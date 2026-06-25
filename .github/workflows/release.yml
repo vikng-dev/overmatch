@@ -41,7 +41,11 @@ jobs:
             os: macos-latest
     runs-on: ${{ matrix.os }}
     steps:
+      # lfs: true is required because assets (*.glb, *.blend) are stored in Git
+      # LFS; without it the checkout yields pointer files and broken bundles.
       - uses: actions/checkout@v7
+        with:
+          lfs: true
 
       - name: Install Linux build dependencies
         if: contains(matrix.target, 'linux')
