@@ -1,0 +1,28 @@
+// Tiger I per-variant spec sheet (ADR-0010). The model owns geometry + spatial anchors;
+// this file owns the tuning numbers. Edit + re-run (hot-reloadable); no recompile.
+//
+// Angles are in DEGREES (the authoring unit); `drive_servos` converts to radians.
+TankSpec(
+    // Locomotion characteristics, read by `apply_drive`.
+    drivetrain: (
+        max_thrust: 12500.0,
+        rolling_resistance: 1150.0,
+        lateral_grip: 60000.0,
+        brush_stiffness: 250000.0,
+        brush_damping: 25000.0,
+    ),
+    // Turret yaw servo: continuous traverse about the hull-up axis.
+    turret: (
+        axis: Y,
+        max_speed: 34.0,
+        accel: 17.0,
+        travel: Continuous,
+    ),
+    // Gun elevation servo: pitch about the turret-right axis, limited to its depression/elevation.
+    gun: (
+        axis: X,
+        max_speed: 23.0,
+        accel: 115.0,
+        travel: Limited(min: -8.0, max: 15.0),
+    ),
+)

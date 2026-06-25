@@ -6,8 +6,8 @@ name: Release
 # with per-platform archives (binary + runtime assets).
 #
 # Phase 1 (now): publish to GitHub Releases.
-# Phase 2 (later): the same matrix output feeds Steam via SteamPipe.
-# macOS builds are currently UNSIGNED; signing/notarization is a follow-up.
+# Phase 2 (later): the same build output feeds Steam via SteamPipe.
+# Linux/Windows: binary + assets archives. macOS: signed + notarized universal .dmg.
 
 on:
   push:
@@ -37,8 +37,6 @@ jobs:
             os: ubuntu-latest
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-          - target: aarch64-apple-darwin
-            os: macos-latest
     runs-on: ${{ matrix.os }}
     steps:
       # lfs: true is required because assets (*.glb, *.blend) are stored in Git
@@ -79,3 +77,54 @@ jobs:
           zip: windows
           checksum: sha256
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  # macOS gets its own job: a signed + notarized universal .dmg (the .app inside is
+  # also the future Steam macOS depot). See scripts/package-macos.sh.
+  upload-macos:
+    needs: create-release
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          lfs: true
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-universal
+
+      - name: Import Developer ID certificate
+        uses: apple-actions/import-codesign-certs@v7
+        with:
+          p12-file-base64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          p12-password: ${{ secrets.MACOS_CERT_PASSWORD }}
+
+      - name: Write notary API key
+        env:
+          APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/notary"
+          printf '%s' "$APPLE_NOTARY_KEY" > "$RUNNER_TEMP/notary/AuthKey.p8"
+
+      - name: Build, sign, notarize, package
+        env:
+          SIGN_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          NOTARY_KEY: ${{ runner.temp }}/notary/AuthKey.p8
+          NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          export VERSION="${tag#v}"
+          ./scripts/package-macos.sh
+
+      - name: Upload .dmg to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" \
+            dist/overmatch-*-universal-apple-darwin.dmg \
+            dist/overmatch-*-universal-apple-darwin.dmg.sha256 \
+            --repo "${GITHUB_REPOSITORY}"

@@ -6,6 +6,7 @@
 use avian3d::prelude::*;
 use bevy::ecs::lifecycle::Add;
 use bevy::prelude::*;
+use serde::Deserialize;
 
 use crate::state::GameplaySet;
 use crate::tank::{CenterOfMassAnchor, Roadwheel, Tank, TrackSide};
@@ -35,10 +36,9 @@ const STICK_SPEED: f32 = 0.3;
 const COMMAND_DEADBAND: f32 = 0.02;
 
 /// Per-variant drivetrain characteristics — this tank's locomotion spec sheet, read by
-/// `apply_drive`. A code `Default` today (the tuned-by-feel placeholders); authored on the model
-/// via skein later (ADR-0007, bucket 2). `Reflect` so skein can instantiate it from glTF extras.
-#[derive(Component, Reflect)]
-#[reflect(Component, Default)]
+/// `apply_drive`. Authored in the tank's `.tank.ron` spec sheet (ADR-0010) and applied to the
+/// hull; the code `Default` is the fallback used until the asset loads (or if a variant omits it).
+#[derive(Component, Clone, Deserialize)]
 pub struct Drivetrain {
     /// Max thrust per roadwheel at full throttle (N); ×16 wheels = total tractive force.
     pub max_thrust: f32,
@@ -67,7 +67,6 @@ impl Default for Drivetrain {
 
 pub fn plugin(app: &mut App) {
     app.init_resource::<DriveInput>()
-        .register_type::<Drivetrain>()
         .add_observer(attach_suspension)
         .add_systems(Update, set_center_of_mass)
         // Order matters within the fixed step: read input, settle springs (sets per-wheel load),

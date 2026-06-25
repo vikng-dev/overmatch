@@ -1,5 +1,7 @@
 # Model-authored per-variant data via skein; tuning stays a live in-game loop
 
+> **Status: superseded by [[0010-per-variant-data-in-ron]].** We adopted skein here but never flowed any data through it (the dependency + plugin + dev BRP server carried zero payload), then reversed course: per-variant data now lives in RON spec-sheet assets, and skein is deferred until node-bound typed structs actually justify it. Kept as the decision trail — the analysis below of *what skein is for* and *when it earns its keep* remains accurate; only the timing bet ("adopt now") was wrong.
+
 Per-tank-variant data — drivetrain and suspension parameters, gun caliber, masses, COM — is authored **on the Blender model** and arrives in Bevy as **typed components**, via **skein** (`bevy_skein`). Reflection-registered components are attached to objects in Blender (the addon reads our live `TypeRegistry` over the Bevy Remote Protocol) and instantiated on scene spawn from the glTF extras — no manual parsing or name-matching for data. The model becomes the single source of truth for everything model-specific, extending [[0005-raycast-roadwheel-locomotion]] (model = geometry only) and the name-based structural binding of [[0002-plugin-per-feature-architecture]].
 
 What lives where — the deciding axis is *does this differ per tank*, not how often it currently changes:

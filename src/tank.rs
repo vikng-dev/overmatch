@@ -8,8 +8,10 @@ use avian3d::prelude::{
 };
 use bevy::prelude::*;
 use bevy::world_serialization::WorldInstanceReady;
+use serde::Deserialize;
 
 use crate::Layer;
+use crate::spec::TankSpecHandle;
 use crate::state::GameplaySet;
 
 /// Uniform density of the hull collider (kg/m³): roughly Tiger-I mass at the authored collision
@@ -62,8 +64,27 @@ pub struct Roadwheel {
 #[derive(Component)]
 pub struct CenterOfMassAnchor;
 
-/// Travel limits for a [`ServoSpec`].
-#[derive(Clone, Copy, Reflect)]
+/// The local axis a servo rotates about. Cardinal-only — tank servos yaw/pitch about a hull axis;
+/// a canted mount would add a `Custom(Dir3)` variant. Resolved to a vector in `drive_servos`.
+#[derive(Clone, Copy, Deserialize)]
+pub enum Axis {
+    X,
+    Y,
+    Z,
+}
+
+impl Axis {
+    fn to_vec3(self) -> Vec3 {
+        match self {
+            Axis::X => Vec3::X,
+            Axis::Y => Vec3::Y,
+            Axis::Z => Vec3::Z,
+        }
+    }
+}
+
+/// Travel limits for a [`ServoSpec`], in **degrees** (the authoring unit).
+#[derive(Clone, Copy, Deserialize)]
 pub enum Travel {
     Limited { min: f32, max: f32 },
     Continuous,
@@ -73,13 +94,16 @@ pub enum Travel {
 // concern has one owner: per-variant config, the commanded intent, and the live mechanism state.
 // `drive_servos` is the behaviour; it reads spec + command and drives state + the transform.
 
-/// Servo config: rotation axis, speed/accel limits, travel range. Per-variant data (bucket 2);
-/// authored in code today, on the model via skein later (ADR-0007). `Reflect` so skein can.
-#[derive(Component, Reflect)]
-#[reflect(Component)]
+/// Servo config: rotation axis, speed/accel limits, travel range. Per-variant data authored in the
+/// tank's `.tank.ron` spec sheet (ADR-0010) and applied to the bound servo node. Angles are in
+/// **degrees** — the human-facing authoring unit; `drive_servos` converts to radians (the
+/// computed/runtime unit shared with `ServoCommand` and `ServoState`).
+#[derive(Component, Clone, Deserialize)]
 pub struct ServoSpec {
-    axis: Vec3,
+    axis: Axis,
+    /// Max slew speed, degrees/second.
     max_speed: f32,
+    /// Slew acceleration, degrees/second².
     accel: f32,
     travel: Travel,
 }
@@ -102,9 +126,7 @@ pub struct ServoState {
 }
 
 pub fn plugin(app: &mut App) {
-    app.register_type::<ServoSpec>()
-        .register_type::<Travel>()
-        .add_systems(Startup, spawn_tank)
+    app.add_systems(Startup, spawn_tank)
         .add_systems(FixedUpdate, drive_servos.in_set(GameplaySet));
 }
 
@@ -114,6 +136,9 @@ fn spawn_tank(mut commands: Commands, asset_server: Res<AssetServer>) {
             WorldAssetRoot(
                 asset_server.load(GltfAssetLabel::Scene(0).from_asset("tiger_1/tiger_1.glb")),
             ),
+            // The variant spec sheet (thrust, servo speeds, …) rides alongside the geometry;
+            // `apply_tank_spec` applies it once both the asset and the rig are ready (ADR-0010).
+            TankSpecHandle(asset_server.load("tiger_1/tiger_1.tank.ron")),
             Transform::from_xyz(10.0, 2.0, 5.0).with_rotation(Quat::from_rotation_z(0.7)),
             // The hull is a dynamic rigid body — Avian owns its Transform (ADR-0005). Its collider
             // comes from the model's `*_Collider` convex proxy, bound in on_tank_ready (ADR-0008).
@@ -137,34 +162,14 @@ fn on_tank_ready(
         };
         let mut entity = commands.entity(entity);
         match name.as_str() {
+            // Servos: bind the marker + the command/state slots here (structure). The `ServoSpec`
+            // config (axis, speeds, travel) is per-variant data, applied from the `.tank.ron` spec
+            // sheet by `apply_tank_spec` (ADR-0010) — not authored in code.
             "Turret" => {
-                entity.insert((
-                    Turret,
-                    ServoSpec {
-                        axis: Vec3::Y,
-                        max_speed: 0.6,
-                        accel: 0.3,
-                        travel: Travel::Continuous,
-                    },
-                    ServoCommand::default(),
-                    ServoState::default(),
-                ));
+                entity.insert((Turret, ServoCommand::default(), ServoState::default()));
             }
             "Gun" => {
-                entity.insert((
-                    Gun,
-                    ServoSpec {
-                        axis: Vec3::X,
-                        max_speed: 0.4,
-                        accel: 2.0,
-                        travel: Travel::Limited {
-                            min: (-8.0_f32).to_radians(),
-                            max: 15.0_f32.to_radians(),
-                        },
-                    },
-                    ServoCommand::default(),
-                    ServoState::default(),
-                ));
+                entity.insert((Gun, ServoCommand::default(), ServoState::default()));
             }
             "Hull" => {
                 entity.insert(Hull);
@@ -218,39 +223,52 @@ fn drive_servos(
 ) {
     let dt = time.delta_secs();
     for (mut transform, spec, command, mut state) in &mut q {
+        // `ServoSpec` authors angles in degrees (the human/skein unit); the runtime — the command,
+        // the state, and the slew maths below — is radians. Convert the spec's angular quantities
+        // once here, at the spec→runtime boundary.
+        let max_speed = spec.max_speed.to_radians();
+        let accel = spec.accel.to_radians();
+        let travel = match spec.travel {
+            Travel::Limited { min, max } => Travel::Limited {
+                min: min.to_radians(),
+                max: max.to_radians(),
+            },
+            Travel::Continuous => Travel::Continuous,
+        };
+
         let prev = state.current;
-        let error = match spec.travel {
+        let error = match travel {
             Travel::Limited { .. } => command.target - state.current,
             Travel::Continuous => shortest_angle(command.target - state.current),
         };
-        let braking_dist = (state.velocity * state.velocity) / (2.0 * spec.accel);
+        let braking_dist = (state.velocity * state.velocity) / (2.0 * accel);
 
         if error.abs() <= braking_dist {
-            let dv = spec.accel * dt;
+            let dv = accel * dt;
             state.velocity = if state.velocity > 0.0 {
                 (state.velocity - dv).max(0.0)
             } else {
                 (state.velocity + dv).min(0.0)
             };
         } else {
-            state.velocity += error.signum() * spec.accel * dt;
-            state.velocity = state.velocity.clamp(-spec.max_speed, spec.max_speed);
+            state.velocity += error.signum() * accel * dt;
+            state.velocity = state.velocity.clamp(-max_speed, max_speed);
         }
 
         state.current += state.velocity * dt;
-        if let Travel::Limited { min, max } = spec.travel {
+        if let Travel::Limited { min, max } = travel {
             state.current = state.current.clamp(min, max);
         }
 
         if error.abs() < 0.001 && state.velocity.abs() < 0.01 {
             state.velocity = 0.0;
-            if let Travel::Limited { min, max } = spec.travel {
+            if let Travel::Limited { min, max } = travel {
                 state.current = command.target.clamp(min, max);
             }
         }
 
         let delta = state.current - prev;
-        transform.rotate_local(Quat::from_axis_angle(spec.axis, delta));
+        transform.rotate_local(Quat::from_axis_angle(spec.axis.to_vec3(), delta));
     }
 }
 
