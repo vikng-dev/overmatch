@@ -14,6 +14,7 @@ mod camera;
 mod debug;
 mod driving;
 mod shooting;
+mod sight;
 mod spec;
 mod state;
 mod tank;
@@ -51,6 +52,8 @@ impl Plugin for GamePlugin {
             driving::plugin,
             camera::plugin,
             aim::plugin,
+            // `sight` owns the gunner-view toggle/mode that `camera` and `aim` branch on.
+            sight::plugin,
             shooting::plugin,
         ));
 

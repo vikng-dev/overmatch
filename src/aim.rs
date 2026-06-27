@@ -7,6 +7,8 @@ use avian3d::prelude::SpatialQuery;
 use bevy::ecs::lifecycle::Add;
 use bevy::prelude::*;
 
+use crate::camera::GunnerCameraPlaced;
+use crate::sight::in_third_person;
 use crate::state::GameplaySet;
 use crate::tank::{Gun, Hull, Muzzle, ServoCommand, Turret};
 use crate::world::ground_distance;
@@ -32,9 +34,18 @@ pub fn plugin(app: &mut App) {
     app.add_systems(Startup, spawn_hud)
         // Attach AimPoint the moment the rig binds the Turret marker.
         .add_observer(attach_aim_point)
+        // Third-person aiming only — in gunner view `sight::drive_gunner_aim` commands the same
+        // servos instead (one writer per mode).
+        .add_systems(Update, aim.run_if(in_third_person).in_set(GameplaySet))
+        // HUD markers reproject through the camera, so they run after the camera's pose is final
+        // for the frame — after propagation and after the gunner camera places itself — or they
+        // lag/jitter against the rendered view (worst at the gunner optic's high zoom).
         .add_systems(
-            Update,
-            (aim, update_bore_indicator, update_aim_indicator).in_set(GameplaySet),
+            PostUpdate,
+            (update_bore_indicator, update_aim_indicator)
+                .in_set(GameplaySet)
+                .after(TransformSystems::Propagate)
+                .after(GunnerCameraPlaced),
         );
 }
 

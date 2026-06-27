@@ -6,8 +6,9 @@ use avian3d::prelude::SpatialQuery;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::prelude::*;
 
+use crate::sight::{Ranging, in_gunner, in_third_person, superelevation};
 use crate::state::GameplaySet;
-use crate::tank::{Tank, Turret};
+use crate::tank::{Gun, Tank, Turret};
 use crate::world::ground_distance;
 
 /// Zoom state on the camera entity. Scroll sets `target_zoom`; `zoom` eases toward it for a
@@ -22,6 +23,12 @@ struct OrbitCamera {
 /// "detach" used to tell camera-follow jitter apart from physics jitter. Always true in release.
 #[derive(Resource)]
 pub struct CameraFollow(pub bool);
+
+/// Marks the gunner camera placement, which runs *after* transform propagation (it bolts the camera
+/// to the gun's live pose and writes its `GlobalTransform` directly). HUD reprojection orders after
+/// this set so markers and the rendered view share one consistent, current camera pose.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GunnerCameraPlaced;
 
 /// The turret-ring pivot, captured once as an offset in the tank root's local frame. The camera
 /// orbits `root · this`, so it reads the body's interpolated root `Transform` rather than the
@@ -39,9 +46,23 @@ pub fn plugin(app: &mut App) {
         // and the tank's `GlobalTransform` together, so they render consistently — no jitter.
         .add_systems(
             PostUpdate,
+            // The orbit camera reads the interpolated root *before* propagation (Avian's follow
+            // guidance), so it propagates together with the tank.
             orbit_camera
+                .run_if(in_third_person)
                 .in_set(GameplaySet)
                 .before(TransformSystems::Propagate),
+        )
+        .add_systems(
+            PostUpdate,
+            // The gunner camera bolts to the gun's *propagated* pose, so it runs after propagation
+            // and writes its own `GlobalTransform` (no extra propagation pass). HUD markers order
+            // after `GunnerCameraPlaced` to reproject through this same pose.
+            gunner_camera
+                .run_if(in_gunner)
+                .in_set(GameplaySet)
+                .in_set(GunnerCameraPlaced)
+                .after(TransformSystems::Propagate),
         );
 }
 
@@ -77,7 +98,7 @@ fn spawn_camera(mut commands: Commands) {
 }
 
 fn orbit_camera(
-    camera: Single<(&mut Transform, &mut OrbitCamera), With<Camera3d>>,
+    camera: Single<(&mut Transform, &mut OrbitCamera, &mut Projection), With<Camera3d>>,
     spatial: SpatialQuery,
     tank: Query<&Transform, (With<Tank>, Without<Camera3d>)>,
     pivot: Res<TurretPivot>,
@@ -91,7 +112,12 @@ fn orbit_camera(
         return;
     }
 
-    let (mut transform, mut orbit) = camera.into_inner();
+    let (mut transform, mut orbit, mut projection) = camera.into_inner();
+
+    // Restore the wide FOV when returning from the gunner optic (which narrows it).
+    if let Projection::Perspective(p) = projection.as_mut() {
+        p.fov = std::f32::consts::FRAC_PI_4;
+    }
     let (Some(turret_local), Ok(tank_transform)) = (pivot.0, tank.single()) else {
         return;
     };
@@ -124,4 +150,48 @@ fn orbit_camera(
     let distance = ORBIT_FAR + (ORBIT_NEAR - ORBIT_FAR) * orbit.zoom;
     let back_ray = Ray3d::new(pivot_point, -transform.forward());
     transform.translation = back_ray.get_point(ground_distance(&spatial, back_ray, distance));
+}
+
+/// Gunner optic (System B): lock the camera to the gun's line of sight. Parked at the **Gun node**
+/// (the elevation pivot / mantlet) — the coaxial sight's natural home — and oriented along the
+/// SIGHT LINE, the bore pitched DOWN by the current superelevation, so dialing range raises the
+/// barrel without tilting the view off-target. The tank is hidden in gunner view (`Visibility` on
+/// the root), so parking inside the mantlet clips no own geometry. The camera reads the gun's live
+/// pose, so it lags the player's intent at the turret's slew rate (the WT "view follows the gun"
+/// feel). Narrow FOV for magnification.
+fn gunner_camera(
+    camera: Single<(&mut Transform, &mut GlobalTransform, &mut Projection), With<Camera3d>>,
+    gun: Query<&GlobalTransform, (With<Gun>, Without<Camera3d>)>,
+    ranging: Res<Ranging>,
+) {
+    let Ok(gun) = gun.single() else {
+        return;
+    };
+    let (mut transform, mut global_transform, mut projection) = camera.into_inner();
+
+    const GUNNER_FOV: f32 = 0.12; // ~7° vertical → ~6× magnification vs the 45° default
+
+    if let Projection::Perspective(p) = projection.as_mut() {
+        p.fov = GUNNER_FOV;
+    }
+
+    // The gun's propagated frame: bore = local −Z, hull-up = local +Y, right = local +X. The sight
+    // line is the bore pitched DOWN by superelevation about right; up stays hull-up (not world up —
+    // a hull-mounted sight rolls *with* the tank, so on a side-slope the view cants with it rather
+    // than drifting off the bore). Pitching about `right` keeps (sight_dir, right, up) orthonormal,
+    // so `look_to` is exact.
+    let rot = gun.rotation();
+    let bore = rot * Vec3::NEG_Z;
+    let right = rot * Vec3::X;
+    let up = rot * Vec3::Y;
+    let sight_dir = Quat::from_axis_angle(right, -superelevation(ranging.range)) * bore;
+
+    // Park at the pivot, look along the sight line. No bore-axis offset → no superelevation
+    // parallax (the camera sits exactly on the sight line, not 0.6 m off it along the barrel).
+    let pose = Transform::from_translation(gun.translation()).looking_to(sight_dir, up);
+
+    // Write both: `Transform` for next frame's bookkeeping, `GlobalTransform` for *this* frame's
+    // render and HUD reprojection (propagation already ran). The camera has no parent, so they match.
+    *transform = pose;
+    *global_transform = GlobalTransform::from(pose);
 }

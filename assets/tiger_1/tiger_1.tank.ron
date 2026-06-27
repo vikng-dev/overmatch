@@ -25,18 +25,19 @@ TankSpec(
         stiffness: 450000.0,
         damping: 50000.0,
     ),
-    // Turret yaw servo: continuous traverse about the hull-up axis.
+    // Turret yaw servo: continuous traverse about the hull-up axis. `accel` is kept close to the
+    // gun's so traverse and elevation feel coherent under a single mouse motion (hot-reload to taste).
     turret: (
         axis: Y,
         max_speed: 34.0,
-        accel: 17.0,
+        accel: 70.0,
         travel: Continuous,
     ),
     // Gun elevation servo: pitch about the turret-right axis, limited to its depression/elevation.
     gun: (
         axis: X,
         max_speed: 23.0,
-        accel: 115.0,
+        accel: 70.0,
         travel: Limited(min: -8.0, max: 15.0),
     ),
 )

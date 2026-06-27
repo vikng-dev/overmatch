@@ -116,10 +116,44 @@ pub struct ServoCommand {
 
 /// A servo's live mechanism state — current angle and angular velocity of the slew. Owned by
 /// `drive_servos`; never authored, never shared.
-#[derive(Component, Default)]
+///
+/// `rest` is the node's authored pose at `current = 0`, captured once so `drive_servos` can write
+/// *absolute* rotations (`rest · R(axis, angle)`) instead of accumulating deltas — cleaner with
+/// variable render-rate `dt` (no accumulating round-off).
+///
+/// **Why `Update`, not `FixedUpdate`:** the servos are *kinematic display* mechanisms — we drive
+/// their transform ourselves; no physics depends on their pose (the hull is a body, the turret/gun
+/// are plain scene nodes; only `fire` reads the muzzle, and it reads the render pose). Running them
+/// at render rate makes the gun pose, the gunner camera (which bolts to it), and the mouse-driven
+/// intent all share one clock → no interpolation, no aliasing. The cost is fixed-step determinism,
+/// which the single-player vertical slice doesn't need; server-authoritative multiplayer will run
+/// the motion profile on the server's fixed clock and have the client interpolate snapshots (a
+/// different, simpler interpolation than self-sim). ADR-0004's "sim-in-fixed" bet is about *physics*.
+#[derive(Component)]
 pub struct ServoState {
     current: f32,
     velocity: f32,
+    rest: Quat,
+    captured: bool,
+}
+
+impl Default for ServoState {
+    fn default() -> Self {
+        Self {
+            current: 0.0,
+            velocity: 0.0,
+            rest: Quat::IDENTITY,
+            captured: false,
+        }
+    }
+}
+
+impl ServoState {
+    /// The servo's current angle (radians, parent-local) — its live mechanism position. Read by the
+    /// gunner sight to clamp how far the aim intent may lead the gun (the on-screen margin).
+    pub fn current(&self) -> f32 {
+        self.current
+    }
 }
 
 pub fn plugin(app: &mut App) {
@@ -128,7 +162,20 @@ pub fn plugin(app: &mut App) {
             Update,
             spawn_tank_when_loaded.run_if(in_state(AppState::Loading)),
         )
-        .add_systems(FixedUpdate, drive_servos.in_set(GameplaySet));
+        // `drive_servos` runs in `Update` (render rate), *after* the aim systems in `GameplaySet`
+        // have written this frame's `ServoCommand.target` — so it chases the fresh target the same
+        // frame, and the gun's `GlobalTransform` (computed by propagation in `PostUpdate`) is
+        // current for the gunner camera and HUD reprojection that read it. No interpolation needed:
+        // the pose is written fresh at render rate, same clock as the mouse-driven intent. (The
+        // single-player slice trades fixed-step determinism for display simplicity; server-authority
+        // will put the motion profile back on the server's fixed clock and have the client
+        // interpolate snapshots. ADR-0004's "sim-in-fixed" bet is about *physics*.)
+        .add_systems(
+            Update,
+            drive_servos
+                .run_if(in_state(AppState::Playing))
+                .after(GameplaySet),
+        );
 }
 
 /// The tank's spec sheet is a *load dependency* (ADR-0011): we kick off its load up front and the
@@ -216,6 +263,10 @@ fn on_tank_ready(
         NoAutoMass,
         NoAutoAngularInertia,
         NoAutoCenterOfMass,
+        // Root visibility owns the gunner-view hide: set to `Hidden`, `InheritedVisibility`
+        // propagates `HIDDEN` to every descendant mesh, so the gunner optic (camera parked at the
+        // gun pivot, inside the mantlet) sees no own-tank geometry — no near-plane clipping.
+        Visibility::Inherited,
     ));
 
     // Record what the walk found, to check against the required contract afterwards.
@@ -328,6 +379,14 @@ fn drive_servos(
 ) {
     let dt = time.delta_secs();
     for (mut transform, spec, command, mut state) in &mut q {
+        // Capture the node's authored rest rotation once, so we can write *absolute* rotations
+        // (`rest · R(axis, angle)`) instead of accumulating deltas — robust to variable render-rate
+        // `dt` (no accumulating round-off).
+        if !state.captured {
+            state.rest = transform.rotation;
+            state.captured = true;
+        }
+
         // `ServoSpec` authors angles in degrees (the human authoring unit); the runtime — the
         // command, the state, and the slew maths below — is radians. Convert the spec's angular
         // quantities once here, at the spec→runtime boundary.
@@ -341,44 +400,55 @@ fn drive_servos(
             Travel::Continuous => Travel::Continuous,
         };
 
-        let prev = state.current;
         let error = match travel {
             Travel::Limited { .. } => command.target - state.current,
             Travel::Continuous => shortest_angle(command.target - state.current),
         };
-        let braking_dist = (state.velocity * state.velocity) / (2.0 * accel);
 
-        if error.abs() <= braking_dist {
-            let dv = accel * dt;
-            state.velocity = if state.velocity > 0.0 {
-                (state.velocity - dv).max(0.0)
-            } else {
-                (state.velocity + dv).min(0.0)
-            };
+        // Land-exactly: if this step's motion would reach or overshoot the target, snap to it and
+        // stop. Without this, the sqrt envelope's `v·dt` exceeds `|error|` just before arrival →
+        // overshoot → sign flip → a tight limit cycle (the residual "buzz" at settle). Snapping
+        // also kills the discrete-cycle hypothesis for the gunner-optic vibration.
+        let step = state.velocity * dt;
+        if step.abs() >= error.abs() && error.abs() > 0.0 {
+            state.current += error;
+            state.velocity = 0.0;
         } else {
-            state.velocity += error.signum() * accel * dt;
-            state.velocity = state.velocity.clamp(-max_speed, max_speed);
+            // Speed that still allows braking to rest exactly at the target — the sqrt velocity
+            // envelope, `v = √(2a·|error|)` — capped at max_speed; slew the actual velocity toward
+            // it within the accel limit. Same trapezoidal motion (accelerate, cruise, decelerate),
+            // but it brakes *smoothly onto* the target.
+            let target_speed = (2.0 * accel * error.abs()).sqrt().min(max_speed);
+            let desired_velocity = error.signum() * target_speed;
+            let dv = accel * dt;
+            state.velocity += (desired_velocity - state.velocity).clamp(-dv, dv);
+
+            state.current += state.velocity * dt;
+            if let Travel::Limited { min, max } = travel {
+                state.current = state.current.clamp(min, max);
+            }
         }
 
-        state.current += state.velocity * dt;
-        if let Travel::Limited { min, max } = travel {
-            state.current = state.current.clamp(min, max);
-        }
-
-        if error.abs() < 0.001 && state.velocity.abs() < 0.01 {
+        // Settle deadband scaled to what one step can resolve (`accel·dt²` ≈ the smallest move the
+        // servo can make before braking), so it's reachable per-step rather than a fixed band that
+        // may sit below the discretization floor and never trigger.
+        let settle = accel * dt * dt;
+        if error.abs() < settle && state.velocity.abs() < accel * dt {
             state.velocity = 0.0;
             if let Travel::Limited { min, max } = travel {
                 state.current = command.target.clamp(min, max);
             }
         }
 
-        let delta = state.current - prev;
-        transform.rotate_local(Quat::from_axis_angle(spec.axis.to_vec3(), delta));
+        // Absolute write of the sim-truth pose. `rest` is the node's authored rotation at
+        // `current = 0`; composing the axis-angle onto it gives the true mechanism pose without
+        // accumulating deltas (robust to variable render-rate `dt`).
+        transform.rotation = state.rest * Quat::from_axis_angle(spec.axis.to_vec3(), state.current);
     }
 }
 
 /// Wrap an angle difference into [-PI, PI] for shortest-path rotation.
-fn shortest_angle(diff: f32) -> f32 {
+pub(crate) fn shortest_angle(diff: f32) -> f32 {
     use std::f32::consts::{PI, TAU};
     (diff + PI).rem_euclid(TAU) - PI
 }

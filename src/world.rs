@@ -1,6 +1,6 @@
-//! The battlefield: environment lighting now, terrain later. Also home to the ground-plane
-//! query that aiming and the camera both use — the seam to swap for an Avian raycast once
-//! terrain has colliders.
+//! The battlefield: environment lighting and a suspension test course now, real terrain later.
+//! Also home to the ground-plane query that aiming and the camera both use — the seam to swap
+//! for an Avian raycast once terrain has colliders.
 
 use avian3d::prelude::{
     Collider, CollisionLayers, LayerMask, RigidBody, SpatialQuery, SpatialQueryFilter,
@@ -13,13 +13,6 @@ use crate::Layer;
 const GROUND_SIZE: f32 = 1000.0;
 /// Thickness of the ground slab. Only the top face (at y=0) matters; the rest is buried.
 const GROUND_THICKNESS: f32 = 1.0;
-
-/// First authored test slope: a thick slab tilted about X. Incline angle, and the slab's run
-/// (along the slope, Z), width (X), and thickness (Y) — degrees / metres.
-const RAMP_ANGLE_DEG: f32 = 12.0;
-const RAMP_RUN: f32 = 16.0;
-const RAMP_WIDTH: f32 = 12.0;
-const RAMP_THICKNESS: f32 = 2.0;
 
 pub fn plugin(app: &mut App) {
     app.add_systems(Startup, spawn_environment);
@@ -56,25 +49,97 @@ fn spawn_environment(
         CollisionLayers::new([Layer::Terrain], LayerMask::ALL),
     ));
 
-    // A first authored slope: a thick slab tilted about X, on the same Terrain layer as the ground
-    // so the wheel rays read it identically. It's sunk so its low edge buries ~1 m under the ground
-    // slab — the tilted top surface crosses y=0, giving a flush, step-free entry, then rises to a
-    // crest. Purpose: put a real incline under the suspension (articulation, weight transfer), and
-    // expose the missing static friction — with velocity-only grip, a parked tank runs away here.
-    //
-    // Low-edge top y = center_y + (thickness/2)·cosθ − (run/2)·sinθ; solve for center_y at −1 m.
-    let (sin, cos) = RAMP_ANGLE_DEG.to_radians().sin_cos();
-    let ramp_y = -1.0 - (RAMP_THICKNESS / 2.0) * cos + (RAMP_RUN / 2.0) * sin;
+    // The suspension test course — deliberate, known geometry (not a scenic map) laid out down
+    // the −Z lane in front of spawn, so each obstacle isolates one suspension behaviour and you
+    // can tell the *sim* from the *terrain*. All on the Terrain layer, so the wheel rays read it
+    // identically to the ground.
+    let cube = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
+    let ramp_mat = materials.add(Color::srgb(0.45, 0.38, 0.28));
+    let bump_mat = materials.add(Color::srgb(0.40, 0.33, 0.24));
+    spawn_test_course(&mut commands, &cube, &ramp_mat, &bump_mat);
+}
+
+/// Spawn a static, unit-cube collision block scaled/posed by `transform` (the Avian idiom: a
+/// `Collider::cuboid(1,1,1)` that the Transform's scale stretches), on the Terrain layer.
+fn spawn_block(
+    commands: &mut Commands,
+    mesh: Handle<Mesh>,
+    material: Handle<StandardMaterial>,
+    transform: Transform,
+) {
     commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(1.0, 1.0, 1.0))),
-        MeshMaterial3d(materials.add(Color::srgb(0.45, 0.38, 0.28))),
-        Transform::from_xyz(0.0, ramp_y, -20.0)
-            .with_rotation(Quat::from_rotation_x(RAMP_ANGLE_DEG.to_radians()))
-            .with_scale(Vec3::new(RAMP_WIDTH, RAMP_THICKNESS, RAMP_RUN)),
+        Mesh3d(mesh),
+        MeshMaterial3d(material),
+        transform,
         RigidBody::Static,
         Collider::cuboid(1.0, 1.0, 1.0),
         CollisionLayers::new([Layer::Terrain], LayerMask::ALL),
     ));
+}
+
+/// The four-obstacle suspension course. Each obstacle is a static cuboid (or row of them) sized
+/// to isolate one thing the per-wheel suspension does. Reuses one unit-cube mesh and two
+/// materials, cloned per block.
+fn spawn_test_course(
+    commands: &mut Commands,
+    cube: &Handle<Mesh>,
+    ramp_mat: &Handle<StandardMaterial>,
+    bump_mat: &Handle<StandardMaterial>,
+) {
+    // 1. Graduated climbs — ramps at 10°/20°/30°, side by side, to compare pitch and find the
+    //    climb limit. (With ~200 kN total thrust vs ~456 kN weight, 20° climbs but 30° stalls —
+    //    gravity-along-slope exceeds thrust — so this also shows where it gives out.) Each is a
+    //    slab tilted about X and sunk so its low edge's top sits ~1 m under the ground slab: the
+    //    upslope crosses y=0 flush (step-free entry), the high edge a crest with a drop beyond.
+    //    Low-edge top y = center_y + (thickness/2)·cosθ − (run/2)·sinθ; solve for center_y at −1 m.
+    let (run, width, thick) = (10.0_f32, 10.0_f32, 2.0_f32);
+    for (i, deg) in [10.0_f32, 20.0, 30.0].into_iter().enumerate() {
+        let (sin, cos) = deg.to_radians().sin_cos();
+        let center_y = -1.0 - (thick / 2.0) * cos + (run / 2.0) * sin;
+        let x = (i as f32 - 1.0) * 14.0; // −14, 0, +14
+        spawn_block(
+            commands,
+            cube.clone(),
+            ramp_mat.clone(),
+            Transform::from_xyz(x, center_y, -40.0)
+                .with_rotation(Quat::from_rotation_x(deg.to_radians()))
+                .with_scale(Vec3::new(width, thick, run)),
+        );
+    }
+
+    // 2. Side-slope — a banked lane tilted about Z, driven ALONG Z so the tank is canted sideways:
+    //    shows roll, lateral weight transfer, and whether it holds the face or slides off. Centred
+    //    at y=0 so the banked top crosses ground near the lane centre (a roughly flush approach).
+    spawn_block(
+        commands,
+        cube.clone(),
+        ramp_mat.clone(),
+        Transform::from_xyz(38.0, 0.0, -45.0)
+            .with_rotation(Quat::from_rotation_z(18.0_f32.to_radians()))
+            .with_scale(Vec3::new(16.0, 2.0, 26.0)),
+    );
+
+    // 3. Step / curb — a low box driven over: front wheels lift over the hard edge, then the rear.
+    //    Single-wheel articulation against a vertical edge (top at y=0.4).
+    spawn_block(
+        commands,
+        cube.clone(),
+        bump_mat.clone(),
+        Transform::from_xyz(0.0, 0.2, -70.0).with_scale(Vec3::new(14.0, 0.4, 4.0)),
+    );
+
+    // 4. Washboard — a row of low bumps; wheels rise and fall independently while the hull stays
+    //    composed (the most legible "suspension is working" demo). Boxes approximate rounded bumps
+    //    — a round profile is a later refinement.
+    for i in 0..6 {
+        let z = -82.0 - i as f32 * 1.6;
+        spawn_block(
+            commands,
+            cube.clone(),
+            bump_mat.clone(),
+            Transform::from_xyz(0.0, 0.12, z).with_scale(Vec3::new(14.0, 0.25, 0.6)),
+        );
+    }
 }
 
 /// Distance along `ray` to the terrain, capped at `max`, falling back to `max` when the ray
