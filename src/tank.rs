@@ -348,6 +348,19 @@ fn on_tank_ready(
                     Visibility::Hidden,
                 ));
             }
+            // Ballistic volumes (armor/modules/crew/ammo — see `.agents/docs/design/
+            // armor-penetration-and-damage.md`): watertight solids named by role prefix,
+            // parented to their rig part so they inherit its motion. They don't render — the
+            // ballistics march raycasts them, and the armor sandbox visualizes them itself — so
+            // hide them at bind, mirroring `*_Collider`. (The exporter includes them as mesh
+            // nodes despite `hide_render` in Blender, so this is the load-bearing hide.)
+            s if s.starts_with("Armor_")
+                || s.starts_with("Module_")
+                || s.starts_with("Crew_")
+                || s.starts_with("Ammo_") =>
+            {
+                entity.insert(Visibility::Hidden);
+            }
             _ => {}
         }
     }
