@@ -28,8 +28,9 @@ use crate::ballistics::{
     PenetrationMarks, ShellPath, ShellReadout, SpallMarks,
 };
 use crate::damage::{
-    self, Ammo, CookedOff, CrewStation, FunctionRole, Incapacitated, LaunchedTurret,
-    TankKnockedOut, TankVolumes,
+    self, Ammo, Capability, CookedOff, CrewStation, Crewman, Dead, FunctionRole, LaunchedTurret,
+    PendingSwap, SWAP_SECONDS, TankCapabilities, TankKnockedOut, TankVolumes, VolumeOf,
+    capability_effectiveness,
 };
 use crate::spec::{self, TankSpec, TankSpecHandle};
 use crate::tank::{Tank, on_tank_ready};
@@ -68,6 +69,16 @@ struct ComponentHpLabel;
 #[derive(Component)]
 struct TankStatusLabel;
 
+/// The bottom crew bar: one cell per seat, driven by the `1`–`5` swap input.
+#[derive(Component)]
+struct CrewBarText;
+
+/// Crew-bar selection: the seat tapped as the swap *source*, awaiting a target.
+#[derive(Resource, Default)]
+struct CrewSelect {
+    source: Option<CrewStation>,
+}
+
 /// The slow-motion ladder the Up/Down arrows step through (a shell flies ~773 m/s).
 const SPEEDS: [f32; 6] = [1.0, 0.25, 0.06, 0.015, 0.004, 0.001];
 
@@ -97,7 +108,7 @@ impl MeshState {
         match self {
             MeshState::Solid => "solid",
             MeshState::Xray => "xray",
-            MeshState::Hidden => "hidden",
+            MeshState::Hidden => "off",
         }
     }
 }
@@ -132,12 +143,24 @@ impl VolumeState {
     }
 }
 
-/// The target's per-layer view state, advanced by `1/2/3`.
-#[derive(Resource, Default)]
+/// The target's per-layer view state, advanced by `F1/F2/F3`. Opens on a useful default: hull
+/// translucent (xray), armour translucent (xray), components solid — so the inner volumes read at
+/// a glance without first cycling the layers.
+#[derive(Resource)]
 struct LayerView {
     mesh: MeshState,
     armor: VolumeState,
     components: VolumeState,
+}
+
+impl Default for LayerView {
+    fn default() -> Self {
+        Self {
+            mesh: MeshState::Xray,
+            armor: VolumeState::Xray,
+            components: VolumeState::Solid,
+        }
+    }
 }
 
 /// Opaque unlit materials for the volumes (so they read the same in the main and overlay passes,
@@ -193,6 +216,7 @@ pub fn plugin(app: &mut App) {
     .insert_resource(ballistics::MarchMode::Demo)
     .init_resource::<LayerView>()
     .init_resource::<SpeedIndex>()
+    .init_resource::<CrewSelect>()
     // Paint translucent materials onto the volume meshes as they bind.
     .add_observer(paint_armor)
     .add_observer(paint_component)
@@ -232,7 +256,10 @@ pub fn plugin(app: &mut App) {
             update_component_hp_labels,
             update_tank_status_labels,
         ),
-    );
+    )
+    // Crew bar (`1`–`5` swap input + render) — split out so the Update tuple stays within Bevy's
+    // 20-system limit.
+    .add_systems(Update, (crew_swap_input, update_crew_bar));
 }
 
 fn spawn_camera(mut commands: Commands) {
@@ -504,7 +531,7 @@ fn update_layer_status(view: Res<LayerView>, mut text: Query<&mut Text, With<Lay
         return;
     };
     *text = Text::new(format!(
-        "1 mesh: {}\n2 armor: {}\n3 components: {}",
+        "F1 mesh: {}\nF2 armor: {}\nF3 components: {}",
         view.mesh.label(),
         view.armor.label(),
         view.components.label(),
@@ -513,15 +540,135 @@ fn update_layer_status(view: Res<LayerView>, mut text: Query<&mut Text, With<Lay
 
 /// `1/2/3` advance the mesh / armor / component tap-loops.
 fn toggle_layers(keys: Res<ButtonInput<KeyCode>>, mut view: ResMut<LayerView>) {
-    if keys.just_pressed(KeyCode::Digit1) {
+    // Moved off the number row (now the crew bar, `1`–`5`) onto the function keys.
+    if keys.just_pressed(KeyCode::F1) {
         view.mesh = view.mesh.next();
     }
-    if keys.just_pressed(KeyCode::Digit2) {
+    if keys.just_pressed(KeyCode::F2) {
         view.armor = view.armor.next();
     }
-    if keys.just_pressed(KeyCode::Digit3) {
+    if keys.just_pressed(KeyCode::F3) {
         view.components = view.components.next();
     }
+}
+
+/// `1`–`5` crew-bar input: tap a seat to select it as the swap source, tap a second to start a
+/// [`PendingSwap`]; re-tapping the source (or any seat while a swap is mid-flight) cancels.
+fn crew_swap_input(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut select: ResMut<CrewSelect>,
+    tank: Query<(Entity, Option<&PendingSwap>), With<Tank>>,
+    seats: Query<(Entity, &CrewStation, &VolumeOf)>,
+    mut commands: Commands,
+) {
+    const DIGITS: [KeyCode; 5] = [
+        KeyCode::Digit1,
+        KeyCode::Digit2,
+        KeyCode::Digit3,
+        KeyCode::Digit4,
+        KeyCode::Digit5,
+    ];
+    let Some(slot) = DIGITS.iter().position(|k| keys.just_pressed(*k)) else {
+        return;
+    };
+    let Ok((tank, pending)) = tank.single() else {
+        return;
+    };
+
+    // Seats for this tank in enum (slot) order.
+    let mut ordered: Vec<(Entity, CrewStation)> = seats
+        .iter()
+        .filter(|(_, _, owner)| owner.tank() == tank)
+        .map(|(e, s, _)| (e, *s))
+        .collect();
+    ordered.sort_by_key(|(_, s)| *s);
+    let Some(&(seat_entity, seat_station)) = ordered.get(slot) else {
+        return;
+    };
+
+    // Any tap while a swap is in flight cancels it.
+    if pending.is_some() {
+        commands.entity(tank).remove::<PendingSwap>();
+        select.source = None;
+        return;
+    }
+
+    match select.source {
+        None => select.source = Some(seat_station),
+        Some(src) if src == seat_station => select.source = None, // re-tap = deselect
+        Some(src) => {
+            if let Some(&(src_entity, _)) = ordered.iter().find(|(_, s)| *s == src) {
+                commands.entity(tank).insert(PendingSwap {
+                    a: src_entity,
+                    b: seat_entity,
+                    remaining: SWAP_SECONDS,
+                });
+            }
+            select.source = None;
+        }
+    }
+}
+
+/// Render the crew bar: `N:Seat` per seat in enum order, plus the occupant (when foreign) and a
+/// `+`/`-` alive/dead mark. The selected source is bracketed `[..]`; a pending swap marks both seats
+/// `~..~` and shows its countdown.
+fn update_crew_bar(
+    select: Res<CrewSelect>,
+    tank: Query<(Entity, Option<&PendingSwap>), With<Tank>>,
+    seats: Query<(Entity, &CrewStation, &Crewman, Option<&Dead>, &VolumeOf)>,
+    mut bar: Query<&mut Text, With<CrewBarText>>,
+) {
+    let Ok(mut text) = bar.single_mut() else {
+        return;
+    };
+    let Ok((tank, pending)) = tank.single() else {
+        *text = Text::new("");
+        return;
+    };
+
+    let mut ordered: Vec<(Entity, CrewStation, Crewman, bool)> = seats
+        .iter()
+        .filter(|(_, _, _, _, owner)| owner.tank() == tank)
+        .map(|(e, s, c, dead, _)| (e, *s, *c, dead.is_some()))
+        .collect();
+    ordered.sort_by_key(|(_, s, _, _)| *s);
+
+    let cells: Vec<String> = ordered
+        .iter()
+        .enumerate()
+        .map(|(i, (entity, seat, crewman, dead))| {
+            // Notes after the seat name: who is actually manning it (when foreign), and whether the
+            // occupant is dead — e.g. "Loader (Commander, dead)".
+            let mut notes: Vec<&str> = Vec::new();
+            if crewman.home != *seat {
+                notes.push(crewman.home.label());
+            }
+            if *dead {
+                notes.push("dead");
+            }
+            let detail = if notes.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", notes.join(", "))
+            };
+            let mut cell = format!("{}: {}{}", i + 1, seat.label(), detail);
+            if select.source == Some(*seat) {
+                cell = format!("[{cell}]");
+            }
+            if let Some(ps) = pending {
+                if *entity == ps.a || *entity == ps.b {
+                    cell = format!("~{cell}~");
+                }
+            }
+            cell
+        })
+        .collect();
+
+    let prefix = match pending {
+        Some(ps) => format!("SWAP {:.1}s   ", ps.remaining.max(0.0)),
+        None => String::new(),
+    };
+    *text = Text::new(format!("{prefix}{}", cells.join("    ")));
 }
 
 /// Apply the layer states to the target's meshes. The hull swaps material/visibility for its loop;
@@ -719,7 +866,7 @@ fn clear_shots(
     keys: Res<ButtonInput<KeyCode>>,
     shots: Query<Entity, Or<(With<ShellPath>, With<ImpactMarker>)>>,
     mut health: Query<&mut ComponentHealth>,
-    incapacitated: Query<Entity, With<Incapacitated>>,
+    dead: Query<Entity, With<Dead>>,
     cooked_off: Query<Entity, With<CookedOff>>,
     knocked_out: Query<Entity, With<TankKnockedOut>>,
     mut commands: Commands,
@@ -734,8 +881,8 @@ fn clear_shots(
     for mut hp in &mut health {
         hp.current = hp.max;
     }
-    for entity in &incapacitated {
-        commands.entity(entity).remove::<Incapacitated>();
+    for entity in &dead {
+        commands.entity(entity).remove::<Dead>();
     }
     for entity in &cooked_off {
         commands.entity(entity).remove::<CookedOff>();
@@ -904,7 +1051,7 @@ fn spawn_hud(mut commands: Commands) {
             "WASD / Shift / Ctrl  fly\n\
              LMB  fire    C  clear shots    R  reset world\n\
              Space  freeze    Esc  pause + free cursor    Up/Down  slow-mo    T  real/demo time\n\
-             1 mesh: solid/xray/hidden    2 armor  3 components: off/on-top/solid/xray",
+             1-5  crew seats: tap source then target to swap occupants (re-tap cancels)",
         ),
         TextFont {
             font_size: FontSize::Px(14.0),
@@ -914,6 +1061,22 @@ fn spawn_hud(mut commands: Commands) {
         Node {
             position_type: PositionType::Absolute,
             top: Val::Px(8.0),
+            left: Val::Px(10.0),
+            ..default()
+        },
+    ));
+    // Crew bar, bottom-left — one cell per seat, driven by `update_crew_bar`.
+    commands.spawn((
+        CrewBarText,
+        Text::new(""),
+        TextFont {
+            font_size: FontSize::Px(15.0),
+            ..default()
+        },
+        TextColor(Color::srgb(0.92, 0.94, 0.78)),
+        Node {
+            position_type: PositionType::Absolute,
+            bottom: Val::Px(10.0),
             left: Val::Px(10.0),
             ..default()
         },
@@ -1161,17 +1324,27 @@ fn update_tank_status_labels(
             Option<&Name>,
             Option<&TankKnockedOut>,
             Option<&TankVolumes>,
+            Option<&TankCapabilities>,
         ),
         With<Tank>,
     >,
     volumes: Query<(
         Option<&CrewStation>,
-        Option<&Incapacitated>,
-        Option<&Ammo>,
-        Option<&CookedOff>,
+        Option<&Crewman>,
+        Option<&Dead>,
         Option<&FunctionRole>,
         Option<&ComponentHealth>,
+        Option<&Ammo>,
+        Option<&CookedOff>,
         Option<&Name>,
+    )>,
+    // Slim query matching `capability_effectiveness`'s signature.
+    capability_volumes: Query<(
+        Option<&CrewStation>,
+        Option<&Crewman>,
+        Option<&Dead>,
+        Option<&FunctionRole>,
+        Option<&ComponentHealth>,
     )>,
     mut labels: Query<
         (&mut Node, &mut Text, &mut Visibility, &mut TextColor),
@@ -1181,7 +1354,7 @@ fn update_tank_status_labels(
     let (camera, cam_transform) = *camera;
     let mut tanks = tanks.iter();
     for (mut node, mut text, mut visibility, mut color) in &mut labels {
-        let Some((transform, name, knocked_out, tank_volumes)) = tanks.next() else {
+        let Some((transform, name, knocked_out, tank_volumes, tank_caps)) = tanks.next() else {
             *visibility = Visibility::Hidden;
             continue;
         };
@@ -1194,14 +1367,14 @@ fn update_tank_status_labels(
 
         if let Some(tank_volumes) = tank_volumes {
             for volume in tank_volumes.iter() {
-                let Ok((crew, incapacitated, ammo, cooked, function, hp, volume_name)) =
+                let Ok((crew, _crewman, dead, function, hp, ammo, cooked, volume_name)) =
                     volumes.get(volume)
                 else {
                     continue;
                 };
                 if let Some(station) = crew {
                     crew_total += 1;
-                    if incapacitated.is_some() || hp.is_some_and(|hp| hp.current <= 0.0) {
+                    if dead.is_some() || hp.is_some_and(|hp| hp.current <= 0.0) {
                         dead_crew.push(station.label());
                     } else {
                         crew_living += 1;
@@ -1221,6 +1394,27 @@ fn update_tank_status_labels(
                 }
             }
         }
+
+        // Capability readout: each capability as `NAME[+]` (available) or `NAME[-]` (unavailable).
+        // Composed from its requirement groups against the live world (design §7b).
+        let caps = [
+            Capability::Drive,
+            Capability::Traverse,
+            Capability::Fire,
+            Capability::Load,
+            Capability::GunnerSight,
+            Capability::CommanderView,
+        ];
+        let cap_line = caps
+            .iter()
+            .map(|cap| {
+                // Scalar effectiveness, not a boolean: a backfilled capability reads (e.g.) 60%.
+                let eff =
+                    capability_effectiveness(tank_volumes, tank_caps, *cap, &capability_volumes);
+                format!("{} {}%", cap.label(), (eff * 100.0).round() as i32)
+            })
+            .collect::<Vec<_>>()
+            .join("   ");
 
         let world_point = transform.translation() + Vec3::Y * 4.4;
         match camera.world_to_viewport(cam_transform, world_point) {
@@ -1248,7 +1442,7 @@ fn update_tank_status_labels(
                     disabled.join(", ")
                 };
                 *text = Text::new(format!(
-                    "{title}\n{state}\nCrew {crew_living}/{crew_total}\nDead: {dead}\nCookoff: {cookoff}\nDisabled: {disabled}",
+                    "{title}\n{state}\nCrew {crew_living}/{crew_total}\nDead: {dead}\nCookoff: {cookoff}\nDisabled: {disabled}\nCapabilities: {cap_line}",
                 ));
                 *color = TextColor(if knocked_out.is_some() {
                     Color::srgb(1.0, 0.35, 0.25)

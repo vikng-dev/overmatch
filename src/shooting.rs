@@ -1,16 +1,16 @@
 //! The player's gun control: fire on click (raising a `ballistics::FireShell`), enforce the reload
-//! cooldown, and recoil the barrel. The trajectory itself lives in `ballistics` — this module owns
-//! only what makes it the *player's* gun. The armor sandbox drives the same `FireShell` from its
-//! free-fly camera instead.
+//! cooldown (gated by the Loader position), and recoil the barrel. The trajectory itself lives in
+//! `ballistics` — this module owns only what makes it the *player's* gun. The armor sandbox drives
+//! the same `FireShell` from its free-fly camera instead.
 
 use bevy::ecs::lifecycle::Add;
 use bevy::prelude::*;
 
 use crate::ballistics::ComponentHealth;
 use crate::ballistics::FireShell;
-use crate::damage::{FunctionRole, TankKnockedOut, TankVolumes, function_disabled};
+use crate::damage::{Capability, CrewStation, Crewman, Dead, FunctionRole, TankCapabilities, TankVolumes, capability_available};
 use crate::state::GameplaySet;
-use crate::tank::{GunBarrel, Muzzle, Tank};
+use crate::tank::{Gun, GunBarrel, Muzzle, Tank};
 
 /// Muzzle velocity of the 88mm gun (m/s). The world is in meters, so this is literal.
 const MUZZLE_SPEED: f32 = 773.0;
@@ -37,17 +37,22 @@ struct Recoil {
     velocity: f32,
 }
 
-/// Gun reload cooldown: seconds remaining before the next shot. 0 = ready.
-#[derive(Resource)]
-struct Reload {
-    remaining: f32,
+/// Gun reload state: seconds remaining before the next shot. 0 = ready (loaded). A component on the
+/// `Gun` entity (per-gun, not a singleton resource). Ticks down only while the Loader position is
+/// staffed by a living crewman (design §7a) — a dead Loader freezes the reload partway through.
+#[derive(Component)]
+pub struct Reload {
+    pub remaining: f32,
 }
 
 pub fn plugin(app: &mut App) {
-    app.insert_resource(Reload { remaining: 0.0 })
-        // attach_recoil reacts to the barrel binding (observer), so it stays out of the set.
-        .add_observer(attach_recoil)
-        .add_systems(Update, fire.in_set(GameplaySet))
+    // attach_recoil + attach_reload react to rig binding (observers), so they stay out of the set.
+    app.add_observer(attach_recoil)
+        .add_observer(attach_reload)
+        .add_systems(
+            Update,
+            (tick_reload, fire).chain().in_set(GameplaySet),
+        )
         .add_systems(FixedUpdate, apply_recoil.in_set(GameplaySet));
 }
 
@@ -64,30 +69,67 @@ fn attach_recoil(add: On<Add, GunBarrel>, barrels: Query<&Transform>, mut comman
     });
 }
 
+/// Attach `Reload` the moment the rig binds `Gun`. Starts ready (0 = loaded).
+fn attach_reload(add: On<Add, Gun>, mut commands: Commands) {
+    commands.entity(add.entity).insert(Reload { remaining: 0.0 });
+}
+
+/// Tick the reload timer down — but only while the Load capability is available (Loader staffed +
+/// Breech intact). A dead Loader or broken Breech freezes the reload partway through; a backfilled
+/// Loader (slice 2) would resume it.
+fn tick_reload(
+    time: Res<Time>,
+    tank: Query<(Option<&TankVolumes>, Option<&TankCapabilities>), With<Tank>>,
+    volumes: Query<(
+        Option<&CrewStation>,
+        Option<&Crewman>,
+        Option<&Dead>,
+        Option<&FunctionRole>,
+        Option<&ComponentHealth>,
+    )>,
+    mut gun: Query<&mut Reload, With<Gun>>,
+) {
+    let Ok((tank_volumes, tank_caps)) = tank.single() else {
+        return;
+    };
+    let Ok(mut reload) = gun.single_mut() else {
+        return;
+    };
+    if reload.remaining > 0.0
+        && capability_available(tank_volumes, tank_caps, Capability::Load, &volumes)
+    {
+        reload.remaining = (reload.remaining - time.delta_secs()).max(0.0);
+    }
+}
+
 fn fire(
     mouse: Res<ButtonInput<MouseButton>>,
-    time: Res<Time>,
-    mut reload: ResMut<Reload>,
+    tank: Query<(Option<&TankVolumes>, Option<&TankCapabilities>), With<Tank>>,
+    volumes: Query<(
+        Option<&CrewStation>,
+        Option<&Crewman>,
+        Option<&Dead>,
+        Option<&FunctionRole>,
+        Option<&ComponentHealth>,
+    )>,
     muzzle: Query<&GlobalTransform, With<Muzzle>>,
-    tank: Query<(Option<&TankVolumes>, Option<&TankKnockedOut>), With<Tank>>,
-    functions: Query<(&FunctionRole, &ComponentHealth)>,
+    mut gun: Query<&mut Reload, With<Gun>>,
     mut barrel: Query<&mut Recoil>,
     mut commands: Commands,
 ) {
-    reload.remaining = (reload.remaining - time.delta_secs()).max(0.0);
-    if !mouse.just_pressed(MouseButton::Left) || reload.remaining > 0.0 {
+    let Ok((tank_volumes, tank_caps)) = tank.single() else {
+        return;
+    };
+    let Ok(mut reload) = gun.single_mut() else {
+        return;
+    };
+    if reload.remaining > 0.0 || !mouse.just_pressed(MouseButton::Left) {
         return;
     }
     let Ok(muzzle) = muzzle.single() else {
         return;
     };
-    let Ok((tank_volumes, knocked_out)) = tank.single() else {
-        return;
-    };
-    if knocked_out.is_some()
-        || function_disabled(tank_volumes, FunctionRole::Breech, &functions)
-        || function_disabled(tank_volumes, FunctionRole::GunBarrel, &functions)
-    {
+    if !capability_available(tank_volumes, tank_caps, Capability::Fire, &volumes) {
         return;
     }
 

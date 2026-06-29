@@ -16,7 +16,7 @@ use serde::Deserialize;
 
 use crate::Layer;
 use crate::ballistics::{ArmorVolume, BallisticVolume, ComponentHealth, ComponentVolume};
-use crate::damage::{Ammo, VolumeOf};
+use crate::damage::{Ammo, Crewman, TankCapabilities, VolumeOf};
 use crate::spec::{TankSpec, TankSpecHandle};
 use crate::state::{AppState, GameplaySet};
 
@@ -266,6 +266,8 @@ pub fn on_tank_ready(
         NoAutoMass,
         NoAutoAngularInertia,
         NoAutoCenterOfMass,
+        // Per-tank capability requirements (design §7b) — drives `capability_effectiveness`.
+        TankCapabilities(spec.capabilities.clone()),
         // Root visibility owns the gunner-view hide: set to `Hidden`, `InheritedVisibility`
         // propagates `HIDDEN` to every descendant mesh, so the gunner optic (camera parked at the
         // gun pivot, inside the mantlet) sees no own-tank geometry — no near-plane clipping.
@@ -384,7 +386,9 @@ pub fn on_tank_ready(
                     "tank volume `{s}` declares a consequence facet but has no hp"
                 );
                 if let Some(crew) = volume.crew {
-                    entity.insert(crew);
+                    // Seat role + its native occupant (topology B): `home == seat` at bind, so
+                    // competence is 1.0 until a backfill swap moves an occupant to a foreign seat.
+                    entity.insert((crew, Crewman { home: crew }));
                 }
                 if volume.ammo {
                     entity.insert(Ammo);

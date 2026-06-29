@@ -172,9 +172,21 @@ When a shell's caliber greatly exceeds a volume's thickness along its normal, su
 The fixed-shape cone of fragments thrown from a volume's exit face on perforation — dense on-axis, thinning with angle and distance — and the primary crew-killer. Each fragment is one HP unit that stops at the first volume it reaches.
 _Avoid_: spalling, fragmentation, frag (the noun is spall; the emitter is the exit cone)
 
-**Crew station**:
-A crew function — gunner (aim), loader (reload), driver (move), commander (view/command). Served by whichever living crewman holds it, and backfilled at degraded effectiveness by others, the commander being the universal backup.
-_Avoid_: crew slot, seat
+**Station**:
+The *place* a crewman works — a fixed, spatial ballistic volume carrying a **role** (the gunner's station grants the gunnery capabilities). Persists whether occupied by a living crewman, a corpse, or briefly no one. Role lives on the station, not the occupant.
+_Avoid_: crew slot, seat, position
+
+**Crewman**:
+The *human* occupant — carries HP, death, and (later) skill. **Occupies** one station at a time; backfills a foreign station at degraded effectiveness, the commander being the universal backup. Crew ↔ station is always a 1:1 matching; a swap is a transposition (the dead occupant takes the survivor's vacated station).
+_Avoid_: treating crew as a counter (crew is never a count — see kill model)
+
+**Capability**:
+A gameplay verb the tank can perform — Drive, Traverse, Fire, Load, GunnerSight, CommanderView. Gated *and graded* by its requirements (crew stations + module functions); its current degree is its effectiveness.
+_Avoid_: action (the player-facing intent verb is a Control; the tank-model verb is a Capability)
+
+**Effectiveness**:
+How well a capability is currently served, ∈ [0, 1] (0 = unavailable, 1 = full) — a *rate* (reload speed, traverse speed, drive power). **Relational**: a crewman's contribution is `competence(crewman, station)`, native 1.0 / foreign degraded, not a fixed attribute. The seam the skill/training system plugs into.
+_Avoid_: efficiency (reserve that for a single requirement member's coefficient)
 
 **Cookoff**:
 Detonation of an ammunition volume when its HP is depleted — instantly kills all crew. The one terminal, non-repairable event.

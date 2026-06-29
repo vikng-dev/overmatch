@@ -11,8 +11,9 @@ doesn't masquerade as scope.
 
 ## 1. The kill model — crew is the only health
 
-There is **no tank HP**. A tank is dead the instant it has **fewer than 2 living crew**. Everything
-else is emergent and *repairable* — only ammunition is terminal. Three paths empty crew:
+There is **no tank HP**. A tank is dead when it has **no living crew** — the count threshold
+("fewer than 2 = dead") is **deferred pending playtest** (see §1a below). Everything else is
+emergent and *repairable* — only ammunition is terminal. Three paths empty crew:
 
 - **Direct hits** — a penetrator or spall fragment reaching a crewman.
 - **Engine fire** — damages nearby crew slowly, by proximity, over time.
@@ -20,6 +21,44 @@ else is emergent and *repairable* — only ammunition is terminal. Three paths e
 
 Module damage (engine, breech, optics, transmission, …) *never* kills the tank — it degrades
 capability and can be repaired. Ammunition is the one exception.
+
+### 1a. Kill threshold — A/B under test (2026-06-29)
+
+(Tracked as a playtest fork: `.agents/scratch/playtest-forks/README.md` (F2).)
+
+**Background.** Originally (this §1) a tank was dead at fewer than 2 living crew — the "a one-man
+tank is operationally finished" rationale. Implementing per-position capability gating (§7) exposed
+a tension: the backfill-slice gameplay we want (a lone survivor choosing which single position to
+staff — drive OR shoot, not both) is *only possible* if a lone-crewman tank is still alive. So the
+<2 threshold gates off the backfill tradeoff before it can exist.
+
+**v1 cut (chosen for now, pending playtest): pure per-position gating, no crew-count KO.**
+Capability loss is derived entirely from per-position staffing (§7): `capability_available =
+staffed AND module HP > 0`. A tank with one surviving Driver can still drive; a tank with one
+surviving Gunner can still traverse/fire/reload (but not move or see); etc. `TankKnockedOut`
+becomes a *readout/label* only, never a gameplay gate. A tank is fully dead only at **0 living
+crew** (every position unstaffed) — a separate condition from a count threshold.
+
+**A (this cut) vs B (the old <2 rule):**
+- **A — pure per-position (chosen for v1):** enables the backfill-slice tradeoff; smallest
+  primitive; KO gate can be re-added as one AND-clause if A feels wrong in playtest.
+- **B — <2 crew = dead:** tanks die earlier; lone survivors can't act; backfill tradeoff never
+  arises because the tank is already dead at the moment a second crewman dies.
+
+**What A means for the existing wiring:**
+- `function_disabled` (module HP gate) stays as-is.
+- A crew-staffing gate is *added* alongside it (§7): capability is on iff position staffed by a
+  living crewman AND module HP > 0. Both must hold; they compose.
+- `TankKnockedOut` is **retired as a gameplay gate** (no system reads it to disable drive/fire).
+  It may survive as a derived label for HUD/scoring, or be removed entirely pending slice-2
+  needs. Cookoff (§8) still kills all crew and launches the turret — that hook moves from
+  `TankKnockedOut`-triggered to `CookedOff`-triggered directly.
+- **If A plays wrong in testing**, B is re-added as: `capability_available AND tank not KO`, where
+  KO latches at living crew < 2. One AND-clause, mechanical revert.
+
+**What "kills" a tank under A:** only 0 living crew. (A "combat-ineffective" derived label — no
+combat capability remains, or no drive AND no fire — may be added later for scoring; it is *not* a
+gameplay gate in v1.)
 
 ## 2. The unified primitive — the ballistic volume
 
@@ -154,7 +193,7 @@ This is *local function state*, not a global health bar — the kill condition i
 - **Degraded performance (later):** checkpoints preferred (e.g. ≤50% HP → −x% power) over continuous
   `hp% = perf%`, for legibility. Tuning, not slice.
 
-## 7. Crew — stations with a backfill hierarchy
+## 7. Crew — positions with capabilities, served by crewmen
 
 Crew are not a counter; each crewman **is a station/function**: gunner (aim), loader (reload), driver
 (move), commander (view/command). Capability is never owned by a module alone — it is **served by
@@ -170,11 +209,193 @@ the cupola; the gunner's optic (`sight.rs`, in flight) = the gunner's station. S
 will eventually **gate** sight/aim/driving rather than sit beside them. *Flag for the gunner-sight
 work:* the optic and third-person toggle are crew-served capabilities, not unconditional.
 
+### 7a. v1 capability model — positions + composition (2026-06-29)
+
+> **Superseded by §7b (2026-06-29).** This records what slice 1 shipped: capability *tags on
+> positions*, AND-only requirements, the `Action` name. §7b is the current target — `Capability`
+> (renamed), requirement *groups* (Part/Pool/Backup), graded effectiveness, and the Station/Crewman
+> split. Kept for history; do not implement from this section.
+
+**Slice 1 (this slice): composed position capabilities + crew death affecting those.** Slice 2 =
+backfill and position swapping between crew members upon death (separate slice; see §7b).
+
+**The primitive:** a ballistic volume that is also a crew position carries a `Position` component
+with a set of `Capability` tags it grants when staffed by a living crewman. v1 keeps `CrewStation`
+as the station-identity label (what seat this volume is — "Commander", "Gunner", …, used for
+diagnostic readouts and slice-2 backfill ("who is where")) and adds a parallel `capabilities`
+facet (what the position grants). So `CrewStation` is **not** retired in slice 1; slice 1 keeps
+it as identity, slice 2 may grow it (see §7b). The fused-model v1 cuts `CrewStation`'s *role as
+the gating key* (gating now keys off the `capabilities` set, not the enum variant) but keeps the
+enum itself as the station identity. v1 is the **fused model** — the crewman's body and the
+position are the same entity (the existing `Ballistic_<Crew>` volume). The separation refactor
+(extract occupant identity into a child entity + `Occupies` relationship) lands at slice 2
+(backfill), not now.
+
+**v1 capability set:** `Drive`, `Traverse`, `Fire`, `Reload`, `GunnerSight`, `CommanderView`.
+- "Traverse" = slewing the turret/gun servo (gates `ServoCommand` writers in `aim.rs` and
+  `sight.rs`). Distinct from `GunnerSight` (the optic camera), which the gunner also carries —
+  both die together when the gunner dies, but they gate independent systems.
+- `Reload` is modeled explicitly as a `Reload { remaining: f32 }` component on the `Gun` entity
+  (in seconds, ticking down; `remaining == 0` = fireable), not a singleton resource. Loader-dead
+  → no decrement (currently-loading round stays partway through).
+
+**Tiger v1 positions and capabilities (the RON's `volumes` facets):**
+
+| Position | Capabilities |
+|---|---|
+| Driver | Drive |
+| Gunner | Traverse, Fire, GunnerSight |
+| Loader | Reload |
+| Commander | CommanderView |
+| BowGunner | ∅ (body to kill; hull MG capability comes later) |
+
+**v1 staffing query (binary, no efficiency):** "is there any living crewman-position entity with
+capability X, owned by this tank?" = `Position { capabilities contains X } AND !Incapacitated AND
+VolumeOf(tank)`. The staffing query keys off the `capabilities` set (data), **not** the
+`CrewStation` variant — so a future tank could have two Gunner-variant positions with different
+capability sets without code change. `CrewStation` is display/identity only. No `Occupies`
+relationship in slice 1 (natural assignment only — each crewman is born into its position;
+backfill/swap is slice 2).
+
+**Composition with module gates:** a capability is available iff the position is staffed by a
+living crewman AND the relevant module HP > 0 (e.g. Drive requires Driver-alive AND Engine-alive
+AND Transmission-alive). The existing `function_disabled` gate stays; a crew-staffing gate is
+added alongside it. They compose (AND), they don't replace.
+
+**View on crewman death — auto-fallback:** losing the crewman whose view is active auto-switches
+the player to the other view if its crewman is alive (CommanderView dead → gunner optic;
+GunnerSight dead → third-person). Both dead → dark (pairs naturally with imminent 0-living-crew
+death under the §1a model).
+
+**Playtest fork — single-crewman juggling (slice 2, *not* v1):** when only one combat-crewman
+remains alive, what happens to the gun? **Default chosen 2026-06-29: hardcore** — the survivor
+physically swaps between positions and serves one role at a time (constant no-aim-while-loading /
+no-load-while-aiming); the cost is *time*, keeping `Occupies` strictly 1:1 (no efficiency
+coefficient needed yet). Arcade variants (dual-occupancy, or remote load) are preserved as
+additive layers if the time-cost plays too punishing. Full fork — alternatives, why it's a
+playtest call, revert cost — in the register: `.agents/scratch/playtest-forks/README.md` (F1).
+Requires the slice-2 position-separation refactor (extract crewman identity from position entity,
+add `Occupies`).
+
+### 7b. Backfill + capability model v2 — the swap mechanic (slice 2, designed 2026-06-29)
+
+Designing backfill evolved the capability model past §7a's AND-only requirements and past slice-1's
+`Action` naming. **This subsection is the current target; §7a is the slice-1 historical record.**
+
+**Separation refactor — Station vs Crewman.**
+- **Station** — the *place*: a fixed, spatial ballistic volume carrying a **role** (the Gunner's
+  station grants the gunnery capabilities). Persists whether occupied by a living crewman, a corpse,
+  or (transiently) no one. **Role lives on the station, not the occupant** — which is what makes
+  "the commander serves the loader's station" expressible (Commander *by specialty*, occupying the
+  Loader station *by assignment*).
+- **Crewman** — the *human*: HP, `Dead`, a `home` (native station / specialty), and later skill.
+- **Bijection invariant:** crew ↔ station is always a perfect matching (N crewmen, N stations). Dead
+  crew stay in the matching — their station still absorbs penetrators (unchanged). A swap is a
+  **transposition** of two crewmen's station assignments.
+
+**Topology B — occupant-data on seats (chosen 2026-06-29, implemented).** Rather than split station
+and crewman into *separate entities* with an `Occupies` relationship (call that topology **C**), the
+slice keeps the **fused seat-volume** as the unit and treats the crewman as occupant *data* on it:
+the volume carries geometry + `ComponentHealth` (the body's HP) + `CrewStation` (the **seat**'s role)
++ `Crewman { home }` (who currently sits there). A swap **exchanges occupant state** (`home`, HP,
+`Dead`) between two seats — so the *living* crewman's killable hitbox moves with the person (shooting
+the new seat kills the backfiller), honouring the Q4 honesty decision, while the ballistics march is
+**untouched** (it still deposits onto each volume's `ComponentHealth`). `competence(home, seat)`
+(`damage.rs`) gates the foreign-seat penalty (native 1.0 / flat 0.6). **Topology C** — first-class
+`Station`/`Crewman` entities + an `Occupies` relationship + rerouting the four ballistics deposit
+sites to the occupant — is the cleaner long-term form, deferred until a second reason to pay for it
+(e.g. crew that visually relocate, or stations with independent geometry); see §9.
+
+**Capability (renamed from `Action`).** The tank-model verb — Drive, Traverse, Fire, Load,
+GunnerSight, CommanderView. The player-facing intent verb lives in the future Controls layer
+(ROADMAP Phase 2), so "Capability" is free for the model concept *and* carries a **degree**
+(effectiveness) that "available action" could not.
+
+**Requirement model — groups.** A capability's requirement is a **list of groups, AND'd** (`min`
+across groups). Each group combines its members one of two ways:
+- **`Part(x)`** — a single mandatory thing (sugar for a one-member group at 1.0); missing → 0.
+- **`Pool([...])`** — *cooperative* redundancy: present contributions **sum, capped at 1.0** (two
+  engines at 0.5; two loaders on a heavy gun).
+- **`Backup([...])`** — *substitutive* redundancy: the **best** available path wins (`max`) (electric
+  vs hand traverse; autoloader vs hand-load). A backup routes around the primary's dependencies, so
+  those deps fold into the *primary member's* quality.
+
+A member is `(coeff, [Part])`: `coeff` is its share (Pool) or ceiling (Backup); `[Part]` are the
+things it needs, whose qualities **multiply** in. **`Part`** is a single flat enum naming every
+referenceable thing (crew stations + module functions, one vocabulary — no `Crew(...)`/`Module(...)`
+wrapper). Crew-vs-module is intrinsic to the resolved entity, not the reference.
+
+**Quality** ∈ [0,1], resolved live per `Part`:
+- **Module** → condition: 1.0 if HP > 0 (graded damage curve later, §9).
+- **Crew** → `competence(crewman, station)` = 1.0 native / flat 0.6 foreign for now; later × skill.
+  Competence is **relational** (crewman × station), *not* an attribute of either — the seam the
+  skill/training system plugs into.
+
+**Combine (per frame, against the live world):**
+```
+member  = coeff × Π(quality of each Part it needs)
+group   = Part/Pool: min(1, Σ members)   |   Backup: max(members)
+effectiveness = min over groups          // 0 = unavailable, 1 = full
+```
+Effectiveness is a **rate** (`time = base / effectiveness`; reload at 0.3 → ~3.3× as long — or a
+speed/power scale). The RON declares only the static *recipe* (structure + coefficients); HP, who's
+alive, and backfill assignment are live inputs — death/damage/swap change the inputs, never the
+recipe.
+
+**RON shape (flat):**
+```ron
+capabilities: {
+    Fire:     [Gunner, Breech, GunBarrel],
+    Drive:    [Driver, Pool([(0.5, [Engine_L]), (0.5, [Engine_R])]), Transmission],
+    Load:     [Backup([(1.0, [Autoloader]), (0.15, [Loader])]), Breech],
+    Traverse: [Gunner, Backup([(1.0, [TraverseMotor]), (0.1, [])])],
+}
+```
+Tiger needs only bare `Part` (mandatory) groups; Pool/Backup are exercised only by exotic tanks
+(the autoloader tank just writes `Load: [Backup([(1.0,[Autoloader])]), Breech]` and drops its Loader
+station — no code change). Serde: mixing a bare `Part` and a `Pool(...)` in one `Vec<Group>` likely
+needs `#[serde(untagged)]` on `Group` — verify it round-trips against the pinned `ron` first. `Part`
+as a **flat** enum (not wrapping CrewStation/FunctionRole) is the robust choice and avoids untagged
+at the reference level.
+
+**The swap mechanic (grilled 2026-06-29):**
+- **Trigger** — bare **tap-source** (a living crewman) → **tap-target** (a station). Player picks
+  both ends; nothing auto-proposed. Distinct from *view* switching (camera; already exists via
+  Lshift).
+- **Duration** — a **timed transition**; the crewman **keeps manning the source station** until the
+  timer completes, then the assignment flips atomically. Trade-with-latency, **no dead window**.
+  **Cancellable, not pausable** (cancel discards the timer; he never left). Anti-spam is the timer
+  itself — nothing is gained mid-transit. ~3–5s, tunable.
+- **Restrictions** — **anyone → any station.** `competence` is the only gate; an impossible pairing
+  is just `competence = 0` (dark though "staffed"). No allow-list system. Tiger MVP: 1.0 home / 0.6
+  foreign, no zeros yet.
+- **Bodies** — the swap is a **1:1 transposition** (the bijection above): the dead occupant takes the
+  survivor's vacated station; the living crewman's killable hitbox moves honestly to the new station;
+  the corpse's location is free cosmetics (a corpse absorbs identically anywhere).
+
+**Playtest knobs (register F1):** the transition **cost model** (source-live latency vs both-ends-dark
+sacrifice) and the **timer duration** are tuned at the controller, not chosen at the desk.
+
+**Slice-2 build scope:** the occupant-data split (topology B: `Crewman { home }` + `competence`); the
+`Capability`/`Group`/`Part` evaluator (general `min`/sum/max — Tiger exercises only `Part`; Pool/Backup
+get pure-function unit tests); effectiveness as `f32`; the swap mechanic. Deferred (§9): topology C
+(entity separation), graded module damage, the skill/training system, `min`-vs-`product` at the AND
+level, min-count floors, per-gun keying (multi-turret), `OneOrMany` serde sugar.
+
+**Build status:** steps 1–3 landed and green — capability model + evaluator (behaviour-preserving),
+topology-B occupant split + `competence` (behaviour-preserving), and the swap mechanic
+(`PendingSwap` + `tick_swaps`, `SWAP_SECONDS = 4`) with a sandbox crew bar (`1`–`5` tap-source →
+tap-target; layer toggles moved to `F1`–`F3`). The sandbox readout shows **scalar effectiveness**
+per capability (`Load 60%` when backfilled), not a boolean. GUI-verified. Slice-2 core is complete;
+remaining work is deferred refinements (§9) and the eventual game-side (non-sandbox) crew UI.
+
 ## 8. Catastrophic & environmental
 
 - **Ammunition** — each shell is modelled **individually** as a ballistic volume + HP. Firing
   **depletes** the stowage, so an emptier rack is a smaller target and less catastrophic (the real
-  "empty your ready rack" play). A shell's HP → 0 = **cookoff** = all crew dead.
+  "empty your ready rack" play). A shell's HP → 0 = **cookoff** = all crew dead (kills all crew
+  positions → 0 living crew → tank dead under the §1a-A model). Turret launch is triggered off
+  `CookedOff` directly, not via `TankKnockedOut` (see §1a — KO is retired as a gameplay gate).
 - **Fire** — an **engine hit by a direct penetrator** (not fragments) has an ignition chance. Fire
   does **not spread**; it does range-per-tick damage to nearby crew/components and can be **put out**
   (a crew repair action). A dedicated **fuel** volume comes later.
@@ -193,6 +414,22 @@ work:* the optic and third-person toggle are crew-served capabilities, not uncon
   crew/module/station definitions TBD.
 - Repair detail (who, how long, occupies which station).
 - Player feedback / legibility — how the player reads *what happened* to their tank.
+- **Capability model (§7b) deferred edges:**
+  - Cross-group combine: `min` (bottleneck, chosen) vs `product` (compounding) — they agree unless a
+    capability has *two* simultaneously-degraded groups; settle when that first arises.
+  - **Min-count floors** — groups that don't degrade gracefully ("need ≥2 or it's 0"), vs the linear
+    `Pool` share model.
+  - **Skill / training system** — competence beyond the static native/foreign split: per-crewman
+    skill, "last stand", swap-timer modifiers. All are multipliers on the two computed scalars
+    (effectiveness, transition time); the model is purely additive when it lands.
+  - **Per-gun keying (multi-turret)** — the one axis groups *don't* cover: `Capability` keyed by the
+    operated gun entity, not a global enum (M3 Lee, Char B1, T-35).
+  - **`OneOrMany` serde sugar** — let single-`Part` `Pool` members write `(0.5, Engine_L)` instead of
+    `(0.5, [Engine_L])`.
+  - **Topology C (entity separation)** — promote `Station`/`Crewman` to first-class entities with an
+    `Occupies` relationship and reroute the four ballistics deposit sites to the occupant. Cleaner
+    than topology B (the fused seat-volume), but pay for it only when crew visually relocate or
+    stations gain independent geometry (§7b).
 
 ## 10. Architecture & the seam
 
@@ -369,6 +606,10 @@ not edit the same files. Authored to by the model handoff and bound to by the co
   shape kinds (Visual / Ballistic / Collider) now split by purpose; rig is a pure empty skeleton. Binds
   clean. **Visual skin needs a human eyeball in the sandbox** (counts match, so geometry should be
   intact; backups in scratchpad).
-- **Next:** consequences of HP→0 (§§7–8: ammo cookoff, crew death, module knock-out + degraded
-  performance); persist material factors + HP to **RON keyed by node name** (§9 data home); then the
-  deferred shape/tuning knobs (caliber exponent, fragment cap, `spall_factor` brittleness split).
+- **Next:** crew position capabilities + per-crew capability gating (§7a). `CrewStation` (enum)
+  → `Position { capabilities }` (composition). v1 capability set = {Drive, Traverse, Fire, Reload,
+  GunnerSight, CommanderView}. Capability available iff staffed by a living crewman AND relevant
+  module HP > 0. `Reload` becomes a `Gun` component (per-gun, not a singleton resource). View
+  auto-fallback on view-crewman death. `TankKnockedOut` retired as a gameplay gate (§1a-A); the
+  cookoff turret-launch hook moves from `TankKnockedOut`-triggered to `CookedOff`-triggered. Slice
+  2 (§7b — backfill/position swapping) is the next design interview.

@@ -95,4 +95,14 @@ TankSpec(
         "Ballistic_Ammo_R_0":              (material_factor:  200.0, hp: 2.0, ammo: true),
         "Ballistic_Ammo_R_1":              (material_factor:  200.0, hp: 2.0, ammo: true),
     },
+    // Per-capability requirement groups (design §7b), AND'd. A bare name is a mandatory `Part`;
+    // `Pool(..)`/`Backup(..)` (unused by the Tiger) express graded redundancy. Tiger is all-mandatory.
+    capabilities: {
+        Drive:         [Driver, Engine, Transmission],
+        Fire:          [Gunner, Breech, GunBarrel],
+        Load:          [Loader, Breech],
+        Traverse:      [Gunner],
+        GunnerSight:   [Gunner],
+        CommanderView: [Commander],
+    },
 )

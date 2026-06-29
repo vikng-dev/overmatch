@@ -9,14 +9,20 @@ use bevy::prelude::*;
 use serde::Deserialize;
 
 use crate::ballistics::ComponentHealth;
-use crate::damage::{FunctionRole, TankKnockedOut, TankVolumes, function_disabled};
+use crate::damage::{Capability, CrewStation, Crewman, Dead, FunctionRole, TankCapabilities, TankVolumes, capability_available};
 use crate::state::GameplaySet;
 use crate::tank::{CenterOfMassAnchor, Roadwheel, Tank, TrackSide};
 
-/// Coulomb coefficient: each wheel's total ground force is capped at MU × load (friction circle).
+/// Coulomb coefficient: each wheel's total ground force is capped at MU × load (friction ellipse).
 /// Per-environment (the track-vs-ground surface pair), not per-tank — destined for the terrain
 /// mechanic, not the model (ADR-0007, bucket 3).
 const MU: f32 = 0.9;
+/// Lateral fraction of the friction ellipse: the sideways force budget is `LATERAL_GRIP_RATIO × MU ×
+/// load`, modelling a track's turning-resistance coefficient μ_t against its longitudinal μ. Firm-
+/// ground skid-steer theory (Wong/Merritt) puts μ_t ≈ 0.5 vs μ ≈ 0.9; this lower lateral grip is what
+/// lets a heavy tank pivot at all — an isotropic circle nearly cancels the steer drive. Surface
+/// property like [`MU`] (ADR-0007, bucket 3).
+const LATERAL_GRIP_RATIO: f32 = 0.55;
 /// Input ramp (per second): turns binary keys into a smooth throttle/steer signal — and gives
 /// the keyboard a taste of the analog mid-range on the way to full. Universal feel (bucket 1).
 const INPUT_RAMP: f32 = 4.0;
@@ -196,9 +202,9 @@ fn approach(current: f32, target: f32, step: f32) -> f32 {
 
 /// Differential-thrust drive with skid-steer friction. Each grounded wheel applies, at its
 /// contact: longitudinal thrust (its track's command) minus rolling resistance, plus lateral
-/// grip resisting side-slip — the whole vector capped at the friction circle (μ × load). Yaw,
-/// turning resistance, and weight transfer all emerge from per-contact forces; nothing scripts
-/// the turn.
+/// grip resisting side-slip — the whole vector capped on the friction ellipse (μ·load fore-aft, a
+/// lower lateral budget sideways). Yaw, turning resistance, and weight transfer all emerge from
+/// per-contact forces; nothing scripts the turn.
 fn apply_drive(
     input: Res<DriveInput>,
     drivetrain: Option<Single<&Drivetrain>>,
@@ -208,21 +214,24 @@ fn apply_drive(
             &GlobalTransform,
             Forces,
             Option<&TankVolumes>,
-            Option<&TankKnockedOut>,
+            Option<&TankCapabilities>,
         ),
         With<Tank>,
     >,
-    functions: Query<(&FunctionRole, &ComponentHealth)>,
+    volumes: Query<(
+        Option<&CrewStation>,
+        Option<&Crewman>,
+        Option<&Dead>,
+        Option<&FunctionRole>,
+        Option<&ComponentHealth>,
+    )>,
     mut wheels: Query<(&Roadwheel, &mut Suspension)>,
 ) {
-    let Ok((_tank, tank_transform, mut forces, tank_volumes, knocked_out)) = body.single_mut()
+    let Ok((_tank, tank_transform, mut forces, tank_volumes, tank_caps)) = body.single_mut()
     else {
         return;
     };
-    if knocked_out.is_some()
-        || function_disabled(tank_volumes, FunctionRole::Engine, &functions)
-        || function_disabled(tank_volumes, FunctionRole::Transmission, &functions)
-    {
+    if !capability_available(tank_volumes, tank_caps, Capability::Drive, &volumes) {
         for (_, mut suspension) in &mut wheels {
             suspension.drive_force = Vec3::ZERO;
         }
@@ -275,14 +284,34 @@ fn apply_drive(
             suspension.anchor = Some(contact);
         }
 
+        // Friction ellipse: tracks grip hard fore-aft (full μ·load) but skid sideways at the lower
+        // turning-resistance coefficient μ_t = ratio·μ (Wong/Merritt firm-ground skid-steer). The
+        // lateral semi-axis is what lets a heavy tank pivot — an isotropic circle nearly cancels the
+        // steer drive.
+        let grip = MU * load;
+        let grip_lat = grip * LATERAL_GRIP_RATIO;
+
         // Slip from the planted anchor, split into the ground-plane axes.
-        let (d_fwd, d_lat) = match suspension.anchor {
-            Some(anchor) => (
-                (contact - anchor).dot(forward),
-                (contact - anchor).dot(right),
-            ),
+        let (mut d_fwd, mut d_lat) = match suspension.anchor {
+            Some(anchor) => ((contact - anchor).dot(forward), (contact - anchor).dot(right)),
             None => (0.0, 0.0),
         };
+
+        // Bristle saturation (LuGre steady-state deflection) on the ellipse: a brush bristle stretches
+        // only to its slip point — d_fwd to grip/k, d_lat to grip_lat/k. Past the ellipse the bristle
+        // *trails* the contact at that fixed deflection (a smooth Coulomb slide) instead of snapping
+        // back to zero, which is what removes the low-speed stick-slip limit cycle.
+        if suspension.anchor.is_some() {
+            let a_fwd = grip / drivetrain.brush_stiffness;
+            let a_lat = grip_lat / drivetrain.brush_stiffness;
+            let e = (d_fwd / a_fwd).powi(2) + (d_lat / a_lat).powi(2);
+            if e > 1.0 {
+                let s = e.sqrt().recip();
+                d_fwd *= s;
+                d_lat *= s;
+                suspension.anchor = Some(contact - forward * d_fwd - right * d_lat);
+            }
+        }
 
         // Longitudinal: thrust when commanded (bleeding the anchor's forward slip so the static
         // spring doesn't fight the drive — the wheel "rolls"); else hold (static spring) or, while
@@ -308,14 +337,13 @@ fn apply_drive(
 
         let mut force = forward * f_fwd + right * f_lat;
 
-        // Friction circle: ground can't supply more than μ × load of tangential force. Past it the
-        // grip breaks loose — re-plant the anchor at the contact so it re-grips from here.
-        let grip = MU * load;
-        if force.length() > grip {
-            force = force.normalize_or_zero() * grip;
-            if suspension.anchor.is_some() {
-                suspension.anchor = Some(contact);
-            }
+        // Cap the tangential force on the friction ellipse (μ·load fore-aft, grip_lat sideways) by
+        // scaling the vector onto its boundary. The bounded bristle rarely overshoots, so this only
+        // trims the thrust+grip vector sum — and never resets the anchor (that snap is the stick-slip
+        // source).
+        let e = (f_fwd / grip).powi(2) + (f_lat / grip_lat).powi(2);
+        if e > 1.0 {
+            force *= e.sqrt().recip();
         }
 
         forces.apply_force_at_point(force, contact);

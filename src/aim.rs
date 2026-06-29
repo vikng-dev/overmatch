@@ -7,10 +7,12 @@ use avian3d::prelude::SpatialQuery;
 use bevy::ecs::lifecycle::Add;
 use bevy::prelude::*;
 
+use crate::ballistics::ComponentHealth;
 use crate::camera::GunnerCameraPlaced;
 use crate::sight::in_third_person;
+use crate::damage::{Capability, CrewStation, Crewman, Dead, FunctionRole, TankCapabilities, TankVolumes, capability_available};
 use crate::state::GameplaySet;
-use crate::tank::{Gun, Hull, Muzzle, ServoCommand, Turret};
+use crate::tank::{Gun, Hull, Muzzle, ServoCommand, Tank, Turret};
 use crate::world::ground_distance;
 
 /// Maximum engagement range; rays that hit nothing fall back to a point this far out.
@@ -108,6 +110,14 @@ fn aim(
     spatial: SpatialQuery,
     camera_query: Single<(&Camera, &GlobalTransform)>,
     window: Single<&Window>,
+    tank: Query<(Option<&TankVolumes>, Option<&TankCapabilities>), With<Tank>>,
+    volumes: Query<(
+        Option<&CrewStation>,
+        Option<&Crewman>,
+        Option<&Dead>,
+        Option<&FunctionRole>,
+        Option<&ComponentHealth>,
+    )>,
     hull: Query<&GlobalTransform, With<Hull>>,
     mut turret: Query<
         (&GlobalTransform, &mut ServoCommand, &mut AimPoint),
@@ -118,6 +128,13 @@ fn aim(
     // Hold RMB to free-look: the camera still pans, but we stop committing aim, so the gun
     // and the locked aim point hold their hull-relative pose.
     if mouse.pressed(MouseButton::Right) {
+        return;
+    }
+
+    let Ok((tank_volumes, tank_caps)) = tank.single() else {
+        return;
+    };
+    if !capability_available(tank_volumes, tank_caps, Capability::Traverse, &volumes) {
         return;
     }
 

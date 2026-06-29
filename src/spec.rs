@@ -13,7 +13,7 @@ use bevy::prelude::*;
 use serde::Deserialize;
 use std::collections::HashMap;
 
-use crate::damage::{CrewStation, FunctionRole};
+use crate::damage::{Capability, CrewStation, FunctionRole, Requirement};
 use crate::driving::{Drivetrain, SuspensionParams};
 use crate::tank::{ServoSpec, Tank};
 
@@ -62,6 +62,11 @@ pub struct TankSpec {
     /// volumes and what they are (design §12). The march reads `material_factor`; `on_tank_ready`
     /// layers components from the facets. The `Armor_/Module_/...` name prefix is documentation only.
     pub volumes: HashMap<String, VolumeSpec>,
+    /// Per-tank capability requirements (design §7b). Each capability maps to a list of requirement
+    /// groups (AND'd): a bare `Part` is mandatory; `Pool(..)`/`Backup(..)` express graded redundancy.
+    /// Drives [`crate::damage::capability_effectiveness`] — the single gate consuming systems query.
+    #[serde(default)]
+    pub capabilities: HashMap<Capability, Requirement>,
 }
 
 /// The handle to a tank's spec sheet, carried on its root entity so each tank knows its variant
@@ -148,5 +153,33 @@ mod tests {
         );
         assert!(spec.volumes["Ballistic_Ammo_L_0"].ammo);
         assert_eq!(spec.volumes["Ballistic_Hull_UFP"].hp, None);
+        // Capability requirements: the flat RON shape deserializes into requirement groups. Drive =
+        // [Driver, Engine, Transmission] (all mandatory `Single`s); Traverse = [Gunner]. Exercises
+        // the `#[serde(untagged)]` bare-`Part` parse.
+        use crate::damage::{Group, Part};
+        assert_eq!(
+            spec.capabilities[&Capability::Drive],
+            vec![
+                Group::Single(Part::Driver),
+                Group::Single(Part::Engine),
+                Group::Single(Part::Transmission),
+            ]
+        );
+        assert_eq!(
+            spec.capabilities[&Capability::Fire],
+            vec![
+                Group::Single(Part::Gunner),
+                Group::Single(Part::Breech),
+                Group::Single(Part::GunBarrel),
+            ]
+        );
+        assert_eq!(
+            spec.capabilities[&Capability::Load],
+            vec![Group::Single(Part::Loader), Group::Single(Part::Breech)]
+        );
+        assert_eq!(
+            spec.capabilities[&Capability::Traverse],
+            vec![Group::Single(Part::Gunner)]
+        );
     }
 }

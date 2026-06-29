@@ -12,7 +12,9 @@
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::prelude::*;
 
+use crate::ballistics::ComponentHealth;
 use crate::camera::GunnerCameraPlaced;
+use crate::damage::{Capability, CrewStation, Crewman, Dead, FunctionRole, TankCapabilities, TankVolumes, capability_available};
 use crate::state::GameplaySet;
 use crate::tank::{Gun, Hull, ServoCommand, ServoState, Tank, Turret, shortest_angle};
 
@@ -28,12 +30,13 @@ pub enum SightMode {
     Gunner,
 }
 
-/// Run condition: the gunner optic is active.
+/// Run condition: the gunner optic is active AND the gunner is alive (otherwise the view is dark
+/// and the player gets a prompt to switch).
 pub fn in_gunner(mode: Res<SightMode>) -> bool {
     *mode == SightMode::Gunner
 }
 
-/// Run condition: the free third-person view is active.
+/// Run condition: the free third-person view is active AND the commander is alive.
 pub fn in_third_person(mode: Res<SightMode>) -> bool {
     *mode == SightMode::ThirdPerson
 }
@@ -75,6 +78,11 @@ impl GunnerIntent {
 #[derive(Component)]
 struct IntentReticle;
 
+/// Full-screen black overlay shown when the active view's crewman is dead, plus a center prompt
+/// telling the player to switch to the other view. Hidden when the view is alive.
+#[derive(Component)]
+struct ViewDeathOverlay;
+
 /// Gun elevation above the line of sight for a flat-fire, drag-free gravity solution:
 /// `θ ≈ g·R / (2·v²)`. The shells are gravity-only (`shooting.rs`), so this is exact for them.
 pub fn superelevation(range: f32) -> f32 {
@@ -86,13 +94,14 @@ pub fn plugin(app: &mut App) {
     app.init_resource::<SightMode>()
         .init_resource::<Ranging>()
         .init_resource::<GunnerIntent>()
-        .add_systems(Startup, spawn_intent_reticle)
+        .add_systems(Startup, (spawn_intent_reticle, spawn_view_death_overlay))
         .add_systems(
             Update,
             (
                 toggle_sight,
                 drive_gunner_aim.run_if(in_gunner),
                 adjust_range.run_if(in_gunner),
+                update_view_death_overlay,
             )
                 .chain()
                 .in_set(GameplaySet),
@@ -123,6 +132,37 @@ fn spawn_intent_reticle(mut commands: Commands) {
         BackgroundColor(Color::srgba(1.0, 0.7, 0.1, 0.9)),
         Visibility::Hidden,
     ));
+}
+
+/// The full-screen black overlay + center prompt, shown when the active view's crewman is dead.
+/// The prompt tells the player to press Lshift to switch to the other view (if its crewman is
+/// alive). Solid black — "your crewman's eyes are gone" (design §7a, view-death model).
+fn spawn_view_death_overlay(mut commands: Commands) {
+    commands
+        .spawn((
+            ViewDeathOverlay,
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                position_type: PositionType::Absolute,
+                flex_direction: FlexDirection::Column,
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            BackgroundColor(Color::BLACK),
+            Visibility::Hidden,
+        ))
+        .with_children(|parent| {
+            parent.spawn((
+                Text::new(""),
+                TextFont {
+                    font_size: FontSize::Px(20.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.9, 0.4, 0.3)),
+            ));
+        });
 }
 
 /// Place the intent cursor at the reprojection of the committed intent direction. A *direction*
@@ -167,17 +207,25 @@ fn update_intent_reticle(
     }
 }
 
-/// Lshift flips the view. Entering gunner view seeds the intent from the gun's *current* lay (not
-/// its commanded target — seeding from `target` yanks the intent ahead of the gun by however far it
-/// was still slewing, and the lead clamp then snaps it back → a jump on handover). The sight-line
-/// pitch is the gun's bore minus the current superelevation. Entering also hides the tank root so
-/// the optic (parked at the gun pivot, inside the mantlet) clips no own geometry; leaving restores
-/// it.
+/// Lshift flips the view — but only if the target view's crewman is alive. Entering gunner view
+/// seeds the intent from the gun's *current* lay (not its commanded target — seeding from `target`
+/// yanks the intent ahead of the gun by however far it was still slewing, and the lead clamp then
+/// snaps it back → a jump on handover). The sight-line pitch is the gun's bore minus the current
+/// superelevation. Entering also hides the tank root so the optic (parked at the gun pivot, inside
+/// the mantlet) clips no own geometry; leaving restores it.
 fn toggle_sight(
     keys: Res<ButtonInput<KeyCode>>,
     mut mode: ResMut<SightMode>,
     mut intent: ResMut<GunnerIntent>,
     ranging: Res<Ranging>,
+    tank: Query<(Option<&TankVolumes>, Option<&TankCapabilities>), With<Tank>>,
+    volumes: Query<(
+        Option<&CrewStation>,
+        Option<&Crewman>,
+        Option<&Dead>,
+        Option<&FunctionRole>,
+        Option<&ComponentHealth>,
+    )>,
     turret: Query<&ServoState, (With<Turret>, Without<Gun>)>,
     gun: Query<&ServoState, (With<Gun>, Without<Turret>)>,
     mut tank_vis: Query<&mut Visibility, With<Tank>>,
@@ -185,8 +233,15 @@ fn toggle_sight(
     if !keys.just_pressed(KeyCode::ShiftLeft) {
         return;
     }
+    let Ok((tank_volumes, tank_caps)) = tank.single() else {
+        return;
+    };
     *mode = match *mode {
         SightMode::ThirdPerson => {
+            // Only switch to gunner optic if the gunner is alive.
+            if !capability_available(tank_volumes, tank_caps, Capability::GunnerSight, &volumes) {
+                return;
+            }
             if let (Ok(t), Ok(g)) = (turret.single(), gun.single()) {
                 intent.yaw = t.current();
                 // Sight-line pitch = bore − superelevation; seeding the bore would re-elevate on top.
@@ -198,6 +253,10 @@ fn toggle_sight(
             SightMode::Gunner
         }
         SightMode::Gunner => {
+            // Only switch to third-person if the commander is alive.
+            if !capability_available(tank_volumes, tank_caps, Capability::CommanderView, &volumes) {
+                return;
+            }
             if let Ok(mut v) = tank_vis.single_mut() {
                 *v = Visibility::Inherited;
             }
@@ -210,6 +269,9 @@ fn toggle_sight(
 /// intent; the turret/gun servos are commanded to chase it. The gun target carries the
 /// superelevation on top of the sight-line pitch, so the barrel rides above the line of sight.
 ///
+/// Gated by the Gunner's `Traverse` capability — a dead gunner freezes the servos (the turret/gun
+/// hold their last commanded position).
+///
 /// The intent is clamped to a circular **margin** — it may lead the gun's *current* lay by at most
 /// `LEAD_MARGIN` of *angular* distance — so the cursor can't run off-screen ahead of the slow
 /// turret: pegged at the margin means "slewing at max," near centre means "caught up." The clamp is
@@ -221,9 +283,24 @@ fn drive_gunner_aim(
     motion: Res<AccumulatedMouseMotion>,
     ranging: Res<Ranging>,
     mut intent: ResMut<GunnerIntent>,
+    tank: Query<(Option<&TankVolumes>, Option<&TankCapabilities>), With<Tank>>,
+    volumes: Query<(
+        Option<&CrewStation>,
+        Option<&Crewman>,
+        Option<&Dead>,
+        Option<&FunctionRole>,
+        Option<&ComponentHealth>,
+    )>,
     mut turret: Query<(&mut ServoCommand, &ServoState), (With<Turret>, Without<Gun>)>,
     mut gun: Query<(&mut ServoCommand, &ServoState), (With<Gun>, Without<Turret>)>,
 ) {
+    let Ok((tank_volumes, tank_caps)) = tank.single() else {
+        return;
+    };
+    if !capability_available(tank_volumes, tank_caps, Capability::Traverse, &volumes) {
+        return;
+    }
+
     // Radians of commanded aim per mouse count. Low because the optic is magnified — a small angle
     // is a big screen move at the gunner FOV. (Future refinement: scale with the zoom FOV.)
     const SENSITIVITY: f32 = 0.0005;
@@ -263,6 +340,48 @@ fn drive_gunner_aim(
     t_cmd.target = intent.yaw;
     // The gun's live lay carries the superelevation; the sight line is that minus it.
     g_cmd.target = intent.pitch + superelevation;
+}
+
+/// Show/hide the black overlay + prompt when the active view's crewman is dead. The prompt tells
+/// the player to press Lshift to switch to the other view if its crewman is alive; if both are
+/// dead, the prompt says so (the tank is effectively dead — 0 living crew imminent).
+fn update_view_death_overlay(
+    mode: Res<SightMode>,
+    tank: Query<(Option<&TankVolumes>, Option<&TankCapabilities>), With<Tank>>,
+    volumes: Query<(
+        Option<&CrewStation>,
+        Option<&Crewman>,
+        Option<&Dead>,
+        Option<&FunctionRole>,
+        Option<&ComponentHealth>,
+    )>,
+    mut overlay: Query<(&mut Visibility, &mut Text), With<ViewDeathOverlay>>,
+) {
+    let Ok((tank_volumes, tank_caps)) = tank.single() else {
+        return;
+    };
+    let Ok((mut vis, mut text)) = overlay.single_mut() else {
+        return;
+    };
+
+    let (active_cap, other_cap, other_label) = match *mode {
+        SightMode::ThirdPerson => (Capability::CommanderView, Capability::GunnerSight, "gunner optic"),
+        SightMode::Gunner => (Capability::GunnerSight, Capability::CommanderView, "third-person"),
+    };
+
+    let active_available = capability_available(tank_volumes, tank_caps, active_cap, &volumes);
+    if active_available {
+        *vis = Visibility::Hidden;
+        return;
+    }
+
+    let other_available = capability_available(tank_volumes, tank_caps, other_cap, &volumes);
+    *text = Text::new(if other_available {
+        format!("Crewman down — [Lshift] for {other_label}")
+    } else {
+        "All view crew down".to_string()
+    });
+    *vis = Visibility::Visible;
 }
 
 /// Scroll dials the range in gunner view (range, not zoom — the optic's magnification is fixed).
