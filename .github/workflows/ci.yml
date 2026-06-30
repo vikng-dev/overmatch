@@ -39,14 +39,12 @@ jobs:
       - name: Formatting
         run: cargo fmt --all --check
 
-  # The heavy job: lints + tests. The cold compile is large — this crate's dev profile
-  # builds all dependencies at opt-level 3 (`[profile.dev.package."*"]` in Cargo.toml)
-  # for fast in-editor runtime, which is slow to compile from scratch. The first run
-  # populates the rust-cache; subsequent (warm) runs finish in a few minutes, so this
-  # generous ceiling really only covers the initial cold build.
+  # The heavy job: lints + tests. Uses the `ci` cargo profile (dependencies at
+  # opt-level 0, see Cargo.toml), so even a cold build is light and the rust-cache is
+  # small; warm runs finish in a few minutes. The ceiling only guards a cold build.
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 30
     steps:
       # No LFS: clippy/test compile the code but never load the .glb assets, so the
       # pointer-file checkout is fine and faster. `persist-credentials: false` keeps
@@ -70,10 +68,12 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # `--locked` builds against the committed Cargo.lock, so CI is reproducible and
-      # fails loudly if the lockfile drifts from Cargo.toml.
+      # `--profile ci` compiles dependencies at opt-level 0 (see Cargo.toml) — far
+      # faster to build cold and a smaller cache than the dev profile's opt-level-3
+      # deps. `--locked` builds against the committed Cargo.lock, so CI is reproducible
+      # and fails loudly if the lockfile drifts from Cargo.toml.
       - name: Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --profile ci --locked --all-targets -- -D warnings
 
       - name: Tests
-        run: cargo test --locked
+        run: cargo test --profile ci --locked

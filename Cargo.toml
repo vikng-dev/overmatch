@@ -22,6 +22,18 @@ opt-level = 1
 [profile.dev.package."*"]
 opt-level = 3
 
+# CI profile: clippy (type-check) + fast unit tests only, which gain nothing from
+# optimized dependencies. Inherit dev but drop every package back to opt-level 0 —
+# the dev profile's opt-level-3 deps are exactly what make a cold CI build slow (~25
+# min) and the rust-cache large (~1.5 GB). Used via `cargo {clippy,test} --profile ci`
+# in .github/workflows/ci.yml.
+[profile.ci]
+inherits = "dev"
+opt-level = 0
+
+[profile.ci.package."*"]
+opt-level = 0
+
 # Optimized for distribution: strip symbols and shrink code size. These slow
 # down compile time (full recompile + LTO), which is fine for release bundles.
 [profile.release]
