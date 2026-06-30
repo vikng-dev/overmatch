@@ -7,12 +7,11 @@ use avian3d::prelude::SpatialQuery;
 use bevy::ecs::lifecycle::Add;
 use bevy::prelude::*;
 
-use crate::ballistics::ComponentHealth;
 use crate::camera::GunnerCameraPlaced;
+use crate::damage::{Capability, ControlledTank};
 use crate::sight::in_third_person;
-use crate::damage::{Capability, CrewStation, Crewman, Dead, FunctionRole, TankCapabilities, TankVolumes, capability_available};
 use crate::state::GameplaySet;
-use crate::tank::{Gun, Hull, Muzzle, ServoCommand, Tank, Turret};
+use crate::tank::{Controlled, Gun, Hull, Muzzle, Rig, ServoCommand, Turret};
 use crate::world::ground_distance;
 
 /// Maximum engagement range; rays that hit nothing fall back to a point this far out.
@@ -110,14 +109,7 @@ fn aim(
     spatial: SpatialQuery,
     camera_query: Single<(&Camera, &GlobalTransform)>,
     window: Single<&Window>,
-    tank: Query<(Option<&TankVolumes>, Option<&TankCapabilities>), With<Tank>>,
-    volumes: Query<(
-        Option<&CrewStation>,
-        Option<&Crewman>,
-        Option<&Dead>,
-        Option<&FunctionRole>,
-        Option<&ComponentHealth>,
-    )>,
+    controlled: ControlledTank,
     hull: Query<&GlobalTransform, With<Hull>>,
     mut turret: Query<
         (&GlobalTransform, &mut ServoCommand, &mut AimPoint),
@@ -131,10 +123,11 @@ fn aim(
         return;
     }
 
-    let Ok((tank_volumes, tank_caps)) = tank.single() else {
+    // The controlled tank only — its rig handles address its own turret/gun/hull.
+    let Some(rig) = controlled.rig() else {
         return;
     };
-    if !capability_available(tank_volumes, tank_caps, Capability::Traverse, &volumes) {
+    if !controlled.available(Capability::Traverse) {
         return;
     }
 
@@ -147,19 +140,19 @@ fn aim(
     let point = ray.get_point(ground_distance(&spatial, ray, MAX_RANGE));
 
     // Computed in the hull's local frame so aim stays correct wherever the tank sits/turns.
-    let Ok(hull) = hull.single() else {
+    let Ok(hull) = hull.get(rig.hull) else {
         return;
     };
     let to_local = hull.affine().inverse();
 
     // Turret yaw + stash the committed point in hull-local space (rides with the hull).
-    if let Ok((turret_transform, mut command, mut aim_point)) = turret.single_mut() {
+    if let Ok((turret_transform, mut command, mut aim_point)) = turret.get_mut(rig.turret) {
         let dir = to_local.transform_vector3(point - turret_transform.translation());
         command.target = (-dir.x).atan2(-dir.z);
         aim_point.0 = Some(to_local.transform_point3(point));
     }
 
-    if let Ok((gun_transform, mut command)) = gun.single_mut() {
+    if let Ok((gun_transform, mut command)) = gun.get_mut(rig.gun) {
         let dir = to_local.transform_vector3(point - gun_transform.translation());
         let horizontal = (dir.x * dir.x + dir.z * dir.z).sqrt();
         command.target = dir.y.atan2(horizontal);
@@ -189,11 +182,15 @@ fn place_indicator(
 fn update_bore_indicator(
     spatial: SpatialQuery,
     camera_query: Single<(&Camera, &GlobalTransform)>,
+    controlled: Query<&Rig, With<Controlled>>,
     muzzle: Query<&GlobalTransform, With<Muzzle>>,
     mut indicator: Query<(&mut Node, &mut Visibility), With<BoreIndicator>>,
 ) {
     let (camera, cam_transform) = *camera_query;
-    let Ok(muzzle) = muzzle.single() else {
+    let Ok(rig) = controlled.single() else {
+        return;
+    };
+    let Ok(muzzle) = muzzle.get(rig.muzzle) else {
         return;
     };
     let Ok((mut node, mut visibility)) = indicator.single_mut() else {
@@ -217,6 +214,7 @@ fn update_bore_indicator(
 fn update_aim_indicator(
     mouse: Res<ButtonInput<MouseButton>>,
     camera_query: Single<(&Camera, &GlobalTransform)>,
+    controlled: Query<&Rig, With<Controlled>>,
     hull: Query<&GlobalTransform, With<Hull>>,
     aim_point: Query<&AimPoint, With<Turret>>,
     mut indicator: Query<(&mut Node, &mut Visibility), With<AimIndicator>>,
@@ -232,10 +230,14 @@ fn update_aim_indicator(
         return;
     }
 
-    let Ok(hull) = hull.single() else {
+    let Ok(rig) = controlled.single() else {
+        *visibility = Visibility::Hidden;
         return;
     };
-    let Ok(aim_point) = aim_point.single() else {
+    let Ok(hull) = hull.get(rig.hull) else {
+        return;
+    };
+    let Ok(aim_point) = aim_point.get(rig.turret) else {
         return;
     };
 

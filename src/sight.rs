@@ -12,11 +12,12 @@
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::prelude::*;
 
-use crate::ballistics::ComponentHealth;
 use crate::camera::GunnerCameraPlaced;
-use crate::damage::{Capability, CrewStation, Crewman, Dead, FunctionRole, TankCapabilities, TankVolumes, capability_available};
+use crate::damage::{Capability, ControlledTank};
 use crate::state::GameplaySet;
-use crate::tank::{Gun, Hull, ServoCommand, ServoState, Tank, Turret, shortest_angle};
+use crate::tank::{
+    Controlled, Gun, Hull, Rig, ServoCommand, ServoState, Tank, Turret, shortest_angle,
+};
 
 /// 88 mm muzzle velocity (m/s) — mirrors `shooting`'s muzzle speed; used for the superelevation
 /// solution. (The shells are gravity-only, so the flat-fire formula below is exact for them.)
@@ -178,6 +179,7 @@ fn update_intent_reticle(
     mode: Res<SightMode>,
     intent: Res<GunnerIntent>,
     camera: Single<(&Camera, &GlobalTransform)>,
+    controlled: Query<&Rig, With<Controlled>>,
     hull: Query<&GlobalTransform, With<Hull>>,
     mut reticle: Query<(&mut Node, &mut Visibility), With<IntentReticle>>,
 ) {
@@ -188,7 +190,11 @@ fn update_intent_reticle(
         *visibility = Visibility::Hidden;
         return;
     }
-    let Ok(hull) = hull.single() else {
+    let Ok(rig) = controlled.single() else {
+        *visibility = Visibility::Hidden;
+        return;
+    };
+    let Ok(hull) = hull.get(rig.hull) else {
         return;
     };
     let (camera, cam_transform) = *camera;
@@ -218,14 +224,7 @@ fn toggle_sight(
     mut mode: ResMut<SightMode>,
     mut intent: ResMut<GunnerIntent>,
     ranging: Res<Ranging>,
-    tank: Query<(Option<&TankVolumes>, Option<&TankCapabilities>), With<Tank>>,
-    volumes: Query<(
-        Option<&CrewStation>,
-        Option<&Crewman>,
-        Option<&Dead>,
-        Option<&FunctionRole>,
-        Option<&ComponentHealth>,
-    )>,
+    controlled: ControlledTank,
     turret: Query<&ServoState, (With<Turret>, Without<Gun>)>,
     gun: Query<&ServoState, (With<Gun>, Without<Turret>)>,
     mut tank_vis: Query<&mut Visibility, With<Tank>>,
@@ -233,31 +232,35 @@ fn toggle_sight(
     if !keys.just_pressed(KeyCode::ShiftLeft) {
         return;
     }
-    let Ok((tank_volumes, tank_caps)) = tank.single() else {
+    let (Some(tank), Some((turret_entity, gun_entity))) = (
+        controlled.entity(),
+        controlled.rig().map(|r| (r.turret, r.gun)),
+    ) else {
         return;
     };
     *mode = match *mode {
         SightMode::ThirdPerson => {
             // Only switch to gunner optic if the gunner is alive.
-            if !capability_available(tank_volumes, tank_caps, Capability::GunnerSight, &volumes) {
+            if !controlled.available(Capability::GunnerSight) {
                 return;
             }
-            if let (Ok(t), Ok(g)) = (turret.single(), gun.single()) {
+            if let (Ok(t), Ok(g)) = (turret.get(turret_entity), gun.get(gun_entity)) {
                 intent.yaw = t.current();
                 // Sight-line pitch = bore − superelevation; seeding the bore would re-elevate on top.
                 intent.pitch = g.current() - superelevation(ranging.range);
             }
-            if let Ok(mut v) = tank_vis.single_mut() {
+            // Hide only the controlled tank's mesh — the optic sits inside its mantlet.
+            if let Ok(mut v) = tank_vis.get_mut(tank) {
                 *v = Visibility::Hidden;
             }
             SightMode::Gunner
         }
         SightMode::Gunner => {
             // Only switch to third-person if the commander is alive.
-            if !capability_available(tank_volumes, tank_caps, Capability::CommanderView, &volumes) {
+            if !controlled.available(Capability::CommanderView) {
                 return;
             }
-            if let Ok(mut v) = tank_vis.single_mut() {
+            if let Ok(mut v) = tank_vis.get_mut(tank) {
                 *v = Visibility::Inherited;
             }
             SightMode::ThirdPerson
@@ -283,23 +286,16 @@ fn drive_gunner_aim(
     motion: Res<AccumulatedMouseMotion>,
     ranging: Res<Ranging>,
     mut intent: ResMut<GunnerIntent>,
-    tank: Query<(Option<&TankVolumes>, Option<&TankCapabilities>), With<Tank>>,
-    volumes: Query<(
-        Option<&CrewStation>,
-        Option<&Crewman>,
-        Option<&Dead>,
-        Option<&FunctionRole>,
-        Option<&ComponentHealth>,
-    )>,
+    controlled: ControlledTank,
     mut turret: Query<(&mut ServoCommand, &ServoState), (With<Turret>, Without<Gun>)>,
     mut gun: Query<(&mut ServoCommand, &ServoState), (With<Gun>, Without<Turret>)>,
 ) {
-    let Ok((tank_volumes, tank_caps)) = tank.single() else {
-        return;
-    };
-    if !capability_available(tank_volumes, tank_caps, Capability::Traverse, &volumes) {
+    if !controlled.available(Capability::Traverse) {
         return;
     }
+    let Some((turret_entity, gun_entity)) = controlled.rig().map(|r| (r.turret, r.gun)) else {
+        return;
+    };
 
     // Radians of commanded aim per mouse count. Low because the optic is magnified — a small angle
     // is a big screen move at the gunner FOV. (Future refinement: scale with the zoom FOV.)
@@ -313,10 +309,10 @@ fn drive_gunner_aim(
 
     let superelevation = superelevation(ranging.range);
 
-    let Ok((mut t_cmd, t_state)) = turret.single_mut() else {
+    let Ok((mut t_cmd, t_state)) = turret.get_mut(turret_entity) else {
         return;
     };
-    let Ok((mut g_cmd, g_state)) = gun.single_mut() else {
+    let Ok((mut g_cmd, g_state)) = gun.get_mut(gun_entity) else {
         return;
     };
 
@@ -347,35 +343,36 @@ fn drive_gunner_aim(
 /// dead, the prompt says so (the tank is effectively dead — 0 living crew imminent).
 fn update_view_death_overlay(
     mode: Res<SightMode>,
-    tank: Query<(Option<&TankVolumes>, Option<&TankCapabilities>), With<Tank>>,
-    volumes: Query<(
-        Option<&CrewStation>,
-        Option<&Crewman>,
-        Option<&Dead>,
-        Option<&FunctionRole>,
-        Option<&ComponentHealth>,
-    )>,
+    controlled: ControlledTank,
     mut overlay: Query<(&mut Visibility, &mut Text), With<ViewDeathOverlay>>,
 ) {
-    let Ok((tank_volumes, tank_caps)) = tank.single() else {
+    if controlled.entity().is_none() {
         return;
-    };
+    }
     let Ok((mut vis, mut text)) = overlay.single_mut() else {
         return;
     };
 
     let (active_cap, other_cap, other_label) = match *mode {
-        SightMode::ThirdPerson => (Capability::CommanderView, Capability::GunnerSight, "gunner optic"),
-        SightMode::Gunner => (Capability::GunnerSight, Capability::CommanderView, "third-person"),
+        SightMode::ThirdPerson => (
+            Capability::CommanderView,
+            Capability::GunnerSight,
+            "gunner optic",
+        ),
+        SightMode::Gunner => (
+            Capability::GunnerSight,
+            Capability::CommanderView,
+            "third-person",
+        ),
     };
 
-    let active_available = capability_available(tank_volumes, tank_caps, active_cap, &volumes);
+    let active_available = controlled.available(active_cap);
     if active_available {
         *vis = Visibility::Hidden;
         return;
     }
 
-    let other_available = capability_available(tank_volumes, tank_caps, other_cap, &volumes);
+    let other_available = controlled.available(other_cap);
     *text = Text::new(if other_available {
         format!("Crewman down — [Lshift] for {other_label}")
     } else {

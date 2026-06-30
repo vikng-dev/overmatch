@@ -9,7 +9,7 @@ use bevy::prelude::*;
 
 use crate::camera::CameraFollow;
 use crate::driving::Suspension;
-use crate::tank::Tank;
+use crate::tank::{Controlled, Tank};
 
 /// How opaque the tank is in x-ray mode (0 = invisible, 1 = solid).
 const XRAY_ALPHA: f32 = 0.2;
@@ -103,7 +103,7 @@ struct XRay(bool);
 fn toggle_xray(
     keys: Res<ButtonInput<KeyCode>>,
     mut xray: ResMut<XRay>,
-    tank: Single<Entity, With<Tank>>,
+    tank: Single<Entity, (With<Tank>, With<Controlled>)>,
     children: Query<&Children>,
     mesh_mats: Query<&MeshMaterial3d<StandardMaterial>>,
     mut materials: ResMut<Assets<StandardMaterial>>,

@@ -17,6 +17,7 @@ use serde::Deserialize;
 use crate::Layer;
 use crate::ballistics::{ArmorVolume, BallisticVolume, ComponentHealth, ComponentVolume};
 use crate::damage::{Ammo, Crewman, TankCapabilities, VolumeOf};
+use crate::sight::SightMode;
 use crate::spec::{TankSpec, TankSpecHandle};
 use crate::state::{AppState, GameplaySet};
 
@@ -35,6 +36,29 @@ pub struct Hull;
 /// are applied here; debug x-ray walks its descendants.
 #[derive(Component)]
 pub struct Tank;
+
+/// Marks the one tank the player is currently commanding. Exactly one tank carries this at a time;
+/// the swap input ([`swap_controlled_tank`]) moves it. The *control* systems (drive input, aiming,
+/// cameras, shooting, gunner sight) scope to this marker so they act on the player's tank alone;
+/// everything tank-agnostic (suspension support, ballistics, damage) ignores it and runs for every
+/// tank. `Controlled` answers *which* tank; [`Rig`] answers *where its parts are*.
+#[derive(Component)]
+pub struct Controlled;
+
+/// Resolved handles to a tank's rig nodes, captured once when the rig binds ([`on_tank_ready`]).
+/// Lets a control system reach *this* tank's specific gun/turret/muzzle by entity (`rig.gun`)
+/// instead of `query.single()`, which silently assumed a single tank in the world. Lives on the
+/// root, so it shares the tank's lifetime — the handles can't dangle (the parts despawn with the
+/// root they're parented to). Captured from the same descendant walk that already enforces the rig
+/// contract, so every field is guaranteed present by the time `Rig` is inserted.
+#[derive(Component)]
+pub struct Rig {
+    pub hull: Entity,
+    pub turret: Entity,
+    pub gun: Entity,
+    pub muzzle: Entity,
+    pub barrel: Entity,
+}
 
 #[derive(Component)]
 pub struct Muzzle;
@@ -177,6 +201,14 @@ pub fn plugin(app: &mut App) {
             drive_servos
                 .run_if(in_state(AppState::Playing))
                 .after(GameplaySet),
+        )
+        // The crew/vehicle swap input. Runs before `GameplaySet` so the control systems this frame
+        // already see the new `Controlled` tank.
+        .add_systems(
+            Update,
+            swap_controlled_tank
+                .run_if(in_state(AppState::Playing))
+                .before(GameplaySet),
         );
 }
 
@@ -205,21 +237,26 @@ fn spawn_tank_when_loaded(
     };
     match asset_server.load_state(&pending.0) {
         LoadState::Loaded => {
-            commands
-                .spawn((
-                    WorldAssetRoot(
-                        asset_server
-                            .load(GltfAssetLabel::Scene(0).from_asset("tiger_1/tiger_1.glb")),
-                    ),
-                    TankSpecHandle(pending.0.clone()),
-                    Transform::from_xyz(10.0, 2.0, 5.0).with_rotation(Quat::from_rotation_z(0.7)),
-                    Name::new("Tiger I"),
-                    // The hull is a dynamic rigid body — Avian owns its Transform (ADR-0005); its
-                    // collider comes from the model's `*_Collider` proxy, bound in on_tank_ready.
-                    Tank,
-                    RigidBody::Dynamic,
-                ))
-                .observe(on_tank_ready);
+            // Two tanks, both player-owned: `Tab` swaps which one is `Controlled`. The first spawns
+            // controlled; the second sits until you swap into it (design: the antagonist/auto-aim
+            // lands in Chunk 2). Both are dynamic bodies — per-tank suspension holds each up; only
+            // the controlled one takes drive input.
+            spawn_tank(
+                &mut commands,
+                &asset_server,
+                &pending.0,
+                Transform::from_xyz(10.0, 2.0, 5.0).with_rotation(Quat::from_rotation_z(0.7)),
+                "Tiger I (A)",
+                true,
+            );
+            spawn_tank(
+                &mut commands,
+                &asset_server,
+                &pending.0,
+                Transform::from_xyz(10.0, 2.0, -12.0),
+                "Tiger I (B)",
+                false,
+            );
             commands.remove_resource::<PendingTankSpec>();
             next.set(AppState::Playing);
         }
@@ -228,6 +265,72 @@ fn spawn_tank_when_loaded(
             panic!("required tank spec sheet failed to load: {err}");
         }
         _ => {}
+    }
+}
+
+/// Spawn one Tiger at `transform`, binding its rig via [`on_tank_ready`]. `controlled` seeds the
+/// player's starting tank with the [`Controlled`] marker. The hull is a dynamic rigid body — Avian
+/// owns its Transform (ADR-0005); its collider comes from the model's `*_Collider` proxy, bound in
+/// `on_tank_ready`.
+fn spawn_tank(
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    spec: &Handle<TankSpec>,
+    transform: Transform,
+    name: &str,
+    controlled: bool,
+) {
+    let mut tank = commands.spawn((
+        WorldAssetRoot(
+            asset_server.load(GltfAssetLabel::Scene(0).from_asset("tiger_1/tiger_1.glb")),
+        ),
+        TankSpecHandle(spec.clone()),
+        transform,
+        Name::new(name.to_string()),
+        Tank,
+        RigidBody::Dynamic,
+    ));
+    tank.observe(on_tank_ready);
+    if controlled {
+        tank.insert(Controlled);
+    }
+}
+
+/// `Tab` hands control to the next tank: it moves the [`Controlled`] marker, and resets the view to
+/// third-person with both tanks visible — so you never inherit the gunner optic's tank-hide on the
+/// tank you just stepped out of. With two tanks this is a toggle; it generalizes to cycling N in
+/// spawn order.
+fn swap_controlled_tank(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut commands: Commands,
+    tanks: Query<Entity, With<Tank>>,
+    controlled: Query<Entity, With<Controlled>>,
+    mut mode: ResMut<SightMode>,
+    mut visibility: Query<&mut Visibility, With<Tank>>,
+) {
+    if !keys.just_pressed(KeyCode::Tab) {
+        return;
+    }
+    let Ok(current) = controlled.single() else {
+        return;
+    };
+    let all: Vec<Entity> = tanks.iter().collect();
+    if all.len() < 2 {
+        return;
+    }
+    let idx = all.iter().position(|&e| e == current).unwrap_or(0);
+    let next = all[(idx + 1) % all.len()];
+    if next == current {
+        return;
+    }
+    commands.entity(current).remove::<Controlled>();
+    commands.entity(next).insert(Controlled);
+
+    // Drop back to third-person and reveal both tanks: the optic hides the controlled tank's mesh,
+    // so without this the tank you just left would stay invisible.
+    *mode = SightMode::ThirdPerson;
+    for mut v in &mut visibility {
+        *v = Visibility::Inherited;
     }
 }
 
@@ -280,18 +383,26 @@ pub fn on_tank_ready(
     let mut left_wheels = 0u32;
     let mut right_wheels = 0u32;
     let mut colliders = 0u32;
+    // Rig-node handles captured for this tank's `Rig` (built after the contract check below).
+    let mut hull_node = None;
+    let mut turret_node = None;
+    let mut gun_node = None;
+    let mut muzzle_node = None;
+    let mut barrel_node = None;
 
     for entity in children.iter_descendants(ready.entity) {
         // Most descendants are unnamed mesh nodes — skip them quietly.
         let Ok(name) = names.get(entity) else {
             continue;
         };
+        let id = entity;
         let mut entity = commands.entity(entity);
         match name.as_str() {
             // Servos: marker + command/state slots + the per-variant `ServoSpec` (axis, speeds,
             // travel) from the spec sheet (ADR-0010) — never authored in code.
             "Turret" => {
                 found.insert("Turret");
+                turret_node = Some(id);
                 entity.insert((
                     Turret,
                     ServoCommand::default(),
@@ -301,6 +412,7 @@ pub fn on_tank_ready(
             }
             "Gun" => {
                 found.insert("Gun");
+                gun_node = Some(id);
                 entity.insert((
                     Gun,
                     ServoCommand::default(),
@@ -310,14 +422,17 @@ pub fn on_tank_ready(
             }
             "Hull" => {
                 found.insert("Hull");
+                hull_node = Some(id);
                 entity.insert(Hull);
             }
             "Muzzle" => {
                 found.insert("Muzzle");
+                muzzle_node = Some(id);
                 entity.insert(Muzzle);
             }
             "Gun_Barrel" => {
                 found.insert("Gun_Barrel");
+                barrel_node = Some(id);
                 entity.insert(GunBarrel);
             }
             "Center_Of_Mass" => {
@@ -456,6 +571,16 @@ pub fn on_tank_ready(
         missing.is_empty(),
         "tank model is missing required rig nodes: {missing:?}"
     );
+
+    // The contract check above guarantees all five rig nodes were found, so these unwraps can't
+    // fire. Record them so control systems can address *this* tank's parts by entity (`rig.gun`).
+    commands.entity(ready.entity).insert(Rig {
+        hull: hull_node.unwrap(),
+        turret: turret_node.unwrap(),
+        gun: gun_node.unwrap(),
+        muzzle: muzzle_node.unwrap(),
+        barrel: barrel_node.unwrap(),
+    });
 
     // The spec's `volumes` map is the model↔code contract: every declared volume must exist in the
     // model (a missing one is an authoring bug — fatal like a missing rig node).

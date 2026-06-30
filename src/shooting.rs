@@ -6,11 +6,10 @@
 use bevy::ecs::lifecycle::Add;
 use bevy::prelude::*;
 
-use crate::ballistics::ComponentHealth;
 use crate::ballistics::FireShell;
-use crate::damage::{Capability, CrewStation, Crewman, Dead, FunctionRole, TankCapabilities, TankVolumes, capability_available};
+use crate::damage::{Capability, ControlledTank};
 use crate::state::GameplaySet;
-use crate::tank::{Gun, GunBarrel, Muzzle, Tank};
+use crate::tank::{Gun, GunBarrel, Muzzle};
 
 /// Muzzle velocity of the 88mm gun (m/s). The world is in meters, so this is literal.
 const MUZZLE_SPEED: f32 = 773.0;
@@ -49,10 +48,7 @@ pub fn plugin(app: &mut App) {
     // attach_recoil + attach_reload react to rig binding (observers), so they stay out of the set.
     app.add_observer(attach_recoil)
         .add_observer(attach_reload)
-        .add_systems(
-            Update,
-            (tick_reload, fire).chain().in_set(GameplaySet),
-        )
+        .add_systems(Update, (tick_reload, fire).chain().in_set(GameplaySet))
         .add_systems(FixedUpdate, apply_recoil.in_set(GameplaySet));
 }
 
@@ -71,7 +67,9 @@ fn attach_recoil(add: On<Add, GunBarrel>, barrels: Query<&Transform>, mut comman
 
 /// Attach `Reload` the moment the rig binds `Gun`. Starts ready (0 = loaded).
 fn attach_reload(add: On<Add, Gun>, mut commands: Commands) {
-    commands.entity(add.entity).insert(Reload { remaining: 0.0 });
+    commands
+        .entity(add.entity)
+        .insert(Reload { remaining: 0.0 });
 }
 
 /// Tick the reload timer down — but only while the Load capability is available (Loader staffed +
@@ -79,57 +77,42 @@ fn attach_reload(add: On<Add, Gun>, mut commands: Commands) {
 /// Loader (slice 2) would resume it.
 fn tick_reload(
     time: Res<Time>,
-    tank: Query<(Option<&TankVolumes>, Option<&TankCapabilities>), With<Tank>>,
-    volumes: Query<(
-        Option<&CrewStation>,
-        Option<&Crewman>,
-        Option<&Dead>,
-        Option<&FunctionRole>,
-        Option<&ComponentHealth>,
-    )>,
+    controlled: ControlledTank,
     mut gun: Query<&mut Reload, With<Gun>>,
 ) {
-    let Ok((tank_volumes, tank_caps)) = tank.single() else {
+    let Some(gun_entity) = controlled.rig().map(|rig| rig.gun) else {
         return;
     };
-    let Ok(mut reload) = gun.single_mut() else {
+    let Ok(mut reload) = gun.get_mut(gun_entity) else {
         return;
     };
-    if reload.remaining > 0.0
-        && capability_available(tank_volumes, tank_caps, Capability::Load, &volumes)
-    {
+    if reload.remaining > 0.0 && controlled.available(Capability::Load) {
         reload.remaining = (reload.remaining - time.delta_secs()).max(0.0);
     }
 }
 
 fn fire(
     mouse: Res<ButtonInput<MouseButton>>,
-    tank: Query<(Option<&TankVolumes>, Option<&TankCapabilities>), With<Tank>>,
-    volumes: Query<(
-        Option<&CrewStation>,
-        Option<&Crewman>,
-        Option<&Dead>,
-        Option<&FunctionRole>,
-        Option<&ComponentHealth>,
-    )>,
+    controlled: ControlledTank,
     muzzle: Query<&GlobalTransform, With<Muzzle>>,
     mut gun: Query<&mut Reload, With<Gun>>,
     mut barrel: Query<&mut Recoil>,
     mut commands: Commands,
 ) {
-    let Ok((tank_volumes, tank_caps)) = tank.single() else {
+    let Some(rig) = controlled.rig() else {
         return;
     };
-    let Ok(mut reload) = gun.single_mut() else {
+    let (gun_entity, muzzle_entity, barrel_entity) = (rig.gun, rig.muzzle, rig.barrel);
+    let Ok(mut reload) = gun.get_mut(gun_entity) else {
         return;
     };
     if reload.remaining > 0.0 || !mouse.just_pressed(MouseButton::Left) {
         return;
     }
-    let Ok(muzzle) = muzzle.single() else {
+    let Ok(muzzle) = muzzle.get(muzzle_entity) else {
         return;
     };
-    if !capability_available(tank_volumes, tank_caps, Capability::Fire, &volumes) {
+    if !controlled.available(Capability::Fire) {
         return;
     }
 
@@ -143,7 +126,7 @@ fn fire(
     });
 
     // Kick the barrel back; apply_recoil springs it home.
-    if let Ok(mut recoil) = barrel.single_mut() {
+    if let Ok(mut recoil) = barrel.get_mut(barrel_entity) {
         recoil.velocity += RECOIL_KICK;
     }
     reload.remaining = RELOAD_SECS;

@@ -13,12 +13,14 @@ use avian3d::prelude::{
     AngularInertia, AngularVelocity, LinearVelocity, Mass, NoAutoAngularInertia, NoAutoMass,
     RigidBody,
 };
+use bevy::ecs::query::QueryData;
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use serde::Deserialize;
 
 use crate::ballistics::ComponentHealth;
 use crate::state::GameplaySet;
-use crate::tank::{ServoCommand, ServoSpec, ServoState, Turret};
+use crate::tank::{Controlled, Rig, ServoCommand, ServoSpec, ServoState, Turret};
 
 /// Semantic ownership: a ballistic volume belongs to a tank for gameplay aggregation. This is
 /// separate from `ChildOf`, which remains the model/transform hierarchy.
@@ -316,6 +318,20 @@ fn place_occupant(
     }
 }
 
+/// The per-volume facets the capability system reads off each tank volume — a *named* form of the
+/// 5-`Option` query that otherwise repeats verbatim across every control system. A volume carries
+/// whatever subset applies: a crew seat has `crew` (+ `crewman`, maybe `dead`, `health`); a module
+/// has `function` + `health`. Use it as `Query<VolumeFacets>`; `.get(e)` yields a struct with these
+/// named fields.
+#[derive(QueryData)]
+pub struct VolumeFacets {
+    pub crew: Option<&'static CrewStation>,
+    pub crewman: Option<&'static Crewman>,
+    pub dead: Option<&'static Dead>,
+    pub function: Option<&'static FunctionRole>,
+    pub health: Option<&'static ComponentHealth>,
+}
+
 /// How well this capability is currently served on this tank, ∈ [0, 1] (0 = unavailable, 1 = full)
 /// — the *effectiveness* (design §7b). Resolves each [`Part`]'s live quality (living crew → 1.0,
 /// intact module → 1.0; backfill competence and graded damage layer in later), then combines via
@@ -325,13 +341,7 @@ pub fn capability_effectiveness(
     tank_volumes: Option<&TankVolumes>,
     tank_caps: Option<&TankCapabilities>,
     capability: Capability,
-    volumes: &Query<(
-        Option<&CrewStation>,
-        Option<&Crewman>,
-        Option<&Dead>,
-        Option<&FunctionRole>,
-        Option<&ComponentHealth>,
-    )>,
+    volumes: &Query<VolumeFacets>,
 ) -> f32 {
     let (Some(tank_volumes), Some(tank_caps)) = (tank_volumes, tank_caps) else {
         return 0.0;
@@ -345,21 +355,21 @@ pub fn capability_effectiveness(
     // (e.g. two volumes of one station) take the best.
     let mut quality: std::collections::HashMap<Part, f32> = std::collections::HashMap::new();
     for volume in tank_volumes.iter() {
-        let Ok((crew, crewman, dead, function, hp)) = volumes.get(volume) else {
+        let Ok(facets) = volumes.get(volume) else {
             continue;
         };
         // A living crew seat supplies its role at the occupant's competence (native 1.0 / foreign
         // degraded). `home` defaults to the seat when no occupant facet is present.
-        if let (Some(role), None) = (crew, dead) {
-            let home = crewman.map(|c| c.home).unwrap_or(*role);
+        if let (Some(role), None) = (facets.crew, facets.dead) {
+            let home = facets.crewman.map(|c| c.home).unwrap_or(*role);
             let q = quality.entry(Part::from(*role)).or_insert(0.0);
             *q = q.max(competence(home, *role));
         }
-        if let (Some(func), Some(hp)) = (function, hp) {
-            if hp.current > 0.0 {
-                let q = quality.entry(Part::from(*func)).or_insert(0.0);
-                *q = q.max(1.0);
-            }
+        if let (Some(func), Some(hp)) = (facets.function, facets.health)
+            && hp.current > 0.0
+        {
+            let q = quality.entry(Part::from(*func)).or_insert(0.0);
+            *q = q.max(1.0);
         }
     }
 
@@ -369,10 +379,7 @@ pub fn capability_effectiveness(
 /// The pure combine core (design §7b), split out so it is testable without a `World`:
 /// `member = coeff × Π(part qualities)`; `group = Single part / Pool capped-sum / Backup max`;
 /// `capability = min across groups`. A part absent from `quality` scores 0.
-pub fn evaluate(
-    requirement: &Requirement,
-    quality: &std::collections::HashMap<Part, f32>,
-) -> f32 {
+pub fn evaluate(requirement: &Requirement, quality: &std::collections::HashMap<Part, f32>) -> f32 {
     let part_quality = |p: Part| quality.get(&p).copied().unwrap_or(0.0);
     let member_quality =
         |(coeff, parts): &Member| parts.iter().fold(*coeff, |q, p| q * part_quality(*p));
@@ -397,15 +404,57 @@ pub fn capability_available(
     tank_volumes: Option<&TankVolumes>,
     tank_caps: Option<&TankCapabilities>,
     capability: Capability,
-    volumes: &Query<(
-        Option<&CrewStation>,
-        Option<&Crewman>,
-        Option<&Dead>,
-        Option<&FunctionRole>,
-        Option<&ComponentHealth>,
-    )>,
+    volumes: &Query<VolumeFacets>,
 ) -> bool {
     capability_effectiveness(tank_volumes, tank_caps, capability, volumes) > 0.0
+}
+
+/// The player's tank, bundled for the control systems (drive input, aiming, sight, shooting). It
+/// folds together the three things those systems always reach for as a unit — *which* tank is
+/// controlled, *where its parts are* ([`Rig`]), and *what it can still do* (capabilities) — so a
+/// system takes one `ControlledTank` param instead of repeating a controlled-tank query, a
+/// [`VolumeFacets`] query, and a `capability_available(..)` call. Scoped to the single [`Controlled`]
+/// tank; per-tank consumers ([`apply_drive`](crate::driving), the HUD) keep using [`VolumeFacets`]
+/// directly since they iterate every tank.
+#[derive(SystemParam)]
+pub struct ControlledTank<'w, 's> {
+    tank: Query<
+        'w,
+        's,
+        (
+            Entity,
+            &'static Rig,
+            Option<&'static TankVolumes>,
+            Option<&'static TankCapabilities>,
+        ),
+        With<Controlled>,
+    >,
+    volumes: Query<'w, 's, VolumeFacets>,
+}
+
+impl ControlledTank<'_, '_> {
+    /// The controlled tank's entity, or `None` if there isn't exactly one controlled tank.
+    pub fn entity(&self) -> Option<Entity> {
+        self.tank.single().ok().map(|(entity, ..)| entity)
+    }
+
+    /// The controlled tank's resolved rig-node handles (`rig.gun`, `rig.turret`, …), or `None`.
+    pub fn rig(&self) -> Option<&Rig> {
+        self.tank.single().ok().map(|(_, rig, ..)| rig)
+    }
+
+    /// Live effectiveness ∈ [0, 1] of `capability` on the controlled tank (0 when none is controlled).
+    pub fn effectiveness(&self, capability: Capability) -> f32 {
+        let Ok((_, _, tank_volumes, tank_caps)) = self.tank.single() else {
+            return 0.0;
+        };
+        capability_effectiveness(tank_volumes, tank_caps, capability, &self.volumes)
+    }
+
+    /// Whether `capability` is usable at all (effectiveness > 0) on the controlled tank.
+    pub fn available(&self, capability: Capability) -> bool {
+        self.effectiveness(capability) > 0.0
+    }
 }
 
 fn process_cookoffs(
@@ -521,7 +570,7 @@ fn mark_dead_tanks(
 
 #[cfg(test)]
 mod tests {
-    use super::{evaluate, GradedGroup, Group, Part};
+    use super::{GradedGroup, Group, Part, evaluate};
     use std::collections::HashMap;
 
     /// Build a part→quality map from `(part, quality)` pairs.
@@ -537,7 +586,11 @@ mod tests {
             Group::Single(Part::Breech),
             Group::Single(Part::GunBarrel),
         ];
-        let all = q(&[(Part::Gunner, 1.0), (Part::Breech, 1.0), (Part::GunBarrel, 1.0)]);
+        let all = q(&[
+            (Part::Gunner, 1.0),
+            (Part::Breech, 1.0),
+            (Part::GunBarrel, 1.0),
+        ]);
         assert_eq!(evaluate(&req, &all), 1.0);
         // Drop the breech → capability gone (min across groups).
         let no_breech = q(&[(Part::Gunner, 1.0), (Part::GunBarrel, 1.0)]);
@@ -551,7 +604,10 @@ mod tests {
             (0.5, vec![Part::Engine]),
             (0.5, vec![Part::Transmission]), // stand-in for a second engine part
         ]))];
-        assert_eq!(evaluate(&req, &q(&[(Part::Engine, 1.0), (Part::Transmission, 1.0)])), 1.0);
+        assert_eq!(
+            evaluate(&req, &q(&[(Part::Engine, 1.0), (Part::Transmission, 1.0)])),
+            1.0
+        );
         assert_eq!(evaluate(&req, &q(&[(Part::Engine, 1.0)])), 0.5);
         assert_eq!(evaluate(&req, &q(&[])), 0.0);
     }
@@ -586,13 +642,16 @@ mod tests {
     #[test]
     fn member_quality_multiplies_dependencies() {
         // A degraded part scales its member: coeff 1.0 × quality 0.6 = 0.6 (competence preview).
-        let req = vec![Group::Graded(GradedGroup::Backup(vec![(1.0, vec![Part::Loader])]))];
+        let req = vec![Group::Graded(GradedGroup::Backup(vec![(
+            1.0,
+            vec![Part::Loader],
+        )]))];
         assert!((evaluate(&req, &q(&[(Part::Loader, 0.6)])) - 0.6).abs() < 1e-6);
     }
 
     #[test]
     fn competence_is_native_or_flat_foreign() {
-        use super::{competence, CrewStation};
+        use super::{CrewStation, competence};
         // Native: a loader in the loader's seat is full.
         assert_eq!(competence(CrewStation::Loader, CrewStation::Loader), 1.0);
         // Foreign: a commander backfilling the loader's seat is degraded.

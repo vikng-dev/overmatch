@@ -6,9 +6,10 @@ use avian3d::prelude::SpatialQuery;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::prelude::*;
 
+use crate::hud::HudCamera;
 use crate::sight::{Ranging, in_gunner, in_third_person, superelevation};
 use crate::state::GameplaySet;
-use crate::tank::{Gun, Tank, Turret};
+use crate::tank::{Controlled, Gun, Rig, Tank};
 use crate::world::ground_distance;
 
 /// Zoom state on the camera entity. Scroll sets `target_zoom`; `zoom` eases toward it for a
@@ -69,13 +70,18 @@ pub fn plugin(app: &mut App) {
 /// Capture the turret's position in the tank root's local frame, once, after the rig binds.
 fn capture_turret_pivot(
     mut pivot: ResMut<TurretPivot>,
-    tank: Query<&GlobalTransform, With<Tank>>,
-    turret: Query<&GlobalTransform, With<Turret>>,
+    controlled: Query<(&GlobalTransform, &Rig), With<Controlled>>,
+    turrets: Query<&GlobalTransform>,
 ) {
     if pivot.0.is_some() {
         return;
     }
-    let (Ok(tank_transform), Ok(turret_transform)) = (tank.single(), turret.single()) else {
+    // Captured from the controlled tank's own turret. The Tigers are identical, so the offset holds
+    // across a swap; a future asymmetric pair would recompute this per controlled tank.
+    let Ok((tank_transform, rig)) = controlled.single() else {
+        return;
+    };
+    let Ok(turret_transform) = turrets.get(rig.turret) else {
         return;
     };
     pivot.0 = Some(
@@ -94,13 +100,15 @@ fn spawn_camera(mut commands: Commands) {
             zoom: 0.0,
             target_zoom: 0.0,
         },
+        // The HUD reprojects world-anchored labels through this camera.
+        HudCamera,
     ));
 }
 
 fn orbit_camera(
     camera: Single<(&mut Transform, &mut OrbitCamera, &mut Projection), With<Camera3d>>,
     spatial: SpatialQuery,
-    tank: Query<&Transform, (With<Tank>, Without<Camera3d>)>,
+    tank: Query<&Transform, (With<Tank>, With<Controlled>, Without<Camera3d>)>,
     pivot: Res<TurretPivot>,
     mouse_motion: Res<AccumulatedMouseMotion>,
     mouse_scroll: Res<AccumulatedMouseScroll>,
@@ -161,10 +169,14 @@ fn orbit_camera(
 /// feel). Narrow FOV for magnification.
 fn gunner_camera(
     camera: Single<(&mut Transform, &mut GlobalTransform, &mut Projection), With<Camera3d>>,
+    controlled: Query<&Rig, With<Controlled>>,
     gun: Query<&GlobalTransform, (With<Gun>, Without<Camera3d>)>,
     ranging: Res<Ranging>,
 ) {
-    let Ok(gun) = gun.single() else {
+    let Ok(rig) = controlled.single() else {
+        return;
+    };
+    let Ok(gun) = gun.get(rig.gun) else {
         return;
     };
     let (mut transform, mut global_transform, mut projection) = camera.into_inner();

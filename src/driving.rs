@@ -8,10 +8,11 @@ use bevy::ecs::lifecycle::Add;
 use bevy::prelude::*;
 use serde::Deserialize;
 
-use crate::ballistics::ComponentHealth;
-use crate::damage::{Capability, CrewStation, Crewman, Dead, FunctionRole, TankCapabilities, TankVolumes, capability_available};
+use crate::damage::{
+    Capability, TankCapabilities, TankVolumes, VolumeFacets, capability_available,
+};
 use crate::state::GameplaySet;
-use crate::tank::{CenterOfMassAnchor, Roadwheel, Tank, TrackSide};
+use crate::tank::{CenterOfMassAnchor, Controlled, Roadwheel, Tank, TrackSide};
 
 /// Coulomb coefficient: each wheel's total ground force is capped at MU × load (friction ellipse).
 /// Per-environment (the track-vs-ground surface pair), not per-tank — destined for the terrain
@@ -93,20 +94,28 @@ pub fn plugin(app: &mut App) {
 /// `Without<CenterOfMass>` filter retires it after the override is inserted.
 fn set_center_of_mass(
     mut commands: Commands,
-    tank: Query<(Entity, &GlobalTransform), (With<Tank>, Without<CenterOfMass>)>,
-    anchor: Query<&GlobalTransform, With<CenterOfMassAnchor>>,
+    tanks: Query<(Entity, &GlobalTransform), (With<Tank>, Without<CenterOfMass>)>,
+    children: Query<&Children>,
+    anchors: Query<&GlobalTransform, With<CenterOfMassAnchor>>,
 ) {
-    let Ok((entity, tank_transform)) = tank.single() else {
-        return;
-    };
-    let Ok(anchor) = anchor.single() else { return }; // empty not bound yet
+    // Per tank: find *its own* `Center_Of_Mass` anchor among its descendants (the rig hierarchy),
+    // so each body's COM comes from its own model. Runs once per tank — the `Without<CenterOfMass>`
+    // filter retires a tank after its override is inserted.
+    for (entity, tank_transform) in &tanks {
+        let Some(anchor) = children
+            .iter_descendants(entity)
+            .find_map(|d| anchors.get(d).ok())
+        else {
+            continue; // this tank's anchor empty not bound yet
+        };
 
-    // The anchor's position in the tank's local frame is exactly Avian's COM offset.
-    let local = tank_transform
-        .affine()
-        .inverse()
-        .transform_point3(anchor.translation());
-    commands.entity(entity).insert(CenterOfMass(local));
+        // The anchor's position in the tank's local frame is exactly Avian's COM offset.
+        let local = tank_transform
+            .affine()
+            .inverse()
+            .transform_point3(anchor.translation());
+        commands.entity(entity).insert(CenterOfMass(local));
+    }
 }
 
 /// Per-roadwheel suspension state. Written by `apply_suspension`; the contact point + load are
@@ -132,39 +141,46 @@ fn attach_suspension(add: On<Add, Roadwheel>, mut commands: Commands) {
 /// Damped-spring suspension: each grounded wheel pushes the hull up at its contact point, so
 /// ride height, pitch, roll, and weight transfer all emerge from the per-wheel springs.
 fn apply_suspension(
-    // The `&SuspensionParams` gates the whole system: no suspension until the spec is applied to
-    // the hull (ADR-0011 — no default spring). Wheels likewise lack a `RayCaster` until then.
-    mut body: Query<(Forces, &SuspensionParams), With<Tank>>,
+    // Runs for *every* tank — support is tank-agnostic (each body rides on its own wheels),
+    // unlike drive input which is scoped to the controlled tank. The `&SuspensionParams` gates a
+    // body in: no suspension until the spec is applied to the hull (ADR-0011 — no default spring).
+    // Wheels likewise lack a `RayCaster` until then.
+    mut bodies: Query<(Entity, Forces, &SuspensionParams), With<Tank>>,
+    children: Query<&Children>,
     mut wheels: Query<(&RayCaster, &RayHits, &mut Suspension), With<Roadwheel>>,
 ) {
-    let Ok((mut forces, params)) = body.single_mut() else {
-        return;
-    };
+    for (body, mut forces, params) in &mut bodies {
+        // Only this body's own roadwheels (its rig descendants) push on it — otherwise a second
+        // tank's wheel hits would load this hull.
+        for wheel in children.iter_descendants(body) {
+            let Ok((ray, hits, mut suspension)) = wheels.get_mut(wheel) else {
+                continue;
+            };
+            let Some(hit) = hits.iter_sorted().next() else {
+                *suspension = Suspension::default();
+                continue;
+            };
 
-    for (ray, hits, mut suspension) in &mut wheels {
-        let Some(hit) = hits.iter_sorted().next() else {
-            *suspension = Suspension::default();
-            continue;
-        };
+            let compression = params.rest_length - hit.distance;
+            if compression <= 0.0 {
+                *suspension = Suspension::default();
+                continue;
+            }
 
-        let compression = params.rest_length - hit.distance;
-        if compression <= 0.0 {
-            *suspension = Suspension::default();
-            continue;
+            let dir = Vec3::from(ray.global_direction());
+            let up = -dir;
+            let contact = ray.global_origin() + dir * hit.distance;
+
+            // Damped spring along the suspension axis. velocity_at_point gives the hull's speed at
+            // the contact; its component along `up` is the compression rate (negative while
+            // settling).
+            let spring_speed = forces.velocity_at_point(contact).dot(up);
+            let load = (params.stiffness * compression - params.damping * spring_speed).max(0.0);
+
+            forces.apply_force_at_point(up * load, contact);
+            suspension.contact = Some(contact);
+            suspension.load = load;
         }
-
-        let dir = Vec3::from(ray.global_direction());
-        let up = -dir;
-        let contact = ray.global_origin() + dir * hit.distance;
-
-        // Damped spring along the suspension axis. velocity_at_point gives the hull's speed at the
-        // contact; its component along `up` is the compression rate (negative while settling).
-        let spring_speed = forces.velocity_at_point(contact).dot(up);
-        let load = (params.stiffness * compression - params.damping * spring_speed).max(0.0);
-
-        forces.apply_force_at_point(up * load, contact);
-        suspension.contact = Some(contact);
-        suspension.load = load;
     }
 }
 
@@ -207,146 +223,155 @@ fn approach(current: f32, target: f32, step: f32) -> f32 {
 /// per-contact forces; nothing scripts the turn.
 fn apply_drive(
     input: Res<DriveInput>,
-    drivetrain: Option<Single<&Drivetrain>>,
-    mut body: Query<
+    mut bodies: Query<
         (
             Entity,
             &GlobalTransform,
             Forces,
+            &Drivetrain,
             Option<&TankVolumes>,
             Option<&TankCapabilities>,
+            Has<Controlled>,
         ),
         With<Tank>,
     >,
-    volumes: Query<(
-        Option<&CrewStation>,
-        Option<&Crewman>,
-        Option<&Dead>,
-        Option<&FunctionRole>,
-        Option<&ComponentHealth>,
-    )>,
+    children: Query<&Children>,
+    volumes: Query<VolumeFacets>,
     mut wheels: Query<(&Roadwheel, &mut Suspension)>,
 ) {
-    let Ok((_tank, tank_transform, mut forces, tank_volumes, tank_caps)) = body.single_mut()
-    else {
-        return;
-    };
-    if !capability_available(tank_volumes, tank_caps, Capability::Drive, &volumes) {
-        for (_, mut suspension) in &mut wheels {
-            suspension.drive_force = Vec3::ZERO;
-        }
-        return;
-    }
-
-    // `Drivetrain` is required per-variant data with no fallback (ADR-0010): we never guess stats.
-    // It's absent only in the startup frames before the spec applies (a failed load is fatal — see
-    // `report_failed_spec`), so apply no drive until then. Read by type — its rig slot is irrelevant.
-    let Some(drivetrain) = drivetrain else {
-        return;
-    };
-    let drivetrain = drivetrain.into_inner();
-
-    // Ground-plane drive basis from the hull orientation: forward flattened onto the ground,
-    // and right as forward rotated −90° about Y (avoids depending on a separate `right()`).
-    let forward: Vec3 = tank_transform.forward().into();
-    let forward = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
-    let right = Vec3::new(-forward.z, 0.0, forward.x);
-
-    for (wheel, mut suspension) in &mut wheels {
-        let (Some(contact), load) = (suspension.contact, suspension.load) else {
-            continue;
-        };
-        if load <= 0.0 {
-            suspension.drive_force = Vec3::ZERO;
-            suspension.anchor = None;
+    // Per tank. `Drivetrain` is required per-variant data with no fallback (ADR-0010): we never
+    // guess stats. It's absent only in the startup frames before the spec applies (a failed load is
+    // fatal — see `report_failed_spec`), so a tank with no `Drivetrain` is simply not driven yet.
+    for (body, tank_transform, mut forces, drivetrain, tank_volumes, tank_caps, controlled) in
+        &mut bodies
+    {
+        // Drive input is the one player-specific part: only the controlled tank reads the live
+        // throttle/steer. A drive-disabled tank parks (no hold either, like before); every other
+        // tank gets zero command, so it holds in place via the brush anchor rather than driving off.
+        if !capability_available(tank_volumes, tank_caps, Capability::Drive, &volumes) {
+            for wheel in children.iter_descendants(body) {
+                if let Ok((_, mut suspension)) = wheels.get_mut(wheel) {
+                    suspension.drive_force = Vec3::ZERO;
+                }
+            }
             continue;
         }
-
-        // Additive differential: D adds to the left track and subtracts from the right, so steer
-        // yaws the nose the same way regardless of throttle, and a pure steer pivots in place.
-        let command = match wheel.side {
-            TrackSide::Left => input.throttle + input.steer,
-            TrackSide::Right => input.throttle - input.steer,
-        }
-        .clamp(-1.0, 1.0);
-        let driving = command.abs() > COMMAND_DEADBAND;
-
-        let velocity = forces.velocity_at_point(contact);
-        let v_fwd = velocity.dot(forward);
-        let v_lat = velocity.dot(right);
-
-        // Static↔kinetic gate: below the stick speed the contact grips (plant an anchor and hold);
-        // above it, it slips and friction is the kinetic skid / coast-down model.
-        let gripping = v_fwd.hypot(v_lat) < STICK_SPEED;
-        if !gripping {
-            suspension.anchor = None;
-        } else if suspension.anchor.is_none() {
-            suspension.anchor = Some(contact);
-        }
-
-        // Friction ellipse: tracks grip hard fore-aft (full μ·load) but skid sideways at the lower
-        // turning-resistance coefficient μ_t = ratio·μ (Wong/Merritt firm-ground skid-steer). The
-        // lateral semi-axis is what lets a heavy tank pivot — an isotropic circle nearly cancels the
-        // steer drive.
-        let grip = MU * load;
-        let grip_lat = grip * LATERAL_GRIP_RATIO;
-
-        // Slip from the planted anchor, split into the ground-plane axes.
-        let (mut d_fwd, mut d_lat) = match suspension.anchor {
-            Some(anchor) => ((contact - anchor).dot(forward), (contact - anchor).dot(right)),
-            None => (0.0, 0.0),
+        let (throttle, steer) = if controlled {
+            (input.throttle, input.steer)
+        } else {
+            (0.0, 0.0)
         };
 
-        // Bristle saturation (LuGre steady-state deflection) on the ellipse: a brush bristle stretches
-        // only to its slip point — d_fwd to grip/k, d_lat to grip_lat/k. Past the ellipse the bristle
-        // *trails* the contact at that fixed deflection (a smooth Coulomb slide) instead of snapping
-        // back to zero, which is what removes the low-speed stick-slip limit cycle.
-        if suspension.anchor.is_some() {
-            let a_fwd = grip / drivetrain.brush_stiffness;
-            let a_lat = grip_lat / drivetrain.brush_stiffness;
-            let e = (d_fwd / a_fwd).powi(2) + (d_lat / a_lat).powi(2);
+        // Ground-plane drive basis from the hull orientation: forward flattened onto the ground,
+        // and right as forward rotated −90° about Y (avoids depending on a separate `right()`).
+        let forward: Vec3 = tank_transform.forward().into();
+        let forward = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
+        let right = Vec3::new(-forward.z, 0.0, forward.x);
+
+        // Only this tank's own roadwheels (its rig descendants) — otherwise the other tank's wheels
+        // would take this tank's drive.
+        for wheel_entity in children.iter_descendants(body) {
+            let Ok((wheel, mut suspension)) = wheels.get_mut(wheel_entity) else {
+                continue;
+            };
+            let (Some(contact), load) = (suspension.contact, suspension.load) else {
+                continue;
+            };
+            if load <= 0.0 {
+                suspension.drive_force = Vec3::ZERO;
+                suspension.anchor = None;
+                continue;
+            }
+
+            // Additive differential: D adds to the left track and subtracts from the right, so steer
+            // yaws the nose the same way regardless of throttle, and a pure steer pivots in place.
+            let command = match wheel.side {
+                TrackSide::Left => throttle + steer,
+                TrackSide::Right => throttle - steer,
+            }
+            .clamp(-1.0, 1.0);
+            let driving = command.abs() > COMMAND_DEADBAND;
+
+            let velocity = forces.velocity_at_point(contact);
+            let v_fwd = velocity.dot(forward);
+            let v_lat = velocity.dot(right);
+
+            // Static↔kinetic gate: below the stick speed the contact grips (plant an anchor and
+            // hold); above it, it slips and friction is the kinetic skid / coast-down model.
+            let gripping = v_fwd.hypot(v_lat) < STICK_SPEED;
+            if !gripping {
+                suspension.anchor = None;
+            } else if suspension.anchor.is_none() {
+                suspension.anchor = Some(contact);
+            }
+
+            // Friction ellipse: tracks grip hard fore-aft (full μ·load) but skid sideways at the
+            // lower turning-resistance coefficient μ_t = ratio·μ (Wong/Merritt firm-ground
+            // skid-steer). The lateral semi-axis is what lets a heavy tank pivot — an isotropic
+            // circle nearly cancels the steer drive.
+            let grip = MU * load;
+            let grip_lat = grip * LATERAL_GRIP_RATIO;
+
+            // Slip from the planted anchor, split into the ground-plane axes.
+            let (mut d_fwd, mut d_lat) = match suspension.anchor {
+                Some(anchor) => (
+                    (contact - anchor).dot(forward),
+                    (contact - anchor).dot(right),
+                ),
+                None => (0.0, 0.0),
+            };
+
+            // Bristle saturation (LuGre steady-state deflection) on the ellipse: a brush bristle
+            // stretches only to its slip point — d_fwd to grip/k, d_lat to grip_lat/k. Past the
+            // ellipse the bristle *trails* the contact at that fixed deflection (a smooth Coulomb
+            // slide) instead of snapping back to zero, which removes the low-speed stick-slip cycle.
+            if suspension.anchor.is_some() {
+                let a_fwd = grip / drivetrain.brush_stiffness;
+                let a_lat = grip_lat / drivetrain.brush_stiffness;
+                let e = (d_fwd / a_fwd).powi(2) + (d_lat / a_lat).powi(2);
+                if e > 1.0 {
+                    let s = e.sqrt().recip();
+                    d_fwd *= s;
+                    d_lat *= s;
+                    suspension.anchor = Some(contact - forward * d_fwd - right * d_lat);
+                }
+            }
+
+            // Longitudinal: thrust when commanded (bleeding the anchor's forward slip so the static
+            // spring doesn't fight the drive — the wheel "rolls"); else hold (static spring) or,
+            // while still rolling, the engine-brake / coast-down.
+            let f_fwd = if driving {
+                if let Some(anchor) = suspension.anchor {
+                    suspension.anchor = Some(anchor + forward * d_fwd);
+                }
+                command * drivetrain.max_thrust - drivetrain.rolling_resistance * v_fwd
+            } else if gripping {
+                -drivetrain.brush_stiffness * d_fwd - drivetrain.brush_damping * v_fwd
+            } else {
+                -drivetrain.rolling_resistance * v_fwd
+            };
+
+            // Lateral: static spring holds the tracks fixed at rest (kills sideways creep); kinetic
+            // stiff grip resists side-slip and yaw while moving (skid steer).
+            let f_lat = if gripping {
+                -drivetrain.brush_stiffness * d_lat - drivetrain.brush_damping * v_lat
+            } else {
+                -drivetrain.lateral_grip * v_lat
+            };
+
+            let mut force = forward * f_fwd + right * f_lat;
+
+            // Cap the tangential force on the friction ellipse (μ·load fore-aft, grip_lat sideways)
+            // by scaling the vector onto its boundary. The bounded bristle rarely overshoots, so
+            // this only trims the thrust+grip vector sum — and never resets the anchor (that snap is
+            // the stick-slip source).
+            let e = (f_fwd / grip).powi(2) + (f_lat / grip_lat).powi(2);
             if e > 1.0 {
-                let s = e.sqrt().recip();
-                d_fwd *= s;
-                d_lat *= s;
-                suspension.anchor = Some(contact - forward * d_fwd - right * d_lat);
+                force *= e.sqrt().recip();
             }
+
+            forces.apply_force_at_point(force, contact);
+            suspension.drive_force = force;
         }
-
-        // Longitudinal: thrust when commanded (bleeding the anchor's forward slip so the static
-        // spring doesn't fight the drive — the wheel "rolls"); else hold (static spring) or, while
-        // still rolling, the engine-brake / coast-down.
-        let f_fwd = if driving {
-            if let Some(anchor) = suspension.anchor {
-                suspension.anchor = Some(anchor + forward * d_fwd);
-            }
-            command * drivetrain.max_thrust - drivetrain.rolling_resistance * v_fwd
-        } else if gripping {
-            -drivetrain.brush_stiffness * d_fwd - drivetrain.brush_damping * v_fwd
-        } else {
-            -drivetrain.rolling_resistance * v_fwd
-        };
-
-        // Lateral: static spring holds the tracks fixed at rest (kills sideways creep); kinetic
-        // stiff grip resists side-slip and yaw while moving (skid steer).
-        let f_lat = if gripping {
-            -drivetrain.brush_stiffness * d_lat - drivetrain.brush_damping * v_lat
-        } else {
-            -drivetrain.lateral_grip * v_lat
-        };
-
-        let mut force = forward * f_fwd + right * f_lat;
-
-        // Cap the tangential force on the friction ellipse (μ·load fore-aft, grip_lat sideways) by
-        // scaling the vector onto its boundary. The bounded bristle rarely overshoots, so this only
-        // trims the thrust+grip vector sum — and never resets the anchor (that snap is the stick-slip
-        // source).
-        let e = (f_fwd / grip).powi(2) + (f_lat / grip_lat).powi(2);
-        if e > 1.0 {
-            force *= e.sqrt().recip();
-        }
-
-        forces.apply_force_at_point(force, contact);
-        suspension.drive_force = force;
     }
 }

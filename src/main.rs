@@ -27,10 +27,9 @@ fn asset_root() -> String {
             .parent()
             .and_then(|macos| macos.parent())
             .map(|contents| contents.join("Resources").join("assets"))
+            && resources.is_dir()
         {
-            if resources.is_dir() {
-                return resources.to_string_lossy().into_owned();
-            }
+            return resources.to_string_lossy().into_owned();
         }
     }
     "assets".to_string()

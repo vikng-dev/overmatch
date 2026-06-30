@@ -1,0 +1,75 @@
+name: CI
+
+# Fast feedback on every push to main and every PR: formatting, lints, and tests
+# must pass. Keeps the tree fmt-clean and clippy-green so drift can't reaccumulate
+# (the release workflow assumes a healthy tree).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Supersede in-flight runs on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: this job only reads the code, so drop the default token down to
+# read-only contents (GitHub/OpenSSF hardening guidance).
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Fast, dependency-free check: formatting is pure text analysis (no system libs, no
+  # compile), so it runs on its own runner in parallel with the slow job and a
+  # whitespace slip fails in seconds instead of behind a multi-minute Bevy build.
+  fmt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Formatting
+        run: cargo fmt --all --check
+
+  # The heavy job: lints + tests, which for Bevy means a real compile.
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # No LFS: clippy/test compile the code but never load the .glb assets, so the
+      # pointer-file checkout is fine and faster. `persist-credentials: false` keeps
+      # the checkout token out of the local git config (nothing here pushes).
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # Bevy needs these to compile on Linux (alsa/udev + windowing), same as the
+      # release build.
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libasound2-dev libudev-dev \
+            libwayland-dev libxkbcommon-dev libx11-dev
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `--locked` builds against the committed Cargo.lock, so CI is reproducible and
+      # fails loudly if the lockfile drifts from Cargo.toml.
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --locked

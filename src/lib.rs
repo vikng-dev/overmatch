@@ -4,6 +4,13 @@
 //! the runtime and runs the app. Each feature module owns its components, systems, and its
 //! own wiring (a `pub fn plugin(app: &mut App)`), so this list reads as a table of contents.
 
+// Two clippy lints fight Bevy's ECS paradigm and are allowed crate-wide (as Bevy's own codebase
+// does): `type_complexity` fires on ordinary multi-component query tuples, and `too_many_arguments`
+// on systems that legitimately need many params. We de-duplicate the genuinely-repeated query shapes
+// behind named `QueryData`/`SystemParam` (e.g. `damage::VolumeFacets`, `damage::ControlledTank`);
+// what remains is irreducible ECS shape, not a smell.
+#![allow(clippy::type_complexity, clippy::too_many_arguments)]
+
 use avian3d::prelude::{PhysicsInterpolationPlugin, PhysicsLayer, PhysicsPlugins};
 use bevy::prelude::*;
 
@@ -15,6 +22,9 @@ pub(crate) mod damage;
 #[cfg(debug_assertions)]
 mod debug;
 mod driving;
+/// The shared tank-state HUD (world-anchored capability/crew/damage readouts). Mounted by both
+/// `GamePlugin` and the sandbox; each tags its own world camera with `hud::HudCamera`.
+mod hud;
 /// The armor ballistics sandbox (`bin/armor_sandbox`). Public so the binary can mount it; not part
 /// of `GamePlugin`.
 pub mod sandbox;
@@ -67,14 +77,13 @@ impl Plugin for GamePlugin {
             ballistics::plugin,
             damage::plugin,
             shooting::plugin,
+            // The shared tank-state HUD — capability/crew/damage readouts floated over each tank.
+            hud::plugin,
         ));
 
         // Dev-only physics visualization (collider/ray wireframes) + debug toggles. Off in release
         // builds.
         #[cfg(debug_assertions)]
-        app.add_plugins((
-            avian3d::prelude::PhysicsDebugPlugin::default(),
-            debug::plugin,
-        ));
+        app.add_plugins((avian3d::prelude::PhysicsDebugPlugin, debug::plugin));
     }
 }
