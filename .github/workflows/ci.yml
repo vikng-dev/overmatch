@@ -46,12 +46,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      # No LFS: clippy/test compile the code but never load the .glb assets, so the
-      # pointer-file checkout is fine and faster. `persist-credentials: false` keeps
-      # the checkout token out of the local git config (nothing here pushes).
+      # Pull LFS: the spec-bind test (`tiger_1_spec_binds_to_model`) opens the real
+      # `.glb` at runtime to check node names against the RON, so a pointer-file
+      # checkout makes it panic on open. The LFS fetch runs during checkout using the
+      # job token; `persist-credentials: false` still keeps that token out of the local
+      # git config afterward (nothing here pushes).
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+          lfs: true
 
       - uses: dtolnay/rust-toolchain@stable
         with:
