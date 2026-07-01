@@ -39,6 +39,10 @@ mod sight;
 mod spec;
 mod state;
 mod tank;
+/// The track-model sandbox (`bin/track_sandbox`). Public so the binary can mount it; not part of
+/// `GamePlugin`. Self-contained: its own code-generated primitive rig + locomotion, for developing
+/// the continuous-track model in isolation.
+pub mod track_sandbox;
 mod world;
 
 /// Physics collision layers. Wheel suspension rays filter to `Terrain` only, so they ignore
