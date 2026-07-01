@@ -1,11 +1,20 @@
 # Design sketch: RON-authored rig contract & composable tank primitives
 
-**Status: PROVISIONAL — idea, not a decision.** Recorded 2026-06-26 so the design thinking
+**Status: SUPERSEDED (built 2026-06-30).** The decided parts graduated to
+[`0012-spec-driven-rig-binder`](../adr/0012-spec-driven-rig-binder.md) (iterate-the-spec binder,
+naming contract, bidirectional fail-fast) and
+[`0013-composable-rig-control`](../adr/0013-composable-rig-control.md) (servos ⊥ weapons ⊥ views,
+pure servos on one aim point, layered capability gates). This file is kept for the design *reasoning*
+(the seam analysis below), but the ADRs are now authoritative — and note one deliberate **deviation**:
+"axis-as-node" (§ below) was **rejected**; a servo's axis is derived from a RON-declared `role`, not
+from node orientation (see 0012, Considered options).
+
+---
+
+**Original status (PROVISIONAL — idea, not a decision).** Recorded 2026-06-26 so the design thinking
 isn't lost; **deliberately deferred** behind the single-player vertical slice. Expect parts of
 this to be wrong once we actually build it — we have exactly one tank (Tiger I) to reason from,
 and you can't design good primitives from one example. This is a starting hypothesis, not a spec.
-When/if built, the decided parts graduate to ADRs (refining 0002/0010/0011); this file is then
-superseded.
 
 Vocabulary from `.agents/skills/codebase-design` (seam, depth, leverage) is used deliberately.
 
@@ -64,7 +73,7 @@ Split each pivot into its own node and read the rotation axis from that node's *
 Unifies with recoil: the glossary already calls recoil "the bore-axis cousin of the Servo." A
 pivot's *rotation* axis and a slider's *translation* axis are both "the node's local axis" → one
 1-DOF-motor primitive, two flavours. Pivot/collider split (pivot = rotating frame, collider as
-its child) matches CONTEXT.md's "part layers compose on the part."
+its child) matches GLOSSARY.md's "part layers compose on the part."
 
 ## Validation: test the path that ships
 
@@ -88,14 +97,14 @@ parser tests a *different* name-resolution path than ships: it would pass while 
   control-layer work. The rig redesign should leave a clean seam for control to pick which parts
   it drives, and **defer** "who aims the second turret."
 
-## Provisional glossary terms (NOT yet in CONTEXT.md)
+## Provisional glossary terms (NOT yet in GLOSSARY.md)
 
-Parked here, not promoted — CONTEXT.md is glossary-for-the-built-model only. Promote on build.
+Parked here, not promoted — GLOSSARY.md is glossary-for-the-built-model only. Promote on build.
 
 - **Primitive** — a reusable rig building block with one behaviour (servo/recoil/suspension/drive
   station) that attaches to a tagged node.
 - **Part declaration** — a RON entry naming a model node and the primitive + data to bind to it.
-- **Rig contract (data-driven)** — refinement of CONTEXT.md's "rig contract": the set of part
+- **Rig contract (data-driven)** — refinement of GLOSSARY.md's "rig contract": the set of part
   declarations a tank's RON requires, checked against the model at load and in tests.
 
 ## First concrete step (the prerequisite — when the slice is done)

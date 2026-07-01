@@ -6,10 +6,12 @@ use avian3d::prelude::SpatialQuery;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::prelude::*;
 
+use crate::firecontrol::{RangeTable, Ranging};
 use crate::hud::HudCamera;
-use crate::sight::{Ranging, in_gunner, in_third_person, superelevation};
+use crate::sight::{in_gunner, in_third_person};
+use crate::spec::ViewKind;
 use crate::state::GameplaySet;
-use crate::tank::{Controlled, Gun, Rig, Tank};
+use crate::tank::{Controlled, Gun, Rig, Tank, TankViews};
 use crate::world::ground_distance;
 
 /// Zoom state on the camera entity. Scroll sets `target_zoom`; `zoom` eases toward it for a
@@ -92,6 +94,16 @@ fn capture_turret_pivot(
     );
 }
 
+/// The controlled tank's authored FOV for `kind`, or `fallback` before the rig binds.
+fn view_fov(views: &Query<&TankViews, With<Controlled>>, kind: ViewKind, fallback: f32) -> f32 {
+    views
+        .single()
+        .ok()
+        .and_then(|v| v.0.get(&kind))
+        .map(|config| config.fov)
+        .unwrap_or(fallback)
+}
+
 fn spawn_camera(mut commands: Commands) {
     commands.spawn((
         Camera3d::default(),
@@ -109,6 +121,7 @@ fn orbit_camera(
     camera: Single<(&mut Transform, &mut OrbitCamera, &mut Projection), With<Camera3d>>,
     spatial: SpatialQuery,
     tank: Query<&Transform, (With<Tank>, With<Controlled>, Without<Camera3d>)>,
+    views: Query<&TankViews, With<Controlled>>,
     pivot: Res<TurretPivot>,
     mouse_motion: Res<AccumulatedMouseMotion>,
     mouse_scroll: Res<AccumulatedMouseScroll>,
@@ -122,9 +135,9 @@ fn orbit_camera(
 
     let (mut transform, mut orbit, mut projection) = camera.into_inner();
 
-    // Restore the wide FOV when returning from the gunner optic (which narrows it).
+    // Restore the wide commander-view FOV when returning from the gunner optic (which narrows it).
     if let Projection::Perspective(p) = projection.as_mut() {
-        p.fov = std::f32::consts::FRAC_PI_4;
+        p.fov = view_fov(&views, ViewKind::Commander, std::f32::consts::FRAC_PI_4);
     }
     let (Some(turret_local), Ok(tank_transform)) = (pivot.0, tank.single()) else {
         return;
@@ -162,16 +175,19 @@ fn orbit_camera(
 
 /// Gunner optic (System B): lock the camera to the gun's line of sight. Parked at the **Gun node**
 /// (the elevation pivot / mantlet) — the coaxial sight's natural home — and oriented along the
-/// SIGHT LINE, the bore pitched DOWN by the current superelevation, so dialing range raises the
-/// barrel without tilting the view off-target. The tank is hidden in gunner view (`Visibility` on
-/// the root), so parking inside the mantlet clips no own geometry. The camera reads the gun's live
-/// pose, so it lags the player's intent at the turret's slew rate (the WT "view follows the gun"
-/// feel). Narrow FOV for magnification.
+/// **sight line**, the bore depressed by the current superelevation: the aim commit lobs the gun up
+/// by that angle for the dialed range, so depressing the view by the same holds the reticle on the
+/// target while the barrel rides above it (dial range → barrel rises, view stays on target). The tank
+/// is hidden in gunner view (`Visibility` on the root), so parking inside the mantlet clips no own
+/// geometry. The camera reads the gun's live pose, so it lags the player's intent at the turret's slew
+/// rate (the WT "view follows the gun" feel). Narrow FOV for magnification.
 fn gunner_camera(
     camera: Single<(&mut Transform, &mut GlobalTransform, &mut Projection), With<Camera3d>>,
     controlled: Query<&Rig, With<Controlled>>,
+    views: Query<&TankViews, With<Controlled>>,
     gun: Query<&GlobalTransform, (With<Gun>, Without<Camera3d>)>,
     ranging: Res<Ranging>,
+    tables: Query<&RangeTable>,
 ) {
     let Ok(rig) = controlled.single() else {
         return;
@@ -181,25 +197,27 @@ fn gunner_camera(
     };
     let (mut transform, mut global_transform, mut projection) = camera.into_inner();
 
-    const GUNNER_FOV: f32 = 0.12; // ~7° vertical → ~6× magnification vs the 45° default
-
+    // The optic's magnification is the gunner view's authored FOV (Tiger ~0.12 rad ≈ 6× vs the 45°
+    // commander view). Fallback covers the pre-bind frame before `TankViews` lands.
     if let Projection::Perspective(p) = projection.as_mut() {
-        p.fov = GUNNER_FOV;
+        p.fov = view_fov(&views, ViewKind::Gunner, 0.12);
     }
 
-    // The gun's propagated frame: bore = local −Z, hull-up = local +Y, right = local +X. The sight
-    // line is the bore pitched DOWN by superelevation about right; up stays hull-up (not world up —
-    // a hull-mounted sight rolls *with* the tank, so on a side-slope the view cants with it rather
-    // than drifting off the bore). Pitching about `right` keeps (sight_dir, right, up) orthonormal,
-    // so `look_to` is exact.
+    // The gun's propagated frame: bore = local −Z, right = local +X, hull-up = local +Y. The sight
+    // line is the bore depressed by the superelevation about the gun's right axis — exactly undoing
+    // the lob the aim commit applied, so the reticle holds the target while the barrel sits raised.
+    // Pitching about `right` keeps (sight_dir, right, up) orthonormal; up stays hull-up (not world up
+    // — a hull-mounted sight rolls *with* the tank rather than drifting off the bore on a side-slope).
+    let theta = tables
+        .get(rig.muzzle)
+        .map_or(0.0, |table| table.superelevation(ranging.range));
     let rot = gun.rotation();
     let bore = rot * Vec3::NEG_Z;
     let right = rot * Vec3::X;
     let up = rot * Vec3::Y;
-    let sight_dir = Quat::from_axis_angle(right, -superelevation(ranging.range)) * bore;
+    let sight_dir = Quat::from_axis_angle(right, -theta) * bore;
 
-    // Park at the pivot, look along the sight line. No bore-axis offset → no superelevation
-    // parallax (the camera sits exactly on the sight line, not 0.6 m off it along the barrel).
+    // Park at the pivot, look along the sight line.
     let pose = Transform::from_translation(gun.translation()).looking_to(sight_dir, up);
 
     // Write both: `Transform` for next frame's bookkeeping, `GlobalTransform` for *this* frame's

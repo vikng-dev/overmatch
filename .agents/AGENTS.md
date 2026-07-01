@@ -10,7 +10,7 @@ Five canonical triage roles, using the default label strings. See `.agents/docs/
 
 ### Domain docs
 
-Single-context: `.agents/CONTEXT.md` + `.agents/docs/adr/`. See `.agents/docs/domain.md`.
+Single-context: `.agents/GLOSSARY.md` + `.agents/docs/adr/`. See `.agents/docs/domain.md`.
 
 ### Playtest forks
 

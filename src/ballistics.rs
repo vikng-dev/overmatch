@@ -8,19 +8,45 @@
 //! The armor penetration march, ballistic volumes, and spall (design doc
 //! `.agents/docs/design/armor-penetration-and-damage.md`) grow off the `Impact` seam here.
 
-use avian3d::prelude::{LayerMask, SpatialQuery, SpatialQueryFilter};
+use avian3d::prelude::{Forces, LayerMask, SpatialQuery, SpatialQueryFilter, WriteRigidBodyForces};
 use bevy::prelude::*;
 
 use crate::Layer;
+use crate::damage::VolumeOf;
 use crate::state::GameplaySet;
 
 /// Gravity applied to shells each fixed tick (m/s²).
 const GRAVITY: Vec3 = Vec3::new(0.0, -9.81, 0.0);
-/// Lumped quadratic air-drag coefficient `k` (1/m): `dv/dt = −k·v²`, so the shell bleeds speed over
-/// range and its penetration `capability` (∝ vⁿ) falls with distance — a far shot that bounces can
-/// perforate up close. One AP value for now; the per-shell ballistic coefficient (which is what sets
-/// APCR-vs-APDS range falloff) joins the shell data later. Sandbox-tunable.
-const DRAG_K: f32 = 0.000_2;
+
+/// Lumped drag-form constant for the quadratic air-drag model `dv/dt = −k·v²`. The per-shell
+/// coefficient is `k = DRAG_FORM · caliber²/mass` (1/m): `caliber²/mass` is the shell's (inverse)
+/// sectional density, so a heavy-for-bore round (the 88) holds velocity while a light-for-bore one
+/// (the 7.9 mm coax) bleeds it. Calibrated so the 88 (0.088 m, 10.2 kg) keeps its hand-tuned
+/// k ≈ 2e-4 — which, from sectional density alone, makes the coax bleed ~7× faster with no per-weapon
+/// field. A per-shell form factor (shape: pointed AP vs APCR vs ball) joins the shell data later.
+/// Sandbox-tunable.
+const DRAG_FORM: f32 = 0.263;
+
+/// A shell's quadratic-drag coefficient `k` (1/m), from its (inverse) sectional density. Shared by
+/// the live shell and the fire-control range table so the aim solution and the actual flight bleed
+/// speed identically — penetration `capability` (∝ vⁿ) then falls with range for both.
+pub fn drag_k(caliber: f32, mass: f32) -> f32 {
+    DRAG_FORM * caliber * caliber / mass
+}
+
+/// One free-flight integration step: apply gravity, then quadratic drag, returning the new velocity.
+/// Drag is integrated analytically (`v ← v/(1 + k·v·dt)`, unconditionally stable, unlike explicit
+/// Euler at high `v·dt`). This is the shared flight kernel — the live shell march
+/// ([`integrate_projectiles`]) and the fire-control range table both step it, so a shell lands where
+/// the superelevation solution said it would. In-plate cost dwarfs drag, so this is free-flight only.
+pub fn freeflight_step(velocity: Vec3, drag_k: f32, dt: f32) -> Vec3 {
+    let v = velocity + GRAVITY * dt;
+    let speed = v.length();
+    if speed == 0.0 {
+        return v;
+    }
+    (v / speed) * (speed / (1.0 + drag_k * speed * dt))
+}
 
 /// Penetration capability: `pen = K · mass^Mₑ · speed^N` (reference-mm — the DeMarre shape, design
 /// doc §3). **Mass is the primary driver** (sectional density / kinetic energy), speed the secondary;
@@ -225,6 +251,8 @@ struct Projectile {
     velocity: Vec3,
     caliber: f32,
     mass: f32,
+    /// Quadratic-drag coefficient (1/m), from the shell's sectional density at spawn (see [`drag_k`]).
+    drag_k: f32,
 }
 
 /// The shell's flight path, accumulated one point per step — the data the sandbox's tracer gizmo
@@ -327,6 +355,17 @@ struct Impact {
     position: Vec3,
 }
 
+/// One crossing's share of a shell's momentum, handed to the struck volume's owning body:
+/// `impulse = m·(v_in − v_out)`, applied at the crossing's entry `point`. The `on_hit_impulse`
+/// observer applies it — so a hit *rocks* the tank in proportion to the momentum it actually
+/// absorbed (a shell that stops shoves it most; a clean overpenetration barely nudges it).
+#[derive(Event)]
+struct HitImpulse {
+    body: Entity,
+    impulse: Vec3,
+    point: Vec3,
+}
+
 /// Preloaded mesh+material for the debug impact marker, cloned per hit by `on_impact`.
 #[derive(Resource)]
 struct ImpactDebug {
@@ -343,6 +382,7 @@ pub fn plugin(app: &mut App) {
         .init_resource::<MarchMode>()
         .add_observer(on_fire_shell)
         .add_observer(on_impact)
+        .add_observer(on_hit_impulse)
         .add_systems(Startup, setup_assets)
         // The same march, integrated on whichever clock the mode selects: `Real` on the fixed
         // server step (`Res<Time>` is `Time<Fixed>` here), `Demo` per-frame on virtual time
@@ -382,6 +422,7 @@ fn on_fire_shell(fire: On<FireShell>, assets: Res<ProjectileAssets>, mut command
             velocity: fire.direction * fire.speed,
             caliber: fire.caliber,
             mass: fire.mass,
+            drag_k: drag_k(fire.caliber, fire.mass),
         },
         ShellPath {
             points: vec![fire.origin],
@@ -408,6 +449,7 @@ fn integrate_projectiles(
         &mut SpallMarks,
     )>,
     volumes: Query<&BallisticVolume>,
+    owners: Query<&VolumeOf>,
     mut health: Query<&mut ComponentHealth>,
     parents: Query<&ChildOf>,
     retain: Res<RetainSpentShells>,
@@ -454,18 +496,15 @@ fn integrate_projectiles(
     for (entity, mut transform, mut projectile, mut path, mut marks, mut readout, mut spall) in
         &mut projectiles
     {
-        // Semi-implicit Euler for this step; the march below may *bend* the direction
-        // (normalization / ricochet), so we carry direction + speed and reconstruct the velocity at
-        // the end rather than assuming a straight segment.
-        projectile.velocity += GRAVITY * dt;
-        let Ok(mut dir) = Dir3::new(projectile.velocity) else {
+        // Advance free-flight velocity (gravity + drag) through the shared flight kernel, so the live
+        // shell bleeds speed identically to the fire-control table that aimed it. The march below may
+        // *bend* the direction (normalization / ricochet), so we carry direction + speed and rebuild
+        // the velocity at the end rather than assuming a straight segment.
+        let stepped = freeflight_step(projectile.velocity, projectile.drag_k, dt);
+        let Ok(mut dir) = Dir3::new(stepped) else {
             continue;
         };
-        // Quadratic air drag bleeds speed over the step — `dv/dt = −k·v²` integrated analytically
-        // (`v ← v/(1 + k·v·dt)`, unconditionally stable, unlike explicit Euler at high v·dt). This is
-        // what makes capability fall with range; in-plate cost dwarfs drag, so free-flight only.
-        let mut speed = projectile.velocity.length();
-        speed /= 1.0 + DRAG_K * speed * dt;
+        let mut speed = stepped.length();
         let mut pos = transform.translation;
         let mut remaining = speed * dt;
         let mut stopped = false;
@@ -505,6 +544,13 @@ fn integrate_projectiles(
                 break;
             };
 
+            // Momentum bookkeeping for this crossing: the incoming velocity (before any bend/bleed)
+            // and the body that owns the struck volume. Each resolution branch below hands the body
+            // its share of the shell's momentum, `m·(v_in − v_out)` — a shell that stops dumps it all,
+            // a perforation less (it carries momentum out), a ricochet a partial normal-ward kick.
+            let v_in = Vec3::from(dir) * speed;
+            let body = owners.get(node_entity).ok().map(|owner| owner.tank());
+
             // Outward surface normal; angle of incidence is measured from it (0 = head-on).
             let normal = Dir3::new(hit.normal).unwrap_or(-dir);
             let incidence = Vec3::from(dir).angle_between(-Vec3::from(normal));
@@ -536,6 +582,13 @@ fn integrate_projectiles(
                 }
                 dir = reflect(dir, normal);
                 speed *= RICOCHET_BLEED;
+                if let Some(body) = body {
+                    commands.trigger(HitImpulse {
+                        body,
+                        impulse: projectile.mass * (v_in - Vec3::from(dir) * speed),
+                        point: entry,
+                    });
+                }
                 marks.ricochets.push(entry);
                 path.points.push(entry);
                 pos = entry;
@@ -575,6 +628,14 @@ fn integrate_projectiles(
                     hp.current = (hp.current - cap * TRANSIT_K).max(0.0);
                 }
                 commands.trigger(Impact { position: embed });
+                // Stopped: the body absorbs the full remaining momentum (v_out = 0).
+                if let Some(body) = body {
+                    commands.trigger(HitImpulse {
+                        body,
+                        impulse: projectile.mass * v_in,
+                        point: entry,
+                    });
+                }
                 pos = embed;
                 stopped = true;
                 break;
@@ -582,6 +643,14 @@ fn integrate_projectiles(
 
             // Perforate: spend the cost (residual speed) and continue along the bent direction.
             speed = speed_for(projectile.mass, cap - cost);
+            // The body keeps the momentum the shell lost crossing it; the shell carries the rest on.
+            if let Some(body) = body {
+                commands.trigger(HitImpulse {
+                    body,
+                    impulse: projectile.mass * (v_in - Vec3::from(dir) * speed),
+                    point: entry,
+                });
+            }
             let exit = entry + dir * span;
             marks.events.push(PenetrationEvent {
                 entry,
@@ -662,6 +731,14 @@ fn integrate_projectiles(
     }
 }
 
+/// Apply a crossing's momentum share to the struck body (immediate velocity change; the off-CoM
+/// entry point also imparts the angular rock). A static or non-rigid owner simply won't match.
+fn on_hit_impulse(hit: On<HitImpulse>, mut bodies: Query<Forces>) {
+    if let Ok(mut forces) = bodies.get_mut(hit.body) {
+        forces.apply_linear_impulse_at_point(hit.impulse, hit.point);
+    }
+}
+
 fn on_impact(impact: On<Impact>, debug: Res<ImpactDebug>, mut commands: Commands) {
     info!("shell impact at {:?}", impact.position);
     // Debug marker for now; the armor penetration march/spall and impact VFX hook in here.
@@ -671,4 +748,36 @@ fn on_impact(impact: On<Impact>, debug: Res<ImpactDebug>, mut commands: Commands
         MeshMaterial3d(debug.material.clone()),
         Transform::from_translation(impact.position),
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `drag_k` is calibrated so the 88 keeps its hand-tuned coefficient, and a light-for-bore round
+    /// (the 7.9 mm coax) bleeds far faster from sectional density alone — the reason a coax drops more
+    /// than the main gun at the same range, with no per-weapon drag field.
+    #[test]
+    fn drag_k_calibration() {
+        let main = drag_k(0.088, 10.2); // 88 mm, 10.2 kg
+        let coax = drag_k(0.0079, 0.0118); // 7.9 mm, 11.8 g
+        assert!(
+            (main - 2.0e-4).abs() < 1.0e-5,
+            "88 drag k should be ≈ 2e-4, got {main}"
+        );
+        assert!(
+            coax > 6.0 * main,
+            "coax should bleed far faster than the 88 (got {coax} vs {main})"
+        );
+    }
+
+    /// Drag only slows a shell — never speeds it up or reverses it — and gravity always pulls the
+    /// vertical component down. Guards the analytic drag step against a sign or stability slip.
+    #[test]
+    fn freeflight_step_bleeds_speed_and_falls() {
+        let v0 = Vec3::new(700.0, 0.0, 0.0);
+        let v1 = freeflight_step(v0, drag_k(0.088, 10.2), 0.01);
+        assert!(v1.length() < v0.length(), "drag must reduce speed");
+        assert!(v1.y < 0.0, "gravity must pull the shell down");
+    }
 }

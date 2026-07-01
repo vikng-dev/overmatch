@@ -28,7 +28,7 @@ _Avoid_: using "target" for the aim point
 ## Tank rig
 
 **Rig contract**:
-The set of named nodes the model must provide for code to bind behaviour to — the required markers (`Hull`, `Turret`, `Gun`, `Gun_Barrel`, `Muzzle`, `Center_Of_Mass`), at least one collision proxy, and at least one roadwheel per side. Absence is a fatal authoring error caught at bind, not a runtime condition.
+The set of nodes the model must provide for code to bind behaviour to. Only `Hull` and `Center_Of_Mass` are fixed-name singletons; the variable parts (servos, weapons, ballistic volumes, view anchors) are **declared in the per-variant RON, keyed by node name**, and the binder iterates that spec to resolve them (ADR-0012). Plus at least one collision proxy and one roadwheel per side. Absence — a declared node with no matching model node, or a missing fixed node — is a fatal authoring error caught at bind, not a runtime condition.
 
 **Hull**:
 The tank body — the chassis the turret sits on, and the frame all aim math is computed relative to.
@@ -181,7 +181,7 @@ The *human* occupant — carries HP, death, and (later) skill. **Occupies** one 
 _Avoid_: treating crew as a counter (crew is never a count — see kill model)
 
 **Capability**:
-A gameplay verb the tank can perform — Drive, Traverse, Fire, Load, GunnerSight, CommanderView. Gated *and graded* by its requirements (crew stations + module functions); its current degree is its effectiveness.
+A gameplay verb the tank can perform, gated *and graded* by its requirements (crew stations + module functions); its current degree is its effectiveness. The grammar (Group / Part / Pool / Backup, evaluated over part qualities) is shared, but the verbs are now **layered by scope** rather than one global list (ADR-0013): per-**servo** slew gates (`requires`), per-**weapon** `fire`/`load` gates, per-**view** gates (`requires`), and a small global `Capability` map for genuinely tank-wide verbs — currently only **Drive**. (Traverse / Fire / Load / GunnerSight / CommanderView were global capabilities before the rig refactor; they moved onto the servo / weapon / view that owns them.)
 _Avoid_: action (the player-facing intent verb is a Control; the tank-model verb is a Capability)
 
 **Effectiveness**:

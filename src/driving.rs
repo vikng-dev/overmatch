@@ -245,18 +245,12 @@ fn apply_drive(
     for (body, tank_transform, mut forces, drivetrain, tank_volumes, tank_caps, controlled) in
         &mut bodies
     {
-        // Drive input is the one player-specific part: only the controlled tank reads the live
-        // throttle/steer. A drive-disabled tank parks (no hold either, like before); every other
-        // tank gets zero command, so it holds in place via the brush anchor rather than driving off.
-        if !capability_available(tank_volumes, tank_caps, Capability::Drive, &volumes) {
-            for wheel in children.iter_descendants(body) {
-                if let Ok((_, mut suspension)) = wheels.get_mut(wheel) {
-                    suspension.drive_force = Vec3::ZERO;
-                }
-            }
-            continue;
-        }
-        let (throttle, steer) = if controlled {
+        // Drive gates *thrust*, not grip: only the controlled tank with a live `Drive` capability
+        // reads the throttle/steer. Everyone else — a remote/idle tank, or one with a dead
+        // driver/engine/transmission — gets zero command but still runs the full friction model below,
+        // so the tracks hold the tank in place via the brush anchor instead of sliding frictionlessly.
+        let drive_ok = capability_available(tank_volumes, tank_caps, Capability::Drive, &volumes);
+        let (throttle, steer) = if controlled && drive_ok {
             (input.throttle, input.steer)
         } else {
             (0.0, 0.0)

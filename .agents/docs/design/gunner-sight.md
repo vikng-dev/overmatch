@@ -1,7 +1,7 @@
 # Design sketch: gunner's sight (System B) & gunner-view aim control
 
 **Status: SPEC for the in-progress build (2026-06-26).** Decided in design discussion; being
-implemented now. Graduates to an ADR if it survives contact. Vocabulary from `.agents/CONTEXT.md`
+implemented now. Graduates to an ADR if it survives contact. Vocabulary from `.agents/GLOSSARY.md`
 (Sight, Bore axis, Bore point, Aim point) and `.agents/skills/codebase-design`.
 
 ## The sighting system: B (of A/B/C/D)

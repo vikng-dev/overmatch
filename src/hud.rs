@@ -11,9 +11,11 @@ use bevy::prelude::*;
 use crate::ballistics::{ComponentHealth, ComponentVolume};
 use crate::damage::{
     Ammo, Capability, CookedOff, CrewStation, Crewman, Dead, FunctionRole, TankCapabilities,
-    TankKnockedOut, TankVolumes, VolumeFacets, capability_effectiveness,
+    TankKnockedOut, TankVolumes, VolumeFacets, capability_effectiveness, evaluate, part_qualities,
 };
-use crate::tank::Tank;
+use crate::shooting::Reload;
+use crate::spec::ViewKind;
+use crate::tank::{Tank, TankRoot, TankViews, Weapon};
 
 /// The camera the HUD reprojects world points through. Each binary tags its own world camera with
 /// this — the game's player camera, the sandbox's free-fly camera — so the shared systems don't
@@ -136,10 +138,10 @@ fn volume_label(
     } else if let Some(function) = function {
         function.label().to_string()
     } else if ammo.is_some() {
-        name.map(|name| name.as_str().replace("Ballistic_", ""))
+        name.map(|name| name.as_str().replace("_Ballistic", ""))
             .unwrap_or_else(|| "Ammo".to_string())
     } else {
-        name.map(|name| name.as_str().replace("Ballistic_", ""))
+        name.map(|name| name.as_str().replace("_Ballistic", ""))
             .unwrap_or_else(|| "Component".to_string())
     }
 }
@@ -151,14 +153,17 @@ fn update_tank_status_labels(
     camera: Single<(&Camera, &GlobalTransform), With<HudCamera>>,
     tanks: Query<
         (
+            Entity,
             &GlobalTransform,
             Option<&Name>,
             Option<&TankKnockedOut>,
             Option<&TankVolumes>,
             Option<&TankCapabilities>,
+            Option<&TankViews>,
         ),
         With<Tank>,
     >,
+    weapons: Query<(&Weapon, &Reload, &TankRoot)>,
     volumes: Query<(
         Option<&CrewStation>,
         Option<&Crewman>,
@@ -178,7 +183,9 @@ fn update_tank_status_labels(
     let (camera, cam_transform) = *camera;
     let mut tanks = tanks.iter();
     for (mut node, mut text, mut visibility, mut color) in &mut labels {
-        let Some((transform, name, knocked_out, tank_volumes, tank_caps)) = tanks.next() else {
+        let Some((entity, transform, name, knocked_out, tank_volumes, tank_caps, tank_views)) =
+            tanks.next()
+        else {
             *visibility = Visibility::Hidden;
             continue;
         };
@@ -219,18 +226,15 @@ fn update_tank_status_labels(
             }
         }
 
-        // Capability readout: each capability as a live effectiveness percentage. Composed from its
-        // requirement groups against the live world (design §7b) — a backfilled capability reads
-        // (e.g.) 60%, not just on/off.
-        let caps = [
-            Capability::Drive,
-            Capability::Traverse,
-            Capability::Fire,
-            Capability::Load,
-            Capability::GunnerSight,
-            Capability::CommanderView,
-        ];
-        let cap_line = caps
+        // Live part qualities, resolved once and reused for the view + weapon gates below (the cap
+        // line keeps `capability_effectiveness`, which resolves them again internally — cheap, and
+        // it owns the `None`-volumes fallback).
+        let quality = tank_volumes.map(|tv| part_qualities(tv, &capability_volumes));
+
+        // Capability readout: each tank-wide capability as a live effectiveness percentage, composed
+        // from its requirement groups against the live world (design §7b) — a backfilled capability
+        // reads (e.g.) 60%, not just on/off. (View + weapon gates moved off this map; see below.)
+        let cap_line = [Capability::Drive]
             .iter()
             .map(|cap| {
                 let eff =
@@ -239,6 +243,53 @@ fn update_tank_status_labels(
             })
             .collect::<Vec<_>>()
             .join("   ");
+
+        // Views readout: each crew viewpoint's gate as a live effectiveness percentage (the per-view
+        // successor to the old GunnerSight/CommanderView capabilities).
+        let view_line = match (&quality, tank_views) {
+            (Some(quality), Some(views)) => {
+                let mut entries = [ViewKind::Gunner, ViewKind::Commander]
+                    .into_iter()
+                    .filter_map(|kind| {
+                        views.0.get(&kind).map(|config| {
+                            let eff = evaluate(&config.requires, quality);
+                            format!("{} {}%", kind.label(), (eff * 100.0).round() as i32)
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                entries.sort();
+                entries.join("   ")
+            }
+            _ => "-".to_string(),
+        };
+
+        // Weapons readout: each weapon's name + reload state, dimmed-flagged when its fire gate is
+        // unmet (dead gunner/loader/breech). Sorted by name so the order is stable frame to frame.
+        let weapon_line = {
+            let mut entries = weapons
+                .iter()
+                .filter(|(_, _, root)| root.0 == entity)
+                .map(|(weapon, reload, _)| {
+                    let can_fire = quality
+                        .as_ref()
+                        .is_some_and(|q| evaluate(&weapon.fire, q) > 0.0);
+                    let status = if reload.remaining > 0.0 {
+                        format!("{:.1}s", reload.remaining)
+                    } else if can_fire {
+                        "READY".to_string()
+                    } else {
+                        "no-fire".to_string()
+                    };
+                    format!("{} {}", weapon.name, status)
+                })
+                .collect::<Vec<_>>();
+            entries.sort();
+            if entries.is_empty() {
+                "-".to_string()
+            } else {
+                entries.join("   ")
+            }
+        };
 
         let world_point = transform.translation() + Vec3::Y * 4.4;
         match camera.world_to_viewport(cam_transform, world_point) {
@@ -266,7 +317,7 @@ fn update_tank_status_labels(
                     disabled.join(", ")
                 };
                 *text = Text::new(format!(
-                    "{title}\n{state}\nCrew {crew_living}/{crew_total}\nDead: {dead}\nCookoff: {cookoff}\nDisabled: {disabled}\nCapabilities: {cap_line}",
+                    "{title}\n{state}\nCrew {crew_living}/{crew_total}\nDead: {dead}\nCookoff: {cookoff}\nDisabled: {disabled}\nCapabilities: {cap_line}\nViews: {view_line}\nWeapons: {weapon_line}",
                 ));
                 *color = TextColor(if knocked_out.is_some() {
                     Color::srgb(1.0, 0.35, 0.25)

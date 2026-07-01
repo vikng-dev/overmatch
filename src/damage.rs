@@ -129,22 +129,12 @@ impl FunctionRole {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize)]
 pub enum Capability {
     Drive,
-    Traverse,
-    Fire,
-    Load,
-    GunnerSight,
-    CommanderView,
 }
 
 impl Capability {
     pub fn label(self) -> &'static str {
         match self {
             Capability::Drive => "Drive",
-            Capability::Traverse => "Traverse",
-            Capability::Fire => "Fire",
-            Capability::Load => "Load",
-            Capability::GunnerSight => "Gunner sight",
-            Capability::CommanderView => "Commander view",
         }
     }
 }
@@ -349,10 +339,18 @@ pub fn capability_effectiveness(
     let Some(requirement) = tank_caps.0.get(&capability) else {
         return 0.0;
     };
+    evaluate(requirement, &part_qualities(tank_volumes, volumes))
+}
 
-    // Resolve each part's live quality. Living crew → 1.0 (competence layers in with backfill);
-    // intact module (HP > 0) → 1.0 (graded damage layers in later). Absent → 0. Duplicate parts
-    // (e.g. two volumes of one station) take the best.
+/// The live quality of each [`Part`] on a tank — the shared core behind *every* requirement check
+/// (a tank-wide [`Capability`], a servo's slew gate, a weapon's fire/load gate): resolve once per
+/// tank, then [`evaluate`] any number of requirements against it. Living crew → competence (native
+/// 1.0 / foreign degraded); intact module (HP > 0) → 1.0 (graded damage layers in later); absent
+/// → 0. Duplicate parts (two volumes of one station) take the best.
+pub fn part_qualities(
+    tank_volumes: &TankVolumes,
+    volumes: &Query<VolumeFacets>,
+) -> std::collections::HashMap<Part, f32> {
     let mut quality: std::collections::HashMap<Part, f32> = std::collections::HashMap::new();
     for volume in tank_volumes.iter() {
         let Ok(facets) = volumes.get(volume) else {
@@ -372,8 +370,7 @@ pub fn capability_effectiveness(
             *q = q.max(1.0);
         }
     }
-
-    evaluate(requirement, &quality)
+    quality
 }
 
 /// The pure combine core (design §7b), split out so it is testable without a `World`:
@@ -418,17 +415,7 @@ pub fn capability_available(
 /// directly since they iterate every tank.
 #[derive(SystemParam)]
 pub struct ControlledTank<'w, 's> {
-    tank: Query<
-        'w,
-        's,
-        (
-            Entity,
-            &'static Rig,
-            Option<&'static TankVolumes>,
-            Option<&'static TankCapabilities>,
-        ),
-        With<Controlled>,
-    >,
+    tank: Query<'w, 's, (Entity, &'static Rig, Option<&'static TankVolumes>), With<Controlled>>,
     volumes: Query<'w, 's, VolumeFacets>,
 }
 
@@ -443,17 +430,14 @@ impl ControlledTank<'_, '_> {
         self.tank.single().ok().map(|(_, rig, ..)| rig)
     }
 
-    /// Live effectiveness ∈ [0, 1] of `capability` on the controlled tank (0 when none is controlled).
-    pub fn effectiveness(&self, capability: Capability) -> f32 {
-        let Ok((_, _, tank_volumes, tank_caps)) = self.tank.single() else {
-            return 0.0;
+    /// Whether the controlled tank *meets* an arbitrary requirement (effectiveness > 0) — for the
+    /// per-weapon / per-part gates (a weapon's `fire`/`load`) that aren't tank-wide capabilities.
+    /// An empty requirement is vacuously met. `None` controlled → not met.
+    pub fn meets(&self, requirement: &Requirement) -> bool {
+        let Ok((_, _, Some(tank_volumes))) = self.tank.single() else {
+            return false;
         };
-        capability_effectiveness(tank_volumes, tank_caps, capability, &self.volumes)
-    }
-
-    /// Whether `capability` is usable at all (effectiveness > 0) on the controlled tank.
-    pub fn available(&self, capability: Capability) -> bool {
-        self.effectiveness(capability) > 0.0
+        evaluate(requirement, &part_qualities(tank_volumes, &self.volumes)) > 0.0
     }
 }
 

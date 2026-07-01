@@ -3,7 +3,7 @@
 **Status: SPEC for the in-progress build (2026-06-27).** Decided in a design interview; being
 implemented now, starting with an isolated sandbox (§11). Graduates to ADR(s) if it survives
 contact — the `ballistics`-as-library-plugin + `shooting` split (§10) is the most ADR-worthy part.
-Vocabulary from `.agents/CONTEXT.md` and `.agents/skills/codebase-design` (seam, depth, leverage).
+Vocabulary from `.agents/GLOSSARY.md` and `.agents/skills/codebase-design` (seam, depth, leverage).
 
 This is the next vertical-slice mechanic after the gunner's sight (`design/gunner-sight.md`). It is
 deliberately deep and physically-grounded; §9 names what is *out* of the first slice so the depth

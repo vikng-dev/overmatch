@@ -2,7 +2,7 @@
 //! for the turret/gun, and the asset-load binding. The tank declares *structure*; features
 //! (aim, shooting) attach their own behavior to these markers reactively.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use avian3d::prelude::{
     AngularInertia, ColliderConstructor, ColliderConstructorHierarchy, CollisionLayers, LayerMask,
@@ -10,15 +10,19 @@ use avian3d::prelude::{
     SpatialQueryFilter,
 };
 use bevy::asset::LoadState;
+use bevy::gltf::GltfMaterialName;
 use bevy::prelude::*;
 use bevy::world_serialization::WorldInstanceReady;
 use serde::Deserialize;
 
 use crate::Layer;
 use crate::ballistics::{ArmorVolume, BallisticVolume, ComponentHealth, ComponentVolume};
-use crate::damage::{Ammo, Crewman, TankCapabilities, VolumeOf};
+use crate::damage::{
+    Ammo, Crewman, Requirement, TankCapabilities, TankVolumes, VolumeFacets, VolumeOf, evaluate,
+    part_qualities,
+};
 use crate::sight::SightMode;
-use crate::spec::{TankSpec, TankSpecHandle};
+use crate::spec::{RecoilSpec, TankSpec, TankSpecHandle, Trigger, ViewKind};
 use crate::state::{AppState, GameplaySet};
 
 // --- Rig markers. Name = the structural contract between the model and the code. ---
@@ -57,8 +61,21 @@ pub struct Rig {
     pub turret: Entity,
     pub gun: Entity,
     pub muzzle: Entity,
-    pub barrel: Entity,
 }
+
+/// Per-view runtime config bound from the spec's `views` map: the camera FOV and the gating
+/// requirement. Keyed by [`ViewKind`] in [`TankViews`] on the tank root; the camera reads `fov`,
+/// the sight systems gate on `requires` (the per-view successor to the old `GunnerSight`/
+/// `CommanderView` capabilities).
+pub struct ViewConfig {
+    pub fov: f32,
+    pub requires: Requirement,
+}
+
+/// The controlled-tank views (camera anchors), bound from the spec. The camera and sight systems
+/// look up the active [`ViewKind`] here for its FOV and gating requirement.
+#[derive(Component)]
+pub struct TankViews(pub HashMap<ViewKind, ViewConfig>);
 
 #[derive(Component)]
 pub struct Muzzle;
@@ -66,6 +83,29 @@ pub struct Muzzle;
 /// The recoiling barrel node (child of `Gun`, parent of `Muzzle`).
 #[derive(Component)]
 pub struct GunBarrel;
+
+/// A bound weapon's runtime config, attached by the binder to its muzzle entity from the spec's
+/// `weapons` map. The shooting systems read it (ballistics for the shell, `reload` for the cooldown,
+/// `recoil` to kick the `barrel`). Replaces the hardcoded `shooting.rs` consts; `barrel` is the
+/// resolved recoil node (`None` for a barrel-less weapon like a coax).
+#[derive(Component)]
+pub struct Weapon {
+    /// The weapon's logical name (the `weapons` map key, e.g. `MainGun`) — what the HUD shows, as
+    /// opposed to the muzzle node's name (`Main_Gun_Muzzle`).
+    pub name: String,
+    pub speed: f32,
+    pub caliber: f32,
+    pub mass: f32,
+    pub reload: f32,
+    pub recoil: Option<RecoilSpec>,
+    pub barrel: Option<Entity>,
+    /// Fire / load gates (design §7b), evaluated against the controlled tank by the shooting
+    /// systems — the per-weapon successors to the old global `Fire`/`Load` capabilities.
+    pub fire: Requirement,
+    pub load: Requirement,
+    /// Which fire input drives this weapon (LMB = `Primary`, Spacebar = `Secondary`).
+    pub trigger: Trigger,
+}
 
 /// Which track a roadwheel drives (for differential thrust). Left wheels sit at −X, right at +X.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -86,30 +126,36 @@ pub struct Roadwheel {
 #[derive(Component)]
 pub struct CenterOfMassAnchor;
 
-/// The local axis a servo rotates about. Cardinal-only — tank servos yaw/pitch about a hull axis;
-/// a canted mount would add a `Custom(Dir3)` variant. Resolved to a vector in `drive_servos`.
-#[derive(Clone, Copy, Deserialize)]
-pub enum Axis {
-    X,
-    Y,
-    Z,
-}
-
-impl Axis {
-    fn to_vec3(self) -> Vec3 {
-        match self {
-            Axis::X => Vec3::X,
-            Axis::Y => Vec3::Y,
-            Axis::Z => Vec3::Z,
-        }
-    }
-}
+/// Back-link from a rig part (a servo) to its tank's root entity, set at bind. Lets a per-tank
+/// system that runs over *all* tanks' parts (`drive_servos`) resolve the owning tank's
+/// `TankVolumes` to evaluate that part's gate — without walking the hierarchy each frame.
+#[derive(Component)]
+pub struct TankRoot(pub Entity);
 
 /// Travel limits for a [`ServoSpec`], in **degrees** (the authoring unit).
 #[derive(Clone, Copy, Deserialize)]
 pub enum Travel {
     Limited { min: f32, max: f32 },
     Continuous,
+}
+
+/// Which aiming degree of freedom a servo actuates — control semantics *and* the rotation axis in
+/// one. `Yaw` rotates about local +Y (traverse), `Pitch` about local +X (elevation); the axis is
+/// derived here rather than re-declared, since for any cardinal mount the role determines it (a
+/// yaw is *by definition* about the vertical). A canted mount would add a `Custom(Dir3)` variant.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub enum ServoRole {
+    Yaw,
+    Pitch,
+}
+
+impl ServoRole {
+    fn axis(self) -> Vec3 {
+        match self {
+            ServoRole::Yaw => Vec3::Y,
+            ServoRole::Pitch => Vec3::X,
+        }
+    }
 }
 
 // A 1-DOF kinematic rotational motor (trapezoidal motion profile), split three ways so each
@@ -123,12 +169,20 @@ pub enum Travel {
 #[derive(Component, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServoSpec {
-    axis: Axis,
+    /// Which aim DOF this servo drives — its handle for role-based binding (no fixed node name), and
+    /// the source of its rotation axis (Yaw→Y, Pitch→X; see [`ServoRole`]).
+    role: ServoRole,
     /// Max slew speed, degrees/second.
     max_speed: f32,
     /// Slew acceleration, degrees/second².
     accel: f32,
     travel: Travel,
+    /// The slew gate (design §7b): what must be intact/crewed for this mount to traverse — e.g. the
+    /// gunner (and, later, a traverse motor). `drive_servos` scales the slew by its effectiveness,
+    /// so a dead operator freezes the mount and a damaged motor (future) just slows it. Empty =
+    /// always free. This is the per-servo successor to the old global `Traverse` capability.
+    #[serde(default)]
+    pub(crate) requires: Requirement,
 }
 
 /// The commanded angle (parent-local) a servo slews toward — the *intent*, written by aiming
@@ -296,17 +350,16 @@ fn spawn_tank(
     }
 }
 
-/// `Tab` hands control to the next tank: it moves the [`Controlled`] marker, and resets the view to
-/// third-person with both tanks visible — so you never inherit the gunner optic's tank-hide on the
-/// tank you just stepped out of. With two tanks this is a toggle; it generalizes to cycling N in
-/// spawn order.
+/// `Tab` hands control to the next tank: it moves the [`Controlled`] marker and resets the view to
+/// third-person — so you never inherit the gunner optic's tank-hide on the tank you just stepped out
+/// of. The mode change re-runs `sync_optic_render_layer`, which restores both tanks' render layers.
+/// With two tanks this is a toggle; it generalizes to cycling N in spawn order.
 fn swap_controlled_tank(
     keys: Res<ButtonInput<KeyCode>>,
     mut commands: Commands,
     tanks: Query<Entity, With<Tank>>,
     controlled: Query<Entity, With<Controlled>>,
     mut mode: ResMut<SightMode>,
-    mut visibility: Query<&mut Visibility, With<Tank>>,
 ) {
     if !keys.just_pressed(KeyCode::Tab) {
         return;
@@ -326,11 +379,45 @@ fn swap_controlled_tank(
     commands.entity(current).remove::<Controlled>();
     commands.entity(next).insert(Controlled);
 
-    // Drop back to third-person and reveal both tanks: the optic hides the controlled tank's mesh,
-    // so without this the tank you just left would stay invisible.
+    // Drop back to third-person; `sync_optic_render_layer` reacts to the change and reveals both
+    // tanks (the optic's render-layer hide only applies in gunner view).
     *mode = SightMode::ThirdPerson;
-    for mut v in &mut visibility {
-        *v = Visibility::Inherited;
+}
+
+/// The track side of a roadwheel *rig empty* — `Wheel_L_<n>` / `Wheel_R_<n>` with a purely numeric
+/// index, and nothing else. The numeric check is load-bearing: it excludes the wheel's typed
+/// children (`Wheel_L_0_Ballistic`, `Wheel_L_0_Visual`), which also begin with `Wheel_` but are a
+/// volume / render mesh, not a suspension station.
+fn roadwheel_side(name: &str) -> Option<TrackSide> {
+    for (prefix, side) in [
+        ("Wheel_L_", TrackSide::Left),
+        ("Wheel_R_", TrackSide::Right),
+    ] {
+        if let Some(rest) = name.strip_prefix(prefix)
+            && !rest.is_empty()
+            && rest.bytes().all(|b| b.is_ascii_digit())
+        {
+            return Some(side);
+        }
+    }
+    None
+}
+
+/// Walk up the model hierarchy from `start` (inclusive) and return the first ancestor that's in
+/// `candidates` — used to resolve a weapon's chain (the yaw / pitch servo above its muzzle).
+fn first_ancestor_in(
+    mut entity: Entity,
+    candidates: &HashSet<Entity>,
+    parents: &Query<&ChildOf>,
+) -> Option<Entity> {
+    loop {
+        if candidates.contains(&entity) {
+            return Some(entity);
+        }
+        match parents.get(entity) {
+            Ok(parent) => entity = parent.parent(),
+            Err(_) => return None,
+        }
     }
 }
 
@@ -344,6 +431,8 @@ pub fn on_tank_ready(
     mut commands: Commands,
     children: Query<&Children>,
     names: Query<&Name>,
+    parents: Query<&ChildOf>,
+    primitives: Query<(), With<GltfMaterialName>>,
     handles: Query<&TankSpecHandle>,
     specs: Res<Assets<TankSpec>>,
 ) {
@@ -371,6 +460,21 @@ pub fn on_tank_ready(
         NoAutoCenterOfMass,
         // Per-tank capability requirements (design §7b) — drives `capability_effectiveness`.
         TankCapabilities(spec.capabilities.clone()),
+        // Per-view FOV + gating requirement (camera FOV, view-death gate).
+        TankViews(
+            spec.views
+                .iter()
+                .map(|(kind, view)| {
+                    (
+                        *kind,
+                        ViewConfig {
+                            fov: view.fov,
+                            requires: view.requires.clone(),
+                        },
+                    )
+                })
+                .collect(),
+        ),
         // Root visibility owns the gunner-view hide: set to `Hidden`, `InheritedVisibility`
         // propagates `HIDDEN` to every descendant mesh, so the gunner optic (camera parked at the
         // gun pivot, inside the mantlet) sees no own-tank geometry — no near-plane clipping.
@@ -379,7 +483,6 @@ pub fn on_tank_ready(
 
     // Record what the walk found, to check against the required contract afterwards.
     let mut found: HashSet<&'static str> = HashSet::new();
-    let mut bound_volumes: HashSet<String> = HashSet::new();
     let mut left_wheels = 0u32;
     let mut right_wheels = 0u32;
     let mut colliders = 0u32;
@@ -388,53 +491,33 @@ pub fn on_tank_ready(
     let mut turret_node = None;
     let mut gun_node = None;
     let mut muzzle_node = None;
-    let mut barrel_node = None;
+    // Node-name → entity index, built in the walk so the spec-driven binding below (servos) can
+    // resolve a declared node by name instead of matching it inline.
+    let mut index: HashMap<String, Entity> = HashMap::new();
 
     for entity in children.iter_descendants(ready.entity) {
+        // Skip render-primitive entities (`GltfMaterialName`, named `{mesh}.{material}`): we bind
+        // structure to authored nodes only, not the loader's per-material render leaves.
+        if primitives.contains(entity) {
+            continue;
+        }
         // Most descendants are unnamed mesh nodes — skip them quietly.
         let Ok(name) = names.get(entity) else {
             continue;
         };
         let id = entity;
+        index.insert(name.to_string(), id);
         let mut entity = commands.entity(entity);
         match name.as_str() {
-            // Servos: marker + command/state slots + the per-variant `ServoSpec` (axis, speeds,
-            // travel) from the spec sheet (ADR-0010) — never authored in code.
-            "Turret" => {
-                found.insert("Turret");
-                turret_node = Some(id);
-                entity.insert((
-                    Turret,
-                    ServoCommand::default(),
-                    ServoState::default(),
-                    spec.turret.clone(),
-                ));
-            }
-            "Gun" => {
-                found.insert("Gun");
-                gun_node = Some(id);
-                entity.insert((
-                    Gun,
-                    ServoCommand::default(),
-                    ServoState::default(),
-                    spec.gun.clone(),
-                ));
-            }
+            // Servos are bound from `spec.servos` after the walk (resolved via `index`), not here —
+            // their nodes carry no fixed names, so the spec is the source of truth for which they are.
             "Hull" => {
                 found.insert("Hull");
                 hull_node = Some(id);
                 entity.insert(Hull);
             }
-            "Muzzle" => {
-                found.insert("Muzzle");
-                muzzle_node = Some(id);
-                entity.insert(Muzzle);
-            }
-            "Gun_Barrel" => {
-                found.insert("Gun_Barrel");
-                barrel_node = Some(id);
-                entity.insert(GunBarrel);
-            }
+            // Weapon parts (muzzle, recoiling barrel) are bound from `spec.weapons` after the walk,
+            // resolved via `index` — node names live in the weapon entry, not here.
             "Center_Of_Mass" => {
                 found.insert("Center_Of_Mass");
                 entity.insert(CenterOfMassAnchor);
@@ -442,14 +525,12 @@ pub fn on_tank_ready(
             // Roadwheels (Wheel_L_0.., Wheel_R_0..): tag the track side + a downward suspension ray
             // sized by the variant's `ray_length`, filtered to Terrain so it skips the tank's own
             // collider. The wheel node has identity rotation, so local −Y is the hull-down axis.
-            s if s.starts_with("Wheel_") => {
-                let side = if s.starts_with("Wheel_L") {
-                    left_wheels += 1;
-                    TrackSide::Left
-                } else {
-                    right_wheels += 1;
-                    TrackSide::Right
-                };
+            s if roadwheel_side(s).is_some() => {
+                let side = roadwheel_side(s).expect("guard matched");
+                match side {
+                    TrackSide::Left => left_wheels += 1,
+                    TrackSide::Right => right_wheels += 1,
+                }
                 entity.insert((
                     Roadwheel { side },
                     RayCaster::new(Vec3::ZERO, Dir3::NEG_Y)
@@ -457,11 +538,11 @@ pub fn on_tank_ready(
                         .with_query_filter(SpatialQueryFilter::from_mask(Layer::Terrain)),
                 ));
             }
-            // Collision proxies (`*_Collider` / `*_Collision`, optionally split `_0/_1/...`): a
-            // convex-hull collider on the Vehicle layer, hidden (it's physics, not rendering —
-            // ADR-0008). Collision-only: it contributes no mass (the hull authors its own, see above).
-            // The glTF loader puts the mesh on a child primitive, so build over the node's descendants.
-            s if s.starts_with("Collider_") => {
+            // Collision proxies (`*_Collider`): a convex-hull collider on the Vehicle layer, hidden
+            // (it's physics, not rendering — ADR-0008). Collision-only: it contributes no mass (the
+            // hull authors its own, see above). The glTF loader puts the mesh on a child primitive,
+            // so build over the node's descendants.
+            s if s.ends_with("_Collider") => {
                 colliders += 1;
                 entity.insert((
                     ColliderConstructorHierarchy::new(ColliderConstructor::ConvexHullFromMesh)
@@ -472,94 +553,186 @@ pub fn on_tank_ready(
                     Visibility::Hidden,
                 ));
             }
-            // Ballistic volumes — the spec's `volumes` map is the source of truth (design
-            // `armor-penetration-and-damage.md` §12; composition, not a `kind` enum): a node is a
-            // volume iff it's a key. `material_factor` (shell-resistance per metre) every volume has;
-            // optional `hp` makes it a damageable component. The `Armor_/Module_/...` prefix is
-            // documentation only, never parsed for behaviour — resistance and role both come from
-            // data, so a steel barrel module resists like steel yet still takes damage.
-            //
-            // Bound as a query-only trimesh collider on the `Armor` layer (watertight solids may be
-            // concave — fine for a raycast, unlike the dynamic physics proxy, ADR-0008) with NO
-            // collision response (`filters = NONE`), so it never perturbs the body. Hidden, like
-            // `*_Collider` — the march raycasts it and the sandbox visualizes it itself.
-            s if spec.volumes.contains_key(s) => {
-                let volume = &spec.volumes[s];
-                bound_volumes.insert(s.to_string());
-                entity.insert((
-                    Visibility::Hidden,
-                    ColliderConstructorHierarchy::new(ColliderConstructor::TrimeshFromMesh)
-                        .with_default_layers(CollisionLayers::new([Layer::Armor], LayerMask::NONE)),
-                    BallisticVolume {
-                        material_factor: volume.material_factor,
-                    },
-                    VolumeOf(ready.entity),
-                ));
-                assert!(
-                    volume.hp.is_some()
-                        || (volume.crew.is_none() && !volume.ammo && volume.function.is_none()),
-                    "tank volume `{s}` declares a consequence facet but has no hp"
-                );
-                if let Some(crew) = volume.crew {
-                    // Seat role + its native occupant (topology B): `home == seat` at bind, so
-                    // competence is 1.0 until a backfill swap moves an occupant to a foreign seat.
-                    entity.insert((crew, Crewman { home: crew }));
-                }
-                if volume.ammo {
-                    entity.insert(Ammo);
-                }
-                if let Some(function) = volume.function {
-                    entity.insert(function);
-                }
-                match volume.hp {
-                    // Damageable (module/crew/ammo): an HP pool the march depletes (transit/spall/
-                    // shock). The consequences of HP→0 (§§7–8) are a later increment.
-                    Some(hp) => {
-                        entity.insert((
-                            ComponentVolume,
-                            ComponentHealth {
-                                current: hp,
-                                max: hp,
-                            },
-                        ));
-                    }
-                    // Pure armour: resists + shadows spall, nothing to lose.
-                    None => {
-                        entity.insert(ArmorVolume);
-                    }
-                }
-            }
-            // Drift lint: a `Ballistic_*` node absent from the spec's `volumes` map — likely an
-            // authoring slip (forgot to declare it, or a rename diverged). Ignored, not bound.
-            s if s.starts_with("Ballistic_") => {
-                warn!(
-                    "node `{s}` is named like a ballistic volume but has no entry in the tank \
-                     spec's `volumes` map — ignoring (add it, or rename if it isn't one)"
-                );
-            }
+            // Ballistic volumes are bound from `spec.volumes` after the walk (resolved via `index`),
+            // like servos and weapons — a node is a volume iff it's a declared key, so the spec is the
+            // source of truth, not an inline name match. (An authored `*_Ballistic` node with no spec
+            // entry is caught by the CI bind-contract test, so there's no runtime drift scan here.)
             _ => {}
         }
     }
 
-    // Required singletons, plus ≥1 collider (else the body is massless → NaN) and ≥1 roadwheel per
-    // side (else a track has no support/thrust). A real Tiger has many wheels; the sim only needs
-    // one contact station per side to be non-degenerate, so the contract is per-side presence, not
-    // a fixed count (which varies per variant).
-    const REQUIRED: [&str; 6] = [
-        "Hull",
-        "Turret",
-        "Gun",
-        "Gun_Barrel",
-        "Muzzle",
-        "Center_Of_Mass",
-    ];
+    // Servos are spec-driven: each `spec.servos` entry resolves to its node via `index` and gets the
+    // servo bundle + its role (the aim pass drives *every* servo by role; no chain concept). The
+    // `Turret`/`Gun` markers are NOT set here — with multiple mounts of a role they'd be ambiguous;
+    // they go on the primary weapon's chain below. A declared servo with no matching node is fatal.
+    let mut missing_servos: Vec<&str> = Vec::new();
+    let mut yaw_servos: HashSet<Entity> = HashSet::new();
+    for (node, servo) in &spec.servos {
+        let Some(&id) = index.get(node.as_str()) else {
+            missing_servos.push(node.as_str());
+            continue;
+        };
+        commands.entity(id).insert((
+            servo.clone(),
+            ServoCommand::default(),
+            ServoState::default(),
+            TankRoot(ready.entity),
+            servo.role,
+        ));
+        if servo.role == ServoRole::Yaw {
+            yaw_servos.insert(id);
+        }
+    }
+
+    // Weapons are spec-driven: resolve each weapon's muzzle (+ optional recoiling barrel) via
+    // `index`, tag the nodes, and attach the `Weapon` config the shooting systems read. One weapon
+    // for now (the main gun) — the coax + hull MG join with the multi-weapon increment — so the
+    // rig's `muzzle`/`barrel` are this single weapon's. A weapon node that doesn't resolve is fatal.
+    let mut missing_weapon_nodes: Vec<&str> = Vec::new();
+    for (weapon_name, weapon) in &spec.weapons {
+        let Some(&muzzle) = index.get(weapon.muzzle.as_str()) else {
+            missing_weapon_nodes.push(weapon.muzzle.as_str());
+            continue;
+        };
+        let barrel = match &weapon.barrel {
+            Some(name) => match index.get(name.as_str()) {
+                Some(&e) => Some(e),
+                None => {
+                    missing_weapon_nodes.push(name.as_str());
+                    None
+                }
+            },
+            None => None,
+        };
+        commands.entity(muzzle).insert((
+            Muzzle,
+            TankRoot(ready.entity),
+            Weapon {
+                name: weapon_name.clone(),
+                speed: weapon.speed,
+                caliber: weapon.caliber,
+                mass: weapon.mass,
+                reload: weapon.reload,
+                recoil: weapon.recoil.clone(),
+                barrel,
+                fire: weapon.fire.clone(),
+                load: weapon.load.clone(),
+                trigger: weapon.trigger,
+            },
+        ));
+        if let Some(barrel) = barrel {
+            commands.entity(barrel).insert(GunBarrel);
+        }
+        // The single `Primary` weapon supplies the rig's main bore (`Rig.muzzle`) — what the bore
+        // HUD reads and LMB fires. The traverse/elevation handles come from the gunner *view* below,
+        // not from the weapon; trigger never speaks to aiming.
+        if weapon.trigger == Trigger::Primary {
+            muzzle_node = Some(muzzle);
+        }
+    }
+
+    // Ballistic volumes are spec-driven too: each `spec.volumes` entry resolves to its node via
+    // `index` and gets the volume bundle (design `armor-penetration-and-damage.md` §12; composition,
+    // not a `kind` enum). `material_factor` (shell-resistance per metre) every volume has; optional
+    // `hp` makes it a damageable component. The `Armor_/Module_/...` name prefix is documentation
+    // only, never parsed — resistance and role both come from data, so a steel barrel module resists
+    // like steel yet still takes damage. Bound as a query-only trimesh collider on the `Armor` layer
+    // (watertight solids may be concave — fine for a raycast, unlike the dynamic physics proxy,
+    // ADR-0008) with NO collision response (`filters = NONE`), so it never perturbs the body; hidden
+    // like `*_Collider` (the march raycasts it, the sandbox visualizes it). A declared volume with no
+    // matching node is fatal — the spec↔model contract (the reverse is the CI bind-contract test).
+    let mut missing_volume_nodes: Vec<&str> = Vec::new();
+    for (name, volume) in &spec.volumes {
+        let Some(&id) = index.get(name.as_str()) else {
+            missing_volume_nodes.push(name.as_str());
+            continue;
+        };
+        assert!(
+            volume.hp.is_some()
+                || (volume.crew.is_none() && !volume.ammo && volume.function.is_none()),
+            "tank volume `{name}` declares a consequence facet but has no hp"
+        );
+        let mut entity = commands.entity(id);
+        entity.insert((
+            Visibility::Hidden,
+            ColliderConstructorHierarchy::new(ColliderConstructor::TrimeshFromMesh)
+                .with_default_layers(CollisionLayers::new([Layer::Armor], LayerMask::NONE)),
+            BallisticVolume {
+                material_factor: volume.material_factor,
+            },
+            VolumeOf(ready.entity),
+        ));
+        if let Some(crew) = volume.crew {
+            // Seat role + its native occupant (topology B): `home == seat` at bind, so competence is
+            // 1.0 until a backfill swap moves an occupant to a foreign seat.
+            entity.insert((crew, Crewman { home: crew }));
+        }
+        if volume.ammo {
+            entity.insert(Ammo);
+        }
+        if let Some(function) = volume.function {
+            entity.insert(function);
+        }
+        match volume.hp {
+            // Damageable (module/crew/ammo): an HP pool the march depletes (transit/spall/shock). The
+            // consequences of HP→0 (§§7–8) are a later increment.
+            Some(hp) => {
+                entity.insert((
+                    ComponentVolume,
+                    ComponentHealth {
+                        current: hp,
+                        max: hp,
+                    },
+                ));
+            }
+            // Pure armour: resists + shadows spall, nothing to lose.
+            None => {
+                entity.insert(ArmorVolume);
+            }
+        }
+    }
+
+    // The gunner's chain feeds the rig's `turret`/`gun` (optic, camera, launched-turret). It's the
+    // gunner view's node (its Pitch servo) + the Yaw servo above it — declared, so the binder never
+    // guesses which of several yaw/pitch mounts is the main one. Tagged `Turret`/`Gun` for the
+    // queries that still address the main mount specifically (the aim pass instead drives *every*
+    // servo by `ServoRole`, chain-agnostic).
+    if let Some(view) = spec.views.get(&ViewKind::Gunner)
+        && let Some(&pitch) = index.get(view.node.as_str())
+    {
+        commands.entity(pitch).insert(Gun);
+        gun_node = Some(pitch);
+        if let Some(yaw) = first_ancestor_in(pitch, &yaw_servos, &parents) {
+            commands.entity(yaw).insert(Turret);
+            turret_node = Some(yaw);
+        }
+    }
+
+    // Fixed-name structural singletons, plus ≥1 collider (else the body is massless → NaN) and ≥1
+    // roadwheel per side (else a track has no support/thrust). A real Tiger has many wheels; the sim
+    // only needs one contact station per side to be non-degenerate, so the contract is per-side
+    // presence, not a fixed count. Servos and weapons are contracted separately (they're spec-
+    // declared, not fixed-named).
+    const REQUIRED: [&str; 2] = ["Hull", "Center_Of_Mass"];
     let mut missing: Vec<&str> = REQUIRED
         .iter()
         .copied()
         .filter(|n| !found.contains(n))
         .collect();
+    missing.extend(missing_servos);
+    missing.extend(missing_weapon_nodes);
+    missing.extend(missing_volume_nodes);
+    if muzzle_node.is_none() {
+        missing.push("<a Primary weapon>");
+    }
+    if turret_node.is_none() {
+        missing.push("<a Yaw servo above the Primary weapon's muzzle>");
+    }
+    if gun_node.is_none() {
+        missing.push("<a Pitch servo above the Primary weapon's muzzle>");
+    }
     if colliders == 0 {
-        missing.push("*Collider_");
+        missing.push("*_Collider");
     }
     if left_wheels == 0 {
         missing.push("Wheel_L*");
@@ -572,35 +745,31 @@ pub fn on_tank_ready(
         "tank model is missing required rig nodes: {missing:?}"
     );
 
-    // The contract check above guarantees all five rig nodes were found, so these unwraps can't
-    // fire. Record them so control systems can address *this* tank's parts by entity (`rig.gun`).
+    // The contract check above guarantees every rig node was found, so these unwraps can't fire.
+    // Record them so control systems can address *this* tank's parts by entity (`rig.gun`). The
+    // recoiling barrel isn't a rig field — it rides each `Weapon` (`weapon.barrel`).
     commands.entity(ready.entity).insert(Rig {
         hull: hull_node.unwrap(),
         turret: turret_node.unwrap(),
         gun: gun_node.unwrap(),
         muzzle: muzzle_node.unwrap(),
-        barrel: barrel_node.unwrap(),
     });
-
-    // The spec's `volumes` map is the model↔code contract: every declared volume must exist in the
-    // model (a missing one is an authoring bug — fatal like a missing rig node).
-    let missing_volumes: Vec<&String> = spec
-        .volumes
-        .keys()
-        .filter(|name| !bound_volumes.contains(*name))
-        .collect();
-    assert!(
-        missing_volumes.is_empty(),
-        "tank spec declares ballistic volumes with no matching model node: {missing_volumes:?}"
-    );
 }
 
 fn drive_servos(
-    mut q: Query<(&mut Transform, &ServoSpec, &ServoCommand, &mut ServoState)>,
+    mut q: Query<(
+        &mut Transform,
+        &ServoSpec,
+        &ServoCommand,
+        &mut ServoState,
+        &TankRoot,
+    )>,
+    tanks: Query<&TankVolumes>,
+    facets: Query<VolumeFacets>,
     time: Res<Time>,
 ) {
     let dt = time.delta_secs();
-    for (mut transform, spec, command, mut state) in &mut q {
+    for (mut transform, spec, command, mut state, root) in &mut q {
         // Capture the node's authored rest rotation once, so we can write *absolute* rotations
         // (`rest · R(axis, angle)`) instead of accumulating deltas — robust to variable render-rate
         // `dt` (no accumulating round-off).
@@ -609,10 +778,17 @@ fn drive_servos(
             state.captured = true;
         }
 
+        // Slew gate (design §7b): scale max speed by the requirement's effectiveness, so a dead
+        // operator (or, later, a damaged traverse motor) freezes or slows this mount. 0 → no slew.
+        let slew = tanks
+            .get(root.0)
+            .map(|tv| evaluate(&spec.requires, &part_qualities(tv, &facets)))
+            .unwrap_or(0.0);
+
         // `ServoSpec` authors angles in degrees (the human authoring unit); the runtime — the
         // command, the state, and the slew maths below — is radians. Convert the spec's angular
         // quantities once here, at the spec→runtime boundary.
-        let max_speed = spec.max_speed.to_radians();
+        let max_speed = spec.max_speed.to_radians() * slew;
         let accel = spec.accel.to_radians();
         let travel = match spec.travel {
             Travel::Limited { min, max } => Travel::Limited {
@@ -665,7 +841,7 @@ fn drive_servos(
         // Absolute write of the sim-truth pose. `rest` is the node's authored rotation at
         // `current = 0`; composing the axis-angle onto it gives the true mechanism pose without
         // accumulating deltas (robust to variable render-rate `dt`).
-        transform.rotation = state.rest * Quat::from_axis_angle(spec.axis.to_vec3(), state.current);
+        transform.rotation = state.rest * Quat::from_axis_angle(spec.role.axis(), state.current);
     }
 }
 

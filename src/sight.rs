@@ -3,25 +3,39 @@
 //!
 //! Lshift toggles between the free third-person "commander" view (the orbit camera + `aim.rs`) and
 //! a zoomed gunner optic locked to the gun's line of sight. In gunner view the camera shows the
-//! gun's *reality* (the sight line), and aiming is **world-space position control**: mouse deltas
-//! move a committed hull-local aim direction (`GunnerIntent`); the turret/gun servos chase it at
-//! their authored slew rate, so the view lags and settles — dead-stop on release, *not* rate
-//! control. Range is dialed by scroll and sets the gun's superelevation above the sight line, so
-//! the barrel elevates while the reticle stays on target and the shell arcs back onto it.
+//! gun's *reality* (the bore), and aiming is **world-space position control**: mouse deltas move a
+//! committed hull-local aim direction (`GunnerIntent`), which is published as the shared `AimPoint`
+//! that every servo chases at its authored slew rate — so the view lags and settles (dead-stop on
+//! release, *not* rate control), and the hull MG traverses alongside the gun. Pure line of sight:
+//! superelevation (the ballistic lob for range) is a firing-side concern deferred to its own slice.
 
-use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
+use bevy::camera::visibility::RenderLayers;
+use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 
+use crate::aim::{AimCommit, AimPoint};
 use crate::camera::GunnerCameraPlaced;
-use crate::damage::{Capability, ControlledTank};
+use crate::damage::ControlledTank;
+use crate::firecontrol::{RangeTable, Ranging};
+use crate::spec::ViewKind;
 use crate::state::GameplaySet;
 use crate::tank::{
-    Controlled, Gun, Hull, Rig, ServoCommand, ServoState, Tank, Turret, shortest_angle,
+    Controlled, Gun, Hull, Rig, ServoState, Tank, TankViews, Turret, shortest_angle,
 };
 
-/// 88 mm muzzle velocity (m/s) — mirrors `shooting`'s muzzle speed; used for the superelevation
-/// solution. (The shells are gravity-only, so the flat-fire formula below is exact for them.)
-const MUZZLE_SPEED: f32 = 773.0;
+/// Whether the controlled tank's `kind` view is usable — its authored `requires` met (a dead
+/// gunner closes the optic, a dead commander closes third-person). A missing view is unusable.
+fn view_available(
+    controlled: &ControlledTank,
+    views: &Query<&TankViews, With<Controlled>>,
+    kind: ViewKind,
+) -> bool {
+    views
+        .single()
+        .ok()
+        .and_then(|v| v.0.get(&kind))
+        .is_some_and(|config| controlled.meets(&config.requires))
+}
 
 /// Which view the player is in. Default is the third-person commander view.
 #[derive(Resource, Clone, Copy, PartialEq, Eq, Default)]
@@ -40,19 +54,6 @@ pub fn in_gunner(mode: Res<SightMode>) -> bool {
 /// Run condition: the free third-person view is active AND the commander is alive.
 pub fn in_third_person(mode: Res<SightMode>) -> bool {
     *mode == SightMode::ThirdPerson
-}
-
-/// Dialed range (m), set by scroll in gunner view. Drives superelevation — the Tiger has no
-/// rangefinder, so the player estimates and dials it (the WW2 gunnery skill).
-#[derive(Resource)]
-pub struct Ranging {
-    pub range: f32,
-}
-
-impl Default for Ranging {
-    fn default() -> Self {
-        Self { range: 800.0 }
-    }
 }
 
 /// The committed gunner aim direction in the hull's local frame (radians): the *intent* the gun
@@ -84,27 +85,89 @@ struct IntentReticle;
 #[derive(Component)]
 struct ViewDeathOverlay;
 
-/// Gun elevation above the line of sight for a flat-fire, drag-free gravity solution:
-/// `θ ≈ g·R / (2·v²)`. The shells are gravity-only (`shooting.rs`), so this is exact for them.
-pub fn superelevation(range: f32) -> f32 {
-    const G: f32 = 9.81;
-    G * range / (2.0 * MUZZLE_SPEED * MUZZLE_SPEED)
+/// The prompt text inside the [`ViewDeathOverlay`] — its own (child) entity, so the overlay's
+/// `Visibility` (on the parent) and this `Text` are written separately.
+#[derive(Component)]
+struct ViewDeathText;
+
+/// Seconds a refusal toast stays up.
+const TOAST_SECONDS: f32 = 2.0;
+
+/// A brief on-screen message — used when a view switch is *refused* (the target view's crewman is
+/// down), so the silent Lshift no-op gets a reason. Ticks down in `update_toast`.
+#[derive(Resource, Default)]
+struct Toast {
+    message: String,
+    remaining: f32,
+}
+
+impl Toast {
+    fn show(&mut self, message: impl Into<String>) {
+        self.message = message.into();
+        self.remaining = TOAST_SECONDS;
+    }
+}
+
+/// The toast's text node (upper-centre); shown while [`Toast::remaining`] > 0.
+#[derive(Component)]
+struct ToastText;
+
+/// HUD: the dialed range, shown in the optic so the ranging skill is legible — the player needs to
+/// read what they've set to estimate and correct it. Hidden outside gunner view.
+#[derive(Component)]
+struct RangeReadout;
+
+/// The ranging reticle's static horizontal reference line, held on the sight centre. The moving range
+/// scale slides behind it; whichever graduation the line crosses is the dialed range.
+#[derive(Component)]
+struct ReticleLine;
+
+/// One graduation of the moving range scale, tagged with the absolute range it marks. Majors (400 m
+/// multiples) carry a number; minors (the 200 m halves) don't. Repositioned each frame to
+/// `θ(dialed) − θ(range)` above centre, so the scale rides up with the gun as range is dialed out and
+/// the dialed graduation lands on the [`ReticleLine`].
+#[derive(Component)]
+struct RangeScaleTick {
+    range: f32,
+    major: bool,
 }
 
 pub fn plugin(app: &mut App) {
     app.init_resource::<SightMode>()
-        .init_resource::<Ranging>()
         .init_resource::<GunnerIntent>()
-        .add_systems(Startup, (spawn_intent_reticle, spawn_view_death_overlay))
+        .init_resource::<Toast>()
+        .add_systems(
+            Startup,
+            (
+                spawn_intent_reticle,
+                spawn_view_death_overlay,
+                spawn_toast,
+                spawn_range_readout,
+                spawn_ranging_reticle,
+            ),
+        )
         .add_systems(
             Update,
             (
                 toggle_sight,
-                drive_gunner_aim.run_if(in_gunner),
-                adjust_range.run_if(in_gunner),
+                // Commits the shared `AimPoint` from the magnified intent (in `AimCommit`, so
+                // `aim::drive_aim_servos` reads it after — same as third-person).
+                drive_gunner_aim.run_if(in_gunner).in_set(AimCommit),
                 update_view_death_overlay,
+                // After `toggle_sight`, so a refused switch this frame shows its reason.
+                update_toast,
+                update_range_readout,
             )
                 .chain()
+                .in_set(GameplaySet),
+        )
+        // React to a view-mode change by re-laying the controlled tank's render layer (hidden from
+        // the optic / shown otherwise). After `toggle_sight` so it sees this frame's mode.
+        .add_systems(
+            Update,
+            sync_optic_render_layer
+                .run_if(resource_changed::<SightMode>)
+                .after(toggle_sight)
                 .in_set(GameplaySet),
         )
         // The intent cursor reprojects through the gunner camera, so it runs after the camera's pose
@@ -113,7 +176,7 @@ pub fn plugin(app: &mut App) {
         // — so the reprojection is clean by construction, no aliasing.
         .add_systems(
             PostUpdate,
-            update_intent_reticle
+            (update_intent_reticle, update_ranging_reticle)
                 .in_set(GameplaySet)
                 .after(TransformSystems::Propagate)
                 .after(GunnerCameraPlaced),
@@ -156,6 +219,7 @@ fn spawn_view_death_overlay(mut commands: Commands) {
         ))
         .with_children(|parent| {
             parent.spawn((
+                ViewDeathText,
                 Text::new(""),
                 TextFont {
                     font_size: FontSize::Px(20.0),
@@ -164,6 +228,188 @@ fn spawn_view_death_overlay(mut commands: Commands) {
                 TextColor(Color::srgb(0.9, 0.4, 0.3)),
             ));
         });
+}
+
+/// The refusal-toast text node: a centred banner in the upper third, hidden until a refused switch
+/// raises it. Its own entity carries both `Text` and `Visibility`, so `update_toast` writes one query.
+fn spawn_toast(mut commands: Commands) {
+    commands
+        .spawn(Node {
+            width: Val::Percent(100.0),
+            position_type: PositionType::Absolute,
+            top: Val::Percent(30.0),
+            justify_content: JustifyContent::Center,
+            ..default()
+        })
+        .with_children(|parent| {
+            parent.spawn((
+                ToastText,
+                Text::new(""),
+                TextFont {
+                    font_size: FontSize::Px(22.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(1.0, 0.75, 0.3)),
+                Visibility::Hidden,
+            ));
+        });
+}
+
+/// The dialed-range readout, parked bottom-left; populated/shown only in the optic.
+fn spawn_range_readout(mut commands: Commands) {
+    commands.spawn((
+        RangeReadout,
+        Text::new(""),
+        TextFont {
+            font_size: FontSize::Px(16.0),
+            ..default()
+        },
+        TextColor(Color::srgba(1.0, 0.8, 0.3, 0.9)),
+        Node {
+            position_type: PositionType::Absolute,
+            bottom: Val::Px(24.0),
+            left: Val::Px(24.0),
+            ..default()
+        },
+        Visibility::Hidden,
+    ));
+}
+
+/// Show the dialed range in the optic so the player can read and correct their estimate; hidden in
+/// third-person (where scroll is the camera dolly, not ranging).
+fn update_range_readout(
+    mode: Res<SightMode>,
+    ranging: Res<Ranging>,
+    mut readout: Query<(&mut Text, &mut Visibility), With<RangeReadout>>,
+) {
+    let Ok((mut text, mut visibility)) = readout.single_mut() else {
+        return;
+    };
+    if *mode == SightMode::Gunner {
+        *text = Text::new(format!("RANGE {} m", ranging.range as i32));
+        *visibility = Visibility::Visible;
+    } else {
+        *visibility = Visibility::Hidden;
+    }
+}
+
+/// Reticle graticule colour — amber, grouping it with the other gunnery readouts.
+const RETICLE_COLOR: Color = Color::srgba(1.0, 0.8, 0.3, 0.85);
+
+/// Spawn the ranging reticle: the static centre line (held on the sight centre via a flex box, the
+/// same idiom as the white centre dot) and the pool of range graduations (200 m steps, majors
+/// numbered in hundreds of metres). All hidden until shown in the optic.
+fn spawn_ranging_reticle(mut commands: Commands) {
+    commands
+        .spawn(Node {
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            ..default()
+        })
+        .with_children(|parent| {
+            parent.spawn((
+                ReticleLine,
+                Node {
+                    width: Val::Px(96.0),
+                    height: Val::Px(2.0),
+                    ..default()
+                },
+                BackgroundColor(RETICLE_COLOR),
+                Visibility::Hidden,
+            ));
+        });
+
+    let mut range = 200.0_f32;
+    while range <= 4000.0 {
+        let major = (range as i32) % 400 == 0;
+        let width = if major { 24.0 } else { 12.0 };
+        let mut tick = commands.spawn((
+            RangeScaleTick { range, major },
+            Node {
+                position_type: PositionType::Absolute,
+                width: Val::Px(width),
+                height: Val::Px(2.0),
+                ..default()
+            },
+            BackgroundColor(RETICLE_COLOR),
+            Visibility::Hidden,
+        ));
+        if major {
+            // Label rides the tick: an absolute child offsets from the tick's own top-left.
+            tick.with_children(|parent| {
+                parent.spawn((
+                    Text::new(format!("{}", (range as i32) / 100)),
+                    TextFont {
+                        font_size: FontSize::Px(12.0),
+                        ..default()
+                    },
+                    TextColor(RETICLE_COLOR),
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: Val::Px(width + 5.0),
+                        top: Val::Px(-7.0),
+                        ..default()
+                    },
+                ));
+            });
+        }
+        range += 200.0;
+    }
+}
+
+/// Slide the range scale so each graduation sits at `θ(dialed) − θ(range)` above the sight centre: the
+/// dialed range lands on the [`ReticleLine`], nearer ranges above it, farther below, the whole scale
+/// riding up with the gun as range is dialed out. Reprojected through the gunner camera (after it has
+/// placed itself this frame), so it shares the rendered pose; hidden outside the optic. Reads the laid
+/// weapon's table — the main gun for now — which is the per-ammo ballistic scale.
+fn update_ranging_reticle(
+    mode: Res<SightMode>,
+    ranging: Res<Ranging>,
+    controlled: Query<&Rig, With<Controlled>>,
+    tables: Query<&RangeTable>,
+    camera: Single<(&Camera, &GlobalTransform)>,
+    mut line: Query<&mut Visibility, (With<ReticleLine>, Without<RangeScaleTick>)>,
+    mut ticks: Query<(&RangeScaleTick, &mut Node, &mut Visibility), Without<ReticleLine>>,
+) {
+    let gunner = *mode == SightMode::Gunner;
+    if let Ok(mut visibility) = line.single_mut() {
+        *visibility = if gunner {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
+
+    let table = controlled
+        .single()
+        .ok()
+        .and_then(|rig| tables.get(rig.muzzle).ok());
+    let (camera, cam_transform) = *camera;
+    let rot = cam_transform.rotation();
+    let forward = rot * Vec3::NEG_Z;
+    let right = rot * Vec3::X;
+
+    for (tick, mut node, mut visibility) in &mut ticks {
+        let Some(table) = table.filter(|_| gunner) else {
+            *visibility = Visibility::Hidden;
+            continue;
+        };
+        // Angle above centre = θ(dialed) − θ(this mark); rotate the sight line up by it about the
+        // camera's right axis (so the scale is screen-vertical regardless of hull roll) and reproject.
+        let angle = table.superelevation(ranging.range) - table.superelevation(tick.range);
+        let dir = Quat::from_axis_angle(right, angle) * forward;
+        match camera.world_to_viewport(cam_transform, cam_transform.translation() + dir) {
+            Ok(screen) => {
+                let half = if tick.major { 12.0 } else { 6.0 };
+                node.left = Val::Px(screen.x - half);
+                node.top = Val::Px(screen.y - 1.0);
+                *visibility = Visibility::Visible;
+            }
+            Err(_) => *visibility = Visibility::Hidden,
+        }
+    }
 }
 
 /// Place the intent cursor at the reprojection of the committed intent direction. A *direction*
@@ -216,64 +462,99 @@ fn update_intent_reticle(
 /// Lshift flips the view — but only if the target view's crewman is alive. Entering gunner view
 /// seeds the intent from the gun's *current* lay (not its commanded target — seeding from `target`
 /// yanks the intent ahead of the gun by however far it was still slewing, and the lead clamp then
-/// snaps it back → a jump on handover). The sight-line pitch is the gun's bore minus the current
-/// superelevation. Entering also hides the tank root so the optic (parked at the gun pivot, inside
-/// the mantlet) clips no own geometry; leaving restores it.
+/// snaps it back → a jump on handover). The sight line is the bore (pure LOS). The controlled tank's
+/// own mesh is hidden from the optic by `sync_optic_render_layer` (reacting to the mode change), so
+/// the camera parked inside the mantlet sees through its own geometry.
 fn toggle_sight(
     keys: Res<ButtonInput<KeyCode>>,
     mut mode: ResMut<SightMode>,
     mut intent: ResMut<GunnerIntent>,
-    ranging: Res<Ranging>,
     controlled: ControlledTank,
+    views: Query<&TankViews, With<Controlled>>,
     turret: Query<&ServoState, (With<Turret>, Without<Gun>)>,
     gun: Query<&ServoState, (With<Gun>, Without<Turret>)>,
-    mut tank_vis: Query<&mut Visibility, With<Tank>>,
+    ranging: Res<Ranging>,
+    tables: Query<&RangeTable>,
+    mut toast: ResMut<Toast>,
 ) {
     if !keys.just_pressed(KeyCode::ShiftLeft) {
         return;
     }
-    let (Some(tank), Some((turret_entity, gun_entity))) = (
-        controlled.entity(),
-        controlled.rig().map(|r| (r.turret, r.gun)),
-    ) else {
+    let Some((turret_entity, gun_entity, muzzle_entity)) =
+        controlled.rig().map(|r| (r.turret, r.gun, r.muzzle))
+    else {
         return;
     };
     *mode = match *mode {
         SightMode::ThirdPerson => {
-            // Only switch to gunner optic if the gunner is alive.
-            if !controlled.available(Capability::GunnerSight) {
+            // Only switch to gunner optic if the gunner view is usable (gunner alive) — otherwise
+            // toast the reason, since the switch silently does nothing.
+            if !view_available(&controlled, &views, ViewKind::Gunner) {
+                toast.show(format!("{} unavailable", ViewKind::Gunner.label()));
                 return;
             }
             if let (Ok(t), Ok(g)) = (turret.get(turret_entity), gun.get(gun_entity)) {
+                // The gun's live pitch carries the superelevation lob; seed the intent from the sight
+                // line (bore − lob), not the raised bore, or the view jumps θ on handover.
+                let theta = tables
+                    .get(muzzle_entity)
+                    .map_or(0.0, |table| table.superelevation(ranging.range));
                 intent.yaw = t.current();
-                // Sight-line pitch = bore − superelevation; seeding the bore would re-elevate on top.
-                intent.pitch = g.current() - superelevation(ranging.range);
-            }
-            // Hide only the controlled tank's mesh — the optic sits inside its mantlet.
-            if let Ok(mut v) = tank_vis.get_mut(tank) {
-                *v = Visibility::Hidden;
+                intent.pitch = g.current() - theta;
             }
             SightMode::Gunner
         }
         SightMode::Gunner => {
-            // Only switch to third-person if the commander is alive.
-            if !controlled.available(Capability::CommanderView) {
+            // Only switch to third-person if the commander view is usable (commander alive).
+            if !view_available(&controlled, &views, ViewKind::Commander) {
+                toast.show(format!("{} unavailable", ViewKind::Commander.label()));
                 return;
-            }
-            if let Ok(mut v) = tank_vis.get_mut(tank) {
-                *v = Visibility::Inherited;
             }
             SightMode::ThirdPerson
         }
     };
 }
 
+/// The render layer the controlled tank's meshes move to while in the gunner optic. The world,
+/// terrain, and other tanks stay on layer 0 (which the camera draws); the controlled tank's own
+/// meshes go here, which the camera does not draw — so the optic, parked inside the mantlet, sees
+/// through its own geometry while everything else renders normally.
+const OPTIC_HIDDEN_LAYER: usize = 1;
+
+/// Hide the controlled tank from its own gunner optic via **render layers, not `Visibility`**. While
+/// in the optic, the controlled tank's render meshes move to [`OPTIC_HIDDEN_LAYER`]; otherwise they
+/// sit on the default layer 0 the camera draws. Render layers are per-camera and, unlike
+/// `Visibility`, are not co-owned by Avian's debug renderer (`PhysicsDebugPlugin` rewrites mesh
+/// `Visibility` when gizmos are toggled), so a debug toggle can no longer defeat the hide. Runs only
+/// when the view mode changes; `RenderLayers` does not inherit, so it is set on each render mesh.
+fn sync_optic_render_layer(
+    mode: Res<SightMode>,
+    controlled: Query<Entity, With<Controlled>>,
+    tanks: Query<Entity, With<Tank>>,
+    children: Query<&Children>,
+    meshes: Query<(), With<Mesh3d>>,
+    mut commands: Commands,
+) {
+    let controlled_tank = controlled.single().ok();
+    for tank in &tanks {
+        let hidden = *mode == SightMode::Gunner && Some(tank) == controlled_tank;
+        let layer = if hidden {
+            RenderLayers::layer(OPTIC_HIDDEN_LAYER)
+        } else {
+            RenderLayers::layer(0)
+        };
+        for entity in children.iter_descendants(tank) {
+            if meshes.contains(entity) {
+                commands.entity(entity).insert(layer.clone());
+            }
+        }
+    }
+}
+
 /// World-space position-control aiming. Mouse deltas accumulate into the committed hull-local
-/// intent; the turret/gun servos are commanded to chase it. The gun target carries the
-/// superelevation on top of the sight-line pitch, so the barrel rides above the line of sight.
-///
-/// Gated by the Gunner's `Traverse` capability — a dead gunner freezes the servos (the turret/gun
-/// hold their last commanded position).
+/// intent, which is published as the shared `AimPoint` (a far point along the intent's line of
+/// sight) — so `aim::drive_aim_servos` chases it with *every* servo, the gun and the hull MG alike,
+/// at their own slew rates. No servo command is written here; this only moves the aim point.
 ///
 /// The intent is clamped to a circular **margin** — it may lead the gun's *current* lay by at most
 /// `LEAD_MARGIN` of *angular* distance — so the cursor can't run off-screen ahead of the slow
@@ -281,19 +562,19 @@ fn toggle_sight(
 /// circular (not per-axis) so diagonal lead feels uniform — a square clamp let you lead ~√2·margin
 /// on the diagonal — and yaw is wrapped (`shortest_angle`) so continuous traverse past ±π doesn't
 /// yank the intent across the wrap. This is the on-screen-cursor bound, distinct from the gun's
-/// mechanical travel limits, which `drive_servos` still enforces.
+/// mechanical travel limits, which `drive_servos` still enforces. The gun chain (`Turret`/`Gun`)
+/// is the lead reference; the hull MG simply rides the same point.
 fn drive_gunner_aim(
     motion: Res<AccumulatedMouseMotion>,
-    ranging: Res<Ranging>,
     mut intent: ResMut<GunnerIntent>,
     controlled: ControlledTank,
-    mut turret: Query<(&mut ServoCommand, &ServoState), (With<Turret>, Without<Gun>)>,
-    mut gun: Query<(&mut ServoCommand, &ServoState), (With<Gun>, Without<Turret>)>,
+    turret: Query<&ServoState, (With<Turret>, Without<Gun>)>,
+    gun: Query<&ServoState, (With<Gun>, Without<Turret>)>,
+    ranging: Res<Ranging>,
+    tables: Query<&RangeTable>,
+    mut aim_point: Query<&mut AimPoint>,
 ) {
-    if !controlled.available(Capability::Traverse) {
-        return;
-    }
-    let Some((turret_entity, gun_entity)) = controlled.rig().map(|r| (r.turret, r.gun)) else {
+    let Some(rig) = controlled.rig() else {
         return;
     };
 
@@ -303,24 +584,32 @@ fn drive_gunner_aim(
     // Max angular distance the intent may lead the gun's live lay (rad, ~2.3°) — keeps the cursor
     // inside the optic.
     const LEAD_MARGIN: f32 = 0.04;
+    // Distance to the published aim point: far enough that all mounts aim essentially parallel
+    // (boresighted along the intent), since there's no committed convergence range yet.
+    const AIM_RANGE: f32 = 10_000.0;
 
     intent.yaw -= motion.delta.x * SENSITIVITY;
     intent.pitch -= motion.delta.y * SENSITIVITY;
 
-    let superelevation = superelevation(ranging.range);
-
-    let Ok((mut t_cmd, t_state)) = turret.get_mut(turret_entity) else {
+    let Ok(t_state) = turret.get(rig.turret) else {
         return;
     };
-    let Ok((mut g_cmd, g_state)) = gun.get_mut(gun_entity) else {
+    let Ok(g_state) = gun.get(rig.gun) else {
         return;
     };
 
-    // Lead as a 2D angular vector from the gun's current sight-line lay. Yaw uses shortest-angle
-    // difference so continuous traverse doesn't wind up. `drive_servos` runs in `Update` after this
-    // system, so `current` is this frame's live angle — the clamp and the chase share one clock.
+    // Superelevation for the dialed range; the gun's live pitch carries it, so the sight line (which
+    // the intent tracks) is the gun's lay minus the lob.
+    let theta = tables
+        .get(rig.muzzle)
+        .map_or(0.0, |table| table.superelevation(ranging.range));
+
+    // Lead as a 2D angular vector from the gun chain's current *sight line* (lay − lob). Yaw uses
+    // shortest-angle difference so continuous traverse doesn't wind up. `drive_servos` runs after
+    // `GameplaySet`, so `current` is the prior frame's integrated angle — clamp and chase share one
+    // clock.
     let yaw_offset = shortest_angle(intent.yaw - t_state.current());
-    let sight_now = g_state.current() - superelevation;
+    let sight_now = g_state.current() - theta;
     let pitch_offset = intent.pitch - sight_now;
 
     // Circular clamp: preserve direction, cap magnitude. Within the margin the intent is left
@@ -333,9 +622,12 @@ fn drive_gunner_aim(
         intent.pitch = sight_now + pitch_offset * scale;
     }
 
-    t_cmd.target = intent.yaw;
-    // The gun's live lay carries the superelevation; the sight line is that minus it.
-    g_cmd.target = intent.pitch + superelevation;
+    // Publish the raw sight-line intent as the shared aim point: a far point (mounts aim ~parallel),
+    // hull-local so it rides with the tank (unstabilized). `drive_aim_servos` lobs it by the
+    // superelevation, raising the bore above the line of sight; this stays the intention.
+    if let Ok(mut aim_point) = aim_point.get_mut(rig.turret) {
+        aim_point.0 = Some(intent.local_dir() * AIM_RANGE);
+    }
 }
 
 /// Show/hide the black overlay + prompt when the active view's crewman is dead. The prompt tells
@@ -344,35 +636,29 @@ fn drive_gunner_aim(
 fn update_view_death_overlay(
     mode: Res<SightMode>,
     controlled: ControlledTank,
-    mut overlay: Query<(&mut Visibility, &mut Text), With<ViewDeathOverlay>>,
+    views: Query<&TankViews, With<Controlled>>,
+    mut overlay: Query<&mut Visibility, With<ViewDeathOverlay>>,
+    mut label: Query<&mut Text, With<ViewDeathText>>,
 ) {
     if controlled.entity().is_none() {
         return;
     }
-    let Ok((mut vis, mut text)) = overlay.single_mut() else {
+    // The overlay's `Visibility` lives on the full-screen node; its prompt `Text` on the child.
+    let (Ok(mut vis), Ok(mut text)) = (overlay.single_mut(), label.single_mut()) else {
         return;
     };
 
-    let (active_cap, other_cap, other_label) = match *mode {
-        SightMode::ThirdPerson => (
-            Capability::CommanderView,
-            Capability::GunnerSight,
-            "gunner optic",
-        ),
-        SightMode::Gunner => (
-            Capability::GunnerSight,
-            Capability::CommanderView,
-            "third-person",
-        ),
+    let (active_view, other_view, other_label) = match *mode {
+        SightMode::ThirdPerson => (ViewKind::Commander, ViewKind::Gunner, "gunner optic"),
+        SightMode::Gunner => (ViewKind::Gunner, ViewKind::Commander, "third-person"),
     };
 
-    let active_available = controlled.available(active_cap);
-    if active_available {
+    if view_available(&controlled, &views, active_view) {
         *vis = Visibility::Hidden;
         return;
     }
 
-    let other_available = controlled.available(other_cap);
+    let other_available = view_available(&controlled, &views, other_view);
     *text = Text::new(if other_available {
         format!("Crewman down — [Lshift] for {other_label}")
     } else {
@@ -381,10 +667,21 @@ fn update_view_death_overlay(
     *vis = Visibility::Visible;
 }
 
-/// Scroll dials the range in gunner view (range, not zoom — the optic's magnification is fixed).
-fn adjust_range(scroll: Res<AccumulatedMouseScroll>, mut ranging: ResMut<Ranging>) {
-    const RANGE_STEP: f32 = 50.0;
-    const RANGE_MIN: f32 = 50.0;
-    const RANGE_MAX: f32 = 4000.0;
-    ranging.range = (ranging.range + scroll.delta.y * RANGE_STEP).clamp(RANGE_MIN, RANGE_MAX);
+/// Tick the refusal toast: show its message while it has time left, then hide it. Set by
+/// `toggle_sight` when a view switch is refused (the target view's crewman is down).
+fn update_toast(
+    time: Res<Time>,
+    mut toast: ResMut<Toast>,
+    mut label: Query<(&mut Text, &mut Visibility), With<ToastText>>,
+) {
+    let Ok((mut text, mut visibility)) = label.single_mut() else {
+        return;
+    };
+    if toast.remaining > 0.0 {
+        toast.remaining -= time.delta_secs();
+        *text = Text::new(toast.message.clone());
+        *visibility = Visibility::Visible;
+    } else if *visibility != Visibility::Hidden {
+        *visibility = Visibility::Hidden;
+    }
 }

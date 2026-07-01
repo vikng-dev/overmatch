@@ -27,13 +27,11 @@ use crate::ballistics::{
     self, ArmorVolume, BallisticVolume, ComponentHealth, ComponentVolume, FireShell, ImpactMarker,
     PenetrationMarks, ShellPath, ShellReadout, SpallMarks,
 };
-use crate::damage::{
-    self, Ammo, CookedOff, CrewStation, Crewman, Dead, LaunchedTurret, PendingSwap, SWAP_SECONDS,
-    TankKnockedOut, VolumeOf,
-};
+use crate::crew_ui;
+use crate::damage::{self, Ammo, CookedOff, Dead, LaunchedTurret, TankKnockedOut};
 use crate::hud::{self, HudCamera};
 use crate::spec::{self, TankSpec, TankSpecHandle};
-use crate::tank::{Tank, on_tank_ready};
+use crate::tank::{Controlled, Tank, on_tank_ready};
 use crate::world;
 
 /// Muzzle speed for sandbox shots (m/s) — the 88 mm, matching the game's gun for now. Becomes a
@@ -60,16 +58,6 @@ struct ShellLabel;
 /// The top-right readout of each layer's current tap-loop state.
 #[derive(Component)]
 struct LayerStatusText;
-
-/// The bottom crew bar: one cell per seat, driven by the `1`–`5` swap input.
-#[derive(Component)]
-struct CrewBarText;
-
-/// Crew-bar selection: the seat tapped as the swap *source*, awaiting a target.
-#[derive(Resource, Default)]
-struct CrewSelect {
-    source: Option<CrewStation>,
-}
 
 /// The slow-motion ladder the Up/Down arrows step through (a shell flies ~773 m/s).
 const SPEEDS: [f32; 6] = [1.0, 0.25, 0.06, 0.015, 0.004, 0.001];
@@ -204,6 +192,9 @@ pub fn plugin(app: &mut App) {
         // Shared tank-state HUD (component HP + aggregate status labels), reprojected through the
         // `HudCamera` tag on the free-fly camera below.
         hud::plugin,
+        // The controlled tank's crew bar + `1`–`5` swap input (shared with the game). The sandbox's
+        // single target is marked `Controlled`, so the same code drives it here.
+        crew_ui::plugin,
     ))
     // Keep spent shells frozen in place (with their tracer + marks) for inspection.
     .insert_resource(ballistics::RetainSpentShells(true))
@@ -211,7 +202,6 @@ pub fn plugin(app: &mut App) {
     .insert_resource(ballistics::MarchMode::Demo)
     .init_resource::<LayerView>()
     .init_resource::<SpeedIndex>()
-    .init_resource::<CrewSelect>()
     // Paint translucent materials onto the volume meshes as they bind.
     .add_observer(paint_armor)
     .add_observer(paint_component)
@@ -249,10 +239,7 @@ pub fn plugin(app: &mut App) {
             update_status,
             update_shell_labels,
         ),
-    )
-    // Crew bar (`1`–`5` swap input + render) — split out so the Update tuple stays within Bevy's
-    // 20-system limit.
-    .add_systems(Update, (crew_swap_input, update_crew_bar));
+    );
 }
 
 fn spawn_camera(mut commands: Commands) {
@@ -381,6 +368,9 @@ fn spawn_target_when_ready(
             Transform::from_xyz(0.0, 2.0, -12.0),
             Name::new("Tiger I target"),
             Tank,
+            // The sandbox's single tank is the one under study — mark it `Controlled` so the shared
+            // crew bar (scoped to the controlled tank) drives it, exactly as in the game.
+            Controlled,
             RigidBody::Static,
         ))
         .observe(on_tank_ready);
@@ -545,125 +535,6 @@ fn toggle_layers(keys: Res<ButtonInput<KeyCode>>, mut view: ResMut<LayerView>) {
     if keys.just_pressed(KeyCode::F3) {
         view.components = view.components.next();
     }
-}
-
-/// `1`–`5` crew-bar input: tap a seat to select it as the swap source, tap a second to start a
-/// [`PendingSwap`]; re-tapping the source (or any seat while a swap is mid-flight) cancels.
-fn crew_swap_input(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut select: ResMut<CrewSelect>,
-    tank: Query<(Entity, Option<&PendingSwap>), With<Tank>>,
-    seats: Query<(Entity, &CrewStation, &VolumeOf)>,
-    mut commands: Commands,
-) {
-    const DIGITS: [KeyCode; 5] = [
-        KeyCode::Digit1,
-        KeyCode::Digit2,
-        KeyCode::Digit3,
-        KeyCode::Digit4,
-        KeyCode::Digit5,
-    ];
-    let Some(slot) = DIGITS.iter().position(|k| keys.just_pressed(*k)) else {
-        return;
-    };
-    let Ok((tank, pending)) = tank.single() else {
-        return;
-    };
-
-    // Seats for this tank in enum (slot) order.
-    let mut ordered: Vec<(Entity, CrewStation)> = seats
-        .iter()
-        .filter(|(_, _, owner)| owner.tank() == tank)
-        .map(|(e, s, _)| (e, *s))
-        .collect();
-    ordered.sort_by_key(|(_, s)| *s);
-    let Some(&(seat_entity, seat_station)) = ordered.get(slot) else {
-        return;
-    };
-
-    // Any tap while a swap is in flight cancels it.
-    if pending.is_some() {
-        commands.entity(tank).remove::<PendingSwap>();
-        select.source = None;
-        return;
-    }
-
-    match select.source {
-        None => select.source = Some(seat_station),
-        Some(src) if src == seat_station => select.source = None, // re-tap = deselect
-        Some(src) => {
-            if let Some(&(src_entity, _)) = ordered.iter().find(|(_, s)| *s == src) {
-                commands.entity(tank).insert(PendingSwap {
-                    a: src_entity,
-                    b: seat_entity,
-                    remaining: SWAP_SECONDS,
-                });
-            }
-            select.source = None;
-        }
-    }
-}
-
-/// Render the crew bar: `N:Seat` per seat in enum order, plus the occupant (when foreign) and a
-/// `+`/`-` alive/dead mark. The selected source is bracketed `[..]`; a pending swap marks both seats
-/// `~..~` and shows its countdown.
-fn update_crew_bar(
-    select: Res<CrewSelect>,
-    tank: Query<(Entity, Option<&PendingSwap>), With<Tank>>,
-    seats: Query<(Entity, &CrewStation, &Crewman, Option<&Dead>, &VolumeOf)>,
-    mut bar: Query<&mut Text, With<CrewBarText>>,
-) {
-    let Ok(mut text) = bar.single_mut() else {
-        return;
-    };
-    let Ok((tank, pending)) = tank.single() else {
-        *text = Text::new("");
-        return;
-    };
-
-    let mut ordered: Vec<(Entity, CrewStation, Crewman, bool)> = seats
-        .iter()
-        .filter(|(_, _, _, _, owner)| owner.tank() == tank)
-        .map(|(e, s, c, dead, _)| (e, *s, *c, dead.is_some()))
-        .collect();
-    ordered.sort_by_key(|(_, s, _, _)| *s);
-
-    let cells: Vec<String> = ordered
-        .iter()
-        .enumerate()
-        .map(|(i, (entity, seat, crewman, dead))| {
-            // Notes after the seat name: who is actually manning it (when foreign), and whether the
-            // occupant is dead — e.g. "Loader (Commander, dead)".
-            let mut notes: Vec<&str> = Vec::new();
-            if crewman.home != *seat {
-                notes.push(crewman.home.label());
-            }
-            if *dead {
-                notes.push("dead");
-            }
-            let detail = if notes.is_empty() {
-                String::new()
-            } else {
-                format!(" ({})", notes.join(", "))
-            };
-            let mut cell = format!("{}: {}{}", i + 1, seat.label(), detail);
-            if select.source == Some(*seat) {
-                cell = format!("[{cell}]");
-            }
-            if let Some(ps) = pending
-                && (*entity == ps.a || *entity == ps.b)
-            {
-                cell = format!("~{cell}~");
-            }
-            cell
-        })
-        .collect();
-
-    let prefix = match pending {
-        Some(ps) => format!("SWAP {:.1}s   ", ps.remaining.max(0.0)),
-        None => String::new(),
-    };
-    *text = Text::new(format!("{prefix}{}", cells.join("    ")));
 }
 
 /// Apply the layer states to the target's meshes. The hull swaps material/visibility for its loop;
@@ -1056,22 +927,6 @@ fn spawn_hud(mut commands: Commands) {
         Node {
             position_type: PositionType::Absolute,
             top: Val::Px(8.0),
-            left: Val::Px(10.0),
-            ..default()
-        },
-    ));
-    // Crew bar, bottom-left — one cell per seat, driven by `update_crew_bar`.
-    commands.spawn((
-        CrewBarText,
-        Text::new(""),
-        TextFont {
-            font_size: FontSize::Px(15.0),
-            ..default()
-        },
-        TextColor(Color::srgb(0.92, 0.94, 0.78)),
-        Node {
-            position_type: PositionType::Absolute,
-            bottom: Val::Px(10.0),
             left: Val::Px(10.0),
             ..default()
         },

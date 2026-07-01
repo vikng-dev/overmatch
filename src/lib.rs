@@ -18,10 +18,16 @@ mod aim;
 mod ballistics;
 mod branding;
 mod camera;
+/// The controlled tank's crew bar + swap input — a shared piece of the fixed player UI, mounted by
+/// both `GamePlugin` and the sandbox (each scoped to the `Controlled` tank).
+mod crew_ui;
 pub(crate) mod damage;
 #[cfg(debug_assertions)]
 mod debug;
 mod driving;
+/// Fire control: per-weapon superelevation range tables + the player-dialed range. Sits atop
+/// `ballistics`; the aim commit reads it to lob the aim point so the bore elevates for range.
+mod firecontrol;
 /// The shared tank-state HUD (world-anchored capability/crew/damage readouts). Mounted by both
 /// `GamePlugin` and the sandbox; each tags its own world camera with `hud::HudCamera`.
 mod hud;
@@ -75,10 +81,15 @@ impl Plugin for GamePlugin {
             // `ballistics` owns the shell trajectory + impact seam; `shooting` is the player's gun
             // control that drives it (the sandbox drives the same `FireShell` from its camera).
             ballistics::plugin,
+            // Fire control: builds each weapon's range table at bind and owns the dialed range; the
+            // aim commit lobs the aim point by the looked-up superelevation.
+            firecontrol::plugin,
             damage::plugin,
             shooting::plugin,
-            // The shared tank-state HUD — capability/crew/damage readouts floated over each tank.
-            hud::plugin,
+            // The shared UI: the tank-state HUD (capability/crew/damage floated over each tank) and
+            // the controlled tank's crew bar + `1`–`5` swap input. Nested so the plugin list stays
+            // within Bevy's 15-tuple `add_plugins` limit.
+            (hud::plugin, crew_ui::plugin),
         ));
 
         // Dev-only physics visualization (collider/ray wireframes) + debug toggles. Off in release

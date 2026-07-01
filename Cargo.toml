@@ -16,6 +16,11 @@ ron = "0.12"
 winit = "0.30"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
+# Test-only: read a `.glb`'s node names directly (no Bevy app) for the spec↔model bind-contract
+# test. Matches the version `bevy_gltf` already resolves, so it adds nothing to the dep tree.
+[dev-dependencies]
+gltf = "1.4"
+
 [profile.dev]
 opt-level = 1
 
