@@ -863,6 +863,181 @@ both.
   - AWAITING USER TEST (model 2): dots + normal lines steady at rest; while driving, load migration
     still reads (smoothing is ~4 ticks, well under perception at speed). If flicker persists → it's
     contact-set blink at the patch edges, next diagnosis.
+- 2026-07-02 — **MODEL 2 FINAL SAVED**: commit `ea54a48`, tag `checkpoint/track-model-2` moved to
+  it (pre-Verlet snapshot `8a1fae4` remains in history). Model 2 closed.
+- 2026-07-02 — **MODEL 3 DEFINED: box-belt (user-driven design discussion).** Track *width* + link
+  *thickness* enter the model. Settled design, three refinements deep:
+  1. Sample the **actual link**: longitudinally the pitch was already physical (172 mm); laterally
+     the link was a zero-width line — the real shoe is 500×172 mm. A rectangle/box cast is a drop-in
+     (`cast_shape` takes any collider; thin-box casts are robust) — **detection** (first touch
+     anywhere on the face) generalizes for free; the **resultant** (our pressure profile) needs the
+     lateral dimension added: edge-column 1D profiles + load-weighted lateral centroid (full-face
+     cast for detection, edges for distribution). Lateral resolution knob = column count.
+  2. **Box, not plate** (user: "all in"): links have thickness; wheels sit on the internal face,
+     ground on the external. Decomposes to two parallel faces of one curve + honest rolling radius +
+     wrap fan-out for free; end-face contact and link self-collision consciously parked.
+  3. **Pin line** (user, the mechanically correct core): the chain solve rides the pins at
+     mid-thickness — the true pitch line of a link chain (172 mm IS pin-to-pin; sprocket engagement
+     is at pitch radius). Three parallel offsets of one solved curve: inner face (pin − t/2, wheels),
+     pin line (chain/joints/pitch/advection), outer face (pin + t/2, terrain + force application).
+     Boxes scissor at pins on bends — the meshes' job to interlock, like real castings.
+- 2026-07-02 — **Step 16: model 3 increment 1 — pin-line chain + box cast** (green: fmt/clippy
+  clean). New `model3.rs` (fork of model 2): `TRACK_THICKNESS` 0.04 (T-34 shoe); `PinBelt` resource
+  (own length+count on the pin line — its perimeter is ~π·t longer, reusing model 2's numbers would
+  eat the slack); `pin_circles()` = rest circles + t/2. Physics fork `apply_belt_support_boxes`:
+  oriented **box cast** per link (`Collider::cuboid(0.02 sliver, t, pitch)`, basis lat/out/along —
+  the travel-distance convention makes pen measure past the *outer face* automatically), endpoint
+  rays at the pins' outer-face points, same closed-form profile, force + traction applied **at the
+  outer face** (lever includes the shoe). Conform fork `conform_belts_boxes`: pin-line ring, wheel
+  circles + t/2 (inner face on the gear), terrain planes hold pins t/2 inside ((p−q)·m ≥ t/2),
+  Verlet/slack bookkeeping unchanged. Shared state reused (BeltPhase/ChainMemory/LinkLoads made
+  pub(super) in model2; chain-solve consts copied into model3 so it can tune independently).
+  `articulate_wheels` gets a per-model surface offset (+t/2); `draw_rig_gizmos` draws the **outer
+  face** as a dimmer companion line for model 3 (the thickness reads). Registered: `M` cycles 1→2→3,
+  model 3 default. Lateral width (edge columns) = increment 2; box rendering = increment 3.
+  - AWAITING USER TEST (model 3 default): (1) two parallel cyan lines — pin line + dimmer outer
+    face — with the outer face touching the ground and the tank riding ~4 cm higher than model 2
+    (A/B with M); (2) wheels sit on the chain correctly (inner face — no sink-into-chain);
+    (3) drive/climb/washboard behave like model 2 (thickness is an offset, not new dynamics);
+    (4) wrap regions read right (pins at r + t/2 on the gears).
+  - USER TEST (16): "looks logical — darker blue rides the ground, wheels ride light blue." Three
+    observations: (a) gizmos jitter on flat ground (element TBD — asked dots-vs-lines again);
+    (b) links jumpy creeping along the washboard — analysis: link **slap-down** off bump corners
+    (a link's contact plane is continuous while the corner is under it, then drops to the flat when
+    its trailing edge clears; the rear joint falls over ~100 ms) — largely honest track clatter,
+    user to judge magnitude after fixes; (c) contact gizmos render under the ground.
+- 2026-07-02 — **Step 16b: surface-point contact + gauge hygiene** (green). (1) (c) explained +
+  fixed: force/dots were at the *reference* outer face, which rides ~sink inside the terrain — the
+  penalty penetration is virtual compliance, the real interface is the surface. Model 3 now applies
+  and draws at the surface point (`+ out·(t/2 − pen_c)`, pen at the centroid ≈ (pen_a+pen_max)/2);
+  slightly more honest lever, dots land on the drawn outer line. (2) Hygiene bug: `LinkLoads` (the
+  damped gauge) wasn't cleared on `M`/`R` — stale identity shifts caused garbage-rotation transients
+  after switching; now cleared with the rest.
+  - AWAITING USER TEST (model 3): (1) dots/normals sit ON the dark-blue outer line; (2) which element
+    still jitters on flat (dots/normals vs chain lines) — diagnosis pending user answer; (3) washboard
+    slap-down: honest clack or too harsh?
+- 2026-07-02 — **MODEL 3 RESTART (user decision).** The increment-1 attempt (steps 16/16b) is
+  **deleted** — never committed, removed from the tree — to be rebuilt from scratch in a fresh
+  session. Everything worth keeping is distilled into
+  **`.agents/docs/design/track-model/model3-handoff.md`** (settled design, implementation learnings
+  from the attempt, the two open issues — flat-ground gizmo jitter [element undiagnosed] and the
+  washboard slap-down feel — Avian API notes, workflow contract, registration checklist). Kept in
+  the tree from the attempt: model2's pub(super) state visibilities and the `LinkLoads` clear on
+  `M`/`R` (real hygiene fix). Registry back to models 1–2, model 2 default; fmt/clippy green.
+- 2026-07-02 — **Step 17: model 3 rebuild, increment 1 — pin-line chain + centerline box cast**
+  (green: fmt/clippy clean; clean launch). Rebuilt from the handoff doc, per its registration
+  checklist and implementation learnings. New `model3.rs`: `TRACK_THICKNESS` 0.04; `PinBelt`
+  resource (own length + count on the pin line — `pin_circles()` = rest circles + t/2; reusing
+  model 2's numbers would eat the slack budget); physics fork `apply_belt_support_boxes` — oriented
+  box cast per link (`Collider::cuboid(0.02 sliver, t, pitch)`; travel-distance convention measures
+  pen past the *outer face* automatically), endpoint rays from the pins' outer-face points, same
+  closed-form profile, force + traction + dot **at the terrain surface** (`+ out·(t/2 − pen_c)`,
+  pen_c ≈ (pen_a.max(0)+pen_max)/2 — the 16b fix, baked in from the start); conform fork
+  `conform_belts_boxes` — pin-line ring, wheel circles + t/2, terrain planes hold pins t/2 inside
+  ((p−q)·m ≥ t/2), Verlet/slack bookkeeping = model 2's (consts copied for independent tuning).
+  Wiring: `Model::BoxBelt` registered (M cycles 1→2→3, model 3 default), `articulate_wheels` rides
+  wheels at chain + t/2 for model 3, `draw_rig_gizmos` draws the outer face as a dimmer companion
+  line (`BELT_OUTER_COLOR`). One deliberate deviation from the handoff: its box basis
+  (`lat = axis×out`) is left-handed (det −1, invalid for `Quat::from_mat3`) — used `out×axis`
+  (same lateral axis, sign flipped; identical physics for the symmetric box).
+  - AWAITING USER TEST (model 3 default): (1) two parallel cyan lines — pin line + dimmer outer
+    face — outer face touching the ground, tank riding ~4 cm higher than model 2 (A/B with `M`);
+    (2) wheels sit on the chain correctly (inner face — no sink-into-chain); (3) contact dots +
+    normals sit ON the dark outer line, not underground; (4) drive/climb/washboard behave like
+    model 2 (thickness is an offset, not new dynamics); (5) wrap regions read right (pins at
+    r + t/2 on the gears). WATCH: flat-ground gizmo jitter (if present — which element, dots vs
+    chain lines?) and washboard slap-down feel (honest clack or too harsh?).
+  - NEXT (after user verdict): increment 2 — real 500 mm width + edge columns + lateral centroid;
+    then increment 3 — box rendering.
+  - VERIFIED (user): "feels about the same, the two lines appear correct" — increment 1 accepted
+    (thickness = offset, not new dynamics: exactly the bar). Jitter report: visible on flat ground,
+    easiest on the force gizmos, **wheels also gently vibrating — and it's on ALL 3 models**. That
+    reframes the open jitter issue: the model-specific suspects (companion line, box-cast noise,
+    Verlet chain) are exonerated; the culprit is in the shared substrate (penalty bed + rigid hull
+    on the fixed tick, or the shared conform→wheels→gizmos visual path). Wheels are a new element
+    datum: on flat they should be terrain-locked through the conform; candidates = real hull
+    amplitude bigger than 15b assumed (plus the lift clamp in `articulate_wheels` rectifying at its
+    boundary), or flickering conform casts.
+- 2026-07-02 — **Step 17b: jitter probe** (green: fmt/clippy clean; built, NOT launched — awaiting
+  user go). Element-first measurement instead of guessing: `JitterProbe` resource ring-buffers
+  ~120 frames of (a) hull world y + pitch (physics side), and on the left track at hull-local
+  z ≈ 0 — same spot, picked spatially so the advected rings don't rotate the element away —
+  (b) articulated wheel world y, (c) conformed belly-sample world y, (d) contact dot drawn world y
+  + displayed load (the force-gizmo size channel). `J` logs each channel's peak-to-peak (mm / ° /
+  ±% of mean load). Sampler runs at the end of the visual chain, gated `sim_running`; works
+  identically on all 3 models since the paths are shared.
+  - TEST PLAN (user): at rest on flat ground, let it settle ~2 s, press `J`, read the log line —
+    per model (`M` between). The channel(s) carrying visible amplitude name the element; hull-y
+    tells physics vs visual.
+  - PROBE RESULTS (user, all 3 models at rest): hull y 0.03–0.23 mm, wheel/belt y 0–0.04 mm, dot y
+    0.6–1.1 mm — **everything geometric is dead still** (physics + conform + wheels exonerated).
+    The one live channel: **dot load** — ±94% on model 1 (raw readout), ±12.5/13.1% on models 2/3
+    *through* the damped gauge. The visible "jitter" is the force-gizmo **size** pulsing (dot
+    radius + normal-line length ∝ load); the "wheels vibrating" was perceptual bleed from adjacent
+    strobing gizmos (wheels moved micrometres). Root cause of the load noise: the displayed load
+    included the **damping term**, which reads the hull's tick-scale micro-velocity (~0.1 mm
+    wobble at tick rate ≈ 0.02 m/s ≈ hundreds of newtons through the damper) — while the elastic
+    term follows penetration, stable to ~0.02 mm. The long-open "static at-rest gizmo jitter" is
+    hereby diagnosed.
+- 2026-07-02 — **Step 17c: elastic-only load display + gauge pruning** (green: fmt/clippy clean;
+  built, awaiting launch approval). The principled fix, replacing the band-aid: models 2/3 now
+  display `SUPPORT_STIFFNESS_PER_M · area · engage` (the elastic/static component — steady at rest,
+  still instant for load migration while driving); physics keeps the full load (support force,
+  friction cap, belt reaction all unchanged). This obsoletes the 15b damped gauge, so the whole
+  apparatus is **deleted**: `LinkLoads`/`LinkLoadsSide`/`LOAD_SMOOTHING` (models 2 + 3), the
+  per-link EMA + identity-rotation bookkeeping, and the `M`/`R` clears in mod.rs (the handoff's
+  "stale gauge shift" bug is moot — the resource no longer exists). Model 2's frozen-ness
+  consciously overridden for display hygiene only (user-directed; physics untouched). Model 1
+  deliberately keeps its raw ±94% readout — frozen baseline, and now a visible A/B of what the fix
+  removes. Reviewed-and-kept (principled, not judo): `CONTACT_ENGAGE` (real compliance, 10b),
+  eased wheel rise/fall (feel, not noise-masking), `belly_extra` EMA (feedback-loop stabilizer),
+  Verlet dt clamp (hitch guard), `DRIVE_RAMP` (input shaping).
+  - AWAITING USER TEST: (1) models 2/3 at rest — dots + normal lines rock steady (J: dot load
+    ±<1%); (2) model 1 still strobes (expected, baseline); (3) driving: load migration/wheelspin
+    colouring reads as before, now without smoothing lag; (4) washboard slap-down feel — re-judge
+    with steady gizmos, harshness may have been partly display.
+  - VERIFIED (user, model 3, J readings): **flat is solved** — dot load ±13% → ±0.8%, wheel/belt
+    0.02–0.03 mm, "overall more stable". (A first flat reading showed wheel/belt ~0.9 mm — window
+    contamination from a pause/unpause transient; a clean re-measure per protocol confirmed calm.)
+    Remaining, two items: (1) **washboard corner links "jump around a bit"** at rest (hull pitch
+    there 0.041° = 10× flat — hull rocks on the bumps, chain re-solves; suspects: bistable tent
+    configs [13e/13f residual] and/or the contact-plane anchor `q` hopping between terrain features
+    while the cast distance stays continuous — plane height jumps, link snaps); (2) **pause/unpause
+    leaves the hull visibly displaced** — parked below.
+- 2026-07-02 — **Step 17d: whole-ring probe channel** (green: fmt/clippy clean; built). The
+  single-spot probe channels watch hull-local z ≈ 0 and can't see a jumping link elsewhere on the
+  loop. Added `ring_y` to `JitterProbe`: per-frame snapshot of every left-side conformed sample's
+  world y, index-aligned (ring is index-stable at rest; cleared on count change). `J` now also
+  prints a **ring sweep**: the worst link's p2p + its hull-local (z, y) position + how many links
+  exceed 0.5 mm — "some links jump around" becomes a number attached to a specific link.
+  - TEST PLAN (user): park ON the washboard at rest, settle ~2 s, `J`; the sweep line names the
+    worst link and its z (which bump/corner it sits on) and the live-link count. Same at flat for
+    the baseline (expect worst ≈ 0.03 mm, 0 links over).
+  - SWEEP RESULTS (user, model 3): the picture is now sharp. FLAT: single-spot channels calm, but
+    **61 of 83 links > 0.5 mm, worst 2.4 mm at (z −0.20, y −0.30) — wheel-top height = the
+    return-run drape**: the grounded belly is pinned, the whole *free chain* shimmers at mm scale
+    forever (neutral modes — spans swinging, joints sliding along wheel circles — restored only by
+    the weak drive anchor; ~0.1 mm/frame micro-inputs random-walk them; the step-15 "chain sleeps"
+    claim measurably never happens). WASHBOARD: worst 15 mm (idler rear wrap) and 97 mm (front
+    diagonal), hull itself rocking 0.8–1.5 mm / 0.048° — AND the user reports the tank **slowly
+    drifts with zero input**, so the cm-numbers are confounded by honest terrain-following of a
+    creeping vehicle. The drift itself is a finding: slip-saturated friction is viscous below
+    saturation (no true stiction) and the corner-contact rocking rectifies into creep — parked
+    below as its own contact-level item.
+- 2026-07-02 — **Step 17e: chain sleep (model 3 only; model 2 stays frozen)** (green: fmt/clippy
+  clean; built, awaiting launch approval). Standard rigid-body sleeping applied to the chain solve
+  — don't re-solve an unchanged problem: per side, after `CHAIN_SLEEP_FRAMES` (15) consecutive
+  frames with max joint motion < `CHAIN_SLEEP_MOTION` (0.3 mm), the chain sleeps (residual Verlet
+  velocity zeroed); while asleep the casts + solve are skipped and the frozen local chain is
+  re-mapped through the hull pose. Wake tests deviation from the **sleep anchor** (hull pose +
+  belt phase at sleep time), not the previous frame — `CHAIN_WAKE_TRANSLATION` 1 mm /
+  `CHAIN_WAKE_ROTATION` 0.002 rad / any phase advance — so slow creep or oscillation can't hide
+  under a per-frame epsilon. New `ChainSleep` resource in `model3.rs`; `M`/`R` need no clearing
+  (a teleport exceeds the anchor deviation and wakes it).
+  - **REVERTED before launch (user decision: "we're losing track a little")** — the sleep
+    machinery is out of the tree; the diagnosis (17b–17d probe findings) and the elastic-only
+    display fix (17c) stand. The free-chain mm-shimmer at rest is accepted-for-now and parked
+    below; focus returns to the model-3 increments.
 
 ## Open questions / parking lot
 
@@ -870,8 +1045,25 @@ both.
   unilateral constraints keep it there. Candidate fixes if it ever matters: re-init chain state a
   few frames *after* a teleport settles; or an asymmetric reel-in anchor (stronger pull for belly
   joints below the taut line). Might become a *feature* (track-throwing as damage/abuse mechanic).
-- **Static at-rest gizmo jitter** (open): survives the Verlet sleep; needs element-level diagnosis
-  (contact dots / normal lines / chain) before a fix.
+- **Static at-rest gizmo jitter** — RESOLVED on flat (steps 17b/17c, user-confirmed): geometry
+  still (≤0.03 mm wheels/belt), flicker was the force-gizmo size displaying the damping term's
+  micro-velocity noise; fixed by elastic-only display (models 2/3; model 1 keeps the raw strobe as
+  baseline).
+- **Free-chain mm-shimmer at rest** (open, diagnosed, accepted for now): the ring sweep (17d)
+  showed the non-grounded chain (drape/wraps/diagonals) never settles — neutral modes random-walk
+  at ~mm scale under micro-inputs; on the washboard, amplified by the hull's real rock + creep. A
+  chain-sleep fix (17e) was built and reverted unlaunched (scope call). If it ever matters:
+  re-derive from the 17e design (sleep on quiet inputs, wake on anchor deviation incl. phase).
+- **Pause/unpause hull displacement** (open, user-observed): Esc-pausing then resuming leaves the
+  hull visibly displaced. Prime suspect: render-interpolation alpha snap when `Time<Physics>`
+  stops/starts — should be bounded by one tick of motion; if the shift is clearly bigger,
+  something real (needs its own probe). May have polluted one early jitter reading.
+- **Zero-input creep on the washboard** (open, user-observed): at rest on bump corners the tank
+  slowly drifts. Mechanism: the hull limit-cycles ~1 mm on the corner contacts (suspect:
+  under-damped — contact damping scales with contact *length*, tiny on a corner, so ζ ∝ √L), and
+  the slip-saturated friction is viscous below saturation (no static-friction anchor), so the
+  rocking rectifies into slow creep. Contact-level work: revisit corner-contact damping scaling
+  and/or a stiction anchor (brush-model-style) for near-zero slip.
 
 - Envelope as taut convex-hull of wheel circles vs. sagging catenary on slack runs — start taut,
   add sag in step 2.

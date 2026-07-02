@@ -18,13 +18,13 @@ pub(super) struct BeltPhase {
 }
 
 impl BeltPhase {
-    fn get(&self, side: Side) -> f32 {
+    pub(super) fn get(&self, side: Side) -> f32 {
         match side {
             Side::Left => self.left,
             Side::Right => self.right,
         }
     }
-    fn advance(&mut self, side: Side, ds: f32) {
+    pub(super) fn advance(&mut self, side: Side, ds: f32) {
         match side {
             Side::Left => self.left += ds,
             Side::Right => self.right += ds,
@@ -45,35 +45,6 @@ const CHAIN_DAMPING: f32 = 0.88;
 /// between whole-link wraps.)
 const CHAIN_DRIVE: f32 = 400.0;
 
-/// Per-tick smoothing (EMA factor) of the **displayed** per-link loads — the physics uses raw. At
-/// rest the contact solve carries a few percent of tick-to-tick load noise (shape-cast tie-breaking
-/// on coplanar faces, engage-ramp edges, fixed-tick sampling): micrometres of hull motion, but the
-/// debug dots/normal lines scale directly with load and flickered visibly. A damped gauge, kept per
-/// link identity (rotates with the ring like the chain state), settles in a few ticks.
-const LOAD_SMOOTHING: f32 = 0.25;
-
-/// The smoothed per-link display loads (see [`LOAD_SMOOTHING`]).
-#[derive(Resource, Default)]
-pub(super) struct LinkLoads {
-    left: LinkLoadsSide,
-    right: LinkLoadsSide,
-}
-
-#[derive(Default)]
-struct LinkLoadsSide {
-    load: Vec<f32>,
-    shift: i64,
-}
-
-impl LinkLoads {
-    fn get_mut(&mut self, side: Side) -> &mut LinkLoadsSide {
-        match side {
-            Side::Left => &mut self.left,
-            Side::Right => &mut self.right,
-        }
-    }
-}
-
 /// The chain's dynamic state per side — the joints are **Verlet particles in the hull's frame**
 /// (position + previous position = implicit velocity). Each frame: rotate indices by the whole
 /// links that passed (state advects with the belt), integrate gravity (transformed into hull-local,
@@ -88,22 +59,22 @@ pub(super) struct ChainMemory {
 }
 
 #[derive(Default)]
-struct ChainSideMemory {
+pub(super) struct ChainSideMemory {
     /// Joint positions (hull-local side plane), the solved state.
-    pos: Vec<Vec2>,
+    pub(super) pos: Vec<Vec2>,
     /// Previous-frame positions (implicit velocity).
-    prev: Vec<Vec2>,
+    pub(super) prev: Vec<Vec2>,
     /// The link-identity shift (total travel / pitch) the stored state corresponds to.
-    shift: i64,
+    pub(super) shift: i64,
     /// Extra path length (m) the terrain currently demands of the belly (smoothed) — subtracted
     /// from the top run's sag budget when building the next reference ring, so the **top half of
     /// the chain lends its slack** when the belly tents over terrain (and sags back when it
     /// doesn't). Without this the surplus had nowhere to go and parked as belly squiggles.
-    belly_extra: f32,
+    pub(super) belly_extra: f32,
 }
 
 impl ChainMemory {
-    fn get_mut(&mut self, side: Side) -> &mut ChainSideMemory {
+    pub(super) fn get_mut(&mut self, side: Side) -> &mut ChainSideMemory {
         match side {
             Side::Left => &mut self.left,
             Side::Right => &mut self.right,
@@ -135,7 +106,6 @@ pub(super) fn apply_belt_support_links(
     count: Res<LinkCount>,
     mut belt: ResMut<BeltSpeed>,
     mut phase: ResMut<BeltPhase>,
-    mut loads: ResMut<LinkLoads>,
     mut contacts: ResMut<BeltContacts>,
 ) {
     let Ok((hull_gt, mut forces)) = hull.single_mut() else {
@@ -179,17 +149,6 @@ pub(super) fn apply_belt_support_links(
             continue;
         }
 
-        // The damped display-load gauge rides the same link identities as everything else.
-        let lmem = loads.get_mut(side);
-        let shift = (phase.get(side) / pitch).floor() as i64;
-        if lmem.load.len() == n {
-            let rot = (shift - lmem.shift).rem_euclid(n as i64) as usize;
-            lmem.load.rotate_right(rot);
-        } else {
-            lmem.load = vec![0.0; n];
-        }
-        lmem.shift = shift;
-
         // Each link = the segment between consecutive stations (modular: the seam segment closes the
         // ring; a degenerate seam is skipped). The link is a rigid plate on penalty ground: it has a
         // **pressure distribution** along its length, and the resultant force acts at the pressure
@@ -200,8 +159,6 @@ pub(super) fn apply_belt_support_links(
         // contact — parry picks arbitrarily among tied points, so the point flipped between the
         // plate's ends tick-to-tick: teleporting dots + flickering torque = the observed jitter.)
         for i in 0..n {
-            // Display-gauge decay: links that exit contact fade over a few ticks instead of blinking.
-            lmem.load[i] *= 1.0 - LOAD_SMOOTHING;
             let a = stations[i];
             let b = stations[(i + 1) % n];
             let seg = b - a;
@@ -321,12 +278,14 @@ pub(super) fn apply_belt_support_links(
                 belt_reaction += f_long; // the belt feels the longitudinal friction as a load
             }
 
-            // Displayed load is the damped gauge (physics above used raw); the decay at the loop
-            // top plus this accumulate form the EMA.
-            lmem.load[i] += load * LOAD_SMOOTHING;
+            // Displayed load = the **elastic** component only. The full load's damping term reads
+            // the hull's tick-scale micro-velocity — hundreds of newtons of noise on a visually
+            // still rig — which is what made the dots/normal lines strobe at rest; the elastic
+            // term follows penetration, which is stable to ~0.02 mm. Physics above uses the full
+            // load.
             contacts.0.push(Contact {
                 local: to_local.transform_point3(p),
-                load: lmem.load[i],
+                load: SUPPORT_STIFFNESS_PER_M * area * engage,
                 normal,
                 slip: slip_long,
             });
@@ -367,7 +326,6 @@ pub(super) fn init_link_count(mut commands: Commands) {
     let length = polyline_len(&belt_loop(&rest_circles(), None)) + TRACK_SLACK;
     commands.insert_resource(LinkCount((length / CONTACT_SPACING).round() as usize));
     commands.insert_resource(ChainMemory::default());
-    commands.insert_resource(LinkLoads::default());
 }
 
 /// MODEL 2's conform — the belt drawn as a true **chain of rigid links** on the same advected ring
@@ -604,7 +562,7 @@ pub(super) fn conform_belts_links(
 /// across `[x0, x1]`. Returns `(∫pen dx, ∫x·pen dx, contacting length)`, clipping the sub-range
 /// where the profile is negative (that part of the plate is clear of the ground). Closed form, so
 /// the plate's resultant force and centroid are smooth functions of pose — no sampling noise.
-fn clipped_linear_piece(x0: f32, x1: f32, p0: f32, p1: f32) -> (f32, f32, f32) {
+pub(super) fn clipped_linear_piece(x0: f32, x1: f32, p0: f32, p1: f32) -> (f32, f32, f32) {
     let w = x1 - x0;
     if w <= 0.0 || (p0 <= 0.0 && p1 <= 0.0) {
         return (0.0, 0.0, 0.0);

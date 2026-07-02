@@ -15,7 +15,8 @@
 //! Hull + sprocket/idler colliders back it as a hard stop (frictionless — pure penetration stops;
 //! the belt owns all tangential physics). Arrow keys drive; contact dots colour green→red by slip.
 //! `R` tours the reset spots, `M` cycles the registered locomotion models (the live A/B — see
-//! [`Model`]), `L` logs state, `Esc` pauses. The procedural (animated) track lands in a later step.
+//! [`Model`]), `L` logs state, `J` prints the jitter probe, `Esc` pauses. The procedural (animated)
+//! track lands in a later step.
 
 use avian3d::prelude::{
     AngularInertia, AngularVelocity, CoefficientCombine, Collider, CollisionLayers, Forces,
@@ -34,11 +35,13 @@ use crate::Layer;
 // `mod.rs`; each model's force systems live in their own file and are gated on `ActiveModel`.
 mod model1;
 mod model2;
+mod model3;
 
 use model1::apply_belt_support;
 use model2::{
     BeltPhase, ChainMemory, apply_belt_support_links, conform_belts_links, init_link_count,
 };
+use model3::{TRACK_THICKNESS, apply_belt_support_boxes, conform_belts_boxes, init_pin_belt};
 
 // --- Rig geometry (metres), benchmarked on the **Soviet T-34** — well-documented numbers and a
 // running-gear layout (5 big road wheels, rear-ish drive, all-steel track) essentially identical to
@@ -206,6 +209,11 @@ enum Model {
     /// passes over (no contact scrubbing); wheelspin/skid = links visibly sliding. Step 1 advects the
     /// stations; segment (plate) contact and link rendering come next.
     LinkBelt,
+    /// MODEL 3 — box-belt: model 2 with the actual T-34 shoe (500 × 172 × 40 mm box) as the contact
+    /// primitive, hung on the **pin line** (the true pitch line). Wheels ride the inner face, terrain
+    /// meets the outer face (oriented box casts), the chain solve rides the pins — three parallel
+    /// offsets of one solved curve.
+    BoxBelt,
 }
 
 impl Model {
@@ -213,13 +221,14 @@ impl Model {
         match self {
             Model::BeltPrimary => "1 — belt-primary (belt sole contact, cosmetic wheels)",
             Model::LinkBelt => "2 — link-belt (stations advect with the belt)",
+            Model::BoxBelt => "3 — box-belt (pin-line chain, box-cast links)",
         }
     }
 }
 
 /// The models registered for the `M` cycle, in order. Adding a model = a `Model` variant, an entry
 /// here, and its gated systems.
-const MODELS: [Model; 2] = [Model::BeltPrimary, Model::LinkBelt];
+const MODELS: [Model; 3] = [Model::BeltPrimary, Model::LinkBelt, Model::BoxBelt];
 
 /// Which model's systems are live. Switched by `switch_model`; model-specific systems gate on
 /// [`model_is`].
@@ -228,8 +237,8 @@ struct ActiveModel(Model);
 
 impl Default for ActiveModel {
     fn default() -> Self {
-        // Model 2 is the live iteration front; model 1 stays registered as the frozen baseline.
-        Self(Model::LinkBelt)
+        // Model 3 is the live iteration front; models 1–2 stay registered as frozen baselines.
+        Self(Model::BoxBelt)
     }
 }
 
@@ -330,6 +339,31 @@ impl ConformedBelts {
 #[derive(Component)]
 struct Hull;
 
+/// How many frames (~2 s) the jitter probe remembers.
+const JITTER_WINDOW: usize = 120;
+
+/// Per-frame world-space samples of the jitter-suspect elements (ring buffers over
+/// [`JITTER_WINDOW`] frames) — the element-first diagnosis instrument for the at-rest gizmo
+/// jitter, shared by all models since the suspect paths are shared. `J` prints each element's
+/// peak-to-peak amplitude: who actually moves, and by how much. Splits physics-side (hull pose)
+/// from visual-side (conformed belt, wheel placement, contact-dot position/size) at a keypress.
+#[derive(Resource, Default)]
+struct JitterProbe {
+    hull_y: std::collections::VecDeque<f32>,
+    hull_pitch: std::collections::VecDeque<f32>,
+    wheel_y: std::collections::VecDeque<f32>,
+    belt_y: std::collections::VecDeque<f32>,
+    dot_y: std::collections::VecDeque<f32>,
+    dot_load: std::collections::VecDeque<f32>,
+    /// Whole-ring channel: per-frame snapshot of every left-side conformed sample's world y,
+    /// index-aligned across frames (the ring is index-stable at rest, which is when the probe is
+    /// read; cleared if the sample count changes). Finds the worst-moving link *anywhere* on the
+    /// loop — the "some links jump around" channel the single-spot channels can't see.
+    ring_y: std::collections::VecDeque<Vec<f32>>,
+    /// Latest frame's hull-local sample positions, to name where the worst link sits.
+    ring_local: Vec<Vec2>,
+}
+
 /// The free-fly inspection camera (own copy, like `armor_sandbox`'s).
 #[derive(Component)]
 struct FreeFlyCam;
@@ -345,6 +379,7 @@ pub fn plugin(app: &mut App) {
         .init_resource::<BeltPhase>()
         .init_resource::<ConformedBelts>()
         .init_resource::<ActiveModel>()
+        .init_resource::<JitterProbe>()
         .add_systems(
             Startup,
             (
@@ -354,6 +389,7 @@ pub fn plugin(app: &mut App) {
                 spawn_rig,
                 init_belt_length,
                 init_link_count,
+                init_pin_belt,
                 spawn_model_label,
             ),
         )
@@ -363,6 +399,8 @@ pub fn plugin(app: &mut App) {
         //
         // MODEL 1: `apply_belt_support` — single ground-contact system, stations fixed in hull space.
         // MODEL 2: `apply_belt_support_links` — same contact physics, stations advect with the belt.
+        // MODEL 3: `apply_belt_support_boxes` — advected links contact as oriented boxes on the pin
+        // line (the real shoe: thickness live, width in increment 2).
         .add_systems(
             FixedUpdate,
             (
@@ -372,6 +410,9 @@ pub fn plugin(app: &mut App) {
                 apply_belt_support_links
                     .run_if(sim_running)
                     .run_if(model_is(Model::LinkBelt)),
+                apply_belt_support_boxes
+                    .run_if(sim_running)
+                    .run_if(model_is(Model::BoxBelt)),
             ),
         )
         .add_systems(
@@ -380,8 +421,9 @@ pub fn plugin(app: &mut App) {
                 fly_camera.run_if(cursor_locked),
                 read_drive_input,
                 // The visual chain, in data order: read the ground into the conformed belt once
-                // (model 1: per-point conform; model 2: rigid-link conform on the advected ring),
-                // then the wheels ride it cosmetically (both models), then it's drawn. The stateful
+                // (model 1: per-point conform; model 2: rigid-link conform on the advected ring;
+                // model 3: the same chain solve on the pin line with box-model offsets), then the
+                // wheels ride it cosmetically (all models), then it's drawn. The stateful
                 // pieces gate on `sim_running` like the physics — Esc pauses Avian's clock but NOT
                 // the Update schedule, so ungated they kept easing wheels / re-solving the chain
                 // against a frozen sim ("deforms while paused" — the second clock). The draw systems
@@ -393,7 +435,13 @@ pub fn plugin(app: &mut App) {
                     conform_belts_links
                         .run_if(model_is(Model::LinkBelt))
                         .run_if(sim_running),
+                    conform_belts_boxes
+                        .run_if(model_is(Model::BoxBelt))
+                        .run_if(sim_running),
                     articulate_wheels.run_if(sim_running),
+                    // Probe after the visual chain settles this frame's state, frozen while paused
+                    // (constant samples would dilute the window).
+                    sample_jitter_probe.run_if(sim_running),
                     draw_rig_gizmos,
                 )
                     .chain(),
@@ -402,6 +450,7 @@ pub fn plugin(app: &mut App) {
                 toggle_pause,
                 reset_rig,
                 log_state,
+                report_jitter_probe,
                 draw_contacts,
             ),
         );
@@ -888,11 +937,18 @@ fn conform_belts(
 fn articulate_wheels(
     hull: Single<&GlobalTransform, With<Hull>>,
     belts: Res<ConformedBelts>,
+    active: Res<ActiveModel>,
     mut wheels: Query<(&RigWheel, &mut Suspension, &mut Transform)>,
     time: Res<Time>,
 ) {
     let affine = hull.affine();
     let dt = time.delta_secs();
+    // Model 3's conformed belt is the *pin line*; the wheels rest on the inner face, a
+    // half-thickness above it. Models 1–2 conform the belt surface itself.
+    let face = match active.0 {
+        Model::BoxBelt => TRACK_THICKNESS / 2.0,
+        _ => 0.0,
+    };
     for (wheel, mut susp, mut transform) in &mut wheels {
         if wheel.kind != WheelKind::Road {
             continue;
@@ -919,7 +975,7 @@ fn articulate_wheels(
             let peak = (m * ROAD_RADIUS) / (1.0 + m * m).sqrt();
             for dz in [lo, hi, peak.clamp(lo, hi)] {
                 let y = a.world.y + m * (dz - z0);
-                let c = y + (ROAD_RADIUS * ROAD_RADIUS - dz * dz).max(0.0).sqrt();
+                let c = y + face + (ROAD_RADIUS * ROAD_RADIUS - dz * dz).max(0.0).sqrt();
                 best = best.max(c);
             }
         }
@@ -993,6 +1049,144 @@ fn log_state(
     );
 }
 
+/// Sample the jitter suspects once per frame (see [`JitterProbe`]): hull pose (physics side), and —
+/// on the left track, at hull-local z ≈ 0, so every channel watches the same spot — the articulated
+/// wheel placement, the conformed belt sample, and the contact dot's drawn position + displayed
+/// load (visual side). Elements picked spatially, not by index, so the advected rings don't rotate
+/// the watched element away.
+fn sample_jitter_probe(
+    hull: Single<&GlobalTransform, With<Hull>>,
+    wheels: Query<(&RigWheel, &Suspension)>,
+    belts: Res<ConformedBelts>,
+    contacts: Res<BeltContacts>,
+    mut probe: ResMut<JitterProbe>,
+) {
+    let gt = *hull;
+    let affine = gt.affine();
+    fn push(buf: &mut std::collections::VecDeque<f32>, v: f32) {
+        buf.push_back(v);
+        if buf.len() > JITTER_WINDOW {
+            buf.pop_front();
+        }
+    }
+    push(&mut probe.hull_y, gt.translation().y);
+    push(
+        &mut probe.hull_pitch,
+        gt.rotation().to_euler(EulerRot::YXZ).1,
+    );
+
+    // The left-side road wheel nearest the hull centre, at its current articulated placement.
+    let wheel = wheels
+        .iter()
+        .filter(|(w, _)| w.side == Side::Left && w.kind == WheelKind::Road)
+        .min_by(|(_, a), (_, b)| a.pivot_local.z.abs().total_cmp(&b.pivot_local.z.abs()))
+        .map(|(_, s)| affine.transform_point3(s.pivot_local + Vec3::Y * s.dy).y);
+    push(&mut probe.wheel_y, wheel.unwrap_or(f32::NAN));
+
+    // The left belly sample nearest hull-local z = 0 (under the hull centre).
+    let hub_y = ROAD_RADIUS - HULL_REST_Y;
+    let belt = belts
+        .get(Side::Left)
+        .iter()
+        .filter(|s| s.local.y < hub_y)
+        .min_by(|a, b| a.local.x.abs().total_cmp(&b.local.x.abs()))
+        .map(|s| s.world.y);
+    push(&mut probe.belt_y, belt.unwrap_or(f32::NAN));
+
+    // The left contact dot nearest hull-local z = 0, where it's drawn (current pose), and its
+    // displayed load (the dot/normal size — the "force gizmo" flicker channel).
+    let dot = contacts
+        .0
+        .iter()
+        .filter(|c| c.local.x < 0.0)
+        .min_by(|a, b| a.local.z.abs().total_cmp(&b.local.z.abs()));
+    push(
+        &mut probe.dot_y,
+        dot.map_or(f32::NAN, |c| gt.transform_point(c.local).y),
+    );
+    push(&mut probe.dot_load, dot.map_or(f32::NAN, |c| c.load));
+
+    // Whole left ring, index-aligned (see the field doc).
+    let ring: Vec<f32> = belts.get(Side::Left).iter().map(|s| s.world.y).collect();
+    if probe.ring_y.front().is_some_and(|f| f.len() != ring.len()) {
+        probe.ring_y.clear();
+    }
+    probe.ring_y.push_back(ring);
+    if probe.ring_y.len() > JITTER_WINDOW {
+        probe.ring_y.pop_front();
+    }
+    probe.ring_local = belts.get(Side::Left).iter().map(|s| s.local).collect();
+}
+
+/// `J` prints the probe: peak-to-peak amplitude of each watched element over the ring window.
+/// Position channels in mm, pitch in degrees, load as ± percent of its mean.
+fn report_jitter_probe(keys: Res<ButtonInput<KeyCode>>, probe: Res<JitterProbe>) {
+    if !keys.just_pressed(KeyCode::KeyJ) {
+        return;
+    }
+    fn p2p(buf: &std::collections::VecDeque<f32>) -> f32 {
+        let (mut min, mut max) = (f32::INFINITY, f32::NEG_INFINITY);
+        for &v in buf {
+            if !v.is_nan() {
+                min = min.min(v);
+                max = max.max(v);
+            }
+        }
+        if max >= min { max - min } else { 0.0 }
+    }
+    let (mut sum, mut cnt) = (0.0_f32, 0u32);
+    for &v in &probe.dot_load {
+        if !v.is_nan() {
+            sum += v;
+            cnt += 1;
+        }
+    }
+    let load_pct = if cnt > 0 && sum > 0.0 {
+        p2p(&probe.dot_load) / (sum / cnt as f32) * 50.0 // half the p2p, as ±%
+    } else {
+        0.0
+    };
+    info!(
+        "jitter p2p over {} frames: hull y {:.3} mm | hull pitch {:.4}° | wheel y {:.3} mm | belt y {:.3} mm | dot y {:.3} mm | dot load ±{:.1}%",
+        probe.hull_y.len(),
+        p2p(&probe.hull_y) * 1000.0,
+        p2p(&probe.hull_pitch).to_degrees(),
+        p2p(&probe.wheel_y) * 1000.0,
+        p2p(&probe.belt_y) * 1000.0,
+        p2p(&probe.dot_y) * 1000.0,
+        load_pct,
+    );
+
+    // Whole-ring sweep: per-sample p2p over the window; the worst link + how many are visibly live.
+    let m = probe.ring_y.front().map_or(0, |f| f.len());
+    if m == 0 || probe.ring_local.len() != m {
+        return;
+    }
+    let (mut worst, mut worst_i, mut over) = (0.0_f32, 0usize, 0u32);
+    for i in 0..m {
+        let (mut mn, mut mx) = (f32::INFINITY, f32::NEG_INFINITY);
+        for frame in &probe.ring_y {
+            mn = mn.min(frame[i]);
+            mx = mx.max(frame[i]);
+        }
+        let p = mx - mn;
+        if p > worst {
+            worst = p;
+            worst_i = i;
+        }
+        if p > 0.0005 {
+            over += 1;
+        }
+    }
+    let at = probe.ring_local[worst_i];
+    info!(
+        "ring sweep ({m} links): worst link y {:.3} mm at hull-local (z {:.2}, y {:.2}) | {over} links > 0.5 mm",
+        worst * 1000.0,
+        at.x,
+        at.y,
+    );
+}
+
 /// Draw the rig skeleton (hub markers) and the **conformed belt** of each side — exactly the loop the
 /// wheels ride (`ConformedBelts`, built by `conform_belts` this frame): taut lower run raised onto any
 /// terrain it meets, the drive-wheel arcs, and the sagging top run. Pure presentation; also the exact
@@ -1001,6 +1195,8 @@ fn draw_rig_gizmos(
     mut gizmos: Gizmos,
     wheels: Query<(&RigWheel, &GlobalTransform)>,
     belts: Res<ConformedBelts>,
+    active: Res<ActiveModel>,
+    hull: Single<&GlobalTransform, With<Hull>>,
 ) {
     // Hub markers, coloured by role so the drive wheels (sprocket/idler) read apart from the road
     // wheels. `kind` is also the seam for later drive/animation (e.g. torque on the sprocket).
@@ -1018,6 +1214,37 @@ fn draw_rig_gizmos(
         if let (Some(a), Some(b)) = (world.next_back(), world.next()) {
             gizmos.line(a, b, BELT_COLOR);
         }
+
+        // MODEL 3: the conformed line is the *pin line* — draw the **outer face** (each sample
+        // offset by its local outward normal × t/2, from neighbour tangents of the solved chain) as
+        // a dimmer companion, so the shoe thickness reads: the dark line rides the ground, the
+        // wheels ride the light one.
+        if active.0 != Model::BoxBelt {
+            continue;
+        }
+        let samples = belts.get(side);
+        let n = samples.len();
+        if n < 3 {
+            continue;
+        }
+        let affine = hull.affine();
+        let track_x = match side {
+            Side::Left => -TRACK_HALF_WIDTH,
+            Side::Right => TRACK_HALF_WIDTH,
+        };
+        let outer: Vec<Vec3> = (0..n)
+            .map(|i| {
+                let tan2 = (samples[(i + 1) % n].local - samples[(i + n - 1) % n].local)
+                    .normalize_or_zero();
+                let out2 = Vec2::new(tan2.y, -tan2.x);
+                let p = samples[i].local + out2 * (TRACK_THICKNESS / 2.0);
+                affine.transform_point3(Vec3::new(track_x, p.y, p.x))
+            })
+            .collect();
+        gizmos.linestrip(
+            outer.iter().copied().chain(outer.first().copied()),
+            BELT_OUTER_COLOR,
+        );
     }
 }
 
@@ -1197,6 +1424,9 @@ fn resample(points: &[Vec2], spacing: f32, offset: f32) -> Vec<Vec2> {
 const HUB_COLOR: Color = Color::srgb(1.0, 0.85, 0.2);
 const DRIVE_HUB_COLOR: Color = Color::srgb(1.0, 0.45, 0.15);
 const BELT_COLOR: Color = Color::srgb(0.2, 0.9, 1.0);
+/// Model 3's outer-face companion line: dimmer/darker than the pin line, so the two parallel curves
+/// read as inner vs ground face at a glance.
+const BELT_OUTER_COLOR: Color = Color::srgb(0.1, 0.45, 0.55);
 const NORMAL_COLOR: Color = Color::srgb(1.0, 0.9, 0.2);
 
 /// The two tangent points of an external tangent line shared by two circles in a plane, on the side
