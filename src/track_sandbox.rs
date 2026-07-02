@@ -17,13 +17,12 @@
 //! procedural (animated) track land in later steps.
 
 use avian3d::prelude::{
-    AngularInertia, AngularVelocity, Collider, CollisionLayers, Forces, LayerMask, LinearVelocity,
-    Mass, NoAutoAngularInertia, NoAutoCenterOfMass, NoAutoMass, Physics,
-    PhysicsInterpolationPlugin, PhysicsPlugins, PhysicsTime, ReadRigidBodyForces, RigidBody,
-    SpatialQuery, SpatialQueryFilter, WriteRigidBodyForces,
+    AngularInertia, AngularVelocity, CoefficientCombine, Collider, CollisionLayers, Forces,
+    Friction, LayerMask, LinearVelocity, Mass, NoAutoAngularInertia, NoAutoCenterOfMass,
+    NoAutoMass, Physics, PhysicsInterpolationPlugin, PhysicsPlugins, PhysicsTime,
+    ReadRigidBodyForces, RigidBody, SpatialQuery, SpatialQueryFilter, WriteRigidBodyForces,
 };
 use bevy::input::mouse::AccumulatedMouseMotion;
-use bevy::math::Affine3A;
 use bevy::prelude::*;
 use bevy::time::Real;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
@@ -63,15 +62,28 @@ const HULL_REST_Y: f32 = 1.15;
 const HULL_MASS: f32 = 12_000.0;
 
 // --- Test course (module-level so the reset + trench floors can reference the trenches) ---
-/// Two trenches down the −Z lane, each `(centre z, width)`. Narrow: some road wheels still catch the
-/// lips. Wide (> the road-wheel span): all road wheels float and only the sprocket/idler diagonal
-/// runs catch — the pure trench-bridging case. Ordered nearest→farthest.
-const TRENCHES: [(f32, f32); 2] = [(8.0, 2.2), (18.0, 5.0)];
+/// Trenches down the −Z lane, each `(centre z, width)`, nearest→farthest. Narrow: some road wheels
+/// still catch the lips. Wide (> the road-wheel span): all road wheels float, only the sprocket/idler
+/// diagonals catch — the pure bridging case. Pit (> the whole track footprint): nothing can catch —
+/// the rig drops in; the drop-in / grind-out case.
+const TRENCHES: [(f32, f32); 3] = [(30.0, 2.2), (42.0, 5.0), (58.0, 10.0)];
+/// Washboard sets `(start z, period, bumps, height)` of increasing coarseness, all before the first
+/// trench. Bump thickness is `period / 3`, so the gaps grow with the period: the fine set's gaps are
+/// narrower than a road wheel (the belt/wheels *bridge* them), the coarse sets' gaps are wider (the
+/// wheels drop in and ride over each bump) — the resolve-vs-bridge spectrum in one drive.
+const WASHBOARDS: [(f32, f32, usize, f32); 3] = [
+    (3.0, 0.8, 6, 0.12),
+    (10.0, 1.5, 5, 0.18),
+    (19.0, 2.5, 4, 0.22),
+];
 /// Lane extent (Z) of the ground: from `LANE_NEAR` in front of spawn out to `LANE_FAR`.
 const LANE_NEAR: f32 = 20.0;
-const LANE_FAR: f32 = -60.0;
-/// Lane width (X) of the ground slabs and obstacles.
-const LANE_W: f32 = 14.0;
+const LANE_FAR: f32 = -110.0;
+/// Lane width (X) of the ground slabs — wide enough to manoeuvre, turn, and drive around obstacles.
+const LANE_W: f32 = 40.0;
+/// Width (X) of the raised obstacles (washboards, step, ramp): a sub-lane, so there is open flat
+/// ground on both sides to steer around them and to compare against.
+const OBSTACLE_W: f32 = 16.0;
 /// Top of the trench floors: a hard bottom below belt reach, so a *failed* bridge rests the rig in
 /// the ditch instead of dropping into a bottomless gap.
 const TRENCH_FLOOR_Y: f32 = -1.2;
@@ -105,6 +117,10 @@ const SUPPORT_DAMPING_PER_M: f32 = 30_000.0;
 /// so it doesn't change the resting height, only the behaviour right at the contact boundary.
 const CONTACT_ENGAGE: f32 = 0.02;
 
+/// Arc-length spacing (m) for the *drawn* belt spline: fine enough that a bump between two wheels is
+/// sampled so the terrain-conform can raise the line onto it (finer = smoother drape, more rays).
+const BELT_DRAW_SPACING: f32 = 0.1;
+
 // --- Drive: belt-speed / slip model. Each track has a belt *speed*; friction comes from the slip
 // between belt and ground, so wheelspin, skid, engine-braking, hill-hold, and top speed all emerge. ---
 /// Top belt surface speed (m/s) at full command — the governed top speed.
@@ -130,17 +146,14 @@ const LATERAL_GRIP_RATIO: f32 = 0.55;
 const DRIVE_RAMP: f32 = 4.0;
 
 // --- Wheels carry NO force in Option 1: the belt is the *sole* ground-contact system (carries the
-// tank, tractions, does walls/gaps). But the wheels are placed **cosmetically on the draped belt** so
-// the track visibly wraps the terrain — each road wheel rides up onto the highest ground its radius can
-// reach, never dropping below the taut belt line (so dips are bridged, not fallen into). This is purely
-// visual (`articulate_wheels`): the *physics* belt stays on the hull-fixed rigid line, decoupled, so
-// the drape never nulls the support. Real force-bearing per-wheel springs are the Option-2 step. ---
-/// Number of down-probes across a wheel's contact width (±`ROAD_RADIUS`) for the cosmetic placement — a
-/// discretised cylinder cast, so a wheel rests on the highest terrain its surface can touch (and bridges
-/// dips narrower than itself) instead of a thin ray poking through to a valley floor.
-const FOOTPRINT_SAMPLES: usize = 7;
-/// How far the cosmetic probe reaches for ground (m).
-const SUSP_RAY_LENGTH: f32 = 1.5;
+// tank, tractions, does walls/gaps) — and the belt is also the sole ground *reader*. The visual model
+// is belt-primary all the way down: `conform_belts` reads the terrain once per frame (the hull-fixed
+// taut loop raised onto the ground), the drawn spline IS that conformed belt, and the road wheels
+// RIDE it (`articulate_wheels` — a rigid roller resting on the belt polyline, no raycast of its own).
+// One source of truth, one data direction: ground → belt → wheels. Purely visual: the *physics* belt
+// penalizes terrain against the rigid reference line, so the drape never nulls the support. Real
+// force-bearing per-wheel springs (the opposite dependency direction: ground → wheels → belt) are
+// Option 2. ---
 /// How fast a wheel's visible placement eases toward its target (m/s), so it travels rather than snaps.
 const SUSP_TRAVEL_RATE: f32 = 2.5;
 /// Clamp on the cosmetic lift (m): a tall obstacle can't fling the visual wheel arbitrarily far.
@@ -162,21 +175,48 @@ enum WheelKind {
     Idler,
 }
 
-/// A single wheel of the code-generated rig: its side, role, and radius. Spawned as a child of the
-/// hull, so its `GlobalTransform` follows the hull (and, later, its own suspension travel).
+/// A single wheel of the code-generated rig: its side and role (radius follows from the role).
+/// Spawned as a child of the hull, so its `GlobalTransform` follows the hull (and, for road wheels,
+/// its own cosmetic travel).
 #[derive(Component)]
 struct RigWheel {
     side: Side,
     kind: WheelKind,
-    radius: f32,
 }
 
-/// A road wheel's cosmetic placement state: the rest pivot in hull-local space (fixed probe source)
-/// and the current eased vertical offset that rides it onto the draped belt. Visual only — no force.
+/// A road wheel's cosmetic placement state: the rest pivot in hull-local space and the current eased
+/// vertical offset that rides it on the conformed belt. Visual only — no force.
 #[derive(Component)]
 struct Suspension {
     pivot_local: Vec3,
     dy: f32,
+}
+
+/// One station of the conformed belt: its hull-local side-plane position on the rigid reference loop
+/// (z, y — *pre*-conform, used to tell the belly from the top run and to align with wheels) and its
+/// conformed world position (raised onto terrain).
+struct BeltSample {
+    local: Vec2,
+    world: Vec3,
+}
+
+/// Each side's conformed belt this frame — the hull-fixed taut loop resampled fine and raised onto the
+/// ground (`y = max(line, terrain)`), in loop order. The **single ground-read of the visual model**:
+/// built once per frame by `conform_belts`, then the drawn spline is exactly this and the road wheels
+/// ride it (ground → belt → wheels, never the other way).
+#[derive(Resource, Default)]
+struct ConformedBelts {
+    left: Vec<BeltSample>,
+    right: Vec<BeltSample>,
+}
+
+impl ConformedBelts {
+    fn get(&self, side: Side) -> &[BeltSample] {
+        match side {
+            Side::Left => &self.left,
+            Side::Right => &self.right,
+        }
+    }
 }
 
 /// Marker for the hull body (the single dynamic rigid body, static for now in increment 1).
@@ -195,6 +235,7 @@ pub fn plugin(app: &mut App) {
         .init_resource::<DriveInput>()
         .init_resource::<BeltSpeed>()
         .init_resource::<BeltLength>()
+        .init_resource::<ConformedBelts>()
         .add_systems(
             Startup,
             (
@@ -215,11 +256,12 @@ pub fn plugin(app: &mut App) {
             (
                 fly_camera.run_if(cursor_locked),
                 read_drive_input,
-                articulate_wheels,
+                // The visual chain, in data order: read the ground into the conformed belt once,
+                // then the wheels ride it, then it's drawn.
+                (conform_belts, articulate_wheels, draw_rig_gizmos).chain(),
                 toggle_pause,
                 reset_rig,
                 log_state,
-                draw_rig_gizmos,
                 draw_contacts,
             ),
         );
@@ -255,10 +297,14 @@ struct ResetSpot(usize);
 
 /// The `R` drop spots: a quick tour of the test cases. `z` is the lane position; all drop at the
 /// resting ride height.
-const RESET_SPOTS: [(f32, &str); 3] = [
+const RESET_SPOTS: [(f32, &str); 4] = [
     (0.0, "flat ground"),
     (-TRENCHES[0].0, "narrow trench"),
     (-TRENCHES[1].0, "wide trench (pure diagonal bridge)"),
+    (
+        -TRENCHES[2].0,
+        "pit (swallows the whole rig — drop in, grind out)",
+    ),
 ];
 
 /// Smoothed driver intent in [-1, 1]: throttle (↑/↓) and steer (→/←). Arrow keys, so WASD stays the
@@ -410,10 +456,10 @@ fn spawn_environment(
     }
     ground(&mut commands, cursor, LANE_FAR);
 
-    // A step / curb (top at y=0.45): a hard vertical edge to climb.
+    // A step / curb (top at y=0.45), past the trenches: a hard vertical edge to climb.
     block(
         &mut commands,
-        Transform::from_xyz(0.0, 0.225, -28.0).with_scale(Vec3::new(LANE_W, 0.45, 4.0)),
+        Transform::from_xyz(0.0, 0.225, -72.0).with_scale(Vec3::new(OBSTACLE_W, 0.45, 4.0)),
         &obstacle_mat,
     );
 
@@ -424,22 +470,26 @@ fn spawn_environment(
     let center_y = -1.0 - (thick / 2.0) * cos + (run / 2.0) * sin;
     block(
         &mut commands,
-        Transform::from_xyz(0.0, center_y, -40.0)
+        Transform::from_xyz(0.0, center_y, -88.0)
             .with_rotation(Quat::from_rotation_x(deg.to_radians()))
-            .with_scale(Vec3::new(LANE_W, thick, run)),
+            .with_scale(Vec3::new(OBSTACLE_W, thick, run)),
         &obstacle_mat,
     );
 
-    // A washboard just in front of spawn: bumps spaced wider than a wheel (period 1.5 m, gap 1.0 m >
-    // the 0.7 m wheel) and taller, so each wheel visibly drops between and rides over — the wheels can
-    // resolve these, unlike a fine ripple they'd just bridge. The clearest "suspension is working" demo.
-    for i in 0..4 {
-        let z = -3.0 - i as f32 * 1.5;
-        block(
-            &mut commands,
-            Transform::from_xyz(0.0, 0.09, z).with_scale(Vec3::new(LANE_W, 0.18, 0.5)),
-            &obstacle_mat,
-        );
+    // The washboards, in front of spawn and before the first trench: one set per density (see
+    // `WASHBOARDS`) — fine gaps the wheels bridge, coarse gaps they drop into and ride over. The
+    // clearest "the model resolves what it should and bridges what it should" demo.
+    for (start, period, bumps, height) in WASHBOARDS {
+        let thickness = period / 3.0;
+        for i in 0..bumps {
+            let z = -(start + i as f32 * period);
+            block(
+                &mut commands,
+                Transform::from_xyz(0.0, height / 2.0, z)
+                    .with_scale(Vec3::new(OBSTACLE_W, height, thickness)),
+                &obstacle_mat,
+            );
+        }
     }
 }
 
@@ -528,6 +578,14 @@ fn spawn_rig(
             // normal terrain (ADR-0005: the hull box is a collision shape + bottoming floor).
             Collider::cuboid(HULL_HALF.x * 2.0, HULL_HALF.y * 2.0, HULL_HALF.z * 2.0),
             CollisionLayers::new([Layer::Vehicle], LayerMask::ALL),
+            // The backstop colliders are *penetration stops only* — ALL tangential surface physics
+            // (traction, grinding-climb, skid) belongs to the belt. Avian colliders default to
+            // μ = 0.5, which silently made them frictional surfaces: pressed against a trench wall,
+            // the collider contact dragged *down* with 0.5·N exactly as the belt tried to grind up
+            // it, locking the climb (the harder the tracks pressed, the harder it dragged). Zero
+            // friction with `Min` combine (outranks the terrain's default `Average`) so the combined
+            // contact is frictionless regardless of terrain material.
+            Friction::ZERO.with_combine_rule(CoefficientCombine::Min),
             // Mass properties are authored, not derived from the colliders (`NoAuto*`), as the game
             // does: a box of the hull extents at `HULL_MASS`.
             Mass(HULL_MASS),
@@ -542,7 +600,7 @@ fn spawn_rig(
         .with_children(|parent| {
             for (side, kind, radius, pos, mesh, mat) in wheels {
                 let mut wheel = parent.spawn((
-                    RigWheel { side, kind, radius },
+                    RigWheel { side, kind },
                     Mesh3d(mesh),
                     MeshMaterial3d(mat),
                     Transform::from_translation(pos).with_rotation(axle),
@@ -556,6 +614,9 @@ fn spawn_rig(
                     wheel.insert((
                         Collider::cylinder(radius * DRIVE_COLLIDER_SCALE, TRACK_HALF_WIDTH * 0.25),
                         CollisionLayers::new([Layer::Vehicle], LayerMask::ALL),
+                        // Pure penetration stop, like the hull box: frictionless so the belt owns
+                        // all tangential physics (see the hull collider comment).
+                        Friction::ZERO.with_combine_rule(CoefficientCombine::Min),
                     ));
                 }
                 // Road wheels get a cosmetic placement state (they carry no force — the belt does).
@@ -569,16 +630,91 @@ fn spawn_rig(
         });
 }
 
-/// Cosmetically ride each road wheel up onto the terrain it can reach, so the drawn belt (which wraps
-/// the wheels) visibly conforms to the ground instead of cutting a rigid plate across it. The wheels
-/// bear no load — the belt is the sole carrier — so this is pure visuals; the physics belt stays on the
-/// hull-fixed rigid line (see `apply_belt_support`), decoupled, so this drape never nulls the support.
-/// A wheel rides up onto the highest terrain its radius can touch (a discretised cylinder cast) but
-/// never drops below the taut belt line, so dips narrower than the wheel — and gaps — are bridged.
+/// Build each side's **conformed belt** — the one ground-read of the visual model. Take the hull-fixed
+/// rigid reference loop (`rest_circles`, the same line the physics penalizes against), resample it
+/// fine, and press each station out of the terrain **along its own outward normal** — the same probe
+/// the physics uses, so the conform asks the same question the contact does. Terrain penetrating the
+/// belt surface moves the station to the terrain surface *in the direction the belt is pressed*: up
+/// onto bumps under the belly (even between wheels, as a taut track under tension would), back off a
+/// wall face at the nose (never up onto the wall's *top* — the normal ray can't see it, which is what
+/// made the old vertical-ray conform snap the belt onto ledges). Terrain outside the surface leaves
+/// the station on the taut line, so dips and gaps stay bridged. Everything visual derives from this —
+/// the drawn spline is exactly it, and the road wheels ride it.
+fn conform_belts(
+    hull: Single<&GlobalTransform, With<Hull>>,
+    spatial: SpatialQuery,
+    belt_length: Res<BeltLength>,
+    mut belts: ResMut<ConformedBelts>,
+) {
+    let hull = *hull;
+    let affine = hull.affine();
+    // The reference loop is side-agnostic (symmetric rig): resample once, conform per side. Close the
+    // loop (append the first point) so the seam has a segment, then use modular indices for tangents.
+    let mut loop_pts = belt_loop(&rest_circles(), Some(belt_length.0));
+    if let Some(&first) = loop_pts.first() {
+        loop_pts.push(first);
+    }
+    let stations = resample(&loop_pts, BELT_DRAW_SPACING);
+    let n = stations.len();
+    if n < 3 {
+        return;
+    }
+    for side in [Side::Left, Side::Right] {
+        let track_x = match side {
+            Side::Left => -TRACK_HALF_WIDTH,
+            Side::Right => TRACK_HALF_WIDTH,
+        };
+        let samples: Vec<BeltSample> = (0..n)
+            .map(|i| {
+                let p = stations[i];
+                let mut w = affine.transform_point3(Vec3::new(track_x, p.y, p.x));
+                // Outward normal in the side plane (CCW winding → tangent rotated −90°), as the
+                // physics computes it: out2 = (tan.y, −tan.x) in (z, y) → world (x = 0, y = out2.y,
+                // z = out2.x).
+                let tan2 = (stations[(i + 1) % n] - stations[(i + n - 1) % n]).normalize_or_zero();
+                let out = affine
+                    .transform_vector3(Vec3::new(0.0, -tan2.x, tan2.y))
+                    .normalize_or_zero();
+                if let Ok(out_dir) = Dir3::new(out) {
+                    // Probe from just inside the belt surface, outward. A hit short of the surface is
+                    // terrain penetrating the belt: the hit point IS the conformed station. A zero
+                    // distance means the origin itself is buried (extreme clip mid-transient) — the
+                    // surface is unknowable from here, so leave the station taut and let the physics
+                    // push the rig out.
+                    let origin = w - out * CONTACT_PROBE;
+                    if let Some(hit) = spatial.cast_ray(
+                        origin,
+                        out_dir,
+                        CONTACT_PROBE,
+                        true,
+                        &SpatialQueryFilter::from_mask(Layer::Terrain),
+                    ) && hit.distance > 0.0
+                    {
+                        w = origin + out * hit.distance;
+                    }
+                }
+                BeltSample { local: p, world: w }
+            })
+            .collect();
+        match side {
+            Side::Left => belts.left = samples,
+            Side::Right => belts.right = samples,
+        }
+    }
+}
+
+/// Ride each road wheel on the **conformed belt** — the wheels follow the *track*, not a ground probe
+/// of their own (belt-primary: the belt reads the ground once; wheels and spline both derive from it).
+/// The wheel is a rigid roller resting on the belt polyline: over a segment with slope `m`, the centre
+/// resting on it sits at `y(dz) + √(R²−dz²)`, which peaks at `dz* = mR/√(1+m²)` — solved in closed
+/// form per segment (plus the clipped ends), so the wheel's path is smooth as it rolls over bumps and
+/// corners instead of quantised to probe columns. Lift-only about the rest pose: a wheel rides up onto
+/// a raised belt but never drops below the taut line, so dips and gaps stay bridged. Visual only — the
+/// wheels bear no load (the belt is the sole carrier).
 fn articulate_wheels(
     hull: Single<&GlobalTransform, With<Hull>>,
+    belts: Res<ConformedBelts>,
     mut wheels: Query<(&RigWheel, &mut Suspension, &mut Transform)>,
-    spatial: SpatialQuery,
     time: Res<Time>,
 ) {
     let affine = hull.affine();
@@ -588,28 +724,36 @@ fn articulate_wheels(
             continue;
         }
         let rest_world = affine.transform_point3(susp.pivot_local);
-        // The wheel-centre world height needed to rest on the highest terrain its surface can touch
-        // across ±ROAD_RADIUS: for column `dz`, a ground hit at `terrain_y` supports the centre at
-        // `terrain_y + sqrt(R² − dz²)`; take the max (highest terrain the rigid roller first meets).
-        let mut best_center_y = f32::NEG_INFINITY;
-        for s in 0..FOOTPRINT_SAMPLES {
-            let dz = -ROAD_RADIUS + 2.0 * ROAD_RADIUS * (s as f32 / (FOOTPRINT_SAMPLES - 1) as f32);
-            let origin = affine.transform_point3(susp.pivot_local + Vec3::new(0.0, 0.0, dz));
-            let Some(hit) = spatial.cast_ray(
-                origin,
-                Dir3::NEG_Y,
-                SUSP_RAY_LENGTH,
-                true,
-                &SpatialQueryFilter::from_mask(Layer::Terrain),
-            ) else {
+        let zc = susp.pivot_local.z;
+        let mut best = f32::NEG_INFINITY;
+        for pair in belts.get(wheel.side).windows(2) {
+            let (a, b) = (&pair[0], &pair[1]);
+            // Only the belly of the loop can support a wheel: skip the top run and the drive-wheel
+            // arcs (they sit above the road-wheel hub line in the pre-conform reference).
+            if a.local.y > susp.pivot_local.y || b.local.y > susp.pivot_local.y {
                 continue;
-            };
-            let terrain_y = origin.y - hit.distance;
-            let center_y = terrain_y + (ROAD_RADIUS * ROAD_RADIUS - dz * dz).max(0.0).sqrt();
-            best_center_y = best_center_y.max(center_y);
+            }
+            // Segment span in wheel-relative dz (hull-local z), clipped to the wheel's width.
+            let (z0, z1) = (a.local.x - zc, b.local.x - zc);
+            let (lo, hi) = if z0 <= z1 { (z0, z1) } else { (z1, z0) };
+            let (lo, hi) = (lo.max(-ROAD_RADIUS), hi.min(ROAD_RADIUS));
+            if lo >= hi {
+                continue;
+            }
+            // Conformed world height, linear in dz across the segment.
+            let m = (b.world.y - a.world.y) / (z1 - z0);
+            let peak = (m * ROAD_RADIUS) / (1.0 + m * m).sqrt();
+            for dz in [lo, hi, peak.clamp(lo, hi)] {
+                let y = a.world.y + m * (dz - z0);
+                let c = y + (ROAD_RADIUS * ROAD_RADIUS - dz * dz).max(0.0).sqrt();
+                best = best.max(c);
+            }
         }
-        // Ride up onto terrain (positive lift), but never below the taut rest line → dips/gaps bridge.
-        let target_dy = (best_center_y - rest_world.y).clamp(0.0, SUSP_MAX_LIFT);
+        if best == f32::NEG_INFINITY {
+            continue;
+        }
+        // Ride up onto a raised belt (positive lift), never below the taut line → dips/gaps bridge.
+        let target_dy = (best - rest_world.y).clamp(0.0, SUSP_MAX_LIFT);
         susp.dy = approach(susp.dy, target_dy, travel);
         transform.translation.y = susp.pivot_local.y + susp.dy;
     }
@@ -828,19 +972,15 @@ fn log_state(
     );
 }
 
-/// Draw the rig skeleton (hub markers) and the full **belt envelope** per side: the taut lower run,
-/// the rear arc wrapping the idler, the top run, and the front arc wrapping the sprocket — a closed
-/// loop that hugs every wheel (so it coincides with the sprocket/idler colliders, and is the exact
-/// path the procedural track will lay links along later).
+/// Draw the rig skeleton (hub markers) and the **conformed belt** of each side — exactly the loop the
+/// wheels ride (`ConformedBelts`, built by `conform_belts` this frame): taut lower run raised onto any
+/// terrain it meets, the drive-wheel arcs, and the sagging top run. Pure presentation; also the exact
+/// path the procedural track will lay links along later.
 fn draw_rig_gizmos(
     mut gizmos: Gizmos,
-    hull: Single<&GlobalTransform, With<Hull>>,
     wheels: Query<(&RigWheel, &GlobalTransform)>,
-    belt_length: Res<BeltLength>,
+    belts: Res<ConformedBelts>,
 ) {
-    let hull = *hull;
-    let to_local = hull.affine().inverse();
-
     // Hub markers, coloured by role so the drive wheels (sprocket/idler) read apart from the road
     // wheels. `kind` is also the seam for later drive/animation (e.g. torque on the sprocket).
     for (wheel, gt) in &wheels {
@@ -852,15 +992,9 @@ fn draw_rig_gizmos(
     }
 
     for side in [Side::Left, Side::Right] {
-        let Some((track_x, circles)) = side_circles(&wheels, &to_local, side) else {
-            continue;
-        };
-        let world: Vec<Vec3> = belt_loop(&circles, Some(belt_length.0))
-            .iter()
-            .map(|p| hull.transform_point(Vec3::new(track_x, p.y, p.x)))
-            .collect();
-        gizmos.linestrip(world.iter().copied(), BELT_COLOR);
-        if let (Some(&a), Some(&b)) = (world.last(), world.first()) {
+        let mut world = belts.get(side).iter().map(|s| s.world);
+        gizmos.linestrip(world.clone(), BELT_COLOR);
+        if let (Some(a), Some(b)) = (world.next_back(), world.next()) {
             gizmos.line(a, b, BELT_COLOR);
         }
     }
@@ -887,30 +1021,6 @@ fn draw_contacts(
         gizmos.sphere(Isometry3d::from_translation(p), r, color);
         gizmos.line(p, p + c.normal * (0.15 + r), NORMAL_COLOR);
     }
-}
-
-/// This side's wheels as side-plane circles in hull-local space, ordered front→rear (z ascending).
-/// Returns the track's local x (all one side's wheels share it) and the `((z, y), radius)` circles.
-fn side_circles(
-    wheels: &Query<(&RigWheel, &GlobalTransform)>,
-    to_local: &Affine3A,
-    side: Side,
-) -> Option<(f32, Vec<(Vec2, f32)>)> {
-    let mut track_x = 0.0;
-    let mut circles: Vec<(Vec2, f32)> = Vec::new();
-    for (wheel, gt) in wheels {
-        if wheel.side != side {
-            continue;
-        }
-        let local = to_local.transform_point3(gt.translation());
-        track_x = local.x;
-        circles.push((Vec2::new(local.z, local.y), wheel.radius));
-    }
-    if circles.is_empty() {
-        return None;
-    }
-    circles.sort_by(|a, b| a.0.x.partial_cmp(&b.0.x).unwrap());
-    Some((track_x, circles))
 }
 
 /// The taut lower run: chain the lower external tangents between consecutive circles (front→rear),

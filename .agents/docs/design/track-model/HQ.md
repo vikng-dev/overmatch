@@ -426,6 +426,136 @@ both.
     still calm at rest, still drives/bridges/climbs (physics untouched since 10b).
   - NEXT: if the drape reads right, Option 1 is done → start Option 2 (real per-wheel springs in series
     on top of this belt).
+  - VERIFIED (user): "much better than I thought." Option 1 accepted. **Committed + tagged as the
+    checkpoint:** `9c42921`, tag `checkpoint/track-belt-option1` — the stable single-system
+    middle-ground we may reuse for the game.
+- 2026-07-01 — **Between-wheel-bump discussion (checkpoint decision).** User spotted the one oddity: a
+  washboard bump that fits *between* two wheels — the cyan spline dips and the bump poke through it,
+  whereas a real track in tension lays *over* the bump. Resolution: this is a **visual lag, not a
+  physics gap** — the physics belt samples the rigid taut line every `CONTACT_SPACING` and already
+  generates support on that bump (dots sit on it); the tank is already held up by it. The drawn spline
+  only follows the *wheels* (and the bump falls between wheel footprints), so it doesn't ride over
+  terrain *between* wheels. **Fully capturable in Option 1**, cheap + pure-visual: conform the drawn
+  spline's lower run to terrain (`belt_y = max(wheel_line, terrain)`) — makes it lie on between-wheel
+  bumps + span dips, and aligns the spline with where physics already puts support (kills the
+  dot/spline offset). The "tension transfers the load to neighbouring wheels" nuance is
+  indistinguishable from "load to hull" in Option 1 (rigid body); it only becomes real in Option 2.
+  - User's model idea ("treat the spline as a hard surface that can't clip under the world + conform to
+    pressure") splits into the two known mechanisms: **(a) can't-clip = geometric conform** = the cheap
+    Option-1 visual above; **(b) conform to pressure = load distribution** = Option 2/3. The forcing
+    constraint: **in a penalty model one line can't both conform and bear load** (conform → 0
+    penetration → 0 force exactly where you want it), which is why physics-line and visual-line are
+    split. Making the *same* conforming hard surface bear load "by pressure" needs soft springs riding
+    it (Option 2) or a per-node belt solve (Option 3). User's reasoning is converging on Option 2.
+  - OPEN FORK (awaiting user): (i) do the cheap Option-1 **spline-conform** visual fix first (so the
+    belt truly can't clip the world) as a stronger checkpoint, THEN Option 2; or (ii) go straight to
+    Option 2 (real per-wheel springs in series on the belt).
+  - User chose (i): quick refinement, test, then decide.
+- 2026-07-01 — **Step 10d: spline terrain-conform** (green: fmt/clippy clean). Pure-visual, physics
+  untouched. `draw_rig_gizmos` now resamples the belt envelope fine (`BELT_DRAW_SPACING` 0.1) and
+  conforms each drawn point to the ground under it (`w.y = max(w.y, terrain)` via a down-ray from
+  `BELT_CONFORM_RISE` 2 m above, reaching `+BELT_CONFORM_REACH` 3 m below). So the cyan line now lies
+  on bumps *between* wheels (a taut track would) and stays taut over dips/gaps — it can't clip under
+  the world. Added `SpatialQuery` to the gizmo system. This also aligns the spline with where the
+  physics already puts support (the dot/spline offset shrinks). No const/behaviour change to the belt
+  physics.
+  - AWAITING USER TEST: (1) the between-wheel washboard bump the spline used to clip now has the belt
+    laying *over* it; (2) over the trenches/gaps the spline still bridges taut (not conformed down into
+    the ditch); (3) no change to feel/drive/climb (physics identical to the tagged checkpoint).
+  - NEXT: if it reads right, this is the strengthened Option-1 checkpoint → begin Option 2 (real
+    per-wheel springs in series on the belt).
+  - VERIFIED (user): "very promising." User asked how wheels get their height (noticed roundness but
+    low resolution — the 7-column quantisation of the ray fan), then named the deeper point: **Option 1
+    is more honest if the wheels follow the *track*, not their own raycast.** Agreed: that makes the
+    two models architecturally pure duals — Option 1 belt-primary (ground → belt → wheels), Option 2
+    wheel-primary (ground → wheels → belt) — which is what makes the planned build-both-and-compare
+    (ease / maintenance / tank-count scaling / feel) a fair comparison. Also settled: the true
+    shape-cast probe belongs to Option 2 (where the probe is force-bearing), not Option 1.
+- 2026-07-01 — **Step 10e: belt-primary all the way down** (green: fmt/clippy clean). One ground-read,
+  one data direction. New `ConformedBelts` resource + `conform_belts` system (Update, chained before
+  `articulate_wheels` → `draw_rig_gizmos`): builds each side's conformed belt once per frame (rigid
+  reference loop from `rest_circles`, resampled at `BELT_DRAW_SPACING`, raised onto terrain). The drawn
+  spline IS that belt (draw takes no SpatialQuery anymore), and `articulate_wheels` now rides the
+  wheels on it with **zero raycasts of its own**: rigid roller resting on the belt polyline, solved in
+  **closed form per segment** (centre = y(dz) + √(R²−dz²), peak at dz* = mR/√(1+m²), plus clipped
+  ends) — so the wheel path is smooth, killing the 7-column quantisation the user spotted. Lift-only +
+  eased as before. Deleted: the per-wheel ray fan (`FOOTPRINT_SAMPLES`, `SUSP_RAY_LENGTH`),
+  `side_circles` (last consumer gone), the `RigWheel.radius` field, the `Affine3A` import. Physics
+  untouched (rigid-line penalty, FixedUpdate).
+  - AWAITING USER TEST: (1) wheel paths over the washboard/step now *smooth* (no stepping); (2) wheels
+    visibly sit ON the cyan belt everywhere (they ride it by construction now); (3) bridging still taut
+    over both trenches; (4) feel/drive/climb unchanged (physics identical). If good → this is the
+    completed Option-1 model (worth re-tagging the checkpoint) → begin Option 2.
+  - VERIFIED (user): "promising", two issues → 10f.
+- 2026-07-02 — **Step 10f: conform bound + course expansion** (green: fmt/clippy clean).
+  1. **Belt-snaps-onto-wall-top fixed** (user ss: nosing a wall, the cyan belt teleported to the ground
+     above): the conform's down-ray from 2 m above found the *top* surface of the wall the belt points
+     were pressed into/under, and `max(line, terrain)` hoisted the line onto it. Semantics fix: conform
+     is for terrain the belt can plausibly *drape over* — added `BELT_CONFORM_MAX_RAISE` (0.35, ~wheel
+     radius): terrain more than that above the taut line is a **wall face** (stations stay on the taut
+     line, pressed against it — walls are the physics'/colliders' job). `BELT_CONFORM_RISE` 2.0→0.5
+     (just above the bound; also stops a buried-in-wall origin reading as terrain, since solid-hit at
+     distance 0 = `+RISE` > bound → rejected). Wheels inherit the bound (they ride the belt).
+  2. **Course rebuilt** (all data-driven): `WASHBOARDS` — three sets of increasing coarseness (period
+     0.8/1.5/2.5, thickness = period/3, heights 0.12/0.18/0.22) so fine gaps are bridged and coarse
+     gaps are resolved — the resolve-vs-bridge spectrum in one drive; trenches moved past them
+     (narrow 2.2 @ z30, wide 5.0 @ z42) + **new pit** (10 m @ z58, wider than the whole track: drop-in/
+     grind-out case, 4th `R` spot); step → z72, ramp → z88, `LANE_FAR` → −110; lane widened 14→40 m
+     with obstacles on a 16 m sub-lane (`OBSTACLE_W`) so there's open ground to manoeuvre/steer around.
+  - AWAITING USER TEST: (1) nose into a trench wall / the step — belt stays pressed on the wall, no
+    snap to the ground above; (2) washboard tour: fine set bridged, coarse sets resolved (wheels drop
+    in + ride over, smooth paths); (3) pit (`R`×4): drops in, grinds out; (4) room to turn/manoeuvre.
+  - NEXT: user verdict → re-tag the completed Option-1 checkpoint → begin Option 2.
+  - USER TEST: wall-snap only reduced, not gone — sawtooth spikes on the idler arc at a ledge (ss).
+    Root cause named in review: the vertical-ray-plus-raise-bound *formulation* is wrong, not its
+    tuning — the conform asks a world-vertical question of a loop whose contact direction varies
+    around it, then `MAX_RAISE` rejects the wrong answers and the accept/reject boundary between
+    adjacent samples IS the sawtooth. User: "rethink, tuning the ray is a hack" → agreed.
+- 2026-07-02 — **Step 10g: outward-normal conform** (green: fmt/clippy clean). Rewrote `conform_belts`
+  to ask the physics' question: each station probes along the belt's **own outward normal** (tangent
+  from loop neighbours, rotated −90°, exactly as `apply_belt_support` does — closed loop + modular
+  indices), from just inside the surface (`CONTACT_PROBE`) outward. A hit short of the surface = the
+  terrain penetrates the belt → **the hit point IS the conformed station** (pressed out along its own
+  contact direction): up onto bumps under the belly, *back off a wall face* at the nose — the normal
+  ray structurally cannot see a wall *top*, so the snap-onto-ledge failure mode is impossible rather
+  than thresholded away. Zero-distance hit (buried origin, extreme clip) → leave taut, physics resolves
+  it. Deleted all three conform consts (`BELT_CONFORM_RISE`/`_REACH`/`_MAX_RAISE`) — no tuning knobs
+  left; the probe depth is shared with the physics. Per user's call, NO arc-pinning special case —
+  betting the normal-probe alone kills the spikes (normals rotate smoothly around the arcs → smoothly
+  varying hits, no accept/reject boundary). Held in reserve if artifacts persist: (a) pin stations on
+  wheel circles (skip conform where the belt wraps a wheel), (b) the full mini-rope relaxation
+  (tension + non-penetration), the geometric end-state.
+  - Caught in self-review before launch: side-plane→world component mapping of the normal was mangled
+    ((0, tan.y, −tan.x) instead of (0, −tan.x, tan.y)) — would have pressed the belly stations
+    *forward*, not up. Fixed; belly now reduces exactly to the old vertical behaviour on flat ground.
+  - AWAITING USER TEST: (1) the idler-arc sawtooth at ledges gone — belt stays wrapped on the wheel /
+    pressed on the wall face, smooth; (2) nose into a wall: belt pressed back on the face, never on
+    top; (3) belly conform unchanged (bumps between wheels still lain over, washboard drape as
+    before); (4) bridging still taut.
+  - NEXT: user verdict → re-tag Option-1 checkpoint → Option 2.
+  - VERIFIED (user): "the clipping cases are solved, much better." Then user diagnosed the next issue
+    from inside the trench: pressed against a vertical wall the tank starts to climb, then **locks** —
+    hypothesis: the inset sprocket/idler collider cylinders drive into the wall and block upward slip.
+- 2026-07-02 — **Wall-climb lock: root cause + fix (step 10h)** (green). User's hypothesis confirmed
+  and sharpened — it's worse than a kinematic block, it's a *design inconsistency*: Avian colliders
+  default to **μ = 0.5** (verified in vendored `physics_material.rs`), so our "pure hard backstop"
+  colliders were silently doing surface physics. Mechanism: (1) belt penetration budget at the
+  sprocket = (1−0.6)·R = 0.18 m → once the collider touches, the belt's grinding-climb force is
+  *frozen* (extra press flows through the rigid contact, buying zero climb); (2) that growing press
+  makes the collider contact drag **down** at 0.5·N exactly while the belt grinds up — the harder the
+  tracks push, the harder it drags. Fix: `Friction::ZERO.with_combine_rule(CoefficientCombine::Min)`
+  on the hull box + sprocket/idler cylinders (Min=3 outranks terrain's default Average=1 → combined
+  contact frictionless regardless of terrain material; verified in source). Backstops now stop
+  penetration only; the belt owns ALL tangential physics.
+  - Design note (user, recorded): whether a given tank CAN scale a ledge is **deliberately emergent**
+    — power/geometry decide, per vehicle ("some tanks are more manoeuvrable and powerful than
+    others"). Don't tune the model to guarantee climbs; let it fight the wall naturally. Expectation
+    here: 1.2 m trench wall vs sprocket-belt top ~1.35 m → marginal, honest either way.
+  - AWAITING USER TEST: in-trench wall fight — the climb should no longer lock at a fixed height;
+    either it grinds over the lip or stalls honestly on force budget. Also sanity: no new sliding
+    weirdness where colliders touch terrain hard (bottoming, wall nosing) — belt still provides all
+    grip.
+  - NEXT: user verdict → re-tag Option-1 checkpoint → Option 2.
 
 ## Open questions / parking lot
 
