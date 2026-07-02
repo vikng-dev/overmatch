@@ -818,6 +818,11 @@ both.
     hanging spans between wheels; (2) the drape breathes with the slack bookkeeping (belly demand
     pulls it tighter); (3) the wall-test slack migration still reads right at the bigger budget;
     (4) no solver misbehaviour from the deeper reference sag (arcs/wraps clean).
+- 2026-07-02 — **MODEL 2 SAVED**: commit `8a1fae4`, tag **`checkpoint/track-model-2`** — the
+  link-belt model, T-34-benchmarked, verified ("this model is insane"; feel very close to the T-34;
+  emergent slack migration confirmed). Both checkpoints now stand for the planned comparison:
+  `checkpoint/track-model-1` (belt-primary) vs `checkpoint/track-model-2` (link-belt), switchable
+  live with `M` at head.
 
 ## Open questions / parking lot
 
