@@ -555,7 +555,269 @@ both.
     either it grinds over the lip or stalls honestly on force budget. Also sanity: no new sliding
     weirdness where colliders touch terrain hard (bottoming, wall nosing) — belt still provides all
     grip.
-  - NEXT: user verdict → re-tag Option-1 checkpoint → Option 2.
+  - VERIFIED (user): "brilliant. works really good."
+- 2026-07-02 — **MODEL 1 SAVED**: commit `6c87691`, tag **`checkpoint/track-model-1`** — the complete,
+  verified belt-primary model (10d–10h: spline conform → belt-primary chain → outward-normal conform →
+  course expansion → frictionless backstops). This is the baseline for the model comparison.
+- 2026-07-02 — **Step 11: multi-model scaffolding** (green: fmt/clippy clean; uncommitted). Per user:
+  the sandbox now accepts multiple locomotion models. `Model` enum + `MODELS` registry + `ActiveModel`
+  resource + `model_is` run condition + `switch_model` (`M` cycles in place, zeroes `BeltSpeed` so the
+  incoming model starts from rest — the live A/B on identical terrain). Shared across models: course,
+  rig, camera, input, pause/reset, belt-loop geometry, `conform_belts`, gizmos, contact viz. Gated
+  per-model: the force systems + wheel articulation (`apply_belt_support` + `articulate_wheels` gate
+  on `Model::BeltPrimary`). `L` log prints the active model. Adding a model = variant + registry entry
+  + gated systems. MODEL 2 (next): iteration on model 1 — design discussion first, then build.
+  - AWAITING USER TEST: pure scaffolding, zero behaviour change — model 1 drives exactly as tagged;
+    `M` logs the (single-entry) cycle; `L` shows "model 1 — belt-primary".
+- 2026-07-02 — **MODEL 2 defined: link-belt** (user's direction, accepted design). Keep exploring the
+  belt-primary model (the wheel-springs Option-2 is a *different* model, maybe model 3 someday). Core
+  idea: treat the belt stations as **virtual track links**. Two mechanisms, from the user's two
+  observations: (1) segments clip terrain corners between stations → make the **segment (link plate)
+  the contact primitive** (segment-cast along the outward normal; support at the true contact point —
+  the plate *rests on* a corner both endpoints miss; same fix as 10e's roller-on-polyline, one level
+  down); (2) stations fixed in hull space scrub along the ground → **advect stations with belt speed**
+  (real link kinematics: no-slip = links stationary on ground under the passing hull; wheelspin =
+  links visibly sliding — the slip model made literal; belt stopped = nothing moves). Free prize: the
+  advected links ARE the procedural animated track (instance link meshes at the advected positions —
+  physics and animation unify on one `LINK_PITCH` primitive). Build order: (1) advected stations,
+  (2) segment-cast contact, (3) draw links as links.
+- 2026-07-02 — **Step 12: model 2 step 1 — advected stations** (green: fmt/clippy clean). Registered
+  `Model::LinkBelt` (M now cycles 1↔2). New `BeltPhase` resource (per-side arc-phase, wrapped mod
+  `CONTACT_SPACING` — uniform ring, one-pitch shift = identity); `resample` gained an `offset` param
+  (stations at `offset + i·spacing`; 0 = exactly the old behaviour). New `apply_belt_support_links`
+  (FixedUpdate, gated on LinkBelt): a deliberate **fork** of model 1's system — model 1's tagged code
+  stays untouched, and step 2 (segment casts) will diverge the body anyway — identical physics except
+  stations sample at the advected phase, and `phase += belt_speed·dt` after the governor (loop
+  traversal direction = belt surface direction when driving forward, so the ring circulates the right
+  way). `articulate_wheels` now shared by both models (gate removed). Phase zeroed on `M`-switch and
+  `R`-reset. Conform/draw stations NOT advected (identical polyline either way; links-as-links is
+  step 3).
+  - AWAITING USER TEST (in model 2, `M` once): (1) contact dots **travel with the belt** when driving
+    — and on a no-slip roll they should sit still in *world* space (lay down and hand off) instead of
+    scrubbing along with the hull; (2) floor it from rest: wheelspin = red dots visibly *sliding*;
+    (3) otherwise identical feel to model 1 (same forces, same coefficients) — A/B with `M` mid-drive;
+    (4) `L` shows the active model.
+  - NEXT: model 2 step 2 — segment(plate)-cast contact · step 3 — draw the links as links.
+  - VERIFIED (user): "very promising, models feel about the same" (correct — step 1 is kinematics of
+    the sampling points, not forces) "but I can already imagine the physics implications and
+    procedural track animation."
+- 2026-07-02 — **Step 12b: module split + model HUD + default** (green: fmt/clippy clean). Per user:
+  (1) `src/track_sandbox.rs` → `src/track_sandbox/` — `mod.rs` (shared course/rig/belt machinery,
+  registry, resources, viz), `model1.rs` (frozen belt-primary `apply_belt_support`), `model2.rs`
+  (`BeltPhase` + `apply_belt_support_links`; the link-belt iteration front). Each model file
+  `use super::*;`, systems `pub(super)`. (2) On-screen model label (top-left `Text` node,
+  `ModelLabel`, updated on `ActiveModel` change; Bevy 0.19 note: `TextFont.font_size` is
+  `FontSize::Px(..)`, not f32). (3) Default model = LinkBelt (model 2 — the iteration front; model 1
+  = frozen baseline).
+  - Also answered (user question, recorded): **the model is essentially 2D per track** — belt loop /
+    stations / conform all live in the (z, y) side plane at fixed track x (two independent 2D
+    problems embedded in 3D by the hull transform; probes are 3D world rays from in-plane points,
+    forces applied at 3D points so full 3D rigid-body response emerges — 2.5D overall). Station =
+    in-plane point standing for a `CONTACT_SPACING` arc of belt (per-metre coefficients); step 2's
+    link plate = in-plane **segment** (line along travel). What stays unmodelled: the track's lateral
+    WIDTH (each track is a knife-edge — a curb under half a track, lateral edge tilt, cross-slope
+    under one belt can't resolve; roll emerges only from left/right height difference). Acceptable at
+    Tier-B (tracks narrow vs long); the escalation if ever needed = several sample columns across the
+    width (line → ribbon), NOT a 3D belt sim.
+  - AWAITING USER TEST: label top-left shows model 2 on launch and flips with `M`; behaviour unchanged
+    otherwise (pure refactor + default).
+  - VERIFIED (user): "looks good" → segments.
+- 2026-07-02 — **Step 13: model 2 step 2 — link-plate (segment) contact** (green: fmt/clippy clean).
+  `model2.rs` only; model 1 untouched. Each link = the segment between consecutive advected stations
+  (modular; degenerate seam skipped). Per link: `cast_shape` with a `Collider::segment` plate
+  (expressed about the link center, identity rotation — endpoints already world-oriented), cast from
+  `CONTACT_PROBE` inside the belt surface along the link's outward normal (Avian 0.7 API verified in
+  vendored source: `ShapeCastConfig{max_distance,..}`, `ShapeHitData{distance, point1=on-terrain,
+  point2=on-cast-shape}`). `pen = PROBE − distance` = the *deepest* terrain feature under the plate;
+  support (soft-engaged) + slip-traction applied **at `hit.point1`** — the true contact point — so a
+  corner poking up *between* stations is found and loaded *there* (point rays are structurally blind
+  to it: the clip the user spotted). Coefficients per-metre × the **actual link length** (seam link
+  is shorter → proportionally less). Contact viz dot at the true contact point
+  (`to_local.transform_point3`). Belt-speed dynamics + phase advection unchanged.
+  - AWAITING USER TEST (model 2, default): (1) drive the washboards — contact dots may sit on bump
+    *corners* between joints now (plate resting on the edge), no force-clipping window as a corner
+    passes between stations; (2) ledge/trench lips: dots ON the lip corner where the plate presses;
+    (3) flat rest calm + same height (plate on flat == point on flat by construction); (4) drive/
+    climb/pit unchanged in feel; A/B vs model 1 with `M`.
+  - NEXT: model 2 step 3 — draw the links as links (plates between advected joints, the proto-track);
+    note the *drawn spline/conform* still point-samples (visual clip between joints can still read on
+    sharp corners — the plate physics no longer does); folding conform onto the link chain is part of
+    step 3.
+  - USER TEST: "a lot of jitter in the gizmos." Root cause (mine, step 13): the whole link load + dot
+    were placed at the shapecast's contact point, which is **degenerate on coplanar contact** — a
+    plate flat on flat ground touches everywhere at once, parry picks arbitrarily among tied points,
+    and the pick flips between the plate's ends tick-to-tick → teleporting dots AND flickering torque
+    (real hull micro-jitter). The cast is good at corners, ambiguous on faces.
+- 2026-07-02 — **Step 13b: pressure-centroid plate contact** (green: fmt/clippy clean). The honest
+  plate model: a rigid plate on penalty ground has a **pressure distribution**; the resultant acts at
+  its **centroid** — a smooth function of pose, no tie-breaking. Per link, reconstruct the profile
+  piecewise-linearly from three probes — endpoint penetrations (2 rays, may be ≤0 = end clear) and
+  the plate cast's deepest point (pen_max at x_c, endpoint pens clamped ≤ pen_max) — and integrate
+  `max(0, pen(x))` in **closed form** (`clipped_linear_piece`: trapezoid + zero-crossing clipping →
+  area ∫pen, first moment ∫x·pen, contacting length). Elastic force = `STIFFNESS_PER_M · area`;
+  damping over the contacting length; engagement ramps on pen_max; force + traction + dot at the
+  centroid `wa + axis·(M/A)` on the belt line (matching model 1's convention). Flat: centroid =
+  centre (stable); corner between stations: profile peaks there → centroid pulls to the corner
+  (correct statics). Cost: 1 cast + 2 rays per link (~3n/side per tick — fine).
+  - AWAITING USER TEST (model 2): (1) jitter gone — dots steady on flat, rest calm; (2) corner cases
+    still caught (dots move toward bump corners/lips as plates ride them); (3) drive/climb unchanged.
+  - VERIFIED (user): "looks good." Follow-up question: the cyan (= the resolved spline the track-link
+    rendering will follow — confirmed) still visually phases through ground between conform points;
+    treat each segment as rigid, like the points but as links? → Yes; nuance: links share joints, so
+    they can't rest independently — rigid-chain answer is the corner link lifts tangent onto the
+    corner and neighbours tilt (the "tent").
+- 2026-07-02 — **Step 13c: rigid-link conform (model 2)** (green: fmt/clippy clean). New
+  `conform_belts_links` in `model2.rs`, gated on LinkBelt (model 1 keeps its frozen per-point
+  `conform_belts`; scheduler runs whichever matches, both write `ConformedBelts`). Two passes per
+  side on the **same advected ring the physics samples** (same `CONTACT_SPACING` pitch, same
+  `BeltPhase` — so the drawn cyan segments ARE the physical links and visibly travel with the belt;
+  most of step 3 arrived naturally): (1) per link, a plate cast along its outward normal → `lift` =
+  deepest terrain penetration past the link line (buried-origin distance-0 casts skipped — taut, let
+  physics push out); (2) per joint, displacement inward = **max of its two adjacent links' lifts**
+  along the averaged link normal. A link over a corner sits tangent on it, neighbours tilt, nothing
+  clips. Wheels ride the conformed chain unchanged (`articulate_wheels` reads `ConformedBelts`).
+  - AWAITING USER TEST (model 2): (1) cyan segments no longer phase through bump corners/lip edges —
+    the chain tents over them; (2) the cyan segments **travel with the belt** when driving (proto
+    track-link animation); (3) wheels still ride the chain sensibly; (4) A/B with `M`: model 1 keeps
+    the old smooth point-conform spline.
+  - NEXT: step 3 finish — draw links as discrete plates (visual gaps at joints / alternating colour),
+    then decide what remains for model-2 completeness vs move to comparison/tag.
+  - VERIFIED (user): "looks very good." Next question (ss: ledge climb): joints displaced by
+    different lifts **stretch** their links (a drooping link reads longer than the pitch — wrong for
+    rigid steel plates). Fixed link length + capped joint angle in this kinematic model? → Yes:
+    that's the missing constraint that makes the chain a chain; = the reserved mini chain-relaxation,
+    now arriving as *rendering integrity* (physics untouched). Sequencing agreed: length conservation
+    first, angle cap as a separate later knob.
+- 2026-07-02 — **Step 13d: chain projection solve — fixed link lengths** (green: fmt/clippy clean).
+  `conform_belts_links` rewritten as a small PBD projection in the 2D side plane, fresh each frame
+  from the reference ring (no temporal state → no drift): gather per-link terrain contact planes
+  (plate casts at reference config; buried-origin casts skipped), then `CHAIN_ITERATIONS` (8)
+  Gauss–Seidel passes of three projections — (a) **rigid link lengths** (each segment back to its
+  reference length, error split between joints; tenting links pull length from neighbours →
+  ultimately the slack top run, the honest bookkeeping under fixed `BeltLength`); (b) **terrain
+  half-spaces** ((p−q)·m ≥ 0 per contacting link's joints); (c) **wheel circles** (joints can't
+  enter the running gear — the wrap now *emerges* from tension around the circles rather than being
+  drawn). `BeltSample.local` = the *solved* local position (consistent with world for the
+  wheel-riding math). Ledge case: the stretched pseudo-link becomes several fixed-length links
+  hinging around the lip.
+  - AWAITING USER TEST (model 2): (1) the ledge/droop case — links stay link-sized, chain hinges
+    around corners (no stretching); (2) segments still travel with the belt; (3) wraps still hug the
+    sprocket/idler (now constraint-emergent); (4) top-run sag breathes as the belly tents (length
+    bookkeeping visible); (5) no solver artifacts (spikes/folding) anywhere on the course.
+  - NEXT: angle cap knob (MAX_LINK_ANGLE projection in the same loop) if wanted after test · draw
+    links as discrete plates · then model-2 wrap-up (tag + compare vs model 1).
+  - USER TEST (ss×4): right direction, but artifacting — links snap between sharp angles; spikes
+    around idler/sprocket; clumping between wheels reads odd; and "are we actually fixed length?
+    the real track has a fixed number of links."
+- 2026-07-02 — **Step 13e: fixed link count + angle cap + convergence** (green: fmt/clippy clean).
+  Three root causes matched to the three symptoms:
+  1. **Not fixed-count (user was right):** per-frame resampling left a phase-dependent *remainder
+     link* at the loop seam — which sits **at the sprocket** (belt_loop starts/ends there) — whose
+     length snapped as the phase wrapped, and the station count flipped ±1 every pitch of travel.
+     Fix: `LinkCount` resource (startup: belt length / target pitch, rounded); both model-2 systems
+     build the ring as exactly N links at pitch = loop_len/N (`resample` + truncate), phase wraps
+     mod that exact pitch. No remainder link, stable count — a real track's ring.
+  2. **Zigzag buckling = the missing angle cap:** length constraints alone let a *compressed* span
+     (nosed into a wall, clumped between wheels) fold arbitrarily sharply. New projection (b):
+     joint articulation capped at `MAX_LINK_ANGLE` 30° (must clear the wheel-wrap demand of
+     ~pitch/radius ≈ 25°/joint on road wheels; ≈ a real pin's limit) — ease the joint toward its
+     neighbours' midpoint proportional to the excess fold.
+  3. **Snapping between configurations = under-convergence:** `CHAIN_ITERATIONS` 8 → 20 (cost
+     trivial; solver order now lengths → angle → terrain → circles).
+  - AWAITING USER TEST (model 2): (1) sprocket/idler spikes gone (the seam link no longer exists);
+    (2) compressed spans bow smoothly instead of zigzagging (wall-nose, wheel clumps); (3) less
+    config-snapping generally; (4) wraps still hug the wheels (cap sits above the wrap demand);
+    (5) links stay link-sized (now exactly L/N each).
+  - NEXT: draw links as discrete plates · model-2 wrap-up (tag + compare vs model 1).
+  - USER TEST (ss×3, at the ledge): "generally better, still edge cases — perhaps the missing piece
+    is chain inertia?" Analysis: half right — the flip-snapping wants *temporal continuity*
+    (bistable tent configs re-derived fresh each frame), whose cheap stable form is a **warm start**
+    (hysteresis), NOT true chain dynamics (mass/momentum/wobble — deliberately out at Tier-B). The
+    ss also exposed a real static bug: the solver's wheel circles were the **rest-pose** ring while
+    the drawn wheels articulate — the chain wrapped phantom circles and notched through the lifted
+    wheels at the ledge.
+- 2026-07-02 — **Step 13f: warm start + articulated wheel circles** (green: fmt/clippy clean).
+  (1) `BeltPhase` now stores **total unwrapped travel** (advance takes no pitch; call sites wrap
+  `rem_euclid(pitch)` for the offset; quotient = link-identity shift). (2) New `ChainMemory`
+  resource: last frame's solved displacements per link (hull-local), index-rotated by the identity
+  shift (`rotate_right((shift − mem.shift) mod n)`) so each displacement seeds the same *physical*
+  link; solver starts from reference + seeded displacement → stays in the basin it settled in.
+  (3) `conform_belts_links` circle constraints now built from the wheels' **current articulated
+  `Transform`s** (radius by `WheelKind`; one frame stale — wheels ride last frame's chain) instead
+  of `rest_circles`.
+  - USER TEST (ss×4): "tuning way off — engine spins the track up like a string and it's flung
+    outward; chain very stiff — stayed floating in shape after stopping; cyan keeps deforming while
+    paused — more than one clock at play." All three diagnosed as bugs in/around the 13f warm start,
+    not tuning:
+    1. **No tension → every feasible config a fixed point**: the projection constraints (lengths,
+       non-penetration, circles) admit infinitely many shapes; pre-warm-start the fresh-from-
+       reference init WAS the implicit tension. Full-strength warm start made deformed shapes
+       persist forever (the floating chain) and let mangled seeds compound at speed (~73 links/sec →
+       the "flung outward" balloon — no centrifugal force exists in this code; it was memory
+       feedback).
+    2. **Stale memory on teleport**: R/M didn't clear `ChainMemory` → garbage seeds.
+    3. **Two clocks confirmed**: Esc pauses Avian only; `articulate_wheels` kept *easing* on the
+       virtual Update clock while paused, moving the solver's wheel circles → chain re-solved →
+       creep while "paused".
+- 2026-07-02 — **Step 13g: chain tension (seed decay) + clock gating + memory resets** (green).
+  (1) `CHAIN_MEMORY` 0.8: seed = reference + α·(rotated last displacement) — the missing tension:
+  deformations decay in ~1/(1−α) frames unless terrain holds them; enough memory survives for tent
+  hysteresis. (2) `conform_belts` / `conform_belts_links` / `articulate_wheels` gate on
+  `sim_running` (paused = everything frozen; draw systems stay ungated — immediate-mode gizmos
+  redraw the frozen state). (3) `R`-reset + `M`-switch clear `ChainMemory`. Engine-power feel
+  deliberately NOT retuned at this step.
+  - VERIFIED (user, ss): "very, very good — the model is getting very sharp." Remaining
+    observations: (a) belly squiggles — "we're not considering the top half of the chain for slack
+    (total chain length)"; (b) engine still accelerates the tracks incredibly quickly; (c) user
+    calls for a **T-34 benchmark** — "numbers well known, track model basically identical to ours".
+- 2026-07-02 — **Step 14: T-34 benchmark + constant-power drivetrain + top-half slack** (green).
+  1. **Vehicle = T-34/76 spec** (shared consts — both models drive the same vehicle): 26.5 t
+     (`HULL_MASS`), 830 mm road wheels (`ROAD_RADIUS` 0.415), contact length 3.85 m
+     (`WHEEL_SPACING` 0.96), sprocket ⌀0.64 (`DRIVE_RADIUS` 0.32 — smaller than the road wheels,
+     as on the real thing), hull 6.1 m (`HULL_HALF`), **link pitch 172 mm** (`CONTACT_SPACING` —
+     the real 72-link ring maps straight onto `LinkCount`), 53 km/h (`MAX_BELT_SPEED` 15),
+     `TRACK_SLACK` 0.005 (≈9 cm mid-span droop ≈ well-tensioned real track). Support stiffness
+     rescaled for the mass at the same ~5 cm sink target (680k/m, damping 80k/m — the
+     mass-independent-sink rule doing its job).
+  2. **Constant-power drivetrain** (the honest fix for "engine spins the track like a string" — the
+     defect was the *shape*, not the number: full force at any speed): new shared
+     `engine_available(v) = min(ENGINE_FORCE, ENGINE_POWER/|v|)` — V-2 diesel 373 kW → 186.5 kW per
+     track, torque-capped at 120 kN (≈ the grip limit). Brutal at stall, tapering at speed. In BOTH
+     models' governors (drivetrain is vehicle spec; the A/B holds the vehicle constant — noted as a
+     deliberate mechanism change to tagged model 1). `BELT_INERTIA` 3k→8k (belt steel ~1.2 t +
+     reflected drivetrain).
+  3. **Top-half slack participation** (user's squiggle diagnosis): per frame, measure the belly's
+     extra path demand from the plate-cast lifts (first-order: Σ(Δ joint-lift)²/2ℓ per link — a
+     uniform raise costs ~nothing, a differential tent is what consumes length), smooth into
+     `ChainSideMemory.belly_extra`, and **subtract it from the next frame's top-run sag budget**
+     (`belt_loop(Some(L − belly_extra))`) — the top half lends its slack instead of the surplus
+     parking as belly squiggles.
+  4. `MAX_LINK_ANGLE` 30°→35° (the T-34's small sprocket needs ~31°/joint to wrap).
+  - AWAITING USER TEST: (1) drive feel — spin-up now tapers with speed (no string-spin), stall
+    torque still shoves 26.5 t around; (2) belly squiggles reduced, top sag visibly breathing as
+    terrain loads the belly; (3) rest sink ~5 cm at the new mass; (4) sprocket wrap clean at the
+    smaller radius; (5) proportions read T-34 (big wheels, small sprocket, long low hull).
+  - NEXT: draw links as discrete plates · model-2 wrap-up (tag + compare vs model 1).
+  - VERIFIED (user, ss×3): "this model is incredible — feel is very close to the T-34." User spotted
+    **emergent slack migration** (confirmed genuine + directionally correct): driving into a wall
+    forward, compression collects *under the front sprocket*; in reverse, on the *top run* — the
+    taut-side/slack-side behaviour of a real front-drive track, un-coded: links advect around the
+    loop while the wall's contact planes pin the nose region; surplus piles just downstream of the
+    pinned zone (warm start lets the pile persist), tension upstream. Remaining ask: proper top-run
+    **droop** — the T-34 runs famously loose, no return rollers, the return run lies ON the road
+    wheels.
+- 2026-07-02 — **Step 14b: T-34 loose track** (green). The droop couldn't be tuned in because the
+  slack budget couldn't *reach*: the top run sits ~0.45 m above the wheel tops and 5 mm slack buys
+  ~9 cm of sag. The resting-on-wheels mechanism already existed (the solver's wheel circles push the
+  chain out from any direction, including from above) — pure budget fix: `TRACK_SLACK` 0.005 →
+  **0.13** (sag ∝ √slack → the reference parabola now dips past the wheel tops; the circles catch
+  the drape). Expected: return run rides the road wheels with short hanging spans between them — the
+  authentic silhouette. (Model 1's point-conform spline has no wheel collision on the top run — it
+  draws the deep parabola through the wheels; baseline-only cosmetic, noted.)
+  - AWAITING USER TEST (model 2): (1) return run drapes onto and rides the road wheel tops, short
+    hanging spans between wheels; (2) the drape breathes with the slack bookkeeping (belly demand
+    pulls it tighter); (3) the wall-test slack migration still reads right at the bigger budget;
+    (4) no solver misbehaviour from the deeper reference sag (arcs/wraps clean).
 
 ## Open questions / parking lot
 
@@ -563,5 +825,3 @@ both.
   add sag in step 2.
 - How belt-speed/slip couples to the (future) powertrain — deferred to step 4.
 - Promotion path into the game: new module vs. extending `driving`; and the ADR-0005 rewrite.
-</content>
-</invoke>

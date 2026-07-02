@@ -12,9 +12,10 @@
 //! the whole loop along each station's outward normal** (down under the tracks, forward on the front
 //! face, …), driven by a **belt-speed / slip model** (each track has a belt speed; friction =
 //! μ·load·saturate(slip); the front face's drive axis points up, so a spinning belt grinds up walls).
-//! Hull + sprocket/idler colliders back it as a hard stop. Arrow keys drive; contact dots colour
-//! green→red by slip. `R` tours the reset spots, `L` logs state, `Esc` pauses. Bump-stops and the
-//! procedural (animated) track land in later steps.
+//! Hull + sprocket/idler colliders back it as a hard stop (frictionless — pure penetration stops;
+//! the belt owns all tangential physics). Arrow keys drive; contact dots colour green→red by slip.
+//! `R` tours the reset spots, `M` cycles the registered locomotion models (the live A/B — see
+//! [`Model`]), `L` logs state, `Esc` pauses. The procedural (animated) track lands in a later step.
 
 use avian3d::prelude::{
     AngularInertia, AngularVelocity, CoefficientCombine, Collider, CollisionLayers, Forces,
@@ -29,17 +30,30 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 use crate::Layer;
 
-// --- Rig geometry (metres). A generic, tank-ish primitive; every value here is a knob the model is
-// meant to be tested against (wheel count, spacing, track length, overhangs). ---
+// One file per locomotion model (the `M` A/B): shared course/rig/belt machinery lives here in
+// `mod.rs`; each model's force systems live in their own file and are gated on `ActiveModel`.
+mod model1;
+mod model2;
 
-/// Number of road wheels per side.
+use model1::apply_belt_support;
+use model2::{
+    BeltPhase, ChainMemory, apply_belt_support_links, conform_belts_links, init_link_count,
+};
+
+// --- Rig geometry (metres), benchmarked on the **Soviet T-34** — well-documented numbers and a
+// running-gear layout (5 big road wheels, rear-ish drive, all-steel track) essentially identical to
+// this model. Nothing here is tuned-to-feel; it's the vehicle's spec sheet. ---
+
+/// Number of road wheels per side (T-34: 5).
 const ROAD_WHEELS: usize = 5;
-/// Road-wheel radius. Also the effective belt half-thickness at the hub for now.
-const ROAD_RADIUS: f32 = 0.35;
-/// Hub-to-hub spacing of road wheels along the track (forward axis).
-const WHEEL_SPACING: f32 = 1.15;
-/// Sprocket/idler radius — larger than the road wheels, in the usual way.
-const DRIVE_RADIUS: f32 = 0.45;
+/// Road-wheel radius. Also the effective belt half-thickness at the hub for now. (T-34's Christie
+/// wheels are famously large: 830 mm diameter.)
+const ROAD_RADIUS: f32 = 0.415;
+/// Hub-to-hub spacing of road wheels along the track: T-34 ground-contact length ≈ 3.85 m over 4
+/// gaps.
+const WHEEL_SPACING: f32 = 0.96;
+/// Sprocket/idler radius (T-34 sprocket ≈ 0.64 m diameter — *smaller* than its road wheels).
+const DRIVE_RADIUS: f32 = 0.32;
 /// The sprocket/idler *collider* radius as a fraction of the wheel radius. Deliberately inset inside
 /// the belt surface: the **belt penalty is the primary contact** (it must be able to penetrate a wall
 /// to generate support + grinding friction), and the collider is only a **hard backstop** against
@@ -53,13 +67,13 @@ const DRIVE_OVERHANG: f32 = 1.0;
 const DRIVE_LIFT: f32 = 0.55;
 /// Lateral offset of each track from the centreline (so the two belts straddle the hull).
 const TRACK_HALF_WIDTH: f32 = 1.25;
-/// Hull box half-extents (x = half width, y = half height, z = half length).
-const HULL_HALF: Vec3 = Vec3::new(1.05, 0.55, 3.4);
+/// Hull box half-extents (x = half width, y = half height, z = half length). T-34 hull ≈ 6.1 m long,
+/// ≈ 2 m between the tracks.
+const HULL_HALF: Vec3 = Vec3::new(1.0, 0.55, 3.05);
 /// Hull centre height when resting on flat ground (road-wheel hubs sit at y = ROAD_RADIUS).
 const HULL_REST_Y: f32 = 1.15;
-/// Hull mass (kg) for the primitive — modest, to keep the contact-spring forces sane while still
-/// feeling weighty. Not a real tank's 57 t; this rig exists to test the model, not a variant.
-const HULL_MASS: f32 = 12_000.0;
+/// Hull mass (kg): T-34/76, combat-loaded ≈ 26.5 t.
+const HULL_MASS: f32 = 26_500.0;
 
 // --- Test course (module-level so the reset + trench floors can reference the trenches) ---
 /// Trenches down the −Z lane, each `(centre z, width)`, nearest→farthest. Narrow: some road wheels
@@ -89,27 +103,30 @@ const OBSTACLE_W: f32 = 16.0;
 const TRENCH_FLOOR_Y: f32 = -1.2;
 
 // --- Belt contact model ---
-/// Arc-length spacing of belt contact stations along the lower run (m). Denser = smoother contact
-/// (less bump as a station crosses a ledge), more rays. Because the coefficients below are **per
-/// metre of belt**, changing this changes only smoothness — never the total support/traction — so
-/// resolution and the physics are decoupled (the fix for "finer spacing launched the rig").
-const CONTACT_SPACING: f32 = 0.15;
+/// Target arc-length spacing of belt contact stations (m) — the **track link pitch**. T-34: 172 mm,
+/// 72 links per track (our slightly longer loop rounds to a few more). Because the coefficients
+/// below are **per metre of belt**, changing this changes only resolution — never the total
+/// support/traction (the fix for "finer spacing launched the rig").
+const CONTACT_SPACING: f32 = 0.172;
 /// Downward ray length used to find ground just beneath each station (m); also the sink at which
 /// support saturates.
 const CONTACT_PROBE: f32 = 0.5;
 /// Slack (m) in the belt beyond the taut rest perimeter: the fixed track length is `rest perimeter +
-/// this`. As the wheels articulate, the taut perimeter changes and the leftover slack redistributes
-/// onto the return (top) run as sag. Sag depth grows as ~√slack, so a little goes a long way — tune.
-const TRACK_SLACK: f32 = 0.02;
-/// Contact-spring stiffness per **metre of belt** (N/m per m): as the *sole* carrier now (Option 1),
-/// the grounded belt length holds ~mg at ~5 cm of sink — soft enough for a compliant, well-engaged
-/// ride (deep stations don't flicker) rather than the old stiff 2 cm bed that see-sawed. Multiplied by
-/// `CONTACT_SPACING` for the per-station value. Ride frequency ≈ √(g / sink) is mass-independent, so
-/// this generalizes: pick a target sink, not a per-vehicle spring constant.
-const SUPPORT_STIFFNESS_PER_M: f32 = 250_000.0;
-/// Contact-spring damping per **metre of belt** (N·s/m per m): ~0.85 critical for the vertical mode at
-/// the softened stiffness above (over-damping here just makes it sluggish).
-const SUPPORT_DAMPING_PER_M: f32 = 30_000.0;
+/// this`. The leftover slack rests on the return (top) run as sag (depth ~√slack). The T-34 runs
+/// famously loose — **no return rollers**, the return run lies on top of the road wheels — so the
+/// budget is sized for the reference sag to dip past the wheel tops (~0.45 m below the taut top
+/// line); the chain solver's wheel-circle constraints then catch the drape and the track *rides the
+/// wheels*, hanging in short spans between them (model 2; model 1's point-conform spline has no
+/// wheel collision on the top run and just draws the deep parabola).
+const TRACK_SLACK: f32 = 0.13;
+/// Contact-spring stiffness per **metre of belt** (N/m per m): the sole carrier holds the T-34's
+/// 26.5 t at ~5 cm of sink over the ~7.7 m of grounded belt. Multiplied by the station's arc length
+/// for the per-station value. Ride frequency ≈ √(g / sink) is mass-independent, so this generalizes:
+/// pick a target sink, not a per-vehicle spring constant.
+const SUPPORT_STIFFNESS_PER_M: f32 = 680_000.0;
+/// Contact-spring damping per **metre of belt** (N·s/m per m): ~0.85 critical for the vertical mode
+/// at the stiffness above (over-damping here just makes it sluggish).
+const SUPPORT_DAMPING_PER_M: f32 = 80_000.0;
 /// Soft-engagement depth (m): a station ramps its contact force in over the first this-many metres of
 /// penetration (quadratic near zero) instead of switching full force on the instant it crosses the
 /// belt surface. Kills the on/off flicker at the belt ends that see-saws the rigid rig at rest — the
@@ -122,18 +139,27 @@ const CONTACT_ENGAGE: f32 = 0.02;
 const BELT_DRAW_SPACING: f32 = 0.1;
 
 // --- Drive: belt-speed / slip model. Each track has a belt *speed*; friction comes from the slip
-// between belt and ground, so wheelspin, skid, engine-braking, hill-hold, and top speed all emerge. ---
-/// Top belt surface speed (m/s) at full command — the governed top speed.
-const MAX_BELT_SPEED: f32 = 11.0;
-/// Max force the engine can put into spinning one track's belt (N). If it exceeds the available grip
-/// the belt over-spins the ground → wheelspin; on grippy ground the belt and ground find rolling.
-const ENGINE_FORCE: f32 = 90_000.0;
+// between belt and ground, so wheelspin, skid, engine-braking, hill-hold, and top speed all emerge.
+// Drivetrain benchmarked on the T-34's 500 hp V-2 diesel. The drivetrain is *vehicle* spec, not
+// track-model spec, so it's shared by all models (the A/B holds the vehicle constant). ---
+/// Top belt surface speed (m/s) at full command — the governed top speed (T-34: ~53 km/h road).
+const MAX_BELT_SPEED: f32 = 15.0;
+/// Engine power available to one track (W): V-2 diesel, 373 kW total. The engine delivers a
+/// **constant-power curve** — available force = power / belt speed (see [`engine_available`]) — so
+/// it's brutal at stall and tapers as the belt spins up; "full force at any speed" was what spun the
+/// track up like a string.
+const ENGINE_POWER: f32 = 186_500.0;
+/// Low-speed torque cap per track (N): the constant-power curve would be infinite at stall; real
+/// gearing caps it around the grip limit (μ·mg/2 ≈ 117 kN — 1st gear on a T-34 can just about spin
+/// the tracks on hard ground).
+const ENGINE_FORCE: f32 = 120_000.0;
 /// Governor gain (N per m/s of belt-speed error): how hard the engine chases the commanded belt
-/// speed, clamped to `ENGINE_FORCE`. Also gives engine-braking when the command drops.
+/// speed, clamped to the available force. Also gives engine-braking when the command drops.
 const BELT_GOVERNOR_GAIN: f32 = 60_000.0;
-/// Effective linear inertia of one track's belt (kg): how quickly it spins up / down. Smaller = more
+/// Effective linear inertia of one track's belt (kg): the belt itself (~1.2 t of steel on a T-34)
+/// plus the reflected drivetrain inertia. Sets how quickly the belt spins up / down; smaller = more
 /// responsive and more prone to wheelspin.
-const BELT_INERTIA: f32 = 3_000.0;
+const BELT_INERTIA: f32 = 8_000.0;
 /// Slip speed (m/s) at which ground friction saturates to μ·load. Below it grip is ~proportional to
 /// slip (rolling); above it the track is sliding (the wheelspin/skid regime).
 const SLIP_SATURATION: f32 = 0.4;
@@ -158,6 +184,82 @@ const DRIVE_RAMP: f32 = 4.0;
 const SUSP_TRAVEL_RATE: f32 = 2.5;
 /// Clamp on the cosmetic lift (m): a tall obstacle can't fling the visual wheel arbitrarily far.
 const SUSP_MAX_LIFT: f32 = 0.5;
+
+/// The locomotion models the sandbox can run, selectable at runtime with `M`. Competing iterations
+/// share the course, rig, camera, input, and belt/conform machinery, and differ only in the gated
+/// systems that generate forces / articulate wheels — so they can be A/B'd live on identical terrain,
+/// which is the point: the eventual pick is on feel/maintenance/scaling, compared side by side.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Model {
+    /// MODEL 1 — belt-primary (tag `checkpoint/track-model-1`): the belt is the sole ground contact
+    /// *and* sole ground reader; wheels are rigid to the hull and ride the conformed belt
+    /// cosmetically (ground → belt → wheels).
+    BeltPrimary,
+    /// MODEL 2 — link-belt: iteration on model 1 where the sampling stations are **virtual track
+    /// links** that *travel with the belt* (each carries an arc-phase advanced by belt speed). Real
+    /// kinematics fall out: rolling without slip = links stationary on the ground while the hull
+    /// passes over (no contact scrubbing); wheelspin/skid = links visibly sliding. Step 1 advects the
+    /// stations; segment (plate) contact and link rendering come next.
+    LinkBelt,
+}
+
+impl Model {
+    fn label(self) -> &'static str {
+        match self {
+            Model::BeltPrimary => "1 — belt-primary (belt sole contact, cosmetic wheels)",
+            Model::LinkBelt => "2 — link-belt (stations advect with the belt)",
+        }
+    }
+}
+
+/// The models registered for the `M` cycle, in order. Adding a model = a `Model` variant, an entry
+/// here, and its gated systems.
+const MODELS: [Model; 2] = [Model::BeltPrimary, Model::LinkBelt];
+
+/// Which model's systems are live. Switched by `switch_model`; model-specific systems gate on
+/// [`model_is`].
+#[derive(Resource)]
+struct ActiveModel(Model);
+
+impl Default for ActiveModel {
+    fn default() -> Self {
+        // Model 2 is the live iteration front; model 1 stays registered as the frozen baseline.
+        Self(Model::LinkBelt)
+    }
+}
+
+/// Run condition: the given model is active.
+fn model_is(model: Model) -> impl Fn(Res<ActiveModel>) -> bool {
+    move |active: Res<ActiveModel>| active.0 == model
+}
+
+/// The drivetrain force available to spin one track's belt at the given belt speed: a
+/// **constant-power** curve (force × speed can't exceed [`ENGINE_POWER`]) under the low-speed
+/// torque cap [`ENGINE_FORCE`]. Shared by all models — the drivetrain is vehicle spec, and the A/B
+/// comparison holds the vehicle constant.
+fn engine_available(belt_speed: f32) -> f32 {
+    (ENGINE_POWER / belt_speed.abs().max(0.5)).min(ENGINE_FORCE)
+}
+
+/// `M` cycles through the registered models in place (same pose, same course spot) — the live A/B.
+/// Belt state is zeroed so the incoming model starts from rest, not from the outgoing model's spin.
+fn switch_model(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut active: ResMut<ActiveModel>,
+    mut belt: ResMut<BeltSpeed>,
+    mut phase: ResMut<BeltPhase>,
+    mut chain: ResMut<ChainMemory>,
+) {
+    if !keys.just_pressed(KeyCode::KeyM) {
+        return;
+    }
+    let i = MODELS.iter().position(|&m| m == active.0).unwrap_or(0);
+    active.0 = MODELS[(i + 1) % MODELS.len()];
+    *belt = BeltSpeed::default();
+    *phase = BeltPhase::default();
+    *chain = ChainMemory::default();
+    info!("model → {}", active.0.label());
+}
 
 /// Which track a wheel belongs to. Left at −X, right at +X (matching the game's `TrackSide`).
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -235,7 +337,9 @@ pub fn plugin(app: &mut App) {
         .init_resource::<DriveInput>()
         .init_resource::<BeltSpeed>()
         .init_resource::<BeltLength>()
+        .init_resource::<BeltPhase>()
         .init_resource::<ConformedBelts>()
+        .init_resource::<ActiveModel>()
         .add_systems(
             Startup,
             (
@@ -244,21 +348,52 @@ pub fn plugin(app: &mut App) {
                 spawn_environment,
                 spawn_rig,
                 init_belt_length,
+                init_link_count,
+                spawn_model_label,
             ),
         )
-        // The belt contact model runs in the fixed step (before Avian integrates in FixedPostUpdate),
-        // NOT while paused (else its penalty force accumulates against a frozen sim and flings the rig
-        // on resume). It is the single ground-contact system: it carries the hull, provides traction,
-        // and integrates belt speed — the wheels are rigid to the hull (Option 1).
-        .add_systems(FixedUpdate, apply_belt_support.run_if(sim_running))
+        // Physics runs in the fixed step (before Avian integrates in FixedPostUpdate), NOT while
+        // paused (else penalty force accumulates against a frozen sim and flings the rig on resume).
+        // Model-specific force systems gate on the active model (the `M` A/B switch).
+        //
+        // MODEL 1: `apply_belt_support` — single ground-contact system, stations fixed in hull space.
+        // MODEL 2: `apply_belt_support_links` — same contact physics, stations advect with the belt.
+        .add_systems(
+            FixedUpdate,
+            (
+                apply_belt_support
+                    .run_if(sim_running)
+                    .run_if(model_is(Model::BeltPrimary)),
+                apply_belt_support_links
+                    .run_if(sim_running)
+                    .run_if(model_is(Model::LinkBelt)),
+            ),
+        )
         .add_systems(
             Update,
             (
                 fly_camera.run_if(cursor_locked),
                 read_drive_input,
-                // The visual chain, in data order: read the ground into the conformed belt once,
-                // then the wheels ride it, then it's drawn.
-                (conform_belts, articulate_wheels, draw_rig_gizmos).chain(),
+                // The visual chain, in data order: read the ground into the conformed belt once
+                // (model 1: per-point conform; model 2: rigid-link conform on the advected ring),
+                // then the wheels ride it cosmetically (both models), then it's drawn. The stateful
+                // pieces gate on `sim_running` like the physics — Esc pauses Avian's clock but NOT
+                // the Update schedule, so ungated they kept easing wheels / re-solving the chain
+                // against a frozen sim ("deforms while paused" — the second clock). The draw systems
+                // stay ungated: gizmos are immediate-mode and must redraw the frozen state.
+                (
+                    conform_belts
+                        .run_if(model_is(Model::BeltPrimary))
+                        .run_if(sim_running),
+                    conform_belts_links
+                        .run_if(model_is(Model::LinkBelt))
+                        .run_if(sim_running),
+                    articulate_wheels.run_if(sim_running),
+                    draw_rig_gizmos,
+                )
+                    .chain(),
+                switch_model,
+                update_model_label,
                 toggle_pause,
                 reset_rig,
                 log_state,
@@ -382,6 +517,40 @@ fn spawn_camera(mut commands: Commands) {
         Transform::from_xyz(11.0, 3.5, 3.0).looking_at(Vec3::new(0.0, 0.8, 0.0), Vec3::Y),
         FreeFlyCam,
     ));
+}
+
+/// The on-screen label of the active model (top-left).
+#[derive(Component)]
+struct ModelLabel;
+
+fn model_label_text(model: Model) -> String {
+    format!("model {}   [M switches]", model.label())
+}
+
+fn spawn_model_label(mut commands: Commands, active: Res<ActiveModel>) {
+    commands.spawn((
+        ModelLabel,
+        Text::new(model_label_text(active.0)),
+        TextFont {
+            font_size: FontSize::Px(15.0),
+            ..default()
+        },
+        TextColor(Color::srgb(0.75, 0.95, 1.0)),
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(8.0),
+            left: Val::Px(12.0),
+            ..default()
+        },
+    ));
+}
+
+/// Keep the label current when `M` switches the model.
+fn update_model_label(active: Res<ActiveModel>, label: Single<&mut Text, With<ModelLabel>>) {
+    if !active.is_changed() {
+        return;
+    }
+    label.into_inner().0 = model_label_text(active.0);
 }
 
 /// Lock + hide the cursor for mouse-look (a query, so a not-yet-present cursor is a no-op).
@@ -654,7 +823,7 @@ fn conform_belts(
     if let Some(&first) = loop_pts.first() {
         loop_pts.push(first);
     }
-    let stations = resample(&loop_pts, BELT_DRAW_SPACING);
+    let stations = resample(&loop_pts, BELT_DRAW_SPACING, 0.0);
     let n = stations.len();
     if n < 3 {
         return;
@@ -759,178 +928,15 @@ fn articulate_wheels(
     }
 }
 
-/// Belt contact — the core of the model. Sample the **whole** belt loop (not just the lower run) and,
-/// at each station, probe along the belt's **outward normal** (down under the tracks, forward on the
-/// front face, etc.). Wherever the belt meets terrain: (1) push back with a damped penalty spring
-/// along the contact normal (**support**); (2) apply **slip-based friction** — `μ·load ×
-/// saturate(slip / SLIP_SATURATION)` — where the belt's longitudinal drive axis is the belt-travel
-/// direction (down the front face, so friction reacts *up* → grinding-climb), capped on the friction
-/// ellipse (**traction**). The longitudinal friction reacts back on the belt, which the engine
-/// governor drives, so wheelspin/skid/engine-braking/hill-hold emerge. One mechanism covers ground,
-/// walls, ledges, and ditch faces alike.
-fn apply_belt_support(
-    mut hull: Query<(&GlobalTransform, Forces), With<Hull>>,
-    spatial: SpatialQuery,
-    input: Res<DriveInput>,
-    time: Res<Time>,
-    mut belt: ResMut<BeltSpeed>,
-    mut contacts: ResMut<BeltContacts>,
-) {
-    let Ok((hull_gt, mut forces)) = hull.single_mut() else {
-        return;
-    };
-    let affine = hull_gt.affine();
-    contacts.0.clear(); // the sole contact system now — nothing ran before us this tick
-    let dt = time.delta_secs();
-
-    // Per-station support coefficients = per-metre × the arc-length each station represents, so the
-    // totals are independent of `CONTACT_SPACING` (resolution decoupled from the physics).
-    let k = SUPPORT_STIFFNESS_PER_M * CONTACT_SPACING;
-    let c = SUPPORT_DAMPING_PER_M * CONTACT_SPACING;
-
-    for side in [Side::Left, Side::Right] {
-        // Physics belt = the hull-fixed rigid taut line (`rest_circles`), NOT the cosmetically-draped
-        // wheels — otherwise draping the wheels onto terrain would flatten the line onto the ground and
-        // null the penetration that carries the tank. Terrain rising above this rigid line generates
-        // support; terrain dropping below it is bridged straight.
-        let track_x = match side {
-            Side::Left => -TRACK_HALF_WIDTH,
-            Side::Right => TRACK_HALF_WIDTH,
-        };
-        let circles = rest_circles();
-        // Additive differential: steer adds to the left track, subtracts from the right, so a pure
-        // steer pivots in place and a steer biases the turn the same way at any throttle.
-        let command = match side {
-            Side::Left => input.throttle + input.steer,
-            Side::Right => input.throttle - input.steer,
-        }
-        .clamp(-1.0, 1.0);
-        let belt_speed = belt.get(side); // this tick's belt surface speed (constant over the loop)
-        // Sum the longitudinal ground friction across this side's belt stations so the belt-speed
-        // integrator sees the full ground reaction (traction is all on the belt now).
-        let mut belt_reaction = 0.0;
-
-        // The full closed belt loop, resampled at uniform spacing. Close it (append the first point)
-        // so the seam has a segment, then use modular indices for the tangent.
-        let mut loop_pts = belt_loop(&circles, None);
-        if let Some(&first) = loop_pts.first() {
-            loop_pts.push(first);
-        }
-        let stations = resample(&loop_pts, CONTACT_SPACING);
-        let n = stations.len();
-        if n < 3 {
-            continue;
-        }
-
-        for i in 0..n {
-            let point = stations[i];
-            // Belt tangent (loop-traversal direction) and outward normal, both in the side plane.
-            // Winding is CCW in (z, y), so the outward normal is the tangent rotated −90°.
-            let tan2 = (stations[(i + 1) % n] - stations[(i + n - 1) % n]).normalize_or_zero();
-            if tan2 == Vec2::ZERO {
-                continue;
-            }
-            let out2 = Vec2::new(tan2.y, -tan2.x);
-
-            let p = affine.transform_point3(Vec3::new(track_x, point.y, point.x));
-            // Side-plane (z, y) direction → world: local (x = 0, y = v.y, z = v.x).
-            let out = affine
-                .transform_vector3(Vec3::new(0.0, out2.y, out2.x))
-                .normalize_or_zero();
-            let Ok(out_dir) = Dir3::new(out) else {
-                continue;
-            };
-
-            // Probe from just inside the belt surface, outward, for terrain the belt has met.
-            let origin = p - out * CONTACT_PROBE;
-            let Some(hit) = spatial.cast_ray(
-                origin,
-                out_dir,
-                CONTACT_PROBE + 0.02,
-                true,
-                &SpatialQueryFilter::from_mask(Layer::Terrain),
-            ) else {
-                continue;
-            };
-            // Penetration of terrain past the belt surface. No deadband: the belt is the sole carrier
-            // now, so on flat ground it settles at a small continuous sink (no parallel wheel springs
-            // holding it at the surface to buzz against), and every grounded station carries its share.
-            let pen = CONTACT_PROBE - hit.distance;
-            if pen <= 0.0 {
-                continue;
-            }
-
-            // (1) Support: penalty spring along the **belt's own inward normal** (−outward), NOT the
-            // terrain hit-normal. The belt normal is smooth (from the spline), whereas the terrain
-            // normal flips between "up" and "sideways" when a ray lands on an edge (a ditch lip),
-            // which shoved the rig in alternating directions and made it chatter/wedge. `−out` still
-            // pushes off a wall (outward points into it) and up off the ground; only the direction is
-            // stabilised. Damped by the hull's speed along it.
-            let normal = -out;
-            let vel = forces.velocity_at_point(p);
-            // Soft engagement: ramp the whole contact force in over the first CONTACT_ENGAGE metres of
-            // penetration, so a station crossing the belt surface eases its force from zero instead of
-            // snapping a large force on/off (which see-sawed the rigid rig at rest). Full force once
-            // well engaged (the resting flat run sits far past this).
-            let engage = (pen / CONTACT_ENGAGE).clamp(0.0, 1.0);
-            let load = (k * pen - c * vel.dot(normal)).max(0.0) * engage;
-            if load <= 0.0 {
-                continue;
-            }
-            forces.apply_force_at_point(normal * load, p);
-
-            // (2) Traction. The belt's drive axis is the belt-travel direction (−tangent: belt_speed
-            // > 0 lays ground backward), projected into the contact plane; lateral is across it. Slip
-            // is belt speed minus the ground's speed along the drive axis; friction saturates at
-            // μ·load. On the front face the drive axis points *up*, so a spinning belt climbs.
-            let mut slip_long = 0.0;
-            let drive = -affine.transform_vector3(Vec3::new(0.0, tan2.y, tan2.x));
-            let long_plane = drive - drive.dot(normal) * normal;
-            if long_plane.length() > 1e-4 {
-                let long_dir = long_plane.normalize();
-                let lat_dir = normal.cross(long_dir).normalize_or_zero();
-                slip_long = belt_speed - vel.dot(long_dir);
-                let s_lat = vel.dot(lat_dir);
-                let grip = MU * load;
-                let grip_lat = grip * LATERAL_GRIP_RATIO;
-                let mut f_long = grip * (slip_long / SLIP_SATURATION).clamp(-1.0, 1.0);
-                let mut f_lat = -grip_lat * (s_lat / SLIP_SATURATION).clamp(-1.0, 1.0);
-                let e = (f_long / grip).powi(2) + (f_lat / grip_lat).powi(2);
-                if e > 1.0 {
-                    let s = e.sqrt().recip();
-                    f_long *= s;
-                    f_lat *= s;
-                }
-                forces.apply_force_at_point(long_dir * f_long + lat_dir * f_lat, p);
-                belt_reaction += f_long; // the belt feels the longitudinal friction as a load
-            }
-
-            contacts.0.push(Contact {
-                local: Vec3::new(track_x, point.y, point.x),
-                load,
-                normal,
-                slip: slip_long,
-            });
-        }
-
-        // Belt dynamics: the engine governor chases the commanded belt speed with force limited to
-        // ENGINE_FORCE; the ground friction reaction opposes it. When the engine out-muscles the
-        // available grip the belt over-spins the ground → wheelspin; otherwise they find rolling.
-        let target = command * MAX_BELT_SPEED;
-        let engine =
-            (BELT_GOVERNOR_GAIN * (target - belt_speed)).clamp(-ENGINE_FORCE, ENGINE_FORCE);
-        let next = belt_speed + (engine - belt_reaction) / BELT_INERTIA * dt;
-        belt.set(side, next.clamp(-MAX_BELT_SPEED, MAX_BELT_SPEED));
-    }
-}
-
-/// `R` cycles the rig through the reset spots (flat → narrow trench → wide trench), dropping it at
-/// rest — the test tour in one key.
+/// `R` cycles the rig through the reset spots (flat → narrow trench → wide trench → pit), dropping it
+/// at rest — the test tour in one key.
 fn reset_rig(
     keys: Res<ButtonInput<KeyCode>>,
     hull: Single<(&mut Transform, &mut LinearVelocity, &mut AngularVelocity), With<Hull>>,
     mut spot: ResMut<ResetSpot>,
     mut belt: ResMut<BeltSpeed>,
+    mut phase: ResMut<BeltPhase>,
+    mut chain: ResMut<ChainMemory>,
 ) {
     if !keys.just_pressed(KeyCode::KeyR) {
         return;
@@ -942,6 +948,8 @@ fn reset_rig(
     lin.0 = Vec3::ZERO;
     ang.0 = Vec3::ZERO;
     *belt = BeltSpeed::default();
+    *phase = BeltPhase::default();
+    *chain = ChainMemory::default();
     info!("reset → {label} (z = {z:.1})");
 }
 
@@ -953,6 +961,7 @@ fn log_state(
     hull: Single<(&Transform, &LinearVelocity), With<Hull>>,
     contacts: Res<BeltContacts>,
     belt: Res<BeltSpeed>,
+    active: Res<ActiveModel>,
 ) {
     if !keys.just_pressed(KeyCode::KeyL) {
         return;
@@ -963,7 +972,8 @@ fn log_state(
     let weight = HULL_MASS * 9.81;
     let speed = lin.0.dot(transform.forward().into());
     info!(
-        "hull y = {:.3} m | stations = {count} | support = {:.0}% of weight | belt L/R = {:.1}/{:.1} m/s | tank = {:.1} m/s",
+        "model {} | hull y = {:.3} m | stations = {count} | support = {:.0}% of weight | belt L/R = {:.1}/{:.1} m/s | tank = {:.1} m/s",
+        active.0.label(),
         transform.translation.y,
         100.0 * total / weight,
         belt.left,
@@ -1135,15 +1145,22 @@ fn rest_circles() -> Vec<(Vec2, f32)> {
     circles
 }
 
-/// Resample a polyline at uniform arc-length `spacing`, so contact stations are evenly spread along
-/// the belt (not bunched at the tangent vertices). Standard arc-length walk; degenerate short
-/// segments (the tiny hops across a wheel bottom) are skipped.
-fn resample(points: &[Vec2], spacing: f32) -> Vec<Vec2> {
+/// Resample a polyline at uniform arc-length `spacing`, stations at arc positions `offset + i·spacing`
+/// (evenly spread along the belt, not bunched at the tangent vertices). `offset = 0` starts at the
+/// polyline's first point; MODEL 2 passes its advancing belt phase so the stations *travel with the
+/// belt*. Standard arc-length walk; degenerate short segments (the tiny hops across a wheel bottom)
+/// are skipped.
+fn resample(points: &[Vec2], spacing: f32, offset: f32) -> Vec<Vec2> {
     if points.len() < 2 {
         return points.to_vec();
     }
-    let mut out = vec![points[0]];
-    let mut since = 0.0; // arc length accumulated since the last emitted station
+    let mut out = Vec::new();
+    // Arc length remaining until the next station: the first lands at `offset` along the polyline.
+    let mut since = spacing - offset.rem_euclid(spacing);
+    if since >= spacing {
+        out.push(points[0]); // offset 0: a station at the very start, as before
+        since = 0.0;
+    }
     for w in points.windows(2) {
         let seg = w[1] - w[0];
         let len = seg.length();
