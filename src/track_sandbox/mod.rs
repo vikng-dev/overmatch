@@ -180,8 +180,13 @@ const DRIVE_RAMP: f32 = 4.0;
 // penalizes terrain against the rigid reference line, so the drape never nulls the support. Real
 // force-bearing per-wheel springs (the opposite dependency direction: ground → wheels → belt) are
 // Option 2. ---
-/// How fast a wheel's visible placement eases toward its target (m/s), so it travels rather than snaps.
-const SUSP_TRAVEL_RATE: f32 = 2.5;
+/// How fast a wheel's visible placement rises toward a higher target (m/s): terrain *forces* a
+/// wheel up, so rising is quick.
+const SUSP_RISE_RATE: f32 = 4.0;
+/// How fast it falls toward a lower target (m/s): a wheel drops under gravity (plus track weight),
+/// so falling is the slower, softer motion — the asymmetry that keeps wheels from snapping down
+/// into every dip.
+const SUSP_FALL_RATE: f32 = 1.5;
 /// Clamp on the cosmetic lift (m): a tall obstacle can't fling the visual wheel arbitrarily far.
 const SUSP_MAX_LIFT: f32 = 0.5;
 
@@ -887,7 +892,7 @@ fn articulate_wheels(
     time: Res<Time>,
 ) {
     let affine = hull.affine();
-    let travel = SUSP_TRAVEL_RATE * time.delta_secs();
+    let dt = time.delta_secs();
     for (wheel, mut susp, mut transform) in &mut wheels {
         if wheel.kind != WheelKind::Road {
             continue;
@@ -922,8 +927,14 @@ fn articulate_wheels(
             continue;
         }
         // Ride up onto a raised belt (positive lift), never below the taut line → dips/gaps bridge.
+        // Rise fast (terrain forces the wheel up), fall slower (it drops under gravity).
         let target_dy = (best - rest_world.y).clamp(0.0, SUSP_MAX_LIFT);
-        susp.dy = approach(susp.dy, target_dy, travel);
+        let rate = if target_dy > susp.dy {
+            SUSP_RISE_RATE
+        } else {
+            SUSP_FALL_RATE
+        };
+        susp.dy = approach(susp.dy, target_dy, rate * dt);
         transform.translation.y = susp.pivot_local.y + susp.dy;
     }
 }

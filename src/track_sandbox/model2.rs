@@ -32,21 +32,55 @@ impl BeltPhase {
     }
 }
 
-/// How much of last frame's displacement seeds the next solve (the warm-start decay). The
-/// projection constraints (lengths, non-penetration, circles) are satisfied by *infinitely many*
-/// shapes — a full-strength warm start made every feasible configuration a **fixed point** (a
-/// deformed chain floated in place forever; at speed, mangled seeds compounded frame-over-frame
-/// into the "flung outward" balloon). Decaying the seed toward the taut reference is the missing
-/// **tension**: deformations relax away in ~1/(1−α) frames unless terrain actively holds them,
-/// while enough memory survives to keep bistable tents from flipping.
-const CHAIN_MEMORY: f32 = 0.8;
+/// Per-frame velocity retention of the chain's Verlet integration — the **swing knob**: how long a
+/// disturbed span keeps swinging before it settles. Lower = deader chain.
+const CHAIN_DAMPING: f32 = 0.88;
 
-/// Last frame's solved chain per side — the warm start. The projection solve is quasi-static and
-/// tent configurations over corners are often bistable; solving fresh each frame let tiny input
-/// changes flip between them (the config-snapping). Seeding from the previous solution (decayed —
-/// see [`CHAIN_MEMORY`]) keeps the solver in the basin it settled in — **hysteresis, the cheap
-/// stable form of chain inertia** (actual chain dynamics — mass, momentum, wobble — stay
-/// deliberately out at this tier).
+/// Stiffness (s⁻²) of the drive anchor pulling each joint toward its advected reference position —
+/// how hard the drivetrain **yanks the chain around**. Acceleration ∝ lag, so the response scales
+/// with how violently the belt/reference moves: full-throttle direction changes crack the chain
+/// taut, coasting barely disturbs it — while a *drooping* span, with no lag to speak of, falls at
+/// plain gravity. The user's "gravity when drooping, violent when pulled by the sprocket" is this
+/// one constant plus g. (Also the tangential coupling that keeps the ring tracking the advection
+/// between whole-link wraps.)
+const CHAIN_DRIVE: f32 = 400.0;
+
+/// Per-tick smoothing (EMA factor) of the **displayed** per-link loads — the physics uses raw. At
+/// rest the contact solve carries a few percent of tick-to-tick load noise (shape-cast tie-breaking
+/// on coplanar faces, engage-ramp edges, fixed-tick sampling): micrometres of hull motion, but the
+/// debug dots/normal lines scale directly with load and flickered visibly. A damped gauge, kept per
+/// link identity (rotates with the ring like the chain state), settles in a few ticks.
+const LOAD_SMOOTHING: f32 = 0.25;
+
+/// The smoothed per-link display loads (see [`LOAD_SMOOTHING`]).
+#[derive(Resource, Default)]
+pub(super) struct LinkLoads {
+    left: LinkLoadsSide,
+    right: LinkLoadsSide,
+}
+
+#[derive(Default)]
+struct LinkLoadsSide {
+    load: Vec<f32>,
+    shift: i64,
+}
+
+impl LinkLoads {
+    fn get_mut(&mut self, side: Side) -> &mut LinkLoadsSide {
+        match side {
+            Side::Left => &mut self.left,
+            Side::Right => &mut self.right,
+        }
+    }
+}
+
+/// The chain's dynamic state per side — the joints are **Verlet particles in the hull's frame**
+/// (position + previous position = implicit velocity). Each frame: rotate indices by the whole
+/// links that passed (state advects with the belt), integrate gravity (transformed into hull-local,
+/// so drapes hang correctly on slopes) + the drive anchor, then run the constraint projections.
+/// This replaces the earlier quasi-static warm-start-with-decay: gravity + anchor ARE the tension
+/// (deformed chain falls/gets-pulled taut), damping sets the visible inertia, and a settled chain
+/// has zero velocity — it *sleeps* instead of re-solving into micro-jitter.
 #[derive(Resource, Default)]
 pub(super) struct ChainMemory {
     left: ChainSideMemory,
@@ -55,9 +89,11 @@ pub(super) struct ChainMemory {
 
 #[derive(Default)]
 struct ChainSideMemory {
-    /// Solved displacement from the reference joint, per link index (hull-local side plane).
-    disp: Vec<Vec2>,
-    /// The link-identity shift (total travel / pitch) the stored solution corresponds to.
+    /// Joint positions (hull-local side plane), the solved state.
+    pos: Vec<Vec2>,
+    /// Previous-frame positions (implicit velocity).
+    prev: Vec<Vec2>,
+    /// The link-identity shift (total travel / pitch) the stored state corresponds to.
     shift: i64,
     /// Extra path length (m) the terrain currently demands of the belly (smoothed) — subtracted
     /// from the top run's sag budget when building the next reference ring, so the **top half of
@@ -99,6 +135,7 @@ pub(super) fn apply_belt_support_links(
     count: Res<LinkCount>,
     mut belt: ResMut<BeltSpeed>,
     mut phase: ResMut<BeltPhase>,
+    mut loads: ResMut<LinkLoads>,
     mut contacts: ResMut<BeltContacts>,
 ) {
     let Ok((hull_gt, mut forces)) = hull.single_mut() else {
@@ -142,6 +179,17 @@ pub(super) fn apply_belt_support_links(
             continue;
         }
 
+        // The damped display-load gauge rides the same link identities as everything else.
+        let lmem = loads.get_mut(side);
+        let shift = (phase.get(side) / pitch).floor() as i64;
+        if lmem.load.len() == n {
+            let rot = (shift - lmem.shift).rem_euclid(n as i64) as usize;
+            lmem.load.rotate_right(rot);
+        } else {
+            lmem.load = vec![0.0; n];
+        }
+        lmem.shift = shift;
+
         // Each link = the segment between consecutive stations (modular: the seam segment closes the
         // ring; a degenerate seam is skipped). The link is a rigid plate on penalty ground: it has a
         // **pressure distribution** along its length, and the resultant force acts at the pressure
@@ -152,6 +200,8 @@ pub(super) fn apply_belt_support_links(
         // contact — parry picks arbitrarily among tied points, so the point flipped between the
         // plate's ends tick-to-tick: teleporting dots + flickering torque = the observed jitter.)
         for i in 0..n {
+            // Display-gauge decay: links that exit contact fade over a few ticks instead of blinking.
+            lmem.load[i] *= 1.0 - LOAD_SMOOTHING;
             let a = stations[i];
             let b = stations[(i + 1) % n];
             let seg = b - a;
@@ -271,9 +321,12 @@ pub(super) fn apply_belt_support_links(
                 belt_reaction += f_long; // the belt feels the longitudinal friction as a load
             }
 
+            // Displayed load is the damped gauge (physics above used raw); the decay at the loop
+            // top plus this accumulate form the EMA.
+            lmem.load[i] += load * LOAD_SMOOTHING;
             contacts.0.push(Contact {
                 local: to_local.transform_point3(p),
-                load,
+                load: lmem.load[i],
                 normal,
                 slip: slip_long,
             });
@@ -314,6 +367,7 @@ pub(super) fn init_link_count(mut commands: Commands) {
     let length = polyline_len(&belt_loop(&rest_circles(), None)) + TRACK_SLACK;
     commands.insert_resource(LinkCount((length / CONTACT_SPACING).round() as usize));
     commands.insert_resource(ChainMemory::default());
+    commands.insert_resource(LinkLoads::default());
 }
 
 /// MODEL 2's conform — the belt drawn as a true **chain of rigid links** on the same advected ring
@@ -339,12 +393,19 @@ pub(super) fn conform_belts_links(
     belt_length: Res<BeltLength>,
     phase: Res<BeltPhase>,
     count: Res<LinkCount>,
+    time: Res<Time>,
     mut memory: ResMut<ChainMemory>,
     mut belts: ResMut<ConformedBelts>,
 ) {
     let hull = *hull;
     let affine = hull.affine();
     let to_local = affine.inverse();
+    // Verlet timestep, clamped so a hitching frame can't explode the integration; gravity in the
+    // hull's frame (the chain hangs correctly when the hull pitches on a slope).
+    let dt = time.delta_secs().min(1.0 / 30.0);
+    let dt2 = dt * dt;
+    let g3 = to_local.transform_vector3(Vec3::NEG_Y * 9.81);
+    let g2 = Vec2::new(g3.z, g3.y);
     for side in [Side::Left, Side::Right] {
         let track_x = match side {
             Side::Left => -TRACK_HALF_WIDTH,
@@ -446,18 +507,25 @@ pub(super) fn conform_belts_links(
             .sum();
         mem.belly_extra = (mem.belly_extra * 0.8 + extra * 0.2).clamp(0.0, 0.5);
 
-        // The projection solve, warm-started from last frame's solution (index-rotated by how many
-        // whole links have passed, so each stored displacement seeds the same physical link). This
-        // is the hysteresis that stops bistable tent configurations from flipping frame-to-frame.
+        // Verlet step: rotate the state by the whole links that passed (it advects with the belt),
+        // then integrate gravity + the drive anchor and hand the candidate to the projections.
         let shift = (phase.get(side) / pitch).floor() as i64;
-        let mut p = joints.clone();
-        if mem.disp.len() == n {
+        if mem.pos.len() == n {
             let rot = (shift - mem.shift).rem_euclid(n as i64) as usize;
-            mem.disp.rotate_right(rot);
-            for (pt, d) in p.iter_mut().zip(&mem.disp) {
-                *pt += *d * CHAIN_MEMORY;
-            }
+            mem.pos.rotate_right(rot);
+            mem.prev.rotate_right(rot);
+        } else {
+            mem.pos = joints.clone();
+            mem.prev = joints.clone();
         }
+        mem.shift = shift;
+        let old_pos = mem.pos.clone();
+        let mut p: Vec<Vec2> = (0..n)
+            .map(|i| {
+                let vel = (mem.pos[i] - mem.prev[i]) * CHAIN_DAMPING;
+                mem.pos[i] + vel + (g2 + (joints[i] - mem.pos[i]) * CHAIN_DRIVE) * dt2
+            })
+            .collect();
         for _ in 0..CHAIN_ITERATIONS {
             // (a) Rigid link lengths: split each segment's error between its joints.
             for i in 0..n {
@@ -515,9 +583,9 @@ pub(super) fn conform_belts_links(
             }
         }
 
-        // Remember the solution (as displacements off the reference) for next frame's warm start.
-        mem.shift = shift;
-        mem.disp = (0..n).map(|i| p[i] - joints[i]).collect();
+        // Commit the Verlet state: previous = pre-integration positions, current = the solved ones.
+        mem.prev = old_pos;
+        mem.pos = p.clone();
 
         let samples: Vec<BeltSample> = (0..n)
             .map(|i| BeltSample {

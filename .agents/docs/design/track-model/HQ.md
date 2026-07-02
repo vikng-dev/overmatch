@@ -823,8 +823,55 @@ both.
   emergent slack migration confirmed). Both checkpoints now stand for the planned comparison:
   `checkpoint/track-model-1` (belt-primary) vs `checkpoint/track-model-2` (link-belt), switchable
   live with `M` at head.
+- 2026-07-02 — **Step 15: Verlet chain dynamics + wheel rise/fall split** (green). User's tuning
+  ask — swing speed / visible inertia; "drooping should fall by gravity, sprocket pull should be
+  violent" — answered by ONE upgrade: the chain solve graduated from quasi-static projection with
+  seed decay to **Verlet dynamics**: `ChainSideMemory` now holds `pos`/`prev` (implicit velocity,
+  hull-local; state rotates with the link-identity shift as before); per frame integrate gravity
+  (transformed into the hull frame — drapes hang right on slopes) + a **drive anchor** toward the
+  advected reference (`CHAIN_DRIVE` 400 s⁻²: accel ∝ lag → violent exactly when the belt/reference
+  moves violently, calm when coasting; also the tangential coupling that tracks advection between
+  wraps), damped by `CHAIN_MEMORY`→`CHAIN_DAMPING` 0.88 (the swing knob), then the SAME constraint
+  projections (lengths / angle cap / terrain planes / wheel circles). `CHAIN_MEMORY` decay deleted —
+  gravity + anchor ARE the tension now, hysteresis comes free from real state, and a settled chain
+  has zero velocity: it **sleeps** instead of re-solving into micro-jitter (prime suspect for the
+  reported at-rest gizmo jitter — verify). dt clamped ≤ 1/30 so hitches can't explode the
+  integration. Also split the cosmetic wheel ease: `SUSP_RISE_RATE` 4.0 (terrain forces wheels up,
+  fast) / `SUSP_FALL_RATE` 1.5 (they drop under gravity, slower) replacing the symmetric 2.5.
+  - AWAITING USER TEST (model 2): (1) top-run droop now *falls* and settles with a bit of swing —
+    gravity-paced, not snapped; (2) hard throttle/reverse yanks the chain sharply (drive-anchor
+    violence), coasting is calm; (3) at-rest gizmo jitter gone (chain sleeps); (4) wheels rise
+    quickly over bumps but ease down into dips; (5) knobs if feel is off: CHAIN_DAMPING (swing
+    life), CHAIN_DRIVE (yank), SUSP_RISE/FALL_RATE.
+  - VERIFIED (user, ss): "sweet model." One rare state captured on camera: a **thrown track** —
+    R-teleport over the narrow trench; the hull settles physically while the chain integrates
+    gravity, the unsupported belly span droops into the gap, and the unilateral constraints
+    (push-out-only circles/planes) capture the wrong-side-of-the-gear configuration as a stable
+    equilibrium. Semi-physical (real loose tracks do this), rare (needs the teleport-settle race) —
+    deliberately NOT handled; parked below. Static at-rest gizmo jitter still present (the Verlet
+    sleep didn't cure it — diagnosing which element before fixing). Otherwise user declares the
+    model complete.
+- 2026-07-02 — **Step 15b: damped load gauge** (green). Jitter diagnosis narrowed with the user:
+  hull + cyan chain visually still; the **green dots + yellow normal lines** flicker, frame-stepped
+  pause shows dot *size* varying → the raw per-tick load readout, not the physics. Contact loads
+  genuinely oscillate a few percent tick-to-tick at rest (shape-cast tie-breaking on coplanar faces,
+  engage-ramp edges, fixed-tick sampling) — micrometres of hull motion, visually amplified by the
+  load→dot-size mapping. Fix: `LinkLoads` — per-link EMA (`LOAD_SMOOTHING` 0.25, decay at loop top +
+  accumulate on contact = links fade instead of blinking), riding the same link identities as the
+  chain state (rotates with the ring). **Physics untouched** — only the displayed `Contact.load` is
+  smoothed; model 1 keeps its raw readout (frozen baseline).
+  - AWAITING USER TEST (model 2): dots + normal lines steady at rest; while driving, load migration
+    still reads (smoothing is ~4 ticks, well under perception at speed). If flicker persists → it's
+    contact-set blink at the patch edges, next diagnosis.
 
 ## Open questions / parking lot
+
+- **Thrown-track capture** (model 2, rare): teleport-settle can droop the chain into a gap and the
+  unilateral constraints keep it there. Candidate fixes if it ever matters: re-init chain state a
+  few frames *after* a teleport settles; or an asymmetric reel-in anchor (stronger pull for belly
+  joints below the taut line). Might become a *feature* (track-throwing as damage/abuse mechanic).
+- **Static at-rest gizmo jitter** (open): survives the Verlet sleep; needs element-level diagnosis
+  (contact dots / normal lines / chain) before a fix.
 
 - Envelope as taut convex-hull of wheel circles vs. sagging catenary on slack runs — start taut,
   add sag in step 2.
