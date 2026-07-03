@@ -1,11 +1,8 @@
-//! Networking-spike dedicated server (steps 5–6 of the lightyear spike map's recommended order).
-//! Headless — the proven `headless_test.rs` recipe (full `DefaultPlugins`, no GPU/window/winit),
-//! NOT `MinimalPlugins`, because increment 6 loads the same `.glb`/`.tank.ron` assets the client
-//! does. `SimPlugin` is deliberately NOT mounted here (task spec for steps 5–6 — it returns in
-//! step 7): physics is composed directly, driven by the shared stub movement system in `net.rs`.
-//! Mounts `spec::plugin` (the `.tank.ron` asset loader) + observes `on_tank_ready` per spawn,
-//! matching `sandbox.rs`'s minimal mounting — not the full `tank::sim_plugin` (out of scope, no
-//! servo/suspension systems here).
+//! Networking-spike dedicated server (step 7 of the lightyear spike map's recommended order):
+//! `SimPlugin` mounted for real — driving/aim/shooting/damage all run under prediction now, not
+//! the increment-5 stub. Headless — the proven `headless_test.rs` recipe (full `DefaultPlugins`,
+//! no GPU/window/winit), NOT `MinimalPlugins`, because the rig loads the same `.glb`/`.tank.ron`
+//! assets the client does.
 //! Run with `cargo run --bin spike_server --features net`.
 
 // Same rationale as lib.rs's crate-level allow (bins don't inherit it): ordinary multi-filter
@@ -23,7 +20,7 @@ use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
 use overmatch::net::{PendingTankSpec, SpikeBeacon, SpikeTank, load_tank_spec, spike_tank_rig};
-use overmatch::{Rig, TankCommand, on_tank_ready, spec_plugin};
+use overmatch::{AppState, Rig, SimPlugin, TankCommand, on_tank_ready};
 
 const PORT: u16 = 5888;
 
@@ -58,9 +55,11 @@ fn main() {
     });
     app.add_plugins(overmatch::net::plugin);
     app.add_plugins(overmatch::net::physics_plugins());
-    // The real rig (increment 6): the `.tank.ron` loader `on_tank_ready` depends on. Not the full
-    // `tank::sim_plugin` — no servo/suspension systems belong in this spike's scope (step 7).
-    app.add_plugins(spec_plugin);
+    // Step 7: the real sim, for real — driving/aim/shooting/damage all run under prediction now.
+    // `SimPlugin` no longer bundles physics (that split already happened in Milestone A), so it
+    // composes cleanly alongside `physics_plugins()` above. Not `tank::sp_spawn_plugin` (the
+    // single-player two-tank duel scenario) — the server keeps its own per-client spawn below.
+    app.add_plugins(SimPlugin);
 
     let server = app
         .world_mut()
@@ -82,8 +81,6 @@ fn main() {
             SpikeBeacon,
             Replicate::to_clients(NetworkTarget::All),
         ));
-        // Static ground plane — not replicated (both sides build their own; it never moves).
-        commands.spawn(overmatch::net::spike_ground());
         info!("spike_server: starting, listening on 0.0.0.0:{PORT}");
     });
     app.add_systems(Startup, load_tank_spec);
@@ -94,13 +91,34 @@ fn main() {
         (
             handle_new_clients,
             spawn_pending_tanks,
+            open_gameplay_gate,
             log_positions,
             count_rig_binds,
+            overmatch::net::log_sim_evidence,
         ),
     );
     app.add_systems(FixedUpdate, (log_tank_commands, perturb_after_delay));
 
     app.run();
+}
+
+/// `SimPlugin` mounts `state::sim_plugin` (`AppState`, `GameplaySet` gated on `Playing`), but the
+/// bins have no menu/loading flow to drive that transition themselves (step 7 task: "the bins
+/// never enter Playing on their own now"). The server already gates spawning on the spec load
+/// (`spawn_pending_tanks`); this just opens the `GameplaySet` gate once, the same load dependency.
+fn open_gameplay_gate(
+    spec: Option<Res<PendingTankSpec>>,
+    asset_server: Res<AssetServer>,
+    state: Res<State<AppState>>,
+    mut next: ResMut<NextState<AppState>>,
+) {
+    if *state.get() != AppState::Loading {
+        return;
+    }
+    let Some(spec) = spec else { return };
+    if matches!(asset_server.load_state(&spec.0), LoadState::Loaded) {
+        next.set(AppState::Playing);
+    }
 }
 
 /// Per-client one-shot: fires ~2 s after connect, applying a large lateral impulse the client

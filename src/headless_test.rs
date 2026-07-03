@@ -48,7 +48,13 @@ fn sim_boots_and_drives_headless() {
     // for the whole load — the same spawn-before-bind race the game keeps to a frame or two),
     // then exactly 16 ms per `update()` so the 64 Hz fixed sim ticks once per update.
     .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO));
-    app.add_plugins(SimPlugin);
+    // Physics + the SP spawn scenario are composition-root choices (see lib.rs SimPlugin note);
+    // this test exercises the single-player-shaped boot, headless.
+    app.add_plugins((
+        avian3d::prelude::PhysicsPlugins::default(),
+        SimPlugin,
+        crate::tank::sp_spawn_plugin,
+    ));
 
     // `App::run` normally drives plugin finish/cleanup (some registration — e.g. Avian's
     // diagnostics resources — happens in `Plugin::finish`); a bare `update()` loop must do it.

@@ -206,7 +206,10 @@ pub struct ServoCommand {
 /// blends `previous → current` by the fixed clock's overstep each frame, so the turret is smooth
 /// at any frame rate — matching how Avian interpolates the hull (ADR-0004's sim-in-fixed bet,
 /// now covering the mechanisms too).
-#[derive(Component)]
+///
+/// `Clone`/`PartialEq`/`Debug` are for `local_rollback::<ServoState>()` (step 7, `net` feature) —
+/// it lives on turret/gun child entities, decorated `DeterministicPredicted` by `net.rs`.
+#[derive(Component, Clone, PartialEq, Debug)]
 pub struct ServoState {
     current: f32,
     /// The angle at the previous fixed tick — the render interpolation's blend-from.
@@ -237,12 +240,19 @@ impl ServoState {
 }
 
 /// Tank spawning, the spec→rig binder, and the servo mechanism — authority-side.
+/// The single-player *scenario*: load the Tiger spec up front, spawn the two-tank duel setup once
+/// it's ready (entering `Playing`), first tank `Controlled`. Split from [`sim_plugin`] because
+/// spawning is per-configuration — the networked server spawns per connected client instead — while
+/// the mechanisms below are the sim wherever tanks come from.
+pub fn sp_spawn_plugin(app: &mut App) {
+    app.add_systems(Startup, load_tank_spec).add_systems(
+        Update,
+        spawn_tank_when_loaded.run_if(in_state(AppState::Loading)),
+    );
+}
+
 pub fn sim_plugin(app: &mut App) {
-    app.add_systems(Startup, load_tank_spec)
-        .add_systems(
-            Update,
-            spawn_tank_when_loaded.run_if(in_state(AppState::Loading)),
-        )
+    app
         // The servo mechanism steps on the fixed clock (sim truth — the muzzle pose decides where
         // shells go), *after* `GameplaySet` so `drive_aim_servos` has written this tick's targets.
         // The rig-node `Transform` write is separate: `interpolate_servos` blends the last two

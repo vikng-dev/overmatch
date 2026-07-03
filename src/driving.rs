@@ -124,7 +124,10 @@ fn set_center_of_mass(
 
 /// Per-roadwheel suspension state. Written by `apply_suspension`; the contact point + load are
 /// what the drive friction will also read (one ray, both jobs). `contact: None` = wheel airborne.
-#[derive(Component, Default)]
+///
+/// `Clone`/`PartialEq`/`Debug` are for `local_rollback::<Suspension>()` (step 7, `net` feature) —
+/// harmless derives on a plain-data struct, added unconditionally rather than feature-gated.
+#[derive(Component, Default, Clone, PartialEq, Debug)]
 pub struct Suspension {
     /// Ground contact this tick (world) — where drive force is applied. `None` = airborne.
     pub contact: Option<Vec3>,
@@ -191,8 +194,12 @@ fn apply_suspension(
 /// A tank's smoothed drive signal in [-1, 1]: its `TankCommand` targets, slewed through the
 /// input ramp. Per-tank sim state (not part of the command), so every tank — local, swapped-away,
 /// or a future network peer — responds to its command with the same vehicle feel.
-#[derive(Component, Default)]
-struct DriveState {
+///
+/// `pub` + `Clone`/`PartialEq`/`Debug` are for `local_rollback::<DriveState>()` (step 7, `net`
+/// feature): it lives on the tank root itself, so it's a drop-in `local_rollback` target — see
+/// `lightyear-step7-map.md` §3.
+#[derive(Component, Default, Clone, PartialEq, Debug)]
+pub struct DriveState {
     throttle: f32,
     steer: f32,
 }

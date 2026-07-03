@@ -34,7 +34,10 @@ struct Recoil {
 /// Weapon reload state: seconds remaining before the next shot. 0 = ready (loaded). A component on
 /// the weapon's muzzle entity (per-weapon, not a singleton). Ticks down only while the Load
 /// capability holds (Loader staffed + Breech intact) — a dead Loader freezes it partway through.
-#[derive(Component)]
+///
+/// `Clone`/`PartialEq`/`Debug` are for `local_rollback::<Reload>()` (step 7, `net` feature) — it
+/// lives on the weapon's muzzle child entity, decorated `DeterministicPredicted` by `net.rs`.
+#[derive(Component, Clone, PartialEq, Debug)]
 pub struct Reload {
     pub remaining: f32,
 }

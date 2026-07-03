@@ -188,3 +188,128 @@ the same rest position on both sides. No back-and-forth signature in either run'
    noise exceed the 1 cm thresholds far more often than a single-box body. Candidates: loosen
    per-component thresholds; check whether velocities need a coarser condition on multi-contact
    bodies; confirm child-collider Position/Rotation aren't accidentally in the predicted set.
+
+- 2026-07-03: New doc `lightyear-step7-map.md` answers the above (child colliders are confirmed
+  NOT in the predicted set — fix is threshold/input-delay tuning) plus predicted-shell spawning
+  (`PreSpawned`, do not gate on `is_in_rollback`), `local_rollback::<C>()` bounds and its
+  child-entity limitation (blocks `ServoState`/`Reload`/`Suspension` as currently structured —
+  architecture-determining), `is_in_rollback` usage, `InputDelayConfig::fixed_input_delay`, and
+  pause-under-lightyear. Read before starting step 7.
+
+## Step 7 — SimPlugin wired into the spike bins (2026-07-03)
+
+- 2026-07-03: Grounding pass done (map §1/§3/§4/§5/§7 + this log's increment 5/6 sections + all
+  step-7 code targets). Confirmed before writing code: no sim system in `driving`/`shooting`/
+  `aim::sim_plugin`/`firecontrol::sim_plugin`/`ballistics` gates on `Controlled` — grep hits for
+  `With<Controlled>` are exclusively client-side (aim.rs HUD indicators, tank.rs Tab swap,
+  damage.rs `ControlledTank` HUD SystemParam). The Milestone-A claim holds; the bins need no
+  `Controlled` anywhere.
+- **Derives (game modules, additive-only)**: `Clone + PartialEq + Debug` added to `ServoState`
+  (tank.rs), `Reload` (shooting.rs), `Suspension` + `DriveState` (driving.rs); `DriveState` also
+  `struct` → `pub struct` (it was module-private; `local_rollback::<C>()` needs the type nameable
+  from net.rs). `Suspension`'s `Option<Vec3>`/`f32` fields derive fine as predicted. New
+  feature-gated re-exports in lib.rs: `DriveState`, `Suspension`, `Reload`, `ServoState`,
+  `ConsumeCommandEdges`, `AppState` (bins must open the `GameplaySet` gate themselves).
+- **Rig decoration (map §7 design, amendment 1)**: `net.rs::decorate_rig_children` — a plain
+  `Added<Rig> + With<Predicted>` query system (Update), inserts `DeterministicPredicted::default()`
+  (skip_despawn: false) on `rig.turret`/`rig.gun`/`rig.muzzle` + every `Roadwheel` descendant.
+  Registered `local_rollback::<DriveState/ServoState/Reload/Suspension>()` in `net::plugin` —
+  safe on the server too (silently no-ops without `PredictionPlugin`, map §3.2). Root needs
+  nothing extra (`Predicted` already carries `DriveState` history via `local_rollback`).
+- **Rollback thresholds coarsened** (map §1c recommendation): named consts in net.rs —
+  `ROLLBACK_POSITION_M = 0.05`, `ROLLBACK_ROTATION_RAD = 0.05`, `ROLLBACK_VELOCITY = 0.05`
+  (the 1 cm reference values are a capsule character's; correction smoothing hides ≤5 cm on a
+  57 t tank). A/B evidence to follow below.
+- **PredictionDiagnosticsPlugin**: NOT re-mounted — `PredictionPlugin::build` already mounts it
+  unconditionally (`prediction/src/plugin.rs:256`, re-verified in the vendored source); a second
+  `add_plugins` would panic on Bevy's duplicate-plugin check. Instead
+  `net::log_prediction_diagnostics` reads `DiagnosticsStore` (ROLLBACKS/ROLLBACK_DEPTH paths)
+  every ~5 s in the client bin.
+- **Input delay lever**: `SPIKE_INPUT_DELAY_TICKS` (default 0) → when >0, inserts
+  `InputTimelineConfig::default().with_input_delay(InputDelayConfig::fixed_input_delay(n))` on
+  the Client entity before Connect (map §5.3 attach point). Off by default — pure A/B lever.
+- **TERRAIN DECISION — spike_ground dropped, world::plugin's terrain wins.** Two grounds would
+  otherwise coexist (SimPlugin→world::plugin spawns the game terrain at Startup on both sides).
+  Investigated the real blocker candidates first: world.rs positions terrain via `Transform`
+  (+ scale-derived collider sizing) while `physics_plugins()` disables avian's
+  `PhysicsTransformPlugin` — BUT `LightyearAvianPlugin` (Position mode, `update_syncs_manually:
+  false` default) mounts its own `transform_to_position` + transform propagation in
+  `RunFixedMainLoop` (vendored `lightyear_avian3d-0.28.0/src/plugin.rs:163`), and collider
+  scale-from-Transform lives in `ColliderBackendPlugin` (`avian3d-0.7.0/src/collision/collider/
+  backend.rs:472`), which is NOT in the disable list. So the game terrain gets correct
+  Position/scale under the netcode composition, and it's already `Layer::Terrain`-tagged — which
+  the old `spike_ground` never was, meaning the wheels' suspension rays (filtered to Terrain,
+  tank.rs `RayCaster::with_query_filter`) would have sailed straight through it. `spike_ground`
+  removed from net.rs + both bins; live-run evidence (wheels grounded) to follow.
+- **Input bridge**: `net.rs::bridge_action_state_to_tank_command` (FixedUpdate,
+  `.before(ConsumeCommandEdges)`): whole-struct copy of `ActionState<TankCommand>.0` into the
+  entity's `TankCommand` for entities carrying both. Ordering reasoning: `consume_edges` clears
+  `fire_primary`/`crew_swap` at tick end; the bridge must land this tick's edges first — the
+  identical constraint `shooting::fire` already declares. NOT gated on `is_in_rollback`: replay
+  restores `ActionState` per-tick from the InputBuffer (lightyear's own systems), so re-copying
+  during replay feeds the *historical* input — gating would leave `TankCommand` stale through
+  replay (map §3.4's "no gate needed" class). `attach_command` (`On<Add, Tank>`) supplies the
+  `TankCommand` side on both ends: the rig bundle includes `Tank`, server spawn + client
+  `attach_predicted_rig` both trigger it.
+- **Stub retired**: `drive_stub_movement` + `DRIVE_FORCE`/`STEER_TORQUE` consts deleted from
+  net.rs; `spike_tank_physics()` never existed under that name — the increment-5 leftovers were
+  the stub system + `spike_ground()`, both now gone. `fire` stays ungated by `is_in_rollback`
+  (coordinator decision: replay may duplicate a local tracer — cosmetic; PreSpawned is a later
+  increment, deliberately NOT added anywhere this step).
+
+### Step 7 verification runs (2026-07-03, logs in the session scratchpad `step7_*.log`)
+
+- **Gates**: `cargo fmt --check` clean; `cargo clippy --all-targets` AND `--features net` both
+  zero warnings; `cargo test` 14/14 (incl. `headless_test::sim_boots_and_drives_headless` —
+  headless_test now mounts `PhysicsPlugins` + `sp_spawn_plugin` alongside `SimPlugin` itself,
+  matching the composition-root split).
+- **LIVE BUG 1 — bridge ordering (fixed)**: first run's fire click was silently lost. With the
+  bridge only `.before(ConsumeCommandEdges)` it is UNORDERED vs `fire`; measured: `fire` ran
+  first (read the stale command), then `consume_edges` cleared the edge the bridge had just
+  written — no tick ever consumed the click (server had `fire_primary=true` in `ActionState`,
+  reload never left 0.0). Fix: bridge is `.before(GameplaySet)` (every consumer AND the
+  edge-clearer live in that set). `GameplaySet` re-exported (net-gated) for this;
+  `ConsumeCommandEdges` re-export reverted (unused).
+- **LIVE BUG 2 — map §7 amendment 1 EMPIRICALLY FALSIFIED (fixed)**: with
+  `DeterministicPredicted::default()` (skip_despawn: false) all 19 decorated children were
+  DESPAWNED ~16 ms after decoration ("Entity despawned ... is invalid" warnings), rig broken
+  client-side, 201 rollbacks/15 s of permanent desync. Cause: `deterministic_despawn` drains on
+  every rollback and despawns entities whose registration tick > rollback_tick — and rollbacks
+  fire continuously through the post-bind suspension-settle burst, so "bind seconds after spawn"
+  does NOT put decoration clear of live rollback targets: the map's "vanishingly narrow window"
+  is the common case. Switched to `skip_despawn: true` (grace: `DisableRollback` for
+  `enable_rollback_after` = 20 ticks, then full participation) — the very variant the
+  `deterministic_replication` example's decorating observer uses. Result: zero despawns, all
+  evidence clean. Map §7's final verdict amendment 1 should be treated as reversed.
+- **A/B rollback rate** (client `--simulate-input`, ~18 s runs, thresholds 0.05):
+  - `SPIKE_LATENCY_MS=0`: **22 rollbacks** total (all in the ~1.3 s post-bind settle burst,
+    zero after), 1 snap (settle), depth ~3.
+  - `SPIKE_LATENCY_MS=100` (+20 jitter): **152 rollbacks** vs increment-6's 430/15 s with the
+    stub at 1 cm thresholds — ~65% drop with the FULL sim now running (16-wheel suspension +
+    brush friction + servos, a much noisier body than the stub). Distribution: ~10/s settle,
+    ~28/s only during full-throttle+steer maneuvering, ~8/s coasting, ~0 at rest. 1 snap.
+  - `SPIKE_INPUT_DELAY_TICKS=2` @100 ms: 158 — lever wired+functional but no measurable effect
+    here; the residual rate is threshold-tripping solver noise under maneuver, not
+    prediction-window depth. Keep at 0.
+- **Real-sim evidence (every criterion, client log lines)**:
+  - Suspension grounded: `SIM-EVIDENCE wheels_grounded=16/16` (14/16 momentarily during settle).
+  - Hull ramped, not instant: position curve 0 → (0.9,−2.3) → (1.3,−11.0) → (2.2,−20.3) over
+    2 s samples under throttle 1.0 + steer 0.3 (INPUT_RAMP visibly easing in).
+  - Turret slewed to the scripted aim: `turret_angle=Some(-0.2449951)` — exactly
+    atan2(−200, 800) = −0.24498 rad for the hull-local aim (200, 0, −800). (Angle converges
+    within the first 2 s sample; the "before" state is the servo's 0.0 rest.)
+  - Reload cycled: `reloads=[0.0, 0.0, 1.984375]` one sample after the tick-300 fire (3.0 s
+    MainGun reload minus ~1 s), back to 0.0 two samples later. NOTE: three `Reload`s exist
+    (MainGun + Coax + hull MG) — an earlier `.iter().next()` evidence read sampled the wrong
+    weapon and masked the working fire; log now prints all.
+  - Rig binds once every run (`rig_binds=1`), 19 children decorated (turret+gun+muzzle+16
+    wheels), convergence: client/server positions on the same trajectory within sample-time
+    offset (e.g. client (2.29,0.018,−19.94)@40.10 vs server (2.25,0.018,−19.53)@39.88).
+- **Forced-rollback + fire pass** (`SPIKE_FIRE_TICK=110`, 100 ms): fire landed inside the
+  perturbation rollback burst (perturbation @47.73, rollbacks 46.9–47.4+, SHELL-SPAWN @48.00).
+  `SHELL-SPAWN ... (total=1)` — the tracer did NOT duplicate in this pass; the accepted wart
+  did not manifest (recorded as rare, not disproven — PreSpawned remains the later fix). Zero
+  panics, zero NaN, zero despawn warnings in all four runs.
+- **Terrain**: `world::plugin` game terrain confirmed working headless under the netcode physics
+  composition on both ends (wheels grounded 16/16 proves the Terrain-layer rays hit it);
+  `spike_ground()` deleted. Tank drives the real test-course world now.
