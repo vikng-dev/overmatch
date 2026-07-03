@@ -1,38 +1,33 @@
-//! Mouse aiming: a screen-center ray commits the shared aim point, which every servo then chases
-//! (`drive_aim_servos`) — turret, gun, and the hull MG alike. RMB free-look holds the committed
-//! point; the HUD shows the center reticle, green bore dot, and amber aim-point dot. The committed
-//! aim point is stored in the hull's local frame, so it rides with the tank (WW2: no gun
-//! stabilization). Storing it in world space instead would be the modern-stabilization split.
+//! Mouse aiming: a screen-center ray commits the shared aim intention into the tank's
+//! [`TankCommand`], which every servo then chases (`drive_aim_servos`) — turret, gun, and the
+//! hull MG alike. RMB free-look holds the committed point; the HUD shows the center reticle,
+//! green bore dot, and amber aim-point dot. The committed intention is hull-local, so it rides
+//! with the tank (WW2: no gun stabilization). Storing it in world space instead would be the
+//! modern-stabilization split.
 //!
-//! The servo drive (`drive_aim_servos`) is mode-agnostic: it reads the one `AimPoint` regardless of
-//! who wrote it, so the gunner optic (`sight::drive_gunner_aim`) reuses it by committing the point
-//! from its magnified intent instead of commanding the servos itself.
+//! The servo drive (`drive_aim_servos`) is mode-agnostic and per-tank: it reads each tank's one
+//! commanded aim regardless of who wrote it — the gunner optic (`sight::drive_gunner_aim`)
+//! commits from its magnified intent instead of commanding the servos itself, and a network
+//! peer's command drives its tank through the exact same path.
 
 use avian3d::prelude::SpatialQuery;
-use bevy::ecs::lifecycle::Add;
 use bevy::prelude::*;
 
 use crate::camera::GunnerCameraPlaced;
+use crate::command::TankCommand;
 use crate::damage::ControlledTank;
-use crate::firecontrol::{RangeTable, Ranging, lob};
+use crate::firecontrol::{RangeTable, lob};
 use crate::sight::in_third_person;
 use crate::state::GameplaySet;
-use crate::tank::{Controlled, Hull, Muzzle, Rig, ServoCommand, ServoRole, TankRoot, Turret};
+use crate::tank::{Controlled, Hull, Muzzle, Rig, ServoCommand, ServoRole, Tank, TankRoot};
 use crate::world::ground_distance;
 
 /// Maximum engagement range; rays that hit nothing fall back to a point this far out.
 const MAX_RANGE: f32 = 10_000.0;
 
-/// The committed aim point in the hull's local frame. `None` until the first commit. The single
-/// shared target both view modes write (third-person ray, gunner intent) and `drive_aim_servos`
-/// reads — every servo chases this one point. ("Target" is reserved for a designated enemy; this is
-/// the commanded ground point.)
-#[derive(Component)]
-pub(crate) struct AimPoint(pub(crate) Option<Vec3>);
-
-/// The aim-commit phase: the per-mode input systems that write [`AimPoint`] (`commit_aim` in
-/// third-person, `sight::drive_gunner_aim` in the optic). `drive_aim_servos` runs `.after` this, so
-/// it always reads the point committed this frame regardless of which mode wrote it.
+/// The aim-commit phase: the per-mode input systems that write the command's aim (`commit_aim` in
+/// third-person, `sight::drive_gunner_aim` in the optic). Client-side command generation at render
+/// rate; the sim (`drive_aim_servos`, fixed clock) consumes whatever intention stands at each tick.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AimCommit;
 
@@ -45,19 +40,24 @@ struct BoreIndicator;
 #[derive(Component)]
 struct AimIndicator;
 
-pub fn plugin(app: &mut App) {
+/// The servo bridge — authority-side: each tick, every tank's servos get targets from its
+/// commanded aim.
+pub fn sim_plugin(app: &mut App) {
+    // In `GameplaySet`, so `drive_servos` (`.after(GameplaySet)`) integrates the fresh targets
+    // the same tick. Mode-agnostic and per-tank.
+    app.add_systems(FixedUpdate, drive_aim_servos.in_set(GameplaySet));
+}
+
+/// The third-person aim commit + HUD dots — client-side: devices → command, and reprojection.
+pub fn client_plugin(app: &mut App) {
     app.add_systems(Startup, spawn_hud)
-        // Attach AimPoint the moment the rig binds the Turret marker.
-        .add_observer(attach_aim_point)
         .add_systems(
             Update,
-            (
-                // Per-mode aim commit: third-person from the screen-center ray; the optic commits
-                // from its magnified intent (`sight::drive_gunner_aim`, also in `AimCommit`).
-                commit_aim.run_if(in_third_person).in_set(AimCommit),
-                // Mode-agnostic: every controlled-tank servo chases the committed point.
-                drive_aim_servos.after(AimCommit),
-            )
+            // Per-mode aim commit: third-person from the screen-center ray; the optic commits
+            // from its magnified intent (`sight::drive_gunner_aim`, also in `AimCommit`).
+            commit_aim
+                .run_if(in_third_person)
+                .in_set(AimCommit)
                 .in_set(GameplaySet),
         )
         // HUD markers reproject through the camera, so they run after the camera's pose is final
@@ -70,11 +70,6 @@ pub fn plugin(app: &mut App) {
                 .after(TransformSystems::Propagate)
                 .after(GunnerCameraPlaced),
         );
-}
-
-/// Reactively give the turret its `AimPoint` the moment the rig binds the `Turret` marker.
-fn attach_aim_point(add: On<Add, Turret>, mut commands: Commands) {
-    commands.entity(add.entity).insert(AimPoint(None));
 }
 
 fn spawn_hud(mut commands: Commands) {
@@ -127,9 +122,9 @@ fn spawn_hud(mut commands: Commands) {
 }
 
 /// Third-person aim commit: a screen-center ray picks the ground point (or a far fallback) and
-/// stores it hull-local on the turret's [`AimPoint`]. RMB free-look stops committing, so the held
-/// point (and the servos chasing it) keep their hull-relative pose. The servos themselves are driven
-/// by `drive_aim_servos`, shared with the gunner optic.
+/// stores it hull-local in the tank's [`TankCommand`]. RMB free-look stops committing, so the held
+/// intention (and the servos chasing it) keep their hull-relative pose. The servos themselves are
+/// driven by `drive_aim_servos`, shared with the gunner optic.
 fn commit_aim(
     mouse: Res<ButtonInput<MouseButton>>,
     spatial: SpatialQuery,
@@ -137,7 +132,7 @@ fn commit_aim(
     window: Single<&Window>,
     controlled: ControlledTank,
     hull: Query<&GlobalTransform, With<Hull>>,
-    mut aim_point: Query<&mut AimPoint>,
+    mut tank_commands: Query<&mut TankCommand>,
 ) {
     // Hold RMB to free-look: the camera still pans, but we stop committing aim, so the servos
     // and the locked aim point hold their hull-relative pose.
@@ -145,7 +140,7 @@ fn commit_aim(
         return;
     }
 
-    let Some(rig) = controlled.rig() else {
+    let (Some(tank), Some(rig)) = (controlled.entity(), controlled.rig()) else {
         return;
     };
 
@@ -164,57 +159,53 @@ fn commit_aim(
     // Store the raw committed point — the player's aim *intention*. The superelevation lob is added
     // downstream in `drive_aim_servos`, so this stays the intention (what the amber HUD dot shows) and
     // the green bore dot ends up the superelevation above it.
-    if let Ok(mut aim_point) = aim_point.get_mut(rig.turret) {
-        aim_point.0 = Some(hull.affine().inverse().transform_point3(point));
+    if let Ok(mut command) = tank_commands.get_mut(tank) {
+        command.aim = Some(hull.affine().inverse().transform_point3(point));
     }
 }
 
-/// Drive every servo of the controlled tank at the one committed aim point — mode-agnostic, so the
-/// same logic serves third-person and the gunner optic. Yaw solves azimuth, Pitch solves elevation,
-/// each from its own pose; the hierarchy composes nested mounts, so the turret+gun and the hull MG
-/// converge independently with no chain logic here. Whether a mount actually slews is its own gate
-/// (`drive_servos`); this just writes the intent. The committed point is the raw aim *intention*;
-/// this bridge lobs it up by the main gun's superelevation for the dialed range, so the bore rides
-/// above the line of sight while `drive_servos` stays a generic point-chaser. The coax + hull MG ride
-/// the gun's lob until per-weapon laying lands.
+/// Drive every servo of every tank at its command's one aim intention — mode-agnostic (the same
+/// logic serves third-person and the gunner optic) and per-tank (a network peer's command drives
+/// its tank identically). Yaw solves azimuth, Pitch solves elevation, each from its own pose; the
+/// hierarchy composes nested mounts, so the turret+gun and the hull MG converge independently with
+/// no chain logic here. Whether a mount actually slews is its own gate (`drive_servos`); this just
+/// writes the intent. The commanded point is the raw aim *intention*; this bridge lobs it up by
+/// the main gun's superelevation for the *commanded* range, so the bore rides above the line of
+/// sight while `drive_servos` stays a generic point-chaser. The coax + hull MG ride the gun's lob
+/// until per-weapon laying lands.
 fn drive_aim_servos(
-    controlled: ControlledTank,
+    tanks: Query<(Entity, &TankCommand, &Rig), With<Tank>>,
     hull: Query<&GlobalTransform, With<Hull>>,
-    aim_point: Query<&AimPoint>,
-    ranging: Res<Ranging>,
     tables: Query<&RangeTable>,
     mut servos: Query<(&GlobalTransform, &mut ServoCommand, &ServoRole, &TankRoot)>,
 ) {
-    let Some(controlled_entity) = controlled.entity() else {
-        return;
-    };
-    let Some(rig) = controlled.rig() else {
-        return;
-    };
-    let Ok(hull) = hull.get(rig.hull) else {
-        return;
-    };
-    let Ok(&AimPoint(Some(local))) = aim_point.get(rig.turret) else {
-        return;
-    };
-
-    // Lob the raw intention up by the superelevation here (not at commit), so the stored aim point —
-    // and its amber HUD dot — stay the intention, while the bore the servos reach is the lobbed point.
-    let theta = tables
-        .get(rig.muzzle)
-        .map_or(0.0, |table| table.superelevation(ranging.range));
-    let hull_affine = hull.affine();
-    let point = hull_affine.transform_point3(lob(local, theta));
-    let to_local = hull_affine.inverse();
-    for (transform, mut command, role, root) in &mut servos {
-        if root.0 != controlled_entity {
-            continue;
-        }
-        let dir = to_local.transform_vector3(point - transform.translation());
-        command.target = match role {
-            ServoRole::Yaw => (-dir.x).atan2(-dir.z),
-            ServoRole::Pitch => dir.y.atan2((dir.x * dir.x + dir.z * dir.z).sqrt()),
+    for (tank, command, rig) in &tanks {
+        let Some(local) = command.aim else {
+            continue; // no commitment yet — servos hold
         };
+        let Ok(hull) = hull.get(rig.hull) else {
+            continue;
+        };
+
+        // Lob the raw intention up by the superelevation here (not at commit), so the commanded aim
+        // — and its amber HUD dot — stay the intention, while the bore the servos reach is the
+        // lobbed point.
+        let theta = tables
+            .get(rig.muzzle)
+            .map_or(0.0, |table| table.superelevation(command.range));
+        let hull_affine = hull.affine();
+        let point = hull_affine.transform_point3(lob(local, theta));
+        let to_local = hull_affine.inverse();
+        for (transform, mut servo, role, root) in &mut servos {
+            if root.0 != tank {
+                continue;
+            }
+            let dir = to_local.transform_vector3(point - transform.translation());
+            servo.target = match role {
+                ServoRole::Yaw => (-dir.x).atan2(-dir.z),
+                ServoRole::Pitch => dir.y.atan2((dir.x * dir.x + dir.z * dir.z).sqrt()),
+            };
+        }
     }
 }
 
@@ -273,9 +264,8 @@ fn update_bore_indicator(
 fn update_aim_indicator(
     mouse: Res<ButtonInput<MouseButton>>,
     camera_query: Single<(&Camera, &GlobalTransform)>,
-    controlled: Query<&Rig, With<Controlled>>,
+    controlled: Query<(&Rig, &TankCommand), With<Controlled>>,
     hull: Query<&GlobalTransform, With<Hull>>,
-    aim_point: Query<&AimPoint, With<Turret>>,
     mut indicator: Query<(&mut Node, &mut Visibility), With<AimIndicator>>,
 ) {
     let (camera, cam_transform) = *camera_query;
@@ -289,19 +279,16 @@ fn update_aim_indicator(
         return;
     }
 
-    let Ok(rig) = controlled.single() else {
+    let Ok((rig, command)) = controlled.single() else {
         *visibility = Visibility::Hidden;
         return;
     };
     let Ok(hull) = hull.get(rig.hull) else {
         return;
     };
-    let Ok(aim_point) = aim_point.get(rig.turret) else {
-        return;
-    };
 
     // No committed aim yet (before first aim, or free-look from frame one).
-    let Some(local) = aim_point.0 else {
+    let Some(local) = command.aim else {
         *visibility = Visibility::Hidden;
         return;
     };

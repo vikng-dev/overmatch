@@ -16,11 +16,12 @@ use avian3d::prelude::{
 use bevy::ecs::query::QueryData;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::ballistics::ComponentHealth;
+use crate::command::{ConsumeCommandEdges, CrewSwap, TankCommand};
 use crate::state::GameplaySet;
-use crate::tank::{Controlled, Rig, ServoCommand, ServoSpec, ServoState, Turret};
+use crate::tank::{Controlled, Rig, ServoCommand, ServoSpec, ServoState, Tank, Turret};
 
 /// Semantic ownership: a ballistic volume belongs to a tank for gameplay aggregation. This is
 /// separate from `ChildOf`, which remains the model/transform hierarchy.
@@ -49,7 +50,9 @@ impl TankVolumes {
 /// for diagnostic readouts and slice-2 backfill ("who is where"). This is identity/label only —
 /// gating keys off [`Capability`] requirements (via [`Part`]), not the role itself. `Ord` is by
 /// declaration order (Commander < … < BowGunner) — the deterministic seat order the crew bar uses.
-#[derive(Component, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
+#[derive(
+    Component, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 pub enum CrewStation {
     Commander,
     Gunner,
@@ -249,8 +252,17 @@ impl KnockoutReason {
 }
 
 pub fn plugin(app: &mut App) {
+    // The crew-swap seam: commands start/cancel swaps on the fixed clock (consuming the edge);
+    // `tick_swaps` runs the in-flight timer. The whole consequence chain is sim — it decides who
+    // lives and what works — so it steps on the fixed clock with the rest of the simulation.
     app.add_systems(
-        Update,
+        FixedUpdate,
+        apply_crew_swap_commands
+            .before(ConsumeCommandEdges)
+            .in_set(GameplaySet),
+    )
+    .add_systems(
+        FixedUpdate,
         (
             tick_swaps,
             process_cookoffs,
@@ -261,6 +273,49 @@ pub fn plugin(app: &mut App) {
             .chain()
             .in_set(GameplaySet),
     );
+}
+
+/// Start or cancel a [`PendingSwap`] from each tank's command — the sim half of the crew-swap
+/// seam (the crew bar's two-tap flow is client-side selection state). Stations resolve against
+/// the tank's *own* seats, so the command is meaningful from any writer (local player or a
+/// network peer) and the server owns the legality check: a `Start` needs both seats to exist and
+/// no swap in flight; `Cancel` aborts an in-flight one.
+fn apply_crew_swap_commands(
+    tanks: Query<(Entity, &TankCommand, Option<&PendingSwap>), With<Tank>>,
+    seats: Query<(Entity, &CrewStation, &VolumeOf)>,
+    mut commands: Commands,
+) {
+    for (tank, command, pending) in &tanks {
+        let Some(swap) = command.crew_swap else {
+            continue;
+        };
+        match swap {
+            CrewSwap::Cancel => {
+                if pending.is_some() {
+                    commands.entity(tank).remove::<PendingSwap>();
+                }
+            }
+            CrewSwap::Start(a, b) => {
+                if pending.is_some() || a == b {
+                    continue;
+                }
+                let seat_of = |station: CrewStation| {
+                    seats
+                        .iter()
+                        .find(|(_, s, owner)| **s == station && owner.tank() == tank)
+                        .map(|(entity, ..)| entity)
+                };
+                let (Some(seat_a), Some(seat_b)) = (seat_of(a), seat_of(b)) else {
+                    continue;
+                };
+                commands.entity(tank).insert(PendingSwap {
+                    a: seat_a,
+                    b: seat_b,
+                    remaining: SWAP_SECONDS,
+                });
+            }
+        }
+    }
 }
 
 /// Tick pending crew swaps; on completion, exchange occupant state (`home`, HP, `Dead`) between the
@@ -404,6 +459,20 @@ pub fn capability_available(
     volumes: &Query<VolumeFacets>,
 ) -> bool {
     capability_effectiveness(tank_volumes, tank_caps, capability, volumes) > 0.0
+}
+
+/// Whether an arbitrary tank *meets* a requirement (effectiveness > 0) — the per-tank analog of
+/// [`ControlledTank::meets`], for sim systems that iterate every tank (a weapon's `fire`/`load`
+/// gates in `shooting`). No volumes yet (spec still binding) → not met.
+pub fn requirement_met(
+    tank_volumes: Option<&TankVolumes>,
+    requirement: &Requirement,
+    volumes: &Query<VolumeFacets>,
+) -> bool {
+    let Some(tank_volumes) = tank_volumes else {
+        return false;
+    };
+    evaluate(requirement, &part_qualities(tank_volumes, volumes)) > 0.0
 }
 
 /// The player's tank, bundled for the control systems (drive input, aiming, sight, shooting). It

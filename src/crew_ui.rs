@@ -1,13 +1,15 @@
 //! The controlled tank's crew bar + swap input — the first piece of the controlled tank's fixed
 //! player UI (the rest of its scattered readouts fold in here over time). Shared: both `GamePlugin`
 //! and the armor sandbox mount it, each scoped to the tank marked [`Controlled`] (the sandbox marks
-//! its single target). Digit `1`–`5` taps a source seat then a target to start a [`PendingSwap`] (the
-//! shared swap mechanic in `damage`); the bar shows each seat, its occupant, deaths, the current
-//! selection, and any in-flight swap countdown.
+//! its single target). Digit `1`–`5` taps a source seat then a target — pure client-side selection
+//! that resolves into a [`CrewSwap`] command; the sim (`damage::apply_crew_swap_commands`)
+//! validates and starts the actual [`PendingSwap`]. The bar shows each seat, its occupant, deaths,
+//! the current selection, and any in-flight swap countdown.
 
 use bevy::prelude::*;
 
-use crate::damage::{CrewStation, Crewman, Dead, PendingSwap, SWAP_SECONDS, VolumeOf};
+use crate::command::{CrewSwap, TankCommand};
+use crate::damage::{CrewStation, Crewman, Dead, PendingSwap, VolumeOf};
 use crate::tank::Controlled;
 
 /// The controlled tank's crew bar: one cell per seat, driven by the `1`–`5` swap input.
@@ -45,15 +47,15 @@ fn spawn_crew_bar(mut commands: Commands) {
     ));
 }
 
-/// `1`–`5` crew-bar input for the controlled tank: tap a seat to select it as the swap source, tap a
-/// second to start a [`PendingSwap`]; re-tapping the source (or any seat while a swap is mid-flight)
-/// cancels.
+/// `1`–`5` crew-bar input for the controlled tank: tap a seat to select it as the swap source, tap
+/// a second to command the swap; re-tapping the source (or any seat while a swap is mid-flight)
+/// cancels. Selection is client-side state; only the resolved [`CrewSwap`] intent goes on the
+/// command — the sim starts (and validates) the actual swap.
 fn crew_swap_input(
     keys: Res<ButtonInput<KeyCode>>,
     mut select: ResMut<CrewSelect>,
-    tank: Query<(Entity, Option<&PendingSwap>), With<Controlled>>,
+    mut tank: Query<(Entity, Option<&PendingSwap>, &mut TankCommand), With<Controlled>>,
     seats: Query<(Entity, &CrewStation, &VolumeOf)>,
-    mut commands: Commands,
 ) {
     const DIGITS: [KeyCode; 5] = [
         KeyCode::Digit1,
@@ -65,24 +67,24 @@ fn crew_swap_input(
     let Some(slot) = DIGITS.iter().position(|k| keys.just_pressed(*k)) else {
         return;
     };
-    let Ok((tank, pending)) = tank.single() else {
+    let Ok((tank, pending, mut command)) = tank.single_mut() else {
         return;
     };
 
     // Seats for this tank in enum (slot) order.
-    let mut ordered: Vec<(Entity, CrewStation)> = seats
+    let mut ordered: Vec<CrewStation> = seats
         .iter()
         .filter(|(_, _, owner)| owner.tank() == tank)
-        .map(|(e, s, _)| (e, *s))
+        .map(|(_, s, _)| *s)
         .collect();
-    ordered.sort_by_key(|(_, s)| *s);
-    let Some(&(seat_entity, seat_station)) = ordered.get(slot) else {
+    ordered.sort();
+    let Some(&seat_station) = ordered.get(slot) else {
         return;
     };
 
     // Any tap while a swap is in flight cancels it.
     if pending.is_some() {
-        commands.entity(tank).remove::<PendingSwap>();
+        command.crew_swap = Some(CrewSwap::Cancel);
         select.source = None;
         return;
     }
@@ -91,13 +93,7 @@ fn crew_swap_input(
         None => select.source = Some(seat_station),
         Some(src) if src == seat_station => select.source = None, // re-tap = deselect
         Some(src) => {
-            if let Some(&(src_entity, _)) = ordered.iter().find(|(_, s)| *s == src) {
-                commands.entity(tank).insert(PendingSwap {
-                    a: src_entity,
-                    b: seat_entity,
-                    remaining: SWAP_SECONDS,
-                });
-            }
+            command.crew_swap = Some(CrewSwap::Start(src, seat_station));
             select.source = None;
         }
     }

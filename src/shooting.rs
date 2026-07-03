@@ -8,7 +8,8 @@ use bevy::ecs::lifecycle::Add;
 use bevy::prelude::*;
 
 use crate::ballistics::FireShell;
-use crate::damage::ControlledTank;
+use crate::command::{ConsumeCommandEdges, TankCommand};
+use crate::damage::{TankVolumes, VolumeFacets, requirement_met};
 use crate::spec::Trigger;
 use crate::state::GameplaySet;
 use crate::tank::{Tank, TankRoot, Weapon};
@@ -40,9 +41,16 @@ pub struct Reload {
 
 pub fn plugin(app: &mut App) {
     // attach_weapon reacts to the binder attaching `Weapon` (an observer), so it stays out of the set.
-    app.add_observer(attach_weapon)
-        .add_systems(Update, (tick_reload, fire).chain().in_set(GameplaySet))
-        .add_systems(FixedUpdate, apply_recoil.in_set(GameplaySet));
+    // The gun is sim: reload and firing run on the fixed clock, driven by each tank's `TankCommand`
+    // — `fire` consumes the click edge, so it must precede the command layer's edge clear.
+    app.add_observer(attach_weapon).add_systems(
+        FixedUpdate,
+        (
+            (tick_reload, fire).chain().before(ConsumeCommandEdges),
+            apply_recoil,
+        )
+            .in_set(GameplaySet),
+    );
 }
 
 /// React to the binder attaching a `Weapon`: start its `Reload` (ready), and — if it recoils — set
@@ -73,50 +81,51 @@ fn attach_weapon(
     }
 }
 
-/// Tick the reload timer down — but only while the Load capability is available (Loader staffed +
-/// Breech intact). A dead Loader or broken Breech freezes the reload partway through; a backfilled
-/// Loader (slice 2) would resume it.
+/// Tick every weapon's reload timer down — but only while its own tank meets the weapon's `load`
+/// requirement (Loader staffed + Breech intact). A dead Loader or broken Breech freezes the
+/// reload partway through; a backfilled Loader (slice 2) would resume it. Per-tank, not
+/// controlled-only: a tank keeps loading whether you're in it or (later) it's a network peer's.
 fn tick_reload(
     time: Res<Time>,
-    controlled: ControlledTank,
+    tanks: Query<Option<&TankVolumes>, With<Tank>>,
+    volumes: Query<VolumeFacets>,
     mut weapons: Query<(&mut Reload, &Weapon, &TankRoot)>,
 ) {
-    let Some(tank) = controlled.entity() else {
-        return;
-    };
     for (mut reload, weapon, root) in &mut weapons {
-        if root.0 == tank && reload.remaining > 0.0 && controlled.meets(&weapon.load) {
+        let Ok(tank_volumes) = tanks.get(root.0) else {
+            continue;
+        };
+        if reload.remaining > 0.0 && requirement_met(tank_volumes, &weapon.load, &volumes) {
             reload.remaining = (reload.remaining - time.delta_secs()).max(0.0);
         }
     }
 }
 
-/// Fire the controlled tank's weapons whose trigger is pressed this frame: LMB → `Primary` (the main
-/// gun, single shot), Spacebar (held) → `Secondary` (the MGs, cyclic via their short reload). Each
-/// weapon fires from its *own* muzzle and ballistics, gated by its `fire` requirement + reload.
+/// Fire each tank's weapons whose trigger its command holds this tick: `fire_primary` → the main
+/// gun (single shot — the command layer latches the click edge to exactly one tick),
+/// `fire_secondary` (held) → the MGs (cyclic via their short reload). Each weapon fires from its
+/// *own* muzzle and ballistics, gated by its `fire` requirement + reload — the gate lives here in
+/// the sim, where the server will enforce it, not in the input path.
 fn fire(
-    mouse: Res<ButtonInput<MouseButton>>,
-    keys: Res<ButtonInput<KeyCode>>,
-    controlled: ControlledTank,
+    tanks: Query<(&TankCommand, Option<&TankVolumes>), With<Tank>>,
+    volumes: Query<VolumeFacets>,
     mut weapons: Query<(&GlobalTransform, &Weapon, &mut Reload, &TankRoot)>,
     mut barrels: Query<&mut Recoil>,
     mut bodies: Query<Forces, With<Tank>>,
     mut commands: Commands,
 ) {
-    let Some(tank) = controlled.entity() else {
-        return;
-    };
-    let primary = mouse.just_pressed(MouseButton::Left);
-    let secondary = keys.pressed(KeyCode::Space);
     for (muzzle, weapon, mut reload, root) in &mut weapons {
-        if root.0 != tank {
+        let Ok((command, tank_volumes)) = tanks.get(root.0) else {
             continue;
-        }
-        let triggered = match weapon.trigger {
-            Trigger::Primary => primary,
-            Trigger::Secondary => secondary,
         };
-        if !triggered || reload.remaining > 0.0 || !controlled.meets(&weapon.fire) {
+        let triggered = match weapon.trigger {
+            Trigger::Primary => command.fire_primary,
+            Trigger::Secondary => command.fire_secondary,
+        };
+        if !triggered
+            || reload.remaining > 0.0
+            || !requirement_met(tank_volumes, &weapon.fire, &volumes)
+        {
             continue;
         }
 
@@ -136,9 +145,8 @@ fn fire(
         }
         // Recoil reaction on the hull: the shell's momentum, opposite the bore, applied on the bore
         // axis. The line of action passes above the centre of mass, so the impulse-at-point also
-        // pitches the nose up (gun climb), not just shoves the hull back. `apply_linear_impulse_at_point`
-        // changes velocity immediately, so it's correct from this `Update` system regardless of the
-        // physics tick. Each weapon kicks by its own momentum, so the MGs barely register.
+        // pitches the nose up (gun climb), not just shoves the hull back. Each weapon kicks by its
+        // own momentum, so the MGs barely register.
         if let Ok(mut forces) = bodies.get_mut(root.0) {
             let impulse = muzzle.forward() * (-weapon.mass * weapon.speed * RECOIL_FEEL);
             forces.apply_linear_impulse_at_point(impulse, muzzle.translation());

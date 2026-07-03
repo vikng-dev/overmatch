@@ -8,11 +8,12 @@ use bevy::ecs::lifecycle::Add;
 use bevy::prelude::*;
 use serde::Deserialize;
 
+use crate::command::TankCommand;
 use crate::damage::{
     Capability, TankCapabilities, TankVolumes, VolumeFacets, capability_available,
 };
 use crate::state::GameplaySet;
-use crate::tank::{CenterOfMassAnchor, Controlled, Roadwheel, Tank, TrackSide};
+use crate::tank::{CenterOfMassAnchor, Roadwheel, Tank, TrackSide};
 
 /// Coulomb coefficient: each wheel's total ground force is capped at MU × load (friction ellipse).
 /// Per-environment (the track-vs-ground surface pair), not per-tank — destined for the terrain
@@ -24,8 +25,10 @@ const MU: f32 = 0.9;
 /// lets a heavy tank pivot at all — an isotropic circle nearly cancels the steer drive. Surface
 /// property like [`MU`] (ADR-0007, bucket 3).
 const LATERAL_GRIP_RATIO: f32 = 0.55;
-/// Input ramp (per second): turns binary keys into a smooth throttle/steer signal — and gives
-/// the keyboard a taste of the analog mid-range on the way to full. Universal feel (bucket 1).
+/// Command ramp (per second): slews the tank's drive signal toward the commanded target, so a
+/// binary key eases through the analog mid-range on the way to full. Vehicle response, not input
+/// handling — it applies identically to a keyboard, a stick, or a network peer's command.
+/// Universal feel (bucket 1).
 const INPUT_RAMP: f32 = 4.0;
 /// Below this contact planar speed (m/s) a wheel "grips": it plants a brush anchor and holds
 /// statically instead of slipping. Above it, friction is kinetic (the skid / coast-down model).
@@ -75,14 +78,15 @@ pub struct SuspensionParams {
 }
 
 pub fn plugin(app: &mut App) {
-    app.init_resource::<DriveInput>()
-        .add_observer(attach_suspension)
+    app.add_observer(attach_suspension)
+        .add_observer(attach_drive_state)
         .add_systems(Update, set_center_of_mass)
-        // Order matters within the fixed step: read input, settle springs (sets per-wheel load),
-        // then drive (reads that load for the friction circle). All gated by the gameplay set.
+        // Order matters within the fixed step: ramp the command into the drive signal, settle
+        // springs (sets per-wheel load), then drive (reads that load for the friction circle).
+        // All gated by the gameplay set.
         .add_systems(
             FixedUpdate,
-            (read_drive_input, apply_suspension, apply_drive)
+            (ramp_drive, apply_suspension, apply_drive)
                 .chain()
                 .in_set(GameplaySet),
         );
@@ -142,7 +146,7 @@ fn attach_suspension(add: On<Add, Roadwheel>, mut commands: Commands) {
 /// ride height, pitch, roll, and weight transfer all emerge from the per-wheel springs.
 fn apply_suspension(
     // Runs for *every* tank — support is tank-agnostic (each body rides on its own wheels),
-    // unlike drive input which is scoped to the controlled tank. The `&SuspensionParams` gates a
+    // unlike thrust, which each tank takes from its own command. The `&SuspensionParams` gates a
     // body in: no suspension until the spec is applied to the hull (ADR-0011 — no default spring).
     // Wheels likewise lack a `RayCaster` until then.
     mut bodies: Query<(Entity, Forces, &SuspensionParams), With<Tank>>,
@@ -184,27 +188,29 @@ fn apply_suspension(
     }
 }
 
-/// Smoothed driver intent in [-1, 1]: throttle (W/S) and steer (D/A). Ramped from the raw keys
-/// so it's controller-ready and the keyboard eases through the analog range.
-#[derive(Resource, Default)]
-struct DriveInput {
+/// A tank's smoothed drive signal in [-1, 1]: its `TankCommand` targets, slewed through the
+/// input ramp. Per-tank sim state (not part of the command), so every tank — local, swapped-away,
+/// or a future network peer — responds to its command with the same vehicle feel.
+#[derive(Component, Default)]
+struct DriveState {
     throttle: f32,
     steer: f32,
 }
 
-fn read_drive_input(
-    keys: Res<ButtonInput<KeyCode>>,
-    time: Res<Time>,
-    mut input: ResMut<DriveInput>,
-) {
-    let axis = |pos: KeyCode, neg: KeyCode| {
-        keys.pressed(pos) as i8 as f32 - keys.pressed(neg) as i8 as f32
-    };
-    let target_throttle = axis(KeyCode::KeyW, KeyCode::KeyS);
-    let target_steer = axis(KeyCode::KeyD, KeyCode::KeyA);
+/// Attach `DriveState` the moment a `Tank` exists (observer, ungated) — the sim-side partner of
+/// the `TankCommand` that `command` attaches on the same trigger.
+fn attach_drive_state(add: On<Add, Tank>, mut commands: Commands) {
+    commands.entity(add.entity).insert(DriveState::default());
+}
+
+/// Slew each tank's drive signal toward its commanded targets. Tank-agnostic: a zeroed command
+/// (swapped away, idle) bleeds back to rest through the same ramp it drove up on.
+fn ramp_drive(time: Res<Time>, mut tanks: Query<(&TankCommand, &mut DriveState)>) {
     let step = INPUT_RAMP * time.delta_secs();
-    input.throttle = approach(input.throttle, target_throttle, step);
-    input.steer = approach(input.steer, target_steer, step);
+    for (command, mut state) in &mut tanks {
+        state.throttle = approach(state.throttle, command.throttle, step);
+        state.steer = approach(state.steer, command.steer, step);
+    }
 }
 
 /// Move `current` toward `target` by at most `step`.
@@ -222,16 +228,15 @@ fn approach(current: f32, target: f32, step: f32) -> f32 {
 /// lower lateral budget sideways). Yaw, turning resistance, and weight transfer all emerge from
 /// per-contact forces; nothing scripts the turn.
 fn apply_drive(
-    input: Res<DriveInput>,
     mut bodies: Query<
         (
             Entity,
             &GlobalTransform,
             Forces,
             &Drivetrain,
+            &DriveState,
             Option<&TankVolumes>,
             Option<&TankCapabilities>,
-            Has<Controlled>,
         ),
         With<Tank>,
     >,
@@ -242,16 +247,17 @@ fn apply_drive(
     // Per tank. `Drivetrain` is required per-variant data with no fallback (ADR-0010): we never
     // guess stats. It's absent only in the startup frames before the spec applies (a failed load is
     // fatal — see `report_failed_spec`), so a tank with no `Drivetrain` is simply not driven yet.
-    for (body, tank_transform, mut forces, drivetrain, tank_volumes, tank_caps, controlled) in
+    for (body, tank_transform, mut forces, drivetrain, state, tank_volumes, tank_caps) in
         &mut bodies
     {
-        // Drive gates *thrust*, not grip: only the controlled tank with a live `Drive` capability
-        // reads the throttle/steer. Everyone else — a remote/idle tank, or one with a dead
-        // driver/engine/transmission — gets zero command but still runs the full friction model below,
-        // so the tracks hold the tank in place via the brush anchor instead of sliding frictionlessly.
+        // Drive gates *thrust*, not grip: only a tank with a live `Drive` capability applies its
+        // drive signal. One with a dead driver/engine/transmission gets zero command but still runs
+        // the full friction model below, so the tracks hold the tank in place via the brush anchor
+        // instead of sliding frictionlessly. Which tank has a non-zero signal at all is the command
+        // layer's business (`gather_commands` writes only the controlled tank's command).
         let drive_ok = capability_available(tank_volumes, tank_caps, Capability::Drive, &volumes);
-        let (throttle, steer) = if controlled && drive_ok {
-            (input.throttle, input.steer)
+        let (throttle, steer) = if drive_ok {
+            (state.throttle, state.steer)
         } else {
             (0.0, 0.0)
         };

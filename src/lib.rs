@@ -18,6 +18,9 @@ mod aim;
 mod ballistics;
 mod branding;
 mod camera;
+/// The command layer: device reads → player bindings → per-tank serializable `TankCommand`. The
+/// seam authoritative multiplayer hangs off; sim modules consume commands, never devices.
+mod command;
 /// The controlled tank's crew bar + swap input — a shared piece of the fixed player UI, mounted by
 /// both `GamePlugin` and the sandbox (each scoped to the `Controlled` tank).
 mod crew_ui;
@@ -28,6 +31,10 @@ mod driving;
 /// Fire control: per-weapon superelevation range tables + the player-dialed range. Sits atop
 /// `ballistics`; the aim commit reads it to lob the aim point so the bore elevates for range.
 mod firecontrol;
+/// The dedicated-server guard: boots `SimPlugin` headless (no GPU/window/winit) and drives the
+/// tank via `TankCommand` — fails first if sim code grows a hard render dependency.
+#[cfg(test)]
+mod headless_test;
 /// The shared tank-state HUD (world-anchored capability/crew/damage readouts). Mounted by both
 /// `GamePlugin` and the sandbox; each tags its own world camera with `hud::HudCamera`.
 mod hud;
@@ -58,11 +65,14 @@ pub(crate) enum Layer {
     Armor,
 }
 
-/// Every gameplay feature, composed. Add to an `App` that already has the runtime plugins
-/// (`DefaultPlugins` for the game, `MinimalPlugins` for headless tests).
-pub struct GamePlugin;
+/// The simulation — the authority layer, in the client/server sense (see the memory note and
+/// bevy_replicon's "abstracting over configurations"): everything the server must run to be the
+/// truth, and everything a predicting client re-runs. Consumes `TankCommand`s, never devices;
+/// steps on the fixed clock. A dedicated server mounts exactly this (plus netcode) on
+/// `MinimalPlugins`; the single-player game mounts it alongside [`ClientPlugin`].
+pub struct SimPlugin;
 
-impl Plugin for GamePlugin {
+impl Plugin for SimPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
             // Avian physics — foundational infra for world/tank/shooting. Runs in
@@ -70,35 +80,66 @@ impl Plugin for GamePlugin {
             // `interpolate_all` renders bodies at an interpolated pose between fixed steps, so
             // motion stays smooth when the display rate differs from the physics tick rate.
             PhysicsPlugins::default().set(PhysicsInterpolationPlugin::interpolate_all()),
-            branding::plugin,
-            state::plugin,
+            state::sim_plugin,
             world::plugin,
             // `spec` registers the `.tank.ron` data-asset loader before `tank` spawns the tank
             // and requests one (ADR-0010).
             spec::plugin,
-            tank::plugin,
+            tank::sim_plugin,
+            // Commands are the sim's only input: `core_plugin` puts a `TankCommand` on every tank
+            // and consumes latched edges each tick; `driving`/`shooting`/`aim` read it.
+            command::core_plugin,
             driving::plugin,
-            camera::plugin,
-            aim::plugin,
-            // `sight` owns the gunner-view toggle/mode that `camera` and `aim` branch on.
-            sight::plugin,
-            // `ballistics` owns the shell trajectory + impact seam; `shooting` is the player's gun
-            // control that drives it (the sandbox drives the same `FireShell` from its camera).
+            aim::sim_plugin,
+            // `ballistics` owns the shell trajectory + impact seam; `shooting` is the gun control
+            // that drives it (the sandbox drives the same `FireShell` from its camera).
             ballistics::plugin,
-            // Fire control: builds each weapon's range table at bind and owns the dialed range; the
-            // aim commit lobs the aim point by the looked-up superelevation.
-            firecontrol::plugin,
+            // Range tables at bind: the servo bridge lobs each tank's aim by its commanded range.
+            firecontrol::sim_plugin,
             damage::plugin,
             shooting::plugin,
-            // The shared UI: the tank-state HUD (capability/crew/damage floated over each tank) and
-            // the controlled tank's crew bar + `1`–`5` swap input. Nested so the plugin list stays
-            // within Bevy's 15-tuple `add_plugins` limit.
-            (hud::plugin, crew_ui::plugin),
+        ));
+    }
+}
+
+/// The client — command generation (devices → `TankCommand`) and presentation (state → screen).
+/// Requires [`SimPlugin`] in the same app (single-player and listen-server mount both; a pure
+/// network client will too, for interpolation/prediction).
+pub struct ClientPlugin;
+
+impl Plugin for ClientPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_plugins((
+            branding::plugin,
+            // Pause/cursor handling (drives the states that `state::sim_plugin` owns).
+            state::client_plugin,
+            // Device gather: the only device→command translation.
+            command::client_plugin,
+            tank::client_plugin,
+            camera::plugin,
+            aim::client_plugin,
+            // `sight` owns the gunner-view toggle/mode that `camera` and `aim` branch on.
+            sight::plugin,
+            // The player's range dial (rides to the sim inside the command).
+            firecontrol::client_plugin,
+            // The tank-state HUD and the controlled tank's crew bar + `1`–`5` swap input.
+            hud::plugin,
+            crew_ui::plugin,
         ));
 
         // Dev-only physics visualization (collider/ray wireframes) + debug toggles. Off in release
         // builds.
         #[cfg(debug_assertions)]
         app.add_plugins((avian3d::prelude::PhysicsDebugPlugin, debug::plugin));
+    }
+}
+
+/// Every gameplay feature, composed — the single-player configuration: the full sim plus the
+/// local client, one app, no netcode. Add to an `App` that already has the runtime plugins.
+pub struct GamePlugin;
+
+impl Plugin for GamePlugin {
+    fn build(&self, app: &mut App) {
+        app.add_plugins((SimPlugin, ClientPlugin));
     }
 }

@@ -136,10 +136,17 @@ pub fn lob(v: Vec3, theta: f32) -> Vec3 {
     }
 }
 
-pub fn plugin(app: &mut App) {
+/// Range tables — authority-side: `drive_aim_servos` lobs by the commanded range through the
+/// weapon's table, so the server builds them too.
+pub fn sim_plugin(app: &mut App) {
+    // Build each weapon's range table the moment the rig binds its `Weapon`.
+    app.add_observer(attach_range_table);
+}
+
+/// The player's range dial — client-side control state; its value rides to the sim inside the
+/// command (`gather_commands` copies it absolute each frame).
+pub fn client_plugin(app: &mut App) {
     app.init_resource::<Ranging>()
-        // Build each weapon's range table the moment the rig binds its `Weapon`.
-        .add_observer(attach_range_table)
         // Scroll dials the range in the optic (mutually exclusive with `orbit_camera`'s third-person
         // zoom, which also reads scroll — they're gated on opposite view modes, so no contention).
         .add_systems(Update, adjust_range.run_if(in_gunner).in_set(GameplaySet));

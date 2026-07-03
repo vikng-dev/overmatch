@@ -4,17 +4,19 @@
 //! Lshift toggles between the free third-person "commander" view (the orbit camera + `aim.rs`) and
 //! a zoomed gunner optic locked to the gun's line of sight. In gunner view the camera shows the
 //! gun's *reality* (the bore), and aiming is **world-space position control**: mouse deltas move a
-//! committed hull-local aim direction (`GunnerIntent`), which is published as the shared `AimPoint`
-//! that every servo chases at its authored slew rate — so the view lags and settles (dead-stop on
-//! release, *not* rate control), and the hull MG traverses alongside the gun. Pure line of sight:
-//! superelevation (the ballistic lob for range) is a firing-side concern deferred to its own slice.
+//! committed hull-local aim direction (`GunnerIntent`), which is published as the tank's commanded
+//! aim (`TankCommand`) that every servo chases at its authored slew rate — so the view lags and
+//! settles (dead-stop on release, *not* rate control), and the hull MG traverses alongside the gun.
+//! Pure line of sight: superelevation (the ballistic lob for range) is a firing-side concern
+//! deferred to its own slice.
 
 use bevy::camera::visibility::RenderLayers;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 
-use crate::aim::{AimCommit, AimPoint};
+use crate::aim::AimCommit;
 use crate::camera::GunnerCameraPlaced;
+use crate::command::TankCommand;
 use crate::damage::ControlledTank;
 use crate::firecontrol::{RangeTable, Ranging};
 use crate::spec::ViewKind;
@@ -150,7 +152,7 @@ pub fn plugin(app: &mut App) {
             Update,
             (
                 toggle_sight,
-                // Commits the shared `AimPoint` from the magnified intent (in `AimCommit`, so
+                // Commits the tank's commanded aim from the magnified intent (in `AimCommit`, so
                 // `aim::drive_aim_servos` reads it after — same as third-person).
                 drive_gunner_aim.run_if(in_gunner).in_set(AimCommit),
                 update_view_death_overlay,
@@ -552,9 +554,9 @@ fn sync_optic_render_layer(
 }
 
 /// World-space position-control aiming. Mouse deltas accumulate into the committed hull-local
-/// intent, which is published as the shared `AimPoint` (a far point along the intent's line of
+/// intent, which is published as the tank's commanded aim (a far point along the intent's line of
 /// sight) — so `aim::drive_aim_servos` chases it with *every* servo, the gun and the hull MG alike,
-/// at their own slew rates. No servo command is written here; this only moves the aim point.
+/// at their own slew rates. No servo command is written here; this only moves the aim intention.
 ///
 /// The intent is clamped to a circular **margin** — it may lead the gun's *current* lay by at most
 /// `LEAD_MARGIN` of *angular* distance — so the cursor can't run off-screen ahead of the slow
@@ -572,9 +574,9 @@ fn drive_gunner_aim(
     gun: Query<&ServoState, (With<Gun>, Without<Turret>)>,
     ranging: Res<Ranging>,
     tables: Query<&RangeTable>,
-    mut aim_point: Query<&mut AimPoint>,
+    mut tank_commands: Query<&mut TankCommand>,
 ) {
-    let Some(rig) = controlled.rig() else {
+    let (Some(tank), Some(rig)) = (controlled.entity(), controlled.rig()) else {
         return;
     };
 
@@ -605,9 +607,9 @@ fn drive_gunner_aim(
         .map_or(0.0, |table| table.superelevation(ranging.range));
 
     // Lead as a 2D angular vector from the gun chain's current *sight line* (lay − lob). Yaw uses
-    // shortest-angle difference so continuous traverse doesn't wind up. `drive_servos` runs after
-    // `GameplaySet`, so `current` is the prior frame's integrated angle — clamp and chase share one
-    // clock.
+    // shortest-angle difference so continuous traverse doesn't wind up. `drive_servos` steps on the
+    // fixed clock, so `current` here is the latest tick's integrated angle — the clamp chases the
+    // sim truth, ≤1 tick behind the render pose the optic shows.
     let yaw_offset = shortest_angle(intent.yaw - t_state.current());
     let sight_now = g_state.current() - theta;
     let pitch_offset = intent.pitch - sight_now;
@@ -622,11 +624,11 @@ fn drive_gunner_aim(
         intent.pitch = sight_now + pitch_offset * scale;
     }
 
-    // Publish the raw sight-line intent as the shared aim point: a far point (mounts aim ~parallel),
-    // hull-local so it rides with the tank (unstabilized). `drive_aim_servos` lobs it by the
-    // superelevation, raising the bore above the line of sight; this stays the intention.
-    if let Ok(mut aim_point) = aim_point.get_mut(rig.turret) {
-        aim_point.0 = Some(intent.local_dir() * AIM_RANGE);
+    // Publish the raw sight-line intent as the tank's commanded aim: a far point (mounts aim
+    // ~parallel), hull-local so it rides with the tank (unstabilized). `drive_aim_servos` lobs it
+    // by the superelevation, raising the bore above the line of sight; this stays the intention.
+    if let Ok(mut command) = tank_commands.get_mut(tank) {
+        command.aim = Some(intent.local_dir() * AIM_RANGE);
     }
 }
 

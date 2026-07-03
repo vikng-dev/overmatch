@@ -21,14 +21,25 @@ pub enum AppState {
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GameplaySet;
 
-pub fn plugin(app: &mut App) {
+/// The state machine + gameplay gate — authority-side: every configuration (dedicated server
+/// included) drives its sim through `AppState`/`GameplaySet`.
+pub fn sim_plugin(app: &mut App) {
     app.init_state::<AppState>()
         // Set configuration is per-schedule, so gate it in every schedule it's used in.
         .configure_sets(Update, GameplaySet.run_if(in_state(AppState::Playing)))
         .configure_sets(FixedUpdate, GameplaySet.run_if(in_state(AppState::Playing)))
         .configure_sets(PostUpdate, GameplaySet.run_if(in_state(AppState::Playing)))
-        // The pause toggle must run in either state, so it is deliberately not in the set.
-        .add_systems(Update, toggle_pause)
+        .configure_sets(
+            RunFixedMainLoop,
+            GameplaySet.run_if(in_state(AppState::Playing)),
+        );
+}
+
+/// Pause input, cursor capture, and the pause overlay — client-side: a headless server has no
+/// Esc key, no cursor, and never pauses. Requires [`sim_plugin`] (the states it drives).
+pub fn client_plugin(app: &mut App) {
+    // The pause toggle must run in either state, so it is deliberately not in the set.
+    app.add_systems(Update, toggle_pause)
         .add_systems(OnEnter(AppState::Playing), (grab_cursor, resume_physics))
         .add_systems(
             OnEnter(AppState::Paused),

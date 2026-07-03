@@ -27,6 +27,7 @@ use crate::ballistics::{
     self, ArmorVolume, BallisticVolume, ComponentHealth, ComponentVolume, FireShell, ImpactMarker,
     PenetrationMarks, ShellPath, ShellReadout, SpallMarks,
 };
+use crate::command;
 use crate::crew_ui;
 use crate::damage::{self, Ammo, CookedOff, Dead, LaunchedTurret, TankKnockedOut};
 use crate::hud::{self, HudCamera};
@@ -195,6 +196,9 @@ pub fn plugin(app: &mut App) {
         // The controlled tank's crew bar + `1`–`5` swap input (shared with the game). The sandbox's
         // single target is marked `Controlled`, so the same code drives it here.
         crew_ui::plugin,
+        // Command core (no device gather): the crew bar writes `CrewSwap` commands, and the
+        // sandbox tank needs a `TankCommand` + the per-tick edge consumption for them to land.
+        command::core_plugin,
     ))
     // Keep spent shells frozen in place (with their tracer + marks) for inspection.
     .insert_resource(ballistics::RetainSpentShells(true))

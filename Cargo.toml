@@ -12,6 +12,9 @@ avian3d = "0.7"
 # git-diffable, deserialized straight into our components via serde.
 serde = { version = "1", features = ["derive"] }
 ron = "0.12"
+# The same glam Bevy already compiles (feature unification) — this only switches on its serde
+# impls, so `Vec3` can ride in the serializable `TankCommand`.
+glam = { version = "0.30", features = ["serde"] }
 
 winit = "0.30"
 image = { version = "0.25", default-features = false, features = ["png"] }

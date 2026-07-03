@@ -197,21 +197,20 @@ pub struct ServoCommand {
 /// A servo's live mechanism state — current angle and angular velocity of the slew. Owned by
 /// `drive_servos`; never authored, never shared.
 ///
-/// `rest` is the node's authored pose at `current = 0`, captured once so `drive_servos` can write
-/// *absolute* rotations (`rest · R(axis, angle)`) instead of accumulating deltas — cleaner with
-/// variable render-rate `dt` (no accumulating round-off).
+/// `rest` is the node's authored pose at `current = 0`, captured once so the pose write can be an
+/// *absolute* rotation (`rest · R(axis, angle)`) instead of accumulating deltas (no round-off).
 ///
-/// **Why `Update`, not `FixedUpdate`:** the servos are *kinematic display* mechanisms — we drive
-/// their transform ourselves; no physics depends on their pose (the hull is a body, the turret/gun
-/// are plain scene nodes; only `fire` reads the muzzle, and it reads the render pose). Running them
-/// at render rate makes the gun pose, the gunner camera (which bolts to it), and the mouse-driven
-/// intent all share one clock → no interpolation, no aliasing. The cost is fixed-step determinism,
-/// which the single-player vertical slice doesn't need; server-authoritative multiplayer will run
-/// the motion profile on the server's fixed clock and have the client interpolate snapshots (a
-/// different, simpler interpolation than self-sim). ADR-0004's "sim-in-fixed" bet is about *physics*.
+/// **Fixed-clock split:** `drive_servos` steps the mechanism (`previous` → `current`) on the fixed
+/// clock — servo pose is sim truth (the muzzle it carries decides where shells go), so the server
+/// can replay it deterministically. The node's `Transform` is *render*: `interpolate_servos`
+/// blends `previous → current` by the fixed clock's overstep each frame, so the turret is smooth
+/// at any frame rate — matching how Avian interpolates the hull (ADR-0004's sim-in-fixed bet,
+/// now covering the mechanisms too).
 #[derive(Component)]
 pub struct ServoState {
     current: f32,
+    /// The angle at the previous fixed tick — the render interpolation's blend-from.
+    previous: f32,
     velocity: f32,
     rest: Quat,
     captured: bool,
@@ -221,6 +220,7 @@ impl Default for ServoState {
     fn default() -> Self {
         Self {
             current: 0.0,
+            previous: 0.0,
             velocity: 0.0,
             rest: Quat::IDENTITY,
             captured: false,
@@ -236,34 +236,43 @@ impl ServoState {
     }
 }
 
-pub fn plugin(app: &mut App) {
+/// Tank spawning, the spec→rig binder, and the servo mechanism — authority-side.
+pub fn sim_plugin(app: &mut App) {
     app.add_systems(Startup, load_tank_spec)
         .add_systems(
             Update,
             spawn_tank_when_loaded.run_if(in_state(AppState::Loading)),
         )
-        // `drive_servos` runs in `Update` (render rate), *after* the aim systems in `GameplaySet`
-        // have written this frame's `ServoCommand.target` — so it chases the fresh target the same
-        // frame, and the gun's `GlobalTransform` (computed by propagation in `PostUpdate`) is
-        // current for the gunner camera and HUD reprojection that read it. No interpolation needed:
-        // the pose is written fresh at render rate, same clock as the mouse-driven intent. (The
-        // single-player slice trades fixed-step determinism for display simplicity; server-authority
-        // will put the motion profile back on the server's fixed clock and have the client
-        // interpolate snapshots. ADR-0004's "sim-in-fixed" bet is about *physics*.)
+        // The servo mechanism steps on the fixed clock (sim truth — the muzzle pose decides where
+        // shells go), *after* `GameplaySet` so `drive_aim_servos` has written this tick's targets.
+        // The rig-node `Transform` write is separate: `interpolate_servos` blends the last two
+        // tick angles by the fixed clock's overstep each frame — smooth at any frame rate, the
+        // same split Avian uses for the hull. The write is *sim*, not presentation: armor volumes
+        // and the muzzle ride these transforms, so a headless server needs them too (the ≤1-tick
+        // interpolated pose read by fire/aim is the recorded M5 laxity).
         .add_systems(
-            Update,
+            FixedUpdate,
             drive_servos
                 .run_if(in_state(AppState::Playing))
                 .after(GameplaySet),
         )
-        // The crew/vehicle swap input. Runs before `GameplaySet` so the control systems this frame
-        // already see the new `Controlled` tank.
         .add_systems(
             Update,
-            swap_controlled_tank
-                .run_if(in_state(AppState::Playing))
-                .before(GameplaySet),
+            interpolate_servos.run_if(in_state(AppState::Playing)),
         );
+}
+
+/// The Tab possession swap — client-side: which tank *this seat* controls is not the sim's
+/// business (under MP the server maps client→tank; the swap becomes a host/debug tool).
+pub fn client_plugin(app: &mut App) {
+    // Runs before `GameplaySet` so the control systems this frame already see the new
+    // `Controlled` tank.
+    app.add_systems(
+        Update,
+        swap_controlled_tank
+            .run_if(in_state(AppState::Playing))
+            .before(GameplaySet),
+    );
 }
 
 /// The tank's spec sheet is a *load dependency* (ADR-0011): we kick off its load up front and the
@@ -758,7 +767,7 @@ pub fn on_tank_ready(
 
 fn drive_servos(
     mut q: Query<(
-        &mut Transform,
+        &Transform,
         &ServoSpec,
         &ServoCommand,
         &mut ServoState,
@@ -769,14 +778,16 @@ fn drive_servos(
     time: Res<Time>,
 ) {
     let dt = time.delta_secs();
-    for (mut transform, spec, command, mut state, root) in &mut q {
-        // Capture the node's authored rest rotation once, so we can write *absolute* rotations
-        // (`rest · R(axis, angle)`) instead of accumulating deltas — robust to variable render-rate
-        // `dt` (no accumulating round-off).
+    for (transform, spec, command, mut state, root) in &mut q {
+        // Capture the node's authored rest rotation once, so the pose write can be an *absolute*
+        // rotation (`rest · R(axis, angle)`) instead of accumulating deltas (no round-off).
         if !state.captured {
             state.rest = transform.rotation;
             state.captured = true;
         }
+
+        // This tick's blend-from for the render interpolation.
+        state.previous = state.current;
 
         // Slew gate (design §7b): scale max speed by the requirement's effectiveness, so a dead
         // operator (or, later, a damaged traverse motor) freezes or slows this mount. 0 → no slew.
@@ -838,10 +849,25 @@ fn drive_servos(
             }
         }
 
-        // Absolute write of the sim-truth pose. `rest` is the node's authored rotation at
-        // `current = 0`; composing the axis-angle onto it gives the true mechanism pose without
-        // accumulating deltas (robust to variable render-rate `dt`).
-        transform.rotation = state.rest * Quat::from_axis_angle(spec.role.axis(), state.current);
+        // No transform write here: `ServoState` is the sim truth; `interpolate_servos` renders it.
+    }
+}
+
+/// The render half of the fixed-clock servo split: blend last tick's angle to this tick's by the
+/// fixed clock's overstep and write the node's `Transform` — smooth mechanism motion at any frame
+/// rate, exactly how Avian renders the hull between physics ticks. Along the shortest arc, so a
+/// continuous mount's ±π wrap doesn't spin the long way round.
+fn interpolate_servos(
+    time: Res<Time<Fixed>>,
+    mut servos: Query<(&mut Transform, &ServoSpec, &ServoState)>,
+) {
+    let alpha = time.overstep_fraction();
+    for (mut transform, spec, state) in &mut servos {
+        if !state.captured {
+            continue;
+        }
+        let angle = state.previous + shortest_angle(state.current - state.previous) * alpha;
+        transform.rotation = state.rest * Quat::from_axis_angle(spec.role.axis(), angle);
     }
 }
 
