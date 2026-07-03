@@ -159,3 +159,32 @@ the same rest position on both sides. No back-and-forth signature in either run'
 - No upstream lightyear 0.28 issue implicated — searched for existing GitHub issues about the
   `PartialEq::ne` rollback default, found none; it's a documented (doc-comment) default, not a bug,
   and the reference example itself works around it explicitly for the same two components we missed.
+
+## Increment 6 verdicts — 2026-07-03 (verified live, 0 ms and 100 ms runs)
+
+1. **Binder fires exactly once** per tank despite rollback replays (`rig_binds=1` every run) —
+   the map §8 reasoning holds: `on_tank_ready` observes scene-ready (outside `FixedMain`), and
+   rollback only re-runs `FixedMain`.
+2. **Child colliders track through rollback**: `TURRET-DRIFT=0` in all runs — the turret collider
+   holds its relative pose through the forced-perturbation rollback
+   (`update_child_collider_position` works on our glb-built rig). No panics, no NaN.
+3. **Spawn-before-bind is fatal if naive, solved by Static-until-bind**: a Dynamic root with no
+   collider free-falls through the ground for the whole async glb load (measured y = −425).
+   Pattern: spawn `RigidBody::Static`, flip to Dynamic on `Added<Rig>` (`activate_bound_rigs`,
+   shared both ends). This is the answer to the map §8 UNCERTAIN — `PredictionTarget`-at-spawn
+   itself is fine; it's the *body activation* that must wait for bind.
+4. **Client root needs an explicit `Transform`**: a replicon-spawned root has only replicated
+   components; without `Transform` the scene hierarchy under it never gets `GlobalTransform`s
+   (Bevy B0004) and the binder captures a wrong rig. Added to `spike_tank_rig` with a why-comment.
+5. **Single-entity model confirmed empirically** (STRUCT dump): one entity carries
+   remote+predicted+rig+body. Earlier "two stacked tanks / +1.7 m divergence" was a diagnostic
+   artifact — `With<Predicted>` position logs were catching the tank's own *child collider
+   entities* (turret at +1.44 m rest offset, correctly). Logs now scoped `With<SpikeTank>`.
+6. **Convergence**: server vs client rest position identical to ~7 significant figures at both
+   0 ms and 100 ms+jitter (e.g. (7.21099, −0.28296, −32.93752) both ends).
+7. **OPEN for next session — rollback rate**: `PredictionMetrics.rollbacks` ≈ 430 over ~15 s at
+   100 ms (vs 13 for the increment-5 primitive). Invisible (snaps=2, converges) but it's ~30
+   full re-simulations/s of CPU. Suspect: contact-rich rig (many child colliders) makes solver
+   noise exceed the 1 cm thresholds far more often than a single-box body. Candidates: loosen
+   per-component thresholds; check whether velocities need a coarser condition on multi-contact
+   bodies; confirm child-collider Position/Rotation aren't accidentally in the predicted set.

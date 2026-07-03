@@ -52,12 +52,23 @@ pub mod sandbox;
 mod shooting;
 mod sight;
 mod spec;
+/// Re-exported for the spike bins (increment 6): `spec::plugin` registers the `.tank.ron` asset
+/// loader both `on_tank_ready` and the spawn systems depend on; `TankSpec`/`TankSpecHandle` are
+/// the load-dependency pair the bins spawn against, matching `sandbox.rs`'s `load_target` pattern.
+#[cfg(feature = "net")]
+pub use spec::{TankSpec, TankSpecHandle, plugin as spec_plugin};
 mod state;
 mod tank;
 /// Re-exported for `spike_server`, which logs bound-rig roadwheel count as its step-2 success
 /// criterion — the same signal `headless_test.rs` polls for, from outside the crate.
 #[cfg(feature = "net")]
 pub use tank::Roadwheel;
+/// Re-exported for the spike bins (increment 6): the real Tiger rig replaces the increment-5
+/// primitive on both ends. `on_tank_ready` is the binder observer (unchanged, per the task's "do
+/// not modify sim module logic"); `Tank`/`Rig`/`Turret`/`Hull` are what the spike's verdict-2 log
+/// (child collider tracking through rollback) reads back.
+#[cfg(feature = "net")]
+pub use tank::{Hull, Rig, Tank, Turret, on_tank_ready};
 /// The track-model sandbox (`bin/track_sandbox`). Public so the binary can mount it; not part of
 /// `GamePlugin`. Self-contained: its own code-generated primitive rig + locomotion, for developing
 /// the continuous-track model in isolation.

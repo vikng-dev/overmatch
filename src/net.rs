@@ -14,7 +14,7 @@ use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::TankCommand;
+use crate::{Tank, TankCommand, TankSpecHandle};
 
 /// A trivial replicated marker — step 3 of the spike: proves `.replicate()` registration and
 /// ordering before any real game state rides the wire.
@@ -27,25 +27,67 @@ pub struct SpikeBeacon;
 #[derive(Component, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct SpikeTank;
 
-/// The increment-5 primitive's dimensions/mass — in the shared module because the SERVER spawns
-/// the authoritative body and the CLIENT must rebuild an identical local one on its predicted
-/// entity (physics components aren't replicated; a client body that differs from the server's
-/// mispredicts every tick, which shows up as continuous rollback).
+/// The increment-5 primitive's dimensions/mass — retired from the spawn path in increment 6 (the
+/// real rig's `on_tank_ready` supplies Mass/AngularInertia from the spec instead), but `TANK_MASS`
+/// stays: the server's perturbation impulse sizing comment (`spike_server.rs`) still references the
+/// real Tiger's mass, and the two happen to match (`tiger_1.tank.ron`'s `mass: 57000.0`).
 pub const TANK_HALF_EXTENTS: Vec3 = Vec3::new(1.8, 1.4, 3.5);
 pub const TANK_MASS: f32 = 57_000.0;
 
-/// The physics half of the spike tank — what the server spawns authoritatively and the client
-/// must insert locally on its predicted entity (map §6's `handle_new_character` pattern).
-pub fn spike_tank_physics() -> impl Bundle {
+/// The Tiger's spec+scene load dependency, kicked off once at startup on both sides (sandbox.rs's
+/// `load_target`/`PendingTarget` pattern) — `on_tank_ready` requires the spec already loaded
+/// (asserts on it), so nothing may spawn a tank root until this resolves.
+#[derive(Resource)]
+pub struct PendingTankSpec(pub Handle<crate::TankSpec>);
+
+pub fn load_tank_spec(mut commands: Commands, asset_server: Res<AssetServer>) {
+    commands.insert_resource(PendingTankSpec(
+        asset_server.load("tiger_1/tiger_1.tank.ron"),
+    ));
+}
+
+/// The root bundle every spike tank spawn needs regardless of side: the real Tiger scene + spec
+/// handle (drives `on_tank_ready`) plus the `RigidBody` the binder itself does not insert (it only
+/// adds Mass/AngularInertia/colliders on children — `tank.rs::spawn_tank` inserts `RigidBody`
+/// alongside the scene for the same reason, mirrored here). `SpikeTank` rides alongside the real
+/// `Tank` marker: `drive_stub_movement` and the increment-5 rollback plumbing key off `SpikeTank`,
+/// while `Tank`/`on_tank_ready` are the real rig's own contract, unchanged.
+pub fn spike_tank_rig(asset_server: &AssetServer, spec: &Handle<crate::TankSpec>) -> impl Bundle {
     (
-        avian3d::prelude::RigidBody::Dynamic,
-        avian3d::prelude::Collider::cuboid(
-            TANK_HALF_EXTENTS.x * 2.0,
-            TANK_HALF_EXTENTS.y * 2.0,
-            TANK_HALF_EXTENTS.z * 2.0,
+        WorldAssetRoot(
+            asset_server.load(GltfAssetLabel::Scene(0).from_asset("tiger_1/tiger_1.glb")),
         ),
-        avian3d::prelude::Mass(TANK_MASS),
+        TankSpecHandle(spec.clone()),
+        Tank,
+        SpikeTank,
+        // Explicit, because on the CLIENT this bundle lands on a replicon-spawned root that has
+        // only the replicated components (Position/Rotation) — without a Transform the scene
+        // hierarchy under it never gets GlobalTransforms (Bevy B0004), the binder captures wrong
+        // collider offsets, and the client settles at a different rest height than the server
+        // (measured: +1.25 vs −0.28 → rollback on every packet). lightyear's avian sync owns
+        // writing this from Position afterwards.
+        Transform::default(),
+        // Static until the rig binds: the glb loads async (~seconds), and a Dynamic body with no
+        // collider yet free-falls through the ground for the whole window (measured: y = −425 and
+        // still falling when the script ended). `activate_bound_rigs` flips it to Dynamic the
+        // moment `Rig` lands — the spike-scale version of the game's spawn-before-bind race.
+        avian3d::prelude::RigidBody::Static,
     )
+}
+
+/// Wake a spike tank's physics once its rig has bound (colliders + mass exist now) — the second
+/// half of the Static-until-bound spawn above. Shared: each side flips at its own bind moment, so
+/// neither ever simulates a collider-less falling body.
+fn activate_bound_rigs(
+    tanks: Query<Entity, (Added<crate::Rig>, With<SpikeTank>)>,
+    mut commands: Commands,
+) {
+    for entity in &tanks {
+        info!("net: {entity} rig bound — body goes Dynamic");
+        commands
+            .entity(entity)
+            .insert(avian3d::prelude::RigidBody::Dynamic);
+    }
 }
 
 /// The static ground both sides build for themselves (never moves, so it is not replicated) —
@@ -106,6 +148,7 @@ pub fn plugin(app: &mut App) {
             (a.0 - b.0).length() >= 0.01
         });
 
+    app.add_systems(Update, activate_bound_rigs);
     app.add_systems(FixedUpdate, drive_stub_movement);
 }
 

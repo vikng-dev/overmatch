@@ -2,7 +2,8 @@
 //! to a local `spike_server` over UDP+netcode, predicts its own tank body, and forces a rollback
 //! via both a `LinkConditioner` (genuine prediction lead) and the server's one-shot perturbation.
 //! Spike-local device gather (WASD + LMB read directly) — deliberately NOT the game's
-//! `command::client_plugin`.
+//! `command::client_plugin`. Mounts `spec::plugin` so the client can load the same `.tank.ron` +
+//! glb the server does and build an identical local rig on its predicted root (increment 6).
 //!
 //! Run with `cargo run --bin spike_client --features net`. Pass `--simulate-input` (or set
 //! `SPIKE_SIMULATE_INPUT`) to run headless and programmatically drive throttle for a few seconds,
@@ -16,13 +17,14 @@ use std::net::{Ipv4Addr, SocketAddr};
 
 use avian3d::prelude::Position;
 use bevy::app::ScheduleRunnerPlugin;
+use bevy::asset::LoadState;
 use bevy::prelude::*;
 use lightyear::prelude::client::*;
 use lightyear::prelude::input::client::InputSystems;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
 use lightyear::prelude::{Controlled as NetControlled, *};
-use overmatch::TankCommand;
-use overmatch::net::{SpikeBeacon, SpikeTank};
+use overmatch::net::{PendingTankSpec, SpikeBeacon, SpikeTank, load_tank_spec, spike_tank_rig};
+use overmatch::{Rig, TankCommand, Turret, on_tank_ready, spec_plugin};
 
 const SERVER_PORT: u16 = 5888;
 
@@ -44,6 +46,15 @@ struct SimulateInput {
 /// `ROLLBACK-SNAP` (the map's suggested fallback detector alongside `PredictionMetrics`).
 #[derive(Component, Default)]
 struct LastPosition(Option<Vec3>);
+
+/// Verdict 2 (increment 6): the turret node's previous-tick pose relative to the hull, so a jump
+/// in that *relative* pose (as opposed to the hull's own world-space rollback snap) would mean
+/// `update_child_collider_position` failed to keep the child rig tracking the root through a
+/// replay. Logged around the perturbation window only (see `watch_turret_pose`).
+#[derive(Resource, Default)]
+struct TurretWatch {
+    last_relative: Option<Vec3>,
+}
 
 fn main() {
     let simulate = std::env::args().any(|a| a == "--simulate-input")
@@ -83,6 +94,9 @@ fn main() {
     });
     app.add_plugins(overmatch::net::plugin);
     app.add_plugins(overmatch::net::physics_plugins());
+    // The real rig (increment 6): same minimal mounting as the server — the `.tank.ron` loader
+    // `on_tank_ready` depends on, not the full `tank::sim_plugin` (no servo/suspension here).
+    app.add_plugins(spec_plugin);
 
     let server_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), SERVER_PORT);
     // Pid-based id so back-to-back runs don't collide inside the server's disconnect timeout.
@@ -138,18 +152,22 @@ fn main() {
         commands.spawn(overmatch::net::spike_ground());
         info!("spike_client: connecting to {server_addr} as client_id={client_id}");
     });
+    app.add_systems(Startup, load_tank_spec);
 
     app.add_observer(log_connected)
         .add_observer(claim_input_slot)
         .add_observer(log_predicted_tank)
         .init_resource::<EdgeLatch>()
         .init_resource::<RollbackWatch>()
+        .init_resource::<TurretWatch>()
         .add_systems(
             Update,
             (
                 log_beacon,
-                attach_predicted_physics,
+                attach_predicted_rig,
+                count_rig_binds,
                 watch_rollback_metrics,
+                watch_turret_pose,
                 log_snap,
                 log_position,
             ),
@@ -188,12 +206,17 @@ fn log_beacon(beacons: Query<Entity, (Added<SpikeBeacon>, With<Remote>)>) {
     }
 }
 
-/// Give the predicted tank its LOCAL physics body (map §6's `handle_new_character` pattern):
-/// avian components are not replicated, and a predicted entity without a body cannot be
-/// re-simulated during rollback replay — the symptom is continuous rollback from spawn, every
-/// confirmed packet disagreeing with a frozen prediction. A plain system (not an observer on
-/// `Predicted`) because `SpikeTank` arrives by replication and may land after the marker.
-fn attach_predicted_physics(
+/// Give the predicted tank its LOCAL rig (map §6's `handle_new_character` pattern, increment 6's
+/// swap for the primitive cuboid): avian components are not replicated, and a predicted entity
+/// without a body cannot be re-simulated during rollback replay — the symptom is continuous
+/// rollback from spawn, every confirmed packet disagreeing with a frozen prediction. A plain
+/// system (not an observer on `Predicted`) because `SpikeTank` arrives by replication and may
+/// land after the marker; also waits on the spec load (§8's spawn-before-bind race, mirrored from
+/// `tank.rs`/`sandbox.rs` — `on_tank_ready` would panic on an unloaded spec). This is the exact
+/// moment the §8 UNCERTAIN gets exercised: `Predicted`/`PredictionTarget` is already on the entity
+/// (attached server-side at spawn) several ticks *before* the glb scene finishes loading and
+/// `on_tank_ready` binds the rig — see the spike log for what was observed in that window.
+fn attach_predicted_rig(
     tanks: Query<
         Entity,
         (
@@ -202,14 +225,61 @@ fn attach_predicted_physics(
             Without<avian3d::prelude::RigidBody>,
         ),
     >,
+    spec: Option<Res<PendingTankSpec>>,
+    asset_server: Res<AssetServer>,
     mut commands: Commands,
 ) {
+    if tanks.is_empty() {
+        return;
+    }
+    let Some(spec) = spec else { return };
+    if !matches!(asset_server.load_state(&spec.0), LoadState::Loaded) {
+        return;
+    }
     for entity in &tanks {
-        info!("spike_client: {entity} predicted tank gets local physics body");
+        info!("spike_client: {entity} predicted tank gets local rig (spec loaded)");
         commands
             .entity(entity)
-            .insert(overmatch::net::spike_tank_physics());
+            .insert(spike_tank_rig(&asset_server, &spec.0))
+            .observe(on_tank_ready);
     }
+}
+
+/// Verdict 1 (increment 6), client side: same `Added<Rig>` count as the server — the predicted
+/// root is exactly where a rollback replay could plausibly re-fire an async-load observer if the
+/// map §8 "rollback re-runs FixedMain only" assumption were wrong, so this is the side that
+/// actually matters for the verdict.
+fn count_rig_binds(binds: Query<Entity, Added<Rig>>) {
+    for entity in &binds {
+        info!("spike_client: {entity} Rig bound (on_tank_ready fired)");
+    }
+}
+
+/// Verdict 2 (increment 6): the turret's pose *relative to the hull* — logged only when it moves
+/// more than the map's 0.1 m bar in one tick, which should never happen (the turret doesn't slew
+/// in this spike; nothing drives `ServoCommand`) unless `update_child_collider_position` failed to
+/// keep the child rig glued to the root through a rollback replay. Absolute world deltas are
+/// expected (the perturbation moves the whole tank); only the hull-relative offset is diagnostic.
+fn watch_turret_pose(
+    hulls: Query<&GlobalTransform, With<overmatch::Hull>>,
+    turrets: Query<&GlobalTransform, With<Turret>>,
+    mut watch: ResMut<TurretWatch>,
+) {
+    let (Ok(hull), Ok(turret)) = (hulls.single(), turrets.single()) else {
+        return;
+    };
+    let relative = hull.translation().distance(turret.translation());
+    let relative_vec = turret.translation() - hull.translation();
+    if let Some(previous) = watch.last_relative {
+        let delta = (relative_vec - previous).length();
+        if delta > 0.1 {
+            warn!(
+                "spike_client: TURRET-DRIFT relative offset moved {delta:.3} m in one tick \
+                 (hull-relative distance now {relative:.3} m) — child rig desynced from root"
+            );
+        }
+    }
+    watch.last_relative = Some(relative_vec);
 }
 
 /// Increment-5 success signal: the predicted tank arrives carrying `Predicted`.
@@ -306,7 +376,7 @@ fn watch_rollback_metrics(metrics: Res<PredictionMetrics>, mut watch: ResMut<Rol
 /// Periodic predicted-position log (every ~2 s) — diffed against the server's own periodic log
 /// for the increment-5/6 convergence success criterion.
 fn log_position(
-    tanks: Query<(Entity, &Position), With<Predicted>>,
+    tanks: Query<(Entity, &Position), (With<Predicted>, With<SpikeTank>)>,
     mut timer: Local<f32>,
     time: Res<Time>,
 ) {
@@ -322,7 +392,9 @@ fn log_position(
 
 /// Backup rollback detector (map's fallback): a same-tick `Position` discontinuity > 0.5 m on the
 /// predicted entity. Also logs final positions for the convergence check.
-fn log_snap(mut tanks: Query<(Entity, &Position, &mut LastPosition), With<Predicted>>) {
+fn log_snap(
+    mut tanks: Query<(Entity, &Position, &mut LastPosition), (With<Predicted>, With<SpikeTank>)>,
+) {
     for (entity, position, mut last) in &mut tanks {
         if let Some(previous) = last.0 {
             let delta = (position.0 - previous).length();

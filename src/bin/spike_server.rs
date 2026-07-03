@@ -3,6 +3,9 @@
 //! NOT `MinimalPlugins`, because increment 6 loads the same `.glb`/`.tank.ron` assets the client
 //! does. `SimPlugin` is deliberately NOT mounted here (task spec for steps 5–6 — it returns in
 //! step 7): physics is composed directly, driven by the shared stub movement system in `net.rs`.
+//! Mounts `spec::plugin` (the `.tank.ron` asset loader) + observes `on_tank_ready` per spawn,
+//! matching `sandbox.rs`'s minimal mounting — not the full `tank::sim_plugin` (out of scope, no
+//! servo/suspension systems here).
 //! Run with `cargo run --bin spike_server --features net`.
 
 // Same rationale as lib.rs's crate-level allow (bins don't inherit it): ordinary multi-filter
@@ -14,12 +17,13 @@ use std::net::{Ipv4Addr, SocketAddr};
 
 use avian3d::prelude::{Forces, Position, WriteRigidBodyForces};
 use bevy::app::ScheduleRunnerPlugin;
+use bevy::asset::LoadState;
 use bevy::prelude::*;
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
-use overmatch::TankCommand;
-use overmatch::net::{SpikeBeacon, SpikeTank};
+use overmatch::net::{PendingTankSpec, SpikeBeacon, SpikeTank, load_tank_spec, spike_tank_rig};
+use overmatch::{Rig, TankCommand, on_tank_ready, spec_plugin};
 
 const PORT: u16 = 5888;
 
@@ -54,6 +58,9 @@ fn main() {
     });
     app.add_plugins(overmatch::net::plugin);
     app.add_plugins(overmatch::net::physics_plugins());
+    // The real rig (increment 6): the `.tank.ron` loader `on_tank_ready` depends on. Not the full
+    // `tank::sim_plugin` — no servo/suspension systems belong in this spike's scope (step 7).
+    app.add_plugins(spec_plugin);
 
     let server = app
         .world_mut()
@@ -79,8 +86,18 @@ fn main() {
         commands.spawn(overmatch::net::spike_ground());
         info!("spike_server: starting, listening on 0.0.0.0:{PORT}");
     });
+    app.add_systems(Startup, load_tank_spec);
+    app.init_resource::<PendingClients>();
 
-    app.add_systems(Update, (handle_new_clients, log_positions));
+    app.add_systems(
+        Update,
+        (
+            handle_new_clients,
+            spawn_pending_tanks,
+            log_positions,
+            count_rig_binds,
+        ),
+    );
     app.add_systems(FixedUpdate, (log_tank_commands, perturb_after_delay));
 
     app.run();
@@ -94,33 +111,73 @@ struct PendingPerturbation {
     at: Duration,
 }
 
-/// Increment-5 spawn pattern (spike map §6/§7): one predicted primitive body per connected
-/// client, owned by that client, everyone else would interpolate it (no second client yet).
+/// Connected clients waiting on the Tiger spec load (§2 of the map: the spec is a load
+/// dependency of spawning, same as `tank.rs`/`sandbox.rs` — `on_tank_ready` asserts it's already
+/// loaded). A client can connect before the tiny `.tank.ron` parse finishes; queueing avoids
+/// spawning a tank root the binder would immediately panic on.
+#[derive(Resource, Default)]
+struct PendingClients(Vec<(Entity, PeerId)>);
+
+/// Queues each newly connected client — spawning is deferred to [`spawn_pending_tanks`] once the
+/// Tiger spec has loaded (spike map §6/§7 spawn pattern: one predicted tank per client, owned by
+/// that client, everyone else would interpolate it — no second client yet).
 fn handle_new_clients(
     new: Query<(Entity, &RemoteId), (Added<Connected>, With<ClientOf>)>,
+    mut pending: ResMut<PendingClients>,
+) {
+    for (link, remote) in &new {
+        info!("spike_server: client connected: {remote} (link {link})");
+        pending.0.push((link, remote.0));
+    }
+}
+
+/// Spawns the real Tiger rig for every queued client once the spec has loaded — the increment-6
+/// swap for increment 5's primitive cuboid spawn. `on_tank_ready` (observed below) builds the
+/// colliders/armor volumes from the same spec once the glb scene arrives (async, per tank).
+fn spawn_pending_tanks(
+    mut pending: ResMut<PendingClients>,
+    spec: Option<Res<PendingTankSpec>>,
+    asset_server: Res<AssetServer>,
     time: Res<Time<Virtual>>,
     mut commands: Commands,
 ) {
-    for (link, remote) in &new {
-        let client_id = remote.0;
-        info!("spike_server: client connected: {remote} (link {link})");
-        commands.spawn((
-            Name::new("SpikeTank"),
-            SpikeTank,
-            ActionState::<TankCommand>::default(),
-            Position(Vec3::new(0.0, 2.0, 0.0)),
-            overmatch::net::spike_tank_physics(),
-            Replicate::to_clients(NetworkTarget::All),
-            PredictionTarget::to_clients(NetworkTarget::Single(client_id)),
-            InterpolationTarget::to_clients(NetworkTarget::AllExceptSingle(client_id)),
-            ControlledBy {
-                owner: link,
-                lifetime: default(),
-            },
-            PendingPerturbation {
-                at: time.elapsed() + Duration::from_secs(2),
-            },
-        ));
+    if pending.0.is_empty() {
+        return;
+    }
+    let Some(spec) = spec else { return };
+    if !matches!(asset_server.load_state(&spec.0), LoadState::Loaded) {
+        return;
+    }
+    for (link, client_id) in pending.0.drain(..) {
+        commands
+            .spawn((
+                Name::new("SpikeTank"),
+                spike_tank_rig(&asset_server, &spec.0),
+                ActionState::<TankCommand>::default(),
+                Position(Vec3::new(0.0, 2.0, 0.0)),
+                Replicate::to_clients(NetworkTarget::All),
+                PredictionTarget::to_clients(NetworkTarget::Single(client_id)),
+                InterpolationTarget::to_clients(NetworkTarget::AllExceptSingle(client_id)),
+                ControlledBy {
+                    owner: link,
+                    lifetime: default(),
+                },
+                PendingPerturbation {
+                    at: time.elapsed() + Duration::from_secs(2),
+                },
+            ))
+            .observe(on_tank_ready);
+    }
+}
+
+/// Verdict 1 (increment 6): the binder must fire exactly once per tank despite rollback replays —
+/// rollback only re-runs `FixedMain` (map §8), and this observer fires from `WorldInstanceReady`
+/// (outside `FixedMain`), so a count > 1 per tank would mean that assumption was wrong. `Rig` is
+/// the observer's own terminal insert, so counting `Added<Rig>` is an external, non-invasive proxy
+/// for "the binder ran" without touching `tank.rs`.
+fn count_rig_binds(binds: Query<Entity, Added<Rig>>) {
+    for entity in &binds {
+        info!("spike_server: {entity} Rig bound (on_tank_ready fired)");
     }
 }
 
