@@ -21,6 +21,10 @@ mod camera;
 /// The command layer: device reads → player bindings → per-tank serializable `TankCommand`. The
 /// seam authoritative multiplayer hangs off; sim modules consume commands, never devices.
 mod command;
+/// Re-exported for the `net` spike bins, which need `TankCommand`/`CrewSwap` to register the
+/// lightyear input protocol and construct commands directly (no device gather in a headless bin).
+#[cfg(feature = "net")]
+pub use command::{CrewSwap, TankCommand};
 /// The controlled tank's crew bar + swap input — a shared piece of the fixed player UI, mounted by
 /// both `GamePlugin` and the sandbox (each scoped to the `Controlled` tank).
 mod crew_ui;
@@ -38,6 +42,10 @@ mod headless_test;
 /// The shared tank-state HUD (world-anchored capability/crew/damage readouts). Mounted by both
 /// `GamePlugin` and the sandbox; each tags its own world camera with `hud::HudCamera`.
 mod hud;
+/// Networking spike protocol registration (`net` feature only). Public so `spike_server`/
+/// `spike_client` can mount it; not part of `GamePlugin`.
+#[cfg(feature = "net")]
+pub mod net;
 /// The armor ballistics sandbox (`bin/armor_sandbox`). Public so the binary can mount it; not part
 /// of `GamePlugin`.
 pub mod sandbox;
@@ -46,6 +54,10 @@ mod sight;
 mod spec;
 mod state;
 mod tank;
+/// Re-exported for `spike_server`, which logs bound-rig roadwheel count as its step-2 success
+/// criterion — the same signal `headless_test.rs` polls for, from outside the crate.
+#[cfg(feature = "net")]
+pub use tank::Roadwheel;
 /// The track-model sandbox (`bin/track_sandbox`). Public so the binary can mount it; not part of
 /// `GamePlugin`. Self-contained: its own code-generated primitive rig + locomotion, for developing
 /// the continuous-track model in isolation.

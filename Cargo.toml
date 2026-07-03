@@ -19,10 +19,34 @@ glam = { version = "0.30", features = ["serde"] }
 winit = "0.30"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
+# Networking spike (feature-gated, see `net` below): behind `optional = true` so the default
+# build never pulls it in. Feature list is exactly what the spike-order steps 1-4 need — no
+# prediction/interpolation/avian3d yet (those land with later increments).
+lightyear = { version = "0.28", default-features = false, features = [
+    "std",
+    "client", "server",
+    "replication",
+    "input_native",
+    "netcode", "udp",
+], optional = true }
+
 # Test-only: read a `.glb`'s node names directly (no Bevy app) for the spec↔model bind-contract
 # test. Matches the version `bevy_gltf` already resolves, so it adds nothing to the dep tree.
 [dev-dependencies]
 gltf = "1.4"
+
+[features]
+net = ["dep:lightyear"]
+
+[[bin]]
+name = "spike_server"
+path = "src/bin/spike_server.rs"
+required-features = ["net"]
+
+[[bin]]
+name = "spike_client"
+path = "src/bin/spike_client.rs"
+required-features = ["net"]
 
 [profile.dev]
 opt-level = 1

@@ -51,7 +51,18 @@ impl TankVolumes {
 /// gating keys off [`Capability`] requirements (via [`Part`]), not the role itself. `Ord` is by
 /// declaration order (Commander < … < BowGunner) — the deterministic seat order the crew bar uses.
 #[derive(
-    Component, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+    Component,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    Reflect,
 )]
 pub enum CrewStation {
     Commander,

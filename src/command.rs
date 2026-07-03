@@ -4,6 +4,7 @@
 //! replayed tick, or (later) a network peer. Gathered once per render frame, before the fixed
 //! loop, which is where input belongs when the sim runs on a fixed clock.
 
+use bevy::ecs::entity::{EntityMapper, MapEntities};
 use bevy::ecs::lifecycle::{Add, Remove};
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -17,7 +18,7 @@ use crate::tank::{Controlled, Tank};
 /// client will send per tick under authoritative multiplayer. Carries the *target* values; the
 /// response ramp toward them is vehicle feel and lives in the sim (`driving`), so a command is
 /// replay-safe and an analog stick later just supplies a finer target.
-#[derive(Component, Default, Clone, Copy, Serialize, Deserialize)]
+#[derive(Component, Default, Clone, Copy, PartialEq, Debug, Serialize, Deserialize, Reflect)]
 pub struct TankCommand {
     /// Target throttle in [-1, 1]: forward/reverse drive.
     pub throttle: f32,
@@ -50,10 +51,17 @@ pub struct TankCommand {
 /// One crew-swap intent, in *stations* (semantic seat identity — stable on the wire, unlike
 /// entity ids). `Start` begins the timed swap between two seats; `Cancel` aborts an in-flight one
 /// (any crew-bar tap while a swap runs).
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize, Reflect)]
 pub enum CrewSwap {
     Start(CrewStation, CrewStation),
     Cancel,
+}
+
+// `TankCommand` has no `Entity` fields (`aim`/`range` are plain data, `crew_swap` addresses seats
+// by `CrewStation`, not entity id) — lightyear's native input plugin requires `MapEntities` on the
+// input type regardless, so this is a no-op, matching the examples' pattern for entity-less inputs.
+impl MapEntities for TankCommand {
+    fn map_entities<M: EntityMapper>(&mut self, _entity_mapper: &mut M) {}
 }
 
 /// The player's device→action map — pure data, no UI. A rebinding screen later just edits this
