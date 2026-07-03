@@ -20,14 +20,15 @@ winit = "0.30"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 # Networking spike (feature-gated, see `net` below): behind `optional = true` so the default
-# build never pulls it in. Feature list is exactly what the spike-order steps 1-4 need — no
-# prediction/interpolation/avian3d yet (those land with later increments).
+# build never pulls it in. `prediction`/`interpolation` are default-on lightyear features (kept
+# explicit here for clarity); `avian3d` pulls in `lightyear_avian3d` (increment 5, spike map §1/§5).
 lightyear = { version = "0.28", default-features = false, features = [
     "std",
     "client", "server",
-    "replication",
+    "replication", "prediction", "interpolation",
     "input_native",
     "netcode", "udp",
+    "avian3d",
 ], optional = true }
 
 # Test-only: read a `.glb`'s node names directly (no Bevy app) for the spec↔model bind-contract
@@ -35,8 +36,11 @@ lightyear = { version = "0.28", default-features = false, features = [
 [dev-dependencies]
 gltf = "1.4"
 
+# `avian3d/serialize` is additive (Serialize/Deserialize impls on Position/Rotation/velocities) —
+# only lightyear's replication registration (net.rs) needs it; gated so the default build's avian3d
+# feature set is untouched.
 [features]
-net = ["dep:lightyear"]
+net = ["dep:lightyear", "avian3d/serialize"]
 
 [[bin]]
 name = "spike_server"

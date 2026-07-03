@@ -1,15 +1,20 @@
-//! Networking-spike client (steps 1–4 of the lightyear spike map's recommended order): connects
-//! to a local `spike_server` over UDP+netcode, logs connection and `SpikeBeacon` replication, and
-//! sends `TankCommand` over lightyear's native input path. Spike-local device gather (WASD + LMB
-//! read directly) — deliberately NOT the game's `command::client_plugin`.
+//! Networking-spike client (steps 5–6 of the lightyear spike map's recommended order): connects
+//! to a local `spike_server` over UDP+netcode, predicts its own tank body, and forces a rollback
+//! via both a `LinkConditioner` (genuine prediction lead) and the server's one-shot perturbation.
+//! Spike-local device gather (WASD + LMB read directly) — deliberately NOT the game's
+//! `command::client_plugin`.
 //!
 //! Run with `cargo run --bin spike_client --features net`. Pass `--simulate-input` (or set
-//! `SPIKE_SIMULATE_INPUT`) to run headless and programmatically drive throttle + two one-tick
-//! fire_primary clicks, proving the wire path without a human at the keyboard.
+//! `SPIKE_SIMULATE_INPUT`) to run headless and programmatically drive throttle for a few seconds,
+//! proving prediction + rollback without a human at the keyboard.
+
+// Same rationale as lib.rs's crate-level allow (bins don't inherit it).
+#![allow(clippy::type_complexity)]
 
 use core::time::Duration;
 use std::net::{Ipv4Addr, SocketAddr};
 
+use avian3d::prelude::Position;
 use bevy::app::ScheduleRunnerPlugin;
 use bevy::prelude::*;
 use lightyear::prelude::client::*;
@@ -17,7 +22,7 @@ use lightyear::prelude::input::client::InputSystems;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
 use lightyear::prelude::{Controlled as NetControlled, *};
 use overmatch::TankCommand;
-use overmatch::net::SpikeBeacon;
+use overmatch::net::{SpikeBeacon, SpikeTank};
 
 const SERVER_PORT: u16 = 5888;
 
@@ -28,12 +33,17 @@ struct EdgeLatch {
     fire_primary: bool,
 }
 
-/// `--simulate-input` state: a fixed-tick counter driving a scripted throttle window and two
-/// single-tick fire_primary "clicks", then a clean exit.
+/// `--simulate-input` state: a fixed-tick counter driving a scripted throttle window, then a
+/// clean exit once enough time has passed to observe the forced rollback + convergence.
 #[derive(Resource, Default)]
 struct SimulateInput {
     ticks: u32,
 }
+
+/// Tracks the predicted tank's previous-tick `Position` so a big jump can be logged as a
+/// `ROLLBACK-SNAP` (the map's suggested fallback detector alongside `PredictionMetrics`).
+#[derive(Component, Default)]
+struct LastPosition(Option<Vec3>);
 
 fn main() {
     let simulate = std::env::args().any(|a| a == "--simulate-input")
@@ -66,23 +76,45 @@ fn main() {
     }
 
     // Ordering per the spike map §3: ClientPlugins, then protocol registration, then the Client
-    // entity.
+    // entity. `net::plugin` also mounts `LightyearAvianPlugin` + Position/Rotation/velocity
+    // registration (map §5); `physics_plugins()` gives the matching disables.
     app.add_plugins(ClientPlugins {
         tick_duration: Duration::from_secs_f64(1.0 / 64.0),
     });
     app.add_plugins(overmatch::net::plugin);
+    app.add_plugins(overmatch::net::physics_plugins());
 
     let server_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), SERVER_PORT);
     // Pid-based id so back-to-back runs don't collide inside the server's disconnect timeout.
     let client_id = u64::from(std::process::id());
+    // ~100 ms delay + jitter on the inbound link, so the client's prediction genuinely runs ahead
+    // of the last-confirmed server state (increment 5 rollback-forcing mechanism #1).
+    // Env-tunable for bisecting rollback causes: SPIKE_LATENCY_MS=0 disables the conditioner
+    // entirely (pure loopback), isolating latency-window effects from genuine sim divergence.
+    let latency_ms: u64 = std::env::var("SPIKE_LATENCY_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(100);
+    let jitter_ms: u64 = std::env::var("SPIKE_JITTER_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20);
+    let conditioner = (latency_ms > 0).then(|| {
+        RecvLinkConditioner::new(LinkConditionerConfig::new(
+            Duration::from_millis(latency_ms),
+            Duration::from_millis(jitter_ms),
+            0.0,
+        ))
+    });
     let client = app
         .world_mut()
         .spawn((
             Name::new("SpikeClient"),
             Client::default(),
-            Link::new(None),
+            Link::new(conditioner),
             LocalAddr(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0)),
             PeerAddr(server_addr),
+            PredictionManager::default(),
             NetcodeClient::new(
                 Authentication::Manual {
                     server_addr,
@@ -102,20 +134,40 @@ fn main() {
         .id();
     app.add_systems(Startup, move |mut commands: Commands| {
         commands.trigger(Connect { entity: client });
+        // The client builds its own ground — rollback replays need terrain to collide with.
+        commands.spawn(overmatch::net::spike_ground());
         info!("spike_client: connecting to {server_addr} as client_id={client_id}");
     });
 
     app.add_observer(log_connected)
         .add_observer(claim_input_slot)
+        .add_observer(log_predicted_tank)
         .init_resource::<EdgeLatch>()
-        .add_systems(Update, log_beacon)
+        .init_resource::<RollbackWatch>()
+        .add_systems(
+            Update,
+            (
+                log_beacon,
+                attach_predicted_physics,
+                watch_rollback_metrics,
+                log_snap,
+                log_position,
+            ),
+        )
         .add_systems(
             RunFixedMainLoop,
             latch_edges.in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
         )
         .add_systems(
             FixedPreUpdate,
-            buffer_input.in_set(InputSystems::WriteClientInputs),
+            // Rollback replays re-run FixedPreUpdate too (map §8) — lightyear itself restores
+            // `ActionState` from the `InputBuffer` per replayed tick (and `buffer_action_state`
+            // is `Without<Rollback>`, so the buffer can't be corrupted), but without this gate
+            // the scripted tick counter would count every replayed tick (verified live: 640
+            // "ticks" burned in <5 s wall).
+            buffer_input
+                .in_set(InputSystems::WriteClientInputs)
+                .run_if(not(is_in_rollback)),
         );
     if simulate {
         app.add_systems(Update, simulate_watchdog);
@@ -136,6 +188,40 @@ fn log_beacon(beacons: Query<Entity, (Added<SpikeBeacon>, With<Remote>)>) {
     }
 }
 
+/// Give the predicted tank its LOCAL physics body (map §6's `handle_new_character` pattern):
+/// avian components are not replicated, and a predicted entity without a body cannot be
+/// re-simulated during rollback replay — the symptom is continuous rollback from spawn, every
+/// confirmed packet disagreeing with a frozen prediction. A plain system (not an observer on
+/// `Predicted`) because `SpikeTank` arrives by replication and may land after the marker.
+fn attach_predicted_physics(
+    tanks: Query<
+        Entity,
+        (
+            With<Predicted>,
+            With<SpikeTank>,
+            Without<avian3d::prelude::RigidBody>,
+        ),
+    >,
+    mut commands: Commands,
+) {
+    for entity in &tanks {
+        info!("spike_client: {entity} predicted tank gets local physics body");
+        commands
+            .entity(entity)
+            .insert(overmatch::net::spike_tank_physics());
+    }
+}
+
+/// Increment-5 success signal: the predicted tank arrives carrying `Predicted`.
+fn log_predicted_tank(add: On<Add, Predicted>, tanks: Query<(), With<SpikeTank>>) {
+    if tanks.contains(add.entity) {
+        info!(
+            "spike_client: {} predicted (carries Predicted) — moves immediately under input",
+            add.entity
+        );
+    }
+}
+
 /// Possession (spike map §6): the server's `ControlledBy` arrives as lightyear's `Controlled`
 /// marker on our avatar — claim it as the local input slot.
 fn claim_input_slot(add: On<Add, NetControlled>, mut commands: Commands) {
@@ -146,6 +232,7 @@ fn claim_input_slot(add: On<Add, NetControlled>, mut commands: Commands) {
     commands.entity(add.entity).insert((
         InputMarker::<TankCommand>::default(),
         ActionState::<TankCommand>::default(),
+        LastPosition::default(),
     ));
 }
 
@@ -168,15 +255,10 @@ fn buffer_input(
     };
     if let Some(mut sim) = simulate {
         sim.ticks += 1;
-        // Scripted drive: ~4 s of full throttle with two one-tick clicks at ticks 64 and 192.
+        // Scripted drive: full throttle for the first ~4s, spanning the ~2s server perturbation,
+        // then release so friction stops the tank and rest positions can be compared.
         state.0.throttle = if sim.ticks <= 256 { 1.0 } else { 0.0 };
-        state.0.fire_primary = sim.ticks == 64 || sim.ticks == 192;
-        if sim.ticks == 64 || sim.ticks == 192 {
-            info!(
-                "spike_client: simulated fire_primary click at tick {}",
-                sim.ticks
-            );
-        }
+        state.0.fire_primary = false;
     } else {
         state.0.throttle =
             keys.pressed(KeyCode::KeyW) as i8 as f32 - keys.pressed(KeyCode::KeyS) as i8 as f32;
@@ -187,18 +269,70 @@ fn buffer_input(
     }
 }
 
-/// Simulate mode: exit cleanly once the script has played out (or bail on a wall-clock timeout if
-/// the connection never came up, so automation doesn't hang).
+/// Simulate mode: exit cleanly once the script has played out (long enough to cover the ~2s
+/// server perturbation and settle afterward), or bail on a wall-clock timeout if the connection
+/// never came up.
 fn simulate_watchdog(
     simulate: Res<SimulateInput>,
     time: Res<Time<Real>>,
     mut exit: MessageWriter<AppExit>,
 ) {
-    if simulate.ticks >= 320 {
+    if simulate.ticks >= 640 {
         info!("spike_client: simulation script complete, exiting");
         exit.write(AppExit::Success);
-    } else if time.elapsed_secs() > 30.0 {
+    } else if time.elapsed_secs() > 40.0 {
         error!("spike_client: watchdog timeout — never got an input slot");
         exit.write(AppExit::error());
+    }
+}
+
+/// Polls `PredictionMetrics` each frame and logs on change — the primary "a rollback fired"
+/// signal (map's suggested mechanism; `lightyear_prediction`'s own diagnostics counter).
+#[derive(Resource, Default)]
+struct RollbackWatch {
+    last_count: u32,
+}
+
+fn watch_rollback_metrics(metrics: Res<PredictionMetrics>, mut watch: ResMut<RollbackWatch>) {
+    if metrics.rollbacks != watch.last_count {
+        info!(
+            "spike_client: ROLLBACK fired (PredictionMetrics.rollbacks={}, rollback_ticks={})",
+            metrics.rollbacks, metrics.rollback_ticks
+        );
+        watch.last_count = metrics.rollbacks;
+    }
+}
+
+/// Periodic predicted-position log (every ~2 s) — diffed against the server's own periodic log
+/// for the increment-5/6 convergence success criterion.
+fn log_position(
+    tanks: Query<(Entity, &Position), With<Predicted>>,
+    mut timer: Local<f32>,
+    time: Res<Time>,
+) {
+    *timer += time.delta_secs();
+    if *timer < 2.0 {
+        return;
+    }
+    *timer = 0.0;
+    for (entity, position) in &tanks {
+        info!("spike_client: {entity} position={:?}", position.0);
+    }
+}
+
+/// Backup rollback detector (map's fallback): a same-tick `Position` discontinuity > 0.5 m on the
+/// predicted entity. Also logs final positions for the convergence check.
+fn log_snap(mut tanks: Query<(Entity, &Position, &mut LastPosition), With<Predicted>>) {
+    for (entity, position, mut last) in &mut tanks {
+        if let Some(previous) = last.0 {
+            let delta = (position.0 - previous).length();
+            if delta > 0.5 {
+                info!(
+                    "spike_client: ROLLBACK-SNAP {entity} moved {delta:.2} m in one tick (from {previous:?} to {:?})",
+                    position.0
+                );
+            }
+        }
+        last.0 = Some(position.0);
     }
 }
