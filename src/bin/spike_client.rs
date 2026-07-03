@@ -1,9 +1,11 @@
-//! Networking-spike client (step 7): connects to a local `spike_server` over UDP+netcode, predicts
-//! its own tank body, and forces a rollback via both a `LinkConditioner` (genuine prediction lead)
-//! and the server's one-shot perturbation. `SimPlugin` is mounted for real now — driving/aim/
-//! shooting all run under prediction, fed by a `TankCommand` bridge (net.rs) from lightyear's own
-//! `ActionState`. Spike-local device gather (WASD + LMB read directly) — deliberately NOT the
-//! game's `command::client_plugin`.
+//! Networking-spike client (step 8): connects to a local `spike_server` over UDP+netcode and is
+//! now *playable* — windowed mode mounts the game's real presentation + device gather
+//! (`NetClientPlugin`: camera, HUD, mouse aim, gunner optic, range dial, crew bar), marks the
+//! replicated own tank with the game's `Controlled` on possession, and feeds the gathered
+//! `TankCommand` into lightyear's `ActionState` each tick (`feed_action_state`). Whether that tank
+//! is predicted or interpolated is the server's spawn-time choice (`SPIKE_PREDICT`) — the step-8
+//! feel-test A/B. Esc is a cursor-release menu overlay, NOT a pause: the sim never stops (there is
+//! no online pause; a frozen predicting client desyncs from a server that keeps ticking).
 //!
 //! Run with `cargo run --bin spike_client --features net`. Pass `--simulate-input` (or set
 //! `SPIKE_SIMULATE_INPUT`) to run headless and programmatically drive throttle/aim/fire for a few
@@ -19,21 +21,30 @@ use avian3d::prelude::Position;
 use bevy::app::ScheduleRunnerPlugin;
 use bevy::asset::LoadState;
 use bevy::prelude::*;
+use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use lightyear::prelude::client::*;
 use lightyear::prelude::input::client::InputSystems;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
 use lightyear::prelude::{Controlled as NetControlled, *};
 use overmatch::net::{PendingTankSpec, SpikeBeacon, SpikeTank, load_tank_spec, spike_tank_rig};
-use overmatch::{AppState, Rig, SimPlugin, TankCommand, Turret, on_tank_ready};
+use overmatch::{
+    AppState, Controlled as GameControlled, NetClientPlugin, Rig, SimPlugin, TankCommand, Turret,
+    on_tank_ready,
+};
 
 const SERVER_PORT: u16 = 5888;
 
-/// Latches edge inputs (LMB click) across render frames until a fixed tick consumes them — the
-/// same latch contract as the game's `gather_commands`, kept spike-local.
+/// Whether the Esc menu overlay is up. The networked stand-in for the SP pause: cursor released,
+/// overlay shown (settings/meta actions later), and `feed_action_state` sends a default command so
+/// the tank coasts to a stop instead of holding the last input — but `AppState` never leaves
+/// `Playing` and the sim keeps ticking.
 #[derive(Resource, Default)]
-struct EdgeLatch {
-    fire_primary: bool,
+struct MenuOverlay {
+    open: bool,
 }
+
+#[derive(Component)]
+struct MenuOverlayNode;
 
 /// `--simulate-input` state: a fixed-tick counter driving a scripted throttle window, then a
 /// clean exit once enough time has passed to observe the forced rollback + convergence.
@@ -110,11 +121,15 @@ fn main() {
     app.add_plugins(overmatch::net::plugin);
     app.add_plugins(overmatch::net::physics_plugins());
     // Step 7: the real sim — same `SimPlugin` the server mounts, so client-side rollback replay
-    // re-runs the actual driving/aim/shooting systems, not a stub. `tank::client_plugin` (Tab
-    // swap) and `command::client_plugin` (device gather) are deliberately NOT mounted: this bin's
-    // own `buffer_input`/simulate-input path writes `ActionState` directly, bridged into
-    // `TankCommand` by `net.rs`'s `bridge_action_state_to_tank_command`.
+    // re-runs the actual driving/aim/shooting systems, not a stub.
     app.add_plugins(SimPlugin);
+    // Step 8, windowed: the game's real presentation + device gather. Its writers fill the
+    // `Controlled` tank's `TankCommand` at render rate; `feed_action_state` (below) hands that to
+    // lightyear each tick. Headless simulate mode keeps writing `ActionState` directly instead
+    // (`buffer_input`) — no devices, no window, no presentation.
+    if !simulate {
+        app.add_plugins(NetClientPlugin);
+    }
 
     let server_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), SERVER_PORT);
     // Pid-based id so back-to-back runs don't collide inside the server's disconnect timeout.
@@ -188,14 +203,13 @@ fn main() {
     app.add_observer(log_connected)
         .add_observer(claim_input_slot)
         .add_observer(log_predicted_tank)
-        .init_resource::<EdgeLatch>()
         .init_resource::<RollbackWatch>()
         .init_resource::<TurretWatch>()
         .add_systems(
             Update,
             (
                 log_beacon,
-                attach_predicted_rig,
+                attach_replicated_rig,
                 open_gameplay_gate,
                 count_rig_binds,
                 watch_rollback_metrics,
@@ -206,12 +220,9 @@ fn main() {
                 overmatch::net::log_prediction_diagnostics,
                 overmatch::net::log_sim_evidence,
             ),
-        )
-        .add_systems(
-            RunFixedMainLoop,
-            latch_edges.in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
-        )
-        .add_systems(
+        );
+    if simulate {
+        app.add_systems(Update, simulate_watchdog).add_systems(
             FixedPreUpdate,
             // Rollback replays re-run FixedPreUpdate too (map §8) — lightyear itself restores
             // `ActionState` from the `InputBuffer` per replayed tick (and `buffer_action_state`
@@ -222,8 +233,19 @@ fn main() {
                 .in_set(InputSystems::WriteClientInputs)
                 .run_if(not(is_in_rollback)),
         );
-    if simulate {
-        app.add_systems(Update, simulate_watchdog);
+    } else {
+        app.init_resource::<MenuOverlay>()
+            .add_systems(Update, toggle_menu)
+            .add_systems(OnEnter(AppState::Playing), grab_cursor)
+            .add_systems(
+                FixedPreUpdate,
+                // Same rollback gate as `buffer_input`: during replay lightyear restores the
+                // historical `ActionState` per tick — overwriting it with the *current* gathered
+                // command would corrupt the replay's input.
+                feed_action_state
+                    .in_set(InputSystems::WriteClientInputs)
+                    .run_if(not(is_in_rollback)),
+            );
     }
 
     app.run();
@@ -261,7 +283,7 @@ fn log_beacon(beacons: Query<Entity, (Added<SpikeBeacon>, With<Remote>)>) {
     }
 }
 
-/// Give the predicted tank its LOCAL rig (map §6's `handle_new_character` pattern, increment 6's
+/// Give the replicated tank its LOCAL rig (map §6's `handle_new_character` pattern, increment 6's
 /// swap for the primitive cuboid): avian components are not replicated, and a predicted entity
 /// without a body cannot be re-simulated during rollback replay — the symptom is continuous
 /// rollback from spawn, every confirmed packet disagreeing with a frozen prediction. A plain
@@ -271,11 +293,17 @@ fn log_beacon(beacons: Query<Entity, (Added<SpikeBeacon>, With<Remote>)>) {
 /// moment the §8 UNCERTAIN gets exercised: `Predicted`/`PredictionTarget` is already on the entity
 /// (attached server-side at spawn) several ticks *before* the glb scene finishes loading and
 /// `on_tank_ready` binds the rig — see the spike log for what was observed in that window.
-fn attach_predicted_rig(
+///
+/// Step 8: a non-predicted tank (the own tank under SPIKE_PREDICT=0; remote tanks at step 9)
+/// gets the same full rig — the binder's node mapping, servos, and view anchors are what the
+/// camera/HUD and `apply_servo_angles` lay the model with — but its body stays `Static`
+/// (`activate_bound_rigs` skips it): replication owns its pose, nothing local simulates it.
+/// `With<Remote>` = every replicated tank, whichever markers rode along.
+fn attach_replicated_rig(
     tanks: Query<
         Entity,
         (
-            With<Predicted>,
+            With<Remote>,
             With<SpikeTank>,
             Without<avian3d::prelude::RigidBody>,
         ),
@@ -292,7 +320,7 @@ fn attach_predicted_rig(
         return;
     }
     for entity in &tanks {
-        info!("spike_client: {entity} predicted tank gets local rig (spec loaded)");
+        info!("spike_client: {entity} replicated tank gets local rig (spec loaded)");
         commands
             .entity(entity)
             .insert(spike_tank_rig(&asset_server, &spec.0))
@@ -359,7 +387,8 @@ fn log_predicted_tank(add: On<Add, Predicted>, tanks: Query<(), With<SpikeTank>>
 }
 
 /// Possession (spike map §6): the server's `ControlledBy` arrives as lightyear's `Controlled`
-/// marker on our avatar — claim it as the local input slot.
+/// marker on our avatar — claim it as the local input slot, and as the game's `Controlled` tank
+/// (step 8): the camera, HUD, aim commit, and crew bar all scope off that marker unchanged.
 fn claim_input_slot(add: On<Add, NetControlled>, mut commands: Commands) {
     info!(
         "spike_client: controlled entity {} — input slot",
@@ -368,50 +397,139 @@ fn claim_input_slot(add: On<Add, NetControlled>, mut commands: Commands) {
     commands.entity(add.entity).insert((
         InputMarker::<TankCommand>::default(),
         ActionState::<TankCommand>::default(),
+        GameControlled,
         LastPosition::default(),
     ));
 }
 
-/// Once per render frame, before the fixed loop: latch the click edge so a tick between frames
-/// neither loses nor doubles it.
-fn latch_edges(mouse: Res<ButtonInput<MouseButton>>, mut latch: ResMut<EdgeLatch>) {
-    latch.fire_primary |= mouse.just_pressed(MouseButton::Left);
-}
-
-/// Write this tick's `TankCommand` into the lightyear `ActionState` slot. Whole-state snapshot per
-/// tick: edges are true for exactly the one tick that consumes the latch.
+/// Headless simulate mode: write the scripted `TankCommand` into the lightyear `ActionState` slot
+/// each tick. Whole-state snapshot per tick, no devices.
 fn buffer_input(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut latch: ResMut<EdgeLatch>,
-    simulate: Option<ResMut<SimulateInput>>,
+    mut sim: ResMut<SimulateInput>,
     mut slots: Query<&mut ActionState<TankCommand>, With<InputMarker<TankCommand>>>,
 ) {
     let Ok(mut state) = slots.single_mut() else {
         return;
     };
-    if let Some(mut sim) = simulate {
-        sim.ticks += 1;
-        let t = sim.ticks;
-        // Step-7 script, exercising the real sim under prediction: 2 s idle (rig binds, suspension
-        // settles) → 4 s throttle 1.0 + steer 0.3 (ramp_drive + suspension + skid-steer, spanning
-        // the ~2 s server perturbation) → coast to rest. The aim intention + range are held from
-        // tick 0 so the turret/gun servos slew (drive_aim_servos → drive_servos) while driving;
-        // one fire click at tick 300 (Reload starts ready) exercises fire + recoil + reload.
-        state.0.throttle = if (128..384).contains(&t) { 1.0 } else { 0.0 };
-        state.0.steer = if (128..384).contains(&t) { 0.3 } else { 0.0 };
-        // Hull-local, far off-axis so the yaw servo visibly slews; range 800 m dials in real
-        // superelevation from the weapon's range table.
-        state.0.aim = Some(Vec3::new(200.0, 0.0, -800.0));
-        state.0.range = 800.0;
-        state.0.fire_primary = t == sim.fire_tick;
-    } else {
-        state.0.throttle =
-            keys.pressed(KeyCode::KeyW) as i8 as f32 - keys.pressed(KeyCode::KeyS) as i8 as f32;
-        state.0.steer =
-            keys.pressed(KeyCode::KeyD) as i8 as f32 - keys.pressed(KeyCode::KeyA) as i8 as f32;
-        state.0.fire_primary = latch.fire_primary;
-        latch.fire_primary = false;
+    sim.ticks += 1;
+    let t = sim.ticks;
+    // Step-7 script, exercising the real sim under prediction: 2 s idle (rig binds, suspension
+    // settles) → 4 s throttle 1.0 + steer 0.3 (ramp_drive + suspension + skid-steer, spanning
+    // the ~2 s server perturbation) → coast to rest. The aim intention + range are held from
+    // tick 0 so the turret/gun servos slew (drive_aim_servos → drive_servos) while driving;
+    // one fire click at tick 300 (Reload starts ready) exercises fire + recoil + reload.
+    state.0.throttle = if (128..384).contains(&t) { 1.0 } else { 0.0 };
+    state.0.steer = if (128..384).contains(&t) { 0.3 } else { 0.0 };
+    // Hull-local, far off-axis so the yaw servo visibly slews; range 800 m dials in real
+    // superelevation from the weapon's range table.
+    state.0.aim = Some(Vec3::new(200.0, 0.0, -800.0));
+    state.0.range = 800.0;
+    state.0.fire_primary = t == sim.fire_tick;
+}
+
+/// Windowed input path: the game's own client writers (`gather_commands`, `commit_aim`,
+/// `drive_gunner_aim`, the range dial, the crew bar) have already filled the `Controlled` tank's
+/// `TankCommand` at render rate — copy it into lightyear's `ActionState` slot each tick, where the
+/// input plugin buffers it for the wire and for rollback replay. The reverse bridge (net.rs) hands
+/// it straight back to the sim, so locally the round trip is an identity copy — the buffer is the
+/// point. Menu open = a default command: the tank coasts to a stop instead of holding the last
+/// input, and clicks in the menu don't fire.
+///
+/// On a non-predicted own tank (SPIKE_PREDICT=0) the local sim must not act on what the writers
+/// wrote — the reverse bridge already skips it, but these fields leak past that gate, so they are
+/// cleared *after* the copy: `aim` (drive_aim_servos would slew the turret with zero latency,
+/// fighting `apply_servo_angles`), the fire edges (a local tracer would spawn), `crew_swap` (local
+/// crew would change). Throttle/steer/range stay — the Static body ignores forces, and clearing
+/// per-tick values the writers only refresh per-frame would starve ticks 2..N of a multi-tick
+/// frame on the wire. Keyed on `Predicted`, not `Interpolated` — see net.rs's
+/// `activate_bound_rigs` on why the latter can't discriminate.
+fn feed_action_state(
+    menu: Res<MenuOverlay>,
+    mut slots: Query<
+        (
+            &mut TankCommand,
+            &mut ActionState<TankCommand>,
+            Has<Predicted>,
+        ),
+        With<InputMarker<TankCommand>>,
+    >,
+) {
+    for (mut command, mut state, predicted) in &mut slots {
+        state.0 = if menu.open {
+            TankCommand::default()
+        } else {
+            *command
+        };
+        if !predicted {
+            command.aim = None;
+            command.fire_primary = false;
+            command.fire_secondary = false;
+            command.crew_swap = None;
+        }
     }
+}
+
+/// Esc toggles the menu overlay: cursor released over the overlay, re-grabbed on close. The
+/// networked replacement for `state::client_plugin`'s pause — `AppState` stays `Playing`
+/// throughout (see [`MenuOverlay`]).
+fn toggle_menu(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut menu: ResMut<MenuOverlay>,
+    window: Single<(&mut Window, &mut CursorOptions), With<PrimaryWindow>>,
+    nodes: Query<Entity, With<MenuOverlayNode>>,
+    mut commands: Commands,
+) {
+    if !keys.just_pressed(KeyCode::Escape) {
+        return;
+    }
+    menu.open = !menu.open;
+    let (mut window, mut cursor) = window.into_inner();
+    if menu.open {
+        cursor.grab_mode = CursorGrabMode::None;
+        cursor.visible = true;
+        commands
+            .spawn((
+                MenuOverlayNode,
+                Node {
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(100.0),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
+            ))
+            .with_children(|parent| {
+                parent.spawn((
+                    Text::new("MENU\nEsc to close"),
+                    TextFont {
+                        font_size: FontSize::Px(48.0),
+                        ..default()
+                    },
+                    TextColor(Color::WHITE),
+                ));
+            });
+    } else {
+        // Re-center before locking, so mouse-look resumes owned by this window (same move as the
+        // game's `grab_cursor`).
+        let center = window.size() / 2.0;
+        window.set_cursor_position(Some(center));
+        cursor.grab_mode = CursorGrabMode::Locked;
+        cursor.visible = false;
+        for node in &nodes {
+            commands.entity(node).despawn();
+        }
+    }
+}
+
+/// Initial cursor grab on entering `Playing` — the one piece of `state::client_plugin` this bin
+/// does want (mouse aim needs a locked cursor from the first frame).
+fn grab_cursor(window: Single<(&mut Window, &mut CursorOptions), With<PrimaryWindow>>) {
+    let (mut window, mut cursor) = window.into_inner();
+    let center = window.size() / 2.0;
+    window.set_cursor_position(Some(center));
+    cursor.grab_mode = CursorGrabMode::Locked;
+    cursor.visible = false;
 }
 
 /// Simulate mode: exit cleanly once the script has played out (long enough to cover the ~2s
@@ -448,10 +566,11 @@ fn watch_rollback_metrics(metrics: Res<PredictionMetrics>, mut watch: ResMut<Rol
     }
 }
 
-/// Periodic predicted-position log (every ~2 s) — diffed against the server's own periodic log
-/// for the increment-5/6 convergence success criterion.
+/// Periodic own-tank position log (every ~2 s) — diffed against the server's own periodic log
+/// for the convergence criterion (predicted) or the interpolated-tracking evidence (step 8's
+/// SPIKE_PREDICT=0 runs).
 fn log_position(
-    tanks: Query<(Entity, &Position), (With<Predicted>, With<SpikeTank>)>,
+    tanks: Query<(Entity, &Position), (With<Remote>, With<SpikeTank>)>,
     mut timer: Local<f32>,
     time: Res<Time>,
 ) {

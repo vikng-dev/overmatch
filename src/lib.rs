@@ -84,9 +84,11 @@ pub use tank::Roadwheel;
 /// Re-exported for the spike bins (increment 6): the real Tiger rig replaces the increment-5
 /// primitive on both ends. `on_tank_ready` is the binder observer (unchanged, per the task's "do
 /// not modify sim module logic"); `Tank`/`Rig`/`Turret`/`Hull` are what the spike's verdict-2 log
-/// (child collider tracking through rollback) reads back.
+/// (child collider tracking through rollback) reads back. `Controlled` (step 8) is possession:
+/// the client bin marks its own replicated tank with it, and every control/presentation system
+/// (camera, HUD, aim commit, crew bar) scopes off it unchanged.
 #[cfg(feature = "net")]
-pub use tank::{Hull, Rig, ServoState, Tank, Turret, on_tank_ready};
+pub use tank::{Controlled, Hull, Rig, ServoState, Tank, Turret, on_tank_ready};
 /// The track-model sandbox (`bin/track_sandbox`). Public so the binary can mount it; not part of
 /// `GamePlugin`. Self-contained: its own code-generated primitive rig + locomotion, for developing
 /// the continuous-track model in isolation.
@@ -172,6 +174,31 @@ impl Plugin for ClientPlugin {
         // builds.
         #[cfg(debug_assertions)]
         app.add_plugins((avian3d::prelude::PhysicsDebugPlugin, debug::plugin));
+    }
+}
+
+/// The networked client's presentation + device gather (Milestone B step 8): [`ClientPlugin`]
+/// minus the single-player-only pieces. No `state::client_plugin` — its Esc pause freezes the
+/// local sim and physics clock, which desyncs a predicting client from a server that keeps
+/// ticking; there is no online pause, so the netcode bin owns its own cursor-release menu overlay
+/// instead. No `tank::client_plugin` — the Tab possession swap is an SP scenario tool; under
+/// netcode the server assigns possession (`ControlledBy`).
+#[cfg(feature = "net")]
+pub struct NetClientPlugin;
+
+#[cfg(feature = "net")]
+impl Plugin for NetClientPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_plugins((
+            branding::plugin,
+            command::client_plugin,
+            camera::plugin,
+            aim::client_plugin,
+            sight::plugin,
+            firecontrol::client_plugin,
+            hud::plugin,
+            crew_ui::plugin,
+        ));
     }
 }
 

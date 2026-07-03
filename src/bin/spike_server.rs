@@ -19,10 +19,31 @@ use bevy::prelude::*;
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
-use overmatch::net::{PendingTankSpec, SpikeBeacon, SpikeTank, load_tank_spec, spike_tank_rig};
+use overmatch::net::{
+    PendingTankSpec, ServoAngles, SpikeBeacon, SpikeTank, load_tank_spec, spike_tank_rig,
+};
 use overmatch::{AppState, Rig, SimPlugin, TankCommand, on_tank_ready};
 
 const PORT: u16 = 5888;
+
+/// Step-8 levers, read once at boot. `SPIKE_PREDICT=0` spawns the owner's tank as
+/// `InterpolationTarget` instead of `PredictionTarget` — the feel-test A/B. Spawn-time only (map
+/// §7: no live prediction↔interpolation switch); restart the server to flip. `SPIKE_PERTURB=0`
+/// drops the forced-rollback impulse — pure noise during a feel test; on by default so the step-7
+/// evidence runs stay reproducible unchanged.
+#[derive(Resource)]
+struct SpikeConfig {
+    predict_owner: bool,
+    perturb: bool,
+}
+
+fn env_flag(name: &str, default: bool) -> bool {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<u8>().ok())
+        .map(|v| v != 0)
+        .unwrap_or(default)
+}
 
 fn main() {
     let mut app = App::new();
@@ -85,6 +106,15 @@ fn main() {
     });
     app.add_systems(Startup, load_tank_spec);
     app.init_resource::<PendingClients>();
+    let config = SpikeConfig {
+        predict_owner: env_flag("SPIKE_PREDICT", true),
+        perturb: env_flag("SPIKE_PERTURB", true),
+    };
+    info!(
+        "spike_server: SPIKE_PREDICT={} SPIKE_PERTURB={}",
+        config.predict_owner, config.perturb
+    );
+    app.insert_resource(config);
 
     app.add_systems(
         Update,
@@ -157,6 +187,7 @@ fn spawn_pending_tanks(
     spec: Option<Res<PendingTankSpec>>,
     asset_server: Res<AssetServer>,
     time: Res<Time<Virtual>>,
+    config: Res<SpikeConfig>,
     mut commands: Commands,
 ) {
     if pending.0.is_empty() {
@@ -167,24 +198,36 @@ fn spawn_pending_tanks(
         return;
     }
     for (link, client_id) in pending.0.drain(..) {
-        commands
-            .spawn((
-                Name::new("SpikeTank"),
-                spike_tank_rig(&asset_server, &spec.0),
-                ActionState::<TankCommand>::default(),
-                Position(Vec3::new(0.0, 2.0, 0.0)),
-                Replicate::to_clients(NetworkTarget::All),
+        let mut tank = commands.spawn((
+            Name::new("SpikeTank"),
+            spike_tank_rig(&asset_server, &spec.0),
+            ActionState::<TankCommand>::default(),
+            Position(Vec3::new(0.0, 2.0, 0.0)),
+            // The authority's turret/gun lay, for every non-predicted view of this tank
+            // (`net::publish_servo_angles` keeps it fresh).
+            ServoAngles::default(),
+            Replicate::to_clients(NetworkTarget::All),
+            ControlledBy {
+                owner: link,
+                lifetime: default(),
+            },
+        ));
+        // The step-8 A/B: the owner predicts its tank (the candidate ship config), or gets the
+        // same interpolated view as everyone else (the feel-test baseline).
+        if config.predict_owner {
+            tank.insert((
                 PredictionTarget::to_clients(NetworkTarget::Single(client_id)),
                 InterpolationTarget::to_clients(NetworkTarget::AllExceptSingle(client_id)),
-                ControlledBy {
-                    owner: link,
-                    lifetime: default(),
-                },
-                PendingPerturbation {
-                    at: time.elapsed() + Duration::from_secs(2),
-                },
-            ))
-            .observe(on_tank_ready);
+            ));
+        } else {
+            tank.insert(InterpolationTarget::to_clients(NetworkTarget::All));
+        }
+        if config.perturb {
+            tank.insert(PendingPerturbation {
+                at: time.elapsed() + Duration::from_secs(2),
+            });
+        }
+        tank.observe(on_tank_ready);
     }
 }
 

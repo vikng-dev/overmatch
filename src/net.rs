@@ -11,10 +11,15 @@ use bevy::diagnostic::DiagnosticsStore;
 use bevy::prelude::*;
 use lightyear::avian3d::plugin::{AvianReplicationMode, LightyearAvianPlugin};
 use lightyear::prediction::diagnostics::PredictionDiagnosticsPlugin;
+// `Remote` (bevy_replicon's "this entity arrived by replication", re-exported): the honest
+// authority-vs-replica discriminator — see `activate_bound_rigs` on why `Predicted`/`Interpolated`
+// are not (the server entity carries both markers itself).
+use lightyear::prelude::client::Remote;
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::tank::ServoCommand;
 use crate::{
     DriveState, GameplaySet, Reload, Rig, Roadwheel, ServoState, Suspension, Tank, TankCommand,
     TankSpecHandle,
@@ -82,8 +87,27 @@ pub fn spike_tank_rig(asset_server: &AssetServer, spec: &Handle<crate::TankSpec>
 /// Wake a spike tank's physics once its rig has bound (colliders + mass exist now) — the second
 /// half of the Static-until-bound spawn above. Shared: each side flips at its own bind moment, so
 /// neither ever simulates a collider-less falling body.
+///
+/// Only where the local side simulates the body (step 8): the authority (`Without<Remote>` — the
+/// server spawned it) or a predicted client view. A non-predicted replicated tank — the own tank
+/// under SPIKE_PREDICT=0, remote tanks at step 9 — stays `Static`: its `Position` is written by
+/// replication+interpolation (the same sync that already carries the pre-bind Static body), and a
+/// Dynamic body would free-run local physics against it.
+///
+/// NOT keyed on `Interpolated`: `PredictionTarget`/`InterpolationTarget` are
+/// `ReplicationTarget<Predicted>`/`<Interpolated>` with the marker as a *required component*, so
+/// the server entity carries BOTH markers itself (send.rs registers the pairs; the markers are
+/// then target-filtered replicated components) — `Without<Interpolated>` excludes the authority.
+/// Measured: server rig bound but never went Dynamic, wheels 0/16 both ends.
 fn activate_bound_rigs(
-    tanks: Query<Entity, (Added<crate::Rig>, With<SpikeTank>)>,
+    tanks: Query<
+        Entity,
+        (
+            Added<crate::Rig>,
+            With<SpikeTank>,
+            Or<(With<Predicted>, Without<Remote>)>,
+        ),
+    >,
     mut commands: Commands,
 ) {
     for entity in &tanks {
@@ -142,6 +166,63 @@ fn decorate_rig_children(
     }
 }
 
+/// Authoritative turret/gun angles (radians, parent-local — `ServoState::current`'s own frame),
+/// published on the tank root by the authority and replicated. A client with a non-predicted view
+/// of the tank (its own tank under SPIKE_PREDICT=0 now; every remote tank at step 9) has no
+/// networked servo sim — its local `ServoState` never leaves rest — so this is how its rig lays.
+///
+/// Applied as `ServoCommand` *targets*, not written into `ServoState`: the local servo mechanism
+/// (`drive_servos`) chases the authoritative angle under its real speed/accel profile, which
+/// smooths replication-rate steps for free — no interpolation registration, no transform fights
+/// with `interpolate_servos`. The hull MG's servos are deliberately not covered yet (per-weapon
+/// laying is its own slice); a remote hull MG rests until then.
+#[derive(Component, Clone, Copy, Default, PartialEq, Debug, Serialize, Deserialize)]
+pub struct ServoAngles {
+    pub turret: f32,
+    pub gun: f32,
+}
+
+/// Authority side: mirror the live `ServoState` angles onto the replicated root component.
+/// `FixedPostUpdate`, so it reads what `drive_servos` (FixedUpdate, after `GameplaySet`) just
+/// stepped. `Without<Remote>` makes it authority-only in shared code: every client-side tank
+/// arrived by replication and carries `Remote` (see `activate_bound_rigs` on why the
+/// `Predicted`/`Interpolated` markers can NOT discriminate here — the server carries both).
+fn publish_servo_angles(
+    mut tanks: Query<(&Rig, &mut ServoAngles), Without<Remote>>,
+    servos: Query<&ServoState>,
+) {
+    for (rig, mut angles) in &mut tanks {
+        let (Ok(turret), Ok(gun)) = (servos.get(rig.turret), servos.get(rig.gun)) else {
+            continue;
+        };
+        // `set_if_neq`: no change-detection churn (and no replication resends) while at rest.
+        angles.set_if_neq(ServoAngles {
+            turret: turret.current(),
+            gun: gun.current(),
+        });
+    }
+}
+
+/// Client side, non-predicted replicated tanks: feed the replicated angles to the local servos as
+/// targets — the mechanism does the rest (see [`ServoAngles`]). In `GameplaySet` so it shares the
+/// Playing gate with the rest of the sim; `drive_servos` orders itself after the whole set, so the
+/// targets land before the mechanism steps. No write conflict with `drive_aim_servos` (also in the
+/// set): a non-predicted tank's `TankCommand.aim` is always `None` (the bridge below skips it, and
+/// the windowed bin clears the field), so that system never touches these tanks' servos.
+fn apply_servo_angles(
+    tanks: Query<(&ServoAngles, &Rig), (With<Remote>, Without<Predicted>)>,
+    mut servos: Query<&mut ServoCommand>,
+) {
+    for (angles, rig) in &tanks {
+        if let Ok(mut turret) = servos.get_mut(rig.turret) {
+            turret.target = angles.turret;
+        }
+        if let Ok(mut gun) = servos.get_mut(rig.gun) {
+            gun.target = angles.gun;
+        }
+    }
+}
+
 /// Coarsened rollback thresholds for the tank root (map §1): the reference examples' 1 cm / 0.01
 /// rad bar is tuned for a single-collider capsule character, not a 16-contact 57 t rig — solver
 /// noise on a body this complex trips that bar far more often than genuine misprediction (measured:
@@ -159,6 +240,9 @@ const ROLLBACK_VELOCITY: f32 = 0.05;
 pub fn plugin(app: &mut App) {
     app.component::<SpikeBeacon>().replicate();
     app.component::<SpikeTank>().replicate();
+    // Plain replication, no `.predict()`/interpolation: predicted tanks simulate their own servos,
+    // and non-predicted consumers chase the raw angle through the servo mechanism (see the type).
+    app.component::<ServoAngles>().replicate();
     app.add_plugins(input::native::InputPlugin::<TankCommand>::default());
 
     // Avian replication (map §5): mount lightyear_avian3d's ordering fixes, then register the
@@ -213,6 +297,8 @@ pub fn plugin(app: &mut App) {
     app.local_rollback::<Suspension>();
 
     app.add_systems(Update, (activate_bound_rigs, decorate_rig_children));
+    app.add_systems(FixedPostUpdate, publish_servo_angles);
+    app.add_systems(FixedUpdate, apply_servo_angles.in_set(GameplaySet));
     // Bridge lightyear's input buffer into the sim's own `TankCommand` (command.rs's contract):
     // sim systems (`ramp_drive`, `fire`, `drive_aim_servos`) read `TankCommand`, never
     // `ActionState` directly, so this is the one seam translating net input into sim input.
@@ -237,8 +323,16 @@ pub fn plugin(app: &mut App) {
 /// `TankCommand` from `command::core_plugin`'s `attach_command` observer (`On<Add, Tank>` — the rig
 /// bundle includes `Tank`, confirmed fires) and `ActionState<TankCommand>` from lightyear's own
 /// input plugin once `InputMarker<TankCommand>` claims the slot (`claim_input_slot`, client bin).
+///
+/// Locally-simulated tanks only (step 8, same predicate as `activate_bound_rigs`): a non-predicted
+/// own tank (SPIKE_PREDICT=0) still *sends* its `ActionState` to the server, but the local sim
+/// must not consume it — the tank's motion is the server's replicated answer, not a local
+/// re-simulation.
 fn bridge_action_state_to_tank_command(
-    mut tanks: Query<(&ActionState<TankCommand>, &mut TankCommand)>,
+    mut tanks: Query<
+        (&ActionState<TankCommand>, &mut TankCommand),
+        Or<(With<Predicted>, Without<Remote>)>,
+    >,
 ) {
     for (action, mut command) in &mut tanks {
         // Whole-struct overwrite: matches `ActionState`'s own "absolute snapshot per tick"

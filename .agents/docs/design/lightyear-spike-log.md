@@ -313,3 +313,57 @@ the same rest position on both sides. No back-and-forth signature in either run'
 - **Terrain**: `world::plugin` game terrain confirmed working headless under the netcode physics
   composition on both ends (wheels grounded 16/16 proves the Terrain-layer rays hit it);
   `spike_ground()` deleted. Tank drives the real test-course world now.
+
+## Step 8 — playable client + prediction toggle (2026-07-03)
+
+- **Design shipped**: windowed `spike_client` mounts `NetClientPlugin` (new in lib.rs: `ClientPlugin`
+  minus `state::client_plugin` and `tank::client_plugin`); possession = `claim_input_slot` adds the
+  game's `Controlled` alongside the input slot; input = `feed_action_state` (FixedPreUpdate,
+  `InputSystems::WriteClientInputs`, `not(is_in_rollback)`) copies the `Controlled` tank's
+  `TankCommand` — filled by the game's own writers at render rate — into `ActionState`, closing the
+  loop with step 7's reverse bridge. Locally an identity round trip; the buffer is the wire format
+  and the rollback-replay source. Esc = spike-local cursor-release menu overlay, `AppState` stays
+  `Playing` (no online pause — a paused predicting client desyncs; `state::client_plugin`'s
+  pause_physics is exactly what must NOT run under netcode). Toggle = server-side `SPIKE_PREDICT=0`
+  swaps the owner's `PredictionTarget` for `InterpolationTarget` at spawn (map §7 option 1);
+  `SPIKE_PERTURB=0` drops the forced-rollback impulse for feel runs.
+- **Servo replication pulled forward from step 9**: replicated `ServoAngles { turret, gun }` on the
+  root, published by the authority from `ServoState` (`publish_servo_angles`, FixedPostUpdate,
+  `set_if_neq` so rest is replication-silent), consumed on non-predicted client tanks by
+  `apply_servo_angles` writing `ServoCommand.target` — the local servo mechanism chases the
+  authoritative angle under its real slew profile, which smooths replication-rate steps for free
+  (no interpolation registration, no `interpolate_servos` transform fights). Hull-MG servos
+  deliberately not covered (per-weapon laying is its own slice).
+- **LIVE BUG 3 — `Interpolated`/`Predicted` markers CANNOT discriminate authority vs replica.**
+  First cut keyed "locally simulated" off `Without<Interpolated>`: both bins froze (wheels 0/16,
+  positions pinned at spawn). Cause, verified in vendored source (`lightyear_replication-0.28.0/
+  src/send.rs:1111,1119`): `PredictionTarget`/`InterpolationTarget` are
+  `ReplicationTarget<Predicted>`/`<Interpolated>` and `register_required_components` puts the
+  *marker itself on the server entity* — the A-mode server tank carries BOTH `Predicted` AND
+  `Interpolated`; the markers are then target-filtered replicated components. The honest
+  discriminator is replicon's `Remote` ("arrived by replication"): locally-simulated ⇔
+  `Or<(With<Predicted>, Without<Remote>)>` (applied to `activate_bound_rigs` + the ActionState→
+  TankCommand bridge); authority ⇔ `Without<Remote>` (publish); non-predicted replica ⇔
+  `(With<Remote>, Without<Predicted>)` (apply, rig-attach, B-mode field clears).
+- **Non-predicted own tank (B mode) semantics**: full rig binds (camera/HUD/servo-apply need the
+  node map) but body stays `Static` — replication owns the pose; `feed_action_state` clears
+  `aim`/fire edges/`crew_swap` after the copy (local sim must not slew/fire/swap at zero latency)
+  while throttle/steer/range survive multi-tick frames. Known accepted warts, B mode only: no
+  local tracer on fire (shell replication still deferred), local HUD reload/damage don't reflect
+  server state, wheels don't animate (no local suspension), mouse still orbits while the menu is
+  open (GameplaySet no longer gates presentation off — SP got this for free from the pause state).
+- **Verification (headless, both modes, SPIKE_LATENCY_MS=100)**: A-mode regression — step-7
+  evidence intact: Dynamic on bind, wheels 16/16, turret −0.2449951 exact, reload cycles,
+  SHELL-SPAWN total=1, 148 rollbacks/run (step 7: 152), convergence on the same trajectory; the two
+  B0004 warnings at bind are pre-existing (reproduced on stashed step-7 baseline, count identical).
+  B-mode — server receives 256 throttle commands, drives wheels 16/16 + fires (reload cycles
+  server-side); client: 0 rollbacks, 0 local shells, no Dynamic (stayed Static), position tracks
+  the server run, `turret_angle` −0.238→−0.2449951 — the replicated-angle chase converges to the
+  authoritative lay. Windowed smoke (~25 s, real window): connect → possession → bind → Dynamic,
+  zero warnings, and `turret_angle` live-moving (1.71→1.77 rad) = the real camera-ray `commit_aim`
+  drove the wire path with no human input.
+- **Feel-test recipe (the actual step-8 deliverable, USER runs it)**: terminal 1
+  `cargo run --bin spike_server --features net` (add `SPIKE_PREDICT=0` for the B side,
+  `SPIKE_PERTURB=0` always for feel runs); terminal 2 `SPIKE_LATENCY_MS=80 SPIKE_JITTER_MS=10
+  cargo run --bin spike_client --features net` (0 for pure localhost). W/S/A/D drive, mouse aims,
+  LMB fires, scroll zooms, Esc menu. Ladder: 0 ms → 80 ms → cloud region (Edgegap, first outing).
