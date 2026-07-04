@@ -26,6 +26,9 @@ lightyear = { version = "0.28", default-features = false, features = [
     "std",
     "client", "server",
     "replication", "prediction", "interpolation",
+    # The render half of prediction (fixed-tick→frame blending; also what arms rollback
+    # correction). NOT implied by `prediction` — see net::client_smoothing_plugin.
+    "frame_interpolation",
     "input_native",
     "netcode", "udp",
     "avian3d",

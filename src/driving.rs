@@ -8,12 +8,13 @@ use bevy::ecs::lifecycle::Add;
 use bevy::prelude::*;
 use serde::Deserialize;
 
+use crate::Layer;
 use crate::command::TankCommand;
 use crate::damage::{
     Capability, TankCapabilities, TankVolumes, VolumeFacets, capability_available,
 };
 use crate::state::GameplaySet;
-use crate::tank::{CenterOfMassAnchor, Roadwheel, Tank, TrackSide};
+use crate::tank::{CenterOfMassAnchor, Roadwheel, Tank, TrackSide, rig_world_pose};
 
 /// Coulomb coefficient: each wheel's total ground force is capped at MU × load (friction ellipse).
 /// Per-environment (the track-vs-ground surface pair), not per-tank — destined for the terrain
@@ -65,8 +66,8 @@ pub struct Drivetrain {
 #[serde(deny_unknown_fields)]
 pub struct SuspensionParams {
     /// How far a roadwheel's suspension ray reaches from the hub (m). Must exceed the effective
-    /// radius (~0.5166) so it finds the ground at rest, with margin for droop. Used when the ray is
-    /// built (`apply_tank_spec`), not per-step.
+    /// radius (~0.5166) so it finds the ground at rest, with margin for droop. Read per-step by
+    /// `apply_suspension`'s in-system cast.
     pub ray_length: f32,
     /// Spring free length from the hub (m). Longer than the effective radius so at rest the spring
     /// is compressed enough to carry the tank's weight at the authored ride height.
@@ -147,23 +148,51 @@ fn attach_suspension(add: On<Add, Roadwheel>, mut commands: Commands) {
 
 /// Damped-spring suspension: each grounded wheel pushes the hull up at its contact point, so
 /// ride height, pitch, roll, and weight transfer all emerge from the per-wheel springs.
+///
+/// Rays are cast HERE, fresh each tick via `SpatialQuery`, from the wheel's tick-truth pose
+/// (`rig_world_pose`) — never from `RayCaster`/`RayHits` components. Those are refreshed by avian
+/// in `FixedPostUpdate`, *after* the step, so a reader in `FixedUpdate` gets last tick's hits; on
+/// the FIRST replayed tick of a rollback "last tick" is the abandoned timeline's final tick (up to
+/// the full rollback depth divergent), and 16 wheels applying spring forces from those stale
+/// distances re-diverged every replay — the step-8 rollback storm's sim-side pump. Casting
+/// in-system reads the restored `Position`/`Rotation` directly, replay ticks included.
+///
+/// Constraint this relies on: suspension rays only hit `Layer::Terrain`, which is all STATIC
+/// geometry — the spatial-query BVH is refreshed inside the physics step, so a mid-tick cast is
+/// only trustworthy against colliders that never move. If terrain ever grows moving platforms,
+/// this needs revisiting.
 fn apply_suspension(
     // Runs for *every* tank — support is tank-agnostic (each body rides on its own wheels),
     // unlike thrust, which each tank takes from its own command. The `&SuspensionParams` gates a
     // body in: no suspension until the spec is applied to the hull (ADR-0011 — no default spring).
-    // Wheels likewise lack a `RayCaster` until then.
-    mut bodies: Query<(Entity, Forces, &SuspensionParams), With<Tank>>,
+    spatial: SpatialQuery,
+    mut bodies: Query<(Entity, &Position, &Rotation, Forces, &SuspensionParams), With<Tank>>,
     children: Query<&Children>,
-    mut wheels: Query<(&RayCaster, &RayHits, &mut Suspension), With<Roadwheel>>,
+    parents: Query<&ChildOf>,
+    locals: Query<&Transform>,
+    mut wheels: Query<&mut Suspension, With<Roadwheel>>,
 ) {
-    for (body, mut forces, params) in &mut bodies {
+    let filter = SpatialQueryFilter::from_mask(Layer::Terrain);
+    for (body, position, rotation, mut forces, params) in &mut bodies {
         // Only this body's own roadwheels (its rig descendants) push on it — otherwise a second
         // tank's wheel hits would load this hull.
         for wheel in children.iter_descendants(body) {
-            let Ok((ray, hits, mut suspension)) = wheels.get_mut(wheel) else {
+            let Ok(mut suspension) = wheels.get_mut(wheel) else {
                 continue;
             };
-            let Some(hit) = hits.iter_sorted().next() else {
+            // Wheel nodes are authored with identity rotation, so wheel-local −Y is hull-down.
+            let Some((origin, wheel_rotation)) =
+                rig_world_pose(wheel, body, position.0, rotation.0, &parents, &locals)
+            else {
+                *suspension = Suspension::default();
+                continue;
+            };
+            let Ok(down) = Dir3::new(wheel_rotation * Vec3::NEG_Y) else {
+                *suspension = Suspension::default();
+                continue;
+            };
+            let Some(hit) = spatial.cast_ray(origin, down, params.ray_length, true, &filter)
+            else {
                 *suspension = Suspension::default();
                 continue;
             };
@@ -174,9 +203,9 @@ fn apply_suspension(
                 continue;
             }
 
-            let dir = Vec3::from(ray.global_direction());
+            let dir = Vec3::from(down);
             let up = -dir;
-            let contact = ray.global_origin() + dir * hit.distance;
+            let contact = origin + dir * hit.distance;
 
             // Damped spring along the suspension axis. velocity_at_point gives the hull's speed at
             // the contact; its component along `up` is the compression rate (negative while

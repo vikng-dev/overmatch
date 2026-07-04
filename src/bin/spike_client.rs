@@ -126,6 +126,10 @@ fn main() {
         .init_resource::<SimulateInput>();
     } else {
         app.add_plugins(DefaultPlugins);
+        // Never drop below the 64 Hz tick: the default `WinitSettings::game()` throttles an
+        // UNFOCUSED window to 60 Hz reactive updates — under tick rate, so an alt-tabbed client
+        // drifts behind the server and resyncs on refocus (lightyear #1113's jitter class).
+        app.insert_resource(bevy::winit::WinitSettings::continuous());
         if sim_windowed {
             app.init_resource::<SimulateInput>();
         }
@@ -139,6 +143,10 @@ fn main() {
     });
     app.add_plugins(overmatch::net::plugin);
     app.add_plugins(overmatch::net::physics_plugins());
+    // The render half of prediction (frame interpolation + armed rollback correction) — client
+    // only; the server has no `Predicted` view to smooth. Mounted in simulate mode too: headless
+    // it idles harmlessly, and `SPIKE_SIM_WINDOWED` diagnoses the real presentation stack.
+    app.add_plugins(overmatch::net::client_smoothing_plugin);
     // Step 7: the real sim — same `SimPlugin` the server mounts, so client-side rollback replay
     // re-runs the actual driving/aim/shooting systems, not a stub.
     app.add_plugins(SimPlugin);

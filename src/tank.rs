@@ -6,8 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 use avian3d::prelude::{
     AngularInertia, ColliderConstructor, ColliderConstructorHierarchy, CollisionLayers, LayerMask,
-    Mass, NoAutoAngularInertia, NoAutoCenterOfMass, NoAutoMass, RayCaster, RigidBody,
-    SpatialQueryFilter,
+    Mass, NoAutoAngularInertia, NoAutoCenterOfMass, NoAutoMass, RigidBody,
 };
 use bevy::asset::LoadState;
 use bevy::gltf::GltfMaterialName;
@@ -114,8 +113,9 @@ pub enum TrackSide {
     Right,
 }
 
-/// A load-bearing roadwheel — a suspension/drive contact station, tagged with its track side.
-/// Carries a downward [`RayCaster`] (the suspension ray); the sprocket and idler are excluded.
+/// A load-bearing roadwheel — a suspension/drive contact station, tagged with its track side;
+/// the sprocket and idler are excluded. Its suspension ray is cast fresh each tick by
+/// `apply_suspension` (see there for why it is not a `RayCaster` component).
 #[derive(Component)]
 pub struct Roadwheel {
     pub side: TrackSide,
@@ -586,21 +586,18 @@ pub fn on_tank_ready(
                 found.insert("Center_Of_Mass");
                 entity.insert(CenterOfMassAnchor);
             }
-            // Roadwheels (Wheel_L_0.., Wheel_R_0..): tag the track side + a downward suspension ray
-            // sized by the variant's `ray_length`, filtered to Terrain so it skips the tank's own
-            // collider. The wheel node has identity rotation, so local −Y is the hull-down axis.
+            // Roadwheels (Wheel_L_0.., Wheel_R_0..): tag the track side. The suspension ray is
+            // cast by `apply_suspension` itself each tick (`SpatialQuery`, tick-truth wheel pose)
+            // — deliberately NOT a `RayCaster` component: its `RayHits` refresh after the step,
+            // which fed rollback replays stale hits (and its position-update system was the
+            // residual bind-window NaN vector).
             s if roadwheel_side(s).is_some() => {
                 let side = roadwheel_side(s).expect("guard matched");
                 match side {
                     TrackSide::Left => left_wheels += 1,
                     TrackSide::Right => right_wheels += 1,
                 }
-                entity.insert((
-                    Roadwheel { side },
-                    RayCaster::new(Vec3::ZERO, Dir3::NEG_Y)
-                        .with_max_distance(spec.suspension.ray_length)
-                        .with_query_filter(SpatialQueryFilter::from_mask(Layer::Terrain)),
-                ));
+                entity.insert(Roadwheel { side });
             }
             // Collision proxies (`*_Collider`): a convex-hull collider on the Vehicle layer, hidden
             // (it's physics, not rendering — ADR-0008). Collision-only: it contributes no mass (the

@@ -12,6 +12,7 @@ use avian3d::schedule::PhysicsSystems;
 use bevy::diagnostic::DiagnosticsStore;
 use bevy::prelude::*;
 use lightyear::avian3d::plugin::{AvianReplicationMode, LightyearAvianPlugin};
+use lightyear::frame_interpolation::{FrameInterpolate, FrameInterpolationPlugin};
 use lightyear::prediction::diagnostics::PredictionDiagnosticsPlugin;
 // `Remote` (bevy_replicon's "this entity arrived by replication", re-exported): the honest
 // authority-vs-replica discriminator — see `activate_bound_rig` on why `Predicted`/`Interpolated`
@@ -142,10 +143,7 @@ fn fixed_nan_probe(
             Option<&Rotation>,
             Option<&avian3d::prelude::ColliderTransform>,
         ),
-        Or<(
-            With<avian3d::prelude::ColliderOf>,
-            With<avian3d::prelude::RayCaster>,
-        )>,
+        With<avian3d::prelude::ColliderOf>,
     >,
     mut latched: Local<bool>,
 ) {
@@ -465,6 +463,50 @@ fn bridge_action_state_to_tank_command(
         // Whole-struct overwrite: matches `ActionState`'s own "absolute snapshot per tick"
         // contract (no per-field diffing needed).
         *command = action.0;
+    }
+}
+
+/// Client-side render smoothing for the predicted tank — the half of lightyear's prediction stack
+/// `LightyearAvianPlugin` does NOT mount (it only *orders* these systems' sets; the plugins and the
+/// per-entity `FrameInterpolate` markers are the app's job, per `lightyear_frame_interpolation`'s
+/// docs and the `avian_3d_character` example). Two effects:
+///   - between fixed ticks the root's Position/Rotation render as an overstep blend instead of raw
+///     64 Hz steps;
+///   - rollback *correction* arms: `update_frame_interpolation_post_rollback` requires
+///     `FrameInterpolate<C>` on the entity, so without it the registered correction fn is inert and
+///     every rollback SNAPS the tank (measured 10–26 rollbacks/s while driving at 80 ms — the
+///     rubber-banding) instead of decaying the error over `CorrectionPolicy` (~200 ms half-life).
+pub fn client_smoothing_plugin(app: &mut App) {
+    app.add_plugins((
+        FrameInterpolationPlugin::<Position>::default(),
+        FrameInterpolationPlugin::<Rotation>::default(),
+    ));
+    app.add_systems(Update, arm_predicted_smoothing);
+}
+
+/// Decorate the predicted tank ROOT with `FrameInterpolate` once `Predicted` and `Position` are
+/// both present. A polling system, not an `Add` observer: the prediction sync copies components
+/// from the confirmed entity in no guaranteed order (same shape as `strip_child_pose_history`).
+/// Root only — the children's poses are DERIVED state (root pose ∘ collider/servo transforms);
+/// frame-interpolating them would fight the systems that derive them.
+fn arm_predicted_smoothing(
+    tanks: Query<
+        Entity,
+        (
+            With<Predicted>,
+            With<SpikeTank>,
+            With<Position>,
+            Without<FrameInterpolate<Position>>,
+        ),
+    >,
+    mut commands: Commands,
+) {
+    for entity in &tanks {
+        info!("net: {entity} predicted root armed for frame interpolation + correction");
+        commands.entity(entity).insert((
+            FrameInterpolate::<Position>::default(),
+            FrameInterpolate::<Rotation>::default(),
+        ));
     }
 }
 
