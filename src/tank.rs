@@ -210,9 +210,9 @@ pub struct ServoCommand {
 /// at any frame rate — matching how Avian interpolates the hull (ADR-0004's sim-in-fixed bet,
 /// now covering the mechanisms too).
 ///
-/// `Clone`/`PartialEq`/`Debug` are for `local_rollback::<ServoState>()` (step 7, `net` feature) —
-/// it lives on turret/gun child entities, decorated `DeterministicPredicted` by `net.rs`.
-#[derive(Component, Clone, PartialEq, Debug)]
+/// An element of [`TankSim::servos`], NOT a component — a tank's carried mechanism state lives
+/// root-resident (see [`TankSim`] for why).
+#[derive(Clone, PartialEq, Debug)]
 pub struct ServoState {
     current: f32,
     /// The angle at the previous fixed tick — the render interpolation's blend-from.
@@ -241,6 +241,55 @@ impl ServoState {
         self.current
     }
 }
+
+/// One weapon's carried sim state — an element of [`TankSim::weapons`]. `reload_remaining` gates
+/// firing (0 = loaded); the recoil pair is the barrel's 1-DOF damped spring along the bore, which
+/// is muzzle pose and therefore sim truth (a shell fired mid-recoil leaves from the recoiled
+/// muzzle, replay included — previously the recoil state lived unregistered on the barrel, a
+/// small determinism gap).
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub struct WeaponState {
+    pub reload_remaining: f32,
+    pub recoil_offset: f32,
+    pub recoil_velocity: f32,
+}
+
+/// ALL of a tank's non-physics carried sim state, root-resident: servo mechanisms, weapon
+/// reload/recoil, and the wheels' brush anchors — indexed by the bind-time [`ServoIndex`]/
+/// [`WeaponIndex`]/[`WheelIndex`] on the corresponding rig child.
+///
+/// Root-resident is the load-bearing choice, not a convenience: under prediction, rollback
+/// restores state per ENTITY, and the tank root is the one replicated/predicted entity — state on
+/// the root gets history and replays with a plain `local_rollback::<TankSim>()`, while state on
+/// glb-bound children needed the whole `DeterministicPredicted` decoration machinery (history
+/// attach, pose-history stripping, despawn-grace windows — the step-7/8 hazard cluster, deleted
+/// with this move). Children keep config plus an index; their transforms are DERIVED from this
+/// state every tick, replays included.
+///
+/// Index assignment is sorted-by-name at bind (`on_tank_ready`) — the spec's servo/weapon maps
+/// are `HashMap`s, and their iteration order must never leak into indices that client and server
+/// both derive.
+#[derive(Component, Clone, PartialEq, Debug, Default)]
+pub struct TankSim {
+    pub servos: Vec<ServoState>,
+    pub weapons: Vec<WeaponState>,
+    /// Per-wheel brush anchor: the world point the contact "gripped" while near rest. `Some` =
+    /// static friction holds the tank there; `None` = slipping (kinetic) or airborne.
+    pub anchors: Vec<Option<Vec3>>,
+}
+
+/// This servo's slot in its tank's [`TankSim::servos`], assigned at bind in sorted-name order.
+#[derive(Component, Clone, Copy)]
+pub struct ServoIndex(pub usize);
+
+/// This weapon's slot in [`TankSim::weapons`] — on the muzzle AND the recoiling barrel (both
+/// actuate from the same weapon state), assigned at bind in sorted-name order.
+#[derive(Component, Clone, Copy)]
+pub struct WeaponIndex(pub usize);
+
+/// This roadwheel's slot in [`TankSim::anchors`], assigned at bind in sorted-name order.
+#[derive(Component, Clone, Copy)]
+pub struct WheelIndex(pub usize);
 
 /// Tank spawning, the spec→rig binder, and the servo mechanism — authority-side.
 /// The single-player *scenario*: load the Tiger spec up front, spawn the two-tank duel setup once
@@ -579,6 +628,9 @@ pub fn on_tank_ready(
     let mut left_wheels = 0u32;
     let mut right_wheels = 0u32;
     let mut colliders = 0u32;
+    // Roadwheel nodes collected during the walk; sorted by name after it so each wheel's
+    // `WheelIndex` into `TankSim::anchors` is walk-order-independent.
+    let mut wheel_nodes: Vec<(String, Entity, TrackSide)> = Vec::new();
     // Rig-node handles captured for this tank's `Rig` (built after the contract check below).
     let mut hull_node = None;
     let mut turret_node = None;
@@ -626,7 +678,9 @@ pub fn on_tank_ready(
                     TrackSide::Left => left_wheels += 1,
                     TrackSide::Right => right_wheels += 1,
                 }
-                entity.insert(Roadwheel { side });
+                // Collected, not inserted here: the wheel's `WheelIndex` into `TankSim::anchors`
+                // is its position in the name-sorted list, assigned after the walk.
+                wheel_nodes.push((name.to_string(), id, side));
             }
             // Collision proxies (`*_Collider`): a convex-hull collider on the Vehicle layer, hidden
             // (it's physics, not rendering — ADR-0008). Collision-only: it contributes no mass (the
@@ -655,9 +709,13 @@ pub fn on_tank_ready(
     // servo bundle + its role (the aim pass drives *every* servo by role; no chain concept). The
     // `Turret`/`Gun` markers are NOT set here — with multiple mounts of a role they'd be ambiguous;
     // they go on the primary weapon's chain below. A declared servo with no matching node is fatal.
+    // Sorted by node name: the entry's position is its `ServoIndex` into `TankSim::servos`, and a
+    // HashMap's iteration order must never decide an index both wire ends derive.
     let mut missing_servos: Vec<&str> = Vec::new();
     let mut yaw_servos: HashSet<Entity> = HashSet::new();
-    for (node, servo) in &spec.servos {
+    let mut servo_entries: Vec<_> = spec.servos.iter().collect();
+    servo_entries.sort_by_key(|(node, _)| node.as_str());
+    for (slot, (node, servo)) in servo_entries.into_iter().enumerate() {
         let Some(&id) = index.get(node.as_str()) else {
             missing_servos.push(node.as_str());
             continue;
@@ -665,7 +723,7 @@ pub fn on_tank_ready(
         commands.entity(id).insert((
             servo.clone(),
             ServoCommand::default(),
-            ServoState::default(),
+            ServoIndex(slot),
             TankRoot(ready.entity),
             servo.role,
         ));
@@ -678,8 +736,11 @@ pub fn on_tank_ready(
     // `index`, tag the nodes, and attach the `Weapon` config the shooting systems read. One weapon
     // for now (the main gun) — the coax + hull MG join with the multi-weapon increment — so the
     // rig's `muzzle`/`barrel` are this single weapon's. A weapon node that doesn't resolve is fatal.
+    // Sorted for the same reason as servos: position = `WeaponIndex` into `TankSim::weapons`.
     let mut missing_weapon_nodes: Vec<&str> = Vec::new();
-    for (weapon_name, weapon) in &spec.weapons {
+    let mut weapon_entries: Vec<_> = spec.weapons.iter().collect();
+    weapon_entries.sort_by_key(|(name, _)| name.as_str());
+    for (slot, (weapon_name, weapon)) in weapon_entries.into_iter().enumerate() {
         let Some(&muzzle) = index.get(weapon.muzzle.as_str()) else {
             missing_weapon_nodes.push(weapon.muzzle.as_str());
             continue;
@@ -697,6 +758,7 @@ pub fn on_tank_ready(
         commands.entity(muzzle).insert((
             Muzzle,
             TankRoot(ready.entity),
+            WeaponIndex(slot),
             Weapon {
                 name: weapon_name.clone(),
                 speed: weapon.speed,
@@ -711,7 +773,10 @@ pub fn on_tank_ready(
             },
         ));
         if let Some(barrel) = barrel {
-            commands.entity(barrel).insert(GunBarrel);
+            // The barrel actuates from the same weapon slot (recoil state) — see `apply_recoil`.
+            commands
+                .entity(barrel)
+                .insert((GunBarrel, WeaponIndex(slot), TankRoot(ready.entity)));
         }
         // The single `Primary` weapon supplies the rig's main bore (`Rig.muzzle`) — what the bore
         // HUD reads and LMB fires. The traverse/elevation handles come from the gunner *view* below,
@@ -835,15 +900,33 @@ pub fn on_tank_ready(
         "tank model is missing required rig nodes: {missing:?}"
     );
 
+    // Wheels get their slot in name-sorted order (see `wheel_nodes` above).
+    wheel_nodes.sort_by(|a, b| a.0.cmp(&b.0));
+    let wheel_count = wheel_nodes.len();
+    for (slot, (_, id, side)) in wheel_nodes.into_iter().enumerate() {
+        commands
+            .entity(id)
+            .insert((Roadwheel { side }, WheelIndex(slot)));
+    }
+
     // The contract check above guarantees every rig node was found, so these unwraps can't fire.
     // Record them so control systems can address *this* tank's parts by entity (`rig.gun`). The
     // recoiling barrel isn't a rig field — it rides each `Weapon` (`weapon.barrel`).
-    commands.entity(ready.entity).insert(Rig {
-        hull: hull_node.unwrap(),
-        turret: turret_node.unwrap(),
-        gun: gun_node.unwrap(),
-        muzzle: muzzle_node.unwrap(),
-    });
+    // `TankSim` is sized to the bound rig: every slot exists from birth (reloads start 0.0 =
+    // loaded; servo rest quats are captured by `drive_servos`' first step).
+    commands.entity(ready.entity).insert((
+        Rig {
+            hull: hull_node.unwrap(),
+            turret: turret_node.unwrap(),
+            gun: gun_node.unwrap(),
+            muzzle: muzzle_node.unwrap(),
+        },
+        TankSim {
+            servos: vec![ServoState::default(); spec.servos.len()],
+            weapons: vec![WeaponState::default(); spec.weapons.len()],
+            anchors: vec![None; wheel_count],
+        },
+    ));
 }
 
 /// The servo's absolute pose write: rest · R(axis, angle) — shared by the three writers (truth
@@ -855,9 +938,16 @@ fn write_servo_pose(transform: &mut Transform, spec: &ServoSpec, state: &ServoSt
 /// Top of each fixed tick: re-assert every servo node's `Transform` to the mechanism's current
 /// angle, undoing `interpolate_servos`' render-time lerp — sim readers inside this tick
 /// (`rig_world_pose` chains, the child-collider sync) must see tick state. Cheap: a quat multiply
-/// per servo.
-fn restore_servo_truth(mut q: Query<(&mut Transform, &ServoSpec, &ServoState)>) {
-    for (mut transform, spec, state) in &mut q {
+/// per servo. Reads the root-resident state (`TankSim::servos`) — during a rollback replay this
+/// is what re-derives the node transforms from the RESTORED state each tick.
+fn restore_servo_truth(
+    mut q: Query<(&mut Transform, &ServoSpec, &ServoIndex, &TankRoot)>,
+    sims: Query<&TankSim>,
+) {
+    for (mut transform, spec, slot, root) in &mut q {
+        let Some(state) = sims.get(root.0).ok().and_then(|sim| sim.servos.get(slot.0)) else {
+            continue;
+        };
         if state.captured {
             write_servo_pose(&mut transform, spec, state, state.current);
         }
@@ -869,15 +959,22 @@ fn drive_servos(
         &mut Transform,
         &ServoSpec,
         &ServoCommand,
-        &mut ServoState,
+        &ServoIndex,
         &TankRoot,
     )>,
+    mut sims: Query<&mut TankSim>,
     tanks: Query<&TankVolumes>,
     facets: Query<VolumeFacets>,
     time: Res<Time>,
 ) {
     let dt = time.delta_secs();
-    for (mut transform, spec, command, mut state, root) in &mut q {
+    for (mut transform, spec, command, slot, root) in &mut q {
+        let Ok(mut sim) = sims.get_mut(root.0) else {
+            continue;
+        };
+        let Some(state) = sim.servos.get_mut(slot.0) else {
+            continue;
+        };
         // Capture the node's authored rest rotation once, so the pose write can be an *absolute*
         // rotation (`rest · R(axis, angle)`) instead of accumulating deltas (no round-off).
         if !state.captured {
@@ -951,7 +1048,8 @@ fn drive_servos(
         // Publish the freshly-stepped angle as this tick's node pose — the value avian's
         // child-collider sync and any later-in-tick reader consume (`interpolate_servos`
         // re-blends it for rendering after the fixed loop).
-        write_servo_pose(&mut transform, spec, &state, state.current);
+        let angle = state.current;
+        write_servo_pose(&mut transform, spec, state, angle);
     }
 }
 
@@ -961,10 +1059,14 @@ fn drive_servos(
 /// continuous mount's ±π wrap doesn't spin the long way round.
 fn interpolate_servos(
     time: Res<Time<Fixed>>,
-    mut servos: Query<(&mut Transform, &ServoSpec, &ServoState)>,
+    mut servos: Query<(&mut Transform, &ServoSpec, &ServoIndex, &TankRoot)>,
+    sims: Query<&TankSim>,
 ) {
     let alpha = time.overstep_fraction();
-    for (mut transform, spec, state) in &mut servos {
+    for (mut transform, spec, slot, root) in &mut servos {
+        let Some(state) = sims.get(root.0).ok().and_then(|sim| sim.servos.get(slot.0)) else {
+            continue;
+        };
         if !state.captured {
             continue;
         }

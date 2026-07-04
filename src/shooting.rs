@@ -12,34 +12,21 @@ use crate::command::{ConsumeCommandEdges, TankCommand};
 use crate::damage::{TankVolumes, VolumeFacets, requirement_met};
 use crate::spec::Trigger;
 use crate::state::GameplaySet;
-use crate::tank::{Tank, TankRoot, Weapon, rig_world_pose};
+use crate::tank::{Muzzle, Tank, TankRoot, TankSim, Weapon, WeaponIndex, rig_world_pose};
 
 /// Feel multiplier on the hull recoil impulse (1.0 = physical momentum). On a 57 t hull true momentum
 /// is a gentle rock by design; bump this if the firing kick should read more dramatically.
 const RECOIL_FEEL: f32 = 1.0;
 
-/// Procedural barrel recoil: a 1-DOF damped spring on the barrel. Firing kicks it back along
-/// the bore (+local Z); the spring returns it to battery. The translational cousin of `Servo`.
-/// `stiffness`/`damping` are baked in from the weapon's `recoil` spec at setup, so `apply_recoil`
-/// needs only this component (the per-weapon tuning travels with the barrel).
+/// Procedural barrel recoil CONFIG: the damped-spring tuning + the barrel's rest position, baked
+/// from the weapon's `recoil` spec at setup. The recoil STATE (offset/velocity) is sim truth —
+/// the muzzle rides the barrel — and lives root-resident in `TankSim::weapons` (see `TankSim`),
+/// keyed by the barrel's `WeaponIndex`. The translational cousin of `Servo`.
 #[derive(Component)]
-struct Recoil {
+struct RecoilParams {
     rest: Vec3,
-    offset: f32,
-    velocity: f32,
     stiffness: f32,
     damping: f32,
-}
-
-/// Weapon reload state: seconds remaining before the next shot. 0 = ready (loaded). A component on
-/// the weapon's muzzle entity (per-weapon, not a singleton). Ticks down only while the Load
-/// capability holds (Loader staffed + Breech intact) — a dead Loader freezes it partway through.
-///
-/// `Clone`/`PartialEq`/`Debug` are for `local_rollback::<Reload>()` (step 7, `net` feature) — it
-/// lives on the weapon's muzzle child entity, decorated `DeterministicPredicted` by `net.rs`.
-#[derive(Component, Clone, PartialEq, Debug)]
-pub struct Reload {
-    pub remaining: f32,
 }
 
 pub fn plugin(app: &mut App) {
@@ -56,9 +43,9 @@ pub fn plugin(app: &mut App) {
     );
 }
 
-/// React to the binder attaching a `Weapon`: start its `Reload` (ready), and — if it recoils — set
-/// up the barrel's `Recoil` from the barrel's rest pose plus the weapon's recoil tuning. Keeps the
-/// shooting state out of the rig binder; the per-weapon numbers ride in from the spec via `Weapon`.
+/// React to the binder attaching a `Weapon`: if it recoils, capture the barrel's authored rest
+/// pose + the spring tuning as `RecoilParams`. The reload/recoil STATE needs no setup — the
+/// binder sizes `TankSim::weapons` at bind (reloads start 0.0 = ready).
 fn attach_weapon(
     add: On<Add, Weapon>,
     weapons: Query<&Weapon>,
@@ -68,16 +55,11 @@ fn attach_weapon(
     let Ok(weapon) = weapons.get(add.entity) else {
         return;
     };
-    commands
-        .entity(add.entity)
-        .insert(Reload { remaining: 0.0 });
     if let (Some(barrel), Some(recoil)) = (weapon.barrel, weapon.recoil.as_ref())
         && let Ok(transform) = transforms.get(barrel)
     {
-        commands.entity(barrel).insert(Recoil {
+        commands.entity(barrel).insert(RecoilParams {
             rest: transform.translation,
-            offset: 0.0,
-            velocity: 0.0,
             stiffness: recoil.stiffness,
             damping: recoil.damping,
         });
@@ -92,14 +74,21 @@ fn tick_reload(
     time: Res<Time>,
     tanks: Query<Option<&TankVolumes>, With<Tank>>,
     volumes: Query<VolumeFacets>,
-    mut weapons: Query<(&mut Reload, &Weapon, &TankRoot)>,
+    weapons: Query<(&Weapon, &WeaponIndex, &TankRoot), With<Muzzle>>,
+    mut sims: Query<&mut TankSim>,
 ) {
-    for (mut reload, weapon, root) in &mut weapons {
+    for (weapon, slot, root) in &weapons {
         let Ok(tank_volumes) = tanks.get(root.0) else {
             continue;
         };
-        if reload.remaining > 0.0 && requirement_met(tank_volumes, &weapon.load, &volumes) {
-            reload.remaining = (reload.remaining - time.delta_secs()).max(0.0);
+        let Ok(mut sim) = sims.get_mut(root.0) else {
+            continue;
+        };
+        let Some(state) = sim.weapons.get_mut(slot.0) else {
+            continue;
+        };
+        if state.reload_remaining > 0.0 && requirement_met(tank_volumes, &weapon.load, &volumes) {
+            state.reload_remaining = (state.reload_remaining - time.delta_secs()).max(0.0);
         }
     }
 }
@@ -112,14 +101,14 @@ fn tick_reload(
 fn fire(
     tanks: Query<(&TankCommand, Option<&TankVolumes>, &Position, &Rotation), With<Tank>>,
     volumes: Query<VolumeFacets>,
-    mut weapons: Query<(Entity, &Weapon, &mut Reload, &TankRoot)>,
-    mut barrels: Query<&mut Recoil>,
+    weapons: Query<(Entity, &Weapon, &WeaponIndex, &TankRoot), With<Muzzle>>,
+    mut sims: Query<&mut TankSim>,
     mut bodies: Query<Forces, With<Tank>>,
     parents: Query<&ChildOf>,
     locals: Query<&Transform>,
     mut commands: Commands,
 ) {
-    for (muzzle_entity, weapon, mut reload, root) in &mut weapons {
+    for (muzzle_entity, weapon, slot, root) in &weapons {
         let Ok((command, tank_volumes, position, rotation)) = tanks.get(root.0) else {
             continue;
         };
@@ -127,10 +116,12 @@ fn fire(
             Trigger::Primary => command.fire_primary,
             Trigger::Secondary => command.fire_secondary,
         };
-        if !triggered
-            || reload.remaining > 0.0
-            || !requirement_met(tank_volumes, &weapon.fire, &volumes)
-        {
+        let ready = sims
+            .get(root.0)
+            .ok()
+            .and_then(|sim| sim.weapons.get(slot.0))
+            .is_some_and(|w| w.reload_remaining <= 0.0);
+        if !triggered || !ready || !requirement_met(tank_volumes, &weapon.fire, &volumes) {
             continue;
         }
 
@@ -160,11 +151,12 @@ fn fire(
             caliber: weapon.caliber,
             mass: weapon.mass,
         });
-        // Kick the barrel back; apply_recoil springs it home.
-        if let (Some(barrel), Some(recoil)) = (weapon.barrel, weapon.recoil.as_ref())
-            && let Ok(mut state) = barrels.get_mut(barrel)
+        // Kick the barrel back (root-resident recoil state); apply_recoil springs it home.
+        if let (Some(_), Some(recoil)) = (weapon.barrel, weapon.recoil.as_ref())
+            && let Ok(mut sim) = sims.get_mut(root.0)
+            && let Some(state) = sim.weapons.get_mut(slot.0)
         {
-            state.velocity += recoil.kick;
+            state.recoil_velocity += recoil.kick;
         }
         // Recoil reaction on the hull: the shell's momentum, opposite the bore, applied on the bore
         // axis. The line of action passes above the centre of mass, so the impulse-at-point also
@@ -174,23 +166,40 @@ fn fire(
             let impulse = bore * (-weapon.mass * weapon.speed * RECOIL_FEEL);
             forces.apply_linear_impulse_at_point(impulse, muzzle_position);
         }
-        reload.remaining = weapon.reload;
+        if let Ok(mut sim) = sims.get_mut(root.0)
+            && let Some(state) = sim.weapons.get_mut(slot.0)
+        {
+            state.reload_remaining = weapon.reload;
+        }
     }
 }
 
-fn apply_recoil(mut barrel: Query<(&mut Transform, &mut Recoil)>, time: Res<Time>) {
+/// Step each recoiling barrel's damped spring (state root-resident in `TankSim::weapons`, so a
+/// rollback replay re-derives the barrel — and therefore the muzzle — from restored state) and
+/// write the barrel's node `Transform`.
+fn apply_recoil(
+    mut barrels: Query<(&mut Transform, &RecoilParams, &WeaponIndex, &TankRoot)>,
+    mut sims: Query<&mut TankSim>,
+    time: Res<Time>,
+) {
     let dt = time.delta_secs();
-    for (mut transform, mut recoil) in &mut barrel {
+    for (mut transform, params, slot, root) in &mut barrels {
+        let Ok(mut sim) = sims.get_mut(root.0) else {
+            continue;
+        };
+        let Some(state) = sim.weapons.get_mut(slot.0) else {
+            continue;
+        };
         // Damped spring back to battery: offset'' = -k·offset - c·offset'.
-        let accel = -recoil.stiffness * recoil.offset - recoil.damping * recoil.velocity;
-        recoil.velocity += accel * dt;
-        recoil.offset += recoil.velocity * dt;
+        let accel = -params.stiffness * state.recoil_offset - params.damping * state.recoil_velocity;
+        state.recoil_velocity += accel * dt;
+        state.recoil_offset += state.recoil_velocity * dt;
         // Battery stop — the barrel can't return past its rest position.
-        if recoil.offset < 0.0 {
-            recoil.offset = 0.0;
-            recoil.velocity = 0.0;
+        if state.recoil_offset < 0.0 {
+            state.recoil_offset = 0.0;
+            state.recoil_velocity = 0.0;
         }
         // Recoil rides back along the bore (+local Z), measured from the rest position.
-        transform.translation = recoil.rest + Vec3::Z * recoil.offset;
+        transform.translation = params.rest + Vec3::Z * state.recoil_offset;
     }
 }

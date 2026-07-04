@@ -14,7 +14,7 @@ use crate::damage::{
     Capability, TankCapabilities, TankVolumes, VolumeFacets, capability_available,
 };
 use crate::state::GameplaySet;
-use crate::tank::{CenterOfMassAnchor, Roadwheel, Tank, TrackSide, rig_world_pose};
+use crate::tank::{CenterOfMassAnchor, Roadwheel, Tank, TankSim, TrackSide, WheelIndex, rig_world_pose};
 
 /// Coulomb coefficient: each wheel's total ground force is capped at MU × load (friction ellipse).
 /// Per-environment (the track-vs-ground surface pair), not per-tank — destined for the terrain
@@ -123,11 +123,11 @@ fn set_center_of_mass(
     }
 }
 
-/// Per-roadwheel suspension state. Written by `apply_suspension`; the contact point + load are
-/// what the drive friction will also read (one ray, both jobs). `contact: None` = wheel airborne.
-///
-/// `Clone`/`PartialEq`/`Debug` are for `local_rollback::<Suspension>()` (step 7, `net` feature) —
-/// harmless derives on a plain-data struct, added unconditionally rather than feature-gated.
+/// Per-roadwheel DERIVED suspension state, recomputed from this tick's ray cast before anything
+/// reads it — never carried across ticks, so it needs no rollback history. The one piece of
+/// carried per-wheel state, the brush ANCHOR, lives root-resident in `TankSim::anchors` (see
+/// `TankSim` on why carried state must sit on the root under prediction). `contact: None` =
+/// wheel airborne.
 #[derive(Component, Default, Clone, PartialEq, Debug)]
 pub struct Suspension {
     /// Ground contact this tick (world) — where drive force is applied. `None` = airborne.
@@ -136,9 +136,6 @@ pub struct Suspension {
     pub load: f32,
     /// Horizontal ground force applied this tick (thrust + friction), kept for the debug viz.
     pub drive_force: Vec3,
-    /// Brush-anchor: the world point the contact "gripped" while near rest. `Some` = gripping
-    /// (static friction holds the tank here); `None` = slipping (kinetic) or airborne.
-    pub anchor: Option<Vec3>,
 }
 
 /// Attach `Suspension` the moment the rig binds a `Roadwheel` (observer, ungated).
@@ -166,25 +163,44 @@ fn apply_suspension(
     // unlike thrust, which each tank takes from its own command. The `&SuspensionParams` gates a
     // body in: no suspension until the spec is applied to the hull (ADR-0011 — no default spring).
     spatial: SpatialQuery,
-    mut bodies: Query<(Entity, &Position, &Rotation, Forces, &SuspensionParams), With<Tank>>,
+    mut bodies: Query<
+        (
+            Entity,
+            &Position,
+            &Rotation,
+            Forces,
+            &SuspensionParams,
+            &mut TankSim,
+        ),
+        With<Tank>,
+    >,
     children: Query<&Children>,
     parents: Query<&ChildOf>,
     locals: Query<&Transform>,
-    mut wheels: Query<&mut Suspension, With<Roadwheel>>,
+    mut wheels: Query<(&WheelIndex, &mut Suspension), With<Roadwheel>>,
 ) {
     let filter = SpatialQueryFilter::from_mask(Layer::Terrain);
-    for (body, position, rotation, mut forces, params) in &mut bodies {
+    for (body, position, rotation, mut forces, params, mut sim) in &mut bodies {
         // Only this body's own roadwheels (its rig descendants) push on it — otherwise a second
-        // tank's wheel hits would load this hull.
+        // tank's wheel hits would load this hull. An unsupported wheel also releases its brush
+        // anchor (the carried state in `TankSim`) — airborne tracks grip nothing.
         for wheel in children.iter_descendants(body) {
-            let Ok(mut suspension) = wheels.get_mut(wheel) else {
+            let Ok((wheel_slot, mut suspension)) = wheels.get_mut(wheel) else {
                 continue;
+            };
+            // Unsupported (airborne / corrupt frame / no compression): no derived state this
+            // tick, AND the brush anchor releases — airborne tracks grip nothing.
+            let unsupported = |suspension: &mut Suspension, sim: &mut TankSim| {
+                *suspension = Suspension::default();
+                if let Some(anchor) = sim.anchors.get_mut(wheel_slot.0) {
+                    *anchor = None;
+                }
             };
             // Wheel nodes are authored with identity rotation, so wheel-local −Y is hull-down.
             let Some((origin, wheel_rotation)) =
                 rig_world_pose(wheel, body, position.0, rotation.0, &parents, &locals)
             else {
-                *suspension = Suspension::default();
+                unsupported(&mut suspension, &mut sim);
                 continue;
             };
             // Same NaN discipline as the aim path: a corrupt pose frame (bind-window rollback
@@ -192,22 +208,22 @@ fn apply_suspension(
             // body. `Dir3::new` already rejects a non-finite direction; the origin needs its own
             // guard.
             if !origin.is_finite() {
-                *suspension = Suspension::default();
+                unsupported(&mut suspension, &mut sim);
                 continue;
             }
             let Ok(down) = Dir3::new(wheel_rotation * Vec3::NEG_Y) else {
-                *suspension = Suspension::default();
+                unsupported(&mut suspension, &mut sim);
                 continue;
             };
             let Some(hit) = spatial.cast_ray(origin, down, params.ray_length, true, &filter)
             else {
-                *suspension = Suspension::default();
+                unsupported(&mut suspension, &mut sim);
                 continue;
             };
 
             let compression = params.rest_length - hit.distance;
             if compression <= 0.0 {
-                *suspension = Suspension::default();
+                unsupported(&mut suspension, &mut sim);
                 continue;
             }
 
@@ -279,6 +295,7 @@ fn apply_drive(
             Forces,
             &Drivetrain,
             &DriveState,
+            &mut TankSim,
             Option<&TankVolumes>,
             Option<&TankCapabilities>,
         ),
@@ -286,12 +303,13 @@ fn apply_drive(
     >,
     children: Query<&Children>,
     volumes: Query<VolumeFacets>,
-    mut wheels: Query<(&Roadwheel, &mut Suspension)>,
+    mut wheels: Query<(&Roadwheel, &WheelIndex, &mut Suspension)>,
 ) {
     // Per tank. `Drivetrain` is required per-variant data with no fallback (ADR-0010): we never
     // guess stats. It's absent only in the startup frames before the spec applies (a failed load is
     // fatal — see `report_failed_spec`), so a tank with no `Drivetrain` is simply not driven yet.
-    for (body, tank_rotation, mut forces, drivetrain, state, tank_volumes, tank_caps) in &mut bodies
+    for (body, tank_rotation, mut forces, drivetrain, state, mut sim, tank_volumes, tank_caps) in
+        &mut bodies
     {
         // Drive gates *thrust*, not grip: only a tank with a live `Drive` capability applies its
         // drive signal. One with a dead driver/engine/transmission gets zero command but still runs
@@ -318,7 +336,11 @@ fn apply_drive(
         // Only this tank's own roadwheels (its rig descendants) — otherwise the other tank's wheels
         // would take this tank's drive.
         for wheel_entity in children.iter_descendants(body) {
-            let Ok((wheel, mut suspension)) = wheels.get_mut(wheel_entity) else {
+            let Ok((wheel, wheel_slot, mut suspension)) = wheels.get_mut(wheel_entity) else {
+                continue;
+            };
+            // The wheel's carried brush anchor, root-resident (see `TankSim`).
+            let Some(anchor) = sim.anchors.get_mut(wheel_slot.0) else {
                 continue;
             };
             let (Some(contact), load) = (suspension.contact, suspension.load) else {
@@ -326,7 +348,7 @@ fn apply_drive(
             };
             if load <= 0.0 {
                 suspension.drive_force = Vec3::ZERO;
-                suspension.anchor = None;
+                *anchor = None;
                 continue;
             }
 
@@ -347,9 +369,9 @@ fn apply_drive(
             // hold); above it, it slips and friction is the kinetic skid / coast-down model.
             let gripping = v_fwd.hypot(v_lat) < STICK_SPEED;
             if !gripping {
-                suspension.anchor = None;
-            } else if suspension.anchor.is_none() {
-                suspension.anchor = Some(contact);
+                *anchor = None;
+            } else if anchor.is_none() {
+                *anchor = Some(contact);
             }
 
             // Friction ellipse: tracks grip hard fore-aft (full μ·load) but skid sideways at the
@@ -360,7 +382,7 @@ fn apply_drive(
             let grip_lat = grip * LATERAL_GRIP_RATIO;
 
             // Slip from the planted anchor, split into the ground-plane axes.
-            let (mut d_fwd, mut d_lat) = match suspension.anchor {
+            let (mut d_fwd, mut d_lat) = match *anchor {
                 Some(anchor) => (
                     (contact - anchor).dot(forward),
                     (contact - anchor).dot(right),
@@ -372,7 +394,7 @@ fn apply_drive(
             // stretches only to its slip point — d_fwd to grip/k, d_lat to grip_lat/k. Past the
             // ellipse the bristle *trails* the contact at that fixed deflection (a smooth Coulomb
             // slide) instead of snapping back to zero, which removes the low-speed stick-slip cycle.
-            if suspension.anchor.is_some() {
+            if anchor.is_some() {
                 let a_fwd = grip / drivetrain.brush_stiffness;
                 let a_lat = grip_lat / drivetrain.brush_stiffness;
                 let e = (d_fwd / a_fwd).powi(2) + (d_lat / a_lat).powi(2);
@@ -380,7 +402,7 @@ fn apply_drive(
                     let s = e.sqrt().recip();
                     d_fwd *= s;
                     d_lat *= s;
-                    suspension.anchor = Some(contact - forward * d_fwd - right * d_lat);
+                    *anchor = Some(contact - forward * d_fwd - right * d_lat);
                 }
             }
 
@@ -388,8 +410,8 @@ fn apply_drive(
             // spring doesn't fight the drive — the wheel "rolls"); else hold (static spring) or,
             // while still rolling, the engine-brake / coast-down.
             let f_fwd = if driving {
-                if let Some(anchor) = suspension.anchor {
-                    suspension.anchor = Some(anchor + forward * d_fwd);
+                if let Some(planted) = *anchor {
+                    *anchor = Some(planted + forward * d_fwd);
                 }
                 command * drivetrain.max_thrust - drivetrain.rolling_resistance * v_fwd
             } else if gripping {

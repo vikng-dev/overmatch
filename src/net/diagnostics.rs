@@ -11,10 +11,9 @@ use lightyear::prediction::diagnostics::PredictionDiagnosticsPlugin;
 use lightyear::prelude::*;
 
 use crate::ballistics::ShellPath;
-use crate::driving::Suspension;
-use crate::shooting::Reload;
 use super::protocol::NetTank;
-use crate::tank::{Hull, Rig, ServoState, Tank, Turret};
+use crate::driving::Suspension;
+use crate::tank::{Hull, Rig, Tank, TankSim, Turret};
 
 /// Diagnostic (bind-window NaN): at the top of each physics tick, name every entity whose
 /// physics state or `ColliderTransform` is non-finite — with values — then latch. Runs before
@@ -202,8 +201,8 @@ pub(crate) fn log_prediction_diagnostics(
 /// reload timer (the Tiger has two — MainGun + Coax; the MainGun's goes non-zero after a fire
 /// consumes the click). One tank per side in this spike, so the single-turret read is unambiguous.
 pub(crate) fn log_sim_evidence(
-    turrets: Query<&ServoState, With<Turret>>,
-    reloads: Query<&Reload>,
+    turrets: Query<(&crate::tank::ServoIndex, &crate::tank::TankRoot), With<Turret>>,
+    sims: Query<&TankSim>,
     wheels: Query<&Suspension>,
     mut timer: Local<f32>,
     time: Res<Time>,
@@ -215,8 +214,16 @@ pub(crate) fn log_sim_evidence(
     *timer = 0.0;
     let grounded = wheels.iter().filter(|s| s.contact.is_some()).count();
     let total = wheels.iter().count();
-    let turret = turrets.iter().next().map(ServoState::current);
-    let reloads: Vec<f32> = reloads.iter().map(|r| r.remaining).collect();
+    let turret = turrets.iter().next().and_then(|(slot, root)| {
+        sims.get(root.0)
+            .ok()
+            .and_then(|sim| sim.servos.get(slot.0))
+            .map(crate::tank::ServoState::current)
+    });
+    let reloads: Vec<f32> = sims
+        .iter()
+        .flat_map(|sim| sim.weapons.iter().map(|w| w.reload_remaining))
+        .collect();
     info!(
         "net: SIM-EVIDENCE wheels_grounded={grounded}/{total} turret_angle={turret:?} reloads={reloads:?}"
     );

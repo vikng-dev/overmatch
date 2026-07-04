@@ -1,15 +1,17 @@
-//! The networked tank-rig lifecycle: spawning a replicated tank's local body, decorating its
-//! child parts as rollback participants, and arming the predicted root's render smoothing. Four
-//! invariants this module maintains:
-//!   1. the rig's non-root children become `DeterministicPredicted` with `skip_despawn: true`
-//!      (they roll back with the root but survive the post-bind rollback burst);
-//!   2. that derived child pose state (`Position`/`Rotation`) carries NO `PredictionHistory` — the
-//!      children's poses are recomputed from the root every tick, and stored history poisons replay;
-//!   3. the body goes `Dynamic` only in the same command-flush as the binder's collider inserts —
+//! The networked tank-rig lifecycle: spawning a replicated tank's local body and arming the
+//! predicted root's render smoothing. Three invariants this module maintains:
+//!   1. the rig attaches only to a valid replicated pose — never to avian's require-inserted
+//!      placeholder (`attach_replicated_rig`'s pose gate, the cold-start crash fix);
+//!   2. the body goes `Dynamic` only in the same command-flush as the binder's collider inserts —
 //!      never before (free-fall) and never after attachment (NaN);
-//!   4. no rollback replays the entity between the bind flush and the end of the rig's first full
-//!      physics tick — the children's poses are placeholder sentinels until first propagation
-//!      (`DisableRollback`, see `attach_replicated_rig` / the cold-server bind crash).
+//!   3. no rollback replays the entity between the bind flush and the end of the rig's first full
+//!      physics tick (`DisableRollback`, lifted by `enable_rollback_after_first_tick`).
+//!
+//! The rig's CHILDREN are not rollback participants at all: every carried child state lives
+//! root-resident in `tank::TankSim` (one `local_rollback` on the predicted root), and child
+//! transforms are derived from it each tick — which is what retired the whole
+//! `DeterministicPredicted` decoration / pose-history-stripping / despawn-grace machinery this
+//! module used to maintain (steps 7–8's hazard cluster).
 
 use avian3d::prelude::{Position, RigidBody, Rotation};
 use bevy::prelude::*;
@@ -21,13 +23,10 @@ use lightyear::prelude::client::Remote;
 use lightyear::prelude::*;
 
 use super::protocol::NetTank;
-use crate::tank::{Rig, Roadwheel, on_tank_ready};
+use crate::tank::{Rig, on_tank_ready};
 
 pub(crate) fn plugin(app: &mut App) {
     app.add_observer(activate_bound_rig);
-    app.add_observer(strip_child_pose_history::<Position>);
-    app.add_observer(strip_child_pose_history::<Rotation>);
-    app.add_systems(Update, decorate_rig_children);
     // FixedLast = the earliest point provably AFTER the fresh rig's first full physics tick
     // (collider-transform propagation included) — see `enable_rollback_after_first_tick`.
     app.add_systems(
@@ -174,87 +173,6 @@ fn activate_bound_rig(
     }
     info!("net: {} rig bound — body goes Dynamic", add.entity);
     commands.entity(add.entity).insert(RigidBody::Dynamic);
-}
-
-/// Decorate a bound rig's non-root parts as rollback-participant the moment both `Rig` (the
-/// binder's terminal insert) and `Predicted` are present on the root (order either can land in —
-/// `Predicted` arrives at spawn, `Rig` seconds later on glb load, so this is really gated on `Rig`
-/// alone in practice, but querying both is the honest precondition per the step-7 map §7 design).
-///
-/// `DeterministicPredicted` marks each part as predicted-but-uncompared: it gets a
-/// `PredictionHistory` and rolls back with the root, but never itself trips a rollback from state
-/// mismatch (it isn't replicated, so it has nothing to mismatch against). Without this,
-/// `local_rollback::<ServoState>()` etc. below would silently no-op on these entities (map §3: the
-/// history-attach observer gates on the trigger entity carrying `Predicted`/`PreSpawned`/
-/// `DeterministicPredicted`/`CatchUpGated` directly — no hierarchy traversal exists).
-///
-/// `skip_despawn: true`, REVERSING the map §7 amendment 1 on live evidence: with the default
-/// (`skip_despawn: false`) every rollback whose target tick predates the decoration tick despawns
-/// the children (`deterministic_despawn` drain, rollback.rs) — and rollbacks fire *continuously*
-/// through the post-bind suspension-settle burst, so the "vanishingly narrow" collision window is
-/// actually the common case: measured, all 19 children despawned ~16 ms after decoration, rig
-/// permanently broken client-side, 201 rollbacks/15 s. The skip_despawn variant instead stamps
-/// `DisableRollback` during the grace window (`enable_rollback_after`, default 20 ticks) and then
-/// lifts it — the children survive the burst and become full rollback participants ~300 ms later.
-fn decorate_rig_children(
-    ready: Query<(Entity, &Rig), (Added<Rig>, With<Predicted>)>,
-    all_children: Query<&Children>,
-    roadwheels: Query<(), With<Roadwheel>>,
-    mut commands: Commands,
-) {
-    let decoration = DeterministicPredicted {
-        skip_despawn: true,
-        ..default()
-    };
-    for (root, rig) in &ready {
-        let mut decorated = 3;
-        for part in [rig.turret, rig.gun, rig.muzzle] {
-            commands.entity(part).insert(decoration);
-        }
-        // Roadwheels aren't in `Rig` (no fixed count/field) — walk the root's whole subtree for
-        // the `Roadwheel` marker, the same descendant-walk shape `on_tank_ready` itself uses
-        // (from the ROOT: wheels are siblings of `Hull` in the model, not under it).
-        for wheel in all_children.iter_descendants(root) {
-            if roadwheels.contains(wheel) {
-                commands.entity(wheel).insert(decoration);
-                decorated += 1;
-            }
-        }
-        info!("net: {root} rig children decorated DeterministicPredicted (count={decorated})");
-    }
-}
-
-/// Strip pose history from decorated rig children. `add_prediction_history` attaches
-/// `PredictionHistory<C>` for EVERY prediction-registered type present on a
-/// `DeterministicPredicted` entity — including avian `Position`/`Rotation`, whose first recorded
-/// value can be the require-inserted `PLACEHOLDER` sentinel (f32::MAX) if collider-transform
-/// propagation hasn't run yet that tick; a later rollback then restores the literal sentinel into
-/// the live component and NaNs the solver (the bind-window crash — see
-/// `nan-crash-research.md` for the fully-cited chain). The children's poses are DERIVED state
-/// (avian recomputes them from the root pose ∘ `ColliderTransform` every tick, replay included),
-/// so pose history on them has zero value. `prepare_rollback` uses the history component itself
-/// as its membership marker, so removal cleanly excludes exactly these two components while the
-/// `local_rollback` histories (`ServoState`/`Reload`/`Suspension`/`DriveState`) keep working.
-///
-/// An OBSERVER on the history insert itself (was: an Update-polled system), so the removal lands
-/// in the same command-flush cascade as lightyear's attach — a rollback in the next frame's
-/// PreUpdate can never see (and restore from) a pose history that only existed for part of a
-/// frame. The polled version left exactly that gap open.
-fn strip_child_pose_history<C: Component>(
-    add: On<Add, PredictionHistory<C>>,
-    decorated: Query<(), With<DeterministicPredicted>>,
-    mut commands: Commands,
-) {
-    if !decorated.contains(add.entity) {
-        return;
-    }
-    info!(
-        "net: {} pose history stripped (derived state, rollback poison vector)",
-        add.entity
-    );
-    commands
-        .entity(add.entity)
-        .remove::<PredictionHistory<C>>();
 }
 
 /// Client-side render smoothing for the predicted tank — the half of lightyear's prediction stack

@@ -15,10 +15,9 @@ use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::command::TankCommand;
-use crate::driving::{DriveState, Suspension};
-use crate::shooting::Reload;
+use crate::driving::DriveState;
 use crate::state::GameplaySet;
-use crate::tank::{Rig, ServoCommand, ServoState};
+use crate::tank::{Rig, ServoCommand, ServoIndex, TankSim};
 
 /// Replicated tank-identity marker — how the client recognizes a replicated entity as a tank
 /// (before its local rig exists) without replicating the sim's own `Tank` marker. Deliberately
@@ -51,18 +50,22 @@ pub struct ServoAngles {
 /// arrived by replication and carries `Remote` (see `activate_bound_rig` on why the
 /// `Predicted`/`Interpolated` markers can NOT discriminate here — the server carries both).
 fn publish_servo_angles(
-    mut tanks: Query<(&Rig, &mut ServoAngles), Without<Remote>>,
-    servos: Query<&ServoState>,
+    mut tanks: Query<(&Rig, &TankSim, &mut ServoAngles), Without<Remote>>,
+    servo_slots: Query<&ServoIndex>,
 ) {
-    for (rig, mut angles) in &mut tanks {
-        let (Ok(turret), Ok(gun)) = (servos.get(rig.turret), servos.get(rig.gun)) else {
+    for (rig, sim, mut angles) in &mut tanks {
+        let angle = |servo| {
+            servo_slots
+                .get(servo)
+                .ok()
+                .and_then(|slot| sim.servos.get(slot.0))
+                .map(crate::tank::ServoState::current)
+        };
+        let (Some(turret), Some(gun)) = (angle(rig.turret), angle(rig.gun)) else {
             continue;
         };
         // `set_if_neq`: no change-detection churn (and no replication resends) while at rest.
-        angles.set_if_neq(ServoAngles {
-            turret: turret.current(),
-            gun: gun.current(),
-        });
+        angles.set_if_neq(ServoAngles { turret, gun });
     }
 }
 
@@ -155,15 +158,12 @@ pub(crate) fn plugin(app: &mut App) {
             (a.0 - b.0).length() >= ROLLBACK_VELOCITY
         });
 
-    // Rig-child rollback participation (map §3/§7): `DriveState` lives on the root itself, a
-    // drop-in `local_rollback` target. `ServoState`/`Reload`/`Suspension` live on turret/gun/
-    // muzzle/roadwheel children — `decorate_rig_children` (net::rig) marks those
-    // `DeterministicPredicted` so history actually attaches; without it these calls compile but
-    // silently do nothing for those entities (no error, no panic — confirmed map §3.3).
+    // Non-replicated rollback state — ROOT-RESIDENT ONLY, by design: the root is the predicted
+    // entity, so plain `local_rollback` attaches history with no child decoration machinery
+    // (`TankSim` centralizes what used to live on turret/gun/muzzle/wheel children — see its doc
+    // for the hazard cluster that design retired).
     app.local_rollback::<DriveState>();
-    app.local_rollback::<ServoState>();
-    app.local_rollback::<Reload>();
-    app.local_rollback::<Suspension>();
+    app.local_rollback::<TankSim>();
 
     app.add_systems(FixedPostUpdate, publish_servo_angles);
     app.add_systems(FixedUpdate, apply_servo_angles.in_set(GameplaySet));

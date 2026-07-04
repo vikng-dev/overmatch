@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use crate::ballistics::ComponentHealth;
 use crate::command::{ConsumeCommandEdges, CrewSwap, TankCommand};
 use crate::state::GameplaySet;
-use crate::tank::{Controlled, Rig, ServoCommand, ServoSpec, ServoState, Tank, Turret};
+use crate::tank::{Controlled, Rig, ServoCommand, ServoIndex, ServoSpec, Tank, Turret};
 
 /// Semantic ownership: a ballistic volume belongs to a tank for gameplay aggregation. This is
 /// separate from `ChildOf`, which remains the model/transform hierarchy.
@@ -575,7 +575,7 @@ fn launch_turrets_on_cookoff(
             ));
             commands
                 .entity(turret)
-                .remove::<(ChildOf, Turret, ServoCommand, ServoState, ServoSpec)>();
+                .remove::<(ChildOf, Turret, ServoCommand, ServoIndex, ServoSpec)>();
         }
     }
 }

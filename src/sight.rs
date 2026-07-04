@@ -22,7 +22,7 @@ use crate::firecontrol::{RangeTable, Ranging};
 use crate::spec::ViewKind;
 use crate::state::GameplaySet;
 use crate::tank::{
-    Controlled, Gun, Hull, Rig, ServoState, Tank, TankViews, Turret, shortest_angle,
+    Controlled, Hull, Rig, ServoIndex, Tank, TankSim, TankViews, shortest_angle,
 };
 
 /// Whether the controlled tank's `kind` view is usable — its authored `requires` met (a dead
@@ -473,8 +473,8 @@ fn toggle_sight(
     mut intent: ResMut<GunnerIntent>,
     controlled: ControlledTank,
     views: Query<&TankViews, With<Controlled>>,
-    turret: Query<&ServoState, (With<Turret>, Without<Gun>)>,
-    gun: Query<&ServoState, (With<Gun>, Without<Turret>)>,
+    servo_slots: Query<&ServoIndex>,
+    sims: Query<&TankSim>,
     ranging: Res<Ranging>,
     tables: Query<&RangeTable>,
     mut toast: ResMut<Toast>,
@@ -495,14 +495,23 @@ fn toggle_sight(
                 toast.show(format!("{} unavailable", ViewKind::Gunner.label()));
                 return;
             }
-            if let (Ok(t), Ok(g)) = (turret.get(turret_entity), gun.get(gun_entity)) {
+            // Servo angles live root-resident (`TankSim`), addressed by each node's `ServoIndex`.
+            let angle = |servo| {
+                controlled
+                    .entity()
+                    .and_then(|tank| sims.get(tank).ok())
+                    .zip(servo_slots.get(servo).ok())
+                    .and_then(|(sim, slot)| sim.servos.get(slot.0))
+                    .map(crate::tank::ServoState::current)
+            };
+            if let (Some(t), Some(g)) = (angle(turret_entity), angle(gun_entity)) {
                 // The gun's live pitch carries the superelevation lob; seed the intent from the sight
                 // line (bore − lob), not the raised bore, or the view jumps θ on handover.
                 let theta = tables
                     .get(muzzle_entity)
                     .map_or(0.0, |table| table.superelevation(ranging.range));
-                intent.yaw = t.current();
-                intent.pitch = g.current() - theta;
+                intent.yaw = t;
+                intent.pitch = g - theta;
             }
             SightMode::Gunner
         }
@@ -570,8 +579,8 @@ fn drive_gunner_aim(
     motion: Res<AccumulatedMouseMotion>,
     mut intent: ResMut<GunnerIntent>,
     controlled: ControlledTank,
-    turret: Query<&ServoState, (With<Turret>, Without<Gun>)>,
-    gun: Query<&ServoState, (With<Gun>, Without<Turret>)>,
+    servo_slots: Query<&ServoIndex>,
+    sims: Query<&TankSim>,
     ranging: Res<Ranging>,
     tables: Query<&RangeTable>,
     mut tank_commands: Query<&mut TankCommand>,
@@ -593,10 +602,18 @@ fn drive_gunner_aim(
     intent.yaw -= motion.delta.x * SENSITIVITY;
     intent.pitch -= motion.delta.y * SENSITIVITY;
 
-    let Ok(t_state) = turret.get(rig.turret) else {
+    // Servo angles live root-resident (`TankSim`), addressed by each node's `ServoIndex`.
+    let angle = |servo| {
+        sims.get(tank)
+            .ok()
+            .zip(servo_slots.get(servo).ok())
+            .and_then(|(sim, slot)| sim.servos.get(slot.0))
+            .map(crate::tank::ServoState::current)
+    };
+    let Some(t_current) = angle(rig.turret) else {
         return;
     };
-    let Ok(g_state) = gun.get(rig.gun) else {
+    let Some(g_current) = angle(rig.gun) else {
         return;
     };
 
@@ -610,8 +627,8 @@ fn drive_gunner_aim(
     // shortest-angle difference so continuous traverse doesn't wind up. `drive_servos` steps on the
     // fixed clock, so `current` here is the latest tick's integrated angle — the clamp chases the
     // sim truth, ≤1 tick behind the render pose the optic shows.
-    let yaw_offset = shortest_angle(intent.yaw - t_state.current());
-    let sight_now = g_state.current() - theta;
+    let yaw_offset = shortest_angle(intent.yaw - t_current);
+    let sight_now = g_current - theta;
     let pitch_offset = intent.pitch - sight_now;
 
     // Circular clamp: preserve direction, cap magnitude. Within the margin the intent is left
@@ -620,7 +637,7 @@ fn drive_gunner_aim(
     let len = (yaw_offset * yaw_offset + pitch_offset * pitch_offset).sqrt();
     if len > LEAD_MARGIN {
         let scale = LEAD_MARGIN / len;
-        intent.yaw = t_state.current() + yaw_offset * scale;
+        intent.yaw = t_current + yaw_offset * scale;
         intent.pitch = sight_now + pitch_offset * scale;
     }
 

@@ -13,7 +13,6 @@ use crate::damage::{
     Ammo, Capability, CookedOff, CrewStation, Crewman, Dead, FunctionRole, TankCapabilities,
     TankKnockedOut, TankVolumes, VolumeFacets, capability_effectiveness, evaluate, part_qualities,
 };
-use crate::shooting::Reload;
 use crate::spec::ViewKind;
 use crate::tank::{Tank, TankRoot, TankViews, Weapon};
 
@@ -163,7 +162,8 @@ fn update_tank_status_labels(
         ),
         With<Tank>,
     >,
-    weapons: Query<(&Weapon, &Reload, &TankRoot)>,
+    weapons: Query<(&Weapon, &crate::tank::WeaponIndex, &TankRoot)>,
+    sims: Query<&crate::tank::TankSim>,
     volumes: Query<(
         Option<&CrewStation>,
         Option<&Crewman>,
@@ -269,12 +269,18 @@ fn update_tank_status_labels(
             let mut entries = weapons
                 .iter()
                 .filter(|(_, _, root)| root.0 == entity)
-                .map(|(weapon, reload, _)| {
+                .map(|(weapon, slot, root)| {
+                    // Reload state is root-resident (`TankSim`), addressed by the weapon's slot.
+                    let remaining = sims
+                        .get(root.0)
+                        .ok()
+                        .and_then(|sim| sim.weapons.get(slot.0))
+                        .map_or(0.0, |w| w.reload_remaining);
                     let can_fire = quality
                         .as_ref()
                         .is_some_and(|q| evaluate(&weapon.fire, q) > 0.0);
-                    let status = if reload.remaining > 0.0 {
-                        format!("{:.1}s", reload.remaining)
+                    let status = if remaining > 0.0 {
+                        format!("{:.1}s", remaining)
                     } else if can_fire {
                         "READY".to_string()
                     } else {
