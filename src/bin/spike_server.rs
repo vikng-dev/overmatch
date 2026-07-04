@@ -12,7 +12,7 @@
 use core::time::Duration;
 use std::net::{Ipv4Addr, SocketAddr};
 
-use avian3d::prelude::{Forces, Position, WriteRigidBodyForces};
+use avian3d::prelude::{Forces, Position, Rotation, WriteRigidBodyForces};
 use bevy::app::ScheduleRunnerPlugin;
 use bevy::asset::LoadState;
 use bevy::prelude::*;
@@ -203,6 +203,13 @@ fn spawn_pending_tanks(
             spike_tank_rig(&asset_server, &spec.0),
             ActionState::<TankCommand>::default(),
             Position(Vec3::new(0.0, 2.0, 0.0)),
+            // Explicit identity, NOT left to `RigidBody`'s required-component default — that
+            // default is `Rotation::PLACEHOLDER` (f32::MAX sentinel, avian rigid_body/mod.rs:271),
+            // and if replication captures the spawn frame before the transform sync overwrites it,
+            // the client's confirmed history for the earliest ticks holds the sentinel — which the
+            // post-bind settle rollbacks then faithfully restore into the sim (the bind-window NaN
+            // crash family, spike log 2026-07-04).
+            Rotation::default(),
             // The authority's turret/gun lay, for every non-predicted view of this tank
             // (`net::publish_servo_angles` keeps it fresh).
             ServoAngles::default(),

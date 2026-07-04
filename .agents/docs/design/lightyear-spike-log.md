@@ -476,3 +476,36 @@ Results at 100 ms (short script, 8-run soaks):
   divergence, the velocity-threshold reasoning stands), but smooth-ground+latency divergence
   collapsed 10×. Full sim evidence intact (exact turret canary, fire+reload, 16/16 wheels,
   convergence).
+
+### Bind-window NaN, third pass (2026-07-04): crash NOT fixed — but the mechanism is cornered
+
+Honest status: the 100 ms bind-window crash persists (~25–90% per 8–12-run soak, heavily
+build/frame-timing dependent — earlier "2/8 with the set anchor" was partly luck). The set
+anchor's OTHER effect is real and reproduced: ~150 → ~10 rollbacks/run at 100 ms. What today's
+falsification ladder established (all soaked, all in scratchpad logs):
+
+- Activation ordering: falsified twice more (observer flip, attachment-gated flip).
+- Root rollback grace (`DisableRollback` + timed lift): falsified — 11/12 crash, reverted.
+- Explicit spawn `Rotation` on the server bundle: kept (correct hygiene — `RigidBody` would
+  require-insert `Rotation::PLACEHOLDER`, avian rigid_body/mod.rs:271) but did not fix it.
+- Wheel physics-pose sync + placeholder sanitizer: REVERTED — giving wheels `Position`/`Rotation`
+  made them lightyear-history-managed and they came back holding LITERAL `Rotation::PLACEHOLDER`
+  + NaN positions at tick-top (probe-visible), while breaking the suspension rays at 0 ms
+  (0/16 grounded, 192 rollbacks — rays must keep their `GlobalTransform` fallback for now).
+
+**The cornered mechanism (high confidence, one concrete probe left):** avian require-inserts
+`Position::PLACEHOLDER`/`Rotation::PLACEHOLDER` (f32::MAX sentinels — finite, so every NaN check
+passes until arithmetic overflows) on collider registration (backend.rs:97-98) and via
+`RigidBody`'s requires. The initializing overwrite lives in the DISABLED `PhysicsTransformPlugin`;
+lightyear's per-frame substitute usually wins, BUT `Position`/`Rotation` are prediction-registered
+types and the rig children carry `DeterministicPredicted` — so `PredictionHistory` on the
+`*_Collider.Mat_Collider` children records their placeholder-era first ticks, and a bind-burst
+rollback RESTORES that junk into live components mid-replay → MAX arithmetic → NaN (child
+Position NaN + AABB `min<=max` assert = exactly the observed signatures; the wheel variant
+appeared only while wheels had the components). The children never needed pose history: avian
+recomputes child collider poses from the root every tick (the map's own "register only the ROOT"
+guidance). NEXT SESSION, first moves: (1) verify with an `On<Insert, Rotation>` observer on rig
+children logging placeholder writes + the restore path; (2) fix by excluding children's
+`Position`/`Rotation` from prediction history (per-entity opt-out if lightyear has one, else
+overwrite/seed their history at decoration time, else don't let decoration precede first-sync).
+Diagnostics kept in-tree: `fixed_nan_probe` (tick-top, pre-physics), `nan_tripwire` (client bin).

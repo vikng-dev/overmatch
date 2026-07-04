@@ -120,6 +120,74 @@ fn activate_bound_rig(
     commands.entity(add.entity).insert(RigidBody::Dynamic);
 }
 
+/// Diagnostic (bind-window NaN): at the top of each physics tick, name every entity whose
+/// physics state or `ColliderTransform` is non-finite — with values — then latch. Runs before
+/// `PhysicsSystems::Prepare`, i.e. before the step that would hit avian's panicking asserts.
+fn fixed_nan_probe(
+    bodies: Query<
+        (
+            Entity,
+            &Position,
+            &Rotation,
+            Option<&LinearVelocity>,
+            Option<&AngularVelocity>,
+        ),
+        With<Tank>,
+    >,
+    parts: Query<
+        (
+            Entity,
+            Option<&Name>,
+            Option<&Position>,
+            Option<&Rotation>,
+            Option<&avian3d::prelude::ColliderTransform>,
+        ),
+        Or<(
+            With<avian3d::prelude::ColliderOf>,
+            With<avian3d::prelude::RayCaster>,
+        )>,
+    >,
+    mut latched: Local<bool>,
+) {
+    if *latched {
+        return;
+    }
+    let mut corrupt = false;
+    for (entity, position, rotation, linear, angular) in &bodies {
+        let bad_vel =
+            linear.is_some_and(|v| !v.0.is_finite()) || angular.is_some_and(|v| !v.0.is_finite());
+        if !position.0.is_finite() || !rotation.0.is_finite() || bad_vel {
+            error!(
+                "net: FIXED-NAN root {entity}: pos={:?} rot={:?} linvel={:?} angvel={:?}",
+                position.0,
+                rotation.0,
+                linear.map(|v| v.0),
+                angular.map(|v| v.0)
+            );
+            corrupt = true;
+        }
+    }
+    for (entity, name, position, rotation, collider_transform) in &parts {
+        let bad = position.is_some_and(|p| !p.0.is_finite())
+            || rotation.is_some_and(|r| !r.0.is_finite())
+            || collider_transform
+                .is_some_and(|t| !(t.translation.is_finite() && t.rotation.0.is_finite()));
+        if bad {
+            error!(
+                "net: FIXED-NAN part {entity} ({:?}): pos={:?} rot={:?} collider_transform={:?}",
+                name.map(|n| n.as_str()),
+                position.map(|p| p.0),
+                rotation.map(|r| r.0),
+                collider_transform
+            );
+            corrupt = true;
+        }
+    }
+    if corrupt {
+        *latched = true;
+    }
+}
+
 /// Decorate a bound rig's non-root parts as rollback-participant the moment both `Rig` (the
 /// binder's terminal insert) and `Predicted` are present on the root (order either can land in —
 /// `Predicted` arrives at spawn, `Rig` seconds later on glb load, so this is really gated on `Rig`
@@ -322,6 +390,13 @@ pub fn plugin(app: &mut App) {
 
     app.add_observer(activate_bound_rig);
     app.add_systems(Update, decorate_rig_children);
+    // Probe ahead of the physics pass, so the first corrupt value is named BEFORE avian's own
+    // finite-asserts panic mid-step (the Update-schedule tripwire never sees it — corruption and
+    // panic land inside one FixedMain run).
+    app.add_systems(
+        FixedPostUpdate,
+        fixed_nan_probe.before(PhysicsSystems::Prepare),
+    );
     app.add_systems(FixedPostUpdate, publish_servo_angles);
     app.add_systems(FixedUpdate, apply_servo_angles.in_set(GameplaySet));
     // Bridge lightyear's input buffer into the sim's own `TankCommand` (command.rs's contract):
