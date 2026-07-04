@@ -450,3 +450,29 @@ User's 0 ms retest: healthy overall but a constant rollback stream when driving 
   `activate_bound_rig` is now an observer (kept: tighter, same behavior). NEXT SESSION: confirm
   the set-configuration hole, then either configure the set ourselves in `physics_plugins()` or
   take it upstream.
+
+### Bind-window NaN — ROOT CAUSE FOUND & FIXED (2026-07-04, second pass)
+
+The suspected set-configuration hole is real and the fix is one `configure_sets`:
+`PhysicsTransformPlugin` (which `LightyearAvianPlugin` requires disabling) owns the ONLY
+`configure_sets` anchoring `PhysicsTransformSystems::Propagate` inside `PhysicsSystems::Prepare`
+(avian `physics_transform/mod.rs:86-93`), while `ColliderTransformPlugin` — mounted by the
+collider backend, NOT in the disable list — adds `propagate_collider_transforms` to that set in
+`FixedPostUpdate` (`collider_transform/plugin.rs:50-53`). Unanchored, collider-transform
+propagation ran at an arbitrary point relative to the physics step. `net::plugin` now re-anchors
+the set (verbatim avian ordering). lightyear_avian's Position mode does NOT configure this set
+itself (checked plugin.rs:155-220) — likely an upstream gap worth reporting.
+
+Results at 100 ms (short script, 8-run soaks):
+- Crashes: ~70% → 2/8, and the NaN tripwire no longer fires at all — the remaining 2 are a
+  DIFFERENT window (`update_ray_caster_positions` Dir3 panic: a wheel Rotation goes NaN inside
+  the same physics step, tripwire can't see it before the panic; 0/4 at 0 ms suggests it needs
+  the bind-burst rollbacks — suspect DisableRollback-grace inconsistency during replay; OPEN).
+- **Rollbacks: ~150/run → 6-14/run.** The unanchored propagation wasn't just a crash risk — its
+  schedule race injected frame-timing-dependent noise into every physics step, and each process
+  raced differently: it was THE dominant systematic client/server divergence source. The step-7
+  "residual rate is threshold-tripping solver noise" reading is superseded — most of that noise
+  was this bug. Washboard at 0 ms only drops ~159 → ~135 (contact transients are genuine
+  divergence, the velocity-threshold reasoning stands), but smooth-ground+latency divergence
+  collapsed 10×. Full sim evidence intact (exact turret canary, fire+reload, 16/16 wheels,
+  convergence).

@@ -3,10 +3,12 @@
 //! both sides of the wire, added after `ServerPlugins`/`ClientPlugins` and before the
 //! `Server`/`Client` connection entity is spawned (see the spike map §3 ordering note).
 
+use avian3d::physics_transform::PhysicsTransformSystems;
 use avian3d::prelude::{
     AngularVelocity, IslandPlugin, IslandSleepingPlugin, LinearVelocity,
     PhysicsInterpolationPlugin, PhysicsTransformPlugin, Position, RigidBody, Rotation,
 };
+use avian3d::schedule::PhysicsSystems;
 use bevy::diagnostic::DiagnosticsStore;
 use bevy::prelude::*;
 use lightyear::avian3d::plugin::{AvianReplicationMode, LightyearAvianPlugin};
@@ -302,6 +304,21 @@ pub fn plugin(app: &mut App) {
     app.local_rollback::<ServoState>();
     app.local_rollback::<Reload>();
     app.local_rollback::<Suspension>();
+
+    // THE BIND-WINDOW NaN FIX. Disabling `PhysicsTransformPlugin` (required by
+    // `LightyearAvianPlugin`, see `physics_plugins()`) also removes the ONLY `configure_sets`
+    // that anchors `PhysicsTransformSystems::Propagate` inside `PhysicsSystems::Prepare`
+    // (avian `physics_transform/mod.rs:86`) — but `ColliderTransformPlugin` (mounted by the
+    // collider backend, NOT disabled) still adds `propagate_collider_transforms` to that set in
+    // `FixedPostUpdate`. Unanchored, it ran at an arbitrary point relative to the physics step:
+    // when a freshly-bound rig's colliders caught the wrong interleaving, their
+    // `ColliderTransform`s went NaN and took every child collider `Position` with them (~70% of
+    // 100 ms runs, within a frame of Dynamic activation; activation-order fixes empirically
+    // falsified — see the spike log). Re-anchoring the set restores avian's own ordering.
+    app.configure_sets(
+        FixedPostUpdate,
+        PhysicsTransformSystems::Propagate.in_set(PhysicsSystems::Prepare),
+    );
 
     app.add_observer(activate_bound_rig);
     app.add_systems(Update, decorate_rig_children);
