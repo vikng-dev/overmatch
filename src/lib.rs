@@ -16,20 +16,11 @@ use bevy::prelude::*;
 
 mod aim;
 mod ballistics;
-/// Re-exported for the spike bins (step 7): `Added<ShellPath>` is the observable "a shell/tracer
-/// spawned" signal — the forced-rollback pass counts these to record whether a fire replayed
-/// during rollback duplicates the local tracer (the accepted pre-`PreSpawned` wart).
-#[cfg(feature = "net")]
-pub use ballistics::ShellPath;
 mod branding;
 mod camera;
 /// The command layer: device reads → player bindings → per-tank serializable `TankCommand`. The
 /// seam authoritative multiplayer hangs off; sim modules consume commands, never devices.
 mod command;
-/// Re-exported for the `net` spike bins, which need `TankCommand`/`CrewSwap` to register the
-/// lightyear input protocol and construct commands directly (no device gather in a headless bin).
-#[cfg(feature = "net")]
-pub use command::{CrewSwap, TankCommand};
 /// The controlled tank's crew bar + swap input — a shared piece of the fixed player UI, mounted by
 /// both `GamePlugin` and the sandbox (each scoped to the `Controlled` tank).
 mod crew_ui;
@@ -37,10 +28,6 @@ pub(crate) mod damage;
 #[cfg(debug_assertions)]
 mod debug;
 mod driving;
-/// Re-exported for `net.rs` (step 7): `local_rollback::<DriveState>()`/`<Suspension>()`
-/// registration and the `TankCommand`→sim bridge need these types by name.
-#[cfg(feature = "net")]
-pub use driving::{DriveState, Suspension};
 /// Fire control: per-weapon superelevation range tables + the player-dialed range. Sits atop
 /// `ballistics`; the aim commit reads it to lob the aim point so the bore elevates for range.
 mod firecontrol;
@@ -51,44 +38,18 @@ mod headless_test;
 /// The shared tank-state HUD (world-anchored capability/crew/damage readouts). Mounted by both
 /// `GamePlugin` and the sandbox; each tags its own world camera with `hud::HudCamera`.
 mod hud;
-/// Networking spike protocol registration (`net` feature only). Public so `spike_server`/
-/// `spike_client` can mount it; not part of `GamePlugin`.
+/// The game's networking layer (`net` feature only). Public so the `client`/`server` bins can call
+/// `net::client::run()`/`net::server::run()`; not part of `GamePlugin`.
 #[cfg(feature = "net")]
 pub mod net;
 /// The armor ballistics sandbox (`bin/armor_sandbox`). Public so the binary can mount it; not part
 /// of `GamePlugin`.
 pub mod sandbox;
 mod shooting;
-/// Re-exported for `net.rs` (step 7): `local_rollback::<Reload>()` registration.
-#[cfg(feature = "net")]
-pub use shooting::Reload;
 mod sight;
 mod spec;
-/// Re-exported for the spike bins (increment 6): `spec::plugin` registers the `.tank.ron` asset
-/// loader both `on_tank_ready` and the spawn systems depend on; `TankSpec`/`TankSpecHandle` are
-/// the load-dependency pair the bins spawn against, matching `sandbox.rs`'s `load_target` pattern.
-#[cfg(feature = "net")]
-pub use spec::{TankSpec, TankSpecHandle, plugin as spec_plugin};
 mod state;
-/// Re-exported for the spike bins (step 7): `SimPlugin` mounts `state::sim_plugin`, which gates
-/// `GameplaySet` on `AppState::Playing` — the bins must open that gate themselves once their spec
-/// loads (they have no menu/loading-screen flow of their own to drive the transition).
-/// `GameplaySet` is what `net.rs`'s input bridge orders itself before (every sim consumer is in it).
-#[cfg(feature = "net")]
-pub use state::{AppState, GameplaySet};
 mod tank;
-/// Re-exported for `spike_server`, which logs bound-rig roadwheel count as its step-2 success
-/// criterion — the same signal `headless_test.rs` polls for, from outside the crate.
-#[cfg(feature = "net")]
-pub use tank::Roadwheel;
-/// Re-exported for the spike bins (increment 6): the real Tiger rig replaces the increment-5
-/// primitive on both ends. `on_tank_ready` is the binder observer (unchanged, per the task's "do
-/// not modify sim module logic"); `Tank`/`Rig`/`Turret`/`Hull` are what the spike's verdict-2 log
-/// (child collider tracking through rollback) reads back. `Controlled` (step 8) is possession:
-/// the client bin marks its own replicated tank with it, and every control/presentation system
-/// (camera, HUD, aim commit, crew bar) scopes off it unchanged.
-#[cfg(feature = "net")]
-pub use tank::{Controlled, Hull, Rig, ServoState, Tank, Turret, on_tank_ready};
 /// The track-model sandbox (`bin/track_sandbox`). Public so the binary can mount it; not part of
 /// `GamePlugin`. Self-contained: its own code-generated primitive rig + locomotion, for developing
 /// the continuous-track model in isolation.

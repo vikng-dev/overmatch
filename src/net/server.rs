@@ -1,47 +1,30 @@
-//! Networking-spike dedicated server (step 7 of the lightyear spike map's recommended order):
+//! The networked dedicated server (step 7 of the lightyear spike map's recommended order):
 //! `SimPlugin` mounted for real — driving/aim/shooting/damage all run under prediction now, not
 //! the increment-5 stub. Headless — the proven `headless_test.rs` recipe (full `DefaultPlugins`,
 //! no GPU/window/winit), NOT `MinimalPlugins`, because the rig loads the same `.glb`/`.tank.ron`
 //! assets the client does.
-//! Run with `cargo run --bin spike_server --features net`.
-
-// Same rationale as lib.rs's crate-level allow (bins don't inherit it): ordinary multi-filter
-// query tuples trip this lint.
-#![allow(clippy::type_complexity)]
+//! Run with `cargo run --bin server --features net`.
 
 use core::time::Duration;
 use std::net::{Ipv4Addr, SocketAddr};
 
-use avian3d::prelude::{Forces, Position, Rotation, WriteRigidBodyForces};
+use avian3d::prelude::{Position, Rotation};
 use bevy::app::ScheduleRunnerPlugin;
 use bevy::asset::LoadState;
 use bevy::prelude::*;
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
-use overmatch::net::{
-    PendingTankSpec, ServoAngles, SpikeBeacon, SpikeTank, load_tank_spec, spike_tank_rig,
-};
-use overmatch::{AppState, Rig, SimPlugin, TankCommand, on_tank_ready};
+
+use super::protocol::ServoAngles;
+use super::{diagnostics, harness, open_gameplay_gate, physics, rig};
+use crate::SimPlugin;
+use crate::command::TankCommand;
+use crate::tank::{PendingTankSpec, load_tank_spec, on_tank_ready};
 
 const PORT: u16 = 5888;
 
-/// Spike levers, read once at boot. `SPIKE_PERTURB=0` drops the forced-rollback impulse — pure
-/// noise during a feel test; on by default so the step-7 evidence runs stay reproducible.
-#[derive(Resource)]
-struct SpikeConfig {
-    perturb: bool,
-}
-
-fn env_flag(name: &str, default: bool) -> bool {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.parse::<u8>().ok())
-        .map(|v| v != 0)
-        .unwrap_or(default)
-}
-
-fn main() {
+pub fn run() {
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
@@ -70,8 +53,8 @@ fn main() {
     app.add_plugins(ServerPlugins {
         tick_duration: Duration::from_secs_f64(1.0 / 64.0),
     });
-    app.add_plugins(overmatch::net::plugin);
-    app.add_plugins(overmatch::net::physics_plugins());
+    app.add_plugins(super::plugin);
+    app.add_plugins(physics::physics_plugins());
     // Step 7: the real sim, for real — driving/aim/shooting/damage all run under prediction now.
     // `SimPlugin` no longer bundles physics (that split already happened in Milestone A), so it
     // composes cleanly alongside `physics_plugins()` above. Not `tank::sp_spawn_plugin` (the
@@ -81,7 +64,7 @@ fn main() {
     let server = app
         .world_mut()
         .spawn((
-            Name::new("SpikeServer"),
+            Name::new("Server"),
             NetcodeServer::new(NetcodeConfig {
                 protocol_id: 0,
                 private_key: [0; 32], // dev only — matches the client's Authentication::Manual
@@ -93,19 +76,14 @@ fn main() {
         .id();
     app.add_systems(Startup, move |mut commands: Commands| {
         commands.trigger(Start { entity: server });
-        commands.spawn((
-            Name::new("SpikeBeacon"),
-            SpikeBeacon,
-            Replicate::to_clients(NetworkTarget::All),
-        ));
-        info!("spike_server: starting, listening on 0.0.0.0:{PORT}");
+        info!("server: starting, listening on 0.0.0.0:{PORT}");
     });
     app.add_systems(Startup, load_tank_spec);
     app.init_resource::<PendingClients>();
-    let config = SpikeConfig {
-        perturb: env_flag("SPIKE_PERTURB", true),
+    let config = harness::PerturbConfig {
+        perturb: harness::env_flag("SPIKE_PERTURB", true),
     };
-    info!("spike_server: SPIKE_PERTURB={}", config.perturb);
+    info!("server: SPIKE_PERTURB={}", config.perturb);
     app.insert_resource(config);
 
     app.add_systems(
@@ -114,41 +92,17 @@ fn main() {
             handle_new_clients,
             spawn_pending_tanks,
             open_gameplay_gate,
-            log_positions,
-            count_rig_binds,
-            overmatch::net::log_sim_evidence,
+            diagnostics::log_positions,
+            diagnostics::count_rig_binds,
+            diagnostics::log_sim_evidence,
         ),
     );
-    app.add_systems(FixedUpdate, (log_tank_commands, perturb_after_delay));
+    app.add_systems(
+        FixedUpdate,
+        (log_tank_commands, harness::perturb_after_delay),
+    );
 
     app.run();
-}
-
-/// `SimPlugin` mounts `state::sim_plugin` (`AppState`, `GameplaySet` gated on `Playing`), but the
-/// bins have no menu/loading flow to drive that transition themselves (step 7 task: "the bins
-/// never enter Playing on their own now"). The server already gates spawning on the spec load
-/// (`spawn_pending_tanks`); this just opens the `GameplaySet` gate once, the same load dependency.
-fn open_gameplay_gate(
-    spec: Option<Res<PendingTankSpec>>,
-    asset_server: Res<AssetServer>,
-    state: Res<State<AppState>>,
-    mut next: ResMut<NextState<AppState>>,
-) {
-    if *state.get() != AppState::Loading {
-        return;
-    }
-    let Some(spec) = spec else { return };
-    if matches!(asset_server.load_state(&spec.0), LoadState::Loaded) {
-        next.set(AppState::Playing);
-    }
-}
-
-/// Per-client one-shot: fires ~2 s after connect, applying a large lateral impulse the client
-/// cannot have predicted (server-only side effect) — guarantees a misprediction and thus a
-/// rollback (increment 5 success criterion).
-#[derive(Component)]
-struct PendingPerturbation {
-    at: Duration,
 }
 
 /// Connected clients waiting on the Tiger spec load (§2 of the map: the spec is a load
@@ -166,7 +120,7 @@ fn handle_new_clients(
     mut pending: ResMut<PendingClients>,
 ) {
     for (link, remote) in &new {
-        info!("spike_server: client connected: {remote} (link {link})");
+        info!("server: client connected: {remote} (link {link})");
         pending.0.push((link, remote.0));
     }
 }
@@ -179,7 +133,7 @@ fn spawn_pending_tanks(
     spec: Option<Res<PendingTankSpec>>,
     asset_server: Res<AssetServer>,
     time: Res<Time<Virtual>>,
-    config: Res<SpikeConfig>,
+    config: Res<harness::PerturbConfig>,
     mut commands: Commands,
 ) {
     if pending.0.is_empty() {
@@ -191,8 +145,8 @@ fn spawn_pending_tanks(
     }
     for (link, client_id) in pending.0.drain(..) {
         let mut tank = commands.spawn((
-            Name::new("SpikeTank"),
-            spike_tank_rig(&asset_server, &spec.0),
+            Name::new("Tank"),
+            rig::net_tank_rig(&asset_server, &spec.0),
             ActionState::<TankCommand>::default(),
             Position(Vec3::new(0.0, 2.0, 0.0)),
             // Explicit identity, NOT left to `RigidBody`'s required-component default — that
@@ -217,64 +171,11 @@ fn spawn_pending_tanks(
             },
         ));
         if config.perturb {
-            tank.insert(PendingPerturbation {
+            tank.insert(harness::PendingPerturbation {
                 at: time.elapsed() + Duration::from_secs(2),
             });
         }
         tank.observe(on_tank_ready);
-    }
-}
-
-/// Verdict 1 (increment 6): the binder must fire exactly once per tank despite rollback replays —
-/// rollback only re-runs `FixedMain` (map §8), and this observer fires from `WorldInstanceReady`
-/// (outside `FixedMain`), so a count > 1 per tank would mean that assumption was wrong. `Rig` is
-/// the observer's own terminal insert, so counting `Added<Rig>` is an external, non-invasive proxy
-/// for "the binder ran" without touching `tank.rs`.
-fn count_rig_binds(binds: Query<Entity, Added<Rig>>) {
-    for entity in &binds {
-        info!("spike_server: {entity} Rig bound (on_tank_ready fired)");
-    }
-}
-
-/// Applies the forced-rollback perturbation once, ~2 s after spawn — a lateral impulse only the
-/// server applies, so the client's prediction (which never saw it coming) mispredicts and must
-/// roll back when the replicated `Position` disagrees.
-fn perturb_after_delay(
-    mut tanks: Query<(Entity, &PendingPerturbation, Forces)>,
-    time: Res<Time<Virtual>>,
-    mut commands: Commands,
-) {
-    for (entity, pending, mut forces) in &mut tanks {
-        if time.elapsed() < pending.at {
-            continue;
-        }
-        // Sized for ~3 m/s of lateral delta-v on the 57 t tank (net.rs::TANK_MASS) — comfortably
-        // above the 0.01 m/s-equivalent rollback threshold (forces exactly one misprediction) but
-        // small next to the ~4-15 m/s cruise speed, so the resulting one-tick displacement stays
-        // under the ROLLBACK-SNAP detector's 0.5 m bar. The previous 4,000,000 N*s value injected
-        // ~70 m/s instantly — legitimate per-tick motion at that speed (~1.1 m/tick) was tripping
-        // the snap detector on its own, misread as rollback oscillation (see spike log).
-        const IMPULSE: f32 = 171_000.0;
-        forces.apply_linear_impulse(Vec3::X * IMPULSE);
-        info!("spike_server: {entity} perturbation impulse applied (forced rollback trigger)");
-        commands.entity(entity).remove::<PendingPerturbation>();
-    }
-}
-
-/// Periodic authoritative position log (every ~2 s), so the client's converged position can be
-/// diffed against this end for the increment-5/6 convergence success criterion.
-fn log_positions(
-    tanks: Query<(Entity, &Position), With<SpikeTank>>,
-    mut timer: Local<f32>,
-    time: Res<Time>,
-) {
-    *timer += time.delta_secs();
-    if *timer < 2.0 {
-        return;
-    }
-    *timer = 0.0;
-    for (entity, position) in &tanks {
-        info!("spike_server: {entity} position={:?}", position.0);
     }
 }
 
@@ -285,7 +186,7 @@ fn log_tank_commands(states: Query<(Entity, &ActionState<TankCommand>)>) {
         let cmd = &state.0;
         if cmd.throttle != 0.0 || cmd.fire_primary {
             info!(
-                "spike_server: {entity} command: throttle={} steer={} fire_primary={}",
+                "server: {entity} command: throttle={} steer={} fire_primary={}",
                 cmd.throttle, cmd.steer, cmd.fire_primary
             );
         }

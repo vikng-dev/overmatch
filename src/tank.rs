@@ -36,7 +36,10 @@ pub struct Gun;
 pub struct Hull;
 
 /// Marks the vehicle's root entity — the dynamic rigid body (chassis). Suspension/drive forces
-/// are applied here; debug x-ray walks its descendants.
+/// are applied here; debug x-ray walks its descendants. Deliberately LOCAL, never replicated:
+/// its `On<Add, Tank>` observers must fire alongside the rig bundle, not at replication-receive
+/// time (see `net::protocol::NetTank` for the wire-side identity marker and the bind-window
+/// regression that rule comes from).
 #[derive(Component)]
 pub struct Tank;
 
@@ -295,11 +298,15 @@ pub fn client_plugin(app: &mut App) {
 
 /// The tank's spec sheet is a *load dependency* (ADR-0011): we kick off its load up front and the
 /// tank scene is spawned only once it's ready, so the rig binds with its stats already in hand —
-/// no spec-less window. While it loads we sit in `AppState::Loading`.
+/// no spec-less window. While it loads we sit in `AppState::Loading`. Kicked off once at startup on
+/// both sides (sandbox.rs's `load_target`/`PendingTarget` pattern) — `on_tank_ready` requires the
+/// spec already loaded (asserts on it), so nothing may spawn a tank root until this resolves. Shared
+/// with the networking layer (`net::rig`/`net::client`/`net::server`), which spawns tanks against
+/// the same load dependency.
 #[derive(Resource)]
-struct PendingTankSpec(Handle<TankSpec>);
+pub(crate) struct PendingTankSpec(pub Handle<TankSpec>);
 
-fn load_tank_spec(mut commands: Commands, asset_server: Res<AssetServer>) {
+pub(crate) fn load_tank_spec(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.insert_resource(PendingTankSpec(
         asset_server.load("tiger_1/tiger_1.tank.ron"),
     ));

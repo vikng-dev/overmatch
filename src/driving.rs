@@ -187,6 +187,14 @@ fn apply_suspension(
                 *suspension = Suspension::default();
                 continue;
             };
+            // Same NaN discipline as the aim path: a corrupt pose frame (bind-window rollback
+            // burst) must not flow through the cast into `apply_force_at_point` and poison the
+            // body. `Dir3::new` already rejects a non-finite direction; the origin needs its own
+            // guard.
+            if !origin.is_finite() {
+                *suspension = Suspension::default();
+                continue;
+            }
             let Ok(down) = Dir3::new(wheel_rotation * Vec3::NEG_Y) else {
                 *suspension = Suspension::default();
                 continue;

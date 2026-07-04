@@ -46,13 +46,13 @@ gltf = "1.4"
 net = ["dep:lightyear", "avian3d/serialize"]
 
 [[bin]]
-name = "spike_server"
-path = "src/bin/spike_server.rs"
+name = "server"
+path = "src/bin/server.rs"
 required-features = ["net"]
 
 [[bin]]
-name = "spike_client"
-path = "src/bin/spike_client.rs"
+name = "client"
+path = "src/bin/client.rs"
 required-features = ["net"]
 
 [profile.dev]
