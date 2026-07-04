@@ -411,3 +411,346 @@ seeding/clearing (all in `LC/src/history_buffer.rs` unless noted):
   **UNCERTAIN/out of scope** since `DeterministicPredicted` children never populate it, per Q3/Q4).
 
 ---
+
+## Q7 — `lightyear_avian3d`'s per-tick write order for child-collider `Position`/`Rotation` under `AvianReplicationMode::Position`
+
+The enum is named exactly `AvianReplicationMode` with variant `Position` (`LA/src/plugin.rs:98-104`,
+`#[default]`) — confirmed matching the repo's usage at `src/net.rs:330`.
+
+### Every system this mode adds/configures that can write child-collider `Position`/`Rotation`
+
+Under `AvianReplicationMode::Position` (`LA/src/plugin.rs:159-218`), with
+`update_syncs_manually: false` (the repo's default, `src/net.rs:329-332` doesn't set it):
+
+1. **`transform_to_position`** (avian-native, `AVIAN/src/physics_transform/mod.rs:187-237`) — added
+   to `RunFixedMainLoop` in `PhysicsTransformSystems::TransformToPosition`
+   (`LA/src/plugin.rs:572-610`, `LightyearAvianPlugin::sync_transform_to_position`). Copies
+   `GlobalTransform` → `Position`/`Rotation` for entities that have `Transform` and are not already
+   "changed" more recently than `LastPhysicsTick`. **Applies to any entity with `Position`+
+   `Rotation`+`GlobalTransform`, not root-only** — so it CAN touch a child collider if its
+   `GlobalTransform` differs from its current `Position`/`Rotation` by more than the tolerance
+   (`AVIAN/src/physics_transform/mod.rs:202-205`). Runs BEFORE `PhysicsSystems::Prepare` in
+   `RunFixedMainLoop` per the `configure_sets` chain at `LA/src/plugin.rs:169-174` (`PhysicsSystems::
+   Prepare.in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop).before(FrameInterpolationSystems::
+   Restore)`), and ALSO configured to run inside `FixedPostUpdate`'s `PhysicsSystems::Prepare`
+   (`LA/src/plugin.rs:574-583`, `sync_transform_to_position` configures BOTH `FixedPostUpdate` and
+   the caller-supplied `schedule` — here `RunFixedMainLoop`, per the call at line 163).
+2. **`position_to_transform`** (avian-native, `AVIAN/src/physics_transform/mod.rs:317-349` for 3D) —
+   added to `PostUpdate` in `PhysicsSystems::Writeback` (`LA/src/plugin.rs:613-651`,
+   `sync_position_to_transform`, called with schedule=`PostUpdate` at line 175). Writes `Position`/
+   `Rotation` → `Transform`, filtered to `Or<(With<RigidBody>, With<ApplyPosToTransform>)>`
+   (`AVIAN/src/physics_transform/mod.rs:254-257`) — a plain (non-`RigidBody`) child collider only
+   gets this if it independently has `ApplyPosToTransform`, which is required-registered onto any
+   entity with `Position` or `Rotation` (`LA/src/plugin.rs:620-623`) — **so YES, child colliders DO
+   get `ApplyPosToTransform` and thus DO get this system's writeback**, but this is `Position`/
+   `Rotation` → `Transform`, the opposite direction from the placeholder-injection concern.
+3. **`Self::add_transform`** (`LA/src/plugin.rs:765-851`) — companion to (2), adds a computed
+   `Transform` when `Position`/`Rotation` are both present but `Transform` isn't yet
+   (`AVIAN/src/plugin.rs` query filter `Without<Transform>`, `LA/src/plugin.rs:766`); also runs in
+   `PostUpdate`. Not itself a Position/Rotation writer.
+4. **`sync_received_position_to_transform`** — adds the same `position_to_transform` + `add_transform`
+   pair again in `PreUpdate` after `ReplicationSystems::Receive` (`LA/src/plugin.rs:653-661`); this
+   is for freshly-received REPLICATED Position/Rotation (interpolated/root entities), not
+   specifically child colliders, though the query filter is the same and would match a child if it
+   somehow had `RigidBody`/`ApplyPosToTransform` and just received a replicated `Position` (children
+   here are NOT replicated individually, only the root is, so this system is largely inert for
+   `DeterministicPredicted` children specifically — **UNCERTAIN** whether it could still fire for
+   them via broader query matching if `ApplyPosToTransform` alone satisfies the filter — checking
+   the filter again: `PosToTransformFilter = (Or<(With<RigidBody>, With<ApplyPosToTransform>)>,
+   Or<(Changed<Position>, Changed<Rotation>)>)`, `AVIAN/src/physics_transform/mod.rs:254-257` — since
+   `ApplyPosToTransform` is required-registered for ANY entity with `Position` (line 620-623 above),
+   **every child collider DOES match this filter's first clause**, so this system runs for children
+   too whenever `Position`/`Rotation` "changed" — again, writing Transform FROM Position, not the
+   reverse).
+5. **`LightyearAvianPlugin::update_child_collider_position`** (`LA/src/plugin.rs:858-888`) — **THE
+   system that actually computes child-collider `Position`/`Rotation` FROM the parent body's
+   `Position`/`Rotation` and the collider's `ColliderTransform`.** Added to `RunFixedMainLoop`,
+   `RunFixedMainLoopSystems::AfterFixedMainLoop` (`LA/src/plugin.rs:187-191`). Query:
+   `Query<(&ColliderTransform, &mut Position, &mut Rotation, &ColliderOf), Without<RigidBody>>` —
+   explicitly `Without<RigidBody>`, i.e. it only touches non-body colliders (children), looks up the
+   parent via `ColliderOf`, and computes:
+   ```rust
+   position.0 = rb_pos.0 + rb_rot * collider_transform.translation;
+   *rotation = (rb_rot.0 * collider_transform.rotation.0).normalize().into();
+   ```
+   (`LA/src/plugin.rs:876,881-886`). This is the ONLY system among the five that writes a child's
+   `Position`/`Rotation` from "parent pose + local offset" — it is the intended replacement for
+   avian's own (disabled) internal per-frame child-position sync, per the doc comment right above it
+   ("In avian, this is done in `PhysicsSystems::First`, so we need to manually run it after
+   `PhysicsSystems` run", `LA/src/plugin.rs:853-857`).
+6. **`configure_sets` block, `FixedPostUpdate`**: `(PhysicsSystems::StepSimulation,
+   (PredictionSystems::UpdateHistory, FrameInterpolationSystems::Update)).chain()`
+   (`LA/src/plugin.rs:193-204`) — governs ordering of history recording relative to physics stepping
+   WITHIN `FixedPostUpdate`, but says nothing about `RunFixedMainLoop`.
+7. **`configure_sets` block, `PostUpdate`**: `(FrameInterpolationSystems::Interpolate,
+   RollbackSystems::VisualCorrection, PhysicsSystems::Writeback, TransformSystems::Propagate).chain()`
+   (`LA/src/plugin.rs:205-217`) — visual-only, post-simulation.
+
+### Does anything initialize/write a placeholder pose for freshly-added colliders?
+
+**No — `lightyear_avian3d` itself never writes `Position::PLACEHOLDER`/`Rotation::PLACEHOLDER`; that
+sentinel is exclusively an avian-core concept** (required-component default,
+`AVIAN/src/collision/collider/backend.rs:97-98`, resolved by avian's own `on_add` hook,
+`AVIAN/src/collision/collider/backend.rs:114-121` → `init_physics_transform`,
+`AVIAN/src/physics_transform/transform.rs:1116-1275`, all read in Q8 below).
+`lightyear_avian3d`'s `update_child_collider_position` (item 5 above) is the only lightyear-side
+system that writes a plausible, non-placeholder pose to a child, and it does so **unconditionally
+overwriting whatever `Position`/`Rotation` currently holds** — it has no placeholder-detection or
+skip-if-parent-not-ready logic; if `rb_pos`/`rb_rot` (queried via `Query<(&Position, &Rotation),
+(With<RigidBody>, With<Children>)>`, `LA/src/plugin.rs:869`) resolve successfully, it always writes.
+If the PARENT itself doesn't match that query (e.g. parent transiently lacks `Childrenue` for one
+frame, or is mid-bind), the child's `Position`/`Rotation` are simply left untouched for that frame
+(the `let Ok(...) = rb_query.get(...) else { continue; }` at `LA/src/plugin.rs:872-874` skips
+silently) — meaning **a child can go through one or more `RunFixedMainLoop::AfterFixedMainLoop`
+passes without this system ever correcting a still-placeholder value**, if the parent doesn't yet
+satisfy the query.
+
+### Does it handle child colliders differently from root bodies at all?
+
+Yes, exactly via the `Without<RigidBody>` filter on `update_child_collider_position` — that is the
+ENTIRE differentiation. Root bodies (`With<RigidBody>`) get their `Position`/`Rotation` exclusively
+from avian's own physics step (`PhysicsSystems::StepSimulation`, inside `FixedPostUpdate`/
+`FixedMain`) plus (if manually moved) `transform_to_position`; child colliders get theirs
+recomputed every frame, once, from the parent + `ColliderTransform`, in `RunFixedMainLoop::
+AfterFixedMainLoop` — **a schedule that runs exactly once per render frame, OUTSIDE `FixedMain`, and
+is therefore NEVER re-entered by `run_rollback`'s manual `world.run_schedule(FixedMain)` replay
+loop** (verified from `bevy_app` source: `RunFixedMainLoop` "runs the `FixedMain` schedule in a
+loop" as its OWN top-level schedule, `bevy_app-0.19.0/src/main_schedule.rs:94-104`; `FixedMain` "runs
+first"→`FixedFirst`→...→`FixedLast` chain configured separately,
+`bevy_app-0.19.0/src/main_schedule.rs:106-160,316-345`; `RunFixedMainLoopSystems::AfterFixedMainLoop`
+doc: "Runs after the fixed update logic. ...runs exactly once per frame, regardless of the number of
+fixed updates," `bevy_app-0.19.0/src/main_schedule.rs:401-404,470-491`). This is the single most
+important structural fact for Q8.
+
+---
+
+## Q8 — Ranked plausible mechanisms writing a literal `Rotation::PLACEHOLDER` (or NaN) into a live child component around bind-time rollback
+
+### Mechanism 1 (highest confidence): placeholder recorded into `PredictionHistory<Rotation>` before `update_child_collider_position` ever resolves it, then reinjected by `prepare_rollback` the moment the grace window lifts on a rollback frame
+
+**Chain of evidence, fully cited:**
+1. Avian's `require`-hook gives every fresh `Collider` a synchronous `Rotation::PLACEHOLDER` the
+   instant the collider component is added (`AVIAN/src/collision/collider/backend.rs:97-98`,
+   `try_register_required_components_with::<C, Rotation>(|| Rotation::PLACEHOLDER)`).
+2. Avian's `on_add` hook for that same collider (`AVIAN/src/collision/collider/backend.rs:114-121`)
+   calls `init_physics_transform` (`AVIAN/src/physics_transform/transform.rs:1116-1275`)
+   synchronously, in the SAME `DeferredWorld` hook — this is the ONLY place the placeholder is
+   normally resolved to a real value for a child, and it happens once, at collider-insertion time
+   (via the entity's `ChildOf`/`Transform` chain, NOT `GlobalTransform` propagation, so it doesn't
+   depend on `TransformSystems::Propagate` having run — `AVIAN/src/physics_transform/
+   transform.rs:1144-1151`).
+3. **If this resolution is skipped, delayed, or the entity briefly re-observes the placeholder
+   before/without this hook completing** (e.g. `RigidBody` special-case at
+   `AVIAN/src/collision/collider/backend.rs:118-121`: `if
+   !world.entity(ctx.entity).contains::<RigidBody>() { init_physics_transform(...) }` — **this
+   SKIPS `init_physics_transform` entirely for an entity that has BOTH `Collider` and `RigidBody`
+   at insertion time**, deferring to whatever inserted `RigidBody` to handle its own pose; a child
+   collider normally does NOT carry `RigidBody`, so this branch should not apply to children — but
+   it IS the one conditional gap in an otherwise-unconditional resolution, and is worth flagging as
+   the most likely SOURCE of a still-placeholder `Rotation` surviving past collider-insertion if the
+   binder's insertion order ever puts `RigidBody` on a "child" transiently, or if bevy's required-
+   component insertion order interacts unexpectedly with multi-component batch inserts — see the
+   Fix Candidates section), the child's `Rotation` remains `PLACEHOLDER` until
+   `update_child_collider_position` (`LA/src/plugin.rs:858-888`) next runs, which (per Q7) is in
+   `RunFixedMainLoop::AfterFixedMainLoop` — once per frame, and ONLY if the parent body
+   simultaneously satisfies `Query<(&Position, &Rotation), (With<RigidBody>, With<Children>)>`
+   (`LA/src/plugin.rs:869`).
+4. **`update_prediction_history::<Rotation>` (`LP/src/predicted_history.rs:94-123`) runs in
+   `FixedPostUpdate`, every tick, unconditionally on `is_changed()`** — since the fresh collider's
+   `Rotation` insertion is itself a change, the very next `FixedPostUpdate` after collider-insertion
+   records history entry #1 with whatever `Rotation` currently holds. **If that `FixedPostUpdate`
+   happens before the next `RunFixedMainLoop::AfterFixedMainLoop` pass has (re-)computed a correct
+   child pose — which is entirely possible since `FixedPostUpdate` is nested inside `FixedMain`,
+   which itself is nested inside `RunFixedMainLoopSystems::FixedMainLoop`, which runs BEFORE
+   `AfterFixedMainLoop` in the SAME `RunFixedMainLoop` pass, meaning on the FIRST frame after
+   collider insertion, `FixedPostUpdate` (and thus `update_prediction_history`) systematically
+   fires strictly earlier than `update_child_collider_position` for that same frame** (`bevy_app-
+   0.19.0/src/main_schedule.rs:401-491`: `BeforeFixedMainLoop` → `FixedMainLoop` (runs `FixedMain`
+   zero-or-more times) → `AfterFixedMainLoop`, in that fixed order every single frame) — **history
+   entry #1 for a freshly-bound child's `Rotation` is recorded from within the SAME
+   `RunFixedMainLoop` pass that will only later, in `AfterFixedMainLoop`, overwrite the placeholder
+   with a real value.** If `init_physics_transform`'s synchronous resolution (step 2) already fixed
+   it by then, entry #1 is fine; if not (step 3's gap, or any other stall), **entry #1 is
+   `Rotation::PLACEHOLDER`, permanently, in history.**
+5. **`prepare_rollback::<Rotation>`'s `Without<DisableRollback>` filter (`LP/src/rollback.rs:890`)
+   PROTECTS this child from having that bad entry #1 restored back into the live component for the
+   ENTIRE `enable_rollback_after` grace window** (default 20 ticks, `LP/src/rollback.rs:264-274`) —
+   the repo's own choice of `skip_despawn: true` (`src/net.rs:217-220`) is precisely what creates
+   this window (Q3/Q4). **The window ends, unconditionally, at
+   `check_rollback`'s`deterministic_skip_despawn` drain (`LP/src/rollback.rs:790-812`), and — as
+   established in Q4 — that drain fires ONLY on a frame where `get_rollback_start_tick()` is
+   already `Some`, i.e. a rollback is happening THIS SAME frame.** The very first tick
+   `DisableRollback` is removed is therefore always immediately followed (same `PreUpdate` pass) by
+   `prepare_rollback` now matching the (newly un-filtered) entity, calling `predicted_history.
+   get_state(rollback_tick)` (`LP/src/rollback.rs:936`, since this is a `Rollback::FromInputs` or
+   non-completed `Rollback::FromState` case for a non-replicated component — `Rotation` here IS
+   replicated on the root but the CHILD doesn't carry `ConfirmedHistory<Rotation>` since it's not
+   individually replicated, so it always takes the `predicted_history.get_state(rollback_tick)`
+   branch, `LP/src/rollback.rs:930-933`), and if `rollback_tick` resolves to (or before, per
+   `HistoryBuffer::get_state`'s `partition_point`-based "newest entry ≤ tick" lookup,
+   `LC/src/history_buffer.rs:160-168`) history entry #1 — **the PLACEHOLDER — `*predicted_component
+   = correct` (`LP/src/rollback.rs:1005`) writes `Rotation::PLACEHOLDER` directly into the live,
+   now-active child `Rotation` component, at the EXACT moment the child becomes a "real" rollback
+   participant.** This is bit-for-bit consistent with the reported symptom: "a real, non-NaN, but
+   wrong sentinel value written into a live component."
+
+**Why this ranks #1:** every link in the chain is independently sourced to a specific line range
+(steps 1–5 above), the timing argument (`RunFixedMainLoop` vs `FixedMain` ordering) is drawn
+directly from `bevy_app`'s own schedule-ordering documentation/implementation (not inferred), and
+the mechanism reproduces BOTH observed variants from the task description:
+- **NaN-computed-position variant** (children without their own `Position`, going through
+  `ColliderTransform`-relative math): if `ColliderOf::on_insert`
+  (`AVIAN/src/collision/collider/collider_hierarchy/mod.rs:82-148`) computes `ColliderTransform`
+  from a `GlobalTransform::reparented_to` (line 104) while the PARENT's `GlobalTransform` is itself
+  still stale/placeholder-derived (because the parent's own `Position`/`Rotation` hasn't been
+  resolved from ITS placeholder yet, in a freshly-spawned batch where parent and children are all
+  new in the same frame), `ColliderTransform` itself can carry NaN/garbage, and
+  `update_child_collider_position`'s `rb_rot * collider_transform.translation` (`LA/src/
+  plugin.rs:876`) then propagates that into the child's computed world `Position` — a downstream
+  NaN, not a sentinel, consistent with the first observed variant.
+- **Literal-PLACEHOLDER variant** (children given their own explicit `Position`/`Rotation`): the
+  above 5-step chain reads back the RAW placeholder value (not a NaN derived from it), consistent
+  with the second observed variant, exactly.
+
+### Mechanism 2 (medium-high confidence): stale `ColliderTransform` computed from a not-yet-propagated parent `GlobalTransform`, independent of history/rollback
+
+`ColliderOf::on_insert` (`AVIAN/src/collision/collider/collider_hierarchy/mod.rs:82-148`) computes
+`ColliderTransform` from `collider_global_transform.reparented_to(body_global_transform)` (line
+96-104), reading `GlobalTransform` on BOTH the collider and the body — if either hasn't yet been
+propagated (i.e. `TransformSystems::Propagate` for THIS newly-spawned hierarchy hasn't run since the
+binder's insert), this computes from whatever `GlobalTransform` defaults to (identity, or a stale
+value from before the bind). This is a real, independently-triggerable source of a wrong
+`ColliderTransform` that doesn't require any rollback/history involvement at all — it can corrupt
+the child's computed pose on the very first `update_child_collider_position` pass regardless of
+prediction. **This ranks below Mechanism 1** because it does not, by itself, explain why the
+corruption specifically survives the `enable_rollback_after` grace window and then reappears as
+the LITERAL sentinel bit-pattern (a stale/garbage `GlobalTransform`-derived value is not
+necessarily `f32::MAX`-exact) — the repo's own experiment (children given explicit `Position`/
+`Rotation`, observing the EXACT `Rotation::PLACEHOLDER` sentinel) is much better explained by
+Mechanism 1 (history recording literally the sentinel byte pattern) than by an accumulated-transform-
+math corruption, which would more likely be a garbage-but-non-sentinel quaternion or a NaN. Still
+plausible as a contributing/parallel cause for the NaN variant specifically.
+
+### Mechanism 3 (lower confidence, but structurally real): the `RigidBody`-present skip branch in avian's collider `on_add` hook
+
+`AVIAN/src/collision/collider/backend.rs:118-121`: `init_physics_transform` is explicitly SKIPPED
+"to avoid doing this twice for rigid bodies added at the same time" whenever the collider entity
+ALSO carries `RigidBody` at `on_add` time. This is a real conditional gap in the placeholder-
+resolution path, but **empirically ruled out for this repo**: `RigidBody::Dynamic` is inserted
+exactly once, only on the root tank entity, in `spawn_tank` (`src/tank.rs:364-373`, specifically
+line 372); child colliders are attached via `ColliderConstructorHierarchy` on `*_Collider`-suffixed
+glTF nodes (`src/tank.rs:609-619`), and roadwheels/servos/muzzle get their components via plain
+`entity.insert((...))`/`commands.entity(id).insert((...))` calls (`src/tank.rs:598-603,
+639-649,671-687`) that never include `RigidBody`. So no rig part other than the root ever carries
+`RigidBody`, and this mechanism cannot be firing in the observed bug. Kept in the ranking only as a
+documented, ruled-out alternative (in case future refactors of the binder change this).
+
+### Ranking rationale
+
+1 > 2 > 3, based on: (1) how many links in each chain are backed by an exact `path:line` citation
+vs. inference, (2) how precisely each mechanism reproduces the EXACT reported sentinel value (not
+just "a wrong value"), and (3) how well each explains the specific timing detail that the bug
+appears "within a frame of bind" and correlates with the `enable_rollback_after`/rollback-frequency
+knobs the repo already varied (per `src/net.rs`'s own comments about the skip_despawn amendment).
+
+---
+
+## Ranked mechanisms + fix candidates
+
+### #1 — Placeholder recorded into `PredictionHistory<Rotation>` (and `Position`) before `update_child_collider_position` resolves it; reinjected by `prepare_rollback` when the grace window lifts on a rollback frame
+
+**Fix candidate A (targeted, lowest-risk): keep the child protected until at least one KNOWN-GOOD
+value has been recorded, not just until a fixed tick count has elapsed.**
+`DeterministicPredicted::enable_rollback_after` is a plain tick-count
+(`LP/src/rollback.rs:264-266`, `u8`) with no concept of "has this child's Position/Rotation ever
+been observed non-placeholder." There is no built-in hook for "wait for a condition," so this
+requires app-level code: before calling `decorate_rig_children`'s insert, or in a follow-up system,
+manually clear/reseed `PredictionHistory<Position>`/`PredictionHistory<Rotation>` for the child
+using the PUBLIC `PredictionHistory::add_predicted(tick, Some(value))` (`LP/src/
+predicted_history.rs:82-84`) once you've confirmed (by directly reading the live component) that it
+no longer equals `Position::PLACEHOLDER`/`Rotation::PLACEHOLDER`. Concretely: add a one-shot system
+that runs AFTER `LightyearAvianPlugin::update_child_collider_position`
+(`RunFixedMainLoopSystems::AfterFixedMainLoop`) and BEFORE the next `FixedPostUpdate`'s
+`update_prediction_history`, which detects `DeterministicPredicted` children whose `Rotation ==
+Rotation::PLACEHOLDER` (or `!is_finite()`) and either (a) calls `history.clear()` on their
+`PredictionHistory<Rotation>`/`<Position>` so a later `update_prediction_history` call starts a
+fresh, correct history once the value resolves, or (b) delays inserting `DeterministicPredicted`
+itself until the first tick where both `Position` and `Rotation` are confirmed finite/non-
+placeholder (i.e., move the decoration query's `Added<Rig>` gate to also require a "pose resolved"
+marker you stamp yourself). **Tradeoff:** (b) is the cleanest but adds a one-tick (or more) extra
+delay to when rollback participation begins, and requires a new marker component + system; (a) is
+a smaller patch (clear-on-detect) but a `history.clear()` call that races with `update_prediction_
+history` in the same tick needs careful system ordering (`.before`/`.after`) to avoid re-recording
+the bad value on the same frame.
+
+**Fix candidate B (broader, addresses Mechanism 2 as well): force
+`LightyearAvianPlugin::update_child_collider_position`-equivalent resolution to run once,
+synchronously, at bind time, before `DeterministicPredicted` is ever inserted** — i.e., in
+`decorate_rig_children` (`src/net.rs:211-236`) or a system ordered immediately before it, directly
+compute and write the child's `Position`/`Rotation` from `ColliderTransform` + the (already-
+propagated, by this point, seconds after spawn) parent `Position`/`Rotation`, THEN insert
+`DeterministicPredicted`. This guarantees no PLACEHOLDER (or its downstream NaN) is ever live on the
+child at the moment `PredictionHistory` starts recording. **Tradeoff:** duplicates
+`update_child_collider_position`'s math in application code (drift risk if lightyear_avian3d changes
+that formula); still doesn't address the `RigidBody`-skip gap (Mechanism 3) or a bad
+`ColliderTransform` computed before parent `GlobalTransform` propagation (Mechanism 2) unless you
+ALSO force a `TransformSystems::Propagate` pass first.
+
+**Fix candidate C (most surgical, addresses the reinjection specifically, not the recording):**
+override `enable_rollback_after` to a much larger number is NOT sufficient by itself — Q4
+established the drain only fires opportunistically on a rollback frame, so a larger grace period
+only delays, but does not prevent, the eventual reinjection of a bad entry #1 if it's still the
+oldest entry in history by then. Instead: after the grace window naturally lifts (observe via
+polling `DisableRollback`'s removal — there is no event for this, so this requires a custom system
+that runs every tick checking `RemovedComponents<DisableRollback>` and, on removal, checks whether
+`PredictionHistory<Rotation>::oldest()` (`LC/src/history_buffer.rs:117-119`, public) is the
+placeholder and if so calls `.clear()` immediately, in the same `PreUpdate` pass, BEFORE
+`RollbackSystems::Rollback` runs. **Tradeoff:** requires ordering your custom system between
+`RollbackSystems::RemoveDisable`/the drain point inside `RollbackSystems::Check`, and
+`RollbackSystems::Rollback` — tight, fragile ordering against lightyear internals not designed to
+be hooked at that granularity (the drain lives inside `check_rollback`, a single monolithic system,
+not split into a separately-orderable step, `LP/src/rollback.rs:355-814`).
+
+**Recommended first fix to try: Candidate A(a)** — cheapest, most local, and directly targets the
+proven mechanism (bad history entry #1) rather than trying to prevent the placeholder from ever
+existing (which fights against avian's own required-component design) or trying to intercept the
+crate-internal drain timing (fragile). Concretely: add a `FixedPostUpdate` system, ordered
+`.after(PredictionSystems::UpdateHistory)` for one tick delay OR (better) ordered to run in
+`RunFixedMainLoop::AfterFixedMainLoop` `.after(LightyearAvianPlugin::update_child_collider_position)`
+that, for any `DeterministicPredicted` child whose live `Rotation`/`Position` are currently
+placeholder/non-finite, calls `.clear()` on both `PredictionHistory<Position>` and
+`PredictionHistory<Rotation>` (accessible since they're `pub` types with `pub` `Deref`/`DerefMut` to
+`HistoryBuffer`, and `HistoryBuffer::clear` is `pub fn clear(&mut self)`,
+`LC/src/history_buffer.rs:171-173`) — guaranteeing history only ever contains genuinely-resolved
+poses by the time the grace window lifts.
+
+### #2 — Stale `ColliderTransform` from not-yet-propagated parent `GlobalTransform`
+
+**Fix candidate:** ensure a `TransformSystems::Propagate` (or avian's own
+`PhysicsTransformSystems::Propagate`, since `PhysicsTransformPlugin` is disabled per `src/
+net.rs:375-388`'s own comment) pass runs and completes for the newly-bound hierarchy BEFORE
+`ColliderOf` is inserted on any child — i.e. insert colliders (and thus trigger `ColliderOf::
+on_insert`) only after an explicit `world.run_schedule`/flush that propagates transforms for the
+just-spawned subtree. If the binder currently does `commands.spawn(...).insert(Collider)` inside a
+single frame alongside reparenting, consider deferring the `Collider`/`ColliderOf` insertion by one
+`Update` tick (spawn hierarchy + `Transform`s first tick, insert colliders next tick after
+`TransformSystems::Propagate` has run at least once) — mirrors how avian's own
+`init_physics_transform` prefers walking `Transform` up `ChildOf` (not `GlobalTransform`) specifically
+to sidestep this ordering hazard (`AVIAN/src/physics_transform/transform.rs:1144-1151`), so if the
+binder can guarantee `Transform` (not `GlobalTransform`) is correct on insert, this whole mechanism
+is moot regardless of propagation timing. **Tradeoff:** adds a frame of latency to bind; requires
+restructuring the binder's insertion order, which the task said not to analyze in depth (only
+grepped, not read in full) — recommend the repo owner read `tank.rs`'s bind system before committing
+to this fix.
+
+### #3 — `RigidBody`-present skip branch in avian's collider `on_add` hook
+
+**Fix candidate:** audit the binder (`tank.rs`, not fully read for this task) to confirm no
+non-root rig part (turret/gun/muzzle/roadwheel) ever momentarily carries `RigidBody` alongside
+`Collider` in the same `commands.entity(...).insert((...))` bundle or across the same command-flush
+boundary. If confirmed absent, this mechanism can be ruled out entirely with no code change. If
+present (e.g. as an artifact of a shared spawn-bundle helper), split the bundle so `RigidBody` is
+only ever inserted on the true root entity, in a separate `insert()` call that cannot race with a
+child's `Collider` insertion. **Tradeoff:** none if the audit clears it; otherwise a straightforward
+bundle-splitting refactor with no runtime cost.
+
