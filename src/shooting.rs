@@ -3,7 +3,7 @@
 //! `ballistics` — this module owns only what makes it the *player's* gun. The armor sandbox drives
 //! the same `FireShell` from its free-fly camera instead.
 
-use avian3d::prelude::{Forces, WriteRigidBodyForces};
+use avian3d::prelude::{Forces, Position, Rotation, WriteRigidBodyForces};
 use bevy::ecs::lifecycle::Add;
 use bevy::prelude::*;
 
@@ -12,7 +12,7 @@ use crate::command::{ConsumeCommandEdges, TankCommand};
 use crate::damage::{TankVolumes, VolumeFacets, requirement_met};
 use crate::spec::Trigger;
 use crate::state::GameplaySet;
-use crate::tank::{Tank, TankRoot, Weapon};
+use crate::tank::{Tank, TankRoot, Weapon, rig_world_pose};
 
 /// Feel multiplier on the hull recoil impulse (1.0 = physical momentum). On a 57 t hull true momentum
 /// is a gentle rock by design; bump this if the firing kick should read more dramatically.
@@ -110,15 +110,17 @@ fn tick_reload(
 /// *own* muzzle and ballistics, gated by its `fire` requirement + reload — the gate lives here in
 /// the sim, where the server will enforce it, not in the input path.
 fn fire(
-    tanks: Query<(&TankCommand, Option<&TankVolumes>), With<Tank>>,
+    tanks: Query<(&TankCommand, Option<&TankVolumes>, &Position, &Rotation), With<Tank>>,
     volumes: Query<VolumeFacets>,
-    mut weapons: Query<(&GlobalTransform, &Weapon, &mut Reload, &TankRoot)>,
+    mut weapons: Query<(Entity, &Weapon, &mut Reload, &TankRoot)>,
     mut barrels: Query<&mut Recoil>,
     mut bodies: Query<Forces, With<Tank>>,
+    parents: Query<&ChildOf>,
+    locals: Query<&Transform>,
     mut commands: Commands,
 ) {
-    for (muzzle, weapon, mut reload, root) in &mut weapons {
-        let Ok((command, tank_volumes)) = tanks.get(root.0) else {
+    for (muzzle_entity, weapon, mut reload, root) in &mut weapons {
+        let Ok((command, tank_volumes, position, rotation)) = tanks.get(root.0) else {
             continue;
         };
         let triggered = match weapon.trigger {
@@ -132,10 +134,28 @@ fn fire(
             continue;
         }
 
+        // Tick-truth muzzle pose (`rig_world_pose`, never `GlobalTransform` — see its doc): the
+        // muzzle decides where the shell goes, so it must be the pose the server's tick also
+        // computes, not the render picture. The chain composes the servo angles (tick-truth in
+        // the fixed loop) and the barrel's recoil offset (stepped in `FixedUpdate`).
+        let Some((muzzle_position, muzzle_rotation)) = rig_world_pose(
+            muzzle_entity,
+            root.0,
+            position.0,
+            rotation.0,
+            &parents,
+            &locals,
+        ) else {
+            continue;
+        };
+        let Ok(bore) = Dir3::new(muzzle_rotation * Vec3::NEG_Z) else {
+            continue; // corrupt pose frame — hold the shot rather than fire NaN
+        };
+
         // Hand off to ballistics: fire down the bore at the weapon's muzzle speed.
         commands.trigger(FireShell {
-            origin: muzzle.translation(),
-            direction: muzzle.forward(),
+            origin: muzzle_position,
+            direction: bore,
             speed: weapon.speed,
             caliber: weapon.caliber,
             mass: weapon.mass,
@@ -151,8 +171,8 @@ fn fire(
         // pitches the nose up (gun climb), not just shoves the hull back. Each weapon kicks by its
         // own momentum, so the MGs barely register.
         if let Ok(mut forces) = bodies.get_mut(root.0) {
-            let impulse = muzzle.forward() * (-weapon.mass * weapon.speed * RECOIL_FEEL);
-            forces.apply_linear_impulse_at_point(impulse, muzzle.translation());
+            let impulse = bore * (-weapon.mass * weapon.speed * RECOIL_FEEL);
+            forces.apply_linear_impulse_at_point(impulse, muzzle_position);
         }
         reload.remaining = weapon.reload;
     }

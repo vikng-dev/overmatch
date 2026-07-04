@@ -50,20 +50,31 @@ struct MenuOverlayNode;
 /// clean exit once enough time has passed to observe the forced rollback + convergence.
 /// `fire_tick` defaults to 300 (mid-drive, well clear of the perturbation); `SPIKE_FIRE_TICK`
 /// overrides it for the forced-rollback-with-fire pass (~110 lands beside the ~2 s perturbation).
+/// `SPIKE_SIM_LONG=1` (rollback-storm diagnostic): drive straight at full throttle for ~15 s —
+/// from spawn that crosses the speed bump (z≈−70) and the washboard (z≈−82…−90), the terrain the
+/// user's rollback-stream report singled out; the default 4 s arc never leaves the flat pad.
 #[derive(Resource)]
 struct SimulateInput {
     ticks: u32,
     fire_tick: u32,
+    /// Last tick of the throttle window (steer is zeroed when extended, so the course features
+    /// dead ahead are actually reached).
+    drive_until: u32,
+    /// Script length — exit after this many ticks.
+    total: u32,
 }
 
 impl Default for SimulateInput {
     fn default() -> Self {
+        let long = std::env::var("SPIKE_SIM_LONG").is_ok();
         Self {
             ticks: 0,
             fire_tick: std::env::var("SPIKE_FIRE_TICK")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(300),
+            drive_until: if long { 1088 } else { 384 },
+            total: if long { 1280 } else { 600 },
         }
     }
 }
@@ -222,6 +233,7 @@ fn main() {
             (
                 log_beacon,
                 attach_replicated_rig,
+                nan_tripwire,
                 open_gameplay_gate,
                 count_rig_binds,
                 watch_rollback_metrics,
@@ -266,6 +278,57 @@ fn main() {
 /// Step-1 success signal.
 fn log_connected(add: On<Add, Connected>) {
     info!("spike_client: connected (entity {})", add.entity);
+}
+
+/// NaN tripwire (bind-window crash diagnostic): names the first entity whose physics `Position`
+/// or local `Transform` goes non-finite, with its ancestry — runs before avian's own finite
+/// assert kills the app, so the culprit node is in the log.
+fn nan_tripwire(
+    positions: Query<(Entity, &Position)>,
+    transforms: Query<(Entity, &Transform)>,
+    names: Query<&Name>,
+    parents: Query<&ChildOf>,
+    mut tripped: Local<bool>,
+) {
+    if *tripped {
+        return;
+    }
+    let describe = |entity: Entity| {
+        let mut chain = String::new();
+        let mut e = entity;
+        loop {
+            let name = names
+                .get(e)
+                .map(|n| n.as_str().to_owned())
+                .unwrap_or_else(|_| "?".into());
+            chain.push_str(&format!("{e}({name}) <- "));
+            match parents.get(e) {
+                Ok(p) => e = p.parent(),
+                Err(_) => break,
+            }
+        }
+        chain
+    };
+    for (entity, position) in &positions {
+        if !position.0.is_finite() {
+            error!(
+                "spike_client: NAN-TRIPWIRE Position on {} = {:?}",
+                describe(entity),
+                position.0
+            );
+            *tripped = true;
+        }
+    }
+    for (entity, transform) in &transforms {
+        if !(transform.translation.is_finite() && transform.rotation.is_finite()) {
+            error!(
+                "spike_client: NAN-TRIPWIRE Transform on {} = {:?}",
+                describe(entity),
+                transform
+            );
+            *tripped = true;
+        }
+    }
 }
 
 /// `SimPlugin` mounts `state::sim_plugin` (`AppState`, `GameplaySet` gated on `Playing`), and the
@@ -430,8 +493,15 @@ fn buffer_input(
     // the ~2 s server perturbation) → coast to rest. The aim intention + range are held from
     // tick 0 so the turret/gun servos slew (drive_aim_servos → drive_servos) while driving;
     // one fire click at tick 300 (Reload starts ready) exercises fire + recoil + reload.
-    state.0.throttle = if (128..384).contains(&t) { 1.0 } else { 0.0 };
-    state.0.steer = if (128..384).contains(&t) { 0.3 } else { 0.0 };
+    let driving = (128..sim.drive_until).contains(&t);
+    state.0.throttle = if driving { 1.0 } else { 0.0 };
+    // The long course run drives dead straight (the bump/washboard are on the spawn axis); the
+    // default short script arcs to exercise skid-steer.
+    state.0.steer = if driving && sim.drive_until == 384 {
+        0.3
+    } else {
+        0.0
+    };
     // Hull-local, far off-axis so the yaw servo visibly slews; range 800 m dials in real
     // superelevation from the weapon's range table.
     // SPIKE_SIM_AIM_SWEEP (rollback-storm diagnostic): instead of the constant point, sweep the
@@ -560,7 +630,7 @@ fn simulate_watchdog(
     time: Res<Time<Real>>,
     mut exit: MessageWriter<AppExit>,
 ) {
-    if simulate.ticks >= 600 {
+    if simulate.ticks >= simulate.total {
         info!("spike_client: simulation script complete, exiting");
         exit.write(AppExit::Success);
     } else if time.elapsed_secs() > 40.0 {

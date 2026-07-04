@@ -403,3 +403,50 @@ at standstill" in the windowed client. Bisection (all live runs, scratchpad `soa
   one frame — the CPU spike, not the correction, may be what reads as "jitter at speed." If run 2
   (80 ms) still feels rough, next levers: `SPIKE_INPUT_DELAY_TICKS=1..2`, threshold re-tune, or
   release-build the client.
+
+### Step 8 washboard/rollback-stream investigation + sim-truth pose reads (2026-07-04)
+
+User's 0 ms retest: healthy overall but a constant rollback stream when driving rough terrain
+(slopes/washboard), suspected suspension divergence. Findings (scratchpad `rep*`/`base*`/`vt*`):
+
+- **Sim-truth pose conversion SHIPPED (M5 debt called in)**: `rig_world_pose` (tank.rs) composes
+  the root's physics `Position`/`Rotation` down the local-Transform chain; `apply_drive` takes its
+  drive basis from physics `Rotation`; `drive_aim_servos` and `fire` use `rig_world_pose` (hull
+  affine, servo positions, muzzle pose). Servo node `Transform`s are now tick-truth inside the
+  fixed loop: `restore_servo_truth` (FixedUpdate, before GameplaySet) undoes the render lerp,
+  `drive_servos` writes the freshly-stepped angle (one shared `write_servo_pose`), and
+  `interpolate_servos` re-blends for rendering afterward — so rollback replays and avian's
+  child-collider sync see mechanism state. Canary held exactly (turret −0.2449951 at 0 ms,
+  23 rollbacks vs baseline 22; 14/14 tests; suspension rays were already physics-space — avian
+  sets ray origins from `Position`/`Rotation`, verified in source).
+- **HONEST RESULT: the conversion did NOT reduce the washboard stream.** New `SPIKE_SIM_LONG`
+  script (drive straight 15 s → crosses the bump at z≈−70 + washboard −82…−90):
+  ~432–458 rollbacks/20 s at 0 ms on BOTH the converted build and the stashed baseline —
+  identical. Distribution: settle burst, then ~6 s of flat driving with ZERO rollbacks, then
+  20–60/s from the bump onward. The stream is the irreducible client/server divergence class
+  (two processes, solver iteration order, f32) amplified by contact transients — flat ground
+  damps it, rough ground amplifies it. The conversion stays anyway: correctness class
+  (replay fidelity, symmetric force math), zero cost, and it removed `apply_drive`'s
+  GlobalTransform read — which was a live panic site (below).
+- **Fix that DID land: `ROLLBACK_VELOCITY` 0.05 → 0.20.** Every recorded mismatch cause in the
+  soak/washboard runs was `LinearVelocity` (suspension vertical-velocity transients). At 0.20 the
+  washboard run drops to ~157–161 (~64% cut), convergence unchanged (client/server agree to
+  centimetres mid-washboard, 1 settle snap), corrections stay invisible. Velocity errors
+  self-damp through the suspension; the 0.05 position/rotation bars still catch real drift.
+- **OPEN BLOCKER — bind-window NaN crash, pre-existing, now well-characterized.** ~60–75% of
+  100 ms headless runs crash within a frame of Dynamic activation: the rig's child colliders'
+  (`*_Collider.Mat_Collider`, `*_Ballistic` armor volumes) `Position` goes NaN while the ROOT
+  stays finite (⇒ `ColliderTransform` is the NaN source), no rollback involved (debug logs show
+  none in flight). Bisection: baseline crashes in `apply_drive` (`GlobalTransform::forward()`
+  unchecked normalize — that read no longer exists); attachment-gated activation (wait for
+  `ColliderOf`) crashes 8/8; observer-based activation (Dynamic in the binder's own flush
+  cascade) still 6/8 — ordering of the flip does NOT fix it. Prime suspect, from source:
+  `ColliderTransformPlugin` schedules `propagate_collider_transforms` into
+  `PhysicsTransformSystems::Propagate`, but that set's configuration lives in
+  `PhysicsTransformPlugin` (avian `physics_transform/mod.rs:86`) — which the netcode composition
+  DISABLES per lightyear_avian's instructions; whether lightyear_avian re-configures that set
+  (its plugin.rs:169+) is the next thing to verify. SP never hits this (PhysicsTransformPlugin
+  enabled there). `nan_tripwire` (spike client) names the first corrupt entity with ancestry;
+  `activate_bound_rig` is now an observer (kept: tighter, same behavior). NEXT SESSION: confirm
+  the set-configuration hole, then either configure the set ourselves in `physics_plugins()` or
+  take it upstream.

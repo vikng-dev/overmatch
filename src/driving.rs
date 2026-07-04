@@ -238,7 +238,7 @@ fn apply_drive(
     mut bodies: Query<
         (
             Entity,
-            &GlobalTransform,
+            &Rotation,
             Forces,
             &Drivetrain,
             &DriveState,
@@ -254,8 +254,7 @@ fn apply_drive(
     // Per tank. `Drivetrain` is required per-variant data with no fallback (ADR-0010): we never
     // guess stats. It's absent only in the startup frames before the spec applies (a failed load is
     // fatal — see `report_failed_spec`), so a tank with no `Drivetrain` is simply not driven yet.
-    for (body, tank_transform, mut forces, drivetrain, state, tank_volumes, tank_caps) in
-        &mut bodies
+    for (body, tank_rotation, mut forces, drivetrain, state, tank_volumes, tank_caps) in &mut bodies
     {
         // Drive gates *thrust*, not grip: only a tank with a live `Drive` capability applies its
         // drive signal. One with a dead driver/engine/transmission gets zero command but still runs
@@ -271,7 +270,11 @@ fn apply_drive(
 
         // Ground-plane drive basis from the hull orientation: forward flattened onto the ground,
         // and right as forward rotated −90° about Y (avoids depending on a separate `right()`).
-        let forward: Vec3 = tank_transform.forward().into();
+        // Physics `Rotation`, not `GlobalTransform`: force directions are sim math and must come
+        // from tick-truth state — the render transform lags physics by up to a frame (differently
+        // on client vs server) and freezes through rollback replays, which measurably streamed
+        // rollbacks under high yaw/pitch rates (step-8 washboard finding).
+        let forward = tank_rotation.0 * Vec3::NEG_Z;
         let forward = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
         let right = Vec3::new(-forward.z, 0.0, forward.x);
 

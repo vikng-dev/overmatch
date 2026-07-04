@@ -5,14 +5,14 @@
 
 use avian3d::prelude::{
     AngularVelocity, IslandPlugin, IslandSleepingPlugin, LinearVelocity,
-    PhysicsInterpolationPlugin, PhysicsTransformPlugin, Position, Rotation,
+    PhysicsInterpolationPlugin, PhysicsTransformPlugin, Position, RigidBody, Rotation,
 };
 use bevy::diagnostic::DiagnosticsStore;
 use bevy::prelude::*;
 use lightyear::avian3d::plugin::{AvianReplicationMode, LightyearAvianPlugin};
 use lightyear::prediction::diagnostics::PredictionDiagnosticsPlugin;
 // `Remote` (bevy_replicon's "this entity arrived by replication", re-exported): the honest
-// authority-vs-replica discriminator — see `activate_bound_rigs` on why `Predicted`/`Interpolated`
+// authority-vs-replica discriminator — see `activate_bound_rig` on why `Predicted`/`Interpolated`
 // are not (the server entity carries both markers itself).
 use lightyear::prelude::client::Remote;
 use lightyear::prelude::input::native::ActionState;
@@ -78,15 +78,22 @@ pub fn spike_tank_rig(asset_server: &AssetServer, spec: &Handle<crate::TankSpec>
         Transform::default(),
         // Static until the rig binds: the glb loads async (~seconds), and a Dynamic body with no
         // collider yet free-falls through the ground for the whole window (measured: y = −425 and
-        // still falling when the script ended). `activate_bound_rigs` flips it to Dynamic the
+        // still falling when the script ended). `activate_bound_rig` flips it to Dynamic the
         // moment `Rig` lands — the spike-scale version of the game's spawn-before-bind race.
         avian3d::prelude::RigidBody::Static,
     )
 }
 
-/// Wake a spike tank's physics once its rig has bound (colliders + mass exist now) — the second
-/// half of the Static-until-bound spawn above. Shared: each side flips at its own bind moment, so
-/// neither ever simulates a collider-less falling body.
+/// Wake a spike tank's physics the instant its rig binds — an OBSERVER on the binder's terminal
+/// `Rig` insert, so `RigidBody::Dynamic` applies in the same command-flush cascade as the binder's
+/// collider constructors, BEFORE any avian system runs that frame. Ordering is load-bearing,
+/// established empirically (step-8 NaN-crash bisection at 100 ms):
+///   - Dynamic landing after avian attached the constructed child colliders → every child
+///     collider's `Position` goes NaN within a frame (avian finite assert, 8/8 with an
+///     attachment-gated flip, ~60% with the old `Added<Rig>` Update system whose one-frame gap
+///     sometimes let attachment win the race);
+///   - colliders attaching to an already-Dynamic body → clean, and it is the only ordering the
+///     rest of the game exercises (SP spawns tanks Dynamic from birth).
 ///
 /// Only where the local side simulates the body (step 8): the authority (`Without<Remote>` — the
 /// server spawned it) or a predicted client view. A non-predicted replicated tank — the own tank
@@ -99,23 +106,16 @@ pub fn spike_tank_rig(asset_server: &AssetServer, spec: &Handle<crate::TankSpec>
 /// the server entity carries BOTH markers itself (send.rs registers the pairs; the markers are
 /// then target-filtered replicated components) — `Without<Interpolated>` excludes the authority.
 /// Measured: server rig bound but never went Dynamic, wheels 0/16 both ends.
-fn activate_bound_rigs(
-    tanks: Query<
-        Entity,
-        (
-            Added<crate::Rig>,
-            With<SpikeTank>,
-            Or<(With<Predicted>, Without<Remote>)>,
-        ),
-    >,
+fn activate_bound_rig(
+    add: On<Add, crate::Rig>,
+    eligible: Query<Entity, (With<SpikeTank>, Or<(With<Predicted>, Without<Remote>)>)>,
     mut commands: Commands,
 ) {
-    for entity in &tanks {
-        info!("net: {entity} rig bound — body goes Dynamic");
-        commands
-            .entity(entity)
-            .insert(avian3d::prelude::RigidBody::Dynamic);
+    if !eligible.contains(add.entity) {
+        return;
     }
+    info!("net: {} rig bound — body goes Dynamic", add.entity);
+    commands.entity(add.entity).insert(RigidBody::Dynamic);
 }
 
 /// Decorate a bound rig's non-root parts as rollback-participant the moment both `Rig` (the
@@ -185,7 +185,7 @@ pub struct ServoAngles {
 /// Authority side: mirror the live `ServoState` angles onto the replicated root component.
 /// `FixedPostUpdate`, so it reads what `drive_servos` (FixedUpdate, after `GameplaySet`) just
 /// stepped. `Without<Remote>` makes it authority-only in shared code: every client-side tank
-/// arrived by replication and carries `Remote` (see `activate_bound_rigs` on why the
+/// arrived by replication and carries `Remote` (see `activate_bound_rig` on why the
 /// `Predicted`/`Interpolated` markers can NOT discriminate here — the server carries both).
 fn publish_servo_angles(
     mut tanks: Query<(&Rig, &mut ServoAngles), Without<Remote>>,
@@ -231,9 +231,16 @@ fn apply_servo_angles(
 /// a ≤5 cm snap; coarsening to 0.05 trades some correctness-under-genuine-desync for a large CPU
 /// win on the honest-noise case. Position in metres, Rotation in radians, velocities in m/s or
 /// rad/s-equivalent — same shape as the map §1(b) reference thresholds, five times coarser.
+///
+/// Velocity is coarser still: rough terrain (the course's bump/washboard) puts sustained vertical-
+/// velocity transients through the suspension, and client/server solver noise on those transients
+/// tripped 0.05 at 20–60 rollbacks/s at ZERO latency — every recorded cause was `LinearVelocity`
+/// (step-8 washboard investigation). 0.20 cut that stream ~64% with convergence unchanged
+/// (positions agree to centimetres mid-washboard); velocity errors self-damp through the
+/// suspension, and the position/rotation bars still catch real drift.
 const ROLLBACK_POSITION_M: f32 = 0.05;
 const ROLLBACK_ROTATION_RAD: f32 = 0.05;
-const ROLLBACK_VELOCITY: f32 = 0.05;
+const ROLLBACK_VELOCITY: f32 = 0.20;
 
 /// Registers everything both sides of the wire must agree on: replicated components and the
 /// `TankCommand` input protocol. Grows as later increments add more (§5/§7 of the spike map).
@@ -296,7 +303,8 @@ pub fn plugin(app: &mut App) {
     app.local_rollback::<Reload>();
     app.local_rollback::<Suspension>();
 
-    app.add_systems(Update, (activate_bound_rigs, decorate_rig_children));
+    app.add_observer(activate_bound_rig);
+    app.add_systems(Update, decorate_rig_children);
     app.add_systems(FixedPostUpdate, publish_servo_angles);
     app.add_systems(FixedUpdate, apply_servo_angles.in_set(GameplaySet));
     // Bridge lightyear's input buffer into the sim's own `TankCommand` (command.rs's contract):
@@ -324,7 +332,7 @@ pub fn plugin(app: &mut App) {
 /// bundle includes `Tank`, confirmed fires) and `ActionState<TankCommand>` from lightyear's own
 /// input plugin once `InputMarker<TankCommand>` claims the slot (`claim_input_slot`, client bin).
 ///
-/// Locally-simulated tanks only (step 8, same predicate as `activate_bound_rigs`): a non-predicted
+/// Locally-simulated tanks only (step 8, same predicate as `activate_bound_rig`): a non-predicted
 /// own tank (SPIKE_PREDICT=0) still *sends* its `ActionState` to the server, but the local sim
 /// must not consume it — the tank's motion is the server's replicated answer, not a local
 /// re-simulation.

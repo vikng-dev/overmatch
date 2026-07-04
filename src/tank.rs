@@ -255,11 +255,19 @@ pub fn sim_plugin(app: &mut App) {
     app
         // The servo mechanism steps on the fixed clock (sim truth — the muzzle pose decides where
         // shells go), *after* `GameplaySet` so `drive_aim_servos` has written this tick's targets.
-        // The rig-node `Transform` write is separate: `interpolate_servos` blends the last two
-        // tick angles by the fixed clock's overstep each frame — smooth at any frame rate, the
-        // same split Avian uses for the hull. The write is *sim*, not presentation: armor volumes
-        // and the muzzle ride these transforms, so a headless server needs them too (the ≤1-tick
-        // interpolated pose read by fire/aim is the recorded M5 laxity).
+        // The node `Transform` is double-clocked: inside the fixed loop it is TICK TRUTH —
+        // `restore_servo_truth` re-asserts it at tick start (undoing the render lerp) and
+        // `drive_servos` writes the freshly-stepped angle at tick end, so every sim reader
+        // (`fire`'s muzzle chain via `rig_world_pose`, avian's child-collider sync, every tick of
+        // a rollback replay) sees the mechanism's state, not the smoothed picture. Between fixed
+        // runs, `interpolate_servos` (Update) blends the last two tick angles by the clock's
+        // overstep for rendering — smooth at any frame rate, same split Avian uses for the hull.
+        .add_systems(
+            FixedUpdate,
+            restore_servo_truth
+                .run_if(in_state(AppState::Playing))
+                .before(GameplaySet),
+        )
         .add_systems(
             FixedUpdate,
             drive_servos
@@ -420,6 +428,43 @@ fn roadwheel_side(name: &str) -> Option<TrackSide> {
         }
     }
     None
+}
+
+/// Tick-truth world pose of a rig node: the body root's physics `Position`/`Rotation` composed
+/// down the node chain's local `Transform`s. Sim systems must use this instead of the node's
+/// `GlobalTransform`, which is the *render* pose — propagated once per frame from the interpolated
+/// picture, up to a frame stale against the physics state, and frozen through a rollback replay.
+/// That staleness differs between a vsync-paced client and an unthrottled server, so a sim that
+/// reads it diverges fastest exactly when the hull's orientation changes fastest (measured: the
+/// step-8 washboard/high-speed-turn rollback stream).
+///
+/// The chain's local transforms are tick-truth inside the fixed loop: servo nodes are restored
+/// from `ServoState` at tick start (`restore_servo_truth`) and re-written by `drive_servos`, the
+/// barrel's recoil transform is stepped in `FixedUpdate`, everything else is static. Rig chains
+/// are authored scale-1, so composition is rigid. `None` if `node` isn't a descendant of `root`
+/// (a despawn-in-flight frame).
+pub(crate) fn rig_world_pose(
+    node: Entity,
+    root: Entity,
+    root_position: Vec3,
+    root_rotation: Quat,
+    parents: &Query<&ChildOf>,
+    locals: &Query<&Transform>,
+) -> Option<(Vec3, Quat)> {
+    let mut chain = Vec::new();
+    let mut entity = node;
+    while entity != root {
+        chain.push(entity);
+        entity = parents.get(entity).ok()?.parent();
+    }
+    let mut position = root_position;
+    let mut rotation = root_rotation;
+    for &link in chain.iter().rev() {
+        let local = locals.get(link).ok()?;
+        position += rotation * local.translation;
+        rotation *= local.rotation;
+    }
+    Some((position, rotation))
 }
 
 /// Walk up the model hierarchy from `start` (inclusive) and return the first ancestor that's in
@@ -775,9 +820,27 @@ pub fn on_tank_ready(
     });
 }
 
+/// The servo's absolute pose write: rest · R(axis, angle) — shared by the three writers (truth
+/// restore, mechanism step, render blend), so there is exactly one formula.
+fn write_servo_pose(transform: &mut Transform, spec: &ServoSpec, state: &ServoState, angle: f32) {
+    transform.rotation = state.rest * Quat::from_axis_angle(spec.role.axis(), angle);
+}
+
+/// Top of each fixed tick: re-assert every servo node's `Transform` to the mechanism's current
+/// angle, undoing `interpolate_servos`' render-time lerp — sim readers inside this tick
+/// (`rig_world_pose` chains, the child-collider sync) must see tick state. Cheap: a quat multiply
+/// per servo.
+fn restore_servo_truth(mut q: Query<(&mut Transform, &ServoSpec, &ServoState)>) {
+    for (mut transform, spec, state) in &mut q {
+        if state.captured {
+            write_servo_pose(&mut transform, spec, state, state.current);
+        }
+    }
+}
+
 fn drive_servos(
     mut q: Query<(
-        &Transform,
+        &mut Transform,
         &ServoSpec,
         &ServoCommand,
         &mut ServoState,
@@ -788,7 +851,7 @@ fn drive_servos(
     time: Res<Time>,
 ) {
     let dt = time.delta_secs();
-    for (transform, spec, command, mut state, root) in &mut q {
+    for (mut transform, spec, command, mut state, root) in &mut q {
         // Capture the node's authored rest rotation once, so the pose write can be an *absolute*
         // rotation (`rest · R(axis, angle)`) instead of accumulating deltas (no round-off).
         if !state.captured {
@@ -859,7 +922,10 @@ fn drive_servos(
             }
         }
 
-        // No transform write here: `ServoState` is the sim truth; `interpolate_servos` renders it.
+        // Publish the freshly-stepped angle as this tick's node pose — the value avian's
+        // child-collider sync and any later-in-tick reader consume (`interpolate_servos`
+        // re-blends it for rendering after the fixed loop).
+        write_servo_pose(&mut transform, spec, &state, state.current);
     }
 }
 
@@ -877,7 +943,7 @@ fn interpolate_servos(
             continue;
         }
         let angle = state.previous + shortest_angle(state.current - state.previous) * alpha;
-        transform.rotation = state.rest * Quat::from_axis_angle(spec.role.axis(), angle);
+        write_servo_pose(&mut transform, spec, state, angle);
     }
 }
 

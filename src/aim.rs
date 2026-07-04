@@ -10,7 +10,8 @@
 //! commits from its magnified intent instead of commanding the servos itself, and a network
 //! peer's command drives its tank through the exact same path.
 
-use avian3d::prelude::SpatialQuery;
+use avian3d::prelude::{Position, Rotation, SpatialQuery};
+use bevy::math::Affine3A;
 use bevy::prelude::*;
 
 use crate::camera::GunnerCameraPlaced;
@@ -19,7 +20,9 @@ use crate::damage::ControlledTank;
 use crate::firecontrol::{RangeTable, lob};
 use crate::sight::in_third_person;
 use crate::state::GameplaySet;
-use crate::tank::{Controlled, Hull, Muzzle, Rig, ServoCommand, ServoRole, Tank, TankRoot};
+use crate::tank::{
+    Controlled, Hull, Muzzle, Rig, ServoCommand, ServoRole, Tank, TankRoot, rig_world_pose,
+};
 use crate::world::ground_distance;
 
 /// Maximum engagement range; rays that hit nothing fall back to a point this far out.
@@ -174,12 +177,13 @@ fn commit_aim(
 /// sight while `drive_servos` stays a generic point-chaser. The coax + hull MG ride the gun's lob
 /// until per-weapon laying lands.
 fn drive_aim_servos(
-    tanks: Query<(Entity, &TankCommand, &Rig), With<Tank>>,
-    hull: Query<&GlobalTransform, With<Hull>>,
+    tanks: Query<(Entity, &TankCommand, &Rig, &Position, &Rotation), With<Tank>>,
     tables: Query<&RangeTable>,
-    mut servos: Query<(&GlobalTransform, &mut ServoCommand, &ServoRole, &TankRoot)>,
+    mut servos: Query<(Entity, &mut ServoCommand, &ServoRole, &TankRoot)>,
+    parents: Query<&ChildOf>,
+    locals: Query<&Transform>,
 ) {
-    for (tank, command, rig) in &tanks {
+    for (tank, command, rig, position, rotation) in &tanks {
         let Some(local) = command.aim else {
             continue; // no commitment yet — servos hold
         };
@@ -190,7 +194,12 @@ fn drive_aim_servos(
         if !local.is_finite() {
             continue;
         }
-        let Ok(hull) = hull.get(rig.hull) else {
+        // Tick-truth hull pose (`rig_world_pose`, never `GlobalTransform` — see its doc): the
+        // hull-local aim frame must be the physics state or client and server lay their servos
+        // from differently-stale hulls and diverge under maneuver.
+        let Some((hull_position, hull_rotation)) =
+            rig_world_pose(rig.hull, tank, position.0, rotation.0, &parents, &locals)
+        else {
             continue;
         };
 
@@ -200,21 +209,25 @@ fn drive_aim_servos(
         let theta = tables
             .get(rig.muzzle)
             .map_or(0.0, |table| table.superelevation(command.range));
-        let hull_affine = hull.affine();
+        let hull_affine = Affine3A::from_rotation_translation(hull_rotation, hull_position);
         let point = hull_affine.transform_point3(lob(local, theta));
         let to_local = hull_affine.inverse();
-        // Same NaN discipline as the aim check above, for the pose side: a zeroed hull
-        // `GlobalTransform` (networked bind/rollback frame) has a non-invertible affine, and the
-        // NaN inverse would poison every servo target below.
+        // Same NaN discipline as the aim check above, for the pose side (a NaN physics pose on a
+        // corrupt frame would poison every servo target below).
         if !(to_local.matrix3.is_finite() && to_local.translation.is_finite()) {
             continue;
         }
-        for (transform, mut servo, role, root) in &mut servos {
+        for (servo, mut servo_command, role, root) in &mut servos {
             if root.0 != tank {
                 continue;
             }
-            let dir = to_local.transform_vector3(point - transform.translation());
-            servo.target = match role {
+            let Some((servo_position, _)) =
+                rig_world_pose(servo, tank, position.0, rotation.0, &parents, &locals)
+            else {
+                continue;
+            };
+            let dir = to_local.transform_vector3(point - servo_position);
+            servo_command.target = match role {
                 ServoRole::Yaw => (-dir.x).atan2(-dir.z),
                 ServoRole::Pitch => dir.y.atan2((dir.x * dir.x + dir.z * dir.z).sqrt()),
             };
