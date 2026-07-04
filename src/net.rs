@@ -236,6 +236,41 @@ fn decorate_rig_children(
     }
 }
 
+/// Strip pose history from decorated rig children. `add_prediction_history` attaches
+/// `PredictionHistory<C>` for EVERY prediction-registered type present on a
+/// `DeterministicPredicted` entity — including avian `Position`/`Rotation`, whose first recorded
+/// value can be the require-inserted `PLACEHOLDER` sentinel (f32::MAX) if collider-transform
+/// propagation hasn't run yet that tick; a later rollback then restores the literal sentinel into
+/// the live component and NaNs the solver (the bind-window crash — see
+/// `nan-crash-research.md` for the fully-cited chain). The children's poses are DERIVED state
+/// (avian recomputes them from the root pose ∘ `ColliderTransform` every tick, replay included),
+/// so pose history on them has zero value. `prepare_rollback` uses the history component itself
+/// as its membership marker, so removal cleanly excludes exactly these two components while the
+/// `local_rollback` histories (`ServoState`/`Reload`/`Suspension`/`DriveState`) keep working.
+/// A polling system (not part of the decoration batch): the history is inserted by lightyear's
+/// own observer, so removal must land after it — the `With` filters make this a no-op except in
+/// the frames where a history actually appeared.
+fn strip_child_pose_history(
+    turrets: Query<
+        Entity,
+        (
+            With<DeterministicPredicted>,
+            Or<(
+                With<PredictionHistory<Position>>,
+                With<PredictionHistory<Rotation>>,
+            )>,
+        ),
+    >,
+    mut commands: Commands,
+) {
+    for entity in &turrets {
+        info!("net: {entity} pose history stripped (derived state, rollback poison vector)");
+        commands
+            .entity(entity)
+            .remove::<(PredictionHistory<Position>, PredictionHistory<Rotation>)>();
+    }
+}
+
 /// Authoritative turret/gun angles (radians, parent-local — `ServoState::current`'s own frame),
 /// published on the tank root by the authority and replicated. Remote (interpolated) tanks —
 /// other players' tanks, from step 9 — have no local servo sim; this is how their rigs lay.
@@ -388,7 +423,7 @@ pub fn plugin(app: &mut App) {
     );
 
     app.add_observer(activate_bound_rig);
-    app.add_systems(Update, decorate_rig_children);
+    app.add_systems(Update, (decorate_rig_children, strip_child_pose_history));
     // Probe ahead of the physics pass, so the first corrupt value is named BEFORE avian's own
     // finite-asserts panic mid-step (the Update-schedule tripwire never sees it — corruption and
     // panic land inside one FixedMain run).

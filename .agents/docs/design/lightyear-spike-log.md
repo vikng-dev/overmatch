@@ -528,3 +528,22 @@ in `activate_bound_rig`/`attach_replicated_rig`. Slice 3 (feel comparison) is de
 becomes a single-model tuning check at 80 ms, still gated on the bind-window NaN crash.
 Verified post-strip: gates green, 0 ms regression identical (11 settle rollbacks, 16/16 wheels,
 exact turret canary, 1 shell).
+
+### Bind-window NaN, fourth pass (2026-07-04): history vector closed, crash persists on a non-history path
+
+Research scan (`nan-crash-research.md`, fully cited): reference examples never add colliders to a
+predicted entity post-spawn and always spawn physics entities with explicit Position/Rotation —
+our async bind is off the reference map, full stop. The prediction-crate chain (history attaches
+for every registered type on DeterministicPredicted entities; change-based recording can capture
+avian's PLACEHOLDER; prepare_rollback restores recorded history verbatim) is real and was PROVEN
+by the wheel experiment — `strip_child_pose_history` (net.rs) now permanently closes that vector.
+
+BUT: in the current tree it never fires (decorated children carry no Position — the colliders
+live on UNDECORATED `*_Collider.Mat_Collider` mesh primitives, which have placeholder-required
+Position but no marker → no history), and the crash persists at 6/12 — so the remaining variant
+is a NON-history path: Mat_Collider Position/ColliderTransform garbage born and consumed inside
+one physics pass (fixed_nan_probe at tick-top never sees it). NEXT: instrument INSIDE the
+physics schedule — `On<Insert, Position>` observer logging placeholder inserts on rig descendants
++ a `Changed<Position>`/placeholder watcher in `PhysicsStepSystems::First` — to name the writer
+between Prepare and the broad-phase/spatial asserts. Everything else about the composition is
+now reference-verified as correct.
