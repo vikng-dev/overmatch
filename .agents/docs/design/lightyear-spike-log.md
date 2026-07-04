@@ -367,3 +367,39 @@ the same rest position on both sides. No back-and-forth signature in either run'
   `SPIKE_PERTURB=0` always for feel runs); terminal 2 `SPIKE_LATENCY_MS=80 SPIKE_JITTER_MS=10
   cargo run --bin spike_client --features net` (0 for pure localhost). W/S/A/D drive, mouse aims,
   LMB fires, scroll zooms, Esc menu. Ladder: 0 ms → 80 ms → cloud region (Edgegap, first outing).
+
+### Step 8 rollback-storm investigation (2026-07-04, user's run-1 report)
+
+User reported "thousands of rollbacks, jitter when driving fast, sluggish turret, sometimes spam
+at standstill" in the windowed client. Bisection (all live runs, scratchpad `soak_*`/`simw_*`/
+`sweep*_*` logs):
+
+- **Standstill soak, windowed, 0 ms, 60 s hands-off**: 26 rollbacks, ALL in the 2 s post-bind
+  settle burst, then a full clean minute — matches the healthy headless baseline. (First read of
+  this run was wrong by one minute of timestamp arithmetic; corrected against log start times.)
+- **New diagnostic levers** (kept, spike_client): `SPIKE_SIM_WINDOWED=1` = scripted input in a
+  real window (vsync pacing + full presentation, deterministic workload; NetClientPlugin's device
+  writers are dead-ended by the reverse bridge, so the script rules). `SPIKE_SIM_AIM_SWEEP=1` =
+  aim orbits the tank at ~1.3 rad/s (a player scanning) instead of the constant point.
+- **Windowed+script 0 ms: 29. Headless+sweep 0 ms: 19. Windowed+sweep+drive 0 ms: 28.** Frame
+  pacing, rendering, and aim churn are ALL exonerated at 0 ms — no storm reproducible.
+- **Windowed+sweep+drive at the DEFAULT 100 ms conditioner: 138/19 s** (~10–28/s under maneuver)
+  — the step-7 measured rate. "Thousands over minutes of play" = the client was almost certainly
+  launched without `SPIKE_LATENCY_MS=0`, so the run-1 report was really a 100 ms+20 jitter run.
+  The conditioner default biting a human tester is a footgun — feel-test commands must pin it.
+- **Real bug 1 (crash, fixed)**: `update_bore_indicator` panicked (`Dir3::new_unchecked` NaN) —
+  for a frame around a networked bind-under-rollback the muzzle's GlobalTransform is zeroed and
+  `forward()`'s unchecked normalize dies. Reproduced twice at 100 ms (exit 101/137 at bind).
+  Fix: fallible `Dir3::new`, skip the frame. Would have crashed the user's run 2 at spawn.
+- **Real bug 2 (sim poisoning, fixed)**: `commit_aim` computes the hull-local aim via
+  `hull.affine().inverse()` — a zeroed hull GlobalTransform yields a NaN aim that rides the
+  command to the SERVER and NaNs the authority's servo→physics state (any buggy or hostile client
+  could do this). `drive_aim_servos` now holds on non-finite aim and on a non-invertible hull
+  affine — the command boundary is a trust boundary.
+- Post-fix: windowed+sweep 100 ms runs clean (exit 0, zero NaN, turret tracking the sweep, reload
+  cycling); headless 0 ms regression 20 rollbacks (baseline 22); all gates green.
+- **OPEN for the feel test**: the ~10–28/s maneuver-time rollback rate at 100 ms is measured-
+  invisible in state terms (≤5 cm corrections) but each rollback replays ~7–13 physics ticks in
+  one frame — the CPU spike, not the correction, may be what reads as "jitter at speed." If run 2
+  (80 ms) still feels rough, next levers: `SPIKE_INPUT_DELAY_TICKS=1..2`, threshold re-tune, or
+  release-build the client.

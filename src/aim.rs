@@ -183,6 +183,13 @@ fn drive_aim_servos(
         let Some(local) = command.aim else {
             continue; // no commitment yet — servos hold
         };
+        // A non-finite intention would NaN the servo targets and cascade into the physics state —
+        // and under MP the command crosses a trust boundary (a client with a zeroed camera/hull
+        // transform, or a hostile one, must not be able to poison the authority's sim). Hold, like
+        // no-commitment.
+        if !local.is_finite() {
+            continue;
+        }
         let Ok(hull) = hull.get(rig.hull) else {
             continue;
         };
@@ -196,6 +203,12 @@ fn drive_aim_servos(
         let hull_affine = hull.affine();
         let point = hull_affine.transform_point3(lob(local, theta));
         let to_local = hull_affine.inverse();
+        // Same NaN discipline as the aim check above, for the pose side: a zeroed hull
+        // `GlobalTransform` (networked bind/rollback frame) has a non-invertible affine, and the
+        // NaN inverse would poison every servo target below.
+        if !(to_local.matrix3.is_finite() && to_local.translation.is_finite()) {
+            continue;
+        }
         for (transform, mut servo, role, root) in &mut servos {
             if root.0 != tank {
                 continue;
@@ -247,8 +260,14 @@ fn update_bore_indicator(
         return;
     };
 
-    // Where the barrel is actually pointing, capped exactly like the aim picker.
-    let ray = Ray3d::new(muzzle.translation(), muzzle.forward());
+    // Where the barrel is actually pointing, capped exactly like the aim picker. Fallible
+    // direction: for a frame around a networked rig bind (rollback replaying into just-decorated
+    // children) the muzzle's GlobalTransform can be zeroed, and `forward()`'s unchecked normalize
+    // panics on it — skip the frame instead (measured live, spike step 8).
+    let Ok(direction) = Dir3::new(muzzle.rotation() * -Vec3::Z) else {
+        return;
+    };
+    let ray = Ray3d::new(muzzle.translation(), direction);
     let point = ray.get_point(ground_distance(&spatial, ray, MAX_RANGE));
 
     place_indicator(

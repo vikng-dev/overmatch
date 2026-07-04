@@ -85,9 +85,14 @@ struct TurretWatch {
 fn main() {
     let simulate = std::env::args().any(|a| a == "--simulate-input")
         || std::env::var("SPIKE_SIMULATE_INPUT").is_ok();
+    // Diagnostic lever (rollback-storm investigation): scripted input in a REAL window — the
+    // deterministic headless baseline workload, but under vsync frame pacing, real rendering, and
+    // the full presentation stack. Separates "windowed render loop causes rollbacks" from "human
+    // device input causes rollbacks": same script, only the runtime differs.
+    let sim_windowed = simulate && std::env::var("SPIKE_SIM_WINDOWED").is_ok();
 
     let mut app = App::new();
-    if simulate {
+    if simulate && !sim_windowed {
         // Headless: same no-GPU/no-window recipe as the server, so automation never opens a window.
         app.add_plugins(
             DefaultPlugins
@@ -110,6 +115,9 @@ fn main() {
         .init_resource::<SimulateInput>();
     } else {
         app.add_plugins(DefaultPlugins);
+        if sim_windowed {
+            app.init_resource::<SimulateInput>();
+        }
     }
 
     // Ordering per the spike map §3: ClientPlugins, then protocol registration, then the Client
@@ -127,7 +135,11 @@ fn main() {
     // `Controlled` tank's `TankCommand` at render rate; `feed_action_state` (below) hands that to
     // lightyear each tick. Headless simulate mode keeps writing `ActionState` directly instead
     // (`buffer_input`) — no devices, no window, no presentation.
-    if !simulate {
+    // Mounted for sim-windowed too: the device writers it brings fill `TankCommand` at render
+    // rate, but in simulate mode the reverse bridge overwrites that whole struct from the scripted
+    // `ActionState` every tick before any sim system reads it — the script rules, the presentation
+    // stack (camera, HUD, real rendering) still runs, which is exactly the diagnostic point.
+    if !simulate || sim_windowed {
         app.add_plugins(NetClientPlugin);
     }
 
@@ -422,7 +434,15 @@ fn buffer_input(
     state.0.steer = if (128..384).contains(&t) { 0.3 } else { 0.0 };
     // Hull-local, far off-axis so the yaw servo visibly slews; range 800 m dials in real
     // superelevation from the weapon's range table.
-    state.0.aim = Some(Vec3::new(200.0, 0.0, -800.0));
+    // SPIKE_SIM_AIM_SWEEP (rollback-storm diagnostic): instead of the constant point, sweep the
+    // aim around the tank at ~1.3 rad/s — a player scanning with the mouse. A human recommits the
+    // aim EVERY frame from the camera ray; the constant-aim script never exercised that churn.
+    state.0.aim = if std::env::var("SPIKE_SIM_AIM_SWEEP").is_ok() {
+        let theta = 0.02 * t as f32;
+        Some(Vec3::new(800.0 * theta.sin(), 0.0, -800.0 * theta.cos()))
+    } else {
+        Some(Vec3::new(200.0, 0.0, -800.0))
+    };
     state.0.range = 800.0;
     state.0.fire_primary = t == sim.fire_tick;
 }
