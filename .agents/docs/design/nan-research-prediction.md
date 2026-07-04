@@ -298,14 +298,20 @@ Per matched entity/component:
   prediction_manager.deterministic_skip_despawn = should_disable_rollback;
   ```
   Recall the vec stores `(protection_tick, entity)` where `protection_tick = decoration_tick +
-  enable_rollback_after` (`LP/src/rollback.rs:295-298`, `DeterministicPredicted::on_add`). So:
-  entities whose `protection_tick <= rollback_tick` (i.e., **the grace window has fully elapsed
-  relative to the CURRENT rollback's target tick**) are moved into `should_disable_rollback` and
-  have `DisableRollback` **removed** — i.e., counter-intuitively, `should_disable_rollback` is the
-  set of entities for which the protection window is now over ("should [have its] disable[d]
-  [state] roll[ed] back", i.e. lifted) — the remaining (still-protected) entities are re-inserted
-  with `DisableRollback` (line 805-808, effectively a churn/no-op refresh) and kept in the vec for
-  future checks. **This whole block only executes when `check_rollback` has already decided
+  enable_rollback_after` (`LP/src/rollback.rs:295-298`, `DeterministicPredicted::on_add`).
+  **Direction of the split — CORRECTED on second-pass audit (`split_off` returns the TAIL):**
+  `partition_point(|(t, _)| *t <= rollback_tick)` (`LP/src/rollback.rs:791-793`) is the index of the
+  first entry with `protection_tick > rollback_tick`, so `split_off(split_idx)`
+  (`LP/src/rollback.rs:794-796`) moves the **still-protected** entities
+  (`protection_tick > rollback_tick`) into `should_disable_rollback`, and those get
+  `DisableRollback` **inserted** (`LP/src/rollback.rs:797-801`). The entities that remain in the
+  original vec (`protection_tick <= rollback_tick`, i.e. **the grace window has fully elapsed
+  relative to the CURRENT rollback's target tick**) get `DisableRollback` **removed**
+  (`LP/src/rollback.rs:802-809`), and the vec is then replaced with only the still-protected set
+  (`LP/src/rollback.rs:810-811`), so expired entries drop out of tracking permanently.
+  (An earlier draft of this section had the two sets swapped; the conclusions below are unchanged —
+  protection is stamped while `protection_tick > rollback_tick` and lifted on the first rollback
+  frame whose `rollback_tick` has reached `protection_tick`.) **This whole block only executes when `check_rollback` has already decided
   `get_rollback_start_tick()` is `Some` for THIS frame** — i.e. the grace period doesn't lift on a
   quiet timer, it lifts (or is re-evaluated) opportunistically, only on ticks where a rollback is
   about to occur. On a tick with NO rollback pending, an expired-but-untouched
@@ -754,3 +760,111 @@ only ever inserted on the true root entity, in a separate `insert()` call that c
 child's `Collider` insertion. **Tradeoff:** none if the audit clears it; otherwise a straightforward
 bundle-splitting refactor with no runtime cost.
 
+
+---
+
+## Audit addendum (second pass, independent source re-verification)
+
+A second full pass over the vendored sources confirmed Q1–Q6 and Q8's overall ranking, but found
+two substantive corrections and one missing fix candidate. Line citations use the same `LP`/`LC`/
+`LA`/`AVIAN` roots as above.
+
+### Correction 1 (Q4): direction of the `deterministic_skip_despawn` split
+
+Fixed in place above (`split_off` returns the tail = still-protected set, which gets
+`DisableRollback` INSERTED; the head = expired set gets it REMOVED; `LP/src/rollback.rs:790-812`).
+Conclusions unchanged.
+
+### Correction 2 (Q7/Q8): avian's own `ColliderTransformPlugin` is NOT disabled and writes child poses INSIDE the physics step — including during rollback replay
+
+Q7's claim that `LightyearAvianPlugin::update_child_collider_position`
+(`RunFixedMainLoop::AfterFixedMainLoop`) is "the ONLY system that writes a child's
+`Position`/`Rotation` from parent pose + local offset" is **incomplete**. The repo disables exactly
+`PhysicsTransformPlugin`, `PhysicsInterpolationPlugin`, `IslandPlugin`, `IslandSleepingPlugin`
+(`src/net.rs:478-481`). **`ColliderTransformPlugin` stays enabled**, and its `build`
+(`AVIAN/src/collision/collider/collider_transform/plugin.rs:41-64`) adds:
+
+- `propagate_collider_transforms` in `FixedPostUpdate`, `PhysicsTransformSystems::Propagate`
+  (`AVIAN/src/collision/collider/collider_transform/plugin.rs:48-53`) — recomputes
+  `ColliderTransform` for new/moved collider subtrees (this is the system the repo's earlier
+  set-anchoring fix, `src/net.rs:410-424`, re-anchored into `PhysicsSystems::Prepare`).
+- **avian's own `update_child_collider_position` INSIDE the `PhysicsSchedule`, at
+  `PhysicsStepSystems::First`**
+  (`AVIAN/src/collision/collider/collider_transform/plugin.rs:55-63`; function body at
+  `AVIAN/src/collision/collider/collider_transform/plugin.rs:66-95`, identical math to the
+  lightyear copy: `position.0 = rb_pos.0 + rb_rot * collider_transform.translation`).
+
+Since the `PhysicsSchedule` runs inside `FixedPostUpdate`'s `PhysicsSystems::StepSimulation`, this
+means: **on every physics tick — including every `FixedMain` replay tick during a rollback — a
+child collider's `Position`/`Rotation` are recomputed from body pose ∘ `ColliderTransform` at the
+START of the step, provided the child is (a) visible (not `DisabledDuringRollback`/
+`PredictionDisable`) and (b) wired: it has `ColliderTransform` + `ColliderOf` resolving to a body
+matching `Query<(&Position, &Rotation), (With<RigidBody>, With<Children>)>`.** Consequences:
+
+1. `PredictionSystems::UpdateHistory` runs after `StepSimulation` (`LA/src/plugin.rs:193-204`), so
+   on any *wired* tick the recorded history value is a real, step-start-recomputed pose — the
+   Mechanism-1 poison window is therefore NOT "every tick until `RunFixedMainLoop::
+   AfterFixedMainLoop`"; it is only the tick(s) where the child exists with `Position`/`Rotation`
+   but is **not yet wired**. That un-wired window is real and structural: `ColliderOf` is inserted
+   by a **commands-based observer** (`ColliderHierarchyPlugin`,
+   `AVIAN/src/collision/collider/collider_hierarchy/plugin.rs:15-40`) — at least one command-flush
+   after the collider insert — and `ColliderTransform` arrives as `ColliderOf`'s required component
+   (`AVIAN/src/collision/collider/collider_hierarchy/mod.rs:49`, `#[require(ColliderTransform)]`)
+   with `ColliderOf::from_world` defaulting to `body: Entity::PLACEHOLDER`
+   (`AVIAN/src/collision/collider/collider_hierarchy/mod.rs:58-65`), which fails the body lookup and
+   makes both copies of `update_child_collider_position` skip the child silently
+   (`AVIAN/src/collision/collider/collider_transform/plugin.rs:79-81` / `LA/src/plugin.rs:872-874`).
+2. Because avian's in-step copy writes through `Mut` unconditionally (no change-gate), a wired
+   child's `Position`/`Rotation` are flagged changed every tick, so `update_prediction_history`
+   keeps refreshing history with real values every wired tick
+   (`LP/src/predicted_history.rs:102-105`). A placeholder-era entry can remain the value returned
+   by `get_state(rollback_tick)` (newest entry ≤ tick, `LC/src/history_buffer.rs:160-168`) only if
+   (a) the rollback target tick lands inside the un-wired window itself, or (b) the child stayed
+   un-wired/hidden for the whole stretch between the poison entry and `rollback_tick`. **UNCERTAIN:**
+   which of (a)/(b) matched the wheels observation — settling it needs a log of `ColliderOf`
+   insertion tick vs. decoration tick vs. the restoring rollback's target tick.
+3. During replay, a *grace-protected* child is hidden (`DisabledDuringRollback`), so avian's in-step
+   copy skips it and its stale pre-rollback pose persists through the replay (as Q4 stated). A
+   *post-grace* child IS re-simulated: `prepare_rollback` restores its pose from history, and
+   avian's in-step copy then overwrites it from the replayed body pose each replay tick — so
+   post-grace children track the body correctly during replay (better than Q4's "frozen" wording,
+   which applies only to protected children).
+
+### Missing fix candidate D (Q8/#1) — remove `PredictionHistory<Position/Rotation>` from decorated children (the repo's `strip_child_pose_history`, already in tree)
+
+The repo already implements the cleanest per-entity-per-component opt-out, and it deserves to be
+ranked as the primary fix rather than omitted: **removing `PredictionHistory<C>` from an entity
+fully excludes that component from both recording and restore**, because the history component is
+itself the membership key of both systems:
+
+- `prepare_rollback<C>`'s query requires `&mut PredictionHistory<C>` (`LP/src/rollback.rs:883-891`)
+  — no history component, no restore, ever.
+- `update_prediction_history<C>`'s query requires `&mut PredictionHistory<C>`
+  (`LP/src/predicted_history.rs:95`) — no history component, no recording.
+- The children's poses are DERIVED state (recomputed every wired tick by avian's in-step
+  `update_child_collider_position`, per Correction 2, replay included), so pose history on them has
+  zero rollback value — nothing is lost by stripping it.
+- Safety of the removal window: between decoration and the strip, the worst case is a rollback
+  hitting a child whose history exists but is still EMPTY (records only happen in
+  `FixedPostUpdate`, which is after `PreUpdate`'s rollback machinery in the same frame) —
+  `get_state` on an empty buffer returns `None` (`LC/src/history_buffer.rs:160-168`) and
+  `prepare_rollback`'s `None` arm leaves the live value in place (`LP/src/rollback.rs:965-974`), so
+  the one-frame polling window of `strip_child_pose_history` (`src/net.rs:255-273`, scheduled in
+  `Update`, `src/net.rs:426`) is benign *provided the strip lands before the first `FixedMain` tick
+  that records* — which the current `Update` scheduling does NOT strictly guarantee against a
+  decoration that lands mid-`FixedMain` (observer commands flush inside `FixedMain`; that same
+  `FixedMain` run's later ticks can record before `Update` runs).
+- **Hardening (recommended):** convert the polling system into an observer
+  `On<Add, (PredictionHistory<Position>, PredictionHistory<Rotation>)>` gated on
+  `With<DeterministicPredicted>` + a rig-part marker, which removes the history in the same command
+  flush that inserted it — closing the record-before-strip window entirely. Caveat either way:
+  lightyear's `add_prediction_history` observer re-attaches history on any later `Add` of `C` /
+  `Predicted` / `PreSpawned` / `DeterministicPredicted` / `CatchUpGated` on that entity
+  (`LP/src/predicted_history.rs:238-247`), so re-decoration or component re-insertion re-poisons;
+  the observer form self-heals against exactly that, the polling form heals one frame later.
+
+**Revised recommendation:** fix candidate D (strip via observer, hardening the in-tree system) as
+primary — it removes the entire mechanism-1 class (poison recording AND reinjection) with public,
+stable APIs (`EntityCommands::remove`, component types are `pub`), no dependence on lightyear-
+internal drain timing, and no duplicated pose math. Candidate A(a) (placeholder-detect +
+`history.clear()`) remains a good diagnostic guard; candidates B/C are superseded by D.
