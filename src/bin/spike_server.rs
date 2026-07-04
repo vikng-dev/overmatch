@@ -26,14 +26,10 @@ use overmatch::{AppState, Rig, SimPlugin, TankCommand, on_tank_ready};
 
 const PORT: u16 = 5888;
 
-/// Step-8 levers, read once at boot. `SPIKE_PREDICT=0` spawns the owner's tank as
-/// `InterpolationTarget` instead of `PredictionTarget` — the feel-test A/B. Spawn-time only (map
-/// §7: no live prediction↔interpolation switch); restart the server to flip. `SPIKE_PERTURB=0`
-/// drops the forced-rollback impulse — pure noise during a feel test; on by default so the step-7
-/// evidence runs stay reproducible unchanged.
+/// Spike levers, read once at boot. `SPIKE_PERTURB=0` drops the forced-rollback impulse — pure
+/// noise during a feel test; on by default so the step-7 evidence runs stay reproducible.
 #[derive(Resource)]
 struct SpikeConfig {
-    predict_owner: bool,
     perturb: bool,
 }
 
@@ -107,13 +103,9 @@ fn main() {
     app.add_systems(Startup, load_tank_spec);
     app.init_resource::<PendingClients>();
     let config = SpikeConfig {
-        predict_owner: env_flag("SPIKE_PREDICT", true),
         perturb: env_flag("SPIKE_PERTURB", true),
     };
-    info!(
-        "spike_server: SPIKE_PREDICT={} SPIKE_PERTURB={}",
-        config.predict_owner, config.perturb
-    );
+    info!("spike_server: SPIKE_PERTURB={}", config.perturb);
     app.insert_resource(config);
 
     app.add_systems(
@@ -214,21 +206,16 @@ fn spawn_pending_tanks(
             // (`net::publish_servo_angles` keeps it fresh).
             ServoAngles::default(),
             Replicate::to_clients(NetworkTarget::All),
+            // The committed model: the owner predicts its own tank (input feels instant, rollback
+            // reconciles), everyone else interpolates it — the standard pairing every lightyear
+            // multiplayer example ships (map §7).
+            PredictionTarget::to_clients(NetworkTarget::Single(client_id)),
+            InterpolationTarget::to_clients(NetworkTarget::AllExceptSingle(client_id)),
             ControlledBy {
                 owner: link,
                 lifetime: default(),
             },
         ));
-        // The step-8 A/B: the owner predicts its tank (the candidate ship config), or gets the
-        // same interpolated view as everyone else (the feel-test baseline).
-        if config.predict_owner {
-            tank.insert((
-                PredictionTarget::to_clients(NetworkTarget::Single(client_id)),
-                InterpolationTarget::to_clients(NetworkTarget::AllExceptSingle(client_id)),
-            ));
-        } else {
-            tank.insert(InterpolationTarget::to_clients(NetworkTarget::All));
-        }
         if config.perturb {
             tank.insert(PendingPerturbation {
                 at: time.elapsed() + Duration::from_secs(2),

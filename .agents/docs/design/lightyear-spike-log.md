@@ -509,3 +509,22 @@ children logging placeholder writes + the restore path; (2) fix by excluding chi
 `Position`/`Rotation` from prediction history (per-entity opt-out if lightyear has one, else
 overwrite/seed their history at decoration time, else don't let decoration precede first-sync).
 Diagnostics kept in-tree: `fixed_nan_probe` (tick-top, pre-physics), `nan_tripwire` (client bin).
+
+## DECISION: prediction committed, dual-model stripped (2026-07-04)
+
+User call, endorsed: the predicted-vs-interpolated own-tank A/B is a question we no longer need
+answered — the make-or-break ("is rollback on this rig cheap and invisible?") was already answered
+YES empirically, and the interpolated model was never a candidate for a precision-gunnery game
+(input→response = RTT + interpolation delay; at 200 ping that's a ~250 ms turret, unshippable
+regardless of "heavy tank" framing). Every future feature now reasons about ONE model.
+
+Stripped as if it never existed: `SPIKE_PREDICT` (server always pairs
+`PredictionTarget::Single(owner)` + `InterpolationTarget::AllExceptSingle(owner)` — the map §7
+standard), `feed_action_state`'s non-predicted field-clearing, the bridge's
+`Or<(Predicted, Without<Remote>)>` filter (vacuous now: only locally-simulated tanks ever carry
+`ActionState`). KEPT and re-labelled as the step-9 remote-tank path it always really was:
+`ServoAngles` publish/apply, `Remote`-based authority discrimination, Static-body-for-remote-rigs
+in `activate_bound_rig`/`attach_replicated_rig`. Slice 3 (feel comparison) is dead; slice 2
+becomes a single-model tuning check at 80 ms, still gated on the bind-window NaN crash.
+Verified post-strip: gates green, 0 ms regression identical (11 settle rollbacks, 16/16 wheels,
+exact turret canary, 1 shell).

@@ -1,10 +1,10 @@
 //! Networking-spike client (step 8): connects to a local `spike_server` over UDP+netcode and is
-//! now *playable* — windowed mode mounts the game's real presentation + device gather
+//! *playable* — windowed mode mounts the game's real presentation + device gather
 //! (`NetClientPlugin`: camera, HUD, mouse aim, gunner optic, range dial, crew bar), marks the
 //! replicated own tank with the game's `Controlled` on possession, and feeds the gathered
-//! `TankCommand` into lightyear's `ActionState` each tick (`feed_action_state`). Whether that tank
-//! is predicted or interpolated is the server's spawn-time choice (`SPIKE_PREDICT`) — the step-8
-//! feel-test A/B. Esc is a cursor-release menu overlay, NOT a pause: the sim never stops (there is
+//! `TankCommand` into lightyear's `ActionState` each tick (`feed_action_state`). The own tank is
+//! always PREDICTED — the committed model: input answers instantly, rollback reconciles against
+//! the authority. Esc is a cursor-release menu overlay, NOT a pause: the sim never stops (there is
 //! no online pause; a frozen predicting client desyncs from a server that keeps ticking).
 //!
 //! Run with `cargo run --bin spike_client --features net`. Pass `--simulate-input` (or set
@@ -369,11 +369,11 @@ fn log_beacon(beacons: Query<Entity, (Added<SpikeBeacon>, With<Remote>)>) {
 /// (attached server-side at spawn) several ticks *before* the glb scene finishes loading and
 /// `on_tank_ready` binds the rig — see the spike log for what was observed in that window.
 ///
-/// Step 8: a non-predicted tank (the own tank under SPIKE_PREDICT=0; remote tanks at step 9)
-/// gets the same full rig — the binder's node mapping, servos, and view anchors are what the
-/// camera/HUD and `apply_servo_angles` lay the model with — but its body stays `Static`
-/// (`activate_bound_rigs` skips it): replication owns its pose, nothing local simulates it.
-/// `With<Remote>` = every replicated tank, whichever markers rode along.
+/// `With<Remote>` = every replicated tank, whichever markers rode along: the own (predicted)
+/// tank today, other players' (interpolated) tanks at step 9. A remote tank gets the same full
+/// rig — the binder's node mapping, servos, and view anchors are what the camera/HUD and
+/// `apply_servo_angles` lay the model with — but its body stays `Static` (`activate_bound_rig`
+/// skips it): replication owns its pose, nothing local simulates it.
 fn attach_replicated_rig(
     tanks: Query<
         Entity,
@@ -524,38 +524,16 @@ fn buffer_input(
 /// it straight back to the sim, so locally the round trip is an identity copy — the buffer is the
 /// point. Menu open = a default command: the tank coasts to a stop instead of holding the last
 /// input, and clicks in the menu don't fire.
-///
-/// On a non-predicted own tank (SPIKE_PREDICT=0) the local sim must not act on what the writers
-/// wrote — the reverse bridge already skips it, but these fields leak past that gate, so they are
-/// cleared *after* the copy: `aim` (drive_aim_servos would slew the turret with zero latency,
-/// fighting `apply_servo_angles`), the fire edges (a local tracer would spawn), `crew_swap` (local
-/// crew would change). Throttle/steer/range stay — the Static body ignores forces, and clearing
-/// per-tick values the writers only refresh per-frame would starve ticks 2..N of a multi-tick
-/// frame on the wire. Keyed on `Predicted`, not `Interpolated` — see net.rs's
-/// `activate_bound_rigs` on why the latter can't discriminate.
 fn feed_action_state(
     menu: Res<MenuOverlay>,
-    mut slots: Query<
-        (
-            &mut TankCommand,
-            &mut ActionState<TankCommand>,
-            Has<Predicted>,
-        ),
-        With<InputMarker<TankCommand>>,
-    >,
+    mut slots: Query<(&TankCommand, &mut ActionState<TankCommand>), With<InputMarker<TankCommand>>>,
 ) {
-    for (mut command, mut state, predicted) in &mut slots {
+    for (command, mut state) in &mut slots {
         state.0 = if menu.open {
             TankCommand::default()
         } else {
             *command
         };
-        if !predicted {
-            command.aim = None;
-            command.fire_primary = false;
-            command.fire_secondary = false;
-            command.crew_swap = None;
-        }
     }
 }
 
@@ -656,9 +634,8 @@ fn watch_rollback_metrics(metrics: Res<PredictionMetrics>, mut watch: ResMut<Rol
     }
 }
 
-/// Periodic own-tank position log (every ~2 s) — diffed against the server's own periodic log
-/// for the convergence criterion (predicted) or the interpolated-tracking evidence (step 8's
-/// SPIKE_PREDICT=0 runs).
+/// Periodic replicated-tank position log (every ~2 s) — diffed against the server's own periodic
+/// log for the convergence criterion.
 fn log_position(
     tanks: Query<(Entity, &Position), (With<Remote>, With<SpikeTank>)>,
     mut timer: Local<f32>,

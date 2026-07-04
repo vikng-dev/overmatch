@@ -97,11 +97,11 @@ pub fn spike_tank_rig(asset_server: &AssetServer, spec: &Handle<crate::TankSpec>
 ///   - colliders attaching to an already-Dynamic body → clean, and it is the only ordering the
 ///     rest of the game exercises (SP spawns tanks Dynamic from birth).
 ///
-/// Only where the local side simulates the body (step 8): the authority (`Without<Remote>` — the
-/// server spawned it) or a predicted client view. A non-predicted replicated tank — the own tank
-/// under SPIKE_PREDICT=0, remote tanks at step 9 — stays `Static`: its `Position` is written by
-/// replication+interpolation (the same sync that already carries the pre-bind Static body), and a
-/// Dynamic body would free-run local physics against it.
+/// Only where the local side simulates the body: the authority (`Without<Remote>` — the server
+/// spawned it) or the client's own predicted tank. A remote (interpolated) tank — other players'
+/// tanks, from step 9 — stays `Static`: its `Position` is written by replication+interpolation
+/// (the same sync that already carries the pre-bind Static body), and a Dynamic body would
+/// free-run local physics against it.
 ///
 /// NOT keyed on `Interpolated`: `PredictionTarget`/`InterpolationTarget` are
 /// `ReplicationTarget<Predicted>`/`<Interpolated>` with the marker as a *required component*, so
@@ -237,9 +237,8 @@ fn decorate_rig_children(
 }
 
 /// Authoritative turret/gun angles (radians, parent-local — `ServoState::current`'s own frame),
-/// published on the tank root by the authority and replicated. A client with a non-predicted view
-/// of the tank (its own tank under SPIKE_PREDICT=0 now; every remote tank at step 9) has no
-/// networked servo sim — its local `ServoState` never leaves rest — so this is how its rig lays.
+/// published on the tank root by the authority and replicated. Remote (interpolated) tanks —
+/// other players' tanks, from step 9 — have no local servo sim; this is how their rigs lay.
 ///
 /// Applied as `ServoCommand` *targets*, not written into `ServoState`: the local servo mechanism
 /// (`drive_servos`) chases the authoritative angle under its real speed/accel profile, which
@@ -273,12 +272,12 @@ fn publish_servo_angles(
     }
 }
 
-/// Client side, non-predicted replicated tanks: feed the replicated angles to the local servos as
+/// Client side, remote (interpolated) tanks: feed the replicated angles to the local servos as
 /// targets — the mechanism does the rest (see [`ServoAngles`]). In `GameplaySet` so it shares the
 /// Playing gate with the rest of the sim; `drive_servos` orders itself after the whole set, so the
 /// targets land before the mechanism steps. No write conflict with `drive_aim_servos` (also in the
-/// set): a non-predicted tank's `TankCommand.aim` is always `None` (the bridge below skips it, and
-/// the windowed bin clears the field), so that system never touches these tanks' servos.
+/// set): a remote tank's `TankCommand` stays default (no input slot, and the bridge below skips
+/// non-simulated tanks), so `aim` is `None` and that system never touches these tanks' servos.
 fn apply_servo_angles(
     tanks: Query<(&ServoAngles, &Rig), (With<Remote>, Without<Predicted>)>,
     mut servos: Query<&mut ServoCommand>,
@@ -419,20 +418,13 @@ pub fn plugin(app: &mut App) {
 
 /// Copy this tick's `ActionState<TankCommand>` (lightyear's input-buffer-backed component) into the
 /// entity's own `TankCommand` (the sim's actual read contract, `command.rs`) — the seam between
-/// networked input and every sim system. Only entities carrying both: the tank root gets
-/// `TankCommand` from `command::core_plugin`'s `attach_command` observer (`On<Add, Tank>` — the rig
-/// bundle includes `Tank`, confirmed fires) and `ActionState<TankCommand>` from lightyear's own
-/// input plugin once `InputMarker<TankCommand>` claims the slot (`claim_input_slot`, client bin).
-///
-/// Locally-simulated tanks only (step 8, same predicate as `activate_bound_rig`): a non-predicted
-/// own tank (SPIKE_PREDICT=0) still *sends* its `ActionState` to the server, but the local sim
-/// must not consume it — the tank's motion is the server's replicated answer, not a local
-/// re-simulation.
+/// networked input and every sim system. Only entities carrying both, which are exactly the
+/// locally-simulated tanks: the server's tanks get `ActionState` at spawn, the client's own
+/// predicted tank gets it when `InputMarker<TankCommand>` claims the slot (`claim_input_slot`,
+/// client bin); remote (interpolated) tanks never carry one. `TankCommand` itself comes from
+/// `command::core_plugin`'s `attach_command` observer (`On<Add, Tank>`).
 fn bridge_action_state_to_tank_command(
-    mut tanks: Query<
-        (&ActionState<TankCommand>, &mut TankCommand),
-        Or<(With<Predicted>, Without<Remote>)>,
-    >,
+    mut tanks: Query<(&ActionState<TankCommand>, &mut TankCommand)>,
 ) {
     for (action, mut command) in &mut tanks {
         // Whole-struct overwrite: matches `ActionState`'s own "absolute snapshot per tick"
