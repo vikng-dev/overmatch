@@ -89,9 +89,9 @@ pub(crate) fn fixed_nan_probe(
 /// link means transform propagation skips that subtree, which corrupts anything composed through
 /// it (collider offsets, COM capture).
 pub(crate) fn report_orphan_transforms(
+    world: &World,
     children: Query<(Entity, &ChildOf), With<GlobalTransform>>,
     has_global: Query<(), With<GlobalTransform>>,
-    names: Query<&Name>,
     mut seen: Local<bevy::platform::collections::HashSet<(Entity, Entity)>>,
 ) {
     for (child, child_of) in &children {
@@ -99,16 +99,23 @@ pub(crate) fn report_orphan_transforms(
         if has_global.contains(parent) || !seen.insert((child, parent)) {
             continue;
         }
-        let name = |e: Entity| {
-            names
-                .get(e)
-                .map(|n| n.as_str().to_owned())
-                .unwrap_or_else(|_| "?".into())
+        // Full archetypes, not just names — the pairs seen so far are anonymous, so the component
+        // lists are the only identification available.
+        let archetype = |e: Entity| -> String {
+            world.inspect_entity(e).map_or_else(
+                |_| "<despawned>".into(),
+                |infos| {
+                    infos
+                        .map(|i| i.name().shortname().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                },
+            )
         };
         warn!(
-            "net: ORPHAN-TRANSFORM child {child} ({}) under transform-less parent {parent} ({})",
-            name(child),
-            name(parent)
+            "net: ORPHAN-TRANSFORM child {child} [{}] under transform-less parent {parent} [{}]",
+            archetype(child),
+            archetype(parent)
         );
     }
 }

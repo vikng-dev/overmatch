@@ -21,9 +21,9 @@ use lightyear::frame_interpolation::{FrameInterpolate, FrameInterpolationPlugin}
 use lightyear::prelude::client::Remote;
 use lightyear::prelude::*;
 
-use crate::spec::{TankSpec, TankSpecHandle};
+use crate::spec::TankSpec;
 use super::protocol::NetTank;
-use crate::tank::{Rig, Roadwheel, Tank, on_tank_ready};
+use crate::tank::{Rig, Roadwheel, on_tank_ready};
 
 pub(crate) fn plugin(app: &mut App) {
     app.add_observer(activate_bound_rig);
@@ -38,18 +38,15 @@ pub(crate) fn plugin(app: &mut App) {
     );
 }
 
-/// The root bundle every networked tank spawn needs regardless of side: the real Tiger scene + spec
-/// handle (drives `on_tank_ready`) plus the `RigidBody` the binder itself does not insert (it only
+/// The networked composition of the shared spawn core (`tank::tank_rig` — scene + spec + `Tank`):
+/// adds the wire identity marker and the `RigidBody` the binder itself does not insert (it only
 /// adds Mass/AngularInertia/colliders on children — `tank.rs::spawn_tank` inserts `RigidBody`
-/// alongside the scene for the same reason, mirrored here). `Tank`/`on_tank_ready` (and, from step 7,
-/// the whole `SimPlugin` — driving/aim/shooting) are the real rig's own contract.
+/// alongside the core for the same reason). Used by both networked spawn paths: the server's
+/// per-client spawn (`net::server::spawn_pending_tanks`) and the client's replicated-tank attach
+/// (`attach_replicated_rig`).
 pub(crate) fn net_tank_rig(asset_server: &AssetServer, spec: &Handle<TankSpec>) -> impl Bundle {
     (
-        WorldAssetRoot(
-            asset_server.load(GltfAssetLabel::Scene(0).from_asset("tiger_1/tiger_1.glb")),
-        ),
-        TankSpecHandle(spec.clone()),
-        Tank,
+        crate::tank::tank_rig(asset_server, spec),
         NetTank,
         // Explicit, because on the CLIENT this bundle lands on a replicon-spawned root that has
         // only the replicated components (Position/Rotation) — without a Transform the scene

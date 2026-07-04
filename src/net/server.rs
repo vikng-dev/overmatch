@@ -160,6 +160,14 @@ fn spawn_pending_tanks(
             // (`net::publish_servo_angles` keeps it fresh).
             ServoAngles::default(),
             Replicate::to_clients(NetworkTarget::All),
+            // Replicate the ROOT alone. Without this, `Replicate` propagates to every rig child
+            // via `ReplicateLike` once the glb binds — ~19 anonymous ghost entities per tank on
+            // each client (nothing simulates them, the client builds its own rig locally), each
+            // predicted+history-tracked, i.e. a standing spurious rollback-check source while the
+            // tank moves, plus per-tick child Position/Rotation bandwidth and the B0004
+            // orphan-transform warnings (`report_orphan_transforms` named them 2026-07-05). The
+            // authority's turret/gun lay rides the root's `ServoAngles` instead.
+            DisableReplicateHierarchy,
             // The committed model: the owner predicts its own tank (input feels instant, rollback
             // reconciles), everyone else interpolates it — the standard pairing every lightyear
             // multiplayer example ships (map §7).

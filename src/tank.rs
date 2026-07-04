@@ -356,6 +356,22 @@ fn spawn_tank_when_loaded(
     }
 }
 
+/// The spawn core every tank shares, whatever world it lives in: the Tiger scene (drives
+/// [`on_tank_ready`] when it lands), the spec handle the binder reads, and the [`Tank`] marker.
+/// The three spawn paths compose it with their role differences — SP ([`spawn_tank`]) adds a
+/// world pose + `RigidBody::Dynamic` from birth; the networked paths (`net::rig::net_tank_rig`)
+/// add the wire identity marker and stay `Static` until the rig binds. The scene path lives here
+/// and nowhere else.
+pub(crate) fn tank_rig(asset_server: &AssetServer, spec: &Handle<TankSpec>) -> impl Bundle {
+    (
+        WorldAssetRoot(
+            asset_server.load(GltfAssetLabel::Scene(0).from_asset("tiger_1/tiger_1.glb")),
+        ),
+        TankSpecHandle(spec.clone()),
+        Tank,
+    )
+}
+
 /// Spawn one Tiger at `transform`, binding its rig via [`on_tank_ready`]. `controlled` seeds the
 /// player's starting tank with the [`Controlled`] marker. The hull is a dynamic rigid body — Avian
 /// owns its Transform (ADR-0005); its collider comes from the model's `*_Collider` proxy, bound in
@@ -369,13 +385,12 @@ fn spawn_tank(
     controlled: bool,
 ) {
     let mut tank = commands.spawn((
-        WorldAssetRoot(
-            asset_server.load(GltfAssetLabel::Scene(0).from_asset("tiger_1/tiger_1.glb")),
-        ),
-        TankSpecHandle(spec.clone()),
+        tank_rig(asset_server, spec),
         transform,
         Name::new(name.to_string()),
-        Tank,
+        // Dynamic from birth: the SP scenario spawns above flat ground and the spec is already
+        // loaded, so the pre-bind free-fall window the networked paths guard against (Static
+        // until bind) is a couple of frames above the pad — harmless, and always has been.
         RigidBody::Dynamic,
     ));
     tank.observe(on_tank_ready);
