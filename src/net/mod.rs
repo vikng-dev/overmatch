@@ -7,7 +7,6 @@
 //! [`harness`] the measurement/test tooling.
 
 use avian3d::schedule::PhysicsSystems;
-use bevy::asset::LoadState;
 use bevy::prelude::*;
 
 pub mod client;
@@ -22,7 +21,7 @@ pub use physics::physics_plugins;
 pub use rig::client_smoothing_plugin;
 
 use crate::state::AppState;
-use crate::tank::PendingTankSpec;
+use crate::tank::PendingTankAssets;
 
 /// The shared networking layer both composition roots mount: the wire contract (`protocol`), the
 /// bind-window physics re-anchor (`physics`), the networked rig lifecycle (`rig`), and the
@@ -46,7 +45,7 @@ pub fn plugin(app: &mut App) {
 /// (`spawn_pending_tanks` / `attach_replicated_rig`); this just opens the `GameplaySet` gate once,
 /// the same load dependency, so the sim actually ticks.
 pub(crate) fn open_gameplay_gate(
-    spec: Option<Res<PendingTankSpec>>,
+    assets: Option<Res<PendingTankAssets>>,
     asset_server: Res<AssetServer>,
     state: Res<State<AppState>>,
     mut next: ResMut<NextState<AppState>>,
@@ -54,9 +53,9 @@ pub(crate) fn open_gameplay_gate(
     if *state.get() != AppState::Loading {
         return;
     }
-    let Some(spec) = spec else { return };
-    if matches!(asset_server.load_state(&spec.0), LoadState::Loaded) {
-        info!("net: spec loaded — entering AppState::Playing");
+    let Some(assets) = assets else { return };
+    if assets.loaded(&asset_server) {
+        info!("net: tank assets loaded — entering AppState::Playing");
         next.set(AppState::Playing);
     }
 }

@@ -12,7 +12,6 @@
 //!      (`DisableRollback`, see `attach_replicated_rig` / the cold-server bind crash).
 
 use avian3d::prelude::{Position, RigidBody, Rotation};
-use bevy::asset::LoadState;
 use bevy::prelude::*;
 use lightyear::frame_interpolation::{FrameInterpolate, FrameInterpolationPlugin};
 // `Remote` (bevy_replicon's "this entity arrived by replication", re-exported): the honest
@@ -21,7 +20,6 @@ use lightyear::frame_interpolation::{FrameInterpolate, FrameInterpolationPlugin}
 use lightyear::prelude::client::Remote;
 use lightyear::prelude::*;
 
-use crate::spec::TankSpec;
 use super::protocol::NetTank;
 use crate::tank::{Rig, Roadwheel, on_tank_ready};
 
@@ -44,9 +42,9 @@ pub(crate) fn plugin(app: &mut App) {
 /// alongside the core for the same reason). Used by both networked spawn paths: the server's
 /// per-client spawn (`net::server::spawn_pending_tanks`) and the client's replicated-tank attach
 /// (`attach_replicated_rig`).
-pub(crate) fn net_tank_rig(asset_server: &AssetServer, spec: &Handle<TankSpec>) -> impl Bundle {
+pub(crate) fn net_tank_rig(assets: &crate::tank::PendingTankAssets) -> impl Bundle {
     (
-        crate::tank::tank_rig(asset_server, spec),
+        crate::tank::tank_rig(assets),
         NetTank,
         // Explicit, because on the CLIENT this bundle lands on a replicon-spawned root that has
         // only the replicated components (Position/Rotation) — without a Transform the scene
@@ -98,23 +96,23 @@ pub(crate) fn attach_replicated_rig(
             Without<RigidBody>,
         ),
     >,
-    spec: Option<Res<crate::tank::PendingTankSpec>>,
+    assets: Option<Res<crate::tank::PendingTankAssets>>,
     asset_server: Res<AssetServer>,
     mut commands: Commands,
 ) {
     if tanks.is_empty() {
         return;
     }
-    let Some(spec) = spec else { return };
-    if !matches!(asset_server.load_state(&spec.0), LoadState::Loaded) {
+    let Some(assets) = assets else { return };
+    if !assets.loaded(&asset_server) {
         return;
     }
     for entity in &tanks {
-        info!("client: {entity} replicated tank gets local rig (spec loaded)");
+        info!("client: {entity} replicated tank gets local rig (assets loaded)");
         commands
             .entity(entity)
             .insert((
-                net_tank_rig(&asset_server, &spec.0),
+                net_tank_rig(&assets),
                 // Defense-in-depth for the bind window (NOT the placeholder crash — that's the
                 // pose gate above, verified separately): no rollback may replay this entity until
                 // its rig has taken one full physics tick, because a replay in that window steps

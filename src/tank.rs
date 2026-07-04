@@ -248,7 +248,7 @@ impl ServoState {
 /// spawning is per-configuration — the networked server spawns per connected client instead — while
 /// the mechanisms below are the sim wherever tanks come from.
 pub fn sp_spawn_plugin(app: &mut App) {
-    app.add_systems(Startup, load_tank_spec).add_systems(
+    app.add_systems(Startup, load_tank_assets).add_systems(
         Update,
         spawn_tank_when_loaded.run_if(in_state(AppState::Loading)),
     );
@@ -296,78 +296,87 @@ pub fn client_plugin(app: &mut App) {
     );
 }
 
-/// The tank's spec sheet is a *load dependency* (ADR-0011): we kick off its load up front and the
-/// tank scene is spawned only once it's ready, so the rig binds with its stats already in hand —
-/// no spec-less window. While it loads we sit in `AppState::Loading`. Kicked off once at startup on
-/// both sides (sandbox.rs's `load_target`/`PendingTarget` pattern) — `on_tank_ready` requires the
-/// spec already loaded (asserts on it), so nothing may spawn a tank root until this resolves. Shared
-/// with the networking layer (`net::rig`/`net::client`/`net::server`), which spawns tanks against
-/// the same load dependency.
+/// The tank's load dependencies (ADR-0011): the spec sheet AND the glb scene, both kicked off up
+/// front, and a tank is spawned only once both are ready — no spec-less window, and the scene
+/// instantiates within ~a frame of spawn instead of after a multi-second glb load. That window
+/// matters most under netcode: a replicated-but-unbound tank is prediction-visible the whole time
+/// (the bind-window hazard class `net::rig` guards). Kicked off once at startup on every side
+/// (sandbox.rs's `load_target`/`PendingTarget` pattern) — `on_tank_ready` requires the spec
+/// already loaded (asserts on it). Shared with the networking layer
+/// (`net::rig`/`net::client`/`net::server`), which spawns tanks against the same dependency.
 #[derive(Resource)]
-pub(crate) struct PendingTankSpec(pub Handle<TankSpec>);
-
-pub(crate) fn load_tank_spec(mut commands: Commands, asset_server: Res<AssetServer>) {
-    commands.insert_resource(PendingTankSpec(
-        asset_server.load("tiger_1/tiger_1.tank.ron"),
-    ));
+pub(crate) struct PendingTankAssets {
+    pub spec: Handle<TankSpec>,
+    pub scene: Handle<bevy::world_serialization::WorldAsset>,
 }
 
-/// Once the spec has loaded, spawn the tank and enter `Playing`. A *failed* spec load is fatal
-/// here (no fallback stats, ADR-0011); a still-loading spec just waits another frame.
+impl PendingTankAssets {
+    /// Both load dependencies resolved — the one gate every spawn path shares.
+    pub(crate) fn loaded(&self, asset_server: &AssetServer) -> bool {
+        matches!(asset_server.load_state(&self.spec), LoadState::Loaded)
+            && matches!(asset_server.load_state(&self.scene), LoadState::Loaded)
+    }
+}
+
+pub(crate) fn load_tank_assets(mut commands: Commands, asset_server: Res<AssetServer>) {
+    commands.insert_resource(PendingTankAssets {
+        spec: asset_server.load("tiger_1/tiger_1.tank.ron"),
+        scene: asset_server.load(GltfAssetLabel::Scene(0).from_asset("tiger_1/tiger_1.glb")),
+    });
+}
+
+/// Once both tank assets have loaded, spawn the duel and enter `Playing`. A *failed* load is
+/// fatal here (no fallback stats, ADR-0011); still-loading just waits another frame.
 fn spawn_tank_when_loaded(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
-    pending: Option<Res<PendingTankSpec>>,
+    pending: Option<Res<PendingTankAssets>>,
     mut next: ResMut<NextState<AppState>>,
 ) {
     let Some(pending) = pending else {
         return;
     };
-    match asset_server.load_state(&pending.0) {
-        LoadState::Loaded => {
-            // Two tanks, both player-owned: `Tab` swaps which one is `Controlled`. The first spawns
-            // controlled; the second sits until you swap into it (design: the antagonist/auto-aim
-            // lands in Chunk 2). Both are dynamic bodies — per-tank suspension holds each up; only
-            // the controlled one takes drive input.
-            spawn_tank(
-                &mut commands,
-                &asset_server,
-                &pending.0,
-                Transform::from_xyz(10.0, 2.0, 5.0).with_rotation(Quat::from_rotation_z(0.7)),
-                "Tiger I (A)",
-                true,
-            );
-            spawn_tank(
-                &mut commands,
-                &asset_server,
-                &pending.0,
-                Transform::from_xyz(10.0, 2.0, -12.0),
-                "Tiger I (B)",
-                false,
-            );
-            commands.remove_resource::<PendingTankSpec>();
-            next.set(AppState::Playing);
+    for handle in [pending.spec.id().untyped(), pending.scene.id().untyped()] {
+        if let LoadState::Failed(err) = asset_server.load_state(handle) {
+            error!("required tank asset failed to load: {err}");
+            panic!("required tank asset failed to load: {err}");
         }
-        LoadState::Failed(err) => {
-            error!("required tank spec sheet failed to load: {err}");
-            panic!("required tank spec sheet failed to load: {err}");
-        }
-        _ => {}
     }
+    if !pending.loaded(&asset_server) {
+        return;
+    }
+    // Two tanks, both player-owned: `Tab` swaps which one is `Controlled`. The first spawns
+    // controlled; the second sits until you swap into it (design: the antagonist/auto-aim
+    // lands in Chunk 2). Both are dynamic bodies — per-tank suspension holds each up; only
+    // the controlled one takes drive input.
+    spawn_tank(
+        &mut commands,
+        &pending,
+        Transform::from_xyz(10.0, 2.0, 5.0).with_rotation(Quat::from_rotation_z(0.7)),
+        "Tiger I (A)",
+        true,
+    );
+    spawn_tank(
+        &mut commands,
+        &pending,
+        Transform::from_xyz(10.0, 2.0, -12.0),
+        "Tiger I (B)",
+        false,
+    );
+    commands.remove_resource::<PendingTankAssets>();
+    next.set(AppState::Playing);
 }
 
 /// The spawn core every tank shares, whatever world it lives in: the Tiger scene (drives
-/// [`on_tank_ready`] when it lands), the spec handle the binder reads, and the [`Tank`] marker.
-/// The three spawn paths compose it with their role differences — SP ([`spawn_tank`]) adds a
-/// world pose + `RigidBody::Dynamic` from birth; the networked paths (`net::rig::net_tank_rig`)
-/// add the wire identity marker and stay `Static` until the rig binds. The scene path lives here
-/// and nowhere else.
-pub(crate) fn tank_rig(asset_server: &AssetServer, spec: &Handle<TankSpec>) -> impl Bundle {
+/// [`on_tank_ready`] when it lands — preloaded, so it instantiates within ~a frame), the spec
+/// handle the binder reads, and the [`Tank`] marker. The three spawn paths compose it with their
+/// role differences — SP ([`spawn_tank`]) adds a world pose + `RigidBody::Dynamic` from birth;
+/// the networked paths (`net::rig::net_tank_rig`) add the wire identity marker and stay `Static`
+/// until the rig binds.
+pub(crate) fn tank_rig(assets: &PendingTankAssets) -> impl Bundle {
     (
-        WorldAssetRoot(
-            asset_server.load(GltfAssetLabel::Scene(0).from_asset("tiger_1/tiger_1.glb")),
-        ),
-        TankSpecHandle(spec.clone()),
+        WorldAssetRoot(assets.scene.clone()),
+        TankSpecHandle(assets.spec.clone()),
         Tank,
     )
 }
@@ -378,19 +387,17 @@ pub(crate) fn tank_rig(asset_server: &AssetServer, spec: &Handle<TankSpec>) -> i
 /// `on_tank_ready`.
 fn spawn_tank(
     commands: &mut Commands,
-    asset_server: &AssetServer,
-    spec: &Handle<TankSpec>,
+    assets: &PendingTankAssets,
     transform: Transform,
     name: &str,
     controlled: bool,
 ) {
     let mut tank = commands.spawn((
-        tank_rig(asset_server, spec),
+        tank_rig(assets),
         transform,
         Name::new(name.to_string()),
-        // Dynamic from birth: the SP scenario spawns above flat ground and the spec is already
-        // loaded, so the pre-bind free-fall window the networked paths guard against (Static
-        // until bind) is a couple of frames above the pad — harmless, and always has been.
+        // Dynamic from birth: the SP scenario's assets are fully loaded at spawn, so the rig
+        // binds within ~a frame — no meaningful colliderless free-fall window to guard.
         RigidBody::Dynamic,
     ));
     tank.observe(on_tank_ready);

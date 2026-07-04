@@ -10,7 +10,6 @@ use std::net::{Ipv4Addr, SocketAddr};
 
 use avian3d::prelude::{Position, Rotation};
 use bevy::app::ScheduleRunnerPlugin;
-use bevy::asset::LoadState;
 use bevy::prelude::*;
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::server::*;
@@ -20,7 +19,7 @@ use super::protocol::ServoAngles;
 use super::{diagnostics, harness, open_gameplay_gate, physics, rig};
 use crate::SimPlugin;
 use crate::command::TankCommand;
-use crate::tank::{PendingTankSpec, load_tank_spec, on_tank_ready};
+use crate::tank::{PendingTankAssets, load_tank_assets, on_tank_ready};
 
 const PORT: u16 = 5888;
 
@@ -78,7 +77,7 @@ pub fn run() {
         commands.trigger(Start { entity: server });
         info!("server: starting, listening on 0.0.0.0:{PORT}");
     });
-    app.add_systems(Startup, load_tank_spec);
+    app.add_systems(Startup, load_tank_assets);
     app.init_resource::<PendingClients>();
     let config = harness::PerturbConfig {
         perturb: harness::env_flag("SPIKE_PERTURB", true),
@@ -130,7 +129,7 @@ fn handle_new_clients(
 /// colliders/armor volumes from the same spec once the glb scene arrives (async, per tank).
 fn spawn_pending_tanks(
     mut pending: ResMut<PendingClients>,
-    spec: Option<Res<PendingTankSpec>>,
+    assets: Option<Res<PendingTankAssets>>,
     asset_server: Res<AssetServer>,
     time: Res<Time<Virtual>>,
     config: Res<harness::PerturbConfig>,
@@ -139,14 +138,14 @@ fn spawn_pending_tanks(
     if pending.0.is_empty() {
         return;
     }
-    let Some(spec) = spec else { return };
-    if !matches!(asset_server.load_state(&spec.0), LoadState::Loaded) {
+    let Some(assets) = assets else { return };
+    if !assets.loaded(&asset_server) {
         return;
     }
     for (link, client_id) in pending.0.drain(..) {
         let mut tank = commands.spawn((
             Name::new("Tank"),
-            rig::net_tank_rig(&asset_server, &spec.0),
+            rig::net_tank_rig(&assets),
             ActionState::<TankCommand>::default(),
             Position(Vec3::new(0.0, 2.0, 0.0)),
             // Explicit identity, NOT left to `RigidBody`'s required-component default — that

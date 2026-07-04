@@ -25,7 +25,7 @@ use lightyear::prelude::{Controlled as NetControlled, *};
 use super::{client_smoothing_plugin, diagnostics, harness, open_gameplay_gate, physics, rig};
 use crate::command::TankCommand;
 use crate::state::AppState;
-use crate::tank::{Controlled as GameControlled, load_tank_spec};
+use crate::tank::{Controlled as GameControlled, PendingTankAssets, load_tank_assets};
 use crate::{NetClientPlugin, SimPlugin};
 
 const SERVER_PORT: u16 = 5888;
@@ -170,15 +170,32 @@ pub fn run() {
                 .with_input_delay(InputDelayConfig::fixed_input_delay(delay_ticks)),
         );
     }
-    app.add_systems(Startup, move |mut commands: Commands| {
-        commands.trigger(Connect { entity: client });
-        // No local ground spawn: `SimPlugin` → `world::plugin` builds the real game terrain
-        // (Terrain-layer static slab + test course) on both sides — rollback replays collide with
-        // it, and the wheels' suspension rays (filtered to `Layer::Terrain`) actually hit it,
-        // which the old untagged `spike_ground` never was (step-7 terrain decision, see log).
-        info!("client: connecting to {server_addr} as client_id={client_id}");
-    });
-    app.add_systems(Startup, load_tank_spec);
+    // Connect only once the tank assets (spec + glb scene) are loaded: the server spawns our
+    // replicated tank the moment we connect, and everything between that spawn and our local rig
+    // bind is the prediction-visible bind window `net::rig` has to guard. Preloading collapses it
+    // from a multi-second glb load to ~a frame of scene instantiation.
+    // (No local ground spawn here: `SimPlugin` → `world::plugin` builds the real game terrain
+    // (Terrain-layer static slab + test course) on both sides — rollback replays collide with it,
+    // and the wheels' suspension rays (filtered to `Layer::Terrain`) actually hit it.)
+    app.add_systems(
+        Update,
+        move |assets: Option<Res<PendingTankAssets>>,
+              asset_server: Res<AssetServer>,
+              mut connected: Local<bool>,
+              mut commands: Commands| {
+            if *connected {
+                return;
+            }
+            let Some(assets) = assets else { return };
+            if !assets.loaded(&asset_server) {
+                return;
+            }
+            *connected = true;
+            commands.trigger(Connect { entity: client });
+            info!("client: tank assets loaded — connecting to {server_addr} as client_id={client_id}");
+        },
+    );
+    app.add_systems(Startup, load_tank_assets);
 
     app.add_observer(diagnostics::log_connected)
         .add_observer(claim_input_slot)
