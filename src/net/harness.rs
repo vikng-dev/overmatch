@@ -21,6 +21,13 @@ use crate::command::TankCommand;
 /// constant, for the whole default ~600-tick run — a pure idle observation window, so a tank
 /// spawned onto a resting contact (`SPIKE_SPAWN_POSE`) is watched settling, with no drive input
 /// perturbing the contact state the client must re-form each rollback.
+/// `SPIKE_SIM_REVERSE=1` (minimal-divergence diagnostic): the mirror of the forward course run —
+/// drive dead straight at throttle −1.0, steer 0, no fire, and NO turret slew (aim `None`, so
+/// `drive_aim_servos` holds every servo at rest). From spawn the obstacles lie down −Z ahead, so
+/// reversing heads up +Z across the flat 1000×1000 ground slab all the way: the SIMPLEST workload
+/// the sim has — flat ground, constant throttle, zero steer, zero moving parts above the hull.
+/// Meant with `SPIKE_SIM_LONG` (the ~15 s straight window); it isolates pure re-simulation
+/// reproducibility from every contact/feature/servo transient the forward run mixes in.
 #[derive(Resource)]
 pub(crate) struct SimulateInput {
     pub(crate) ticks: u32,
@@ -33,6 +40,9 @@ pub(crate) struct SimulateInput {
     /// `SPIKE_SIM_IDLE`: suppress ALL drive input (throttle/steer stay 0, no fire) for the whole
     /// run — the beached-rest observation window.
     idle: bool,
+    /// `SPIKE_SIM_REVERSE`: drive backward (throttle −1.0) up the flat slab, steer 0, no fire, aim
+    /// held (`None` → servos rest) — the minimal-divergence straight-flat workload.
+    reverse: bool,
 }
 
 impl Default for SimulateInput {
@@ -47,6 +57,7 @@ impl Default for SimulateInput {
             drive_until: if long { 1088 } else { 384 },
             total: if long { 1280 } else { 600 },
             idle: std::env::var("SPIKE_SIM_IDLE").is_ok(),
+            reverse: std::env::var("SPIKE_SIM_REVERSE").is_ok(),
         }
     }
 }
@@ -70,10 +81,17 @@ pub(crate) fn buffer_input(
     // Idle window (`SPIKE_SIM_IDLE`): never drive — the tank just sits on whatever contact it
     // spawned onto, so the trace isolates the beached-rest rollback storm from any drive churn.
     let driving = !sim.idle && (128..sim.drive_until).contains(&t);
-    state.0.throttle = if driving { 1.0 } else { 0.0 };
+    // Reverse (`SPIKE_SIM_REVERSE`) mirrors the drive up the flat slab: throttle −1.0 instead of
+    // +1.0, heading up +Z away from the −Z obstacles — the minimal-divergence straight-flat run.
+    state.0.throttle = if driving {
+        if sim.reverse { -1.0 } else { 1.0 }
+    } else {
+        0.0
+    };
     // The long course run drives dead straight (the bump/washboard are on the spawn axis); the
-    // default short script arcs to exercise skid-steer.
-    state.0.steer = if driving && sim.drive_until == 384 {
+    // default short script arcs to exercise skid-steer. Reverse always drives dead straight — a
+    // steer input would peel the run off the flat spawn axis and defeat the minimal workload.
+    state.0.steer = if driving && !sim.reverse && sim.drive_until == 384 {
         0.3
     } else {
         0.0
@@ -83,15 +101,22 @@ pub(crate) fn buffer_input(
     // SPIKE_SIM_AIM_SWEEP (rollback-storm diagnostic): instead of the constant point, sweep the
     // aim around the tank at ~1.3 rad/s — a player scanning with the mouse. A human recommits the
     // aim EVERY frame from the camera ray; the constant-aim script never exercised that churn.
-    state.0.aim = if std::env::var("SPIKE_SIM_AIM_SWEEP").is_ok() {
+    // Reverse: aim `None` — `drive_aim_servos` skips (no target written), so every servo holds at
+    // its rest pose. The point is zero moving parts above the hull, so a servo slew can't feed the
+    // pose divergence under study.
+    state.0.aim = if sim.reverse {
+        None
+    } else if std::env::var("SPIKE_SIM_AIM_SWEEP").is_ok() {
         let theta = 0.02 * t as f32;
         Some(Vec3::new(800.0 * theta.sin(), 0.0, -800.0 * theta.cos()))
     } else {
         Some(Vec3::new(200.0, 0.0, -800.0))
     };
     state.0.range = 800.0;
-    // No fire in the idle window — a recoil impulse would disturb the resting contact under study.
-    state.0.fire_primary = !sim.idle && t == sim.fire_tick;
+    // No fire in the idle window — a recoil impulse would disturb the resting contact under study —
+    // nor in reverse, where the recoil transient would be exactly the kind of moving part the
+    // minimal-divergence run exists to exclude.
+    state.0.fire_primary = !sim.idle && !sim.reverse && t == sim.fire_tick;
 }
 
 /// Simulate mode: exit cleanly once the script has played out (long enough to cover the ~2s
