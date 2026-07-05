@@ -296,11 +296,33 @@ pub struct WheelIndex(pub usize);
 pub struct SimParts(pub HashMap<String, Entity>);
 
 /// A glb view node's link to the sim part of the same name, inserted by [`bind_tank_view`]. The
-/// render side of the split: [`mirror_view_parts`] copies runtime-written sim part transforms
-/// (servos, recoiling barrels) onto `ViewOf`-tagged nodes so the visual model tracks the sim.
-/// Step-2 scaffolding target: the full view attach will re-point the render writers themselves.
+/// name-keyed sim/view join, view→sim direction: the render writers (`interpolate_servos`)
+/// resolve their sim source through it, and the sandbox's volume painter reads the sim part's
+/// volume role through it.
 #[derive(Component, Clone, Copy)]
 pub struct ViewOf(pub Entity);
+
+/// The sim→view back-link, inserted on each sim part by [`bind_tank_view`] when its view node
+/// attaches: the part table in entity form, for consumers that start from a sim entity —
+/// `sync_view_barrels` (the recoil pose copy), the cook-off view detach, and every render
+/// reader that must follow the smoothed view pose (gunner camera, bore dot, HP labels).
+#[derive(Component, Clone, Copy)]
+pub struct ViewNode(pub Entity);
+
+impl ViewNode {
+    /// THE render-reader fallback rule, single-sourced: a sim part's render-side node is its
+    /// attached view node, or the sim part itself before the scene attaches (cosmetic — the sim
+    /// pose steps at tick rate, but nothing slews during the spawn pop-in). Degrades per part:
+    /// a partially-instantiated scene only falls back where the join is actually missing.
+    pub fn resolve(view: Option<&ViewNode>, sim: Entity) -> Entity {
+        view.map_or(sim, |view| view.0)
+    }
+}
+
+/// Marks a glb view node whose sim part is a servo frame — `interpolate_servos`' write set (the
+/// render blend targets VIEW nodes; sim node transforms are pure tick truth since step 2).
+#[derive(Component)]
+pub struct ViewServo;
 
 /// Tank spawning, the spec→rig binder, and the servo mechanism — authority-side.
 /// The single-player *scenario*: load the Tiger spec up front, spawn the two-tank duel setup once
@@ -318,13 +340,14 @@ pub fn sim_plugin(app: &mut App) {
     app
         // The servo mechanism steps on the fixed clock (sim truth — the muzzle pose decides where
         // shells go), *after* `GameplaySet` so `drive_aim_servos` has written this tick's targets.
-        // The node `Transform` is double-clocked: inside the fixed loop it is TICK TRUTH —
-        // `restore_servo_truth` re-asserts it at tick start (undoing the render lerp) and
+        // The sim node's `Transform` is pure TICK TRUTH: `restore_servo_truth` re-derives it from
+        // `TankSim` at tick start (what makes rollback replays compose restored state) and
         // `drive_servos` writes the freshly-stepped angle at tick end, so every sim reader
         // (`fire`'s muzzle chain via `rig_world_pose`, avian's child-collider sync, every tick of
-        // a rollback replay) sees the mechanism's state, not the smoothed picture. Between fixed
-        // runs, `interpolate_servos` (Update) blends the last two tick angles by the clock's
-        // overstep for rendering — smooth at any frame rate, same split Avian uses for the hull.
+        // a rollback replay) sees the mechanism's state. Render smoothing lives on the VIEW tree:
+        // between fixed runs `interpolate_servos` (Update) blends the last two tick angles by the
+        // clock's overstep into the view nodes — smooth at any frame rate, same split Avian uses
+        // for the hull, without ever touching a sim transform.
         .add_systems(
             FixedUpdate,
             restore_servo_truth
@@ -339,18 +362,9 @@ pub fn sim_plugin(app: &mut App) {
         )
         .add_systems(
             Update,
-            (interpolate_servos, mirror_view_parts)
-                .chain()
-                .run_if(in_state(AppState::Playing)),
-        );
-}
-
-/// The render-side view mirror alone — for compositions that don't run the servo sim but still
-/// spawn tanks through [`spawn_tank_sim`] (the armor sandbox: a static target, but cook-off
-/// still detaches the sim turret and the visible glb turret must follow it). [`sim_plugin`]
-/// compositions get the mirror chained after `interpolate_servos` instead; never mount both.
-pub fn view_mirror_plugin(app: &mut App) {
-    app.add_systems(Update, mirror_view_parts);
+            interpolate_servos.run_if(in_state(AppState::Playing)),
+        )
+        .add_plugins(view_attach_plugin);
 }
 
 /// The Tab possession swap — client-side: which tank *this seat* controls is not the sim's
@@ -1042,26 +1056,37 @@ pub(crate) fn spawn_tank_sim(
 /// Nothing here constructs sim state; the scene is free to arrive seconds late (a visual pop-in,
 /// not a bind window). Observed per spawn path via `.observe(…)`, like the binder it replaces.
 ///
-/// Two jobs, both render-side: hide the authored physics geometry (collision proxies, ballistic
-/// volumes — their sim colliders are built from data; the glb copies are just meshes), and tag
-/// every glb node that has a same-named sim part with [`ViewOf`] — the join `mirror_view_parts`
-/// and the sandbox's volume painter consume. Step 2 grows this into the full view attach.
+/// All render-side (design §6C):
+///   - hide the authored physics geometry (collision proxies, ballistic volumes — their sim
+///     colliders are built from data; the glb copies are just meshes);
+///   - tag every glb node that has a same-named sim part with [`ViewOf`] (+ [`ViewServo`] where
+///     the part is a servo frame — `interpolate_servos`' write set) and back-link the sim part
+///     with [`ViewNode`] — the join every render reader resolves through ([`ViewNode::resolve`]);
+///   - seed each moving view node (servo, barrel) at its sim part's CURRENT pose, so a scene
+///     attaching mid-slew never shows the authored rest pose, not even for the one frame before
+///     the render writers first run;
+///   - if a sim part already detached (cook-off fired during the scene load), attach its view
+///     subtree to the free body now — the `Add<LaunchedTurret>` observer fired before this join
+///     existed and never re-fires.
 pub fn bind_tank_view(
     ready: On<WorldInstanceReady>,
-    parts: Query<&SimParts>,
+    roots: Query<&SimParts>,
     children: Query<&Children>,
     names: Query<&Name>,
     meshes: Query<(), With<Mesh3d>>,
+    servos: Query<(), With<ServoSpec>>,
+    barrels: Query<(), With<GunBarrel>>,
+    launched: Query<(), With<crate::damage::LaunchedTurret>>,
+    transforms: Query<&Transform>,
     mut commands: Commands,
 ) {
-    let Ok(parts) = parts.get(ready.entity) else {
+    let Ok(parts) = roots.get(ready.entity) else {
         return;
     };
     // The root's descendants hold TWO same-named trees: the sim skeleton and the instantiated
     // scene. This walk's subject is the SCENE — skip the sim parts, or every skeleton node gets
-    // a self-referential `ViewOf` (which made `mirror_view_parts`' detach branch reparent a
-    // launched turret onto itself and teleport it) and the hide rule stamps `Visibility` onto
-    // bare skeleton nodes (B0004 warning per node, measured 48/run).
+    // a self-referential `ViewOf` (which would corrupt the cook-off detach) and the hide rule
+    // stamps `Visibility` onto bare skeleton nodes (B0004 warning per node, measured 48/run).
     let skeleton: HashSet<Entity> = parts.0.values().copied().collect();
     for entity in children.iter_descendants(ready.entity) {
         if skeleton.contains(&entity) {
@@ -1074,67 +1099,105 @@ pub fn bind_tank_view(
             commands.entity(entity).insert(Visibility::Hidden);
         }
         // Primitive leaves (`Mesh3d`) are render geometry, not part-named nodes — a mesh sharing
-        // a part's name (Blender mesh data often shares its object's name) must not be mirrored.
+        // a part's name (Blender mesh data often shares its object's name) must not be joined.
         // `Mesh3d` presence is the reliable discriminator, NOT `GltfMaterialName` (absent on
         // unnamed-material primitives — the step-0 shadow lesson).
         if meshes.contains(entity) {
             continue;
         }
-        if let Some(&sim) = parts.0.get(name.as_str()) {
-            commands.entity(entity).insert(ViewOf(sim));
-        }
-    }
-}
-
-/// Step-1 scaffolding for the view attach (design §6C; step 2 replaces it by re-pointing the
-/// render writers themselves): copy each runtime-written sim part transform — servo nodes
-/// (written by `interpolate_servos`) and recoiling barrels (written by `apply_recoil`) — onto its
-/// [`ViewOf`]-tagged glb node, so the visual model tracks the sim skeleton. A local-space copy is
-/// exact: the view node sits in a parent chain identical to its sim part's (same glb topology;
-/// the extra scene-wrapper link is identity). Static parts never re-render (`set_if_neq`).
-///
-/// Cook-off detach: when a sim part leaves the tank hierarchy (the launched turret —
-/// `damage::launch_turrets_on_cookoff` makes it a free body), its view node reparents under the
-/// free sim body and follows it whole; the local-copy link ends there.
-fn mirror_view_parts(
-    views: Query<(Entity, &ViewOf)>,
-    moving: Query<(), Or<(With<ServoSpec>, With<GunBarrel>)>>,
-    parents: Query<&ChildOf>,
-    mut transforms: Query<&mut Transform>,
-    mut commands: Commands,
-) {
-    for (view, target) in &views {
-        let sim = target.0;
-        if parents.get(sim).is_err() {
-            commands
-                .entity(view)
-                .insert((ChildOf(sim), Transform::IDENTITY))
-                .remove::<ViewOf>();
-            continue;
-        }
-        if !moving.contains(sim) {
-            continue;
-        }
-        let Ok(&source) = transforms.get(sim) else {
+        let Some(&sim) = parts.0.get(name.as_str()) else {
             continue;
         };
-        if let Ok(mut dest) = transforms.get_mut(view) {
-            dest.set_if_neq(source);
+        // Already launched: same attach `detach_view_on_turret_launch` performs, done here
+        // because that observer fired (and no-oped) before the scene existed. No `ViewOf` — the
+        // subtree rides the free body whole; its child parts below still join normally.
+        if launched.contains(sim) {
+            commands.entity(sim).insert(Visibility::default());
+            commands
+                .entity(entity)
+                .insert((ChildOf(sim), Transform::IDENTITY));
+            continue;
+        }
+        commands.entity(entity).insert(ViewOf(sim));
+        commands.entity(sim).insert(ViewNode(entity));
+        // Runtime-written parts start at the sim's current pose (tick truth), not the authored
+        // rest the glb shipped — a scene attaching mid-slew must never flash the rest pose.
+        if (servos.contains(sim) || barrels.contains(sim))
+            && let Ok(&pose) = transforms.get(sim)
+        {
+            commands.entity(entity).insert(pose);
+        }
+        if servos.contains(sim) {
+            commands.entity(entity).insert(ViewServo);
         }
     }
 }
 
-/// The servo's absolute pose write: rest · R(axis, angle) — shared by the three writers (truth
-/// restore, mechanism step, render blend), so there is exactly one formula.
-fn write_servo_pose(transform: &mut Transform, spec: &ServoSpec, rest: &ServoRest, angle: f32) {
-    transform.rotation = rest.0 * Quat::from_axis_angle(spec.role.axis(), angle);
+/// Copy each recoiling barrel's tick-truth transform onto its view node. The recoil spring steps
+/// on the fixed clock (`apply_recoil` writes the SIM barrel — the muzzle chain `fire` composes
+/// must carry the offset), so the view copy renders at fixed rate too — exactly the pre-split
+/// look (barrel recoil was never overstep-blended). A local-space copy is exact: the view node
+/// sits in a parent chain identical to its sim part's.
+fn sync_view_barrels(
+    barrels: Query<(&Transform, &ViewNode), With<GunBarrel>>,
+    mut views: Query<&mut Transform, Without<GunBarrel>>,
+) {
+    // A launched turret's subtree keeps its barrel link: both trees ride the same free body, so
+    // the local copy stays exact there too.
+    for (source, view) in &barrels {
+        if let Ok(mut dest) = views.get_mut(view.0) {
+            dest.set_if_neq(*source);
+        }
+    }
 }
 
-/// Top of each fixed tick: re-assert every servo node's `Transform` to the mechanism's current
-/// angle, undoing `interpolate_servos`' render-time lerp — sim readers inside this tick
-/// (`rig_world_pose` chains, the child-collider sync) must see tick state. Cheap: a quat multiply
-/// per servo. Reads the root-resident state (`TankSim::servos`) — during a rollback replay this
-/// is what re-derives the node transforms from the RESTORED state each tick.
+/// The view half of the cook-off detach (design §6C): when the sim decides the turret comes off
+/// (`damage::launch_turrets_on_cookoff` strips its `ChildOf` and makes it a free rigid body), the
+/// view turret subtree reparents under that free sim body with an identity offset and follows it
+/// whole. Its `ViewOf`/`ViewServo` come off — the launched sim turret has no servo components
+/// left, so nothing would (or should) keep writing the view node's local transform.
+fn detach_view_on_turret_launch(
+    add: On<Add, crate::damage::LaunchedTurret>,
+    views: Query<&ViewNode>,
+    mut commands: Commands,
+) {
+    let Ok(view) = views.get(add.entity) else {
+        return;
+    };
+    // The free sim body becomes the view subtree's new visibility root — without its own
+    // `Visibility` the reparented view node's inheritance chain breaks (B0004).
+    commands.entity(add.entity).insert(Visibility::default());
+    commands
+        .entity(view.0)
+        .insert((ChildOf(add.entity), Transform::IDENTITY))
+        .remove::<(ViewOf, ViewServo)>();
+}
+
+/// The render-side view-attach systems every tank-spawning composition mounts exactly once:
+/// [`sim_plugin`] pulls it in for the game and the net bins; the armor sandbox (which runs no
+/// servo sim) mounts it directly. `interpolate_servos` is NOT here — it needs the `Playing`
+/// gate and the fixed-clock state only sim compositions have. `sync_view_barrels` runs ungated
+/// deliberately: the sandbox has no `AppState`, and outside gameplay the copy is a no-op
+/// (`set_if_neq` over a handful of entities).
+pub fn view_attach_plugin(app: &mut App) {
+    app.add_observer(detach_view_on_turret_launch);
+    app.add_systems(Update, sync_view_barrels);
+}
+
+/// The servo's absolute pose rotation: rest · R(axis, angle) — shared by all three writers
+/// (truth restore, mechanism step, render blend), so there is exactly one formula.
+fn servo_rotation(spec: &ServoSpec, rest: &ServoRest, angle: f32) -> Quat {
+    rest.0 * Quat::from_axis_angle(spec.role.axis(), angle)
+}
+
+/// Top of each fixed tick: re-assert every sim servo node's `Transform` from the root-resident
+/// state, so sim readers inside this tick (`rig_world_pose` chains, the child-collider sync) see
+/// tick state derived from `TankSim` — during a rollback replay this is what re-derives the node
+/// transforms from the RESTORED state each replayed tick (without it, the first replayed `fire`
+/// would compose the abandoned timeline's muzzle pose). On a normal tick it re-writes the value
+/// `drive_servos` left there — since step 2 nothing render-side touches sim transforms anymore
+/// (`interpolate_servos` writes the view tree), so this is the invariant's cheap enforcement, a
+/// quat multiply per servo, rather than an undo of the render lerp.
 fn restore_servo_truth(
     mut q: Query<(&mut Transform, &ServoSpec, &ServoRest, &ServoIndex, &TankRoot)>,
     sims: Query<&TankSim>,
@@ -1143,7 +1206,7 @@ fn restore_servo_truth(
         let Some(state) = sims.get(root.0).ok().and_then(|sim| sim.servos.get(slot.0)) else {
             continue;
         };
-        write_servo_pose(&mut transform, spec, rest, state.current);
+        transform.rotation = servo_rotation(spec, rest, state.current);
     }
 }
 
@@ -1233,29 +1296,41 @@ fn drive_servos(
         }
 
         // Publish the freshly-stepped angle as this tick's node pose — the value avian's
-        // child-collider sync and any later-in-tick reader consume (`interpolate_servos`
-        // re-blends it for rendering after the fixed loop).
-        let angle = state.current;
-        write_servo_pose(&mut transform, spec, rest, angle);
+        // child-collider sync and any later-in-tick reader consume. Render smoothing happens on
+        // the VIEW tree (`interpolate_servos`); this transform never carries a blended pose.
+        transform.rotation = servo_rotation(spec, rest, state.current);
     }
 }
 
 /// The render half of the fixed-clock servo split: blend last tick's angle to this tick's by the
-/// fixed clock's overstep and write the node's `Transform` — smooth mechanism motion at any frame
-/// rate, exactly how Avian renders the hull between physics ticks. Along the shortest arc, so a
-/// continuous mount's ±π wrap doesn't spin the long way round.
+/// fixed clock's overstep and write the **view** node's `Transform` — smooth mechanism motion at
+/// any frame rate, exactly how Avian renders the hull between physics ticks. Along the shortest
+/// arc, so a continuous mount's ±π wrap doesn't spin the long way round.
+///
+/// Writes VIEW nodes only (design §6C): the sim servo node's `Transform` is pure tick truth,
+/// written by `drive_servos`/`restore_servo_truth` alone, so no sim reader can ever see a
+/// render-blended pose. The view node resolves its sim source through [`ViewOf`]; a launched
+/// turret's view node loses `ViewServo` at detach and drops out of this write set.
 fn interpolate_servos(
     time: Res<Time<Fixed>>,
-    mut servos: Query<(&mut Transform, &ServoSpec, &ServoRest, &ServoIndex, &TankRoot)>,
+    mut views: Query<(&mut Transform, &ViewOf), With<ViewServo>>,
+    servos: Query<(&ServoSpec, &ServoRest, &ServoIndex, &TankRoot)>,
     sims: Query<&TankSim>,
 ) {
     let alpha = time.overstep_fraction();
-    for (mut transform, spec, rest, slot, root) in &mut servos {
+    for (mut transform, view_of) in &mut views {
+        let Ok((spec, rest, slot, root)) = servos.get(view_of.0) else {
+            continue;
+        };
         let Some(state) = sims.get(root.0).ok().and_then(|sim| sim.servos.get(slot.0)) else {
             continue;
         };
         let angle = state.previous + shortest_angle(state.current - state.previous) * alpha;
-        write_servo_pose(&mut transform, spec, rest, angle);
+        // Guarded write: a settled mount must not re-dirty the view transform every frame.
+        let rotation = servo_rotation(spec, rest, angle);
+        if transform.rotation != rotation {
+            transform.rotation = rotation;
+        }
     }
 }
 

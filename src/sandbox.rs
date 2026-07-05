@@ -194,9 +194,9 @@ pub fn plugin(app: &mut App) {
         // The tank-geometry extractor: the target's sim body (armor volumes included) spawns from
         // `ExtractedTankGeometry`, exactly like the game's tanks; the shadow harness rides along.
         bake::plugin,
-        // The sim→view transform mirror: the target is static, but cook-off detaches the sim
+        // The render-side view attach: the target is static, but cook-off detaches the sim
         // turret and the rendered glb turret must follow the free body.
-        crate::tank::view_mirror_plugin,
+        crate::tank::view_attach_plugin,
         // Shared tank-state HUD (component HP + aggregate status labels), reprojected through the
         // `HudCamera` tag on the free-fly camera below.
         hud::plugin,

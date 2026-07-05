@@ -174,8 +174,9 @@ pub fn plugin(app: &mut App) {
         )
         // The intent cursor reprojects through the gunner camera, so it runs after the camera's pose
         // is final for the frame. Both inputs are render-rate — `intent` (mouse, Update) and the
-        // camera pose (which reads the gun's `GlobalTransform`, driven by `drive_servos` in Update)
-        // — so the reprojection is clean by construction, no aliasing.
+        // camera pose (which reads the VIEW gun's `GlobalTransform`, blended by
+        // `interpolate_servos` in Update) — so the reprojection is clean by construction, no
+        // aliasing.
         .add_systems(
             PostUpdate,
             (update_intent_reticle, update_ranging_reticle)
@@ -421,8 +422,8 @@ fn update_ranging_reticle(
 /// outside gunner view.
 ///
 /// Both inputs are render-rate — `intent` (mouse, `Update`) and the gunner camera's pose (which
-/// reads the gun's `GlobalTransform`, driven by `drive_servos` in `Update`) — so the reprojection
-/// is a pure function of two same-clock values: no aliasing.
+/// reads the VIEW gun's `GlobalTransform`, blended by `interpolate_servos` in `Update`) — so the
+/// reprojection is a pure function of two same-clock values: no aliasing.
 fn update_intent_reticle(
     mode: Res<SightMode>,
     intent: Res<GunnerIntent>,

@@ -21,7 +21,7 @@ use crate::firecontrol::{RangeTable, lob};
 use crate::sight::in_third_person;
 use crate::state::GameplaySet;
 use crate::tank::{
-    Controlled, Hull, Muzzle, Rig, ServoCommand, ServoRole, Tank, TankRoot, rig_world_pose,
+    Controlled, Hull, Rig, ServoCommand, ServoRole, Tank, TankRoot, ViewNode, rig_world_pose,
 };
 use crate::world::ground_distance;
 
@@ -259,14 +259,18 @@ fn update_bore_indicator(
     spatial: SpatialQuery,
     camera_query: Single<(&Camera, &GlobalTransform)>,
     controlled: Query<&Rig, With<Controlled>>,
-    muzzle: Query<&GlobalTransform, With<Muzzle>>,
+    view_nodes: Query<&ViewNode>,
+    muzzle: Query<&GlobalTransform>,
     mut indicator: Query<(&mut Node, &mut Visibility), With<BoreIndicator>>,
 ) {
     let (camera, cam_transform) = *camera_query;
     let Ok(rig) = controlled.single() else {
         return;
     };
-    let Ok(muzzle) = muzzle.get(rig.muzzle) else {
+    // The VIEW muzzle (design §6C): the bore dot must ride the render-smoothed chain — the sim
+    // muzzle steps at tick rate since the sim/view split.
+    let Ok(muzzle) = muzzle.get(ViewNode::resolve(view_nodes.get(rig.muzzle).ok(), rig.muzzle))
+    else {
         return;
     };
     let Ok((mut node, mut visibility)) = indicator.single_mut() else {

@@ -14,7 +14,7 @@ use crate::damage::{
     TankKnockedOut, TankVolumes, VolumeFacets, capability_effectiveness, evaluate, part_qualities,
 };
 use crate::spec::ViewKind;
-use crate::tank::{Tank, TankRoot, TankViews, Weapon};
+use crate::tank::{Tank, TankRoot, TankViews, ViewNode, Weapon};
 
 /// The camera the HUD reprojects world points through. Each binary tags its own world camera with
 /// this — the game's player camera, the sandbox's free-fly camera — so the shared systems don't
@@ -77,11 +77,15 @@ fn spawn_labels(mut commands: Commands) {
 
 /// Float an HP readout over each *damaged* component (current < max), reprojected to screen; hide
 /// the leftover labels. Lets you watch transit damage and spall chip components down (red at 0).
+/// Anchored at the volume's VIEW node where one is attached ([`ViewNode::resolve`]): a
+/// turret-resident component's sim pose steps at tick rate since the sim/view split, and the
+/// label must track the smoothly-rendered model, not the stepped skeleton.
 fn update_component_hp_labels(
     camera: Single<(&Camera, &GlobalTransform), With<HudCamera>>,
     components: Query<
         (
-            &GlobalTransform,
+            Entity,
+            Option<&ViewNode>,
             &ComponentHealth,
             Option<&CrewStation>,
             Option<&Ammo>,
@@ -90,6 +94,7 @@ fn update_component_hp_labels(
         ),
         With<ComponentVolume>,
     >,
+    transforms: Query<&GlobalTransform>,
     mut labels: Query<
         (&mut Node, &mut Text, &mut Visibility, &mut TextColor),
         With<ComponentHpLabel>,
@@ -98,9 +103,13 @@ fn update_component_hp_labels(
     let (camera, cam_transform) = *camera;
     let mut damaged = components
         .iter()
-        .filter(|(_, hp, _, _, _, _)| hp.current < hp.max);
+        .filter(|(_, _, hp, _, _, _, _)| hp.current < hp.max);
     for (mut node, mut text, mut visibility, mut color) in &mut labels {
-        let Some((transform, hp, crew, ammo, function, name)) = damaged.next() else {
+        let Some((entity, view, hp, crew, ammo, function, name)) = damaged.next() else {
+            *visibility = Visibility::Hidden;
+            continue;
+        };
+        let Ok(transform) = transforms.get(ViewNode::resolve(view, entity)) else {
             *visibility = Visibility::Hidden;
             continue;
         };

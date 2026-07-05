@@ -11,7 +11,7 @@ use crate::hud::HudCamera;
 use crate::sight::{in_gunner, in_third_person};
 use crate::spec::ViewKind;
 use crate::state::GameplaySet;
-use crate::tank::{Controlled, Gun, Rig, Tank, TankViews, rig_world_pose};
+use crate::tank::{Controlled, Rig, Tank, TankViews, ViewNode, rig_world_pose};
 use crate::world::ground_distance;
 
 /// Zoom state on the camera entity. Scroll sets `target_zoom`; `zoom` eases toward it for a
@@ -188,14 +188,17 @@ fn gunner_camera(
     camera: Single<(&mut Transform, &mut GlobalTransform, &mut Projection), With<Camera3d>>,
     controlled: Query<&Rig, With<Controlled>>,
     views: Query<&TankViews, With<Controlled>>,
-    gun: Query<&GlobalTransform, (With<Gun>, Without<Camera3d>)>,
+    view_nodes: Query<&ViewNode>,
+    gun: Query<&GlobalTransform, Without<Camera3d>>,
     ranging: Res<Ranging>,
     tables: Query<&RangeTable>,
 ) {
     let Ok(rig) = controlled.single() else {
         return;
     };
-    let Ok(gun) = gun.get(rig.gun) else {
+    // The VIEW gun (design §6C): the optic must ride the render-smoothed pose — the sim gun's
+    // chain steps at tick rate since the sim/view split.
+    let Ok(gun) = gun.get(ViewNode::resolve(view_nodes.get(rig.gun).ok(), rig.gun)) else {
         return;
     };
     let (mut transform, mut global_transform, mut projection) = camera.into_inner();
