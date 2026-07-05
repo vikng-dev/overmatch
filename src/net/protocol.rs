@@ -9,6 +9,7 @@ use lightyear::avian3d::plugin::{AvianReplicationMode, LightyearAvianPlugin};
 // `Remote` (bevy_replicon's "this entity arrived by replication", re-exported): the honest
 // authority-vs-replica discriminator — see `activate_bound_rig` on why `Predicted`/`Interpolated`
 // are not (the server entity carries both markers itself).
+use lightyear::core::confirmed_history::ConfirmedHistory;
 use lightyear::prelude::client::Remote;
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::*;
@@ -164,6 +165,8 @@ pub(crate) fn plugin(app: &mut App) {
     // for the hazard cluster that design retired).
     app.local_rollback::<DriveState>();
     app.local_rollback::<TankSim>();
+    app.add_observer(strip_confirmed_history::<DriveState>);
+    app.add_observer(strip_confirmed_history::<TankSim>);
 
     app.add_systems(FixedPostUpdate, publish_servo_angles);
     app.add_systems(FixedUpdate, apply_servo_angles.in_set(GameplaySet));
@@ -183,6 +186,28 @@ pub(crate) fn plugin(app: &mut App) {
         FixedUpdate,
         bridge_action_state_to_tank_command.before(GameplaySet),
     );
+}
+
+/// Kill lightyear's stale-confirmed poisoning of local-only rollback state: `add_prediction_history`
+/// (lightyear_prediction `predicted_history.rs`) fires when a `local_rollback` component is added to
+/// an entity that is `Predicted` + carries `ConfirmHistory` — our replicated tank root — and seeds
+/// `ConfirmedHistory<C>` with the component's ADD-TIME value, treating it as an authoritative
+/// init-message write. For a component the server never replicates that seed is the buffer's only
+/// entry forever, and `prepare_rollback` prefers confirmed history over predicted whenever it merely
+/// EXISTS — so every state rollback restored `TankSim`/`DriveState` to their bind-time defaults
+/// instead of the rollback tick's predicted value. Measured symptom chain (2026-07-05): restored
+/// `captured=false` made `drive_servos` re-capture servo rest quats from the live (already-slewed)
+/// node transform, permanently baking the current lay into the servo zero — turret resolving away
+/// from the aim point, gun visibly outside its travel limits — plus per-rollback resets of turret
+/// angle, reload timers, and wheel anchors. Stripping the component on add makes `prepare_rollback`
+/// fall through to predicted history, which is the correct source for never-replicated state. The
+/// seed path is designed for replicated components arriving in init messages; a local-only component
+/// added later is outside its intent (upstream report candidate).
+fn strip_confirmed_history<C: Component + Clone>(
+    add: On<Add, ConfirmedHistory<C>>,
+    mut commands: Commands,
+) {
+    commands.entity(add.entity).try_remove::<ConfirmedHistory<C>>();
 }
 
 /// Copy this tick's `ActionState<TankCommand>` (lightyear's input-buffer-backed component) into the
