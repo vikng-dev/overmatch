@@ -27,6 +27,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import bisect
 import json
 import math
 import sys
@@ -140,6 +141,12 @@ def parse(path):
                     "cp": _finite_vec(row.get("cp"), 3) if "cp" in row else None,
                     "cq": _finite_vec(row.get("cq"), 4) if "cq" in row else None,
                     "has_corr": ("cp" in row) or ("cq" in row),
+                    # Per-entity confirmed authority (src/trace.rs, added for silent-desync hunt):
+                    # latest confirmed Position/LinearVelocity and the tick they belong to. Absent
+                    # in pre-instrumentation traces — parsed as None so the detector degrades to n/a.
+                    "confp": _finite_vec(row.get("confp"), 3) if "confp" in row else None,
+                    "confv": _finite_vec(row.get("confv"), 3) if "confv" in row else None,
+                    "conft": row.get("conft"),
                 })
             elif k == "tick":
                 p = _finite_vec(row.get("p"), 3)
@@ -395,6 +402,151 @@ def divergence(client_ticks, server_ticks):
             "dlv": np.array(dlv), "n": len(shared)}
 
 
+SILENT_MIN_DUR_S = 0.5  # a sustained-desync window must last at least this long to count
+
+
+def silent_desync_windows(div, chosen_ticks, server_ticks, chosen_frames, rollbacks, tick_hz):
+    """Maximal windows of sustained same-tick client/server position desync with NO rollback.
+
+    A window is a run of consecutive shared ticks where |client p − server p| > DIV_P,
+    containing no rollback (a rollback tick at either endpoint or in an internal gap
+    terminates the run), lasting at least SILENT_MIN_DUR_S. Each is the fingerprint of a
+    *silent* desync: the position rollback condition (DIV_P m in protocol.rs) sat tripped
+    for the whole window yet no rollback fired.
+
+    Per window we discriminate the three failure branches using the client's own confirmed
+    fields (confp/conft), degrading every conf-derived stat to None when the trace predates
+    that instrumentation (so pre-fields captures still report the window from tick data):
+      - `conft` advance   — stalled (updates stopped arriving) vs moving.
+      - median |confp − server_p(conft)| — is the confirmed value the server's actual value
+        at that tick (staleness / quantization check).
+      - median |confp − client_p(conft)| — what the rollback check compared; > DIV_P here
+        with no rollback means the check saw a mismatch and declined to fire.
+    """
+    shared = [int(t) for t in div["shared"]]
+    dp = list(div["dp"])
+    if not shared:
+        return []
+    period = 1.0 / tick_hz if tick_hz else 1.0 / 64.0
+    rb_sorted = sorted(int(r["tick"]) for r in rollbacks if r["tick"] is not None)
+    rb_set = set(rb_sorted)
+
+    def rollback_in_open(a, b):
+        """Any rollback tick strictly inside the open interval (a, b)."""
+        idx = bisect.bisect_right(rb_sorted, a)
+        return idx < len(rb_sorted) and rb_sorted[idx] < b
+
+    # A shared tick is eligible if it is over threshold and is not itself a rollback tick.
+    over = [dp[i] > DIV_P and shared[i] not in rb_set for i in range(len(shared))]
+
+    cmap = {t["tick"]: t for t in chosen_ticks}
+    smap = {t["tick"]: t for t in server_ticks}
+    # Client frame rows indexed by predicted tick, carrying the confirmed fields; a tick can
+    # own several frames (render > tick rate), so keep them all and aggregate per window.
+    frames_by_tick = {}
+    for f in chosen_frames:
+        if f["tick"] is not None:
+            frames_by_tick.setdefault(f["tick"], []).append(f)
+
+    windows = []
+    i, n = 0, len(shared)
+    while i < n:
+        if not over[i]:
+            i += 1
+            continue
+        j = i
+        while j + 1 < n and over[j + 1] and not rollback_in_open(shared[j], shared[j + 1]):
+            j += 1
+        lo_tick, hi_tick = shared[i], shared[j]
+        dur = (hi_tick - lo_tick + 1) * period
+        if dur >= SILENT_MIN_DUR_S:
+            windows.append(_build_silent_window(
+                lo_tick, hi_tick, dur, shared, dp, i, j,
+                frames_by_tick, cmap, smap))
+        i = j + 1
+    return windows
+
+
+def _build_silent_window(lo_tick, hi_tick, dur, shared, dp, i, j,
+                         frames_by_tick, cmap, smap):
+    """Assemble one silent-desync window's report record (see silent_desync_windows)."""
+    max_dp = max(dp[i:j + 1])
+
+    # Confirmed-field stats from the client frame rows whose predicted tick lands in the window.
+    conft_vals = []
+    confp_vs_server = []   # |confp − server_p(conft)| : is confirmed == server's value there?
+    confp_vs_client = []   # |confp − client_p(conft)| : what the rollback check compared
+    have_conf = False
+    for tk in range(lo_tick, hi_tick + 1):
+        for f in frames_by_tick.get(tk, []):
+            ct = f["conft"]
+            if ct is None:
+                continue
+            have_conf = True
+            conft_vals.append(int(ct))
+            cp = f["confp"]
+            if cp is None:
+                continue
+            srow = smap.get(int(ct))
+            if srow is not None and srow["p"] is not None:
+                confp_vs_server.append(float(np.linalg.norm(cp - srow["p"])))
+            crow = cmap.get(int(ct))
+            if crow is not None and crow["p"] is not None:
+                confp_vs_client.append(float(np.linalg.norm(cp - crow["p"])))
+
+    conft_min = min(conft_vals) if conft_vals else None
+    conft_max = max(conft_vals) if conft_vals else None
+    med_server = float(np.median(confp_vs_server)) if confp_vs_server else None
+    med_client = float(np.median(confp_vs_client)) if confp_vs_client else None
+
+    # Verdict — the three branches from the task brief.
+    if not have_conf:
+        verdict = "no conf fields (tick-only) — cannot discriminate branch"
+    elif conft_min is not None and conft_max == conft_min:
+        verdict = "updates stalled"
+    elif med_client is not None and med_client > DIV_P:
+        verdict = "mismatch ignored by check"
+    else:
+        verdict = "confirmed matches client history (server-side or quantization issue)"
+
+    return {
+        "lo": lo_tick, "hi": hi_tick, "dur": dur, "max_dp": max_dp,
+        "conft_min": conft_min, "conft_max": conft_max,
+        "conft_advanced": (conft_max - conft_min) if conft_vals else None,
+        "med_server": med_server, "med_client": med_client,
+        "have_conf": have_conf, "verdict": verdict,
+    }
+
+
+def print_silent_desync(windows):
+    """The SILENT DESYNC WINDOWS report section (only reached when --server was given)."""
+    print("\n  SILENT DESYNC WINDOWS (|Δp|>%.2f m sustained >=%.1f s, NO rollback inside)"
+          % (DIV_P, SILENT_MIN_DUR_S))
+    if not windows:
+        print("    (none — no sustained rollback-free position desync)")
+        return
+    print(f"    found {len(windows)} window(s):")
+    for w in windows:
+        print(f"      ticks {w['lo']}–{w['hi']}  dur {w['dur']:.2f} s  "
+              f"max|Δp| {w['max_dp']:.3f} m")
+        if not w["have_conf"]:
+            conft_s = "conft n/a"
+            server_s = "|confp−server| n/a"
+            client_s = "|confp−client| n/a"
+        else:
+            adv = w["conft_advanced"]
+            conft_s = (f"conft {w['conft_min']}→{w['conft_max']} "
+                       f"({'stalled' if adv == 0 else f'+{adv} ticks'})")
+            server_s = ("|confp−server_p(conft)| median "
+                        + ("n/a" if w["med_server"] is None else f"{w['med_server']:.3f} m"))
+            client_s = ("|confp−client_p(conft)| median "
+                        + ("n/a" if w["med_client"] is None else f"{w['med_client']:.3f} m"))
+        print(f"        {conft_s}")
+        print(f"        {server_s}")
+        print(f"        {client_s}")
+        print(f"        VERDICT: {w['verdict']}")
+
+
 def collect_spikes(fm, chosen, thr):
     """Translational + rotational render-jerk spikes as a merged, magnitude-sorted list."""
     out = []
@@ -560,6 +712,14 @@ def print_report(in_path, meta, role, is_net, ent, n_other, chosen, chosen_ticks
             print(f"      {'|Δlv| m/s':<14}{fmt(pct(dlv,50))}{fmt(pct(dlv,95))}{fmt(pct(dlv,100),12)}"
                   f"{fmt(flv*100,9,1)} %")
             print(f"    thresholds: |Δp|>{DIV_P} m, rot>{DIV_Q} rad, |Δlv|>{DIV_LV} m/s")
+
+        # silent-desync windows — tick-based detection, conf-based branch discrimination.
+        # Only meaningful with a server trace (needs same-tick divergence); absent otherwise.
+        if div is not None and div["n"] > 0:
+            tick_hz = (meta or {}).get("tick_hz")
+            windows = silent_desync_windows(div, chosen_ticks, server_ticks, chosen,
+                                            rollbacks, tick_hz)
+            print_silent_desync(windows)
 
     # top spikes
     print(f"\n  TOP {len(top_rows)} SPIKES — what coincided with each snap")

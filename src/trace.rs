@@ -21,9 +21,16 @@
 //! - `frame`  — per render frame, per tank root, AFTER transform propagation, so `p`/`q` are what
 //!   actually renders (`GlobalTransform`): `t` wall-secs, `dt` frame delta, `os` fixed overstep,
 //!   `e` entity bits, `p`/`q` world pose, `ctl` (present+true only for the controlled tank). Client
-//!   extras: `tick` (predicted), `conf` (last-confirmed server tick or null), `rb`/`rbt`
-//!   (cumulative rollback / rolled-back-tick counts), `cp`/`cq` (live `VisualCorrection` error
-//!   translation/quat, present only while a correction decays).
+//!   extras: `tick` (predicted), `conf` (GLOBAL last-confirmed server tick or null — the whole
+//!   replication stream's high-water mark), `rb`/`rbt` (cumulative rollback / rolled-back-tick
+//!   counts), `cp`/`cq` (live `VisualCorrection` error translation/quat, present only while a
+//!   correction decays). Per-ENTITY confirmed authority for the predicted tank root, from its
+//!   `ConfirmedHistory<C>` newest present sample: `confp` [x,y,z] latest confirmed `Position`,
+//!   `confv` [x,y,z] latest confirmed `LinearVelocity`, `conft` the lightyear tick that
+//!   `confp`/`confv` belong to. This tick is the entity's OWN last authoritative update — it can
+//!   lag the global `conf` when the tank's replicated components stop changing (or stop arriving),
+//!   the key discriminator for a silent desync. All three are omitted (not null) when no confirmed
+//!   sample exists yet, and absent entirely in SP / SP-composition net builds (no `ConfirmedHistory`).
 //! - `tick`   — per fixed tick, per tank root: sim truth — `p`/`q`/`lv`/`av`, `gnd` grounded wheel
 //!   count, `anc` planted anchor count, `loads` per-wheel spring load (N, ~0.1 N), `thr`/`str` drive
 //!   intent, `hc` hull contact-pair count, `pen` max penetration depth (m). Client-only: `rp`
@@ -56,6 +63,8 @@ use crate::tank::{Controlled, Tank, TankSim, WheelIndex};
 
 #[cfg(feature = "net")]
 use bevy::ecs::system::SystemParam;
+#[cfg(feature = "net")]
+use lightyear::core::confirmed_history::ConfirmedHistory;
 #[cfg(feature = "net")]
 use lightyear::prelude::{
     LocalTimeline, PredictionManager, PredictionMetrics, ReplicationCheckpointMap, Rollback,
@@ -219,6 +228,15 @@ fn record_frame(
         Option<&VisualCorrection<Position>>,
         Option<&VisualCorrection<Rotation>>,
     )>,
+    // The predicted root's confirmed-authority history: lightyear seeds these buffers from every
+    // replication receive (`add_confirmed_to_history`) and `prepare_rollback` reads them as the
+    // rollback source. `Option<&…>` per component and an unfiltered query (like `corr`) so the
+    // SP-composition net build — which never registers `ConfirmedHistory` — yields `(None, None)`
+    // rather than failing system-param validation.
+    #[cfg(feature = "net")] conf: Query<(
+        Option<&ConfirmedHistory<Position>>,
+        Option<&ConfirmedHistory<LinearVelocity>>,
+    )>,
 ) {
     for (entity, global, controlled) in &roots {
         let (_, rotation, translation) = global.to_scale_rotation_translation();
@@ -266,6 +284,22 @@ fn record_frame(
                 }
                 if let Some(correction) = cq {
                     obj.insert("cq".into(), quat(correction.error.0));
+                }
+            }
+            // The LATEST confirmed (server-authoritative) Position/LinearVelocity this predicted
+            // root has received, plus the tick it belongs to. `ConfirmedHistory::newest_present`
+            // is the buffer's most-recent present sample — `(tick, value)` — exactly the sample
+            // `prepare_rollback` prefers as the rollback source. `conft` is the entity's OWN last
+            // authoritative tick; when it stalls while the global `conf` keeps advancing, the
+            // tank's confirmed updates stopped arriving (silent-desync branch a). Omit all three
+            // when the buffer is still empty — a not-yet-confirmed frame carries no `conf*`.
+            if let Ok((confp, confv)) = conf.get(entity) {
+                if let Some((tick, position)) = confp.and_then(|h| h.newest_present()) {
+                    obj.insert("confp".into(), vec3(position.0));
+                    obj.insert("conft".into(), Value::from(u64::from(tick.0)));
+                }
+                if let Some((_, velocity)) = confv.and_then(|h| h.newest_present()) {
+                    obj.insert("confv".into(), vec3(velocity.0));
                 }
             }
         }
