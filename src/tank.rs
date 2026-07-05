@@ -367,10 +367,14 @@ impl PendingTankAssets {
     }
 }
 
+/// The tank model's asset path — shared with `bake`'s extractor, which parses the same file as
+/// data (one path, two readers, guaranteed to agree on the source bytes).
+pub(crate) const TIGER_GLB_PATH: &str = "tiger_1/tiger_1.glb";
+
 pub(crate) fn load_tank_assets(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.insert_resource(PendingTankAssets {
         spec: asset_server.load("tiger_1/tiger_1.tank.ron"),
-        scene: asset_server.load(GltfAssetLabel::Scene(0).from_asset("tiger_1/tiger_1.glb")),
+        scene: asset_server.load(GltfAssetLabel::Scene(0).from_asset(TIGER_GLB_PATH)),
     });
 }
 
@@ -493,7 +497,7 @@ fn swap_controlled_tank(
 /// index, and nothing else. The numeric check is load-bearing: it excludes the wheel's typed
 /// children (`Wheel_L_0_Ballistic`, `Wheel_L_0_Visual`), which also begin with `Wheel_` but are a
 /// volume / render mesh, not a suspension station.
-fn roadwheel_side(name: &str) -> Option<TrackSide> {
+pub(crate) fn roadwheel_side(name: &str) -> Option<TrackSide> {
     for (prefix, side) in [
         ("Wheel_L_", TrackSide::Left),
         ("Wheel_R_", TrackSide::Right),

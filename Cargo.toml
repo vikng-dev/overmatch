@@ -19,6 +19,11 @@ glam = { version = "0.30", features = ["serde"] }
 winit = "0.30"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
+# Read a `.glb` directly as data (no Bevy scene): the sim/view-split geometry extractor (`bake`,
+# design sim-view-split-and-tank-bake.md) and the spec↔model bind-contract test. Matches the
+# version `bevy_gltf` already resolves, so it adds nothing to the dep tree.
+gltf = "1.4"
+
 # Networking spike (feature-gated, see `net` below): behind `optional = true` so the default
 # build never pulls it in. `prediction`/`interpolation` are default-on lightyear features (kept
 # explicit here for clarity); `avian3d` pulls in `lightyear_avian3d` (increment 5, spike map §1/§5).
@@ -33,11 +38,6 @@ lightyear = { version = "0.28", default-features = false, features = [
     "netcode", "udp",
     "avian3d",
 ], optional = true }
-
-# Test-only: read a `.glb`'s node names directly (no Bevy app) for the spec↔model bind-contract
-# test. Matches the version `bevy_gltf` already resolves, so it adds nothing to the dep tree.
-[dev-dependencies]
-gltf = "1.4"
 
 # `avian3d/serialize` is additive (Serialize/Deserialize impls on Position/Rotation/velocities) —
 # only lightyear's replication registration (net.rs) needs it; gated so the default build's avian3d
