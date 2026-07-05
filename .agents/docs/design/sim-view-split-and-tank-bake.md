@@ -165,13 +165,39 @@ into the connect handshake; version the artifact format.
 
 ## 7. Open research (in flight 2026-07-05, fold findings here)
 
-1. **Avian raw-data colliders** (vendored-source pass): exact APIs to build convex hulls/trimeshes
-   from vertices+indices; whether they reproduce `ConvexHullFromMesh`/`TrimeshFromMesh` shapes
-   bit-identically; whether `Collider` serde round-trips (repo already enables `avian3d/serialize`)
-   vs re-building from raw verts at load; cross-platform determinism caveats (hull algorithms,
-   `TrimeshFlags`).
-2. **glTF-as-data access** (same pass): parsing glb without scene spawn (`gltf` crate already in
-   tree?), mesh attribute access at preload for phase 1, `GltfExtras` availability.
+1. **Avian raw-data colliders** — RESOLVED (vendored pass, 2026-07-05; avian3d 0.7.0 /
+   parry3d 0.27.0):
+   - Exact equivalences proven at the parry call level: `TrimeshFromMesh` ≡
+     `Collider::trimesh_with_config(verts, indices, TrimeshFlags::MERGE_DUPLICATE_VERTICES)`
+     (avian `parry/mod.rs:1174`); `ConvexHullFromMesh` ≡ `Collider::convex_hull(points)` — it
+     ignores indices entirely (`parry/mod.rs:1243`). So raw-data construction reproduces today's
+     shapes byte-for-byte. Note: avian's own mesh extractor bails on unindexed primitives
+     (`parry/mod.rs:1499`) — our extractor shouldn't require indices for the hull path.
+   - `Collider` serde round-trips (under `serialize`, currently only pulled in via the repo's
+     `net` feature), BUT the wire format is parry-0.27 internals (BVH layout included, shape
+     stored twice) with **no version stability** — a baked parry blob dies on every
+     avian/parry upgrade. **Decision: do NOT serde colliders; bake raw geometry + a shape
+     recipe** (see the determinism-driven format below).
+   - **Determinism:** parry's cross-platform story is gated behind `enhanced-determinism`
+     (not enabled; not needed for this). Shape *construction* uses IEEE-exact ops only, but the
+     incremental convex-hull algorithm is tie-break sensitive to 1-ULP differences — the one
+     component risky to run independently on two platforms. **Artifact format therefore: per
+     collision proxy, run the hull OFFLINE once and store the pre-hulled verts+face indices,
+     reconstructed at load via `SharedShape::convex_mesh` (no hull computation at runtime, fails
+     loudly at bake time instead of silently at spawn); per armor volume, store verts/indices
+     with duplicates pre-merged offline, rebuild as plain trimesh.** Client and server then
+     construct identical shapes from identical bytes by construction.
+2. **glTF-as-data access** — RESOLVED (same pass):
+   - The `gltf` 1.4.1 crate is already a direct dependency AND already parses this exact .glb
+     offline in the CI bind-contract test (`src/spec.rs:317`) — phase 2's parser exists in tree.
+   - Phase-1 preload extraction is fully feasible with no scene spawn: `Assets<Gltf>` →
+     `GltfNode` (local `Transform`, `extras`, names) → `GltfMesh`/`GltfPrimitive` →
+     `Assets<Mesh>` → `ATTRIBUTE_POSITION.as_float3()` + `indices()`. glTF meshes are labeled
+     subassets present the moment the glb asset is Loaded — i.e. already guaranteed by the
+     existing `PendingTankAssets` gate.
+   - Coordinate caveat: bevy_gltf 0.19's glTF→Bevy coordinate conversion is opt-in and OFF by
+     default (repo never configures it), so offline `gltf`-crate transforms match runtime
+     one-for-one. If the app ever opts in, the bake must replicate the conversion.
 3. **Blender exporter fidelity** — RESOLVED (web pass, 2026-07-05):
    - Object/mesh/material/**empty** custom props export reliably to `extras` under
      `Include > Custom Properties` (`export_extras`). Types that survive: str/int/float/bool,
