@@ -15,9 +15,10 @@ use avian3d::prelude::{PhysicsInterpolationPlugin, PhysicsLayer, PhysicsPlugins}
 use bevy::prelude::*;
 
 mod aim;
-/// The tank-geometry extractor + shadow harness (sim/view split step 0 — design
-/// `sim-view-split-and-tank-bake.md` §8). Proves `extract(glb) → TankGeometry` equivalent to the
-/// live scene walk before phase 1 makes it the sim skeleton's spawn source.
+/// The tank-geometry extractor + shadow harness (sim/view split — design
+/// `sim-view-split-and-tank-bake.md` §8). `extract(glb) → TankGeometry` IS the sim skeleton's
+/// spawn source since step 1 (`tank::spawn_tank_sim`); the shadow harness keeps proving it
+/// equivalent to the instantiated scene on every view bind.
 mod bake;
 mod ballistics;
 mod branding;
@@ -93,9 +94,9 @@ impl Plugin for SimPlugin {
             // `spec` registers the `.tank.ron` data-asset loader before `tank` spawns the tank
             // and requests one (ADR-0010).
             spec::plugin,
-            // Sim/view split step 0: extract the tank glb as data at startup and shadow-verify
-            // it against every rig bind — sim-side because the sim is what phase 1 will spawn
-            // from this data, on every composition (SP, net client, net server).
+            // Sim/view split: extract the tank glb as data at startup — the sim skeleton's spawn
+            // source on every composition (SP, net client, net server) — and shadow-verify it
+            // against every instantiated scene.
             bake::plugin,
             tank::sim_plugin,
             // Commands are the sim's only input: `core_plugin` puts a `TankCommand` on every tank

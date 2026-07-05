@@ -1,20 +1,21 @@
-//! Step 0 of the sim/view split (design `sim-view-split-and-tank-bake.md` §8): the tank-geometry
-//! extractor and its shadow harness.
+//! The sim/view split's data source (design `sim-view-split-and-tank-bake.md` §8): the
+//! tank-geometry extractor and its shadow harness.
 //!
 //! `extract_tank_geometry` parses the tank's `.glb` **as data** — the `gltf` crate against the
 //! file, no Bevy scene, no asset dependency — into [`TankGeometry`]: every node's name, parent,
 //! local transform, root-relative pose, and (for sim-consumed meshes) raw vertex/index buffers.
-//! This is the exact data set the rig binder currently reads out of the instantiated scene, and
-//! in phase 1 it becomes the sim skeleton's spawn source; the same function is phase 2's offline
-//! compiler core (one parser, two mounting points — design §6A).
+//! Since step 1 this is what the sim skeleton spawns from (`tank::spawn_tank_sim`) — the scene
+//! walk it replaced was step-0-shadow-proven to read exactly these values. The same function is
+//! phase 2's offline compiler core (one parser, two mounting points — design §6A).
 //!
-//! Step 0 changes NO behavior: the extractor runs at startup and a shadow observer compares its
-//! output against every value the live scene walk produces at bind — names, hierarchy, local
-//! transforms (bit-exact), composed root poses (bit-exact, in `rig_world_pose`'s own operation
-//! order), and collider/ballistic mesh bytes against `Assets<Mesh>`. The extractor is proven
-//! equivalent while the living architecture still runs, so the phase-1 switch changes *where data
-//! comes from* with proof it is the same data. Mismatches panic in debug builds and log errors in
-//! release; a clean pass logs one grep-able `SHADOW-BAKE ok` line (harness evidence).
+//! The shadow harness stays on: the extractor runs at startup and a shadow observer compares its
+//! output against every instantiated tank scene — names, hierarchy, local transforms (bit-exact),
+//! composed root poses (bit-exact, in `rig_world_pose`'s own operation order), and
+//! collider/ballistic mesh bytes against `Assets<Mesh>`. Post-step-1 that direction reverses
+//! meaning: it proves the *view* the player sees matches the data the sim runs on (and still
+//! catches a bevy_gltf coordinate-conversion default flip — design §7.2). Mismatches panic in
+//! debug builds and log errors in release; a clean pass logs one grep-able `SHADOW-BAKE ok` line
+//! (harness evidence).
 //!
 //! The startup parse re-reads the glb the asset server also loads (~65 MB, once) — scaffolding
 //! that phase 2 deletes along with the runtime glb dependency.
@@ -28,6 +29,7 @@ use bevy::prelude::*;
 use bevy::world_serialization::WorldInstanceReady;
 
 use crate::spec::TankSpecHandle;
+use crate::tank::SimParts;
 
 /// One glTF node, extracted. `name` follows bevy_gltf's rule exactly (authored name, else
 /// `GltfNode{index}` — `bevy_gltf::loader::gltf_ext::scene::node_name`), so scene entities and
@@ -55,8 +57,8 @@ pub(crate) struct MeshGeometry {
     pub indices: Vec<u32>,
 }
 
-/// The whole model, extracted as data. Phase 1 spawns the sim skeleton from this; step 0 only
-/// shadow-verifies it against the instantiated scene.
+/// The whole model, extracted as data — the sim skeleton's spawn source (`tank::spawn_tank_sim`),
+/// shadow-verified against every instantiated tank scene.
 pub(crate) struct TankGeometry {
     pub nodes: Vec<NodeGeometry>,
     pub by_name: HashMap<String, usize>,
@@ -223,6 +225,7 @@ fn shadow_compare_on_instance_ready(
     ready: On<WorldInstanceReady>,
     geometry: Option<Res<ExtractedTankGeometry>>,
     tanks: Query<(), With<TankSpecHandle>>,
+    sim_parts: Query<&SimParts>,
     children: Query<&Children>,
     parents: Query<&ChildOf>,
     names: Query<&Name>,
@@ -239,6 +242,13 @@ fn shadow_compare_on_instance_ready(
         return;
     };
     let geometry = &geometry.0;
+    // The tank root's descendants hold TWO same-named trees since step 1: the data-spawned sim
+    // skeleton and the instantiated glb scene (the view). The shadow's subject is the VIEW — skip
+    // the sim parts, whose transforms are the extracted values by construction.
+    let skeleton: std::collections::HashSet<Entity> = sim_parts
+        .get(ready.entity)
+        .map(|parts| parts.0.values().copied().collect())
+        .unwrap_or_default();
     let mut mismatches: Vec<String> = Vec::new();
 
     // Scene side: every named descendant that is a glTF NODE. Mesh data always spawns as child
@@ -249,7 +259,7 @@ fn shadow_compare_on_instance_ready(
     // with the walk in phase 1.)
     let mut seen: HashMap<&str, Entity> = HashMap::new();
     for entity in children.iter_descendants(ready.entity) {
-        if primitives.contains(entity) {
+        if skeleton.contains(&entity) || primitives.contains(entity) {
             continue;
         }
         let Ok(name) = names.get(entity) else {

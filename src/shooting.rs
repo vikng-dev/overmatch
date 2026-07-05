@@ -4,7 +4,6 @@
 //! the same `FireShell` from its free-fly camera instead.
 
 use avian3d::prelude::{Forces, Position, Rotation, WriteRigidBodyForces};
-use bevy::ecs::lifecycle::Add;
 use bevy::prelude::*;
 
 use crate::ballistics::FireShell;
@@ -18,22 +17,23 @@ use crate::tank::{Muzzle, Tank, TankRoot, TankSim, Weapon, WeaponIndex, rig_worl
 /// is a gentle rock by design; bump this if the firing kick should read more dramatically.
 const RECOIL_FEEL: f32 = 1.0;
 
-/// Procedural barrel recoil CONFIG: the damped-spring tuning + the barrel's rest position, baked
-/// from the weapon's `recoil` spec at setup. The recoil STATE (offset/velocity) is sim truth —
-/// the muzzle rides the barrel — and lives root-resident in `TankSim::weapons` (see `TankSim`),
-/// keyed by the barrel's `WeaponIndex`. The translational cousin of `Servo`.
+/// Procedural barrel recoil CONFIG: the damped-spring tuning + the barrel's rest (battery)
+/// position, built by `tank::spawn_tank_sim` from the weapon's `recoil` spec and the barrel
+/// node's authored translation — spawn-time data, not a bind-time transform capture. The recoil
+/// STATE (offset/velocity) is sim truth — the muzzle rides the barrel — and lives root-resident
+/// in `TankSim::weapons` (see `TankSim`), keyed by the barrel's `WeaponIndex`. The translational
+/// cousin of `Servo`.
 #[derive(Component)]
-struct RecoilParams {
-    rest: Vec3,
-    stiffness: f32,
-    damping: f32,
+pub(crate) struct RecoilParams {
+    pub(crate) rest: Vec3,
+    pub(crate) stiffness: f32,
+    pub(crate) damping: f32,
 }
 
 pub fn plugin(app: &mut App) {
-    // attach_weapon reacts to the binder attaching `Weapon` (an observer), so it stays out of the set.
     // The gun is sim: reload and firing run on the fixed clock, driven by each tank's `TankCommand`
     // — `fire` consumes the click edge, so it must precede the command layer's edge clear.
-    app.add_observer(attach_weapon).add_systems(
+    app.add_systems(
         FixedUpdate,
         (
             (tick_reload, fire).chain().before(ConsumeCommandEdges),
@@ -41,29 +41,6 @@ pub fn plugin(app: &mut App) {
         )
             .in_set(GameplaySet),
     );
-}
-
-/// React to the binder attaching a `Weapon`: if it recoils, capture the barrel's authored rest
-/// pose + the spring tuning as `RecoilParams`. The reload/recoil STATE needs no setup — the
-/// binder sizes `TankSim::weapons` at bind (reloads start 0.0 = ready).
-fn attach_weapon(
-    add: On<Add, Weapon>,
-    weapons: Query<&Weapon>,
-    transforms: Query<&Transform>,
-    mut commands: Commands,
-) {
-    let Ok(weapon) = weapons.get(add.entity) else {
-        return;
-    };
-    if let (Some(barrel), Some(recoil)) = (weapon.barrel, weapon.recoil.as_ref())
-        && let Ok(transform) = transforms.get(barrel)
-    {
-        commands.entity(barrel).insert(RecoilParams {
-            rest: transform.translation,
-            stiffness: recoil.stiffness,
-            damping: recoil.damping,
-        });
-    }
 }
 
 /// Tick every weapon's reload timer down — but only while its own tank meets the weapon's `load`

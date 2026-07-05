@@ -23,6 +23,7 @@ use bevy::camera::visibility::RenderLayers;
 use bevy::ui::IsDefaultUiCamera;
 
 use crate::Layer;
+use crate::bake;
 use crate::ballistics::{
     self, ArmorVolume, BallisticVolume, ComponentHealth, ComponentVolume, FireShell, ImpactMarker,
     PenetrationMarks, ShellPath, ShellReadout, SpallMarks,
@@ -32,7 +33,7 @@ use crate::crew_ui;
 use crate::damage::{self, Ammo, CookedOff, Dead, LaunchedTurret, TankKnockedOut};
 use crate::hud::{self, HudCamera};
 use crate::spec::{self, TankSpec, TankSpecHandle};
-use crate::tank::{Controlled, Tank, on_tank_ready};
+use crate::tank::{Controlled, Tank, TankSimSource, ViewOf, bind_tank_view, spawn_tank_sim};
 use crate::world;
 
 /// Muzzle speed for sandbox shots (m/s) — the 88 mm, matching the game's gun for now. Becomes a
@@ -190,6 +191,12 @@ pub fn plugin(app: &mut App) {
         damage::plugin,
         // `spec` registers the `.tank.ron` loader so the target tank's volumes bind with their data.
         spec::plugin,
+        // The tank-geometry extractor: the target's sim body (armor volumes included) spawns from
+        // `ExtractedTankGeometry`, exactly like the game's tanks; the shadow harness rides along.
+        bake::plugin,
+        // The sim→view transform mirror: the target is static, but cook-off detaches the sim
+        // turret and the rendered glb turret must follow the free body.
+        crate::tank::view_mirror_plugin,
         // Shared tank-state HUD (component HP + aggregate status labels), reprojected through the
         // `HudCamera` tag on the free-fly camera below.
         hud::plugin,
@@ -206,9 +213,8 @@ pub fn plugin(app: &mut App) {
     .insert_resource(ballistics::MarchMode::Demo)
     .init_resource::<LayerView>()
     .init_resource::<SpeedIndex>()
-    // Paint translucent materials onto the volume meshes as they bind.
-    .add_observer(paint_armor)
-    .add_observer(paint_component)
+    // Paint translucent materials onto the volume meshes as the view binds to the sim parts.
+    .add_observer(paint_view_volumes)
     .add_systems(
         Startup,
         (
@@ -350,12 +356,14 @@ fn load_target(mut commands: Commands, asset_server: Res<AssetServer>) {
 }
 
 /// Once the spec is loaded, spawn the real Tiger as a **static** target (no driving/suspension — it
-/// just stands there to be shot) and bind it with the shared `on_tank_ready`, which now attaches the
-/// ballistic-volume colliders the march raycasts.
+/// just stands there to be shot): the sim body — ballistic-volume colliders the march raycasts
+/// included — synchronously from the extracted geometry (`spawn_tank_sim`), the glb scene as its
+/// view (`bind_tank_view`), exactly like the game's tanks.
 fn spawn_target_when_ready(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     pending: Option<Res<PendingTarget>>,
+    source: TankSimSource,
 ) {
     let Some(pending) = pending else {
         return;
@@ -363,21 +371,25 @@ fn spawn_target_when_ready(
     if !matches!(asset_server.load_state(&pending.0), LoadState::Loaded) {
         return;
     }
-    commands
-        .spawn((
-            WorldAssetRoot(
-                asset_server.load(GltfAssetLabel::Scene(0).from_asset("tiger_1/tiger_1.glb")),
-            ),
-            TankSpecHandle(pending.0.clone()),
-            Transform::from_xyz(0.0, 2.0, -12.0),
-            Name::new("Tiger I target"),
-            Tank,
-            // The sandbox's single tank is the one under study — mark it `Controlled` so the shared
-            // crew bar (scoped to the controlled tank) drives it, exactly as in the game.
-            Controlled,
-            RigidBody::Static,
-        ))
-        .observe(on_tank_ready);
+    let Some((geometry, spec)) = source.get(&pending.0) else {
+        return;
+    };
+    let mut target = commands.spawn((
+        WorldAssetRoot(
+            asset_server.load(GltfAssetLabel::Scene(0).from_asset("tiger_1/tiger_1.glb")),
+        ),
+        TankSpecHandle(pending.0.clone()),
+        Transform::from_xyz(0.0, 2.0, -12.0),
+        Name::new("Tiger I target"),
+        Tank,
+        // The sandbox's single tank is the one under study — mark it `Controlled` so the shared
+        // crew bar (scoped to the controlled tank) drives it, exactly as in the game.
+        Controlled,
+        RigidBody::Static,
+    ));
+    target.observe(bind_tank_view);
+    let root = target.id();
+    spawn_tank_sim(&mut commands, root, geometry, spec);
     commands.remove_resource::<PendingTarget>();
 }
 
@@ -409,40 +421,32 @@ fn setup_volume_materials(mut commands: Commands, mut materials: ResMut<Assets<S
     });
 }
 
-/// When an armor volume binds, paint its mesh primitives translucent blue + tag them.
-fn paint_armor(
-    add: On<Add, ArmorVolume>,
+/// When a glb view node binds to a sim part (`ViewOf`, inserted by `bind_tank_view`), check
+/// whether that part is a ballistic volume and paint the view node's mesh primitives accordingly
+/// — armor blue, component amber. The volume components live on the sim skeleton (spawned from
+/// data, no meshes); the renderable copies of the volume geometry live in the glb view tree, and
+/// `ViewOf` is the name-keyed join between the two.
+fn paint_view_volumes(
+    add: On<Add, ViewOf>,
+    views: Query<&ViewOf>,
+    armor: Query<(), With<ArmorVolume>>,
+    components: Query<(), With<ComponentVolume>>,
     children: Query<&Children>,
     meshes: Query<(), With<Mesh3d>>,
     materials: Res<VolumeMaterials>,
     mut commands: Commands,
 ) {
-    paint_volume(
-        add.entity,
-        true,
-        &children,
-        &meshes,
-        &materials.armor,
-        &mut commands,
-    );
-}
-
-/// When a component volume binds, paint its mesh primitives translucent amber + tag them.
-fn paint_component(
-    add: On<Add, ComponentVolume>,
-    children: Query<&Children>,
-    meshes: Query<(), With<Mesh3d>>,
-    materials: Res<VolumeMaterials>,
-    mut commands: Commands,
-) {
-    paint_volume(
-        add.entity,
-        false,
-        &children,
-        &meshes,
-        &materials.component,
-        &mut commands,
-    );
+    let Ok(view) = views.get(add.entity) else {
+        return;
+    };
+    let (is_armor, material) = if armor.contains(view.0) {
+        (true, &materials.armor)
+    } else if components.contains(view.0) {
+        (false, &materials.component)
+    } else {
+        return;
+    };
+    paint_volume(add.entity, is_armor, &children, &meshes, material, &mut commands);
 }
 
 /// Set `material` + a [`VolumePaint`] tag on every mesh in the volume node's subtree (the glTF
@@ -468,14 +472,19 @@ fn paint_volume(
 }
 
 /// Tag the hull's *visual* meshes (and remember their material), so x-ray can swap them translucent.
-/// A hull mesh is any mesh that is neither a ballistic volume nor a collider proxy (checked up the
-/// hierarchy). Runs each frame; `Without<HullMesh>` makes it tag each mesh just once.
+/// A hull mesh is any mesh that is neither a ballistic volume nor a collider proxy — checked up
+/// the hierarchy by component (the sandbox's standalone plates carry both on the mesh entity) and
+/// by the authoring name convention (in the tank's glb view tree the volume/proxy roles live on
+/// the sim skeleton, so the mesh's ancestors only *name* them — the same `*_Ballistic`/
+/// `*_Collider` rule `tank::bind_tank_view` hides by). Runs each frame; `Without<HullMesh>` makes
+/// it tag each mesh just once.
 fn tag_hull_meshes(
     candidates: Query<
         (Entity, &MeshMaterial3d<StandardMaterial>),
         (With<Mesh3d>, Without<HullMesh>, Without<VolumePaint>),
     >,
     parents: Query<&ChildOf>,
+    names: Query<&Name>,
     volumes: Query<(), Or<(With<ArmorVolume>, With<ComponentVolume>)>>,
     colliders: Query<(), With<Collider>>,
     mut commands: Commands,
@@ -484,7 +493,10 @@ fn tag_hull_meshes(
         let mut probe = entity;
         let mut is_hull = true;
         loop {
-            if volumes.contains(probe) || colliders.contains(probe) {
+            let physics_name = names.get(probe).is_ok_and(|name| {
+                name.as_str().ends_with("_Ballistic") || name.as_str().ends_with("_Collider")
+            });
+            if physics_name || volumes.contains(probe) || colliders.contains(probe) {
                 is_hull = false;
                 break;
             }

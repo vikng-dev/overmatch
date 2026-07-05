@@ -11,7 +11,7 @@ use crate::hud::HudCamera;
 use crate::sight::{in_gunner, in_third_person};
 use crate::spec::ViewKind;
 use crate::state::GameplaySet;
-use crate::tank::{Controlled, Gun, Rig, Tank, TankViews};
+use crate::tank::{Controlled, Gun, Rig, Tank, TankViews, rig_world_pose};
 use crate::world::ground_distance;
 
 /// Zoom state on the camera entity. Scroll sets `target_zoom`; `zoom` eases toward it for a
@@ -33,9 +33,10 @@ pub struct CameraFollow(pub bool);
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GunnerCameraPlaced;
 
-/// The turret-ring pivot, captured once as an offset in the tank root's local frame. The camera
-/// orbits `root · this`, so it reads the body's interpolated root `Transform` rather than the
-/// turret's (one-frame-stale) `GlobalTransform`. `None` until the rig is bound.
+/// The turret-ring pivot as an offset in the tank root's local frame. The camera orbits
+/// `root · this`, so it reads the body's interpolated root `Transform` rather than the turret's
+/// (one-frame-stale) `GlobalTransform`. Computed once from the sim skeleton's local-transform
+/// chain — spawn-complete data, available the first frame (`None` only before any tank exists).
 #[derive(Resource, Default)]
 struct TurretPivot(Option<Vec3>);
 
@@ -69,29 +70,31 @@ pub fn plugin(app: &mut App) {
         );
 }
 
-/// Capture the turret's position in the tank root's local frame, once, after the rig binds.
+/// Compute the turret's position in the tank root's local frame, once, from the sim skeleton's
+/// local transforms (`rig_world_pose` with an identity root = the root-relative offset). The
+/// chain's translations are static — the turret's own yaw doesn't move its pivot — so this is a
+/// constant, derived from spawn-complete data rather than captured from a live `GlobalTransform`
+/// (the lazy bind-time capture the sim/view split retired).
 fn capture_turret_pivot(
     mut pivot: ResMut<TurretPivot>,
-    controlled: Query<(&GlobalTransform, &Rig), With<Controlled>>,
-    turrets: Query<&GlobalTransform>,
+    controlled: Query<(Entity, &Rig), With<Controlled>>,
+    parents: Query<&ChildOf>,
+    locals: Query<&Transform>,
 ) {
     if pivot.0.is_some() {
         return;
     }
-    // Captured from the controlled tank's own turret. The Tigers are identical, so the offset holds
+    // Computed from the controlled tank's own turret. The Tigers are identical, so the offset holds
     // across a swap; a future asymmetric pair would recompute this per controlled tank.
-    let Ok((tank_transform, rig)) = controlled.single() else {
+    let Ok((tank, rig)) = controlled.single() else {
         return;
     };
-    let Ok(turret_transform) = turrets.get(rig.turret) else {
+    let Some((position, _)) =
+        rig_world_pose(rig.turret, tank, Vec3::ZERO, Quat::IDENTITY, &parents, &locals)
+    else {
         return;
     };
-    pivot.0 = Some(
-        tank_transform
-            .affine()
-            .inverse()
-            .transform_point3(turret_transform.translation()),
-    );
+    pivot.0 = Some(position);
 }
 
 /// The controlled tank's authored FOV for `kind`, or `fallback` before the rig binds.

@@ -19,7 +19,9 @@ use super::protocol::ServoAngles;
 use super::{diagnostics, harness, open_gameplay_gate, physics, rig};
 use crate::SimPlugin;
 use crate::command::TankCommand;
-use crate::tank::{PendingTankAssets, load_tank_assets, on_tank_ready};
+use crate::tank::{
+    PendingTankAssets, TankSimSource, bind_tank_view, load_tank_assets, spawn_tank_sim,
+};
 
 const PORT: u16 = 5888;
 
@@ -124,13 +126,15 @@ fn handle_new_clients(
     }
 }
 
-/// Spawns the real Tiger rig for every queued client once the spec has loaded — the increment-6
-/// swap for increment 5's primitive cuboid spawn. `on_tank_ready` (observed below) builds the
-/// colliders/armor volumes from the same spec once the glb scene arrives (async, per tank).
+/// Spawns the real Tiger for every queued client once the assets have loaded — sim body built
+/// synchronously from the extracted geometry (`spawn_tank_sim`) in the same command batch as the
+/// root, so the tank is collider-complete before replication ever sees it; the glb scene attaches
+/// later as pure view (`bind_tank_view`, observed below).
 fn spawn_pending_tanks(
     mut pending: ResMut<PendingClients>,
     assets: Option<Res<PendingTankAssets>>,
     asset_server: Res<AssetServer>,
+    source: TankSimSource,
     time: Res<Time<Virtual>>,
     config: Res<harness::PerturbConfig>,
     mut commands: Commands,
@@ -142,6 +146,9 @@ fn spawn_pending_tanks(
     if !assets.loaded(&asset_server) {
         return;
     }
+    let Some((geometry, spec)) = source.get(&assets.spec) else {
+        return;
+    };
     for (link, client_id) in pending.0.drain(..) {
         let mut tank = commands.spawn((
             Name::new("Tank"),
@@ -182,7 +189,9 @@ fn spawn_pending_tanks(
                 at: time.elapsed() + Duration::from_secs(2),
             });
         }
-        tank.observe(on_tank_ready);
+        tank.observe(bind_tank_view);
+        let root = tank.id();
+        spawn_tank_sim(&mut commands, root, geometry, spec);
     }
 }
 

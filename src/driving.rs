@@ -14,7 +14,7 @@ use crate::damage::{
     Capability, TankCapabilities, TankVolumes, VolumeFacets, capability_available,
 };
 use crate::state::GameplaySet;
-use crate::tank::{CenterOfMassAnchor, Roadwheel, Tank, TankSim, TrackSide, WheelIndex, rig_world_pose};
+use crate::tank::{Roadwheel, Tank, TankSim, TrackSide, WheelIndex, rig_world_pose};
 
 /// Coulomb coefficient: each wheel's total ground force is capped at MU × load (friction ellipse).
 /// Per-environment (the track-vs-ground surface pair), not per-tank — destined for the terrain
@@ -79,9 +79,12 @@ pub struct SuspensionParams {
 }
 
 pub fn plugin(app: &mut App) {
+    // The body's centre of mass needs no system here: `tank::spawn_tank_sim` inserts
+    // `CenterOfMass` from the authored `Center_Of_Mass` empty's extracted position at spawn
+    // (the model owns the COM; `NoAutoCenterOfMass` keeps the collision proxies' centroid from
+    // diluting it — ADR-0011).
     app.add_observer(attach_suspension)
         .add_observer(attach_drive_state)
-        .add_systems(Update, set_center_of_mass)
         // Order matters within the fixed step: ramp the command into the drive signal, settle
         // springs (sets per-wheel load), then drive (reads that load for the friction circle).
         // All gated by the gameplay set.
@@ -91,36 +94,6 @@ pub fn plugin(app: &mut App) {
                 .chain()
                 .in_set(GameplaySet),
         );
-}
-
-/// Set the body's centre of mass from the authored `Center_Of_Mass` empty (the model owns it).
-/// `on_tank_ready` adds `NoAutoCenterOfMass`, so this authored value is the body's COM outright —
-/// the collision proxies' centroid does not dilute it (ADR-0011). Runs once: the
-/// `Without<CenterOfMass>` filter retires it after the override is inserted.
-fn set_center_of_mass(
-    mut commands: Commands,
-    tanks: Query<(Entity, &GlobalTransform), (With<Tank>, Without<CenterOfMass>)>,
-    children: Query<&Children>,
-    anchors: Query<&GlobalTransform, With<CenterOfMassAnchor>>,
-) {
-    // Per tank: find *its own* `Center_Of_Mass` anchor among its descendants (the rig hierarchy),
-    // so each body's COM comes from its own model. Runs once per tank — the `Without<CenterOfMass>`
-    // filter retires a tank after its override is inserted.
-    for (entity, tank_transform) in &tanks {
-        let Some(anchor) = children
-            .iter_descendants(entity)
-            .find_map(|d| anchors.get(d).ok())
-        else {
-            continue; // this tank's anchor empty not bound yet
-        };
-
-        // The anchor's position in the tank's local frame is exactly Avian's COM offset.
-        let local = tank_transform
-            .affine()
-            .inverse()
-            .transform_point3(anchor.translation());
-        commands.entity(entity).insert(CenterOfMass(local));
-    }
 }
 
 /// Per-roadwheel DERIVED suspension state, recomputed from this tick's ray cast before anything

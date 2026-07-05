@@ -1,25 +1,35 @@
 //! The tank: its rig (structural markers bound by node name), the kinematic `Servo` motor
-//! for the turret/gun, and the asset-load binding. The tank declares *structure*; features
+//! for the turret/gun, and the sim-skeleton spawner. The tank declares *structure*; features
 //! (aim, shooting) attach their own behavior to these markers reactively.
+//!
+//! **Sim/view split, phase 1** (design `sim-view-split-and-tank-bake.md` §8 step 1): the sim
+//! body — servo frames, wheel stations, collision hulls, armor volumes, `Rig`/`TankSim` — is
+//! spawned *synchronously* from the extracted [`crate::bake::TankGeometry`], never from the
+//! instantiated glb scene. The scene is a **view**: it attaches whenever it loads and only
+//! renders ([`bind_tank_view`]). This is what makes the tier-2 rule structural: every
+//! rollback-registered component is constructible at spawn, from data, so there is no bind
+//! window for netcode to care about.
 
 use std::collections::{HashMap, HashSet};
 
 use avian3d::prelude::{
-    AngularInertia, ColliderConstructor, ColliderConstructorHierarchy, CollisionLayers, LayerMask,
-    Mass, NoAutoAngularInertia, NoAutoCenterOfMass, NoAutoMass, RigidBody,
+    AngularInertia, CenterOfMass, Collider, CollisionLayers, LayerMask, Mass,
+    NoAutoAngularInertia, NoAutoCenterOfMass, NoAutoMass, RigidBody, TrimeshFlags,
 };
 use bevy::asset::LoadState;
-use bevy::gltf::GltfMaterialName;
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::world_serialization::WorldInstanceReady;
 use serde::Deserialize;
 
 use crate::Layer;
+use crate::bake::{ExtractedTankGeometry, TankGeometry};
 use crate::ballistics::{ArmorVolume, BallisticVolume, ComponentHealth, ComponentVolume};
 use crate::damage::{
     Ammo, Crewman, Requirement, TankCapabilities, TankVolumes, VolumeFacets, VolumeOf, evaluate,
     part_qualities,
 };
+use crate::shooting::RecoilParams;
 use crate::sight::SightMode;
 use crate::spec::{RecoilSpec, TankSpec, TankSpecHandle, Trigger, ViewKind};
 use crate::state::{AppState, GameplaySet};
@@ -51,12 +61,12 @@ pub struct Tank;
 #[derive(Component)]
 pub struct Controlled;
 
-/// Resolved handles to a tank's rig nodes, captured once when the rig binds ([`on_tank_ready`]).
-/// Lets a control system reach *this* tank's specific gun/turret/muzzle by entity (`rig.gun`)
-/// instead of `query.single()`, which silently assumed a single tank in the world. Lives on the
-/// root, so it shares the tank's lifetime — the handles can't dangle (the parts despawn with the
-/// root they're parented to). Captured from the same descendant walk that already enforces the rig
-/// contract, so every field is guaranteed present by the time `Rig` is inserted.
+/// Resolved handles to a tank's rig nodes, assigned when the sim skeleton spawns
+/// ([`spawn_tank_sim`]). Lets a control system reach *this* tank's specific gun/turret/muzzle by
+/// entity (`rig.gun`) instead of `query.single()`, which silently assumed a single tank in the
+/// world. Lives on the root, so it shares the tank's lifetime — the handles can't dangle (the
+/// parts despawn with the root they're parented to). The spawner's contract check guarantees
+/// every field is present by the time `Rig` is inserted.
 #[derive(Component)]
 pub struct Rig {
     pub hull: Entity,
@@ -124,12 +134,7 @@ pub struct Roadwheel {
     pub side: TrackSide,
 }
 
-/// The authored centre-of-mass: an Empty (`Center_Of_Mass`) placed in the model. `driving` reads
-/// its position and sets the body's centre of mass from it — the model owns the COM.
-#[derive(Component)]
-pub struct CenterOfMassAnchor;
-
-/// Back-link from a rig part (a servo) to its tank's root entity, set at bind. Lets a per-tank
+/// Back-link from a rig part (a servo) to its tank's root entity, set at spawn. Lets a per-tank
 /// system that runs over *all* tanks' parts (`drive_servos`) resolve the owning tank's
 /// `TankVolumes` to evaluate that part's gate — without walking the hierarchy each frame.
 #[derive(Component)]
@@ -198,10 +203,9 @@ pub struct ServoCommand {
 }
 
 /// A servo's live mechanism state — current angle and angular velocity of the slew. Owned by
-/// `drive_servos`; never authored, never shared.
-///
-/// `rest` is the node's authored pose at `current = 0`, captured once so the pose write can be an
-/// *absolute* rotation (`rest · R(axis, angle)`) instead of accumulating deltas (no round-off).
+/// `drive_servos`; never authored, never shared. Pure per-tick state: the node's authored rest
+/// pose is *config*, spawned from data as [`ServoRest`] on the servo node (it used to be lazily
+/// captured in here, which is exactly the state the ConfirmedHistory-seed bug corrupted).
 ///
 /// **Fixed-clock split:** `drive_servos` steps the mechanism (`previous` → `current`) on the fixed
 /// clock — servo pose is sim truth (the muzzle it carries decides where shells go), so the server
@@ -212,27 +216,20 @@ pub struct ServoCommand {
 ///
 /// An element of [`TankSim::servos`], NOT a component — a tank's carried mechanism state lives
 /// root-resident (see [`TankSim`] for why).
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct ServoState {
     current: f32,
     /// The angle at the previous fixed tick — the render interpolation's blend-from.
     previous: f32,
     velocity: f32,
-    rest: Quat,
-    captured: bool,
 }
 
-impl Default for ServoState {
-    fn default() -> Self {
-        Self {
-            current: 0.0,
-            previous: 0.0,
-            velocity: 0.0,
-            rest: Quat::IDENTITY,
-            captured: false,
-        }
-    }
-}
+/// A servo node's authored rest rotation — the pose at `current = 0` — spawned from the extracted
+/// geometry so the pose write can be an *absolute* rotation (`rest · R(axis, angle)`) instead of
+/// accumulating deltas (no round-off). Config, not state: it never changes after spawn, so it
+/// lives on the servo node, outside the rollback-registered [`TankSim`].
+#[derive(Component, Clone, Copy)]
+pub struct ServoRest(pub Quat);
 
 impl ServoState {
     /// The servo's current angle (radians, parent-local) — its live mechanism position. Read by the
@@ -255,7 +252,7 @@ pub struct WeaponState {
 }
 
 /// ALL of a tank's non-physics carried sim state, root-resident: servo mechanisms, weapon
-/// reload/recoil, and the wheels' brush anchors — indexed by the bind-time [`ServoIndex`]/
+/// reload/recoil, and the wheels' brush anchors — indexed by the spawn-time [`ServoIndex`]/
 /// [`WeaponIndex`]/[`WheelIndex`] on the corresponding rig child.
 ///
 /// Root-resident is the load-bearing choice, not a convenience: under prediction, rollback
@@ -266,9 +263,9 @@ pub struct WeaponState {
 /// with this move). Children keep config plus an index; their transforms are DERIVED from this
 /// state every tick, replays included.
 ///
-/// Index assignment is sorted-by-name at bind (`on_tank_ready`) — the spec's servo/weapon maps
-/// are `HashMap`s, and their iteration order must never leak into indices that client and server
-/// both derive.
+/// Index assignment is sorted-by-name at spawn ([`spawn_tank_sim`]) — the spec's servo/weapon
+/// maps are `HashMap`s, and their iteration order must never leak into indices that client and
+/// server both derive.
 #[derive(Component, Clone, PartialEq, Debug, Default)]
 pub struct TankSim {
     pub servos: Vec<ServoState>,
@@ -278,18 +275,32 @@ pub struct TankSim {
     pub anchors: Vec<Option<Vec3>>,
 }
 
-/// This servo's slot in its tank's [`TankSim::servos`], assigned at bind in sorted-name order.
+/// This servo's slot in its tank's [`TankSim::servos`], assigned at spawn in sorted-name order.
 #[derive(Component, Clone, Copy)]
 pub struct ServoIndex(pub usize);
 
 /// This weapon's slot in [`TankSim::weapons`] — on the muzzle AND the recoiling barrel (both
-/// actuate from the same weapon state), assigned at bind in sorted-name order.
+/// actuate from the same weapon state), assigned at spawn in sorted-name order.
 #[derive(Component, Clone, Copy)]
 pub struct WeaponIndex(pub usize);
 
-/// This roadwheel's slot in [`TankSim::anchors`], assigned at bind in sorted-name order.
+/// This roadwheel's slot in [`TankSim::anchors`], assigned at spawn in sorted-name order.
 #[derive(Component, Clone, Copy)]
 pub struct WheelIndex(pub usize);
+
+/// The sim skeleton's part table, on the tank root: node name → sim part entity, for every part
+/// [`spawn_tank_sim`] spawned. The **name-keyed join between sim and view** (design §6C): the
+/// view binder ([`bind_tank_view`]) resolves each instantiated glb node against this map to tag
+/// it [`ViewOf`] its sim part. Phase 2's artifact part table is this map, serialized.
+#[derive(Component)]
+pub struct SimParts(pub HashMap<String, Entity>);
+
+/// A glb view node's link to the sim part of the same name, inserted by [`bind_tank_view`]. The
+/// render side of the split: [`mirror_view_parts`] copies runtime-written sim part transforms
+/// (servos, recoiling barrels) onto `ViewOf`-tagged nodes so the visual model tracks the sim.
+/// Step-2 scaffolding target: the full view attach will re-point the render writers themselves.
+#[derive(Component, Clone, Copy)]
+pub struct ViewOf(pub Entity);
 
 /// Tank spawning, the spec→rig binder, and the servo mechanism — authority-side.
 /// The single-player *scenario*: load the Tiger spec up front, spawn the two-tank duel setup once
@@ -328,8 +339,18 @@ pub fn sim_plugin(app: &mut App) {
         )
         .add_systems(
             Update,
-            interpolate_servos.run_if(in_state(AppState::Playing)),
+            (interpolate_servos, mirror_view_parts)
+                .chain()
+                .run_if(in_state(AppState::Playing)),
         );
+}
+
+/// The render-side view mirror alone — for compositions that don't run the servo sim but still
+/// spawn tanks through [`spawn_tank_sim`] (the armor sandbox: a static target, but cook-off
+/// still detaches the sim turret and the visible glb turret must follow it). [`sim_plugin`]
+/// compositions get the mirror chained after `interpolate_servos` instead; never mount both.
+pub fn view_mirror_plugin(app: &mut App) {
+    app.add_systems(Update, mirror_view_parts);
 }
 
 /// The Tab possession swap — client-side: which tank *this seat* controls is not the sim's
@@ -346,13 +367,14 @@ pub fn client_plugin(app: &mut App) {
 }
 
 /// The tank's load dependencies (ADR-0011): the spec sheet AND the glb scene, both kicked off up
-/// front, and a tank is spawned only once both are ready — no spec-less window, and the scene
-/// instantiates within ~a frame of spawn instead of after a multi-second glb load. That window
-/// matters most under netcode: a replicated-but-unbound tank is prediction-visible the whole time
-/// (the bind-window hazard class `net::rig` guards). Kicked off once at startup on every side
-/// (sandbox.rs's `load_target`/`PendingTarget` pattern) — `on_tank_ready` requires the spec
-/// already loaded (asserts on it). Shared with the networking layer
-/// (`net::rig`/`net::client`/`net::server`), which spawns tanks against the same dependency.
+/// front, and a tank is spawned only once both are ready — [`spawn_tank_sim`] reads the loaded
+/// spec, and preloading the scene keeps the *view* pop-in to ~a frame. Since phase 1 of the
+/// sim/view split the scene is presentation only: the sim body spawns synchronously from the
+/// extracted geometry, so a late scene is a cosmetic wait, not a sim hazard. (The scene stays a
+/// gate here because it is still the extractor's source and the shadow harness's subject; phase 2
+/// drops the server's dependency on it entirely — design §8 step 3.) Kicked off once at startup
+/// on every side; shared with the networking layer (`net::rig`/`net::client`/`net::server`),
+/// which spawns tanks against the same dependency.
 #[derive(Resource)]
 pub(crate) struct PendingTankAssets {
     pub spec: Handle<TankSpec>,
@@ -371,6 +393,23 @@ impl PendingTankAssets {
 /// data (one path, two readers, guaranteed to agree on the source bytes).
 pub(crate) const TIGER_GLB_PATH: &str = "tiger_1/tiger_1.glb";
 
+/// The sim spawner's data dependencies, resolved as ONE gate every spawn path shares (SP,
+/// server connect-spawn, client replicated-attach, sandbox target): the extracted geometry
+/// (a Startup resource wherever `bake::plugin` is mounted) + the loaded spec. `get` returns
+/// `None` while anything is still pending — callers simply try again next frame — so the
+/// wait-vs-spawn behavior can't drift between the paths.
+#[derive(SystemParam)]
+pub(crate) struct TankSimSource<'w> {
+    geometry: Option<Res<'w, ExtractedTankGeometry>>,
+    specs: Res<'w, Assets<TankSpec>>,
+}
+
+impl TankSimSource<'_> {
+    pub(crate) fn get(&self, spec: &Handle<TankSpec>) -> Option<(&TankGeometry, &TankSpec)> {
+        Some((&self.geometry.as_ref()?.0, self.specs.get(spec)?))
+    }
+}
+
 pub(crate) fn load_tank_assets(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.insert_resource(PendingTankAssets {
         spec: asset_server.load("tiger_1/tiger_1.tank.ron"),
@@ -384,6 +423,7 @@ fn spawn_tank_when_loaded(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     pending: Option<Res<PendingTankAssets>>,
+    source: TankSimSource,
     mut next: ResMut<NextState<AppState>>,
 ) {
     let Some(pending) = pending else {
@@ -398,6 +438,9 @@ fn spawn_tank_when_loaded(
     if !pending.loaded(&asset_server) {
         return;
     }
+    let Some((geometry, spec)) = source.get(&pending.spec) else {
+        return;
+    };
     // Two tanks, both player-owned: `Tab` swaps which one is `Controlled`. The first spawns
     // controlled; the second sits until you swap into it (design: the antagonist/auto-aim
     // lands in Chunk 2). Both are dynamic bodies — per-tank suspension holds each up; only
@@ -405,6 +448,8 @@ fn spawn_tank_when_loaded(
     spawn_tank(
         &mut commands,
         &pending,
+        geometry,
+        spec,
         Transform::from_xyz(10.0, 2.0, 5.0).with_rotation(Quat::from_rotation_z(0.7)),
         "Tiger I (A)",
         true,
@@ -412,6 +457,8 @@ fn spawn_tank_when_loaded(
     spawn_tank(
         &mut commands,
         &pending,
+        geometry,
+        spec,
         Transform::from_xyz(10.0, 2.0, -12.0),
         "Tiger I (B)",
         false,
@@ -420,12 +467,12 @@ fn spawn_tank_when_loaded(
     next.set(AppState::Playing);
 }
 
-/// The spawn core every tank shares, whatever world it lives in: the Tiger scene (drives
-/// [`on_tank_ready`] when it lands — preloaded, so it instantiates within ~a frame), the spec
-/// handle the binder reads, and the [`Tank`] marker. The three spawn paths compose it with their
-/// role differences — SP ([`spawn_tank`]) adds a world pose + `RigidBody::Dynamic` from birth;
-/// the networked paths (`net::rig::net_tank_rig`) add the wire identity marker and stay `Static`
-/// until the rig binds.
+/// The spawn core every tank shares, whatever world it lives in: the Tiger scene as the **view**
+/// (drives [`bind_tank_view`] when it instantiates — preloaded, so within ~a frame), the spec
+/// handle, and the [`Tank`] marker. The sim body itself comes from [`spawn_tank_sim`], which
+/// every spawn path calls in the same command batch — the tank is sim-complete before this
+/// bundle's flush ends. SP ([`spawn_tank`]) adds a world pose + `RigidBody::Dynamic`; the
+/// networked paths (`net::rig::net_tank_rig`) add the wire identity marker.
 pub(crate) fn tank_rig(assets: &PendingTankAssets) -> impl Bundle {
     (
         WorldAssetRoot(assets.scene.clone()),
@@ -434,13 +481,15 @@ pub(crate) fn tank_rig(assets: &PendingTankAssets) -> impl Bundle {
     )
 }
 
-/// Spawn one Tiger at `transform`, binding its rig via [`on_tank_ready`]. `controlled` seeds the
-/// player's starting tank with the [`Controlled`] marker. The hull is a dynamic rigid body — Avian
-/// owns its Transform (ADR-0005); its collider comes from the model's `*_Collider` proxy, bound in
-/// `on_tank_ready`.
+/// Spawn one Tiger at `transform`: the full sim skeleton synchronously from the extracted
+/// geometry ([`spawn_tank_sim`]), the glb scene as its view. `controlled` seeds the player's
+/// starting tank with the [`Controlled`] marker. The hull is a dynamic rigid body — Avian owns
+/// its Transform (ADR-0005) — and is collider-complete in this very command batch.
 fn spawn_tank(
     commands: &mut Commands,
     assets: &PendingTankAssets,
+    geometry: &TankGeometry,
+    spec: &TankSpec,
     transform: Transform,
     name: &str,
     controlled: bool,
@@ -449,14 +498,14 @@ fn spawn_tank(
         tank_rig(assets),
         transform,
         Name::new(name.to_string()),
-        // Dynamic from birth: the SP scenario's assets are fully loaded at spawn, so the rig
-        // binds within ~a frame — no meaningful colliderless free-fall window to guard.
         RigidBody::Dynamic,
     ));
-    tank.observe(on_tank_ready);
+    tank.observe(bind_tank_view);
     if controlled {
         tank.insert(Controlled);
     }
+    let root = tank.id();
+    spawn_tank_sim(commands, root, geometry, spec);
 }
 
 /// `Tab` hands control to the next tank: it moves the [`Controlled`] marker and resets the view to
@@ -549,54 +598,399 @@ pub(crate) fn rig_world_pose(
     Some((position, rotation))
 }
 
-/// Walk up the model hierarchy from `start` (inclusive) and return the first ancestor that's in
-/// `candidates` — used to resolve a weapon's chain (the yaw / pitch servo above its muzzle).
-fn first_ancestor_in(
-    mut entity: Entity,
-    candidates: &HashSet<Entity>,
-    parents: &Query<&ChildOf>,
-) -> Option<Entity> {
+/// Walk up the extracted node tree from `index` (inclusive) and return the first node satisfying
+/// `pred` — how the spawner resolves the yaw servo above the gunner's pitch node. Topology is
+/// data: the runtime used to walk entity ancestors at bind for this.
+fn first_geometry_ancestor(
+    geometry: &TankGeometry,
+    mut index: usize,
+    pred: impl Fn(usize) -> bool,
+) -> Option<usize> {
     loop {
-        if candidates.contains(&entity) {
-            return Some(entity);
+        if pred(index) {
+            return Some(index);
         }
-        match parents.get(entity) {
-            Ok(parent) => entity = parent.parent(),
-            Err(_) => return None,
-        }
+        index = geometry.nodes[index].parent?;
     }
 }
 
-/// Walk the loaded scene and, in one pass, bind structural markers + apply the (already-loaded)
-/// per-variant spec to each part — servo configs, the suspension ray, the collider's density — and
-/// enforce the rig contract: every node the sim binds behaviour to must exist in the model.
-/// Missing structure is an authoring bug — fatal like a bad spec sheet (ADR-0010) — so we panic
-/// with the list of what's absent. This is where ADR-0002's "name = the contract" is *enforced*.
-pub fn on_tank_ready(
-    ready: On<WorldInstanceReady>,
-    mut commands: Commands,
-    children: Query<&Children>,
-    names: Query<&Name>,
-    parents: Query<&ChildOf>,
-    primitives: Query<(), With<GltfMaterialName>>,
-    handles: Query<&TankSpecHandle>,
-    specs: Res<Assets<TankSpec>>,
+/// Build a tank's ENTIRE sim body on `root`, synchronously, from the extracted geometry + the
+/// already-loaded spec — servo frames, wheel stations, collision hulls, armor volumes,
+/// `Rig`/`TankSim` — with no asset in the loop (sim/view split phase 1, design §8 step 1). Every
+/// spawn path calls this in the same command batch as the root bundle, so the tank is
+/// sim-complete (colliders included) the moment its first flush ends: SP at scenario spawn, the
+/// server at connect-spawn, the client the moment the replicated root lands.
+///
+/// The skeleton mirrors the glb node tree — same names, same local transforms (bit-exact, step-0
+/// shadow-proven), same topology — but only the chains the sim actually reads; visual-only nodes
+/// stay out. The glb scene instantiates later as pure view ([`bind_tank_view`]).
+///
+/// This also enforces the rig contract (ADR-0002's "name = the contract"): every node the spec
+/// declares must exist in the extracted geometry. Missing structure is an authoring bug — fatal
+/// like a bad spec sheet (ADR-0010) — so we panic with the list of what's absent. Phase 2 turns
+/// this same check into a build error in the offline tank compiler.
+pub(crate) fn spawn_tank_sim(
+    commands: &mut Commands,
+    root: Entity,
+    geometry: &TankGeometry,
+    spec: &TankSpec,
 ) {
-    // The spec is a load dependency of spawning (ADR-0011): the tank is spawned only once its
-    // `.tank.ron` has loaded, so it's guaranteed present here. Its absence would be a bug.
-    let spec = handles
-        .get(ready.entity)
-        .ok()
-        .and_then(|handle| specs.get(&handle.0))
-        .expect("tank spec must be loaded before the tank is spawned");
+    // --- Resolve every spec-declared node against the extracted geometry. Sorted where the
+    // entry's position becomes an index both wire ends derive (`ServoIndex`/`WeaponIndex`): a
+    // HashMap's iteration order must never decide those.
+    let mut servo_entries: Vec<_> = spec.servos.iter().collect();
+    servo_entries.sort_by_key(|(node, _)| node.as_str());
+    let mut weapon_entries: Vec<_> = spec.weapons.iter().collect();
+    weapon_entries.sort_by_key(|(name, _)| name.as_str());
 
-    // Hull-level per-variant data. Mass properties are AUTHORED, never derived from the abstract
-    // collision proxy (ADR-0011): `NoAuto*` makes the proxy (and the future turret ramming collider)
-    // contribute zero mass — they are collision-only. Mass is the balance figure; angular inertia is
-    // a box of the authored extents at that mass (distribution only); the centre of mass is the
-    // authored `Center_Of_Mass` empty, applied authoritatively by `set_center_of_mass`.
+    let mut missing: Vec<String> = Vec::new();
+    let mut resolve = |name: &str| -> Option<usize> {
+        let found = geometry.by_name.get(name).copied();
+        if found.is_none() {
+            missing.push(name.to_string());
+        }
+        found
+    };
+    let servo_nodes: Vec<Option<usize>> = servo_entries
+        .iter()
+        .map(|(node, _)| resolve(node))
+        .collect();
+    let weapon_nodes: Vec<(Option<usize>, Option<usize>)> = weapon_entries
+        .iter()
+        .map(|(_, weapon)| {
+            (
+                resolve(&weapon.muzzle),
+                weapon.barrel.as_deref().and_then(&mut resolve),
+            )
+        })
+        .collect();
+    // Sorted for spawn-order determinism (no wire-shared index derives from volumes, but entity
+    // and collider creation order must not vary run-to-run or across the wire on a whim of
+    // HashMap iteration).
+    let mut volume_entries: Vec<_> = spec.volumes.iter().collect();
+    volume_entries.sort_by_key(|(name, _)| name.as_str());
+    let volume_nodes: Vec<_> = volume_entries
+        .iter()
+        .map(|(name, volume)| (*name, *volume, resolve(name)))
+        .collect();
+    // The gunner view's node is the main mount's Pitch servo — the anchor of the gun chain.
+    let gunner_pitch = spec
+        .views
+        .get(&ViewKind::Gunner)
+        .and_then(|view| resolve(&view.node));
+    let hull_index = resolve("Hull");
+    let com_index = resolve("Center_Of_Mass");
+
+    // Roadwheels and collision proxies are found by naming convention, straight from the node
+    // tree (glTF nodes only — the extractor never captures the loader's per-material render
+    // leaves, so this scan can't be polluted by mesh names the way the old scene walk could).
+    let mut wheel_nodes: Vec<(usize, TrackSide)> = Vec::new();
+    let mut collider_nodes: Vec<usize> = Vec::new();
+    for (index, node) in geometry.nodes.iter().enumerate().skip(1) {
+        if let Some(side) = roadwheel_side(&node.name) {
+            wheel_nodes.push((index, side));
+        } else if node.name.ends_with("_Collider") {
+            collider_nodes.push(index);
+        }
+    }
+    // Wheels get their slot (`WheelIndex` into `TankSim::anchors`) in name-sorted order.
+    wheel_nodes.sort_by(|a, b| geometry.nodes[a.0].name.cmp(&geometry.nodes[b.0].name));
+
+    // The gunner's chain feeds the rig's `turret`/`gun` (optic, camera, launched-turret): the
+    // declared Pitch node + the Yaw servo above it in the extracted topology — the binder never
+    // guesses which of several yaw/pitch mounts is the main one.
+    let yaw_indices: HashSet<usize> = servo_entries
+        .iter()
+        .zip(&servo_nodes)
+        .filter(|((_, servo), _)| servo.role == ServoRole::Yaw)
+        .filter_map(|(_, index)| *index)
+        .collect();
+    let turret_index = gunner_pitch
+        .and_then(|pitch| first_geometry_ancestor(geometry, pitch, |i| yaw_indices.contains(&i)));
+    // The single `Primary` weapon supplies the rig's main bore (`Rig.muzzle`) — what the bore HUD
+    // reads and LMB fires. Trigger never speaks to aiming; the chain handles come from the gunner
+    // view above.
+    let primary_muzzle_index = weapon_entries
+        .iter()
+        .zip(&weapon_nodes)
+        .find(|((_, weapon), _)| weapon.trigger == Trigger::Primary)
+        .and_then(|(_, (muzzle, _))| *muzzle);
+
+    // The full contract: declared nodes, structural singletons, the main-bore chain, ≥1 collider
+    // (else the body is massless → NaN) and ≥1 roadwheel per side (else a track has no
+    // support/thrust — per-side presence, not a fixed count).
+    if primary_muzzle_index.is_none() {
+        missing.push("<a Primary weapon>".into());
+    }
+    if gunner_pitch.is_none() {
+        missing.push("<a Pitch servo above the Primary weapon's muzzle>".into());
+    }
+    if turret_index.is_none() {
+        missing.push("<a Yaw servo above the Primary weapon's muzzle>".into());
+    }
+    if collider_nodes.is_empty() {
+        missing.push("*_Collider".into());
+    }
+    if !wheel_nodes.iter().any(|&(_, side)| side == TrackSide::Left) {
+        missing.push("Wheel_L*".into());
+    }
+    if !wheel_nodes.iter().any(|&(_, side)| side == TrackSide::Right) {
+        missing.push("Wheel_R*".into());
+    }
+    assert!(
+        missing.is_empty(),
+        "tank model is missing required rig nodes: {missing:?}"
+    );
+
+    // --- Spawn the skeleton: every needed node plus its ancestor chain, so `rig_world_pose`
+    // composes the exact transforms the scene walk used to provide (bit-equal by the step-0
+    // shadow proof). Extraction order guarantees parents precede children.
+    let mut needed: HashSet<usize> = HashSet::new();
+    {
+        let mut include = |mut index: usize| {
+            while index != 0 && needed.insert(index) {
+                index = geometry.nodes[index].parent.unwrap_or(0);
+            }
+        };
+        for index in servo_nodes.iter().flatten() {
+            include(*index);
+        }
+        for (muzzle, barrel) in &weapon_nodes {
+            include(muzzle.expect("contract checked"));
+            if let Some(barrel) = barrel {
+                include(*barrel);
+            }
+        }
+        for (_, _, index) in &volume_nodes {
+            include(index.expect("contract checked"));
+        }
+        for &(index, _) in &wheel_nodes {
+            include(index);
+        }
+        for &index in &collider_nodes {
+            include(index);
+        }
+        include(hull_index.expect("contract checked"));
+        include(turret_index.expect("contract checked"));
+        // The COM node is deliberately NOT spawned: its position is pure data, applied to the
+        // root below — nothing addresses it as an entity anymore.
+    }
+    let mut entities: Vec<Option<Entity>> = vec![None; geometry.nodes.len()];
+    for (index, node) in geometry.nodes.iter().enumerate().skip(1) {
+        if !needed.contains(&index) {
+            continue;
+        }
+        // Parent 0 is the loader's scene-wrapper node — identity transform while bevy_gltf's
+        // coordinate conversion stays off (shadow-pinned), so folding it into the root is
+        // pose-neutral.
+        let parent = match node.parent {
+            Some(0) | None => root,
+            Some(p) => entities[p].expect("extraction order puts parents before children"),
+        };
+        let entity = commands
+            .spawn((Name::new(node.name.clone()), node.transform, ChildOf(parent)))
+            .id();
+        entities[index] = Some(entity);
+    }
+    let entity_at = |index: usize| entities[index].expect("needed nodes were spawned above");
+
+    // --- Servos: the spec entry's bundle + its role (the aim pass drives *every* servo by role)
+    // + the authored rest rotation from data (`ServoRest` — the lazy first-tick capture this
+    // replaces is what the ConfirmedHistory bug corrupted).
+    for (slot, ((_, servo), index)) in servo_entries.iter().zip(&servo_nodes).enumerate() {
+        let index = index.expect("contract checked");
+        commands.entity(entity_at(index)).insert((
+            (*servo).clone(),
+            ServoCommand::default(),
+            ServoIndex(slot),
+            TankRoot(root),
+            servo.role,
+            ServoRest(geometry.nodes[index].transform.rotation),
+        ));
+    }
+
+    // --- Weapons: tag muzzle (+ optional recoiling barrel) and attach the `Weapon` config the
+    // shooting systems read. The barrel actuates from the same weapon slot (recoil state); its
+    // spring config (`RecoilParams`) is built here from the authored rest translation — data, not
+    // a bind-time transform capture.
+    for (slot, ((weapon_name, weapon), (muzzle_index, barrel_index))) in
+        weapon_entries.iter().zip(&weapon_nodes).enumerate()
+    {
+        let muzzle = entity_at(muzzle_index.expect("contract checked"));
+        let barrel = barrel_index.map(&entity_at);
+        commands.entity(muzzle).insert((
+            Muzzle,
+            TankRoot(root),
+            WeaponIndex(slot),
+            Weapon {
+                name: (*weapon_name).clone(),
+                speed: weapon.speed,
+                caliber: weapon.caliber,
+                mass: weapon.mass,
+                reload: weapon.reload,
+                recoil: weapon.recoil.clone(),
+                barrel,
+                fire: weapon.fire.clone(),
+                load: weapon.load.clone(),
+                trigger: weapon.trigger,
+            },
+        ));
+        if let (Some(barrel), Some(barrel_index)) = (barrel, *barrel_index) {
+            commands
+                .entity(barrel)
+                .insert((GunBarrel, WeaponIndex(slot), TankRoot(root)));
+            if let Some(recoil) = weapon.recoil.as_ref() {
+                commands.entity(barrel).insert(RecoilParams {
+                    rest: geometry.nodes[barrel_index].transform.translation,
+                    stiffness: recoil.stiffness,
+                    damping: recoil.damping,
+                });
+            }
+        }
+    }
+
+    // --- Ballistic volumes: the volume bundle (design `armor-penetration-and-damage.md` §12;
+    // composition, not a `kind` enum — `material_factor` every volume has, optional facets layer
+    // roles on top) + a query-only trimesh collider per captured primitive, built from the
+    // extracted buffers. `trimesh_with_config(…, MERGE_DUPLICATE_VERTICES)` is the exact parry
+    // construction avian's `TrimeshFromMesh` performs (design §7.1, vendored-source proven), on
+    // the `Armor` layer with NO collision response (`filters = NONE`) so it never perturbs the
+    // body — watertight solids may be concave, fine for the march's raycast (ADR-0008).
+    for (name, volume, index) in &volume_nodes {
+        let index = index.expect("contract checked");
+        let node = &geometry.nodes[index];
+        let entity = entity_at(index);
+        assert!(
+            volume.hp.is_some()
+                || (volume.crew.is_none() && !volume.ammo && volume.function.is_none()),
+            "tank volume `{name}` declares a consequence facet but has no hp"
+        );
+        // A volume with no captured mesh is invisible to the penetration march — shells would
+        // silently pass through it forever. The extractor only captures buffers under the
+        // `*_Ballistic` naming rule, so a differently-suffixed declared volume must die HERE,
+        // loudly, not at first shot (the golden test pins this for the shipped asset; this is
+        // the runtime backstop for the next one).
+        assert!(
+            !node.primitives.is_empty(),
+            "ballistic volume `{name}` captured no mesh data (does its node name follow the \
+             `*_Ballistic` capture rule?)"
+        );
+        {
+            let mut entity = commands.entity(entity);
+            entity.insert((
+                BallisticVolume {
+                    material_factor: volume.material_factor,
+                },
+                VolumeOf(root),
+            ));
+            if let Some(crew) = volume.crew {
+                // Seat role + its native occupant (topology B): `home == seat` at spawn, so
+                // competence is 1.0 until a backfill swap moves an occupant to a foreign seat.
+                entity.insert((crew, Crewman { home: crew }));
+            }
+            if volume.ammo {
+                entity.insert(Ammo);
+            }
+            if let Some(function) = volume.function {
+                entity.insert(function);
+            }
+            match volume.hp {
+                // Damageable (module/crew/ammo): an HP pool the march depletes.
+                Some(hp) => {
+                    entity.insert((
+                        ComponentVolume,
+                        ComponentHealth {
+                            current: hp,
+                            max: hp,
+                        },
+                    ));
+                }
+                // Pure armour: resists + shadows spall, nothing to lose.
+                None => {
+                    entity.insert(ArmorVolume);
+                }
+            }
+        }
+        for primitive in &node.primitives {
+            let vertices: Vec<Vec3> = primitive.positions.iter().copied().map(Vec3::from).collect();
+            let triangles: Vec<[u32; 3]> = primitive
+                .indices
+                .chunks_exact(3)
+                .map(|t| [t[0], t[1], t[2]])
+                .collect();
+            // Pre-check the cheap failure mode by name: `trimesh_with_config` panics on an empty
+            // triangle list (an unindexed export — `read_indices` came back empty) without saying
+            // which node broke.
+            assert!(
+                !triangles.is_empty(),
+                "ballistic volume `{name}` has an unindexed or triangle-less mesh primitive"
+            );
+            commands.spawn((
+                ChildOf(entity),
+                Transform::IDENTITY,
+                Collider::trimesh_with_config(
+                    vertices,
+                    triangles,
+                    TrimeshFlags::MERGE_DUPLICATE_VERTICES,
+                ),
+                CollisionLayers::new([Layer::Armor], LayerMask::NONE),
+            ));
+        }
+    }
+
+    // --- Collision proxies: a convex hull per captured primitive on the Vehicle layer.
+    // `Collider::convex_hull(points)` is exactly avian's `ConvexHullFromMesh` (it ignores
+    // indices — design §7.1). Collision-only: contributes no mass (the root authors its own).
+    for &index in &collider_nodes {
+        let node = &geometry.nodes[index];
+        assert!(
+            !node.primitives.is_empty(),
+            "collision proxy `{}` captured no mesh data",
+            node.name
+        );
+        for primitive in &node.primitives {
+            let points: Vec<Vec3> = primitive.positions.iter().copied().map(Vec3::from).collect();
+            let collider = Collider::convex_hull(points).unwrap_or_else(|| {
+                panic!("collision proxy `{}` has a degenerate hull source", node.name)
+            });
+            commands.spawn((
+                ChildOf(entity_at(index)),
+                Transform::IDENTITY,
+                collider,
+                CollisionLayers::new([Layer::Vehicle], LayerMask::ALL),
+            ));
+        }
+    }
+
+    // --- Wheels: suspension/drive contact stations, slotted in name-sorted order. The suspension
+    // ray is cast by `apply_suspension` itself each tick (`SpatialQuery`, tick-truth wheel pose).
+    for (slot, &(index, side)) in wheel_nodes.iter().enumerate() {
+        commands
+            .entity(entity_at(index))
+            .insert((Roadwheel { side }, WheelIndex(slot)));
+    }
+
+    // --- Structural markers.
+    let hull = entity_at(hull_index.expect("contract checked"));
+    let gun = entity_at(gunner_pitch.expect("contract checked"));
+    let turret = entity_at(turret_index.expect("contract checked"));
+    let muzzle = entity_at(primary_muzzle_index.expect("contract checked"));
+    commands.entity(hull).insert(Hull);
+    commands.entity(gun).insert(Gun);
+    commands.entity(turret).insert(Turret);
+
+    // --- The root: hull-level per-variant data + the assembled handles/state. Mass properties
+    // are AUTHORED, never derived from the abstract collision proxy (ADR-0011): `NoAuto*` makes
+    // the proxies contribute zero mass. The centre of mass is the authored `Center_Of_Mass`
+    // empty's root-relative position, straight from data (the runtime used to invert the root's
+    // `GlobalTransform` for this — a lazy read the split retires).
     let (ex, ey, ez) = spec.inertia_extents;
-    commands.entity(ready.entity).insert((
+    let parts: HashMap<String, Entity> = entities
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entity)| entity.map(|e| (geometry.nodes[index].name.clone(), e)))
+        .collect();
+    commands.entity(root).insert((
         spec.drivetrain.clone(),
         spec.suspension.clone(),
         Mass(spec.mass),
@@ -604,6 +998,7 @@ pub fn on_tank_ready(
         NoAutoMass,
         NoAutoAngularInertia,
         NoAutoCenterOfMass,
+        CenterOfMass(geometry.nodes[com_index.expect("contract checked")].root_position),
         // Per-tank capability requirements (design §7b) — drives `capability_effectiveness`.
         TankCapabilities(spec.capabilities.clone()),
         // Per-view FOV + gating requirement (camera FOV, view-death gate).
@@ -622,321 +1017,117 @@ pub fn on_tank_ready(
                 .collect(),
         ),
         // Root visibility owns the gunner-view hide: set to `Hidden`, `InheritedVisibility`
-        // propagates `HIDDEN` to every descendant mesh, so the gunner optic (camera parked at the
-        // gun pivot, inside the mantlet) sees no own-tank geometry — no near-plane clipping.
+        // propagates `HIDDEN` to every descendant mesh, so the gunner optic (camera parked at
+        // the gun pivot, inside the mantlet) sees no own-tank geometry — no near-plane clipping.
         Visibility::Inherited,
-    ));
-
-    // Record what the walk found, to check against the required contract afterwards.
-    let mut found: HashSet<&'static str> = HashSet::new();
-    let mut left_wheels = 0u32;
-    let mut right_wheels = 0u32;
-    let mut colliders = 0u32;
-    // Roadwheel nodes collected during the walk; sorted by name after it so each wheel's
-    // `WheelIndex` into `TankSim::anchors` is walk-order-independent.
-    let mut wheel_nodes: Vec<(String, Entity, TrackSide)> = Vec::new();
-    // Rig-node handles captured for this tank's `Rig` (built after the contract check below).
-    let mut hull_node = None;
-    let mut turret_node = None;
-    let mut gun_node = None;
-    let mut muzzle_node = None;
-    // Node-name → entity index, built in the walk so the spec-driven binding below (servos) can
-    // resolve a declared node by name instead of matching it inline.
-    let mut index: HashMap<String, Entity> = HashMap::new();
-
-    for entity in children.iter_descendants(ready.entity) {
-        // Skip render-primitive entities (`GltfMaterialName`, named `{mesh}.{material}`): we bind
-        // structure to authored nodes only, not the loader's per-material render leaves.
-        if primitives.contains(entity) {
-            continue;
-        }
-        // Most descendants are unnamed mesh nodes — skip them quietly.
-        let Ok(name) = names.get(entity) else {
-            continue;
-        };
-        let id = entity;
-        index.insert(name.to_string(), id);
-        let mut entity = commands.entity(entity);
-        match name.as_str() {
-            // Servos are bound from `spec.servos` after the walk (resolved via `index`), not here —
-            // their nodes carry no fixed names, so the spec is the source of truth for which they are.
-            "Hull" => {
-                found.insert("Hull");
-                hull_node = Some(id);
-                entity.insert(Hull);
-            }
-            // Weapon parts (muzzle, recoiling barrel) are bound from `spec.weapons` after the walk,
-            // resolved via `index` — node names live in the weapon entry, not here.
-            "Center_Of_Mass" => {
-                found.insert("Center_Of_Mass");
-                entity.insert(CenterOfMassAnchor);
-            }
-            // Roadwheels (Wheel_L_0.., Wheel_R_0..): tag the track side. The suspension ray is
-            // cast by `apply_suspension` itself each tick (`SpatialQuery`, tick-truth wheel pose)
-            // — deliberately NOT a `RayCaster` component: its `RayHits` refresh after the step,
-            // which fed rollback replays stale hits (and its position-update system was the
-            // residual bind-window NaN vector).
-            s if roadwheel_side(s).is_some() => {
-                let side = roadwheel_side(s).expect("guard matched");
-                match side {
-                    TrackSide::Left => left_wheels += 1,
-                    TrackSide::Right => right_wheels += 1,
-                }
-                // Collected, not inserted here: the wheel's `WheelIndex` into `TankSim::anchors`
-                // is its position in the name-sorted list, assigned after the walk.
-                wheel_nodes.push((name.to_string(), id, side));
-            }
-            // Collision proxies (`*_Collider`): a convex-hull collider on the Vehicle layer, hidden
-            // (it's physics, not rendering — ADR-0008). Collision-only: it contributes no mass (the
-            // hull authors its own, see above). The glTF loader puts the mesh on a child primitive,
-            // so build over the node's descendants.
-            s if s.ends_with("_Collider") => {
-                colliders += 1;
-                entity.insert((
-                    ColliderConstructorHierarchy::new(ColliderConstructor::ConvexHullFromMesh)
-                        .with_default_layers(CollisionLayers::new(
-                            [Layer::Vehicle],
-                            LayerMask::ALL,
-                        )),
-                    Visibility::Hidden,
-                ));
-            }
-            // Ballistic volumes are bound from `spec.volumes` after the walk (resolved via `index`),
-            // like servos and weapons — a node is a volume iff it's a declared key, so the spec is the
-            // source of truth, not an inline name match. (An authored `*_Ballistic` node with no spec
-            // entry is caught by the CI bind-contract test, so there's no runtime drift scan here.)
-            _ => {}
-        }
-    }
-
-    // Servos are spec-driven: each `spec.servos` entry resolves to its node via `index` and gets the
-    // servo bundle + its role (the aim pass drives *every* servo by role; no chain concept). The
-    // `Turret`/`Gun` markers are NOT set here — with multiple mounts of a role they'd be ambiguous;
-    // they go on the primary weapon's chain below. A declared servo with no matching node is fatal.
-    // Sorted by node name: the entry's position is its `ServoIndex` into `TankSim::servos`, and a
-    // HashMap's iteration order must never decide an index both wire ends derive.
-    let mut missing_servos: Vec<&str> = Vec::new();
-    let mut yaw_servos: HashSet<Entity> = HashSet::new();
-    let mut servo_entries: Vec<_> = spec.servos.iter().collect();
-    servo_entries.sort_by_key(|(node, _)| node.as_str());
-    for (slot, (node, servo)) in servo_entries.into_iter().enumerate() {
-        let Some(&id) = index.get(node.as_str()) else {
-            missing_servos.push(node.as_str());
-            continue;
-        };
-        commands.entity(id).insert((
-            servo.clone(),
-            ServoCommand::default(),
-            ServoIndex(slot),
-            TankRoot(ready.entity),
-            servo.role,
-        ));
-        if servo.role == ServoRole::Yaw {
-            yaw_servos.insert(id);
-        }
-    }
-
-    // Weapons are spec-driven: resolve each weapon's muzzle (+ optional recoiling barrel) via
-    // `index`, tag the nodes, and attach the `Weapon` config the shooting systems read. One weapon
-    // for now (the main gun) — the coax + hull MG join with the multi-weapon increment — so the
-    // rig's `muzzle`/`barrel` are this single weapon's. A weapon node that doesn't resolve is fatal.
-    // Sorted for the same reason as servos: position = `WeaponIndex` into `TankSim::weapons`.
-    let mut missing_weapon_nodes: Vec<&str> = Vec::new();
-    let mut weapon_entries: Vec<_> = spec.weapons.iter().collect();
-    weapon_entries.sort_by_key(|(name, _)| name.as_str());
-    for (slot, (weapon_name, weapon)) in weapon_entries.into_iter().enumerate() {
-        let Some(&muzzle) = index.get(weapon.muzzle.as_str()) else {
-            missing_weapon_nodes.push(weapon.muzzle.as_str());
-            continue;
-        };
-        let barrel = match &weapon.barrel {
-            Some(name) => match index.get(name.as_str()) {
-                Some(&e) => Some(e),
-                None => {
-                    missing_weapon_nodes.push(name.as_str());
-                    None
-                }
-            },
-            None => None,
-        };
-        commands.entity(muzzle).insert((
-            Muzzle,
-            TankRoot(ready.entity),
-            WeaponIndex(slot),
-            Weapon {
-                name: weapon_name.clone(),
-                speed: weapon.speed,
-                caliber: weapon.caliber,
-                mass: weapon.mass,
-                reload: weapon.reload,
-                recoil: weapon.recoil.clone(),
-                barrel,
-                fire: weapon.fire.clone(),
-                load: weapon.load.clone(),
-                trigger: weapon.trigger,
-            },
-        ));
-        if let Some(barrel) = barrel {
-            // The barrel actuates from the same weapon slot (recoil state) — see `apply_recoil`.
-            commands
-                .entity(barrel)
-                .insert((GunBarrel, WeaponIndex(slot), TankRoot(ready.entity)));
-        }
-        // The single `Primary` weapon supplies the rig's main bore (`Rig.muzzle`) — what the bore
-        // HUD reads and LMB fires. The traverse/elevation handles come from the gunner *view* below,
-        // not from the weapon; trigger never speaks to aiming.
-        if weapon.trigger == Trigger::Primary {
-            muzzle_node = Some(muzzle);
-        }
-    }
-
-    // Ballistic volumes are spec-driven too: each `spec.volumes` entry resolves to its node via
-    // `index` and gets the volume bundle (design `armor-penetration-and-damage.md` §12; composition,
-    // not a `kind` enum). `material_factor` (shell-resistance per metre) every volume has; optional
-    // `hp` makes it a damageable component. The `Armor_/Module_/...` name prefix is documentation
-    // only, never parsed — resistance and role both come from data, so a steel barrel module resists
-    // like steel yet still takes damage. Bound as a query-only trimesh collider on the `Armor` layer
-    // (watertight solids may be concave — fine for a raycast, unlike the dynamic physics proxy,
-    // ADR-0008) with NO collision response (`filters = NONE`), so it never perturbs the body; hidden
-    // like `*_Collider` (the march raycasts it, the sandbox visualizes it). A declared volume with no
-    // matching node is fatal — the spec↔model contract (the reverse is the CI bind-contract test).
-    let mut missing_volume_nodes: Vec<&str> = Vec::new();
-    for (name, volume) in &spec.volumes {
-        let Some(&id) = index.get(name.as_str()) else {
-            missing_volume_nodes.push(name.as_str());
-            continue;
-        };
-        assert!(
-            volume.hp.is_some()
-                || (volume.crew.is_none() && !volume.ammo && volume.function.is_none()),
-            "tank volume `{name}` declares a consequence facet but has no hp"
-        );
-        let mut entity = commands.entity(id);
-        entity.insert((
-            Visibility::Hidden,
-            ColliderConstructorHierarchy::new(ColliderConstructor::TrimeshFromMesh)
-                .with_default_layers(CollisionLayers::new([Layer::Armor], LayerMask::NONE)),
-            BallisticVolume {
-                material_factor: volume.material_factor,
-            },
-            VolumeOf(ready.entity),
-        ));
-        if let Some(crew) = volume.crew {
-            // Seat role + its native occupant (topology B): `home == seat` at bind, so competence is
-            // 1.0 until a backfill swap moves an occupant to a foreign seat.
-            entity.insert((crew, Crewman { home: crew }));
-        }
-        if volume.ammo {
-            entity.insert(Ammo);
-        }
-        if let Some(function) = volume.function {
-            entity.insert(function);
-        }
-        match volume.hp {
-            // Damageable (module/crew/ammo): an HP pool the march depletes (transit/spall/shock). The
-            // consequences of HP→0 (§§7–8) are a later increment.
-            Some(hp) => {
-                entity.insert((
-                    ComponentVolume,
-                    ComponentHealth {
-                        current: hp,
-                        max: hp,
-                    },
-                ));
-            }
-            // Pure armour: resists + shadows spall, nothing to lose.
-            None => {
-                entity.insert(ArmorVolume);
-            }
-        }
-    }
-
-    // The gunner's chain feeds the rig's `turret`/`gun` (optic, camera, launched-turret). It's the
-    // gunner view's node (its Pitch servo) + the Yaw servo above it — declared, so the binder never
-    // guesses which of several yaw/pitch mounts is the main one. Tagged `Turret`/`Gun` for the
-    // queries that still address the main mount specifically (the aim pass instead drives *every*
-    // servo by `ServoRole`, chain-agnostic).
-    if let Some(view) = spec.views.get(&ViewKind::Gunner)
-        && let Some(&pitch) = index.get(view.node.as_str())
-    {
-        commands.entity(pitch).insert(Gun);
-        gun_node = Some(pitch);
-        if let Some(yaw) = first_ancestor_in(pitch, &yaw_servos, &parents) {
-            commands.entity(yaw).insert(Turret);
-            turret_node = Some(yaw);
-        }
-    }
-
-    // Fixed-name structural singletons, plus ≥1 collider (else the body is massless → NaN) and ≥1
-    // roadwheel per side (else a track has no support/thrust). A real Tiger has many wheels; the sim
-    // only needs one contact station per side to be non-degenerate, so the contract is per-side
-    // presence, not a fixed count. Servos and weapons are contracted separately (they're spec-
-    // declared, not fixed-named).
-    const REQUIRED: [&str; 2] = ["Hull", "Center_Of_Mass"];
-    let mut missing: Vec<&str> = REQUIRED
-        .iter()
-        .copied()
-        .filter(|n| !found.contains(n))
-        .collect();
-    missing.extend(missing_servos);
-    missing.extend(missing_weapon_nodes);
-    missing.extend(missing_volume_nodes);
-    if muzzle_node.is_none() {
-        missing.push("<a Primary weapon>");
-    }
-    if turret_node.is_none() {
-        missing.push("<a Yaw servo above the Primary weapon's muzzle>");
-    }
-    if gun_node.is_none() {
-        missing.push("<a Pitch servo above the Primary weapon's muzzle>");
-    }
-    if colliders == 0 {
-        missing.push("*_Collider");
-    }
-    if left_wheels == 0 {
-        missing.push("Wheel_L*");
-    }
-    if right_wheels == 0 {
-        missing.push("Wheel_R*");
-    }
-    assert!(
-        missing.is_empty(),
-        "tank model is missing required rig nodes: {missing:?}"
-    );
-
-    // Wheels get their slot in name-sorted order (see `wheel_nodes` above).
-    wheel_nodes.sort_by(|a, b| a.0.cmp(&b.0));
-    let wheel_count = wheel_nodes.len();
-    for (slot, (_, id, side)) in wheel_nodes.into_iter().enumerate() {
-        commands
-            .entity(id)
-            .insert((Roadwheel { side }, WheelIndex(slot)));
-    }
-
-    // The contract check above guarantees every rig node was found, so these unwraps can't fire.
-    // Record them so control systems can address *this* tank's parts by entity (`rig.gun`). The
-    // recoiling barrel isn't a rig field — it rides each `Weapon` (`weapon.barrel`).
-    // `TankSim` is sized to the bound rig: every slot exists from birth (reloads start 0.0 =
-    // loaded; servo rest quats are captured by `drive_servos`' first step).
-    commands.entity(ready.entity).insert((
-        Rig {
-            hull: hull_node.unwrap(),
-            turret: turret_node.unwrap(),
-            gun: gun_node.unwrap(),
-            muzzle: muzzle_node.unwrap(),
-        },
+        // `TankSim` sized to the spawned rig: every slot exists from birth (reloads start 0.0 =
+        // loaded; servo rests are spawned config, not captured state).
         TankSim {
             servos: vec![ServoState::default(); spec.servos.len()],
             weapons: vec![WeaponState::default(); spec.weapons.len()],
-            anchors: vec![None; wheel_count],
+            anchors: vec![None; wheel_nodes.len()],
         },
+        Rig {
+            hull,
+            turret,
+            gun,
+            muzzle,
+        },
+        SimParts(parts),
     ));
+}
+
+/// The view binder: when the tank's glb scene instantiates, join its named nodes against the sim
+/// skeleton's part table ([`SimParts`]) — presentation attaching onto an already-complete sim.
+/// Nothing here constructs sim state; the scene is free to arrive seconds late (a visual pop-in,
+/// not a bind window). Observed per spawn path via `.observe(…)`, like the binder it replaces.
+///
+/// Two jobs, both render-side: hide the authored physics geometry (collision proxies, ballistic
+/// volumes — their sim colliders are built from data; the glb copies are just meshes), and tag
+/// every glb node that has a same-named sim part with [`ViewOf`] — the join `mirror_view_parts`
+/// and the sandbox's volume painter consume. Step 2 grows this into the full view attach.
+pub fn bind_tank_view(
+    ready: On<WorldInstanceReady>,
+    parts: Query<&SimParts>,
+    children: Query<&Children>,
+    names: Query<&Name>,
+    meshes: Query<(), With<Mesh3d>>,
+    mut commands: Commands,
+) {
+    let Ok(parts) = parts.get(ready.entity) else {
+        return;
+    };
+    // The root's descendants hold TWO same-named trees: the sim skeleton and the instantiated
+    // scene. This walk's subject is the SCENE — skip the sim parts, or every skeleton node gets
+    // a self-referential `ViewOf` (which made `mirror_view_parts`' detach branch reparent a
+    // launched turret onto itself and teleport it) and the hide rule stamps `Visibility` onto
+    // bare skeleton nodes (B0004 warning per node, measured 48/run).
+    let skeleton: HashSet<Entity> = parts.0.values().copied().collect();
+    for entity in children.iter_descendants(ready.entity) {
+        if skeleton.contains(&entity) {
+            continue;
+        }
+        let Ok(name) = names.get(entity) else {
+            continue;
+        };
+        if name.as_str().ends_with("_Collider") || name.as_str().ends_with("_Ballistic") {
+            commands.entity(entity).insert(Visibility::Hidden);
+        }
+        // Primitive leaves (`Mesh3d`) are render geometry, not part-named nodes — a mesh sharing
+        // a part's name (Blender mesh data often shares its object's name) must not be mirrored.
+        // `Mesh3d` presence is the reliable discriminator, NOT `GltfMaterialName` (absent on
+        // unnamed-material primitives — the step-0 shadow lesson).
+        if meshes.contains(entity) {
+            continue;
+        }
+        if let Some(&sim) = parts.0.get(name.as_str()) {
+            commands.entity(entity).insert(ViewOf(sim));
+        }
+    }
+}
+
+/// Step-1 scaffolding for the view attach (design §6C; step 2 replaces it by re-pointing the
+/// render writers themselves): copy each runtime-written sim part transform — servo nodes
+/// (written by `interpolate_servos`) and recoiling barrels (written by `apply_recoil`) — onto its
+/// [`ViewOf`]-tagged glb node, so the visual model tracks the sim skeleton. A local-space copy is
+/// exact: the view node sits in a parent chain identical to its sim part's (same glb topology;
+/// the extra scene-wrapper link is identity). Static parts never re-render (`set_if_neq`).
+///
+/// Cook-off detach: when a sim part leaves the tank hierarchy (the launched turret —
+/// `damage::launch_turrets_on_cookoff` makes it a free body), its view node reparents under the
+/// free sim body and follows it whole; the local-copy link ends there.
+fn mirror_view_parts(
+    views: Query<(Entity, &ViewOf)>,
+    moving: Query<(), Or<(With<ServoSpec>, With<GunBarrel>)>>,
+    parents: Query<&ChildOf>,
+    mut transforms: Query<&mut Transform>,
+    mut commands: Commands,
+) {
+    for (view, target) in &views {
+        let sim = target.0;
+        if parents.get(sim).is_err() {
+            commands
+                .entity(view)
+                .insert((ChildOf(sim), Transform::IDENTITY))
+                .remove::<ViewOf>();
+            continue;
+        }
+        if !moving.contains(sim) {
+            continue;
+        }
+        let Ok(&source) = transforms.get(sim) else {
+            continue;
+        };
+        if let Ok(mut dest) = transforms.get_mut(view) {
+            dest.set_if_neq(source);
+        }
+    }
 }
 
 /// The servo's absolute pose write: rest · R(axis, angle) — shared by the three writers (truth
 /// restore, mechanism step, render blend), so there is exactly one formula.
-fn write_servo_pose(transform: &mut Transform, spec: &ServoSpec, state: &ServoState, angle: f32) {
-    transform.rotation = state.rest * Quat::from_axis_angle(spec.role.axis(), angle);
+fn write_servo_pose(transform: &mut Transform, spec: &ServoSpec, rest: &ServoRest, angle: f32) {
+    transform.rotation = rest.0 * Quat::from_axis_angle(spec.role.axis(), angle);
 }
 
 /// Top of each fixed tick: re-assert every servo node's `Transform` to the mechanism's current
@@ -945,16 +1136,14 @@ fn write_servo_pose(transform: &mut Transform, spec: &ServoSpec, state: &ServoSt
 /// per servo. Reads the root-resident state (`TankSim::servos`) — during a rollback replay this
 /// is what re-derives the node transforms from the RESTORED state each tick.
 fn restore_servo_truth(
-    mut q: Query<(&mut Transform, &ServoSpec, &ServoIndex, &TankRoot)>,
+    mut q: Query<(&mut Transform, &ServoSpec, &ServoRest, &ServoIndex, &TankRoot)>,
     sims: Query<&TankSim>,
 ) {
-    for (mut transform, spec, slot, root) in &mut q {
+    for (mut transform, spec, rest, slot, root) in &mut q {
         let Some(state) = sims.get(root.0).ok().and_then(|sim| sim.servos.get(slot.0)) else {
             continue;
         };
-        if state.captured {
-            write_servo_pose(&mut transform, spec, state, state.current);
-        }
+        write_servo_pose(&mut transform, spec, rest, state.current);
     }
 }
 
@@ -962,6 +1151,7 @@ fn drive_servos(
     mut q: Query<(
         &mut Transform,
         &ServoSpec,
+        &ServoRest,
         &ServoCommand,
         &ServoIndex,
         &TankRoot,
@@ -972,20 +1162,13 @@ fn drive_servos(
     time: Res<Time>,
 ) {
     let dt = time.delta_secs();
-    for (mut transform, spec, command, slot, root) in &mut q {
+    for (mut transform, spec, rest, command, slot, root) in &mut q {
         let Ok(mut sim) = sims.get_mut(root.0) else {
             continue;
         };
         let Some(state) = sim.servos.get_mut(slot.0) else {
             continue;
         };
-        // Capture the node's authored rest rotation once, so the pose write can be an *absolute*
-        // rotation (`rest · R(axis, angle)`) instead of accumulating deltas (no round-off).
-        if !state.captured {
-            state.rest = transform.rotation;
-            state.captured = true;
-        }
-
         // This tick's blend-from for the render interpolation.
         state.previous = state.current;
 
@@ -1053,7 +1236,7 @@ fn drive_servos(
         // child-collider sync and any later-in-tick reader consume (`interpolate_servos`
         // re-blends it for rendering after the fixed loop).
         let angle = state.current;
-        write_servo_pose(&mut transform, spec, state, angle);
+        write_servo_pose(&mut transform, spec, rest, angle);
     }
 }
 
@@ -1063,19 +1246,16 @@ fn drive_servos(
 /// continuous mount's ±π wrap doesn't spin the long way round.
 fn interpolate_servos(
     time: Res<Time<Fixed>>,
-    mut servos: Query<(&mut Transform, &ServoSpec, &ServoIndex, &TankRoot)>,
+    mut servos: Query<(&mut Transform, &ServoSpec, &ServoRest, &ServoIndex, &TankRoot)>,
     sims: Query<&TankSim>,
 ) {
     let alpha = time.overstep_fraction();
-    for (mut transform, spec, slot, root) in &mut servos {
+    for (mut transform, spec, rest, slot, root) in &mut servos {
         let Some(state) = sims.get(root.0).ok().and_then(|sim| sim.servos.get(slot.0)) else {
             continue;
         };
-        if !state.captured {
-            continue;
-        }
         let angle = state.previous + shortest_angle(state.current - state.previous) * alpha;
-        write_servo_pose(&mut transform, spec, state, angle);
+        write_servo_pose(&mut transform, spec, rest, angle);
     }
 }
 

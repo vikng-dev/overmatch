@@ -229,16 +229,14 @@ pub(crate) fn log_sim_evidence(
     );
 }
 
-/// Verdict 1 (increment 6): the binder must fire exactly once per tank despite rollback replays —
-/// rollback only re-runs `FixedMain` (map §8), and `on_tank_ready` fires from `WorldInstanceReady`
-/// (outside `FixedMain`), so a count > 1 per tank would mean that assumption was wrong. `Rig` is
-/// the observer's own terminal insert, so counting `Added<Rig>` is an external, non-invasive proxy
-/// for "the binder ran" without touching `tank.rs`. On the client this is the side that actually
-/// matters for the verdict — the predicted root is exactly where a rollback replay could plausibly
-/// re-fire an async-load observer if the "rollback re-runs FixedMain only" assumption were wrong.
+/// Verdict 1 (increment 6, kept post-split): the sim body must be built exactly once per tank
+/// despite rollback replays — `Rig` is `spawn_tank_sim`'s root insert, so counting `Added<Rig>`
+/// is an external, non-invasive proxy for "the skeleton spawned" without touching `tank.rs`. The
+/// spawner runs from `Update` systems (outside `FixedMain`, which is all a rollback re-runs, map
+/// §8), so a count > 1 per tank would mean that assumption broke.
 pub(crate) fn count_rig_binds(binds: Query<Entity, Added<Rig>>) {
     for entity in &binds {
-        info!("net: {entity} Rig bound (on_tank_ready fired)");
+        info!("net: {entity} Rig bound (sim skeleton spawned)");
     }
 }
 

@@ -5,7 +5,7 @@
 //! values stay plain-text, git-diffable, and hot-reloadable, with no recompile and no Blender
 //! round-trip. There are **no code defaults** (ADR-0011): a competitive sim never runs on guessed
 //! stats, so a failed load is fatal. The spec is a *load dependency* — the tank is spawned only
-//! once it's loaded — so `tank::on_tank_ready` binds its values onto the rig in a single pass.
+//! once it's loaded — so `tank::spawn_tank_sim` builds the sim body from its values in one pass.
 
 use bevy::asset::io::Reader;
 use bevy::asset::{AssetLoader, LoadContext, LoadState};
@@ -146,11 +146,11 @@ pub struct TankSpec {
     pub suspension: SuspensionParams,
     /// Servos (actuator mounts) keyed by model node name — the **source of truth** for which nodes
     /// rotate and how. Each carries its aim `role` (which also derives the rotation axis: Yaw→Y,
-    /// Pitch→X) and slew tuning; `on_tank_ready` resolves each name to its node and binds the servo.
+    /// Pitch→X) and slew tuning; `spawn_tank_sim` resolves each name to its node and binds the servo.
     /// Replaces the old fixed `turret`/`gun` fields, so a variant can declare any number of mounts.
     pub servos: HashMap<String, ServoSpec>,
     /// Ballistic volumes keyed by model node name — the **source of truth** for which nodes are
-    /// volumes and what they are (design §12). The march reads `material_factor`; `on_tank_ready`
+    /// volumes and what they are (design §12). The march reads `material_factor`; `spawn_tank_sim`
     /// layers components from the facets. The `Armor_/Module_/...` name prefix is documentation only.
     pub volumes: HashMap<String, VolumeSpec>,
     /// Weapons keyed by logical name — the **source of truth** for the tank's armament. Each names
@@ -305,7 +305,7 @@ mod tests {
     }
 
     /// The spec↔model **bind contract** — the CI-time twin of the runtime contract in
-    /// `tank::on_tank_ready`, but without launching Bevy: it reads the glTF node names directly and
+    /// `tank::spawn_tank_sim`, but without launching Bevy: it reads the glTF node names directly and
     /// checks both directions. Every node the spec references must exist in the `.glb`; the fixed
     /// structural nodes must be present; and every authored `*_Ballistic` node must be a declared
     /// volume (no orphans). This catches name drift — a rename, a typo, a forgotten declaration —
@@ -346,7 +346,7 @@ mod tests {
             has(&view.node);
         }
 
-        // Fixed structural contract (mirrors `on_tank_ready`'s `REQUIRED` + the prefix scans).
+        // Fixed structural contract (mirrors `spawn_tank_sim`'s singletons + the prefix scans).
         has("Hull");
         has("Center_Of_Mass");
         assert!(
