@@ -59,6 +59,28 @@ DIV_P = 0.05   # m   rollback position threshold
 DIV_Q = 0.05   # rad rollback rotation threshold
 DIV_LV = 0.20  # m/s rollback velocity threshold
 
+# --- Camera-space high-pass transient detection (viewer-side hiccup hunt) ----------------------
+# A camera-follow scheduling race steps the camera ONE frame relative to the tank: the world-space
+# pose stream stays perfectly smooth, but the tank's position IN CAMERA SPACE jerks back a frame and
+# snaps forward the next — a visible on-screen lurch. We high-pass each per-axis VELOCITY stream
+# (per-frame displacement / dt, deviation from a local median) and flag transients, running the SAME
+# detector on both the world-space and the camera-space controlled-tank position: world-space is the
+# control, so camera-space-ONLY events fingerprint the viewer-side race rather than real sim motion.
+#
+# The series is velocity (displacement / dt), NOT raw displacement, for the same reason the
+# world-space signal above is render JERK (dv/dt) and not raw Δp: a windowed client runs at a
+# variable, uncapped frame rate, so raw per-frame displacement scales with dt and a mere frame-pacing
+# hitch would flag in BOTH streams. Velocity is dt-normalised, so steady cruise reads flat regardless
+# of frame time and only a genuine pose-vs-camera discontinuity trips it.
+CAM_WIN_S = 0.6       # local-median window (removes steady cruise + slow drift; corner ~1.7 Hz)
+CAM_K = 6.0           # event when a per-axis velocity deviates by > K * robust-sigma (1.4826*MAD)
+CAM_FLOOR_MS = 0.3    # ...and by at least this many m/s, so a dead-steady stream stays event-free
+CAM_MERGE_S = 0.15    # collapse flagged frames closer than this into one EVENT (count hiccups, not frames)
+CAM_WARMUP_S = 3.0    # skip the run's first seconds: spawn settle + the camera flying in from its
+                      # authored spawn pose + the initial rollback burst are one-time, not the cruise
+                      # hiccup, and their huge deviations would otherwise swamp the robust scale.
+CAM_COINCIDE_S = 0.12 # a camera event within this of a world event is the SAME transient (shared pose)
+
 
 # --- quaternion helpers (layout [x, y, z, w]) -------------------------------------------------
 def q_conj(q):
@@ -85,6 +107,21 @@ def q_angle(q):
 def q_between(a, b):
     """Shortest-arc angle between two orientations a -> b (radians)."""
     return q_angle(q_mul(q_conj(a), b))
+
+
+def q_rotate(q, v):
+    """Rotate 3-vector v by unit quaternion q ([x, y, z, w])."""
+    qv = np.array([v[0], v[1], v[2], 0.0])
+    r = q_mul(q_mul(q, qv), q_conj(q))
+    return r[:3]
+
+
+def world_to_camera(p, cam_t, cam_q):
+    """Express world point p in the camera's local frame — the inverse of the camera's world
+    transform (rotation + translation, no scale): rotate (p − cam_t) by the camera's conjugate
+    rotation. A stationary tank held at a fixed camera offset maps to a constant camera-space point,
+    so any per-frame jitter here is the camera moving relative to the tank, not the tank itself."""
+    return q_rotate(q_conj(cam_q), np.asarray(p) - np.asarray(cam_t))
 
 
 # --- parsing ----------------------------------------------------------------------------------
@@ -138,6 +175,11 @@ def parse(path):
                     "t": float(t), "dt": float(dt), "e": row.get("e"),
                     "p": p, "q": q, "ctl": bool(row.get("ctl", False)),
                     "tick": row.get("tick"),
+                    # Primary 3D camera world pose (src/trace.rs, added for the camera-race hunt):
+                    # absent in pre-instrumentation traces / headless-client rows — parsed as None so
+                    # the camera-space section degrades to "not applicable" rather than erroring.
+                    "cam": _finite_vec(row.get("cam"), 3) if "cam" in row else None,
+                    "camq": _finite_vec(row.get("camq"), 4) if "camq" in row else None,
                     "cp": _finite_vec(row.get("cp"), 3) if "cp" in row else None,
                     "cq": _finite_vec(row.get("cq"), 4) if "cq" in row else None,
                     "has_corr": ("cp" in row) or ("cq" in row),
@@ -598,6 +640,129 @@ def spike_table(spikes, rollbacks, chosen_ticks, top_n):
     return rows
 
 
+# --- camera-space transient detection ---------------------------------------------------------
+def high_pass_transients(t, dt, pos):
+    """High-pass velocity-transient EVENTS on a per-frame position stream (pos: Nx3, aligned t/dt).
+
+    Per axis: per-frame velocity v[i] = (pos[i] − pos[i−1]) / dt[i]; a local median m[i] over frames
+    within ±CAM_WIN_S/2 of t[i]; deviation e[i] = v[i] − m[i]. Only frames past CAM_WARMUP_S are
+    eligible (the one-time spawn/camera-fly-in transient is excluded and does not pollute the scale).
+    Robust per-axis scale = 1.4826·MAD(e) over the eligible region; a frame is flagged when |e[i]| on
+    any axis exceeds max(CAM_K·scale, CAM_FLOOR_MS). Flagged frames closer than CAM_MERGE_S collapse
+    to one event. Returns event times, peak per-axis velocity deviation per event, inter-event gaps,
+    and the rate — a ~1/s metronome shows as gaps near 1 s.
+    """
+    n = len(pos)
+    if n < 3:
+        return {"n": 0, "t": np.array([]), "peak": [], "gaps": np.array([]), "rate": 0.0, "dur": 0.0}
+    v = (pos[1:] - pos[:-1]) / dt[1:, None]   # velocity into frame i (defined for i>=1)
+    td = t[1:]
+    m = len(td)
+    # per-axis local median over a ±win/2 time window (two-pointer sweep; frames are time-ordered)
+    half = CAM_WIN_S / 2.0
+    med = np.empty_like(v)
+    lo = hi = 0
+    for i in range(m):
+        while lo < m and td[lo] < td[i] - half:
+            lo += 1
+        while hi < m and td[hi] <= td[i] + half:
+            hi += 1
+        med[i] = np.median(v[lo:hi], axis=0)
+    e = v - med
+    eligible = td >= (t[0] + CAM_WARMUP_S)
+    if not np.any(eligible):
+        eligible = np.ones(m, dtype=bool)
+    scale = 1.4826 * np.median(np.abs(e[eligible] - np.median(e[eligible], axis=0)), axis=0)
+    thr = np.maximum(CAM_K * scale, CAM_FLOOR_MS)
+    hit = np.any(np.abs(e) > thr, axis=1) & eligible
+
+    # collapse flagged frames within CAM_MERGE_S into single events (count hiccups, not frames)
+    idx = np.nonzero(hit)[0]
+    events = []
+    if len(idx):
+        start = prev = idx[0]
+        for k in idx[1:]:
+            if td[k] - td[prev] > CAM_MERGE_S:
+                events.append((start, prev))
+                start = k
+            prev = k
+        events.append((start, prev))
+    evs = [{"t": float(td[a]), "peak": np.abs(e[a:b + 1]).max(axis=0)} for a, b in events]
+    et = np.array([ev["t"] for ev in evs])
+    gaps = np.diff(et) if len(et) >= 2 else np.array([])
+    span = float(td[-1] - (t[0] + CAM_WARMUP_S)) if np.any(eligible) else 0.0
+    rate = len(evs) / (span / 60.0) if span > 0 else 0.0
+    return {"n": len(evs), "t": et, "peak": [ev["peak"] for ev in evs],
+            "gaps": gaps, "rate": rate, "dur": span}
+
+
+def print_camera_space(chosen):
+    """CAMERA-SPACE section: resolve the controlled tank into camera space and run the high-pass
+    velocity-transient detector on both it and the world-space pose (the control). Emitted only when
+    the trace carries cam/camq; a pre-instrumentation or headless-client trace skips it silently, so
+    the report stays backward compatible.
+
+    World-space is the control: the tank root's rendered pose is smooth regardless of camera
+    scheduling, so world-space should read ~0 events. Camera-space events with NO coincident
+    world-space event (within CAM_COINCIDE_S) are the fingerprint of a viewer-side follow race — the
+    camera moved relative to a pose the tank itself never actually took."""
+    acc, prev = [], -math.inf
+    for f in chosen:
+        if f["dt"] <= 0.0 or f["t"] <= prev:
+            continue
+        prev = f["t"]
+        if f.get("cam") is not None and f.get("camq") is not None:
+            acc.append(f)
+    if len(acc) < 8:
+        return  # no camera pose recorded — section not applicable
+
+    t = np.array([f["t"] for f in acc])
+    dt = np.array([f["dt"] for f in acc])
+    world = np.array([f["p"] for f in acc])
+    camsp = np.array([world_to_camera(f["p"], f["cam"], f["camq"]) for f in acc])
+    w = high_pass_transients(t, dt, world)
+    c = high_pass_transients(t, dt, camsp)
+
+    # camera-space events with no coincident world-space event = camera-specific (the race).
+    cam_only = [ct for ct in c["t"]
+                if len(w["t"]) == 0 or float(np.min(np.abs(w["t"] - ct))) > CAM_COINCIDE_S]
+
+    print("\n  CAMERA-SPACE TRANSIENTS (viewer-side hiccup — controlled tank in the camera's frame)")
+    print(f"    detector: per-axis velocity (Δp/dt) vs ±{CAM_WIN_S:.2f}s local median, "
+          f"event > max({CAM_K:g}·MAD, {CAM_FLOOR_MS:g} m/s); <{CAM_MERGE_S:g}s apart merged")
+    print(f"    frames with camera pose: {len(acc)}   analysed span "
+          f"{w['dur']:.1f} s (first {CAM_WARMUP_S:g}s warmup skipped)")
+
+    def _line(label, r):
+        if r["n"] == 0:
+            print(f"    {label:<14} 0 events")
+            return
+        gaps = r["gaps"]
+        gap_s = (f"gap med {np.median(gaps):.2f} s (min {gaps.min():.2f}, max {gaps.max():.2f})"
+                 if len(gaps) else "single event")
+        peak = max(float(p.max()) for p in r["peak"])
+        print(f"    {label:<14} {r['n']:>3} events   {r['rate']:5.1f}/min   "
+              f"peak dev {peak:5.2f} m/s   {gap_s}")
+
+    _line("world-space", w)
+    _line("camera-space", c)
+    print(f"    camera-only    {len(cam_only):>3} events   "
+          f"(camera-space transients with no coincident world-space transient)")
+
+    if c["n"] == 0:
+        verdict = "clean — no camera-space transients"
+    elif len(cam_only) == 0:
+        verdict = ("every camera-space transient coincides with a world-space one — motion is in the "
+                   "pose stream, not camera-specific")
+    elif w["n"] == 0:
+        verdict = (f"{len(cam_only)} camera-space-ONLY transient(s) while world-space is perfectly "
+                   f"clean — viewer-side follow-scheduling artifact (the camera read a stale tank pose)")
+    else:
+        verdict = (f"{len(cam_only)} camera-space-only transient(s) beyond {w['n']} shared with "
+                   f"world-space — a camera-specific component is present")
+    print(f"    VERDICT: {verdict}")
+
+
 # --- report -----------------------------------------------------------------------------------
 def print_report(in_path, meta, role, is_net, ent, n_other, chosen, chosen_ticks,
                  fm, cs, rollbacks, spikes, div, server_meta, server_ticks,
@@ -735,6 +900,9 @@ def print_report(in_path, meta, role, is_net, ent, n_other, chosen, chosen_ticks
               f"{corr:>5}{gnd:>5}{hc:>4}{pen:>9}")
     if not top_rows:
         print("    (none — no spikes above threshold)")
+
+    # Camera-space transient hunt — emitted only when the trace carries the camera pose (cam/camq).
+    print_camera_space(chosen)
     print(line)
 
 

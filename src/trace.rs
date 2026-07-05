@@ -20,7 +20,10 @@
 //!   before any Update/FixedUpdate recorder).
 //! - `frame`  — per render frame, per tank root, AFTER transform propagation, so `p`/`q` are what
 //!   actually renders (`GlobalTransform`): `t` wall-secs, `dt` frame delta, `os` fixed overstep,
-//!   `e` entity bits, `p`/`q` world pose, `ctl` (present+true only for the controlled tank). Client
+//!   `e` entity bits, `p`/`q` world pose, `ctl` (present+true only for the controlled tank). `cam`
+//!   [x,y,z] + `camq` [x,y,z,w] the primary 3D camera's world pose (`GlobalTransform`), same on every
+//!   tank row of a frame — OMITTED (not null) on a headless client with no camera, so the analyzer's
+//!   camera-space section is opt-in and old traces parse unchanged. Client
 //!   extras: `tick` (predicted), `conf` (GLOBAL last-confirmed server tick or null — the whole
 //!   replication stream's high-water mark), `rb`/`rbt` (cumulative rollback / rolled-back-tick
 //!   counts), `cp`/`cq` (live `VisualCorrection` error translation/quat, present only while a
@@ -223,6 +226,12 @@ fn record_frame(
     real: Res<Time<Real>>,
     fixed: Res<Time<Fixed>>,
     roots: Query<(Entity, &GlobalTransform, Has<Controlled>), With<Tank>>,
+    // The primary 3D world camera's pose. Recorded so the analyzer can resolve the controlled tank
+    // into camera space and catch viewer-side transients — a camera-follow scheduling race steps the
+    // camera a frame relative to the tank, which is invisible in the world-space pose stream but is a
+    // visible lurch on screen. Empty on a headless client (no camera spawned) → the fields are then
+    // OMITTED, not null, keeping the row shape identical to a pre-instrumentation trace.
+    camera: Query<&GlobalTransform, With<Camera3d>>,
     #[cfg(feature = "net")] net: NetFrameCtx,
     #[cfg(feature = "net")] corr: Query<(
         Option<&VisualCorrection<Position>>,
@@ -238,6 +247,12 @@ fn record_frame(
         Option<&ConfirmedHistory<LinearVelocity>>,
     )>,
 ) {
+    // One camera pose for every tank row this frame (recorded after Propagate, so the third-person
+    // orbit camera's `GlobalTransform` is final). `None` on a headless client → `cam`/`camq` omitted.
+    let cam = camera
+        .iter()
+        .next()
+        .map(GlobalTransform::to_scale_rotation_translation);
     for (entity, global, controlled) in &roots {
         let (_, rotation, translation) = global.to_scale_rotation_translation();
         let mut row = json!({
@@ -252,6 +267,12 @@ fn record_frame(
         let obj = row.as_object_mut().expect("json! built an object");
         if controlled {
             obj.insert("ctl".into(), Value::Bool(true));
+        }
+        // The camera's world pose this frame — same for every tank row. Omitted (not null) when no
+        // camera exists (headless client), so the analyzer's camera-space section stays opt-in.
+        if let Some((_, cam_rot, cam_tr)) = cam {
+            obj.insert("cam".into(), vec3(cam_tr));
+            obj.insert("camq".into(), quat(cam_rot));
         }
         #[cfg(feature = "net")]
         {
