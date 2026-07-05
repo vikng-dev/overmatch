@@ -46,6 +46,19 @@ The recoiling barrel — child of the Gun, parent of the Muzzle. Slides under re
 **Muzzle**:
 The barrel's tip. Its forward is the bore axis; shells spawn here.
 
+## Sim / view
+
+**Sim body** (sim skeleton):
+The tank's simulated entities — servo frames, wheel stations, colliders, armor volumes, carried `TankSim` state — built synchronously at spawn from extracted data (`TankGeometry`), never from the glb scene. This is what the server and predicted client run on; it is rollback-registered and complete the tick the tank spawns (ADR-0014).
+_Avoid_: "the rig" for the sim body (the rig is the *contract*; the sim body is the spawned entities)
+
+**View**:
+The instantiated glb scene, attached onto the sim body as pure presentation whenever it loads. It only renders — no sim state reads or lives on it. A view node mirrors a sim part by name (`ViewOf` / `ViewNode`); render smoothing writes view nodes, and the sim transforms stay pure per-tick truth (ADR-0014).
+_Avoid_: calling the view "the model" (that is the source `.glb`/`.blend`)
+
+**Bind window** (retired):
+The old hazard interval between a replicated tank root arriving and its sim body finishing an async scene-driven bind — the source of a run of netcode bugs. Closed by ADR-0014: the sim body is now complete at spawn, so a late scene is only a cosmetic view pop-in. The term should now describe *only* the view attach, or be deleted.
+
 ## Gunnery
 
 **Servo**:

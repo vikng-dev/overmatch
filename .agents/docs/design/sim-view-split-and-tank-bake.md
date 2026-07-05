@@ -1,10 +1,13 @@
 # Design sketch: sim/view split & the tank bake (tier 3)
 
-**Status: PROVISIONAL (design discussion, research in flight).** Recorded 2026-07-05 from the
-MP-overhaul follow-up session (agent + Yan). Two research passes are pending and their findings
-should be folded into §7 before this graduates to an ADR: (a) vendored-source verification of
-Avian/Bevy raw-data collider + glTF-as-data APIs, (b) web research on Blender→glTF `extras`
-fidelity and prior art (Blenvy et al.).
+**Status: PHASE 1 IMPLEMENTED & GRADUATED (ADR-0014); phase 2 (the offline bake, §8 step 4)
+remains governed by this sketch.** Recorded 2026-07-05 from the MP-overhaul follow-up session
+(agent + Yan); research folded into §7 the same day. Steps 0–3 of §8 landed 2026-07-05
+(extractor + shadow `d4de242`; sim-spawns-whole `b380a55`; view-attach `262225b`; demolition —
+see git log): the settled phase-1 decisions live in
+[`0014-sim-view-split`](../adr/0014-sim-view-split.md). What this sketch still owns: §7's
+artifact-format decisions and §8 step 4 (`tools/tankc`, the baked artifact + handshake hash, the
+server shedding the glb) plus §9's phase-2 honesty test.
 
 Related: [`0012-spec-driven-rig-binder`](../adr/0012-spec-driven-rig-binder.md),
 [`0013-composable-rig-control`](../adr/0013-composable-rig-control.md),
@@ -264,30 +267,40 @@ poses or view nodes explicitly (each consumer from §3's coupling list gets an e
 mirrors it. This is the highest-touch step (many files, feel-test sensitive) — its own commit(s),
 windowed feel test before proceeding.
 
-### Step 3 — demolition (the anti-artifact pass)
+### Step 3 — demolition (the anti-artifact pass) — DONE 2026-07-05
 
 Everything that exists only because the scene used to construct the sim gets **deleted in the
 same PR series**, not left to rot (see the wariness this plan exists to serve). The checklist:
 
-- [ ] `on_tank_ready` scene walk as sim constructor; the runtime name→entity `index`
-- [ ] runtime name-pattern matching (`Wheel_L_/R_<n>`, `*_Collider`, `_Ballistic` suffix logic) —
-      moves into the extractor; the runtime never parses node names for sim meaning again
-- [ ] the gun→turret ancestor walk at bind (`first_ancestor_in`) — topology is artifact data
-- [ ] sorted-by-name index assignment as a *determinism device* — indices become artifact order
-      (deterministic by construction; keep the sort inside the extractor if convenient)
-- [ ] `ServoState.rest`/`captured` and every other lazy capture (per step 1)
-- [ ] Static-until-bind + `activate_bound_rig` (client rig activation gating): the sim body
-      exists from tick 0; decide what if anything still gates Dynamic (should be nothing beyond
-      lightyear's own replicated-pose arrival, which now precedes/coincides with spawn)
-- [ ] `PendingTankAssets` as a *connect* gate: phase 1 still preloads the glb (extraction source),
-      but once phase 2 lands the server drops the dependency entirely; the client's gate becomes a
-      view concern only
-- [ ] bind-window diagnostics: `report_orphan_transforms`, the bind-family NaN probes — re-audit
-      which still guard anything real; delete the rest (they were symptoms' instruments)
-- [ ] docs: mark ADR-0012's runtime-join sections superseded by the new ADR this sketch graduates
-      to; add the tier-2 rule to AGENTS.md as standing discipline
-- [ ] grep-sweep for the words "bind window" / "bound rig" in comments — every remaining mention
-      must describe the *view* attach, or be deleted
+- [x] `on_tank_ready` scene walk as sim constructor; the runtime name→entity `index` (step 1)
+- [x] runtime name-pattern matching (`Wheel_L_/R_<n>`, `*_Collider`, `_Ballistic` suffix logic) —
+      moved into the extractor (`TankGeometry::roadwheels`/`collision_proxies`); the runtime never
+      parses node names for sim meaning. (`bind_tank_view`'s hide rule still name-matches — view
+      meaning, deliberately out of scope of this rule.)
+- [x] the gun→turret ancestor walk at bind (`first_ancestor_in`) — topology is extracted data
+      (`first_geometry_ancestor`, step 1)
+- [x] sorted-by-name index assignment as a *determinism device* — the wheel sort lives inside the
+      extractor; servo/weapon sorts stay at spawn over the spec maps (they merge into the artifact
+      at phase 2)
+- [x] `ServoState.rest`/`captured` and every other lazy capture (step 1)
+- [x] Static-until-bind + `activate_bound_rig`: deleted. Each spawn path sets `RigidBody` in the
+      spawn flush by role (server always Dynamic; client Dynamic-if-Predicted else Static), with an
+      `Add<Predicted>` upgrade observer for the marker-lags-pose case (vendored-source verified:
+      `Predicted` is a replicated marker on its own visibility path, not guaranteed to ride the
+      pose's init message). The pose gate — lightyear's replicated-pose arrival — is the one gate
+      that remains, as predicted.
+- [x] `PendingTankAssets` as a *connect* gate: kept for phase 1 (the glb is the extractor's source
+      and the shadow's subject), re-documented as such; the server drops it at phase 2
+- [x] bind-window diagnostics: `report_orphan_transforms` deleted (ghost-child/bind races are
+      structurally impossible); `count_rig_binds` deleted — its build-exactly-once invariant is now
+      enforced by the spawn gates themselves (`attach_replicated_rig`'s `Without<RigidBody>` filter
+      cannot match a built tank twice; the server drains its pending queue), not merely observed;
+      `nan_tripwire`/`fixed_nan_probe` kept and re-scoped as general NaN-class guards
+- [x] docs: ADR-0012's runtime-join sections marked superseded by
+      [`0014-sim-view-split`](../adr/0014-sim-view-split.md); tier-2 rule added to AGENTS.md;
+      sim-body/view/bind-window(retired) terms added to the glossary
+- [x] grep-sweep for "bind window" / "bound rig": every remaining mention describes the view
+      attach or accurately-dated history of the retired window
 
 What deliberately survives: `TankSim` root-residency + rollback registration (already correct
 post-`strip_confirmed_history`), `Rig` handles, `ServoIndex`-family (assignment source changes),
