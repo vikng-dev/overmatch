@@ -2,7 +2,7 @@
 //! The camera is also the aiming device, so look direction stays the player's — zoom only
 //! changes the orbit radius, which slides along the view axis and never moves the aim point.
 
-use avian3d::prelude::SpatialQuery;
+use avian3d::prelude::{PhysicsSystems, SpatialQuery};
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::prelude::*;
 
@@ -45,16 +45,35 @@ pub fn plugin(app: &mut App) {
         .init_resource::<TurretPivot>()
         .add_systems(Startup, spawn_camera)
         .add_systems(Update, capture_turret_pivot)
-        // Avian's follow-camera guidance: run after physics/interpolation but *before* transform
-        // propagation, reading the interpolated `Transform`. Propagation then computes the camera's
-        // and the tank's `GlobalTransform` together, so they render consistently — no jitter.
         .add_systems(
             PostUpdate,
             // The orbit camera reads the interpolated root *before* propagation (Avian's follow
-            // guidance), so it propagates together with the tank.
+            // guidance), so it propagates together with the tank — but only if it reads *this*
+            // frame's written root `Transform`. Both edges are load-bearing:
+            //
+            // - `.after(PhysicsSystems::Writeback)`: in the MP composition the root `Transform` is
+            //   written in THIS PostUpdate by avian's `position_to_transform` (in `Writeback`), which
+            //   lightyear_avian's Position-mode chains Interpolate → VisualCorrection → Writeback →
+            //   Propagate. `orbit_camera` reads that root `Transform`. With only `.before(Propagate)`
+            //   and no edge to Writeback, the multithreaded executor is free to order us before OR
+            //   after Writeback and may flip frame to frame; a frame that reads *before* Writeback
+            //   targets last frame's pose (~7 cm at 8.6 m/s cruise), so the camera — and the whole
+            //   rendered world with it — lurches back a frame, then snaps forward the next: a
+            //   metronomic ~1/s hiccup along travel even though the tank's own stream is smooth.
+            //   Ordering after Writeback pins us to the pose Propagate is about to consume.
+            // - `.before(TransformSystems::Propagate)`: Propagation then computes the camera's and
+            //   the tank's `GlobalTransform` from the same root pose in one pass, so they render
+            //   consistent — no follow jitter.
+            //
+            // The edge must hold in BOTH compositions, so it anchors on `PhysicsSystems::Writeback`
+            // (avian's set, present with or without `net`) rather than lightyear's own sets. In SP
+            // the render-smoothed `Transform` is eased in `RunFixedMainLoop` (before `Update`), so
+            // this PostUpdate's `Writeback` set is empty and the edge is a harmless no-op — which is
+            // exactly why SP already renders smooth.
             orbit_camera
                 .run_if(in_third_person)
                 .in_set(GameplaySet)
+                .after(PhysicsSystems::Writeback)
                 .before(TransformSystems::Propagate),
         )
         .add_systems(
