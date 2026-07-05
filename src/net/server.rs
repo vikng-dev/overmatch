@@ -151,6 +151,9 @@ fn spawn_pending_tanks(
     let Some((geometry, spec)) = source.get(&assets.spec) else {
         return;
     };
+    // Harness override (`SPIKE_SPAWN_POSE`): place the tank onto a known resting contact for the
+    // beached-rest repro; unset in every normal run, so the default flat-pad spawn stands.
+    let (spawn_pos, spawn_rot) = harness::spawn_pose().unwrap_or((Vec3::new(0.0, 2.0, 0.0), Quat::IDENTITY));
     for (link, client_id) in pending.0.drain(..) {
         let mut tank = commands.spawn((
             Name::new("Tank"),
@@ -162,14 +165,14 @@ fn spawn_pending_tanks(
             // invariants state its exact boundary).
             RigidBody::Dynamic,
             ActionState::<TankCommand>::default(),
-            Position(Vec3::new(0.0, 2.0, 0.0)),
-            // Explicit identity, NOT left to `RigidBody`'s required-component default — that
-            // default is `Rotation::PLACEHOLDER` (f32::MAX sentinel, avian rigid_body/mod.rs:271),
-            // and if replication captures the spawn frame before the transform sync overwrites it,
-            // the client's confirmed history for the earliest ticks holds the sentinel — which
-            // rollbacks would then faithfully restore into the sim (the placeholder-NaN class,
-            // spike log 2026-07-04).
-            Rotation::default(),
+            Position(spawn_pos),
+            // Explicit identity (or the `SPIKE_SPAWN_POSE` override), NOT left to `RigidBody`'s
+            // required-component default — that default is `Rotation::PLACEHOLDER` (f32::MAX
+            // sentinel, avian rigid_body/mod.rs:271), and if replication captures the spawn frame
+            // before the transform sync overwrites it, the client's confirmed history for the
+            // earliest ticks holds the sentinel — which rollbacks would then faithfully restore
+            // into the sim (the placeholder-NaN class, spike log 2026-07-04).
+            Rotation(spawn_rot),
             // The authority's turret/gun lay, for every non-predicted view of this tank
             // (`net::publish_servo_angles` keeps it fresh).
             ServoAngles::default(),

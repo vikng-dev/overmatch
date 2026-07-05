@@ -17,6 +17,10 @@ use crate::command::TankCommand;
 /// `SPIKE_SIM_LONG=1` (rollback-storm diagnostic): drive straight at full throttle for ~15 s —
 /// from spawn that crosses the speed bump (z≈−70) and the washboard (z≈−82…−90), the terrain the
 /// user's rollback-stream report singled out; the default 4 s arc never leaves the flat pad.
+/// `SPIKE_SIM_IDLE=1` (beached-rest diagnostic): hold zero throttle/steer, never fire, aim
+/// constant, for the whole default ~600-tick run — a pure idle observation window, so a tank
+/// spawned onto a resting contact (`SPIKE_SPAWN_POSE`) is watched settling, with no drive input
+/// perturbing the contact state the client must re-form each rollback.
 #[derive(Resource)]
 pub(crate) struct SimulateInput {
     pub(crate) ticks: u32,
@@ -26,6 +30,9 @@ pub(crate) struct SimulateInput {
     drive_until: u32,
     /// Script length — exit after this many ticks.
     pub(crate) total: u32,
+    /// `SPIKE_SIM_IDLE`: suppress ALL drive input (throttle/steer stay 0, no fire) for the whole
+    /// run — the beached-rest observation window.
+    idle: bool,
 }
 
 impl Default for SimulateInput {
@@ -39,6 +46,7 @@ impl Default for SimulateInput {
                 .unwrap_or(300),
             drive_until: if long { 1088 } else { 384 },
             total: if long { 1280 } else { 600 },
+            idle: std::env::var("SPIKE_SIM_IDLE").is_ok(),
         }
     }
 }
@@ -59,7 +67,9 @@ pub(crate) fn buffer_input(
     // the ~2 s server perturbation) → coast to rest. The aim intention + range are held from
     // tick 0 so the turret/gun servos slew (drive_aim_servos → drive_servos) while driving;
     // one fire click at tick 300 (Reload starts ready) exercises fire + recoil + reload.
-    let driving = (128..sim.drive_until).contains(&t);
+    // Idle window (`SPIKE_SIM_IDLE`): never drive — the tank just sits on whatever contact it
+    // spawned onto, so the trace isolates the beached-rest rollback storm from any drive churn.
+    let driving = !sim.idle && (128..sim.drive_until).contains(&t);
     state.0.throttle = if driving { 1.0 } else { 0.0 };
     // The long course run drives dead straight (the bump/washboard are on the spawn axis); the
     // default short script arcs to exercise skid-steer.
@@ -80,7 +90,8 @@ pub(crate) fn buffer_input(
         Some(Vec3::new(200.0, 0.0, -800.0))
     };
     state.0.range = 800.0;
-    state.0.fire_primary = t == sim.fire_tick;
+    // No fire in the idle window — a recoil impulse would disturb the resting contact under study.
+    state.0.fire_primary = !sim.idle && t == sim.fire_tick;
 }
 
 /// Simulate mode: exit cleanly once the script has played out (long enough to cover the ~2s
@@ -147,6 +158,27 @@ pub(crate) fn perturb_after_delay(
         info!("server: {entity} perturbation impulse applied (forced rollback trigger)");
         commands.entity(entity).remove::<PendingPerturbation>();
     }
+}
+
+/// `SPIKE_SPAWN_POSE="x,y,z,qx,qy,qz,qw"` (server): override the spawned tank's initial
+/// `Position`/`Rotation` — parsed once at boot, applied in `spawn_pending_tanks`. Seven
+/// comma-separated f32s (translation metres, then an xyzw quaternion, normalized on read); any
+/// malformed value logs and falls back to the default spawn. Used to place the tank onto a known
+/// resting contact (the field-captured beached pose on the §2 side-slope slab edge) so the
+/// rollback storm reproduces deterministically. Inert when unset.
+pub(crate) fn spawn_pose() -> Option<(Vec3, Quat)> {
+    let raw = std::env::var("SPIKE_SPAWN_POSE").ok()?;
+    let nums: Vec<f32> = raw.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+    if nums.len() != 7 {
+        error!("server: SPIKE_SPAWN_POSE=\"{raw}\" is not seven f32s (x,y,z,qx,qy,qz,qw) — ignored");
+        return None;
+    }
+    let pos = Vec3::new(nums[0], nums[1], nums[2]);
+    // xyzw, matching the trace/analysis quaternion layout; normalize so a hand-entered field
+    // capture (not bit-exact unit) lands as a valid `Rotation`.
+    let rot = Quat::from_xyzw(nums[3], nums[4], nums[5], nums[6]).normalize();
+    info!("server: SPIKE_SPAWN_POSE pos={pos:?} rot={rot:?}");
+    Some((pos, rot))
 }
 
 /// `SPIKE_INPUT_DELAY_TICKS` (default 0, i.e. `InputDelayConfig::no_input_delay()`'s behavior via
