@@ -125,6 +125,24 @@ pub(crate) fn plugin(app: &mut App) {
     // (see `ROLLBACK_POSITION_M` etc. above — coarsened for step 7).
     app.add_plugins(LightyearAvianPlugin {
         replication_mode: AvianReplicationMode::Position,
+        // Roll back avian's non-replicated SOLVER state across rollback replay, not just the
+        // replicated Position/Rotation/velocities. Defaults to `false` (the `..default()` we
+        // shipped through step 8) — and with it off, every rollback re-steps the solver against a
+        // STALE `ContactGraph`/`ConstraintGraph` and a stale collider BVH (`ColliderTrees`), left
+        // wherever the abandoned misprediction ran. The whole block that fixes this is gated on the
+        // flag (lightyear_avian3d 0.28 plugin.rs:355-399): `ContactGraph`/`ConstraintGraph`/
+        // `PhysicsIslands` `local_rollback`, `RollbackMovedProxies`, and the two PreUpdate repair
+        // systems — `restore_collider_tree_from_enlarged_aabbs` (rebuilds the BVH leaves from the
+        // rolled-back `EnlargedAabb`s) and `repair_missing_contact_pairs_from_restored_aabbs`. That
+        // last one exists precisely because, in avian's own words, "a stale tree can miss contacts
+        // even when Position/Velocity were rolled back correctly" — the exact failure the beached-
+        // rest repro caught: a tank resting on the §2 side-slope slab edge (hull contact, wheels
+        // off terrain) drove a sustained ~12 rollbacks/s storm, every rollback attributed to
+        // `LinearVelocity`, because replaying the settled contact against stale solver state
+        // produced push-out velocities the honest server rest never had.
+        // Mounted in shared `net::plugin`, so both ends register it — but only the client rolls
+        // back; the server pays only the per-tick `ContactGraph`/`ColliderAabb` snapshot cost.
+        rollback_resources: true,
         ..default()
     });
     // Each condition also feeds the jitter-trace recorder (`crate::trace`) its measured magnitude
