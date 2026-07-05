@@ -47,9 +47,9 @@ pub struct Hull;
 
 /// Marks the vehicle's root entity — the dynamic rigid body (chassis). Suspension/drive forces
 /// are applied here; debug x-ray walks its descendants. Deliberately LOCAL, never replicated:
-/// its `On<Add, Tank>` observers must fire alongside the rig bundle, not at replication-receive
-/// time (see `net::protocol::NetTank` for the wire-side identity marker and the bind-window
-/// regression that rule comes from).
+/// its `On<Add, Tank>` observers must fire alongside the local spawn bundle, not at
+/// replication-receive time (see `net::protocol::NetTank` for the wire-side identity marker and
+/// the measured NaN regression that rule comes from).
 #[derive(Component)]
 pub struct Tank;
 
@@ -556,25 +556,6 @@ fn swap_controlled_tank(
     *mode = SightMode::ThirdPerson;
 }
 
-/// The track side of a roadwheel *rig empty* — `Wheel_L_<n>` / `Wheel_R_<n>` with a purely numeric
-/// index, and nothing else. The numeric check is load-bearing: it excludes the wheel's typed
-/// children (`Wheel_L_0_Ballistic`, `Wheel_L_0_Visual`), which also begin with `Wheel_` but are a
-/// volume / render mesh, not a suspension station.
-pub(crate) fn roadwheel_side(name: &str) -> Option<TrackSide> {
-    for (prefix, side) in [
-        ("Wheel_L_", TrackSide::Left),
-        ("Wheel_R_", TrackSide::Right),
-    ] {
-        if let Some(rest) = name.strip_prefix(prefix)
-            && !rest.is_empty()
-            && rest.bytes().all(|b| b.is_ascii_digit())
-        {
-            return Some(side);
-        }
-    }
-    None
-}
-
 /// Tick-truth world pose of a rig node: the body root's physics `Position`/`Rotation` composed
 /// down the node chain's local `Transform`s. Sim systems must use this instead of the node's
 /// `GlobalTransform`, which is the *render* pose — propagated once per frame from the interpolated
@@ -695,20 +676,12 @@ pub(crate) fn spawn_tank_sim(
     let hull_index = resolve("Hull");
     let com_index = resolve("Center_Of_Mass");
 
-    // Roadwheels and collision proxies are found by naming convention, straight from the node
-    // tree (glTF nodes only — the extractor never captures the loader's per-material render
-    // leaves, so this scan can't be polluted by mesh names the way the old scene walk could).
-    let mut wheel_nodes: Vec<(usize, TrackSide)> = Vec::new();
-    let mut collider_nodes: Vec<usize> = Vec::new();
-    for (index, node) in geometry.nodes.iter().enumerate().skip(1) {
-        if let Some(side) = roadwheel_side(&node.name) {
-            wheel_nodes.push((index, side));
-        } else if node.name.ends_with("_Collider") {
-            collider_nodes.push(index);
-        }
-    }
-    // Wheels get their slot (`WheelIndex` into `TankSim::anchors`) in name-sorted order.
-    wheel_nodes.sort_by(|a, b| geometry.nodes[a.0].name.cmp(&geometry.nodes[b.0].name));
+    // Roadwheels and collision proxies come pre-classified from the extractor by naming convention
+    // (design §8 step 3: the runtime never parses node names for sim meaning). `roadwheels` is
+    // already name-sorted — that order is each wheel's `WheelIndex` slot into `TankSim::anchors`,
+    // an index both wire ends derive.
+    let wheel_nodes = &geometry.roadwheels;
+    let collider_nodes = &geometry.collision_proxies;
 
     // The gunner's chain feeds the rig's `turret`/`gun` (optic, camera, launched-turret): the
     // declared Pitch node + the Yaw servo above it in the extracted topology — the binder never
@@ -778,10 +751,10 @@ pub(crate) fn spawn_tank_sim(
         for (_, _, index) in &volume_nodes {
             include(index.expect("contract checked"));
         }
-        for &(index, _) in &wheel_nodes {
+        for &(index, _) in wheel_nodes {
             include(index);
         }
-        for &index in &collider_nodes {
+        for &index in collider_nodes {
             include(index);
         }
         include(hull_index.expect("contract checked"));
@@ -955,7 +928,7 @@ pub(crate) fn spawn_tank_sim(
     // --- Collision proxies: a convex hull per captured primitive on the Vehicle layer.
     // `Collider::convex_hull(points)` is exactly avian's `ConvexHullFromMesh` (it ignores
     // indices — design §7.1). Collision-only: contributes no mass (the root authors its own).
-    for &index in &collider_nodes {
+    for &index in collider_nodes {
         let node = &geometry.nodes[index];
         assert!(
             !node.primitives.is_empty(),

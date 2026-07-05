@@ -347,7 +347,7 @@ fn spawn_targets(
 }
 
 /// The target tank's spec, loading. The tank is spawned only once it's ready (a load dependency,
-/// ADR-0011), so `on_tank_ready` binds its volumes with their data in one pass.
+/// ADR-0011), so `spawn_tank_sim` builds its volumes with their data in one pass.
 #[derive(Resource)]
 struct PendingTarget(Handle<TankSpec>);
 

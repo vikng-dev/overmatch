@@ -176,10 +176,11 @@ fn apply_suspension(
                 unsupported(&mut suspension, &mut sim);
                 continue;
             };
-            // Same NaN discipline as the aim path: a corrupt pose frame (bind-window rollback
-            // burst) must not flow through the cast into `apply_force_at_point` and poison the
-            // body. `Dir3::new` already rejects a non-finite direction; the origin needs its own
-            // guard.
+            // Same NaN discipline as the aim path: a corrupt pose frame must not flow through
+            // the cast into `apply_force_at_point` and poison the body. `Dir3::new` already
+            // rejects a non-finite direction; the origin needs its own guard. (First measured in
+            // the old async-bind era's rollback bursts; kept as general discipline — any future
+            // corruption source hits the same funnel.)
             if !origin.is_finite() {
                 unsupported(&mut suspension, &mut sim);
                 continue;

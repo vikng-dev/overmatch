@@ -8,7 +8,7 @@
 use core::time::Duration;
 use std::net::{Ipv4Addr, SocketAddr};
 
-use avian3d::prelude::{Position, Rotation};
+use avian3d::prelude::{Position, RigidBody, Rotation};
 use bevy::app::ScheduleRunnerPlugin;
 use bevy::prelude::*;
 use lightyear::prelude::input::native::ActionState;
@@ -94,7 +94,6 @@ pub fn run() {
             spawn_pending_tanks,
             open_gameplay_gate,
             diagnostics::log_positions,
-            diagnostics::count_rig_binds,
             diagnostics::log_sim_evidence,
         ),
     );
@@ -107,9 +106,9 @@ pub fn run() {
 }
 
 /// Connected clients waiting on the Tiger spec load (§2 of the map: the spec is a load
-/// dependency of spawning, same as `tank.rs`/`sandbox.rs` — `on_tank_ready` asserts it's already
-/// loaded). A client can connect before the tiny `.tank.ron` parse finishes; queueing avoids
-/// spawning a tank root the binder would immediately panic on.
+/// dependency of spawning, same as `tank.rs` — `spawn_tank_sim` requires the spec + extracted
+/// geometry already loaded). A client can connect before the tiny `.tank.ron` parse finishes;
+/// queueing avoids spawning a tank root the spawner would immediately panic on.
 #[derive(Resource, Default)]
 struct PendingClients(Vec<(Entity, PeerId)>);
 
@@ -153,26 +152,32 @@ fn spawn_pending_tanks(
         let mut tank = commands.spawn((
             Name::new("Tank"),
             rig::net_tank_rig(&assets),
+            // The server is always the authority: its body simulates from tick 0. Set alongside
+            // `spawn_tank_sim`'s collider inserts (below, same command batch), so `Dynamic` is
+            // present in the same flush as the colliders — they never sit unattached or
+            // placeholder-posed waiting for a body (the step-8 NaN class; `net::rig`'s module
+            // invariants state its exact boundary).
+            RigidBody::Dynamic,
             ActionState::<TankCommand>::default(),
             Position(Vec3::new(0.0, 2.0, 0.0)),
             // Explicit identity, NOT left to `RigidBody`'s required-component default — that
             // default is `Rotation::PLACEHOLDER` (f32::MAX sentinel, avian rigid_body/mod.rs:271),
             // and if replication captures the spawn frame before the transform sync overwrites it,
-            // the client's confirmed history for the earliest ticks holds the sentinel — which the
-            // post-bind settle rollbacks then faithfully restore into the sim (the bind-window NaN
-            // crash family, spike log 2026-07-04).
+            // the client's confirmed history for the earliest ticks holds the sentinel — which
+            // rollbacks would then faithfully restore into the sim (the placeholder-NaN class,
+            // spike log 2026-07-04).
             Rotation::default(),
             // The authority's turret/gun lay, for every non-predicted view of this tank
             // (`net::publish_servo_angles` keeps it fresh).
             ServoAngles::default(),
             Replicate::to_clients(NetworkTarget::All),
             // Replicate the ROOT alone. Without this, `Replicate` propagates to every rig child
-            // via `ReplicateLike` once the glb binds — ~19 anonymous ghost entities per tank on
-            // each client (nothing simulates them, the client builds its own rig locally), each
-            // predicted+history-tracked, i.e. a standing spurious rollback-check source while the
-            // tank moves, plus per-tick child Position/Rotation bandwidth and the B0004
-            // orphan-transform warnings (`report_orphan_transforms` named them 2026-07-05). The
-            // authority's turret/gun lay rides the root's `ServoAngles` instead.
+            // via `ReplicateLike` — the whole sim skeleton (~19 child entities per tank, spawned
+            // synchronously under the root by `spawn_tank_sim`) would replicate to each client,
+            // where nothing simulates them (the client builds its own skeleton locally), each
+            // predicted+history-tracked: a standing spurious rollback-check source while the tank
+            // moves, plus per-tick child Position/Rotation bandwidth and B0004 orphan-transform
+            // warnings. The authority's turret/gun lay rides the root's `ServoAngles` instead.
             DisableReplicateHierarchy,
             // The committed model: the owner predicts its own tank (input feels instant, rollback
             // reconciles), everyone else interpolates it — the standard pairing every lightyear

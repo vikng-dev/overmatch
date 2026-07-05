@@ -13,11 +13,13 @@ use lightyear::prelude::*;
 use crate::ballistics::ShellPath;
 use super::protocol::NetTank;
 use crate::driving::Suspension;
-use crate::tank::{Hull, Rig, Tank, TankSim, Turret};
+use crate::tank::{Hull, Tank, TankSim, Turret};
 
-/// Diagnostic (bind-window NaN): at the top of each physics tick, name every entity whose
+/// Diagnostic (physics NaN guard): at the top of each physics tick, name every entity whose
 /// physics state or `ColliderTransform` is non-finite — with values — then latch. Runs before
 /// `PhysicsSystems::Prepare`, i.e. before the step that would hit avian's panicking asserts.
+/// Guards a class wider than any one spawn path: a placeholder-magnitude pose surviving into the
+/// step, a solver blow-up, a NaN riding in on a replicated/rolled-back value.
 pub(crate) fn fixed_nan_probe(
     bodies: Query<
         (
@@ -45,8 +47,9 @@ pub(crate) fn fixed_nan_probe(
         return;
     }
     // Non-finite OR placeholder-magnitude: avian's require-inserted `PLACEHOLDER` sentinels are
-    // f32::MAX — *finite*, so a pure `is_finite` probe is blind to exactly the poison the
-    // bind-window family injects. Anything past 1e30 m is equally impossible and equally fatal.
+    // f32::MAX — *finite*, so a pure `is_finite` probe is blind to exactly the poison a mistimed
+    // `RigidBody` insert (or a replicated placeholder) injects. Anything past 1e30 m is equally
+    // impossible and equally fatal.
     let poisoned = |v: Vec3| !v.is_finite() || v.abs().max_element() > 1.0e30;
     let mut corrupt = false;
     for (entity, position, rotation, linear, angular) in &bodies {
@@ -83,45 +86,10 @@ pub(crate) fn fixed_nan_probe(
     }
 }
 
-/// Bind-window forensics: name every entity that carries a `GlobalTransform` while its parent has
-/// none (the B0004 pairs Bevy warns about during the net bind window) — once per pair. The broken
-/// link means transform propagation skips that subtree, which corrupts anything composed through
-/// it (collider offsets, COM capture).
-pub(crate) fn report_orphan_transforms(
-    world: &World,
-    children: Query<(Entity, &ChildOf), With<GlobalTransform>>,
-    has_global: Query<(), With<GlobalTransform>>,
-    mut seen: Local<bevy::platform::collections::HashSet<(Entity, Entity)>>,
-) {
-    for (child, child_of) in &children {
-        let parent = child_of.parent();
-        if has_global.contains(parent) || !seen.insert((child, parent)) {
-            continue;
-        }
-        // Full archetypes, not just names — the pairs seen so far are anonymous, so the component
-        // lists are the only identification available.
-        let archetype = |e: Entity| -> String {
-            world.inspect_entity(e).map_or_else(
-                |_| "<despawned>".into(),
-                |infos| {
-                    infos
-                        .map(|i| i.name().shortname().to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                },
-            )
-        };
-        warn!(
-            "net: ORPHAN-TRANSFORM child {child} [{}] under transform-less parent {parent} [{}]",
-            archetype(child),
-            archetype(parent)
-        );
-    }
-}
-
-/// NaN tripwire (bind-window crash diagnostic): names the first entity whose physics `Position`
-/// or local `Transform` goes non-finite, with its ancestry — runs before avian's own finite
-/// assert kills the app, so the culprit node is in the log.
+/// NaN tripwire: names the first entity whose physics `Position` or local `Transform` goes
+/// non-finite, with its ancestry — runs before avian's own finite assert kills the app, so the
+/// culprit node is in the log. A permanent guard on the NaN class (a corrupt pose, a bad solver
+/// step), independent of any spawn timing.
 pub(crate) fn nan_tripwire(
     positions: Query<(Entity, &Position)>,
     transforms: Query<(Entity, &Transform)>,
@@ -227,17 +195,6 @@ pub(crate) fn log_sim_evidence(
     info!(
         "net: SIM-EVIDENCE wheels_grounded={grounded}/{total} turret_angle={turret:?} reloads={reloads:?}"
     );
-}
-
-/// Verdict 1 (increment 6, kept post-split): the sim body must be built exactly once per tank
-/// despite rollback replays — `Rig` is `spawn_tank_sim`'s root insert, so counting `Added<Rig>`
-/// is an external, non-invasive proxy for "the skeleton spawned" without touching `tank.rs`. The
-/// spawner runs from `Update` systems (outside `FixedMain`, which is all a rollback re-runs, map
-/// §8), so a count > 1 per tank would mean that assumption broke.
-pub(crate) fn count_rig_binds(binds: Query<Entity, Added<Rig>>) {
-    for entity in &binds {
-        info!("net: {entity} Rig bound (sim skeleton spawned)");
-    }
 }
 
 /// Periodic authoritative/replicated position log (every ~2 s), so client and server positions can

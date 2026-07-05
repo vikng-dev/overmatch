@@ -7,8 +7,8 @@ use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, Rotation};
 use bevy::prelude::*;
 use lightyear::avian3d::plugin::{AvianReplicationMode, LightyearAvianPlugin};
 // `Remote` (bevy_replicon's "this entity arrived by replication", re-exported): the honest
-// authority-vs-replica discriminator — see `activate_bound_rig` on why `Predicted`/`Interpolated`
-// are not (the server entity carries both markers itself).
+// authority-vs-replica discriminator — see `upgrade_predicted_to_dynamic` on why
+// `Predicted`/`Interpolated` are not (the server entity carries both markers itself).
 use lightyear::core::confirmed_history::ConfirmedHistory;
 use lightyear::prelude::client::Remote;
 use lightyear::prelude::input::native::ActionState;
@@ -21,12 +21,12 @@ use crate::state::GameplaySet;
 use crate::tank::{Rig, ServoCommand, ServoIndex, TankSim};
 
 /// Replicated tank-identity marker — how the client recognizes a replicated entity as a tank
-/// (before its local rig exists) without replicating the sim's own `Tank` marker. Deliberately
-/// NOT `Tank`: replicating `Tank` fires its `On<Add, Tank>` observers at replication-receive
-/// time, ahead of the client's rig bundle, and that ordering deterministically NaN'd the bind
-/// window (4/4 crash at Dynamic activation, 2026-07-05 restructure regression — mechanism in the
-/// bind-window family, root pos/rot/velocities all NaN within a frame). The sim's `Tank` stays a
-/// local component that arrives with the rig bundle, exactly like every other rig component.
+/// (before its local sim body exists) without replicating the sim's own `Tank` marker. Deliberately
+/// NOT `Tank`: replicating `Tank` fires its `On<Add, Tank>` observers at replication-receive time,
+/// ahead of the client's sim-body build, and that ordering deterministically NaN'd the tank at
+/// `Dynamic` activation (4/4 crash, 2026-07-05 restructure regression — root pos/rot/velocities all
+/// NaN within a frame). The sim's `Tank` stays a local component that arrives with the sim body,
+/// exactly like every other rig component (`spawn_tank_sim`).
 #[derive(Component, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct NetTank;
 
@@ -48,7 +48,7 @@ pub struct ServoAngles {
 /// Authority side: mirror the live `ServoState` angles onto the replicated root component.
 /// `FixedPostUpdate`, so it reads what `drive_servos` (FixedUpdate, after `GameplaySet`) just
 /// stepped. `Without<Remote>` makes it authority-only in shared code: every client-side tank
-/// arrived by replication and carries `Remote` (see `activate_bound_rig` on why the
+/// arrived by replication and carries `Remote` (see `upgrade_predicted_to_dynamic` on why the
 /// `Predicted`/`Interpolated` markers can NOT discriminate here — the server carries both).
 fn publish_servo_angles(
     mut tanks: Query<(&Rig, &TankSim, &mut ServoAngles), Without<Remote>>,
@@ -194,7 +194,7 @@ pub(crate) fn plugin(app: &mut App) {
 /// `ConfirmedHistory<C>` with the component's ADD-TIME value, treating it as an authoritative
 /// init-message write. For a component the server never replicates that seed is the buffer's only
 /// entry forever, and `prepare_rollback` prefers confirmed history over predicted whenever it merely
-/// EXISTS — so every state rollback restored `TankSim`/`DriveState` to their bind-time defaults
+/// EXISTS — so every state rollback restored `TankSim`/`DriveState` to their add-time defaults
 /// instead of the rollback tick's predicted value. Measured symptom chain (2026-07-05): restored
 /// `captured=false` made `drive_servos` re-capture servo rest quats from the live (already-slewed)
 /// node transform, permanently baking the current lay into the servo zero — turret resolving away

@@ -170,10 +170,12 @@ pub fn run() {
                 .with_input_delay(InputDelayConfig::fixed_input_delay(delay_ticks)),
         );
     }
-    // Connect only once the tank assets (spec + glb scene) are loaded: the server spawns our
-    // replicated tank the moment we connect, and everything between that spawn and our local rig
-    // bind is the prediction-visible bind window `net::rig` has to guard. Preloading collapses it
-    // from a multi-second glb load to ~a frame of scene instantiation.
+    // Connect only once the tank assets (spec + glb scene) are loaded. The client still preloads
+    // before connecting — but no longer to guard a bind window (that window is gone: the sim body
+    // now spawns whole from extracted data the moment the replicated root lands). The spec feeds
+    // the spawner (`attach_replicated_rig` → `spawn_tank_sim`), and the glb feeds the geometry
+    // extractor + the shadow check + the view attach (`bind_tank_view`); preloading both keeps the
+    // view pop-in to ~a frame of scene instantiation instead of a multi-second glb load.
     // (No local ground spawn here: `SimPlugin` → `world::plugin` builds the real game terrain
     // (Terrain-layer static slab + test course) on both sides — rollback replays collide with it,
     // and the wheels' suspension rays (filtered to `Layer::Terrain`) actually hit it.)
@@ -207,9 +209,7 @@ pub fn run() {
             (
                 rig::attach_replicated_rig,
                 diagnostics::nan_tripwire,
-                diagnostics::report_orphan_transforms,
                 open_gameplay_gate,
-                diagnostics::count_rig_binds,
                 diagnostics::watch_rollback_metrics,
                 diagnostics::watch_turret_pose,
                 diagnostics::log_snap,

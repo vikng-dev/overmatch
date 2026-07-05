@@ -3,10 +3,13 @@
 //!
 //! `extract_tank_geometry` parses the tank's `.glb` **as data** — the `gltf` crate against the
 //! file, no Bevy scene, no asset dependency — into [`TankGeometry`]: every node's name, parent,
-//! local transform, root-relative pose, and (for sim-consumed meshes) raw vertex/index buffers.
-//! Since step 1 this is what the sim skeleton spawns from (`tank::spawn_tank_sim`) — the scene
-//! walk it replaced was step-0-shadow-proven to read exactly these values. The same function is
-//! phase 2's offline compiler core (one parser, two mounting points — design §6A).
+//! local transform, root-relative pose, (for sim-consumed meshes) raw vertex/index buffers, and
+//! the typed part lists the sim classifies by naming convention (roadwheel stations tagged with
+//! their track side, `*_Collider` collision proxies) — so the runtime never re-parses a node name
+//! for sim meaning (design §8 step 3). Since step 1 this is what the sim skeleton spawns from
+//! (`tank::spawn_tank_sim`) — the scene walk it replaced was step-0-shadow-proven to read exactly
+//! these values. The same function is phase 2's offline compiler core (one parser, two mounting
+//! points — design §6A).
 //!
 //! The shadow harness stays on: the extractor runs at startup and a shadow observer compares its
 //! output against every instantiated tank scene — names, hierarchy, local transforms (bit-exact),
@@ -29,7 +32,7 @@ use bevy::prelude::*;
 use bevy::world_serialization::WorldInstanceReady;
 
 use crate::spec::TankSpecHandle;
-use crate::tank::SimParts;
+use crate::tank::{SimParts, TrackSide};
 
 /// One glTF node, extracted. `name` follows bevy_gltf's rule exactly (authored name, else
 /// `GltfNode{index}` — `bevy_gltf::loader::gltf_ext::scene::node_name`), so scene entities and
@@ -62,6 +65,15 @@ pub(crate) struct MeshGeometry {
 pub(crate) struct TankGeometry {
     pub nodes: Vec<NodeGeometry>,
     pub by_name: HashMap<String, usize>,
+    /// Load-bearing roadwheel stations — `(node index, TrackSide)`, one per `Wheel_L/R_<n>` empty
+    /// ([`roadwheel_side`]), **sorted by node name**. That order is the wheels' [`WheelIndex`]
+    /// (`crate::tank::WheelIndex`) slot order into `TankSim::anchors` — an index both wire ends
+    /// derive, so the sort is load-bearing determinism, not cosmetics: a `HashMap`- or
+    /// extraction-order list would let client and server disagree on which anchor is which wheel.
+    pub roadwheels: Vec<(usize, TrackSide)>,
+    /// Collision-proxy nodes — `*_Collider` node indices in extraction order. No wire-shared index
+    /// derives from this order (each proxy just yields a convex hull), so it is not sorted.
+    pub collision_proxies: Vec<usize>,
 }
 
 #[derive(Resource)]
@@ -73,6 +85,27 @@ pub(crate) struct ExtractedTankGeometry(pub TankGeometry);
 /// rule so a differently-suffixed volume can't silently dodge capture.
 fn captures_mesh(name: &str) -> bool {
     name.ends_with("_Collider") || name.ends_with("_Ballistic")
+}
+
+/// The track side of a roadwheel *rig empty* — `Wheel_L_<n>` / `Wheel_R_<n>` with a purely numeric
+/// index, and nothing else. The numeric check is load-bearing: it excludes the wheel's typed
+/// children (`Wheel_L_0_Ballistic`, `Wheel_L_0_Visual`), which also begin with `Wheel_` but are a
+/// volume / render mesh, not a suspension station. Lives here (not in the sim) because classifying
+/// a node name into sim meaning is the extractor's job (design §8 step 3); [`TrackSide`] itself is
+/// sim vocabulary, imported from `crate::tank`.
+fn roadwheel_side(name: &str) -> Option<TrackSide> {
+    for (prefix, side) in [
+        ("Wheel_L_", TrackSide::Left),
+        ("Wheel_R_", TrackSide::Right),
+    ] {
+        if let Some(rest) = name.strip_prefix(prefix)
+            && !rest.is_empty()
+            && rest.bytes().all(|b| b.is_ascii_digit())
+        {
+            return Some(side);
+        }
+    }
+    None
 }
 
 pub(crate) fn plugin(app: &mut App) {
@@ -214,12 +247,35 @@ pub(crate) fn extract_tank_geometry(path: &Path) -> Result<TankGeometry, String>
         }
     }
 
-    Ok(TankGeometry { nodes, by_name })
+    // Classify the sim's name-convention parts once, here — the runtime consumes these typed lists
+    // and never re-scans node names for sim meaning (design §8 step 3). glTF nodes only: the
+    // extractor never captures the loader's per-material render leaves, so these lists can't be
+    // polluted by mesh names the way the old runtime scene walk could. Index 0 is the scene-root
+    // wrapper, skipped.
+    let mut roadwheels: Vec<(usize, TrackSide)> = Vec::new();
+    let mut collision_proxies: Vec<usize> = Vec::new();
+    for (index, node) in nodes.iter().enumerate().skip(1) {
+        if let Some(side) = roadwheel_side(&node.name) {
+            roadwheels.push((index, side));
+        } else if node.name.ends_with("_Collider") {
+            collision_proxies.push(index);
+        }
+    }
+    // Name-sorted: this is the `WheelIndex` slot order both wire ends derive (see the field doc).
+    roadwheels.sort_by(|a, b| nodes[a.0].name.cmp(&nodes[b.0].name));
+
+    Ok(TankGeometry {
+        nodes,
+        by_name,
+        roadwheels,
+        collision_proxies,
+    })
 }
 
-/// The shadow harness: on every tank rig instantiation, verify the extracted geometry against
-/// what the scene actually contains — the step-0 equivalence proof (module doc). Read-only and
-/// order-independent with respect to `on_tank_ready` (both observe the same event; this one
+/// The shadow harness: on every tank scene instantiation, verify the extracted geometry against
+/// what the scene actually contains — the step-0 equivalence proof, kept as the sim-data-vs-view
+/// guard (module doc). Read-only, so it is order-independent with respect to the view binder
+/// (`tank::bind_tank_view`, an entity-scoped observer of this same event; this one is global and
 /// writes nothing).
 fn shadow_compare_on_instance_ready(
     ready: On<WorldInstanceReady>,
@@ -456,7 +512,6 @@ fn transform_bits_eq(a: &Transform, b: &Transform) -> bool {
 mod tests {
     use super::*;
     use crate::spec::TankSpec;
-    use crate::tank::roadwheel_side;
 
     /// The extractor's golden test: extract the Tiger and hold it to the same contract the
     /// binder enforces at runtime — every spec-declared node present, the structural singletons,
@@ -513,25 +568,35 @@ mod tests {
         node("Hull");
         node("Center_Of_Mass");
 
-        // Wheels: 8 per side on the Tiger (snapshot; SIM-EVIDENCE's 16/16).
-        let wheels = |prefix_side| {
+        // Wheels: 8 per side on the Tiger (snapshot; SIM-EVIDENCE's 16/16), via the extractor's
+        // typed list.
+        let per_side = |want| {
             geometry
-                .nodes
+                .roadwheels
                 .iter()
-                .filter(|n| roadwheel_side(&n.name) == Some(prefix_side))
+                .filter(|&&(_, side)| side == want)
                 .count()
         };
-        assert_eq!(wheels(crate::tank::TrackSide::Left), 8);
-        assert_eq!(wheels(crate::tank::TrackSide::Right), 8);
-
-        // Collision proxies: present, captured, indexed.
-        let colliders: Vec<_> = geometry
-            .nodes
+        assert_eq!(per_side(crate::tank::TrackSide::Left), 8);
+        assert_eq!(per_side(crate::tank::TrackSide::Right), 8);
+        // The wheel list is name-sorted — the load-bearing `WheelIndex` slot order both wire ends
+        // derive — so pin that too, not just the per-side counts.
+        let wheel_names: Vec<&str> = geometry
+            .roadwheels
             .iter()
-            .filter(|n| n.name.ends_with("_Collider"))
+            .map(|&(index, _)| geometry.nodes[index].name.as_str())
             .collect();
-        assert!(!colliders.is_empty(), "no *_Collider proxies extracted");
-        for collider in colliders {
+        let mut sorted = wheel_names.clone();
+        sorted.sort_unstable();
+        assert_eq!(wheel_names, sorted, "roadwheels must be extracted name-sorted");
+
+        // Collision proxies: present (extraction order), captured, indexed — via the typed list.
+        assert!(
+            !geometry.collision_proxies.is_empty(),
+            "no *_Collider proxies extracted"
+        );
+        for &index in &geometry.collision_proxies {
+            let collider = &geometry.nodes[index];
             assert!(!collider.primitives.is_empty());
             for p in &collider.primitives {
                 assert!(p.positions.len() >= 4, "`{}`: degenerate hull source", collider.name);

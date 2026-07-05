@@ -1,6 +1,6 @@
 //! The physics-plugin configuration the networked layer runs under: the avian disables
 //! `LightyearAvianPlugin` requires, plus the transform-propagation re-anchor that keeps a
-//! freshly-bound rig's colliders finite through the bind window.
+//! freshly-spawned body's child colliders finite through their first physics ticks.
 
 use avian3d::physics_transform::PhysicsTransformSystems;
 use avian3d::prelude::{
@@ -9,16 +9,17 @@ use avian3d::prelude::{
 use avian3d::schedule::PhysicsSystems;
 use bevy::prelude::*;
 
-/// THE BIND-WINDOW NaN FIX. Disabling `PhysicsTransformPlugin` (required by
+/// THE COLLIDER-PROPAGATION NaN FIX. Disabling `PhysicsTransformPlugin` (required by
 /// `LightyearAvianPlugin`, see `physics_plugins()`) also removes the ONLY `configure_sets`
 /// that anchors `PhysicsTransformSystems::Propagate` inside `PhysicsSystems::Prepare`
 /// (avian `physics_transform/mod.rs:86`) — but `ColliderTransformPlugin` (mounted by the
 /// collider backend, NOT disabled) still adds `propagate_collider_transforms` to that set in
 /// `FixedPostUpdate`. Unanchored, it ran at an arbitrary point relative to the physics step:
-/// when a freshly-bound rig's colliders caught the wrong interleaving, their
+/// when a fresh body's child colliders caught the wrong interleaving, their
 /// `ColliderTransform`s went NaN and took every child collider `Position` with them (~70% of
-/// 100 ms runs, within a frame of Dynamic activation; activation-order fixes empirically
-/// falsified — see the spike log). Re-anchoring the set restores avian's own ordering.
+/// 100 ms runs, within a frame of Dynamic activation, measured in the old async-bind era;
+/// activation-order fixes empirically falsified — see the spike log). The hazard is the set
+/// anchoring itself, not any spawn timing — re-anchoring restores avian's own ordering.
 pub(crate) fn plugin(app: &mut App) {
     app.configure_sets(
         FixedPostUpdate,

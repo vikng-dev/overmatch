@@ -5,12 +5,21 @@
 //! attaches later as pure view. Invariants this module maintains:
 //!   1. the sim body attaches only to a valid replicated pose — never to avian's require-inserted
 //!      placeholder (`attach_replicated_rig`'s pose gate, the cold-start crash fix);
-//!   2. the body goes `Dynamic` in the same command-flush as the collider inserts
-//!      (`activate_bound_rig`, an `Add<Rig>` observer in that flush's cascade) — never before
-//!      (free-fall) and never after (the NaN ordering class);
-//!   3. no rollback replays the entity before the end of its first full physics tick
-//!      (`DisableRollback`, lifted by `enable_rollback_after_first_tick`) — the children's
-//!      `ColliderTransform`s need one `PhysicsSystems::Prepare` propagation first.
+//!   2. a `RigidBody` is set in the SAME command-flush as the collider inserts — colliders never
+//!      wait, unattached or placeholder-posed, for a body that arrives in a later frame (the NaN
+//!      ordering class: the step-8 8/8 crash was collider ATTACHMENT/first-propagation racing the
+//!      body transition). The server spawns `Dynamic` (always the authority); the client attaches
+//!      `Dynamic` if the replicated root is already `Predicted` and `Static` otherwise — an
+//!      interpolated remote, whose pose replication owns for good, OR a predicted root whose
+//!      `Predicted` marker has not yet replicated. That last case is promoted to `Dynamic` by
+//!      `upgrade_predicted_to_dynamic` — a body-TYPE change on a long-prepared body whose
+//!      `ColliderTransform`s have had frames of `Prepare` propagation, which is outside the
+//!      ordering class (and re-arms invariant 3 regardless);
+//!   3. no rollback replays the entity before the end of its first full physics tick under its
+//!      current body role (`DisableRollback`, lifted by `enable_rollback_after_first_tick`) —
+//!      armed at spawn for the children's first `ColliderTransform` propagation, and re-armed by
+//!      the `Static`→`Dynamic` promotion so a freshly-integrating body is never first stepped
+//!      inside another entity's replay.
 //!
 //! The rig's CHILDREN are not rollback participants at all: every carried child state lives
 //! root-resident in `tank::TankSim` (one `local_rollback` on the predicted root), and child
@@ -22,8 +31,9 @@ use avian3d::prelude::{Position, RigidBody, Rotation};
 use bevy::prelude::*;
 use lightyear::frame_interpolation::{FrameInterpolate, FrameInterpolationPlugin};
 // `Remote` (bevy_replicon's "this entity arrived by replication", re-exported): the honest
-// authority-vs-replica discriminator — see `activate_bound_rig` on why `Predicted`/`Interpolated`
-// are not (the server entity carries both markers itself).
+// authority-vs-replica discriminator — the server's own tanks are not `Remote`, every client-side
+// tank is (see `upgrade_predicted_to_dynamic` on why `Predicted`/`Interpolated` can NOT stand in
+// for it: the server entity carries both markers itself).
 use lightyear::prelude::client::Remote;
 use lightyear::prelude::*;
 
@@ -31,7 +41,7 @@ use super::protocol::NetTank;
 use crate::tank::{Rig, TankSimSource, bind_tank_view, spawn_tank_sim};
 
 pub(crate) fn plugin(app: &mut App) {
-    app.add_observer(activate_bound_rig);
+    app.add_observer(upgrade_predicted_to_dynamic);
     // FixedLast = the earliest point provably AFTER the fresh rig's first full physics tick
     // (collider-transform propagation included) — see `enable_rollback_after_first_tick`.
     app.add_systems(
@@ -41,11 +51,11 @@ pub(crate) fn plugin(app: &mut App) {
 }
 
 /// The networked composition of the shared spawn core (`tank::tank_rig` — scene-as-view + spec +
-/// `Tank`): adds the wire identity marker and the `RigidBody` (`tank.rs::spawn_tank` inserts it
-/// alongside the core for the same reason — the sim spawner only adds mass properties and child
-/// colliders). Used by both networked spawn paths: the server's per-client spawn
-/// (`net::server::spawn_pending_tanks`) and the client's replicated-tank attach
-/// (`attach_replicated_rig`); both call `spawn_tank_sim` in the same command batch.
+/// `Tank`): adds the wire identity marker and the `Transform` the replicated root needs. The
+/// `RigidBody` is deliberately NOT here — each spawn path sets it alongside `spawn_tank_sim`'s
+/// collider inserts in the same command flush (`net::server::spawn_pending_tanks` always `Dynamic`,
+/// the client's `attach_replicated_rig` `Dynamic`/`Static` by prediction role — see the module
+/// invariants). Used by both networked spawn paths; both call `spawn_tank_sim` in the same batch.
 pub(crate) fn net_tank_rig(assets: &crate::tank::PendingTankAssets) -> impl Bundle {
     (
         crate::tank::tank_rig(assets),
@@ -57,10 +67,6 @@ pub(crate) fn net_tank_rig(assets: &crate::tank::PendingTankAssets) -> impl Bund
         // rollback on every packet). lightyear's avian sync owns writing this from Position
         // afterwards.
         Transform::default(),
-        // Static in the bundle; `activate_bound_rig` (an `Add<Rig>` observer) flips the locally
-        // simulated compositions to Dynamic within the same flush cascade, once the skeleton's
-        // colliders are in the queue — remote (interpolated) tanks stay Static for good.
-        avian3d::prelude::RigidBody::Static,
     )
 }
 
@@ -69,14 +75,19 @@ pub(crate) fn net_tank_rig(assets: &crate::tank::PendingTankAssets) -> impl Bund
 /// components are not replicated, and a predicted entity without a body cannot be re-simulated
 /// during rollback replay — the symptom is continuous rollback from spawn, every confirmed packet
 /// disagreeing with a frozen prediction. A plain system (not an observer on `Predicted`) because
-/// `NetTank` arrives by replication and may land after the marker; waits on the asset gate (the
-/// spec feeds the spawner, the preloaded glb keeps the view pop-in short).
+/// `NetTank` arrives by replication and may land before OR after the prediction marker; waits on
+/// the asset gate (the spec feeds the spawner, the preloaded glb keeps the view pop-in short).
 ///
 /// `With<Remote>` = every replicated tank, whichever markers rode along: the own (predicted)
-/// tank today, other players' (interpolated) tanks at step 9. A remote tank gets the same full
-/// sim skeleton — node mapping, servos, and view anchors are what the camera/HUD and
-/// `apply_servo_angles` lay the model with — but its body stays `Static` (`activate_bound_rig`
-/// skips it): replication owns its pose, nothing local simulates it.
+/// tank today, other players' (interpolated) tanks at step 9. Every replicated tank gets the same
+/// full sim skeleton — node mapping, servos, and view anchors are what the camera/HUD and
+/// `apply_servo_angles` lay the model with. The `RigidBody` is chosen HERE, in the same flush as
+/// `spawn_tank_sim`'s colliders: `Dynamic` when the root already carries `Predicted` (this client
+/// simulates it), `Static` otherwise. `Static` covers both an interpolated remote (replication owns
+/// its pose forever) AND a predicted root whose `Predicted` marker has not yet replicated — the
+/// pose (a `.predict()` component) and the marker ride different replication-visibility paths and
+/// need not arrive in the same message; `upgrade_predicted_to_dynamic` promotes that latter case
+/// the instant the marker lands (a predicted body left `Static` mispredicts every packet).
 pub(crate) fn attach_replicated_rig(
     // `With<Position>, With<Rotation>`: THE COLD-START PLACEHOLDER GUARD. The bundle's
     // `RigidBody` require-inserts `Position::PLACEHOLDER`/`Rotation::PLACEHOLDER` (f32::MAX)
@@ -84,10 +95,10 @@ pub(crate) fn attach_replicated_rig(
     // the `NetTank` marker (`.predict()` components ride the prediction sync, plain markers the
     // replication apply). Lose that race and the body's first Dynamic tick integrates from
     // f32::MAX and NaNs the root (measured: 9/9 cold-cache runs, root pos/rot = 3.4e38 at the
-    // first post-bind probe; warm runs won the race by luck). Gating the body on the pose closes
+    // first post-spawn probe; warm runs won the race by luck). Gating the body on the pose closes
     // the hole for every timing.
     tanks: Query<
-        Entity,
+        (Entity, Has<Predicted>),
         (
             With<Remote>,
             With<NetTank>,
@@ -111,12 +122,26 @@ pub(crate) fn attach_replicated_rig(
     let Some((geometry, spec)) = source.get(&assets.spec) else {
         return;
     };
-    for entity in &tanks {
-        info!("client: {entity} replicated tank gets local sim body (assets loaded)");
+    for (entity, predicted) in &tanks {
+        // `Dynamic` only where THIS client simulates the body — the predicted root. Everything
+        // else starts `Static`: an interpolated remote stays there for good, a predicted root
+        // still awaiting its marker is promoted by `upgrade_predicted_to_dynamic`. The `RigidBody`
+        // rides the same `insert` as `spawn_tank_sim`'s collider inserts, so it lands in one flush
+        // — colliders never sit unattached/placeholder-posed waiting for a body in a later frame
+        // (the step-8 NaN-crash class; see the module invariants for its exact boundary).
+        let body = if predicted {
+            RigidBody::Dynamic
+        } else {
+            RigidBody::Static
+        };
+        info!(
+            "client: {entity} replicated tank gets local sim body (assets loaded, predicted={predicted})"
+        );
         commands
             .entity(entity)
             .insert((
                 net_tank_rig(&assets),
+                body,
                 // Defense-in-depth (NOT the placeholder crash — that's the pose gate above,
                 // verified separately): no rollback may replay this entity until its body has
                 // taken one full physics tick, because a replay before that steps physics over
@@ -132,54 +157,68 @@ pub(crate) fn attach_replicated_rig(
     }
 }
 
-/// Lift [`DisableRollback`] once the fresh body has completed one full physics tick — at
-/// `FixedLast` of that tick, `PhysicsSystems::Prepare` (FixedPostUpdate) has already replaced the
-/// children's placeholder poses with propagated ones, so replays are safe from here on. Gated on
-/// `Rig` (present from the spawn flush, so this fires at the first post-spawn FixedLast) and
-/// not-in-rollback (during a replay triggered by another entity, this one is `Disabled` and must
-/// stay protected).
+/// Lift [`DisableRollback`] once the fresh body has completed one full physics tick under its
+/// current role — at `FixedLast` of that tick, `PhysicsSystems::Prepare` (FixedPostUpdate) has
+/// already replaced the children's placeholder `ColliderTransform`s with propagated ones (the
+/// spawn case) or the promoted body has taken one clean Dynamic step (the
+/// `upgrade_predicted_to_dynamic` re-arm), so replays are safe from here on: `check_rollback`
+/// builds its query `.without::<DisableRollback>()` (lightyear_prediction rollback.rs:192) and
+/// stamps these entities `DisabledDuringRollback` during other entities' replays (rollback.rs:1103),
+/// so a replay cannot step the body before that first tick. Gated on `Rig` (present from the
+/// spawn flush, so this fires at the next FixedLast after arming) and not-in-rollback (during a
+/// replay triggered by another entity, this one is disabled and must stay protected).
 fn enable_rollback_after_first_tick(
     fresh: Query<Entity, (With<Rig>, With<NetTank>, With<DisableRollback>)>,
     mut commands: Commands,
 ) {
     for entity in &fresh {
-        info!("net: {entity} first post-bind tick complete — rollback enabled");
+        info!("net: {entity} first physics tick complete — rollback enabled");
         commands.entity(entity).remove::<DisableRollback>();
     }
 }
 
-/// Wake a networked tank's physics the instant its sim body exists — an OBSERVER on the spawner's
-/// `Rig` insert, so `RigidBody::Dynamic` applies in the same command-flush cascade as the
-/// skeleton's collider spawns, BEFORE any avian system runs that frame. Ordering is load-bearing,
-/// established empirically against the old async binder (step-8 NaN-crash bisection at 100 ms):
-///   - Dynamic landing after avian attached the constructed child colliders → every child
-///     collider's `Position` goes NaN within a frame (avian finite assert, 8/8 with an
-///     attachment-gated flip, ~60% with the old `Added<Rig>` Update system whose one-frame gap
-///     sometimes let attachment win the race);
-///   - colliders attaching to an already-Dynamic body → clean, and it is the only ordering the
-///     rest of the game exercises (SP spawns tanks Dynamic from birth).
+/// Promote a client's predicted tank from `Static` to `Dynamic` the instant its `Predicted` marker
+/// lands — the fallback for when the marker arrives AFTER `attach_replicated_rig` already built the
+/// sim body `Static`. `Predicted` is a replicated marker (a required component of `PredictionTarget`
+/// on the server — lightyear_replication send.rs:1112; replicated via `app.replicate::<Predicted>()`
+/// lib.rs:183; there is NO separate predicted entity, the replicated root IS the predicted one), and
+/// it rides a per-component visibility filter (`PredictedBit`, send.rs:359-417) distinct from the
+/// entity-level `Replicate` visibility that carries Position/Rotation — so it is NOT guaranteed to
+/// reach the client in the same init message as the pose. `attach_replicated_rig` gates on the pose,
+/// and picks `Dynamic` only if `Predicted` is already present by then; this observer closes the
+/// otherwise-fatal window where the pose (hence the sim body) lands first and `Predicted` a few
+/// frames later — a predicted body stuck `Static` mispredicts every packet (continuous rollback
+/// from spawn, the worst failure here).
 ///
-/// Only where the local side simulates the body: the authority (`Without<Remote>` — the server
-/// spawned it) or the client's own predicted tank. A remote (interpolated) tank — other players'
-/// tanks, from step 9 — stays `Static`: its `Position` is written by replication+interpolation
-/// (the same sync that already carries the pre-bind Static body), and a Dynamic body would
-/// free-run local physics against it.
+/// `With<Remote>` scopes it to replicated (client) tanks: the server's own tanks are not `Remote`
+/// and are spawned `Dynamic` directly, so this never touches them (and the interpolated remote never
+/// receives `Predicted`, so it stays `Static` for good). NOT keyed off `Interpolated` as the
+/// authority discriminator, because the server entity carries BOTH markers itself — `PredictionTarget`
+/// and `InterpolationTarget` each require their marker (send.rs:1112/1119); `Remote` is the honest
+/// authority-vs-replica split.
 ///
-/// NOT keyed on `Interpolated`: `PredictionTarget`/`InterpolationTarget` are
-/// `ReplicationTarget<Predicted>`/`<Interpolated>` with the marker as a *required component*, so
-/// the server entity carries BOTH markers itself (send.rs registers the pairs; the markers are
-/// then target-filtered replicated components) — `Without<Interpolated>` excludes the authority.
-/// Measured: server rig bound but never went Dynamic, wheels 0/16 both ends.
-fn activate_bound_rig(
-    add: On<Add, Rig>,
-    eligible: Query<Entity, (With<NetTank>, Or<(With<Predicted>, Without<Remote>)>)>,
+/// This is a body-TYPE change on a long-prepared body — its colliders attached at spawn and their
+/// `ColliderTransform`s have had frames of `PhysicsSystems::Prepare` propagation, so it sits
+/// outside the step-8 attachment-races-transition NaN class (module invariant 2). It still re-arms
+/// [`DisableRollback`]: `Predicted` is what makes the entity rollback-checkable (`check_rollback`
+/// requires it), so without the re-arm the body's first-ever Dynamic tick could run inside another
+/// entity's replay with a near-empty history; `enable_rollback_after_first_tick` lifts it after
+/// one clean Dynamic tick, exactly as at spawn.
+fn upgrade_predicted_to_dynamic(
+    add: On<Add, Predicted>,
+    eligible: Query<(), (With<Remote>, With<NetTank>, With<Rig>)>,
     mut commands: Commands,
 ) {
     if !eligible.contains(add.entity) {
         return;
     }
-    info!("net: {} rig bound — body goes Dynamic", add.entity);
-    commands.entity(add.entity).insert(RigidBody::Dynamic);
+    info!(
+        "net: {} predicted marker arrived after spawn — body goes Dynamic",
+        add.entity
+    );
+    commands
+        .entity(add.entity)
+        .insert((RigidBody::Dynamic, DisableRollback));
 }
 
 /// Client-side render smoothing for the predicted tank — the half of lightyear's prediction stack

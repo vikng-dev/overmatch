@@ -24,8 +24,8 @@ use crate::state::AppState;
 use crate::tank::PendingTankAssets;
 
 /// The shared networking layer both composition roots mount: the wire contract (`protocol`), the
-/// bind-window physics re-anchor (`physics`), the networked rig lifecycle (`rig`), and the
-/// bind-window NaN probe. Identical on client and server, as lightyear demands.
+/// physics re-anchor (`physics`), the networked rig lifecycle (`rig`), and the physics NaN probe.
+/// Identical on client and server, as lightyear demands.
 pub fn plugin(app: &mut App) {
     protocol::plugin(app);
     physics::plugin(app);
