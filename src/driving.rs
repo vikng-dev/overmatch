@@ -76,6 +76,79 @@ pub struct SuspensionParams {
     pub stiffness: f32,
     /// Suspension damping per wheel (N·s/m), ~0.6 of critical, so it settles without bouncing.
     pub damping: f32,
+    /// Effective roadwheel radius (m) — hub to the wheel's ground-contact surface. Only the
+    /// `sphere` probe reads it (`apply_suspension`): its ball of THIS radius rounds every terrain
+    /// edge by the wheel's radius, making contact distance a continuous function of pose. Must be
+    /// less than `ray_length + SPHERE_PROBE_RETRACT` so the cast can still reach droop.
+    ///
+    /// **Not authored today** and `#[serde(default)]` so the existing spec sheets stay valid — the
+    /// geometry extractor carries only each wheel's node + side, not its radius, so there is no
+    /// spec-driven path yet; this defaults to the Tiger's effective radius (~0.5166, the value the
+    /// ray-model doc comments already name). Flat-ground ride height is INDEPENDENT of it — the
+    /// probe's offset algebra cancels the radius on flat ground (see `apply_suspension`), so a
+    /// mis-set value only re-rounds edges, never the equilibrium. Override in the `.tank.ron` once
+    /// a per-variant number is warranted (no schema invented here — a defaulted field, not a
+    /// required one).
+    #[serde(default = "default_wheel_radius")]
+    pub wheel_radius: f32,
+}
+
+/// The Tiger's effective roadwheel radius (m) — [`SuspensionParams::wheel_radius`]'s default when a
+/// spec sheet omits it. Matches the `~0.5166` the ray-model doc comments already reference.
+fn default_wheel_radius() -> f32 {
+    0.5166
+}
+
+/// Retract margin (m) for the `sphere` probe's shape cast: the ball starts backed off this far UP
+/// the cast axis, so a wheel already touching or slightly penetrating terrain still reports a hit
+/// (avian's shape cast returns distance 0 for a shape that begins already intersecting, which would
+/// lose the penetration depth). It bounds the maximum penetration the probe can resolve, and it
+/// CANCELS out of the flat-ground compression (see the offset algebra in `apply_suspension`), so
+/// its exact value never shifts the ride height — only how deep a bump the ball can measure.
+const SPHERE_PROBE_RETRACT: f32 = 0.3;
+
+/// Which ground-probe geometry each wheel's suspension uses (`apply_suspension`) — the A/B switch
+/// for the continuous-contact slice. Read ONCE from the `SUSPENSION_PROBE` env var at startup
+/// ([`SuspensionProbe::from_env`]), never per-tick, and held in this resource.
+///
+/// **SIM-AFFECTING**: the probe geometry sets the per-wheel contact distance and thus every spring
+/// force — client and server MUST run the same value or they diverge every tick and rollback
+/// endlessly. It is logged loudly at startup ([`log_suspension_probe`]) and must be set identically
+/// on both processes. `Sphere` is the default (the continuous-contact fix); `Ray` is the preserved
+/// line-ray alternative for the playtest fork (`.agents/scratch/playtest-forks/`).
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SuspensionProbe {
+    /// The original per-wheel line ray: contact is a binary hit/miss of a single downward ray, so a
+    /// terrain edge teleports the contact — the MP-jitter amplifier this slice replaces.
+    Ray,
+    /// A wheel-radius sphere cast: geometrically rounds every terrain edge by the wheel radius, so
+    /// contact distance (hence spring force) is a continuous function of pose. The default.
+    Sphere,
+}
+
+impl SuspensionProbe {
+    /// Parse `SUSPENSION_PROBE` once. `ray`/`sphere` select the model; anything else (including
+    /// unset) defaults to `Sphere` — the continuous-contact fix — with a warning for a typo'd value.
+    fn from_env() -> Self {
+        match std::env::var("SUSPENSION_PROBE").as_deref() {
+            Ok("ray") => Self::Ray,
+            Ok("sphere") => Self::Sphere,
+            Err(_) => Self::Sphere,
+            Ok(other) => {
+                warn!("SUSPENSION_PROBE=`{other}` unrecognised (want ray|sphere) — using sphere");
+                Self::Sphere
+            }
+        }
+    }
+}
+
+/// Announce the active probe at startup, loudly — it is sim-affecting, so a mismatched client and
+/// server (one `ray`, one `sphere`) would diverge silently otherwise. Runs on both ends.
+fn log_suspension_probe(probe: Res<SuspensionProbe>) {
+    info!(
+        "SUSPENSION_PROBE={:?} — SIM-AFFECTING: client and server MUST match this value",
+        *probe
+    );
 }
 
 pub fn plugin(app: &mut App) {
@@ -83,7 +156,9 @@ pub fn plugin(app: &mut App) {
     // `CenterOfMass` from the authored `Center_Of_Mass` empty's extracted position at spawn
     // (the model owns the COM; `NoAutoCenterOfMass` keeps the collision proxies' centroid from
     // diluting it — ADR-0011).
-    app.add_observer(attach_suspension)
+    app.insert_resource(SuspensionProbe::from_env())
+        .add_systems(Startup, log_suspension_probe)
+        .add_observer(attach_suspension)
         .add_observer(attach_drive_state)
         // Order matters within the fixed step: ramp the command into the drive signal, settle
         // springs (sets per-wheel load), then drive (reads that load for the friction circle).
@@ -119,7 +194,15 @@ fn attach_suspension(add: On<Add, Roadwheel>, mut commands: Commands) {
 /// Damped-spring suspension: each grounded wheel pushes the hull up at its contact point, so
 /// ride height, pitch, roll, and weight transfer all emerge from the per-wheel springs.
 ///
-/// Rays are cast HERE, fresh each tick via `SpatialQuery`, from the wheel's tick-truth pose
+/// The ground probe is one of two geometries ([`SuspensionProbe`], the `SUSPENSION_PROBE` A/B
+/// switch): a line **ray** (the original — contact is a binary hit/miss, so a terrain edge
+/// teleports the contact between a curb top and the road below, the MP-jitter amplifier), or a
+/// wheel-radius **sphere** cast (the default — geometrically rounds every edge by the wheel radius,
+/// so contact distance, and thus spring force, is a continuous function of pose). Only the
+/// contact-distance SOURCE and contact POINT differ between them; the spring/damper math, the force
+/// direction, and everything downstream are identical. See the offset-algebra note at the cast.
+///
+/// Probes are cast HERE, fresh each tick via `SpatialQuery`, from the wheel's tick-truth pose
 /// (`rig_world_pose`) — never from `RayCaster`/`RayHits` components. Those are refreshed by avian
 /// in `FixedPostUpdate`, *after* the step, so a reader in `FixedUpdate` gets last tick's hits; on
 /// the FIRST replayed tick of a rollback "last tick" is the abandoned timeline's final tick (up to
@@ -136,6 +219,9 @@ fn apply_suspension(
     // unlike thrust, which each tank takes from its own command. The `&SuspensionParams` gates a
     // body in: no suspension until the spec is applied to the hull (ADR-0011 — no default spring).
     spatial: SpatialQuery,
+    // The active probe geometry, read once at startup (see [`SuspensionProbe`]). Sim-affecting: the
+    // same value must run on both client and server.
+    probe: Res<SuspensionProbe>,
     mut bodies: Query<
         (
             Entity,
@@ -189,21 +275,64 @@ fn apply_suspension(
                 unsupported(&mut suspension, &mut sim);
                 continue;
             };
-            let Some(hit) = spatial.cast_ray(origin, down, params.ray_length, true, &filter)
-            else {
+            let dir = Vec3::from(down);
+
+            // Probe the ground for `(ground_distance, contact)`: `ground_distance` is the hub-to-
+            // ground distance ALONG THE CAST AXIS — the exact quantity the spring compresses against
+            // — and `contact` is the world point where drive/friction act.
+            //
+            // Offset algebra (why flat-ground equilibrium is byte-identical between the models):
+            // the ray reports `ground_distance = hit.distance` directly (hub to the ground point
+            // straight below). The sphere starts its centre backed off UP the axis by
+            // `SPHERE_PROBE_RETRACT` (the retract trick) and travels `hit.distance` until its
+            // surface touches; on flat ground the centre stops one radius `r` above the ground, so
+            // the hub sits `hit.distance + r - SPHERE_PROBE_RETRACT` above it. Reconstructing
+            // `ground_distance` that way makes `compression = rest_length - ground_distance`
+            // identical for both probes on flat ground for ANY radius and ANY retract (both cancel)
+            // — same ride height, same 16 loads, same preload. The radius only bites where the
+            // ground is NOT flat: there the sphere touches the nearest terrain point in any
+            // direction (an edge, a lateral rise), rounding it off by `r` instead of the ray's
+            // teleporting point. `hit.point1` is the closest point on the HIT shape (the terrain) in
+            // world space (avian `ShapeHitData`), i.e. the true ground contact — on flat ground it
+            // coincides with the ray's `origin + dir * hit.distance`, so drive/friction match too.
+            let probed = match *probe {
+                SuspensionProbe::Ray => spatial
+                    .cast_ray(origin, down, params.ray_length, true, &filter)
+                    .map(|hit| (hit.distance, origin + dir * hit.distance)),
+                SuspensionProbe::Sphere => spatial
+                    .cast_shape(
+                        &Collider::sphere(params.wheel_radius),
+                        origin - dir * SPHERE_PROBE_RETRACT,
+                        Quat::IDENTITY,
+                        down,
+                        &ShapeCastConfig {
+                            // Mirror the ray's reach: the sphere can find ground until the hub is
+                            // `ray_length` above it (`hit.distance = ray_length + retract - r`).
+                            max_distance: params.ray_length + SPHERE_PROBE_RETRACT
+                                - params.wheel_radius,
+                            ..default()
+                        },
+                        &filter,
+                    )
+                    .map(|hit| {
+                        (
+                            hit.distance + params.wheel_radius - SPHERE_PROBE_RETRACT,
+                            hit.point1,
+                        )
+                    }),
+            };
+            let Some((ground_distance, contact)) = probed else {
                 unsupported(&mut suspension, &mut sim);
                 continue;
             };
 
-            let compression = params.rest_length - hit.distance;
+            let compression = params.rest_length - ground_distance;
             if compression <= 0.0 {
                 unsupported(&mut suspension, &mut sim);
                 continue;
             }
 
-            let dir = Vec3::from(down);
             let up = -dir;
-            let contact = origin + dir * hit.distance;
 
             // Damped spring along the suspension axis. velocity_at_point gives the hull's speed at
             // the contact; its component along `up` is the compression rate (negative while
