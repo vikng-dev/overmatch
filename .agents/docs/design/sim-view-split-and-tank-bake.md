@@ -172,11 +172,34 @@ into the connect handshake; version the artifact format.
    `TrimeshFlags`).
 2. **glTF-as-data access** (same pass): parsing glb without scene spawn (`gltf` crate already in
    tree?), mesh attribute access at preload for phase 1, `GltfExtras` availability.
-3. **Blender exporter fidelity** (web pass): custom-props→`extras` (object/mesh/empty/bone; types;
-   nesting; export flag; library-override gotchas).
-4. **Prior art** (web pass): Blenvy / blender_bevy_components_workflow state + lessons; offline
-   glTF→physics baking pipelines; how server-authoritative games ship collision packages; field
-   reports on "all gameplay data in Blender" (for/against the thin-RON call in §5).
+3. **Blender exporter fidelity** — RESOLVED (web pass, 2026-07-05):
+   - Object/mesh/material/**empty** custom props export reliably to `extras` under
+     `Include > Custom Properties` (`export_extras`). Types that survive: str/int/float/bool,
+     arrays, JSON-compatible nested dicts (exporter: glTF-Blender-IO `com/extras.py`).
+   - Gotcha: object props → `node.extras`, mesh-DATA props → `mesh.extras` (shared across objects
+     sharing a mesh) — author tags on the OBJECT. RNA-defined props (PropertyGroup/Enum) do NOT
+     export; failures are silent — the compiler must validate tags and fail loudly.
+   - Avoid: props on bones/Actions/collections (patchy/undocumented), per-instance overrides of
+     props inside linked collections (library-override friction).
+4. **Prior art** — RESOLVED (web pass, 2026-07-05):
+   - **Blenvy is dead** (alpha, pinned Bevy 0.14, unmerged 0.15 PRs since Oct 2024) — do not
+     adopt. Its post-mortem lesson: it reimplemented RON serialization in Python and died keeping
+     up with Bevy releases. Our own-compiler plan sidesteps that class entirely.
+   - **Skein (bevy_skein 0.6, Bevy 0.19, maintained)** is the successor: components as plain JSON
+     under a namespaced `extras` key, decoded by the engine's own deserializer. Borrow patterns
+     (namespaced key, flat JSON, validate-in-compiler), not the runtime crate — we compile to an
+     artifact, we don't spawn components at load. (Upstream standardization: bevy#21038.)
+   - **Offline glTF→collider baking:** no maintained off-the-shelf Rust tool exists — teams roll
+     a headless step on the `gltf` crate + parry3d/avian types (all renderer-free; parry shapes
+     are serde-serializable). Bevy's asset processor is not yet a compelling host. Industry
+     precedent is exactly our shape: Source compiles collision to a separate `.phy` the server
+     loads (never the render mesh); Unreal/Flax cook dedicated collision data.
+   - **Numbers-in-Blender verdict supports §5:** ecosystem consensus frames Blender-authored
+     extras as structural/spatial + role tags, NOT balance scalars (iteration cost, opaque binary
+     diffs, silent-drop type unsafety, and no variant story without duplicating Blender data).
+     Rule of thumb adopted: *needs a 3D viewport to author → Blender; needs a diff to review →
+     RON.* Explicit `extras` role tags are preferred over parsing name suffixes long-term —
+     equally reliable to export, less fragile — with the compiler validating either way.
 
 ## 8. Implementation plan
 
