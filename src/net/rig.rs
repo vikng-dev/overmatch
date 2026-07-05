@@ -236,7 +236,64 @@ pub fn client_smoothing_plugin(app: &mut App) {
         FrameInterpolationPlugin::<Position>::default(),
         FrameInterpolationPlugin::<Rotation>::default(),
     ));
-    app.add_systems(Update, arm_predicted_smoothing);
+    app.add_systems(Update, (arm_predicted_smoothing, demote_predicted_interpolated));
+}
+
+/// Strip the `Interpolated` marker off the client's OWN predicted tank — the fix for the
+/// "silent Position desync" (multi-second windows where predicted Position ran 6–16 cm off the
+/// server at the same tick with NO rollback, though the 0.05 m Position rollback condition sat
+/// tripped the whole time).
+///
+/// ROOT CAUSE (traced against vendored lightyear 0.28). The server's authoritative tank carries
+/// BOTH `Predicted` and `Interpolated` (each is a required component of its target — `PredictionTarget`
+/// / `InterpolationTarget`, send.rs:1112/1119), and BOTH replicate to the owning client's predicted
+/// root — verified: `Predicted=true Interpolated=true` on the controlled tank. Our protocol registers
+/// Position/Rotation with BOTH `.predict()` (sets the `Predicted`-marker replicon write fn =
+/// prediction's `write_history`, which records confirmed values AND checks for a rollback mismatch)
+/// and `.add_linear_interpolation()` (sets the `Interpolated`-marker write fn = interpolation's
+/// `write_history`, which only `insert_present`s into `ConfirmedHistory<C>` — no mismatch check).
+/// When an entity carries both markers, bevy_replicon's `ComponentFns::write` picks the FIRST present
+/// marker's fn in priority order (`component_fns.rs:113`); `Predicted` and `Interpolated` are both
+/// priority 100, and the `Interpolated` slot wins the tie — so every replicated Position/Rotation
+/// update on the predicted tank went through the interpolation path. That fills
+/// `ConfirmedHistory<Position>` with correct server values (so `conft` advances and `confp` matches
+/// the server to ~0 m) but NEVER records a mismatch into `StateRollbackMetadata`. The velocities are
+/// registered with `.predict()` only, so they still route through prediction and still roll back.
+///
+/// The rollback check (`check_rollback`, `RollbackMode::Check`) then has no way to catch a Position
+/// drift on this entity: its explicit-mismatch branch only fires on components that recorded a
+/// mismatch (never Position), and its unchanged-component scan is SKIPPED for any entity whose
+/// Replicon `ConfirmHistory` already contains the completed tick (`rollback.rs:583`) — which our tank
+/// always does, being explicitly confirmed every tick by its velocity mutations. Net effect: Position
+/// only ever corrected as a passenger of a velocity-triggered rollback; when velocity agreed while
+/// Position drifted, the desync was silent.
+///
+/// THE FIX is client-side and leaves the shared wire protocol untouched: an entity that is both
+/// predicted and interpolated is contradictory (they are lightyear's two mutually-exclusive views),
+/// and for the owner Prediction must win. Removing `Interpolated` (a) makes replicon fall through to
+/// the `Predicted` write fn for Position/Rotation, restoring the rollback mismatch check, and (b)
+/// stops the interpolation systems (`With<Interpolated>`, Update schedule) from also writing an
+/// interpolated Position onto the predicted root each frame. `.add_linear_interpolation()` STAYS in
+/// the protocol so genuinely-remote (interpolated-only) tanks keep interpolating. Removing the marker
+/// has no despawn side effect — it only downgrades the (cosmetic) delayed-interpolated-despawn back to
+/// immediate despawn (`lightyear_interpolation despawn.rs:55`), irrelevant for a predicted entity.
+///
+/// A polling system, not an `Add` observer, for the same reason as [`arm_predicted_smoothing`]: the
+/// two markers ride different replication-visibility paths and land in no guaranteed order, so we
+/// re-check every frame and strip whenever both are present (the query is empty once stripped).
+///
+/// (Upstream report candidate: two same-priority marker write fns for one component make the
+/// confirmed-write path — and thus whether prediction can even see a mismatch — depend on marker
+/// registration/tie-break order, silently. lightyear could either forbid an entity carrying both
+/// view markers or make `Predicted` outrank `Interpolated` for the write-fn selection.)
+fn demote_predicted_interpolated(
+    tanks: Query<Entity, (With<Predicted>, With<Interpolated>, With<NetTank>)>,
+    mut commands: Commands,
+) {
+    for entity in &tanks {
+        info!("net: {entity} predicted tank also carries Interpolated — stripping it so Position/Rotation route through the prediction (rollback-checked) receive path");
+        commands.entity(entity).remove::<Interpolated>();
+    }
 }
 
 /// Decorate the predicted tank ROOT with `FrameInterpolate` once `Predicted` and `Position` are
