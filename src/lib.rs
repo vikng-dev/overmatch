@@ -55,6 +55,10 @@ mod sight;
 mod spec;
 mod state;
 mod tank;
+/// The jitter-trace recorder (`SPIKE_TRACE=<path>`): an env-gated JSONL log of rendered vs. simulated
+/// pose, rollback events, and correction decay — passive instrumentation for the MP hull-jitter
+/// investigation. Off (zero cost) unless the env var is set. Net-specific rows are `#[cfg(net)]`.
+mod trace;
 /// The track-model sandbox (`bin/track_sandbox`). Public so the binary can mount it; not part of
 /// `GamePlugin`. Self-contained: its own code-generated primitive rig + locomotion, for developing
 /// the continuous-track model in isolation.
@@ -186,6 +190,9 @@ impl Plugin for GamePlugin {
             // The single-player scenario: two-tank duel spawn, first tank controlled.
             tank::sp_spawn_plugin,
             ClientPlugin,
+            // Passive jitter-trace recorder (frame + tick rows; no net extras in this build). Idle
+            // unless `SPIKE_TRACE` is set.
+            trace::sp_plugin,
         ));
     }
 }

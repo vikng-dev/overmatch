@@ -231,6 +231,20 @@ pub struct DriveState {
     steer: f32,
 }
 
+impl DriveState {
+    /// The current (ramped) throttle signal — read-only, for the jitter-trace recorder (`trace.rs`),
+    /// which logs sim-truth drive intent alongside the tick pose. The fields stay private so
+    /// `ramp_drive` remains their only writer.
+    pub(crate) fn throttle(&self) -> f32 {
+        self.throttle
+    }
+
+    /// The current (ramped) steer signal — read-only companion to [`DriveState::throttle`].
+    pub(crate) fn steer(&self) -> f32 {
+        self.steer
+    }
+}
+
 /// Attach `DriveState` the moment a `Tank` exists (observer, ungated) — the sim-side partner of
 /// the `TankCommand` that `command` attaches on the same trigger.
 fn attach_drive_state(add: On<Add, Tank>, mut commands: Commands) {

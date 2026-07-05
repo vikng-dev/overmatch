@@ -127,11 +127,16 @@ pub(crate) fn plugin(app: &mut App) {
         replication_mode: AvianReplicationMode::Position,
         ..default()
     });
+    // Each condition also feeds the jitter-trace recorder (`crate::trace`) its measured magnitude
+    // WHEN it trips — the `trg` attribution on every `rollback` row, so analysis can see which
+    // component (and how far out) forced each rollback. `note_if_tripped` measures-compares-notes in
+    // one call and returns the trip verdict; it is a no-op unless `SPIKE_TRACE` is set (a single
+    // relaxed atomic load), so the untraced hot path is unchanged.
     app.component::<Position>()
         .replicate()
         .predict()
         .with_rollback_condition(|a: &Position, b: &Position| {
-            (a.0 - b.0).length() >= ROLLBACK_POSITION_M
+            crate::trace::note_if_tripped("Position", (a.0 - b.0).length(), ROLLBACK_POSITION_M)
         })
         .add_linear_correction_fn()
         .add_linear_interpolation();
@@ -139,7 +144,7 @@ pub(crate) fn plugin(app: &mut App) {
         .replicate()
         .predict()
         .with_rollback_condition(|a: &Rotation, b: &Rotation| {
-            a.angle_between(*b) >= ROLLBACK_ROTATION_RAD
+            crate::trace::note_if_tripped("Rotation", a.angle_between(*b), ROLLBACK_ROTATION_RAD)
         })
         .add_linear_correction_fn()
         .add_linear_interpolation();
@@ -150,13 +155,13 @@ pub(crate) fn plugin(app: &mut App) {
         .replicate()
         .predict()
         .with_rollback_condition(|a: &LinearVelocity, b: &LinearVelocity| {
-            (a.0 - b.0).length() >= ROLLBACK_VELOCITY
+            crate::trace::note_if_tripped("LinearVelocity", (a.0 - b.0).length(), ROLLBACK_VELOCITY)
         });
     app.component::<AngularVelocity>()
         .replicate()
         .predict()
         .with_rollback_condition(|a: &AngularVelocity, b: &AngularVelocity| {
-            (a.0 - b.0).length() >= ROLLBACK_VELOCITY
+            crate::trace::note_if_tripped("AngularVelocity", (a.0 - b.0).length(), ROLLBACK_VELOCITY)
         });
 
     // Non-replicated rollback state — ROOT-RESIDENT ONLY, by design: the root is the predicted

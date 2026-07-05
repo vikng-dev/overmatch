@@ -61,6 +61,9 @@ pub fn run() {
     // composes cleanly alongside `physics_plugins()` above. Not `tank::sp_spawn_plugin` (the
     // single-player two-tank duel scenario) — the server keeps its own per-client spawn below.
     app.add_plugins(SimPlugin);
+    // Passive jitter-trace recorder: tick rows only (the server has no predicted view to render).
+    // Idle unless `SPIKE_TRACE` is set.
+    app.add_plugins(crate::trace::server_plugin);
 
     let server = app
         .world_mut()
