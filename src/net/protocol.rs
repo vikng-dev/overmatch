@@ -99,15 +99,23 @@ fn apply_servo_angles(
 /// win on the honest-noise case. Position in metres, Rotation in radians, velocities in m/s or
 /// rad/s-equivalent — same shape as the map §1(b) reference thresholds, five times coarser.
 ///
-/// Velocity is coarser still: rough terrain (the course's bump/washboard) puts sustained vertical-
-/// velocity transients through the suspension, and client/server solver noise on those transients
-/// tripped 0.05 at 20–60 rollbacks/s at ZERO latency — every recorded cause was `LinearVelocity`
-/// (step-8 washboard investigation). 0.20 cut that stream ~64% with convergence unchanged
-/// (positions agree to centimetres mid-washboard); velocity errors self-damp through the
-/// suspension, and the position/rotation bars still catch real drift.
+/// Velocity is deliberately DESYNC-ONLY (1.0), not a noise tripwire — the jitter investigation's
+/// reconciliation-amplification finding. A rollback is not free reconciliation: it restores a
+/// ~12-tick-old confirmed state and RE-SIMULATES to the present, and the replay is chaotic through
+/// friction/contact (stick-slip brush anchors, contact transients), so the corrected present lands
+/// farther from the old present than the triggering error ever was — measured on a windowed feel
+/// capture: applied visual correction = 5.6× the same-tick sim divergence at median, 43× at p90,
+/// corrections active on 41% of frames with |error| p50 0.35 m, from triggers barely over the old
+/// 0.20 m/s bar while true positions agreed to 0.5–4 cm. Velocity-triggered rollbacks were
+/// INJECTING visible motion, not removing desync. Velocity errors self-damp through the suspension;
+/// the position/rotation bars — which actually fire since the Interpolated-marker fix — are the
+/// honest desync backstops, so drift is caught at 5 cm regardless. 1.0 m/s keeps the velocity
+/// condition only for gross desync (teleports, missed impacts), where a replay is genuinely
+/// cheaper than waiting for the position bar. The conditions must stay: without one, lightyear
+/// falls back to `PartialEq::ne` — bit-equality that f32 solver output never satisfies.
 const ROLLBACK_POSITION_M: f32 = 0.05;
 const ROLLBACK_ROTATION_RAD: f32 = 0.05;
-const ROLLBACK_VELOCITY: f32 = 0.20;
+const ROLLBACK_VELOCITY: f32 = 1.0;
 
 /// Registers everything both sides of the wire must agree on: replicated components and the
 /// `TankCommand` input protocol. Grows as later increments add more (§5/§7 of the spike map).
