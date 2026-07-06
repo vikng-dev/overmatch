@@ -31,11 +31,37 @@ const LATERAL_GRIP_RATIO: f32 = 0.55;
 /// handling — it applies identically to a keyboard, a stick, or a network peer's command.
 /// Universal feel (bucket 1).
 const INPUT_RAMP: f32 = 4.0;
-/// Below this contact planar speed (m/s) a wheel "grips": it plants a brush anchor and holds
-/// statically instead of slipping. Above it, friction is kinetic (the skid / coast-down model).
-/// This static↔kinetic gate is a Karnopp-style zero-velocity band — what lets a stopped tank
-/// hold on a slope instead of creeping away. Universal feel (bucket 1).
+/// Centre of the static↔kinetic transition (m/s of contact planar speed): near here a wheel hands
+/// off between gripping (brush anchor + static hold) and slipping (kinetic skid / coast-down). This
+/// is a Karnopp-style zero-velocity band — what lets a stopped tank hold on a slope instead of
+/// creeping away. Universal feel (bucket 1).
+///
+/// NO LONGER a hard gate: the regime is BLENDED across [`STICK_BAND`] around this speed (see
+/// [`static_weight`]). A hard threshold made a binary force-regime flip that mm/s-scale cross-machine
+/// velocity noise could straddle — the friction cousin of the sphere-cast's binary ray-contact
+/// amplifier (playtest fork `friction-continuity.md`): under MP prediction the client and server land
+/// on opposite sides of the gate and apply different force laws, diverging every tick. The smoothstep
+/// makes the static fraction a *continuous* function of speed, so velocity noise only nudges the
+/// blend weight instead of flipping the law.
 const STICK_SPEED: f32 = 0.3;
+/// Half-width of the static↔kinetic blend band, as a fraction of [`STICK_SPEED`]: the regime blends
+/// smoothly across `[STICK_SPEED·(1−BAND), STICK_SPEED·(1+BAND)]` (here 0.18–0.42 m/s), fully static
+/// below, fully kinetic above. Wide enough that the ~0.1–0.6 m/s velocity divergence a wedged tank
+/// shows under prediction cannot cliff-edge the force regime; narrow enough that the hand-off is
+/// still crisp on the feel (hill-hold releases into a glide over a ~0.24 m/s window, not a snap).
+/// Feel dial (bucket 1); SIM-AFFECTING — both wire ends run the same blend, so no A/B fork is needed
+/// for protocol identity.
+const STICK_BAND: f32 = 0.4;
+/// Per-tick low-pass rate for the sliding anchor's approach to its LuGre steady-state target (see
+/// the anchor-target block in `apply_drive`): each tick the anchor closes this fraction of the
+/// remaining gap, scaled by how much the wheel is sliding (`× (1 − w_static)`). At 1.0 the anchor
+/// tracks the target directly — safe now that the target is CONTINUOUS in velocity (deflection
+/// scales through zero instead of flipping across the ellipse with the slide direction's unit
+/// vector; see the target's doc), so there is no teleporting input left to filter. Kept as a dial:
+/// lowering it (~0.25) trades capture strength for extra smoothing of contact-velocity noise, the
+/// preserved fallback if a future regime shows target churn again. Feel dial (bucket 1);
+/// SIM-AFFECTING like its siblings.
+const ANCHOR_RELAX_RATE: f32 = 1.0;
 /// A per-track command below this magnitude counts as "no drive" — the wheel holds rather than
 /// driving, so a feather-touch doesn't switch off the hill-hold. Universal feel (bucket 1).
 const COMMAND_DEADBAND: f32 = 0.02;
@@ -561,6 +587,21 @@ fn approach(current: f32, target: f32, step: f32) -> f32 {
     }
 }
 
+/// Continuous static fraction for a contact sliding at planar `speed` (m/s): `1.0` fully gripping
+/// (static brush hold), `0.0` fully sliding (kinetic), smoothstepped across the [`STICK_BAND`] band
+/// around [`STICK_SPEED`]. Replaces the old hard `speed < STICK_SPEED` gate so mm/s-scale velocity
+/// noise near the threshold can only nudge the blend weight, never flip the force law (the MP
+/// divergence amplifier — see [`STICK_SPEED`]). At the endpoints it reproduces the gate exactly
+/// (`1.0` below the band, `0.0` above), so rest hill-hold and full-speed skid are unchanged; only the
+/// hand-off between them is now continuous.
+fn static_weight(speed: f32) -> f32 {
+    let lo = STICK_SPEED * (1.0 - STICK_BAND);
+    let hi = STICK_SPEED * (1.0 + STICK_BAND);
+    let t = ((speed - lo) / (hi - lo)).clamp(0.0, 1.0);
+    // 1 − smoothstep(t): high (static) at low speed, decaying to 0 (kinetic) across the band.
+    1.0 - t * t * (3.0 - 2.0 * t)
+}
+
 /// Differential-thrust drive with skid-steer friction. Each grounded wheel applies, at its
 /// contact: longitudinal thrust (its track's command) minus rolling resistance, plus lateral
 /// grip resisting side-slip — the whole vector capped on the friction ellipse (μ·load fore-aft, a
@@ -644,14 +685,14 @@ fn apply_drive(
             let v_fwd = velocity.dot(forward);
             let v_lat = velocity.dot(right);
 
-            // Static↔kinetic gate: below the stick speed the contact grips (plant an anchor and
-            // hold); above it, it slips and friction is the kinetic skid / coast-down model.
-            let gripping = v_fwd.hypot(v_lat) < STICK_SPEED;
-            if !gripping {
-                *anchor = None;
-            } else if anchor.is_none() {
-                *anchor = Some(contact);
-            }
+            // Static↔kinetic blend (was a hard `speed < STICK_SPEED` gate — the binary force-regime
+            // flip mm/s velocity noise could straddle, the MP divergence amplifier). `w_static` is a
+            // continuous static fraction: 1 fully gripping (brush hold), 0 fully sliding (kinetic),
+            // smoothstepped across the band around the stick speed. Every force below is a
+            // `w_static`-blend of its static and kinetic laws, so a cross-machine velocity difference
+            // moves the weight a hair rather than switching the law.
+            let speed = v_fwd.hypot(v_lat);
+            let w_static = static_weight(speed);
 
             // Friction ellipse: tracks grip hard fore-aft (full μ·load) but skid sideways at the
             // lower turning-resistance coefficient μ_t = ratio·μ (Wong/Merritt firm-ground
@@ -660,20 +701,59 @@ fn apply_drive(
             let grip = MU * load;
             let grip_lat = grip * LATERAL_GRIP_RATIO;
 
-            // Slip from the planted anchor, split into the ground-plane axes.
-            let (mut d_fwd, mut d_lat) = match *anchor {
-                Some(anchor) => (
-                    (contact - anchor).dot(forward),
-                    (contact - anchor).dot(right),
-                ),
-                None => (0.0, 0.0),
+            // Anchor plant/release no longer flips at the stick-speed gate — that Some/None flicker
+            // (measured ~14–29 /s in the powered wedge; each flip reset the slip integral) is exactly
+            // the binary transition this slice removes. Instead the anchor stays planted while the
+            // wheel bears load and RELAXES toward the LuGre kinetic steady state in proportion to how
+            // much the wheel is sliding (`1 − w_static`): the bristle trailing on the friction
+            // ellipse, deflected along the slide so its spring force opposes it (`z_ss =
+            // sign(v)·g(v)/σ0` in LuGre terms). The trail deflection is a CONTINUOUS function of the
+            // contact velocity — each axis scales linearly with `v/v_ref` and clamps at its ellipse
+            // semi-axis (`v_ref` = the band top, where the regime is fully kinetic) — NOT the unit
+            // slide direction: `v̂` is discontinuous through v = 0, and in the near-band regime
+            // (planar speed ~0.2 m/s, comparable to contact-velocity noise from angular jitter) a
+            // `v̂`-scaled target teleports across the ellipse (±2·grip/k ≈ 0.18 m) every direction
+            // flip — measured re-arming the wedge storm this slice kills (lat0 wedge 1 → 48
+            // rollbacks). With the linear-through-zero form, velocity noise moves the target
+            // proportionally (mm for mm/s), while a sustained slide (> `v_ref`) still saturates it.
+            //
+            // Fully gripping (`w_static = 1`) the anchor is frozen — the static hill-hold spring,
+            // bit-identical to the old planted anchor. Sliding, it re-grips from ~Coulomb capture
+            // strength (`w·μ·load` opposing the slide), which is what arrests a slide on a slope the
+            // way the old hard gate's instant re-plant did — but continuously. Two other rejected
+            // variants, measured: relax toward the CONTACT (zero deflection) leaked the hold
+            // deflection under contact-velocity jitter and a tank nudged loose on the 20° ramp
+            // never re-gripped (slid 7 m off; baseline parks in 0.6 m); NO relax (keep the stale
+            // planted point) re-gripped from a stale-direction saturated spring — a ~31 kN force
+            // step that re-amplified washboard coast-down rollbacks 1→32 at lat0. Anchor releases
+            // (`None`) only when the wheel goes airborne/unloaded (the `load <= 0` path here and
+            // `apply_suspension`'s unsupported paths).
+            let v_ref = STICK_SPEED * (1.0 + STICK_BAND);
+            let d_sat_fwd =
+                grip / drivetrain.brush_stiffness * (v_fwd / v_ref).clamp(-1.0, 1.0);
+            let d_sat_lat =
+                grip_lat / drivetrain.brush_stiffness * (v_lat / v_ref).clamp(-1.0, 1.0);
+            let anchor_target = contact - forward * d_sat_fwd - right * d_sat_lat;
+            // `planted` carries the anchor point through this wheel's force math — every write
+            // below keeps `*anchor` in sync with it, so the `Option` never needs re-testing (the
+            // wheel is loaded, and a loaded wheel's anchor is always `Some` from here on).
+            let mut planted = match *anchor {
+                None => anchor_target,
+                Some(a) => a + (anchor_target - a) * ((1.0 - w_static) * ANCHOR_RELAX_RATE),
             };
+            *anchor = Some(planted);
+
+            // Slip from the planted anchor, split into the ground-plane axes.
+            let (mut d_fwd, mut d_lat) = (
+                (contact - planted).dot(forward),
+                (contact - planted).dot(right),
+            );
 
             // Bristle saturation (LuGre steady-state deflection) on the ellipse: a brush bristle
             // stretches only to its slip point — d_fwd to grip/k, d_lat to grip_lat/k. Past the
             // ellipse the bristle *trails* the contact at that fixed deflection (a smooth Coulomb
             // slide) instead of snapping back to zero, which removes the low-speed stick-slip cycle.
-            if anchor.is_some() {
+            {
                 let a_fwd = grip / drivetrain.brush_stiffness;
                 let a_lat = grip_lat / drivetrain.brush_stiffness;
                 let e = (d_fwd / a_fwd).powi(2) + (d_lat / a_lat).powi(2);
@@ -681,30 +761,32 @@ fn apply_drive(
                     let s = e.sqrt().recip();
                     d_fwd *= s;
                     d_lat *= s;
-                    *anchor = Some(contact - forward * d_fwd - right * d_lat);
+                    planted = contact - forward * d_fwd - right * d_lat;
+                    *anchor = Some(planted);
                 }
             }
 
             // Longitudinal: thrust when commanded (bleeding the anchor's forward slip so the static
-            // spring doesn't fight the drive — the wheel "rolls"); else hold (static spring) or,
-            // while still rolling, the engine-brake / coast-down.
+            // spring doesn't fight the drive — the wheel "rolls"); else the static hold and the
+            // kinetic engine-brake / coast-down BLENDED by `w_static`, so the release from hill-hold
+            // into a glide is continuous across the stick band instead of a gate flip.
             let f_fwd = if driving {
-                if let Some(planted) = *anchor {
-                    *anchor = Some(planted + forward * d_fwd);
-                }
+                *anchor = Some(planted + forward * d_fwd);
                 command * drivetrain.max_thrust - drivetrain.rolling_resistance * v_fwd
-            } else if gripping {
-                -drivetrain.brush_stiffness * d_fwd - drivetrain.brush_damping * v_fwd
             } else {
-                -drivetrain.rolling_resistance * v_fwd
+                let hold = -drivetrain.brush_stiffness * d_fwd - drivetrain.brush_damping * v_fwd;
+                let coast = -drivetrain.rolling_resistance * v_fwd;
+                w_static * hold + (1.0 - w_static) * coast
             };
 
-            // Lateral: static spring holds the tracks fixed at rest (kills sideways creep); kinetic
-            // stiff grip resists side-slip and yaw while moving (skid steer).
-            let f_lat = if gripping {
-                -drivetrain.brush_stiffness * d_lat - drivetrain.brush_damping * v_lat
-            } else {
-                -drivetrain.lateral_grip * v_lat
+            // Lateral: static spring holds the tracks fixed at rest (kills sideways creep) BLENDED
+            // with the kinetic stiff grip that resists side-slip and yaw while moving (skid steer) —
+            // `w_static` hands off continuously, so a canted wedge riding near the stick speed can't
+            // flip a huge lateral force step (static spring ≫ kinetic damper) tick-to-tick.
+            let f_lat = {
+                let hold = -drivetrain.brush_stiffness * d_lat - drivetrain.brush_damping * v_lat;
+                let slip = -drivetrain.lateral_grip * v_lat;
+                w_static * hold + (1.0 - w_static) * slip
             };
 
             let mut force = forward * f_fwd + right * f_lat;
