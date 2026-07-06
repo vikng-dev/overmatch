@@ -1,0 +1,81 @@
+name: Server build
+
+# On-demand build of the headless Linux dedicated server, for cloud playtest deploys.
+# GitHub's ubuntu-latest runner IS the deploy target (x86_64 Linux, glibc 2.39 — matched
+# by an Ubuntu 24.04 droplet), so this avoids cross-compiling the Bevy/avian C deps from
+# an ARM Mac. It builds only the `server` bin: the client runs locally on the dev machine
+# and connects to the remote server.
+#
+# Trigger it manually (pre-alpha — no need to build on every push):
+#   gh workflow run "Server build"
+# then pull the artifact:
+#   gh run download <run-id> -n overmatch-server-x86_64-linux
+# and ship it to the droplet:
+#   scp -i ~/.ssh/do-vikng-dev overmatch-server.tar.gz root@<ip>:/opt/
+#
+# Future (PlayFlow / any container vendor): add a job that `docker build`s this same
+# binary + assets into an image and pushes it to a registry (GHCR). The artifact path
+# below stays the VPS-friendly output; the container path is purely additive.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # lfs: true — assets (*.glb) live in Git LFS; the server bakes tank geometry from
+      # the real .glb at startup, so a pointer-file checkout yields a broken bundle.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          lfs: true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Same deps the CI and release builds install — Bevy needs alsa/udev + windowing
+      # libs to compile on Linux even though the server runs headless.
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libasound2-dev libudev-dev \
+            libwayland-dev libxkbcommon-dev libx11-dev
+
+      # Ship only runtime assets: the server loads .glb meshes; Blender source files are
+      # build-time only. Keeps the artifact small.
+      - name: Prune non-runtime assets
+        run: find assets -type f \( -name '*.blend' -o -name '*.blend1' \) -delete
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: server-net
+
+      # --locked builds against the committed Cargo.lock (reproducible, fails loudly on
+      # lockfile drift). The release profile (strip + thin LTO) yields a lean binary.
+      - name: Build server
+        run: cargo build --release --locked --bin server --features net
+
+      # Stage a self-contained folder: the binary alongside assets/, so on the droplet
+      # `BEVY_ASSET_ROOT=<extracted dir>` finds the meshes and `./server` just runs.
+      - name: Package
+        run: |
+          mkdir -p stage/overmatch-server
+          cp target/release/server stage/overmatch-server/
+          cp -r assets stage/overmatch-server/
+          tar -C stage -czf overmatch-server.tar.gz overmatch-server
+          ls -lh overmatch-server.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: overmatch-server-x86_64-linux
+          path: overmatch-server.tar.gz
+          retention-days: 14
+          if-no-files-found: error
