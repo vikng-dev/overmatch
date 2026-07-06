@@ -230,7 +230,10 @@ fn upgrade_predicted_to_dynamic(
 ///   - rollback *correction* arms: `update_frame_interpolation_post_rollback` requires
 ///     `FrameInterpolate<C>` on the entity, so without it the registered correction fn is inert and
 ///     every rollback SNAPS the tank (measured 10–26 rollbacks/s while driving at 80 ms — the
-///     rubber-banding) instead of decaying the error over `CorrectionPolicy` (~200 ms half-life).
+///     rubber-banding). Since 597ec21 the correction policy is `instant_correction()` — the sim
+///     snaps to the corrected present in one frame by design and the render-space error layer
+///     (`net/render_error.rs`) absorbs the discontinuity on the view side; this arming remains
+///     load-bearing for the between-ticks overstep blend and lightyear's correction plumbing.
 pub fn client_smoothing_plugin(app: &mut App) {
     app.add_plugins((
         FrameInterpolationPlugin::<Position>::default(),

@@ -51,6 +51,15 @@
 //! sample on a component whose confirmed feed stalled must not be re-counted just because other
 //! components' feeds kept moving. This is a backstop: firings must be rare and visible, hence one
 //! `info!` line per firing.
+//!
+//! SCAFFOLDING STATUS (ADR-0015): this module is Layer-2 netcode scaffolding — a workaround for a
+//! named upstream defect, not architecture. The defect is lightyear's skipped-check-never-retried:
+//! a confirmed sample stamped at-or-ahead of the current tick is stored but never re-checked once
+//! the tick passes it. Removal condition: delete this module (or demote it to insurance behind a
+//! rare-firing assert) when lightyear ships a deferred re-check of stored future samples, or
+//! includes always-confirmed entities in the `check_rollback` unchanged-entity scan whenever the
+//! receive-time check was skipped. The 3-sample persistence gate above is the part worth keeping
+//! if it ever becomes insurance.
 
 use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, Rotation};
 use bevy::prelude::*;

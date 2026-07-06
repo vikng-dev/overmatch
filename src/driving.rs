@@ -2,6 +2,16 @@
 //! double duty — its spring holds the hull up (support, implemented here) and, later, its normal
 //! load feeds the drive friction. The hull rides on its wheels; the hull box is only a collision
 //! shape and a bottoming-out safety floor.
+//!
+//! This file carries the two precedents for the Layer-1 divergence-continuity rule (ADR-0015):
+//! contact and force laws must be CONTINUOUS functions of pose and velocity, so that the mm/mm-s
+//! scale divergence prediction always carries nudges a blend weight instead of flipping a force
+//! regime and bifurcating the two sims. The sphere-cast suspension probe (washboard rollbacks
+//! −73%) and the static↔kinetic friction blend + LuGre anchor relax (wedge storm 44+ → 1, see
+//! [`STICK_SPEED`]/[`STICK_BAND`]/[`ANCHOR_RELAX_RATE`]) are the shipped applications. Every
+//! future force law here — the track model explicitly included — is bound by the same rule:
+//! divergence-continuous contact primitives, no sharp oriented box casts (rounded shapes or
+//! ray/sphere stations instead).
 
 use avian3d::prelude::*;
 use bevy::ecs::lifecycle::Add;

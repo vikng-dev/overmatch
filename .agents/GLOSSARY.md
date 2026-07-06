@@ -137,6 +137,25 @@ _Avoid_: handbrake (that is a separate, future input)
 **Engine-brake / coast-down**:
 The light longitudinal resistance applied when the throttle is released while the tank is still rolling — bleeds speed toward a stop before the grip anchors take over. The "heavy-glide" feel: how much momentum a released tank keeps.
 
+## Netcode
+
+**Divergence continuity**:
+The Layer-1 rule (ADR-0015): contact and force laws must be continuous functions of pose and velocity, so tiny client/server divergence nudges a blend weight instead of flipping a force regime and bifurcating the sims. Precedents: the sphere-cast suspension probe and the static↔kinetic friction blend (`driving.rs`); binding on all future force laws, the track model included.
+_Avoid_: "determinism" for this (continuity bounds divergence growth; determinism eliminates divergence)
+
+**Forward determinism / Replay determinism**:
+*Forward*: same state + same inputs → same result — what lockstep needs, and what engines actually ship. *Replay*: restore a snapshot, resimulate, and land bit-identically on the original forward path — what prediction + rollback needs, and what no engine sells today (avian #734 is the open thread). Our dominant divergence term is a replay failure, not a forward one.
+
+**Prediction margin**:
+How many ticks the client runs ahead of the confirmed state it receives. Input delay eats it: `InputDelayConfig::balanced()` at loopback RTT absorbs all latency into delay, margin hits zero, and every confirmed update arrives at-or-ahead of the current tick.
+
+**Check starvation**:
+The zero-margin failure (fixed by `net/watchdog.rs`): lightyear's receive-time rollback check is skipped for any sample stamped at-or-ahead of the current tick and never retried, so state rollback goes permanently, silently dead — measured 35–50 m divergence with fresh authority arriving and zero rollbacks. Pre-watchdog lat0 rollback counts measured this, not convergence.
+
+**Netcode scaffolding** (Layer 1 / Layer 2):
+The two-layer doctrine (ADR-0015). *Layer 1* — permanent sim-design work, ours: divergence continuity. *Layer 2* — deliberately removable workarounds, each mapped to a named upstream defect with a removal condition (watchdog, contact-restore fix, coarsened thresholds). The render-space error layer looks like Layer 2 but is permanent — other players' inputs are unpredictable forever, and it is how any correction is presented.
+_Avoid_: calling Layer-1 work a workaround (it stands on its own merits)
+
 ## Collision
 
 **Part layer**:

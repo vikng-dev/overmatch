@@ -115,6 +115,13 @@ fn apply_servo_angles(
 /// falls back to `PartialEq::ne` — bit-equality that f32 solver output never satisfies.
 /// `pub(crate)` because `net::watchdog` re-runs the same comparisons with the same bars — one
 /// definition of "desynced enough to roll back", two detectors (receive-time + backstop).
+///
+/// Two notes from the 2026-07-06 review (ADR-0015): the rollback-count evidence above predates
+/// the watchdog — pre-watchdog lat0 rollback COUNTS measured check starvation (the receive-time
+/// check silently dead at zero prediction margin, see `net::watchdog`), not convergence, and are
+/// invalid as an A/B metric. And these coarsened bars are Layer-2 scaffolding, a ratchet rather
+/// than a setting: as the divergence they absorb collapses (contact-restore fix, upstream
+/// constraint ordering), tighten them toward the 1 cm / 0.01 rad reference values.
 pub(crate) const ROLLBACK_POSITION_M: f32 = 0.05;
 pub(crate) const ROLLBACK_ROTATION_RAD: f32 = 0.05;
 pub(crate) const ROLLBACK_VELOCITY: f32 = 1.0;

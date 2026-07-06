@@ -46,6 +46,18 @@ Missing structure is fatal here — every spec-declared node must resolve agains
 - **Lazy captures are gone.** Servo rest, recoil rest, the camera's turret-pivot capture, the COM `GlobalTransform` read — all spawned from data now. `ServoState` shrinks to true per-tick state.
 - **`strip_confirmed_history` stays load-bearing.** On the client the sim components are still, in lightyear's eyes, inserted *mid-life* onto an already-replicated root (the pose gate means the entity exists a few frames before the sim body attaches), so lightyear still seeds `ConfirmedHistory` with their add-time values — the split fixed what the corrupted restore *did* (the lazy rest capture), not the seeding itself. Deleting the strip guard would resurrect the aim-desync class with correct-looking spawn code.
 
+## Addendum (2026-07-06): the split now also carries rollback-correction smoothing
+
+Commit 597ec21 moved the client to **instant sim correction** (`CorrectionPolicy::instant_correction()`
+— the sim pose snaps to the corrected present within one frame) with **all visible smoothing in
+the render-space error layer** (`net/render_error.rs`), which accumulates each rollback's jump as
+an offset on the root's post-writeback `Transform` and decays it — "the sim snaps, the view never
+does". This extends the paragraph above one level up: sim transforms stay pure per-tick truth not
+only against servo blending but against netcode correction too, and the smoothing lives strictly
+render-side. The split is what made that possible — with sim truth and presentation already
+separate planes, the correction offset had a place to live that provably cannot feed back into
+the simulation. Doctrine context in [[0015-divergence-doctrine]].
+
 ## Deferred — phase 2 (governed by the design sketch)
 
 Out of scope here; still owned by `design/sim-view-split-and-tank-bake.md`:
