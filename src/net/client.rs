@@ -123,6 +123,9 @@ pub fn run() {
     // Passive jitter-trace recorder: frame + tick + rollback rows with prediction/correction extras.
     // Idle unless `SPIKE_TRACE` is set.
     app.add_plugins(crate::trace::client_plugin);
+    // Diagnostic contact probe: per-tick broad/narrow-phase state for the predicted tank's
+    // hull-vs-terrain pairs. Idle (nothing registered) unless `SPIKE_CONTACT_PROBE` is set.
+    app.add_plugins(super::contact_probe::plugin);
 
     let server_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), SERVER_PORT);
     // Pid-based id so back-to-back runs don't collide inside the server's disconnect timeout.

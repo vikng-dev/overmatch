@@ -10,6 +10,7 @@ use avian3d::schedule::PhysicsSystems;
 use bevy::prelude::*;
 
 pub mod client;
+pub mod contact_probe;
 pub mod diagnostics;
 pub mod harness;
 pub mod physics;
