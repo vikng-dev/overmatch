@@ -12,6 +12,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use avian3d::physics_transform::ApplyPosToTransform;
 use avian3d::prelude::{
     AngularInertia, CenterOfMass, Collider, CollisionLayers, LayerMask, Mass,
     NoAutoAngularInertia, NoAutoCenterOfMass, NoAutoMass, RigidBody, TrimeshFlags,
@@ -324,6 +325,91 @@ impl ViewNode {
 #[derive(Component)]
 pub struct ViewServo;
 
+/// The AUTHORED local `Transform` of a child collider (collision proxy / armor volume): sim
+/// structure, spawned once from extracted geometry and never legitimately rewritten at runtime —
+/// the collider's world pose is *derived* (root `Position` ∘ propagated `ColliderTransform`),
+/// so its local `Transform` is a constant of the rig, not state.
+///
+/// **ADR-0015 Layer-2 scaffolding — the collider attachment-poisoning fix.** Upstream defect
+/// (lightyear_avian3d 0.28, upstream report candidate #3): `AvianReplicationMode::Position`
+/// registers avian's `ApplyPosToTransform` as a REQUIRED component of `Position`/`Rotation`
+/// (plugin.rs:620-623) so the Position→Transform sync also covers Interpolated roots — but child
+/// colliders carry `Position`/`Rotation` too (avian collider backend required components), so the
+/// blanket requirement drags them into `position_to_transform`'s write set
+/// (avian3d `physics_transform/mod.rs:254-257`). That system then rewrites the child's LOCAL
+/// `Transform` as its sim-world `Position` `reparented_to` the parent bone's `GlobalTransform`
+/// — which is render-blended (FrameInterpolation/VisualCorrection/render-error offset) and one
+/// `TransformSystems::Propagate` stale. Every frame deposits the sim-vs-render difference into
+/// the local `Transform`; `propagate_collider_transforms` folds it into `ColliderTransform` next
+/// tick and the collider's world pose ratchets away from the rig (measured: 2–13 cm/tick during
+/// rollback storms, hull proxy 2.8 m above the root; the resulting hc=0 storms self-sustain).
+/// The ADR-0014 leak class — render state leaking into sim — introduced upstream.
+///
+/// The fix is [`shield_authored_collider_transform`]: strip `ApplyPosToTransform` from these
+/// entities, excising the write instead of undoing it. This component is the scope marker (and
+/// keeps the authored value on record for tripwires/re-assertion should upstream semantics
+/// change). Removal condition: upstream excludes child colliders (non-`RigidBody` entities with
+/// `ColliderOf`) from the blanket `ApplyPosToTransform` requirement, or gives the sync an
+/// opt-out per entity.
+#[derive(Component)]
+pub struct AuthoredLocalTransform(pub Transform);
+
+/// Strip [`ApplyPosToTransform`] the moment anything inserts it on an authored child collider —
+/// see [`AuthoredLocalTransform`] for the full defect. An observer, not a spawn-site `remove`,
+/// so the shield is self-healing: required-component insertion happens at every `Position`/
+/// `Rotation`/`Collider` (re-)insert, and any future re-insert would silently re-arm the
+/// poisoning write. Runs identically on client and server (registered in [`sim_plugin`], mounted
+/// by every composition root): the deposit is render-sized on the client but exists on the
+/// server too (the reparent target is one `Propagate` stale even without render blending), and
+/// the sim-affecting symmetry rule forbids fixing sim-visible state on one end only. In non-net
+/// compositions `ApplyPosToTransform` is never required-inserted (avian's own
+/// `position_to_transform` filter never matched these entities — no `RigidBody`), so this never
+/// fires there.
+fn shield_authored_collider_transform(
+    add: On<Add, ApplyPosToTransform>,
+    authored: Query<&AuthoredLocalTransform, Without<RigidBody>>,
+    mut commands: Commands,
+) {
+    if let Ok(authored) = authored.get(add.entity) {
+        // Strip the write-set membership AND re-assert the authored value: the strip lands in
+        // the same command flush as the insert that armed it (no system runs in between), so
+        // the re-assert is normally a no-op — it exists so that even a re-arm that somehow
+        // followed a deposit leaves the attachment at its authored constant. try_* variants:
+        // a same-flush despawn (spawn-then-abort, recursive parent despawn) must skip the
+        // already-gone proxy, not crash the session at command application.
+        commands
+            .entity(add.entity)
+            .try_remove::<ApplyPosToTransform>()
+            .try_insert(authored.0);
+    }
+}
+
+/// The mirror trigger: [`shield_authored_collider_transform`] only fires when the authored
+/// marker is already present at `ApplyPosToTransform`-insertion time, so a spawn site that
+/// splits the bundle (collider first, marker in a later command) would arm the poisoning write
+/// with no future `Add` to heal it. Watching the marker's own insertion closes that direction —
+/// the shield is order-independent: whichever of the two components lands second completes it.
+fn shield_late_authored_marker(
+    add: On<Add, AuthoredLocalTransform>,
+    armed: Query<&AuthoredLocalTransform, (With<ApplyPosToTransform>, Without<RigidBody>)>,
+    mut commands: Commands,
+) {
+    if let Ok(authored) = armed.get(add.entity) {
+        commands
+            .entity(add.entity)
+            .try_remove::<ApplyPosToTransform>()
+            .try_insert(authored.0);
+    }
+}
+
+/// The authored attachment, stated once: the spawned local `Transform` and the
+/// [`AuthoredLocalTransform`] record the shield re-asserts must never disagree — a stale copy
+/// would silently move the collider to the wrong pose on a later observer re-fire (wrong
+/// contact / wrong damage geometry, the exact symptom class the shield exists to prevent).
+fn authored_attachment(transform: Transform) -> impl Bundle {
+    (transform, AuthoredLocalTransform(transform))
+}
+
 /// Tank spawning, the spec→rig binder, and the servo mechanism — authority-side.
 /// The single-player *scenario*: load the Tiger spec up front, spawn the two-tank duel setup once
 /// it's ready (entering `Playing`), first tank `Controlled`. Split from [`sim_plugin`] because
@@ -337,6 +423,11 @@ pub fn sp_spawn_plugin(app: &mut App) {
 }
 
 pub fn sim_plugin(app: &mut App) {
+    // The attachment-poisoning shield (see `AuthoredLocalTransform`): child colliders' local
+    // transforms are authored constants, never derived from world state. Two observers make it
+    // order-independent — whichever of marker/`ApplyPosToTransform` lands second completes it.
+    app.add_observer(shield_authored_collider_transform);
+    app.add_observer(shield_late_authored_marker);
     app
         // The servo mechanism steps on the fixed clock (sim truth — the muzzle pose decides where
         // shells go), *after* `GameplaySet` so `drive_aim_servos` has written this tick's targets.
@@ -914,7 +1005,10 @@ pub(crate) fn spawn_tank_sim(
             );
             commands.spawn((
                 ChildOf(entity),
-                Transform::IDENTITY,
+                // Authored attachment, shielded from lightyear_avian's Position→Transform sync
+                // (see `AuthoredLocalTransform`): a poisoned armor volume is wrong damage
+                // geometry, same class as a poisoned collision proxy.
+                authored_attachment(Transform::IDENTITY),
                 Collider::trimesh_with_config(
                     vertices,
                     triangles,
@@ -942,7 +1036,9 @@ pub(crate) fn spawn_tank_sim(
             });
             commands.spawn((
                 ChildOf(entity_at(index)),
-                Transform::IDENTITY,
+                // Authored attachment, shielded from lightyear_avian's Position→Transform sync —
+                // the probe-confirmed poisoning ratchet (see `AuthoredLocalTransform`).
+                authored_attachment(Transform::IDENTITY),
                 collider,
                 CollisionLayers::new([Layer::Vehicle], LayerMask::ALL),
             ));
