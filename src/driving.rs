@@ -107,6 +107,57 @@ fn default_wheel_radius() -> f32 {
 /// its exact value never shifts the ride height — only how deep a bump the ball can measure.
 const SPHERE_PROBE_RETRACT: f32 = 0.3;
 
+/// Bump-stop stiffness as a multiple of the linear spring [`SuspensionParams::stiffness`]: the
+/// progressive catch spring that engages in the last stretch of suspension travel is this much
+/// stiffer than the main spring. ~10–20× is the vehicle-sim norm — firm enough to arrest a hard
+/// landing inside the remaining travel, soft enough that the catch is felt as a firm compression
+/// rather than a wall. Feel-tuning dial (bucket 1); it scales off the per-wheel `stiffness`, so it
+/// tracks any per-variant spring. SIM-AFFECTING — both wire ends run this same law, so no A/B
+/// switch is needed for protocol identity.
+const BUMP_STOP_STIFFNESS_RATIO: f32 = 15.0;
+/// Where the bump-stop engages, as a multiple of the even-share STATIC compression
+/// `c_static = M·g / (n·k)` — the compression at which one wheel's linear spring carries exactly
+/// 1/n of the tank's weight, computed per body in `apply_suspension` from its `ComputedMass`,
+/// wheel count, and gravity. Engagement MUST sit strictly above the at-rest band or the stop
+/// itself corrupts the flat-ground equilibrium: measured on the Tiger, per-wheel static
+/// compression spreads to ~1.13× the even share (the COM is not centered between the axles), and
+/// a first cut that engaged at a fixed 85% of max travel (0.0709 m) sat INSIDE that band
+/// (0.055–0.072 m) — 5/16 wheels rode the stop at rest, ride height rose 0.055→0.087 and ground
+/// contact flickered. 1.25× clears the measured 1.13× spread with margin while still engaging
+/// well before the travel clamp (Tiger: engage ≈ 0.0792 m vs max travel 0.0834 m). The engagement
+/// is PROGRESSIVE (force ramps from zero at the threshold and climbs with further compression) ON
+/// PURPOSE, and this is REQUIRED, not cosmetic: a bare travel clamp would re-introduce a binary
+/// force step at the limit (the force derivative jumps), exactly the discontinuous-contact
+/// divergence-amplifier class this investigation removed. The soft, growing catch keeps the
+/// contact force continuous. SIM-AFFECTING like everything here; both ends derive it from
+/// replicated-identical inputs (authored mass, spec spring, wheel count).
+const BUMP_STOP_ENGAGE_LOAD_RATIO: f32 = 1.25;
+/// Upper cap on the engage point, as a fraction of max travel: however heavy a variant sags, the
+/// last (1 − this) of travel always ramps the stop, so the catch never degenerates into the bare
+/// clamp (zero ramp width — the binary force step again). A variant whose static sag pushes the
+/// load-ratio engage past this cap will feel the stop at rest — a spec-authoring signal (its
+/// travel geometry can't carry its weight), not a law failure; the force stays continuous.
+const BUMP_STOP_LATEST_ENGAGE: f32 = 0.95;
+/// The bump-stop is a DAMPED stiff spring, not a bare one. Its damping is the main [`SuspensionParams::damping`]
+/// scaled by `sqrt(BUMP_STOP_STIFFNESS_RATIO)`, which holds the same ~0.6-of-critical damping
+/// FRACTION the main spring is tuned to, now at the ~15× bump rate (critical damping scales with the
+/// square root of stiffness). Measured why this is mandatory: an UNDAMPED bump-stop is a trampoline,
+/// not a catch — a 4 m drop-test rebounded to ~2.8 m and never settled (wheels flickering in and out
+/// of contact at "rest"), the exact "finicky, snaps around" failure this suspension work exists to
+/// remove. The damper dissipates the landing energy so the catch settles. Ramped in with the spring
+/// (from zero at engagement) so it adds no force step of its own. Derived, not authored — it tracks
+/// whatever `stiffness`/`damping` a variant carries.
+///
+/// The stop's whole force is impulse-CAPPED at application (see `apply_suspension`) — a spring
+/// this stiff cannot be integrated raw at 64 Hz. Measured: one tick of penetration at landing
+/// speed puts `k·v·dt²` at ~0.6 of the wheel-share momentum `m·v`, so a raw 15× spring returns
+/// MORE impulse than the fall brought in (restitution ≥ 1) and the tank re-launches through the
+/// engage threshold forever — a self-sustaining hammer cycle (500–600 kN wheel spikes, ground
+/// contact flickering at "rest") that this damping alone measurably did not fix.
+fn bump_stop_damping(params: &SuspensionParams) -> f32 {
+    params.damping * BUMP_STOP_STIFFNESS_RATIO.sqrt()
+}
+
 /// Which ground-probe geometry each wheel's suspension uses (`apply_suspension`) — the A/B switch
 /// for the continuous-contact slice. Read ONCE from the `SUSPENSION_PROBE` env var at startup
 /// ([`SuspensionProbe::from_env`]), never per-tick, and held in this resource.
@@ -222,12 +273,22 @@ fn apply_suspension(
     // The active probe geometry, read once at startup (see [`SuspensionProbe`]). Sim-affecting: the
     // same value must run on both client and server.
     probe: Res<SuspensionProbe>,
+    // Gravity + the body's `ComputedMass` feed the bump-stop's engage point (the even-share static
+    // compression `M·g / (n·k)` — see [`BUMP_STOP_ENGAGE_LOAD_RATIO`]). Both are deterministic
+    // spawn-time data (authored mass, avian's default gravity), identical on both wire ends.
+    gravity: Res<Gravity>,
+    // The fixed timestep (this runs in `FixedUpdate`, so `Time` IS `Time<Fixed>`), for the
+    // bump-stop's impulse cap: force × dt against the contact's effective momentum.
+    time: Res<Time>,
     mut bodies: Query<
         (
             Entity,
             &Position,
             &Rotation,
             Forces,
+            &ComputedMass,
+            &ComputedAngularInertia,
+            &ComputedCenterOfMass,
             &SuspensionParams,
             &mut TankSim,
         ),
@@ -239,7 +300,55 @@ fn apply_suspension(
     mut wheels: Query<(&WheelIndex, &mut Suspension), With<Roadwheel>>,
 ) {
     let filter = SpatialQueryFilter::from_mask(Layer::Terrain);
-    for (body, position, rotation, mut forces, params, mut sim) in &mut bodies {
+    for (body, position, rotation, mut forces, mass, inertia, com, params, mut sim) in &mut bodies {
+        // Travel-limit geometry, shared by every wheel of this body (see the clamp at the spring):
+        // at full compression the hub sits exactly `wheel_radius` above the contact, so
+        // `max_travel = rest_length - wheel_radius`.
+        let max_travel = params.rest_length - params.wheel_radius;
+        // The bump-stop's engage point: `BUMP_STOP_ENGAGE_LOAD_RATIO ×` the even-share static
+        // compression `c_static = M·g / (n·k)` (n = this tank's wheel count — `TankSim::anchors`
+        // has one slot per roadwheel), capped at [`BUMP_STOP_LATEST_ENGAGE`] of max travel so a
+        // ramp zone always remains before the clamp. Derived per body, not authored: it tracks
+        // whatever mass/spring/wheel-count a variant carries, and by construction sits a
+        // documented margin ABOVE flat-ground rest — the stop must never load the equilibrium
+        // (measured failure mode in [`BUMP_STOP_ENGAGE_LOAD_RATIO`]'s doc).
+        let wheel_count = sim.anchors.len().max(1) as f32;
+        let static_compression =
+            mass.value() * gravity.0.length() / (wheel_count * params.stiffness);
+        let engage = (BUMP_STOP_ENGAGE_LOAD_RATIO * static_compression)
+            .min(BUMP_STOP_LATEST_ENGAGE * max_travel);
+        // The bump-stop's impulse budget (see the cap at the stop): the world-space inverse
+        // inertia and centre of mass feed a per-contact effective mass, contact-solver style —
+        // but with the LINEAR compliance scaled by the wheel count:
+        // `cap_i = closing / (dt · (n/M + (r×n)·I⁻¹·(r×n)))`. Both simpler bounds measurably
+        // FAILED, one per term:
+        // - even-share `(M/n)·closing/dt` (no rotational term) over-estimates pitch/roll modes —
+        //   the true effective mass at a far contact is much smaller than M/n, so the "cap"
+        //   over-cancelled the contact velocity, reversed it, and pumped rotation geometrically
+        //   until a single-tick ~100 MN kick launched the tank ~66 m off flat ground (washboard
+        //   run, hard-throttle rear-wheel engagement);
+        // - the exact single-contact `1/(1/M + rot)` over-budgets SIMULTANEITY — near the COM it
+        //   approaches the full M per wheel, 16 wheels superpose in one tick, and the settled
+        //   tank breathed/flickered again (rest run: gnd 11–16, py std ×3).
+        // Splitting the linear term n ways bounds the SUM of the wheels' linear impulses by
+        // M·closing however many engage (flat multi-wheel landings get the full budget, exactly
+        // the even share that made the drop-test catch clean), while the per-contact rotational
+        // term keeps a lone corner hit at or below its true effective mass (under-capped when
+        // fewer wheels engage — conservative: an absorber may under-absorb, never energize).
+        // All spawn-derived deterministic data (authored mass/inertia), identical both ends.
+        //
+        // Known accepted softness: with the cap dissipative-only, a slow QUASI-STATIC deep press
+        // (the post-curb-jump landing) recovers on the clamped linear spring alone (1.32× weight
+        // total) — measured ~0.5 s at py ≈ −0.14, the same magnitude as the baseline's own worst
+        // settle dip. Two attempts to firm that regime with a static weight-share floor on the
+        // cap (whole engage zone, then depth-gated past the clamp) BOTH re-armed a sustained
+        // settle limit cycle (instantaneous ~100 kN wheel spikes at "rest", ride biased +12 mm)
+        // and were reverted — any velocity-independent force the settle breathing can reach
+        // keeps re-exciting it. Firming this catch further means substepping or an implicit
+        // stop, not a bigger force.
+        let inv_inertia_world = inertia.rotated(rotation.0).inverse();
+        let com_world = position.0 + rotation.0 * com.0;
+        let dt = time.delta_secs();
         // Only this body's own roadwheels (its rig descendants) push on it — otherwise a second
         // tank's wheel hits would load this hull. An unsupported wheel also releases its brush
         // anchor (the carried state in `TankSim`) — airborne tracks grip nothing.
@@ -326,11 +435,25 @@ fn apply_suspension(
                 continue;
             };
 
-            let compression = params.rest_length - ground_distance;
-            if compression <= 0.0 {
+            let raw_compression = params.rest_length - ground_distance;
+            if raw_compression <= 0.0 {
                 unsupported(&mut suspension, &mut sim);
                 continue;
             }
+
+            // Travel clamp. Cap the compression the LINEAR spring sees at the geometric limit where
+            // the wheel hub sits exactly `wheel_radius` above the contact. The probe reports
+            // `ground_distance` hub-to-ground along the cast axis, so the wheel's own bottom touches
+            // the surface when `ground_distance == wheel_radius`, i.e. when
+            // `compression == rest_length - wheel_radius` (`max_travel`, hoisted above the wheel
+            // loop). Past that the wheel — and the hull that rides on it (the spring's whole job is
+            // to hold the hull up) — would sink below ground, the measured "phasing" (root reached
+            // y = −0.12 on a hard landing). Clamping the linear term flattens it beyond the limit,
+            // but a constant force cannot arrest a fast descent on its own — the bump-stop below
+            // supplies the growing restoring force. Flat-ground rest never reaches the clamp
+            // (Tiger: static compression 0.055–0.072 m vs max travel 0.0834 m), so ride height is
+            // untouched.
+            let compression = raw_compression.min(max_travel);
 
             let up = -dir;
 
@@ -338,7 +461,46 @@ fn apply_suspension(
             // the contact; its component along `up` is the compression rate (negative while
             // settling).
             let spring_speed = forces.velocity_at_point(contact).dot(up);
-            let load = (params.stiffness * compression - params.damping * spring_speed).max(0.0);
+            let mut load = params.stiffness * compression - params.damping * spring_speed;
+
+            // Bump-stop: a much stiffer DAMPED spring (`BUMP_STOP_STIFFNESS_RATIO × stiffness`)
+            // engaging above `engage` (a load-ratio margin over static rest — hoisted per body
+            // above) and climbing PAST the clamp — its spring term is driven by the UNCLAMPED
+            // compression, so the deeper the over-travel the harder it pushes back: a firm catch,
+            // not a bottom-out. The progressive ramp (force grows from zero at `engage`) is
+            // REQUIRED — see [`BUMP_STOP_ENGAGE_LOAD_RATIO`]: a hard clamp alone would be a
+            // discontinuous contact-force step, the divergence amplifier this work removed. The
+            // matched damper (see [`bump_stop_damping`]) fades in from zero across the
+            // engage→clamp zone (`ramp`), so neither term introduces a step of its own.
+            //
+            // The whole stop is impulse-capped to be NON-RESTITUTIVE: this tick it may push no
+            // harder than the force that zeroes this contact's share of the closing momentum in
+            // one step (the simultaneity-safe effective mass — algebra and the two measured
+            // failure modes it fixes at the `inv_inertia_world` hoist). A stiff spring
+            // integrated explicitly at 64 Hz otherwise returns MORE impulse than the impact
+            // brought in (restitution ≥ 1, measured: a 4 m drop re-launched itself through the
+            // engage threshold indefinitely, hammering 500–600 kN wheel spikes at "rest").
+            // Under the cap the stop can only absorb the fall, never re-launch it; rebound is
+            // handed to the (stable) linear spring. The cap also structurally protects rest:
+            // closing speed ≈ 0 at equilibrium, so a wheel drifting past `engage` on solver
+            // noise gets ~zero stop force — the flat-ground equilibrium stays the linear
+            // spring's alone. Continuity holds through the capped regime too: the cap scales
+            // linearly with closing speed, so no force step appears at the v = 0 crossover.
+            if raw_compression > engage {
+                let over = raw_compression - engage;
+                let ramp = (over / (max_travel - engage)).min(1.0);
+                let stop = BUMP_STOP_STIFFNESS_RATIO * params.stiffness * over
+                    - bump_stop_damping(params) * spring_speed * ramp;
+                // `spring_speed` < 0 while compressing (see its comment), so the closing speed is
+                // its negation, floored at 0 — a rebounding wheel gets no stop force at all.
+                let closing = (-spring_speed).max(0.0);
+                let lever = (contact - com_world).cross(up);
+                let inv_effective_mass =
+                    wheel_count * mass.inverse() + lever.dot(inv_inertia_world * lever);
+                load += stop.clamp(0.0, closing / (dt * inv_effective_mass));
+            }
+
+            let load = load.max(0.0);
 
             forces.apply_force_at_point(up * load, contact);
             suspension.contact = Some(contact);
