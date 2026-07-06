@@ -30,7 +30,13 @@
 //!   correction decays). Per-ENTITY confirmed authority for the predicted tank root, from its
 //!   `ConfirmedHistory<C>` newest present sample: `confp` [x,y,z] latest confirmed `Position`,
 //!   `confv` [x,y,z] latest confirmed `LinearVelocity`, `conft` the lightyear tick that
-//!   `confp`/`confv` belong to. This tick is the entity's OWN last authoritative update — it can
+//!   `confp`/`confv` belong to. `vo` [x,y,z] + `voq` [x,y,z,w] the predicted root's live
+//!   render-space error offset (`net::render_error::RenderErrorOffset`) — the sim-snap-hiding
+//!   displacement this frame adds to the render `Transform`. Present only on the predicted root that
+//!   carries the offset (omitted, not null, elsewhere and in SP). It separates a SIM snap (which
+//!   `confp`/`rb` show) from VIEW motion: the rendered `p`/`q` already fold the offset in (it is what
+//!   renders), so `p − vo` recovers the lightyear-visible pose. This tick is the entity's OWN last
+//!   authoritative update — it can
 //!   lag the global `conf` when the tank's replicated components stop changing (or stop arriving),
 //!   the key discriminator for a silent desync. All three are omitted (not null) when no confirmed
 //!   sample exists yet, and absent entirely in SP / SP-composition net builds (no `ConfirmedHistory`).
@@ -257,6 +263,10 @@ fn record_frame(
         Option<&ConfirmedHistory<Position>>,
         Option<&ConfirmedHistory<LinearVelocity>>,
     )>,
+    // The predicted root's live render-space error offset. Present only on the entity `net::render_error`
+    // armed (the client's predicted tank); an unfiltered `Option`-style `get` keeps every other tank
+    // row — and the SP-composition net build, which never mounts the layer — omitting the field.
+    #[cfg(feature = "net")] view_offset: Query<&crate::net::render_error::RenderErrorOffset>,
 ) {
     // One camera pose for every tank row this frame (recorded after Propagate, so the third-person
     // orbit camera's `GlobalTransform` is final). `None` on a headless client → `cam`/`camq` omitted.
@@ -333,6 +343,12 @@ fn record_frame(
                 if let Some((_, velocity)) = confv.and_then(|h| h.newest_present()) {
                     obj.insert("confv".into(), vec3(velocity.0));
                 }
+            }
+            // The render-space error offset this frame folds into the rendered `p`/`q`. Present only
+            // on the predicted root carrying `RenderErrorOffset`; omitted (not null) on every other row.
+            if let Ok(offset) = view_offset.get(entity) {
+                obj.insert("vo".into(), vec3(offset.translation));
+                obj.insert("voq".into(), quat(offset.rotation));
             }
         }
         trace.write(&row);

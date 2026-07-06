@@ -33,6 +33,14 @@ pub struct CameraFollow(pub bool);
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GunnerCameraPlaced;
 
+/// The third-person orbit camera's system set — an ordering anchor. The MP render-error layer
+/// (`net::render_error`) offsets the predicted root's `Transform` between `PhysicsSystems::Writeback`
+/// and `TransformSystems::Propagate`; ordering it `.before(OrbitCameraSet)` there makes the camera
+/// orbit the offset (rendered) pose rather than the pre-offset one, so the whole view moves as one.
+/// A no-op edge in SP (the layer is net-gated) and on a headless client (no camera to place).
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct OrbitCameraSet;
+
 /// The turret-ring pivot as an offset in the tank root's local frame. The camera orbits
 /// `root · this`, so it reads the body's interpolated root `Transform` rather than the turret's
 /// (one-frame-stale) `GlobalTransform`. Computed once from the sim skeleton's local-transform
@@ -73,6 +81,7 @@ pub fn plugin(app: &mut App) {
             orbit_camera
                 .run_if(in_third_person)
                 .in_set(GameplaySet)
+                .in_set(OrbitCameraSet)
                 .after(PhysicsSystems::Writeback)
                 .before(TransformSystems::Propagate),
         )

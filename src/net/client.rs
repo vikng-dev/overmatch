@@ -17,6 +17,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use bevy::app::ScheduleRunnerPlugin;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
+use lightyear::prediction::correction::CorrectionPolicy;
 use lightyear::prelude::client::*;
 use lightyear::prelude::input::client::InputSystems;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
@@ -96,6 +97,11 @@ pub fn run() {
     // only; the server has no `Predicted` view to smooth. Mounted in simulate mode too: headless
     // it idles harmlessly, and `SPIKE_SIM_WINDOWED` diagnoses the real presentation stack.
     app.add_plugins(client_smoothing_plugin);
+    // The render-space error layer (client only): with `instant_correction` on the PredictionManager
+    // below, lightyear snaps the sim pose to the corrected present in one frame; this layer
+    // accumulates that snap as a decaying offset on the predicted root's render `Transform` so the
+    // VIEW never lurches.
+    app.add_plugins(super::render_error::plugin);
     // Step 7: the real sim — same `SimPlugin` the server mounts, so client-side rollback replay
     // re-runs the actual driving/aim/shooting systems, not a stub.
     app.add_plugins(SimPlugin);
@@ -195,6 +201,14 @@ pub fn run() {
                     input: RollbackMode::Disabled,
                     ..default()
                 },
+                // Let the sim SNAP: collapse lightyear's built-in visual correction to a single frame
+                // (`decay_period` 1 ms / `decay_ratio` 1e-7 — the error underflows to ~0 the frame the
+                // rollback lands), so the lightyear-visible pose reaches the corrected present at once.
+                // ALL visible smoothing then lives in `net::render_error`, which offsets the render
+                // `Transform` and decays it with a capped correction velocity — the "view never snaps"
+                // layer. Leaving the default 200 ms half-life here would double-smooth (and lightyear's
+                // has no velocity cap), reintroducing the lurch this layer exists to kill.
+                correction_policy: CorrectionPolicy::instant_correction(),
                 ..default()
             },
             // The depth knobs (1)+(2), inserted ALWAYS (no longer only under the env lever): the

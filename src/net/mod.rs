@@ -14,6 +14,7 @@ pub mod diagnostics;
 pub mod harness;
 pub mod physics;
 pub mod protocol;
+pub mod render_error;
 pub mod rig;
 pub mod server;
 
