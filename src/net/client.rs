@@ -12,7 +12,7 @@
 //! seconds, proving prediction + rollback under a real sim workload without a human at the keyboard.
 
 use core::time::Duration;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use bevy::app::ScheduleRunnerPlugin;
 use bevy::prelude::*;
@@ -127,7 +127,25 @@ pub fn run() {
     // hull-vs-terrain pairs. Idle (nothing registered) unless `SPIKE_CONTACT_PROBE` is set.
     app.add_plugins(super::contact_probe::plugin);
 
-    let server_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), SERVER_PORT);
+    // Server address: `OVERMATCH_SERVER` points the client at a remote server for cloud
+    // playtests — accepts `host:port` (a full `SocketAddr`) or a bare IP (default port appended).
+    // Unset → loopback, the single-machine dev/harness default.
+    let default_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), SERVER_PORT);
+    let server_addr = match std::env::var("OVERMATCH_SERVER") {
+        Ok(raw) => raw
+            .parse::<SocketAddr>()
+            .or_else(|_| {
+                raw.parse::<IpAddr>()
+                    .map(|ip| SocketAddr::new(ip, SERVER_PORT))
+            })
+            .unwrap_or_else(|_| {
+                error!(
+                    "client: OVERMATCH_SERVER=\"{raw}\" is not an ip or ip:port — using loopback"
+                );
+                default_addr
+            }),
+        Err(_) => default_addr,
+    };
     // Pid-based id so back-to-back runs don't collide inside the server's disconnect timeout.
     let client_id = u64::from(std::process::id());
     // ~100 ms delay + jitter on the inbound link, so the client's prediction genuinely runs ahead
