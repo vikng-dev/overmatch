@@ -178,6 +178,14 @@ impl Plugin for NetClientPlugin {
             hud::plugin,
             crew_ui::plugin,
         ));
+
+        // Dev-only physics visualization + debug toggles, same pair `ClientPlugin` mounts for SP
+        // (`G` = force arrows + collider wireframes, `X` = x-ray, `F` = camera detach). View-only:
+        // it reads `Suspension`/`GlobalTransform` and draws gizmos — nothing sim-visible — so it is
+        // safe on a predicting client and is never mounted by the headless server (which composes
+        // `SimPlugin` only, never this plugin).
+        #[cfg(debug_assertions)]
+        app.add_plugins((avian3d::prelude::PhysicsDebugPlugin, debug::plugin));
     }
 }
 

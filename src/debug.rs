@@ -1,7 +1,15 @@
-//! Dev-only debug helpers (compiled only with `debug_assertions`). Currently an X-ray toggle:
-//! press `X` to make the tank translucent so the physics gizmos that sit *inside* the model —
-//! suspension rays, the hull collider — show through. Translucent (Blend) materials stop
-//! writing depth, so the depth-tested gizmos behind them become visible.
+//! Dev-only debug helpers (compiled only with `debug_assertions`). Press `G` to toggle the debug
+//! gizmos: per-wheel force arrows (cyan = suspension load, orange = drive + friction, red line =
+//! the suspension ray) plus Avian's collider wireframes. Press `X` for the X-ray toggle: the tank
+//! turns translucent so the gizmos that sit *inside* the model show through (Blend materials stop
+//! writing depth, so the depth-tested gizmos behind them become visible). `F` detaches the camera.
+//!
+//! Mounted by BOTH client compositions — `ClientPlugin` (single-player) and `NetClientPlugin`
+//! (the networked client bin) — always paired with Avian's `PhysicsDebugPlugin` (which registers
+//! the `PhysicsGizmos` group this module configures). Strictly view-only: every system reads sim
+//! state (`&Suspension`, `&GlobalTransform`) immutably and writes only render-side things (gizmos,
+//! materials, camera follow), so it is safe on a predicting net client; the headless server never
+//! mounts it.
 
 use avian3d::prelude::PhysicsGizmos;
 use bevy::color::Alpha;
