@@ -1,0 +1,21 @@
+#!/bin/sh
+# pre-push — mirrors CI's `check` job so a green push means green CI. Compiles, so it is
+# slower than pre-commit (tens of seconds to a couple of minutes on a warm cache); it runs
+# on push, not on every commit. Bypass once with `git push --no-verify`.
+#
+# Commands mirror .github/workflows/ci.yml (minus `--profile ci`, which only speeds CI's
+# cold builds — it does not change lint/test pass-fail, and omitting it reuses your warm
+# dev target dir). `--locked` catches Cargo.lock drift exactly as CI does.
+set -e
+cd "$(git rev-parse --show-toplevel)"
+
+echo "pre-push ▸ cargo fmt --all --check"
+cargo fmt --all --check >/dev/null || { printf '\033[31m  unformatted\033[0m — run: cargo fmt --all\n' >&2; exit 1; }
+
+echo "pre-push ▸ cargo clippy --locked --all-targets -- -D warnings"
+cargo clippy --quiet --locked --all-targets -- -D warnings
+
+echo "pre-push ▸ cargo test --locked"
+cargo test --quiet --locked
+
+echo "pre-push ▸ ok"

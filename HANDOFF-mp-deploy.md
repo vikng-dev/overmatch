@@ -79,13 +79,17 @@ for the panel on Opus: edit the persisted workflow script's agent() opts, add `m
 Sessions run in a worktree; harness runs need `pkill -f target/debug/server` + port 5888 free +
 `BEVY_ASSET_ROOT=$PWD` + `SPIKE_PERTURB=0` on the server, ~10 s bake before the client.
 
-## Verification protocol (gates unchanged)
+## Verification protocol
 
 ```bash
+cargo fmt --all --check          # CI's fmt job — MUST run; its omission left main red 2026-07-04..07
 cargo clippy -q --all-targets && cargo clippy -q --features net --all-targets
 cargo test -q && cargo test -q --features net       # 15 lib + 4 spherecast
 cargo build -q --bin server --bin client --features net
 ```
+Git hooks enforce fmt (pre-commit) + clippy/test (pre-push) locally — `scripts/hooks/`, activate
+per clone with `git config core.hooksPath scripts/hooks` (see that README). CI runs `fmt` +
+`check` (clippy `--locked --all-targets -D warnings`, tests `--locked`), both must be green.
 Harness recipes and current baselines: see "Hard-won facts" above; grep `SHADOW-BAKE ok` both
 ends, `NAN-TRIPWIRE|FIXED-NAN|panicked|B0004` = 0. Drop test now part of the repertoire:
 `SPIKE_SPAWN_POSE="0,6,0,0,0,0,1"` + `SPIKE_SIM_IDLE=1` (lands 16/16, settles to rest).

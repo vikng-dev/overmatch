@@ -1,0 +1,11 @@
+#!/bin/sh
+# pre-commit — formatting gate. Mirrors CI's `fmt` job (`cargo fmt --all --check`).
+# Fast: rustfmt is pure text analysis, no compile, ~1s. This is the gate whose absence
+# let formatting drift accumulate on main for two days (2026-07-04..07).
+# Bypass once with `git commit --no-verify`; CI is the final backstop.
+set -e
+cd "$(git rev-parse --show-toplevel)"
+if ! cargo fmt --all --check >/dev/null; then
+    printf '\n\033[31m✗ pre-commit: unformatted code.\033[0m  Fix: cargo fmt --all   (then re-stage)\n' >&2
+    exit 1
+fi
