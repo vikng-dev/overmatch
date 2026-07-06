@@ -526,6 +526,27 @@ fn apply_suspension(
         0
     };
     for (body, position, rotation, mut forces, mass, inertia, com, params, mut sim) in &mut bodies {
+        // Mass properties are computed by avian AFTER the spawn-tick collider flush, so on a body's
+        // very first tick `ComputedMass`/`ComputedAngularInertia` are still zero. Every quantity
+        // below scales off them — static compression, the bump-stop engage point, and the impulse
+        // cap's effective mass all collapse to zero. A pose already compressed on that tick (a
+        // terrain-intersecting `SPIKE_SPAWN_POSE`) then enters the stop with `inv_effective_mass = 0`
+        // and, at rest, `closing = 0`, so `cap = 0/0 = NaN` panics the clamp. No valid suspension
+        // force exists without mass, so skip the body until avian fills it in — but release its
+        // wheels to unsupported FIRST (clear contact/load, drop brush anchors, exactly the airborne
+        // path below), so if mass ever drops out mid-run no stale contact/anchor state leaks into
+        // `apply_drive`. (Same NaN-discipline funnel as the per-wheel origin/direction guards below.)
+        if !(mass.value() > 0.0 && mass.value().is_finite()) {
+            for wheel in children.iter_descendants(body) {
+                if let Ok((wheel_slot, mut suspension)) = wheels.get_mut(wheel) {
+                    *suspension = Suspension::default();
+                    if let Some(anchor) = sim.anchors.get_mut(wheel_slot.0) {
+                        *anchor = None;
+                    }
+                }
+            }
+            continue;
+        }
         // Travel-limit geometry, shared by every wheel of this body (see the clamp at the spring):
         // at full compression the hub sits exactly `wheel_radius` above the contact, so
         // `max_travel = rest_length - wheel_radius`.
@@ -746,7 +767,16 @@ fn apply_suspension(
                 let inv_effective_mass =
                     wheel_count * mass.inverse() + lever.dot(inv_inertia_world * lever);
                 let cap = closing / (dt * inv_effective_mass);
-                let applied = stop.clamp(0.0, cap);
+                // Defence in depth at the line that once panicked: the body-level mass guard covers
+                // the "no mass yet" NaN, but `inv_effective_mass` also carries the rotational term
+                // `lever·(I⁻¹·lever)` — a degenerate `ComputedAngularInertia` (a zero principal
+                // moment → infinite inverse) would make it non-finite even with mass valid, and
+                // `clamp(0.0, NaN)` panics. Treat any non-finite cap as "no stop force this tick".
+                let applied = if cap.is_finite() {
+                    stop.clamp(0.0, cap)
+                } else {
+                    0.0
+                };
                 // Recorder taps (`susp_trace`): copies, no recomputation.
                 trace_stop = applied;
                 trace_capped = stop > cap;
