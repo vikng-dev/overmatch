@@ -68,18 +68,18 @@
 //!   registered conditions) can't leak in.
 //!
 //! Analysis aligns rows across processes on `tick` + `role`, never on `e` (entity ids differ per
-//! process). Rows are line-buffered through a `BufWriter` flushed every ~1 s (`on_timer`) and on a
-//! clean World drop (`BufWriter::drop`); a hard-killed process may lose the unflushed tail
-//! (acceptable).
+//! process). Rows are line-buffered through [`JsonlSink`] (a `BufWriter` flushed ~every 1 s from
+//! `write` itself, and on a clean World drop via `BufWriter::drop`); a hard-killed process may
+//! lose the unflushed tail (acceptable). The sink + NaN-safe JSON helpers are `pub(crate)` — the
+//! suspension-force recorder (`susp_trace`, driving.rs) shares them.
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use avian3d::prelude::{AngularVelocity, Collisions, LinearVelocity, Position, Rotation};
 use bevy::prelude::*;
-use bevy::time::common_conditions::on_timer;
 use serde_json::{Value, json};
 
 use crate::driving::{DriveState, Suspension};
@@ -95,30 +95,65 @@ use lightyear::prelude::{
     RollbackSystems, VisualCorrection,
 };
 
+/// The one JSONL sink both recorders share (`TraceWriter` here, `susp_trace` in `driving.rs`):
+/// buffered line writes with a ~1 s flush cadence folded into `write` itself, so every consumer
+/// gets the same tail-protection behavior without owning a flush system. Rows go through
+/// `serde_json::Value` (see [`num`]) so a corrupt frame emits `null`, never invalid-JSON
+/// `NaN`/`inf` — the recorders exist precisely for the corrupt regimes.
+///
+/// Flushing is best-effort tail protection: line-buffered writes reach disk about every second
+/// (checked on each write — rows arrive every frame/tick while a recorder is armed) and on a
+/// clean exit (the `BufWriter` flushes on drop); a hard-killed process may lose the unflushed
+/// remainder (accepted).
+pub(crate) struct JsonlSink {
+    writer: BufWriter<File>,
+    last_flush: Instant,
+}
+
+impl JsonlSink {
+    pub(crate) fn create(path: &Path) -> std::io::Result<Self> {
+        Ok(Self {
+            writer: BufWriter::new(File::create(path)?),
+            last_flush: Instant::now(),
+        })
+    }
+
+    /// Append one row, best-effort. A passive observer never lets an I/O hiccup disturb the sim, so
+    /// write errors are dropped (the periodic flush + the parse check surface a broken file).
+    pub(crate) fn write(&mut self, row: &Value) {
+        let _ = writeln!(self.writer, "{row}");
+        if self.last_flush.elapsed() >= Duration::from_secs(1) {
+            let _ = self.writer.flush();
+            self.last_flush = Instant::now();
+        }
+    }
+}
+
 /// The open trace sink. Present iff `SPIKE_TRACE` was set at startup — [`install`] both inserts it
 /// and returns whether it did, so the recorder systems gate on that return value at registration
 /// time rather than on a per-frame `resource_exists` check.
 #[derive(Resource)]
 struct TraceWriter {
-    writer: BufWriter<File>,
+    sink: JsonlSink,
     /// The composition role, carried so the Startup `write_meta` system can stamp the `meta` row
     /// (it runs after `install`, which no longer writes the row itself — see fix 6).
     role: &'static str,
 }
 
 impl TraceWriter {
-    /// Append one row, best-effort. A passive observer never lets an I/O hiccup disturb the sim, so
-    /// write errors are dropped (the periodic flush + the parse check surface a broken file).
+    /// Append one row — see [`JsonlSink::write`] for the error/flush discipline.
     fn write(&mut self, row: &Value) {
-        let _ = writeln!(self.writer, "{row}");
+        self.sink.write(row);
     }
 }
 
 // --- JSON leaf helpers -----------------------------------------------------------------------
 // serde_json's `From<f64>` maps NaN/Inf to `Null` rather than emitting invalid JSON — exactly the
 // safety a pose recorder needs, since a corrupt frame must still produce a parseable line.
+// `pub(crate)` so the suspension-force recorder (`susp_trace`, driving.rs) emits with the same
+// NaN discipline instead of growing a parallel implementation.
 
-fn num(x: f32) -> Value {
+pub(crate) fn num(x: f32) -> Value {
     Value::from(x as f64)
 }
 
@@ -158,26 +193,21 @@ fn install(app: &mut App, role: &'static str) -> bool {
         return false;
     };
     let resolved = role_path(&path, role);
-    let file = match File::create(&resolved) {
-        Ok(file) => file,
+    let sink = match JsonlSink::create(&resolved) {
+        Ok(sink) => sink,
         Err(err) => {
             error!("trace: cannot open {}: {err}", resolved.display());
             return false;
         }
     };
     info!("trace: recording {role} rows to {}", resolved.display());
-    app.insert_resource(TraceWriter {
-        writer: BufWriter::new(file),
-        role,
-    });
+    app.insert_resource(TraceWriter { sink, role });
     // The `meta` row is written from Startup (not here) so `tick_hz` can read the app's actual
     // `Time<Fixed>` timestep, which may not be configured at plugin-build time. Startup runs before
     // any Update/FixedUpdate recorder, so it stays the first row.
     app.add_systems(Startup, write_meta);
-    // Flushing is best-effort tail protection: line-buffered writes reach disk every ~1 s and on a
-    // clean exit (the `BufWriter` drops with the World and flushes); a killed process may lose the
-    // unflushed remainder (accepted).
-    app.add_systems(Last, flush_periodically.run_if(on_timer(Duration::from_secs(1))));
+    // Flush cadence lives inside `JsonlSink::write` (~1 s, checked per row — rows arrive every
+    // frame while tracing), so no periodic flush system is needed.
     // Arm the trigger-attribution slot's fast path. The slot only fills on the client (check_rollback
     // is client-only), but the flag is role-agnostic and cheap; the server never calls
     // `note_rollback_trigger`, so its slot stays empty regardless.
@@ -527,12 +557,6 @@ fn next_local_tick(counter: &mut Local<u64>) -> u64 {
     let current = **counter;
     **counter += 1;
     current
-}
-
-/// Flush the buffer ~once a second (gated by `on_timer`) so a long run's rows reach disk
-/// incrementally — a live tail is useful while a session is still running.
-fn flush_periodically(mut trace: ResMut<TraceWriter>) {
-    let _ = trace.writer.flush();
 }
 
 // --- Rollback trigger attribution (net only) -------------------------------------------------

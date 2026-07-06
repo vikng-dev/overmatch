@@ -101,6 +101,12 @@ shrinks what the scaffolding has to absorb.
 - **Thresholds are a ratchet, not a setting**: as divergence collapses (contact-restore fix,
   upstream ordering), the `net/protocol.rs` bars tighten toward the reference values instead of
   ossifying.
+- **Map authoring, defence-in-depth: prefer tiling large static colliders to ≤10 m extents.**
+  parry's GJK shape-cast converges on a *relative* tolerance, so cast error scales with the
+  target collider's extent (measured: 0.25 mm at 5 m half-extent vs 139–172 mm at 500 m —
+  `tests/spherecast_scale.rs`). The sphere probe now reconstructs distance from witness geometry
+  and is immune, but any *future* shape-cast consumer inherits the defect; small tiles cap it at
+  the source. (Not applied retroactively — the 1000 m slab stands until a map-authoring pass.)
 
 ## Related
 

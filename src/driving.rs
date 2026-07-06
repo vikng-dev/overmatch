@@ -18,8 +18,82 @@ use bevy::ecs::lifecycle::Add;
 use bevy::prelude::*;
 use serde::Deserialize;
 
+/// The suspension-force recorder: an env-gated, per-wheel/per-tick JSONL log of the exact force
+/// decomposition `apply_suspension` and `apply_drive` feed `apply_force_at_point` — spring,
+/// damper, bump-stop (with its impulse-cap state), the `max(0)` clip, and the drive/anchor force
+/// with the contact velocity it acted on. The raw material for offline force/energy audits: it is
+/// what decomposed the at-rest limit-cycle's energy pump down to sphere-cast TOI noise (see
+/// [`sphere_cast_ground_contact`]).
+///
+/// A PASSIVE observer, like [`crate::trace`]: nothing here writes sim state. The whole module is
+/// OFF unless `SUSP_TRACE=<path>` names a file at startup — an unset var costs one
+/// `std::env::var` lookup on first use and a `OnceLock` read per call thereafter, zero writes
+/// (both systems hoist that read to once per run, so the per-wheel hot loops pay nothing).
+/// Unlike `SPIKE_TRACE` the path is used VERBATIM (no role suffix): give each process its own
+/// path when tracing both wire ends from one shell. The sink itself is [`crate::trace`]'s
+/// [`crate::trace::JsonlSink`] — same NaN-safe emission (a non-finite f32 serializes as `null`,
+/// never invalid-JSON `NaN`/`inf`; this recorder targets exactly the corrupt regimes) and the
+/// same ~1 s flush cadence, not a parallel implementation.
+///
+/// ## Row schema (one compact JSON object per line, `k` = kind)
+/// - `"s"` — per wheel, per `apply_suspension` run: `n` trace tick (the join key), `w` wheel
+///   slot, `c`/`cc` raw/clamped compression, `ss` spring speed, `fs`/`fd`/`fb` spring/damper/
+///   bump-stop force, `cap` whether the stop's impulse cap engaged, `clip` force removed by the
+///   `max(0)` floor, `ld` the applied load, `cy` contact y, `py` body y, `vy` hull vertical
+///   velocity, `wx`/`wz` hull angular-velocity x/z, `oy` probe-origin y, `gd` probed ground
+///   distance, `we` wheel entity bits.
+/// - `"d"` — per anchored wheel, per `apply_drive` run: `n` the same tick's join key, `w` wheel
+///   slot, `vf`/`vl` contact velocity fore-aft/lateral, `ws` static-grip blend weight, `df`/`dl`
+///   anchor deflection fore-aft/lateral, `f` the applied force vector, `pow` the instantaneous
+///   power that force feeds the body (positive = energy in).
+mod susp_trace {
+    use std::path::Path;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Mutex, OnceLock};
+
+    use serde_json::Value;
+
+    use crate::trace::JsonlSink;
+
+    /// The shared-with-`crate::trace` sink (`Mutex` because the recorders are plain functions with
+    /// no `World` access, unlike `TraceWriter`'s resource): NaN-safe rows, ~1 s flush cadence.
+    static SINK: OnceLock<Option<Mutex<JsonlSink>>> = OnceLock::new();
+    /// Monotone per-`apply_suspension`-run counter — the join key between suspension and drive
+    /// rows of the same tick (`apply_drive` reads, never bumps).
+    static TICK: AtomicU64 = AtomicU64::new(0);
+
+    fn sink() -> Option<&'static Mutex<JsonlSink>> {
+        SINK.get_or_init(|| {
+            std::env::var("SUSP_TRACE").ok().map(|path| {
+                Mutex::new(JsonlSink::create(Path::new(&path)).expect("SUSP_TRACE file creation"))
+            })
+        })
+        .as_ref()
+    }
+
+    pub fn enabled() -> bool {
+        sink().is_some()
+    }
+
+    /// Bump the per-tick counter (once per `apply_suspension` run) and return it.
+    pub fn next_tick() -> u64 {
+        TICK.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    pub fn tick() -> u64 {
+        TICK.load(Ordering::Relaxed)
+    }
+
+    pub fn write(row: &Value) {
+        if let Some(sink) = sink() {
+            sink.lock().expect("SUSP_TRACE sink poisoned").write(row);
+        }
+    }
+}
+
 use crate::Layer;
 use crate::command::TankCommand;
+use crate::trace::num;
 use crate::damage::{
     Capability, TankCapabilities, TankVolumes, VolumeFacets, capability_available,
 };
@@ -142,6 +216,115 @@ fn default_wheel_radius() -> f32 {
 /// CANCELS out of the flat-ground compression (see the offset algebra in `apply_suspension`), so
 /// its exact value never shifts the ride height — only how deep a bump the ball can measure.
 const SPHERE_PROBE_RETRACT: f32 = 0.3;
+
+/// Width (m) of the trust band the witness reconstruction may move the sphere probe's ground
+/// distance ABOVE the TOI-based value: `ground_distance` is clamped to
+/// `[toi_based, toi_based + SPHERE_CAST_TOI_SLACK]` in [`sphere_cast_ground_contact`].
+///
+/// The band exists because parry's cast TOI is ONE-SIDED: it converges from below (short), never
+/// meaningfully long, so `toi_based` is a lower bound on the true distance and `toi_based +` the
+/// worst observed short-error is a sound upper bound. Sized from live SUSP_TRACE data (idle at
+/// rest on the 1000 m slab, pre-reconstruction runs, `probe-origin y − ground_distance` per wheel
+/// per tick): short error p50 33 mm, p99 134 mm, max 199.75 mm over 19,828 samples (idle run;
+/// 194.9 mm in a second run), long-side excursions sub-mm (a tilt-projection artifact of the
+/// measurement, not the cast). 0.18 would have clipped 5/19,828 honest at-rest corrections
+/// (residual up to ~20 mm → ~11 kN spring error, the very noise class the reconstruction
+/// removes); 0.20 clipped none. If a pose ever exceeds the band the clamp degrades gracefully:
+/// the residual error is only the excess over the band (mm scale) and one-sided-conservative
+/// (slightly short, the old TOI's direction) — never a NEW discontinuity class (ADR-0015).
+pub const SPHERE_CAST_TOI_SLACK: f32 = 0.20;
+
+/// `(hub-to-ground distance, contact point)` for the [`SuspensionProbe::Sphere`] probe: the
+/// witness-geometry distance reconstruction, GUARDED by the TOI-based value it replaced. `travel`
+/// is the shape cast's reported travel (`hit.distance`), `point1`/`normal1` its witness pair on
+/// the terrain in world space, `retract` the cast's back-off up the axis
+/// ([`SPHERE_PROBE_RETRACT`] at the call site; a parameter so tests can pin the math at any
+/// retract).
+///
+/// WHY not `hit.distance` alone: parry's shape-cast TOI solver (`gjk::minkowski_ray_cast`,
+/// parry3d-0.27.0 `src/query/gjk/gjk.rs:661-780`) converges on a RELATIVE tolerance —
+/// `eps_rel · max_bound`, `eps_rel = sqrt(10·f32::EPSILON) ≈ 1.09e-3` (gjk.rs:141-144, 676) —
+/// with an early "upper bounds inconsistencies" return besides (gjk.rs:713-724), so its accuracy
+/// scales with the TARGET collider's extent. Against the 1000 m ground slab (`world.rs`) the
+/// returned distance comes up to ~200 mm SHORT — one-sided and deterministic but DISCONTINUOUS in
+/// pose, so at rest the 551 kN/m spring turned it into 10–40 kN per-wheel force noise per tick,
+/// pumping the hull's at-rest modes (~2.2 kW measured) into a sustained ~12 mm / 0.29° wobble —
+/// the gunner-sight shake on flat ground. The witness pair of the SAME call is exact even when
+/// the TOI is wrong (measured `hit.point1.y = 0.000000` throughout; avian-0.7.0 converts parry's
+/// terrain-frame witness to world space at `src/spatial_query/system_param.rs:580-583`), so the
+/// travel is reconstructed from geometry instead: the cast ball's centre at true contact sits one
+/// radius out along the terrain's outward normal, `centre = point1 + normal1·r`; the travel from
+/// the retracted cast origin is `(centre − cast_origin)·dir`; and the hub-to-ground distance is
+/// `travel + r − retract`, exactly the probe site's offset algebra. Substituting
+/// `cast_origin = origin − dir·retract` cancels the retract, leaving the pure hub-frame form
+/// computed here: `(centre − origin)·dir + r`. On flat ground that reduces to the hub height
+/// exactly (the radius cancels against the centre offset), so ride height, preload, and the
+/// ray/sphere equilibrium identity are untouched. Measured (`tests/spherecast_scale.rs`): raw TOI
+/// error 139 mm at 500 m half-extent → 0.0001 mm reconstructed.
+///
+/// The reconstruction is trusted ONLY when the witness pair is actually cast geometry:
+/// - **Penetrating start** (`travel < 1e-5`): parry rebuilds the hit from the deepest-penetration
+///   CONTACT pair instead — `time_of_impact < 1.0e-5` swaps `witness1`/`normal1` for
+///   `contact_support_map_support_map`'s point/normal (parry3d-0.27.0
+///   `src/query/shape_cast/shape_cast_support_map_support_map.rs:31-51`; avian passes
+///   `stop_at_penetration: true` + `compute_impact_geometry_on_penetration: true`,
+///   avian3d-0.7.0 `src/spatial_query/system_param.rs:566-572`). That `normal1` is the
+///   MINIMUM-PENETRATION separation axis — unrelated to the cast axis, possibly pointing into
+///   the terrain relative to the probe — and parry documents the whole witness set as unreliable
+///   for this status (`shape_cast.rs:39-56`, `ShapeCastStatus::PenetratingOrWithinTargetDist`).
+///   Reconstructing from it can push the ball centre BELOW the hub and report the wheel
+///   unsupported exactly when it is jammed deepest. Fall back to `toi_based` = `r − retract`,
+///   the old formula's value for a zero-travel hit: max compression, full spring + bump-stop —
+///   the established hard-landing behavior (travel clamp + progressive bump-stop slice).
+/// - **Non-finite witness**: fall back to `toi_based`, and synthesize the contact ON THE CAST
+///   AXIS rather than passing the corrupt `point1` downstream into `apply_force_at_point` (the
+///   same NaN funnel the probe-origin guard closes). From the offset algebra above, the on-axis
+///   ground point sits `ground_distance` from the hub along the cast:
+///   `contact = origin + dir · ground_distance` (the ray probe's exact form; for the sphere,
+///   centre-at-contact `origin + dir·(gd − r)` plus one radius on down the axis).
+/// - **Valid witness**: `ground_distance = reconstructed.clamp(toi_based, toi_based +`
+///   [`SPHERE_CAST_TOI_SLACK`]`)`. On flat ground the honest correction is ≤ ~200 mm (measured),
+///   inside the band, so the reconstruction passes through exact. Where the witness feature-flips
+///   at a slab edge (the closest-point witness jumping face↔edge along the medial axis,
+///   pose-discontinuously), the band bounds the step at the OLD TOI-error scale — no new
+///   discontinuity class beyond what ADR-0015 already absorbs.
+///
+/// SIM-AFFECTING: this sets every spring force; both wire ends run the same code by construction
+/// (`SimPlugin`), so no protocol knob is needed. Upstream report candidate #4: parry GJK
+/// shape-cast relative tolerance vs large shapes. `pub` (re-exported at the crate root) for
+/// `tests/spherecast_scale.rs`, which pins the helper's math (reconstruction, band, fallbacks)
+/// against raw parry casts AND parry's TOI defect itself — it fails if parry fixes the tolerance
+/// upstream, the workaround-retirement tripwire. It does NOT bind the `apply_suspension` call
+/// site (a thin adapter over this helper); the live guard for that wiring is the idle at-rest
+/// harness metric (p.y spread ≲ 0.02 mm).
+pub fn sphere_cast_ground_contact(
+    origin: Vec3,
+    dir: Vec3,
+    wheel_radius: f32,
+    retract: f32,
+    travel: f32,
+    point1: Vec3,
+    normal1: Vec3,
+) -> (f32, Vec3) {
+    // The old formula — trust the TOI. One-sided short (never meaningfully long), so it is a
+    // LOWER bound on the true distance: conservative (over-compresses, never under-supports).
+    let toi_based = travel + wheel_radius - retract;
+    // `1.0e-5` mirrors parry's own penetration cutoff (shape_cast_support_map_support_map.rs:35):
+    // below it the witness pair is a penetration contact, not cast geometry (doc above).
+    if travel >= 1.0e-5 && point1.is_finite() && normal1.is_finite() {
+        let centre_at_contact = point1 + normal1 * wheel_radius;
+        let reconstructed = (centre_at_contact - origin).dot(dir) + wheel_radius;
+        let ground_distance = reconstructed.clamp(toi_based, toi_based + SPHERE_CAST_TOI_SLACK);
+        (ground_distance, point1)
+    } else if point1.is_finite() {
+        // Penetrating start with a finite witness: conservative distance, but the deep-contact
+        // point is still the honest place for drive/friction to act (the old path's choice).
+        (toi_based, point1)
+    } else {
+        // Corrupt witness: conservative distance + the synthesized on-axis contact (doc above).
+        (toi_based, origin + dir * toi_based)
+    }
+}
 
 /// Bump-stop stiffness as a multiple of the linear spring [`SuspensionParams::stiffness`]: the
 /// progressive catch spring that engages in the last stretch of suspension travel is this much
@@ -336,6 +519,12 @@ fn apply_suspension(
     mut wheels: Query<(&WheelIndex, &mut Suspension), With<Roadwheel>>,
 ) {
     let filter = SpatialQueryFilter::from_mask(Layer::Terrain);
+    // Suspension-force recorder (`susp_trace`): the per-run counter, this tick's row join key.
+    let trace_tick = if susp_trace::enabled() {
+        susp_trace::next_tick()
+    } else {
+        0
+    };
     for (body, position, rotation, mut forces, mass, inertia, com, params, mut sim) in &mut bodies {
         // Travel-limit geometry, shared by every wheel of this body (see the clamp at the spring):
         // at full compression the hub sits exactly `wheel_radius` above the contact, so
@@ -429,17 +618,27 @@ fn apply_suspension(
             // Offset algebra (why flat-ground equilibrium is byte-identical between the models):
             // the ray reports `ground_distance = hit.distance` directly (hub to the ground point
             // straight below). The sphere starts its centre backed off UP the axis by
-            // `SPHERE_PROBE_RETRACT` (the retract trick) and travels `hit.distance` until its
-            // surface touches; on flat ground the centre stops one radius `r` above the ground, so
-            // the hub sits `hit.distance + r - SPHERE_PROBE_RETRACT` above it. Reconstructing
-            // `ground_distance` that way makes `compression = rest_length - ground_distance`
-            // identical for both probes on flat ground for ANY radius and ANY retract (both cancel)
-            // — same ride height, same 16 loads, same preload. The radius only bites where the
-            // ground is NOT flat: there the sphere touches the nearest terrain point in any
-            // direction (an edge, a lateral rise), rounding it off by `r` instead of the ray's
-            // teleporting point. `hit.point1` is the closest point on the HIT shape (the terrain) in
-            // world space (avian `ShapeHitData`), i.e. the true ground contact — on flat ground it
-            // coincides with the ray's `origin + dir * hit.distance`, so drive/friction match too.
+            // `SPHERE_PROBE_RETRACT` (the retract trick) and travels until its surface touches; on
+            // flat ground the centre stops one radius `r` above the ground, so the hub sits
+            // `travel + r - SPHERE_PROBE_RETRACT` above it. Reconstructing `ground_distance` that
+            // way makes `compression = rest_length - ground_distance` identical for both probes on
+            // flat ground for ANY radius and ANY retract (both cancel) — same ride height, same 16
+            // loads, same preload. The radius only bites where the ground is NOT flat: there the
+            // sphere touches the nearest terrain point in any direction (an edge, a lateral rise),
+            // rounding it off by `r` instead of the ray's teleporting point. `hit.point1` is the
+            // closest point on the HIT shape (the terrain) in world space (avian `ShapeHitData`),
+            // i.e. the true ground contact — on flat ground it coincides with the ray's
+            // `origin + dir * hit.distance`, so drive/friction match too.
+            //
+            // The travel is NOT `hit.distance` alone: parry's shape-cast TOI is only relative-
+            // tolerance accurate (millimetres-to-centimetres short against the large ground slab,
+            // pose-discontinuous — the at-rest limit-cycle pump) while the witness pair of the
+            // same hit is exact, so [`sphere_cast_ground_contact`] reconstructs the travel from
+            // `hit.point1`/`hit.normal1`, clamped to the TOI-based band, with conservative
+            // fallbacks for penetrating starts and corrupt witnesses — full derivation, guard
+            // semantics, error measurements, and the ADR-0015 continuity argument at that
+            // function. This arm is a thin adapter over it: everything except the raw cast lives
+            // in the tested helper.
             let probed = match *probe {
                 SuspensionProbe::Ray => spatial
                     .cast_ray(origin, down, params.ray_length, true, &filter)
@@ -452,7 +651,7 @@ fn apply_suspension(
                         down,
                         &ShapeCastConfig {
                             // Mirror the ray's reach: the sphere can find ground until the hub is
-                            // `ray_length` above it (`hit.distance = ray_length + retract - r`).
+                            // `ray_length` above it (`travel = ray_length + retract - r`).
                             max_distance: params.ray_length + SPHERE_PROBE_RETRACT
                                 - params.wheel_radius,
                             ..default()
@@ -460,9 +659,14 @@ fn apply_suspension(
                         &filter,
                     )
                     .map(|hit| {
-                        (
-                            hit.distance + params.wheel_radius - SPHERE_PROBE_RETRACT,
+                        sphere_cast_ground_contact(
+                            origin,
+                            dir,
+                            params.wheel_radius,
+                            SPHERE_PROBE_RETRACT,
+                            hit.distance,
                             hit.point1,
+                            hit.normal1,
                         )
                     }),
             };
@@ -497,7 +701,15 @@ fn apply_suspension(
             // the contact; its component along `up` is the compression rate (negative while
             // settling).
             let spring_speed = forces.velocity_at_point(contact).dot(up);
-            let mut load = params.stiffness * compression - params.damping * spring_speed;
+            // The two linear terms named once — the load sum below AND the recorder rows read
+            // them, so tracing adds no recomputation to the hot loop.
+            let spring_force = params.stiffness * compression;
+            let damper_force = -params.damping * spring_speed;
+            let mut load = spring_force + damper_force;
+            // Recorder taps (`susp_trace`): the bump-stop's applied force + cap state (plain
+            // copies of values the force math computes anyway — free when tracing is off).
+            let mut trace_stop = 0.0_f32;
+            let mut trace_capped = false;
 
             // Bump-stop: a much stiffer DAMPED spring (`BUMP_STOP_STIFFNESS_RATIO × stiffness`)
             // engaging above `engage` (a load-ratio margin over static rest — hoisted per body
@@ -533,10 +745,45 @@ fn apply_suspension(
                 let lever = (contact - com_world).cross(up);
                 let inv_effective_mass =
                     wheel_count * mass.inverse() + lever.dot(inv_inertia_world * lever);
-                load += stop.clamp(0.0, closing / (dt * inv_effective_mass));
+                let cap = closing / (dt * inv_effective_mass);
+                let applied = stop.clamp(0.0, cap);
+                // Recorder taps (`susp_trace`): copies, no recomputation.
+                trace_stop = applied;
+                trace_capped = stop > cap;
+                load += applied;
             }
 
             let load = load.max(0.0);
+
+            // Suspension-force recorder: the exact values entering `apply_force_at_point`
+            // (`clip` = the force the `max(0)` floor removed) — schema at `susp_trace`. f32
+            // fields go through `crate::trace::num` (NaN/inf → null, never invalid JSON).
+            if trace_tick != 0 {
+                let hull_v = forces.linear_velocity();
+                let hull_w = forces.angular_velocity();
+                susp_trace::write(&serde_json::json!({
+                    "k": "s",
+                    "n": trace_tick,
+                    "w": wheel_slot.0,
+                    "c": num(raw_compression),
+                    "cc": num(compression),
+                    "ss": num(spring_speed),
+                    "fs": num(spring_force),
+                    "fd": num(damper_force),
+                    "fb": num(trace_stop),
+                    "cap": trace_capped,
+                    "clip": num((spring_force + damper_force + trace_stop).min(0.0)),
+                    "ld": num(load),
+                    "cy": num(contact.y),
+                    "py": num(position.0.y),
+                    "vy": num(hull_v.y),
+                    "wx": num(hull_w.x),
+                    "wz": num(hull_w.z),
+                    "oy": num(origin.y),
+                    "gd": num(ground_distance),
+                    "we": wheel.to_bits(),
+                }));
+            }
 
             forces.apply_force_at_point(up * load, contact);
             suspension.contact = Some(contact);
@@ -635,6 +882,15 @@ fn apply_drive(
     volumes: Query<VolumeFacets>,
     mut wheels: Query<(&Roadwheel, &WheelIndex, &mut Suspension)>,
 ) {
+    // Suspension-force recorder (`susp_trace`): hoisted once per run like `apply_suspension`'s
+    // check, so the per-wheel hot loop below pays nothing when tracing is off. Reads (never
+    // bumps) the tick counter — `apply_suspension` runs first in the step, so this is the same
+    // tick's join key.
+    let trace_tick = if susp_trace::enabled() {
+        susp_trace::tick()
+    } else {
+        0
+    };
     // Per tank. `Drivetrain` is required per-variant data with no fallback (ADR-0010): we never
     // guess stats. It's absent only in the startup frames before the spec applies (a failed load is
     // fatal — see `report_failed_spec`), so a tank with no `Drivetrain` is simply not driven yet.
@@ -808,6 +1064,25 @@ fn apply_drive(
             let e = (f_fwd / grip).powi(2) + (f_lat / grip_lat).powi(2);
             if e > 1.0 {
                 force *= e.sqrt().recip();
+            }
+
+            // Suspension-force recorder: the exact drive/anchor force entering
+            // `apply_force_at_point` plus the contact velocity it was computed from — `pow` is
+            // the instantaneous power this force feeds the body (positive = energy in). f32
+            // fields go through `crate::trace::num` (NaN/inf → null, never invalid JSON).
+            if trace_tick != 0 {
+                susp_trace::write(&serde_json::json!({
+                    "k": "d",
+                    "n": trace_tick,
+                    "w": wheel_slot.0,
+                    "vf": num(v_fwd),
+                    "vl": num(v_lat),
+                    "ws": num(w_static),
+                    "df": num(d_fwd),
+                    "dl": num(d_lat),
+                    "f": [num(force.x), num(force.y), num(force.z)],
+                    "pow": num(force.dot(velocity)),
+                }));
             }
 
             forces.apply_force_at_point(force, contact);

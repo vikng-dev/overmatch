@@ -33,6 +33,11 @@ pub(crate) mod damage;
 #[cfg(debug_assertions)]
 mod debug;
 mod driving;
+/// Re-exported for `tests/spherecast_scale.rs`: the sphere probe's witness-geometry distance
+/// reconstruction + its TOI-band guard (the parry TOI-tolerance workaround) are pinned against
+/// raw parry casts there — the helper's math and parry's behavior, not the `apply_suspension`
+/// call site (that wiring's live guard is the idle at-rest harness metric).
+pub use driving::{SPHERE_CAST_TOI_SLACK, sphere_cast_ground_contact};
 /// Fire control: per-weapon superelevation range tables + the player-dialed range. Sits atop
 /// `ballistics`; the aim commit reads it to lob the aim point so the bore elevates for range.
 mod firecontrol;
