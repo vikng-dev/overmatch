@@ -36,7 +36,18 @@
 //!   sample exists yet, and absent entirely in SP / SP-composition net builds (no `ConfirmedHistory`).
 //! - `tick`   — per fixed tick, per tank root: sim truth — `p`/`q`/`lv`/`av`, `gnd` grounded wheel
 //!   count, `anc` planted anchor count, `loads` per-wheel spring load (N, ~0.1 N), `thr`/`str` drive
-//!   intent, `hc` hull contact-pair count, `pen` max penetration depth (m). Client-only: `rp`
+//!   intent, `hc` count of TOUCHING hull contact pairs (only pairs avian flags as actually
+//!   touching AND with still-overlapping AABBs — not the speculative pairs `Collisions::iter`
+//!   also carries, nor the stale pairs a rollback restore strands with a set `TOUCHING` flag but
+//!   disjoint AABBs), `pen` deepest real penetration among them (m, clamped `>= 0`: a speculative
+//!   contact's negative separation gap reads as zero, not a signed distance). Both are honest now
+//!   — `hc`/`pen` sit at 0 while the tank drives wheel-borne, and rise on genuine hull-vs-ground
+//!   overlap; the earlier multi-metre `pen` at hc=1 during normal driving was a phantom
+//!   (client-only) non-touching / rollback-stale pair. Caveat that remains BY DESIGN: avian's
+//!   narrow phase measures manifolds from the START-of-step pose while this row records the
+//!   post-solve pose, so inside a client rollback-correction burst (rows near `rp`/`rollback`
+//!   activity) `pen` can report a deep pre-solve overlap the solver then pushed out — real
+//!   transient world state, not a filtering miss; server/SP rows never show it. Client-only: `rp`
 //!   (present+true only on a rollback-REPLAY tick — the corrected re-simulation of an
 //!   already-recorded tick number; absent on original ticks and in SP/server rows, which never
 //!   replay). Analysis keeps the LAST row per (tick, entity), i.e. the replayed/corrected value.
@@ -375,13 +386,37 @@ fn record_tick(
     #[cfg(feature = "net")]
     let is_replay = !replaying.is_empty();
 
-    // Per-body contact count + deepest penetration in ONE pass over the contact graph (fix 5), so
-    // the roots loop below is a map lookup rather than a full re-scan per tank. A tank-vs-tank pair
-    // counts for both roots, which is correct — each body has that contact. `body1`/`body2` are the
-    // rigid-body entities (the tank root here, since the hull/part colliders are its children).
+    // Per-body count of TOUCHING contact pairs + deepest real penetration in ONE pass over the
+    // contact graph (fix 5), so the roots loop below is a map lookup rather than a full re-scan per
+    // tank. A tank-vs-tank pair counts for both roots, which is correct — each body has that
+    // contact. `body1`/`body2` are the rigid-body entities (the tank root here, since the hull/part
+    // colliders are its children).
+    //
+    // Only pairs avian reports as actually TOUCHING count (`ContactPair::is_touching` — the
+    // `TOUCHING` flag, verified in avian 0.7 source). A contact PAIR exists as soon as two colliders'
+    // speculative margins overlap, and a fast body's margin is unbounded; the client compounds it,
+    // since a rollback-restored contact graph can carry a stale manifold whose overlap never
+    // happened. Counting those inflated `hc` and, worse, `pen` — the measured hc=1 / pen≈2.9 m while
+    // the tank drove cleanly on its wheels. Penetration is likewise read only from a touching pair's
+    // deepest contact and clamped to `>= 0`: a speculative contact reports a NEGATIVE penetration
+    // (the separation gap), which must read as "no penetration", not a signed distance.
+    //
+    // `aabbs_disjoint` closes the remaining stale-flag hole (measured on rollback-REPLAY ticks of a
+    // drop test: multi-metre `pen` while airborne): when a rollback restore teleports the body, the
+    // pair's AABBs stop overlapping and avian's narrow phase EARLY-OUTS — it sets `DISJOINT_AABB`
+    // and returns without clearing `TOUCHING` or the manifolds (vendored 0.7 source,
+    // `narrow_phase/system_param.rs`), leaving the abandoned timeline's contact data flagged as
+    // touching until the pair's deferred removal. A pair both "touching" and "AABBs no longer
+    // overlap" is definitionally stale.
     let mut contacts: std::collections::HashMap<Entity, (u32, f32)> = std::collections::HashMap::new();
     for pair in collisions.iter() {
-        let deepest = pair.find_deepest_contact().map_or(0.0, |point| point.penetration);
+        if !pair.is_touching() || pair.aabbs_disjoint() {
+            continue;
+        }
+        let deepest = pair
+            .find_deepest_contact()
+            .map_or(0.0, |point| point.penetration)
+            .max(0.0);
         for body in [pair.body1, pair.body2].into_iter().flatten() {
             let entry = contacts.entry(body).or_insert((0, 0.0));
             entry.0 += 1;
