@@ -136,6 +136,47 @@ pub fn run() {
             0.0,
         ))
     });
+    // Reconciliation DEPTH controls (jitter investigation: felt MP jitter = frequency × depth ×
+    // chaos-gain; the threshold coarsening in `protocol` attacked frequency, this attacks depth).
+    // Every rollback restores a ~12-tick-old confirmed state and RE-SIMULATES to the present; that
+    // replay is chaotic through friction/contact, landing the corrected present 6–35× farther from
+    // the old present than the cm-scale client/server error that triggered it. Depth = how many
+    // ticks each replay re-runs, and two lightyear defaults inflate it, so we ran the library's
+    // maximum-violence configuration by default. Both are set on the input timeline below.
+    //
+    // (1) Input delay. Every tick of input delay is a tick prediction does NOT run ahead, so it
+    //     shrinks the prediction window (hence max rollback depth) directly. `balanced()` spends up
+    //     to ~50 ms of latency on input delay before any prediction — lightyear's own recommended
+    //     setting "to reduce the amount of rollback ticks needed (to reduce the rollback visual
+    //     artifacts and CPU costs)" (lightyear_sync input.rs). The old `PredictionManager::default()`
+    //     path selected `no_input_delay()`: 100% of latency absorbed by prediction, maximum depth.
+    //     `SPIKE_INPUT_DELAY_TICKS` overrides for A/B — `=0` restores `no_input_delay()` (the old
+    //     behavior), `=n` pins `fixed_input_delay(n)`; unset = the shipping `balanced()`.
+    let (input_delay, delay_label) = match harness::input_delay_ticks() {
+        None => (
+            InputDelayConfig::balanced(),
+            "balanced (≤3-tick input delay absorbs ~50ms before prediction)".to_string(),
+        ),
+        Some(0) => (
+            InputDelayConfig::no_input_delay(),
+            "no_input_delay (SPIKE_INPUT_DELAY_TICKS=0 — old max-prediction behavior)".to_string(),
+        ),
+        Some(n) => (
+            InputDelayConfig::fixed_input_delay(n),
+            format!("fixed_input_delay({n}) (SPIKE_INPUT_DELAY_TICKS={n})"),
+        ),
+    };
+    // (2) Sync jitter margin. `jitter_multiple` scales measured jitter into how far ahead prediction
+    //     runs purely as jitter safety — pure depth. lightyear defaults to 4 (99.7% packet
+    //     coverage); with the 20 ms test conditioner that's ~5 ticks of margin baked into the
+    //     prediction window. We ship 2 (95%). `SPIKE_JITTER_MULTIPLE` overrides for A/B; other
+    //     `SyncConfig` fields keep their defaults (`jitter_margin: 1.0` etc.).
+    let jitter_multiple = harness::jitter_multiple();
+    let sync_config = SyncConfig {
+        jitter_multiple,
+        ..default()
+    };
+    info!("client: input delay = {delay_label}; sync jitter_multiple = {jitter_multiple}");
     let client = app
         .world_mut()
         .spawn((
@@ -144,7 +185,23 @@ pub fn run() {
             Link::new(conditioner),
             LocalAddr(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0)),
             PeerAddr(server_addr),
-            PredictionManager::default(),
+            // (3) The input-rollback branch is a permanent no-op for us — we never rebroadcast
+            //     inputs and our own inputs can't mismatch (we author them), so `RollbackMode`'s
+            //     input arm only costs a per-frame input-buffer scan. Disable it; STATE rollback
+            //     (the real one, against replicated Position/Rotation/velocity) stays `Check`, and
+            //     everything else keeps its `RollbackPolicy` default (`max_rollback_ticks: 100`).
+            PredictionManager {
+                rollback_policy: RollbackPolicy {
+                    input: RollbackMode::Disabled,
+                    ..default()
+                },
+                ..default()
+            },
+            // The depth knobs (1)+(2), inserted ALWAYS (no longer only under the env lever): the
+            // shipping default is `balanced()` + `jitter_multiple: 2`, not lightyear's max-violence
+            // `no_input_delay()` + `jitter_multiple: 4`. `PredictionManager` `#[require]`s an
+            // `InputTimelineConfig`; giving it explicitly here wins over that default insert.
+            InputTimelineConfig::new(sync_config, input_delay),
             NetcodeClient::new(
                 Authentication::Manual {
                     server_addr,
@@ -162,17 +219,6 @@ pub fn run() {
             UdpIo::default(),
         ))
         .id();
-    // Env-tunable input delay (step 7 A/B lever, map §5): `fixed_input_delay(n)` pins the input
-    // delay to n ticks, shrinking the prediction window — off by default (0 ≈ no_input_delay,
-    // except max_predicted_ticks stays 100 which matches our ~7-tick practical case anyway).
-    let delay_ticks = harness::input_delay_ticks();
-    if delay_ticks > 0 {
-        info!("client: SPIKE_INPUT_DELAY_TICKS={delay_ticks}");
-        app.world_mut().entity_mut(client).insert(
-            InputTimelineConfig::default()
-                .with_input_delay(InputDelayConfig::fixed_input_delay(delay_ticks)),
-        );
-    }
     // Connect only once the tank assets (spec + glb scene) are loaded. The client still preloads
     // before connecting — but no longer to guard a bind window (that window is gone: the sim body
     // now spawns whole from extracted data the moment the replicated root lands). The spec feeds

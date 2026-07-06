@@ -206,13 +206,28 @@ pub(crate) fn spawn_pose() -> Option<(Vec3, Quat)> {
     Some((pos, rot))
 }
 
-/// `SPIKE_INPUT_DELAY_TICKS` (default 0, i.e. `InputDelayConfig::no_input_delay()`'s behavior via
-/// `fixed_input_delay(0)`): an A/B lever per map §5 — a small fixed input delay shrinks how often
-/// prediction needs to run ahead at all, a second and complementary knob to the threshold
-/// coarsening in `protocol`. Off by default so the baseline A/B isn't itself perturbed by this lever.
-pub(crate) fn input_delay_ticks() -> u16 {
+/// `SPIKE_INPUT_DELAY_TICKS`: the input-delay A/B lever for the reconciliation-DEPTH work — input
+/// delay is the primary knob on how far prediction runs ahead, and thus on rollback replay depth.
+/// `None` (unset) is the shipping default: `InputDelayConfig::balanced()` (~50 ms of latency spent
+/// on input delay before prediction, lightyear's own recommendation to shrink rollback depth).
+/// `Some(0)` forces `no_input_delay()` — the pre-change max-prediction behavior, so the harness can
+/// A/B the old and new depths from the SAME binary. `Some(n>0)` pins `fixed_input_delay(n)`. Kept as
+/// an `Option` precisely so "unset" (balanced) and "explicitly 0" (no delay) stay distinguishable.
+pub(crate) fn input_delay_ticks() -> Option<u16> {
     std::env::var("SPIKE_INPUT_DELAY_TICKS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(0)
+}
+
+/// `SPIKE_JITTER_MULTIPLE` (default 2): the sync-margin A/B lever, the depth work's second knob.
+/// `SyncConfig::jitter_multiple` scales measured jitter into the timeline's safety margin — how far
+/// ahead prediction runs purely to cover jitter, i.e. baked-in rollback depth (1→65% packet
+/// coverage, 2→95%, 3→99.7%; lightyear_sync sync.rs). lightyear defaults to 4 (99.7%), which with
+/// the 20 ms test conditioner is ~5 ticks of pure margin; we ship 2 (95%). The lever restores 4 (or
+/// any value) to A/B the old margin against the new from one binary.
+pub(crate) fn jitter_multiple() -> u8 {
+    std::env::var("SPIKE_JITTER_MULTIPLE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2)
 }
