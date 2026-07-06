@@ -41,7 +41,11 @@
 //!   the key discriminator for a silent desync. All three are omitted (not null) when no confirmed
 //!   sample exists yet, and absent entirely in SP / SP-composition net builds (no `ConfirmedHistory`).
 //! - `tick`   — per fixed tick, per tank root: sim truth — `p`/`q`/`lv`/`av`, `gnd` grounded wheel
-//!   count, `anc` planted anchor count, `loads` per-wheel spring load (N, ~0.1 N), `thr`/`str` drive
+//!   count, `anc` anchored (loaded/grounded) wheel count, `ancm` per-wheel anchor bitmask (bit i =
+//!   slot i anchored; transitions = grounding churn, wheels gaining/losing load — NOT grip flicker:
+//!   since the static↔kinetic blend in `driving.rs`, anchors stay `Some` while the wheel bears load
+//!   and the grip regime lives in the continuous `w_static` weight, so `anc`≈`gnd` by design),
+//!   `loads` per-wheel spring load (N, ~0.1 N), `thr`/`str` drive
 //!   intent, `hc` count of TOUCHING hull contact pairs (only pairs avian flags as actually
 //!   touching AND with still-overlapping AABBs — not the speculative pairs `Collisions::iter`
 //!   also carries, nor the stale pairs a rollback restore strands with a set `TOUCHING` flag but
@@ -460,7 +464,27 @@ fn record_tick(
             // row width.
             .map(|(_, suspension)| num((suspension.load * 10.0).round() / 10.0))
             .collect();
+        // `anc` counts anchored wheels — since the static↔kinetic friction blend (`ramp_drive`,
+        // src/driving.rs) an anchor stays `Some` for as long as the wheel bears load and releases
+        // only on the airborne/unloaded paths, so this is a loaded/grounded-wheel count (≈ `gnd`),
+        // NOT a grip-state count. The grip regime is the continuous `w_static` weight in
+        // `ramp_drive` now — it never appears here as a discrete state to count.
         let anchors = sim.anchors.iter().filter(|a| a.is_some()).count();
+        // Per-wheel anchor bitmask (bit i = slot i anchored), so analysis can count per-wheel
+        // anchor TRANSITIONS across ticks. Post-blend these transitions are grounding churn (a
+        // wheel gaining/losing load), not the stick-speed plant/release grip flicker the
+        // friction-continuity work measured with this field — that flicker no longer exists as a
+        // Some/None flip (see the anchor-relax comment in src/driving.rs). The plain `anc` count
+        // hides a simultaneous gain+loss (one wheel loads as another unloads, net count unchanged);
+        // the bitmask exposes each slot's flip. u32 covers any plausible wheel count (Tiger has
+        // 16); higher slots would silently drop, acceptable.
+        let anchor_mask: u32 = sim
+            .anchors
+            .iter()
+            .take(32)
+            .enumerate()
+            .filter(|(_, a)| a.is_some())
+            .fold(0u32, |m, (i, _)| m | (1 << i));
 
         // Contact pairs whose rigid body is this tank root, and the deepest penetration among them
         // — the collision-stress signal the jitter correlates with.
@@ -478,6 +502,7 @@ fn record_tick(
             "av": vec3(angvel.0),
             "gnd": grounded,
             "anc": anchors,
+            "ancm": anchor_mask,
             "loads": Value::Array(loads),
             "thr": num(drive.throttle()),
             "str": num(drive.steer()),
