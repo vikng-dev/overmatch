@@ -113,9 +113,36 @@ fn apply_servo_angles(
 /// condition only for gross desync (teleports, missed impacts), where a replay is genuinely
 /// cheaper than waiting for the position bar. The conditions must stay: without one, lightyear
 /// falls back to `PartialEq::ne` — bit-equality that f32 solver output never satisfies.
-const ROLLBACK_POSITION_M: f32 = 0.05;
-const ROLLBACK_ROTATION_RAD: f32 = 0.05;
-const ROLLBACK_VELOCITY: f32 = 1.0;
+/// `pub(crate)` because `net::watchdog` re-runs the same comparisons with the same bars — one
+/// definition of "desynced enough to roll back", two detectors (receive-time + backstop).
+pub(crate) const ROLLBACK_POSITION_M: f32 = 0.05;
+pub(crate) const ROLLBACK_ROTATION_RAD: f32 = 0.05;
+pub(crate) const ROLLBACK_VELOCITY: f32 = 1.0;
+
+// The mismatch METRICS those thresholds are measured against — like the bars above, defined once
+// and shared by both detectors (the registered rollback conditions below and `net::watchdog`'s
+// re-run of the same comparison), so "desynced enough to roll back" has exactly one definition:
+// one metric, one bar, two call sites.
+
+/// Confirmed-vs-predicted `Position` divergence: straight-line distance (m).
+pub(crate) fn position_error(a: &Position, b: &Position) -> f32 {
+    (a.0 - b.0).length()
+}
+
+/// Confirmed-vs-predicted `Rotation` divergence: shortest rotation angle between the two (rad).
+pub(crate) fn rotation_error(a: &Rotation, b: &Rotation) -> f32 {
+    a.angle_between(*b)
+}
+
+/// Confirmed-vs-predicted `LinearVelocity` divergence: vector difference magnitude (m/s).
+pub(crate) fn linear_velocity_error(a: &LinearVelocity, b: &LinearVelocity) -> f32 {
+    (a.0 - b.0).length()
+}
+
+/// Confirmed-vs-predicted `AngularVelocity` divergence: vector difference magnitude (rad/s).
+pub(crate) fn angular_velocity_error(a: &AngularVelocity, b: &AngularVelocity) -> f32 {
+    (a.0 - b.0).length()
+}
 
 /// Registers everything both sides of the wire must agree on: replicated components and the
 /// `TankCommand` input protocol. Grows as later increments add more (§5/§7 of the spike map).
@@ -162,7 +189,7 @@ pub(crate) fn plugin(app: &mut App) {
         .replicate()
         .predict()
         .with_rollback_condition(|a: &Position, b: &Position| {
-            crate::trace::note_if_tripped("Position", (a.0 - b.0).length(), ROLLBACK_POSITION_M)
+            crate::trace::note_if_tripped("Position", position_error(a, b), ROLLBACK_POSITION_M)
         })
         .add_linear_correction_fn()
         .add_linear_interpolation();
@@ -170,7 +197,7 @@ pub(crate) fn plugin(app: &mut App) {
         .replicate()
         .predict()
         .with_rollback_condition(|a: &Rotation, b: &Rotation| {
-            crate::trace::note_if_tripped("Rotation", a.angle_between(*b), ROLLBACK_ROTATION_RAD)
+            crate::trace::note_if_tripped("Rotation", rotation_error(a, b), ROLLBACK_ROTATION_RAD)
         })
         .add_linear_correction_fn()
         .add_linear_interpolation();
@@ -181,13 +208,13 @@ pub(crate) fn plugin(app: &mut App) {
         .replicate()
         .predict()
         .with_rollback_condition(|a: &LinearVelocity, b: &LinearVelocity| {
-            crate::trace::note_if_tripped("LinearVelocity", (a.0 - b.0).length(), ROLLBACK_VELOCITY)
+            crate::trace::note_if_tripped("LinearVelocity", linear_velocity_error(a, b), ROLLBACK_VELOCITY)
         });
     app.component::<AngularVelocity>()
         .replicate()
         .predict()
         .with_rollback_condition(|a: &AngularVelocity, b: &AngularVelocity| {
-            crate::trace::note_if_tripped("AngularVelocity", (a.0 - b.0).length(), ROLLBACK_VELOCITY)
+            crate::trace::note_if_tripped("AngularVelocity", angular_velocity_error(a, b), ROLLBACK_VELOCITY)
         });
 
     // Non-replicated rollback state — ROOT-RESIDENT ONLY, by design: the root is the predicted

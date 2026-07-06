@@ -17,6 +17,7 @@ pub mod protocol;
 pub mod render_error;
 pub mod rig;
 pub mod server;
+pub mod watchdog;
 
 pub use physics::physics_plugins;
 pub use rig::client_smoothing_plugin;

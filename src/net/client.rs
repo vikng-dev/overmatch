@@ -102,6 +102,10 @@ pub fn run() {
     // accumulates that snap as a decaying offset on the predicted root's render `Transform` so the
     // VIEW never lurches.
     app.add_plugins(super::render_error::plugin);
+    // The rollback watchdog (client only): the backstop for lightyear's receive-time mismatch
+    // check, which starves permanently at zero prediction margin — exactly where `balanced()`
+    // input delay puts a LAN/loopback client (see the module doc for the vendored mechanism).
+    app.add_plugins(super::watchdog::plugin);
     // Step 7: the real sim — same `SimPlugin` the server mounts, so client-side rollback replay
     // re-runs the actual driving/aim/shooting systems, not a stub.
     app.add_plugins(SimPlugin);
