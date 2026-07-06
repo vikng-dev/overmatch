@@ -14,8 +14,8 @@ use std::collections::{HashMap, HashSet};
 
 use avian3d::physics_transform::ApplyPosToTransform;
 use avian3d::prelude::{
-    AngularInertia, CenterOfMass, Collider, CollisionLayers, LayerMask, Mass,
-    NoAutoAngularInertia, NoAutoCenterOfMass, NoAutoMass, RigidBody, TrimeshFlags,
+    AngularInertia, CenterOfMass, Collider, CollisionLayers, LayerMask, Mass, NoAutoAngularInertia,
+    NoAutoCenterOfMass, NoAutoMass, RigidBody, TrimeshFlags,
 };
 use bevy::asset::LoadState;
 use bevy::ecs::system::SystemParam;
@@ -812,7 +812,10 @@ pub(crate) fn spawn_tank_sim(
     if !wheel_nodes.iter().any(|&(_, side)| side == TrackSide::Left) {
         missing.push("Wheel_L*".into());
     }
-    if !wheel_nodes.iter().any(|&(_, side)| side == TrackSide::Right) {
+    if !wheel_nodes
+        .iter()
+        .any(|&(_, side)| side == TrackSide::Right)
+    {
         missing.push("Wheel_R*".into());
     }
     assert!(
@@ -866,7 +869,11 @@ pub(crate) fn spawn_tank_sim(
             Some(p) => entities[p].expect("extraction order puts parents before children"),
         };
         let entity = commands
-            .spawn((Name::new(node.name.clone()), node.transform, ChildOf(parent)))
+            .spawn((
+                Name::new(node.name.clone()),
+                node.transform,
+                ChildOf(parent),
+            ))
             .id();
         entities[index] = Some(entity);
     }
@@ -990,7 +997,12 @@ pub(crate) fn spawn_tank_sim(
             }
         }
         for primitive in &node.primitives {
-            let vertices: Vec<Vec3> = primitive.positions.iter().copied().map(Vec3::from).collect();
+            let vertices: Vec<Vec3> = primitive
+                .positions
+                .iter()
+                .copied()
+                .map(Vec3::from)
+                .collect();
             let triangles: Vec<[u32; 3]> = primitive
                 .indices
                 .chunks_exact(3)
@@ -1030,9 +1042,17 @@ pub(crate) fn spawn_tank_sim(
             node.name
         );
         for primitive in &node.primitives {
-            let points: Vec<Vec3> = primitive.positions.iter().copied().map(Vec3::from).collect();
+            let points: Vec<Vec3> = primitive
+                .positions
+                .iter()
+                .copied()
+                .map(Vec3::from)
+                .collect();
             let collider = Collider::convex_hull(points).unwrap_or_else(|| {
-                panic!("collision proxy `{}` has a degenerate hull source", node.name)
+                panic!(
+                    "collision proxy `{}` has a degenerate hull source",
+                    node.name
+                )
             });
             commands.spawn((
                 ChildOf(entity_at(index)),
@@ -1268,7 +1288,13 @@ fn servo_rotation(spec: &ServoSpec, rest: &ServoRest, angle: f32) -> Quat {
 /// (`interpolate_servos` writes the view tree), so this is the invariant's cheap enforcement, a
 /// quat multiply per servo, rather than an undo of the render lerp.
 fn restore_servo_truth(
-    mut q: Query<(&mut Transform, &ServoSpec, &ServoRest, &ServoIndex, &TankRoot)>,
+    mut q: Query<(
+        &mut Transform,
+        &ServoSpec,
+        &ServoRest,
+        &ServoIndex,
+        &TankRoot,
+    )>,
     sims: Query<&TankSim>,
 ) {
     for (mut transform, spec, rest, slot, root) in &mut q {

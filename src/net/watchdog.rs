@@ -273,11 +273,11 @@ fn rollback_watchdog(
     ];
 
     // Timeline regression = new session (see the system doc): forget everything, observe fresh.
-    if checks
-        .iter()
-        .zip(&state.components)
-        .any(|(c, s)| c.checkable.zip(s.last_tick).is_some_and(|(t, last)| t < last))
-    {
+    if checks.iter().zip(&state.components).any(|(c, s)| {
+        c.checkable
+            .zip(s.last_tick)
+            .is_some_and(|(t, last)| t < last)
+    }) {
         debug!("watchdog: confirmed timeline regressed — resetting for the new session");
         *state = WatchdogState::default();
     }

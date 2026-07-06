@@ -239,7 +239,10 @@ pub fn client_smoothing_plugin(app: &mut App) {
         FrameInterpolationPlugin::<Position>::default(),
         FrameInterpolationPlugin::<Rotation>::default(),
     ));
-    app.add_systems(Update, (arm_predicted_smoothing, demote_predicted_interpolated));
+    app.add_systems(
+        Update,
+        (arm_predicted_smoothing, demote_predicted_interpolated),
+    );
 }
 
 /// Strip the `Interpolated` marker off the client's OWN predicted tank — the fix for the
@@ -294,7 +297,9 @@ fn demote_predicted_interpolated(
     mut commands: Commands,
 ) {
     for entity in &tanks {
-        info!("net: {entity} predicted tank also carries Interpolated — stripping it so Position/Rotation route through the prediction (rollback-checked) receive path");
+        info!(
+            "net: {entity} predicted tank also carries Interpolated — stripping it so Position/Rotation route through the prediction (rollback-checked) receive path"
+        );
         commands.entity(entity).remove::<Interpolated>();
     }
 }

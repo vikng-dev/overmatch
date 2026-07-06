@@ -446,7 +446,14 @@ fn paint_view_volumes(
     } else {
         return;
     };
-    paint_volume(add.entity, is_armor, &children, &meshes, material, &mut commands);
+    paint_volume(
+        add.entity,
+        is_armor,
+        &children,
+        &meshes,
+        material,
+        &mut commands,
+    );
 }
 
 /// Set `material` + a [`VolumePaint`] tag on every mesh in the volume node's subtree (the glTF

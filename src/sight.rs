@@ -21,9 +21,7 @@ use crate::damage::ControlledTank;
 use crate::firecontrol::{RangeTable, Ranging};
 use crate::spec::ViewKind;
 use crate::state::GameplaySet;
-use crate::tank::{
-    Controlled, Hull, Rig, ServoIndex, Tank, TankSim, TankViews, shortest_angle,
-};
+use crate::tank::{Controlled, Hull, Rig, ServoIndex, Tank, TankSim, TankViews, shortest_angle};
 
 /// Whether the controlled tank's `kind` view is usable — its authored `requires` met (a dead
 /// gunner closes the optic, a dead commander closes third-person). A missing view is unusable.

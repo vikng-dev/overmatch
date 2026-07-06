@@ -168,7 +168,8 @@ fn apply_recoil(
             continue;
         };
         // Damped spring back to battery: offset'' = -k·offset - c·offset'.
-        let accel = -params.stiffness * state.recoil_offset - params.damping * state.recoil_velocity;
+        let accel =
+            -params.stiffness * state.recoil_offset - params.damping * state.recoil_velocity;
         state.recoil_velocity += accel * dt;
         state.recoil_offset += state.recoil_velocity * dt;
         // Battery stop — the barrel can't return past its rest position.

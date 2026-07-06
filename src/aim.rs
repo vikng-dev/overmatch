@@ -269,8 +269,10 @@ fn update_bore_indicator(
     };
     // The VIEW muzzle (design §6C): the bore dot must ride the render-smoothed chain — the sim
     // muzzle steps at tick rate since the sim/view split.
-    let Ok(muzzle) = muzzle.get(ViewNode::resolve(view_nodes.get(rig.muzzle).ok(), rig.muzzle))
-    else {
+    let Ok(muzzle) = muzzle.get(ViewNode::resolve(
+        view_nodes.get(rig.muzzle).ok(),
+        rig.muzzle,
+    )) else {
         return;
     };
     let Ok((mut node, mut visibility)) = indicator.single_mut() else {

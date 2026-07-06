@@ -215,13 +215,21 @@ pub(crate) fn plugin(app: &mut App) {
         .replicate()
         .predict()
         .with_rollback_condition(|a: &LinearVelocity, b: &LinearVelocity| {
-            crate::trace::note_if_tripped("LinearVelocity", linear_velocity_error(a, b), ROLLBACK_VELOCITY)
+            crate::trace::note_if_tripped(
+                "LinearVelocity",
+                linear_velocity_error(a, b),
+                ROLLBACK_VELOCITY,
+            )
         });
     app.component::<AngularVelocity>()
         .replicate()
         .predict()
         .with_rollback_condition(|a: &AngularVelocity, b: &AngularVelocity| {
-            crate::trace::note_if_tripped("AngularVelocity", angular_velocity_error(a, b), ROLLBACK_VELOCITY)
+            crate::trace::note_if_tripped(
+                "AngularVelocity",
+                angular_velocity_error(a, b),
+                ROLLBACK_VELOCITY,
+            )
         });
 
     // Non-replicated rollback state — ROOT-RESIDENT ONLY, by design: the root is the predicted
@@ -272,7 +280,9 @@ fn strip_confirmed_history<C: Component + Clone>(
     add: On<Add, ConfirmedHistory<C>>,
     mut commands: Commands,
 ) {
-    commands.entity(add.entity).try_remove::<ConfirmedHistory<C>>();
+    commands
+        .entity(add.entity)
+        .try_remove::<ConfirmedHistory<C>>();
 }
 
 /// Copy this tick's `ActionState<TankCommand>` (lightyear's input-buffer-backed component) into the

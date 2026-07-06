@@ -153,7 +153,8 @@ fn spawn_pending_tanks(
     };
     // Harness override (`SPIKE_SPAWN_POSE`): place the tank onto a known resting contact for the
     // beached-rest repro; unset in every normal run, so the default flat-pad spawn stands.
-    let (spawn_pos, spawn_rot) = harness::spawn_pose().unwrap_or((Vec3::new(0.0, 2.0, 0.0), Quat::IDENTITY));
+    let (spawn_pos, spawn_rot) =
+        harness::spawn_pose().unwrap_or((Vec3::new(0.0, 2.0, 0.0), Quat::IDENTITY));
     for (link, client_id) in pending.0.drain(..) {
         let mut tank = commands.spawn((
             Name::new("Tank"),

@@ -10,8 +10,8 @@ use bevy::prelude::*;
 use lightyear::prediction::diagnostics::PredictionDiagnosticsPlugin;
 use lightyear::prelude::*;
 
-use crate::ballistics::ShellPath;
 use super::protocol::NetTank;
+use crate::ballistics::ShellPath;
 use crate::driving::Suspension;
 use crate::tank::{Hull, Tank, TankSim, Turret};
 
@@ -53,7 +53,8 @@ pub(crate) fn fixed_nan_probe(
     let poisoned = |v: Vec3| !v.is_finite() || v.abs().max_element() > 1.0e30;
     let mut corrupt = false;
     for (entity, position, rotation, linear, angular) in &bodies {
-        let bad_vel = linear.is_some_and(|v| poisoned(v.0)) || angular.is_some_and(|v| poisoned(v.0));
+        let bad_vel =
+            linear.is_some_and(|v| poisoned(v.0)) || angular.is_some_and(|v| poisoned(v.0));
         if poisoned(position.0) || !rotation.0.is_finite() || bad_vel {
             error!(
                 "net: FIXED-NAN root {entity}: pos={:?} rot={:?} linvel={:?} angvel={:?}",

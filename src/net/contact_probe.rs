@@ -88,7 +88,16 @@ fn aabb_divergence(leaf_min: [f32; 3], leaf_max: [f32; 3], component: &ColliderA
 /// The probe body: one line per candidate (hull proxy, terrain collider) pair per fixed tick.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn probe(
-    roots: Query<(Entity, &Position, &Rotation, &LinearVelocity, Has<Controlled>), With<Tank>>,
+    roots: Query<
+        (
+            Entity,
+            &Position,
+            &Rotation,
+            &LinearVelocity,
+            Has<Controlled>,
+        ),
+        With<Tank>,
+    >,
     children: Query<&Children>,
     colliders: Query<(
         Entity,
@@ -143,7 +152,10 @@ fn probe(
             let (leaf_y, leaf_dvg) = match leaf {
                 Some(leaf) => (
                     yr(leaf.min.y, leaf.max.y),
-                    format!("{:.6}", aabb_divergence(leaf.min.to_array(), leaf.max.to_array(), &eaabb.get())),
+                    format!(
+                        "{:.6}",
+                        aabb_divergence(leaf.min.to_array(), leaf.max.to_array(), &eaabb.get())
+                    ),
                 ),
                 None => ("none".into(), "none".into()),
             };
@@ -182,8 +194,8 @@ fn probe(
                 // The GROUND slab (the y-span-1.01 collider covering the whole map) is logged
                 // UNCONDITIONALLY: it's the pair the server holds in the wedge scenario, and the
                 // whole point is watching it while the client's state is far from re-forming it.
-                let is_ground = (tcaabb.max.y - tcaabb.min.y) < 1.5
-                    && (tcaabb.max.x - tcaabb.min.x) > 100.0;
+                let is_ground =
+                    (tcaabb.max.y - tcaabb.min.y) < 1.5 && (tcaabb.max.x - tcaabb.min.x) > 100.0;
                 if pair.is_none() && !is_ground && !near_aabb.intersects(tcaabb) {
                     continue;
                 }
@@ -203,7 +215,14 @@ fn probe(
                 let tleaf_dvg = ttree
                     .get_proxy_aabb(tkey.id())
                     .map_or("none".into(), |leaf| {
-                        format!("{:.6}", aabb_divergence(leaf.min.to_array(), leaf.max.to_array(), &teaabb.get()))
+                        format!(
+                            "{:.6}",
+                            aabb_divergence(
+                                leaf.min.to_array(),
+                                leaf.max.to_array(),
+                                &teaabb.get()
+                            )
+                        )
                     });
 
                 info!(

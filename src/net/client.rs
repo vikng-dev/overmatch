@@ -264,7 +264,9 @@ pub fn run() {
             }
             *connected = true;
             commands.trigger(Connect { entity: client });
-            info!("client: tank assets loaded — connecting to {server_addr} as client_id={client_id}");
+            info!(
+                "client: tank assets loaded — connecting to {server_addr} as client_id={client_id}"
+            );
         },
     );
     app.add_systems(Startup, load_tank_assets);
@@ -290,17 +292,18 @@ pub fn run() {
             ),
         );
     if simulate {
-        app.add_systems(Update, harness::simulate_watchdog).add_systems(
-            FixedPreUpdate,
-            // Rollback replays re-run FixedPreUpdate too (map §8) — lightyear itself restores
-            // `ActionState` from the `InputBuffer` per replayed tick (and `buffer_action_state`
-            // is `Without<Rollback>`, so the buffer can't be corrupted), but without this gate
-            // the scripted tick counter would count every replayed tick (verified live: 640
-            // "ticks" burned in <5 s wall).
-            harness::buffer_input
-                .in_set(InputSystems::WriteClientInputs)
-                .run_if(not(is_in_rollback)),
-        );
+        app.add_systems(Update, harness::simulate_watchdog)
+            .add_systems(
+                FixedPreUpdate,
+                // Rollback replays re-run FixedPreUpdate too (map §8) — lightyear itself restores
+                // `ActionState` from the `InputBuffer` per replayed tick (and `buffer_action_state`
+                // is `Without<Rollback>`, so the buffer can't be corrupted), but without this gate
+                // the scripted tick counter would count every replayed tick (verified live: 640
+                // "ticks" burned in <5 s wall).
+                harness::buffer_input
+                    .in_set(InputSystems::WriteClientInputs)
+                    .run_if(not(is_in_rollback)),
+            );
     } else {
         app.init_resource::<MenuOverlay>()
             .add_systems(Update, toggle_menu)

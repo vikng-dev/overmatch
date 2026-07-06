@@ -208,9 +208,14 @@ pub(crate) fn perturb_after_delay(
 /// rollback storm reproduces deterministically. Inert when unset.
 pub(crate) fn spawn_pose() -> Option<(Vec3, Quat)> {
     let raw = std::env::var("SPIKE_SPAWN_POSE").ok()?;
-    let nums: Vec<f32> = raw.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+    let nums: Vec<f32> = raw
+        .split(',')
+        .filter_map(|s| s.trim().parse().ok())
+        .collect();
     if nums.len() != 7 {
-        error!("server: SPIKE_SPAWN_POSE=\"{raw}\" is not seven f32s (x,y,z,qx,qy,qz,qw) — ignored");
+        error!(
+            "server: SPIKE_SPAWN_POSE=\"{raw}\" is not seven f32s (x,y,z,qx,qy,qz,qw) — ignored"
+        );
         return None;
     }
     let pos = Vec3::new(nums[0], nums[1], nums[2]);

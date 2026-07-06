@@ -93,12 +93,12 @@ mod susp_trace {
 
 use crate::Layer;
 use crate::command::TankCommand;
-use crate::trace::num;
 use crate::damage::{
     Capability, TankCapabilities, TankVolumes, VolumeFacets, capability_available,
 };
 use crate::state::GameplaySet;
 use crate::tank::{Roadwheel, Tank, TankSim, TrackSide, WheelIndex, rig_world_pose};
+use crate::trace::num;
 
 /// Coulomb coefficient: each wheel's total ground force is capped at MU × load (friction ellipse).
 /// Per-environment (the track-vs-ground surface pair), not per-tank — destined for the terrain
@@ -995,8 +995,7 @@ fn apply_drive(
             // (`None`) only when the wheel goes airborne/unloaded (the `load <= 0` path here and
             // `apply_suspension`'s unsupported paths).
             let v_ref = STICK_SPEED * (1.0 + STICK_BAND);
-            let d_sat_fwd =
-                grip / drivetrain.brush_stiffness * (v_fwd / v_ref).clamp(-1.0, 1.0);
+            let d_sat_fwd = grip / drivetrain.brush_stiffness * (v_fwd / v_ref).clamp(-1.0, 1.0);
             let d_sat_lat =
                 grip_lat / drivetrain.brush_stiffness * (v_lat / v_ref).clamp(-1.0, 1.0);
             let anchor_target = contact - forward * d_sat_fwd - right * d_sat_lat;

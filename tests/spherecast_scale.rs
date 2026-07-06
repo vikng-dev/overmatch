@@ -96,11 +96,18 @@ fn cast_error(half_extent: f32) -> (f32, f32, f32) {
             let (reconstructed, contact) =
                 sphere_cast_ground_contact(start, dir, WHEEL_RADIUS, 0.0, toi, point1, normal1);
             max_err_reconstructed = max_err_reconstructed.max((reconstructed - y).abs());
-            assert_eq!(contact, point1, "non-penetrating cast must keep the witness contact");
+            assert_eq!(
+                contact, point1,
+                "non-penetrating cast must keep the witness contact"
+            );
             count += 1;
         }
     }
-    (max_err_raw, sum_err_raw / count as f32, max_err_reconstructed)
+    (
+        max_err_raw,
+        sum_err_raw / count as f32,
+        max_err_reconstructed,
+    )
 }
 
 #[test]
@@ -238,7 +245,10 @@ fn non_finite_witness_synthesizes_on_axis_contact() {
         Vector::new(0.0, 1.0, 0.0),
     );
     assert_eq!(ground_distance, toi_based);
-    assert!(contact.is_finite(), "corrupt witness must never escape as the contact");
+    assert!(
+        contact.is_finite(),
+        "corrupt witness must never escape as the contact"
+    );
     assert_eq!(contact, origin + dir * toi_based);
 
     // Non-finite NORMAL with a finite point: no reconstruction (falls back to the TOI-based

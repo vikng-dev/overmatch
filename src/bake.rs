@@ -294,7 +294,9 @@ fn shadow_compare_on_instance_ready(
     }
     let Some(geometry) = geometry.as_deref() else {
         // Startup extraction precedes any instantiation; absence is a wiring bug, not a race.
-        fail(vec!["ExtractedTankGeometry resource missing at bind".into()]);
+        fail(vec![
+            "ExtractedTankGeometry resource missing at bind".into(),
+        ]);
         return;
     };
     let geometry = &geometry.0;
@@ -340,7 +342,8 @@ fn shadow_compare_on_instance_ready(
         }
 
         // Parent node, by name. The scene-root wrapper's parent chain holds no extracted node.
-        let scene_parent = nearest_extracted_ancestor(entity, ready.entity, geometry, &parents, &names);
+        let scene_parent =
+            nearest_extracted_ancestor(entity, ready.entity, geometry, &parents, &names);
         let extracted_parent = node.parent.map(|p| geometry.nodes[p].name.as_str());
         if scene_parent != extracted_parent {
             mismatches.push(format!(
@@ -353,7 +356,8 @@ fn shadow_compare_on_instance_ready(
         if let Some((position, rotation)) =
             compose_scene_pose(entity, ready.entity, &parents, &transforms)
         {
-            if position.to_array().map(f32::to_bits) != node.root_position.to_array().map(f32::to_bits)
+            if position.to_array().map(f32::to_bits)
+                != node.root_position.to_array().map(f32::to_bits)
                 || rotation.to_array().map(f32::to_bits)
                     != node.root_rotation.to_array().map(f32::to_bits)
             {
@@ -400,7 +404,12 @@ fn shadow_compare_on_instance_ready(
                 .iter()
                 .map(|p| {
                     (
-                        p.positions.iter().flatten().copied().map(f32::to_bits).collect(),
+                        p.positions
+                            .iter()
+                            .flatten()
+                            .copied()
+                            .map(f32::to_bits)
+                            .collect(),
                         p.indices.clone(),
                     )
                 })
@@ -588,7 +597,10 @@ mod tests {
             .collect();
         let mut sorted = wheel_names.clone();
         sorted.sort_unstable();
-        assert_eq!(wheel_names, sorted, "roadwheels must be extracted name-sorted");
+        assert_eq!(
+            wheel_names, sorted,
+            "roadwheels must be extracted name-sorted"
+        );
 
         // Collision proxies: present (extraction order), captured, indexed — via the typed list.
         assert!(
@@ -599,7 +611,11 @@ mod tests {
             let collider = &geometry.nodes[index];
             assert!(!collider.primitives.is_empty());
             for p in &collider.primitives {
-                assert!(p.positions.len() >= 4, "`{}`: degenerate hull source", collider.name);
+                assert!(
+                    p.positions.len() >= 4,
+                    "`{}`: degenerate hull source",
+                    collider.name
+                );
                 assert!(!p.indices.is_empty(), "`{}`: unindexed mesh", collider.name);
             }
         }
@@ -610,9 +626,11 @@ mod tests {
             .servos
             .keys()
             .map(String::as_str)
-            .chain(spec.weapons.values().flat_map(|w| {
-                std::iter::once(w.muzzle.as_str()).chain(w.barrel.as_deref())
-            }))
+            .chain(
+                spec.weapons
+                    .values()
+                    .flat_map(|w| std::iter::once(w.muzzle.as_str()).chain(w.barrel.as_deref())),
+            )
             .chain(["Hull", "Center_Of_Mass"])
         {
             assert_eq!(

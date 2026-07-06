@@ -261,7 +261,8 @@ pub fn server_plugin(app: &mut App) {
 fn write_meta(mut trace: ResMut<TraceWriter>, fixed: Res<Time<Fixed>>) {
     let role = trace.role;
     let tick_hz = (1.0 / fixed.timestep().as_secs_f64()).round() as u64;
-    let meta = json!({ "k": "meta", "role": role, "tick_hz": tick_hz, "ver": env!("CARGO_PKG_VERSION") });
+    let meta =
+        json!({ "k": "meta", "role": role, "tick_hz": tick_hz, "ver": env!("CARGO_PKG_VERSION") });
     trace.write(&meta);
 }
 
@@ -458,7 +459,8 @@ fn record_tick(
     // `narrow_phase/system_param.rs`), leaving the abandoned timeline's contact data flagged as
     // touching until the pair's deferred removal. A pair both "touching" and "AABBs no longer
     // overlap" is definitionally stale.
-    let mut contacts: std::collections::HashMap<Entity, (u32, f32)> = std::collections::HashMap::new();
+    let mut contacts: std::collections::HashMap<Entity, (u32, f32)> =
+        std::collections::HashMap::new();
     for pair in collisions.iter() {
         if !pair.is_touching() || pair.aabbs_disjoint() {
             continue;

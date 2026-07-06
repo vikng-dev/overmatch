@@ -117,9 +117,14 @@ fn capture_turret_pivot(
     let Ok((tank, rig)) = controlled.single() else {
         return;
     };
-    let Some((position, _)) =
-        rig_world_pose(rig.turret, tank, Vec3::ZERO, Quat::IDENTITY, &parents, &locals)
-    else {
+    let Some((position, _)) = rig_world_pose(
+        rig.turret,
+        tank,
+        Vec3::ZERO,
+        Quat::IDENTITY,
+        &parents,
+        &locals,
+    ) else {
         return;
     };
     pivot.0 = Some(position);
