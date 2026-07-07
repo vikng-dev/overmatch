@@ -11,7 +11,7 @@
 
 use avian3d::prelude::{
     AngularInertia, AngularVelocity, LinearVelocity, Mass, NoAutoAngularInertia, NoAutoMass,
-    RigidBody,
+    Position, RigidBody, Rotation,
 };
 use bevy::ecs::query::QueryData;
 use bevy::ecs::system::SystemParam;
@@ -581,20 +581,31 @@ fn launch_turrets_on_cookoff(
             let right = Vec3::from(global.right());
             let forward = Vec3::from(global.forward());
             const TURRET_MASS: f32 = 8_000.0;
-            commands.entity(turret).insert((
-                pose,
-                RigidBody::Dynamic,
-                Mass(TURRET_MASS),
-                AngularInertia::from_shape(&Cuboid::new(3.0, 1.2, 2.4), TURRET_MASS),
-                NoAutoMass,
-                NoAutoAngularInertia,
-                LinearVelocity(up * 14.0 + forward * 3.0),
-                AngularVelocity(right * 3.0 + up * 1.2),
-                LaunchedTurret,
-            ));
+            // Detach FIRST, then insert the free body — in one command batch so `ChildOf` is gone
+            // before avian's `RigidBody` on-add hook (`init_physics_transform`) fires. That hook
+            // runs at command-flush time via `DeferredWorld`, and if `ChildOf` is still present it
+            // DERIVES `Position` by walking the parent chain and composing it with our `Transform`
+            // — but `pose` is already the WORLD transform, so the parent's world transform gets
+            // applied a second time (measured: a correct (4.03, 1.75, 11.21) turret published as a
+            // double-transformed (-4.58, 1.73, 2.91)). We seed EXPLICIT world `Position`/`Rotation`
+            // (before `RigidBody`, the placeholder-NaN discipline) so the hook uses them verbatim
+            // instead of deriving; keeping `Transform` too for the view/mesh.
             commands
                 .entity(turret)
-                .remove::<(ChildOf, Turret, ServoCommand, ServoIndex, ServoSpec)>();
+                .remove::<(ChildOf, Turret, ServoCommand, ServoIndex, ServoSpec)>()
+                .insert((
+                    Position(pose.translation),
+                    Rotation(pose.rotation),
+                    pose,
+                    RigidBody::Dynamic,
+                    Mass(TURRET_MASS),
+                    AngularInertia::from_shape(&Cuboid::new(3.0, 1.2, 2.4), TURRET_MASS),
+                    NoAutoMass,
+                    NoAutoAngularInertia,
+                    LinearVelocity(up * 14.0 + forward * 3.0),
+                    AngularVelocity(right * 3.0 + up * 1.2),
+                    LaunchedTurret,
+                ));
         }
     }
 }
