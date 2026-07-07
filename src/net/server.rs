@@ -18,10 +18,13 @@ use lightyear::prelude::*;
 use super::protocol::{LaunchedTurretPose, NetHealth, ServoAngles};
 use super::{diagnostics, harness, open_gameplay_gate, physics, rig};
 use crate::SimPlugin;
+use crate::bake::TankGeometry;
 use crate::command::{ConsumeCommandEdges, TankCommand};
+use crate::damage::TankKnockedOut;
+use crate::spec::TankSpec;
 use crate::state::GameplaySet;
 use crate::tank::{
-    PendingTankAssets, TankSimSource, bind_tank_view, load_tank_assets, spawn_tank_sim,
+    PendingTankAssets, Rig, TankSimSource, bind_tank_view, load_tank_assets, spawn_tank_sim,
 };
 
 const PORT: u16 = 5888;
@@ -100,6 +103,10 @@ pub fn run() {
             // Ownerless test bot (`OVERMATCH_BOT`, default OFF): a self-driving remote every client
             // interpolates, so the remote-tank path can be exercised without a second client.
             spawn_bot,
+            // The bot's death→respawn loop: schedule 5 s out when its root gains `TankKnockedOut`,
+            // then sweep the dead bot (and any detached launched turret) and spawn a fresh one.
+            schedule_bot_respawn,
+            respawn_dead_bots,
             open_gameplay_gate,
             diagnostics::log_positions,
             diagnostics::log_sim_evidence,
@@ -277,13 +284,27 @@ fn spawn_bot(
         return;
     };
     *spawned = true;
+    let root = spawn_bot_entity(&mut commands, &assets, geometry, spec);
+    info!("server: spawned circling bot tank {root} (OVERMATCH_BOT)");
+}
+
+/// Build one ownerless bot tank (root + observed view binding + synchronous sim skeleton) and
+/// return its root. Shared by the initial [`spawn_bot`] and the [`respawn_dead_bots`] loop so both
+/// produce a byte-identical bot from the same spawn pose; the env gate and one-shot guard stay in
+/// `spawn_bot`, the death timing stays in the respawn systems.
+fn spawn_bot_entity(
+    commands: &mut Commands,
+    assets: &PendingTankAssets,
+    geometry: &TankGeometry,
+    spec: &TankSpec,
+) -> Entity {
     let mut tank = commands.spawn((
         Name::new("Bot"),
         Bot,
         // Replicated bot marker: `Name` doesn't ride the wire, so this is how the client's HUD
         // recognizes the bot to prefix its nameplate with `[BOT]`.
         super::protocol::NetBot,
-        rig::net_tank_rig(&assets),
+        rig::net_tank_rig(assets),
         // Simulated as a normal Dynamic body on the SERVER (it drives); clients receive it via
         // replication and, having no local body role for it, build a Static interpolated body
         // (`net::rig::attach_replicated_rig` picks `Static` for any non-`Predicted` tank).
@@ -307,9 +328,76 @@ fn spawn_bot(
     ));
     tank.observe(bind_tank_view);
     let root = tank.id();
-    spawn_tank_sim(&mut commands, root, geometry, spec);
-    info!("server: spawned circling bot tank {root} (OVERMATCH_BOT)");
+    spawn_tank_sim(commands, root, geometry, spec);
+    root
 }
+
+/// Schedules a bot's respawn the tick its root gains [`TankKnockedOut`] — the emergent death label
+/// (`damage::mark_dead_tanks` at 0 living crew, `damage::process_cookoffs` on cookoff). Stamps the
+/// virtual-clock instant 5 s out onto [`BotRespawnAt`]; the `Without<BotRespawnAt>` filter keeps a
+/// second death label (e.g. crew-loss after a cookoff) from rescheduling. Reads the same
+/// `Time<Virtual>` clock the respawn consumer and `spawn_pending_tanks` do.
+fn schedule_bot_respawn(
+    dead: Query<Entity, (With<Bot>, Added<TankKnockedOut>, Without<BotRespawnAt>)>,
+    time: Res<Time<Virtual>>,
+    mut commands: Commands,
+) {
+    for bot in &dead {
+        commands
+            .entity(bot)
+            .insert(BotRespawnAt(time.elapsed_secs() + 5.0));
+        info!("server: bot {bot} knocked out; respawning in 5s");
+    }
+}
+
+/// When a scheduled [`BotRespawnAt`] comes due, sweep the dead bot and spawn a fresh one at the same
+/// pose. Same asset gate as [`spawn_bot`]/[`spawn_pending_tanks`] (long-loaded by the time any bot
+/// dies, but resolved identically so the spawn path never diverges).
+fn respawn_dead_bots(
+    dead: Query<(Entity, &BotRespawnAt, &Rig), With<Bot>>,
+    assets: Option<Res<PendingTankAssets>>,
+    asset_server: Res<AssetServer>,
+    source: TankSimSource,
+    time: Res<Time<Virtual>>,
+    mut commands: Commands,
+) {
+    let now = time.elapsed_secs();
+    // (root, its Rig.turret) for every bot now due. Capture the turret handle BEFORE despawning the
+    // root: if the bot cooked off, `damage::launch_turrets_on_cookoff` stripped the turret's
+    // `ChildOf` and made it a free body, so it is NOT a descendant of the root and the recursive
+    // root despawn below would miss it — leaking one launched turret per respawn.
+    let due: Vec<(Entity, Entity)> = dead
+        .iter()
+        .filter(|(_, at, _)| now >= at.0)
+        .map(|(root, _, rig)| (root, rig.turret))
+        .collect();
+    if due.is_empty() {
+        return;
+    }
+    let Some(assets) = assets else { return };
+    if !assets.loaded(&asset_server) {
+        return;
+    }
+    let Some((geometry, spec)) = source.get(&assets.spec) else {
+        return;
+    };
+    for (root, turret) in due {
+        // Recursive despawn sweeps the root and its attached rig (children + relationship targets).
+        commands.entity(root).despawn();
+        // The launched turret, if it detached on cookoff. `try_despawn` is a silent no-op when the
+        // turret is still an attached child (already swept above) or otherwise gone — no panic, no
+        // double-free, so the one branch covers both the cookoff and crew-loss deaths.
+        commands.entity(turret).try_despawn();
+        let fresh = spawn_bot_entity(&mut commands, &assets, geometry, spec);
+        info!("server: respawned bot as {fresh} (was {root})");
+    }
+}
+
+/// Marker scheduling a bot respawn: the `Time<Virtual>` timestamp (secs) at which the dead bot is
+/// swept and a fresh one spawned. Inserted by [`schedule_bot_respawn`], consumed by
+/// [`respawn_dead_bots`].
+#[derive(Component)]
+struct BotRespawnAt(f32);
 
 /// Drive the bot in a steady circle: constant throttle + steer written straight into its own
 /// `TankCommand` (`command.rs`'s read contract, attached by `command`'s `On<Add, Tank>` observer).
