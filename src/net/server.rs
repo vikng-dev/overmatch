@@ -18,7 +18,8 @@ use lightyear::prelude::*;
 use super::protocol::ServoAngles;
 use super::{diagnostics, harness, open_gameplay_gate, physics, rig};
 use crate::SimPlugin;
-use crate::command::TankCommand;
+use crate::command::{ConsumeCommandEdges, TankCommand};
+use crate::state::GameplaySet;
 use crate::tank::{
     PendingTankAssets, TankSimSource, bind_tank_view, load_tank_assets, spawn_tank_sim,
 };
@@ -84,6 +85,7 @@ pub fn run() {
     });
     app.add_systems(Startup, load_tank_assets);
     app.init_resource::<PendingClients>();
+    app.init_resource::<SpawnLane>();
     let config = harness::PerturbConfig {
         perturb: harness::env_flag("SPIKE_PERTURB", true),
     };
@@ -95,6 +97,9 @@ pub fn run() {
         (
             handle_new_clients,
             spawn_pending_tanks,
+            // Ownerless test bot (`OVERMATCH_BOT`, default OFF): a self-driving remote every client
+            // interpolates, so the remote-tank path can be exercised without a second client.
+            spawn_bot,
             open_gameplay_gate,
             diagnostics::log_positions,
             diagnostics::log_sim_evidence,
@@ -102,7 +107,14 @@ pub fn run() {
     );
     app.add_systems(
         FixedUpdate,
-        (log_tank_commands, harness::perturb_after_delay),
+        (
+            log_tank_commands,
+            harness::perturb_after_delay,
+            // Steer the bot each tick — in `GameplaySet` before the edge-consumer, like every other
+            // command writer; a direct `TankCommand` write (the bot carries no `ActionState`, so
+            // `bridge_action_state_to_tank_command` skips it).
+            drive_bot.in_set(GameplaySet).before(ConsumeCommandEdges),
+        ),
     );
 
     app.run();
@@ -114,6 +126,23 @@ pub fn run() {
 /// queueing avoids spawning a tank root the spawner would immediately panic on.
 #[derive(Resource, Default)]
 struct PendingClients(Vec<(Entity, PeerId)>);
+
+/// Persistent spawn-lane counter so successive (and reconnecting) clients fan out along X instead
+/// of stacking on the shared base pose — two tanks spawned at the same spot interpenetrate and NaN
+/// the solver. Never reset: a reconnecting client just takes the next free lane. Lanes step 0, +8,
+/// −8, +16, −16 … metres ([`lane_offset`]), comfortably inside the 1000 m ground slab and clear of
+/// both the −Z test course and the +38 m side-slope.
+#[derive(Resource, Default)]
+struct SpawnLane(u32);
+
+/// The per-lane X offset laid on top of the base spawn pose: lane 0 is exactly on the base (so a
+/// single client — and the deterministic `SPIKE_SPAWN_POSE` harness repro — lands unshifted), then
+/// odd lanes step +8 m, even lanes −8 m, the magnitude growing 8 m each pair.
+fn lane_offset(lane: u32) -> Vec3 {
+    let step = lane.div_ceil(2) as f32 * 8.0;
+    let sign = if lane % 2 == 1 { 1.0 } else { -1.0 };
+    Vec3::new(sign * step, 0.0, 0.0)
+}
 
 /// Queues each newly connected client — spawning is deferred to [`spawn_pending_tanks`] once the
 /// Tiger spec has loaded (spike map §6/§7 spawn pattern: one predicted tank per client, owned by
@@ -139,6 +168,7 @@ fn spawn_pending_tanks(
     source: TankSimSource,
     time: Res<Time<Virtual>>,
     config: Res<harness::PerturbConfig>,
+    mut lane: ResMut<SpawnLane>,
     mut commands: Commands,
 ) {
     if pending.0.is_empty() {
@@ -153,9 +183,13 @@ fn spawn_pending_tanks(
     };
     // Harness override (`SPIKE_SPAWN_POSE`): place the tank onto a known resting contact for the
     // beached-rest repro; unset in every normal run, so the default flat-pad spawn stands.
-    let (spawn_pos, spawn_rot) =
+    let (base_pos, spawn_rot) =
         harness::spawn_pose().unwrap_or((Vec3::new(0.0, 2.0, 0.0), Quat::IDENTITY));
     for (link, client_id) in pending.0.drain(..) {
+        // Fan each client out onto its own lane (lane 0 = the base pose, so the single-client and
+        // `SPIKE_SPAWN_POSE` cases are unshifted); the counter persists so reconnects don't collide.
+        let spawn_pos = base_pos + lane_offset(lane.0);
+        lane.0 += 1;
         let mut tank = commands.spawn((
             Name::new("Tank"),
             rig::net_tank_rig(&assets),
@@ -204,6 +238,77 @@ fn spawn_pending_tanks(
         tank.observe(bind_tank_view);
         let root = tank.id();
         spawn_tank_sim(&mut commands, root, geometry, spec);
+    }
+}
+
+/// Marker for the ownerless test-bot tank ([`spawn_bot`]) — scopes [`drive_bot`] to it, and keeps
+/// it out of every other tank query the server runs.
+#[derive(Component)]
+struct Bot;
+
+/// Spawn ONE ownerless "bot" tank that drives in a circle, replicated to every client as a pure
+/// interpolated remote — a solo test rig for the remote-tank interpolation/timing path, with no
+/// second client needed. Gated behind `OVERMATCH_BOT` (present = on, unset = off), default OFF so
+/// every existing run and harness recipe is byte-for-byte unchanged. Same asset gate as
+/// [`spawn_pending_tanks`]; spawns exactly once (the `spawned` guard). Mirrors the player spawn's
+/// component set minus the ownership half.
+fn spawn_bot(
+    mut spawned: Local<bool>,
+    assets: Option<Res<PendingTankAssets>>,
+    asset_server: Res<AssetServer>,
+    source: TankSimSource,
+    mut commands: Commands,
+) {
+    // `is_err()` = the var is unset: present (even empty, e.g. `OVERMATCH_BOT=`) counts as on.
+    if *spawned || std::env::var("OVERMATCH_BOT").is_err() {
+        return;
+    }
+    let Some(assets) = assets else { return };
+    if !assets.loaded(&asset_server) {
+        return;
+    }
+    let Some((geometry, spec)) = source.get(&assets.spec) else {
+        return;
+    };
+    *spawned = true;
+    let mut tank = commands.spawn((
+        Name::new("Bot"),
+        Bot,
+        rig::net_tank_rig(&assets),
+        // Simulated as a normal Dynamic body on the SERVER (it drives); clients receive it via
+        // replication and, having no local body role for it, build a Static interpolated body
+        // (`net::rig::attach_replicated_rig` picks `Static` for any non-`Predicted` tank).
+        RigidBody::Dynamic,
+        // A distinct spot on the flat pad, a few metres up +Z — away from the per-client X lanes
+        // (`lane_offset`) and the −Z test course, so the circle stays on flat ground.
+        Position(Vec3::new(0.0, 2.0, 12.0)),
+        // Explicit, for the same replicated-placeholder reason as the player spawn (see there).
+        Rotation(Quat::IDENTITY),
+        ServoAngles::default(),
+        Replicate::to_clients(NetworkTarget::All),
+        DisableReplicateHierarchy,
+        // NO `PredictionTarget`, NO `ControlledBy`: no client owns or predicts the bot, so on every
+        // client the replicated root lands `Interpolated` only — a Static local body — which is
+        // exactly the remote-tank path this rig exists to exercise solo.
+        InterpolationTarget::to_clients(NetworkTarget::All),
+    ));
+    tank.observe(bind_tank_view);
+    let root = tank.id();
+    spawn_tank_sim(&mut commands, root, geometry, spec);
+    info!("server: spawned circling bot tank {root} (OVERMATCH_BOT)");
+}
+
+/// Drive the bot in a steady circle: constant throttle + steer written straight into its own
+/// `TankCommand` (`command.rs`'s read contract, attached by `command`'s `On<Add, Tank>` observer).
+/// The bot carries no `ActionState`, so `bridge_action_state_to_tank_command` (protocol.rs) never
+/// touches it — this is the sole writer. Ordered in `GameplaySet` before the edge-consumer, with
+/// the other command writers; throttle/steer are levels (never cleared), so it circles for good.
+fn drive_bot(mut bots: Query<&mut TankCommand, With<Bot>>) {
+    for mut command in &mut bots {
+        // Gentle constants: enough drive + differential yaw to circle on the flat pad without
+        // leaving it or flipping. Everything else stays at `TankCommand::default()`.
+        command.throttle = 0.5;
+        command.steer = 0.5;
     }
 }
 
