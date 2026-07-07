@@ -11,9 +11,9 @@
 use avian3d::prelude::{Forces, LayerMask, SpatialQuery, SpatialQueryFilter, WriteRigidBodyForces};
 use bevy::prelude::*;
 
-use crate::Layer;
 use crate::damage::VolumeOf;
 use crate::state::GameplaySet;
+use crate::{ClientReplica, Layer};
 
 /// Gravity applied to shells each fixed tick (m/s²).
 const GRAVITY: Vec3 = Vec3::new(0.0, -9.81, 0.0);
@@ -119,6 +119,9 @@ fn cast_spall_fragment(
     parents: &Query<&ChildOf>,
     health: &mut Query<&mut ComponentHealth>,
     filter: &SpatialQueryFilter,
+    // Authority-only HP deposition: `false` on the net client (a replica), which still traces the
+    // fragment (for FX / `deposited`) but leaves the actual HP write to the server.
+    deposit: bool,
 ) -> SpallFragment {
     const EPS: f32 = 1.0e-3;
     const PROBE: f32 = 50.0;
@@ -149,8 +152,12 @@ fn cast_spall_fragment(
             break;
         };
         // Deposit damage scaled by current penetration (energy), if it's a damageable component.
+        // `deposited` still records the hit (the visual trace) on a replica; only the HP write is
+        // authority-gated.
         if let Ok(mut hp) = health.get_mut(node_entity) {
-            hp.current = (hp.current - pen * FRAG_DMG_PER_MM).max(0.0);
+            if deposit {
+                hp.current = (hp.current - pen * FRAG_DMG_PER_MM).max(0.0);
+            }
             deposited = true;
         }
         // Cost to cross this volume = its thickness along the fragment path × material factor.
@@ -453,11 +460,16 @@ fn integrate_projectiles(
     mut health: Query<&mut ComponentHealth>,
     parents: Query<&ChildOf>,
     retain: Res<RetainSpentShells>,
+    // Present only on the net client (a replica): shells still fly, raycast, spark, and despawn, but
+    // HP deposition and hit impulse are the server's authority. Absent in SP / sandbox / server.
+    replica: Option<Res<ClientReplica>>,
     spatial: SpatialQuery,
     time: Res<Time>,
     mut commands: Commands,
 ) {
     let dt = time.delta_secs();
+    // Authority = not a replica: only then does a hit actually mutate health here.
+    let deposit = replica.is_none();
     // The march casts against terrain (which stops the shell) and ballistic volumes (which it
     // crosses); the struck entity being a `BallisticVolume` is what tells the two apart.
     let world = SpatialQueryFilter::from_mask(
@@ -576,7 +588,7 @@ fn integrate_projectiles(
                 // Shock: even a deflected hit jars an exposed component (barrel, optic) — scaled by
                 // impact energy (capability) and how square the graze was. Armor has no HP, so it
                 // shrugs the bounce off; a fragile module loses integrity without being one-shot.
-                if let Ok(mut hp) = health.get_mut(node_entity) {
+                if deposit && let Ok(mut hp) = health.get_mut(node_entity) {
                     let shock = SHOCK_K * capability(projectile.mass, speed) * incidence.cos();
                     hp.current = (hp.current - shock).max(0.0);
                 }
@@ -624,7 +636,7 @@ fn integrate_projectiles(
                 path.points.push(embed);
                 // It buried itself here, spending all it had (`cap`) — deposit that as transit damage
                 // if the volume is a damageable component (design §6). No exit, so no spall.
-                if let Ok(mut hp) = health.get_mut(node_entity) {
+                if deposit && let Ok(mut hp) = health.get_mut(node_entity) {
                     hp.current = (hp.current - cap * TRANSIT_K).max(0.0);
                 }
                 commands.trigger(Impact { position: embed });
@@ -661,7 +673,7 @@ fn integrate_projectiles(
 
             // Transit damage: the main penetrator drove through this volume — if it's a damageable
             // component, deposit the cost it paid crossing (design §6). Armor has no HP, so no-op.
-            if let Ok(mut hp) = health.get_mut(node_entity) {
+            if deposit && let Ok(mut hp) = health.get_mut(node_entity) {
                 hp.current = (hp.current - cost * TRANSIT_K).max(0.0);
             }
 
@@ -696,6 +708,7 @@ fn integrate_projectiles(
                         &parents,
                         &mut health,
                         &armor,
+                        deposit,
                     ));
                 }
                 spall.bursts.push(burst);
@@ -733,7 +746,16 @@ fn integrate_projectiles(
 
 /// Apply a crossing's momentum share to the struck body (immediate velocity change; the off-CoM
 /// entry point also imparts the angular rock). A static or non-rigid owner simply won't match.
-fn on_hit_impulse(hit: On<HitImpulse>, mut bodies: Query<Forces>) {
+fn on_hit_impulse(
+    hit: On<HitImpulse>,
+    // Authority-only: on the net client (a replica) the struck body's motion is server-owned and
+    // arrives by replication — applying a local impulse here would fight it (a divergent shove).
+    replica: Option<Res<ClientReplica>>,
+    mut bodies: Query<Forces>,
+) {
+    if replica.is_some() {
+        return;
+    }
     if let Ok(mut forces) = bodies.get_mut(hit.body) {
         forces.apply_linear_impulse_at_point(hit.impulse, hit.point);
     }

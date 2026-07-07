@@ -70,6 +70,17 @@ mod trace;
 pub mod track_sandbox;
 mod world;
 
+/// Marker resource: this app is a NETWORK CLIENT running the shared sim as a REPLICA of the server,
+/// not an authority. Damage is server-authoritative — the client still flies shells, raycasts, sparks
+/// impacts, and despawns spent shells (all cosmetic), but must NOT deposit HP or apply hit impulse, or
+/// it would independently simulate a divergent local kill the server never sanctioned (the bug this
+/// slice fixes). `ballistics` gates its four HP writes and `on_hit_impulse` on this being ABSENT.
+/// Inserted ONLY by `net::client::run`; single-player (`GamePlugin`), the sandbox, and the dedicated
+/// server never insert it, so those authorities keep depositing damage normally. Lives at the crate
+/// root (not `net`) so the always-compiled `ballistics` can reference it without the `net` feature.
+#[derive(Resource, Default)]
+pub(crate) struct ClientReplica;
+
 /// Physics collision layers. Wheel suspension rays filter to `Terrain` only, so they ignore
 /// the vehicle's own hull collider (ADR-0005). Shared infra, hence at the crate root.
 #[derive(PhysicsLayer, Default, Clone, Copy, Debug)]

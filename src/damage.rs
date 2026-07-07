@@ -262,6 +262,14 @@ impl KnockoutReason {
     }
 }
 
+/// The damage-consequence chain (cookoff → crew death → tank-death label → turret launch). Labeled
+/// so any producer of this tick's `ComponentHealth` can order itself BEFORE it: the authority's local
+/// deposition (`ballistics`, same-frame in `GameplaySet`) and, on the net client, the replicated
+/// health apply (`net::protocol::apply_net_health`) both land before the consequences read HP, so
+/// death is interpreted from the freshest health on either end.
+#[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct DamageConsequences;
+
 pub fn plugin(app: &mut App) {
     // The crew-swap seam: commands start/cancel swaps on the fixed clock (consuming the edge);
     // `tick_swaps` runs the in-flight timer. The whole consequence chain is sim — it decides who
@@ -282,7 +290,8 @@ pub fn plugin(app: &mut App) {
             launch_turrets_on_cookoff,
         )
             .chain()
-            .in_set(GameplaySet),
+            .in_set(GameplaySet)
+            .in_set(DamageConsequences),
     );
 }
 
@@ -546,11 +555,21 @@ fn process_cookoffs(
 pub struct LaunchedTurret;
 
 fn launch_turrets_on_cookoff(
+    // Authority-only: launching the turret spawns a free PHYSICS body, and unlike a purely logical
+    // consequence (crew death, capability loss) that emerges correctly from replicated health, a
+    // client-local launch starts from an unsynced avian Position (pops to origin) and re-fires on
+    // every reconnect via `Added<CookedOff>` (both observed). So the net client does NOT launch
+    // locally; the authoritative launched turret is replicated to it in a follow-up slice. SP /
+    // sandbox / server (the authorities) still launch here.
+    replica: Option<Res<crate::ClientReplica>>,
     cooked_ammo: Query<&VolumeOf, (With<CookedOff>, Added<CookedOff>)>,
     turrets: Query<(Entity, &GlobalTransform), (With<Turret>, Without<LaunchedTurret>)>,
     parents: Query<&ChildOf>,
     mut commands: Commands,
 ) {
+    if replica.is_some() {
+        return;
+    }
     for ammo_owner in &cooked_ammo {
         let tank = ammo_owner.tank();
         for (turret, global) in &turrets {

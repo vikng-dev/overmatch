@@ -15,7 +15,9 @@ use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::ballistics::ComponentHealth;
 use crate::command::TankCommand;
+use crate::damage::{DamageConsequences, TankVolumes};
 use crate::driving::DriveState;
 use crate::state::GameplaySet;
 use crate::tank::{Rig, ServoCommand, ServoIndex, TankSim};
@@ -49,6 +51,73 @@ pub struct NetBot;
 pub struct ServoAngles {
     pub turret: f32,
     pub gun: f32,
+}
+
+/// Authoritative per-volume health snapshot, published on the tank root by the authority and
+/// replicated so the client's death/HUD emerge from server-owned state (server-authoritative combat).
+/// Holds each health-bearing volume's `ComponentHealth.current` in `TankVolumes` iteration order —
+/// the SAME order both ends derive, since both build the rig from one RON spec via `spawn_tank_sim`
+/// (sorted-by-name volume spawn). Index `i` therefore maps to the same volume on both ends; a length
+/// mismatch at apply time skips the tank rather than misalign. Modeled on [`ServoAngles`]: plain
+/// replication (no prediction/interpolation), `set_if_neq` on publish to avoid at-rest churn.
+#[derive(Component, Clone, Default, PartialEq, Debug, Serialize, Deserialize)]
+pub struct NetHealth(pub Vec<f32>);
+
+/// The tank's health-bearing volumes in `TankVolumes` order — the SINGLE definition of which volumes
+/// (and in what order) [`NetHealth`] snapshots, so publish and apply can never drift out of alignment
+/// (index `i` addresses the same volume on both ends). `has_health` is the caller's query membership
+/// test, so this serves both the immutable (publish) and mutable (apply) `ComponentHealth` query.
+fn health_bearing_volumes(
+    volumes: &TankVolumes,
+    has_health: impl Fn(Entity) -> bool,
+) -> Vec<Entity> {
+    volumes.iter().filter(|&v| has_health(v)).collect()
+}
+
+/// Authority side: collect each health-bearing volume's live `ComponentHealth.current` into the
+/// replicated `NetHealth`. `FixedPostUpdate` (after the damage chain has run this tick),
+/// `Without<Remote>` = authority-only in shared code (every client tank carries `Remote` — see
+/// `publish_servo_angles`). The collect order — the shared [`health_bearing_volumes`] filter — is
+/// exactly the apply order in [`apply_net_health`].
+fn publish_net_health(
+    mut tanks: Query<(&TankVolumes, &mut NetHealth), Without<Remote>>,
+    health: Query<&ComponentHealth>,
+) {
+    for (volumes, mut net) in &mut tanks {
+        let snapshot: Vec<f32> = health_bearing_volumes(volumes, |v| health.contains(v))
+            .iter()
+            .map(|&v| health.get(v).map_or(0.0, |hp| hp.current))
+            .collect();
+        // `set_if_neq`: no change-detection churn (and no replication resends) while health is stable.
+        net.set_if_neq(NetHealth(snapshot));
+    }
+}
+
+/// Client side: write the replicated `NetHealth` back onto each `Remote` tank's local volumes, so the
+/// damage-consequence systems (`damage.rs`) run off authoritative health. Matches the publish order
+/// exactly — `TankVolumes` filtered to health-bearing volumes — so index `i` addresses the same
+/// volume the server collected. Ordered `.before(DamageConsequences)` so cookoff/crew-death read this
+/// tick's authoritative health. A length mismatch (e.g. rig not fully spawned yet) skips the tank
+/// rather than write misaligned values.
+fn apply_net_health(
+    tanks: Query<(&TankVolumes, &NetHealth), With<Remote>>,
+    mut health: Query<&mut ComponentHealth>,
+) {
+    for (volumes, net) in &tanks {
+        // The health-bearing volumes in publish order (the SAME shared filter the server used).
+        let bearers = health_bearing_volumes(volumes, |v| health.contains(v));
+        // A length mismatch is expected transiently while the client's rig is still spawning and
+        // self-heals once it's fully built; a *persistent* mismatch means client/server spec skew
+        // (a distribution concern — matched builds never skew). Skip rather than write misaligned.
+        if bearers.len() != net.0.len() {
+            continue;
+        }
+        for (volume, &value) in bearers.into_iter().zip(&net.0) {
+            if let Ok(mut hp) = health.get_mut(volume) {
+                hp.current = value;
+            }
+        }
+    }
 }
 
 /// Authority side: mirror the live `ServoState` angles onto the replicated root component.
@@ -165,6 +234,9 @@ pub(crate) fn plugin(app: &mut App) {
     // Plain replication, no `.predict()`/interpolation: predicted tanks simulate their own servos,
     // and non-predicted consumers chase the raw angle through the servo mechanism (see the type).
     app.component::<ServoAngles>().replicate();
+    // Server-authoritative per-volume health (same plain-replication shape as `ServoAngles`): the
+    // client's damage/death emerge from this, not a divergent local kill.
+    app.component::<NetHealth>().replicate();
     app.add_plugins(input::native::InputPlugin::<TankCommand>::default());
 
     // Avian replication (map §5): mount lightyear_avian3d's ordering fixes, then register the
@@ -248,8 +320,16 @@ pub(crate) fn plugin(app: &mut App) {
     app.add_observer(strip_confirmed_history::<DriveState>);
     app.add_observer(strip_confirmed_history::<TankSim>);
 
-    app.add_systems(FixedPostUpdate, publish_servo_angles);
+    app.add_systems(FixedPostUpdate, (publish_servo_angles, publish_net_health));
     app.add_systems(FixedUpdate, apply_servo_angles.in_set(GameplaySet));
+    // Client: land the replicated health before the damage-consequence chain reads it, so cookoff /
+    // crew-death interpret this tick's authoritative HP (server-only publish is a no-op there).
+    app.add_systems(
+        FixedUpdate,
+        apply_net_health
+            .in_set(GameplaySet)
+            .before(DamageConsequences),
+    );
     // Bridge lightyear's input buffer into the sim's own `TankCommand` (command.rs's contract):
     // sim systems (`ramp_drive`, `fire`, `drive_aim_servos`) read `TankCommand`, never
     // `ActionState` directly, so this is the one seam translating net input into sim input.
