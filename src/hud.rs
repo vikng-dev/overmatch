@@ -1,20 +1,16 @@
-//! Shared tank-state HUD: world-anchored readouts both the game and the armor sandbox mount. The
-//! systems reproject through whichever camera carries [`HudCamera`], so each binary tags its own
+//! Shared world-anchored HUD: labels both the game and the armor sandbox reproject over the world.
+//! The systems reproject through whichever camera carries [`HudCamera`], so each binary tags its own
 //! world camera (the game's third-person/gunner camera; the sandbox's free-fly camera) and the
-//! shared code depends on neither binary's camera marker. The state shown is read straight from the
-//! damage model (capability effectiveness, crew, component HP, knock-out), so the HUD stays a pure
-//! *view* — it owns no gameplay state, and the same numbers can later drive a designed player HUD,
-//! voice, and VFX (this is the diagnostic seam).
+//! shared code depends on neither binary's camera marker. Two readouts live here: a per-component HP
+//! label floated over each *damaged* volume, and a name nameplate floated over each tank. Both read
+//! straight from the sim, so the HUD stays a pure *view*. The controlled tank's aggregate vitals
+//! (crew, capabilities, weapons) live in its fixed corner panel (`crew_ui`), not over the world.
 
 use bevy::prelude::*;
 
 use crate::ballistics::{ComponentHealth, ComponentVolume};
-use crate::damage::{
-    Ammo, Capability, CookedOff, CrewStation, Crewman, Dead, FunctionRole, TankCapabilities,
-    TankKnockedOut, TankVolumes, VolumeFacets, capability_effectiveness, evaluate, part_qualities,
-};
-use crate::spec::ViewKind;
-use crate::tank::{Tank, TankRoot, TankViews, ViewNode, Weapon};
+use crate::damage::{Ammo, CrewStation, FunctionRole};
+use crate::tank::{Tank, ViewNode};
 
 /// The camera the HUD reprojects world points through. Each binary tags its own world camera with
 /// this — the game's player camera, the sandbox's free-fly camera — so the shared systems don't
@@ -26,16 +22,16 @@ pub struct HudCamera;
 #[derive(Component)]
 struct ComponentHpLabel;
 
-/// A pooled aggregate readout floated over each tank: terminal state, living crew, cookoff, disabled
-/// module functions, and per-capability effectiveness. Reassigned to a live tank each frame.
+/// A pooled nameplate floated over each tank: just the tank's display name, reprojected each frame.
+/// Reassigned to a live tank each frame. The aggregate status this used to carry (crew, caps,
+/// weapons) now lives in the controlled tank's fixed corner panel (`crew_ui`) — a floating
+/// diagnostic block over *every* tank was noise; the local crew only need their own vitals.
 #[derive(Component)]
-struct TankStatusLabel;
+struct TankNameplate;
 
 pub fn plugin(app: &mut App) {
-    app.add_systems(Startup, spawn_labels).add_systems(
-        Update,
-        (update_component_hp_labels, update_tank_status_labels),
-    );
+    app.add_systems(Startup, spawn_labels)
+        .add_systems(Update, (update_component_hp_labels, update_tank_nameplates));
 }
 
 fn spawn_labels(mut commands: Commands) {
@@ -56,20 +52,24 @@ fn spawn_labels(mut commands: Commands) {
             Visibility::Hidden,
         ));
     }
-    // Aggregate tank-state labels: living crew, cookoff, knockout, disabled functions, capabilities.
+    // Nameplate pool floated over each tank — just the display name. Reprojected each frame; hidden
+    // while unused. Four covers the current SP duel + a bit of headroom, same as the old pool.
     for _ in 0..4 {
         commands.spawn((
-            TankStatusLabel,
+            TankNameplate,
             Text::new(""),
             TextFont {
-                font_size: FontSize::Px(14.0),
+                font_size: FontSize::Px(15.0),
                 ..default()
             },
-            TextColor(Color::srgb(0.88, 0.95, 1.0)),
+            TextColor(Color::srgb(0.90, 0.96, 1.0)),
             Node {
                 position_type: PositionType::Absolute,
+                padding: UiRect::axes(Val::Px(6.0), Val::Px(2.0)),
+                border_radius: BorderRadius::all(Val::Px(3.0)),
                 ..default()
             },
+            BackgroundColor(Color::srgba(0.04, 0.06, 0.08, 0.55)),
             Visibility::Hidden,
         ));
     }
@@ -154,193 +154,27 @@ fn volume_label(
     }
 }
 
-/// Float an aggregate status readout over each tank: terminal state, living crew, cookoff, and
-/// currently-disabled module functions, plus per-capability effectiveness. Deliberately diagnostic:
-/// the final game can turn the same state into a designed HUD, voice, and VFX later.
-fn update_tank_status_labels(
+/// Float a name nameplate over each tank, reprojected to screen; hide the leftover plates. Anchored
+/// a little above the hull so it clears the model. The aggregate status this used to carry now lives
+/// in the controlled tank's fixed corner panel (`crew_ui::update_status_panel`).
+fn update_tank_nameplates(
     camera: Single<(&Camera, &GlobalTransform), With<HudCamera>>,
-    tanks: Query<
-        (
-            Entity,
-            &GlobalTransform,
-            Option<&Name>,
-            Option<&TankKnockedOut>,
-            Option<&TankVolumes>,
-            Option<&TankCapabilities>,
-            Option<&TankViews>,
-        ),
-        With<Tank>,
-    >,
-    weapons: Query<(&Weapon, &crate::tank::WeaponIndex, &TankRoot)>,
-    sims: Query<&crate::tank::TankSim>,
-    volumes: Query<(
-        Option<&CrewStation>,
-        Option<&Crewman>,
-        Option<&Dead>,
-        Option<&FunctionRole>,
-        Option<&ComponentHealth>,
-        Option<&Ammo>,
-        Option<&CookedOff>,
-        Option<&Name>,
-    )>,
-    capability_volumes: Query<VolumeFacets>,
-    mut labels: Query<
-        (&mut Node, &mut Text, &mut Visibility, &mut TextColor),
-        With<TankStatusLabel>,
-    >,
+    tanks: Query<(&GlobalTransform, Option<&Name>), With<Tank>>,
+    mut labels: Query<(&mut Node, &mut Text, &mut Visibility), With<TankNameplate>>,
 ) {
     let (camera, cam_transform) = *camera;
     let mut tanks = tanks.iter();
-    for (mut node, mut text, mut visibility, mut color) in &mut labels {
-        let Some((entity, transform, name, knocked_out, tank_volumes, tank_caps, tank_views)) =
-            tanks.next()
-        else {
+    for (mut node, mut text, mut visibility) in &mut labels {
+        let Some((transform, name)) = tanks.next() else {
             *visibility = Visibility::Hidden;
             continue;
         };
-
-        let mut crew_total = 0;
-        let mut crew_living = 0;
-        let mut dead_crew: Vec<&'static str> = Vec::new();
-        let mut cooked_off: Vec<String> = Vec::new();
-        let mut disabled: Vec<&'static str> = Vec::new();
-
-        if let Some(tank_volumes) = tank_volumes {
-            for volume in tank_volumes.iter() {
-                let Ok((crew, _crewman, dead, function, hp, ammo, cooked, volume_name)) =
-                    volumes.get(volume)
-                else {
-                    continue;
-                };
-                if let Some(station) = crew {
-                    crew_total += 1;
-                    if dead.is_some() || hp.is_some_and(|hp| hp.current <= 0.0) {
-                        dead_crew.push(station.label());
-                    } else {
-                        crew_living += 1;
-                    }
-                }
-                if ammo.is_some() && cooked.is_some() {
-                    cooked_off.push(
-                        volume_name
-                            .map(|name| name.as_str().to_string())
-                            .unwrap_or_else(|| "ammo".to_string()),
-                    );
-                }
-                if let (Some(function), Some(hp)) = (function, hp)
-                    && hp.current <= 0.0
-                {
-                    disabled.push(function.label());
-                }
-            }
-        }
-
-        // Live part qualities, resolved once and reused for the view + weapon gates below (the cap
-        // line keeps `capability_effectiveness`, which resolves them again internally — cheap, and
-        // it owns the `None`-volumes fallback).
-        let quality = tank_volumes.map(|tv| part_qualities(tv, &capability_volumes));
-
-        // Capability readout: each tank-wide capability as a live effectiveness percentage, composed
-        // from its requirement groups against the live world (design §7b) — a backfilled capability
-        // reads (e.g.) 60%, not just on/off. (View + weapon gates moved off this map; see below.)
-        let cap_line = [Capability::Drive]
-            .iter()
-            .map(|cap| {
-                let eff =
-                    capability_effectiveness(tank_volumes, tank_caps, *cap, &capability_volumes);
-                format!("{} {}%", cap.label(), (eff * 100.0).round() as i32)
-            })
-            .collect::<Vec<_>>()
-            .join("   ");
-
-        // Views readout: each crew viewpoint's gate as a live effectiveness percentage (the per-view
-        // successor to the old GunnerSight/CommanderView capabilities).
-        let view_line = match (&quality, tank_views) {
-            (Some(quality), Some(views)) => {
-                let mut entries = [ViewKind::Gunner, ViewKind::Commander]
-                    .into_iter()
-                    .filter_map(|kind| {
-                        views.0.get(&kind).map(|config| {
-                            let eff = evaluate(&config.requires, quality);
-                            format!("{} {}%", kind.label(), (eff * 100.0).round() as i32)
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                entries.sort();
-                entries.join("   ")
-            }
-            _ => "-".to_string(),
-        };
-
-        // Weapons readout: each weapon's name + reload state, dimmed-flagged when its fire gate is
-        // unmet (dead gunner/loader/breech). Sorted by name so the order is stable frame to frame.
-        let weapon_line = {
-            let mut entries = weapons
-                .iter()
-                .filter(|(_, _, root)| root.0 == entity)
-                .map(|(weapon, slot, root)| {
-                    // Reload state is root-resident (`TankSim`), addressed by the weapon's slot.
-                    let remaining = sims
-                        .get(root.0)
-                        .ok()
-                        .and_then(|sim| sim.weapons.get(slot.0))
-                        .map_or(0.0, |w| w.reload_remaining);
-                    let can_fire = quality
-                        .as_ref()
-                        .is_some_and(|q| evaluate(&weapon.fire, q) > 0.0);
-                    let status = if remaining > 0.0 {
-                        format!("{:.1}s", remaining)
-                    } else if can_fire {
-                        "READY".to_string()
-                    } else {
-                        "no-fire".to_string()
-                    };
-                    format!("{} {}", weapon.name, status)
-                })
-                .collect::<Vec<_>>();
-            entries.sort();
-            if entries.is_empty() {
-                "-".to_string()
-            } else {
-                entries.join("   ")
-            }
-        };
-
         let world_point = transform.translation() + Vec3::Y * 4.4;
         match camera.world_to_viewport(cam_transform, world_point) {
             Ok(screen) => {
                 node.left = Val::Px(screen.x + 12.0);
-                node.top = Val::Px(screen.y - 56.0);
-                let title = name.map(|name| name.as_str()).unwrap_or("Tiger I");
-                let state = knocked_out
-                    .map(|state| format!("KNOCKED OUT ({})", state.reason.label()))
-                    .unwrap_or_else(|| "ALIVE".to_string());
-                let dead = if dead_crew.is_empty() {
-                    "-".to_string()
-                } else {
-                    dead_crew.join(", ")
-                };
-                let cookoff = if cooked_off.is_empty() {
-                    "no".to_string()
-                } else {
-                    cooked_off.join(", ")
-                };
-                let has_disabled = !disabled.is_empty();
-                let disabled = if disabled.is_empty() {
-                    "-".to_string()
-                } else {
-                    disabled.join(", ")
-                };
-                *text = Text::new(format!(
-                    "{title}\n{state}\nCrew {crew_living}/{crew_total}\nDead: {dead}\nCookoff: {cookoff}\nDisabled: {disabled}\nCapabilities: {cap_line}\nViews: {view_line}\nWeapons: {weapon_line}",
-                ));
-                *color = TextColor(if knocked_out.is_some() {
-                    Color::srgb(1.0, 0.35, 0.25)
-                } else if !dead_crew.is_empty() || has_disabled {
-                    Color::srgb(1.0, 0.85, 0.35)
-                } else {
-                    Color::srgb(0.85, 0.95, 1.0)
-                });
+                node.top = Val::Px(screen.y - 20.0);
+                *text = Text::new(name.map(|name| name.as_str()).unwrap_or("Tiger I"));
                 *visibility = Visibility::Visible;
             }
             Err(_) => *visibility = Visibility::Hidden,
