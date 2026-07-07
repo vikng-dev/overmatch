@@ -126,6 +126,9 @@ pub fn run() {
     // Diagnostic contact probe: per-tick broad/narrow-phase state for the predicted tank's
     // hull-vs-terrain pairs. Idle (nothing registered) unless `SPIKE_CONTACT_PROBE` is set.
     app.add_plugins(super::contact_probe::plugin);
+    // FPS + frame-time diagnostics for the bottom-right debug panel (`net::debug_hud`, mounted in
+    // `NetClientPlugin`) — NOT part of `DefaultPlugins`, so it must be added explicitly here.
+    app.add_plugins(bevy::diagnostic::FrameTimeDiagnosticsPlugin::default());
 
     // Server address: `OVERMATCH_SERVER` points the client at a remote server for cloud
     // playtests — accepts `host:port` (a full `SocketAddr`) or a bare IP (default port appended).

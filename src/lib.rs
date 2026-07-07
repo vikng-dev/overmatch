@@ -177,6 +177,9 @@ impl Plugin for NetClientPlugin {
             firecontrol::client_plugin,
             hud::plugin,
             crew_ui::plugin,
+            // Bottom-right ping/FPS/frame-time debug panel — net-client only (ping is meaningless
+            // in SP), for testing against the deployed server.
+            net::debug_hud::plugin,
         ));
 
         // Dev-only physics visualization + debug toggles, same pair `ClientPlugin` mounts for SP
