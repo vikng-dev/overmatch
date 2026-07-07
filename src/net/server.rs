@@ -15,7 +15,7 @@ use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
 
-use super::protocol::{NetHealth, ServoAngles};
+use super::protocol::{LaunchedTurretPose, NetHealth, ServoAngles};
 use super::{diagnostics, harness, open_gameplay_gate, physics, rig};
 use crate::SimPlugin;
 use crate::command::{ConsumeCommandEdges, TankCommand};
@@ -214,6 +214,9 @@ fn spawn_pending_tanks(
             // The authority's per-volume health snapshot (`net::publish_net_health` fills it once the
             // rig's volumes exist), replicated so the client's damage/death are server-driven.
             NetHealth::default(),
+            // `None` until the turret cooks off (`net::publish_launched_turret_pose` fills it), so
+            // the client can show the authoritative toss it does not simulate locally.
+            LaunchedTurretPose::default(),
             Replicate::to_clients(NetworkTarget::All),
             // Replicate the ROOT alone. Without this, `Replicate` propagates to every rig child
             // via `ReplicateLike` — the whole sim skeleton (~19 child entities per tank, spawned
@@ -293,6 +296,8 @@ fn spawn_bot(
         ServoAngles::default(),
         // Per-volume health snapshot for the bot too, so a client kills it from replicated state.
         NetHealth::default(),
+        // Launched-turret pose datum for the bot too (`None` until its turret cooks off).
+        LaunchedTurretPose::default(),
         Replicate::to_clients(NetworkTarget::All),
         DisableReplicateHierarchy,
         // NO `PredictionTarget`, NO `ControlledBy`: no client owns or predicts the bot, so on every

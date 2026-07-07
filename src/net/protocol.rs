@@ -3,7 +3,7 @@
 //! prediction/rollback registration) — mismatch here desyncs or fails the connection. If a component
 //! or input rides the wire, its registration lives here and nowhere else.
 
-use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, Rotation};
+use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, RigidBody, Rotation};
 use bevy::prelude::*;
 use lightyear::avian3d::plugin::{AvianReplicationMode, LightyearAvianPlugin};
 // `Remote` (bevy_replicon's "this entity arrived by replication", re-exported): the honest
@@ -17,10 +17,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::ballistics::ComponentHealth;
 use crate::command::TankCommand;
-use crate::damage::{DamageConsequences, TankVolumes};
+use crate::damage::{DamageConsequences, LaunchedTurret, TankVolumes};
 use crate::driving::DriveState;
 use crate::state::GameplaySet;
-use crate::tank::{Rig, ServoCommand, ServoIndex, TankSim};
+use crate::tank::{Rig, ServoCommand, ServoIndex, ServoSpec, TankSim};
 
 /// Replicated tank-identity marker — how the client recognizes a replicated entity as a tank
 /// (before its local sim body exists) without replicating the sim's own `Tank` marker. Deliberately
@@ -62,6 +62,18 @@ pub struct ServoAngles {
 /// replication (no prediction/interpolation), `set_if_neq` on publish to avoid at-rest churn.
 #[derive(Component, Clone, Default, PartialEq, Debug, Serialize, Deserialize)]
 pub struct NetHealth(pub Vec<f32>);
+
+/// Authoritative world pose of the launched (cooked-off) turret, published on the tank root by the
+/// authority and replicated so the client can SHOW the toss it does NOT simulate locally
+/// (`damage::launch_turrets_on_cookoff` early-returns on the `ClientReplica` gate — a client-local
+/// launch pops to an unsynced origin and re-fires on reconnect). `None` until the turret launches,
+/// then `Some((world position, world rotation))` — the "Approach A" design: keep the turret on the
+/// client's locally-built rig (the `Rig.turret` join key) and drive it KINEMATICALLY from this
+/// datum instead of promoting it to its own replicated entity. Plain replication (no
+/// prediction/interpolation), same idiom as [`ServoAngles`]/[`NetHealth`]; `set_if_neq` on publish
+/// so a resting turret stops churning change-detection (and replication resends).
+#[derive(Component, Clone, Default, PartialEq, Debug, Serialize, Deserialize)]
+pub struct LaunchedTurretPose(pub Option<(Vec3, Quat)>);
 
 /// The tank's health-bearing volumes in `TankVolumes` order — the SINGLE definition of which volumes
 /// (and in what order) [`NetHealth`] snapshots, so publish and apply can never drift out of alignment
@@ -165,6 +177,72 @@ fn apply_servo_angles(
     }
 }
 
+/// Authority side: mirror the launched turret's live avian world pose onto the replicated root
+/// datum. `FixedPostUpdate` (after `launch_turrets_on_cookoff` has made the turret a free body and
+/// the solver has stepped it), `Without<Remote>` = authority-only (every client tank carries
+/// `Remote`). The join key is `Rig.turret` — the same turret `Entity` the authority launched; once
+/// it carries `LaunchedTurret` the second query resolves it, and we publish `Some(pose)`. Before
+/// launch the turret isn't a free body (no launched match) so the datum stays its `None` default.
+/// `set_if_neq` so a resting turret stops churning change-detection.
+fn publish_launched_turret_pose(
+    mut tanks: Query<(&Rig, &mut LaunchedTurretPose), Without<Remote>>,
+    launched: Query<(&Position, &Rotation), With<LaunchedTurret>>,
+) {
+    for (rig, mut pose) in &mut tanks {
+        if let Ok((position, rotation)) = launched.get(rig.turret) {
+            pose.set_if_neq(LaunchedTurretPose(Some((position.0, rotation.0))));
+        }
+    }
+}
+
+/// Client side, remote tanks: realize the authoritative launched-turret pose the client does NOT
+/// simulate (`launch_turrets_on_cookoff` is gated off on the replica). `With<Remote>` = replica-only
+/// in shared code, exactly like [`apply_servo_angles`]. Two phases keyed off whether the client's
+/// `Rig.turret` has been detached yet (`LaunchedTurret` presence — the one-time guard):
+///   - Not yet detached: strip the servo attachment (`ChildOf` + the three servo components) and
+///     re-spawn the turret as a free `Kinematic` body seeded AT the authoritative pose. `Position`/
+///     `Rotation` go in the tuple BEFORE `RigidBody` (the placeholder-NaN discipline — a body must
+///     never flush with a `PLACEHOLDER` pose). Inserting `LaunchedTurret` fires the existing
+///     `detach_view_on_turret_launch` observer, which reparents the glb turret subtree for free.
+///   - Already detached: write the pose straight onto the (kinematic) turret's `Position`/`Rotation`
+///     — avian never overrides a kinematic body's pose, so this direct write IS the kinematic drive
+///     that tracks the server's flying-then-resting turret. `set_if_neq` to avoid at-rest churn.
+///
+/// Borrow structure: `tanks` reads the tank ROOT (`Rig`/`LaunchedTurretPose`), `launched` is the
+/// read-only detach guard, and `poses` mutates the TURRET's `Position`/`Rotation` — three disjoint
+/// component sets over (root vs turret) entities, so no aliasing and no query conflict.
+fn apply_launched_turret_pose(
+    tanks: Query<(&Rig, &LaunchedTurretPose), With<Remote>>,
+    launched: Query<(), With<LaunchedTurret>>,
+    mut poses: Query<(&mut Position, &mut Rotation), With<LaunchedTurret>>,
+    mut commands: Commands,
+) {
+    for (rig, pose) in &tanks {
+        let Some((position, rotation)) = pose.0 else {
+            continue;
+        };
+        if launched.contains(rig.turret) {
+            // Already detached: kinematically drive the free turret to the authoritative pose.
+            if let Ok((mut p, mut r)) = poses.get_mut(rig.turret) {
+                p.set_if_neq(Position(position));
+                r.set_if_neq(Rotation(rotation));
+            }
+        } else {
+            // One-time detach: fires exactly once because the `LaunchedTurret` insert (below) makes
+            // the `launched.contains` guard true for every subsequent tick.
+            commands
+                .entity(rig.turret)
+                .remove::<(ChildOf, ServoCommand, ServoIndex, ServoSpec)>()
+                .insert((
+                    Position(position),
+                    Rotation(rotation),
+                    RigidBody::Kinematic,
+                    LaunchedTurret,
+                ));
+        }
+    }
+}
+
 /// Coarsened rollback thresholds for the tank root (map §1): the reference examples' 1 cm / 0.01
 /// rad bar is tuned for a single-collider capsule character, not a 16-contact 57 t rig — solver
 /// noise on a body this complex trips that bar far more often than genuine misprediction (measured:
@@ -237,6 +315,9 @@ pub(crate) fn plugin(app: &mut App) {
     // Server-authoritative per-volume health (same plain-replication shape as `ServoAngles`): the
     // client's damage/death emerge from this, not a divergent local kill.
     app.component::<NetHealth>().replicate();
+    // Authoritative launched-turret world pose (same plain-replication shape): the client shows the
+    // cooked-off toss it does NOT simulate locally, driving its own rig turret kinematically.
+    app.component::<LaunchedTurretPose>().replicate();
     app.add_plugins(input::native::InputPlugin::<TankCommand>::default());
 
     // Avian replication (map §5): mount lightyear_avian3d's ordering fixes, then register the
@@ -320,8 +401,18 @@ pub(crate) fn plugin(app: &mut App) {
     app.add_observer(strip_confirmed_history::<DriveState>);
     app.add_observer(strip_confirmed_history::<TankSim>);
 
-    app.add_systems(FixedPostUpdate, (publish_servo_angles, publish_net_health));
-    app.add_systems(FixedUpdate, apply_servo_angles.in_set(GameplaySet));
+    app.add_systems(
+        FixedPostUpdate,
+        (
+            publish_servo_angles,
+            publish_net_health,
+            publish_launched_turret_pose,
+        ),
+    );
+    app.add_systems(
+        FixedUpdate,
+        (apply_servo_angles, apply_launched_turret_pose).in_set(GameplaySet),
+    );
     // Client: land the replicated health before the damage-consequence chain reads it, so cookoff /
     // crew-death interpret this tick's authoritative HP (server-only publish is a no-op there).
     app.add_systems(
