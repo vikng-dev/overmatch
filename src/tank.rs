@@ -76,6 +76,28 @@ pub struct Rig {
     pub muzzle: Entity,
 }
 
+/// Sweep a cooked-off turret when its tank root despawns. On cookoff the turret is detached from the
+/// rig (`ChildOf` removed, remade as a free `LaunchedTurret` body — see
+/// `damage::launch_turrets_on_cookoff` / `net::protocol::apply_launched_turret_pose`), so it is NOT
+/// a descendant of the root: a recursive root despawn misses it, leaking one launched turret per
+/// death. `Rig` lives ONLY on the tank root and is removed as the root despawns, so `On<Remove,
+/// Rig>` is the "root is going away" signal on BOTH ends of the wire — the net server despawning a
+/// respawning bot, and the net client recursively despawning the root when that despawn replicates.
+/// The removed `Rig` is still readable inside the observer, so we reach its captured `turret` handle
+/// and `try_despawn` it: a silent no-op when the turret was still an attached child (crew-loss
+/// death, already swept by the recursive despawn) or is otherwise gone, so one branch covers both
+/// death paths on both ends. Mounted in [`sim_plugin`], which the net client and server both pull in
+/// via `SimPlugin`; harmless in single-player, where tank roots never despawn.
+fn sweep_launched_turret_on_root_despawn(
+    remove: On<Remove, Rig>,
+    rigs: Query<&Rig>,
+    mut commands: Commands,
+) {
+    if let Ok(rig) = rigs.get(remove.entity) {
+        commands.entity(rig.turret).try_despawn();
+    }
+}
+
 /// Per-view runtime config bound from the spec's `views` map: the camera FOV and the gating
 /// requirement. Keyed by [`ViewKind`] in [`TankViews`] on the tank root; the camera reads `fov`,
 /// the sight systems gate on `requires` (the per-view successor to the old `GunnerSight`/
@@ -428,6 +450,7 @@ pub fn sim_plugin(app: &mut App) {
     // order-independent — whichever of marker/`ApplyPosToTransform` lands second completes it.
     app.add_observer(shield_authored_collider_transform);
     app.add_observer(shield_late_authored_marker);
+    app.add_observer(sweep_launched_turret_on_root_despawn);
     app
         // The servo mechanism steps on the fixed clock (sim truth — the muzzle pose decides where
         // shells go), *after* `GameplaySet` so `drive_aim_servos` has written this tick's targets.
