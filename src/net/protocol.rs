@@ -30,6 +30,12 @@ use crate::tank::{Rig, ServoCommand, ServoIndex, TankSim};
 #[derive(Component, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct NetTank;
 
+/// Replicated bot marker — `Name` is not replicated, so the client can't read the server's
+/// `Name::new("Bot")`; this rides the wire so the client's HUD can prefix the bot's nameplate with
+/// `[BOT]`. Plain replication like [`NetTank`] (no prediction/interpolation).
+#[derive(Component, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct NetBot;
+
 /// Authoritative turret/gun angles (radians, parent-local — `ServoState::current`'s own frame),
 /// published on the tank root by the authority and replicated. Remote (interpolated) tanks —
 /// other players' tanks, from step 9 — have no local servo sim; this is how their rigs lay.
@@ -155,6 +161,7 @@ pub(crate) fn angular_velocity_error(a: &AngularVelocity, b: &AngularVelocity) -
 /// `TankCommand` input protocol. Grows as later increments add more (§5/§7 of the spike map).
 pub(crate) fn plugin(app: &mut App) {
     app.component::<NetTank>().replicate();
+    app.component::<NetBot>().replicate();
     // Plain replication, no `.predict()`/interpolation: predicted tanks simulate their own servos,
     // and non-predicted consumers chase the raw angle through the servo mechanism (see the type).
     app.component::<ServoAngles>().replicate();

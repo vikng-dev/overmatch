@@ -274,6 +274,9 @@ fn spawn_bot(
     let mut tank = commands.spawn((
         Name::new("Bot"),
         Bot,
+        // Replicated bot marker: `Name` doesn't ride the wire, so this is how the client's HUD
+        // recognizes the bot to prefix its nameplate with `[BOT]`.
+        super::protocol::NetBot,
         rig::net_tank_rig(&assets),
         // Simulated as a normal Dynamic body on the SERVER (it drives); clients receive it via
         // replication and, having no local body role for it, build a Static interpolated body

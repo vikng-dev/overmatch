@@ -8,6 +8,11 @@
 
 use bevy::prelude::*;
 
+// `NetBot` is a net-only replicated type; the default/sandbox builds don't compile the `net`
+// feature, so both the import and its use in `update_tank_nameplates` are gated.
+#[cfg(feature = "net")]
+use crate::net::protocol::NetBot;
+
 use crate::ballistics::{ComponentHealth, ComponentVolume};
 use crate::damage::{Ammo, CrewStation, FunctionRole};
 use crate::tank::{Tank, ViewNode};
@@ -159,13 +164,19 @@ fn volume_label(
 /// in the controlled tank's fixed corner panel (`crew_ui::update_status_panel`).
 fn update_tank_nameplates(
     camera: Single<(&Camera, &GlobalTransform), With<HudCamera>>,
-    tanks: Query<(&GlobalTransform, Option<&Name>), With<Tank>>,
+    tanks: Query<(Entity, &GlobalTransform, Option<&Name>), With<Tank>>,
+    // Net builds only: a bot carries the replicated `NetBot` marker (`Name` doesn't ride the wire),
+    // so its nameplate is prefixed `[BOT]`. `#[cfg]` on the system param keeps the default/sandbox
+    // builds (no `net` feature, no `NetBot` type) compiling.
+    #[cfg(feature = "net")] bots: Query<(), With<NetBot>>,
     mut labels: Query<(&mut Node, &mut Text, &mut Visibility), With<TankNameplate>>,
 ) {
     let (camera, cam_transform) = *camera;
     let mut tanks = tanks.iter();
     for (mut node, mut text, mut visibility) in &mut labels {
-        let Some((transform, name)) = tanks.next() else {
+        // `_entity` is only read in net builds (the `[BOT]` lookup); the underscore keeps the
+        // default build's unused binding from tripping clippy's `-D warnings`.
+        let Some((_entity, transform, name)) = tanks.next() else {
             *visibility = Visibility::Hidden;
             continue;
         };
@@ -174,7 +185,14 @@ fn update_tank_nameplates(
             Ok(screen) => {
                 node.left = Val::Px(screen.x + 12.0);
                 node.top = Val::Px(screen.y - 20.0);
-                *text = Text::new(name.map(|name| name.as_str()).unwrap_or("Tiger I"));
+                let label = name.map(|name| name.as_str()).unwrap_or("Tiger I");
+                #[cfg(feature = "net")]
+                let label = if bots.get(_entity).is_ok() {
+                    format!("[BOT] {label}")
+                } else {
+                    label.to_string()
+                };
+                *text = Text::new(label);
                 *visibility = Visibility::Visible;
             }
             Err(_) => *visibility = Visibility::Hidden,
