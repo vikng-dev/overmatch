@@ -7,14 +7,15 @@
 //! overlay, NOT a pause: the sim never stops (there is no online pause; a frozen predicting client
 //! desyncs from a server that keeps ticking).
 //!
-//! Run with `cargo run --bin client --features net`. Pass `--simulate-input` (or set
-//! `SPIKE_SIMULATE_INPUT`) to run headless and programmatically drive throttle/aim/fire for a few
-//! seconds, proving prediction + rollback under a real sim workload without a human at the keyboard.
+//! Run with `cargo run` (the `overmatch` bin, `net` feature on by default). Pass `--simulate-input`
+//! (or set `SPIKE_SIMULATE_INPUT`) to run headless and programmatically drive throttle/aim/fire for a
+//! few seconds, proving prediction + rollback under a real sim workload without a human at the keyboard.
 
 use core::time::Duration;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use bevy::app::ScheduleRunnerPlugin;
+use bevy::asset::AssetPlugin;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use lightyear::prediction::correction::CorrectionPolicy;
@@ -59,6 +60,12 @@ pub fn run() {
         // Headless: same no-GPU/no-window recipe as the server, so automation never opens a window.
         app.add_plugins(
             DefaultPlugins
+                // Exe-relative asset root (see `asset_root`), so a bundled/double-clicked client
+                // finds `assets/` regardless of cwd — headless automation loads the same rig.
+                .set(AssetPlugin {
+                    file_path: asset_root(),
+                    ..default()
+                })
                 .set(bevy::render::RenderPlugin {
                     render_creation: bevy::render::settings::WgpuSettings {
                         backends: None,
@@ -77,7 +84,12 @@ pub fn run() {
         .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(2)))
         .init_resource::<harness::SimulateInput>();
     } else {
-        app.add_plugins(DefaultPlugins);
+        // Exe-relative asset root (see `asset_root`): a double-clicked `overmatch`/`overmatch.exe`
+        // (or a macOS `.app`) finds `assets/` beside it no matter the launch cwd.
+        app.add_plugins(DefaultPlugins.set(AssetPlugin {
+            file_path: asset_root(),
+            ..default()
+        }));
         // Never drop below the 64 Hz tick: the default `WinitSettings::game()` throttles an
         // UNFOCUSED window to 60 Hz reactive updates — under tick rate, so an alt-tabbed client
         // drifts behind the server and resyncs on refocus (lightyear #1113's jitter class).
@@ -137,24 +149,26 @@ pub fn run() {
     // `NetClientPlugin`) — NOT part of `DefaultPlugins`, so it must be added explicitly here.
     app.add_plugins(bevy::diagnostic::FrameTimeDiagnosticsPlugin::default());
 
-    // Server address: `OVERMATCH_SERVER` points the client at a remote server for cloud
-    // playtests — accepts `host:port` (a full `SocketAddr`) or a bare IP (default port appended).
-    // Unset → loopback, the single-machine dev/harness default.
-    let default_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), SERVER_PORT);
+    // Server address resolution, in priority order:
+    //   1. runtime `OVERMATCH_SERVER` — points a dev/playtest client at any server.
+    //   2. compile-time `OVERMATCH_DEFAULT_SERVER` (baked via `option_env!`): CI sets it on the
+    //      release client to the deployed droplet, so a double-clicked build connects there with no
+    //      env. A dev build leaves it unset and falls through.
+    //   3. loopback — the single-machine dev/harness default.
+    // Both the runtime and the baked form accept `host:port` (a full `SocketAddr`) or a bare IP
+    // (default port appended); see [`parse_server_addr`].
+    let loopback = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), SERVER_PORT);
     let server_addr = match std::env::var("OVERMATCH_SERVER") {
-        Ok(raw) => raw
-            .parse::<SocketAddr>()
-            .or_else(|_| {
-                raw.parse::<IpAddr>()
-                    .map(|ip| SocketAddr::new(ip, SERVER_PORT))
-            })
-            .unwrap_or_else(|_| {
-                error!(
-                    "client: OVERMATCH_SERVER=\"{raw}\" is not an ip or ip:port — using loopback"
-                );
-                default_addr
-            }),
-        Err(_) => default_addr,
+        // A malformed RUNTIME override falls back to loopback, not to the baked default: an explicit
+        // bad `OVERMATCH_SERVER` shouldn't silently redirect the player to the compiled-in server.
+        Ok(raw) => parse_server_addr(&raw).unwrap_or_else(|| {
+            error!("client: OVERMATCH_SERVER=\"{raw}\" is not an ip or ip:port — using loopback");
+            loopback
+        }),
+        // No runtime override: use the compile-time baked default if this build has a (valid) one.
+        Err(_) => option_env!("OVERMATCH_DEFAULT_SERVER")
+            .and_then(parse_server_addr)
+            .unwrap_or(loopback),
     };
     // Pid-based id so back-to-back runs don't collide inside the server's disconnect timeout.
     let client_id = u64::from(std::process::id());
@@ -349,6 +363,52 @@ pub fn run() {
     }
 
     app.run();
+}
+
+/// Parse a server address from a string in either accepted form: a full `host:port` `SocketAddr`,
+/// or a bare IP (the default [`SERVER_PORT`] is appended). Shared by the runtime `OVERMATCH_SERVER`
+/// override and the compile-time `OVERMATCH_DEFAULT_SERVER` baked default. `None` on a malformed
+/// value; the caller decides the fallback.
+fn parse_server_addr(raw: &str) -> Option<SocketAddr> {
+    raw.parse::<SocketAddr>().ok().or_else(|| {
+        raw.parse::<IpAddr>()
+            .ok()
+            .map(|ip| SocketAddr::new(ip, SERVER_PORT))
+    })
+}
+
+/// Where to load runtime assets from. Defaults to `assets` (relative to the working directory) for
+/// `cargo run`. A packaged client is launched with an unrelated working directory, so when we detect
+/// a bundle we resolve assets from the executable's own path:
+/// - macOS `.app`: `exe = <App>.app/Contents/MacOS/<bin>` → `../Resources/assets`.
+/// - Windows: `<exe_dir>/assets`, so a double-clicked `overmatch.exe` finds `assets/` beside it.
+///
+/// Each branch only wins if the resolved directory actually exists, else it falls back to `"assets"`
+/// (the `cargo run` / dev case). Moved here from the retired single-player `main.rs`; the client is
+/// now the only Bevy-`App`-building product, so this lives beside where it is wired into `AssetPlugin`.
+fn asset_root() -> String {
+    #[cfg(target_os = "macos")]
+    if let Ok(exe) = std::env::current_exe() {
+        // exe = <App>.app/Contents/MacOS/<bin>  ->  ../Resources/assets
+        if let Some(resources) = exe
+            .parent()
+            .and_then(|macos| macos.parent())
+            .map(|contents| contents.join("Resources").join("assets"))
+            && resources.is_dir()
+        {
+            return resources.to_string_lossy().into_owned();
+        }
+    }
+    #[cfg(target_os = "windows")]
+    if let Ok(exe) = std::env::current_exe() {
+        // exe = <dir>/overmatch.exe  ->  <dir>/assets
+        if let Some(assets) = exe.parent().map(|dir| dir.join("assets"))
+            && assets.is_dir()
+        {
+            return assets.to_string_lossy().into_owned();
+        }
+    }
+    "assets".to_string()
 }
 
 /// Possession (spike map §6): the server's `ControlledBy` arrives as lightyear's `Controlled`
