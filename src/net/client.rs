@@ -23,7 +23,9 @@ use lightyear::prelude::input::client::InputSystems;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
 use lightyear::prelude::{Controlled as NetControlled, *};
 
+use super::protocol::FireEvent;
 use super::{client_smoothing_plugin, diagnostics, harness, open_gameplay_gate, physics, rig};
+use crate::ballistics::FireShell;
 use crate::command::TankCommand;
 use crate::state::AppState;
 use crate::tank::{Controlled as GameControlled, PendingTankAssets, load_tank_assets};
@@ -306,6 +308,7 @@ pub fn run() {
             Update,
             (
                 rig::attach_replicated_rig,
+                receive_fire_events,
                 diagnostics::nan_tripwire,
                 open_gameplay_gate,
                 diagnostics::watch_rollback_metrics,
@@ -359,6 +362,39 @@ fn claim_input_slot(add: On<Add, NetControlled>, mut commands: Commands) {
         GameControlled,
         diagnostics::LastPosition::default(),
     ));
+}
+
+/// Drain the server's cosmetic `FireEvent`s (`net::protocol::FireEvent`) and re-raise each as a
+/// local `FireShell` — the CLIENT half of the opponent-fire seam. A remote (interpolated) tank runs
+/// no local `fire`, so this is how its shots become visible: the re-raised `FireShell` flies through
+/// the same `integrate_projectiles`, which already gates damage/hit-impulse off under `ClientReplica`
+/// (deposit=false), so the resulting shell is cosmetic BY CONSTRUCTION — no new gating here.
+///
+/// `MessageReceiver<FireEvent>` is a required component of the `Client` (the `ServerToClient`
+/// direction registered in `net::protocol`), so it rides the client link entity. `shooter: None`:
+/// the client never re-broadcasts, and only the server owns attribution (the wire `shooter` is
+/// entity-mapped but unused for now — see `FireEvent`). A `FireEvent` whose direction fails the
+/// `Dir3` guard is skipped (hold the tracer rather than spawn a NaN shell), mirroring `fire`'s bore
+/// guard.
+fn receive_fire_events(
+    mut receivers: Query<&mut MessageReceiver<FireEvent>>,
+    mut commands: Commands,
+) {
+    for mut receiver in &mut receivers {
+        for event in receiver.receive() {
+            let Ok(direction) = Dir3::new(event.direction) else {
+                continue; // corrupt bore off the wire — hold the tracer rather than fire NaN
+            };
+            commands.trigger(FireShell {
+                origin: event.origin,
+                direction,
+                speed: event.speed,
+                caliber: event.caliber,
+                mass: event.mass,
+                shooter: None,
+            });
+        }
+    }
 }
 
 /// Windowed input path: the game's own client writers (`gather_commands`, `commit_aim`,

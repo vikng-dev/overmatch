@@ -250,6 +250,15 @@ pub struct FireShell {
     pub caliber: f32,
     /// Projectile mass (kg) — the primary driver of penetration capability (design §3).
     pub mass: f32,
+    /// The tank root that fired this shell, or `None` for trigger sources with no tank (the
+    /// sandbox's free-fly camera). Ballistics ignores it — `on_fire_shell` just spawns the shell —
+    /// but the net server's `FireShell` observer reads it to broadcast the cosmetic tracer to the
+    /// OTHER clients (`net::server`, the "FireEvent" seam): a shot whose shooter is known can be
+    /// attributed to the right replicated tank; `None` shots (sandbox) simply never broadcast. Only
+    /// `net::server` reads this, so it is dead code in a build without the `net` feature (SP /
+    /// sandbox) — allow it there rather than drop a field the wire seam depends on.
+    #[cfg_attr(not(feature = "net"), allow(dead_code))]
+    pub shooter: Option<Entity>,
 }
 
 /// A shell in flight. Kinematic — integrated by hand, no physics engine.

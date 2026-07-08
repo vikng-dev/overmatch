@@ -4,6 +4,7 @@
 //! or input rides the wire, its registration lives here and nowhere else.
 
 use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, RigidBody, Rotation};
+use bevy::ecs::entity::{EntityMapper, MapEntities};
 use bevy::prelude::*;
 use lightyear::avian3d::plugin::{AvianReplicationMode, LightyearAvianPlugin};
 // `Remote` (bevy_replicon's "this entity arrived by replication", re-exported): the honest
@@ -74,6 +75,49 @@ pub struct NetHealth(pub Vec<f32>);
 /// so a resting turret stops churning change-detection (and replication resends).
 #[derive(Component, Clone, Default, PartialEq, Debug, Serialize, Deserialize)]
 pub struct LaunchedTurretPose(pub Option<(Vec3, Quat)>);
+
+/// Cosmetic opponent-fire tracer ("FireEvent" seam): a replicated MESSAGE (not a component), one
+/// broadcast per authoritative shot, so every OTHER client spawns a LOCAL cosmetic shell for a tank
+/// it only interpolates. A remote (interpolated) tank runs no local `fire` — it has no
+/// `ActionState`/`TankCommand` — so without this its shots are invisible; a client sees only its
+/// OWN predicted tank's shells. Loss-tolerant BY CONSTRUCTION: damage is server-authoritative
+/// (`NetHealth`), so a dropped `FireEvent` costs a missing tracer, never a missing hit — which is
+/// exactly why [`FireChannel`] is unreliable + unordered.
+///
+/// Geometry mirrors [`crate::ballistics::FireShell`] (origin / bore / speed / caliber / mass) so the
+/// receiver can re-raise that same event and let the existing `integrate_projectiles` fly it (already
+/// damage-gated off under `ClientReplica` — cosmetic with no new gating). The bore rides as a `Vec3`,
+/// NOT a `Dir3`: a corrupt/zero direction off the wire must be REJECTED on receipt (hold the tracer)
+/// rather than trip a `Dir3` non-zero invariant, so the client reconstructs `Dir3` behind the same
+/// bore guard `fire` itself uses.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct FireEvent {
+    pub origin: Vec3,
+    /// Bore direction as a raw `Vec3` — see the type doc on why it is not a `Dir3`.
+    pub direction: Vec3,
+    pub speed: f32,
+    pub caliber: f32,
+    pub mass: f32,
+    /// The firing tank root, ENTITY-MAPPED (`MapEntities` below) so the server entity resolves to the
+    /// receiver's local replica. The client does NOT use it yet — the tracer flies purely off the
+    /// geometry above — but carrying (and mapping) it now means future remote-barrel recoil /
+    /// hit-reaction can hook onto the right tank with no protocol change.
+    pub shooter: Entity,
+}
+
+impl MapEntities for FireEvent {
+    fn map_entities<M: EntityMapper>(&mut self, mapper: &mut M) {
+        // Only `shooter` is an entity; every other field is plain geometry.
+        self.shooter = mapper.get_mapped(self.shooter);
+    }
+}
+
+/// The dedicated channel [`FireEvent`] rides: unreliable + unordered, matching the message's
+/// loss-tolerance (a missing tracer is cosmetic; there is nothing to retry or re-sequence). A
+/// zero-sized marker type — `Channel` is blanket-implemented for any `Send + Sync + 'static` type
+/// (lightyear_transport channel/mod.rs), so the type IS the channel; its settings are registered in
+/// [`plugin`].
+pub struct FireChannel;
 
 /// The tank's health-bearing volumes in `TankVolumes` order — the SINGLE definition of which volumes
 /// (and in what order) [`NetHealth`] snapshots, so publish and apply can never drift out of alignment
@@ -318,6 +362,31 @@ pub(crate) fn plugin(app: &mut App) {
     // Authoritative launched-turret world pose (same plain-replication shape): the client shows the
     // cooked-off toss it does NOT simulate locally, driving its own rig turret kinematically.
     app.component::<LaunchedTurretPose>().replicate();
+
+    // The cosmetic opponent-fire tracer (`FireEvent`) and its dedicated loss-tolerant channel. A
+    // MESSAGE, not a replicated component: it is a one-shot fire-and-forget event, not a piece of
+    // ongoing state. `ServerToClient` (the server is the sole broadcaster — see `net::server`);
+    // `add_map_entities` registers `FireEvent`'s `MapEntities` so the `shooter` entity resolves to
+    // the receiver's local replica on deserialize. Registered in this SHARED plugin so both ends
+    // agree on the message id, direction, and channel — exactly like the `.replicate()` block above.
+    app.add_channel::<FireChannel>(ChannelSettings {
+        // Unreliable + unordered: a dropped or reordered tracer is cosmetically harmless (damage is
+        // server-authoritative via `NetHealth`), so paying for acks/retries/sequencing would be pure
+        // overhead on a high-frequency event.
+        mode: ChannelMode::UnorderedUnreliable,
+        ..default()
+    })
+    // The CHANNEL's own direction — NOT just the message's. This installs the per-link
+    // sender/receiver observers (`add_sender_channel`/`add_receiver_channel` in lightyear_transport)
+    // that populate each new `Transport`'s channel senders from the registry; without it the channel
+    // exists in the `ChannelRegistry` but no link ever gets a `FireChannel` sender, so every send
+    // fails `ChannelNotFound` at runtime (compiles fine — the bug only shows live). Same idiom as
+    // lightyear's own `InputChannel`/`RepliconUpdatesChannel` registrations.
+    .add_direction(NetworkDirection::ServerToClient);
+    app.register_message::<FireEvent>()
+        .add_map_entities()
+        .add_direction(NetworkDirection::ServerToClient);
+
     app.add_plugins(input::native::InputPlugin::<TankCommand>::default());
 
     // Avian replication (map §5): mount lightyear_avian3d's ordering fixes, then register the

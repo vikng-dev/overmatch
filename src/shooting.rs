@@ -127,6 +127,9 @@ fn fire(
             speed: weapon.speed,
             caliber: weapon.caliber,
             mass: weapon.mass,
+            // This shell belongs to a tank: name its root so the net server can broadcast the
+            // cosmetic tracer to every OTHER client (`net::server`'s FireShell observer).
+            shooter: Some(root.0),
         });
         // Kick the barrel back (root-resident recoil state); apply_recoil springs it home.
         if let (Some(_), Some(recoil)) = (weapon.barrel, weapon.recoil.as_ref())

@@ -15,10 +15,11 @@ use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
 
-use super::protocol::{LaunchedTurretPose, NetHealth, ServoAngles};
+use super::protocol::{FireChannel, FireEvent, LaunchedTurretPose, NetHealth, ServoAngles};
 use super::{diagnostics, harness, open_gameplay_gate, physics, rig};
 use crate::SimPlugin;
 use crate::bake::TankGeometry;
+use crate::ballistics::FireShell;
 use crate::command::{ConsumeCommandEdges, TankCommand};
 use crate::damage::TankKnockedOut;
 use crate::spec::TankSpec;
@@ -68,6 +69,11 @@ pub fn run() {
     // Passive jitter-trace recorder: tick rows only (the server has no predicted view to render).
     // Idle unless `SPIKE_TRACE` is set.
     app.add_plugins(crate::trace::server_plugin);
+    // The cosmetic opponent-fire broadcast: SERVER ONLY. Every authoritative `fire` raises a
+    // `FireShell`; this observer turns each one that names a tank into a `FireEvent` for the OTHER
+    // clients (`broadcast_fire`). Registered here and NOWHERE shared, so the client's own local
+    // `FireShell` (its predicted tank's cosmetic shell) never tries to send.
+    app.add_observer(broadcast_fire);
 
     let server = app
         .world_mut()
@@ -399,17 +405,77 @@ fn respawn_dead_bots(
 #[derive(Component)]
 struct BotRespawnAt(f32);
 
-/// Drive the bot in a steady circle: constant throttle + steer written straight into its own
-/// `TankCommand` (`command.rs`'s read contract, attached by `command`'s `On<Add, Tank>` observer).
-/// The bot carries no `ActionState`, so `bridge_action_state_to_tank_command` (protocol.rs) never
-/// touches it — this is the sole writer. Ordered in `GameplaySet` before the edge-consumer, with
-/// the other command writers; throttle/steer are levels (never cleared), so it circles for good.
+/// Drive the bot in a steady circle AND hold its main gun's trigger: constants written straight into
+/// its own `TankCommand` (`command.rs`'s read contract, attached by `command`'s `On<Add, Tank>`
+/// observer). The bot carries no `ActionState`, so `bridge_action_state_to_tank_command` (protocol.rs)
+/// never touches it — this is the sole writer. Ordered in `GameplaySet` before the edge-consumer,
+/// with the other command writers; the fields are levels (never cleared), so it circles and fires for
+/// good. Firing makes the bot a self-firing target that exercises the opponent-fire path (the `net`
+/// `FireEvent` tracer, and the remote-recoil / hit-reaction slices to come) solo — no second client.
 fn drive_bot(mut bots: Query<&mut TankCommand, With<Bot>>) {
     for mut command in &mut bots {
         // Gentle constants: enough drive + differential yaw to circle on the flat pad without
         // leaving it or flipping. Everything else stays at `TankCommand::default()`.
         command.throttle = 0.5;
         command.steer = 0.5;
+        // Hold primary fire: the gun fires each time its reload completes (so ~one main-gun shot per
+        // reload), forward/unaimed as it circles. Aiming at a player is later bot-AI work; for now
+        // this is purely the solo test-fire source described above.
+        command.fire_primary = true;
+    }
+}
+
+/// Turn each authoritative `FireShell` into the cosmetic `FireEvent` broadcast — the SERVER half of
+/// the opponent-fire seam (`net::protocol::FireEvent`). Observes every shot the sim fires; a shot
+/// that names a tank (`shooter: Some`) is broadcast so the OTHER clients spawn a local tracer for a
+/// tank they only interpolate, while sandbox/`None` shots (no tank) never broadcast.
+///
+/// Targeting: a PLAYER tank carries `ControlledBy`, so resolve its owner link's `RemoteId` (the same
+/// `PeerId` `handle_new_clients` reads) and send to `AllExceptSingle(owner)` — the shooter already
+/// flew its own local shell, so excluding it avoids a double tracer. A BOT has no `ControlledBy`, so
+/// send to `All` (everyone should see the bot fire). `FireEvent.shooter` carries the firing tank so
+/// the receiver's entity-mapping resolves it to the local replica.
+fn broadcast_fire(
+    fire: On<FireShell>,
+    controlled: Query<&ControlledBy>,
+    remotes: Query<&RemoteId>,
+    servers: Query<&Server>,
+    mut sender: ServerMultiMessageSender,
+) {
+    // Only tank-attributed shots broadcast; a `None` shooter (the sandbox) has no tank to name.
+    let Some(tank) = fire.shooter else {
+        return;
+    };
+    // No `Server` collection yet (no client has linked) — nothing to send to; drop the tracer.
+    let Ok(server) = servers.single() else {
+        return;
+    };
+    let event = FireEvent {
+        origin: fire.origin,
+        // Carry the bore as a plain `Vec3`; the receiver reconstructs `Dir3` behind a guard.
+        direction: fire.direction.as_vec3(),
+        speed: fire.speed,
+        caliber: fire.caliber,
+        mass: fire.mass,
+        shooter: tank,
+    };
+    let target = match controlled.get(tank) {
+        // Player tank: exclude the owner (they already flew their own local shell).
+        Ok(controlled_by) => match remotes.get(controlled_by.owner) {
+            Ok(remote) => NetworkTarget::AllExceptSingle(remote.0),
+            // Owner link with no `RemoteId` (owner mid-disconnect / dangling link while the tank is
+            // still live). Fall back to `All` rather than suppress the tracer for EVERYONE — a
+            // one-frame double tracer for a departing owner beats every other client seeing the shot
+            // with no round. Should not happen for a live owner.
+            Err(_) => NetworkTarget::All,
+        },
+        // Bot (no owner): everyone should see it fire.
+        Err(_) => NetworkTarget::All,
+    };
+    if let Err(err) = sender.send::<FireEvent, FireChannel>(&event, server, &target) {
+        // A dropped cosmetic tracer is not an error (the channel is unreliable by design); keep this
+        // at debug so a transient send failure under heavy fire can't spam the log.
+        debug!("server: FireEvent broadcast dropped: {err}");
     }
 }
 

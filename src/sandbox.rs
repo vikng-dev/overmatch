@@ -710,6 +710,9 @@ fn fire(
         speed: MUZZLE_SPEED,
         caliber: CALIBER,
         mass: SHELL_MASS,
+        // The free-fly camera is not a tank, so there is nothing to attribute (and the sandbox is
+        // single-process anyway) — `None` never broadcasts.
+        shooter: None,
     });
 }
 
