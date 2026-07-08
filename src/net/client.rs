@@ -409,28 +409,26 @@ fn parse_server_addr(raw: &str) -> Option<SocketAddr> {
 /// (the `cargo run` / dev case). Moved here from the retired single-player `main.rs`; the client is
 /// now the only Bevy-`App`-building product, so this lives beside where it is wired into `AssetPlugin`.
 fn asset_root() -> String {
+    // macOS `.app`: exe = <App>.app/Contents/MacOS/<bin>  ->  ../Resources/assets.
     #[cfg(target_os = "macos")]
-    if let Ok(exe) = std::env::current_exe() {
-        // exe = <App>.app/Contents/MacOS/<bin>  ->  ../Resources/assets
-        if let Some(resources) = exe
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(resources) = exe
             .parent()
             .and_then(|macos| macos.parent())
             .map(|contents| contents.join("Resources").join("assets"))
-            && resources.is_dir()
-        {
-            return resources.to_string_lossy().into_owned();
-        }
+        && resources.is_dir()
+    {
+        return resources.to_string_lossy().into_owned();
     }
     // Windows + Linux: the packaged archive extracts the binary and `assets/` into one folder, so
     // resolve `<exe_dir>/assets` — a double-clicked `overmatch.exe` OR an `./overmatch` launched from
     // any working directory finds its assets beside it. (Both are identical exe-relative resolution.)
     #[cfg(any(target_os = "windows", target_os = "linux"))]
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(assets) = exe.parent().map(|dir| dir.join("assets"))
-            && assets.is_dir()
-        {
-            return assets.to_string_lossy().into_owned();
-        }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(assets) = exe.parent().map(|dir| dir.join("assets"))
+        && assets.is_dir()
+    {
+        return assets.to_string_lossy().into_owned();
     }
     "assets".to_string()
 }
