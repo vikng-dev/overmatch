@@ -18,6 +18,15 @@ use crate::{ClientReplica, Layer};
 /// Gravity applied to shells each fixed tick (m/s²).
 const GRAVITY: Vec3 = Vec3::new(0.0, -9.81, 0.0);
 
+/// World-floor height (m): a shell that descends past this has cleared the map edge into the void
+/// below the terrain and is culled. Gravity guarantees every shell reaches it within seconds unless
+/// it hits terrain first — and an in-play arc always does, impacting the ground well above this — so
+/// this only removes the escapees that would otherwise integrate forever (the never-despawn leak),
+/// with zero effect on any legitimate shot (including straight-up or lobbed shells, which come back
+/// down onto terrain). Far below the lowest terrain (the ~0 m slab). A shell can't reach it via
+/// f32 overflow instead: max reach is ~10^5 m (gravity bounds the apex), ~33 orders below `f32::MAX`.
+const KILL_FLOOR: f32 = -100.0;
+
 /// Lumped drag-form constant for the quadratic air-drag model `dv/dt = −k·v²`. The per-shell
 /// coefficient is `k = DRAG_FORM · caliber²/mass` (1/m): `caliber²/mass` is the shell's (inverse)
 /// sectional density, so a heavy-for-bore round (the 88) holds velocity while a light-for-bore one
@@ -745,6 +754,11 @@ fn integrate_projectiles(
                 // Game: the spent shell is done.
                 commands.entity(entity).despawn();
             }
+        } else if pos.y < KILL_FLOOR {
+            // Left the world: cleared the map edge and fell into the void below the terrain. Despawn
+            // outright — there is no impact to inspect, so this ignores the sandbox's retain (unlike a
+            // real impact). This is what bounds a shell that never hits terrain; see `KILL_FLOOR`.
+            commands.entity(entity).despawn();
         } else {
             projectile.velocity = Vec3::from(dir) * speed;
             readout.speed = speed;
