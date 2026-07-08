@@ -46,9 +46,10 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-  # The Windows PVP client → GitHub Release. Tags only (skips on dispatch with create-release).
-  # Windows is the immediate friend-playtest target; Linux/macOS clients stay minimal (macOS via the
-  # notarized job below, no Linux client row).
+  # The desktop PVP client → GitHub Release. Tags only (skips on dispatch with create-release).
+  # Windows + Linux client archives here; macOS is the signed/notarized .dmg job below. Covers both a
+  # Windows and a Linux friend. (Linux runtime floor: built on ubuntu-latest/glibc 2.39 + needs a
+  # working Vulkan driver — fine on a current desktop distro; AppImage would remove that floor later.)
   upload-client:
     needs: create-release
     strategy:
@@ -57,6 +58,8 @@ jobs:
         include:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
     runs-on: ${{ matrix.os }}
     steps:
       # lfs: true is required because assets (*.glb) are stored in Git LFS; without it the checkout
@@ -64,6 +67,16 @@ jobs:
       - uses: actions/checkout@v7
         with:
           lfs: true
+
+      # The Linux client links alsa/udev + the windowing (X11/Wayland/xkb) stack — it RENDERS, unlike
+      # the headless server, but needs the same compile-time libs. (Windows/MSVC needs none.)
+      - name: Install Linux build dependencies
+        if: contains(matrix.target, 'linux')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libasound2-dev libudev-dev \
+            libwayland-dev libxkbcommon-dev libx11-dev
 
       # Ship only runtime assets: the game loads .glb meshes; Blender source files are build-time
       # only. (.blend1 is gitignored, but prune defensively.)

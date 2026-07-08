@@ -402,7 +402,8 @@ fn parse_server_addr(raw: &str) -> Option<SocketAddr> {
 /// `cargo run`. A packaged client is launched with an unrelated working directory, so when we detect
 /// a bundle we resolve assets from the executable's own path:
 /// - macOS `.app`: `exe = <App>.app/Contents/MacOS/<bin>` → `../Resources/assets`.
-/// - Windows: `<exe_dir>/assets`, so a double-clicked `overmatch.exe` finds `assets/` beside it.
+/// - Windows / Linux: `<exe_dir>/assets`, so a double-clicked `overmatch.exe` or an `./overmatch`
+///   launched from any cwd finds `assets/` beside it (the archive extracts binary + assets together).
 ///
 /// Each branch only wins if the resolved directory actually exists, else it falls back to `"assets"`
 /// (the `cargo run` / dev case). Moved here from the retired single-player `main.rs`; the client is
@@ -420,9 +421,11 @@ fn asset_root() -> String {
             return resources.to_string_lossy().into_owned();
         }
     }
-    #[cfg(target_os = "windows")]
+    // Windows + Linux: the packaged archive extracts the binary and `assets/` into one folder, so
+    // resolve `<exe_dir>/assets` — a double-clicked `overmatch.exe` OR an `./overmatch` launched from
+    // any working directory finds its assets beside it. (Both are identical exe-relative resolution.)
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     if let Ok(exe) = std::env::current_exe() {
-        // exe = <dir>/overmatch.exe  ->  <dir>/assets
         if let Some(assets) = exe.parent().map(|dir| dir.join("assets"))
             && assets.is_dir()
         {
