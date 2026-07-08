@@ -11,7 +11,8 @@ use std::net::{Ipv4Addr, SocketAddr};
 use avian3d::prelude::{Position, RigidBody, Rotation};
 use bevy::app::ScheduleRunnerPlugin;
 use bevy::prelude::*;
-use lightyear::prelude::input::native::ActionState;
+use lightyear::prelude::input::native::{ActionState, NativeStateSequence};
+use lightyear::prelude::input::server::{InputValidationAppExt, authorize_controlled_targets};
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
 
@@ -74,6 +75,32 @@ pub fn run() {
     // clients (`broadcast_fire`). Registered here and NOWHERE shared, so the client's own local
     // `FireShell` (its predicted tank's cosmetic shell) never tries to send.
     app.add_observer(broadcast_fire);
+    // Server-authoritative input authorization: strip any `InputTarget::Entity` a client is NOT the
+    // `ControlledBy` owner of, before the input buffer ever applies it. lightyear ships this as an
+    // opt-in `InputSystems::ValidateInputs` system (`add_input_validator` = sugar for
+    // `add_systems(PreUpdate, .in_set(ValidateInputs))`, lightyear_inputs server.rs:153-160) and does
+    // NOT enable it by default — `ControlledBy` is an optional ownership model. We DO use it (every
+    // player tank is spawned `ControlledBy` its link), so register the built-in
+    // `authorize_controlled_targets` for our native `TankCommand` sequence. Placed on the SERVER only:
+    // it queries the server-side `MessageReceiver<InputMessage<S>>` + `ControlledByRemote` (which only
+    // exist on the authority) and is the enforcement point for "a client cannot drive a tank it does
+    // not own" — the second line of defense behind unique client ids, in case a client is modified to
+    // forge `InputTarget::Entity(opponent)`. Inert on the client (no such receiver), but scoped here so
+    // authorization is unambiguously an authority concern.
+    app.add_input_validator(authorize_controlled_targets::<NativeStateSequence<TankCommand>>);
+    // Give every remote client link a `ReplicationSender`. lightyear's per-client visibility hooks
+    // (`ReplicationTarget::on_insert` / `ControlledBy::on_insert`) only set the hide/show bits for
+    // `Predicted`/`Interpolated`/`Controlled` on links that carry `ReplicationSender` (or `HostClient`);
+    // without it those `on_insert` hooks no-op, and an UNSET visibility bit defaults to VISIBLE — so all
+    // three ownership markers broadcast to EVERY client and each one predicts + claims input on EVERY
+    // tank (the "one player controls both tanks" leak). The one visibility path that isn't
+    // `ReplicationSender`-gated (`handle_new_client_visibility`) fires only at connect, before the tanks
+    // asset-load-gate-spawn in `spawn_pending_tanks`, so it never covers them — the spawn-time path is
+    // always `on_insert`. Replication itself still works (replicon's `ConnectedClient` drives the send),
+    // which is why only the ownership markers leaked. Canonical lightyear examples add this in their
+    // `On<Add, LinkOf>` handler; `ReplicationSender` is a unit marker used solely by the visibility
+    // hooks (it does not start a duplicate send loop), so inserting it is safe.
+    app.add_observer(attach_replication_sender);
 
     let server = app
         .world_mut()
@@ -139,6 +166,15 @@ pub fn run() {
 /// queueing avoids spawning a tank root the spawner would immediately panic on.
 #[derive(Resource, Default)]
 struct PendingClients(Vec<(Entity, PeerId)>);
+
+/// Insert [`ReplicationSender`] onto every remote client link the moment it spawns. This is the gate
+/// lightyear's per-client `Predicted`/`Interpolated`/`Controlled` visibility hooks require — see the
+/// registration in [`run`] for the full rationale. `On<Add, LinkOf>` fires structurally, before both
+/// `spawn_pending_tanks` and `spawn_bot`, so the sender is always present when a tank's `on_insert`
+/// visibility path runs.
+fn attach_replication_sender(add: On<Add, LinkOf>, mut commands: Commands) {
+    commands.entity(add.entity).insert(ReplicationSender);
+}
 
 /// Persistent spawn-lane counter so successive (and reconnecting) clients fan out along X instead
 /// of stacking on the shared base pose — two tanks spawned at the same spot interpenetrate and NaN

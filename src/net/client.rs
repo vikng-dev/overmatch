@@ -12,6 +12,7 @@
 //! few seconds, proving prediction + rollback under a real sim workload without a human at the keyboard.
 
 use core::time::Duration;
+use std::hash::{BuildHasher, Hasher};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use bevy::app::ScheduleRunnerPlugin;
@@ -24,7 +25,7 @@ use lightyear::prelude::input::client::InputSystems;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
 use lightyear::prelude::{Controlled as NetControlled, *};
 
-use super::protocol::FireEvent;
+use super::protocol::{FireEvent, NetTank};
 use super::{client_smoothing_plugin, diagnostics, harness, open_gameplay_gate, physics, rig};
 use crate::ballistics::FireShell;
 use crate::command::TankCommand;
@@ -170,8 +171,19 @@ pub fn run() {
             .and_then(parse_server_addr)
             .unwrap_or(loopback),
     };
-    // Pid-based id so back-to-back runs don't collide inside the server's disconnect timeout.
-    let client_id = u64::from(std::process::id());
+    // A per-process RANDOM client id, generated once at startup. NOT the PID (the old
+    // `u64::from(std::process::id())`): netcode does NOT enforce client-id uniqueness, so a duplicate
+    // id silently OVERWRITES the server's `PeerId → Entity` mapping, and ownership routing resolves by
+    // RAW id value — `PredictionTarget::to_clients(NetworkTarget::Single(id))` and
+    // `PeerMetadata.mapping` both key on the value, not on which machine sent it. Two machines that
+    // happened to share a PID would therefore collide: the server misroutes prediction / `ControlledBy`,
+    // and an opponent's tank arrives on the wrong client carrying `Predicted`/`Controlled` (turret
+    // desync, one client driving both tanks, input contention). A well-distributed random u64 makes a
+    // cross-machine collision vanishingly unlikely. `RandomState::new()` is seeded from OS randomness on
+    // every call, so a fresh hasher's `finish()` yields a random u64 with NO new dependency. Generated
+    // once here and stable for the session; a fresh identity across restarts is fine (back-to-back runs
+    // still can't collide inside the server's disconnect timeout — the whole reason the PID existed).
+    let client_id = std::hash::RandomState::new().build_hasher().finish();
     // ~100 ms delay + jitter on the inbound link, so the client's prediction genuinely runs ahead
     // of the last-confirmed server state (increment 5 rollback-forcing mechanism #1).
     // Env-tunable for bisecting rollback causes: SPIKE_LATENCY_MS=0 disables the conditioner
@@ -334,6 +346,15 @@ pub fn run() {
                 diagnostics::log_sim_evidence,
             ),
         );
+    // Ownership trace (opt-in via `OVERMATCH_OWNERSHIP_TRACE`; KEPT — useful): once per second, log
+    // every `NetTank`'s ownership markers, so a two-client loopback run can confirm that each client's
+    // OWN tank is the sole carrier of `Controlled`/`InputMarker`/`Predicted` and every opponent is
+    // `Interpolated`+`Remote` only. This is exactly the axis the shared-PID bug corrupted (an opponent
+    // arriving with `Controlled`/`Predicted`). Registered only when the env var is present, so normal
+    // runs stay quiet.
+    if std::env::var("OVERMATCH_OWNERSHIP_TRACE").is_ok() {
+        app.add_systems(Update, log_tank_ownership);
+    }
     if simulate {
         app.add_systems(Update, harness::simulate_watchdog)
             .add_systems(
@@ -422,6 +443,40 @@ fn claim_input_slot(add: On<Add, NetControlled>, mut commands: Commands) {
         GameControlled,
         diagnostics::LastPosition::default(),
     ));
+}
+
+/// Opt-in ownership trace (`OVERMATCH_OWNERSHIP_TRACE`): once per second, dump every replicated
+/// tank's ownership markers. For a two-client loopback verification this is the ground truth — the
+/// OWN tank must be the only one with `Controlled` (the game marker `claim_input_slot` inserts),
+/// `InputMarker<TankCommand>`, and `Predicted`; every opponent must be `Interpolated`+`Remote` only.
+/// Any opponent showing `Controlled`/`Predicted` is the ownership-misroute this fix targets.
+/// Throttled to ~1 Hz via a `Local` deadline so it never floods the log.
+#[expect(clippy::type_complexity, reason = "one-off diagnostic marker snapshot")]
+fn log_tank_ownership(
+    tanks: Query<
+        (
+            Entity,
+            Has<GameControlled>,
+            Has<InputMarker<TankCommand>>,
+            Has<Predicted>,
+            Has<Interpolated>,
+            Has<Remote>,
+        ),
+        With<NetTank>,
+    >,
+    time: Res<Time>,
+    mut next: Local<f32>,
+) {
+    let now = time.elapsed_secs();
+    if now < *next {
+        return;
+    }
+    *next = now + 1.0;
+    for (entity, controlled, input_marker, predicted, interpolated, remote) in &tanks {
+        info!(
+            "ownership: {entity} controlled={controlled} input_marker={input_marker} predicted={predicted} interpolated={interpolated} remote={remote}"
+        );
+    }
 }
 
 /// Drain the server's cosmetic `FireEvent`s (`net::protocol::FireEvent`) and re-raise each as a
