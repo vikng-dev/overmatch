@@ -1,6 +1,6 @@
 [package]
 name = "overmatch"
-version = "0.2.2"
+version = "0.3.0-alpha.1"
 edition = "2024"
 default-run = "overmatch"
 
@@ -42,20 +42,35 @@ lightyear = { version = "0.28", default-features = false, features = [
     "avian3d",
 ], optional = true }
 
+# The product IS the networked client, so `net` ships by default: `cargo run`/`cargo build` build
+# the `overmatch` PVP client + the `overmatch-server`. `dev_tools` (physics-debug gizmos + the debug
+# key bindings) is default-on too, decoupled from `debug_assertions` so an optimized playtest build
+# can still carry the tooling. `--no-default-features` drops both, leaving the lib + sandbox
+# (non-net) path — still exercised in CI.
+#
 # `avian3d/serialize` is additive (Serialize/Deserialize impls on Position/Rotation/velocities) —
-# only lightyear's replication registration (net.rs) needs it; gated so the default build's avian3d
-# feature set is untouched.
+# only lightyear's replication registration (net.rs) needs it; gated so a `--no-default-features`
+# build's avian3d feature set is untouched.
 [features]
+default = ["net", "dev_tools"]
 net = ["dep:lightyear", "avian3d/serialize"]
+# Player-facing debug tooling (physics wireframes + the `G`/`X`/`F` debug keys). Empty deps: it is a
+# pure compile gate the code reads via `#[cfg(feature = "dev_tools")]`, kept separate from
+# `debug_assertions` so it survives into optimized builds.
+dev_tools = []
 
+# The product client: `main.rs` runs `net::client::run()`, so the bin requires `net`. Declared
+# explicitly (not just auto-discovered) to pin `required-features` — a `--no-default-features` build
+# skips it instead of failing to resolve `net::client`.
 [[bin]]
-name = "server"
-path = "src/bin/server.rs"
+name = "overmatch"
+path = "src/main.rs"
 required-features = ["net"]
 
+# The dedicated server.
 [[bin]]
-name = "client"
-path = "src/bin/client.rs"
+name = "overmatch-server"
+path = "src/bin/overmatch-server.rs"
 required-features = ["net"]
 
 [profile.dev]

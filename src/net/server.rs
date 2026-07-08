@@ -3,7 +3,7 @@
 //! the increment-5 stub. Headless — the proven `headless_test.rs` recipe (full `DefaultPlugins`,
 //! no GPU/window/winit), NOT `MinimalPlugins`, because the rig loads the same `.glb`/`.tank.ron`
 //! assets the client does.
-//! Run with `cargo run --bin server --features net`.
+//! Run with `cargo run --bin overmatch-server` (the `net` feature is on by default).
 
 use core::time::Duration;
 use std::net::{Ipv4Addr, SocketAddr};

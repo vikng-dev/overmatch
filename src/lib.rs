@@ -30,7 +30,7 @@ mod command;
 /// both `GamePlugin` and the sandbox (each scoped to the `Controlled` tank).
 mod crew_ui;
 pub(crate) mod damage;
-#[cfg(debug_assertions)]
+#[cfg(feature = "dev_tools")]
 mod debug;
 mod driving;
 /// Re-exported for `tests/spherecast_scale.rs`: the sphere probe's witness-geometry distance
@@ -160,9 +160,9 @@ impl Plugin for ClientPlugin {
             crew_ui::plugin,
         ));
 
-        // Dev-only physics visualization (collider/ray wireframes) + debug toggles. Off in release
-        // builds.
-        #[cfg(debug_assertions)]
+        // Physics visualization (collider/ray wireframes) + debug toggles, behind the `dev_tools`
+        // feature (default-on, droppable from an optimized build via `--no-default-features`).
+        #[cfg(feature = "dev_tools")]
         app.add_plugins((avian3d::prelude::PhysicsDebugPlugin, debug::plugin));
     }
 }
@@ -193,12 +193,12 @@ impl Plugin for NetClientPlugin {
             net::debug_hud::plugin,
         ));
 
-        // Dev-only physics visualization + debug toggles, same pair `ClientPlugin` mounts for SP
+        // Physics visualization + debug toggles, same pair `ClientPlugin` mounts for SP
         // (`G` = force arrows + collider wireframes, `X` = x-ray, `F` = camera detach). View-only:
         // it reads `Suspension`/`GlobalTransform` and draws gizmos — nothing sim-visible — so it is
         // safe on a predicting client and is never mounted by the headless server (which composes
-        // `SimPlugin` only, never this plugin).
-        #[cfg(debug_assertions)]
+        // `SimPlugin` only, never this plugin). Behind the `dev_tools` feature (default-on).
+        #[cfg(feature = "dev_tools")]
         app.add_plugins((avian3d::prelude::PhysicsDebugPlugin, debug::plugin));
     }
 }
