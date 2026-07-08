@@ -36,6 +36,9 @@ DMG="$DIST/$BIN_NAME-v$VERSION-universal-apple-darwin.dmg"
 echo ">> Version $VERSION, signing as: $IDENTITY"
 
 # ---------- 1. Build universal binary ----------
+# `overmatch` is the PVP client. Default features now include `net`, so a plain `--release` build
+# is the networked client; if OVERMATCH_DEFAULT_SERVER is set in the environment (the Release
+# workflow exports the droplet IP), it is baked in as the client's default server via option_env!.
 echo ">> Building universal binary (aarch64 + x86_64)..."
 rustup target add aarch64-apple-darwin x86_64-apple-darwin >/dev/null
 cargo build --release --target aarch64-apple-darwin
@@ -52,7 +55,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 mv "$DIST/$BIN_NAME" "$APP/Contents/MacOS/$BIN_NAME"
 chmod +x "$APP/Contents/MacOS/$BIN_NAME"
 cp "$ICON" "$APP/Contents/Resources/$BIN_NAME.icns"
-# Runtime assets in Resources/assets (matches asset_root() in main.rs). Prune sources.
+# Runtime assets in Resources/assets (matches asset_root() in net::client). Prune sources.
 cp -R assets "$APP/Contents/Resources/assets"
 find "$APP/Contents/Resources/assets" -type f \
   \( -name '*.blend' -o -name '*.blend1' -o -name '.DS_Store' \) -delete

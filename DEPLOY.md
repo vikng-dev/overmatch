@@ -32,12 +32,12 @@ Type=simple
 WorkingDirectory=/opt/overmatch-server
 Environment=BEVY_ASSET_ROOT=/opt/overmatch-server
 Environment=SPIKE_PERTURB=0
-ExecStart=/opt/overmatch-server/server
+ExecStart=/opt/overmatch-server/overmatch-server
 Restart=on-failure
 RestartSec=3
 ```
 
-Payload on the droplet: `/opt/overmatch-server/{server,assets/}`.
+Payload on the droplet: `/opt/overmatch-server/{overmatch-server,assets/}`.
 
 Common ops:
 
@@ -56,11 +56,12 @@ systemctl stop overmatch-server          # stop the meter when not testing
 
 The server binary must be Linux x86_64. The dev machine is an ARM Mac, so we build it on
 GitHub's `ubuntu-latest` runner (which *is* the deploy target — glibc 2.39, matched by the
-droplet). See `.github/workflows/server-build.yml`.
+droplet). The `Release` workflow's `workflow_dispatch` path builds just the `overmatch-server`
+and uploads it as a plain artifact (see `.github/workflows/release.yml`).
 
 ```bash
 # 1. Build on CI (workflow_dispatch — pre-alpha, no build-on-push)
-gh workflow run "Server build"
+gh workflow run "Release"
 gh run watch                                   # wait for green
 gh run download <run-id> -n overmatch-server-x86_64-linux
 
@@ -71,6 +72,10 @@ ssh -i ~/.ssh/do-vikng-dev root@157.245.48.161 '
   systemctl restart overmatch-server &&
   systemctl status overmatch-server --no-pager | head -5'
 ```
+
+> **Binary renamed:** the server binary is now `overmatch-server` (was `server`). On the next
+> redeploy, update the droplet's `ExecStart=` (and delete the stale `/opt/overmatch-server/server`)
+> to match the unit above.
 
 ## Known-provisional bits
 

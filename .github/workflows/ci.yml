@@ -75,8 +75,18 @@ jobs:
       # faster to build cold and a smaller cache than the dev profile's opt-level-3
       # deps. `--locked` builds against the committed Cargo.lock, so CI is reproducible
       # and fails loudly if the lockfile drifts from Cargo.toml.
+      # Default features now include `net` + `dev_tools`, so this covers the shipping client/server
+      # (net) path.
       - name: Clippy
         run: cargo clippy --profile ci --locked --all-targets -- -D warnings
 
       - name: Tests
         run: cargo test --profile ci --locked
+
+      # ...and the `--no-default-features` path (lib + sandbox, no net/dev_tools) keeps its own
+      # coverage — nothing default-on can hide a break in the minimal build.
+      - name: Clippy (no default features)
+        run: cargo clippy --profile ci --locked --no-default-features --all-targets -- -D warnings
+
+      - name: Tests (no default features)
+        run: cargo test --profile ci --locked --no-default-features

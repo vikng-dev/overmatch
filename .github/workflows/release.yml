@@ -1,25 +1,44 @@
 name: Release
 
-# Tag-triggered release pipeline. Cut a release by bumping `version` in
-# Cargo.toml, then: git tag vX.Y.Z && git push --tags
-# A matching `vX.Y.Z` tag builds every platform and publishes a GitHub Release
-# with per-platform archives (binary + runtime assets).
+# The single build pipeline for the PRODUCT (`overmatch`, the PVP client) and the
+# `overmatch-server` (dedicated server). Two triggers:
 #
-# Phase 1 (now): publish to GitHub Releases.
-# Phase 2 (later): the same build output feeds Steam via SteamPipe.
-# Linux/Windows: binary + assets archives. macOS: signed + notarized universal .dmg.
+#   - A `vX.Y.Z` tag PUBLISHES a GitHub Release with per-platform archives:
+#       * Windows  `overmatch`        — the PVP client, server address baked to the droplet.
+#       * macOS    `overmatch`        — the client, as a signed + notarized universal .dmg.
+#       * Linux    `overmatch-server` — the dedicated server, tar with assets/.
+#     Cut one by bumping `version` in Cargo.toml, then: git tag vX.Y.Z && git push --tags
+#
+#   - `workflow_dispatch` (no tag) builds ONLY the Linux `overmatch-server` and uploads it as a
+#     plain artifact for `scp` redeploys to the test droplet (see DEPLOY.md). This absorbs the
+#     old dedicated `server-build.yml`.
+#
+# Phase 1 (now): GitHub Releases. Phase 2 (later): the same output feeds Steam via SteamPipe.
 
 on:
   push:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'      # stable, e.g. v0.1.0
-      - 'v[0-9]+.[0-9]+.[0-9]+-*'    # prerelease, e.g. v0.1.0-rc.1
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'    # prerelease, e.g. v0.3.0-alpha.1
+  workflow_dispatch:
 
 permissions:
   contents: write
 
+env:
+  CARGO_TERM_COLOR: always
+  # The DigitalOcean test droplet (DEPLOY.md). Baked into the release client at compile time via
+  # `option_env!("OVERMATCH_DEFAULT_SERVER")` (net::client::run), so a friend's double-clicked build
+  # connects to the droplet with no env set. Overridable at runtime with `OVERMATCH_SERVER`. Every
+  # step's cargo build inherits this workflow-level env, so the client jobs need no extra wiring.
+  OVERMATCH_DEFAULT_SERVER: 157.245.48.161
+
 jobs:
+  # The GitHub Release shell — tags only (workflow_dispatch has no tag to release against). The
+  # client/macOS jobs `needs` this, so on a plain dispatch they skip with it; the server job runs
+  # regardless (see its `if`).
   create-release:
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -27,34 +46,27 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-  upload-assets:
+  # The Windows PVP client → GitHub Release. Tags only (skips on dispatch with create-release).
+  # Windows is the immediate friend-playtest target; Linux/macOS clients stay minimal (macOS via the
+  # notarized job below, no Linux client row).
+  upload-client:
     needs: create-release
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
           - target: x86_64-pc-windows-msvc
             os: windows-latest
     runs-on: ${{ matrix.os }}
     steps:
-      # lfs: true is required because assets (*.glb, *.blend) are stored in Git
-      # LFS; without it the checkout yields pointer files and broken bundles.
+      # lfs: true is required because assets (*.glb) are stored in Git LFS; without it the checkout
+      # yields pointer files and a broken bundle.
       - uses: actions/checkout@v7
         with:
           lfs: true
 
-      - name: Install Linux build dependencies
-        if: contains(matrix.target, 'linux')
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            pkg-config libasound2-dev libudev-dev \
-            libwayland-dev libxkbcommon-dev libx11-dev
-
-      # Ship only runtime assets: the game loads .glb meshes; Blender source
-      # files are build-time only. (.blend1 is gitignored, but prune defensively.)
+      # Ship only runtime assets: the game loads .glb meshes; Blender source files are build-time
+      # only. (.blend1 is gitignored, but prune defensively.)
       - name: Prune non-runtime assets
         shell: bash
         run: find assets -type f \( -name '*.blend' -o -name '*.blend1' \) -delete
@@ -63,14 +75,17 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      # Builds + archives + checksums + uploads to the release. `net` is default, passed explicitly
+      # for clarity; the workflow-level OVERMATCH_DEFAULT_SERVER is baked in via option_env!.
       - uses: taiki-e/upload-rust-binary-action@v1
         with:
           bin: overmatch
+          features: net
           target: ${{ matrix.target }}
-          # e.g. overmatch-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
+          # e.g. overmatch-v0.3.0-alpha.1-x86_64-pc-windows-msvc.zip
           archive: $bin-$tag-$target
-          # Bundle the assets/ folder next to the binary, under a top-level dir
-          # so users extract a single self-contained folder.
+          # Bundle assets/ next to the binary, under a top-level dir so users extract one
+          # self-contained folder.
           include: assets
           leading-dir: true
           tar: unix
@@ -78,8 +93,80 @@ jobs:
           checksum: sha256
           token: ${{ secrets.GITHUB_TOKEN }}
 
-  # macOS gets its own job: a signed + notarized universal .dmg (the .app inside is
-  # also the future Steam macOS depot). See scripts/package-macos.sh.
+  # The Linux dedicated server. Runs on BOTH triggers:
+  #   - tag: uploaded to the GitHub Release (renamed + checksummed).
+  #   - workflow_dispatch: uploaded as a plain artifact for scp redeploys (DEPLOY.md).
+  # `needs: create-release` + `if: always()` so it waits for (but isn't gated out by) the release
+  # shell on tags, and still runs when create-release is skipped on a dispatch.
+  upload-server:
+    needs: create-release
+    if: ${{ always() && (needs.create-release.result == 'success' || needs.create-release.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # lfs: true — the server bakes tank geometry from the real .glb at startup, so a pointer-file
+      # checkout yields a broken bundle.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          lfs: true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Bevy needs alsa/udev + windowing libs to COMPILE on Linux even though the server runs headless.
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libasound2-dev libudev-dev \
+            libwayland-dev libxkbcommon-dev libx11-dev
+
+      - name: Prune non-runtime assets
+        run: find assets -type f \( -name '*.blend' -o -name '*.blend1' \) -delete
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: server-net
+
+      # --locked builds against the committed Cargo.lock (reproducible). release profile = strip +
+      # thin LTO. `net` is default; passed explicitly to mirror the intent.
+      - name: Build server
+        run: cargo build --release --locked --bin overmatch-server --features net
+
+      # Stage a self-contained folder: the binary alongside assets/, so on the droplet
+      # `BEVY_ASSET_ROOT=<extracted dir>` finds the meshes and `./overmatch-server` just runs.
+      - name: Package
+        run: |
+          mkdir -p stage/overmatch-server
+          cp target/release/overmatch-server stage/overmatch-server/
+          cp -r assets stage/overmatch-server/
+          tar -C stage -czf overmatch-server.tar.gz overmatch-server
+          ls -lh overmatch-server.tar.gz
+
+      # Plain artifact for the workflow_dispatch → scp redeploy path.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: overmatch-server-x86_64-linux
+          path: overmatch-server.tar.gz
+          retention-days: 14
+          if-no-files-found: error
+
+      # On a tag, also attach the server tar (renamed + checksummed) to the GitHub Release.
+      - name: Attach server to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          asset="overmatch-server-${tag}-x86_64-unknown-linux-gnu.tar.gz"
+          mv overmatch-server.tar.gz "$asset"
+          sha256sum "$asset" > "$asset.sha256"
+          gh release upload "$tag" "$asset" "$asset.sha256" --repo "${GITHUB_REPOSITORY}"
+
+  # macOS client: a signed + notarized universal .dmg (the .app inside is also the future Steam macOS
+  # depot). Tags only (skips on dispatch with create-release). See scripts/package-macos.sh — its
+  # `cargo build --release` builds default features (now including `net`) and inherits the
+  # workflow-level OVERMATCH_DEFAULT_SERVER, baking the droplet address in.
   upload-macos:
     needs: create-release
     runs-on: macos-latest
