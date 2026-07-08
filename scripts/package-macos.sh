@@ -11,7 +11,20 @@
 #
 # Local example:
 #   NOTARYTOOL_PROFILE=autoquit-notary ./scripts/package-macos.sh
+#
+# Modes (so CI can split Apple signing secrets away from the untrusted `cargo build`):
+#   --build-only   steps 1-2: universal build + assemble dist/Overmatch.app (unsigned, NO secrets).
+#   --sign-only    steps 3-5: sign the existing dist/Overmatch.app -> DMG -> notarize -> staple.
+#   (no arg)       full build + sign, unchanged behavior for local use.
 set -euo pipefail
+
+MODE="full"
+case "${1:-}" in
+  --build-only) MODE="build" ;;
+  --sign-only)  MODE="sign" ;;
+  "")           MODE="full" ;;
+  *) echo "Usage: $0 [--build-only|--sign-only]" >&2; exit 64 ;;
+esac
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -23,17 +36,24 @@ VERSION="${VERSION:-$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/'
 ENTITLEMENTS="$ROOT/build/macos/entitlements.plist"
 ICON="$ROOT/build/icons/icon.icns"
 
-IDENTITY="${SIGN_IDENTITY:-$(security find-identity -v -p codesigning | awk -F'"' '/Developer ID Application/{print $2; exit}')}"
-if [[ -z "$IDENTITY" ]]; then
-  echo "No Developer ID Application signing identity found (set SIGN_IDENTITY)." >&2
-  exit 65
-fi
-
 DIST="$ROOT/dist"
 APP="$DIST/$APP_NAME.app"
 DMG="$DIST/$BIN_NAME-v$VERSION-universal-apple-darwin.dmg"
 
-echo ">> Version $VERSION, signing as: $IDENTITY"
+# Signing identity is only needed for the sign phase; the build-only path must not require it
+# (that is the whole point — no Apple credentials materialized before the untrusted build runs).
+if [[ "$MODE" != "build" ]]; then
+  IDENTITY="${SIGN_IDENTITY:-$(security find-identity -v -p codesigning | awk -F'"' '/Developer ID Application/{print $2; exit}')}"
+  if [[ -z "$IDENTITY" ]]; then
+    echo "No Developer ID Application signing identity found (set SIGN_IDENTITY)." >&2
+    exit 65
+  fi
+  echo ">> Version $VERSION, signing as: $IDENTITY"
+else
+  echo ">> Version $VERSION (build-only, unsigned)"
+fi
+
+if [[ "$MODE" != "sign" ]]; then
 
 # ---------- 1. Build universal binary ----------
 # `overmatch` is the PVP client. Default features now include `net`, so a plain `--release` build
@@ -78,6 +98,20 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
+
+fi  # end build phase
+
+# The build phase is done. In --build-only we stop here with an unsigned dist/Overmatch.app.
+if [[ "$MODE" == "build" ]]; then
+  echo ">> Done (build-only): $APP"
+  exit 0
+fi
+
+# --sign-only picks up the .app produced by the build job (downloaded as an artifact).
+if [[ ! -d "$APP" ]]; then
+  echo "Expected $APP to exist before signing (run --build-only first, or without a mode)." >&2
+  exit 66
+fi
 
 # ---------- 3. Sign (inside-out: executable, then bundle) ----------
 echo ">> Signing with hardened runtime + entitlements..."

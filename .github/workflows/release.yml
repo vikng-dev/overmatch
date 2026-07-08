@@ -176,11 +176,14 @@ jobs:
           sha256sum "$asset" > "$asset.sha256"
           gh release upload "$tag" "$asset" "$asset.sha256" --repo "${GITHUB_REPOSITORY}"
 
-  # macOS client: a signed + notarized universal .dmg (the .app inside is also the future Steam macOS
-  # depot). Tags only (skips on dispatch with create-release). See scripts/package-macos.sh — its
-  # `cargo build --release` builds default features (now including `net`) and inherits the
-  # workflow-level OVERMATCH_DEFAULT_SERVER, baking the droplet address in.
-  upload-macos:
+  # macOS client, part 1 of 2: the UNTRUSTED build. This job runs the `cargo build` (full dependency
+  # graph, arbitrary build.rs / proc-macros) and holds NO Apple signing secrets — no cert import, no
+  # notary key. That isolation is the whole point of the split: a compromised transitive crate here
+  # cannot reach the Developer ID cert or notary key, because they are never materialized on this
+  # runner. It inherits the workflow-level OVERMATCH_DEFAULT_SERVER, baking the droplet address in.
+  # Tags only (skips on dispatch with create-release). If you ever add an Apple secret here, STOP —
+  # it belongs in sign-macos below.
+  build-macos:
     needs: create-release
     runs-on: macos-latest
     steps:
@@ -196,6 +199,47 @@ jobs:
         with:
           key: macos-universal
 
+      - name: Build the unsigned universal .app
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          export VERSION="${tag#v}"
+          ./scripts/package-macos.sh --build-only
+
+      # actions/upload-artifact zips its input and drops the executable bit + mac metadata, which
+      # corrupts a .app bundle. Pack the bundle with `ditto -c -k --keepParent` first — a ditto zip
+      # preserves the bundle structure, exec bit, and resource forks — and upload that single file;
+      # sign-macos re-extracts it with `ditto -x -k`.
+      - name: Pack the .app for transport
+        run: ditto -c -k --keepParent dist/Overmatch.app dist/Overmatch-app.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: overmatch-macos-app
+          path: dist/Overmatch-app.zip
+          retention-days: 1
+          if-no-files-found: error
+
+  # macOS client, part 2 of 2: the TRUSTED sign. This job holds the Apple signing secrets (Developer
+  # ID cert + notary key) but runs NO `cargo build` — it only operates on the pre-built .app from
+  # build-macos. It produces the signed + notarized universal .dmg (the .app inside is also the future
+  # Steam macOS depot). Tags only (inherits the skip via `needs: build-macos` -> create-release).
+  sign-macos:
+    needs: build-macos
+    runs-on: macos-latest
+    steps:
+      # Only the entitlements plist, icon, and the sign script are needed here — no LFS assets (they
+      # are already baked into the downloaded .app), so a plain checkout is enough.
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: overmatch-macos-app
+          path: dist
+
+      # Restore dist/Overmatch.app from the ditto zip with the exec bit + bundle structure intact.
+      - name: Unpack the .app
+        run: ditto -x -k dist/Overmatch-app.zip dist/
+
       - name: Import Developer ID certificate
         uses: apple-actions/import-codesign-certs@v7
         with:
@@ -209,7 +253,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/notary"
           printf '%s' "$APPLE_NOTARY_KEY" > "$RUNNER_TEMP/notary/AuthKey.p8"
 
-      - name: Build, sign, notarize, package
+      - name: Sign, notarize, package
         env:
           SIGN_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
           NOTARY_KEY: ${{ runner.temp }}/notary/AuthKey.p8
@@ -218,7 +262,7 @@ jobs:
         run: |
           tag="${GITHUB_REF_NAME}"
           export VERSION="${tag#v}"
-          ./scripts/package-macos.sh
+          ./scripts/package-macos.sh --sign-only
 
       - name: Upload .dmg to release
         env:
