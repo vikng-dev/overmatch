@@ -22,34 +22,72 @@ use crate::tank::Controlled;
 /// `command::Bindings` like the drive/fire keys, but the death screen is the only reader for now.
 const RESPAWN_KEY: KeyCode = KeyCode::KeyR;
 
-/// The full-screen death overlay node, so its presence can be toggled by whether the player's own
-/// tank is currently knocked out. One at a time (spawned/despawned by [`toggle_death_screen`]).
-#[derive(Component)]
-struct DeathScreenNode;
-
-pub fn plugin(app: &mut App) {
-    app.add_systems(Update, (toggle_death_screen, request_respawn));
+/// Which message the overlay is showing. Stored on the node so a state change (dead → respawning)
+/// rebuilds the text without churning the node every frame.
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+enum DeathScreenNode {
+    /// The player's crew are dead and no respawn has been requested — offer the key.
+    Died,
+    /// A respawn was requested and we are waiting out the round-trip for the fresh tank to replicate
+    /// back and be re-claimed. Keep the overlay up so there is never a bare, tankless frame.
+    Respawning,
 }
 
-/// Show the death overlay exactly while the player's own (`Controlled`) tank carries `TankKnockedOut`,
-/// and take it down once a fresh tank is re-acquired (the respawned tank is not knocked out, and
-/// `net::client::claim_input_slot` moves `Controlled` onto it). Spawn/despawn on the transition only —
-/// not every frame — so the text node is built once per death, matching the menu overlay's idiom.
+/// Latched true the moment the player presses respawn, cleared once a fresh live `Controlled` tank is
+/// re-acquired. Bridges the ~1-RTT gap in which the old tank has despawned but the new one has not yet
+/// replicated back — the window the overlay must NOT drop through.
+#[derive(Resource, Default)]
+struct AwaitingRespawn(bool);
+
+pub fn plugin(app: &mut App) {
+    app.init_resource::<AwaitingRespawn>()
+        .add_systems(Update, (request_respawn, toggle_death_screen).chain());
+}
+
+/// Drive the death overlay through the full death→respawn round-trip, so it never drops through the
+/// tankless gap. The states, in order of precedence:
+///   - **Respawning** — a respawn was requested (`AwaitingRespawn`) and no live own tank exists yet.
+///     Covers both the still-dead-but-requested window AND the ~1-RTT gap after the old tank despawns
+///     but before the new one replicates back and `net::client::claim_input_slot` re-grants
+///     `Controlled`. This is the fix: the old code keyed solely on the dead tank existing, so the
+///     overlay vanished the instant that tank despawned, leaving the player with neither death screen
+///     nor a camera-bound tank until the replica arrived.
+///   - **Died** — the crew are dead and no respawn has been requested yet: offer the key.
+///   - **hidden** — a live own tank exists; clear `AwaitingRespawn` and take the overlay down.
+///
+/// A live own tank is `Controlled` without `TankKnockedOut` (the fresh tank spawns full-health, so its
+/// health-derived `TankKnockedOut` is absent). Runs after [`request_respawn`] so a press this frame is
+/// reflected immediately. Spawn/despawn only on a state change — not every frame.
 fn toggle_death_screen(
     dead_own: Query<(), (With<Controlled>, With<TankKnockedOut>)>,
-    overlay: Query<Entity, With<DeathScreenNode>>,
+    live_own: Query<(), (With<Controlled>, Without<TankKnockedOut>)>,
+    overlay: Query<(Entity, &DeathScreenNode)>,
+    mut awaiting: ResMut<AwaitingRespawn>,
     mut commands: Commands,
 ) {
-    let is_dead = !dead_own.is_empty();
-    let shown = !overlay.is_empty();
-    match (is_dead, shown) {
-        (true, false) => spawn_death_screen(&mut commands),
-        (false, true) => {
-            for node in &overlay {
-                commands.entity(node).despawn();
-            }
-        }
-        _ => {}
+    let has_live = !live_own.is_empty();
+    if has_live {
+        // The fresh tank is claimed and alive — the round-trip is over.
+        awaiting.0 = false;
+    }
+
+    let desired = if awaiting.0 && !has_live {
+        Some(DeathScreenNode::Respawning)
+    } else if !dead_own.is_empty() {
+        Some(DeathScreenNode::Died)
+    } else {
+        None
+    };
+
+    let shown = overlay.single().ok().map(|(_, state)| *state);
+    if desired == shown {
+        return;
+    }
+    for (node, _) in &overlay {
+        commands.entity(node).despawn();
+    }
+    if let Some(state) = desired {
+        spawn_death_screen(&mut commands, state);
     }
 }
 
@@ -63,22 +101,31 @@ fn toggle_death_screen(
 fn request_respawn(
     keys: Res<ButtonInput<KeyCode>>,
     mut dead_own: Query<&mut TankCommand, (With<Controlled>, With<TankKnockedOut>)>,
+    mut awaiting: ResMut<AwaitingRespawn>,
 ) {
     if !keys.just_pressed(RESPAWN_KEY) {
         return;
     }
     for mut command in &mut dead_own {
         command.respawn = true;
+        // Latch the wait so the overlay switches to "respawning…" and stays up across the round-trip
+        // even after the old tank despawns (`toggle_death_screen`). Scoped to the dead-tank query, so
+        // it can only latch when there is actually a dead own tank to respawn.
+        awaiting.0 = true;
     }
 }
 
-/// Spawn the graybox death overlay: a dim full-screen backdrop with centered white text. Deliberately
-/// minimal (the friend-fight punch-list asks only for "YOU DIED — press R to respawn"); mirrors the
-/// menu overlay's node/text shape in `net::client` so the two read as one UI family.
-fn spawn_death_screen(commands: &mut Commands) {
+/// Spawn the graybox death overlay: a dim full-screen backdrop with centered white text, its message
+/// chosen by `state`. Deliberately minimal; mirrors the menu overlay's node/text shape in
+/// `net::client` so the two read as one UI family.
+fn spawn_death_screen(commands: &mut Commands, state: DeathScreenNode) {
+    let text = match state {
+        DeathScreenNode::Died => "YOU DIED\npress R to respawn",
+        DeathScreenNode::Respawning => "RESPAWNING…",
+    };
     commands
         .spawn((
-            DeathScreenNode,
+            state,
             Node {
                 width: Val::Percent(100.0),
                 height: Val::Percent(100.0),
@@ -90,7 +137,7 @@ fn spawn_death_screen(commands: &mut Commands) {
         ))
         .with_children(|parent| {
             parent.spawn((
-                Text::new("YOU DIED\npress R to respawn"),
+                Text::new(text),
                 TextFont {
                     font_size: FontSize::Px(48.0),
                     ..default()
