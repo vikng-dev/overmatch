@@ -13,7 +13,7 @@ use lightyear::prelude::*;
 use super::protocol::NetTank;
 use crate::ballistics::ShellPath;
 use crate::driving::Suspension;
-use crate::tank::{Hull, Tank, TankSim, Turret};
+use crate::tank::{Rig, ServoIndex, ServoState, Tank, TankRoot, TankSim, Turret};
 
 /// Diagnostic (physics NaN guard): at the top of each physics tick, name every entity whose
 /// physics state or `ColliderTransform` is non-finite — with values — then latch. Runs before
@@ -166,12 +166,19 @@ pub(crate) fn log_prediction_diagnostics(
 
 /// Step-7 verification readout (every ~2 s, both sides): proof the *real* sim is running, not the
 /// retired stub — grounded-wheel count (suspension rays actually hitting the Terrain-layer game
-/// ground), the main turret's servo angle (slewing toward the scripted aim), and every weapon's
+/// ground), each tank's turret servo angle (slewing toward the scripted aim), and every weapon's
 /// reload timer (the Tiger has two — MainGun + Coax; the MainGun's goes non-zero after a fire
-/// consumes the click). One tank per side in this spike, so the single-turret read is unambiguous.
+/// consumes the click).
+///
+/// **Per tank, labelled by root.** An earlier revision read `turrets.iter().next()` and flattened
+/// every tank's reloads into one unlabelled list — a single-tank assumption. With two humans (and/or
+/// the `OVERMATCH_BOT` circler) that collapsed the readout onto ONE arbitrary tank's turret (often
+/// not the one being examined) and made the reload list unattributable. Now the wheel count is one
+/// aggregate line (wheels carry no root join) and each tank emits its OWN turret angle + reloads,
+/// keyed by its root entity.
 pub(crate) fn log_sim_evidence(
-    turrets: Query<(&crate::tank::ServoIndex, &crate::tank::TankRoot), With<Turret>>,
-    sims: Query<&TankSim>,
+    turrets: Query<(&ServoIndex, &TankRoot), With<Turret>>,
+    sims: Query<(Entity, &TankSim)>,
     wheels: Query<&Suspension>,
     mut timer: Local<f32>,
     time: Res<Time>,
@@ -183,19 +190,18 @@ pub(crate) fn log_sim_evidence(
     *timer = 0.0;
     let grounded = wheels.iter().filter(|s| s.contact.is_some()).count();
     let total = wheels.iter().count();
-    let turret = turrets.iter().next().and_then(|(slot, root)| {
-        sims.get(root.0)
-            .ok()
-            .and_then(|sim| sim.servos.get(slot.0))
-            .map(crate::tank::ServoState::current)
-    });
-    let reloads: Vec<f32> = sims
-        .iter()
-        .flat_map(|sim| sim.weapons.iter().map(|w| w.reload_remaining))
-        .collect();
-    info!(
-        "net: SIM-EVIDENCE wheels_grounded={grounded}/{total} turret_angle={turret:?} reloads={reloads:?}"
-    );
+    info!("net: SIM-EVIDENCE wheels_grounded={grounded}/{total} (all tanks)");
+    for (root, sim) in &sims {
+        // This tank's OWN turret servo, found by the Turret-marked servo whose `TankRoot` is this
+        // root — never a `.next()` over the global turret set, which would read another tank's.
+        let turret = turrets
+            .iter()
+            .find(|(_, tank_root)| tank_root.0 == root)
+            .and_then(|(slot, _)| sim.servos.get(slot.0))
+            .map(ServoState::current);
+        let reloads: Vec<f32> = sim.weapons.iter().map(|w| w.reload_remaining).collect();
+        info!("net: SIM-EVIDENCE {root} turret_angle={turret:?} reloads={reloads:?}");
+    }
 }
 
 /// Periodic authoritative/replicated position log (every ~2 s), so client and server positions can
@@ -291,32 +297,44 @@ pub(crate) fn watch_rollback_metrics(
 /// replay. Logged around the perturbation window only.
 #[derive(Resource, Default)]
 pub(crate) struct TurretWatch {
-    last_relative: Option<Vec3>,
+    /// Per-tank previous hull→turret offset, keyed by the tank ROOT. A single `Option` here assumed
+    /// exactly one tank — with two humans (and/or the bot) the old `hulls.single()`/`turrets.single()`
+    /// both returned `Err` (many hulls, many turrets) and the whole detector silently went DEAD, so a
+    /// real child-rig desync on either tank would never have been logged.
+    last_relative: std::collections::HashMap<Entity, Vec3>,
 }
 
-/// Verdict 2 (increment 6): the turret's pose *relative to the hull* — logged only when it moves
-/// more than the map's 0.1 m bar in one tick, which should never happen (the turret doesn't slew
-/// in this spike; nothing drives `ServoCommand`) unless `update_child_collider_position` failed to
-/// keep the child rig glued to the root through a rollback replay. Absolute world deltas are
-/// expected (the perturbation moves the whole tank); only the hull-relative offset is diagnostic.
+/// Verdict 2 (increment 6): each tank's turret pose *relative to its own hull* — logged only when it
+/// moves more than the map's 0.1 m bar in one tick, which should never happen unless
+/// `update_child_collider_position` failed to keep the child rig glued to the root through a rollback
+/// replay. Absolute world deltas are expected (the perturbation moves the whole tank); only the
+/// hull-relative offset is diagnostic.
+///
+/// **Per tank, keyed by root.** Joins hull↔turret through the root's [`Rig`] (both handles live there)
+/// and tracks the previous offset per root, so the detector stays LIVE for two humans and the bot —
+/// the single-tank `.single()` form went inert the moment a second tank existed (see [`TurretWatch`]).
+/// The client builds a local skeleton (hence a `Rig`) for every replicated tank — its own predicted
+/// one and each interpolated opponent — so this covers all of them.
 pub(crate) fn watch_turret_pose(
-    hulls: Query<&GlobalTransform, With<Hull>>,
-    turrets: Query<&GlobalTransform, With<Turret>>,
+    roots: Query<(Entity, &Rig)>,
+    globals: Query<&GlobalTransform>,
     mut watch: ResMut<TurretWatch>,
 ) {
-    let (Ok(hull), Ok(turret)) = (hulls.single(), turrets.single()) else {
-        return;
-    };
-    let relative = hull.translation().distance(turret.translation());
-    let relative_vec = turret.translation() - hull.translation();
-    if let Some(previous) = watch.last_relative {
-        let delta = (relative_vec - previous).length();
-        if delta > 0.1 {
-            warn!(
-                "client: TURRET-DRIFT relative offset moved {delta:.3} m in one tick \
-                 (hull-relative distance now {relative:.3} m) — child rig desynced from root"
-            );
+    for (root, rig) in &roots {
+        let (Ok(hull), Ok(turret)) = (globals.get(rig.hull), globals.get(rig.turret)) else {
+            continue;
+        };
+        let relative_vec = turret.translation() - hull.translation();
+        if let Some(&previous) = watch.last_relative.get(&root) {
+            let delta = (relative_vec - previous).length();
+            if delta > 0.1 {
+                let relative = relative_vec.length();
+                warn!(
+                    "client: TURRET-DRIFT {root} relative offset moved {delta:.3} m in one tick \
+                     (hull-relative distance now {relative:.3} m) — child rig desynced from root"
+                );
+            }
         }
+        watch.last_relative.insert(root, relative_vec);
     }
-    watch.last_relative = Some(relative_vec);
 }
