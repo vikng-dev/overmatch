@@ -1,0 +1,32 @@
+# Keep Cursor's file/retrieval indexer out of build output and binary assets.
+#
+# Why this file exists: `target/` reached 56 GB during a multi-agent session (repeated
+# `--features net` / `--no-default-features` flips each produce their own artifacts). Nothing was
+# telling the indexer to skip it. This is about the INDEXER, not rust-analyzer — rust-analyzer works
+# off `cargo metadata` and dependency sources in `~/.cargo/registry`, and only reaches into `target/`
+# for proc-macro dylibs and build-script output. If rust-analyzer is the memory problem, the levers
+# are its own settings (pin `cargo.features`, drop `--all-targets` from its check command, disable
+# cache priming), not this file.
+
+# Build output.
+/target
+/dist
+/build
+
+# Binary assets: the source of truth is the .blend / .glb, and neither is useful to index as text.
+*.blend
+*.blend1
+*.glb
+*.gltf
+*.png
+*.jpg
+
+# Research/scrape cache.
+.firecrawl/
+
+# Trace captures: `SPIKE_TRACE` / `SUSP_TRACE` write JSONL at 64 Hz, so these get large fast and
+# carry no reusable meaning outside `scripts/jitter/`.
+*.jsonl
+*.log
+
+.DS_Store
