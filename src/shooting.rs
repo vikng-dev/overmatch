@@ -30,6 +30,31 @@ pub(crate) struct RecoilParams {
     pub(crate) damping: f32,
 }
 
+/// THE single expression of how a fired weapon kicks its barrel: add `weapon`'s `recoil.kick` to
+/// slot `slot`'s recoil velocity in `sim`. Owns the WHOLE decision — a weapon with no `recoil` spec
+/// (a coax), no `barrel` node, or a slot absent from `sim.weapons` (a rig still spawning, a bad slot
+/// off the wire) kicks nothing. Both the local shooter ([`fire`], this module) and the remote-recoil
+/// applier (`net::client::apply_pending_recoil_kicks`) pass `(sim, slot, weapon)` and are IDENTICAL
+/// by construction: "how a shot recoils the gun" is one implementation, not two that agree today
+/// (the derive-the-consequence doctrine, ADR-0016 — a derive that branches differently per end is
+/// two implementations).
+///
+/// The `barrel` gate lives HERE, not at the call sites, and is load-bearing: `apply_recoil` only
+/// steps slots that have `RecoilParams`, which `spawn_tank_sim` builds on the barrel node — so a
+/// kick on a barrel-less slot would land in `recoil_velocity` and NEVER decay, accumulating without
+/// bound in rollback-tracked `TankSim` state, shot after shot. Gating in one place makes that
+/// unreachable on both ends.
+pub(crate) fn kick_recoil(sim: &mut TankSim, slot: usize, weapon: &Weapon) {
+    // No barrel node to recoil (no `RecoilParams`, so `apply_recoil` never springs it back), or a
+    // recoil-less weapon — either way, no kick.
+    let (Some(_), Some(recoil)) = (weapon.barrel, weapon.recoil.as_ref()) else {
+        return;
+    };
+    if let Some(state) = sim.weapons.get_mut(slot) {
+        state.recoil_velocity += recoil.kick;
+    }
+}
+
 pub fn plugin(app: &mut App) {
     // The gun is sim: reload and firing run on the fixed clock, driven by each tank's `TankCommand`
     // — `fire` consumes the click edge, so it must precede the command layer's edge clear.
@@ -135,12 +160,11 @@ fn fire(
                 weapon: slot.0,
             }),
         });
-        // Kick the barrel back (root-resident recoil state); apply_recoil springs it home.
-        if let (Some(_), Some(recoil)) = (weapon.barrel, weapon.recoil.as_ref())
-            && let Ok(mut sim) = sims.get_mut(root.0)
-            && let Some(state) = sim.weapons.get_mut(slot.0)
-        {
-            state.recoil_velocity += recoil.kick;
+        // Kick the barrel back (root-resident recoil state); apply_recoil springs it home. The
+        // shared `kick_recoil` owns the whole decision (barrel + recoil spec present, slot valid), so
+        // this path and the opponent-view path (`net::client`) can't diverge on how a shot recoils.
+        if let Ok(mut sim) = sims.get_mut(root.0) {
+            kick_recoil(&mut sim, slot.0, weapon);
         }
         // Recoil reaction on the hull: the shell's momentum, opposite the bore, applied on the bore
         // axis. The line of action passes above the centre of mass, so the impulse-at-point also

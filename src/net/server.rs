@@ -486,6 +486,17 @@ fn broadcast_fire(
     let Ok(server) = servers.single() else {
         return;
     };
+    // The weapon slot rides the wire as a `u8` (ample — a tank carries a handful of weapons). A
+    // silent `as u8` would wrap a slot >= 256 mod 256 and recoil a VALID-BUT-WRONG barrel on every
+    // remote client; unreachable today, but skip-with-warn on overflow rather than truncate, the
+    // same fail-loudly-or-skip discipline as the `Dir3` bore guard.
+    let Ok(weapon) = u8::try_from(source.weapon) else {
+        warn!(
+            "server: weapon slot {} exceeds u8 — skipping FireEvent broadcast for this shot",
+            source.weapon
+        );
+        return;
+    };
     let event = FireEvent {
         origin: fire.origin,
         // Carry the bore as a plain `Vec3`; the receiver reconstructs `Dir3` behind a guard.
@@ -495,8 +506,8 @@ fn broadcast_fire(
         mass: fire.mass,
         shooter: source.tank,
         // Which weapon fired — the receiver derives THIS shot's barrel recoil from its own local
-        // spec keyed by this slot. `u8` is ample; slot values are single digits.
-        weapon: source.weapon as u8,
+        // spec keyed by this slot.
+        weapon,
     };
     let target = match controlled.get(source.tank) {
         // Player tank: exclude the owner (they already flew their own local shell).

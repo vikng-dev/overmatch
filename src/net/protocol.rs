@@ -594,20 +594,41 @@ fn strip_confirmed_history<C: Component + Clone>(
 /// makes `apply_crew_swap_commands` insert a fresh one every ~`SWAP_SECONDS`.
 ///
 /// So consult the entity's own `InputBuffer` for the tick `FixedUpdate` is stepping
-/// (`LocalTimeline::tick()`) and copy accordingly:
-/// - `buffer.get(tick).is_some()` → a real input exists for this tick (`get` is the EXACT,
-///   non-extrapolating lookup: `None` past the buffered range, and it resolves
-///   `Compressed::SameAsPrecedent` back to the value the client actually sent). Copy the whole
-///   command, edges included.
-/// - `buffer.get(tick).is_none()` (or no buffer yet — a server tank before its first input message)
-///   → the `ActionState` is a held-last extrapolation. Copy levels and absolutes, clear the edges.
+/// (`LocalTimeline::tick()`). The `ActionState` is a hold-last extrapolation — and its edges must be
+/// dropped — precisely when the buffer HAS data but none for this tick: `get(tick).is_none()` AND
+/// `get_last().is_some()`. `get` is the EXACT, non-extrapolating lookup (`None` past the buffered
+/// range, resolving `Compressed::SameAsPrecedent` back to the value the client actually sent);
+/// `get_last` is `Some` iff the buffer holds ANY entry (vendored `lightyear_inputs`
+/// input_buffer.rs:339). Only when both hold is the server's `update_action_state` holding the last
+/// input forever. Copy the whole command otherwise, edges included. The four cases:
+/// - **Client own tank, forward tick:** buffer non-empty, `get(tick)` `Some` → not held-last → edge
+///   passes. In the PRE-SYNC window (before `InputTimeline` syncs) the buffer is absent/empty, so
+///   `held_last` is `false` and a genuine click passes — the case the coarser `get(tick).is_some()`
+///   rule wrongly dropped.
+/// - **Client own tank, rollback replay:** lightyear restores the historical `ActionState` per
+///   replayed tick, and the buffer retains `max_rollback_ticks + 1` of history (`lightyear_inputs`
+///   `client.rs`), so `get(replayed_tick)` is `Some` → the own fire edge re-fires during replay.
+/// - **Server tank, no input message yet:** buffer absent/empty → not held-last → passes, and the
+///   `ActionState` is `default()` anyway, so there is no edge to carry. Harmless.
+/// - **Server tank, starved:** buffer non-empty, `get(tick)` `None`, `get_last` `Some` → held-last →
+///   edges cleared. The original starvation re-latch (`701d0a7`) stays fixed.
 ///
-/// This is shared code mounted on BOTH ends. On the server it fixes the starvation above. On the
-/// client the own tank's buffer is never starved (the client authors an input every tick), and
-/// `LocalTimeline::tick()` is the REPLAYED tick during rollback resim (incremented in `FixedFirst`
-/// even inside rollback); the client's buffer retains `max_rollback_ticks + 1` of history
-/// (`lightyear_inputs` `client.rs:555`), so `get(replayed_tick)` is `Some` and the own fire edge
-/// re-fires correctly during replay.
+/// This is shared code mounted on BOTH ends. On the server it fixes the starvation above; on the
+/// client `LocalTimeline::tick()` is the REPLAYED tick during rollback resim (incremented in
+/// `FixedFirst` even inside rollback).
+///
+/// **Loss trade (deliberate, NON-FIX).** A fire edge whose input arrives AFTER its tick was
+/// simulated is dropped, not fired late — firing an edge on a tick it was not issued for is the bug
+/// (the shot leaves at the wrong muzzle pose and diverges from what the client predicted), so past
+/// ticks are dropped in every netcode. lightyear's per-message input redundancy normally prevents
+/// it: an `InputMessage` carries "the inputs for the last N ticks before T" (vendored
+/// `lightyear_inputs` client.rs module doc + `num_ticks *= packet_redundancy`, client.rs:686), so an
+/// isolated packet loss does NOT lose the edge — a later message re-carries it and it can still land
+/// before the server simulates that tick. Only under loss deep enough to outlast that redundancy
+/// window is a fire edge dropped rather than fired late; the client may then have predicted a shot
+/// the server never fires, leaving its `reload_remaining` (root-resident in `TankSim`, NOT
+/// replicated) disagreeing with the server's until the next shot reconciles it. That is inherent to
+/// predicting fire on a lossy input stream, not introduced by the edge-clearing rule.
 ///
 /// **Load-bearing invariant.** `get` resolving `SameAsPrecedent` means two consecutive buffered
 /// `fire_primary: true`s would BOTH bridge as edges and fire twice. That is fine because it can only
@@ -628,13 +649,17 @@ fn bridge_action_state_to_tank_command(
     for (action, buffer, mut command) in &mut tanks {
         // Whole-struct copy (matches `ActionState`'s "absolute snapshot per tick" contract) …
         let mut next = action.0;
-        // … but a held-last extrapolation must not carry an edge. A real input for this tick is a
-        // present, non-extrapolating buffer entry (`get`, not `get_predict`); its absence — or no
-        // buffer at all — means the `ActionState` is held-last, so drop the edges.
-        let real_input = buffer.is_some_and(|b| b.get(tick).is_some());
-        if !real_input {
-            next.fire_primary = false;
-            next.crew_swap = None;
+        // … but a HOLD-LAST EXTRAPOLATION must not carry an edge. The `ActionState` is extrapolated
+        // exactly when the buffer HAS data but none for this tick (`get(tick).is_none()` while
+        // `get_last().is_some()`) — that is when the server's `update_action_state` holds the last
+        // input forever (`get_predict` → `get_last`). An ABSENT or EMPTY buffer is NOT extrapolating
+        // (nothing is being held): on the client's own tank the `ActionState` was authored THIS tick
+        // by `feed_action_state`, so a genuine click in the pre-sync join/spawn window must pass.
+        // `get`, not `get_predict`, is the exact non-extrapolating lookup. See the doc for the full
+        // per-case argument (`get_last` semantics: vendored `lightyear_inputs` input_buffer.rs:339).
+        let held_last = buffer.is_some_and(|b| b.get(tick).is_none() && b.get_last().is_some());
+        if held_last {
+            next.clear_edges();
         }
         *command = next;
     }
@@ -765,11 +790,12 @@ mod tests {
         );
     }
 
-    /// Before the first input message arrives, a server tank can carry `ActionState` with no
-    /// `InputBuffer` yet. Treat a missing buffer as "no real input" and clear edges (the
-    /// `ActionState` is default there anyway, so levels are unaffected).
+    /// A MISSING `InputBuffer` is NOT a hold-last extrapolation — nothing is being held. In the
+    /// pre-sync join/spawn window the client's own tank carries `ActionState` (authored THIS tick by
+    /// `feed_action_state`) before its `InputTimeline` has produced a buffer, so a genuine click must
+    /// pass. (The coarser `get(tick).is_some()` rule wrongly dropped it — the bug FIX 1 targets.)
     #[test]
-    fn missing_buffer_clears_edge() {
+    fn missing_buffer_passes_edge() {
         let mut world = World::new();
         world.insert_resource(timeline_at(3));
         let entity = world
@@ -781,8 +807,31 @@ mod tests {
             .unwrap();
 
         assert!(
-            !world.get::<TankCommand>(entity).unwrap().fire_primary,
-            "no InputBuffer means no real input for this tick — clear the edge",
+            world.get::<TankCommand>(entity).unwrap().fire_primary,
+            "a missing InputBuffer is not hold-last extrapolation — a real edge must pass",
+        );
+    }
+
+    /// A present-but-EMPTY buffer is likewise not extrapolating: `get_last()` is `None` (no entry to
+    /// hold), so `held_last` is false and the edge passes. Distinguishes "no data yet" (pass) from
+    /// "data, but none for this tick" (the starved case above, which clears).
+    #[test]
+    fn empty_buffer_passes_edge() {
+        let mut world = World::new();
+        world.insert_resource(timeline_at(3));
+        // An `InputBuffer` component present but with no entries — `get_last()` is `None`.
+        let buffer = NativeBuffer::<TankCommand>::default();
+        let entity = world
+            .spawn((ActionState(fire_click()), buffer, TankCommand::default()))
+            .id();
+
+        world
+            .run_system_once(bridge_action_state_to_tank_command)
+            .unwrap();
+
+        assert!(
+            world.get::<TankCommand>(entity).unwrap().fire_primary,
+            "an empty InputBuffer has nothing to hold-last — a real edge must pass",
         );
     }
 }

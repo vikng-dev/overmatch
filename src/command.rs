@@ -24,9 +24,10 @@ pub struct TankCommand {
     pub throttle: f32,
     /// Target steer in [-1, 1]: differential yaw, positive to the right.
     pub steer: f32,
-    /// Fire the primary weapon. An *edge*: latched by `gather_commands` from the click, held
-    /// until the first fixed tick consumes it (`consume_edges`) — so a click between ticks is
-    /// neither lost (frame with zero ticks) nor doubled (frame with several).
+    /// Fire the primary weapon. An *edge* (see [`TankCommand::clear_edges`] for the full edge
+    /// set): latched by `gather_commands` from the click, held until the first fixed tick consumes
+    /// it (`consume_edges`) — so a click between ticks is neither lost (frame with zero ticks) nor
+    /// doubled (frame with several).
     pub fire_primary: bool,
     /// Fire the secondary weapon(s). A *level*: true while the trigger is held; the MGs cycle on
     /// their own reload.
@@ -41,11 +42,36 @@ pub struct TankCommand {
     /// The player-dialed range (m). The sim lobs the bore above the aim intention by the range
     /// table's superelevation for this range — dial wrong and the shot falls short or long.
     pub range: f32,
-    /// Start or cancel a crew swap. An *edge* like [`fire_primary`](Self::fire_primary): written
-    /// by the crew bar's two-tap input, consumed by one fixed tick. The sim
-    /// (`damage::apply_crew_swap_commands`) validates it against the tank's own seats — crew
-    /// reassignment changes capabilities, so the server must own it.
+    /// Start or cancel a crew swap. An *edge* like [`fire_primary`](Self::fire_primary) (both
+    /// enumerated by [`TankCommand::clear_edges`]): written by the crew bar's two-tap input,
+    /// consumed by one fixed tick. The sim (`damage::apply_crew_swap_commands`) validates it
+    /// against the tank's own seats — crew reassignment changes capabilities, so the server must
+    /// own it.
     pub crew_swap: Option<CrewSwap>,
+}
+
+impl TankCommand {
+    /// THE definition of which `TankCommand` fields are EDGES — one-shot intents latched for a
+    /// single tick, as opposed to the levels (`throttle`/`steer`/`fire_secondary`) and absolutes
+    /// (`aim`/`range`) that are held. Adding a new edge field? Clear it HERE and nowhere else.
+    ///
+    /// Two call sites depend on this being the single structural fact: [`consume_edges`] clears the
+    /// edge at the end of the tick that consumed it, and the net input bridge
+    /// (`net::protocol::bridge_action_state_to_tank_command`) clears the edges off a hold-last
+    /// extrapolation so a starved input stream can't re-latch them. A future edge field cleared in
+    /// one but not the other silently reintroduces the starvation re-latch bug (`701d0a7`); routing
+    /// both through this method makes that impossible.
+    pub fn clear_edges(&mut self) {
+        self.fire_primary = false;
+        self.crew_swap = None;
+    }
+
+    /// Whether any edge field is currently latched — the read counterpart to [`clear_edges`], so
+    /// the edge set lives in exactly one place. [`consume_edges`] uses it to skip the mutable
+    /// touch (and its change-detection churn) on a command with no edge to clear.
+    pub fn has_edge(&self) -> bool {
+        self.fire_primary || self.crew_swap.is_some()
+    }
 }
 
 /// One crew-swap intent, in *stations* (semantic seat identity — stable on the wire, unlike
@@ -193,9 +219,10 @@ fn gather_commands(
 /// contract described on [`TankCommand::fire_primary`].
 fn consume_edges(mut tanks: Query<&mut TankCommand>) {
     for mut command in &mut tanks {
-        if command.fire_primary || command.crew_swap.is_some() {
-            command.fire_primary = false;
-            command.crew_swap = None;
+        // Read through the shared edge test first, so a command with no edge is never touched
+        // mutably (no spurious change-detection); the field set itself lives in `clear_edges`.
+        if command.has_edge() {
+            command.clear_edges();
         }
     }
 }
