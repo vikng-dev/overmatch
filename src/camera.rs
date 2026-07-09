@@ -142,8 +142,14 @@ fn capture_turret_pivot(
     pivot.0 = Some(position);
 }
 
+/// The gunner optic's fallback vertical FOV (radians) for the pre-bind frame before `TankViews`
+/// lands — mirrors the Tiger's authored `0.12`. Shared (rather than a bare literal at each call
+/// site) so the camera's magnification and the sight's cursor-travel margin agree on the same
+/// pre-bind value.
+pub const GUNNER_FOV_FALLBACK: f32 = 0.12;
+
 /// The controlled tank's authored FOV for `kind`, or `fallback` before the rig binds.
-fn view_fov(views: &Query<&TankViews, With<Controlled>>, kind: ViewKind, fallback: f32) -> f32 {
+pub fn view_fov(views: &Query<&TankViews, With<Controlled>>, kind: ViewKind, fallback: f32) -> f32 {
     views
         .single()
         .ok()
@@ -251,7 +257,7 @@ fn gunner_camera(
     // The optic's magnification is the gunner view's authored FOV (Tiger ~0.12 rad ≈ 6× vs the 45°
     // commander view). Fallback covers the pre-bind frame before `TankViews` lands.
     if let Projection::Perspective(p) = projection.as_mut() {
-        p.fov = view_fov(&views, ViewKind::Gunner, 0.12);
+        p.fov = view_fov(&views, ViewKind::Gunner, GUNNER_FOV_FALLBACK);
     }
 
     // The gun's propagated frame: bore = local −Z, right = local +X, hull-up = local +Y. The sight

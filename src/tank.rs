@@ -216,6 +216,21 @@ pub struct ServoSpec {
     pub(crate) requires: Requirement,
 }
 
+impl ServoSpec {
+    /// This servo's authored travel limits converted to **radians** (the runtime unit), or `None`
+    /// for a `Continuous` mount (unlimited traverse). The authoring unit is degrees; `drive_servos`
+    /// clamps the live `current` (the lay) to this same window every tick. The gunner sight reuses
+    /// it to keep the aim intent inside what the mount can mechanically reach, so a cursor parked
+    /// past the elevation stop can't peg the reticle at the optic rim forever (the gun would
+    /// saturate at its limit and the lead never close).
+    pub fn travel_limits(&self) -> Option<(f32, f32)> {
+        match self.travel {
+            Travel::Limited { min, max } => Some((min.to_radians(), max.to_radians())),
+            Travel::Continuous => None,
+        }
+    }
+}
+
 /// The commanded angle (parent-local) a servo slews toward — the *intent*, written by aiming
 /// (and, later, the ROADMAP Phase-2 controls layer). Position-mode for now; a velocity-mode
 /// command is a future variant (NOTES.md). Kept separate from state: different writer, different

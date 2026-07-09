@@ -15,13 +15,15 @@ use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 
 use crate::aim::AimCommit;
-use crate::camera::{CameraKickApplied, GunnerCameraPlaced};
+use crate::camera::{CameraKickApplied, GUNNER_FOV_FALLBACK, GunnerCameraPlaced, view_fov};
 use crate::command::TankCommand;
 use crate::damage::ControlledTank;
 use crate::firecontrol::{RangeTable, Ranging};
 use crate::spec::ViewKind;
 use crate::state::GameplaySet;
-use crate::tank::{Controlled, Hull, Rig, ServoIndex, Tank, TankSim, TankViews, shortest_angle};
+use crate::tank::{
+    Controlled, Hull, Rig, ServoIndex, ServoSpec, Tank, TankSim, TankViews, shortest_angle,
+};
 
 /// Whether the controlled tank's `kind` view is usable — its authored `requires` met (a dead
 /// gunner closes the optic, a dead commander closes third-person). A missing view is unusable.
@@ -565,24 +567,66 @@ fn sync_optic_render_layer(
     }
 }
 
+/// The gunner optic's radius as a fraction of the view's **half** vertical FOV — the single shared
+/// object that ties the cursor's travel circle to the drawn optic rim. `drive_gunner_aim` uses it
+/// for the intent's angular margin (`margin = OPTIC_RADIUS_FRACTION · fov/2`); the circular
+/// sight-overlay UI (to come) MUST read this same constant for its rim radius, so the cursor can
+/// reach exactly the drawn edge — no more, no less — by construction rather than by two hand-tuned
+/// numbers drifting apart. Angular by half-FOV means it maps to a fixed fraction of the viewport's
+/// half-height regardless of magnification: the overlay's rim in pixels is `OPTIC_RADIUS_FRACTION ·
+/// viewport_height/2`. 0.9 leaves a sliver of margin between the cursor's reach and the hard edge.
+pub const OPTIC_RADIUS_FRACTION: f32 = 0.9;
+
+/// The cursor-travel / optic-rim angular radius (radians) for a view of vertical FOV `fov`: a fixed
+/// fraction of the half-FOV (see [`OPTIC_RADIUS_FRACTION`]). Pulled out as a pure function so the
+/// derivation is unit-testable and the overlay UI can call the identical maths.
+fn optic_margin(fov: f32) -> f32 {
+    OPTIC_RADIUS_FRACTION * (fov / 2.0)
+}
+
+/// Clamp `value` to a servo's authored travel `limits` (radians); a `None` (continuous) mount passes
+/// through untouched. Kept pure for the unit test — the caller shifts the pitch window by the lob
+/// before calling (sight line = lay − superelevation).
+fn clamp_to_travel(value: f32, limits: Option<(f32, f32)>) -> f32 {
+    match limits {
+        Some((min, max)) => value.clamp(min, max),
+        None => value,
+    }
+}
+
 /// World-space position-control aiming. Mouse deltas accumulate into the committed hull-local
 /// intent, which is published as the tank's commanded aim (a far point along the intent's line of
 /// sight) — so `aim::drive_aim_servos` chases it with *every* servo, the gun and the hull MG alike,
 /// at their own slew rates. No servo command is written here; this only moves the aim intention.
 ///
-/// The intent is clamped to a circular **margin** — it may lead the gun's *current* lay by at most
-/// `LEAD_MARGIN` of *angular* distance — so the cursor can't run off-screen ahead of the slow
-/// turret: pegged at the margin means "slewing at max," near centre means "caught up." The clamp is
-/// circular (not per-axis) so diagonal lead feels uniform — a square clamp let you lead ~√2·margin
-/// on the diagonal — and yaw is wrapped (`shortest_angle`) so continuous traverse past ±π doesn't
-/// yank the intent across the wrap. This is the on-screen-cursor bound, distinct from the gun's
-/// mechanical travel limits, which `drive_servos` still enforces. The gun chain (`Turret`/`Gun`)
-/// is the lead reference; the hull MG simply rides the same point.
+/// Two bounds shape the intent, in order:
+///
+/// 1. **Mechanical travel** — the intent is clamped to what the gun chain can actually reach, from
+///    the servos' authored travel limits ([`ServoSpec::travel_limits`], the same window
+///    `drive_servos` enforces on the lay). The servos limit the *lay* (bore); the intent tracks the
+///    *sight line* = lay − lob, so the reachable pitch window is those limits shifted DOWN by the
+///    superelevation θ. Without this the cursor could park above the gun's max elevation, the gun
+///    would saturate at its stop, and the reticle would peg at the optic rim forever, never settling.
+/// 2. **Circular optic margin** — the intent may then lead the gun's *current* sight line by at most
+///    `optic_margin(fov)` = [`OPTIC_RADIUS_FRACTION`] · half the authored optic FOV, so the cursor
+///    can't run past the optic edge ahead of the slow turret: pegged at the margin means "slewing at
+///    max," near centre means "caught up." Deriving the radius from the *authored* per-tank FOV (not
+///    a hardcoded angle) makes the travel circle the same object as the drawn optic rim. The clamp is
+///    circular (not per-axis) so diagonal lead feels uniform — a square clamp let you lead ~√2·margin
+///    on the diagonal — and yaw is wrapped (`shortest_angle`) so continuous traverse past ±π doesn't
+///    yank the intent across the wrap.
+///
+/// Inside both bounds the absolute intent is left untouched (hull-local) so the gun genuinely catches
+/// up as it slews — re-pinning to `current + offset` each frame would make the target recede with the
+/// gun (never arrives). The gun chain (`Turret`/`Gun`) is the lead reference; the hull MG rides the
+/// same point.
 fn drive_gunner_aim(
     motion: Res<AccumulatedMouseMotion>,
     mut intent: ResMut<GunnerIntent>,
     controlled: ControlledTank,
+    views: Query<&TankViews, With<Controlled>>,
     servo_slots: Query<&ServoIndex>,
+    servo_specs: Query<&ServoSpec>,
     sims: Query<&TankSim>,
     ranging: Res<Ranging>,
     tables: Query<&RangeTable>,
@@ -592,18 +636,27 @@ fn drive_gunner_aim(
         return;
     };
 
-    // Radians of commanded aim per mouse count. Low because the optic is magnified — a small angle
-    // is a big screen move at the gunner FOV. (Future refinement: scale with the zoom FOV.)
-    const SENSITIVITY: f32 = 0.0005;
-    // Max angular distance the intent may lead the gun's live lay (rad, ~2.3°) — keeps the cursor
-    // inside the optic.
-    const LEAD_MARGIN: f32 = 0.04;
+    // The optic's authored vertical FOV (per-tank) sets both the magnification and the cursor's
+    // reach — the margin is a fixed fraction of the half-FOV, so the travel circle IS the drawn
+    // optic rim. Fallback mirrors `camera.rs` for the pre-bind frame before `TankViews` lands.
+    let fov = view_fov(&views, ViewKind::Gunner, GUNNER_FOV_FALLBACK);
+    let margin = optic_margin(fov);
+
+    // Radians of commanded aim per mouse count, scaled with the optic FOV so the screen-space cursor
+    // feel — and the count of mouse-counts to cross the optic — is magnification-invariant (a
+    // narrower optic magnifies, so the same screen move is a smaller angle). Anchored so the
+    // reference 0.12 rad optic keeps its tuned 0.0005 (this retires the old "scale with the zoom
+    // FOV" note); with one authored gunner FOV today it is a no-op, and correct the moment a second
+    // optic exists.
+    const SENSITIVITY_AT_REF: f32 = 0.0005;
+    const REF_FOV: f32 = 0.12;
+    let sensitivity = SENSITIVITY_AT_REF * (fov / REF_FOV);
     // Distance to the published aim point: far enough that all mounts aim essentially parallel
     // (boresighted along the intent), since there's no committed convergence range yet.
     const AIM_RANGE: f32 = 10_000.0;
 
-    intent.yaw -= motion.delta.x * SENSITIVITY;
-    intent.pitch -= motion.delta.y * SENSITIVITY;
+    intent.yaw -= motion.delta.x * sensitivity;
+    intent.pitch -= motion.delta.y * sensitivity;
 
     // Servo angles live root-resident (`TankSim`), addressed by each node's `ServoIndex`.
     let angle = |servo| {
@@ -626,20 +679,36 @@ fn drive_gunner_aim(
         .get(rig.muzzle)
         .map_or(0.0, |table| table.superelevation(ranging.range));
 
-    // Lead as a 2D angular vector from the gun chain's current *sight line* (lay − lob). Yaw uses
-    // shortest-angle difference so continuous traverse doesn't wind up. `drive_servos` steps on the
-    // fixed clock, so `current` here is the latest tick's integrated angle — the clamp chases the
-    // sim truth, ≤1 tick behind the render pose the optic shows.
+    // Bound 1 — mechanical travel. The pitch (elevation) servo's limits are on the *lay*; the intent
+    // is the *sight line* = lay − θ, so shift the window down by the lob. The Tiger's turret is
+    // `Continuous` (yaw passes through); a limited-traverse turret would clamp yaw directly (no lob
+    // on yaw). Clamping the absolute intent here — before the circular clamp — guarantees the final
+    // intent is reachable, so the reticle always has an angle it can settle onto.
+    let pitch_limits = servo_specs
+        .get(rig.gun)
+        .ok()
+        .and_then(ServoSpec::travel_limits)
+        .map(|(min, max)| (min - theta, max - theta));
+    let yaw_limits = servo_specs
+        .get(rig.turret)
+        .ok()
+        .and_then(ServoSpec::travel_limits);
+    intent.pitch = clamp_to_travel(intent.pitch, pitch_limits);
+    intent.yaw = clamp_to_travel(intent.yaw, yaw_limits);
+
+    // Bound 2 — circular optic margin. Lead as a 2D angular vector from the gun chain's current
+    // *sight line* (lay − lob). Yaw uses shortest-angle difference so continuous traverse doesn't
+    // wind up. `drive_servos` steps on the fixed clock, so `current` here is the latest tick's
+    // integrated angle — the clamp chases the sim truth, ≤1 tick behind the render pose the optic
+    // shows. Preserve direction, cap magnitude at the optic radius; within the margin the intent is
+    // untouched (see the doc comment — re-pinning would make the target recede with the gun). The
+    // interpolation stays inside the travel window (both endpoints are, and scale ∈ [0, 1]).
     let yaw_offset = shortest_angle(intent.yaw - t_current);
     let sight_now = g_current - theta;
     let pitch_offset = intent.pitch - sight_now;
-
-    // Circular clamp: preserve direction, cap magnitude. Within the margin the intent is left
-    // untouched (absolute, hull-local) so the gun genuinely catches up as it slews — re-pinning to
-    // `current + offset` each frame would make the target recede with the gun (never arrives).
     let len = (yaw_offset * yaw_offset + pitch_offset * pitch_offset).sqrt();
-    if len > LEAD_MARGIN {
-        let scale = LEAD_MARGIN / len;
+    if len > margin {
+        let scale = margin / len;
         intent.yaw = t_current + yaw_offset * scale;
         intent.pitch = sight_now + pitch_offset * scale;
     }
@@ -705,5 +774,50 @@ fn update_toast(
         *visibility = Visibility::Visible;
     } else if *visibility != Visibility::Hidden {
         *visibility = Visibility::Hidden;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The margin is a fixed fraction of the half-FOV — the derivation the overlay UI must share, so
+    /// the cursor's travel circle and the drawn rim are one radius. Pinned at the Tiger's authored
+    /// 0.12 rad optic (≈0.054 rad) and confirmed proportional to the fraction.
+    #[test]
+    fn margin_is_fraction_of_half_fov() {
+        let fov = 0.12_f32;
+        assert!((optic_margin(fov) - OPTIC_RADIUS_FRACTION * fov / 2.0).abs() < 1e-9);
+        assert!((optic_margin(fov) - 0.054).abs() < 1e-6);
+        // Scales with the authored FOV: a wider optic gets a proportionally wider reach.
+        assert!((optic_margin(0.24) - 2.0 * optic_margin(0.12)).abs() < 1e-9);
+    }
+
+    /// A continuous mount (turret yaw) passes through; a limited mount clamps to its window. This is
+    /// the raw clamp — the caller shifts the pitch window down by the superelevation before calling.
+    #[test]
+    fn travel_clamp_respects_limits() {
+        assert_eq!(clamp_to_travel(3.0, None), 3.0);
+        let limits = Some((-8.0_f32.to_radians(), 15.0_f32.to_radians()));
+        // Below the floor and above the ceiling saturate; an in-window angle is untouched.
+        assert!((clamp_to_travel(-1.0, limits) - (-8.0_f32).to_radians()).abs() < 1e-6);
+        assert!((clamp_to_travel(1.0, limits) - 15.0_f32.to_radians()).abs() < 1e-6);
+        assert!((clamp_to_travel(0.1, limits) - 0.1).abs() < 1e-9);
+    }
+
+    /// Superelevation slides the reachable *sight-line* pitch window down by the lob: the servo
+    /// limits bound the lay (= sight line + θ), so a sight line laid at `max − θ` puts the bore
+    /// exactly at its elevation stop. As range is dialed out and θ grows, the sight can't be laid as
+    /// high — the gun spends more of its travel on the lob.
+    #[test]
+    fn superelevation_shifts_pitch_window() {
+        let (min, max) = (-8.0_f32.to_radians(), 15.0_f32.to_radians());
+        let theta = 0.01_f32;
+        let shifted = Some((min - theta, max - theta));
+        // A sight line just under the shifted ceiling stays; one above it is pulled to `max − θ`.
+        let ceiling = max - theta;
+        assert!((clamp_to_travel(ceiling + 0.05, shifted) - ceiling).abs() < 1e-6);
+        // Lay = clamped sight line + θ never exceeds the mechanical `max`.
+        assert!(clamp_to_travel(ceiling + 0.05, shifted) + theta <= max + 1e-6);
     }
 }
