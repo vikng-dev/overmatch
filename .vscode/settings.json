@@ -1,0 +1,33 @@
+{
+  // rust-analyzer on a bevy+avian+lightyear+parry graph is expensive by nature. These three settings
+  // exist to stop it being expensive REPEATEDLY. Measured 2026-07-09: rust-analyzer climbed to
+  // ~2.9 GB resident while agent `cargo` runs held several GB apiece on the same graph.
+
+  // The load-bearing one. rust-analyzer runs its own `cargo check` into `target/` by default — the
+  // SAME directory the terminal builds use. This repo gates on two feature sets (`--features net`
+  // and `--no-default-features`, both in ci.yml), so a terminal build under one resolution evicts the
+  // artifacts rust-analyzer just produced under the other, and each rebuilds what the other threw
+  // away. `true` moves rust-analyzer to `target/rust-analyzer`, ending the mutual eviction. Costs a
+  // second artifact tree on disk; `target/` is already in `.cursorignore`, so this is covered.
+  "rust-analyzer.cargo.targetDir": true,
+
+  // The big one on a 16 GB machine. With check disabled rust-analyzer never spawns `cargo`/`rustc`
+  // at all, so the editor stops contributing multi-GB compiler processes on top of its own ~3 GB
+  // resident graph. Completion, go-to-definition, hover, rename and rust-analyzer's OWN type errors
+  // all still work — what is lost is inline cargo/clippy diagnostics, which `ci.yml` already gates
+  // with `cargo clippy --all-targets -- -D warnings` on both feature sets, strictly more thoroughly
+  // than the editor surfaced them. Run clippy in the terminal; that is the real gate anyway.
+  "rust-analyzer.check.enable": false,
+
+  // Moot while `check.enable` is false, kept for whoever turns it back on: `--all-targets` pulls
+  // tests/benches/examples into every check pass, roughly doubling the analysis surface.
+  "rust-analyzer.check.allTargets": false,
+
+  // Priming eagerly analyses the whole dependency graph on open. On this graph that is the single
+  // largest startup memory spike, for symbols that resolve on demand anyway.
+  "rust-analyzer.cachePriming.enable": false
+
+  // Deliberately NOT set: `rust-analyzer.cargo.features`. `net` is a DEFAULT feature
+  // (Cargo.toml: `default = ["net", "dev_tools"]`), so rust-analyzer already enables it and pinning
+  // the list buys nothing. It would only matter if `net` were opt-in.
+}
