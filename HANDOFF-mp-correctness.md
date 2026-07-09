@@ -1,6 +1,6 @@
 # Handoff — MP correctness slice, and the predict-everyone fork
 
-For: Yan + a fresh session. State as of 2026-07-09. Branch `mp-correctness-slice`, 8 commits,
+For: Yan + a fresh session. State as of 2026-07-09. Branch `mp-correctness-slice`, 18 commits,
 **not pushed, not merged**. Gates green both feature sets; both net bins build. Delete this file when
 consumed.
 
@@ -22,6 +22,13 @@ contact-restore *gate* is genuinely clear (§3); the *case for walking through i
 | `7a93a98` | `.vscode/settings.json`: editor stops spawning compilers |
 | `ca54288` | Retired the contact-restore divergence term **and the metric behind it** |
 | `1b8df19` | Review fixes — two of the three correctness bugs were introduced by this slice |
+| `2e5fba9` | **macOS `.dmg` fix**: the bake and the asset server disagreed on where `assets/` lives |
+| `a96e9fd` | Corrected `apply_net_health`'s invariant — the trigger is *input* rollback, not state |
+| `57f1405`/`8783520` | `FireEvent` carries its fire tick; shell anchored at the predicted index (2nd commit reverses the 1st) |
+| `cc5dc7e` | Replaced the derived catch-up figure with the measured one |
+| `4c2b95a` | GLOSSARY vocabulary; ADR-0016 rewritten and shortened; **ADR-0017** new |
+| `63cd526` | Stopped the docs teaching that determinism means lockstep |
+| `bfbf53a` | **`design/timelines-and-shear.md`** — the timeline model, measured |
 
 **The only genuine bug in the multiplayer slice was the input-edge starvation.** lightyear extrapolates
 a starved input stream by holding the last `ActionState` forever (`get_predict` → `get_last()`), and
@@ -33,27 +40,27 @@ own tank authors an input every tick; remote tanks carry no `ActionState`).
 
 Barrel recoil was a **missing feature, not a defect**, and became the worked example of ADR-0016.
 
-## 2. Three things I asserted that were wrong
+## 2. What I asserted that was wrong
 
-Recorded because the pattern matters more than the items.
+Recorded because the pattern matters more than the items: **every one was a confident claim sitting
+next to code or prose that did not support it** — the failure mode ADR-0016 names for the wire.
+Each was caught by an agent told to disbelieve me.
 
-1. **"`NetHealth` tick-staleness manufactures divergence."** It does not. State rollback runs
-   `RollbackMode::Check`, which starts every rollback at `last_confirmed_tick` *and only on a mismatch
-   there* — and the tank matches at pre-death ticks. No replay window begins before the death tick. The
-   fix I proposed would not have worked anyway: the drive gate rides the `Dead` marker, never rolled
-   back, not health. Retracted; the test that "confirmed" it was deleted.
+| Claim | Verdict |
+|---|---|
+| "`NetHealth` tick-staleness manufactures divergence" | **No.** State rollback (`Check` *and* `Always`) starts at `last_confirmed_tick`; no replay window precedes the death tick. My proposed fix would not have worked either — the drive gate rides the never-rolled-back `Dead` marker, not health. |
+| "Replay contact re-formation is the gate before predicting remotes" | **Stale document.** Superseded the same day it was written; the `hc=0` metric never discriminated the defect. |
+| "Drain the `FireEvent` on the fixed clock" | **Would drop messages** on zero-tick frames — `lightyear_messages` clears undrained receivers in `Last`. |
+| "The opponent's tracer lags a constant ~64 m" | **Wrong reference frame.** Measured: 6 of 7 shots need zero catch-up; the defect is an intermittent late packet. |
+| "Anchor the caught-up shell to the confirmed index `C`" | **No** — it would converge on where the victim *was*. Anchored at `P`, co-indexed with the hull it hits (`8783520` reverses `57f1405`). |
+| "`Tick` is a wrapping `u16`" | It is a wrapping **`u32`**; `Sub` returns `i32` through `i64`. |
+| "`I < C`" | **Backwards at shipping latency — and there is no fixed ordering.** They cross over near one-way ≈ 27 ms and are not commensurable. |
+| "Catch-up is ~10 ticks / ~125 m" | **Derived, never measured.** Measured ≈4 ticks / ~49 m at RTT ≈ 91 ms (`cc5dc7e`). |
+| "Parallel reduction order blocks determinism" | **Not in avian 0.7.** Edge colouring gives disjoint per-colour writes, and the repo had already measured that `parallel` off changes nothing. Three blockers, not four. |
+| "ADR-0004 rejected lockstep" | **It contains no netcode at all.** Phantom citation, written by me into ADR-0016. |
 
-2. **"Replay contact re-formation is the gate before predicting remotes."** Stale document. The
-   `hc=0` finding was superseded the same day it was written (`SPIKE_CONTACT_PROBE`, `8a08d60`) and
-   fixed (`AuthoredLocalTransform` shield, `33cc4e4`) — but §5's prose never caught up, and ADR-0015
-   repeated it as a *measured* ranked cause. My warm-start hypothesis was refuted three ways.
-
-3. **"Drain the `FireEvent` on the fixed clock."** Would have dropped every message arriving on a
-   zero-tick frame — `lightyear_messages` clears undrained receivers in `Last` (`plugin.rs:161`).
-
-Each was caught by an agent told to disbelieve me. **Two of the three correctness findings in the final
-review were bugs this slice introduced**, both of them doc comments asserting something the code did
-not guarantee. That is the failure mode ADR-0016 names.
+**Two of the three correctness findings in the final code review were bugs this slice introduced**,
+both of them doc comments asserting something the code did not guarantee.
 
 ## 3. Divergence: the gate is clear
 
@@ -75,60 +82,22 @@ regardless of the §4 decision — it is a determinism prerequisite too.
 
 ## 4. The fork: predict-everyone — recommended AGAINST
 
-An earlier revision of this file argued *for* it, on the grounds that tank-tank collision requires it.
-Research (2026-07-09) refuted that. Recorded honestly, because the argument is seductive and someone
-will re-derive it.
+**This reasoning now lives in doctrine, where it will survive this file being deleted.**
 
-**What is still true.** Prediction cannot make an opponent less latent — their input arrives with their
-state. What it does is put them on *your* timeline. Today your tank runs ~½ RTT *ahead* of the server
-and the opponent ~1.7 send-intervals *behind* it; they occupy your physics world at different instants.
-That misalignment is real and it is why a ram feels wrong.
+- **[ADR-0017](.agents/docs/adr/0017-mutual-contact-resolves-on-the-authority.md)** — the decision,
+  the three exits from a mutual continuous interaction, and the two lightyear-source blockers (the bot
+  has no input to rebroadcast; reliable remote fire needs input rollback, which breaks
+  `apply_net_health`).
+- **[design/timelines-and-shear.md](.agents/docs/design/timelines-and-shear.md)** — the four tick
+  indices, the measured offsets, and why ramming, un-learnable aim lead, the incoherent tracer and the
+  unfelt hit are one phenomenon.
+- **[ADR-0016](.agents/docs/adr/0016-replicate-causes-derive-consequences.md)** — the three tests
+  (complete cause, one-way vs mutual, contractive vs expansive) that decide derive-vs-replicate.
 
-**Why predicting them does not fix it.** War Thunder ships exactly this model — extrapolate remote
-vehicles from last-known controls — and says on the record: *"The main (and obvious) exception where it
-does not work so well is physical collisions between vehicles… there is actually no good online
-solution for a colliding solution anyway."* With two predicted Dynamic bodies, **both** mispredict, and
-each feeds the other's contact solver. Fiedler's answer to two clients contesting one contact is
-single-authority-per-contact, not free collision. Epic's Chaos "replicate velocity and let the client
-collide" mode is documented as *"does not handle interactions gracefully."* Nobody ships two freely
-colliding predicted bodies without determinism — and Rocket League (fixed-tick Bullet) and Photon
-Quantum (fixed-point) have it; avian across two worlds does not (ADR-0015: bit-exact only in flat
-cruise). **Predict-everyone relocates the artifact and buys a resim bill.**
-
-**And hit feel is settled the other way.** Overwatch's GDC 2017 deck lists what the client rolls back:
-local entity state, input, aim, poses. Explicitly excluded: *"Variables and states on remote Entities"*
-and *"Data from other Entity Components (such as for health)."* They ship a `Suppress Movement
-Prediction` node for knockback. The rule is: predict effects you **author**; replicate effects authored
-**against** you. This corroborates memory `mp-hit-feel-view-layer`.
-
-**Three hard constraints found in source, if you ever revisit it:**
-
-1. **The bot cannot be predicted.** It has no `ControlledBy` and no client authoring its input;
-   `drive_bot` writes `TankCommand` directly server-side, so no input message names it, so lightyear
-   never inserts `ActionState` on the client replica, so a predicted bot coasts on a default command.
-   Only a `HostClient` can rebroadcast server-authored inputs. Predict-everyone is really
-   **predict-every-player**, mixed mode — so `ServoAngles` and `FireEvent` are **NOT deletable**. An
-   earlier revision of this file claimed they were. Wrong.
-
-2. **Reliable remote fire requires input rollback; input rollback breaks `apply_net_health`.**
-   `run_rollback` replays from `rollback_start_tick + 1`, so a remote's fire at the confirmed tick is
-   never re-executed — with input rollback off, derived remote fire is unreliable by construction. With
-   it on, rollbacks target `last_confirmed_input.tick` (`Always`) or `earliest_mismatch - 1` (`Check`),
-   neither gated on state confirmation, so a replay window can precede a death tick and
-   `apply_net_health` writes post-death HP onto pre-death ticks. You cannot have both. (Note: **state**
-   rollback in either mode always starts at `server_confirmed_tick` and is safe; and predicting more
-   entities does NOT widen the frontier — `last_confirmed_tick` is global. `0fa6cd8` originally claimed
-   both of those wrong things; corrected in `a96e9fd`.)
-
-3. **`TankCommand.aim` is an analog `Vec3`**, so input-side `RollbackMode::Check` would mismatch, and
-   roll back, *every single tick*. And edges under hold-last: `701d0a7` clears them when
-   `get(tick).is_none() && get_last().is_some()`, which for a remote tank is true almost every tick, so
-   it would never fire locally. See `TankCommand::clear_edges`, now the single definition of which
-   fields are edges.
-
-**Also:** the comment at `net/client.rs:255` calls the input-rollback arm "a permanent no-op". That is
-a statement about today's config, not a permanent property. Fix it if you ever flip `rebroadcast_inputs`.
-
+The short version: predicting opponents does not fix ramming, it replaces shear with *mutual
+misprediction* fed through the one part of the sim that expands perturbations. Determinism comes
+before predict-everyone, not after. An earlier revision of this file argued the opposite, at length;
+that argument is recorded in ADR-0017's *Considered options* so nobody re-derives it.
 ## 4b. What to do instead
 
 1. **Tick-stamp `FireEvent` and fast-forward the tracer.** `on_fire_shell` starts an opponent's shell at
