@@ -4,7 +4,9 @@
 release, coast-down capture, pivot feathering all read right). Residual MP instability observed in
 the drive (ramp nose-dive → hull catches → never settles, continuous jitter) is the hull-contact
 replay machine (client `hc=0` on replayed ticks — see the 80/10 paragraph below), NOT the friction
-law; next slice.
+law; next slice. **(The `hc=0` attribution is SUPERSEDED 2026-07-09 — see the correction below; the
+residual is contact-transient solver noise across two ECS Worlds plus in-contact load chaos, not a
+contact-replay machine.)**
 
 **Correction (2026-07-06, architecture-review session):** the lat0 blend numbers below are
 **bimodal**, not stable — 4 additional runs measured 1 / 63 / 1 / 50 rollbacks, the high-count
@@ -16,6 +18,22 @@ rollback goes silently dead — divergence then runs unchecked. Fixed by the rol
 (`src/net/watchdog.rs`, this branch). Until/unless that context changes, **lat0 rollback counts
 from pre-watchdog builds are not a valid A/B metric** (they measure check starvation, not
 convergence); lat0 |Δp| tick-row divergence remains valid.
+
+**Correction (2026-07-09, post-shield re-measurement) — the hc=0 attribution is SUPERSEDED.** The
+"hull-contact replay machine (client `hc=0` on replayed ticks)" reading in the Status line above,
+and the "client hc=0 vs server hc=2 — a contact-replay machine, not friction" reading in the 80/10
+paragraph below, are **retired**. That exact signature — client `hc=0` while the server holds
+`hc>0` — is what the post-shield re-measurement tested, and it came back **0 occurrences across all
+88 server-joined replayed ticks** at 80/10 (`.agents/docs/design/sim-divergence-and-determinism.md`
+§6; ADR-0015 ranked cause #2, now retired). Worse, the `hc=0`-among-replayed-ticks metric never
+discriminated "no hull contact because the tank rides on its wheels or is airborne" (physically
+correct, and the common case) from "contact failed to re-form after restore" — so it is a **poison
+indicator**, not evidence for either direction. Superseded by: the `SPIKE_CONTACT_PROBE`
+reclassification (`8a08d60` — the mechanism was attachment poisoning, a render→sim leak, not a
+restore defect), the `AuthoredLocalTransform` shield (`33cc4e4`), and the post-shield
+re-measurement (`ca54288`). **Current understanding of the residual:** contact-transient solver
+noise across the two ECS Worlds (ADR-0015 ranked cause #1) plus in-contact replay load chaos — not
+a hull-contact-restore failure. The original text is preserved below as the historical record.
 
 **The question.** The drive/friction model's static↔kinetic hand-off: should it stay the original
 **hard gate** (a wheel grips below `STICK_SPEED = 0.3 m/s`, slips above — anchor planted/dropped as
@@ -48,7 +66,8 @@ edge and drives away while the server stays wedged); the blend holds both ends w
 "mismatch ignored by check" class is pre-existing). At 80/10: 207 → 94–156 rollbacks (chaotic
 band), |Δlv| p50 0.58 → 0.15 m/s, |Δp| p50 19 → 4 mm; the residual storm is the client's hull-edge
 contact failing to re-form during depth-8 prediction (client hc=0 vs server hc=2 — a
-contact-replay machine, not friction). Washboard lat0 7→7, 80/10 within the measured chaotic band
+contact-replay machine, not friction — **this hc=0 reading is SUPERSEDED 2026-07-09, see the
+correction near the top: a poison indicator, not a contact-restore rate**). Washboard lat0 7→7, 80/10 within the measured chaotic band
 (1–147); flat-cruise bit-exactness preserved (0.000 across all fields, ticks 650–1350); drop test
 clean (min py −0.042); the 20° ramp park is *stronger* (1.5 cm creep vs the baseline's 0.6 m
 slide-then-catch) because capture through the band starts at Coulomb strength.

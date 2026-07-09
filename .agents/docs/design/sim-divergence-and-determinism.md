@@ -61,10 +61,18 @@ differs between client and server worlds (different entity histories), feeding o
 float sums. This is why bit-exactness was never on the table for the current architecture.
 
 *(corrected 2026-07-06: the "parallel = nondeterministic solver order" half of that paragraph is
-stale for avian 0.7. The dynamics step is order-invariant same-machine **by construction** —
-graph-coloring with disjoint body writes, Vec-backed contact storage; upstream PRs #712/#807 made
-parallel constraint generation deterministic, and avian CI enforces cross-platform bit-identity
-WITH parallel enabled (2D-only test; 3D plausible but unverified). And bit-exactness IS on the
+stale for avian 0.7. The **parallelism** is the safe part: the parallel dynamics step is
+order-invariant same-machine **by construction** — greedy edge-colouring gives each body one edge
+per colour, so `par_for_each` writes are disjoint (`plugin.rs:557-561`), Vec-backed contact
+storage; upstream PRs #712/#807 made parallel constraint generation deterministic, and avian CI
+enforces cross-platform bit-identity WITH parallel enabled (2D-only test; 3D plausible but
+unverified). **Do not read "parallel is safe" as "ordering is solved":** the actual residual
+nondeterminism is the **serial, entity-index-keyed colouring order** — which colour a
+multi-manifold body's manifolds land in is keyed on `body.index_u32()`
+(`constraint_graph.rs:184-191`) and applied in a serial colour-index loop (`plugin.rs:557-561`), so
+two ECS Worlds with different entity indices accumulate the same manifolds in a different colour
+order (measured, parallel-off changes nothing: |Δav| 0.154 vs 0.155). Full mechanism and
+measurement: `.agents/scratch/upstream-reports/avian-solver-constraint-order.md`. And bit-exactness IS on the
 table where it matters: flat-ground cruise measured bit-exact client-vs-server over ~880-tick
 windows, all fields. The two REAL divergence mechanisms are (1) same-machine replay divergence
 from BVH refit topology across rollback restore — lightyear_avian restores the tree from
@@ -138,10 +146,24 @@ contact-free ticks, so it was never evidence of a replay-determinism failure in 
    (§2 correction), and the throughput argument was miscast: the tank is ONE rigid body — the
    wheels are external forces, not solver constraints — so even 10v10 is ~20 bodies, trivial
    solver load.)*
-4. **Lockstep/deterministic replication stays rejected** for this game: 16-wheel contact-rich
-   physics per tank × cross-platform × Rust ecosystem's current maturity = the expensive path,
-   and its bandwidth win doesn't matter at 1v1–3v3. Revisit only if state bandwidth ever becomes
-   the binding constraint (10v10 on thin pipes).
+4. **An inputs-only wire stays rejected — determinism-the-property does not.** *(rewritten
+   2026-07-09; the original bullet conflated the two, rejecting determinism-the-property with a
+   lockstep-specific bandwidth argument — it contradicted §4.1 above, which correctly calls
+   determinism "the ROLLBACK-KILLER".)* These are orthogonal choices:
+   - **Rejected: lightyear's `deterministic_replication` / an inputs-only wire** (§3). The slowest
+     peer gates everyone, and one divergence desyncs permanently with no authority to re-anchor.
+     16-wheel contact-rich physics per tank × cross-platform × Rust ecosystem's current maturity
+     makes it the expensive path, and its bandwidth win doesn't matter at 1v1–3v3. Revisit only if
+     state bandwidth ever becomes the binding constraint (10v10 on thin pipes).
+   - **Pursued: determinism-the-property, under server authority, as the rollback-killer** (§4.1,
+     ADR-0015:56-60). Target quadrant is deterministic + server-authoritative + **state kept as
+     the re-anchor and divergence detector** (the Rocket League / Photon Quantum shape), NOT
+     input-only lockstep. Every bit of forward- and replay-determinism gained makes corrections
+     rarer without touching the wire model or dropping the re-anchor.
+   - **What determinism buys, precisely.** It does *not* make *prediction* more accurate —
+     prediction is bounded by information (you cannot know a remote player's next input).
+     Determinism eliminates the **divergence** error class (same inputs, different results); it
+     cannot touch the **misprediction** class (unknown remote inputs). Those are separate budgets.
 5. **Keep the divergence budget honest with the tools built this session:** `SPIKE_SIM_LONG` +
    `SPIKE_SIM_WINDOWED` + `SPIKE_SIM_AIM_SWEEP` reproduce the workload classes; `nan_tripwire`
    names corruption; per-component thresholds are the tuning surface (velocity loose, position/

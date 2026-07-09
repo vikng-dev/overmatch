@@ -144,14 +144,29 @@ a statement about today's config, not a permanent property. Fix it if you ever f
 4. **A standing divergence instrument** (per-tick state hash + per-component error magnitudes). Serves
    the threshold ratchet today and is day-one infrastructure for a determinism effort.
 
-**On determinism** (Yan's stated next direction): ADR-0016 is already the on-ramp — keep deriving
-consequences and what remains on the wire is only causes, which *is* deterministic lockstep. Determinism
-is the doctrine's fixed point, not a rewrite away from it. But note: you do not need bit-exactness, you
-need **divergence below the rollback threshold** (ADR-0015 says as much), which is continuous and
-buyable incrementally. That matters because the deployment is **ARM client against x86 server**;
-cross-architecture bit-exactness realistically means fixed-point physics, which avian is not. Fixing the
-named upstream bugs is a ratchet on what exists. Bit-exact cross-arch determinism is a different project
-wearing the same word.
+**On determinism** (Yan's stated next direction): ADR-0016 is already the on-ramp — deriving every
+consequence *reduces what has to be reconciled*, but it does **not** turn the wire into inputs-only
+lockstep. State replication and the authority's re-anchor stay (dropping them is what lockstep does,
+and that is exactly the rejected quadrant — one divergence would desync permanently with nothing to
+re-anchor from). The endpoint is **deterministic + server-authoritative**, not lockstep. Determinism
+is the doctrine's fixed point, not a rewrite away from it. And note: you do not need bit-exactness,
+you need **divergence below the rollback threshold** (ADR-0015 says as much), which is continuous and
+buyable incrementally.
+
+That last point matters because the deployment is **ARM client against x86 server**. But
+cross-architecture bit-exactness does **not** require fixed-point physics. IEEE-754 specifies
+`+ − × ÷ √` as correctly rounded — bit-identical on ARM and x86 — and Rust neither enables fast-math
+nor implicitly contracts FMA, so the classic C `a*b+c` pitfall is off the table by default. The real
+blockers are enumerable: **(1)** transcendentals (`glam` defaults to `std` libm,
+`glam-0.30.10/Cargo.toml:48`; avian's `enhanced-determinism` swaps in the Rust `libm` crate);
+**(2)** FMA contraction, only if a `mul_add` path is actually emitted as FMA; **(3)** the serial,
+entity-index-keyed constraint colouring order (`.agents/scratch/upstream-reports/avian-solver-constraint-order.md`,
+avian #480/#734). **"Parallel reduction order" is NOT a blocker in avian 0.7** — measured: rebuilt
+without the `parallel` feature, same divergence (|Δav| 0.154 vs 0.155), because the parallel step
+writes disjoint bodies per colour by construction. Once (1)–(3) land, bit-exact cross-arch float is
+plausibly reachable *without* fixed-point — and in any case what the netcode needs is divergence
+below the rollback threshold, not bit-exactness. Fixing the named upstream bugs is a ratchet on what
+exists.
 
 ## 5. Open items I did not touch
 
@@ -166,6 +181,25 @@ wearing the same word.
   not an agent's.** Both are Layer-2 removal conditions per ADR-0015.
 - **`target/` was 56 GB.** `.cursorignore` now excludes it from Cursor's indexer; `cargo clean` when
   convenient. rust-analyzer's ~3 GB is its Bevy graph and is not affected by either.
+
+**The friend-fight punch list** (carried over from the now-consumed `HANDOFF-opponent-fire.md`; the
+`FireEvent`/opponent-fire slice it led with has shipped — see §1 `71987cf` and §4b). The remaining
+work is entirely about the **second human** ("my friend on Windows joins the DO server, we fight, we
+both respawn"):
+- **Windows client distribution** — there is NO CI build for the net client bin, and a
+  double-clicked `.exe` has no `OVERMATCH_SERVER` env. Needs: a Windows `--bin overmatch --features net`
+  CI build (mirror the server build workflow) + a **baked default server address** (fall back to the
+  DO IP when `OVERMATCH_SERVER` is unset) + Yan wants a **debug build** so the debug keys work. Fully
+  parallel to the sim work (no collision). Friend is on **Windows**. See **`DEPLOY.md`** for the DO
+  droplet + redeploy runbook (redeploy after any protocol/`.replicate()` change or a new client won't
+  handshake).
+- **Two-human-input validation** — lightyear's per-client input demux with two live `ActionState`
+  authors is the one untested netcode path; the friend joining IS the test. Also audit client-side
+  unscoped `With<Tank>` queries and the single-tank diagnostics in `src/net/diagnostics.rs`
+  (`watch_turret_pose`, `log_sim_evidence`).
+- **Player respawn** (deferred, not the bot's): death screen + respawn key when your own crew all die
+  (emergent). Bot respawn (`schedule_bot_respawn`/`respawn_dead_bots`) is the reference; a player
+  respawn needs a new `TankCommand` field + server despawn/respawn of the client's tank.
 
 ## 6. Verification
 

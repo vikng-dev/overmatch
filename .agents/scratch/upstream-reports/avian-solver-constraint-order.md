@@ -1,6 +1,6 @@
 # avian3d 0.7: solver constraint order derives from entity index, not a spatial key — cross-World non-determinism
 
-**Target:** github.com/Jondolf/avian · avian3d 0.7 · **Severity for us:** LOW *current impact* (bounded, self-healing, absorbed by server authority) but **HIGHEST strategic** — this is the single remaining obstacle to fully deterministic forward sim, i.e. the linchpin for any input-only / lockstep / GGPO architecture. · **Status:** unfiled
+**Target:** github.com/Jondolf/avian · avian3d 0.7 · **Severity for us:** LOW *current impact* (bounded, self-healing, absorbed by server authority) but **HIGHEST strategic** — this is the single remaining same-machine obstacle to fully deterministic forward sim, i.e. the enabler for **predict-both-with-rollback under our existing server-authoritative, state-re-anchored architecture** (NOT a move to an input-only / lockstep wire — that architecture stays rejected, see ADR-0015 and the design doc §4.1/§4.4). · **Status:** unfiled
 **Lineage:** the unresolved SOLVER-side tail of issues #406 / PR #480 ("make contacts deterministic across Worlds" — the broad phase was changed to sort by spatial key instead of `Entity` id; the constraint/solver graph was not).
 
 ## Suggested title
@@ -74,7 +74,21 @@ server-authoritative + prediction architecture (it manifests only as occasional 
 in a pathological wedged state; normal play is bit-exact). We do not work around it.
 
 Its importance is strategic: it is the **last same-machine non-determinism source**, and the exact
-obstacle between us and deterministic forward sim. If this ships upstream (plus `enhanced-determinism`
-for the independent transcendental axis), input-only lockstep / GGPO-style rollback architectures
-become viable for this project (see ADR-0015 and the determinism-unlock analysis). Track it as the
-enabler, not a bug to patch locally.
+obstacle between us and deterministic forward sim. **What it enables is predict-both-with-rollback
+under the architecture we already run** — server-authoritative, state replicated and kept as the
+re-anchor and divergence detector. It does **not** require moving to an input-only / lockstep wire
+(that stays rejected — the slowest peer would gate everyone and one divergence would desync
+permanently with no authority to re-anchor; see ADR-0015 and the design doc §4.4). If this ships
+upstream (plus `enhanced-determinism` for the independent transcendental axis), the divergence
+error class collapses and predicting non-owned tanks becomes viable without a wire-model change.
+Track it as that enabler, not a bug to patch locally.
+
+**A reader must not come away thinking parallelism is the risk — it is the safe part.** The
+parallel dynamics step is order-invariant **by construction**: greedy edge-colouring gives each
+body at most one edge per colour, so the `par_for_each` within a colour writes to disjoint bodies
+(`plugin.rs:557-561`). Measured: rebuilding without the `parallel` feature does not change the
+divergence (|Δav| 0.154 vs 0.155, `:22`/`:47-48` above). The live nondeterminism is entirely the
+**serial, entity-index-keyed colouring order** (`constraint_graph.rs:184-191`, applied serially by
+colour index in `plugin.rs:557-561`) — a per-body property of *which* colour a manifold lands in,
+not of how colours are executed. The upstream fix is to make that assignment geometry-derived
+(spatial key), not to touch threading.
