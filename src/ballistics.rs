@@ -82,8 +82,9 @@ pub(crate) fn advance_shell(position: Vec3, velocity: Vec3, drag_k: f32, dt: f32
 /// drift from natively integrating the same `ticks`. Ballistic (no per-step raycast): this returns the
 /// free-flight arc, and whether the round ALREADY hit something during the skipped flight is the
 /// caller's concern ([`on_fire_shell`] clears that with a single segment raycast — see there). The
-/// skip is systematically ~10 ticks / ~125 m under the predicted-present timeline (see
-/// `net::protocol::FireEvent::fire_tick`), which is exactly why the returned arc points matter: they
+/// skip is systematic under the predicted-present timeline — MEASURED ≈4 ticks / ~49 m at RTT ≈ 91 ms,
+/// growing with RTT (see `net::protocol::FireEvent::fire_tick` and `design/timelines-and-shear.md` §2)
+/// — which is exactly why the returned arc points matter: they
 /// populate the trail so the tracer reads as a round already in flight, not one teleporting in.
 pub(crate) fn fast_forward_shell(
     origin: Vec3,
@@ -515,11 +516,12 @@ fn setup_assets(
 /// `net::protocol::FireEvent::fire_tick`); `catch_up_ticks` is `0` for every locally-fired shell, so
 /// that path is skipped and the shell spawns at the muzzle exactly as before (local shells unaffected).
 ///
-/// **Hits during catch-up.** Under the predicted-present timeline the skip is systematically ~10 ticks
-/// / ~125 m, so a close-range shot routinely catches up PAST its target. If the round flew into terrain
+/// **Hits during catch-up.** Under the predicted-present timeline the skip is systematic — MEASURED
+/// ≈4 ticks / ~49 m at RTT ≈ 91 ms, growing with RTT (`design/timelines-and-shear.md` §2) — so a
+/// close-range shot can catch up PAST its target. If the round flew into terrain
 /// or a hull during the skipped flight it already impacted on the authority — there is nothing left in
 /// the air, so we skip the phantom tracer rather than spawn it downrange of the surface it hit. That
-/// test is ONE straight-segment raycast (`Terrain | Armor`): the catch-up arc's gravity drop over ~10
+/// test is ONE straight-segment raycast (`Terrain | Armor`): the catch-up arc's gravity drop over a few
 /// ticks is sub-metre, so the muzzle→caught-up segment tracks the true arc. It is deliberately NOT a
 /// per-tick penetration march — the client deposits no HP or impulse here (`ClientReplica`), so the
 /// full march would resolve nothing the server hasn't; reusing it would only thread the volume / health

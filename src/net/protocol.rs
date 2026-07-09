@@ -157,8 +157,12 @@ pub struct FireEvent {
     ///
     /// # The cost, named not buried
     ///
-    /// The shell appears ALREADY DOWNRANGE: `P − fire_tick ≈ (P−S) + (S−fire_tick) ≈` ~10 ticks ≈
-    /// 156 ms ≈ **~125 m at 800 m/s**. That is not a bug — it is information the client did not have
+    /// The shell appears ALREADY DOWNRANGE: `P − fire_tick ≈ (P − S) + RTT/2`. MEASURED at 80 ms/10 ms
+    /// (RTT ≈ 91 ms): `P − S` ≈ +1.0 tick, `S − C` ≈ +2.96 ticks, so the skip is **≈4 ticks ≈ 61 ms ≈
+    /// ~49 m at 800 m/s**, growing with RTT (`design/timelines-and-shear.md` §2). An earlier revision
+    /// of this comment derived ~10 ticks / ~125 m by assuming a prediction margin of ~RTT/2; the
+    /// margin is far smaller, because `InputDelayConfig::balanced()` absorbs most of the round trip
+    /// into input delay rather than prediction. That is not a bug — it is information the client did not have
     /// (it learned of the shot late). Mitigated by populating [`crate::ballistics::ShellPath`] across
     /// the skipped flight from the same integrator, so the tracer reads as a round already in the air
     /// rather than one teleporting into existence. (The `FireEvent` channel being unreliable/unordered
