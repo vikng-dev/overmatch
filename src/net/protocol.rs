@@ -99,15 +99,23 @@ pub struct FireEvent {
     pub caliber: f32,
     pub mass: f32,
     /// The firing tank root, ENTITY-MAPPED (`MapEntities` below) so the server entity resolves to the
-    /// receiver's local replica. The client does NOT use it yet — the tracer flies purely off the
-    /// geometry above — but carrying (and mapping) it now means future remote-barrel recoil /
-    /// hit-reaction can hook onto the right tank with no protocol change.
+    /// receiver's local replica. The client resolves it to kick that tank's barrel recoil spring
+    /// (`net::client::apply_pending_recoil_kicks`) — the "replicate the cause" half of remote recoil.
     pub shooter: Entity,
+    /// Which weapon fired — its slot in the shooter's `TankSim::weapons` (its `WeaponIndex`). Plain
+    /// data, NOT entity-mapped: the receiver reads it against its OWN local rig to find the firing
+    /// weapon's `Weapon.recoil.kick`, so nothing about the recoil impulse rides the wire — only which
+    /// weapon fired. A `u8` is ample (a tank carries a handful of weapons; 256 slots is unreachable),
+    /// and the receiver bounds-checks it against the local `TankSim`/muzzles and SKIPS a slot it
+    /// can't resolve — the same "reject off the wire, never panic or index out of bounds" discipline
+    /// [`direction`](Self::direction) uses.
+    pub weapon: u8,
 }
 
 impl MapEntities for FireEvent {
     fn map_entities<M: EntityMapper>(&mut self, mapper: &mut M) {
-        // Only `shooter` is an entity; every other field is plain geometry.
+        // Only `shooter` is an entity; every other field is plain geometry or data (the `weapon`
+        // slot is read against the receiver's own local rig, so it is NOT mapped).
         self.shooter = mapper.get_mapped(self.shooter);
     }
 }

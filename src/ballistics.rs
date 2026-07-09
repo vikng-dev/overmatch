@@ -246,6 +246,23 @@ fn march_demo(mode: Res<MarchMode>) -> bool {
     *mode == MarchMode::Demo
 }
 
+/// The tank + weapon a shell was fired from — the CAUSE the net server broadcasts so every OTHER
+/// client can DERIVE that shot's consequences (the cosmetic tracer AND the shooter's barrel recoil)
+/// from its own local spec, with no impulse or spring state ever riding the wire. Pairing the
+/// attributed tank with the weapon slot in one value makes the two impossible to disagree — an
+/// attributed shot always knows which weapon fired it, so the recoil kick lands on the right barrel.
+/// The slot is the weapon's `TankSim::weapons` index (its `WeaponIndex`). Only `net::server` reads
+/// this, so it is dead code in a build without the `net` feature (SP / sandbox) — allow it there
+/// rather than drop the data the wire seam depends on.
+#[cfg_attr(not(feature = "net"), allow(dead_code))]
+#[derive(Clone, Copy)]
+pub struct ShotSource {
+    /// The tank root the shell was fired from.
+    pub tank: Entity,
+    /// The firing weapon's slot in `TankSim::weapons` — its spawn-time `WeaponIndex`.
+    pub weapon: usize,
+}
+
 /// Fire a shell — the trigger-agnostic seam. The player's gun and the sandbox camera both raise
 /// this; ballistics spawns and integrates the shell. Geometry only — origin, bore direction, muzzle
 /// speed — so it carries no assumption about *what* fired it.
@@ -259,15 +276,16 @@ pub struct FireShell {
     pub caliber: f32,
     /// Projectile mass (kg) — the primary driver of penetration capability (design §3).
     pub mass: f32,
-    /// The tank root that fired this shell, or `None` for trigger sources with no tank (the
-    /// sandbox's free-fly camera). Ballistics ignores it — `on_fire_shell` just spawns the shell —
-    /// but the net server's `FireShell` observer reads it to broadcast the cosmetic tracer to the
-    /// OTHER clients (`net::server`, the "FireEvent" seam): a shot whose shooter is known can be
-    /// attributed to the right replicated tank; `None` shots (sandbox) simply never broadcast. Only
-    /// `net::server` reads this, so it is dead code in a build without the `net` feature (SP /
-    /// sandbox) — allow it there rather than drop a field the wire seam depends on.
+    /// The tank + weapon that fired this shell ([`ShotSource`]), or `None` for trigger sources with
+    /// no tank (the sandbox's free-fly camera). Ballistics ignores it — `on_fire_shell` just spawns
+    /// the shell — but the net server's `FireShell` observer reads it to broadcast the cosmetic
+    /// tracer AND the firing weapon to the OTHER clients (`net::server`, the "FireEvent" seam): a
+    /// shot whose source is known is attributed to the right replicated tank and weapon slot; `None`
+    /// shots (sandbox) simply never broadcast. Only `net::server` reads this, so it is dead code in a
+    /// build without the `net` feature (SP / sandbox) — allow it there rather than drop a field the
+    /// wire seam depends on.
     #[cfg_attr(not(feature = "net"), allow(dead_code))]
-    pub shooter: Option<Entity>,
+    pub shooter: Option<ShotSource>,
 }
 
 /// A shell in flight. Kinematic — integrated by hand, no physics engine.

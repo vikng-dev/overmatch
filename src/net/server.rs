@@ -479,7 +479,7 @@ fn broadcast_fire(
     mut sender: ServerMultiMessageSender,
 ) {
     // Only tank-attributed shots broadcast; a `None` shooter (the sandbox) has no tank to name.
-    let Some(tank) = fire.shooter else {
+    let Some(source) = fire.shooter else {
         return;
     };
     // No `Server` collection yet (no client has linked) — nothing to send to; drop the tracer.
@@ -493,9 +493,12 @@ fn broadcast_fire(
         speed: fire.speed,
         caliber: fire.caliber,
         mass: fire.mass,
-        shooter: tank,
+        shooter: source.tank,
+        // Which weapon fired — the receiver derives THIS shot's barrel recoil from its own local
+        // spec keyed by this slot. `u8` is ample; slot values are single digits.
+        weapon: source.weapon as u8,
     };
-    let target = match controlled.get(tank) {
+    let target = match controlled.get(source.tank) {
         // Player tank: exclude the owner (they already flew their own local shell).
         Ok(controlled_by) => match remotes.get(controlled_by.owner) {
             Ok(remote) => NetworkTarget::AllExceptSingle(remote.0),

@@ -29,8 +29,11 @@ use super::protocol::{FireEvent, NetTank};
 use super::{client_smoothing_plugin, diagnostics, harness, open_gameplay_gate, physics, rig};
 use crate::ballistics::FireShell;
 use crate::command::TankCommand;
-use crate::state::AppState;
-use crate::tank::{Controlled as GameControlled, PendingTankAssets, load_tank_assets};
+use crate::state::{AppState, GameplaySet};
+use crate::tank::{
+    Controlled as GameControlled, Muzzle, PendingTankAssets, TankRoot, TankSim, Weapon,
+    WeaponIndex, load_tank_assets,
+};
 use crate::{NetClientPlugin, SimPlugin};
 
 const SERVER_PORT: u16 = 5888;
@@ -346,6 +349,29 @@ pub fn run() {
                 diagnostics::log_sim_evidence,
             ),
         );
+    // Remote-barrel recoil (the "derive the consequence" half of the opponent-fire seam). Split
+    // across two clocks ON PURPOSE — see the verification finding in `receive_fire_events`:
+    //   - `receive_fire_events` (Update, above) DRAINS the receiver at render rate and captures each
+    //     shot's CAUSE (shooter + weapon slot) into `PendingRecoilKicks`. It must stay render-rate:
+    //     lightyear clears an undrained `MessageReceiver` in `Last` EVERY frame, so a drain on the
+    //     fixed clock would silently lose every `FireEvent` that arrives on a 0-fixed-tick frame
+    //     (the majority of frames whenever render rate exceeds the 64 Hz tick, and ~all of them in
+    //     the headless harness) — a systematic client-side drop, not the network loss the channel is
+    //     built to tolerate.
+    //   - `apply_pending_recoil_kicks` (here, FixedUpdate) DERIVES the spring kick from this client's
+    //     OWN local spec and writes it into `TankSim` on the sim clock, `.before(GameplaySet)` so
+    //     `shooting::apply_recoil` (in `GameplaySet`) springs it the same tick. `TankSim` is
+    //     fixed-clock sim truth; writing it from Update would be a render→sim leak (non-deterministic
+    //     across 0/1/2-tick frames). Gated `not(is_in_rollback)` like `feed_action_state`: a rollback
+    //     replays `FixedMain` N times, and re-applying a queued one-shot kick per replayed tick would
+    //     multiply it — the queue is drained exactly once, on a real tick.
+    app.init_resource::<PendingRecoilKicks>();
+    app.add_systems(
+        FixedUpdate,
+        apply_pending_recoil_kicks
+            .before(GameplaySet)
+            .run_if(not(is_in_rollback)),
+    );
     // Ownership trace (opt-in via `OVERMATCH_OWNERSHIP_TRACE`; KEPT — useful): once per second, log
     // every `NetTank`'s ownership markers, so a two-client loopback run can confirm that each client's
     // OWN tank is the sole carrier of `Controlled`/`InputMarker`/`Predicted` and every opponent is
@@ -480,20 +506,43 @@ fn log_tank_ownership(
     }
 }
 
-/// Drain the server's cosmetic `FireEvent`s (`net::protocol::FireEvent`) and re-raise each as a
-/// local `FireShell` — the CLIENT half of the opponent-fire seam. A remote (interpolated) tank runs
-/// no local `fire`, so this is how its shots become visible: the re-raised `FireShell` flies through
-/// the same `integrate_projectiles`, which already gates damage/hit-impulse off under `ClientReplica`
-/// (deposit=false), so the resulting shell is cosmetic BY CONSTRUCTION — no new gating here.
+/// Barrel recoil kicks awaiting the sim clock: `(shooter root, weapon slot)` per opponent shot,
+/// captured at render rate by [`receive_fire_events`] and consumed on the fixed clock by
+/// [`apply_pending_recoil_kicks`]. The queue is the seam between the render-rate message drain (which
+/// must stay render-rate — lightyear clears an undrained receiver every frame in `Last`) and the
+/// fixed-clock `TankSim` write (which must be on the sim clock — see [`apply_pending_recoil_kicks`]).
+#[derive(Resource, Default)]
+struct PendingRecoilKicks(Vec<(Entity, usize)>);
+
+/// Drain the server's cosmetic `FireEvent`s (`net::protocol::FireEvent`) and, for each: re-raise a
+/// local `FireShell` (the visible tracer) AND enqueue the shot's recoil CAUSE onto
+/// [`PendingRecoilKicks`] — the CLIENT half of the opponent-fire seam. A remote (interpolated) tank
+/// runs no local `fire`, so this is how its shots become visible AND how its barrel kicks: the
+/// re-raised `FireShell` flies through the same `integrate_projectiles` (already damage/hit-gated off
+/// under `ClientReplica`, so the shell is cosmetic BY CONSTRUCTION), and the enqueued
+/// `(shooter, slot)` lets `apply_pending_recoil_kicks` derive the spring kick from this client's own
+/// local spec on the sim clock.
 ///
 /// `MessageReceiver<FireEvent>` is a required component of the `Client` (the `ServerToClient`
-/// direction registered in `net::protocol`), so it rides the client link entity. `shooter: None`:
-/// the client never re-broadcasts, and only the server owns attribution (the wire `shooter` is
-/// entity-mapped but unused for now — see `FireEvent`). A `FireEvent` whose direction fails the
-/// `Dir3` guard is skipped (hold the tracer rather than spawn a NaN shell), mirroring `fire`'s bore
-/// guard.
+/// direction registered in `net::protocol`), so it rides the client link entity. `shooter: None` on
+/// the re-raised `FireShell`: the client never re-broadcasts (only the server owns attribution).
+/// A `FireEvent` whose direction fails the `Dir3` guard is skipped entirely (no tracer, no kick),
+/// mirroring `fire`'s bore guard.
+///
+/// **Why this stays in `Update` (render rate), NOT the fixed clock.** Verified against vendored
+/// `lightyear_messages` 0.28: `MessageReceiver<M>.recv` is a plain `Vec` that `receive()` drains, and
+/// the plugin schedules a `clear` system in `Last` every frame (`MessagePlugin`, plugin.rs) that
+/// empties any receiver NOT drained that frame — messages are received in `PreUpdate`
+/// (`MessageSystems::Receive`) and live for exactly one frame. `RunFixedMainLoop` (hence `FixedUpdate`)
+/// runs BEFORE `Update`/`Last` and executes 0..N times per frame, so draining from a fixed schedule
+/// would drop every `FireEvent` arriving on a 0-tick frame — common above 64 Hz render, near-total in
+/// the headless `2 ms` runner. Draining here, in `Update` (always once per frame, before `Last`),
+/// loses none; only the `TankSim` write is deferred to the sim clock. `Update` is also outside every
+/// rollback replay (replays run inside `RunFixedMainLoop`), so the drain and the cosmetic-shell spawn
+/// can't be re-run by a rollback — preserving today's render-rate shell-spawn timing exactly.
 fn receive_fire_events(
     mut receivers: Query<&mut MessageReceiver<FireEvent>>,
+    mut pending: ResMut<PendingRecoilKicks>,
     mut commands: Commands,
 ) {
     for mut receiver in &mut receivers {
@@ -509,6 +558,53 @@ fn receive_fire_events(
                 mass: event.mass,
                 shooter: None,
             });
+            // Capture the CAUSE (which tank's which weapon fired); the fixed-clock applier below
+            // derives the spring kick from this client's own local spec. `event.shooter` is already
+            // entity-mapped to the local replica; `event.weapon` is bounds-checked at apply time.
+            pending.0.push((event.shooter, event.weapon as usize));
+        }
+    }
+}
+
+/// Kick each opponent shot's barrel recoil spring, on the SIM clock — the "derive the consequence"
+/// half of remote recoil. Drains [`PendingRecoilKicks`] (captured at render rate by
+/// [`receive_fire_events`]) and, for each `(shooter, slot)`, looks up the firing weapon's
+/// `Weapon.recoil.kick` on THIS client's own local rig and adds it to the shooter's
+/// `TankSim::weapons[slot].recoil_velocity`. Nothing about the impulse rides the wire — only which
+/// weapon fired; each machine derives the identical kick from its shared RON spec (the muzzle carries
+/// the `Weapon` config, keyed by `WeaponIndex`). `shooting::apply_recoil` then springs the barrel
+/// back home from this velocity exactly as it does for a locally-fired shot.
+///
+/// Scheduled `FixedUpdate`, `.before(GameplaySet)` so `apply_recoil` (in the set) sees the kick the
+/// same tick, and gated `not(is_in_rollback)`: `TankSim` is fixed-clock sim truth (a render-rate
+/// write would be a render→sim leak, non-deterministic across 0/1/2-tick frames), and a rollback
+/// replays `FixedMain` N times — draining the queue only on a real tick applies each one-shot kick
+/// exactly once. The shooter is always an interpolated remote (a player's own `FireEvent` is excluded
+/// by `broadcast_fire`; the bot is owned by no one), whose `TankSim` is not rollback-checked, so this
+/// never fights `local_rollback::<TankSim>()` on the predicted own tank.
+///
+/// Skips silently on a missing tank, a slot with no matching muzzle, an out-of-range slot, or a
+/// recoil-less weapon (a coax) — a replica may not have finished spawning its rig, exactly as the
+/// `FireEvent` direction guard tolerates a bad bore.
+fn apply_pending_recoil_kicks(
+    mut pending: ResMut<PendingRecoilKicks>,
+    muzzles: Query<(&WeaponIndex, &Weapon, &TankRoot), With<Muzzle>>,
+    mut sims: Query<&mut TankSim>,
+) {
+    for (shooter, slot) in pending.0.drain(..) {
+        // Derive the kick from THIS machine's local RON spec, keyed by the firing weapon's slot.
+        let Some(kick) = muzzles
+            .iter()
+            .find(|(index, _, root)| root.0 == shooter && index.0 == slot)
+            .and_then(|(_, weapon, _)| weapon.recoil.as_ref())
+            .map(|recoil| recoil.kick)
+        else {
+            continue; // no matching muzzle / recoil-less weapon / rig not spawned yet — skip
+        };
+        if let Ok(mut sim) = sims.get_mut(shooter)
+            && let Some(state) = sim.weapons.get_mut(slot)
+        {
+            state.recoil_velocity += kick;
         }
     }
 }
@@ -594,4 +690,123 @@ fn grab_cursor(window: Single<(&mut Window, &mut CursorOptions), With<PrimaryWin
     window.set_cursor_position(Some(center));
     cursor.grab_mode = CursorGrabMode::Locked;
     cursor.visible = false;
+}
+
+/// `apply_pending_recoil_kicks` derives a remote shot's barrel recoil from the LOCAL spec — these
+/// exercise that derivation directly against a minimal rig. An external integration test can't reach
+/// the sim types (`crate::tank` is a private module — `TankSim`/`Weapon`/`WeaponIndex` are not
+/// externally nameable), so the honest test lives here in-crate, over real ECS state.
+#[cfg(test)]
+mod tests {
+    use bevy::ecs::system::RunSystemOnce;
+
+    use super::*;
+    use crate::spec::{RecoilSpec, Trigger};
+    use crate::tank::WeaponState;
+
+    /// A one-weapon `Weapon` config carrying `recoil` (or not) — the only fields the recoil derive
+    /// reads; the rest are filled to satisfy the struct.
+    fn weapon(recoil: Option<RecoilSpec>) -> Weapon {
+        Weapon {
+            name: "MainGun".into(),
+            speed: 800.0,
+            caliber: 0.088,
+            mass: 10.2,
+            reload: 8.0,
+            recoil,
+            barrel: None,
+            fire: Vec::new(),
+            load: Vec::new(),
+            trigger: Trigger::Primary,
+        }
+    }
+
+    /// Spawn a tank root with an `n`-slot `TankSim` plus a muzzle at `slot` whose `Weapon` carries
+    /// `recoil`; returns the root entity.
+    fn spawn_rig(
+        world: &mut World,
+        slots: usize,
+        slot: usize,
+        recoil: Option<RecoilSpec>,
+    ) -> Entity {
+        let root = world
+            .spawn(TankSim {
+                weapons: vec![WeaponState::default(); slots],
+                ..default()
+            })
+            .id();
+        world.spawn((Muzzle, WeaponIndex(slot), TankRoot(root), weapon(recoil)));
+        root
+    }
+
+    /// A `FireEvent` for a named slot raises exactly that slot's `recoil_velocity` by the LOCAL
+    /// spec's `kick`, and leaves other slots untouched.
+    #[test]
+    fn kick_lands_on_named_slot() {
+        let mut world = World::new();
+        let kick = 3.5;
+        let root = spawn_rig(
+            &mut world,
+            2,
+            1,
+            Some(RecoilSpec {
+                kick,
+                stiffness: 100.0,
+                damping: 5.0,
+            }),
+        );
+        world.insert_resource(PendingRecoilKicks(vec![(root, 1)]));
+
+        world.run_system_once(apply_pending_recoil_kicks).unwrap();
+
+        let sim = world.get::<TankSim>(root).unwrap();
+        assert_eq!(sim.weapons[1].recoil_velocity, kick, "named slot kicks");
+        assert_eq!(
+            sim.weapons[0].recoil_velocity, 0.0,
+            "an unfired slot stays at rest"
+        );
+    }
+
+    /// A malformed slot off the wire — out of range, or naming no muzzle on this rig — is a silent
+    /// no-op: no panic, no out-of-bounds index, no spurious kick on any slot.
+    #[test]
+    fn bad_slot_is_noop() {
+        let mut world = World::new();
+        let root = spawn_rig(
+            &mut world,
+            1,
+            0,
+            Some(RecoilSpec {
+                kick: 3.5,
+                stiffness: 100.0,
+                damping: 5.0,
+            }),
+        );
+        // Slot 9 exists on neither the muzzle set nor the 1-slot `TankSim`.
+        world.insert_resource(PendingRecoilKicks(vec![(root, 9)]));
+
+        world.run_system_once(apply_pending_recoil_kicks).unwrap();
+
+        let sim = world.get::<TankSim>(root).unwrap();
+        assert_eq!(
+            sim.weapons[0].recoil_velocity, 0.0,
+            "a bad slot kicks nothing"
+        );
+    }
+
+    /// A recoil-less weapon (a coax: `recoil: None`) contributes no kick even when correctly named.
+    #[test]
+    fn recoilless_weapon_is_noop() {
+        let mut world = World::new();
+        let root = spawn_rig(&mut world, 1, 0, None);
+        world.insert_resource(PendingRecoilKicks(vec![(root, 0)]));
+
+        world.run_system_once(apply_pending_recoil_kicks).unwrap();
+
+        let sim = world.get::<TankSim>(root).unwrap();
+        assert_eq!(
+            sim.weapons[0].recoil_velocity, 0.0,
+            "no recoil spec, no kick"
+        );
+    }
 }

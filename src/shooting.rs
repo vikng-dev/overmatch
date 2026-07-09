@@ -6,7 +6,7 @@
 use avian3d::prelude::{Forces, Position, Rotation, WriteRigidBodyForces};
 use bevy::prelude::*;
 
-use crate::ballistics::FireShell;
+use crate::ballistics::{FireShell, ShotSource};
 use crate::command::{ConsumeCommandEdges, TankCommand};
 use crate::damage::{TankVolumes, VolumeFacets, requirement_met};
 use crate::spec::Trigger;
@@ -127,9 +127,13 @@ fn fire(
             speed: weapon.speed,
             caliber: weapon.caliber,
             mass: weapon.mass,
-            // This shell belongs to a tank: name its root so the net server can broadcast the
-            // cosmetic tracer to every OTHER client (`net::server`'s FireShell observer).
-            shooter: Some(root.0),
+            // This shell belongs to a tank: name its root AND the firing weapon slot so the net
+            // server can broadcast the cosmetic tracer and the barrel-recoil cause to every OTHER
+            // client (`net::server`'s FireShell observer), which each derive the kick locally.
+            shooter: Some(ShotSource {
+                tank: root.0,
+                weapon: slot.0,
+            }),
         });
         // Kick the barrel back (root-resident recoil state); apply_recoil springs it home.
         if let (Some(_), Some(recoil)) = (weapon.barrel, weapon.recoil.as_ref())
