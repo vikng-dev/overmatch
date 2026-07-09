@@ -476,6 +476,12 @@ fn broadcast_fire(
     controlled: Query<&ControlledBy>,
     remotes: Query<&RemoteId>,
     servers: Query<&Server>,
+    // The server's simulation tick. `shooting::fire` raises `FireShell` inside `FixedUpdate`, in
+    // `GameplaySet`, AFTER `LocalTimeline` is incremented for this tick (`increment_local_tick` runs
+    // in `FixedFirst`); nothing advances it again until the next frame's `FixedFirst`. So this
+    // observer — even deferred to the command flush — reads the SAME tick the firing sim step ran on,
+    // which is exactly the tick the muzzle pose in `fire.origin` was computed for.
+    timeline: Res<LocalTimeline>,
     mut sender: ServerMultiMessageSender,
 ) {
     // Only tank-attributed shots broadcast; a `None` shooter (the sandbox) has no tank to name.
@@ -508,6 +514,9 @@ fn broadcast_fire(
         // Which weapon fired — the receiver derives THIS shot's barrel recoil from its own local
         // spec keyed by this slot.
         weapon,
+        // The tick this shot fired on, so the receiver can fast-forward the tracer to where the
+        // shell already is in its confirmed timeline (see `FireEvent::fire_tick`).
+        fire_tick: timeline.tick(),
     };
     let target = match controlled.get(source.tank) {
         // Player tank: exclude the owner (they already flew their own local shell).

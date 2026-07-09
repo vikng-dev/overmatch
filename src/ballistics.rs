@@ -57,6 +57,56 @@ pub fn freeflight_step(velocity: Vec3, drag_k: f32, dt: f32) -> Vec3 {
     (v / speed) * (speed / (1.0 + drag_k * speed * dt))
 }
 
+/// One free-flight ADVANCE of a shell over `dt`: step the velocity through the shared drag/gravity
+/// kernel ([`freeflight_step`]), then step position by that new velocity (`p ← p + v·dt`). Returns
+/// `(new position, new velocity)`.
+///
+/// This is THE single definition of "how a shell advances one tick in open air." The live march
+/// ([`integrate_projectiles`]) opens every tick with it (its ray-march then refines the position only
+/// if the segment hits something), and the FireEvent catch-up ([`fast_forward_shell`]) folds it once
+/// per skipped tick — so a caught-up shell and a natively-integrated one advance by ONE
+/// implementation, not two that happen to agree today (ADR-0016). Collision-free by construction: the
+/// caller owns the raycast (the live march casts each step; the catch-up is cosmetic and deliberately
+/// does not — see [`fast_forward_shell`]).
+pub(crate) fn advance_shell(position: Vec3, velocity: Vec3, drag_k: f32, dt: f32) -> (Vec3, Vec3) {
+    let velocity = freeflight_step(velocity, drag_k, dt);
+    (position + velocity * dt, velocity)
+}
+
+/// Fast-forward a just-fired shell `ticks` free-flight steps from its muzzle — the net FireEvent
+/// catch-up (`net::client::receive_fire_events`). Returns the caught-up `(position, velocity)` and the
+/// arc it traced (origin first, one point per stepped tick) so the [`ShellPath`] trail starts at the
+/// muzzle rather than 64 m behind the shell.
+///
+/// One per-tick advance — the shared [`advance_shell`] the live march steps — so the catch-up cannot
+/// drift from natively integrating the same `ticks`. **Ballistic only: no per-step raycast.** The
+/// catch-up is cosmetic (a client shell never deposits HP or impulse — the `ClientReplica` gate in
+/// [`integrate_projectiles`]), so a raycast here would resolve nothing; its only effect would be to
+/// stop the tracer at geometry. That matters solely for a shell that catches up THROUGH a near surface
+/// (a close-range late-arriving `FireEvent`), which then clips for at most one frame before the live
+/// march — which DOES raycast — resolves it on the next tick. Reusing the full ray-march would remove
+/// that brief clip at the cost of threading `SpatialQuery` + the volume/health/spall machinery into
+/// the spawn path for a purely cosmetic shell; not worth the coupling. In the common case the catch-up
+/// is 0–few ticks (the `FireEvent` and the confirmed frame arrive together — see the timeline note on
+/// `net::protocol::FireEvent::fire_tick`), so this is usually a handful of metres or a no-op.
+pub(crate) fn fast_forward_shell(
+    origin: Vec3,
+    velocity: Vec3,
+    drag_k: f32,
+    dt: f32,
+    ticks: u32,
+) -> (Vec3, Vec3, Vec<Vec3>) {
+    let mut pos = origin;
+    let mut vel = velocity;
+    let mut points = Vec::with_capacity(ticks as usize + 1);
+    points.push(pos);
+    for _ in 0..ticks {
+        (pos, vel) = advance_shell(pos, vel, drag_k, dt);
+        points.push(pos);
+    }
+    (pos, vel, points)
+}
+
 /// Penetration capability: `pen = K · mass^Mₑ · speed^N` (reference-mm — the DeMarre shape, design
 /// doc §3). **Mass is the primary driver** (sectional density / kinetic energy), speed the secondary;
 /// caliber is deliberately *not* here — it drives overmatch and spall hole-size, not raw penetration.
@@ -286,6 +336,12 @@ pub struct FireShell {
     /// wire seam depends on.
     #[cfg_attr(not(feature = "net"), allow(dead_code))]
     pub shooter: Option<ShotSource>,
+    /// How many free-flight ticks to fast-forward this shell at spawn ([`fast_forward_shell`]) — the
+    /// net FireEvent catch-up. `0` for every locally-fired shell (the player's gun, the sandbox
+    /// camera, and the shooter's own predicted shell): those spawn at the muzzle and fly from there,
+    /// so the field is a no-op off the net path. Only `net::client::receive_fire_events` sets it > 0,
+    /// to place a remote shot where it already is in the server's confirmed timeline.
+    pub catch_up_ticks: u32,
 }
 
 /// A shell in flight. Kinematic — integrated by hand, no physics engine.
@@ -458,26 +514,49 @@ fn setup_assets(
 }
 
 /// Spawn a shell from a `FireShell`: at the origin, oriented down the bore, with velocity along the
-/// bore at the muzzle speed.
-fn on_fire_shell(fire: On<FireShell>, assets: Res<ProjectileAssets>, mut commands: Commands) {
+/// bore at the muzzle speed — then, for a net catch-up shell (`fire.catch_up_ticks > 0`), fast-forward
+/// it to where it already is in the server's confirmed timeline. `catch_up_ticks` is `0` for every
+/// locally-fired shell, so the fast-forward is a no-op there and the shell spawns at the muzzle exactly
+/// as before (local shells are unaffected).
+fn on_fire_shell(
+    fire: On<FireShell>,
+    assets: Res<ProjectileAssets>,
+    // The FIXED timestep, NOT `Res<Time>`: this observer can fire from `Update` (the net client
+    // re-raises `FireShell` at render rate), where `Res<Time>` is `Time<Virtual>` (a render-frame dt).
+    // The catch-up counts fixed SERVER ticks, so it must step the fixed timestep the live march also
+    // uses in `Real` mode. Unused when `catch_up_ticks == 0` (the loop never runs).
+    fixed_time: Res<Time<Fixed>>,
+    mut commands: Commands,
+) {
+    let drag = drag_k(fire.caliber, fire.mass);
+    let dt = fixed_time.timestep().as_secs_f32();
+    let (position, velocity, points) = fast_forward_shell(
+        fire.origin,
+        fire.direction * fire.speed,
+        drag,
+        dt,
+        fire.catch_up_ticks,
+    );
+    // Travel direction after any catch-up (gravity/drag bend it); fall back to the bore for a
+    // degenerate zero velocity so a spent-to-rest catch-up never trips `Dir3`.
+    let travel = Dir3::new(velocity).unwrap_or(fire.direction);
+    let speed = velocity.length();
     commands.spawn((
         Projectile {
-            velocity: fire.direction * fire.speed,
+            velocity,
             caliber: fire.caliber,
             mass: fire.mass,
-            drag_k: drag_k(fire.caliber, fire.mass),
+            drag_k: drag,
         },
-        ShellPath {
-            points: vec![fire.origin],
-        },
+        ShellPath { points },
         PenetrationMarks::default(),
         SpallMarks::default(),
         ShellReadout {
-            speed: fire.speed,
-            capability: capability(fire.mass, fire.speed),
+            speed,
+            capability: capability(fire.mass, speed),
         },
         WorldAssetRoot(assets.scene.clone()),
-        Transform::from_translation(fire.origin).looking_to(fire.direction, Vec3::Y),
+        Transform::from_translation(position).looking_to(travel, Vec3::Y),
     ));
 }
 
@@ -544,11 +623,18 @@ fn integrate_projectiles(
     for (entity, mut transform, mut projectile, mut path, mut marks, mut readout, mut spall) in
         &mut projectiles
     {
-        // Advance free-flight velocity (gravity + drag) through the shared flight kernel, so the live
-        // shell bleeds speed identically to the fire-control table that aimed it. The march below may
-        // *bend* the direction (normalization / ricochet), so we carry direction + speed and rebuild
-        // the velocity at the end rather than assuming a straight segment.
-        let stepped = freeflight_step(projectile.velocity, projectile.drag_k, dt);
+        // Advance free-flight (gravity + drag on the velocity, then the position step) through the
+        // shared per-tick kernel — the SAME [`advance_shell`] the FireEvent catch-up folds, so a
+        // caught-up shell and a natively-flown one can't diverge. `freeflight_pos` is this tick's
+        // free-flight landing point; the ray-march below overrides it only where the segment hits
+        // something. The march may *bend* the direction (normalization / ricochet), so we carry
+        // direction + speed and rebuild the velocity at the end rather than assuming a straight step.
+        let (freeflight_pos, stepped) = advance_shell(
+            transform.translation,
+            projectile.velocity,
+            projectile.drag_k,
+            dt,
+        );
         let Ok(mut dir) = Dir3::new(stepped) else {
             continue;
         };
@@ -556,6 +642,10 @@ fn integrate_projectiles(
         let mut pos = transform.translation;
         let mut remaining = speed * dt;
         let mut stopped = false;
+        // Whether the march has bent the shell off its original free-flight segment. Until it does,
+        // an open-air fly-out lands exactly on `freeflight_pos` (the shared advance); after a bend the
+        // leftover budget flies along the new direction instead.
+        let mut bent = false;
 
         // Ray-march the step: free flight until a surface, then resolve it — terrain stops the
         // shell; a ballistic volume ricochets (too oblique) or is crossed (normalize → spend cost →
@@ -563,7 +653,14 @@ fn integrate_projectiles(
         while remaining > EPS {
             let origin = pos + dir * EPS;
             let Some(hit) = spatial.cast_ray(origin, dir, remaining, true, &world) else {
-                pos += dir * remaining; // open air — fly out the rest of the step
+                // Open air — fly out the rest of the step. On the original (unbent) segment this is
+                // exactly the shared `advance_shell` landing point; a `continue` past this point only
+                // ever follows a bend, so `bent` is the exact discriminant.
+                pos = if bent {
+                    pos + dir * remaining
+                } else {
+                    freeflight_pos
+                };
                 break;
             };
             let entry = origin + dir * hit.distance;
@@ -629,6 +726,7 @@ fn integrate_projectiles(
                     hp.current = (hp.current - shock).max(0.0);
                 }
                 dir = reflect(dir, normal);
+                bent = true; // off the original free-flight segment (see the open-air break)
                 speed *= RICOCHET_BLEED;
                 if let Some(body) = body {
                     commands.trigger(HitImpulse {
@@ -648,6 +746,7 @@ fn integrate_projectiles(
             // path it cuts and nudges the exit). Overmatch does NOT bend it further — the round drives
             // through in roughly the same direction; overmatch instead cancels the *slope cost* below.
             dir = bend_toward(dir, -normal, NORMALIZATION * incidence);
+            bent = true; // off the original free-flight segment (see the open-air break)
             let span = spatial
                 .cast_ray_predicate(entry + dir * EPS, dir, PROBE, false, &armor, &|e| {
                     e == hit.entity
@@ -842,5 +941,68 @@ mod tests {
         let v1 = freeflight_step(v0, drag_k(0.088, 10.2), 0.01);
         assert!(v1.length() < v0.length(), "drag must reduce speed");
         assert!(v1.y < 0.0, "gravity must pull the shell down");
+    }
+
+    /// `advance_shell` IS the live march's open-air step: new velocity is the shared `freeflight_step`,
+    /// and the position advances by that new velocity over `dt` (`p += v·dt`) — the exact `pos += dir *
+    /// remaining` the ray-march does when a step hits nothing. Pinning it keeps the catch-up and the
+    /// live march provably ONE implementation (ADR-0016) even if the march is later refactored.
+    #[test]
+    fn advance_shell_is_the_freeflight_step() {
+        let pos = Vec3::new(2.0, 30.0, 5.0);
+        let v = Vec3::new(500.0, -10.0, 40.0);
+        let k = drag_k(0.088, 10.2);
+        let dt = 1.0 / 64.0;
+        let (p, nv) = advance_shell(pos, v, k, dt);
+        let expected_v = freeflight_step(v, k, dt);
+        assert_eq!(nv, expected_v, "velocity is the shared free-flight kernel");
+        assert_eq!(
+            p,
+            pos + expected_v * dt,
+            "position steps by the new velocity"
+        );
+    }
+
+    /// The "one integrator" property (the test that matters): fast-forwarding a shell N ticks lands it
+    /// in the SAME state as N single-tick advances. `fast_forward_shell` folds the shared
+    /// `advance_shell` — the exact per-tick kernel the live march steps in open air — so a caught-up
+    /// shell can't diverge from a natively integrated one. Guards against re-deriving the catch-up as a
+    /// closed-form trajectory.
+    #[test]
+    fn fast_forward_matches_single_tick_advances() {
+        let origin = Vec3::new(1.0, 50.0, -3.0);
+        let v0 = Vec3::new(600.0, 20.0, 0.0);
+        let k = drag_k(0.088, 10.2);
+        let dt = 1.0 / 64.0;
+        let n = 7;
+
+        // N single-tick advances by hand.
+        let (mut pos, mut vel) = (origin, v0);
+        for _ in 0..n {
+            (pos, vel) = advance_shell(pos, vel, k, dt);
+        }
+
+        let (ff_pos, ff_vel, path) = fast_forward_shell(origin, v0, k, dt, n);
+        assert_eq!(ff_pos, pos, "fast-forward position == N single advances");
+        assert_eq!(ff_vel, vel, "fast-forward velocity == N single advances");
+        // One point per stepped tick plus the origin, and the trail starts AT the muzzle (requirement:
+        // the tracer trail must not start 64 m behind the shell).
+        assert_eq!(path.len(), n as usize + 1);
+        assert_eq!(path[0], origin, "the trail starts at the muzzle");
+        assert_eq!(*path.last().unwrap(), ff_pos, "the trail ends at the shell");
+    }
+
+    /// Zero catch-up is an exact no-op: the shell stays at the muzzle with its launch velocity and a
+    /// one-point trail — byte-identical to a locally fired shell (SP / sandbox / own predicted), which
+    /// always passes `catch_up_ticks: 0`.
+    #[test]
+    fn zero_catch_up_is_noop() {
+        let origin = Vec3::new(0.0, 2.0, 0.0);
+        let v0 = Vec3::new(800.0, 0.0, 0.0);
+        let k = drag_k(0.088, 10.2);
+        let (pos, vel, path) = fast_forward_shell(origin, v0, k, 1.0 / 64.0, 0);
+        assert_eq!(pos, origin, "no catch-up leaves the shell at the muzzle");
+        assert_eq!(vel, v0, "no catch-up leaves the launch velocity");
+        assert_eq!(path, vec![origin], "no catch-up traces only the muzzle");
     }
 }

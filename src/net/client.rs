@@ -536,9 +536,17 @@ fn receive_fire_events(
     // predict-everyone, every predicted tank). They run `shooting::fire` and kick themselves, so a
     // `FireEvent` naming one of them is our own shot echoed back and must be ignored — see the doc.
     locally_fired: Query<(), With<ActionState<TankCommand>>>,
+    // Newest fully-confirmed server tick — the frame the shell catch-up measures against (see
+    // `net::protocol::FireEvent::fire_tick`). Optional and defaulted to "no catch-up" when absent: an
+    // SP-composition net build has no such resource, and a just-joined client has no confirmed tick
+    // yet — accessed optionally exactly as `trace.rs` does, rather than failing system-param validation.
+    checkpoints: Option<Res<ReplicationCheckpointMap>>,
     mut pending: ResMut<PendingRecoilKicks>,
     mut commands: Commands,
 ) {
+    let confirmed = checkpoints
+        .as_deref()
+        .and_then(ReplicationCheckpointMap::last_confirmed_tick);
     for mut receiver in &mut receivers {
         for event in receiver.receive() {
             // `event.shooter` is already entity-mapped to the local replica. If that tank fires
@@ -549,6 +557,18 @@ fn receive_fire_events(
             let Ok(direction) = Dir3::new(event.direction) else {
                 continue; // corrupt bore off the wire — hold the tracer rather than fire NaN
             };
+            // How far along its flight the shell already is, in the CONFIRMED server frame. With no
+            // confirmed tick yet (early join / SP-net build) there is nothing to measure against, so
+            // spawn at the muzzle and fly from there (catch-up 0). An absurd / stale / wrapped fire
+            // tick rejects the whole event — no tracer, no recoil — the same "reject off the wire"
+            // discipline as the bore guard above.
+            let catch_up_ticks = match confirmed {
+                Some(now) => match fire_catch_up_ticks(event.fire_tick, now) {
+                    Some(ticks) => ticks,
+                    None => continue,
+                },
+                None => 0,
+            };
             commands.trigger(FireShell {
                 origin: event.origin,
                 direction,
@@ -556,6 +576,7 @@ fn receive_fire_events(
                 caliber: event.caliber,
                 mass: event.mass,
                 shooter: None,
+                catch_up_ticks,
             });
             // Capture the CAUSE (which tank's which weapon fired); the fixed-clock applier below
             // derives the spring kick from this client's own local spec. `event.shooter` is already
@@ -563,6 +584,40 @@ fn receive_fire_events(
             pending.0.push((event.shooter, event.weapon as usize));
         }
     }
+}
+
+/// The largest catch-up a `FireEvent` may request. A shot older than the deepest state window we would
+/// ever reconcile is stale — its server shell has long since resolved on the authority, so a fresh
+/// cosmetic tracer for it is meaningless, and fast-forwarding it would burn that many ballistic steps
+/// for nothing. 100 ticks matches `RollbackPolicy`'s default `max_rollback_ticks` (the deepest replay
+/// this client runs — see the `PredictionManager` in [`run`]) and is ≈ 1.56 s / ~1.25 km of pre-drag
+/// flight at 800 m/s. A value this large is only ever reached by a corrupt/wrapped tick off the wire or
+/// a `FireEvent` delayed far past any cosmetic use — either way, skip rather than loop.
+const CATCH_UP_MAX_TICKS: u32 = 100;
+
+/// Ticks to fast-forward an opponent shell so it sits where the server's shell is IN THE CONFIRMED
+/// FRAME (see `net::protocol::FireEvent::fire_tick` for why the confirmed tick, not the predicted or
+/// server-now estimate). `Some(n)` fast-forwards `n` ticks (`n == 0` = spawn at the muzzle and fly
+/// normally); `None` REJECTS the shot as absurd (the caller skips the tracer AND the recoil).
+///
+/// Wrap-safe by construction: `Tick` is a wrapping `u32` (`lightyear_core::tick`, via `wrapping_id!`)
+/// and implements `Sub<Tick>` returning the difference as an `i32` — lightyear's OWN tick difference
+/// (`(now as i64 − fire as i64) as i32`, bit-identical to its `wrapping_diff` helper and correct across
+/// the `u32::MAX` boundary), not a naive `u32` subtraction that would underflow when the fire tick is
+/// ahead of our confirmed present. (A `u32` tick never actually wraps in a session — ~777 days at
+/// 64 Hz — but the arithmetic is correct at the boundary regardless, which is what the wraparound test
+/// pins.)
+///   - elapsed < 0: the fire tick is at or ahead of our confirmed present (a fire tick a tick or two
+///     into our not-yet-confirmed future is normal) — don't rewind; spawn at the muzzle (`Some(0)`).
+///   - 0 ≤ elapsed ≤ [`CATCH_UP_MAX_TICKS`]: fast-forward that many ticks.
+///   - elapsed > [`CATCH_UP_MAX_TICKS`]: absurd / stale / wrapped nonsense — reject (`None`), no loop.
+fn fire_catch_up_ticks(fire: Tick, confirmed: Tick) -> Option<u32> {
+    let elapsed = confirmed - fire;
+    if elapsed < 0 {
+        return Some(0);
+    }
+    let elapsed = elapsed as u32;
+    (elapsed <= CATCH_UP_MAX_TICKS).then_some(elapsed)
 }
 
 /// Kick each opponent shot's barrel recoil spring, on the SIM clock — the "derive the consequence"
@@ -833,5 +888,50 @@ mod tests {
             sim.weapons[0].recoil_velocity, 0.0,
             "no recoil spec, no kick"
         );
+    }
+
+    /// A shot fired ON our confirmed present needs no catch-up: spawn at the muzzle, fly normally.
+    #[test]
+    fn fire_tick_equal_to_confirmed_is_zero_catch_up() {
+        assert_eq!(fire_catch_up_ticks(Tick(500), Tick(500)), Some(0));
+    }
+
+    /// A fire tick AHEAD of our confirmed present (its confirmed state hasn't landed yet — a tick or
+    /// two into our not-yet-confirmed future is normal) clamps to 0, never rewinds the shell.
+    #[test]
+    fn future_fire_tick_clamps_to_zero() {
+        assert_eq!(fire_catch_up_ticks(Tick(503), Tick(500)), Some(0));
+    }
+
+    /// A shot fired a few confirmed ticks ago fast-forwards by exactly that many ticks.
+    #[test]
+    fn elapsed_within_bound_fast_forwards() {
+        assert_eq!(fire_catch_up_ticks(Tick(500), Tick(505)), Some(5));
+        assert_eq!(
+            fire_catch_up_ticks(Tick(500), Tick(500 + CATCH_UP_MAX_TICKS)),
+            Some(CATCH_UP_MAX_TICKS),
+            "exactly at the bound still fast-forwards",
+        );
+    }
+
+    /// A fire tick far in the past — a stale/lost `FireEvent`, or corrupt/wrapped nonsense off the wire
+    /// — is REJECTED (no tracer, no loop over 10^6 steps), the same reject-off-the-wire discipline as
+    /// the bore guard.
+    #[test]
+    fn far_past_fire_tick_is_rejected() {
+        assert_eq!(
+            fire_catch_up_ticks(Tick(500), Tick(500 + CATCH_UP_MAX_TICKS + 1)),
+            None
+        );
+        assert_eq!(fire_catch_up_ticks(Tick(0), Tick(1_000_000)), None);
+    }
+
+    /// Tick arithmetic WRAPS: a fire tick just below `u32::MAX` with a confirmed tick a few ticks past
+    /// the wrap yields the small true elapsed (6 here), NOT a ~4-billion-tick nonsense that would be
+    /// rejected or loop. `Tick`'s `Sub` (lightyear's own wrap-correct difference) makes this hold.
+    #[test]
+    fn wraparound_near_max_behaves() {
+        // MAX-2 → MAX-1 → MAX → 0 → 1 → 2 → 3 is 6 ticks across the wrap boundary.
+        assert_eq!(fire_catch_up_ticks(Tick(u32::MAX - 2), Tick(3)), Some(6));
     }
 }

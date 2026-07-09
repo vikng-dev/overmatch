@@ -159,6 +159,8 @@ fn fire(
                 tank: root.0,
                 weapon: slot.0,
             }),
+            // Locally fired: the shell spawns at the muzzle THIS tick — no net catch-up.
+            catch_up_ticks: 0,
         });
         // Kick the barrel back (root-resident recoil state); apply_recoil springs it home. The
         // shared `kick_recoil` owns the whole decision (barrel + recoil spec present, slot valid), so

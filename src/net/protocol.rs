@@ -110,6 +110,53 @@ pub struct FireEvent {
     /// can't resolve — the same "reject off the wire, never panic or index out of bounds" discipline
     /// [`direction`](Self::direction) uses.
     pub weapon: u8,
+    /// The server `Tick` the shot was fired on (`broadcast_fire` stamps the server's `LocalTimeline`).
+    /// Lets the receiver spawn the shell where it ALREADY IS rather than at the muzzle: without this,
+    /// the shell begins its flight the instant the message arrives, so a client's copy of an opponent's
+    /// round starts wherever the confirmed frame has advanced past the fire tick — the tracer would
+    /// trail its true position. `net::client::receive_fire_events` fast-forwards the shell by the ticks
+    /// elapsed since this one (`fast_forward_shell`).
+    ///
+    /// # Which timeline the receiver measures "elapsed" against — the crux
+    ///
+    /// The shell's [`origin`](Self::origin) is server truth at *this* tick. The client holds several
+    /// clocks that disagree about "now," and the choice decides where the tracer lands relative to the
+    /// server-authoritative hit:
+    ///
+    /// - **`LocalTimeline::tick()` (predicted present).** Runs `RTT/2 + jitter_margin + 1 +
+    ///   error_margin - input_delay` AHEAD of the server (verified: `lightyear_sync`
+    ///   `timeline/input.rs` `InputTimeline::sync_objective`). Measuring elapsed against it launches the
+    ///   shell ~1.5*RTT of flight ahead — it reaches the victim well BEFORE the replicated health drop.
+    ///   Rejected.
+    /// - **`RemoteTimeline::current_estimate` (the server's true *instantaneous* present ~ server_now).**
+    ///   Elapsed against it is ~ one-way latency — the "~64 m at 800 m/s / 80 ms" figure. This is where
+    ///   the server's shell is at the tick the server is simulating RIGHT NOW. But that tick is a FUTURE
+    ///   the client cannot confirm yet: the victim's health (server-authoritative, [`NetHealth`]) will
+    ///   not reflect it for another one-way latency. Placing the shell there makes it arrive at the
+    ///   victim ~one-way-latency EARLY — the round passes through before the HP drops. Rejected.
+    /// - **`ReplicationCheckpointMap::last_confirmed_tick()` (newest fully-confirmed server tick).
+    ///   CHOSEN.** The shell is integrated forward on the client at the fixed rate in lockstep with the
+    ///   confirmed frame advancing, and damage lands at confirmed ticks. Elapsed = `last_confirmed -
+    ///   fire_tick` places the tracer where the server's shell is IN THE CONFIRMED FRAME, so it reaches
+    ///   the victim exactly as the victim's replicated health drops — the one alignment consistent with
+    ///   the authoritative hit.
+    /// - **Interpolation timeline (`last_confirmed - InterpolationDelay`).** Would emerge from the
+    ///   interpolated *shooter's* rendered barrel, but then reach the victim `InterpolationDelay` LATE
+    ///   relative to the HP drop. This is the genuine tension the alignment cannot escape: the tracer
+    ///   can be consistent with the server's confirmed hit OR with the interpolated shooter's visible
+    ///   muzzle, not both. Because damage is server-authoritative, we pick the hit.
+    ///
+    /// **The offset is small, not ~64 m.** At receipt the `FireEvent` and the confirmed replication for
+    /// `fire_tick` arrive together (both sent at `fire_tick`, both delayed one-way latency), so
+    /// `last_confirmed ~= fire_tick` and elapsed ~= 0 — the common case is a no-op, spawning at the
+    /// muzzle exactly as today. Elapsed only grows when the (unreliable, unordered — see [`FireChannel`])
+    /// `FireEvent` arrives LATE relative to the confirmed frame, and advancing the shell by that much is
+    /// then correct: the server's shell really is that far along. The ~one-way-latency figure is the
+    /// distance to the REJECTED `RemoteTimeline` estimate, not to this one.
+    ///
+    /// NOT entity-mapped and NOT a `Dir3`-style guarded value: a raw tick is meaningless to remap, and
+    /// the receiver clamps/rejects an absurd value itself (`net::client::fire_catch_up_ticks`).
+    pub fire_tick: Tick,
 }
 
 impl MapEntities for FireEvent {

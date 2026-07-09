@@ -713,6 +713,8 @@ fn fire(
         // The free-fly camera is not a tank, so there is nothing to attribute (and the sandbox is
         // single-process anyway) — `None` never broadcasts.
         shooter: None,
+        // Locally fired: no net catch-up.
+        catch_up_ticks: 0,
     });
 }
 
