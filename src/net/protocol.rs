@@ -111,48 +111,58 @@ pub struct FireEvent {
     /// [`direction`](Self::direction) uses.
     pub weapon: u8,
     /// The server `Tick` the shot was fired on (`broadcast_fire` stamps the server's `LocalTimeline`).
-    /// Lets the receiver spawn the shell where it ALREADY IS rather than at the muzzle: without this,
-    /// the shell begins its flight the instant the message arrives, so a client's copy of an opponent's
-    /// round starts wherever the confirmed frame has advanced past the fire tick — the tracer would
-    /// trail its true position. `net::client::receive_fire_events` fast-forwards the shell by the ticks
-    /// elapsed since this one (`fast_forward_shell`).
+    /// Lets the receiver AGE the shell to where it already is rather than start its flight at the muzzle
+    /// when the message arrives: `net::client::receive_fire_events` fast-forwards it by the ticks
+    /// elapsed since this one (`fast_forward_shell`), using the same per-tick integrator the live march
+    /// steps.
     ///
-    /// # Which timeline the receiver measures "elapsed" against — the crux
+    /// # Which tick the receiver ages the shell to — the crux
     ///
-    /// The shell's [`origin`](Self::origin) is server truth at *this* tick. The client holds several
-    /// clocks that disagree about "now," and the choice decides where the tracer lands relative to the
-    /// server-authoritative hit:
+    /// A projectile has no free will: its entire future is `(origin, direction, speed, fire_tick) +
+    /// physics`, so placing it at ANY tick is exact arithmetic, not a guess — unlike a remote tank,
+    /// whose future needs a human's next input (which is why a remote tank is interpolated in the past
+    /// and a shell honestly can be advanced). At one instant the client holds four tick indices,
+    /// ordered `I` (interpolation) and `C` (confirmed) both behind `S` (server now) behind `P`
+    /// (predicted present):
+    /// - `P = LocalTimeline::tick()` — the tick this client's OWN tank is simulated at. Runs `S + RTT/2
+    ///   + jitter_margin + 1 + error_margin − input_delay` (verified: `lightyear_sync`
+    ///   `timeline/input.rs` `InputTimeline::sync_objective`).
+    /// - `S ≈` `RemoteTimeline::current_estimate` `= last_received_tick + RTT/2` (`timeline/remote.rs`).
+    /// - `C = ReplicationCheckpointMap::last_confirmed_tick()`, the newest fully-confirmed server tick.
+    /// - `I = S − (interp_delay + jitter)`, where `interp_delay = max(send_interval·1.7, 5ms)`
+    ///   (`lightyear_interpolation` `timeline.rs` `to_duration` / `InterpolationTimeline::sync_objective`).
     ///
-    /// - **`LocalTimeline::tick()` (predicted present).** Runs `RTT/2 + jitter_margin + 1 +
-    ///   error_margin - input_delay` AHEAD of the server (verified: `lightyear_sync`
-    ///   `timeline/input.rs` `InputTimeline::sync_objective`). Measuring elapsed against it launches the
-    ///   shell ~1.5*RTT of flight ahead — it reaches the victim well BEFORE the replicated health drop.
-    ///   Rejected.
-    /// - **`RemoteTimeline::current_estimate` (the server's true *instantaneous* present ~ server_now).**
-    ///   Elapsed against it is ~ one-way latency — the "~64 m at 800 m/s / 80 ms" figure. This is where
-    ///   the server's shell is at the tick the server is simulating RIGHT NOW. But that tick is a FUTURE
-    ///   the client cannot confirm yet: the victim's health (server-authoritative, [`NetHealth`]) will
-    ///   not reflect it for another one-way latency. Placing the shell there makes it arrive at the
-    ///   victim ~one-way-latency EARLY — the round passes through before the HP drops. Rejected.
-    /// - **`ReplicationCheckpointMap::last_confirmed_tick()` (newest fully-confirmed server tick).
-    ///   CHOSEN.** The shell is integrated forward on the client at the fixed rate in lockstep with the
-    ///   confirmed frame advancing, and damage lands at confirmed ticks. Elapsed = `last_confirmed -
-    ///   fire_tick` places the tracer where the server's shell is IN THE CONFIRMED FRAME, so it reaches
-    ///   the victim exactly as the victim's replicated health drops — the one alignment consistent with
-    ///   the authoritative hit.
-    /// - **Interpolation timeline (`last_confirmed - InterpolationDelay`).** Would emerge from the
-    ///   interpolated *shooter's* rendered barrel, but then reach the victim `InterpolationDelay` LATE
-    ///   relative to the HP drop. This is the genuine tension the alignment cannot escape: the tracer
-    ///   can be consistent with the server's confirmed hit OR with the interpolated shooter's visible
-    ///   muzzle, not both. Because damage is server-authoritative, we pick the hit.
+    /// **We age the shell to `P`. CHOSEN.** Elapsed = `P − fire_tick`. Reasoning:
+    /// 1. **The interaction that matters is shell-vs-our-own-predicted-hull, and our hull lives at `P`.**
+    ///    This client only ever predicts and *feels* hits on its OWN tank (everyone else's damage is
+    ///    server-authoritative via [`NetHealth`]). Co-indexing the shell with `P` puts both objects at
+    ///    the same tick in the same physics world, so their collision is well-posed — the property a
+    ///    future predicted hit-impulse needs.
+    /// 2. **Tick-indexing, not wall-clock, is what makes client and server agree.** Both integrate the
+    ///    shell from `fire_tick`; aged to `P` the shell is at `pos(P)` while our hull is our prediction
+    ///    for tick `P`, so a local hit falls on the SAME tick number the server's does — same tick,
+    ///    same result, no rollback.
     ///
-    /// **The offset is small, not ~64 m.** At receipt the `FireEvent` and the confirmed replication for
-    /// `fire_tick` arrive together (both sent at `fire_tick`, both delayed one-way latency), so
-    /// `last_confirmed ~= fire_tick` and elapsed ~= 0 — the common case is a no-op, spawning at the
-    /// muzzle exactly as today. Elapsed only grows when the (unreliable, unordered — see [`FireChannel`])
-    /// `FireEvent` arrives LATE relative to the confirmed frame, and advancing the shell by that much is
-    /// then correct: the server's shell really is that far along. The ~one-way-latency figure is the
-    /// distance to the REJECTED `RemoteTimeline` estimate, not to this one.
+    /// **Rejected — `C` (confirmed frame).** An earlier revision chose this "so the tracer reaches the
+    /// victim as its replicated health drops." But our own hull is RENDERED at `P`, ahead of `C`, so a
+    /// `C`-indexed shell lags our rendered hull by `P − C` (the full prediction offset) for its whole
+    /// flight — it is visibly short of us exactly when we are hit. That IS the bug this change exists to
+    /// fix, re-introduced. `S` (server-now) is likewise rejected: it is a future the client cannot
+    /// confirm, arriving one-way-latency early.
+    ///
+    /// **Rejected — `I` (interpolation frame).** Aging to `I` would make the shell exit the interpolated
+    /// *shooter's* rendered barrel cleanly. That is a cosmetic win paid for with correctness: the
+    /// shell-vs-own-hull physics goes ill-posed. You can be coherent with the server / your own hull, or
+    /// with the interpolated shooter's barrel, NOT both; we choose the former.
+    ///
+    /// # The cost, named not buried
+    ///
+    /// The shell appears ALREADY DOWNRANGE: `P − fire_tick ≈ (P−S) + (S−fire_tick) ≈` ~10 ticks ≈
+    /// 156 ms ≈ **~125 m at 800 m/s**. That is not a bug — it is information the client did not have
+    /// (it learned of the shot late). Mitigated by populating [`crate::ballistics::ShellPath`] across
+    /// the skipped flight from the same integrator, so the tracer reads as a round already in the air
+    /// rather than one teleporting into existence. (The `FireEvent` channel being unreliable/unordered
+    /// — see [`FireChannel`] — only ever adds to that lateness, never removes it.)
     ///
     /// NOT entity-mapped and NOT a `Dir3`-style guarded value: a raw tick is meaningless to remap, and
     /// the receiver clamps/rejects an absurd value itself (`net::client::fire_catch_up_ticks`).

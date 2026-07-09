@@ -79,16 +79,12 @@ pub(crate) fn advance_shell(position: Vec3, velocity: Vec3, drag_k: f32, dt: f32
 /// muzzle rather than 64 m behind the shell.
 ///
 /// One per-tick advance — the shared [`advance_shell`] the live march steps — so the catch-up cannot
-/// drift from natively integrating the same `ticks`. **Ballistic only: no per-step raycast.** The
-/// catch-up is cosmetic (a client shell never deposits HP or impulse — the `ClientReplica` gate in
-/// [`integrate_projectiles`]), so a raycast here would resolve nothing; its only effect would be to
-/// stop the tracer at geometry. That matters solely for a shell that catches up THROUGH a near surface
-/// (a close-range late-arriving `FireEvent`), which then clips for at most one frame before the live
-/// march — which DOES raycast — resolves it on the next tick. Reusing the full ray-march would remove
-/// that brief clip at the cost of threading `SpatialQuery` + the volume/health/spall machinery into
-/// the spawn path for a purely cosmetic shell; not worth the coupling. In the common case the catch-up
-/// is 0–few ticks (the `FireEvent` and the confirmed frame arrive together — see the timeline note on
-/// `net::protocol::FireEvent::fire_tick`), so this is usually a handful of metres or a no-op.
+/// drift from natively integrating the same `ticks`. Ballistic (no per-step raycast): this returns the
+/// free-flight arc, and whether the round ALREADY hit something during the skipped flight is the
+/// caller's concern ([`on_fire_shell`] clears that with a single segment raycast — see there). The
+/// skip is systematically ~10 ticks / ~125 m under the predicted-present timeline (see
+/// `net::protocol::FireEvent::fire_tick`), which is exactly why the returned arc points matter: they
+/// populate the trail so the tracer reads as a round already in flight, not one teleporting in.
 pub(crate) fn fast_forward_shell(
     origin: Vec3,
     velocity: Vec3,
@@ -514,10 +510,22 @@ fn setup_assets(
 }
 
 /// Spawn a shell from a `FireShell`: at the origin, oriented down the bore, with velocity along the
-/// bore at the muzzle speed — then, for a net catch-up shell (`fire.catch_up_ticks > 0`), fast-forward
-/// it to where it already is in the server's confirmed timeline. `catch_up_ticks` is `0` for every
-/// locally-fired shell, so the fast-forward is a no-op there and the shell spawns at the muzzle exactly
-/// as before (local shells are unaffected).
+/// bore at the muzzle speed. For a net catch-up shell (`fire.catch_up_ticks > 0`) first fast-forward it
+/// to OUR predicted present, where it is co-indexed with our own hull (see
+/// `net::protocol::FireEvent::fire_tick`); `catch_up_ticks` is `0` for every locally-fired shell, so
+/// that path is skipped and the shell spawns at the muzzle exactly as before (local shells unaffected).
+///
+/// **Hits during catch-up.** Under the predicted-present timeline the skip is systematically ~10 ticks
+/// / ~125 m, so a close-range shot routinely catches up PAST its target. If the round flew into terrain
+/// or a hull during the skipped flight it already impacted on the authority — there is nothing left in
+/// the air, so we skip the phantom tracer rather than spawn it downrange of the surface it hit. That
+/// test is ONE straight-segment raycast (`Terrain | Armor`): the catch-up arc's gravity drop over ~10
+/// ticks is sub-metre, so the muzzle→caught-up segment tracks the true arc. It is deliberately NOT a
+/// per-tick penetration march — the client deposits no HP or impulse here (`ClientReplica`), so the
+/// full march would resolve nothing the server hasn't; reusing it would only thread the volume / health
+/// / spall machinery into the spawn path for a purely cosmetic shell. A skipped shot still registers:
+/// barrel recoil is enqueued independently (`net::client::receive_fire_events`) and damage is
+/// server-authoritative.
 fn on_fire_shell(
     fire: On<FireShell>,
     assets: Res<ProjectileAssets>,
@@ -526,6 +534,8 @@ fn on_fire_shell(
     // The catch-up counts fixed SERVER ticks, so it must step the fixed timestep the live march also
     // uses in `Real` mode. Unused when `catch_up_ticks == 0` (the loop never runs).
     fixed_time: Res<Time<Fixed>>,
+    // The already-landed test below; inert for a local shell (guarded on `catch_up_ticks > 0`).
+    spatial: SpatialQuery,
     mut commands: Commands,
 ) {
     let drag = drag_k(fire.caliber, fire.mass);
@@ -537,6 +547,34 @@ fn on_fire_shell(
         dt,
         fire.catch_up_ticks,
     );
+
+    // Net catch-up only: if the round already flew into terrain or a hull during the skipped flight it
+    // impacted on the authority — skip the phantom in-flight tracer (see the doc). One segment raycast,
+    // started a hair off the muzzle (matching the live march's `+ dir*EPS`) so a muzzle flush with a
+    // collider face can't self-trip it.
+    if fire.catch_up_ticks > 0 {
+        let skipped = position - fire.origin;
+        if let Ok(dir) = Dir3::new(skipped) {
+            const EPS: f32 = 1.0e-3;
+            let filter = SpatialQueryFilter::from_mask(
+                LayerMask::from(Layer::Terrain) | LayerMask::from(Layer::Armor),
+            );
+            let reach = (skipped.length() - EPS).max(0.0);
+            if spatial
+                .cast_ray(
+                    fire.origin + Vec3::from(dir) * EPS,
+                    dir,
+                    reach,
+                    true,
+                    &filter,
+                )
+                .is_some()
+            {
+                return;
+            }
+        }
+    }
+
     // Travel direction after any catch-up (gravity/drag bend it); fall back to the bore for a
     // degenerate zero velocity so a spent-to-rest catch-up never trips `Dir3`.
     let travel = Dir3::new(velocity).unwrap_or(fire.direction);
