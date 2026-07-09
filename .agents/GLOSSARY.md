@@ -144,13 +144,33 @@ The Layer-1 rule (ADR-0015): contact and force laws must be continuous functions
 _Avoid_: "determinism" for this (continuity bounds divergence growth; determinism eliminates divergence)
 
 **Forward determinism / Replay determinism**:
-*Forward*: same state + same inputs → same result — what lockstep needs, and what engines actually ship. *Replay*: restore a snapshot, resimulate, and land bit-identically on the original forward path — what prediction + rollback needs, and what no engine sells today (avian #734 is the open thread). Our dominant divergence term is a replay failure, not a forward one.
+*Forward*: same state + same inputs → same result, on any machine. *Replay*: restore a snapshot, resimulate, and land bit-identically on the original forward path. Prediction + rollback wants both — forward to make corrections *rare* (client and server agree while nothing surprising happens), replay to make a correction *converge* instead of seeding new error. Neither is a correctness requirement under server authority, which re-anchors regardless.
+_Avoid_: filing determinism under lockstep. Lockstep *needs* forward determinism; so does predict-and-rollback. Determinism is a property of the sim, orthogonal to who holds authority (ADR-0015).
+
+**Misprediction / Divergence**:
+The two error classes a correction repairs. *Misprediction*: you guessed a remote player's next input wrong — information-theoretic, irreducible, and **determinism cannot touch it**. *Divergence*: same inputs, different results — determinism eliminates it entirely. Solo rollbacks are pure divergence, which is why ADR-0015 treats them as a defect metric with target ~zero.
+_Avoid_: "determinism makes prediction more accurate" (it makes *replay* exact; the guess is bounded by information, not reproducibility)
 
 **Prediction margin**:
 How many ticks the client runs ahead of the confirmed state it receives. Input delay eats it: `InputDelayConfig::balanced()` at loopback RTT absorbs all latency into delay, margin hits zero, and every confirmed update arrives at-or-ahead of the current tick.
 
 **Check starvation**:
 The zero-margin failure (fixed by `net/watchdog.rs`): lightyear's receive-time rollback check is skipped for any sample stamped at-or-ahead of the current tick and never retried, so state rollback goes permanently, silently dead — measured 35–50 m divergence with fresh authority arriving and zero rollbacks. Pre-watchdog lat0 rollback counts measured this, not convergence.
+
+**Tick index** (predicted `P` / server `S` / confirmed `C` / interpolation `I`):
+The tick a given entity is a view of. A client's world is not a snapshot of one instant: its own tank lives at the *predicted* index `P`, an opponent's collider at the *interpolation* index `I`, and server-authoritative facts arrive on the *confirmed* frontier `C`. See `design/timelines-and-shear.md` for the offsets and their sources.
+_Avoid_: comparing `C` and `I` as if commensurable — `C` is a global replication-completeness frontier, `I` a per-entity render index.
+
+**Shear**:
+The tick gap between two entities that interact. Interactions are only well-posed between entities on the same tick index; static world geometry has no index, which is why driving feels right and ramming does not. Ramming, un-learnable aim lead, and the incoherent opponent tracer are one phenomenon (ADR-0017).
+_Avoid_: "lag" or "latency" for this (those are wall-clock; shear is measured in ticks between two entities)
+
+**Complete cause**:
+A cause whose whole future is a function of information already held, so a consequence can be placed on *any* tick index by exact arithmetic rather than guessed. A fire event is complete — *a projectile has no free will*. An input stream is not: the next input is unknowable. The first test for deriving rather than replicating (ADR-0016).
+
+**Contractive / Expansive**:
+Whether a system's dynamics shrink or grow a perturbation — the Lyapunov question. A servo chasing a target and a damped recoil spring are contractive, so they tolerate a stale cause and can be derived. **A contact solver is expansive**, which is why collision resolves on the authority. Distinct from *divergence continuity*: a contact solver is roughly continuous and still expansive.
+_Avoid_: "self-correcting" (does not distinguish contractive from merely bounded or oscillatory)
 
 **Netcode scaffolding** (Layer 1 / Layer 2):
 The two-layer doctrine (ADR-0015). *Layer 1* — permanent sim-design work, ours: divergence continuity. *Layer 2* — deliberately removable workarounds, each mapped to a named upstream defect with a removal condition (watchdog, contact-restore fix, coarsened thresholds). The render-space error layer looks like Layer 2 but is permanent — other players' inputs are unpredictable forever, and it is how any correction is presented.

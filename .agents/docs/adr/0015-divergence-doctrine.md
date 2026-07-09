@@ -54,11 +54,17 @@ solo divergence, ranked:
    state, not input.
 
 And one settled point of framing: within state replication, **determinism is the
-rollback-killer, not a rejected alternative**. Lockstep stays rejected ([[0004-avian-physics]]-era
-call, still right), but the Rocket League precedent is the model — server-authoritative +
-prediction, with determinism pursued as the optimization that makes corrections rare. The useful
-distinction is **forward determinism** (same state + same inputs → same result; what lockstep
-needs; what Box2D v3-class engines ship) vs **replay determinism** (restore + resimulate lands
+rollback-killer, not a rejected alternative**. Lockstep stays rejected (`design/sim-divergence-and-determinism.md`
+§4.4 — the slowest peer gates everyone and one divergence desyncs permanently, with no authority to
+re-anchor; *not* an ADR-0004 call, which is silent on netcode), but the Rocket League precedent is
+the model — server-authoritative + prediction, with determinism pursued as the optimization that
+makes corrections rare. **Determinism is orthogonal to authority**: it is a property of the sim, and
+the target quadrant is deterministic *and* server-authoritative, with state kept as the re-anchor and
+the divergence detector. Note also what determinism cannot do — it eliminates the *divergence* error
+class (same inputs, different results) and cannot touch the *misprediction* class (you do not know a
+remote player's next input). The useful
+distinction is **forward determinism** (same state + same inputs → same result, on any machine; what
+makes corrections rare; what Box2D v3-class engines ship) vs **replay determinism** (restore + resimulate lands
 bit-identically on the forward path; what prediction + rollback needs; *no engine sells it
 today* — avian issue #734 is the open upstream thread).
 
