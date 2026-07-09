@@ -1,4 +1,6 @@
-//! Dev-only debug helpers (compiled only with `debug_assertions`). Press `G` to toggle the debug
+//! Dev-only debug helpers (compiled behind the `dev_tools` feature — default-on, and deliberately
+//! decoupled from `debug_assertions` so an optimized/`--release` playtest build still carries these
+//! keys; see `Cargo.toml`). Press `G` to toggle the debug
 //! gizmos: per-wheel force arrows (cyan = suspension load, orange = drive + friction, red line =
 //! the suspension ray) plus Avian's collider wireframes. Press `X` for the X-ray toggle: the tank
 //! turns translucent so the gizmos that sit *inside* the model show through (Blend materials stop
