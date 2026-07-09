@@ -63,7 +63,9 @@ and uploads it as a plain artifact (see `.github/workflows/release.yml`).
 # 1. Build on CI (workflow_dispatch — pre-alpha, no build-on-push)
 gh workflow run "Release"
 gh run watch                                   # wait for green
-gh run download <run-id> -n overmatch-server-x86_64-linux
+# --repo is required when downloading outside the checkout (e.g. into a scratch dir):
+# gh infers the repo from the surrounding git tree, and a scratch dir has none.
+gh run download <run-id> -n overmatch-server-x86_64-linux --repo vikng-dev/overmatch
 
 # 2. Ship + swap
 scp -i ~/.ssh/do-vikng-dev overmatch-server.tar.gz root@157.245.48.161:/opt/
@@ -72,10 +74,6 @@ ssh -i ~/.ssh/do-vikng-dev root@157.245.48.161 '
   systemctl restart overmatch-server &&
   systemctl status overmatch-server --no-pager | head -5'
 ```
-
-> **Binary renamed:** the server binary is now `overmatch-server` (was `server`). On the next
-> redeploy, update the droplet's `ExecStart=` (and delete the stale `/opt/overmatch-server/server`)
-> to match the unit above.
 
 ## Known-provisional bits
 
