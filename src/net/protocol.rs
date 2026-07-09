@@ -192,7 +192,11 @@ pub struct FireChannel;
 /// (and in what order) [`NetHealth`] snapshots, so publish and apply can never drift out of alignment
 /// (index `i` addresses the same volume on both ends). `has_health` is the caller's query membership
 /// test, so this serves both the immutable (publish) and mutable (apply) `ComponentHealth` query.
-fn health_bearing_volumes(
+///
+/// `pub(crate)` so the view-layer hit-feel cue (`net::hit_feel`) can map a `NetHealth` index back to
+/// its volume entity through the SAME ordered filter both wire ends use — a bearing for the hit
+/// direction reads off that volume's world pose. One filter, one order, no drift.
+pub(crate) fn health_bearing_volumes(
     volumes: &TankVolumes,
     has_health: impl Fn(Entity) -> bool,
 ) -> Vec<Entity> {

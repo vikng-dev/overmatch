@@ -15,6 +15,7 @@ pub mod death_screen;
 pub mod debug_hud;
 pub mod diagnostics;
 pub mod harness;
+pub mod hit_feel;
 pub mod physics;
 pub mod protocol;
 pub mod render_error;

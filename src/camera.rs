@@ -33,6 +33,18 @@ pub struct CameraFollow(pub bool);
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GunnerCameraPlaced;
 
+/// The view-layer hit-kick's ordering anchor. `net::hit_feel::apply_camera_kick` displaces the
+/// camera's rendered `GlobalTransform` by a decaying recoil offset when the player is hit, and it must
+/// run AFTER both camera placements have set that pose ([`orbit_camera`] before `Propagate`,
+/// [`gunner_camera`] after it in [`GunnerCameraPlaced`]) — so the kick anchors `.after(GunnerCameraPlaced)`.
+/// Systems that reproject through the camera (the gunner reticles in `sight`) order `.after` this set
+/// so they ride the kicked pose and the whole sight picture jolts as one. **Empty in single-player and
+/// on a headless client** (the kick is net-client-only, mounted by `NetClientPlugin`), where every
+/// `.after(CameraKickApplied)` edge is a harmless no-op — the same vacuous-anchor idiom as
+/// [`OrbitCameraSet`].
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CameraKickApplied;
+
 /// The third-person orbit camera's system set — an ordering anchor. The MP render-error layer
 /// (`net::render_error`) offsets the predicted root's `Transform` between `PhysicsSystems::Writeback`
 /// and `TransformSystems::Propagate`; ordering it `.before(OrbitCameraSet)` there makes the camera

@@ -198,6 +198,9 @@ impl Plugin for NetClientPlugin {
             // The death screen + respawn key — net-client only (SP has no respawn flow): shows
             // "YOU DIED" when the player's own tank is knocked out and latches the respawn edge.
             net::death_screen::plugin,
+            // View-layer combat feedback (net-client only): the camera kick + damage flash when the
+            // player is hit, and the hit-marker when the player's shell drops an opponent's health.
+            net::hit_feel::plugin,
         ));
 
         // Physics visualization + debug toggles, same pair `ClientPlugin` mounts for SP

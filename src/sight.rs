@@ -15,7 +15,7 @@ use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 
 use crate::aim::AimCommit;
-use crate::camera::GunnerCameraPlaced;
+use crate::camera::{CameraKickApplied, GunnerCameraPlaced};
 use crate::command::TankCommand;
 use crate::damage::ControlledTank;
 use crate::firecontrol::{RangeTable, Ranging};
@@ -180,7 +180,11 @@ pub fn plugin(app: &mut App) {
             (update_intent_reticle, update_ranging_reticle)
                 .in_set(GameplaySet)
                 .after(TransformSystems::Propagate)
-                .after(GunnerCameraPlaced),
+                .after(GunnerCameraPlaced)
+                // After the hit-kick has displaced the camera's rendered pose, so the reticles
+                // reproject through the kicked view and the whole sight picture jolts together on a
+                // hit. Vacuous edge in SP/headless (the kick set is net-client-only, empty there).
+                .after(CameraKickApplied),
         );
 }
 
