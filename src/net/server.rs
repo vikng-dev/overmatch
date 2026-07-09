@@ -154,6 +154,12 @@ pub fn run() {
             // command writer; a direct `TankCommand` write (the bot carries no `ActionState`, so
             // `bridge_action_state_to_tank_command` skips it).
             drive_bot.in_set(GameplaySet).before(ConsumeCommandEdges),
+            // Honor a dead client's respawn edge — a command READER, so in `GameplaySet` before the
+            // edge-consumer, alongside `drive_bot`, so it sees this tick's bridged `respawn` edge
+            // before `consume_edges` clears it.
+            respawn_player_tanks
+                .in_set(GameplaySet)
+                .before(ConsumeCommandEdges),
         ),
     );
 
@@ -239,61 +245,97 @@ fn spawn_pending_tanks(
         // `SPIKE_SPAWN_POSE` cases are unshifted); the counter persists so reconnects don't collide.
         let spawn_pos = base_pos + lane_offset(lane.0);
         lane.0 += 1;
-        let mut tank = commands.spawn((
-            Name::new("Tank"),
-            rig::net_tank_rig(&assets),
-            // The server is always the authority: its body simulates from tick 0. Set alongside
-            // `spawn_tank_sim`'s collider inserts (below, same command batch), so `Dynamic` is
-            // present in the same flush as the colliders — they never sit unattached or
-            // placeholder-posed waiting for a body (the step-8 NaN class; `net::rig`'s module
-            // invariants state its exact boundary).
-            RigidBody::Dynamic,
-            ActionState::<TankCommand>::default(),
-            Position(spawn_pos),
-            // Explicit identity (or the `SPIKE_SPAWN_POSE` override), NOT left to `RigidBody`'s
-            // required-component default — that default is `Rotation::PLACEHOLDER` (f32::MAX
-            // sentinel, avian rigid_body/mod.rs:271), and if replication captures the spawn frame
-            // before the transform sync overwrites it, the client's confirmed history for the
-            // earliest ticks holds the sentinel — which rollbacks would then faithfully restore
-            // into the sim (the placeholder-NaN class, spike log 2026-07-04).
-            Rotation(spawn_rot),
-            // The authority's turret/gun lay, for every non-predicted view of this tank
-            // (`net::publish_servo_angles` keeps it fresh).
-            ServoAngles::default(),
-            // The authority's per-volume health snapshot (`net::publish_net_health` fills it once the
-            // rig's volumes exist), replicated so the client's damage/death are server-driven.
-            NetHealth::default(),
-            // `None` until the turret cooks off (`net::publish_launched_turret_pose` fills it), so
-            // the client can show the authoritative toss it does not simulate locally.
-            LaunchedTurretPose::default(),
-            Replicate::to_clients(NetworkTarget::All),
-            // Replicate the ROOT alone. Without this, `Replicate` propagates to every rig child
-            // via `ReplicateLike` — the whole sim skeleton (~19 child entities per tank, spawned
-            // synchronously under the root by `spawn_tank_sim`) would replicate to each client,
-            // where nothing simulates them (the client builds its own skeleton locally), each
-            // predicted+history-tracked: a standing spurious rollback-check source while the tank
-            // moves, plus per-tick child Position/Rotation bandwidth and B0004 orphan-transform
-            // warnings. The authority's turret/gun lay rides the root's `ServoAngles` instead.
-            DisableReplicateHierarchy,
-            // The committed model: the owner predicts its own tank (input feels instant, rollback
-            // reconciles), everyone else interpolates it — the standard pairing every lightyear
-            // multiplayer example ships (map §7).
-            PredictionTarget::to_clients(NetworkTarget::Single(client_id)),
-            InterpolationTarget::to_clients(NetworkTarget::AllExceptSingle(client_id)),
-            ControlledBy {
-                owner: link,
-                lifetime: default(),
-            },
-        ));
+        let root = spawn_player_tank(
+            &mut commands,
+            geometry,
+            spec,
+            &assets,
+            link,
+            client_id,
+            spawn_pos,
+            spawn_rot,
+        );
         if config.perturb {
-            tank.insert(harness::PendingPerturbation {
+            commands.entity(root).insert(harness::PendingPerturbation {
                 at: time.elapsed() + Duration::from_secs(2),
             });
         }
-        tank.observe(bind_tank_view);
-        let root = tank.id();
-        spawn_tank_sim(&mut commands, root, geometry, spec);
     }
+}
+
+/// Build one owned player tank (root + observed view binding + synchronous sim skeleton) at
+/// `spawn_pos`/`spawn_rot`, owned + predicted by `client_id`'s `link`, and return its root. Shared by
+/// the connect-time [`spawn_pending_tanks`] and the death-time [`respawn_player_tanks`] loop so a
+/// respawn re-acquires through the EXACT same ownership/prediction path a fresh join does — the
+/// known lightyear gotcha ([`attach_replication_sender`]) means the ownership markers only land
+/// correctly through this one component set, so both entry points must share it verbatim. The
+/// harness perturbation stays with the connect-time caller (a startup test concern, not a respawn's).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the full owned-tank spawn contract — pose, assets, and ownership identity — is \
+              exactly what both call sites must agree on; bundling it into a struct would only \
+              move the same fields"
+)]
+fn spawn_player_tank(
+    commands: &mut Commands,
+    geometry: &TankGeometry,
+    spec: &TankSpec,
+    assets: &PendingTankAssets,
+    link: Entity,
+    client_id: PeerId,
+    spawn_pos: Vec3,
+    spawn_rot: Quat,
+) -> Entity {
+    let mut tank = commands.spawn((
+        Name::new("Tank"),
+        rig::net_tank_rig(assets),
+        // The server is always the authority: its body simulates from tick 0. Set alongside
+        // `spawn_tank_sim`'s collider inserts (below, same command batch), so `Dynamic` is
+        // present in the same flush as the colliders — they never sit unattached or
+        // placeholder-posed waiting for a body (the step-8 NaN class; `net::rig`'s module
+        // invariants state its exact boundary).
+        RigidBody::Dynamic,
+        ActionState::<TankCommand>::default(),
+        Position(spawn_pos),
+        // Explicit identity (or the `SPIKE_SPAWN_POSE` override), NOT left to `RigidBody`'s
+        // required-component default — that default is `Rotation::PLACEHOLDER` (f32::MAX
+        // sentinel, avian rigid_body/mod.rs:271), and if replication captures the spawn frame
+        // before the transform sync overwrites it, the client's confirmed history for the
+        // earliest ticks holds the sentinel — which rollbacks would then faithfully restore
+        // into the sim (the placeholder-NaN class, spike log 2026-07-04).
+        Rotation(spawn_rot),
+        // The authority's turret/gun lay, for every non-predicted view of this tank
+        // (`net::publish_servo_angles` keeps it fresh).
+        ServoAngles::default(),
+        // The authority's per-volume health snapshot (`net::publish_net_health` fills it once the
+        // rig's volumes exist), replicated so the client's damage/death are server-driven.
+        NetHealth::default(),
+        // `None` until the turret cooks off (`net::publish_launched_turret_pose` fills it), so
+        // the client can show the authoritative toss it does not simulate locally.
+        LaunchedTurretPose::default(),
+        Replicate::to_clients(NetworkTarget::All),
+        // Replicate the ROOT alone. Without this, `Replicate` propagates to every rig child
+        // via `ReplicateLike` — the whole sim skeleton (~19 child entities per tank, spawned
+        // synchronously under the root by `spawn_tank_sim`) would replicate to each client,
+        // where nothing simulates them (the client builds its own skeleton locally), each
+        // predicted+history-tracked: a standing spurious rollback-check source while the tank
+        // moves, plus per-tick child Position/Rotation bandwidth and B0004 orphan-transform
+        // warnings. The authority's turret/gun lay rides the root's `ServoAngles` instead.
+        DisableReplicateHierarchy,
+        // The committed model: the owner predicts its own tank (input feels instant, rollback
+        // reconciles), everyone else interpolates it — the standard pairing every lightyear
+        // multiplayer example ships (map §7).
+        PredictionTarget::to_clients(NetworkTarget::Single(client_id)),
+        InterpolationTarget::to_clients(NetworkTarget::AllExceptSingle(client_id)),
+        ControlledBy {
+            owner: link,
+            lifetime: default(),
+        },
+    ));
+    tank.observe(bind_tank_view);
+    let root = tank.id();
+    spawn_tank_sim(commands, root, geometry, spec);
+    root
 }
 
 /// Marker for the ownerless test-bot tank ([`spawn_bot`]) — scopes [`drive_bot`] to it, and keeps
@@ -440,6 +482,87 @@ fn respawn_dead_bots(
 /// [`respawn_dead_bots`].
 #[derive(Component)]
 struct BotRespawnAt(f32);
+
+/// Server-authoritative PLAYER respawn (the friend-fight counterpart to the bot loop above): when a
+/// client's own tank is knocked out and the client latches a [`TankCommand::respawn`] edge, sweep the
+/// dead tank and spawn that client a fresh one through the same ownership path connect uses
+/// ([`spawn_player_tank`]).
+///
+/// **The death is VALIDATED on the authority, never trusted from the client.** The query is gated
+/// `With<TankKnockedOut>` — the emergent death label the server itself latched (`damage::mark_dead_tanks`
+/// at 0 living crew, `damage::process_cookoffs` on cookoff) off its OWN authoritative sim. A client
+/// that forges `respawn: true` while alive names a tank that carries no `TankKnockedOut`, so it never
+/// matches and nothing happens. `With<ControlledBy>` (read as `&ControlledBy`) scopes this to owned
+/// player tanks and excludes the ownerless bot, whose death→respawn is the separate timed
+/// [`respawn_dead_bots`] loop — the two never overlap.
+///
+/// Runs on the fixed clock in `GameplaySet`, `.before(ConsumeCommandEdges)`, exactly like [`drive_bot`]
+/// and every other command reader: `bridge_action_state_to_tank_command` has already written this
+/// tick's `respawn` edge (and, under input starvation, already CLEARED it via `TankCommand::clear_edges`,
+/// so a stale held-last input can't re-trigger a respawn), and `consume_edges` clears it at the tick's
+/// end — so a single latched edge respawns exactly once. The recursive root despawn drops the dead rig;
+/// `tank::sweep_launched_turret_on_root_despawn` (`On<Remove, Rig>`, mounted in `SimPlugin` on both
+/// ends) sweeps a cooked-off turret that detached from the root, so no launched turret leaks — the same
+/// guarantee `respawn_dead_bots` relies on.
+fn respawn_player_tanks(
+    dead: Query<(Entity, &TankCommand, &ControlledBy), With<TankKnockedOut>>,
+    remotes: Query<&RemoteId>,
+    assets: Option<Res<PendingTankAssets>>,
+    asset_server: Res<AssetServer>,
+    source: TankSimSource,
+    mut lane: ResMut<SpawnLane>,
+    mut commands: Commands,
+) {
+    // (dead root, owner link, owner client id) for every owned tank that both IS dead and asked to
+    // respawn this tick. Resolve the owner's `RemoteId` up front (the `PeerId` the fresh tank must be
+    // predicted/owned by); an owner link mid-disconnect with no `RemoteId` is skipped rather than
+    // respawned to a client that is leaving.
+    let requests: Vec<(Entity, Entity, PeerId)> = dead
+        .iter()
+        .filter(|(_, command, _)| command.respawn)
+        .filter_map(|(root, _, controlled)| {
+            remotes
+                .get(controlled.owner)
+                .ok()
+                .map(|remote| (root, controlled.owner, remote.0))
+        })
+        .collect();
+    if requests.is_empty() {
+        return;
+    }
+    // Same asset gate as the spawn/respawn loops (long-loaded by the time anyone can die, but resolved
+    // identically so the spawn path never diverges).
+    let Some(assets) = assets else { return };
+    if !assets.loaded(&asset_server) {
+        return;
+    }
+    let Some((geometry, spec)) = source.get(&assets.spec) else {
+        return;
+    };
+    // A respawn takes the NEXT free lane (never reset — same rule a reconnecting client follows), so a
+    // fresh tank never lands on top of another body and NaNs the solver. The base pose honors the
+    // `SPIKE_SPAWN_POSE` harness override exactly as the connect path does.
+    let (base_pos, spawn_rot) =
+        harness::spawn_pose().unwrap_or((Vec3::new(0.0, 2.0, 0.0), Quat::IDENTITY));
+    for (root, link, client_id) in requests {
+        let spawn_pos = base_pos + lane_offset(lane.0);
+        lane.0 += 1;
+        // Recursive despawn sweeps the dead root and its attached rig; the `On<Remove, Rig>` observer
+        // handles any cooked-off turret that had detached (see the system doc).
+        commands.entity(root).despawn();
+        let fresh = spawn_player_tank(
+            &mut commands,
+            geometry,
+            spec,
+            &assets,
+            link,
+            client_id,
+            spawn_pos,
+            spawn_rot,
+        );
+        info!("server: player {client_id} respawn requested — swept {root}, spawned {fresh}");
+    }
+}
 
 /// Drive the bot in a steady circle AND hold its main gun's trigger: constants written straight into
 /// its own `TankCommand` (`command.rs`'s read contract, attached by `command`'s `On<Add, Tank>`

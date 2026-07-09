@@ -11,6 +11,7 @@ use bevy::prelude::*;
 
 pub mod client;
 pub mod contact_probe;
+pub mod death_screen;
 pub mod debug_hud;
 pub mod diagnostics;
 pub mod harness;

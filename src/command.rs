@@ -48,6 +48,15 @@ pub struct TankCommand {
     /// against the tank's own seats — crew reassignment changes capabilities, so the server must
     /// own it.
     pub crew_swap: Option<CrewSwap>,
+    /// Request a respawn of this (dead) tank. An *edge* like [`fire_primary`](Self::fire_primary)
+    /// and [`crew_swap`](Self::crew_swap) (all three enumerated by [`TankCommand::clear_edges`]):
+    /// latched by the net client's death screen on the respawn key, held until one fixed tick
+    /// consumes it. The server VALIDATES it against the tank's own death (`net::server`'s
+    /// `respawn_player_tanks` acts only on a tank that already carries `damage::TankKnockedOut`) —
+    /// a respawn changes the whole entity's lifetime, so the authority must own it and must not
+    /// trust a client that claims to be dead. Meaningful only under netcode; single-player has no
+    /// respawn flow and never writes it.
+    pub respawn: bool,
 }
 
 impl TankCommand {
@@ -64,13 +73,14 @@ impl TankCommand {
     pub fn clear_edges(&mut self) {
         self.fire_primary = false;
         self.crew_swap = None;
+        self.respawn = false;
     }
 
     /// Whether any edge field is currently latched — the read counterpart to [`clear_edges`], so
     /// the edge set lives in exactly one place. [`consume_edges`] uses it to skip the mutable
     /// touch (and its change-detection churn) on a command with no edge to clear.
     pub fn has_edge(&self) -> bool {
-        self.fire_primary || self.crew_swap.is_some()
+        self.fire_primary || self.crew_swap.is_some() || self.respawn
     }
 }
 
@@ -232,5 +242,57 @@ fn consume_edges(mut tanks: Query<&mut TankCommand>) {
 fn clear_command_on_release(remove: On<Remove, Controlled>, mut tanks: Query<&mut TankCommand>) {
     if let Ok(mut command) = tanks.get_mut(remove.entity) {
         *command = TankCommand::default();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::damage::CrewStation;
+
+    /// Every edge field is reported by [`TankCommand::has_edge`] and reset by
+    /// [`TankCommand::clear_edges`] — the single-source-of-truth contract the edge set hangs off
+    /// (`consume_edges` and the net input bridge both route through these two). A new edge added to
+    /// one method but not the other fails this: `has_edge` would still report the field `clear_edges`
+    /// left latched.
+    #[test]
+    fn clear_edges_resets_every_edge_has_edge_reports() {
+        // Each latched-edge variant in isolation: has_edge true, then clear_edges makes it false.
+        let edges: [fn(&mut TankCommand); 3] = [
+            |c| c.fire_primary = true,
+            |c| c.crew_swap = Some(CrewSwap::Start(CrewStation::Gunner, CrewStation::Loader)),
+            |c| c.respawn = true,
+        ];
+        for set_edge in edges {
+            let mut command = TankCommand::default();
+            assert!(!command.has_edge(), "default command has no edge");
+            set_edge(&mut command);
+            assert!(command.has_edge(), "a latched edge is reported by has_edge");
+            command.clear_edges();
+            assert!(!command.has_edge(), "clear_edges resets the latched edge");
+        }
+    }
+
+    /// `clear_edges` touches ONLY the edge fields — the levels and absolutes ride through untouched
+    /// (the property `consume_edges` and the starvation bridge both depend on).
+    #[test]
+    fn clear_edges_preserves_levels_and_absolutes() {
+        let mut command = TankCommand {
+            throttle: 0.5,
+            steer: -0.5,
+            fire_secondary: true,
+            aim: Some(Vec3::X),
+            range: 800.0,
+            fire_primary: true,
+            crew_swap: Some(CrewSwap::Cancel),
+            respawn: true,
+        };
+        command.clear_edges();
+        assert_eq!(command.throttle, 0.5);
+        assert_eq!(command.steer, -0.5);
+        assert!(command.fire_secondary);
+        assert_eq!(command.aim, Some(Vec3::X));
+        assert_eq!(command.range, 800.0);
+        assert!(!command.has_edge(), "all edges cleared");
     }
 }

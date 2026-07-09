@@ -808,6 +808,7 @@ mod tests {
             range: 850.0,
             fire_primary: true,
             crew_swap: Some(CrewSwap::Start(CrewStation::Gunner, CrewStation::Loader)),
+            respawn: true,
         };
         let mut buffer = NativeBuffer::<TankCommand>::default();
         buffer.set(Tick(5), ActionState(held));
@@ -833,6 +834,7 @@ mod tests {
             cmd.crew_swap, None,
             "crew-swap edge cleared on a starved tick"
         );
+        assert!(!cmd.respawn, "respawn edge cleared on a starved tick");
     }
 
     /// A tick with a REAL buffered input (the non-starved case, and every rollback-replayed tick of

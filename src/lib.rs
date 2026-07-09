@@ -195,6 +195,9 @@ impl Plugin for NetClientPlugin {
             // Bottom-right ping/FPS/frame-time debug panel — net-client only (ping is meaningless
             // in SP), for testing against the deployed server.
             net::debug_hud::plugin,
+            // The death screen + respawn key — net-client only (SP has no respawn flow): shows
+            // "YOU DIED" when the player's own tank is knocked out and latches the respawn edge.
+            net::death_screen::plugin,
         ));
 
         // Physics visualization + debug toggles, same pair `ClientPlugin` mounts for SP
