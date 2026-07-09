@@ -158,7 +158,40 @@ fn publish_net_health(
 }
 
 /// Client side: write the replicated `NetHealth` back onto each `Remote` tank's local volumes, so the
-/// damage-consequence systems (`damage.rs`) run off authoritative health. Matches the publish order
+/// damage-consequence systems (`damage.rs`) run off authoritative health.
+///
+/// **This system is TICK-AGNOSTIC, and that is only safe because state rollback runs in
+/// `RollbackMode::Check`.** It applies the newest confirmed health to whatever tick is being
+/// simulated — forward tick or replayed tick alike. `NetHealth` is plain-replicated (no `.predict()`,
+/// hence no `ConfirmedHistory`), so it holds exactly one value, and a rollback replay of ticks
+/// `T..present` writes that one value onto every replayed tick.
+///
+/// Applying it FORWARD is correct: newest-confirmed health is the best estimate for a predicted tick,
+/// which is just prediction. Applying it BACKWARD — a post-death value onto a genuinely pre-death
+/// tick — would NOT be, because the drive/reload/fire capability gate rides the `Dead` marker
+/// (`damage::part_qualities` reads `facets.dead`), `Dead` is monotonic and never rolled back, and a
+/// replayed pre-death tick would therefore suppress thrust the forward sim had applied: divergence
+/// manufactured by the correction machinery.
+///
+/// That is unreachable today. `RollbackMode::Check` (`net::client`) starts every rollback at
+/// `last_confirmed_tick` and only when a mismatch is detected THERE — and the tank matches at
+/// pre-death ticks (it predicted the driver alive; the server confirms alive), so no replay window
+/// begins before the death tick. The watchdog's forced rollback (`net::watchdog`) is likewise gated
+/// on a breach, so it cannot independently target a pre-death tick either.
+///
+/// The residual is narrow and bounded: `last_confirmed_tick` is a GLOBAL frontier across all
+/// replicated entities, while a plain-replicated component is applied per-message as it arrives. So a
+/// newer dead `NetHealth` can be live while a rollback targets an older tick — but only when ANOTHER
+/// entity's stream lags across the death tick, and the error is then the cross-entity replication lag
+/// (1-3 ticks, sub-centimetre), not the rollback depth. Transient and self-healing.
+///
+/// **Two changes would make this real and depth-driven, and both must revisit this system:** setting
+/// the state `RollbackMode` to `Always` (which rolls back with no mismatch check), or predicting
+/// non-owned tanks (which multiplies the entities feeding that global frontier). Either one, and
+/// health needs a tick-correct representation — and note that fixing `NetHealth` alone would NOT be
+/// enough, because the capability gate reads the never-rolled-back `Dead` marker, not health.
+///
+/// Matches the publish order
 /// exactly — `TankVolumes` filtered to health-bearing volumes — so index `i` addresses the same
 /// volume the server collected. Ordered `.before(DamageConsequences)` so cookoff/crew-death read this
 /// tick's authoritative health. A length mismatch (e.g. rig not fully spawned yet) skips the tank
