@@ -429,39 +429,13 @@ fn parse_server_addr(raw: &str) -> Option<SocketAddr> {
     })
 }
 
-/// Where to load runtime assets from. Defaults to `assets` (relative to the working directory) for
-/// `cargo run`. A packaged client is launched with an unrelated working directory, so when we detect
-/// a bundle we resolve assets from the executable's own path:
-/// - macOS `.app`: `exe = <App>.app/Contents/MacOS/<bin>` → `../Resources/assets`.
-/// - Windows / Linux: `<exe_dir>/assets`, so a double-clicked `overmatch.exe` or an `./overmatch`
-///   launched from any cwd finds `assets/` beside it (the archive extracts binary + assets together).
-///
-/// Each branch only wins if the resolved directory actually exists, else it falls back to `"assets"`
-/// (the `cargo run` / dev case). Moved here from the retired single-player `main.rs`; the client is
-/// now the only Bevy-`App`-building product, so this lives beside where it is wired into `AssetPlugin`.
+/// `AssetPlugin`'s `file_path` — the `assets/` directory this client reads from, as a `String`
+/// (what `AssetPlugin` wants). Delegates to the shared, unit-tested resolver at `crate::assets`;
+/// the resolution logic (macOS `.app` → `Contents/Resources/assets`, flat Windows/Linux archive →
+/// `exe_dir/assets`, env overrides) lives there so the tank bake (`bake`, which compiles without the
+/// `net` feature) resolves the exact same directory. See `crate::assets::asset_root`.
 fn asset_root() -> String {
-    // macOS `.app`: exe = <App>.app/Contents/MacOS/<bin>  ->  ../Resources/assets.
-    #[cfg(target_os = "macos")]
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(resources) = exe
-            .parent()
-            .and_then(|macos| macos.parent())
-            .map(|contents| contents.join("Resources").join("assets"))
-        && resources.is_dir()
-    {
-        return resources.to_string_lossy().into_owned();
-    }
-    // Windows + Linux: the packaged archive extracts the binary and `assets/` into one folder, so
-    // resolve `<exe_dir>/assets` — a double-clicked `overmatch.exe` OR an `./overmatch` launched from
-    // any working directory finds its assets beside it. (Both are identical exe-relative resolution.)
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(assets) = exe.parent().map(|dir| dir.join("assets"))
-        && assets.is_dir()
-    {
-        return assets.to_string_lossy().into_owned();
-    }
-    "assets".to_string()
+    crate::assets::asset_root().to_string_lossy().into_owned()
 }
 
 /// Possession (spike map §6): the server's `ControlledBy` arrives as lightyear's `Controlled`

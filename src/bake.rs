@@ -26,7 +26,6 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use bevy::asset::io::file::FileAssetReader;
 use bevy::mesh::VertexAttributeValues;
 use bevy::prelude::*;
 use bevy::world_serialization::WorldInstanceReady;
@@ -116,13 +115,26 @@ pub(crate) fn plugin(app: &mut App) {
 }
 
 fn extract_at_startup(mut commands: Commands) {
-    // Same base-path rule the asset server uses (BEVY_ASSET_ROOT → CARGO_MANIFEST_DIR → exe dir),
-    // so the extractor and the loader always read the same file.
-    let path = FileAssetReader::get_base_path()
-        .join("assets")
-        .join(crate::tank::TIGER_GLB_PATH);
-    let geometry = extract_tank_geometry(&path)
-        .unwrap_or_else(|err| panic!("bake: extracting {} failed: {err}", path.display()));
+    // Resolve the glb through the SAME `asset_root()` that `AssetPlugin`'s `file_path` uses, so the
+    // bake and the asset server always open the same file. `asset_root()` already returns the
+    // `…/assets` directory (on a macOS `.app`, `Contents/Resources/assets` — not the exe dir), so we
+    // join the glb path straight onto it with NO extra `assets` segment. Using Bevy's raw
+    // `get_base_path()` here instead was the v0.3.0-alpha.2 macOS crash: it resolved the exe dir
+    // (`Contents/MacOS`) in a double-clicked bundle, `+ "assets"` → a directory that does not exist,
+    // while the asset server was reading `Contents/Resources/assets`. See `crate::assets`.
+    let root = crate::assets::asset_root();
+    let path = root.join(crate::tank::TIGER_GLB_PATH);
+    let geometry = extract_tank_geometry(&path).unwrap_or_else(|err| {
+        panic!(
+            "bake: extracting {} failed: {err}\n\
+             bake resolves the glb via asset_root() (BEVY_ASSET_ROOT → CARGO_MANIFEST_DIR → exe dir; \
+             a macOS `.app` exe in Contents/MacOS resolves to Contents/Resources/assets). \
+             Resolved assets root: {}. If this path is wrong, the packaging layout and asset_root() \
+             disagree — see crate::assets.",
+            path.display(),
+            root.display(),
+        )
+    });
     let mesh_nodes = geometry
         .nodes
         .iter()
