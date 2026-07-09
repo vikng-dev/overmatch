@@ -27,14 +27,29 @@ solo divergence, ranked:
    only at contact transients, where entity-index-keyed constraint ordering differs between the
    two worlds and contact chaos amplifies last-bit float differences. Irreducible by
    configuration; needs upstream canonical constraint ordering.
-2. **The dominant term: the correction machinery manufactures its own divergence.** Rollback
-   restore is imperfect — hull contact fails to re-form on the first replayed tick (hc=0 on 55%
-   of replayed ticks at 80 ms/10 ms jitter, 98.4% at lat0, with Δlv exactly −g·dt = 0.1533 m/s
-   vertical at k=1 while pose restore is near-exact, |Δp| p50 1.5 mm) — so each rollback seeds
-   mm-scale error that re-trips the 0.05 m position threshold ticks later. A self-feeding engine
-   in hull-contact states, felt as "the hull-stuck tank never settles". The multi-meter replay
-   errors are a *separate* machine: in-contact friction/load chaos through the replay (per-wheel
-   load deltas to 5.8e6 N), anti-correlated with the hc-loss signature.
+2. **The dominant term (RETIRED 2026-07-09): the correction machinery *appeared* to manufacture
+   its own divergence.** As recorded 2026-07-06: "hull contact fails to re-form on the first
+   replayed tick (hc=0 on 55% of replayed ticks at 80 ms/10 ms jitter, 98.4% at lat0, with Δlv
+   exactly −g·dt = 0.1533 m/s vertical at k=1 while pose restore is near-exact, |Δp| p50 1.5 mm)",
+   read as a self-feeding engine in hull-contact states, felt as "the hull-stuck tank never
+   settles". *(superseded 2026-07-06 by the `SPIKE_CONTACT_PROBE` reclassification (8a08d60),
+   retired by the `AuthoredLocalTransform` shield (33cc4e4), re-measured post-shield 2026-07-09.)*
+   Two corrections. (a) The mechanism was never a restore defect: it was attachment poisoning —
+   child-collider proxies levitating up to 2.8 m above the root, so `hc=0` was avian being honest
+   about a collider that had left (§2's contact-restore row in the design doc). (b) More
+   fundamentally, the `hc=0`-among-replayed-ticks metric never discriminated the alleged defect:
+   it conflates "no hull contact because the tank rides on its wheels or is airborne" (physically
+   correct, and the common case) with "contact failed to re-form after restore" — so the
+   98.4%/55% are a *poison indicator*, not a contact-restore failure rate, and are evidence for
+   neither direction. Post-shield re-measurement (2026-07-09; design doc §6): the raw rate went
+   *up* at 80/10 (100%, n=88 pooled replayed ticks) and down at lat0 (~62%, n=8 pooled), while the
+   discriminating metric the original lacked — client `hc=0` while the server holds `hc>0` — is
+   **0 across all 88 server-joined replayed ticks at 80/10**, and contact re-forms wherever the
+   hull is genuinely grounded. **The ranking's #2 is retired, not replaced:** solo rollback
+   frequency is now at the noise floor (2–4 per 20 s run vs the pre-shield storm), so no term is
+   promoted to dominant. The multi-meter replay errors remain a *separate* machine: in-contact
+   friction/load chaos through the replay (per-wheel load deltas to 5.8e6 N), absorbed by the
+   Layer-2 thresholds.
 3. **Input-timing slips under jitter** — rare. Trigger attribution is ~93% Position; the cause is
    state, not input.
 

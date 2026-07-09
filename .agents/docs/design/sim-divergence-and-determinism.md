@@ -7,7 +7,9 @@ log (measured), vendored crate sources (verified, cited by file:line), and web m
 **Updated 2026-07-06** after the architecture-review session: stale claims corrected in place
 (marked "(corrected 2026-07-06: …)"), new measured rows in §2, and §5 added with the
 solo-divergence model and the two-layer doctrine — whose canonical home is
-[ADR-0015](../adr/0015-divergence-doctrine.md).
+[ADR-0015](../adr/0015-divergence-doctrine.md). **Updated 2026-07-09:** §5's "dominant term"
+(the hc=0 contact-restore claim) re-measured after the shield and retired — see §6 (the
+post-shield measurement) and §7 (a lat0 connect-hang open finding).
 
 ## 1. Why two runs of "the same sim" diverge at all
 
@@ -43,7 +45,7 @@ zero latency, macOS-vs-macOS, identical binaries:
 | Contact transients on rough terrain (washboard/bump) | 20–60 velocity-threshold trips/s at 0.05 m/s; ~135/20 s run even post-fixes | **Irreducible class** — managed by thresholds (`ROLLBACK_VELOCITY` 0.20) |
 | Everything else (flat ground, driving, slewing, firing) | ~10 rollbacks/run at 100 ms, ~0 at rest | Healthy noise floor |
 | Check starvation: lightyear's receive-time mismatch check skipped at zero prediction margin and never retried (see §5) | 35–50 m divergence with fresh authority arriving every tick and **zero rollbacks**; 3,296 skip-trace lines in one run | **FIXED** (8ae795c, `net/watchdog.rs` backstop) — added 2026-07-06 |
-| Rollback contact-restore defect: hull contact fails to re-form on the first replayed tick, seeding mm-scale error that re-trips the 0.05 m bar | hc=0 on 55% of replayed ticks at 80/10 (98.4% at lat0); Δlv exactly −g·dt = 0.1533 m/s at k=1 while pose restore is near-exact (\|Δp\| p50 1.5 mm); contact re-forms at k=1 in 62/69 cases where the client's abandoned timeline still had it vs fails in 80/85 where it didn't | **FIXED 2026-07-06** — `AuthoredLocalTransform` + `shield_authored_collider_transform` (src/tank.rs), ADR-0015 Layer-2, upstream report candidate #3. (superseded 2026-07-06, same-day probe verdict: the abandoned-timeline restore mechanism confirmed that morning — collision state restored to the mispredicted timeline, child colliders not restored at all — is real but BENIGN: with `SPIKE_CONTACT_PROBE` the BVH leaves, moved-proxy set and contact pairs all self-heal within a tick once poses are honest. The actual killer is ATTACHMENT POISONING: lightyear_avian's `AvianReplicationMode::Position` registers `ApplyPosToTransform` as a required component of `Position`/`Rotation` (lightyear_avian3d-0.28.0 plugin.rs:620-623), dragging the tank's child colliders — which carry `Position`/`Rotation` as collider required components — into avian's `position_to_transform` write set (avian3d-0.7.0 physics_transform/mod.rs:254-257, mounted PreUpdate + PostUpdate by lightyear_avian). That system rewrites each proxy's LOCAL `Transform` as its sim-world `Position` `reparented_to` the parent bone's `GlobalTransform`, which is render-blended (FrameInterpolation/VisualCorrection/render-error offset) and one `Propagate` stale — render state leaking into sim, the ADR-0014 leak class, introduced upstream. Each frame deposits the sim-vs-render difference into the authored attachment; `propagate_collider_transforms` folds it into `ColliderTransform` and the pose ratchets (measured: proxies constant to 0.1 mm in healthy runs; 2–13 cm/tick during rollback storms, hull proxy reaching 2.8 m above the root — the sustained hc=0-while-"penetrating" windows were the proxy genuinely elsewhere, not a broad-phase defect, retiring the zombie-pair suspicion). Fix: strip `ApplyPosToTransform` from authored child colliders via an `On<Add>` observer, identical on both ends — the deposit is render-sized on the client but exists server-side too via the stale-`Propagate` term.) |
+| Rollback contact-restore defect: hull contact fails to re-form on the first replayed tick, seeding mm-scale error that re-trips the 0.05 m bar | hc=0 on 55% of replayed ticks at 80/10 (98.4% at lat0); Δlv exactly −g·dt = 0.1533 m/s at k=1 while pose restore is near-exact (\|Δp\| p50 1.5 mm); contact re-forms at k=1 in 62/69 cases where the client's abandoned timeline still had it vs fails in 80/85 where it didn't | **FIXED 2026-07-06** — `AuthoredLocalTransform` + `shield_authored_collider_transform` (src/tank.rs), ADR-0015 Layer-2, upstream report candidate #3. (superseded 2026-07-06, same-day probe verdict: the abandoned-timeline restore mechanism confirmed that morning — collision state restored to the mispredicted timeline, child colliders not restored at all — is real but BENIGN: with `SPIKE_CONTACT_PROBE` the BVH leaves, moved-proxy set and contact pairs all self-heal within a tick once poses are honest. The actual killer is ATTACHMENT POISONING: lightyear_avian's `AvianReplicationMode::Position` registers `ApplyPosToTransform` as a required component of `Position`/`Rotation` (lightyear_avian3d-0.28.0 plugin.rs:620-623), dragging the tank's child colliders — which carry `Position`/`Rotation` as collider required components — into avian's `position_to_transform` write set (avian3d-0.7.0 physics_transform/mod.rs:254-257, mounted PreUpdate + PostUpdate by lightyear_avian). That system rewrites each proxy's LOCAL `Transform` as its sim-world `Position` `reparented_to` the parent bone's `GlobalTransform`, which is render-blended (FrameInterpolation/VisualCorrection/render-error offset) and one `Propagate` stale — render state leaking into sim, the ADR-0014 leak class, introduced upstream. Each frame deposits the sim-vs-render difference into the authored attachment; `propagate_collider_transforms` folds it into `ColliderTransform` and the pose ratchets (measured: proxies constant to 0.1 mm in healthy runs; 2–13 cm/tick during rollback storms, hull proxy reaching 2.8 m above the root — the sustained hc=0-while-"penetrating" windows were the proxy genuinely elsewhere, not a broad-phase defect, retiring the zombie-pair suspicion). Fix: strip `ApplyPosToTransform` from authored child colliders via an `On<Add>` observer, identical on both ends — the deposit is render-sized on the client but exists server-side too via the stale-`Propagate` term.) Post-shield re-measured 2026-07-09 (§6): retired — the discriminating metric (client hc=0 while server hc>0) is 0/88 replayed ticks at 80/10, and the hc=0 percentages in this row are a poison indicator, not a contact-restore failure rate. |
 | In-contact replay load chaos (friction/load through the replay, a separate machine from the row above — anti-correlated with the hc-loss signature) | per-wheel load deltas to 5.8e6 N; the multi-meter replay errors | **OPEN** — absorbed by the Layer-2 thresholds (ADR-0015) — added 2026-07-06 |
 | Sphere-cast TOI noise vs large colliders: parry's GJK shape-cast converges on a *relative* tolerance (`eps_rel ≈ 1.09e-3`, parry3d-0.27.0 gjk.rs:661-780), so the sphere probe's `hit.distance` against the 1000 m ground slab came up one-sided up to ~172 mm SHORT — deterministic but pose-discontinuous. A standing divergence AMPLIFIER (mm-scale pose differences between the two ends → 10–40 kN per-wheel force differences through the 551 kN/m spring) and the at-rest limit-cycle pump (~2.2 kW measured, sustaining the ~12 mm / 0.29° hull wobble = the gunner-sight shake on flat ground) | one-sided distance error scales with collider extent: 0.25 mm at 5 m half-extent vs 139–172 mm at 500 m; 10–40 kN per-wheel force noise per tick at rest | **FIXED 2026-07-06** — witness-geometry reconstruction (`sphere_cast_ground_contact`, src/driving.rs): the same hit's `point1`/`normal1` are exact even when the TOI is wrong (measured `point1.y = 0.000000` throughout), so the travel is recomputed from them — GUARDED (same-day hardening): the reconstruction is trusted only for non-penetrating casts with a finite witness, clamped to `[toi_based, toi_based + 0.20]` (0.20 m = the worst live-measured one-sided short error, 199.8 mm; parry's TOI is a lower bound, so the band caps any witness pathology at the old error scale); penetrating starts (parry swaps the witness for a penetration contact whose normal is unrelated to the cast axis) and non-finite witnesses fall back to the old conservative TOI path. `tests/spherecast_scale.rs` pins the helper's math (reconstruction, band, fallbacks) and parry's TOI defect (the workaround-retirement tripwire); it does not bind the `apply_suspension` call site (a thin adapter over the helper) — that wiring's live guard is the idle at-rest harness metric (p.y spread ≲ 0.02 mm). Upstream report candidate #4: parry GJK shape-cast relative tolerance vs large shapes |
 
@@ -106,7 +108,10 @@ snapshotting, mentioned above) is the ecosystem's closest existing thing. Our ow
 divergence term (§2's contact-restore row) is precisely a replay-determinism failure, not a
 forward one. *(superseded 2026-07-06: the probe reclassified that row — the dominant term was
 attachment poisoning, a render→sim leak (a bug, upstream), not a replay-determinism failure;
-the replay-determinism framing stands for avian #734 itself, no longer for our dominant term.)*
+the replay-determinism framing stands for avian #734 itself, no longer for our dominant term.
+Further superseded 2026-07-09: post-shield re-measurement (§6) retires that "dominant term"
+outright — the hc=0 metric never discriminated a restore failure from wheel-borne/airborne
+contact-free ticks, so it was never evidence of a replay-determinism failure in the first place.)*
 
 ## 4. What this means for Overmatch
 
@@ -162,14 +167,23 @@ defect indicator, target ~zero**. Measured divergence causes, ranked:
    contact transients, where entity-index-keyed constraint ordering differs between the worlds
    and contact chaos amplifies last-bit float differences. Irreducible by config; needs upstream
    canonical ordering.
-2. **THE DOMINANT TERM: the correction machinery manufactures its own divergence.** Rollback
-   restore is imperfect — hull contact fails to re-form on the first replayed tick: hc=0 on 55%
-   of replayed ticks at 80/10, 98.4% at lat0, with Δlv exactly −g·dt = 0.1533 m/s vertical at k=1
-   while pose restore is near-exact (|Δp| p50 1.5 mm). Each rollback thus seeds mm-scale error
-   that re-trips the 0.05 m position threshold ticks later — a self-feeding engine in
-   hull-contact states, felt as "the hull-stuck tank never settles". The multi-meter replay
-   errors are a SEPARATE machine: in-contact friction/load chaos through the replay (per-wheel
-   load deltas to 5.8e6 N), anti-correlated with the hc-loss signature.
+2. **THE DOMINANT TERM — RETIRED (2026-07-09). The correction machinery *appeared* to manufacture
+   its own divergence.** As recorded 2026-07-06: "hull contact fails to re-form on the first
+   replayed tick: hc=0 on 55% of replayed ticks at 80/10, 98.4% at lat0, with Δlv exactly −g·dt =
+   0.1533 m/s vertical at k=1 while pose restore is near-exact (|Δp| p50 1.5 mm)", read as a
+   self-feeding engine in hull-contact states, felt as "the hull-stuck tank never settles".
+   *(superseded 2026-07-06 by the `SPIKE_CONTACT_PROBE` reclassification (8a08d60), retired by the
+   `AuthoredLocalTransform` shield (33cc4e4), re-measured post-shield 2026-07-09 — see §6.)* Two
+   things were wrong with the original reading. (a) The mechanism was attachment poisoning, not a
+   restore defect — child-collider proxies levitating up to 2.8 m above the root, so hc=0 was
+   avian being honest about a collider that had left (§2's contact-restore row). (b) The metric
+   itself never measured contact re-formation: hc=0-among-replayed-ticks conflates "no hull
+   contact because the tank rides on its wheels or is airborne" (physically correct, and the
+   common case) with "contact failed to re-form after restore" — so the 98.4%/55% are a POISON
+   INDICATOR, not a contact-restore failure rate, and are evidence for neither direction. The
+   multi-meter replay errors are a SEPARATE machine: in-contact friction/load chaos through the
+   replay (per-wheel load deltas to 5.8e6 N), anti-correlated with the hc-loss signature, still
+   absorbed by the Layer-2 thresholds.
 3. **Input-timing slips under jitter** — rare. Trigger attribution ~93% Position; the cause is
    state, not input.
 
@@ -205,3 +219,80 @@ upstream reports, keep workarounds small and documented-removable, let the conti
 compound.
 
 Web sources (background, treat as secondary): [DeepWiki avian determinism](https://deepwiki.com/avianphysics/avian/10.3-determinism) (machine-generated), [avian repo](https://github.com/avianphysics/avian), [bevy determinism discussion #2480](https://github.com/bevyengine/bevy/discussions/2480).
+
+## 6. 2026-07-09: post-shield contact-restore re-measurement
+
+The §2 contact-restore row and §5's ranked term #2 both carried the pre-shield hc=0 numbers
+(98.4% at lat0, 55% at 80/10), captured 2026-07-06 **~1 h before** the `AuthoredLocalTransform`
+shield landed (33cc4e4). Nobody had re-measured after the shield. This section is that
+measurement. Binary built from `src/` as of 0fa6cd8 — the last commit touching it; the commits
+after it are docs and editor config (shield 33cc4e4 and probe reclassification 8a08d60
+both in). Same harness as the original: server `SPIKE_PERTURB=0`, client `SPIKE_SIM_LONG=1
+SPIKE_SIMULATE_INPUT=1` (the ~20 s dead-straight course crossing the bump z≈−70 and washboard
+z≈−82…−90), each of `SPIKE_LATENCY_MS=0` and `SPIKE_LATENCY_MS=80 SPIKE_JITTER_MS=10`. Metric
+identical to the original: fraction of client `tick` rows with `rp=true` where `hc==0` — the
+`SPIKE_TRACE` schema's own fields, no instrumentation added. `NAN-TRIPWIRE|FIXED-NAN|panicked|
+B0004` all 0 across every client and server log.
+
+**The raw rate did not fall. Read this as retirement of the metric, not of a number.**
+
+| Condition | pre-shield (poison) | post-shield raw hc=0 | replayed-tick n |
+|---|---|---|---|
+| lat0 | 98.4% | 50% and 75% (2 runs); pooled 5/8 = **62.5%** | 4 per run, **8 pooled** |
+| 80/10 | 55% | 100% every run (6/6); pooled 88/88 = **100%** | 14–21 per run, **88 pooled** |
+
+The 80/10 rate went *up* (55% → 100%). That is not a regression, because the metric conflates
+wheel-borne/airborne hc=0 (physically correct) with a restore failure: a higher number here means
+only that more of the few replay ticks fell in wheel-borne cruise. The load-bearing evidence is
+the discriminating metric the original methodology lacked:
+
+- **Client hc=0 while the server holds hc>0 = 0, across all 88 server-joined replay ticks at
+  80/10.** On every replayed tick the server *also* held hc=0 — there was no hull contact to
+  re-form and the client agreed. Contact re-forms wherever it should: the one lat0 replay tick
+  with the hull genuinely grounded (gnd=16, p.y=−0.126) read hc=1.
+- **Airborne/wheel-borne decomposition (lat0).** Every hc=0 replay tick is either airborne
+  (gnd=0, p.y≈1.5, falling) or wheel-borne (gnd=16, hull just clear of the ground) — states where
+  hc=0 is the correct reading (cf. e12a07b, "hc=0 on every wheel-borne row"). hc=1 appears exactly
+  when the hull is actually on the ground.
+- **Attachment healed (`SPIKE_CONTACT_PROBE`, 3505 lines, lat0).** The proxy's root-relative
+  offset `cto` is constant; `leaf_dvg`/`tleaf_dvg` = 0.000000 throughout; no proxy levitation —
+  the 2.8 m ratchet the poison produced is gone. The BVH-stomp and zombie-pair suspects stay
+  exonerated.
+- **Structural: the denominator collapsed.** Solo rollbacks are now 2–4 per 20 s run (noise
+  floor), versus the pre-shield poison storm's position-rollback-every-~7-ticks that produced the
+  hundreds of replayed ticks the old percentages were taken over. This is a result in itself, not
+  a ratio: the machine that manufactured the replay-tick population is gone.
+
+**Verdict: first-replayed-tick contact re-formation is retired as a defect.** No remaining
+contact-restore barrier to predicting non-owned tanks surfaced in this investigation.
+
+Limits, stated in the open:
+
+- **The lat0 sample is thin — n=4 per run, 8 pooled (two runs).** Do not read 62.5% as a solid
+  figure; it is 5 of 8 ticks. It could not be grown because of the connect hang in §7.
+- **The server-join and the airborne/wheel-borne decomposition are NEW metrics, not the original
+  methodology.** The original's "contact re-forms in 62/69 cases where the abandoned timeline
+  still had it vs fails in 80/85 where it didn't" split is not reconstructable from the current
+  trace schema — it needs the abandoned-timeline contact state, which no trace field carries. So
+  these numbers are a fresh, more discriminating read that *retires* the old metric, not a
+  like-for-like time series continuing the 98.4%/55%.
+
+## 7. Open finding (2026-07-09): lat0 client hang at connect — unresolved, uninvestigated
+
+While gathering §6 the zero-latency client (`SPIKE_LATENCY_MS=0`, headless simulate) reproducibly
+**froze at connect**: the main loop stalls immediately after `net::rig`'s "first physics tick
+complete — rollback enabled", records ~10 ticks, then lives ~14 s frozen (the only tell is a
+`gilrs::ff::server` "iteration took >50 ms" warning that never appears in a clean run) before the
+process is SIGKILLed (exit 137, signal 9). It is **lat0-specific** — the 80/10 condition completed
+6/6 clean — and **intermittent**, not deterministic: the same lat0 binary also completed on 2 runs
+(the §6 lat0 data). It reproduces on a quiet box, with no OOM/jetsam kill, no crash report, and no
+thermal throttling (all three verified). Peak RSS on the runs that survive is ~0.7 GB, so it is
+not memory. It is not the contact phenomenon.
+
+**Hypothesis worth testing (untested):** the zero-prediction-margin condition already documented
+in `src/net/watchdog.rs` — loopback RTT plus `InputDelayConfig::balanced()` drives the prediction
+margin to zero, the regime where lightyear's receive-time mismatch check starves. A startup stall
+in exactly that regime would fit the lat0-only, at-first-rollback-enable signature. **Left
+unresolved and uninvestigated** — not chased, no `src/` change. Methodological cost: it caps the
+lat0 sample size for any replayed-tick metric (§6's lat0 n=8), so lat0 measurements here lean on
+the two clean runs plus the 80/10 server-join.
