@@ -177,47 +177,50 @@ fn detect_health_drops(
             continue;
         }
 
-        // Find the worst per-volume drop and whether any drop occurred at all.
-        let mut worst_drop = 0.0f32;
-        let mut worst_volume = None;
-        let mut any_drop = false;
-        for (i, (&volume, &now)) in bearers.iter().zip(&net.0).enumerate() {
-            let drop = memory.0[i] - now;
-            if drop > HIT_EPS_HP {
-                any_drop = true;
-                if drop > worst_drop {
-                    worst_drop = drop;
-                    worst_volume = Some(volume);
-                }
-            }
-        }
+        // The worst per-volume drop since last snapshot (`None` if nothing dropped).
+        let worst = worst_drop(&memory.0, &net.0);
         memory.0 = net.0.clone();
 
-        if !any_drop {
+        let Some((worst_index, drop_hp)) = worst else {
             continue;
-        }
+        };
+        let worst_volume = bearers.get(worst_index).copied();
 
         if is_own {
             // Severity from the worst volume's share of its own pool; a light chip barely nudges, a
             // heavy penetration jolts hard.
             let severity = worst_volume
                 .and_then(|v| health.get(v).ok())
-                .map(|hp| (worst_drop / hp.max.max(1.0)).clamp(0.0, 1.0))
+                .map(|hp| (drop_hp / hp.max.max(1.0)).clamp(0.0, 1.0))
                 .unwrap_or(0.5);
             let bearing = worst_volume.and_then(|v| hit_bearing(&transforms, root, v));
             add_camera_kick(&mut kick, severity, bearing);
             flash.0 = 1.0;
             info!(
-                "hit-feel: OWN tank hit — worst drop {worst_drop:.1} hp (severity {severity:.2}, \
+                "hit-feel: OWN tank hit — worst drop {drop_hp:.1} hp (severity {severity:.2}, \
                  bearing {bearing:?}) → camera kick + damage flash"
             );
         } else {
             confirm.0 = 1.0;
-            info!(
-                "hit-feel: opponent {root} health dropped (worst {worst_drop:.1} hp) → hit-confirm"
-            );
+            info!("hit-feel: opponent {root} health dropped (worst {drop_hp:.1} hp) → hit-confirm");
         }
     }
+}
+
+/// Scan two same-length health snapshots for the single largest per-volume DROP, returning its index
+/// and magnitude — or `None` if nothing fell by more than [`HIT_EPS_HP`] (an all-increase snapshot, a
+/// respawn's health reset, raises nothing). Pure, so the detection core is unit-testable without the
+/// live authoritative hit the spawn-point harness cannot produce. A length mismatch is the caller's to
+/// screen (it means the rig is mid-spawn); here mismatched tails are simply not compared.
+fn worst_drop(prev: &[f32], now: &[f32]) -> Option<(usize, f32)> {
+    let mut worst: Option<(usize, f32)> = None;
+    for (i, (&before, &after)) in prev.iter().zip(now).enumerate() {
+        let drop = before - after;
+        if drop > HIT_EPS_HP && worst.is_none_or(|(_, w)| drop > w) {
+            worst = Some((i, drop));
+        }
+    }
+    worst
 }
 
 /// The struck volume's lateral position in the tank ROOT's local frame, `+` = struck on the right —
@@ -346,4 +349,58 @@ fn drive_hit_confirm(
         confirm.0 = 0.0;
     }
     *marker.into_inner() = TextColor(Color::srgba(1.0, 1.0, 1.0, confirm.0));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_change_is_no_hit() {
+        assert_eq!(worst_drop(&[100.0, 50.0, 25.0], &[100.0, 50.0, 25.0]), None);
+    }
+
+    #[test]
+    fn an_increase_raises_nothing() {
+        // A respawn resets health UP; that must not read as a hit.
+        assert_eq!(worst_drop(&[0.0, 10.0], &[100.0, 100.0]), None);
+    }
+
+    #[test]
+    fn picks_the_largest_drop_and_its_index() {
+        // Volume 0 chips by 5, volume 2 by 40 — the worst is volume 2, and it is what the bearing
+        // reads off. Volume 1 rose and is ignored.
+        let (index, drop) = worst_drop(&[100.0, 30.0, 80.0], &[95.0, 60.0, 40.0]).unwrap();
+        assert_eq!(index, 2);
+        assert!((drop - 40.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_sub_epsilon_chip_is_noise() {
+        // Below HIT_EPS_HP: replication float churn, not a hit.
+        assert_eq!(worst_drop(&[100.0], &[100.0 - HIT_EPS_HP / 2.0]), None);
+    }
+
+    #[test]
+    fn a_kick_leans_toward_the_struck_side_and_clamps() {
+        // A hit on the right (+bearing) yaws one way; a burst never exceeds the per-axis clamp.
+        let mut kick = CameraKick::default();
+        add_camera_kick(&mut kick, 1.0, Some(2.0));
+        assert!(kick.angular.x > 0.0, "always a pitch-up punch");
+        let right_yaw = kick.angular.y;
+        let mut left = CameraKick::default();
+        add_camera_kick(&mut left, 1.0, Some(-2.0));
+        assert!(
+            left.angular.y.signum() != right_yaw.signum(),
+            "left and right hits yaw opposite ways"
+        );
+        for _ in 0..50 {
+            add_camera_kick(&mut kick, 1.0, Some(2.0));
+        }
+        assert!(kick.angular.x <= KICK_MAX_RAD + 1e-6, "pitch stays clamped");
+        assert!(
+            kick.angular.y.abs() <= KICK_MAX_RAD + 1e-6,
+            "yaw stays clamped"
+        );
+    }
 }
