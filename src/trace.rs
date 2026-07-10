@@ -63,8 +63,15 @@
 //!   identical `h` on both ends is bit-exact agreement. `hpos`/`hrot`/`hlv`/`hav`/`hsim` — the
 //!   per-component sub-hashes (`hsim` folds `DriveState` + `TankSim` servos/weapons/anchors, the
 //!   hidden state no pose field exposes), so a mismatch localizes to a component and the analyzer can
-//!   name the first-divergence sub-component. See `hash_tank_state`. Caveat that remains BY DESIGN:
-//!   avian's
+//!   name the first-divergence sub-component. `hsim` decodes further into `hdrv` (`DriveState`
+//!   throttle/steer), `hsrv` (servo current/previous/velocity), `hrld` (weapon reload timers),
+//!   `hrec` (barrel recoil offset/velocity), `hanc` (wheel brush anchors incl. the Some/None grip
+//!   discriminant) — `hsim` is their fixed-order combination, so a carried-state mismatch names its
+//!   field family, not just "sim". With `SPIKE_TRACE_SIM_FIELDS` set the row also carries `simf`,
+//!   the RAW carried-state values (`srv` per-servo triples, `wpn` per-weapon triples, `anch`
+//!   per-wheel points-or-null), so the analyzer can report carried-state magnitudes, not just
+//!   booleans (`thr`/`str` are already row fields). See `hash_tank_state`. Caveat that remains BY
+//!   DESIGN: avian's
 //!   narrow phase measures manifolds from the START-of-step pose while this row records the
 //!   post-solve pose, so inside a client rollback-correction burst (rows near `rp`/`rollback`
 //!   activity) `pen` can report a deep pre-solve overlap the solver then pushed out — real
@@ -146,6 +153,11 @@ struct TraceWriter {
     /// The composition role, carried so the Startup `write_meta` system can stamp the `meta` row
     /// (it runs after `install`, which no longer writes the row itself — see fix 6).
     role: &'static str,
+    /// `SPIKE_TRACE_SIM_FIELDS` was set: tick rows also carry `simf`, the raw carried-state values
+    /// behind the `hsim` sub-hashes, so the offline analyzer can report magnitudes (Δreload,
+    /// Δservo angle, anchor point distance) instead of hash booleans. Off by default — it widens
+    /// every tick row.
+    sim_fields: bool,
 }
 
 impl TraceWriter {
@@ -253,7 +265,19 @@ struct TankStateHash {
     rot: u64,
     lv: u64,
     av: u64,
+    /// The carried-state combination (fixed order: `drv, srv, rld, rec, anc`) — kept so existing
+    /// analysis keyed on `hsim` still gets its single "did any carried state differ?" boolean.
     sim: u64,
+    /// `DriveState` throttle/steer.
+    drv: u64,
+    /// Servo current/previous/velocity, every servo in slot order.
+    srv: u64,
+    /// Weapon reload timers, every weapon in slot order.
+    rld: u64,
+    /// Barrel recoil offset/velocity, every weapon in slot order.
+    rec: u64,
+    /// Wheel brush anchors (Some/None discriminant + point), every wheel in slot order.
+    anc: u64,
 }
 
 /// Hash a tank root's canonical sim state (see the module-level note on world-independence). Pure and
@@ -285,30 +309,50 @@ fn hash_tank_state(
     ha.write_vec3(angvel);
     let av = ha.finish();
 
-    let mut hs = Fnv64::new();
-    hs.write_f32(drive.throttle());
-    hs.write_f32(drive.steer());
+    // The carried state hashes as five per-field-family streams so a `hsim` mismatch names its
+    // field (servo vs reload vs recoil vs anchor vs drive), then combines into the single `sim`
+    // boolean existing analysis keys on.
+    let mut hd = Fnv64::new();
+    hd.write_f32(drive.throttle());
+    hd.write_f32(drive.steer());
+    let drv = hd.finish();
+
+    let mut hsv = Fnv64::new();
     for servo in &sim.servos {
         for field in servo.hash_fields() {
-            hs.write_f32(field);
+            hsv.write_f32(field);
         }
     }
+    let srv = hsv.finish();
+
+    let mut hrl = Fnv64::new();
+    let mut hrc = Fnv64::new();
     for weapon in &sim.weapons {
-        hs.write_f32(weapon.reload_remaining);
-        hs.write_f32(weapon.recoil_offset);
-        hs.write_f32(weapon.recoil_velocity);
+        hrl.write_f32(weapon.reload_remaining);
+        hrc.write_f32(weapon.recoil_offset);
+        hrc.write_f32(weapon.recoil_velocity);
     }
+    let rld = hrl.finish();
+    let rec = hrc.finish();
+
+    let mut han = Fnv64::new();
     for anchor in &sim.anchors {
         // A discriminant distinguishes `None` (slipping/airborne) from `Some((0,0,0))` — a grip
         // released vs a grip anchored exactly at the origin are different sim states and must hash
         // apart.
         match anchor {
-            None => hs.write_u32(0),
+            None => han.write_u32(0),
             Some(point) => {
-                hs.write_u32(1);
-                hs.write_vec3(*point);
+                han.write_u32(1);
+                han.write_vec3(*point);
             }
         }
+    }
+    let anc = han.finish();
+
+    let mut hs = Fnv64::new();
+    for sub in [drv, srv, rld, rec, anc] {
+        hs.write_u64(sub);
     }
     let sim_hash = hs.finish();
 
@@ -325,6 +369,11 @@ fn hash_tank_state(
         lv,
         av,
         sim: sim_hash,
+        drv,
+        srv,
+        rld,
+        rec,
+        anc,
     }
 }
 
@@ -364,7 +413,12 @@ fn install(app: &mut App, role: &'static str) -> bool {
         }
     };
     info!("trace: recording {role} rows to {}", resolved.display());
-    app.insert_resource(TraceWriter { sink, role });
+    let sim_fields = std::env::var("SPIKE_TRACE_SIM_FIELDS").is_ok();
+    app.insert_resource(TraceWriter {
+        sink,
+        role,
+        sim_fields,
+    });
     // The `meta` row is written from Startup (not here) so `tick_hz` can read the app's actual
     // `Time<Fixed>` timestep, which may not be configured at plugin-build time. Startup runs before
     // any Update/FixedUpdate recorder, so it stays the first row.
@@ -707,7 +761,7 @@ fn record_tick(
             controlled
         };
 
-        // `mut` for the `rp` stamp below.
+        // `mut` for the `rp` stamp and the `simf` verbose dump below.
         let mut row = json!({
             "k": "tick",
             "tick": tick_no,
@@ -735,7 +789,41 @@ fn record_tick(
             "hlv": hash.lv,
             "hav": hash.av,
             "hsim": hash.sim,
+            // The carried-state decode: which field family a `hsim` mismatch lives in.
+            "hdrv": hash.drv,
+            "hsrv": hash.srv,
+            "hrld": hash.rld,
+            "hrec": hash.rec,
+            "hanc": hash.anc,
         });
+        // Raw carried-state values (`SPIKE_TRACE_SIM_FIELDS`): the magnitudes behind the sub-hash
+        // booleans. `thr`/`str` (DriveState) are already row fields above.
+        if trace.sim_fields {
+            let srv: Vec<Value> = sim
+                .servos
+                .iter()
+                .map(|s| Value::Array(s.hash_fields().iter().map(|&f| num(f)).collect()))
+                .collect();
+            let wpn: Vec<Value> = sim
+                .weapons
+                .iter()
+                .map(|w| {
+                    Value::Array(vec![
+                        num(w.reload_remaining),
+                        num(w.recoil_offset),
+                        num(w.recoil_velocity),
+                    ])
+                })
+                .collect();
+            let anch: Vec<Value> = sim
+                .anchors
+                .iter()
+                .map(|a| a.map_or(Value::Null, vec3))
+                .collect();
+            row.as_object_mut()
+                .expect("json! built an object")
+                .insert("simf".into(), json!({"srv": srv, "wpn": wpn, "anch": anch}));
+        }
         // Mark rollback-replay ticks so analysis keeps the corrected value for this tick number.
         // Never set in the single-player composition (`is_replay` is always false there — no rollback).
         if is_replay {
@@ -878,16 +966,17 @@ mod tests {
     use super::*;
     use crate::tank::WeaponState;
 
-    /// A representative, non-trivial sim state (both `Vec`s populated, one anchor set and one
-    /// released) so the canonicalization is exercised over every field path.
+    /// A representative, non-trivial sim state (every `Vec` populated, one anchor set and one
+    /// released, non-default drive) so the canonicalization is exercised over every field path —
+    /// including each of the five carried-state sub-hash streams.
     fn sample() -> (Vec3, Quat, Vec3, Vec3, DriveState, TankSim) {
         let position = Vec3::new(1.5, 2.0, -70.25);
         let rotation = Quat::from_rotation_y(0.3);
         let linvel = Vec3::new(0.0, -0.153, 4.2);
         let angvel = Vec3::new(0.01, -0.02, 0.03);
-        let drive = DriveState::default();
+        let drive = DriveState::test_new(0.75, -0.25);
         let sim = TankSim {
-            servos: Vec::new(),
+            servos: vec![crate::tank::ServoState::test_new(0.4, 0.39, 0.64)],
             weapons: vec![WeaponState {
                 reload_remaining: 1.25,
                 recoil_offset: -0.4,
@@ -952,7 +1041,7 @@ mod tests {
     }
 
     /// A released anchor (`None`) must not collide with one anchored at the origin (`Some(0,0,0)`):
-    /// the discriminant is load-bearing carried sim state.
+    /// the discriminant is load-bearing carried sim state — and it localizes to the `anc` stream.
     #[test]
     fn anchor_none_differs_from_some_origin() {
         let (p, q, lv, av, drive, _sim) = sample();
@@ -969,6 +1058,89 @@ mod tests {
         let hn = hash_tank_state(p, q, lv, av, &drive, &none);
         let hs = hash_tank_state(p, q, lv, av, &drive, &some);
         assert_ne!(hn.sim, hs.sim);
+        assert_ne!(hn.anc, hs.anc);
+        // The other carried-state streams are untouched by an anchor flip.
+        assert_eq!(hn.drv, hs.drv);
+        assert_eq!(hn.srv, hs.srv);
+        assert_eq!(hn.rld, hs.rld);
+        assert_eq!(hn.rec, hs.rec);
+    }
+
+    /// Each carried-state field family flips ITS sub-hash (plus `sim` and `combined`) and no other —
+    /// the per-field decode the window attribution relies on. One-ULP flips, same bar as the
+    /// velocity-bit test.
+    #[test]
+    fn carried_state_flip_localizes_to_its_family() {
+        let (p, q, lv, av, drive, sim) = sample();
+        let base = hash_tank_state(p, q, lv, av, &drive, &sim);
+
+        // Drive: steer one ULP off.
+        let drive2 = DriveState::test_new(
+            drive.throttle(),
+            f32::from_bits(drive.steer().to_bits() ^ 1),
+        );
+        let d = hash_tank_state(p, q, lv, av, &drive2, &sim);
+        assert_ne!(base.drv, d.drv);
+        assert_ne!(base.sim, d.sim);
+        assert_ne!(base.combined, d.combined);
+        assert_eq!(
+            (base.srv, base.rld, base.rec, base.anc),
+            (d.srv, d.rld, d.rec, d.anc)
+        );
+        assert_eq!(
+            (base.pos, base.rot, base.lv, base.av),
+            (d.pos, d.rot, d.lv, d.av)
+        );
+
+        // Servo: velocity one ULP off.
+        let [cur, prev, vel] = sim.servos[0].hash_fields();
+        let mut sim2 = sim.clone();
+        sim2.servos[0] =
+            crate::tank::ServoState::test_new(cur, prev, f32::from_bits(vel.to_bits() ^ 1));
+        let s = hash_tank_state(p, q, lv, av, &drive, &sim2);
+        assert_ne!(base.srv, s.srv);
+        assert_ne!(base.sim, s.sim);
+        assert_eq!(
+            (base.drv, base.rld, base.rec, base.anc),
+            (s.drv, s.rld, s.rec, s.anc)
+        );
+
+        // Reload: timer one ULP off — must NOT touch the recoil stream despite sharing the weapon.
+        let mut sim3 = sim.clone();
+        sim3.weapons[0].reload_remaining =
+            f32::from_bits(sim.weapons[0].reload_remaining.to_bits() ^ 1);
+        let r = hash_tank_state(p, q, lv, av, &drive, &sim3);
+        assert_ne!(base.rld, r.rld);
+        assert_ne!(base.sim, r.sim);
+        assert_eq!(
+            (base.drv, base.srv, base.rec, base.anc),
+            (r.drv, r.srv, r.rec, r.anc)
+        );
+
+        // Recoil: offset one ULP off — must NOT touch the reload stream.
+        let mut sim4 = sim.clone();
+        sim4.weapons[0].recoil_offset = f32::from_bits(sim.weapons[0].recoil_offset.to_bits() ^ 1);
+        let c = hash_tank_state(p, q, lv, av, &drive, &sim4);
+        assert_ne!(base.rec, c.rec);
+        assert_ne!(base.sim, c.sim);
+        assert_eq!(
+            (base.drv, base.srv, base.rld, base.anc),
+            (c.drv, c.srv, c.rld, c.anc)
+        );
+
+        // Anchor: point one ULP off.
+        let mut sim5 = sim.clone();
+        sim5.anchors[0] = sim.anchors[0].map(|mut a| {
+            a.x = f32::from_bits(a.x.to_bits() ^ 1);
+            a
+        });
+        let a = hash_tank_state(p, q, lv, av, &drive, &sim5);
+        assert_ne!(base.anc, a.anc);
+        assert_ne!(base.sim, a.sim);
+        assert_eq!(
+            (base.drv, base.srv, base.rld, base.rec),
+            (a.drv, a.srv, a.rld, a.rec)
+        );
     }
 
     /// Entity-id independence, made explicit: the hash function takes no entity and no ECS handle, so

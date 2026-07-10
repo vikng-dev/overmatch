@@ -58,11 +58,25 @@ pub(crate) fn kick_recoil(sim: &mut TankSim, slot: usize, weapon: &Weapon) {
 pub fn plugin(app: &mut App) {
     // The gun is sim: reload and firing run on the fixed clock, driven by each tank's `TankCommand`
     // — `fire` consumes the click edge, so it must precede the command layer's edge clear.
+    //
+    // `apply_recoil.after(fire)` is DETERMINISM-LOAD-BEARING, not a preference: both systems take
+    // `&mut TankSim`, and without an explicit edge Bevy's executor may serialize them in either
+    // order — an order that measurably differed between client and server processes (2026-07-10,
+    // divergence instrument): on the fire tick one end integrated the spring before the kick and
+    // the other after, a one-tick recoil phase offset that read as a 33-tick `hrec` divergence
+    // window per shot. The canonical order is kick-then-integrate — a shot's kick springs the
+    // barrel the SAME tick, matching what the remote-fire path already promises
+    // (`net::client::apply_pending_recoil_kicks` runs `.before(GameplaySet)` for exactly that).
+    //
+    // The remaining unordered `&mut TankSim` neighbors (driving.rs's suspension/drive chain) write
+    // DISJOINT TankSim fields (anchors, never weapons), so their order against these systems
+    // cannot change values today. If a shooting system ever touches anchors — or a driving system
+    // touches weapons — that pair must be ordered explicitly too.
     app.add_systems(
         FixedUpdate,
         (
             (tick_reload, fire).chain().before(ConsumeCommandEdges),
-            apply_recoil,
+            apply_recoil.after(fire),
         )
             .in_set(GameplaySet),
     );

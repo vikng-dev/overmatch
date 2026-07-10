@@ -450,3 +450,113 @@ Reading, in order of importance:
   manifolds, broad-phase topology are not in the hash; a constraint-order divergence registers as
   a pose/velocity mismatch without naming its mechanism — that still needs the dedicated probes
   (§2, §6).
+
+## 9. 2026-07-10: the hsim windows decoded — three classes, one repo fix (task #24)
+
+The §8 baseline left one open divergence term: `hsim`-only windows at connect and post-fire,
+attributed by window timing alone because `hsim` was one boolean. This section decodes them.
+Instrument change (branch `hsim-divergence-decode`): `hsim` now splits into `hdrv`/`hsrv`/
+`hrld`/`hrec`/`hanc` (drive, servo, reload, recoil, anchor — `hsim` is their fixed-order
+combination), `SPIKE_TRACE_SIM_FIELDS=1` puts the raw carried values on the row (`simf`), and
+the analyzer gained a MISMATCH WINDOWS section (per-window field attribution, magnitudes,
+opens@first-shared-tick vs mid-run, replay-row counts). Every number below is MEASURED
+(2026-07-10, dev binaries, same machine, 80/10 jitter, `SPIKE_PERTURB=0`; runs d2–d8, f1, g1–g3 on
+`hsim-divergence-decode` @ 5187643 (pre-rebase 0d99a38), rebaseline traces main @ 2a482c6).
+
+### Step zero — the metric survives
+
+The §8 windows are final-timeline divergence, not a join artifact. Verified: lightyear's
+rollback replay runs the full `FixedMain` schedule (vendored `lightyear_prediction`
+`rollback.rs:1137`), so `record_tick` re-records replayed ticks at the same `FixedLast` phase
+(`rp`-stamped) and the keep-last join compares corrected-timeline values; server traces carry
+zero duplicate (tick, entity) rows; the tick join has zero holes; and across every run no
+replay row ever flipped client/server agreement in either direction (0 "replay fixed it" /
+0 "replay broke it" ticks). Window ticks are predominantly forward-simulation rows (§8 long
+connect window: 56/70; every permanent window: 100%). One §8 reading does not survive: windows
+do not "open at the connect rollback" — they open at the FIRST SHARED TICK in every run
+(the two ends had never agreed yet), and window width is flat (~67–73 ticks) across rollback
+depths 2–17, so rollback-replay seeding is out as the mechanism.
+
+### Class 1 — the connect window is aim-stream cold start (servo-only, benign)
+
+Every instrumented run (7/7 with aim input): a window opening at the first shared tick,
+closing 67–73 ticks later, attributed servo=ALL, reload=recoil=anchor=drive=0, max |Δservo|
+0.6148 in every run. The raw values (d3): at the first shared tick the client's servos are
+already slewing while the server's sit at bit-exact 0.0; the server then runs the IDENTICAL
+trajectory 17–28 ticks late (server t300 ≡ client t272, bit-equal). Mechanism: the scripted
+aim is held from script tick 0, the client's prediction applies it immediately, and the
+server's view of that input stream starts ~2 dozen ticks later at join; both ends then chase
+the same constant hull-local target, so the servo state contracts to agreement (ADR-0016).
+Controls: throttle starts at script tick 128 — after the window closes — so aim is the only
+live input during the transient (drive=0 in every window is consistent, not exculpatory);
+the reverse course (aim None, throttle-only from tick 128) scores **100.00% hash match on all
+589 shared ticks through its own connect rollback** — restore and replay of
+`TankSim`/`DriveState` are bit-clean when no input is in flight at join. No fix needed: this
+is inherent predict-ahead join behavior, confined to servo fields, contractive by
+construction. The §8 hypothesis list: restore fidelity (1) and edge semantics (2) are dead —
+the reverse control rules them out; anchors (3) belong to class 3 below; writer asymmetry (4)
+was the right shape but the writer is the input stream itself.
+
+### Class 2 — the post-fire window was a system-order ambiguity (FIXED, f516fb6)
+
+The fire-adjacent 33-tick window (§8 long 1767–1799; here d5 556..588, d8 561..593; 3 of 6
+pre-fix runs) decodes as recoil=33, everything else 0, max |Δrecoil| 3.062. Raw values (d5):
+reload timers in perfect lockstep (both ends 3.0000 on the fire tick — the shot fired the
+SAME tick on both ends), while the server's recoil (offset, velocity) at tick T+1 bit-equals
+the client's at tick T; on the fire tick the server holds the raw kick (off=0, vel=14.0), the
+client one integration step (off=0.1709, vel=10.9375). Mechanism: `fire` (applies the kick)
+and `apply_recoil` (integrates the spring) both take `&mut TankSim` with NO ordering edge —
+Bevy execution-order ambiguity; each process resolves its own order, and when they resolve
+opposite the spring integrates on opposite sides of the kick: a one-tick recoil phase that
+damps on the spring's ~33-tick settle. The window length is the spring settle time, the 3.062
+is (kick − one integration step) — both now predictable from spec. Fix: explicit
+`apply_recoil.after(fire)` (kick-then-integrate, the order the remote-fire path
+`apply_pending_recoil_kicks` already promises). Post-fix evidence: 0 of 4 runs (f1, g1–g3)
+show any `hrec` window, including two whose class-3 window SPANS the fire tick with recoil=0
+throughout (f1, g3) — the pre-fix equivalent (d7) carried recoil=33 inside its class-3 window. The remaining unordered `&mut TankSim` neighbors
+(driving's suspension/drive chain vs shooting) write disjoint field families; the invariant
+and its tripwire comment live at the `shooting::plugin` registration.
+
+### Class 3 — perturbation-seeded physics divergence (OPEN — wave-A territory)
+
+The rebaseline's new term, now characterized: a mid-run window carrying pos+rot+lv+av (+servo/
+anchor as symptoms), opening at a perturbation event and persisting to trace end. Seeds
+observed: the fire tick (rebaseline short @493, short3 @497 — initial |Δp| 0.230 mm in BOTH,
+the same seed twice) and the connect-replay tail (d7 @295: ~1.7 mm; f1 @358 after a
+one-tick blip @355). The connect-seeded specimens carry an ALL-16-wheel anchor
+discriminant flip on the seed tick (one end's anchors all release/re-grip, the other's don't;
+d6/d7/f1 — d6's healed when a rollback snapped it back, d7/f1's persisted); the fire-seeded
+specimen g3 seeds with no flip (its anchor term is pure derived world-point offset, 5.2 mm),
+with reload=recoil=0 proving the seed is the shell-spawn/hull-impulse perturbation itself,
+not the (now-fixed) recoil ambiguity. Below the rollback thresholds
+position is non-contractive: the offset can contract dynamically (d7: 1.7 mm → 78 µm by
+t450) then re-amplify at contact events (d7 late course: |Δlv| 6.27 m/s, |Δp| 64 mm, still no
+rollback). Servo and anchor divergence inside these windows is DERIVED — aim targets are
+pose-dependent and anchors are world points — so `hsim` stays red for the window's whole
+life; reload/recoil/drive stay 0 throughout. Incidence: 3/12 valid decoded runs (d7, f1, g3), 2/3 rebaseline shorts. Mechanism hypothesis (UNVERIFIED, deliberately left to the wave-A A/B): world-order-
+sensitive contact/solver behavior at island-change events — the avian constraint-order class
+(upstream report #2) and/or the BVH contact-restore class (#5); the wave-A avian fork A/B on
+this instrument is the discriminating experiment. Handed off via
+`.agents/scratch/hsim-to-wave-a.md`.
+
+### Standing updates
+
+- **Misfire-feel risk: no measured support.** `hrld` diverged on ZERO ticks across every run
+  and every window class. The handoff's concrete fear (client accepts a fire click the server
+  rejects on reload skew) has no observed mechanism today; the one carried-state fire term is
+  fixed. What predict-both would re-open is class-1-style input-stream windows, not reload skew.
+- **§7 hang is not lat0-specific.** 3 of 10 headless 80/10 client runs hung at connect, last
+  log line the connect ROLLBACK-SNAP, process alive but silent. Same open item, wider trigger.
+- **§8 limits partially closed.** The `hsim`-boolean limit is gone (decode + `simf`
+  magnitudes). Non-tank state, solo pairing, and solver internals remain as stated.
+
+### The §9 bar (predict before tracing)
+
+- A window opening at the first shared tick, servo-only, ≤ ~73 ticks, not scaling with
+  rollback depth: class 1 — expected at every join while any aim input is live; benign.
+- A 33-tick recoil-only window after a shot: class 2 — must NOT appear post-f516fb6; its
+  reappearance means a new `TankSim` order ambiguity (check any new `&mut TankSim` system
+  against the `shooting::plugin` invariant comment).
+- A mid-run pos+rot+lv+av window seeded with an all-wheel anchor flip: class 3 — expect
+  reload/recoil/drive = 0, sub-threshold persistence, possible contact re-amplification;
+  goes to the avian/wave-A track, not this repo.
