@@ -74,7 +74,9 @@ pub fn sim_plugin(app: &mut App) {
 ///   commitment" ([`CommittedAim::get`]), exactly the fresh-spawn state.
 /// - **Single writer:** exactly one commit system writes this at a time — [`commit_aim`] in third
 ///   person, `sight::drive_gunner_aim` in the optic. Their run conditions (`in_third_person` /
-///   `in_gunner`) are mutually exclusive, so there is never a write race.
+///   `in_gunner`) are mutually exclusive on every frame but the gunner→third-person toggle frame,
+///   where both may write once — schedule-ordered (`BeforeFixedMainLoop` then `Update`), never
+///   raced, and last-writer-wins lands on the mode the player just entered.
 #[derive(Resource, Default)]
 pub(crate) struct CommittedAim(Option<(Entity, Vec3)>);
 
