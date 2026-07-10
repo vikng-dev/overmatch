@@ -14,7 +14,7 @@ use avian3d::prelude::{Position, Rotation, SpatialQuery};
 use bevy::math::Affine3A;
 use bevy::prelude::*;
 
-use crate::camera::GunnerCameraPlaced;
+use crate::camera::{CameraKickApplied, GunnerCameraPlaced};
 use crate::command::TankCommand;
 use crate::damage::ControlledTank;
 use crate::firecontrol::{RangeTable, lob};
@@ -71,7 +71,12 @@ pub fn client_plugin(app: &mut App) {
             (update_bore_indicator, update_aim_indicator)
                 .in_set(GameplaySet)
                 .after(TransformSystems::Propagate)
-                .after(GunnerCameraPlaced),
+                .after(GunnerCameraPlaced)
+                // After the hit-kick has displaced the camera's rendered pose, so the commander
+                // sight dots reproject through the kicked view and the whole sight picture jolts
+                // together on a hit — matching the gunner reticles in `sight`. Vacuous edge in
+                // SP/headless (the kick set is net-client-only, empty there).
+                .after(CameraKickApplied),
         );
 }
 
