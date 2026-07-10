@@ -181,11 +181,7 @@ fn scan(src: &str) -> Vec<Offender> {
                 i += 1;
             }
             // `. expect (` arms an expect-region.
-            if dot_seen && ident == "expect" {
-                armed = true;
-            } else {
-                armed = false;
-            }
+            armed = dot_seen && ident == "expect";
             prev_ident = ident;
             dot_seen = false;
             continue;
@@ -195,11 +191,7 @@ fn scan(src: &str) -> Vec<Offender> {
         match c {
             '!' => {
                 // `<ident>!` where ident is a diagnostic macro arms a macro-region.
-                if DIAGNOSTIC_MACROS.contains(&prev_ident.as_str()) {
-                    armed = true;
-                } else {
-                    armed = false;
-                }
+                armed = DIAGNOSTIC_MACROS.contains(&prev_ident.as_str());
                 prev_ident.clear();
             }
             '(' | '[' | '{' => {
