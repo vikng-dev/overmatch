@@ -247,86 +247,69 @@ pub fn run() {
         ..default()
     };
     info!("client: input delay = {delay_label}; sync jitter_multiple = {jitter_multiple}");
-    let client = app
-        .world_mut()
-        .spawn((
-            Name::new("Client"),
-            Client::default(),
-            Link::new(conditioner),
-            LocalAddr(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0)),
-            PeerAddr(server_addr),
-            // (3) The input-rollback branch is a permanent no-op for us — we never rebroadcast
-            //     inputs and our own inputs can't mismatch (we author them), so `RollbackMode`'s
-            //     input arm only costs a per-frame input-buffer scan. Disable it; STATE rollback
-            //     (the real one, against replicated Position/Rotation/velocity) stays `Check`, and
-            //     everything else keeps its `RollbackPolicy` default (`max_rollback_ticks: 100`).
-            PredictionManager {
-                rollback_policy: RollbackPolicy {
-                    input: RollbackMode::Disabled,
-                    ..default()
-                },
-                // Let the sim SNAP: collapse lightyear's built-in visual correction to a single frame
-                // (`decay_period` 1 ms / `decay_ratio` 1e-7 — the error underflows to ~0 the frame the
-                // rollback lands), so the lightyear-visible pose reaches the corrected present at once.
-                // ALL visible smoothing then lives in `net::render_error`, which offsets the render
-                // `Transform` and decays it with a capped correction velocity — the "view never snaps"
-                // layer. Leaving the default 200 ms half-life here would double-smooth (and lightyear's
-                // has no velocity cap), reintroducing the lurch this layer exists to kill.
-                correction_policy: CorrectionPolicy::instant_correction(),
+    // The single client connection entity — found by the retry driver via `With<NetcodeClient>`
+    // (there is exactly one), so its id need not be threaded through.
+    app.world_mut().spawn((
+        Name::new("Client"),
+        Client::default(),
+        Link::new(conditioner),
+        LocalAddr(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0)),
+        PeerAddr(server_addr),
+        // (3) The input-rollback branch is a permanent no-op for us — we never rebroadcast
+        //     inputs and our own inputs can't mismatch (we author them), so `RollbackMode`'s
+        //     input arm only costs a per-frame input-buffer scan. Disable it; STATE rollback
+        //     (the real one, against replicated Position/Rotation/velocity) stays `Check`, and
+        //     everything else keeps its `RollbackPolicy` default (`max_rollback_ticks: 100`).
+        PredictionManager {
+            rollback_policy: RollbackPolicy {
+                input: RollbackMode::Disabled,
                 ..default()
             },
-            // The depth knobs (1)+(2), inserted ALWAYS (no longer only under the env lever): the
-            // shipping default is `balanced()` + `jitter_multiple: 2`, not lightyear's max-violence
-            // `no_input_delay()` + `jitter_multiple: 4`. `PredictionManager` `#[require]`s an
-            // `InputTimelineConfig`; giving it explicitly here wins over that default insert.
-            InputTimelineConfig::new(sync_config, input_delay),
-            NetcodeClient::new(
-                Authentication::Manual {
-                    server_addr,
-                    client_id,
-                    private_key: [0; 32],
-                    protocol_id: 0,
-                },
-                NetcodeConfig {
-                    client_timeout_secs: 3,
-                    token_expire_secs: -1,
-                    ..default()
-                },
-            )
-            .expect("manual dev token should always build"),
-            UdpIo::default(),
-        ))
-        .id();
-    // Connect only once the tank assets (spec + glb scene) are loaded. The client still preloads
-    // before connecting — but no longer to guard a bind window (that window is gone: the sim body
-    // now spawns whole from extracted data the moment the replicated root lands). The spec feeds
-    // the spawner (`attach_replicated_rig` → `spawn_tank_sim`), and the glb feeds the geometry
-    // extractor + the shadow check + the view attach (`bind_tank_view`); preloading both keeps the
-    // view pop-in to ~a frame of scene instantiation instead of a multi-second glb load.
-    // (No local ground spawn here: `SimPlugin` → `world::plugin` builds the real game terrain
-    // (Terrain-layer static slab + test course) on both sides — rollback replays collide with it,
-    // and the wheels' suspension rays (filtered to `Layer::Terrain`) actually hit it.)
-    app.add_systems(
-        Update,
-        move |assets: Option<Res<PendingTankAssets>>,
-              asset_server: Res<AssetServer>,
-              mut connected: Local<bool>,
-              mut commands: Commands| {
-            if *connected {
-                return;
-            }
-            let Some(assets) = assets else { return };
-            if !assets.loaded(&asset_server) {
-                return;
-            }
-            *connected = true;
-            commands.trigger(Connect { entity: client });
-            info!(
-                "client: tank assets loaded — connecting to {server_addr} as client_id={client_id}"
-            );
+            // Let the sim SNAP: collapse lightyear's built-in visual correction to a single frame
+            // (`decay_period` 1 ms / `decay_ratio` 1e-7 — the error underflows to ~0 the frame the
+            // rollback lands), so the lightyear-visible pose reaches the corrected present at once.
+            // ALL visible smoothing then lives in `net::render_error`, which offsets the render
+            // `Transform` and decays it with a capped correction velocity — the "view never snaps"
+            // layer. Leaving the default 200 ms half-life here would double-smooth (and lightyear's
+            // has no velocity cap), reintroducing the lurch this layer exists to kill.
+            correction_policy: CorrectionPolicy::instant_correction(),
+            ..default()
         },
-    );
+        // The depth knobs (1)+(2), inserted ALWAYS (no longer only under the env lever): the
+        // shipping default is `balanced()` + `jitter_multiple: 2`, not lightyear's max-violence
+        // `no_input_delay()` + `jitter_multiple: 4`. `PredictionManager` `#[require]`s an
+        // `InputTimelineConfig`; giving it explicitly here wins over that default insert.
+        InputTimelineConfig::new(sync_config, input_delay),
+        NetcodeClient::new(
+            Authentication::Manual {
+                server_addr,
+                client_id,
+                private_key: [0; 32],
+                protocol_id: 0,
+            },
+            NetcodeConfig {
+                client_timeout_secs: 3,
+                token_expire_secs: -1,
+                ..default()
+            },
+        )
+        .expect("manual dev token should always build"),
+        UdpIo::default(),
+    ));
+    // The connection state machine: gate the FIRST connect on the tank assets, then auto-retry a
+    // failed/dropped connection on a short backoff. See [`drive_connection`] for the full states;
+    // the target endpoint is fixed for the session, so record it once for the retry driver's log.
+    info!("client: target server {server_addr}, client_id={client_id}");
+    app.init_resource::<ConnectRetry>()
+        .add_systems(Update, drive_connection);
     app.add_systems(Startup, load_tank_assets);
+    // The connect-status overlay ("CONNECTING…" / "RECONNECTING…") is windowed presentation only —
+    // headless automation has no window to draw it, and verifies the state machine via the log
+    // lines `drive_connection` emits instead. Mounted on the same condition as `NetClientPlugin`.
+    if !simulate || sim_windowed {
+        app.add_systems(Startup, spawn_connect_status)
+            .add_systems(Update, update_connect_status);
+    }
 
     app.add_observer(diagnostics::log_connected)
         .add_observer(claim_input_slot)
@@ -415,6 +398,198 @@ pub fn run() {
     }
 
     app.run();
+}
+
+/// State for the connect/reconnect driver ([`drive_connection`]). Lives across every mode (the
+/// headless harness drives it too), so it is init'd unconditionally.
+#[derive(Resource, Default)]
+struct ConnectRetry {
+    /// The first `Connect` has been triggered (tank assets finished loading). Until then the retry
+    /// driver stays idle: the client entity carries `Disconnected` from spawn (netcode's `#[require]`
+    /// default), which is the pre-connect resting state — NOT a failure to retry.
+    initiated: bool,
+    /// We reached `Connected` at least once this session. Distinguishes "never connected yet"
+    /// (`CONNECTING…`) from "was in game, lost the link" (`RECONNECTING…`) for the status overlay.
+    connected_once: bool,
+    /// Connect attempts that have already failed and been retried — drives the `(retry N)` suffix
+    /// and the backoff schedule. Reset to 0 on a successful `Connected`.
+    attempts: u32,
+    /// Wall-clock deadline (`Time::elapsed_secs_f64`) for the next retry `Connect`. Armed the frame
+    /// we first observe the failed/`Disconnected` state, cleared the frame we fire the retry.
+    next_retry_at: Option<f64>,
+}
+
+/// Backoff before the next reconnect attempt, in seconds. `attempts` is how many connect attempts
+/// have already failed (0 = the first retry, right after the initial attempt fell over). A short,
+/// mildly-growing delay capped at [`RECONNECT_BACKOFF_CAP`]: long enough not to hammer a truly-down
+/// server, short enough that a server started mid-retry is picked up within a couple seconds. Pure
+/// so the schedule is unit-testable without a running app.
+fn reconnect_backoff_secs(attempts: u32) -> f64 {
+    const BASE: f64 = 1.0;
+    const STEP: f64 = 0.5;
+    (BASE + STEP * f64::from(attempts)).min(RECONNECT_BACKOFF_CAP)
+}
+
+/// The ceiling on [`reconnect_backoff_secs`] — a client that has been retrying for a while still
+/// re-checks for a server at least this often. Retries are indefinite (no attempt cap): the primary
+/// workflow is "launch the client, then the server", where the wait can exceed any small cap, and a
+/// mid-game drop should keep trying to reconnect for as long as the player leaves the window open.
+const RECONNECT_BACKOFF_CAP: f64 = 5.0;
+
+/// The connection state machine, run every frame in every mode. It owns both the FIRST connect
+/// (asset-gated) and every retry after a failed or dropped link, reading the connection state off
+/// the single client entity's lightyear markers:
+///   - **`Connected`** — the link is up. Clear the retry ledger (so a LATER drop starts a fresh
+///     backoff) and latch `connected_once` (so that later drop presents as `RECONNECTING…`, not a
+///     first connect). Nothing else to do; possession + the game HUD take over.
+///   - **not yet initiated** — gate the first `Connect` on the tank assets, exactly as the old
+///     asset-gate did: the sim body spawns whole from extracted data the moment the replicated root
+///     lands, and preloading keeps view pop-in to ~a frame. (No local ground spawn: `SimPlugin` →
+///     `world::plugin` builds the real terrain on both sides; rollback replays collide with it and
+///     the suspension rays hit it.)
+///   - **`Connecting`** — a connect is in flight (netcode `SendingConnectionRequest`/
+///     `ChallengeResponse`); wait it out.
+///   - **`Disconnected` after initiating** — the attempt failed (timeout / denied / link drop) and
+///     netcode inserted `Disconnected`. Arm a backoff, then fire a fresh `Connect` when it elapses.
+///     A fresh `Connect` re-runs `LinkStart`, binding a NEW source socket — which is what sidesteps
+///     the server's lingering-slot `ClientEntityInUse` drop after a hard client kill (the client_id
+///     stays the session-stable one; netcode does not key the collision on it).
+fn drive_connection(
+    time: Res<Time>,
+    assets: Option<Res<PendingTankAssets>>,
+    asset_server: Res<AssetServer>,
+    client: Query<(Entity, Has<Connected>, Has<Connecting>), With<NetcodeClient>>,
+    mut retry: ResMut<ConnectRetry>,
+    mut commands: Commands,
+) {
+    let Ok((entity, connected, connecting)) = client.single() else {
+        return;
+    };
+
+    if connected {
+        retry.connected_once = true;
+        retry.attempts = 0;
+        retry.next_retry_at = None;
+        return;
+    }
+
+    if !retry.initiated {
+        let Some(assets) = assets else { return };
+        if !assets.loaded(&asset_server) {
+            return;
+        }
+        retry.initiated = true;
+        commands.trigger(Connect { entity });
+        info!("client: tank assets loaded — connecting");
+        return;
+    }
+
+    // A connect is in flight — leave the timer alone and wait for it to resolve to Connected or
+    // fall back to Disconnected.
+    if connecting {
+        return;
+    }
+
+    // Initiated, not connected, not connecting => the attempt failed and netcode inserted
+    // `Disconnected`. Retry on a backoff.
+    let now = time.elapsed_secs_f64();
+    match retry.next_retry_at {
+        None => {
+            let delay = reconnect_backoff_secs(retry.attempts);
+            retry.next_retry_at = Some(now + delay);
+        }
+        Some(at) if now >= at => {
+            retry.attempts += 1;
+            retry.next_retry_at = None;
+            commands.trigger(Connect { entity });
+            info!(
+                "client: reconnect attempt {} ({})",
+                retry.attempts,
+                if retry.connected_once {
+                    "lost in-game connection"
+                } else {
+                    "never connected"
+                }
+            );
+        }
+        Some(_) => {}
+    }
+}
+
+/// The centered connect-status overlay's container (a dim full-screen backdrop) — toggled visible
+/// while unconnected and hidden once the link is up. Its `Text` child carries [`ConnectStatusText`].
+#[derive(Component)]
+struct ConnectStatusNode;
+
+/// The connect-status message node inside [`ConnectStatusNode`] — its text is rewritten from
+/// [`ConnectRetry`] by [`update_connect_status`].
+#[derive(Component)]
+struct ConnectStatusText;
+
+/// Spawn the connect-status overlay once, hidden by default (the first frame is pre-connect anyway;
+/// [`update_connect_status`] reveals it). Mirrors the menu/death overlays' node+text shape so the
+/// three read as one UI family.
+fn spawn_connect_status(mut commands: Commands) {
+    commands
+        .spawn((
+            ConnectStatusNode,
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
+        ))
+        .with_children(|parent| {
+            parent.spawn((
+                ConnectStatusText,
+                Text::new("CONNECTING…"),
+                TextFont {
+                    font_size: FontSize::Px(48.0),
+                    ..default()
+                },
+                TextColor(Color::WHITE),
+            ));
+        });
+}
+
+/// Drive the connect-status overlay from [`ConnectRetry`] + the live connection state: hidden once
+/// `Connected` (possession + the game HUD take over), else `CONNECTING…` / `CONNECTING… (retry N)`
+/// before a first connect and `RECONNECTING…` after an in-game drop. The text is rewritten only on
+/// change (tracked in a `Local`) so it doesn't churn every frame — the debug-HUD idiom.
+fn update_connect_status(
+    retry: Res<ConnectRetry>,
+    connected: Query<(), (With<Connected>, With<NetcodeClient>)>,
+    mut container: Query<&mut Visibility, With<ConnectStatusNode>>,
+    mut text: Query<&mut Text, With<ConnectStatusText>>,
+    mut shown: Local<Option<String>>,
+) {
+    let Ok(mut visibility) = container.single_mut() else {
+        return;
+    };
+    if !connected.is_empty() {
+        if *visibility != Visibility::Hidden {
+            *visibility = Visibility::Hidden;
+        }
+        return;
+    }
+    *visibility = Visibility::Visible;
+
+    let label = if retry.connected_once {
+        "RECONNECTING…".to_string()
+    } else if retry.attempts == 0 {
+        "CONNECTING…".to_string()
+    } else {
+        format!("CONNECTING… (retry {})", retry.attempts)
+    };
+    if shown.as_deref() != Some(label.as_str()) {
+        if let Ok(mut text) = text.single_mut() {
+            *text = Text::new(label.clone());
+        }
+        *shown = Some(label);
+    }
 }
 
 /// Parse a server address from a string in either accepted form: a full `host:port` `SocketAddr`,
@@ -927,5 +1102,27 @@ mod tests {
     fn wraparound_near_max_behaves() {
         // MAX-2 → MAX-1 → MAX → 0 → 1 → 2 → 3 is 6 ticks across the wrap boundary.
         assert_eq!(fire_catch_up_ticks(Tick(u32::MAX - 2), Tick(3)), Some(6));
+    }
+
+    /// The first retry waits the base delay; subsequent retries grow by a fixed step. Short enough
+    /// that a server started mid-retry is picked up within a couple seconds.
+    #[test]
+    fn reconnect_backoff_grows_from_base() {
+        assert_eq!(reconnect_backoff_secs(0), 1.0, "first retry = base");
+        assert_eq!(reconnect_backoff_secs(1), 1.5);
+        assert_eq!(reconnect_backoff_secs(2), 2.0);
+    }
+
+    /// The backoff never exceeds the cap, no matter how many attempts have piled up — an
+    /// indefinitely-retrying client still re-checks for a server at least that often.
+    #[test]
+    fn reconnect_backoff_is_capped() {
+        assert_eq!(reconnect_backoff_secs(100), RECONNECT_BACKOFF_CAP);
+        assert_eq!(reconnect_backoff_secs(u32::MAX), RECONNECT_BACKOFF_CAP);
+        // Monotonic non-decreasing up to the cap.
+        for n in 0..20 {
+            assert!(reconnect_backoff_secs(n) <= reconnect_backoff_secs(n + 1));
+            assert!(reconnect_backoff_secs(n) <= RECONNECT_BACKOFF_CAP);
+        }
     }
 }
