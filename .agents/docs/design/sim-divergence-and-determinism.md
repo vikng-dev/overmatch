@@ -9,7 +9,10 @@ log (measured), vendored crate sources (verified, cited by file:line), and web m
 solo-divergence model and the two-layer doctrine — whose canonical home is
 [ADR-0015](../adr/0015-divergence-doctrine.md). **Updated 2026-07-09:** §5's "dominant term"
 (the hc=0 contact-restore claim) re-measured after the shield and retired — see §6 (the
-post-shield measurement) and §7 (a lat0 connect-hang open finding).
+post-shield measurement) and §7 (a lat0 connect-hang open finding). **Updated 2026-07-10:** §8
+added — the divergence instrument (per-tick world-independent state hash + offline join) and its
+measured baseline: physics state bit-exact on every shared tick of both harness runs, residual
+divergence entirely in carried mechanism state (`hsim`).
 
 ## 1. Why two runs of "the same sim" diverge at all
 
@@ -318,3 +321,132 @@ in exactly that regime would fit the lat0-only, at-first-rollback-enable signatu
 unresolved and uninvestigated** — not chased, no `src/` change. Methodological cost: it caps the
 lat0 sample size for any replayed-tick metric (§6's lat0 n=8), so lat0 measurements here lean on
 the two clean runs plus the 80/10 server-join.
+
+## 8. 2026-07-10: the divergence instrument (per-tick state hash) and its baseline
+
+A determinism effort needs a number to drive to zero. This section documents the instrument that
+measures it — a per-tick, world-independent state hash on both ends plus an offline join/diff —
+and the baseline it reads today: the reference the upstream-patch A/Bs (wave A,
+`HANDOFF-upstream-determinism-wave-a.md`) get compared against. Every number below is MEASURED
+(2026-07-10, dev-profile binaries from the `divergence-instrument` branch, same machine both
+ends, macOS).
+
+### What it is
+
+Two layers, both env-gated (`SPIKE_TRACE`; zero cost unset — the recorder systems are registered
+only in a traced run):
+
+1. **Per-tick state hash** (`src/trace.rs`, `hash_tank_state`, riding the existing `record_tick`
+   in `FixedLast`). Each fixed tick, for each tank root, on BOTH client and server, new fields on
+   the existing `tick` trace row:
+   - `h` — the combined hash: the exhaustive boolean "did anything differ this tick?".
+   - `hpos` / `hrot` / `hlv` / `hav` / `hsim` — per-component sub-hashes, so a mismatch localizes
+     to `Position` / `Rotation` / `LinearVelocity` / `AngularVelocity` / carried sim.
+   - `own` — the cross-world tank identity the offline join pairs on (never the entity id).
+
+   What is hashed: the physics state (`Position`, `Rotation`, `LinearVelocity`,
+   `AngularVelocity`) by raw f32 BITS (`to_bits` — bit-exactness is the bar), plus the carried
+   sim state where hidden divergence lives: `DriveState` (throttle, steer) and all of `TankSim` —
+   servo current/previous/velocity, weapon reload/recoil, and the per-wheel brush anchors
+   (`Some(point)` vs `None`, discriminated). `hsim` is the ONLY cross-world witness for the
+   carried state; no pose/velocity field exposes it — and the baseline below shows that is
+   exactly where today's residual divergence lives.
+
+   **World-independence (the load-bearing design constraint).** Client and server entity ids
+   differ for the same logical tank (measured: 4294966669 vs 4294966650), so the hash consumes NO
+   entity id, no pointer, no `HashMap` iteration, no archetype order — only f32 bits, in a fixed
+   field order, with every `TankSim` `Vec` walked in spawn-sorted slot order (`WheelIndex` /
+   `ServoIndex` / `WeaponIndex`, identical across worlds by `spawn_tank_sim`'s sorted-by-name
+   assignment). A fixed FNV-1a 64 (not std's version-seeded SipHash) keeps hashes reproducible
+   across builds and re-derivable offline. The row's `own` field — the game `Controlled` marker
+   on the client/SP, lightyear's `ControlledBy` on the server, `false` for the ownerless bot on
+   both — is the pairing key, so the join never touches `e`. Unit tests (`src/trace.rs`,
+   `mod tests`) pin: same state → same hash; one flipped `av` bit → different `h` and `hav` and
+   NOTHING else; `+0.0`/`−0.0` hash apart; anchor `None` ≠ `Some(origin)`; entity-id independence.
+   Replay semantics are preserved: rollback-replay rows keep their `rp` stamp and the join keeps
+   the LAST row per (tick, entity) — the corrected value.
+
+2. **Offline join/diff** (`scripts/divergence/analyze.py`). Pairs each tank across worlds by
+   `own` (busiest-entity fallback for pre-`own` traces) and reports per shared tick: hash match
+   rate (overall + flat-cruise vs contact-transient windows, classified from the rows' own
+   `gnd`/`hc` on both ends), the first-divergence tick with its diverged sub-component(s), a
+   sub-component tally over all mismatched ticks, and per-component error magnitudes (|Δp|,
+   rotation angle, |Δlv|, |Δav|; p50/p99/max) from the pose/velocity fields the rows already
+   carry. `--json` emits the rates/tally as a machine payload for A/B scripting.
+
+### How to run it
+
+Same harness as §6 (server `SPIKE_PERTURB=0` + headless scripted client, `SPIKE_TRACE` both
+ends — role-suffixed files; avoid `SPIKE_LATENCY_MS=0`, the §7 connect hang). Direct binary runs
+need `BEVY_ASSET_ROOT=<repo>`:
+
+```
+# server (background)
+BEVY_ASSET_ROOT=$PWD SPIKE_PERTURB=0 SPIKE_TRACE=/tmp/base.jsonl ./target/debug/overmatch-server &
+# client (headless scripted; 80/10 = the standard jittered condition; add SPIKE_SIM_LONG=1
+# for the ~20 s course crossing the bump z~-70 and washboard z~-82..-90)
+BEVY_ASSET_ROOT=$PWD SPIKE_SIMULATE_INPUT=1 SPIKE_SIM_LONG=1 SPIKE_LATENCY_MS=80 \
+    SPIKE_JITTER_MS=10 SPIKE_TRACE=/tmp/base.jsonl ./target/debug/overmatch
+# analyze (warmup-ticks 0 reports the full run; default drops the first 64 shared ticks)
+uv run scripts/divergence/analyze.py --client /tmp/base.client.jsonl \
+    --server /tmp/base.server.jsonl --warmup-ticks 0
+```
+
+### The baseline (MEASURED 2026-07-10, 80 ms / 10 ms jitter, SPIKE_PERTURB=0)
+
+`NAN-TRIPWIRE|FIXED-NAN|panicked|B0004` all 0 in every log, both runs. Full-run numbers
+(`--warmup-ticks 0`).
+
+| Metric | long course (`SPIKE_SIM_LONG`, bump+washboard) | default short course (steer arc + fire) |
+|---|---|---|
+| shared ticks | 1278 (~20 s) | 584 (~9 s) |
+| rollbacks (whole run) | 1 (connect-time, depth 13, empty `trg`) | 2 (connect window, Position ~0.93 m) |
+| hash match, overall | 91.71% (1172/1278) | 87.84% (513/584) |
+| hash match, flat-cruise window | 90.00% (900 ticks) | 89.69% (572 ticks) |
+| hash match, contact-transient window | **100%** (362 ticks) | 0% (12 ticks — all inside the connect transient) |
+| mismatched ticks, by sub-component | 106 — **all `hsim`-only** | 71 — **all `hsim`-only** |
+| \|Δp\| / rot / \|Δlv\| / \|Δav\| p50/p99/max | **all exactly 0** (bit-exact, every shared tick) | **all exactly 0** (bit-exact, every shared tick) |
+| first divergence | tick 1463 (`sim`) | tick 139 (`sim`) |
+| mismatch windows (contiguous) | 1463–1535 (73 ticks), 1767–1799 (33 ticks) | 139–209 (71 ticks) |
+
+Reading, in order of importance:
+
+1. **Physics state is bit-exact on EVERY shared tick of both runs — the whole course, bump and
+   washboard included.** §5's flat-cruise bit-exactness (~880-tick windows) now extends to the
+   full 1278-tick jittered course. The expected contact-transient `|Δav|`-first signature (§2's
+   constraint-order row) did NOT appear here: post-shield/witness-fix, this course never enters
+   the multi-manifold wedge state that term was measured in. Consequence for the wave-A avian
+   A/B: **this course is not a discriminating workload for the constraint-order patch** — use the
+   wedge repro (`SPIKE_SPAWN_POSE` on the slab edge, per
+   `.agents/scratch/upstream-reports/avian-solver-constraint-order.md`), with this instrument as
+   the metric.
+2. **The only residual divergence class on this harness is carried-mechanism state (`hsim`),
+   invisible to every pose/velocity field** — precisely what the hash exists to catch. It is
+   transient and reconverges: both runs' first window starts exactly at the connect-time rollback
+   replay (long: window 1463–1535 vs rollback start 1462; short: window 139–209 vs rollback
+   starts 138/140), and the long run's second window (1767–1799, 33 ticks) opens ~4 ticks after
+   the scripted fire (~tick 1763) and closes on the recoil-settle timescale. Attribution beyond
+   the window timing is a HYPOTHESIS (the hash cannot name the `TankSim` field — see limits):
+   plausibly servo/recoil state divergence seeded through the rollback replay and the fire edge.
+   The short run's fire (~tick 439) produced no window, so the fire-adjacent term is not
+   deterministic run-to-run.
+3. The match-rate denominators matter: "flat cruise 90%" does not mean cruise diverges — the
+   `hsim` windows happen to sit in ticks classified flat (gnd=16, hc=0). The window split
+   classifies the mismatch's LOCATION, not its cause; the sub-component tally (`sim=106/106`,
+   `71/71`) is the causal read.
+
+### What the instrument CANNOT see yet (honest limits)
+
+- **Non-tank state.** Only tank roots are hashed. Anything else that carries sim state —
+  shells in flight, launched turrets mid-toss, future dynamic map objects — is invisible to `h`.
+- **Solo pairing only.** `own` distinguishes two classes (player tank / bot). Multi-client or
+  multi-bot worlds need a richer identity than one boolean, or the join pairs wrong tanks.
+  Scoped to the solo case by design.
+- **`hsim` is a boolean.** There is no |Δsim| magnitude and no per-field decode — a `hsim`
+  mismatch names neither the `TankSim` field nor its size. The baseline's window-timing
+  correlation is the current attribution method; a field-level decode needs the raw values on
+  the row (a follow-up, if the `hsim` class survives the connect-transient fix).
+- **Solver internals are hashed only through their effect.** Warm-start impulses, contact
+  manifolds, broad-phase topology are not in the hash; a constraint-order divergence registers as
+  a pose/velocity mismatch without naming its mechanism — that still needs the dedicated probes
+  (§2, §6).
