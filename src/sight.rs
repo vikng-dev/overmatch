@@ -3,27 +3,33 @@
 //!
 //! Lshift toggles between the free third-person "commander" view (the orbit camera + `aim.rs`) and
 //! a zoomed gunner optic locked to the gun's line of sight. In gunner view the camera shows the
-//! gun's *reality* (the bore), and aiming is **world-space position control**: mouse deltas move a
-//! committed hull-local aim direction — the shared [`aim::CommittedAim`], worked in yaw/pitch here —
-//! which is published as the tank's commanded aim (`TankCommand`) that every servo chases at its
-//! authored slew rate — so the view lags and
+//! gun's *reality* (the bore), and aiming is **world-space position control**: mouse deltas steer
+//! the sight line from the gun pivot (worked in yaw/pitch here), which is then RESOLVED against the
+//! world — terrain or another tank's armor, a far fallback in the sky — and committed as a
+//! hull-local POINT: the shared [`aim::CommittedAim`], the same domain form third person commits,
+//! so the two modes never convert between a point and a bare direction (the parallax bug class the
+//! 2026-07-10 unification exposed). The point is published as the tank's commanded aim
+//! (`TankCommand`) that every servo chases at its authored slew rate — so the view lags and
 //! settles (dead-stop on release, *not* rate control), and the hull MG traverses alongside the gun.
 //! Pure line of sight: superelevation (the ballistic lob for range) is a firing-side concern
 //! deferred to its own slice.
 
+use avian3d::prelude::{Position, Rotation, SpatialQuery};
 use bevy::camera::visibility::RenderLayers;
 use bevy::input::mouse::AccumulatedMouseMotion;
+use bevy::math::Affine3A;
 use bevy::prelude::*;
 
-use crate::aim::{AimCommit, CommittedAim};
+use crate::aim::{AimCommit, CommittedAim, MAX_RANGE, aim_distance};
 use crate::camera::{CameraKickApplied, GUNNER_FOV_FALLBACK, GunnerCameraPlaced, view_fov};
 use crate::command::{TankCommand, gather_commands};
-use crate::damage::ControlledTank;
+use crate::damage::{ControlledTank, VolumeOf};
 use crate::firecontrol::{RangeTable, Ranging};
 use crate::spec::ViewKind;
 use crate::state::{GameplaySet, PlayerInputSet};
 use crate::tank::{
-    Controlled, Hull, Rig, ServoIndex, ServoSpec, Tank, TankSim, TankViews, shortest_angle,
+    Controlled, Hull, Rig, ServoIndex, ServoSpec, Tank, TankSim, TankViews, rig_world_pose,
+    shortest_angle,
 };
 use crate::ui_font::UiFonts;
 
@@ -60,12 +66,17 @@ pub fn in_third_person(mode: Res<SightMode>) -> bool {
     *mode == SightMode::ThirdPerson
 }
 
-/// The committed gunner aim in the hull's local frame (radians), as yaw/pitch: the working form of
-/// the shared [`aim::CommittedAim`] while the optic drives it (position control — mouse deltas move
-/// it; it is NOT the gun's live lay, which lags). No longer a resource: the persistent memory is the
-/// one `CommittedAim` (a hull-local point), which the optic RESUMES into yaw/pitch each frame
-/// ([`GunnerIntent::from_hull_local_dir`]), works the clamps on, and republishes. So the yaw/pitch
-/// is a per-frame scratch value, not a second source of truth to keep in sync.
+/// The committed gunner aim as yaw/pitch (radians, hull frame): the working form of the shared
+/// [`aim::CommittedAim`] while the optic drives it (position control — mouse deltas move it; it is
+/// NOT the gun's live lay, which lags). The angles are the bearing of the committed point **from
+/// the gun mount** (`point − mount`, the sight's true origin — where `camera::gunner_camera` parks
+/// and where `aim::drive_aim_servos` measures the pitch servo's target), NEVER from the hull-frame
+/// origin: the hull origin sits ~2.2 m below the mount at ground level, and a near floor point's
+/// bearing differs between the two by the mount parallax (~2.5° at 50 m, ~9° at 15 m — nearly the
+/// whole 3.1° optic radius under magnification; the 2026-07-10 "aim snaps on first optic input"
+/// regression). Not a resource: the persistent memory is the one `CommittedAim` point, which the
+/// optic resumes into yaw/pitch each frame, works the clamps on, and re-resolves — a per-frame
+/// scratch value, not a second source of truth to keep in sync.
 #[derive(Clone, Copy)]
 struct GunnerIntent {
     yaw: f32,
@@ -73,21 +84,22 @@ struct GunnerIntent {
 }
 
 impl GunnerIntent {
-    /// The intent as a direction in the hull's local frame. Inverse of the yaw/pitch decomposition
-    /// `aim.rs` uses (`yaw = atan2(-x, -z)`, `pitch = atan2(y, |xz|)`), so the reticle agrees with
-    /// what the servos are commanded toward.
+    /// The intent as a direction in the hull's local frame (unit length). Inverse of the yaw/pitch
+    /// decomposition `aim.rs` uses (`yaw = atan2(-x, -z)`, `pitch = atan2(y, |xz|)`), so the
+    /// reticle agrees with what the servos are commanded toward.
     fn local_dir(&self) -> Vec3 {
         let (sy, cy) = self.yaw.sin_cos();
         let (sp, cp) = self.pitch.sin_cos();
         Vec3::new(-sy * cp, sp, -cy * cp)
     }
 
-    /// Decompose a hull-local aim direction (or a far point along it) into yaw/pitch — the exact
-    /// inverse of [`local_dir`](Self::local_dir), and the SAME decomposition `aim::drive_aim_servos`
-    /// applies per servo (`yaw = atan2(-x, -z)`, `pitch = atan2(y, |xz|)`). Scale-invariant (`atan2`
-    /// ignores magnitude), so the shared [`aim::CommittedAim`] point resumes to its bearing at any
-    /// range. This is how the optic picks up the one committed intention each frame — the third
-    /// person commit, or the optic's own last publish — with no separate handoff.
+    /// Decompose a hull-local aim direction into yaw/pitch — the exact inverse of
+    /// [`local_dir`](Self::local_dir), and the SAME decomposition `aim::drive_aim_servos` applies
+    /// per servo (`yaw = atan2(-x, -z)`, `pitch = atan2(y, |xz|)`). Scale-invariant (`atan2`
+    /// ignores magnitude). The caller resumes the committed point by feeding `point − mount`, so
+    /// the bearing is measured from the sight's origin exactly as `drive_aim_servos` measures each
+    /// servo's target from its own pose — feeding the raw point would measure from the hull-frame
+    /// origin and reintroduce the mount parallax (see [`GunnerIntent`]).
     fn from_hull_local_dir(dir: Vec3) -> Self {
         Self {
             yaw: (-dir.x).atan2(-dir.z),
@@ -184,11 +196,13 @@ pub fn plugin(app: &mut App) {
         // `gather_commands`), NOT `Update`: the fixed loop runs its sim ticks *before* `Update`, so
         // an aim written in `Update` is one render frame stale by the time the sim consumes it —
         // +16.7 ms at 60 Hz of avoidable input latency. This reads only the mouse motion (ready in
-        // `PreUpdate`) and the last tick's servo angles, never the camera, so it moves cleanly out of
-        // `Update`. `.after(gather_commands)` pins the order — both write `TankCommand` (disjoint
-        // fields: `gather_commands` the drive/range fields, this one `aim`) — and puts the aim commit
-        // after this frame's fresh `Ranging` has reached the command. Still in `AimCommit` so
-        // `aim::drive_aim_servos` (fixed clock) reads whatever intention stands at each tick.
+        // `PreUpdate`), the last tick's servo angles, and the tick-truth physics pose for its
+        // mount-origin resolve (`rig_world_pose` from `Position`/`Rotation` — never the camera or a
+        // render-rate `GlobalTransform`), so it moves cleanly out of `Update`. `.after(gather_commands)`
+        // pins the order — both write `TankCommand` (disjoint fields: `gather_commands` the
+        // drive/range fields, this one `aim`) — and puts the aim commit after this frame's fresh
+        // `Ranging` has reached the command. Still in `AimCommit` so `aim::drive_aim_servos` (fixed
+        // clock) reads whatever intention stands at each tick.
         .add_systems(
             RunFixedMainLoop,
             drive_gunner_aim
@@ -463,12 +477,11 @@ fn update_ranging_reticle(
     }
 }
 
-/// Place the intent cursor at the reprojection of the committed aim point. Reprojects the ACTUAL
-/// hull-local committed point (world = hull · local), so a finite committed point (e.g. a floor aim
-/// resumed from third person before the player has touched the mouse — the zero-input-identity case)
-/// lands at its true screen position; a directional far publish (once the optic owns the intention)
-/// projects essentially at its bearing regardless of the range constant. As the gun (and so the
-/// camera/sight line) catches up, this drifts back to screen centre; hidden outside gunner view.
+/// Place the intent cursor at the reprojection of the committed aim point — a resolved point on
+/// the world in BOTH regimes (a third-person commit resumed on entry, or the optic's own resolve),
+/// so its true screen position is exact at any range; no bearing-only shortcut, which would place a
+/// near floor aim too high by the mount parallax. As the gun (and so the camera/sight line) catches
+/// up, this drifts back to screen centre; hidden outside gunner view.
 ///
 /// Reads the shared [`aim::CommittedAim`] (republished by `drive_gunner_aim` earlier this frame in
 /// `BeforeFixedMainLoop`) and the gunner camera's pose (which reads the VIEW gun's `GlobalTransform`,
@@ -504,12 +517,9 @@ fn update_intent_reticle(
     };
     let (camera, cam_transform) = *camera;
 
-    // Reproject the ACTUAL committed world point, hull-local → world. Since the zero-input-identity
-    // fix, the committed value in the optic is NOT always a far `local_dir` publish: a mode switch
-    // with no mouse input yet keeps the commander's finite committed point (e.g. a floor aim ~50 m
-    // out), whose true screen position is LOWER than its bearing-from-origin — projecting the raw
-    // direction would place the dot too high (the regression). Projecting the point itself is
-    // correct for both: a far directional publish projects essentially at its bearing anyway.
+    // Reproject the ACTUAL committed world point, hull-local → world. The committed value is always
+    // a resolved point (both modes commit points), so this is exact at any range — projecting a
+    // bearing instead would place a near floor aim too high by the mount parallax (the regression).
     let point = hull.affine().transform_point3(local);
 
     match camera.world_to_viewport(cam_transform, point) {
@@ -636,56 +646,63 @@ fn clamp_to_travel(value: f32, limits: Option<(f32, f32)>) -> f32 {
 struct AimPublish {
     /// Re-authored into `command.aim` every frame in the optic.
     command_aim: Vec3,
-    /// `Some` = re-store into `CommittedAim` (the optic now owns the directional intention); `None` =
-    /// leave the committed memory exactly as it was (the zero-input-identity invariant).
+    /// `Some` = re-store into `CommittedAim` (the optic's freshly resolved point); `None` = leave
+    /// the committed memory exactly as it was (the zero-input-identity invariant).
     store: Option<Vec3>,
 }
 
-/// The **zero-input-identity** decision for the optic's aim commit. Third person commits a RESOLVED
-/// WORLD POINT (finite range — the amber HUD dot and `drive_aim_servos`' convergence both need it);
-/// the optic aims a DIRECTION-INTENT (`local_dir · AIM_RANGE`, a far point where every mount aims
-/// ~parallel). Resuming the point into yaw/pitch decomposes it to a bearing and DISCARDS the range,
-/// so republishing the directional form is LOSSY on a finite committed point — it moves the gun by
-/// the parallax between the hull-frame origin and the gun mount, and (once re-stored) destroys the
-/// original commitment. So:
+/// The **zero-input-identity** decision for the optic's aim commit. Both modes commit RESOLVED
+/// WORLD POINTS, but they resolve from different origins — third person raycasts from the orbit
+/// camera, the optic from the gun mount — so re-resolving an inherited commitment can land on
+/// DIFFERENT world geometry (a crest the elevated camera saw over occludes the mount's lower ray),
+/// and a mode transition must be identity on the aim. So the resolve is gated on actual input:
 ///
 /// - **No mouse motion this frame, with an existing commitment** (`committed_point = Some`,
-///   `!moved`): re-author the ORIGINAL committed point verbatim (range intact) and store NOTHING.
-///   A mode transition with zero input is thus identity on `CommittedAim` and on the gun's lay —
-///   the gun keeps chasing exactly the point it chased in third person, floor / horizon / sky alike.
-/// - **The player moved the mouse** (`moved`): the optic takes ownership of the intention — publish
-///   the directional far point and re-store it. From here the existing publish/clamp behaviour owns
-///   the intention (the direction-intent model), unchanged.
-/// - **No commitment yet** (`committed_point = None`: fresh spawn or a possession change): there is
-///   nothing to preserve, so the seeded directional intent must be published AND stored to establish
-///   the commitment — even with zero input, so the recirculation invariant still writes `command.aim`.
-fn resume_commit(committed_point: Option<Vec3>, moved: bool, directional: Vec3) -> AimPublish {
+///   `!moved`): re-author the ORIGINAL committed point verbatim and store NOTHING. A mode
+///   transition with zero input is thus identity on `CommittedAim` and on the gun's lay — the gun
+///   keeps chasing exactly the point it chased in third person, floor / horizon / sky alike.
+/// - **The player moved the mouse** (`moved`): the optic takes ownership — publish and re-store
+///   the point just resolved along the moved sight line. From here the intention is the optic's
+///   own resolve, and the commander finds it (a real point on the world) on a later mode switch.
+/// - **No commitment yet** (`committed_point = None`: fresh spawn or a possession change): there
+///   is nothing to preserve, so the resolve seeded from the gun's lay must be published AND stored
+///   to establish the commitment — even with zero input, so the recirculation invariant still
+///   writes `command.aim`.
+fn resume_commit(committed_point: Option<Vec3>, moved: bool, resolved: Vec3) -> AimPublish {
     match committed_point {
         Some(point) if !moved => AimPublish {
             command_aim: point,
             store: None,
         },
         _ => AimPublish {
-            command_aim: directional,
-            store: Some(directional),
+            command_aim: resolved,
+            store: Some(resolved),
         },
     }
 }
 
 /// World-space position-control aiming. The one committed intention (the shared [`aim::CommittedAim`],
 /// resumed into yaw/pitch each frame — or seeded from the gun's lay when this tank has none yet)
-/// takes this frame's mouse deltas, is clamped, then re-published as the tank's commanded aim so
-/// `aim::drive_aim_servos` chases it with *every* servo, the gun and the hull MG alike, at their own
-/// slew rates. No servo command is written here; this only moves the aim intention.
+/// takes this frame's mouse deltas, is clamped, then RESOLVED against the world and re-published as
+/// the tank's commanded aim so `aim::drive_aim_servos` chases it with *every* servo, the gun and the
+/// hull MG alike, at their own slew rates. No servo command is written here; this only moves the aim
+/// intention.
 ///
-/// **Zero-input identity ([`resume_commit`]).** Third person commits a RESOLVED WORLD POINT (finite
-/// range); the optic aims a DIRECTION-INTENT (a far `local_dir · AIM_RANGE` point). A mode switch
-/// with no mouse input must be identity, so the directional form is published/re-stored ONLY once the
-/// player actually moves the mouse (or on a fresh tank with no commitment to preserve). Until then the
-/// resume re-authors the ORIGINAL committed point verbatim — the gun does not move and the reticle
-/// does not jump on a floor aim, and `CommittedAim` is left untouched. From the first mouse delta the
-/// optic OWNS the intention (the direction-intent model) and re-stores it, so the commander finds the
-/// optic's lay already committed on the next mode switch.
+/// **One frame convention, one origin.** The resume decomposes `point − mount` (the gun pivot, from
+/// the same physics-truth chain `drive_aim_servos` lays from), the clamps compare against the gun's
+/// lay measured at that same mount, and the resolve raycasts FROM that mount along the sight line —
+/// so the working angles, the servo convergence, and the gunner camera (parked at the pivot) all
+/// agree, and no conversion ever moves the gun by the mount↔hull-origin parallax (~2.5° at 50 m —
+/// most of the optic's 3.1° radius; the "snaps on first input" regression).
+///
+/// **Zero-input identity ([`resume_commit`]).** Both modes commit resolved points, but from
+/// different origins (orbit camera vs mount), so re-resolving an inherited commitment could land on
+/// different geometry (crest occlusion). The resolve is therefore published/re-stored ONLY once the
+/// player actually moves the mouse (or on a fresh tank with no commitment to preserve); until then
+/// the resume re-authors the ORIGINAL committed point verbatim — the gun does not move, the reticle
+/// does not jump, and `CommittedAim` is left untouched. From the first mouse delta the optic OWNS
+/// the intention and re-stores its own resolve, so the commander finds a real point on the world
+/// already committed on the next mode switch.
 ///
 /// Two bounds shape the intent, in order:
 ///
@@ -710,6 +727,7 @@ fn resume_commit(committed_point: Option<Vec3>, moved: bool, directional: Vec3) 
 /// same point.
 fn drive_gunner_aim(
     motion: Res<AccumulatedMouseMotion>,
+    spatial: SpatialQuery,
     mut committed: ResMut<CommittedAim>,
     controlled: ControlledTank,
     views: Query<&TankViews, With<Controlled>>,
@@ -718,6 +736,10 @@ fn drive_gunner_aim(
     sims: Query<&TankSim>,
     ranging: Res<Ranging>,
     tables: Query<&RangeTable>,
+    poses: Query<(&Position, &Rotation)>,
+    parents: Query<&ChildOf>,
+    locals: Query<&Transform>,
+    volumes: Query<&VolumeOf>,
     mut tank_commands: Query<&mut TankCommand>,
 ) {
     let (Some(tank), Some(rig)) = (controlled.entity(), controlled.rig()) else {
@@ -739,9 +761,6 @@ fn drive_gunner_aim(
     const SENSITIVITY_AT_REF: f32 = 0.0005;
     const REF_FOV: f32 = 0.12;
     let sensitivity = SENSITIVITY_AT_REF * (fov / REF_FOV);
-    // Distance to the published aim point: far enough that all mounts aim essentially parallel
-    // (boresighted along the intent), since there's no committed convergence range yet.
-    const AIM_RANGE: f32 = 10_000.0;
 
     // Servo angles live root-resident (`TankSim`), addressed by each node's `ServoIndex`.
     let angle = |servo| {
@@ -764,16 +783,48 @@ fn drive_gunner_aim(
         .get(rig.muzzle)
         .map_or(0.0, |table| table.superelevation(ranging.range));
 
+    // The sight's origin: the gun mount (elevation pivot), from the SAME physics-truth chain
+    // `aim::drive_aim_servos` lays from (`rig_world_pose`, never `GlobalTransform`), so the
+    // decomposition below, the clamps against the live lay, and the servo convergence all measure
+    // their angles from one origin. The hull frame anchors the committed point's local form.
+    let Ok((root_position, root_rotation)) = poses.get(tank) else {
+        return;
+    };
+    let Some((hull_position, hull_rotation)) = rig_world_pose(
+        rig.hull,
+        tank,
+        root_position.0,
+        root_rotation.0,
+        &parents,
+        &locals,
+    ) else {
+        return;
+    };
+    let Some((mount_world, _)) = rig_world_pose(
+        rig.gun,
+        tank,
+        root_position.0,
+        root_rotation.0,
+        &parents,
+        &locals,
+    ) else {
+        return;
+    };
+    let hull_affine = Affine3A::from_rotation_translation(hull_rotation, hull_position);
+    let mount_local = hull_affine.inverse().transform_point3(mount_world);
+
     // Resume the one committed intention into yaw/pitch — the shared `CommittedAim`, whether it was
-    // set by the commander commit (`aim::commit_aim`) or by this system's own last publish. When
-    // this tank has NO commitment yet (fresh spawn, or a possession change — the entity-keyed `get`
-    // reads `None`), seed from the gun's CURRENT lay instead. This single rule replaces the old
-    // seed-on-entry `toggle_sight` did: an active commander aim is simply continued (its point
-    // decodes to the same sight-line bearing), only an absent commitment falls back to the lay.
-    // Seed from the sight line (lay − lob), not the raised bore, or the view jumps θ on handover.
+    // set by the commander commit (`aim::commit_aim`) or by this system's own last resolve. The
+    // bearing is `point − mount`, from the sight's origin (see `GunnerIntent`) — decomposing the
+    // raw point would measure from the hull origin ~2.2 m below and snap the aim by the mount
+    // parallax on the first input. When this tank has NO commitment yet (fresh spawn, or a
+    // possession change — the entity-keyed `get` reads `None`), seed from the gun's CURRENT lay
+    // instead. This single rule replaces the old seed-on-entry `toggle_sight` did: an active
+    // commander aim is simply continued, only an absent commitment falls back to the lay. Seed from
+    // the sight line (lay − lob), not the raised bore, or the view jumps θ on handover.
     let committed_point = committed.get(tank);
     let mut intent = committed_point
-        .map(GunnerIntent::from_hull_local_dir)
+        .map(|point| GunnerIntent::from_hull_local_dir(point - mount_local))
         .unwrap_or(GunnerIntent {
             yaw: t_current,
             pitch: g_current - theta,
@@ -820,18 +871,39 @@ fn drive_gunner_aim(
         intent.pitch = sight_now + pitch_offset * scale;
     }
 
-    // Publish. The raw sight-line intent as a directional far point (mounts aim ~parallel), hull-local
-    // so it rides with the tank (unstabilized); `drive_aim_servos` lobs it by the superelevation,
-    // raising the bore above the line of sight, so this stays the intention. But `resume_commit`
-    // gates the directional form behind actual mouse input (the zero-input-identity invariant): with
-    // an existing commitment and no motion this frame, it re-authors the ORIGINAL committed point
-    // (range intact — the gun does not move on a floor aim) and leaves `CommittedAim` untouched.
-    // Either way SOMETHING writes `command.aim` every frame (the recirculation invariant for the
-    // optic: never fall silent); only the OWNING transition (mouse input, or a fresh tank with no
-    // commitment to preserve) re-stores the directional point so the commander finds the optic's lay
-    // on a later mode switch.
-    let directional = intent.local_dir() * AIM_RANGE;
-    let publish = resume_commit(committed_point, moved, directional);
+    // Resolve the (possibly moved) sight line against the world: a ray from the mount along the
+    // intent bearing, hitting whatever a shell would meet — terrain or another tank's armor, own
+    // tank excluded (the ray starts inside the mantlet volume) — with the shared far fallback in
+    // the sky. `point = mount + dir·t` is the committed hull-local form; decomposing it next frame
+    // (`point − mount`) recovers these exact angles, so the resolve round-trips and the intent
+    // never drifts. Raw sight-line point, hull-local so it rides with the tank (unstabilized);
+    // `drive_aim_servos` lobs it by the superelevation, raising the bore above the line of sight,
+    // so this stays the intention.
+    let dir_local = intent.local_dir();
+    // Fallible direction: a NaN-poisoned pose or committed value this frame (rollback edge) must
+    // not be resolved and re-stored — that would poison the shared memory itself. Skip the frame,
+    // the same idiom as the bore dot and `drive_aim_servos`' non-finite hold.
+    let Ok(dir_world) = Dir3::new(hull_rotation * dir_local) else {
+        return;
+    };
+    let distance = aim_distance(
+        &spatial,
+        Ray3d::new(mount_world, dir_world),
+        MAX_RANGE,
+        tank,
+        &volumes,
+        &parents,
+    );
+    let resolved = mount_local + dir_local * distance;
+
+    // Publish. `resume_commit` gates the resolve behind actual mouse input (the zero-input-identity
+    // invariant): with an existing commitment and no motion this frame, it re-authors the ORIGINAL
+    // committed point (the gun does not move) and leaves `CommittedAim` untouched. Either way
+    // SOMETHING writes `command.aim` every frame (the recirculation invariant for the optic: never
+    // fall silent); only the OWNING transition (mouse input, or a fresh tank with no commitment to
+    // preserve) re-stores the resolved point so the commander finds the optic's aim — a real point
+    // on the world — on a later mode switch.
+    let publish = resume_commit(committed_point, moved, resolved);
     if let Some(point) = publish.store {
         committed.set(tank, point);
     }
@@ -945,40 +1017,78 @@ mod tests {
         }
     }
 
-    /// Zero-input identity / RANGE fidelity: resuming a finite committed point with NO mouse motion
-    /// re-authors that ORIGINAL point verbatim (range intact) and re-stores NOTHING, so a mode switch
-    /// is identity on `aim::CommittedAim` and on the gun's lay. The `intent_dir_round_trips` test
-    /// covers DIRECTION fidelity (a far point decodes to its bearing); this covers RANGE fidelity —
-    /// the near floor point that made the gun rise on entry before the fix. Actual mouse input (or a
-    /// fresh tank with no commitment) transitions to the directional publish and re-stores it.
+    /// Zero-input identity: resuming an existing commitment with NO mouse motion re-authors that
+    /// ORIGINAL point verbatim and re-stores NOTHING, so a mode switch is identity on
+    /// `aim::CommittedAim` and on the gun's lay — even when this frame's re-resolve would land
+    /// somewhere else (the optic resolves from the mount, third person from the camera: different
+    /// origins can see different geometry). Actual mouse input (or a fresh tank with no commitment)
+    /// publishes AND re-stores the fresh resolve.
     #[test]
     fn zero_input_resume_is_identity() {
-        // A near floor point in front of and below the hull-frame origin — the regressing case.
-        let floor = Vec3::new(0.0, -2.0, -50.0);
-        // What the resume WOULD publish if it discarded range: a far point along the same bearing.
-        let directional = floor.normalize() * 10_000.0;
+        // A commitment inherited from third person (a floor point ~50 m out)...
+        let inherited = Vec3::new(0.0, -2.0, -50.0);
+        // ...and what the optic's own resolve found this frame — deliberately different (e.g. a
+        // crest between the mount and the inherited point occludes the lower ray).
+        let resolved = Vec3::new(0.0, -1.0, -30.0);
 
         // No motion, existing commitment: re-author the original point, store nothing (identity).
-        let held = resume_commit(Some(floor), false, directional);
+        let held = resume_commit(Some(inherited), false, resolved);
         assert_eq!(
-            held.command_aim, floor,
-            "zero input re-authors the ORIGINAL committed point — range intact, gun does not move"
+            held.command_aim, inherited,
+            "zero input re-authors the ORIGINAL committed point — the gun does not move"
         );
         assert_eq!(
             held.store, None,
             "zero input leaves CommittedAim untouched (identity)"
         );
 
-        // Player moved the mouse: the optic takes directional ownership and re-stores it.
-        let moved = resume_commit(Some(floor), true, directional);
-        assert_eq!(moved.command_aim, directional);
-        assert_eq!(moved.store, Some(directional));
+        // Player moved the mouse: the optic takes ownership of its own resolve and re-stores it.
+        let moved = resume_commit(Some(inherited), true, resolved);
+        assert_eq!(moved.command_aim, resolved);
+        assert_eq!(moved.store, Some(resolved));
 
-        // Fresh tank (no commitment): nothing to preserve, so the seeded directional intent must be
-        // published AND stored to establish the commitment — even with zero input (recirculation).
-        let fresh = resume_commit(None, false, directional);
-        assert_eq!(fresh.command_aim, directional);
-        assert_eq!(fresh.store, Some(directional));
+        // Fresh tank (no commitment): nothing to preserve, so the resolve seeded from the gun's lay
+        // must be published AND stored to establish the commitment — even with zero input
+        // (recirculation).
+        let fresh = resume_commit(None, false, resolved);
+        assert_eq!(fresh.command_aim, resolved);
+        assert_eq!(fresh.store, Some(resolved));
+    }
+
+    /// The resume measures the committed point's bearing from the MOUNT, and the resolve
+    /// (`mount + dir · t`) inverts it exactly. Decomposing the raw point instead would measure from
+    /// the hull-frame origin — ~2.2 m below the mount at ground level — and a near floor aim's
+    /// bearing differs between the two by the mount parallax (~2.5° at 50 m, most of the 3.1° optic
+    /// radius under magnification): the "aim snaps much higher on first optic input" regression.
+    #[test]
+    fn resume_measures_bearing_from_the_mount() {
+        // The Tiger's geometry: gun pivot ~2.2 m above the hull-frame origin, floor point 50 m out
+        // at ground level (hull origin ≈ ground).
+        let mount = Vec3::new(0.0, 2.2171, -1.100);
+        let point = Vec3::new(0.0, 0.0, -50.0);
+
+        let intent = GunnerIntent::from_hull_local_dir(point - mount);
+        // The true sight line from the mount is depressed ~2.6°; the hull-origin bearing is 0°.
+        let expected = (-(mount.y)).atan2((point - mount).xz().length());
+        assert!(
+            (intent.pitch - expected).abs() < 1e-6,
+            "sight-line pitch from the mount, got {}",
+            intent.pitch
+        );
+        assert!(
+            intent.pitch < -0.04,
+            "a near floor aim depresses the sight line — a ~0 pitch means the decomposition \
+             regressed to the hull origin"
+        );
+
+        // Resolving along that bearing from the mount lands back on the committed point: the
+        // resume↔resolve pair round-trips, so the intent never drifts frame to frame.
+        let distance = (point - mount).length();
+        let resolved = mount + intent.local_dir() * distance;
+        assert!(
+            (resolved - point).length() < 1e-4,
+            "resolve should invert the resume, got {resolved}"
+        );
     }
 
     /// A continuous mount (turret yaw) passes through; a limited mount clamps to its window. This is

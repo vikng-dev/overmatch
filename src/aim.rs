@@ -125,15 +125,17 @@ pub fn sim_plugin(app: &mut App) {
 ///   where both may write once — schedule-ordered (`BeforeFixedMainLoop` then `Update`), never
 ///   raced, and last-writer-wins lands on the mode the player just entered.
 /// - **Zero-input identity:** a mode transition with zero player input is IDENTITY on this memory.
-///   Third person commits a RESOLVED WORLD POINT (finite range — the amber HUD dot and
-///   `drive_aim_servos`' convergence both need it); the optic aims a DIRECTION-INTENT (a far point
-///   where every mount aims ~parallel). The optic RESUMES the committed point into a yaw/pitch
-///   working view — a lossy decomposition that discards range — but must not WRITE that directional
-///   form back until the player moves the mouse: on entry it re-authors the ORIGINAL committed point
-///   into `command.aim` (so the gun does not move and the reticle does not jump on a finite floor
-///   aim) and leaves this memory untouched. Only actual optic input (or a fresh tank with no
-///   commitment to preserve) transitions the intention to directional and re-stores it
-///   (`sight::resume_commit`). This keeps both domain forms honest in the one memory.
+///   BOTH modes commit RESOLVED WORLD POINTS — third person raycast from the camera, the optic
+///   raycast from the gun mount along its sight line (far fallback in the sky) — so the memory
+///   holds exactly one domain form and no conversion between a point and a bare direction exists to
+///   go wrong (the mount-parallax bug class the 2026-07-10 unification exposed). What keeps the
+///   transition identity is the differing RESOLVE ORIGINS: the mount's ray can meet different
+///   geometry than the elevated camera's (a crest occludes the lower ray), so the optic must not
+///   re-resolve an inherited commitment unprompted. It RESUMES the point into its yaw/pitch working
+///   view (measured from the mount), re-authors the ORIGINAL point into `command.aim` (the gun does
+///   not move, the reticle does not jump), and leaves this memory untouched until actual optic
+///   input (or a fresh tank with no commitment to preserve) re-resolves and re-stores
+///   (`sight::resume_commit`).
 #[derive(Resource, Default)]
 pub(crate) struct CommittedAim(Option<(Entity, Vec3)>);
 
