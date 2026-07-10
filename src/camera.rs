@@ -6,12 +6,13 @@ use avian3d::prelude::{PhysicsSystems, SpatialQuery};
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::prelude::*;
 
+use crate::aim::CommittedAim;
 use crate::firecontrol::{RangeTable, Ranging};
 use crate::hud::HudCamera;
-use crate::sight::{in_gunner, in_third_person};
+use crate::sight::{SightMode, SightToggled, in_gunner, in_third_person};
 use crate::spec::ViewKind;
 use crate::state::{GameplaySet, PlayerInputSet};
-use crate::tank::{Controlled, Rig, Tank, TankViews, ViewNode, rig_world_pose};
+use crate::tank::{Controlled, Hull, Rig, Tank, TankViews, ViewNode, rig_world_pose};
 use crate::world::ground_distance;
 
 /// Zoom state on the camera entity. Scroll sets `target_zoom`; `zoom` eases toward it for a
@@ -59,6 +60,11 @@ pub struct OrbitCameraSet;
 /// chain — spawn-complete data, available the first frame (`None` only before any tank exists).
 #[derive(Resource, Default)]
 struct TurretPivot(Option<Vec3>);
+
+/// Height of the orbit pivot above the turret ring — shared by the follow placement
+/// ([`orbit_camera`]) and the optic-exit re-aim ([`reaim_orbit_on_optic_exit`]), which must
+/// reconstruct the exact pivot the body will be placed from.
+const PIVOT_LIFT: f32 = 2.5;
 
 pub fn plugin(app: &mut App) {
     app.insert_resource(CameraFollow(true))
@@ -122,6 +128,16 @@ pub fn plugin(app: &mut App) {
                 .in_set(GameplaySet)
                 .in_set(GunnerCameraPlaced)
                 .after(TransformSystems::Propagate),
+        )
+        .add_systems(
+            Update,
+            // React to leaving the optic by re-aiming the orbit camera at the committed point.
+            // `.after(SightToggled)` so the flip is consumed the SAME frame; the mode filter runs
+            // inside (a change to Gunner must not fire it a frame — or a session — later).
+            reaim_orbit_on_optic_exit
+                .run_if(resource_changed::<SightMode>)
+                .after(SightToggled)
+                .in_set(GameplaySet),
         );
 }
 
@@ -264,13 +280,65 @@ fn orbit_camera(
 
     // Orbit around the turret ring (root pose × captured offset), lifted a little. The camera sits
     // on the line through the pivot along its view axis; the ground ray pulls it in near terrain.
-    const PIVOT_LIFT: f32 = 2.5;
     const ORBIT_FAR: f32 = 18.0;
     const ORBIT_NEAR: f32 = 5.0;
     let pivot_point = tank_transform.transform_point(turret_local) + Vec3::Y * PIVOT_LIFT;
     let distance = ORBIT_FAR + (ORBIT_NEAR - ORBIT_FAR) * orbit.zoom;
     let back_ray = Ray3d::new(pivot_point, -transform.forward());
     transform.translation = back_ray.get_point(ground_distance(&spatial, back_ray, distance));
+}
+
+/// Returning from the gunner optic to third person, re-aim the orbit camera so its screen-centre
+/// ray passes through the committed aim point: the mode transition is identity on the AIM, not on
+/// the camera's direction. There is one `Camera3d`, and [`gunner_camera`] overwrote its pose every
+/// optic frame — there is no pre-optic orientation to restore, only a stale gunner sight line whose
+/// ORIGIN is about to change (gun mount → orbit position, ~5 m up and 18 m back). Carrying that
+/// direction over parallel makes the centre ray hit the ground well beyond the committed point (a
+/// ~50 m floor aim re-picks at roughly twice the distance), so an RMB-up `commit_aim` immediately
+/// re-commits a farther, higher target and the gun self-corrects upward — the gunner→third-person
+/// half of the 2026-07-10 transition regression.
+///
+/// Aiming the camera FROM THE PIVOT at the point makes pivot, camera body, and committed point
+/// collinear by construction — [`orbit_camera`] places the body on the line through the pivot along
+/// `−forward` — so the centre ray (which passes through the pivot) hits the committed point, the
+/// white reticle lands on it, and a fresh RMB-up commit re-picks the SAME point. Runs only on the
+/// toggle frame; from there `orbit_look` owns the direction again. No commitment (fresh spawn — or
+/// the startup fire of `resource_changed`): nothing to re-aim at, keep the current direction.
+fn reaim_orbit_on_optic_exit(
+    mode: Res<SightMode>,
+    committed: Res<CommittedAim>,
+    controlled: Query<(Entity, &Rig), With<Controlled>>,
+    tank: Query<&Transform, (With<Tank>, With<Controlled>, Without<Camera3d>)>,
+    hull: Query<&GlobalTransform, With<Hull>>,
+    pivot: Res<TurretPivot>,
+    camera: Single<&mut Transform, With<Camera3d>>,
+) {
+    // Only the exit direction re-aims; entering the optic needs nothing (`gunner_camera` owns the
+    // pose outright while in it).
+    if *mode != SightMode::ThirdPerson {
+        return;
+    }
+    let Ok((tank_entity, rig)) = controlled.single() else {
+        return;
+    };
+    let Some(local) = committed.get(tank_entity) else {
+        return;
+    };
+    let (Some(turret_local), Ok(tank_transform)) = (pivot.0, tank.single()) else {
+        return;
+    };
+    let Ok(hull_transform) = hull.get(rig.hull) else {
+        return;
+    };
+
+    let target = hull_transform.affine().transform_point3(local);
+    let pivot_point = tank_transform.transform_point(turret_local) + Vec3::Y * PIVOT_LIFT;
+    // Fallible: a zero/non-finite span (a poisoned pose on the toggle frame) must not NaN the
+    // camera rotation — keep the current direction instead.
+    let Ok(direction) = Dir3::new(target - pivot_point) else {
+        return;
+    };
+    camera.into_inner().look_to(direction, Vec3::Y);
 }
 
 /// Gunner optic (System B): lock the camera to the gun's line of sight. Parked at the **Gun node**

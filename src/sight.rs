@@ -55,6 +55,13 @@ pub enum SightMode {
     Gunner,
 }
 
+/// The Lshift view toggle's ordering anchor: `toggle_sight` flips [`SightMode`] here (`Update`).
+/// A system that must react to the flip the SAME frame (the orbit camera's optic-exit re-aim in
+/// `camera`) orders `.after` this set — reacting a frame late means one frame of camera and aim
+/// commit consuming the stale pre-toggle direction.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SightToggled;
+
 /// Run condition: the gunner optic is active AND the gunner is alive (otherwise the view is dark
 /// and the player gets a prompt to switch).
 pub fn in_gunner(mode: Res<SightMode>) -> bool {
@@ -183,7 +190,7 @@ pub fn plugin(app: &mut App) {
             (
                 // Only the Lshift view toggle is player input (gated on the cursor); the overlay,
                 // toast, and range readout are presentation and keep updating with the cursor free.
-                toggle_sight.in_set(PlayerInputSet),
+                toggle_sight.in_set(PlayerInputSet).in_set(SightToggled),
                 update_view_death_overlay,
                 // After `toggle_sight`, so a refused switch this frame shows its reason.
                 update_toast,
