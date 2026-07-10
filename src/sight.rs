@@ -4,8 +4,9 @@
 //! Lshift toggles between the free third-person "commander" view (the orbit camera + `aim.rs`) and
 //! a zoomed gunner optic locked to the gun's line of sight. In gunner view the camera shows the
 //! gun's *reality* (the bore), and aiming is **world-space position control**: mouse deltas move a
-//! committed hull-local aim direction (`GunnerIntent`), which is published as the tank's commanded
-//! aim (`TankCommand`) that every servo chases at its authored slew rate — so the view lags and
+//! committed hull-local aim direction — the shared [`aim::CommittedAim`], worked in yaw/pitch here —
+//! which is published as the tank's commanded aim (`TankCommand`) that every servo chases at its
+//! authored slew rate — so the view lags and
 //! settles (dead-stop on release, *not* rate control), and the hull MG traverses alongside the gun.
 //! Pure line of sight: superelevation (the ballistic lob for range) is a firing-side concern
 //! deferred to its own slice.
@@ -14,7 +15,7 @@ use bevy::camera::visibility::RenderLayers;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 
-use crate::aim::AimCommit;
+use crate::aim::{AimCommit, CommittedAim};
 use crate::camera::{CameraKickApplied, GUNNER_FOV_FALLBACK, GunnerCameraPlaced, view_fov};
 use crate::command::{TankCommand, gather_commands};
 use crate::damage::ControlledTank;
@@ -59,9 +60,13 @@ pub fn in_third_person(mode: Res<SightMode>) -> bool {
     *mode == SightMode::ThirdPerson
 }
 
-/// The committed gunner aim direction in the hull's local frame (radians): the *intent* the gun
-/// chases. Mouse deltas move it (position control); it is NOT the gun's live lay, which lags.
-#[derive(Resource, Default)]
+/// The committed gunner aim in the hull's local frame (radians), as yaw/pitch: the working form of
+/// the shared [`aim::CommittedAim`] while the optic drives it (position control — mouse deltas move
+/// it; it is NOT the gun's live lay, which lags). No longer a resource: the persistent memory is the
+/// one `CommittedAim` (a hull-local point), which the optic RESUMES into yaw/pitch each frame
+/// ([`GunnerIntent::from_hull_local_dir`]), works the clamps on, and republishes. So the yaw/pitch
+/// is a per-frame scratch value, not a second source of truth to keep in sync.
+#[derive(Clone, Copy)]
 struct GunnerIntent {
     yaw: f32,
     pitch: f32,
@@ -75,6 +80,19 @@ impl GunnerIntent {
         let (sy, cy) = self.yaw.sin_cos();
         let (sp, cp) = self.pitch.sin_cos();
         Vec3::new(-sy * cp, sp, -cy * cp)
+    }
+
+    /// Decompose a hull-local aim direction (or a far point along it) into yaw/pitch — the exact
+    /// inverse of [`local_dir`](Self::local_dir), and the SAME decomposition `aim::drive_aim_servos`
+    /// applies per servo (`yaw = atan2(-x, -z)`, `pitch = atan2(y, |xz|)`). Scale-invariant (`atan2`
+    /// ignores magnitude), so the shared [`aim::CommittedAim`] point resumes to its bearing at any
+    /// range. This is how the optic picks up the one committed intention each frame — the third
+    /// person commit, or the optic's own last publish — with no separate handoff.
+    fn from_hull_local_dir(dir: Vec3) -> Self {
+        Self {
+            yaw: (-dir.x).atan2(-dir.z),
+            pitch: dir.y.atan2((dir.x * dir.x + dir.z * dir.z).sqrt()),
+        }
     }
 }
 
@@ -137,7 +155,6 @@ struct RangeScaleTick {
 
 pub fn plugin(app: &mut App) {
     app.init_resource::<SightMode>()
-        .init_resource::<GunnerIntent>()
         .init_resource::<Toast>()
         .add_systems(
             Startup,
@@ -452,14 +469,15 @@ fn update_ranging_reticle(
 /// the gun (and so the camera/sight line) catches up, this drifts back to screen centre; hidden
 /// outside gunner view.
 ///
-/// Both inputs are render-rate — `intent` (mouse, `Update`) and the gunner camera's pose (which
-/// reads the VIEW gun's `GlobalTransform`, blended by `interpolate_servos` in `Update`) — so the
-/// reprojection is a pure function of two same-clock values: no aliasing.
+/// Reads the shared [`aim::CommittedAim`] (republished by `drive_gunner_aim` earlier this frame in
+/// `BeforeFixedMainLoop`) and the gunner camera's pose (which reads the VIEW gun's `GlobalTransform`,
+/// blended by `interpolate_servos` in `Update`) — a pure function of the committed intent and the
+/// camera, no aliasing.
 fn update_intent_reticle(
     mode: Res<SightMode>,
-    intent: Res<GunnerIntent>,
+    committed: Res<CommittedAim>,
     camera: Single<(&Camera, &GlobalTransform)>,
-    controlled: Query<&Rig, With<Controlled>>,
+    controlled: Query<(Entity, &Rig), With<Controlled>>,
     hull: Query<&GlobalTransform, With<Hull>>,
     mut reticle: Query<(&mut Node, &mut Visibility), With<IntentReticle>>,
 ) {
@@ -470,17 +488,25 @@ fn update_intent_reticle(
         *visibility = Visibility::Hidden;
         return;
     }
-    let Ok(rig) = controlled.single() else {
+    let Ok((tank, rig)) = controlled.single() else {
         *visibility = Visibility::Hidden;
         return;
     };
     let Ok(hull) = hull.get(rig.hull) else {
         return;
     };
+    // The committed intention (the shared `CommittedAim`, republished by `drive_gunner_aim` every
+    // gunner frame), hull-local. `None` before the first commit for this tank (possession-keyed).
+    let Some(local) = committed.get(tank) else {
+        *visibility = Visibility::Hidden;
+        return;
+    };
     let (camera, cam_transform) = *camera;
 
-    // Intent direction in world space, as a point one unit along it from the camera.
-    let dir = hull.rotation() * intent.local_dir();
+    // Intent direction in world space, as a point one unit along it from the camera (a direction
+    // projects to one screen pixel regardless of distance). `normalize_or_zero` guards the
+    // unreachable zero point; in the optic the committed value is always a far `local_dir` publish.
+    let dir = hull.rotation() * local.normalize_or_zero();
     let point = cam_transform.translation() + dir;
 
     match camera.world_to_viewport(cam_transform, point) {
@@ -493,34 +519,30 @@ fn update_intent_reticle(
     }
 }
 
-/// Lshift flips the view — but only if the target view's crewman is alive. Entering gunner view
-/// seeds the intent from the gun's *current* lay (not its commanded target — seeding from `target`
-/// yanks the intent ahead of the gun by however far it was still slewing, and the lead clamp then
-/// snaps it back → a jump on handover). The sight line is the bore (pure LOS). The controlled tank's
-/// own mesh is hidden from the optic by `sync_optic_render_layer` (reacting to the mode change), so
-/// the camera parked inside the mantlet sees through its own geometry.
+/// Lshift flips the view — but only if the target view's crewman is alive. **No aim handoff:** both
+/// modes read and write the one [`aim::CommittedAim`], so a switch preserves the committed intention
+/// by construction — the optic RESUMES the commander's committed aim on entry (`drive_gunner_aim`),
+/// and third-person re-authors the optic's last-published lay on return (`aim::commit_aim`'s RMB
+/// hold). What used to live here — seed-the-intent-from-the-gun's-lay on entry, reseed-the-free-look-
+/// hold-from-the-live-aim on exit — is gone: the seeding it did IS what sharing one memory does for
+/// free (a fresh, never-committed tank still starts from the gun's current lay, but that one rule now
+/// lives in `drive_gunner_aim`, keyed on the absence of a commitment). The controlled tank's own mesh
+/// is hidden from the optic by `sync_optic_render_layer` (reacting to the mode change), so the camera
+/// parked inside the mantlet sees through its own geometry.
 fn toggle_sight(
     keys: Res<ButtonInput<KeyCode>>,
     mut mode: ResMut<SightMode>,
-    mut intent: ResMut<GunnerIntent>,
-    mut free_look: ResMut<crate::aim::FreeLookHold>,
     controlled: ControlledTank,
     views: Query<&TankViews, With<Controlled>>,
-    servo_slots: Query<&ServoIndex>,
-    sims: Query<&TankSim>,
-    ranging: Res<Ranging>,
-    tables: Query<&RangeTable>,
-    tank_commands: Query<&TankCommand>,
     mut toast: ResMut<Toast>,
 ) {
     if !keys.just_pressed(KeyCode::ShiftLeft) {
         return;
     }
-    let Some((turret_entity, gun_entity, muzzle_entity)) =
-        controlled.rig().map(|r| (r.turret, r.gun, r.muzzle))
-    else {
+    // Need a controlled rig to have a view to flip into.
+    if controlled.rig().is_none() {
         return;
-    };
+    }
     *mode = match *mode {
         SightMode::ThirdPerson => {
             // Only switch to gunner optic if the gunner view is usable (gunner alive) — otherwise
@@ -529,24 +551,6 @@ fn toggle_sight(
                 toast.show(format!("{} unavailable", ViewKind::Gunner.label()));
                 return;
             }
-            // Servo angles live root-resident (`TankSim`), addressed by each node's `ServoIndex`.
-            let angle = |servo| {
-                controlled
-                    .entity()
-                    .and_then(|tank| sims.get(tank).ok())
-                    .zip(servo_slots.get(servo).ok())
-                    .and_then(|(sim, slot)| sim.servos.get(slot.0))
-                    .map(crate::tank::ServoState::current)
-            };
-            if let (Some(t), Some(g)) = (angle(turret_entity), angle(gun_entity)) {
-                // The gun's live pitch carries the superelevation lob; seed the intent from the sight
-                // line (bore − lob), not the raised bore, or the view jumps θ on handover.
-                let theta = tables
-                    .get(muzzle_entity)
-                    .map_or(0.0, |table| table.superelevation(ranging.range));
-                intent.yaw = t;
-                intent.pitch = g - theta;
-            }
             SightMode::Gunner
         }
         SightMode::Gunner => {
@@ -554,20 +558,6 @@ fn toggle_sight(
             if !view_available(&controlled, &views, ViewKind::Commander) {
                 toast.show(format!("{} unavailable", ViewKind::Commander.label()));
                 return;
-            }
-            // Re-seed the third-person free-look hold from the gun's CURRENT commanded aim as we
-            // hand back. `drive_gunner_aim` superseded the intention while in the optic without ever
-            // touching `commit_aim`'s hold; if RMB is already held on return, `commit_aim` would
-            // re-author that stale pre-optic point and drag the gun off the optic's lay. Seeding the
-            // hold with the live commitment holds it steady instead (mirrors the gunner seeding its
-            // own intent from the live gun on entry). Harmless when RMB is up — `commit_aim` picks a
-            // fresh point and overwrites this next frame.
-            if let Some(tank) = controlled.entity() {
-                free_look.0 = tank_commands
-                    .get(tank)
-                    .ok()
-                    .and_then(|command| command.aim)
-                    .map(|aim| (tank, aim));
             }
             SightMode::ThirdPerson
         }
@@ -637,10 +627,13 @@ fn clamp_to_travel(value: f32, limits: Option<(f32, f32)>) -> f32 {
     }
 }
 
-/// World-space position-control aiming. Mouse deltas accumulate into the committed hull-local
-/// intent, which is published as the tank's commanded aim (a far point along the intent's line of
-/// sight) — so `aim::drive_aim_servos` chases it with *every* servo, the gun and the hull MG alike,
-/// at their own slew rates. No servo command is written here; this only moves the aim intention.
+/// World-space position-control aiming. The one committed intention (the shared [`aim::CommittedAim`],
+/// resumed into yaw/pitch each frame — or seeded from the gun's lay when this tank has none yet)
+/// takes this frame's mouse deltas, is clamped, then re-published as the tank's commanded aim (a far
+/// point along the intent's line of sight) AND re-stored into `CommittedAim` — so `aim::drive_aim_servos`
+/// chases it with *every* servo, the gun and the hull MG alike, at their own slew rates, and the
+/// commander finds the optic's lay already committed on a mode switch. No servo command is written
+/// here; this only moves the aim intention.
 ///
 /// Two bounds shape the intent, in order:
 ///
@@ -665,7 +658,7 @@ fn clamp_to_travel(value: f32, limits: Option<(f32, f32)>) -> f32 {
 /// same point.
 fn drive_gunner_aim(
     motion: Res<AccumulatedMouseMotion>,
-    mut intent: ResMut<GunnerIntent>,
+    mut committed: ResMut<CommittedAim>,
     controlled: ControlledTank,
     views: Query<&TankViews, With<Controlled>>,
     servo_slots: Query<&ServoIndex>,
@@ -698,9 +691,6 @@ fn drive_gunner_aim(
     // (boresighted along the intent), since there's no committed convergence range yet.
     const AIM_RANGE: f32 = 10_000.0;
 
-    intent.yaw -= motion.delta.x * sensitivity;
-    intent.pitch -= motion.delta.y * sensitivity;
-
     // Servo angles live root-resident (`TankSim`), addressed by each node's `ServoIndex`.
     let angle = |servo| {
         sims.get(tank)
@@ -721,6 +711,24 @@ fn drive_gunner_aim(
     let theta = tables
         .get(rig.muzzle)
         .map_or(0.0, |table| table.superelevation(ranging.range));
+
+    // Resume the one committed intention into yaw/pitch — the shared `CommittedAim`, whether it was
+    // set by the commander commit (`aim::commit_aim`) or by this system's own last publish. When
+    // this tank has NO commitment yet (fresh spawn, or a possession change — the entity-keyed `get`
+    // reads `None`), seed from the gun's CURRENT lay instead. This single rule replaces the old
+    // seed-on-entry `toggle_sight` did: an active commander aim is simply continued (its point
+    // decodes to the same sight-line bearing), only an absent commitment falls back to the lay.
+    // Seed from the sight line (lay − lob), not the raised bore, or the view jumps θ on handover.
+    let mut intent = committed
+        .get(tank)
+        .map(GunnerIntent::from_hull_local_dir)
+        .unwrap_or(GunnerIntent {
+            yaw: t_current,
+            pitch: g_current - theta,
+        });
+
+    intent.yaw -= motion.delta.x * sensitivity;
+    intent.pitch -= motion.delta.y * sensitivity;
 
     // Bound 1 — mechanical travel. The pitch (elevation) servo's limits are on the *lay*; the intent
     // is the *sight line* = lay − θ, so shift the window down by the lob. The Tiger's turret is
@@ -759,8 +767,13 @@ fn drive_gunner_aim(
     // Publish the raw sight-line intent as the tank's commanded aim: a far point (mounts aim
     // ~parallel), hull-local so it rides with the tank (unstabilized). `drive_aim_servos` lobs it
     // by the superelevation, raising the bore above the line of sight; this stays the intention.
+    // Store into `CommittedAim` too (the recirculation invariant for the optic: it re-authors every
+    // frame, never falling silent) so the shared memory carries the current intention for the
+    // reticle and for a later mode switch — the commander finds the optic's lay already here.
+    let point = intent.local_dir() * AIM_RANGE;
+    committed.set(tank, point);
     if let Ok(mut command) = tank_commands.get_mut(tank) {
-        command.aim = Some(intent.local_dir() * AIM_RANGE);
+        command.aim = Some(point);
     }
 }
 
@@ -834,6 +847,39 @@ mod tests {
         assert!((optic_margin(fov) - 0.054).abs() < 1e-6);
         // Scales with the authored FOV: a wider optic gets a proportionally wider reach.
         assert!((optic_margin(0.24) - 2.0 * optic_margin(0.12)).abs() < 1e-9);
+    }
+
+    /// The yaw/pitch ↔ hull-local direction conversion round-trips: decomposing `local_dir`'s output
+    /// recovers the original angles. This is the bridge that lets the optic resume the shared
+    /// `aim::CommittedAim` (a point) into its yaw/pitch working form and republish it — it must be
+    /// lossless over the reachable aim window, and scale-invariant (a committed far point decodes to
+    /// the same bearing as its unit direction).
+    #[test]
+    fn intent_dir_round_trips() {
+        // Sample the reachable window: yaw all the way round, pitch within ±80° (well inside the
+        // atan2 branch where the decomposition inverts, |pitch| < 90°).
+        for yaw_deg in [-170.0, -90.0, -30.0, 0.0, 45.0, 120.0, 179.0_f32] {
+            for pitch_deg in [-80.0, -15.0, 0.0, 10.0, 60.0_f32] {
+                let intent = GunnerIntent {
+                    yaw: yaw_deg.to_radians(),
+                    pitch: pitch_deg.to_radians(),
+                };
+                let dir = intent.local_dir();
+                let back = GunnerIntent::from_hull_local_dir(dir);
+                assert!(
+                    (shortest_angle(back.yaw - intent.yaw)).abs() < 1e-5,
+                    "yaw round-trip at ({yaw_deg}, {pitch_deg})"
+                );
+                assert!(
+                    (back.pitch - intent.pitch).abs() < 1e-5,
+                    "pitch round-trip at ({yaw_deg}, {pitch_deg})"
+                );
+                // Scale-invariant: a far committed point decodes to the same angles as the unit dir.
+                let far = GunnerIntent::from_hull_local_dir(dir * 10_000.0);
+                assert!((shortest_angle(far.yaw - intent.yaw)).abs() < 1e-5);
+                assert!((far.pitch - intent.pitch).abs() < 1e-5);
+            }
+        }
     }
 
     /// A continuous mount (turret yaw) passes through; a limited mount clamps to its window. This is
