@@ -19,6 +19,8 @@ use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
 use lightyear::prelude::*;
 
+use crate::ui_font::UiFonts;
+
 /// How often the readout text is rebuilt. Slow enough that the digits are readable, fast enough to
 /// still track the sim — the standard per-second refresh of a game perf overlay.
 const REFRESH_SECS: f32 = 1.0;
@@ -36,7 +38,7 @@ pub fn plugin(app: &mut App) {
         .add_systems(Update, update_debug_hud);
 }
 
-fn spawn_debug_hud(mut commands: Commands) {
+fn spawn_debug_hud(mut commands: Commands, fonts: Res<UiFonts>) {
     // Bottom-right — a subtle dark card mirroring `crew_ui`'s status panel (top-left), so the
     // corners read as one UI family. Fixed width sized to the widest realistic row
     // ("Frame  999.9 ms") at font_size 15px; Bevy UI Nodes are border-box, so this includes the 8px
@@ -74,6 +76,8 @@ fn spawn_debug_hud(mut commands: Commands) {
                     row.spawn((
                         Text::new(label),
                         TextFont {
+                            // Regular: a dense metric row label.
+                            font: fonts.body.clone().into(),
                             font_size: FontSize::Px(15.0),
                             ..default()
                         },
@@ -84,6 +88,8 @@ fn spawn_debug_hud(mut commands: Commands) {
                         // Placeholder until the first ~1 Hz refresh populates real numbers.
                         Text::new("--"),
                         TextFont {
+                            // Regular: a dense metric row value.
+                            font: fonts.body.clone().into(),
                             font_size: FontSize::Px(15.0),
                             ..default()
                         },

@@ -35,6 +35,7 @@ use crate::camera::CameraKickApplied;
 use crate::damage::TankVolumes;
 use crate::hud::HudCamera;
 use crate::tank::Controlled;
+use crate::ui_font::UiFonts;
 
 use super::protocol::{NetHealth, health_bearing_volumes};
 
@@ -291,7 +292,7 @@ fn apply_camera_kick(
 /// Spawn the two cue overlays once. The damage frame is a hollow full-screen red border; the
 /// hit-marker is a centred "X" tick. Both start transparent and are driven by their intensity
 /// resources. Mirrors the node idiom in `aim::spawn_hud` / `hud::spawn_labels`.
-fn spawn_cue_ui(mut commands: Commands) {
+fn spawn_cue_ui(mut commands: Commands, fonts: Res<UiFonts>) {
     commands.spawn((
         DamageFlashNode,
         Node {
@@ -315,6 +316,8 @@ fn spawn_cue_ui(mut commands: Commands) {
                 HitConfirmNode,
                 Text::new("X"),
                 TextFont {
+                    // SemiBold: the punchy centre-screen hit marker.
+                    font: fonts.hud.clone().into(),
                     font_size: FontSize::Px(28.0),
                     ..default()
                 },

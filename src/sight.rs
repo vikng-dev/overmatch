@@ -24,6 +24,7 @@ use crate::state::{GameplaySet, PlayerInputSet};
 use crate::tank::{
     Controlled, Hull, Rig, ServoIndex, ServoSpec, Tank, TankSim, TankViews, shortest_angle,
 };
+use crate::ui_font::UiFonts;
 
 /// Whether the controlled tank's `kind` view is usable — its authored `requires` met (a dead
 /// gunner closes the optic, a dead commander closes third-person). A missing view is unusable.
@@ -226,7 +227,7 @@ fn spawn_intent_reticle(mut commands: Commands) {
 /// The full-screen black overlay + center prompt, shown when the active view's crewman is dead.
 /// The prompt tells the player to press Lshift to switch to the other view (if its crewman is
 /// alive). Solid black — "your crewman's eyes are gone" (design §7a, view-death model).
-fn spawn_view_death_overlay(mut commands: Commands) {
+fn spawn_view_death_overlay(mut commands: Commands, fonts: Res<UiFonts>) {
     commands
         .spawn((
             ViewDeathOverlay,
@@ -247,6 +248,8 @@ fn spawn_view_death_overlay(mut commands: Commands) {
                 ViewDeathText,
                 Text::new(""),
                 TextFont {
+                    // SemiBold: a full-screen crew-death prompt.
+                    font: fonts.hud.clone().into(),
                     font_size: FontSize::Px(20.0),
                     ..default()
                 },
@@ -257,7 +260,7 @@ fn spawn_view_death_overlay(mut commands: Commands) {
 
 /// The refusal-toast text node: a centred banner in the upper third, hidden until a refused switch
 /// raises it. Its own entity carries both `Text` and `Visibility`, so `update_toast` writes one query.
-fn spawn_toast(mut commands: Commands) {
+fn spawn_toast(mut commands: Commands, fonts: Res<UiFonts>) {
     commands
         .spawn(Node {
             width: Val::Percent(100.0),
@@ -271,6 +274,8 @@ fn spawn_toast(mut commands: Commands) {
                 ToastText,
                 Text::new(""),
                 TextFont {
+                    // SemiBold: a centred refusal banner.
+                    font: fonts.hud.clone().into(),
                     font_size: FontSize::Px(22.0),
                     ..default()
                 },
@@ -281,11 +286,13 @@ fn spawn_toast(mut commands: Commands) {
 }
 
 /// The dialed-range readout, parked bottom-left; populated/shown only in the optic.
-fn spawn_range_readout(mut commands: Commands) {
+fn spawn_range_readout(mut commands: Commands, fonts: Res<UiFonts>) {
     commands.spawn((
         RangeReadout,
         Text::new(""),
         TextFont {
+            // SemiBold: an all-caps gunnery readout ("RANGE ... m").
+            font: fonts.hud.clone().into(),
             font_size: FontSize::Px(16.0),
             ..default()
         },
@@ -324,7 +331,7 @@ const RETICLE_COLOR: Color = Color::srgba(1.0, 0.8, 0.3, 0.85);
 /// Spawn the ranging reticle: the static centre line (held on the sight centre via a flex box, the
 /// same idiom as the white centre dot) and the pool of range graduations (200 m steps, majors
 /// numbered in hundreds of metres). All hidden until shown in the optic.
-fn spawn_ranging_reticle(mut commands: Commands) {
+fn spawn_ranging_reticle(mut commands: Commands, fonts: Res<UiFonts>) {
     commands
         .spawn(Node {
             width: Val::Percent(100.0),
@@ -367,6 +374,8 @@ fn spawn_ranging_reticle(mut commands: Commands) {
                 parent.spawn((
                     Text::new(format!("{}", (range as i32) / 100)),
                     TextFont {
+                        // Regular: a tiny reticle graduation number (12px).
+                        font: fonts.body.clone().into(),
                         font_size: FontSize::Px(12.0),
                         ..default()
                     },

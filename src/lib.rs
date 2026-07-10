@@ -72,6 +72,10 @@ mod trace;
 /// `GamePlugin`. Self-contained: its own code-generated primitive rig + locomotion, for developing
 /// the continuous-track model in isolation.
 pub mod track_sandbox;
+/// The bundled UI typeface (Barlow Condensed): loads the two weights once and exposes them as a
+/// `ui_font::UiFonts` resource that every `Text`-spawning client plugin reads. Mounted by each
+/// windowed composition root; retires Bevy's ASCII-only default font.
+mod ui_font;
 mod world;
 
 /// Marker resource: this app is a NETWORK CLIENT running the shared sim as a REPLICA of the server,
@@ -166,6 +170,9 @@ impl Plugin for ClientPlugin {
     fn build(&self, app: &mut App) {
         gate_player_input(app);
         app.add_plugins((
+            // Load the bundled UI font first: it inserts `UiFonts` at build time, so the HUD/crew
+            // spawn systems below always find it (see `ui_font`).
+            ui_font::plugin,
             branding::plugin,
             // Pause/cursor handling (drives the states that `state::sim_plugin` owns).
             state::client_plugin,
@@ -204,6 +211,8 @@ impl Plugin for NetClientPlugin {
     fn build(&self, app: &mut App) {
         gate_player_input(app);
         app.add_plugins((
+            // Load the bundled UI font first (inserts `UiFonts` at build time; see `ui_font`).
+            ui_font::plugin,
             branding::plugin,
             command::client_plugin,
             camera::plugin,

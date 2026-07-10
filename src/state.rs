@@ -4,6 +4,8 @@ use avian3d::prelude::{Physics, PhysicsTime};
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow, WindowFocused};
 
+use crate::ui_font::UiFonts;
+
 /// Top-level app mode. `Loading` gates gameplay until required assets (e.g. the tank's spec
 /// sheet) have loaded, so nothing binds against a half-loaded world (ADR-0011). More variants
 /// (Menu) slot in here later.
@@ -149,7 +151,7 @@ fn resume_physics(mut time: ResMut<Time<Physics>>) {
 
 /// "PAUSED" overlay. `DespawnOnExit(Paused)` deletes it (children included) on unpause, so
 /// there is no teardown system to keep in sync.
-fn spawn_pause_overlay(mut commands: Commands) {
+fn spawn_pause_overlay(mut commands: Commands, fonts: Res<UiFonts>) {
     commands
         .spawn((
             DespawnOnExit(AppState::Paused),
@@ -165,6 +167,8 @@ fn spawn_pause_overlay(mut commands: Commands) {
             parent.spawn((
                 Text::new("PAUSED"),
                 TextFont {
+                    // SemiBold: a big all-caps overlay.
+                    font: fonts.hud.clone().into(),
                     font_size: FontSize::Px(80.0),
                     ..default()
                 },

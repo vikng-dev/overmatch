@@ -197,6 +197,9 @@ pub fn plugin(app: &mut App) {
         // The render-side view attach: the target is static, but cook-off detaches the sim
         // turret and the rendered glb turret must follow the free body.
         crate::tank::view_attach_plugin,
+        // The shared HUD/crew plugins below read the `UiFonts` resource; mount the loader so the
+        // sandbox provides it too (the sandbox's own labels keep the default font — a dev tool).
+        crate::ui_font::plugin,
         // Shared tank-state HUD (component HP + aggregate status labels), reprojected through the
         // `HudCamera` tag on the free-fly camera below.
         hud::plugin,

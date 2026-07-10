@@ -16,6 +16,7 @@ use crate::net::protocol::NetBot;
 use crate::ballistics::{ComponentHealth, ComponentVolume};
 use crate::damage::{Ammo, CrewStation, FunctionRole};
 use crate::tank::{Tank, ViewNode};
+use crate::ui_font::UiFonts;
 
 /// The camera the HUD reprojects world points through. Each binary tags its own world camera with
 /// this — the game's player camera, the sandbox's free-fly camera — so the shared systems don't
@@ -39,13 +40,15 @@ pub fn plugin(app: &mut App) {
         .add_systems(Update, (update_component_hp_labels, update_tank_nameplates));
 }
 
-fn spawn_labels(mut commands: Commands) {
+fn spawn_labels(mut commands: Commands, fonts: Res<UiFonts>) {
     // Pool of HP labels floated over damaged components each frame; hidden while unused.
     for _ in 0..12 {
         commands.spawn((
             ComponentHpLabel,
             Text::new(""),
             TextFont {
+                // Regular: a small, dense numeric readout (13px).
+                font: fonts.body.clone().into(),
                 font_size: FontSize::Px(13.0),
                 ..default()
             },
@@ -64,6 +67,8 @@ fn spawn_labels(mut commands: Commands) {
             TankNameplate,
             Text::new(""),
             TextFont {
+                // SemiBold: a tank identity chip floated over the world — reads as a label.
+                font: fonts.hud.clone().into(),
                 font_size: FontSize::Px(15.0),
                 ..default()
             },

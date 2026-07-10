@@ -15,6 +15,7 @@ use crate::damage::{
 };
 use crate::spec::ViewKind;
 use crate::tank::{Controlled, TankRoot, TankSim, TankViews, Weapon, WeaponIndex};
+use crate::ui_font::UiFonts;
 
 /// The controlled tank's crew bar: one cell per seat, driven by the `1`–`5` swap input.
 #[derive(Component)]
@@ -39,12 +40,14 @@ pub fn plugin(app: &mut App) {
         );
 }
 
-fn spawn_crew_bar(mut commands: Commands) {
+fn spawn_crew_bar(mut commands: Commands, fonts: Res<UiFonts>) {
     // Bottom-left — one cell per seat, driven by `update_crew_bar`.
     commands.spawn((
         CrewBarText,
         Text::new(""),
         TextFont {
+            // Regular: a dense multi-cell seat readout.
+            font: fonts.body.clone().into(),
             font_size: FontSize::Px(15.0),
             ..default()
         },
@@ -58,13 +61,15 @@ fn spawn_crew_bar(mut commands: Commands) {
     ));
 }
 
-fn spawn_status_panel(mut commands: Commands) {
+fn spawn_status_panel(mut commands: Commands, fonts: Res<UiFonts>) {
     // Top-left — the controlled tank's vitals card (the crew bar owns bottom-left). A subtle dark
     // card behind a compact multi-line stat block, driven by `update_status_panel`.
     commands.spawn((
         StatusPanelText,
         Text::new(""),
         TextFont {
+            // Regular: a dense multi-line stat block.
+            font: fonts.body.clone().into(),
             font_size: FontSize::Px(15.0),
             ..default()
         },

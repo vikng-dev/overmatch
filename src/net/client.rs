@@ -34,6 +34,7 @@ use crate::tank::{
     Controlled as GameControlled, Muzzle, PendingTankAssets, TankRoot, TankSim, Weapon,
     WeaponIndex, load_tank_assets,
 };
+use crate::ui_font::UiFonts;
 use crate::{NetClientPlugin, SimPlugin};
 
 const SERVER_PORT: u16 = 5888;
@@ -543,7 +544,7 @@ struct ConnectStatusText;
 /// Spawn the connect-status overlay once, hidden by default (the first frame is pre-connect anyway;
 /// [`update_connect_status`] reveals it). Mirrors the menu/death overlays' node+text shape so the
 /// three read as one UI family.
-fn spawn_connect_status(mut commands: Commands) {
+fn spawn_connect_status(mut commands: Commands, fonts: Res<UiFonts>) {
     commands
         .spawn((
             ConnectStatusNode,
@@ -561,6 +562,8 @@ fn spawn_connect_status(mut commands: Commands) {
                 ConnectStatusText,
                 Text::new("CONNECTING..."),
                 TextFont {
+                    // SemiBold: a big all-caps connect overlay.
+                    font: fonts.hud.clone().into(),
                     font_size: FontSize::Px(48.0),
                     ..default()
                 },
@@ -875,7 +878,12 @@ fn feed_action_state(
 
 /// Open the menu overlay: release the cursor and spawn the translucent backdrop. Shared by the Esc
 /// toggle and the alt-tab focus handler (both need the freed cursor to have somewhere to land).
-fn open_menu(menu: &mut MenuOverlay, cursor: &mut CursorOptions, commands: &mut Commands) {
+fn open_menu(
+    menu: &mut MenuOverlay,
+    cursor: &mut CursorOptions,
+    commands: &mut Commands,
+    font: &Handle<Font>,
+) {
     menu.open = true;
     cursor.grab_mode = CursorGrabMode::None;
     cursor.visible = true;
@@ -895,6 +903,8 @@ fn open_menu(menu: &mut MenuOverlay, cursor: &mut CursorOptions, commands: &mut 
             parent.spawn((
                 Text::new("MENU\nEsc to close"),
                 TextFont {
+                    // SemiBold: a big all-caps menu overlay.
+                    font: font.into(),
                     font_size: FontSize::Px(48.0),
                     ..default()
                 },
@@ -926,6 +936,7 @@ fn toggle_menu(
     mut menu: ResMut<MenuOverlay>,
     window: Single<(&mut Window, &mut CursorOptions), With<PrimaryWindow>>,
     nodes: Query<Entity, With<MenuOverlayNode>>,
+    fonts: Res<UiFonts>,
     mut commands: Commands,
 ) {
     if !keys.just_pressed(KeyCode::Escape) {
@@ -935,7 +946,7 @@ fn toggle_menu(
     if menu.open {
         close_menu(&mut menu, &mut window, &mut cursor, &nodes, &mut commands);
     } else {
-        open_menu(&mut menu, &mut cursor, &mut commands);
+        open_menu(&mut menu, &mut cursor, &mut commands, &fonts.hud);
     }
 }
 
@@ -949,6 +960,7 @@ fn focus_menu(
     mut menu: ResMut<MenuOverlay>,
     cursor: Single<&mut CursorOptions, With<PrimaryWindow>>,
     mut refocus: ResMut<RefocusGrab>,
+    fonts: Res<UiFonts>,
     mut commands: Commands,
 ) {
     // Collapse the frame's focus events to whether we ended focused (the last event wins).
@@ -965,7 +977,7 @@ fn focus_menu(
         cursor.grab_mode = CursorGrabMode::None;
         cursor.visible = true;
         if !menu.open {
-            open_menu(&mut menu, &mut cursor, &mut commands);
+            open_menu(&mut menu, &mut cursor, &mut commands, &fonts.hud);
         }
     } else if !menu.open {
         refocus.0 = Some(REFOCUS_GRAB_FRAMES);

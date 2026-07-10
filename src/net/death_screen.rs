@@ -17,6 +17,7 @@ use bevy::prelude::*;
 use crate::command::TankCommand;
 use crate::damage::TankKnockedOut;
 use crate::tank::Controlled;
+use crate::ui_font::UiFonts;
 
 /// The respawn key. `R` for respawn — a graybox binding; a rebind screen later would move it into
 /// `command::Bindings` like the drive/fire keys, but the death screen is the only reader for now.
@@ -84,6 +85,7 @@ fn toggle_death_screen(
     live_own: Query<(), (With<Controlled>, Without<TankKnockedOut>)>,
     overlay: Query<(Entity, &DeathScreenNode)>,
     mut awaiting: ResMut<AwaitingRespawn>,
+    fonts: Res<UiFonts>,
     mut commands: Commands,
 ) {
     let has_live = !live_own.is_empty();
@@ -114,7 +116,7 @@ fn toggle_death_screen(
         commands.entity(node).despawn();
     }
     if let Some(state) = desired {
-        spawn_death_screen(&mut commands, state);
+        spawn_death_screen(&mut commands, state, &fonts.hud);
     }
 }
 
@@ -148,7 +150,7 @@ fn request_respawn(
 /// Spawn the graybox death overlay: a dim full-screen backdrop with centered white text, its message
 /// chosen by `state`. Deliberately minimal; mirrors the menu overlay's node/text shape in
 /// `net::client` so the two read as one UI family.
-fn spawn_death_screen(commands: &mut Commands, state: DeathScreenNode) {
+fn spawn_death_screen(commands: &mut Commands, state: DeathScreenNode, font: &Handle<Font>) {
     let text = match state {
         DeathScreenNode::Died => "YOU DIED\npress R to respawn",
         DeathScreenNode::Respawning => "RESPAWNING...",
@@ -169,6 +171,8 @@ fn spawn_death_screen(commands: &mut Commands, state: DeathScreenNode) {
             parent.spawn((
                 Text::new(text),
                 TextFont {
+                    // SemiBold: a big all-caps death overlay.
+                    font: font.into(),
                     font_size: FontSize::Px(48.0),
                     ..default()
                 },
