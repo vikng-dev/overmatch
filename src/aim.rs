@@ -77,6 +77,16 @@ pub fn sim_plugin(app: &mut App) {
 ///   `in_gunner`) are mutually exclusive on every frame but the gunner→third-person toggle frame,
 ///   where both may write once — schedule-ordered (`BeforeFixedMainLoop` then `Update`), never
 ///   raced, and last-writer-wins lands on the mode the player just entered.
+/// - **Zero-input identity:** a mode transition with zero player input is IDENTITY on this memory.
+///   Third person commits a RESOLVED WORLD POINT (finite range — the amber HUD dot and
+///   `drive_aim_servos`' convergence both need it); the optic aims a DIRECTION-INTENT (a far point
+///   where every mount aims ~parallel). The optic RESUMES the committed point into a yaw/pitch
+///   working view — a lossy decomposition that discards range — but must not WRITE that directional
+///   form back until the player moves the mouse: on entry it re-authors the ORIGINAL committed point
+///   into `command.aim` (so the gun does not move and the reticle does not jump on a finite floor
+///   aim) and leaves this memory untouched. Only actual optic input (or a fresh tank with no
+///   commitment to preserve) transitions the intention to directional and re-stores it
+///   (`sight::resume_commit`). This keeps both domain forms honest in the one memory.
 #[derive(Resource, Default)]
 pub(crate) struct CommittedAim(Option<(Entity, Vec3)>);
 
