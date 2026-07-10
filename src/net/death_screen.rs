@@ -33,11 +33,31 @@ enum DeathScreenNode {
     Respawning,
 }
 
-/// Latched true the moment the player presses respawn, cleared once a fresh live `Controlled` tank is
-/// re-acquired. Bridges the ~1-RTT gap in which the old tank has despawned but the new one has not yet
-/// replicated back — the window the overlay must NOT drop through.
+/// How long a respawn request may sit unfulfilled before the overlay reverts from `RESPAWNING…` back
+/// to `Died` and re-enables the request. The happy path re-acquires a live tank within ~1 RTT (well
+/// under this), so the timeout only fires when the request genuinely stalls: the server asset-gate
+/// skipped the spawn, or the link dropped while dead and no fresh tank will ever replicate back.
+/// Without it the overlay sticks on `RESPAWNING…` forever with no way to re-request.
+const RESPAWN_TIMEOUT_SECS: f64 = 5.0;
+
+/// Tracks an in-flight respawn request. Latched the moment the player presses respawn, cleared once a
+/// fresh live `Controlled` tank is re-acquired — bridging the ~1-RTT gap in which the old tank has
+/// despawned but the new one has not yet replicated back (the window the overlay must NOT drop
+/// through) — OR cleared by the [`RESPAWN_TIMEOUT_SECS`] wall-clock timeout when the request stalls.
 #[derive(Resource, Default)]
-struct AwaitingRespawn(bool);
+struct AwaitingRespawn {
+    /// True from the respawn press until a live tank is re-acquired or the request times out.
+    active: bool,
+    /// Wall-clock deadline (`Time::elapsed_secs_f64`) past which an unfulfilled request reverts to
+    /// `Died`. Meaningful only while `active`.
+    deadline: f64,
+}
+
+/// Whether an in-flight respawn request has timed out: still awaiting, no live tank has arrived, and
+/// the wall-clock deadline has passed. Pure so the revert threshold is unit-testable without an app.
+fn respawn_timed_out(awaiting: &AwaitingRespawn, has_live: bool, now: f64) -> bool {
+    awaiting.active && !has_live && now >= awaiting.deadline
+}
 
 pub fn plugin(app: &mut App) {
     app.init_resource::<AwaitingRespawn>()
@@ -59,6 +79,7 @@ pub fn plugin(app: &mut App) {
 /// health-derived `TankKnockedOut` is absent). Runs after [`request_respawn`] so a press this frame is
 /// reflected immediately. Spawn/despawn only on a state change — not every frame.
 fn toggle_death_screen(
+    time: Res<Time>,
     dead_own: Query<(), (With<Controlled>, With<TankKnockedOut>)>,
     live_own: Query<(), (With<Controlled>, Without<TankKnockedOut>)>,
     overlay: Query<(Entity, &DeathScreenNode)>,
@@ -68,10 +89,16 @@ fn toggle_death_screen(
     let has_live = !live_own.is_empty();
     if has_live {
         // The fresh tank is claimed and alive — the round-trip is over.
-        awaiting.0 = false;
+        awaiting.active = false;
+    } else if respawn_timed_out(&awaiting, has_live, time.elapsed_secs_f64()) {
+        // The request stalled past the timeout (asset-gate skip, or a drop while dead): drop the
+        // wait so the overlay reverts to `Died` and the player can press R again. The dead own tank
+        // still exists in that case, so precedence below falls to `Died`.
+        awaiting.active = false;
+        info!("client: respawn request timed out — reverting to the death screen");
     }
 
-    let desired = if awaiting.0 && !has_live {
+    let desired = if awaiting.active && !has_live {
         Some(DeathScreenNode::Respawning)
     } else if !dead_own.is_empty() {
         Some(DeathScreenNode::Died)
@@ -99,6 +126,7 @@ fn toggle_death_screen(
 /// (and, under starvation, the input bridge's `clear_edges`) drops it after one tick, so a held key
 /// can't spam respawns.
 fn request_respawn(
+    time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     mut dead_own: Query<&mut TankCommand, (With<Controlled>, With<TankKnockedOut>)>,
     mut awaiting: ResMut<AwaitingRespawn>,
@@ -110,8 +138,10 @@ fn request_respawn(
         command.respawn = true;
         // Latch the wait so the overlay switches to "respawning…" and stays up across the round-trip
         // even after the old tank despawns (`toggle_death_screen`). Scoped to the dead-tank query, so
-        // it can only latch when there is actually a dead own tank to respawn.
-        awaiting.0 = true;
+        // it can only latch when there is actually a dead own tank to respawn. Arm the timeout so a
+        // request that never yields a live tank reverts to `Died` instead of sticking forever.
+        awaiting.active = true;
+        awaiting.deadline = time.elapsed_secs_f64() + RESPAWN_TIMEOUT_SECS;
     }
 }
 
@@ -145,4 +175,39 @@ fn spawn_death_screen(commands: &mut Commands, state: DeathScreenNode) {
                 TextColor(Color::WHITE),
             ));
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn awaiting(active: bool, deadline: f64) -> AwaitingRespawn {
+        AwaitingRespawn { active, deadline }
+    }
+
+    /// The timeout fires only once the deadline is genuinely past — before it, an in-flight request
+    /// keeps the overlay on `RESPAWNING…`.
+    #[test]
+    fn not_timed_out_before_deadline() {
+        let a = awaiting(true, 10.0);
+        assert!(!respawn_timed_out(&a, false, 9.999), "just before deadline");
+        assert!(respawn_timed_out(&a, false, 10.0), "at the deadline");
+        assert!(respawn_timed_out(&a, false, 12.0), "past the deadline");
+    }
+
+    /// A live tank arriving cancels the timeout regardless of the clock: the round-trip succeeded,
+    /// so there is nothing to revert.
+    #[test]
+    fn live_tank_never_times_out() {
+        let a = awaiting(true, 10.0);
+        assert!(!respawn_timed_out(&a, true, 100.0));
+    }
+
+    /// With no request in flight there is nothing to time out — the timeout can't manufacture a
+    /// revert out of an idle death screen.
+    #[test]
+    fn inactive_never_times_out() {
+        let a = awaiting(false, 0.0);
+        assert!(!respawn_timed_out(&a, false, 100.0));
+    }
 }
