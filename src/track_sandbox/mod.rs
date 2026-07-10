@@ -219,9 +219,9 @@ enum Model {
 impl Model {
     fn label(self) -> &'static str {
         match self {
-            Model::BeltPrimary => "1 — belt-primary (belt sole contact, cosmetic wheels)",
-            Model::LinkBelt => "2 — link-belt (stations advect with the belt)",
-            Model::BoxBelt => "3 — box-belt (pin-line chain, box-cast links)",
+            Model::BeltPrimary => "1 - belt-primary (belt sole contact, cosmetic wheels)",
+            Model::LinkBelt => "2 - link-belt (stations advect with the belt)",
+            Model::BoxBelt => "3 - box-belt (pin-line chain, box-cast links)",
         }
     }
 }
@@ -492,7 +492,7 @@ const RESET_SPOTS: [(f32, &str); 4] = [
     (-TRENCHES[1].0, "wide trench (pure diagonal bridge)"),
     (
         -TRENCHES[2].0,
-        "pit (swallows the whole rig — drop in, grind out)",
+        "pit (swallows the whole rig - drop in, grind out)",
     ),
 ];
 

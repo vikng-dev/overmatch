@@ -225,11 +225,11 @@ pub fn run() {
     let (input_delay, delay_label) = match harness::input_delay_ticks() {
         None => (
             InputDelayConfig::balanced(),
-            "balanced (≤3-tick input delay absorbs ~50ms before prediction)".to_string(),
+            "balanced (<=3-tick input delay absorbs ~50ms before prediction)".to_string(),
         ),
         Some(0) => (
             InputDelayConfig::no_input_delay(),
-            "no_input_delay (SPIKE_INPUT_DELAY_TICKS=0 — old max-prediction behavior)".to_string(),
+            "no_input_delay (SPIKE_INPUT_DELAY_TICKS=0 - old max-prediction behavior)".to_string(),
         ),
         Some(n) => (
             InputDelayConfig::fixed_input_delay(n),
@@ -545,7 +545,7 @@ fn spawn_connect_status(mut commands: Commands) {
         .with_children(|parent| {
             parent.spawn((
                 ConnectStatusText,
-                Text::new("CONNECTING…"),
+                Text::new("CONNECTING..."),
                 TextFont {
                     font_size: FontSize::Px(48.0),
                     ..default()
@@ -578,11 +578,11 @@ fn update_connect_status(
     *visibility = Visibility::Visible;
 
     let label = if retry.connected_once {
-        "RECONNECTING…".to_string()
+        "RECONNECTING...".to_string()
     } else if retry.attempts == 0 {
-        "CONNECTING…".to_string()
+        "CONNECTING...".to_string()
     } else {
-        format!("CONNECTING… (retry {})", retry.attempts)
+        format!("CONNECTING... (retry {})", retry.attempts)
     };
     if shown.as_deref() != Some(label.as_str()) {
         if let Ok(mut text) = text.single_mut() {
