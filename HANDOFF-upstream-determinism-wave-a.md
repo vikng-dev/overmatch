@@ -1,115 +1,133 @@
-# Handoff — upstream determinism, wave A
+# Handoff — upstream determinism, wave A (local, end-to-end)
 
-For the external agent (Codex, cloud environment). Written 2026-07-10. Owner: Yan (yan@vikng.dev).
-Delete when wave A is consumed.
+For the Codex agent working LOCALLY on Yan's machine. Written 2026-07-10, supersedes the
+2026-07-10 cloud version of this file in full. Owner: Yan (yan@vikng.dev). Delete when consumed.
 
 ## Mission
 
-Fork, patch, and test three upstream defects that Overmatch (a Bevy/avian/lightyear tank PvP
-game) has diagnosed and worked around. You produce **patched forks with proof**; you do **not**
-publish. Explicitly out of scope for you:
+Fork, patch, and test three upstream defects that Overmatch (Bevy 0.19 / avian / lightyear tank
+PvP) has diagnosed — **end to end**: crate-level proof inside each fork, then game-level proof
+through Overmatch's own harness with the corresponding workaround disabled. You produce patched
+forks plus evidence; you do **not** publish.
 
-- **No upstream issues, PRs, or comments.** Yan files those himself later, with dedicated
-  attention, using your results. Anything you push must be to **private** forks.
-- **No changes to the Overmatch repo.** Your deliverable is entirely in the three forks.
-- **No architecture work.** Overmatch stays server-authoritative with state replication;
-  determinism here is pursued as the property that makes client-side corrections rare
-  (the "rollback-killer"), NOT as a step toward lockstep or an inputs-only wire. If a patch
-  seems to want an architecture opinion, stop and report instead.
+Hard constraints:
+- **No upstream issues, PRs, or comments; no public pushes.** Yan files everything himself later
+  with dedicated attention. Forks stay private (or purely local clones — nothing needs to leave
+  this machine).
+- **Never touch the main checkout** at `~/Desktop/github/vikng-dev/personal/overmatch` — it is
+  the merge point and other agents work there. All your Overmatch work happens in YOUR worktree
+  (below). You never push or merge to `main` — the team lead does that.
+- **No architecture opinions.** Overmatch stays server-authoritative with state replication;
+  determinism is pursued as the property that makes corrections rare (the "rollback-killer"),
+  NOT a step toward lockstep or an inputs-only wire.
 
-## The three targets
+## Environment setup (do this first)
 
-The authoritative briefs are the three report files in this repo — read them first, they are
-short and carry mechanism, vendored file:line citations, measurements, the suggested fix shape,
-and the trap warnings:
+1. **Your Overmatch worktree** (persistent — reuse it across sessions, its `target/` warms once):
+   ```bash
+   cd ~/Desktop/github/vikng-dev/personal/overmatch
+   git worktree add ../overmatch-codex -b codex/integration
+   ```
+   All your Overmatch-side branches live under the `codex/` prefix. Commit early and often.
+2. **Fork clones** (separate repos — NOT worktrees of Overmatch):
+   ```bash
+   mkdir -p ~/Desktop/github/vikng-dev/personal/vendor-forks && cd $_
+   git clone <avian>    avian     # github.com/Jondolf/avian
+   git clone <parry>    parry     # github.com/dimforge/parry
+   git clone <lightyear> lightyear # github.com/cBournhonesque/lightyear
+   ```
+   **Check out the exact commit matching the crates.io release Overmatch pins** (from our
+   Cargo.lock): avian3d **0.7.0**, parry3d **0.27.0**, lightyear + lightyear_prediction +
+   lightyear_sync + lightyear_avian3d **0.28.0**, bevy 0.19.0. Find the release tag; if a repo
+   has no matching tag, locate the version-bump commit and verify the crate's Cargo.toml version
+   matches — and if the repo source at that commit differs from the published .crate, say so in
+   your report. Branch per mission: `fix/solver-constraint-order`, `fix/cast-absolute-tolerance`,
+   `fix/deferred-rollback-check`.
+3. **Path overrides** — in your worktree's `Cargo.toml`, on `codex/integration`:
+   ```toml
+   [patch.crates-io]
+   avian3d = { path = "../vendor-forks/avian/crates/avian3d" }
+   # parry3d likewise when testing mission 2;
+   # the lightyear family must be patched CONSISTENTLY — every lightyear_* crate Overmatch pulls
+   # (lightyear, lightyear_prediction, lightyear_sync, lightyear_avian3d, ...) from the same
+   # fork checkout, or cargo will mix registry and path versions and fail or, worse, half-apply.
+   ```
+   Keep each mission's override commit separate so A/B toggling is one revert.
 
-1. `.agents/scratch/upstream-reports/avian-solver-constraint-order.md` — **avian3d 0.7.0**
-   (github.com/Jondolf/avian). Solver constraint accumulation order derives from entity index →
-   cross-World non-determinism for multi-manifold bodies. THE strategic item; do it first.
-2. `.agents/scratch/upstream-reports/parry-gjk-cast-relative-tolerance.md` — **parry3d 0.27.0**
-   (github.com/dimforge/parry). Shape-cast TOI relative tolerance → ~200 mm one-sided error vs
-   large colliders.
-3. `.agents/scratch/upstream-reports/lightyear-check-starvation.md` — **lightyear 0.28.0**,
-   crates `lightyear_prediction` + `lightyear_sync` (github.com/cBournhonesque/lightyear).
-   Rollback mismatch checks silently skipped forever at zero prediction margin.
+## Machine etiquette (this box is shared and has 16 GB)
 
-## Fork mechanics
+- **One cold build at a time, machine-wide.** Before any first build in a fresh dir:
+  `pgrep -l rustc` — if another build is running, wait. A memory watchdog is armed and the team
+  lead WILL kill runaway builds.
+- **One game client+server pair at a time.** Before a harness run: `lsof -nP -i :5888` must be
+  empty; if it isn't and the processes aren't yours, wait — never kill processes you didn't
+  start. Clean up your own (`pkill -f overmatch` scoped to your worktree's target path) and
+  re-check the port after.
+- macOS has no `timeout`: background the client and `kill` it (see the harness recipes in
+  `.agents/` docs). **Avoid `SPIKE_LATENCY_MS=0`** — known unresolved client hang at connect.
 
-- Fork each upstream repo **privately**; create one branch per item (e.g.
-  `fix/solver-constraint-order`, `fix/cast-absolute-tolerance`, `fix/deferred-rollback-check`).
-- **Patch against the exact versions Overmatch pins** (from our Cargo.lock): avian3d **0.7.0**,
-  parry3d **0.27.0**, lightyear/lightyear_prediction/lightyear_sync **0.28.0**, bevy **0.19.0**.
-  Check out the matching release tag/commit in each repo and branch from there — NOT from main.
-  (Overmatch will consume the branches via `[patch.crates-io]`; a patch against main is
-  unusable to us. Rebasing onto main is a later, separate step for the eventual PRs.)
-- Keep each patch minimal and surgical. These will become upstream PRs under close review;
-  every changed line should trace to the report's mechanism.
+## The three missions
 
-## The non-negotiable test discipline
+The authoritative briefs are in your worktree: `.agents/scratch/upstream-reports/` —
+`avian-solver-constraint-order.md`, `parry-gjk-cast-relative-tolerance.md`,
+`lightyear-check-starvation.md`. Read each fully; they carry mechanism, vendored file:line,
+measurements, suggested fix shape, and trap warnings. Priority order as listed. Non-negotiable
+discipline per mission: a **failing-before / passing-after test committed in the fork**, plus a
+clean run of the crate's existing suite. Summary of the traps (details in the reports):
 
-Every patch ships with a **failing-before / passing-after** test committed in the fork, plus a
-clean run of the crate's existing test suite. A patch without its repro test is not done.
+1. **avian constraint order** — the fix is geometry-derived (spatial-key) ordering of the
+   manifold→color assignment, per avian PR #480's broad-phase precedent. Do NOT touch threading
+   (the parallel step is order-invariant by construction; measured: disabling `parallel` changes
+   nothing). Crate test: two Worlds, different entity spawn histories, identical geometry,
+   persistent ≥2-manifold contact, ~100+ ticks → bit-identical angular velocity after the patch.
+   Keep avian's own determinism CI test green. Measure/bound the sort cost.
+2. **parry cast tolerance** — absolute (or hybrid) convergence bound; the report has the exact
+   standalone repro (sphere r=0.5166 vs cuboids at 5/50/500 m half-extent; error must drop from
+   ~139–172 mm @500 m to a documented sub-mm bound, no small-scale or perf regression). Decide
+   deliberately about the early-return path (gjk.rs:713-724). Don't perturb witness computation.
+3. **lightyear check starvation** — deferred re-check of receive-time-skipped samples (or
+   inclusion in the completion-time scan); the sample is already stored in `ConfirmedHistory`.
+   Stepper-style test: zero prediction margin, injected divergence → pre-patch: no rollback ever;
+   post-patch: exactly one, at the right tick. Don't "fix" `balanced()` itself; don't
+   double-check samples already checked at receive time.
 
-**Item 1 — avian constraint order.** Repro test: two independent ECS Worlds ("server" and
-"client"), identical geometry and scripted forces, but **different entity spawn histories** (spawn
-and despawn some dummy entities in one World first so entity indices differ — our measured case
-was index 4294966669 vs 4294966650 for the same logical body). Drive a single dynamic body into a
-**persistent ≥2-manifold contact state** (the report's case: a hull wedged on a slab edge) for
-~100+ ticks. Before the patch: angular velocity diverges from the first settled contact tick
-(measured ordering: |Δav| ≫ |Δlv| ≫ |Δp|). After: **bit-identical** across Worlds every tick.
-Fix shape per the report: make manifold→color assignment / per-color accumulation order derive
-from a stable **spatial key** (contact world position, then normal) — the same remedy avian
-PR #480 applied to the broad phase. **Traps:** (a) do NOT touch threading — the parallel step is
-order-invariant by construction and rebuilding without `parallel` provably changes nothing; the
-defect is the serial, entity-index-keyed coloring; (b) single-World determinism is already
-bit-exact (140/140 measured) — your patch must not regress that, and avian CI enforces
-cross-platform determinism with parallel ON (2D test) — keep it green; (c) measure or bound the
-sort's perf cost per solve and report it.
+## End-to-end validation (your worktree, workaround off + fork on)
 
-**Item 2 — parry cast tolerance.** The report contains the exact standalone repro: avian's
-`cast_shapes` arrangement, sphere r=0.5166 cast at cuboids of half-extent 5 m / 50 m / 500 m.
-Before: one-sided short error 0.25 mm / 3.6 mm / 139–172 mm. After: an absolute (or hybrid
-absolute+relative) convergence bound holding error to a documented sub-millimeter figure at all
-three scales, with **no precision or perf regression at small scales** (run parry's full query
-test suite). **Traps:** (a) the early-return "upper bounds inconsistencies" path
-(gjk.rs:713-724) returns the current lower bound — decide deliberately whether it also needs the
-absolute bound, and say so; (b) the witness data (`point1`/`normal1`) is exact even when TOI is
-wrong — do not perturb witness computation; (c) Overmatch carries an automatic tripwire
-(`tests/spherecast_scale.rs`) that FAILS when this is fixed — expected, that's our retirement
-signal, not your concern.
+General loop per mission: build `codex/integration` with the path override, **disable our
+workaround for that mission**, run the harness (server + one headless scripted client, e.g.
+`SPIKE_LATENCY_MS=80 SPIKE_JITTER_MS=10 SPIKE_SIM_LONG=1`, `SPIKE_TRACE=<path>` on BOTH ends —
+role-suffixed files), and compare against the same run WITHOUT the fork patch. Baseline gates in
+every run: `NAN-TRIPWIRE|FIXED-NAN|panicked|B0004` all zero. Tick rows carry per-tick
+Position/Rotation/velocities on both ends with aligned tick numbers — write your own small
+join/diff script (keep it in your worktree or scratch, not main's src) to compare client vs
+server per tick. Note: the team is building a first-class divergence instrument (per-tick state
+hash) on `main` — rebase your worktree onto main when it lands and prefer it.
 
-**Item 3 — lightyear check starvation.** The defect: `write_history::<C>` skips the rollback
-comparison when `confirmed_tick >= current_tick` (registry.rs:426-428) and **no deferred re-check
-exists**; the completion-time scan excludes always-confirmed entities (rollback.rs:583). At zero
-prediction margin (`InputDelayConfig::balanced()` at LAN RTT) every update skips → rollback
-permanently, silently dead (measured: 35–50 m divergence, 3,296 skip events, zero rollbacks).
-Fix shape (report offers two; pick and justify): (a) deferred re-check — the skipped sample is
-already stored in `ConfirmedHistory`; re-run the comparison once the local tick passes it; or
-(b) include receive-skipped entities in the completion-time scan. Repro test: lightyear has
-stepper-style client/server test infrastructure — build a case with input delay absorbing all
-RTT (zero margin), inject a divergence between confirmed and predicted state, assert pre-patch
-that no rollback fires and post-patch that it does, exactly once, at the right tick. **Traps:**
-(a) the bug is in the check machinery — do not "fix" `balanced()` itself; documenting the
-zero-margin regime is a bonus, changing sync behavior is out of scope; (b) beware double-firing:
-a sample checked at receive time must not be re-checked later; (c) our repo-side workaround
-(`net/watchdog.rs`) fires after 3 consecutive breaching samples with per-component thresholds —
-your fix supersedes it only if a single genuine mismatch triggers exactly one rollback.
+Per mission:
+1. **avian** — our workaround is NONE (the divergence is absorbed, not patched). The e2e
+   signature: drive the multi-manifold wedge state (see the report; `SPIKE_SIM_*` scripts +
+   the washboard/wedge course) and join tick rows. Unpatched: cross-World |Δav| ≈ 0.15 in the
+   wedged state. Patched: bit-identical (or collapse by orders of magnitude — report the number).
+   Flat-ground cruise must STAY bit-exact (it already is — regression guard).
+2. **parry** — two signals. (a) The automatic tripwire: `tests/spherecast_scale.rs` in Overmatch
+   MUST FAIL against your patched parry (it asserts the raw TOI defect exists) — that failure is
+   the success signal; note it, don't "fix" the test on your branch. (b) Disable the workaround
+   (the witness-reconstruction path in `src/driving.rs` — gate it off locally on your branch) and
+   verify the at-rest idle metric the docs name (hull p.y spread ≲ 0.02 mm at rest) holds with
+   raw TOI + your patched parry.
+3. **lightyear** — disable `net/watchdog.rs` (gate its registration off on your branch). With
+   UNPATCHED lightyear + watchdog off at low latency (e.g. `SPIKE_LATENCY_MS=10`, NOT 0), the
+   starvation reproduces (runaway |Δp| divergence with zero rollbacks; skip-trace events count
+   it). With your patch + watchdog off: divergence stays bounded (reference: the
+   `SPIKE_INPUT_DELAY_TICKS=0` falsifier capped it at 0.015–0.57 m) and mismatches roll back.
+   Report the skip/re-check event counts.
 
 ## Handback format
 
-One report per item: branch + commit SHAs; whether the report's mechanism held exactly under
-your repro (if reality diverged from the report ANYWHERE, say so precisely — these reports
-become public filings and corrections matter more than confirmations); test names and the
-command to run them; existing-suite results; perf notes (item 1 especially); and where your fix
-deviates from the report's suggested shape, why. Flag anything you found that looks like a
-SEPARATE defect — do not fix it, report it.
-
-## What happens on our side (context, not your work)
-
-Overmatch consumes your branches via a `[patch.crates-io]` integration branch and validates
-game-level with a divergence instrument (per-tick state hash, client vs server): acceptance for
-"workaround retired" is solo-play hash-mismatch at or below current baseline with the
-corresponding workaround disabled. Cross-platform (x86 Linux ↔ ARM macOS) claims are validated
-on our side too — your cloud box only proves cross-World, which is the main prize and
-architecture-independent. Yan files the issues and PRs himself afterward, rebasing your branches
-onto upstream main as needed.
+One report per mission: fork branch + SHAs; whether the report's mechanism held EXACTLY under
+your repro (corrections matter more than confirmations — these become public filings);
+crate-test names + run commands; existing-suite results; perf notes; the e2e A/B numbers
+(unpatched vs patched, workaround off) with the trace evidence paths; where your fix deviates
+from the report's suggested shape and why; anything that looks like a SEPARATE defect (report,
+don't fix). Plus: the state of `codex/integration` (override commits, workaround-disable
+commits) so the team lead can reproduce your A/B in one checkout.
