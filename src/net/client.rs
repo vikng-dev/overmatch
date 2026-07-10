@@ -596,14 +596,20 @@ fn spawn_connect_status(mut commands: Commands, fonts: Res<UiFonts>) {
 
 /// Drive the connect-status overlay from [`ConnectRetry`] + the live connection state: hidden once
 /// `Connected` (possession + the game HUD take over), else `CONNECTING…` / `CONNECTING… (retry N)`
-/// before a first connect and `RECONNECTING…` after an in-game drop. The text is rewritten only on
-/// change (tracked in a `Local`) so it doesn't churn every frame — the debug-HUD idiom.
+/// before a first connect and `RECONNECTING…` after an in-game drop.
+///
+/// Every write is guarded on ACTUAL change — `Visibility` on BOTH branches (the hidden branch always
+/// did; the visible branch used to blind-write `Visible` and rebuild the label `String` every frame),
+/// and the label only when the `(connected_once, attempts)` pair it renders changes. That pair is the
+/// label's sole input, so memoizing it in a `Local` skips both the `format!` allocation and the `Text`
+/// change-detection churn on the steady-state frames (which are almost all of them — the overlay sits
+/// on one message for seconds at a time). The debug-HUD idiom, now applied symmetrically.
 fn update_connect_status(
     retry: Res<ConnectRetry>,
     connected: Query<(), (With<Connected>, With<NetcodeClient>)>,
     mut container: Query<&mut Visibility, With<ConnectStatusNode>>,
     mut text: Query<&mut Text, With<ConnectStatusText>>,
-    mut shown: Local<Option<String>>,
+    mut shown: Local<Option<(bool, u32)>>,
 ) {
     let Ok(mut visibility) = container.single_mut() else {
         return;
@@ -614,20 +620,25 @@ fn update_connect_status(
         }
         return;
     }
-    *visibility = Visibility::Visible;
+    if *visibility != Visibility::Visible {
+        *visibility = Visibility::Visible;
+    }
 
-    let label = if retry.connected_once {
-        "RECONNECTING...".to_string()
-    } else if retry.attempts == 0 {
-        "CONNECTING...".to_string()
-    } else {
-        format!("CONNECTING... (retry {})", retry.attempts)
-    };
-    if shown.as_deref() != Some(label.as_str()) {
+    // The label is a pure function of `(connected_once, attempts)` — rebuild it (and rewrite the
+    // `Text`) only when that pair changes, not every frame.
+    let key = (retry.connected_once, retry.attempts);
+    if *shown != Some(key) {
+        let label = if retry.connected_once {
+            "RECONNECTING…".to_string()
+        } else if retry.attempts == 0 {
+            "CONNECTING…".to_string()
+        } else {
+            format!("CONNECTING… (retry {})", retry.attempts)
+        };
         if let Ok(mut text) = text.single_mut() {
-            *text = Text::new(label.clone());
+            *text = Text::new(label);
         }
-        *shown = Some(label);
+        *shown = Some(key);
     }
 }
 
