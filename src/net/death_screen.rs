@@ -13,11 +13,10 @@
 //! solely by `NetClientPlugin`. Single-player has no respawn flow.
 
 use bevy::prelude::*;
-use bevy::window::PrimaryWindow;
 
-use super::client::{MenuOverlay, command_idled};
 use crate::command::TankCommand;
 use crate::damage::TankKnockedOut;
+use crate::state::PlayerInputSet;
 use crate::tank::Controlled;
 use crate::ui_font::UiFonts;
 
@@ -64,7 +63,16 @@ fn respawn_timed_out(awaiting: &AwaitingRespawn, has_live: bool, now: f64) -> bo
 
 pub fn plugin(app: &mut App) {
     app.init_resource::<AwaitingRespawn>()
-        .add_systems(Update, (request_respawn, toggle_death_screen).chain());
+        // `request_respawn` consumes a player keypress, so it carries the same license every other
+        // device-reading system does: [`PlayerInputSet`], gated on a captured cursor. Menu open or
+        // window unfocused → cursor released → the system doesn't run — which is exactly when
+        // `feed_action_state` zeroes the wire command, so a respawn edge can never be latched into a
+        // command the wire is about to swallow. One invariant covers both, with nothing to keep in
+        // sync. `toggle_death_screen` stays ungated (the overlay must manage itself regardless).
+        .add_systems(
+            Update,
+            (request_respawn.in_set(PlayerInputSet), toggle_death_screen).chain(),
+        );
 }
 
 /// Drive the death overlay through the full death→respawn round-trip, so it never drops through the
@@ -130,31 +138,17 @@ fn toggle_death_screen(
 /// (and, under starvation, the input bridge's `clear_edges`) drops it after one tick, so a held key
 /// can't spam respawns.
 ///
-/// Gated on the SAME idle condition `feed_action_state` uses ([`command_idled`], one source of truth):
-/// while the command is being zeroed on the wire (menu open, or the window unfocused), a respawn edge
-/// would be swallowed before it ever reaches the server, yet latching `AwaitingRespawn` would flip the
-/// overlay to `RESPAWNING…` for the full timeout while nothing was actually sent. So while idled we do
-/// not accept OR latch the request — R with the menu up does nothing, the overlay stays on `press R`,
-/// and the player closes the menu first. `MenuOverlay` is mounted on the SAME windowed condition as
-/// this module (both ride `NetClientPlugin` / the cursor-grab block), so it is normally present; the
-/// `Option` is a defensive fallback that treats "menu absent" as "not idled".
+/// Runs in [`PlayerInputSet`] (see the registration comment): while the cursor is released — menu
+/// open, window unfocused — this system doesn't run at all, so a respawn edge can never be latched
+/// into a command `feed_action_state` is zeroing on the wire. R with the menu up does nothing and the
+/// overlay stays on `press R`.
 fn request_respawn(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
-    menu: Option<Res<MenuOverlay>>,
-    window: Single<&Window, With<PrimaryWindow>>,
     mut dead_own: Query<&mut TankCommand, (With<Controlled>, With<TankKnockedOut>)>,
     mut awaiting: ResMut<AwaitingRespawn>,
 ) {
     if !keys.just_pressed(RESPAWN_KEY) {
-        return;
-    }
-    // The wire is zeroing the command out from under us (menu / unfocused) — a latched edge would
-    // never be sent. Don't accept the request; the overlay keeps showing "press R".
-    if menu
-        .as_deref()
-        .is_some_and(|menu| command_idled(menu, window.focused))
-    {
         return;
     }
     for mut command in &mut dead_own {
