@@ -143,8 +143,10 @@ fn spawn_test_course(
 }
 
 /// Distance along `ray` to the terrain, capped at `max`, falling back to `max` when the ray
-/// misses (sky / above the horizon). A world raycast against the `Terrain` layer — the shared
-/// ground query for aiming and the camera, now that terrain is more than the y=0 plane.
+/// misses (sky / above the horizon). A world raycast against the `Terrain` layer ONLY — the orbit
+/// camera's ground pull-in, which must ignore tanks (a tank crossing behind the player must not
+/// yank the camera in). Aim rays use `aim::aim_distance` instead, which adds the `Armor` layer so
+/// the aim dots predict what a shell would actually meet, tanks included.
 pub fn ground_distance(spatial: &SpatialQuery, ray: Ray3d, max: f32) -> f32 {
     spatial
         .cast_ray(

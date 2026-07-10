@@ -10,23 +10,70 @@
 //! commits from its magnified intent instead of commanding the servos itself, and a network
 //! peer's command drives its tank through the exact same path.
 
-use avian3d::prelude::{Position, Rotation, SpatialQuery};
+use avian3d::prelude::{LayerMask, Position, Rotation, SpatialQuery, SpatialQueryFilter};
 use bevy::math::Affine3A;
 use bevy::prelude::*;
 
+use crate::Layer;
 use crate::camera::{CameraKickApplied, GunnerCameraPlaced};
 use crate::command::TankCommand;
-use crate::damage::ControlledTank;
+use crate::damage::{ControlledTank, VolumeOf};
 use crate::firecontrol::{RangeTable, lob};
 use crate::sight::in_third_person;
 use crate::state::{GameplaySet, PlayerInputSet};
 use crate::tank::{
     Controlled, Hull, Rig, ServoCommand, ServoRole, Tank, TankRoot, ViewNode, rig_world_pose,
 };
-use crate::world::ground_distance;
 
-/// Maximum engagement range; rays that hit nothing fall back to a point this far out.
-const MAX_RANGE: f32 = 10_000.0;
+/// Maximum engagement range; rays that hit nothing fall back to a point this far out. Shared by
+/// every aim ray — the third-person pick, the bore dot, and the optic's resolve
+/// (`sight::drive_gunner_aim`) — so "the sky" is one far point in all of them.
+pub(crate) const MAX_RANGE: f32 = 10_000.0;
+
+/// Distance along an aim ray to the first surface a shell would meet: terrain or a tank's ballistic
+/// volumes — the same `Terrain | Armor` mask the live shell marches against
+/// (`ballistics::integrate_projectiles`), so the dots predict the shell's truth, tanks included.
+/// `own` tank's volumes are excluded: every aim ray legitimately starts inside or behind them (the
+/// optic resolve at the gun pivot inside the mantlet, the third-person pick behind own turret, the
+/// bore ray at the muzzle inside the barrel's exposed-component volume), and a self-hit would weld
+/// the aim to the tank itself. Falls back to `max` on a miss (sky / above the horizon).
+pub(crate) fn aim_distance(
+    spatial: &SpatialQuery,
+    ray: Ray3d,
+    max: f32,
+    own: Entity,
+    volumes: &Query<&VolumeOf>,
+    parents: &Query<&ChildOf>,
+) -> f32 {
+    // A hit lands on the collider's mesh-primitive entity; ownership (`VolumeOf`) sits on its named
+    // parent node — the same ancestry walk the shell march does. No volume in the ancestry ⇒
+    // terrain ⇒ never "own".
+    let not_own = |entity: Entity| {
+        let mut probe = entity;
+        loop {
+            if let Ok(owner) = volumes.get(probe) {
+                return owner.tank() != own;
+            }
+            match parents.get(probe) {
+                Ok(parent) => probe = parent.parent(),
+                Err(_) => return true,
+            }
+        }
+    };
+    spatial
+        .cast_ray_predicate(
+            ray.origin,
+            ray.direction,
+            max,
+            true,
+            &SpatialQueryFilter::from_mask(
+                LayerMask::from(Layer::Terrain) | LayerMask::from(Layer::Armor),
+            ),
+            &not_own,
+        )
+        .map(|hit| hit.distance)
+        .unwrap_or(max)
+}
 
 /// The aim-commit phase: the per-mode input systems that write the command's aim (`commit_aim` in
 /// third-person, `sight::drive_gunner_aim` in the optic). Client-side command generation at render
@@ -201,6 +248,8 @@ fn commit_aim(
     window: Single<&Window>,
     controlled: ControlledTank,
     hull: Query<&GlobalTransform, With<Hull>>,
+    volumes: Query<&VolumeOf>,
+    parents: Query<&ChildOf>,
     mut tank_commands: Query<&mut TankCommand>,
     mut committed: ResMut<CommittedAim>,
 ) {
@@ -231,8 +280,11 @@ fn commit_aim(
         return;
     };
 
-    // Aim at the ground hit, or a far fallback when nothing is struck (sky / above horizon).
-    let point = ray.get_point(ground_distance(&spatial, ray, MAX_RANGE));
+    // Aim at whatever the shell would meet — terrain or another tank — or a far fallback when
+    // nothing is struck (sky / above horizon).
+    let point = ray.get_point(aim_distance(
+        &spatial, ray, MAX_RANGE, tank, &volumes, &parents,
+    ));
 
     // Stored in the hull's local frame so aim stays correct wherever the tank sits/turns.
     let Ok(hull) = hull.get(rig.hull) else {
@@ -339,13 +391,15 @@ fn place_indicator(
 fn update_bore_indicator(
     spatial: SpatialQuery,
     camera_query: Single<(&Camera, &GlobalTransform)>,
-    controlled: Query<&Rig, With<Controlled>>,
+    controlled: Query<(Entity, &Rig), With<Controlled>>,
     view_nodes: Query<&ViewNode>,
     muzzle: Query<&GlobalTransform>,
+    volumes: Query<&VolumeOf>,
+    parents: Query<&ChildOf>,
     mut indicator: Query<(&mut Node, &mut Visibility), With<BoreIndicator>>,
 ) {
     let (camera, cam_transform) = *camera_query;
-    let Ok(rig) = controlled.single() else {
+    let Ok((tank, rig)) = controlled.single() else {
         return;
     };
     // The VIEW muzzle (design §6C): the bore dot must ride the render-smoothed chain — the sim
@@ -368,7 +422,9 @@ fn update_bore_indicator(
         return;
     };
     let ray = Ray3d::new(muzzle.translation(), direction);
-    let point = ray.get_point(ground_distance(&spatial, ray, MAX_RANGE));
+    let point = ray.get_point(aim_distance(
+        &spatial, ray, MAX_RANGE, tank, &volumes, &parents,
+    ));
 
     place_indicator(
         &mut node,
