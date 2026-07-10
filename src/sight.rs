@@ -503,12 +503,14 @@ fn toggle_sight(
     keys: Res<ButtonInput<KeyCode>>,
     mut mode: ResMut<SightMode>,
     mut intent: ResMut<GunnerIntent>,
+    mut free_look: ResMut<crate::aim::FreeLookHold>,
     controlled: ControlledTank,
     views: Query<&TankViews, With<Controlled>>,
     servo_slots: Query<&ServoIndex>,
     sims: Query<&TankSim>,
     ranging: Res<Ranging>,
     tables: Query<&RangeTable>,
+    tank_commands: Query<&TankCommand>,
     mut toast: ResMut<Toast>,
 ) {
     if !keys.just_pressed(KeyCode::ShiftLeft) {
@@ -552,6 +554,20 @@ fn toggle_sight(
             if !view_available(&controlled, &views, ViewKind::Commander) {
                 toast.show(format!("{} unavailable", ViewKind::Commander.label()));
                 return;
+            }
+            // Re-seed the third-person free-look hold from the gun's CURRENT commanded aim as we
+            // hand back. `drive_gunner_aim` superseded the intention while in the optic without ever
+            // touching `commit_aim`'s hold; if RMB is already held on return, `commit_aim` would
+            // re-author that stale pre-optic point and drag the gun off the optic's lay. Seeding the
+            // hold with the live commitment holds it steady instead (mirrors the gunner seeding its
+            // own intent from the live gun on entry). Harmless when RMB is up — `commit_aim` picks a
+            // fresh point and overwrites this next frame.
+            if let Some(tank) = controlled.entity() {
+                free_look.0 = tank_commands
+                    .get(tank)
+                    .ok()
+                    .and_then(|command| command.aim)
+                    .map(|aim| (tank, aim));
             }
             SightMode::ThirdPerson
         }

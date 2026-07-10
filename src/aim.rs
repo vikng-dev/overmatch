@@ -51,9 +51,21 @@ pub fn sim_plugin(app: &mut App) {
     app.add_systems(FixedUpdate, drive_aim_servos.in_set(GameplaySet));
 }
 
+/// The free-look hold memory: `commit_aim`'s last freshly-committed aim (hull-local), keyed by tank
+/// entity. RMB free-look re-authors it every frame (see [`commit_aim`] — holding is an act, not an
+/// omission, or the net input buffer recirculates a stale sweep, b206f34). It is a RESOURCE, not a
+/// `commit_aim` `Local`, precisely so `sight::toggle_sight` can REFRESH it when the gunner optic
+/// supersedes the intention: on returning from the optic to third person, `toggle_sight` re-seeds
+/// this from the gun's CURRENT commanded aim, so a still-held RMB holds the optic's lay instead of
+/// dragging the gun back to the abandoned pre-optic point (a `Local` could never be poked from
+/// `sight`). The entity key means a possession change can never replay a stale hold onto a new tank.
+#[derive(Resource, Default)]
+pub(crate) struct FreeLookHold(pub(crate) Option<(Entity, Vec3)>);
+
 /// The third-person aim commit + HUD dots — client-side: devices → command, and reprojection.
 pub fn client_plugin(app: &mut App) {
-    app.add_systems(Startup, spawn_hud)
+    app.init_resource::<FreeLookHold>()
+        .add_systems(Startup, spawn_hud)
         .add_systems(
             Update,
             // Per-mode aim commit: third-person from the screen-center ray; the optic commits
@@ -146,10 +158,12 @@ fn spawn_hud(mut commands: Commands) {
 /// free-look, that loop recirculates the last few PRE-free-look commits forever (period ≈ D+1
 /// ticks, measured live via the bridge: the aim cycling bit-exact through the pre-RMB sweep trail
 /// every tick) — the amber dot and the gun both bounce along the old sweep and never settle. So
-/// free-look keeps writing the HELD intention (this system's own memory of its last fresh commit)
-/// every frame: the buffer then carries the player's truth, and SP (where nothing else writes
-/// `aim`) sees the same value it always held. The memory is keyed by tank entity so a possession
-/// change can never replay a stale hold onto a different tank.
+/// free-look keeps writing the HELD intention ([`FreeLookHold`], the last fresh commit) every frame:
+/// the buffer then carries the player's truth, and SP (where nothing else writes `aim`) sees the same
+/// value it always held. The memory is keyed by tank entity so a possession change can never replay a
+/// stale hold onto a different tank — and it lives in a resource, not a `Local`, so `sight::toggle_sight`
+/// can re-seed it from the gun's current lay when the gunner optic supersedes the intention (returning
+/// from the optic with RMB held then holds the optic's lay, not the abandoned pre-optic point).
 fn commit_aim(
     mouse: Res<ButtonInput<MouseButton>>,
     spatial: SpatialQuery,
@@ -158,7 +172,7 @@ fn commit_aim(
     controlled: ControlledTank,
     hull: Query<&GlobalTransform, With<Hull>>,
     mut tank_commands: Query<&mut TankCommand>,
-    mut held: Local<Option<(Entity, Vec3)>>,
+    mut held: ResMut<FreeLookHold>,
 ) {
     let (Some(tank), Some(rig)) = (controlled.entity(), controlled.rig()) else {
         return;
@@ -169,7 +183,7 @@ fn commit_aim(
     // option under the net input round trip). No memory yet (free-look from the first frame, or
     // right after a possession change): author nothing, exactly like the pre-first-commit state.
     if mouse.pressed(MouseButton::Right) {
-        if let Some((held_tank, aim)) = *held
+        if let Some((held_tank, aim)) = held.0
             && held_tank == tank
             && let Ok(mut command) = tank_commands.get_mut(tank)
             // Same-value writes are skipped so SP (where the hold already sticks) sees no
@@ -200,7 +214,7 @@ fn commit_aim(
     if let Ok(mut command) = tank_commands.get_mut(tank) {
         let local = hull.affine().inverse().transform_point3(point);
         command.aim = Some(local);
-        *held = Some((tank, local));
+        held.0 = Some((tank, local));
     }
 }
 
