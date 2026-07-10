@@ -395,21 +395,32 @@ pub fn run() {
                     .run_if(not(is_in_rollback)),
             );
     } else {
+        app.add_systems(
+            FixedPreUpdate,
+            // Same rollback gate as `buffer_input`: during replay lightyear restores the historical
+            // `ActionState` per tick — overwriting it with the *current* gathered command would
+            // corrupt the replay's input.
+            feed_action_state
+                .in_set(InputSystems::WriteClientInputs)
+                .run_if(not(is_in_rollback)),
+        );
+    }
+
+    // Cursor grab + Esc menu overlay: mounted whenever there is a REAL window — normal windowed play
+    // AND `SPIKE_SIM_WINDOWED` (a real window whose tank is scripted, but whose camera / gunner optic /
+    // ranging a viewer still drives by hand). `gate_player_input`'s "captured cursor = license" gate
+    // only opens once `grab_mode == Locked`, and these systems are the ONLY thing that locks it; before
+    // this, sim_windowed left the cursor released, so every device-reading system idled and the feel
+    // capture lost camera orbit / Lshift / ranging entirely. Headless simulate has no window, so it
+    // stays off there — and `feed_action_state` stays out of sim_windowed (the scripted `buffer_input`
+    // owns the wire), so the menu's command-idling never fights the script. The Esc toggle, the alt-tab
+    // focus watcher, and the deferred re-grab all move the same cursor, so chain them for a
+    // deterministic order within the frame.
+    if !simulate || sim_windowed {
         app.init_resource::<MenuOverlay>()
             .init_resource::<RefocusGrab>()
-            // The Esc toggle, the alt-tab focus watcher, and the deferred re-grab all move the same
-            // cursor, so chain them for a deterministic order within the frame.
             .add_systems(Update, (toggle_menu, focus_menu, tick_refocus_grab).chain())
-            .add_systems(OnEnter(AppState::Playing), grab_cursor)
-            .add_systems(
-                FixedPreUpdate,
-                // Same rollback gate as `buffer_input`: during replay lightyear restores the
-                // historical `ActionState` per tick — overwriting it with the *current* gathered
-                // command would corrupt the replay's input.
-                feed_action_state
-                    .in_set(InputSystems::WriteClientInputs)
-                    .run_if(not(is_in_rollback)),
-            );
+            .add_systems(OnEnter(AppState::Playing), grab_cursor);
     }
 
     app.run();
