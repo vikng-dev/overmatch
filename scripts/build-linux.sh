@@ -41,9 +41,12 @@ mkdir -p "$STAGE"
 cp "target/$TARGET/release/$NAME" "$STAGE/"
 # Ship only runtime assets: the game loads .glb meshes (see asset_server.load
 # calls). Blender source files (.blend/.blend1) are build-time only, so prune
-# them to keep the bundle small. cc.txt attribution files are kept.
+# them to keep the bundle small. cc.txt attribution files are kept. Also drop the
+# stale pre-restructure asset backups under assets/**/backup/ (~63 MB of superseded
+# glb+ron that stays in git but must not ship).
 cp -r assets "$STAGE/"
 find "$STAGE/assets" -type f \( -name '*.blend' -o -name '*.blend1' -o -name '.DS_Store' \) -delete
+find "$STAGE/assets" -type d -name backup -prune -exec rm -rf {} +
 
 tar -czf "dist/$NAME-linux-x86_64.tar.gz" -C dist "$NAME"
 

@@ -75,10 +75,13 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 mv "$DIST/$BIN_NAME" "$APP/Contents/MacOS/$BIN_NAME"
 chmod +x "$APP/Contents/MacOS/$BIN_NAME"
 cp "$ICON" "$APP/Contents/Resources/$BIN_NAME.icns"
-# Runtime assets in Resources/assets (matches asset_root() in net::client). Prune sources.
+# Runtime assets in Resources/assets (matches asset_root() in net::client). Prune sources, plus the
+# stale pre-restructure asset backups under assets/**/backup/ (~63 MB of superseded glb+ron that
+# stays in git but must not ship).
 cp -R assets "$APP/Contents/Resources/assets"
 find "$APP/Contents/Resources/assets" -type f \
   \( -name '*.blend' -o -name '*.blend1' -o -name '.DS_Store' \) -delete
+find "$APP/Contents/Resources/assets" -type d -name backup -prune -exec rm -rf {} +
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

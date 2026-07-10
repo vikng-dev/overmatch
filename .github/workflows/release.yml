@@ -78,11 +78,14 @@ jobs:
             pkg-config libasound2-dev libudev-dev \
             libwayland-dev libxkbcommon-dev libx11-dev
 
-      # Ship only runtime assets: the game loads .glb meshes; Blender source files are build-time
-      # only. (.blend1 is gitignored, but prune defensively.)
+      # Ship only runtime assets: the game loads .glb meshes, so drop the build-time Blender sources
+      # (.blend1 is gitignored, but prune defensively) AND the stale pre-restructure asset backups
+      # under assets/**/backup/ — ~63 MB of superseded glb+ron that stays in git but must not ship.
       - name: Prune non-runtime assets
         shell: bash
-        run: find assets -type f \( -name '*.blend' -o -name '*.blend1' \) -delete
+        run: |
+          find assets -type f \( -name '*.blend' -o -name '*.blend1' \) -delete
+          find assets -type d -name backup -prune -exec rm -rf {} +
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -134,8 +137,12 @@ jobs:
             pkg-config libasound2-dev libudev-dev \
             libwayland-dev libxkbcommon-dev libx11-dev
 
+      # Same prune as the client job: drop the build-time Blender sources and the stale asset backups
+      # under assets/**/backup/ so neither rides along in the server bundle.
       - name: Prune non-runtime assets
-        run: find assets -type f \( -name '*.blend' -o -name '*.blend1' \) -delete
+        run: |
+          find assets -type f \( -name '*.blend' -o -name '*.blend1' \) -delete
+          find assets -type d -name backup -prune -exec rm -rf {} +
 
       - uses: Swatinem/rust-cache@v2
         with:
