@@ -77,7 +77,16 @@ def q_angle(q):
 
 
 def q_between(a, b):
-    """Shortest-arc angle between two orientations a -> b (radians)."""
+    """Shortest-arc angle between two orientations a -> b (radians).
+
+    Bit-identical inputs return exactly 0.0: the composed formula leaves ~1e-17 rad of
+    float-addition non-associativity residue on IDENTICAL quats ((wy + xz) - yw - zx round-off),
+    which would print as a phantom rotation floor in a baseline where rotation is measured
+    bit-exact. A REAL divergence is never masked — one flipped f32 quat bit is ~1e-7 rad, ten
+    orders above the residue this early-out removes.
+    """
+    if np.array_equal(a, b):
+        return 0.0
     return q_angle(q_mul(q_conj(a), b))
 
 
