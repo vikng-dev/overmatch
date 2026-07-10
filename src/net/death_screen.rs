@@ -163,37 +163,22 @@ fn request_respawn(
 }
 
 /// Spawn the graybox death overlay: a dim full-screen backdrop with centered white text, its message
-/// chosen by `state`. Deliberately minimal; mirrors the menu overlay's node/text shape in
-/// `net::client` so the two read as one UI family.
+/// chosen by `state`. Deliberately minimal; shares `ui_font::spawn_overlay` with the menu, connect,
+/// and pause overlays so the family reads as one. The backdrop carries a red tint (its only departure
+/// from the others' black) and the state enum doubles as the node's marker + despawn handle.
 fn spawn_death_screen(commands: &mut Commands, state: DeathScreenNode, font: &Handle<Font>) {
     let text = match state {
         DeathScreenNode::Died => "YOU DIED\npress R to respawn",
         DeathScreenNode::Respawning => "RESPAWNING…",
     };
-    commands
-        .spawn((
-            state,
-            Node {
-                width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                ..default()
-            },
-            BackgroundColor(Color::srgba(0.15, 0.0, 0.0, 0.6)),
-        ))
-        .with_children(|parent| {
-            parent.spawn((
-                Text::new(text),
-                TextFont {
-                    // SemiBold: a big all-caps death overlay.
-                    font: font.into(),
-                    font_size: FontSize::Px(48.0),
-                    ..default()
-                },
-                TextColor(Color::WHITE),
-            ));
-        });
+    crate::ui_font::spawn_overlay(
+        commands,
+        font,
+        state,
+        text,
+        (),
+        Some(Color::srgba(0.15, 0.0, 0.0, 0.6)),
+    );
 }
 
 #[cfg(test)]

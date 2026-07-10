@@ -150,29 +150,17 @@ fn resume_physics(mut time: ResMut<Time<Physics>>) {
 }
 
 /// "PAUSED" overlay. `DespawnOnExit(Paused)` deletes it (children included) on unpause, so
-/// there is no teardown system to keep in sync.
+/// there is no teardown system to keep in sync. Shares `ui_font::spawn_overlay` with the net menu,
+/// connect, and death overlays. Two deliberate departures from the old inline copy: it now renders
+/// at the family standard size (was 80 px, see `OVERLAY_FONT_PX`), and `None` preserves this site's
+/// distinguishing lack of a dim backdrop.
 fn spawn_pause_overlay(mut commands: Commands, fonts: Res<UiFonts>) {
-    commands
-        .spawn((
-            DespawnOnExit(AppState::Paused),
-            Node {
-                width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                ..default()
-            },
-        ))
-        .with_children(|parent| {
-            parent.spawn((
-                Text::new("PAUSED"),
-                TextFont {
-                    // SemiBold: a big all-caps overlay.
-                    font: fonts.hud.clone().into(),
-                    font_size: FontSize::Px(80.0),
-                    ..default()
-                },
-                TextColor(Color::WHITE),
-            ));
-        });
+    crate::ui_font::spawn_overlay(
+        &mut commands,
+        &fonts.hud,
+        DespawnOnExit(AppState::Paused),
+        "PAUSED",
+        (),
+        None,
+    );
 }

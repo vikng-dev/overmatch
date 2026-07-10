@@ -556,31 +556,17 @@ struct ConnectStatusText;
 /// [`update_connect_status`] reveals it). Mirrors the menu/death overlays' node+text shape so the
 /// three read as one UI family.
 fn spawn_connect_status(mut commands: Commands, fonts: Res<UiFonts>) {
-    commands
-        .spawn((
-            ConnectStatusNode,
-            Node {
-                width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                ..default()
-            },
-            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
-        ))
-        .with_children(|parent| {
-            parent.spawn((
-                ConnectStatusText,
-                Text::new("CONNECTING…"),
-                TextFont {
-                    // SemiBold: a big all-caps connect overlay.
-                    font: fonts.hud.clone().into(),
-                    font_size: FontSize::Px(48.0),
-                    ..default()
-                },
-                TextColor(Color::WHITE),
-            ));
-        });
+    // The only site to mark the text child too (`ConnectStatusText`), so `update_connect_status` can
+    // rewrite the label in place. Spawned with default (visible) `Visibility` — the first frame is
+    // pre-connect, and `update_connect_status` drives it from there.
+    crate::ui_font::spawn_overlay(
+        &mut commands,
+        &fonts.hud,
+        ConnectStatusNode,
+        "CONNECTING…",
+        ConnectStatusText,
+        Some(Color::srgba(0.0, 0.0, 0.0, 0.6)),
+    );
 }
 
 /// Drive the connect-status overlay from [`ConnectRetry`] + the live connection state: hidden once
@@ -909,30 +895,14 @@ fn open_menu(
     menu.open = true;
     cursor.grab_mode = CursorGrabMode::None;
     cursor.visible = true;
-    commands
-        .spawn((
-            MenuOverlayNode,
-            Node {
-                width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                ..default()
-            },
-            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
-        ))
-        .with_children(|parent| {
-            parent.spawn((
-                Text::new("MENU\nEsc to close"),
-                TextFont {
-                    // SemiBold: a big all-caps menu overlay.
-                    font: font.into(),
-                    font_size: FontSize::Px(48.0),
-                    ..default()
-                },
-                TextColor(Color::WHITE),
-            ));
-        });
+    crate::ui_font::spawn_overlay(
+        commands,
+        font,
+        MenuOverlayNode,
+        "MENU\nEsc to close",
+        (),
+        Some(Color::srgba(0.0, 0.0, 0.0, 0.6)),
+    );
 }
 
 /// Close the menu overlay: re-grab the cursor and despawn the backdrop.
