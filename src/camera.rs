@@ -193,9 +193,20 @@ fn orbit_look(
     camera: Single<&mut Transform, With<Camera3d>>,
     mouse_motion: Res<AccumulatedMouseMotion>,
     follow: Res<CameraFollow>,
+    pivot: Res<TurretPivot>,
+    tank: Query<(), (With<Tank>, With<Controlled>)>,
 ) {
     // Detached (debug): leave the camera where it is so motion can be judged against a fixed view.
     if !follow.0 {
+        return;
+    }
+    // Freeze mouse-look when there is no controlled tank/pivot to orbit — the tankless death→respawn
+    // gap, or CONNECTING. Without a body to re-anchor to, `orbit_camera` can't reposition the camera,
+    // so the locked cursor's motion here would re-point it at nothing and the player would respawn
+    // facing a random direction. This is the guard the wave-4 orbit split (62da9bd) dropped: it
+    // mirrors the `(pivot.0, tank.single())` check `orbit_camera` uses to place the body, so ONLY the
+    // mouse-delta rotation gates — `orbit_camera`'s follow half keeps tracking the tank behind the menu.
+    if pivot.0.is_none() || tank.is_empty() {
         return;
     }
     let mut transform = camera.into_inner();
