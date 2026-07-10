@@ -10,6 +10,12 @@
 //! this set must earn its place with a fresh cmap check against the shipped `.ttf`s before it can be
 //! added here (see the rule in `.agents/AGENTS.md`).
 //!
+//! **The typographic allowance is per-file, because the font isn't uniform.** Only the Barlow-threaded
+//! client files ([`BARLOW_TEXT_FILES`]) render through `ui_font::UiFonts`; the dev sandboxes
+//! ([`ASCII_ONLY_TEXT_FILES`]: `sandbox.rs`, `track_sandbox/mod.rs`) keep Bevy's default ASCII-only
+//! font (AGENTS.md), whose cmap does NOT carry `… — –` &c. So the sandbox files are held to pure
+//! printable ASCII, and only the Barlow files get the typographic extension.
+//!
 //! It must NOT flag comments, nor the log/panic/assert strings the house style deliberately fills
 //! with em dashes: those never reach `Text`. So the scanner strips line/block comments and the
 //! argument region of every diagnostic macro (`info!`, `error!`, `assert_eq!`, …) and of `.expect(`,
@@ -32,25 +38,30 @@ const TYPOGRAPHIC_SET: &[char] = &[
     '\u{2264}', // ≤ LESS-THAN OR EQUAL TO
 ];
 
-/// Whether a character is inside the bundled font's verified coverage: printable ASCII, or one of
-/// the [`TYPOGRAPHIC_SET`] glyphs. A rendered literal made only of these is safe to draw.
-fn is_font_covered(c: char) -> bool {
-    c.is_ascii() || TYPOGRAPHIC_SET.contains(&c)
+/// Whether a character is inside the font's verified coverage for a given file. Printable ASCII is
+/// always covered; the [`TYPOGRAPHIC_SET`] glyphs are covered ONLY when `allow_typographic` — i.e.
+/// only for the Barlow-threaded files, not the ASCII-only-font sandboxes.
+fn is_font_covered(c: char, allow_typographic: bool) -> bool {
+    c.is_ascii() || (allow_typographic && TYPOGRAPHIC_SET.contains(&c))
 }
 
-/// The files that spawn `Text`. A rendered non-ASCII glyph can only originate here.
-const TEXT_FILES: &[&str] = &[
+/// The Barlow-threaded files that spawn `Text` through `ui_font::UiFonts` — printable ASCII PLUS the
+/// verified [`TYPOGRAPHIC_SET`]. A rendered out-of-coverage glyph can only originate here or in
+/// [`ASCII_ONLY_TEXT_FILES`].
+const BARLOW_TEXT_FILES: &[&str] = &[
     "src/hud.rs",
     "src/crew_ui.rs",
     "src/sight.rs",
     "src/state.rs",
-    "src/sandbox.rs",
     "src/net/client.rs",
     "src/net/death_screen.rs",
     "src/net/debug_hud.rs",
     "src/net/hit_feel.rs",
-    "src/track_sandbox/mod.rs",
 ];
+
+/// The dev-sandbox files that spawn `Text`. These keep Bevy's default ASCII-only font (AGENTS.md), so
+/// their rendered literals must be pure printable ASCII — the typographic set is NOT available to them.
+const ASCII_ONLY_TEXT_FILES: &[&str] = &["src/sandbox.rs", "src/track_sandbox/mod.rs"];
 
 /// Macros whose string arguments are diagnostics, never rendered — skipped by the scanner.
 const DIAGNOSTIC_MACROS: &[&str] = &[
@@ -89,7 +100,7 @@ struct Offender {
 /// argument region. A hand-rolled tokenizer, because that is exactly the boundary the rule draws
 /// (rendered vs. diagnostic) and no lighter heuristic respects it: these files are full of em dashes
 /// in `info!`/`assert!` that are perfectly legal.
-fn scan(src: &str) -> Vec<Offender> {
+fn scan(src: &str, allow_typographic: bool) -> Vec<Offender> {
     let mut offenders = Vec::new();
     let chars: Vec<char> = src.chars().collect();
     let mut i = 0;
@@ -161,7 +172,7 @@ fn scan(src: &str) -> Vec<Offender> {
                 i += 1;
             }
             let skipping = skip_until.is_some();
-            if !skipping && lit.chars().any(|c| !is_font_covered(c)) {
+            if !skipping && lit.chars().any(|c| !is_font_covered(c, allow_typographic)) {
                 let text: String = lit.chars().take(60).collect();
                 offenders.push(Offender {
                     line: start_line,
@@ -262,15 +273,18 @@ fn scan(src: &str) -> Vec<Offender> {
 fn rendered_strings_within_font_coverage() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut failures = Vec::new();
-    for rel in TEXT_FILES {
-        let path = root.join(rel);
-        let src = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
-        for off in scan(&src) {
-            failures.push(format!(
-                "{rel}:{} contains an out-of-coverage character: {:?}",
-                off.line, off.text
-            ));
+    // Two regimes: the Barlow files may use the typographic set; the ASCII-only-font sandboxes may not.
+    for (files, allow_typographic) in [(BARLOW_TEXT_FILES, true), (ASCII_ONLY_TEXT_FILES, false)] {
+        for rel in files {
+            let path = root.join(rel);
+            let src = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+            for off in scan(&src, allow_typographic) {
+                failures.push(format!(
+                    "{rel}:{} contains an out-of-coverage character: {:?}",
+                    off.line, off.text
+                ));
+            }
         }
     }
     assert!(
@@ -283,10 +297,10 @@ fn rendered_strings_within_font_coverage() {
     );
 }
 
-/// The scanner must flag an out-of-coverage rendered literal but ignore comments, diagnostic
-/// strings, AND rendered literals that stay within the verified typographic set — otherwise it would
-/// either miss real tofu, fight the house style, or reject the em dashes/ellipses the UI is now
-/// allowed to draw. Pin all three directions.
+/// **Barlow regime** (`allow_typographic = true`). The scanner must flag an out-of-coverage rendered
+/// literal but ignore comments, diagnostic strings, AND rendered literals that stay within the
+/// verified typographic set — otherwise it would either miss real tofu, fight the house style, or
+/// reject the em dashes/ellipses the Barlow files are now allowed to draw. Pin all three directions.
 #[test]
 fn scanner_flags_uncovered_but_not_comments_logs_or_typographic_set() {
     let sample = r#"
@@ -303,10 +317,10 @@ fn demo() {
     let label = "BROKEN €";                          // BAD: euro sign is out of coverage
 }
 "#;
-    let offenders = scan(sample);
+    let offenders = scan(sample, true);
     let lines: Vec<usize> = offenders.iter().map(|o| o.line).collect();
     // Exactly the two out-of-coverage offenders — nothing from comments / logs / asserts / expect,
-    // and NOT the typographic-set line (which is now allowed).
+    // and NOT the typographic-set line (which is allowed in the Barlow regime).
     assert!(
         offenders.iter().any(|o| o.text.contains("TOFU")),
         "must flag the kanji-bearing Text::new literal; got {offenders:?}"
@@ -323,5 +337,44 @@ fn demo() {
         offenders.len(),
         2,
         "must flag ONLY out-of-coverage rendered literals, not comments/logs/asserts/expect/typographic-set; got {offenders:?} at lines {lines:?}"
+    );
+}
+
+/// **ASCII-only regime** (`allow_typographic = false`, the sandbox files). Now the SAME typographic
+/// literal that the Barlow regime allows must ALSO be flagged — the sandbox font has no glyph for it —
+/// while comments, diagnostics, and pure-ASCII rendered literals are still ignored. This proves the
+/// per-file split actually tightens the sandbox files rather than silently allowing the typographic set
+/// everywhere.
+#[test]
+fn scanner_ascii_only_regime_flags_typographic_set_too() {
+    let sample = r#"
+// a comment with an em dash — and an ellipsis … must be ignored
+fn demo() {
+    info!("log line — never rendered, ignored …");
+    let _ = foo.expect("expect — ignored …");
+    let ok = format!("rendered {} ...", n);          // ascii, fine
+    let typo = Text::new("RANGE 1200 m — ± 5°, ≤ 4×"); // BAD here: no typographic glyphs in the default font
+    commands.spawn(Text::new("TOFU字"));              // BAD: kanji is out of coverage
+    let label = "BROKEN €";                          // BAD: euro sign is out of coverage
+}
+"#;
+    let offenders = scan(sample, false);
+    let lines: Vec<usize> = offenders.iter().map(|o| o.line).collect();
+    assert!(
+        offenders.iter().any(|o| o.text.contains("RANGE")),
+        "ASCII-only regime MUST flag the typographic-set literal; got {offenders:?}"
+    );
+    assert!(
+        offenders.iter().any(|o| o.text.contains("TOFU")),
+        "must still flag the kanji-bearing literal; got {offenders:?}"
+    );
+    assert!(
+        offenders.iter().any(|o| o.text.contains("BROKEN")),
+        "must still flag the euro-bearing literal; got {offenders:?}"
+    );
+    assert_eq!(
+        offenders.len(),
+        3,
+        "ASCII-only regime flags the typographic + kanji + euro literals, but still not comments/logs/expect/pure-ASCII; got {offenders:?} at lines {lines:?}"
     );
 }
