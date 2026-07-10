@@ -26,6 +26,14 @@ The hash answers "did anything differ?" exactly (including the carried
 `TankSim`/`DriveState` no pose field exposes, via `hsim`); the magnitudes answer
 "by how much?" for the pose/velocity part.
 
+  - MISMATCH WINDOWS: each contiguous mismatched-tick span, attributed to the
+    carried-state field families via the `hsim` decode (`hdrv`/`hsrv`/`hrld`/
+    `hrec`/`hanc` — drive, servo, reload, recoil, anchor), with whether the
+    window opens at the first shared tick (spawn/connect transient vs mid-run
+    event) and how many surviving client rows were rollback replays. When the
+    trace was recorded with SPIKE_TRACE_SIM_FIELDS the raw carried values ride
+    the rows (`simf`) and each window also reports max per-family |Δ| magnitudes.
+
 Rollback REPLAY re-records ticks (client rows stamped `rp=true`): where rows
 share (tick, entity) the LAST wins — the corrected replay value, matching
 src/trace.rs and scripts/jitter/analyze.py.
@@ -52,6 +60,11 @@ DIV_LV = 0.20  # m/s
 
 SUBS = ("hpos", "hrot", "hlv", "hav", "hsim")
 SUB_LABEL = {"hpos": "pos", "hrot": "rot", "hlv": "lv", "hav": "av", "hsim": "sim"}
+
+# The carried-state decode (src/trace.rs since the per-field split): `hsim` = the fixed-order
+# combination of these five streams. Absent in older traces — attribution then reports "n/a".
+SIM_SUBS = ("hdrv", "hsrv", "hrld", "hrec", "hanc")
+SIM_LABEL = {"hdrv": "drive", "hsrv": "servo", "hrld": "reload", "hrec": "recoil", "hanc": "anchor"}
 
 
 # --- quaternion helpers (layout [x, y, z, w], matching src/trace.rs) ---------------------------
@@ -147,6 +160,12 @@ def parse_ticks(path):
                     "ctl": bool(row.get("ctl", False)),
                     "h": row.get("h"),
                     "sub": {s: row.get(s) for s in SUBS},
+                    "simsub": {s: row.get(s) for s in SIM_SUBS},
+                    "rp": bool(row.get("rp", False)),
+                    # Raw carried-state values (SPIKE_TRACE_SIM_FIELDS) + drive intent, for the
+                    # carried-state magnitude report. None when the trace wasn't verbose.
+                    "simf": row.get("simf"),
+                    "thr": row.get("thr"), "str": row.get("str"),
                 }
                 by_key[(rec["tick"], rec["e"])] = rec
     ticks = list(by_key.values())
@@ -195,6 +214,57 @@ def pair_tanks(client_ticks, server_ticks):
     return pairs
 
 
+def sim_field_deltas(c, s):
+    """Max-abs per-family carried-state differences between two VERBOSE rows (SPIKE_TRACE_SIM_FIELDS).
+
+    Returns {servo, reload, recoil, anchor, anchor_flips, drive} or None when either row lacks
+    `simf`. Anchor Some/None disagreements count as `anchor_flips` (a discriminant divergence has
+    no distance); torn/null elements make the family read NaN rather than crash the join.
+    """
+    cf, sf = c.get("simf"), s.get("simf")
+    if not cf or not sf:
+        return None
+
+    def max_abs(pairs):
+        m = 0.0
+        try:
+            for a, b in pairs:
+                if a is None or b is None:
+                    return float("nan")
+                m = max(m, abs(a - b))
+        except TypeError:
+            return float("nan")
+        return m
+
+    out = {"servo": max_abs((ea, eb)
+                            for xa, xb in zip(cf.get("srv") or [], sf.get("srv") or [])
+                            for ea, eb in zip(xa, xb))}
+    rld, rec = 0.0, 0.0
+    try:
+        for wa, wb in zip(cf.get("wpn") or [], sf.get("wpn") or []):
+            rld = max(rld, abs(wa[0] - wb[0]))
+            rec = max(rec, abs(wa[1] - wb[1]), abs(wa[2] - wb[2]))
+    except TypeError:
+        rld = rec = float("nan")
+    out["reload"], out["recoil"] = rld, rec
+    anc, flips = 0.0, 0
+    try:
+        for aa, ab in zip(cf.get("anch") or [], sf.get("anch") or []):
+            if (aa is None) != (ab is None):
+                flips += 1
+            elif aa is not None:
+                anc = max(anc, math.dist(aa, ab))
+    except TypeError:
+        anc = float("nan")
+    out["anchor"], out["anchor_flips"] = anc, flips
+    if c.get("thr") is not None and s.get("thr") is not None:
+        out["drive"] = max(abs(c["thr"] - s["thr"]),
+                           abs((c.get("str") or 0.0) - (s.get("str") or 0.0)))
+    else:
+        out["drive"] = float("nan")
+    return out
+
+
 # --- per-tick join + diff ---------------------------------------------------------------------
 def join(c_rows, s_rows, warmup_ticks):
     """Join one tank's client/server rows on tick number; return a per-shared-tick record array.
@@ -215,6 +285,11 @@ def join(c_rows, s_rows, warmup_ticks):
         h_match = (c["h"] is not None and c["h"] == s["h"])
         sub_match = {sub: (c["sub"][sub] is not None and c["sub"][sub] == s["sub"][sub])
                      for sub in SUBS}
+        # Carried-state decode: tri-state — None when either trace predates the sub-hash split
+        # (an absent field is UNKNOWN, not diverged).
+        sim_match = {sub: (None if (c["simsub"][sub] is None or s["simsub"][sub] is None)
+                           else c["simsub"][sub] == s["simsub"][sub])
+                     for sub in SIM_SUBS}
         dp = float(np.linalg.norm(c["p"] - s["p"]))
         dq = q_between(c["q"], s["q"])
         dlv = (float(np.linalg.norm(c["lv"] - s["lv"]))
@@ -226,6 +301,8 @@ def join(c_rows, s_rows, warmup_ticks):
         hc_zero = ((c["hc"] in (0, None)) and (s["hc"] in (0, None)))
         flat = gnd_ok and hc_zero
         out.append({"tick": tk, "h_match": h_match, "sub_match": sub_match,
+                    "sim_match": sim_match, "rp": c["rp"],
+                    "simd": None if h_match else sim_field_deltas(c, s),
                     "dp": dp, "dq": dq, "dlv": dlv, "dav": dav,
                     "flat": flat})
     return out
@@ -239,6 +316,53 @@ def pct(arr, q):
 def mag_stats(joined, key):
     vals = [j[key] for j in joined]
     return pct(vals, 50), pct(vals, 99), pct(vals, 100)
+
+
+def mismatch_windows(joined):
+    """Contiguous mismatched-tick spans, each attributed to the carried-state field families.
+
+    Per window: the tick range, whether it opens at the first shared tick (a spawn/connect
+    transient rather than a mid-run event), how many of its surviving client rows were rollback
+    replays, the per-family mismatch tally (None = trace predates the decode), and — when the
+    trace is verbose — the max per-family carried-state magnitudes.
+    """
+    windows = []
+    run = []
+    for j in joined:
+        if j["h_match"]:
+            if run:
+                windows.append(run)
+                run = []
+        elif run and j["tick"] != run[-1]["tick"] + 1:
+            windows.append(run)
+            run = [j]
+        else:
+            run.append(j)
+    if run:
+        windows.append(run)
+
+    first_tick = joined[0]["tick"] if joined else None
+    out = []
+    for w in windows:
+        have_decode = any(v is not None for j in w for v in j["sim_match"].values())
+        tally = ({SIM_LABEL[s]: sum(1 for j in w if j["sim_match"][s] is False)
+                  for s in SIM_SUBS} if have_decode else None)
+        # pose/velocity families too, so a physics-diverging window is named as such
+        pose_tally = {SUB_LABEL[s]: sum(1 for j in w if not j["sub_match"][s])
+                      for s in SUBS}
+        mags = None
+        deltas = [j["simd"] for j in w if j["simd"]]
+        if deltas:
+            mags = {k: max((d[k] for d in deltas), default=float("nan"))
+                    for k in ("servo", "reload", "recoil", "anchor", "drive")}
+            mags["anchor_flips"] = max(d["anchor_flips"] for d in deltas)
+        out.append({
+            "lo": w[0]["tick"], "hi": w[-1]["tick"], "n": len(w),
+            "opens_at_first_shared": w[0]["tick"] == first_tick,
+            "rp_rows": sum(1 for j in w if j["rp"]),
+            "sim_tally": tally, "pose_tally": pose_tally, "mags": mags,
+        })
+    return out
 
 
 def summarize(joined):
@@ -267,6 +391,7 @@ def summarize(joined):
         "n_trans": len(trans), "rate_trans": rate(trans),
         "first": first, "first_subs": first_subs,
         "sub_tally": sub_tally, "n_mismatch": len(mismatched),
+        "windows": mismatch_windows(joined),
         "mag": {k: mag_stats(joined, k) for k in ("dp", "dq", "dlv", "dav")},
         "mag_trans": {k: mag_stats(trans, k) for k in ("dp", "dq", "dlv", "dav")},
     }
@@ -308,6 +433,25 @@ def print_tank(label, s):
         tally = "   ".join(f"{name}={cnt}" for name, cnt in s["sub_tally"].items())
         print(f"\n    SUB-COMPONENT DIVERGENCE TALLY ({s['n_mismatch']} mismatched ticks)")
         print(f"      {tally}")
+
+    if s["windows"]:
+        print(f"\n    MISMATCH WINDOWS ({len(s['windows'])} contiguous span(s))")
+        for w in s["windows"]:
+            opens = "opens@first-shared-tick" if w["opens_at_first_shared"] else "mid-run"
+            print(f"      {w['lo']}..{w['hi']}  ({w['n']} ticks, {opens}, "
+                  f"{w['rp_rows']} replay rows)")
+            pose = "   ".join(f"{k}={v}" for k, v in w["pose_tally"].items() if v)
+            print(f"        components: {pose or '(none?)'}")
+            if w["sim_tally"] is not None:
+                sim = "   ".join(f"{k}={v}" for k, v in w["sim_tally"].items())
+                print(f"        carried-state fields: {sim}")
+            else:
+                print("        carried-state fields: n/a (trace predates the hsim decode)")
+            if w["mags"]:
+                m = w["mags"]
+                print(f"        max |Δ|: servo {m['servo']:.3e}  reload {m['reload']:.3e}  "
+                      f"recoil {m['recoil']:.3e}  anchor {m['anchor']:.3e} "
+                      f"(discriminant flips {m['anchor_flips']})  drive {m['drive']:.3e}")
 
     def mag_block(title, mag):
         print(f"\n    {title}")

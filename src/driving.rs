@@ -847,6 +847,14 @@ impl DriveState {
     pub(crate) fn steer(&self) -> f32 {
         self.steer
     }
+
+    /// Test-only constructor: the divergence-hash unit tests (`trace.rs`) need a non-default
+    /// `DriveState` to prove a drive-field flip localizes to the `hdrv` sub-hash. The fields stay
+    /// private in production code — `ramp_drive` remains their only writer.
+    #[cfg(test)]
+    pub(crate) fn test_new(throttle: f32, steer: f32) -> Self {
+        Self { throttle, steer }
+    }
 }
 
 /// Attach `DriveState` the moment a `Tank` exists (observer, ungated) — the sim-side partner of

@@ -284,6 +284,18 @@ impl ServoState {
     pub(crate) fn hash_fields(&self) -> [f32; 3] {
         [self.current, self.previous, self.velocity]
     }
+
+    /// Test-only constructor: the divergence-hash unit tests (`trace.rs`) need a non-default servo
+    /// to prove a servo-field flip localizes to the `hsrv` sub-hash. The fields stay private in
+    /// production code — `drive_servos` remains their only writer.
+    #[cfg(test)]
+    pub(crate) fn test_new(current: f32, previous: f32, velocity: f32) -> Self {
+        Self {
+            current,
+            previous,
+            velocity,
+        }
+    }
 }
 
 /// One weapon's carried sim state — an element of [`TankSim::weapons`]. `reload_remaining` gates
