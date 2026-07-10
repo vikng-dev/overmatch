@@ -794,7 +794,7 @@ fn update_view_death_overlay(
 
     let other_available = view_available(&controlled, &views, other_view);
     *text = Text::new(if other_available {
-        format!("Crewman down - [Lshift] for {other_label}")
+        format!("Crewman down — [Lshift] for {other_label}")
     } else {
         "All view crew down".to_string()
     });

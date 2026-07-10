@@ -174,7 +174,7 @@ fn request_respawn(
 fn spawn_death_screen(commands: &mut Commands, state: DeathScreenNode, font: &Handle<Font>) {
     let text = match state {
         DeathScreenNode::Died => "YOU DIED\npress R to respawn",
-        DeathScreenNode::Respawning => "RESPAWNING...",
+        DeathScreenNode::Respawning => "RESPAWNING…",
     };
     commands
         .spawn((

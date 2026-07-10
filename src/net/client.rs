@@ -582,7 +582,7 @@ fn spawn_connect_status(mut commands: Commands, fonts: Res<UiFonts>) {
         .with_children(|parent| {
             parent.spawn((
                 ConnectStatusText,
-                Text::new("CONNECTING..."),
+                Text::new("CONNECTING…"),
                 TextFont {
                     // SemiBold: a big all-caps connect overlay.
                     font: fonts.hud.clone().into(),
