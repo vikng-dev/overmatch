@@ -753,6 +753,28 @@ fn drive_gunner_aim(
         return;
     };
 
+    // The one committed intention, filtered for finiteness: a poisoned committed value (rollback
+    // edge) reads as NO commitment, so the seed-from-lay path below overwrites it with a finite
+    // resolve instead of latching the optic dead (a NaN resume would trip the direction guard
+    // before every publish, forever, with nothing in gunner mode ever healing the memory).
+    let committed_point = committed.get(tank).filter(|point| point.is_finite());
+    // Zero motion this frame is exactly `Vec2::ZERO` from `AccumulatedMouseMotion`.
+    let moved = motion.delta != Vec2::ZERO;
+
+    // Zero-input identity, taken FIRST — [`resume_commit`]'s no-motion arm, short-circuited before
+    // any pose work: with an existing commitment and no input, re-author the ORIGINAL point
+    // (recirculation: holding is an act) and touch nothing else. Publishing before the pose fetch
+    // keeps the hold alive even on a frame the resolve guards below would skip, and drops the
+    // world raycast that `resume_commit` would discard anyway.
+    if let Some(point) = committed_point
+        && !moved
+    {
+        if let Ok(mut command) = tank_commands.get_mut(tank) {
+            command.aim = Some(point);
+        }
+        return;
+    }
+
     // The optic's authored vertical FOV (per-tank) sets both the magnification and the cursor's
     // reach — the margin is a fixed fraction of the half-FOV, so the travel circle IS the drawn
     // optic rim. Fallback mirrors `camera.rs` for the pre-bind frame before `TankViews` lands.
@@ -819,6 +841,14 @@ fn drive_gunner_aim(
     };
     let hull_affine = Affine3A::from_rotation_translation(hull_rotation, hull_position);
     let mount_local = hull_affine.inverse().transform_point3(mount_world);
+    // NaN discipline for the resolve inputs: a poisoned pose frame must reach neither the raycast
+    // nor the store — a non-finite resolve would poison the shared memory itself. Skip the frame
+    // (the fast path above has already re-authored a held commitment; a fresh tank skips one seed
+    // frame). `mount_local` finite implies the hull affine is too, so `dir_world` below stays
+    // finite whenever these pass.
+    if !(mount_world.is_finite() && mount_local.is_finite()) {
+        return;
+    }
 
     // Resume the one committed intention into yaw/pitch — the shared `CommittedAim`, whether it was
     // set by the commander commit (`aim::commit_aim`) or by this system's own last resolve. The
@@ -829,7 +859,6 @@ fn drive_gunner_aim(
     // instead. This single rule replaces the old seed-on-entry `toggle_sight` did: an active
     // commander aim is simply continued, only an absent commitment falls back to the lay. Seed from
     // the sight line (lay − lob), not the raised bore, or the view jumps θ on handover.
-    let committed_point = committed.get(tank);
     let mut intent = committed_point
         .map(|point| GunnerIntent::from_hull_local_dir(point - mount_local))
         .unwrap_or(GunnerIntent {
@@ -837,10 +866,6 @@ fn drive_gunner_aim(
             pitch: g_current - theta,
         });
 
-    // The intention only becomes directional (loses its committed range) once the player actually
-    // moves the mouse in the optic — until then a resume is identity on the committed point (see
-    // `resume_commit`). Zero motion this frame is exactly `Vec2::ZERO` from `AccumulatedMouseMotion`.
-    let moved = motion.delta != Vec2::ZERO;
     intent.yaw -= motion.delta.x * sensitivity;
     intent.pitch -= motion.delta.y * sensitivity;
 
@@ -903,13 +928,12 @@ fn drive_gunner_aim(
     );
     let resolved = mount_local + dir_local * distance;
 
-    // Publish. `resume_commit` gates the resolve behind actual mouse input (the zero-input-identity
-    // invariant): with an existing commitment and no motion this frame, it re-authors the ORIGINAL
-    // committed point (the gun does not move) and leaves `CommittedAim` untouched. Either way
-    // SOMETHING writes `command.aim` every frame (the recirculation invariant for the optic: never
-    // fall silent); only the OWNING transition (mouse input, or a fresh tank with no commitment to
-    // preserve) re-stores the resolved point so the commander finds the optic's aim — a real point
-    // on the world — on a later mode switch.
+    // Publish. [`resume_commit`] is the full decision (its no-motion arm was short-circuited at the
+    // top of the system, before the pose work); reaching here means the OWNING transition — mouse
+    // input, or a fresh tank with no commitment to preserve — so the resolved point is published
+    // AND re-stored, and the commander finds the optic's aim — a real point on the world — on a
+    // later mode switch. Between the fast path and this, SOMETHING writes `command.aim` every
+    // healthy frame (the recirculation invariant for the optic: never fall silent).
     let publish = resume_commit(committed_point, moved, resolved);
     if let Some(point) = publish.store {
         committed.set(tank, point);

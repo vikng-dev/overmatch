@@ -40,6 +40,26 @@ impl VolumeOf {
 #[relationship_target(relationship = VolumeOf)]
 pub struct TankVolumes(Vec<Entity>);
 
+/// Resolve a spatial-query hit to the nearest ancestor carrying `T`. Colliders (armor trimeshes,
+/// collision proxies) are spawned as bare children of their named node, so a raycast hit lands on
+/// the mesh-primitive entity while the semantic components (`BallisticVolume`, [`VolumeOf`]) live
+/// on an ancestor. This is the ONE hierarchy-resolution rule, shared by the shell march, the spall
+/// fragments, and the aim rays — one walk, so a change to the spawned shape cannot make the aim
+/// dots silently disagree with the shells they predict. `None` (no such ancestor) ⇒ terrain.
+pub fn hit_ancestor<'a, T: Component>(
+    hit: Entity,
+    components: &'a Query<&T>,
+    parents: &Query<&ChildOf>,
+) -> Option<(Entity, &'a T)> {
+    let mut probe = hit;
+    loop {
+        if let Ok(found) = components.get(probe) {
+            return Some((probe, found));
+        }
+        probe = parents.get(probe).ok()?.parent();
+    }
+}
+
 impl TankVolumes {
     pub fn iter(&self) -> impl Iterator<Item = Entity> + '_ {
         self.0.iter().copied()

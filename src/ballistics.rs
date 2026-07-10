@@ -11,7 +11,7 @@
 use avian3d::prelude::{Forces, LayerMask, SpatialQuery, SpatialQueryFilter, WriteRigidBodyForces};
 use bevy::prelude::*;
 
-use crate::damage::VolumeOf;
+use crate::damage::{VolumeOf, hit_ancestor};
 use crate::state::GameplaySet;
 use crate::{ClientReplica, Layer};
 
@@ -190,19 +190,8 @@ fn cast_spall_fragment(
         };
         let at = pos + Vec3::from(dir) * hit.distance;
         pen = (pen / (1.0 + FRAG_DRAG * hit.distance)).max(0.0); // drag over the gap
-        // Resolve the struck volume's node + material factor (walk up from the mesh primitive).
-        let mut probe = hit.entity;
-        let mut node = None;
-        loop {
-            if let Ok(v) = volumes.get(probe) {
-                node = Some((probe, v.material_factor));
-                break;
-            }
-            match parents.get(probe) {
-                Ok(parent) => probe = parent.parent(),
-                Err(_) => break,
-            }
-        }
+        // Resolve the struck volume's node + material factor (`hit_ancestor`, the shared walk).
+        let node = hit_ancestor(hit.entity, volumes, parents).map(|(e, v)| (e, v.material_factor));
         let Some((node_entity, factor)) = node else {
             pos = at;
             break;
@@ -706,21 +695,11 @@ fn integrate_projectiles(
             let entry = origin + dir * hit.distance;
             let travelled = EPS + hit.distance;
 
-            // The hit lands on the collider's mesh-primitive entity; the `BallisticVolume` sits on its
-            // named parent node — walk up to find it, keeping the node entity so transit damage and
-            // spall can address the component. No volume in the ancestry ⇒ terrain.
-            let mut probe = hit.entity;
-            let mut resolved = None;
-            loop {
-                if let Ok(found) = volumes.get(probe) {
-                    resolved = Some((probe, found.material_factor));
-                    break;
-                }
-                match parents.get(probe) {
-                    Ok(parent) => probe = parent.parent(),
-                    Err(_) => break,
-                }
-            }
+            // The struck `BallisticVolume` sits on the hit's ancestry (`hit_ancestor`, the shared
+            // hierarchy-resolution rule), keeping the node entity so transit damage and spall can
+            // address the component. No volume in the ancestry ⇒ terrain.
+            let resolved = hit_ancestor(hit.entity, &volumes, &parents)
+                .map(|(node, volume)| (node, volume.material_factor));
             let Some((node_entity, factor)) = resolved else {
                 // Terrain: stop here.
                 commands.trigger(Impact { position: entry });

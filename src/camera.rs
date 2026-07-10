@@ -61,10 +61,17 @@ pub struct OrbitCameraSet;
 #[derive(Resource, Default)]
 struct TurretPivot(Option<Vec3>);
 
-/// Height of the orbit pivot above the turret ring — shared by the follow placement
-/// ([`orbit_camera`]) and the optic-exit re-aim ([`reaim_orbit_on_optic_exit`]), which must
-/// reconstruct the exact pivot the body will be placed from.
+/// Height of the orbit pivot above the turret ring.
 const PIVOT_LIFT: f32 = 2.5;
+
+/// The orbit pivot in world space: the turret ring (root pose × captured offset), lifted a little.
+/// THE point the camera body is placed from ([`orbit_camera`]) and the optic-exit re-aim aims from
+/// ([`reaim_orbit_on_optic_exit`]) — one formula, because the re-aim's collinearity guarantee
+/// (pivot, camera body, committed point on one line) holds only if it reconstructs exactly the
+/// pivot the body placement will use.
+fn orbit_pivot(tank_transform: &Transform, turret_local: Vec3) -> Vec3 {
+    tank_transform.transform_point(turret_local) + Vec3::Y * PIVOT_LIFT
+}
 
 pub fn plugin(app: &mut App) {
     app.insert_resource(CameraFollow(true))
@@ -278,11 +285,12 @@ fn orbit_camera(
     let ease = 1.0 - (-ZOOM_GLIDE * time.delta_secs()).exp();
     orbit.zoom += (orbit.target_zoom - orbit.zoom) * ease;
 
-    // Orbit around the turret ring (root pose × captured offset), lifted a little. The camera sits
-    // on the line through the pivot along its view axis; the ground ray pulls it in near terrain.
+    // Orbit around the shared pivot (`orbit_pivot` — the re-aim reconstructs this same point). The
+    // camera sits on the line through the pivot along its view axis; the ground ray pulls it in
+    // near terrain.
     const ORBIT_FAR: f32 = 18.0;
     const ORBIT_NEAR: f32 = 5.0;
-    let pivot_point = tank_transform.transform_point(turret_local) + Vec3::Y * PIVOT_LIFT;
+    let pivot_point = orbit_pivot(tank_transform, turret_local);
     let distance = ORBIT_FAR + (ORBIT_NEAR - ORBIT_FAR) * orbit.zoom;
     let back_ray = Ray3d::new(pivot_point, -transform.forward());
     transform.translation = back_ray.get_point(ground_distance(&spatial, back_ray, distance));
@@ -304,6 +312,13 @@ fn orbit_camera(
 /// white reticle lands on it, and a fresh RMB-up commit re-picks the SAME point. Runs only on the
 /// toggle frame; from there `orbit_look` owns the direction again. No commitment (fresh spawn — or
 /// the startup fire of `resource_changed`): nothing to re-aim at, keep the current direction.
+///
+/// `resource_changed` also fires on a Tab possession swap (SP): `swap_controlled_tank` writes
+/// `SightMode::ThirdPerson` unconditionally, and a write counts as a change even when the value
+/// stands. That fire is a no-op BY the possession invariant, not by luck: [`CommittedAim`] is
+/// keyed to the tank that last committed — always the outgoing tank — so `get` on the freshly
+/// acquired tank reads `None` and the early return keeps the camera exactly where the player left
+/// it.
 fn reaim_orbit_on_optic_exit(
     mode: Res<SightMode>,
     committed: Res<CommittedAim>,
@@ -331,8 +346,14 @@ fn reaim_orbit_on_optic_exit(
         return;
     };
 
+    // Known one-frame seam: the target rides the hull `GlobalTransform` (last propagation) while
+    // the pivot rides the root `Transform` (this frame's render pose) — exiting while driving
+    // offsets the two by up to a frame of motion (~14 cm at cruise), a sub-pixel reticle nudge the
+    // next RMB-up commit absorbs. Unifying them needs a hull pose off the root `Transform` chain,
+    // which conflicts with holding the camera `Transform` mutably here (`rig_world_pose` wants an
+    // unfiltered `Query<&Transform>`); not worth the contortion for a toggle-frame-only nudge.
     let target = hull_transform.affine().transform_point3(local);
-    let pivot_point = tank_transform.transform_point(turret_local) + Vec3::Y * PIVOT_LIFT;
+    let pivot_point = orbit_pivot(tank_transform, turret_local);
     // Fallible: a zero/non-finite span (a poisoned pose on the toggle frame) must not NaN the
     // camera rotation — keep the current direction instead.
     let Ok(direction) = Dir3::new(target - pivot_point) else {

@@ -17,9 +17,9 @@ use bevy::prelude::*;
 use crate::Layer;
 use crate::camera::{CameraKickApplied, GunnerCameraPlaced};
 use crate::command::TankCommand;
-use crate::damage::{ControlledTank, VolumeOf};
+use crate::damage::{ControlledTank, VolumeOf, hit_ancestor};
 use crate::firecontrol::{RangeTable, lob};
-use crate::sight::in_third_person;
+use crate::sight::{SightToggled, in_third_person};
 use crate::state::{GameplaySet, PlayerInputSet};
 use crate::tank::{
     Controlled, Hull, Rig, ServoCommand, ServoRole, Tank, TankRoot, ViewNode, rig_world_pose,
@@ -45,20 +45,10 @@ pub(crate) fn aim_distance(
     volumes: &Query<&VolumeOf>,
     parents: &Query<&ChildOf>,
 ) -> f32 {
-    // A hit lands on the collider's mesh-primitive entity; ownership (`VolumeOf`) sits on its named
-    // parent node — the same ancestry walk the shell march does. No volume in the ancestry ⇒
-    // terrain ⇒ never "own".
+    // Ownership sits on the hit's ancestry (`hit_ancestor`, the shared hierarchy-resolution rule).
+    // No volume in the ancestry ⇒ terrain ⇒ never "own".
     let not_own = |entity: Entity| {
-        let mut probe = entity;
-        loop {
-            if let Ok(owner) = volumes.get(probe) {
-                return owner.tank() != own;
-            }
-            match parents.get(probe) {
-                Ok(parent) => probe = parent.parent(),
-                Err(_) => return true,
-            }
-        }
+        hit_ancestor(entity, volumes, parents).is_none_or(|(_, owner)| owner.tank() != own)
     };
     spatial
         .cast_ray_predicate(
@@ -120,10 +110,12 @@ pub fn sim_plugin(app: &mut App) {
 ///   can never replay a stale intention onto a new tank — a mismatched key reads as "no
 ///   commitment" ([`CommittedAim::get`]), exactly the fresh-spawn state.
 /// - **Single writer:** exactly one commit system writes this at a time — [`commit_aim`] in third
-///   person, `sight::drive_gunner_aim` in the optic. Their run conditions (`in_third_person` /
-///   `in_gunner`) are mutually exclusive on every frame but the gunner→third-person toggle frame,
-///   where both may write once — schedule-ordered (`BeforeFixedMainLoop` then `Update`), never
-///   raced, and last-writer-wins lands on the mode the player just entered.
+///   person, `sight::drive_gunner_aim` in the optic. On a toggle frame, only the OUTGOING mode
+///   writes: the optic committed in `BeforeFixedMainLoop` while the mode was still Gunner, and
+///   `commit_aim` is ordered `.before(SightToggled)` so its run condition is evaluated before the
+///   flip (never raced against it — unordered, the executor could run it after a gunner→third
+///   flip and commit through the camera's still-gunner `GlobalTransform`). The incoming mode's
+///   first write is the NEXT frame, through a camera pose that actually belongs to it.
 /// - **Zero-input identity:** a mode transition with zero player input is IDENTITY on this memory.
 ///   BOTH modes commit RESOLVED WORLD POINTS — third person raycast from the camera, the optic
 ///   raycast from the gun mount along its sight line (far fallback in the sky) — so the memory
@@ -162,8 +154,17 @@ pub fn client_plugin(app: &mut App) {
             Update,
             // Per-mode aim commit: third-person from the screen-center ray; the optic commits
             // from its magnified intent (`sight::drive_gunner_aim`, also in `AimCommit`).
+            // `.before(SightToggled)` is the single-writer invariant's ordering half (see
+            // [`CommittedAim`]): the run condition is evaluated BEFORE the Lshift flip, so on a
+            // toggle frame only the OUTGOING mode's commit runs. Unordered, the executor could run
+            // this after the gunner→third-person flip and commit a fresh pick through the camera's
+            // still-GUNNER `GlobalTransform` (propagation is PostUpdate; the exit re-aim writes only
+            // `Transform`) — a ray from the gun mount along the mid-slew lay, overwriting the
+            // player's committed intention with the gun's lag point, intermittently by executor
+            // order.
             commit_aim
                 .run_if(in_third_person)
+                .before(SightToggled)
                 .in_set(AimCommit)
                 .in_set(PlayerInputSet)
                 .in_set(GameplaySet),
