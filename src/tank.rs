@@ -275,6 +275,15 @@ impl ServoState {
     pub fn current(&self) -> f32 {
         self.current
     }
+
+    /// The servo's full carried state, in a fixed field order — the canonical input to the
+    /// per-tick divergence hash (`trace::hash_tank_state`). All three fields are sim truth that
+    /// rolls back and replays, so all three must enter the hash; the order here IS the hashed order.
+    /// The fields stay private (`drive_servos` is their only writer); this is a read-only view for
+    /// the passive recorder.
+    pub(crate) fn hash_fields(&self) -> [f32; 3] {
+        [self.current, self.previous, self.velocity]
+    }
 }
 
 /// One weapon's carried sim state — an element of [`TankSim::weapons`]. `reload_remaining` gates

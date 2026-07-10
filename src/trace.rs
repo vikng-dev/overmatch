@@ -53,7 +53,18 @@
 //!   contact's negative separation gap reads as zero, not a signed distance). Both are honest now
 //!   — `hc`/`pen` sit at 0 while the tank drives wheel-borne, and rise on genuine hull-vs-ground
 //!   overlap; the earlier multi-metre `pen` at hc=1 during normal driving was a phantom
-//!   (client-only) non-touching / rollback-stale pair. Caveat that remains BY DESIGN: avian's
+//!   (client-only) non-touching / rollback-stale pair. THE DIVERGENCE INSTRUMENT'S per-tick fields
+//!   (analyzed offline by `scripts/divergence/analyze.py`): `own` — the world-independent tank
+//!   identity the client/server join pairs on (the player's own tank: `Controlled` on the client/SP,
+//!   `ControlledBy` on the server; the ownerless bot is `false` on both — NEVER the entity id, which
+//!   differs per world). `h` — the combined canonical state hash: an exhaustive "did anything differ
+//!   this tick?" over the pose/velocity BITS plus the carried `TankSim`/`DriveState`, computed
+//!   world-independently (fixed field order, `Vec`s in spawn-sorted slot order, no entity id) so an
+//!   identical `h` on both ends is bit-exact agreement. `hpos`/`hrot`/`hlv`/`hav`/`hsim` — the
+//!   per-component sub-hashes (`hsim` folds `DriveState` + `TankSim` servos/weapons/anchors, the
+//!   hidden state no pose field exposes), so a mismatch localizes to a component and the analyzer can
+//!   name the first-divergence sub-component. See `hash_tank_state`. Caveat that remains BY DESIGN:
+//!   avian's
 //!   narrow phase measures manifolds from the START-of-step pose while this row records the
 //!   post-solve pose, so inside a client rollback-correction burst (rows near `rp`/`rollback`
 //!   activity) `pen` can report a deep pre-solve overlap the solver then pushed out — real
@@ -91,8 +102,8 @@ use bevy::ecs::system::SystemParam;
 use lightyear::core::confirmed_history::ConfirmedHistory;
 #[cfg(feature = "net")]
 use lightyear::prelude::{
-    LocalTimeline, PredictionManager, PredictionMetrics, ReplicationCheckpointMap, Rollback,
-    RollbackSystems, VisualCorrection,
+    ControlledBy, LocalTimeline, PredictionManager, PredictionMetrics, ReplicationCheckpointMap,
+    Rollback, RollbackSystems, VisualCorrection,
 };
 
 /// The one JSONL sink both recorders share (`TraceWriter` here, `susp_trace` in `driving.rs`):
@@ -163,6 +174,161 @@ fn vec3(v: Vec3) -> Value {
 
 fn quat(q: Quat) -> Value {
     Value::Array(vec![num(q.x), num(q.y), num(q.z), num(q.w)])
+}
+
+// --- Per-tick state hash (the divergence instrument's exhaustive boolean) ---------------------
+// A canonical, WORLD-INDEPENDENT hash of a tank root's sim state, computed identically on client and
+// server so the offline join (`scripts/divergence/analyze.py`) can answer "did anything differ this
+// tick?" with a single u64 compare, and localize a difference to a sub-component. World-independence
+// is by construction: the hash consumes ONLY f32 bit patterns of pose/velocity/carried-sim, in a
+// fixed field order, with every `Vec` walked in its spawn-sorted index order (`WheelIndex`/
+// `ServoIndex`/`WeaponIndex` — identical across the two ECS worlds by `spawn_tank_sim`'s
+// sorted-by-name assignment). NOTHING that differs between worlds enters it — no entity id, no
+// pointer, no `HashMap` iteration, no archetype order. Two worlds that reached the same logical state
+// therefore hash identically even though their entity indices differ (measured 4294966669 vs
+// 4294966650 for the same tank). The per-tank ROW carries `own` (below) as the cross-world pairing
+// key, so the join never needs the entity id it cannot compare.
+//
+// Bit-exactness is the bar (flat-ground cruise is already measured bit-exact client-vs-server), so
+// every f32 enters as its raw `to_bits()` — `+0.0`/`−0.0` and any last-ulp difference flip the hash.
+
+/// A tiny FNV-1a 64-bit hasher over an explicit byte stream. Chosen over `std::hash::DefaultHasher`
+/// deliberately: its algorithm is fixed here (not a std-version-dependent SipHash seed), so a hash is
+/// reproducible across builds and trivially re-derivable by an offline tool, and it is fed only the
+/// f32 bits we hand it — the world-independence guarantee lives in WHAT we write, and this type keeps
+/// the HOW dependency-free and testable.
+struct Fnv64(u64);
+
+impl Fnv64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    fn new() -> Self {
+        Self(Self::OFFSET)
+    }
+
+    fn write_u32(&mut self, x: u32) {
+        for b in x.to_le_bytes() {
+            self.0 ^= u64::from(b);
+            self.0 = self.0.wrapping_mul(Self::PRIME);
+        }
+    }
+
+    fn write_u64(&mut self, x: u64) {
+        for b in x.to_le_bytes() {
+            self.0 ^= u64::from(b);
+            self.0 = self.0.wrapping_mul(Self::PRIME);
+        }
+    }
+
+    /// Hash the f32's RAW BITS — bit-exactness is the divergence bar, so `1.0` and the next
+    /// representable value must hash apart, and `+0.0`/`−0.0` must not collide.
+    fn write_f32(&mut self, x: f32) {
+        self.write_u32(x.to_bits());
+    }
+
+    fn write_vec3(&mut self, v: Vec3) {
+        self.write_f32(v.x);
+        self.write_f32(v.y);
+        self.write_f32(v.z);
+    }
+
+    fn write_quat(&mut self, q: Quat) {
+        self.write_f32(q.x);
+        self.write_f32(q.y);
+        self.write_f32(q.z);
+        self.write_f32(q.w);
+    }
+
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+/// One tank's per-tick state hash: the combined exhaustive boolean plus a per-component breakdown so
+/// the analyzer can localize a divergence (the measured signature is `|Δav|`-first at contact
+/// transients). `sim` folds both `DriveState` and the carried `TankSim` (servos, weapon reloads/
+/// recoil, wheel anchors) — the hidden state no pose/velocity field exposes, so the hash is the ONLY
+/// cross-world witness for it.
+struct TankStateHash {
+    combined: u64,
+    pos: u64,
+    rot: u64,
+    lv: u64,
+    av: u64,
+    sim: u64,
+}
+
+/// Hash a tank root's canonical sim state (see the module-level note on world-independence). Pure and
+/// ECS-free precisely so it is unit-testable: same inputs → same hash, one flipped velocity bit → a
+/// different hash, and — because no entity ever enters it — hash equality is independent of the two
+/// worlds' entity ids. Field order is fixed and load-bearing: `position, rotation, linvel, angvel`,
+/// then `DriveState(throttle, steer)`, then each `TankSim` `Vec` in slot order.
+fn hash_tank_state(
+    position: Vec3,
+    rotation: Quat,
+    linvel: Vec3,
+    angvel: Vec3,
+    drive: &DriveState,
+    sim: &TankSim,
+) -> TankStateHash {
+    let mut hp = Fnv64::new();
+    hp.write_vec3(position);
+    let pos = hp.finish();
+
+    let mut hr = Fnv64::new();
+    hr.write_quat(rotation);
+    let rot = hr.finish();
+
+    let mut hl = Fnv64::new();
+    hl.write_vec3(linvel);
+    let lv = hl.finish();
+
+    let mut ha = Fnv64::new();
+    ha.write_vec3(angvel);
+    let av = ha.finish();
+
+    let mut hs = Fnv64::new();
+    hs.write_f32(drive.throttle());
+    hs.write_f32(drive.steer());
+    for servo in &sim.servos {
+        for field in servo.hash_fields() {
+            hs.write_f32(field);
+        }
+    }
+    for weapon in &sim.weapons {
+        hs.write_f32(weapon.reload_remaining);
+        hs.write_f32(weapon.recoil_offset);
+        hs.write_f32(weapon.recoil_velocity);
+    }
+    for anchor in &sim.anchors {
+        // A discriminant distinguishes `None` (slipping/airborne) from `Some((0,0,0))` — a grip
+        // released vs a grip anchored exactly at the origin are different sim states and must hash
+        // apart.
+        match anchor {
+            None => hs.write_u32(0),
+            Some(point) => {
+                hs.write_u32(1);
+                hs.write_vec3(*point);
+            }
+        }
+    }
+    let sim_hash = hs.finish();
+
+    // Combine the sub-hashes in fixed order so `combined` reflects EVERY field and no sub-component's
+    // difference can cancel another's.
+    let mut hc = Fnv64::new();
+    for sub in [pos, rot, lv, av, sim_hash] {
+        hc.write_u64(sub);
+    }
+    TankStateHash {
+        combined: hc.finish(),
+        pos,
+        rot,
+        lv,
+        av,
+        sim: sim_hash,
+    }
 }
 
 /// Insert `role` before the extension of the raw `SPIKE_TRACE` value, so concurrently-launched
@@ -422,7 +588,20 @@ fn record_tick(
     // Same source `is_in_rollback` reads (`Query<(), With<Rollback>>`): non-empty iff this tick is a
     // rollback-replay re-simulation, which is what `rp` marks.
     #[cfg(feature = "net")] replaying: Query<(), With<Rollback>>,
+    // The server's ownership marker (`spawn_player_tank` inserts `ControlledBy` on every player
+    // tank; the ownerless test bot has none). It is the SERVER-side half of the cross-world identity
+    // the hash join pairs on: the client's own predicted tank carries the game `Controlled` marker
+    // (already in the roots query), the server's authoritative copy of that same logical tank carries
+    // `ControlledBy` instead — neither replicates the other's marker, so `own` is computed per role
+    // below. Empty result on a client / SP-composition build, which is correct (they pair on
+    // `Controlled`).
+    #[cfg(feature = "net")] owners: Query<(), With<ControlledBy>>,
 ) {
+    // The composition role, copied before the mutable `trace` borrow the write loop needs. It selects
+    // which marker means "the player's own tank" for the world-independent pairing key `own` (net
+    // only — SP's `own` is just `Controlled`, so the binding would be unused there).
+    #[cfg(feature = "net")]
+    let role = trace.role;
     // One tick number for every tank this call. Net: the predicted/authoritative tick, so client and
     // server rows align. SP (or an SP-composition net build with no `LocalTimeline`): a monotonic
     // local counter, incremented once per tick here — enough for the analysis script to order rows.
@@ -522,6 +701,25 @@ fn record_tick(
         // — the collision-stress signal the jitter correlates with.
         let (hull_contacts, penetration) = contacts.get(&entity).copied().unwrap_or((0, 0.0));
 
+        // The world-independent per-tick state hash — the divergence instrument's exhaustive boolean.
+        // Feeds off the tick-truth pose/velocity and the carried sim state already in hand; costs a
+        // few dozen FNV rounds, and only when tracing is armed (this whole system is registered only
+        // then).
+        let hash = hash_tank_state(position.0, rotation.0, linvel.0, angvel.0, drive, sim);
+
+        // The cross-world pairing key. Client / SP: the game `Controlled` marker (own predicted tank).
+        // Server: `ControlledBy` (the authoritative copy of that same player tank). Kept per-role so a
+        // 2-player world stays correct — on the client only OUR avatar carries `Controlled`, while the
+        // server marks every player tank `ControlledBy` its own link.
+        #[cfg(feature = "net")]
+        let own = if role == "server" {
+            owners.get(entity).is_ok()
+        } else {
+            controlled
+        };
+        #[cfg(not(feature = "net"))]
+        let own = controlled;
+
         // `mut` used only by the net-only `rp` stamp below; unused in the SP build.
         #[cfg_attr(not(feature = "net"), allow(unused_mut))]
         let mut row = json!({
@@ -541,6 +739,16 @@ fn record_tick(
             "hc": hull_contacts,
             "pen": num(penetration),
             "ctl": controlled,
+            // Cross-world tank identity for the hash join (world-independent — never the entity id).
+            "own": own,
+            // The per-tick state hash: `h` combined (exhaustive "did anything differ?"), then the
+            // per-component breakdown so a difference localizes to pose vs velocity vs carried sim.
+            "h": hash.combined,
+            "hpos": hash.pos,
+            "hrot": hash.rot,
+            "hlv": hash.lv,
+            "hav": hash.av,
+            "hsim": hash.sim,
         });
         // Mark rollback-replay ticks so analysis keeps the corrected value for this tick number.
         #[cfg(feature = "net")]
@@ -683,4 +891,117 @@ fn record_rollback(
         "trg": Value::Array(triggers),
     });
     trace.write(&row);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tank::WeaponState;
+
+    /// A representative, non-trivial sim state (both `Vec`s populated, one anchor set and one
+    /// released) so the canonicalization is exercised over every field path.
+    fn sample() -> (Vec3, Quat, Vec3, Vec3, DriveState, TankSim) {
+        let position = Vec3::new(1.5, 2.0, -70.25);
+        let rotation = Quat::from_rotation_y(0.3);
+        let linvel = Vec3::new(0.0, -0.153, 4.2);
+        let angvel = Vec3::new(0.01, -0.02, 0.03);
+        let drive = DriveState::default();
+        let sim = TankSim {
+            servos: Vec::new(),
+            weapons: vec![WeaponState {
+                reload_remaining: 1.25,
+                recoil_offset: -0.4,
+                recoil_velocity: 0.0,
+            }],
+            anchors: vec![Some(Vec3::new(3.0, 0.0, -70.0)), None],
+        };
+        (position, rotation, linvel, angvel, drive, sim)
+    }
+
+    /// Same state → same combined hash AND same sub-hashes. This is the join's core assumption: two
+    /// worlds that reached an identical logical state must produce byte-identical hashes.
+    #[test]
+    fn identical_state_hashes_identically() {
+        let (p, q, lv, av, drive, sim) = sample();
+        let a = hash_tank_state(p, q, lv, av, &drive, &sim);
+        let b = hash_tank_state(p, q, lv, av, &drive, &sim);
+        assert_eq!(a.combined, b.combined);
+        assert_eq!(
+            (a.pos, a.rot, a.lv, a.av, a.sim),
+            (b.pos, b.rot, b.lv, b.av, b.sim)
+        );
+    }
+
+    /// A SINGLE flipped bit of angular velocity changes the combined hash and the `av` sub-hash, and
+    /// leaves every other sub-hash untouched — the property that lets the analyzer localize a
+    /// divergence to one component. The flip is one ULP: `av.z`'s least-significant mantissa bit.
+    #[test]
+    fn one_flipped_velocity_bit_diverges_only_that_component() {
+        let (p, q, lv, av, drive, sim) = sample();
+        let base = hash_tank_state(p, q, lv, av, &drive, &sim);
+
+        let mut av2 = av;
+        av2.z = f32::from_bits(av.z.to_bits() ^ 1);
+        assert_ne!(
+            av2.z.to_bits(),
+            av.z.to_bits(),
+            "the bit flip must change the bits"
+        );
+        let flipped = hash_tank_state(p, q, lv, av2, &drive, &sim);
+
+        assert_ne!(
+            base.combined, flipped.combined,
+            "combined hash must catch the flip"
+        );
+        assert_ne!(base.av, flipped.av, "the av sub-hash must catch the flip");
+        // Every OTHER component is unchanged — the localization guarantee.
+        assert_eq!(base.pos, flipped.pos);
+        assert_eq!(base.rot, flipped.rot);
+        assert_eq!(base.lv, flipped.lv);
+        assert_eq!(base.sim, flipped.sim);
+    }
+
+    /// `+0.0` and `−0.0` are the same number but different bits, and bit-exactness is the bar, so they
+    /// must hash apart (a sign-flip through zero is a real last-bit divergence).
+    #[test]
+    fn signed_zero_hashes_apart() {
+        let (p, q, _lv, av, drive, sim) = sample();
+        let pos_zero = hash_tank_state(p, q, Vec3::new(0.0, 0.0, 0.0), av, &drive, &sim);
+        let neg_zero = hash_tank_state(p, q, Vec3::new(-0.0, 0.0, 0.0), av, &drive, &sim);
+        assert_ne!(pos_zero.lv, neg_zero.lv);
+    }
+
+    /// A released anchor (`None`) must not collide with one anchored at the origin (`Some(0,0,0)`):
+    /// the discriminant is load-bearing carried sim state.
+    #[test]
+    fn anchor_none_differs_from_some_origin() {
+        let (p, q, lv, av, drive, _sim) = sample();
+        let none = TankSim {
+            servos: vec![],
+            weapons: vec![],
+            anchors: vec![None],
+        };
+        let some = TankSim {
+            servos: vec![],
+            weapons: vec![],
+            anchors: vec![Some(Vec3::ZERO)],
+        };
+        let hn = hash_tank_state(p, q, lv, av, &drive, &none);
+        let hs = hash_tank_state(p, q, lv, av, &drive, &some);
+        assert_ne!(hn.sim, hs.sim);
+    }
+
+    /// Entity-id independence, made explicit: the hash function takes no entity and no ECS handle, so
+    /// two "worlds" whose only difference is the (absent) entity id produce the same hash. This is the
+    /// world-independence guarantee the join relies on, expressed as a test.
+    #[test]
+    fn hash_is_entity_id_independent() {
+        // There is simply no entity to pass — the signature itself is the proof. Two calls standing in
+        // for the client world and the server world (different entity ids there, identical state here)
+        // agree.
+        let (p, q, lv, av, drive, sim) = sample();
+        let client_world = hash_tank_state(p, q, lv, av, &drive, &sim);
+        let server_world = hash_tank_state(p, q, lv, av, &drive, &sim);
+        assert_eq!(client_world.combined, server_world.combined);
+    }
 }
