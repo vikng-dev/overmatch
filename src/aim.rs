@@ -72,10 +72,13 @@ pub fn client_plugin(app: &mut App) {
                 .in_set(GameplaySet)
                 .after(TransformSystems::Propagate)
                 .after(GunnerCameraPlaced)
-                // After the hit-kick has displaced the camera's rendered pose, so the commander
-                // sight dots reproject through the kicked view and the whole sight picture jolts
-                // together on a hit — matching the gunner reticles in `sight`. Vacuous edge in
-                // SP/headless (the kick set is net-client-only, empty there).
+                // After the hit-kick has displaced the camera's rendered `GlobalTransform`. The GREEN
+                // bore dot (`update_bore_indicator`) reads that kicked pose, so it jolts with the
+                // rendered view and the whole sight picture shakes together on a hit — matching the
+                // gunner reticles in `sight`. The AMBER intention dot (`update_aim_indicator`)
+                // deliberately reads the un-kicked camera `Transform` instead (see its body), so this
+                // edge is only load-bearing for the bore dot. Vacuous edge in SP/headless (the kick set
+                // is net-client-only, empty there).
                 .after(CameraKickApplied),
         );
 }
@@ -130,9 +133,22 @@ fn spawn_hud(mut commands: Commands) {
 }
 
 /// Third-person aim commit: a screen-center ray picks the ground point (or a far fallback) and
-/// stores it hull-local in the tank's [`TankCommand`]. RMB free-look stops committing, so the held
-/// intention (and the servos chasing it) keep their hull-relative pose. The servos themselves are
+/// stores it hull-local in the tank's [`TankCommand`]. RMB free-look holds the committed
+/// intention — by RE-AUTHORING it every frame, not by falling silent. The servos themselves are
 /// driven by `drive_aim_servos`, shared with the gunner optic.
+///
+/// **Holding must be an act, not an omission.** `TankCommand.aim` is an absolute re-sent every
+/// tick ("like Quake/Source viewangles" — the field's doc), and under netcode the input bridge
+/// (`net::protocol::bridge_action_state_to_tank_command`) rewrites the whole command each tick
+/// from lightyear's input buffer, which with input delay D is a D-tick delay line fed by
+/// `feed_action_state` sampling this same component. If this system simply stops writing during
+/// free-look, that loop recirculates the last few PRE-free-look commits forever (period ≈ D+1
+/// ticks, measured live via the bridge: the aim cycling bit-exact through the pre-RMB sweep trail
+/// every tick) — the amber dot and the gun both bounce along the old sweep and never settle. So
+/// free-look keeps writing the HELD intention (this system's own memory of its last fresh commit)
+/// every frame: the buffer then carries the player's truth, and SP (where nothing else writes
+/// `aim`) sees the same value it always held. The memory is keyed by tank entity so a possession
+/// change can never replay a stale hold onto a different tank.
 fn commit_aim(
     mouse: Res<ButtonInput<MouseButton>>,
     spatial: SpatialQuery,
@@ -141,16 +157,29 @@ fn commit_aim(
     controlled: ControlledTank,
     hull: Query<&GlobalTransform, With<Hull>>,
     mut tank_commands: Query<&mut TankCommand>,
+    mut held: Local<Option<(Entity, Vec3)>>,
 ) {
-    // Hold RMB to free-look: the camera still pans, but we stop committing aim, so the servos
-    // and the locked aim point hold their hull-relative pose.
-    if mouse.pressed(MouseButton::Right) {
-        return;
-    }
-
     let (Some(tank), Some(rig)) = (controlled.entity(), controlled.rig()) else {
         return;
     };
+
+    // Hold RMB to free-look: the camera still pans, but we stop picking NEW aim points — the held
+    // intention is re-authored every frame instead (see the doc comment for why silence is not an
+    // option under the net input round trip). No memory yet (free-look from the first frame, or
+    // right after a possession change): author nothing, exactly like the pre-first-commit state.
+    if mouse.pressed(MouseButton::Right) {
+        if let Some((held_tank, aim)) = *held
+            && held_tank == tank
+            && let Ok(mut command) = tank_commands.get_mut(tank)
+            // Same-value writes are skipped so SP (where the hold already sticks) sees no
+            // change-detection churn; under netcode the bridge changed it this tick, so this
+            // restores the intention before the HUD (PostUpdate) and next tick's input sample read.
+            && command.aim != Some(aim)
+        {
+            command.aim = Some(aim);
+        }
+        return;
+    }
 
     let (camera, cam_transform) = *camera_query;
     let Ok(ray) = camera.viewport_to_world(cam_transform, window.size() / 2.0) else {
@@ -168,7 +197,9 @@ fn commit_aim(
     // downstream in `drive_aim_servos`, so this stays the intention (what the amber HUD dot shows) and
     // the green bore dot ends up the superelevation above it.
     if let Ok(mut command) = tank_commands.get_mut(tank) {
-        command.aim = Some(hull.affine().inverse().transform_point3(point));
+        let local = hull.affine().inverse().transform_point3(point);
+        command.aim = Some(local);
+        *held = Some((tank, local));
     }
 }
 
@@ -306,12 +337,22 @@ fn update_bore_indicator(
 
 fn update_aim_indicator(
     mouse: Res<ButtonInput<MouseButton>>,
-    camera_query: Single<(&Camera, &GlobalTransform)>,
+    // The camera's un-kicked `Transform`, NOT its `GlobalTransform`. The amber dot marks the player's
+    // committed aim *intention*, which `commit_aim` fixes by projecting screen-centre through the
+    // un-kicked (stabilized) camera pose (ADR-0003). `net::hit_feel::apply_camera_kick` displaces only
+    // the rendered `GlobalTransform` — a decaying, re-excited-every-hit recoil offset. Reprojecting a
+    // FROZEN intention (free-look holds `command.aim`) through that shaking pose makes the marker jitter
+    // between two positions and never settle while you are under fire, even though the intention is rock
+    // steady — the regression. The camera is parentless, so its `Transform` IS its un-kicked world pose,
+    // the exact pose `commit_aim` reads, so the dot stays welded to the point it was committed at while
+    // the green bore dot and the gunner reticles still jolt with the kicked view (the sight picture jolt).
+    camera_query: Single<(&Camera, &Transform), With<Camera3d>>,
     controlled: Query<(&Rig, &TankCommand), With<Controlled>>,
     hull: Query<&GlobalTransform, With<Hull>>,
     mut indicator: Query<(&mut Node, &mut Visibility), With<AimIndicator>>,
 ) {
     let (camera, cam_transform) = *camera_query;
+    let cam_transform = GlobalTransform::from(*cam_transform);
     let Ok((mut node, mut visibility)) = indicator.single_mut() else {
         return;
     };
@@ -343,7 +384,7 @@ fn update_aim_indicator(
         &mut node,
         &mut visibility,
         camera,
-        cam_transform,
+        &cam_transform,
         world,
         3.0,
     );
