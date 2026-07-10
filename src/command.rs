@@ -205,8 +205,10 @@ fn attach_command(add: On<Add, Tank>, mut commands: Commands) {
 }
 
 /// Translate devices through the bindings into the controlled tank's command. The only place in
-/// the sim path that reads a device.
-fn gather_commands(
+/// the sim path that reads a device. `pub(crate)` so the other `BeforeFixedMainLoop` command
+/// writers (`firecontrol::adjust_range`, `sight::drive_gunner_aim`) can pin an explicit order
+/// against it — both share the `Ranging`/`TankCommand` it touches.
+pub(crate) fn gather_commands(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     bindings: Res<Bindings>,

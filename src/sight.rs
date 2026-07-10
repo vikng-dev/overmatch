@@ -16,7 +16,7 @@ use bevy::prelude::*;
 
 use crate::aim::AimCommit;
 use crate::camera::{CameraKickApplied, GUNNER_FOV_FALLBACK, GunnerCameraPlaced, view_fov};
-use crate::command::TankCommand;
+use crate::command::{TankCommand, gather_commands};
 use crate::damage::ControlledTank;
 use crate::firecontrol::{RangeTable, Ranging};
 use crate::spec::ViewKind;
@@ -152,15 +152,30 @@ pub fn plugin(app: &mut App) {
             Update,
             (
                 toggle_sight,
-                // Commits the tank's commanded aim from the magnified intent (in `AimCommit`, so
-                // `aim::drive_aim_servos` reads it after — same as third-person).
-                drive_gunner_aim.run_if(in_gunner).in_set(AimCommit),
                 update_view_death_overlay,
                 // After `toggle_sight`, so a refused switch this frame shows its reason.
                 update_toast,
                 update_range_readout,
             )
                 .chain()
+                .in_set(GameplaySet),
+        )
+        // Commit the commanded aim from the magnified mouse intent. In `BeforeFixedMainLoop` (with
+        // `gather_commands`), NOT `Update`: the fixed loop runs its sim ticks *before* `Update`, so
+        // an aim written in `Update` is one render frame stale by the time the sim consumes it —
+        // +16.7 ms at 60 Hz of avoidable input latency. This reads only the mouse motion (ready in
+        // `PreUpdate`) and the last tick's servo angles, never the camera, so it moves cleanly out of
+        // `Update`. `.after(gather_commands)` pins the order — both write `TankCommand` (disjoint
+        // fields: `gather_commands` the drive/range fields, this one `aim`) — and puts the aim commit
+        // after this frame's fresh `Ranging` has reached the command. Still in `AimCommit` so
+        // `aim::drive_aim_servos` (fixed clock) reads whatever intention stands at each tick.
+        .add_systems(
+            RunFixedMainLoop,
+            drive_gunner_aim
+                .run_if(in_gunner)
+                .after(gather_commands)
+                .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop)
+                .in_set(AimCommit)
                 .in_set(GameplaySet),
         )
         // React to a view-mode change by re-laying the controlled tank's render layer (hidden from

@@ -213,7 +213,10 @@ fn orbit_camera(
     const ZOOM_SPEED: f32 = 0.01;
     const ZOOM_GLIDE: f32 = 12.0;
     orbit.target_zoom = (orbit.target_zoom + mouse_scroll.delta.y * ZOOM_SPEED).clamp(0.0, 1.0);
-    let ease = (ZOOM_GLIDE * time.delta_secs()).min(1.0);
+    // Frame-rate-exact exponential glide: `1 - e^(-k·dt)` is the closed-form decay over `dt`, so the
+    // dolly lands identically regardless of frame time. The old `(k·dt).min(1)` was a linear
+    // approximation that eased faster at high frame rates.
+    let ease = 1.0 - (-ZOOM_GLIDE * time.delta_secs()).exp();
     orbit.zoom += (orbit.target_zoom - orbit.zoom) * ease;
 
     // Orbit around the turret ring (root pose × captured offset), lifted a little. The camera sits

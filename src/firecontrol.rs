@@ -19,6 +19,7 @@ use bevy::input::mouse::AccumulatedMouseScroll;
 use bevy::prelude::*;
 
 use crate::ballistics::{drag_k, freeflight_step};
+use crate::command::gather_commands;
 use crate::sight::in_gunner;
 use crate::state::GameplaySet;
 use crate::tank::Weapon;
@@ -149,7 +150,19 @@ pub fn client_plugin(app: &mut App) {
     app.init_resource::<Ranging>()
         // Scroll dials the range in the optic (mutually exclusive with `orbit_camera`'s third-person
         // zoom, which also reads scroll — they're gated on opposite view modes, so no contention).
-        .add_systems(Update, adjust_range.run_if(in_gunner).in_set(GameplaySet));
+        //
+        // In `BeforeFixedMainLoop`, right before `gather_commands`, so the dial the sim reads is
+        // *this* frame's scroll: `gather_commands` copies `Ranging::range` into the command, so a
+        // dial left in `Update` would only reach the sim one render frame later. `.before` makes the
+        // read-after-write ordering explicit (both touch the `Ranging` resource).
+        .add_systems(
+            RunFixedMainLoop,
+            adjust_range
+                .run_if(in_gunner)
+                .before(gather_commands)
+                .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop)
+                .in_set(GameplaySet),
+        );
 }
 
 /// Build a weapon's range table and store it on its muzzle, reacting to the binder attaching `Weapon`.
