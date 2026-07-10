@@ -22,7 +22,8 @@
 //! then checks what remains. `format!` is intentionally NOT stripped — it is the one macro whose
 //! output is routinely handed to `Text::new` (e.g. the connect-status and view-death prompts).
 
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 /// Characters beyond printable ASCII that the bundled Barlow Condensed weights are verified to
 /// render (both SemiBold and Regular cmaps checked). A rendered literal may contain these; anything
@@ -53,6 +54,7 @@ const BARLOW_TEXT_FILES: &[&str] = &[
     "src/crew_ui.rs",
     "src/sight.rs",
     "src/state.rs",
+    "src/ui_font.rs",
     "src/net/client.rs",
     "src/net/death_screen.rs",
     "src/net/debug_hud.rs",
@@ -376,5 +378,240 @@ fn demo() {
         offenders.len(),
         3,
         "ASCII-only regime flags the typographic + kanji + euro literals, but still not comments/logs/expect/pure-ASCII; got {offenders:?} at lines {lines:?}"
+    );
+}
+
+// --- Completeness: keep the two TEXT_FILES lists in step with the code -------------------------
+//
+// The two lists above are hand-maintained, and the whole guard is only as good as they are complete:
+// a new file that spawns `Text` but is in NEITHER list is silently unguarded. The check below walks
+// all of `src/`, flags every file that actually constructs a `Text` (via `Text::new(` or the `Text(`
+// tuple), and asserts each such file is classified into one of the two lists — so adding a Text spawn
+// in a new file fails this test until the developer files it under the right regime.
+
+/// Blank out the *contents* of comments and string/char literals (raw strings included), leaving code
+/// tokens verbatim. So a doc comment or a log string that merely *mentions* `Text::new` cannot be
+/// mistaken for a real spawn by [`file_spawns_text`] — the exact false-positive the completeness
+/// check has to avoid, since these files are full of prose about `Text`.
+fn blank_comments_and_literals(src: &str) -> String {
+    let chars: Vec<char> = src.chars().collect();
+    let mut out = String::with_capacity(chars.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        // Line comment.
+        if c == '/' && i + 1 < chars.len() && chars[i + 1] == '/' {
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        // Block comment (Rust block comments nest).
+        if c == '/' && i + 1 < chars.len() && chars[i + 1] == '*' {
+            let mut nest = 1;
+            i += 2;
+            while i < chars.len() && nest > 0 {
+                if chars[i] == '/' && i + 1 < chars.len() && chars[i + 1] == '*' {
+                    nest += 1;
+                    i += 2;
+                } else if chars[i] == '*' && i + 1 < chars.len() && chars[i + 1] == '/' {
+                    nest -= 1;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        // Raw string: r"…" / r#"…"# / r##"…"## … — only when the `r` starts a token (not the tail of
+        // an identifier, and not a raw identifier like `r#type` where the `#` is not followed by `"`).
+        let r_starts_token = i == 0 || !(chars[i - 1].is_alphanumeric() || chars[i - 1] == '_');
+        if c == 'r'
+            && r_starts_token
+            && i + 1 < chars.len()
+            && (chars[i + 1] == '"' || chars[i + 1] == '#')
+        {
+            let mut j = i + 1;
+            let mut hashes = 0;
+            while j < chars.len() && chars[j] == '#' {
+                hashes += 1;
+                j += 1;
+            }
+            if j < chars.len() && chars[j] == '"' {
+                j += 1;
+                loop {
+                    if j >= chars.len() {
+                        break;
+                    }
+                    if chars[j] == '"' {
+                        let mut k = j + 1;
+                        let mut h = 0;
+                        while h < hashes && k < chars.len() && chars[k] == '#' {
+                            h += 1;
+                            k += 1;
+                        }
+                        if h == hashes {
+                            j = k;
+                            break;
+                        }
+                    }
+                    j += 1;
+                }
+                i = j;
+                continue;
+            }
+            // Not a raw string (e.g. `r#type`): fall through and treat `r` as an ordinary char.
+        }
+        // Plain string literal.
+        if c == '"' {
+            i += 1;
+            while i < chars.len() {
+                if chars[i] == '\\' && i + 1 < chars.len() {
+                    i += 2;
+                    continue;
+                }
+                if chars[i] == '"' {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        // Char literal (`'x'`, `'\n'`); a lifetime (`'a`) falls through as ordinary punctuation.
+        if c == '\'' {
+            if i + 1 < chars.len() && chars[i + 1] == '\\' {
+                let mut j = i + 2;
+                while j < chars.len() && chars[j] != '\'' {
+                    j += 1;
+                }
+                i = j + 1;
+                continue;
+            }
+            if i + 2 < chars.len() && chars[i + 2] == '\'' {
+                i += 3;
+                continue;
+            }
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+/// Whether `chars[pos..]` starts with `pat`.
+fn matches_at(chars: &[char], pos: usize, pat: &str) -> bool {
+    let p: Vec<char> = pat.chars().collect();
+    pos + p.len() <= chars.len() && chars[pos..pos + p.len()] == p[..]
+}
+
+/// Whether the source actually constructs a `Text` — a standalone `Text(` tuple or `Text::new(` — in
+/// code (comments and string literals are blanked first). The standalone check (the char before
+/// `Text` must not be an identifier char, and what follows must be `(` or `::new(`) keeps siblings
+/// like `TextColor(`, `TextFont`, `TextSpan`, `Text2d` from matching.
+fn file_spawns_text(src: &str) -> bool {
+    let code = blank_comments_and_literals(src);
+    let chars: Vec<char> = code.chars().collect();
+    for start in 0..chars.len() {
+        if !matches_at(&chars, start, "Text") {
+            continue;
+        }
+        if start > 0 {
+            let prev = chars[start - 1];
+            if prev.is_alphanumeric() || prev == '_' {
+                continue;
+            }
+        }
+        let after = start + 4;
+        if matches_at(&chars, after, "(") || matches_at(&chars, after, "::new(") {
+            return true;
+        }
+    }
+    false
+}
+
+/// Every `.rs` file under `dir`, recursively.
+fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let entries =
+        std::fs::read_dir(dir).unwrap_or_else(|e| panic!("cannot read dir {}: {e}", dir.display()));
+    for entry in entries {
+        let path = entry.expect("dir entry").path();
+        if path.is_dir() {
+            collect_rs_files(&path, out);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            out.push(path);
+        }
+    }
+}
+
+#[test]
+fn text_files_lists_are_complete() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let classified: HashSet<&str> = BARLOW_TEXT_FILES
+        .iter()
+        .chain(ASCII_ONLY_TEXT_FILES)
+        .copied()
+        .collect();
+
+    let mut files = Vec::new();
+    collect_rs_files(&root.join("src"), &mut files);
+    files.sort();
+
+    let mut unclassified = Vec::new();
+    for path in files {
+        let src = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        if !file_spawns_text(&src) {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(&root)
+            .expect("src file is under the manifest dir")
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        if !classified.contains(rel.as_str()) {
+            unclassified.push(rel);
+        }
+    }
+    unclassified.sort();
+
+    assert!(
+        unclassified.is_empty(),
+        "these src files spawn `Text` but are not classified in tests/ui_ascii.rs — the font-coverage \
+         guard is not scanning them. Add each to exactly one list: BARLOW_TEXT_FILES if it renders \
+         through `ui_font::UiFonts` (may use the typographic set), or ASCII_ONLY_TEXT_FILES if it \
+         keeps Bevy's default ASCII-only font (a dev sandbox). Unclassified:\n{}",
+        unclassified.join("\n")
+    );
+}
+
+/// The completeness detector must fire on real spawns yet stay blind to `Text` mentioned only in
+/// comments, string/raw-string literals, or as the prefix of a sibling type — otherwise it would
+/// nag about files that never render text.
+#[test]
+fn spawn_detector_ignores_comments_and_strings() {
+    let no_spawn = r###"
+        //! prose that spawns a `Text::new(...)` node — comment only
+        /* Text( inside a block comment */
+        fn f() {
+            info!("logs Text::new( in a string, never code");
+            let s = r#"raw literal with Text( in it"#;
+            let _ = TextColor(Color::WHITE);
+            let _ = TextFont::default();
+            let _ = subText(0);
+        }
+    "###;
+    assert!(
+        !file_spawns_text(no_spawn),
+        "must not flag `Text` in comments, strings, raw strings, or sibling identifiers"
+    );
+
+    assert!(
+        file_spawns_text(r#"fn f(){ parent.spawn(Text::new("hi")); }"#),
+        "must flag a Text::new(...) spawn"
+    );
+    assert!(
+        file_spawns_text(r#"fn f(){ commands.spawn(Text("hi".into())); }"#),
+        "must flag a Text(...) tuple spawn"
     );
 }
