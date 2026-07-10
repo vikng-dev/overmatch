@@ -52,9 +52,8 @@ mod headless_test;
 /// The shared tank-state HUD (world-anchored capability/crew/damage readouts). Mounted by both
 /// `GamePlugin` and the sandbox; each tags its own world camera with `hud::HudCamera`.
 mod hud;
-/// The game's networking layer (`net` feature only). Public so the `client`/`server` bins can call
+/// The game's networking layer. Public so the `client`/`server` bins can call
 /// `net::client::run()`/`net::server::run()`; not part of `GamePlugin`.
-#[cfg(feature = "net")]
 pub mod net;
 /// The armor ballistics sandbox (`bin/armor_sandbox`). Public so the binary can mount it; not part
 /// of `GamePlugin`.
@@ -203,10 +202,8 @@ impl Plugin for ClientPlugin {
 /// ticking; there is no online pause, so the netcode bin owns its own cursor-release menu overlay
 /// instead. No `tank::client_plugin` — the Tab possession swap is an SP scenario tool; under
 /// netcode the server assigns possession (`ControlledBy`).
-#[cfg(feature = "net")]
 pub struct NetClientPlugin;
 
-#[cfg(feature = "net")]
 impl Plugin for NetClientPlugin {
     fn build(&self, app: &mut App) {
         gate_player_input(app);

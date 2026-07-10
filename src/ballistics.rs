@@ -287,10 +287,8 @@ fn march_demo(mode: Res<MarchMode>) -> bool {
 /// from its own local spec, with no impulse or spring state ever riding the wire. Pairing the
 /// attributed tank with the weapon slot in one value makes the two impossible to disagree — an
 /// attributed shot always knows which weapon fired it, so the recoil kick lands on the right barrel.
-/// The slot is the weapon's `TankSim::weapons` index (its `WeaponIndex`). Only `net::server` reads
-/// this, so it is dead code in a build without the `net` feature (SP / sandbox) — allow it there
-/// rather than drop the data the wire seam depends on.
-#[cfg_attr(not(feature = "net"), allow(dead_code))]
+/// The slot is the weapon's `TankSim::weapons` index (its `WeaponIndex`). Read by `net::server` to
+/// attribute the shot on the wire.
 #[derive(Clone, Copy)]
 pub struct ShotSource {
     /// The tank root the shell was fired from.
@@ -317,10 +315,7 @@ pub struct FireShell {
     /// the shell — but the net server's `FireShell` observer reads it to broadcast the cosmetic
     /// tracer AND the firing weapon to the OTHER clients (`net::server`, the "FireEvent" seam): a
     /// shot whose source is known is attributed to the right replicated tank and weapon slot; `None`
-    /// shots (sandbox) simply never broadcast. Only `net::server` reads this, so it is dead code in a
-    /// build without the `net` feature (SP / sandbox) — allow it there rather than drop a field the
-    /// wire seam depends on.
-    #[cfg_attr(not(feature = "net"), allow(dead_code))]
+    /// shots (sandbox) simply never broadcast.
     pub shooter: Option<ShotSource>,
     /// How many free-flight ticks to fast-forward this shell at spawn ([`fast_forward_shell`]) — the
     /// net FireEvent catch-up. `0` for every locally-fired shell (the player's gun, the sandbox

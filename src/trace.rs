@@ -96,11 +96,8 @@ use serde_json::{Value, json};
 use crate::driving::{DriveState, Suspension};
 use crate::tank::{Controlled, Tank, TankSim, WheelIndex};
 
-#[cfg(feature = "net")]
 use bevy::ecs::system::SystemParam;
-#[cfg(feature = "net")]
 use lightyear::core::confirmed_history::ConfirmedHistory;
-#[cfg(feature = "net")]
 use lightyear::prelude::{
     ControlledBy, LocalTimeline, PredictionManager, PredictionMetrics, ReplicationCheckpointMap,
     Rollback, RollbackSystems, VisualCorrection,
@@ -376,14 +373,15 @@ fn install(app: &mut App, role: &'static str) -> bool {
     // frame while tracing), so no periodic flush system is needed.
     // Arm the trigger-attribution slot's fast path. The slot only fills on the client (check_rollback
     // is client-only), but the flag is role-agnostic and cheap; the server never calls
-    // `note_rollback_trigger`, so its slot stays empty regardless.
-    #[cfg(feature = "net")]
+    // `note_rollback_trigger`, so its slot stays empty regardless — as does the single-player
+    // composition, which registers no rollback conditions.
     TRACE_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
     true
 }
 
-/// Single-player: frame + tick recorders, no net extras (the cfg-gated fields simply don't exist in
-/// this build). Two tanks spawn; both are recorded, told apart by `e`/`ctl` in analysis.
+/// Single-player: frame + tick recorders, no net extras (the net resources the extras read are simply
+/// absent at runtime in this composition). Two tanks spawn; both are recorded, told apart by `e`/`ctl`
+/// in analysis.
 pub fn sp_plugin(app: &mut App) {
     if !install(app, "sp") {
         return;
@@ -396,7 +394,6 @@ pub fn sp_plugin(app: &mut App) {
 /// ARE recorded (stamped `rp` — fix 4), so analysis sees the corrected re-simulation, not the
 /// abandoned misprediction. A PreUpdate system clears the trigger slot before lightyear's rollback
 /// check so `trg` attribution is exact (fix 2).
-#[cfg(feature = "net")]
 pub fn client_plugin(app: &mut App) {
     if !install(app, "client") {
         return;
@@ -413,7 +410,6 @@ pub fn client_plugin(app: &mut App) {
 }
 
 /// MP server: tick rows only (it has no `Predicted` view to render, hence no frame/rollback rows).
-#[cfg(feature = "net")]
 pub fn server_plugin(app: &mut App) {
     if !install(app, "server") {
         return;
@@ -436,9 +432,10 @@ fn write_meta(mut trace: ResMut<TraceWriter>, fixed: Res<Time<Fixed>>) {
 /// `after(TransformSystems::Propagate)` so `GlobalTransform` already reflects the frame-interpolated
 /// + correction-adjusted `Position`/`Rotation` (MP) or avian's render interpolation (SP).
 ///
-/// The net extras ride cfg-gated parameters (`net`, `corr`): the whole system compiles in the
-/// no-net SP build with those params (and the block that fills them) removed, so nothing from
-/// lightyear leaks outside `#[cfg(feature = "net")]`.
+/// The net extras (`net`, `corr`, `conf`, `view_offset`) read prediction/correction state that only
+/// a real MP client mounts; every one is accessed OPTIONALLY, so the same system runs unchanged in
+/// the single-player composition (where those resources/components are simply absent at runtime) and
+/// emits an SP-shaped row.
 fn record_frame(
     mut trace: ResMut<TraceWriter>,
     real: Res<Time<Real>>,
@@ -450,24 +447,24 @@ fn record_frame(
     // visible lurch on screen. Empty on a headless client (no camera spawned) → the fields are then
     // OMITTED, not null, keeping the row shape identical to a pre-instrumentation trace.
     camera: Query<&GlobalTransform, With<Camera3d>>,
-    #[cfg(feature = "net")] net: NetFrameCtx,
-    #[cfg(feature = "net")] corr: Query<(
+    net: NetFrameCtx,
+    corr: Query<(
         Option<&VisualCorrection<Position>>,
         Option<&VisualCorrection<Rotation>>,
     )>,
     // The predicted root's confirmed-authority history: lightyear seeds these buffers from every
     // replication receive (`add_confirmed_to_history`) and `prepare_rollback` reads them as the
     // rollback source. `Option<&…>` per component and an unfiltered query (like `corr`) so the
-    // SP-composition net build — which never registers `ConfirmedHistory` — yields `(None, None)`
+    // single-player composition — which never registers `ConfirmedHistory` — yields `(None, None)`
     // rather than failing system-param validation.
-    #[cfg(feature = "net")] conf: Query<(
+    conf: Query<(
         Option<&ConfirmedHistory<Position>>,
         Option<&ConfirmedHistory<LinearVelocity>>,
     )>,
     // The predicted root's live render-space error offset. Present only on the entity `net::render_error`
     // armed (the client's predicted tank); an unfiltered `Option`-style `get` keeps every other tank
-    // row — and the SP-composition net build, which never mounts the layer — omitting the field.
-    #[cfg(feature = "net")] view_offset: Query<&crate::net::render_error::RenderErrorOffset>,
+    // row — and the single-player composition, which never mounts the layer — omitting the field.
+    view_offset: Query<&crate::net::render_error::RenderErrorOffset>,
 ) {
     // One camera pose for every tank row this frame (recorded after Propagate, so the third-person
     // orbit camera's `GlobalTransform` is final). `None` on a headless client → `cam`/`camq` omitted.
@@ -496,13 +493,11 @@ fn record_frame(
             obj.insert("cam".into(), vec3(cam_tr));
             obj.insert("camq".into(), quat(cam_rot));
         }
-        #[cfg(feature = "net")]
         {
-            // The prediction/replication resources exist together on a real MP client. On an
-            // SP-composition net build (`cargo run --features net` mounts `trace::sp_plugin`, but
-            // here `client_plugin` — the point is the resources may be absent) none are present, so
-            // access them optionally and skip the net extras rather than panic on system-param
-            // validation (fix 3): the row then has the same shape as an SP frame row.
+            // The prediction/replication resources exist together on a real MP client. In the
+            // single-player composition none are present, so access them optionally and skip the net
+            // extras rather than panic on system-param validation (fix 3): the row then has the same
+            // shape as an SP frame row.
             if let (Some(timeline), Some(checkpoints), Some(metrics)) = (
                 net.timeline.as_deref(),
                 net.checkpoints.as_deref(),
@@ -584,36 +579,30 @@ fn record_tick(
     wheels: Query<(&WheelIndex, &Suspension)>,
     collisions: Collisions,
     mut tick_counter: Local<u64>,
-    #[cfg(feature = "net")] timeline: Option<Res<LocalTimeline>>,
+    timeline: Option<Res<LocalTimeline>>,
     // Same source `is_in_rollback` reads (`Query<(), With<Rollback>>`): non-empty iff this tick is a
-    // rollback-replay re-simulation, which is what `rp` marks.
-    #[cfg(feature = "net")] replaying: Query<(), With<Rollback>>,
+    // rollback-replay re-simulation, which is what `rp` marks. Empty in the single-player composition
+    // (no rollback), which is correct.
+    replaying: Query<(), With<Rollback>>,
     // The server's ownership marker (`spawn_player_tank` inserts `ControlledBy` on every player
     // tank; the ownerless test bot has none). It is the SERVER-side half of the cross-world identity
     // the hash join pairs on: the client's own predicted tank carries the game `Controlled` marker
     // (already in the roots query), the server's authoritative copy of that same logical tank carries
     // `ControlledBy` instead — neither replicates the other's marker, so `own` is computed per role
-    // below. Empty result on a client / SP-composition build, which is correct (they pair on
-    // `Controlled`).
-    #[cfg(feature = "net")] owners: Query<(), With<ControlledBy>>,
+    // below. Empty result on a client / single-player, which is correct (they pair on `Controlled`).
+    owners: Query<(), With<ControlledBy>>,
 ) {
     // The composition role, copied before the mutable `trace` borrow the write loop needs. It selects
-    // which marker means "the player's own tank" for the world-independent pairing key `own` (net
-    // only — SP's `own` is just `Controlled`, so the binding would be unused there).
-    #[cfg(feature = "net")]
+    // which marker means "the player's own tank" for the world-independent pairing key `own`.
     let role = trace.role;
-    // One tick number for every tank this call. Net: the predicted/authoritative tick, so client and
-    // server rows align. SP (or an SP-composition net build with no `LocalTimeline`): a monotonic
-    // local counter, incremented once per tick here — enough for the analysis script to order rows.
-    #[cfg(feature = "net")]
+    // One tick number for every tank this call. MP: the predicted/authoritative tick, so client and
+    // server rows align. Single-player (no `LocalTimeline`): a monotonic local counter, incremented
+    // once per tick here — enough for the analysis script to order rows.
     let tick_no = match timeline.as_deref() {
         Some(timeline) => u64::from(timeline.tick().0),
         None => next_local_tick(&mut tick_counter),
     };
-    #[cfg(not(feature = "net"))]
-    let tick_no = next_local_tick(&mut tick_counter);
 
-    #[cfg(feature = "net")]
     let is_replay = !replaying.is_empty();
 
     // Per-body count of TOUCHING contact pairs + deepest real penetration in ONE pass over the
@@ -710,18 +699,15 @@ fn record_tick(
         // The cross-world pairing key. Client / SP: the game `Controlled` marker (own predicted tank).
         // Server: `ControlledBy` (the authoritative copy of that same player tank). Kept per-role so a
         // 2-player world stays correct — on the client only OUR avatar carries `Controlled`, while the
-        // server marks every player tank `ControlledBy` its own link.
-        #[cfg(feature = "net")]
+        // server marks every player tank `ControlledBy` its own link. Single-player has no server
+        // role, so `own` falls through to `Controlled` there too.
         let own = if role == "server" {
             owners.get(entity).is_ok()
         } else {
             controlled
         };
-        #[cfg(not(feature = "net"))]
-        let own = controlled;
 
-        // `mut` used only by the net-only `rp` stamp below; unused in the SP build.
-        #[cfg_attr(not(feature = "net"), allow(unused_mut))]
+        // `mut` for the `rp` stamp below.
         let mut row = json!({
             "k": "tick",
             "tick": tick_no,
@@ -751,7 +737,7 @@ fn record_tick(
             "hsim": hash.sim,
         });
         // Mark rollback-replay ticks so analysis keeps the corrected value for this tick number.
-        #[cfg(feature = "net")]
+        // Never set in the single-player composition (`is_replay` is always false there — no rollback).
         if is_replay {
             row.as_object_mut()
                 .expect("json! built an object")
@@ -762,26 +748,26 @@ fn record_tick(
 }
 
 /// Read-and-bump the single-player tick counter: there is no network tick, so this monotonic count
-/// orders SP (and SP-composition net-build) rows.
+/// orders single-player rows.
 fn next_local_tick(counter: &mut Local<u64>) -> u64 {
     let current = **counter;
     **counter += 1;
     current
 }
 
-// --- Rollback trigger attribution (net only) -------------------------------------------------
+// --- Rollback trigger attribution --------------------------------------------------------------
+// Reached only on a real MP client (the server never runs check_rollback; single-player registers no
+// rollback conditions), but always compiled — the guard below makes it free when tracing is off.
 
 /// Set once the trace writer opens, so the rollback-condition closures in `net::protocol` can skip
 /// the mutex entirely when tracing is off — the cost of instrumentation is a single relaxed atomic
 /// load on the check_rollback hot path.
-#[cfg(feature = "net")]
 static TRACE_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// The trigger-attribution slot: component/magnitude pairs pushed by the rollback-condition closures
 /// (`net::protocol`) as they trip, drained by [`record_rollback`] into the `trg` field. A plain
 /// `static Mutex` rather than a resource because the closures are `Fn` values with no `World` access.
 /// Capped at 64 to bound a pathological burst; excess is dropped.
-#[cfg(feature = "net")]
 static ROLLBACK_TRIGGERS: std::sync::Mutex<Vec<(&'static str, f32)>> =
     std::sync::Mutex::new(Vec::new());
 
@@ -789,7 +775,6 @@ static ROLLBACK_TRIGGERS: std::sync::Mutex<Vec<(&'static str, f32)>> =
 /// client/server divergence). Called from [`note_if_tripped`] when a condition returns true. No-op
 /// when tracing is off (the atomic guard) — so the closures pay nothing in an untraced run, and the
 /// server (which never runs check_rollback) never reaches the push.
-#[cfg(feature = "net")]
 fn note_rollback_trigger(component: &'static str, magnitude: f32) {
     if !TRACE_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
         return;
@@ -804,7 +789,6 @@ fn note_rollback_trigger(component: &'static str, magnitude: f32) {
 /// The single rollback-condition body shared by every predicted component's closure (`net::protocol`
 /// — fix 7): trip when `magnitude >= threshold`, and note the trip for trace attribution when it
 /// does. Returns whether the component's condition tripped (lightyear's `should_rollback` contract).
-#[cfg(feature = "net")]
 pub(crate) fn note_if_tripped(component: &'static str, magnitude: f32, threshold: f32) -> bool {
     let trip = magnitude >= threshold;
     if trip {
@@ -819,7 +803,6 @@ pub(crate) fn note_if_tripped(component: &'static str, magnitude: f32, threshold
 /// re-tests push into the slot every frame a `VisualCorrection` lives — pollution that would
 /// misattribute (or, past the 64-cap, evict) the real triggers a later rollback drains. Wiping the
 /// slot immediately before `check_rollback` guarantees the observer drains only THIS check's trips.
-#[cfg(feature = "net")]
 fn clear_rollback_triggers() {
     if let Ok(mut triggers) = ROLLBACK_TRIGGERS.lock() {
         triggers.clear();
@@ -830,7 +813,6 @@ fn clear_rollback_triggers() {
 /// clear-before-check discipline ([`clear_rollback_triggers`]) the slot holds exactly the trips from
 /// this frame's `check_rollback` at drain time — correction-decay re-tests from earlier frames were
 /// already wiped — so the drained pairs are exact per-check attribution, not a weight.
-#[cfg(feature = "net")]
 fn drain_rollback_triggers() -> Vec<(&'static str, f32)> {
     ROLLBACK_TRIGGERS
         .lock()
@@ -838,12 +820,11 @@ fn drain_rollback_triggers() -> Vec<(&'static str, f32)> {
         .unwrap_or_default()
 }
 
-/// Net resources the `frame` row's client extras read, bundled so `record_frame`'s cfg-gated
-/// parameter stays a single name. All three exist together on a real MP client (`LocalTimeline` +
-/// `PredictionMetrics` from the prediction stack, `ReplicationCheckpointMap` from shared replication
-/// registration) — but accessed OPTIONALLY so the SP-composition net build (no lightyear plugins)
-/// doesn't panic system-param validation on the missing resources (fix 3).
-#[cfg(feature = "net")]
+/// Net resources the `frame` row's client extras read, bundled so `record_frame`'s parameter stays a
+/// single name. All three exist together on a real MP client (`LocalTimeline` + `PredictionMetrics`
+/// from the prediction stack, `ReplicationCheckpointMap` from shared replication registration) — but
+/// accessed OPTIONALLY so the single-player composition (no lightyear plugins) doesn't panic
+/// system-param validation on the missing resources (fix 3).
 #[derive(SystemParam)]
 struct NetFrameCtx<'w> {
     timeline: Option<Res<'w, LocalTimeline>>,
@@ -858,7 +839,6 @@ struct NetFrameCtx<'w> {
 ///
 /// Registered only in a traced run (`client_plugin` gates on `install`), so `TraceWriter` is present
 /// unconditionally — no Option guard needed.
-#[cfg(feature = "net")]
 fn record_rollback(
     add: On<Add, Rollback>,
     mut trace: ResMut<TraceWriter>,
