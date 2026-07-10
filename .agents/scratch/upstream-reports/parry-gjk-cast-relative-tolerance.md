@@ -1,23 +1,34 @@
-# parry3d 0.27: GJK shape-cast TOI relative tolerance yields ~200 mm error vs large colliders
+# parry3d 0.27: GJK shape-cast stagnation exit returns unrefined lower TOI bound — ~140 mm error vs large colliders
 
 **Target:** github.com/dimforge/parry · parry3d 0.27 · **Severity for us:** HIGH (fixed f4a24c2) · **Status:** unfiled
 **Automatic retirement tripwire:** `tests/spherecast_scale.rs` FAILS when parry fixes this (it
 asserts the raw TOI error stays > 10 mm at 500 m) — that failure means: file the workaround for
-removal.
+removal. (Verified 2026-07-10: against the candidate fix the raw error at 500 m drops to
+0.00024 mm, so the tripwire fires as designed.)
 
 ## Suggested title
 
-Shape-cast time-of-impact error scales with target shape extent (relative convergence tolerance)
+Shape-cast TOI error scales with target shape extent: the upper-bound-stagnation exit returns
+the unrefined lower bound
 
-## Mechanism
+## Mechanism (CORRECTED 2026-07-10 — instrumented in parry3d 0.27.0 source; our original
+## relative-tolerance attribution was wrong)
 
-`gjk::minkowski_ray_cast` (parry3d-0.27.0 src/query/gjk/gjk.rs:661-780) converges on the TOI
-with a RELATIVE bound — `max_bound - min_bound <= eps_rel * max_bound` with
-`eps_rel = sqrt(10 * f32::EPSILON) ≈ 1.09e-3` (gjk.rs:141-144, 676) — and has an early-return
-"upper bounds inconsistencies" path that returns the current lower bound (gjk.rs:713-724).
-Against a CSO containing a large shape's support points (a 1000 m ground cuboid: ±500 m), the
-relative tolerance is absolute-large: hit distances come back SHORT (one-sided) by up to
-~0.2 m, pose-discontinuously (deterministic per pose, jumping tick to tick).
+`gjk::minkowski_ray_cast` (parry3d-0.27.0 src/query/gjk/gjk.rs:661-780) advances a lower TOI
+bound `ltoi` and tracks an upper bound. When the upper bound fails to decrease between
+iterations — float cancellation when a large shape's support coordinates (a 1000 m ground
+cuboid: ±500 m) are translated into the advanced-origin frame — the "last chance" stagnation
+exit fires (gjk.rs:712-715 sets `last_chance` on `max_bound >= old_max_bound`) and returns the
+CURRENT LOWER BOUND `ltoi` as the hit (gjk.rs:720-723), still short of true impact by the
+stagnated gap. Hit distances come back SHORT (one-sided at 0.27.0), pose-discontinuously
+(deterministic per pose, jumping tick to tick).
+
+**What it is NOT (our original report got this wrong):** the relative convergence bound
+`eps_rel = sqrt(10 * f32::EPSILON)` plays no role. Instrumented over the 2,400-cast repro
+workload: the eps_rel branch (gjk.rs:770-781; gjk.rs:676 only computes `_eps_rel`) fired **0**
+times; **2,278/2,278** erroneous TOIs exited via `last_chance`. Structurally, under default
+float features that eps_rel branch returns `None` (a miss), never a TOI — it is incapable of
+producing the short-hit signature at all.
 
 ## Measured
 
@@ -31,12 +42,21 @@ and a standing amplifier of client/server divergence at contact.
 
 ## Suggested upstream fix
 
-An absolute (or hybrid) convergence tolerance for the TOI, or documenting the error bound and
-recommending witness-based distance reconstruction for large targets.
+Refine the stagnation exit's TOI from the simplex witnesses already in hand (project the
+witness separation along the cast direction) instead of returning the raw lower bound; witness
+and normal generation stay untouched. A candidate patch exists (branch
+`fix/cast-absolute-tolerance`): errors at 5/50/500 m half-extent go 0.246/3.637/139.448 mm →
+0.113/0.0023/0.00024 mm, cost confined to the rare stagnation exit (≤4 weighted witness
+accumulations). **Disclosure the PR must carry:** (a) the refined TOI is no longer a certified
+lower bound — measured overshoot up to +0.113 mm at 5 m half-extent (curvature converts lateral
+witness deviation into forward error ≈ r·θ²/2), where 0.27.0 was strictly one-sided short;
+(b) a stagnation hit whose refined TOI exceeds `max_time_of_impact` now correctly returns
+`None` where 0.27.0 returned a wrongly-short hit.
 
 ## Our workaround + removal condition
 
 `sphere_cast_ground_contact` (src/driving.rs, commit f4a24c2): reconstruct distance from the
-witness (`point1 + normal1·r` = ball centre), clamped to `[toi, toi + 0.20 m]` (TOI is provably
-never long), with conservative fallbacks for penetrating starts and non-finite witnesses. Remove
-when the tripwire test fails against an upgraded parry.
+witness (`point1 + normal1·r` = ball centre), clamped to `[toi, toi + 0.20 m]` (at 0.27.0 the
+TOI is never long; post-fix parry can overshoot by ≲0.12 mm, far inside the clamp band, so the
+clamp stays valid either way). Conservative fallbacks for penetrating starts and non-finite
+witnesses. Remove when the tripwire test fails against an upgraded parry.

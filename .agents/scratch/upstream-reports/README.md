@@ -16,6 +16,7 @@ is OUR impact, not upstream's triage.
 | 6 | [lightyear-confirmedhistory-seeding.md](lightyear-confirmedhistory-seeding.md) | lightyear 0.28 | MEDIUM — local_rollback components restored to add-time defaults | `strip_confirmed_history` (net/protocol.rs) |
 | 7 | [lightyear-sealed-correction-policy.md](lightyear-sealed-correction-policy.md) | lightyear 0.28 | LOW — API gap, no builder for CorrectionPolicy | render-error layer bypasses (597ec21) |
 | 8 | [avian-solver-constraint-order.md](avian-solver-constraint-order.md) | avian3d 0.7 | LOW impact / **HIGHEST strategic** — the last same-machine non-determinism; linchpin for deterministic MP | none (bounded/self-healing, absorbed by server auth) |
+| 9 | [lightyear-avian-childof-not-replicated-transform-mode.md](lightyear-avian-childof-not-replicated-transform-mode.md) | lightyear_avian 0.28 | NONE for us (we use Position mode) — upstream's own test fails at the 0.28.0 tag | none needed |
 
 Housekeeping: when an upstream fix ships, the matching workaround's removal condition is stated
 in each file (and #3 has an automatic tripwire: `tests/spherecast_scale.rs` FAILS when parry

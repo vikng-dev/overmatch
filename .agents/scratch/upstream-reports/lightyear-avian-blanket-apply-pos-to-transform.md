@@ -12,7 +12,12 @@ state (compounding attachment drift)
 `AvianReplicationMode::Position` mounts `sync_position_to_transform` (plugin.rs:175, PostUpdate)
 AND `sync_received_position_to_transform` (plugin.rs:176/653-661, PreUpdate), and registers
 `ApplyPosToTransform` as a **required component of `Position`/`Rotation`** (plugin.rs:620-623,
-"make sure PositionToTransform sync also runs for Interpolated entities"). Side effect: every
+"make sure PositionToTransform sync also runs for Interpolated entities"). **Scope (verified
+2026-07-10): the blanket registration is NOT Position-mode-only** — it lives in
+`sync_position_to_transform` (plugin.rs:613-624), which is also mounted by
+`AvianReplicationMode::Transform` (plugin.rs:302) and `PositionButInterpolateTransform`
+(plugin.rs:245/250); every mode that syncs position to transform carries the poisoned
+requirement. Side effect: every
 CHILD COLLIDER (they carry `Position`/`Rotation` as collider required components, no
 `RigidBody`) enters avian's `position_to_transform` write set (`PosToTransformFilter =
 Or<(With<RigidBody>, With<ApplyPosToTransform>)>`, avian3d-0.7.0 physics_transform/mod.rs:254-257).
