@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::damage::CrewStation;
 use crate::firecontrol::Ranging;
-use crate::state::GameplaySet;
+use crate::state::{GameplaySet, PlayerInputSet};
 use crate::tank::{Controlled, Tank};
 
 /// One tick's worth of driver intent for one tank: plain data, serializable — exactly what a
@@ -194,6 +194,7 @@ pub fn client_plugin(app: &mut App) {
             RunFixedMainLoop,
             gather_commands
                 .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop)
+                .in_set(PlayerInputSet)
                 .in_set(GameplaySet),
         );
 }

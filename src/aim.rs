@@ -19,7 +19,7 @@ use crate::command::TankCommand;
 use crate::damage::ControlledTank;
 use crate::firecontrol::{RangeTable, lob};
 use crate::sight::in_third_person;
-use crate::state::GameplaySet;
+use crate::state::{GameplaySet, PlayerInputSet};
 use crate::tank::{
     Controlled, Hull, Rig, ServoCommand, ServoRole, Tank, TankRoot, ViewNode, rig_world_pose,
 };
@@ -61,6 +61,7 @@ pub fn client_plugin(app: &mut App) {
             commit_aim
                 .run_if(in_third_person)
                 .in_set(AimCommit)
+                .in_set(PlayerInputSet)
                 .in_set(GameplaySet),
         )
         // HUD markers reproject through the camera, so they run after the camera's pose is final

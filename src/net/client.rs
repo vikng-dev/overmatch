@@ -18,7 +18,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use bevy::app::ScheduleRunnerPlugin;
 use bevy::asset::AssetPlugin;
 use bevy::prelude::*;
-use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
+use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow, WindowFocused};
 use lightyear::prediction::correction::CorrectionPolicy;
 use lightyear::prelude::client::*;
 use lightyear::prelude::input::client::InputSystems;
@@ -49,6 +49,17 @@ struct MenuOverlay {
 
 #[derive(Component)]
 struct MenuOverlayNode;
+
+/// Countdown to a deferred cursor re-grab after the window regains focus with the menu closed.
+/// `None` = idle. A grab issued the same frame focus returns is silently dropped by winit (bevy
+/// #16237/#16238), so `focus_menu` arms this and `tick_refocus_grab` waits [`REFOCUS_GRAB_FRAMES`]
+/// frames before recapturing.
+#[derive(Resource, Default)]
+struct RefocusGrab(Option<u8>);
+
+/// Frames to wait after focus returns before auto-grabbing — enough for winit to settle the focus
+/// event so the grab actually takes.
+const REFOCUS_GRAB_FRAMES: u8 = 2;
 
 pub fn run() {
     let simulate = std::env::args().any(|a| a == "--simulate-input")
@@ -384,7 +395,10 @@ pub fn run() {
             );
     } else {
         app.init_resource::<MenuOverlay>()
-            .add_systems(Update, toggle_menu)
+            .init_resource::<RefocusGrab>()
+            // The Esc toggle, the alt-tab focus watcher, and the deferred re-grab all move the same
+            // cursor, so chain them for a deterministic order within the frame.
+            .add_systems(Update, (toggle_menu, focus_menu, tick_refocus_grab).chain())
             .add_systems(OnEnter(AppState::Playing), grab_cursor)
             .add_systems(
                 FixedPreUpdate,
@@ -844,14 +858,63 @@ fn apply_pending_recoil_kicks(
 /// input, and clicks in the menu don't fire.
 fn feed_action_state(
     menu: Res<MenuOverlay>,
+    window: Single<&Window, With<PrimaryWindow>>,
     mut slots: Query<(&TankCommand, &mut ActionState<TankCommand>), With<InputMarker<TankCommand>>>,
 ) {
+    // Menu open OR the window unfocused (alt-tab): send a default command, so the moment we stop
+    // reading devices the tank coasts to a stop instead of holding the last input forever.
+    let idle = menu.open || !window.focused;
     for (command, mut state) in &mut slots {
-        state.0 = if menu.open {
+        state.0 = if idle {
             TankCommand::default()
         } else {
             *command
         };
+    }
+}
+
+/// Open the menu overlay: release the cursor and spawn the translucent backdrop. Shared by the Esc
+/// toggle and the alt-tab focus handler (both need the freed cursor to have somewhere to land).
+fn open_menu(menu: &mut MenuOverlay, cursor: &mut CursorOptions, commands: &mut Commands) {
+    menu.open = true;
+    cursor.grab_mode = CursorGrabMode::None;
+    cursor.visible = true;
+    commands
+        .spawn((
+            MenuOverlayNode,
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
+        ))
+        .with_children(|parent| {
+            parent.spawn((
+                Text::new("MENU\nEsc to close"),
+                TextFont {
+                    font_size: FontSize::Px(48.0),
+                    ..default()
+                },
+                TextColor(Color::WHITE),
+            ));
+        });
+}
+
+/// Close the menu overlay: re-grab the cursor and despawn the backdrop.
+fn close_menu(
+    menu: &mut MenuOverlay,
+    window: &mut Window,
+    cursor: &mut CursorOptions,
+    nodes: &Query<Entity, With<MenuOverlayNode>>,
+    commands: &mut Commands,
+) {
+    menu.open = false;
+    crate::state::grab_now(window, cursor);
+    for node in nodes.iter() {
+        commands.entity(node).despawn();
     }
 }
 
@@ -868,42 +931,63 @@ fn toggle_menu(
     if !keys.just_pressed(KeyCode::Escape) {
         return;
     }
-    menu.open = !menu.open;
     let (mut window, mut cursor) = window.into_inner();
     if menu.open {
+        close_menu(&mut menu, &mut window, &mut cursor, &nodes, &mut commands);
+    } else {
+        open_menu(&mut menu, &mut cursor, &mut commands);
+    }
+}
+
+/// Alt-tab handling. Losing focus opens the menu (there is no online pause — the game keeps running
+/// behind the translucent overlay) and releases the cursor; regaining it with the menu closed arms a
+/// deferred re-grab ([`tick_refocus_grab`]). Writing `grab_mode = None` explicitly on loss matches OS
+/// reality and arms change detection even when winit has already dropped the grab (bevy
+/// #16237/#16238). Regaining focus with the menu open stays released — closing it (Esc) re-grabs.
+fn focus_menu(
+    mut focus: MessageReader<WindowFocused>,
+    mut menu: ResMut<MenuOverlay>,
+    cursor: Single<&mut CursorOptions, With<PrimaryWindow>>,
+    mut refocus: ResMut<RefocusGrab>,
+    mut commands: Commands,
+) {
+    // Collapse the frame's focus events to whether we ended focused (the last event wins).
+    let mut ended_focused = None;
+    for event in focus.read() {
+        ended_focused = Some(event.focused);
+    }
+    let Some(focused) = ended_focused else {
+        return;
+    };
+    let mut cursor = cursor.into_inner();
+    if !focused {
+        refocus.0 = None; // cancel any pending re-grab
         cursor.grab_mode = CursorGrabMode::None;
         cursor.visible = true;
-        commands
-            .spawn((
-                MenuOverlayNode,
-                Node {
-                    width: Val::Percent(100.0),
-                    height: Val::Percent(100.0),
-                    justify_content: JustifyContent::Center,
-                    align_items: AlignItems::Center,
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
-            ))
-            .with_children(|parent| {
-                parent.spawn((
-                    Text::new("MENU\nEsc to close"),
-                    TextFont {
-                        font_size: FontSize::Px(48.0),
-                        ..default()
-                    },
-                    TextColor(Color::WHITE),
-                ));
-            });
-    } else {
-        // Re-center before locking, so mouse-look resumes owned by this window (same move as the
-        // game's `grab_cursor`).
-        let center = window.size() / 2.0;
-        window.set_cursor_position(Some(center));
-        cursor.grab_mode = CursorGrabMode::Locked;
-        cursor.visible = false;
-        for node in &nodes {
-            commands.entity(node).despawn();
+        if !menu.open {
+            open_menu(&mut menu, &mut cursor, &mut commands);
+        }
+    } else if !menu.open {
+        refocus.0 = Some(REFOCUS_GRAB_FRAMES);
+    }
+}
+
+/// Fire the deferred re-grab armed by [`focus_menu`]: count down, then — the menu still closed —
+/// lock+hide+recenter. Re-checks the menu at fire time so a menu opened during the wait cancels it.
+fn tick_refocus_grab(
+    mut refocus: ResMut<RefocusGrab>,
+    menu: Res<MenuOverlay>,
+    window: Single<(&mut Window, &mut CursorOptions), With<PrimaryWindow>>,
+) {
+    match refocus.0 {
+        None => {}
+        Some(n) if n > 1 => refocus.0 = Some(n - 1),
+        Some(_) => {
+            refocus.0 = None;
+            if !menu.open {
+                let (mut window, mut cursor) = window.into_inner();
+                crate::state::grab_now(&mut window, &mut cursor);
+            }
         }
     }
 }
@@ -912,10 +996,7 @@ fn toggle_menu(
 /// does want (mouse aim needs a locked cursor from the first frame).
 fn grab_cursor(window: Single<(&mut Window, &mut CursorOptions), With<PrimaryWindow>>) {
     let (mut window, mut cursor) = window.into_inner();
-    let center = window.size() / 2.0;
-    window.set_cursor_position(Some(center));
-    cursor.grab_mode = CursorGrabMode::Locked;
-    cursor.visible = false;
+    crate::state::grab_now(&mut window, &mut cursor);
 }
 
 /// `apply_pending_recoil_kicks` derives a remote shot's barrel recoil from the LOCAL spec — these

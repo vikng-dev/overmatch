@@ -21,7 +21,7 @@ use bevy::prelude::*;
 use crate::ballistics::{drag_k, freeflight_step};
 use crate::command::gather_commands;
 use crate::sight::in_gunner;
-use crate::state::GameplaySet;
+use crate::state::{GameplaySet, PlayerInputSet};
 use crate::tank::Weapon;
 
 /// The player-dialed range to the target (m). The Tiger has no rangefinder, so ranging is a *skill*:
@@ -161,6 +161,7 @@ pub fn client_plugin(app: &mut App) {
                 .run_if(in_gunner)
                 .before(gather_commands)
                 .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop)
+                .in_set(PlayerInputSet)
                 .in_set(GameplaySet),
         );
 }

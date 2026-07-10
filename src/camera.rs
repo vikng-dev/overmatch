@@ -10,7 +10,7 @@ use crate::firecontrol::{RangeTable, Ranging};
 use crate::hud::HudCamera;
 use crate::sight::{in_gunner, in_third_person};
 use crate::spec::ViewKind;
-use crate::state::GameplaySet;
+use crate::state::{GameplaySet, PlayerInputSet};
 use crate::tank::{Controlled, Rig, Tank, TankViews, ViewNode, rig_world_pose};
 use crate::world::ground_distance;
 
@@ -99,6 +99,21 @@ pub fn plugin(app: &mut App) {
         )
         .add_systems(
             PostUpdate,
+            // Free-look rotation is the one device-reading half of the orbit camera, split out so it
+            // hangs on `PlayerInputSet`: with the cursor released (menu / alt-tab) the orbit freezes,
+            // but `orbit_camera` (the follow + zoom half, NOT in the set) keeps running, so the camera
+            // still tracks the tank behind the menu — only the mouse-orbit is frozen (Yan's call).
+            // `.before(orbit_camera)` so the position placement reads this frame's rotation; both
+            // mutate the camera `Transform`, so the order must be explicit.
+            orbit_look
+                .run_if(in_third_person)
+                .in_set(GameplaySet)
+                .in_set(PlayerInputSet)
+                .before(orbit_camera)
+                .before(TransformSystems::Propagate),
+        )
+        .add_systems(
+            PostUpdate,
             // The gunner camera bolts to the gun's *propagated* pose, so it runs after propagation
             // and writes its own `GlobalTransform` (no extra propagation pass). HUD markers order
             // after `GunnerCameraPlaced` to reproject through this same pose.
@@ -171,13 +186,37 @@ fn spawn_camera(mut commands: Commands) {
     ));
 }
 
+/// Free look: turn the camera from this frame's mouse delta. The one device-reading half of the
+/// orbit camera, split out so it hangs on `PlayerInputSet` — with the cursor released the orbit
+/// freezes while `orbit_camera` keeps the body following the tank.
+fn orbit_look(
+    camera: Single<&mut Transform, With<Camera3d>>,
+    mouse_motion: Res<AccumulatedMouseMotion>,
+    follow: Res<CameraFollow>,
+) {
+    // Detached (debug): leave the camera where it is so motion can be judged against a fixed view.
+    if !follow.0 {
+        return;
+    }
+    let mut transform = camera.into_inner();
+    // Free look: yaw/pitch read back from the current rotation, so no orientation state is stored.
+    // Mouse delta is already per-frame — do NOT multiply by dt. Stop pitch just short of vertical,
+    // where euler angles hit gimbal lock.
+    const PITCH_LIMIT: f32 = std::f32::consts::FRAC_PI_2 - 0.001;
+    const YAW_SENSITIVITY: f32 = 0.004;
+    const PITCH_SENSITIVITY: f32 = 0.003;
+    let (yaw, pitch, _) = transform.rotation.to_euler(EulerRot::YXZ);
+    let yaw = yaw - mouse_motion.delta.x * YAW_SENSITIVITY;
+    let pitch = (pitch - mouse_motion.delta.y * PITCH_SENSITIVITY).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+    transform.rotation = Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0);
+}
+
 fn orbit_camera(
     camera: Single<(&mut Transform, &mut OrbitCamera, &mut Projection), With<Camera3d>>,
     spatial: SpatialQuery,
     tank: Query<&Transform, (With<Tank>, With<Controlled>, Without<Camera3d>)>,
     views: Query<&TankViews, With<Controlled>>,
     pivot: Res<TurretPivot>,
-    mouse_motion: Res<AccumulatedMouseMotion>,
     mouse_scroll: Res<AccumulatedMouseScroll>,
     follow: Res<CameraFollow>,
     time: Res<Time>,
@@ -197,16 +236,9 @@ fn orbit_camera(
         return;
     };
 
-    // Free look: yaw/pitch read back from the current rotation, so no orientation state is
-    // stored. Mouse delta is already per-frame — do NOT multiply by dt. Stop pitch just short
-    // of vertical, where euler angles hit gimbal lock.
-    const PITCH_LIMIT: f32 = std::f32::consts::FRAC_PI_2 - 0.001;
-    const YAW_SENSITIVITY: f32 = 0.004;
-    const PITCH_SENSITIVITY: f32 = 0.003;
-    let (yaw, pitch, _) = transform.rotation.to_euler(EulerRot::YXZ);
-    let yaw = yaw - mouse_motion.delta.x * YAW_SENSITIVITY;
-    let pitch = (pitch - mouse_motion.delta.y * PITCH_SENSITIVITY).clamp(-PITCH_LIMIT, PITCH_LIMIT);
-    transform.rotation = Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0);
+    // The camera's rotation is set by `orbit_look` (the device-reading half, gated on the cursor and
+    // ordered `.before` this) — here we only read it to place the body, so the orbit stays frozen
+    // behind the menu while the follow keeps tracking the tank.
 
     // Zoom: scroll sets a target the actual zoom eases toward, so chunky (device-dependent)
     // scroll deltas become a smooth dolly. Both consts are feel knobs.

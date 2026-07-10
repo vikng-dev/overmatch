@@ -20,7 +20,7 @@ use crate::command::{TankCommand, gather_commands};
 use crate::damage::ControlledTank;
 use crate::firecontrol::{RangeTable, Ranging};
 use crate::spec::ViewKind;
-use crate::state::GameplaySet;
+use crate::state::{GameplaySet, PlayerInputSet};
 use crate::tank::{
     Controlled, Hull, Rig, ServoIndex, ServoSpec, Tank, TankSim, TankViews, shortest_angle,
 };
@@ -151,7 +151,9 @@ pub fn plugin(app: &mut App) {
         .add_systems(
             Update,
             (
-                toggle_sight,
+                // Only the Lshift view toggle is player input (gated on the cursor); the overlay,
+                // toast, and range readout are presentation and keep updating with the cursor free.
+                toggle_sight.in_set(PlayerInputSet),
                 update_view_death_overlay,
                 // After `toggle_sight`, so a refused switch this frame shows its reason.
                 update_toast,
@@ -176,6 +178,7 @@ pub fn plugin(app: &mut App) {
                 .after(gather_commands)
                 .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop)
                 .in_set(AimCommit)
+                .in_set(PlayerInputSet)
                 .in_set(GameplaySet),
         )
         // React to a view-mode change by re-laying the controlled tank's render layer (hidden from

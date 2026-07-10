@@ -139,6 +139,24 @@ impl Plugin for SimPlugin {
     }
 }
 
+/// Gate the device-reading [`state::PlayerInputSet`] on a captured cursor (`state::cursor_locked`),
+/// in each schedule its members live in: `Update` (aim commit, view toggle), `PostUpdate` (free-look
+/// orbit), and `RunFixedMainLoop` (gunner aim, range dial, drive gather). Shared by both windowed
+/// composition roots — SP [`ClientPlugin`] and net [`NetClientPlugin`] — so the license to consume
+/// mouse/gameplay input (`grab_mode == Locked`) is configured identically in one place. The headless
+/// server and the scripted harness mount neither root, so the gate never touches them.
+fn gate_player_input(app: &mut App) {
+    use bevy::ecs::schedule::ScheduleLabel;
+    use state::{PlayerInputSet, cursor_locked};
+    for schedule in [
+        Update.intern(),
+        PostUpdate.intern(),
+        RunFixedMainLoop.intern(),
+    ] {
+        app.configure_sets(schedule, PlayerInputSet.run_if(cursor_locked));
+    }
+}
+
 /// The client — command generation (devices → `TankCommand`) and presentation (state → screen).
 /// Requires [`SimPlugin`] in the same app (single-player and listen-server mount both; a pure
 /// network client will too, for interpolation/prediction).
@@ -146,6 +164,7 @@ pub struct ClientPlugin;
 
 impl Plugin for ClientPlugin {
     fn build(&self, app: &mut App) {
+        gate_player_input(app);
         app.add_plugins((
             branding::plugin,
             // Pause/cursor handling (drives the states that `state::sim_plugin` owns).
@@ -183,6 +202,7 @@ pub struct NetClientPlugin;
 #[cfg(feature = "net")]
 impl Plugin for NetClientPlugin {
     fn build(&self, app: &mut App) {
+        gate_player_input(app);
         app.add_plugins((
             branding::plugin,
             command::client_plugin,
