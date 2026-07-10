@@ -45,6 +45,41 @@ skipped for that tick. Also consider documenting that `balanced()` at low RTT yi
 prediction margin — users likely assume "recommended default" composes safely with state
 rollback.
 
+## Candidate fix status (adversarially reviewed 2026-07-11, branch `fix/deferred-rollback-check`)
+
+Option (a) implemented and sound: per-component deferred marker recorded ONLY when the
+receive-time check skips (set gate is the exact complement of the receive-time gate,
+registry.rs:454-456 vs :488-497), compared once when local prediction passes the tick and
+replicon completed it, removed on consumption; `balanced()`/lightyear_sync untouched; no
+double-fire with the unchanged-entity scan (exclusive branches, rollback.rs:519-575). RED test
+proof verbatim: "the deferred mismatch should trigger exactly one rollback from its confirmed
+tick / left: [] / right: [Tick(77)]". Suites: rollback 28/28, prediction 19+1, sync 9; full
+suite 155/1/3 — **single-threaded only; the suite is load-flaky in parallel at the 0.28.0 tag
+(pre-existing) — disclose in the PR.** Minor: stale-mismatch consumption after a forced rollback
+is marginally likelier (wasted, not incorrect, rollback); latent marker retention if upstream
+ever prunes predicted-entity ConfirmedHistory (currently a dead path).
+
+**BLOCKING EDGE, measured live (2026-07-11): rollback to a locally-future tick.** Deferred
+markers are recorded when `confirmed_tick >= current_tick`; a backward SyncEvent (routine at
+zero-margin connect) then drops the local tick below a recorded `mismatch_tick`, and the new
+`rollback_tick = mismatch_tick` branch (rollback.rs:534-539) rolls FORWARD to a locally-future
+tick — base could never do this. In-game at SPIKE_LATENCY_MS=10, watchdog off, flat course:
+3 of 4 runs the client's timeline teleported ~280 ticks ahead at first deferred consumption and
+the process ballooned to **7.5 GB RSS in ~2 s** (catch-up resim + prediction storage) before
+jetsam killed it; the 4th survived permanently ~6,400 ticks ahead of the server. The patch is
+NOT shippable without a guard: clamp deferred consumption to completed ticks (roll back to
+`min(mismatch_tick, current_tick − 1)`) or drop/re-key markers above the local tick on a
+backward SyncEvent. With the guard absent our watchdog workaround STAYS (retirement condition
+not met). Where the edge does not fire the fix demonstrably works: beached-wedge run held
+|Δp| p50 3.4 mm / p99 21.9 mm with mid-run rollbacks, vs unpatched 17.6 / 47.6 mm with zero
+post-connect rollbacks.
+
+**Fresh live evidence (this repo, 2026-07-11, watchdog gated OFF, SPIKE_LATENCY_MS=10):**
+unpatched wedge run — |Δp| reached 55.3 mm (above the 50 mm rollback bar) with exactly 2
+rollbacks, both in the connect window, none after, fresh authority arriving every tick. Also
+2/24 standard 80/10 short runs showed a constant ~880 mm offset from connect persisting
+un-rolled-back for hundreds of ticks.
+
 ## Our workaround + removal condition
 
 `src/net/watchdog.rs` (commit 8ae795c): per-tick comparison of

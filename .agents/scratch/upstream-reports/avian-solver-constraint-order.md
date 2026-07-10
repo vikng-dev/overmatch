@@ -31,8 +31,15 @@ Manifold→edge insertion order is ascending `contact_id` = graph edge-insertion
 the insertion order therefore derive from **entity identity**, not geometry. Two ECS Worlds with
 different spawn histories have different Entity indices for the same logical body (measured:
 server tank `4294966669` vs client tank `4294966650`), so the same set of manifolds accumulates
-onto `angular_velocity` in a **different color order**. Float addition is non-associative ⇒ the
-result is deterministic per-process but differs between Worlds.
+onto `angular_velocity` in a **different color order**.
+
+**Effect-size framing (corrected 2026-07-11):** the driver is stronger than float-sum
+non-associativity. Colors are solved as sequential-impulse (Gauss-Seidel) passes — reordering
+colors changes **which impulses are computed against already-updated velocities**, so the
+divergence is order-1 immediately, not ULP-scale: the candidate fix's RED test measures the
+same wedge diverging to angular velocities `(−0.52, −1.33, 0.82)` vs `(1.61, −0.18, −3.54)` at
+tick 1 of settled multi-manifold contact. Float non-associativity is the additional,
+smaller term.
 
 ## Measured (this game, 64 Hz, commit a79d50f)
 
@@ -66,6 +73,37 @@ each color's `contact_constraints` (or the manifold→color assignment) by a sta
 makes the accumulation order identical across Worlds with identical geometry, closing cross-World
 (and, with it, a prerequisite for cross-platform) determinism for multi-manifold bodies. Relates
 to the cache-free-solver discussion (#734) but is independent and much smaller.
+
+## Candidate fix status (adversarially reviewed 2026-07-11, branch `fix/solver-constraint-order`)
+
+Patch exists and is sound: canonical coloring by lexicographic-min world contact point then
+normal (`total_cmp`), rebuilt on a topology-dirty flag, parallel body-disjointness invariant
+re-established via a separate canonical body set; warm-start keyed by `contact_id` (immune to
+reorder); new test = two Worlds with different spawn histories, ≥2 manifolds on both bodies for
+≥100/180 ticks, full-state equality every tick (passes at HEAD; RED fails with the order-1
+divergence quoted above). Suite 68 passed + 1 pre-existing sub-ULP ARM rasterizer failure
+(confirmed at the v0.7.0 tag).
+
+**MUST-FIX before filing:** the 2D cross-platform determinism hash constant was recalibrated
+against the default f32 build (`0x3126af7d`) but avian CI runs that test under
+`f64 + enhanced-determinism + xpbd_joints + …` — measured under the exact CI feature set the
+patch produces `0x4fa858dc` and the test FAILS as submitted. Re-derive under CI features and
+confirm from the PR's own CI run. The hash change itself must be called out in the PR: the
+patch changes canonical results for all users, not just cross-World cases.
+
+**Disclose in PR text:** (a) bit-equal spatial-key ties fall back to entity order (stable sort)
+— coincident-geometry manifolds could still diverge, degenerate; (b) the dirty flag is global,
+so busy scenes re-sort near-every step — perf claims (+0.37% whole-step) are the author's, not
+independently verified; (c) `ContactManifoldSortKey::new` panics on a zero-point manifold where
+the old path tolerated it (believed unreachable); (d) semver: `GraphColor`/`ConstraintGraph`
+gain private fields (breaks struct-literal construction downstream).
+
+**Game-level evidence (this repo's divergence instrument, 2026-07-11):** flat-cruise long
+course with the patch: physics bit-exact on all 1262 shared ticks (no regression, matches
+unpatched). The live-network instrument cannot re-measure the wedge signature (connect
+transient seeds pre-window state deltas; rollback starvation prevents re-anchoring), and the
+short-course "class-3" persistent windows are NOT this defect (identical 0.230 mm fire-edge
+seed on patched and unpatched builds, 2/12 vs 1/12) — the cross-World proof is the crate test.
 
 ## Our workaround + removal condition
 

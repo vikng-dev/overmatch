@@ -568,3 +568,47 @@ this instrument is the discriminating experiment. Handed off via
 - A mid-run pos+rot+lv+av window seeded with an all-wheel anchor flip: class 3 — expect
   reload/recoil/drive = 0, sub-threshold persistence, possible contact re-amplification;
   goes to the avian/wave-A track, not this repo.
+
+## 10. 2026-07-11: wave-A A/B — the three upstream patches vs the instrument (class 3 returned to sender)
+
+The wave-A review session (HANDOFF-wave-a-review.md, now consumed) reviewed Codex's three fork
+patches and ran the game-level A/Bs on main @ d7d103e. Verdicts + records:
+`.agents/scratch/wave-a-ab-records/`; adoption memo: `.agents/scratch/wave-a-adoption-memo.md`.
+Everything below is MEASURED (80/10 unless noted; N given per claim).
+
+- **Class 3 is NOT the avian constraint-order term.** §9 handed class 3 to the wave-A avian
+  track; the track hands it back with evidence: short course N=12/side, class-3 incidence 2/12
+  unpatched vs 1/12 avian-patched (n.s.), and the fire-edge seed is bit-identical either way
+  (|Δp| 0.230 mm — the same constant as both §9 specimens). The all-wheel anchor-flip seed at
+  island-change events remains; next suspects are the contact-restore/BVH class (report #5) or
+  the shell-spawn/impulse path itself. Class 3 returns to this repo's divergence track.
+- **The avian patch is still right upstream** (crate-level cross-World proof re-verified; its
+  RED shows order-1 Gauss-Seidel divergence at tick 1 of settled multi-manifold contact) and
+  costs nothing here: flat-cruise long course with the patch is physics-bit-exact on every
+  shared tick (94.69% vs 94.45% baseline, residue hsim-only). The live-network instrument
+  cannot re-measure the §2 wedge signature — the connect transient seeds state deltas before
+  the shared window and starved rollback never re-anchors, so the marginally-stable wedge
+  diverges fully on both sides (documented in ab-avian.md). Cross-World determinism claims are
+  crate-test territory; the instrument's game-level role is the regression gate.
+- **Parry workaround retirement is armed.** Against the fork, `tests/spherecast_scale.rs`
+  fails exactly as designed; at-rest idle with raw TOI + patched parry matches workaround-on
+  (per-tick |dy| p99 0.027 vs 0.029 mm, no limit cycle); long course at baseline (94.85%,
+  bit-exact physics). Retire `sphere_cast_ground_contact`'s reconstruction when a parry release
+  ships the fix.
+- **The lightyear deferred-check fix works — and has a disqualifying edge.** Watchdog off at
+  lat10: unpatched wedge sat at |Δp| max 55.3 mm (above the 50 mm bar) with 2 connect-only
+  rollbacks (starvation, raw); patched wedge held p50 3.4 / p99 21.9 mm with mid-run rollbacks.
+  BUT on the flat course 3/4 patched runs died: deferred markers recorded at zero margin +
+  a backward connect SyncEvent → rollback consumption jumps the local timeline ~280 ticks
+  FORWARD (base cannot roll back to a future tick), catch-up resim balloons the client to
+  7.5 GB, jetsam kills it; the survivor ran ~6,400 ticks ahead of the server. The watchdog
+  STAYS until the fork grows a future-tick guard and re-passes ab-lightyear.md's A/B.
+- **New (rare) anomaly class for the connect track: constant-offset connect runaway.** 2/24
+  standard short runs held a CONSTANT ~880 mm |Δp| from the connect window (one closed at
+  tick ~471, one persisted to trace end) with no rollback despite being far above threshold —
+  a world-frame offset (spawn/teleport ordering?), not physics divergence, and a watchdog blind
+  spot (it compares component histories, which agree tick-to-tick once offset). Belongs to the
+  §7 connect investigation.
+- Rebaseline note: the pre-recoil-fix bimodal short course (§9's fire-seeded 2/3 incidence) is
+  gone as such post-f516fb6; what remains is the rarer class-3 above. The long course is the
+  stable regression gate (94.45–94.85% across all builds, physics bit-exact, hsim-only).
