@@ -14,7 +14,7 @@ wastes the offset). Parallax math + the A/B/C/D rationale: chat 2026-06-26.
 ### The three lines (the core relationship)
 
 ```
-intent      ← committed world (hull-local) aim direction, moved by the mouse
+intent      ← committed world (hull-local) aim POINT, steered by the mouse   (see §2026-07-10)
 sight line  ← the gun's BASE lay; camera looks along this; reticle centre   (= intent, lagged)
 bore        ← sight line + superelevation(range)   ← the barrel; sits ABOVE the reticle
 ```
@@ -50,4 +50,29 @@ bore        ← sight line + superelevation(range)   ← the barrel; sits ABOVE 
   `ServoCommand` targets from `sight.rs` instead. One writer per mode — no conflict.
 - Both write the existing `ServoCommand.target` (hull-local yaw / pitch), so the rig + `drive_servos`
   chase mechanism is reused, not rebuilt.
-```
+
+## 2026-07-10 revision: the intent is a resolved POINT, measured from the mount
+
+The original spec's "committed hull-local aim direction" shipped as a bare direction re-encoded as
+a 10 km far point from the HULL-FRAME ORIGIN, while third person committed a resolved world point.
+The two forms met at every mode transition, and every conversion changed the observer origin
+(hull origin ≈ ground level vs gun mount 2.2 m up vs orbit camera ~5 m up) without re-resolving —
+a parallax error class scaling with 1/distance (~2.5° at 50 m, most of the 3.1° optic radius),
+invisible at the horizon where the feel checks ran. Three regressions in one day came from it.
+
+Revised model (implemented; see `aim::CommittedAim`'s four-invariant doc block, the doctrine):
+
+- **Both modes commit resolved world points** into the one `CommittedAim` memory — third person by
+  raycasting from the camera, the optic by raycasting **from the gun mount** along its sight line
+  (terrain or another tank's armor — the shell's own `Terrain | Armor` mask, own tank excluded —
+  far fallback in the sky). No point↔direction conversion exists anymore.
+- **One origin per frame convention:** the optic's yaw/pitch working form is the bearing of
+  `point − mount`, the same per-servo-from-its-own-pose decomposition `drive_aim_servos` uses; the
+  resolve `mount + dir·t` inverts it exactly, so resume↔resolve round-trips without drift.
+- **Zero-input identity** (kept, and still necessary): the two modes resolve from different origins,
+  which can see different geometry (crest occlusion), so the optic never re-resolves an inherited
+  commitment until actual mouse input (`sight::resume_commit`).
+- **Mode exit re-aims the orbit camera at the committed point** (`camera::reaim_orbit_on_optic_exit`):
+  pivot, camera body, and point are collinear, so the white reticle lands on the committed point and
+  an RMB-up recommit re-picks the SAME point — the transition is identity on the aim in both
+  directions.
