@@ -955,12 +955,7 @@ fn focus_menu(
     fonts: Res<UiFonts>,
     mut commands: Commands,
 ) {
-    // Collapse the frame's focus events to whether we ended focused (the last event wins).
-    let mut ended_focused = None;
-    for event in focus.read() {
-        ended_focused = Some(event.focused);
-    }
-    let Some(focused) = ended_focused else {
+    let Some(focused) = crate::state::collapse_focus(&mut focus) else {
         return;
     };
     let mut cursor = cursor.into_inner();

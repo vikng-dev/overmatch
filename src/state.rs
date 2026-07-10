@@ -84,6 +84,18 @@ pub(crate) fn grab_now(window: &mut Window, cursor: &mut CursorOptions) {
     cursor.visible = false;
 }
 
+/// Collapse a frame's `WindowFocused` messages to the net result — whether the window ended the
+/// frame focused (the last event wins) — or `None` if focus didn't change this frame. Shared by the
+/// two focus watchers ([`release_on_focus_lost`] here and `net::client::focus_menu`), which both
+/// need only that final state, not the individual events.
+pub(crate) fn collapse_focus(focus: &mut MessageReader<WindowFocused>) -> Option<bool> {
+    let mut ended_focused = None;
+    for event in focus.read() {
+        ended_focused = Some(event.focused);
+    }
+    ended_focused
+}
+
 /// Release the cursor and pause when the window loses focus (alt-tab). Writing `grab_mode = None`
 /// here — not only via `OnEnter(Paused)` — matches OS reality the instant focus is lost AND arms
 /// change detection: winit may already have dropped the grab while bevy still caches `Locked`
@@ -96,12 +108,7 @@ fn release_on_focus_lost(
     mut next: ResMut<NextState<AppState>>,
     cursor: Single<&mut CursorOptions, With<PrimaryWindow>>,
 ) {
-    // Collapse the frame's focus events to whether we ended unfocused (the last event wins).
-    let mut ended_focused = None;
-    for event in focus.read() {
-        ended_focused = Some(event.focused);
-    }
-    let Some(false) = ended_focused else {
+    let Some(false) = collapse_focus(&mut focus) else {
         return;
     };
     let mut cursor = cursor.into_inner();
