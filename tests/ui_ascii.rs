@@ -1,8 +1,14 @@
-//! Guard: every string literal that can reach a Bevy `Text` must be printable ASCII.
+//! Guard: every string literal that can reach a Bevy `Text` must stay within the bundled UI font's
+//! glyph coverage.
 //!
-//! Bevy's default font is an ASCII-only FiraMono subset with **no fallback**, so a non-ASCII glyph
-//! (`…`, `—`, `°`, …) in a rendered string draws tofu on screen. This test scans the files that
-//! spawn `Text` and asserts their rendered string literals are ASCII.
+//! The client now ships Barlow Condensed (`assets/fonts/`, loaded by `ui_font`), which covers the
+//! full printable ASCII range plus the small typographic set the UI actually uses ([`TYPOGRAPHIC_SET`]:
+//! `… — – ° × ± ≤`). Every one of those was verified present in BOTH shipped weights' cmaps
+//! (SemiBold and Regular). A glyph outside that coverage still has no fallback — it draws tofu on
+//! screen — so this test scans the files that spawn `Text` and flags any rendered string literal
+//! containing a character that is neither ASCII nor in the verified set. Anything more exotic than
+//! this set must earn its place with a fresh cmap check against the shipped `.ttf`s before it can be
+//! added here (see the rule in `.agents/AGENTS.md`).
 //!
 //! It must NOT flag comments, nor the log/panic/assert strings the house style deliberately fills
 //! with em dashes: those never reach `Text`. So the scanner strips line/block comments and the
@@ -11,6 +17,26 @@
 //! output is routinely handed to `Text::new` (e.g. the connect-status and view-death prompts).
 
 use std::path::PathBuf;
+
+/// Characters beyond printable ASCII that the bundled Barlow Condensed weights are verified to
+/// render (both SemiBold and Regular cmaps checked). A rendered literal may contain these; anything
+/// else non-ASCII is flagged. Extending this list requires re-verifying the new codepoint against
+/// the shipped `.ttf` cmaps first — the coverage claim is what keeps it from being tofu.
+const TYPOGRAPHIC_SET: &[char] = &[
+    '\u{2026}', // … HORIZONTAL ELLIPSIS
+    '\u{2014}', // — EM DASH
+    '\u{2013}', // – EN DASH
+    '\u{00B0}', // ° DEGREE SIGN
+    '\u{00D7}', // × MULTIPLICATION SIGN
+    '\u{00B1}', // ± PLUS-MINUS SIGN
+    '\u{2264}', // ≤ LESS-THAN OR EQUAL TO
+];
+
+/// Whether a character is inside the bundled font's verified coverage: printable ASCII, or one of
+/// the [`TYPOGRAPHIC_SET`] glyphs. A rendered literal made only of these is safe to draw.
+fn is_font_covered(c: char) -> bool {
+    c.is_ascii() || TYPOGRAPHIC_SET.contains(&c)
+}
 
 /// The files that spawn `Text`. A rendered non-ASCII glyph can only originate here.
 const TEXT_FILES: &[&str] = &[
@@ -58,10 +84,11 @@ struct Offender {
     text: String,
 }
 
-/// Scan Rust source and return every non-ASCII string literal that is NOT inside a comment and NOT
-/// inside a diagnostic-macro / `.expect(` argument region. A hand-rolled tokenizer, because that is
-/// exactly the boundary the rule draws (rendered vs. diagnostic) and no lighter heuristic respects
-/// it: these files are full of em dashes in `info!`/`assert!` that are perfectly legal.
+/// Scan Rust source and return every string literal with an out-of-coverage character (see
+/// [`is_font_covered`]) that is NOT inside a comment and NOT inside a diagnostic-macro / `.expect(`
+/// argument region. A hand-rolled tokenizer, because that is exactly the boundary the rule draws
+/// (rendered vs. diagnostic) and no lighter heuristic respects it: these files are full of em dashes
+/// in `info!`/`assert!` that are perfectly legal.
 fn scan(src: &str) -> Vec<Offender> {
     let mut offenders = Vec::new();
     let chars: Vec<char> = src.chars().collect();
@@ -134,7 +161,7 @@ fn scan(src: &str) -> Vec<Offender> {
                 i += 1;
             }
             let skipping = skip_until.is_some();
-            if !skipping && !lit.is_ascii() {
+            if !skipping && lit.chars().any(|c| !is_font_covered(c)) {
                 let text: String = lit.chars().take(60).collect();
                 offenders.push(Offender {
                     line: start_line,
@@ -232,7 +259,7 @@ fn scan(src: &str) -> Vec<Offender> {
 }
 
 #[test]
-fn rendered_strings_are_ascii() {
+fn rendered_strings_within_font_coverage() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut failures = Vec::new();
     for rel in TEXT_FILES {
@@ -241,23 +268,27 @@ fn rendered_strings_are_ascii() {
             .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
         for off in scan(&src) {
             failures.push(format!(
-                "{rel}:{} contains non-ASCII: {:?}",
+                "{rel}:{} contains an out-of-coverage character: {:?}",
                 off.line, off.text
             ));
         }
     }
     assert!(
         failures.is_empty(),
-        "rendered UI strings must be printable ASCII (Bevy's default font has no non-ASCII \
-         fallback — it draws tofu). Offenders:\n{}",
+        "rendered UI strings must stay within the bundled Barlow Condensed coverage — printable \
+         ASCII plus the verified typographic set ({TYPOGRAPHIC_SET:?}); anything else has no glyph \
+         and draws tofu. A new codepoint needs a fresh cmap check before it joins TYPOGRAPHIC_SET. \
+         Offenders:\n{}",
         failures.join("\n")
     );
 }
 
-/// The scanner must flag a rendered non-ASCII literal but ignore comments and diagnostic strings —
-/// otherwise it would either miss real tofu or fight the house style. Pin both directions.
+/// The scanner must flag an out-of-coverage rendered literal but ignore comments, diagnostic
+/// strings, AND rendered literals that stay within the verified typographic set — otherwise it would
+/// either miss real tofu, fight the house style, or reject the em dashes/ellipses the UI is now
+/// allowed to draw. Pin all three directions.
 #[test]
-fn scanner_flags_rendered_but_not_comments_or_logs() {
+fn scanner_flags_uncovered_but_not_comments_logs_or_typographic_set() {
     let sample = r#"
 // a comment with an em dash — and an ellipsis … must be ignored
 /* block comment — also ignored … */
@@ -267,24 +298,30 @@ fn demo() {
     assert_eq!(a, b, "assert — ignored …");
     let _ = foo.expect("expect — ignored …");
     let ok = format!("rendered {} ...", n);          // ascii, fine
-    commands.spawn(Text::new("TOFU…"));              // BAD: rendered non-ascii
-    let label = "BROKEN —";                          // BAD: plain literal, rendered path
+    let typo = Text::new("RANGE 1200 m — ± 5°, ≤ 4×"); // OK: all within TYPOGRAPHIC_SET
+    commands.spawn(Text::new("TOFU字"));              // BAD: kanji is out of coverage
+    let label = "BROKEN €";                          // BAD: euro sign is out of coverage
 }
 "#;
     let offenders = scan(sample);
     let lines: Vec<usize> = offenders.iter().map(|o| o.line).collect();
-    // Exactly the two rendered offenders, nothing from comments / logs / asserts / expect.
+    // Exactly the two out-of-coverage offenders — nothing from comments / logs / asserts / expect,
+    // and NOT the typographic-set line (which is now allowed).
     assert!(
         offenders.iter().any(|o| o.text.contains("TOFU")),
-        "must flag the Text::new tofu literal; got {offenders:?}"
+        "must flag the kanji-bearing Text::new literal; got {offenders:?}"
     );
     assert!(
         offenders.iter().any(|o| o.text.contains("BROKEN")),
-        "must flag the plain rendered literal; got {offenders:?}"
+        "must flag the euro-bearing rendered literal; got {offenders:?}"
+    );
+    assert!(
+        !offenders.iter().any(|o| o.text.contains("RANGE")),
+        "must NOT flag a literal that stays within the verified typographic set; got {offenders:?}"
     );
     assert_eq!(
         offenders.len(),
         2,
-        "must flag ONLY rendered literals, not comments/logs/asserts/expect; got {offenders:?} at lines {lines:?}"
+        "must flag ONLY out-of-coverage rendered literals, not comments/logs/asserts/expect/typographic-set; got {offenders:?} at lines {lines:?}"
     );
 }
