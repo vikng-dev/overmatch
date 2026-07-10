@@ -302,7 +302,13 @@ Limits, stated in the open:
   these numbers are a fresh, more discriminating read that *retires* the old metric, not a
   like-for-like time series continuing the 98.4%/55%.
 
-## 7. Open finding (2026-07-09): lat0 client hang at connect — unresolved, uninvestigated
+## 7. Open finding (2026-07-09): client hang at connect — unresolved, NOT lat0-specific
+
+**Update (2026-07-10, §9 session):** the hang is NOT lat0-specific after all — 3 of 10 headless
+scripted runs at **80/10** hung the same way (client silent immediately after the connect
+ROLLBACK-SNAP log line, process alive, server keeps running). The lat0-only framing below is
+the original observation, kept for the record; the zero-margin hypothesis needs re-examination
+since 80/10 has healthy margin. Budget retries into any scripted-pair harness.
 
 While gathering §6 the zero-latency client (`SPIKE_LATENCY_MS=0`, headless simulate) reproducibly
 **froze at connect**: the main loop stalls immediately after `net::rig`'s "first physics tick
@@ -426,10 +432,12 @@ Reading, in order of importance:
    replay (long: window 1463–1535 vs rollback start 1462; short: window 139–209 vs rollback
    starts 138/140), and the long run's second window (1767–1799, 33 ticks) opens ~4 ticks after
    the scripted fire (~tick 1763) and closes on the recoil-settle timescale. Attribution beyond
-   the window timing is a HYPOTHESIS (the hash cannot name the `TankSim` field — see limits):
-   plausibly servo/recoil state divergence seeded through the rollback replay and the fire edge.
-   The short run's fire (~tick 439) produced no window, so the fire-adjacent term is not
-   deterministic run-to-run.
+   the window timing was a HYPOTHESIS at this baseline; §9 decoded both windows — the connect
+   window is aim-stream cold start (servo-only, NOT rollback-seeded: it opens at the first
+   shared tick and its width is independent of rollback depth), and the fire window was the
+   fire/apply_recoil order ambiguity (fixed). The fire term's run-to-run stochasticity (the
+   short run's fire at ~tick 439 produced no window) is the executor resolving the ambiguous
+   order per process, exactly as §9 measured.
 3. The match-rate denominators matter: "flat cruise 90%" does not mean cruise diverges — the
    `hsim` windows happen to sit in ticks classified flat (gnd=16, hc=0). The window split
    classifies the mismatch's LOCATION, not its cause; the sub-component tally (`sim=106/106`,
@@ -442,10 +450,10 @@ Reading, in order of importance:
 - **Solo pairing only.** `own` distinguishes two classes (player tank / bot). Multi-client or
   multi-bot worlds need a richer identity than one boolean, or the join pairs wrong tanks.
   Scoped to the solo case by design.
-- **`hsim` is a boolean.** There is no |Δsim| magnitude and no per-field decode — a `hsim`
-  mismatch names neither the `TankSim` field nor its size. The baseline's window-timing
-  correlation is the current attribution method; a field-level decode needs the raw values on
-  the row (a follow-up, if the `hsim` class survives the connect-transient fix).
+- ~~**`hsim` is a boolean.**~~ CLOSED 2026-07-10: `hsim` decodes into `hdrv`/`hsrv`/`hrld`/
+  `hrec`/`hanc`, `SPIKE_TRACE_SIM_FIELDS=1` puts the raw carried values on the row, and the
+  analyzer attributes each mismatch window per field family with magnitudes — see §9, which
+  used exactly this to decode the baseline's windows.
 - **Solver internals are hashed only through their effect.** Warm-start impulses, contact
   manifolds, broad-phase topology are not in the hash; a constraint-order divergence registers as
   a pose/velocity mismatch without naming its mechanism — that still needs the dedicated probes
