@@ -43,9 +43,20 @@ const SERVER_PORT: u16 = 5888;
 /// overlay shown (settings/meta actions later), and `feed_action_state` sends a default command so
 /// the tank coasts to a stop instead of holding the last input — but `AppState` never leaves
 /// `Playing` and the sim keeps ticking.
+///
+/// `pub(super)` so `death_screen::request_respawn` can share the one input-idle predicate
+/// ([`command_idled`]) rather than re-derive it.
 #[derive(Resource, Default)]
-struct MenuOverlay {
+pub(super) struct MenuOverlay {
     open: bool,
+}
+
+/// The single "is the player's command being idled this frame?" predicate — menu open OR the window
+/// unfocused (alt-tab). ONE definition, shared by [`feed_action_state`] (which zeroes the wire
+/// command when it holds) and `death_screen::request_respawn` (which must not latch a respawn edge
+/// the wire would then swallow). Pure, so the two can never drift out of agreement.
+pub(super) fn command_idled(menu: &MenuOverlay, focused: bool) -> bool {
+    menu.open || !focused
 }
 
 #[derive(Component)]
@@ -876,8 +887,10 @@ fn feed_action_state(
     mut slots: Query<(&TankCommand, &mut ActionState<TankCommand>), With<InputMarker<TankCommand>>>,
 ) {
     // Menu open OR the window unfocused (alt-tab): send a default command, so the moment we stop
-    // reading devices the tank coasts to a stop instead of holding the last input forever.
-    let idle = menu.open || !window.focused;
+    // reading devices the tank coasts to a stop instead of holding the last input forever. The exact
+    // condition `death_screen::request_respawn` shares, so a respawn edge is never latched while the
+    // wire is zeroing the command out from under it.
+    let idle = command_idled(&menu, window.focused);
     for (command, mut state) in &mut slots {
         state.0 = if idle {
             TankCommand::default()
