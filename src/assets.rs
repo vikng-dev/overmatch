@@ -9,9 +9,9 @@
 //!
 //! [`FileAssetReader::get_base_path`]: bevy::asset::io::file::FileAssetReader::get_base_path
 //!
-//! Lives at the crate root (not under `net`) because `bake` compiles in a `--no-default-features`
-//! build too, so the shared resolver must be always-compiled — `net::client`'s old private copy was
-//! `#[cfg(feature = "net")]` and unreachable from `bake`.
+//! Lives at the crate root (not under `net`) because `bake` shares it: it was once a private copy
+//! inside `net::client`, unreachable from `bake`, and was lifted here so both subsystems resolve the
+//! asset root by the one rule.
 
 use std::path::{Path, PathBuf};
 

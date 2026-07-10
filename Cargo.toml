@@ -6,7 +6,10 @@ default-run = "overmatch"
 
 [dependencies]
 bevy = { version = "0.19", features = ["debug"] }
-avian3d = "0.7"
+# `serialize` adds the Serialize/Deserialize impls on Position/Rotation/velocities that lightyear's
+# replication registration needs. Unconditional since the collapse of the `net` feature — it used to
+# ride `net = [..., "avian3d/serialize"]`.
+avian3d = { version = "0.7", features = ["serialize"] }
 
 # Per-variant spec sheets are authored as RON data assets (ADR-0010): plain-text,
 # git-diffable, deserialized straight into our components via serde.
@@ -27,9 +30,11 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # version `bevy_gltf` already resolves, so it adds nothing to the dep tree.
 gltf = "1.4"
 
-# Networking spike (feature-gated, see `net` below): behind `optional = true` so the default
-# build never pulls it in. `prediction`/`interpolation` are default-on lightyear features (kept
-# explicit here for clarity); `avian3d` pulls in `lightyear_avian3d` (increment 5, spike map §1/§5).
+# The netcode layer. The PVP client IS the product, so lightyear is an unconditional dependency —
+# it compiles into every build (single-player returns as a runtime mode inside the client, not a
+# compile variant; `tests/net_boundary.rs` keeps the sim layer from depending on it). `prediction`/
+# `interpolation` are default-on lightyear features (kept explicit for clarity); `avian3d` pulls in
+# `lightyear_avian3d` (increment 5, spike map §1/§5).
 lightyear = { version = "0.28", default-features = false, features = [
     "std",
     "client", "server",
@@ -40,38 +45,31 @@ lightyear = { version = "0.28", default-features = false, features = [
     "input_native",
     "netcode", "udp",
     "avian3d",
-], optional = true }
+] }
 
-# The product IS the networked client, so `net` ships by default: `cargo run`/`cargo build` build
-# the `overmatch` PVP client + the `overmatch-server`. `dev_tools` (physics-debug gizmos + the debug
-# key bindings) is default-on too, decoupled from `debug_assertions` so an optimized playtest build
-# can still carry the tooling. `--no-default-features` drops both, leaving the lib + sandbox
-# (non-net) path — still exercised in CI.
+# `dev_tools` (physics-debug gizmos + the `G`/`X`/`F` debug key bindings) is the one real compile
+# gate: default-on, decoupled from `debug_assertions` so an optimized playtest build can still carry
+# the tooling, and flipped off for a public beta. `net` used to be a second feature here; it was
+# collapsed away once the product converged on the networked client (halving every gate run and
+# build cache — the second dependency resolution is gone).
 #
-# `avian3d/serialize` is additive (Serialize/Deserialize impls on Position/Rotation/velocities) —
-# only lightyear's replication registration (net.rs) needs it; gated so a `--no-default-features`
-# build's avian3d feature set is untouched.
+# `avian3d/serialize` is additive (Serialize/Deserialize impls on Position/Rotation/velocities) that
+# lightyear's replication registration needs; unconditional now that lightyear always compiles.
 [features]
-default = ["net", "dev_tools"]
-net = ["dep:lightyear", "avian3d/serialize"]
+default = ["dev_tools"]
 # Player-facing debug tooling (physics wireframes + the `G`/`X`/`F` debug keys). Empty deps: it is a
 # pure compile gate the code reads via `#[cfg(feature = "dev_tools")]`, kept separate from
 # `debug_assertions` so it survives into optimized builds.
 dev_tools = []
 
-# The product client: `main.rs` runs `net::client::run()`, so the bin requires `net`. Declared
-# explicitly (not just auto-discovered) to pin `required-features` — a `--no-default-features` build
-# skips it instead of failing to resolve `net::client`.
 [[bin]]
 name = "overmatch"
 path = "src/main.rs"
-required-features = ["net"]
 
 # The dedicated server.
 [[bin]]
 name = "overmatch-server"
 path = "src/bin/overmatch-server.rs"
-required-features = ["net"]
 
 [profile.dev]
 opt-level = 1
