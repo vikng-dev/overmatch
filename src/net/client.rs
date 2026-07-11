@@ -27,7 +27,7 @@ use lightyear::prelude::input::client::InputSystems;
 use lightyear::prelude::input::native::{ActionState, InputMarker, NativeBuffer};
 use lightyear::prelude::{Controlled as NetControlled, *};
 
-use super::protocol::{FireEvent, NetTank};
+use super::protocol::{FireEvent, NetTank, PROTOCOL_FINGERPRINT};
 use super::{client_smoothing_plugin, diagnostics, harness, open_gameplay_gate, physics, rig};
 use crate::ballistics::FireShell;
 use crate::command::TankCommand;
@@ -309,7 +309,14 @@ pub fn run() {
                 server_addr,
                 client_id,
                 private_key: [0; 32],
-                protocol_id: 0,
+                // The protocol-compatibility guard: bake this build's `PROTOCOL_FINGERPRINT` into the
+                // connect token's `protocol_id`. netcode folds it into the token AEAD, so a server
+                // built from a different revision (mismatched fingerprint) cannot decrypt the token
+                // and drops the request — the connection is refused at the handshake, BEFORE
+                // replication starts, instead of "succeeding" and then spamming replicon
+                // apply-failures forever (the 2026-07-11 skew incident). Must match the server's
+                // `NetcodeConfig.protocol_id` (`net::server`).
+                protocol_id: PROTOCOL_FINGERPRINT,
             },
             NetcodeConfig {
                 client_timeout_secs: 3,
