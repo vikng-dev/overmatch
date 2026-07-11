@@ -157,3 +157,142 @@ fn sim_boots_and_drives_headless() {
          (sim not actually running headless?)"
     );
 }
+
+/// The MG-tracer render gate, exercised on the real spawn path headless (the same dedicated-server
+/// recipe as above). Firing the secondary trigger (the two 7.9 mm MGs) must, over a burst:
+///   * spawn tracer STREAKS (`TracerStreak`) for the ~1-in-5 tracer rounds, and
+///   * spawn NO `shell.glb` scene root on ANY MG round — the bug this slice fixes (MG bullets used to
+///     render as full 88 mm shell scenes). A shell in flight carries `ShellPath`; only a
+///     main-gun-calibre round also gets a `WorldAssetRoot` scene, so `ShellPath + WorldAssetRoot`
+///     over an MG-only burst must stay empty while streaks appear.
+#[test]
+fn mg_rounds_stream_tracers_and_spawn_no_shell_scene() {
+    use crate::ballistics::{ShellPath, TracerStreak};
+    use bevy::world_serialization::WorldAssetRoot;
+
+    let mut app = App::new();
+    app.add_plugins(
+        DefaultPlugins
+            .set(bevy::render::RenderPlugin {
+                render_creation: bevy::render::settings::WgpuSettings {
+                    backends: None,
+                    ..default()
+                }
+                .into(),
+                ..default()
+            })
+            .set(WindowPlugin {
+                primary_window: None,
+                exit_condition: bevy::window::ExitCondition::DontExit,
+                ..default()
+            })
+            .disable::<bevy::winit::WinitPlugin>(),
+    )
+    .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO));
+    app.add_plugins((
+        avian3d::prelude::PhysicsPlugins::default(),
+        SimPlugin,
+        crate::tank::sp_spawn_plugin,
+    ));
+
+    while app.plugins_state() == bevy::app::PluginsState::Adding {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    app.finish();
+    app.cleanup();
+
+    // Boot to Playing.
+    for _ in 0..3000 {
+        app.update();
+        if *app.world().resource::<State<AppState>>().get() == AppState::Playing {
+            break;
+        }
+    }
+    assert_eq!(
+        *app.world().resource::<State<AppState>>().get(),
+        AppState::Playing,
+        "sim never reached Playing headless",
+    );
+
+    // Real-time asset IO (sim clock frozen) until the rig binds — the muzzles/weapons must exist for
+    // `fire` to find a bore.
+    let mut wheels = 0;
+    for _ in 0..5000 {
+        app.update();
+        let world = app.world_mut();
+        wheels = world.query::<&crate::tank::Roadwheel>().iter(world).count();
+        if wheels >= 32 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        wheels >= 32,
+        "rig never bound headless; roadwheels: {wheels}"
+    );
+
+    // Start the sim clock and let the tank settle a few ticks.
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+        16,
+    )));
+    for _ in 0..30 {
+        app.update();
+    }
+
+    let mut tank_q = app
+        .world_mut()
+        .query_filtered::<Entity, (With<Tank>, With<Controlled>)>();
+    let tank = tank_q.single(app.world()).expect("one controlled tank");
+
+    // Hold the secondary trigger (the MGs) — a burst. Do NOT press primary, so no 88 round is fired.
+    // MG reload is ~0.08 s (~5 ticks), so ~60 ticks yields ~10 shots per MG across the two MGs, with
+    // tracer_every=5 giving several tracer rounds.
+    let mut saw_streak = false;
+    let mut saw_mg_shell_scene = false;
+    let mut saw_shell = false;
+    for _ in 0..60 {
+        // Re-assert each tick (in its own scope so the command borrow ends before `update`): the
+        // command layer clears edge fields, and there is no device gather to hold the level fields.
+        {
+            let mut entity = app.world_mut().entity_mut(tank);
+            let mut cmd = entity
+                .get_mut::<TankCommand>()
+                .expect("tank carries a command");
+            cmd.fire_secondary = true;
+            cmd.fire_primary = false;
+        }
+        app.update();
+
+        let world = app.world_mut();
+        if world.query::<&TracerStreak>().iter(world).count() > 0 {
+            saw_streak = true;
+        }
+        let world = app.world_mut();
+        if world.query::<&ShellPath>().iter(world).count() > 0 {
+            saw_shell = true;
+        }
+        let world = app.world_mut();
+        if world
+            .query_filtered::<(), (With<ShellPath>, With<WorldAssetRoot>)>()
+            .iter(world)
+            .count()
+            > 0
+        {
+            saw_mg_shell_scene = true;
+        }
+    }
+
+    assert!(
+        saw_shell,
+        "the MG burst never spawned a single shell — the fire gate or reload never let it fire",
+    );
+    assert!(
+        saw_streak,
+        "MG tracer rounds spawned no TracerStreak — the streak visual never attached",
+    );
+    assert!(
+        !saw_mg_shell_scene,
+        "an MG round spawned a shell.glb scene root (WorldAssetRoot) — the very bug this fixes: MG \
+         bullets must NOT render as 88 mm shell scenes",
+    );
+}

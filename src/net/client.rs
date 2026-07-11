@@ -888,6 +888,9 @@ fn receive_fire_events(
                 speed: event.speed,
                 caliber: event.caliber,
                 mass: event.mass,
+                // The shooter decided this round's tracer-ness from its belt; carry it so this remote
+                // client dresses the shell identically (streak or invisible).
+                tracer: event.tracer,
                 shooter: None,
                 catch_up_ticks,
             });
@@ -1033,6 +1036,7 @@ mod tests {
             reload: 8.0,
             recoil,
             barrel,
+            tracer_every: 1,
             fire: Vec::new(),
             load: Vec::new(),
             trigger: Trigger::Primary,

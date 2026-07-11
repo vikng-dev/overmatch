@@ -52,7 +52,7 @@ use crate::tank::{Rig, ServoCommand, ServoIndex, ServoSpec, TankSim};
 /// changes** (a replicated component added/removed/reordered/renamed, a message or channel changed,
 /// the input type changed). The `wire_surface_is_pinned` tripwire fails until you do, which
 /// is the point: it makes a silent wire-breaking change impossible.
-pub const PROTOCOL_REV: u32 = 1;
+pub const PROTOCOL_REV: u32 = 2;
 
 /// The protocol fingerprint both ends bake into their netcode `protocol_id` (`Authentication::Manual`
 /// on the client, `NetcodeConfig` on the server). Derived at COMPILE TIME from [`PROTOCOL_REV`] + the
@@ -201,6 +201,11 @@ pub struct FireEvent {
     pub speed: f32,
     pub caliber: f32,
     pub mass: f32,
+    /// Whether this round is a tracer, as the shooter's belt decided it (mirrors
+    /// [`crate::ballistics::FireShell::tracer`]). Carried so every remote client dresses the shell the
+    /// SAME way the shooter and server do — the emissive streak for a tracer, no visual for a
+    /// non-tracer MG round — rather than re-deriving it (a remote has no belt counter for that tank).
+    pub tracer: bool,
     /// The firing tank root, ENTITY-MAPPED (`MapEntities` below) so the server entity resolves to the
     /// receiver's local replica. The client resolves it to kick that tank's barrel recoil spring
     /// (`net::client::apply_pending_recoil_kicks`) — the "replicate the cause" half of remote recoil.
@@ -773,7 +778,7 @@ const WIRE_SURFACE_HASH: u64 = 0x3291_7748_6c3b_98f4;
 /// changes; the `wire_types_are_pinned` tripwire prints the new value. See the block above for the
 /// coverage model. `#[cfg(test)]` for the same reason as `WIRE_SURFACE`.
 #[cfg(test)]
-const WIRE_TYPES_HASH: u64 = 0xf574_3db6_e37b_4567;
+const WIRE_TYPES_HASH: u64 = 0xa913_18e8_4ceb_4ba5;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can

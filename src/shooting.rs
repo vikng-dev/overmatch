@@ -55,6 +55,16 @@ pub(crate) fn kick_recoil(sim: &mut TankSim, slot: usize, weapon: &Weapon) {
     }
 }
 
+/// Whether the `rounds_fired`-th round down a belt with cadence `tracer_every` is a tracer. Pure
+/// belt arithmetic (see [`crate::spec::WeaponSpec::tracer_every`]): every `tracer_every`-th round
+/// traces, counting the belt from the first round (index 0). `1` = every round; `5` = rounds
+/// 0, 5, 10, … (one-in-five); `0` = a tracerless belt, never. Both the server and the predicted
+/// client call this with a counter they each walk from 0, so they agree on every round's tracer-ness.
+pub(crate) fn tracer_round(rounds_fired: u32, tracer_every: u32) -> bool {
+    // The `!= 0` guard both encodes the "never" belt and short-circuits before `is_multiple_of(0)`.
+    tracer_every != 0 && rounds_fired.is_multiple_of(tracer_every)
+}
+
 pub fn plugin(app: &mut App) {
     // The gun is sim: reload and firing run on the fixed clock, driven by each tank's `TankCommand`
     // — `fire` consumes the click edge, so it must precede the command layer's edge clear.
@@ -159,6 +169,26 @@ fn fire(
             continue; // corrupt pose frame — hold the shot rather than fire NaN
         };
 
+        // Belt bookkeeping: is THIS round a tracer, then advance the belt. Decided from root-resident
+        // `TankSim` state so the server and the predicted client — which both run this `fire` and
+        // count their own belts from 0 — agree on each round's tracer-ness (and a rollback replay
+        // restores the counter, re-deriving the same answer). The flag rides FireShell → FireEvent so
+        // remote clients match too. A rollback that drops a predicted shot can leave THIS client's own
+        // counter one round out of phase with the server's; the resulting one-round tracer skew on the
+        // shooter's own view is cosmetic and accepted (see `WeaponState::rounds_fired`).
+        let tracer = if let Ok(mut sim) = sims.get_mut(root.0) {
+            match sim.weapons.get_mut(slot.0) {
+                Some(state) => {
+                    let is_tracer = tracer_round(state.rounds_fired, weapon.tracer_every);
+                    state.rounds_fired = state.rounds_fired.wrapping_add(1);
+                    is_tracer
+                }
+                None => false,
+            }
+        } else {
+            false
+        };
+
         // Hand off to ballistics: fire down the bore at the weapon's muzzle speed.
         commands.trigger(FireShell {
             origin: muzzle_position,
@@ -166,6 +196,7 @@ fn fire(
             speed: weapon.speed,
             caliber: weapon.caliber,
             mass: weapon.mass,
+            tracer,
             // This shell belongs to a tank: name its root AND the firing weapon slot so the net
             // server can broadcast the cosmetic tracer and the barrel-recoil cause to every OTHER
             // client (`net::server`'s FireShell observer), which each derive the kick locally.
@@ -226,5 +257,44 @@ fn apply_recoil(
         }
         // Recoil rides back along the bore (+local Z), measured from the rest position.
         transform.translation = params.rest + Vec3::Z * state.recoil_offset;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tracer_round;
+
+    /// The belt cadence is exact: `tracer_every == 1` traces every round; `5` traces exactly rounds
+    /// 0, 5, 10, … (one-in-five, counting the belt from the first round); `0` is a tracerless belt
+    /// that never traces. This is the arithmetic the server and the predicted client both walk, so
+    /// they can only agree if it is this deterministic.
+    #[test]
+    fn tracer_cadence_is_every_nth() {
+        // 1 = always.
+        for n in 0..20u32 {
+            assert!(
+                tracer_round(n, 1),
+                "tracer_every=1 traces every round (round {n})"
+            );
+        }
+        // 5 = one-in-five, phased on the belt start.
+        for n in 0..20u32 {
+            assert_eq!(
+                tracer_round(n, 5),
+                n % 5 == 0,
+                "tracer_every=5 traces rounds 0,5,10,… (round {n})"
+            );
+        }
+        assert!(tracer_round(0, 5), "the first round of a belt traces");
+        assert!(!tracer_round(1, 5));
+        assert!(!tracer_round(4, 5));
+        assert!(tracer_round(5, 5));
+        // 0 = never (a future stealth belt).
+        for n in 0..20u32 {
+            assert!(
+                !tracer_round(n, 0),
+                "tracer_every=0 never traces (round {n})"
+            );
+        }
     }
 }
