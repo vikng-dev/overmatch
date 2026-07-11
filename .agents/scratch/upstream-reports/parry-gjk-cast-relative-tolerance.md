@@ -1,6 +1,6 @@
 # parry3d 0.27: GJK shape-cast stagnation exit returns unrefined lower TOI bound — ~140 mm error vs large colliders
 
-**Target:** github.com/dimforge/parry · parry3d 0.27 · **Severity for us:** HIGH (fixed f4a24c2) · **Status:** unfiled
+**Target:** github.com/dimforge/parry · parry3d 0.27 · **Severity for us:** HIGH (fixed f4a24c2) · **Status:** FILED 2026-07-11 — issue dimforge/parry#429, PR dimforge/parry#430 (branch fix/shape-cast-stagnation-refine on vikng-dev/parry)
 **Automatic retirement tripwire:** `tests/spherecast_scale.rs` FAILS when parry fixes this (it
 asserts the raw TOI error stays > 10 mm at 500 m) — that failure means: file the workaround for
 removal. (Verified 2026-07-10: against the candidate fix the raw error at 500 m drops to
