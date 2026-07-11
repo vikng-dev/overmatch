@@ -61,7 +61,8 @@ pub(crate) fn kick_recoil(sim: &mut TankSim, slot: usize, weapon: &Weapon) {
 /// 0, 5, 10, … (one-in-five); `0` = a tracerless belt, never. Both the server and the predicted
 /// client call this with a counter they each walk from 0, so they agree on every round's tracer-ness.
 pub(crate) fn tracer_round(rounds_fired: u32, tracer_every: u32) -> bool {
-    tracer_every != 0 && rounds_fired % tracer_every == 0
+    // The `!= 0` guard both encodes the "never" belt and short-circuits before `is_multiple_of(0)`.
+    tracer_every != 0 && rounds_fired.is_multiple_of(tracer_every)
 }
 
 pub fn plugin(app: &mut App) {

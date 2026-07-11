@@ -3,7 +3,9 @@
 //! changes the orbit radius, which slides along the view axis and never moves the aim point.
 
 use avian3d::prelude::{PhysicsSystems, SpatialQuery};
+use bevy::camera::Hdr;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
+use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 
 use crate::aim::CommittedAim;
@@ -199,6 +201,17 @@ pub fn view_fov(views: &Query<&TankViews, With<Controlled>>, kind: ViewKind, fal
 fn spawn_camera(mut commands: Commands) {
     commands.spawn((
         Camera3d::default(),
+        // HDR + bloom — the foundation the emissive tracer streak (`ballistics::on_fire_shell`) needs
+        // to actually GLOW: its material's emissive rides above 1.0 in linear space, which only reads
+        // as a bright streak once the camera renders HDR and bloom bleeds the over-bright pixels. In
+        // Bevy 0.19 HDR is the `Hdr` marker component (no longer a `Camera.hdr` field); `Bloom` also
+        // `#[require(Hdr)]`s it, but we spell both out for intent.
+        Hdr,
+        // Conservative intensity: 0.19 moved bloom's Karis-average weighting to LINEAR space, so the
+        // same numeric intensity reads LOWER than pre-0.19 docs suggest — NATURAL (0.15) is a
+        // restrained starting point. NEEDS AN EYEBALL PASS against the tracer once it's on screen; bump
+        // if the streak reads flat, drop if the scene blooms hazy.
+        Bloom::NATURAL,
         Transform::from_xyz(10.0, 7.0, -7.0).looking_at(Vec3::new(10.0, 1.0, 5.0), Vec3::Y),
         OrbitCamera {
             zoom: 0.0,

@@ -428,6 +428,28 @@ pub struct ShellReadout {
     pub capability: f32,
 }
 
+/// Calibre boundary between the two shell VISUALS (`on_fire_shell`). At or above this the round keeps
+/// the `shell.glb` scene (the 88, 0.088 m — its own glow/trail dressing is a later slice); below it a
+/// round is MG-calibre (7.9 mm) and renders as a tracer streak (or nothing, if it's not a tracer).
+/// 20 mm (the autocannon line) cleanly separates the Tiger's armament and reads as a real boundary.
+/// The projectile entity carries no weapon identity, so the visual keys off `caliber` — the physical
+/// signal already on `FireShell`; a future per-weapon visual style would replace this heuristic.
+const TRACER_MAX_CALIBER: f32 = 0.02;
+
+/// View marker on a tracer round's emissive streak child (`on_fire_shell`). The streak is a VIEW
+/// attachment on the cosmetic projectile entity (ADR-0014) — it carries no sim state; it just rides
+/// the projectile's `Transform`, which `integrate_projectiles` keeps pointed down the velocity.
+#[derive(Component)]
+pub struct TracerStreak;
+
+/// Preloaded tracer-streak view assets (mesh + emissive material), built once so a tracer round clones
+/// handles rather than rebuilding them per shot — the streak twin of [`ProjectileAssets`].
+#[derive(Resource)]
+struct TracerAssets {
+    mesh: Handle<Mesh>,
+    material: Handle<StandardMaterial>,
+}
+
 /// Preloaded shell scene, cloned per shot rather than loaded each time.
 #[derive(Resource)]
 struct ProjectileAssets {
@@ -480,11 +502,30 @@ pub fn plugin(app: &mut App) {
         );
 }
 
-fn setup_assets(mut commands: Commands, asset_server: Res<AssetServer>) {
+fn setup_assets(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
     // Preload once; firing clones the handle rather than hitting the asset server per shot.
     commands.insert_resource(ProjectileAssets {
         scene: asset_server.load(GltfAssetLabel::Scene(0).from_asset("shell/shell.glb")),
     });
+    // The tracer streak: a thin cuboid elongated along the shell's local −Z (its travel axis — the
+    // projectile `Transform` is kept `look_to(velocity)` by `integrate_projectiles`), so it reads as a
+    // streak trailing the round. Dimensions are a first cut — NEEDS AN EYEBALL PASS with bloom on.
+    let mesh = meshes.add(Cuboid::new(0.05, 0.05, 2.0));
+    // Emissive + unlit so it glows on its own and bloom catches it: emissive rides ABOVE 1.0 in linear
+    // space (the over-bright the HDR camera's `Bloom` blooms). Warm (orange-yellow) tracer colour.
+    // Values are a restrained first cut — tune alongside the camera's bloom intensity.
+    let material = materials.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 0.6, 0.2),
+        emissive: LinearRgba::rgb(6.0, 2.4, 0.6),
+        unlit: true,
+        ..default()
+    });
+    commands.insert_resource(TracerAssets { mesh, material });
 }
 
 /// Spawn a shell from a `FireShell`: at the origin, oriented down the bore, with velocity along the
@@ -508,6 +549,7 @@ fn setup_assets(mut commands: Commands, asset_server: Res<AssetServer>) {
 fn on_fire_shell(
     fire: On<FireShell>,
     assets: Res<ProjectileAssets>,
+    tracer_assets: Res<TracerAssets>,
     // The FIXED timestep, NOT `Res<Time>`: this observer can fire from `Update` (the net client
     // re-raises `FireShell` at render rate), where `Res<Time>` is `Time<Virtual>` (a render-frame dt).
     // The catch-up counts fixed SERVER ticks, so it must step the fixed timestep the live march also
@@ -558,7 +600,10 @@ fn on_fire_shell(
     // degenerate zero velocity so a spent-to-rest catch-up never trips `Dir3`.
     let travel = Dir3::new(velocity).unwrap_or(fire.direction);
     let speed = velocity.length();
-    commands.spawn((
+    // The sim shell is IDENTICAL for every round — it flies and raycasts the same whether or not it is
+    // visible (a non-tracer MG round still bounces, ricochets, and lands; dead-reckoned streaks were
+    // rejected). Only the ATTACHED VISUAL differs, gated below at the RENDER layer.
+    let mut shell = commands.spawn((
         Projectile {
             velocity,
             caliber: fire.caliber,
@@ -572,9 +617,26 @@ fn on_fire_shell(
             speed,
             capability: capability(fire.mass, speed),
         },
-        WorldAssetRoot(assets.scene.clone()),
+        // Root visibility so an attached streak child inherits it (harmless on the shell-scene path).
+        Visibility::default(),
         Transform::from_translation(position).looking_to(travel, Vec3::Y),
     ));
+
+    // Visual policy (interim — a per-weapon visual style would supersede the caliber split):
+    //   * Main-gun-calibre round (the 88): keep the `shell.glb` scene. Its own glow/trail dressing is
+    //     a separate upcoming slice; the tracer flag doesn't drive its look yet.
+    //   * MG-calibre TRACER round: an emissive streak child, elongated along velocity.
+    //   * MG-calibre NON-tracer round: NO visual entity at all — it still flew above (raycast + all),
+    //     it's just invisible (a future "wake/trace through optics" effect will dress these).
+    if fire.caliber >= TRACER_MAX_CALIBER {
+        shell.insert(WorldAssetRoot(assets.scene.clone()));
+    } else if fire.tracer {
+        shell.with_child((
+            Mesh3d(tracer_assets.mesh.clone()),
+            MeshMaterial3d(tracer_assets.material.clone()),
+            TracerStreak,
+        ));
+    }
 }
 
 fn integrate_projectiles(
