@@ -55,6 +55,12 @@ mod hud;
 /// The game's networking layer. Public so the `client`/`server` bins can call
 /// `net::client::run()`/`net::server::run()`; not part of `GamePlugin`.
 pub mod net;
+/// The net client's single overlay authority (active-set resource + pure input/cursor/scrim rules for
+/// the connect / death / menu / view-death overlays). Lives at the crate root, NOT under `net`,
+/// because it is pure view-state that the always-sim `sight` module also declares into — putting it
+/// here keeps `sight` from naming `crate::net` (the `tests/net_boundary.rs` guard). Mounted only by
+/// [`NetClientPlugin`]; single-player has `state::client_plugin`'s real pause instead.
+mod overlay;
 /// The armor ballistics sandbox (`bin/armor_sandbox`). Public so the binary can mount it; not part
 /// of `GamePlugin`.
 pub mod sandbox;
@@ -218,6 +224,11 @@ impl Plugin for NetClientPlugin {
             firecontrol::client_plugin,
             hud::plugin,
             crew_ui::plugin,
+            // The single overlay authority (net-client only): one active-set resource + derived
+            // input/cursor/scrim rules behind which connect status, the death screen, the Esc menu,
+            // and the view-death black all compose with explicit priority and z-order. Owns the one
+            // cursor system; the connect/death/sight owners declare their presence into it.
+            overlay::plugin,
             // Bottom-right ping/FPS/frame-time debug panel — net-client only (ping is meaningless
             // in SP), for testing against the deployed server.
             net::debug_hud::plugin,
