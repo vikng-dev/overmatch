@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 # Build, sign, notarize and package the macOS app as a notarized .dmg.
 #
-# Produces: dist/overmatch-v<VERSION>-universal-apple-darwin.dmg (+ .sha256)
+# Produces: dist/overmatch-v<VERSION>-aarch64-apple-darwin.dmg (+ .sha256)
 # The .app inside is also the content used for the future Steam macOS depot.
+#
+# Apple-Silicon-ONLY since v0.3.0-alpha.5 (was universal): Intel Macs are <0.5% of Steam and
+# macOS 26 Tahoe is the last Intel macOS — dropping the x86_64 slice halves the CI build (the
+# old sequential universal job ran ~1h25m). Steamworks config when the depot lands: check
+# "Apple Silicon Binaries Included", leave "64-bit (Intel)" UNCHECKED. If Intel ever needs to
+# come back, restore the second target + lipo (see git history of this file).
 #
 # Credentials (two ways, so this works locally AND in CI):
 #   - Signing identity: $SIGN_IDENTITY, else auto-detected Developer ID Application.
@@ -13,7 +19,7 @@
 #   NOTARYTOOL_PROFILE=autoquit-notary ./scripts/package-macos.sh
 #
 # Modes (so CI can split Apple signing secrets away from the untrusted `cargo build`):
-#   --build-only   steps 1-2: universal build + assemble dist/Overmatch.app (unsigned, NO secrets).
+#   --build-only   steps 1-2: arm64 build + assemble dist/Overmatch.app (unsigned, NO secrets).
 #   --sign-only    steps 3-5: sign the existing dist/Overmatch.app -> DMG -> notarize -> staple.
 #   (no arg)       full build + sign, unchanged behavior for local use.
 set -euo pipefail
@@ -38,7 +44,7 @@ ICON="$ROOT/build/icons/icon.icns"
 
 DIST="$ROOT/dist"
 APP="$DIST/$APP_NAME.app"
-DMG="$DIST/$BIN_NAME-v$VERSION-universal-apple-darwin.dmg"
+DMG="$DIST/$BIN_NAME-v$VERSION-aarch64-apple-darwin.dmg"
 
 # Signing identity is only needed for the sign phase; the build-only path must not require it
 # (that is the whole point — no Apple credentials materialized before the untrusted build runs).
@@ -55,18 +61,15 @@ fi
 
 if [[ "$MODE" != "sign" ]]; then
 
-# ---------- 1. Build universal binary ----------
+# ---------- 1. Build the Apple Silicon binary ----------
 # `overmatch` is the PVP client. Default features now include `net`, so a plain `--release` build
 # is the networked client; if OVERMATCH_DEFAULT_SERVER is set in the environment (the Release
 # workflow exports the droplet IP), it is baked in as the client's default server via option_env!.
-echo ">> Building universal binary (aarch64 + x86_64)..."
-rustup target add aarch64-apple-darwin x86_64-apple-darwin >/dev/null
+echo ">> Building aarch64-apple-darwin binary..."
+rustup target add aarch64-apple-darwin >/dev/null
 cargo build --release --target aarch64-apple-darwin
-cargo build --release --target x86_64-apple-darwin
 mkdir -p "$DIST"
-lipo -create -output "$DIST/$BIN_NAME" \
-  "target/aarch64-apple-darwin/release/$BIN_NAME" \
-  "target/x86_64-apple-darwin/release/$BIN_NAME"
+cp "target/aarch64-apple-darwin/release/$BIN_NAME" "$DIST/$BIN_NAME"
 
 # ---------- 2. Assemble the .app ----------
 echo ">> Assembling $APP_NAME.app..."

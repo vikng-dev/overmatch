@@ -5,7 +5,7 @@ name: Release
 #
 #   - A `vX.Y.Z` tag PUBLISHES a GitHub Release with per-platform archives:
 #       * Windows  `overmatch`        — the PVP client, server address baked to the droplet.
-#       * macOS    `overmatch`        — the client, as a signed + notarized universal .dmg.
+#       * macOS    `overmatch`        — the client, as a signed + notarized arm64 .dmg (Apple Silicon only).
 #       * Linux    `overmatch-server` — the dedicated server, tar with assets/.
 #     Cut one by bumping `version` in Cargo.toml, then: git tag vX.Y.Z && git push --tags
 #
@@ -197,15 +197,18 @@ jobs:
         with:
           lfs: true
 
+      # Apple-Silicon-ONLY (2026-07-11, was universal): Intel Macs are <0.5% of Steam and macOS 26
+      # is the last Intel macOS; dropping the x86_64 slice + lipo halves this job (~1h25m → one
+      # arch). Steamworks depot config: "Apple Silicon Binaries Included" only.
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          targets: aarch64-apple-darwin
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: macos-universal
+          key: macos-aarch64
 
-      - name: Build the unsigned universal .app
+      - name: Build the unsigned .app (arm64)
         run: |
           tag="${GITHUB_REF_NAME}"
           export VERSION="${tag#v}"
@@ -227,7 +230,7 @@ jobs:
 
   # macOS client, part 2 of 2: the TRUSTED sign. This job holds the Apple signing secrets (Developer
   # ID cert + notary key) but runs NO `cargo build` — it only operates on the pre-built .app from
-  # build-macos. It produces the signed + notarized universal .dmg (the .app inside is also the future
+  # build-macos. It produces the signed + notarized arm64 .dmg (the .app inside is also the future
   # Steam macOS depot). Tags only (inherits the skip via `needs: build-macos` -> create-release).
   sign-macos:
     needs: build-macos
@@ -275,6 +278,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release upload "${GITHUB_REF_NAME}" \
-            dist/overmatch-*-universal-apple-darwin.dmg \
-            dist/overmatch-*-universal-apple-darwin.dmg.sha256 \
+            dist/overmatch-*-aarch64-apple-darwin.dmg \
+            dist/overmatch-*-aarch64-apple-darwin.dmg.sha256 \
             --repo "${GITHUB_REPOSITORY}"
