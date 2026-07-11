@@ -25,8 +25,8 @@ use bevy::ui::IsDefaultUiCamera;
 use crate::Layer;
 use crate::bake;
 use crate::ballistics::{
-    self, ArmorVolume, BallisticVolume, ComponentHealth, ComponentVolume, FireShell, ImpactMarker,
-    PenetrationMarks, ShellPath, ShellReadout, SpallMarks,
+    self, ArmorVolume, BallisticVolume, ComponentHealth, ComponentVolume, FireShell, Impact,
+    ImpactMarker, PenetrationMarks, ShellPath, ShellReadout, SpallMarks,
 };
 use crate::command;
 use crate::crew_ui;
@@ -218,6 +218,11 @@ pub fn plugin(app: &mut App) {
     .init_resource::<SpeedIndex>()
     // Paint translucent materials onto the volume meshes as the view binds to the sim parts.
     .add_observer(paint_view_volumes)
+    // The sandbox's own impact marker: `ballistics` no longer spawns one (it stays pure sim,
+    // ADR-0014), so the sandbox subscribes to the sim `Impact` event itself. Unlike the game
+    // client's debug marker (ring-buffered, gizmo-gated in `debug.rs`), the sandbox keeps every
+    // marker until the `C` clear — inspecting a whole session of shots is the point.
+    .add_observer(spawn_impact_marker)
     .add_systems(
         Startup,
         (
@@ -227,6 +232,7 @@ pub fn plugin(app: &mut App) {
             spawn_hud,
             load_target,
             setup_volume_materials,
+            setup_impact_marker,
             spawn_overlay_light,
         ),
     )
@@ -422,6 +428,40 @@ fn setup_volume_materials(mut commands: Commands, mut materials: ResMut<Assets<S
             ..default()
         }),
     });
+}
+
+/// Preloaded mesh+material for the sandbox's impact markers, cloned per hit by `spawn_impact_marker`.
+#[derive(Resource)]
+struct ImpactMarkerAssets {
+    mesh: Handle<Mesh>,
+    material: Handle<StandardMaterial>,
+}
+
+/// Small red sphere reused for every impact marker.
+fn setup_impact_marker(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    commands.insert_resource(ImpactMarkerAssets {
+        mesh: meshes.add(Sphere::new(0.2)),
+        material: materials.add(Color::srgb(1.0, 0.3, 0.1)),
+    });
+}
+
+/// Drop a red sphere at each shell impact and leave it there — no cap, no gate. The sandbox is a
+/// dev tool for studying shots, so markers pile up until `C` wipes the board (`clear_shots`).
+fn spawn_impact_marker(
+    impact: On<Impact>,
+    assets: Res<ImpactMarkerAssets>,
+    mut commands: Commands,
+) {
+    commands.spawn((
+        ImpactMarker,
+        Mesh3d(assets.mesh.clone()),
+        MeshMaterial3d(assets.material.clone()),
+        Transform::from_translation(impact.position),
+    ));
 }
 
 /// When a glb view node binds to a sim part (`ViewOf`, inserted by `bind_tank_view`), check

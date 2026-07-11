@@ -13,10 +13,13 @@
 //! materials, camera follow), so it is safe on a predicting net client; the headless server never
 //! mounts it.
 
+use std::collections::VecDeque;
+
 use avian3d::prelude::PhysicsGizmos;
 use bevy::color::Alpha;
 use bevy::prelude::*;
 
+use crate::ballistics::{Impact, ImpactMarker};
 use crate::camera::CameraFollow;
 use crate::driving::Suspension;
 use crate::tank::{Controlled, Tank};
@@ -25,12 +28,20 @@ use crate::tank::{Controlled, Tank};
 const XRAY_ALPHA: f32 = 0.2;
 /// Metres of arrow per newton of suspension force (so ~35 kN reads as a ~1.75 m arrow).
 const FORCE_VIZ_SCALE: f32 = 1.0 / 20_000.0;
+/// How many impact markers the game client keeps on screen before the oldest is despawned — the
+/// markers are never explicitly cleared here (unlike the sandbox's `C` key), so this ring bounds
+/// what would otherwise accumulate forever.
+const IMPACT_MARKER_CAP: usize = 32;
 
 pub fn plugin(app: &mut App) {
     app.init_resource::<XRay>()
+        .init_resource::<ImpactMarkerRing>()
         // Off by default, like the x-ray — press G to bring all debug gizmos up.
         .insert_resource(ShowGizmos(false))
-        .add_systems(Startup, configure_physics_gizmos)
+        .add_systems(Startup, (configure_physics_gizmos, setup_impact_marker))
+        // The debug impact marker: a view-side subscriber to `ballistics`' sim `Impact` event
+        // (ADR-0014), gated on `ShowGizmos` and ring-buffered to `IMPACT_MARKER_CAP`.
+        .add_observer(spawn_impact_marker)
         .add_systems(Update, (toggle_xray, toggle_camera_follow, toggle_gizmos))
         // Mirror the on/off state onto Avian's own gizmos (colliders, suspension rays).
         .add_systems(
@@ -138,5 +149,113 @@ fn toggle_xray(
             material.base_color = material.base_color.with_alpha(alpha);
             material.alpha_mode = mode;
         }
+    }
+}
+
+/// Preloaded mesh+material for the debug impact marker, cloned per hit by `spawn_impact_marker`.
+#[derive(Resource)]
+struct ImpactDebug {
+    mesh: Handle<Mesh>,
+    material: Handle<StandardMaterial>,
+}
+
+/// The live impact markers in spawn order, oldest at the front — a ring that evicts its front once
+/// it passes `IMPACT_MARKER_CAP`, so markers don't accumulate forever in the game client.
+#[derive(Resource, Default)]
+struct ImpactMarkerRing(VecDeque<Entity>);
+
+/// Small red sphere reused for every impact marker.
+fn setup_impact_marker(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    commands.insert_resource(ImpactDebug {
+        mesh: meshes.add(Sphere::new(0.2)),
+        material: materials.add(Color::srgb(1.0, 0.3, 0.1)),
+    });
+}
+
+/// Drop a red sphere at each shell impact — but only while the `G` gizmo toggle is up, and keeping
+/// at most `IMPACT_MARKER_CAP` on screen (the oldest is despawned when a new one pushes past the
+/// cap). View-only, so it is safe on a predicting net client.
+fn spawn_impact_marker(
+    impact: On<Impact>,
+    show: Res<ShowGizmos>,
+    debug: Res<ImpactDebug>,
+    mut ring: ResMut<ImpactMarkerRing>,
+    mut commands: Commands,
+) {
+    if !show.0 {
+        return;
+    }
+    let marker = commands
+        .spawn((
+            ImpactMarker,
+            Mesh3d(debug.mesh.clone()),
+            MeshMaterial3d(debug.material.clone()),
+            Transform::from_translation(impact.position),
+        ))
+        .id();
+    ring.0.push_back(marker);
+    // Evict from the front until back under the cap. `try_despawn` is a silent no-op if the marker
+    // is already gone (e.g. a scene reset despawned it out from under us).
+    while ring.0.len() > IMPACT_MARKER_CAP {
+        if let Some(old) = ring.0.pop_front() {
+            commands.entity(old).try_despawn();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minimal app carrying just what `spawn_impact_marker` reads — no asset plugins needed, since
+    /// the observer only *clones* the preloaded handles (default handles are fine for a headless run).
+    fn harness(show: bool) -> App {
+        let mut app = App::new();
+        app.insert_resource(ShowGizmos(show))
+            .init_resource::<ImpactMarkerRing>()
+            .insert_resource(ImpactDebug {
+                mesh: Handle::default(),
+                material: Handle::default(),
+            })
+            .add_observer(spawn_impact_marker);
+        app
+    }
+
+    fn marker_count(app: &mut App) -> usize {
+        app.world_mut()
+            .query_filtered::<Entity, With<ImpactMarker>>()
+            .iter(app.world())
+            .count()
+    }
+
+    #[test]
+    fn gizmos_off_spawns_no_marker() {
+        let mut app = harness(false);
+        app.world_mut().trigger(Impact {
+            position: Vec3::ZERO,
+        });
+        app.world_mut().flush();
+        assert_eq!(marker_count(&mut app), 0);
+    }
+
+    #[test]
+    fn ring_caps_markers_and_evicts_oldest() {
+        let mut app = harness(true);
+        // Fire past the cap; the ring must hold at exactly the cap, oldest evicted.
+        for _ in 0..IMPACT_MARKER_CAP + 5 {
+            app.world_mut().trigger(Impact {
+                position: Vec3::ZERO,
+            });
+            app.world_mut().flush();
+        }
+        assert_eq!(marker_count(&mut app), IMPACT_MARKER_CAP);
+        assert_eq!(
+            app.world().resource::<ImpactMarkerRing>().0.len(),
+            IMPACT_MARKER_CAP
+        );
     }
 }

@@ -429,10 +429,11 @@ struct ProjectileAssets {
 
 /// A shell hit something — the seam the armor penetration march/spall and impact VFX hang off. The
 /// hit's normal and struck entity are available from the raycast; add them here when a feature needs
-/// them. Global event (the shell despawns), handled by the `on_impact` observer.
+/// them. Global event (the shell despawns), handled by the sim-side `on_impact` observer; the
+/// dev-only debug marker (`debug::spawn_impact_marker`) and the sandbox subscribe to the same event.
 #[derive(Event)]
-struct Impact {
-    position: Vec3,
+pub(crate) struct Impact {
+    pub(crate) position: Vec3,
 }
 
 /// One crossing's share of a shell's momentum, handed to the struck volume's owning body:
@@ -446,14 +447,9 @@ struct HitImpulse {
     point: Vec3,
 }
 
-/// Preloaded mesh+material for the debug impact marker, cloned per hit by `on_impact`.
-#[derive(Resource)]
-struct ImpactDebug {
-    mesh: Handle<Mesh>,
-    material: Handle<StandardMaterial>,
-}
-
-/// Tags the debug impact marker, so the sandbox's clear command can find and remove it.
+/// Tags a debug impact marker so the observers that spawn them (`debug::spawn_impact_marker` in the
+/// game client, the sandbox's own) can ring-buffer/clear them. The marker mesh/material and the
+/// spawn itself are view concerns and live with those observers, not in this sim module (ADR-0014).
 #[derive(Component)]
 pub struct ImpactMarker;
 
@@ -477,20 +473,10 @@ pub fn plugin(app: &mut App) {
         );
 }
 
-fn setup_assets(
-    mut commands: Commands,
-    asset_server: Res<AssetServer>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
+fn setup_assets(mut commands: Commands, asset_server: Res<AssetServer>) {
     // Preload once; firing clones the handle rather than hitting the asset server per shot.
     commands.insert_resource(ProjectileAssets {
         scene: asset_server.load(GltfAssetLabel::Scene(0).from_asset("shell/shell.glb")),
-    });
-    // Small red sphere reused for every impact marker.
-    commands.insert_resource(ImpactDebug {
-        mesh: meshes.add(Sphere::new(0.2)),
-        material: materials.add(Color::srgb(1.0, 0.3, 0.1)),
     });
 }
 
@@ -915,15 +901,11 @@ fn on_hit_impulse(
     }
 }
 
-fn on_impact(impact: On<Impact>, debug: Res<ImpactDebug>, mut commands: Commands) {
+fn on_impact(impact: On<Impact>) {
     info!("shell impact at {:?}", impact.position);
-    // Debug marker for now; the armor penetration march/spall and impact VFX hook in here.
-    commands.spawn((
-        ImpactMarker,
-        Mesh3d(debug.mesh.clone()),
-        MeshMaterial3d(debug.material.clone()),
-        Transform::from_translation(impact.position),
-    ));
+    // The sim-side seam: the armor penetration march/spall hook in here. The debug marker is a
+    // separate, view-side observer on this same event (`debug::spawn_impact_marker`), kept out of
+    // the sim per ADR-0014.
 }
 
 #[cfg(test)]
