@@ -688,6 +688,15 @@ Everything below is MEASURED (80/10 unless noted; N given per claim).
   five 100%-hash-mismatch runs are mm-scale sub-threshold drift (class-3 family, |Δp| ≤ 9 mm),
   not this. Likely gated on the same session conditions as §7's hang (the 2/24 came from the
   loaded wave-A box); treat as dormant — re-sweep whenever §7's loaded-repro harness runs.
+  **Final tally (2026-07-11, post-§7-fix): 0/117.** The last uncovered condition — 24 loaded
+  connects into a REUSED long-lived server (the wave-A retry harness reconnected into live
+  servers; all earlier probe batches used fresh servers) — also came back clean: 0/24, worst
+  |Δp| 5.3 cm rollback-corrected transient, the §7 guard fired ZERO times (reconnect into a
+  tick-advanced server does not strand the input buffer), and the server survived 24
+  connect/disconnect cycles without leak or wedge. No recreated condition reproduces the
+  original 2/24 and no mechanism was ever confirmed. Status: dormant-verging-on-retired — keep
+  the auto-sweep convention on loaded batches, chase no further. The watchdog's constant-offset
+  blind spot remains real and documented regardless.
 - Rebaseline note: the pre-recoil-fix bimodal short course (§9's fire-seeded 2/3 incidence) is
   gone as such post-f516fb6; what remains is the rarer class-3 above. The long course is the
   stable regression gate (94.45–94.85% across all builds, physics bit-exact, hsim-only).
