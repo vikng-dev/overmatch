@@ -267,8 +267,13 @@ fn cursor_owner(
         refocus.0 = focused.then_some(REFOCUS_GRAB_FRAMES);
     }
     if input_blocked(&overlays, window.focused) {
-        cursor.grab_mode = CursorGrabMode::None;
-        cursor.visible = true;
+        // Act only on the grab→release EDGE: `grab_mode` is our requested state (the OS-truth
+        // divergence on focus loss is repaired by writing it here), and re-writing it every blocked
+        // frame would mark the cursor options changed each frame for no transition.
+        if cursor.grab_mode != CursorGrabMode::None {
+            cursor.grab_mode = CursorGrabMode::None;
+            cursor.visible = true;
+        }
         refocus.0 = None; // nothing to (re)grab while blocked
         return;
     }
@@ -279,7 +284,15 @@ fn cursor_owner(
             refocus.0 = None;
             crate::state::grab_now(&mut window, &mut cursor);
         }
-        None => crate::state::grab_now(&mut window, &mut cursor),
+        // Grab only on the release→grab EDGE. `grab_now` warps the cursor to centre; issuing that
+        // warp every unblocked frame (instead of on the transition) marks the window changed each
+        // frame and fights the OS's warp/motion-delta handling — per-frame re-centering is exactly
+        // the mouse-look stutter to avoid. The release paths above (and the SP/focus ones) all write
+        // `grab_mode = None` explicitly, so "!= Locked" IS the transition edge.
+        None if cursor.grab_mode != CursorGrabMode::Locked => {
+            crate::state::grab_now(&mut window, &mut cursor);
+        }
+        None => {}
     }
 }
 
