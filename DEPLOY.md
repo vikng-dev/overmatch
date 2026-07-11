@@ -52,7 +52,34 @@ systemctl stop overmatch-server          # stop the meter when not testing
 > The idle server still burns CPU and ~$6/mo. **Stop the service (or power off the droplet)
 > when not actively playtesting.**
 
-## Redeploy (new server build → droplet)
+## Auto-deploy (main → droplet)
+
+**Every push to `main` redeploys the droplet automatically.** The `Deploy to droplet` workflow
+(`.github/workflows/deploy.yml`) builds the Linux `overmatch-server` exactly like the release
+dispatch path, then `scp`s the payload to `/opt`, extracts it into `/opt/overmatch-server`,
+`systemctl restart overmatch-server`, and verifies (`systemctl is-active` + echoes the deployed
+git SHA into the run log via a baked `DEPLOYED_SHA` marker). So the droplet always runs `main`
+— no manual step needed for normal merges.
+
+- **Auth:** the workflow uses the `DROPLET_SSH_KEY` repo Actions secret (a dedicated ed25519
+  key whose public half is in the droplet's `authorized_keys`). The droplet's host key is
+  **pinned** in the workflow (no `StrictHostKeyChecking=no`); if you ever rebuild the droplet,
+  update the pinned `known_hosts` line in `deploy.yml` to match its new host key.
+- **Only `main` branch pushes deploy.** Tag pushes (`vX.Y.Z`) and `workflow_dispatch` are the
+  release path (`release.yml`) and never touch this workflow — the manual redeploy below still
+  works untouched.
+- **Serialized:** a `concurrency` group queues overlapping deploys (never cancels a run that may
+  be mid-scp/restart on the droplet); the newest push ends up live.
+- **Skip a deploy:** put `[skip deploy]` in the merge/commit message — CI still runs, but the
+  droplet is left alone (useful for docs-only or WIP-on-main changes).
+- **Heads-up:** because the restart is automatic, **merging to `main` mid-playtest will bounce
+  the live server** and drop connected friends for a few seconds. Use `[skip deploy]`, or hold
+  the merge, while a session is in progress.
+
+## Redeploy (manual fallback — new server build → droplet)
+
+The auto-deploy above is the normal path; this manual procedure stays as a fallback (e.g. to
+redeploy a non-`main` build, or if the deploy workflow is unavailable).
 
 The server binary must be Linux x86_64. The dev machine is an ARM Mac, so we build it on
 GitHub's `ubuntu-latest` runner (which *is* the deploy target — glibc 2.39, matched by the
