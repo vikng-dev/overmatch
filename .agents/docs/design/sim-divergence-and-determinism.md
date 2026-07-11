@@ -304,6 +304,23 @@ Limits, stated in the open:
 
 ## 7. Open finding (2026-07-09): client hang at connect — unresolved, NOT lat0-specific
 
+**Update (2026-07-11, verification batches @ e3ee1ab): the hang is CPU-LOAD-GATED.** 48 headless
+scripted 80/10 connects on a quiet box — 24 on main @ e3ee1ab, 24 on the pre-`min_delay` baseline
+(d7d103e `src/net/client.rs`, A/B for the interp fix) — produced **0 hangs**; the interp
+`min_delay` pin is not the variable. Re-running 12 connects with all 10 cores saturated
+(10× `yes` busy-loops, mimicking the wave-A session's parallel-build load) reproduced **4/12**,
+same signature: silence immediately after `rollback enabled` → connect `ROLLBACK-SNAP` → first
+`ROLLBACK fired`, trace recording stops at the same instant (FixedLast dead, wedged main loop),
+server keeps running, then the process dies **SIGKILL/exit 137 at 40–96 s** — three of the four
+killed by the OS before the harness's external 90 s timeout, with no jetsam/crash report found
+(kill source unconfirmed; RSS-balloon-then-jetsam per the check-starvation report's failure mode
+is plausible but unproven). Practical reads: (a) the old "3/10" was measured on a loaded box and
+matches the loaded rate, not the quiet-box rate; casual playtests on quiet machines won't feel
+it, which is why it "disappeared"; (b) any future repro/bisect MUST run under CPU saturation;
+(c) the trigger is a scheduling/starvation race, consistent with the receive-time-check-starvation
+neighborhood but now load-, not margin-, keyed. Raw runs + classifier script: session scratchpad
+`connect-verify{,-ab,-load}/`.
+
 **Update (2026-07-10, §9 session):** the hang is NOT lat0-specific after all — 3 of 10 headless
 scripted runs at **80/10** hung the same way (client silent immediately after the connect
 ROLLBACK-SNAP log line, process alive, server keeps running). The lat0-only framing below is
@@ -608,7 +625,13 @@ Everything below is MEASURED (80/10 unless noted; N given per claim).
   tick ~471, one persisted to trace end) with no rollback despite being far above threshold —
   a world-frame offset (spawn/teleport ordering?), not physics divergence, and a watchdog blind
   spot (it compares component histories, which agree tick-to-tick once offset). Belongs to the
-  §7 connect investigation.
+  §7 connect investigation. **Verification (2026-07-11 @ e3ee1ab): NOT reproduced — 0/57
+  analyzable 80/10 runs** (25 quiet-box on main, 24 quiet-box on the pre-`min_delay` d7d103e
+  client baseline, 8 loaded-box survivors; the 4 loaded-box §7 hangs truncate their traces too
+  early to judge). Max |Δp| seen anywhere: 50 mm transient (2 runs, closed by tick ~292); the
+  five 100%-hash-mismatch runs are mm-scale sub-threshold drift (class-3 family, |Δp| ≤ 9 mm),
+  not this. Likely gated on the same session conditions as §7's hang (the 2/24 came from the
+  loaded wave-A box); treat as dormant — re-sweep whenever §7's loaded-repro harness runs.
 - Rebaseline note: the pre-recoil-fix bimodal short course (§9's fire-seeded 2/3 incidence) is
   gone as such post-f516fb6; what remains is the rarer class-3 above. The long course is the
   stable regression gate (94.45–94.85% across all builds, physics bit-exact, hsim-only).
