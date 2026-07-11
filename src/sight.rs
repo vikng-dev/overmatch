@@ -25,6 +25,7 @@ use crate::camera::{CameraKickApplied, GUNNER_FOV_FALLBACK, GunnerCameraPlaced, 
 use crate::command::{TankCommand, gather_commands};
 use crate::damage::{ControlledTank, VolumeOf};
 use crate::firecontrol::{RangeTable, Ranging};
+use crate::overlay::{self, Overlay, Overlays};
 use crate::spec::ViewKind;
 use crate::state::{GameplaySet, PlayerInputSet};
 use crate::tank::{
@@ -279,6 +280,11 @@ fn spawn_view_death_overlay(mut commands: Commands, fonts: Res<UiFonts>) {
                 ..default()
             },
             BackgroundColor(Color::BLACK),
+            // The one-scrim contract's lowest z: the view-death black sits BELOW the death screen, so
+            // whole-crew death (Death latched) can never let this opaque black occlude "YOU DIED" — the
+            // spawn-order bug this redesign fixes. On the net client `update_view_death_overlay` also
+            // hard-suppresses it whenever Death is latched; the z is the belt to that braces.
+            GlobalZIndex(Overlay::ViewDead.zindex()),
             Visibility::Hidden,
         ))
         .with_children(|parent| {
@@ -946,18 +952,23 @@ fn drive_gunner_aim(
 /// Show/hide the black overlay + prompt when the active view's crewman is dead. The prompt tells
 /// the player to press Lshift to switch to the other view if its crewman is alive; if both are
 /// dead, the prompt says so (the tank is effectively dead — 0 living crew imminent).
+///
+/// On the NET client this participates in the overlay authority: it declares `Overlay::ViewDead`
+/// presence and defers its own visibility to the one-scrim rule — suppressed entirely whenever a
+/// higher overlay (the death screen above all, but also the menu / connect screen) owns the scrim, so
+/// whole-crew death shows "YOU DIED", not this black. In single-player the `Overlays` resource is
+/// absent (`Option` is `None`) and it behaves standalone as before: crewman down → black + prompt.
 fn update_view_death_overlay(
     mode: Res<SightMode>,
     controlled: ControlledTank,
     views: Query<&TankViews, With<Controlled>>,
-    mut overlay: Query<&mut Visibility, With<ViewDeathOverlay>>,
+    overlays: Option<ResMut<Overlays>>,
+    mut overlay_vis: Query<&mut Visibility, With<ViewDeathOverlay>>,
     mut label: Query<&mut Text, With<ViewDeathText>>,
 ) {
-    if controlled.entity().is_none() {
-        return;
-    }
+    let has_controlled = controlled.entity().is_some();
     // The overlay's `Visibility` lives on the full-screen node; its prompt `Text` on the child.
-    let (Ok(mut vis), Ok(mut text)) = (overlay.single_mut(), label.single_mut()) else {
+    let (Ok(mut vis), Ok(mut text)) = (overlay_vis.single_mut(), label.single_mut()) else {
         return;
     };
 
@@ -966,7 +977,20 @@ fn update_view_death_overlay(
         SightMode::Gunner => (ViewKind::Gunner, ViewKind::Commander, "third-person"),
     };
 
-    if view_available(&controlled, &views, active_view) {
+    // The active view's crewman is down — the standalone condition for wanting this overlay. Gated on a
+    // controlled tank existing (no station to be dead without one).
+    let crewman_down = has_controlled && !view_available(&controlled, &views, active_view);
+
+    // Declare presence into the net authority (net client only), then let the one-scrim rule decide
+    // whether we actually draw. In single-player there is no authority: draw whenever `crewman_down`.
+    let suppressed = if let Some(mut overlays) = overlays {
+        overlays.declare(Overlay::ViewDead, crewman_down);
+        !overlay::draws_scrim(&overlays, Overlay::ViewDead)
+    } else {
+        false
+    };
+
+    if !crewman_down || suppressed {
         *vis = Visibility::Hidden;
         return;
     }
