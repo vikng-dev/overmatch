@@ -741,6 +741,50 @@ const WIRE_SURFACE: &[&str] = &[
 #[cfg(test)]
 const WIRE_SURFACE_HASH: u64 = 0x3291_7748_6c3b_98f4;
 
+// ---------------------------------------------------------------------------
+// Deep wire-surface coverage (field-level + external-dep skew)
+// ---------------------------------------------------------------------------
+//
+// [`WIRE_SURFACE`] pins the ordered SET OF TYPES that ride the wire; the `plugin_registrations_match_
+// wire_surface` tripwire binds that list to the actual `plugin` registration block, and the
+// `wire_surface_is_pinned` tripwire pins the list's hash. Together those catch a type ADDED, REMOVED,
+// RENAMED, or REORDERED. They do NOT catch a change to what a type SERIALIZES: adding a field to
+// `VolumeSnapshot`/`CrewSnapshot`/`NetCrew` renames no registered type, so the fingerprint stays put
+// while the two ends misdeserialize each other — the exact silent skew the guard exists to refuse.
+//
+// COVERAGE MODEL, in two halves that together cover every byte on the wire:
+//   * OWN types (defined in this crate) — covered by [`WIRE_TYPES_HASH`]: the `wire_types_are_pinned`
+//     tripwire source-scans each wire-facing struct/enum's DEFINITION TEXT (comments/whitespace
+//     stripped, so a doc or reformat edit is invisible; a field/variant/type change is not) and hashes
+//     the lot. This is the whole `WIRE_SURFACE` own-type graph, followed through embeds: `NetCrew`
+//     carries `VolumeSnapshot` which carries `CrewSnapshot`, `TankCommand` (src/command.rs) carries
+//     `CrewSwap`, and both `CrewSnapshot` and `CrewSwap` carry `CrewStation` (src/damage.rs).
+//   * EXTERNAL types (avian `Position`/`Rotation`/`LinearVelocity`/`AngularVelocity`, plus lightyear's
+//     own wire framing) — their source is not in this tree to scan, so they are covered by DEP VERSION:
+//     [`WIRE_DEP_AVIAN3D`]/[`WIRE_DEP_LIGHTYEAR`] pin the resolved `Cargo.lock` versions, so a bump of
+//     either dep (which can silently change how those types serialize or how lightyear frames them)
+//     also trips a tripwire and demands a [`PROTOCOL_REV`] bump.
+//
+// Every one of these tripwires fails with the SAME instruction — bump `PROTOCOL_REV` and re-pin — so a
+// wire change on ANY axis (type set, field layout, or dep version) forces the fingerprint to move.
+
+/// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin this
+/// (and bump [`PROTOCOL_REV`]) in the same diff whenever a wire-facing struct/enum's definition
+/// changes; the `wire_types_are_pinned` tripwire prints the new value. See the block above for the
+/// coverage model. `#[cfg(test)]` for the same reason as `WIRE_SURFACE`.
+#[cfg(test)]
+const WIRE_TYPES_HASH: u64 = 0xf574_3db6_e37b_4567;
+
+/// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
+/// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
+/// change the on-wire bytes without touching any source in this tree, so it must also bump
+/// [`PROTOCOL_REV`]; the `wire_types_are_pinned` tripwire enforces it. `#[cfg(test)]` for the same
+/// reason as `WIRE_SURFACE`.
+#[cfg(test)]
+const WIRE_DEP_AVIAN3D: &str = "0.7.0";
+#[cfg(test)]
+const WIRE_DEP_LIGHTYEAR: &str = "0.28.0";
+
 /// Registers everything both sides of the wire must agree on: replicated components, the cosmetic
 /// fire message/channel, and the `TankCommand` input protocol — the exact surface enumerated in
 /// `WIRE_SURFACE` above (keep the two in lockstep; the `wire_surface_is_pinned` tripwire enforces
@@ -1065,6 +1109,301 @@ mod tests {
             actual, WIRE_SURFACE_HASH,
             "wire surface changed: bump PROTOCOL_REV and re-pin WIRE_SURFACE_HASH to {actual:#018x}",
         );
+    }
+
+    // --- Source-scan tripwires --------------------------------------------------------------------
+    //
+    // These read this crate's own source (via `CARGO_MANIFEST_DIR`) and grep it, the same SOURCE-SCAN
+    // pattern `tests/net_boundary.rs` uses to enforce an architectural contract. They are honest-but-
+    // simple line/substring scanners, NOT a Rust parser — resilient to reformatting, and biased toward
+    // FALSE TRIPS (which merely force a harmless re-pin) over false passes (which would let a wire skew
+    // through). Comments/whitespace are stripped first so prose and layout edits never trip them.
+
+    /// Read a repo-relative source file (or `Cargo.lock`) for a scan.
+    fn read_source(rel: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {rel}: {e}"))
+    }
+
+    /// Blank `//` line- and `/* */` (nesting) block-comments to spaces, preserving newlines so line
+    /// indices survive. Same intent as `net_boundary`'s `strip_comments`: only CODE is scanned, so a
+    /// wire type named in prose can't trip a tripwire and a doc edit can't move a hash.
+    fn strip_comments(src: &str) -> String {
+        let mut out = String::with_capacity(src.len());
+        let mut rest = src;
+        let mut block_depth = 0usize;
+        while let Some(c) = rest.chars().next() {
+            if block_depth > 0 {
+                if rest.starts_with("/*") {
+                    block_depth += 1;
+                    out.push_str("  ");
+                    rest = &rest[2..];
+                } else if rest.starts_with("*/") {
+                    block_depth -= 1;
+                    out.push_str("  ");
+                    rest = &rest[2..];
+                } else {
+                    out.push(if c == '\n' { '\n' } else { ' ' });
+                    rest = &rest[c.len_utf8()..];
+                }
+            } else if rest.starts_with("/*") {
+                block_depth = 1;
+                out.push_str("  ");
+                rest = &rest[2..];
+            } else if rest.starts_with("//") {
+                // Blank to end of line (keep the newline).
+                let end = rest.find('\n').unwrap_or(rest.len());
+                for _ in 0..end {
+                    out.push(' ');
+                }
+                rest = &rest[end..];
+            } else {
+                out.push(c);
+                rest = &rest[c.len_utf8()..];
+            }
+        }
+        out
+    }
+
+    /// The `plugin` fn body (between its outermost braces), comment-stripped. Brace-matched rather than
+    /// line-delimited so the closure/config braces inside it (e.g. `ChannelSettings { .. }`, the
+    /// `LightyearAvianPlugin { .. }` block) don't fool the scan.
+    fn plugin_body(stripped: &str) -> &str {
+        let sig = stripped
+            .find("fn plugin(app: &mut App) {")
+            .expect("plugin() signature present");
+        let open = sig + stripped[sig..].find('{').expect("plugin() opening brace");
+        let bytes = stripped.as_bytes();
+        let mut depth = 0i32;
+        for (i, &b) in bytes.iter().enumerate().skip(open) {
+            match b {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &stripped[open + 1..i];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unbalanced braces in plugin()");
+    }
+
+    /// The registration forms that put a type on the wire, each identified by the exact call `plugin`
+    /// makes. NOT `local_rollback::<T>` / `add_observer(..::<T>)` — those register ROOT-LOCAL rollback
+    /// state that never crosses the wire, so they are deliberately absent.
+    const REG_MARKERS: &[&str] = &[
+        ".component::<",        // `app.component::<T>().replicate()` (+ `.predict()` chains)
+        ".add_channel::<",      // `app.add_channel::<T>(..)`
+        ".register_message::<", // `app.register_message::<T>()`
+        "InputPlugin::<",       // `InputPlugin::<T>::default()` — the input protocol
+    ];
+
+    /// Derive the ordered wire-type list straight from `plugin`'s registration calls, left-to-right,
+    /// top-to-bottom. Each marker is immediately followed by `<Type>`; the last `::`-segment is the
+    /// bare type name `WIRE_SURFACE` lists.
+    fn registered_types(body: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for line in body.lines() {
+            let mut rest = line;
+            while let Some((idx, marker)) = REG_MARKERS
+                .iter()
+                .filter_map(|m| rest.find(m).map(|i| (i, *m)))
+                .min_by_key(|(i, _)| *i)
+            {
+                let after = &rest[idx + marker.len()..];
+                let Some(end) = after.find('>') else { break };
+                let name = after[..end]
+                    .trim()
+                    .rsplit("::")
+                    .next()
+                    .expect("split yields at least one segment")
+                    .trim()
+                    .to_string();
+                out.push(name);
+                rest = &after[end + 1..];
+            }
+        }
+        out
+    }
+
+    /// FINDING 1 TRIPWIRE. The types `plugin` actually registers must equal [`WIRE_SURFACE`], in order.
+    /// This is what stops the hand list from silently diverging from the code: add / remove / reorder a
+    /// registration in `plugin` (e.g. `app.component::<NetSmoke>().replicate()`) WITHOUT editing
+    /// `WIRE_SURFACE` and this fails — which is the whole point, since forgetting the `PROTOCOL_REV`
+    /// bump means forgetting the adjacent list too. Fixing it (updating `WIRE_SURFACE`) then trips
+    /// `wire_surface_is_pinned`, which forces the `PROTOCOL_REV` bump + re-pin. One edit, two gates, no
+    /// silent wire skew.
+    #[test]
+    fn plugin_registrations_match_wire_surface() {
+        let src = read_source("src/net/protocol.rs");
+        let derived = registered_types(plugin_body(&strip_comments(&src)));
+        let derived: Vec<&str> = derived.iter().map(String::as_str).collect();
+        assert_eq!(
+            derived.as_slice(),
+            WIRE_SURFACE,
+            "plugin()'s registration block no longer matches WIRE_SURFACE. A replicated component, \
+             channel, message, or input was added / removed / reordered in plugin() without updating \
+             the hand-maintained WIRE_SURFACE list beside it. Update WIRE_SURFACE to match plugin() \
+             (which then fails wire_surface_is_pinned), then bump PROTOCOL_REV and re-pin \
+             WIRE_SURFACE_HASH — all in the same diff.",
+        );
+    }
+
+    /// The own wire-facing types whose DEFINITION TEXT rides [`WIRE_TYPES_HASH`], each as
+    /// `(source file, type name)`. This is the `WIRE_SURFACE` own-type graph followed through its
+    /// embeds (see the coverage-model block by the const): the five snapshot/marker components and the
+    /// fire message from this file, `TankCommand`/`CrewSwap` from `command.rs`, and the `CrewStation`
+    /// both crew types embed from `damage.rs`. External wire types (avian/lightyear) are covered by dep
+    /// version instead — they have no source here to scan.
+    const WIRE_TYPE_DEFS: &[(&str, &str)] = &[
+        ("src/net/protocol.rs", "NetTank"),
+        ("src/net/protocol.rs", "NetBot"),
+        ("src/net/protocol.rs", "ServoAngles"),
+        ("src/net/protocol.rs", "NetCrew"),
+        ("src/net/protocol.rs", "VolumeSnapshot"),
+        ("src/net/protocol.rs", "CrewSnapshot"),
+        ("src/net/protocol.rs", "LaunchedTurretPose"),
+        ("src/net/protocol.rs", "FireChannel"),
+        ("src/net/protocol.rs", "FireEvent"),
+        ("src/command.rs", "TankCommand"),
+        ("src/command.rs", "CrewSwap"),
+        ("src/damage.rs", "CrewStation"),
+    ];
+
+    /// Whether `line` is the `struct NAME`/`enum NAME` DEFINITION line — the keyword immediately
+    /// followed by the exact name and a non-identifier boundary, so `VolumeSnapshot` never matches
+    /// `VolumeSnapshotSource`.
+    fn is_def_line(line: &str, name: &str) -> bool {
+        ["struct ", "enum "].iter().any(|kw| {
+            let needle = format!("{kw}{name}");
+            line.find(&needle).is_some_and(|idx| {
+                line[idx + needle.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|c| !c.is_alphanumeric() && c != '_')
+            })
+        })
+    }
+
+    /// Extract a type's DEFINITION from comment-stripped source `stripped`: its preceding attribute
+    /// lines (the `#[derive(..)]` that governs its serde), the `struct`/`enum` header, and the body up
+    /// to the closing `}` (or the `;` of a unit struct). Whitespace is then removed entirely, so only a
+    /// real token change (a field, a variant, a type, a derive) moves the result — a reformat or a doc
+    /// edit does not. Walking back over the contiguous non-blank attribute lines stops at the blank the
+    /// stripped doc-comment leaves above every wire type (house style: every wire type is documented),
+    /// so it is conservative — an over-grab only forces a harmless re-pin, never a missed field.
+    fn normalized_type_def(stripped: &str, name: &str) -> String {
+        let lines: Vec<&str> = stripped.lines().collect();
+        let kw = lines
+            .iter()
+            .position(|l| is_def_line(l, name))
+            .unwrap_or_else(|| panic!("definition of `{name}` not found"));
+        // Walk back over contiguous non-blank lines (the attribute block), stop at the blank the
+        // doc-comment strips to.
+        let mut start = kw;
+        while start > 0 && !lines[start - 1].trim().is_empty() {
+            start -= 1;
+        }
+        // Forward from the header: a unit struct ends at the first `;`, else brace-match the body.
+        let region: String = lines[kw..].join("\n");
+        let semi = region.find(';');
+        let brace = region.find('{');
+        let end = match (brace, semi) {
+            (Some(b), Some(s)) if s < b => s + 1,
+            (None, Some(s)) => s + 1,
+            (Some(b), _) => {
+                let bytes = region.as_bytes();
+                let mut depth = 0i32;
+                let mut close = None;
+                for (i, &by) in bytes.iter().enumerate().skip(b) {
+                    match by {
+                        b'{' => depth += 1,
+                        b'}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                close = Some(i + 1);
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                close.unwrap_or_else(|| panic!("unbalanced braces in `{name}` definition"))
+            }
+            _ => panic!("no terminator (`;` or `{{`) for `{name}` definition"),
+        };
+        let attrs = lines[start..kw].join("\n");
+        let def = format!("{attrs}\n{}", &region[..end]);
+        def.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    /// FNV-1a over every own wire type's normalized definition, each terminated by `\n` (so no two
+    /// distinct definition sets collide by concatenation) — the same fold shape as `hash_wire_surface`.
+    fn hash_wire_types() -> u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        for (file, name) in WIRE_TYPE_DEFS {
+            let stripped = strip_comments(&read_source(file));
+            for byte in normalized_type_def(&stripped, name).bytes() {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            hash ^= u64::from(b'\n');
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        hash
+    }
+
+    /// The resolved version of a `Cargo.lock` package. Scans the `[[package]]` blocks for the one whose
+    /// `name = "…"` matches, then reads its `version = "…"`.
+    fn locked_version(lock: &str, crate_name: &str) -> String {
+        let needle = format!("name = \"{crate_name}\"");
+        let block = lock
+            .split("[[package]]")
+            .find(|b| b.lines().any(|l| l.trim() == needle))
+            .unwrap_or_else(|| panic!("`{crate_name}` not found in Cargo.lock"));
+        block
+            .lines()
+            .find_map(|l| {
+                l.trim()
+                    .strip_prefix("version = \"")
+                    .and_then(|v| v.strip_suffix('"'))
+            })
+            .unwrap_or_else(|| panic!("no version for `{crate_name}` in Cargo.lock"))
+            .to_string()
+    }
+
+    /// FINDING 2 TRIPWIRE. A field-level serde change to an own wire type (a field added to
+    /// `VolumeSnapshot`/`CrewSnapshot`/`NetCrew`, etc.) renames no registered type, so `WIRE_SURFACE`
+    /// and its hash stay green — yet skewed builds would then CONNECT (same fingerprint) and
+    /// misdeserialize. This pins the definition TEXT of every own wire type, and the resolved versions
+    /// of the external wire deps (avian/lightyear), so either kind of change trips here and forces the
+    /// `PROTOCOL_REV` bump. See the coverage-model block by the consts.
+    #[test]
+    fn wire_types_are_pinned() {
+        let actual = hash_wire_types();
+        assert_eq!(
+            actual, WIRE_TYPES_HASH,
+            "a wire-facing type DEFINITION changed (a field / variant / type / derive on one of the \
+             own wire types) without a PROTOCOL_REV bump: skewed builds would connect and \
+             misdeserialize. Bump PROTOCOL_REV and re-pin WIRE_TYPES_HASH to {actual:#018x} in the \
+             same diff.",
+        );
+
+        let lock = read_source("Cargo.lock");
+        for (crate_name, pinned) in [
+            ("avian3d", WIRE_DEP_AVIAN3D),
+            ("lightyear", WIRE_DEP_LIGHTYEAR),
+        ] {
+            let locked = locked_version(&lock, crate_name);
+            assert_eq!(
+                &locked, pinned,
+                "external wire dep `{crate_name}` moved {pinned} -> {locked}: its types (or wire \
+                 framing) can serialize differently, an invisible skew. Bump PROTOCOL_REV and update \
+                 the pinned WIRE_DEP_* version in the same diff.",
+            );
+        }
     }
 
     /// The fingerprint is a pure function of the build (so a same-build client/server always agree
