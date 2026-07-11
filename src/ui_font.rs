@@ -41,8 +41,9 @@ const OVERLAY_FONT_PX: f32 = 48.0;
 /// each commented that they "mirror" the others. Callers supply only what genuinely differs:
 ///
 /// - `node_markers` — component(s) placed on the backdrop node. This is each site's identity and its
-///   despawn handle: `MenuOverlayNode`, `ConnectStatusNode`, the death-screen state enum, or
-///   `DespawnOnExit(Paused)`. Everything each site queries or despawns hangs off this.
+///   despawn handle: the shared `overlay::OverlayNode(_)` (which drives z + one-scrim visibility) plus
+///   any site-specific marker such as the death-screen state enum, or `DespawnOnExit(Paused)` for the
+///   single-player pause overlay. Everything each site queries or despawns hangs off this.
 /// - `text` — the message (may contain `\n`).
 /// - `text_markers` — component(s) on the `Text` child. Only the connect overlay needs one
 ///   (`ConnectStatusText`, so its label can be rewritten later); the other three pass `()`.

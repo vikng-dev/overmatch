@@ -192,7 +192,12 @@ pub fn plugin(app: &mut App) {
                 // Only the Lshift view toggle is player input (gated on the cursor); the overlay,
                 // toast, and range readout are presentation and keep updating with the cursor free.
                 toggle_sight.in_set(PlayerInputSet).in_set(SightToggled),
-                update_view_death_overlay,
+                // On the net client this DECLARES `Overlay::ViewDead` (+ its prompt text) and leaves
+                // the visibility swap to the shared `overlay::apply_overlay_visibility` reconciler — so
+                // its declaration joins the `Declare` phase and its apply reads the fully-reconciled
+                // set (the ordering fix). In single-player (no `Overlays`) it still sets visibility
+                // itself. `Declare` is unconfigured in single-player, so it imposes nothing there.
+                update_view_death_overlay.in_set(overlay::OverlaySet::Declare),
                 // After `toggle_sight`, so a refused switch this frame shows its reason.
                 update_toast,
                 update_range_readout,
@@ -266,6 +271,13 @@ fn spawn_view_death_overlay(mut commands: Commands, fonts: Res<UiFonts>) {
     commands
         .spawn((
             ViewDeathOverlay,
+            // `OverlayNode(ViewDead)` stamps the one-scrim contract's lowest z via its hook (in BOTH
+            // single-player and net — the hook always runs): the view-death black sits BELOW the death
+            // screen, so whole-crew death (Death latched) can never let this opaque black occlude "YOU
+            // DIED" — the spawn-order bug this redesign fixes. On the net client the marker ALSO hands
+            // this node's visibility to `overlay::apply_overlay_visibility`, which hard-suppresses it
+            // whenever a higher overlay owns the scrim; the z is the belt to that brace.
+            overlay::OverlayNode(Overlay::ViewDead),
             Node {
                 width: Val::Percent(100.0),
                 height: Val::Percent(100.0),
@@ -276,11 +288,6 @@ fn spawn_view_death_overlay(mut commands: Commands, fonts: Res<UiFonts>) {
                 ..default()
             },
             BackgroundColor(Color::BLACK),
-            // The one-scrim contract's lowest z: the view-death black sits BELOW the death screen, so
-            // whole-crew death (Death latched) can never let this opaque black occlude "YOU DIED" — the
-            // spawn-order bug this redesign fixes. On the net client `update_view_death_overlay` also
-            // hard-suppresses it whenever Death is latched; the z is the belt to that braces.
-            GlobalZIndex(Overlay::ViewDead.zindex()),
             Visibility::Hidden,
         ))
         .with_children(|parent| {
@@ -977,11 +984,14 @@ fn drive_gunner_aim(
 /// the player to press Lshift to switch to the other view if its crewman is alive; if both are
 /// dead, the prompt says so (the tank is effectively dead — 0 living crew imminent).
 ///
-/// On the NET client this participates in the overlay authority: it declares `Overlay::ViewDead`
-/// presence and defers its own visibility to the one-scrim rule — suppressed entirely whenever a
-/// higher overlay (the death screen above all, but also the menu / connect screen) owns the scrim, so
-/// whole-crew death shows "YOU DIED", not this black. In single-player the `Overlays` resource is
-/// absent (`Option` is `None`) and it behaves standalone as before: crewman down → black + prompt.
+/// On the NET client this participates in the overlay authority: it runs in
+/// [`overlay::OverlaySet::Declare`] and only DECLARES `Overlay::ViewDead` presence (+ refreshes the
+/// prompt text), leaving the visibility swap to the shared `overlay::apply_overlay_visibility`
+/// reconciler that runs AFTER `Declare`. That split is the ordering fix: the one-scrim decision reads a
+/// fully-declared set, so this black is suppressed entirely whenever a higher overlay (the death screen
+/// above all, but also the menu / connect screen) owns the scrim — whole-crew death shows "YOU DIED",
+/// not this black. In single-player the `Overlays` resource is absent (`Option` is `None`) and this
+/// system sets the node's visibility itself, standalone as before: crewman down → black + prompt.
 fn update_view_death_overlay(
     mode: Res<SightMode>,
     controlled: ControlledTank,
@@ -1005,27 +1015,31 @@ fn update_view_death_overlay(
     // controlled tank existing (no station to be dead without one).
     let crewman_down = has_controlled && !view_available(&controlled, &views, active_view);
 
-    // Declare presence into the net authority (net client only), then let the one-scrim rule decide
-    // whether we actually draw. In single-player there is no authority: draw whenever `crewman_down`.
-    let suppressed = if let Some(mut overlays) = overlays {
-        overlays.declare(Overlay::ViewDead, crewman_down);
-        !overlay::draws_scrim(&overlays, Overlay::ViewDead)
-    } else {
-        false
-    };
-
-    if !crewman_down || suppressed {
-        *vis = Visibility::Hidden;
-        return;
+    // Refresh the prompt whenever the active crewman is down (identical in both modes); a hidden node's
+    // stale text is harmless and re-derived here before it can be shown again.
+    if crewman_down {
+        let other_available = view_available(&controlled, &views, other_view);
+        *text = Text::new(if other_available {
+            format!("Crewman down — [Lshift] for {other_label}")
+        } else {
+            "All view crew down".to_string()
+        });
     }
 
-    let other_available = view_available(&controlled, &views, other_view);
-    *text = Text::new(if other_available {
-        format!("Crewman down — [Lshift] for {other_label}")
-    } else {
-        "All view crew down".to_string()
-    });
-    *vis = Visibility::Visible;
+    match overlays {
+        // Net client: DECLARE presence only; the shared reconciler owns visibility from the fully-
+        // declared set (suppressed under any higher overlay). We must not also write `Visibility` here
+        // — that would double-write it and read a not-yet-reconciled set.
+        Some(mut overlays) => overlays.declare(Overlay::ViewDead, crewman_down),
+        // Single-player: no authority — draw whenever the active crewman is down.
+        None => {
+            vis.set_if_neq(if crewman_down {
+                Visibility::Visible
+            } else {
+                Visibility::Hidden
+            });
+        }
+    }
 }
 
 /// Tick the refusal toast: show its message while it has time left, then hide it. Set by
