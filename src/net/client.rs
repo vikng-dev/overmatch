@@ -590,13 +590,10 @@ fn drive_connection(
     }
 }
 
-/// The centered connect-status overlay's container (a dim full-screen backdrop) — toggled visible
-/// while unconnected and hidden once the link is up. Its `Text` child carries [`ConnectStatusText`].
-#[derive(Component)]
-struct ConnectStatusNode;
-
-/// The connect-status message node inside [`ConnectStatusNode`] — its text is rewritten from
-/// [`ConnectRetry`] by [`update_connect_status`].
+/// The connect-status message node inside the connect overlay — its text is rewritten from
+/// [`ConnectRetry`] by [`update_connect_status`]. The backdrop node itself carries no bespoke marker:
+/// it is an `overlay::OverlayNode(ConnectStatus)`, so its z and scrim visibility are the shared
+/// authority's job; only this text child needs its own handle for the in-place label rewrite.
 #[derive(Component)]
 struct ConnectStatusText;
 
@@ -607,56 +604,48 @@ fn spawn_connect_status(mut commands: Commands, fonts: Res<UiFonts>) {
     // The only site to mark the text child too (`ConnectStatusText`), so `update_connect_status` can
     // rewrite the label in place. Spawned with default (visible) `Visibility` — the first frame is
     // pre-connect, and `update_connect_status` drives it from there.
-    let node = crate::ui_font::spawn_overlay(
+    // The `OverlayNode` marker stamps the one-scrim `GlobalZIndex` (highest of the four, so a
+    // connect/reconnect covers everything) via its hook and hands visibility to the shared
+    // `overlay::apply_overlay_visibility` reconciler; only the text child keeps a bespoke marker.
+    crate::ui_font::spawn_overlay(
         &mut commands,
         &fonts.hud,
-        ConnectStatusNode,
+        crate::overlay::OverlayNode(crate::overlay::Overlay::ConnectStatus),
         "CONNECTING…",
         ConnectStatusText,
         Some(Color::srgba(0.0, 0.0, 0.0, 0.6)),
     );
-    // The one-scrim contract's z: highest of the four, so a connect/reconnect covers everything.
-    commands.entity(node).insert(GlobalZIndex(
-        crate::overlay::Overlay::ConnectStatus.zindex(),
-    ));
 }
 
-/// Drive the connect-status overlay from [`ConnectRetry`] + the live connection state: hidden once
-/// `Connected` (possession + the game HUD take over), else `CONNECTING…` / `CONNECTING… (retry N)`
-/// before a first connect and `RECONNECTING…` after an in-game drop.
+/// Declare the connect-status overlay's presence from the live connection state and drive its LABEL
+/// from [`ConnectRetry`]: `CONNECTING…` / `CONNECTING… (retry N)` before a first connect, the
+/// build-mismatch hint after enough first-connect failures, and `RECONNECTING…` after an in-game drop.
+/// Presence declaration runs in [`crate::overlay::OverlaySet::Declare`]; the backdrop's z and scrim
+/// visibility are the shared `OverlayNode` authority's, so this system no longer touches `Visibility`.
 ///
-/// Every write is guarded on ACTUAL change — `Visibility` on BOTH branches (the hidden branch always
-/// did; the visible branch used to blind-write `Visible` and rebuild the label `String` every frame),
-/// and the label only when the `(connected_once, attempts)` pair it renders changes. That pair is the
-/// label's sole input, so memoizing it in a `Local` skips both the `format!` allocation and the `Text`
-/// change-detection churn on the steady-state frames (which are almost all of them — the overlay sits
-/// on one message for seconds at a time). The debug-HUD idiom, now applied symmetrically.
+/// The label write is guarded on ACTUAL change — rebuilt only when the `(connected_once, attempts)`
+/// pair it renders changes. That pair is the label's sole input, so memoizing it in a `Local` skips
+/// both the `format!` allocation and the `Text` change-detection churn on the steady-state frames
+/// (which are almost all of them — the overlay sits on one message for seconds at a time).
+///
+/// The mismatch hint is gated on `!connected_once`: only a session that has NEVER connected can be a
+/// build mismatch (the fingerprints are transport-indistinguishable from a down server); once we have
+/// connected, a later drop is a transient link loss and stays `RECONNECTING…` for as long as the
+/// retries run, never accusing a mid-game player's client of being out of date.
 fn update_connect_status(
     retry: Res<ConnectRetry>,
     connected: Query<(), (With<Connected>, With<NetcodeClient>)>,
     mut overlays: ResMut<crate::overlay::Overlays>,
-    mut container: Query<&mut Visibility, With<ConnectStatusNode>>,
     mut text: Query<&mut Text, With<ConnectStatusText>>,
     mut shown: Local<Option<(bool, u32)>>,
 ) {
     use crate::overlay::Overlay;
     let is_connected = !connected.is_empty();
     // Declare presence into the overlay authority: the connect screen is latched whenever the link is
-    // not up. It is the highest-priority overlay, so it will own the scrim whenever present.
+    // not up. It is the highest-priority overlay, so it will own the scrim whenever present — and the
+    // shared `overlay::apply_overlay_visibility` reconciler swaps the backdrop's visibility from that.
+    // This system only owns the label text now (its zindex/visibility moved to the `OverlayNode`).
     overlays.declare(Overlay::ConnectStatus, !is_connected);
-
-    let Ok(mut visibility) = container.single_mut() else {
-        return;
-    };
-    // Visibility follows the one-scrim rule (ConnectStatus is top when present, so this is effectively
-    // "visible while unconnected", but routed through the single authority for uniformity).
-    visibility.set_if_neq(
-        if crate::overlay::draws_scrim(&overlays, Overlay::ConnectStatus) {
-            Visibility::Visible
-        } else {
-            Visibility::Hidden
-        },
-    );
     if is_connected {
         return;
     }
@@ -664,21 +653,28 @@ fn update_connect_status(
     // The label is a pure function of `(connected_once, attempts)` — rebuild it (and rewrite the
     // `Text`) only when that pair changes, not every frame. `attempts` is clamped into the memo key at
     // the hint threshold, so once the persistent-failure hint is showing the key stops changing and
-    // the `format!`/`Text`-write churn stops too (the label is constant past that point).
+    // the `format!`/`Text`-write churn stops too (the label is constant past that point). The clamp
+    // is safe for BOTH paths: a never-connected session climbs to the hint and pins there, while a
+    // reconnecting session (`connected_once`) never reaches the mismatch branch below, so its key just
+    // pins at the clamp with the label constant on "RECONNECTING…".
     let key = (
         retry.connected_once,
         retry.attempts.min(MISMATCH_HINT_AFTER_ATTEMPTS),
     );
     if *shown != Some(key) {
-        let label = if retry.attempts >= MISMATCH_HINT_AFTER_ATTEMPTS {
-            // Enough attempts have failed to rule out a server still starting up. The refusal a
-            // fingerprint mismatch produces is indistinguishable from an unreachable server (see
-            // `MISMATCH_HINT_AFTER_ATTEMPTS`), so name both causes rather than guess.
+        let label = if retry.connected_once {
+            // We connected earlier this session, so the fingerprints PROVABLY matched — a mid-game
+            // drop is a transient link loss, never a build mismatch. Keep "RECONNECTING…" indefinitely
+            // (retries are uncapped) rather than ever accusing a connected player's client of being
+            // out of date.
+            "RECONNECTING…".to_string()
+        } else if retry.attempts >= MISMATCH_HINT_AFTER_ATTEMPTS {
+            // Never connected this session AND enough attempts have failed to rule out a server still
+            // starting up. The refusal a fingerprint mismatch produces is indistinguishable from an
+            // unreachable server (see `MISMATCH_HINT_AFTER_ATTEMPTS`), so name both causes.
             "CAN'T CONNECT — server down or client/server build mismatch\n\
              (update the client or redeploy the server)"
                 .to_string()
-        } else if retry.connected_once {
-            "RECONNECTING…".to_string()
         } else if retry.attempts == 0 {
             "CONNECTING…".to_string()
         } else {

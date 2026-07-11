@@ -67,22 +67,27 @@ fn respawn_timed_out(awaiting: &AwaitingRespawn, has_live: bool, now: f64) -> bo
 pub fn plugin(app: &mut App) {
     app.init_resource::<AwaitingRespawn>()
         .add_systems(Startup, spawn_death_status_line)
-        // `request_respawn` consumes a player keypress, so it carries the same license every other
-        // device-reading system does: [`PlayerInputSet`], gated on a captured cursor. Menu open or
-        // window unfocused → cursor released → the system doesn't run — which is exactly when
-        // `feed_action_state` zeroes the wire command, so a respawn edge can never be latched into a
-        // command the wire is about to swallow. One invariant covers both, with nothing to keep in
-        // sync. `toggle_death_screen` stays ungated (the overlay must manage itself regardless).
-        // `apply_death_visibility` runs after it so a state change this frame swaps visibility the
-        // same frame.
         .add_systems(
             Update,
             (
-                request_respawn.in_set(PlayerInputSet),
-                toggle_death_screen,
-                apply_death_visibility,
-            )
-                .chain(),
+                // Presence declaration for the death overlay joins the shared `Declare` phase, so the
+                // generic scrim reconciler AND the status-line one below read ONE fully-declared set
+                // (the ordering fix: death and menu visuals can no longer be computed from different
+                // generations of the set on the Esc edge while dead).
+                toggle_death_screen.in_set(overlay::OverlaySet::Declare),
+                // `request_respawn` consumes a player keypress, so it carries `PlayerInputSet`'s cursor
+                // license. It ALSO runs after `Declare` and re-checks `overlay::input_blocked` on the
+                // reconciled set, so a respawn edge pressed the SAME frame a menu opens (R+Esc, or an
+                // alt-tab) — before `PlayerInputSet`'s cursor gate has caught up — is refused rather
+                // than latched into a command `feed_action_state` is about to zero (the phantom
+                // `RESPAWNING…` fix).
+                request_respawn
+                    .in_set(PlayerInputSet)
+                    .after(overlay::OverlaySet::Declare),
+                // The death STATUS LINE is the one one-scrim exemption; its tiny reconciler runs after
+                // `Declare` alongside the generic `overlay::apply_overlay_visibility`.
+                apply_death_status_line.after(overlay::OverlaySet::Declare),
+            ),
         );
 }
 
@@ -98,8 +103,10 @@ pub fn plugin(app: &mut App) {
 ///   - **hidden** — a live own tank exists; clear `AwaitingRespawn` and take the overlay down.
 ///
 /// A live own tank is `Controlled` without `TankKnockedOut` (the fresh tank spawns full-health, so its
-/// health-derived `TankKnockedOut` is absent). Runs after [`request_respawn`] so a press this frame is
-/// reflected immediately. Spawn/despawn only on a state change — not every frame.
+/// health-derived `TankKnockedOut` is absent). Runs in [`overlay::OverlaySet::Declare`] (so its `Death`
+/// declaration is reconciled before the scrim/status-line reconcilers read the set); a respawn pressed
+/// this frame by [`request_respawn`] — which now runs AFTER `Declare` — is reflected the next frame.
+/// Spawn/despawn only on a state change — not every frame.
 fn toggle_death_screen(
     time: Res<Time>,
     dead_own: Query<(), (With<Controlled>, With<TankKnockedOut>)>,
@@ -158,14 +165,27 @@ fn toggle_death_screen(
 /// Runs in [`PlayerInputSet`] (see the registration comment): while the cursor is released — menu
 /// open, window unfocused — this system doesn't run at all, so a respawn edge can never be latched
 /// into a command `feed_action_state` is zeroing on the wire. R with the menu up does nothing and the
-/// overlay stays on `press R`.
+/// overlay stays on `press R`. The `overlay::input_blocked` re-check below closes the ONE remaining
+/// gap the cursor gate can't: the frame a menu opens in the SAME tick R is pressed, before the cursor
+/// owner has released the cursor — refusing the latch there is what prevents a phantom `RESPAWNING…`.
 fn request_respawn(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
+    overlays: Res<Overlays>,
     mut dead_own: Query<&mut TankCommand, (With<Controlled>, With<TankKnockedOut>)>,
     mut awaiting: ResMut<AwaitingRespawn>,
 ) {
     if !keys.just_pressed(RESPAWN_KEY) {
+        return;
+    }
+    // Same-frame guard against a phantom `RESPAWNING…`: a menu opened THIS frame (R+Esc together) or
+    // an alt-tab (`focus_declare` declares the menu) is already in the reconciled set — we run after
+    // `OverlaySet::Declare` — but `PlayerInputSet`'s cursor gate hasn't caught up yet (the cursor owner
+    // releases later this frame). If input is blocked, refuse: do not write the wire `respawn` edge
+    // (`feed_action_state` would zero it anyway) nor latch `AwaitingRespawn`, so the overlay never
+    // sticks on `RESPAWNING…` for a request the server never sees. `window_focused = true` because a
+    // focus loss is itself represented in the set as the declared menu.
+    if overlay::input_blocked(&overlays, true) {
         return;
     }
     for mut command in &mut dead_own {
@@ -190,17 +210,17 @@ fn spawn_death_screen(commands: &mut Commands, state: DeathScreenNode, font: &Ha
         DeathScreenNode::Died => "YOU DIED\npress R to respawn",
         DeathScreenNode::Respawning => "RESPAWNING…",
     };
-    let node = crate::ui_font::spawn_overlay(
+    // Two markers: the stateful `DeathScreenNode` enum (text form + despawn handle) and the shared
+    // `OverlayNode(Death)`, which stamps the one-scrim `GlobalZIndex` via its hook and hands the full
+    // backdrop's visibility to `overlay::apply_overlay_visibility` (the status line is exempt, below).
+    crate::ui_font::spawn_overlay(
         commands,
         font,
-        state,
+        (state, overlay::OverlayNode(Overlay::Death)),
         text,
         (),
         Some(Color::srgba(0.15, 0.0, 0.0, 0.6)),
     );
-    commands
-        .entity(node)
-        .insert(GlobalZIndex(Overlay::Death.zindex()));
 }
 
 /// A thin, top-pinned, NON-interactive status line shown only while the death state is latched but the
@@ -240,26 +260,17 @@ fn spawn_death_status_line(mut commands: Commands, fonts: Res<UiFonts>) {
         });
 }
 
-/// Apply the one-scrim rule to the death overlay. Existence (spawn/despawn on the death STATE) stays
-/// with `toggle_death_screen`; this only visibility-swaps the two visual forms:
-///   - **Death is the scrim owner** (dead, no menu on top): the full node — red backdrop + "YOU DIED /
-///     press R" — is `Visible`, the status line `Hidden`.
-///   - **the menu is on top of Death** ([`overlay::death_status_line`]): the whole node is `Hidden`
-///     (backdrop + "press R" gone — never a prompt that can't work) and the thin status line takes
-///     over, drawn above the menu backdrop. Menu closes → the full screen snaps back (no despawn).
-///   - **Death not latched**: the node has been despawned; the status line stays `Hidden`.
-fn apply_death_visibility(
+/// Reconcile ONLY the death STATUS LINE — the one one-scrim exemption. The full backdrop node is a
+/// shared `overlay::OverlayNode(Death)`, so its visibility (red backdrop + "YOU DIED / press R", shown
+/// exactly while Death owns the scrim) is `overlay::apply_overlay_visibility`'s job now, and its
+/// existence (spawn/despawn on the death STATE) stays `toggle_death_screen`'s. This system only swaps
+/// the thin status line: `Visible` exactly while the death state is latched but the menu is drawn on
+/// top of it ([`overlay::death_status_line`]) — "DEAD — respawn on menu close", legible THROUGH the
+/// menu — and `Hidden` otherwise. Runs after `OverlaySet::Declare` so it reads the fully-reconciled set.
+fn apply_death_status_line(
     overlays: Res<Overlays>,
-    mut node: Query<&mut Visibility, (With<DeathScreenNode>, Without<DeathStatusLine>)>,
-    mut status: Query<&mut Visibility, (With<DeathStatusLine>, Without<DeathScreenNode>)>,
+    mut status: Query<&mut Visibility, With<DeathStatusLine>>,
 ) {
-    if let Ok(mut vis) = node.single_mut() {
-        vis.set_if_neq(if overlay::draws_scrim(&overlays, Overlay::Death) {
-            Visibility::Visible
-        } else {
-            Visibility::Hidden
-        });
-    }
     if let Ok(mut vis) = status.single_mut() {
         vis.set_if_neq(if overlay::death_status_line(&overlays) {
             Visibility::Visible

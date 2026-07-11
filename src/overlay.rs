@@ -30,6 +30,8 @@
 
 use std::collections::BTreeSet;
 
+use bevy::ecs::lifecycle::HookContext;
+use bevy::ecs::world::DeferredWorld;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow, WindowFocused};
 
@@ -170,10 +172,31 @@ const REFOCUS_GRAB_FRAMES: u8 = 2;
 #[derive(Resource, Default)]
 struct RefocusGrab(Option<u8>);
 
-/// The Esc menu overlay's backdrop node. Persistent (spawned once, visibility-swapped) so it can
-/// coexist in state with a latched death screen and snap back instantly, per the one-scrim rule.
-#[derive(Component)]
-struct MenuNode;
+/// Marks a full-screen overlay backdrop node as `overlay`, so ONE generic reconciler
+/// ([`apply_overlay_visibility`]) drives its scrim visibility from the shared [`draws_scrim`] rule and
+/// its [`Overlay::zindex`] is stamped exactly once (the `on_add` hook below). This retires the three
+/// hand-copied `set_if_neq(draws_scrim …)` blocks (menu / death backdrop / connect) and the four
+/// scattered `GlobalZIndex(Overlay::X.zindex())` stamps into this single marker. Every marked node is
+/// persistent (spawned once, visibility-swapped, never despawned for the swap) so it snaps back the
+/// instant the layer above closes. The death STATUS LINE is the sole exempt sibling — it is NOT an
+/// [`OverlayNode`] and keeps its own tiny reconciler in `net::death_screen`.
+#[derive(Component, Clone, Copy)]
+#[component(on_add = stamp_overlay_zindex)]
+pub(crate) struct OverlayNode(pub(crate) Overlay);
+
+/// Stamp the overlay's one-scrim `GlobalZIndex` the instant its [`OverlayNode`] marker lands, so no
+/// spawn site has to remember the z — the draw order is a pure function of which overlay it is.
+fn stamp_overlay_zindex(mut world: DeferredWorld, HookContext { entity, .. }: HookContext) {
+    let overlay = world
+        .entity(entity)
+        .get::<OverlayNode>()
+        .expect("OverlayNode present in its own on_add hook")
+        .0;
+    world
+        .commands()
+        .entity(entity)
+        .insert(GlobalZIndex(overlay.zindex()));
+}
 
 /// The pinned intra-frame order for the overlay authority: owners DECLARE presence, THEN the cursor
 /// owner derives the license and moves the cursor. Chained so the cursor (and, transitively, the
@@ -200,9 +223,12 @@ pub(crate) fn plugin(app: &mut App) {
             (
                 (esc_toggle, focus_declare).in_set(OverlaySet::Declare),
                 cursor_owner.in_set(OverlaySet::Cursor),
-                // Reads the reconciled set; ordered after the declarations so a menu opened this frame
-                // shows this frame.
-                apply_menu_visibility.after(OverlaySet::Declare),
+                // The ONE scrim reconciler for every marked overlay node. Ordered after ALL
+                // declarations (`OverlaySet::Declare`, which now holds the connect / death / view-death
+                // owners too) so it reads one fully-reconciled generation of the set — the fix for the
+                // cross-overlay one-frame skew. The death status line is the lone exemption and runs in
+                // `net::death_screen`, also after `Declare`.
+                apply_overlay_visibility.after(OverlaySet::Declare),
             ),
         );
 }
@@ -214,26 +240,47 @@ fn spawn_menu_overlay(mut commands: Commands, fonts: Res<UiFonts>) {
     let node = crate::ui_font::spawn_overlay(
         &mut commands,
         &fonts.hud,
-        MenuNode,
+        OverlayNode(Overlay::Menu),
         "MENU\nEsc to close",
         (),
         Some(Color::srgba(0.0, 0.0, 0.0, 0.6)),
     );
-    commands
-        .entity(node)
-        .insert((GlobalZIndex(Overlay::Menu.zindex()), Visibility::Hidden));
+    // The `GlobalZIndex` is stamped by the `OverlayNode` hook; only the initial hidden state is ours.
+    commands.entity(node).insert(Visibility::Hidden);
 }
 
 /// Esc toggles the menu presence directly on [`Overlays`] — the menu's one home, retiring the old
-/// `MenuOverlay{open}`. Close only when the menu is the top DISMISSABLE layer (so Esc under a connect
-/// screen can't half-close a menu buried beneath it); otherwise open. The cursor follows from
+/// `MenuOverlay{open}`. The routing is the pure [`esc_menu_target`]; the cursor follows from
 /// [`input_blocked`] via the cursor owner — this system moves no cursor itself.
 fn esc_toggle(keys: Res<ButtonInput<KeyCode>>, mut overlays: ResMut<Overlays>) {
     if !keys.just_pressed(KeyCode::Escape) {
         return;
     }
-    let open = top_dismissable(&overlays) != Some(Overlay::Menu);
-    overlays.declare(Overlay::Menu, open);
+    let present = esc_menu_target(&overlays);
+    overlays.declare(Overlay::Menu, present);
+}
+
+/// The menu presence an Esc press should declare, given the current set — pure so the routing is
+/// unit-testable without an app. Three cases:
+///   - the menu is the top DISMISSABLE layer → Esc CLOSES it (`false`);
+///   - an UNDISMISSABLE overlay outranks the menu (only a connect screen can) → Esc never OPENS a menu
+///     that would latch invisibly beneath it, and UNLATCHES one already buried there (dismiss intent),
+///     so both cases resolve to `false` — Esc under a connect screen with no menu is a no-op;
+///   - otherwise nothing latched outranks the menu → Esc OPENS it (`true`), even over the death screen.
+///
+/// This fixes the one-way latch: the old `top_dismissable(..) != Some(Menu)` opened the menu on EVERY
+/// Esc while a connect screen was up (undismissable, always top), so the player reconnected into a
+/// surprise input-blocking menu that no Esc could then remove.
+fn esc_menu_target(overlays: &Overlays) -> bool {
+    if top_dismissable(overlays) == Some(Overlay::Menu) {
+        return false; // the menu is on top and dismissable → close it
+    }
+    // Menu absent, or buried under an undismissable overlay that outranks it. If something outranks the
+    // menu (a connect screen), Esc must not open one and unlatches any buried; otherwise open.
+    let outranked = overlays
+        .top()
+        .is_some_and(|t| !t.dismissable() && t > Overlay::Menu);
+    !outranked
 }
 
 /// Alt-tab out declares the menu present (there is no online pause — the game keeps running behind the
@@ -296,15 +343,19 @@ fn cursor_owner(
     }
 }
 
-/// Visibility-swap the menu backdrop: shown only while the menu is the scrim owner (open and nothing
-/// higher-priority — a connect screen — on top of it). Kept latched in `Overlays` regardless, so it
-/// snaps back the instant a layer above closes.
-fn apply_menu_visibility(
+/// The ONE reconciler of the one-scrim rule for every [`OverlayNode`]: each marked backdrop is
+/// `Visible` only while its overlay owns the scrim ([`draws_scrim`] — the top of the reconciled set)
+/// and `Hidden` otherwise (visibility-swap, never despawn, so it snaps back the instant the layer above
+/// closes). Replaces the three hand-copied per-overlay visibility systems (menu / death backdrop /
+/// connect) with one; the death status line is the lone exemption (`net::death_screen`). Runs after
+/// [`OverlaySet::Declare`] so all owners — including the connect / death / view-death declarers now
+/// gathered there — have written their presence into the SAME set generation this reads.
+fn apply_overlay_visibility(
     overlays: Res<Overlays>,
-    mut menu: Query<&mut Visibility, With<MenuNode>>,
+    mut nodes: Query<(&OverlayNode, &mut Visibility)>,
 ) {
-    if let Ok(mut vis) = menu.single_mut() {
-        vis.set_if_neq(if draws_scrim(&overlays, Overlay::Menu) {
+    for (node, mut vis) in &mut nodes {
+        vis.set_if_neq(if draws_scrim(&overlays, node.0) {
             Visibility::Visible
         } else {
             Visibility::Hidden
@@ -436,6 +487,49 @@ mod tests {
         assert!(!draws_scrim(&set, Overlay::Death), "death backdrop hidden");
         assert!(death_status_line(&set), "status line shown instead");
         assert!(input_blocked(&set, true), "R gated — the menu blocks input");
+    }
+
+    /// Esc under a connect screen is a NO-OP: it must not latch an invisible, input-blocking menu that
+    /// the player then reconnects into (the one-way-latch bug). With no menu present and the connect
+    /// screen on top, the routing keeps the menu absent.
+    #[test]
+    fn esc_under_connect_is_a_no_op() {
+        assert!(
+            !esc_menu_target(&overlays(&[Overlay::ConnectStatus])),
+            "Esc under a connect screen latches nothing",
+        );
+    }
+
+    /// A menu latched before a reconnect took over is UNLATCHED by Esc (dismiss intent), so it isn't
+    /// waiting to block input the instant the link returns.
+    #[test]
+    fn esc_unlatches_a_menu_buried_under_connect() {
+        assert!(
+            !esc_menu_target(&overlays(&[Overlay::ConnectStatus, Overlay::Menu])),
+            "Esc dismisses a menu buried beneath the connect screen",
+        );
+    }
+
+    /// The ordinary toggle is unchanged: Esc opens the menu when nothing latched outranks it (including
+    /// over the death screen) and closes it when it is on top.
+    #[test]
+    fn esc_toggles_the_menu_normally() {
+        assert!(
+            esc_menu_target(&overlays(&[])),
+            "nothing up → Esc opens the menu",
+        );
+        assert!(
+            !esc_menu_target(&overlays(&[Overlay::Menu])),
+            "menu on top → Esc closes it",
+        );
+        assert!(
+            esc_menu_target(&overlays(&[Overlay::Death])),
+            "Death doesn't outrank the menu — Esc opens the menu while dead",
+        );
+        assert!(
+            !esc_menu_target(&overlays(&[Overlay::Menu, Overlay::Death])),
+            "menu over death → Esc closes it",
+        );
     }
 
     /// The status line is menu-over-death ONLY: it does not show when Death owns the scrim (full screen
