@@ -16,6 +16,7 @@ use bevy::prelude::*;
 
 use crate::command::TankCommand;
 use crate::damage::TankKnockedOut;
+use crate::overlay::{self, Overlay, Overlays};
 use crate::state::PlayerInputSet;
 use crate::tank::Controlled;
 use crate::ui_font::UiFonts;
@@ -63,15 +64,23 @@ fn respawn_timed_out(awaiting: &AwaitingRespawn, has_live: bool, now: f64) -> bo
 
 pub fn plugin(app: &mut App) {
     app.init_resource::<AwaitingRespawn>()
+        .add_systems(Startup, spawn_death_status_line)
         // `request_respawn` consumes a player keypress, so it carries the same license every other
         // device-reading system does: [`PlayerInputSet`], gated on a captured cursor. Menu open or
         // window unfocused → cursor released → the system doesn't run — which is exactly when
         // `feed_action_state` zeroes the wire command, so a respawn edge can never be latched into a
         // command the wire is about to swallow. One invariant covers both, with nothing to keep in
         // sync. `toggle_death_screen` stays ungated (the overlay must manage itself regardless).
+        // `apply_death_visibility` runs after it so a state change this frame swaps visibility the
+        // same frame.
         .add_systems(
             Update,
-            (request_respawn.in_set(PlayerInputSet), toggle_death_screen).chain(),
+            (
+                request_respawn.in_set(PlayerInputSet),
+                toggle_death_screen,
+                apply_death_visibility,
+            )
+                .chain(),
         );
 }
 
@@ -95,6 +104,7 @@ fn toggle_death_screen(
     live_own: Query<(), (With<Controlled>, Without<TankKnockedOut>)>,
     overlay: Query<(Entity, &DeathScreenNode)>,
     mut awaiting: ResMut<AwaitingRespawn>,
+    mut overlays: ResMut<Overlays>,
     fonts: Res<UiFonts>,
     mut commands: Commands,
 ) {
@@ -117,6 +127,11 @@ fn toggle_death_screen(
     } else {
         None
     };
+
+    // Declare `Death` presence into the overlay authority every frame (idempotent, self-healing): the
+    // death overlay is latched whenever there is a message to show. The scrim/visibility consequence is
+    // `apply_death_visibility`'s job; existence (spawn/despawn below) stays this system's.
+    overlays.declare(Overlay::Death, desired.is_some());
 
     let shown = overlay.single().ok().map(|(_, state)| *state);
     if desired == shown {
@@ -165,13 +180,15 @@ fn request_respawn(
 /// Spawn the graybox death overlay: a dim full-screen backdrop with centered white text, its message
 /// chosen by `state`. Deliberately minimal; shares `ui_font::spawn_overlay` with the menu, connect,
 /// and pause overlays so the family reads as one. The backdrop carries a red tint (its only departure
-/// from the others' black) and the state enum doubles as the node's marker + despawn handle.
+/// from the others' black) and the state enum doubles as the node's marker + despawn handle. Stamped
+/// with the one-scrim contract's `GlobalZIndex` (Death sits above the menu's z so the status line —
+/// which rides the same z — shows through the menu, though the full screen itself is hidden then).
 fn spawn_death_screen(commands: &mut Commands, state: DeathScreenNode, font: &Handle<Font>) {
     let text = match state {
         DeathScreenNode::Died => "YOU DIED\npress R to respawn",
         DeathScreenNode::Respawning => "RESPAWNING…",
     };
-    crate::ui_font::spawn_overlay(
+    let node = crate::ui_font::spawn_overlay(
         commands,
         font,
         state,
@@ -179,6 +196,75 @@ fn spawn_death_screen(commands: &mut Commands, state: DeathScreenNode, font: &Ha
         (),
         Some(Color::srgba(0.15, 0.0, 0.0, 0.6)),
     );
+    commands
+        .entity(node)
+        .insert(GlobalZIndex(Overlay::Death.zindex()));
+}
+
+/// A thin, top-pinned, NON-interactive status line shown only while the death state is latched but the
+/// menu is drawn on top of it ([`overlay::death_status_line`]): "DEAD — respawn on menu close". Exempt
+/// from the one-scrim suppression — it draws no backdrop, and its `GlobalZIndex` (Death's, above the
+/// menu's) keeps it legible THROUGH the menu, so the player knows the respawn key is merely gated
+/// (menu open, cursor released) rather than gone. We never show "press R" while R can't work; this line
+/// is what stands in for it. Persistent (spawned once, visibility-swapped) like the connect/menu nodes.
+#[derive(Component)]
+struct DeathStatusLine;
+
+fn spawn_death_status_line(mut commands: Commands, fonts: Res<UiFonts>) {
+    commands
+        .spawn((
+            DeathStatusLine,
+            Node {
+                width: Val::Percent(100.0),
+                position_type: PositionType::Absolute,
+                top: Val::Px(12.0),
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+            GlobalZIndex(Overlay::Death.zindex()),
+            Visibility::Hidden,
+        ))
+        .with_children(|parent| {
+            parent.spawn((
+                Text::new("DEAD — respawn on menu close"),
+                TextFont {
+                    // SemiBold: a terse all-caps status line.
+                    font: fonts.hud.clone().into(),
+                    font_size: FontSize::Px(20.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.9, 0.4, 0.3)),
+            ));
+        });
+}
+
+/// Apply the one-scrim rule to the death overlay. Existence (spawn/despawn on the death STATE) stays
+/// with `toggle_death_screen`; this only visibility-swaps the two visual forms:
+///   - **Death is the scrim owner** (dead, no menu on top): the full node — red backdrop + "YOU DIED /
+///     press R" — is `Visible`, the status line `Hidden`.
+///   - **the menu is on top of Death** ([`overlay::death_status_line`]): the whole node is `Hidden`
+///     (backdrop + "press R" gone — never a prompt that can't work) and the thin status line takes
+///     over, drawn above the menu backdrop. Menu closes → the full screen snaps back (no despawn).
+///   - **Death not latched**: the node has been despawned; the status line stays `Hidden`.
+fn apply_death_visibility(
+    overlays: Res<Overlays>,
+    mut node: Query<&mut Visibility, (With<DeathScreenNode>, Without<DeathStatusLine>)>,
+    mut status: Query<&mut Visibility, (With<DeathStatusLine>, Without<DeathScreenNode>)>,
+) {
+    if let Ok(mut vis) = node.single_mut() {
+        vis.set_if_neq(if overlay::draws_scrim(&overlays, Overlay::Death) {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        });
+    }
+    if let Ok(mut vis) = status.single_mut() {
+        vis.set_if_neq(if overlay::death_status_line(&overlays) {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        });
+    }
 }
 
 #[cfg(test)]
