@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.overmatch.target-sweep</string>
+
+    <!-- Run scripts/disk/sweep.sh through /bin/sh. cargo-sweep lives in ~/.cargo/bin,
+         which a launchd agent does not inherit on PATH, so the script calls tools by the
+         names launchd's minimal environment can resolve — and we widen PATH here too. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>/Users/Yan/Desktop/github/vikng-dev/personal/overmatch/scripts/disk/sweep.sh</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/Yan/.cargo/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <!-- Weekly: Sunday (weekday 0) at 04:00. If the box is asleep at the fire time,
+         launchd runs it once at the next wake. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>0</integer>
+        <key>Hour</key>
+        <integer>4</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/overmatch-target-sweep.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/overmatch-target-sweep.log</string>
+</dict>
+</plist>
