@@ -16,7 +16,9 @@ use lightyear::prelude::input::server::{InputValidationAppExt, authorize_control
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
 
-use super::protocol::{FireChannel, FireEvent, LaunchedTurretPose, NetCrew, ServoAngles};
+use super::protocol::{
+    FireChannel, FireEvent, LaunchedTurretPose, NetCrew, PROTOCOL_FINGERPRINT, ServoAngles,
+};
 use super::{diagnostics, harness, open_gameplay_gate, physics, rig};
 use crate::SimPlugin;
 use crate::bake::TankGeometry;
@@ -107,7 +109,14 @@ pub fn run() {
         .spawn((
             Name::new("Server"),
             NetcodeServer::new(NetcodeConfig {
-                protocol_id: 0,
+                // The protocol-compatibility guard's server end: only a client whose connect token was
+                // built with the SAME `PROTOCOL_FINGERPRINT` decrypts here (netcode folds `protocol_id`
+                // into the token AEAD), so a version/wire-skewed client is refused at the handshake
+                // rather than admitted into a replication stream it cannot apply. Must match the
+                // client's `Authentication::Manual.protocol_id` (`net::client`). A skewed client is
+                // transport-indistinguishable from a down server (the request is silently dropped) —
+                // the client-side overlay surfaces that as a combined hint after N failed attempts.
+                protocol_id: PROTOCOL_FINGERPRINT,
                 private_key: [0; 32], // dev only — matches the client's Authentication::Manual
                 ..default()
             }),

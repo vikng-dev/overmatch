@@ -27,7 +27,7 @@ use lightyear::prelude::input::client::InputSystems;
 use lightyear::prelude::input::native::{ActionState, InputMarker, NativeBuffer};
 use lightyear::prelude::{Controlled as NetControlled, *};
 
-use super::protocol::{FireEvent, NetTank};
+use super::protocol::{FireEvent, NetTank, PROTOCOL_FINGERPRINT};
 use super::{client_smoothing_plugin, diagnostics, harness, open_gameplay_gate, physics, rig};
 use crate::ballistics::FireShell;
 use crate::command::TankCommand;
@@ -309,7 +309,14 @@ pub fn run() {
                 server_addr,
                 client_id,
                 private_key: [0; 32],
-                protocol_id: 0,
+                // The protocol-compatibility guard: bake this build's `PROTOCOL_FINGERPRINT` into the
+                // connect token's `protocol_id`. netcode folds it into the token AEAD, so a server
+                // built from a different revision (mismatched fingerprint) cannot decrypt the token
+                // and drops the request — the connection is refused at the handshake, BEFORE
+                // replication starts, instead of "succeeding" and then spamming replicon
+                // apply-failures forever (the 2026-07-11 skew incident). Must match the server's
+                // `NetcodeConfig.protocol_id` (`net::server`).
+                protocol_id: PROTOCOL_FINGERPRINT,
             },
             NetcodeConfig {
                 client_timeout_secs: 3,
@@ -478,6 +485,16 @@ fn reconnect_backoff_secs(attempts: u32) -> f64 {
 /// mid-game drop should keep trying to reconnect for as long as the player leaves the window open.
 const RECONNECT_BACKOFF_CAP: f64 = 5.0;
 
+/// After this many failed connect attempts the status overlay stops saying only "CONNECTING…" and
+/// adds the version-mismatch hint. WHY a count and not a specific "PROTOCOL MISMATCH" line: a
+/// fingerprint-skewed peer is refused by netcode dropping the undecryptable connect token silently
+/// (see `net::protocol::PROTOCOL_FINGERPRINT`), which the client observes as
+/// `ConnectionRequestTimedOut` — byte-for-byte the same terminal state as a down/unreachable server
+/// (verified against vendored `lightyear_netcode` client.rs `update_state`). The two are transport-
+/// indistinguishable, so the honest message names BOTH causes. Three attempts (~a few seconds of
+/// backoff) is enough to rule out a server still starting up before showing it.
+const MISMATCH_HINT_AFTER_ATTEMPTS: u32 = 3;
+
 /// The connection state machine, run every frame in every mode. It owns both the FIRST connect
 /// (asset-gated) and every retry after a failed or dropped link, reading the connection state off
 /// the single client entity's lightyear markers:
@@ -500,11 +517,19 @@ fn drive_connection(
     time: Res<Time>,
     assets: Option<Res<PendingTankAssets>>,
     asset_server: Res<AssetServer>,
-    client: Query<(Entity, Has<Connected>, Has<Connecting>), With<NetcodeClient>>,
+    client: Query<
+        (
+            Entity,
+            Has<Connected>,
+            Has<Connecting>,
+            Option<&Disconnected>,
+        ),
+        With<NetcodeClient>,
+    >,
     mut retry: ResMut<ConnectRetry>,
     mut commands: Commands,
 ) {
-    let Ok((entity, connected, connecting)) = client.single() else {
+    let Ok((entity, connected, connecting, disconnected)) = client.single() else {
         return;
     };
 
@@ -544,8 +569,15 @@ fn drive_connection(
             retry.attempts += 1;
             retry.next_retry_at = None;
             commands.trigger(Connect { entity });
+            // Log netcode's terminal reason for the breadcrumb it gives (`ConnectionRequestTimedOut`
+            // vs `ConnectionDenied` etc.). It does NOT distinguish a fingerprint mismatch from an
+            // unreachable server — both time out — so the overlay shows the combined hint after
+            // `MISMATCH_HINT_AFTER_ATTEMPTS`; this is purely for a dev reading the console.
+            let reason = disconnected
+                .and_then(|d| d.reason.as_deref())
+                .unwrap_or("no reason reported");
             info!(
-                "client: reconnect attempt {} ({})",
+                "client: reconnect attempt {} ({}) — last netcode state: {reason}",
                 retry.attempts,
                 if retry.connected_once {
                     "lost in-game connection"
@@ -630,10 +662,22 @@ fn update_connect_status(
     }
 
     // The label is a pure function of `(connected_once, attempts)` — rebuild it (and rewrite the
-    // `Text`) only when that pair changes, not every frame.
-    let key = (retry.connected_once, retry.attempts);
+    // `Text`) only when that pair changes, not every frame. `attempts` is clamped into the memo key at
+    // the hint threshold, so once the persistent-failure hint is showing the key stops changing and
+    // the `format!`/`Text`-write churn stops too (the label is constant past that point).
+    let key = (
+        retry.connected_once,
+        retry.attempts.min(MISMATCH_HINT_AFTER_ATTEMPTS),
+    );
     if *shown != Some(key) {
-        let label = if retry.connected_once {
+        let label = if retry.attempts >= MISMATCH_HINT_AFTER_ATTEMPTS {
+            // Enough attempts have failed to rule out a server still starting up. The refusal a
+            // fingerprint mismatch produces is indistinguishable from an unreachable server (see
+            // `MISMATCH_HINT_AFTER_ATTEMPTS`), so name both causes rather than guess.
+            "CAN'T CONNECT — server down or client/server build mismatch\n\
+             (update the client or redeploy the server)"
+                .to_string()
+        } else if retry.connected_once {
             "RECONNECTING…".to_string()
         } else if retry.attempts == 0 {
             "CONNECTING…".to_string()
