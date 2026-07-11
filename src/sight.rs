@@ -1051,6 +1051,133 @@ fn update_toast(
 mod tests {
     use super::*;
 
+    /// The pure hide invariant: a mesh is hidden from the optic ([`OPTIC_HIDDEN_LAYER`]) only when it
+    /// belongs to the controlled tank AND the gunner optic is up; every other combination is layer 0
+    /// (the world the camera draws — including opponents, so the optic sees them).
+    #[test]
+    fn desired_optic_layer_hides_only_controlled_in_gunner() {
+        let hidden = RenderLayers::layer(OPTIC_HIDDEN_LAYER);
+        let shown = RenderLayers::layer(0);
+        assert_eq!(desired_optic_layer(true, true), hidden, "own tank in optic");
+        assert_eq!(
+            desired_optic_layer(true, false),
+            shown,
+            "opponent stays visible in optic"
+        );
+        assert_eq!(
+            desired_optic_layer(false, true),
+            shown,
+            "own tank shown in third person"
+        );
+        assert_eq!(
+            desired_optic_layer(false, false),
+            shown,
+            "opponent, third person"
+        );
+    }
+
+    /// The reconcile is CONTINUOUS DERIVED RENDER STATE: it re-lays every mesh's render layer from the
+    /// live (`SightMode`, `Controlled`, mesh set) each frame, not on a `SightMode` event. This drives
+    /// the whole system through its transitions and asserts each mesh's `RenderLayers`, including the
+    /// two cases the old event-driven stamp missed (both fail without the per-frame reconcile):
+    /// a mesh attaching asynchronously WHILE in the optic, and `Controlled` moving to a fresh tank
+    /// with NO `SightMode` write (the multiplayer respawn that leaves the barrel in the sight).
+    #[test]
+    fn reconcile_lays_layers_across_transitions() {
+        let mut app = App::new();
+        app.init_resource::<SightMode>();
+        app.add_systems(Update, reconcile_optic_render_layers);
+
+        // Two tanks: A controlled (a direct mesh + a mesh under a non-mesh sub-node, to exercise
+        // `iter_descendants`), B an opponent with its own meshes.
+        let world = app.world_mut();
+        let tank_a = world.spawn((Tank, Controlled)).id();
+        let a_direct = world
+            .spawn((Mesh3d(Handle::default()), ChildOf(tank_a)))
+            .id();
+        let a_subnode = world.spawn(ChildOf(tank_a)).id();
+        let a_nested = world
+            .spawn((Mesh3d(Handle::default()), ChildOf(a_subnode)))
+            .id();
+        let tank_b = world.spawn((Tank,)).id();
+        let b_mesh = world
+            .spawn((Mesh3d(Handle::default()), ChildOf(tank_b)))
+            .id();
+
+        let hidden = RenderLayers::layer(OPTIC_HIDDEN_LAYER);
+        let shown = RenderLayers::layer(0);
+        let layer = |app: &App, e: Entity| {
+            app.world()
+                .entity(e)
+                .get::<RenderLayers>()
+                .cloned()
+                .expect("every mesh carries a RenderLayers after reconcile")
+        };
+
+        // 1. Third person: every mesh, both tanks, on layer 0.
+        app.update();
+        for e in [a_direct, a_nested, b_mesh] {
+            assert_eq!(layer(&app, e), shown, "third person: mesh {e:?} on layer 0");
+        }
+
+        // 2. Gunner: the controlled tank's meshes hide; the opponent's stay visible.
+        *app.world_mut().resource_mut::<SightMode>() = SightMode::Gunner;
+        app.update();
+        assert_eq!(
+            layer(&app, a_direct),
+            hidden,
+            "gunner: own direct mesh hidden"
+        );
+        assert_eq!(
+            layer(&app, a_nested),
+            hidden,
+            "gunner: own nested mesh hidden"
+        );
+        assert_eq!(layer(&app, b_mesh), shown, "gunner: opponent stays visible");
+
+        // 3. A NEW mesh attaches under the controlled tank WHILE in the optic (the async-attach case
+        // the one-shot stamp missed) — the next frame lands it hidden.
+        let a_late = app
+            .world_mut()
+            .spawn((Mesh3d(Handle::default()), ChildOf(tank_a)))
+            .id();
+        app.update();
+        assert_eq!(
+            layer(&app, a_late),
+            hidden,
+            "async-attached mesh hides on the next reconcile (old event-driven design misses it)"
+        );
+
+        // 4. Move `Controlled` to the opponent with NO `SightMode` write — the multiplayer respawn.
+        // Old tank's meshes return to layer 0; the newly controlled tank's meshes hide.
+        app.world_mut().entity_mut(tank_a).remove::<Controlled>();
+        app.world_mut().entity_mut(tank_b).insert(Controlled);
+        app.update();
+        for e in [a_direct, a_nested, a_late] {
+            assert_eq!(
+                layer(&app, e),
+                shown,
+                "respawn: stepped-out tank's mesh {e:?} back to layer 0"
+            );
+        }
+        assert_eq!(
+            layer(&app, b_mesh),
+            hidden,
+            "respawn: newly controlled tank hides with no SightMode change (the bug)"
+        );
+
+        // 5. Back to third person: every mesh on layer 0 again.
+        *app.world_mut().resource_mut::<SightMode>() = SightMode::ThirdPerson;
+        app.update();
+        for e in [a_direct, a_nested, a_late, b_mesh] {
+            assert_eq!(
+                layer(&app, e),
+                shown,
+                "back to third person: mesh {e:?} on layer 0"
+            );
+        }
+    }
+
     /// The margin is a fixed fraction of the half-FOV — the derivation the overlay UI must share, so
     /// the cursor's travel circle and the drawn rim are one radius. Pinned at the Tiger's authored
     /// 0.12 rad optic (≈0.054 rad) and confirmed proportional to the fraction.
