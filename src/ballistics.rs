@@ -317,6 +317,13 @@ pub struct FireShell {
     /// shot whose source is known is attributed to the right replicated tank and weapon slot; `None`
     /// shots (sandbox) simply never broadcast.
     pub shooter: Option<ShotSource>,
+    /// Whether THIS round is a tracer (a per-belt cadence decided at fire time from the weapon's belt
+    /// counter — see [`crate::spec::WeaponSpec::tracer_every`]). Governs only the ATTACHED VISUAL, not
+    /// the flight or the raycast: an MG tracer round gets the emissive streak, a non-tracer MG round
+    /// gets NO visual entity (it still flies + raycasts invisibly), and the main gun keeps its shell
+    /// scene regardless (`on_fire_shell`). Rides FireShell (and its net twin [`crate::net::protocol::
+    /// FireEvent`]) so shooter, server, and every remote client agree on each round's tracer-ness.
+    pub tracer: bool,
     /// How many free-flight ticks to fast-forward this shell at spawn ([`fast_forward_shell`]) — the
     /// net FireEvent catch-up. `0` for every locally-fired shell (the player's gun, the sandbox
     /// camera, and the shooter's own predicted shell): those spawn at the muzzle and fly from there,

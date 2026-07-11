@@ -134,6 +134,10 @@ pub struct Weapon {
     pub reload: f32,
     pub recoil: Option<RecoilSpec>,
     pub barrel: Option<Entity>,
+    /// Belt tracer cadence (see [`crate::spec::WeaponSpec::tracer_every`]): every Nth round down the
+    /// belt traces, `1` = all, `0` = none. `shooting::fire` reads it against the weapon's belt counter
+    /// ([`WeaponState::rounds_fired`]) to decide each shot's `tracer` flag.
+    pub tracer_every: u32,
     /// Fire / load gates (design §7b), evaluated against the controlled tank by the shooting
     /// systems — the per-weapon successors to the old global `Fire`/`Load` capabilities.
     pub fire: Requirement,
@@ -308,6 +312,16 @@ pub struct WeaponState {
     pub reload_remaining: f32,
     pub recoil_offset: f32,
     pub recoil_velocity: f32,
+    /// Belt counter — how many rounds this weapon has fired, walking its belt. `shooting::fire`
+    /// reads `rounds_fired % Weapon::tracer_every` to decide each shot's tracer flag, then bumps it.
+    /// Root-resident sim state like the rest of `WeaponState`, so a rollback replay restores it and
+    /// re-derives the SAME tracer answer (server and predicted client both count from 0). Wraps
+    /// harmlessly (`wrapping_add`); at 64 Hz the phase is what matters, not the absolute count. It is
+    /// deliberately NOT folded into the determinism hash (`trace::hash_tank_state`): a mispredicted /
+    /// rolled-back shot can leave the shooter's own counter one round out of phase with the server's,
+    /// which is a purely cosmetic tracer skew we accept — hashing it would flag that benign skew as a
+    /// divergence.
+    pub rounds_fired: u32,
 }
 
 /// ALL of a tank's non-physics carried sim state, root-resident: servo mechanisms, weapon
@@ -976,6 +990,7 @@ pub(crate) fn spawn_tank_sim(
                 reload: weapon.reload,
                 recoil: weapon.recoil.clone(),
                 barrel,
+                tracer_every: weapon.tracer_every,
                 fire: weapon.fire.clone(),
                 load: weapon.load.clone(),
                 trigger: weapon.trigger,

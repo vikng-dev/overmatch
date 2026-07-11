@@ -643,6 +643,9 @@ fn broadcast_fire(
         speed: fire.speed,
         caliber: fire.caliber,
         mass: fire.mass,
+        // The belt decided this round's tracer-ness on the authoritative fire; broadcast it so every
+        // remote client dresses the shell identically.
+        tracer: fire.tracer,
         shooter: source.tank,
         // Which weapon fired — the receiver derives THIS shot's barrel recoil from its own local
         // spec keyed by this slot.

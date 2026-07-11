@@ -981,6 +981,9 @@ mod tests {
                 reload_remaining: 1.25,
                 recoil_offset: -0.4,
                 recoil_velocity: 0.0,
+                // Belt counter — cosmetic, deliberately NOT folded into the state hash below (see
+                // `WeaponState::rounds_fired`); carried here only so the literal is complete.
+                rounds_fired: 3,
             }],
             anchors: vec![Some(Vec3::new(3.0, 0.0, -70.0)), None],
         };
