@@ -302,7 +302,42 @@ Limits, stated in the open:
   these numbers are a fresh, more discriminating read that *retires* the old metric, not a
   like-for-like time series continuing the 98.4%/55%.
 
-## 7. Open finding (2026-07-09): client hang at connect — unresolved, NOT lat0-specific
+## 7. RESOLVED (2026-07-11): client hang at connect — decoded and guarded
+
+**Update (2026-07-11, same session as the load-gating verification below): ROOT CAUSE DECODED,
+FIX LANDED.** Two wedges caught live under CPU saturation (thread samples + RSS timelines in the
+session scratchpad `connect-hang-catch/`): the main thread parks in the outer schedule's
+`block_on` while one Compute-pool worker spins 20+ s inside
+`lightyear_inputs::client::prepare_input_message` →
+`NativeStateSequence::build_from_input_buffer`. Mechanism, all steps source-verified in the
+vendored 0.28 crates:
+1. The first connect-window `SyncEvent` re-anchors `LocalTimeline` by a raw delta that can go
+   **backward** (`InputTimeline::sync` resyncs on first sync; the objective's RTT/2 term is
+   polluted by scheduler delay on a loaded box while `LocalTimeline` has been ticking since app
+   start — the check-starvation filing's "backward SyncEvent" observed in stock lightyear).
+2. `InputBuffer::set_raw` refuses writes below `start_tick` (input_buffer.rs:194-197), so the
+   buffer stays **stranded** at the pre-jump ticks while the timeline sits below it — persistent,
+   which is why the wedge never self-heals.
+3. `build_from_input_buffer` (lightyear_inputs_native input_message.rs:94) computes
+   `(end_tick + 1 - buffer_start_tick) as usize` where `Tick - Tick → i32`: a strand of ≥ 2 ticks
+   goes negative, sign-extends to ~2^64, and the loop `push`es one `Compressed` per iteration —
+   simultaneously the silent spin AND the RSS balloon (1.5 GB at wedge onset observed) → paging
+   collapse (`UN` state) → OS SIGKILL at 40-96 s, no crash report. `num_ticks` (redundancy·1 = 5
+   for us) can never make the loop large; the wrap is the only route.
+Fix: `drop_stranded_input_buffer` in `src/net/client.rs` — PostUpdate,
+`.before(InputSystems::PrepareInputMessage)`, drops the own-tank `NativeBuffer<TankCommand>`
+whenever `start_tick` leads `current_tick + input_delay` (never true in steady state; the buffer
+is rebuilt at the correct tick on the next FixedPreUpdate write; cost when firing = a few ticks
+of unsent input the server hold-last extrapolates anyway). Tripwire:
+`tests/net_input_buffer_wrap.rs` pins both enablers + the degenerate itself (thread-timeout
+canary); if it fires, upstream clamped the range — re-verify with a loaded batch and retire the
+guard. Proof: loaded 24-run batch with the guard = **24/24 clean, guard fired in 20/24 runs**
+(strands of 1-17 ticks logged — backward resyncs are ROUTINE under load; the old 3/10 hang rate
+was the ≥2-tick subset), vs 4/12 wedges unguarded same day. Upstream filing candidate: the
+`as usize` wrap wants a `.max(0)` clamp at input_message.rs:94 — park alongside the wave-A memo
+filings. The constant-offset runaway (§10) stays open — it did NOT reproduce (0/57) and is not
+explained by this mechanism, though the backward-resync window it lives in is now partially
+defused by the guard; re-sweep on future loaded batches.
 
 **Update (2026-07-11, verification batches @ e3ee1ab): the hang is CPU-LOAD-GATED.** 48 headless
 scripted 80/10 connects on a quiet box — 24 on main @ e3ee1ab, 24 on the pre-`min_delay` baseline

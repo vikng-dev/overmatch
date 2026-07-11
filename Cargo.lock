@@ -5852,6 +5852,8 @@ dependencies = [
  "image",
  "lightyear",
  "lightyear_core",
+ "lightyear_inputs",
+ "lightyear_inputs_native",
  "lightyear_sync",
  "ron",
  "serde",

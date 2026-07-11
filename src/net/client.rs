@@ -24,7 +24,7 @@ use lightyear::interpolation::timeline::InterpolationConfig;
 use lightyear::prediction::correction::CorrectionPolicy;
 use lightyear::prelude::client::*;
 use lightyear::prelude::input::client::InputSystems;
-use lightyear::prelude::input::native::{ActionState, InputMarker};
+use lightyear::prelude::input::native::{ActionState, InputMarker, NativeBuffer};
 use lightyear::prelude::{Controlled as NetControlled, *};
 
 use super::protocol::{FireEvent, NetTank};
@@ -438,6 +438,13 @@ pub fn run() {
                 .run_if(not(is_in_rollback)),
         );
     }
+    // §7 connect-hang guard: must beat `prepare_input_message` to the stranded buffer within the
+    // same frame — `.before` the set, not `.after(SyncSystems::Sync)`, because lightyear orders
+    // PrepareInputMessage BEFORE Sync in PostUpdate and the strand persists across frames anyway.
+    app.add_systems(
+        PostUpdate,
+        drop_stranded_input_buffer.before(InputSystems::PrepareInputMessage),
+    );
 
     // Cursor grab + Esc menu overlay: mounted whenever there is a REAL window — normal windowed play
     // AND `SPIKE_SIM_WINDOWED` (a real window whose tank is scripted, but whose camera / gunner optic /
@@ -678,6 +685,57 @@ fn claim_input_slot(add: On<Add, NetControlled>, mut commands: Commands) {
         GameControlled,
         diagnostics::LastPosition::default(),
     ));
+}
+
+/// §7 connect-hang guard: drop the own-tank `InputBuffer` whenever it is stranded AHEAD of the
+/// timeline, before lightyear's `prepare_input_message` consumes it.
+///
+/// The wedge this prevents (2026-07-11, caught live under CPU saturation — thread samples in the
+/// §7 doc section): the first connect-window `SyncEvent` can re-anchor `LocalTimeline` BACKWARD
+/// (the RTT estimate is polluted by scheduler delay on a loaded machine, and `LocalTimeline` has
+/// been ticking since app start, so the freshly-computed server objective can land below it).
+/// `InputBuffer::set_raw` refuses writes below its `start_tick`, so the buffer stays anchored at
+/// the high pre-jump ticks forever — and `NativeStateSequence::build_from_input_buffer`
+/// (`lightyear_inputs_native` input_message.rs:94) computes `(end_tick + 1 - buffer_start_tick)
+/// as usize` with `Tick - Tick → i32`: a negative difference sign-extends to ~2^64, and its
+/// per-iteration `states.push` allocates unboundedly — main loop parked on the wedged worker,
+/// RSS balloons, OS SIGKILL at 40–96 s. `tests/net_input_buffer_wrap.rs` pins the two upstream
+/// enablers plus the degenerate itself; if that tripwire fires, upstream clamped the range and
+/// this guard becomes removable insurance.
+///
+/// The invariant enforced: the buffer's oldest retained tick must never LEAD `current_tick +
+/// input_delay` (the exact `end_tick` `prepare_input_message` will use). In steady state the
+/// buffer always trails it (writes happen AT the delayed tick), so this only fires in the
+/// already-broken post-backward-resync regime; the cost when it fires is a few ticks of
+/// not-yet-sent input the server would have hold-last extrapolated anyway. Rollback replays are
+/// no hazard: they restore `ActionState` from history without moving `start_tick` backward, and
+/// `prepare_input_message` is `Without<Rollback>` besides. Cheap enough to run unconditionally
+/// (one predicted tank, two Tick compares).
+fn drop_stranded_input_buffer(
+    timeline: Res<LocalTimeline>,
+    sender: Query<&InputTimeline, With<Client>>,
+    mut buffers: Query<&mut NativeBuffer<TankCommand>, With<InputMarker<TankCommand>>>,
+) {
+    let Ok(input_timeline) = sender.single() else {
+        return;
+    };
+    let delayed_tick = timeline.tick() + input_timeline.input_delay() as i32;
+    for mut buffer in &mut buffers {
+        let Some(start) = buffer.start_tick else {
+            continue;
+        };
+        if start - delayed_tick > 0 {
+            warn!(
+                "client: input buffer stranded ahead of timeline (start {:?} > delayed tick {:?}, \
+                 backward connect resync) — dropping it to dodge lightyear's unbounded \
+                 input-message loop (§7 guard)",
+                start, delayed_tick
+            );
+            buffer.start_tick = None;
+            buffer.buffer.clear();
+            buffer.last_remote_tick = None;
+        }
+    }
 }
 
 /// Opt-in ownership trace (`OVERMATCH_OWNERSHIP_TRACE`): once per second, dump every replicated

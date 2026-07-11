@@ -63,6 +63,11 @@ lightyear = { version = "0.28", default-features = false, features = [
 [dev-dependencies]
 lightyear_sync = "0.28"
 lightyear_core = "0.28"
+# The input-buffer-wrap tripwire (tests/net_input_buffer_wrap.rs) pins the §7 connect-hang
+# degenerate (`build_from_input_buffer`'s unclamped negative-range wrap) that
+# `drop_stranded_input_buffer` in src/net/client.rs guards against.
+lightyear_inputs = "0.28"
+lightyear_inputs_native = "0.28"
 
 [features]
 default = ["dev_tools"]
