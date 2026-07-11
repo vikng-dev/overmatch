@@ -16,7 +16,7 @@ use lightyear::prelude::input::server::{InputValidationAppExt, authorize_control
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
 
-use super::protocol::{FireChannel, FireEvent, LaunchedTurretPose, NetHealth, ServoAngles};
+use super::protocol::{FireChannel, FireEvent, LaunchedTurretPose, NetCrew, ServoAngles};
 use super::{diagnostics, harness, open_gameplay_gate, physics, rig};
 use crate::SimPlugin;
 use crate::bake::TankGeometry;
@@ -307,9 +307,10 @@ fn spawn_player_tank(
         // The authority's turret/gun lay, for every non-predicted view of this tank
         // (`net::publish_servo_angles` keeps it fresh).
         ServoAngles::default(),
-        // The authority's per-volume health snapshot (`net::publish_net_health` fills it once the
-        // rig's volumes exist), replicated so the client's damage/death are server-driven.
-        NetHealth::default(),
+        // The authority's atomic combat snapshot (`net::publish_net_crew` fills it once the rig's
+        // volumes exist): per-volume HP + per-seat occupancy/aliveness + in-flight swap, replicated
+        // so the client's damage/death/crew bar are server-driven.
+        NetCrew::default(),
         // `None` until the turret cooks off (`net::publish_launched_turret_pose` fills it), so
         // the client can show the authoritative toss it does not simulate locally.
         LaunchedTurretPose::default(),
@@ -399,8 +400,8 @@ fn spawn_bot_entity(
         // Explicit, for the same replicated-placeholder reason as the player spawn (see there).
         Rotation(Quat::IDENTITY),
         ServoAngles::default(),
-        // Per-volume health snapshot for the bot too, so a client kills it from replicated state.
-        NetHealth::default(),
+        // Atomic combat snapshot for the bot too, so a client kills it from replicated state.
+        NetCrew::default(),
         // Launched-turret pose datum for the bot too (`None` until its turret cooks off).
         LaunchedTurretPose::default(),
         Replicate::to_clients(NetworkTarget::All),

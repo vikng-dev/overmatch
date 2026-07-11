@@ -3,11 +3,13 @@
 //! let the player latch a respawn.
 //!
 //! **Death is read from replicated state, not decided locally.** The client's own tank is predicted
-//! and carries `Remote` (it arrived by replication), so `net::protocol::apply_net_health` writes the
-//! server's authoritative per-volume `NetHealth` onto it each tick, and the SAME damage-consequence
-//! chain the server runs (`damage::kill_crew` → `damage::mark_dead_tanks` / `damage::process_cookoffs`)
-//! then latches `TankKnockedOut` off that authoritative health. So "my crew are all dead" is a
-//! server-driven fact the client merely observes — exactly the source of truth the requirement names.
+//! and carries `Remote` (it arrived by replication), so `net::protocol::apply_net_crew` realizes the
+//! server's authoritative `NetCrew` snapshot onto it each tick and DERIVES `TankKnockedOut`
+//! idempotently from it (a pure function of the snapshot — no monotonic local latch fed by
+//! re-assertable HP). The deciding damage chain (`damage::kill_crew`/`mark_dead_tanks`/
+//! `process_cookoffs`) is authority-only and does not run on the client. So "my crew are all dead" is
+//! a server-driven fact the client merely observes — exactly the source of truth the requirement
+//! names.
 //!
 //! Net-only by construction: this module lives under the `net`-gated `net` module and is mounted
 //! solely by `NetClientPlugin`. Single-player has no respawn flow.

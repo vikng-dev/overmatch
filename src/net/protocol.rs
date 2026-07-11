@@ -5,6 +5,7 @@
 
 use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, RigidBody, Rotation};
 use bevy::ecs::entity::{EntityMapper, MapEntities};
+use bevy::ecs::query::QueryData;
 use bevy::prelude::*;
 use lightyear::avian3d::plugin::{AvianReplicationMode, LightyearAvianPlugin};
 // `Remote` (bevy_replicon's "this entity arrived by replication", re-exported): the honest
@@ -18,7 +19,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::ballistics::ComponentHealth;
 use crate::command::TankCommand;
-use crate::damage::{DamageConsequences, LaunchedTurret, TankVolumes};
+use crate::damage::{
+    Ammo, CrewStation, Crewman, DamageConsequences, Dead, LaunchedTurret, PendingSwap,
+    TankKnockedOut, TankVolumes, knockout_from_counts,
+};
 use crate::driving::DriveState;
 use crate::state::GameplaySet;
 use crate::tank::{Rig, ServoCommand, ServoIndex, ServoSpec, TankSim};
@@ -54,15 +58,58 @@ pub struct ServoAngles {
     pub gun: f32,
 }
 
-/// Authoritative per-volume health snapshot, published on the tank root by the authority and
-/// replicated so the client's death/HUD emerge from server-owned state (server-authoritative combat).
-/// Holds each health-bearing volume's `ComponentHealth.current` in `TankVolumes` iteration order —
-/// the SAME order both ends derive, since both build the rig from one RON spec via `spawn_tank_sim`
-/// (sorted-by-name volume spawn). Index `i` therefore maps to the same volume on both ends; a length
-/// mismatch at apply time skips the tank rather than misalign. Modeled on [`ServoAngles`]: plain
-/// replication (no prediction/interpolation), `set_if_neq` on publish to avoid at-rest churn.
+/// Authoritative per-crew-seat occupancy, published on the tank root by the authority and replicated
+/// so the client renders swap progress and a foreign backfill (`Crewman.home != seat`) without
+/// running the swap flip locally. Travels INSIDE [`NetCrew`] so occupancy, HP, and aliveness are one
+/// atomic snapshot (see the type doc). `home` is the occupant's native station; `dead` is the
+/// server's authoritative aliveness (its monotonic `Dead` latch, fed only by its own sim).
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub struct CrewSnapshot {
+    /// The occupant's native station (specialty) — after a backfill swap this differs from the seat's
+    /// own [`CrewStation`], which is a fixed local fact both ends spawn from the RON.
+    pub home: CrewStation,
+    /// Whether the occupant is dead on the authority. The client DERIVES its local `Dead` marker from
+    /// this each tick (idempotent), never latching it from re-assertable HP.
+    pub dead: bool,
+}
+
+/// One health-bearing volume's authoritative snapshot within [`NetCrew`]: its HP, plus — for a crew
+/// seat — the occupant facts. `crew` is `None` for module/ammo volumes (they have HP but no occupant).
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub struct VolumeSnapshot {
+    /// The volume's live `ComponentHealth.current`.
+    pub hp: f32,
+    /// The occupant facts for a crew seat; `None` for a module or ammo volume.
+    pub crew: Option<CrewSnapshot>,
+}
+
+/// The authoritative combat snapshot of a tank, published on the root by the authority and replicated
+/// so the client's death / HUD / crew bar emerge from server-owned state (server-authoritative combat).
+///
+/// **One atomic snapshot, so no frame is internally inconsistent.** It SUBSUMES the former `NetHealth`:
+/// every health-bearing volume's HP travels here in `TankVolumes` iteration order (the SAME order both
+/// ends derive, since both build the rig from one RON spec via `spawn_tank_sim` — sorted-by-name volume
+/// spawn), and each crew seat's occupancy (`Crewman.home`) and aliveness (`Dead`) ride the SAME entry.
+/// A crew swap moves a live occupant between seats; replicating HP alone (as `NetHealth` did) let the
+/// server's still-pre-swap HP re-assert onto the seat a client-side flip had just moved the live man
+/// into — the corruption this component exists to end (the client no longer flips; it reads this).
+/// Index `i` maps to the same volume on both ends; a length mismatch at apply time skips the tank.
+///
+/// `swap` carries the in-flight backfill (`(source seat, target seat, seconds remaining)`) so the crew
+/// bar's countdown is a cosmetic reading of replicated state (ADR-0014), not a client-predicted timer.
+///
+/// Plain replication (no prediction/interpolation), same idiom as [`ServoAngles`]; `set_if_neq` on
+/// publish so a resting tank stops churning change-detection. During a swap the `remaining` countdown
+/// changes every tick, so the snapshot DOES resend each tick then — deliberate: a swap is a rare 4 s
+/// event and replicating its progress is the point; at rest (`swap == None`, HP and crew stable) the
+/// snapshot is stable and `set_if_neq` suppresses idle churn exactly as `NetHealth` did.
 #[derive(Component, Clone, Default, PartialEq, Debug, Serialize, Deserialize)]
-pub struct NetHealth(pub Vec<f32>);
+pub struct NetCrew {
+    /// Every health-bearing volume in [`health_bearing_volumes`] order: HP + (for seats) occupancy.
+    pub volumes: Vec<VolumeSnapshot>,
+    /// The in-flight backfill swap, if any: `(source seat, target seat, seconds remaining)`.
+    pub swap: Option<(CrewStation, CrewStation, f32)>,
+}
 
 /// Authoritative world pose of the launched (cooked-off) turret, published on the tank root by the
 /// authority and replicated so the client can SHOW the toss it does NOT simulate locally
@@ -206,89 +253,218 @@ pub(crate) fn health_bearing_volumes(
     volumes.iter().filter(|&v| has_health(v)).collect()
 }
 
-/// Authority side: collect each health-bearing volume's live `ComponentHealth.current` into the
-/// replicated `NetHealth`. `FixedPostUpdate` (after the damage chain has run this tick),
-/// `Without<Remote>` = authority-only in shared code (every client tank carries `Remote` — see
-/// `publish_servo_angles`). The collect order — the shared [`health_bearing_volumes`] filter — is
-/// exactly the apply order in [`apply_net_health`].
-fn publish_net_health(
-    mut tanks: Query<(&TankVolumes, &mut NetHealth), Without<Remote>>,
-    health: Query<&ComponentHealth>,
+/// The read side of [`publish_net_crew`]: one health-bearing volume's live facts. `crew`/`crewman`/
+/// `dead` are the crew-seat occupancy the snapshot carries (ammo-ness is NOT published — the client
+/// reads its own local `Ammo` marker against the replicated HP to spot a cooked-off bin).
+#[derive(QueryData)]
+struct VolumeSnapshotSource {
+    health: &'static ComponentHealth,
+    crew: Option<&'static CrewStation>,
+    crewman: Option<&'static Crewman>,
+    dead: Option<&'static Dead>,
+}
+
+/// Authority side: collect the tank's atomic combat snapshot — every health-bearing volume's HP plus
+/// each crew seat's occupancy/aliveness, in the shared [`health_bearing_volumes`] order — into the
+/// replicated [`NetCrew`], and stamp any in-flight [`PendingSwap`] as station pairs.
+/// `FixedPostUpdate` (after the damage chain has run this tick), `Without<Remote>` = authority-only in
+/// shared code (every client tank carries `Remote` — see `publish_servo_angles`). The collect order
+/// is exactly the apply order in [`apply_net_crew`].
+fn publish_net_crew(
+    mut tanks: Query<(&TankVolumes, Option<&PendingSwap>, &mut NetCrew), Without<Remote>>,
+    sources: Query<VolumeSnapshotSource>,
+    stations: Query<&CrewStation>,
 ) {
-    for (volumes, mut net) in &mut tanks {
-        let snapshot: Vec<f32> = health_bearing_volumes(volumes, |v| health.contains(v))
-            .iter()
-            .map(|&v| health.get(v).map_or(0.0, |hp| hp.current))
-            .collect();
-        // `set_if_neq`: no change-detection churn (and no replication resends) while health is stable.
-        net.set_if_neq(NetHealth(snapshot));
+    for (volumes, pending, mut net) in &mut tanks {
+        let snapshot: Vec<VolumeSnapshot> =
+            health_bearing_volumes(volumes, |v| sources.contains(v))
+                .iter()
+                .map(|&v| {
+                    let Ok(src) = sources.get(v) else {
+                        return VolumeSnapshot {
+                            hp: 0.0,
+                            crew: None,
+                        };
+                    };
+                    VolumeSnapshot {
+                        hp: src.health.current,
+                        // A crew seat carries its occupant's home (defaulting to the seat before any
+                        // backfill) and the authority's monotonic aliveness.
+                        crew: src.crew.map(|seat| CrewSnapshot {
+                            home: src.crewman.map_or(*seat, |c| c.home),
+                            dead: src.dead.is_some(),
+                        }),
+                    }
+                })
+                .collect();
+        // The in-flight swap as STATIONS (stable on the wire, unlike the seat entity ids in
+        // `PendingSwap`); dropped if a seat vanished mid-flight, matching `tick_swaps`.
+        let swap = pending.and_then(|ps| {
+            let (Ok(&a), Ok(&b)) = (stations.get(ps.a), stations.get(ps.b)) else {
+                return None;
+            };
+            Some((a, b, ps.remaining))
+        });
+        // `set_if_neq`: no change-detection churn (nor replication resends) while at rest.
+        net.set_if_neq(NetCrew {
+            volumes: snapshot,
+            swap,
+        });
     }
 }
 
-/// Client side: write the replicated `NetHealth` back onto each `Remote` tank's local volumes, so the
-/// damage-consequence systems (`damage.rs`) run off authoritative health.
+/// The write side of [`apply_net_crew`]: mutate one volume's HP + occupant `home`, read its
+/// aliveness/ammo membership. The tank ROOT (`NetCrew`/`TankVolumes`) and its VOLUMES are disjoint
+/// entities, so this and the root query never alias.
+#[derive(QueryData)]
+#[query_data(mutable)]
+struct VolumeSink {
+    health: &'static mut ComponentHealth,
+    crewman: Option<&'static mut Crewman>,
+    ammo: Has<Ammo>,
+    dead: Has<Dead>,
+}
+
+/// Client side: realize the replicated [`NetCrew`] onto each `Remote` tank — write authoritative HP
+/// and occupant `home` onto its local volumes, DERIVE each seat's `Dead` marker idempotently, and
+/// DERIVE the tank's `TankKnockedOut` label from the same snapshot. This replaces the former
+/// `apply_net_health` and the client's run of the monotonic-latching damage chain
+/// (`kill_crew`/`mark_dead_tanks`/`process_cookoffs`, now authority-only): the client no longer
+/// *decides* death from re-assertable HP, it *reads* it (ADR-0016 — replicate the cause, derive the
+/// consequence; death is absorbing, so the server's latch needs no history and the client's derive
+/// needs no latch).
 ///
 /// **This system is TICK-AGNOSTIC, and that is only safe because state rollback runs in
-/// `RollbackMode::Check`.** It applies the newest confirmed health to whatever tick is being
-/// simulated — forward tick or replayed tick alike. `NetHealth` is plain-replicated (no `.predict()`,
+/// `RollbackMode::Check`.** It applies the newest confirmed snapshot to whatever tick is being
+/// simulated — forward tick or replayed tick alike. [`NetCrew`] is plain-replicated (no `.predict()`,
 /// hence no `ConfirmedHistory`), so it holds exactly one value, and a rollback replay of ticks
 /// `T..present` writes that one value onto every replayed tick.
 ///
-/// Applying it FORWARD is correct: newest-confirmed health is the best estimate for a predicted tick,
-/// which is just prediction. Applying it BACKWARD — a post-death value onto a genuinely pre-death
-/// tick — would NOT be, because the drive/reload/fire capability gate rides the `Dead` marker
-/// (`damage::part_qualities` reads `facets.dead`), `Dead` is monotonic and never rolled back, and a
-/// replayed pre-death tick would therefore suppress thrust the forward sim had applied: divergence
-/// manufactured by the correction machinery.
+/// Applying it FORWARD is correct: the newest-confirmed snapshot is the best estimate for a predicted
+/// tick, which is just prediction. Applying it BACKWARD — a post-death snapshot onto a genuinely
+/// pre-death tick — would suppress thrust the forward sim applied (the drive/reload/fire capability
+/// gate rides `Dead` via `damage::part_qualities`). Unlike the old `NetHealth` design this no longer
+/// depends on `Dead` being a *never-rolled-back* latch: here `Dead` is RE-DERIVED from the confirmed
+/// snapshot on every (forward or replayed) tick, so a replayed tick simply gets the same
+/// newest-confirmed aliveness — consistent by construction rather than by the latch's immunity.
 ///
-/// That is unreachable today, and the reason is narrower than it first looks. **Every STATE rollback
-/// starts at `server_confirmed_tick`** — `RollbackMode::Check` and `RollbackMode::Always` both
-/// (`lightyear_prediction` rollback.rs:494-509 for `Always`, :534-556/:613-635 for `Check`) — so a
-/// state replay window never begins before the tick whose confirmed health killed the crewman. The
-/// watchdog's forced rollback (`net::watchdog`) is gated on a confirmed-vs-predicted breach, and the
-/// tank MATCHES at pre-death ticks (it predicted the driver alive; the server confirms alive), so it
-/// cannot independently target a pre-death tick either.
+/// It stays unreachable for the same structural reason `apply_net_health` was safe: **every STATE
+/// rollback starts at `server_confirmed_tick`** (`lightyear_prediction` rollback.rs — `Always`
+/// :494-509, `Check` :534-556/:613-635), so a state replay window never begins before the tick whose
+/// confirmed snapshot killed the crewman. The residual (a newer snapshot live while a rollback targets
+/// an older tick, because `last_confirmed_tick` is a GLOBAL Replicon value applied per-message) is the
+/// cross-entity replication lag (1-3 ticks, sub-centimetre), transient and self-healing.
 ///
-/// The residual is narrow and bounded: `last_confirmed_tick` is a GLOBAL Replicon-completeness value,
-/// while a plain-replicated component is applied per-message as it arrives. So a newer dead
-/// `NetHealth` can be live while a rollback targets an older tick — but only when ANOTHER entity's
-/// stream lags across the death tick, and the error is then the cross-entity replication lag (1-3
-/// ticks, sub-centimetre), not the rollback depth. Transient and self-healing.
+/// **Enabling INPUT-side rollback is still the flag to watch** — it targets ticks OLDER than
+/// `server_confirmed_tick` (rollback.rs:669/:694) and could land before a death tick — but note this
+/// design already removes the old sharp edge there: the capability gate now reads a `Dead` that tracks
+/// the confirmed snapshot per tick rather than a never-rolled-back latch, so input rollback no longer
+/// needs a *separate* fix for the aliveness gate on top of a tick-correct health representation.
 ///
-/// **The one change that makes this real and depth-driven is enabling INPUT-side rollback.** Input
-/// rollbacks are NOT gated on state confirmation: `RollbackMode::Always` targets
-/// `last_confirmed_input.tick` (rollback.rs:669) and `Check` targets `earliest_mismatch - 1`
-/// (rollback.rs:694), either of which may be OLDER than `server_confirmed_tick` and therefore land
-/// before a death tick. That is the flag to watch, and it is exactly the flag "predict non-owned
-/// tanks and derive their fire from rebroadcast inputs" wants to set. Before setting it, health needs
-/// a tick-correct representation — and note that fixing `NetHealth` alone would NOT be enough,
-/// because the capability gate reads the never-rolled-back `Dead` marker, not health.
-///
-/// Predicting non-owned tanks *by itself* does NOT endanger this system: `last_confirmed_tick` is
-/// global and independent of how many entities are predicted. An earlier revision of this comment
-/// claimed otherwise, and claimed state-`Always` was a trigger. Both were wrong.
-///
-/// Matches the publish order
-/// exactly — `TankVolumes` filtered to health-bearing volumes — so index `i` addresses the same
-/// volume the server collected. Ordered `.before(DamageConsequences)` so cookoff/crew-death read this
-/// tick's authoritative health. A length mismatch (e.g. rig not fully spawned yet) skips the tank
-/// rather than write misaligned values.
-fn apply_net_health(
-    tanks: Query<(&TankVolumes, &NetHealth), With<Remote>>,
-    mut health: Query<&mut ComponentHealth>,
+/// Ordered `.before(DamageConsequences)` for parity with the authority (whose chain is gated off on
+/// the client — `Without` `ClientReplica`); a length mismatch (rig still spawning) skips the tank.
+fn apply_net_crew(
+    tanks: Query<(Entity, &TankVolumes, &NetCrew, Option<&TankKnockedOut>), With<Remote>>,
+    mut volumes: Query<VolumeSink>,
+    mut commands: Commands,
 ) {
-    for (volumes, net) in &tanks {
+    for (tank, tank_volumes, net, knocked_out) in &tanks {
         // The health-bearing volumes in publish order (the SAME shared filter the server used).
-        let bearers = health_bearing_volumes(volumes, |v| health.contains(v));
+        let bearers = health_bearing_volumes(tank_volumes, |v| volumes.contains(v));
         // A length mismatch is expected transiently while the client's rig is still spawning and
-        // self-heals once it's fully built; a *persistent* mismatch means client/server spec skew
+        // self-heals once it's fully built; a persistent mismatch means client/server spec skew
         // (a distribution concern — matched builds never skew). Skip rather than write misaligned.
-        if bearers.len() != net.0.len() {
+        if bearers.len() != net.volumes.len() {
             continue;
         }
-        for (volume, &value) in bearers.into_iter().zip(&net.0) {
-            if let Ok(mut hp) = health.get_mut(volume) {
-                hp.current = value;
+        // Recompute the tank's aggregate crew/ammo state from scratch every tick — no monotonic
+        // accumulation — so the knockout label below is a pure function of this snapshot.
+        let mut crew_total = 0;
+        let mut crew_living = 0;
+        let mut ammo_cooked = false;
+        for (volume, snap) in bearers.into_iter().zip(&net.volumes) {
+            let Ok(mut sink) = volumes.get_mut(volume) else {
+                continue;
+            };
+            sink.health.current = snap.hp;
+            if let Some(crew) = snap.crew {
+                if let Some(mut crewman) = sink.crewman
+                    && crewman.home != crew.home
+                {
+                    crewman.home = crew.home;
+                }
+                // Idempotent `Dead` derivation: track the authoritative aliveness, never latch it.
+                match (crew.dead, sink.dead) {
+                    (true, false) => {
+                        commands.entity(volume).insert(Dead);
+                    }
+                    (false, true) => {
+                        commands.entity(volume).remove::<Dead>();
+                    }
+                    _ => {}
+                }
+                crew_total += 1;
+                if !crew.dead {
+                    crew_living += 1;
+                }
+            }
+            if sink.ammo && snap.hp <= 0.0 {
+                ammo_cooked = true;
+            }
+        }
+        // Idempotent knockout derivation via the ONE shared rule (`damage::knockout_from_counts`),
+        // the same threshold the authority's `mark_dead_tanks` latches from — so "knocked out" means
+        // the same thing on both ends, computed once.
+        match (
+            knockout_from_counts(crew_total, crew_living, ammo_cooked),
+            knocked_out,
+        ) {
+            (Some(reason), None) => {
+                commands.entity(tank).insert(TankKnockedOut { reason });
+            }
+            (None, Some(_)) => {
+                commands.entity(tank).remove::<TankKnockedOut>();
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Client side: mirror the replicated [`NetCrew::swap`] into a LOCAL, cosmetic [`PendingSwap`] on each
+/// `Remote` tank, resolving the wire's station pair back to this tank's seat entities. This is the net
+/// half of ADR-0016 for the swap timer — replicate the cause (the server's in-flight swap), derive the
+/// view state — and it keeps the crew bar (`crew_ui`) a pure SIM-layer view: it reads `PendingSwap`
+/// exactly as in single-player, never naming the netcode (the `tests/net_boundary.rs` contract).
+///
+/// Safe precisely because the deciding swap systems are authority-only: on a net client
+/// `damage::apply_crew_swap_commands` and `damage::tick_swaps` are gated off (`Without` `ClientReplica`),
+/// so this synthesized `PendingSwap` is never ticked or completed locally — it is a display datum only,
+/// re-derived from the authoritative snapshot every tick (so a cancel/complete on the server clears it).
+fn mirror_swap_from_net_crew(
+    tanks: Query<(Entity, &NetCrew, Option<&PendingSwap>), With<Remote>>,
+    seats: Query<(Entity, &CrewStation, &crate::damage::VolumeOf)>,
+    mut commands: Commands,
+) {
+    for (tank, net, pending) in &tanks {
+        match net.swap {
+            Some((a_station, b_station, remaining)) => {
+                let seat_of = |station: CrewStation| {
+                    seats
+                        .iter()
+                        .find(|(_, s, owner)| **s == station && owner.tank() == tank)
+                        .map(|(e, ..)| e)
+                };
+                if let (Some(a), Some(b)) = (seat_of(a_station), seat_of(b_station)) {
+                    commands
+                        .entity(tank)
+                        .insert(PendingSwap { a, b, remaining });
+                }
+            }
+            // No swap in flight on the authority: drop any leftover display datum.
+            None => {
+                if pending.is_some() {
+                    commands.entity(tank).remove::<PendingSwap>();
+                }
             }
         }
     }
@@ -474,9 +650,11 @@ pub(crate) fn plugin(app: &mut App) {
     // Plain replication, no `.predict()`/interpolation: predicted tanks simulate their own servos,
     // and non-predicted consumers chase the raw angle through the servo mechanism (see the type).
     app.component::<ServoAngles>().replicate();
-    // Server-authoritative per-volume health (same plain-replication shape as `ServoAngles`): the
-    // client's damage/death emerge from this, not a divergent local kill.
-    app.component::<NetHealth>().replicate();
+    // Server-authoritative atomic combat snapshot (same plain-replication shape as `ServoAngles`):
+    // per-volume HP + per-seat occupancy/aliveness + in-flight swap, all in one component so no
+    // frame is internally inconsistent. Subsumes the former `NetHealth`. The client's damage/death
+    // emerge from this, not a divergent local kill.
+    app.component::<NetCrew>().replicate();
     // Authoritative launched-turret world pose (same plain-replication shape): the client shows the
     // cooked-off toss it does NOT simulate locally, driving its own rig turret kinematically.
     app.component::<LaunchedTurretPose>().replicate();
@@ -592,7 +770,7 @@ pub(crate) fn plugin(app: &mut App) {
         FixedPostUpdate,
         (
             publish_servo_angles,
-            publish_net_health,
+            publish_net_crew,
             publish_launched_turret_pose,
         ),
     );
@@ -600,14 +778,18 @@ pub(crate) fn plugin(app: &mut App) {
         FixedUpdate,
         (apply_servo_angles, apply_launched_turret_pose).in_set(GameplaySet),
     );
-    // Client: land the replicated health before the damage-consequence chain reads it, so cookoff /
-    // crew-death interpret this tick's authoritative HP (server-only publish is a no-op there).
+    // Client: realize the authoritative combat snapshot (HP + occupancy + derived Dead/knockout) on
+    // every replica tank. `.before(DamageConsequences)` for parity with the authority — whose chain
+    // is gated off on the client (`damage::plugin`), where this derivation stands in for it.
     app.add_systems(
         FixedUpdate,
-        apply_net_health
+        apply_net_crew
             .in_set(GameplaySet)
             .before(DamageConsequences),
     );
+    // Client: keep the crew bar's view-only `PendingSwap` in step with the replicated swap, so the
+    // sim-layer `crew_ui` reads it exactly as in single-player (never naming the netcode).
+    app.add_systems(FixedUpdate, mirror_swap_from_net_crew.in_set(GameplaySet));
     // Bridge lightyear's input buffer into the sim's own `TankCommand` (command.rs's contract):
     // sim systems (`ramp_drive`, `fire`, `drive_aim_servos`) read `TankCommand`, never
     // `ActionState` directly, so this is the one seam translating net input into sim input.

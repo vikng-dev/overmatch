@@ -37,7 +37,7 @@ use crate::hud::HudCamera;
 use crate::tank::Controlled;
 use crate::ui_font::UiFonts;
 
-use super::protocol::{NetHealth, health_bearing_volumes};
+use super::protocol::{NetCrew, health_bearing_volumes};
 
 // --- Feel dials (all in ONE place) -----------------------------------------------------------
 /// Camera-kick impulse added per hit, in radians, before severity scaling. Pitch is the always-up
@@ -83,11 +83,17 @@ struct DamageFlash(f32);
 #[derive(Resource, Default)]
 struct HitConfirm(f32);
 
-/// The last-seen `NetHealth` snapshot for a tank, so a change can be diffed into per-volume drops.
+/// The last-seen per-volume HP snapshot for a tank, so a change can be diffed into per-volume drops.
 /// Armed once (seeded to the live value, so the spawn frame is never read as a hit), updated on every
-/// observed change.
+/// observed change. Read out of the replicated [`NetCrew`] (which subsumes the former `NetHealth`).
 #[derive(Component)]
 struct HealthMemory(Vec<f32>);
+
+/// The per-volume HP vector out of the atomic [`NetCrew`] snapshot, in the SAME
+/// [`health_bearing_volumes`] order the server published — the value hit-feel diffs for drops.
+fn net_health(net: &NetCrew) -> Vec<f32> {
+    net.volumes.iter().map(|v| v.hp).collect()
+}
 
 /// The screen-edge damage frame (own hit). A full-screen node drawn as a thick red border, its alpha
 /// driven by [`DamageFlash`]; the hollow centre keeps it from obscuring the fight.
@@ -132,11 +138,13 @@ pub fn plugin(app: &mut App) {
 /// component first appears is never diffed as a hit. Polling (not an observer) for the same reason as
 /// `net::render_error::arm_render_error`: replicated markers arrive in no guaranteed order.
 fn arm_health_memory(
-    tanks: Query<(Entity, &NetHealth), (With<Remote>, Without<HealthMemory>)>,
+    tanks: Query<(Entity, &NetCrew), (With<Remote>, Without<HealthMemory>)>,
     mut commands: Commands,
 ) {
     for (entity, net) in &tanks {
-        commands.entity(entity).insert(HealthMemory(net.0.clone()));
+        commands
+            .entity(entity)
+            .insert(HealthMemory(net_health(net)));
     }
 }
 
@@ -157,11 +165,11 @@ fn detect_health_drops(
         (
             Entity,
             &TankVolumes,
-            &NetHealth,
+            &NetCrew,
             &mut HealthMemory,
             Has<Controlled>,
         ),
-        (With<Remote>, Changed<NetHealth>),
+        (With<Remote>, Changed<NetCrew>),
     >,
     health: Query<&ComponentHealth>,
     transforms: Query<&GlobalTransform>,
@@ -170,17 +178,20 @@ fn detect_health_drops(
     mut confirm: ResMut<HitConfirm>,
 ) {
     for (root, volumes, net, mut memory, is_own) in &mut tanks {
-        // The health-bearing volumes in the SAME order the server snapshotted (index i ↔ volume).
+        // The per-volume HP out of the atomic snapshot, in the SAME health-bearing order the server
+        // published (index i ↔ volume). `Changed<NetCrew>` also fires each tick a swap countdown
+        // ticks; the diff below simply finds no drop then, so that costs a no-op, never a false cue.
+        let hp = net_health(net);
         let bearers = health_bearing_volumes(volumes, |v| health.contains(v));
         // A transient length skew while the rig is still spawning: resync memory, diff nothing.
-        if bearers.len() != net.0.len() || memory.0.len() != net.0.len() {
-            memory.0 = net.0.clone();
+        if bearers.len() != hp.len() || memory.0.len() != hp.len() {
+            memory.0 = hp;
             continue;
         }
 
         // The worst per-volume drop since last snapshot (`None` if nothing dropped).
-        let worst = worst_drop(&memory.0, &net.0);
-        memory.0 = net.0.clone();
+        let worst = worst_drop(&memory.0, &hp);
+        memory.0 = hp;
 
         let Some((worst_index, drop_hp)) = worst else {
             continue;
