@@ -55,6 +55,15 @@ lightyear = { version = "0.28", default-features = false, features = [
 #
 # `avian3d/serialize` is additive (Serialize/Deserialize impls on Position/Rotation/velocities) that
 # lightyear's replication registration needs; unconditional now that lightyear always compiles.
+# Test-only direct handles on lightyear's sub-crates (already in the dependency graph via the
+# `lightyear` facade, so these add no new builds — cargo unifies them with the locked 0.28.0).
+# The facade does not re-export the `SyncedTimeline`/`SyncTargetTimeline` traits or the
+# fixed-point time types, and the interpolation-delay tripwire (tests/net_interp_delay.rs) must
+# call `sync_objective` directly to pin the send_interval=0 degenerate it guards against.
+[dev-dependencies]
+lightyear_sync = "0.28"
+lightyear_core = "0.28"
+
 [features]
 default = ["dev_tools"]
 # Player-facing debug tooling (physics wireframes + the `G`/`X`/`F` debug keys). Empty deps: it is a

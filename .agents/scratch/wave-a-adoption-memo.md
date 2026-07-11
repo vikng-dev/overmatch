@@ -84,6 +84,38 @@ then any `[patch]` adoption rides one rebuild; doing it in the other order rebui
    real-world tier + video only for lightyear (and optionally parry limit-cycle) — per the
    "hands-on, reproducible, no slop" plan.
 
+## ADDED 2026-07-11 (post-decision): lightyear interpolation delay — PARKED filing candidate
+
+New item from the remote-tank teleport investigation (same day, separate session). Not a wave-A
+patch — a config-degenerate diagnosis with the strongest evidence package of the batch.
+
+- **Symptom/mechanism**: interpolated remotes teleport along their path because the client's
+  interpolation delay collapses to `min_delay = 5ms` when the server advertises
+  `send_interval = 0` (per-tick replication, `ReplicationMetadata` default — the acknowledged
+  `TODO: deal with server_send_interval = 0` in `lightyear_interpolation` timeline.rs). Deeper
+  finding, NOT yet reported upstream anywhere: the interpolation objective anchors to the
+  server-now ESTIMATE, which sits RTT/2 ahead of the newest received keyframe, so the effective
+  headroom is `RTT/2 − (delay + jitter_margin)` — the configured delay has RTT-dependent
+  semantics, and the 5ms default is chronically NEGATIVE on WAN (clamp → freeze-then-step).
+  Upstream refs: #890 (open, same config trap, no mechanism), #423 (open, maintainer workaround
+  = fixed min_delay, calibrated on local RTT≈0 so it under-buffers on WAN), #1451 (merged, in
+  0.28 — chose clamp over extrapolate).
+- **Our fix (landed on main)**: explicit `InterpolationConfig { min_delay: 100ms }` on the
+  Client entity (`src/net/client.rs`, full sizing derivation in the comment). Deliberately NOT
+  the examples' server-side `ReplicationMetadata::new(100ms)` — that timer throttles the whole
+  sender and would starve own-tank prediction reconciliation to 10 Hz.
+- **Tripwire**: `tests/net_interp_delay.rs` pins the degenerate behaviorally (calls
+  `sync_objective` directly; expects the 5ms+1-tick collapse). Fires on any upstream fix to the
+  TODO, the defaults, or the anchoring → signal to re-derive/delete our min_delay and file or
+  update the upstream report.
+- **Filing shape when resumed**: comment on #890 (or fresh issue referencing it) with the
+  RTT/2-anchoring arithmetic + repro; patch candidate = implement the TODO (`send_interval == 0
+  → fall back to tick_duration`) AND/OR document/expose RTT-adaptive delay. Escalation path: an
+  in-app RTT-adaptive delay (`min_delay = RTT/2 + N·tick + jitter`, updated from PingManager at
+  connect) — if we build and prove it, it IS the upstream PR.
+- **Resume triggers**: same as avian/lightyear-watchdog below (parry PR response OR 1v1 alpha
+  playtest done), plus: fires automatically if the tripwire trips on a lightyear upgrade.
+
 ## DECISION 2026-07-11 (Yan): parry filed; avian + lightyear PARKED — alpha focus
 
 parry: FILED (issue #429, PR #430, Discord follow-up). avian and lightyear filings are parked

@@ -19,6 +19,8 @@ use bevy::app::ScheduleRunnerPlugin;
 use bevy::asset::AssetPlugin;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow, WindowFocused};
+// Not in any prelude: the snapshot-interpolation timeline config (the remote-tank delay knob).
+use lightyear::interpolation::timeline::InterpolationConfig;
 use lightyear::prediction::correction::CorrectionPolicy;
 use lightyear::prelude::client::*;
 use lightyear::prelude::input::client::InputSystems;
@@ -292,6 +294,37 @@ pub fn run() {
         // `no_input_delay()` + `jitter_multiple: 4`. `PredictionManager` `#[require]`s an
         // `InputTimelineConfig`; giving it explicitly here wins over that default insert.
         InputTimelineConfig::new(sync_config, input_delay),
+        // THE REMOTE-TANK TELEPORT FIX (2026-07-11): pin the interpolation delay to a real
+        // buffer. Interpolated remotes render at `I = server_estimate − (delay + jitter_margin)`
+        // where `delay = max(send_interval·1.7, min_delay)` — and our server replicates every
+        // tick, advertising `send_interval = 0` (lightyear's `ReplicationMetadata` default), so
+        // the ratio path is dead (acknowledged upstream hole: the `TODO: deal with
+        // server_send_interval = 0` in `lightyear_interpolation` timeline.rs; issues #890/#423).
+        // Without this insert the required-component default applies and delay collapses to
+        // `min_delay = 5 ms`. That is not merely thin — it is NEGATIVE on a real link: the
+        // server estimate sits RTT/2 AHEAD of the newest keyframe actually received, so the
+        // headroom behind the newest keyframe is `RTT/2 − (min_delay + 1 tick + 4·jitter)` —
+        // past zero whenever RTT ≳ 41 ms. The interpolation clock then chronically overruns the
+        // buffer, and lightyear CLAMPS (holds newest, no extrapolation) — remote hulls freeze
+        // and step keyframe-to-keyframe: the "teleports along the driving path" jitter, immune
+        // to `SPIKE_LATENCY_MS=0` because real WAN RTT alone crosses the bar.
+        //
+        // 100 ms ≈ RTT/2 + 4–5 keyframes of headroom for droplet-range links (RTT ≲ 100 ms),
+        // sized by `min_delay ≥ RTT/2 + (N−1)·15.625 ms − 4·jitter`. Cost: interpolated remotes
+        // render a further ~100 ms in the past — the honest model for a non-predicted opponent
+        // (see `FireEvent::fire_tick`'s timeline taxonomy; shells deliberately do NOT live on
+        // `I`). Own-tank prediction is untouched, as is the per-tick confirmed stream feeding
+        // rollback — which is exactly why the fix is HERE and not a server send-interval: the
+        // lightyear examples' `ReplicationMetadata::new(100ms)` pattern would throttle the whole
+        // sender, starving prediction reconciliation to 10 Hz. Tune down toward ~60 ms if
+        // remote-lead feel demands, no lower (back into clamp territory at droplet RTT). The
+        // eventual robust form is RTT-adaptive delay (upstream filing candidate — parked, see
+        // `.agents/scratch/wave-a-adoption-memo.md` §interp-delay); `tests/net_interp_delay.rs`
+        // tripwires the upstream degenerate this insert compensates for.
+        InterpolationConfig {
+            min_delay: Duration::from_millis(100),
+            ..Default::default()
+        },
         NetcodeClient::new(
             Authentication::Manual {
                 server_addr,

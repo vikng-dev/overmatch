@@ -129,8 +129,11 @@ pub struct FireEvent {
     ///   `timeline/input.rs` `InputTimeline::sync_objective`).
     /// - `S ≈` `RemoteTimeline::current_estimate` `= last_received_tick + RTT/2` (`timeline/remote.rs`).
     /// - `C = ReplicationCheckpointMap::last_confirmed_tick()`, the newest fully-confirmed server tick.
-    /// - `I = S − (interp_delay + jitter)`, where `interp_delay = max(send_interval·1.7, 5ms)`
+    /// - `I = S − (interp_delay + jitter)`, where `interp_delay = max(send_interval·1.7, min_delay)`
     ///   (`lightyear_interpolation` `timeline.rs` `to_duration` / `InterpolationTimeline::sync_objective`).
+    ///   Our per-tick sender advertises `send_interval = 0`, so `min_delay` is the whole delay — pinned
+    ///   to 100 ms by the explicit `InterpolationConfig` in `net::client` (the remote-tank teleport fix;
+    ///   the 5 ms lightyear default put `I` AHEAD of the newest received keyframe at WAN RTT).
     ///
     /// **We age the shell to `P`. CHOSEN.** Elapsed = `P − fire_tick`. Reasoning:
     /// 1. **The interaction that matters is shell-vs-our-own-predicted-hull, and our hull lives at `P`.**

@@ -5851,6 +5851,8 @@ dependencies = [
  "gltf",
  "image",
  "lightyear",
+ "lightyear_core",
+ "lightyear_sync",
  "ron",
  "serde",
  "serde_json",
