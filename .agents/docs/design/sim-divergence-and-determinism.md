@@ -311,13 +311,19 @@ session scratchpad `connect-hang-catch/`): the main thread parks in the outer sc
 `lightyear_inputs::client::prepare_input_message` →
 `NativeStateSequence::build_from_input_buffer`. Mechanism, all steps source-verified in the
 vendored 0.28 crates:
-1. The first connect-window `SyncEvent` re-anchors `LocalTimeline` by a raw delta that can go
-   **backward** (`InputTimeline::sync` resyncs on first sync; the objective's RTT/2 term is
-   polluted by scheduler delay on a loaded box while `LocalTimeline` has been ticking since app
-   start — the check-starvation filing's "backward SyncEvent" observed in stock lightyear).
+1. A connect-window `SyncEvent` fires TWO observers (source-verified after the fix landed —
+   this refines the commit message's "backward resync" framing): `receive_tick_events`
+   (lightyear_inputs client.rs:1157) remaps `InputBuffer.start_tick` by `tick_delta` — so the
+   timeline jump itself IS compensated — while `recompute_input_delay_on_sync`
+   (lightyear_sync input.rs:52) recomputes `input_delay` from current RTT. **Nothing compensates
+   the delay change**: entries sit at `old_now + old_delay`, prepare's `end_tick` becomes
+   `new_now + new_delay`, and the remap cancels `tick_delta` exactly — net strand
+   `= old_delay − new_delay`. Under load the early RTT samples are inflated by scheduler delay
+   (delay computed high on the first sync), then ping settles and a later sync snap recomputes it
+   lower → strands of 1-17 ticks observed, wedges landing "a few rollbacks in" = the SECOND snap.
 2. `InputBuffer::set_raw` refuses writes below `start_tick` (input_buffer.rs:194-197), so the
-   buffer stays **stranded** at the pre-jump ticks while the timeline sits below it — persistent,
-   which is why the wedge never self-heals.
+   strand is **persistent** — new inputs at the lower delayed tick are silently dropped and the
+   buffer never re-anchors.
 3. `build_from_input_buffer` (lightyear_inputs_native input_message.rs:94) computes
    `(end_tick + 1 - buffer_start_tick) as usize` where `Tick - Tick → i32`: a strand of ≥ 2 ticks
    goes negative, sign-extends to ~2^64, and the loop `push`es one `Compressed` per iteration —
@@ -332,10 +338,25 @@ of unsent input the server hold-last extrapolates anyway). Tripwire:
 `tests/net_input_buffer_wrap.rs` pins both enablers + the degenerate itself (thread-timeout
 canary); if it fires, upstream clamped the range — re-verify with a loaded batch and retire the
 guard. Proof: loaded 24-run batch with the guard = **24/24 clean, guard fired in 20/24 runs**
-(strands of 1-17 ticks logged — backward resyncs are ROUTINE under load; the old 3/10 hang rate
-was the ≥2-tick subset), vs 4/12 wedges unguarded same day. Upstream filing candidate: the
-`as usize` wrap wants a `.max(0)` clamp at input_message.rs:94 — park alongside the wave-A memo
-filings. The constant-offset runaway (§10) stays open — it did NOT reproduce (0/57) and is not
+(strands of 1-17 ticks logged — delay-shrink sync events are ROUTINE under load; the old 3/10
+hang rate was the ≥2-tick subset), vs 4/12 wedges unguarded same day.
+
+**Upstream filing package (checked 2026-07-11: bug LIVE at lightyear HEAD — main's
+`build_from_input_buffer` is byte-identical; no duplicate issue; #1534 "only buffer inputs after
+timeline sync" is adjacent but does NOT close the delay-shrink route; #560 is the historic panic
+cousin; #1559 is our other open input-buffer filing):**
+(A) PRIMARY: `build_from_input_buffer` (inputs_native input_message.rs) computes
+    `(end_tick + 1 - buffer_start_tick) as usize` with `Tick−Tick → i32`; a buffer leading
+    `end_tick` by ≥ 2 sign-extends to ~2^64 and the per-iteration `states.push` allocates until
+    the OS kills the process — a silent unbounded loop where an empty/absent message (or a
+    warn + bail) is correct. One-line shape: clamp both bounds at 0 / early-return on
+    `buffer_start_tick > end_tick`.
+(B) TRIGGER: on `SyncEvent<InputTimelineConfig>`, `receive_tick_events` compensates the buffer
+    for `tick_delta` but `recompute_input_delay_on_sync` changes `input_delay` with no
+    corresponding buffer/message compensation — any delay SHRINK ≥ 2 ticks strands the buffer
+    ahead of `end_tick = now + delay`, and `set_raw`'s refuse-lower rule makes the strand
+    permanent. Repro: link conditioner + CPU-loaded client, batch connects (or the unit shape in
+    our tests/net_input_buffer_wrap.rs canary). The constant-offset runaway (§10) stays open — it did NOT reproduce (0/57) and is not
 explained by this mechanism, though the backward-resync window it lives in is now partially
 defused by the guard; re-sweep on future loaded batches.
 
