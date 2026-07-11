@@ -1,0 +1,130 @@
+name: Deploy to droplet
+
+# Auto-deploy the dedicated server to the DigitalOcean test droplet on every push to `main`.
+# Build the Linux `overmatch-server` EXACTLY like the release workflow's dispatch path, then
+# scp the payload to the droplet, extract it, and restart the systemd unit — so the droplet
+# always runs `main`. See DEPLOY.md ("Auto-deploy") for the operator's view.
+#
+# Scope: this workflow fires ONLY on branch pushes to `main`. Tag pushes (`vX.Y.Z`) and
+# `workflow_dispatch` are handled entirely by release.yml and never reach here, so the full
+# release path and the manual scp-redeploy path are untouched.
+#
+# The server BUILD steps below are duplicated from release.yml's `upload-server` job.
+# >>> KEEP IN SYNC with .github/workflows/release.yml `upload-server` (build + package). <<<
+# They are deliberately not factored into a reusable workflow: release.yml must keep its
+# tag/dispatch semantics literally unchanged, so it cannot adopt a shared recipe, and factoring
+# for this side alone would only move the duplication, not remove it.
+
+on:
+  push:
+    branches: [main]
+
+# Least privilege: we only read the code (the deploy auth is the SSH key secret, not the token).
+permissions:
+  contents: read
+
+# Serialize droplet deploys. `cancel-in-progress: false` (queue, don't cancel): a running job
+# may be mid-scp / mid-extract / mid-restart on the droplet, and cancelling there could leave a
+# half-written payload. Queued runs execute in commit order, so the newest push ends up live
+# without ever interrupting an in-flight deploy.
+concurrency:
+  group: deploy-droplet
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # The DigitalOcean test droplet. Not a secret — it's public in DEPLOY.md and baked into release
+  # clients. The matching SSH private key is the `DROPLET_SSH_KEY` repo secret; its host key is
+  # pinned below.
+  DROPLET_HOST: 157.245.48.161
+
+jobs:
+  deploy:
+    # Skip the whole run (build + deploy) when the head commit says so: `[skip deploy]` merges
+    # still get CI (ci.yml), they just don't touch the droplet.
+    if: ${{ !contains(github.event.head_commit.message, '[skip deploy]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # --- BUILD (keep in sync with release.yml upload-server) --------------------------------
+      # lfs: true — the server bakes tank geometry from the real .glb at startup, so a pointer-file
+      # checkout yields a broken bundle.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          lfs: true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Bevy needs alsa/udev + windowing libs to COMPILE on Linux even though the server runs headless.
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libasound2-dev libudev-dev \
+            libwayland-dev libxkbcommon-dev libx11-dev
+
+      # Drop the build-time Blender sources and the stale asset backups under assets/**/backup/ so
+      # neither rides along in the server bundle.
+      - name: Prune non-runtime assets
+        run: |
+          find assets -type f \( -name '*.blend' -o -name '*.blend1' \) -delete
+          find assets -type d -name backup -prune -exec rm -rf {} +
+
+      # Share the release server build cache for warm builds.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: server-net
+
+      # --locked builds against the committed Cargo.lock (reproducible). release profile = strip +
+      # thin LTO.
+      - name: Build server
+        run: cargo build --release --locked --bin overmatch-server
+
+      # Stage a self-contained folder: the binary alongside assets/, plus a DEPLOYED_SHA marker so
+      # the droplet (and this run's log) can state exactly which commit is live.
+      - name: Package
+        run: |
+          mkdir -p stage/overmatch-server
+          cp target/release/overmatch-server stage/overmatch-server/
+          cp -r assets stage/overmatch-server/
+          printf '%s\n' "${GITHUB_SHA}" > stage/overmatch-server/DEPLOYED_SHA
+          tar -C stage -czf overmatch-server.tar.gz overmatch-server
+          ls -lh overmatch-server.tar.gz
+
+      # --- DEPLOY -----------------------------------------------------------------------------
+      # Install the deploy key (0600, in RUNNER_TEMP), pin the droplet's host key, ship the payload,
+      # extract into /opt/overmatch-server, restart the unit, and verify (is-active + live SHA).
+      - name: Deploy to droplet
+        env:
+          DROPLET_SSH_KEY: ${{ secrets.DROPLET_SSH_KEY }}
+        run: |
+          set -euo pipefail
+
+          KEY="${RUNNER_TEMP}/deploy_key"
+          KNOWN="${RUNNER_TEMP}/known_hosts"
+
+          # Private key from the secret, readable only by us.
+          install -m 600 /dev/null "$KEY"
+          printf '%s\n' "$DROPLET_SSH_KEY" > "$KEY"
+
+          # Pin the droplet's ed25519 host key (from DEPLOY.md) instead of disabling checking.
+          printf '%s\n' \
+            '157.245.48.161 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHj3I4r44u/XAIAGlqKqGwLPTrXit3dthCHfcBJo390G' \
+            > "$KNOWN"
+
+          SSH_OPTS=(-i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$KNOWN")
+
+          # Ship the payload to /opt, then extract + restart + verify on the droplet. The tar's
+          # top-level dir is `overmatch-server`, so extracting in /opt refreshes /opt/overmatch-server.
+          scp "${SSH_OPTS[@]}" overmatch-server.tar.gz "root@${DROPLET_HOST}:/opt/"
+          ssh "${SSH_OPTS[@]}" "root@${DROPLET_HOST}" '
+            set -e
+            cd /opt
+            tar xzf overmatch-server.tar.gz
+            systemctl restart overmatch-server
+            systemctl is-active overmatch-server
+            echo "Deployed SHA on droplet: $(cat /opt/overmatch-server/DEPLOYED_SHA)"
+          '
+          echo "Pushed commit ${GITHUB_SHA} to the droplet."
