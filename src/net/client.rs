@@ -139,6 +139,8 @@ pub fn run() {
     // Passive jitter-trace recorder: frame + tick + rollback rows with prediction/correction extras.
     // Idle unless `SPIKE_TRACE` is set.
     app.add_plugins(crate::trace::client_plugin);
+    // Per-fixed-tick sim-cost recorder: idle unless `SPIKE_COST_TRACE` is set (the MG-march cost spike).
+    app.add_plugins(crate::cost::client_plugin);
     // Diagnostic contact probe: per-tick broad/narrow-phase state for the predicted tank's
     // hull-vs-terrain pairs. Idle (nothing registered) unless `SPIKE_CONTACT_PROBE` is set.
     app.add_plugins(super::contact_probe::plugin);

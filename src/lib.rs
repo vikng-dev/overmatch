@@ -42,6 +42,11 @@ mod driving;
 /// raw parry casts there — the helper's math and parry's behavior, not the `apply_suspension`
 /// call site (that wiring's live guard is the idle at-rest harness metric).
 pub use driving::{SPHERE_CAST_TOI_SLACK, sphere_cast_ground_contact};
+/// The per-fixed-tick sim-COST recorder (`SPIKE_COST_TRACE=<path>`): an env-gated JSONL log of
+/// FixedUpdate tick time, the `ballistics::integrate_projectiles` share of it, and entity/projectile
+/// counts — the reusable measurement rig for the machine-gun-march cost spike. Off (zero cost) unless
+/// the env var is set; registered on the net server and client composition roots.
+mod cost;
 /// Fire control: per-weapon superelevation range tables + the player-dialed range. Sits atop
 /// `ballistics`; the aim commit reads it to lob the aim point so the bore elevates for range.
 mod firecontrol;

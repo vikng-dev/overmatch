@@ -72,6 +72,8 @@ pub fn run() {
     // Passive jitter-trace recorder: tick rows only (the server has no predicted view to render).
     // Idle unless `SPIKE_TRACE` is set.
     app.add_plugins(crate::trace::server_plugin);
+    // Per-fixed-tick sim-cost recorder: idle unless `SPIKE_COST_TRACE` is set (the MG-march cost spike).
+    app.add_plugins(crate::cost::server_plugin);
     // The cosmetic opponent-fire broadcast: SERVER ONLY. Every authoritative `fire` raises a
     // `FireShell`; this observer turns each one that names a tank into a `FireEvent` for the OTHER
     // clients (`broadcast_fire`). Registered here and NOWHERE shared, so the client's own local
