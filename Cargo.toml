@@ -85,17 +85,39 @@ path = "src/main.rs"
 name = "overmatch-server"
 path = "src/bin/overmatch-server.rs"
 
+# Debuginfo slimming (measured 2026-07-11): a fleet sweep found ~90% of a 169 GB
+# target-dir footprint was debuginfo, and 37 GB of it was our own crate's `.o` files.
+# Cargo's dev default is `debug = 2` (full DWARF), and on macOS the default
+# `split-debuginfo = "unpacked"` scatters that into per-object `.o`/`.dSYM` files that
+# never get reaped — so an every-day rebuild loop sheds GB/day of stale debug churn.
+# The fix is profile config, not worktree tricks:
+#   - own crate -> `line-tables-only`: keeps file:line in backtraces (what panic
+#     reports and agents actually read) while dropping variable/type DWARF.
+#   - deps -> `debug = 0`: nobody sets breakpoints inside bevy/wgpu/avian/lightyear.
+# For real lldb variable inspection, opt in with the `dev-full` profile below.
 [profile.dev]
 opt-level = 1
+debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 3
+debug = 0
+
+# Opt-in full-debuginfo escape hatch for a genuine lldb / variable-inspection session:
+# `cargo build --profile dev-full`. Inherits dev (same opt split) but restores full
+# DWARF on our crate. Deps stay at the inherited `debug = 0` — bump them here too if you
+# ever need to step into a dependency. Not used by any gate; purely a local debugging lever.
+[profile.dev-full]
+inherits = "dev"
+debug = 2
 
 # CI profile: clippy (type-check) + fast unit tests only, which gain nothing from
 # optimized dependencies. Inherit dev but drop every package back to opt-level 0 —
 # the dev profile's opt-level-3 deps are exactly what make a cold CI build slow (~25
 # min) and the rust-cache large (~1.5 GB). Used via `cargo {clippy,test} --profile ci`
-# in .github/workflows/ci.yml.
+# in .github/workflows/ci.yml. Debuginfo slimming rides in via `inherits = "dev"`:
+# our crate stays `line-tables-only` (so a CI test panic still logs file:line) and deps
+# inherit `debug = 0` — clippy and the type-check need no debuginfo of their own.
 [profile.ci]
 inherits = "dev"
 opt-level = 0
