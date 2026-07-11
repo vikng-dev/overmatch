@@ -1095,4 +1095,127 @@ mod tests {
             "an empty InputBuffer has nothing to hold-last — a real edge must pass",
         );
     }
+
+    /// The crew-swap false-death tripwire (the corruption this slice ends). Builds the exact
+    /// post-corruption local state the OLD client path produced on a `Remote` tank — swap A↔B, seat
+    /// A (Gunner) LEFT holding the dead occupant and seat B (Loader) LEFT holding the live one after
+    /// the client-side flip, `apply_net_health` then re-asserting HP `[full, 0]` by index and
+    /// `kill_crew` LATCHING `Dead` onto the seat now holding the live man, `mark_dead_tanks` then
+    /// falsely latching `TankKnockedOut` — while the AUTHORITY's snapshot still says seat A is the
+    /// live Gunner and seat B the dead Loader.
+    ///
+    /// `apply_net_crew` (the fix) must HEAL it: it re-derives HP, occupancy (`home`), and `Dead` from
+    /// the authoritative snapshot every tick and derives the knockout label from scratch, so the live
+    /// crewman ends alive and the tank is not knocked out. The old `apply_net_health` (HP only, no
+    /// occupancy/aliveness re-derivation) plus the monotonic `kill_crew`/`mark_dead_tanks` latches
+    /// leave the corruption in place — this test fails against that ordering and passes with the fix.
+    #[test]
+    fn crew_swap_does_not_false_kill_on_replica() {
+        use crate::ballistics::ComponentHealth;
+        use crate::damage::{Crewman, Dead, KnockoutReason, TankKnockedOut, VolumeOf};
+
+        const FULL: f32 = 100.0;
+
+        let mut world = World::new();
+
+        // The `Remote` tank root carrying the AUTHORITATIVE (server) snapshot, still pre-swap: seat A
+        // is the live Gunner (full HP), seat B the dead Loader (0 HP). `swap == None` (the server has
+        // not applied any flip). `TankVolumes` is populated by the `VolumeOf` relationship below.
+        let root = world
+            .spawn((
+                Remote,
+                NetCrew {
+                    volumes: vec![
+                        VolumeSnapshot {
+                            hp: FULL,
+                            crew: Some(CrewSnapshot {
+                                home: CrewStation::Gunner,
+                                dead: false,
+                            }),
+                        },
+                        VolumeSnapshot {
+                            hp: 0.0,
+                            crew: Some(CrewSnapshot {
+                                home: CrewStation::Loader,
+                                dead: true,
+                            }),
+                        },
+                    ],
+                    swap: None,
+                },
+                // The false knockout the old `mark_dead_tanks` latched — the fix must remove it.
+                TankKnockedOut {
+                    reason: KnockoutReason::CrewLoss,
+                },
+            ))
+            .id();
+
+        // Seat A in `TankVolumes` order (spawned first). Its LOCAL state is the corruption: the
+        // client-side flip moved the dead Loader-occupant here (`home = Loader`, `Dead`) and
+        // `apply_net_health` wrote its index-0 HP (full) back on — the exact mismatched leftover.
+        let seat_a = world
+            .spawn((
+                CrewStation::Gunner,
+                Crewman {
+                    home: CrewStation::Loader,
+                },
+                ComponentHealth {
+                    current: FULL,
+                    max: FULL,
+                },
+                Dead,
+                VolumeOf(root),
+            ))
+            .id();
+
+        // Seat B (spawned second → index 1). The flip moved the LIVE Gunner-occupant here, then
+        // `apply_net_health` wrote index-1 HP (0) onto it and `kill_crew` LATCHED `Dead` — the live
+        // man wrongly killed. `home = Gunner` is the live occupant the flip stranded here.
+        let seat_b = world
+            .spawn((
+                CrewStation::Loader,
+                Crewman {
+                    home: CrewStation::Gunner,
+                },
+                ComponentHealth {
+                    current: 0.0,
+                    max: FULL,
+                },
+                Dead,
+                VolumeOf(root),
+            ))
+            .id();
+
+        world.run_system_once(apply_net_crew).unwrap();
+
+        // Seat A is the live Gunner again: HP restored, occupant home restored, `Dead` cleared.
+        assert_eq!(
+            world.get::<ComponentHealth>(seat_a).unwrap().current,
+            FULL,
+            "seat A keeps the authoritative full HP",
+        );
+        assert_eq!(
+            world.get::<Crewman>(seat_a).unwrap().home,
+            CrewStation::Gunner,
+            "seat A's occupant home is re-derived from the snapshot (not the flipped Loader)",
+        );
+        assert!(
+            world.get::<Dead>(seat_a).is_none(),
+            "the LIVE crewman must not end up dead — the false-death corruption is healed",
+        );
+
+        // Seat B stays the authoritative dead Loader (0 HP, dead) — the fix does not resurrect it.
+        assert_eq!(
+            world.get::<Crewman>(seat_b).unwrap().home,
+            CrewStation::Loader,
+        );
+        assert!(world.get::<Dead>(seat_b).is_some(), "seat B stays dead");
+
+        // With one crew seat living, the tank is NOT knocked out — the false `TankKnockedOut` that
+        // would have driven the death screen is removed by the idempotent derivation.
+        assert!(
+            world.get::<TankKnockedOut>(root).is_none(),
+            "the tank must not be knocked out with a living crewman — no false YOU DIED",
+        );
+    }
 }
