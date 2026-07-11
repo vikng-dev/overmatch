@@ -673,8 +673,10 @@ fn spawn_tank(
 }
 
 /// `Tab` hands control to the next tank: it moves the [`Controlled`] marker and resets the view to
-/// third-person — so you never inherit the gunner optic's tank-hide on the tank you just stepped out
-/// of. The mode change re-runs `sync_optic_render_layer`, which restores both tanks' render layers.
+/// third-person. The third-person reset is belt-and-suspenders, not load-bearing: `sight`'s
+/// `reconcile_optic_render_layers` runs every frame and derives each tank's render layer from the
+/// live (`SightMode`, `Controlled`) pair, so it restores the stepped-out tank's meshes on its own
+/// even without the reset (the same continuous reconcile that fixes the input-less MP respawn swap).
 /// With two tanks this is a toggle; it generalizes to cycling N in spawn order.
 fn swap_controlled_tank(
     keys: Res<ButtonInput<KeyCode>>,
