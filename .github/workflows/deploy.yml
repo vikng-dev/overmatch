@@ -63,7 +63,8 @@ jobs:
 
       # --- DEPLOY -----------------------------------------------------------------------------
       # Install the deploy key (0600, in RUNNER_TEMP), pin the droplet's host key, ship the payload,
-      # extract into /opt/overmatch-server, restart the unit, and verify (is-active + live SHA).
+      # extract into a fresh staging dir and swap it into /opt/overmatch-server (a clean install, not
+      # a merge over the old tree), restart the unit, and verify (is-active + live SHA).
       - name: Deploy to droplet
         env:
           DROPLET_SSH_KEY: ${{ secrets.DROPLET_SSH_KEY }}
@@ -77,21 +78,35 @@ jobs:
           install -m 600 /dev/null "$KEY"
           printf '%s\n' "$DROPLET_SSH_KEY" > "$KEY"
 
-          # Pin the droplet's ed25519 host key (from DEPLOY.md) instead of disabling checking.
-          printf '%s\n' \
-            '157.245.48.161 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHj3I4r44u/XAIAGlqKqGwLPTrXit3dthCHfcBJo390G' \
-            > "$KNOWN"
+          # Pin the droplet's ed25519 host key (from DEPLOY.md) instead of disabling checking. The
+          # host is `$DROPLET_HOST` (interpolated, so a re-IP updates exactly ONE place — the env
+          # above); only the key material is a literal.
+          printf '%s ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHj3I4r44u/XAIAGlqKqGwLPTrXit3dthCHfcBJo390G\n' \
+            "${DROPLET_HOST}" > "$KNOWN"
 
           SSH_OPTS=(-i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes \
             -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$KNOWN")
 
-          # Ship the payload to /opt, then extract + restart + verify on the droplet. The tar's
-          # top-level dir is `overmatch-server`, so extracting in /opt refreshes /opt/overmatch-server.
+          # Ship the payload to /opt, then extract into a FRESH staging dir, swap it into place, and
+          # restart + verify on the droplet.
           scp "${SSH_OPTS[@]}" overmatch-server.tar.gz "root@${DROPLET_HOST}:/opt/"
           ssh "${SSH_OPTS[@]}" "root@${DROPLET_HOST}" '
             set -e
             cd /opt
-            tar xzf overmatch-server.tar.gz
+            # Extract into a clean staging dir, NOT over the live tree: a plain `tar xzf` over
+            # /opt/overmatch-server leaves files deleted/renamed on main lingering on the droplet
+            # forever — an invisible skew vs a clean install. The tar unpacks a top-level
+            # `overmatch-server/`, so stage it aside first.
+            rm -rf overmatch-server.staging
+            mkdir overmatch-server.staging
+            tar xzf overmatch-server.tar.gz -C overmatch-server.staging
+            # Swap the freshly-staged tree into place, THEN restart. The service is still running
+            # from the old dir during extract, so we swap before touching the unit: retire the old
+            # tree and move the new one in, so the restart below launches the clean install.
+            rm -rf overmatch-server.old
+            if [ -d overmatch-server ]; then mv overmatch-server overmatch-server.old; fi
+            mv overmatch-server.staging/overmatch-server overmatch-server
+            rm -rf overmatch-server.staging overmatch-server.old
             systemctl restart overmatch-server
             systemctl is-active overmatch-server
             echo "Deployed SHA on droplet: $(cat /opt/overmatch-server/DEPLOYED_SHA)"
