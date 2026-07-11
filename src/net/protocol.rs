@@ -27,6 +27,62 @@ use crate::driving::DriveState;
 use crate::state::GameplaySet;
 use crate::tank::{Rig, ServoCommand, ServoIndex, ServoSpec, TankSim};
 
+// ---------------------------------------------------------------------------
+// Protocol compatibility guard
+// ---------------------------------------------------------------------------
+//
+// WHY THIS EXISTS. bevy_replicon addresses replicated components by their REGISTRATION INDEX, not
+// by name, so a client and server built from different revisions of `plugin` (below) silently
+// misapply each other's messages: the deployed alpha.4 server replicated `NetHealth` at the index a
+// main-built client had since re-registered as `NetCrew`, and the client spammed per-tick
+// `unable to apply mutate message ... missing history component` forever, with no hint of the cause
+// (2026-07-11 incident). The netcode handshake already carries the mechanism to refuse this cleanly,
+// BEFORE replication ever starts: netcode.io's `protocol_id` is folded into the connect-token AEAD,
+// so a client whose `protocol_id` differs from the server's produces a token the server cannot
+// decrypt — it drops the request and the client times out, exactly as if the server were down (a
+// mismatch is transport-indistinguishable from a timeout; see `net::client`'s connect overlay). We
+// therefore bake [`PROTOCOL_FINGERPRINT`] into BOTH ends' `protocol_id` (`net::client`/`net::server`),
+// turning a version/wire skew into a clean refusal instead of a corrupt-forever connection.
+
+/// The pinned protocol revision. It rides [`PROTOCOL_FINGERPRINT`] alongside the crate version, so
+/// two builds that share a crate version but differ on the WIRE SURFACE (the replicated
+/// component/message/channel set `plugin` registers) still refuse each other once this is bumped.
+///
+/// **Bump this — and re-pin [`WIRE_SURFACE_HASH`] — in the SAME diff whenever the wire surface
+/// changes** (a replicated component added/removed/reordered/renamed, a message or channel changed,
+/// the input type changed). The `wire_surface_is_pinned` tripwire fails until you do, which
+/// is the point: it makes a silent wire-breaking change impossible.
+pub const PROTOCOL_REV: u32 = 1;
+
+/// The protocol fingerprint both ends bake into their netcode `protocol_id` (`Authentication::Manual`
+/// on the client, `NetcodeConfig` on the server). Derived at COMPILE TIME from [`PROTOCOL_REV`] + the
+/// crate version, so it is a pure function of the build — the SAME build always yields the SAME value
+/// (the two-app integration tests build both ends from this crate, so they always agree and still
+/// connect), and any version bump OR [`PROTOCOL_REV`] bump changes it, refusing a skewed peer.
+pub const PROTOCOL_FINGERPRINT: u64 = protocol_fingerprint();
+
+/// FNV-1a over `bytes`, continuing from `seed` — a tiny, dependency-free, `const`-evaluable hash so
+/// [`PROTOCOL_FINGERPRINT`] is a compile-time constant with no build script or proc macro. Not
+/// cryptographic (it doesn't need to be — `protocol_id` is a compatibility tag, not a secret; the
+/// dev private key is a separate `[0; 32]`), just a stable well-mixed fold of the inputs.
+const fn fnv1a_64(seed: u64, bytes: &[u8]) -> u64 {
+    let mut hash = seed;
+    let mut i = 0;
+    while i < bytes.len() {
+        hash ^= bytes[i] as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        i += 1;
+    }
+    hash
+}
+
+/// Fold [`PROTOCOL_REV`] then the crate version into one `u64` (FNV-1a offset basis as the seed).
+const fn protocol_fingerprint() -> u64 {
+    let rev_bytes = PROTOCOL_REV.to_le_bytes();
+    let after_rev = fnv1a_64(0xcbf2_9ce4_8422_2325, &rev_bytes);
+    fnv1a_64(after_rev, env!("CARGO_PKG_VERSION").as_bytes())
+}
+
 /// Replicated tank-identity marker — how the client recognizes a replicated entity as a tank
 /// (before its local sim body exists) without replicating the sim's own `Tank` marker. Deliberately
 /// NOT `Tank`: replicating `Tank` fires its `On<Add, Tank>` observers at replication-receive time,
@@ -642,8 +698,53 @@ pub(crate) fn angular_velocity_error(a: &AngularVelocity, b: &AngularVelocity) -
     (a.0 - b.0).length()
 }
 
-/// Registers everything both sides of the wire must agree on: replicated components and the
-/// `TankCommand` input protocol. Grows as later increments add more (§5/§7 of the spike map).
+/// The ordered WIRE SURFACE: every replicated component, replicated message, channel, and input type
+/// that rides the wire, in the EXACT order [`plugin`] registers them below. This is the surface
+/// bevy_replicon addresses by registration index — the thing a version skew corrupts (the motivating
+/// `NetHealth`-vs-`NetCrew`-at-the-same-index incident).
+///
+/// It is HAND-MAINTAINED and bound to `plugin` by the `wire_surface_is_pinned` tripwire (in the test
+/// module): this list must mirror the registration block one-for-one, in order. Enumerating
+/// lightyear's `ComponentRegistry` at runtime was considered and rejected as disproportionate (it
+/// keys on `TypeId`, mixes in lightyear-internal registrations, and its `finish()` poisons the
+/// registry) — the sanctioned "ordered list adjacent to the registration block with a comment binding
+/// them" is the proportionate guard. Changing the wire (rename/add/remove/reorder a replicated type,
+/// message, channel, or the input) must edit this list too, which changes [`WIRE_SURFACE_HASH`] and
+/// fails the tripwire — forcing a [`PROTOCOL_REV`] bump + re-pin in the same diff.
+///
+/// `#[cfg(test)]`: this and [`WIRE_SURFACE_HASH`] exist only to drive that tripwire, so they compile
+/// only under test — but they live HERE, adjacent to `plugin`, so an editor of the registration block
+/// sees the list they must keep in step.
+#[cfg(test)]
+const WIRE_SURFACE: &[&str] = &[
+    // Plain-replicated markers/snapshots — `app.component::<_>().replicate()`, in order:
+    "NetTank",
+    "NetBot",
+    "ServoAngles",
+    "NetCrew",
+    "LaunchedTurretPose",
+    // The cosmetic-fire channel then message — `app.add_channel` / `app.register_message`:
+    "FireChannel",
+    "FireEvent",
+    // The input protocol — `InputPlugin::<TankCommand>`:
+    "TankCommand",
+    // Predicted+rollback avian components — `app.component::<_>().replicate().predict()`, in order:
+    "Position",
+    "Rotation",
+    "LinearVelocity",
+    "AngularVelocity",
+];
+
+/// The pinned structural hash of [`WIRE_SURFACE`]. Re-pin this (and bump [`PROTOCOL_REV`]) in the
+/// same diff whenever the wire surface changes; the `wire_surface_is_pinned` tripwire prints the new
+/// value in its failure message. `#[cfg(test)]` for the same reason as `WIRE_SURFACE`.
+#[cfg(test)]
+const WIRE_SURFACE_HASH: u64 = 0x3291_7748_6c3b_98f4;
+
+/// Registers everything both sides of the wire must agree on: replicated components, the cosmetic
+/// fire message/channel, and the `TankCommand` input protocol — the exact surface enumerated in
+/// `WIRE_SURFACE` above (keep the two in lockstep; the `wire_surface_is_pinned` tripwire enforces
+/// it). Grows as later increments add more (§5/§7 of the spike map).
 pub(crate) fn plugin(app: &mut App) {
     app.component::<NetTank>().replicate();
     app.component::<NetBot>().replicate();
@@ -934,6 +1035,58 @@ mod tests {
     use super::*;
     use crate::command::CrewSwap;
     use crate::damage::CrewStation;
+
+    /// FNV-1a over the ordered [`WIRE_SURFACE`] names, each terminated by a `\n` separator so no two
+    /// distinct lists can collide by concatenation (`["ab","c"]` must not hash as `["a","bc"]`). The
+    /// same const the tripwire pins; recomputed here so a failure can print the value to re-pin.
+    fn hash_wire_surface() -> u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        for name in WIRE_SURFACE {
+            for byte in name.bytes() {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            hash ^= u64::from(b'\n');
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        hash
+    }
+
+    /// THE TRIPWIRE. The wire surface must equal its pinned snapshot. When this fails, the replicated
+    /// component/message/channel/input set changed — bump [`PROTOCOL_REV`] and re-pin
+    /// [`WIRE_SURFACE_HASH`] to the value this prints, in the SAME diff. That is what makes a silent
+    /// wire-breaking change impossible: mismatched builds already refuse at the netcode handshake
+    /// (both ends' `protocol_id` = [`PROTOCOL_FINGERPRINT`]), and bumping `PROTOCOL_REV` is what
+    /// actually moves that fingerprint so the refusal fires.
+    #[test]
+    fn wire_surface_is_pinned() {
+        let actual = hash_wire_surface();
+        assert_eq!(
+            actual, WIRE_SURFACE_HASH,
+            "wire surface changed: bump PROTOCOL_REV and re-pin WIRE_SURFACE_HASH to {actual:#018x}",
+        );
+    }
+
+    /// The fingerprint is a pure function of the build (so a same-build client/server always agree
+    /// and connect) and actually MOVES with each of its inputs (so a rev or version skew is refused).
+    #[test]
+    fn fingerprint_is_deterministic_and_sensitive() {
+        assert_eq!(
+            PROTOCOL_FINGERPRINT,
+            protocol_fingerprint(),
+            "the fingerprint must be a pure function of the build",
+        );
+        // A different PROTOCOL_REV changes the fingerprint.
+        let rev1 = fnv1a_64(0xcbf2_9ce4_8422_2325, &1u32.to_le_bytes());
+        let rev2 = fnv1a_64(0xcbf2_9ce4_8422_2325, &2u32.to_le_bytes());
+        assert_ne!(rev1, rev2, "PROTOCOL_REV must change the fingerprint");
+        // The crate version is folded in on top: a different version string changes the fingerprint.
+        assert_ne!(
+            fnv1a_64(rev1, b"0.3.0-alpha.4"),
+            fnv1a_64(rev1, b"0.3.0-alpha.5"),
+            "the crate version must change the fingerprint",
+        );
+    }
 
     /// A `LocalTimeline` (a `#[derive(Resource)]`) pinned to `tick`. Its field is private, so seed
     /// it from `Default` (tick 0) and step it with the public `apply_delta`.
