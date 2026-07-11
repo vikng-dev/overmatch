@@ -366,9 +366,10 @@ fn reaim_orbit_on_optic_exit(
 /// (the elevation pivot / mantlet) — the coaxial sight's natural home — and oriented along the
 /// **sight line**, the bore depressed by the current superelevation: the aim commit lobs the gun up
 /// by that angle for the dialed range, so depressing the view by the same holds the reticle on the
-/// target while the barrel rides above it (dial range → barrel rises, view stays on target). The tank
-/// is hidden in gunner view (`Visibility` on the root), so parking inside the mantlet clips no own
-/// geometry. The camera reads the gun's live pose, so it lags the player's intent at the turret's slew
+/// target while the barrel rides above it (dial range → barrel rises, view stays on target). The
+/// controlled tank's meshes are moved off this camera's render layer in gunner view (`sight`'s
+/// `reconcile_optic_render_layers`), so parking inside the mantlet clips no own geometry. The camera
+/// reads the gun's live pose, so it lags the player's intent at the turret's slew
 /// rate (the WT "view follows the gun" feel). Narrow FOV for magnification.
 fn gunner_camera(
     camera: Single<(&mut Transform, &mut GlobalTransform, &mut Projection), With<Camera3d>>,

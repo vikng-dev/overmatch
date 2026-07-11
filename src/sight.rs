@@ -221,15 +221,11 @@ pub fn plugin(app: &mut App) {
                 .in_set(PlayerInputSet)
                 .in_set(GameplaySet),
         )
-        // React to a view-mode change by re-laying the controlled tank's render layer (hidden from
-        // the optic / shown otherwise). After `toggle_sight` so it sees this frame's mode.
-        .add_systems(
-            Update,
-            sync_optic_render_layer
-                .run_if(resource_changed::<SightMode>)
-                .after(toggle_sight)
-                .in_set(GameplaySet),
-        )
+        // Reconcile the controlled tank's optic render-layer hide every frame — continuous derived
+        // render state, no `run_if`/ordering edge (see the system's doc comment for why event-driven
+        // was the original defect). Plain `Update`/`GameplaySet`; it only writes on mismatch, so an
+        // unconditional schedule costs a read of each mesh's layer in steady state.
+        .add_systems(Update, reconcile_optic_render_layers.in_set(GameplaySet))
         // The intent cursor reprojects through the gunner camera, so it runs after the camera's pose
         // is final for the frame. Both inputs are render-rate — `intent` (mouse, Update) and the
         // camera pose (which reads the VIEW gun's `GlobalTransform`, blended by
@@ -553,8 +549,8 @@ fn update_intent_reticle(
 /// hold-from-the-live-aim on exit — is gone: the seeding it did IS what sharing one memory does for
 /// free (a fresh, never-committed tank still starts from the gun's current lay, but that one rule now
 /// lives in `drive_gunner_aim`, keyed on the absence of a commitment). The controlled tank's own mesh
-/// is hidden from the optic by `sync_optic_render_layer` (reacting to the mode change), so the camera
-/// parked inside the mantlet sees through its own geometry.
+/// is hidden from the optic by `reconcile_optic_render_layers` (which derives the hide from this mode
+/// every frame), so the camera parked inside the mantlet sees through its own geometry.
 fn toggle_sight(
     keys: Res<ButtonInput<KeyCode>>,
     mut mode: ResMut<SightMode>,
@@ -596,31 +592,59 @@ fn toggle_sight(
 /// through its own geometry while everything else renders normally.
 const OPTIC_HIDDEN_LAYER: usize = 1;
 
+/// The render layer a tank mesh belongs on: [`OPTIC_HIDDEN_LAYER`] when it is a mesh of the
+/// controlled tank AND the gunner optic is up (hide it from the mount-parked camera), else the
+/// default layer 0 every camera draws. Pure so the reconcile invariant — controlled-and-gunner hides,
+/// everything else shows — is unit-tested without an app.
+fn desired_optic_layer(gunner: bool, is_controlled: bool) -> RenderLayers {
+    if gunner && is_controlled {
+        RenderLayers::layer(OPTIC_HIDDEN_LAYER)
+    } else {
+        RenderLayers::layer(0)
+    }
+}
+
 /// Hide the controlled tank from its own gunner optic via **render layers, not `Visibility`**. While
 /// in the optic, the controlled tank's render meshes move to [`OPTIC_HIDDEN_LAYER`]; otherwise they
 /// sit on the default layer 0 the camera draws. Render layers are per-camera and, unlike
 /// `Visibility`, are not co-owned by Avian's debug renderer (`PhysicsDebugPlugin` rewrites mesh
-/// `Visibility` when gizmos are toggled), so a debug toggle can no longer defeat the hide. Runs only
-/// when the view mode changes; `RenderLayers` does not inherit, so it is set on each render mesh.
-fn sync_optic_render_layer(
+/// `Visibility` when gizmos are toggled), so a debug toggle can no longer defeat the hide.
+///
+/// **Runs unconditionally every frame — this hide is CONTINUOUS DERIVED RENDER STATE** of (SightMode
+/// × which tank is `Controlled` × the tank's live mesh set), the same shape as Bevy's own per-frame
+/// visibility and transform propagation, and derived the same way: recomputed from its inputs rather
+/// than event-driven. Event/`resource_changed`-driven was the original defect — it re-laid the layers
+/// only on a `SightMode` change, so two input-less mutations of the derived state silently went
+/// unhandled: (1) a multiplayer respawn swaps `Controlled` onto a fresh tank (and despawns the old)
+/// with no mode change, leaving the new tank's barrel rendering in the mount-parked optic; and (2)
+/// the tank's meshes attach ASYNCHRONOUSLY as the glb scene instantiates (default layer 0) — there is
+/// no mesh-set-changed event to subscribe, so meshes landing after a one-shot stamp were missed even
+/// on first gunner entry. A per-frame reconcile owns all three inputs by construction.
+///
+/// `RenderLayers` does not inherit, so the layer is written per render mesh, and **only on mismatch**:
+/// each mesh's current `Option<&RenderLayers>` is compared against the desired layer and left alone
+/// when it already matches, so steady state is reads-only (no per-frame change-detection dirtying) and
+/// the unconditional schedule costs one layer read per mesh. Non-controlled tanks' meshes stay on
+/// layer 0 in gunner mode, so the optic still sees opponents.
+fn reconcile_optic_render_layers(
     mode: Res<SightMode>,
     controlled: Query<Entity, With<Controlled>>,
     tanks: Query<Entity, With<Tank>>,
     children: Query<&Children>,
-    meshes: Query<(), With<Mesh3d>>,
+    meshes: Query<Option<&RenderLayers>, With<Mesh3d>>,
     mut commands: Commands,
 ) {
     let controlled_tank = controlled.single().ok();
+    let gunner = *mode == SightMode::Gunner;
     for tank in &tanks {
-        let hidden = *mode == SightMode::Gunner && Some(tank) == controlled_tank;
-        let layer = if hidden {
-            RenderLayers::layer(OPTIC_HIDDEN_LAYER)
-        } else {
-            RenderLayers::layer(0)
-        };
+        let desired = desired_optic_layer(gunner, Some(tank) == controlled_tank);
         for entity in children.iter_descendants(tank) {
-            if meshes.contains(entity) {
-                commands.entity(entity).insert(layer.clone());
+            // `meshes.get` doubles as the `Mesh3d` filter (non-mesh nodes `Err` out) and the current
+            // layer read; write only when it differs from the desired layer.
+            if let Ok(current) = meshes.get(entity)
+                && current != Some(&desired)
+            {
+                commands.entity(entity).insert(desired.clone());
             }
         }
     }
