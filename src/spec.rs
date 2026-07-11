@@ -77,6 +77,14 @@ pub struct WeaponSpec {
     pub mass: f32,
     /// Reload cooldown before the weapon can fire again (s).
     pub reload: f32,
+    /// **Belt composition** — the tracer cadence, authored as ammunition data (real belts are loaded
+    /// e.g. 4-ball-1-tracer), NOT a VFX knob. Every `tracer_every`-th round down the belt is a tracer:
+    /// `1` = every round is a tracer (the 88's single-round "belt"), `5` = one-in-five (the 7.9 mm MG
+    /// belts). `0` = a tracerless belt (a future stealth belt) — no round ever traces. This is the
+    /// seed of the belt-customization feature; a future load-out UI edits the same field. Required (no
+    /// code default, ADR-0011): a belt with unstated tracer content is an authoring omission, not a
+    /// guessable default. The counter that walks the belt is sim state ([`crate::tank::WeaponState`]).
+    pub tracer_every: u32,
     /// Recoil spring, present iff `barrel` is. Authored alongside it.
     #[serde(default)]
     pub recoil: Option<RecoilSpec>,
@@ -251,6 +259,10 @@ mod tests {
             Some("Main_Gun_Recoil")
         );
         assert_eq!(spec.weapons["MainGun"].speed, 773.0);
+        // Belt data: the 88 traces every round (single-round belt); the MG belts are one-in-five.
+        assert_eq!(spec.weapons["MainGun"].tracer_every, 1);
+        assert_eq!(spec.weapons["Coax"].tracer_every, 5);
+        assert_eq!(spec.weapons["HullMG"].tracer_every, 5);
         // Volumes: a steel-grade *module* (barrel) and a pure-armour plate (no hp) exercise the
         // composition facet — material decoupled from role.
         assert_eq!(spec.volumes["Gun_Barrel_Ballistic"].material_factor, 1000.0);
