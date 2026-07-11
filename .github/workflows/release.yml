@@ -120,47 +120,17 @@ jobs:
     timeout-minutes: 30
     steps:
       # lfs: true — the server bakes tank geometry from the real .glb at startup, so a pointer-file
-      # checkout yields a broken bundle.
+      # checkout yields a broken bundle. Checkout stays job-level (a local composite `uses: ./...`
+      # only resolves after the repo is on disk).
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
           lfs: true
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      # Bevy needs alsa/udev + windowing libs to COMPILE on Linux even though the server runs headless.
-      - name: Install Linux build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            pkg-config libasound2-dev libudev-dev \
-            libwayland-dev libxkbcommon-dev libx11-dev
-
-      # Same prune as the client job: drop the build-time Blender sources and the stale asset backups
-      # under assets/**/backup/ so neither rides along in the server bundle.
-      - name: Prune non-runtime assets
-        run: |
-          find assets -type f \( -name '*.blend' -o -name '*.blend1' \) -delete
-          find assets -type d -name backup -prune -exec rm -rf {} +
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: server-net
-
-      # --locked builds against the committed Cargo.lock (reproducible). release profile = strip +
-      # thin LTO.
-      - name: Build server
-        run: cargo build --release --locked --bin overmatch-server
-
-      # Stage a self-contained folder: the binary alongside assets/, so on the droplet
-      # `BEVY_ASSET_ROOT=<extracted dir>` finds the meshes and `./overmatch-server` just runs.
-      - name: Package
-        run: |
-          mkdir -p stage/overmatch-server
-          cp target/release/overmatch-server stage/overmatch-server/
-          cp -r assets stage/overmatch-server/
-          tar -C stage -czf overmatch-server.tar.gz overmatch-server
-          ls -lh overmatch-server.tar.gz
+      # The canonical server build + package recipe (toolchain -> deps -> prune -> cache -> build ->
+      # tar). Shared verbatim with deploy.yml. No DEPLOYED_SHA marker here, so the release/dispatch
+      # artifact is unchanged. Leaves overmatch-server.tar.gz in the workspace root.
+      - uses: ./.github/actions/build-server
 
       # Plain artifact for the workflow_dispatch → scp redeploy path.
       - uses: actions/upload-artifact@v4

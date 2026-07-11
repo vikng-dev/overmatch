@@ -1,0 +1,85 @@
+name: Build overmatch-server
+description: >-
+  The single canonical build + package recipe for the Linux `overmatch-server`
+  dedicated server. Runs as steps inside the caller's job: toolchain -> apt deps
+  -> asset prune -> rust-cache -> cargo build -> tar. Both release.yml
+  (`upload-server`) and deploy.yml call this, so the recipe lives in exactly one
+  place.
+
+# CONTRACT (the seam):
+#   * The CALLER checks out the repo FIRST, with `lfs: true` (the server bakes
+#     tank geometry from real .glb at startup, so a pointer-file checkout yields a
+#     broken bundle) and `persist-credentials: false`. A checkout is mandatory
+#     before a local `uses: ./...` composite even resolves, and both callers want
+#     the identical LFS checkout, so it stays job-level — not hidden in here.
+#   * THIS action then does everything build-shaped and leaves
+#     `overmatch-server.tar.gz` in the workspace root (exposed as the `tar`
+#     output). What the caller does with that tar (upload-artifact / attach to
+#     release / scp to droplet) is the caller's business.
+
+inputs:
+  deployed-sha:
+    description: >-
+      When 'true', embed a DEPLOYED_SHA marker (GITHUB_SHA) inside the tar so the
+      droplet + run log can state exactly which commit is live. Default 'false'
+      keeps the release artifact byte-for-byte as before (no marker). The marker
+      is a packaging detail that goes INSIDE the tar, so it belongs with the
+      packaging step here rather than as a caller-side re-tar — one canonical tar.
+    required: false
+    default: 'false'
+
+outputs:
+  tar:
+    description: Path (workspace-relative) to the produced server tarball.
+    value: overmatch-server.tar.gz
+
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@stable
+
+    # Bevy needs alsa/udev + windowing libs to COMPILE on Linux even though the server runs headless.
+    - name: Install Linux build dependencies
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          pkg-config libasound2-dev libudev-dev \
+          libwayland-dev libxkbcommon-dev libx11-dev
+
+    # Drop the build-time Blender sources and the stale asset backups under assets/**/backup/ so
+    # neither rides along in the server bundle.
+    - name: Prune non-runtime assets
+      shell: bash
+      run: |
+        find assets -type f \( -name '*.blend' -o -name '*.blend1' \) -delete
+        find assets -type d -name backup -prune -exec rm -rf {} +
+
+    # Shared server build cache (key: server-net) — release, dispatch, and deploy all warm the
+    # same cache on purpose.
+    - uses: Swatinem/rust-cache@v2
+      with:
+        key: server-net
+
+    # --locked builds against the committed Cargo.lock (reproducible). release profile = strip +
+    # thin LTO.
+    - name: Build server
+      shell: bash
+      run: cargo build --release --locked --bin overmatch-server
+
+    # Stage a self-contained folder: the binary alongside assets/, so on the droplet
+    # `BEVY_ASSET_ROOT=<extracted dir>` finds the meshes and `./overmatch-server` just runs. With
+    # deployed-sha=true, also drop a DEPLOYED_SHA marker inside the folder before packing.
+    - name: Package
+      shell: bash
+      env:
+        DEPLOYED_SHA: ${{ inputs.deployed-sha }}
+      run: |
+        mkdir -p stage/overmatch-server
+        cp target/release/overmatch-server stage/overmatch-server/
+        cp -r assets stage/overmatch-server/
+        if [ "$DEPLOYED_SHA" = "true" ]; then
+          printf '%s\n' "${GITHUB_SHA}" > stage/overmatch-server/DEPLOYED_SHA
+        fi
+        tar -C stage -czf overmatch-server.tar.gz overmatch-server
+        ls -lh overmatch-server.tar.gz
