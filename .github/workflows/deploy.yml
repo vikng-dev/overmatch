@@ -9,11 +9,9 @@ name: Deploy to droplet
 # `workflow_dispatch` are handled entirely by release.yml and never reach here, so the full
 # release path and the manual scp-redeploy path are untouched.
 #
-# The server BUILD steps below are duplicated from release.yml's `upload-server` job.
-# >>> KEEP IN SYNC with .github/workflows/release.yml `upload-server` (build + package). <<<
-# They are deliberately not factored into a reusable workflow: release.yml must keep its
-# tag/dispatch semantics literally unchanged, so it cannot adopt a shared recipe, and factoring
-# for this side alone would only move the duplication, not remove it.
+# The server build + package is the shared composite `.github/actions/build-server`, called
+# verbatim by release.yml's `upload-server` too — so there is exactly one recipe, no sync burden.
+# Here it runs with `deployed-sha: true` to bake the DEPLOYED_SHA marker into the tar.
 
 on:
   push:
@@ -46,51 +44,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      # --- BUILD (keep in sync with release.yml upload-server) --------------------------------
+      # --- BUILD ------------------------------------------------------------------------------
       # lfs: true — the server bakes tank geometry from the real .glb at startup, so a pointer-file
-      # checkout yields a broken bundle.
+      # checkout yields a broken bundle. Checkout stays job-level (a local composite `uses: ./...`
+      # only resolves after the repo is on disk).
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
           lfs: true
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      # Bevy needs alsa/udev + windowing libs to COMPILE on Linux even though the server runs headless.
-      - name: Install Linux build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            pkg-config libasound2-dev libudev-dev \
-            libwayland-dev libxkbcommon-dev libx11-dev
-
-      # Drop the build-time Blender sources and the stale asset backups under assets/**/backup/ so
-      # neither rides along in the server bundle.
-      - name: Prune non-runtime assets
-        run: |
-          find assets -type f \( -name '*.blend' -o -name '*.blend1' \) -delete
-          find assets -type d -name backup -prune -exec rm -rf {} +
-
-      # Share the release server build cache for warm builds.
-      - uses: Swatinem/rust-cache@v2
+      # The canonical server build + package recipe, shared verbatim with release.yml's
+      # `upload-server`. deployed-sha: true bakes a DEPLOYED_SHA marker into the tar so the droplet
+      # (and this run's log) can state exactly which commit is live. Leaves overmatch-server.tar.gz
+      # in the workspace root for the deploy step below.
+      - uses: ./.github/actions/build-server
         with:
-          key: server-net
-
-      # --locked builds against the committed Cargo.lock (reproducible). release profile = strip +
-      # thin LTO.
-      - name: Build server
-        run: cargo build --release --locked --bin overmatch-server
-
-      # Stage a self-contained folder: the binary alongside assets/, plus a DEPLOYED_SHA marker so
-      # the droplet (and this run's log) can state exactly which commit is live.
-      - name: Package
-        run: |
-          mkdir -p stage/overmatch-server
-          cp target/release/overmatch-server stage/overmatch-server/
-          cp -r assets stage/overmatch-server/
-          printf '%s\n' "${GITHUB_SHA}" > stage/overmatch-server/DEPLOYED_SHA
-          tar -C stage -czf overmatch-server.tar.gz overmatch-server
-          ls -lh overmatch-server.tar.gz
+          deployed-sha: 'true'
 
       # --- DEPLOY -----------------------------------------------------------------------------
       # Install the deploy key (0600, in RUNNER_TEMP), pin the droplet's host key, ship the payload,
