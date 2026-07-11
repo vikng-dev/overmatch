@@ -50,6 +50,20 @@ pub(crate) struct SimulateInput {
     /// divergence from every servo/fire/steer transient. `forward` and `reverse` are mutually
     /// exclusive; `forward` wins if both are set.
     forward: bool,
+    /// `SPIKE_FIRE_SECONDARY` (the MG-cost workload): stay stationary and HOLD the secondary trigger
+    /// from a short warmup to the end of the run, so the only difference from the `SPIKE_SIM_IDLE`
+    /// baseline is the machine-gun fire itself — the clean A/B for `integrate_projectiles` cost.
+    /// Overrides the drive script (throttle/steer forced to 0). Aim held constant at `aim_point`.
+    fire_secondary: bool,
+    /// `SPIKE_AIM_POINT="x,y,z"` (hull-local metres): the point every servo chases in the fire/idle
+    /// workloads. Default `(200,0,-800)` lays the guns downrange into open ground (rounds strike
+    /// terrain — the common spray case); set it at a stationary target's hull so the rounds strike
+    /// ARMOR instead, exercising the full penetration march (thickness/span probes, spall). Ignored by
+    /// the drive scripts (which choose aim by their own rule).
+    aim_point: Vec3,
+    /// `SPIKE_SIM_RANGE` (m): the dialed range for the fire/idle aim solution's superelevation. 800 m
+    /// default. A close armor-hit target wants a small value so the rounds shoot flat into the plate.
+    range: f32,
 }
 
 impl Default for SimulateInput {
@@ -60,6 +74,11 @@ impl Default for SimulateInput {
         // (throttle sign, steer/aim/fire gating) sees at most one of them set and needs no
         // precedence logic of its own.
         let forward = std::env::var("SPIKE_SIM_FORWARD").is_ok();
+        // `SPIKE_SIM_TICKS` overrides the script length — the MG-cost workload needs ≥30 s of steady
+        // fire (≈2000+ ticks past the warmup), far longer than either default arc.
+        let total_override: Option<u32> = std::env::var("SPIKE_SIM_TICKS")
+            .ok()
+            .and_then(|v| v.parse().ok());
         Self {
             ticks: 0,
             fire_tick: std::env::var("SPIKE_FIRE_TICK")
@@ -67,12 +86,33 @@ impl Default for SimulateInput {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(300),
             drive_until: if long { 1088 } else { 384 },
-            total: if long { 1280 } else { 600 },
+            total: total_override.unwrap_or(if long { 1280 } else { 600 }),
             idle: std::env::var("SPIKE_SIM_IDLE").is_ok(),
             reverse: !forward && std::env::var("SPIKE_SIM_REVERSE").is_ok(),
             forward,
+            fire_secondary: std::env::var("SPIKE_FIRE_SECONDARY").is_ok(),
+            aim_point: parse_aim_point().unwrap_or(Vec3::new(200.0, 0.0, -800.0)),
+            range: std::env::var("SPIKE_SIM_RANGE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(800.0),
         }
     }
+}
+
+/// Parse `SPIKE_AIM_POINT="x,y,z"` into a hull-local aim point; `None` (unset or malformed) falls
+/// back to the downrange default. Three comma-separated f32s.
+fn parse_aim_point() -> Option<Vec3> {
+    let raw = std::env::var("SPIKE_AIM_POINT").ok()?;
+    let nums: Vec<f32> = raw
+        .split(',')
+        .filter_map(|s| s.trim().parse().ok())
+        .collect();
+    if nums.len() != 3 {
+        error!("harness: SPIKE_AIM_POINT=\"{raw}\" is not three f32s (x,y,z) — using the default");
+        return None;
+    }
+    Some(Vec3::new(nums[0], nums[1], nums[2]))
 }
 
 /// Headless simulate mode: write the scripted `TankCommand` into the lightyear `ActionState` slot
@@ -86,6 +126,22 @@ pub(crate) fn buffer_input(
     };
     sim.ticks += 1;
     let t = sim.ticks;
+    // MG-cost workload (`SPIKE_FIRE_SECONDARY`): stay stationary and hold the secondary trigger from a
+    // short warmup to the end. Stationary + constant aim means the ONLY delta from the `SPIKE_SIM_IDLE`
+    // baseline is the machine-gun fire, so the per-tick cost recorder's idle-vs-fire difference is
+    // exactly the MG march + shell spawn/despawn cost. Returns early — this overrides the drive script.
+    if sim.fire_secondary {
+        // ~3 s: let the connect handshake, tank spawn, and asset load settle before the burst starts,
+        // and comfortably inside the recorder's own 6 s warmup.
+        const FIRE_WARMUP: u32 = 192;
+        state.0.throttle = 0.0;
+        state.0.steer = 0.0;
+        state.0.aim = Some(sim.aim_point);
+        state.0.range = sim.range;
+        state.0.fire_primary = false;
+        state.0.fire_secondary = t > FIRE_WARMUP;
+        return;
+    }
     // Step-7 script, exercising the real sim under prediction: 2 s idle (rig binds, suspension
     // settles) → 4 s throttle 1.0 + steer 0.3 (ramp_drive + suspension + skid-steer, spanning
     // the ~2 s server perturbation) → coast to rest. The aim intention + range are held from
@@ -125,9 +181,11 @@ pub(crate) fn buffer_input(
         let theta = 0.02 * t as f32;
         Some(Vec3::new(800.0 * theta.sin(), 0.0, -800.0 * theta.cos()))
     } else {
-        Some(Vec3::new(200.0, 0.0, -800.0))
+        // The idle/drive baseline aims at the SAME point the fire workload uses, so an idle-vs-fire
+        // A/B differs only by the trigger (the aim/servo pose is identical in both).
+        Some(sim.aim_point)
     };
-    state.0.range = 800.0;
+    state.0.range = sim.range;
     // No fire in the idle window — a recoil impulse would disturb the resting contact under study —
     // nor in reverse, where the recoil transient would be exactly the kind of moving part the
     // minimal-divergence run exists to exclude.
@@ -145,7 +203,11 @@ pub(crate) fn simulate_watchdog(
     if simulate.ticks >= simulate.total {
         info!("client: simulation script complete, exiting");
         exit.write(AppExit::Success);
-    } else if time.elapsed_secs() > 40.0 {
+    } else if time.elapsed_secs() > simulate.total as f32 / 64.0 + 20.0 {
+        // The script advances at the 64 Hz tick rate, so a run that never reaches `total` in its own
+        // wall-clock budget + 20 s slack is wedged (never got an input slot / stalled). Scaling the
+        // bound with `total` lets the long MG-cost workloads (~40 s) finish while still fast-failing a
+        // never-connected short run.
         error!("client: watchdog timeout — never got an input slot");
         exit.write(AppExit::error());
     }

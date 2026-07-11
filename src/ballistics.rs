@@ -8,6 +8,8 @@
 //! The armor penetration march, ballistic volumes, and spall (design doc
 //! `.agents/docs/design/armor-penetration-and-damage.md`) grow off the `Impact` seam here.
 
+use std::time::Instant;
+
 use avian3d::prelude::{Forces, LayerMask, SpatialQuery, SpatialQueryFilter, WriteRigidBodyForces};
 use bevy::prelude::*;
 
@@ -327,7 +329,7 @@ pub struct FireShell {
 
 /// A shell in flight. Kinematic — integrated by hand, no physics engine.
 #[derive(Component)]
-struct Projectile {
+pub(crate) struct Projectile {
     velocity: Vec3,
     caliber: f32,
     mass: f32,
@@ -453,9 +455,30 @@ struct HitImpulse {
 #[derive(Component)]
 pub struct ImpactMarker;
 
+/// EXPERIMENTAL measurement A/B lever (`SPIKE_MG_SHORTCIRCUIT`, default OFF): the B-arm of the
+/// machine-gun-march cost attribution. When armed, [`integrate_projectiles`] still free-flies each
+/// sub-20 mm round and still fires its per-step world `cast_ray` — but the FIRST surface the ray hits
+/// (terrain OR armor) STOPS the round outright, skipping the whole penetration-resolution march:
+/// the thickness probe, the span probe, the ricochet/normalize logic, the spall sub-casts, and all HP
+/// deposition / hit-impulse. So round LIFETIME and population are identical between the two arms (both
+/// despawn on first contact), and the A−B tick-cost delta isolates the cost of the resolution
+/// machinery beyond the base ray. Sub-20 mm only (the 7.9 mm MGs; the 88 mm keeps the full march
+/// unconditionally), so the main gun's authoritative damage is never touched. This CHANGES sim
+/// behaviour (an MG deposits no damage in the B-arm) — it is a measurement knob, never a shipping
+/// path, hence default-off and gated behind an obvious env var.
+#[derive(Resource, Clone, Copy, Default)]
+pub struct MgShortCircuit(pub bool);
+
+/// Caliber ceiling (m) the [`MgShortCircuit`] B-arm applies to — the 7.9 mm MGs (0.0079 m) fall well
+/// under it, the 88 mm (0.088 m) well over, so the lever can never touch the main gun's march.
+const MG_SHORTCIRCUIT_CALIBER_MAX: f32 = 0.020;
+
 pub fn plugin(app: &mut App) {
     app.init_resource::<RetainSpentShells>()
         .init_resource::<MarchMode>()
+        .insert_resource(MgShortCircuit(
+            std::env::var("SPIKE_MG_SHORTCIRCUIT").is_ok(),
+        ))
         .add_observer(on_fire_shell)
         .add_observer(on_impact)
         .add_observer(on_hit_impulse)
@@ -588,10 +611,18 @@ fn integrate_projectiles(
     // Present only on the net client (a replica): shells still fly, raycast, spark, and despawn, but
     // HP deposition and hit impulse are the server's authority. Absent in SP / sandbox / server.
     replica: Option<Res<ClientReplica>>,
+    // EXPERIMENTAL cost-attribution A/B lever (`SPIKE_MG_SHORTCIRCUIT`, default off — see the type).
+    shortcircuit: Res<MgShortCircuit>,
+    // Sim-cost recorder attribution sink (`SPIKE_COST_TRACE`): absent unless the recorder is armed, so
+    // an unmeasured run pays only the `Option` check. This system's whole wall-time is stamped into it.
+    mut cost: Option<ResMut<crate::cost::CostTrace>>,
     spatial: SpatialQuery,
     time: Res<Time>,
     mut commands: Commands,
 ) {
+    // March-cost attribution timer (`SPIKE_COST_TRACE`): only sampled when the recorder is armed, so an
+    // unmeasured run never touches the clock. Covers the whole march (query iteration + every cast).
+    let march_t0 = cost.as_ref().map(|_| Instant::now());
     let dt = time.delta_secs();
     // Authority = not a replica: only then does a hit actually mutate health here.
     let deposit = replica.is_none();
@@ -675,6 +706,17 @@ fn integrate_projectiles(
             };
             let entry = origin + dir * hit.distance;
             let travelled = EPS + hit.distance;
+
+            // EXPERIMENTAL B-arm (`SPIKE_MG_SHORTCIRCUIT`): a sub-20 mm round stops dead at the first
+            // surface, skipping the entire penetration-resolution march below (thickness/span probes,
+            // ricochet, spall, HP). Population-preserving — same despawn-on-contact as the live path —
+            // so the A−B tick-cost delta isolates the resolution machinery. Default off (see the type).
+            if shortcircuit.0 && projectile.caliber < MG_SHORTCIRCUIT_CALIBER_MAX {
+                commands.trigger(Impact { position: entry });
+                pos = entry;
+                stopped = true;
+                break;
+            }
 
             // The struck `BallisticVolume` sits on the hit's ancestry (`hit_ancestor`, the shared
             // hierarchy-resolution rule), keeping the node entity so transit damage and spall can
@@ -881,6 +923,12 @@ fn integrate_projectiles(
             readout.speed = speed;
             readout.capability = capability(projectile.mass, speed);
         }
+    }
+
+    // Attribute this system's whole wall-time to the current fixed tick (`SPIKE_COST_TRACE`). Inert
+    // (both `Option`s empty) unless the recorder is armed.
+    if let (Some(cost), Some(t0)) = (cost.as_mut(), march_t0) {
+        cost.record_march(t0.elapsed().as_secs_f64() * 1.0e6);
     }
 }
 

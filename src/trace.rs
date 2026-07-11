@@ -380,7 +380,7 @@ fn hash_tank_state(
 /// Insert `role` before the extension of the raw `SPIKE_TRACE` value, so concurrently-launched
 /// processes sharing one value write to distinct files. `/tmp/t.jsonl` → `/tmp/t.<role>.jsonl`; a
 /// value with no extension gets `.<role>.jsonl` appended (`/tmp/t` → `/tmp/t.<role>.jsonl`).
-fn role_path(path: &str, role: &str) -> PathBuf {
+pub(crate) fn role_path(path: &str, role: &str) -> PathBuf {
     let p = Path::new(path);
     if let (Some(stem), Some(ext)) = (p.file_stem(), p.extension()) {
         let mut name = stem.to_os_string();
