@@ -18,7 +18,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use bevy::app::ScheduleRunnerPlugin;
 use bevy::asset::AssetPlugin;
 use bevy::prelude::*;
-use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow, WindowFocused};
+use bevy::window::PrimaryWindow;
 // Not in any prelude: the snapshot-interpolation timeline config (the remote-tank delay knob).
 use lightyear::interpolation::timeline::InterpolationConfig;
 use lightyear::prediction::correction::CorrectionPolicy;
@@ -40,29 +40,6 @@ use crate::ui_font::UiFonts;
 use crate::{NetClientPlugin, SimPlugin};
 
 const SERVER_PORT: u16 = 5888;
-
-/// Whether the Esc menu overlay is up. The networked stand-in for the SP pause: cursor released,
-/// overlay shown (settings/meta actions later), and `feed_action_state` sends a default command so
-/// the tank coasts to a stop instead of holding the last input — but `AppState` never leaves
-/// `Playing` and the sim keeps ticking.
-#[derive(Resource, Default)]
-struct MenuOverlay {
-    open: bool,
-}
-
-#[derive(Component)]
-struct MenuOverlayNode;
-
-/// Countdown to a deferred cursor re-grab after the window regains focus with the menu closed.
-/// `None` = idle. A grab issued the same frame focus returns is silently dropped by winit (bevy
-/// #16237/#16238), so `focus_menu` arms this and `tick_refocus_grab` waits [`REFOCUS_GRAB_FRAMES`]
-/// frames before recapturing.
-#[derive(Resource, Default)]
-struct RefocusGrab(Option<u8>);
-
-/// Frames to wait after focus returns before auto-grabbing — enough for winit to settle the focus
-/// event so the grab actually takes.
-const REFOCUS_GRAB_FRAMES: u8 = 2;
 
 pub fn run() {
     let simulate = std::env::args().any(|a| a == "--simulate-input")
@@ -353,7 +330,12 @@ pub fn run() {
     // lines `drive_connection` emits instead. Mounted on the same condition as `NetClientPlugin`.
     if !simulate || sim_windowed {
         app.add_systems(Startup, spawn_connect_status)
-            .add_systems(Update, update_connect_status);
+            // Declares `Overlay::ConnectStatus` presence into the overlay authority, so it must run in
+            // the `Declare` phase before the cursor owner derives the input license from the set.
+            .add_systems(
+                Update,
+                update_connect_status.in_set(crate::overlay::OverlaySet::Declare),
+            );
     }
 
     app.add_observer(diagnostics::log_connected)
@@ -446,22 +428,14 @@ pub fn run() {
         drop_stranded_input_buffer.before(InputSystems::PrepareInputMessage),
     );
 
-    // Cursor grab + Esc menu overlay: mounted whenever there is a REAL window — normal windowed play
-    // AND `SPIKE_SIM_WINDOWED` (a real window whose tank is scripted, but whose camera / gunner optic /
-    // ranging a viewer still drives by hand). `gate_player_input`'s "captured cursor = license" gate
-    // only opens once `grab_mode == Locked`, and these systems are the ONLY thing that locks it; before
-    // this, sim_windowed left the cursor released, so every device-reading system idled and the feel
-    // capture lost camera orbit / Lshift / ranging entirely. Headless simulate has no window, so it
-    // stays off there — and `feed_action_state` stays out of sim_windowed (the scripted `buffer_input`
-    // owns the wire), so the menu's command-idling never fights the script. The Esc toggle, the alt-tab
-    // focus watcher, and the deferred re-grab all move the same cursor, so chain them for a
-    // deterministic order within the frame.
-    if !simulate || sim_windowed {
-        app.init_resource::<MenuOverlay>()
-            .init_resource::<RefocusGrab>()
-            .add_systems(Update, (toggle_menu, focus_menu, tick_refocus_grab).chain())
-            .add_systems(OnEnter(AppState::Playing), grab_cursor);
-    }
+    // The Esc menu, the alt-tab focus watcher, and the ONE cursor owner now live in the overlay
+    // authority (`crate::overlay::plugin`, mounted by `NetClientPlugin` on same windowed condition):
+    // presence declared into `Overlays`, the cursor moved solely by `overlay::cursor_owner` from the
+    // `input_blocked` license, and the initial grab handled there too (no more `OnEnter(Playing)`
+    // grab). `gate_player_input`'s "captured cursor = license" gate still opens on `grab_mode ==
+    // Locked`, which the cursor owner drives. Headless simulate mounts no overlay authority (no window);
+    // `feed_action_state` stays out of sim_windowed (the scripted `buffer_input` owns the wire), so the
+    // authority's command-idling never fights the script.
 
     app.run();
 }
@@ -599,7 +573,7 @@ fn spawn_connect_status(mut commands: Commands, fonts: Res<UiFonts>) {
     // The only site to mark the text child too (`ConnectStatusText`), so `update_connect_status` can
     // rewrite the label in place. Spawned with default (visible) `Visibility` — the first frame is
     // pre-connect, and `update_connect_status` drives it from there.
-    crate::ui_font::spawn_overlay(
+    let node = crate::ui_font::spawn_overlay(
         &mut commands,
         &fonts.hud,
         ConnectStatusNode,
@@ -607,6 +581,10 @@ fn spawn_connect_status(mut commands: Commands, fonts: Res<UiFonts>) {
         ConnectStatusText,
         Some(Color::srgba(0.0, 0.0, 0.0, 0.6)),
     );
+    // The one-scrim contract's z: highest of the four, so a connect/reconnect covers everything.
+    commands.entity(node).insert(GlobalZIndex(
+        crate::overlay::Overlay::ConnectStatus.zindex(),
+    ));
 }
 
 /// Drive the connect-status overlay from [`ConnectRetry`] + the live connection state: hidden once
@@ -622,18 +600,32 @@ fn spawn_connect_status(mut commands: Commands, fonts: Res<UiFonts>) {
 fn update_connect_status(
     retry: Res<ConnectRetry>,
     connected: Query<(), (With<Connected>, With<NetcodeClient>)>,
+    mut overlays: ResMut<crate::overlay::Overlays>,
     mut container: Query<&mut Visibility, With<ConnectStatusNode>>,
     mut text: Query<&mut Text, With<ConnectStatusText>>,
     mut shown: Local<Option<(bool, u32)>>,
 ) {
+    use crate::overlay::Overlay;
+    let is_connected = !connected.is_empty();
+    // Declare presence into the overlay authority: the connect screen is latched whenever the link is
+    // not up. It is the highest-priority overlay, so it will own the scrim whenever present.
+    overlays.declare(Overlay::ConnectStatus, !is_connected);
+
     let Ok(mut visibility) = container.single_mut() else {
         return;
     };
-    if !connected.is_empty() {
-        visibility.set_if_neq(Visibility::Hidden);
+    // Visibility follows the one-scrim rule (ConnectStatus is top when present, so this is effectively
+    // "visible while unconnected", but routed through the single authority for uniformity).
+    visibility.set_if_neq(
+        if crate::overlay::draws_scrim(&overlays, Overlay::ConnectStatus) {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        },
+    );
+    if is_connected {
         return;
     }
-    visibility.set_if_neq(Visibility::Visible);
 
     // The label is a pure function of `(connected_once, attempts)` — rebuild it (and rewrite the
     // `Text`) only when that pair changes, not every frame.
@@ -952,20 +944,21 @@ fn apply_pending_recoil_kicks(
 /// `TankCommand` at render rate — copy it into lightyear's `ActionState` slot each tick, where the
 /// input plugin buffers it for the wire and for rollback replay. The reverse bridge (net::protocol)
 /// hands it straight back to the sim, so locally the round trip is an identity copy — the buffer is
-/// the point. Menu open = a default command: the tank coasts to a stop instead of holding the last
-/// input, and clicks in the menu don't fire.
+/// the point. When input is blocked = a default command: the tank coasts to a stop instead of holding
+/// the last input, and clicks in the menu don't fire.
 fn feed_action_state(
-    menu: Res<MenuOverlay>,
+    overlays: Res<crate::overlay::Overlays>,
     window: Single<&Window, With<PrimaryWindow>>,
     mut slots: Query<(&TankCommand, &mut ActionState<TankCommand>), With<InputMarker<TankCommand>>>,
 ) {
-    // Menu open OR the window unfocused (alt-tab): send a default command, so the moment we stop
-    // reading devices the tank coasts to a stop instead of holding the last input forever. Both
-    // conditions also release the cursor, and a released cursor gates `PlayerInputSet` — so every
-    // system that could latch anything into the command (drive gather, aim commit, respawn request)
-    // is already frozen whenever this zeroing is active. The license invariant keeps the two aligned
-    // structurally; nothing here needs sharing or re-deriving.
-    let idle = menu.open || !window.focused;
+    // The ONE license, `overlay::input_blocked` — the same authority that feeds the cursor owner and
+    // (via the released cursor + `state::cursor_locked`) gates `PlayerInputSet`. Blocked (menu / connect
+    // screen up, or window unfocused) → send a default command, so the moment we stop reading devices
+    // the tank coasts to a stop instead of holding the last input forever. Because the identical
+    // derivation also releases the cursor, every system that could latch anything into the command
+    // (drive gather, aim commit, respawn request) is already frozen whenever this zeroing is active —
+    // no second inference to keep in sync.
+    let idle = crate::overlay::input_blocked(&overlays, window.focused);
     for (command, mut state) in &mut slots {
         state.0 = if idle {
             TankCommand::default()
@@ -973,120 +966,6 @@ fn feed_action_state(
             *command
         };
     }
-}
-
-/// Open the menu overlay: release the cursor and spawn the translucent backdrop. Shared by the Esc
-/// toggle and the alt-tab focus handler (both need the freed cursor to have somewhere to land).
-fn open_menu(
-    menu: &mut MenuOverlay,
-    cursor: &mut CursorOptions,
-    commands: &mut Commands,
-    font: &Handle<Font>,
-) {
-    menu.open = true;
-    cursor.grab_mode = CursorGrabMode::None;
-    cursor.visible = true;
-    crate::ui_font::spawn_overlay(
-        commands,
-        font,
-        MenuOverlayNode,
-        "MENU\nEsc to close",
-        (),
-        Some(Color::srgba(0.0, 0.0, 0.0, 0.6)),
-    );
-}
-
-/// Close the menu overlay: re-grab the cursor and despawn the backdrop.
-fn close_menu(
-    menu: &mut MenuOverlay,
-    window: &mut Window,
-    cursor: &mut CursorOptions,
-    nodes: &Query<Entity, With<MenuOverlayNode>>,
-    commands: &mut Commands,
-) {
-    menu.open = false;
-    crate::state::grab_now(window, cursor);
-    for node in nodes.iter() {
-        commands.entity(node).despawn();
-    }
-}
-
-/// Esc toggles the menu overlay: cursor released over the overlay, re-grabbed on close. The
-/// networked replacement for `state::client_plugin`'s pause — `AppState` stays `Playing`
-/// throughout (see [`MenuOverlay`]).
-fn toggle_menu(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut menu: ResMut<MenuOverlay>,
-    window: Single<(&mut Window, &mut CursorOptions), With<PrimaryWindow>>,
-    nodes: Query<Entity, With<MenuOverlayNode>>,
-    fonts: Res<UiFonts>,
-    mut commands: Commands,
-) {
-    if !keys.just_pressed(KeyCode::Escape) {
-        return;
-    }
-    let (mut window, mut cursor) = window.into_inner();
-    if menu.open {
-        close_menu(&mut menu, &mut window, &mut cursor, &nodes, &mut commands);
-    } else {
-        open_menu(&mut menu, &mut cursor, &mut commands, &fonts.hud);
-    }
-}
-
-/// Alt-tab handling. Losing focus opens the menu (there is no online pause — the game keeps running
-/// behind the translucent overlay) and releases the cursor; regaining it with the menu closed arms a
-/// deferred re-grab ([`tick_refocus_grab`]). Writing `grab_mode = None` explicitly on loss matches OS
-/// reality and arms change detection even when winit has already dropped the grab (bevy
-/// #16237/#16238). Regaining focus with the menu open stays released — closing it (Esc) re-grabs.
-fn focus_menu(
-    mut focus: MessageReader<WindowFocused>,
-    mut menu: ResMut<MenuOverlay>,
-    cursor: Single<&mut CursorOptions, With<PrimaryWindow>>,
-    mut refocus: ResMut<RefocusGrab>,
-    fonts: Res<UiFonts>,
-    mut commands: Commands,
-) {
-    let Some(focused) = crate::state::collapse_focus(&mut focus) else {
-        return;
-    };
-    let mut cursor = cursor.into_inner();
-    if !focused {
-        refocus.0 = None; // cancel any pending re-grab
-        cursor.grab_mode = CursorGrabMode::None;
-        cursor.visible = true;
-        if !menu.open {
-            open_menu(&mut menu, &mut cursor, &mut commands, &fonts.hud);
-        }
-    } else if !menu.open {
-        refocus.0 = Some(REFOCUS_GRAB_FRAMES);
-    }
-}
-
-/// Fire the deferred re-grab armed by [`focus_menu`]: count down, then — the menu still closed —
-/// lock+hide+recenter. Re-checks the menu at fire time so a menu opened during the wait cancels it.
-fn tick_refocus_grab(
-    mut refocus: ResMut<RefocusGrab>,
-    menu: Res<MenuOverlay>,
-    window: Single<(&mut Window, &mut CursorOptions), With<PrimaryWindow>>,
-) {
-    match refocus.0 {
-        None => {}
-        Some(n) if n > 1 => refocus.0 = Some(n - 1),
-        Some(_) => {
-            refocus.0 = None;
-            if !menu.open {
-                let (mut window, mut cursor) = window.into_inner();
-                crate::state::grab_now(&mut window, &mut cursor);
-            }
-        }
-    }
-}
-
-/// Initial cursor grab on entering `Playing` — the one piece of `state::client_plugin` this module
-/// does want (mouse aim needs a locked cursor from the first frame).
-fn grab_cursor(window: Single<(&mut Window, &mut CursorOptions), With<PrimaryWindow>>) {
-    let (mut window, mut cursor) = window.into_inner();
-    crate::state::grab_now(&mut window, &mut cursor);
 }
 
 /// `apply_pending_recoil_kicks` derives a remote shot's barrel recoil from the LOCAL spec — these
