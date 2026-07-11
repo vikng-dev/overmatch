@@ -83,3 +83,15 @@ then any `[patch]` adoption rides one rebuild; doing it in the other order rebui
    the public fork + before/after numbers table + our game-level instrument numbers as the
    real-world tier + video only for lightyear (and optionally parry limit-cycle) — per the
    "hands-on, reproducible, no slop" plan.
+
+## DECISION 2026-07-11 (Yan): parry filed; avian + lightyear PARKED — alpha focus
+
+parry: FILED (issue #429, PR #430, Discord follow-up). avian and lightyear filings are parked
+deliberately — not abandoned. Resume triggers (either): (a) parry PR gets maintainer response
+(tells us how this ecosystem engages, improves the next two filings), or (b) the 1v1 alpha
+playtest has happened. Resume points: avian = re-derive the 2D CI hash under the exact CI
+feature set on the fork, then file (review-avian.md has the command evidence); lightyear = add
+the future-tick guard (clamp deferred consumption to min(mismatch_tick, current_tick−1)),
+re-run the ab-lightyear A/B (bay branches + levers ready), then file. Alpha priorities this
+session surfaced: §7 connect hang (3/10 at 80/10 — playtest killer), constant-offset connect
+runaway (2/24, ~0.9 m un-rolled-back), Yan's aim feel matrix.
