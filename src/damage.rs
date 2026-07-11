@@ -282,11 +282,32 @@ impl KnockoutReason {
     }
 }
 
+/// The knockout verdict from a tank's aggregate crew/ammo state — the ONE rule for "what counts as
+/// knocked out": a cooked-off ammo bin (Cookoff, precedence) or zero living crew (CrewLoss), else
+/// still fighting. The authority LATCHES it monotonically (`mark_dead_tanks`, fed by its own sim);
+/// the net client DERIVES it idempotently each tick (`net::protocol::apply_net_crew`, from the
+/// replicated snapshot). Both evaluate this single function, so the label means the same on both ends
+/// (ADR-0016 — one implementation, not two that agree today).
+pub(crate) fn knockout_from_counts(
+    crew_total: u32,
+    crew_living: u32,
+    ammo_cooked: bool,
+) -> Option<KnockoutReason> {
+    if ammo_cooked {
+        Some(KnockoutReason::Cookoff)
+    } else if crew_total > 0 && crew_living == 0 {
+        Some(KnockoutReason::CrewLoss)
+    } else {
+        None
+    }
+}
+
 /// The damage-consequence chain (cookoff → crew death → tank-death label → turret launch). Labeled
 /// so any producer of this tick's `ComponentHealth` can order itself BEFORE it: the authority's local
-/// deposition (`ballistics`, same-frame in `GameplaySet`) and, on the net client, the replicated
-/// health apply (`net::protocol::apply_net_health`) both land before the consequences read HP, so
-/// death is interpreted from the freshest health on either end.
+/// deposition (`ballistics`, same-frame in `GameplaySet`) lands before the consequences read HP. On
+/// the net client this whole chain is gated OFF (authority-only — see `plugin`); the replicated
+/// snapshot apply (`net::protocol::apply_net_crew`) both writes HP and DERIVES the consequences there,
+/// ordering itself `.before` this (empty-on-the-client) set for parity.
 #[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct DamageConsequences;
 
@@ -294,11 +315,22 @@ pub fn plugin(app: &mut App) {
     // The crew-swap seam: commands start/cancel swaps on the fixed clock (consuming the edge);
     // `tick_swaps` runs the in-flight timer. The whole consequence chain is sim — it decides who
     // lives and what works — so it steps on the fixed clock with the rest of the simulation.
+    //
+    // **AUTHORITY-ONLY on a net client.** Both this seam and the whole [`DamageConsequences`] chain
+    // are the *deciding* systems (start/time/apply a swap; latch death; cook off; launch the turret)
+    // — server-owned under authoritative multiplayer. On the net client the outcome arrives as
+    // replicated [`crate::net::protocol::NetCrew`] and `net::protocol::apply_net_crew` DERIVES the
+    // client's crew/death from it (ADR-0016). Running these here too would re-decide from
+    // re-assertable local state — the crew-swap false-death corruption this slice ends. The gate is
+    // the `ClientReplica` resource (present only on the net client — single-player, the sandbox, and
+    // the dedicated server are all authorities and keep running the chain). Same discriminator
+    // `ballistics` and `launch_turrets_on_cookoff` already use.
     app.add_systems(
         FixedUpdate,
         apply_crew_swap_commands
             .before(ConsumeCommandEdges)
-            .in_set(GameplaySet),
+            .in_set(GameplaySet)
+            .run_if(not(resource_exists::<crate::ClientReplica>)),
     )
     .add_systems(
         FixedUpdate,
@@ -311,7 +343,8 @@ pub fn plugin(app: &mut App) {
         )
             .chain()
             .in_set(GameplaySet)
-            .in_set(DamageConsequences),
+            .in_set(DamageConsequences)
+            .run_if(not(resource_exists::<crate::ClientReplica>)),
     );
 }
 
@@ -575,21 +608,17 @@ fn process_cookoffs(
 pub struct LaunchedTurret;
 
 fn launch_turrets_on_cookoff(
-    // Authority-only: launching the turret spawns a free PHYSICS body, and unlike a purely logical
-    // consequence (crew death, capability loss) that emerges correctly from replicated health, a
-    // client-local launch starts from an unsynced avian Position (pops to origin) and re-fires on
-    // every reconnect via `Added<CookedOff>` (both observed). So the net client does NOT launch
-    // locally; the authoritative launched turret is replicated to it in a follow-up slice. SP /
-    // sandbox / server (the authorities) still launch here.
-    replica: Option<Res<crate::ClientReplica>>,
+    // Launching the turret spawns a free PHYSICS body, and unlike a purely logical consequence (crew
+    // death, capability loss) that the client derives from the replicated snapshot, a client-local
+    // launch starts from an unsynced avian Position (pops to origin) and re-fires on every reconnect
+    // via `Added<CookedOff>` (both observed). The net client instead shows the authoritative launched
+    // turret via `net::protocol::LaunchedTurretPose`. This whole chain is already gated authority-only
+    // at the plugin (`Without` `ClientReplica`), so no per-system replica guard is needed here.
     cooked_ammo: Query<&VolumeOf, (With<CookedOff>, Added<CookedOff>)>,
     turrets: Query<(Entity, &GlobalTransform), (With<Turret>, Without<LaunchedTurret>)>,
     parents: Query<&ChildOf>,
     mut commands: Commands,
 ) {
-    if replica.is_some() {
-        return;
-    }
     for ammo_owner in &cooked_ammo {
         let tank = ammo_owner.tank();
         for (turret, global) in &turrets {
@@ -674,10 +703,12 @@ fn mark_dead_tanks(
                 }
             }
         }
-        if crew_total > 0 && crew_living == 0 {
-            commands.entity(tank).insert(TankKnockedOut {
-                reason: KnockoutReason::CrewLoss,
-            });
+        // The shared threshold rule (also the net client's derive): cookoff is handled by
+        // `process_cookoffs` upstream in the chain (which inserts its own `TankKnockedOut` and is
+        // filtered out by `Without<TankKnockedOut>` here), so this latch only ever reaches the
+        // crew-loss branch — `ammo_cooked = false`.
+        if let Some(reason) = knockout_from_counts(crew_total, crew_living, false) {
+            commands.entity(tank).insert(TankKnockedOut { reason });
         }
     }
 }

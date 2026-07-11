@@ -143,8 +143,10 @@ pub fn run() {
     app.add_plugins(SimPlugin);
     // Server-authoritative combat: mark this app a REPLICA so `ballistics` flies/sparks shells
     // cosmetically but never deposits HP or applies hit impulse — damage/death emerge from the
-    // server's replicated per-volume health (`net::protocol::NetHealth`) instead of a divergent
-    // local kill. Only the net client sets this; SP / sandbox / server stay authorities.
+    // server's replicated combat snapshot (`net::protocol::NetCrew`) instead of a divergent local
+    // kill. This resource also gates the whole `damage::DamageConsequences` chain off here (the
+    // client derives those from `NetCrew`). Only the net client sets this; SP / sandbox / server
+    // stay authorities.
     app.insert_resource(crate::ClientReplica);
     // Step 8, windowed: the game's real presentation + device gather. Its writers fill the
     // `Controlled` tank's `TankCommand` at render rate; `feed_action_state` (below) hands that to
