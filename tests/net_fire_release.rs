@@ -489,3 +489,60 @@ fn sweep() {
          input delay was closing, or weakened the for_tick attestation in the bridge.",
     );
 }
+
+/// SCOPE of the freeze (the "stuck throttle" question). The `Absent` anchor freezes the server's
+/// WHOLE `ActionState`, not just the fire fields — `get_predict` returns `None`, so lightyear's
+/// `update_action_state` skips the apply for every field at once. So could a poisoned buffer strand
+/// a THROTTLE and run the tank away?
+///
+/// It is bounded, and this pins why: the freeze can only PERSIST while the client's command is
+/// byte-identical tick over tick, because that is what produces the all-`SameAsPrecedent` tail
+/// behind the `Absent` (`set` only compresses a value equal to its precedent). The instant ANY field
+/// changes, the client encodes a real `Compressed::Input`, `update_buffer` writes it (it is past
+/// `last_remote_tick`), `get_predict` resolves it — and the `ActionState` un-freezes.
+///
+/// Which bounds the hazard sharply for us: `TankCommand::aim` is a HULL-LOCAL point, so it changes
+/// every tick whenever the player moves the mouse, or the hull moves, or the hull rotates, or the
+/// turret slews. In any gameplay that could run a tank away, the command already differs every tick
+/// and the chain cannot form. And when the command IS bit-identical — parked, not aiming, not
+/// touching anything — the frozen command is the command the player is still holding, so freezing it
+/// is a no-op. Hold-last on the levels is lightyear's intended semantics and ours (see
+/// `bridge_action_state_to_tank_command`); only the CONSUMABLES are gated, by `for_tick`.
+#[test]
+fn a_changed_command_unfreezes_the_absent_anchored_buffer() {
+    let mut buf: Buf = Buf::default();
+    let held = ActionState(Cmd {
+        fire_secondary: true,
+        aim: 0,
+        for_tick: tk(10).0,
+    });
+    buf.set(tk(10), held.clone());
+    buf.set_empty(tk(11)); // the Absent
+    buf.set_raw(tk(12), Compressed::SameAsPrecedent); // …and the tail a HELD command produces
+    buf.set_raw(tk(13), Compressed::SameAsPrecedent);
+    assert!(
+        buf.get_predict(tk(13)).is_none(),
+        "frozen while the command does not change"
+    );
+
+    // Any change to ANY field — here `aim`, which our hull-local aim point moves every tick — is
+    // encoded as a real `Input`, not a `SameAsPrecedent`.
+    buf.set(
+        tk(14),
+        ActionState(Cmd {
+            fire_secondary: true,
+            aim: 7, // the aim moved
+            for_tick: tk(14).0,
+        }),
+    );
+
+    assert_eq!(
+        format!("{:?}", buf.get_raw(tk(14))).split('(').next(),
+        Some("Input"),
+        "a changed command encodes a real Input, never a SameAsPrecedent"
+    );
+    assert!(
+        buf.get_predict(tk(14)).is_some(),
+        "…so the ActionState UN-FREEZES: the freeze cannot outlive the first changed command"
+    );
+}
