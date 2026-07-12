@@ -877,13 +877,15 @@ impl SeenShots {
 /// `RicochetKeyframe` whose direction fails the `Dir3` guard, or whose tick is absurd, is skipped
 /// (no tracer/bounce), the same "reject off the wire" discipline as `fire`'s bore guard.
 ///
-/// **Ignore any event/keyframe naming a tank THIS client simulates locally** (one carrying
+/// **Ignore a FIRE event naming a tank THIS client simulates locally** (one carrying
 /// `ActionState<TankCommand>` — exactly the tanks that run `shooting::fire` here and have already flown
-/// their shell, kicked their barrel, and whose own shells fail-close at armor by design). Bursts are
-/// sent to `All` (`broadcast_fire`), so a client always receives its OWN shots' echoes; this guard
-/// drops them — no duplicate tracer, no self-kick into `local_rollback::<TankSim>()` state, no useless
-/// own-keyframe buffered. The guard is on `ActionState`, not `Predicted`/`Controlled`, because it is
-/// semantic ("don't touch a tank that fires locally") and survives the predict-everyone change.
+/// their shell and kicked their barrel). Bursts are sent to `All` (`broadcast_fire`), so a client
+/// always receives its OWN shots' echoes; this guard drops them — no duplicate tracer, no self-kick
+/// into `local_rollback::<TankSim>()` state. The guard is on `ActionState`, not
+/// `Predicted`/`Controlled`, because it is semantic ("don't touch a tank that fires locally") and
+/// survives the predict-everyone change. **KEYFRAMES are deliberately NOT guarded**: a keyframe spawns
+/// nothing (no duplicate risk — it re-seeds an existing shell by `ShotId`), and the shooter's own
+/// predicted shell is precisely the one that most needs its ricochet carried through (see the loop).
 ///
 /// **Why this stays in `Update` (render rate), NOT the fixed clock.** Verified against vendored
 /// `lightyear_messages` 0.28: `MessageReceiver<M>.recv` is a plain `Vec` that `receive()` drains, and
@@ -954,12 +956,16 @@ fn receive_fire_events(
                 pending.0.push((event.shooter, event.weapon as usize));
             }
             for keyframe in &burst.keyframes {
-                // Skip our own shells' keyframes (they fail-close locally, never re-seed) and guard the
-                // bore; then store the sanctioned bounce for the march to consume (idempotent by
-                // `(ShotId, sequence)`, so the redundancy window's duplicates are no-ops).
-                if locally_fired.contains(keyframe.shot.shooter)
-                    || Dir3::new(keyframe.direction).is_err()
-                {
+                // NO `locally_fired` skip here, deliberately — unlike the fires loop above. That guard
+                // exists to prevent a duplicate shell SPAWN from our own shot's echo; a keyframe spawns
+                // nothing — it re-seeds an existing shell — and the shooter's OWN predicted shell is
+                // exactly the one that most needs the bounce carried through (the fall-of-shot read on
+                // a ricocheted round, the gunnery loop's core feedback). The own shell carries the SAME
+                // `ShotId` this keyframe names (`protocol::stamp_shot_ids` — same root the mapper
+                // resolves `shot.shooter` to, same tick-indexed fire tick), so it holds at contact and
+                // re-seeds from this bounce like any observer shell. Guard the bore, then store
+                // (idempotent by `(ShotId, sequence)`, so the redundancy window's duplicates are no-ops).
+                if Dir3::new(keyframe.direction).is_err() {
                     continue;
                 }
                 sanctioned.insert(

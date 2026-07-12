@@ -21,8 +21,9 @@ use super::protocol::{
     RicochetKeyframe, ServoAngles,
 };
 use super::{diagnostics, harness, open_gameplay_gate, physics, rig};
+use crate::SimPlugin;
 use crate::bake::TankGeometry;
-use crate::ballistics::{FireShell, Projectile, ShellRicochet, Shot, ShotSource};
+use crate::ballistics::{FireShell, ShellRicochet};
 use crate::command::{ConsumeCommandEdges, TankCommand};
 use crate::damage::TankKnockedOut;
 use crate::spec::TankSpec;
@@ -30,7 +31,6 @@ use crate::state::GameplaySet;
 use crate::tank::{
     PendingTankAssets, Rig, TankSimSource, bind_tank_view, load_tank_assets, spawn_tank_sim,
 };
-use crate::{ShotId, SimPlugin};
 
 const PORT: u16 = 5888;
 
@@ -78,14 +78,13 @@ pub fn run() {
     // The cosmetic opponent-fire broadcast: SERVER ONLY. Every authoritative `fire` raises a
     // `FireShell`; `broadcast_fire` turns each one that names a tank into a `FireEvent`, and every
     // authoritative ricochet raises a `ShellRicochet` that `on_shell_ricochet` turns into a
-    // `RicochetKeyframe` — both broadcast to the OTHER clients inside a sliding-window `FireBurst`
+    // `RicochetKeyframe` — both broadcast to every client inside a sliding-window `FireBurst`
     // (`FireRings`). Registered here and NOWHERE shared, so the client's own local `FireShell` never
-    // tries to send. `stamp_shot_ids` completes each server shell's `ShotId` from its `ShotSource` +
-    // the fire tick (the one part the sim can't know), so a ricochet can name the shot on the wire.
+    // tries to send. (`ShotId` stamping is NOT here: `protocol::stamp_shot_ids` runs on BOTH ends, so
+    // the server shell that ricochets and the client's own predicted shell carry the same id.)
     app.init_resource::<FireRings>();
     app.add_observer(broadcast_fire);
     app.add_observer(on_shell_ricochet);
-    app.add_systems(FixedPostUpdate, stamp_shot_ids);
     // Server-authoritative input authorization: strip any `InputTarget::Entity` a client is NOT the
     // `ControlledBy` owner of, before the input buffer ever applies it. lightyear ships this as an
     // opt-in `InputSystems::ValidateInputs` system (`add_input_validator` = sugar for
@@ -650,12 +649,13 @@ impl FireRings {
 /// interpolate, while sandbox/`None` shots (no tank) never broadcast.
 ///
 /// **Targeting: `All`, deduped at the receiver.** Every burst goes to every client; a client drops any
-/// fire/keyframe naming a tank IT simulates locally (`receive_fire_events`' `locally_fired` guard), so
-/// the shooter discarding its own echo is a receiver concern. This is what lets ONE shared burst carry
+/// FIRE naming a tank IT simulates locally (`receive_fire_events`' `locally_fired` guard), so the
+/// shooter discarding its own echo is a receiver concern. This is what lets ONE shared burst carry
 /// events from MULTIPLE shooters correctly — an `AllExceptSingle(owner)` target could not, since a
 /// burst re-carrying another shooter's fires must still reach this owner. The one-frame self-echo the
 /// owner discards is negligible, and the redundancy window (which re-carries older shooters' events) is
-/// only correct under `All`.
+/// only correct under `All`. KEYFRAMES are not dropped for own shots — the shooter's own shell consumes
+/// its bounce (the fall-of-shot read), which also REQUIRES the `All` target here.
 fn broadcast_fire(
     fire: On<FireShell>,
     servers: Query<&Server>,
@@ -717,13 +717,14 @@ fn broadcast_fire(
 }
 
 /// Turn each authoritative `ballistics::ShellRicochet` into a `RicochetKeyframe` and broadcast the
-/// current window — the SERVER half of the bounce carry-through (ADR-0016: replicate the CAUSE, the
-/// observer derives the re-seed). The authority march raises `ShellRicochet` at the moment it resolves
-/// a bounce for a net-attributed shell (`Shot` present, stamped by `stamp_shot_ids`); this stamps the
-/// bounce tick from the server timeline and sends. Same `FireRings`/`All` window + targeting as
-/// `broadcast_fire`: a fire burst re-carries recent keyframes and vice versa, so both streams share the
-/// redundancy for free. `ShellRicochet` is a sim-layer event, so the sandbox raises it too — but no
-/// `Server` is present there and this observer is SERVER-ONLY, so it never fires off the net.
+/// current window — the SERVER half of the bounce carry-through (ADR-0016: replicate the CAUSE; every
+/// client — observers AND the shooter — derives the re-seed). The authority march raises
+/// `ShellRicochet` at the moment it resolves a bounce for a net-attributed shell (`Shot` present,
+/// stamped by the shared `protocol::stamp_shot_ids`); this stamps the bounce tick from the server
+/// timeline and sends. Same `FireRings`/`All` window + targeting as `broadcast_fire`: a fire burst
+/// re-carries recent keyframes and vice versa, so both streams share the redundancy for free.
+/// `ShellRicochet` is a sim-layer event, so the sandbox raises it too — but no `Server` is present
+/// there and this observer is SERVER-ONLY, so it never fires off the net.
 fn on_shell_ricochet(
     ricochet: On<ShellRicochet>,
     servers: Query<&Server>,
@@ -749,33 +750,6 @@ fn on_shell_ricochet(
         sender.send::<FireBurst, FireChannel>(&rings.burst(), server, &NetworkTarget::All)
     {
         debug!("server: RicochetKeyframe burst dropped: {err}");
-    }
-}
-
-/// Complete each freshly-spawned server shell's [`ShotId`] from its [`ShotSource`] (tank + weapon slot,
-/// stamped at spawn by `on_fire_shell`) plus the fire tick — the one part the sim layer cannot know,
-/// since the tick lives in lightyear's timeline (`tests/net_boundary`). Runs `FixedPostUpdate`, so the
-/// timeline still reads the fire tick (unchanged until the next `FixedFirst`) — the SAME value
-/// `broadcast_fire` stamped into the `FireEvent`, so the observer's shell (built from that `FireEvent`)
-/// and this server shell carry the IDENTICAL `ShotId`, and a later `RicochetKeyframe` correlates. A
-/// shell reaches armor only on a later tick (it spawns at the muzzle), so `Shot` is always present
-/// before it can ricochet. `Without<Shot>` makes this idempotent; a slot past `u8` is skipped
-/// (matching `broadcast_fire`, which also skips the whole shot — so no observer shell exists anyway).
-fn stamp_shot_ids(
-    shells: Query<(Entity, &ShotSource), (With<Projectile>, Without<Shot>)>,
-    timeline: Res<LocalTimeline>,
-    mut commands: Commands,
-) {
-    let fire_tick = timeline.tick().0;
-    for (entity, source) in &shells {
-        let Ok(weapon) = u8::try_from(source.weapon) else {
-            continue;
-        };
-        commands.entity(entity).insert(Shot(ShotId {
-            shooter: source.tank,
-            weapon,
-            fire_tick,
-        }));
     }
 }
 

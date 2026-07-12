@@ -308,51 +308,70 @@ pub struct ShotSource {
 /// A cosmetic shell's network identity ([`ShotId`]) — the correlation spine both ends stamp so a
 /// server-sanctioned [`ShellRicochet`]/`RicochetKeyframe` re-seeds exactly the shell it belongs to.
 ///
-/// Stamped only where a shot has a network identity, and by DIFFERENT paths on the two ends (the sim
-/// layer cannot read the fire tick — it lives in the netcode timeline):
-///   * **Observer** (a replica watching another tank): `net::client` fills [`FireShell::shot`] from the
-///     wire and `on_fire_shell` attaches it here. These shells are keyframe-eligible: the march holds
-///     them at armor contact for their sanctioned bounce (see [`integrate_projectiles`]).
-///   * **Authority** (server): `on_fire_shell` leaves `FireShell::shot` `None` (no tick in the sim), so
-///     the server stamps this AFTER spawn from the shell's [`ShotSource`] + its timeline tick.
-///   * **The owner's OWN predicted shell and every SP/sandbox shell** carry NO `Shot`: no keyframe will
-///     ever arrive for them, so the march fail-closes them at armor contact immediately (the pre-slice
-///     behaviour), never holding.
+/// Stamped wherever a shot has a network identity, by two paths (the sim layer cannot read the fire
+/// tick — it lives in the netcode timeline):
+///   * **Observer shells** (a replica watching another tank): `net::client` fills [`FireShell::shot`]
+///     straight from the wire and `on_fire_shell` attaches it here.
+///   * **Attributed locally-fired shells** — the server's authoritative shell AND the shooter's own
+///     predicted client shell: `on_fire_shell` leaves `FireShell::shot` `None` (no tick in the sim),
+///     and the shared `net::protocol::stamp_shot_ids` completes it after spawn from the shell's
+///     [`ShotSource`] + the timeline tick — yielding the SAME id on every machine (see that system's
+///     doc for why the tick and the mapped shooter entity agree across ends).
+///
+/// Every `Shot`-carrying shell on a net client is keyframe-eligible: at armor contact the march
+/// re-seeds it from its sanctioned bounce or holds briefly for one ([`integrate_projectiles`]) — the
+/// shooter's OWN round included, which is the fall-of-shot read the gunnery loop needs. Only shells
+/// with NO `Shot` (SP/sandbox — no wire; or an unattributed shot) fail-close immediately at contact.
 #[derive(Component, Clone, Copy)]
 pub(crate) struct Shot(pub ShotId);
 
-/// A replica shell FROZEN at armor contact, waiting the grace window for its server-sanctioned bounce
-/// keyframe. `ticks` counts the fixed ticks it has been held — which equals how far the predicted
-/// present advanced past the bounce (the shell reaches contact when its present ≈ the server bounce
-/// tick), so it is exactly the catch-up the re-seed fast-forwards to bring the resumed shell back to
-/// the present timeline (see the re-seed in [`integrate_projectiles`]). Only ever on the observer path.
+/// A net-client shell FROZEN (and hidden — invisible-stop) at armor contact, waiting the grace window
+/// for its server-sanctioned bounce keyframe. `ticks` counts the fixed ticks it has been held.
+///
+/// # Why `ticks` is exactly the re-seed catch-up (the hold-count arithmetic)
+///
+/// Every cosmetic shell on a client — the shooter's own (fired at the predicted present natively) and
+/// an observer's (aged to the predicted present by the `fire_tick` catch-up) — lives on the SAME
+/// P timeline: at local tick X it sits at pos(X) of the authoritative trajectory (shared integrator,
+/// same origin and fire tick). The trajectory meets the plate at age `B − fire_tick` (B = the server
+/// bounce tick), so the shell reaches contact at local tick ≈ B, and the present then advances one
+/// tick per held tick: at keyframe consumption, present = B + `ticks`. Fast-forwarding the sanctioned
+/// post-bounce state by `ticks` therefore lands the shell at pos(present) — correctly phased, with no
+/// clock read the net-clean sim layer couldn't make. The identical arithmetic covers both cases; no
+/// own-vs-observer branch is needed. (Residual: contact tick differs from B by the target's motion
+/// over the interpolation delay — sub-metre at tank speeds, within the integration tolerance the
+/// carry-through test pins.)
 #[derive(Component)]
 struct Held {
     ticks: u32,
-    /// The surface normal at the contact where the shell froze (the observer's own raycast against the
+    /// The surface normal at the contact where the shell froze (this client's own raycast against the
     /// interpolated pose) — used to orient the eventual bounce spark on re-seed, or the neutral spark
     /// if the wait times out. Saved because the top-of-loop `Held` handler has no raycast of its own.
     normal: Vec3,
 }
 
-/// The largest catch-up an on-fire-shell / re-seed hold may span before the shell is finalized —
-/// ~250 ms at 64 Hz. Justified as the HOLD grace window: it must cover the observer's interpolation
-/// delay (100 ms, `net::client`) plus keyframe send jitter and a redundancy resend interval (fire
-/// bursts are ~80 ms apart at 12.5 rounds/s), yet stay short enough that a genuinely DROPPED keyframe
-/// truncates the trail within a few frames rather than freezing the round visibly. Correctness never
-/// depends on the keyframe arriving inside it — past it the shell degrades to honest fail-closed
-/// truncation (the pre-slice behaviour).
+/// The HOLD grace window — ~250 ms at 64 Hz. Because every client shell lives at the predicted
+/// present P, AHEAD of server-now S, it reaches the plate (local tick ≈ bounce tick B) wall-clock
+/// BEFORE the server resolves the bounce; the keyframe then needs one-way latency to arrive. So the
+/// expected hold is ≈ (P − S) + OWL ≈ 4–8 ticks at droplet RTT (P − S ≈ 1 tick under balanced input
+/// delay), and the window must cover that plus send jitter plus one redundancy resend interval (fire
+/// bursts are ~80 ms apart at 12.5 rounds/s) — 16 ticks covers RTT ≲ 200 ms with margin, yet stays
+/// short enough that a shell whose keyframe never comes (a genuinely dropped keyframe, or any
+/// embed/perforation — those emit none) finalizes within a quarter second. Correctness never depends
+/// on the keyframe arriving inside it — past it the shell degrades to honest fail-closed truncation
+/// (the pre-slice behaviour).
 const RICOCHET_HOLD_TICKS: u32 = 16;
 
-/// One server-sanctioned ricochet, delivered to the observer's ballistics march so a replica shell
-/// re-seeds from truth instead of improvising a bounce against interpolated geometry. Net-neutral (no
-/// lightyear types) so `ballistics` can consume it without naming the netcode; `net::client` fills the
-/// store from the replicated `RicochetKeyframe`, the march drains it.
+/// One server-sanctioned ricochet, delivered to a net client's ballistics march so its cosmetic
+/// shell — an observer's replica or the shooter's own predicted round — re-seeds from truth instead
+/// of improvising a bounce against interpolated geometry. Net-neutral (no lightyear types) so
+/// `ballistics` can consume it without naming the netcode; `net::client` fills the store from the
+/// replicated `RicochetKeyframe`, the march drains it.
 #[derive(Clone, Copy)]
 pub(crate) struct SanctionedBounce {
     /// The exact server bounce point — where the re-seeded shell restarts.
     pub origin: Vec3,
-    /// The post-bounce travel direction (unit; the observer guards it before use).
+    /// The post-bounce travel direction (unit; the receiver guards it before use).
     pub direction: Vec3,
     /// The post-bounce speed (m/s).
     pub speed: f32,
@@ -368,12 +387,13 @@ struct ShotBounces {
     age: f32,
 }
 
-/// The observer's bounded buffer of server-sanctioned bounces, keyed by [`ShotId`] (the shot both ends
-/// agree on). Defined here because the ballistics march CONSUMES it (the re-seed), but populated and
-/// aged by `net::client` (which owns the wire). Follows the codebase's ring discipline: entries expire
-/// with the shell that could consume them and the shot count is capped, so a long match never grows it
-/// unbounded. Present only on a net client; SP/sandbox/server never insert it (the march reads it as
-/// an `Option`), and the authority march never consults it anyway (it resolves bounces for real).
+/// The net client's bounded buffer of server-sanctioned bounces — for observer shells AND the
+/// shooter's own — keyed by [`ShotId`] (the shot both ends agree on). Defined here because the
+/// ballistics march CONSUMES it (the re-seed), but populated and aged by `net::client` (which owns
+/// the wire). Follows the codebase's ring discipline: entries expire with the shell that could
+/// consume them and the shot count is capped, so a long match never grows it unbounded. Present only
+/// on a net client; SP/sandbox/server never insert it (the march reads it as an `Option`), and the
+/// authority march never consults it anyway (it resolves bounces for real).
 #[derive(Resource, Default)]
 pub(crate) struct SanctionedBounces {
     shots: std::collections::HashMap<ShotId, ShotBounces>,
@@ -431,12 +451,13 @@ impl SanctionedBounces {
 }
 
 /// The authority resolved a ricochet — the sim-layer seam `net::server` turns into a server-sanctioned
-/// `RicochetKeyframe` broadcast (ADR-0016: replicate the cause). Carries the post-bounce state an
-/// observer needs to re-seed from truth, keyed by the shell's [`ShotId`] so it correlates to the right
-/// cosmetic shell on every observer, plus the bounce ordinal so multiple ricochets stay ordered. Only
-/// raised for a shell that carries a [`Shot`] (net-attributed) on the authority; SP/sandbox shells have
-/// no `Shot`, so they raise none and there is no observer to listen anyway. Local, never replicated —
-/// `net::server` maps it onto the wire.
+/// `RicochetKeyframe` broadcast (ADR-0016: replicate the cause). Carries the post-bounce state a
+/// client needs to re-seed from truth, keyed by the shell's [`ShotId`] so it correlates to the right
+/// cosmetic shell on every client — the observers' replicas AND the shooter's own predicted round —
+/// plus the bounce ordinal so multiple ricochets stay ordered. Only raised for a shell that carries a
+/// [`Shot`] (net-attributed) on the authority; SP/sandbox shells have no `Shot`, so they raise none
+/// and there is no client to listen anyway. Local, never replicated — `net::server` maps it onto the
+/// wire.
 #[derive(Event)]
 pub(crate) struct ShellRicochet {
     pub shot: ShotId,
@@ -480,13 +501,14 @@ pub struct FireShell {
     /// so the field is a no-op off the net path. Only `net::client::receive_fire_events` sets it > 0,
     /// to place a remote shot where it already is in the server's confirmed timeline.
     pub catch_up_ticks: u32,
-    /// The shot's network identity ([`ShotId`]) when this shell is a keyframe-eligible OBSERVER shell:
-    /// `Some` only on the path that re-raises a remote tank's shot (`net::client::receive_fire_events`,
-    /// which builds it from the wire, tick included). `None` everywhere else — a locally-fired shell
-    /// (the player's own gun, on the client too), the authority's own server shell (which the server
-    /// stamps AFTER spawn from [`ShotSource`] + its timeline tick, since the sim cannot read the tick),
-    /// and every SP/sandbox shell. `on_fire_shell` attaches [`Shot`] from this when it is `Some`, which
-    /// is what makes a shell hold at armor contact for its bounce keyframe instead of fail-closing.
+    /// The shot's network identity ([`ShotId`]) when it is ALREADY known at raise time: `Some` only on
+    /// the path that re-raises a remote tank's shot (`net::client::receive_fire_events`, which builds
+    /// it from the wire, tick included) — `on_fire_shell` attaches [`Shot`] from it. `None` from every
+    /// LOCAL trigger (`shooting::fire`, the sandbox): the sim cannot read the fire tick, so a
+    /// locally-fired attributed shell — the server's authoritative shell AND the shooter's own
+    /// predicted client shell — is stamped AFTER spawn by the shared `net::protocol::stamp_shot_ids`
+    /// from its [`ShotSource`] + the timeline tick. Carrying [`Shot`] (either way) is what makes a
+    /// net-client shell hold at armor contact for its bounce keyframe instead of fail-closing.
     pub shot: Option<ShotId>,
 }
 
@@ -498,6 +520,20 @@ pub(crate) struct Projectile {
     mass: f32,
     /// Quadratic-drag coefficient (1/m), from the shell's sectional density at spawn (see [`drag_k`]).
     drag_k: f32,
+}
+
+#[cfg(test)]
+impl Projectile {
+    /// Test-only 88-shaped shell for CROSS-MODULE tests (`net::protocol`'s `stamp_shot_ids` test needs
+    /// a `Projectile`-carrying entity; the fields stay module-private for everyone else).
+    pub(crate) fn test_88(velocity: Vec3) -> Self {
+        Self {
+            velocity,
+            caliber: 0.088,
+            mass: 10.2,
+            drag_k: drag_k(0.088, 10.2),
+        }
+    }
 }
 
 /// The shell's flight path, accumulated one point per step — the data the sandbox's tracer gizmo
@@ -891,11 +927,11 @@ fn on_fire_shell(
     ));
 
     // Network identity, when the shot has one. An OBSERVER shell carries its wire [`Shot`]
-    // (keyframe-eligible — it re-seeds at armor contact); any attributed shell carries its
-    // [`ShotSource`] so the authority can complete the `Shot` after spawn from the fire tick
-    // (`net::server::stamp_shot_ids`). Inserted here (not the spawn tuple, which is already at the
-    // bundle-arity ceiling) — flushed with the spawn, and the shell is never marched until a later
-    // schedule point, so it never runs the march without these.
+    // (keyframe-eligible — it re-seeds at armor contact); any attributed locally-fired shell carries
+    // its [`ShotSource`] so the shared `net::protocol::stamp_shot_ids` can complete the `Shot` after
+    // spawn from the fire tick — on the server AND the shooter's own client alike. Inserted here (not
+    // the spawn tuple, which is already at the bundle-arity ceiling) — flushed with the spawn, and the
+    // shell is never marched until a later schedule point, so it never runs the march without these.
     if let Some(shot) = fire.shot {
         shell.insert(Shot(shot));
     }
@@ -1024,24 +1060,24 @@ fn integrate_projectiles(
         held,
     ) in &mut projectiles
     {
-        // OBSERVER HOLD (net client only): a replica shell frozen at armor contact, waiting the grace
-        // window for its server-sanctioned bounce keyframe. It does NOT free-flight while held — it
-        // either re-seeds from the now-arrived bounce or, past the window, degrades to honest
-        // fail-closed truncation. The authority never holds (it resolves bounces for real), and a
-        // shell with no `Shot` never enters this state (it fail-closes on first contact below).
+        // NET-CLIENT HOLD: a `Shot`-carrying shell — an observer's replica OR the shooter's own
+        // predicted round — frozen (and hidden, see the hold insert below) at armor contact, waiting
+        // the grace window for its server-sanctioned bounce keyframe. It does NOT free-flight while
+        // held — it either re-seeds from the now-arrived bounce or, past the window, degrades to
+        // honest fail-closed truncation. The authority never holds (it resolves bounces for real),
+        // and a shell with no `Shot` never enters this state (it fail-closes on first contact below).
         if let Some(mut held) = held {
             // The bounce we are waiting on (the next unconsumed ordinal for this shot), if it arrived.
             let arrived = shot
                 .zip(sanctioned.as_ref())
                 .and_then(|(s, buf)| buf.next(s.0, marks.ricochets.len()));
             if let Some(bounce) = arrived {
-                // RE-SEED (late arrival). Fast-forward the sanctioned post-bounce state by the ticks we
-                // held: the shell reached contact when its predicted present ≈ the server bounce tick,
-                // and the present advanced one tick per held tick, so `held.ticks` IS present − bounce
-                // tick — the exact catch-up that puts the resumed shell back at the present timeline
-                // (the same integrator the initial `fire_tick` catch-up uses; ADR). The returned arc
-                // feeds `ShellPath` so the trail runs seamlessly through the bounce; the bounce point
-                // re-anchors the tracer clamp (`marks.ricochets`); the ember rides the same entity.
+                // RE-SEED. Fast-forward the sanctioned post-bounce state by the ticks we held —
+                // exactly present − bounce_tick, for the shooter's own shell and an observer's alike
+                // (both live on the P timeline; the arithmetic is in `Held`'s doc) — through the same
+                // integrator the initial `fire_tick` catch-up uses. The returned arc feeds `ShellPath`
+                // so the trail runs seamlessly through the bounce; the bounce point re-anchors the
+                // tracer clamp (`marks.ricochets`); the ember rides the same (re-shown) entity.
                 let seed_vel = Dir3::new(bounce.direction)
                     .map_or(projectile.velocity, |d| Vec3::from(d) * bounce.speed);
                 let (pos, vel, arc) =
@@ -1050,8 +1086,8 @@ fn integrate_projectiles(
                     path.points.push(point);
                 }
                 marks.ricochets.push(bounce.origin);
-                // The bounce now reads on the observer with its TRUE (server-sanctioned) directional
-                // spark fan, biased along the deflected travel — the same read the authority showed.
+                // The bounce now reads with its TRUE (server-sanctioned) directional spark fan,
+                // biased along the deflected travel — the same read the authority showed.
                 commands.trigger(Impact {
                     position: bounce.origin,
                     normal: held.normal,
@@ -1067,7 +1103,11 @@ fn integrate_projectiles(
                 projectile.velocity = vel;
                 readout.speed = vel.length();
                 readout.capability = capability(projectile.mass, vel.length());
-                commands.entity(entity).remove::<Held>();
+                // Un-hide (the hold's invisible-stop) and resume marching next tick.
+                commands
+                    .entity(entity)
+                    .remove::<Held>()
+                    .insert(Visibility::Inherited);
                 continue;
             }
             // Still waiting. Past the grace window, finalize as today's fail-closed truncation — a
@@ -1181,30 +1221,36 @@ fn integrate_projectiles(
                 break;
             };
 
-            // OBSERVER ARMOR CONTACT (net client only — `!deposit`, i.e. `ClientReplica` present). An
-            // observer must NEVER re-simulate an authoritative armor collision against the
-            // non-authoritative (interpolated, ~100 ms stale) tank pose it renders — a round's real fate
-            // at a plate (ricochet, perforate, embed) is the server's to decide. Deterministic local
-            // flight is honest only UP TO the first surface; past it the client would improvise a
-            // deflection the server never sanctioned and the cosmetic shell would wander off where the
-            // authoritative round did not ("post-ricochet round wanders / trail is lost"). Three cases,
-            // in order of the common path:
+            // NET-CLIENT ARMOR CONTACT (`!deposit`, i.e. `ClientReplica` present) — every cosmetic
+            // shell this client flies: an observer's replica AND the shooter's own predicted round. A
+            // client must NEVER re-simulate an authoritative armor collision against the
+            // non-authoritative (interpolated, ~100 ms stale) target pose it renders — a round's real
+            // fate at a plate (ricochet, perforate, embed) is the server's to decide. Deterministic
+            // local flight is honest only UP TO the first surface; past it the client would improvise
+            // a deflection the server never sanctioned and the cosmetic shell would wander off where
+            // the authoritative round did not ("post-ricochet round wanders / trail is lost"). Three
+            // cases:
             //   1. The server ALREADY sanctioned this shot's next bounce → RE-SEED from truth and keep
-            //      marching the leftover budget (the exact shape of the authority ricochet branch below,
-            //      so the trail and tracer clamp continue through the bounce identically). This is the
-            //      common case — the keyframe is emitted at server-bounce time while this shell flies a
-            //      delayed timeline, so it usually arrives BEFORE contact. Allocation-free and obvious.
-            //   2. No bounce yet, but this shell HAS a network identity → HOLD: freeze at contact, no
-            //      impact VFX yet, and wait the grace window (the `Held` handler at the top of the loop
-            //      re-seeds when the keyframe lands, or fail-closes past the window).
-            //   3. No `Shot` at all (the owner's OWN cosmetic shell, which no keyframe ever addresses, or
-            //      a non-net authority-less shell) → FAIL CLOSED immediately, exactly as before this
-            //      slice: stop dead with a neutral armor spark (no bounce fan, no flame lick — the client
-            //      cannot know the outcome), trail ends there.
+            //      marching the leftover budget (the exact shape of the authority ricochet branch
+            //      below, so the trail and tracer clamp continue through the bounce identically).
+            //      Opportunistic, not the norm: every client shell lives at the predicted present P,
+            //      AHEAD of server-now, so first contact usually precedes the keyframe's arrival (the
+            //      hold arithmetic in `Held`'s doc) — this branch pre-arms mainly when contact is late
+            //      (target-motion pose lag, frame hitches) or on later bounces of a multi-bounce shot.
+            //   2. No bounce yet, but this shell HAS a network identity (`Shot` — observer shells from
+            //      the wire, own shells via `net::protocol::stamp_shot_ids`) → HOLD: freeze hidden at
+            //      contact (invisible-stop — no impact VFX, and no frozen round hanging on the plate
+            //      while it waits), for the grace window (the `Held` handler at the top of the loop
+            //      re-seeds when the keyframe lands, or fail-closes past the window). THE EXPECTED
+            //      PATH for a first bounce, ≈(P−S)+OWL ticks of hold.
+            //   3. No `Shot` at all (an unattributed shot; SP/sandbox never reach here — they are
+            //      authorities) → FAIL CLOSED immediately, the pre-slice behaviour: stop dead with a
+            //      neutral armor spark (no bounce fan, no flame lick — the client cannot know the
+            //      outcome), trail ends there.
             // Terrain already stops BOTH ends identically (static, pose-independent geometry), so only
-            // this pose-dependent armor contact needs the guard. The authority (`deposit == true`) runs
-            // the full resolution below unchanged. Correctness NEVER depends on keyframe delivery: a
-            // dropped keyframe degrades case 2 to the case-3 truncation.
+            // this pose-dependent armor contact needs the guard. The authority (`deposit == true`)
+            // runs the full resolution below unchanged. Correctness NEVER depends on keyframe
+            // delivery: a dropped keyframe degrades case 2 to the case-3 truncation.
             if !deposit {
                 let next_bounce = shot
                     .zip(sanctioned.as_ref())
@@ -1212,7 +1258,7 @@ fn integrate_projectiles(
                 if let Some(bounce) = next_bounce {
                     // 1. PRE-ARMED re-seed onto server truth; keep marching the leftover budget. The
                     //    bounce reads with its TRUE directional spark (biased along the deflected
-                    //    travel) — the observer now knows the sanctioned outcome, so this is the real
+                    //    travel) — the client now knows the sanctioned outcome, so this is the real
                     //    ricochet fan, not the neutral fail-closed spark.
                     commands.trigger(Impact {
                         position: bounce.origin,
@@ -1234,12 +1280,17 @@ fn integrate_projectiles(
                     continue;
                 }
                 if shot.is_some() {
-                    // 2. HOLD for the keyframe (no impact yet); the `Held` handler drives the wait,
-                    //    keeping the contact normal for the eventual bounce / neutral spark.
-                    commands.entity(entity).insert(Held {
-                        ticks: 0,
-                        normal: hit.normal,
-                    });
+                    // 2. HOLD for the keyframe: invisible-stop (hidden so no round hangs frozen on the
+                    //    plate — the shooter is watching this one), no impact yet; the `Held` handler
+                    //    drives the wait, keeping the contact normal for the eventual bounce /
+                    //    neutral spark.
+                    commands.entity(entity).insert((
+                        Held {
+                            ticks: 0,
+                            normal: hit.normal,
+                        },
+                        Visibility::Hidden,
+                    ));
                     pos = entry;
                     holding = true;
                     break;
@@ -2294,5 +2345,123 @@ mod march_tests {
         let impacts = app.world().resource::<ImpactLog>().0.clone();
         assert_eq!(impacts.len(), 2, "two directional bounce sparks");
         assert!(impacts.iter().all(|i| i.deflection.is_some()));
+    }
+
+    /// THE SHOOTER'S OWN SHELL (predicted-timeline variant of the hold-then-arrive test). An own shell
+    /// carries `ShotSource` (attributed local fire) + the `Shot` the shared stamp completed — and,
+    /// living AT the predicted present, it always reaches the plate before the server's keyframe can
+    /// arrive, so HOLD is its expected path: it freezes HIDDEN at contact (the invisible-stop — the
+    /// shooter is watching this round; a frozen shell hanging on the plate would read as a bug), then
+    /// re-seeds and re-shows when the keyframe lands, re-aged by the held ticks so its resumed
+    /// position is consistent with the present timeline. The fall-of-shot read on a bounced round.
+    #[test]
+    fn own_shell_holds_hidden_then_reseeds_when_keyframe_arrives() {
+        let shot = a_shot();
+        let bounce = authority_bounce(shot);
+
+        let mut app = replica_world(SanctionedBounces::default()); // keyframe not yet arrived
+        let shell = spawn_oblique_shell(&mut app, shot);
+        // The own-shell shape: attributed local fire — `ShotSource` rides the shell alongside the
+        // stamped `Shot` (`net::protocol::stamp_shot_ids`); the march must treat it identically.
+        app.world_mut().entity_mut(shell).insert(ShotSource {
+            tank: Entity::PLACEHOLDER,
+            weapon: 0,
+        });
+
+        // March to contact: the shell holds — hidden, no spark, entity kept.
+        let mut froze = false;
+        for _ in 0..8 {
+            app.update();
+            if app.world().get::<Held>(shell).is_some() {
+                froze = true;
+                break;
+            }
+        }
+        assert!(
+            froze,
+            "the own shell holds at armor contact like any Shot-carrying shell"
+        );
+        assert_eq!(
+            app.world().get::<Visibility>(shell),
+            Some(&Visibility::Hidden),
+            "the hold is an INVISIBLE stop — no frozen round hanging on the plate",
+        );
+        assert!(
+            app.world().resource::<ImpactLog>().0.is_empty(),
+            "no spark while holding",
+        );
+
+        // The keyframe lands (inside the grace window) → re-seed, re-show, continue.
+        const HELD_EXTRA: u32 = 3;
+        for _ in 0..HELD_EXTRA {
+            app.update();
+        }
+        app.world_mut().resource_mut::<SanctionedBounces>().insert(
+            shot,
+            SanctionedBounce {
+                origin: bounce.origin,
+                direction: bounce.direction,
+                speed: bounce.speed,
+                sequence: 0,
+            },
+        );
+        app.update();
+
+        assert!(app.world().get::<Held>(shell).is_none(), "hold cleared");
+        assert_eq!(
+            app.world().get::<Visibility>(shell),
+            Some(&Visibility::Inherited),
+            "the re-seeded shell is shown again",
+        );
+        let marks = app.world().get::<PenetrationMarks>(shell).unwrap();
+        assert_eq!(
+            marks.ricochets.len(),
+            1,
+            "the sanctioned bounce re-anchored the clamp"
+        );
+        // Re-aged by the held ticks — the same present − bounce_tick arithmetic as an observer shell.
+        let dt = 0.016;
+        let (expected_pos, _, _) = fast_forward_shell(
+            bounce.origin,
+            bounce.direction.normalize() * bounce.speed,
+            drag_k(0.088, 10.2),
+            dt,
+            HELD_EXTRA,
+        );
+        let pos = app.world().get::<Transform>(shell).unwrap().translation;
+        assert!(
+            pos.distance(expected_pos) < 1.0e-3,
+            "own shell resumes at the sanctioned state fast-forwarded by the hold (got {pos}, want {expected_pos})",
+        );
+        assert!(
+            app.world().get::<Projectile>(shell).is_some(),
+            "the shooter's own bounced round flies on — the fall-of-shot read",
+        );
+    }
+
+    /// The own shell's keyframe LOST: same honest fail-closed truncation as an observer shell — one
+    /// neutral spark at expiry, shell finalized. (The own shell is not special-cased anywhere in the
+    /// march; this pins that its `ShotSource` changes nothing about the degradation.)
+    #[test]
+    fn own_shell_keyframe_lost_fail_closes() {
+        let shot = a_shot();
+        let mut app = replica_world(SanctionedBounces::default()); // no keyframe, ever
+        let shell = spawn_oblique_shell(&mut app, shot);
+        app.world_mut().entity_mut(shell).insert(ShotSource {
+            tank: Entity::PLACEHOLDER,
+            weapon: 0,
+        });
+
+        for _ in 0..(RICOCHET_HOLD_TICKS + 4) {
+            app.update();
+        }
+
+        assert!(
+            app.world().get_entity(shell).is_err(),
+            "the own shell finalizes once the grace window expires",
+        );
+        let impacts = app.world().resource::<ImpactLog>().0.clone();
+        assert_eq!(impacts.len(), 1, "one neutral fail-closed spark");
+        assert!(impacts[0].deflection.is_none(), "no improvised bounce fan");
     }
 }

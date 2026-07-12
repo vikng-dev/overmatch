@@ -18,7 +18,7 @@ use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::ShotId;
-use crate::ballistics::ComponentHealth;
+use crate::ballistics::{ComponentHealth, Projectile, Shot, ShotSource};
 use crate::command::{ConsumeCommandEdges, TankCommand};
 use crate::damage::{
     Ammo, CrewStation, Crewman, DamageConsequences, Dead, LaunchedTurret, PendingSwap,
@@ -379,13 +379,15 @@ impl MapEntities for FireEvent {
 /// a wrong hit (damage is server-authoritative), which is why it rides the same loss-tolerant
 /// [`FireChannel`] — inside [`FireBurst`], which gives it sliding-window redundancy (piece 3).
 ///
-/// Keyed by [`ShotId`] so it correlates to the right shell on every observer (a shell they only
-/// interpolate, a different local entity than the server's). `sequence` is the bounce's 0-based ordinal
-/// within the shot, so multiple ricochets on one shell are consumed strictly in order. The observer
-/// re-ages the re-seeded shell by how long it held (which equals present − `bounce_tick`), so
-/// `bounce_tick` itself is carried for audit and a future RTT-adaptive path rather than the hot path
-/// (see `ballistics::SanctionedBounce`). `direction` rides as a raw `Vec3` and is guarded to a `Dir3`
-/// on receipt, the same discipline as [`FireEvent::direction`].
+/// Keyed by [`ShotId`] so it correlates to the right cosmetic shell on every client — an observer's
+/// replica AND the shooter's own predicted round (which carries the same id via the shared
+/// [`stamp_shot_ids`]; the shooter's fall-of-shot read on a bounced round is the loop this feeds).
+/// `sequence` is the bounce's 0-based ordinal within the shot, so multiple ricochets on one shell are
+/// consumed strictly in order. The receiver re-ages the re-seeded shell by how long it held (which
+/// equals present − `bounce_tick`), so `bounce_tick` itself is carried for audit and a future
+/// RTT-adaptive path rather than the hot path (see `ballistics::SanctionedBounce`). `direction` rides
+/// as a raw `Vec3` and is guarded to a `Dir3` on receipt, the same discipline as
+/// [`FireEvent::direction`].
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RicochetKeyframe {
     /// The shot this bounce belongs to — its `shooter` is entity-mapped (see [`FireBurst`]).
@@ -413,9 +415,11 @@ pub struct RicochetKeyframe {
 ///
 /// One message type, not two, so the wire surface is a single registration and both streams share the
 /// redundancy for free — a fire burst re-carries recent keyframes and vice versa. Sent to
-/// `NetworkTarget::All`; a client drops any fire/keyframe naming a tank IT simulates (the
-/// `locally_fired` guard), so the shooter discarding its own echo is a receiver concern, not a
-/// targeting one — which is what makes the redundancy correct across shooters in one shared burst.
+/// `NetworkTarget::All`; a client drops any FIRE naming a tank IT simulates (the `locally_fired`
+/// guard — a fire echo would duplicate the shell), so the shooter discarding its own echo is a
+/// receiver concern, not a targeting one — which is what makes the redundancy correct across shooters
+/// in one shared burst. KEYFRAMES are deliberately NOT dropped for own shots: they spawn nothing, and
+/// the shooter's own shell consumes them (see `receive_fire_events`).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct FireBurst {
     /// The last N fire events (N sized to cover a multi-packet burst at an MG's cyclic rate).
@@ -776,6 +780,55 @@ fn apply_net_belts(mut tanks: Query<(&NetBelts, &mut TankSim), With<Remote>>) {
                 state.reload_remaining = snap.swap_remaining;
             }
         }
+    }
+}
+
+/// BOTH ENDS: complete each freshly-spawned attributed shell's [`ShotId`] from its [`ShotSource`]
+/// (tank + weapon slot, attached at spawn by `on_fire_shell`) plus the fire tick — the one part the
+/// sim layer cannot know, since the tick lives in lightyear's timeline (`tests/net_boundary`). Runs
+/// `FixedPostUpdate`, so the timeline still reads the FIRE tick (unchanged until the next
+/// `FixedFirst`) — the SAME value the server's `broadcast_fire` stamps into the `FireEvent`.
+///
+/// This lives in the SHARED protocol plugin, not `net::server`, because the id must be stamped
+/// identically on every net composition for the keyframe correlation to close end-to-end:
+///   * **Server**: the authoritative shell carries the id so its ricochet raises a `ShellRicochet`
+///     naming the shot (`net::server::on_shell_ricochet` puts it on the wire).
+///   * **Shooter's client**: the OWN predicted shell fires at the SAME tick number the server
+///     simulates that input on (prediction is tick-indexed: both ends run `shooting::fire` for tick T
+///     with the input for tick T — a late input is dropped, never fired late, so if the server fires
+///     at all it fires at T), against the SAME tank root the keyframe's entity-mapped `shooter`
+///     resolves to (the mapped root is the root the local rig hangs off — the same entity
+///     `ShotSource.tank` named at fire time, as `apply_pending_recoil_kicks` already relies on). So
+///     the locally-stamped id equals the wire-derived one, and the shooter's own bounced round
+///     re-seeds from the server keyframe — the fall-of-shot read the gunnery loop needs.
+///   * **Observer clients**: their shells are stamped directly from the wire
+///     (`receive_fire_events` passes `FireShell.shot`), so this system finds no `ShotSource` on them
+///     (the client re-raise passes `shooter: None`) and leaves them alone.
+///
+/// SP/sandbox never mount this plugin, so their shells carry no `Shot` — irrelevant there: the
+/// authority march consults `Shot` only to emit `ShellRicochet`, and there is no wire to carry one.
+/// A shell reaches armor only on a later tick (it spawns at the muzzle), so `Shot` is always present
+/// before it can ricochet or hold. `Without<Shot>` makes this idempotent (and skips wire-stamped
+/// observer shells even if they ever gained a source); a slot past `u8` is skipped, matching
+/// `broadcast_fire` (which also skips the whole shot — so no keyframe would name it anyway). On the
+/// client this also runs during rollback replay, stamping a replay-refired shell with the replayed
+/// tick — which IS its fire tick, so the duplicate carries the same id as the original (cosmetic
+/// duplicate, same correlation).
+fn stamp_shot_ids(
+    shells: Query<(Entity, &ShotSource), (With<Projectile>, Without<Shot>)>,
+    timeline: Res<LocalTimeline>,
+    mut commands: Commands,
+) {
+    let fire_tick = timeline.tick().0;
+    for (entity, source) in &shells {
+        let Ok(weapon) = u8::try_from(source.weapon) else {
+            continue;
+        };
+        commands.entity(entity).insert(Shot(ShotId {
+            shooter: source.tank,
+            weapon,
+            fire_tick,
+        }));
     }
 }
 
@@ -1180,6 +1233,10 @@ pub(crate) fn plugin(app: &mut App) {
             publish_net_crew,
             publish_launched_turret_pose,
             publish_net_belts,
+            // BOTH ends: complete each attributed shell's `ShotId` from `ShotSource` + this tick —
+            // the shared stamp that makes the server's ricocheting shell, the shooter's OWN predicted
+            // shell, and the observers' catch-up shells all carry ONE id (see the system doc).
+            stamp_shot_ids,
         ),
     );
     app.add_systems(
@@ -1734,6 +1791,61 @@ mod tests {
                 fire_tick: 77,
             },
         );
+    }
+
+    /// THE OWN-SHELL CORRELATION, end to end: [`stamp_shot_ids`] (the shared BOTH-ends stamp) gives a
+    /// locally-fired attributed shell — the shooter's own predicted round, the server's authoritative
+    /// round — the EXACT [`ShotId`] the wire derives for that shot ([`FireEvent::shot_id`], and hence
+    /// the id a `RicochetKeyframe` names). This equality is what lets the shooter's own bounced round
+    /// re-seed from the server's keyframe: same shooter root (`ShotSource.tank` is the root `fire`
+    /// used, the entity the keyframe's mapped `shooter` resolves to), same slot, same tick-indexed
+    /// fire tick (both ends run `fire` for tick T with the input for tick T).
+    #[test]
+    fn stamp_shot_ids_matches_the_wire_derived_id() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        use crate::ballistics::{Projectile, Shot, ShotSource};
+
+        const FIRE_TICK: i32 = 42;
+        let mut world = World::new();
+        world.insert_resource(timeline_at(FIRE_TICK));
+        let shooter = world.spawn_empty().id();
+        // The own-shell shape at spawn: `Projectile` + `ShotSource`, no `Shot` yet (`shooting::fire`
+        // passes `shot: None` — the sim cannot read the tick).
+        let shell = world
+            .spawn((
+                Projectile::test_88(Vec3::X * 800.0),
+                ShotSource {
+                    tank: shooter,
+                    weapon: 1,
+                },
+            ))
+            .id();
+
+        world.run_system_once(stamp_shot_ids).unwrap();
+
+        // What the server's broadcast derives for the SAME shot on the wire.
+        let wire_id = FireEvent {
+            origin: Vec3::ZERO,
+            direction: Vec3::X,
+            speed: 800.0,
+            caliber: 0.0079,
+            mass: 0.0118,
+            tracer: true,
+            shooter,
+            weapon: 1,
+            fire_tick: Tick(FIRE_TICK as u32),
+        }
+        .shot_id();
+        assert_eq!(
+            world.get::<Shot>(shell).expect("stamped").0,
+            wire_id,
+            "the locally-stamped ShotId equals the wire-derived one — the keyframe correlates",
+        );
+
+        // Idempotent: a second run must not re-stamp (Without<Shot>).
+        world.run_system_once(stamp_shot_ids).unwrap();
+        assert_eq!(world.get::<Shot>(shell).unwrap().0, wire_id);
     }
 
     /// The fingerprint is a pure function of the build (so a same-build client/server always agree
