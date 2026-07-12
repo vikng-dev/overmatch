@@ -610,19 +610,23 @@ fn drive_bot(mut bots: Query<&mut TankCommand, With<Bot>>) {
     }
 }
 
-/// The server's sliding redundancy windows: the last N [`FireEvent`]s, [`RicochetKeyframe`]s, and
+/// The server's sliding redundancy windows: recent [`FireEvent`]s, [`RicochetKeyframe`]s, and
 /// [`ImpactConfirm`]s, resent in EVERY [`FireBurst`] so one delivered burst repairs a multi-packet
 /// loss of any stream (piece 3 — the input-redundancy pattern applied to cosmetics).
 ///
-/// [`FIRE_WINDOW`] = 4 is sized against the worst case: a 750 rpm MG cycles at 12.5 rounds/s, so the
-/// server sends one fire burst every ~80 ms, and a 4-deep fire window keeps each event alive across the
-/// next ~3 bursts (~240 ms) — past a typical WAN burst loss, while staying a handful of small structs
-/// per packet. Keyframes and confirms are rare (one per ricochet / per armor-terminated shot), so
-/// their 4-deep windows hold each far longer in wall-clock — an entry only rotates out after N MORE
-/// events of its kind — giving bounces and terminals generous redundancy. (Caveat, accepted: a lost
-/// entry is only RE-carried by the next burst, which some fire/ricochet/terminal must trigger — an
-/// isolated shot's lost confirm may never resend inside the grace window and then degrades to the
-/// fail-closed truncation, invariant 3 of ADR-0021.)
+/// **Retention is TIME-based, not per-stream count-based (F4).** The window keeps every entry younger
+/// than [`FIRE_RETAIN_TICKS`] regardless of how many tanks are firing. A fixed depth-N ring is a
+/// *single global* ring across all shooters, so with k simultaneous shooters the per-event survival
+/// window divides by k — at two MGs a depth-4 ring covers only ~120 ms, inside a routine WAN burst
+/// loss ("tracers vanish in big fights"). Sizing by age instead makes each event's redundancy
+/// independent of shooter count: a bounce/fire/confirm rides every burst for ~[`FIRE_RETAIN_TICKS`]
+/// worth of ticks, which is tuned to cover the consumer's grace window (`RICOCHET_HOLD_TICKS` ≈ 16
+/// ticks / ~250 ms — a keyframe older than that has either been consumed or already dissolved) plus
+/// send jitter. [`FIRE_WINDOW_MAX`] is a defensive per-stream cap so a pathological fire rate can't
+/// unbound a burst; a duel never approaches it. (Caveat, accepted: a lost entry is only RE-carried by
+/// the next burst, which some fire/ricochet/terminal must trigger — an isolated shot's lost confirm
+/// may never resend inside the grace window and then degrades to the quiet dissolve, invariant 3 of
+/// ADR-0021.)
 #[derive(Resource, Default)]
 struct FireRings {
     fires: std::collections::VecDeque<FireEvent>,
@@ -630,15 +634,55 @@ struct FireRings {
     confirms: std::collections::VecDeque<ImpactConfirm>,
 }
 
-/// Sliding-window depth — see [`FireRings`] for the sizing against MG cyclic rate.
-const FIRE_WINDOW: usize = 4;
+/// How long (in ticks) a redundancy entry rides every burst before it ages out — see [`FireRings`].
+/// ~20 ticks ≈ 312 ms at 64 Hz: comfortably past the consumer's ~250 ms grace window
+/// (`ballistics::RICOCHET_HOLD_TICKS`) plus send jitter, so a valid keyframe/confirm survives long
+/// enough for the shell that consumes it, and no longer.
+const FIRE_RETAIN_TICKS: i32 = 20;
+
+/// Defensive hard cap on entries retained per stream — bounds a burst's size under a pathological fire
+/// rate (a stream firing faster than one round per few ms would otherwise let the time window grow the
+/// vec unboundedly). A 1v1 duel at MG cyclic rate keeps ~3–4 fires in flight, far under this.
+const FIRE_WINDOW_MAX: usize = 32;
+
+/// A redundancy-window entry that carries the server tick it was stamped on, so [`FireRings::push`] can
+/// evict by age. All three wire streams already carry their tick as a field.
+trait BurstEntry {
+    fn tick(&self) -> Tick;
+}
+impl BurstEntry for FireEvent {
+    fn tick(&self) -> Tick {
+        self.fire_tick
+    }
+}
+impl BurstEntry for RicochetKeyframe {
+    fn tick(&self) -> Tick {
+        self.bounce_tick
+    }
+}
+impl BurstEntry for ImpactConfirm {
+    fn tick(&self) -> Tick {
+        self.impact_tick
+    }
+}
 
 impl FireRings {
-    fn push<T>(ring: &mut std::collections::VecDeque<T>, item: T) {
-        if ring.len() == FIRE_WINDOW {
+    /// Push a fresh entry and prune the ring: drop everything older than [`FIRE_RETAIN_TICKS`] relative
+    /// to `now` (the current server tick), then enforce the defensive [`FIRE_WINDOW_MAX`] cap. Entries
+    /// are appended in tick order, so eviction is always from the front. `Tick - Tick` is lightyear's
+    /// wrapping i32 difference, correct across the u32 tick boundary.
+    fn push<T: BurstEntry>(ring: &mut std::collections::VecDeque<T>, item: T, now: Tick) {
+        ring.push_back(item);
+        while let Some(front) = ring.front() {
+            if now - front.tick() > FIRE_RETAIN_TICKS {
+                ring.pop_front();
+            } else {
+                break;
+            }
+        }
+        while ring.len() > FIRE_WINDOW_MAX {
             ring.pop_front();
         }
-        ring.push_back(item);
     }
     /// A burst carrying the whole current window of all three streams (what a sequenced-unreliable
     /// delivery needs so dropping a stale burst loses nothing the next re-carries).
@@ -715,7 +759,7 @@ fn broadcast_fire(
         // shell already is in its confirmed timeline (see `FireEvent::fire_tick`).
         fire_tick: timeline.tick(),
     };
-    FireRings::push(&mut rings.fires, event);
+    FireRings::push(&mut rings.fires, event, timeline.tick());
     if let Err(err) =
         sender.send::<FireBurst, FireChannel>(&rings.burst(), server, &NetworkTarget::All)
     {
@@ -754,7 +798,7 @@ fn on_shell_ricochet(
         bounce_tick: timeline.tick(),
         sequence: ricochet.sequence,
     };
-    FireRings::push(&mut rings.keyframes, keyframe);
+    FireRings::push(&mut rings.keyframes, keyframe, timeline.tick());
     if let Err(err) =
         sender.send::<FireBurst, FireChannel>(&rings.burst(), server, &NetworkTarget::All)
     {
@@ -789,7 +833,7 @@ fn on_shell_terminal(
         impact_tick: timeline.tick(),
         after_bounces: terminal.after_bounces,
     };
-    FireRings::push(&mut rings.confirms, confirm);
+    FireRings::push(&mut rings.confirms, confirm, timeline.tick());
     if let Err(err) =
         sender.send::<FireBurst, FireChannel>(&rings.burst(), server, &NetworkTarget::All)
     {
@@ -808,5 +852,65 @@ fn log_tank_commands(states: Query<(Entity, &ActionState<TankCommand>)>) {
                 cmd.throttle, cmd.steer, cmd.fire_primary
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fire event stamped at `tick` — the only field the F4 windowing reads is `fire_tick`.
+    fn fire_at(tick: u32) -> FireEvent {
+        FireEvent {
+            origin: Vec3::ZERO,
+            direction: Vec3::X,
+            speed: 800.0,
+            caliber: 0.0079,
+            mass: 0.0118,
+            tracer: true,
+            shooter: Entity::PLACEHOLDER,
+            weapon: 0,
+            fire_tick: Tick(tick),
+        }
+    }
+
+    /// F4: retention is by AGE, not by per-stream count. A depth-4 ring would have evicted the first
+    /// fire after four later ones (the multi-shooter divide-by-k bug); the time window keeps every
+    /// entry younger than `FIRE_RETAIN_TICKS` regardless of how many arrive in between.
+    #[test]
+    fn window_retains_by_age_not_by_count() {
+        let mut ring = std::collections::VecDeque::new();
+        FireRings::push(&mut ring, fire_at(100), Tick(100));
+        // Ten more fires (other shooters) over the next ten ticks — all inside the retain window.
+        for t in 101..=110u32 {
+            FireRings::push(&mut ring, fire_at(t), Tick(t));
+        }
+        assert!(
+            ring.iter().any(|f| f.fire_tick == Tick(100)),
+            "the tick-100 fire survives ten later fires — age-based retention, not count",
+        );
+
+        // Advance one tick past the retain window: the tick-100 entry ages out.
+        let now = 100 + FIRE_RETAIN_TICKS as u32 + 1;
+        FireRings::push(&mut ring, fire_at(now), Tick(now));
+        assert!(
+            !ring.iter().any(|f| f.fire_tick == Tick(100)),
+            "past FIRE_RETAIN_TICKS the entry ages out of the window",
+        );
+    }
+
+    /// F4: the defensive cap bounds the burst even when entries arrive faster than the time window
+    /// would evict (here all on one tick, so the age prune never fires).
+    #[test]
+    fn window_cap_bounds_the_burst() {
+        let mut ring = std::collections::VecDeque::new();
+        for _ in 0..(FIRE_WINDOW_MAX + 10) {
+            FireRings::push(&mut ring, fire_at(200), Tick(200));
+        }
+        assert_eq!(
+            ring.len(),
+            FIRE_WINDOW_MAX,
+            "the cap bounds the ring under same-tick churn",
+        );
     }
 }
