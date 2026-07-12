@@ -86,6 +86,9 @@ pub mod track_sandbox;
 /// `ui_font::UiFonts` resource that every `Text`-spawning client plugin reads. Mounted by each
 /// windowed composition root; retires Bevy's ASCII-only default font.
 mod ui_font;
+/// Ship-facing view-layer VFX (impact dust puffs): a render-only subscriber to the sim's `Impact`
+/// seam, mounted by both windowed clients (ADR-0014 — never the server).
+mod vfx;
 mod world;
 
 /// Marker resource: this app is a NETWORK CLIENT running the shared sim as a REPLICA of the server,
@@ -198,6 +201,8 @@ impl Plugin for ClientPlugin {
             // The tank-state HUD and the controlled tank's crew bar + `1`–`5` swap input.
             hud::plugin,
             crew_ui::plugin,
+            // Impact dust puffs — every landed round reads at the target (view-only, ADR-0014).
+            vfx::plugin,
         ));
 
         // Physics visualization (collider/ray wireframes) + debug toggles, behind the `dev_tools`
@@ -243,6 +248,9 @@ impl Plugin for NetClientPlugin {
             // View-layer combat feedback (net-client only): the camera kick + damage flash when the
             // player is hit, and the hit-marker when the player's shell drops an opponent's health.
             net::hit_feel::plugin,
+            // Impact dust puffs — every landed round reads at the target (view-only, ADR-0014; the
+            // replica's cosmetic shells spark the same `Impact` seam, so remote fire puffs too).
+            vfx::plugin,
         ));
 
         // Physics visualization + debug toggles, same pair `ClientPlugin` mounts for SP

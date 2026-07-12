@@ -11,6 +11,7 @@
 use std::time::Instant;
 
 use avian3d::prelude::{Forces, LayerMask, SpatialQuery, SpatialQueryFilter, WriteRigidBodyForces};
+use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
 
 use crate::damage::{VolumeOf, hit_ancestor};
@@ -535,17 +536,21 @@ fn setup_assets(
     commands.insert_resource(ProjectileAssets {
         scene: asset_server.load(GltfAssetLabel::Scene(0).from_asset("shell/shell.glb")),
     });
-    // The tracer streak: a thin cuboid elongated along the shell's local −Z (its travel axis — the
-    // projectile `Transform` is kept `look_to(velocity)` by `integrate_projectiles`), so it reads as a
-    // streak trailing the round. Dimensions are a first cut — NEEDS AN EYEBALL PASS with bloom on.
-    let mesh = meshes.add(Cuboid::new(0.05, 0.05, 2.0));
-    // Emissive + unlit so it glows on its own and bloom catches it: emissive rides ABOVE 1.0 in linear
-    // space (the over-bright the HDR camera's `Bloom` blooms). Warm (orange-yellow) tracer colour.
-    // Values are a restrained first cut — tune alongside the camera's bloom intensity.
+    // The tracer streak: a thin UNIT capsule authored along its local +Y. The per-shot child
+    // transform (`on_fire_shell`) rotates that axis onto the shell's local −Z (its travel axis — the
+    // projectile `Transform` is kept `look_to(velocity)` by `integrate_projectiles`) and scales the
+    // length to ≈ one frame of travel, so it reads as a hot round with a trailing tail, not a box.
+    let mesh = meshes.add(Capsule3d::new(0.018, 1.0));
+    // The EMISSIVE IS THE WHOLE VISUAL: black base + zero reflectance kill every lit contribution,
+    // so the streak renders exactly its emissive — which rides far above 1.0 in linear space, where
+    // the HDR camera's `Bloom` (camera.rs) halos it and the tonemapper rolls the over-bright core to
+    // white-hot for free. Do NOT set `unlit: true` here: StandardMaterial's unlit path outputs
+    // `base_color` alone and IGNORES `emissive`, which rendered the old streak as a flat sRGB
+    // "square sausage" that bloom never caught. Warm orange; magnitude tunes against bloom intensity.
     let material = materials.add(StandardMaterial {
-        base_color: Color::srgb(1.0, 0.6, 0.2),
-        emissive: LinearRgba::rgb(6.0, 2.4, 0.6),
-        unlit: true,
+        base_color: Color::BLACK,
+        reflectance: 0.0,
+        emissive: LinearRgba::rgb(30.0, 12.0, 3.0),
         ..default()
     });
     commands.insert_resource(TracerAssets { mesh, material });
@@ -604,16 +609,21 @@ fn on_fire_shell(
                 LayerMask::from(Layer::Terrain) | LayerMask::from(Layer::Armor),
             );
             let reach = (skipped.length() - EPS).max(0.0);
-            if spatial
-                .cast_ray(
-                    fire.origin + Vec3::from(dir) * EPS,
-                    dir,
-                    reach,
-                    true,
-                    &filter,
-                )
-                .is_some()
-            {
+            if let Some(hit) = spatial.cast_ray(
+                fire.origin + Vec3::from(dir) * EPS,
+                dir,
+                reach,
+                true,
+                &filter,
+            ) {
+                // The round already landed during the skipped flight — no in-flight tracer, but the
+                // IMPACT still reads: spark the same view-side `Impact` seam a live march would have
+                // (the dust puff, `vfx::spawn_impact_puff`), where the segment says it hit. Without
+                // this, close-range remote fire (whose whole flight fits inside the catch-up skip)
+                // shows nothing at all on the observing client.
+                commands.trigger(Impact {
+                    position: fire.origin + Vec3::from(dir) * (EPS + hit.distance),
+                });
                 return;
             }
         }
@@ -654,9 +664,23 @@ fn on_fire_shell(
     if fire.caliber >= TRACER_MAX_CALIBER {
         shell.insert(WorldAssetRoot(assets.scene.clone()));
     } else if fire.tracer {
+        // Streak length ≈ one render frame of travel, so successive frames fuse into a continuous
+        // line (floored so a slow, spent round still reads as a streak). The unit capsule's +Y axis
+        // is rotated onto the parent's −Z (the travel axis), Y-scaled to the length, and pushed half
+        // a length BACK along +Z — the head rides the projectile, the tail trails it.
+        let length = (speed * 0.018).max(2.0);
         shell.with_child((
             Mesh3d(tracer_assets.mesh.clone()),
             MeshMaterial3d(tracer_assets.material.clone()),
+            Transform {
+                translation: Vec3::Z * (length * 0.5),
+                rotation: Quat::from_rotation_arc(Vec3::Y, Vec3::NEG_Z),
+                scale: Vec3::new(1.0, length, 1.0),
+            },
+            // A light streak neither casts nor receives shadow — without these the sun dragged a
+            // long capsule shadow across the terrain under every tracer.
+            NotShadowCaster,
+            NotShadowReceiver,
             TracerStreak,
         ));
     }
