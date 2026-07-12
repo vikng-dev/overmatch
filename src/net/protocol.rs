@@ -18,14 +18,17 @@ use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::ballistics::ComponentHealth;
-use crate::command::TankCommand;
+use crate::command::{ConsumeCommandEdges, TankCommand};
 use crate::damage::{
     Ammo, CrewStation, Crewman, DamageConsequences, Dead, LaunchedTurret, PendingSwap,
     TankKnockedOut, TankVolumes, knockout_from_counts,
 };
 use crate::driving::DriveState;
+use crate::spec::FireMode;
 use crate::state::GameplaySet;
-use crate::tank::{Rig, ServoCommand, ServoIndex, ServoSpec, TankSim};
+use crate::tank::{
+    Muzzle, Rig, ServoCommand, ServoIndex, ServoSpec, TankRoot, TankSim, Weapon, WeaponIndex,
+};
 
 // ---------------------------------------------------------------------------
 // Protocol compatibility guard
@@ -52,7 +55,7 @@ use crate::tank::{Rig, ServoCommand, ServoIndex, ServoSpec, TankSim};
 /// changes** (a replicated component added/removed/reordered/renamed, a message or channel changed,
 /// the input type changed). The `wire_surface_is_pinned` tripwire fails until you do, which
 /// is the point: it makes a silent wire-breaking change impossible.
-pub const PROTOCOL_REV: u32 = 2;
+pub const PROTOCOL_REV: u32 = 3;
 
 /// The protocol fingerprint both ends bake into their netcode `protocol_id` (`Authentication::Manual`
 /// on the client, `NetcodeConfig` on the server). Derived at COMPILE TIME from [`PROTOCOL_REV`] + the
@@ -178,6 +181,64 @@ pub struct NetCrew {
 /// so a resting turret stops churning change-detection (and replication resends).
 #[derive(Component, Clone, Default, PartialEq, Debug, Serialize, Deserialize)]
 pub struct LaunchedTurretPose(pub Option<(Vec3, Quat)>);
+
+/// One belt-fed (`Automatic`) weapon's authoritative fire-supply facts within [`NetBelts`] — the
+/// two CORRELATED values a client cannot predict on a lossy input stream and so must be TOLD:
+///
+/// * `belt` — rounds left on the current belt (`WeaponState::belt_remaining`). This GATES fire
+///   (`shooting::fire`: an `Automatic` fires only while `belt > 0`), so the client's own predicted
+///   belt drifting below the server's is the exact bug this component fixes: under deep input loss
+///   the client predicts a shot the server never fires (`bridge_action_state_to_tank_command`'s
+///   documented loss trade), its `belt_remaining` (root-resident in `TankSim`, formerly NOT
+///   replicated) drops one under the server's, and — because `TankSim` is `local_rollback` with NO
+///   confirmed value to roll back TO — nothing ever corrected it until the next belt swap reset both
+///   ends to `belt_size`. That window is a phantom client MG round (no damage — damage is
+///   server-authoritative), a lying HUD count, and a per-tick `hrld` divergence flag (belt is folded
+///   into `trace::hash_tank_state`).
+///
+/// * `swap_remaining` — the belt-SWAP countdown, i.e. `WeaponState::reload_remaining` WHILE the belt
+///   is dry (`belt == 0`); `0.0` while `belt > 0` (not swapping). It must ride HERE, atomically with
+///   `belt`, because pinning `belt` alone leaves a boundary hazard: the moment the server's belt hits
+///   0 the client would see `belt == 0` but hold its own near-zero cyclic `reload_remaining`, so its
+///   local `tick_reload` would INSTANTLY complete the swap and refill to `belt_size`, which the next
+///   `apply_net_belts` overwrites back to 0 — an every-tick refill/overwrite OSCILLATION. Carrying
+///   the swap countdown lets the client pin `reload_remaining` to the server's while `belt == 0`, so
+///   the refill is server-driven (it arrives as `belt == belt_size`), never raced locally. This is
+///   the SAME "replicate the correlated facts atomically" shape as [`NetCrew`]'s `swap` countdown.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub struct BeltSnapshot {
+    /// Rounds left on the belt (`WeaponState::belt_remaining`); `0` = a swap is in flight.
+    pub belt: u32,
+    /// The belt-swap countdown (`reload_remaining` while `belt == 0`), else `0.0`. See the type doc.
+    pub swap_remaining: f32,
+}
+
+/// The authoritative per-weapon fire-supply snapshot of a tank, published on the root by the
+/// authority and replicated so the client's belt-fed weapons gate fire (and count the HUD) from
+/// server truth instead of a divergent local prediction. The net half of the belt-replication fix
+/// (Option B, owner 2026-07-12): the server's belt overwrites the client's prediction.
+///
+/// **One entry per weapon slot, in `TankSim::weapons` order** (the SAME order both ends derive —
+/// sorted-by-name weapon spawn assigns `WeaponIndex`, exactly like [`NetCrew`]'s volume order), so
+/// index `i` addresses the same weapon on both ends. `None` = a non-belt-fed (`Single`) weapon,
+/// which carries no belt and whose `reload_remaining` this fix deliberately does NOT touch (the 88's
+/// reload divergence is inherent-and-self-reconciling — the next shot fixes it — per
+/// `bridge_action_state_to_tank_command`'s loss-trade note; only the belt's window is long enough to
+/// warrant replication). A length mismatch at apply time (rig still spawning) skips the tank.
+///
+/// Plain replication (no prediction/interpolation), same idiom as [`ServoAngles`]/[`NetCrew`];
+/// `set_if_neq` on publish so a resting tank stops churning change-detection. While an MG fires the
+/// `belt` changes ~12.5/s and the snapshot resends then (deliberate — lightyear's change-detection
+/// handles it, no custom throttle); `swap_remaining` is `0.0` throughout normal fire (so it does not
+/// add churn) and only ticks every tick during the rare multi-second belt swap, exactly like
+/// [`NetCrew`]'s swap countdown. At rest (belt full, not firing) the snapshot is stable and
+/// `set_if_neq` suppresses idle churn.
+#[derive(Component, Clone, Default, PartialEq, Debug, Serialize, Deserialize)]
+pub struct NetBelts {
+    /// Every weapon in `TankSim::weapons` order: `Some(BeltSnapshot)` for a belt-fed (`Automatic`)
+    /// weapon, `None` for a `Single` weapon (untouched by the belt fix).
+    pub weapons: Vec<Option<BeltSnapshot>>,
+}
 
 /// Cosmetic opponent-fire tracer ("FireEvent" seam): a replicated MESSAGE (not a component), one
 /// broadcast per authoritative shot, so every OTHER client spawns a LOCAL cosmetic shell for a tank
@@ -531,6 +592,106 @@ fn mirror_swap_from_net_crew(
     }
 }
 
+/// Authority side: collect each tank's per-weapon belt supply — for every belt-fed (`Automatic`)
+/// weapon, its `belt_remaining` plus the swap countdown while dry — into the replicated [`NetBelts`],
+/// one entry per `TankSim::weapons` slot in slot order (`None` for a `Single` weapon). `FireMode`
+/// lives on the muzzle's [`Weapon`] (not in `TankSim`), so this joins the muzzles to their root by
+/// `TankRoot` and scatters into the slot-indexed vector by [`WeaponIndex`] — the same slot both ends
+/// derive. `FixedPostUpdate` (after `shooting::tick_reload`/`fire` have stepped this tick),
+/// `Without<Remote>` = authority-only in shared code (every client tank carries `Remote`, see
+/// `publish_servo_angles`). The collect order is exactly the apply order in [`apply_net_belts`].
+fn publish_net_belts(
+    mut tanks: Query<(Entity, &TankSim, &mut NetBelts), Without<Remote>>,
+    muzzles: Query<(&Weapon, &WeaponIndex, &TankRoot), With<Muzzle>>,
+) {
+    for (root, sim, mut belts) in &mut tanks {
+        // `None` by default — a slot with no belt (a `Single` weapon) or whose muzzle hasn't spawned.
+        let mut snapshot: Vec<Option<BeltSnapshot>> = vec![None; sim.weapons.len()];
+        for (weapon, slot, tank_root) in &muzzles {
+            if tank_root.0 != root {
+                continue;
+            }
+            // Bounds-guarded: a muzzle whose slot outruns this tank's `TankSim::weapons` (rig still
+            // spawning) is skipped rather than indexed past the end.
+            let Some(state) = sim.weapons.get(slot.0) else {
+                continue;
+            };
+            if let FireMode::Automatic { .. } = weapon.fire_mode {
+                snapshot[slot.0] = Some(BeltSnapshot {
+                    belt: state.belt_remaining,
+                    // The swap countdown ONLY while the belt is dry (`reload_remaining` is then the
+                    // swap timer); `0.0` during cyclic fire so it adds no change-detection churn.
+                    swap_remaining: if state.belt_remaining == 0 {
+                        state.reload_remaining
+                    } else {
+                        0.0
+                    },
+                });
+            }
+        }
+        // `set_if_neq`: no change-detection churn (nor replication resends) while at rest.
+        belts.set_if_neq(NetBelts { weapons: snapshot });
+    }
+}
+
+/// Client side: realize the replicated [`NetBelts`] onto each `Remote` tank's local `TankSim` — pin
+/// every belt-fed weapon's `belt_remaining` to server truth, and (while the belt is dry) its
+/// `reload_remaining` to the server's swap countdown. This is Option B (owner 2026-07-12): the
+/// server's belt OVERWRITES the client's prediction. `belt_remaining` is root-resident in the
+/// `local_rollback`-tracked `TankSim`, with NO replicated confirmed value to roll back to, so before
+/// this a client's mispredicted belt (a phantom shot the server never fired) stayed wrong until the
+/// next belt swap; here it snaps back every tick.
+///
+/// **Why pin `reload_remaining` only when `belt == 0`.** While the belt has rounds, `reload_remaining`
+/// is the sub-0.1 s cyclic interval — cheap to let the client predict, self-correcting within one
+/// cycle, and it never gate-diverges because the belt (which actually gates fire) is authoritative.
+/// While the belt is DRY it is the multi-second swap timer, and pinning it is what stops the boundary
+/// oscillation the [`BeltSnapshot::swap_remaining`] doc describes (a client would otherwise instantly
+/// complete the swap locally and fight the overwrite every tick). A `None` entry (a `Single` weapon)
+/// is left entirely untouched — its reload divergence is inherent and self-reconciling (see
+/// [`NetBelts`]).
+///
+/// **This system is TICK-AGNOSTIC and runs during rollback replay too** — the same discipline as
+/// [`apply_net_crew`], and for the same reason: [`NetBelts`] is plain-replicated (no `.predict()`,
+/// hence no `ConfirmedHistory`), so it holds exactly one value, and a rollback replay of ticks
+/// `T..present` pins that newest-confirmed value onto every replayed tick. That is deliberate — we
+/// WANT the belt pinned to server truth on forward AND replayed ticks alike; gating it off during
+/// rollback would let the replay re-derive the divergent local belt from prediction history and
+/// re-open the very gap this closes. The residual is the same cross-entity replication lag
+/// `apply_net_crew` documents: the pinned belt is the newest CONFIRMED value (a few ticks old), so
+/// during a burst the client's belt trails the server's live belt by that lag — a bounded,
+/// transient, self-healing delta (the divergence analyzer's belt field reads transient-then-zero),
+/// not the old accumulate-until-swap divergence. A snap that flips fire-gating mid-burst is
+/// acceptable by owner decision: a predicted MG round silently does not happen (it was only a
+/// damage-free tracer — damage is server-authoritative).
+///
+/// Ordered `.after(ConsumeCommandEdges)` so it runs after `shooting::tick_reload`/`fire` (which order
+/// `.before(ConsumeCommandEdges)`) each tick — the confirmed belt is the tick's last word, so the
+/// end-of-tick state (and the `hrld` hash) reads exactly server truth. `With<Remote>` = replica-only
+/// in shared code, exactly like [`apply_net_crew`]; a length mismatch (rig still spawning) skips.
+fn apply_net_belts(mut tanks: Query<(&NetBelts, &mut TankSim), With<Remote>>) {
+    for (belts, mut sim) in &mut tanks {
+        // A length mismatch is expected transiently while the client's rig is still spawning and
+        // self-heals once built; a persistent mismatch means client/server spec skew. Skip rather
+        // than write misaligned (same discipline as `apply_net_crew`).
+        if belts.weapons.len() != sim.weapons.len() {
+            continue;
+        }
+        for (snap, state) in belts.weapons.iter().zip(sim.weapons.iter_mut()) {
+            // `None` = a non-belt-fed weapon: leave its `belt_remaining`/`reload_remaining` alone.
+            let Some(snap) = snap else {
+                continue;
+            };
+            state.belt_remaining = snap.belt;
+            if snap.belt == 0 {
+                // Swap in flight on the authority: pin the countdown so the client neither completes
+                // a phantom swap early nor oscillates refilling against the overwrite (see the doc).
+                state.reload_remaining = snap.swap_remaining;
+            }
+        }
+    }
+}
+
 /// Authority side: mirror the live `ServoState` angles onto the replicated root component.
 /// `FixedPostUpdate`, so it reads what `drive_servos` (FixedUpdate, after `GameplaySet`) just
 /// stepped. `Without<Remote>` makes it authority-only in shared code: every client-side tank
@@ -728,6 +889,7 @@ const WIRE_SURFACE: &[&str] = &[
     "ServoAngles",
     "NetCrew",
     "LaunchedTurretPose",
+    "NetBelts",
     // The cosmetic-fire channel then message — `app.add_channel` / `app.register_message`:
     "FireChannel",
     "FireEvent",
@@ -744,7 +906,7 @@ const WIRE_SURFACE: &[&str] = &[
 /// same diff whenever the wire surface changes; the `wire_surface_is_pinned` tripwire prints the new
 /// value in its failure message. `#[cfg(test)]` for the same reason as `WIRE_SURFACE`.
 #[cfg(test)]
-const WIRE_SURFACE_HASH: u64 = 0x3291_7748_6c3b_98f4;
+const WIRE_SURFACE_HASH: u64 = 0x3c11_1a6e_6fda_3699;
 
 // ---------------------------------------------------------------------------
 // Deep wire-surface coverage (field-level + external-dep skew)
@@ -778,7 +940,7 @@ const WIRE_SURFACE_HASH: u64 = 0x3291_7748_6c3b_98f4;
 /// changes; the `wire_types_are_pinned` tripwire prints the new value. See the block above for the
 /// coverage model. `#[cfg(test)]` for the same reason as `WIRE_SURFACE`.
 #[cfg(test)]
-const WIRE_TYPES_HASH: u64 = 0xa913_18e8_4ceb_4ba5;
+const WIRE_TYPES_HASH: u64 = 0xdaa6_71e0_a8c7_2218;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -808,6 +970,10 @@ pub(crate) fn plugin(app: &mut App) {
     // Authoritative launched-turret world pose (same plain-replication shape): the client shows the
     // cooked-off toss it does NOT simulate locally, driving its own rig turret kinematically.
     app.component::<LaunchedTurretPose>().replicate();
+    // Server-authoritative per-weapon belt supply (same plain-replication shape): each belt-fed
+    // weapon's `belt_remaining` + swap countdown, so the client's fire-gating belt (root-resident in
+    // the un-replicated `TankSim`) snaps to server truth instead of a divergent local prediction.
+    app.component::<NetBelts>().replicate();
 
     // The cosmetic opponent-fire tracer (`FireEvent`) and its dedicated loss-tolerant channel. A
     // MESSAGE, not a replicated component: it is a one-shot fire-and-forget event, not a piece of
@@ -922,6 +1088,7 @@ pub(crate) fn plugin(app: &mut App) {
             publish_servo_angles,
             publish_net_crew,
             publish_launched_turret_pose,
+            publish_net_belts,
         ),
     );
     app.add_systems(
@@ -936,6 +1103,16 @@ pub(crate) fn plugin(app: &mut App) {
         apply_net_crew
             .in_set(GameplaySet)
             .before(DamageConsequences),
+    );
+    // Client: pin each belt-fed weapon's supply to server truth (Option B). `.after(ConsumeCommandEdges)`
+    // so it runs after `shooting::tick_reload`/`fire` (which order `.before(ConsumeCommandEdges)`) —
+    // the confirmed belt is the tick's last word. Runs during rollback replay too (tick-agnostic,
+    // like `apply_net_crew`), so the belt stays pinned on every replayed tick; see the system doc.
+    app.add_systems(
+        FixedUpdate,
+        apply_net_belts
+            .in_set(GameplaySet)
+            .after(ConsumeCommandEdges),
     );
     // Client: keep the crew bar's view-only `PendingSwap` in step with the replicated swap, so the
     // sim-layer `crew_ui` reads it exactly as in single-player (never naming the netcode).
@@ -1270,6 +1447,8 @@ mod tests {
         ("src/net/protocol.rs", "VolumeSnapshot"),
         ("src/net/protocol.rs", "CrewSnapshot"),
         ("src/net/protocol.rs", "LaunchedTurretPose"),
+        ("src/net/protocol.rs", "NetBelts"),
+        ("src/net/protocol.rs", "BeltSnapshot"),
         ("src/net/protocol.rs", "FireChannel"),
         ("src/net/protocol.rs", "FireEvent"),
         ("src/command.rs", "TankCommand"),
@@ -1714,5 +1893,114 @@ mod tests {
             world.get::<TankKnockedOut>(root).is_none(),
             "the tank must not be knocked out with a living crewman — no false YOU DIED",
         );
+    }
+
+    /// A `Remote` tank carrying a two-slot `TankSim` whose belt-fed weapon has DIVERGED below the
+    /// authoritative belt (the phantom-shot bug), plus a `Single` weapon whose reload must be left
+    /// alone. Seeds the root's [`NetBelts`] with server truth for the belt weapon and `None` for the
+    /// `Single`.
+    fn diverged_belt_tank(world: &mut World, server_belt: u32, server_swap: f32) -> Entity {
+        use crate::tank::{TankSim, WeaponState};
+        world
+            .spawn((
+                Remote,
+                NetBelts {
+                    weapons: vec![
+                        // Slot 0: the belt-fed weapon, server truth.
+                        Some(BeltSnapshot {
+                            belt: server_belt,
+                            swap_remaining: server_swap,
+                        }),
+                        // Slot 1: a `Single` weapon — no belt, must stay untouched.
+                        None,
+                    ],
+                },
+                TankSim {
+                    servos: Vec::new(),
+                    anchors: Vec::new(),
+                    weapons: vec![
+                        // Slot 0: the client's MISPREDICTED belt (fired a phantom round the server
+                        // never fired), with a stale cyclic `reload_remaining`.
+                        WeaponState {
+                            belt_remaining: 3,
+                            reload_remaining: 0.05,
+                            ..WeaponState::default()
+                        },
+                        // Slot 1: the `Single` weapon mid-reload — its `reload_remaining` is the 88's
+                        // reload countdown and must survive `apply_net_belts` intact.
+                        WeaponState {
+                            belt_remaining: 0,
+                            reload_remaining: 4.2,
+                            ..WeaponState::default()
+                        },
+                    ],
+                },
+            ))
+            .id()
+    }
+
+    /// THE BELT-CONVERGENCE TRIPWIRE. Injects a belt divergence (client belt != server belt) and
+    /// asserts `apply_net_belts` snaps the client's `belt_remaining` to server truth in ONE apply —
+    /// which clears the `hrld` divergence, since `belt_remaining` is exactly the term
+    /// `trace::hash_tank_state` folds into that hash. Also proves the fix stays off the `Single`
+    /// weapon (whose reload divergence is out of scope) and off the belt weapon's cyclic reload while
+    /// rounds remain (that stays client-predicted).
+    #[test]
+    fn diverged_belt_converges_to_server_truth() {
+        use crate::tank::TankSim;
+
+        let mut world = World::new();
+        // Server belt is 6 (client mispredicted down to 3); belt has rounds so no swap.
+        let tank = diverged_belt_tank(&mut world, 6, 0.0);
+
+        world.run_system_once(apply_net_belts).unwrap();
+
+        let sim = world.get::<TankSim>(tank).unwrap();
+        assert_eq!(
+            sim.weapons[0].belt_remaining, 6,
+            "the client's mispredicted belt must snap to server truth (hrld belt term now matches)",
+        );
+        assert_eq!(
+            sim.weapons[0].reload_remaining, 0.05,
+            "while the belt has rounds the cyclic reload stays client-predicted (not pinned)",
+        );
+        // The `Single` weapon (a `None` entry) is untouched — its reload divergence is out of scope.
+        assert_eq!(
+            sim.weapons[1].belt_remaining, 0,
+            "a Single weapon carries no belt and is left alone",
+        );
+        assert_eq!(
+            sim.weapons[1].reload_remaining, 4.2,
+            "a Single weapon's reload countdown must survive apply_net_belts intact",
+        );
+    }
+
+    /// While the authoritative belt is DRY, `apply_net_belts` pins the client's swap countdown to the
+    /// server's — the anti-oscillation guarantee ([`BeltSnapshot::swap_remaining`]): without it the
+    /// client, seeing `belt == 0` with a near-zero cyclic reload, would instantly complete the swap
+    /// locally and fight the overwrite every tick. Convergence in one apply.
+    #[test]
+    fn dry_belt_pins_swap_countdown_no_oscillation() {
+        use crate::tank::TankSim;
+
+        let mut world = World::new();
+        // Server belt is DRY, 2.5 s into the swap; the client wrongly thinks it still has 3 rounds
+        // with a near-zero reload (the boundary the oscillation would have exploited).
+        let tank = diverged_belt_tank(&mut world, 0, 2.5);
+
+        // Two applies (two ticks) — the belt stays pinned at 0 and the countdown at server truth,
+        // never refilling locally: the oscillation would show up as belt flipping back to belt_size.
+        for _ in 0..2 {
+            world.run_system_once(apply_net_belts).unwrap();
+            let sim = world.get::<TankSim>(tank).unwrap();
+            assert_eq!(
+                sim.weapons[0].belt_remaining, 0,
+                "a dry authoritative belt stays dry on the client — no local refill oscillation",
+            );
+            assert_eq!(
+                sim.weapons[0].reload_remaining, 2.5,
+                "the swap countdown is pinned to server truth while the belt is dry",
+            );
+        }
     }
 }
