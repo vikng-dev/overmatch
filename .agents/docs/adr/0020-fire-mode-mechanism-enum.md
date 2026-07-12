@@ -11,7 +11,7 @@ enum FireMode {
 
 It replaces the flat `reload: f32` + `tracer_every: u32` pair, under which the 88 and the MGs ran one code path that was quietly wrong for both: the 88 authored a `tracer_every` it only consulted vacuously (`1` = "every round", because the field existed), and the MGs' 750 rpm cyclic rate was smuggled through the *reload* machinery as `reload: 0.08` — which made rate of fire crew-gated. That was a latent trap: `tick_reload` froze the timer whenever the weapon's `load` requirement was unmet, so a dead Loader would have frozen an MG's cyclic rate mid-belt, a thing no crew casualty physically does. The mechanism split makes the crew-gate split expressible.
 
-## The owner's four calls (2026-07-11)
+## The owner's four calls (2026-07-12)
 
 1. **Finite belt, infinite reserve.** An `Automatic` fires from a `belt_size`-round belt tracked as sim state; there is no stowed-ammo inventory behind it. Running dry automatically starts a `belt_swap_secs` swap — ammunition *pressure* (bursts get interrupted; a dry gun is vulnerable for seconds) without an ammo-management meta the alpha doesn't need.
 2. **The swap is crew-gated; the cyclic interval is not.** The belt swap is the human act, gated by the same `load: Requirement` machinery as the 88's reload (dead gun crew = frozen swap = silent gun). The 60/rpm interval between rounds is mechanism and ticks unconditionally. `shooting::tick_reload` branches per mode on exactly this line.

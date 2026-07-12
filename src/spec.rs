@@ -59,7 +59,7 @@ pub enum Trigger {
 /// A weapon's fire *mechanism* — single-shot with a per-round reload, or belt-fed automatic. An
 /// enum, not optional fields on `WeaponSpec`, so invalid combos are unrepresentable (ADR-0010/0011):
 /// the 88 cannot author a `tracer_every` it never consults, an MG cannot omit its belt. Extensible
-/// by design — a future overheat model adds fields to `Automatic` (deferred, owner call 2026-07-11).
+/// by design — a future overheat model adds fields to `Automatic` (deferred, owner call 2026-07-12).
 #[derive(Deserialize, Clone, Copy, PartialEq, Debug)]
 #[serde(deny_unknown_fields)]
 pub enum FireMode {
@@ -71,7 +71,7 @@ pub enum FireMode {
     /// between rounds — pure mechanism, NEVER crew-gated: a dead loader does not slow a working
     /// action). The belt is finite (`belt_size` rounds, tracked as sim state in
     /// [`crate::tank::WeaponState::belt_remaining`]) over an INFINITE reserve (no stowed-ammo
-    /// inventory — owner call 2026-07-11): running dry automatically starts a belt swap of
+    /// inventory — owner call 2026-07-12): running dry automatically starts a belt swap of
     /// `belt_swap_secs`, and the *swap* is what the weapon's `load` requirement gates, same as the
     /// 88's reload. `tracer_every` is the belt's composition (real belts are loaded e.g.
     /// 4-ball-1-tracer), NOT a VFX knob: every `tracer_every`-th round down the belt traces
