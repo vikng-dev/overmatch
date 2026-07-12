@@ -133,7 +133,13 @@ fn fade_embers(
             commands.entity(entity).try_despawn();
             continue;
         }
-        if let Some(mut mat) = materials.get_mut(&material.0) {
+        // Only the fade tail mutates the material. During the steady burn `factor` is a constant
+        // 1.0, so the emissive already equals its birth value (each ember owns a fresh clone from
+        // `EmberAssets::material`) — writing it every frame would mark the material `Modified` and
+        // re-upload it per ember per frame for nothing.
+        if ember.age >= EMBER_BURN
+            && let Some(mut mat) = materials.get_mut(&material.0)
+        {
             mat.emissive = EMBER_EMISSIVE * factor;
         }
     }
