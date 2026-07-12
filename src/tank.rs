@@ -32,7 +32,7 @@ use crate::damage::{
 };
 use crate::shooting::RecoilParams;
 use crate::sight::SightMode;
-use crate::spec::{RecoilSpec, TankSpec, TankSpecHandle, Trigger, ViewKind};
+use crate::spec::{FireMode, RecoilSpec, TankSpec, TankSpecHandle, Trigger, ViewKind};
 use crate::state::{AppState, GameplaySet};
 
 // --- Rig markers. Name = the structural contract between the model and the code. ---
@@ -120,9 +120,9 @@ pub struct Muzzle;
 pub struct GunBarrel;
 
 /// A bound weapon's runtime config, attached by the binder to its muzzle entity from the spec's
-/// `weapons` map. The shooting systems read it (ballistics for the shell, `reload` for the cooldown,
-/// `recoil` to kick the `barrel`). Replaces the hardcoded `shooting.rs` consts; `barrel` is the
-/// resolved recoil node (`None` for a barrel-less weapon like a coax).
+/// `weapons` map. The shooting systems read it (ballistics for the shell, `fire_mode` for the
+/// mechanism, `recoil` to kick the `barrel`). Replaces the hardcoded `shooting.rs` consts; `barrel`
+/// is the resolved recoil node (`None` for a barrel-less weapon like a coax).
 #[derive(Component)]
 pub struct Weapon {
     /// The weapon's logical name (the `weapons` map key, e.g. `MainGun`) — what the HUD shows, as
@@ -131,18 +131,18 @@ pub struct Weapon {
     pub speed: f32,
     pub caliber: f32,
     pub mass: f32,
-    pub reload: f32,
+    /// The fire mechanism (see [`FireMode`]): single-shot reload vs belt-fed automatic. Decides how
+    /// `shooting::fire`/`tick_reload` run this weapon AND which input semantics apply (`Single`
+    /// consumes a trigger edge, `Automatic` reads the held level).
+    pub fire_mode: FireMode,
     pub recoil: Option<RecoilSpec>,
     pub barrel: Option<Entity>,
-    /// Belt tracer cadence (see [`crate::spec::WeaponSpec::tracer_every`]): every Nth round down the
-    /// belt traces, `1` = all, `0` = none. `shooting::fire` reads it against the weapon's belt counter
-    /// ([`WeaponState::rounds_fired`]) to decide each shot's `tracer` flag.
-    pub tracer_every: u32,
     /// Fire / load gates (design §7b), evaluated against the controlled tank by the shooting
     /// systems — the per-weapon successors to the old global `Fire`/`Load` capabilities.
     pub fire: Requirement,
     pub load: Requirement,
-    /// Which fire input drives this weapon (LMB = `Primary`, Spacebar = `Secondary`).
+    /// Which fire input drives this weapon (LMB = `Primary`, Spacebar = `Secondary`). Pure input
+    /// routing; the mechanism is [`Self::fire_mode`].
     pub trigger: Trigger,
 }
 
@@ -309,19 +309,45 @@ impl ServoState {
 /// small determinism gap).
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct WeaponState {
+    /// The one fire timer, meaning per [`FireMode`]: `Single`'s crew-gated reload; `Automatic`'s
+    /// cyclic interval (60/rpm, never crew-gated) while the belt has rounds, or its crew-gated belt
+    /// swap while the belt is dry (see [`Self::belt_remaining`]).
     pub reload_remaining: f32,
     pub recoil_offset: f32,
     pub recoil_velocity: f32,
     /// Belt counter — how many rounds this weapon has fired, walking its belt. `shooting::fire`
-    /// reads `rounds_fired % Weapon::tracer_every` to decide each shot's tracer flag, then bumps it.
-    /// Root-resident sim state like the rest of `WeaponState`, so a rollback replay restores it and
-    /// re-derives the SAME tracer answer (server and predicted client both count from 0). Wraps
-    /// harmlessly (`wrapping_add`); at 64 Hz the phase is what matters, not the absolute count. It is
-    /// deliberately NOT folded into the determinism hash (`trace::hash_tank_state`): a mispredicted /
-    /// rolled-back shot can leave the shooter's own counter one round out of phase with the server's,
-    /// which is a purely cosmetic tracer skew we accept — hashing it would flag that benign skew as a
-    /// divergence.
+    /// reads `rounds_fired % tracer_every` (from the `Automatic` fire mode) to decide each shot's
+    /// tracer flag, then bumps it. Root-resident sim state like the rest of `WeaponState`, so a
+    /// rollback replay restores it and re-derives the SAME tracer answer (server and predicted
+    /// client both count from 0). Wraps harmlessly (`wrapping_add`); at 64 Hz the phase is what
+    /// matters, not the absolute count. It is deliberately NOT folded into the determinism hash
+    /// (`trace::hash_tank_state`): a mispredicted / rolled-back shot can leave the shooter's own
+    /// counter one round out of phase with the server's, which is a purely cosmetic tracer skew we
+    /// accept — hashing it would flag that benign skew as a divergence.
     pub rounds_fired: u32,
+    /// Rounds left on the current belt (`Automatic` only; a `Single` weapon carries 0 and never
+    /// reads it). Starts full ([`Self::for_mode`]); each shot decrements it, and 0 means a belt
+    /// swap is in flight (`reload_remaining` is then the swap timer — `shooting::tick_reload`
+    /// refills to `belt_size` when the swap completes). Unlike the cosmetic `rounds_fired` above,
+    /// this GATES fire, so it IS folded into the determinism hash (`trace::hash_tank_state`): two
+    /// sims disagreeing on it disagree on whether the weapon can shoot.
+    pub belt_remaining: u32,
+}
+
+impl WeaponState {
+    /// Spawn-time state for a weapon of the given fire mode: everything zero (loaded, at battery),
+    /// with an `Automatic`'s belt starting FULL — a fresh belt is spawn config, like a loaded 88.
+    /// (Starting at 0 would hand every MG a phantom first belt swap — or worse, with the refill
+    /// living inside the crew-gated swap tick, a crew-dead spawn whose belt never fills at all.)
+    pub fn for_mode(mode: &FireMode) -> Self {
+        Self {
+            belt_remaining: match mode {
+                FireMode::Single { .. } => 0,
+                FireMode::Automatic { belt_size, .. } => *belt_size,
+            },
+            ..Self::default()
+        }
+    }
 }
 
 /// ALL of a tank's non-physics carried sim state, root-resident: servo mechanisms, weapon
@@ -987,10 +1013,9 @@ pub(crate) fn spawn_tank_sim(
                 speed: weapon.speed,
                 caliber: weapon.caliber,
                 mass: weapon.mass,
-                reload: weapon.reload,
+                fire_mode: weapon.fire_mode,
                 recoil: weapon.recoil.clone(),
                 barrel,
-                tracer_every: weapon.tracer_every,
                 fire: weapon.fire.clone(),
                 load: weapon.load.clone(),
                 trigger: weapon.trigger,
@@ -1200,10 +1225,15 @@ pub(crate) fn spawn_tank_sim(
         // the gun pivot, inside the mantlet) sees no own-tank geometry — no near-plane clipping.
         Visibility::Inherited,
         // `TankSim` sized to the spawned rig: every slot exists from birth (reloads start 0.0 =
-        // loaded; servo rests are spawned config, not captured state).
+        // loaded, automatic belts start full; servo rests are spawned config, not captured state).
+        // Weapon slots follow `weapon_entries`' sorted-by-name order — the same order the
+        // `WeaponIndex` loop above assigned, so slot i's state matches slot i's `Weapon`.
         TankSim {
             servos: vec![ServoState::default(); spec.servos.len()],
-            weapons: vec![WeaponState::default(); spec.weapons.len()],
+            weapons: weapon_entries
+                .iter()
+                .map(|(_, weapon)| WeaponState::for_mode(&weapon.fire_mode))
+                .collect(),
             anchors: vec![None; wheel_nodes.len()],
         },
         Rig {

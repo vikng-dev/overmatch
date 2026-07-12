@@ -64,11 +64,12 @@
 //!   per-component sub-hashes (`hsim` folds `DriveState` + `TankSim` servos/weapons/anchors, the
 //!   hidden state no pose field exposes), so a mismatch localizes to a component and the analyzer can
 //!   name the first-divergence sub-component. `hsim` decodes further into `hdrv` (`DriveState`
-//!   throttle/steer), `hsrv` (servo current/previous/velocity), `hrld` (weapon reload timers),
-//!   `hrec` (barrel recoil offset/velocity), `hanc` (wheel brush anchors incl. the Some/None grip
-//!   discriminant) — `hsim` is their fixed-order combination, so a carried-state mismatch names its
-//!   field family, not just "sim". With `SPIKE_TRACE_SIM_FIELDS` set the row also carries `simf`,
-//!   the RAW carried-state values (`srv` per-servo triples, `wpn` per-weapon triples, `anch`
+//!   throttle/steer), `hsrv` (servo current/previous/velocity), `hrld` (weapon fire timers + belt
+//!   counts), `hrec` (barrel recoil offset/velocity), `hanc` (wheel brush anchors incl. the
+//!   Some/None grip discriminant) — `hsim` is their fixed-order combination, so a carried-state
+//!   mismatch names its field family, not just "sim". With `SPIKE_TRACE_SIM_FIELDS` set the row
+//!   also carries `simf`, the RAW carried-state values (`srv` per-servo triples, `wpn` per-weapon
+//!   reload/recoil/belt quads, `anch`
 //!   per-wheel points-or-null), so the analyzer can report carried-state magnitudes, not just
 //!   booleans (`thr`/`str` are already row fields). See `hash_tank_state`. Caveat that remains BY
 //!   DESIGN: avian's
@@ -329,6 +330,12 @@ fn hash_tank_state(
     let mut hrc = Fnv64::new();
     for weapon in &sim.weapons {
         hrl.write_f32(weapon.reload_remaining);
+        // `belt_remaining` GATES fire (a dry belt cannot shoot; the swap timer's meaning depends
+        // on it), so it enters the hash — in the reload stream, whose fire-timer it modulates.
+        // Contrast `rounds_fired`, which is deliberately EXCLUDED: that counter only picks which
+        // rounds trace, a cosmetic phase that a dropped predicted shot legitimately skews by one
+        // (see `WeaponState::rounds_fired`) — hashing it would flag benign skew as divergence.
+        hrl.write_u32(weapon.belt_remaining);
         hrc.write_f32(weapon.recoil_offset);
         hrc.write_f32(weapon.recoil_velocity);
     }
@@ -812,6 +819,7 @@ fn record_tick(
                         num(w.reload_remaining),
                         num(w.recoil_offset),
                         num(w.recoil_velocity),
+                        Value::from(w.belt_remaining),
                     ])
                 })
                 .collect();
@@ -984,6 +992,9 @@ mod tests {
                 // Belt counter — cosmetic, deliberately NOT folded into the state hash below (see
                 // `WeaponState::rounds_fired`); carried here only so the literal is complete.
                 rounds_fired: 3,
+                // Rounds left on the belt — fire-gating, hashed (in the `rld` stream), unlike the
+                // cosmetic counter above.
+                belt_remaining: 47,
             }],
             anchors: vec![Some(Vec3::new(3.0, 0.0, -70.0)), None],
         };
@@ -1118,6 +1129,20 @@ mod tests {
         assert_eq!(
             (base.drv, base.srv, base.rec, base.anc),
             (r.drv, r.srv, r.rec, r.anc)
+        );
+
+        // Belt count: one round off — a fire-gating difference, so it must land in the reload
+        // stream (`rld`, the fire-timer family it modulates) and nowhere else. (`rounds_fired`
+        // has no such case: it is cosmetic and deliberately unhashed.)
+        let mut simb = sim.clone();
+        simb.weapons[0].belt_remaining = sim.weapons[0].belt_remaining.wrapping_add(1);
+        let b = hash_tank_state(p, q, lv, av, &drive, &simb);
+        assert_ne!(base.rld, b.rld);
+        assert_ne!(base.sim, b.sim);
+        assert_ne!(base.combined, b.combined);
+        assert_eq!(
+            (base.drv, base.srv, base.rec, base.anc),
+            (b.drv, b.srv, b.rec, b.anc)
         );
 
         // Recoil: offset one ULP off — must NOT touch the reload stream.
