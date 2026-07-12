@@ -202,6 +202,70 @@ pub struct TankSpec {
     pub capabilities: HashMap<Capability, Requirement>,
 }
 
+impl TankSpec {
+    /// Fail-fast semantic validation past what serde's shape check catches (ADR-0011: a competitive
+    /// sim never runs on silently-bricked stats). serde proves the *fields* exist and typecheck; this
+    /// proves the *values* yield a weapon that can actually fire and cycle. Each rejection names the
+    /// offending weapon. Called at asset-load (so a bad hot-reload/authoring slip is a hard load
+    /// error, surfaced by `report_failed_spec`), and re-run by the schema test on the shipped sheet.
+    ///
+    /// The rejections and their failure modes:
+    /// - `Automatic { belt_size: 0 }` — a permanently dry belt: the swap timer is only armed *inside*
+    ///   `fire()`, which a dry belt blocks, so the weapon can never fire *or* swap. Bricked.
+    /// - `Automatic { rpm: <= 0.0 }` — the cyclic interval is `60.0 / rpm`: `0.0` arms an infinite
+    ///   (never-elapsing) reload, negative arms a nonsense one.
+    /// - `Automatic { belt_swap_secs: < 0.0 }` / `Single { reload_secs: < 0.0 }` — a negative timer.
+    ///
+    /// Deliberately NOT rejected (documented so a future editor does not "tighten" them into bugs):
+    /// - `Automatic { tracer_every: 0 }` — a legal tracerless "stealth belt" (spec doc + `tracer_round`
+    ///   short-circuits on `0`, so there is no divide/modulo-by-zero); never traces, by design.
+    /// - `belt_swap_secs == 0.0` / `reload_secs == 0.0` — a degenerate instant reload, not bricked
+    ///   (the belt refills / the gun readies immediately); left legal.
+    pub fn validate(&self) -> Result<(), BevyError> {
+        for (name, weapon) in &self.weapons {
+            match weapon.fire_mode {
+                FireMode::Single { reload_secs } => {
+                    if reload_secs < 0.0 {
+                        return Err(format!(
+                            "weapon `{name}`: Single.reload_secs must be >= 0 (got {reload_secs})"
+                        )
+                        .into());
+                    }
+                }
+                FireMode::Automatic {
+                    rpm,
+                    belt_size,
+                    belt_swap_secs,
+                    tracer_every: _, // 0 is legal (tracerless stealth belt) — see the doc above.
+                } => {
+                    if belt_size == 0 {
+                        return Err(format!(
+                            "weapon `{name}`: Automatic.belt_size must be > 0 (a 0-round belt can \
+                             never fire or swap)"
+                        )
+                        .into());
+                    }
+                    if rpm <= 0.0 {
+                        return Err(format!(
+                            "weapon `{name}`: Automatic.rpm must be > 0 (the cyclic interval is \
+                             60/rpm; got {rpm})"
+                        )
+                        .into());
+                    }
+                    if belt_swap_secs < 0.0 {
+                        return Err(format!(
+                            "weapon `{name}`: Automatic.belt_swap_secs must be >= 0 (got \
+                             {belt_swap_secs})"
+                        )
+                        .into());
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 /// The handle to a tank's spec sheet, carried on its root entity so each tank knows its variant
 /// (multi-variant ready). `spawn_tank` loads it alongside the model.
 #[derive(Component)]
@@ -224,7 +288,10 @@ impl AssetLoader for TankSpecLoader {
     ) -> Result<TankSpec, BevyError> {
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes).await?;
-        Ok(ron::de::from_bytes(&bytes)?)
+        let spec: TankSpec = ron::de::from_bytes(&bytes)?;
+        // Past serde's shape check: reject values that parse but yield an unfirable weapon (ADR-0011).
+        spec.validate()?;
+        Ok(spec)
     }
 
     fn extensions(&self) -> &[&str] {
@@ -348,6 +415,114 @@ mod tests {
         assert_eq!(
             spec.views[&ViewKind::Gunner].requires,
             vec![Group::Single(Part::Gunner)]
+        );
+    }
+
+    /// The shipped sheet must pass semantic validation, not just parse — the CI-time twin of the
+    /// load-time `validate()` gate.
+    #[test]
+    fn tiger_1_spec_passes_validation() {
+        let spec: TankSpec = ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron"))
+            .expect("tiger_1.tank.ron must parse");
+        spec.validate()
+            .expect("the shipped sheet must be semantically valid");
+    }
+
+    /// `validate()` rejects each silently-bricked `FireMode` value, and its error names the weapon.
+    /// The legal edge cases (tracerless belt, instant reloads) must still pass. Guards ADR-0011's
+    /// fail-fast: a weapon that parses but can never fire/cycle must be a hard load error, not a
+    /// dead gun discovered mid-match.
+    #[test]
+    fn validate_rejects_bricked_fire_modes() {
+        // Start from a valid shipped sheet, then swap in one bad weapon at a time.
+        let with_weapon = |name: &str, mode: FireMode| {
+            let mut spec: TankSpec =
+                ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron")).unwrap();
+            let mut w = spec.weapons["Coax"].clone();
+            w.fire_mode = mode;
+            spec.weapons.insert(name.to_string(), w);
+            spec
+        };
+
+        // A 0-round belt: never fires or swaps.
+        let bad = with_weapon(
+            "Bricked",
+            FireMode::Automatic {
+                rpm: 750.0,
+                belt_size: 0,
+                belt_swap_secs: 3.5,
+                tracer_every: 5,
+            },
+        );
+        let err = bad.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("Bricked") && err.contains("belt_size"),
+            "{err}"
+        );
+
+        // rpm == 0.0: infinite cyclic interval.
+        let err = with_weapon(
+            "ZeroRpm",
+            FireMode::Automatic {
+                rpm: 0.0,
+                belt_size: 150,
+                belt_swap_secs: 3.5,
+                tracer_every: 5,
+            },
+        )
+        .validate()
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("ZeroRpm") && err.contains("rpm"), "{err}");
+
+        // Negative belt-swap timer.
+        let err = with_weapon(
+            "NegSwap",
+            FireMode::Automatic {
+                rpm: 750.0,
+                belt_size: 150,
+                belt_swap_secs: -1.0,
+                tracer_every: 5,
+            },
+        )
+        .validate()
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("NegSwap") && err.contains("belt_swap_secs"),
+            "{err}"
+        );
+
+        // Negative single-shot reload.
+        let err = with_weapon("NegReload", FireMode::Single { reload_secs: -0.5 })
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("NegReload") && err.contains("reload_secs"),
+            "{err}"
+        );
+
+        // Legal edges: a tracerless stealth belt (tracer_every: 0) and instant reloads pass.
+        assert!(
+            with_weapon(
+                "Stealth",
+                FireMode::Automatic {
+                    rpm: 750.0,
+                    belt_size: 150,
+                    belt_swap_secs: 0.0,
+                    tracer_every: 0,
+                },
+            )
+            .validate()
+            .is_ok(),
+            "tracer_every: 0 is a legal tracerless belt; belt_swap_secs: 0 is a legal instant refill"
+        );
+        assert!(
+            with_weapon("InstantReload", FireMode::Single { reload_secs: 0.0 })
+                .validate()
+                .is_ok(),
+            "reload_secs: 0 is a legal instant reload"
         );
     }
 
