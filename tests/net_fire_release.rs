@@ -610,11 +610,10 @@ fn run_freeze(
             seq.clone().update_buffer(&mut server, *end_tick, TICK);
         }
         let tick = tk(t);
-        let applied = server.get_predict(tick).cloned();
-        if applied.is_none() {
-            frozen += 1; // update_action_state SKIPS the apply -> ActionState frozen
-        } else {
-            action = applied.unwrap();
+        match server.get_predict(tick).cloned() {
+            // update_action_state SKIPS the apply -> ActionState frozen at its last value.
+            None => frozen += 1,
+            Some(applied) => action = applied,
         }
         // the bridge: for_tick attestation gates CONSUMABLES only; levels ride through (hold-last)
         let mut c = action.0;
