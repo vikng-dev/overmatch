@@ -1,20 +1,22 @@
 //! Ship-facing view-layer combat VFX (ADR-0014): render-only subscribers to the sim's seams —
-//! `ballistics::Impact` (dust puffs) and `ballistics::FireShell` (the 88's muzzle dressing + smoke
-//! trail) — plus the shared machinery they are built from. Mounted ONLY by the two windowed client
-//! compositions (SP `ClientPlugin` and `NetClientPlugin`); the headless server and the scripted
-//! harness never mount any of it. Nothing here writes sim state, and all randomness is view-side
-//! ([`ViewRng`]) — the deterministic sim never sees it.
+//! `ballistics::Impact` (dust puffs + sparks) and `ballistics::FireShell` (the 88's and the MGs'
+//! muzzle dressings + the 88's smoke trail) — plus the shared machinery they are built from.
+//! Mounted ONLY by the two windowed client compositions (SP `ClientPlugin` and `NetClientPlugin`);
+//! the headless server and the scripted harness never mount any of it. Nothing here writes sim
+//! state, and all randomness is view-side ([`ViewRng`]) — the deterministic sim never sees it.
 //!
 //! Layout:
 //!   * [`billboard`] — the shared sprite machinery: camera-facing flipbook quads with an
 //!     erosion + gradient-map material (`VfxBillboardMaterial`), aging/ring-cap systems, and the
-//!     procedural gradient-LUT builder. Both the 88 dressing here and the MG dressing (slice B)
-//!     consume it.
-//!   * [`muzzle`] — the 88's firing signature: 1–2-frame flash cluster, transient shadowless
-//!     muzzle light, lingering eroded smoke puff.
+//!     procedural gradient-LUT builder. The 88 dressing, the MG dressing, and the impact sparks
+//!     all consume it.
+//!   * [`muzzle`] — both guns' firing signatures: 1–2-frame flash clusters, transient shadowless
+//!     muzzle lights (the MG's rationed to tracer rounds), lingering eroded smoke (the MG's
+//!     rationed to every few rounds).
 //!   * [`trail`] — the 88 shell's smoke trail: one camera-facing ribbon per shell, built from the
 //!     sim's `ShellPath` recording, noise-eroded at the tail (`VfxTrailMaterial`).
-//!   * [`impact`] — the impact dust puffs (every landed round reads at the target).
+//!   * [`impact`] — the layered impact read: a dust puff on every landed round plus stretched
+//!     spark streaks kicked around the hit's surface normal.
 //!   * [`prewarm`] — startup warm-up spawns that force the shell scene and every VFX
 //!     mesh/material pipeline permutation to compile before the first shot, killing the measured
 //!     first-fire hitch.

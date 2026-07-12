@@ -463,12 +463,18 @@ struct ProjectileAssets {
 }
 
 /// A shell hit something — the seam the armor penetration march/spall and impact VFX hang off. The
-/// hit's normal and struck entity are available from the raycast; add them here when a feature needs
-/// them. Global event (the shell despawns), handled by the sim-side `on_impact` observer; the
-/// dev-only debug marker (`debug::spawn_impact_marker`) and the sandbox subscribe to the same event.
+/// struck entity is available from the raycast; add it here when a feature needs it. Global event
+/// (the shell despawns), handled by the sim-side `on_impact` observer; the dev-only debug marker
+/// (`debug::spawn_impact_marker`) and the sandbox subscribe to the same event. Local, never
+/// replicated — growing it is not a wire change.
 #[derive(Event)]
 pub(crate) struct Impact {
     pub(crate) position: Vec3,
+    /// Outward surface normal at the hit, straight from the raycast (for an embedded round, the
+    /// ENTRY face's normal — the surface a viewer sees the round strike). View consumers kick
+    /// sparks/dust along it (`vfx::impact`); not guaranteed unit-length in degenerate hits, so
+    /// consumers normalize with a fallback.
+    pub(crate) normal: Vec3,
 }
 
 /// One crossing's share of a shell's momentum, handed to the struck volume's owning body:
@@ -626,6 +632,7 @@ fn on_fire_shell(
                 // shows nothing at all on the observing client.
                 commands.trigger(Impact {
                     position: fire.origin + Vec3::from(dir) * (EPS + hit.distance),
+                    normal: hit.normal,
                 });
                 return;
             }
@@ -808,7 +815,10 @@ fn integrate_projectiles(
             // ricochet, spall, HP). Population-preserving — same despawn-on-contact as the live path —
             // so the A−B tick-cost delta isolates the resolution machinery. Default off (see the type).
             if shortcircuit.0 && projectile.caliber < MG_SHORTCIRCUIT_CALIBER_MAX {
-                commands.trigger(Impact { position: entry });
+                commands.trigger(Impact {
+                    position: entry,
+                    normal: hit.normal,
+                });
                 pos = entry;
                 stopped = true;
                 break;
@@ -821,7 +831,10 @@ fn integrate_projectiles(
                 .map(|(node, volume)| (node, volume.material_factor));
             let Some((node_entity, factor)) = resolved else {
                 // Terrain: stop here.
-                commands.trigger(Impact { position: entry });
+                commands.trigger(Impact {
+                    position: entry,
+                    normal: hit.normal,
+                });
                 pos = entry;
                 stopped = true;
                 break;
@@ -912,7 +925,12 @@ fn integrate_projectiles(
                 if deposit && let Ok(mut hp) = health.get_mut(node_entity) {
                     hp.current = (hp.current - cap * TRANSIT_K).max(0.0);
                 }
-                commands.trigger(Impact { position: embed });
+                // The embed's visible face is the ENTRY surface — its normal is what sparks kick
+                // off of (the embed point itself is inside the plate).
+                commands.trigger(Impact {
+                    position: embed,
+                    normal: Vec3::from(normal),
+                });
                 // Stopped: the body absorbs the full remaining momentum (v_out = 0).
                 if let Some(body) = body {
                     commands.trigger(HitImpulse {

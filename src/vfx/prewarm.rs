@@ -25,7 +25,7 @@ use bevy::world_serialization::WorldAssetRoot;
 
 use super::ViewRng;
 use super::billboard::{BillboardRing, BillboardSpec, VfxBillboardMaterial, spawn_billboard};
-use super::impact::PuffAssets;
+use super::impact::{PuffAssets, SparkAssets};
 use super::muzzle::MuzzleVfxAssets;
 use super::trail::{TrailAssets, prewarm_ribbon_mesh};
 
@@ -59,6 +59,7 @@ pub(super) fn spawn_prewarm_rig(
     muzzle: Res<MuzzleVfxAssets>,
     trail: Res<TrailAssets>,
     puff: Res<PuffAssets>,
+    spark: Res<SparkAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut billboard_materials: ResMut<Assets<VfxBillboardMaterial>>,
     mut standard_materials: ResMut<Assets<StandardMaterial>>,
@@ -82,6 +83,9 @@ pub(super) fn spawn_prewarm_rig(
     for material in [
         muzzle.flash_material(muzzle.core_atlas.clone(), 2.0),
         muzzle.smoke_material(),
+        // The impact sparks' template (slice B): same Add-blend quad pipeline as the flash, but
+        // its own LUT — warming it readies the spark bind group too, not just the pipeline.
+        spark.spark_material(),
     ] {
         let billboard = spawn_billboard(
             &mut commands,
