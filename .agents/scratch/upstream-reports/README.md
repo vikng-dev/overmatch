@@ -17,6 +17,12 @@ is OUR impact, not upstream's triage.
 | 7 | [lightyear-sealed-correction-policy.md](lightyear-sealed-correction-policy.md) | lightyear 0.28 | LOW — API gap, no builder for CorrectionPolicy | render-error layer bypasses (597ec21) |
 | 8 | [avian-solver-constraint-order.md](avian-solver-constraint-order.md) | avian3d 0.7 | LOW impact / **HIGHEST strategic** — the last same-machine non-determinism; linchpin for deterministic MP | none (bounded/self-healing, absorbed by server auth) |
 | 9 | [lightyear-avian-childof-not-replicated-transform-mode.md](lightyear-avian-childof-not-replicated-transform-mode.md) | lightyear_avian 0.28 | NONE for us (we use Position mode) — upstream's own test fails at the 0.28.0 tag | none needed |
+| 10 | [lightyear-absent-anchor-input-freeze.md](lightyear-absent-anchor-input-freeze.md) | lightyear 0.28 | CRITICAL — server fires unauthored rounds after release (ammo + damage, nothing to roll back) | `fixed_input_delay(3)` + `TankCommand.for_tick` (REV 5) |
+
+**Note on `InputDelayConfig::balanced()`:** it is now implicated in **two** CRITICAL defects (#1 and #10)
+— it recomputes the input delay from live RTT/jitter on every sync, which breaks both the prediction-margin
+assumption (#1) and the input buffer's `Δend_tick == 1` invariant (#10). We have pinned it. Reconsider
+adaptive delay only when BOTH are resolved upstream.
 
 Housekeeping: when an upstream fix ships, the matching workaround's removal condition is stated
 in each file (and #3 has an automatic tripwire: `tests/spherecast_scale.rs` FAILS when parry
