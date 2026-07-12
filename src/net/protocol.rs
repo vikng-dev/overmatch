@@ -1409,7 +1409,7 @@ fn strip_confirmed_history<C: Component + Clone>(
 ///    `update_action_state` SKIPS the apply and the server's `ActionState` FREEZES at its last
 ///    value), and — because `get_last` recurses back through `SameAsPrecedent` and DEAD-ENDS on the
 ///    `Absent` — `get_last()` return `None` as well (input_buffer.rs:339/305). Upstream: lightyear
-///    issue #1559, open. See `.agents/scratch/upstream-reports/lightyear-input-buffer-provenance.md`.
+///    issue #1559, open. See `.agents/scratch/upstream-reports/lightyear-absent-anchor-input-freeze.md`.
 ///
 /// Every one of those returns an ordinary `Some(command)`, and cases 2/3/4 are invisible to the
 /// buffer's SHAPE — a fabricated gap-fill and a genuinely HELD trigger are the byte-identical

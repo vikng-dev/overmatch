@@ -79,7 +79,7 @@ const SERVER_PORT: u16 = 5888;
 /// pin cannot remove (notably `Absent`-anchored buffer freezes, which are seeded at connect time
 /// regardless of the delay). But the pin is what removes the seeds at source, so do not trade it
 /// away for adaptive latency without reading `.agents/scratch/upstream-reports/
-/// lightyear-input-buffer-provenance.md` first.
+/// lightyear-absent-anchor-input-freeze.md` first.
 ///
 /// # Why 3
 ///
@@ -1464,7 +1464,7 @@ mod tests {
     ///
     /// If you genuinely need adaptive input delay back, the fix is NOT to delete this test: it is to
     /// make lightyear's client stop re-authoring a buffer tick it has already sent (upstream write-up
-    /// in `.agents/scratch/upstream-reports/lightyear-input-buffer-provenance.md`).
+    /// in `.agents/scratch/upstream-reports/lightyear-absent-anchor-input-freeze.md`).
     #[test]
     fn input_delay_is_constant() {
         let config = shipping_input_delay();
