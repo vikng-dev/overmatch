@@ -546,3 +546,126 @@ fn a_changed_command_unfreezes_the_absent_anchored_buffer() {
         "…so the ActionState UN-FREEZES: the freeze cannot outlive the first changed command"
     );
 }
+
+// ===================== SCOPE EXPERIMENT: the Absent freeze on the SERVER path =====================
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default, Reflect)]
+struct Cmd2 {
+    throttle: u8,
+    fire_secondary: bool,
+    aim: u16,
+    for_tick: u32,
+}
+type Buf2 = InputBuffer<ActionState<Cmd2>, Cmd2>;
+type Seq2 = NativeStateSequence<Cmd2>;
+
+/// Replay the pipeline with the REAL Absent seed route: `buffer_action_state` (FixedPreUpdate)
+/// writes at `t + d_fix`, but `prepare_input_message` (PostUpdate) computes `end_tick = t + d_post`.
+/// When the delay INCREMENTS between those two points, `end_tick` lands one tick past the client's
+/// own buffer end and `build_from_input_buffer` encodes that trailing tick as `Compressed::Absent`.
+///
+/// Returns (server_fire_ticks_unauthored, server_throttle_mismatch_ticks, froze_at_all)
+fn run_freeze(
+    d_fix: &dyn Fn(i32) -> i32,
+    d_post: &dyn Fn(i32) -> i32,
+    press: i32,
+    release: i32,
+    moving_aim: bool,
+    last: i32,
+) -> (Vec<i32>, Vec<(i32, u8, u8)>, usize) {
+    let cmd_at = |t: i32| Cmd2 {
+        throttle: if t >= press && t < release { 100 } else { 0 },
+        fire_secondary: t >= press && t < release,
+        aim: if moving_aim { t as u16 } else { 0 },
+        for_tick: 0,
+    };
+
+    let mut authored: HashMap<i32, Cmd2> = HashMap::new();
+    let mut client: Buf2 = Buf2::default();
+    let mut wire: Vec<(i32, Tick, Seq2)> = Vec::new();
+
+    for t in 0..last {
+        let b = t + d_fix(t);
+        let mut c = cmd_at(t);
+        c.for_tick = tk(b).0;
+        client.set(tk(b), ActionState(c));
+        authored.insert(b, c);
+
+        // PostUpdate: end_tick uses the delay AS OF POSTUPDATE.
+        let e = t + d_post(t);
+        if let Some(seq) = Seq2::build_from_input_buffer(&client, REDUNDANCY, tk(e)) {
+            wire.push((t, tk(e), seq));
+        }
+        client.pop(tk(t - HISTORY_DEPTH as i32));
+    }
+
+    let mut server: Buf2 = Buf2::default();
+    let mut action = ActionState::<Cmd2>::default();
+    let mut fire_leak = Vec::new();
+    let mut throttle_bad = Vec::new();
+    let mut frozen = 0usize;
+
+    for t in 0..last {
+        for (_, end_tick, seq) in wire.iter().filter(|(a, _, _)| *a == t) {
+            seq.clone().update_buffer(&mut server, *end_tick, TICK);
+        }
+        let tick = tk(t);
+        let applied = server.get_predict(tick).cloned();
+        if applied.is_none() {
+            frozen += 1; // update_action_state SKIPS the apply -> ActionState frozen
+        } else {
+            action = applied.unwrap();
+        }
+        // the bridge: for_tick attestation gates CONSUMABLES only; levels ride through (hold-last)
+        let mut c = action.0;
+        if c.for_tick != tick.0 {
+            c.fire_secondary = false; // fail_consumables_closed
+        }
+        if let Some(auth) = authored.get(&t) {
+            if c.fire_secondary && !auth.fire_secondary {
+                fire_leak.push(t);
+            }
+            if c.throttle != auth.throttle {
+                throttle_bad.push((t, auth.throttle, c.throttle));
+            }
+        }
+        server.pop_keeping_last(tick - 1);
+    }
+    (fire_leak, throttle_bad, frozen)
+}
+
+/// THE SCOPE QUESTION. Player HOLDS throttle+trigger (the "holds freeze" case), then RELEASES both.
+/// The input delay increments between FixedPreUpdate and PostUpdate on one tick, seeding a trailing
+/// `Absent` in the message — the real seed route from upstream report #10.
+#[test]
+fn scope_absent_freeze_throttle_and_fire() {
+    let press = 40;
+    let release = 60;
+    println!(
+        "\n{:>5} {:>6} {:>7} {:>10} {:>14} {:>26}",
+        "seed", "aim", "frozen", "fire-leak", "throttle-bad", "throttle detail"
+    );
+    for moving_aim in [false, true] {
+        for seed in 50..66 {
+            // delay is 2 everywhere; on tick `seed` PostUpdate sees 3 (it incremented mid-frame),
+            // and from `seed+1` the FixedPreUpdate write also uses 3.
+            let d_fix = move |t: i32| if t > seed { 3 } else { 2 };
+            let d_post = move |t: i32| if t >= seed { 3 } else { 2 };
+            let (fire, thr, frozen) = run_freeze(&d_fix, &d_post, press, release, moving_aim, 100);
+            if !fire.is_empty() || !thr.is_empty() || frozen > 0 {
+                let detail = thr
+                    .iter()
+                    .take(3)
+                    .map(|(t, a, g)| format!("t{t}:want{a}/got{g}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                println!(
+                    "{seed:>5} {:>6} {frozen:>7} {:>10} {:>14} {detail:>26}",
+                    moving_aim,
+                    format!("{:?}", fire),
+                    thr.len(),
+                );
+            }
+        }
+    }
+}
