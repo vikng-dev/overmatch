@@ -64,18 +64,27 @@ fn sim_boots_and_drives_headless() {
     app.finish();
     app.cleanup();
 
-    // Boot: asset IO is genuinely async, so poll until the spec loads and the app enters Playing.
-    for _ in 0..3000 {
+    // Boot: asset IO is genuinely async and runs on wall-clock IO threads (the tank spec RON +
+    // tiger_1.glb), so poll until the spec loads and the app enters Playing. Each not-yet-Playing
+    // iteration yields 1 ms to those IO threads — a bare CPU-bound spin (no yield) starves them on
+    // a loaded 2-core CI runner and can burn through the whole bound before the glb finishes,
+    // which was the headless-boot flake. The sleep is WALL-CLOCK only: the clock is still
+    // `ManualDuration(ZERO)` here (Phase 1 below), so no sim tick advances and the frozen-load
+    // invariant documented above holds untouched. A wall-clock deadline (not a fixed spin count)
+    // makes the wait obviously bounded and deadlock-free — and the Playing early-exit keeps the
+    // fast path (local machine, IO already done) spin-free.
+    let boot_deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
         app.update();
         if *app.world().resource::<State<AppState>>().get() == AppState::Playing {
             break;
         }
+        assert!(
+            std::time::Instant::now() < boot_deadline,
+            "sim never reached Playing headless — spec or scene load failed"
+        );
+        std::thread::sleep(Duration::from_millis(1));
     }
-    assert_eq!(
-        *app.world().resource::<State<AppState>>().get(),
-        AppState::Playing,
-        "sim never reached Playing headless — spec or scene load failed"
-    );
 
     // Phase 1 (sim time frozen): poll real-time asset IO until both rigs are fully bound.
     let mut wheels = 0;
@@ -201,18 +210,24 @@ fn mg_rounds_stream_tracers_and_spawn_no_shell_scene() {
     app.finish();
     app.cleanup();
 
-    // Boot to Playing.
-    for _ in 0..3000 {
+    // Boot to Playing. Same spin-vs-async-IO race as the sibling test above: poll `app.update()`,
+    // but yield 1 ms of WALL-CLOCK time (clock still `ManualDuration(ZERO)`, so no sim tick
+    // advances) to the glb/RON IO threads each not-yet-Playing pass, bounded by a wall-clock
+    // deadline. Without the yield, a loaded CI runner can starve the IO threads and exhaust the
+    // bound before the assets load — the headless-boot flake. The Playing early-exit keeps the
+    // fast path spin-free.
+    let boot_deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
         app.update();
         if *app.world().resource::<State<AppState>>().get() == AppState::Playing {
             break;
         }
+        assert!(
+            std::time::Instant::now() < boot_deadline,
+            "sim never reached Playing headless",
+        );
+        std::thread::sleep(Duration::from_millis(1));
     }
-    assert_eq!(
-        *app.world().resource::<State<AppState>>().get(),
-        AppState::Playing,
-        "sim never reached Playing headless",
-    );
 
     // Real-time asset IO (sim clock frozen) until the rig binds — the muzzles/weapons must exist for
     // `fire` to find a bore.
