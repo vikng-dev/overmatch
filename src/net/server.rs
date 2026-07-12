@@ -17,13 +17,13 @@ use lightyear::prelude::server::*;
 use lightyear::prelude::*;
 
 use super::protocol::{
-    FireBurst, FireChannel, FireEvent, LaunchedTurretPose, NetBelts, NetCrew, PROTOCOL_FINGERPRINT,
-    RicochetKeyframe, ServoAngles,
+    FireBurst, FireChannel, FireEvent, ImpactConfirm, LaunchedTurretPose, NetBelts, NetCrew,
+    PROTOCOL_FINGERPRINT, RicochetKeyframe, ServoAngles,
 };
 use super::{diagnostics, harness, open_gameplay_gate, physics, rig};
 use crate::SimPlugin;
 use crate::bake::TankGeometry;
-use crate::ballistics::{FireShell, ShellRicochet};
+use crate::ballistics::{FireShell, ShellRicochet, ShellTerminal};
 use crate::command::{ConsumeCommandEdges, TankCommand};
 use crate::damage::TankKnockedOut;
 use crate::spec::TankSpec;
@@ -76,15 +76,18 @@ pub fn run() {
     // Per-fixed-tick sim-cost recorder: idle unless `SPIKE_COST_TRACE` is set (the MG-march cost spike).
     app.add_plugins(crate::cost::server_plugin);
     // The cosmetic opponent-fire broadcast: SERVER ONLY. Every authoritative `fire` raises a
-    // `FireShell`; `broadcast_fire` turns each one that names a tank into a `FireEvent`, and every
+    // `FireShell`; `broadcast_fire` turns each one that names a tank into a `FireEvent`; every
     // authoritative ricochet raises a `ShellRicochet` that `on_shell_ricochet` turns into a
-    // `RicochetKeyframe` — both broadcast to every client inside a sliding-window `FireBurst`
-    // (`FireRings`). Registered here and NOWHERE shared, so the client's own local `FireShell` never
-    // tries to send. (`ShotId` stamping is NOT here: `protocol::stamp_shot_ids` runs on BOTH ends, so
-    // the server shell that ricochets and the client's own predicted shell carry the same id.)
+    // `RicochetKeyframe`; and every authoritative armor TERMINAL (embed/perforation) raises a
+    // `ShellTerminal` that `on_shell_terminal` turns into an `ImpactConfirm` — all broadcast to every
+    // client inside a sliding-window `FireBurst` (`FireRings`). Registered here and NOWHERE shared,
+    // so the client's own local `FireShell` never tries to send. (`ShotId` stamping is NOT here:
+    // `protocol::stamp_shot_ids` runs on BOTH ends, so the server shell that ricochets/terminates and
+    // the client's own predicted shell carry the same id.)
     app.init_resource::<FireRings>();
     app.add_observer(broadcast_fire);
     app.add_observer(on_shell_ricochet);
+    app.add_observer(on_shell_terminal);
     // Server-authoritative input authorization: strip any `InputTarget::Entity` a client is NOT the
     // `ControlledBy` owner of, before the input buffer ever applies it. lightyear ships this as an
     // opt-in `InputSystems::ValidateInputs` system (`add_input_validator` = sugar for
@@ -607,19 +610,24 @@ fn drive_bot(mut bots: Query<&mut TankCommand, With<Bot>>) {
     }
 }
 
-/// The server's sliding redundancy windows: the last N [`FireEvent`]s and the last N
-/// [`RicochetKeyframe`]s, resent in EVERY [`FireBurst`] so one delivered burst repairs a multi-packet
-/// loss of either stream (piece 3 — the input-redundancy pattern applied to cosmetics).
+/// The server's sliding redundancy windows: the last N [`FireEvent`]s, [`RicochetKeyframe`]s, and
+/// [`ImpactConfirm`]s, resent in EVERY [`FireBurst`] so one delivered burst repairs a multi-packet
+/// loss of any stream (piece 3 — the input-redundancy pattern applied to cosmetics).
 ///
 /// [`FIRE_WINDOW`] = 4 is sized against the worst case: a 750 rpm MG cycles at 12.5 rounds/s, so the
 /// server sends one fire burst every ~80 ms, and a 4-deep fire window keeps each event alive across the
 /// next ~3 bursts (~240 ms) — past a typical WAN burst loss, while staying a handful of small structs
-/// per packet. Keyframes are rare (only ricochets), so a 4-deep keyframe window holds each far longer
-/// in wall-clock — it only rotates out after N MORE ricochets — giving bounces generous redundancy.
+/// per packet. Keyframes and confirms are rare (one per ricochet / per armor-terminated shot), so
+/// their 4-deep windows hold each far longer in wall-clock — an entry only rotates out after N MORE
+/// events of its kind — giving bounces and terminals generous redundancy. (Caveat, accepted: a lost
+/// entry is only RE-carried by the next burst, which some fire/ricochet/terminal must trigger — an
+/// isolated shot's lost confirm may never resend inside the grace window and then degrades to the
+/// fail-closed truncation, invariant 3 of ADR-0021.)
 #[derive(Resource, Default)]
 struct FireRings {
     fires: std::collections::VecDeque<FireEvent>,
     keyframes: std::collections::VecDeque<RicochetKeyframe>,
+    confirms: std::collections::VecDeque<ImpactConfirm>,
 }
 
 /// Sliding-window depth — see [`FireRings`] for the sizing against MG cyclic rate.
@@ -632,12 +640,13 @@ impl FireRings {
         }
         ring.push_back(item);
     }
-    /// A burst carrying the whole current window of both streams (what a sequenced-unreliable delivery
-    /// needs so dropping a stale burst loses nothing the next re-carries).
+    /// A burst carrying the whole current window of all three streams (what a sequenced-unreliable
+    /// delivery needs so dropping a stale burst loses nothing the next re-carries).
     fn burst(&self) -> FireBurst {
         FireBurst {
             fires: self.fires.iter().cloned().collect(),
             keyframes: self.keyframes.iter().cloned().collect(),
+            confirms: self.confirms.iter().cloned().collect(),
         }
     }
 }
@@ -750,6 +759,41 @@ fn on_shell_ricochet(
         sender.send::<FireBurst, FireChannel>(&rings.burst(), server, &NetworkTarget::All)
     {
         debug!("server: RicochetKeyframe burst dropped: {err}");
+    }
+}
+
+/// Turn each authoritative `ballistics::ShellTerminal` (an embed/perforation — the shot's END on
+/// armor) into an `ImpactConfirm` and broadcast the current window — the SERVER half of the terminal
+/// confirm that completes the shot state machine (ADR-0016: replicate the CAUSE; every client —
+/// observers AND the shooter — renders the honest armor read from it). The authority march raises
+/// `ShellTerminal` at most once per shot (see its doc); this stamps the impact tick from the server
+/// timeline and sends. Same `FireRings`/`All` window + targeting as `broadcast_fire`; SERVER-ONLY for
+/// the same reason as `on_shell_ricochet` (the sandbox raises the sim event too, but has no `Server`).
+fn on_shell_terminal(
+    terminal: On<ShellTerminal>,
+    servers: Query<&Server>,
+    timeline: Res<LocalTimeline>,
+    mut rings: ResMut<FireRings>,
+    mut sender: ServerMultiMessageSender,
+) {
+    let Ok(server) = servers.single() else {
+        return;
+    };
+    let confirm = ImpactConfirm {
+        shot: terminal.shot,
+        position: terminal.position,
+        normal: terminal.normal,
+        penetrated: terminal.penetrated,
+        // Stamped here (the sim can't read the timeline); the client resolves on receipt, so this is
+        // carried for audit — see `ImpactConfirm::impact_tick`.
+        impact_tick: timeline.tick(),
+        after_bounces: terminal.after_bounces,
+    };
+    FireRings::push(&mut rings.confirms, confirm);
+    if let Err(err) =
+        sender.send::<FireBurst, FireChannel>(&rings.burst(), server, &NetworkTarget::All)
+    {
+        debug!("server: ImpactConfirm burst dropped: {err}");
     }
 }
 

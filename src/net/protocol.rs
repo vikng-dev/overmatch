@@ -405,39 +405,81 @@ pub struct RicochetKeyframe {
     pub sequence: u32,
 }
 
-/// The sliding-window redundancy envelope (piece 3 — the input-redundancy pattern applied to cosmetic
-/// events): every broadcast carries the last few [`FireEvent`]s AND the last few [`RicochetKeyframe`]s,
-/// so ONE delivered burst repairs a multi-packet loss of either stream. Rides the sequenced-unreliable
-/// [`FireChannel`] — a newer burst supersedes an older one without acks or head-of-line blocking, and
-/// each burst carries the whole current window, so dropping a stale burst loses nothing the next one
-/// doesn't re-carry. The receiver DEDUPS: fires by [`ShotId`] (spawn each cosmetic shell exactly once),
-/// keyframes by `(ShotId, sequence)` (the `SanctionedBounces` insert is idempotent).
+/// The server-sanctioned TERMINAL of a shot on armor — the confirm that completes the shot state
+/// machine on every client: a shot ends in exactly one of {terrain stop (client-local —
+/// pose-independent static geometry, both ends already agree, so terrain never confirms), THIS
+/// confirmed armor terminal, fail-closed truncation (the lost-confirm fallback)}. Broadcast where the
+/// authoritative march resolves an EMBED or a PERFORATION (a ricochet is a [`RicochetKeyframe`]
+/// instead); mirrors the authority's own `Impact` read at the struck plate — position, normal, and the
+/// `penetrated` verdict that gates the flame lick — so a net client renders the SAME honest armor read
+/// SP shows, at the SERVER's position. Perforation ends the COSMETIC shell at the entry-face read even
+/// though the authoritative shell continues into the tank interior — the documented choice on
+/// `ballistics::ShellTerminal` (what an external viewer sees at the plate IS this read; the client
+/// cannot march the interior). No surface enum rides: a confirm is ALWAYS armor (terrain is local).
 ///
-/// One message type, not two, so the wire surface is a single registration and both streams share the
-/// redundancy for free — a fire burst re-carries recent keyframes and vice versa. Sent to
+/// Loss-tolerant like its siblings (the [`FireBurst`] redundancy re-carries it); a lost confirm
+/// degrades to the fail-closed neutral truncation after the grace window. AT MOST ONE per shot (the
+/// authority strips the shell's shot identity after emitting), so the receiver dedups by [`ShotId`]
+/// alone — the `SanctionedShots` terminal insert is first-wins-idempotent. `after_bounces` orders it
+/// against the shot's ricochet keyframes: the client consumes the terminal only after re-seeding
+/// through that many bounces, so a shot's terminal never skips a bounce whose keyframe is merely late.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ImpactConfirm {
+    /// The shot this terminal belongs to — its `shooter` is entity-mapped (see [`FireBurst`]).
+    pub shot: ShotId,
+    /// The server's impact position (embed point, or the perforation's entry face).
+    pub position: Vec3,
+    /// The struck face's outward normal, from the server's raycast. No `Dir3` guard on receipt:
+    /// `Impact` consumers normalize with a fallback by contract (see `ballistics::Impact::normal`).
+    pub normal: Vec3,
+    /// The server's penetration verdict — gates the flame lick exactly as the local read does.
+    pub penetrated: bool,
+    /// The server `Tick` the impact resolved on. Audit / future RTT-adaptive use, like
+    /// [`RicochetKeyframe::bounce_tick`] — the client resolves on receipt, not by re-aging.
+    pub impact_tick: Tick,
+    /// Ricochets the authority resolved before this terminal (the client's ordering gate).
+    pub after_bounces: u32,
+}
+
+/// The sliding-window redundancy envelope (piece 3 — the input-redundancy pattern applied to cosmetic
+/// events): every broadcast carries the last few [`FireEvent`]s, [`RicochetKeyframe`]s, AND
+/// [`ImpactConfirm`]s, so ONE delivered burst repairs a multi-packet loss of any stream. Rides the
+/// sequenced-unreliable [`FireChannel`] — a newer burst supersedes an older one without acks or
+/// head-of-line blocking, and each burst carries the whole current window, so dropping a stale burst
+/// loses nothing the next one doesn't re-carry. The receiver DEDUPS: fires by [`ShotId`] (spawn each
+/// cosmetic shell exactly once), keyframes by `(ShotId, sequence)`, confirms by [`ShotId`] alone (at
+/// most one terminal per shot) — the `SanctionedShots` inserts are idempotent.
+///
+/// One message type, not three, so the wire surface is a single registration and all streams share the
+/// redundancy for free — a fire burst re-carries recent keyframes/confirms and vice versa. Sent to
 /// `NetworkTarget::All`; a client drops any FIRE naming a tank IT simulates (the `locally_fired`
 /// guard — a fire echo would duplicate the shell), so the shooter discarding its own echo is a
 /// receiver concern, not a targeting one — which is what makes the redundancy correct across shooters
-/// in one shared burst. KEYFRAMES are deliberately NOT dropped for own shots: they spawn nothing, and
-/// the shooter's own shell consumes them (see `receive_fire_events`).
+/// in one shared burst. KEYFRAMES and CONFIRMS are deliberately NOT dropped for own shots: they spawn
+/// nothing, and the shooter's own shell consumes them (see `receive_fire_events`).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct FireBurst {
     /// The last N fire events (N sized to cover a multi-packet burst at an MG's cyclic rate).
     pub fires: Vec<FireEvent>,
     /// The last N ricochet keyframes (rare — they persist in the window far longer than fires).
     pub keyframes: Vec<RicochetKeyframe>,
+    /// The last N impact confirms (one per armor-terminated shot).
+    pub confirms: Vec<ImpactConfirm>,
 }
 
 impl MapEntities for FireBurst {
     fn map_entities<M: EntityMapper>(&mut self, mapper: &mut M) {
         // Every embedded shot's `shooter` entity must resolve to the receiver's local replica: map the
-        // fires through their own impl, and each keyframe's `ShotId.shooter` directly (ShotId is a
-        // net-neutral crate-root type with no MapEntities of its own).
+        // fires through their own impl, and each keyframe's/confirm's `ShotId.shooter` directly
+        // (ShotId is a net-neutral crate-root type with no MapEntities of its own).
         for fire in &mut self.fires {
             fire.map_entities(mapper);
         }
         for keyframe in &mut self.keyframes {
             keyframe.shot.shooter = mapper.get_mapped(keyframe.shot.shooter);
+        }
+        for confirm in &mut self.confirms {
+            confirm.shot.shooter = mapper.get_mapped(confirm.shot.shooter);
         }
     }
 }
@@ -1082,7 +1124,7 @@ const WIRE_SURFACE_HASH: u64 = 0xc977_9452_059a_6423;
 /// changes; the `wire_types_are_pinned` tripwire prints the new value. See the block above for the
 /// coverage model. `#[cfg(test)]` for the same reason as `WIRE_SURFACE`.
 #[cfg(test)]
-const WIRE_TYPES_HASH: u64 = 0xcf66_ab93_37d3_e136;
+const WIRE_TYPES_HASH: u64 = 0xa7b9_be0a_9624_2fa5;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -1627,6 +1669,7 @@ mod tests {
         ("src/net/protocol.rs", "FireBurst"),
         ("src/net/protocol.rs", "FireEvent"),
         ("src/net/protocol.rs", "RicochetKeyframe"),
+        ("src/net/protocol.rs", "ImpactConfirm"),
         ("src/lib.rs", "ShotId"),
         ("src/command.rs", "TankCommand"),
         ("src/command.rs", "CrewSwap"),

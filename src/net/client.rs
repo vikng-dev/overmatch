@@ -29,7 +29,7 @@ use lightyear::prelude::{Controlled as NetControlled, *};
 
 use super::protocol::{FireBurst, NetTank, PROTOCOL_FINGERPRINT};
 use super::{client_smoothing_plugin, diagnostics, harness, open_gameplay_gate, physics, rig};
-use crate::ballistics::{FireShell, SanctionedBounce, SanctionedBounces};
+use crate::ballistics::{FireShell, SanctionedBounce, SanctionedShots, SanctionedTerminal};
 use crate::command::TankCommand;
 use crate::state::{AppState, GameplaySet};
 use crate::tank::{
@@ -391,12 +391,12 @@ pub fn run() {
     // ballistics march consumes it; this ager evicts stale entries). Client-only — the buffer's
     // `Option<Res>` read in `integrate_projectiles` is absent everywhere else.
     app.init_resource::<SeenShots>();
-    app.init_resource::<SanctionedBounces>();
+    app.init_resource::<SanctionedShots>();
     app.add_systems(
         FixedUpdate,
         // Gated `not(is_in_rollback)` so a replay (which re-runs `FixedMain` N times) does not
         // over-age the buffer; expiry is sim-time coarse, so a real tick is the right cadence.
-        age_sanctioned_bounces.run_if(not(is_in_rollback)),
+        age_sanctioned_shots.run_if(not(is_in_rollback)),
     );
     app.add_systems(
         FixedUpdate,
@@ -833,7 +833,7 @@ struct PendingRecoilKicks(Vec<(Entity, usize)>);
 /// simple ring: a `VecDeque` for FIFO eviction + a `HashSet` mirror for O(1) membership. The cap need
 /// only exceed the redundancy window (a shot reappears in at most `FIRE_WINDOW`-1 later bursts, ~4
 /// shots), so 128 is deep orders of magnitude past any duplicate — an evicted id can never be
-/// re-offered. Keyframes need no such set: the `SanctionedBounces` insert is idempotent by
+/// re-offered. Keyframes need no such set: the `SanctionedShots` insert is idempotent by
 /// `(ShotId, sequence)`, so a redundant keyframe is a no-op there.
 #[derive(Resource, Default)]
 struct SeenShots {
@@ -864,12 +864,15 @@ impl SeenShots {
 /// sliding window re-carries recent events): re-raise a local `FireShell` (the visible tracer, stamped
 /// with its `ShotId` so a bounce keyframe can re-seed it) AND enqueue the shot's recoil CAUSE onto
 /// [`PendingRecoilKicks`]. For each `RicochetKeyframe`: store the server-sanctioned bounce in
-/// [`SanctionedBounces`] (idempotent by `(ShotId, sequence)`), where the ballistics march consumes it.
+/// [`SanctionedShots`] (idempotent by `(ShotId, sequence)`). For each `ImpactConfirm`: store the
+/// shot's terminal there too (idempotent by `ShotId` — at most one per shot). The ballistics march
+/// consumes both — the shot state machine's sanctioned outcomes.
 ///
 /// A remote (interpolated) tank runs no local `fire`, so this is how its shots become visible AND how
-/// its barrel kicks and how its ricochets carry through: the re-raised `FireShell` flies through the
-/// same `integrate_projectiles` (damage/hit-gated off under `ClientReplica`, cosmetic BY CONSTRUCTION),
-/// re-seeding from a sanctioned bounce at armor contact instead of improvising one.
+/// its barrel kicks and how its ricochets/impacts carry through: the re-raised `FireShell` flies
+/// through the same `integrate_projectiles` (damage/hit-gated off under `ClientReplica`, cosmetic BY
+/// CONSTRUCTION), re-seeding from a sanctioned bounce at armor contact — or resolving at the
+/// sanctioned terminal with the full honest armor read — instead of improvising either.
 ///
 /// `MessageReceiver<FireBurst>` is a required component of the `Client` (the `ServerToClient` direction
 /// registered in `net::protocol`), so it rides the client link entity. `shooter: None` on the re-raised
@@ -911,7 +914,7 @@ fn receive_fire_events(
     timeline: Res<LocalTimeline>,
     mut pending: ResMut<PendingRecoilKicks>,
     mut seen: ResMut<SeenShots>,
-    mut sanctioned: ResMut<SanctionedBounces>,
+    mut sanctioned: ResMut<SanctionedShots>,
     mut commands: Commands,
 ) {
     let now = timeline.tick();
@@ -981,6 +984,25 @@ fn receive_fire_events(
                     },
                 );
             }
+            for confirm in &burst.confirms {
+                // Same rule as keyframes: NO `locally_fired` skip — a confirm spawns nothing, it
+                // RESOLVES an existing shell (the shooter's own included: the honest armor read on
+                // their own hit), so the fires-echo guard has no business here. No `Dir3` guard
+                // either: the normal feeds `Impact::normal`, whose consumers normalize with a
+                // fallback by contract. Store idempotently (first wins — at most one terminal per
+                // shot, so a redundancy-window duplicate is a no-op); the march consumes it, ordered
+                // behind the shot's bounces by `after_bounces`. `impact_tick` rides the wire for
+                // audit only — the client resolves on receipt.
+                sanctioned.insert_terminal(
+                    confirm.shot,
+                    SanctionedTerminal {
+                        position: confirm.position,
+                        normal: confirm.normal,
+                        penetrated: confirm.penetrated,
+                        after_bounces: confirm.after_bounces,
+                    },
+                );
+            }
         }
     }
 }
@@ -989,7 +1011,7 @@ fn receive_fire_events(
 /// lifetime — the `net::client` half of the buffer's ring discipline (the ballistics march only READS
 /// it). Fixed clock so expiry is measured in sim time, matching the shells that consume it; the buffer
 /// lives only on the client, so this is the sole ager.
-fn age_sanctioned_bounces(mut sanctioned: ResMut<SanctionedBounces>, time: Res<Time>) {
+fn age_sanctioned_shots(mut sanctioned: ResMut<SanctionedShots>, time: Res<Time>) {
     sanctioned.age(time.delta_secs());
 }
 
