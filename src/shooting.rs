@@ -1,5 +1,5 @@
-//! The player's gun control: fire per each weapon's [`FireMode`] (a `Single`'s click →  one shell
-//! + a crew-gated reload; an `Automatic`'s held trigger → cyclic fire off a finite belt, with a
+//! The player's gun control: fire per each weapon's [`FireMode`] (a `Single`'s click → one shell
+//! plus a crew-gated reload; an `Automatic`'s held trigger → cyclic fire off a finite belt, with a
 //! crew-gated belt swap when it runs dry), raising a `ballistics::FireShell` per round, and recoil
 //! the barrel. The trajectory itself lives in `ballistics` — this module owns only what makes it
 //! the *player's* gun. The armor sandbox drives the same `FireShell` from its free-fly camera
