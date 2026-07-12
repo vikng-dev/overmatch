@@ -14,14 +14,24 @@
 //! every round that lands billows + pings + sparks, so a burst visibly walks across whatever it is
 //! hitting instead of one lone tracer arriving out of nowhere.
 //!
-//! The read now branches on the round's physical scale: `Impact` carries `caliber`, and at/above
-//! [`TRACER_MAX_CALIBER`] (the same big/small boundary the muzzle + tracer paths use) the 88 lands
-//! a full terrain SPLASH stack — contact flash, dirt ejecta, a tall dirt plume, a low dust ring, a
-//! lingering cloud, and a flat ground scar — instead of the MG's compact dust-ping-spark read. The
-//! scale is HONEST: the plume height/hang come from real large-caliber soil-strike footage, never
-//! from screen size or camera distance (owner doctrine 2026-07-12 — no fake viewer assistance). The
-//! MG path below [`TRACER_MAX_CALIBER`] is byte-for-byte the original small read. Armor-vs-terrain
-//! surface differentiation (spark-on-steel vs dirt) is still deferred.
+//! The read branches on TWO axes the `Impact` carries: the round's physical `caliber` and the
+//! `surface` it struck.
+//!
+//!   * Caliber: at/above [`TRACER_MAX_CALIBER`] (the same big/small boundary the muzzle + tracer
+//!     paths use) the 88 lands a full large-caliber read; below it, the MG's compact read.
+//!   * Surface: armor is categorically NOT dirt (War Thunder Drone-Age dev material + GHPC
+//!     reference). A TERRAIN hit reads as a dirt splash; an ARMOR hit reads as spark-on-steel.
+//!
+//! So the 88 on TERRAIN lands the full SPLASH stack — contact flash, dirt ejecta, a tall dirt plume,
+//! a low dust ring, a lingering cloud, and a flat ground scar; the 88 on ARMOR instead lands a
+//! white-hot contact flash, a dense fast hot spark fan, and a small gray spall/smoke puff — no plume,
+//! no dust ring, no ground scar, no lingering brown cloud — plus a brief flame lick ONLY when the
+//! round bit into the steel (`Impact.penetrated`). The MG on terrain is the byte-for-byte original
+//! small read; the MG on armor swaps its dirt-toned dust billow for a gray spall LUT (the honest
+//! minimum recolor — same shape, no change to the RNG draw order the small-read tests pin).
+//! The scale is HONEST throughout: the plume height/hang come from real large-caliber soil-strike
+//! footage, the armor read from steel-strike reference — never from screen size or camera distance
+//! (owner doctrine 2026-07-12 — no fake viewer assistance).
 //!
 //! Strictly view-only (ADR-0014): subscribes to the sim's [`Impact`] event and spawns short-lived
 //! render entities that no sim system ever reads — safe on a predicting net client (the replica
@@ -33,7 +43,7 @@ use std::collections::VecDeque;
 
 use bevy::prelude::*;
 
-use crate::ballistics::{Impact, TRACER_MAX_CALIBER};
+use crate::ballistics::{Impact, ImpactSurface, TRACER_MAX_CALIBER};
 
 use super::ViewRng;
 use super::billboard::{
@@ -145,6 +155,49 @@ const GROUND_MARK_LIFETIME: f32 = 6.0;
 /// The scar ring cap: a handful of recent gouges. Small — scars are rare (88-only) and long-lived.
 const GROUND_MARK_CAP: usize = 16;
 
+// --- The 88 on ARMOR (caliber ≥ TRACER_MAX_CALIBER, surface Armor): steel is categorically NOT dirt
+// (War Thunder Drone-Age dev material + GHPC reference). A white-hot contact flash, a dense fast hot
+// spark fan, and a small gray spall/smoke puff — NO plume, NO dust ring, NO ground scar, NO lingering
+// brown cloud. A brief flame lick is added ONLY when the round bit into the steel (`Impact.penetrated`
+// — a defeated embed or a clean perforation, never a ricochet). Rides the SAME warmed Add (flash /
+// spark / flame) and Blend (spall) pipelines as the terrain read — no new pipeline permutations.
+
+/// Armor contact flash: bigger and hotter than the terrain splash flash ([`SPLASH_FLASH_SIZE`] 2.3)
+/// — the welding-bright instant of steel-on-steel. Size (m), lifetime (s), emissive boost.
+const ARMOR_FLASH_SIZE: f32 = 2.7;
+const ARMOR_FLASH_LIFETIME: f32 = 0.06;
+const ARMOR_FLASH_GLOW: f32 = 13.0;
+
+/// Dense spark fan: many fast hot streaks off the steel (scaled up from the MG garnish's 2–4). Count
+/// range, speed (m/s — brisker than terrain), lifetime (s), stretch (seconds-of-travel → length),
+/// width fraction (needle-thin), emissive boost, and cone spread (tangent magnitude before
+/// renormalizing; 0 = straight along the fan axis, ~1 ≈ 45°).
+const ARMOR_SPARK_COUNT: (u32, u32) = (14, 20);
+const ARMOR_SPARK_SPEED: (f32, f32) = (16.0, 34.0);
+const ARMOR_SPARK_LIFETIME: (f32, f32) = (0.12, 0.22);
+const ARMOR_SPARK_STRETCH: (f32, f32) = (0.03, 0.05);
+const ARMOR_SPARK_WIDTH_RATIO: f32 = 0.08;
+const ARMOR_SPARK_GLOW: f32 = 14.0;
+const ARMOR_SPARK_SPREAD: (f32, f32) = (0.2, 1.1);
+/// On a ricochet (`Impact.deflection` present) the fan axis leans from the surface normal toward the
+/// deflected outgoing direction by this fraction (0 = symmetric off the normal, 1 = fully along the
+/// bounce) — a bounce throws its sparks the way it kicked off.
+const ARMOR_SPARK_DEFLECT_BIAS: f32 = 0.6;
+
+/// Small gray spall/smoke puff: one short low-alpha gray mass (steel spall, NOT a dirt cloud). Size
+/// ease (m — blooms to ~1.3 m), lifetime (s), alpha, and a gentle rise + normal push (m/s).
+const SPALL_PUFF_SIZE: (f32, f32) = (0.4, 1.3);
+const SPALL_PUFF_LIFETIME: (f32, f32) = (0.3, 0.5);
+const SPALL_PUFF_ALPHA: f32 = 0.5;
+const SPALL_PUFF_RISE: f32 = 0.6;
+
+/// Flame lick (penetration only): one brief warm additive flame off the breach — the round's hot
+/// metal igniting as it bites in. Size ease (m), lifetime (s), emissive boost, and a rise (m/s).
+const FLAME_LICK_SIZE: (f32, f32) = (0.6, 1.4);
+const FLAME_LICK_LIFETIME: f32 = 0.16;
+const FLAME_LICK_GLOW: f32 = 8.0;
+const FLAME_LICK_RISE: f32 = 1.2;
+
 /// Independent eviction ring for the long-lived ground scars (see [`GROUND_MARK_CAP`]). Insulated
 /// from the shared [`BillboardRing`] so an MG storm filling that ring can't evict a fresh 88 scar.
 #[derive(Resource, Default)]
@@ -174,6 +227,12 @@ pub(super) struct ImpactAssets {
     dirt_lut: Handle<Image>,
     /// Darker scorched-earth palette for the flat ground scar.
     scar_lut: Handle<Image>,
+    /// Neutral gray palette for the armor read's spall/smoke (steel spall, never brown dirt) — the
+    /// MG armor billow swap and the 88 armor puff both use it.
+    spall_lut: Handle<Image>,
+    /// White-hot palette for the armor read's contact flash + dense spark fan (and the flame lick's
+    /// hot core) — whiter/hotter than the terrain `spark_lut`, which cools to ember orange.
+    hot_lut: Handle<Image>,
 }
 
 impl ImpactAssets {
@@ -269,6 +328,69 @@ impl ImpactAssets {
             alpha_mode: AlphaMode::Blend,
         }
     }
+
+    /// A gray spall-smoke mass for the armor read's puff: the dust atlas recolored through the
+    /// neutral `spall_lut` (never the earthy dirt LUT — steel throws gray spall/smoke, not dirt),
+    /// alpha-blend occluding mass, overall `alpha`. Shares the already-warmed Blend pipeline.
+    fn spall_material(&self, alpha: f32) -> VfxBillboardMaterial {
+        VfxBillboardMaterial {
+            params: VfxParams {
+                frame: Vec4::new(0.0, 2.0, 2.0, 0.0),
+                fade: Vec4::new(0.0, 2.4, 0.0, alpha),
+                glow: Vec4::new(0.0, 0.0, 0.0, 0.0),
+            },
+            atlas: self.dust_atlas.clone(),
+            lut: self.spall_lut.clone(),
+            alpha_mode: AlphaMode::Blend,
+        }
+    }
+
+    /// The armor contact flash: a white-hot additive bloom, hotter/whiter than the terrain splash's
+    /// warm flash ([`ImpactAssets::ping_material`] on the spark LUT) — welding-bright steel contact.
+    /// The round-glow atlas through the white-hot `hot_lut`.
+    fn armor_flash_material(&self) -> VfxBillboardMaterial {
+        VfxBillboardMaterial {
+            params: VfxParams {
+                frame: Vec4::new(0.0, 1.0, 1.0, 0.0),
+                fade: Vec4::new(0.0, 3.0, 0.0, 1.0),
+                glow: Vec4::new(ARMOR_FLASH_GLOW, 1.0, 0.0, 0.0),
+            },
+            atlas: self.ping_atlas.clone(),
+            lut: self.hot_lut.clone(),
+            alpha_mode: AlphaMode::Add,
+        }
+    }
+
+    /// The armor spark material: the spark-streak atlas through the white-hot `hot_lut` — the dense
+    /// fan's hotter, whiter streak (the terrain `spark_material` cools to ember orange). Additive.
+    fn armor_spark_material(&self) -> VfxBillboardMaterial {
+        VfxBillboardMaterial {
+            params: VfxParams {
+                frame: Vec4::new(0.0, 2.0, 2.0, 0.0),
+                fade: Vec4::new(0.0, 3.0, 0.0, 1.0),
+                glow: Vec4::new(ARMOR_SPARK_GLOW, 1.0, 0.0, 0.0),
+            },
+            atlas: self.spark_atlas.clone(),
+            lut: self.hot_lut.clone(),
+            alpha_mode: AlphaMode::Add,
+        }
+    }
+
+    /// The flame-lick material (penetration only): a brief warm additive flame off the breach — the
+    /// spark LUT's orange tail read as fire, over the soft dust atlas so it reads as a lick, not a
+    /// spark. Additive so it blooms; kept small and short (see the flame-lick constants).
+    fn flame_material(&self) -> VfxBillboardMaterial {
+        VfxBillboardMaterial {
+            params: VfxParams {
+                frame: Vec4::new(0.0, 2.0, 2.0, 0.0),
+                fade: Vec4::new(0.0, 2.0, 0.0, 1.0),
+                glow: Vec4::new(FLAME_LICK_GLOW, 1.0, 0.0, 0.0),
+            },
+            atlas: self.dust_atlas.clone(),
+            lut: self.spark_lut.clone(),
+            alpha_mode: AlphaMode::Add,
+        }
+    }
 }
 
 pub(super) fn setup_impact_assets(
@@ -318,6 +440,23 @@ pub(super) fn setup_impact_assets(
         let color = LinearRgba::rgb(lum * 0.85, lum * 0.62, lum * 0.45);
         (color, 0.0)
     });
+    // Spall LUT for the armor read's gray spall/smoke: a NEUTRAL (faintly cool) gray with NO earth
+    // tint — steel throws gray spall and smoke, never brown dirt. Darkens slightly with age (Y); a
+    // whisper of heat only in the brightest young texels (the strike lights it for an instant).
+    let spall_lut = gradient_lut(&mut images, |x, y| {
+        let lum = 0.10 + 0.40 * x;
+        let color = LinearRgba::rgb(lum * 0.88, lum * 0.90, lum * 0.94);
+        let heat = 0.10 * x * (-y * 8.0).exp();
+        (color, heat)
+    });
+    // Hot LUT for the armor flash + spark fan: white-hot at birth (all channels high, a touch of blue
+    // in the hottest core) cooling toward white-yellow — hotter and WHITER than the spark LUT's orange
+    // ember tail (armor contact is a welding-bright flash, not a campfire ember). Heat front-loaded.
+    let hot_lut = gradient_lut(&mut images, |x, y| {
+        let cool = 1.0 - y;
+        let color = LinearRgba::rgb(x, x * (0.85 + 0.12 * cool), x * (0.7 + 0.2 * cool));
+        (color, x * (0.7 + 0.6 * cool))
+    });
     commands.insert_resource(ImpactAssets {
         quad: unit_quad(&mut meshes),
         dust_atlas: asset_server.load("vfx/impact_dust.png"),
@@ -329,13 +468,17 @@ pub(super) fn setup_impact_assets(
         spark_lut,
         dirt_lut,
         scar_lut,
+        spall_lut,
+        hot_lut,
     });
 }
 
-/// Drop the layered read at each shell impact — branching on the round's physical caliber. At/above
-/// [`TRACER_MAX_CALIBER`] the 88 lands the big terrain splash ([`spawn_big_splash`]); below it, the
-/// MG's compact dust-ping-spark read ([`spawn_small_impact`], byte-for-byte the original). `normal`
-/// is resolved once, before either path draws RNG, so the small path's RNG sequence is unchanged.
+/// Drop the layered read at each shell impact — branching on BOTH the round's physical caliber and
+/// the `surface` it struck. At/above [`TRACER_MAX_CALIBER`] the 88 lands either the big terrain
+/// splash ([`spawn_big_splash`]) or the armor read ([`spawn_big_armor`]); below it, the MG's compact
+/// dust-ping-spark read ([`spawn_small_impact`], which recolors its billow gray on armor but keeps
+/// the terrain path byte-for-byte). `normal`/`to_camera` are resolved once, before any path draws
+/// RNG, so the small path's RNG sequence is unchanged and the surface pick costs no RNG.
 fn spawn_impact_read(
     impact: On<Impact>,
     assets: Res<ImpactAssets>,
@@ -352,22 +495,37 @@ fn spawn_impact_read(
         .map(|cam| cam.translation() - impact.position)
         .unwrap_or(Vec3::Z);
     if impact.caliber >= TRACER_MAX_CALIBER {
-        spawn_big_splash(
-            impact.position,
-            normal,
-            to_camera,
-            &assets,
-            &mut materials,
-            &mut ring,
-            &mut ground_ring,
-            &mut rng,
-            &mut commands,
-        );
+        match impact.surface {
+            ImpactSurface::Terrain => spawn_big_splash(
+                impact.position,
+                normal,
+                to_camera,
+                &assets,
+                &mut materials,
+                &mut ring,
+                &mut ground_ring,
+                &mut rng,
+                &mut commands,
+            ),
+            ImpactSurface::Armor => spawn_big_armor(
+                impact.position,
+                normal,
+                to_camera,
+                impact.penetrated,
+                impact.deflection,
+                &assets,
+                &mut materials,
+                &mut ring,
+                &mut rng,
+                &mut commands,
+            ),
+        }
     } else {
         spawn_small_impact(
             impact.position,
             normal,
             to_camera,
+            impact.surface,
             &assets,
             &mut materials,
             &mut ring,
@@ -377,20 +535,35 @@ fn spawn_impact_read(
     }
 }
 
-/// The MG / small-caliber read (byte-for-byte the original `spawn_impact_read` body): dust billow
-/// (mass) + ping (contact flash) + a few sparks (crisp garnish), all on the shared billboard ring.
-/// This is what makes the four invisible non-tracer rounds of the belt cycle register at the target.
+/// The MG / small-caliber read (the original terrain body, plus a gray-spall LUT swap on armor):
+/// dust billow (mass) + ping (contact flash) + a few sparks (crisp garnish), all on the shared
+/// billboard ring. This is what makes the four invisible non-tracer rounds of the belt cycle register
+/// at the target. On ARMOR the billow's LUT swaps from the earthy dust palette to the neutral gray
+/// `spall_lut` (the honest minimum recolor — a small round on steel throws gray spall, not dirt); the
+/// swap draws NO RNG, so the byte-identical terrain read (and its pinned RNG order) is untouched.
 #[allow(clippy::too_many_arguments)]
 fn spawn_small_impact(
     position: Vec3,
     normal: Vec3,
     to_camera: Vec3,
+    surface: ImpactSurface,
     assets: &ImpactAssets,
     materials: &mut Assets<VfxBillboardMaterial>,
     ring: &mut BillboardRing,
     rng: &mut ViewRng,
     commands: &mut Commands,
 ) {
+    // The billow material: the earthy dust palette on terrain, the gray spall palette on armor. Only
+    // the LUT differs — same params, same atlas, same Blend pipeline — and choosing it draws no RNG,
+    // so the small read's RNG sequence (the pinned draw order) is identical on both surfaces.
+    let billow = {
+        let mut m = assets.dust_material();
+        if surface == ImpactSurface::Armor {
+            m.lut = assets.spall_lut.clone();
+        }
+        m
+    };
+
     // --- Dust billow: one alpha-blended eroding billboard, random frame/roll/spin, blooming and
     // drifting out along the surface normal (with a gentle rise).
     let dust_size = rng.range(DUST_SIZE.0, DUST_SIZE.1);
@@ -400,7 +573,7 @@ fn spawn_small_impact(
         ring,
         assets.quad.clone(),
         BillboardSpec {
-            material: assets.dust_material(),
+            material: billow,
             lifetime: rng.range(DUST_LIFETIME.0, DUST_LIFETIME.1),
             origin: position + normal * (DUST_SIZE.0 * 0.5),
             drift: normal * DUST_NORMAL_PUSH + Vec3::Y * DUST_RISE,
@@ -667,6 +840,148 @@ fn spawn_big_splash(
     );
 }
 
+/// The 88 ARMOR read (caliber ≥ TRACER_MAX_CALIBER, surface Armor): the spark-on-steel read — a
+/// white-hot contact flash, a dense fast hot spark fan, and a small gray spall/smoke puff, all on the
+/// shared ring. NO plume, NO dust ring, NO lingering cloud, and — deliberately — NO ground scar
+/// (steel isn't gouged like soil; the armor read touches only the shared billboard ring). A brief
+/// flame lick is appended ONLY when `penetrated` (the round bit into the steel). When `deflection` is
+/// present (a ricochet) the spark fan leans toward the bounce direction; otherwise it splays off the
+/// surface normal. Physical read (module doc), not screen-relative.
+#[allow(clippy::too_many_arguments)]
+fn spawn_big_armor(
+    position: Vec3,
+    normal: Vec3,
+    to_camera: Vec3,
+    penetrated: bool,
+    deflection: Option<Vec3>,
+    assets: &ImpactAssets,
+    materials: &mut Assets<VfxBillboardMaterial>,
+    ring: &mut BillboardRing,
+    rng: &mut ViewRng,
+    commands: &mut Commands,
+) {
+    // The spark fan's axis: straight off the surface normal, or leaned toward the deflected outgoing
+    // direction on a ricochet (a bounce throws its sparks the way it kicked off).
+    let axis = match deflection.and_then(|d| d.try_normalize()) {
+        Some(defl) => (normal * (1.0 - ARMOR_SPARK_DEFLECT_BIAS) + defl * ARMOR_SPARK_DEFLECT_BIAS)
+            .try_normalize()
+            .unwrap_or(normal),
+        None => normal,
+    };
+    let (tan_a, tan_b) = axis.any_orthonormal_pair();
+
+    // --- White-hot contact flash: one big hot additive bloom at the strike, gone in a frame or two.
+    spawn_billboard(
+        commands,
+        materials,
+        ring,
+        assets.quad.clone(),
+        BillboardSpec {
+            material: assets.armor_flash_material(),
+            lifetime: ARMOR_FLASH_LIFETIME,
+            origin: position + normal * 0.1,
+            drift: Vec3::ZERO,
+            frames: 1,
+            start_frame: 0.0,
+            frame_rate: 0.0,
+            start_size: ARMOR_FLASH_SIZE,
+            end_size: ARMOR_FLASH_SIZE * 0.8,
+            aspect: Vec3::ONE,
+            roll: rng.range(0.0, std::f32::consts::TAU),
+            spin: 0.0,
+            erosion_end: 0.0,
+            rotation: None,
+        },
+    );
+
+    // --- Dense hot spark fan: many fast white-hot streaks in a cone around the fan axis, each a
+    // fixed-orientation billboard elongated along its own flight direction.
+    let count = ARMOR_SPARK_COUNT.0
+        + (rng.next_f32() * (ARMOR_SPARK_COUNT.1 - ARMOR_SPARK_COUNT.0 + 1) as f32) as u32;
+    for _ in 0..count.min(ARMOR_SPARK_COUNT.1) {
+        let theta = rng.range(0.0, std::f32::consts::TAU);
+        let spread = rng.range(ARMOR_SPARK_SPREAD.0, ARMOR_SPARK_SPREAD.1);
+        let dir = (axis + (tan_a * theta.cos() + tan_b * theta.sin()) * spread).normalize();
+        let speed = rng.range(ARMOR_SPARK_SPEED.0, ARMOR_SPARK_SPEED.1);
+        let length = speed * rng.range(ARMOR_SPARK_STRETCH.0, ARMOR_SPARK_STRETCH.1);
+        spawn_billboard(
+            commands,
+            materials,
+            ring,
+            assets.quad.clone(),
+            BillboardSpec {
+                material: assets.armor_spark_material(),
+                lifetime: rng.range(ARMOR_SPARK_LIFETIME.0, ARMOR_SPARK_LIFETIME.1),
+                origin: position + dir * (length * 0.5),
+                drift: dir * speed,
+                frames: 4,
+                start_frame: rng.range(0.0, 4.0),
+                frame_rate: 0.0,
+                start_size: length,
+                end_size: length * 0.6,
+                aspect: Vec3::new(ARMOR_SPARK_WIDTH_RATIO, 1.0, 1.0),
+                roll: 0.0,
+                spin: 0.0,
+                erosion_end: 1.0,
+                rotation: Some(spark_orientation(dir, to_camera)),
+            },
+        );
+    }
+
+    // --- Small gray spall puff: one short gray smoke mass off the strike (steel spall, never dirt),
+    // pushed gently out along the normal and rising.
+    let puff_size = rng.range(SPALL_PUFF_SIZE.0, SPALL_PUFF_SIZE.1);
+    spawn_billboard(
+        commands,
+        materials,
+        ring,
+        assets.quad.clone(),
+        BillboardSpec {
+            material: assets.spall_material(SPALL_PUFF_ALPHA),
+            lifetime: rng.range(SPALL_PUFF_LIFETIME.0, SPALL_PUFF_LIFETIME.1),
+            origin: position + normal * (SPALL_PUFF_SIZE.0 * 0.5),
+            drift: normal * 0.3 + Vec3::Y * SPALL_PUFF_RISE,
+            frames: 4,
+            start_frame: rng.range(0.0, 4.0),
+            frame_rate: 0.0,
+            start_size: SPALL_PUFF_SIZE.0,
+            end_size: puff_size,
+            aspect: Vec3::ONE,
+            roll: rng.range(0.0, std::f32::consts::TAU),
+            spin: rng.range(-DUST_SPIN_MAX, DUST_SPIN_MAX),
+            erosion_end: 1.0,
+            rotation: None,
+        },
+    );
+
+    // --- Flame lick: penetration ONLY (the round bit into the steel — embed-that-defeats or a clean
+    // perforation, never a ricochet). One brief warm additive flame off the breach, rising.
+    if penetrated {
+        spawn_billboard(
+            commands,
+            materials,
+            ring,
+            assets.quad.clone(),
+            BillboardSpec {
+                material: assets.flame_material(),
+                lifetime: FLAME_LICK_LIFETIME,
+                origin: position + normal * (FLAME_LICK_SIZE.0 * 0.5),
+                drift: normal * 0.5 + Vec3::Y * FLAME_LICK_RISE,
+                frames: 4,
+                start_frame: rng.range(0.0, 4.0),
+                frame_rate: 0.0,
+                start_size: FLAME_LICK_SIZE.0,
+                end_size: FLAME_LICK_SIZE.1,
+                aspect: Vec3::ONE,
+                roll: rng.range(0.0, std::f32::consts::TAU),
+                spin: 0.0,
+                erosion_end: 1.0,
+                rotation: None,
+            },
+        );
+    }
+}
+
 /// Orientation for a flat, ground-lying billboard: turn the quad's +Z (its face normal) onto the
 /// surface `normal` so it lies ON the terrain (not camera-facing), then roll it by `roll` around
 /// that normal for per-instance variety. `normal` must be unit-length.
@@ -720,15 +1035,34 @@ mod tests {
             spark_lut: Handle::default(),
             dirt_lut: Handle::default(),
             scar_lut: Handle::default(),
+            spall_lut: Handle::default(),
+            hot_lut: Handle::default(),
         });
         app
     }
 
+    /// Fire a terrain impact (the default surface) — keeps every existing terrain/MG test byte-for-
+    /// byte, including the RNG draw order the small read pins.
     fn trigger_impact(app: &mut App, normal: Vec3, caliber: f32) {
+        trigger_surface(app, normal, caliber, ImpactSurface::Terrain, false, None);
+    }
+
+    /// Fire an impact on an explicit surface (with penetration + deflection) — the armor tests.
+    fn trigger_surface(
+        app: &mut App,
+        normal: Vec3,
+        caliber: f32,
+        surface: ImpactSurface,
+        penetrated: bool,
+        deflection: Option<Vec3>,
+    ) {
         app.world_mut().trigger(Impact {
             position: Vec3::ZERO,
             normal,
             caliber,
+            surface,
+            penetrated,
+            deflection,
         });
         app.world_mut().flush();
     }
@@ -892,6 +1226,144 @@ mod tests {
         assert!(
             ring_len <= BILLBOARD_CAP,
             "impact storm must stay ring-capped (got {ring_len})"
+        );
+    }
+
+    /// The 88 on ARMOR is categorically NOT the terrain splash: it throws its compact spark-on-steel
+    /// read (flash + a dense 14–20 spark fan + one gray spall puff) on the shared ring and — the
+    /// honesty contract — leaves NO ground scar (steel isn't gouged like soil). Contrast the terrain
+    /// 88, which DOES gouge exactly one scar.
+    #[test]
+    fn armor_88_reads_spark_on_steel_not_dirt() {
+        // Terrain 88: gouges one ground scar (the slice-1 splash).
+        let mut terrain = harness();
+        trigger_impact(&mut terrain, Vec3::Y, BIG_CALIBER);
+        assert_eq!(
+            terrain.world().resource::<GroundMarkRing>().0.len(),
+            1,
+            "the terrain 88 gouges a ground scar"
+        );
+
+        // Armor 88 (no penetration): NO ground scar, and a compact flash + dense fan + puff stack.
+        let mut armor = harness();
+        trigger_surface(
+            &mut armor,
+            Vec3::Y,
+            BIG_CALIBER,
+            ImpactSurface::Armor,
+            false,
+            None,
+        );
+        assert_eq!(
+            armor.world().resource::<GroundMarkRing>().0.len(),
+            0,
+            "an armor hit never gouges a ground scar"
+        );
+        // The spark fan is the needle-thin streak set (aspect.x < 0.2); it must be the dense 14–20.
+        let fan = sparks(&mut armor).len();
+        assert!(
+            (ARMOR_SPARK_COUNT.0 as usize..=ARMOR_SPARK_COUNT.1 as usize).contains(&fan),
+            "armor spark fan {fan} outside {ARMOR_SPARK_COUNT:?}"
+        );
+        // Non-penetrating stack: flash(1) + fan(14–20) + spall puff(1). No plume/ring/cloud/scar.
+        let total = billboards(&mut armor);
+        assert_eq!(
+            total,
+            fan + 2,
+            "armor read = flash + {fan} sparks + one gray spall puff"
+        );
+    }
+
+    /// Penetration (the round bit into the steel) appends exactly the flame lick — one extra
+    /// billboard over the otherwise-identical non-penetrating armor read. Both harnesses share the
+    /// fixed seed, so the RNG-driven fan count is identical and the delta is purely the flame lick.
+    #[test]
+    fn armor_penetration_adds_exactly_the_flame_lick() {
+        let mut no_pen = harness();
+        trigger_surface(
+            &mut no_pen,
+            Vec3::Y,
+            BIG_CALIBER,
+            ImpactSurface::Armor,
+            false,
+            None,
+        );
+        let n0 = billboards(&mut no_pen);
+
+        let mut pen = harness();
+        trigger_surface(
+            &mut pen,
+            Vec3::Y,
+            BIG_CALIBER,
+            ImpactSurface::Armor,
+            true,
+            None,
+        );
+        let n1 = billboards(&mut pen);
+
+        assert_eq!(
+            n1,
+            n0 + 1,
+            "penetration adds exactly the flame lick, nothing else"
+        );
+    }
+
+    /// The MG on armor is the honest-minimum recolor: the SAME billboard shape/count as the MG on
+    /// terrain (only the billow LUT swaps to gray spall), so the small-read structure the terrain
+    /// tests pin is preserved verbatim — no ground scar, no extra layers.
+    #[test]
+    fn mg_armor_preserves_the_small_read_shape() {
+        let mut terrain = harness();
+        trigger_impact(&mut terrain, Vec3::Y, MG_CALIBER);
+        let nt = billboards(&mut terrain);
+
+        let mut armor = harness();
+        trigger_surface(
+            &mut armor,
+            Vec3::Y,
+            MG_CALIBER,
+            ImpactSurface::Armor,
+            false,
+            None,
+        );
+        let na = billboards(&mut armor);
+
+        assert_eq!(
+            na, nt,
+            "MG armor recolor keeps the small-read shape (LUT swap only)"
+        );
+        assert_eq!(
+            armor.world().resource::<GroundMarkRing>().0.len(),
+            0,
+            "the MG armor read leaves no ground scar"
+        );
+    }
+
+    /// A ricochet's spark fan leans toward the deflected (outgoing) direction: with the surface
+    /// normal +Y and the bounce strongly along +X, the fan's mean kick carries a clear +X component
+    /// it would not have if it splayed symmetrically off the normal.
+    #[test]
+    fn ricochet_biases_the_spark_fan_along_the_bounce() {
+        let mut app = harness();
+        let deflect = Vec3::new(1.0, 0.2, 0.0).normalize();
+        trigger_surface(
+            &mut app,
+            Vec3::Y,
+            BIG_CALIBER,
+            ImpactSurface::Armor,
+            false,
+            Some(deflect),
+        );
+        let fan = sparks(&mut app);
+        assert!(!fan.is_empty(), "a ricochet must throw a spark fan");
+        let mean_x: f32 = fan
+            .iter()
+            .map(|(drift, _)| drift.normalize().x)
+            .sum::<f32>()
+            / fan.len() as f32;
+        assert!(
+            mean_x > 0.2,
+            "the fan must lean toward the bounce (+X); mean x-kick was {mean_x}"
         );
     }
 }

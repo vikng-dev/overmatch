@@ -442,6 +442,15 @@ pub struct ShellReadout {
 /// shell-scene branch below, rather than a second constant that could drift.
 pub(crate) const TRACER_MAX_CALIBER: f32 = 0.02;
 
+/// A remote shot older than this many fixed catch-up ticks (~250 ms at 64 Hz) is stale: its flash
+/// moment is long over on the shooter's screen, so the cosmetic reads it would still fire late — the
+/// muzzle dressing AND the catch-up impact phantom (`on_fire_shell`) — are suppressed rather than
+/// erupted late from bare ground (a full-scale splash + a multi-second ground scar with no shell
+/// attached reads as a phantom). `pub(crate)` so the sim-side catch-up gate here and the view-side
+/// muzzle gate (`vfx::muzzle`) share ONE constant and can never drift apart. Damage is unaffected —
+/// the shell resolved on the authority; this gates only the cosmetic catch-up read.
+pub(crate) const STALE_FIRE_TICKS: u32 = 16;
+
 /// View marker on a tracer round's emissive streak child (`on_fire_shell`). The streak is a VIEW
 /// attachment on the cosmetic projectile entity (ADR-0014) — it carries no sim state; it just rides
 /// the projectile's `Transform`, which `integrate_projectiles` keeps pointed down the velocity.
@@ -469,6 +478,16 @@ struct ProjectileAssets {
     scene: Handle<WorldAsset>,
 }
 
+/// What the round struck — the surface discriminator the view read branches on (armor is
+/// categorically NOT dirt: spark-on-steel + spall vs a dirt splash). Resolved sim-side where the
+/// hit's volume ancestry is known (`hit_ancestor` ⇒ `Armor`, else `Terrain`). Kept lean: wood/snow/
+/// etc. are deferred until terrain carries material tags. Local-only, like the rest of [`Impact`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ImpactSurface {
+    Terrain,
+    Armor,
+}
+
 /// A shell hit something — the seam the armor penetration march/spall and impact VFX hang off. The
 /// struck entity is available from the raycast; add it here when a feature needs it. Global event
 /// (the shell despawns), handled by the sim-side `on_impact` observer; the dev-only debug marker
@@ -487,6 +506,18 @@ pub(crate) struct Impact {
     /// [`TRACER_MAX_CALIBER`]). Already in scope at every trigger (rides `FireShell`), so carrying
     /// it here costs nothing; `Impact` stays local-never-replicated, so this is NOT a wire change.
     pub(crate) caliber: f32,
+    /// What was struck — armor (spark-on-steel + spall + optional flame) vs terrain (dirt splash).
+    /// The view's second branch axis after caliber. Resolved from the hit's volume ancestry.
+    pub(crate) surface: ImpactSurface,
+    /// Whether the round bit INTO steel (a defeated embed OR a clean perforation) as opposed to
+    /// bouncing off (ricochet) or striking terrain. Gates the armor read's brief flame lick — the
+    /// hot metal signature of the round burying itself in the plate. `false` for terrain, ricochet,
+    /// the MG short-circuit, and the cosmetic catch-up phantom.
+    pub(crate) penetrated: bool,
+    /// For a ricochet, the outgoing deflected travel direction — the view biases the armor spark fan
+    /// along it (a bounce throws its sparks the way it deflected). `None` for every non-ricochet hit
+    /// (the fan then splays symmetrically off the surface normal).
+    pub(crate) deflection: Option<Vec3>,
 }
 
 /// One crossing's share of a shell's momentum, handed to the struck volume's owning body:
@@ -606,6 +637,11 @@ fn on_fire_shell(
     fixed_time: Res<Time<Fixed>>,
     // The already-landed test below; inert for a local shell (guarded on `catch_up_ticks > 0`).
     spatial: SpatialQuery,
+    // Volume ancestry, to classify the catch-up hit's surface (armor vs terrain) the same way the
+    // live march does (`hit_ancestor`). Cheap to thread through the observer; only read when a
+    // catch-up hit actually lands (guarded on `catch_up_ticks > 0`).
+    volumes: Query<&BallisticVolume>,
+    parents: Query<&ChildOf>,
     mut commands: Commands,
 ) {
     let drag = drag_k(fire.caliber, fire.mass);
@@ -642,11 +678,33 @@ fn on_fire_shell(
                 // (the dust billow + sparks, `vfx::impact`), where the segment says it hit. Without
                 // this, close-range remote fire (whose whole flight fits inside the catch-up skip)
                 // shows nothing at all on the observing client.
-                commands.trigger(Impact {
-                    position: fire.origin + Vec3::from(dir) * (EPS + hit.distance),
-                    normal: hit.normal,
-                    caliber: fire.caliber,
-                });
+                //
+                // STALENESS GATE (shares `STALE_FIRE_TICKS` with the muzzle dressing so the flash and
+                // this impact phantom fall stale together): past the bound the flash moment is long
+                // over on the shooter's screen, and erupting a full-scale splash + a multi-second
+                // ground scar late from bare ground — with no shell or muzzle flash attached — reads as
+                // a phantom (the catch-up accepts up to `CATCH_UP_MAX_TICKS` = 100, a ~1.5 s stall).
+                // So we still `return` (the shell landed on the authority — no in-flight tracer
+                // either), but suppress the cosmetic read. Damage is unaffected.
+                if fire.catch_up_ticks <= STALE_FIRE_TICKS {
+                    // Surface is resolved properly from the hit's volume ancestry (armor plate ⇒
+                    // Armor, else Terrain); penetration is unknown in this cosmetic-phantom context
+                    // (no march ran), so `penetrated: false` — a catch-up armor read shows the
+                    // spark/spall but never the flame lick.
+                    let surface = if hit_ancestor(hit.entity, &volumes, &parents).is_some() {
+                        ImpactSurface::Armor
+                    } else {
+                        ImpactSurface::Terrain
+                    };
+                    commands.trigger(Impact {
+                        position: fire.origin + Vec3::from(dir) * (EPS + hit.distance),
+                        normal: hit.normal,
+                        caliber: fire.caliber,
+                        surface,
+                        penetrated: false,
+                        deflection: None,
+                    });
+                }
                 return;
             }
         }
@@ -830,10 +888,21 @@ fn integrate_projectiles(
             // ricochet, spall, HP). Population-preserving — same despawn-on-contact as the live path —
             // so the A−B tick-cost delta isolates the resolution machinery. Default off (see the type).
             if shortcircuit.0 && projectile.caliber < MG_SHORTCIRCUIT_CALIBER_MAX {
+                // Classify the first surface from the hit's volume ancestry (the same `hit_ancestor`
+                // rule the full march uses just below) so the read is honest even in the B-arm. The
+                // short-circuit stops dead without resolving penetration, so `penetrated: false`.
+                let surface = if hit_ancestor(hit.entity, &volumes, &parents).is_some() {
+                    ImpactSurface::Armor
+                } else {
+                    ImpactSurface::Terrain
+                };
                 commands.trigger(Impact {
                     position: entry,
                     normal: hit.normal,
                     caliber: projectile.caliber,
+                    surface,
+                    penetrated: false,
+                    deflection: None,
                 });
                 pos = entry;
                 stopped = true;
@@ -851,6 +920,9 @@ fn integrate_projectiles(
                     position: entry,
                     normal: hit.normal,
                     caliber: projectile.caliber,
+                    surface: ImpactSurface::Terrain,
+                    penetrated: false,
+                    deflection: None,
                 });
                 pos = entry;
                 stopped = true;
@@ -903,6 +975,17 @@ fn integrate_projectiles(
                         point: entry,
                     });
                 }
+                // The bounce reads on the struck face: a hard bright spark fan, biased along the
+                // deflected (outgoing) direction — a ricochet throws its sparks the way it kicked off.
+                // It bit no steel, so `penetrated: false` (no flame lick — a bounce doesn't ignite).
+                commands.trigger(Impact {
+                    position: entry,
+                    normal: Vec3::from(normal),
+                    caliber: projectile.caliber,
+                    surface: ImpactSurface::Armor,
+                    penetrated: false,
+                    deflection: Some(Vec3::from(dir)),
+                });
                 marks.ricochets.push(entry);
                 path.points.push(entry);
                 pos = entry;
@@ -943,11 +1026,16 @@ fn integrate_projectiles(
                     hp.current = (hp.current - cap * TRANSIT_K).max(0.0);
                 }
                 // The embed's visible face is the ENTRY surface — its normal is what sparks kick
-                // off of (the embed point itself is inside the plate).
+                // off of (the embed point itself is inside the plate). The round buried itself in the
+                // steel (`penetrated: true`): the hot-metal signature earns the brief flame lick, even
+                // though the plate ultimately defeated it — it bit in, it didn't bounce.
                 commands.trigger(Impact {
                     position: embed,
                     normal: Vec3::from(normal),
                     caliber: projectile.caliber,
+                    surface: ImpactSurface::Armor,
+                    penetrated: true,
+                    deflection: None,
                 });
                 // Stopped: the body absorbs the full remaining momentum (v_out = 0).
                 if let Some(body) = body {
@@ -963,6 +1051,18 @@ fn integrate_projectiles(
             }
 
             // Perforate: spend the cost (residual speed) and continue along the bent direction.
+            // The struck FACE reads here — the entry point, its outward normal — where the round
+            // punched through. This is the one place "penetrated" is unambiguously true (the round
+            // breached the plate into the interior), so the armor read earns its flame lick. Without
+            // this trigger a clean perforation was visually silent on the struck face.
+            commands.trigger(Impact {
+                position: entry,
+                normal: Vec3::from(normal),
+                caliber: projectile.caliber,
+                surface: ImpactSurface::Armor,
+                penetrated: true,
+                deflection: None,
+            });
             speed = speed_for(projectile.mass, cap - cost);
             // The body keeps the momentum the shell lost crossing it; the shell carries the rest on.
             if let Some(body) = body {
@@ -1180,5 +1280,245 @@ mod tests {
         assert_eq!(pos, origin, "no catch-up leaves the shell at the muzzle");
         assert_eq!(vel, v0, "no catch-up leaves the launch velocity");
         assert_eq!(path, vec![origin], "no catch-up traces only the muzzle");
+    }
+}
+
+/// Physics-backed march tests: an Avian world with a single steel `BallisticVolume` plate, an 88
+/// round marched into it, and every `Impact` captured — so the new armor triggers (ricochet +
+/// perforation) and the surface classification are exercised through the REAL `integrate_projectiles`
+/// resolution, not mocked. Modelled on the sandbox's plate targets (`sandbox::spawn_targets`).
+#[cfg(test)]
+mod march_tests {
+    use std::time::Duration;
+
+    use avian3d::prelude::{Collider, CollisionLayers, PhysicsPlugins, RigidBody};
+    use bevy::prelude::*;
+    use bevy::time::TimeUpdateStrategy;
+
+    use super::*;
+
+    /// One captured impact — the fields the armor read branches on.
+    #[derive(Clone, Copy)]
+    struct Captured {
+        position: Vec3,
+        surface: ImpactSurface,
+        penetrated: bool,
+        deflection: Option<Vec3>,
+    }
+
+    /// The capture sink: every `Impact` the march fires lands here (view-only observer stand-in).
+    #[derive(Resource, Default)]
+    struct ImpactLog(Vec<Captured>);
+
+    fn capture_impact(impact: On<Impact>, mut log: ResMut<ImpactLog>) {
+        log.0.push(Captured {
+            position: impact.position,
+            surface: impact.surface,
+            penetrated: impact.penetrated,
+            deflection: impact.deflection,
+        });
+    }
+
+    /// Steel: reference-mm of armor per metre of material, so a plate's cost ≈ its thickness in mm
+    /// (matches `sandbox::spawn_targets`).
+    const STEEL: f32 = 1000.0;
+
+    /// Build an Avian world with one static steel plate (full extents `size`, centred at `at`, facing
+    /// ±Z) on the `Armor` layer, register the real march + the impact capture, and settle the physics
+    /// so the spatial-query pipeline includes the plate before any shell is marched.
+    fn world_with_plate(size: Vec3, at: Vec3) -> App {
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            // Avian's collider cache reads `AssetEvent<Mesh>`, so the asset system must be present
+            // even though these cuboid colliders carry no mesh handle.
+            AssetPlugin::default(),
+            PhysicsPlugins::default(),
+        ))
+        .init_asset::<Mesh>()
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            16,
+        )))
+        .init_resource::<RetainSpentShells>()
+        .insert_resource(MgShortCircuit(false))
+        .init_resource::<ImpactLog>()
+        .add_observer(capture_impact)
+        // The real march, run every Update (the `march_demo`/`march_real` run-if only selects the
+        // clock; here `Res<Time>` is the virtual clock the manual duration steps).
+        .add_systems(Update, integrate_projectiles);
+
+        // Drive plugin finish/cleanup by hand (a bare `update()` loop skips it) — Avian registers its
+        // diagnostics resources in `Plugin::finish`, and the spatial-query systems require them.
+        while app.plugins_state() == bevy::app::PluginsState::Adding {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        app.finish();
+        app.cleanup();
+
+        app.world_mut().spawn((
+            Transform::from_translation(at),
+            RigidBody::Static,
+            Collider::cuboid(size.x, size.y, size.z),
+            CollisionLayers::new([Layer::Armor], LayerMask::ALL),
+            BallisticVolume {
+                material_factor: STEEL,
+            },
+        ));
+
+        // Settle: let Avian register the static collider and build the spatial-query pipeline before
+        // a shell is marched against it.
+        for _ in 0..8 {
+            app.update();
+        }
+        app
+    }
+
+    /// Spawn an 88 round at `origin` travelling `dir` (unit) at `speed`, then march until an impact is
+    /// captured (or the bound trips). Returns every impact fired.
+    fn fire_and_capture(app: &mut App, origin: Vec3, dir: Vec3, speed: f32) -> Vec<Captured> {
+        app.world_mut().spawn((
+            Projectile {
+                velocity: dir * speed,
+                caliber: 0.088,
+                mass: 10.2,
+                drag_k: drag_k(0.088, 10.2),
+            },
+            ShellPath {
+                points: vec![origin],
+            },
+            PenetrationMarks::default(),
+            SpallMarks::default(),
+            ShellReadout {
+                speed,
+                capability: capability(10.2, speed),
+            },
+            Transform::from_translation(origin).looking_to(dir, Vec3::Y),
+        ));
+        for _ in 0..8 {
+            app.update();
+            if !app.world().resource::<ImpactLog>().0.is_empty() {
+                break;
+            }
+        }
+        app.world().resource::<ImpactLog>().0.clone()
+    }
+
+    /// A head-on 88 into a 50 mm steel plate cleanly perforates: exactly ONE armor impact at the entry
+    /// face, flagged `penetrated` (it breached the plate), with no deflection. This exercises the new
+    /// clean-perforation trigger (slice-1 fired no Impact on a perforated face).
+    #[test]
+    fn head_on_perforation_fires_one_penetrating_armor_impact() {
+        // 50 mm plate: cost ≈ 50 ref-mm, far below the 88's ~263 capability at 800 m/s → perforates.
+        let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.05), Vec3::new(0.0, 2.0, 0.0));
+        let hits = fire_and_capture(&mut app, Vec3::new(0.0, 2.0, 2.0), Vec3::NEG_Z, 800.0);
+        assert_eq!(
+            hits.len(),
+            1,
+            "a clean perforation fires exactly one impact"
+        );
+        let hit = hits[0];
+        assert_eq!(
+            hit.surface,
+            ImpactSurface::Armor,
+            "the struck face is armor"
+        );
+        assert!(
+            hit.penetrated,
+            "a clean perforation is a penetration (flame lick earned)"
+        );
+        assert!(hit.deflection.is_none(), "a perforation does not deflect");
+        // Entry is on the +Z face of the plate (half-thickness 0.025 above centre z=0).
+        assert!(
+            (hit.position.z - 0.025).abs() < 0.05,
+            "the impact reads at the entry face, got z={}",
+            hit.position.z
+        );
+    }
+
+    /// A very oblique 88 (≈75° from the normal) into a 100 mm plate ricochets: exactly ONE armor
+    /// impact at the bounce point, NOT flagged `penetrated` (a bounce ignites no flame lick), carrying
+    /// the outgoing deflected direction for the view's directional spark fan. This exercises the new
+    /// ricochet trigger (slice-1's ricochet branch was visually silent).
+    #[test]
+    fn oblique_ricochet_fires_one_deflecting_non_penetrating_impact() {
+        // 100 mm plate is not overmatched by the 88 (0.088 < 3 × 0.10), so a steep graze ricochets.
+        let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.10), Vec3::new(0.0, 2.0, 0.0));
+        // ≈75° from the +Z face normal: mostly along +X with a shallow −Z bite.
+        let dir = Vec3::new(
+            75.0_f32.to_radians().sin(),
+            0.0,
+            -75.0_f32.to_radians().cos(),
+        )
+        .normalize();
+        let hits = fire_and_capture(&mut app, Vec3::new(-1.0, 2.0, 0.6), dir, 800.0);
+        assert_eq!(hits.len(), 1, "a ricochet fires exactly one impact");
+        let hit = hits[0];
+        assert_eq!(
+            hit.surface,
+            ImpactSurface::Armor,
+            "the struck face is armor"
+        );
+        assert!(!hit.penetrated, "a ricochet bit no steel — no flame lick");
+        let deflect = hit
+            .deflection
+            .expect("a ricochet carries its outgoing direction");
+        // It bounced off the +Z face, so the deflected direction kicks back out along +Z.
+        assert!(
+            deflect.z > 0.0,
+            "the bounce deflects back off the face (+Z), got {deflect:?}"
+        );
+    }
+
+    /// Raise a `FireShell` (88, given `catch_up_ticks`) whose fast-forwarded flight overshoots a plate
+    /// 2 m ahead, so the catch-up already-landed raycast in `on_fire_shell` hits — then return every
+    /// impact the observer fired. Registers `on_fire_shell` with dummy asset resources (a catch-up hit
+    /// returns before the shell scene is ever spawned, so the handles are never dereferenced).
+    fn fire_shell_catch_up(app: &mut App, catch_up_ticks: u32) -> Vec<Captured> {
+        app.insert_resource(ProjectileAssets {
+            scene: Handle::default(),
+        });
+        app.insert_resource(TracerAssets {
+            mesh: Handle::default(),
+            material: Handle::default(),
+        });
+        app.add_observer(on_fire_shell);
+        // Muzzle at z=+2, firing straight down −Z through the plate at the origin at high speed, so a
+        // single-digit catch-up already overshoots it and the segment raycast finds the plate.
+        app.world_mut().trigger(FireShell {
+            origin: Vec3::new(0.0, 2.0, 2.0),
+            direction: Dir3::NEG_Z,
+            speed: 800.0,
+            caliber: 0.088,
+            mass: 10.2,
+            shooter: None,
+            tracer: true,
+            catch_up_ticks,
+        });
+        app.world_mut().flush();
+        app.world().resource::<ImpactLog>().0.clone()
+    }
+
+    /// A FRESH catch-up (≤ STALE_FIRE_TICKS) whose flight fully resolves in the skip still fires the
+    /// cosmetic impact read — the close-range remote-fire case the phantom exists to cover.
+    #[test]
+    fn fresh_catch_up_fires_the_phantom_impact() {
+        let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.05), Vec3::new(0.0, 2.0, 0.0));
+        let hits = fire_shell_catch_up(&mut app, 5);
+        assert_eq!(hits.len(), 1, "a fresh catch-up hit reads once");
+        assert_eq!(hits[0].surface, ImpactSurface::Armor, "the plate is armor");
+    }
+
+    /// A STALE catch-up (> STALE_FIRE_TICKS) whose flight fully resolves in the skip fires NO impact:
+    /// the flash moment is long over, so the phantom would erupt a full splash + ground scar late from
+    /// bare ground. It is suppressed by the same staleness bound the muzzle dressing uses.
+    #[test]
+    fn stale_catch_up_suppresses_the_phantom_impact() {
+        let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.05), Vec3::new(0.0, 2.0, 0.0));
+        let hits = fire_shell_catch_up(&mut app, STALE_FIRE_TICKS + 1);
+        assert!(
+            hits.is_empty(),
+            "a stale catch-up must fire no late phantom impact, got {}",
+            hits.len()
+        );
     }
 }
