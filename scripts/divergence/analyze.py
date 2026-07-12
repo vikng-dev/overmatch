@@ -224,6 +224,15 @@ def sim_field_deltas(c, s):
     Each `wpn` row is [reload_remaining, recoil_offset, recoil_velocity, belt_remaining] — the belt
     count (wpn[3]) gates fire and is what the `hrld` sub-hash flags, so a belt-only divergence must
     show a nonzero `belt` delta rather than a misleading reload/recoil 0.0.
+
+    Since the belt-replication fix (`NetBelts`, `net::protocol::apply_net_belts`) the client's belt is
+    PINNED to the server's newest CONFIRMED value every tick, so during an active MG burst a small
+    `belt` delta (0-1 round) is EXPECTED and BENIGN: it is the pure replication lag (the confirmed
+    value trails the server's live belt by a few ticks), transient-then-zero as fire pauses — NOT the
+    old accumulate-until-swap divergence. A brief `reload` flag at the last-round boundary (the client
+    predicting the final round into a swap a few ticks before the server confirms belt==0) is the same
+    bounded, self-healing correction window. A PERSISTENT belt delta that grows across a burst is the
+    real regression to hunt.
     """
     cf, sf = c.get("simf"), s.get("simf")
     if not cf or not sf:

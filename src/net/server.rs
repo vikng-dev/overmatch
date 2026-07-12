@@ -17,7 +17,8 @@ use lightyear::prelude::server::*;
 use lightyear::prelude::*;
 
 use super::protocol::{
-    FireChannel, FireEvent, LaunchedTurretPose, NetCrew, PROTOCOL_FINGERPRINT, ServoAngles,
+    FireChannel, FireEvent, LaunchedTurretPose, NetBelts, NetCrew, PROTOCOL_FINGERPRINT,
+    ServoAngles,
 };
 use super::{diagnostics, harness, open_gameplay_gate, physics, rig};
 use crate::SimPlugin;
@@ -325,6 +326,9 @@ fn spawn_player_tank(
         // `None` until the turret cooks off (`net::publish_launched_turret_pose` fills it), so
         // the client can show the authoritative toss it does not simulate locally.
         LaunchedTurretPose::default(),
+        // Per-weapon belt supply (`net::publish_net_belts` fills it once the rig's weapons exist),
+        // replicated so the client's belt-fed fire-gating snaps to server truth.
+        NetBelts::default(),
         Replicate::to_clients(NetworkTarget::All),
         // Replicate the ROOT alone. Without this, `Replicate` propagates to every rig child
         // via `ReplicateLike` — the whole sim skeleton (~19 child entities per tank, spawned
@@ -415,6 +419,8 @@ fn spawn_bot_entity(
         NetCrew::default(),
         // Launched-turret pose datum for the bot too (`None` until its turret cooks off).
         LaunchedTurretPose::default(),
+        // Per-weapon belt supply for the bot too (server truth for its belt-fed weapons).
+        NetBelts::default(),
         Replicate::to_clients(NetworkTarget::All),
         DisableReplicateHierarchy,
         // NO `PredictionTarget`, NO `ControlledBy`: no client owns or predicts the bot, so on every
