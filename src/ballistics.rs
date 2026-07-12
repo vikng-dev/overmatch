@@ -353,13 +353,20 @@ struct Held {
 /// The HOLD grace window — ~250 ms at 64 Hz. Because every client shell lives at the predicted
 /// present P, AHEAD of server-now S, it reaches the plate (local tick ≈ bounce tick B) wall-clock
 /// BEFORE the server resolves the bounce; the keyframe then needs one-way latency to arrive. So the
-/// expected hold is ≈ (P − S) + OWL ≈ 4–8 ticks at droplet RTT (P − S ≈ 1 tick under balanced input
-/// delay), and the window must cover that plus send jitter plus one redundancy resend interval (fire
-/// bursts are ~80 ms apart at 12.5 rounds/s) — 16 ticks covers RTT ≲ 200 ms with margin, yet stays
-/// short enough that a shell whose keyframe never comes (a genuinely dropped keyframe, or any
-/// embed/perforation — those emit none) finalizes within a quarter second. Correctness never depends
-/// on the keyframe arriving inside it — past it the shell degrades to honest fail-closed truncation
-/// (the pre-slice behaviour).
+/// expected hold is ≈ (P − S) + OWL ≈ 4–8 ticks at droplet RTT, and the window must cover that plus
+/// send jitter — 16 ticks covers RTT ≲ 200 ms, yet stays short enough that a shell whose verdict never
+/// comes finalizes within a quarter second. Correctness never depends on the keyframe arriving inside
+/// it — past it the shell degrades to the honest quiet dissolve.
+///
+/// **This window, not the retain window, is what bounds the redundancy the shell can actually USE.**
+/// The server re-sends its window every tick (`net::server::broadcast_fire_window`), so a bounce
+/// resolved at server tick B is re-broadcast on B..B+`FIRE_RETAIN_TICKS`; but the shell dissolves once
+/// it has held this long, so only the copies sent in the first `RICOCHET_HOLD_TICKS − ((P − S) + OWL)`
+/// ticks can still be consumed. At droplet RTT that leaves ~8–12 usable copies (a lost bounce needs
+/// every one of them to drop); the slack shrinks as RTT grows, and at RTT ≈ 200 ms it closes — the
+/// first arriving copy is the only one that can land. If high-latency play ever becomes a target, this
+/// is the constant to derive from measured RTT (the arithmetic is `(P − S) + OWL + jitter`), NOT the
+/// retain window.
 const RICOCHET_HOLD_TICKS: u32 = 16;
 
 /// F3 tick-triggered consumption margin. A client shell reaches the plate at local tick ≈ the server
