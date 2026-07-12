@@ -68,6 +68,11 @@ lightyear_core = "0.28"
 # `drop_stranded_input_buffer` in src/net/client.rs guards against.
 lightyear_inputs = "0.28"
 lightyear_inputs_native = "0.28"
+# Measures the ACTUAL input-message wire cost (`input_message_wire_cost`, net/protocol.rs): lightyear
+# serializes with `bincode::serde::encode_into_std_write(.., bincode::config::standard())`
+# (lightyear_serde registry.rs:175), so measuring with the same crate + config is measuring the wire,
+# not a model of it. Already in the tree via lightyear_serde — cargo unifies it, no new build.
+bincode = { version = "2.0.1", features = ["serde"] }
 
 [features]
 default = ["dev_tools"]

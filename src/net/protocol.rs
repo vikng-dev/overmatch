@@ -13,7 +13,7 @@ use lightyear::avian3d::plugin::{AvianReplicationMode, LightyearAvianPlugin};
 // `Predicted`/`Interpolated` are not (the server entity carries both markers itself).
 use lightyear::core::confirmed_history::ConfirmedHistory;
 use lightyear::prelude::client::Remote;
-use lightyear::prelude::input::native::{ActionState, NativeBuffer};
+use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
 // Row fields for the shot-lifecycle recorder (`crate::shot_trace`); evaluated only when it is armed.
@@ -58,7 +58,7 @@ use crate::tank::{
 /// changes** (a replicated component added/removed/reordered/renamed, a message or channel changed,
 /// the input type changed). The `wire_surface_is_pinned` tripwire fails until you do, which
 /// is the point: it makes a silent wire-breaking change impossible.
-pub const PROTOCOL_REV: u32 = 4;
+pub const PROTOCOL_REV: u32 = 5;
 
 /// The protocol fingerprint both ends bake into their netcode `protocol_id` (`Authentication::Manual`
 /// on the client, `NetcodeConfig` on the server). Derived at COMPILE TIME from [`PROTOCOL_REV`] + the
@@ -1142,7 +1142,7 @@ const WIRE_SURFACE_HASH: u64 = 0xc977_9452_059a_6423;
 /// changes; the `wire_types_are_pinned` tripwire prints the new value. See the block above for the
 /// coverage model. `#[cfg(test)]` for the same reason as `WIRE_SURFACE`.
 #[cfg(test)]
-const WIRE_TYPES_HASH: u64 = 0xa7b9_be0a_9624_2fa5;
+const WIRE_TYPES_HASH: u64 = 0xfb57_e5aa_ccd8_3d53;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -1375,109 +1375,112 @@ fn strip_confirmed_history<C: Component + Clone>(
 /// client module); remote (interpolated) tanks never carry one. `TankCommand` itself comes from
 /// `command::core_plugin`'s `attach_command` observer (`On<Add, Tank>`).
 ///
-/// **Edges are only valid on a tick a real input actually arrived for.** lightyear extrapolates a
-/// starved input stream by holding the last `ActionState` forever: the server's
-/// `update_action_state` calls `InputBuffer::get_predict(tick)`, which returns `get_last()` once
-/// `tick` is past the buffered range (`lightyear_inputs` `input_buffer.rs:316` / `server.rs:707`,
-/// "equivalent to considering that the player will keep playing the last action"). Hold-last is
-/// CORRECT for `TankCommand`'s MOVEMENT levels (`throttle`/`steer`) and absolutes (`aim`/`range`) —
-/// a starved stream keeping the last drive and lay is the right guess. It is WRONG for the edges
-/// (`fire_primary`/`crew_swap`) AND for the automatic-fire level (`fire_secondary`), for the same
-/// underlying reason: both commit a DISCRETE consequence off a tick the server never received. A held
-/// edge re-latches every tick, so `consume_edges` (`command.rs`) can never win — one unrequested shot
-/// per reload cycle (`shooting::fire` is reload-gated) and a crew swap that re-arms itself forever
-/// (`damage::tick_swaps` drops `PendingSwap` on completion, and the still-held `Start` edge makes
-/// `apply_crew_swap_commands` insert a fresh one every ~`SWAP_SECONDS`). And a held `fire_secondary`
-/// keeps an `Automatic` weapon cycling for the whole starvation window: a lost RELEASE transition
-/// after a burst fired extra server rounds the player never asked for (ammo + damage). So on a
-/// hold-last tick this bridge clears the edges AND fails `fire_secondary` closed — never committing
-/// fire on extrapolated input (Overwatch/Rocket League/GGPO firing canon).
+/// # A CONSUMABLE commits only on an ATTESTED tick
 ///
-/// So consult the entity's own `InputBuffer` for the tick `FixedUpdate` is stepping
-/// (`LocalTimeline::tick()`). The `ActionState` is a hold-last extrapolation — and its edges must be
-/// dropped — precisely when the buffer HAS data but none for this tick: `get(tick).is_none()` AND
-/// `get_last().is_some()`. `get` is the EXACT, non-extrapolating lookup (`None` past the buffered
-/// range, resolving `Compressed::SameAsPrecedent` back to the value the client actually sent);
-/// `get_last` is `Some` iff the buffer holds ANY entry (vendored `lightyear_inputs`
-/// input_buffer.rs:339). Only when both hold is the server's `update_action_state` holding the last
-/// input forever. Copy the whole command otherwise, edges included. The four cases:
-/// - **Client own tank, forward tick:** buffer non-empty, `get(tick)` `Some` → not held-last → edge
-///   passes. In the PRE-SYNC window (before `InputTimeline` syncs) the buffer is absent/empty, so
-///   `held_last` is `false` and a genuine click passes — the case the coarser `get(tick).is_some()`
-///   rule wrongly dropped.
+/// The whole struct is copied — matching `ActionState`'s "absolute snapshot per tick" contract —
+/// EXCEPT that the CONSUMABLES (`TankCommand::fail_consumables_closed`: the edges, plus the
+/// automatic-fire level) are failed closed on any tick the command cannot attest it was authored
+/// for. The test is a POSITIVE ATTESTATION, not a detector:
+///
+/// ```ignore
+/// if next.for_tick != tick.0 { next.fail_consumables_closed(); }
+/// ```
+///
+/// `TankCommand::for_tick` is stamped ONCE, on the client (`net::client`'s `stamp_input_tick`), with
+/// the exact tick lightyear's `buffer_action_state` files the command under (`local_tick +
+/// input_delay`), and then rides the input buffer, the wire, the server's buffer and rollback replay
+/// unmodified. So `for_tick == tick` iff the player really authored THIS command FOR THIS tick.
+///
+/// **Why a positive attestation and not a detector.** A value handed back by lightyear's
+/// `InputBuffer` for tick T is not necessarily an input the player gave for tick T. It can be:
+///
+/// 1. **Hold-last extrapolation.** Past the buffered range, the server's `update_action_state` calls
+///    `InputBuffer::get_predict(tick)`, which returns `get_last()` (`lightyear_inputs`
+///    input_buffer.rs:316 / server.rs:707) — "the player will keep playing the last action".
+/// 2. **A `SameAsPrecedent` gap-fill.** `InputBuffer::set_raw` fills any tick the writer SKIPS with
+///    `Compressed::SameAsPrecedent` (input_buffer.rs:212), a fabricated repeat of the last command
+///    on a tick nobody authored. The client skips a tick exactly when its `input_delay` GROWS.
+/// 3. **A stale entry the correction could not overwrite.** When the client's `input_delay` SHRINKS,
+///    two local ticks author the SAME buffer tick; the client fixes its own entry, but
+///    `update_buffer` refuses to write any tick `<= last_remote_tick` (input_message.rs:195), so the
+///    SERVER keeps the superseded value forever.
+/// 4. **An `Absent`-anchored freeze.** An `Absent` entry in the server's buffer makes `get` return
+///    `None` for the whole `SameAsPrecedent` tail behind it, `get_predict` return `None` (so
+///    `update_action_state` SKIPS the apply and the server's `ActionState` FREEZES at its last
+///    value), and — because `get_last` recurses back through `SameAsPrecedent` and DEAD-ENDS on the
+///    `Absent` — `get_last()` return `None` as well (input_buffer.rs:339/305). Upstream: lightyear
+///    issue #1559, open. See `.agents/scratch/upstream-reports/lightyear-input-buffer-provenance.md`.
+///
+/// Every one of those returns an ordinary `Some(command)`, and cases 2/3/4 are invisible to the
+/// buffer's SHAPE — a fabricated gap-fill and a genuinely HELD trigger are the byte-identical
+/// `Compressed::SameAsPrecedent`. The detector this replaced (`get(tick).is_none() &&
+/// get_last().is_some()`, commit 2ea6cf5) saw only case 1, and case 4 defeats even that (its second
+/// conjunct goes FALSE precisely when the freeze bites). `for_tick` sees all four, and — the point —
+/// it sees the NEXT one too, because it never enumerates them: it asks the command to prove itself.
+/// `tests/net_fire_release.rs` drives all four over the real lightyear pipeline.
+///
+/// **Levels and absolutes are deliberately NOT gated.** Hold-last is CORRECT for `throttle`/`steer`
+/// and `aim`/`range`: a starved stream keeping the last drive and lay is the right guess, and none
+/// of it commits anything that cannot be taken back. Only the consumables spend ammo, deal damage,
+/// or change an entity's lifetime — see `TankCommand::fail_consumables_closed` for why that rule is
+/// OURS rather than practitioner canon.
+///
+/// # The four cases, per end
+///
+/// - **Client own tank, forward tick:** `stamp_input_tick` wrote `for_tick = tick + input_delay`
+///   this tick and `buffer_action_state` files it there; `input_delay` ticks later that tick comes
+///   round and `for_tick == tick`. Attested → the edge passes. In the PRE-SYNC window
+///   `input_delay()` is 0, so `for_tick == tick` immediately and a genuine click still passes.
 /// - **Client own tank, rollback replay:** lightyear restores the historical `ActionState` per
-///   replayed tick, and the buffer retains `max_rollback_ticks + 1` of history (`lightyear_inputs`
-///   `client.rs`), so `get(replayed_tick)` is `Some` → the own fire edge re-fires during replay.
-/// - **Server tank, no input message yet:** buffer absent/empty → not held-last → passes, and the
-///   `ActionState` is `default()` anyway, so there is no edge to carry. Harmless.
-/// - **Server tank, starved:** buffer non-empty, `get(tick)` `None`, `get_last` `Some` → held-last →
-///   edges cleared AND `fire_secondary` failed closed. The original starvation re-latch (`701d0a7`)
-///   stays fixed, and the automatic-fire level no longer commits rounds on extrapolated ticks.
+///   replayed tick, stamp and all, and `LocalTimeline::tick()` IS the replayed tick — so the own
+///   fire edge re-fires during replay exactly as it must.
+/// - **Server tank, no input yet:** `ActionState::default()` carries `for_tick == 0` ≠ the server's
+///   tick → failed closed. There is no edge to carry anyway. Harmless.
+/// - **Server tank, starved / fabricated / stale / frozen:** the value's stamp names a DIFFERENT
+///   tick → consumables failed closed. The starvation re-latch (`701d0a7`) and the MG release leak
+///   both stay fixed, and so does every variant of them we have not met yet.
 ///
-/// This is shared code mounted on BOTH ends. On the server it fixes the starvation above; on the
-/// client `LocalTimeline::tick()` is the REPLAYED tick during rollback resim (incremented in
-/// `FixedFirst` even inside rollback).
+/// **Known non-coverage (honest).** Case 3 (`input_delay` SHRINKS) strands a value that IS correctly
+/// stamped for its own tick — the player authored it for that tick, then revised it, and the server
+/// never got the revision. No stamp can see that; the revision simply never arrived. That is closed
+/// upstream of here, by pinning `input_delay` CONSTANT (`net::client`'s
+/// `SHIPPING_INPUT_DELAY_TICKS`), which makes the client's write tick advance by exactly +1 and so
+/// makes cases 2 and 3 impossible to construct. The two fixes are complementary, not redundant: the
+/// pin removes the seeds it can, the attestation refuses to commit on any seed that survives.
 ///
 /// **Loss trade (deliberate, NON-FIX).** A fire edge whose input arrives AFTER its tick was
 /// simulated is dropped, not fired late — firing an edge on a tick it was not issued for is the bug
 /// (the shot leaves at the wrong muzzle pose and diverges from what the client predicted), so past
-/// ticks are dropped in every netcode. lightyear's per-message input redundancy normally prevents
-/// it: an `InputMessage` carries "the inputs for the last N ticks before T" (vendored
-/// `lightyear_inputs` client.rs module doc + `num_ticks *= packet_redundancy`, client.rs:686), so an
-/// isolated packet loss does NOT lose the edge — a later message re-carries it and it can still land
-/// before the server simulates that tick. Only under loss deep enough to outlast that redundancy
-/// window is a fire edge dropped rather than fired late; the client may then have predicted a shot
-/// the server never fires, leaving its `reload_remaining` (root-resident in `TankSim`, NOT
-/// replicated) disagreeing with the server's until the next shot reconciles it. That is inherent to
-/// predicting fire on a lossy input stream, not introduced by the edge-clearing rule.
+/// ticks are dropped in every netcode. lightyear's per-message redundancy normally prevents it: an
+/// `InputMessage` carries the inputs for the last N ticks before T (`num_ticks *= packet_redundancy`,
+/// client.rs:686), so an isolated packet loss does NOT lose the edge. Only under loss deep enough to
+/// outlast that window is an edge dropped rather than fired late; the client may then have predicted
+/// a shot the server never fires, leaving its `reload_remaining` (root-resident in `TankSim`, NOT
+/// replicated) disagreeing until the next shot reconciles it. Inherent to predicting fire on a lossy
+/// input stream.
 ///
-/// **Load-bearing invariant.** `get` resolving `SameAsPrecedent` means two consecutive buffered
-/// `fire_primary: true`s would BOTH bridge as edges and fire twice. That is fine because it can only
-/// happen for two DISTINCT clicks on back-to-back ticks (two intended shots): `gather_commands`
-/// latches the click from `just_pressed` (true for one frame per physical press) and `consume_edges`
-/// clears it before the next `feed_action_state`, so a single held mouse button produces exactly ONE
-/// buffered `true`. If `gather_commands` is ever changed to latch from `pressed`, a hold would put a
-/// run of `true`s in the buffer and this bridge would have to dedupe consecutive edges as well.
+/// **Load-bearing invariant.** Two consecutive buffered `fire_primary: true`s both bridge as edges
+/// and fire twice. That is fine because it can only happen for two DISTINCT clicks on back-to-back
+/// ticks (two intended shots): `gather_commands` latches the click from `just_pressed` (true for one
+/// frame per physical press) and `consume_edges` clears it before the next `feed_action_state`, so a
+/// single held mouse button produces exactly ONE buffered `true`. If `gather_commands` is ever
+/// changed to latch from `pressed`, a hold would put a run of `true`s in the buffer and this bridge
+/// would have to dedupe consecutive edges as well.
 fn bridge_action_state_to_tank_command(
     timeline: Res<LocalTimeline>,
-    mut tanks: Query<(
-        &ActionState<TankCommand>,
-        Option<&NativeBuffer<TankCommand>>,
-        &mut TankCommand,
-    )>,
+    mut tanks: Query<(&ActionState<TankCommand>, &mut TankCommand)>,
 ) {
     let tick = timeline.tick();
-    for (action, buffer, mut command) in &mut tanks {
+    for (action, mut command) in &mut tanks {
         // Whole-struct copy (matches `ActionState`'s "absolute snapshot per tick" contract) …
         let mut next = action.0;
-        // … but a HOLD-LAST EXTRAPOLATION must not carry an edge — nor commit AUTOMATIC FIRE. The
-        // `ActionState` is extrapolated exactly when the buffer HAS data but none for this tick
-        // (`get(tick).is_none()` while `get_last().is_some()`) — that is when the server's
-        // `update_action_state` holds the last input forever (`get_predict` → `get_last`). An ABSENT
-        // or EMPTY buffer is NOT extrapolating (nothing is being held): on the client's own tank the
-        // `ActionState` was authored THIS tick by `feed_action_state`, so a genuine click in the
-        // pre-sync join/spawn window must pass. `get`, not `get_predict`, is the exact
-        // non-extrapolating lookup. See the doc for the full per-case argument (`get_last` semantics:
-        // vendored `lightyear_inputs` input_buffer.rs:339).
-        let held_last = buffer.is_some_and(|b| b.get(tick).is_none() && b.get_last().is_some());
-        if held_last {
-            next.clear_edges();
-            // FAIL CLOSED on the automatic-fire LEVEL. Hold-last is correct for the *movement* levels
-            // (`throttle`/`steer`) and the absolutes (`aim`/`range`) — a starved stream keeping the
-            // last drive/lay is the right guess. But `fire_secondary` gates an `Automatic` weapon
-            // (`shooting::fire`), so holding it commits a DISCRETE, ammo-and-damage consequence off a
-            // tick the server never actually received — the firing-netcode invariant "never commit a
-            // discrete action on extrapolated input" (Overwatch/Rocket League/GGPO canon). Left held,
-            // a lost RELEASE transition made the server keep cycling the MG for the whole starvation
-            // window: extra server rounds after the player let go (the owner's HUD belt then snapped
-            // down by them via `NetBelts`, and the target took the hits). Clearing it here is the
-            // level counterpart of the edge clear above — fail closed, so an unconfirmed trigger fires
-            // nothing. NOT folded into `clear_edges`: that method is the EDGE set (`consume_edges`
-            // calls it every tick and would kill legitimate sustained fire); this is a level, cleared
-            // ONLY on the extrapolated tick, ONLY here. The client's own tank never reaches this
-            // branch (its buffer always holds the current tick, forward and rollback-replay alike), so
-            // this only ever fires-closed the SERVER under genuine input starvation.
-            next.fire_secondary = false;
+        // … but a CONSUMABLE commits ONLY on a tick this command can ATTEST it was authored for.
+        // `for_tick` was stamped by `net::client`'s `stamp_input_tick` with the tick lightyear
+        // files the command under; anything lightyear inherited, repeated, fabricated or froze
+        // carries some OTHER tick's stamp. Fail closed — never a detector, always a proof. See the
+        // doc above for the four ways an unattested value reaches this line.
+        if next.for_tick != tick.0 {
+            next.fail_consumables_closed();
         }
         *command = next;
     }
@@ -1938,6 +1941,14 @@ mod tests {
         tl
     }
 
+    /// A command the player authored FOR `tick` — the attested case.
+    fn authored_for(tick: i32, cmd: TankCommand) -> TankCommand {
+        TankCommand {
+            for_tick: Tick(tick as u32).0,
+            ..cmd
+        }
+    }
+
     fn fire_click() -> TankCommand {
         TankCommand {
             fire_primary: true,
@@ -1945,26 +1956,24 @@ mod tests {
         }
     }
 
-    /// STARVED tick: the last real input is old, the current tick is past the buffer end, and the
-    /// `ActionState` holds that last input (exactly what the server's `get_predict` produces). The
-    /// bridge must NOT re-latch the stale fire edge — not once, and not on any subsequent tick.
+    /// UNATTESTED tick: the `ActionState` carries a command the player authored for tick 5, and the
+    /// sim is stepping tick 10. This is what EVERY way lightyear can hand back a value that is not
+    /// this tick's input looks like at the seam — hold-last extrapolation, a `SameAsPrecedent`
+    /// gap-fill, a stale un-overwritable entry, or an `Absent`-frozen `ActionState`. The bridge must
+    /// NOT re-latch the stale fire edge — not once, and not on any subsequent tick.
     #[test]
-    fn starved_tick_does_not_refire_held_edge() {
+    fn unattested_tick_does_not_refire_held_edge() {
         let mut world = World::new();
         world.insert_resource(timeline_at(10));
-
-        // A single real input at tick 5 carried a click; nothing has arrived since — tick 10 is
-        // starved. `buffer.get(10)` is therefore `None` (past the buffered range).
-        let mut buffer = NativeBuffer::<TankCommand>::default();
-        buffer.set(Tick(5), ActionState(fire_click()));
-        // The held-last `ActionState` the server's `update_action_state` leaves behind on a starved
-        // tick (`get_predict(10) == get_last() ==` the tick-5 click).
         let entity = world
-            .spawn((ActionState(fire_click()), buffer, TankCommand::default()))
+            .spawn((
+                ActionState(authored_for(5, fire_click())),
+                TankCommand::default(),
+            ))
             .id();
 
-        // Three starved ticks in a row, each clearing the command first (as `consume_edges` would):
-        // the bridge is the only thing that could re-latch the edge, and it must never do so.
+        // Three unattested ticks in a row, each clearing the command first (as `consume_edges`
+        // would): the bridge is the only thing that could re-latch the edge, and it must never.
         for _ in 0..3 {
             world.get_mut::<TankCommand>(entity).unwrap().fire_primary = false;
             world
@@ -1972,34 +1981,35 @@ mod tests {
                 .unwrap();
             assert!(
                 !world.get::<TankCommand>(entity).unwrap().fire_primary,
-                "a held-last fire edge must not bridge on a starved tick",
+                "an unattested fire edge must not bridge",
             );
         }
     }
 
-    /// A starved tick carries the MOVEMENT levels and ABSOLUTES through (hold-last is correct for
-    /// those), clears both EDGES, and FAILS THE AUTOMATIC-FIRE LEVEL CLOSED — the last of these is the
-    /// fix for the "extra shot after release" report: a held `fire_secondary` off an extrapolated tick
-    /// commits an ammo/damage consequence the server never received, so it must not cycle the MG.
+    /// An unattested tick carries the MOVEMENT levels and ABSOLUTES through (hold-last is CORRECT
+    /// for those — a starved stream keeping the last drive and lay is the right guess, and neither
+    /// commits anything irreversible), and fails every CONSUMABLE closed.
     #[test]
-    fn starved_tick_keeps_movement_levels_fails_fire_closed_clears_edges() {
+    fn unattested_tick_keeps_movement_levels_fails_consumables_closed() {
         let mut world = World::new();
         world.insert_resource(timeline_at(10));
 
-        let held = TankCommand {
-            throttle: 0.7,
-            steer: -0.3,
-            fire_secondary: true,
-            aim: Some(Vec3::new(1.0, 2.0, 3.0)),
-            range: 850.0,
-            fire_primary: true,
-            crew_swap: Some(CrewSwap::Start(CrewStation::Gunner, CrewStation::Loader)),
-            respawn: true,
-        };
-        let mut buffer = NativeBuffer::<TankCommand>::default();
-        buffer.set(Tick(5), ActionState(held));
+        let held = authored_for(
+            5,
+            TankCommand {
+                throttle: 0.7,
+                steer: -0.3,
+                fire_secondary: true,
+                aim: Some(Vec3::new(1.0, 2.0, 3.0)),
+                range: 850.0,
+                fire_primary: true,
+                crew_swap: Some(CrewSwap::Start(CrewStation::Gunner, CrewStation::Loader)),
+                respawn: true,
+                for_tick: 0,
+            },
+        );
         let entity = world
-            .spawn((ActionState(held), buffer, TankCommand::default()))
+            .spawn((ActionState(held), TankCommand::default()))
             .id();
 
         world
@@ -2009,43 +2019,41 @@ mod tests {
         let cmd = *world.get::<TankCommand>(entity).unwrap();
         assert_eq!(cmd.throttle, 0.7, "throttle level held through starvation");
         assert_eq!(cmd.steer, -0.3, "steer level held through starvation");
-        assert!(
-            !cmd.fire_secondary,
-            "automatic-fire level fails closed on a starved tick — never fire on extrapolated input",
-        );
         assert_eq!(cmd.aim, Some(Vec3::new(1.0, 2.0, 3.0)), "aim absolute held");
         assert_eq!(cmd.range, 850.0, "range absolute held");
-        assert!(!cmd.fire_primary, "fire edge cleared on a starved tick");
+        // …and every consumable fails closed.
+        assert!(
+            !cmd.fire_secondary,
+            "automatic-fire level fails closed on an unattested tick",
+        );
+        assert!(!cmd.fire_primary, "fire edge cleared on an unattested tick");
         assert_eq!(
             cmd.crew_swap, None,
-            "crew-swap edge cleared on a starved tick"
+            "crew-swap edge cleared on an unattested tick"
         );
-        assert!(!cmd.respawn, "respawn edge cleared on a starved tick");
+        assert!(!cmd.respawn, "respawn edge cleared on an unattested tick");
     }
 
-    /// The "extra shot after release" report, at the seam: once the release is lost and the stream
-    /// starves, the server holds the last `ActionState` (trigger still down) for the WHOLE window. The
-    /// bridge must fail `fire_secondary` closed on EVERY such tick, so the count of ticks that would
-    /// cycle the MG after release is zero — not merely reduced. Mirrors `starved_tick_does_not_refire_held_edge`
-    /// for the level.
+    /// The "extra shot after release" report, at the seam: however the release went missing, the
+    /// server ends up presenting a trigger-down command stamped for an OLD tick. The bridge must
+    /// fail `fire_secondary` closed on EVERY such tick, so the count of ticks that could cycle the
+    /// MG after release is ZERO — not merely reduced.
     #[test]
-    fn starved_held_trigger_fires_no_tick_for_the_whole_window() {
+    fn unattested_held_trigger_fires_no_tick_for_the_whole_window() {
         let mut world = World::new();
         world.insert_resource(timeline_at(20));
 
-        // The last real input (tick 5) had the trigger held; nothing since — every tick from here is
-        // starved and the held-last `ActionState` keeps the trigger down.
-        let held = TankCommand {
-            fire_secondary: true,
-            ..default()
-        };
-        let mut buffer = NativeBuffer::<TankCommand>::default();
-        buffer.set(Tick(5), ActionState(held));
+        let held = authored_for(
+            5,
+            TankCommand {
+                fire_secondary: true,
+                ..default()
+            },
+        );
         let entity = world
-            .spawn((ActionState(held), buffer, TankCommand::default()))
+            .spawn((ActionState(held), TankCommand::default()))
             .id();
 
-        // Ten consecutive starved ticks: not one may present a held trigger to `shooting::fire`.
         let mut fired_ticks = 0;
         for _ in 0..10 {
             world
@@ -2057,28 +2065,69 @@ mod tests {
         }
         assert_eq!(
             fired_ticks, 0,
-            "a held trigger held-last through starvation must fire zero extra rounds after release",
+            "a trigger held on unattested ticks must fire zero extra rounds after release",
         );
     }
 
-    /// The counterpart the fail-closed gate must NOT break: a tick with a REAL buffered input holds
-    /// `fire_secondary` through, so a genuinely-held trigger keeps the `Automatic` cycling. Only the
-    /// EXTRAPOLATED tick fails closed; a confirmed held trigger fires exactly as the player asked.
+    /// THE 88 COROLLARY. An `Absent`-anchored server buffer FREEZES `ActionState` outright:
+    /// `get_predict` returns `None`, so lightyear's `update_action_state` SKIPS the apply and the
+    /// component keeps whatever it last held — forever, across an unbounded number of ticks. If a
+    /// `fire_primary: true` is what it froze on, the edge is re-presented to the sim EVERY tick,
+    /// `consume_edges` clears it every tick, and `shooting::fire` (reload-gated) lands ONE
+    /// unrequested 88 round per reload cycle, indefinitely. The old `held_last` detector could not
+    /// see this at all: `get_last()` recurses back through `SameAsPrecedent` and DEAD-ENDS on the
+    /// `Absent`, returning `None`, so its second conjunct was FALSE precisely when the freeze bit.
+    ///
+    /// Attestation does not care WHY the value is stale. The frozen command names an old tick; the
+    /// gate refuses it, every tick, for as long as the freeze lasts.
     #[test]
-    fn confirmed_tick_keeps_fire_secondary_for_sustained_fire() {
+    fn frozen_action_state_cannot_relatch_the_88() {
+        let mut world = World::new();
+        let entity = world
+            .spawn((
+                // Frozen on a click authored for tick 5 and never updated since.
+                ActionState(authored_for(5, fire_click())),
+                TankCommand::default(),
+            ))
+            .id();
+
+        // Four seconds of ticks at 64 Hz — more than a full 88 reload cycle, so a single re-latch
+        // would be a live round downrange.
+        let mut latched = 0;
+        for tick in 6..262 {
+            world.insert_resource(timeline_at(tick));
+            world.get_mut::<TankCommand>(entity).unwrap().clear_edges();
+            world
+                .run_system_once(bridge_action_state_to_tank_command)
+                .unwrap();
+            if world.get::<TankCommand>(entity).unwrap().fire_primary {
+                latched += 1;
+            }
+        }
+        assert_eq!(
+            latched, 0,
+            "a frozen fire edge must never re-latch — that is an unrequested 88 round per reload",
+        );
+    }
+
+    /// The counterpart the gate must NOT break: a tick whose command ATTESTS it was authored for
+    /// this very tick holds `fire_secondary` through, so a genuinely-held trigger keeps the
+    /// `Automatic` cycling. Only unattested fire fails closed; confirmed fire is exactly what the
+    /// player asked for.
+    #[test]
+    fn attested_tick_keeps_fire_secondary_for_sustained_fire() {
         let mut world = World::new();
         world.insert_resource(timeline_at(8));
 
-        let held = TankCommand {
-            fire_secondary: true,
-            ..default()
-        };
-        // A real input FOR tick 8 (the tick being simulated): `get(8)` is `Some`, so this is not a
-        // hold-last extrapolation and the held trigger must pass.
-        let mut buffer = NativeBuffer::<TankCommand>::default();
-        buffer.set(Tick(8), ActionState(held));
+        let held = authored_for(
+            8,
+            TankCommand {
+                fire_secondary: true,
+                ..default()
+            },
+        );
         let entity = world
-            .spawn((ActionState(held), buffer, TankCommand::default()))
+            .spawn((ActionState(held), TankCommand::default()))
             .id();
 
         world
@@ -2087,23 +2136,23 @@ mod tests {
 
         assert!(
             world.get::<TankCommand>(entity).unwrap().fire_secondary,
-            "a confirmed held trigger must bridge through — sustained fire is not extrapolated fire",
+            "an attested held trigger must bridge through — sustained fire is not fabricated fire",
         );
     }
 
-    /// A tick with a REAL buffered input (the non-starved case, and every rollback-replayed tick of
-    /// the client's own tank — its buffer retains `max_rollback_ticks + 1` of history) bridges the
-    /// whole command, edges included: the fire edge must re-fire.
+    /// An attested tick bridges the whole command, EDGES included. This is the non-starved case and
+    /// every rollback-replayed tick of the client's own tank: lightyear restores the historical
+    /// `ActionState` (stamp and all) per replayed tick, and `LocalTimeline::tick()` IS the replayed
+    /// tick — so the own fire edge must re-fire during replay.
     #[test]
-    fn real_buffered_tick_fires_edge() {
+    fn attested_tick_fires_edge() {
         let mut world = World::new();
         world.insert_resource(timeline_at(8));
-
-        // A real input for tick 8 (the replayed tick) carrying the click.
-        let mut buffer = NativeBuffer::<TankCommand>::default();
-        buffer.set(Tick(8), ActionState(fire_click()));
         let entity = world
-            .spawn((ActionState(fire_click()), buffer, TankCommand::default()))
+            .spawn((
+                ActionState(authored_for(8, fire_click())),
+                TankCommand::default(),
+            ))
             .id();
 
         world
@@ -2112,20 +2161,23 @@ mod tests {
 
         assert!(
             world.get::<TankCommand>(entity).unwrap().fire_primary,
-            "a real buffered edge at this tick must bridge through (own-tank rollback re-fire)",
+            "an attested edge must bridge through (own-tank rollback re-fire)",
         );
     }
 
-    /// A MISSING `InputBuffer` is NOT a hold-last extrapolation — nothing is being held. In the
-    /// pre-sync join/spawn window the client's own tank carries `ActionState` (authored THIS tick by
-    /// `feed_action_state`) before its `InputTimeline` has produced a buffer, so a genuine click must
-    /// pass. (The coarser `get(tick).is_some()` rule wrongly dropped it — the bug FIX 1 targets.)
+    /// The PRE-SYNC window: before the `InputTimeline` syncs, `input_delay()` is 0, so
+    /// `stamp_input_tick` stamps the CURRENT tick and a genuine click attests immediately — even
+    /// though no `InputBuffer` exists yet. (The bridge no longer reads the buffer at all; this pins
+    /// that a joining player's first click is not swallowed.)
     #[test]
-    fn missing_buffer_passes_edge() {
+    fn pre_sync_click_attests_and_passes() {
         let mut world = World::new();
         world.insert_resource(timeline_at(3));
         let entity = world
-            .spawn((ActionState(fire_click()), TankCommand::default()))
+            .spawn((
+                ActionState(authored_for(3, fire_click())),
+                TankCommand::default(),
+            ))
             .id();
 
         world
@@ -2134,21 +2186,26 @@ mod tests {
 
         assert!(
             world.get::<TankCommand>(entity).unwrap().fire_primary,
-            "a missing InputBuffer is not hold-last extrapolation — a real edge must pass",
+            "a pre-sync click is authored for the current tick — it must pass",
         );
     }
 
-    /// A present-but-EMPTY buffer is likewise not extrapolating: `get_last()` is `None` (no entry to
-    /// hold), so `held_last` is false and the edge passes. Distinguishes "no data yet" (pass) from
-    /// "data, but none for this tick" (the starved case above, which clears).
+    /// The server's own `ActionState::default()` before ANY input message lands carries
+    /// `for_tick == 0`, which attests to nothing once the server's tick has moved — so it fails
+    /// closed. (There is no edge in a default command anyway; this pins that the default is not
+    /// accidentally attested at tick 0 forever.)
     #[test]
-    fn empty_buffer_passes_edge() {
+    fn default_action_state_is_unattested() {
         let mut world = World::new();
-        world.insert_resource(timeline_at(3));
-        // An `InputBuffer` component present but with no entries — `get_last()` is `None`.
-        let buffer = NativeBuffer::<TankCommand>::default();
+        world.insert_resource(timeline_at(7));
         let entity = world
-            .spawn((ActionState(fire_click()), buffer, TankCommand::default()))
+            .spawn((
+                ActionState(TankCommand {
+                    fire_secondary: true,
+                    ..default()
+                }),
+                TankCommand::default(),
+            ))
             .id();
 
         world
@@ -2156,8 +2213,124 @@ mod tests {
             .unwrap();
 
         assert!(
-            world.get::<TankCommand>(entity).unwrap().fire_primary,
-            "an empty InputBuffer has nothing to hold-last — a real edge must pass",
+            !world.get::<TankCommand>(entity).unwrap().fire_secondary,
+            "an unstamped (default) command attests nothing — fail closed",
+        );
+    }
+
+    /// **The `for_tick` wire cost, measured — not modelled.** lightyear serializes an
+    /// `InputMessage` with `bincode::serde::encode_into_std_write(.., config::standard())`
+    /// (`lightyear_serde` registry.rs:175), so this encodes a real `NativeStateSequence<TankCommand>`
+    /// — the exact `states` payload of one input message — with the exact same crate and config.
+    ///
+    /// The honest downside of provenance: `for_tick` changes EVERY tick, so it defeats
+    /// `Compressed::SameAsPrecedent` run-compression. A message that used to be one full command plus
+    /// four one-byte "same as the last one" markers becomes five full commands
+    /// (`packet_redundancy: 5`).
+    ///
+    /// This prints both regimes so the cost is on the record rather than assumed. It asserts only a
+    /// CEILING, so it fails loudly if `TankCommand` ever grows fat enough to make the input stream a
+    /// real bandwidth problem — at which point the mitigation is to shrink the ATTESTED payload (a
+    /// `u8` tick-LSB, or a fire-fields-only sub-struct carrying the stamp), not to drop attestation.
+    ///
+    /// Context for the number: this is UPSTREAM traffic only (client → server), one message per
+    /// frame. The comparison is also somewhat theoretical — `aim` is an `Option<Vec3>` of a
+    /// HULL-LOCAL point, so it changes every tick whenever the player is aiming OR the hull is
+    /// moving OR the turret is slewing. Run-compression was already dead in all of those; it only
+    /// ever paid off for a tank sitting perfectly still doing nothing, which is exactly when nobody
+    /// cares about bandwidth.
+    #[test]
+    fn input_message_wire_cost() {
+        use lightyear::prelude::input::native::NativeStateSequence;
+
+        const REDUNDANCY: u32 = 5; // lightyear `InputConfig::packet_redundancy` default
+        const TICK_HZ: usize = 64;
+
+        // `ActionStateSequence` is the trait carrying `build_from_input_buffer`.
+        use lightyear::prelude::input::native::NativeBuffer;
+        use lightyear_inputs::input_message::ActionStateSequence;
+
+        fn encoded_len(buffer: &NativeBuffer<TankCommand>, end: Tick) -> usize {
+            let seq = NativeStateSequence::<TankCommand>::build_from_input_buffer(
+                buffer, REDUNDANCY, end,
+            )
+            .expect("buffer has entries");
+            bincode::serde::encode_to_vec(&seq, bincode::config::standard())
+                .expect("bincode encodes the sequence")
+                .len()
+        }
+
+        // A player holding the trigger, perfectly still: the ONLY thing that changes tick to tick is
+        // the stamp. This is the worst case for compression, i.e. the best case for the old wire.
+        let held = |tick: i32, stamped: bool| {
+            ActionState(TankCommand {
+                throttle: 1.0,
+                fire_secondary: true,
+                aim: Some(Vec3::new(0.0, 1.5, -40.0)),
+                range: 800.0,
+                for_tick: if stamped { Tick(tick as u32).0 } else { 0 },
+                ..default()
+            })
+        };
+
+        let mut unstamped = NativeBuffer::<TankCommand>::default();
+        let mut stamped = NativeBuffer::<TankCommand>::default();
+        // REALISTIC tick values: bincode's `standard()` config VARINT-encodes, so a `for_tick` of
+        // 100 costs one byte while a real mid-session tick (100_000 ≈ 26 min in at 64 Hz) costs
+        // several. Measuring at tick 100 would flatter the stamp.
+        const T0: i32 = 100_000;
+        for tick in T0..T0 + 10 {
+            unstamped.set(Tick(tick as u32), held(tick, false));
+            stamped.set(Tick(tick as u32), held(tick, true));
+        }
+
+        let before = encoded_len(&unstamped, Tick((T0 + 9) as u32));
+        let after = encoded_len(&stamped, Tick((T0 + 9) as u32));
+        let delta = after - before;
+        let up_bytes_per_s = delta * TICK_HZ;
+
+        println!(
+            "IDLE (worst case for the stamp — nothing but `for_tick` changes, so run-compression \
+             was fully paying off): {before} B -> {after} B (+{delta} B/message) = +{:.1} KB/s \
+             upstream per client at {TICK_HZ} Hz",
+            up_bytes_per_s as f64 / 1024.0,
+        );
+
+        // The REALISTIC regime: the player is aiming, so the hull-local `aim` point already differs
+        // every tick and every slot was ALREADY a full command. The stamp adds only its own bytes.
+        let aiming = |tick: i32, stamped: bool| {
+            ActionState(TankCommand {
+                throttle: 1.0,
+                fire_secondary: true,
+                aim: Some(Vec3::new(0.01 * tick as f32, 1.5, -40.0)),
+                range: 800.0,
+                for_tick: if stamped { Tick(tick as u32).0 } else { 0 },
+                ..default()
+            })
+        };
+        let mut aim_unstamped = NativeBuffer::<TankCommand>::default();
+        let mut aim_stamped = NativeBuffer::<TankCommand>::default();
+        for tick in T0..T0 + 10 {
+            aim_unstamped.set(Tick(tick as u32), aiming(tick, false));
+            aim_stamped.set(Tick(tick as u32), aiming(tick, true));
+        }
+        let aim_before = encoded_len(&aim_unstamped, Tick((T0 + 9) as u32));
+        let aim_after = encoded_len(&aim_stamped, Tick((T0 + 9) as u32));
+        let aim_delta = aim_after - aim_before;
+        println!(
+            "AIMING (the realistic regime — `aim` is a hull-local point, so it already changed \
+             every tick and compression was already dead): {aim_before} B -> {aim_after} B \
+             (+{aim_delta} B/message) = +{:.1} KB/s upstream per client at {TICK_HZ} Hz",
+            (aim_delta * TICK_HZ) as f64 / 1024.0,
+        );
+
+        assert!(
+            after <= 256,
+            "the attested input payload is {after} B/message ({:.1} KB/s upstream) — TankCommand has \
+             grown fat enough that per-tick attestation costs real bandwidth. Shrink the ATTESTED \
+             payload (u8 tick-LSB, or a fire-only sub-struct carrying the stamp); do NOT drop \
+             attestation, which is what keeps the server from firing rounds nobody asked for.",
+            up_bytes_per_s as f64 / 1024.0,
         );
     }
 

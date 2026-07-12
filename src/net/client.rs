@@ -45,6 +45,60 @@ use crate::{NetClientPlugin, ShotId, SimPlugin};
 
 const SERVER_PORT: u16 = 5888;
 
+/// The shipping input delay, in ticks. **CONSTANT — and the constancy is the point.**
+///
+/// # Why this may not go back to `balanced()`
+///
+/// lightyear's client files each tick's input into its `InputBuffer` at `local_tick + input_delay`
+/// (`lightyear_inputs` client.rs, `buffer_action_state`), and its `InputMessage` covers
+/// `[end_tick - N + 1, end_tick]` with `end_tick` computed the same way. **Every part of that
+/// pipeline assumes `end_tick` advances by exactly +1 per tick.** `InputDelayConfig::balanced()`
+/// breaks the assumption: it recomputes `input_delay` from LIVE RTT + jitter on every sync
+/// (`lightyear_sync` timeline/input.rs `input_delay_ticks`), so on any real link the delay WOBBLES —
+/// with `balanced()`'s 3-tick cap and our 64 Hz tick, anything under ~50 ms ping sits right in the
+/// varying band and flips continuously. Each flip breaks `Δend_tick == 1` in one of two ways, and
+/// both of them fire the machine gun after the player let go:
+///
+/// - **delay SHRINKS → `end_tick` STALLS.** Two consecutive local ticks author the SAME buffer tick.
+///   The client overwrites its own entry with the newer (released) command and re-sends it — but the
+///   server's `update_buffer` refuses to write any tick `<= last_remote_tick`
+///   (`lightyear_inputs` input_message.rs:195), so the SERVER never learns the correction and keeps
+///   the stale PRESSED value. It fires a round the client never predicted.
+/// - **delay GROWS → `end_tick` JUMPS.** The client SKIPS a buffer tick, and `InputBuffer::set_raw`
+///   gap-fills it with `Compressed::SameAsPrecedent` (input_buffer.rs:212) — a fabricated repeat of
+///   the last command, on a tick the player never authored. BOTH ends read it as genuine and fire.
+///
+/// `tests/net_fire_release.rs` drives both over the real lightyear pipeline and counts the rounds:
+/// with a wobbling delay it is thousands of unauthorized fire-ticks across the sweep; with a
+/// CONSTANT delay it is exactly zero, because the client then writes exactly one buffer tick per
+/// local tick, contiguously, and never revises one it has already sent. `input_delay_is_constant`
+/// (below) is the tripwire that keeps it that way.
+///
+/// This is NOT the only line of defence — `net::protocol`'s bridge refuses to commit a consumable on
+/// any tick the command cannot attest it was authored for, which catches these AND the seeds this
+/// pin cannot remove (notably `Absent`-anchored buffer freezes, which are seeded at connect time
+/// regardless of the delay). But the pin is what removes the seeds at source, so do not trade it
+/// away for adaptive latency without reading `.agents/scratch/upstream-reports/
+/// lightyear-input-buffer-provenance.md` first.
+///
+/// # Why 3
+///
+/// It is the cap `balanced()` was already selecting on this link (`maximum_input_delay_before_
+/// prediction: 3`), so pinning there costs at most a tick or two of added input latency over what we
+/// shipped — and buys the DEEPEST input buffer, i.e. the most tolerance for droplet jitter before an
+/// input goes missing at all, plus the shallowest rollback window. ~47 ms at 64 Hz, on a vehicle
+/// whose controls are deliberately sluggish.
+pub(crate) const SHIPPING_INPUT_DELAY_TICKS: u16 = 3;
+
+/// The shipping input-delay config. `fixed_input_delay` sets `minimum == maximum`, which is exactly
+/// the condition under which lightyear's `input_delay_ticks()` is RTT-INDEPENDENT: every branch of
+/// it returns that shared value for any `rtt_ticks <= maximum_predicted_ticks + minimum` (~1.6 s of
+/// ping at 64 Hz — far past playable). See [`SHIPPING_INPUT_DELAY_TICKS`] for why that matters, and
+/// `input_delay_is_constant` for the tripwire that pins it.
+pub(crate) fn shipping_input_delay() -> InputDelayConfig {
+    InputDelayConfig::fixed_input_delay(SHIPPING_INPUT_DELAY_TICKS)
+}
+
 pub fn run() {
     let simulate = std::env::args().any(|a| a == "--simulate-input")
         || std::env::var("SPIKE_SIMULATE_INPUT").is_ok();
@@ -218,17 +272,20 @@ pub fn run() {
     // maximum-violence configuration by default. Both are set on the input timeline below.
     //
     // (1) Input delay. Every tick of input delay is a tick prediction does NOT run ahead, so it
-    //     shrinks the prediction window (hence max rollback depth) directly. `balanced()` spends up
-    //     to ~50 ms of latency on input delay before any prediction — lightyear's own recommended
-    //     setting "to reduce the amount of rollback ticks needed (to reduce the rollback visual
-    //     artifacts and CPU costs)" (lightyear_sync input.rs). The old `PredictionManager::default()`
-    //     path selected `no_input_delay()`: 100% of latency absorbed by prediction, maximum depth.
-    //     `SPIKE_INPUT_DELAY_TICKS` overrides for A/B — `=0` restores `no_input_delay()` (the old
-    //     behavior), `=n` pins `fixed_input_delay(n)`; unset = the shipping `balanced()`.
+    //     shrinks the prediction window (hence max rollback depth) directly — lightyear's own
+    //     recommended lever "to reduce the amount of rollback ticks needed (to reduce the rollback
+    //     visual artifacts and CPU costs)" (lightyear_sync input.rs). We spend the full
+    //     `SHIPPING_INPUT_DELAY_TICKS` on it, ALWAYS — see that constant for why a CONSTANT delay is
+    //     load-bearing correctness, not just a depth knob.
+    //     `SPIKE_INPUT_DELAY_TICKS` overrides for A/B — `=0` selects `no_input_delay()` (the old
+    //     max-prediction behavior; also constant), `=n` pins `fixed_input_delay(n)`.
     let (input_delay, delay_label) = match harness::input_delay_ticks() {
         None => (
-            InputDelayConfig::balanced(),
-            "balanced (<=3-tick input delay absorbs ~50ms before prediction)".to_string(),
+            shipping_input_delay(),
+            format!(
+                "fixed_input_delay({SHIPPING_INPUT_DELAY_TICKS}) — CONSTANT by design (~{:.0}ms)",
+                f64::from(SHIPPING_INPUT_DELAY_TICKS) * 1000.0 / 64.0
+            ),
         ),
         Some(0) => (
             InputDelayConfig::no_input_delay(),
@@ -457,7 +514,10 @@ pub fn run() {
                 // is `Without<Rollback>`, so the buffer can't be corrupted), but without this gate
                 // the scripted tick counter would count every replayed tick (verified live: 640
                 // "ticks" burned in <5 s wall).
-                harness::buffer_input
+                // `stamp_input_tick` chained AFTER the writer: it stamps whatever command the writer
+                // just placed, and must be the last word before lightyear buffers it.
+                (harness::buffer_input, stamp_input_tick)
+                    .chain()
                     .in_set(InputSystems::WriteClientInputs)
                     .run_if(not(is_in_rollback)),
             );
@@ -465,9 +525,10 @@ pub fn run() {
         app.add_systems(
             FixedPreUpdate,
             // Same rollback gate as `buffer_input`: during replay lightyear restores the historical
-            // `ActionState` per tick — overwriting it with the *current* gathered command would
-            // corrupt the replay's input.
-            feed_action_state
+            // `ActionState` per tick — overwriting it with the *current* gathered command (or
+            // re-stamping it with the replayed tick) would corrupt the replay's input.
+            (feed_action_state, stamp_input_tick)
+                .chain()
                 .in_set(InputSystems::WriteClientInputs)
                 .run_if(not(is_in_rollback)),
         );
@@ -1338,6 +1399,43 @@ fn feed_action_state(
     }
 }
 
+/// Stamp `TankCommand::for_tick` — **the one place input provenance is created**, and the reason the
+/// sim can ever trust a command it reads out of an input buffer.
+///
+/// Runs in `InputSystems::WriteClientInputs`, chained AFTER whichever writer filled the
+/// `ActionState` this tick (`feed_action_state` windowed, `harness::buffer_input` headless), and
+/// therefore BEFORE lightyear's `buffer_action_state` (`InputSystems::BufferClientInputs`, which
+/// lightyear orders strictly after `WriteClientInputs`). It stamps the command with `local_tick +
+/// input_delay` — computed EXACTLY as `buffer_action_state` computes the slot it is about to file
+/// the command into — so the stamp names the tick the command will be READ back on, on this client
+/// and on the server alike.
+///
+/// From here the stamp is inert: it rides the `InputBuffer`, the wire, the server's `InputBuffer`
+/// and rollback replay without ever being rewritten. `net::protocol`'s bridge compares it against
+/// the tick actually being simulated, and any command lightyear inherited, repeated, fabricated or
+/// froze necessarily names a DIFFERENT tick. That is the whole mechanism — see
+/// `bridge_action_state_to_tank_command` for the four ways it happens and
+/// `TankCommand::fail_consumables_closed` for what we refuse to do about them.
+///
+/// Not run during rollback (chained under the same `not(is_in_rollback)` gate as the writers):
+/// lightyear restores the historical `ActionState` per replayed tick, stamp included, and
+/// re-stamping it with the replayed tick would forge attestation for input that was never authored
+/// for it — turning the guard into a rubber stamp. The historical stamp is already correct.
+///
+/// Pre-sync, `input_delay()` is 0, so the stamp is the current tick and a joining player's first
+/// click attests immediately.
+fn stamp_input_tick(
+    timeline: Res<LocalTimeline>,
+    sender: Query<&InputTimeline, With<Client>>,
+    mut slots: Query<&mut ActionState<TankCommand>, With<InputMarker<TankCommand>>>,
+) {
+    let delay = sender.single().map_or(0, |t| t.input_delay() as i32);
+    let for_tick = timeline.tick() + delay;
+    for mut state in &mut slots {
+        state.0.for_tick = for_tick.0;
+    }
+}
+
 /// `apply_pending_recoil_kicks` derives a remote shot's barrel recoil from the LOCAL spec — these
 /// exercise that derivation directly against a minimal rig. An external integration test can't reach
 /// the sim types (`crate::tank` is a private module — `TankSim`/`Weapon`/`WeaponIndex` are not
@@ -1347,6 +1445,71 @@ mod tests {
     use bevy::ecs::system::RunSystemOnce;
 
     use super::*;
+
+    /// TRIPWIRE — **the shipping input delay must be CONSTANT.**
+    ///
+    /// This fails the moment someone swaps [`shipping_input_delay`] back to an ADAPTIVE config
+    /// (`InputDelayConfig::balanced()`, or any config whose minimum and maximum differ), which is
+    /// exactly the change that reintroduces the MG release leak — a delay that wobbles breaks
+    /// lightyear's `Δend_tick == 1` assumption and either strands a stale PRESSED input on the
+    /// server or fabricates a `SameAsPrecedent` one on both ends. See [`SHIPPING_INPUT_DELAY_TICKS`]
+    /// for the full mechanism and `tests/net_fire_release.rs` for it driven over real lightyear.
+    ///
+    /// The assertion is on the config's SHAPE rather than on a swept `input_delay_ticks()` because
+    /// that function is private to `lightyear_sync`. `minimum == maximum` is precisely its
+    /// RTT-independence condition: with `min == max == n`, `rtt_ticks <= n` returns `n`, and every
+    /// remaining branch returns `maximum_input_delay_before_prediction == n` for any `rtt_ticks <=
+    /// maximum_predicted_ticks + n`. Only past that (~1.6 s of ping at 64 Hz — long past playable)
+    /// does it grow again.
+    ///
+    /// If you genuinely need adaptive input delay back, the fix is NOT to delete this test: it is to
+    /// make lightyear's client stop re-authoring a buffer tick it has already sent (upstream write-up
+    /// in `.agents/scratch/upstream-reports/lightyear-input-buffer-provenance.md`).
+    #[test]
+    fn input_delay_is_constant() {
+        let config = shipping_input_delay();
+        assert_eq!(
+            config.minimum_input_delay_ticks, config.maximum_input_delay_before_prediction,
+            "the shipping input delay must be RTT-INDEPENDENT (minimum == maximum). An adaptive \
+             delay makes lightyear's input-buffer write tick stall or jump, which strands stale \
+             PRESSED inputs on the server and fabricates SameAsPrecedent ones on both ends — the \
+             MG-fires-after-release leak. See SHIPPING_INPUT_DELAY_TICKS.",
+        );
+        assert_eq!(
+            config.minimum_input_delay_ticks, SHIPPING_INPUT_DELAY_TICKS,
+            "shipping input delay changed — intended?",
+        );
+    }
+
+    /// The stamp must name the tick lightyear will FILE the command under (`local_tick +
+    /// input_delay`), not the tick that authored it — otherwise the bridge's comparison is off by
+    /// the delay and every consumable fails closed forever. With no `InputTimeline` (pre-sync, and
+    /// this bare `World`), the delay is 0 and the stamp is the current tick.
+    #[test]
+    fn stamp_names_the_tick_the_command_will_be_read_on() {
+        let mut world = World::new();
+        let mut timeline = LocalTimeline::default();
+        timeline.apply_delta(42);
+        world.insert_resource(timeline);
+        let entity = world
+            .spawn((
+                ActionState(TankCommand::default()),
+                InputMarker::<TankCommand>::default(),
+            ))
+            .id();
+
+        world.run_system_once(stamp_input_tick).unwrap();
+
+        assert_eq!(
+            world
+                .get::<ActionState<TankCommand>>(entity)
+                .unwrap()
+                .0
+                .for_tick,
+            42,
+            "with input_delay 0 the stamp is the current tick",
+        );
+    }
     use crate::spec::{FireMode, RecoilSpec, Trigger};
     use crate::tank::WeaponState;
 

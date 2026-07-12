@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use bevy::prelude::Reflect;
 use lightyear_core::prelude::Tick;
-use lightyear_inputs::input_buffer::InputBuffer;
+use lightyear_inputs::input_buffer::{Compressed, InputBuffer};
 use lightyear_inputs::input_message::ActionStateSequence;
 use lightyear_inputs_native::prelude::{ActionState, NativeStateSequence};
 use serde::{Deserialize, Serialize};
@@ -37,10 +37,12 @@ fn tk(t: i32) -> Tick {
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Fix {
-    /// Shipping today (2ea6cf5): fail `fire_secondary` closed iff the buffer has NO entry for the
-    /// tick — `get(tick).is_none() && get_last().is_some()`.
+    /// The RETIRED detector (commit 2ea6cf5): fail `fire_secondary` closed iff the buffer has NO
+    /// entry for the tick — `get(tick).is_none() && get_last().is_some()`. Kept here only as the
+    /// baseline the sweep measures against.
     HeldLast,
-    /// Positive attestation: commit fire only if the command was authored FOR this exact tick.
+    /// SHIPPING: positive attestation — commit a consumable only if the command was authored FOR
+    /// this exact tick (`TankCommand::for_tick`, stamped by `net::client`'s `stamp_input_tick`).
     ForTick,
 }
 
@@ -298,6 +300,107 @@ fn same_as_precedent_cannot_distinguish_fabrication_from_a_held_trigger() {
     );
 }
 
+/// MECHANISM C — an `Absent` entry ANCHORS the server's buffer and FREEZES its `ActionState`.
+///
+/// This is the case that defeats even the retired `held_last` detector, and it is why the fix had to
+/// become an attestation rather than a better detector. Verified here against the real
+/// `InputBuffer`; upstream this is lightyear issue #1559 ("presses work, holds freeze"), still open.
+///
+/// Once an `Absent` sits in the buffer with a `SameAsPrecedent` tail behind it (which is what a HELD
+/// button produces — nothing changes, so nothing is worth encoding):
+///
+/// - `get(tick)` recurses back through the `SameAsPrecedent`s, hits the `Absent`, and returns `None`
+///   for the WHOLE tail.
+/// - `get_last()` does the same — it DEAD-ENDS on the `Absent` and returns `None` too, even though
+///   the buffer is manifestly non-empty. This is the killer: `held_last`'s second conjunct
+///   (`get_last().is_some()`) goes FALSE exactly when the freeze bites, so the detector reports "not
+///   extrapolating" at the precise moment the server is most lost.
+/// - `get_predict(tick)` returns `None`, so lightyear's `update_action_state` SKIPS the apply
+///   (server.rs:707) and the server's `ActionState` FREEZES at whatever it last held — a trigger-down
+///   command, forever.
+/// - `pop_keeping_last` degrades to a plain `pop` (its `get_last_with_tick()` is `None`), and `pop`'s
+///   "repair" step re-writes the new front with the value it popped — which is the `Absent`. So the
+///   anchor PROPAGATES FORWARD one tick per server tick. The poison sustains itself.
+///
+/// No stamp is needed to see any of this. That is the point: `for_tick` never asks WHY a value is
+/// wrong.
+#[test]
+fn absent_anchor_freezes_the_server_and_blinds_the_held_last_detector() {
+    let mut buf: Buf = Buf::default();
+    let pressed = ActionState(Cmd {
+        fire_secondary: true,
+        aim: 0,
+        for_tick: tk(10).0,
+    });
+    buf.set(tk(10), pressed.clone());
+    // The Absent (however it got seeded), then the SameAsPrecedent tail a HELD button produces.
+    buf.set_empty(tk(11));
+    buf.set_raw(tk(12), Compressed::SameAsPrecedent);
+    buf.set_raw(tk(13), Compressed::SameAsPrecedent);
+
+    // The whole tail reads as "no input", even though the buffer is full of entries.
+    assert!(buf.get(tk(13)).is_none(), "get dead-ends on the Absent");
+    assert_eq!(buf.len(), 4, "…while the buffer is manifestly non-empty");
+
+    // THE KILLER: get_last() is None too — it recurses back and dead-ends on the same Absent.
+    assert!(
+        buf.get_last().is_none(),
+        "get_last must dead-end on the Absent — this is what blinds `held_last`"
+    );
+
+    // So the retired detector reports "not extrapolating" …
+    let held_last = buf.get(tk(13)).is_none() && buf.get_last().is_some();
+    assert!(
+        !held_last,
+        "held_last is FALSE precisely when the server is most lost — the detector is blind here"
+    );
+
+    // … while lightyear's server would SKIP the ActionState apply and freeze on the pressed command.
+    assert!(
+        buf.get_predict(tk(13)).is_none(),
+        "get_predict returns None → update_action_state skips → ActionState FROZEN at pressed"
+    );
+
+    // And attestation sees it without knowing any of the above: the frozen command names tick 10.
+    let frozen = pressed.0;
+    assert_ne!(
+        frozen.for_tick,
+        tk(13).0,
+        "the frozen command attests to tick 10, not tick 13 — consumables fail closed"
+    );
+}
+
+/// The `Absent` anchor PROPAGATES: `pop_keeping_last` degrades to `pop`, whose repair step rewrites
+/// the new front with the popped value — the `Absent` itself. So the freeze does not age out; the
+/// server carries it forward one tick at a time.
+#[test]
+fn absent_anchor_propagates_forward_through_pop() {
+    let mut buf: Buf = Buf::default();
+    let pressed = ActionState(Cmd {
+        fire_secondary: true,
+        aim: 0,
+        for_tick: tk(10).0,
+    });
+    buf.set(tk(10), pressed);
+    buf.set_empty(tk(11));
+    for t in 12..16 {
+        buf.set_raw(tk(t), Compressed::SameAsPrecedent);
+    }
+
+    // The server simulating tick 12 pops up to tick 11 — straight through the Absent.
+    buf.pop_keeping_last(tk(11));
+
+    assert_eq!(
+        format!("{:?}", buf.get_raw(tk(12))),
+        "Absent",
+        "pop's repair step rewrote the new front with the Absent it popped — the anchor MOVED"
+    );
+    assert!(
+        buf.get_last().is_none(),
+        "…so the buffer is still blind, one tick later, and will be next tick too"
+    );
+}
+
 /// Before/after table: today's `held_last` guard vs. the candidate fixes, swept over delay wobble,
 /// packet loss, reordering and arrival skew.
 #[test]
@@ -368,4 +471,21 @@ fn sweep() {
     for (name, cases, srv, cli) in &table {
         println!("{name:<32} {cases:>7} {srv:>12} {cli:>12}");
     }
+
+    // THE SHIPPING CONFIGURATION, pinned: positive attestation (`TankCommand::for_tick`, checked by
+    // `net::protocol`'s bridge) on top of a CONSTANT input delay (`net::client`'s
+    // `SHIPPING_INPUT_DELAY_TICKS`). Across every combination of delay wobble, burst loss,
+    // reordering and arrival skew in the sweep, the number of rounds fired off input the player
+    // never authored is ZERO — on the server and on the client's own predicted tank alike.
+    let (_, cases, srv, cli) = table
+        .iter()
+        .find(|(name, ..)| name.starts_with("ForTick + CONST"))
+        .expect("the shipping configuration is in the table");
+    assert_eq!(
+        (*srv, *cli),
+        (0, 0),
+        "SHIPPING CONFIG LEAKS. Across {cases} scenarios the server fired {srv} and the client \
+         {cli} rounds off input the player never authored. Something re-opened a seed the constant \
+         input delay was closing, or weakened the for_tick attestation in the bridge.",
+    );
 }
