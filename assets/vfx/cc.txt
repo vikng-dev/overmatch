@@ -1,0 +1,10 @@
+Sprites from the Kenney Particle Pack (https://kenney.nl/assets/particle-pack), CC0 1.0
+(https://creativecommons.org/publicdomain/zero/1.0/). No attribution required; noted for provenance.
+
+Source files ("PNG (Transparent)" variants, downscaled to 256 px per frame):
+  smoke_atlas.png        — 2x2 atlas of smoke_01, smoke_02, smoke_04, smoke_05 (row-major)
+  flash_flames_atlas.png — 2x2 atlas of muzzle_01, muzzle_02, muzzle_04, muzzle_05 (row-major)
+  flash_core.png         — flare_01
+
+All are grayscale-with-alpha on purpose: the VFX materials recolor them through per-effect
+gradient LUTs (src/vfx/billboard.rs), so one neutral sprite set serves every palette.

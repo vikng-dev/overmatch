@@ -438,7 +438,9 @@ pub struct ShellReadout {
 /// 20 mm (the autocannon line) cleanly separates the Tiger's armament and reads as a real boundary.
 /// The projectile entity carries no weapon identity, so the visual keys off `caliber` — the physical
 /// signal already on `FireShell`; a future per-weapon visual style would replace this heuristic.
-const TRACER_MAX_CALIBER: f32 = 0.02;
+/// `pub(crate)` so the view layer's 88 dressing (`vfx::muzzle`) gates on the SAME boundary as the
+/// shell-scene branch below, rather than a second constant that could drift.
+pub(crate) const TRACER_MAX_CALIBER: f32 = 0.02;
 
 /// View marker on a tracer round's emissive streak child (`on_fire_shell`). The streak is a VIEW
 /// attachment on the cosmetic projectile entity (ADR-0014) — it carries no sim state; it just rides

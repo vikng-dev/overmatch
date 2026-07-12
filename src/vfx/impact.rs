@@ -41,7 +41,7 @@ const PUFF_EMISSIVE: LinearRgba = LinearRgba {
     alpha: 1.0,
 };
 
-pub fn plugin(app: &mut App) {
+pub(super) fn plugin(app: &mut App) {
     app.init_resource::<PuffRing>()
         .add_systems(Startup, setup_puff_assets)
         // The ship impact puff: a view-side subscriber to `ballistics`' sim `Impact` event
@@ -52,11 +52,12 @@ pub fn plugin(app: &mut App) {
 
 /// Preloaded puff view assets: the shared mesh handle plus the birth-state MATERIAL VALUE (not a
 /// handle — each puff clones it into its own asset so the per-frame fade can mutate one puff
-/// without fading every other live puff in lockstep).
+/// without fading every other live puff in lockstep). `pub(super)` so the prewarm rig can warm this
+/// exact mesh + material combination's pipeline at startup.
 #[derive(Resource)]
-struct PuffAssets {
-    mesh: Handle<Mesh>,
-    material: StandardMaterial,
+pub(super) struct PuffAssets {
+    pub(super) mesh: Handle<Mesh>,
+    pub(super) material: StandardMaterial,
 }
 
 /// Live puffs in spawn order, oldest at the front — evicted past [`PUFF_CAP`], exactly the
@@ -72,7 +73,7 @@ struct ImpactPuff {
     age: f32,
 }
 
-fn setup_puff_assets(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>) {
+pub(super) fn setup_puff_assets(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>) {
     commands.insert_resource(PuffAssets {
         mesh: meshes.add(Sphere::new(PUFF_RADIUS)),
         // Same no-lit-contribution recipe as the tracer streak (black base, zero reflectance): the

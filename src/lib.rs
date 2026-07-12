@@ -86,8 +86,10 @@ pub mod track_sandbox;
 /// `ui_font::UiFonts` resource that every `Text`-spawning client plugin reads. Mounted by each
 /// windowed composition root; retires Bevy's ASCII-only default font.
 mod ui_font;
-/// Ship-facing view-layer VFX (impact dust puffs): a render-only subscriber to the sim's `Impact`
-/// seam, mounted by both windowed clients (ADR-0014 — never the server).
+/// Ship-facing view-layer combat VFX: render-only subscribers to the sim's `Impact` and
+/// `FireShell` seams (impact puffs, the 88's muzzle flash/light/smoke + shell smoke trail) plus
+/// the shared billboard/erosion/gradient-LUT machinery they are built from. Mounted by both
+/// windowed clients (ADR-0014 — never the server).
 mod vfx;
 mod world;
 
