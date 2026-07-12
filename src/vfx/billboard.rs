@@ -242,7 +242,12 @@ fn age_billboards(
         billboard.age += dt;
         let t = billboard.age / billboard.lifetime;
         if t >= 1.0 {
-            commands.entity(entity).despawn();
+            // A billboard has two lifetime owners — this end-of-life ager and the [`BillboardRing`]
+            // eviction (which already uses `try_despawn`). Both can target the same entity in one
+            // frame; if eviction frees it first and the slot is recycled before this despawn lands in
+            // the shared command flush, a plain `despawn` would warn on the stale id. `try_despawn`
+            // makes the second despawn a silent no-op.
+            commands.entity(entity).try_despawn();
             continue;
         }
         billboard.roll += billboard.spin * dt;
