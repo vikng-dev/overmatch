@@ -186,6 +186,58 @@ stay (it is cheap insurance and canon-adjacent — Source's `CUserCmd` carries `
 [lightyear-check-starvation.md](lightyear-check-starvation.md) is also resolved, since that defect is
 also `balanced()`-triggered.
 
+## What fixing this unlocks for us
+
+**Clean up — the pin and its tripwire, not the attestation.**
+
+- Retired: `SHIPPING_INPUT_DELAY_TICKS` / `shipping_input_delay()` (`src/net/client.rs:48-100`) and the
+  tripwire `input_delay_is_constant` (`src/net/client.rs:1468`), whose whole job is to fail the build
+  if anyone reintroduces an adaptive delay. Both exist *only* because of this defect (plus
+  [#1](lightyear-check-starvation.md); see Blocked-by).
+- **NOT retired: `TankCommand::for_tick` (PROTOCOL_REV 5) and `fail_consumables_closed`**
+  (`src/command.rs:132`, applied by the bridge at `net/protocol.rs:1482`). The invariant is **ours** —
+  *a discrete action commits only on a tick the command can attest it was authored for* — and it
+  covers cases no `Absent` fix touches: seed route (b) at connect, reordering (see *Related* below),
+  the hold-last level freeze under genuine input starvation (commit 2ea6cf5), and any future buffer
+  regression. It stays whatever upstream ships.
+- What *does* change is its **status**: `for_tick` stops being load-bearing and becomes belt-and-braces,
+  so its wire cost becomes **optional rather than paid under duress**. Measured (`input_message_wire_cost`,
+  `net/protocol.rs`, real `NativeStateSequence` through real bincode): the stamp changes every tick and
+  so defeats `Compressed::SameAsPrecedent` run-compression — **+20 B/message aiming** (156 → 176 B;
+  +1.2 KB/s upstream per client at 64 Hz) and **+140 B/message parked-idle** (36 → 176 B; +8.8 KB/s),
+  idle being the worst case precisely because it is the only regime where run-compression was still
+  paying off. Once the buffer is trustworthy that cost is a *choice*: shrink the attested payload (a
+  `u8` tick-LSB, or a fire-fields-only sub-struct carrying the stamp) and keep the invariant, or keep
+  paying 20 B and not think about it. Today neither option is open — dropping or thinning attestation
+  reopens unauthored rounds.
+
+**Optimize.** Nothing in the sim or the frame budget; the cost of this defect is entirely wire bytes
+(above) and the pinned ~47 ms of input latency (below). Note the pin is not *only* a cost: 3 ticks of
+delay also buys the deepest input buffer, i.e. the most jitter tolerance before an input goes missing
+at all, and the shallowest rollback window. Any retirement trades that away.
+
+**Explore.**
+
+- **Adaptive input delay** (`balanced()`): near-0 delay on a good link, more on a bad one — the way to
+  get 0-tick *feel* on a LAN without 0-tick *risk* on a bad connection. **Blocked by TWO reports:** this
+  one (a varying delay corrupts the input stream — `Δend_tick != 1`, defects a/d/e) **and**
+  [lightyear-check-starvation.md](lightyear-check-starvation.md) (a delay that grows into the link's
+  natural lead walks the prediction margin to zero, where rollback is silently dead). Either defect
+  alone makes adaptive delay a shipping bug.
+- **0-tick input delay** — worth stating exactly, because the intuition runs backwards. `no_input_delay()`
+  is `minimum == maximum == 0`: **constant**, so it is *not* blocked by this report (no wobble, no
+  fabricated ticks, and the anti-adaptive tripwire passes as soon as the constant is deliberately
+  changed). It is also not blocked by #1 — it is #1's *falsifier*: dropping the delay to 0 restores the
+  prediction margin. What it costs is stated in #1's unlocks section: deeper rollbacks (chaos
+  amplification — wants
+  [avian-solver-constraint-order.md](avian-solver-constraint-order.md)) and a zero jitter cushion, so a
+  late input becomes a **dropped** trigger pull (we fail closed via `for_tick`) rather than an
+  unauthored round. An experiment to run — with `SPIKE_INPUT_DELAY_TICKS=0` the lever already exists —
+  not a free win.
+- Fix direction **4** (a "was this tick authored or inherited?" API, issue #492) would give us natively
+  what `for_tick` re-derives. We would still keep `for_tick`: it is 20 B and it does not depend on
+  upstream getting provenance right. But every *other* server-auth game would stop having to invent it.
+
 ## Related, separately filable
 
 `InputChannel` is registered `ChannelMode::UnorderedUnreliable` (`lightyear_inputs/src/plugin.rs:28`)

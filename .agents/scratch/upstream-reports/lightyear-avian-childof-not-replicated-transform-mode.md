@@ -37,3 +37,15 @@ this failure is NOT flake — it fails identically every run, single-threaded in
 
 None needed — we do not use `AvianReplicationMode::Transform`. Filed for upstream's benefit and
 as context if we ever switch replication modes.
+
+## What fixing this unlocks for us
+
+**Nothing for us — filed for the ecosystem.** We run `AvianReplicationMode::Position` and have no
+plans to switch; there is no workaround to delete, no cost to recover, and no experiment this gates.
+The value of filing is entirely upstream's: it is a failing test *already in their tree* at the 0.28.0
+tag, which makes it the cheapest issue on this list for a maintainer to act on, and clearing it is
+good for the ecosystem we depend on.
+
+The only self-interested reason to keep it on the list: a fixed `Transform` mode would make that mode
+a real option for us if we ever had cause to move (we do not — Position mode is what the rig and the
+rollback path are built around). Filed as courtesy, tracked as nothing.

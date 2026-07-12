@@ -44,3 +44,18 @@ the init guard before `set_proxy_aabb`.
 
 None needed post-33cc4e4; documenting for upstream correctness. If it ever resurfaces, the
 probe (`SPIKE_CONTACT_PROBE=1`) discriminates it in one run.
+
+## What fixing this unlocks for us
+
+**Nothing for us today — filed for the ecosystem.** No workaround exists to delete, no cost to recover,
+no capability gated on it. With the `ApplyPosToTransform` poisoning excised
+([lightyear-avian-blanket-apply-pos-to-transform.md](lightyear-avian-blanket-apply-pos-to-transform.md))
+our child-collider poses are honest, avian's per-tick AABB refresh self-heals the stale leaves within a
+tick, and the defect is latent rather than damaging.
+
+The one forward-looking caveat, stated as a caveat and not a payoff: it goes live again the moment a
+child collider's pose can genuinely *diverge* from its root during prediction — an articulated track
+model with its own bodies, or any collider whose local transform stops being an authored constant. If
+that lands and contact starts behaving strangely after rollbacks, this is the first suspect and
+`SPIKE_CONTACT_PROBE=1` discriminates it in one run. Until then: no payoff, and we should not pretend
+otherwise when filing.

@@ -50,3 +50,26 @@ transforms should never be derived from world Position.
 `AuthoredLocalTransform` marker + a pair of order-independent `On<Add>` observers stripping
 `ApplyPosToTransform` from marked entities (src/tank.rs, commit 33cc4e4; despawn-safe, both
 ends). Remove when upstream excludes child colliders from the requirement.
+
+## What fixing this unlocks for us
+
+**Clean up.** The whole shield in `src/tank.rs`: the `AuthoredLocalTransform` component, both observers
+(`shield_authored_collider_transform`, `shield_late_authored_marker` — two of them purely so the shield
+is insertion-order-independent), the `authored_attachment()` bundle helper and its use at every
+child-collider spawn site, the two observer registrations in `sim_plugin`, and ADR-0015's Layer-2 row 2.
+It also retires a **standing authoring rule**: today every new child collider (armor volume, future
+track station, any damage geometry) must remember to carry the marker or it silently re-arms the
+poisoning write — a footgun with no compile-time guard. That rule disappears with the defect.
+
+**Optimize.** Not the observers (they fire at spawn and cost nothing at steady state) — the recovered
+cost is the **divergence the poisoning manufactured**, which is one of the two entries ADR-0015 names as
+the reason the rollback bars are coarsened to 5× the reference (`ROLLBACK_POSITION_M` = 0.05,
+`net/protocol.rs:1038`) rather than the 1 cm / 0.01 rad reference values. Those bars are a ratchet: this
+fix plus [avian-solver-constraint-order.md](avian-solver-constraint-order.md) are the two conditions
+ADR-0015 names for tightening them. Note the shield already removed the *live* cost here (post-shield
+solo rollbacks are 2–4 per 20 s vs the pre-shield storm), so the recovery is bookkeeping we have
+already banked — an upstream fix banks the *deletion*, not new headroom.
+
+**Explore.** Nothing new becomes possible — the shield is complete (it excises the write rather than
+undoing it, on both ends). This one is honestly just: delete the workaround, delete the rule, stop
+having to explain it to every future collider.

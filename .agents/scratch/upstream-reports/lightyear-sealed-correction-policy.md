@@ -33,3 +33,20 @@ smoothing as the intended extension point; it composes well with FrameInterpolat
 
 Permanent (render-error layer is now core architecture, ADR-0014/0015). Report is a suggestion,
 not a request we depend on.
+
+## What fixing this unlocks for us
+
+**Nothing — and this one should be filed saying so.** `net/render_error.rs` is not scaffolding waiting
+for an upstream fix; ADR-0015 classifies it as *"permanent-but-looks-like-scaffolding"*: multiplayer
+reintroduces legitimate mispredictions forever (you cannot predict the other tank's input), and this
+layer is how *any* correction is presented. A `CorrectionPolicy` builder would not retire a single line
+of it, and we would not move the smoothing back into lightyear if it did exist — `instant_correction()`
+plus a render-space error layer is the sim/view split (ADR-0014), i.e. the arrangement we would choose
+anyway.
+
+The honest content of the report is therefore about **API shape, not about us**: the gap forced a design
+that turned out right, which is luck, not ergonomics. The only thing a builder would buy us is a cheap
+A/B — lightyear-side adaptive decay vs our render-error layer — that we currently cannot run without
+rewriting either side. Marginal, and speculative: we have no complaint the layer does not already answer.
+Everything else this fix buys goes to games that want a Fiedler-style adaptive decay with a
+correction-velocity cap and no view layer of their own.
