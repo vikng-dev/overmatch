@@ -394,13 +394,12 @@ fn ribbon_vertices(
         // Width taper toward the muzzle (stage 1b): the age-grown half-width is pinched to a quarter
         // at the origin, back to full past the fade — a lens/wisp, not a tube.
         let half = 0.5 * (TRAIL_WIDTH_BIRTH + ages[i] * TRAIL_WIDTH_GROWTH) * (0.25 + 0.75 * fade);
-        // View-parallel dim (stage 1c, optional): a segment seen edge-on is a thin bright sliver —
-        // dim it toward transparent as its axis aligns with the view direction.
-        let seg = dir.normalize_or_zero();
-        let view = (cam - centers[i]).normalize_or_zero();
-        let view_dim = 1.0 - smoothstep(0.97, 0.999, seg.dot(view).abs());
-        // The unused color.a lane now carries head-fade × view-dim; the shader multiplies alpha by it.
-        let alpha = fade * view_dim;
+        // color.a is the head fade alone (the shader multiplies alpha by it). A view-parallel dim
+        // once lived here (stage 1c) but was removed: from any behind-the-gun camera, distance itself
+        // aligns receding segments with the view axis (a 100 m segment is <2° off it), so the dim
+        // erased the whole far trail no matter the threshold. The cost is the honest flat "ribbon"
+        // tell when a trail is seen edge-on; the real fix is a tube cross-section, not an alpha trick.
+        let alpha = fade;
         let age_frac = (ages[i] / TRAIL_POINT_LIFETIME).clamp(0.0, 1.0);
         for (edge, u) in [(-1.0, 0.0), (1.0, 1.0)] {
             let p = centers[i] + side * (half * edge);
@@ -553,11 +552,13 @@ mod tests {
         );
         // The age lane feeds the shader's erosion: oldest ≈ eroded, head fresh.
         assert!(colors[0][0] > 0.4 && colors[6][0] == 0.0);
-        // The head-fade alpha lane: fully transparent at the muzzle end (arc 0), opaque past the fade.
+        // The alpha lane is the head fade ALONE (no view-parallel dim): fully transparent at the
+        // muzzle end (arc 0), and exactly full alpha past HEAD_FADE_ARC regardless of view angle —
+        // the arc-30 station sits past the 25 m fade even though it is near-parallel to this camera.
         assert_eq!(colors[0][3], 0.0, "muzzle-end fade is fully in");
-        assert!(
-            colors[4][3] > 0.5,
-            "past HEAD_FADE_ARC the trail is at full alpha"
+        assert_eq!(
+            colors[4][3], 1.0,
+            "past HEAD_FADE_ARC the trail is at full alpha (fade only, never view-dimmed)"
         );
 
         // Degenerate: one station (or none) builds nothing.

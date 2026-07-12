@@ -6,8 +6,10 @@
 //             sticks to the air the shell flew through instead of swimming when tail points expire;
 //   color.r — the point's age fraction 0..1 (0 = at the shell) — the erosion driver;
 //   color.g — a per-point random seed, offsetting the noise row so two trails never match;
-//   color.a — CPU-baked head-fade × view-parallel dim (stage 1): softens the muzzle-end birth seam
-//             and dims edge-on segments. Multiplied straight into the output alpha.
+//   color.a — CPU-baked head fade (stage 1): softens the muzzle-end birth seam. Multiplied straight
+//             into the output alpha. (A view-parallel dim once shared this lane but was removed —
+//             distance alone aligns receding segments with the view axis, so it erased far trails;
+//             the edge-on flat "ribbon" tell it hid is a tube cross-section's job to fix, not alpha's.)
 //
 // Fragment recipe (Klemen Lozar's smoke-breakup shape): a soft across-strip profile modulated by
 // two scrolling octaves of tileable noise gives the density signal; the erosion threshold rises

@@ -50,16 +50,33 @@ use super::billboard::{
 /// ~0.05 and the gun starts reading slow.
 const FLASH_LIFETIME: f32 = 0.035;
 /// Core flash size range (m, diameter at the muzzle; the 88's fireball is car-sized for a frame).
-const FLASH_CORE_SIZE: (f32, f32) = (2.4, 3.2);
-/// Directional flame-plane length range (m) and their width as a fraction of length.
-const FLASH_PLANE_LENGTH: (f32, f32) = (3.0, 4.4);
+/// Punched up ~1.45× from the first cut (2.4–3.2) — the owner found the flash too subtle.
+const FLASH_CORE_SIZE: (f32, f32) = (3.5, 4.6);
+/// Directional flame-plane length range (m) and their width as a fraction of length. Punched up
+/// ~1.45× with the core (was 3.0–4.4).
+const FLASH_PLANE_LENGTH: (f32, f32) = (4.3, 6.4);
 const FLASH_PLANE_WIDTH_RATIO: f32 = 0.55;
 /// Emissive boost on the flash LUT's heat lane — well above 1.0 so bloom catches the whole flash.
 const FLASH_GLOW: f32 = 14.0;
 
+/// The 88's fireball glow card: ONE soft additive billboard behind the starburst core — the classic
+/// card that sells fireball VOLUME between the 2-frame flash and the lingering smoke. Camera-facing,
+/// ~1.5× the core, LOW alpha, on the round-glow (`mg_core`) sprite, and it fades fast over its own
+/// ~0.1 s. It is the ONLY thing allowed to linger past [`FLASH_LIFETIME`] — the 2-frame flash
+/// discipline itself is untouched. Rides the same additive billboard pipeline as the flash (no new
+/// permutation, so the prewarm rig already covers it).
+const FLASH_GLOW_CARD_SCALE: f32 = 1.5;
+const FLASH_GLOW_CARD_LIFETIME: f32 = 0.1;
+/// LOW overall alpha (billboard `fade.w`) and a softened emissive boost (`glow.x`) — a fill glow, not
+/// a second hot core.
+const FLASH_GLOW_CARD_ALPHA: f32 = 0.35;
+const FLASH_GLOW_CARD_GLOW: f32 = 4.0;
+
 /// Lingering muzzle smoke: lifetime (s), size ease (m), and its drift (up + a muzzle-gas push).
+/// Birth size nudged up (was 1.6) so the punched-up flash hands off to a smoke puff that is already
+/// present, not a wisp.
 const SMOKE_LIFETIME: f32 = 1.2;
-const SMOKE_SIZE: (f32, f32) = (1.6, 4.2);
+const SMOKE_SIZE: (f32, f32) = (2.2, 4.2);
 const SMOKE_RISE: f32 = 0.55;
 const SMOKE_PUSH: f32 = 1.3;
 /// Slow flipbook playback for the smoke (frames/s over the 4-frame atlas) and its roll rate (rad/s).
@@ -199,8 +216,10 @@ impl MuzzleVfxAssets {
         VfxBillboardMaterial {
             params: VfxParams {
                 frame: Vec4::new(0.0, 2.0, 2.0, 0.0),
-                // Moderate sharpness: soft dissolve edges on the puff.
-                fade: Vec4::new(0.0, 2.6, 0.0, 0.85),
+                // Moderate sharpness: soft dissolve edges on the puff. w is the 88's overall alpha
+                // (nudged up from 0.85 so early smoke has more presence for the flash to hand off to);
+                // the MG puff overrides it down to `MG_SMOKE_ALPHA`.
+                fade: Vec4::new(0.0, 2.6, 0.0, 0.92),
                 glow: Vec4::new(SMOKE_GLOW, 0.0, 0.0, 0.0),
             },
             atlas: self.smoke_atlas.clone(),
@@ -370,6 +389,39 @@ fn on_main_gun_fire(
             roll: rng.range(0.0, std::f32::consts::TAU),
             spin: 0.0,
             erosion_end: 0.0,
+            rotation: None,
+        },
+    );
+
+    // --- Fireball glow card: one soft additive round-glow billboard behind the core, LOW alpha and
+    // a softened boost, ~1.5× the core. It is the one element allowed to outlive the 2-frame flash
+    // (its own ~0.1 s, eroding out fast) — the volume that bridges the flash and the smoke.
+    let mut glow = assets.flash_material(assets.mg_core.clone(), 1.5);
+    glow.params.frame = Vec4::new(0.0, 1.0, 1.0, 0.0);
+    glow.params.glow.x = FLASH_GLOW_CARD_GLOW;
+    glow.params.fade.w = FLASH_GLOW_CARD_ALPHA;
+    let glow_size = core_size * FLASH_GLOW_CARD_SCALE;
+    spawn_billboard(
+        &mut commands,
+        &mut materials,
+        &mut ring,
+        assets.quad.clone(),
+        BillboardSpec {
+            material: glow,
+            lifetime: FLASH_GLOW_CARD_LIFETIME,
+            origin: origin + dir * 1.0,
+            drift: Vec3::ZERO,
+            frames: 1,
+            start_frame: 0.0,
+            frame_rate: 0.0,
+            start_size: glow_size,
+            end_size: glow_size * 1.3,
+            aspect: Vec3::ONE,
+            roll: rng.range(0.0, std::f32::consts::TAU),
+            spin: 0.0,
+            // Erode out fast over its short life — this is the "fade" that lets it linger without
+            // the flash lingering.
+            erosion_end: 1.0,
             rotation: None,
         },
     );
@@ -704,15 +756,20 @@ mod tests {
             .count()
     }
 
-    /// An 88 shot spawns the full main-gun dressing — core + 2 planes + smoke (4 billboards) and
-    /// 1 light — and an MG-calibre round gets the MG dressing instead: core + 1 flame plane
-    /// (no smoke on the first round — the ration counts from 1) at a fraction of the 88's size,
-    /// plus its own dim light (now on EVERY round). Each round is dressed by exactly ONE observer.
+    /// An 88 shot spawns the full main-gun dressing — core + glow card + 2 planes + smoke
+    /// (5 billboards) and 1 light — and an MG-calibre round gets the MG dressing instead: core +
+    /// 1 flame plane (no smoke on the first round — the ration counts from 1) at a fraction of the
+    /// 88's size, plus its own dim light (now on EVERY round). Each round is dressed by exactly ONE
+    /// observer.
     #[test]
     fn main_gun_and_mg_split_the_dressing() {
         let mut app = harness();
         fire(&mut app, 0.088, 0);
-        assert_eq!(billboards(&mut app), 4, "88: core + 2 planes + smoke");
+        assert_eq!(
+            billboards(&mut app),
+            5,
+            "88: core + glow card + 2 planes + smoke"
+        );
         assert_eq!(lights(&mut app), 1);
 
         let mut mg = harness();
@@ -858,7 +915,7 @@ mod tests {
         assert_eq!(lights(&mut app), 0);
         // At or under the boundary the dressing still plays (~150 ms catch-up is the normal case).
         fire(&mut app, 0.088, STALE_FIRE_TICKS);
-        assert_eq!(billboards(&mut app), 4);
+        assert_eq!(billboards(&mut app), 5);
     }
 
     /// The muzzle light decays monotonically from its first-frame peak and despawns at end of

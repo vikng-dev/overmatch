@@ -1,4 +1,4 @@
-//! The 88's tracer ember (survey/historical read): a small, DIM red-orange emissive point at the
+//! The 88's tracer ember (survey/historical read): a small, GLOWING red-orange emissive point at the
 //! shell's BASE that burns for ~2 s then fades — the Pzgr.39's base tracer (APCBC-HE-T, ~13 g of
 //! tracer composition, ~2 s burn to ~1500 m), the gunner's fall-of-shot read at range. It is
 //! deliberately a point at the base, NEVER a whole-shell glow (the War-Thunder "glowing
@@ -21,17 +21,18 @@ use bevy::world_serialization::WorldAssetRoot;
 
 use crate::ballistics::ShellPath;
 
-/// The ember's emissive at full burn (linear, above 1.0 so bloom catches it) — a DIM red-orange,
-/// kept far under the MG tracer streak's `LinearRgba::rgb(30, 12, 3)` so the 88's point reads as a
-/// quiet steady ember, not a competing tracer.
+/// The ember's emissive at full burn (linear) — well up into the bloom-catching band so the 88's
+/// point reads as ONE deliberate glowing ember with a small halo, not the pre-tuning non-glowing dot.
+/// Still kept clearly under the MG tracer streak's `LinearRgba::rgb(30, 12, 3)` so it never competes
+/// with a streak: a steady point, never longer or shinier than an MG tracer.
 const EMBER_EMISSIVE: LinearRgba = LinearRgba {
-    red: 2.6,
-    green: 0.6,
-    blue: 0.12,
+    red: 10.0,
+    green: 2.5,
+    blue: 0.5,
     alpha: 1.0,
 };
 /// Ember point radius (m): a small bead at the base — never the whole shell.
-const EMBER_RADIUS: f32 = 0.05;
+const EMBER_RADIUS: f32 = 0.09;
 /// Distance (m) behind the shell's center the ember sits — at its base (the shell's local +Z is the
 /// trailing direction, the same axis the tracer streak's tail uses).
 const EMBER_BASE_OFFSET: f32 = 0.35;
