@@ -6,6 +6,7 @@
 //!   * a 1-frame additive PING (a small round glow) at the hit point — the instant of contact; and
 //!   * a handful of stretched-billboard SPARKS (survey trick 8: velocity-elongated additive streaks,
 //!     free motion blur) kicked in a cone around the hit's surface normal — the crisp hot garnish.
+//!
 //! All three ride the shared billboard machinery ([`super::billboard`]) — one aging system, one
 //! eviction ring — so an impact storm stays bounded with the muzzle dressing. The read exists so the
 //! four non-tracer rounds of an MG belt cycle still register at the target: the rounds themselves
