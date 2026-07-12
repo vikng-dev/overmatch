@@ -1116,11 +1116,12 @@ fn fire_catch_up_ticks(fire: Tick, now: Tick) -> Option<u32> {
 /// render→sim leak, non-deterministic across 0/1/2-tick frames), and a rollback replays `FixedMain`
 /// N times — draining the queue only on a real tick applies each one-shot kick exactly once.
 ///
-/// The shooter is normally an interpolated remote (a player's own `FireEvent` is excluded by
-/// `broadcast_fire`'s `AllExceptSingle(owner)`; the bot is owned by no one), whose `TankSim` is not
-/// rollback-checked. But `broadcast_fire`'s `All` fallback CAN deliver a client its own shot, which
-/// would kick the predicted own tank's `local_rollback::<TankSim>()`-tracked sim from a message —
-/// so [`receive_fire_events`] drops any shot whose shooter carries `ActionState<TankCommand>` (the
+/// The shooter is normally an interpolated remote, whose `TankSim` is not rollback-checked. But
+/// `broadcast_fire` targets `NetworkTarget::All` (the redundancy window must re-carry every shooter's
+/// events to every client, so it cannot exclude the owner — dedup happens at the receiver instead),
+/// which means a client also receives its OWN shot's echo; kicking the predicted own tank's
+/// `local_rollback::<TankSim>()`-tracked sim from a message would corrupt it — so
+/// [`receive_fire_events`] drops any shot whose shooter carries `ActionState<TankCommand>` (the
 /// locally-fired set) before it ever reaches this queue. Nothing rollback-tracked is kicked here.
 ///
 /// Skips silently on a missing tank, a slot with no matching muzzle, an out-of-range slot, or a

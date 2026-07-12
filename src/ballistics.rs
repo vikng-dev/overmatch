@@ -451,13 +451,20 @@ impl SanctionedShots {
     /// shell's flight (a ~1.25 km round at 800 m/s ≈ 1.5 s) so a valid keyframe/terminal is never
     /// evicted before its shell reaches it, but bounded so a lost/never-consumed one does not leak.
     const MAX_AGE_SECS: f32 = 3.0;
-    /// Hard cap on tracked shots — a backstop against pathological churn; a 1v1 duel never approaches it.
+    /// Hard cap on tracked shots — a backstop against pathological churn; a 1v1 duel never approaches
+    /// it. Only reached by an implausible flood of distinct in-flight shots (well past two MGs), and
+    /// then the eviction below picks the OLDEST entry — which under such churn could be a shot whose
+    /// shell is still mid-hold, prematurely fail-closing (quiet-dissolving) it. Accepted: the cap is a
+    /// leak backstop, not a hot-path policy (`MAX_AGE_SECS` does the real eviction), and 64 sits orders
+    /// of magnitude above any real shot-in-flight count, so the premature-evict case is unreachable in
+    /// practice.
     const MAX_SHOTS: usize = 64;
 
     /// This shot's entry, fresh-touched, with the over-cap eviction applied.
     fn entry(&mut self, shot: ShotId) -> &mut SanctionedShot {
         if self.shots.len() >= Self::MAX_SHOTS && !self.shots.contains_key(&shot) {
-            // Evict the single oldest shot (age is monotonic between touches) — a backstop only.
+            // Evict the single oldest shot (age is monotonic between touches) — a backstop only (see
+            // `MAX_SHOTS`: under a flood this could evict a mid-hold shot, accepted as unreachable).
             if let Some(oldest) = self
                 .shots
                 .iter()
