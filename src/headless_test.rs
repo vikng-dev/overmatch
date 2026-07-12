@@ -8,24 +8,77 @@
 //! use, and what the server binary will mount. Compile-out of render code is the later
 //! crates-split step, per the client-server-organization decision.)
 
-use std::time::Duration;
+use std::sync::{Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 
 use crate::SimPlugin;
+use crate::bake::ExtractedTankGeometry;
 use crate::command::TankCommand;
+use crate::spec::TankSpec;
 use crate::state::AppState;
-use crate::tank::{Controlled, Tank};
+use crate::tank::{Controlled, PendingTankAssets, TIGER_GLB_PATH, Tank};
 
-/// Boot the sim headless, then drive the tank by writing its `TankCommand` directly — the exact
-/// path a server takes applying a remote client's command (no device gather mounted).
-#[test]
-fn sim_boots_and_drives_headless() {
+/// Backstop only — NOT a performance budget. With the boots serialized (see [`BOOT_LEASE`]) a boot
+/// has the whole box to itself, so it finishes in seconds; this bound exists purely so a genuine
+/// hang (a wiring bug that never reaches `Playing`) fails with the diagnosis below instead of
+/// sitting until the CI job timeout. It is generous on purpose: the loop exits the instant the sim
+/// is up, so a wide bound costs a healthy run exactly nothing.
+const BOOT_DEADLINE: Duration = Duration::from_secs(60);
+
+/// Booting one headless sim is a HEAVY fixture: a full Bevy app (assets, scenes, gltf, physics)
+/// that reads the 65 MB `tiger_1.glb` **twice** — `bake::extract_at_startup` parses it
+/// synchronously as data, and the asset server loads it again as a scene on the IO/compute pools.
+/// Measured: ~11 s of CPU per boot.
+///
+/// Four tests in this file each need one, and cargo runs them concurrently by default. Each app
+/// sizes its task pools to the core count, so on a 2-core CI runner four simultaneous boots
+/// oversubscribe the box roughly 4x: they starve each other's asset IO and every one of them blew
+/// its boot deadline while the machine had plenty of work in flight and none of it finishing. That
+/// was the headless-boot CI red — a contention timeout, not a broken asset.
+///
+/// So the boots take turns. The lease is held for the whole test body, not just the boot: a
+/// *booting* app contends with the sim phases of any already-booted sibling, so dropping it at
+/// `Playing` would move the starvation rather than remove it. These four are the only tests that
+/// mount a full app; the crate's other ~170 keep running in parallel around them.
+///
+/// Poisoning is deliberately ignored: the lease guards a *machine resource* (the box's cores), not
+/// shared mutable state, so a panicking test leaves nothing corrupted behind it. Propagating poison
+/// would turn one genuine failure into three misleading `PoisonError` panics and bury the real one.
+static BOOT_LEASE: Mutex<()> = Mutex::new(());
+
+/// A booted headless sim, plus the lease that serialized its boot. Derefs to the [`App`], so tests
+/// use it exactly like one; keep it alive for the whole test (dropping it early releases the lease).
+struct BootedSim {
+    app: App,
+    _lease: MutexGuard<'static, ()>,
+}
+
+impl std::ops::Deref for BootedSim {
+    type Target = App;
+    fn deref(&self) -> &App {
+        &self.app
+    }
+}
+
+impl std::ops::DerefMut for BootedSim {
+    fn deref_mut(&mut self) -> &mut App {
+        &mut self.app
+    }
+}
+
+/// The canonical Bevy dedicated-server configuration: full plugin registration (assets, scenes,
+/// gltf, types) but **no GPU** (`backends: None` — wgpu never initializes), **no window, no
+/// winit**. This is exactly what the M5 server binary will mount.
+///
+/// The clock starts at `ManualDuration(ZERO)`: asset IO is wall-clock, and if sim time advanced
+/// while it ran, the collider-less tanks would free-fall through the terrain for the whole load —
+/// the same spawn-before-bind race the game keeps to a frame or two. Callers start the clock once
+/// the rig is bound.
+fn headless_app() -> App {
     let mut app = App::new();
-    // The canonical Bevy dedicated-server configuration: full plugin registration (assets,
-    // scenes, gltf, types) but **no GPU** (`backends: None` — wgpu never initializes), **no
-    // window, no winit**. This is exactly what the M5 server binary will mount.
     app.add_plugins(
         DefaultPlugins
             .set(bevy::render::RenderPlugin {
@@ -43,13 +96,9 @@ fn sim_boots_and_drives_headless() {
             })
             .disable::<bevy::winit::WinitPlugin>(),
     )
-    // Deterministic clock, in two phases: **zero** while assets load (asset IO is wall-clock; if
-    // sim time advanced meanwhile, the collider-less tanks would free-fall through the terrain
-    // for the whole load — the same spawn-before-bind race the game keeps to a frame or two),
-    // then exactly 16 ms per `update()` so the 64 Hz fixed sim ticks once per update.
     .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO));
     // Physics + the SP spawn scenario are composition-root choices (see lib.rs SimPlugin note);
-    // this test exercises the single-player-shaped boot, headless.
+    // this exercises the single-player-shaped boot, headless.
     app.add_plugins((
         avian3d::prelude::PhysicsPlugins::default(),
         SimPlugin,
@@ -63,32 +112,106 @@ fn sim_boots_and_drives_headless() {
     }
     app.finish();
     app.cleanup();
+    app
+}
 
-    // Boot: asset IO is genuinely async and runs on wall-clock IO threads (the tank spec RON +
-    // tiger_1.glb), so poll until the spec loads and the app enters Playing. Each not-yet-Playing
-    // iteration yields 1 ms to those IO threads — a bare CPU-bound spin (no yield) starves them on
-    // a loaded 2-core CI runner and can burn through the whole bound before the glb finishes,
-    // which was the headless-boot flake. The sleep is WALL-CLOCK only: the clock is still
-    // `ManualDuration(ZERO)` here (Phase 1 below), so no sim tick advances and the frozen-load
-    // invariant documented above holds untouched. A wall-clock deadline (not a fixed spin count)
-    // makes the wait obviously bounded and deadlock-free — and the Playing early-exit keeps the
-    // fast path (local machine, IO already done) spin-free.
-    let boot_deadline = std::time::Instant::now() + Duration::from_secs(30);
+/// Exactly what the boot is still waiting on, spelled out. The old message ("spec or scene load
+/// failed") conflated *slow* with *broken* and cost a full investigation to tell apart; this one is
+/// meant to be read straight from a CI log.
+fn boot_diagnosis(app: &App, elapsed: Duration) -> String {
+    let world = app.world();
+    let state = *world.resource::<State<AppState>>().get();
+    let assets = world.resource::<AssetServer>();
+    let specs = world.resource::<Assets<TankSpec>>();
+    let geometry = world.get_resource::<ExtractedTankGeometry>().is_some();
+
+    // The three gates `tank::spawn_tank_when_loaded` waits on, reported individually.
+    let (spec_state, scene_state, spec_parsed) = match world.get_resource::<PendingTankAssets>() {
+        Some(p) => (
+            format!("{:?}", assets.load_state(&p.spec)),
+            format!("{:?}", assets.load_state(&p.scene)),
+            specs.get(&p.spec).is_some(),
+        ),
+        // Removed only by the spawn itself, which sets `Playing` in the same run — so if it is gone
+        // while we are still Loading, the state machine, not the assets, is the suspect.
+        None => {
+            let gone = "<resource gone — the spawn already ran>".to_string();
+            (gone.clone(), gone, false)
+        }
+    };
+
+    // Size on disk catches the other way this can break: a Git LFS **pointer file** (~130 bytes of
+    // text) instead of the 65 MB model, which is what a checkout without `lfs: true` leaves behind.
+    let glb = crate::assets::asset_root().join(TIGER_GLB_PATH);
+    let glb_report = match std::fs::metadata(&glb) {
+        Ok(m) if m.len() < 1024 => format!(
+            "{} — {} bytes: THIS IS A GIT LFS POINTER, not the model (checkout without `lfs: true`)",
+            glb.display(),
+            m.len()
+        ),
+        Ok(m) => format!("{} — {} bytes", glb.display(), m.len()),
+        Err(e) => format!("{} — CANNOT STAT: {e}", glb.display()),
+    };
+
+    format!(
+        "sim never reached AppState::Playing headless after {:.1} s (deadline {:?}).\n\
+         \n\
+         The boot waits on three gates (tank::spawn_tank_when_loaded); their state right now:\n  \
+           AppState ............... {state:?}\n  \
+           spec  (tiger_1.tank.ron) {spec_state}\n  \
+           scene (tiger_1.glb) .... {scene_state}\n  \
+           TankSpec parsed ........ {spec_parsed}\n  \
+           ExtractedTankGeometry .. {geometry}  (bake::extract_at_startup, Startup)\n  \
+           glb on disk ............ {glb_report}\n\
+         \n\
+         How to read this:\n  \
+           * still `Loading` + a full-size glb -> the box was too slow or too contended to finish\n    \
+             the asset IO in time. NOT a broken asset. Check whether several full apps booted at\n    \
+             once (see BOOT_LEASE above — they are supposed to take turns).\n  \
+           * `Failed(..)` -> a genuine load failure; the error is printed in the state above.\n  \
+           * a ~130-byte glb -> a Git LFS pointer, not the model: the checkout ran without `lfs: true`.\n  \
+           * `NotLoaded` -> `load_tank_assets` never ran: a plugin-wiring bug, not an asset problem.",
+        elapsed.as_secs_f32(),
+        BOOT_DEADLINE,
+    )
+}
+
+/// Boot the sim headless and run it to a bound rig: `Playing` reached and both tanks' roadwheels
+/// instantiated from the real Tiger scene. The sim clock is still FROZEN on return — callers start
+/// it when they want time to pass.
+///
+/// Serialized against the other headless boots by [`BOOT_LEASE`]; the returned [`BootedSim`] holds
+/// that lease, and the deadline clock only starts once the lease is in hand (a test queued behind a
+/// sibling must not burn its own boot budget waiting its turn).
+fn booted_sim() -> BootedSim {
+    let lease = BOOT_LEASE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let mut app = headless_app();
+
+    // Asset IO is genuinely async on wall-clock IO threads (the spec RON + tiger_1.glb), so poll
+    // until the spawn gate opens and the app enters Playing. Each not-yet-Playing pass yields 1 ms
+    // to those IO threads: a bare CPU-bound spin starves them. The sleep is WALL-CLOCK only — the
+    // clock is `ManualDuration(ZERO)` here, so no sim tick advances and the frozen-load invariant
+    // above holds untouched.
+    let started = Instant::now();
     loop {
         app.update();
         if *app.world().resource::<State<AppState>>().get() == AppState::Playing {
             break;
         }
-        assert!(
-            std::time::Instant::now() < boot_deadline,
-            "sim never reached Playing headless — spec or scene load failed"
-        );
+        let elapsed = started.elapsed();
+        assert!(elapsed < BOOT_DEADLINE, "{}", boot_diagnosis(&app, elapsed));
         std::thread::sleep(Duration::from_millis(1));
     }
 
-    // Phase 1 (sim time frozen): poll real-time asset IO until both rigs are fully bound.
+    // Still real-time asset IO (sim clock frozen): wait for the scene to instantiate and the rigs to
+    // bind. Both tanks together carry 32 roadwheels; the muzzles/weapons land in the same bind, so
+    // this is also what makes a bore available to `fire`.
     let mut wheels = 0;
-    for _ in 0..5000 {
+    let started = Instant::now();
+    while started.elapsed() < BOOT_DEADLINE {
         app.update();
         let world = app.world_mut();
         wheels = world.query::<&crate::tank::Roadwheel>().iter(world).count();
@@ -99,10 +222,38 @@ fn sim_boots_and_drives_headless() {
     }
     assert!(
         wheels >= 32,
-        "rigs never bound headless (scene/spec bind failed?); roadwheels: {wheels}"
+        "the sim reached Playing but the rigs never bound headless — the Tiger scene instantiated \
+         no roadwheels (expected 32 across the two tanks, saw {wheels}). The spec and scene both \
+         loaded, so this is a scene-bind/spec-match failure, not an asset-IO one.",
     );
 
-    // Phase 2: start the clock and let the suspension ground and settle.
+    BootedSim { app, _lease: lease }
+}
+
+/// [`booted_sim`] with the sim clock started and the tanks settled onto their suspension — the
+/// shared scaffolding for the shooting tests, which need the REAL tiger geometry (a synthetic plate
+/// cannot reproduce a muzzle that recoils behind its own mantlet).
+fn booted_sp_app() -> BootedSim {
+    let mut sim = booted_sim();
+    sim.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+        16,
+    )));
+    for _ in 0..30 {
+        sim.update();
+    }
+    sim
+}
+
+/// Boot the sim headless, then drive the tank by writing its `TankCommand` directly — the exact
+/// path a server takes applying a remote client's command (no device gather mounted).
+#[test]
+fn sim_boots_and_drives_headless() {
+    // Boot to a bound rig with the sim clock still frozen — this test then starts the clock itself,
+    // because grounding the suspension from a standstill is part of what it proves.
+    let mut app = booted_sim();
+
+    // Start the clock (16 ms per `update()`, so the 64 Hz fixed sim ticks once per update) and let
+    // the suspension ground and settle.
     app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
         16,
     )));
@@ -179,80 +330,8 @@ fn mg_rounds_stream_tracers_and_spawn_no_shell_scene() {
     use crate::ballistics::{ShellPath, TracerStreak};
     use bevy::world_serialization::WorldAssetRoot;
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .set(bevy::render::RenderPlugin {
-                render_creation: bevy::render::settings::WgpuSettings {
-                    backends: None,
-                    ..default()
-                }
-                .into(),
-                ..default()
-            })
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: bevy::window::ExitCondition::DontExit,
-                ..default()
-            })
-            .disable::<bevy::winit::WinitPlugin>(),
-    )
-    .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO));
-    app.add_plugins((
-        avian3d::prelude::PhysicsPlugins::default(),
-        SimPlugin,
-        crate::tank::sp_spawn_plugin,
-    ));
-
-    while app.plugins_state() == bevy::app::PluginsState::Adding {
-        std::thread::sleep(Duration::from_millis(1));
-    }
-    app.finish();
-    app.cleanup();
-
-    // Boot to Playing. Same spin-vs-async-IO race as the sibling test above: poll `app.update()`,
-    // but yield 1 ms of WALL-CLOCK time (clock still `ManualDuration(ZERO)`, so no sim tick
-    // advances) to the glb/RON IO threads each not-yet-Playing pass, bounded by a wall-clock
-    // deadline. Without the yield, a loaded CI runner can starve the IO threads and exhaust the
-    // bound before the assets load — the headless-boot flake. The Playing early-exit keeps the
-    // fast path spin-free.
-    let boot_deadline = std::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        app.update();
-        if *app.world().resource::<State<AppState>>().get() == AppState::Playing {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < boot_deadline,
-            "sim never reached Playing headless",
-        );
-        std::thread::sleep(Duration::from_millis(1));
-    }
-
-    // Real-time asset IO (sim clock frozen) until the rig binds — the muzzles/weapons must exist for
-    // `fire` to find a bore.
-    let mut wheels = 0;
-    for _ in 0..5000 {
-        app.update();
-        let world = app.world_mut();
-        wheels = world.query::<&crate::tank::Roadwheel>().iter(world).count();
-        if wheels >= 32 {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(1));
-    }
-    assert!(
-        wheels >= 32,
-        "rig never bound headless; roadwheels: {wheels}"
-    );
-
-    // Start the sim clock and let the tank settle a few ticks.
-    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
-        16,
-    )));
-    for _ in 0..30 {
-        app.update();
-    }
+    // A booted, settled rig: the muzzles/weapons must exist for `fire` to find a bore.
+    let mut app = booted_sp_app();
 
     let mut tank_q = app
         .world_mut()
@@ -313,79 +392,6 @@ fn mg_rounds_stream_tracers_and_spawn_no_shell_scene() {
         "an MG round spawned a shell.glb scene root (WorldAssetRoot) — the very bug this fixes: MG \
          bullets must NOT render as 88 mm shell scenes",
     );
-}
-
-/// Boot the sim headless (the dedicated-server recipe above) with the single-player two-tank scenario,
-/// run it to a bound, settled rig, and hand back the app — the shared scaffolding for the shooting
-/// tests below, which need the REAL tiger geometry (a synthetic plate cannot reproduce a muzzle that
-/// recoils behind its own mantlet).
-fn booted_sp_app() -> App {
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .set(bevy::render::RenderPlugin {
-                render_creation: bevy::render::settings::WgpuSettings {
-                    backends: None,
-                    ..default()
-                }
-                .into(),
-                ..default()
-            })
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: bevy::window::ExitCondition::DontExit,
-                ..default()
-            })
-            .disable::<bevy::winit::WinitPlugin>(),
-    )
-    .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO));
-    app.add_plugins((
-        avian3d::prelude::PhysicsPlugins::default(),
-        SimPlugin,
-        crate::tank::sp_spawn_plugin,
-    ));
-    while app.plugins_state() == bevy::app::PluginsState::Adding {
-        std::thread::sleep(Duration::from_millis(1));
-    }
-    app.finish();
-    app.cleanup();
-
-    // Boot to Playing on wall-clock asset IO with the sim clock frozen (see the boot notes above).
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        app.update();
-        if *app.world().resource::<State<AppState>>().get() == AppState::Playing {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "sim never reached Playing headless",
-        );
-        std::thread::sleep(Duration::from_millis(1));
-    }
-    let mut wheels = 0;
-    for _ in 0..5000 {
-        app.update();
-        let world = app.world_mut();
-        wheels = world.query::<&crate::tank::Roadwheel>().iter(world).count();
-        if wheels >= 32 {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(1));
-    }
-    assert!(
-        wheels >= 32,
-        "rig never bound headless; roadwheels: {wheels}"
-    );
-
-    // Start the sim clock and let the tanks settle onto their suspension.
-    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
-        16,
-    )));
-    for _ in 0..30 {
-        app.update();
-    }
-    app
 }
 
 /// SHOOTER SELF-EXCLUSION on the REAL asset — the coax bug, at its root.
