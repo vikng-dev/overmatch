@@ -51,7 +51,10 @@ pub(crate) struct VfxParams {
     pub frame: Vec4,
     /// x: erosion threshold, y: erosion sharpness, z: life fraction (LUT row), w: overall alpha.
     pub fade: Vec4,
-    /// x: emissive boost at LUT heat 1.0.
+    /// x: emissive boost at LUT heat 1.0, y: BLEND CONTRACT flag the shader reads — `1.0` = additive
+    /// glow (`AlphaMode::Add`), `0.0` = alpha-over mass (`AlphaMode::Blend`). Both alpha modes share
+    /// the premultiplied blend state, so the shader must premultiply the additive path itself; this
+    /// lane tells it which (see `vfx_billboard.wgsl`).
     pub glow: Vec4,
 }
 
@@ -314,6 +317,17 @@ pub(crate) fn gradient_lut(
         TextureFormat::Rgba8Unorm,
         RenderAssetUsages::RENDER_WORLD,
     ))
+}
+
+/// Hermite `smoothstep` (the GLSL/WGSL one) — a clamped 0→1 ease over `[e0, e1]`. Used by the
+/// procedural LUT floors and the trail's arc-anchored head fade; kept here so the view layer shares
+/// one implementation.
+pub(crate) fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
+    if e1 <= e0 {
+        return if x >= e1 { 1.0 } else { 0.0 };
+    }
+    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 /// The shared unit quad for billboards (1×1 m, facing +Z, sprite-up along +Y — `Rectangle`'s UV

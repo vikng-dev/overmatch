@@ -32,7 +32,7 @@ use bevy::world_serialization::WorldAssetRoot;
 use crate::ballistics::ShellPath;
 
 use super::ViewRng;
-use super::billboard::gradient_lut;
+use super::billboard::{gradient_lut, smoothstep};
 
 /// Minimum spacing (m) between captured trail points — the emit-every-N-meters cap. At the 88's
 /// ~773 m/s that is ~55 points/s.
@@ -51,6 +51,10 @@ const TRAIL_DRIFT_RISE: f32 = 0.35;
 /// Live-trail ring cap (the 88 reloads in 3 s and trails outlive shells by ~2 s, so >2 live trails
 /// per gun is already a refire storm).
 const TRAIL_CAP: usize = 8;
+/// Arc length (m) over which the trail fades IN from the muzzle end (survey stage 1): the birth seam
+/// at the gun softens over the first stretch, and the oldest end pinches (both width and alpha)
+/// instead of ending as a hard tube cap. The muzzle puff masks whatever the fade leaves.
+const HEAD_FADE_ARC: f32 = 25.0;
 
 pub(super) fn plugin(app: &mut App) {
     app.init_resource::<TrailRing>()
@@ -367,6 +371,10 @@ fn ribbon_vertices(
     let mut positions = Vec::with_capacity(n * 2);
     let mut uvs = Vec::with_capacity(n * 2);
     let mut colors = Vec::with_capacity(n * 2);
+    // Carried across stations so a degenerate side vector (viewing straight down the trail axis)
+    // reuses the last good frame instead of snapping to a world axis — the old `Vec3::Y` fallback
+    // flipped the ribbon's down-axis frame-to-frame. `Vec3::Y` seeds only the first station.
+    let mut last_side = Vec3::Y;
     for i in 0..n {
         let dir = if i == 0 {
             centers[1] - centers[0]
@@ -378,14 +386,27 @@ fn ribbon_vertices(
         let side = dir
             .cross(cam - centers[i])
             .try_normalize()
-            .unwrap_or(Vec3::Y);
-        let half = 0.5 * (TRAIL_WIDTH_BIRTH + ages[i] * TRAIL_WIDTH_GROWTH);
+            .unwrap_or(last_side);
+        last_side = side;
+        // Arc-anchored fade toward the muzzle end (stage 1a): 0 at the origin, easing to 1 over the
+        // first HEAD_FADE_ARC metres.
+        let fade = smoothstep(0.0, HEAD_FADE_ARC, arcs[i]);
+        // Width taper toward the muzzle (stage 1b): the age-grown half-width is pinched to a quarter
+        // at the origin, back to full past the fade — a lens/wisp, not a tube.
+        let half = 0.5 * (TRAIL_WIDTH_BIRTH + ages[i] * TRAIL_WIDTH_GROWTH) * (0.25 + 0.75 * fade);
+        // View-parallel dim (stage 1c, optional): a segment seen edge-on is a thin bright sliver —
+        // dim it toward transparent as its axis aligns with the view direction.
+        let seg = dir.normalize_or_zero();
+        let view = (cam - centers[i]).normalize_or_zero();
+        let view_dim = 1.0 - smoothstep(0.97, 0.999, seg.dot(view).abs());
+        // The unused color.a lane now carries head-fade × view-dim; the shader multiplies alpha by it.
+        let alpha = fade * view_dim;
         let age_frac = (ages[i] / TRAIL_POINT_LIFETIME).clamp(0.0, 1.0);
         for (edge, u) in [(-1.0, 0.0), (1.0, 1.0)] {
             let p = centers[i] + side * (half * edge);
             positions.push([p.x, p.y, p.z]);
             uvs.push([u, arcs[i]]);
-            colors.push([age_frac, seeds[i], 0.0, 1.0]);
+            colors.push([age_frac, seeds[i], 0.0, alpha]);
         }
     }
     (positions, uvs, colors)
@@ -493,8 +514,9 @@ mod tests {
     }
 
     /// The strip math: 2 vertices per station (stored points + the live head), 6 indices per quad,
-    /// V anchored to capture-time arc length, width growing with point age, and degenerate inputs
-    /// yielding empty buffers instead of panicking.
+    /// V anchored to capture-time arc length, the stage-1 lens/wisp width profile (age grows it, the
+    /// muzzle-end fade pinches it), the head-fade alpha lane, and degenerate inputs yielding empty
+    /// buffers instead of panicking.
     #[test]
     fn ribbon_vertices_shape_and_taper() {
         let points = vec![
@@ -506,14 +528,22 @@ mod tests {
         let cam = Vec3::new(15.0, 20.0, 40.0);
         let (positions, uvs, colors) = ribbon_vertices(&points, head, cam);
         assert_eq!(positions.len(), 8, "2 verts per station, head included");
-        // Width tapers with AGE: the oldest station's vertex pair is the widest.
         let width_at = |i: usize| {
             let a = Vec3::from(positions[i * 2]);
             let b = Vec3::from(positions[i * 2 + 1]);
             a.distance(b)
         };
-        assert!(width_at(0) > width_at(2), "older smoke is wider");
-        assert!(width_at(2) > width_at(3), "the head (age 0) is narrowest");
+        // Lens/wisp profile: the mid station is widest — the muzzle end (arc 0) is pinched by the
+        // fade, and the head (age 0) narrows by the age term.
+        assert!(
+            width_at(1) > width_at(0),
+            "the muzzle end is pinched (fade)"
+        );
+        assert!(width_at(1) > width_at(3), "the mid is wider than the head");
+        assert!(
+            width_at(2) > width_at(3),
+            "the head (age 0) is narrowest at the fresh end"
+        );
         // V rides the capture-time arc, monotonic toward the head.
         assert_eq!(uvs[0][1], 0.0);
         assert_eq!(uvs[2][1], 15.0);
@@ -523,6 +553,12 @@ mod tests {
         );
         // The age lane feeds the shader's erosion: oldest ≈ eroded, head fresh.
         assert!(colors[0][0] > 0.4 && colors[6][0] == 0.0);
+        // The head-fade alpha lane: fully transparent at the muzzle end (arc 0), opaque past the fade.
+        assert_eq!(colors[0][3], 0.0, "muzzle-end fade is fully in");
+        assert!(
+            colors[4][3] > 0.5,
+            "past HEAD_FADE_ARC the trail is at full alpha"
+        );
 
         // Degenerate: one station (or none) builds nothing.
         let (p, _, _) = ribbon_vertices(&points[..1], None, cam);
