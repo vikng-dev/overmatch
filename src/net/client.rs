@@ -407,6 +407,19 @@ pub fn run() {
     // same tick), and it is the marker's ONLY writer. See `crate::Replaying`.
     app.init_resource::<crate::Replaying>();
     app.add_systems(FixedUpdate, mark_replaying.before(GameplaySet));
+    // F3 (tick-triggered consumption): republish the predicted present `P` to the sim layer each
+    // forward tick, so the ballistics march can consume an OVERDUE sanctioned outcome for a shell
+    // that MISSED the plate the server resolved on (see `crate::PredictedPresent`). `.before` the
+    // march in `GameplaySet`; gated `not(is_in_rollback)` so a replay does not stamp `P` backward to
+    // a historical tick (the march is skipped during replay anyway — F1 — so this only keeps the value
+    // clean on the tick the march next reads it forward).
+    app.init_resource::<crate::PredictedPresent>();
+    app.add_systems(
+        FixedUpdate,
+        publish_predicted_present
+            .before(GameplaySet)
+            .run_if(not(is_in_rollback)),
+    );
     app.add_systems(
         FixedUpdate,
         apply_pending_recoil_kicks
@@ -986,9 +999,11 @@ fn receive_fire_events(
                         origin: keyframe.origin,
                         direction: keyframe.direction,
                         speed: keyframe.speed,
-                        // `bounce_tick` rides the wire (audit / future RTT-adaptive re-aging) but the
-                        // sim re-ages by HOLD duration instead (which equals present − bounce tick), so
-                        // it is not carried into the buffer — see `ballistics::Held`.
+                        // The server bounce tick, unwrapped from the wire `Tick` to the net-neutral
+                        // `u32` the sim keys on. The normal HOLD path re-ages by hold duration (which
+                        // equals present − bounce tick); F3's tick-triggered path compares the
+                        // predicted present against this directly to consume a pose-divergent MISS.
+                        bounce_tick: keyframe.bounce_tick.0,
                         sequence: keyframe.sequence,
                     },
                 );
@@ -1000,14 +1015,17 @@ fn receive_fire_events(
                 // either: the normal feeds `Impact::normal`, whose consumers normalize with a
                 // fallback by contract. Store idempotently (first wins — at most one terminal per
                 // shot, so a redundancy-window duplicate is a no-op); the march consumes it, ordered
-                // behind the shot's bounces by `after_bounces`. `impact_tick` rides the wire for
-                // audit only — the client resolves on receipt.
+                // behind the shot's bounces by `after_bounces`. On the normal path the client resolves
+                // on receipt (at contact or hold); F3's tick-triggered path compares the predicted
+                // present against `impact_tick` (unwrapped to the net-neutral `u32`) to finalize a
+                // pose-divergent MISS the authority already resolved elsewhere.
                 sanctioned.insert_terminal(
                     confirm.shot,
                     SanctionedTerminal {
                         position: confirm.position,
                         normal: confirm.normal,
                         penetrated: confirm.penetrated,
+                        impact_tick: confirm.impact_tick.0,
                         after_bounces: confirm.after_bounces,
                     },
                 );
@@ -1033,6 +1051,18 @@ fn age_sanctioned_shots(mut sanctioned: ResMut<SanctionedShots>, time: Res<Time>
 /// gameplay; maintaining the flag when the march can't run is harmless).
 fn mark_replaying(mut replaying: ResMut<crate::Replaying>, rollback: Query<(), With<Rollback>>) {
     replaying.0 = !rollback.is_empty();
+}
+
+/// F3 writer for the net-neutral [`crate::PredictedPresent`] marker: republish this client's
+/// predicted present tick `P` to the sim layer each forward tick. Every cosmetic shell lives at `P`,
+/// so the ballistics march compares an overdue sanctioned outcome's server tick against this one
+/// value. `LocalTimeline::tick()` is the same present `bridge_action_state_to_tank_command` and
+/// `receive_fire_events` read (the tick the own tank is simulated at, ahead of the server).
+fn publish_predicted_present(
+    mut present: ResMut<crate::PredictedPresent>,
+    timeline: Res<LocalTimeline>,
+) {
+    present.0 = timeline.tick().0;
 }
 
 /// The largest catch-up a `FireEvent` may request. A shot older than the deepest state window we would

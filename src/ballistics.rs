@@ -16,7 +16,7 @@ use bevy::prelude::*;
 
 use crate::damage::{VolumeOf, hit_ancestor};
 use crate::state::GameplaySet;
-use crate::{ClientReplica, Layer, Replaying, ShotId};
+use crate::{ClientReplica, Layer, PredictedPresent, Replaying, ShotId};
 
 /// Gravity applied to shells each fixed tick (m/s²).
 const GRAVITY: Vec3 = Vec3::new(0.0, -9.81, 0.0);
@@ -362,6 +362,17 @@ struct Held {
 /// (the pre-slice behaviour).
 const RICOCHET_HOLD_TICKS: u32 = 16;
 
+/// F3 tick-triggered consumption margin. A client shell reaches the plate at local tick ≈ the server
+/// bounce/impact tick; if it MISSES (its interpolated-pose flight grazes past a plate the server's
+/// round resolved on) it never contacts and never holds. Once the predicted present has passed the
+/// sanctioned outcome's server tick by THIS many ticks without a local contact, the march consumes it
+/// anyway (re-seed at the server bounce, or finalize at the server impact). Sized to clear normal
+/// contact slop — a legitimate contact happens right at present ≈ outcome tick and leaves the
+/// free-flight path immediately, so a few ticks of grace avoids force-consuming a shell that is about
+/// to contact — while staying short enough that a genuine miss snaps to truth after only metres of
+/// fly-past, not the full hold window. ~94 ms at 64 Hz.
+const OVERDUE_MARGIN_TICKS: u32 = 6;
+
 /// One server-sanctioned ricochet, delivered to a net client's ballistics march so its cosmetic
 /// shell — an observer's replica or the shooter's own predicted round — re-seeds from truth instead
 /// of improvising a bounce against interpolated geometry. Net-neutral (no lightyear types) so
@@ -375,6 +386,12 @@ pub(crate) struct SanctionedBounce {
     pub direction: Vec3,
     /// The post-bounce speed (m/s).
     pub speed: f32,
+    /// The server tick this bounce resolved on (net-neutral `u32`; `net::client` unwraps the wire
+    /// `Tick`). Enables F3's tick-triggered consumption: a client shell whose interpolated-pose flight
+    /// MISSED this plate never contacts, so it is re-seeded here once the predicted present passes
+    /// `bounce_tick` by a margin (`OVERDUE_MARGIN_TICKS`) — instead of flying on through where the
+    /// authoritative round bounced. On the normal hold path the re-age equals `present − bounce_tick`.
+    pub bounce_tick: u32,
     /// This bounce's 0-based ordinal within the shot — consumed strictly in order (`0`, then `1`, …),
     /// so multiple ricochets on one shell re-seed in the sequence the server resolved them.
     pub sequence: u32,
@@ -396,6 +413,12 @@ pub(crate) struct SanctionedTerminal {
     pub normal: Vec3,
     /// The server's penetration verdict — gates the flame lick, exactly as the authority's read did.
     pub penetrated: bool,
+    /// The server tick this terminal resolved on (net-neutral `u32`; `net::client` unwraps the wire
+    /// `Tick`). Enables F3's tick-triggered consumption: a client shell whose interpolated-pose flight
+    /// MISSED the struck plate never contacts, so it is finalized at the server's read once the
+    /// predicted present passes `impact_tick` by a margin (`OVERDUE_MARGIN_TICKS`) — instead of holding
+    /// for a contact the authority already resolved elsewhere.
+    pub impact_tick: u32,
     /// How many ricochets the authority resolved BEFORE this terminal. A shell only consumes the
     /// terminal once it has re-seeded through that many bounces (its `ricochets` count matches), so a
     /// multi-bounce shot's terminal can never fire early at the wrong plate while a bounce keyframe is
@@ -1086,6 +1109,10 @@ fn integrate_projectiles(
     // cosmetic march below is skipped on a replayed tick — see the early return. Absent on the
     // authority (never rolls back).
     replaying: Option<Res<Replaying>>,
+    // F3: this net client's predicted present tick `P` (every cosmetic shell lives at `P`). Read to
+    // consume an OVERDUE sanctioned outcome for a shell that MISSED the plate the server resolved on.
+    // Present only on a net client; absent on the authority (it resolves shots for real).
+    present: Option<Res<PredictedPresent>>,
     // EXPERIMENTAL cost-attribution A/B lever (`SPIKE_MG_SHORTCIRCUIT`, default off — see the type).
     shortcircuit: Res<MgShortCircuit>,
     // Sim-cost recorder attribution sink (`SPIKE_COST_TRACE`): absent unless the recorder is armed, so
@@ -1114,6 +1141,9 @@ fn integrate_projectiles(
     let dt = time.delta_secs();
     // Authority = not a replica: only then does a hit actually mutate health here.
     let deposit = replica.is_none();
+    // F3: the predicted present tick, if this is a net client — the clock the overdue-consumption
+    // check below compares each sanctioned outcome's server tick against. Absent on the authority.
+    let present = present.map(|p| p.0);
     // The march casts against terrain (which stops the shell) and ballistic volumes (which it
     // crosses); the struck entity being a `BallisticVolume` is what tells the two apart.
     let world = SpatialQueryFilter::from_mask(
@@ -1236,22 +1266,103 @@ fn integrate_projectiles(
                 commands.entity(entity).despawn();
                 continue;
             }
-            // Still waiting. Past the grace window, finalize as the fail-closed truncation — a
+            // Still waiting. Past the grace window, the shell degrades to the fail-closed fallback — a
             // dropped keyframe/confirm must never leave a round frozen forever, and correctness never
             // depends on delivery. Otherwise stay frozen this tick (no advance, no impact yet).
             held.ticks += 1;
             if held.ticks > RICOCHET_HOLD_TICKS {
-                commands.trigger(Impact {
-                    position: transform.translation,
-                    normal: held.normal,
-                    caliber: projectile.caliber,
-                    surface: ImpactSurface::Armor,
-                    penetrated: false,
-                    deflection: None,
-                });
+                // F3(ii) — QUIET DISSOLVE, not a fabricated spark. A held shell that never received a
+                // sanctioned outcome is one of two things and we cannot tell which: a genuinely LOST
+                // verdict (the server DID resolve this contact, but every redundant confirm/keyframe
+                // dropped) or a pose-divergent MISS (this client contacted a plate the server's round
+                // sailed past — the interpolated target pose differs at grazing geometry). A neutral
+                // spark here reads as a confirmed contact, but in the miss case the authority resolved
+                // NO contact at this point — the spark fabricates geometry/verdict the server never
+                // sanctioned, the exact thing invariant 2 and the honesty doctrine forbid. So end the
+                // shell silently: the (already hidden) round is despawned and its trail simply stops at
+                // the last free-flight point. No spark for a contact the authority never confirmed.
+                // (A server-confirmed contact whose confirm merely arrived LATE is consumed by the
+                // tick-triggered overdue path below or the pre-armed/hold paths — this fallback is only
+                // reached when NO sanctioned outcome exists for the shot at all.)
                 commands.entity(entity).despawn();
             }
             continue;
+        }
+
+        // F3: TICK-TRIGGERED CONSUMPTION of an overdue sanctioned outcome — the pose-divergence MISS
+        // case. A net client flies its cosmetic shell against the interpolated (~100 ms-stale) target
+        // pose; where that pose differs from the server's at grazing geometry (exactly where ricochets
+        // live) the client shell can sail PAST the plate the server's round resolved on. It then never
+        // contacts, so it neither pre-arms nor holds — the sanctioned bounce/terminal would age out
+        // unconsumed and the observer would watch the round fly on through where the authoritative
+        // round bounced or terminated (the precise divergence invariant 2 exists to kill, resurrected
+        // by sub-metre pose lag). So once our predicted present has passed the sanctioned outcome's
+        // server tick by `OVERDUE_MARGIN_TICKS` WITHOUT a local contact, consume it by the clock:
+        // re-seed at the server bounce, or finalize at the server impact. This is also the seam a
+        // future NON-CONTACT outcome — an airburst-HE detonation with no armor contact at all — slots
+        // into: an outcome resolved by its tick, not by a ray. Net-client only (`!deposit`); the
+        // authority resolves shots for real and never reads `present`.
+        if !deposit
+            && let (Some(shot), Some(buf), Some(present)) = (shot, sanctioned.as_ref(), present)
+        {
+            let consumed = marks.ricochets.len();
+            if let Some(bounce) = buf.next(shot.0, consumed) {
+                if present.saturating_sub(bounce.bounce_tick) > OVERDUE_MARGIN_TICKS {
+                    // Re-seed onto server truth, re-aged forward to the present by exactly
+                    // present − bounce_tick — the SAME catch-up the hold path applies (`Held`'s doc),
+                    // here driven by the clock rather than a hold count. The shell jumps to the
+                    // sanctioned bounce and flies on from there next tick; it is already visible (it
+                    // never held), so there is no hidden state to clear. The spark reads with the
+                    // sanctioned deflection fan; the surface normal is not on the keyframe wire, so it
+                    // orients off the post-bounce direction (the same approximation the pre-armed path's
+                    // client raycast stands in for).
+                    let re_age = present - bounce.bounce_tick;
+                    let seed_vel = Dir3::new(bounce.direction)
+                        .map_or(projectile.velocity, |d| Vec3::from(d) * bounce.speed);
+                    let (rpos, rvel, arc) =
+                        fast_forward_shell(bounce.origin, seed_vel, projectile.drag_k, dt, re_age);
+                    for point in arc {
+                        path.points.push(point);
+                    }
+                    marks.ricochets.push(bounce.origin);
+                    commands.trigger(Impact {
+                        position: bounce.origin,
+                        normal: bounce.direction,
+                        caliber: projectile.caliber,
+                        surface: ImpactSurface::Armor,
+                        penetrated: false,
+                        deflection: Some(bounce.direction),
+                    });
+                    transform.translation = rpos;
+                    if let Ok(d) = Dir3::new(rvel) {
+                        transform.look_to(d, Vec3::Y);
+                    }
+                    projectile.velocity = rvel;
+                    readout.speed = rvel.length();
+                    readout.capability = capability(projectile.mass, rvel.length());
+                    continue;
+                }
+            } else if let Some(terminal) = buf.terminal(shot.0, consumed)
+                && present.saturating_sub(terminal.impact_tick) > OVERDUE_MARGIN_TICKS
+            {
+                // Finalize at the server's read — position, normal, and the `penetrated` verdict
+                // that gates the flame lick — the full honest armor read the authority resolved,
+                // even though this client's shell never touched the (mis-posed) plate. The trail
+                // reaches the server impact point, then the shell ends. (The `else if` is keyed on NO
+                // bounce being owed: `buf.terminal` would return `None` anyway while a bounce's
+                // keyframe is still in flight, by its `after_bounces` gate.)
+                path.points.push(terminal.position);
+                commands.trigger(Impact {
+                    position: terminal.position,
+                    normal: terminal.normal,
+                    caliber: projectile.caliber,
+                    surface: ImpactSurface::Armor,
+                    penetrated: terminal.penetrated,
+                    deflection: None,
+                });
+                commands.entity(entity).despawn();
+                continue;
+            }
         }
 
         // Advance free-flight (gravity + drag on the velocity, then the position step) through the
@@ -2254,6 +2365,38 @@ mod march_tests {
             .id()
     }
 
+    /// A shell fired into OPEN AIR (away from any plate), carrying `shot` — used by the F1/F3 tests
+    /// that need a cosmetic round which free-flies without ever contacting armor.
+    fn spawn_free_shell(
+        app: &mut App,
+        origin: Vec3,
+        dir: Vec3,
+        speed: f32,
+        shot: ShotId,
+    ) -> Entity {
+        app.world_mut()
+            .spawn((
+                Projectile {
+                    velocity: dir.normalize() * speed,
+                    caliber: 0.088,
+                    mass: 10.2,
+                    drag_k: drag_k(0.088, 10.2),
+                },
+                ShellPath {
+                    points: vec![origin],
+                },
+                PenetrationMarks::default(),
+                SpallMarks::default(),
+                ShellReadout {
+                    speed,
+                    capability: capability(10.2, speed),
+                },
+                Transform::from_translation(origin).looking_to(dir, Vec3::Y),
+                Shot(shot),
+            ))
+            .id()
+    }
+
     /// Run the AUTHORITY (no `ClientReplica`) oblique ricochet and return the sanctioned bounce it
     /// raises — the server truth an observer must re-seed from.
     fn authority_bounce(shot: ShotId) -> CapturedBounce {
@@ -2308,6 +2451,9 @@ mod march_tests {
                 origin: bounce.origin,
                 direction: bounce.direction,
                 speed: bounce.speed,
+                // Inert in these tests (no `PredictedPresent` resource → the F3 overdue path is off);
+                // the hold/pre-armed paths under test don't read it.
+                bounce_tick: 0,
                 sequence: 0,
             },
         );
@@ -2411,6 +2557,9 @@ mod march_tests {
                 origin: bounce.origin,
                 direction: bounce.direction,
                 speed: bounce.speed,
+                // Inert in these tests (no `PredictedPresent` resource → the F3 overdue path is off);
+                // the hold/pre-armed paths under test don't read it.
+                bounce_tick: 0,
                 sequence: 0,
             },
         );
@@ -2588,6 +2737,9 @@ mod march_tests {
                 origin: bounce.origin,
                 direction: bounce.direction,
                 speed: bounce.speed,
+                // Inert in these tests (no `PredictedPresent` resource → the F3 overdue path is off);
+                // the hold/pre-armed paths under test don't read it.
+                bounce_tick: 0,
                 sequence: 0,
             },
         );
@@ -2607,11 +2759,13 @@ mod march_tests {
         );
     }
 
-    /// HOLD-THEN-EXPIRE. The keyframe NEVER arrives: past the grace window the shell degrades to
-    /// today's honest fail-closed truncation — one neutral armor spark (no improvised bounce fan) and
-    /// the shell is finalized. Correctness never depended on delivery.
+    /// HOLD-THEN-EXPIRE (F3(ii) — QUIET DISSOLVE). The keyframe NEVER arrives: past the grace window
+    /// the shell ends SILENTLY — despawned, its trail simply stops, and NO spark. A held shell that
+    /// got no sanctioned outcome is either a lost verdict or a pose-divergent miss, and a neutral spark
+    /// at a client-computed contact would fabricate a contact the authority never confirmed (invariant
+    /// 2 / the honesty doctrine). Correctness never depended on delivery.
     #[test]
-    fn observer_hold_expires_to_fail_closed_truncation() {
+    fn observer_hold_expires_to_quiet_dissolve() {
         let shot = a_shot();
         let mut app = replica_world(SanctionedShots::default()); // no keyframe ever arrives
         let shell = spawn_oblique_shell(&mut app, shot);
@@ -2624,21 +2778,11 @@ mod march_tests {
             app.world().get_entity(shell).is_err(),
             "the shell is finalized (despawned) once the grace window expires",
         );
-        let impacts = app.world().resource::<ImpactLog>().0.clone();
-        assert_eq!(
-            impacts.len(),
-            1,
-            "exactly one spark — the fail-closed neutral truncation, fired once at expiry",
-        );
         assert!(
-            impacts[0].deflection.is_none(),
-            "a neutral spark — the client never improvises a bounce it wasn't told about",
+            app.world().resource::<ImpactLog>().0.is_empty(),
+            "NO spark — a fabricated contact the authority never confirmed would violate the honesty \
+             doctrine; the shell dissolves quietly",
         );
-        assert!(
-            !impacts[0].penetrated,
-            "no flame lick on the fail-closed spark"
-        );
-        assert_eq!(impacts[0].surface, ImpactSurface::Armor);
     }
 
     /// MULTI-BOUNCE. Two sanctioned bounces (ordinals 0 then 1) are consumed strictly in order: the
@@ -2655,6 +2799,7 @@ mod march_tests {
             origin: Vec3::new(0.0, 2.0, 0.5),
             direction: Vec3::new(0.12, 0.0, -1.0).normalize(),
             speed: 480.0,
+            bounce_tick: 0, // inert (no `PredictedPresent` — F3 overdue path off)
             sequence: 0,
         };
         // Bounce 1: re-seed on the face, aimed AWAY (+Z) so the shell flies out and survives.
@@ -2662,6 +2807,7 @@ mod march_tests {
             origin: Vec3::new(0.0, 2.0, 0.05),
             direction: Vec3::Z,
             speed: 300.0,
+            bounce_tick: 0, // inert (no `PredictedPresent` — F3 overdue path off)
             sequence: 1,
         };
         let mut buf = SanctionedShots::default();
@@ -2760,6 +2906,9 @@ mod march_tests {
                 origin: bounce.origin,
                 direction: bounce.direction,
                 speed: bounce.speed,
+                // Inert in these tests (no `PredictedPresent` resource → the F3 overdue path is off);
+                // the hold/pre-armed paths under test don't read it.
+                bounce_tick: 0,
                 sequence: 0,
             },
         );
@@ -2797,11 +2946,11 @@ mod march_tests {
         );
     }
 
-    /// The own shell's keyframe LOST: same honest fail-closed truncation as an observer shell — one
-    /// neutral spark at expiry, shell finalized. (The own shell is not special-cased anywhere in the
+    /// The own shell's keyframe LOST: same honest F3(ii) QUIET DISSOLVE as an observer shell — no
+    /// spark at expiry, shell finalized silently. (The own shell is not special-cased anywhere in the
     /// march; this pins that its `ShotSource` changes nothing about the degradation.)
     #[test]
-    fn own_shell_keyframe_lost_fail_closes() {
+    fn own_shell_keyframe_lost_dissolves_quietly() {
         let shot = a_shot();
         let mut app = replica_world(SanctionedShots::default()); // no keyframe, ever
         let shell = spawn_oblique_shell(&mut app, shot);
@@ -2818,9 +2967,141 @@ mod march_tests {
             app.world().get_entity(shell).is_err(),
             "the own shell finalizes once the grace window expires",
         );
+        assert!(
+            app.world().resource::<ImpactLog>().0.is_empty(),
+            "no spark — the own shell dissolves quietly too (no fabricated contact)",
+        );
+    }
+
+    // --- F3: tick-triggered consumption of an overdue sanctioned outcome (the pose-divergent miss) ----
+
+    /// CLIENT-MISS / SERVER-HIT (bounce). The client's shell flies against a target pose the server's
+    /// didn't share, so it sails PAST the plate and never contacts — but the server DID resolve a
+    /// bounce there. Once the predicted present passes the bounce's server tick by the margin, the
+    /// overdue path re-seeds the shell at the server bounce (with the sanctioned directional spark)
+    /// instead of letting it fly on through where the authoritative round bounced (invariant 2).
+    #[test]
+    fn overdue_bounce_reseeds_a_pose_divergent_miss() {
+        let shot = a_shot(); // fire_tick = 100
+        let mut app = replica_world(SanctionedShots::default());
+        // Present well past the server bounce tick — the client shell missed and flew on.
+        app.insert_resource(crate::PredictedPresent(shot.fire_tick + 20));
+        let bounce_origin = Vec3::new(1.0, 2.0, 3.0);
+        app.world_mut().resource_mut::<SanctionedShots>().insert(
+            shot,
+            SanctionedBounce {
+                origin: bounce_origin,
+                direction: Vec3::Z,
+                speed: 500.0,
+                // present(120) − bounce_tick(105) = 15 > OVERDUE_MARGIN_TICKS.
+                bounce_tick: shot.fire_tick + 5,
+                sequence: 0,
+            },
+        );
+        // A shell flying in open air high above the plate — it never contacts.
+        let shell = spawn_free_shell(&mut app, Vec3::new(0.0, 20.0, 5.0), Vec3::Z, 800.0, shot);
+
+        app.update(); // the overdue check consumes the bounce this tick
+
+        let marks = app.world().get::<PenetrationMarks>(shell).unwrap();
+        assert_eq!(marks.ricochets.len(), 1, "the overdue bounce is consumed");
+        assert!(
+            marks.ricochets[0].distance(bounce_origin) < 1.0e-3,
+            "re-seeded at the SERVER bounce point, not where the client's round flew",
+        );
+        assert!(
+            app.world().get::<Projectile>(shell).is_some(),
+            "the shell survives and flies on from the server bounce",
+        );
+        let pos = app.world().get::<Transform>(shell).unwrap().translation;
+        assert!(
+            pos.distance(bounce_origin) > 1.0e-2,
+            "re-aged forward of the bounce (caught up to the present)",
+        );
         let impacts = app.world().resource::<ImpactLog>().0.clone();
-        assert_eq!(impacts.len(), 1, "one neutral fail-closed spark");
-        assert!(impacts[0].deflection.is_none(), "no improvised bounce fan");
+        assert_eq!(impacts.len(), 1, "the sanctioned bounce sparks");
+        assert!(
+            impacts[0].deflection.is_some(),
+            "with its directional fan (server truth), not a fabricated neutral spark",
+        );
+    }
+
+    /// CLIENT-MISS / SERVER-HIT (terminal). Same pose-divergence, but the server resolved an
+    /// embed/perforation. The overdue path finalizes the shell at the SERVER's impact with the honest
+    /// armor read (position, normal, `penetrated`) rather than holding for a contact that never comes.
+    #[test]
+    fn overdue_terminal_finalizes_a_pose_divergent_miss() {
+        let shot = a_shot();
+        let mut app = replica_world(SanctionedShots::default());
+        app.insert_resource(crate::PredictedPresent(shot.fire_tick + 20));
+        let impact_pos = Vec3::new(1.0, 2.0, 3.0);
+        app.world_mut()
+            .resource_mut::<SanctionedShots>()
+            .insert_terminal(
+                shot,
+                SanctionedTerminal {
+                    position: impact_pos,
+                    normal: Vec3::Z,
+                    penetrated: true,
+                    impact_tick: shot.fire_tick + 5,
+                    after_bounces: 0,
+                },
+            );
+        let shell = spawn_free_shell(&mut app, Vec3::new(0.0, 20.0, 5.0), Vec3::Z, 800.0, shot);
+
+        app.update();
+
+        assert!(
+            app.world().get_entity(shell).is_err(),
+            "the shell finalizes at the server terminal",
+        );
+        let impacts = app.world().resource::<ImpactLog>().0.clone();
+        assert_eq!(impacts.len(), 1, "the server terminal reads");
+        assert!(
+            impacts[0].position.distance(impact_pos) < 1.0e-3,
+            "at the SERVER's impact position",
+        );
+        assert!(
+            impacts[0].penetrated,
+            "with the server's penetration verdict (the flame lick MP would otherwise miss)",
+        );
+    }
+
+    /// The margin guard: a sanctioned outcome only a tick or two old is NOT force-consumed — the shell
+    /// is still allowed to reach the plate and hold/contact normally, so a legitimately-imminent
+    /// contact isn't snapped away mid-air.
+    #[test]
+    fn a_sanctioned_outcome_within_the_margin_is_not_force_consumed() {
+        let shot = a_shot();
+        let mut app = replica_world(SanctionedShots::default());
+        app.insert_resource(crate::PredictedPresent(shot.fire_tick + 5));
+        app.world_mut().resource_mut::<SanctionedShots>().insert(
+            shot,
+            SanctionedBounce {
+                origin: Vec3::new(1.0, 2.0, 3.0),
+                direction: Vec3::Z,
+                speed: 500.0,
+                // present(105) − bounce_tick(104) = 1 <= OVERDUE_MARGIN_TICKS — inside the margin.
+                bounce_tick: shot.fire_tick + 4,
+                sequence: 0,
+            },
+        );
+        let shell = spawn_free_shell(&mut app, Vec3::new(0.0, 20.0, 5.0), Vec3::Z, 800.0, shot);
+
+        app.update();
+
+        assert!(
+            app.world()
+                .get::<PenetrationMarks>(shell)
+                .unwrap()
+                .ricochets
+                .is_empty(),
+            "inside the margin the shell is not force-consumed — it flies on toward a real contact",
+        );
+        assert!(
+            app.world().resource::<ImpactLog>().0.is_empty(),
+            "no premature spark inside the margin",
+        );
     }
 
     // --- Terminal confirms (ImpactConfirm carry-through) ---------------------------------------------
@@ -2968,6 +3249,7 @@ mod march_tests {
                     position: server_pos,
                     normal: Vec3::Z,
                     penetrated: true,
+                    impact_tick: 0, // inert (no `PredictedPresent` — F3 overdue path off)
                     after_bounces: 0,
                 },
             );
@@ -3011,6 +3293,7 @@ mod march_tests {
                 position: server_pos,
                 normal: Vec3::Z,
                 penetrated: true,
+                impact_tick: 0, // inert (no `PredictedPresent` — F3 overdue path off)
                 after_bounces: 0,
             },
         );
@@ -3049,6 +3332,7 @@ mod march_tests {
                 position: server_pos,
                 normal: Vec3::Z,
                 penetrated: false,
+                impact_tick: 0, // inert (no `PredictedPresent` — F3 overdue path off)
                 after_bounces: 1,
             },
         );
@@ -3076,6 +3360,7 @@ mod march_tests {
                 origin: Vec3::new(0.0, 2.0, 0.5),
                 direction: Vec3::new(0.12, 0.0, -1.0).normalize(),
                 speed: 480.0,
+                bounce_tick: 0, // inert (no `PredictedPresent` — F3 overdue path off)
                 sequence: 0,
             },
         );
@@ -3127,6 +3412,7 @@ mod march_tests {
                     position: Vec3::new(0.0, 2.0, 0.07),
                     normal: Vec3::Z,
                     penetrated: true,
+                    impact_tick: 0, // inert (no `PredictedPresent` — F3 overdue path off)
                     after_bounces: 0,
                 },
             );
@@ -3153,6 +3439,7 @@ mod march_tests {
                 position: Vec3::X,
                 normal: Vec3::Z,
                 penetrated: true,
+                impact_tick: 0, // inert (dedup test — buffer semantics, not the march)
                 after_bounces: 0,
             },
         );
@@ -3163,6 +3450,7 @@ mod march_tests {
                 position: Vec3::Y * 99.0,
                 normal: Vec3::Z,
                 penetrated: false,
+                impact_tick: 0, // inert (dedup test — buffer semantics, not the march)
                 after_bounces: 3,
             },
         );

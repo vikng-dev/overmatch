@@ -125,6 +125,22 @@ pub(crate) struct ClientReplica;
 #[derive(Resource, Default)]
 pub(crate) struct Replaying(pub bool);
 
+/// The net client's PREDICTED PRESENT tick `P` (raw `u32`), republished to the sim layer every
+/// FORWARD `FixedUpdate`. Every cosmetic shell a net client flies lives at `P` — the observer's via
+/// its `fire_tick` catch-up, the shooter's own natively — so this single value IS each in-flight
+/// shell's present tick. The ballistics march reads it (as `Option<Res<PredictedPresent>>`) for F3's
+/// tick-triggered consumption: a shell whose interpolated-pose flight MISSED the plate the server
+/// resolved on never contacts, so once `P` passes the sanctioned outcome's server tick
+/// (`bounce_tick` / `impact_tick`, both net-neutral on the buffer) by a margin, the march consumes it
+/// anyway — re-seeding at the server bounce or finalizing at the server impact — rather than letting
+/// the round sail on through where the authoritative shell bounced or terminated.
+///
+/// Net-neutral like [`Replaying`]: a crate-root sim type whose ONLY writer is `net::client` (which
+/// alone may read lightyear's `LocalTimeline`). Absent on the authority (server / SP / sandbox),
+/// which resolves shots for real and never consults it.
+#[derive(Resource, Default)]
+pub(crate) struct PredictedPresent(pub u32);
+
 /// Physics collision layers. Wheel suspension rays filter to `Terrain` only, so they ignore
 /// the vehicle's own hull collider (ADR-0005). Shared infra, hence at the crate root.
 #[derive(PhysicsLayer, Default, Clone, Copy, Debug)]
