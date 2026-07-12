@@ -103,6 +103,16 @@ fn verify_vfx_assets(asset_server: Res<AssetServer>, mut done: Local<bool>) {
     }
 }
 
+/// The splitmix64 finalizer's two multiply-xorshift rounds — the bit-mixing core shared by
+/// [`ViewRng::next_f32`] and the trail's value-noise lattice ([`trail::noise_texture`]). It is
+/// deliberately *just* the two rounds: `ViewRng` follows it with a final `z ^= z >> 31`, the noise
+/// lattice does not, so folding that step in here would change one output or the other. Cosmetic,
+/// view-side only (never the sim's determinism domain).
+pub(super) fn mix64(z: u64) -> u64 {
+    let z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB)
+}
+
 /// View-layer RNG for cosmetic variation (sprite roll, scale jitter, flipbook start frames). A tiny
 /// splitmix64 — deliberately NOT the sim's determinism domain: it is seeded from wall-clock entropy,
 /// lives only in the windowed clients, and nothing the sim hashes or replicates ever reads it.
@@ -129,9 +139,7 @@ impl ViewRng {
     /// Next uniform sample in `[0, 1)` (splitmix64, top 24 bits).
     pub(crate) fn next_f32(&mut self) -> f32 {
         self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        let mut z = mix64(self.0);
         z ^= z >> 31;
         (z >> 40) as f32 / (1u64 << 24) as f32
     }
