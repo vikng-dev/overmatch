@@ -295,7 +295,11 @@ fn update_trails(
         };
 
         if head.is_none() && trail.points.len() < 2 {
-            commands.entity(entity).despawn();
+            // A trail has two lifetime owners — this dissolve-out cleanup and the [`TrailRing`]
+            // eviction (which already uses `try_despawn`). If eviction frees a trail first and its
+            // slot is recycled before this despawn lands in the shared command flush, a plain
+            // `despawn` would warn on the stale id. `try_despawn` makes the second despawn silent.
+            commands.entity(entity).try_despawn();
             continue;
         }
 

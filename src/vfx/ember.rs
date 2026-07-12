@@ -126,7 +126,11 @@ fn fade_embers(
             1.0 - (ember.age - EMBER_BURN) / EMBER_FADE
         };
         if factor <= 0.0 {
-            commands.entity(entity).despawn();
+            // An ember has two lifetime owners — this burn-out and the parent shell's despawn (which
+            // recursively despawns the ember child). If the shell impacts and despawns first and the
+            // ember's slot is recycled before this despawn lands in the shared command flush, a plain
+            // `despawn` would warn on the stale id. `try_despawn` makes the second despawn silent.
+            commands.entity(entity).try_despawn();
             continue;
         }
         if let Some(mut mat) = materials.get_mut(&material.0) {

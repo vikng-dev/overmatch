@@ -674,7 +674,12 @@ fn decay_muzzle_lights(
         light.age += time.delta_secs();
         let t = light.age / light.lifetime;
         if t >= 1.0 {
-            commands.entity(entity).despawn();
+            // A light has TWO lifetime owners — this end-of-life decay and the [`MuzzleLightRing`]
+            // eviction (which already uses `try_despawn`). Under the MG's per-round cadence both can
+            // target the same light in one frame; if eviction frees it first and the slot is recycled
+            // before this despawn lands in the shared command flush, a plain `despawn` would warn on
+            // the stale, regenerated id. `try_despawn` makes the second despawn a silent no-op.
+            commands.entity(entity).try_despawn();
             continue;
         }
         let falloff = 1.0 - t;
@@ -961,5 +966,40 @@ mod tests {
             fire(&mut app, 0.088, 0);
         }
         assert_eq!(lights(&mut app), LIGHT_CAP);
+    }
+
+    /// Regression (owner playtest, 2026-07-12): the MG's per-round muzzle lights give
+    /// [`MuzzleLightRing`] eviction and [`decay_muzzle_lights`] the SAME live light to despawn in one
+    /// frame — the two-owner collision that, with a plain `despawn`, warned on a stale/recycled id
+    /// ("the entity ... is invalid; its index now has generation N"). This hammers a sustained MG
+    /// exchange — firing past the cap while lights age out every frame — and asserts the live light
+    /// population never exceeds the cap and the ring self-heals once fire stops. Both despawn owners
+    /// are the silent `try_despawn`, so the second despawn of an already-freed slot is a no-op, and
+    /// the ager never trips the command error handler.
+    #[test]
+    fn sustained_mg_fire_caps_lights_without_stale_despawn() {
+        let mut app = harness();
+        // Well past LIGHT_CAP with decay interleaved: three rounds per frame, then half a light's
+        // lifetime of wall time so lights age out under the eviction churn (the collision window).
+        for frame in 0..40 {
+            for _ in 0..3 {
+                fire_round(&mut app, MG_CALIBER, 0, false);
+            }
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(MG_LIGHT_LIFETIME * 0.5));
+            app.update();
+            assert!(
+                lights(&mut app) <= LIGHT_CAP,
+                "frame {frame}: live lights must never exceed the cap"
+            );
+        }
+        // Fire stops and everything ages out: no light lingers (the decay despawn runs clean even
+        // over a ring still holding evicted, now-stale ids).
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(MG_LIGHT_LIFETIME * 2.0));
+        app.update();
+        assert_eq!(lights(&mut app), 0, "all lights age out cleanly");
     }
 }
