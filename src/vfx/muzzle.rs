@@ -395,36 +395,40 @@ fn on_main_gun_fire(
 
     // --- Fireball glow card: one soft additive round-glow billboard behind the core, LOW alpha and
     // a softened boost, ~1.5× the core. It is the one element allowed to outlive the 2-frame flash
-    // (its own ~0.1 s, eroding out fast) — the volume that bridges the flash and the smoke.
-    let mut glow = assets.flash_material(assets.mg_core.clone(), 1.5);
-    glow.params.frame = Vec4::new(0.0, 1.0, 1.0, 0.0);
-    glow.params.glow.x = FLASH_GLOW_CARD_GLOW;
-    glow.params.fade.w = FLASH_GLOW_CARD_ALPHA;
-    let glow_size = core_size * FLASH_GLOW_CARD_SCALE;
-    spawn_billboard(
-        &mut commands,
-        &mut materials,
-        &mut ring,
-        assets.quad.clone(),
-        BillboardSpec {
-            material: glow,
-            lifetime: FLASH_GLOW_CARD_LIFETIME,
-            origin: origin + dir * 1.0,
-            drift: Vec3::ZERO,
-            frames: 1,
-            start_frame: 0.0,
-            frame_rate: 0.0,
-            start_size: glow_size,
-            end_size: glow_size * 1.3,
-            aspect: Vec3::ONE,
-            roll: rng.range(0.0, std::f32::consts::TAU),
-            spin: 0.0,
-            // Erode out fast over its short life — this is the "fade" that lets it linger without
-            // the flash lingering.
-            erosion_end: 1.0,
-            rotation: None,
-        },
-    );
+    // (its own ~0.1 s, eroding out fast) — the volume that bridges the flash and the smoke. Near-only
+    // dressing: beyond FAR_FULL_DRESSING only the core + light carry the read (see the module LOD
+    // contract), so the glow card is gated with the planes and smoke below.
+    if near {
+        let mut glow = assets.flash_material(assets.mg_core.clone(), 1.5);
+        glow.params.frame = Vec4::new(0.0, 1.0, 1.0, 0.0);
+        glow.params.glow.x = FLASH_GLOW_CARD_GLOW;
+        glow.params.fade.w = FLASH_GLOW_CARD_ALPHA;
+        let glow_size = core_size * FLASH_GLOW_CARD_SCALE;
+        spawn_billboard(
+            &mut commands,
+            &mut materials,
+            &mut ring,
+            assets.quad.clone(),
+            BillboardSpec {
+                material: glow,
+                lifetime: FLASH_GLOW_CARD_LIFETIME,
+                origin: origin + dir * 1.0,
+                drift: Vec3::ZERO,
+                frames: 1,
+                start_frame: 0.0,
+                frame_rate: 0.0,
+                start_size: glow_size,
+                end_size: glow_size * 1.3,
+                aspect: Vec3::ONE,
+                roll: rng.range(0.0, std::f32::consts::TAU),
+                spin: 0.0,
+                // Erode out fast over its short life — this is the "fade" that lets it linger without
+                // the flash lingering.
+                erosion_end: 1.0,
+                rotation: None,
+            },
+        );
+    }
 
     // --- Directional flame planes: two bore-aligned quads, ~90° apart around the bore, each on a
     // random frame of the 4-flame atlas (the random-start-frame anti-repetition trick — per SHOT
@@ -791,6 +795,31 @@ mod tests {
                 billboard.start_size
             );
         }
+    }
+
+    /// Distance LOD contract: beyond `FAR_FULL_DRESSING` only the core + light spawn — the glow
+    /// card, flame planes and smoke are all near-only. A camera parked well past the cutoff must
+    /// leave the 88 with exactly ONE billboard (the core) and its light. Guards the glow card
+    /// against silently re-escaping the gate.
+    #[test]
+    fn far_88_shot_drops_to_core_and_light() {
+        let mut app = harness();
+        // Park a camera far past the 400 m cutoff from the fixed shot origin (1, 2, 3).
+        app.world_mut().spawn((
+            Camera3d::default(),
+            GlobalTransform::from_translation(Vec3::new(2000.0, 0.0, 0.0)),
+        ));
+        fire(&mut app, 0.088, 0);
+        assert_eq!(
+            billboards(&mut app),
+            1,
+            "far 88: core only (no glow card, planes, or smoke)"
+        );
+        assert_eq!(
+            lights(&mut app),
+            1,
+            "the muzzle light carries the read at range"
+        );
     }
 
     /// Per-shot variation is the MG's anti-strobe contract: consecutive shots must differ in core
