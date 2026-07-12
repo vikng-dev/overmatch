@@ -500,12 +500,12 @@ pub(super) fn prewarm_ribbon_mesh() -> Mesh {
 fn noise_texture(images: &mut Assets<Image>) -> Handle<Image> {
     use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
     const SIZE: usize = 128;
-    // Integer lattice hash → [0,1) (splitmix-flavored, wrap-friendly).
+    // Integer lattice hash → [0,1) (splitmix-flavored, wrap-friendly): decorrelate the packed
+    // coords with the golden-ratio increment, then the shared two-round bit mix (no trailing
+    // xorshift here — see `super::mix64`), taking the top 24 bits.
     fn lattice(x: u32, y: u32, octave: u32) -> f32 {
-        let mut z = (x as u64) ^ ((y as u64) << 16) ^ ((octave as u64) << 40);
-        z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        let z = (x as u64) ^ ((y as u64) << 16) ^ ((octave as u64) << 40);
+        let z = super::mix64(z.wrapping_add(0x9E37_79B9_7F4A_7C15));
         ((z >> 40) as f32) / (1u64 << 24) as f32
     }
     fn smooth(t: f32) -> f32 {

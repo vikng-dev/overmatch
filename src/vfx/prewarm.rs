@@ -143,32 +143,24 @@ pub(super) fn spawn_prewarm_rig(
 
 /// As the warm-up shell scene instantiates, stamp `NoFrustumCulling` (+ shadow opt-outs) onto its
 /// mesh entities — the piece that makes an under-the-map scene actually reach pipeline
-/// specialization. Idles at one empty-query check once the rigs are gone.
+/// specialization. The scene attaches its 2–3 mesh leaves under the rig root asynchronously (over a
+/// few frames), so this still polls, but it DESCENDS the rig subtrees only — never the world's whole
+/// `Mesh3d` set — and stamps each leaf once (the `Without<NoFrustumCulling>` filter makes the
+/// re-visit a no-op). Idles when the rigs are gone (`rigs` empty → no iterations).
 pub(super) fn tag_prewarm_meshes(
-    rigs: Query<(), With<PrewarmRig>>,
-    untagged: Query<Entity, (With<Mesh3d>, Without<NoFrustumCulling>)>,
-    parents: Query<&ChildOf>,
+    rigs: Query<Entity, With<PrewarmRig>>,
+    children: Query<&Children>,
+    untagged: Query<(), (With<Mesh3d>, Without<NoFrustumCulling>)>,
     mut commands: Commands,
 ) {
-    if rigs.is_empty() {
-        return;
-    }
-    for entity in &untagged {
-        // Walk up to see whether this mesh belongs to a prewarm rig (the shell scene is 2–3 nodes
-        // deep; live gameplay meshes stop at their own non-rig root).
-        let mut node = entity;
-        loop {
-            if rigs.contains(node) {
+    for rig in &rigs {
+        for entity in children.iter_descendants(rig) {
+            if untagged.contains(entity) {
                 commands.entity(entity).insert((
                     NoFrustumCulling,
                     NotShadowCaster,
                     NotShadowReceiver,
                 ));
-                break;
-            }
-            match parents.get(node) {
-                Ok(parent) => node = parent.parent(),
-                Err(_) => break,
             }
         }
     }

@@ -217,9 +217,13 @@ def pair_tanks(client_ticks, server_ticks):
 def sim_field_deltas(c, s):
     """Max-abs per-family carried-state differences between two VERBOSE rows (SPIKE_TRACE_SIM_FIELDS).
 
-    Returns {servo, reload, recoil, anchor, anchor_flips, drive} or None when either row lacks
+    Returns {servo, reload, recoil, belt, anchor, anchor_flips, drive} or None when either row lacks
     `simf`. Anchor Some/None disagreements count as `anchor_flips` (a discriminant divergence has
     no distance); torn/null elements make the family read NaN rather than crash the join.
+
+    Each `wpn` row is [reload_remaining, recoil_offset, recoil_velocity, belt_remaining] — the belt
+    count (wpn[3]) gates fire and is what the `hrld` sub-hash flags, so a belt-only divergence must
+    show a nonzero `belt` delta rather than a misleading reload/recoil 0.0.
     """
     cf, sf = c.get("simf"), s.get("simf")
     if not cf or not sf:
@@ -239,14 +243,18 @@ def sim_field_deltas(c, s):
     out = {"servo": max_abs((ea, eb)
                             for xa, xb in zip(cf.get("srv") or [], sf.get("srv") or [])
                             for ea, eb in zip(xa, xb))}
-    rld, rec = 0.0, 0.0
+    rld, rec, belt = 0.0, 0.0, 0.0
     try:
         for wa, wb in zip(cf.get("wpn") or [], sf.get("wpn") or []):
             rld = max(rld, abs(wa[0] - wb[0]))
             rec = max(rec, abs(wa[1] - wb[1]), abs(wa[2] - wb[2]))
+            # wpn[3] is belt_remaining (an integer round count); older traces omit it — treat a
+            # missing 4th field as no belt divergence rather than crashing the join.
+            if len(wa) > 3 and len(wb) > 3:
+                belt = max(belt, abs(wa[3] - wb[3]))
     except TypeError:
-        rld = rec = float("nan")
-    out["reload"], out["recoil"] = rld, rec
+        rld = rec = belt = float("nan")
+    out["reload"], out["recoil"], out["belt"] = rld, rec, belt
     anc, flips = 0.0, 0
     try:
         for aa, ab in zip(cf.get("anch") or [], sf.get("anch") or []):
@@ -354,7 +362,7 @@ def mismatch_windows(joined):
         deltas = [j["simd"] for j in w if j["simd"]]
         if deltas:
             mags = {k: max((d[k] for d in deltas), default=float("nan"))
-                    for k in ("servo", "reload", "recoil", "anchor", "drive")}
+                    for k in ("servo", "reload", "recoil", "belt", "anchor", "drive")}
             mags["anchor_flips"] = max(d["anchor_flips"] for d in deltas)
         out.append({
             "lo": w[0]["tick"], "hi": w[-1]["tick"], "n": len(w),
@@ -450,7 +458,8 @@ def print_tank(label, s):
             if w["mags"]:
                 m = w["mags"]
                 print(f"        max |Δ|: servo {m['servo']:.3e}  reload {m['reload']:.3e}  "
-                      f"recoil {m['recoil']:.3e}  anchor {m['anchor']:.3e} "
+                      f"recoil {m['recoil']:.3e}  belt {m['belt']:.3e}  "
+                      f"anchor {m['anchor']:.3e} "
                       f"(discriminant flips {m['anchor_flips']})  drive {m['drive']:.3e}")
 
     def mag_block(title, mag):
