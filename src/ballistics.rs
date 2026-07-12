@@ -929,6 +929,36 @@ fn integrate_projectiles(
                 break;
             };
 
+            // FAIL-CLOSED (net client only — `!deposit`, i.e. `ClientReplica` present): an observer
+            // must NEVER re-simulate an authoritative armor collision against the non-authoritative
+            // (interpolated, ~100 ms stale) tank pose it renders. A round's real fate at a plate —
+            // ricochet, perforate, or embed — is the server's to decide and arrives as replicated
+            // state (`NetHealth`/`NetCrew`), not as anything this shell can derive locally. Deterministic
+            // local flight is honest only UP TO the first surface; past it the client would improvise a
+            // deflection/perforation the server never sanctioned, and the cosmetic shell would fly off
+            // (or stop) somewhere the authoritative round did not — the "post-ricochet round wanders /
+            // the trail is lost" divergence owners reported. So the cosmetic shell STOPS dead at first
+            // armor contact with a neutral spark (no bounce fan, no flame lick — the client cannot know
+            // which it was), and its smoke trail ends there and dissolves. Terrain already stops BOTH
+            // ends identically (static, pose-independent geometry), so only this pose-dependent armor
+            // contact needs the guard. The server/SP/sandbox (authority, `deposit == true`) run the full
+            // resolution below unchanged. (An HONEST post-bounce keyframe — the server replicating the
+            // deflected origin/direction so the observer re-seeds its shell from truth — is a wire change,
+            // deferred to the orchestrator's decision.)
+            if !deposit {
+                commands.trigger(Impact {
+                    position: entry,
+                    normal: hit.normal,
+                    caliber: projectile.caliber,
+                    surface: ImpactSurface::Armor,
+                    penetrated: false,
+                    deflection: None,
+                });
+                pos = entry;
+                stopped = true;
+                break;
+            }
+
             // Momentum bookkeeping for this crossing: the incoming velocity (before any bend/bleed)
             // and the body that owns the struck volume. Each resolution branch below hands the body
             // its share of the shell's momentum, `m·(v_in − v_out)` — a shell that stops dumps it all,
@@ -1520,5 +1550,75 @@ mod march_tests {
             "a stale catch-up must fire no late phantom impact, got {}",
             hits.len()
         );
+    }
+
+    /// Count the live `Projectile`s in the world (shells still in flight).
+    fn live_projectiles(app: &mut App) -> usize {
+        app.world_mut()
+            .query::<&Projectile>()
+            .iter(app.world())
+            .count()
+    }
+
+    /// The oblique-ricochet setup from `oblique_ricochet_fires_one_deflecting_non_penetrating_impact`,
+    /// but marched to resolution: how many `Impact`s, and does the shell SURVIVE the bounce (continue
+    /// in flight)? Parameterised by whether the world is a net client (`ClientReplica` present).
+    fn oblique_ricochet_outcome(replica: bool) -> (Vec<Captured>, usize) {
+        let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.10), Vec3::new(0.0, 2.0, 0.0));
+        if replica {
+            app.insert_resource(crate::ClientReplica);
+        }
+        let dir = Vec3::new(
+            75.0_f32.to_radians().sin(),
+            0.0,
+            -75.0_f32.to_radians().cos(),
+        )
+        .normalize();
+        let hits = fire_and_capture(&mut app, Vec3::new(-1.0, 2.0, 0.6), dir, 800.0);
+        let survivors = live_projectiles(&mut app);
+        (hits, survivors)
+    }
+
+    /// REPRO (symptom 2 — post-ricochet trail loss). AUTHORITY path (no `ClientReplica`): the server
+    /// ricochets the 88 off the plate and the shell CONTINUES in flight (survives), carrying its trail
+    /// on past the bounce. This is correct on the authority.
+    #[test]
+    fn authority_ricochet_shell_survives_and_continues() {
+        let (hits, survivors) = oblique_ricochet_outcome(false);
+        assert_eq!(hits.len(), 1, "one bounce impact");
+        assert!(hits[0].deflection.is_some(), "authority reads a ricochet");
+        assert_eq!(survivors, 1, "the ricocheted shell continues in flight");
+    }
+
+    /// FIX (symptom 2). REPLICA path (`ClientReplica` present — the remote observer): the client must
+    /// NOT re-simulate the authoritative bounce against interpolated geometry. Fail-closed — the
+    /// cosmetic shell STOPS dead at first armor contact (despawned, no survivor), firing a NEUTRAL
+    /// armor spark (no deflection fan, no flame lick), so its trail ends at contact instead of chasing
+    /// an improvised deflection the server never sanctioned.
+    #[test]
+    fn replica_ricochet_fails_closed_at_first_armor_contact() {
+        let (hits, survivors) = oblique_ricochet_outcome(true);
+        assert_eq!(hits.len(), 1, "one armor-contact spark");
+        assert_eq!(hits[0].surface, ImpactSurface::Armor, "it hit armor");
+        assert!(
+            hits[0].deflection.is_none(),
+            "no improvised bounce fan — the client cannot know the outcome"
+        );
+        assert!(!hits[0].penetrated, "no flame lick — neutral spark");
+        assert_eq!(
+            survivors, 0,
+            "the cosmetic shell stops dead at contact (trail ends there)"
+        );
+    }
+
+    /// The fail-closed guard is REPLICA-ONLY: a head-on perforation on the AUTHORITY still drives the
+    /// round through the plate and out the far side (the server's shell continues), unaffected by the
+    /// guard. Pins that the `!deposit` gate did not leak into the authority march.
+    #[test]
+    fn authority_perforation_still_drives_through() {
+        let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.05), Vec3::new(0.0, 2.0, 0.0));
+        let hits = fire_and_capture(&mut app, Vec3::new(0.0, 2.0, 2.0), Vec3::NEG_Z, 800.0);
+        assert_eq!(hits.len(), 1, "one perforation impact");
+        assert!(hits[0].penetrated, "authority perforates (flame lick)");
     }
 }
