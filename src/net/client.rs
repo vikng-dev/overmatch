@@ -854,11 +854,17 @@ struct PendingRecoilKicks(Vec<(Entity, usize)>);
 /// Bounded set of shots already turned into a cosmetic shell, so a redundantly-retransmitted
 /// [`FireEvent`](super::protocol::FireEvent) (piece 3 — each burst re-carries the last N) spawns
 /// EXACTLY ONE tracer, not N. A
-/// simple ring: a `VecDeque` for FIFO eviction + a `HashSet` mirror for O(1) membership. The cap need
-/// only exceed the redundancy window (a shot reappears in at most `FIRE_WINDOW`-1 later bursts, ~4
-/// shots), so 128 is deep orders of magnitude past any duplicate — an evicted id can never be
-/// re-offered. Keyframes need no such set: the `SanctionedShots` insert is idempotent by
-/// `(ShotId, sequence)`, so a redundant keyframe is a no-op there.
+/// simple ring: a `VecDeque` for FIFO eviction + a `HashSet` mirror for O(1) membership.
+///
+/// The cap must exceed the number of DISTINCT shots that can be fired while any one shot is still
+/// being re-carried — evict an id that a redundant burst can still re-offer and the shell spawns
+/// TWICE. The server now re-broadcasts its whole window every tick
+/// (`net::server::broadcast_fire_window`), so a fire re-rides every burst for `FIRE_RETAIN_TICKS`
+/// (~312 ms); two tanks on 750 rpm MGs fire ~8 distinct shots in that span. 128 is ~16× that, and the
+/// pathological bound is the sender's own `FIRE_WINDOW_MAX` (32 per stream) — so an evicted id can
+/// never be re-offered. Keyframes and confirms need no such set: the `SanctionedShots` inserts are
+/// idempotent by `(ShotId, sequence)` / `ShotId`, so a redundant copy is a no-op there (and a bounce
+/// already consumed is never re-consumed — the shell's own ricochet count has moved past its ordinal).
 #[derive(Resource, Default)]
 struct SeenShots {
     order: std::collections::VecDeque<ShotId>,
