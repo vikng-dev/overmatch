@@ -88,23 +88,57 @@
 //! `SPIKE_SHOT_TRACE` recorder's `send` rows count those copies per event directly; in this harness
 //! they measure 21 copies per fire and per keyframe, of which 16 land inside the observer's hold.)
 //!
-//! # A REAL RACE this test surfaced (not fixed here — instrument first, per this slice's remit)
+//! # A REAL BUG this work surfaced — FOUND here, FIXED on main (`net::client::shooter_is_live`)
 //!
-//! `FireEvent::shooter` is entity-mapped on receipt, and lightyear's receive-side mapper falls back to
-//! **`Entity::PLACEHOLDER`** when the shooter has no replica in the client's entity map yet (verified
-//! live in this harness, which replicates no tank). The mapped shooter is an input to `ShotId`, so a
-//! `FireEvent` that arrives BEFORE its shooter's tank replica does gets a PLACEHOLDER-keyed id, while
-//! the shot's `RicochetKeyframe`/`ImpactConfirm` — arriving later, once the replica exists — keys on
-//! the REAL replica entity. The two ids then disagree, the sanctioned outcome never correlates with the
-//! shell, and the round holds and quietly dissolves.
+//! **An unmapped shooter does not reject a `FireEvent` — it mis-keys it, and the shot then spawns
+//! TWICE.** This instrument is what caught it, in a live 3-process session; the receiver-side guard it
+//! called for now ships (`fix/remote-tracer-root`), so what follows is the EVIDENCE, kept because the
+//! guard is only obviously right if the failure it prevents is written down.
 //!
-//! In production the tank's spawn is replicated before it can fire, so the map is normally populated
-//! first — but replication and the cosmetic [`super::protocol::FireChannel`] are DIFFERENT channels
-//! with no ordering between them, and the fire channel is unreliable: under loss (or right at a
-//! spawn/respawn) a fire burst can legitimately land before the spawn it belongs to. The blast radius
-//! is one dissolved cosmetic round (damage is server-authoritative), which is why this is filed, not
-//! panicked over. The `SPIKE_SHOT_TRACE` recorder will show it as a `spawn` with no `hold`-resolution
-//! and a `never_consumed` outcome in `scripts/shot/analyze.py`'s carry-through table.
+//! `FireEvent::shooter` is entity-mapped on receipt, and lightyear's receive-side mapper does not fail
+//! on an entity it cannot resolve: it hands back `Entity::PLACEHOLDER` (`ReceiveEntityMap::get_mapped`
+//! — "return `Entity::PLACEHOLDER` as an error"). The mapped shooter is an input to [`ShotId`], so an
+//! event that lands before its shooter's tank replica does gets a GARBAGE-KEYED id. Three
+//! consequences, the first two measured in a live 3-process run (`SPIKE_SHOT_TRACE`, 2 clients +
+//! server, MG fire):
+//!
+//! 1. **Duplicate cosmetic shells.** The redundancy window re-carries every fire for ~312 ms
+//!    (`FIRE_RETAIN_TICKS`). A fire first received while the shooter is unmapped is keyed on the
+//!    garbage entity; when the SAME event is re-carried a few bursts later — now with the replica in
+//!    the map — it keys on the real entity, `SeenShots` sees a NEW `ShotId`, and a SECOND tracer
+//!    spawns for one round. Measured on the observing client at connect: **6 shots spawned two shells
+//!    each** (15 mis-keyed `fire_rx` rows, all inside the first ~7 ticks after its replicas arrived).
+//! 2. **Carry-through that silently cannot happen.** A mis-keyed shell's `RicochetKeyframe` /
+//!    `ImpactConfirm` — arriving later, keyed on the REAL replica — can never correlate with it, so the
+//!    shell holds and quietly dissolves. This is a candidate cause for INTERMITTENT observer
+//!    carry-through failures.
+//!
+//! 3. **It also DEFEATED the coax self-hit fix** — found while rebasing this branch onto that fix, and
+//!    the sharpest argument for the guard. `receive_fire_events` names the shooter on the replica's
+//!    `FireShell` so the round is transparent to the tank that fired it (`ballistics::not_own_volume`);
+//!    the entity it names is the MAPPED one, so a mis-keyed shell self-excluded against
+//!    `Entity::PLACEHOLDER` — i.e. against NOTHING. The observer's coax round then did exactly what the
+//!    coax fix removed: struck the shooter's own mantlet centimetres out, fail-closed, and drew no
+//!    tracer at all. So the mis-keying was never merely a duplicate-shell bug; it silently re-opened
+//!    the invisible-coax symptom inside every connect/respawn/loss window.
+//!
+//! Reachable in production whenever a fire burst outruns the spawn it belongs to: replication and the
+//! cosmetic [`super::protocol::FireChannel`] are different channels with NO ordering between them, and
+//! the fire channel is unreliable — so connect, respawn, and any burst-loss window produced it. The
+//! clock-driven send window (`net::server::broadcast_fire_window`) neither caused nor cured it, but it
+//! is what makes the FIX cheap: a fire is re-carried on every tick of its retain window, so dropping
+//! the copies that arrive before the shooter resolves turns the race into a ~1-frame DELAY rather than
+//! a loss — the next copy is accepted, correctly keyed, exactly once.
+//!
+//! **The guard now ships** (`net::client::shooter_is_live`, `fix/remote-tracer-root`): a
+//! fire/keyframe/confirm whose shooter does not resolve to a live replicated tank is DROPPED, not
+//! keyed on garbage. The recorder still SEES those drops — they are `drop` rows (`res:
+//! "unresolved_shooter"`), and `scripts/shot/analyze.py` reports them in its RECEIVE GATE table —
+//! because an instrument that only records what survives a guard cannot tell you what the guard costs.
+//!
+//! This test does not assert against the bug: its shooter tank is replicated and the run does not arm
+//! until the observer holds a replica of it ([`ShooterTank`]), so every id here is the mapped, correct
+//! one and the gate passes. The race itself is the recorder's catch, in a real session.
 
 use core::time::Duration;
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
