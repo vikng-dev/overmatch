@@ -211,6 +211,8 @@ fn spawn_impact_marker(
 mod tests {
     use super::*;
 
+    use crate::ballistics::ImpactSurface;
+
     /// Minimal app carrying just what `spawn_impact_marker` reads — no asset plugins needed, since
     /// the observer only *clones* the preloaded handles (default handles are fine for a headless run).
     fn harness(show: bool) -> App {
@@ -239,6 +241,9 @@ mod tests {
             position: Vec3::ZERO,
             normal: Vec3::Y,
             caliber: 0.088,
+            surface: ImpactSurface::Terrain,
+            penetrated: false,
+            deflection: None,
         });
         app.world_mut().flush();
         assert_eq!(marker_count(&mut app), 0);
@@ -253,6 +258,9 @@ mod tests {
                 position: Vec3::ZERO,
                 normal: Vec3::Y,
                 caliber: 0.088,
+                surface: ImpactSurface::Terrain,
+                penetrated: false,
+                deflection: None,
             });
             app.world_mut().flush();
         }
