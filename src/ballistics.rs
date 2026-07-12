@@ -445,8 +445,15 @@ pub(crate) const TRACER_MAX_CALIBER: f32 = 0.02;
 /// View marker on a tracer round's emissive streak child (`on_fire_shell`). The streak is a VIEW
 /// attachment on the cosmetic projectile entity (ADR-0014) — it carries no sim state; it just rides
 /// the projectile's `Transform`, which `integrate_projectiles` keeps pointed down the velocity.
+///
+/// `nominal_len` is the full streak length (≈ one render frame of travel). The view layer
+/// ([`crate::vfx`]'s tracer clamp) shortens the drawn streak to the distance the round has actually
+/// flown since the muzzle or the last ricochet, so the tail never pokes back through the turret or a
+/// bounce point; past `nominal_len` of travel the clamp is a no-op and the full streak shows.
 #[derive(Component)]
-pub struct TracerStreak;
+pub struct TracerStreak {
+    pub nominal_len: f32,
+}
 
 /// Preloaded tracer-streak view assets (mesh + emissive material), built once so a tracer round clones
 /// handles rather than rebuilding them per shot — the streak twin of [`ProjectileAssets`].
@@ -627,7 +634,7 @@ fn on_fire_shell(
             ) {
                 // The round already landed during the skipped flight — no in-flight tracer, but the
                 // IMPACT still reads: spark the same view-side `Impact` seam a live march would have
-                // (the dust puff, `vfx::spawn_impact_puff`), where the segment says it hit. Without
+                // (the dust billow + sparks, `vfx::impact`), where the segment says it hit. Without
                 // this, close-range remote fire (whose whole flight fits inside the catch-up skip)
                 // shows nothing at all on the observing client.
                 commands.trigger(Impact {
@@ -691,7 +698,9 @@ fn on_fire_shell(
             // long capsule shadow across the terrain under every tracer.
             NotShadowCaster,
             NotShadowReceiver,
-            TracerStreak,
+            TracerStreak {
+                nominal_len: length,
+            },
         ));
     }
 }

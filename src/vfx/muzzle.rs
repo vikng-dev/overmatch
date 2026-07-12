@@ -1,13 +1,21 @@
 //! The guns' firing signatures (survey tricks 1/2/3/5). The 88: a 1–2-FRAME billboard flash
-//! cluster (one camera-facing core + two bore-aligned flame planes), a transient shadowless muzzle
-//! light (first frame hottest, ~100 ms decay), and one lingering eroded smoke puff (~1 s). The MGs
-//! (slice B, [`on_mg_fire`]): the same machinery at rifle scale — a small 1–2-frame core (+ one
-//! flame plane when near), a dim short light on TRACER rounds only (the every-Nth-shot cost gate,
-//! which also couples the flicker to the streaks), and one faint puff every few rounds (per-round
-//! smoke at 12.5 rds/s per gun stacks into fog — the overdraw trap). At 750 rpm per-shot VARIATION
-//! is the whole game: random flame frame + roll + size jitter per shot, because identical repeated
-//! flashes strobe. Strict lifetime discipline on every flash — the craft canon is emphatic that a
-//! flash alive past ~2 frames reads slow and weak; the smoke and the light are what linger.
+//! cluster (one camera-facing scorch-starburst core + two bore-aligned flame planes), a transient
+//! muzzle light (first frame hottest, ~100 ms decay, shadow-casting behind the [`MuzzleShadows`]
+//! lever), and one lingering eroded smoke puff (~1 s). The MGs (slice B, [`on_mg_fire`]): the same
+//! machinery at rifle scale — a small 1–2-frame round-glow core (+ one flame plane when near), a
+//! dim short light on EVERY round (tracer rounds spike ~1.5× brighter, visually coupling the flicker
+//! to the streaks), and one faint puff every few rounds (per-round smoke at 12.5 rds/s per gun
+//! stacks into fog — the overdraw trap). At 750 rpm per-shot VARIATION is the whole game: random
+//! flame frame + roll + size jitter per shot, because identical repeated flashes strobe. Strict
+//! lifetime discipline on every flash — the craft canon is emphatic that a flash alive past ~2
+//! frames reads slow and weak; the smoke and the light are what linger.
+//!
+//! Shadows (Yan's 2026-07-12 decision): the muzzle light stays a direction-less `PointLight` (the
+//! hull occludes it physically, like any object), and shadow casting is ON by default but sits
+//! behind the [`MuzzleShadows`] measurement lever (`OVERMATCH_MUZZLE_SHADOWS`, the MG-march-lever
+//! precedent) so the shadowed-point cost — 6 cube-face passes per live light per frame — can be
+//! measured and, if the MG's sustained-fire population spikes, dialed back (every-Nth MG light, or
+//! off) without a rebuild.
 //!
 //! Hook: observers on the sim's [`FireShell`] event — the SAME seam the shell scene and the
 //! tracer child hang off (`ballistics::on_fire_shell`), split by the SAME caliber
@@ -34,8 +42,8 @@ use crate::ballistics::{FireShell, TRACER_MAX_CALIBER};
 
 use super::ViewRng;
 use super::billboard::{
-    BillboardRing, BillboardSpec, VfxBillboardMaterial, VfxParams, gradient_lut, spawn_billboard,
-    unit_quad,
+    BillboardRing, BillboardSpec, VfxBillboardMaterial, VfxParams, gradient_lut, smoothstep,
+    spawn_billboard, unit_quad,
 };
 
 /// Flash cluster lifetime (s): ~2 frames at 60 Hz. THE knob the survey warns about — push it past
@@ -61,15 +69,22 @@ const SMOKE_SPIN_MAX: f32 = 0.6;
 const SMOKE_GLOW: f32 = 5.0;
 
 /// Muzzle light (the 88's): peak luminous power (lm), falloff range (m), decay time (s). First
-/// frame hottest, gone in ~100 ms; never a shadow caster (the expensive half of a light).
+/// frame hottest, gone in ~100 ms. Shadow casting rides the [`MuzzleShadows`] lever (the expensive
+/// half of a light — 6 cube-face passes per frame alive).
 const LIGHT_PEAK_LUMENS: f32 = 8.0e6;
 const LIGHT_RANGE: f32 = 35.0;
 const LIGHT_LIFETIME: f32 = 0.1;
 /// Live muzzle-light ring cap — pathological-refire bound, same shape as the billboard ring.
-/// Shared by the 88 and both MGs: steady state is ≤ 2 alive (the 88 ≤ 1 at its ~4 s cycle; MG
-/// lights ride tracer rounds only — 2.5/s per gun × [`MG_LIGHT_LIFETIME`] ≈ 0.1 alive each), so
-/// the cap only bites on rollback-replay storms.
-const LIGHT_CAP: usize = 6;
+/// Shared by the 88 and both MGs. MG lights now ride EVERY round (12.5/s per gun ×
+/// [`MG_LIGHT_LIFETIME`] ≈ 0.6 alive each, ~2.5 across two guns firing) so a two-tank MG exchange
+/// can hold several live at once; raised from 6 so that exchange never evicts a still-live light.
+const LIGHT_CAP: usize = 12;
+/// The MG tracer-round brightness spike: a tracer round's muzzle light is this much brighter than a
+/// ball round's, so the flicker still reads harder exactly when a streak leaves the barrel.
+const MG_TRACER_LIGHT_BOOST: f32 = 1.5;
+/// [`MuzzleShadows::MgEveryNth`] fallback: only every this-many-th MG light casts a shadow (the 88
+/// always does in that mode). The measurement fallback if sustained MG shadow cost spikes.
+const MG_SHADOW_EVERY: u32 = 4;
 
 // --- The MG's dressing knobs (slice B): the 88's machinery at rifle scale.
 
@@ -81,8 +96,8 @@ const MG_FLASH_LIFETIME: f32 = 0.03;
 const MG_FLASH_CORE_SIZE: (f32, f32) = (0.3, 0.55);
 /// The single near-only MG flame plane: length range (m); shares the 88's width ratio.
 const MG_FLASH_PLANE_LENGTH: (f32, f32) = (0.45, 0.8);
-/// MG muzzle light — TRACER rounds only (the survey's every-Nth-shot cost gate; the belt's
-/// `tracer_every` = 5 makes that every 5th round, visually coupling the flicker to the streaks).
+/// MG muzzle light — now on EVERY round (a per-round light at 750 rpm reads as a continuous muzzle
+/// glimmer; the tracer round spikes [`MG_TRACER_LIGHT_BOOST`]× brighter so the streak still pops).
 /// Dimmer, shorter, tighter than the 88's.
 const MG_LIGHT_PEAK_LUMENS: f32 = 1.2e6;
 const MG_LIGHT_RANGE: f32 = 16.0;
@@ -108,10 +123,38 @@ const FAR_FULL_DRESSING: f32 = 400.0;
 pub(super) fn plugin(app: &mut App) {
     app.init_resource::<MuzzleLightRing>()
         .init_resource::<MgSmokeCadence>()
+        .init_resource::<MgShadowCadence>()
+        .insert_resource(MuzzleShadows::from_env())
         .add_systems(Startup, setup_muzzle_assets)
         .add_observer(on_main_gun_fire)
         .add_observer(on_mg_fire)
         .add_systems(Update, decay_muzzle_lights);
+}
+
+/// The muzzle-light shadow lever (`OVERMATCH_MUZZLE_SHADOWS`, the MG-march-lever precedent). Default
+/// `On` — the 2026-07-12 decision — with fallback positions the orchestrator can select from the
+/// cost measurements without a rebuild. Read once at plugin build (never per-frame), exactly like
+/// `ballistics::MgShortCircuit`.
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(super) enum MuzzleShadows {
+    /// Every muzzle light casts a shadow (the decision's default).
+    #[default]
+    On,
+    /// The 88 casts; MG lights cast only every [`MG_SHADOW_EVERY`]-th round (the cost fallback).
+    MgEveryNth,
+    /// No muzzle light casts a shadow (the measurement baseline / hard fallback).
+    Off,
+}
+
+impl MuzzleShadows {
+    fn from_env() -> Self {
+        match std::env::var("OVERMATCH_MUZZLE_SHADOWS").ok().as_deref() {
+            Some("off") => Self::Off,
+            Some("mg-nth") => Self::MgEveryNth,
+            // Unset, "on", or anything else: the default decision.
+            _ => Self::On,
+        }
+    }
 }
 
 /// Preloaded muzzle-dressing assets: the shared quad, the two sprite atlases, and the per-effect
@@ -119,7 +162,11 @@ pub(super) fn plugin(app: &mut App) {
 #[derive(Resource)]
 pub(super) struct MuzzleVfxAssets {
     pub(super) quad: Handle<Mesh>,
+    /// The 88's flash core: a 2×2 scorch-starburst atlas (a spiky radial star per shot).
     pub(super) core_atlas: Handle<Image>,
+    /// The MG's flash core: a single small round glow (`light_01`) — a rifle-scale pop, not the 88's
+    /// starburst.
+    mg_core: Handle<Image>,
     flame_atlas: Handle<Image>,
     smoke_atlas: Handle<Image>,
     flash_lut: Handle<Image>,
@@ -137,7 +184,9 @@ impl MuzzleVfxAssets {
             params: VfxParams {
                 frame: Vec4::new(0.0, 2.0, 2.0, 0.0),
                 fade: Vec4::new(0.0, sharpness, 0.0, 1.0),
-                glow: Vec4::new(FLASH_GLOW, 0.0, 0.0, 0.0),
+                // glow.y = 1.0: the additive blend contract (see `vfx_billboard.wgsl`) — premultiply
+                // by coverage so transparent texels add nothing (kills the old orange square).
+                glow: Vec4::new(FLASH_GLOW, 1.0, 0.0, 0.0),
             },
             atlas,
             lut: self.flash_lut.clone(),
@@ -169,9 +218,15 @@ pub(super) fn setup_muzzle_assets(
 ) {
     // Flash LUT: signal-hot core → orange edges, uniformly heat-loaded (the flash lives 2 frames —
     // the life axis barely matters). Rgb chosen so the ADDITIVE blend sums toward white-hot.
+    // Belt-and-braces against the premultiply bug: floor the color to BLACK at signal 0 (the
+    // `smoothstep`-shaped ramp over the first ~17% of signal) so even a partial-alpha edge texel
+    // reading its LUT floor contributes nothing — the additive premultiply already masks fully
+    // transparent texels, this catches the anti-aliased fringe.
     let flash_lut = gradient_lut(&mut images, |x, _y| {
-        let color = LinearRgba::rgb(0.9 + 0.1 * x, 0.35 + 0.6 * x * x, 0.08 + 0.5 * x * x * x);
-        (color, 0.3 + 0.7 * x)
+        let floor = smoothstep(0.0, 0.17, x);
+        let color =
+            LinearRgba::rgb(0.9 + 0.1 * x, 0.35 + 0.6 * x * x, 0.08 + 0.5 * x * x * x) * floor;
+        (color, (0.3 + 0.7 * x) * floor)
     });
     // Smoke LUT: warm powder-gray at birth cooling to a pale neutral, luminance riding the sprite
     // signal; heat only in the young, bright texels (flash-lit smoke blooms for the first instants,
@@ -185,7 +240,8 @@ pub(super) fn setup_muzzle_assets(
     });
     commands.insert_resource(MuzzleVfxAssets {
         quad: unit_quad(&mut meshes),
-        core_atlas: asset_server.load("vfx/flash_core.png"),
+        core_atlas: asset_server.load("vfx/flash_core_atlas.png"),
+        mg_core: asset_server.load("vfx/mg_core.png"),
         flame_atlas: asset_server.load("vfx/flash_flames_atlas.png"),
         smoke_atlas: asset_server.load("vfx/smoke_atlas.png"),
         flash_lut,
@@ -213,8 +269,13 @@ struct MuzzleLightRing(std::collections::VecDeque<Entity>);
 #[derive(Resource, Default)]
 struct MgSmokeCadence(u32);
 
-/// Spawn one transient shadowless muzzle light into the shared ring — the 88's and the MGs' common
-/// machinery; peak/range/lifetime/radius are the caller's scale knobs.
+/// Round counter for the [`MuzzleShadows::MgEveryNth`] fallback ([`MG_SHADOW_EVERY`]); ticks once
+/// per MG round, deciding which rounds' lights cast a shadow in that mode.
+#[derive(Resource, Default)]
+struct MgShadowCadence(u32);
+
+/// Spawn one transient muzzle light into the shared ring — the 88's and the MGs' common machinery;
+/// peak/range/lifetime/radius are the caller's scale knobs, `shadows` the lever-resolved decision.
 fn spawn_muzzle_light(
     commands: &mut Commands,
     ring: &mut MuzzleLightRing,
@@ -223,6 +284,7 @@ fn spawn_muzzle_light(
     range: f32,
     lifetime: f32,
     radius: f32,
+    shadows: bool,
 ) {
     let light = commands
         .spawn((
@@ -236,7 +298,9 @@ fn spawn_muzzle_light(
                 intensity: peak,
                 range,
                 radius,
-                shadow_maps_enabled: false,
+                // Direction-less point (the hull occludes it like any object); shadow casting is the
+                // lever's call (see [`MuzzleShadows`]) — the expensive half of the light.
+                shadow_maps_enabled: shadows,
                 ..default()
             },
             Transform::from_translation(position),
@@ -259,6 +323,7 @@ fn on_main_gun_fire(
     mut materials: ResMut<Assets<VfxBillboardMaterial>>,
     mut ring: ResMut<BillboardRing>,
     mut light_ring: ResMut<MuzzleLightRing>,
+    shadows: Res<MuzzleShadows>,
     mut rng: ResMut<ViewRng>,
     camera: Query<&GlobalTransform, With<Camera3d>>,
     mut commands: Commands,
@@ -282,8 +347,9 @@ fn on_main_gun_fire(
         })
         .unwrap_or(true);
 
-    // --- Flash core: one camera-facing additive billboard, 1–2 frames. Random roll + size so no
-    // two shots match; single-frame sprite, so no flipbook here.
+    // --- Flash core: one camera-facing additive billboard, 1–2 frames. A random one of the four
+    // scorch-starburst atlas frames (the anti-strobe frame pick — nothing lives long enough to
+    // animate) plus random roll + size, so no two shots match.
     let core_size = rng.range(FLASH_CORE_SIZE.0, FLASH_CORE_SIZE.1);
     spawn_billboard(
         &mut commands,
@@ -295,8 +361,8 @@ fn on_main_gun_fire(
             lifetime: FLASH_LIFETIME,
             origin: origin + dir * 1.0,
             drift: Vec3::ZERO,
-            frames: 1,
-            start_frame: 0.0,
+            frames: 4,
+            start_frame: rng.range(0.0, 4.0).floor(),
             frame_rate: 0.0,
             start_size: core_size,
             end_size: core_size * 1.25,
@@ -373,8 +439,8 @@ fn on_main_gun_fire(
         );
     }
 
-    // --- Muzzle light: transient, shadowless, first frame hottest (Vlambeer: the environment
-    // lighting up IS a large share of the perceived power).
+    // --- Muzzle light: transient, first frame hottest (Vlambeer: the environment lighting up IS a
+    // large share of the perceived power). The 88 casts a shadow unless the lever is fully Off.
     spawn_muzzle_light(
         &mut commands,
         &mut light_ring,
@@ -383,6 +449,7 @@ fn on_main_gun_fire(
         LIGHT_RANGE,
         LIGHT_LIFETIME,
         0.4,
+        *shadows != MuzzleShadows::Off,
     );
 }
 
@@ -398,6 +465,8 @@ fn on_mg_fire(
     mut ring: ResMut<BillboardRing>,
     mut light_ring: ResMut<MuzzleLightRing>,
     mut cadence: ResMut<MgSmokeCadence>,
+    mut shadow_cadence: ResMut<MgShadowCadence>,
+    shadows: Res<MuzzleShadows>,
     mut rng: ResMut<ViewRng>,
     camera: Query<&GlobalTransform, With<Camera3d>>,
     mut commands: Commands,
@@ -426,10 +495,11 @@ fn on_mg_fire(
         })
         .unwrap_or(true);
 
-    // --- Flash core: one small camera-facing additive billboard. The core sprite is single-frame
-    // (full-image lanes below — the flare is the WHOLE image, not an atlas cell), so its per-shot
-    // variation is roll + size jitter; the flame plane carries the frame variation.
-    let mut core = assets.flash_material(assets.core_atlas.clone(), 2.0);
+    // --- Flash core: one small camera-facing additive billboard on the MG's own round-glow sprite.
+    // The core sprite is single-frame (full-image lanes below — the glow is the WHOLE image, not an
+    // atlas cell), so its per-shot variation is roll + size jitter; the flame plane carries the
+    // frame variation.
+    let mut core = assets.flash_material(assets.mg_core.clone(), 2.0);
     core.params.frame = Vec4::new(0.0, 1.0, 1.0, 0.0);
     let core_size = rng.range(MG_FLASH_CORE_SIZE.0, MG_FLASH_CORE_SIZE.1);
     spawn_billboard(
@@ -514,19 +584,31 @@ fn on_mg_fire(
         );
     }
 
-    // --- Muzzle light: tracer rounds ONLY (every 5th round of the belt) — the every-Nth-shot cost
-    // gate, and the flicker lands exactly when a streak leaves the muzzle.
-    if fire.tracer {
-        spawn_muzzle_light(
-            &mut commands,
-            &mut light_ring,
-            origin + dir * 0.3,
-            MG_LIGHT_PEAK_LUMENS,
-            MG_LIGHT_RANGE,
-            MG_LIGHT_LIFETIME,
-            0.1,
-        );
-    }
+    // --- Muzzle light: EVERY round now (the tracer-only gate is gone — a per-round glimmer reads as
+    // real automatic fire). A tracer round spikes brighter so the streak still pops as it leaves the
+    // barrel. Shadow casting is the lever's call: On casts always, MgEveryNth casts every
+    // [`MG_SHADOW_EVERY`]-th round (the 88 unaffected), Off never.
+    shadow_cadence.0 = shadow_cadence.0.wrapping_add(1);
+    let mg_shadows = match *shadows {
+        MuzzleShadows::On => true,
+        MuzzleShadows::Off => false,
+        MuzzleShadows::MgEveryNth => shadow_cadence.0.is_multiple_of(MG_SHADOW_EVERY),
+    };
+    let peak = if fire.tracer {
+        MG_LIGHT_PEAK_LUMENS * MG_TRACER_LIGHT_BOOST
+    } else {
+        MG_LIGHT_PEAK_LUMENS
+    };
+    spawn_muzzle_light(
+        &mut commands,
+        &mut light_ring,
+        origin + dir * 0.3,
+        peak,
+        MG_LIGHT_RANGE,
+        MG_LIGHT_LIFETIME,
+        0.1,
+        mg_shadows,
+    );
 }
 
 /// Decay each muzzle light hard (cubic — most of the drop in the first frames) and despawn at its
@@ -554,12 +636,19 @@ mod tests {
     use crate::vfx::billboard::Billboard;
 
     /// Minimal app carrying what BOTH fire observers + the agers read: bare asset stores, a
-    /// fixed-seed view RNG, no camera (distance LOD treats that as near — full dressing).
+    /// fixed-seed view RNG, no camera (distance LOD treats that as near — full dressing). Defaults
+    /// to the shipped `MuzzleShadows::On`; `harness_shadows` overrides for the lever tests.
     fn harness() -> App {
+        harness_shadows(MuzzleShadows::On)
+    }
+
+    fn harness_shadows(mode: MuzzleShadows) -> App {
         let mut app = App::new();
         app.init_resource::<BillboardRing>()
             .init_resource::<MuzzleLightRing>()
             .init_resource::<MgSmokeCadence>()
+            .init_resource::<MgShadowCadence>()
+            .insert_resource(mode)
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<Image>>()
             .init_resource::<Assets<VfxBillboardMaterial>>()
@@ -571,6 +660,7 @@ mod tests {
         app.insert_resource(MuzzleVfxAssets {
             quad: Handle::default(),
             core_atlas: Handle::default(),
+            mg_core: Handle::default(),
             flame_atlas: Handle::default(),
             smoke_atlas: Handle::default(),
             flash_lut: Handle::default(),
@@ -615,9 +705,9 @@ mod tests {
     }
 
     /// An 88 shot spawns the full main-gun dressing — core + 2 planes + smoke (4 billboards) and
-    /// 1 light — and an MG-calibre tracer round gets the MG dressing instead: core + 1 flame plane
+    /// 1 light — and an MG-calibre round gets the MG dressing instead: core + 1 flame plane
     /// (no smoke on the first round — the ration counts from 1) at a fraction of the 88's size,
-    /// plus its own dim light. Each round is dressed by exactly ONE observer.
+    /// plus its own dim light (now on EVERY round). Each round is dressed by exactly ONE observer.
     #[test]
     fn main_gun_and_mg_split_the_dressing() {
         let mut app = harness();
@@ -628,7 +718,7 @@ mod tests {
         let mut mg = harness();
         fire_round(&mut mg, MG_CALIBER, 0, true);
         assert_eq!(billboards(&mut mg), 2, "MG: core + 1 flame plane");
-        assert_eq!(lights(&mut mg), 1, "tracer round carries the light");
+        assert_eq!(lights(&mut mg), 1, "every MG round carries a light");
         // Scale discipline: every MG flash element is well under the 88's smallest core.
         let world = mg.world_mut();
         let mut q = world.query::<&Billboard>();
@@ -659,23 +749,82 @@ mod tests {
         );
     }
 
-    /// The MG muzzle light is rationed to TRACER rounds only (the every-Nth-shot cost gate): a
-    /// 4-ball-1-tracer belt cycle yields exactly one light, dimmer and shorter-lived than the 88's.
+    /// The MG muzzle light now rides EVERY round (the tracer-only gate is gone): a 4-ball-1-tracer
+    /// belt cycle yields five lights, each dimmer and shorter-lived than the 88's, and the tracer
+    /// round's light spikes [`MG_TRACER_LIGHT_BOOST`]× brighter than a ball round's.
     #[test]
-    fn mg_light_rides_tracer_rounds_only() {
+    fn mg_light_rides_every_round_with_tracer_spike() {
         let mut app = harness();
         for _ in 0..4 {
             fire_round(&mut app, MG_CALIBER, 0, false);
         }
-        assert_eq!(lights(&mut app), 0, "ball rounds carry no light");
+        assert_eq!(lights(&mut app), 4, "every ball round carries a light too");
         fire_round(&mut app, MG_CALIBER, 0, true);
-        assert_eq!(lights(&mut app), 1, "the tracer round carries it");
-        let world = app.world_mut();
+        assert_eq!(lights(&mut app), 5, "the tracer round adds its own");
+
+        // Scale + spike: a fresh app so exactly one ball then one tracer are comparable at birth.
+        let mut ball = harness();
+        fire_round(&mut ball, MG_CALIBER, 0, false);
+        let ball_peak = {
+            let world = ball.world_mut();
+            let mut q = world.query::<&MuzzleLight>();
+            q.single(world).expect("one ball light").peak
+        };
+        let mut tracer = harness();
+        fire_round(&mut tracer, MG_CALIBER, 0, true);
+        let world = tracer.world_mut();
         let mut q = world.query::<(&MuzzleLight, &PointLight)>();
-        let (light, point) = q.single(world).expect("one MG light");
-        assert!(point.intensity < LIGHT_PEAK_LUMENS, "dimmer than the 88's");
+        let (light, point) = q.single(world).expect("one tracer light");
+        assert!(light.peak < LIGHT_PEAK_LUMENS, "dimmer than the 88's");
         assert!(light.lifetime < LIGHT_LIFETIME, "shorter than the 88's");
-        assert!(!point.shadow_maps_enabled, "never a shadow caster");
+        assert!(
+            (light.peak - ball_peak * MG_TRACER_LIGHT_BOOST).abs() < 1.0,
+            "the tracer round's light spikes {MG_TRACER_LIGHT_BOOST}× the ball round's"
+        );
+        // Under the default (shadows On) even the MG light casts.
+        assert!(
+            point.shadow_maps_enabled,
+            "shadows On casts on the MG light"
+        );
+    }
+
+    /// The shadow lever: `On` casts on both guns, `Off` casts on neither, `MgEveryNth` spares the MG
+    /// except every [`MG_SHADOW_EVERY`]-th round while the 88 always casts.
+    #[test]
+    fn shadow_lever_gates_casting() {
+        // Off: neither gun casts.
+        let mut off = harness_shadows(MuzzleShadows::Off);
+        fire(&mut off, 0.088, 0);
+        fire_round(&mut off, MG_CALIBER, 0, true);
+        {
+            let world = off.world_mut();
+            let mut q = world.query::<&PointLight>();
+            for point in q.iter(world) {
+                assert!(!point.shadow_maps_enabled, "Off: no light casts");
+            }
+        }
+
+        // MgEveryNth: the 88 casts; the MG casts only on the Nth round.
+        let mut nth = harness_shadows(MuzzleShadows::MgEveryNth);
+        fire(&mut nth, 0.088, 0);
+        {
+            let world = nth.world_mut();
+            let mut q = world.query::<(&MuzzleLight, &PointLight)>();
+            let (_, point) = q.single(world).expect("just the 88 light");
+            assert!(point.shadow_maps_enabled, "MgEveryNth: the 88 still casts");
+        }
+        // Walk one belt cycle of MG rounds: exactly one — the Nth — casts a shadow.
+        let mut walk = harness_shadows(MuzzleShadows::MgEveryNth);
+        for _ in 0..MG_SHADOW_EVERY {
+            fire_round(&mut walk, MG_CALIBER, 0, false);
+        }
+        let world = walk.world_mut();
+        let mut q = world.query::<&PointLight>();
+        let casters = q.iter(world).filter(|p| p.shadow_maps_enabled).count();
+        assert_eq!(
+            casters, 1,
+            "MgEveryNth: exactly the {MG_SHADOW_EVERY}-th of a belt cycle casts"
+        );
     }
 
     /// MG smoke is rationed to every [`MG_SMOKE_EVERY`]-th round — per-round puffs at the cyclic
@@ -723,8 +872,8 @@ mod tests {
         let (_, point) = q.single(world).expect("one light");
         assert_eq!(point.intensity, LIGHT_PEAK_LUMENS, "born at peak");
         assert!(
-            !point.shadow_maps_enabled,
-            "muzzle light must never cast shadows"
+            point.shadow_maps_enabled,
+            "under the default shadows-On lever the 88 light casts (the 2026-07-12 decision)"
         );
 
         app.world_mut()

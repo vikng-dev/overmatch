@@ -25,7 +25,8 @@ use bevy::world_serialization::WorldAssetRoot;
 
 use super::ViewRng;
 use super::billboard::{BillboardRing, BillboardSpec, VfxBillboardMaterial, spawn_billboard};
-use super::impact::{PuffAssets, SparkAssets};
+use super::ember::EmberAssets;
+use super::impact::ImpactAssets;
 use super::muzzle::MuzzleVfxAssets;
 use super::trail::{TrailAssets, prewarm_ribbon_mesh};
 
@@ -58,8 +59,8 @@ pub(super) fn spawn_prewarm_rig(
     asset_server: Res<AssetServer>,
     muzzle: Res<MuzzleVfxAssets>,
     trail: Res<TrailAssets>,
-    puff: Res<PuffAssets>,
-    spark: Res<SparkAssets>,
+    impact: Res<ImpactAssets>,
+    ember: Res<EmberAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut billboard_materials: ResMut<Assets<VfxBillboardMaterial>>,
     mut standard_materials: ResMut<Assets<StandardMaterial>>,
@@ -83,9 +84,10 @@ pub(super) fn spawn_prewarm_rig(
     for material in [
         muzzle.flash_material(muzzle.core_atlas.clone(), 2.0),
         muzzle.smoke_material(),
-        // The impact sparks' template (slice B): same Add-blend quad pipeline as the flash, but
-        // its own LUT — warming it readies the spark bind group too, not just the pipeline.
-        spark.spark_material(),
+        // The impact sparks' template: same Add-blend quad pipeline as the flash (which also covers
+        // the additive ping), but its own LUT — warming it readies the spark bind group too. The
+        // impact dust billow rides the smoke's Blend pipeline, already warmed above.
+        impact.spark_material(),
     ] {
         let billboard = spawn_billboard(
             &mut commands,
@@ -117,7 +119,8 @@ pub(super) fn spawn_prewarm_rig(
     }
 
     // One real trail ribbon (its own mesh layout — position/normal/uv/color — is its own pipeline
-    // permutation) and one impact puff clone (Blend `StandardMaterial` over the puff sphere).
+    // permutation) and one 88 ember clone (Blend emissive `StandardMaterial` over the ember sphere —
+    // the same pipeline the old impact puff warmed, now serving the shell-base ember).
     commands.spawn((
         PrewarmRig::new(),
         Mesh3d(meshes.add(prewarm_ribbon_mesh())),
@@ -129,8 +132,8 @@ pub(super) fn spawn_prewarm_rig(
     ));
     commands.spawn((
         PrewarmRig::new(),
-        Mesh3d(puff.mesh.clone()),
-        MeshMaterial3d(standard_materials.add(puff.material.clone())),
+        Mesh3d(ember.mesh.clone()),
+        MeshMaterial3d(standard_materials.add(ember.material.clone())),
         Transform::from_translation(PREWARM_POSITION),
         NoFrustumCulling,
         NotShadowCaster,

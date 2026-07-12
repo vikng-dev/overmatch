@@ -22,7 +22,8 @@ struct VfxParams {
     // x: erosion threshold 0..1, y: erosion sharpness, z: life fraction 0..1 (gradient LUT row),
     // w: overall alpha multiplier.
     fade: vec4<f32>,
-    // x: emissive boost at LUT heat 1.0 (rgb *= 1 + heat * boost), y/z/w: reserved.
+    // x: emissive boost at LUT heat 1.0 (rgb *= 1 + heat * boost), y: BLEND CONTRACT flag —
+    // >0.5 = additive glow, else alpha-over mass (see the fragment output note), z/w: reserved.
     glow: vec4<f32>,
 }
 
@@ -50,5 +51,19 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // Gradient map: X = grayscale signal, Y = life fraction. LUT alpha = heat.
     let g = textureSample(lut_texture, lut_sampler, vec2(signal, params.fade.z));
     let rgb = g.rgb * (1.0 + g.a * params.glow.x);
-    return vec4(rgb, alpha * params.fade.w);
+    let cover = alpha * params.fade.w;
+    // BOTH blend modes ride Bevy's premultiplied-alpha blend state — `AlphaMode::Add` and
+    // `AlphaMode::Blend` map to `BLEND_PREMULTIPLIED_ALPHA` / `BLEND_ALPHA`, and the two differ
+    // ONLY in what this fragment must output (Bevy's own PBR premultiplies in `pbr_functions.wgsl`;
+    // our custom fragment must do the equivalent itself). Returning STRAIGHT color under the
+    // additive contract added rgb at full weight over the whole quad — the transparent texels' LUT
+    // floor glowed as an orange square. glow.y flags the contract:
+    //   * additive (glow.y > 0.5): premultiply by coverage and ZERO the alpha lane, so the blend is
+    //     `rgb*cover + dst` — transparent texels add nothing, hot cores never darken;
+    //   * alpha-over (glow.y <= 0.5): straight color with coverage in the alpha lane — `rgb*cover +
+    //     (1-cover)*dst`, smoke as occluding mass.
+    if params.glow.y > 0.5 {
+        return vec4(rgb * cover, 0.0);
+    }
+    return vec4(rgb, cover);
 }

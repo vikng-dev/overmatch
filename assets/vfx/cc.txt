@@ -1,10 +1,16 @@
 Sprites from the Kenney Particle Pack (https://kenney.nl/assets/particle-pack), CC0 1.0
 (https://creativecommons.org/publicdomain/zero/1.0/). No attribution required; noted for provenance.
 
-Source files ("PNG (Transparent)" variants, downscaled to 256 px per frame):
-  smoke_atlas.png        — 2x2 atlas of smoke_01, smoke_02, smoke_04, smoke_05 (row-major)
-  flash_flames_atlas.png — 2x2 atlas of muzzle_01, muzzle_02, muzzle_04, muzzle_05 (row-major)
-  flash_core.png         — flare_01
+Source files ("PNG (Transparent)" variants, downscaled to 256 px per frame; 2x2 atlases are
+row-major TL, TR, BL, BR):
+  smoke_atlas.png        — 2x2 atlas of smoke_01, smoke_02, smoke_04, smoke_05
+  flash_flames_atlas.png — 2x2 atlas of muzzle_01, muzzle_02, muzzle_04, muzzle_05 (88 flame planes)
+  flash_core_atlas.png   — 2x2 atlas of scorch_01, scorch_02, scorch_03, light_01 (88 flash core:
+                           spiky radial starbursts + a round-glow 4th frame)
+  mg_core.png            — light_01 (the MG's small round-glow flash core; also the impact ping)
+  spark_atlas.png        — 2x2 atlas of trace_01, trace_02, trace_05, trace_03 (impact spark streaks;
+                           already vertical, long axis +Y = the stretched-quad axis)
+  impact_dust.png        — 2x2 atlas of smoke_06, smoke_07, smoke_08, dirt_03 (impact dust billow)
 
 All are grayscale-with-alpha on purpose: the VFX materials recolor them through per-effect
 gradient LUTs (src/vfx/billboard.rs), so one neutral sprite set serves every palette.

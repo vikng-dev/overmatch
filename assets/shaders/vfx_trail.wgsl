@@ -5,7 +5,9 @@
 //   uv.y    — arc length along the trail in meters, anchored at CAPTURE time so the noise pattern
 //             sticks to the air the shell flew through instead of swimming when tail points expire;
 //   color.r — the point's age fraction 0..1 (0 = at the shell) — the erosion driver;
-//   color.g — a per-point random seed, offsetting the noise row so two trails never match.
+//   color.g — a per-point random seed, offsetting the noise row so two trails never match;
+//   color.a — CPU-baked head-fade × view-parallel dim (stage 1): softens the muzzle-end birth seam
+//             and dims edge-on segments. Multiplied straight into the output alpha.
 //
 // Fragment recipe (Klemen Lozar's smoke-breakup shape): a soft across-strip profile modulated by
 // two scrolling octaves of tileable noise gives the density signal; the erosion threshold rises
@@ -58,5 +60,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let alpha = clamp((signal - erosion) * params.shape.z, 0.0, 1.0);
     let g = textureSample(lut_texture, lut_sampler, vec2(signal, age));
     let rgb = g.rgb * (1.0 + g.a * params.glow.x);
-    return vec4(rgb, alpha * params.shape.w);
+    // color.a folds in the CPU-baked head-fade (soft muzzle-end birth seam) and the view-parallel
+    // dim (edge-on segments fade), on top of the noise erosion and the material alpha.
+    return vec4(rgb, alpha * params.shape.w * in.color.a);
 }
