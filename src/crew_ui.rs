@@ -86,6 +86,42 @@ fn spawn_status_panel(mut commands: Commands, fonts: Res<UiFonts>) {
     ));
 }
 
+/// One weapon's status readout, split out so the precedence is unit-testable without standing up the
+/// whole ECS panel. `no_fire` is the per-weapon fire gate (dead gunner/breech/barrel) — an *unusable*
+/// weapon. The crew-gate/no-fire state wins over any timer readout: a weapon that can't fire must not
+/// tease a reload or swap countdown (a dead gun's `reload_remaining` freezes, so the timer would
+/// otherwise stick forever — the bug this precedence fixes for the belt swap).
+fn weapon_status(
+    fire_mode: FireMode,
+    no_fire: bool,
+    reload_remaining: f32,
+    belt_remaining: u32,
+) -> String {
+    match fire_mode {
+        FireMode::Single { .. } => {
+            if no_fire {
+                "no-fire".to_string()
+            } else if reload_remaining > 0.0 {
+                format!("{reload_remaining:.1}s")
+            } else {
+                "READY".to_string()
+            }
+        }
+        FireMode::Automatic { .. } => {
+            if no_fire {
+                "no-fire".to_string()
+            } else if belt_remaining == 0 {
+                // Dry belt = swap in flight; the timer freezes (and this readout with it) while the
+                // gun crew can't work the swap. Only reached when the gun CAN fire (no_fire is
+                // false) — a crew-dead MG reads `no-fire`, not a stuck `SWAP` countdown.
+                format!("SWAP {reload_remaining:.1}s")
+            } else {
+                format!("{belt_remaining} rds")
+            }
+        }
+    }
+}
+
 /// Render the controlled tank's vitals card: crew alive/total, Drive + Gunner-sight effectiveness,
 /// and each weapon's reload/fire state (`READY` / `x.xs` / `no-fire`). A pure view over the same
 /// local components the world-space status block used to show — the seed of the designed player HUD.
@@ -154,30 +190,13 @@ fn update_status_panel(
                 .ok()
                 .and_then(|sim| sim.weapons.get(slot.0).copied())
                 .unwrap_or_default();
-            let remaining = state.reload_remaining;
             let no_fire = evaluate(&weapon.fire, &quality) <= 0.0;
-            let status = match weapon.fire_mode {
-                FireMode::Single { .. } => {
-                    if remaining > 0.0 {
-                        format!("{remaining:.1}s")
-                    } else if no_fire {
-                        "no-fire".to_string()
-                    } else {
-                        "READY".to_string()
-                    }
-                }
-                FireMode::Automatic { .. } => {
-                    if state.belt_remaining == 0 {
-                        // Dry belt = swap in flight; the timer freezes (and this readout with it)
-                        // while the gun crew can't work the swap.
-                        format!("SWAP {remaining:.1}s")
-                    } else if no_fire {
-                        "no-fire".to_string()
-                    } else {
-                        format!("{} rds", state.belt_remaining)
-                    }
-                }
-            };
+            let status = weapon_status(
+                weapon.fire_mode,
+                no_fire,
+                state.reload_remaining,
+                state.belt_remaining,
+            );
             (
                 weapon.name.to_string(),
                 format!("{} {}", weapon.name, status),
@@ -323,4 +342,40 @@ fn update_crew_bar(
         None => String::new(),
     };
     *text = Text::new(format!("{prefix}{}", cells.join("    ")));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const AUTO: FireMode = FireMode::Automatic {
+        rpm: 750.0,
+        belt_size: 150,
+        belt_swap_secs: 3.5,
+        tracer_every: 5,
+    };
+    const SINGLE: FireMode = FireMode::Single { reload_secs: 3.0 };
+
+    /// The crew-gate/no-fire state wins over every timer readout, in BOTH fire modes: a weapon that
+    /// can't fire reads `no-fire`, never a (frozen) reload or swap countdown. This is the regression
+    /// guard for the dry-belt MG whose swap timer froze on a crew-dead gun and showed a permanently
+    /// stuck `SWAP` countdown instead of `no-fire`.
+    #[test]
+    fn no_fire_wins_over_frozen_timers() {
+        // Automatic, dry belt, gun crew dead: the swap timer is frozen — must read `no-fire`.
+        assert_eq!(weapon_status(AUTO, true, 2.7, 0), "no-fire");
+        // Single, mid-reload, fire crew dead: the reload is frozen — must read `no-fire`.
+        assert_eq!(weapon_status(SINGLE, true, 1.4, 0), "no-fire");
+    }
+
+    /// With the fire gate met, each mode shows its normal live readout.
+    #[test]
+    fn firable_weapons_show_their_live_state() {
+        // Automatic: belt count while loaded, swap countdown while dry.
+        assert_eq!(weapon_status(AUTO, false, 0.0, 42), "42 rds");
+        assert_eq!(weapon_status(AUTO, false, 2.7, 0), "SWAP 2.7s");
+        // Single: reload countdown, then READY.
+        assert_eq!(weapon_status(SINGLE, false, 1.4, 1), "1.4s");
+        assert_eq!(weapon_status(SINGLE, false, 0.0, 1), "READY");
+    }
 }
