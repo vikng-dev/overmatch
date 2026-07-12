@@ -556,6 +556,15 @@ impl SanctionedShots {
         }
     }
 
+    /// Is anything buffered under this exact [`ShotId`]? The buffer is a map KEYED by the shot's id
+    /// (whose `shooter` is an entity-mapped reference), so this is the question a mis-keyed shell
+    /// silently answers `false` to for its whole short life — see
+    /// `net::client::a_miskeyed_shooter_forges_a_second_shot_identity`.
+    #[cfg(test)]
+    pub(crate) fn has_shot(&self, shot: ShotId) -> bool {
+        self.shots.contains_key(&shot)
+    }
+
     /// The shot's next-to-consume bounce (ordinal `consumed`), if it has arrived. `consumed` is how
     /// many bounces this shell has already re-seeded through (its `PenetrationMarks::ricochets` count).
     fn next(&self, shot: ShotId, consumed: usize) -> Option<SanctionedBounce> {
@@ -830,6 +839,35 @@ pub(crate) const STALE_FIRE_TICKS: u32 = 16;
 #[derive(Component)]
 pub struct TracerStreak {
     pub nominal_len: f32,
+}
+
+impl TracerStreak {
+    /// THE definition of the streak child's local transform for a round that has flown `flown` metres
+    /// since its anchor (the muzzle, or its most recent ricochet).
+    ///
+    /// The unit capsule is authored along its local +Y; this rotates that axis onto the parent's −Z
+    /// (the travel axis — `integrate_projectiles` keeps the projectile `look_to(velocity)`), scales Y
+    /// to the drawn length, and pushes the capsule half a length back along +Z, so the head rides the
+    /// round and the tail trails it. The drawn length is clamped to `flown`, so the tail can never poke
+    /// back through the muzzle/turret or behind a bounce point; past `nominal_len` the clamp is a no-op
+    /// and the full streak shows.
+    ///
+    /// **One definition, two callers, deliberately.** The spawn ([`on_fire_shell`]) seeds the child with
+    /// this, and the view layer's per-frame maintainer (`vfx::tracer::clamp_tracer_streaks`) re-derives
+    /// it every frame as the round flies and re-anchors it at each ricochet. The spawn MUST clamp for
+    /// itself: a shell born in `Update` (a net observer's — `net::client::receive_fire_events` re-raises
+    /// `FireShell` at render rate) materializes at that schedule's command flush, i.e. AFTER the
+    /// `Update` maintainer has already run, so its first rendered frame draws whatever the spawn wrote.
+    /// A shell born in `FixedUpdate` (a locally-fired one) is clamped before it is ever drawn. Deriving
+    /// the seed from anything but this function is what let the two paths silently disagree.
+    pub(crate) fn drawn_transform(&self, flown: f32) -> Transform {
+        let len = self.nominal_len.min(flown).max(0.0);
+        Transform {
+            translation: Vec3::Z * (len * 0.5),
+            rotation: Quat::from_rotation_arc(Vec3::Y, Vec3::NEG_Z),
+            scale: Vec3::new(1.0, len, 1.0),
+        }
+    }
 }
 
 /// Preloaded tracer-streak view assets (mesh + emissive material), built once so a tracer round clones
@@ -1139,25 +1177,28 @@ fn on_fire_shell(
         shell.insert(WorldAssetRoot(assets.scene.clone()));
     } else if fire.tracer {
         // Streak length ≈ one render frame of travel, so successive frames fuse into a continuous
-        // line (floored so a slow, spent round still reads as a streak). The unit capsule's +Y axis
-        // is rotated onto the parent's −Z (the travel axis), Y-scaled to the length, and pushed half
-        // a length BACK along +Z — the head rides the projectile, the tail trails it.
-        let length = (speed * 0.018).max(2.0);
+        // line (floored so a slow, spent round still reads as a streak).
+        let streak = TracerStreak {
+            nominal_len: (speed * 0.018).max(2.0),
+        };
+        // SEED THE STREAK ALREADY CLAMPED to what the round has flown since the muzzle — for a local
+        // shell that is 0 (`catch_up_ticks == 0`, so it draws nothing until it moves); for a net
+        // observer's it is the catch-up distance. The clamp cannot be left to the view layer's
+        // per-frame maintainer alone: an observer's shell is born in `Update`, i.e. after that
+        // maintainer has already run, so its FIRST rendered frame draws exactly what we write here.
+        // Seeding the full `nominal_len` is what dragged a ~13 m tail back through the shooter's
+        // turret on every remote MG round. See [`TracerStreak::drawn_transform`].
+        let flown = position.distance(fire.origin);
+        let transform = streak.drawn_transform(flown);
         shell.with_child((
             Mesh3d(tracer_assets.mesh.clone()),
             MeshMaterial3d(tracer_assets.material.clone()),
-            Transform {
-                translation: Vec3::Z * (length * 0.5),
-                rotation: Quat::from_rotation_arc(Vec3::Y, Vec3::NEG_Z),
-                scale: Vec3::new(1.0, length, 1.0),
-            },
+            transform,
             // A light streak neither casts nor receives shadow — without these the sun dragged a
             // long capsule shadow across the terrain under every tracer.
             NotShadowCaster,
             NotShadowReceiver,
-            TracerStreak {
-                nominal_len: length,
-            },
+            streak,
         ));
     }
 }

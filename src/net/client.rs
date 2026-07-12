@@ -940,6 +940,11 @@ fn receive_fire_events(
     // predict-everyone, every predicted tank). They run `shooting::fire` and kick themselves, so a
     // `FireEvent`/`RicochetKeyframe` naming one of them is our own shot echoed back and is ignored.
     locally_fired: Query<(), With<ActionState<TankCommand>>>,
+    // Every tank replicated to this client — the RESOLVABILITY oracle for a shot's shooter (see
+    // [`shooter_is_live`]). `NetTank` is the wire-side tank-identity marker, and it lands on the own
+    // predicted tank and every remote alike, so it is exactly "is there a real tank behind this
+    // entity reference".
+    tanks: Query<(), With<NetTank>>,
     // The client's PREDICTED present (`P`): the tick this client's OWN tank is simulated at, ahead of
     // the server (see `net::protocol::FireEvent::fire_tick` for why the shell ages to THIS tick and
     // not the confirmed or server-now frame). `LocalTimeline` is always present on a client (mounted by
@@ -954,6 +959,12 @@ fn receive_fire_events(
     for mut receiver in &mut receivers {
         for burst in receiver.receive() {
             for event in &burst.fires {
+                // UNRESOLVABLE SHOOTER → drop (see [`shooter_is_live`]). Must come before
+                // `seen.mark_new`: a mis-keyed shot must not spawn a shell AND must not burn a
+                // `SeenShots` slot under an id that no keyframe will ever name.
+                if !shooter_is_live(event.shooter, &tanks) {
+                    continue;
+                }
                 // `event.shooter` is already entity-mapped to the local replica. Skip our own shot
                 // echoed back, and any duplicate the redundancy window re-carried (dedup by ShotId).
                 if locally_fired.contains(event.shooter) {
@@ -1022,6 +1033,12 @@ fn receive_fire_events(
                 if Dir3::new(keyframe.direction).is_err() {
                     continue;
                 }
+                // UNRESOLVABLE SHOOTER → drop (see [`shooter_is_live`]). `ShotId.shooter` is the
+                // buffer's KEY: storing a bounce under a garbage id parks it where no shell can ever
+                // find it, and it ages out unconsumed while the shell that wanted it dissolves.
+                if !shooter_is_live(keyframe.shot.shooter, &tanks) {
+                    continue;
+                }
                 sanctioned.insert(
                     keyframe.shot,
                     SanctionedBounce {
@@ -1048,6 +1065,11 @@ fn receive_fire_events(
                 // on receipt (at contact or hold); F3's tick-triggered path compares the predicted
                 // present against `impact_tick` (unwrapped to the net-neutral `u32`) to finalize a
                 // pose-divergent MISS the authority already resolved elsewhere.
+                // UNRESOLVABLE SHOOTER → drop (see [`shooter_is_live`]), for the same reason as a
+                // keyframe: `ShotId` keys the buffer, so a garbage id is an unreachable slot.
+                if !shooter_is_live(confirm.shot.shooter, &tanks) {
+                    continue;
+                }
                 sanctioned.insert_terminal(
                     confirm.shot,
                     SanctionedTerminal {
@@ -1061,6 +1083,35 @@ fn receive_fire_events(
             }
         }
     }
+}
+
+/// Does this shot's `shooter` reference resolve to a LIVE replicated tank on this client?
+///
+/// **The hazard.** Every shot names its shooter by entity (`FireEvent::shooter`, and `ShotId.shooter`
+/// inside every `RicochetKeyframe`/`ImpactConfirm`), mapped on receive by `FireBurst`'s `MapEntities`.
+/// lightyear's mapper does NOT reject a reference it cannot resolve — it hands back a GARBAGE entity.
+/// That reference is an INPUT TO [`crate::ShotId`], the correlation spine the whole cosmetic shot state
+/// machine is keyed on, so an unresolvable shooter silently mis-keys the shot instead of failing. A
+/// fire event can legitimately beat its shooter's tank replica through the pipe — at connect, at
+/// respawn, and in any burst-loss window — so this is reachable in normal play, and it was MEASURED
+/// live: mis-keyed fires spawned DUPLICATE shells (the redundancy window re-carried the same event
+/// later, now correctly mapped, so `SeenShots` saw a "new" `ShotId` and spawned a second shell), and a
+/// mis-keyed shell could never consume its own bounce keyframe or terminal confirm (they are stored
+/// under the shot's true id, which the shell does not carry) — so it held at armor contact and quietly
+/// dissolved. That is the observer's "the ricochet replicates, but the tracer never comes out of it".
+///
+/// **Why DROP and not buffer.** Dropping an unresolvable shot looks lossy, but the redundancy window
+/// already IS the buffer: `net::server::broadcast_fire_window` re-carries every fire, keyframe and
+/// confirm on every burst for `FIRE_RETAIN_TICKS` (~20 ticks / ~312 ms), on the clock rather than on
+/// new traffic. So a shot that beats its tank down the pipe is re-delivered for the next ~312 ms, and
+/// the first copy that arrives AFTER the tank resolves is accepted — correctly keyed, exactly once.
+/// Dropping the early copies turns the race into a delay instead of corruption, and it needs no new
+/// machinery. A second, local buffer would duplicate that window, and would be actively worse: a
+/// held-back shot's catch-up (`fire_catch_up_ticks`) keeps growing while it waits, so replaying it
+/// late spawns its shell further downrange — past `STALE_FIRE_TICKS` it is suppressed as stale anyway.
+/// Silence for the ~1 frame before a tank resolves is the honest read; a garbage-keyed phantom is not.
+fn shooter_is_live(shooter: Entity, tanks: &Query<(), With<NetTank>>) -> bool {
+    tanks.contains(shooter)
 }
 
 /// Age the observer's server-sanctioned bounce buffer each fixed tick and evict entries past a shell's
@@ -1425,6 +1476,93 @@ mod tests {
             seen.mark_new(other_weapon),
             "same tank+tick, other weapon = distinct shot"
         );
+    }
+
+    /// ROOT GUARD: only a reference that resolves to a LIVE replicated tank is an acceptable shooter.
+    ///
+    /// lightyear's receive-side mapper does not reject an entity reference it cannot resolve — it hands
+    /// back a garbage one — so this predicate is the client's own resolvability check. A never-mapped
+    /// reference and a DESPAWNED tank (the respawn window) must both read as not-live.
+    #[test]
+    fn only_a_live_replicated_tank_is_an_acceptable_shooter() {
+        let mut world = World::new();
+        let tank = world.spawn(NetTank).id();
+        let not_a_tank = world.spawn_empty().id();
+        let despawned = world.spawn(NetTank).id();
+        world.despawn(despawned);
+
+        let verdicts = world
+            .run_system_once(move |tanks: Query<(), With<NetTank>>| {
+                (
+                    shooter_is_live(tank, &tanks),
+                    shooter_is_live(not_a_tank, &tanks),
+                    shooter_is_live(despawned, &tanks),
+                )
+            })
+            .expect("system runs");
+        assert_eq!(
+            verdicts,
+            (true, false, false),
+            "a live NetTank is a shooter; a non-tank entity and a despawned tank are not",
+        );
+    }
+
+    /// WHY that guard is the ROOT and not a patch: a mis-keyed shooter does not fail loudly — it forges
+    /// a DIFFERENT [`ShotId`], and `ShotId` is the correlation spine the entire cosmetic shot state
+    /// machine is keyed on. Both symptoms measured live fall out of this one inequality:
+    ///
+    ///  * DUPLICATE SHELLS — `SeenShots` dedups by `ShotId`, so the mis-keyed copy and the redundancy
+    ///    window's later, correctly-mapped re-delivery are two different shots: two shells for one shot.
+    ///  * THE DISSOLVE — `SanctionedShots` is a map KEYED by `ShotId`, so a bounce keyframe stored under
+    ///    the shot's true id is unreachable to a shell carrying the mis-keyed one. It holds at armor
+    ///    contact, never consumes its verdict, and quietly dissolves: the ricochet "replicates", but the
+    ///    observer's tracer never comes out of the bounce.
+    #[test]
+    fn a_miskeyed_shooter_forges_a_second_shot_identity() {
+        let mut world = World::new();
+        let real = world.spawn(NetTank).id();
+        let garbage = world.spawn_empty().id();
+
+        let truth = ShotId {
+            shooter: real,
+            weapon: 0,
+            fire_tick: 42,
+        };
+        let miskeyed = ShotId {
+            shooter: garbage,
+            ..truth
+        };
+        assert_ne!(
+            truth, miskeyed,
+            "the shooter entity is an INPUT to ShotId — a garbage one silently forges a second identity",
+        );
+
+        // Duplicate shells: the dedup gate lets both through, because they are not the same shot.
+        let mut seen = SeenShots::default();
+        assert!(seen.mark_new(miskeyed), "the mis-keyed copy spawns a shell");
+        assert!(
+            seen.mark_new(truth),
+            "and the redundancy window's correctly-mapped re-delivery spawns a SECOND — one shot, two \
+             shells (MEASURED: 6 of 15 mis-keyed fires doubled at connect)",
+        );
+
+        // The dissolve: a buffer keyed by ShotId cannot serve a shell that carries the other id.
+        let mut buf = SanctionedShots::default();
+        buf.insert(
+            truth,
+            SanctionedBounce {
+                origin: Vec3::ZERO,
+                direction: Vec3::NEG_Z,
+                speed: 600.0,
+                bounce_tick: 0,
+                sequence: 0,
+            },
+        );
+        assert!(
+            !buf.has_shot(miskeyed),
+            "the mis-keyed shell can never find its sanctioned bounce — it holds, then dissolves",
+        );
+        assert!(buf.has_shot(truth), "the true id does find it");
     }
 
     /// The sliding-window REDUNDANCY property: with a window of N, if each burst is lost at most once
