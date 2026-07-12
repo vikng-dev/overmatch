@@ -156,12 +156,29 @@ pub(crate) struct BillboardSpec {
     pub rotation: Option<Quat>,
 }
 
-/// Spawn one billboard from a spec: per-instance material clone, ring registration, shadow opt-out.
-/// The shared quad `mesh` is the caller's (preloaded once per effect module).
+/// Spawn one billboard from a spec into the shared [`BillboardRing`] (cap [`BILLBOARD_CAP`]): the
+/// path every sub-second effect uses. See [`spawn_billboard_ring`] for effects that need their own
+/// eviction ring (e.g. long-lived ground marks that would be evicted early under an MG storm).
 pub(crate) fn spawn_billboard(
     commands: &mut Commands,
     materials: &mut Assets<VfxBillboardMaterial>,
     ring: &mut BillboardRing,
+    mesh: Handle<Mesh>,
+    spec: BillboardSpec,
+) -> Entity {
+    spawn_billboard_ring(commands, materials, &mut ring.0, BILLBOARD_CAP, mesh, spec)
+}
+
+/// Spawn one billboard from a spec into an EXPLICIT eviction ring (`ring` FIFO, oldest evicted past
+/// `cap`): per-instance material clone, ring registration, shadow opt-out. The shared quad `mesh` is
+/// the caller's (preloaded once per effect module). [`spawn_billboard`] is the shared-ring wrapper;
+/// callers that need an independent leak bound (their own cap, insulated from the shared storm) pass
+/// their own deque + cap here.
+pub(crate) fn spawn_billboard_ring(
+    commands: &mut Commands,
+    materials: &mut Assets<VfxBillboardMaterial>,
+    ring: &mut VecDeque<Entity>,
+    cap: usize,
     mesh: Handle<Mesh>,
     spec: BillboardSpec,
 ) -> Entity {
@@ -203,9 +220,9 @@ pub(crate) fn spawn_billboard(
         entity.insert(FaceCamera);
     }
     let id = entity.id();
-    ring.0.push_back(id);
-    while ring.0.len() > BILLBOARD_CAP {
-        if let Some(old) = ring.0.pop_front() {
+    ring.push_back(id);
+    while ring.len() > cap {
+        if let Some(old) = ring.pop_front() {
             commands.entity(old).try_despawn();
         }
     }
