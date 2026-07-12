@@ -71,6 +71,12 @@ mod overlay;
 /// of `GamePlugin`.
 pub mod sandbox;
 mod shooting;
+/// The SHOT-LIFECYCLE recorder (`SPIKE_SHOT_TRACE=<path>`): an env-gated JSONL log of what happens to
+/// each [`ShotId`] on BOTH ends — the authority's fire/keyframe/confirm emissions, and the client's
+/// arrivals (with the dedup verdict) plus its cosmetic shell's spawn → contact → hold → re-seed /
+/// terminal / dissolve. Net-neutral (plain `u32` ticks), so `ballistics` writes to it without naming
+/// the netcode. Off (zero cost) unless the env var is set. Analyzed by `scripts/shot/analyze.py`.
+mod shot_trace;
 mod sight;
 mod spec;
 mod state;
