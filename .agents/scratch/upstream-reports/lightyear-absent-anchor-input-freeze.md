@@ -73,6 +73,40 @@ session.
 
 **(c)** `SyncEvent` tick snaps / rollback bursts underrunning the client's popped head (#1559 route 2).
 
+## Two FURTHER defects from the same `balanced()` root — no `Absent` required [NEW, ours]
+
+Seed route (a) above shows how a delay change can plant an `Absent`. But a delay change corrupts the
+input stream **directly**, without any `Absent` at all, in two more ways. Both were reproduced over the
+real pipeline (see Evidence); both produce a value that is byte-indistinguishable from real input, so
+neither is visible to any buffer-shape check.
+
+**(d) Delay SHRINKS → `end_tick` STALLS → the client's correction is silently DROPPED.**
+`buffer_action_state` writes `set(local_tick + input_delay)`. When the delay drops by one, two
+consecutive local ticks write the **same** buffer tick: the client correctly overwrites its own entry
+with the newer command and re-sends it, but `end_tick` does not advance, so **every** tick in that
+message is `<= last_remote_tick` and `update_buffer`'s write gate refuses all of them
+(`lightyear_inputs/src/input_message.rs:195`). The server keeps the **superseded** value — forever.
+If the superseded value was `pressed` and the revision was the player's RELEASE, the server fires a
+round the client never predicted, off a perfectly ordinary `Compressed::Input(..)` entry.
+
+`last_remote_tick` is a **receipt** watermark being used as a **simulation** watermark. A tick that has
+been received but not yet simulated is still correctable. lightyear already *notices* this and logs it —
+`detect_input_history_rewrite` (`server.rs:644`) emits *"server received a different input for a future
+tick already covered by an earlier client input packet"* — and then drops the correction anyway.
+
+**(e) Delay GROWS → `end_tick` JUMPS → the client's OWN buffer FABRICATES the skipped tick.**
+The client skips a buffer tick, and `InputBuffer::set_raw` fills any skipped tick unconditionally with
+`Compressed::SameAsPrecedent` (`input_buffer.rs:212`, *"if an input is missing, we consider that the
+user repeated their last action"*). That is an **extrapolation written into the buffer as data**.
+`get()` resolves it back to `Some(pressed)`, so the client fires the phantom round **itself** and ships
+the fabrication to the server as truth — both ends fire a tick nobody authored.
+
+Crucially, **the fabrication is not detectable by shape**: a genuinely HELD button also compresses to
+`SameAsPrecedent` (`set()`, `input_buffer.rs:168-175`). They are the same bytes. `set_raw`'s gap-fill and
+`set`'s compression need to be *different variants* (e.g. `Fabricated`) if a consumer is ever to tell
+"the player repeated this" from "we filled this in" — which is fix direction 4 restated at the buffer
+level.
+
 ## Evidence
 
 - **Reproduction repo (runnable):** `lightyear-repro-1559` — failing tests against lightyear's public API
@@ -85,6 +119,15 @@ session.
   **0**. Packet loss alone produced **0** leaks — the defect is the delay wobble, not starvation.
 - Our detector for extrapolated ticks (`get(tick).is_none() && get_last().is_some()`) is **structurally
   blind** here: both conjuncts read false, because `get_last()` also dead-ends on the `Absent`.
+- Focused cases in `tests/net_fire_release.rs` (ours, over the real lightyear types):
+  `delay_shrink_strands_a_stale_pressed_tick_on_the_server` (defect **d** — the server fires on a
+  `Compressed::Input(fire: true)` entry the client had already corrected);
+  `delay_growth_fabricates_unauthored_pressed_ticks_on_both_ends` (defect **e** — a 1→3 delay jump
+  fabricates TWO ticks and **both ends** fire them);
+  `same_as_precedent_cannot_distinguish_fabrication_from_a_held_trigger` (why no shape rule can work);
+  `absent_anchor_freezes_the_server_and_blinds_the_held_last_detector` and
+  `absent_anchor_propagates_forward_through_pop` (the freeze above, incl. `pop` carrying the anchor
+  forward one tick per tick — the poison sustains itself).
 
 ## Suggested upstream fix directions (not prescriptive)
 
@@ -95,7 +138,11 @@ session.
 3. In `pop`, carry the last resolvable `Input` as the new anchor instead of materialising `Absent` forward.
 4. Give games an API to ask *"was this tick's input authored, or inherited?"* — issue [#492](https://github.com/cBournhonesque/lightyear/issues/492) proposed a per-action `handle_missing_input` hook; it was never implemented. Without it, every server-auth game must re-derive provenance itself.
 5. Independently: make the adaptive delay recomputation preserve `Δend_tick == 1`, or document that
-   `balanced()` is unsafe with the native input buffer.
+   `balanced()` is unsafe with the native input buffer. Note this single change would close seed route
+   (a) **and** defects (d) and (e) at once — every one of them is `Δend_tick != 1`.
+6. For (d) specifically: gate `update_buffer`'s writes on the last **simulated** tick, not
+   `last_remote_tick`, so a not-yet-simulated tick stays correctable. That needs a monotonic per-message
+   sequence number to order two messages sharing an `end_tick` (the stall makes `end_tick` ambiguous).
 
 ## Our workaround (shipped)
 
