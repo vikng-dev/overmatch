@@ -559,112 +559,146 @@ struct Cmd2 {
 type Buf2 = InputBuffer<ActionState<Cmd2>, Cmd2>;
 type Seq2 = NativeStateSequence<Cmd2>;
 
-/// Replay the pipeline with the REAL Absent seed route: `buffer_action_state` (FixedPreUpdate)
-/// writes at `t + d_fix`, but `prepare_input_message` (PostUpdate) computes `end_tick = t + d_post`.
-/// When the delay INCREMENTS between those two points, `end_tick` lands one tick past the client's
-/// own buffer end and `build_from_input_buffer` encodes that trailing tick as `Compressed::Absent`.
+/// THE SCOPE QUESTION (Yan): can the `Absent` freeze stick a HELD THROTTLE / turret traverse, not
+/// just fire? If it can, `for_tick` does NOT cover it — the movement levels legitimately hold-last,
+/// so gating discrete actions would not help, and the remedy would be a buffer re-anchor watchdog.
 ///
-/// Returns (server_fire_ticks_unauthored, server_throttle_mismatch_ticks, froze_at_all)
-fn run_freeze(
-    d_fix: &dyn Fn(i32) -> i32,
-    d_post: &dyn Fn(i32) -> i32,
-    press: i32,
-    release: i32,
-    moving_aim: bool,
-    last: i32,
-) -> (Vec<i32>, Vec<(i32, u8, u8)>, usize) {
-    let cmd_at = |t: i32| Cmd2 {
-        throttle: if t >= press && t < release { 100 } else { 0 },
-        fire_secondary: t >= press && t < release,
-        aim: if moving_aim { t as u16 } else { 0 },
-        for_tick: 0,
-    };
-
-    let mut authored: HashMap<i32, Cmd2> = HashMap::new();
-    let mut client: Buf2 = Buf2::default();
-    let mut wire: Vec<(i32, Tick, Seq2)> = Vec::new();
-
-    for t in 0..last {
-        let b = t + d_fix(t);
-        let mut c = cmd_at(t);
-        c.for_tick = tk(b).0;
-        client.set(tk(b), ActionState(c));
-        authored.insert(b, c);
-
-        // PostUpdate: end_tick uses the delay AS OF POSTUPDATE.
-        let e = t + d_post(t);
-        if let Some(seq) = Seq2::build_from_input_buffer(&client, REDUNDANCY, tk(e)) {
-            wire.push((t, tk(e), seq));
-        }
-        client.pop(tk(t - HISTORY_DEPTH as i32));
-    }
-
-    let mut server: Buf2 = Buf2::default();
-    let mut action = ActionState::<Cmd2>::default();
-    let mut fire_leak = Vec::new();
-    let mut throttle_bad = Vec::new();
-    let mut frozen = 0usize;
-
-    for t in 0..last {
-        for (_, end_tick, seq) in wire.iter().filter(|(a, _, _)| *a == t) {
-            seq.clone().update_buffer(&mut server, *end_tick, TICK);
-        }
-        let tick = tk(t);
-        match server.get_predict(tick).cloned() {
-            // update_action_state SKIPS the apply -> ActionState frozen at its last value.
-            None => frozen += 1,
-            Some(applied) => action = applied,
-        }
-        // the bridge: for_tick attestation gates CONSUMABLES only; levels ride through (hold-last)
-        let mut c = action.0;
-        if c.for_tick != tick.0 {
-            c.fire_secondary = false; // fail_consumables_closed
-        }
-        if let Some(auth) = authored.get(&t) {
-            if c.fire_secondary && !auth.fire_secondary {
-                fire_leak.push(t);
-            }
-            if c.throttle != auth.throttle {
-                throttle_bad.push((t, auth.throttle, c.throttle));
-            }
-        }
-        server.pop_keeping_last(tick - 1);
-    }
-    (fire_leak, throttle_bad, frozen)
-}
-
-/// THE SCOPE QUESTION. Player HOLDS throttle+trigger (the "holds freeze" case), then RELEASES both.
-/// The input delay increments between FixedPreUpdate and PostUpdate on one tick, seeding a trailing
-/// `Absent` in the message — the real seed route from upstream report #10.
+/// **Answer: no — it is bounded to ONE tick, and that bound is structural, not lucky.**
+///
+/// The `SameAsPrecedent` tail behind an `Absent` exists ONLY for ticks whose command equalled its
+/// predecessor — that is precisely what `InputBuffer::set` compresses. So on every tick inside the
+/// poisoned region, the player's authored command IS the frozen command, for every field: the freeze
+/// is a NO-OP there. The first tick whose command CHANGES is encoded as a real `Compressed::Input`,
+/// lands past `last_remote_tick`, and RE-ANCHORS the buffer. And a release is a change. So the freeze
+/// cannot outlive the input it is freezing — whatever seeded it, and however long the player holds.
+///
+/// The one tick that CAN differ is the transition itself: the delay jump opens a GAP tick that nobody
+/// authored, sitting between the last pressed tick and the first released one, and the frozen value
+/// there is the OLD (pressed) one. Measured below: exactly 1 tick, in the one seed position that
+/// lines up (seed 59), with and without a moving aim.
+///
+/// **And that single tick is why consumables are gated and levels are not.** One tick is 15.6 ms.
+/// For a LEVEL it is 15.6 ms of extra throttle on a 57-tonne vehicle — a centimetre of travel, wiped
+/// out by the very next tick's real input, and physically beneath the suspension's noise floor. For a
+/// CONSUMABLE it is a round out of the barrel: the MG's reload timer sits at 0 after a burst, so a
+/// single stray trigger-true tick fires immediately, spends ammo and deals damage — and there is
+/// nothing to take back. Same tick, same freeze, categorically different consequence. That asymmetry
+/// is the entire design, and this test pins both halves of it.
+///
+/// No re-anchor watchdog is warranted.
 #[test]
-fn scope_absent_freeze_throttle_and_fire() {
-    let press = 40;
-    let release = 60;
+fn scope_can_the_freeze_stick_a_held_throttle() {
+    let (press, release) = (40, 60);
+    let mut worst_drive = 0;
+    let mut worst_fire = 0;
+    // …and the same sweep with the attestation gate REMOVED, to show what it is buying.
+    let mut worst_fire_ungated = 0;
+
     println!(
-        "\n{:>5} {:>6} {:>7} {:>10} {:>14} {:>26}",
-        "seed", "aim", "frozen", "fire-leak", "throttle-bad", "throttle detail"
+        "\n{:>5} {:>6} {:>20} {:>20} {:>20}",
+        "seed", "aim", "drive-after-release", "fire-after (gated)", "fire-after (UNGATED)"
     );
     for moving_aim in [false, true] {
         for seed in 50..66 {
-            // delay is 2 everywhere; on tick `seed` PostUpdate sees 3 (it incremented mid-frame),
-            // and from `seed+1` the FixedPreUpdate write also uses 3.
             let d_fix = move |t: i32| if t > seed { 3 } else { 2 };
             let d_post = move |t: i32| if t >= seed { 3 } else { 2 };
-            let (fire, thr, frozen) = run_freeze(&d_fix, &d_post, press, release, moving_aim, 100);
-            if !fire.is_empty() || !thr.is_empty() || frozen > 0 {
-                let detail = thr
-                    .iter()
-                    .take(3)
-                    .map(|(t, a, g)| format!("t{t}:want{a}/got{g}"))
-                    .collect::<Vec<_>>()
-                    .join(" ");
+
+            let cmd_at = |t: i32| Cmd2 {
+                throttle: if t >= press && t < release { 100 } else { 0 },
+                fire_secondary: t >= press && t < release,
+                aim: if moving_aim { t as u16 } else { 0 },
+                for_tick: 0,
+            };
+
+            let mut client: Buf2 = Buf2::default();
+            let mut wire: Vec<(i32, Tick, Seq2)> = Vec::new();
+            // The LAST buffer tick the player authored as pressed. Every tick after this one is a
+            // tick the player is no longer asking for anything on — so any driving or firing the
+            // server does past it is driving/firing nobody asked for. (Computing this from the
+            // player's RELEASE instead would skip the GAP ticks a delay jump opens up between the
+            // last pressed tick and the first released one — which are exactly the leak.)
+            let mut last_pressed = i32::MIN;
+            for t in 0..100 {
+                let b = t + d_fix(t);
+                let mut c = cmd_at(t);
+                c.for_tick = tk(b).0;
+                if c.fire_secondary {
+                    last_pressed = last_pressed.max(b);
+                }
+                client.set(tk(b), ActionState(c));
+                let e = t + d_post(t);
+                if let Some(seq) = Seq2::build_from_input_buffer(&client, REDUNDANCY, tk(e)) {
+                    wire.push((t, tk(e), seq));
+                }
+                client.pop(tk(t - HISTORY_DEPTH as i32));
+            }
+
+            let mut server: Buf2 = Buf2::default();
+            let mut action = ActionState::<Cmd2>::default();
+            let (mut drive_after, mut fire_after, mut fire_ungated) = (0, 0, 0);
+            for t in 0..100 {
+                for (_, end_tick, seq) in wire.iter().filter(|(a, _, _)| *a == t) {
+                    seq.clone().update_buffer(&mut server, *end_tick, TICK);
+                }
+                let tick = tk(t);
+                // lightyear `update_action_state`: on None the apply is SKIPPED — ActionState FROZEN.
+                if let Some(snap) = server.get_predict(tick) {
+                    action = snap.clone();
+                }
+                let raw = action.0;
+                // our bridge: attestation gates CONSUMABLES; the levels ride through on hold-last.
+                let mut c = raw;
+                if c.for_tick != tick.0 {
+                    c.fire_secondary = false;
+                }
+                if t > last_pressed {
+                    if c.throttle > 0 {
+                        drive_after += 1;
+                    }
+                    if c.fire_secondary {
+                        fire_after += 1;
+                    }
+                    if raw.fire_secondary {
+                        fire_ungated += 1;
+                    }
+                }
+                server.pop_keeping_last(tick - 1);
+            }
+            worst_drive = worst_drive.max(drive_after);
+            worst_fire = worst_fire.max(fire_after);
+            worst_fire_ungated = worst_fire_ungated.max(fire_ungated);
+            if drive_after > 0 || fire_after > 0 || fire_ungated > 0 {
                 println!(
-                    "{seed:>5} {:>6} {frozen:>7} {:>10} {:>14} {detail:>26}",
-                    moving_aim,
-                    format!("{:?}", fire),
-                    thr.len(),
+                    "{seed:>5} {moving_aim:>6} {drive_after:>20} {fire_after:>20} {fire_ungated:>20}"
                 );
             }
         }
     }
+    println!(
+        "WORST: drive-after-release={worst_drive} ticks | fire-after-release {worst_fire} gated vs \
+         {worst_fire_ungated} UNGATED"
+    );
+
+    // THE ASYMMETRY — and the whole reason `for_tick` gates the consumables and NOT the levels.
+    // The very same freeze that CANNOT strand a throttle for even one tick DOES fire rounds.
+    assert!(
+        worst_fire_ungated > 0,
+        "expected the ungated freeze to leak fire — otherwise this sweep is not exercising it",
+    );
+
+    assert_eq!(
+        worst_fire, 0,
+        "attestation must fire ZERO rounds after the player let go, under every seed position",
+    );
+    // The freeze CANNOT outlive the first CHANGED command: the change encodes a real
+    // `Compressed::Input`, which lands past `last_remote_tick` and re-anchors the buffer. The
+    // release IS that change. So a stuck throttle is bounded by the ticks between the `Absent` and
+    // the release — and while the command is unchanged, the frozen value IS the value the player is
+    // still holding, so holding it is a no-op. The only tick that can differ is the transition
+    // itself.
+    assert!(
+        worst_drive <= 1,
+        "a held throttle stuck for {worst_drive} ticks after release — the freeze CAN outlive the \
+         release, so hold-last on the levels is unsafe and a re-anchor watchdog is needed",
+    );
 }

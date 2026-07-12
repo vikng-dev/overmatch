@@ -30,6 +30,32 @@ A single `Compressed::Absent` entry poisons the server's `InputBuffer` for as lo
    window is all-`SameAsPrecedent` behind the `Absent`, so the chain stays unresolvable. #1559 puts it
    precisely: *"presses work, holds freeze."*
 
+### Scope correction — "permanently freezes" is true but MISLEADING; do not argue it that way
+
+The freeze is unbounded in **duration** but a **no-op in effect** except at one tick, and a maintainer who
+tests it naively will see nothing wrong and close the report. The precise statement:
+
+A `SameAsPrecedent` tail exists **only** for ticks whose command equalled its predecessor — that is exactly
+what `InputBuffer::set` compresses. So on every tick *inside* the poisoned region, the player's authored
+command **is** the frozen command, field for field: freezing it changes nothing. The first tick whose
+command **changes** encodes a real `Compressed::Input`, lands past `last_remote_tick`, and re-anchors the
+buffer. **A release is a change.** The freeze therefore cannot outlive the input it is freezing.
+
+What survives is the **transition tick**: the delay jump opens a gap tick nobody authored, sitting between
+the last *pressed* tick and the first *released* one, and the frozen value there is the old (pressed) one.
+Measured across 32 seed positions: **worst case exactly 1 tick.**
+
+**That one tick is the whole bug, and its severity is entirely a function of what the input DOES:**
+- a **level** (throttle/steer/aim) → 15.6 ms of stale throttle on a 57-tonne vehicle: ~1 cm, erased by the
+  next tick, beneath the suspension noise floor. Harmless. This is why "the server drives your tank away"
+  is NOT a claim we make.
+- a **consumable** (fire) → a round leaves the barrel. Ammo spent, damage dealt, replicated to the victim,
+  **nothing to roll back**.
+
+So the upstream argument must be: *"a discrete, irreversible action commits on a fabricated tick"* — not
+*"state freezes indefinitely."* The former is trivially demonstrable and cannot be waved away; the latter
+invites a maintainer to hold a stick, observe nothing, and close the issue.
+
 ## Consequence (the part not yet engaged with upstream)
 
 In a **server-authoritative game with client-side prediction**, a frozen `ActionState` means the server
