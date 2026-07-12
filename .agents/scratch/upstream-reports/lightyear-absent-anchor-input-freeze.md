@@ -6,7 +6,42 @@
 
 ## Suggested title
 
-`Absent`-anchored `SameAsPrecedent` chain permanently freezes server `ActionState`; adaptive input delay seeds it in ordinary play
+Adaptive input delay fabricates an input tick the player never authored (on BOTH ends, indistinguishably)
+
+## LEAD WITH THIS — validated in a live client+server App, 2026-07-13
+
+When `input_delay` grows by one, the client skips a buffer tick, and `InputBuffer::set_raw` gap-fills it
+with `Compressed::SameAsPrecedent` — *"if an input is missing, we consider that the user repeated their
+last action"* (`input_buffer.rs:212`). That is an **extrapolation written into the buffer as data.**
+Both the client and the server then resolve it to the last real value, so:
+
+```
+   223 |        HELD        |  FIRE  |  FIRE
+   224 |    ** NOBODY **    |  FIRE  |  FIRE   <== UNAUTHORIZED FIRE
+   225 |        HELD        |  FIRE  |  FIRE
+
+  player held the trigger for      : 40 ticks
+  server simulated trigger-down for: 41 ticks
+  server rounds fired: 6            (player authored 5)
+```
+
+**Two properties make this un-fixable downstream, and they are the whole report:**
+
+1. **The fabrication is symmetric.** Client and server agree perfectly — divergence is *zero*, because both
+   ends fabricate the same value. Any correctness check that compares the two ends passes. **Agreement is
+   not authorization.**
+2. **The fabrication is byte-identical to a genuine hold.** A gap-filled tick and a truly-held tick are both
+   `SameAsPrecedent`. No buffer-shape inspection, no downstream heuristic, can tell them apart — a fact we
+   established the expensive way, by shipping a detector that could not (see "Our workaround").
+
+Therefore the only defense available to a game is **input provenance** — carry the tick the command was
+authored FOR, and refuse to commit irreversible actions on any command that cannot attest to the current
+tick. We shipped exactly that. But no game should have to: a netcode library should not silently manufacture
+inputs and hand them back as truth.
+
+*(Methodology note, honestly: an early attempt to refute this measured client/server divergence rather than
+player authorization and found "no bug." That was the wrong metric — see property 1. The numbers above come
+from a live App instrumented against what the human actually held.)*
 
 ## Mechanism (all verified in vendored 0.28.0 source)
 
@@ -107,6 +142,12 @@ real pipeline (see Evidence); both produce a value that is byte-indistinguishabl
 neither is visible to any buffer-shape check.
 
 **(d) Delay SHRINKS → `end_tick` STALLS → the client's correction is silently DROPPED.**
+*Status: real at the `InputBuffer` level (`delay_shrink_strands_a_stale_pressed_tick_on_the_server` passes
+against the real pipeline) but **NOT reproduced in a live App** across a sweep of bump tick × schedule ×
+send interval. A partial, unconfirmed explanation: in a live App frames outrun ticks, so a mid-tick shrink
+emits a message with a LOWER `end_tick`, which rolls `last_remote_tick` backward (the SECOND-ISSUE defect)
+and accidentally repairs the stranded tick. Treat mechanism (d) as unvalidated in-engine; the leak counts in
+our sweep are dominated by (e), the growth fabrication above. Do not lead with (d) upstream.*
 `buffer_action_state` writes `set(local_tick + input_delay)`. When the delay drops by one, two
 consecutive local ticks write the **same** buffer tick: the client correctly overwrites its own entry
 with the newer command and re-sends it, but `end_tick` does not advance, so **every** tick in that
