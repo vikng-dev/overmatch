@@ -38,7 +38,9 @@
 
 use bevy::prelude::*;
 
-use crate::ballistics::{FireShell, TRACER_MAX_CALIBER};
+// `STALE_FIRE_TICKS` is shared with the sim-side catch-up impact gate (`ballistics::on_fire_shell`)
+// so the muzzle flash and the impact phantom fall stale together — one constant, no drift.
+use crate::ballistics::{FireShell, STALE_FIRE_TICKS, TRACER_MAX_CALIBER};
 
 use super::ViewRng;
 use super::billboard::{
@@ -130,9 +132,6 @@ const MG_SMOKE_ALPHA: f32 = 0.45;
 const MG_SMOKE_RISE: f32 = 0.4;
 const MG_SMOKE_PUSH: f32 = 0.7;
 
-/// A remote shot older than this many fixed ticks (~250 ms at 64 Hz) skips the dressing entirely
-/// (survey: stale cosmetic events skip rather than play late).
-const STALE_FIRE_TICKS: u32 = 16;
 /// Beyond this camera distance (m) only the core + light spawn (LOD by distance — the cheap half
 /// of the overdraw discipline).
 const FAR_FULL_DRESSING: f32 = 400.0;

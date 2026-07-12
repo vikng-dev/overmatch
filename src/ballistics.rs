@@ -442,6 +442,15 @@ pub struct ShellReadout {
 /// shell-scene branch below, rather than a second constant that could drift.
 pub(crate) const TRACER_MAX_CALIBER: f32 = 0.02;
 
+/// A remote shot older than this many fixed catch-up ticks (~250 ms at 64 Hz) is stale: its flash
+/// moment is long over on the shooter's screen, so the cosmetic reads it would still fire late — the
+/// muzzle dressing AND the catch-up impact phantom (`on_fire_shell`) — are suppressed rather than
+/// erupted late from bare ground (a full-scale splash + a multi-second ground scar with no shell
+/// attached reads as a phantom). `pub(crate)` so the sim-side catch-up gate here and the view-side
+/// muzzle gate (`vfx::muzzle`) share ONE constant and can never drift apart. Damage is unaffected —
+/// the shell resolved on the authority; this gates only the cosmetic catch-up read.
+pub(crate) const STALE_FIRE_TICKS: u32 = 16;
+
 /// View marker on a tracer round's emissive streak child (`on_fire_shell`). The streak is a VIEW
 /// attachment on the cosmetic projectile entity (ADR-0014) — it carries no sim state; it just rides
 /// the projectile's `Transform`, which `integrate_projectiles` keeps pointed down the velocity.
@@ -668,23 +677,34 @@ fn on_fire_shell(
                 // IMPACT still reads: spark the same view-side `Impact` seam a live march would have
                 // (the dust billow + sparks, `vfx::impact`), where the segment says it hit. Without
                 // this, close-range remote fire (whose whole flight fits inside the catch-up skip)
-                // shows nothing at all on the observing client. Surface is resolved properly from the
-                // hit's volume ancestry (armor plate ⇒ Armor, else Terrain); penetration is unknown
-                // in this cosmetic-phantom context (no march ran), so `penetrated: false` — a
-                // catch-up armor read shows the spark/spall but never the flame lick.
-                let surface = if hit_ancestor(hit.entity, &volumes, &parents).is_some() {
-                    ImpactSurface::Armor
-                } else {
-                    ImpactSurface::Terrain
-                };
-                commands.trigger(Impact {
-                    position: fire.origin + Vec3::from(dir) * (EPS + hit.distance),
-                    normal: hit.normal,
-                    caliber: fire.caliber,
-                    surface,
-                    penetrated: false,
-                    deflection: None,
-                });
+                // shows nothing at all on the observing client.
+                //
+                // STALENESS GATE (shares `STALE_FIRE_TICKS` with the muzzle dressing so the flash and
+                // this impact phantom fall stale together): past the bound the flash moment is long
+                // over on the shooter's screen, and erupting a full-scale splash + a multi-second
+                // ground scar late from bare ground — with no shell or muzzle flash attached — reads as
+                // a phantom (the catch-up accepts up to `CATCH_UP_MAX_TICKS` = 100, a ~1.5 s stall).
+                // So we still `return` (the shell landed on the authority — no in-flight tracer
+                // either), but suppress the cosmetic read. Damage is unaffected.
+                if fire.catch_up_ticks <= STALE_FIRE_TICKS {
+                    // Surface is resolved properly from the hit's volume ancestry (armor plate ⇒
+                    // Armor, else Terrain); penetration is unknown in this cosmetic-phantom context
+                    // (no march ran), so `penetrated: false` — a catch-up armor read shows the
+                    // spark/spall but never the flame lick.
+                    let surface = if hit_ancestor(hit.entity, &volumes, &parents).is_some() {
+                        ImpactSurface::Armor
+                    } else {
+                        ImpactSurface::Terrain
+                    };
+                    commands.trigger(Impact {
+                        position: fire.origin + Vec3::from(dir) * (EPS + hit.distance),
+                        normal: hit.normal,
+                        caliber: fire.caliber,
+                        surface,
+                        penetrated: false,
+                        deflection: None,
+                    });
+                }
                 return;
             }
         }
@@ -1446,6 +1466,59 @@ mod march_tests {
         assert!(
             deflect.z > 0.0,
             "the bounce deflects back off the face (+Z), got {deflect:?}"
+        );
+    }
+
+    /// Raise a `FireShell` (88, given `catch_up_ticks`) whose fast-forwarded flight overshoots a plate
+    /// 2 m ahead, so the catch-up already-landed raycast in `on_fire_shell` hits — then return every
+    /// impact the observer fired. Registers `on_fire_shell` with dummy asset resources (a catch-up hit
+    /// returns before the shell scene is ever spawned, so the handles are never dereferenced).
+    fn fire_shell_catch_up(app: &mut App, catch_up_ticks: u32) -> Vec<Captured> {
+        app.insert_resource(ProjectileAssets {
+            scene: Handle::default(),
+        });
+        app.insert_resource(TracerAssets {
+            mesh: Handle::default(),
+            material: Handle::default(),
+        });
+        app.add_observer(on_fire_shell);
+        // Muzzle at z=+2, firing straight down −Z through the plate at the origin at high speed, so a
+        // single-digit catch-up already overshoots it and the segment raycast finds the plate.
+        app.world_mut().trigger(FireShell {
+            origin: Vec3::new(0.0, 2.0, 2.0),
+            direction: Dir3::NEG_Z,
+            speed: 800.0,
+            caliber: 0.088,
+            mass: 10.2,
+            shooter: None,
+            tracer: true,
+            catch_up_ticks,
+        });
+        app.world_mut().flush();
+        app.world().resource::<ImpactLog>().0.clone()
+    }
+
+    /// A FRESH catch-up (≤ STALE_FIRE_TICKS) whose flight fully resolves in the skip still fires the
+    /// cosmetic impact read — the close-range remote-fire case the phantom exists to cover.
+    #[test]
+    fn fresh_catch_up_fires_the_phantom_impact() {
+        let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.05), Vec3::new(0.0, 2.0, 0.0));
+        let hits = fire_shell_catch_up(&mut app, 5);
+        assert_eq!(hits.len(), 1, "a fresh catch-up hit reads once");
+        assert_eq!(hits[0].surface, ImpactSurface::Armor, "the plate is armor");
+    }
+
+    /// A STALE catch-up (> STALE_FIRE_TICKS) whose flight fully resolves in the skip fires NO impact:
+    /// the flash moment is long over, so the phantom would erupt a full splash + ground scar late from
+    /// bare ground. It is suppressed by the same staleness bound the muzzle dressing uses.
+    #[test]
+    fn stale_catch_up_suppresses_the_phantom_impact() {
+        let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.05), Vec3::new(0.0, 2.0, 0.0));
+        let hits = fire_shell_catch_up(&mut app, STALE_FIRE_TICKS + 1);
+        assert!(
+            hits.is_empty(),
+            "a stale catch-up must fire no late phantom impact, got {}",
+            hits.len()
         );
     }
 }
