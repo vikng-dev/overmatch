@@ -1172,12 +1172,18 @@ fn strip_confirmed_history<C: Component + Clone>(
 /// `update_action_state` calls `InputBuffer::get_predict(tick)`, which returns `get_last()` once
 /// `tick` is past the buffered range (`lightyear_inputs` `input_buffer.rs:316` / `server.rs:707`,
 /// "equivalent to considering that the player will keep playing the last action"). Hold-last is
-/// CORRECT for `TankCommand`'s levels (`throttle`/`steer`/`fire_secondary`) and absolutes
-/// (`aim`/`range`), but WRONG for its edges (`fire_primary`/`crew_swap`): a held edge re-latches
-/// every tick, so `consume_edges` (`command.rs`) can never win. Left unfixed that is one unrequested
-/// shot per reload cycle (`shooting::fire` is reload-gated) and a crew swap that re-arms itself
-/// forever — `damage::tick_swaps` drops `PendingSwap` on completion, and the still-held `Start` edge
-/// makes `apply_crew_swap_commands` insert a fresh one every ~`SWAP_SECONDS`.
+/// CORRECT for `TankCommand`'s MOVEMENT levels (`throttle`/`steer`) and absolutes (`aim`/`range`) —
+/// a starved stream keeping the last drive and lay is the right guess. It is WRONG for the edges
+/// (`fire_primary`/`crew_swap`) AND for the automatic-fire level (`fire_secondary`), for the same
+/// underlying reason: both commit a DISCRETE consequence off a tick the server never received. A held
+/// edge re-latches every tick, so `consume_edges` (`command.rs`) can never win — one unrequested shot
+/// per reload cycle (`shooting::fire` is reload-gated) and a crew swap that re-arms itself forever
+/// (`damage::tick_swaps` drops `PendingSwap` on completion, and the still-held `Start` edge makes
+/// `apply_crew_swap_commands` insert a fresh one every ~`SWAP_SECONDS`). And a held `fire_secondary`
+/// keeps an `Automatic` weapon cycling for the whole starvation window: a lost RELEASE transition
+/// after a burst fired extra server rounds the player never asked for (ammo + damage). So on a
+/// hold-last tick this bridge clears the edges AND fails `fire_secondary` closed — never committing
+/// fire on extrapolated input (Overwatch/Rocket League/GGPO firing canon).
 ///
 /// So consult the entity's own `InputBuffer` for the tick `FixedUpdate` is stepping
 /// (`LocalTimeline::tick()`). The `ActionState` is a hold-last extrapolation — and its edges must be
@@ -1197,7 +1203,8 @@ fn strip_confirmed_history<C: Component + Clone>(
 /// - **Server tank, no input message yet:** buffer absent/empty → not held-last → passes, and the
 ///   `ActionState` is `default()` anyway, so there is no edge to carry. Harmless.
 /// - **Server tank, starved:** buffer non-empty, `get(tick)` `None`, `get_last` `Some` → held-last →
-///   edges cleared. The original starvation re-latch (`701d0a7`) stays fixed.
+///   edges cleared AND `fire_secondary` failed closed. The original starvation re-latch (`701d0a7`)
+///   stays fixed, and the automatic-fire level no longer commits rounds on extrapolated ticks.
 ///
 /// This is shared code mounted on BOTH ends. On the server it fixes the starvation above; on the
 /// client `LocalTimeline::tick()` is the REPLAYED tick during rollback resim (incremented in
@@ -1235,17 +1242,34 @@ fn bridge_action_state_to_tank_command(
     for (action, buffer, mut command) in &mut tanks {
         // Whole-struct copy (matches `ActionState`'s "absolute snapshot per tick" contract) …
         let mut next = action.0;
-        // … but a HOLD-LAST EXTRAPOLATION must not carry an edge. The `ActionState` is extrapolated
-        // exactly when the buffer HAS data but none for this tick (`get(tick).is_none()` while
-        // `get_last().is_some()`) — that is when the server's `update_action_state` holds the last
-        // input forever (`get_predict` → `get_last`). An ABSENT or EMPTY buffer is NOT extrapolating
-        // (nothing is being held): on the client's own tank the `ActionState` was authored THIS tick
-        // by `feed_action_state`, so a genuine click in the pre-sync join/spawn window must pass.
-        // `get`, not `get_predict`, is the exact non-extrapolating lookup. See the doc for the full
-        // per-case argument (`get_last` semantics: vendored `lightyear_inputs` input_buffer.rs:339).
+        // … but a HOLD-LAST EXTRAPOLATION must not carry an edge — nor commit AUTOMATIC FIRE. The
+        // `ActionState` is extrapolated exactly when the buffer HAS data but none for this tick
+        // (`get(tick).is_none()` while `get_last().is_some()`) — that is when the server's
+        // `update_action_state` holds the last input forever (`get_predict` → `get_last`). An ABSENT
+        // or EMPTY buffer is NOT extrapolating (nothing is being held): on the client's own tank the
+        // `ActionState` was authored THIS tick by `feed_action_state`, so a genuine click in the
+        // pre-sync join/spawn window must pass. `get`, not `get_predict`, is the exact
+        // non-extrapolating lookup. See the doc for the full per-case argument (`get_last` semantics:
+        // vendored `lightyear_inputs` input_buffer.rs:339).
         let held_last = buffer.is_some_and(|b| b.get(tick).is_none() && b.get_last().is_some());
         if held_last {
             next.clear_edges();
+            // FAIL CLOSED on the automatic-fire LEVEL. Hold-last is correct for the *movement* levels
+            // (`throttle`/`steer`) and the absolutes (`aim`/`range`) — a starved stream keeping the
+            // last drive/lay is the right guess. But `fire_secondary` gates an `Automatic` weapon
+            // (`shooting::fire`), so holding it commits a DISCRETE, ammo-and-damage consequence off a
+            // tick the server never actually received — the firing-netcode invariant "never commit a
+            // discrete action on extrapolated input" (Overwatch/Rocket League/GGPO canon). Left held,
+            // a lost RELEASE transition made the server keep cycling the MG for the whole starvation
+            // window: extra server rounds after the player let go (the owner's HUD belt then snapped
+            // down by them via `NetBelts`, and the target took the hits). Clearing it here is the
+            // level counterpart of the edge clear above — fail closed, so an unconfirmed trigger fires
+            // nothing. NOT folded into `clear_edges`: that method is the EDGE set (`consume_edges`
+            // calls it every tick and would kill legitimate sustained fire); this is a level, cleared
+            // ONLY on the extrapolated tick, ONLY here. The client's own tank never reaches this
+            // branch (its buffer always holds the current tick, forward and rollback-replay alike), so
+            // this only ever fires-closed the SERVER under genuine input starvation.
+            next.fire_secondary = false;
         }
         *command = next;
     }
@@ -1658,10 +1682,12 @@ mod tests {
         }
     }
 
-    /// A starved tick still carries LEVELS and ABSOLUTES through (hold-last is correct for those),
-    /// while both EDGES are cleared.
+    /// A starved tick carries the MOVEMENT levels and ABSOLUTES through (hold-last is correct for
+    /// those), clears both EDGES, and FAILS THE AUTOMATIC-FIRE LEVEL CLOSED — the last of these is the
+    /// fix for the "extra shot after release" report: a held `fire_secondary` off an extrapolated tick
+    /// commits an ammo/damage consequence the server never received, so it must not cycle the MG.
     #[test]
-    fn starved_tick_keeps_levels_clears_edges() {
+    fn starved_tick_keeps_movement_levels_fails_fire_closed_clears_edges() {
         let mut world = World::new();
         world.insert_resource(timeline_at(10));
 
@@ -1689,8 +1715,8 @@ mod tests {
         assert_eq!(cmd.throttle, 0.7, "throttle level held through starvation");
         assert_eq!(cmd.steer, -0.3, "steer level held through starvation");
         assert!(
-            cmd.fire_secondary,
-            "secondary level held through starvation"
+            !cmd.fire_secondary,
+            "automatic-fire level fails closed on a starved tick — never fire on extrapolated input",
         );
         assert_eq!(cmd.aim, Some(Vec3::new(1.0, 2.0, 3.0)), "aim absolute held");
         assert_eq!(cmd.range, 850.0, "range absolute held");
@@ -1700,6 +1726,74 @@ mod tests {
             "crew-swap edge cleared on a starved tick"
         );
         assert!(!cmd.respawn, "respawn edge cleared on a starved tick");
+    }
+
+    /// The "extra shot after release" report, at the seam: once the release is lost and the stream
+    /// starves, the server holds the last `ActionState` (trigger still down) for the WHOLE window. The
+    /// bridge must fail `fire_secondary` closed on EVERY such tick, so the count of ticks that would
+    /// cycle the MG after release is zero — not merely reduced. Mirrors `starved_tick_does_not_refire_held_edge`
+    /// for the level.
+    #[test]
+    fn starved_held_trigger_fires_no_tick_for_the_whole_window() {
+        let mut world = World::new();
+        world.insert_resource(timeline_at(20));
+
+        // The last real input (tick 5) had the trigger held; nothing since — every tick from here is
+        // starved and the held-last `ActionState` keeps the trigger down.
+        let held = TankCommand {
+            fire_secondary: true,
+            ..default()
+        };
+        let mut buffer = NativeBuffer::<TankCommand>::default();
+        buffer.set(Tick(5), ActionState(held));
+        let entity = world
+            .spawn((ActionState(held), buffer, TankCommand::default()))
+            .id();
+
+        // Ten consecutive starved ticks: not one may present a held trigger to `shooting::fire`.
+        let mut fired_ticks = 0;
+        for _ in 0..10 {
+            world
+                .run_system_once(bridge_action_state_to_tank_command)
+                .unwrap();
+            if world.get::<TankCommand>(entity).unwrap().fire_secondary {
+                fired_ticks += 1;
+            }
+        }
+        assert_eq!(
+            fired_ticks, 0,
+            "a held trigger held-last through starvation must fire zero extra rounds after release",
+        );
+    }
+
+    /// The counterpart the fail-closed gate must NOT break: a tick with a REAL buffered input holds
+    /// `fire_secondary` through, so a genuinely-held trigger keeps the `Automatic` cycling. Only the
+    /// EXTRAPOLATED tick fails closed; a confirmed held trigger fires exactly as the player asked.
+    #[test]
+    fn confirmed_tick_keeps_fire_secondary_for_sustained_fire() {
+        let mut world = World::new();
+        world.insert_resource(timeline_at(8));
+
+        let held = TankCommand {
+            fire_secondary: true,
+            ..default()
+        };
+        // A real input FOR tick 8 (the tick being simulated): `get(8)` is `Some`, so this is not a
+        // hold-last extrapolation and the held trigger must pass.
+        let mut buffer = NativeBuffer::<TankCommand>::default();
+        buffer.set(Tick(8), ActionState(held));
+        let entity = world
+            .spawn((ActionState(held), buffer, TankCommand::default()))
+            .id();
+
+        world
+            .run_system_once(bridge_action_state_to_tank_command)
+            .unwrap();
+
+        assert!(
+            world.get::<TankCommand>(entity).unwrap().fire_secondary,
+            "a confirmed held trigger must bridge through — sustained fire is not extrapolated fire",
+        );
     }
 
     /// A tick with a REAL buffered input (the non-starved case, and every rollback-replayed tick of

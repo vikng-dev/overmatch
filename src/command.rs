@@ -30,7 +30,10 @@ pub struct TankCommand {
     /// doubled (frame with several).
     pub fire_primary: bool,
     /// Fire the secondary weapon(s). A *level*: true while the trigger is held; the MGs cycle on
-    /// their own reload.
+    /// their own reload. Unlike the movement levels (`throttle`/`steer`), it commits a discrete
+    /// ammo-and-damage consequence, so the net input bridge does NOT hold-last it under starvation:
+    /// on an extrapolated tick it fails closed (see `net::protocol::bridge_action_state_to_tank_command`),
+    /// so a lost trigger-release can't keep an `Automatic` firing rounds the server never received.
     pub fire_secondary: bool,
     /// The committed aim *intention*: a hull-local point every servo chases (ADR-0012's one aim
     /// point, moved onto the command). Hull-local so it rides with the tank (unstabilized WW2
