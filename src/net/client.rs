@@ -398,6 +398,15 @@ pub fn run() {
         // over-age the buffer; expiry is sim-time coarse, so a real tick is the right cadence.
         age_sanctioned_shots.run_if(not(is_in_rollback)),
     );
+    // F1 (rollback-safe cosmetics): the net-neutral `crate::Replaying` bridge. The ballistics march
+    // and `shooting::fire`'s own-shell `FireShell` trigger are VIEW-layer, tick-timed cosmetics that
+    // must advance once per FORWARD tick — but they live in `GameplaySet`, which a rollback replays
+    // N times, and the sim layer cannot name lightyear's `Rollback` to gate itself
+    // (`tests/net_boundary`). This writer mirrors the replay state into the sim-visible flag at the
+    // HEAD of every FixedUpdate (`.before(GameplaySet)`, so both consumers read a fresh value the
+    // same tick), and it is the marker's ONLY writer. See `crate::Replaying`.
+    app.init_resource::<crate::Replaying>();
+    app.add_systems(FixedUpdate, mark_replaying.before(GameplaySet));
     app.add_systems(
         FixedUpdate,
         apply_pending_recoil_kicks
@@ -1013,6 +1022,17 @@ fn receive_fire_events(
 /// lives only on the client, so this is the sole ager.
 fn age_sanctioned_shots(mut sanctioned: ResMut<SanctionedShots>, time: Res<Time>) {
     sanctioned.age(time.delta_secs());
+}
+
+/// F1 writer for the net-neutral [`crate::Replaying`] marker: mirror lightyear's rollback state into
+/// a sim-visible `bool` each FixedUpdate. `Query<(), With<Rollback>>` is exactly what the
+/// `is_in_rollback` run condition reads (non-empty iff THIS tick is a rollback replay), so the flag
+/// is `true` on replayed ticks and `false` on forward ticks — the sim layer reads it (as
+/// `Option<Res<Replaying>>`) to keep the cosmetic shell march, `Held` aging, and the own-shell
+/// `FireShell` trigger off replayed ticks. Runs unconditionally (a rollback only ever fires during
+/// gameplay; maintaining the flag when the march can't run is harmless).
+fn mark_replaying(mut replaying: ResMut<crate::Replaying>, rollback: Query<(), With<Rollback>>) {
+    replaying.0 = !rollback.is_empty();
 }
 
 /// The largest catch-up a `FireEvent` may request. A shot older than the deepest state window we would

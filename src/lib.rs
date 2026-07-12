@@ -105,6 +105,26 @@ mod world;
 #[derive(Resource, Default)]
 pub(crate) struct ClientReplica;
 
+/// Marker resource: lightyear is REPLAYING a rollback right now — re-running `FixedMain` from a
+/// restored past tick up to the predicted present, N times in one frame. The sim layer reads it (as
+/// `Option<Res<Replaying>>`, `.0` true only mid-replay) to keep VIEW-ONLY, tick-timed cosmetic work
+/// OFF replayed ticks: the cosmetic shell march + `Held` aging advance the shell's picture one step
+/// per FORWARD tick, and the shooter's own-shell `FireShell` trigger fires once per forward fire
+/// tick. Replaying them would double-march every in-flight shell by the rollback depth, over-count
+/// the `Held` grace window (burning it in one frame and corrupting the `present − bounce_tick`
+/// re-seed arithmetic), and re-spawn a DUPLICATE own shell sharing one `ShotId` every time a replay
+/// re-crosses a fire tick. The DETERMINISTIC sim mutations (`TankSim` belt/reload/recoil, hull
+/// impulse) still replay — only the cosmetic reconstruction is skipped.
+///
+/// Net-neutral like [`ClientReplica`]: this crate-root marker is the sim's vocabulary, but only
+/// `net::client` (which alone may name lightyear's `Rollback`) WRITES it — a `bool` re-derived at the
+/// head of every `FixedUpdate` from whether this is a replayed tick. Absent on the authority
+/// (server / SP / sandbox), which never rolls back, so its absence reads as "forward tick" everywhere
+/// the writer is not mounted. Lives at the crate root (not `net`) so the always-compiled `ballistics`
+/// / `shooting` can reference it without the netcode in scope (`tests/net_boundary`).
+#[derive(Resource, Default)]
+pub(crate) struct Replaying(pub bool);
+
 /// Physics collision layers. Wheel suspension rays filter to `Terrain` only, so they ignore
 /// the vehicle's own hull collider (ADR-0005). Shared infra, hence at the crate root.
 #[derive(PhysicsLayer, Default, Clone, Copy, Debug)]

@@ -16,7 +16,7 @@ use bevy::prelude::*;
 
 use crate::damage::{VolumeOf, hit_ancestor};
 use crate::state::GameplaySet;
-use crate::{ClientReplica, Layer, ShotId};
+use crate::{ClientReplica, Layer, Replaying, ShotId};
 
 /// Gravity applied to shells each fixed tick (m/s²).
 const GRAVITY: Vec3 = Vec3::new(0.0, -9.81, 0.0);
@@ -1082,6 +1082,10 @@ fn integrate_projectiles(
     // client; absent in SP/sandbox/server, where the authority march resolves bounces for real and
     // never consults it. An observer shell at armor contact re-seeds from here or holds for it.
     sanctioned: Option<Res<SanctionedShots>>,
+    // F1: set (to `true`) only while lightyear is REPLAYING a rollback on a net client. The whole
+    // cosmetic march below is skipped on a replayed tick — see the early return. Absent on the
+    // authority (never rolls back).
+    replaying: Option<Res<Replaying>>,
     // EXPERIMENTAL cost-attribution A/B lever (`SPIKE_MG_SHORTCIRCUIT`, default off — see the type).
     shortcircuit: Res<MgShortCircuit>,
     // Sim-cost recorder attribution sink (`SPIKE_COST_TRACE`): absent unless the recorder is armed, so
@@ -1091,6 +1095,19 @@ fn integrate_projectiles(
     time: Res<Time>,
     mut commands: Commands,
 ) {
+    // F1 (rollback-safe cosmetics): on a net client, lightyear replays FixedMain N times per
+    // rollback. Every shell this system marches is VIEW-ONLY (`deposit == false` — HP and impulse are
+    // the server's authority; see `ClientReplica`) and its picture must advance exactly ONE step per
+    // FORWARD tick. Re-marching on each replayed tick would teleport every in-flight shell forward by
+    // the rollback depth (with duplicate `ShellPath` points) and age every `Held` shell one extra
+    // tick per replay — burning the grace window in a single frame and corrupting the
+    // `present − bounce_tick` re-seed arithmetic that `Held` depends on. So skip the whole march on a
+    // replayed tick; the shells resume untouched on the next forward tick. The DETERMINISTIC sim state
+    // a rollback exists to correct (`TankSim`, physics) is not here — it re-runs in `GameplaySet`
+    // normally. The authority (server/SP/sandbox) never sets `Replaying`, so it is never skipped.
+    if replaying.is_some_and(|r| r.0) {
+        return;
+    }
     // March-cost attribution timer (`SPIKE_COST_TRACE`): only sampled when the recorder is armed, so an
     // unmeasured run never touches the clock. Covers the whole march (query iteration + every cast).
     let march_t0 = cost.as_ref().map(|_| Instant::now());
@@ -2431,6 +2448,162 @@ mod march_tests {
         assert!(
             app.world().get::<Projectile>(shell).is_some(),
             "the shell survives and continues after the delayed re-seed",
+        );
+    }
+
+    // --- F1: the cosmetic march is rollback-safe -----------------------------------------------------
+
+    /// Put the replica world into (`true`) or out of (`false`) a lightyear rollback replay — the same
+    /// sim-visible flag `net::client::mark_replaying` maintains. The march reads it as
+    /// `Option<Res<Replaying>>` and skips the whole cosmetic advance while it is `true`.
+    fn set_replaying(app: &mut App, replaying: bool) {
+        app.insert_resource(crate::Replaying(replaying));
+    }
+
+    /// ROLLBACK STORM over a free-flying shell. A replay re-runs `FixedMain` (hence this march) N times
+    /// in one frame; every one of those replayed ticks must leave the cosmetic shell EXACTLY where it
+    /// was — no double-march teleport, no duplicate `ShellPath` points, no spurious impact. The next
+    /// FORWARD tick resumes the march.
+    #[test]
+    fn rollback_replay_freezes_the_cosmetic_march() {
+        let shot = a_shot();
+        let mut app = replica_world(SanctionedShots::default());
+        // A shell fired into OPEN AIR, away from the plate (at z≈0), so it free-flies for the whole
+        // test and never enters the hold path — isolating the pure free-flight march.
+        let origin = Vec3::new(0.0, 2.0, 5.0);
+        let dir = Vec3::Z;
+        let speed = 800.0;
+        let shell = app
+            .world_mut()
+            .spawn((
+                Projectile {
+                    velocity: dir * speed,
+                    caliber: 0.088,
+                    mass: 10.2,
+                    drag_k: drag_k(0.088, 10.2),
+                },
+                ShellPath {
+                    points: vec![origin],
+                },
+                PenetrationMarks::default(),
+                SpallMarks::default(),
+                ShellReadout {
+                    speed,
+                    capability: capability(10.2, speed),
+                },
+                Transform::from_translation(origin).looking_to(dir, Vec3::Y),
+                Shot(shot),
+            ))
+            .id();
+
+        // One forward tick: the shell is in open air (it has not reached any plate).
+        app.update();
+        assert!(
+            app.world().get::<Held>(shell).is_none(),
+            "baseline: the shell is still free-flying, not yet at contact",
+        );
+        let pos_before = app.world().get::<Transform>(shell).unwrap().translation;
+        let vel_before = app.world().get::<Projectile>(shell).unwrap().velocity;
+        let points_before = app.world().get::<ShellPath>(shell).unwrap().points.len();
+
+        // A storm of 8 replayed ticks: the march must be inert.
+        set_replaying(&mut app, true);
+        for _ in 0..8 {
+            app.update();
+        }
+        assert_eq!(
+            app.world().get::<Transform>(shell).unwrap().translation,
+            pos_before,
+            "a replayed tick must not advance the shell (no double-march teleport)",
+        );
+        assert_eq!(
+            app.world().get::<Projectile>(shell).unwrap().velocity,
+            vel_before,
+            "a replayed tick must not integrate the shell's velocity",
+        );
+        assert_eq!(
+            app.world().get::<ShellPath>(shell).unwrap().points.len(),
+            points_before,
+            "a replayed tick must not append duplicate ShellPath points",
+        );
+        assert!(
+            app.world().resource::<ImpactLog>().0.is_empty(),
+            "a replayed tick fires no impact",
+        );
+
+        // Back on the forward timeline the march resumes.
+        set_replaying(&mut app, false);
+        app.update();
+        assert_ne!(
+            app.world().get::<Transform>(shell).unwrap().translation,
+            pos_before,
+            "a forward tick resumes the march",
+        );
+    }
+
+    /// ROLLBACK STORM over a HELD shell. `Held.ticks` is the exact catch-up the re-seed re-ages by
+    /// (`present − bounce_tick`); a replay must not increment it, or the re-seed lands the shell AHEAD
+    /// of the present. Assert the hold is frozen across a storm, and that the eventual re-seed is
+    /// re-aged by the TRUE forward hold count — unchanged by the replays.
+    #[test]
+    fn rollback_replay_does_not_age_the_hold_and_reseed_stays_exact() {
+        let shot = a_shot();
+        let bounce = authority_bounce(shot);
+        let mut app = replica_world(SanctionedShots::default());
+        let shell = spawn_oblique_shell(&mut app, shot);
+
+        // March until the shell freezes at armor (no keyframe yet).
+        for _ in 0..8 {
+            app.update();
+            if app.world().get::<Held>(shell).is_some() {
+                break;
+            }
+        }
+        assert!(app.world().get::<Held>(shell).is_some(), "held at contact");
+
+        // Accumulate the TRUE hold over some FORWARD ticks.
+        const HELD_FWD: u32 = 4;
+        for _ in 0..HELD_FWD {
+            app.update();
+        }
+        assert_eq!(app.world().get::<Held>(shell).unwrap().ticks, HELD_FWD);
+
+        // A storm of 8 replayed ticks WHILE held: the grace-window counter must not move.
+        set_replaying(&mut app, true);
+        for _ in 0..8 {
+            app.update();
+        }
+        assert_eq!(
+            app.world().get::<Held>(shell).unwrap().ticks,
+            HELD_FWD,
+            "a replay must not age the hold window (it would burn the grace window and over-age the re-seed)",
+        );
+
+        // The keyframe lands; on the forward timeline the shell re-seeds, re-aged by exactly the true
+        // forward hold — the replays did not inflate it.
+        set_replaying(&mut app, false);
+        app.world_mut().resource_mut::<SanctionedShots>().insert(
+            shot,
+            SanctionedBounce {
+                origin: bounce.origin,
+                direction: bounce.direction,
+                speed: bounce.speed,
+                sequence: 0,
+            },
+        );
+        app.update();
+        let dt = 0.016;
+        let (expected_pos, _, _) = fast_forward_shell(
+            bounce.origin,
+            bounce.direction.normalize() * bounce.speed,
+            drag_k(0.088, 10.2),
+            dt,
+            HELD_FWD,
+        );
+        let pos = app.world().get::<Transform>(shell).unwrap().translation;
+        assert!(
+            pos.distance(expected_pos) < 1.0e-3,
+            "re-seed re-aged by the TRUE hold count, not the storm's replays (got {pos}, want {expected_pos})",
         );
     }
 
