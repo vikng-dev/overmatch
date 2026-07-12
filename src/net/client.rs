@@ -29,7 +29,9 @@ use lightyear::prelude::{Controlled as NetControlled, *};
 
 use super::protocol::{FireBurst, NetTank, PROTOCOL_FINGERPRINT};
 use super::{client_smoothing_plugin, diagnostics, harness, open_gameplay_gate, physics, rig};
-use crate::ballistics::{FireShell, SanctionedBounce, SanctionedShots, SanctionedTerminal};
+use crate::ballistics::{
+    FireShell, SanctionedBounce, SanctionedShots, SanctionedTerminal, ShotSource,
+};
 use crate::command::TankCommand;
 use crate::state::{AppState, GameplaySet};
 use crate::tank::{
@@ -897,10 +899,13 @@ impl SeenShots {
 /// sanctioned terminal with the full honest armor read — instead of improvising either.
 ///
 /// `MessageReceiver<FireBurst>` is a required component of the `Client` (the `ServerToClient` direction
-/// registered in `net::protocol`), so it rides the client link entity. `shooter: None` on the re-raised
-/// `FireShell` (the client never re-broadcasts — only the server owns attribution); a `FireEvent` /
-/// `RicochetKeyframe` whose direction fails the `Dir3` guard, or whose tick is absurd, is skipped
-/// (no tracer/bounce), the same "reject off the wire" discipline as `fire`'s bore guard.
+/// registered in `net::protocol`), so it rides the client link entity. The re-raised `FireShell` NAMES
+/// its `shooter` (the entity-mapped `FireEvent::shooter` + weapon slot) — identity, not authority: the
+/// cosmetic shell must exclude the firing tank's own volumes exactly as the authority does
+/// (`ballistics::not_own_volume`), while depositing nothing (`ClientReplica` gates that) and
+/// re-broadcasting nothing (`broadcast_fire` is server-only). A `FireEvent` / `RicochetKeyframe` whose
+/// direction fails the `Dir3` guard, or whose tick is absurd, is skipped (no tracer/bounce), the same
+/// "reject off the wire" discipline as `fire`'s bore guard.
 ///
 /// **Ignore a FIRE event naming a tank THIS client simulates locally** (one carrying
 /// `ActionState<TankCommand>` — exactly the tanks that run `shooting::fire` here and have already flown
@@ -969,7 +974,25 @@ fn receive_fire_events(
                     // The shooter decided this round's tracer-ness from its belt; carry it so this
                     // remote client dresses the shell identically (streak or invisible).
                     tracer: event.tracer,
-                    shooter: None,
+                    // NAME THE SHOOTER — identity, not authority. The replica shell must exclude the
+                    // firing tank's own volumes from its march exactly as the authority does
+                    // (`ballistics::not_own_volume`), or a muzzle that recoils behind its own armour
+                    // (the coax, behind its mantlet) makes the shell "land" on its own tank
+                    // millimetres out and the observer sees no tracer at all — while the bow MG, with
+                    // no volume in front of it, replicates fine. `event.shooter` is already
+                    // entity-mapped to this client's replica of that tank (`FireEvent`'s
+                    // `MapEntities`), which is the root its volumes' `VolumeOf` names, and
+                    // `event.weapon` is the same slot `PendingRecoilKicks` bounds-checks below.
+                    //
+                    // This grants the replica NO damage path: deposition (HP, hit impulse) is gated on
+                    // `ClientReplica` alone, and the fail-closed armor discipline still holds for every
+                    // OTHER tank's geometry. Nor does it re-broadcast — `net::server::broadcast_fire`,
+                    // the only reader of `FireShell::shooter` for attribution, is registered on the
+                    // server and nowhere else.
+                    shooter: Some(ShotSource {
+                        tank: event.shooter,
+                        weapon: event.weapon as usize,
+                    }),
                     catch_up_ticks,
                     // Stamp the shell with its network identity so a bounce keyframe re-seeds exactly
                     // this shell (`ballistics::Shot`, keyframe-eligible).
