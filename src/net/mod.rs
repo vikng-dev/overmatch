@@ -21,6 +21,11 @@ pub mod protocol;
 pub mod render_error;
 pub mod rig;
 pub mod server;
+/// The loss-injected end-to-end tripwire: two real apps over a real (conditioned) lightyear link,
+/// asserting exactly-once cosmetic-shell spawn and ricochet carry-through under seeded packet loss.
+/// Test-only — it exists to close the model-vs-reality gap the redundancy unit tests leave open.
+#[cfg(test)]
+mod shot_loss;
 pub mod watchdog;
 
 pub use physics::physics_plugins;

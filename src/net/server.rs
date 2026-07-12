@@ -210,7 +210,7 @@ struct PendingClients(Vec<(Entity, PeerId)>);
 /// registration in [`run`] for the full rationale. `On<Add, LinkOf>` fires structurally, before both
 /// `spawn_pending_tanks` and `spawn_bot`, so the sender is always present when a tank's `on_insert`
 /// visibility path runs.
-fn attach_replication_sender(add: On<Add, LinkOf>, mut commands: Commands) {
+pub(super) fn attach_replication_sender(add: On<Add, LinkOf>, mut commands: Commands) {
     commands.entity(add.entity).insert(ReplicationSender);
 }
 
@@ -658,7 +658,7 @@ fn drive_bot(mut bots: Query<&mut TankCommand, With<Bot>>) {
 /// shape of "works sometimes." Sending the window on the clock instead decouples redundancy from fire
 /// rate: every entry rides ~[`FIRE_RETAIN_TICKS`] consecutive bursts (~312 ms) whatever fired it.
 #[derive(Resource, Default)]
-struct FireRings {
+pub(super) struct FireRings {
     fires: std::collections::VecDeque<FireEvent>,
     keyframes: std::collections::VecDeque<RicochetKeyframe>,
     confirms: std::collections::VecDeque<ImpactConfirm>,
@@ -770,7 +770,12 @@ impl FireRings {
 ///
 /// Cheap and unconditional: no `Server` yet (no client linked) is the only early-out besides an empty
 /// window. The channel is unreliable/sequenced by design, so a failed send is a `debug!`, not an error.
-fn broadcast_fire_window(
+///
+/// `pub(super)` so the loss-injected E2E tripwire (`net::shot_loss`) mounts the REAL send site: with
+/// the send no longer riding the observers, a harness that registers only the three push observers
+/// would broadcast nothing at all — which is precisely why the tripwire is worth more against this
+/// architecture than against the old one (it now exercises the window sender itself, under loss).
+pub(super) fn broadcast_fire_window(
     servers: Query<&Server>,
     timeline: Res<LocalTimeline>,
     mut rings: ResMut<FireRings>,
@@ -875,7 +880,7 @@ fn record_sent_copies(
 /// owner discards is negligible, and the redundancy window (which re-carries older shooters' events) is
 /// only correct under `All`. KEYFRAMES are not dropped for own shots — the shooter's own shell consumes
 /// its bounce (the fall-of-shot read), which also REQUIRES the `All` target here.
-fn broadcast_fire(
+pub(super) fn broadcast_fire(
     fire: On<FireShell>,
     // The server's simulation tick. `shooting::fire` raises `FireShell` inside `FixedUpdate`, in
     // `GameplaySet`, AFTER `LocalTimeline` is incremented for this tick (`increment_local_tick` runs
@@ -951,7 +956,9 @@ fn broadcast_fire(
 /// window + targeting as `broadcast_fire`: one burst carries every stream, so they share the redundancy
 /// for free. `ShellRicochet` is a sim-layer event, so the sandbox raises it too — but this observer is
 /// SERVER-ONLY (registered only in the server plugin), so it never fires off the net.
-fn on_shell_ricochet(
+///
+/// `pub(super)` so the loss-injected E2E tripwire (`net::shot_loss`) can mount the production wiring.
+pub(super) fn on_shell_ricochet(
     ricochet: On<ShellRicochet>,
     timeline: Res<LocalTimeline>,
     mut rings: ResMut<FireRings>,
@@ -992,7 +999,7 @@ fn on_shell_ricochet(
 /// outright, degrading it post-F3 to a silent dissolve on the observer AND on the shooter's own shell —
 /// see [`FireRings`]). Same `FireRings`/`All` window + targeting as `broadcast_fire`; SERVER-ONLY for
 /// the same reason as `on_shell_ricochet`.
-fn on_shell_terminal(
+pub(super) fn on_shell_terminal(
     terminal: On<ShellTerminal>,
     timeline: Res<LocalTimeline>,
     mut rings: ResMut<FireRings>,

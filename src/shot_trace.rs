@@ -103,9 +103,11 @@
 //! - `overdue` — F3's tick-triggered consumption fired: the shell MISSED the plate the server resolved
 //!   on (interpolated-pose divergence) and the outcome was consumed by the clock instead. `res` =
 //!   "bounce"|"terminal", `late` = how many ticks past the outcome's server tick `P` had run.
-//! - `end` — the shell's picture ended: `why` = "terminal" | "bounce_dissolve" (the expired hold) |
-//!   "terrain" | "failclosed" (contact with no network identity) | "catchup_landed" (the round had
-//!   already resolved during its catch-up fast-forward, so no tracer ever flew).
+//! - `end` — the shell's picture ended: `why` = "terminal" (the confirmed armor read) |
+//!   "bounce_dissolve" (the hold expired — the quiet dissolve) | "terrain" (a terrain stop, which
+//!   needs no confirm: static geometry, both ends agree) | "kill_floor" (flew out of the world) |
+//!   "catchup_landed" (the round had already resolved during its catch-up fast-forward, so no tracer
+//!   ever flew).
 //!
 //! Rows are line-buffered through the shared [`JsonlSink`] (~1 s flush cadence, plus the clean-drop
 //! flush), so a hard-killed process may lose the unflushed tail — accepted, as everywhere else.

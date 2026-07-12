@@ -855,7 +855,7 @@ fn log_tank_ownership(
 /// must stay render-rate — lightyear clears an undrained receiver every frame in `Last`) and the
 /// fixed-clock `TankSim` write (which must be on the sim clock — see [`apply_pending_recoil_kicks`]).
 #[derive(Resource, Default)]
-struct PendingRecoilKicks(Vec<(Entity, usize)>);
+pub(super) struct PendingRecoilKicks(Vec<(Entity, usize)>);
 
 /// Bounded set of shots already turned into a cosmetic shell, so a redundantly-retransmitted
 /// [`FireEvent`](super::protocol::FireEvent) (piece 3 — each burst re-carries the last N) spawns
@@ -872,7 +872,7 @@ struct PendingRecoilKicks(Vec<(Entity, usize)>);
 /// idempotent by `(ShotId, sequence)` / `ShotId`, so a redundant copy is a no-op there (and a bounce
 /// already consumed is never re-consumed — the shell's own ricochet count has moved past its ordinal).
 #[derive(Resource, Default)]
-struct SeenShots {
+pub(super) struct SeenShots {
     order: std::collections::VecDeque<ShotId>,
     set: bevy::platform::collections::HashSet<ShotId>,
 }
@@ -940,7 +940,7 @@ impl SeenShots {
 /// loses none; only the `TankSim` write is deferred to the sim clock. `Update` is also outside every
 /// rollback replay (replays run inside `RunFixedMainLoop`), so the drain and the cosmetic-shell spawn
 /// can't be re-run by a rollback — preserving today's render-rate shell-spawn timing exactly.
-fn receive_fire_events(
+pub(super) fn receive_fire_events(
     mut receivers: Query<&mut MessageReceiver<FireBurst>>,
     // The set of tanks THIS client simulates locally (own predicted tank; later, under
     // predict-everyone, every predicted tank). They run `shooting::fire` and kick themselves, so a
@@ -1199,7 +1199,7 @@ fn shooter_is_live(shooter: Entity, tanks: &Query<(), With<NetTank>>) -> bool {
 /// lifetime — the `net::client` half of the buffer's ring discipline (the ballistics march only READS
 /// it). Fixed clock so expiry is measured in sim time, matching the shells that consume it; the buffer
 /// lives only on the client, so this is the sole ager.
-fn age_sanctioned_shots(mut sanctioned: ResMut<SanctionedShots>, time: Res<Time>) {
+pub(super) fn age_sanctioned_shots(mut sanctioned: ResMut<SanctionedShots>, time: Res<Time>) {
     sanctioned.age(time.delta_secs());
 }
 
@@ -1219,7 +1219,7 @@ fn mark_replaying(mut replaying: ResMut<crate::Replaying>, rollback: Query<(), W
 /// so the ballistics march compares an overdue sanctioned outcome's server tick against this one
 /// value. `LocalTimeline::tick()` is the same present `bridge_action_state_to_tank_command` and
 /// `receive_fire_events` read (the tick the own tank is simulated at, ahead of the server).
-fn publish_predicted_present(
+pub(super) fn publish_predicted_present(
     mut present: ResMut<crate::PredictedPresent>,
     timeline: Res<LocalTimeline>,
 ) {
