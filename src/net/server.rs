@@ -15,6 +15,8 @@ use lightyear::prelude::input::native::{ActionState, NativeStateSequence};
 use lightyear::prelude::input::server::{InputValidationAppExt, authorize_controlled_targets};
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
+// Row fields for the shot-lifecycle recorder (`crate::shot_trace`); evaluated only when it is armed.
+use serde_json::json;
 
 use super::protocol::{
     FireBurst, FireChannel, FireEvent, ImpactConfirm, LaunchedTurretPose, NetBelts, NetCrew,
@@ -75,6 +77,9 @@ pub fn run() {
     app.add_plugins(crate::trace::server_plugin);
     // Per-fixed-tick sim-cost recorder: idle unless `SPIKE_COST_TRACE` is set (the MG-march cost spike).
     app.add_plugins(crate::cost::server_plugin);
+    // Shot-lifecycle recorder: the authority's half (fire broadcast / ricochet keyframe / impact
+    // confirm, keyed by `ShotId`). Idle unless `SPIKE_SHOT_TRACE` is set — see `crate::shot_trace`.
+    app.add_plugins(crate::shot_trace::server_plugin);
     // The cosmetic opponent-fire broadcast: SERVER ONLY. Every authoritative `fire` raises a
     // `FireShell`; `broadcast_fire` turns each one that names a tank into a `FireEvent`; every
     // authoritative ricochet raises a `ShellRicochet` that `on_shell_ricochet` turns into a
@@ -769,6 +774,13 @@ fn broadcast_fire_window(
     servers: Query<&Server>,
     timeline: Res<LocalTimeline>,
     mut rings: ResMut<FireRings>,
+    // Shot-lifecycle recorder (`SPIKE_SHOT_TRACE`), absent unless armed: the `send` rows — one per
+    // event this datagram CARRIES. This is the one row the recorder could not meaningfully write
+    // before: under the old event-driven send, "emitted" and "sent" were the same instant and a `send`
+    // row would have been a restatement of `fire`/`kf`/`cf`. Now they are different moments, and HOW
+    // MANY copies an event actually got is the exact property this system exists to guarantee — so the
+    // instrument measures it instead of assuming it (`scripts/shot/analyze.py`: copies-per-event).
+    mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
     mut sender: ServerMultiMessageSender,
 ) {
     // Age the window on the clock first, then send iff anything is still in it: a stream nobody is
@@ -784,6 +796,67 @@ fn broadcast_fire_window(
         sender.send::<FireBurst, FireChannel>(&rings.burst(), server, &NetworkTarget::All)
     {
         debug!("server: FireBurst broadcast dropped: {err}");
+        // No datagram left the box, so no `send` row is written for this tick's window: the recorder
+        // must count copies that were actually SENT, not copies that were merely eligible.
+        return;
+    }
+    record_sent_copies(&mut shot_trace, &rings, timeline.tick());
+}
+
+/// One `send` row per event carried by the burst just broadcast — the copies-per-event ledger
+/// (`crate::shot_trace`, `SPIKE_SHOT_TRACE`; absent unless armed, which is the only cost an unrecorded
+/// run pays: one `Option` check per tick the window is non-empty).
+///
+/// **What a `send` row means, and what it is NOT.** It is a TRANSMISSION: this event rode this tick's
+/// datagram. The emission rows (`fire` / `kf` / `cf`, written by the three push observers) are a
+/// different fact — the tick the shot/bounce/impact HAPPENED — and the analyzer's arrival-lead
+/// arithmetic keys off those. Counting the `send` rows for one `ShotId` + stream gives the number of
+/// datagram copies that event actually got: exactly the quantity [`broadcast_fire_window`] was written
+/// to raise off the floor (the isolated 88 bounce rode ONE copy under the old event-driven send), and
+/// the number the client's `fire_rx`/`kf_rx` `dup` verdicts are the receiving end of.
+///
+/// `c` is the event's AGE in ticks at this send (0 on the tick it was emitted). With a linked client
+/// the window goes out every tick it is non-empty, so `c` also reads as the copy's 0-based ordinal —
+/// but the analyzer counts rows rather than trusting that, because a burst the sender failed to emit
+/// (or a window that filled while no client was linked) breaks the identity and the instrument must
+/// report the copies that happened, not the copies that should have.
+fn record_sent_copies(
+    trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
+    rings: &FireRings,
+    now: Tick,
+) {
+    if trace.is_none() {
+        return;
+    }
+    for event in &rings.fires {
+        let age = (now - event.fire_tick).max(0);
+        crate::shot_trace::record(
+            trace,
+            "send",
+            now.0,
+            event.shot_id(),
+            || json!({ "s": "fire", "c": age }),
+        );
+    }
+    for keyframe in &rings.keyframes {
+        let age = (now - keyframe.bounce_tick).max(0);
+        crate::shot_trace::record(
+            trace,
+            "send",
+            now.0,
+            keyframe.shot,
+            || json!({ "s": "kf", "c": age, "seq": keyframe.sequence }),
+        );
+    }
+    for confirm in &rings.confirms {
+        let age = (now - confirm.impact_tick).max(0);
+        crate::shot_trace::record(
+            trace,
+            "send",
+            now.0,
+            confirm.shot,
+            || json!({ "s": "cf", "c": age }),
+        );
     }
 }
 
@@ -813,6 +886,11 @@ fn broadcast_fire(
     // It is also the tick `broadcast_fire_window` (`.after(GameplaySet)`, same tick) stamps its send.
     timeline: Res<LocalTimeline>,
     mut rings: ResMut<FireRings>,
+    // Shot-lifecycle recorder (`SPIKE_SHOT_TRACE`), absent unless armed: the authority's `fire` row —
+    // the head of every shot's cross-process lifecycle (see `crate::shot_trace`). It records the shot
+    // being FIRED, which is what this observer now does; the DATAGRAMS it rides are a separate fact,
+    // recorded (as `send` rows) by `broadcast_fire_window`, which is where sending now lives.
+    mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
 ) {
     // Only tank-attributed shots broadcast; a `None` shooter (the sandbox) has no tank to name.
     let Some(source) = fire.shooter else {
@@ -847,6 +925,19 @@ fn broadcast_fire(
         // shell already is in its confirmed timeline (see `FireEvent::fire_tick`).
         fire_tick: timeline.tick(),
     };
+    crate::shot_trace::record(
+        &mut shot_trace,
+        "fire",
+        timeline.tick().0,
+        event.shot_id(),
+        || {
+            json!({
+                "o": [event.origin.x, event.origin.y, event.origin.z],
+                "tr": event.tracer,
+                "cal": event.caliber,
+            })
+        },
+    );
     FireRings::push(&mut rings.fires, event, timeline.tick());
 }
 
@@ -864,7 +955,20 @@ fn on_shell_ricochet(
     ricochet: On<ShellRicochet>,
     timeline: Res<LocalTimeline>,
     mut rings: ResMut<FireRings>,
+    // Shot-lifecycle recorder: the `kf` row — the tick the authority RESOLVED the bounce, which is the
+    // tick the client's hold is racing. Recorded here, at the push, not at `broadcast_fire_window`: the
+    // bounce HAPPENED once, on this tick, and the analyzer's arrival-lead (`recv_tick − bounce_tick`)
+    // is only the quantity that sizes `RICOCHET_HOLD_TICKS` if this row means the resolution, not a
+    // transmission. The window's re-sends of it are `send` rows.
+    mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
 ) {
+    crate::shot_trace::record(
+        &mut shot_trace,
+        "kf",
+        timeline.tick().0,
+        ricochet.shot,
+        || json!({ "seq": ricochet.sequence }),
+    );
     let keyframe = RicochetKeyframe {
         shot: ricochet.shot,
         origin: ricochet.origin,
@@ -892,7 +996,19 @@ fn on_shell_terminal(
     terminal: On<ShellTerminal>,
     timeline: Res<LocalTimeline>,
     mut rings: ResMut<FireRings>,
+    // Shot-lifecycle recorder: the `cf` row — the shot's authoritative END, stamped at the tick the
+    // authority resolved it (same emission-not-transmission rule as `on_shell_ricochet`'s `kf`). A shot
+    // with a `cf` here and no `cf_rx`/`end` on the client is the never-consumed class the analyzer
+    // counts — and the `send` rows now say whether that shot's confirm ever left the box at all.
+    mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
 ) {
+    crate::shot_trace::record(
+        &mut shot_trace,
+        "cf",
+        timeline.tick().0,
+        terminal.shot,
+        || json!({ "pen": terminal.penetrated, "ab": terminal.after_bounces }),
+    );
     let confirm = ImpactConfirm {
         shot: terminal.shot,
         position: terminal.position,

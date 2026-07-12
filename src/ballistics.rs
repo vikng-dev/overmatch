@@ -13,6 +13,10 @@ use std::time::Instant;
 use avian3d::prelude::{Forces, LayerMask, SpatialQuery, SpatialQueryFilter, WriteRigidBodyForces};
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
+// The shot-lifecycle recorder's row fields (`crate::shot_trace`, `SPIKE_SHOT_TRACE`). Every `json!`
+// below sits inside the closure `shot_trace::record` only calls when the recorder is ARMED, so an
+// unrecorded run builds no JSON at all — it pays one `Option` check.
+use serde_json::json;
 
 use crate::damage::{VolumeOf, hit_ancestor};
 use crate::state::GameplaySet;
@@ -414,7 +418,10 @@ struct Held {
 /// first arriving copy is the only one that can land. If high-latency play ever becomes a target, this
 /// is the constant to derive from measured RTT (the arithmetic is `(P − S) + OWL + jitter`), NOT the
 /// retain window.
-const RICOCHET_HOLD_TICKS: u32 = 16;
+///
+/// `pub(crate)` so the shot-lifecycle recorder (`crate::shot_trace`) can stamp the CONFIGURED window
+/// into its `meta` row — the value the measured hold-time histogram is read against.
+pub(crate) const RICOCHET_HOLD_TICKS: u32 = 16;
 
 /// F3 tick-triggered consumption margin. A client shell reaches the plate at local tick ≈ the server
 /// bounce/impact tick; if it MISSES (its interpolated-pose flight grazes past a plate the server's
@@ -425,7 +432,8 @@ const RICOCHET_HOLD_TICKS: u32 = 16;
 /// free-flight path immediately, so a few ticks of grace avoids force-consuming a shell that is about
 /// to contact — while staying short enough that a genuine miss snaps to truth after only metres of
 /// fly-past, not the full hold window. ~94 ms at 64 Hz.
-const OVERDUE_MARGIN_TICKS: u32 = 6;
+/// `pub(crate)` for the same reason as [`RICOCHET_HOLD_TICKS`] — the recorder's `meta` row.
+pub(crate) const OVERDUE_MARGIN_TICKS: u32 = 6;
 
 /// One server-sanctioned ricochet, delivered to a net client's ballistics march so its cosmetic
 /// shell — an observer's replica or the shooter's own predicted round — re-seeds from truth instead
@@ -504,7 +512,9 @@ impl SanctionedShots {
     /// Longest a shot's sanctioned state lingers unconsumed before eviction — comfortably past a
     /// shell's flight (a ~1.25 km round at 800 m/s ≈ 1.5 s) so a valid keyframe/terminal is never
     /// evicted before its shell reaches it, but bounded so a lost/never-consumed one does not leak.
-    const MAX_AGE_SECS: f32 = 3.0;
+    /// `pub(crate)` so `crate::shot_trace`'s `meta` row can carry the configured eviction bound
+    /// beside the hold window (both are theory-sized constants the recorder exists to measure).
+    pub(crate) const MAX_AGE_SECS: f32 = 3.0;
     /// Hard cap on tracked shots — a backstop against pathological churn; a 1v1 duel never approaches
     /// it. Only reached by an implausible flood of distinct in-flight shots (well past two MGs), and
     /// then the eviction below picks the OLDEST entry — which under such churn could be a shot whose
@@ -538,22 +548,28 @@ impl SanctionedShots {
     }
 
     /// Record a server-sanctioned bounce, idempotently by `(shot, sequence)` — a redundantly
-    /// retransmitted keyframe is a no-op, never a duplicate bounce.
-    pub(crate) fn insert(&mut self, shot: ShotId, bounce: SanctionedBounce) {
+    /// retransmitted keyframe is a no-op, never a duplicate bounce. Returns whether the bounce was NEW
+    /// (`false` = the redundancy window re-carried one we already had), which the shot-lifecycle
+    /// recorder logs as the keyframe stream's dedup verdict.
+    pub(crate) fn insert(&mut self, shot: ShotId, bounce: SanctionedBounce) -> bool {
         let entry = self.entry(shot);
-        if !entry.bounces.iter().any(|b| b.sequence == bounce.sequence) {
-            entry.bounces.push(bounce);
+        if entry.bounces.iter().any(|b| b.sequence == bounce.sequence) {
+            return false;
         }
+        entry.bounces.push(bounce);
+        true
     }
 
     /// Record a shot's terminal, idempotently by [`ShotId`] — a shot has AT MOST ONE terminal (the
     /// server strips `Shot` after emitting it), so the first insert wins and a redundantly
-    /// retransmitted confirm is a no-op.
-    pub(crate) fn insert_terminal(&mut self, shot: ShotId, terminal: SanctionedTerminal) {
+    /// retransmitted confirm is a no-op. Returns whether the terminal was NEW, like [`Self::insert`].
+    pub(crate) fn insert_terminal(&mut self, shot: ShotId, terminal: SanctionedTerminal) -> bool {
         let entry = self.entry(shot);
-        if entry.terminal.is_none() {
-            entry.terminal = Some(terminal);
+        if entry.terminal.is_some() {
+            return false;
         }
+        entry.terminal = Some(terminal);
+        true
     }
 
     /// Is anything buffered under this exact [`ShotId`]? The buffer is a map KEYED by the shot's id
@@ -1053,8 +1069,18 @@ fn on_fire_shell(
     // would otherwise report "already landed" 1 cm out and swallow the shell whole.
     owners: Query<&VolumeOf>,
     parents: Query<&ChildOf>,
+    // The net client's predicted present `P` — the tick every cosmetic shell lives at, and the one
+    // the shot-lifecycle recorder stamps its rows with. Absent on the authority (server / SP /
+    // sandbox), where an OBSERVER shell (the only kind that carries `fire.shot` here) never exists.
+    present: Option<Res<PredictedPresent>>,
+    // The shot-lifecycle recorder (`SPIKE_SHOT_TRACE`): absent unless armed, so an unrecorded run pays
+    // one `Option` check per shot. Only an OBSERVER shell (wire-stamped `fire.shot`) is recorded here;
+    // a locally-fired shell has no id yet at spawn (`net::protocol::stamp_shot_ids` completes it, and
+    // writes that shell's `spawn` row itself).
+    mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
     mut commands: Commands,
 ) {
+    let now = present.as_deref().map_or(0, |p| p.0);
     let drag = drag_k(fire.caliber, fire.mass);
     let dt = fixed_time.timestep().as_secs_f32();
     let (position, velocity, points) = fast_forward_shell(
@@ -1123,6 +1149,18 @@ fn on_fire_shell(
                         deflection: None,
                     });
                 }
+                // The shot's picture ends here without a tracer ever flying — its whole flight fitted
+                // inside the catch-up skip. Recorded as an `end`, so the analyzer never counts this
+                // shot as a MISSING spawn (it is a legitimate, if late-informed, terminal).
+                if let Some(shot) = fire.shot {
+                    crate::shot_trace::record(
+                        &mut shot_trace,
+                        "end",
+                        now,
+                        shot,
+                        || json!({ "why": "catchup_landed", "cu": fire.catch_up_ticks }),
+                    );
+                }
                 return;
             }
         }
@@ -1165,6 +1203,18 @@ fn on_fire_shell(
     }
     if let Some(source) = fire.shooter {
         shell.insert(source);
+    }
+    // Lifecycle row: an OBSERVER shell (its id came straight off the wire) is in the air. The
+    // shooter's own / the authority's shell is recorded by `net::protocol::stamp_shot_ids` instead —
+    // that is where its id first exists.
+    if let Some(shot) = fire.shot {
+        crate::shot_trace::record(
+            &mut shot_trace,
+            "spawn",
+            now,
+            shot,
+            || json!({ "src": "obs", "cu": fire.catch_up_ticks }),
+        );
     }
 
     // Visual policy (interim — a per-weapon visual style would supersede the caliber split):
@@ -1248,6 +1298,11 @@ fn integrate_projectiles(
     // Sim-cost recorder attribution sink (`SPIKE_COST_TRACE`): absent unless the recorder is armed, so
     // an unmeasured run pays only the `Option` check. This system's whole wall-time is stamped into it.
     mut cost: Option<ResMut<crate::cost::CostTrace>>,
+    // Shot-lifecycle recorder sink (`SPIKE_SHOT_TRACE`): absent unless armed, same `Option` discipline
+    // as the cost sink above. Every row below is client-side (`!deposit`) — this is the CONSUMING half
+    // of a shot's life (contact → hold → re-seed / terminal / dissolve), the half whose timings size
+    // `RICOCHET_HOLD_TICKS`. The authority's emissions are recorded in `net::server`.
+    mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
     spatial: SpatialQuery,
     time: Res<Time>,
     mut commands: Commands,
@@ -1274,6 +1329,9 @@ fn integrate_projectiles(
     // F3: the predicted present tick, if this is a net client — the clock the overdue-consumption
     // check below compares each sanctioned outcome's server tick against. Absent on the authority.
     let present = present.map(|p| p.0);
+    // The tick every shot-lifecycle row this march writes is stamped with: the predicted present (the
+    // tick each cosmetic shell lives at). Never read on the authority — every row site is `!deposit`.
+    let now = present.unwrap_or(0);
     // The march casts against terrain (which stops the shell) and ballistic volumes (which it
     // crosses); the struck entity being a `BallisticVolume` is what tells the two apart.
     let world = SpatialQueryFilter::from_mask(
@@ -1373,6 +1431,18 @@ fn integrate_projectiles(
                 projectile.velocity = vel;
                 readout.speed = vel.length();
                 readout.capability = capability(projectile.mass, vel.length());
+                // The measurement the whole recorder exists for: how long this shell actually waited
+                // for its server verdict, and that the wait ENDED in a carry-through.
+                if let Some(shot) = shot {
+                    crate::shot_trace::record(&mut shot_trace, "hold", now, shot.0, || {
+                        json!({
+                            "held": held.ticks,
+                            "res": "bounce",
+                            "seq": bounce.sequence,
+                            "bt": bounce.bounce_tick,
+                        })
+                    });
+                }
                 // Un-hide (the hold's invisible-stop) and resume marching next tick.
                 commands
                     .entity(entity)
@@ -1400,6 +1470,23 @@ fn integrate_projectiles(
                     penetrated: terminal.penetrated,
                     deflection: None,
                 });
+                if let Some(shot) = shot {
+                    crate::shot_trace::record(&mut shot_trace, "hold", now, shot.0, || {
+                        json!({
+                            "held": held.ticks,
+                            "res": "terminal",
+                            "it": terminal.impact_tick,
+                            "pen": terminal.penetrated,
+                        })
+                    });
+                    crate::shot_trace::record(
+                        &mut shot_trace,
+                        "end",
+                        now,
+                        shot.0,
+                        || json!({ "why": "terminal" }),
+                    );
+                }
                 commands.entity(entity).despawn();
                 continue;
             }
@@ -1421,6 +1508,27 @@ fn integrate_projectiles(
                 // (A server-confirmed contact whose confirm merely arrived LATE is consumed by the
                 // tick-triggered overdue path below or the pre-armed/hold paths — this fallback is only
                 // reached when NO sanctioned outcome exists for the shot at all.)
+                //
+                // THE DEGRADATION COUNT. Every expiry here is a shot whose picture was lost — either the
+                // window was too short for this link (the histogram will show holds crowding the bound)
+                // or the outcome never arrived at all (the analyzer's never-consumed class, cross-joined
+                // against the server's `kf`/`cf` rows). That split is the recorder's whole point.
+                if let Some(shot) = shot {
+                    crate::shot_trace::record(
+                        &mut shot_trace,
+                        "hold",
+                        now,
+                        shot.0,
+                        || json!({ "held": held.ticks, "res": "expired" }),
+                    );
+                    crate::shot_trace::record(
+                        &mut shot_trace,
+                        "end",
+                        now,
+                        shot.0,
+                        || json!({ "why": "bounce_dissolve" }),
+                    );
+                }
                 commands.entity(entity).despawn();
             }
             continue;
@@ -1477,6 +1585,17 @@ fn integrate_projectiles(
                     projectile.velocity = rvel;
                     readout.speed = rvel.length();
                     readout.capability = capability(projectile.mass, rvel.length());
+                    // The pose-divergence MISS, consumed by the clock. Counted separately from the hold
+                    // path: a run where these dominate means the client's interpolated geometry is
+                    // routinely missing plates the server resolves on — an F3 signal, not a hold-window
+                    // sizing signal.
+                    crate::shot_trace::record(
+                        &mut shot_trace,
+                        "overdue",
+                        now,
+                        shot.0,
+                        || json!({ "res": "bounce", "late": re_age, "seq": bounce.sequence }),
+                    );
                     continue;
                 }
             } else if let Some(terminal) = buf.terminal(shot.0, consumed)
@@ -1497,6 +1616,21 @@ fn integrate_projectiles(
                     penetrated: terminal.penetrated,
                     deflection: None,
                 });
+                let late = present.saturating_sub(terminal.impact_tick);
+                crate::shot_trace::record(
+                    &mut shot_trace,
+                    "overdue",
+                    now,
+                    shot.0,
+                    || json!({ "res": "terminal", "late": late, "pen": terminal.penetrated }),
+                );
+                crate::shot_trace::record(
+                    &mut shot_trace,
+                    "end",
+                    now,
+                    shot.0,
+                    || json!({ "why": "terminal" }),
+                );
                 commands.entity(entity).despawn();
                 continue;
             }
@@ -1599,6 +1733,19 @@ fn integrate_projectiles(
                     penetrated: false,
                     deflection: None,
                 });
+                // A terrain stop is the one shot terminal that needs NO confirm: static, pose-independent
+                // geometry, so both ends already agree (ADR-0021's invariant). Recorded on the client so
+                // the analyzer can close the lifecycle of a shot that simply never reached armor, instead
+                // of filing it as never-consumed.
+                if !deposit && let Some(shot) = shot {
+                    crate::shot_trace::record(
+                        &mut shot_trace,
+                        "end",
+                        now,
+                        shot.0,
+                        || json!({ "why": "terrain" }),
+                    );
+                }
                 pos = entry;
                 stopped = true;
                 break;
@@ -1667,6 +1814,18 @@ fn integrate_projectiles(
                     path.points.push(bounce.origin);
                     marks.ricochets.push(bounce.origin);
                     remaining -= travelled;
+                    // Contact resolved with ZERO hold (the keyframe beat the shell to the plate) — a
+                    // late contact or a later bounce of a multi-bounce shot. Recorded so the histogram
+                    // separates "held 0 ticks" from "never held".
+                    if let Some(shot) = shot {
+                        crate::shot_trace::record(
+                            &mut shot_trace,
+                            "contact",
+                            now,
+                            shot.0,
+                            || json!({ "res": "pre_bounce", "seq": bounce.sequence, "bt": bounce.bounce_tick }),
+                        );
+                    }
                     continue;
                 }
                 // 1b. PRE-ARMED TERMINAL: the shot's confirmed embed/perforation already arrived
@@ -1687,11 +1846,27 @@ fn integrate_projectiles(
                         penetrated: terminal.penetrated,
                         deflection: None,
                     });
+                    if let Some(shot) = shot {
+                        crate::shot_trace::record(
+                            &mut shot_trace,
+                            "contact",
+                            now,
+                            shot.0,
+                            || json!({ "res": "pre_term", "it": terminal.impact_tick, "pen": terminal.penetrated }),
+                        );
+                        crate::shot_trace::record(
+                            &mut shot_trace,
+                            "end",
+                            now,
+                            shot.0,
+                            || json!({ "why": "terminal" }),
+                        );
+                    }
                     pos = entry;
                     stopped = true;
                     break;
                 }
-                if shot.is_some() {
+                if let Some(shot) = shot {
                     // 2. HOLD for the verdict: invisible-stop (hidden so no round hangs frozen on the
                     //    plate — the shooter is watching this one), no impact yet; the `Held` handler
                     //    drives the wait, keeping the contact normal for the eventual bounce /
@@ -1703,6 +1878,16 @@ fn integrate_projectiles(
                         },
                         Visibility::Hidden,
                     ));
+                    // The hold OPENS here; the `Held` handler's `hold` row closes it with the wait
+                    // length. Contact tick ≈ the server's bounce/impact tick (both timelines index the
+                    // same trajectory), which is what makes `held` ≈ the keyframe's arrival lead.
+                    crate::shot_trace::record(
+                        &mut shot_trace,
+                        "contact",
+                        now,
+                        shot.0,
+                        || json!({ "res": "hold" }),
+                    );
                     pos = entry;
                     holding = true;
                     break;
@@ -2003,6 +2188,15 @@ fn integrate_projectiles(
             // Left the world: cleared the map edge and fell into the void below the terrain. Despawn
             // outright — there is no impact to inspect, so this ignores the sandbox's retain (unlike a
             // real impact). This is what bounds a shell that never hits terrain; see `KILL_FLOOR`.
+            if !deposit && let Some(shot) = shot {
+                crate::shot_trace::record(
+                    &mut shot_trace,
+                    "end",
+                    now,
+                    shot.0,
+                    || json!({ "why": "kill_floor" }),
+                );
+            }
             commands.entity(entity).despawn();
         } else {
             projectile.velocity = Vec3::from(dir) * speed;

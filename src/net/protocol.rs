@@ -16,6 +16,8 @@ use lightyear::prelude::client::Remote;
 use lightyear::prelude::input::native::{ActionState, NativeBuffer};
 use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
+// Row fields for the shot-lifecycle recorder (`crate::shot_trace`); evaluated only when it is armed.
+use serde_json::json;
 
 use crate::ShotId;
 use crate::ballistics::{ComponentHealth, Projectile, Shot, ShotSource};
@@ -859,18 +861,34 @@ fn apply_net_belts(mut tanks: Query<(&NetBelts, &mut TankSim), With<Remote>>) {
 fn stamp_shot_ids(
     shells: Query<(Entity, &ShotSource), (With<Projectile>, Without<Shot>)>,
     timeline: Res<LocalTimeline>,
+    // Shot-lifecycle recorder (`SPIKE_SHOT_TRACE`), absent unless armed: this is where a LOCALLY-FIRED
+    // shell's id first exists, so it is where that shell's `spawn` row belongs (the observer shells
+    // `on_fire_shell` stamps from the wire write their own). `ClientReplica` tells the two roles apart
+    // without naming a lightyear type: the shooter's own predicted shell ("own") vs the authoritative
+    // one ("auth").
+    replica: Option<Res<crate::ClientReplica>>,
+    mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
     mut commands: Commands,
 ) {
     let fire_tick = timeline.tick().0;
+    let src = if replica.is_some() { "own" } else { "auth" };
     for (entity, source) in &shells {
         let Ok(weapon) = u8::try_from(source.weapon) else {
             continue;
         };
-        commands.entity(entity).insert(Shot(ShotId {
+        let shot = ShotId {
             shooter: source.tank,
             weapon,
             fire_tick,
-        }));
+        };
+        crate::shot_trace::record(
+            &mut shot_trace,
+            "spawn",
+            fire_tick,
+            shot,
+            || json!({ "src": src }),
+        );
+        commands.entity(entity).insert(Shot(shot));
     }
 }
 
