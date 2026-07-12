@@ -260,6 +260,53 @@ fn bend_toward(dir: Dir3, target: Dir3, angle: f32) -> Dir3 {
     Dir3::new(Quat::from_axis_angle(Vec3::from(axis), angle.min(between)) * d).unwrap_or(dir)
 }
 
+/// SHOOTER SELF-EXCLUSION — the ray-cast predicate every shell cast runs: a round never resolves
+/// against the tank that FIRED it. `true` keeps the candidate collider, `false` makes it transparent.
+/// `shooter` is the firing tank's root ([`ShotSource::tank`]); `None` (the sandbox's free-fly camera —
+/// no tank) excludes nothing. Terrain has no [`VolumeOf`] ancestry and is therefore never "own", so it
+/// stops every shell as before.
+///
+/// # Why a shell must ignore its own tank
+///
+/// A muzzle inside its own geometry is NORMAL, not a modelling error: a recoiling barrel *retracts*
+/// its muzzle, and a gun mounted through a mantlet retracts it BEHIND that mantlet. The tiger's coax
+/// is exactly this — its muzzle clears `Gun_Mantlet_Ballistic` by ~7 cm at rest, and its recoil spring
+/// (kick 3.0 m/s) pulls it ~10 cm back, so every round after a burst's first one is fired from INSIDE
+/// the tank's own mantlet. With no exclusion the round's first cast hit that mantlet millimetres out,
+/// and:
+///   * on the AUTHORITY it embedded there (the 7.9 mm round's ~8 ref-mm capability cannot cross
+///     1000-factor steel) — the coax was a dud that shot itself in its own mask;
+///   * on a NET CLIENT (`!deposit`) the contact fail-closed — the shooter's own shell held hidden at
+///     the muzzle for the grace window, and an observer's shell was killed even earlier, by
+///     `on_fire_shell`'s already-landed catch-up test, so no tracer was EVER spawned. The bow MG, which
+///     has no ballistic volume anywhere in front of it, replicated fine — the asymmetry Yan saw.
+///
+/// The bore geometry is a modelling detail; the *rule* is not. [`crate::aim::aim_distance`] has always
+/// excluded the firing tank from the aim ray this way; the shell march simply never did.
+///
+/// Exclusion runs for the shell's WHOLE flight, not just a muzzle-clearance distance: it needs no
+/// magic radius, no per-shell distance state (which a rollback would have to restore), and it is the
+/// same answer on every machine. The cost is that a round which ricochets off the world back into its
+/// own tank passes through it — an outcome no gun can currently produce, and one the previous
+/// behaviour got wrong in a far louder way.
+///
+/// IDENTITY, NOT AUTHORITY: this is why the observer's re-raised `FireShell` names its `shooter`
+/// (`net::client::receive_fire_events`). Damage deposition stays gated on [`crate::ClientReplica`]
+/// alone (`deposit`) — naming the shooter grants a replica shell no damage path whatsoever.
+fn not_own_volume(
+    entity: Entity,
+    shooter: Option<Entity>,
+    owners: &Query<&VolumeOf>,
+    parents: &Query<&ChildOf>,
+) -> bool {
+    let Some(shooter) = shooter else {
+        return true;
+    };
+    // Ownership sits on the hit's ancestry (`hit_ancestor`, the shared hierarchy-resolution rule) —
+    // the same walk `aim_distance` makes for the aim ray.
+    hit_ancestor(entity, owners, parents).is_none_or(|(_, owner)| owner.tank() != shooter)
+}
+
 /// Whether a spent shell freezes in place — keeping its stuck mesh, tracer, and penetration marks
 /// for inspection — instead of despawning. The game despawns (default); the sandbox opts in.
 #[derive(Resource, Default)]
@@ -595,11 +642,21 @@ pub struct FireShell {
     /// Projectile mass (kg) — the primary driver of penetration capability (design §3).
     pub mass: f32,
     /// The tank + weapon that fired this shell ([`ShotSource`]), or `None` for trigger sources with
-    /// no tank (the sandbox's free-fly camera). Ballistics ignores it — `on_fire_shell` just spawns
-    /// the shell — but the net server's `FireShell` observer reads it to broadcast the cosmetic
-    /// tracer AND the firing weapon to the OTHER clients (`net::server`, the "FireEvent" seam): a
-    /// shot whose source is known is attributed to the right replicated tank and weapon slot; `None`
-    /// shots (sandbox) simply never broadcast.
+    /// no tank (the sandbox's free-fly camera). It answers TWO questions, and keeping them apart is
+    /// what this field's history got wrong:
+    ///   * **Self-exclusion (ballistics, BOTH ends).** The round is transparent to the tank that fired
+    ///     it — `on_fire_shell` carries the source onto the shell and every cast the march makes
+    ///     excludes that tank's volumes ([`not_own_volume`]). Without it a muzzle that recoils behind
+    ///     its own armour (the coax, behind its mantlet) shoots its own tank point-blank. This is pure
+    ///     IDENTITY: it grants the shell no damage path — deposition is gated on
+    ///     [`crate::ClientReplica`] alone — so a cosmetic replica shell names its shooter too
+    ///     (`net::client::receive_fire_events`) and self-excludes exactly as the authority does.
+    ///   * **Attribution (net server ONLY).** The server's `FireShell` observer reads it to broadcast
+    ///     the cosmetic tracer AND the firing weapon to the OTHER clients (`net::server`, the
+    ///     "FireEvent" seam): a shot whose source is known is attributed to the right replicated tank
+    ///     and weapon slot; `None` shots (sandbox) simply never broadcast. `broadcast_fire` is
+    ///     registered on the server and nowhere else, so a client naming its shooter re-broadcasts
+    ///     nothing.
     pub shooter: Option<ShotSource>,
     /// Whether THIS round is a tracer (decided at fire time from the weapon's [`crate::spec::
     /// FireMode`]: a `Single`'s round always traces; an `Automatic`'s belt cadence — `tracer_every`
@@ -945,6 +1002,11 @@ fn on_fire_shell(
     // live march does (`hit_ancestor`). Cheap to thread through the observer; only read when a
     // catch-up hit actually lands (guarded on `catch_up_ticks > 0`).
     volumes: Query<&BallisticVolume>,
+    // Volume OWNERSHIP, for the shooter self-exclusion the already-landed test needs (see
+    // [`not_own_volume`]): a muzzle that sits inside its own tank's geometry — the coax, whose
+    // recoiling barrel retracts its muzzle behind the STATIC mantlet on every round after the first —
+    // would otherwise report "already landed" 1 cm out and swallow the shell whole.
+    owners: Query<&VolumeOf>,
     parents: Query<&ChildOf>,
     mut commands: Commands,
 ) {
@@ -969,13 +1031,20 @@ fn on_fire_shell(
             let filter = SpatialQueryFilter::from_mask(
                 LayerMask::from(Layer::Terrain) | LayerMask::from(Layer::Armor),
             );
+            // The shooter's own volumes are transparent to its own round — the same rule the live
+            // march applies (see [`not_own_volume`]). Without it this segment, which starts AT the
+            // muzzle, reports the shooter's own mantlet as an already-landed hit and the observer's
+            // shell is never spawned.
+            let shooter = fire.shooter.map(|source| source.tank);
+            let not_own = |entity: Entity| not_own_volume(entity, shooter, &owners, &parents);
             let reach = (skipped.length() - EPS).max(0.0);
-            if let Some(hit) = spatial.cast_ray(
+            if let Some(hit) = spatial.cast_ray_predicate(
                 fire.origin + Vec3::from(dir) * EPS,
                 dir,
                 reach,
                 true,
                 &filter,
+                &not_own,
             ) {
                 // The round already landed during the skipped flight — no in-flight tracer, but the
                 // IMPACT still reads: spark the same view-side `Impact` seam a live march would have
@@ -1099,6 +1168,12 @@ fn integrate_projectiles(
         // present), `Held` marks a shell frozen at armor waiting for its sanctioned bounce keyframe.
         Option<&Shot>,
         Option<&mut Held>,
+        // The tank that fired this shell, when it was fired BY one — `on_fire_shell` attaches it from
+        // `FireShell::shooter` on every attributed shot (the authority's, the shooter's own predicted
+        // round, AND an observer's replica). Read here ONLY to exclude that tank's own volumes from the
+        // march ([`not_own_volume`]) — never to deposit anything. `None` for the sandbox's tank-less
+        // camera fire, which excludes nothing.
+        Option<&ShotSource>,
     )>,
     volumes: Query<&BallisticVolume>,
     owners: Query<&VolumeOf>,
@@ -1196,8 +1271,15 @@ fn integrate_projectiles(
         mut spall,
         shot,
         held,
+        source,
     ) in &mut projectiles
     {
+        // SHOOTER SELF-EXCLUSION (see [`not_own_volume`]): this round is transparent to the tank that
+        // fired it, for every cast below. Identical on the authority and on a replica — the one place
+        // both ends must agree about the shooter's own geometry, or the server's damage model and the
+        // client's cosmetic model describe different worlds.
+        let shooter = source.map(|source| source.tank);
+        let not_own = |entity: Entity| not_own_volume(entity, shooter, &owners, &parents);
         // NET-CLIENT HOLD: a `Shot`-carrying shell — an observer's replica OR the shooter's own
         // predicted round — frozen (and hidden, see the hold insert below) at armor contact, waiting
         // the grace window for the server's verdict on this contact. It does NOT free-flight while
@@ -1412,7 +1494,9 @@ fn integrate_projectiles(
         // perforate or embed) — and keep marching the leftover budget along the new direction.
         while remaining > EPS {
             let origin = pos + dir * EPS;
-            let Some(hit) = spatial.cast_ray(origin, dir, remaining, true, &world) else {
+            let Some(hit) =
+                spatial.cast_ray_predicate(origin, dir, remaining, true, &world, &not_own)
+            else {
                 // Open air — fly out the rest of the step. On the original (unbent) segment this is
                 // exactly the shared `advance_shell` landing point; a `continue` past this point only
                 // ever follows a bend, so `bent` is the exact discriminant.
@@ -2123,6 +2207,99 @@ mod march_tests {
             }
         }
         app.world().resource::<ImpactLog>().0.clone()
+    }
+
+    /// SHOOTER SELF-EXCLUSION ([`not_own_volume`]): a round is transparent to the tank that FIRED it.
+    ///
+    /// The tiger's coax fires from inside its own mantlet on every round after a burst's first (its
+    /// recoiling barrel retracts the muzzle ~10 cm; the muzzle clears the mantlet by ~7 cm), so the
+    /// march's very first cast struck the shooter's own armour a centimetre out — embedding the round on
+    /// the authority, and fail-closing the tracer on every net client. The plate here stands for that
+    /// mantlet: a round fired from INSIDE it must fly straight out if the plate belongs to its shooter,
+    /// and must still be stopped by the very same plate if it does not. That second half is the point —
+    /// this is an exclusion, not a hole in the armour.
+    #[test]
+    fn a_shell_ignores_the_tank_that_fired_it() {
+        use crate::damage::VolumeOf;
+
+        // A thick plate the shell starts INSIDE (origin at z = 0, the plate's centre) — the muzzle
+        // buried in its own mask.
+        for own in [true, false] {
+            let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.4), Vec3::new(0.0, 2.0, 0.0));
+            // The "tank" that owns the plate, and the shooter — the same entity or not, per the arm.
+            let tank = app.world_mut().spawn(Transform::default()).id();
+            let shooter = if own {
+                tank
+            } else {
+                app.world_mut().spawn(Transform::default()).id()
+            };
+            let mut plates = app
+                .world_mut()
+                .query_filtered::<Entity, With<BallisticVolume>>();
+            let plate = plates.single(app.world()).expect("one plate");
+            app.world_mut().entity_mut(plate).insert(VolumeOf(tank));
+
+            let origin = Vec3::new(0.0, 2.0, 0.0);
+            let dir = Vec3::NEG_Z;
+            let shell = app
+                .world_mut()
+                .spawn((
+                    Projectile {
+                        velocity: dir * 755.0,
+                        caliber: 0.0079,
+                        mass: 0.0118,
+                        drag_k: drag_k(0.0079, 0.0118),
+                    },
+                    ShellPath {
+                        points: vec![origin],
+                    },
+                    PenetrationMarks::default(),
+                    SpallMarks::default(),
+                    ShellReadout {
+                        speed: 755.0,
+                        capability: capability(0.0118, 755.0),
+                    },
+                    // The attribution the shell carries from `FireShell::shooter` — on the authority's
+                    // shell, the shooter's own predicted shell, AND (since the coax fix) an observer's
+                    // replica shell alike.
+                    ShotSource {
+                        tank: shooter,
+                        weapon: 0,
+                    },
+                    Transform::from_translation(origin).looking_to(dir, Vec3::Y),
+                ))
+                .id();
+            app.update();
+
+            let hits = app.world().resource::<ImpactLog>().0.clone();
+            if own {
+                assert!(
+                    hits.is_empty(),
+                    "a round fired from inside its OWN tank's armour must pass straight through it — \
+                     the coax fires from inside its own mantlet every burst; got {} impact(s)",
+                    hits.len(),
+                );
+                let flown = app
+                    .world()
+                    .get::<Transform>(shell)
+                    .expect("the shell survives its own tank")
+                    .translation
+                    .distance(origin);
+                assert!(
+                    flown > 10.0,
+                    "the round should fly a full step (~11.8 m at 755 m/s) out of its own tank; it \
+                     moved {flown:.2} m",
+                );
+            } else {
+                assert_eq!(
+                    hits.len(),
+                    1,
+                    "the SAME plate must still stop a round from any other source — self-exclusion is \
+                     an exclusion, not a hole in the armour",
+                );
+                assert_eq!(hits[0].surface, ImpactSurface::Armor);
+            }
+        }
     }
 
     /// A head-on 88 into a 50 mm steel plate cleanly perforates: exactly ONE armor impact at the entry
