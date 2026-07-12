@@ -13,6 +13,7 @@
 
 use avian3d::prelude::{PhysicsInterpolationPlugin, PhysicsLayer, PhysicsPlugins};
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 
 mod aim;
 /// The runtime asset-root resolver (`asset_root`) — where `assets/` lives, resolved once and shared
@@ -104,6 +105,42 @@ mod world;
 #[derive(Resource, Default)]
 pub(crate) struct ClientReplica;
 
+/// Marker resource: lightyear is REPLAYING a rollback right now — re-running `FixedMain` from a
+/// restored past tick up to the predicted present, N times in one frame. The sim layer reads it (as
+/// `Option<Res<Replaying>>`, `.0` true only mid-replay) to keep VIEW-ONLY, tick-timed cosmetic work
+/// OFF replayed ticks: the cosmetic shell march + `Held` aging advance the shell's picture one step
+/// per FORWARD tick, and the shooter's own-shell `FireShell` trigger fires once per forward fire
+/// tick. Replaying them would double-march every in-flight shell by the rollback depth, over-count
+/// the `Held` grace window (burning it in one frame and corrupting the `present − bounce_tick`
+/// re-seed arithmetic), and re-spawn a DUPLICATE own shell sharing one `ShotId` every time a replay
+/// re-crosses a fire tick. The DETERMINISTIC sim mutations (`TankSim` belt/reload/recoil, hull
+/// impulse) still replay — only the cosmetic reconstruction is skipped.
+///
+/// Net-neutral like [`ClientReplica`]: this crate-root marker is the sim's vocabulary, but only
+/// `net::client` (which alone may name lightyear's `Rollback`) WRITES it — a `bool` re-derived at the
+/// head of every `FixedUpdate` from whether this is a replayed tick. Absent on the authority
+/// (server / SP / sandbox), which never rolls back, so its absence reads as "forward tick" everywhere
+/// the writer is not mounted. Lives at the crate root (not `net`) so the always-compiled `ballistics`
+/// / `shooting` can reference it without the netcode in scope (`tests/net_boundary`).
+#[derive(Resource, Default)]
+pub(crate) struct Replaying(pub bool);
+
+/// The net client's PREDICTED PRESENT tick `P` (raw `u32`), republished to the sim layer every
+/// FORWARD `FixedUpdate`. Every cosmetic shell a net client flies lives at `P` — the observer's via
+/// its `fire_tick` catch-up, the shooter's own natively — so this single value IS each in-flight
+/// shell's present tick. The ballistics march reads it (as `Option<Res<PredictedPresent>>`) for F3's
+/// tick-triggered consumption: a shell whose interpolated-pose flight MISSED the plate the server
+/// resolved on never contacts, so once `P` passes the sanctioned outcome's server tick
+/// (`bounce_tick` / `impact_tick`, both net-neutral on the buffer) by a margin, the march consumes it
+/// anyway — re-seeding at the server bounce or finalizing at the server impact — rather than letting
+/// the round sail on through where the authoritative shell bounced or terminated.
+///
+/// Net-neutral like [`Replaying`]: a crate-root sim type whose ONLY writer is `net::client` (which
+/// alone may read lightyear's `LocalTimeline`). Absent on the authority (server / SP / sandbox),
+/// which resolves shots for real and never consults it.
+#[derive(Resource, Default)]
+pub(crate) struct PredictedPresent(pub u32);
+
 /// Physics collision layers. Wheel suspension rays filter to `Terrain` only, so they ignore
 /// the vehicle's own hull collider (ADR-0005). Shared infra, hence at the crate root.
 #[derive(PhysicsLayer, Default, Clone, Copy, Debug)]
@@ -115,6 +152,31 @@ pub(crate) enum Layer {
     /// Ballistic volumes (armor plates + modules): what the penetration march raycasts against,
     /// distinct from `Vehicle` (the dynamic collision proxy). "Same geometry, two layers" (ADR-0008).
     Armor,
+}
+
+/// The correlation spine for one shot: which weapon on which tank fired on which tick. Every
+/// shot-scoped wire message keys on it — the cosmetic tracer ([`net::protocol::FireEvent`]) exposes it
+/// by accessor (`FireEvent::shot_id`, no extra bytes on the wire), the server-sanctioned bounce
+/// ([`net::protocol::RicochetKeyframe`]) carries it, and both ends stamp it on the local cosmetic shell
+/// they spawn ([`ballistics::Shot`]) — so an arriving keyframe re-seeds EXACTLY the shell it belongs to,
+/// and a redundantly-retransmitted duplicate is deduped instead of spawning a second tracer.
+///
+/// **`fire_tick` is what makes successive rounds distinct.** An automatic weapon fires the same
+/// `(shooter, weapon)` every few ticks; without the tick every round of a burst would share one id and
+/// the redundancy dedup would collapse the whole burst to a single shell. It is strictly increasing per
+/// `(shooter, weapon)` (one shot per weapon per tick, ticks advance), which the receiver's dedup relies on.
+///
+/// **NET-NEUTRAL BY DESIGN.** `fire_tick` is a plain `u32` (the raw tick value), not lightyear's `Tick`,
+/// so the always-runnable sim layer (`ballistics`) can key shells on it without naming the netcode
+/// (`tests/net_boundary`); [`net::protocol`] converts to/from `Tick` at the wire boundary. Lives at the
+/// crate root beside [`ClientReplica`]/[`Layer`] for the same reason those do: shared sim/net vocabulary.
+/// The `shooter` [`Entity`] is wire-mapped by the carrying message to the receiver's local replica, so a
+/// `ShotId` is stable within one receiver — which is exactly the dedup/correlation scope.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub struct ShotId {
+    pub shooter: Entity,
+    pub weapon: u8,
+    pub fire_tick: u32,
 }
 
 /// The simulation — the authority layer, in the client/server sense (see the memory note and

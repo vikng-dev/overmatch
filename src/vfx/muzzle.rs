@@ -739,6 +739,7 @@ mod tests {
             shooter: None,
             tracer,
             catch_up_ticks,
+            shot: None,
         });
         app.world_mut().flush();
     }

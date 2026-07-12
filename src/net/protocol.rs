@@ -17,7 +17,8 @@ use lightyear::prelude::input::native::{ActionState, NativeBuffer};
 use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::ballistics::ComponentHealth;
+use crate::ShotId;
+use crate::ballistics::{ComponentHealth, Projectile, Shot, ShotSource};
 use crate::command::{ConsumeCommandEdges, TankCommand};
 use crate::damage::{
     Ammo, CrewStation, Crewman, DamageConsequences, Dead, LaunchedTurret, PendingSwap,
@@ -55,7 +56,7 @@ use crate::tank::{
 /// changes** (a replicated component added/removed/reordered/renamed, a message or channel changed,
 /// the input type changed). The `wire_surface_is_pinned` tripwire fails until you do, which
 /// is the point: it makes a silent wire-breaking change impossible.
-pub const PROTOCOL_REV: u32 = 3;
+pub const PROTOCOL_REV: u32 = 4;
 
 /// The protocol fingerprint both ends bake into their netcode `protocol_id` (`Authentication::Manual`
 /// on the client, `NetcodeConfig` on the server). Derived at COMPILE TIME from [`PROTOCOL_REV`] + the
@@ -345,6 +346,23 @@ pub struct FireEvent {
     pub fire_tick: Tick,
 }
 
+impl FireEvent {
+    /// This shot's [`ShotId`] — the correlation spine, DERIVED from the fields already on the wire
+    /// (`shooter`, `weapon`, `fire_tick`) rather than carried as a separate field. Chosen so the wire
+    /// stays minimal (zero extra bytes) and the id can never disagree with the geometry it identifies:
+    /// it is a pure function of what's already here. `fire_tick` (a lightyear `Tick`) is unwrapped to
+    /// its raw `u32` for the net-neutral [`ShotId`] (see its doc). Both ends call this to key dedup and
+    /// to stamp the spawned shell, so a redundantly-retransmitted `FireEvent` (piece 3) resolves to the
+    /// SAME id and is deduped, and a `RicochetKeyframe` (piece 2) correlates to the shell it belongs to.
+    pub fn shot_id(&self) -> ShotId {
+        ShotId {
+            shooter: self.shooter,
+            weapon: self.weapon,
+            fire_tick: self.fire_tick.0,
+        }
+    }
+}
+
 impl MapEntities for FireEvent {
     fn map_entities<M: EntityMapper>(&mut self, mapper: &mut M) {
         // Only `shooter` is an entity; every other field is plain geometry or data (the `weapon`
@@ -353,11 +371,126 @@ impl MapEntities for FireEvent {
     }
 }
 
-/// The dedicated channel [`FireEvent`] rides: unreliable + unordered, matching the message's
-/// loss-tolerance (a missing tracer is cosmetic; there is nothing to retry or re-sequence). A
-/// zero-sized marker type — `Channel` is blanket-implemented for any `Send + Sync + 'static` type
-/// (lightyear_transport channel/mod.rs), so the type IS the channel; its settings are registered in
-/// [`plugin`].
+/// A server-sanctioned ricochet — the "replicate the cause" (ADR-0016) half of the bounce
+/// carry-through. Broadcast the instant the AUTHORITATIVE march resolves a ricochet, so every observer
+/// re-seeds its cosmetic shell from server truth instead of improvising a bounce against interpolated
+/// geometry (the divergence that made replica shells wander off after a bounce). Loss-tolerant BY
+/// CONSTRUCTION, exactly like [`FireEvent`]: a dropped keyframe costs a truncated cosmetic trail, never
+/// a wrong hit (damage is server-authoritative), which is why it rides the same loss-tolerant
+/// [`FireChannel`] — inside [`FireBurst`], which gives it sliding-window redundancy (piece 3).
+///
+/// Keyed by [`ShotId`] so it correlates to the right cosmetic shell on every client — an observer's
+/// replica AND the shooter's own predicted round (which carries the same id via the shared
+/// [`stamp_shot_ids`]; the shooter's fall-of-shot read on a bounced round is the loop this feeds).
+/// `sequence` is the bounce's 0-based ordinal within the shot, so multiple ricochets on one shell are
+/// consumed strictly in order. The receiver re-ages the re-seeded shell by how long it held (which
+/// equals present − `bounce_tick`), so `bounce_tick` itself is carried for audit and a future
+/// RTT-adaptive path rather than the hot path (see `ballistics::SanctionedBounce`). `direction` rides
+/// as a raw `Vec3` and is guarded to a `Dir3` on receipt, the same discipline as
+/// [`FireEvent::direction`].
+#[derive(Clone, Serialize, Deserialize)]
+pub struct RicochetKeyframe {
+    /// The shot this bounce belongs to — its `shooter` is entity-mapped (see [`FireBurst`]).
+    pub shot: ShotId,
+    /// The exact server bounce point — where the observer re-seeds the shell.
+    pub origin: Vec3,
+    /// Post-bounce travel direction (guarded to `Dir3` on receipt).
+    pub direction: Vec3,
+    /// Post-bounce speed (m/s).
+    pub speed: f32,
+    /// The server `Tick` the bounce resolved on (stamped from the server's `LocalTimeline`).
+    pub bounce_tick: Tick,
+    /// This bounce's 0-based ordinal within the shot — the SAME count an observer derives from its
+    /// shell's own ricochets, so bounces re-seed in the order the server resolved them.
+    pub sequence: u32,
+}
+
+/// The server-sanctioned TERMINAL of a shot on armor — the confirm that completes the shot state
+/// machine on every client: a shot ends in exactly one of {terrain stop (client-local —
+/// pose-independent static geometry, both ends already agree, so terrain never confirms), THIS
+/// confirmed armor terminal, fail-closed truncation (the lost-confirm fallback)}. Broadcast where the
+/// authoritative march resolves an EMBED or a PERFORATION (a ricochet is a [`RicochetKeyframe`]
+/// instead); mirrors the authority's own `Impact` read at the struck plate — position, normal, and the
+/// `penetrated` verdict that gates the flame lick — so a net client renders the SAME honest armor read
+/// SP shows, at the SERVER's position. Perforation ends the COSMETIC shell at the entry-face read even
+/// though the authoritative shell continues into the tank interior — the documented choice on
+/// `ballistics::ShellTerminal` (what an external viewer sees at the plate IS this read; the client
+/// cannot march the interior). No surface enum rides: a confirm is ALWAYS armor (terrain is local).
+///
+/// Loss-tolerant like its siblings (the [`FireBurst`] redundancy re-carries it); a lost confirm
+/// degrades to the fail-closed neutral truncation after the grace window. AT MOST ONE per shot (the
+/// authority strips the shell's shot identity after emitting), so the receiver dedups by [`ShotId`]
+/// alone — the `SanctionedShots` terminal insert is first-wins-idempotent. `after_bounces` orders it
+/// against the shot's ricochet keyframes: the client consumes the terminal only after re-seeding
+/// through that many bounces, so a shot's terminal never skips a bounce whose keyframe is merely late.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ImpactConfirm {
+    /// The shot this terminal belongs to — its `shooter` is entity-mapped (see [`FireBurst`]).
+    pub shot: ShotId,
+    /// The server's impact position (embed point, or the perforation's entry face).
+    pub position: Vec3,
+    /// The struck face's outward normal, from the server's raycast. No `Dir3` guard on receipt:
+    /// `Impact` consumers normalize with a fallback by contract (see `ballistics::Impact::normal`).
+    pub normal: Vec3,
+    /// The server's penetration verdict — gates the flame lick exactly as the local read does.
+    pub penetrated: bool,
+    /// The server `Tick` the impact resolved on. Audit / future RTT-adaptive use, like
+    /// [`RicochetKeyframe::bounce_tick`] — the client resolves on receipt, not by re-aging.
+    pub impact_tick: Tick,
+    /// Ricochets the authority resolved before this terminal (the client's ordering gate).
+    pub after_bounces: u32,
+}
+
+/// The sliding-window redundancy envelope (piece 3 — the input-redundancy pattern applied to cosmetic
+/// events): every broadcast carries the last few [`FireEvent`]s, [`RicochetKeyframe`]s, AND
+/// [`ImpactConfirm`]s, so ONE delivered burst repairs a multi-packet loss of any stream. Rides the
+/// sequenced-unreliable [`FireChannel`] — a newer burst supersedes an older one without acks or
+/// head-of-line blocking, and each burst carries the whole current window, so dropping a stale burst
+/// loses nothing the next one doesn't re-carry. The receiver DEDUPS: fires by [`ShotId`] (spawn each
+/// cosmetic shell exactly once), keyframes by `(ShotId, sequence)`, confirms by [`ShotId`] alone (at
+/// most one terminal per shot) — the `SanctionedShots` inserts are idempotent.
+///
+/// One message type, not three, so the wire surface is a single registration and all streams share the
+/// redundancy for free — a fire burst re-carries recent keyframes/confirms and vice versa. Sent to
+/// `NetworkTarget::All`; a client drops any FIRE naming a tank IT simulates (the `locally_fired`
+/// guard — a fire echo would duplicate the shell), so the shooter discarding its own echo is a
+/// receiver concern, not a targeting one — which is what makes the redundancy correct across shooters
+/// in one shared burst. KEYFRAMES and CONFIRMS are deliberately NOT dropped for own shots: they spawn
+/// nothing, and the shooter's own shell consumes them (see `receive_fire_events`).
+#[derive(Clone, Serialize, Deserialize)]
+pub struct FireBurst {
+    /// The last N fire events (N sized to cover a multi-packet burst at an MG's cyclic rate).
+    pub fires: Vec<FireEvent>,
+    /// The last N ricochet keyframes (rare — they persist in the window far longer than fires).
+    pub keyframes: Vec<RicochetKeyframe>,
+    /// The last N impact confirms (one per armor-terminated shot).
+    pub confirms: Vec<ImpactConfirm>,
+}
+
+impl MapEntities for FireBurst {
+    fn map_entities<M: EntityMapper>(&mut self, mapper: &mut M) {
+        // Every embedded shot's `shooter` entity must resolve to the receiver's local replica: map the
+        // fires through their own impl, and each keyframe's/confirm's `ShotId.shooter` directly
+        // (ShotId is a net-neutral crate-root type with no MapEntities of its own).
+        for fire in &mut self.fires {
+            fire.map_entities(mapper);
+        }
+        for keyframe in &mut self.keyframes {
+            keyframe.shot.shooter = mapper.get_mapped(keyframe.shot.shooter);
+        }
+        for confirm in &mut self.confirms {
+            confirm.shot.shooter = mapper.get_mapped(confirm.shot.shooter);
+        }
+    }
+}
+
+/// The dedicated channel [`FireBurst`] rides: SEQUENCED + unreliable. Sequenced (not merely unordered)
+/// because each burst carries the whole current sliding window of recent fires and keyframes — a newer
+/// burst strictly supersedes an older one, so delivering only the newest and dropping stale/reordered
+/// bursts loses nothing (the newest re-carries the window), while still paying no acks/retries/HOL
+/// blocking for cosmetic traffic (damage is server-authoritative). A zero-sized marker type — `Channel`
+/// is blanket-implemented for any `Send + Sync + 'static` type (lightyear_transport channel/mod.rs), so
+/// the type IS the channel; its settings are registered in [`plugin`].
 pub struct FireChannel;
 
 /// The tank's health-bearing volumes in `TankVolumes` order — the SINGLE definition of which volumes
@@ -692,6 +825,55 @@ fn apply_net_belts(mut tanks: Query<(&NetBelts, &mut TankSim), With<Remote>>) {
     }
 }
 
+/// BOTH ENDS: complete each freshly-spawned attributed shell's [`ShotId`] from its [`ShotSource`]
+/// (tank + weapon slot, attached at spawn by `on_fire_shell`) plus the fire tick — the one part the
+/// sim layer cannot know, since the tick lives in lightyear's timeline (`tests/net_boundary`). Runs
+/// `FixedPostUpdate`, so the timeline still reads the FIRE tick (unchanged until the next
+/// `FixedFirst`) — the SAME value the server's `broadcast_fire` stamps into the `FireEvent`.
+///
+/// This lives in the SHARED protocol plugin, not `net::server`, because the id must be stamped
+/// identically on every net composition for the keyframe correlation to close end-to-end:
+///   * **Server**: the authoritative shell carries the id so its ricochet raises a `ShellRicochet`
+///     naming the shot (`net::server::on_shell_ricochet` puts it on the wire).
+///   * **Shooter's client**: the OWN predicted shell fires at the SAME tick number the server
+///     simulates that input on (prediction is tick-indexed: both ends run `shooting::fire` for tick T
+///     with the input for tick T — a late input is dropped, never fired late, so if the server fires
+///     at all it fires at T), against the SAME tank root the keyframe's entity-mapped `shooter`
+///     resolves to (the mapped root is the root the local rig hangs off — the same entity
+///     `ShotSource.tank` named at fire time, as `apply_pending_recoil_kicks` already relies on). So
+///     the locally-stamped id equals the wire-derived one, and the shooter's own bounced round
+///     re-seeds from the server keyframe — the fall-of-shot read the gunnery loop needs.
+///   * **Observer clients**: their shells are stamped directly from the wire
+///     (`receive_fire_events` passes `FireShell.shot`), so this system finds no `ShotSource` on them
+///     (the client re-raise passes `shooter: None`) and leaves them alone.
+///
+/// SP/sandbox never mount this plugin, so their shells carry no `Shot` — irrelevant there: the
+/// authority march consults `Shot` only to emit `ShellRicochet`, and there is no wire to carry one.
+/// A shell reaches armor only on a later tick (it spawns at the muzzle), so `Shot` is always present
+/// before it can ricochet or hold. `Without<Shot>` makes this idempotent (and skips wire-stamped
+/// observer shells even if they ever gained a source); a slot past `u8` is skipped, matching
+/// `broadcast_fire` (which also skips the whole shot — so no keyframe would name it anyway). On the
+/// client this also runs during rollback replay, stamping a replay-refired shell with the replayed
+/// tick — which IS its fire tick, so the duplicate carries the same id as the original (cosmetic
+/// duplicate, same correlation).
+fn stamp_shot_ids(
+    shells: Query<(Entity, &ShotSource), (With<Projectile>, Without<Shot>)>,
+    timeline: Res<LocalTimeline>,
+    mut commands: Commands,
+) {
+    let fire_tick = timeline.tick().0;
+    for (entity, source) in &shells {
+        let Ok(weapon) = u8::try_from(source.weapon) else {
+            continue;
+        };
+        commands.entity(entity).insert(Shot(ShotId {
+            shooter: source.tank,
+            weapon,
+            fire_tick,
+        }));
+    }
+}
+
 /// Authority side: mirror the live `ServoState` angles onto the replicated root component.
 /// `FixedPostUpdate`, so it reads what `drive_servos` (FixedUpdate, after `GameplaySet`) just
 /// stepped. `Without<Remote>` makes it authority-only in shared code: every client-side tank
@@ -890,9 +1072,11 @@ const WIRE_SURFACE: &[&str] = &[
     "NetCrew",
     "LaunchedTurretPose",
     "NetBelts",
-    // The cosmetic-fire channel then message — `app.add_channel` / `app.register_message`:
+    // The cosmetic-fire channel then message — `app.add_channel` / `app.register_message`. The message
+    // is now the redundancy envelope `FireBurst`; `FireEvent` rides INSIDE it (a wire type, not a
+    // registered message), covered by the field-level `WIRE_TYPES_HASH` below.
     "FireChannel",
-    "FireEvent",
+    "FireBurst",
     // The input protocol — `InputPlugin::<TankCommand>`:
     "TankCommand",
     // Predicted+rollback avian components — `app.component::<_>().replicate().predict()`, in order:
@@ -906,7 +1090,7 @@ const WIRE_SURFACE: &[&str] = &[
 /// same diff whenever the wire surface changes; the `wire_surface_is_pinned` tripwire prints the new
 /// value in its failure message. `#[cfg(test)]` for the same reason as `WIRE_SURFACE`.
 #[cfg(test)]
-const WIRE_SURFACE_HASH: u64 = 0x3c11_1a6e_6fda_3699;
+const WIRE_SURFACE_HASH: u64 = 0xc977_9452_059a_6423;
 
 // ---------------------------------------------------------------------------
 // Deep wire-surface coverage (field-level + external-dep skew)
@@ -940,7 +1124,7 @@ const WIRE_SURFACE_HASH: u64 = 0x3c11_1a6e_6fda_3699;
 /// changes; the `wire_types_are_pinned` tripwire prints the new value. See the block above for the
 /// coverage model. `#[cfg(test)]` for the same reason as `WIRE_SURFACE`.
 #[cfg(test)]
-const WIRE_TYPES_HASH: u64 = 0xdaa6_71e0_a8c7_2218;
+const WIRE_TYPES_HASH: u64 = 0xa7b9_be0a_9624_2fa5;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -975,17 +1159,19 @@ pub(crate) fn plugin(app: &mut App) {
     // the un-replicated `TankSim`) snaps to server truth instead of a divergent local prediction.
     app.component::<NetBelts>().replicate();
 
-    // The cosmetic opponent-fire tracer (`FireEvent`) and its dedicated loss-tolerant channel. A
-    // MESSAGE, not a replicated component: it is a one-shot fire-and-forget event, not a piece of
-    // ongoing state. `ServerToClient` (the server is the sole broadcaster — see `net::server`);
-    // `add_map_entities` registers `FireEvent`'s `MapEntities` so the `shooter` entity resolves to
-    // the receiver's local replica on deserialize. Registered in this SHARED plugin so both ends
-    // agree on the message id, direction, and channel — exactly like the `.replicate()` block above.
+    // The cosmetic opponent-fire broadcast (`FireBurst`: a sliding window of recent `FireEvent`s +
+    // `RicochetKeyframe`s) and its dedicated loss-tolerant channel. A MESSAGE, not a replicated
+    // component: fire-and-forget events, not ongoing state. `ServerToClient` (the server is the sole
+    // broadcaster — see `net::server`); `add_map_entities` registers `FireBurst`'s `MapEntities` so
+    // every embedded shot's `shooter` entity resolves to the receiver's local replica on deserialize.
+    // Registered in this SHARED plugin so both ends agree on the message id, direction, and channel —
+    // exactly like the `.replicate()` block above.
     app.add_channel::<FireChannel>(ChannelSettings {
-        // Unreliable + unordered: a dropped or reordered tracer is cosmetically harmless (damage is
-        // server-authoritative via `NetHealth`), so paying for acks/retries/sequencing would be pure
-        // overhead on a high-frequency event.
-        mode: ChannelMode::UnorderedUnreliable,
+        // Sequenced + unreliable: each burst carries the whole current redundancy window, so delivering
+        // only the newest and dropping stale/reordered bursts loses nothing (the newest re-carries it),
+        // while paying no acks/retries/HOL blocking on high-frequency cosmetic traffic (damage is
+        // server-authoritative via `NetCrew`). See `FireChannel`/`FireBurst`.
+        mode: ChannelMode::SequencedUnreliable,
         ..default()
     })
     // The CHANNEL's own direction — NOT just the message's. This installs the per-link
@@ -995,7 +1181,7 @@ pub(crate) fn plugin(app: &mut App) {
     // fails `ChannelNotFound` at runtime (compiles fine — the bug only shows live). Same idiom as
     // lightyear's own `InputChannel`/`RepliconUpdatesChannel` registrations.
     .add_direction(NetworkDirection::ServerToClient);
-    app.register_message::<FireEvent>()
+    app.register_message::<FireBurst>()
         .add_map_entities()
         .add_direction(NetworkDirection::ServerToClient);
 
@@ -1089,6 +1275,10 @@ pub(crate) fn plugin(app: &mut App) {
             publish_net_crew,
             publish_launched_turret_pose,
             publish_net_belts,
+            // BOTH ends: complete each attributed shell's `ShotId` from `ShotSource` + this tick —
+            // the shared stamp that makes the server's ricocheting shell, the shooter's OWN predicted
+            // shell, and the observers' catch-up shells all carry ONE id (see the system doc).
+            stamp_shot_ids,
         ),
     );
     app.add_systems(
@@ -1474,7 +1664,13 @@ mod tests {
         ("src/net/protocol.rs", "NetBelts"),
         ("src/net/protocol.rs", "BeltSnapshot"),
         ("src/net/protocol.rs", "FireChannel"),
+        // The redundancy envelope and both stream element types it embeds (fires + keyframes), plus the
+        // correlation spine `ShotId` (defined at the crate root, net-neutral — see its doc).
+        ("src/net/protocol.rs", "FireBurst"),
         ("src/net/protocol.rs", "FireEvent"),
+        ("src/net/protocol.rs", "RicochetKeyframe"),
+        ("src/net/protocol.rs", "ImpactConfirm"),
+        ("src/lib.rs", "ShotId"),
         ("src/command.rs", "TankCommand"),
         ("src/command.rs", "CrewSwap"),
         ("src/damage.rs", "CrewStation"),
@@ -1612,6 +1808,87 @@ mod tests {
                  the pinned WIRE_DEP_* version in the same diff.",
             );
         }
+    }
+
+    /// [`FireEvent::shot_id`] is a pure function of the fields already on the wire (no extra bytes),
+    /// unwrapping the lightyear `Tick` to the net-neutral `u32` the sim keys on — so the shell both
+    /// ends spawn and the keyframe that re-seeds it share ONE id.
+    #[test]
+    fn fire_event_shot_id_is_derived_from_wire_fields() {
+        let event = FireEvent {
+            origin: Vec3::ZERO,
+            direction: Vec3::X,
+            speed: 800.0,
+            caliber: 0.088,
+            mass: 10.2,
+            tracer: true,
+            shooter: Entity::PLACEHOLDER,
+            weapon: 3,
+            fire_tick: Tick(77),
+        };
+        assert_eq!(
+            event.shot_id(),
+            ShotId {
+                shooter: event.shooter,
+                weapon: 3,
+                fire_tick: 77,
+            },
+        );
+    }
+
+    /// THE OWN-SHELL CORRELATION, end to end: [`stamp_shot_ids`] (the shared BOTH-ends stamp) gives a
+    /// locally-fired attributed shell — the shooter's own predicted round, the server's authoritative
+    /// round — the EXACT [`ShotId`] the wire derives for that shot ([`FireEvent::shot_id`], and hence
+    /// the id a `RicochetKeyframe` names). This equality is what lets the shooter's own bounced round
+    /// re-seed from the server's keyframe: same shooter root (`ShotSource.tank` is the root `fire`
+    /// used, the entity the keyframe's mapped `shooter` resolves to), same slot, same tick-indexed
+    /// fire tick (both ends run `fire` for tick T with the input for tick T).
+    #[test]
+    fn stamp_shot_ids_matches_the_wire_derived_id() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        use crate::ballistics::{Projectile, Shot, ShotSource};
+
+        const FIRE_TICK: i32 = 42;
+        let mut world = World::new();
+        world.insert_resource(timeline_at(FIRE_TICK));
+        let shooter = world.spawn_empty().id();
+        // The own-shell shape at spawn: `Projectile` + `ShotSource`, no `Shot` yet (`shooting::fire`
+        // passes `shot: None` — the sim cannot read the tick).
+        let shell = world
+            .spawn((
+                Projectile::test_88(Vec3::X * 800.0),
+                ShotSource {
+                    tank: shooter,
+                    weapon: 1,
+                },
+            ))
+            .id();
+
+        world.run_system_once(stamp_shot_ids).unwrap();
+
+        // What the server's broadcast derives for the SAME shot on the wire.
+        let wire_id = FireEvent {
+            origin: Vec3::ZERO,
+            direction: Vec3::X,
+            speed: 800.0,
+            caliber: 0.0079,
+            mass: 0.0118,
+            tracer: true,
+            shooter,
+            weapon: 1,
+            fire_tick: Tick(FIRE_TICK as u32),
+        }
+        .shot_id();
+        assert_eq!(
+            world.get::<Shot>(shell).expect("stamped").0,
+            wire_id,
+            "the locally-stamped ShotId equals the wire-derived one — the keyframe correlates",
+        );
+
+        // Idempotent: a second run must not re-stamp (Without<Shot>).
+        world.run_system_once(stamp_shot_ids).unwrap();
+        assert_eq!(world.get::<Shot>(shell).unwrap().0, wire_id);
     }
 
     /// The fingerprint is a pure function of the build (so a same-build client/server always agree
