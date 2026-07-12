@@ -1024,7 +1024,7 @@ mod tests {
     use bevy::ecs::system::RunSystemOnce;
 
     use super::*;
-    use crate::spec::{RecoilSpec, Trigger};
+    use crate::spec::{FireMode, RecoilSpec, Trigger};
     use crate::tank::WeaponState;
 
     /// A one-weapon `Weapon` config with the given `recoil` spec and `barrel` node — the only two
@@ -1035,10 +1035,9 @@ mod tests {
             speed: 800.0,
             caliber: 0.088,
             mass: 10.2,
-            reload: 8.0,
+            fire_mode: FireMode::Single { reload_secs: 8.0 },
             recoil,
             barrel,
-            tracer_every: 1,
             fire: Vec::new(),
             load: Vec::new(),
             trigger: Trigger::Primary,

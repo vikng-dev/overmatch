@@ -245,8 +245,10 @@ fn mg_rounds_stream_tracers_and_spawn_no_shell_scene() {
     let tank = tank_q.single(app.world()).expect("one controlled tank");
 
     // Hold the secondary trigger (the MGs) — a burst. Do NOT press primary, so no 88 round is fired.
-    // MG reload is ~0.08 s (~5 ticks), so ~60 ticks yields ~10 shots per MG across the two MGs, with
-    // tracer_every=5 giving several tracer rounds.
+    // The MGs are `Automatic(rpm: 750)` — a 0.08 s cyclic interval (~5 ticks) — so ~60 ticks yields
+    // ~10 shots per MG across the two MGs, with the belt's tracer_every=5 giving several tracer
+    // rounds. The 150-round belts stay far from dry (~12 rounds each), so no belt swap interrupts
+    // the burst.
     let mut saw_streak = false;
     let mut saw_mg_shell_scene = false;
     let mut saw_shell = false;
@@ -284,7 +286,8 @@ fn mg_rounds_stream_tracers_and_spawn_no_shell_scene() {
 
     assert!(
         saw_shell,
-        "the MG burst never spawned a single shell — the fire gate or reload never let it fire",
+        "the MG burst never spawned a single shell — the fire gate, cyclic interval, or belt never \
+         let it fire",
     );
     assert!(
         saw_streak,

@@ -1,7 +1,9 @@
-//! The player's gun control: fire on click (raising a `ballistics::FireShell`), enforce the reload
-//! cooldown (gated by the Loader position), and recoil the barrel. The trajectory itself lives in
-//! `ballistics` — this module owns only what makes it the *player's* gun. The armor sandbox drives
-//! the same `FireShell` from its free-fly camera instead.
+//! The player's gun control: fire per each weapon's [`FireMode`] (a `Single`'s click →  one shell
+//! + a crew-gated reload; an `Automatic`'s held trigger → cyclic fire off a finite belt, with a
+//! crew-gated belt swap when it runs dry), raising a `ballistics::FireShell` per round, and recoil
+//! the barrel. The trajectory itself lives in `ballistics` — this module owns only what makes it
+//! the *player's* gun. The armor sandbox drives the same `FireShell` from its free-fly camera
+//! instead.
 
 use avian3d::prelude::{Forces, Position, Rotation, WriteRigidBodyForces};
 use bevy::prelude::*;
@@ -9,7 +11,7 @@ use bevy::prelude::*;
 use crate::ballistics::{FireShell, ShotSource};
 use crate::command::{ConsumeCommandEdges, TankCommand};
 use crate::damage::{TankVolumes, VolumeFacets, requirement_met};
-use crate::spec::Trigger;
+use crate::spec::{FireMode, Trigger};
 use crate::state::GameplaySet;
 use crate::tank::{Muzzle, Tank, TankRoot, TankSim, Weapon, WeaponIndex, rig_world_pose};
 
@@ -56,10 +58,12 @@ pub(crate) fn kick_recoil(sim: &mut TankSim, slot: usize, weapon: &Weapon) {
 }
 
 /// Whether the `rounds_fired`-th round down a belt with cadence `tracer_every` is a tracer. Pure
-/// belt arithmetic (see [`crate::spec::WeaponSpec::tracer_every`]): every `tracer_every`-th round
-/// traces, counting the belt from the first round (index 0). `1` = every round; `5` = rounds
-/// 0, 5, 10, … (one-in-five); `0` = a tracerless belt, never. Both the server and the predicted
-/// client call this with a counter they each walk from 0, so they agree on every round's tracer-ness.
+/// belt arithmetic (see [`crate::spec::FireMode::Automatic`]'s `tracer_every` — only the
+/// `Automatic` arm of [`fire`] calls this; a `Single`'s round always traces): every
+/// `tracer_every`-th round traces, counting the belt from the first round (index 0). `1` = every
+/// round; `5` = rounds 0, 5, 10, … (one-in-five); `0` = a tracerless belt, never. Both the server
+/// and the predicted client call this with a counter they each walk from 0, so they agree on every
+/// round's tracer-ness.
 pub(crate) fn tracer_round(rounds_fired: u32, tracer_every: u32) -> bool {
     // The `!= 0` guard both encodes the "never" belt and short-circuits before `is_multiple_of(0)`.
     tracer_every != 0 && rounds_fired.is_multiple_of(tracer_every)
@@ -92,10 +96,21 @@ pub fn plugin(app: &mut App) {
     );
 }
 
-/// Tick every weapon's reload timer down — but only while its own tank meets the weapon's `load`
-/// requirement (Loader staffed + Breech intact). A dead Loader or broken Breech freezes the
-/// reload partway through; a backfilled Loader (slice 2) would resume it. Per-tank, not
-/// controlled-only: a tank keeps loading whether you're in it or (later) it's a network peer's.
+/// Tick every weapon's fire timer down, with the crew gate applied per [`FireMode`] — this is
+/// where "what does the crew actually do" splits by mechanism:
+///
+/// * `Single`: the timer is the reload, and the whole reload is gated by the weapon's `load`
+///   requirement (Loader staffed + Breech intact). A dead Loader or broken Breech freezes the
+///   reload partway through; a backfilled Loader (slice 2) would resume it.
+/// * `Automatic`, belt has rounds: the timer is the cyclic interval (60/rpm), pure mechanism —
+///   it ticks UNGATED. Crew-gating it was the old single-path latent trap: a dead loader would
+///   have frozen an MG's rate of fire mid-belt, which no crew casualty physically does.
+/// * `Automatic`, belt dry: the timer is the belt swap, and the SWAP is what `load` gates (the
+///   human act, same machinery as the 88's reload). When it reaches 0 the belt refills — inside
+///   the gated tick, so a crew-dead tank never completes a swap.
+///
+/// Per-tank, not controlled-only: a tank keeps loading whether you're in it or it's a network
+/// peer's.
 fn tick_reload(
     time: Res<Time>,
     tanks: Query<Option<&TankVolumes>, With<Tank>>,
@@ -113,17 +128,42 @@ fn tick_reload(
         let Some(state) = sim.weapons.get_mut(slot.0) else {
             continue;
         };
-        if state.reload_remaining > 0.0 && requirement_met(tank_volumes, &weapon.load, &volumes) {
-            state.reload_remaining = (state.reload_remaining - time.delta_secs()).max(0.0);
+        if state.reload_remaining <= 0.0 {
+            continue;
+        }
+        match weapon.fire_mode {
+            // Single-shot reload: crew-gated, unchanged.
+            FireMode::Single { .. } => {
+                if requirement_met(tank_volumes, &weapon.load, &volumes) {
+                    state.reload_remaining = (state.reload_remaining - time.delta_secs()).max(0.0);
+                }
+            }
+            FireMode::Automatic { belt_size, .. } => {
+                if state.belt_remaining > 0 {
+                    // Cyclic interval: mechanism, never crew-gated.
+                    state.reload_remaining = (state.reload_remaining - time.delta_secs()).max(0.0);
+                } else if requirement_met(tank_volumes, &weapon.load, &volumes) {
+                    // Belt swap: the crew-gated act. The refill lives INSIDE the gated tick, on
+                    // the exact tick the timer bottoms out — so completion is impossible while
+                    // the gate is unmet, and happens exactly once per swap.
+                    state.reload_remaining = (state.reload_remaining - time.delta_secs()).max(0.0);
+                    if state.reload_remaining <= 0.0 {
+                        state.belt_remaining = belt_size;
+                    }
+                }
+            }
         }
     }
 }
 
-/// Fire each tank's weapons whose trigger its command holds this tick: `fire_primary` → the main
-/// gun (single shot — the command layer latches the click edge to exactly one tick),
-/// `fire_secondary` (held) → the MGs (cyclic via their short reload). Each weapon fires from its
-/// *own* muzzle and ballistics, gated by its `fire` requirement + reload — the gate lives here in
-/// the sim, where the server will enforce it, not in the input path.
+/// Fire each tank's weapons whose trigger its command holds this tick — THE one fire system, a
+/// `match` on [`FireMode`] per weapon, never per-mechanism systems (the schedule edges above are
+/// determinism-load-bearing and must stay singular). `Trigger` is pure input ROUTING (which
+/// command field the weapon reads); the input *semantics* come from the mode: a `Single` weapon
+/// consumes a latched click edge (`fire_primary`-style, one tick per click), an `Automatic` reads
+/// a held level and cycles at 60/rpm from a finite belt. Each weapon fires from its *own* muzzle
+/// and ballistics, gated by its `fire` requirement + fire timer (+ belt for an `Automatic`) — the
+/// gate lives here in the sim, where the server will enforce it, not in the input path.
 fn fire(
     tanks: Query<(&TankCommand, Option<&TankVolumes>, &Position, &Rotation), With<Tank>>,
     volumes: Query<VolumeFacets>,
@@ -138,15 +178,28 @@ fn fire(
         let Ok((command, tank_volumes, position, rotation)) = tanks.get(root.0) else {
             continue;
         };
+        // Input routing only — edge vs level is baked into the command fields themselves
+        // (`fire_primary` is a one-tick click latch, `fire_secondary` a held level; see
+        // `TankCommand`), so a `Single` on Primary consumes the edge and an `Automatic` on
+        // Secondary reads the level, per the mode's contract.
         let triggered = match weapon.trigger {
             Trigger::Primary => command.fire_primary,
             Trigger::Secondary => command.fire_secondary,
         };
+        // Ready = fire timer at 0, plus rounds on the belt for an `Automatic` (a dry belt is
+        // mid-swap: `reload_remaining` then carries the swap timer, which a dead crew can freeze
+        // at >0 forever — the belt check keeps "no rounds" firm even at timer 0 edge cases).
         let ready = sims
             .get(root.0)
             .ok()
             .and_then(|sim| sim.weapons.get(slot.0))
-            .is_some_and(|w| w.reload_remaining <= 0.0);
+            .is_some_and(|w| {
+                w.reload_remaining <= 0.0
+                    && match weapon.fire_mode {
+                        FireMode::Single { .. } => true,
+                        FireMode::Automatic { .. } => w.belt_remaining > 0,
+                    }
+            });
         if !triggered || !ready || !requirement_met(tank_volumes, &weapon.fire, &volumes) {
             continue;
         }
@@ -169,17 +222,25 @@ fn fire(
             continue; // corrupt pose frame — hold the shot rather than fire NaN
         };
 
-        // Belt bookkeeping: is THIS round a tracer, then advance the belt. Decided from root-resident
-        // `TankSim` state so the server and the predicted client — which both run this `fire` and
-        // count their own belts from 0 — agree on each round's tracer-ness (and a rollback replay
-        // restores the counter, re-deriving the same answer). The flag rides FireShell → FireEvent so
-        // remote clients match too. A rollback that drops a predicted shot can leave THIS client's own
-        // counter one round out of phase with the server's; the resulting one-round tracer skew on the
-        // shooter's own view is cosmetic and accepted (see `WeaponState::rounds_fired`).
+        // Round bookkeeping: is THIS round a tracer, then advance the counter. A `Single`'s round
+        // always traces (its visual is the shell scene, not a streak — `tracer_round` is belt
+        // arithmetic and only the `Automatic` arm calls it). Decided from root-resident `TankSim`
+        // state so the server and the predicted client — which both run this `fire` and count
+        // their own belts from 0 — agree on each round's tracer-ness (and a rollback replay
+        // restores the counter, re-deriving the same answer). The flag rides FireShell → FireEvent
+        // so remote clients match too. A rollback that drops a predicted shot can leave THIS
+        // client's own counter one round out of phase with the server's; the resulting one-round
+        // tracer skew on the shooter's own view is cosmetic and accepted (see
+        // `WeaponState::rounds_fired`).
         let tracer = if let Ok(mut sim) = sims.get_mut(root.0) {
             match sim.weapons.get_mut(slot.0) {
                 Some(state) => {
-                    let is_tracer = tracer_round(state.rounds_fired, weapon.tracer_every);
+                    let is_tracer = match weapon.fire_mode {
+                        FireMode::Single { .. } => true,
+                        FireMode::Automatic { tracer_every, .. } => {
+                            tracer_round(state.rounds_fired, tracer_every)
+                        }
+                    };
                     state.rounds_fired = state.rounds_fired.wrapping_add(1);
                     is_tracer
                 }
@@ -221,10 +282,27 @@ fn fire(
             let impulse = bore * (-weapon.mass * weapon.speed * RECOIL_FEEL);
             forces.apply_linear_impulse_at_point(impulse, muzzle_position);
         }
+        // Arm the fire timer per mechanism. `Single`: the crew-gated reload. `Automatic`: consume
+        // one belt round; a dry belt automatically starts the (crew-gated) belt swap, otherwise
+        // the timer is the plain cyclic interval.
         if let Ok(mut sim) = sims.get_mut(root.0)
             && let Some(state) = sim.weapons.get_mut(slot.0)
         {
-            state.reload_remaining = weapon.reload;
+            match weapon.fire_mode {
+                FireMode::Single { reload_secs } => state.reload_remaining = reload_secs,
+                FireMode::Automatic {
+                    rpm,
+                    belt_swap_secs,
+                    ..
+                } => {
+                    state.belt_remaining = state.belt_remaining.saturating_sub(1);
+                    state.reload_remaining = if state.belt_remaining == 0 {
+                        belt_swap_secs
+                    } else {
+                        60.0 / rpm
+                    };
+                }
+            }
         }
     }
 }
@@ -262,7 +340,182 @@ fn apply_recoil(
 
 #[cfg(test)]
 mod tests {
-    use super::tracer_round;
+    use std::time::Duration;
+
+    use avian3d::prelude::{Position, Rotation};
+    use bevy::ecs::system::RunSystemOnce;
+    use bevy::prelude::*;
+
+    use super::{fire, tick_reload, tracer_round};
+    use crate::command::TankCommand;
+    use crate::damage::{CrewStation, Dead, Group, Part, Requirement, VolumeOf};
+    use crate::spec::{FireMode, Trigger};
+    use crate::tank::{Muzzle, Tank, TankRoot, TankSim, Weapon, WeaponIndex, WeaponState};
+
+    /// The belt-fed test mode: 600 rpm = a 0.1 s cyclic interval, a 2-round belt, a 1 s swap.
+    const MG_MODE: FireMode = FireMode::Automatic {
+        rpm: 600.0,
+        belt_size: 2,
+        belt_swap_secs: 1.0,
+        tracer_every: 5,
+    };
+
+    /// A minimal `Automatic` rig the real `fire`/`tick_reload` systems run over: a tank root
+    /// (command holding the secondary trigger, physics pose, one-slot `TankSim` with a FULL belt),
+    /// a live Loader crew volume (so `TankVolumes` exists and a `[Loader]` gate is meetable), and
+    /// a muzzle child carrying the `Weapon` with the given `load` gate. Returns (root, loader).
+    fn spawn_mg_rig(world: &mut World, load: Requirement) -> (Entity, Entity) {
+        let root = world
+            .spawn((
+                Tank,
+                TankCommand {
+                    fire_secondary: true,
+                    ..default()
+                },
+                Position::default(),
+                Rotation::default(),
+                TankSim {
+                    weapons: vec![WeaponState::for_mode(&MG_MODE)],
+                    ..default()
+                },
+            ))
+            .id();
+        let loader = world.spawn((CrewStation::Loader, VolumeOf(root))).id();
+        world.spawn((
+            Muzzle,
+            WeaponIndex(0),
+            TankRoot(root),
+            Transform::default(),
+            ChildOf(root),
+            Weapon {
+                name: "MG".into(),
+                speed: 755.0,
+                caliber: 0.0079,
+                mass: 0.0118,
+                fire_mode: MG_MODE,
+                recoil: None,
+                barrel: None,
+                fire: Vec::new(),
+                load,
+                trigger: Trigger::Secondary,
+            },
+        ));
+        (root, loader)
+    }
+
+    fn weapon_state(world: &mut World, root: Entity) -> WeaponState {
+        world.get::<TankSim>(root).expect("sim on root").weapons[0]
+    }
+
+    fn advance(world: &mut World, secs: f32) {
+        world
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_secs_f32(secs));
+        world.run_system_once(tick_reload).unwrap();
+    }
+
+    /// The determinism-relevant belt lifecycle, on the real systems: firing walks the belt down,
+    /// a dry belt BLOCKS fire and automatically starts the swap, the swap timer runs it out, the
+    /// belt refills, and fire resumes — all of it in root-resident `TankSim` state (so a rollback
+    /// replay re-derives the identical sequence).
+    #[test]
+    fn belt_runs_dry_swap_completes_fire_resumes() {
+        let mut world = World::new();
+        world.insert_resource(Time::<()>::default());
+        // Ungated swap (`load: []`) — the crew gate has its own test below.
+        let (root, _) = spawn_mg_rig(&mut world, Vec::new());
+
+        // Round 1: belt 2→1, the cyclic interval (60/600 = 0.1 s) arms.
+        world.run_system_once(fire).unwrap();
+        let s = weapon_state(&mut world, root);
+        assert_eq!((s.rounds_fired, s.belt_remaining), (1, 1));
+        assert!(
+            (s.reload_remaining - 0.1).abs() < 1e-6,
+            "cyclic interval armed"
+        );
+
+        // Held trigger inside the cyclic interval: no shot.
+        world.run_system_once(fire).unwrap();
+        assert_eq!(weapon_state(&mut world, root).rounds_fired, 1);
+
+        // Interval elapses; round 2 empties the belt — the swap starts AUTOMATICALLY (timer
+        // becomes belt_swap_secs, not the cyclic interval).
+        advance(&mut world, 0.15);
+        world.run_system_once(fire).unwrap();
+        let s = weapon_state(&mut world, root);
+        assert_eq!((s.rounds_fired, s.belt_remaining), (2, 0));
+        assert_eq!(s.reload_remaining, 1.0, "dry belt arms the swap timer");
+
+        // Dry belt blocks fire mid-swap.
+        world.run_system_once(fire).unwrap();
+        assert_eq!(weapon_state(&mut world, root).rounds_fired, 2);
+
+        // Half the swap: still dry, still blocked.
+        advance(&mut world, 0.5);
+        let s = weapon_state(&mut world, root);
+        assert_eq!(s.belt_remaining, 0);
+        assert!((s.reload_remaining - 0.5).abs() < 1e-6);
+        world.run_system_once(fire).unwrap();
+        assert_eq!(weapon_state(&mut world, root).rounds_fired, 2);
+
+        // Swap completes: the belt refills to belt_size and fire resumes.
+        advance(&mut world, 0.6);
+        let s = weapon_state(&mut world, root);
+        assert_eq!(s.belt_remaining, 2, "completed swap refills the belt");
+        assert_eq!(s.reload_remaining, 0.0);
+        world.run_system_once(fire).unwrap();
+        let s = weapon_state(&mut world, root);
+        assert_eq!((s.rounds_fired, s.belt_remaining), (3, 1));
+    }
+
+    /// The crew-gate split the redesign exists for: the CYCLIC interval ticks with the gun crew
+    /// dead (a dead loader must not freeze an MG's rate of fire — the old single-path trap), but
+    /// the BELT SWAP is crew-gated like the 88's reload: dead crew = frozen swap = no fire, and a
+    /// revived crew resumes and completes it.
+    #[test]
+    fn belt_swap_is_crew_gated_but_cyclic_interval_is_not() {
+        let mut world = World::new();
+        world.insert_resource(Time::<()>::default());
+        let (root, loader) = spawn_mg_rig(&mut world, vec![Group::Single(Part::Loader)]);
+
+        // Kill the loader BEFORE anything fires (`fire: []` stays met — only `load` cares).
+        world.entity_mut(loader).insert(Dead);
+
+        // Round 1 fires, and the cyclic interval ticks out DESPITE the dead loader.
+        world.run_system_once(fire).unwrap();
+        assert_eq!(weapon_state(&mut world, root).belt_remaining, 1);
+        advance(&mut world, 0.15);
+        assert_eq!(
+            weapon_state(&mut world, root).reload_remaining,
+            0.0,
+            "the cyclic interval is mechanism, not crew work — it must tick with the crew dead"
+        );
+
+        // Round 2 empties the belt; the swap arms…
+        world.run_system_once(fire).unwrap();
+        let s = weapon_state(&mut world, root);
+        assert_eq!((s.rounds_fired, s.belt_remaining), (2, 0));
+        assert_eq!(s.reload_remaining, 1.0);
+
+        // …and FREEZES: dead gun crew = no swap, however long we wait, and no fire.
+        for _ in 0..4 {
+            advance(&mut world, 5.0);
+        }
+        let s = weapon_state(&mut world, root);
+        assert_eq!(s.reload_remaining, 1.0, "dead crew freezes the swap timer");
+        assert_eq!(s.belt_remaining, 0, "no refill while the swap is frozen");
+        world.run_system_once(fire).unwrap();
+        assert_eq!(weapon_state(&mut world, root).rounds_fired, 2);
+
+        // Revive the loader (slice-2 backfill shape): the swap resumes, completes, fire returns.
+        world.entity_mut(loader).remove::<Dead>();
+        advance(&mut world, 0.6);
+        advance(&mut world, 0.6);
+        let s = weapon_state(&mut world, root);
+        assert_eq!(s.belt_remaining, 2, "revived crew completes the swap");
+        world.run_system_once(fire).unwrap();
+        assert_eq!(weapon_state(&mut world, root).rounds_fired, 3);
+    }
 
     /// The belt cadence is exact: `tracer_every == 1` traces every round; `5` traces exactly rounds
     /// 0, 5, 10, … (one-in-five, counting the belt from the first round); `0` is a tracerless belt

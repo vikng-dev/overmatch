@@ -13,7 +13,7 @@ use crate::damage::{
     Capability, CrewStation, Crewman, Dead, PendingSwap, TankCapabilities, TankKnockedOut,
     TankVolumes, VolumeFacets, VolumeOf, capability_effectiveness, evaluate, part_qualities,
 };
-use crate::spec::ViewKind;
+use crate::spec::{FireMode, ViewKind};
 use crate::tank::{Controlled, TankRoot, TankSim, TankViews, Weapon, WeaponIndex};
 use crate::ui_font::UiFonts;
 
@@ -140,24 +140,43 @@ fn update_status_panel(
         .get(&ViewKind::Gunner)
         .map_or(0.0, |view| evaluate(&view.requires, &quality));
 
-    // Weapons: name + reload state, flagged `no-fire` when the fire gate is unmet (dead
-    // gunner/loader/breech). Sorted by name so the order is stable frame to frame.
+    // Weapons: name + per-fire-mode state, flagged `no-fire` when the fire gate is unmet (dead
+    // gunner/loader/breech). A `Single` reads as the classic READY / reload countdown; an
+    // `Automatic` shows its belt count, or the swap countdown while the belt is dry. Sorted by
+    // name so the order is stable frame to frame.
     let mut weapon_entries = weapons
         .iter()
         .filter(|(_, _, root)| root.0 == tank)
         .map(|(weapon, slot, root)| {
-            // Reload state is root-resident (`TankSim`), addressed by the weapon's slot.
-            let remaining = sims
+            // Fire-timer/belt state is root-resident (`TankSim`), addressed by the weapon's slot.
+            let state = sims
                 .get(root.0)
                 .ok()
-                .and_then(|sim| sim.weapons.get(slot.0))
-                .map_or(0.0, |w| w.reload_remaining);
-            let status = if remaining > 0.0 {
-                format!("{remaining:.1}s")
-            } else if evaluate(&weapon.fire, &quality) > 0.0 {
-                "READY".to_string()
-            } else {
-                "no-fire".to_string()
+                .and_then(|sim| sim.weapons.get(slot.0).copied())
+                .unwrap_or_default();
+            let remaining = state.reload_remaining;
+            let no_fire = evaluate(&weapon.fire, &quality) <= 0.0;
+            let status = match weapon.fire_mode {
+                FireMode::Single { .. } => {
+                    if remaining > 0.0 {
+                        format!("{remaining:.1}s")
+                    } else if no_fire {
+                        "no-fire".to_string()
+                    } else {
+                        "READY".to_string()
+                    }
+                }
+                FireMode::Automatic { .. } => {
+                    if state.belt_remaining == 0 {
+                        // Dry belt = swap in flight; the timer freezes (and this readout with it)
+                        // while the gun crew can't work the swap.
+                        format!("SWAP {remaining:.1}s")
+                    } else if no_fire {
+                        "no-fire".to_string()
+                    } else {
+                        format!("{} rds", state.belt_remaining)
+                    }
+                }
             };
             (
                 weapon.name.to_string(),

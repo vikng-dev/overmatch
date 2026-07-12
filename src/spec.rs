@@ -56,6 +56,35 @@ pub enum Trigger {
     Secondary,
 }
 
+/// A weapon's fire *mechanism* — single-shot with a per-round reload, or belt-fed automatic. An
+/// enum, not optional fields on `WeaponSpec`, so invalid combos are unrepresentable (ADR-0010/0011):
+/// the 88 cannot author a `tracer_every` it never consults, an MG cannot omit its belt. Extensible
+/// by design — a future overheat model adds fields to `Automatic` (deferred, owner call 2026-07-11).
+#[derive(Deserialize, Clone, Copy, PartialEq, Debug)]
+#[serde(deny_unknown_fields)]
+pub enum FireMode {
+    /// One round per trigger *edge* (the click), then a crew-gated reload of `reload_secs` — the
+    /// 88's mechanism. Every round is its own "belt": the shot always traces (its visual is the
+    /// shell scene, not a streak).
+    Single { reload_secs: f32 },
+    /// Belt-fed cyclic fire on a held trigger *level*. `rpm` sets the cyclic interval (60/rpm s
+    /// between rounds — pure mechanism, NEVER crew-gated: a dead loader does not slow a working
+    /// action). The belt is finite (`belt_size` rounds, tracked as sim state in
+    /// [`crate::tank::WeaponState::belt_remaining`]) over an INFINITE reserve (no stowed-ammo
+    /// inventory — owner call 2026-07-11): running dry automatically starts a belt swap of
+    /// `belt_swap_secs`, and the *swap* is what the weapon's `load` requirement gates, same as the
+    /// 88's reload. `tracer_every` is the belt's composition (real belts are loaded e.g.
+    /// 4-ball-1-tracer), NOT a VFX knob: every `tracer_every`-th round down the belt traces
+    /// (`5` = one-in-five, `0` = a tracerless stealth belt — never traces). The seed of the
+    /// belt-customization feature; a future load-out UI edits these same fields.
+    Automatic {
+        rpm: f32,
+        belt_size: u32,
+        belt_swap_secs: f32,
+        tracer_every: u32,
+    },
+}
+
 /// One weapon's data, keyed by logical name in [`TankSpec::weapons`]. `muzzle` (the bore the shot
 /// leaves from) and the optional recoiling `barrel` are model node names; the weapon's aiming chain
 /// is *not* declared here — it's the muzzle's servo ancestors, derived from the model hierarchy.
@@ -63,6 +92,8 @@ pub enum Trigger {
 #[serde(deny_unknown_fields)]
 pub struct WeaponSpec {
     /// Fire input this weapon answers to. The single `Primary` also marks the rig's main bore.
+    /// Pure input *routing* (which command field the weapon reads) — the fire mechanism, and with
+    /// it the edge-vs-level input semantics, comes from [`Self::fire_mode`].
     pub trigger: Trigger,
     /// Bore node — shot origin + direction.
     pub muzzle: String,
@@ -75,16 +106,9 @@ pub struct WeaponSpec {
     pub caliber: f32,
     /// Projectile mass (kg) — primary driver of penetration capability.
     pub mass: f32,
-    /// Reload cooldown before the weapon can fire again (s).
-    pub reload: f32,
-    /// **Belt composition** — the tracer cadence, authored as ammunition data (real belts are loaded
-    /// e.g. 4-ball-1-tracer), NOT a VFX knob. Every `tracer_every`-th round down the belt is a tracer:
-    /// `1` = every round is a tracer (the 88's single-round "belt"), `5` = one-in-five (the 7.9 mm MG
-    /// belts). `0` = a tracerless belt (a future stealth belt) — no round ever traces. This is the
-    /// seed of the belt-customization feature; a future load-out UI edits the same field. Required (no
-    /// code default, ADR-0011): a belt with unstated tracer content is an authoring omission, not a
-    /// guessable default. The counter that walks the belt is sim state ([`crate::tank::WeaponState`]).
-    pub tracer_every: u32,
+    /// The fire mechanism: single-shot reload or belt-fed automatic. Required (no code default,
+    /// ADR-0011) — a weapon with an unstated mechanism is an authoring omission.
+    pub fire_mode: FireMode,
     /// Recoil spring, present iff `barrel` is. Authored alongside it.
     #[serde(default)]
     pub recoil: Option<RecoilSpec>,
@@ -259,10 +283,21 @@ mod tests {
             Some("Main_Gun_Recoil")
         );
         assert_eq!(spec.weapons["MainGun"].speed, 773.0);
-        // Belt data: the 88 traces every round (single-round belt); the MG belts are one-in-five.
-        assert_eq!(spec.weapons["MainGun"].tracer_every, 1);
-        assert_eq!(spec.weapons["Coax"].tracer_every, 5);
-        assert_eq!(spec.weapons["HullMG"].tracer_every, 5);
+        // Fire mechanisms: the 88 is single-shot with a crew-gated reload (and authors NO belt
+        // fields — the enum makes that combo unrepresentable); the MGs are belt-fed automatics
+        // with a one-in-five tracer belt.
+        assert_eq!(
+            spec.weapons["MainGun"].fire_mode,
+            FireMode::Single { reload_secs: 3.0 }
+        );
+        let mg_mode = FireMode::Automatic {
+            rpm: 750.0,
+            belt_size: 150,
+            belt_swap_secs: 3.5,
+            tracer_every: 5,
+        };
+        assert_eq!(spec.weapons["Coax"].fire_mode, mg_mode);
+        assert_eq!(spec.weapons["HullMG"].fire_mode, mg_mode);
         // Volumes: a steel-grade *module* (barrel) and a pure-armour plate (no hp) exercise the
         // composition facet — material decoupled from role.
         assert_eq!(spec.volumes["Gun_Barrel_Ballistic"].material_factor, 1000.0);

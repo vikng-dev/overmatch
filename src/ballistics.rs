@@ -319,8 +319,9 @@ pub struct FireShell {
     /// shot whose source is known is attributed to the right replicated tank and weapon slot; `None`
     /// shots (sandbox) simply never broadcast.
     pub shooter: Option<ShotSource>,
-    /// Whether THIS round is a tracer (a per-belt cadence decided at fire time from the weapon's belt
-    /// counter — see [`crate::spec::WeaponSpec::tracer_every`]). Governs only the ATTACHED VISUAL, not
+    /// Whether THIS round is a tracer (decided at fire time from the weapon's [`crate::spec::
+    /// FireMode`]: a `Single`'s round always traces; an `Automatic`'s belt cadence — `tracer_every`
+    /// against the belt counter — picks). Governs only the ATTACHED VISUAL, not
     /// the flight or the raycast: an MG tracer round gets the emissive streak, a non-tracer MG round
     /// gets NO visual entity (it still flies + raycasts invisibly), and the main gun keeps its shell
     /// scene regardless (`on_fire_shell`). Rides FireShell (and its net twin [`crate::net::protocol::

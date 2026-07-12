@@ -76,11 +76,16 @@ TankSpec(
         "Ammo_R_1_Ballistic":              (material_factor:  200.0, hp: 2.0, ammo: true),
     },
     weapons: {
+        // fire_mode is the mechanism: the 88 is Single (one round per click, crew-gated reload —
+        // and no belt fields to author); the 7.9 mm MGs are Automatic (held trigger, 750 rpm =
+        // the 0.08 s cyclic interval, a 150-round belt drum over an infinite reserve, ~3.5 s
+        // crew-gated belt swap when dry, one-in-five tracer belt).
         "MainGun": (
             trigger: Primary,
             muzzle: "Main_Gun_Muzzle",
             barrel: "Main_Gun_Recoil",
-            speed: 773.0, caliber: 0.088, mass: 10.2, reload: 3.0, tracer_every: 1,
+            speed: 773.0, caliber: 0.088, mass: 10.2,
+            fire_mode: Single(reload_secs: 3.0),
             recoil: (kick: 14.0, stiffness: 90.0, damping: 14.0),
             fire: [Gunner, Breech, GunBarrel],
             load: [Loader, Breech],
@@ -89,7 +94,8 @@ TankSpec(
             trigger: Secondary,
             muzzle: "Coax_MG_Muzzle",
             barrel: "Coax_MG_Recoil",
-            speed: 755.0, caliber: 0.0079, mass: 0.0118, reload: 0.08, tracer_every: 5,
+            speed: 755.0, caliber: 0.0079, mass: 0.0118,
+            fire_mode: Automatic(rpm: 750.0, belt_size: 150, belt_swap_secs: 3.5, tracer_every: 5),
             recoil: (kick: 3.0, stiffness: 240.0, damping: 18.0),
             fire: [Backup([(1.0, [Gunner]), (1.0, [Loader])])],
         ),
@@ -97,7 +103,8 @@ TankSpec(
             trigger: Secondary,
             muzzle: "Hull_MG_Muzzle",
             barrel: "Hull_MG_Recoil",
-            speed: 755.0, caliber: 0.0079, mass: 0.0118, reload: 0.08, tracer_every: 5,
+            speed: 755.0, caliber: 0.0079, mass: 0.0118,
+            fire_mode: Automatic(rpm: 750.0, belt_size: 150, belt_swap_secs: 3.5, tracer_every: 5),
             recoil: (kick: 3.0, stiffness: 240.0, damping: 18.0),
             fire: [BowGunner],
         ),
