@@ -16,7 +16,7 @@ use bevy::prelude::*;
 
 use crate::damage::{VolumeOf, hit_ancestor};
 use crate::state::GameplaySet;
-use crate::{ClientReplica, Layer};
+use crate::{ClientReplica, Layer, ShotId};
 
 /// Gravity applied to shells each fixed tick (m/s²).
 const GRAVITY: Vec3 = Vec3::new(0.0, -9.81, 0.0);
@@ -292,12 +292,158 @@ fn march_demo(mode: Res<MarchMode>) -> bool {
 /// attributed shot always knows which weapon fired it, so the recoil kick lands on the right barrel.
 /// The slot is the weapon's `TankSim::weapons` index (its `WeaponIndex`). Read by `net::server` to
 /// attribute the shot on the wire.
-#[derive(Clone, Copy)]
+///
+/// Also a `Component`: `on_fire_shell` attaches it to the spawned shell whenever the shot was
+/// attributed, so the authority (`net::server`) can complete the shell's [`ShotId`] with the fire
+/// tick (the one part the sim layer cannot know — the tick lives in lightyear's timeline). See
+/// [`Shot`] for the two-step stamping.
+#[derive(Clone, Copy, Component)]
 pub struct ShotSource {
     /// The tank root the shell was fired from.
     pub tank: Entity,
     /// The firing weapon's slot in `TankSim::weapons` — its spawn-time `WeaponIndex`.
     pub weapon: usize,
+}
+
+/// A cosmetic shell's network identity ([`ShotId`]) — the correlation spine both ends stamp so a
+/// server-sanctioned [`ShellRicochet`]/`RicochetKeyframe` re-seeds exactly the shell it belongs to.
+///
+/// Stamped only where a shot has a network identity, and by DIFFERENT paths on the two ends (the sim
+/// layer cannot read the fire tick — it lives in the netcode timeline):
+///   * **Observer** (a replica watching another tank): `net::client` fills [`FireShell::shot`] from the
+///     wire and `on_fire_shell` attaches it here. These shells are keyframe-eligible: the march holds
+///     them at armor contact for their sanctioned bounce (see [`integrate_projectiles`]).
+///   * **Authority** (server): `on_fire_shell` leaves `FireShell::shot` `None` (no tick in the sim), so
+///     the server stamps this AFTER spawn from the shell's [`ShotSource`] + its timeline tick.
+///   * **The owner's OWN predicted shell and every SP/sandbox shell** carry NO `Shot`: no keyframe will
+///     ever arrive for them, so the march fail-closes them at armor contact immediately (the pre-slice
+///     behaviour), never holding.
+#[derive(Component, Clone, Copy)]
+pub(crate) struct Shot(pub ShotId);
+
+/// A replica shell FROZEN at armor contact, waiting the grace window for its server-sanctioned bounce
+/// keyframe. `ticks` counts the fixed ticks it has been held — which equals how far the predicted
+/// present advanced past the bounce (the shell reaches contact when its present ≈ the server bounce
+/// tick), so it is exactly the catch-up the re-seed fast-forwards to bring the resumed shell back to
+/// the present timeline (see the re-seed in [`integrate_projectiles`]). Only ever on the observer path.
+#[derive(Component)]
+struct Held {
+    ticks: u32,
+    /// The surface normal at the contact where the shell froze (the observer's own raycast against the
+    /// interpolated pose) — used to orient the eventual bounce spark on re-seed, or the neutral spark
+    /// if the wait times out. Saved because the top-of-loop `Held` handler has no raycast of its own.
+    normal: Vec3,
+}
+
+/// The largest catch-up an on-fire-shell / re-seed hold may span before the shell is finalized —
+/// ~250 ms at 64 Hz. Justified as the HOLD grace window: it must cover the observer's interpolation
+/// delay (100 ms, `net::client`) plus keyframe send jitter and a redundancy resend interval (fire
+/// bursts are ~80 ms apart at 12.5 rounds/s), yet stay short enough that a genuinely DROPPED keyframe
+/// truncates the trail within a few frames rather than freezing the round visibly. Correctness never
+/// depends on the keyframe arriving inside it — past it the shell degrades to honest fail-closed
+/// truncation (the pre-slice behaviour).
+const RICOCHET_HOLD_TICKS: u32 = 16;
+
+/// One server-sanctioned ricochet, delivered to the observer's ballistics march so a replica shell
+/// re-seeds from truth instead of improvising a bounce against interpolated geometry. Net-neutral (no
+/// lightyear types) so `ballistics` can consume it without naming the netcode; `net::client` fills the
+/// store from the replicated `RicochetKeyframe`, the march drains it.
+#[derive(Clone, Copy)]
+pub(crate) struct SanctionedBounce {
+    /// The exact server bounce point — where the re-seeded shell restarts.
+    pub origin: Vec3,
+    /// The post-bounce travel direction (unit; the observer guards it before use).
+    pub direction: Vec3,
+    /// The post-bounce speed (m/s).
+    pub speed: f32,
+    /// This bounce's 0-based ordinal within the shot — consumed strictly in order (`0`, then `1`, …),
+    /// so multiple ricochets on one shell re-seed in the sequence the server resolved them.
+    pub sequence: u32,
+}
+
+/// Per-shot ordered bounces plus an age for expiry.
+struct ShotBounces {
+    bounces: Vec<SanctionedBounce>,
+    /// Seconds since last touched — evicted once it outlives any shell that could still consume it.
+    age: f32,
+}
+
+/// The observer's bounded buffer of server-sanctioned bounces, keyed by [`ShotId`] (the shot both ends
+/// agree on). Defined here because the ballistics march CONSUMES it (the re-seed), but populated and
+/// aged by `net::client` (which owns the wire). Follows the codebase's ring discipline: entries expire
+/// with the shell that could consume them and the shot count is capped, so a long match never grows it
+/// unbounded. Present only on a net client; SP/sandbox/server never insert it (the march reads it as
+/// an `Option`), and the authority march never consults it anyway (it resolves bounces for real).
+#[derive(Resource, Default)]
+pub(crate) struct SanctionedBounces {
+    shots: std::collections::HashMap<ShotId, ShotBounces>,
+}
+
+impl SanctionedBounces {
+    /// Longest a shot's bounces linger unconsumed before eviction — comfortably past a shell's flight
+    /// (a ~1.25 km round at 800 m/s ≈ 1.5 s) so a valid keyframe is never evicted before its shell
+    /// reaches it, but bounded so a lost/never-consumed keyframe does not leak.
+    const MAX_AGE_SECS: f32 = 3.0;
+    /// Hard cap on tracked shots — a backstop against pathological churn; a 1v1 duel never approaches it.
+    const MAX_SHOTS: usize = 64;
+
+    /// Record a server-sanctioned bounce, idempotently by `(shot, sequence)` — a redundantly
+    /// retransmitted keyframe is a no-op, never a duplicate bounce. Evicts the oldest shot if inserting
+    /// a NEW shot would exceed the cap.
+    pub(crate) fn insert(&mut self, shot: ShotId, bounce: SanctionedBounce) {
+        let entry = self.shots.entry(shot).or_insert_with(|| ShotBounces {
+            bounces: Vec::new(),
+            age: 0.0,
+        });
+        entry.age = 0.0;
+        if !entry.bounces.iter().any(|b| b.sequence == bounce.sequence) {
+            entry.bounces.push(bounce);
+        }
+        if self.shots.len() > Self::MAX_SHOTS {
+            // Evict the single oldest shot (age is monotic between touches) — a backstop only.
+            if let Some(oldest) = self
+                .shots
+                .iter()
+                .max_by(|a, b| a.1.age.total_cmp(&b.1.age))
+                .map(|(k, _)| *k)
+            {
+                self.shots.remove(&oldest);
+            }
+        }
+    }
+
+    /// The shot's next-to-consume bounce (ordinal `consumed`), if it has arrived. `consumed` is how
+    /// many bounces this shell has already re-seeded through (its `PenetrationMarks::ricochets` count).
+    fn next(&self, shot: ShotId, consumed: usize) -> Option<SanctionedBounce> {
+        self.shots
+            .get(&shot)
+            .and_then(|e| e.bounces.iter().find(|b| b.sequence as usize == consumed))
+            .copied()
+    }
+
+    /// Age every tracked shot and evict those past [`Self::MAX_AGE_SECS`]. Driven by `net::client`.
+    pub(crate) fn age(&mut self, dt: f32) {
+        for entry in self.shots.values_mut() {
+            entry.age += dt;
+        }
+        self.shots.retain(|_, e| e.age <= Self::MAX_AGE_SECS);
+    }
+}
+
+/// The authority resolved a ricochet — the sim-layer seam `net::server` turns into a server-sanctioned
+/// `RicochetKeyframe` broadcast (ADR-0016: replicate the cause). Carries the post-bounce state an
+/// observer needs to re-seed from truth, keyed by the shell's [`ShotId`] so it correlates to the right
+/// cosmetic shell on every observer, plus the bounce ordinal so multiple ricochets stay ordered. Only
+/// raised for a shell that carries a [`Shot`] (net-attributed) on the authority; SP/sandbox shells have
+/// no `Shot`, so they raise none and there is no observer to listen anyway. Local, never replicated —
+/// `net::server` maps it onto the wire.
+#[derive(Event)]
+pub(crate) struct ShellRicochet {
+    pub shot: ShotId,
+    pub origin: Vec3,
+    pub direction: Vec3,
+    pub speed: f32,
+    pub sequence: u32,
 }
 
 /// Fire a shell — the trigger-agnostic seam. The player's gun and the sandbox camera both raise
@@ -334,6 +480,14 @@ pub struct FireShell {
     /// so the field is a no-op off the net path. Only `net::client::receive_fire_events` sets it > 0,
     /// to place a remote shot where it already is in the server's confirmed timeline.
     pub catch_up_ticks: u32,
+    /// The shot's network identity ([`ShotId`]) when this shell is a keyframe-eligible OBSERVER shell:
+    /// `Some` only on the path that re-raises a remote tank's shot (`net::client::receive_fire_events`,
+    /// which builds it from the wire, tick included). `None` everywhere else — a locally-fired shell
+    /// (the player's own gun, on the client too), the authority's own server shell (which the server
+    /// stamps AFTER spawn from [`ShotSource`] + its timeline tick, since the sim cannot read the tick),
+    /// and every SP/sandbox shell. `on_fire_shell` attaches [`Shot`] from this when it is `Some`, which
+    /// is what makes a shell hold at armor contact for its bounce keyframe instead of fail-closing.
+    pub shot: Option<ShotId>,
 }
 
 /// A shell in flight. Kinematic — integrated by hand, no physics engine.
@@ -736,6 +890,19 @@ fn on_fire_shell(
         Transform::from_translation(position).looking_to(travel, Vec3::Y),
     ));
 
+    // Network identity, when the shot has one. An OBSERVER shell carries its wire [`Shot`]
+    // (keyframe-eligible — it re-seeds at armor contact); any attributed shell carries its
+    // [`ShotSource`] so the authority can complete the `Shot` after spawn from the fire tick
+    // (`net::server::stamp_shot_ids`). Inserted here (not the spawn tuple, which is already at the
+    // bundle-arity ceiling) — flushed with the spawn, and the shell is never marched until a later
+    // schedule point, so it never runs the march without these.
+    if let Some(shot) = fire.shot {
+        shell.insert(Shot(shot));
+    }
+    if let Some(source) = fire.shooter {
+        shell.insert(source);
+    }
+
     // Visual policy (interim — a per-weapon visual style would supersede the caliber split):
     //   * Main-gun-calibre round (the 88): keep the `shell.glb` scene. Its own glow/trail dressing is
     //     a separate upcoming slice; the tracer flag doesn't drive its look yet.
@@ -778,6 +945,10 @@ fn integrate_projectiles(
         &mut PenetrationMarks,
         &mut ShellReadout,
         &mut SpallMarks,
+        // OBSERVER-only, both `Option`: `Shot` is the shell's network identity (keyframe-eligible when
+        // present), `Held` marks a shell frozen at armor waiting for its sanctioned bounce keyframe.
+        Option<&Shot>,
+        Option<&mut Held>,
     )>,
     volumes: Query<&BallisticVolume>,
     owners: Query<&VolumeOf>,
@@ -787,6 +958,10 @@ fn integrate_projectiles(
     // Present only on the net client (a replica): shells still fly, raycast, spark, and despawn, but
     // HP deposition and hit impulse are the server's authority. Absent in SP / sandbox / server.
     replica: Option<Res<ClientReplica>>,
+    // The observer's server-sanctioned bounce buffer (`net::client` fills it). Present only on a net
+    // client; absent in SP/sandbox/server, where the authority march resolves bounces for real and
+    // never consults it. An observer shell at armor contact re-seeds from here or holds for it.
+    sanctioned: Option<Res<SanctionedBounces>>,
     // EXPERIMENTAL cost-attribution A/B lever (`SPIKE_MG_SHORTCIRCUIT`, default off — see the type).
     shortcircuit: Res<MgShortCircuit>,
     // Sim-cost recorder attribution sink (`SPIKE_COST_TRACE`): absent unless the recorder is armed, so
@@ -837,9 +1012,82 @@ fn integrate_projectiles(
     // Main-penetrator transit damage = cost paid crossing the component × this (design §6).
     const TRANSIT_K: f32 = 1.0;
 
-    for (entity, mut transform, mut projectile, mut path, mut marks, mut readout, mut spall) in
-        &mut projectiles
+    for (
+        entity,
+        mut transform,
+        mut projectile,
+        mut path,
+        mut marks,
+        mut readout,
+        mut spall,
+        shot,
+        held,
+    ) in &mut projectiles
     {
+        // OBSERVER HOLD (net client only): a replica shell frozen at armor contact, waiting the grace
+        // window for its server-sanctioned bounce keyframe. It does NOT free-flight while held — it
+        // either re-seeds from the now-arrived bounce or, past the window, degrades to honest
+        // fail-closed truncation. The authority never holds (it resolves bounces for real), and a
+        // shell with no `Shot` never enters this state (it fail-closes on first contact below).
+        if let Some(mut held) = held {
+            // The bounce we are waiting on (the next unconsumed ordinal for this shot), if it arrived.
+            let arrived = shot
+                .zip(sanctioned.as_ref())
+                .and_then(|(s, buf)| buf.next(s.0, marks.ricochets.len()));
+            if let Some(bounce) = arrived {
+                // RE-SEED (late arrival). Fast-forward the sanctioned post-bounce state by the ticks we
+                // held: the shell reached contact when its predicted present ≈ the server bounce tick,
+                // and the present advanced one tick per held tick, so `held.ticks` IS present − bounce
+                // tick — the exact catch-up that puts the resumed shell back at the present timeline
+                // (the same integrator the initial `fire_tick` catch-up uses; ADR). The returned arc
+                // feeds `ShellPath` so the trail runs seamlessly through the bounce; the bounce point
+                // re-anchors the tracer clamp (`marks.ricochets`); the ember rides the same entity.
+                let seed_vel = Dir3::new(bounce.direction)
+                    .map_or(projectile.velocity, |d| Vec3::from(d) * bounce.speed);
+                let (pos, vel, arc) =
+                    fast_forward_shell(bounce.origin, seed_vel, projectile.drag_k, dt, held.ticks);
+                for point in arc {
+                    path.points.push(point);
+                }
+                marks.ricochets.push(bounce.origin);
+                // The bounce now reads on the observer with its TRUE (server-sanctioned) directional
+                // spark fan, biased along the deflected travel — the same read the authority showed.
+                commands.trigger(Impact {
+                    position: bounce.origin,
+                    normal: held.normal,
+                    caliber: projectile.caliber,
+                    surface: ImpactSurface::Armor,
+                    penetrated: false,
+                    deflection: Some(bounce.direction),
+                });
+                transform.translation = pos;
+                if let Ok(d) = Dir3::new(vel) {
+                    transform.look_to(d, Vec3::Y);
+                }
+                projectile.velocity = vel;
+                readout.speed = vel.length();
+                readout.capability = capability(projectile.mass, vel.length());
+                commands.entity(entity).remove::<Held>();
+                continue;
+            }
+            // Still waiting. Past the grace window, finalize as today's fail-closed truncation — a
+            // dropped keyframe must never leave a round frozen forever, and correctness never depends
+            // on delivery. Otherwise stay frozen this tick (no advance, no impact yet).
+            held.ticks += 1;
+            if held.ticks > RICOCHET_HOLD_TICKS {
+                commands.trigger(Impact {
+                    position: transform.translation,
+                    normal: held.normal,
+                    caliber: projectile.caliber,
+                    surface: ImpactSurface::Armor,
+                    penetrated: false,
+                    deflection: None,
+                });
+                commands.entity(entity).despawn();
+            }
+            continue;
+        }
+
         // Advance free-flight (gravity + drag on the velocity, then the position step) through the
         // shared per-tick kernel — the SAME [`advance_shell`] the FireEvent catch-up folds, so a
         // caught-up shell and a natively-flown one can't diverge. `freeflight_pos` is this tick's
@@ -859,6 +1107,10 @@ fn integrate_projectiles(
         let mut pos = transform.translation;
         let mut remaining = speed * dt;
         let mut stopped = false;
+        // Set when an observer shell freezes at armor contact to await its bounce keyframe (see the
+        // `!deposit` branch): the shell keeps its entity and velocity, and the `Held` handler above
+        // drives the wait on subsequent ticks — distinct from `stopped` (which despawns).
+        let mut holding = false;
         // Whether the march has bent the shell off its original free-flight segment. Until it does,
         // an open-air fly-out lands exactly on `freeflight_pos` (the shared advance); after a bend the
         // leftover budget flies along the new direction instead.
@@ -929,23 +1181,70 @@ fn integrate_projectiles(
                 break;
             };
 
-            // FAIL-CLOSED (net client only — `!deposit`, i.e. `ClientReplica` present): an observer
-            // must NEVER re-simulate an authoritative armor collision against the non-authoritative
-            // (interpolated, ~100 ms stale) tank pose it renders. A round's real fate at a plate —
-            // ricochet, perforate, or embed — is the server's to decide and arrives as replicated
-            // state (`NetHealth`/`NetCrew`), not as anything this shell can derive locally. Deterministic
-            // local flight is honest only UP TO the first surface; past it the client would improvise a
-            // deflection/perforation the server never sanctioned, and the cosmetic shell would fly off
-            // (or stop) somewhere the authoritative round did not — the "post-ricochet round wanders /
-            // the trail is lost" divergence owners reported. So the cosmetic shell STOPS dead at first
-            // armor contact with a neutral spark (no bounce fan, no flame lick — the client cannot know
-            // which it was), and its smoke trail ends there and dissolves. Terrain already stops BOTH
-            // ends identically (static, pose-independent geometry), so only this pose-dependent armor
-            // contact needs the guard. The server/SP/sandbox (authority, `deposit == true`) run the full
-            // resolution below unchanged. (An HONEST post-bounce keyframe — the server replicating the
-            // deflected origin/direction so the observer re-seeds its shell from truth — is a wire change,
-            // deferred to the orchestrator's decision.)
+            // OBSERVER ARMOR CONTACT (net client only — `!deposit`, i.e. `ClientReplica` present). An
+            // observer must NEVER re-simulate an authoritative armor collision against the
+            // non-authoritative (interpolated, ~100 ms stale) tank pose it renders — a round's real fate
+            // at a plate (ricochet, perforate, embed) is the server's to decide. Deterministic local
+            // flight is honest only UP TO the first surface; past it the client would improvise a
+            // deflection the server never sanctioned and the cosmetic shell would wander off where the
+            // authoritative round did not ("post-ricochet round wanders / trail is lost"). Three cases,
+            // in order of the common path:
+            //   1. The server ALREADY sanctioned this shot's next bounce → RE-SEED from truth and keep
+            //      marching the leftover budget (the exact shape of the authority ricochet branch below,
+            //      so the trail and tracer clamp continue through the bounce identically). This is the
+            //      common case — the keyframe is emitted at server-bounce time while this shell flies a
+            //      delayed timeline, so it usually arrives BEFORE contact. Allocation-free and obvious.
+            //   2. No bounce yet, but this shell HAS a network identity → HOLD: freeze at contact, no
+            //      impact VFX yet, and wait the grace window (the `Held` handler at the top of the loop
+            //      re-seeds when the keyframe lands, or fail-closes past the window).
+            //   3. No `Shot` at all (the owner's OWN cosmetic shell, which no keyframe ever addresses, or
+            //      a non-net authority-less shell) → FAIL CLOSED immediately, exactly as before this
+            //      slice: stop dead with a neutral armor spark (no bounce fan, no flame lick — the client
+            //      cannot know the outcome), trail ends there.
+            // Terrain already stops BOTH ends identically (static, pose-independent geometry), so only
+            // this pose-dependent armor contact needs the guard. The authority (`deposit == true`) runs
+            // the full resolution below unchanged. Correctness NEVER depends on keyframe delivery: a
+            // dropped keyframe degrades case 2 to the case-3 truncation.
             if !deposit {
+                let next_bounce = shot
+                    .zip(sanctioned.as_ref())
+                    .and_then(|(s, buf)| buf.next(s.0, marks.ricochets.len()));
+                if let Some(bounce) = next_bounce {
+                    // 1. PRE-ARMED re-seed onto server truth; keep marching the leftover budget. The
+                    //    bounce reads with its TRUE directional spark (biased along the deflected
+                    //    travel) — the observer now knows the sanctioned outcome, so this is the real
+                    //    ricochet fan, not the neutral fail-closed spark.
+                    commands.trigger(Impact {
+                        position: bounce.origin,
+                        normal: hit.normal,
+                        caliber: projectile.caliber,
+                        surface: ImpactSurface::Armor,
+                        penetrated: false,
+                        deflection: Some(bounce.direction),
+                    });
+                    if let Ok(new_dir) = Dir3::new(bounce.direction) {
+                        dir = new_dir;
+                    }
+                    speed = bounce.speed;
+                    pos = bounce.origin;
+                    bent = true;
+                    path.points.push(bounce.origin);
+                    marks.ricochets.push(bounce.origin);
+                    remaining -= travelled;
+                    continue;
+                }
+                if shot.is_some() {
+                    // 2. HOLD for the keyframe (no impact yet); the `Held` handler drives the wait,
+                    //    keeping the contact normal for the eventual bounce / neutral spark.
+                    commands.entity(entity).insert(Held {
+                        ticks: 0,
+                        normal: hit.normal,
+                    });
+                    pos = entry;
+                    holding = true;
+                    break;
+                }
+                // 3. No identity — fail closed immediately (pre-slice behaviour).
                 commands.trigger(Impact {
                     position: entry,
                     normal: hit.normal,
@@ -1018,6 +1317,24 @@ fn integrate_projectiles(
                 });
                 marks.ricochets.push(entry);
                 path.points.push(entry);
+                // AUTHORITY → OBSERVER: replicate this sanctioned bounce as the cause (ADR-0016) so
+                // every observer re-seeds its cosmetic shell from truth rather than improvising. Only
+                // for a net-attributed shell (`Shot` present, stamped by `net::server`); SP/sandbox
+                // shells carry none and raise nothing. `dir`/`speed` are already post-reflect/bleed
+                // (the outgoing state); `entry` is the bounce point. `net::server` observes this and
+                // stamps the bounce tick from its timeline. The ordinal is this ricochet's 0-based
+                // index — the SAME count an observer shell derives from its own `ricochets` — so
+                // multi-bounce shots re-seed in order. (Only reachable on the authority: the observer
+                // `!deposit` branch above already broke before here.)
+                if let Some(shot) = shot {
+                    commands.trigger(ShellRicochet {
+                        shot: shot.0,
+                        origin: entry,
+                        direction: Vec3::from(dir),
+                        speed,
+                        sequence: (marks.ricochets.len() - 1) as u32,
+                    });
+                }
                 pos = entry;
                 remaining -= travelled;
                 continue;
@@ -1163,7 +1480,11 @@ fn integrate_projectiles(
         transform.look_to(dir, Vec3::Y);
         path.points.push(pos);
 
-        if stopped {
+        if holding {
+            // Frozen at armor awaiting the bounce keyframe: keep the entity and its velocity untouched
+            // (the `Held` handler at the top of the loop drives the wait next tick). The freeze point
+            // was just recorded once, so the trail ends cleanly at the plate while the shell holds.
+        } else if stopped {
             if retain.0 {
                 // Sandbox: freeze where it stopped — drop the live components so it is no longer
                 // integrated or labelled, but keep the stuck shell, its path, and its penetration
@@ -1523,6 +1844,7 @@ mod march_tests {
             shooter: None,
             tracer: true,
             catch_up_ticks,
+            shot: None,
         });
         app.world_mut().flush();
         app.world().resource::<ImpactLog>().0.clone()
@@ -1620,5 +1942,357 @@ mod march_tests {
         let hits = fire_and_capture(&mut app, Vec3::new(0.0, 2.0, 2.0), Vec3::NEG_Z, 800.0);
         assert_eq!(hits.len(), 1, "one perforation impact");
         assert!(hits[0].penetrated, "authority perforates (flame lick)");
+    }
+
+    // --- Keyframe carry-through (piece 2) ------------------------------------------------------------
+
+    /// The fields of a `ShellRicochet` the authority raised — the server-sanctioned bounce.
+    #[derive(Clone, Copy)]
+    struct CapturedBounce {
+        origin: Vec3,
+        direction: Vec3,
+        speed: f32,
+        sequence: u32,
+    }
+
+    #[derive(Resource, Default)]
+    struct RicochetLog(Vec<CapturedBounce>);
+
+    fn capture_ricochet(ricochet: On<ShellRicochet>, mut log: ResMut<RicochetLog>) {
+        log.0.push(CapturedBounce {
+            origin: ricochet.origin,
+            direction: ricochet.direction,
+            speed: ricochet.speed,
+            sequence: ricochet.sequence,
+        });
+    }
+
+    /// The oblique-ricochet geometry (the same steep graze the existing ricochet test uses), started at
+    /// the standard point and carrying `shot` so the authority march raises a `ShellRicochet`.
+    fn spawn_oblique_shell(app: &mut App, shot: ShotId) -> Entity {
+        let origin = Vec3::new(-1.0, 2.0, 0.6);
+        let dir = Vec3::new(
+            75.0_f32.to_radians().sin(),
+            0.0,
+            -75.0_f32.to_radians().cos(),
+        )
+        .normalize();
+        let speed = 800.0;
+        app.world_mut()
+            .spawn((
+                Projectile {
+                    velocity: dir * speed,
+                    caliber: 0.088,
+                    mass: 10.2,
+                    drag_k: drag_k(0.088, 10.2),
+                },
+                ShellPath {
+                    points: vec![origin],
+                },
+                PenetrationMarks::default(),
+                SpallMarks::default(),
+                ShellReadout {
+                    speed,
+                    capability: capability(10.2, speed),
+                },
+                Transform::from_translation(origin).looking_to(dir, Vec3::Y),
+                Shot(shot),
+            ))
+            .id()
+    }
+
+    /// Run the AUTHORITY (no `ClientReplica`) oblique ricochet and return the sanctioned bounce it
+    /// raises — the server truth an observer must re-seed from.
+    fn authority_bounce(shot: ShotId) -> CapturedBounce {
+        let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.10), Vec3::new(0.0, 2.0, 0.0));
+        app.init_resource::<RicochetLog>();
+        app.add_observer(capture_ricochet);
+        spawn_oblique_shell(&mut app, shot);
+        for _ in 0..8 {
+            app.update();
+            if !app.world().resource::<RicochetLog>().0.is_empty() {
+                break;
+            }
+        }
+        *app.world()
+            .resource::<RicochetLog>()
+            .0
+            .first()
+            .expect("the authority raised a ShellRicochet for the oblique shot")
+    }
+
+    fn a_shot() -> ShotId {
+        ShotId {
+            shooter: Entity::PLACEHOLDER,
+            weapon: 0,
+            fire_tick: 100,
+        }
+    }
+
+    /// A replica world (`ClientReplica` + a `SanctionedBounces` buffer + the plate) ready to march an
+    /// observer shell.
+    fn replica_world(bounces: SanctionedBounces) -> App {
+        let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.10), Vec3::new(0.0, 2.0, 0.0));
+        app.insert_resource(crate::ClientReplica);
+        app.insert_resource(bounces);
+        app
+    }
+
+    /// CARRY-THROUGH (pre-armed, the common case). The keyframe is already buffered when the observer
+    /// shell reaches armor contact: it re-seeds onto server truth and CONTINUES — the trail runs through
+    /// the exact bounce point (no gap), the post-bounce direction matches the server's within
+    /// integration tolerance, one directional (sanctioned) spark reads, and the shell survives.
+    #[test]
+    fn observer_reseeds_from_prearmed_keyframe_and_continues() {
+        let shot = a_shot();
+        let bounce = authority_bounce(shot);
+        assert_eq!(bounce.sequence, 0, "the first bounce is ordinal 0");
+
+        let mut buf = SanctionedBounces::default();
+        buf.insert(
+            shot,
+            SanctionedBounce {
+                origin: bounce.origin,
+                direction: bounce.direction,
+                speed: bounce.speed,
+                sequence: 0,
+            },
+        );
+        let mut app = replica_world(buf);
+        let shell = spawn_oblique_shell(&mut app, shot);
+
+        // March until the shell re-seeds (a ricochet recorded) or the bound trips.
+        for _ in 0..8 {
+            app.update();
+            if !app
+                .world()
+                .get::<PenetrationMarks>(shell)
+                .unwrap()
+                .ricochets
+                .is_empty()
+            {
+                break;
+            }
+        }
+
+        let marks = app.world().get::<PenetrationMarks>(shell).unwrap();
+        assert_eq!(marks.ricochets.len(), 1, "exactly one re-seed");
+        assert!(
+            marks.ricochets[0].distance(bounce.origin) < 1.0e-3,
+            "re-seeded at the exact server bounce point (tracer clamp re-anchors here)",
+        );
+        let path = app.world().get::<ShellPath>(shell).unwrap();
+        assert!(
+            path.points
+                .iter()
+                .any(|p| p.distance(bounce.origin) < 1.0e-3),
+            "the trail runs THROUGH the bounce point — no gap in the ribbon",
+        );
+        let velocity = app.world().get::<Projectile>(shell).unwrap().velocity;
+        let angle = velocity
+            .normalize()
+            .angle_between(bounce.direction.normalize());
+        assert!(
+            angle < 0.05,
+            "post-bounce direction matches server truth within integration tolerance (got {angle} rad)",
+        );
+        assert!(
+            velocity.z > 0.0,
+            "the shell deflects back off the +Z face and flies on — the server's outcome",
+        );
+        assert!(
+            app.world().get::<Projectile>(shell).is_some(),
+            "the shell survives the bounce (it continues, it does not truncate)",
+        );
+        let impacts = app.world().resource::<ImpactLog>().0.clone();
+        assert_eq!(impacts.len(), 1, "one bounce spark");
+        assert!(
+            impacts[0].deflection.is_some(),
+            "the sanctioned bounce reads with its directional fan, not the neutral fail-closed spark",
+        );
+    }
+
+    /// HOLD-THEN-ARRIVE. The keyframe is delayed past contact but lands inside the grace window: the
+    /// shell FREEZES at the plate (no spark yet), then re-seeds when the bounce arrives — re-aged
+    /// forward by exactly the ticks it held, so its resumed position is consistent with the present
+    /// timeline (matches the shared integrator advanced by the hold duration).
+    #[test]
+    fn observer_holds_then_reseeds_when_keyframe_arrives_in_window() {
+        let shot = a_shot();
+        let bounce = authority_bounce(shot);
+
+        let mut app = replica_world(SanctionedBounces::default()); // buffer starts EMPTY
+        let shell = spawn_oblique_shell(&mut app, shot);
+
+        // March until the shell freezes at armor (no keyframe yet).
+        let mut froze = false;
+        for _ in 0..8 {
+            app.update();
+            if app.world().get::<Held>(shell).is_some() {
+                froze = true;
+                break;
+            }
+        }
+        assert!(
+            froze,
+            "the shell holds at armor contact awaiting its keyframe"
+        );
+        assert!(
+            app.world().resource::<ImpactLog>().0.is_empty(),
+            "a held shell fires NO spark — it waits (no improvised impact)",
+        );
+
+        // Hold a few more ticks (still inside the grace window), then the keyframe lands.
+        const HELD_EXTRA: u32 = 4;
+        for _ in 0..HELD_EXTRA {
+            app.update();
+        }
+        assert_eq!(
+            app.world().get::<Held>(shell).unwrap().ticks,
+            HELD_EXTRA,
+            "the hold accumulates one tick per frozen tick (the catch-up it will re-age by)",
+        );
+        app.world_mut().resource_mut::<SanctionedBounces>().insert(
+            shot,
+            SanctionedBounce {
+                origin: bounce.origin,
+                direction: bounce.direction,
+                speed: bounce.speed,
+                sequence: 0,
+            },
+        );
+        app.update(); // the Held handler re-seeds this tick
+
+        assert!(
+            app.world().get::<Held>(shell).is_none(),
+            "the hold clears on re-seed",
+        );
+        let marks = app.world().get::<PenetrationMarks>(shell).unwrap();
+        assert_eq!(marks.ricochets.len(), 1);
+        assert!(
+            marks.ricochets[0].distance(bounce.origin) < 1.0e-3,
+            "the tracer clamp re-anchors at the true bounce point",
+        );
+        // Re-aged forward by the hold: the resumed position is the sanctioned state fast-forwarded
+        // HELD_EXTRA ticks — the exact shared integrator, so it is consistent with the present timeline.
+        let dt = 0.016; // the test world's ManualDuration
+        let (expected_pos, _, _) = fast_forward_shell(
+            bounce.origin,
+            bounce.direction.normalize() * bounce.speed,
+            drag_k(0.088, 10.2),
+            dt,
+            HELD_EXTRA,
+        );
+        let pos = app.world().get::<Transform>(shell).unwrap().translation;
+        assert!(
+            pos.distance(expected_pos) < 1.0e-3,
+            "resumed position = sanctioned bounce fast-forwarded by the hold duration (got {pos}, want {expected_pos})",
+        );
+        assert!(
+            pos.distance(bounce.origin) > 1.0e-2,
+            "the re-aged shell is downrange of the bounce point (it caught back up to the present)",
+        );
+        assert!(
+            app.world().get::<Projectile>(shell).is_some(),
+            "the shell survives and continues after the delayed re-seed",
+        );
+    }
+
+    /// HOLD-THEN-EXPIRE. The keyframe NEVER arrives: past the grace window the shell degrades to
+    /// today's honest fail-closed truncation — one neutral armor spark (no improvised bounce fan) and
+    /// the shell is finalized. Correctness never depended on delivery.
+    #[test]
+    fn observer_hold_expires_to_fail_closed_truncation() {
+        let shot = a_shot();
+        let mut app = replica_world(SanctionedBounces::default()); // no keyframe ever arrives
+        let shell = spawn_oblique_shell(&mut app, shot);
+
+        for _ in 0..(RICOCHET_HOLD_TICKS + 4) {
+            app.update();
+        }
+
+        assert!(
+            app.world().get_entity(shell).is_err(),
+            "the shell is finalized (despawned) once the grace window expires",
+        );
+        let impacts = app.world().resource::<ImpactLog>().0.clone();
+        assert_eq!(
+            impacts.len(),
+            1,
+            "exactly one spark — the fail-closed neutral truncation, fired once at expiry",
+        );
+        assert!(
+            impacts[0].deflection.is_none(),
+            "a neutral spark — the client never improvises a bounce it wasn't told about",
+        );
+        assert!(
+            !impacts[0].penetrated,
+            "no flame lick on the fail-closed spark"
+        );
+        assert_eq!(impacts[0].surface, ImpactSurface::Armor);
+    }
+
+    /// MULTI-BOUNCE. Two sanctioned bounces (ordinals 0 then 1) are consumed strictly in order: the
+    /// shell re-seeds through bounce 0 (redirected back toward the plate), hits armor again, and
+    /// re-seeds through bounce 1 (redirected away) — the trail carrying both bounce points in sequence.
+    /// The bounces are fabricated (not authority-derived) so the geometry deterministically forces the
+    /// second contact.
+    #[test]
+    fn observer_consumes_two_bounces_in_order() {
+        let shot = a_shot();
+        // Bounce 0: re-seed just off the +Z face, aimed BACK toward the plate so the leftover march
+        // budget carries the shell into a second contact.
+        let b0 = SanctionedBounce {
+            origin: Vec3::new(0.0, 2.0, 0.5),
+            direction: Vec3::new(0.12, 0.0, -1.0).normalize(),
+            speed: 480.0,
+            sequence: 0,
+        };
+        // Bounce 1: re-seed on the face, aimed AWAY (+Z) so the shell flies out and survives.
+        let b1 = SanctionedBounce {
+            origin: Vec3::new(0.0, 2.0, 0.05),
+            direction: Vec3::Z,
+            speed: 300.0,
+            sequence: 1,
+        };
+        let mut buf = SanctionedBounces::default();
+        buf.insert(shot, b0);
+        buf.insert(shot, b1);
+        let mut app = replica_world(buf);
+        let shell = spawn_oblique_shell(&mut app, shot);
+
+        for _ in 0..8 {
+            app.update();
+            if app.world().get_entity(shell).is_err()
+                || app
+                    .world()
+                    .get::<PenetrationMarks>(shell)
+                    .is_some_and(|m| m.ricochets.len() >= 2)
+            {
+                break;
+            }
+        }
+
+        let marks = app.world().get::<PenetrationMarks>(shell).unwrap();
+        assert_eq!(
+            marks.ricochets.len(),
+            2,
+            "both sanctioned bounces were consumed",
+        );
+        assert!(
+            marks.ricochets[0].distance(b0.origin) < 1.0e-3,
+            "bounce 0 (ordinal 0) re-seeds first",
+        );
+        assert!(
+            marks.ricochets[1].distance(b1.origin) < 1.0e-3,
+            "bounce 1 (ordinal 1) re-seeds second — strict order",
+        );
+        assert!(
+            app.world().get::<Projectile>(shell).is_some(),
+            "after the second bounce the shell flies on",
+        );
+        let impacts = app.world().resource::<ImpactLog>().0.clone();
+        assert_eq!(impacts.len(), 2, "two directional bounce sparks");
+        assert!(impacts.iter().all(|i| i.deflection.is_some()));
     }
 }

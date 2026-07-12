@@ -13,6 +13,7 @@
 
 use avian3d::prelude::{PhysicsInterpolationPlugin, PhysicsLayer, PhysicsPlugins};
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 
 mod aim;
 /// The runtime asset-root resolver (`asset_root`) — where `assets/` lives, resolved once and shared
@@ -115,6 +116,31 @@ pub(crate) enum Layer {
     /// Ballistic volumes (armor plates + modules): what the penetration march raycasts against,
     /// distinct from `Vehicle` (the dynamic collision proxy). "Same geometry, two layers" (ADR-0008).
     Armor,
+}
+
+/// The correlation spine for one shot: which weapon on which tank fired on which tick. Every
+/// shot-scoped wire message keys on it — the cosmetic tracer ([`net::protocol::FireEvent`]) exposes it
+/// by accessor (`FireEvent::shot_id`, no extra bytes on the wire), the server-sanctioned bounce
+/// ([`net::protocol::RicochetKeyframe`]) carries it, and both ends stamp it on the local cosmetic shell
+/// they spawn ([`ballistics::Shot`]) — so an arriving keyframe re-seeds EXACTLY the shell it belongs to,
+/// and a redundantly-retransmitted duplicate is deduped instead of spawning a second tracer.
+///
+/// **`fire_tick` is what makes successive rounds distinct.** An automatic weapon fires the same
+/// `(shooter, weapon)` every few ticks; without the tick every round of a burst would share one id and
+/// the redundancy dedup would collapse the whole burst to a single shell. It is strictly increasing per
+/// `(shooter, weapon)` (one shot per weapon per tick, ticks advance), which the receiver's dedup relies on.
+///
+/// **NET-NEUTRAL BY DESIGN.** `fire_tick` is a plain `u32` (the raw tick value), not lightyear's `Tick`,
+/// so the always-runnable sim layer (`ballistics`) can key shells on it without naming the netcode
+/// (`tests/net_boundary`); [`net::protocol`] converts to/from `Tick` at the wire boundary. Lives at the
+/// crate root beside [`ClientReplica`]/[`Layer`] for the same reason those do: shared sim/net vocabulary.
+/// The `shooter` [`Entity`] is wire-mapped by the carrying message to the receiver's local replica, so a
+/// `ShotId` is stable within one receiver — which is exactly the dedup/correlation scope.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub struct ShotId {
+    pub shooter: Entity,
+    pub weapon: u8,
+    pub fire_tick: u32,
 }
 
 /// The simulation — the authority layer, in the client/server sense (see the memory note and

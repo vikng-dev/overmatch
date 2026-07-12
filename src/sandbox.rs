@@ -762,6 +762,8 @@ fn fire(
         shooter: None,
         // Locally fired: no net catch-up.
         catch_up_ticks: 0,
+        // Single-process sandbox — no network identity, no bounce keyframes.
+        shot: None,
     });
 }
 

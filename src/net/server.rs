@@ -17,13 +17,12 @@ use lightyear::prelude::server::*;
 use lightyear::prelude::*;
 
 use super::protocol::{
-    FireChannel, FireEvent, LaunchedTurretPose, NetBelts, NetCrew, PROTOCOL_FINGERPRINT,
-    ServoAngles,
+    FireBurst, FireChannel, FireEvent, LaunchedTurretPose, NetBelts, NetCrew, PROTOCOL_FINGERPRINT,
+    RicochetKeyframe, ServoAngles,
 };
 use super::{diagnostics, harness, open_gameplay_gate, physics, rig};
-use crate::SimPlugin;
 use crate::bake::TankGeometry;
-use crate::ballistics::FireShell;
+use crate::ballistics::{FireShell, Projectile, ShellRicochet, Shot, ShotSource};
 use crate::command::{ConsumeCommandEdges, TankCommand};
 use crate::damage::TankKnockedOut;
 use crate::spec::TankSpec;
@@ -31,6 +30,7 @@ use crate::state::GameplaySet;
 use crate::tank::{
     PendingTankAssets, Rig, TankSimSource, bind_tank_view, load_tank_assets, spawn_tank_sim,
 };
+use crate::{ShotId, SimPlugin};
 
 const PORT: u16 = 5888;
 
@@ -76,10 +76,16 @@ pub fn run() {
     // Per-fixed-tick sim-cost recorder: idle unless `SPIKE_COST_TRACE` is set (the MG-march cost spike).
     app.add_plugins(crate::cost::server_plugin);
     // The cosmetic opponent-fire broadcast: SERVER ONLY. Every authoritative `fire` raises a
-    // `FireShell`; this observer turns each one that names a tank into a `FireEvent` for the OTHER
-    // clients (`broadcast_fire`). Registered here and NOWHERE shared, so the client's own local
-    // `FireShell` (its predicted tank's cosmetic shell) never tries to send.
+    // `FireShell`; `broadcast_fire` turns each one that names a tank into a `FireEvent`, and every
+    // authoritative ricochet raises a `ShellRicochet` that `on_shell_ricochet` turns into a
+    // `RicochetKeyframe` — both broadcast to the OTHER clients inside a sliding-window `FireBurst`
+    // (`FireRings`). Registered here and NOWHERE shared, so the client's own local `FireShell` never
+    // tries to send. `stamp_shot_ids` completes each server shell's `ShotId` from its `ShotSource` +
+    // the fire tick (the one part the sim can't know), so a ricochet can name the shot on the wire.
+    app.init_resource::<FireRings>();
     app.add_observer(broadcast_fire);
+    app.add_observer(on_shell_ricochet);
+    app.add_systems(FixedPostUpdate, stamp_shot_ids);
     // Server-authoritative input authorization: strip any `InputTarget::Entity` a client is NOT the
     // `ControlledBy` owner of, before the input buffer ever applies it. lightyear ships this as an
     // opt-in `InputSystems::ValidateInputs` system (`add_input_validator` = sugar for
@@ -602,27 +608,65 @@ fn drive_bot(mut bots: Query<&mut TankCommand, With<Bot>>) {
     }
 }
 
-/// Turn each authoritative `FireShell` into the cosmetic `FireEvent` broadcast — the SERVER half of
-/// the opponent-fire seam (`net::protocol::FireEvent`). Observes every shot the sim fires; a shot
-/// that names a tank (`shooter: Some`) is broadcast so the OTHER clients spawn a local tracer for a
-/// tank they only interpolate, while sandbox/`None` shots (no tank) never broadcast.
+/// The server's sliding redundancy windows: the last N [`FireEvent`]s and the last N
+/// [`RicochetKeyframe`]s, resent in EVERY [`FireBurst`] so one delivered burst repairs a multi-packet
+/// loss of either stream (piece 3 — the input-redundancy pattern applied to cosmetics).
 ///
-/// Targeting: a PLAYER tank carries `ControlledBy`, so resolve its owner link's `RemoteId` (the same
-/// `PeerId` `handle_new_clients` reads) and send to `AllExceptSingle(owner)` — the shooter already
-/// flew its own local shell, so excluding it avoids a double tracer. A BOT has no `ControlledBy`, so
-/// send to `All` (everyone should see the bot fire). `FireEvent.shooter` carries the firing tank so
-/// the receiver's entity-mapping resolves it to the local replica.
+/// [`FIRE_WINDOW`] = 4 is sized against the worst case: a 750 rpm MG cycles at 12.5 rounds/s, so the
+/// server sends one fire burst every ~80 ms, and a 4-deep fire window keeps each event alive across the
+/// next ~3 bursts (~240 ms) — past a typical WAN burst loss, while staying a handful of small structs
+/// per packet. Keyframes are rare (only ricochets), so a 4-deep keyframe window holds each far longer
+/// in wall-clock — it only rotates out after N MORE ricochets — giving bounces generous redundancy.
+#[derive(Resource, Default)]
+struct FireRings {
+    fires: std::collections::VecDeque<FireEvent>,
+    keyframes: std::collections::VecDeque<RicochetKeyframe>,
+}
+
+/// Sliding-window depth — see [`FireRings`] for the sizing against MG cyclic rate.
+const FIRE_WINDOW: usize = 4;
+
+impl FireRings {
+    fn push<T>(ring: &mut std::collections::VecDeque<T>, item: T) {
+        if ring.len() == FIRE_WINDOW {
+            ring.pop_front();
+        }
+        ring.push_back(item);
+    }
+    /// A burst carrying the whole current window of both streams (what a sequenced-unreliable delivery
+    /// needs so dropping a stale burst loses nothing the next re-carries).
+    fn burst(&self) -> FireBurst {
+        FireBurst {
+            fires: self.fires.iter().cloned().collect(),
+            keyframes: self.keyframes.iter().cloned().collect(),
+        }
+    }
+}
+
+/// Turn each authoritative `FireShell` into a cosmetic `FireEvent` and broadcast the current sliding
+/// window — the SERVER half of the opponent-fire seam (`net::protocol::FireEvent`/`FireBurst`).
+/// Observes every shot the sim fires; a shot that names a tank (`shooter: Some`) is pushed to the fire
+/// ring and a `FireBurst` sent so the OTHER clients spawn a local tracer for a tank they only
+/// interpolate, while sandbox/`None` shots (no tank) never broadcast.
+///
+/// **Targeting: `All`, deduped at the receiver.** Every burst goes to every client; a client drops any
+/// fire/keyframe naming a tank IT simulates locally (`receive_fire_events`' `locally_fired` guard), so
+/// the shooter discarding its own echo is a receiver concern. This is what lets ONE shared burst carry
+/// events from MULTIPLE shooters correctly — an `AllExceptSingle(owner)` target could not, since a
+/// burst re-carrying another shooter's fires must still reach this owner. The one-frame self-echo the
+/// owner discards is negligible, and the redundancy window (which re-carries older shooters' events) is
+/// only correct under `All`.
 fn broadcast_fire(
     fire: On<FireShell>,
-    controlled: Query<&ControlledBy>,
-    remotes: Query<&RemoteId>,
     servers: Query<&Server>,
     // The server's simulation tick. `shooting::fire` raises `FireShell` inside `FixedUpdate`, in
     // `GameplaySet`, AFTER `LocalTimeline` is incremented for this tick (`increment_local_tick` runs
     // in `FixedFirst`); nothing advances it again until the next frame's `FixedFirst`. So this
     // observer — even deferred to the command flush — reads the SAME tick the firing sim step ran on,
-    // which is exactly the tick the muzzle pose in `fire.origin` was computed for.
+    // which is exactly the tick the muzzle pose in `fire.origin` was computed for (and the tick
+    // `stamp_shot_ids` stamps into this shell's `Shot`, so a later ricochet keyframe keys the same id).
     timeline: Res<LocalTimeline>,
+    mut rings: ResMut<FireRings>,
     mut sender: ServerMultiMessageSender,
 ) {
     // Only tank-attributed shots broadcast; a `None` shooter (the sandbox) has no tank to name.
@@ -636,7 +680,7 @@ fn broadcast_fire(
     // The weapon slot rides the wire as a `u8` (ample — a tank carries a handful of weapons). A
     // silent `as u8` would wrap a slot >= 256 mod 256 and recoil a VALID-BUT-WRONG barrel on every
     // remote client; unreachable today, but skip-with-warn on overflow rather than truncate, the
-    // same fail-loudly-or-skip discipline as the `Dir3` bore guard.
+    // same fail-loudly-or-skip discipline as the `Dir3` bore guard (and matches `stamp_shot_ids`).
     let Ok(weapon) = u8::try_from(source.weapon) else {
         warn!(
             "server: weapon slot {} exceeds u8 — skipping FireEvent broadcast for this shot",
@@ -662,23 +706,76 @@ fn broadcast_fire(
         // shell already is in its confirmed timeline (see `FireEvent::fire_tick`).
         fire_tick: timeline.tick(),
     };
-    let target = match controlled.get(source.tank) {
-        // Player tank: exclude the owner (they already flew their own local shell).
-        Ok(controlled_by) => match remotes.get(controlled_by.owner) {
-            Ok(remote) => NetworkTarget::AllExceptSingle(remote.0),
-            // Owner link with no `RemoteId` (owner mid-disconnect / dangling link while the tank is
-            // still live). Fall back to `All` rather than suppress the tracer for EVERYONE — a
-            // one-frame double tracer for a departing owner beats every other client seeing the shot
-            // with no round. Should not happen for a live owner.
-            Err(_) => NetworkTarget::All,
-        },
-        // Bot (no owner): everyone should see it fire.
-        Err(_) => NetworkTarget::All,
+    FireRings::push(&mut rings.fires, event);
+    if let Err(err) =
+        sender.send::<FireBurst, FireChannel>(&rings.burst(), server, &NetworkTarget::All)
+    {
+        // A dropped cosmetic burst is not an error (the channel is unreliable by design, and the
+        // window covers the loss); keep this at debug so a transient send failure can't spam the log.
+        debug!("server: FireBurst broadcast dropped: {err}");
+    }
+}
+
+/// Turn each authoritative `ballistics::ShellRicochet` into a `RicochetKeyframe` and broadcast the
+/// current window — the SERVER half of the bounce carry-through (ADR-0016: replicate the CAUSE, the
+/// observer derives the re-seed). The authority march raises `ShellRicochet` at the moment it resolves
+/// a bounce for a net-attributed shell (`Shot` present, stamped by `stamp_shot_ids`); this stamps the
+/// bounce tick from the server timeline and sends. Same `FireRings`/`All` window + targeting as
+/// `broadcast_fire`: a fire burst re-carries recent keyframes and vice versa, so both streams share the
+/// redundancy for free. `ShellRicochet` is a sim-layer event, so the sandbox raises it too — but no
+/// `Server` is present there and this observer is SERVER-ONLY, so it never fires off the net.
+fn on_shell_ricochet(
+    ricochet: On<ShellRicochet>,
+    servers: Query<&Server>,
+    timeline: Res<LocalTimeline>,
+    mut rings: ResMut<FireRings>,
+    mut sender: ServerMultiMessageSender,
+) {
+    let Ok(server) = servers.single() else {
+        return;
     };
-    if let Err(err) = sender.send::<FireEvent, FireChannel>(&event, server, &target) {
-        // A dropped cosmetic tracer is not an error (the channel is unreliable by design); keep this
-        // at debug so a transient send failure under heavy fire can't spam the log.
-        debug!("server: FireEvent broadcast dropped: {err}");
+    let keyframe = RicochetKeyframe {
+        shot: ricochet.shot,
+        origin: ricochet.origin,
+        direction: ricochet.direction,
+        speed: ricochet.speed,
+        // Stamped here (the sim can't read the timeline); the observer re-ages by hold duration, so
+        // this is carried for audit — see `RicochetKeyframe::bounce_tick`.
+        bounce_tick: timeline.tick(),
+        sequence: ricochet.sequence,
+    };
+    FireRings::push(&mut rings.keyframes, keyframe);
+    if let Err(err) =
+        sender.send::<FireBurst, FireChannel>(&rings.burst(), server, &NetworkTarget::All)
+    {
+        debug!("server: RicochetKeyframe burst dropped: {err}");
+    }
+}
+
+/// Complete each freshly-spawned server shell's [`ShotId`] from its [`ShotSource`] (tank + weapon slot,
+/// stamped at spawn by `on_fire_shell`) plus the fire tick — the one part the sim layer cannot know,
+/// since the tick lives in lightyear's timeline (`tests/net_boundary`). Runs `FixedPostUpdate`, so the
+/// timeline still reads the fire tick (unchanged until the next `FixedFirst`) — the SAME value
+/// `broadcast_fire` stamped into the `FireEvent`, so the observer's shell (built from that `FireEvent`)
+/// and this server shell carry the IDENTICAL `ShotId`, and a later `RicochetKeyframe` correlates. A
+/// shell reaches armor only on a later tick (it spawns at the muzzle), so `Shot` is always present
+/// before it can ricochet. `Without<Shot>` makes this idempotent; a slot past `u8` is skipped
+/// (matching `broadcast_fire`, which also skips the whole shot — so no observer shell exists anyway).
+fn stamp_shot_ids(
+    shells: Query<(Entity, &ShotSource), (With<Projectile>, Without<Shot>)>,
+    timeline: Res<LocalTimeline>,
+    mut commands: Commands,
+) {
+    let fire_tick = timeline.tick().0;
+    for (entity, source) in &shells {
+        let Ok(weapon) = u8::try_from(source.weapon) else {
+            continue;
+        };
+        commands.entity(entity).insert(Shot(ShotId {
+            shooter: source.tank,
+            weapon,
+            fire_tick,
+        }));
     }
 }
 

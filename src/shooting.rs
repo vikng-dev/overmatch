@@ -267,6 +267,11 @@ fn fire(
             }),
             // Locally fired: the shell spawns at the muzzle THIS tick — no net catch-up.
             catch_up_ticks: 0,
+            // The sim cannot read the fire tick (it lives in the netcode timeline), so `fire` never
+            // stamps the shot identity: the AUTHORITY completes it after spawn from `ShotSource` + its
+            // timeline (`net::server`), and the owner's OWN client shell deliberately gets none (no
+            // keyframe ever addresses it, so it fail-closes at armor contact immediately). `None` here.
+            shot: None,
         });
         // Kick the barrel back (root-resident recoil state); apply_recoil springs it home. The
         // shared `kick_recoil` owns the whole decision (barrel + recoil spec present, slot valid), so
