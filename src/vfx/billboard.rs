@@ -10,8 +10,8 @@
 //! trade the impact puffs already make); the clones are bounded by [`BILLBOARD_CAP`]'s ring, and
 //! everything short-lived, so the batching cost stays a handful of draws.
 //!
-//! Two consumers by design: the 88 dressing ([`super::muzzle`]) today, the MG dressing (slice B)
-//! next — nothing in here knows which weapon it is dressing.
+//! Consumers by design: the 88 and MG muzzle dressings ([`super::muzzle`]) and the impact sparks
+//! ([`super::impact`]) — nothing in here knows which weapon or surface it is dressing.
 
 use std::collections::VecDeque;
 
@@ -28,7 +28,7 @@ use bevy::transform::TransformSystems;
 /// Live-billboard ring cap — a leak bound, exactly the impact puffs' `PUFF_CAP` shape. Steady state
 /// is far below it (an 88 shot spawns ~4 billboards, each sub-second); the cap only bites on
 /// pathological refire (rollback-replayed fire seams, spawn storms), evicting oldest-first.
-const BILLBOARD_CAP: usize = 96;
+pub(super) const BILLBOARD_CAP: usize = 96;
 
 pub(super) fn plugin(app: &mut App) {
     app.init_resource::<BillboardRing>()

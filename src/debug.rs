@@ -237,6 +237,7 @@ mod tests {
         let mut app = harness(false);
         app.world_mut().trigger(Impact {
             position: Vec3::ZERO,
+            normal: Vec3::Y,
         });
         app.world_mut().flush();
         assert_eq!(marker_count(&mut app), 0);
@@ -249,6 +250,7 @@ mod tests {
         for _ in 0..IMPACT_MARKER_CAP + 5 {
             app.world_mut().trigger(Impact {
                 position: Vec3::ZERO,
+                normal: Vec3::Y,
             });
             app.world_mut().flush();
         }

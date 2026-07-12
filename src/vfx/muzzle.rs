@@ -1,12 +1,18 @@
-//! The 88's firing signature (survey tricks 1/2/3/5): a 1–2-FRAME billboard flash cluster (one
-//! camera-facing core + two bore-aligned flame planes), a transient shadowless muzzle light
-//! (first frame hottest, ~100 ms decay), and one lingering eroded smoke puff (~1 s). Strict
-//! lifetime discipline on the flash — the craft canon is emphatic that a flash alive past ~2
-//! frames reads slow and weak; the smoke and the light are what linger.
+//! The guns' firing signatures (survey tricks 1/2/3/5). The 88: a 1–2-FRAME billboard flash
+//! cluster (one camera-facing core + two bore-aligned flame planes), a transient shadowless muzzle
+//! light (first frame hottest, ~100 ms decay), and one lingering eroded smoke puff (~1 s). The MGs
+//! (slice B, [`on_mg_fire`]): the same machinery at rifle scale — a small 1–2-frame core (+ one
+//! flame plane when near), a dim short light on TRACER rounds only (the every-Nth-shot cost gate,
+//! which also couples the flicker to the streaks), and one faint puff every few rounds (per-round
+//! smoke at 12.5 rds/s per gun stacks into fog — the overdraw trap). At 750 rpm per-shot VARIATION
+//! is the whole game: random flame frame + roll + size jitter per shot, because identical repeated
+//! flashes strobe. Strict lifetime discipline on every flash — the craft canon is emphatic that a
+//! flash alive past ~2 frames reads slow and weak; the smoke and the light are what linger.
 //!
-//! Hook: an observer on the sim's [`FireShell`] event — the SAME seam the shell scene and the
-//! tracer child hang off (`ballistics::on_fire_shell`), gated to the 88 by the SAME caliber
-//! boundary (`ballistics::TRACER_MAX_CALIBER`). Both local fire (`shooting::fire`, FixedUpdate)
+//! Hook: observers on the sim's [`FireShell`] event — the SAME seam the shell scene and the
+//! tracer child hang off (`ballistics::on_fire_shell`), split by the SAME caliber
+//! boundary (`ballistics::TRACER_MAX_CALIBER`): at/above it the 88 observer dresses the shot,
+//! below it the MG observer does. Both local fire (`shooting::fire`, FixedUpdate)
 //! and remote fire (`net::client::receive_fire_events` re-raising `FireShell` in Update) arrive
 //! here; `FireShell::origin`/`direction` are the muzzle pose at the fire tick on every path.
 //!
@@ -54,13 +60,43 @@ const SMOKE_SPIN_MAX: f32 = 0.6;
 /// Faint heat on young smoke (it is lit by the flash for the first instants).
 const SMOKE_GLOW: f32 = 5.0;
 
-/// Muzzle light: peak luminous power (lm), falloff range (m), decay time (s). First frame hottest,
-/// gone in ~100 ms; never a shadow caster (the expensive half of a light).
+/// Muzzle light (the 88's): peak luminous power (lm), falloff range (m), decay time (s). First
+/// frame hottest, gone in ~100 ms; never a shadow caster (the expensive half of a light).
 const LIGHT_PEAK_LUMENS: f32 = 8.0e6;
 const LIGHT_RANGE: f32 = 35.0;
 const LIGHT_LIFETIME: f32 = 0.1;
 /// Live muzzle-light ring cap — pathological-refire bound, same shape as the billboard ring.
+/// Shared by the 88 and both MGs: steady state is ≤ 2 alive (the 88 ≤ 1 at its ~4 s cycle; MG
+/// lights ride tracer rounds only — 2.5/s per gun × [`MG_LIGHT_LIFETIME`] ≈ 0.1 alive each), so
+/// the cap only bites on rollback-replay storms.
 const LIGHT_CAP: usize = 6;
+
+// --- The MG's dressing knobs (slice B): the 88's machinery at rifle scale.
+
+/// MG flash lifetime (s): ~1–2 frames — even tighter than the 88's (a small flash that lingers
+/// reads as a sputtering candle, not gunfire).
+const MG_FLASH_LIFETIME: f32 = 0.03;
+/// MG core flash size range (m) — a rifle-calibre pop, an order of magnitude under the 88's
+/// fireball. The RANGE is also the per-shot size jitter.
+const MG_FLASH_CORE_SIZE: (f32, f32) = (0.3, 0.55);
+/// The single near-only MG flame plane: length range (m); shares the 88's width ratio.
+const MG_FLASH_PLANE_LENGTH: (f32, f32) = (0.45, 0.8);
+/// MG muzzle light — TRACER rounds only (the survey's every-Nth-shot cost gate; the belt's
+/// `tracer_every` = 5 makes that every 5th round, visually coupling the flicker to the streaks).
+/// Dimmer, shorter, tighter than the 88's.
+const MG_LIGHT_PEAK_LUMENS: f32 = 1.2e6;
+const MG_LIGHT_RANGE: f32 = 16.0;
+const MG_LIGHT_LIFETIME: f32 = 0.05;
+/// MG smoke ration: one faint puff every this many MG rounds (across both guns — it is cosmetic
+/// cadence, not per-barrel state). Per-round puffs at the cyclic rate are the overdraw trap.
+const MG_SMOKE_EVERY: u32 = 4;
+/// The MG puff: shorter, smaller, fainter than the 88's (alpha multiplier well under the 88's
+/// 0.85), with a gentler rise and muzzle-gas push.
+const MG_SMOKE_LIFETIME: f32 = 0.7;
+const MG_SMOKE_SIZE: (f32, f32) = (0.3, 1.0);
+const MG_SMOKE_ALPHA: f32 = 0.45;
+const MG_SMOKE_RISE: f32 = 0.4;
+const MG_SMOKE_PUSH: f32 = 0.7;
 
 /// A remote shot older than this many fixed ticks (~250 ms at 64 Hz) skips the dressing entirely
 /// (survey: stale cosmetic events skip rather than play late).
@@ -71,8 +107,10 @@ const FAR_FULL_DRESSING: f32 = 400.0;
 
 pub(super) fn plugin(app: &mut App) {
     app.init_resource::<MuzzleLightRing>()
+        .init_resource::<MgSmokeCadence>()
         .add_systems(Startup, setup_muzzle_assets)
         .add_observer(on_main_gun_fire)
+        .add_observer(on_mg_fire)
         .add_systems(Update, decay_muzzle_lights);
 }
 
@@ -155,15 +193,62 @@ pub(super) fn setup_muzzle_assets(
     });
 }
 
-/// A live muzzle light's age; [`decay_muzzle_lights`] drives the intensity fall and the despawn.
+/// A live muzzle light's age plus the scale it was born with; [`decay_muzzle_lights`] drives the
+/// intensity fall and the despawn from these. Per-light `peak`/`lifetime` is what lets the 88 and
+/// the MGs share one decay system at different scales.
 #[derive(Component)]
 struct MuzzleLight {
     age: f32,
+    /// Peak intensity (lm) the cubic decay falls from.
+    peak: f32,
+    /// Seconds from peak to despawn.
+    lifetime: f32,
 }
 
 /// Live muzzle lights, oldest first — the refire leak bound (see [`LIGHT_CAP`]).
 #[derive(Resource, Default)]
 struct MuzzleLightRing(std::collections::VecDeque<Entity>);
+
+/// Belt-position counter for the MG smoke ration ([`MG_SMOKE_EVERY`]); ticks once per MG round.
+#[derive(Resource, Default)]
+struct MgSmokeCadence(u32);
+
+/// Spawn one transient shadowless muzzle light into the shared ring — the 88's and the MGs' common
+/// machinery; peak/range/lifetime/radius are the caller's scale knobs.
+fn spawn_muzzle_light(
+    commands: &mut Commands,
+    ring: &mut MuzzleLightRing,
+    position: Vec3,
+    peak: f32,
+    range: f32,
+    lifetime: f32,
+    radius: f32,
+) {
+    let light = commands
+        .spawn((
+            MuzzleLight {
+                age: 0.0,
+                peak,
+                lifetime,
+            },
+            PointLight {
+                color: Color::srgb(1.0, 0.72, 0.42),
+                intensity: peak,
+                range,
+                radius,
+                shadow_maps_enabled: false,
+                ..default()
+            },
+            Transform::from_translation(position),
+        ))
+        .id();
+    ring.0.push_back(light);
+    while ring.0.len() > LIGHT_CAP {
+        if let Some(old) = ring.0.pop_front() {
+            commands.entity(old).try_despawn();
+        }
+    }
+}
 
 /// Dress a main-gun shot: flash cluster + muzzle light + lingering smoke, all view entities hung
 /// off the `FireShell` geometry (origin + bore direction). MG-calibre rounds pass through untouched
@@ -290,30 +375,162 @@ fn on_main_gun_fire(
 
     // --- Muzzle light: transient, shadowless, first frame hottest (Vlambeer: the environment
     // lighting up IS a large share of the perceived power).
-    let light = commands
-        .spawn((
-            MuzzleLight { age: 0.0 },
-            PointLight {
-                color: Color::srgb(1.0, 0.72, 0.42),
-                intensity: LIGHT_PEAK_LUMENS,
-                range: LIGHT_RANGE,
-                radius: 0.4,
-                shadow_maps_enabled: false,
-                ..default()
+    spawn_muzzle_light(
+        &mut commands,
+        &mut light_ring,
+        origin + dir * 1.2,
+        LIGHT_PEAK_LUMENS,
+        LIGHT_RANGE,
+        LIGHT_LIFETIME,
+        0.4,
+    );
+}
+
+/// Dress an MG shot (slice B): a small 1–2-frame flash (core + one near-only flame plane), a dim
+/// short muzzle light on TRACER rounds only, and one faint puff every [`MG_SMOKE_EVERY`] rounds.
+/// Everything per-shot randomized (flame frame, roll, size) — at 750 rpm identical repeated
+/// flashes strobe. Main-gun-calibre rounds pass through untouched (their dressing is
+/// [`on_main_gun_fire`]); staleness and distance LOD gates are the 88's exactly.
+fn on_mg_fire(
+    fire: On<FireShell>,
+    assets: Res<MuzzleVfxAssets>,
+    mut materials: ResMut<Assets<VfxBillboardMaterial>>,
+    mut ring: ResMut<BillboardRing>,
+    mut light_ring: ResMut<MuzzleLightRing>,
+    mut cadence: ResMut<MgSmokeCadence>,
+    mut rng: ResMut<ViewRng>,
+    camera: Query<&GlobalTransform, With<Camera3d>>,
+    mut commands: Commands,
+) {
+    // The complement of the 88 observer's gate — the SAME boundary the shell-scene/tracer split
+    // uses, so every round is dressed by exactly one of the two observers.
+    if fire.caliber >= TRACER_MAX_CALIBER {
+        return;
+    }
+    // Stale remote burst (net catch-up past ~250 ms): skip, don't play late.
+    if fire.catch_up_ticks > STALE_FIRE_TICKS {
+        return;
+    }
+    // The smoke ration counts every non-stale MG round, near or far, so the cadence is a property
+    // of the burst, not of the camera.
+    cadence.0 = cadence.0.wrapping_add(1);
+    let smoke_due = cadence.0.is_multiple_of(MG_SMOKE_EVERY);
+
+    let origin = fire.origin;
+    let dir = Vec3::from(fire.direction);
+    // Distance LOD, same shape as the 88's: with no camera (headless harness) treat as near.
+    let near = camera
+        .single()
+        .map(|cam| {
+            cam.translation().distance_squared(origin) < FAR_FULL_DRESSING * FAR_FULL_DRESSING
+        })
+        .unwrap_or(true);
+
+    // --- Flash core: one small camera-facing additive billboard. The core sprite is single-frame
+    // (full-image lanes below — the flare is the WHOLE image, not an atlas cell), so its per-shot
+    // variation is roll + size jitter; the flame plane carries the frame variation.
+    let mut core = assets.flash_material(assets.core_atlas.clone(), 2.0);
+    core.params.frame = Vec4::new(0.0, 1.0, 1.0, 0.0);
+    let core_size = rng.range(MG_FLASH_CORE_SIZE.0, MG_FLASH_CORE_SIZE.1);
+    spawn_billboard(
+        &mut commands,
+        &mut materials,
+        &mut ring,
+        assets.quad.clone(),
+        BillboardSpec {
+            material: core,
+            lifetime: MG_FLASH_LIFETIME,
+            origin: origin + dir * 0.15,
+            drift: Vec3::ZERO,
+            frames: 1,
+            start_frame: 0.0,
+            frame_rate: 0.0,
+            start_size: core_size,
+            end_size: core_size * 1.2,
+            aspect: Vec3::ONE,
+            roll: rng.range(0.0, std::f32::consts::TAU),
+            spin: 0.0,
+            erosion_end: 0.0,
+            rotation: None,
+        },
+    );
+
+    // --- One bore-aligned flame plane, near only: a random frame of the 4-flame atlas per shot
+    // plus a random roll around the bore (survey trick 2 — the anti-strobe variation).
+    if near {
+        let length = rng.range(MG_FLASH_PLANE_LENGTH.0, MG_FLASH_PLANE_LENGTH.1);
+        let rotation = Quat::from_axis_angle(dir, rng.range(0.0, std::f32::consts::TAU))
+            * Quat::from_rotation_arc(Vec3::Y, dir);
+        spawn_billboard(
+            &mut commands,
+            &mut materials,
+            &mut ring,
+            assets.quad.clone(),
+            BillboardSpec {
+                material: assets.flash_material(assets.flame_atlas.clone(), 2.0),
+                lifetime: MG_FLASH_LIFETIME,
+                origin: origin + dir * (length * 0.45),
+                drift: Vec3::ZERO,
+                frames: 4,
+                start_frame: rng.range(0.0, 4.0).floor(),
+                frame_rate: 0.0,
+                start_size: length,
+                end_size: length * 1.1,
+                aspect: Vec3::new(FLASH_PLANE_WIDTH_RATIO, 1.0, 1.0),
+                roll: 0.0,
+                spin: 0.0,
+                erosion_end: 0.0,
+                rotation: Some(rotation),
             },
-            Transform::from_translation(origin + dir * 1.2),
-        ))
-        .id();
-    light_ring.0.push_back(light);
-    while light_ring.0.len() > LIGHT_CAP {
-        if let Some(old) = light_ring.0.pop_front() {
-            commands.entity(old).try_despawn();
-        }
+        );
+    }
+
+    // --- Rationed smoke: one faint short puff every few rounds, near only (a sub-pixel puff at
+    // range is pure overdraw).
+    if near && smoke_due {
+        let mut smoke = assets.smoke_material();
+        smoke.params.fade.w = MG_SMOKE_ALPHA;
+        spawn_billboard(
+            &mut commands,
+            &mut materials,
+            &mut ring,
+            assets.quad.clone(),
+            BillboardSpec {
+                material: smoke,
+                lifetime: MG_SMOKE_LIFETIME,
+                origin: origin + dir * 0.4,
+                drift: Vec3::Y * MG_SMOKE_RISE + dir * MG_SMOKE_PUSH,
+                frames: 4,
+                start_frame: rng.range(0.0, 4.0),
+                frame_rate: SMOKE_FRAME_RATE,
+                start_size: MG_SMOKE_SIZE.0,
+                end_size: MG_SMOKE_SIZE.1,
+                aspect: Vec3::ONE,
+                roll: rng.range(0.0, std::f32::consts::TAU),
+                spin: rng.range(-SMOKE_SPIN_MAX, SMOKE_SPIN_MAX),
+                erosion_end: 1.0,
+                rotation: None,
+            },
+        );
+    }
+
+    // --- Muzzle light: tracer rounds ONLY (every 5th round of the belt) — the every-Nth-shot cost
+    // gate, and the flicker lands exactly when a streak leaves the muzzle.
+    if fire.tracer {
+        spawn_muzzle_light(
+            &mut commands,
+            &mut light_ring,
+            origin + dir * 0.3,
+            MG_LIGHT_PEAK_LUMENS,
+            MG_LIGHT_RANGE,
+            MG_LIGHT_LIFETIME,
+            0.1,
+        );
     }
 }
 
-/// Decay each muzzle light hard (cubic — most of the drop in the first frames) and despawn at
-/// [`LIGHT_LIFETIME`].
+/// Decay each muzzle light hard (cubic — most of the drop in the first frames) and despawn at its
+/// own lifetime. One system for every gun's lights; the scale rides on the component.
 fn decay_muzzle_lights(
     time: Res<Time>,
     mut lights: Query<(Entity, &mut MuzzleLight, &mut PointLight)>,
@@ -321,13 +538,13 @@ fn decay_muzzle_lights(
 ) {
     for (entity, mut light, mut point) in &mut lights {
         light.age += time.delta_secs();
-        let t = light.age / LIGHT_LIFETIME;
+        let t = light.age / light.lifetime;
         if t >= 1.0 {
             commands.entity(entity).despawn();
             continue;
         }
         let falloff = 1.0 - t;
-        point.intensity = LIGHT_PEAK_LUMENS * falloff * falloff * falloff;
+        point.intensity = light.peak * falloff * falloff * falloff;
     }
 }
 
@@ -336,18 +553,20 @@ mod tests {
     use super::*;
     use crate::vfx::billboard::Billboard;
 
-    /// Minimal app carrying what the observer + agers read: bare asset stores, a fixed-seed view
-    /// RNG, no camera (distance LOD treats that as near — full dressing).
+    /// Minimal app carrying what BOTH fire observers + the agers read: bare asset stores, a
+    /// fixed-seed view RNG, no camera (distance LOD treats that as near — full dressing).
     fn harness() -> App {
         let mut app = App::new();
         app.init_resource::<BillboardRing>()
             .init_resource::<MuzzleLightRing>()
+            .init_resource::<MgSmokeCadence>()
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<Image>>()
             .init_resource::<Assets<VfxBillboardMaterial>>()
             .init_resource::<Time>()
             .insert_resource(ViewRng::seeded(42))
             .add_observer(on_main_gun_fire)
+            .add_observer(on_mg_fire)
             .add_systems(Update, decay_muzzle_lights);
         app.insert_resource(MuzzleVfxAssets {
             quad: Handle::default(),
@@ -360,7 +579,7 @@ mod tests {
         app
     }
 
-    fn fire(app: &mut App, caliber: f32, catch_up_ticks: u32) {
+    fn fire_round(app: &mut App, caliber: f32, catch_up_ticks: u32, tracer: bool) {
         app.world_mut().trigger(FireShell {
             origin: Vec3::new(1.0, 2.0, 3.0),
             direction: Dir3::X,
@@ -368,11 +587,18 @@ mod tests {
             caliber,
             mass: 10.2,
             shooter: None,
-            tracer: true,
+            tracer,
             catch_up_ticks,
         });
         app.world_mut().flush();
     }
+
+    fn fire(app: &mut App, caliber: f32, catch_up_ticks: u32) {
+        fire_round(app, caliber, catch_up_ticks, true);
+    }
+
+    /// The 7.9 mm coax — the MG-calibre side of the boundary.
+    const MG_CALIBER: f32 = 0.0079;
 
     fn billboards(app: &mut App) -> usize {
         app.world_mut()
@@ -388,27 +614,98 @@ mod tests {
             .count()
     }
 
-    /// An 88 shot spawns the full dressing — core + 2 planes + smoke (4 billboards) and 1 light —
-    /// and an MG-calibre round spawns NOTHING from this module (its dressing is slice B).
+    /// An 88 shot spawns the full main-gun dressing — core + 2 planes + smoke (4 billboards) and
+    /// 1 light — and an MG-calibre tracer round gets the MG dressing instead: core + 1 flame plane
+    /// (no smoke on the first round — the ration counts from 1) at a fraction of the 88's size,
+    /// plus its own dim light. Each round is dressed by exactly ONE observer.
     #[test]
-    fn main_gun_dresses_mg_does_not() {
+    fn main_gun_and_mg_split_the_dressing() {
         let mut app = harness();
         fire(&mut app, 0.088, 0);
-        assert_eq!(billboards(&mut app), 4, "core + 2 planes + smoke");
+        assert_eq!(billboards(&mut app), 4, "88: core + 2 planes + smoke");
         assert_eq!(lights(&mut app), 1);
 
         let mut mg = harness();
-        fire(&mut mg, 0.0079, 0);
-        assert_eq!(billboards(&mut mg), 0, "MG rounds get no 88 dressing");
-        assert_eq!(lights(&mut mg), 0);
+        fire_round(&mut mg, MG_CALIBER, 0, true);
+        assert_eq!(billboards(&mut mg), 2, "MG: core + 1 flame plane");
+        assert_eq!(lights(&mut mg), 1, "tracer round carries the light");
+        // Scale discipline: every MG flash element is well under the 88's smallest core.
+        let world = mg.world_mut();
+        let mut q = world.query::<&Billboard>();
+        for billboard in q.iter(world) {
+            assert!(
+                billboard.start_size < FLASH_CORE_SIZE.0,
+                "MG dressing must stay rifle-scale (got {} m)",
+                billboard.start_size
+            );
+        }
     }
 
-    /// A stale remote shot (catch-up beyond ~250 ms) skips the dressing rather than playing late.
+    /// Per-shot variation is the MG's anti-strobe contract: consecutive shots must differ in core
+    /// roll and size (seeded RNG makes this deterministic — a regression to fixed values fails).
+    #[test]
+    fn mg_shots_never_repeat_identically() {
+        let mut app = harness();
+        fire_round(&mut app, MG_CALIBER, 0, false);
+        fire_round(&mut app, MG_CALIBER, 0, false);
+        let world = app.world_mut();
+        // The cores are the camera-facing billboards (the flame planes bake a fixed rotation).
+        let mut q = world.query_filtered::<&Billboard, With<crate::vfx::billboard::FaceCamera>>();
+        let cores: Vec<(f32, f32)> = q.iter(world).map(|b| (b.roll, b.start_size)).collect();
+        assert_eq!(cores.len(), 2, "two shots, two cores");
+        assert!(
+            cores[0].0 != cores[1].0 && cores[0].1 != cores[1].1,
+            "consecutive MG flashes must differ in roll and size: {cores:?}"
+        );
+    }
+
+    /// The MG muzzle light is rationed to TRACER rounds only (the every-Nth-shot cost gate): a
+    /// 4-ball-1-tracer belt cycle yields exactly one light, dimmer and shorter-lived than the 88's.
+    #[test]
+    fn mg_light_rides_tracer_rounds_only() {
+        let mut app = harness();
+        for _ in 0..4 {
+            fire_round(&mut app, MG_CALIBER, 0, false);
+        }
+        assert_eq!(lights(&mut app), 0, "ball rounds carry no light");
+        fire_round(&mut app, MG_CALIBER, 0, true);
+        assert_eq!(lights(&mut app), 1, "the tracer round carries it");
+        let world = app.world_mut();
+        let mut q = world.query::<(&MuzzleLight, &PointLight)>();
+        let (light, point) = q.single(world).expect("one MG light");
+        assert!(point.intensity < LIGHT_PEAK_LUMENS, "dimmer than the 88's");
+        assert!(light.lifetime < LIGHT_LIFETIME, "shorter than the 88's");
+        assert!(!point.shadow_maps_enabled, "never a shadow caster");
+    }
+
+    /// MG smoke is rationed to every [`MG_SMOKE_EVERY`]-th round — per-round puffs at the cyclic
+    /// rate are the overdraw trap the survey warns about.
+    #[test]
+    fn mg_smoke_spawns_every_nth_round() {
+        let mut app = harness();
+        let rounds = MG_SMOKE_EVERY * 2;
+        for _ in 0..rounds {
+            fire_round(&mut app, MG_CALIBER, 0, false);
+        }
+        // Each round spawns core + flame plane; every Nth adds one puff.
+        let expected = (rounds * 2 + rounds / MG_SMOKE_EVERY) as usize;
+        assert_eq!(
+            billboards(&mut app),
+            expected,
+            "2/round + 1 puff per {MG_SMOKE_EVERY}"
+        );
+    }
+
+    /// A stale remote shot (catch-up beyond ~250 ms) skips the dressing rather than playing late —
+    /// both guns.
     #[test]
     fn stale_remote_fire_skips_dressing() {
         let mut app = harness();
         fire(&mut app, 0.088, STALE_FIRE_TICKS + 1);
         assert_eq!(billboards(&mut app), 0);
+        assert_eq!(lights(&mut app), 0);
+        fire(&mut app, MG_CALIBER, STALE_FIRE_TICKS + 1);
+        assert_eq!(billboards(&mut app), 0, "stale MG burst skips too");
         assert_eq!(lights(&mut app), 0);
         // At or under the boundary the dressing still plays (~150 ms catch-up is the normal case).
         fire(&mut app, 0.088, STALE_FIRE_TICKS);
