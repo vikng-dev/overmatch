@@ -238,6 +238,7 @@ mod tests {
         app.world_mut().trigger(Impact {
             position: Vec3::ZERO,
             normal: Vec3::Y,
+            caliber: 0.088,
         });
         app.world_mut().flush();
         assert_eq!(marker_count(&mut app), 0);
@@ -251,6 +252,7 @@ mod tests {
             app.world_mut().trigger(Impact {
                 position: Vec3::ZERO,
                 normal: Vec3::Y,
+                caliber: 0.088,
             });
             app.world_mut().flush();
         }

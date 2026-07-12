@@ -482,6 +482,11 @@ pub(crate) struct Impact {
     /// sparks/dust along it (`vfx::impact`); not guaranteed unit-length in degenerate hits, so
     /// consumers normalize with a fallback.
     pub(crate) normal: Vec3,
+    /// The striking round's caliber (m) — the physical scale the view read branches on: the MG's
+    /// tiny 0.0079 m spark-ping vs the 88's 0.088 m dirt fountain (`vfx::impact` splits on
+    /// [`TRACER_MAX_CALIBER`]). Already in scope at every trigger (rides `FireShell`), so carrying
+    /// it here costs nothing; `Impact` stays local-never-replicated, so this is NOT a wire change.
+    pub(crate) caliber: f32,
 }
 
 /// One crossing's share of a shell's momentum, handed to the struck volume's owning body:
@@ -640,6 +645,7 @@ fn on_fire_shell(
                 commands.trigger(Impact {
                     position: fire.origin + Vec3::from(dir) * (EPS + hit.distance),
                     normal: hit.normal,
+                    caliber: fire.caliber,
                 });
                 return;
             }
@@ -827,6 +833,7 @@ fn integrate_projectiles(
                 commands.trigger(Impact {
                     position: entry,
                     normal: hit.normal,
+                    caliber: projectile.caliber,
                 });
                 pos = entry;
                 stopped = true;
@@ -843,6 +850,7 @@ fn integrate_projectiles(
                 commands.trigger(Impact {
                     position: entry,
                     normal: hit.normal,
+                    caliber: projectile.caliber,
                 });
                 pos = entry;
                 stopped = true;
@@ -939,6 +947,7 @@ fn integrate_projectiles(
                 commands.trigger(Impact {
                     position: embed,
                     normal: Vec3::from(normal),
+                    caliber: projectile.caliber,
                 });
                 // Stopped: the body absorbs the full remaining momentum (v_out = 0).
                 if let Some(body) = body {

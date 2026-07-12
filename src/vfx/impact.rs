@@ -14,9 +14,14 @@
 //! every round that lands billows + pings + sparks, so a burst visibly walks across whatever it is
 //! hitting instead of one lone tracer arriving out of nowhere.
 //!
-//! `Impact` deliberately stays lean (position + normal, no caliber), so the 88 and the MG share
-//! one impact look; per-caliber/material differentiation (armor sparks vs dirt debris) is deferred
-//! rather than growing the event.
+//! The read now branches on the round's physical scale: `Impact` carries `caliber`, and at/above
+//! [`TRACER_MAX_CALIBER`] (the same big/small boundary the muzzle + tracer paths use) the 88 lands
+//! a full terrain SPLASH stack — contact flash, dirt ejecta, a tall dirt plume, a low dust ring, a
+//! lingering cloud, and a flat ground scar — instead of the MG's compact dust-ping-spark read. The
+//! scale is HONEST: the plume height/hang come from real large-caliber soil-strike footage, never
+//! from screen size or camera distance (owner doctrine 2026-07-12 — no fake viewer assistance). The
+//! MG path below [`TRACER_MAX_CALIBER`] is byte-for-byte the original small read. Armor-vs-terrain
+//! surface differentiation (spark-on-steel vs dirt) is still deferred.
 //!
 //! Strictly view-only (ADR-0014): subscribes to the sim's [`Impact`] event and spawns short-lived
 //! render entities that no sim system ever reads — safe on a predicting net client (the replica
@@ -24,14 +29,16 @@
 //! windowed client compositions (SP `ClientPlugin` and `NetClientPlugin`); the headless server and
 //! the scripted harness never mount it.
 
+use std::collections::VecDeque;
+
 use bevy::prelude::*;
 
-use crate::ballistics::Impact;
+use crate::ballistics::{Impact, TRACER_MAX_CALIBER};
 
 use super::ViewRng;
 use super::billboard::{
     BillboardRing, BillboardSpec, VfxBillboardMaterial, VfxParams, gradient_lut, spawn_billboard,
-    unit_quad,
+    spawn_billboard_ring, unit_quad,
 };
 
 // --- The dust billow (survey trick 7): the mass of the impact read. Alpha-blend so it darkens and
@@ -84,8 +91,68 @@ const SPARK_GLOW: f32 = 10.0;
 /// along the normal, 1 ≈ 45°).
 const SPARK_SPREAD: (f32, f32) = (0.15, 0.9);
 
+// --- The 88 terrain SPLASH (caliber ≥ TRACER_MAX_CALIBER): a large-caliber AP round striking soil.
+// Layered on the SAME billboard machinery (dirt-recolored LUTs, tall aspect for the plume, drift for
+// the rise) — no new systems, no new pipelines (every layer is the already-warmed Add flash or Blend
+// smoke pipeline). Physical scale from period gun-camera / range footage of big-AP soil strikes:
+// dirt fountains in the ~4–10 m band with ~1.5–2 s hang. Chosen here: a ~7.7 m plume (5.5 m size ×
+// 1.4 aspect) rising ~4.5 m/s over 1.8 s — mid-band, honest, NOT scaled to screen or range.
+
+/// Contact flash: a bright additive bloom at the instant of the strike (the round's kinetic flash +
+/// dust ignition). Big and brief — size (m), lifetime (s).
+const SPLASH_FLASH_SIZE: f32 = 2.3;
+const SPLASH_FLASH_LIFETIME: f32 = 0.05;
+
+/// Ejecta streaks: the spark-streak geometry recolored to dirt (Blend, not hot), thrown in an
+/// up-biased cone — clods and grit kicked off the strike. Count range, speed (m/s), lifetime (s),
+/// and how strongly the launch cone is pulled toward straight up (0 = along the normal, 1 = up).
+const EJECTA_COUNT: (u32, u32) = (8, 12);
+const EJECTA_SPEED: (f32, f32) = (7.0, 18.0);
+const EJECTA_LIFETIME: (f32, f32) = (0.25, 0.4);
+const EJECTA_UP_BIAS: f32 = 0.55;
+/// Ejecta streak stretch (seconds-of-travel → length) and width fraction — chunkier than the metal
+/// sparks (soil clods, not needles).
+const EJECTA_STRETCH: (f32, f32) = (0.03, 0.05);
+const EJECTA_WIDTH_RATIO: f32 = 0.28;
+
+/// Dirt plume: the tall central fountain — 1–2 blooming, rising, tall-aspect Blend billboards.
+/// Count, size ease (m, base — aspect makes it tall), the tall aspect (y > x), rise speed (m/s), and
+/// lifetime (s). Final height ≈ SPLASH_PLUME_SIZE.1 × aspect.y ≈ 7.7 m.
+const SPLASH_PLUME_COUNT: (u32, u32) = (1, 2);
+const SPLASH_PLUME_SIZE: (f32, f32) = (1.6, 5.5);
+const SPLASH_PLUME_ASPECT: Vec3 = Vec3::new(0.7, 1.4, 1.0);
+const SPLASH_PLUME_RISE: f32 = 4.5;
+const SPLASH_PLUME_LIFETIME: f32 = 1.8;
+
+/// Low dust ring: a wide, ground-hugging billboard that blooms outward along the surface — the dust
+/// skirt thrown flat off the strike. Size ease (m), lifetime (s), low alpha.
+const SPLASH_RING_SIZE: (f32, f32) = (1.0, 5.0);
+const SPLASH_RING_LIFETIME: f32 = 0.8;
+const SPLASH_RING_ALPHA: f32 = 0.4;
+
+/// Lingering dust cloud: the large, low-alpha brown haze that hangs after the fountain falls — the
+/// slowest layer. Size ease (m), lifetime (s), alpha.
+const SPLASH_CLOUD_SIZE: (f32, f32) = (3.0, 6.0);
+const SPLASH_CLOUD_LIFETIME: f32 = 3.0;
+const SPLASH_CLOUD_ALPHA: f32 = 0.35;
+
+/// Ground scar: one flat, ground-oriented disturbed-earth mark an 88 AP strike gouges. Footprint
+/// (m, square), lifetime (s, the slowest-fading layer). Lives in its OWN ring ([`GroundMarkRing`],
+/// cap [`GROUND_MARK_CAP`]) so a multi-second scar isn't evicted within a frame by the sub-second
+/// billboard storm sharing [`BILLBOARD_CAP`].
+const GROUND_MARK_SIZE: f32 = 2.0;
+const GROUND_MARK_LIFETIME: f32 = 6.0;
+/// The scar ring cap: a handful of recent gouges. Small — scars are rare (88-only) and long-lived.
+const GROUND_MARK_CAP: usize = 16;
+
+/// Independent eviction ring for the long-lived ground scars (see [`GROUND_MARK_CAP`]). Insulated
+/// from the shared [`BillboardRing`] so an MG storm filling that ring can't evict a fresh 88 scar.
+#[derive(Resource, Default)]
+pub(super) struct GroundMarkRing(pub VecDeque<Entity>);
+
 pub(super) fn plugin(app: &mut App) {
-    app.add_systems(Startup, setup_impact_assets)
+    app.init_resource::<GroundMarkRing>()
+        .add_systems(Startup, setup_impact_assets)
         // The ship impact read: a view-side subscriber to `ballistics`' sim `Impact` event
         // (ADR-0014) — the same seam the debug marker and the sandbox subscribe to. Dust/ping/sparks
         // ride the shared billboard ring + ager, so no impact-local ring or aging system is needed.
@@ -103,6 +170,10 @@ pub(super) struct ImpactAssets {
     ping_atlas: Handle<Image>,
     spark_atlas: Handle<Image>,
     spark_lut: Handle<Image>,
+    /// Earthy-brown palette for the 88 splash's dirt masses (plume/ring/cloud) and its dirt ejecta.
+    dirt_lut: Handle<Image>,
+    /// Darker scorched-earth palette for the flat ground scar.
+    scar_lut: Handle<Image>,
 }
 
 impl ImpactAssets {
@@ -151,6 +222,53 @@ impl ImpactAssets {
             alpha_mode: AlphaMode::Add,
         }
     }
+
+    /// A dirt-mass material for the 88 splash's plume/ring/cloud: the dust atlas recolored through
+    /// the earthy `dirt_lut`, alpha-blend occluding mass (glow.y = 0 — never additive), overall
+    /// `alpha` per layer. Shares the already-warmed Blend billboard pipeline.
+    fn dirt_material(&self, alpha: f32) -> VfxBillboardMaterial {
+        VfxBillboardMaterial {
+            params: VfxParams {
+                frame: Vec4::new(0.0, 2.0, 2.0, 0.0),
+                fade: Vec4::new(0.0, 2.2, 0.0, alpha),
+                glow: Vec4::new(0.0, 0.0, 0.0, 0.0),
+            },
+            atlas: self.dust_atlas.clone(),
+            lut: self.dirt_lut.clone(),
+            alpha_mode: AlphaMode::Blend,
+        }
+    }
+
+    /// The dirt-ejecta material: the spark-streak geometry recolored to dirt (Blend, no glow — soil
+    /// clods are lit mass, not hot metal). Same Blend pipeline as the dust masses.
+    fn ejecta_material(&self) -> VfxBillboardMaterial {
+        VfxBillboardMaterial {
+            params: VfxParams {
+                frame: Vec4::new(0.0, 2.0, 2.0, 0.0),
+                fade: Vec4::new(0.0, 3.0, 0.0, 1.0),
+                glow: Vec4::new(0.0, 0.0, 0.0, 0.0),
+            },
+            atlas: self.spark_atlas.clone(),
+            lut: self.dirt_lut.clone(),
+            alpha_mode: AlphaMode::Blend,
+        }
+    }
+
+    /// The ground-scar material: the dust atlas pinned to its dirt frame (BR cell 3 of the 2×2 —
+    /// `dirt_03`, via a 4-frame/rate-0/start-3 spec) recolored dark through `scar_lut`, alpha-blend,
+    /// slow erosion so the gouge fades over its long life. Ground-oriented at spawn (fixed rotation).
+    fn ground_mark_material(&self) -> VfxBillboardMaterial {
+        VfxBillboardMaterial {
+            params: VfxParams {
+                frame: Vec4::new(3.0, 2.0, 2.0, 0.0),
+                fade: Vec4::new(0.0, 1.6, 0.0, 0.85),
+                glow: Vec4::new(0.0, 0.0, 0.0, 0.0),
+            },
+            atlas: self.dust_atlas.clone(),
+            lut: self.scar_lut.clone(),
+            alpha_mode: AlphaMode::Blend,
+        }
+    }
 }
 
 pub(super) fn setup_impact_assets(
@@ -180,6 +298,26 @@ pub(super) fn setup_impact_assets(
         let color = LinearRgba::rgb(x, x * (0.55 + 0.35 * cool), x * x * (0.12 + 0.5 * cool));
         (color, x * (0.35 + 0.65 * cool))
     });
+    // Dirt LUT for the 88 splash masses: an earthy brown, brighter/tanner where the sprite signal is
+    // strong (sunlit dirt face) sinking to a dark damp brown in shadow; darkening slightly as the
+    // cloud ages (Y). No heat — kicked soil is inert lit mass, never an emitter.
+    let dirt_lut = gradient_lut(&mut images, |x, y| {
+        let lum = 0.06 + 0.34 * x;
+        let age = 1.0 - y;
+        let color = LinearRgba::rgb(
+            lum * (0.78 + 0.30 * age),
+            lum * (0.58 + 0.20 * age),
+            lum * (0.40 + 0.12 * age),
+        );
+        (color, 0.0)
+    });
+    // Scar LUT: the same earth pulled much darker — a scorched, disturbed-earth gouge that reads as a
+    // stain on the terrain, not a bright decal. No heat.
+    let scar_lut = gradient_lut(&mut images, |x, _| {
+        let lum = 0.03 + 0.16 * x;
+        let color = LinearRgba::rgb(lum * 0.85, lum * 0.62, lum * 0.45);
+        (color, 0.0)
+    });
     commands.insert_resource(ImpactAssets {
         quad: unit_quad(&mut meshes),
         dust_atlas: asset_server.load("vfx/impact_dust.png"),
@@ -189,35 +327,82 @@ pub(super) fn setup_impact_assets(
         ping_atlas: asset_server.load("vfx/mg_core.png"),
         spark_atlas: asset_server.load("vfx/spark_atlas.png"),
         spark_lut,
+        dirt_lut,
+        scar_lut,
     });
 }
 
-/// Drop the layered read at each shell impact — every round, tracer or not: the impact is what makes
-/// the four invisible non-tracer rounds of the belt cycle read at the target. Dust billow (mass) +
-/// ping (contact flash) + a few sparks (crisp garnish), all on the shared billboard ring.
+/// Drop the layered read at each shell impact — branching on the round's physical caliber. At/above
+/// [`TRACER_MAX_CALIBER`] the 88 lands the big terrain splash ([`spawn_big_splash`]); below it, the
+/// MG's compact dust-ping-spark read ([`spawn_small_impact`], byte-for-byte the original). `normal`
+/// is resolved once, before either path draws RNG, so the small path's RNG sequence is unchanged.
 fn spawn_impact_read(
     impact: On<Impact>,
     assets: Res<ImpactAssets>,
     mut materials: ResMut<Assets<VfxBillboardMaterial>>,
     mut ring: ResMut<BillboardRing>,
+    mut ground_ring: ResMut<GroundMarkRing>,
     mut rng: ResMut<ViewRng>,
     camera: Query<&GlobalTransform, With<Camera3d>>,
     mut commands: Commands,
 ) {
     let normal = impact.normal.try_normalize().unwrap_or(Vec3::Y);
+    let to_camera = camera
+        .single()
+        .map(|cam| cam.translation() - impact.position)
+        .unwrap_or(Vec3::Z);
+    if impact.caliber >= TRACER_MAX_CALIBER {
+        spawn_big_splash(
+            impact.position,
+            normal,
+            to_camera,
+            &assets,
+            &mut materials,
+            &mut ring,
+            &mut ground_ring,
+            &mut rng,
+            &mut commands,
+        );
+    } else {
+        spawn_small_impact(
+            impact.position,
+            normal,
+            to_camera,
+            &assets,
+            &mut materials,
+            &mut ring,
+            &mut rng,
+            &mut commands,
+        );
+    }
+}
 
+/// The MG / small-caliber read (byte-for-byte the original `spawn_impact_read` body): dust billow
+/// (mass) + ping (contact flash) + a few sparks (crisp garnish), all on the shared billboard ring.
+/// This is what makes the four invisible non-tracer rounds of the belt cycle register at the target.
+#[allow(clippy::too_many_arguments)]
+fn spawn_small_impact(
+    position: Vec3,
+    normal: Vec3,
+    to_camera: Vec3,
+    assets: &ImpactAssets,
+    materials: &mut Assets<VfxBillboardMaterial>,
+    ring: &mut BillboardRing,
+    rng: &mut ViewRng,
+    commands: &mut Commands,
+) {
     // --- Dust billow: one alpha-blended eroding billboard, random frame/roll/spin, blooming and
     // drifting out along the surface normal (with a gentle rise).
     let dust_size = rng.range(DUST_SIZE.0, DUST_SIZE.1);
     spawn_billboard(
-        &mut commands,
-        &mut materials,
-        &mut ring,
+        commands,
+        materials,
+        ring,
         assets.quad.clone(),
         BillboardSpec {
             material: assets.dust_material(),
             lifetime: rng.range(DUST_LIFETIME.0, DUST_LIFETIME.1),
-            origin: impact.position + normal * (DUST_SIZE.0 * 0.5),
+            origin: position + normal * (DUST_SIZE.0 * 0.5),
             drift: normal * DUST_NORMAL_PUSH + Vec3::Y * DUST_RISE,
             frames: 4,
             start_frame: rng.range(0.0, 4.0),
@@ -234,14 +419,14 @@ fn spawn_impact_read(
 
     // --- Ping: one small additive round glow at the hit point, 1–2 frames — the instant of contact.
     spawn_billboard(
-        &mut commands,
-        &mut materials,
-        &mut ring,
+        commands,
+        materials,
+        ring,
         assets.quad.clone(),
         BillboardSpec {
             material: assets.ping_material(),
             lifetime: PING_LIFETIME,
-            origin: impact.position + normal * 0.05,
+            origin: position + normal * 0.05,
             drift: Vec3::ZERO,
             frames: 1,
             start_frame: 0.0,
@@ -260,10 +445,6 @@ fn spawn_impact_read(
     // normal falls back to straight up — sparks off the ground still read). Each is a fixed-
     // orientation billboard elongated along its own flight direction, drifting at launch speed;
     // erosion + the LUT's cooling row kill it as a dim ember.
-    let to_camera = camera
-        .single()
-        .map(|cam| cam.translation() - impact.position)
-        .unwrap_or(Vec3::Z);
     let (tan_a, tan_b) = normal.any_orthonormal_pair();
     let count =
         SPARK_COUNT.0 + (rng.next_f32() * (SPARK_COUNT.1 - SPARK_COUNT.0 + 1) as f32) as u32;
@@ -274,14 +455,14 @@ fn spawn_impact_read(
         let speed = rng.range(SPARK_SPEED.0, SPARK_SPEED.1);
         let length = speed * rng.range(SPARK_STRETCH.0, SPARK_STRETCH.1);
         spawn_billboard(
-            &mut commands,
-            &mut materials,
-            &mut ring,
+            commands,
+            materials,
+            ring,
             assets.quad.clone(),
             BillboardSpec {
                 material: assets.spark_material(),
                 lifetime: rng.range(SPARK_LIFETIME.0, SPARK_LIFETIME.1),
-                origin: impact.position + dir * (length * 0.5),
+                origin: position + dir * (length * 0.5),
                 drift: dir * speed,
                 frames: 4,
                 start_frame: rng.range(0.0, 4.0),
@@ -296,6 +477,201 @@ fn spawn_impact_read(
             },
         );
     }
+}
+
+/// The 88 terrain SPLASH (caliber ≥ TRACER_MAX_CALIBER): the layered large-caliber soil-strike read.
+/// Contact flash → dirt ejecta → tall dirt plume → low dust ring → lingering cloud on the shared
+/// ring, plus one flat ground scar in its own ring. Physical scale (module doc), not screen-relative.
+#[allow(clippy::too_many_arguments)]
+fn spawn_big_splash(
+    position: Vec3,
+    normal: Vec3,
+    to_camera: Vec3,
+    assets: &ImpactAssets,
+    materials: &mut Assets<VfxBillboardMaterial>,
+    ring: &mut BillboardRing,
+    ground_ring: &mut GroundMarkRing,
+    rng: &mut ViewRng,
+    commands: &mut Commands,
+) {
+    let (tan_a, tan_b) = normal.any_orthonormal_pair();
+
+    // --- Contact flash: one big additive bloom at the strike, gone in a frame or two.
+    spawn_billboard(
+        commands,
+        materials,
+        ring,
+        assets.quad.clone(),
+        BillboardSpec {
+            material: assets.ping_material(),
+            lifetime: SPLASH_FLASH_LIFETIME,
+            origin: position + normal * 0.1,
+            drift: Vec3::ZERO,
+            frames: 1,
+            start_frame: 0.0,
+            frame_rate: 0.0,
+            start_size: SPLASH_FLASH_SIZE,
+            end_size: SPLASH_FLASH_SIZE * 0.8,
+            aspect: Vec3::ONE,
+            roll: rng.range(0.0, std::f32::consts::TAU),
+            spin: 0.0,
+            erosion_end: 0.0,
+            rotation: None,
+        },
+    );
+
+    // --- Ejecta streaks: soil clods thrown in an up-biased cone (blend the normal toward straight up
+    // by EJECTA_UP_BIAS, then spread), each a dirt-recolored stretched streak flying at launch speed.
+    let up_axis = (normal * (1.0 - EJECTA_UP_BIAS) + Vec3::Y * EJECTA_UP_BIAS)
+        .try_normalize()
+        .unwrap_or(Vec3::Y);
+    let count =
+        EJECTA_COUNT.0 + (rng.next_f32() * (EJECTA_COUNT.1 - EJECTA_COUNT.0 + 1) as f32) as u32;
+    for _ in 0..count.min(EJECTA_COUNT.1) {
+        let theta = rng.range(0.0, std::f32::consts::TAU);
+        let spread = rng.range(SPARK_SPREAD.0, SPARK_SPREAD.1);
+        let dir = (up_axis + (tan_a * theta.cos() + tan_b * theta.sin()) * spread).normalize();
+        let speed = rng.range(EJECTA_SPEED.0, EJECTA_SPEED.1);
+        let length = speed * rng.range(EJECTA_STRETCH.0, EJECTA_STRETCH.1);
+        spawn_billboard(
+            commands,
+            materials,
+            ring,
+            assets.quad.clone(),
+            BillboardSpec {
+                material: assets.ejecta_material(),
+                lifetime: rng.range(EJECTA_LIFETIME.0, EJECTA_LIFETIME.1),
+                origin: position + dir * (length * 0.5),
+                drift: dir * speed,
+                frames: 4,
+                start_frame: rng.range(0.0, 4.0),
+                frame_rate: 0.0,
+                start_size: length,
+                end_size: length * 0.7,
+                aspect: Vec3::new(EJECTA_WIDTH_RATIO, 1.0, 1.0),
+                roll: 0.0,
+                spin: 0.0,
+                erosion_end: 1.0,
+                rotation: Some(spark_orientation(dir, to_camera)),
+            },
+        );
+    }
+
+    // --- Dirt plume: 1–2 tall camera-facing dirt columns rising off the strike, blooming to full
+    // height over their life then eroding out.
+    let plumes = SPLASH_PLUME_COUNT.0
+        + (rng.next_f32() * (SPLASH_PLUME_COUNT.1 - SPLASH_PLUME_COUNT.0 + 1) as f32) as u32;
+    for _ in 0..plumes.min(SPLASH_PLUME_COUNT.1) {
+        spawn_billboard(
+            commands,
+            materials,
+            ring,
+            assets.quad.clone(),
+            BillboardSpec {
+                material: assets.dirt_material(0.7),
+                lifetime: SPLASH_PLUME_LIFETIME,
+                origin: position + normal * (SPLASH_PLUME_SIZE.0 * 0.5),
+                drift: Vec3::Y * SPLASH_PLUME_RISE,
+                frames: 4,
+                start_frame: rng.range(0.0, 4.0),
+                frame_rate: 0.0,
+                start_size: SPLASH_PLUME_SIZE.0,
+                end_size: SPLASH_PLUME_SIZE.1,
+                aspect: SPLASH_PLUME_ASPECT,
+                roll: rng.range(-0.2, 0.2),
+                spin: 0.0,
+                erosion_end: 1.0,
+                rotation: None,
+            },
+        );
+    }
+
+    // --- Low dust ring: a wide, ground-oriented skirt blooming outward flat off the strike.
+    spawn_billboard(
+        commands,
+        materials,
+        ring,
+        assets.quad.clone(),
+        BillboardSpec {
+            material: assets.dirt_material(SPLASH_RING_ALPHA),
+            lifetime: SPLASH_RING_LIFETIME,
+            origin: position + normal * 0.1,
+            drift: Vec3::ZERO,
+            frames: 4,
+            start_frame: rng.range(0.0, 4.0),
+            frame_rate: 0.0,
+            start_size: SPLASH_RING_SIZE.0,
+            end_size: SPLASH_RING_SIZE.1,
+            aspect: Vec3::ONE,
+            roll: 0.0,
+            spin: 0.0,
+            erosion_end: 1.0,
+            rotation: Some(ground_orientation(
+                normal,
+                rng.range(0.0, std::f32::consts::TAU),
+            )),
+        },
+    );
+
+    // --- Lingering cloud: the large, low-alpha brown haze that hangs after the fountain falls.
+    spawn_billboard(
+        commands,
+        materials,
+        ring,
+        assets.quad.clone(),
+        BillboardSpec {
+            material: assets.dirt_material(SPLASH_CLOUD_ALPHA),
+            lifetime: SPLASH_CLOUD_LIFETIME,
+            origin: position + normal * (SPLASH_CLOUD_SIZE.0 * 0.5) + Vec3::Y * 0.5,
+            drift: Vec3::Y * (SPLASH_PLUME_RISE * 0.15),
+            frames: 4,
+            start_frame: rng.range(0.0, 4.0),
+            frame_rate: 0.0,
+            start_size: SPLASH_CLOUD_SIZE.0,
+            end_size: SPLASH_CLOUD_SIZE.1,
+            aspect: Vec3::ONE,
+            roll: rng.range(0.0, std::f32::consts::TAU),
+            spin: 0.0,
+            erosion_end: 1.0,
+            rotation: None,
+        },
+    );
+
+    // --- Ground scar: one flat, ground-oriented gouge on the terrain — its OWN long-lived ring so it
+    // isn't evicted within a frame by the sub-second billboard storm sharing BILLBOARD_CAP.
+    spawn_billboard_ring(
+        commands,
+        materials,
+        &mut ground_ring.0,
+        GROUND_MARK_CAP,
+        assets.quad.clone(),
+        BillboardSpec {
+            material: assets.ground_mark_material(),
+            lifetime: GROUND_MARK_LIFETIME,
+            origin: position + normal * 0.05,
+            drift: Vec3::ZERO,
+            frames: 4,
+            start_frame: 3.0,
+            frame_rate: 0.0,
+            start_size: GROUND_MARK_SIZE,
+            end_size: GROUND_MARK_SIZE * 1.1,
+            aspect: Vec3::ONE,
+            roll: 0.0,
+            spin: 0.0,
+            erosion_end: 1.0,
+            rotation: Some(ground_orientation(
+                normal,
+                rng.range(0.0, std::f32::consts::TAU),
+            )),
+        },
+    );
+}
+
+/// Orientation for a flat, ground-lying billboard: turn the quad's +Z (its face normal) onto the
+/// surface `normal` so it lies ON the terrain (not camera-facing), then roll it by `roll` around
+/// that normal for per-instance variety. `normal` must be unit-length.
+fn ground_orientation(normal: Vec3, roll: f32) -> Quat {
+    Quat::from_rotation_arc(Vec3::Z, normal) * Quat::from_rotation_z(roll)
 }
 
 /// Orientation for a stretched spark: quad +Y along the flight direction, quad normal (+Z) turned
@@ -318,12 +694,18 @@ mod tests {
 
     use crate::vfx::billboard::{BILLBOARD_CAP, Billboard, FaceCamera};
 
+    /// An MG-belt round: below TRACER_MAX_CALIBER, so the small dust-ping-spark read.
+    const MG_CALIBER: f32 = 0.0079;
+    /// The 88's AP round: at/above TRACER_MAX_CALIBER, so the big terrain splash.
+    const BIG_CALIBER: f32 = 0.088;
+
     /// Minimal app carrying what the impact observer reads. Real `Assets` stores (initialized bare,
     /// no asset plugins) so the per-billboard material clones run for real; fixed-seed view RNG; no
     /// camera (spark facing falls back).
     fn harness() -> App {
         let mut app = App::new();
         app.init_resource::<BillboardRing>()
+            .init_resource::<GroundMarkRing>()
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<VfxBillboardMaterial>>()
             .init_resource::<Time>()
@@ -336,14 +718,17 @@ mod tests {
             ping_atlas: Handle::default(),
             spark_atlas: Handle::default(),
             spark_lut: Handle::default(),
+            dirt_lut: Handle::default(),
+            scar_lut: Handle::default(),
         });
         app
     }
 
-    fn trigger_impact(app: &mut App, normal: Vec3) {
+    fn trigger_impact(app: &mut App, normal: Vec3, caliber: f32) {
         app.world_mut().trigger(Impact {
             position: Vec3::ZERO,
             normal,
+            caliber,
         });
         app.world_mut().flush();
     }
@@ -371,13 +756,13 @@ mod tests {
             .collect()
     }
 
-    /// One impact spawns the full layered read: a dust billow + a ping + 2–4 sparks, all on the
-    /// shared billboard ring. The dust and ping are the aspect-1 camera facers; the sparks are the
-    /// needle streaks.
+    /// One MG-caliber impact spawns the full small read: a dust billow + a ping + 2–4 sparks, all on
+    /// the shared billboard ring, and NO ground scar (scars are 88-only). The dust and ping are the
+    /// aspect-1 camera facers; the sparks are the needle streaks.
     #[test]
     fn every_impact_spawns_the_layered_read() {
         let mut app = harness();
-        trigger_impact(&mut app, Vec3::Y);
+        trigger_impact(&mut app, Vec3::Y, MG_CALIBER);
         let total = billboards(&mut app);
         let spark_n = sparks(&mut app).len();
         assert!(
@@ -389,11 +774,69 @@ mod tests {
             spark_n + 2,
             "layered read = dust + ping + {spark_n} sparks"
         );
+        assert_eq!(
+            app.world().resource::<GroundMarkRing>().0.len(),
+            0,
+            "the MG read leaves no ground scar"
+        );
         // Exactly two camera-facing aspect-1 elements: the dust billow and the ping.
         let world = app.world_mut();
         let mut q = world.query_filtered::<&Billboard, With<FaceCamera>>();
         let facers = q.iter(world).filter(|b| b.aspect.x > 0.5).count();
         assert_eq!(facers, 2, "dust billow + ping face the camera");
+    }
+
+    /// The 88 (big caliber) lands the full terrain splash instead: contact flash, 8–12 dirt ejecta,
+    /// 1–2 plumes, a dust ring, and a lingering cloud on the shared ring, PLUS exactly one flat
+    /// ground scar in its OWN ring, lying on the surface (its +Z turned onto the normal).
+    #[test]
+    fn big_caliber_spawns_the_splash_stack() {
+        let mut app = harness();
+        trigger_impact(&mut app, Vec3::Y, BIG_CALIBER);
+
+        // Exactly one ground scar, in its independent ring, flat on the terrain (not camera-facing).
+        let ground = app.world().resource::<GroundMarkRing>().0.clone();
+        assert_eq!(ground.len(), 1, "one 88 ground scar in its own ring");
+        let scar = ground[0];
+        assert!(
+            app.world().get::<FaceCamera>(scar).is_none(),
+            "the ground scar lies flat, never camera-facing"
+        );
+        let rot = app
+            .world()
+            .get::<Transform>(scar)
+            .expect("scar transform")
+            .rotation;
+        assert!(
+            rot.mul_vec3(Vec3::Z).dot(Vec3::Y) > 0.99,
+            "the scar's face lies on the terrain normal"
+        );
+
+        // The shared-ring stack: flash(1) + ejecta(8–12) + plume(1–2) + ring(1) + cloud(1).
+        let lo = 1 + EJECTA_COUNT.0 as usize + SPLASH_PLUME_COUNT.0 as usize + 2;
+        let hi = 1 + EJECTA_COUNT.1 as usize + SPLASH_PLUME_COUNT.1 as usize + 2;
+        let shared = app.world().resource::<BillboardRing>().0.len();
+        assert!(
+            (lo..=hi).contains(&shared),
+            "big splash stack size {shared} outside {lo}..={hi}"
+        );
+        // Total billboards = the shared stack plus the one scar (its own ring).
+        assert_eq!(billboards(&mut app), shared + 1, "stack + the ground scar");
+    }
+
+    /// The ground scars ride their OWN eviction ring, bounded by GROUND_MARK_CAP — insulated from the
+    /// shared billboard ring so a storm can't evict a fresh multi-second scar within a frame.
+    #[test]
+    fn ground_scars_are_ring_capped() {
+        let mut app = harness();
+        for _ in 0..GROUND_MARK_CAP + 8 {
+            trigger_impact(&mut app, Vec3::Y, BIG_CALIBER);
+        }
+        assert_eq!(
+            app.world().resource::<GroundMarkRing>().0.len(),
+            GROUND_MARK_CAP,
+            "ground scars stay bounded by their own cap"
+        );
     }
 
     /// The sparks all kick AWAY from the surface (positive component along the hit normal), each
@@ -403,7 +846,7 @@ mod tests {
     fn impacts_spark_along_the_normal() {
         let mut app = harness();
         let normal = Vec3::new(0.3, 0.9, -0.1).normalize();
-        trigger_impact(&mut app, normal);
+        trigger_impact(&mut app, normal, MG_CALIBER);
         let sparks = sparks(&mut app);
         assert!(!sparks.is_empty(), "an impact must throw sparks");
         for (drift, axis_alignment) in sparks {
@@ -424,7 +867,7 @@ mod tests {
     #[test]
     fn degenerate_normal_falls_back_up() {
         let mut app = harness();
-        trigger_impact(&mut app, Vec3::ZERO);
+        trigger_impact(&mut app, Vec3::ZERO, MG_CALIBER);
         let sparks = sparks(&mut app);
         assert!(sparks.len() >= SPARK_COUNT.0 as usize);
         for (drift, _) in sparks {
@@ -438,7 +881,7 @@ mod tests {
     fn impact_storm_is_ring_capped() {
         let mut app = harness();
         for _ in 0..200 {
-            trigger_impact(&mut app, Vec3::Y);
+            trigger_impact(&mut app, Vec3::Y, MG_CALIBER);
         }
         let ring_len = app.world().resource::<BillboardRing>().0.len();
         assert_eq!(

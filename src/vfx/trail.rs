@@ -51,10 +51,18 @@ const TRAIL_DRIFT_RISE: f32 = 0.35;
 /// Live-trail ring cap (the 88 reloads in 3 s and trails outlive shells by ~2 s, so >2 live trails
 /// per gun is already a refire storm).
 const TRAIL_CAP: usize = 8;
-/// Arc length (m) over which the trail fades IN from the muzzle end (survey stage 1): the birth seam
-/// at the gun softens over the first stretch, and the oldest end pinches (both width and alpha)
-/// instead of ending as a hard tube cap. The muzzle puff masks whatever the fade leaves.
-const HEAD_FADE_ARC: f32 = 25.0;
+/// Arc length (m) from the muzzle below which the ribbon emits NO geometry at all. Looking down the
+/// trail axis from the gunner's seat, the near-muzzle quads overlap in screen space and their
+/// individually-low alphas stack back-to-front — semi-transparent geometry at the barrel still
+/// reads as smoke at the barrel. The fix is honest absence: the shell's trail only begins a few
+/// metres out (real behaviour — propellant smoke AT the muzzle belongs to the muzzle PUFF, which
+/// exists and lives ~1.2 s). The ribbon's near end is pinned at exactly this arc by interpolating a
+/// boundary station onto it, so it doesn't pop by a station as points expire.
+const TRAIL_START_ARC: f32 = 10.0;
+/// Arc length (m) over which the trail fades IN (width AND alpha) past [`TRAIL_START_ARC`]: the near
+/// end is a pinched-to-nothing wisp at the start arc, easing to full over this stretch — a taper,
+/// not a hard tube cap. The muzzle puff masks the gap between barrel and start arc.
+const HEAD_FADE_ARC: f32 = 20.0;
 
 pub(super) fn plugin(app: &mut App) {
     app.init_resource::<TrailRing>()
@@ -371,7 +379,48 @@ fn ribbon_vertices(
         seeds.push(seeds.last().copied().unwrap_or(0.0));
     }
 
+    // Cut everything closer to the muzzle than TRAIL_START_ARC — that near-barrel smoke is the
+    // muzzle puff's job, not the trail's (module doc / TRAIL_START_ARC). Find the first station at
+    // or past the start arc; if a station precedes it, splice in a boundary station at EXACTLY the
+    // start arc (interpolated between the straddling pair) so the ribbon's near end stays pinned
+    // there instead of jumping by a whole station as near-muzzle points age out.
+    let n_full = centers.len();
+    let start_idx = arcs
+        .iter()
+        .position(|&a| a >= TRAIL_START_ARC)
+        .unwrap_or(n_full);
+    let cap = n_full - start_idx + 1;
+    let mut e_centers = Vec::with_capacity(cap);
+    let mut e_ages = Vec::with_capacity(cap);
+    let mut e_arcs = Vec::with_capacity(cap);
+    let mut e_seeds = Vec::with_capacity(cap);
+    if start_idx < n_full {
+        if start_idx > 0 {
+            let (a, b) = (start_idx - 1, start_idx);
+            let span = arcs[b] - arcs[a];
+            let t = if span > 1e-4 {
+                (TRAIL_START_ARC - arcs[a]) / span
+            } else {
+                0.0
+            };
+            e_centers.push(centers[a].lerp(centers[b], t));
+            e_ages.push(ages[a] + (ages[b] - ages[a]) * t);
+            e_arcs.push(TRAIL_START_ARC);
+            e_seeds.push(seeds[b]);
+        }
+        e_centers.extend_from_slice(&centers[start_idx..]);
+        e_ages.extend_from_slice(&ages[start_idx..]);
+        e_arcs.extend_from_slice(&arcs[start_idx..]);
+        e_seeds.extend_from_slice(&seeds[start_idx..]);
+    }
+    let (centers, ages, arcs, seeds) = (e_centers, e_ages, e_arcs, e_seeds);
+
     let n = centers.len();
+    if n < 2 {
+        // The whole trail is still inside the start arc (the shell has barely cleared the muzzle):
+        // no ribbon yet, the muzzle puff carries the read.
+        return (Vec::new(), Vec::new(), Vec::new());
+    }
     let mut positions = Vec::with_capacity(n * 2);
     let mut uvs = Vec::with_capacity(n * 2);
     let mut colors = Vec::with_capacity(n * 2);
@@ -392,12 +441,13 @@ fn ribbon_vertices(
             .try_normalize()
             .unwrap_or(last_side);
         last_side = side;
-        // Arc-anchored fade toward the muzzle end (stage 1a): 0 at the origin, easing to 1 over the
-        // first HEAD_FADE_ARC metres.
-        let fade = smoothstep(0.0, HEAD_FADE_ARC, arcs[i]);
-        // Width taper toward the muzzle (stage 1b): the age-grown half-width is pinched to a quarter
-        // at the origin, back to full past the fade — a lens/wisp, not a tube.
-        let half = 0.5 * (TRAIL_WIDTH_BIRTH + ages[i] * TRAIL_WIDTH_GROWTH) * (0.25 + 0.75 * fade);
+        // Arc-anchored fade in from the start arc (stage 1a): 0 at TRAIL_START_ARC (the near end,
+        // where geometry now begins), easing to 1 over the next HEAD_FADE_ARC metres.
+        let fade = smoothstep(TRAIL_START_ARC, TRAIL_START_ARC + HEAD_FADE_ARC, arcs[i]);
+        // Width taper from the near end (stage 1b): the age-grown half-width is pinched to ~nothing
+        // at the start arc (no 0.25 floor — the near end is an honest wisp point), back to full past
+        // the fade. A lens/taper, not a tube with a hard cap.
+        let half = 0.5 * (TRAIL_WIDTH_BIRTH + ages[i] * TRAIL_WIDTH_GROWTH) * fade;
         // color.a is the head fade alone (the shader multiplies alpha by it). A view-parallel dim
         // once lived here (stage 1c) but was removed: from any behind-the-gun camera, distance itself
         // aligns receding segments with the view axis (a 100 m segment is <2° off it), so the dim
@@ -516,53 +566,80 @@ mod tests {
         }
     }
 
-    /// The strip math: 2 vertices per station (stored points + the live head), 6 indices per quad,
-    /// V anchored to capture-time arc length, the stage-1 lens/wisp width profile (age grows it, the
-    /// muzzle-end fade pinches it), the head-fade alpha lane, and degenerate inputs yielding empty
-    /// buffers instead of panicking.
+    /// The strip math after the start-arc cut: 2 vertices per station, 6 indices per quad, NO
+    /// geometry inside TRAIL_START_ARC (the near-muzzle station is dropped and replaced by an
+    /// interpolated boundary pinned at exactly the start arc), the near end a width-and-alpha wisp
+    /// easing to full over HEAD_FADE_ARC, and the head (age 0) narrowed by the age term.
     #[test]
     fn ribbon_vertices_shape_and_taper() {
+        // arc 5 is inside the start arc (dropped); the others straddle/clear it.
         let points = vec![
-            point(Vec3::ZERO, 1.0, 0.0),
-            point(Vec3::X * 15.0, 0.5, 15.0),
-            point(Vec3::X * 30.0, 0.1, 30.0),
+            point(Vec3::X * 5.0, 1.0, 5.0),
+            point(Vec3::X * 20.0, 0.8, 20.0),
+            point(Vec3::X * 40.0, 0.4, 40.0),
         ];
-        let head = Some(Vec3::X * 40.0);
-        let cam = Vec3::new(15.0, 20.0, 40.0);
+        let head = Some(Vec3::X * 50.0); // head arc = 40 + 10 = 50
+        let cam = Vec3::new(20.0, 20.0, 40.0);
         let (positions, uvs, colors) = ribbon_vertices(&points, head, cam);
-        assert_eq!(positions.len(), 8, "2 verts per station, head included");
+        // Emitted: boundary(arc 10) + arc 20 + arc 40 + head(arc 50) = 4 stations. The arc-5
+        // station is gone, spliced into the boundary.
+        assert_eq!(positions.len(), 8, "boundary + 2 kept points + head");
+        // No emitted vertex lives inside the start arc.
+        for uv in &uvs {
+            assert!(
+                uv[1] >= TRAIL_START_ARC,
+                "no geometry emitted inside TRAIL_START_ARC (got arc {})",
+                uv[1]
+            );
+        }
         let width_at = |i: usize| {
             let a = Vec3::from(positions[i * 2]);
             let b = Vec3::from(positions[i * 2 + 1]);
             a.distance(b)
         };
-        // Lens/wisp profile: the mid station is widest — the muzzle end (arc 0) is pinched by the
-        // fade, and the head (age 0) narrows by the age term.
+        // Near end is a pinched-to-nothing wisp (fade = 0 at the start arc), widening outward.
+        assert_eq!(width_at(0), 0.0, "the near end is pinched to zero width");
         assert!(
             width_at(1) > width_at(0),
-            "the muzzle end is pinched (fade)"
+            "width fades in past the start arc"
         );
-        assert!(width_at(1) > width_at(3), "the mid is wider than the head");
+        assert!(width_at(2) > width_at(1), "still widening across the fade");
+        // The head (age 0) is narrower than the same-full-fade older station just behind it.
         assert!(
             width_at(2) > width_at(3),
-            "the head (age 0) is narrowest at the fresh end"
+            "the head (age 0) narrows by the age term"
         );
-        // V rides the capture-time arc, monotonic toward the head.
-        assert_eq!(uvs[0][1], 0.0);
-        assert_eq!(uvs[2][1], 15.0);
+        // V rides the capture-time arc: it now STARTS at the boundary arc, monotonic to the head.
+        assert_eq!(
+            uvs[0][1], TRAIL_START_ARC,
+            "near end pinned at the start arc"
+        );
+        assert_eq!(uvs[2][1], 20.0);
         assert!(
             uvs[6][1] > uvs[4][1],
             "head arc extends past the last point"
         );
-        // The age lane feeds the shader's erosion: oldest ≈ eroded, head fresh.
+        // The age lane feeds the shader's erosion: the near (older) end eroded, head fresh.
         assert!(colors[0][0] > 0.4 && colors[6][0] == 0.0);
-        // The alpha lane is the head fade ALONE (no view-parallel dim): fully transparent at the
-        // muzzle end (arc 0), and exactly full alpha past HEAD_FADE_ARC regardless of view angle —
-        // the arc-30 station sits past the 25 m fade even though it is near-parallel to this camera.
-        assert_eq!(colors[0][3], 0.0, "muzzle-end fade is fully in");
+        // The alpha lane is the arc fade ALONE (no view-parallel dim): fully transparent at the near
+        // end (the start arc), full alpha past TRAIL_START_ARC + HEAD_FADE_ARC (arc 40 clears 30 m)
+        // regardless of view angle.
+        assert_eq!(colors[0][3], 0.0, "near-end fade is fully in");
         assert_eq!(
             colors[4][3], 1.0,
-            "past HEAD_FADE_ARC the trail is at full alpha (fade only, never view-dimmed)"
+            "past the fade window the trail is at full alpha (fade only, never view-dimmed)"
+        );
+
+        // A trail still entirely inside the start arc builds NOTHING (the shell just cleared the
+        // muzzle — the puff carries it).
+        let inside = vec![
+            point(Vec3::X * 2.0, 0.5, 2.0),
+            point(Vec3::X * 6.0, 0.3, 6.0),
+        ];
+        let (p, _, _) = ribbon_vertices(&inside, Some(Vec3::X * 8.0), cam);
+        assert!(
+            p.is_empty(),
+            "no geometry until the trail clears the start arc"
         );
 
         // Degenerate: one station (or none) builds nothing.
