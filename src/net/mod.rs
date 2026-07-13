@@ -11,6 +11,7 @@ mod contact_probe;
 mod death_screen;
 mod debug_hud;
 mod diagnostics;
+mod disclosure;
 mod harness;
 mod hit_feel;
 mod physics;
@@ -23,6 +24,7 @@ mod server;
 /// Test-only — it exists to close the model-vs-reality gap the redundancy unit tests leave open.
 #[cfg(test)]
 mod shot_loss;
+mod shot_transport;
 mod watchdog;
 
 /// Run the predicted network client.

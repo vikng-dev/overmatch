@@ -8,7 +8,7 @@
 use avian3d::prelude::{Forces, Position, Rotation, WriteRigidBodyForces};
 use bevy::prelude::*;
 
-use crate::ballistics::{FireShell, ShotSource};
+use crate::ballistics::{FireShell, FireShellOrigin, ShotSource};
 use crate::command::{ConsumeCommandEdges, TankCommand};
 use crate::damage::{TankVolumes, VolumeFacets, requirement_met};
 use crate::spec::{FireMode, Trigger};
@@ -165,7 +165,16 @@ fn tick_reload(
 /// and ballistics, gated by its `fire` requirement + fire timer (+ belt for an `Automatic`) — the
 /// gate lives here in the sim, where the server will enforce it, not in the input path.
 fn fire(
-    tanks: Query<(&TankCommand, Option<&TankVolumes>, &Position, &Rotation), With<Tank>>,
+    tanks: Query<
+        (
+            &TankCommand,
+            Option<&TankVolumes>,
+            &Position,
+            &Rotation,
+            Option<&crate::CombatantId>,
+        ),
+        With<Tank>,
+    >,
     volumes: Query<VolumeFacets>,
     weapons: Query<(Entity, &Weapon, &WeaponIndex, &TankRoot), With<Muzzle>>,
     mut sims: Query<&mut TankSim>,
@@ -179,11 +188,15 @@ fn fire(
     // (the forward tick already spawned it; the shell entity is not rolled back). Absent on the
     // authority (server/SP/sandbox never roll back), so it fires there unconditionally.
     replaying: Option<Res<crate::Replaying>>,
+    // Present only in a composed network app. `net::protocol` republishes the `LocalTimeline`
+    // before `GameplaySet`, so an attributed local FireShell is born with the identity that changes
+    // its ballistic hold/keyframe behaviour. Single-player and sandboxes deliberately have no clock.
+    shot_clock: Option<Res<crate::ShotClock>>,
     mut commands: Commands,
 ) {
     let replaying = replaying.is_some_and(|r| r.0);
     for (muzzle_entity, weapon, slot, root) in &weapons {
-        let Ok((command, tank_volumes, position, rotation)) = tanks.get(root.0) else {
+        let Ok((command, tank_volumes, position, rotation, combatant)) = tanks.get(root.0) else {
             continue;
         };
         // Input routing only — edge vs level is baked into the command fields themselves
@@ -264,12 +277,28 @@ fn fire(
         // round's `ShotId`. The sim mutations above/below (tracer counter, and belt/reload/recoil/hull
         // below) still run — they MUST replay for the rolled-back `TankSim` to re-derive exactly.
         if !replaying {
+            // The identity belongs to the event, not a later post-spawn repair: `on_fire_shell`
+            // includes it in the shell's initial bundle, so lifecycle observers and the first march
+            // see the same keyed state. A slot that cannot fit the wire's u8 has no network shot
+            // (the server likewise declines to broadcast it), and SP/sandbox have no clock.
+            let shot = shot_clock.as_ref().and_then(|clock| {
+                let combatant = combatant.expect(
+                    "network tank fired without spawn-complete CombatantId; immutable sim state \
+                     must arrive with the predicted root",
+                );
+                u8::try_from(slot.0).ok().map(|weapon| crate::ShotId {
+                    combatant: *combatant,
+                    weapon,
+                    fire_tick: clock.0,
+                })
+            });
             commands.trigger(FireShell {
                 origin: muzzle_position,
                 direction: bore,
                 speed: weapon.speed,
                 caliber: weapon.caliber,
                 mass: weapon.mass,
+                mechanism: weapon.fire_mode.mechanism(),
                 tracer,
                 // This shell belongs to a tank: name its root AND the firing weapon slot so the net
                 // server can broadcast the cosmetic tracer and the barrel-recoil cause to every OTHER
@@ -278,14 +307,10 @@ fn fire(
                     tank: root.0,
                     weapon: slot.0,
                 }),
+                shot_origin: FireShellOrigin::Local,
                 // Locally fired: the shell spawns at the muzzle THIS tick — no net catch-up.
                 catch_up_ticks: 0,
-                // The sim cannot read the fire tick (it lives in the netcode timeline), so `fire` never
-                // stamps the shot identity: on a net composition the shared `net::protocol::stamp_shot_ids`
-                // completes it after spawn from the `ShotSource` above + the timeline — on the server AND
-                // on the shooter's own client, so the shooter's own round re-seeds from the server's
-                // ricochet keyframes too (the fall-of-shot read). Always `None` here.
-                shot: None,
+                shot,
             });
         }
         // Kick the barrel back (root-resident recoil state); apply_recoil springs it home. The
@@ -398,6 +423,7 @@ mod tests {
                     weapons: vec![WeaponState::for_mode(&MG_MODE)],
                     ..default()
                 },
+                crate::CombatantId(1),
             ))
             .id();
         let loader = world.spawn((CrewStation::Loader, VolumeOf(root))).id();
@@ -569,6 +595,52 @@ mod tests {
                 "tracer_every=0 never traces (round {n})"
             );
         }
+    }
+
+    /// A network composition publishes the current fixed tick before `GameplaySet`, so a local
+    /// firing event is born with the identity the server puts on its matching `FireEvent`. This is
+    /// the event seam: downstream observers must never see an attributed local round as unkeyed.
+    #[test]
+    fn locally_fired_shell_event_already_carries_its_shot_id() {
+        use crate::ballistics::FireShell;
+
+        #[derive(Resource, Default)]
+        struct FiredShot(Option<crate::ShotId>);
+
+        fn capture(fire: On<FireShell>, mut fired: ResMut<FiredShot>) {
+            fired.0 = fire.shot;
+        }
+
+        let mut world = World::new();
+        world.insert_resource(Time::<()>::default());
+        world.insert_resource(crate::ShotClock(81));
+        world.init_resource::<FiredShot>();
+        world.add_observer(capture);
+        let (_root, _) = spawn_mg_rig(&mut world, Vec::new());
+
+        world.run_system_once(fire).unwrap();
+
+        assert_eq!(
+            world.resource::<FiredShot>().0,
+            Some(crate::ShotId {
+                combatant: crate::CombatantId(1),
+                weapon: 0,
+                fire_tick: 81,
+            }),
+            "a locally fired network shell is keyed at the FireShell seam",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "network tank fired without spawn-complete CombatantId")]
+    fn network_fire_rejects_a_root_missing_its_spawn_identity() {
+        let mut world = World::new();
+        world.insert_resource(Time::<()>::default());
+        world.insert_resource(crate::ShotClock(81));
+        let (root, _) = spawn_mg_rig(&mut world, Vec::new());
+        world.entity_mut(root).remove::<crate::CombatantId>();
+
+        world.run_system_once(fire).unwrap();
     }
 
     /// F1: a rollback replay re-runs `fire` for a tick that already fired on the forward pass. The

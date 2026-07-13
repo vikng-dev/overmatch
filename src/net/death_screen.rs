@@ -2,14 +2,9 @@
 //! [`crate::net::server`] respawn loop: when the player's OWN tank dies, show a minimal overlay and
 //! let the player latch a respawn.
 //!
-//! **Death is read from replicated state, not decided locally.** The client's own tank is predicted
-//! and carries `Remote` (it arrived by replication), so `net::protocol::apply_net_crew` realizes the
-//! server's authoritative `NetCrew` snapshot onto it each tick and DERIVES `TankKnockedOut`
-//! idempotently from it (a pure function of the snapshot — no monotonic local latch fed by
-//! re-assertable HP). The deciding damage chain (`damage::kill_crew`/`mark_dead_tanks`/
-//! `process_cookoffs`) is authority-only and does not run on the client. So "my crew are all dead" is
-//! a server-driven fact the client merely observes — exactly the source of truth the requirement
-//! names.
+//! Death is read from the public, server-authored `NetTankStatus`; `net::disclosure` realizes that
+//! state as `TankKnockedOut` on replicas. Detailed `NetCrew` state remains owner-private and does not
+//! decide the client's public life-state label.
 //!
 //! Net-only by construction: this module lives under the `net`-gated `net` module and is mounted
 //! solely by `NetClientPlugin`. Single-player has no respawn flow.

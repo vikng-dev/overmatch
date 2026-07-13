@@ -35,6 +35,14 @@ mod prewarm;
 mod tracer;
 mod trail;
 
+#[cfg(test)]
+pub(crate) use trail::{TrailHarnessSet, TrailStationMeshEvidence};
+
+#[cfg(test)]
+pub(crate) fn mount_trail_loss_harness(app: &mut App) {
+    trail::mount_loss_harness(app);
+}
+
 pub fn plugin(app: &mut App) {
     app.init_resource::<ViewRng>();
     app.add_plugins((

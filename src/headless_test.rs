@@ -585,13 +585,13 @@ fn a_burst_never_shoots_its_own_tank() {
 ///
 /// Fire the exact shape the wire produces — origin 12 cm behind the coax muzzle (the recoil retraction),
 /// `shooter` named and entity-mapped, `catch_up_ticks > 0`, `ClientReplica` present — and assert the
-/// shell IS spawned and flies. The `shooter: None` control (the old code's shape) is what proves the
-/// naming is load-bearing rather than incidental.
+/// shell IS spawned and flies. The `shooter: None` control (the old code's shape) is held hidden at
+/// the client-only armor candidate, which proves the naming is load-bearing rather than incidental.
 #[test]
 fn a_replica_coax_shell_clears_the_shooters_mantlet() {
     use crate::ClientReplica;
     use crate::ShotId;
-    use crate::ballistics::{FireShell, ShellPath, ShotSource};
+    use crate::ballistics::{FireShell, FireShellOrigin, ShellPath, ShotSource};
     use crate::tank::{Muzzle, TankRoot, Weapon, WeaponIndex, rig_world_pose};
     use avian3d::prelude::{Position, Rotation};
     use bevy::ecs::system::RunSystemOnce;
@@ -660,28 +660,36 @@ fn a_replica_coax_shell_clears_the_shooters_mantlet() {
         speed: 755.0,
         caliber: 0.0079,
         mass: 0.0118,
+        mechanism: crate::spec::FireMechanism::Automatic,
         tracer: true,
+        shot_origin: FireShellOrigin::Reconstructed,
         shooter,
         catch_up_ticks: 4,
         shot: Some(ShotId {
-            shooter: shot.tank,
+            combatant: crate::CombatantId(1),
             weapon: shot.slot as u8,
             fire_tick: 1,
         }),
     };
 
-    // CONTROL — the shape the old code raised (`shooter: None`). The already-landed test hits the
-    // shooter's own mantlet a centimetre out and swallows the shell whole: no tracer, ever. This is the
-    // bug, pinned.
+    // CONTROL — the shape the old code raised (`shooter: None`). The catch-up scan hits the shooter's
+    // own mantlet a centimetre out. A keyed armor candidate now waits hidden for authority instead of
+    // fabricating a terminal, but it still cannot fly: this is the missing-tracer bug, pinned.
     app.world_mut().trigger(fire(None));
     app.update();
-    let mut shells = app.world_mut().query::<&ShellPath>();
+    let mut shells = app.world_mut().query::<(Entity, &Visibility, &ShellPath)>();
+    let control = shells
+        .iter(app.world())
+        .next()
+        .map(|(entity, visibility, _)| (entity, *visibility))
+        .expect("the keyed control shell should survive as an authority-waiting candidate");
     assert_eq!(
-        shells.iter(app.world()).count(),
-        0,
-        "CONTROL: an un-attributed replica shell fired from inside the shooter's mantlet is swallowed \
-         by the already-landed catch-up test — this is exactly the coax's missing tracer",
+        control.1,
+        Visibility::Hidden,
+        "CONTROL: an un-attributed replica shell fired from inside the shooter's mantlet must be held \
+         hidden there — it cannot honestly fly or render a tracer",
     );
+    app.world_mut().despawn(control.0);
 
     // THE FIX — the same shot, naming its shooter. The shooter's own volumes are transparent to it, so
     // the round is spawned and flies.

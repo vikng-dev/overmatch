@@ -10,7 +10,7 @@
 use bevy::asset::io::Reader;
 use bevy::asset::{AssetLoader, LoadContext, LoadState};
 use bevy::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::damage::{Capability, CrewStation, FunctionRole, Requirement};
@@ -83,6 +83,22 @@ pub enum FireMode {
         belt_swap_secs: f32,
         tracer_every: u32,
     },
+}
+
+/// The mechanism category a fired round carries across the simulation and network seams.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FireMechanism {
+    Single,
+    Automatic,
+}
+
+impl FireMode {
+    pub fn mechanism(self) -> FireMechanism {
+        match self {
+            Self::Single { .. } => FireMechanism::Single,
+            Self::Automatic { .. } => FireMechanism::Automatic,
+        }
+    }
 }
 
 /// One weapon's data, keyed by logical name in [`TankSpec::weapons`]. `muzzle` (the bore the shot

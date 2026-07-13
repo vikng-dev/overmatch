@@ -73,10 +73,10 @@ mod overlay;
 pub mod sandbox;
 mod shooting;
 /// The SHOT-LIFECYCLE recorder (`SPIKE_SHOT_TRACE=<path>`): an env-gated JSONL log of what happens to
-/// each [`ShotId`] on BOTH ends — the authority's fire/keyframe/confirm emissions, and the client's
-/// arrivals (with the dedup verdict) plus its cosmetic shell's spawn → contact → hold → re-seed /
-/// terminal / dissolve. Net-neutral (plain `u32` ticks), so `ballistics` writes to it without naming
-/// the netcode. Off (zero cost) unless the env var is set. Analyzed by `scripts/shot/analyze.py`.
+/// each [`ShotId`] on BOTH ends — the authority's fire/keyframe/terminal/damage emissions, and the
+/// client's arrivals (with the dedup verdict) plus its marker and cosmetic shell/trail boundaries.
+/// Net-neutral (plain `u32` ticks), so `ballistics` writes to it without naming the netcode. Off (zero
+/// cost) unless the env var is set. Analyzed by `scripts/shot/analyze.py`.
 mod shot_trace;
 mod sight;
 mod spec;
@@ -101,14 +101,8 @@ mod ui_font;
 mod vfx;
 mod world;
 
-/// Marker resource: this app is a NETWORK CLIENT running the shared sim as a REPLICA of the server,
-/// not an authority. Damage is server-authoritative — the client still flies shells, raycasts, sparks
-/// impacts, and despawns spent shells (all cosmetic), but must NOT deposit HP or apply hit impulse, or
-/// it would independently simulate a divergent local kill the server never sanctioned (the bug this
-/// slice fixes). `ballistics` gates its four HP writes and `on_hit_impulse` on this being ABSENT.
-/// Inserted ONLY by `net::client::run`; single-player (`GamePlugin`), the sandbox, and the dedicated
-/// server never insert it, so those authorities keep depositing damage normally. Lives at the crate
-/// root (not `net`) so the always-compiled `ballistics` can reference it without the `net` feature.
+/// Marks a network-client replica. Ballistics uses it to suppress authority-only damage and impulse
+/// writes while retaining cosmetic flight and impacts.
 #[derive(Resource, Default)]
 pub(crate) struct ClientReplica;
 
@@ -132,21 +126,15 @@ pub(crate) struct ClientReplica;
 #[derive(Resource, Default)]
 pub(crate) struct Replaying(pub bool);
 
-/// The net client's PREDICTED PRESENT tick `P` (raw `u32`), republished to the sim layer every
-/// FORWARD `FixedUpdate`. Every cosmetic shell a net client flies lives at `P` — the observer's via
-/// its `fire_tick` catch-up, the shooter's own natively — so this single value IS each in-flight
-/// shell's present tick. The ballistics march reads it (as `Option<Res<PredictedPresent>>`) for F3's
-/// tick-triggered consumption: a shell whose interpolated-pose flight MISSED the plate the server
-/// resolved on never contacts, so once `P` passes the sanctioned outcome's server tick
-/// (`bounce_tick` / `impact_tick`, both net-neutral on the buffer) by a margin, the march consumes it
-/// anyway — re-seeding at the server bounce or finalizing at the server impact — rather than letting
-/// the round sail on through where the authoritative shell bounced or terminated.
-///
-/// Net-neutral like [`Replaying`]: a crate-root sim type whose ONLY writer is `net::client` (which
-/// alone may read lightyear's `LocalTimeline`). Absent on the authority (server / SP / sandbox),
-/// which resolves shots for real and never consults it.
+/// Net client's predicted-present tick, republished as net-neutral sim vocabulary. Replica ballistics
+/// uses it to age sanctioned outcomes; authority and sandbox compositions do not install it.
 #[derive(Resource, Default)]
 pub(crate) struct PredictedPresent(pub u32);
+
+/// Net-neutral current tick published before gameplay. Local network fire uses it to construct a
+/// [`ShotId`] before shell spawn; authority/sandbox shells may be unkeyed.
+#[derive(Resource, Default)]
+pub(crate) struct ShotClock(pub u32);
 
 /// Physics collision layers. Wheel suspension rays filter to `Terrain` only, so they ignore
 /// the vehicle's own hull collider (ADR-0005). Shared infra, hence at the crate root.
@@ -161,29 +149,24 @@ pub(crate) enum Layer {
     Armor,
 }
 
-/// The correlation spine for one shot: which weapon on which tank fired on which tick. Every
-/// shot-scoped wire message keys on it — the cosmetic tracer ([`net::protocol::FireEvent`]) exposes it
-/// by accessor (`FireEvent::shot_id`, no extra bytes on the wire), the server-sanctioned bounce
-/// ([`net::protocol::RicochetKeyframe`]) carries it, and both ends stamp it on the local cosmetic shell
-/// they spawn ([`ballistics::Shot`]) — so an arriving keyframe re-seeds EXACTLY the shell it belongs to,
-/// and a redundantly-retransmitted duplicate is deduped instead of spawning a second tracer.
+/// A non-zero, match-local identity assigned synchronously when a combatant spawns.
 ///
-/// **`fire_tick` is what makes successive rounds distinct.** An automatic weapon fires the same
-/// `(shooter, weapon)` every few ticks; without the tick every round of a burst would share one id and
-/// the redundancy dedup would collapse the whole burst to a single shell. It is strictly increasing per
-/// `(shooter, weapon)` (one shot per weapon per tick, ticks advance), which the receiver's dedup relies on.
+/// Entity ids are an ECS implementation detail: a respawn receives a new entity and every client
+/// maps that entity independently. This value stays with the player or bot across respawn, making
+/// delayed outcomes addressable without depending on either lifetime or mapping.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub(crate) struct CombatantId(pub(crate) u64);
+
+/// Canonical, net-neutral identity for one shot: `(combatant, weapon, fire_tick)`.
 ///
-/// **NET-NEUTRAL BY DESIGN.** `fire_tick` is a plain `u32` (the raw tick value), not lightyear's `Tick`,
-/// so the always-runnable sim layer (`ballistics`) can key shells on it without naming the netcode
-/// (`tests/net_boundary`); [`net::protocol`] converts to/from `Tick` at the wire boundary. Lives at the
-/// crate root beside [`ClientReplica`]/[`Layer`] for the same reason those do: shared sim/net vocabulary.
-/// The `shooter` [`Entity`] is wire-mapped by the carrying message to the receiver's local replica, so a
-/// `ShotId` is stable within one receiver — which is exactly the dedup/correlation scope.
+/// Invariant: `fire_tick` distinguishes successive rounds from one weapon, while `combatant` is
+/// stable plain data rather than an entity mapping. Every shot-scoped wire and cosmetic outcome keys
+/// on this triple, so it remains usable across client mappings and a firing tank's despawn.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
-pub struct ShotId {
-    pub shooter: Entity,
-    pub weapon: u8,
-    pub fire_tick: u32,
+pub(crate) struct ShotId {
+    pub(crate) combatant: CombatantId,
+    pub(crate) weapon: u8,
+    pub(crate) fire_tick: u32,
 }
 
 /// The simulation — the authority layer, in the client/server sense (see the memory note and

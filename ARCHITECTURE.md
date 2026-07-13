@@ -140,6 +140,7 @@ src/
   net/
     mod.rs                       # private networking adapter facade
     protocol/                    # wire schema, fingerprint, registration, bridges
+    shot_transport.rs            # shot delivery policy, fairness, routing, and counters
     client/                      # connection, prediction, receipt, ownership
     server/                      # admission, spawn, replication, publication
     physics.rs
@@ -196,6 +197,27 @@ authority and analytical callers receive a complete root through `spawn_complete
 assembler is not a caller interface. Fixed-step servo ordering and integrity observers remain
 owned by the facade.
 
+### Current shot-replication boundary
+
+`src/net/shot_transport.rs` owns the authority's complete shot-delivery policy. It classifies facts
+from the spawn-time `FireMechanism`, routes owner-private damage, fairly packetizes bounded automatic
+visuals with fresh-before-repair admission, admits sparse reliable cannon facts, and exposes transport
+counters. `net::protocol` owns
+only the wire vocabulary and registration; `net::client` owns idempotent receipt, replica-readiness,
+and sanctioned-outcome consumption; `net::hit_feel` owns the temporary confirmation presentation.
+
+Automatic public facts are expiry-bounded presentation. Single-shot starts, ricochets, and terminals
+are repairable public facts. Damage confirmation is a separate owner-private reliable fact and is
+never reconstructed from a coalesced health snapshot. No path derives delivery class from caliber or
+from a late asset/component attachment.
+
+The real-UDP harness in `net::shot_loss` is the executable contract: seeded inbound loss, delayed
+observer delivery, post-bounce trail evidence, private receipt checks, raw opaque link counters, a
+**DERIVED 30-combatant × two-weapon** synchronized volley, and 30 independent receiver Apps under a
+**DERIVED one-second 768-RPM-per-slot** automatic stream with a reliable cannon inserted during
+contention. The raw counters include Lightyear control, acknowledgement, and replication payloads
+and therefore must not be reported as per-shot bandwidth.
+
 ## Comment and documentation policy
 
 Source comments may state:
@@ -218,8 +240,11 @@ evidence documents and link them briefly when the implementation still depends o
 | **OPEN — correctness** | `net::rig::attach_replicated_rig` waits for replicated `Position`/`Rotation`, then calls the explicitly exceptional `attach_replicated_tank_body` on an existing `Remote` root. Construction is asset-independent and lands in one flush, but rollback state is still attached after root replication. | Replace the replicated shell with a source-verified spawn-intent/acknowledgment design that constructs rollback state before ordinary component replication can expose the entity. Pin split arrival, initial connection, prediction history, and first-physics-tick behavior in a real client/server lifecycle test. |
 | **OPEN — content seam** | `TankBlueprint` removes Bevy asset readiness from simulation construction, but geometry is still extracted from the runtime GLB and the blueprint is neither versioned nor fingerprinted. | Server boots and simulates with the GLB absent; content validation happens before Battle admission; client and server compare a content fingerprint. |
 | **OPEN — dependency closure** | The dedicated server is headless at runtime but still compiles Bevy rendering/window dependencies through the shared package. | A targeted server dependency report excludes render, WGPU, and Winit, and a headless Battle test runs the actual server composition. |
+| **OPEN — Battle identity** | `ShotId` is unique within the current connection-scoped Battle, but has no Battle epoch. A connection therefore may not carry reusable combatant/tick identities across multiple Battles. | Before one connection can survive Garage and enter another Battle, add an authority-issued Battle epoch to shot identity and pin cross-Battle damage-receipt deduplication. |
+| **OPEN — aggregate network budget** | Automatic shot visuals have a bounded application admission rate, but Lightyear's whole-link bandwidth limiter is disabled and no representative replication/input/control baseline exists. Channel separation is not a scheduler reservation. | Measure the full per-client traffic mix under representative movement, combat, loss, and 30-player fan-out; then choose and enforce a quota with consequence/replication priorities, reliable-age instrumentation, and real-UDP overload tests. |
 | **REPAID — guarded** | The executables previously reached through `overmatch::net::{client,server}` and `net` declared its client, server, protocol, diagnostic, and harness children public. | Executables now call crate-root `run_client`/`run_server`; networking children are private or crate-private; `tests/net_boundary.rs` rejects `overmatch::net` reach-through and compile-checks the root interface. |
 | **REPAID — guarded** | Tank model, construction, servo, integrity, scenario, and view responsibilities previously shared one file and exposed the low-level skeleton spawner to every caller. | `src/tank.rs` now owns composition and explicit exports; private children own the separate invariants; authority/offline routes use `spawn_complete_tank`; the replicated-root exception is named and isolated. **MEASURED:** the three repository gates listed below pass against the isolated staged tree. |
+| **REPAID — guarded** | Shot presentation previously used globally capped history bursts whose capacity could discard a synchronized multi-combatant volley before networking and whose outcome delivery did not distinguish sparse cannon trajectories from automatic visual traffic. | `net::shot_transport` owns per-combatant fair admission, bounded serialization, reliable single-shot trajectories, owner-private reliable damage receipts, and counters; unit and real-UDP loss/volley tests pin the boundary. |
 | **OPEN — locality** | Ballistics, protocol, client networking, and server networking still mix independent reasons to change in large files. | Each moves behind a facade with private children, while lifecycle and loss/rollback contract tests remain green. |
 | **OPEN — schedule ownership** | Cross-feature ordering is distributed among feature plugin implementations and long comments. | Named simulation sets and edges are registered at the owning simulation seam and pinned by behaviour tests. |
 | **OPEN — prose drift** | Source and design prose still contains retired features, historical mechanisms, and claims contradicted by current code. | Comments satisfy the policy above; current docs link to evidence rather than embedding incident chronology; stale claims are removed or corrected. |

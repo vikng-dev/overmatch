@@ -1,25 +1,8 @@
-//! MG tracer streak origin maintainer (view-only). The sim spawns each tracer round a capsule streak
-//! ([`ballistics::TracerStreak`], nominally ~13 m at the MG's 755 m/s) whose tail trails the round.
-//! Right after a ricochet — and at the spawn instant for a locally-fired round — the round has barely
-//! moved since its anchor, so a full-length tail would extend BACKWARD through the muzzle/turret (or
-//! back past the bounce point). This system re-derives the drawn streak each frame from the distance
-//! the round has actually flown since its last anchor (the muzzle, or the most recent ricochet), so
-//! the tail can never poke behind where the round came from. Past `nominal_len` of travel it is a
-//! no-op and the full streak shows.
+//! View-only MG tracer streak maintenance.
 //!
-//! **The spawn seeds the streak already clamped** ([`TracerStreak::drawn_transform`], shared with
-//! `ballistics::on_fire_shell`) — this system MAINTAINS that invariant as the round flies and
-//! re-anchors it at each bounce; it does not establish it. That split is load-bearing: a net
-//! observer's shell is born in `Update` (`net::client::receive_fire_events` re-raises `FireShell` at
-//! render rate), so it materializes at that schedule's command flush — AFTER this system has already
-//! run — and its first rendered frame draws whatever the spawn wrote. When this system was the only
-//! clamp, every remote MG round drew one frame of full-length streak anchored at the muzzle: a ~13 m
-//! tail straight back through the shooter's turret. A locally-fired shell is born in `FixedUpdate` and
-//! was always clamped before its first draw, which is exactly why the artifact looked remote-only.
-//!
-//! All data is already on the sim shell — [`ShellPath`] (`points[0]` = muzzle) and
-//! [`PenetrationMarks`] (`ricochets`) — so this reads sim state and writes only the cosmetic child's
-//! `Transform` (ADR-0014). Client-mounted with the rest of `vfx`; the headless server never runs it.
+//! Invariant: spawn seeds the streak clamped and this system re-derives the same transform from the
+//! distance since the muzzle or latest ricochet. This covers the first frame of `Update`-spawned
+//! observer shells, before this system can run.
 
 use bevy::prelude::*;
 
@@ -66,7 +49,7 @@ fn clamp_tracer_streaks(
 mod tests {
     use super::*;
 
-    use crate::ballistics::FireShell;
+    use crate::ballistics::{FireShell, FireShellOrigin};
     use avian3d::prelude::*;
     use bevy::asset::AssetPlugin;
     use bevy::time::TimeUpdateStrategy;
@@ -83,12 +66,18 @@ mod tests {
             speed: 755.0,
             caliber: 0.0079,
             mass: 0.0118,
+            mechanism: crate::spec::FireMechanism::Automatic,
             tracer: true,
             // Identity, not authority — both paths name their shooter (the coax self-exclusion).
             shooter: Some(crate::ballistics::ShotSource {
                 tank: Entity::PLACEHOLDER,
                 weapon: 0,
             }),
+            shot_origin: if shot.is_some() {
+                FireShellOrigin::Reconstructed
+            } else {
+                FireShellOrigin::Local
+            },
             catch_up_ticks: catch_up,
             shot,
         }
@@ -159,20 +148,7 @@ mod tests {
         Some((tail - muzzle).dot(travel))
     }
 
-    /// REGRESSION (the returning artifact, now guarded as a CLASS, not an instance).
-    ///
-    /// A tracer streak's tail must never poke back behind the muzzle — on ANY frame, including the very
-    /// first one the round is drawn on, from EITHER spawn schedule, at EVERY catch-up.
-    ///
-    /// The original clamp was a corrective `Update` system, which silently assumed the shell already
-    /// existed when it ran. That holds for a shell born in `FixedUpdate` (locally fired) and is FALSE
-    /// for one born in `Update` (a net observer's, from `receive_fire_events`): deferred commands
-    /// materialize it at the END of `Update`, after the clamp has run, so its first rendered frame drew
-    /// the raw `nominal_len` streak — a ~13 m tail through the shooter's turret. It only bit when the
-    /// round was still within `nominal_len` of the muzzle, i.e. at a small catch-up, which is why it
-    /// read as "remote-only" and survived a fix that only ever tested one schedule.
-    ///
-    /// Parameterising over the SCHEDULE is the whole point: any future spawn path lands on this axis.
+    /// Regression: every spawn schedule must seed a streak whose tail is not behind the muzzle.
     #[test]
     fn a_streak_never_pokes_behind_the_muzzle_from_either_spawn_path() {
         for born in [Born::Local, Born::Remote] {
@@ -222,6 +198,7 @@ mod tests {
                 Transform::from_translation(Vec3::new(3.0, 0.0, 0.0)),
                 ShellPath {
                     points: vec![Vec3::ZERO],
+                    segment_starts: Vec::new(),
                 },
                 PenetrationMarks::default(),
             ))
@@ -251,6 +228,7 @@ mod tests {
                 Transform::from_translation(Vec3::new(50.0, 0.0, 0.0)),
                 ShellPath {
                     points: vec![Vec3::ZERO, Vec3::new(48.0, 0.0, 0.0)],
+                    segment_starts: Vec::new(),
                 },
                 PenetrationMarks {
                     ricochets: vec![Vec3::new(48.0, 0.0, 0.0)],
@@ -278,6 +256,7 @@ mod tests {
                 Transform::from_translation(Vec3::new(30.0, 0.0, 0.0)),
                 ShellPath {
                     points: vec![Vec3::ZERO],
+                    segment_starts: Vec::new(),
                 },
                 PenetrationMarks::default(),
             ))
@@ -318,15 +297,14 @@ mod tests {
     /// that, so a component added to one path alone (the failure mode that would silently make a view
     /// system skip remote shells entirely) fails here instead of in a playtest.
     ///
-    /// The ONE sanctioned difference is [`ballistics::Shot`], the shell's network identity: an
-    /// observer's shell carries it off the wire at spawn, while a locally-fired one is completed after
-    /// spawn by the shared `net::protocol::stamp_shot_ids`. It is correlation, not view state — nothing
+    /// The ONE sanctioned difference is [`ballistics::Shot`], the shell's network identity: both
+    /// local and reconstructed network shells carry it at spawn. It is correlation, not view state — nothing
     /// in `vfx` reads it. Damage authority is NOT a component difference at all: it is gated on the
     /// `ClientReplica` RESOURCE, so it cannot skew the shell's composition.
     #[test]
     fn local_and_remote_shells_are_compositionally_identical_to_the_view() {
         let shot = crate::ShotId {
-            shooter: Entity::PLACEHOLDER,
+            combatant: crate::CombatantId(1),
             weapon: 0,
             fire_tick: 100,
         };

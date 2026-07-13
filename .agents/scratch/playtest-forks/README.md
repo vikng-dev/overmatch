@@ -139,4 +139,35 @@ The server owns disclosure. A live client must receive only the detail the curre
 
 **Revert cost.** Expected to be low for presentation once the confirmation seam is complete: the required interface is a discrete, shot-attributed authoritative damage fact, deduplicated by `ShotId`, rather than a cue inferred from replicated health snapshots. Changing how much detail the server discloses may widen or narrow that semantic fact, but no presentation belongs in ballistics or damage truth.
 
-**Lives in.** `src/net/hit_feel.rs`, the authoritative damage/outcome path in `src/net/protocol.rs` and `src/net/server.rs`, and the future armor-inspection presentation.
+**Lives in.** `src/net/hit_feel.rs`, the authoritative damage/outcome path in
+`src/net/protocol.rs` and `src/net/shot_transport.rs`, and the future armor-inspection presentation.
+
+---
+
+## F4 — Remote automatic-fire continuity
+
+**Status:** open · bounded default implemented 2026-07-13 · settle with impaired-network playtests
+
+**The question.** How much loss or thinning in another tank's automatic-fire presentation remains
+readable before cadence, direction, or cause-and-effect feels broken?
+
+**Default — every authored automatic fact is eligible for bounded repair.** Fire, ricochet, and
+terminal visuals use three unordered-unreliable send opportunities and expire after 16 authority
+ticks. Both values are **DERIVED STARTING DEFAULTS**. The receiver deduplicates by `ShotId`; missing
+visuals never change authority or owner-private damage confirmation.
+
+**Alternatives kept alive:** fewer copies under contention; longer or shorter presentation expiry;
+distance/visibility-aware tracer density that never hides a gameplay-visible tank; or a compact
+firing-generation/cadence state for recovery after correlated loss. Reliable per-round automatic
+traffic is deliberately not an alternative because stale retransmit debt scales with the burst.
+
+**Why it's a playtest call.** Independent-loss arithmetic cannot tell us whether real correlated
+loss looks like an acceptable hole in a burst or a misleading silence. Test at normal and adverse
+RTT/loss while several tanks fire, watching remote muzzle cadence, post-bounce continuation, late
+visuals, and whether confirmation still feels causally attached to the shot.
+
+**Revert cost.** Low for copy count, expiry, and batch admission; medium for a firing-generation
+state because that widens the wire contract and join-in-progress model.
+
+**Lives in.** `src/net/shot_transport.rs`, `src/net/client.rs`, `src/net/shot_loss.rs`, and
+ADR-0021.

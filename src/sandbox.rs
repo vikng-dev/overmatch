@@ -24,8 +24,8 @@ use bevy::ui::IsDefaultUiCamera;
 use crate::Layer;
 use crate::bake;
 use crate::ballistics::{
-    self, ArmorVolume, BallisticVolume, ComponentHealth, ComponentVolume, FireShell, Impact,
-    ImpactMarker, PenetrationMarks, ShellPath, ShellReadout, SpallMarks,
+    self, ArmorVolume, BallisticVolume, ComponentHealth, ComponentVolume, FireShell,
+    FireShellOrigin, Impact, ImpactMarker, PenetrationMarks, ShellPath, ShellReadout, SpallMarks,
 };
 use crate::command;
 use crate::crew_ui;
@@ -745,6 +745,7 @@ fn fire(
         speed: MUZZLE_SPEED,
         caliber: CALIBER,
         mass: SHELL_MASS,
+        mechanism: crate::spec::FireMechanism::Single,
         // A single sighting round — mark it a tracer. Moot for the sandbox's own visuals (it retains
         // spent shells and draws its own path gizmos, and CALIBER is main-gun-sized so it keeps the
         // shell scene regardless), but keeps the field honest.
@@ -752,6 +753,7 @@ fn fire(
         // The free-fly camera is not a tank, so there is nothing to attribute (and the sandbox is
         // single-process anyway) — `None` never broadcasts.
         shooter: None,
+        shot_origin: FireShellOrigin::Local,
         // Locally fired: no net catch-up.
         catch_up_ticks: 0,
         // Single-process sandbox — no network identity, no bounce keyframes.
@@ -896,7 +898,21 @@ fn toggle_march_mode(keys: Res<ButtonInput<KeyCode>>, mut mode: ResMut<ballistic
 /// inspection draw the penetration march will build on (path segments, entry/exit, spall cones).
 fn draw_shell_paths(mut gizmos: Gizmos, paths: Query<&ShellPath>) {
     for path in &paths {
-        gizmos.linestrip(path.points.iter().copied(), Color::srgb(1.0, 0.85, 0.2));
+        let mut start = 0;
+        for end in path
+            .segment_starts
+            .iter()
+            .copied()
+            .chain(std::iter::once(path.points.len()))
+        {
+            if end.saturating_sub(start) >= 2 {
+                gizmos.linestrip(
+                    path.points[start..end].iter().copied(),
+                    Color::srgb(1.0, 0.85, 0.2),
+                );
+            }
+            start = end;
+        }
     }
 }
 

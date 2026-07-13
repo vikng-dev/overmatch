@@ -5857,6 +5857,7 @@ version = "0.3.0-alpha.4"
 dependencies = [
  "avian3d",
  "bevy",
+ "bevy_replicon",
  "bincode",
  "glam 0.30.10",
  "gltf",

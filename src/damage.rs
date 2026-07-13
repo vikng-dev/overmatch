@@ -282,12 +282,9 @@ impl KnockoutReason {
     }
 }
 
-/// The knockout verdict from a tank's aggregate crew/ammo state — the ONE rule for "what counts as
-/// knocked out": a cooked-off ammo bin (Cookoff, precedence) or zero living crew (CrewLoss), else
-/// still fighting. The authority LATCHES it monotonically (`mark_dead_tanks`, fed by its own sim);
-/// the net client DERIVES it idempotently each tick (`net::protocol::apply_net_crew`, from the
-/// replicated snapshot). Both evaluate this single function, so the label means the same on both ends
-/// (ADR-0016 — one implementation, not two that agree today).
+/// The authority's knockout rule: cookoff takes precedence over zero living crew. Replicas receive
+/// the resulting reason through public `NetTankStatus`; they do not re-decide it from private crew
+/// detail.
 pub(crate) fn knockout_from_counts(
     crew_total: u32,
     crew_living: u32,
@@ -305,9 +302,8 @@ pub(crate) fn knockout_from_counts(
 /// The damage-consequence chain (cookoff → crew death → tank-death label → turret launch). Labeled
 /// so any producer of this tick's `ComponentHealth` can order itself BEFORE it: the authority's local
 /// deposition (`ballistics`, same-frame in `GameplaySet`) lands before the consequences read HP. On
-/// the net client this whole chain is gated OFF (authority-only — see `plugin`); the replicated
-/// snapshot apply (`net::protocol::apply_net_crew`) both writes HP and DERIVES the consequences there,
-/// ordering itself `.before` this (empty-on-the-client) set for parity.
+/// the net client this whole chain is gated off. Owner-private `NetCrew` realizes detail, while
+/// public `NetTankStatus` realizes the authority's knockout reason.
 #[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct DamageConsequences;
 
@@ -318,10 +314,9 @@ pub fn plugin(app: &mut App) {
     //
     // **AUTHORITY-ONLY on a net client.** Both this seam and the whole [`DamageConsequences`] chain
     // are the *deciding* systems (start/time/apply a swap; latch death; cook off; launch the turret)
-    // — server-owned under authoritative multiplayer. On the net client the outcome arrives as
-    // replicated [`crate::net::protocol::NetCrew`] and `net::protocol::apply_net_crew` DERIVES the
-    // client's crew/death from it (ADR-0016). Running these here too would re-decide from
-    // re-assertable local state — the crew-swap false-death corruption this slice ends. The gate is
+    // — server-owned under authoritative multiplayer. On the net client, `NetCrew` realizes private
+    // crew detail and `NetTankStatus` realizes public knockout state. Running these systems there
+    // would re-decide authority outcomes from re-assertable local state. The gate is
     // the `ClientReplica` resource (present only on the net client — single-player, the sandbox, and
     // the dedicated server are all authorities and keep running the chain). Same discriminator
     // `ballistics` and `launch_turrets_on_cookoff` already use.

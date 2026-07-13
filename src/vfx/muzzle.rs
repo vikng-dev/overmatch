@@ -693,6 +693,7 @@ fn decay_muzzle_lights(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ballistics::FireShellOrigin;
     use crate::vfx::billboard::Billboard;
 
     /// Minimal app carrying what BOTH fire observers + the agers read: bare asset stores, a
@@ -736,8 +737,14 @@ mod tests {
             speed: 773.0,
             caliber,
             mass: 10.2,
+            mechanism: if caliber <= MG_CALIBER {
+                crate::spec::FireMechanism::Automatic
+            } else {
+                crate::spec::FireMechanism::Single
+            },
             shooter: None,
             tracer,
+            shot_origin: FireShellOrigin::Local,
             catch_up_ticks,
             shot: None,
         });

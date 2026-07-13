@@ -167,6 +167,13 @@ The light longitudinal resistance applied when the throttle is released while th
 
 ## Netcode
 
+**Shot identity** (`ShotId`):
+The stable Battle-local identity shared by one authored round, its public trajectory facts, and its
+owner-private damage confirmation: firing `CombatantId`, weapon slot, and authority fire tick. The
+current weapon mechanism emits at most once per slot per tick; a future mechanism that breaks that
+invariant must widen the identity first.
+_Avoid_: projectile entity (an entity is local and transient; shot identity is plain correlated data)
+
 **Divergence continuity**:
 The Layer-1 rule (ADR-0015): contact and force laws must be continuous functions of pose and velocity, so tiny client/server divergence nudges a blend weight instead of flipping a force regime and bifurcating the sims. Precedents: the sphere-cast suspension probe and the static↔kinetic friction blend (`driving.rs`); binding on all future force laws, the track model included.
 _Avoid_: "determinism" for this (continuity bounds divergence growth; determinism eliminates divergence)

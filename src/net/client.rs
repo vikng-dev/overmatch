@@ -29,10 +29,13 @@ use lightyear::prelude::{Controlled as NetControlled, *};
 // Row fields for the shot-lifecycle recorder (`crate::shot_trace`); evaluated only when it is armed.
 use serde_json::json;
 
-use super::protocol::{FireBurst, NetTank, PROTOCOL_FINGERPRINT};
+use super::protocol::{
+    DamageConfirm, DamageReceipt, FireEvent, FireVisualBatch, FireVisualFact, ImpactConfirm,
+    NetTank, PROTOCOL_FINGERPRINT, RicochetKeyframe,
+};
 use super::{client_smoothing_plugin, diagnostics, harness, open_gameplay_gate, physics, rig};
 use crate::ballistics::{
-    FireShell, SanctionedBounce, SanctionedShots, SanctionedTerminal, ShotSource,
+    FireShell, FireShellOrigin, SanctionedBounce, SanctionedShots, SanctionedTerminal, ShotSource,
 };
 use crate::command::TankCommand;
 use crate::state::{AppState, GameplaySet};
@@ -41,7 +44,7 @@ use crate::tank::{
     WeaponIndex, load_tank_assets,
 };
 use crate::ui_font::UiFonts;
-use crate::{NetClientPlugin, ShotId, SimPlugin};
+use crate::{CombatantId, NetClientPlugin, ShotId, SimPlugin};
 
 const SERVER_PORT: u16 = 5888;
 
@@ -176,12 +179,9 @@ pub fn run() {
     // Step 7: the real sim — same `SimPlugin` the server mounts, so client-side rollback replay
     // re-runs the actual driving/aim/shooting systems, not a stub.
     app.add_plugins(SimPlugin);
-    // Server-authoritative combat: mark this app a REPLICA so `ballistics` flies/sparks shells
-    // cosmetically but never deposits HP or applies hit impulse — damage/death emerge from the
-    // server's replicated combat snapshot (`net::protocol::NetCrew`) instead of a divergent local
-    // kill. This resource also gates the whole `damage::DamageConsequences` chain off here (the
-    // client derives those from `NetCrew`). Only the net client sets this; SP / sandbox / server
-    // stay authorities.
+    // Server-authoritative combat: replicas fly shells cosmetically but never deposit HP or apply
+    // hit impulse. Private crew detail and public life state arrive independently from the server;
+    // the client never runs `DamageConsequences` to decide either one.
     app.insert_resource(crate::ClientReplica);
     // Step 8, windowed: the game's real presentation + device gather. Its writers fill the
     // `Controlled` tank's `TankCommand` at render rate; `feed_action_state` (below) hands that to
@@ -199,9 +199,8 @@ pub fn run() {
     app.add_plugins(crate::trace::client_plugin);
     // Per-fixed-tick sim-cost recorder: idle unless `SPIKE_COST_TRACE` is set (the MG-march cost spike).
     app.add_plugins(crate::cost::client_plugin);
-    // Shot-lifecycle recorder: the client's half — wire arrivals (fire/keyframe/confirm, with the
-    // dedup verdict) plus the cosmetic shell's spawn → contact → hold → resolution → end, keyed by
-    // `ShotId`. Idle unless `SPIKE_SHOT_TRACE` is set — see `crate::shot_trace`.
+    // Shot-lifecycle recorder: public-shot arrivals, owner-private receipt/marker boundaries, and the
+    // cosmetic shell lifecycle, all keyed by stable `ShotId`. Idle unless `SPIKE_SHOT_TRACE` is set.
     app.add_plugins(crate::shot_trace::client_plugin);
     // Diagnostic contact probe: per-tick broad/narrow-phase state for the predicted tank's
     // hull-vs-terrain pairs. Idle (nothing registered) unless `SPIKE_CONTACT_PROBE` is set.
@@ -415,6 +414,7 @@ pub fn run() {
     }
 
     app.add_observer(diagnostics::log_connected)
+        .add_observer(reset_shot_receive_state)
         .add_observer(claim_input_slot)
         .add_observer(diagnostics::log_predicted_tank)
         .init_resource::<diagnostics::RollbackWatch>()
@@ -424,6 +424,7 @@ pub fn run() {
             (
                 rig::attach_replicated_rig,
                 receive_fire_events,
+                receive_damage_confirms,
                 diagnostics::nan_tripwire,
                 open_gameplay_gate,
                 diagnostics::watch_rollback_metrics,
@@ -452,10 +453,11 @@ pub fn run() {
     //     replays `FixedMain` N times, and re-applying a queued one-shot kick per replayed tick would
     //     multiply it — the queue is drained exactly once, on a real tick.
     app.init_resource::<PendingRecoilKicks>();
-    // The fire-event dedup set (redundancy overlap) and the server-sanctioned bounce buffer (the
-    // ballistics march consumes it; this ager evicts stale entries). Client-only — the buffer's
-    // `Option<Res>` read in `integrate_projectiles` is absent everywhere else.
+    // Client-only shot dedup, deferred fire resolution, private-receipt dedup, and sanctioned
+    // outcomes. The ballistics march reads `SanctionedShots` optionally everywhere else.
     app.init_resource::<SeenShots>();
+    app.init_resource::<PendingFireEvents>();
+    app.init_resource::<SeenDamage>();
     app.init_resource::<SanctionedShots>();
     app.add_systems(
         FixedUpdate,
@@ -918,20 +920,7 @@ fn log_tank_ownership(
 #[derive(Resource, Default)]
 pub(super) struct PendingRecoilKicks(Vec<(Entity, usize)>);
 
-/// Bounded set of shots already turned into a cosmetic shell, so a redundantly-retransmitted
-/// [`FireEvent`](super::protocol::FireEvent) (piece 3 — each burst re-carries the last N) spawns
-/// EXACTLY ONE tracer, not N. A
-/// simple ring: a `VecDeque` for FIFO eviction + a `HashSet` mirror for O(1) membership.
-///
-/// The cap must exceed the number of DISTINCT shots that can be fired while any one shot is still
-/// being re-carried — evict an id that a redundant burst can still re-offer and the shell spawns
-/// TWICE. The server now re-broadcasts its whole window every tick
-/// (`net::server::broadcast_fire_window`), so a fire re-rides every burst for `FIRE_RETAIN_TICKS`
-/// (~312 ms); two tanks on 750 rpm MGs fire ~8 distinct shots in that span. 128 is ~16× that, and the
-/// pathological bound is the sender's own `FIRE_WINDOW_MAX` (32 per stream) — so an evicted id can
-/// never be re-offered. Keyframes and confirms need no such set: the `SanctionedShots` inserts are
-/// idempotent by `(ShotId, sequence)` / `ShotId`, so a redundant copy is a no-op there (and a bounce
-/// already consumed is never re-consumed — the shell's own ricochet count has moved past its ordinal).
+/// Bounded [`ShotId`] dedup cache across repeated visual batches and direct reliable facts.
 #[derive(Resource, Default)]
 pub(super) struct SeenShots {
     order: std::collections::VecDeque<ShotId>,
@@ -939,9 +928,10 @@ pub(super) struct SeenShots {
 }
 
 impl SeenShots {
-    const CAP: usize = 128;
-    /// Record `shot` as seen; returns `true` if it is NEW (was not already present). Evicts the oldest
-    /// once over cap.
+    // DERIVED: 30 combatants x two weapons x ceil(750 RPM x `CATCH_UP_MAX_TICKS` / 64 Hz)
+    // is 1,200 ids. The next power of two covers every duplicate the catch-up gate can accept.
+    const CAP: usize = 2_048;
+    /// Record `shot`; return whether it was not already present.
     fn mark_new(&mut self, shot: ShotId) -> bool {
         if !self.set.insert(shot) {
             return false;
@@ -956,304 +946,500 @@ impl SeenShots {
     }
 }
 
-/// Drain the server's cosmetic `FireBurst`s and process each embedded event — the CLIENT half of the
-/// opponent-fire seam. For each NEW `FireEvent` (deduped by [`ShotId`] against [`SeenShots`], since the
-/// sliding window re-carries recent events): re-raise a local `FireShell` (the visible tracer, stamped
-/// with its `ShotId` so a bounce keyframe can re-seed it) AND enqueue the shot's recoil CAUSE onto
-/// [`PendingRecoilKicks`]. For each `RicochetKeyframe`: store the server-sanctioned bounce in
-/// [`SanctionedShots`] (idempotent by `(ShotId, sequence)`). For each `ImpactConfirm`: store the
-/// shot's terminal there too (idempotent by `ShotId` — at most one per shot). The ballistics march
-/// consumes both — the shot state machine's sanctioned outcomes.
+/// A fire visual that arrived before its replica root. Facts are keyed by stable [`ShotId`], never
+/// by the transient entity mapping which may be absent or stale during replication catch-up.
+#[derive(Clone)]
+struct PendingFire {
+    event: FireEvent,
+    received_tick: Tick,
+}
+
+/// Bounded, expiring fire visuals awaiting a unique live shooter root.
+#[derive(Resource, Default)]
+pub(super) struct PendingFireEvents {
+    order: std::collections::VecDeque<ShotId>,
+    by_shot: bevy::platform::collections::HashMap<ShotId, PendingFire>,
+}
+
+impl PendingFireEvents {
+    // DERIVED: 256 is larger than the 60-fire synchronized 30-tank volley and stays below the
+    // 2,048-entry ShotId dedup horizon, so a pending id cannot outlive its duplicate guard.
+    const CAP: usize = 256;
+    // DERIVED: 16 ticks is the server automatic-visual repair TTL; a later fire would be stale
+    // presentation debt rather than a useful tracer.
+    const TTL_TICKS: i32 = 16;
+
+    /// Insert one unresolved fire. The return value is an older event evicted for bounded memory.
+    fn insert(&mut self, event: FireEvent, received_tick: Tick) -> Option<PendingFire> {
+        let shot = event.shot_id();
+        if self.by_shot.contains_key(&shot) {
+            return None;
+        }
+        self.order.push_back(shot);
+        self.by_shot.insert(
+            shot,
+            PendingFire {
+                event,
+                received_tick,
+            },
+        );
+        (self.order.len() > Self::CAP)
+            .then(|| self.order.pop_front())
+            .flatten()
+            .and_then(|old| self.by_shot.remove(&old))
+    }
+
+    fn pop_front(&mut self) -> Option<PendingFire> {
+        self.order
+            .pop_front()
+            .and_then(|shot| self.by_shot.remove(&shot))
+    }
+
+    fn requeue(&mut self, pending: PendingFire) {
+        let shot = pending.event.shot_id();
+        self.order.push_back(shot);
+        self.by_shot.insert(shot, pending);
+    }
+
+    fn len(&self) -> usize {
+        self.order.len()
+    }
+}
+
+/// Connection-lifetime dedup ledger for owner-private damage confirmations.
 ///
-/// A remote (interpolated) tank runs no local `fire`, so this is how its shots become visible AND how
-/// its barrel kicks and how its ricochets/impacts carry through: the re-raised `FireShell` flies
-/// through the same `integrate_projectiles` (damage/hit-gated off under `ClientReplica`, cosmetic BY
-/// CONSTRUCTION), re-seeding from a sanctioned bounce at armor contact — or resolving at the
-/// sanctioned terminal with the full honest armor read — instead of improvising either.
+/// INVARIANT: a [`DamageReceipt`] is never reused within a match. Forgetting one would permit a late
+/// duplicate to raise a second authoritative confirmation, so this ledger has the receipt's lifetime
+/// rather than the bounded presentation lifetime used by automatic-fire visuals.
+#[derive(Resource, Default)]
+pub(super) struct SeenDamage {
+    set: bevy::platform::collections::HashSet<DamageReceipt>,
+}
+
+impl SeenDamage {
+    fn mark_new(&mut self, receipt: DamageReceipt) -> bool {
+        self.set.insert(receipt)
+    }
+}
+
+/// A new transport connection starts a new receipt/presentation identity scope.
 ///
-/// `MessageReceiver<FireBurst>` is a required component of the `Client` (the `ServerToClient` direction
-/// registered in `net::protocol`), so it rides the client link entity. The re-raised `FireShell` NAMES
-/// its `shooter` (the entity-mapped `FireEvent::shooter` + weapon slot) — identity, not authority: the
-/// cosmetic shell must exclude the firing tank's own volumes exactly as the authority does
-/// (`ballistics::not_own_volume`), while depositing nothing (`ClientReplica` gates that) and
-/// re-broadcasting nothing (`broadcast_fire` is server-only). A `FireEvent` / `RicochetKeyframe` whose
-/// direction fails the `Dir3` guard, or whose tick is absurd, is skipped (no tracer/bounce), the same
-/// "reject off the wire" discipline as `fire`'s bore guard.
+/// INVARIANT: Lightyear does not carry message-channel backlog across connections. Clearing these
+/// client-only ledgers therefore cannot discard an in-flight fact from the new connection, and it
+/// prevents a later server connection that reuses match-local ids from colliding with the previous
+/// link. A connection spanning multiple Battles is forbidden until `ShotId` carries a Battle epoch.
+fn reset_shot_receive_state(
+    _connected: On<Add, Connected>,
+    mut recoil: ResMut<PendingRecoilKicks>,
+    mut shots: ResMut<SeenShots>,
+    mut fires: ResMut<PendingFireEvents>,
+    mut damage: ResMut<SeenDamage>,
+    mut sanctioned: ResMut<SanctionedShots>,
+) {
+    *recoil = default();
+    *shots = default();
+    *fires = default();
+    *damage = default();
+    *sanctioned = default();
+}
+
+/// Drain public fire, keyframe, and terminal facts.
 ///
-/// **Ignore a FIRE event naming a tank THIS client simulates locally** (one carrying
-/// `ActionState<TankCommand>` — exactly the tanks that run `shooting::fire` here and have already flown
-/// their shell and kicked their barrel). Bursts are sent to `All` (`broadcast_fire`), so a client
-/// always receives its OWN shots' echoes; this guard drops them — no duplicate tracer, no self-kick
-/// into `local_rollback::<TankSim>()` state. The guard is on `ActionState`, not
-/// `Predicted`/`Controlled`, because it is semantic ("don't touch a tank that fires locally") and
-/// survives the predict-everyone change. **KEYFRAMES are deliberately NOT guarded**: a keyframe spawns
-/// nothing (no duplicate risk — it re-seeds an existing shell by `ShotId`), and the shooter's own
-/// predicted shell is precisely the one that most needs its ricochet carried through (see the loop).
+/// New fires spawn a cosmetic shell and enqueue recoil; keyframes and terminals arm its sanctioned
+/// outcome buffer. Damage confirmation is owner-private and handled by [`receive_damage_confirms`].
 ///
-/// **Why this stays in `Update` (render rate), NOT the fixed clock.** Verified against vendored
-/// `lightyear_messages` 0.28: `MessageReceiver<M>.recv` is a plain `Vec` that `receive()` drains, and
-/// the plugin schedules a `clear` system in `Last` every frame (`MessagePlugin`, plugin.rs) that
-/// empties any receiver NOT drained that frame — messages are received in `PreUpdate`
-/// (`MessageSystems::Receive`) and live for exactly one frame. `RunFixedMainLoop` (hence `FixedUpdate`)
-/// runs BEFORE `Update`/`Last` and executes 0..N times per frame, so draining from a fixed schedule
-/// would drop every `FireBurst` arriving on a 0-tick frame — common above 64 Hz render, near-total in
-/// the headless `2 ms` runner. Draining here, in `Update` (always once per frame, before `Last`),
-/// loses none; only the `TankSim` write is deferred to the sim clock. `Update` is also outside every
-/// rollback replay (replays run inside `RunFixedMainLoop`), so the drain and the cosmetic-shell spawn
-/// can't be re-run by a rollback — preserving today's render-rate shell-spawn timing exactly.
+/// This must run in `Update`: Lightyear clears undrained message receivers in `Last`, while a frame
+/// can run no fixed steps. Draining in `FixedUpdate` would lose arrivals on such a frame. `Update` also
+/// stays outside rollback replay; only the `TankSim` recoil write crosses to the fixed clock.
 pub(super) fn receive_fire_events(
-    mut receivers: Query<&mut MessageReceiver<FireBurst>>,
-    // The set of tanks THIS client simulates locally (own predicted tank; later, under
-    // predict-everyone, every predicted tank). They run `shooting::fire` and kick themselves, so a
-    // `FireEvent`/`RicochetKeyframe` naming one of them is our own shot echoed back and is ignored.
+    mut batch_receivers: Query<&mut MessageReceiver<FireVisualBatch>>,
+    mut fire_receivers: Query<&mut MessageReceiver<FireEvent>>,
+    mut keyframe_receivers: Query<&mut MessageReceiver<RicochetKeyframe>>,
+    mut confirm_receivers: Query<&mut MessageReceiver<ImpactConfirm>>,
+    // Locally firing tanks suppress their echoed fire only; their keyframes and terminals still apply.
     locally_fired: Query<(), With<ActionState<TankCommand>>>,
-    // Every tank replicated to this client — the RESOLVABILITY oracle for a shot's shooter (see
-    // [`shooter_is_live`]). `NetTank` is the wire-side tank-identity marker, and it lands on the own
-    // predicted tank and every remote alike, so it is exactly "is there a real tank behind this
-    // entity reference".
-    tanks: Query<(), With<NetTank>>,
-    // The client's PREDICTED present (`P`): the tick this client's OWN tank is simulated at, ahead of
-    // the server (see `net::protocol::FireEvent::fire_tick` for why the shell ages to THIS tick and
-    // not the confirmed or server-now frame). `LocalTimeline` is always present on a client (mounted by
-    // lightyear's `TimelinePlugin`, as `bridge_action_state_to_tank_command` also reads it non-optional).
+    // Fire's display/recoil entity must resolve before a cosmetic shell can be created.
+    tanks: Query<(Entity, &CombatantId), With<NetTank>>,
+    // Fast-forward remote shells to this client's predicted present.
     timeline: Res<LocalTimeline>,
     mut pending: ResMut<PendingRecoilKicks>,
     mut seen: ResMut<SeenShots>,
+    mut pending_fires: ResMut<PendingFireEvents>,
     mut sanctioned: ResMut<SanctionedShots>,
-    // Shot-lifecycle recorder (`SPIKE_SHOT_TRACE`), absent unless armed — one `Option` check on a hot
-    // path (an MG delivers 12.5 events/s/gun through here). Records the ARRIVAL half of every stream:
-    // the dedup verdict on fires (does the redundancy window earn its bytes?) and the arrival lead of
-    // keyframes/confirms against their server tick (the number that sizes `RICOCHET_HOLD_TICKS`).
+    // Optional lifecycle recorder for wire arrivals and dedup results.
     mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
     mut commands: Commands,
 ) {
     let now = timeline.tick();
-    for mut receiver in &mut receivers {
-        for burst in receiver.receive() {
-            // The newest fire tick this burst carries — recorded on every `fire_rx` row. A NEW event
-            // whose own fire tick is OLDER than this one was repaired by the redundancy window: the
-            // burst sent the moment it fired never arrived, and a later burst's window re-carried it.
-            // (Only computed when the recorder is armed: an unrecorded run must not walk the vec.)
-            let burst_newest = shot_trace.as_ref().map(|_| {
-                burst
-                    .fires
-                    .iter()
-                    .map(|f| f.fire_tick.0)
-                    .max()
-                    .unwrap_or_default()
-            });
-            for event in &burst.fires {
-                // UNRESOLVABLE SHOOTER → drop (see [`shooter_is_live`]). Must come before
-                // `seen.mark_new`: a mis-keyed shot must not spawn a shell AND must not burn a
-                // `SeenShots` slot under an id that no keyframe will ever name.
-                if !shooter_is_live(event.shooter, &tanks) {
-                    // ...but RECORD it. The guard drops exactly the class this recorder was built to
-                    // catch (a fire beating its shooter's replica down the pipe), so recording only
-                    // what SURVIVES the guard would make the instrument blind to it — and to the
-                    // guard's own cost. The row's `ShotId` is the garbage-keyed one, which is
-                    // harmless: the analyzer joins on `(w, ft)`, both wire-verbatim, so a dropped copy
-                    // still lands on the shot it belongs to. `res` names WHY, so a `drop` followed by a
-                    // clean `fire_rx` is the redundancy window turning a corruption into a delay.
-                    crate::shot_trace::record(
-                        &mut shot_trace,
-                        "drop",
-                        now.0,
-                        event.shot_id(),
-                        || json!({ "s": "fire", "res": "unresolved_shooter" }),
-                    );
-                    continue;
-                }
-                // `event.shooter` is already entity-mapped to the local replica. Skip our own shot
-                // echoed back, and any duplicate the redundancy window re-carried (dedup by ShotId).
-                if locally_fired.contains(event.shooter) {
-                    continue;
-                }
-                let shot = event.shot_id();
-                let fresh = seen.mark_new(shot);
-                crate::shot_trace::record(&mut shot_trace, "fire_rx", now.0, shot, || {
-                    json!({
-                        "dup": !fresh,
-                        "bnew": burst_newest.unwrap_or_default(),
-                        "cu": fire_catch_up_ticks(event.fire_tick, now),
-                    })
-                });
-                if !fresh {
-                    continue;
-                }
-                let Ok(direction) = Dir3::new(event.direction) else {
-                    continue; // corrupt bore off the wire — hold the tracer rather than fire NaN
-                };
-                // How far along its flight the shell already is at OUR predicted present. An absurd /
-                // stale / wrapped fire tick rejects the event — no tracer, no recoil.
-                let Some(catch_up_ticks) = fire_catch_up_ticks(event.fire_tick, now) else {
-                    continue;
-                };
-                commands.trigger(FireShell {
-                    origin: event.origin,
-                    direction,
-                    speed: event.speed,
-                    caliber: event.caliber,
-                    mass: event.mass,
-                    // The shooter decided this round's tracer-ness from its belt; carry it so this
-                    // remote client dresses the shell identically (streak or invisible).
-                    tracer: event.tracer,
-                    // NAME THE SHOOTER — identity, not authority. The replica shell must exclude the
-                    // firing tank's own volumes from its march exactly as the authority does
-                    // (`ballistics::not_own_volume`), or a muzzle that recoils behind its own armour
-                    // (the coax, behind its mantlet) makes the shell "land" on its own tank
-                    // millimetres out and the observer sees no tracer at all — while the bow MG, with
-                    // no volume in front of it, replicates fine. `event.shooter` is already
-                    // entity-mapped to this client's replica of that tank (`FireEvent`'s
-                    // `MapEntities`), which is the root its volumes' `VolumeOf` names, and
-                    // `event.weapon` is the same slot `PendingRecoilKicks` bounds-checks below.
-                    //
-                    // This grants the replica NO damage path: deposition (HP, hit impulse) is gated on
-                    // `ClientReplica` alone, and the fail-closed armor discipline still holds for every
-                    // OTHER tank's geometry. Nor does it re-broadcast — `net::server::broadcast_fire`,
-                    // the only reader of `FireShell::shooter` for attribution, is registered on the
-                    // server and nowhere else.
-                    shooter: Some(ShotSource {
-                        tank: event.shooter,
-                        weapon: event.weapon as usize,
-                    }),
-                    catch_up_ticks,
-                    // Stamp the shell with its network identity so a bounce keyframe re-seeds exactly
-                    // this shell (`ballistics::Shot`, keyframe-eligible).
-                    shot: Some(shot),
-                });
-                // Capture the CAUSE (which tank's which weapon fired); the fixed-clock applier below
-                // derives the spring kick from this client's own local spec. `event.weapon` is
-                // bounds-checked at apply time.
-                pending.0.push((event.shooter, event.weapon as usize));
-            }
-            for keyframe in &burst.keyframes {
-                // NO `locally_fired` skip here, deliberately — unlike the fires loop above. That guard
-                // exists to prevent a duplicate shell SPAWN from our own shot's echo; a keyframe spawns
-                // nothing — it re-seeds an existing shell — and the shooter's OWN predicted shell is
-                // exactly the one that most needs the bounce carried through (the fall-of-shot read on
-                // a ricocheted round, the gunnery loop's core feedback). The own shell carries the SAME
-                // `ShotId` this keyframe names (`protocol::stamp_shot_ids` — same root the mapper
-                // resolves `shot.shooter` to, same tick-indexed fire tick), so it holds at contact and
-                // re-seeds from this bounce like any observer shell. Guard the bore, then store
-                // (idempotent by `(ShotId, sequence)`, so the redundancy window's duplicates are no-ops).
-                if Dir3::new(keyframe.direction).is_err() {
-                    continue;
-                }
-                // UNRESOLVABLE SHOOTER → drop (see [`shooter_is_live`]). `ShotId.shooter` is the
-                // buffer's KEY: storing a bounce under a garbage id parks it where no shell can ever
-                // find it, and it ages out unconsumed while the shell that wanted it dissolves.
-                if !shooter_is_live(keyframe.shot.shooter, &tanks) {
-                    // Recorded, not silent — same reason as the fire guard above: a bounce dropped
-                    // here is a bounce the shell will not get, and the analyzer's carry-through table
-                    // must be able to name the guard as the cause rather than filing it as a mystery.
-                    crate::shot_trace::record(
-                        &mut shot_trace,
-                        "drop",
-                        now.0,
-                        keyframe.shot,
-                        || json!({ "s": "kf", "res": "unresolved_shooter", "seq": keyframe.sequence }),
-                    );
-                    continue;
-                }
-                let fresh = sanctioned.insert(
-                    keyframe.shot,
-                    SanctionedBounce {
-                        origin: keyframe.origin,
-                        direction: keyframe.direction,
-                        speed: keyframe.speed,
-                        // The server bounce tick, unwrapped from the wire `Tick` to the net-neutral
-                        // `u32` the sim keys on. The normal HOLD path re-ages by hold duration (which
-                        // equals present − bounce tick); F3's tick-triggered path compares the
-                        // predicted present against this directly to consume a pose-divergent MISS.
-                        bounce_tick: keyframe.bounce_tick.0,
-                        sequence: keyframe.sequence,
-                    },
+    for mut receiver in &mut batch_receivers {
+        for batch in receiver.receive() {
+            for fact in batch.facts {
+                consume_fire_visual_fact(
+                    fact,
+                    now,
+                    &locally_fired,
+                    &tanks,
+                    &mut pending,
+                    &mut seen,
+                    &mut pending_fires,
+                    &mut sanctioned,
+                    &mut shot_trace,
+                    &mut commands,
                 );
-                // THE SIZING MEASUREMENT. `t − bt` (this row's receive tick minus the server bounce
-                // tick) is exactly the quantity `ballistics::RICOCHET_HOLD_TICKS` must cover: the
-                // client's shell reaches the plate at local tick ≈ `bt` (both timelines index the same
-                // trajectory), so it waits from `bt` until this row. The distribution of `t − bt` over a
-                // real link IS the hold-time histogram's cause.
-                crate::shot_trace::record(&mut shot_trace, "kf_rx", now.0, keyframe.shot, || {
-                    json!({
-                        "dup": !fresh,
-                        "bt": keyframe.bounce_tick.0,
-                        "seq": keyframe.sequence,
-                    })
-                });
             }
-            for confirm in &burst.confirms {
-                // Same rule as keyframes: NO `locally_fired` skip — a confirm spawns nothing, it
-                // RESOLVES an existing shell (the shooter's own included: the honest armor read on
-                // their own hit), so the fires-echo guard has no business here. No `Dir3` guard
-                // either: the normal feeds `Impact::normal`, whose consumers normalize with a
-                // fallback by contract. Store idempotently (first wins — at most one terminal per
-                // shot, so a redundancy-window duplicate is a no-op); the march consumes it, ordered
-                // behind the shot's bounces by `after_bounces`. On the normal path the client resolves
-                // on receipt (at contact or hold); F3's tick-triggered path compares the predicted
-                // present against `impact_tick` (unwrapped to the net-neutral `u32`) to finalize a
-                // pose-divergent MISS the authority already resolved elsewhere.
-                // UNRESOLVABLE SHOOTER → drop (see [`shooter_is_live`]), for the same reason as a
-                // keyframe: `ShotId` keys the buffer, so a garbage id is an unreachable slot.
-                if !shooter_is_live(confirm.shot.shooter, &tanks) {
-                    crate::shot_trace::record(
-                        &mut shot_trace,
-                        "drop",
-                        now.0,
-                        confirm.shot,
-                        || json!({ "s": "cf", "res": "unresolved_shooter" }),
-                    );
-                    continue;
-                }
-                let fresh = sanctioned.insert_terminal(
-                    confirm.shot,
-                    SanctionedTerminal {
-                        position: confirm.position,
-                        normal: confirm.normal,
-                        penetrated: confirm.penetrated,
-                        impact_tick: confirm.impact_tick.0,
-                        after_bounces: confirm.after_bounces,
-                    },
+        }
+    }
+    for mut receiver in &mut fire_receivers {
+        for event in receiver.receive() {
+            consume_fire_event(
+                &event,
+                now,
+                &locally_fired,
+                &tanks,
+                &mut pending,
+                &mut seen,
+                &mut pending_fires,
+                &mut shot_trace,
+                &mut commands,
+            );
+        }
+    }
+    for mut receiver in &mut keyframe_receivers {
+        for keyframe in receiver.receive() {
+            consume_ricochet_keyframe(&keyframe, now, &mut sanctioned, &mut shot_trace);
+        }
+    }
+    for mut receiver in &mut confirm_receivers {
+        for confirm in receiver.receive() {
+            consume_impact_confirm(&confirm, now, &mut sanctioned, &mut shot_trace);
+        }
+    }
+    resolve_pending_fire_events(
+        now,
+        &locally_fired,
+        &tanks,
+        &mut pending,
+        &mut pending_fires,
+        &mut shot_trace,
+        &mut commands,
+    );
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one receiver boundary keeps public visual facts coherent"
+)]
+fn consume_fire_visual_fact(
+    fact: FireVisualFact,
+    now: Tick,
+    locally_fired: &Query<(), With<ActionState<TankCommand>>>,
+    tanks: &Query<(Entity, &CombatantId), With<NetTank>>,
+    pending_recoil: &mut PendingRecoilKicks,
+    seen: &mut SeenShots,
+    pending_fires: &mut PendingFireEvents,
+    sanctioned: &mut SanctionedShots,
+    shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
+    commands: &mut Commands,
+) {
+    match fact {
+        FireVisualFact::Fire(event) => consume_fire_event(
+            &event,
+            now,
+            locally_fired,
+            tanks,
+            pending_recoil,
+            seen,
+            pending_fires,
+            shot_trace,
+            commands,
+        ),
+        FireVisualFact::Ricochet(keyframe) => {
+            consume_ricochet_keyframe(&keyframe, now, sanctioned, shot_trace)
+        }
+        FireVisualFact::Impact(confirm) => {
+            consume_impact_confirm(&confirm, now, sanctioned, shot_trace)
+        }
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the fire receive boundary owns dedup and deferred presentation"
+)]
+fn consume_fire_event(
+    event: &FireEvent,
+    now: Tick,
+    locally_fired: &Query<(), With<ActionState<TankCommand>>>,
+    tanks: &Query<(Entity, &CombatantId), With<NetTank>>,
+    pending_recoil: &mut PendingRecoilKicks,
+    seen: &mut SeenShots,
+    pending_fires: &mut PendingFireEvents,
+    shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
+    commands: &mut Commands,
+) {
+    let shot = event.shot_id();
+    let fresh = seen.mark_new(shot);
+    crate::shot_trace::record(
+        shot_trace,
+        "fire_rx",
+        now.0,
+        shot,
+        || json!({ "dup": !fresh, "cu": fire_catch_up_ticks(event.fire_tick, now) }),
+    );
+    if !fresh {
+        return;
+    }
+    if Dir3::new(event.direction).is_err() || fire_catch_up_ticks(event.fire_tick, now).is_none() {
+        crate::shot_trace::record(
+            shot_trace,
+            "drop",
+            now.0,
+            shot,
+            || json!({ "s": "fire", "res": "invalid_fire" }),
+        );
+        return;
+    }
+    match resolve_shooter(event, tanks) {
+        ShooterResolution::Resolved(shooter) => {
+            spawn_reconstructed_fire(event, shooter, now, locally_fired, pending_recoil, commands);
+        }
+        ShooterResolution::Missing | ShooterResolution::Ambiguous => {
+            if let Some(evicted) = pending_fires.insert(event.clone(), now) {
+                crate::shot_trace::record(
+                    shot_trace,
+                    "drop",
+                    now.0,
+                    evicted.event.shot_id(),
+                    || json!({ "s": "fire", "res": "pending_capacity" }),
                 );
-                crate::shot_trace::record(&mut shot_trace, "cf_rx", now.0, confirm.shot, || {
-                    json!({
-                        "dup": !fresh,
-                        "it": confirm.impact_tick.0,
-                        "pen": confirm.penetrated,
-                    })
-                });
             }
         }
     }
 }
 
-/// Does this shot's `shooter` reference resolve to a LIVE replicated tank on this client?
+fn consume_ricochet_keyframe(
+    keyframe: &RicochetKeyframe,
+    now: Tick,
+    sanctioned: &mut SanctionedShots,
+    shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
+) {
+    if Dir3::new(keyframe.direction).is_err() {
+        return;
+    }
+    let fresh = sanctioned.insert(
+        keyframe.shot,
+        SanctionedBounce {
+            origin: keyframe.origin,
+            direction: keyframe.direction,
+            speed: keyframe.speed,
+            bounce_tick: keyframe.bounce_tick.0,
+            sequence: keyframe.sequence,
+        },
+    );
+    crate::shot_trace::record(
+        shot_trace,
+        "kf_rx",
+        now.0,
+        keyframe.shot,
+        || json!({ "dup": !fresh, "bt": keyframe.bounce_tick.0, "seq": keyframe.sequence }),
+    );
+}
+
+fn consume_impact_confirm(
+    confirm: &ImpactConfirm,
+    now: Tick,
+    sanctioned: &mut SanctionedShots,
+    shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
+) {
+    let fresh = sanctioned.insert_terminal(
+        confirm.shot,
+        SanctionedTerminal {
+            position: confirm.position,
+            normal: confirm.normal,
+            penetrated: confirm.penetrated,
+            impact_tick: confirm.impact_tick.0,
+            after_bounces: confirm.after_bounces,
+        },
+    );
+    crate::shot_trace::record(
+        shot_trace,
+        "cf_rx",
+        now.0,
+        confirm.shot,
+        || json!({ "dup": !fresh, "it": confirm.impact_tick.0, "pen": confirm.penetrated }),
+    );
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShooterResolution {
+    Resolved(Entity),
+    Missing,
+    Ambiguous,
+}
+
+/// Resolve one visual fire to a root. The mapped entity wins only when its immutable identity agrees;
+/// a stale map falls back to exactly one live root with the fact's [`CombatantId`].
+fn resolve_shooter(
+    event: &FireEvent,
+    tanks: &Query<(Entity, &CombatantId), With<NetTank>>,
+) -> ShooterResolution {
+    if let Ok((entity, combatant)) = tanks.get(event.shooter)
+        && *combatant == event.combatant
+    {
+        return ShooterResolution::Resolved(entity);
+    }
+
+    let mut matches = tanks
+        .iter()
+        .filter_map(|(entity, combatant)| (*combatant == event.combatant).then_some(entity));
+    let Some(unique) = matches.next() else {
+        return ShooterResolution::Missing;
+    };
+    if matches.next().is_some() {
+        ShooterResolution::Ambiguous
+    } else {
+        ShooterResolution::Resolved(unique)
+    }
+}
+
+fn resolve_pending_fire_events(
+    now: Tick,
+    locally_fired: &Query<(), With<ActionState<TankCommand>>>,
+    tanks: &Query<(Entity, &CombatantId), With<NetTank>>,
+    pending_recoil: &mut PendingRecoilKicks,
+    pending_fires: &mut PendingFireEvents,
+    shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
+    commands: &mut Commands,
+) {
+    let pending_count = pending_fires.len();
+    for _ in 0..pending_count {
+        let Some(pending) = pending_fires.pop_front() else {
+            return;
+        };
+        let shot = pending.event.shot_id();
+        if pending_fire_expired(pending.received_tick, now) {
+            crate::shot_trace::record(
+                shot_trace,
+                "drop",
+                now.0,
+                shot,
+                || json!({ "s": "fire", "res": "pending_expired" }),
+            );
+            continue;
+        }
+        match resolve_shooter(&pending.event, tanks) {
+            ShooterResolution::Resolved(shooter) => spawn_reconstructed_fire(
+                &pending.event,
+                shooter,
+                now,
+                locally_fired,
+                pending_recoil,
+                commands,
+            ),
+            ShooterResolution::Missing | ShooterResolution::Ambiguous => {
+                pending_fires.requeue(pending)
+            }
+        }
+    }
+}
+
+fn pending_fire_expired(received_tick: Tick, now: Tick) -> bool {
+    now - received_tick > PendingFireEvents::TTL_TICKS
+}
+
+fn spawn_reconstructed_fire(
+    event: &FireEvent,
+    shooter: Entity,
+    now: Tick,
+    locally_fired: &Query<(), With<ActionState<TankCommand>>>,
+    pending_recoil: &mut PendingRecoilKicks,
+    commands: &mut Commands,
+) {
+    if locally_fired.contains(shooter) {
+        return;
+    }
+    let Ok(direction) = Dir3::new(event.direction) else {
+        return;
+    };
+    let Some(catch_up_ticks) = fire_catch_up_ticks(event.fire_tick, now) else {
+        return;
+    };
+    commands.trigger(FireShell {
+        origin: event.origin,
+        direction,
+        speed: event.speed,
+        caliber: event.caliber,
+        mass: event.mass,
+        tracer: event.tracer,
+        shooter: Some(ShotSource {
+            tank: shooter,
+            weapon: event.weapon as usize,
+        }),
+        shot_origin: FireShellOrigin::Reconstructed,
+        catch_up_ticks,
+        shot: Some(event.shot_id()),
+        mechanism: event.mechanism,
+    });
+    pending_recoil.0.push((shooter, event.weapon as usize));
+}
+
+/// Drain the owner-private `DamageConfirm` channel and raise one presentation event per receipt.
 ///
-/// **The hazard.** Every shot names its shooter by entity (`FireEvent::shooter`, and `ShotId.shooter`
-/// inside every `RicochetKeyframe`/`ImpactConfirm`), mapped on receive by `FireBurst`'s `MapEntities`.
-/// lightyear's mapper does NOT reject a reference it cannot resolve — it hands back a GARBAGE entity.
-/// That reference is an INPUT TO [`crate::ShotId`], the correlation spine the whole cosmetic shot state
-/// machine is keyed on, so an unresolvable shooter silently mis-keys the shot instead of failing. A
-/// fire event can legitimately beat its shooter's tank replica through the pipe — at connect, at
-/// respawn, and in any burst-loss window — so this is reachable in normal play, and it was MEASURED
-/// live: mis-keyed fires spawned DUPLICATE shells (the redundancy window re-carried the same event
-/// later, now correctly mapped, so `SeenShots` saw a "new" `ShotId` and spawned a second shell), and a
-/// mis-keyed shell could never consume its own bounce keyframe or terminal confirm (they are stored
-/// under the shot's true id, which the shell does not carry) — so it held at armor contact and quietly
-/// dissolved. That is the observer's "the ricochet replicates, but the tracer never comes out of it".
+/// The channel target already proves ownership; receipt handling must not query a currently controlled
+/// tank, because the player can receive a valid confirmation after death and before respawn.
+/// This runs in `Update` for the same receiver-clear scheduling invariant as [`receive_fire_events`].
+pub(super) fn receive_damage_confirms(
+    mut receivers: Query<&mut MessageReceiver<DamageConfirm>>,
+    timeline: Res<LocalTimeline>,
+    mut seen: ResMut<SeenDamage>,
+    mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
+    mut commands: Commands,
+) {
+    let received_tick = timeline.tick();
+    for mut receiver in &mut receivers {
+        for damage in receiver.receive() {
+            consume_damage_confirm(
+                &damage,
+                received_tick,
+                &mut seen,
+                &mut shot_trace,
+                &mut commands,
+            );
+        }
+    }
+}
+
+/// Record each owner-private confirmation, then pass only the first occurrence to presentation.
 ///
-/// **Why DROP and not buffer.** Dropping an unresolvable shot looks lossy, but the redundancy window
-/// already IS the buffer: `net::server::broadcast_fire_window` re-carries every fire, keyframe and
-/// confirm on every burst for `FIRE_RETAIN_TICKS` (~20 ticks / ~312 ms), on the clock rather than on
-/// new traffic. So a shot that beats its tank down the pipe is re-delivered for the next ~312 ms, and
-/// the first copy that arrives AFTER the tank resolves is accepted — correctly keyed, exactly once.
-/// Dropping the early copies turns the race into a delay instead of corruption, and it needs no new
-/// machinery. A second, local buffer would duplicate that window, and would be actively worse: a
-/// held-back shot's catch-up (`fire_catch_up_ticks`) keeps growing while it waits, so replaying it
-/// late spawns its shell further downrange — past `STALE_FIRE_TICKS` it is suppressed as stale anyway.
-/// Silence for the ~1 frame before a tank resolves is the honest read; a garbage-keyed phantom is not.
-fn shooter_is_live(shooter: Entity, tanks: &Query<(), With<NetTank>>) -> bool {
-    tanks.contains(shooter)
+/// INVARIANT: `DamageReceipt` is stable match-local data, so reconstructing its [`ShotId`] cannot
+/// depend on a replica that may have despawned between damage and receipt.
+fn consume_damage_confirm(
+    damage: &DamageConfirm,
+    received_tick: Tick,
+    seen: &mut SeenDamage,
+    shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
+    commands: &mut Commands,
+) {
+    let shot = ShotId {
+        combatant: damage.receipt.combatant,
+        weapon: damage.receipt.weapon,
+        fire_tick: damage.receipt.fire_tick,
+    };
+    let fresh = seen.mark_new(damage.receipt);
+    crate::shot_trace::record(shot_trace, "dmg_rx", received_tick.0, shot, || {
+        json!({
+            "own": true,
+            "dup": !fresh,
+            "dt": damage.damage_tick.0,
+        })
+    });
+    if fresh {
+        commands.trigger(super::hit_feel::LocalHitConfirmed {
+            receipt: damage.receipt,
+            received_tick: received_tick.0,
+            damage_tick: damage.damage_tick.0,
+        });
+    }
 }
 
 /// Age the observer's server-sanctioned bounce buffer each fixed tick and evict entries past a shell's
@@ -1338,13 +1524,9 @@ fn fire_catch_up_ticks(fire: Tick, now: Tick) -> Option<u32> {
 /// render→sim leak, non-deterministic across 0/1/2-tick frames), and a rollback replays `FixedMain`
 /// N times — draining the queue only on a real tick applies each one-shot kick exactly once.
 ///
-/// The shooter is normally an interpolated remote, whose `TankSim` is not rollback-checked. But
-/// `broadcast_fire` targets `NetworkTarget::All` (the redundancy window must re-carry every shooter's
-/// events to every client, so it cannot exclude the owner — dedup happens at the receiver instead),
-/// which means a client also receives its OWN shot's echo; kicking the predicted own tank's
-/// `local_rollback::<TankSim>()`-tracked sim from a message would corrupt it — so
-/// [`receive_fire_events`] drops any shot whose shooter carries `ActionState<TankCommand>` (the
-/// locally-fired set) before it ever reaches this queue. Nothing rollback-tracked is kicked here.
+/// Public fire facts reach the shooter too. [`receive_fire_events`] suppresses a fact whose shooter
+/// carries `ActionState<TankCommand>` before it enters this queue, so the echoed fact cannot kick the
+/// locally predicted, rollback-tracked `TankSim`.
 ///
 /// Skips silently on a missing tank, a slot with no matching muzzle, an out-of-range slot, or a
 /// recoil-less weapon (a coax) — a replica may not have finished spawning its rig, exactly as the
@@ -1443,8 +1625,40 @@ fn stamp_input_tick(
 #[cfg(test)]
 mod tests {
     use bevy::ecs::system::RunSystemOnce;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+
+    #[derive(Resource)]
+    struct TestDamageCopies(Vec<DamageConfirm>);
+
+    #[derive(Resource, Default)]
+    struct MarkerPulses(usize);
+
+    fn feed_test_damage_copies(
+        copies: Res<TestDamageCopies>,
+        timeline: Res<LocalTimeline>,
+        mut seen: ResMut<SeenDamage>,
+        mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
+        mut commands: Commands,
+    ) {
+        for damage in &copies.0 {
+            consume_damage_confirm(
+                damage,
+                timeline.tick(),
+                &mut seen,
+                &mut shot_trace,
+                &mut commands,
+            );
+        }
+    }
+
+    fn count_marker_pulse(
+        _: On<super::super::hit_feel::LocalHitConfirmed>,
+        mut pulses: ResMut<MarkerPulses>,
+    ) {
+        pulses.0 += 1;
+    }
 
     /// TRIPWIRE — **the shipping input delay must be CONSTANT.**
     ///
@@ -1689,7 +1903,7 @@ mod tests {
 
     fn shot(tick: u32) -> ShotId {
         ShotId {
-            shooter: Entity::PLACEHOLDER,
+            combatant: crate::CombatantId(1),
             weapon: 0,
             fire_tick: tick,
         }
@@ -1722,75 +1936,277 @@ mod tests {
         );
     }
 
-    /// ROOT GUARD: only a reference that resolves to a LIVE replicated tank is an acceptable shooter.
-    ///
-    /// lightyear's receive-side mapper does not reject an entity reference it cannot resolve — it hands
-    /// back a garbage one — so this predicate is the client's own resolvability check. A never-mapped
-    /// reference and a DESPAWNED tank (the respawn window) must both read as not-live.
+    /// Owner-private damage receipts do not name a replica entity, so duplicate suppression remains
+    /// valid through the death-to-respawn interval with no controlled tank root.
     #[test]
-    fn only_a_live_replicated_tank_is_an_acceptable_shooter() {
-        let mut world = World::new();
-        let tank = world.spawn(NetTank).id();
-        let not_a_tank = world.spawn_empty().id();
-        let despawned = world.spawn(NetTank).id();
-        world.despawn(despawned);
+    fn seen_damage_dedups_a_receipt_without_a_live_controlled_tank() {
+        let mut seen = SeenDamage::default();
+        let receipt = DamageReceipt {
+            combatant: crate::CombatantId(1),
+            weapon: 1,
+            fire_tick: 77,
+        };
 
-        let verdicts = world
-            .run_system_once(move |tanks: Query<(), With<NetTank>>| {
-                (
-                    shooter_is_live(tank, &tanks),
-                    shooter_is_live(not_a_tank, &tanks),
-                    shooter_is_live(despawned, &tanks),
-                )
-            })
-            .expect("system runs");
-        assert_eq!(
-            verdicts,
-            (true, false, false),
-            "a live NetTank is a shooter; a non-tank entity and a despawned tank are not",
+        assert!(
+            seen.mark_new(receipt),
+            "the first private confirmation reaches presentation"
+        );
+        assert!(
+            !seen.mark_new(receipt),
+            "a redundancy-window echo cannot pulse a second marker"
+        );
+        assert!(
+            seen.mark_new(DamageReceipt {
+                combatant: crate::CombatantId(1),
+                weapon: 1,
+                fire_tick: 78,
+            }),
+            "the next fire tick is a distinct confirmation"
         );
     }
 
-    /// WHY that guard is the ROOT and not a patch: a mis-keyed shooter does not fail loudly — it forges
-    /// a DIFFERENT [`ShotId`], and `ShotId` is the correlation spine the entire cosmetic shot state
-    /// machine is keyed on. Both symptoms measured live fall out of this one inequality:
-    ///
-    ///  * DUPLICATE SHELLS — `SeenShots` dedups by `ShotId`, so the mis-keyed copy and the redundancy
-    ///    window's later, correctly-mapped re-delivery are two different shots: two shells for one shot.
-    ///  * THE DISSOLVE — `SanctionedShots` is a map KEYED by `ShotId`, so a bounce keyframe stored under
-    ///    the shot's true id is unreachable to a shell carrying the mis-keyed one. It holds at armor
-    ///    contact, never consumes its verdict, and quietly dissolves: the ricochet "replicates", but the
-    ///    observer's tracer never comes out of the bounce.
     #[test]
-    fn a_miskeyed_shooter_forges_a_second_shot_identity() {
+    fn damage_receipt_remains_deduped_after_more_than_the_old_ring_horizon() {
+        let mut seen = SeenDamage::default();
+        let first = DamageReceipt {
+            combatant: crate::CombatantId(1),
+            weapon: 1,
+            fire_tick: 1,
+        };
+        assert!(seen.mark_new(first));
+        for fire_tick in 2..=256 {
+            assert!(seen.mark_new(DamageReceipt { fire_tick, ..first }));
+        }
+        assert!(
+            !seen.mark_new(first),
+            "an authoritative confirmation stays exactly-once for the connection scope"
+        );
+    }
+
+    #[test]
+    fn a_new_connection_resets_match_local_shot_receive_state() {
+        let mut app = App::new();
+        app.init_resource::<PendingRecoilKicks>()
+            .init_resource::<SeenShots>()
+            .init_resource::<PendingFireEvents>()
+            .init_resource::<SeenDamage>()
+            .init_resource::<SanctionedShots>()
+            .add_observer(reset_shot_receive_state);
+        let receipt = DamageReceipt {
+            combatant: crate::CombatantId(1),
+            weapon: 0,
+            fire_tick: 1,
+        };
+        assert!(
+            app.world_mut()
+                .resource_mut::<SeenDamage>()
+                .mark_new(receipt)
+        );
+        app.world_mut()
+            .resource_mut::<SeenShots>()
+            .mark_new(ShotId {
+                combatant: receipt.combatant,
+                weapon: receipt.weapon,
+                fire_tick: receipt.fire_tick,
+            });
+
+        app.world_mut()
+            .spawn((RemoteId(PeerId::Netcode(99)), Connected));
+
+        assert!(app.world().resource::<SeenDamage>().set.is_empty());
+        assert!(app.world().resource::<SeenShots>().set.is_empty());
+    }
+
+    #[test]
+    fn duplicate_damage_receipts_trace_two_receives_and_one_marker_boundary() {
+        let path = std::env::temp_dir().join(format!(
+            "overmatch-damage-receipt-{}-{}.jsonl",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        {
+            let receipt = DamageReceipt {
+                combatant: crate::CombatantId(9),
+                weapon: 1,
+                fire_tick: 10,
+            };
+            let damage = DamageConfirm {
+                receipt,
+                damage_tick: Tick(12),
+            };
+            let mut timeline = LocalTimeline::default();
+            timeline.apply_delta(13);
+            let mut app = App::new();
+            app.insert_resource(timeline);
+            app.init_resource::<SeenDamage>();
+            app.insert_resource(crate::shot_trace::ShotTrace::for_test(&path));
+            app.insert_resource(TestDamageCopies(vec![damage.clone(), damage]));
+            app.init_resource::<MarkerPulses>();
+            super::super::hit_feel::mount_test_marker_boundary(&mut app);
+            app.add_observer(count_marker_pulse)
+                .add_systems(Update, feed_test_damage_copies);
+
+            app.update();
+            assert_eq!(
+                app.world().resource::<MarkerPulses>().0,
+                1,
+                "receipt dedup permits exactly one presentation pulse"
+            );
+        }
+
+        let rows: Vec<serde_json::Value> = std::fs::read_to_string(&path)
+            .expect("test trace readable after app drop")
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("trace row is JSON"))
+            .collect();
+        let damage_rows: Vec<_> = rows.iter().filter(|row| row["k"] == "dmg_rx").collect();
+        let marker_rows: Vec<_> = rows.iter().filter(|row| row["k"] == "marker").collect();
+        assert_eq!(damage_rows.len(), 2, "every redundancy copy is traced");
+        assert_eq!(
+            marker_rows.len(),
+            1,
+            "only the first receipt reaches the marker"
+        );
+        assert_eq!(damage_rows[0]["dup"], false);
+        assert_eq!(damage_rows[1]["dup"], true);
+        assert_eq!(damage_rows[0]["t"], 13);
+        assert_eq!(damage_rows[0]["dt"], 12);
+        assert_eq!(marker_rows[0]["t"], 13);
+        assert_eq!(marker_rows[0]["dt"], 12);
+        std::fs::remove_file(path).expect("test trace removed");
+    }
+
+    fn fire_event(shooter: Entity, combatant: u64, tick: u32) -> FireEvent {
+        FireEvent {
+            origin: Vec3::ZERO,
+            direction: Vec3::NEG_Z,
+            speed: 800.0,
+            caliber: 0.0079,
+            mass: 0.0118,
+            mechanism: crate::spec::FireMechanism::Automatic,
+            tracer: true,
+            shooter,
+            combatant: CombatantId(combatant),
+            weapon: 0,
+            fire_tick: Tick(tick),
+        }
+    }
+
+    /// A fire may beat its root's replica. It is retained by stable shot identity and resolves when
+    /// exactly one matching combatant root exists, even if the original entity map was unresolved.
+    #[test]
+    fn pending_fire_resolves_when_its_combatant_root_arrives() {
+        let mut world = World::new();
+        let unmapped = Entity::from_raw_u32(999).expect("non-placeholder entity");
+        let event = fire_event(unmapped, 7, 42);
+        let mut pending = PendingFireEvents::default();
+        assert!(pending.insert(event.clone(), Tick(42)).is_none());
+        assert_eq!(pending.len(), 1, "unresolved fire is retained");
+
+        let before = world
+            .run_system_once(move |tanks: Query<(Entity, &CombatantId), With<NetTank>>| {
+                resolve_shooter(&event, &tanks)
+            })
+            .expect("system runs");
+        assert_eq!(before, ShooterResolution::Missing);
+
+        let root = world.spawn((NetTank, CombatantId(7))).id();
+        let pending_event = pending.pop_front().expect("queued event remains").event;
+        let after = world
+            .run_system_once(move |tanks: Query<(Entity, &CombatantId), With<NetTank>>| {
+                resolve_shooter(&pending_event, &tanks)
+            })
+            .expect("system runs");
+        assert_eq!(
+            after,
+            ShooterResolution::Resolved(root),
+            "the stable combatant id repairs an unresolved entity mapping",
+        );
+    }
+
+    #[test]
+    fn pending_fire_duplicate_is_suppressed_by_shot_id() {
+        let unmapped = Entity::from_raw_u32(999).expect("non-placeholder entity");
+        let event = fire_event(unmapped, 7, 42);
+        let mut seen = SeenShots::default();
+        let mut pending = PendingFireEvents::default();
+
+        assert!(seen.mark_new(event.shot_id()));
+        pending.insert(event.clone(), Tick(42));
+        assert!(
+            !seen.mark_new(event.shot_id()),
+            "a redundant transport copy cannot become a second pending fire"
+        );
+        assert_eq!(pending.len(), 1, "one ShotId owns one deferred visual");
+    }
+
+    #[test]
+    fn ambiguous_combatant_roots_fail_closed() {
+        let mut world = World::new();
+        let stale_map = world.spawn_empty().id();
+        world.spawn((NetTank, CombatantId(7)));
+        world.spawn((NetTank, CombatantId(7)));
+        let event = fire_event(stale_map, 7, 42);
+
+        let resolution = world
+            .run_system_once(move |tanks: Query<(Entity, &CombatantId), With<NetTank>>| {
+                resolve_shooter(&event, &tanks)
+            })
+            .expect("system runs");
+        assert_eq!(
+            resolution,
+            ShooterResolution::Ambiguous,
+            "two live roots with one CombatantId must not receive an arbitrary visual/recoil event",
+        );
+    }
+
+    #[test]
+    fn pending_fire_expires_after_the_visual_ttl() {
+        let received = Tick(100);
+        let last_live = Tick(100 + PendingFireEvents::TTL_TICKS as u32);
+        assert!(
+            !pending_fire_expired(received, last_live),
+            "the last tick inside the TTL remains eligible for root repair"
+        );
+        assert!(
+            pending_fire_expired(received, last_live + 1),
+            "a stale visual is discarded instead of becoming delayed cosmetic debt"
+        );
+    }
+
+    /// A mapped `FireEvent.shooter` is only a display/recoil handle. Its stable shot identity must not
+    /// change when receivers map that handle to different local entities.
+    #[test]
+    fn shot_identity_is_independent_of_entity_mapping() {
         let mut world = World::new();
         let real = world.spawn(NetTank).id();
-        let garbage = world.spawn_empty().id();
+        let mapped_elsewhere = world.spawn_empty().id();
 
         let truth = ShotId {
-            shooter: real,
+            combatant: crate::CombatantId(7),
             weapon: 0,
             fire_tick: 42,
         };
-        let miskeyed = ShotId {
-            shooter: garbage,
-            ..truth
-        };
+        let other_receiver_view = ShotId { ..truth };
+        assert_eq!(truth, other_receiver_view);
         assert_ne!(
-            truth, miskeyed,
-            "the shooter entity is an INPUT to ShotId — a garbage one silently forges a second identity",
+            real, mapped_elsewhere,
+            "different ECS worlds map a shooter independently"
         );
 
-        // Duplicate shells: the dedup gate lets both through, because they are not the same shot.
         let mut seen = SeenShots::default();
-        assert!(seen.mark_new(miskeyed), "the mis-keyed copy spawns a shell");
         assert!(
             seen.mark_new(truth),
-            "and the redundancy window's correctly-mapped re-delivery spawns a SECOND — one shot, two \
-             shells (MEASURED: 6 of 15 mis-keyed fires doubled at connect)",
+            "the first receiver-local fire view spawns one shell"
+        );
+        assert!(
+            !seen.mark_new(other_receiver_view),
+            "a remapped echo retains the same identity and cannot spawn a second shell"
         );
 
-        // The dissolve: a buffer keyed by ShotId cannot serve a shell that carries the other id.
         let mut buf = SanctionedShots::default();
         buf.insert(
             truth,
@@ -1803,56 +2219,12 @@ mod tests {
             },
         );
         assert!(
-            !buf.has_shot(miskeyed),
-            "the mis-keyed shell can never find its sanctioned bounce — it holds, then dissolves",
+            buf.has_shot(other_receiver_view),
+            "an outcome keyed on the stable id serves either receiver-local entity view"
         );
-        assert!(buf.has_shot(truth), "the true id does find it");
     }
 
-    /// The sliding-window REDUNDANCY property: with a window of N, if each burst is lost at most once
-    /// but the window still covers every event, every shot spawns EXACTLY ONCE — none dropped, none
-    /// doubled. Models bursts carrying the last N fire ticks, drops a subset of bursts, and asserts the
-    /// dedup over the SURVIVORS yields one spawn per unique shot.
-    #[test]
-    fn redundancy_window_delivers_every_shot_exactly_once_under_loss() {
-        const WINDOW: usize = 4; // matches `net::server::FIRE_WINDOW`
-        const SHOTS: u32 = 8;
-        // Drop bursts 2, 4, 6 — never two adjacent, so within a window of 4 every event still rides a
-        // delivered burst (shot t appears in bursts t..=t+WINDOW-1).
-        let dropped = [2u32, 4, 6];
-
-        let mut seen = SeenShots::default();
-        let mut spawned: bevy::platform::collections::HashSet<u32> = Default::default();
-        let mut doubled = false;
-        for k in 1..=SHOTS {
-            if dropped.contains(&k) {
-                continue; // this burst was lost
-            }
-            let lo = k.saturating_sub(WINDOW as u32 - 1).max(1);
-            for tick in lo..=k {
-                if seen.mark_new(shot(tick)) && !spawned.insert(tick) {
-                    doubled = true;
-                }
-            }
-        }
-
-        assert!(
-            !doubled,
-            "no shot spawned twice despite the redundancy overlap"
-        );
-        assert_eq!(
-            spawned.len() as u32,
-            SHOTS,
-            "every shot spawned despite lost bursts — the window repaired the loss",
-        );
-        for t in 1..=SHOTS {
-            assert!(spawned.contains(&t), "shot {t} spawned exactly once");
-        }
-    }
-
-    /// The dedup ring is BOUNDED: past its cap the oldest ids are evicted. (An evicted id can never be
-    /// re-offered — a shot only reappears within `FIRE_WINDOW` bursts, far inside the cap — so this
-    /// only bounds memory, it never re-admits a duplicate in practice.)
+    /// The dedup ring is bounded while recent visual copies remain suppressed.
     #[test]
     fn seen_shots_ring_is_bounded() {
         let mut seen = SeenShots::default();
@@ -1864,11 +2236,28 @@ mod tests {
             "the ring never exceeds its cap (got {})",
             seen.order.len(),
         );
-        // The oldest evicted ids are gone (so re-offering one reads as new again — acceptable, it can't
-        // happen inside the redundancy window); the newest are still remembered.
+        // Capacity eviction never removes the newest ids.
         assert!(
             !seen.mark_new(shot(SeenShots::CAP as u32 + 5)),
             "a recent id is still deduped"
+        );
+    }
+
+    #[test]
+    fn seen_shots_retains_the_full_accepted_thirty_player_fire_horizon() {
+        let mut seen = SeenShots::default();
+        let oldest = shot(0);
+        assert!(seen.mark_new(oldest));
+
+        // DERIVED: 30 combatants x two weapons x ceil(750 RPM x CATCH_UP_MAX_TICKS / 64 Hz).
+        let accepted_horizon: u32 = 30 * 2 * 20;
+        for fire_tick in 1..=accepted_horizon {
+            assert!(seen.mark_new(shot(fire_tick)));
+        }
+
+        assert!(
+            !seen.mark_new(oldest),
+            "a duplicate that can pass catch-up validation must remain deduplicated"
         );
     }
 
