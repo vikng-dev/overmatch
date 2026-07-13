@@ -137,6 +137,6 @@ The server owns disclosure. A live client must receive only the detail the curre
 
 **Why it's a playtest call.** The correct point depends on whether feedback improves comprehension and learning or erodes observation, uncertainty, and tank knowledge. It cannot be settled from implementation convenience.
 
-**Revert cost.** Low for presentation: the shooter already receives a discrete, shot-attributed authoritative `DamageConfirm`, deduplicated by `ShotId`, rather than inferring its cue from replicated health snapshots. Changing how much detail the server discloses may widen or narrow that semantic fact, but no presentation belongs in ballistics or damage truth.
+**Revert cost.** Expected to be low for presentation once the confirmation seam is complete: the required interface is a discrete, shot-attributed authoritative damage fact, deduplicated by `ShotId`, rather than a cue inferred from replicated health snapshots. Changing how much detail the server discloses may widen or narrow that semantic fact, but no presentation belongs in ballistics or damage truth.
 
 **Lives in.** `src/net/hit_feel.rs`, the authoritative damage/outcome path in `src/net/protocol.rs` and `src/net/server.rs`, and the future armor-inspection presentation.

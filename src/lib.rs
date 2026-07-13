@@ -61,16 +61,7 @@ mod hud;
 /// The networking implementation. Executables enter through [`run_client`] and [`run_server`];
 /// the adapter tree is private to the library.
 mod net;
-
-/// Run the predicted network client.
-pub fn run_client() {
-    net::client::run();
-}
-
-/// Run the authoritative dedicated server.
-pub fn run_server() {
-    net::server::run();
-}
+pub use net::{run_client, run_server};
 /// The net client's single overlay authority (active-set resource + pure input/cursor/scrim rules for
 /// the connect / death / menu / view-death overlays). Lives at the crate root, NOT under `net`,
 /// because it is pure view-state that the always-sim `sight` module also declares into — putting it
@@ -321,13 +312,13 @@ impl Plugin for NetClientPlugin {
             overlay::plugin,
             // Bottom-right ping/FPS/frame-time debug panel — net-client only (ping is meaningless
             // in SP), for testing against the deployed server.
-            net::debug_hud::plugin,
+            net::debug_hud_plugin,
             // The death screen + respawn key — net-client only (SP has no respawn flow): shows
             // "YOU DIED" when the player's own tank is knocked out and latches the respawn edge.
-            net::death_screen::plugin,
+            net::death_screen_plugin,
             // View-layer combat feedback (net-client only): the camera kick + damage flash when the
             // player is hit, and the hit-marker when the player's shell drops an opponent's health.
-            net::hit_feel::plugin,
+            net::hit_feel_plugin,
             // Impact dust puffs — every landed round reads at the target (view-only, ADR-0014; the
             // replica's cosmetic shells spark the same `Impact` seam, so remote fire puffs too).
             vfx::plugin,

@@ -6,24 +6,35 @@
 use avian3d::schedule::PhysicsSystems;
 use bevy::prelude::*;
 
-pub(crate) mod client;
+mod client;
 mod contact_probe;
-pub(crate) mod death_screen;
-pub(crate) mod debug_hud;
+mod death_screen;
+mod debug_hud;
 mod diagnostics;
 mod harness;
-pub(crate) mod hit_feel;
+mod hit_feel;
 mod physics;
-pub(crate) mod protocol;
-pub(crate) mod render_error;
+mod protocol;
+mod render_error;
 mod rig;
-pub(crate) mod server;
+mod server;
 /// The loss-injected end-to-end tripwire: two real apps over a real (conditioned) lightyear link,
 /// asserting exactly-once cosmetic-shell spawn and ricochet carry-through under seeded packet loss.
 /// Test-only — it exists to close the model-vs-reality gap the redundancy unit tests leave open.
 #[cfg(test)]
 mod shot_loss;
 mod watchdog;
+
+/// Run the predicted network client.
+pub use client::run as run_client;
+/// Run the authoritative dedicated server.
+pub use server::run as run_server;
+
+pub(super) use death_screen::plugin as death_screen_plugin;
+pub(super) use debug_hud::plugin as debug_hud_plugin;
+pub(super) use hit_feel::plugin as hit_feel_plugin;
+pub(crate) use protocol::NetBot;
+pub(crate) use render_error::RenderErrorOffset;
 
 use rig::client_smoothing_plugin;
 
@@ -33,7 +44,7 @@ use crate::tank::PendingTankAssets;
 /// The shared networking layer both composition roots mount: the wire contract (`protocol`), the
 /// physics re-anchor (`physics`), the networked rig lifecycle (`rig`), and the physics NaN probe.
 /// Identical on client and server, as lightyear demands.
-pub fn plugin(app: &mut App) {
+fn plugin(app: &mut App) {
     protocol::plugin(app);
     physics::plugin(app);
     rig::plugin(app);
@@ -51,7 +62,7 @@ pub fn plugin(app: &mut App) {
 /// never enter Playing on their own now"). Both already gate their spawn/rig work on the spec load
 /// (`spawn_pending_tanks` / `attach_replicated_rig`); this just opens the `GameplaySet` gate once,
 /// the same load dependency, so the sim actually ticks.
-pub(crate) fn open_gameplay_gate(
+fn open_gameplay_gate(
     assets: Option<Res<PendingTankAssets>>,
     asset_server: Res<AssetServer>,
     state: Res<State<AppState>>,

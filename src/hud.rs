@@ -8,7 +8,7 @@
 
 use bevy::prelude::*;
 
-use crate::net::protocol::NetBot;
+use crate::net::NetBot;
 
 use crate::ballistics::{ComponentHealth, ComponentVolume};
 use crate::damage::{Ammo, CrewStation, FunctionRole};

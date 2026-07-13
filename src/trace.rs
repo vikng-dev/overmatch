@@ -525,7 +525,7 @@ fn record_frame(
     // The predicted root's live render-space error offset. Present only on the entity `net::render_error`
     // armed (the client's predicted tank); an unfiltered `Option`-style `get` keeps every other tank
     // row — and the single-player composition, which never mounts the layer — omitting the field.
-    view_offset: Query<&crate::net::render_error::RenderErrorOffset>,
+    view_offset: Query<&crate::net::RenderErrorOffset>,
 ) {
     // One camera pose for every tank row this frame (recorded after Propagate, so the third-person
     // orbit camera's `GlobalTransform` is final). `None` on a headless client → `cam`/`camq` omitted.
