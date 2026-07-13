@@ -5,7 +5,7 @@
 //! does (`aim::commit_aim`, `sight::drive_gunner_aim`), and the gunner optic depresses its view by the
 //! same angle so the reticle holds the target while the barrel rides above it.
 //!
-//! With air drag there is no closed form, so this is the real-world *range table*: at bind we fire the
+//! With air drag there is no closed form, so this is the real-world *range table*: at spawn we fire the
 //! weapon's trajectory — off `ballistics`' shared flight kernel, so the solution matches the actual
 //! shell — at a sweep of launch angles, record where each lands, and invert that to a `range → angle`
 //! lookup. Each weapon gets its own; the draggy coax needs far more lob than the 88 at equal range,
@@ -14,7 +14,6 @@
 //! Deep module: a small interface (`RangeTable::superelevation`, `Ranging`, `lob`) over the
 //! sweep / invert / interpolate inside.
 
-use bevy::ecs::lifecycle::Add;
 use bevy::input::mouse::AccumulatedMouseScroll;
 use bevy::prelude::*;
 
@@ -22,7 +21,6 @@ use crate::ballistics::{drag_k, freeflight_step};
 use crate::command::gather_commands;
 use crate::sight::in_gunner;
 use crate::state::{GameplaySet, PlayerInputSet};
-use crate::tank::Weapon;
 
 /// The player-dialed range to the target (m). The Tiger has no rangefinder, so ranging is a *skill*:
 /// the player estimates and scrolls this in the optic, and the gun lobs for it — dial wrong and the
@@ -39,7 +37,7 @@ impl Default for Ranging {
 }
 
 /// A weapon's precomputed range table: ascending `(range_m, superelevation_rad)` rows. Built once per
-/// weapon at bind (the trajectory is fixed) and stored on its muzzle; the aim commit looks up the
+/// weapon at spawn (the trajectory is fixed) and stored on its muzzle; the aim commit looks up the
 /// dialed range to lob the aim point. Each weapon has its own — the coax out-lobs the 88 at equal
 /// range, the per-ammo ballistic scale.
 #[derive(Component)]
@@ -137,13 +135,6 @@ pub fn lob(v: Vec3, theta: f32) -> Vec3 {
     }
 }
 
-/// Range tables — authority-side: `drive_aim_servos` lobs by the commanded range through the
-/// weapon's table, so the server builds them too.
-pub fn sim_plugin(app: &mut App) {
-    // Build each weapon's range table the moment the rig binds its `Weapon`.
-    app.add_observer(attach_range_table);
-}
-
 /// The player's range dial — client-side control state; its value rides to the sim inside the
 /// command (`gather_commands` copies it absolute each frame).
 pub fn client_plugin(app: &mut App) {
@@ -164,18 +155,6 @@ pub fn client_plugin(app: &mut App) {
                 .in_set(PlayerInputSet)
                 .in_set(GameplaySet),
         );
-}
-
-/// Build a weapon's range table and store it on its muzzle, reacting to the binder attaching `Weapon`.
-fn attach_range_table(add: On<Add, Weapon>, weapons: Query<&Weapon>, mut commands: Commands) {
-    let Ok(weapon) = weapons.get(add.entity) else {
-        return;
-    };
-    commands.entity(add.entity).insert(RangeTable::for_weapon(
-        weapon.speed,
-        weapon.caliber,
-        weapon.mass,
-    ));
 }
 
 /// Scroll dials the range in the optic (range, not zoom — the optic's magnification is fixed). The

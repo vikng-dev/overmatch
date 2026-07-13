@@ -17,7 +17,6 @@ use bevy::prelude::*;
 use bevy::time::{Real, Virtual};
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
-use bevy::asset::LoadState;
 use bevy::camera::ClearColorConfig;
 use bevy::camera::visibility::RenderLayers;
 use bevy::ui::IsDefaultUiCamera;
@@ -192,7 +191,7 @@ pub fn plugin(app: &mut App) {
         // `spec` registers the `.tank.ron` loader so the target tank's volumes bind with their data.
         spec::plugin,
         // The tank-geometry extractor: the target's sim body (armor volumes included) spawns from
-        // `ExtractedTankGeometry`, exactly like the game's tanks; the shadow harness rides along.
+        // `TankBlueprint`, exactly like the game's tanks; the shadow harness rides along.
         bake::plugin,
         // The render-side view attach: the target is static, but cook-off detaches the sim
         // turret and the rendered glb turret must follow the free body.
@@ -246,7 +245,7 @@ pub fn plugin(app: &mut App) {
             clear_shots,
             reset_world,
             toggle_march_mode,
-            spawn_target_when_ready,
+            spawn_target_from_blueprint,
             tag_hull_meshes,
             toggle_layers,
             apply_layer_visibility,
@@ -355,8 +354,8 @@ fn spawn_targets(
     }
 }
 
-/// The target tank's spec, loading. The tank is spawned only once it's ready (a load dependency,
-/// ADR-0011), so `spawn_tank_sim` builds its volumes with their data in one pass.
+/// Legacy spec-asset handle retained for `TankSpecHandle` and the view-shadow validator. Simulation
+/// data comes from `TankBlueprint` and does not wait for this handle to resolve.
 #[derive(Resource)]
 struct PendingTarget(Handle<TankSpec>);
 
@@ -364,11 +363,8 @@ fn load_target(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.insert_resource(PendingTarget(asset_server.load("tiger_1/tiger_1.tank.ron")));
 }
 
-/// Once the spec is loaded, spawn the real Tiger as a **static** target (no driving/suspension — it
-/// just stands there to be shot): the sim body — ballistic-volume colliders the march raycasts
-/// included — synchronously from the extracted geometry (`spawn_tank_sim`), the glb scene as its
-/// view (`bind_tank_view`), exactly like the game's tanks.
-fn spawn_target_when_ready(
+/// Spawn the static target synchronously from the blueprint; its glb view may attach later.
+fn spawn_target_from_blueprint(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     pending: Option<Res<PendingTarget>>,
@@ -377,9 +373,6 @@ fn spawn_target_when_ready(
     let Some(pending) = pending else {
         return;
     };
-    if !matches!(asset_server.load_state(&pending.0), LoadState::Loaded) {
-        return;
-    }
     let Some((geometry, spec)) = source.get(&pending.0) else {
         return;
     };

@@ -5,14 +5,14 @@
 //! loop, which is where input belongs when the sim runs on a fixed clock.
 
 use bevy::ecs::entity::{EntityMapper, MapEntities};
-use bevy::ecs::lifecycle::{Add, Remove};
+use bevy::ecs::lifecycle::Remove;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::damage::CrewStation;
 use crate::firecontrol::Ranging;
 use crate::state::{GameplaySet, PlayerInputSet};
-use crate::tank::{Controlled, Tank};
+use crate::tank::Controlled;
 
 /// One tick's worth of driver intent for one tank: plain data, serializable — exactly what a
 /// client will send per tick under authoritative multiplayer. Carries the *target* values; the
@@ -231,14 +231,12 @@ pub struct ConsumeCommandEdges;
 /// command. No devices — the game adds those via [`plugin`]; the sandbox writes commands from its
 /// own controls (the crew bar).
 pub fn core_plugin(app: &mut App) {
-    app.add_observer(attach_command)
-        .add_observer(clear_command_on_release)
-        .add_systems(
-            FixedUpdate,
-            consume_edges
-                .in_set(ConsumeCommandEdges)
-                .in_set(GameplaySet),
-        );
+    app.add_observer(clear_command_on_release).add_systems(
+        FixedUpdate,
+        consume_edges
+            .in_set(ConsumeCommandEdges)
+            .in_set(GameplaySet),
+    );
 }
 
 /// Device gather — client-side: the only device→command translation. Requires [`core_plugin`]
@@ -255,12 +253,6 @@ pub fn client_plugin(app: &mut App) {
                 .in_set(PlayerInputSet)
                 .in_set(GameplaySet),
         );
-}
-
-/// Every tank carries a `TankCommand` from birth — zeroed until someone (local player now, a
-/// network peer later) writes it.
-fn attach_command(add: On<Add, Tank>, mut commands: Commands) {
-    commands.entity(add.entity).insert(TankCommand::default());
 }
 
 /// Translate devices through the bindings into the controlled tank's command. The only place in

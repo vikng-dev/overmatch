@@ -90,12 +90,9 @@ const fn protocol_fingerprint() -> u64 {
 }
 
 /// Replicated tank-identity marker — how the client recognizes a replicated entity as a tank
-/// (before its local sim body exists) without replicating the sim's own `Tank` marker. Deliberately
-/// NOT `Tank`: replicating `Tank` fires its `On<Add, Tank>` observers at replication-receive time,
-/// ahead of the client's sim-body build, and that ordering deterministically NaN'd the tank at
-/// `Dynamic` activation (4/4 crash, 2026-07-05 restructure regression — root pos/rot/velocities all
-/// NaN within a frame). The sim's `Tank` stays a local component that arrives with the sim body,
-/// exactly like every other rig component (`spawn_tank_sim`).
+/// without replicating the sim's own `Tank` marker. Deliberately NOT `Tank`: the sim marker stays
+/// local and arrives only with the complete local body, including Tank's required command/drive
+/// state.
 #[derive(Component, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct NetTank;
 
@@ -1372,8 +1369,8 @@ fn strip_confirmed_history<C: Component + Clone>(
 /// networked input and every sim system. Only entities carrying both, which are exactly the
 /// locally-simulated tanks: the server's tanks get `ActionState` at spawn, the client's own
 /// predicted tank gets it when `InputMarker<TankCommand>` claims the slot (`claim_input_slot`,
-/// client module); remote (interpolated) tanks never carry one. `TankCommand` itself comes from
-/// `command::core_plugin`'s `attach_command` observer (`On<Add, Tank>`).
+/// client module); remote (interpolated) tanks never carry one. `TankCommand` is a required
+/// component of the local `Tank` sim marker.
 ///
 /// # A CONSUMABLE commits only on an ATTESTED tick
 ///

@@ -219,8 +219,6 @@ impl Plugin for SimPlugin {
             // `ballistics` owns the shell trajectory + impact seam; `shooting` is the gun control
             // that drives it (the sandbox drives the same `FireShell` from its camera).
             ballistics::plugin,
-            // Range tables at bind: the servo bridge lobs each tank's aim by its commanded range.
-            firecontrol::sim_plugin,
             damage::plugin,
             shooting::plugin,
         ));

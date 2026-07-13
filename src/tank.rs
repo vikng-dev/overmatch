@@ -2,13 +2,9 @@
 //! for the turret/gun, and the sim-skeleton spawner. The tank declares *structure*; features
 //! (aim, shooting) attach their own behavior to these markers reactively.
 //!
-//! **Sim/view split, phase 1** (design `sim-view-split-and-tank-bake.md` §8 step 1): the sim
-//! body — servo frames, wheel stations, collision hulls, armor volumes, `Rig`/`TankSim` — is
-//! spawned *synchronously* from the extracted [`crate::bake::TankGeometry`], never from the
-//! instantiated glb scene. The scene is a **view**: it attaches whenever it loads and only
-//! renders ([`bind_tank_view`]). This is what makes the tier-2 rule structural: every
-//! rollback-registered component is constructible at spawn, from data, so there is no bind
-//! window for netcode to care about.
+//! `spawn_tank_sim` builds the local body synchronously from geometry/spec data; the instantiated
+//! glb scene attaches later as presentation ([`bind_tank_view`]). Runtime geometry extraction and
+//! the replicated client's late shell-to-body transition remain open in `ARCHITECTURE.md`.
 
 use std::collections::{HashMap, HashSet};
 
@@ -24,12 +20,15 @@ use bevy::world_serialization::WorldInstanceReady;
 use serde::Deserialize;
 
 use crate::Layer;
-use crate::bake::{ExtractedTankGeometry, TankGeometry};
+use crate::bake::{TankBlueprint, TankGeometry};
 use crate::ballistics::{ArmorVolume, BallisticVolume, ComponentHealth, ComponentVolume};
+use crate::command::TankCommand;
 use crate::damage::{
     Ammo, Crewman, Requirement, TankCapabilities, TankVolumes, VolumeFacets, VolumeOf, evaluate,
     part_qualities,
 };
+use crate::driving::{DriveState, Suspension};
+use crate::firecontrol::RangeTable;
 use crate::shooting::RecoilParams;
 use crate::sight::SightMode;
 use crate::spec::{FireMode, RecoilSpec, TankSpec, TankSpecHandle, Trigger, ViewKind};
@@ -48,10 +47,10 @@ pub struct Hull;
 
 /// Marks the vehicle's root entity — the dynamic rigid body (chassis). Suspension/drive forces
 /// are applied here; debug x-ray walks its descendants. Deliberately LOCAL, never replicated:
-/// its `On<Add, Tank>` observers must fire alongside the local spawn bundle, not at
-/// replication-receive time (see `net::protocol::NetTank` for the wire-side identity marker and
-/// the measured NaN regression that rule comes from).
+/// its required `TankCommand` and `DriveState` join the same command flush as the full
+/// local sim body, never a standalone wire marker.
 #[derive(Component)]
+#[require(TankCommand, DriveState)]
 pub struct Tank;
 
 /// Marks the one tank the player is currently commanding. Exactly one tank carries this at a time;
@@ -155,8 +154,10 @@ pub enum TrackSide {
 
 /// A load-bearing roadwheel — a suspension/drive contact station, tagged with its track side;
 /// the sprocket and idler are excluded. Its suspension ray is cast fresh each tick by
-/// `apply_suspension` (see there for why it is not a `RayCaster` component).
+/// `apply_suspension` (see there for why it is not a `RayCaster` component). Its required
+/// [`Suspension`] joins the same command flush as the roadwheel marker.
 #[derive(Component)]
+#[require(Suspension)]
 pub struct Roadwheel {
     pub side: TrackSide,
 }
@@ -570,23 +571,17 @@ pub fn client_plugin(app: &mut App) {
     );
 }
 
-/// The tank's load dependencies (ADR-0011): the spec sheet AND the glb scene, both kicked off up
-/// front, and a tank is spawned only once both are ready — [`spawn_tank_sim`] reads the loaded
-/// spec, and preloading the scene keeps the *view* pop-in to ~a frame. Since phase 1 of the
-/// sim/view split the scene is presentation only: the sim body spawns synchronously from the
-/// extracted geometry, so a late scene is a cosmetic wait, not a sim hazard. (The scene stays a
-/// gate here because it is still the extractor's source and the shadow harness's subject; phase 2
-/// drops the server's dependency on it entirely — design §8 step 3.) Kicked off once at startup
-/// on every side; shared with the networking layer (`net::rig`/`net::client`/`net::server`),
-/// which spawns tanks against the same dependency.
-#[derive(Resource)]
+/// Handles for the tank's presentation assets. They may still be loading when simulation state is
+/// constructed; [`TankSimSource`] owns the eager spawn data. `loaded` is used only by compositions
+/// that choose to hold their presentation/gameplay gate until the view is ready.
+#[derive(Resource, Clone)]
 pub(crate) struct PendingTankAssets {
     pub spec: Handle<TankSpec>,
     pub scene: Handle<bevy::world_serialization::WorldAsset>,
 }
 
 impl PendingTankAssets {
-    /// Both load dependencies resolved — the one gate every spawn path shares.
+    /// Both presentation assets have resolved.
     pub(crate) fn loaded(&self, asset_server: &AssetServer) -> bool {
         matches!(asset_server.load_state(&self.spec), LoadState::Loaded)
             && matches!(asset_server.load_state(&self.scene), LoadState::Loaded)
@@ -597,20 +592,22 @@ impl PendingTankAssets {
 /// data (one path, two readers, guaranteed to agree on the source bytes).
 pub(crate) const TIGER_GLB_PATH: &str = "tiger_1/tiger_1.glb";
 
-/// The sim spawner's data dependencies, resolved as ONE gate every spawn path shares (SP,
-/// server connect-spawn, client replicated-attach, sandbox target): the extracted geometry
-/// (a Startup resource wherever `bake::plugin` is mounted) + the loaded spec. `get` returns
-/// `None` while anything is still pending — callers simply try again next frame — so the
-/// wait-vs-spawn behavior can't drift between the paths.
+/// The sim spawner's synchronous runtime data dependency. [`TankBlueprint`] is built at `Startup`
+/// from the GLB's raw data and the embedded shipped RON before network receive runs; it never
+/// consults `Assets<TankSpec>`. View loading may be delayed independently. The offline,
+/// fingerprinted content seam remains open in `ARCHITECTURE.md`.
 #[derive(SystemParam)]
 pub(crate) struct TankSimSource<'w> {
-    geometry: Option<Res<'w, ExtractedTankGeometry>>,
-    specs: Res<'w, Assets<TankSpec>>,
+    blueprint: Option<Res<'w, TankBlueprint>>,
 }
 
 impl TankSimSource<'_> {
-    pub(crate) fn get(&self, spec: &Handle<TankSpec>) -> Option<(&TankGeometry, &TankSpec)> {
-        Some((&self.geometry.as_ref()?.0, self.specs.get(spec)?))
+    pub(crate) fn get(
+        &self,
+        _legacy_spec_handle: &Handle<TankSpec>,
+    ) -> Option<(&TankGeometry, &TankSpec)> {
+        let blueprint = self.blueprint.as_deref()?;
+        Some((&blueprint.geometry, &blueprint.spec))
     }
 }
 
@@ -801,12 +798,10 @@ fn first_geometry_ancestor(
     }
 }
 
-/// Build a tank's ENTIRE sim body on `root`, synchronously, from the extracted geometry + the
-/// already-loaded spec — servo frames, wheel stations, collision hulls, armor volumes,
-/// `Rig`/`TankSim` — with no asset in the loop (sim/view split phase 1, design §8 step 1). Every
-/// spawn path calls this in the same command batch as the root bundle, so the tank is
-/// sim-complete (colliders included) the moment its first flush ends: SP at scenario spawn, the
-/// server at connect-spawn, the client the moment the replicated root lands.
+/// Queue a tank's complete local sim body on `root` from supplied geometry and spec data. All body
+/// components and children land in one command flush. Authority/offline callers invoke this while
+/// constructing the root; the replicated-client exception is tracked as open debt in
+/// `ARCHITECTURE.md`.
 ///
 /// The skeleton mirrors the glb node tree — same names, same local transforms (bit-exact, step-0
 /// shadow-proven), same topology — but only the chains the sim actually reads; visual-only nodes
@@ -1004,22 +999,29 @@ pub(crate) fn spawn_tank_sim(
     {
         let muzzle = entity_at(muzzle_index.expect("contract checked"));
         let barrel = barrel_index.map(&entity_at);
+        let weapon_component = Weapon {
+            name: (*weapon_name).clone(),
+            speed: weapon.speed,
+            caliber: weapon.caliber,
+            mass: weapon.mass,
+            fire_mode: weapon.fire_mode,
+            recoil: weapon.recoil.clone(),
+            barrel,
+            fire: weapon.fire.clone(),
+            load: weapon.load.clone(),
+            trigger: weapon.trigger,
+        };
+        let range_table = RangeTable::for_weapon(
+            weapon_component.speed,
+            weapon_component.caliber,
+            weapon_component.mass,
+        );
         commands.entity(muzzle).insert((
             Muzzle,
             TankRoot(root),
             WeaponIndex(slot),
-            Weapon {
-                name: (*weapon_name).clone(),
-                speed: weapon.speed,
-                caliber: weapon.caliber,
-                mass: weapon.mass,
-                fire_mode: weapon.fire_mode,
-                recoil: weapon.recoil.clone(),
-                barrel,
-                fire: weapon.fire.clone(),
-                load: weapon.load.clone(),
-                trigger: weapon.trigger,
-            },
+            weapon_component,
+            range_table,
         ));
         if let (Some(barrel), Some(barrel_index)) = (barrel, *barrel_index) {
             commands
@@ -1539,4 +1541,44 @@ fn interpolate_servos(
 pub(crate) fn shortest_angle(diff: f32) -> f32 {
     use std::f32::consts::{PI, TAU};
     (diff + PI).rem_euclid(TAU) - PI
+}
+
+#[cfg(test)]
+mod spawn_contract_tests {
+    use std::sync::Arc;
+
+    use super::*;
+
+    #[derive(Resource, Default)]
+    struct SourceProbe(bool);
+
+    fn probe_unresolved_handle(source: TankSimSource, mut probe: ResMut<SourceProbe>) {
+        probe.0 = source.get(&Handle::default()).is_some();
+    }
+
+    #[test]
+    fn sim_source_does_not_require_a_resolved_asset_handle() {
+        let spec: TankSpec = ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron"))
+            .expect("the shipped Tiger spec must parse");
+        let geometry = TankGeometry {
+            nodes: Vec::new(),
+            by_name: HashMap::new(),
+            roadwheels: Vec::new(),
+            collision_proxies: Vec::new(),
+        };
+
+        let mut app = App::new();
+        app.insert_resource(TankBlueprint {
+            geometry: Arc::new(geometry),
+            spec: Arc::new(spec),
+        })
+        .init_resource::<SourceProbe>()
+        .add_systems(Update, probe_unresolved_handle);
+        app.update();
+
+        assert!(
+            app.world().resource::<SourceProbe>().0,
+            "TankSimSource must read the eager blueprint even when its legacy asset handle is unresolved",
+        );
+    }
 }

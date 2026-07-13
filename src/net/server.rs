@@ -119,8 +119,8 @@ pub fn run() {
     // without it those `on_insert` hooks no-op, and an UNSET visibility bit defaults to VISIBLE — so all
     // three ownership markers broadcast to EVERY client and each one predicts + claims input on EVERY
     // tank (the "one player controls both tanks" leak). The one visibility path that isn't
-    // `ReplicationSender`-gated (`handle_new_client_visibility`) fires only at connect, before the tanks
-    // asset-load-gate-spawn in `spawn_pending_tanks`, so it never covers them — the spawn-time path is
+    // `ReplicationSender`-gated (`handle_new_client_visibility`) fires only at connect, before
+    // `spawn_pending_tanks` creates the tanks, so it never covers them — the spawn-time path is
     // always `on_insert`. Replication itself still works (replicon's `ConnectedClient` drives the send),
     // which is why only the ownership markers leaked. Canonical lightyear examples add this in their
     // `On<Add, LinkOf>` handler; `ReplicationSender` is a unit marker used solely by the visibility
@@ -198,10 +198,8 @@ pub fn run() {
     app.run();
 }
 
-/// Connected clients waiting on the Tiger spec load (§2 of the map: the spec is a load
-/// dependency of spawning, same as `tank.rs` — `spawn_tank_sim` requires the spec + extracted
-/// geometry already loaded). A client can connect before the tiny `.tank.ron` parse finishes;
-/// queueing avoids spawning a tank root the spawner would immediately panic on.
+/// Connected clients waiting for the server's next spawn pass. The simulation blueprint is eager,
+/// so this queue batches link setup and spawn work rather than waiting on view assets.
 #[derive(Resource, Default)]
 struct PendingClients(Vec<(Entity, PeerId)>);
 
@@ -231,9 +229,8 @@ fn lane_offset(lane: u32) -> Vec3 {
     Vec3::new(sign * step, 0.0, 0.0)
 }
 
-/// Queues each newly connected client — spawning is deferred to [`spawn_pending_tanks`] once the
-/// Tiger spec has loaded (spike map §6/§7 spawn pattern: one predicted tank per client, owned by
-/// that client, everyone else would interpolate it — no second client yet).
+/// Queues each newly connected client for [`spawn_pending_tanks`] (one predicted tank per client,
+/// owned by that client; every other client interpolates it).
 fn handle_new_clients(
     new: Query<(Entity, &RemoteId), (Added<Connected>, With<ClientOf>)>,
     mut pending: ResMut<PendingClients>,
@@ -244,14 +241,11 @@ fn handle_new_clients(
     }
 }
 
-/// Spawns the real Tiger for every queued client once the assets have loaded — sim body built
-/// synchronously from the extracted geometry (`spawn_tank_sim`) in the same command batch as the
-/// root, so the tank is collider-complete before replication ever sees it; the glb scene attaches
-/// later as pure view (`bind_tank_view`, observed below).
+/// Spawns a complete authoritative tank for every queued client. View handles may still be
+/// loading; the simulation body comes from the eager blueprint.
 fn spawn_pending_tanks(
     mut pending: ResMut<PendingClients>,
-    assets: Option<Res<PendingTankAssets>>,
-    asset_server: Res<AssetServer>,
+    assets: Res<PendingTankAssets>,
     source: TankSimSource,
     time: Res<Time<Virtual>>,
     config: Res<harness::PerturbConfig>,
@@ -259,10 +253,6 @@ fn spawn_pending_tanks(
     mut commands: Commands,
 ) {
     if pending.0.is_empty() {
-        return;
-    }
-    let Some(assets) = assets else { return };
-    if !assets.loaded(&asset_server) {
         return;
     }
     let Some((geometry, spec)) = source.get(&assets.spec) else {
@@ -382,22 +372,16 @@ struct Bot;
 /// Spawn ONE ownerless "bot" tank that drives in a circle, replicated to every client as a pure
 /// interpolated remote — a solo test rig for the remote-tank interpolation/timing path, with no
 /// second client needed. Gated behind `OVERMATCH_BOT` (present = on, unset = off), default OFF so
-/// every existing run and harness recipe is byte-for-byte unchanged. Same asset gate as
-/// [`spawn_pending_tanks`]; spawns exactly once (the `spawned` guard). Mirrors the player spawn's
-/// component set minus the ownership half.
+/// every existing run and harness recipe is unchanged. Spawns exactly once (the `spawned` guard)
+/// and mirrors the player spawn's component set minus ownership.
 fn spawn_bot(
     mut spawned: Local<bool>,
-    assets: Option<Res<PendingTankAssets>>,
-    asset_server: Res<AssetServer>,
+    assets: Res<PendingTankAssets>,
     source: TankSimSource,
     mut commands: Commands,
 ) {
     // `is_err()` = the var is unset: present (even empty, e.g. `OVERMATCH_BOT=`) counts as on.
     if *spawned || std::env::var("OVERMATCH_BOT").is_err() {
-        return;
-    }
-    let Some(assets) = assets else { return };
-    if !assets.loaded(&asset_server) {
         return;
     }
     let Some((geometry, spec)) = source.get(&assets.spec) else {
@@ -427,7 +411,7 @@ fn spawn_bot_entity(
         rig::net_tank_rig(assets),
         // Simulated as a normal Dynamic body on the SERVER (it drives); clients receive it via
         // replication and, having no local body role for it, build a Static interpolated body
-        // (`net::rig::attach_replicated_rig` picks `Static` for any non-`Predicted` tank).
+        // (`net::rig::attach_replicated_rig` picks `Static` for non-`Predicted` tanks).
         RigidBody::Dynamic,
         // A distinct spot on the flat pad, a few metres up +Z — away from the per-client X lanes
         // (`lane_offset`) and the −Z test course, so the circle stays on flat ground.
@@ -473,12 +457,10 @@ fn schedule_bot_respawn(
 }
 
 /// When a scheduled [`BotRespawnAt`] comes due, sweep the dead bot and spawn a fresh one at the same
-/// pose. Same asset gate as [`spawn_bot`]/[`spawn_pending_tanks`] (long-loaded by the time any bot
-/// dies, but resolved identically so the spawn path never diverges).
+/// pose through the same blueprint-backed constructor.
 fn respawn_dead_bots(
     dead: Query<(Entity, &BotRespawnAt, &Rig), With<Bot>>,
-    assets: Option<Res<PendingTankAssets>>,
-    asset_server: Res<AssetServer>,
+    assets: Res<PendingTankAssets>,
     source: TankSimSource,
     time: Res<Time<Virtual>>,
     mut commands: Commands,
@@ -494,10 +476,6 @@ fn respawn_dead_bots(
         .map(|(root, _, rig)| (root, rig.turret))
         .collect();
     if due.is_empty() {
-        return;
-    }
-    let Some(assets) = assets else { return };
-    if !assets.loaded(&asset_server) {
         return;
     }
     let Some((geometry, spec)) = source.get(&assets.spec) else {
@@ -545,8 +523,7 @@ struct BotRespawnAt(f32);
 fn respawn_player_tanks(
     dead: Query<(Entity, &TankCommand, &ControlledBy), With<TankKnockedOut>>,
     remotes: Query<&RemoteId>,
-    assets: Option<Res<PendingTankAssets>>,
-    asset_server: Res<AssetServer>,
+    assets: Res<PendingTankAssets>,
     source: TankSimSource,
     mut lane: ResMut<SpawnLane>,
     mut commands: Commands,
@@ -566,12 +543,6 @@ fn respawn_player_tanks(
         })
         .collect();
     if requests.is_empty() {
-        return;
-    }
-    // Same asset gate as the spawn/respawn loops (long-loaded by the time anyone can die, but resolved
-    // identically so the spawn path never diverges).
-    let Some(assets) = assets else { return };
-    if !assets.loaded(&asset_server) {
         return;
     }
     let Some((geometry, spec)) = source.get(&assets.spec) else {
@@ -603,8 +574,8 @@ fn respawn_player_tanks(
 }
 
 /// Drive the bot in a steady circle AND hold its main gun's trigger: constants written straight into
-/// its own `TankCommand` (`command.rs`'s read contract, attached by `command`'s `On<Add, Tank>`
-/// observer). The bot carries no `ActionState`, so `bridge_action_state_to_tank_command` (protocol.rs)
+/// its own `TankCommand` (a required component of `Tank`). The bot carries no `ActionState`, so
+/// `bridge_action_state_to_tank_command` (protocol.rs)
 /// never touches it — this is the sole writer. Ordered in `GameplaySet` before the edge-consumer,
 /// with the other command writers; the fields are levels (never cleared), so it circles and fires for
 /// good. Firing makes the bot a self-firing target that exercises the opponent-fire path (the `net`

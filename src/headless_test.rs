@@ -15,7 +15,7 @@ use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 
 use crate::SimPlugin;
-use crate::bake::ExtractedTankGeometry;
+use crate::bake::TankBlueprint;
 use crate::command::TankCommand;
 use crate::spec::TankSpec;
 use crate::state::AppState;
@@ -48,6 +48,39 @@ const BOOT_DEADLINE: Duration = Duration::from_secs(60);
 /// shared mutable state, so a panicking test leaves nothing corrupted behind it. Propagating poison
 /// would turn one genuine failure into three misleading `PoisonError` panics and bury the real one.
 static BOOT_LEASE: Mutex<()> = Mutex::new(());
+
+fn assert_tank_state_at_add(
+    add: On<Add, Tank>,
+    tanks: Query<(Has<TankCommand>, Has<crate::driving::DriveState>)>,
+) {
+    let (command, drive) = tanks
+        .get(add.entity)
+        .expect("a newly added Tank must still exist during its observer");
+    assert!(
+        command && drive,
+        "TankCommand and DriveState must exist in the same insertion that adds Tank",
+    );
+}
+
+fn assert_suspension_at_add(
+    add: On<Add, crate::tank::Roadwheel>,
+    wheels: Query<Has<crate::driving::Suspension>>,
+) {
+    assert!(
+        wheels.get(add.entity).is_ok_and(|present| present),
+        "Suspension must exist in the same insertion that adds Roadwheel",
+    );
+}
+
+fn assert_range_table_at_add(
+    add: On<Add, crate::tank::Weapon>,
+    weapons: Query<Has<crate::firecontrol::RangeTable>>,
+) {
+    assert!(
+        weapons.get(add.entity).is_ok_and(|present| present),
+        "RangeTable must exist in the same insertion that adds Weapon",
+    );
+}
 
 /// A booted headless sim, plus the lease that serialized its boot. Derefs to the [`App`], so tests
 /// use it exactly like one; keep it alive for the whole test (dropping it early releases the lease).
@@ -103,7 +136,10 @@ fn headless_app() -> App {
         avian3d::prelude::PhysicsPlugins::default(),
         SimPlugin,
         crate::tank::sp_spawn_plugin,
-    ));
+    ))
+    .add_observer(assert_tank_state_at_add)
+    .add_observer(assert_suspension_at_add)
+    .add_observer(assert_range_table_at_add);
 
     // `App::run` normally drives plugin finish/cleanup (some registration — e.g. Avian's
     // diagnostics resources — happens in `Plugin::finish`); a bare `update()` loop must do it.
@@ -123,7 +159,7 @@ fn boot_diagnosis(app: &App, elapsed: Duration) -> String {
     let state = *world.resource::<State<AppState>>().get();
     let assets = world.resource::<AssetServer>();
     let specs = world.resource::<Assets<TankSpec>>();
-    let geometry = world.get_resource::<ExtractedTankGeometry>().is_some();
+    let blueprint = world.get_resource::<TankBlueprint>().is_some();
 
     // The three gates `tank::spawn_tank_when_loaded` waits on, reported individually.
     let (spec_state, scene_state, spec_parsed) = match world.get_resource::<PendingTankAssets>() {
@@ -161,7 +197,7 @@ fn boot_diagnosis(app: &App, elapsed: Duration) -> String {
            spec  (tiger_1.tank.ron) {spec_state}\n  \
            scene (tiger_1.glb) .... {scene_state}\n  \
            TankSpec parsed ........ {spec_parsed}\n  \
-           ExtractedTankGeometry .. {geometry}  (bake::extract_at_startup, Startup)\n  \
+           TankBlueprint ......... {blueprint}  (bake::extract_at_startup, Startup)\n  \
            glb on disk ............ {glb_report}\n\
          \n\
          How to read this:\n  \
@@ -225,6 +261,33 @@ fn booted_sim() -> BootedSim {
         "the sim reached Playing but the rigs never bound headless — the Tiger scene instantiated \
          no roadwheels (expected 32 across the two tanks, saw {wheels}). The spec and scene both \
          loaded, so this is a scene-bind/spec-match failure, not an asset-IO one.",
+    );
+
+    // Final census complements the insertion-time observers above and catches any alternate
+    // construction path that produced an incomplete entity without the expected marker.
+    let world = app.world_mut();
+    let incomplete_tanks = world
+        .query_filtered::<(Has<TankCommand>, Has<crate::driving::DriveState>), With<Tank>>()
+        .iter(world)
+        .filter(|(command, drive)| !command || !drive)
+        .count();
+    let incomplete_wheels = world
+        .query_filtered::<Has<crate::driving::Suspension>, With<crate::tank::Roadwheel>>()
+        .iter(world)
+        .filter(|suspension| !suspension)
+        .count();
+    let weapon_tables: Vec<bool> = world
+        .query_filtered::<Has<crate::firecontrol::RangeTable>, With<crate::tank::Weapon>>()
+        .iter(world)
+        .collect();
+    assert_eq!(
+        incomplete_tanks, 0,
+        "a spawned Tank lacks command or drive state"
+    );
+    assert_eq!(incomplete_wheels, 0, "a spawned Roadwheel lacks Suspension");
+    assert!(
+        !weapon_tables.is_empty() && weapon_tables.iter().all(|present| *present),
+        "a spawned Weapon lacks its RangeTable",
     );
 
     BootedSim { app, _lease: lease }

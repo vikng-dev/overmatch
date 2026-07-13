@@ -14,7 +14,6 @@
 //! ray/sphere stations instead).
 
 use avian3d::prelude::*;
-use bevy::ecs::lifecycle::Add;
 use bevy::prelude::*;
 use serde::Deserialize;
 
@@ -428,8 +427,6 @@ pub fn plugin(app: &mut App) {
     // diluting it — ADR-0011).
     app.insert_resource(SuspensionProbe::from_env())
         .add_systems(Startup, log_suspension_probe)
-        .add_observer(attach_suspension)
-        .add_observer(attach_drive_state)
         // Order matters within the fixed step: ramp the command into the drive signal, settle
         // springs (sets per-wheel load), then drive (reads that load for the friction circle).
         // All gated by the gameplay set.
@@ -454,11 +451,6 @@ pub struct Suspension {
     pub load: f32,
     /// Horizontal ground force applied this tick (thrust + friction), kept for the debug viz.
     pub drive_force: Vec3,
-}
-
-/// Attach `Suspension` the moment the rig binds a `Roadwheel` (observer, ungated).
-fn attach_suspension(add: On<Add, Roadwheel>, mut commands: Commands) {
-    commands.entity(add.entity).insert(Suspension::default());
 }
 
 /// Damped-spring suspension: each grounded wheel pushes the hull up at its contact point, so
@@ -855,12 +847,6 @@ impl DriveState {
     pub(crate) fn test_new(throttle: f32, steer: f32) -> Self {
         Self { throttle, steer }
     }
-}
-
-/// Attach `DriveState` the moment a `Tank` exists (observer, ungated) — the sim-side partner of
-/// the `TankCommand` that `command` attaches on the same trigger.
-fn attach_drive_state(add: On<Add, Tank>, mut commands: Commands) {
-    commands.entity(add.entity).insert(DriveState::default());
 }
 
 /// Slew each tank's drive signal toward its commanded targets. Tank-agnostic: a zeroed command

@@ -58,10 +58,9 @@ fn plugin(app: &mut App) {
 }
 
 /// `SimPlugin` mounts `state::sim_plugin` (`AppState`, `GameplaySet` gated on `Playing`), and the
-/// composition roots have no menu/loading flow to drive that transition themselves ("the roots
-/// never enter Playing on their own now"). Both already gate their spawn/rig work on the spec load
-/// (`spawn_pending_tanks` / `attach_replicated_rig`); this just opens the `GameplaySet` gate once,
-/// the same load dependency, so the sim actually ticks.
+/// composition roots have no menu/loading flow to drive that transition themselves. Tank spawn is
+/// independent of these assets; this gate only delays player gameplay until the current view is
+/// ready.
 fn open_gameplay_gate(
     assets: Option<Res<PendingTankAssets>>,
     asset_server: Res<AssetServer>,
