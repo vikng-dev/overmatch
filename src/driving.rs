@@ -17,7 +17,7 @@ use suspension::{apply_suspension, log_suspension_probe};
 use traction::{apply_drive, ramp_drive};
 
 pub fn plugin(app: &mut App) {
-    // The body's centre of mass needs no system here: `tank::spawn_tank_sim` inserts
+    // The body's centre of mass needs no system here: complete tank construction inserts
     // `CenterOfMass` from the authored `Center_Of_Mass` empty's extracted position at spawn
     // (the model owns the COM; `NoAutoCenterOfMass` keeps the collision proxies' centroid from
     // diluting it — ADR-0011).

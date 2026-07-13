@@ -187,6 +187,15 @@ Bevy function plugins and plugin tuples are valid internal implementation tools.
 custom `PluginGroup` only when a caller genuinely needs to select or reorder a stable collection;
 folder organization alone is not a reason.
 
+### Current tank boundary
+
+`src/tank.rs` is the tank facade. Its private children own model vocabulary, complete construction,
+servo mechanics, integrity guards, the local duel scenario, and presentation attachment. Normal
+authority and analytical callers receive a complete root through `spawn_complete_tank`; only
+`net::rig` uses the explicitly transitional `attach_replicated_tank_body` seam. The private
+assembler is not a caller interface. Fixed-step servo ordering and integrity observers remain
+owned by the facade.
+
 ## Comment and documentation policy
 
 Source comments may state:
@@ -206,11 +215,12 @@ evidence documents and link them briefly when the implementation still depends o
 
 | State | Debt | Required evidence for repayment |
 |---|---|---|
-| **OPEN — correctness** | `net::rig::attach_replicated_rig` waits for replicated `Position`/`Rotation`, then constructs the local body from `TankBlueprint`, sets the body role and `DisableRollback`, and calls `spawn_tank_sim` on an existing `Remote` root. This remains a late sim attachment even though it is asset-independent and lands in one command flush. | Replace the replicated shell with a source-verified spawn-intent/acknowledgment design that constructs rollback state before ordinary component replication can expose the entity. Pin split arrival, initial connection, prediction history, and first-physics-tick behavior in a real client/server lifecycle test. |
+| **OPEN — correctness** | `net::rig::attach_replicated_rig` waits for replicated `Position`/`Rotation`, then calls the explicitly exceptional `attach_replicated_tank_body` on an existing `Remote` root. Construction is asset-independent and lands in one flush, but rollback state is still attached after root replication. | Replace the replicated shell with a source-verified spawn-intent/acknowledgment design that constructs rollback state before ordinary component replication can expose the entity. Pin split arrival, initial connection, prediction history, and first-physics-tick behavior in a real client/server lifecycle test. |
 | **OPEN — content seam** | `TankBlueprint` removes Bevy asset readiness from simulation construction, but geometry is still extracted from the runtime GLB and the blueprint is neither versioned nor fingerprinted. | Server boots and simulates with the GLB absent; content validation happens before Battle admission; client and server compare a content fingerprint. |
 | **OPEN — dependency closure** | The dedicated server is headless at runtime but still compiles Bevy rendering/window dependencies through the shared package. | A targeted server dependency report excludes render, WGPU, and Winit, and a headless Battle test runs the actual server composition. |
 | **REPAID — guarded** | The executables previously reached through `overmatch::net::{client,server}` and `net` declared its client, server, protocol, diagnostic, and harness children public. | Executables now call crate-root `run_client`/`run_server`; networking children are private or crate-private; `tests/net_boundary.rs` rejects `overmatch::net` reach-through and compile-checks the root interface. |
-| **OPEN — locality** | Ballistics, protocol, client networking, tank lifecycle, and server networking mix several independent reasons to change in large files. | Each moves behind a facade with private children, while lifecycle and loss/rollback contract tests remain green. |
+| **REPAID — guarded** | Tank model, construction, servo, integrity, scenario, and view responsibilities previously shared one file and exposed the low-level skeleton spawner to every caller. | `src/tank.rs` now owns composition and explicit exports; private children own the separate invariants; authority/offline routes use `spawn_complete_tank`; the replicated-root exception is named and isolated. **MEASURED:** the three repository gates listed below pass against the isolated staged tree. |
+| **OPEN — locality** | Ballistics, protocol, client networking, and server networking still mix independent reasons to change in large files. | Each moves behind a facade with private children, while lifecycle and loss/rollback contract tests remain green. |
 | **OPEN — schedule ownership** | Cross-feature ordering is distributed among feature plugin implementations and long comments. | Named simulation sets and edges are registered at the owning simulation seam and pinned by behaviour tests. |
 | **OPEN — prose drift** | Source and design prose still contains retired features, historical mechanisms, and claims contradicted by current code. | Comments satisfy the policy above; current docs link to evidence rather than embedding incident chronology; stale claims are removed or corrected. |
 

@@ -435,7 +435,7 @@ only in a traced run):
    differ for the same logical tank (measured: 4294966669 vs 4294966650), so the hash consumes NO
    entity id, no pointer, no `HashMap` iteration, no archetype order — only f32 bits, in a fixed
    field order, with every `TankSim` `Vec` walked in spawn-sorted slot order (`WheelIndex` /
-   `ServoIndex` / `WeaponIndex`, identical across worlds by `spawn_tank_sim`'s sorted-by-name
+   `ServoIndex` / `WeaponIndex`, identical across worlds by construction's sorted-by-name
    assignment). A fixed FNV-1a 64 (not std's version-seeded SipHash) keeps hashes reproducible
    across builds and re-derivable offline. The row's `own` field — the game `Controlled` marker
    on the client/SP, lightyear's `ControlledBy` on the server, `false` for the ownerless bot on

@@ -20,18 +20,16 @@ use serde_json::json;
 
 use super::protocol::{
     FireBurst, FireChannel, FireEvent, ImpactConfirm, LaunchedTurretPose, NetBelts, NetCrew,
-    PROTOCOL_FINGERPRINT, RicochetKeyframe, ServoAngles,
+    NetTank, PROTOCOL_FINGERPRINT, RicochetKeyframe, ServoAngles,
 };
-use super::{diagnostics, harness, open_gameplay_gate, physics, rig};
+use super::{diagnostics, harness, open_gameplay_gate, physics};
 use crate::SimPlugin;
-use crate::bake::TankGeometry;
 use crate::ballistics::{FireShell, ShellRicochet, ShellTerminal};
 use crate::command::{ConsumeCommandEdges, TankCommand};
 use crate::damage::TankKnockedOut;
-use crate::spec::TankSpec;
 use crate::state::GameplaySet;
 use crate::tank::{
-    PendingTankAssets, Rig, TankSimSource, bind_tank_view, load_tank_assets, spawn_tank_sim,
+    PendingTankAssets, Rig, TankContent, TankSimSource, load_tank_assets, spawn_complete_tank,
 };
 
 const PORT: u16 = 5888;
@@ -255,7 +253,7 @@ fn spawn_pending_tanks(
     if pending.0.is_empty() {
         return;
     }
-    let Some((geometry, spec)) = source.get(&assets.spec) else {
+    let Some(content) = source.get() else {
         return;
     };
     // Harness override (`SPIKE_SPAWN_POSE`): place the tank onto a known resting contact for the
@@ -269,8 +267,7 @@ fn spawn_pending_tanks(
         lane.0 += 1;
         let root = spawn_player_tank(
             &mut commands,
-            geometry,
-            spec,
+            content,
             &assets,
             link,
             client_id,
@@ -285,83 +282,51 @@ fn spawn_pending_tanks(
     }
 }
 
-/// Build one owned player tank (root + observed view binding + synchronous sim skeleton) at
-/// `spawn_pos`/`spawn_rot`, owned + predicted by `client_id`'s `link`, and return its root. Shared by
-/// the connect-time [`spawn_pending_tanks`] and the death-time [`respawn_player_tanks`] loop so a
-/// respawn re-acquires through the EXACT same ownership/prediction path a fresh join does — the
-/// known lightyear gotcha ([`attach_replication_sender`]) means the ownership markers only land
-/// correctly through this one component set, so both entry points must share it verbatim. The
-/// harness perturbation stays with the connect-time caller (a startup test concern, not a respawn's).
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the full owned-tank spawn contract — pose, assets, and ownership identity — is \
-              exactly what both call sites must agree on; bundling it into a struct would only \
-              move the same fields"
-)]
+/// Construct an authoritative player tank. Initial join and respawn share this exact ownership and
+/// prediction bundle so reacquisition cannot drift from first spawn.
 fn spawn_player_tank(
     commands: &mut Commands,
-    geometry: &TankGeometry,
-    spec: &TankSpec,
+    content: TankContent<'_>,
     assets: &PendingTankAssets,
     link: Entity,
     client_id: PeerId,
     spawn_pos: Vec3,
     spawn_rot: Quat,
 ) -> Entity {
-    let mut tank = commands.spawn((
-        Name::new("Tank"),
-        rig::net_tank_rig(assets),
-        // The server is always the authority: its body simulates from tick 0. Set alongside
-        // `spawn_tank_sim`'s collider inserts (below, same command batch), so `Dynamic` is
-        // present in the same flush as the colliders — they never sit unattached or
-        // placeholder-posed waiting for a body (the step-8 NaN class; `net::rig`'s module
-        // invariants state its exact boundary).
-        RigidBody::Dynamic,
-        ActionState::<TankCommand>::default(),
-        Position(spawn_pos),
-        // Explicit identity (or the `SPIKE_SPAWN_POSE` override), NOT left to `RigidBody`'s
-        // required-component default — that default is `Rotation::PLACEHOLDER` (f32::MAX
-        // sentinel, avian rigid_body/mod.rs:271), and if replication captures the spawn frame
-        // before the transform sync overwrites it, the client's confirmed history for the
-        // earliest ticks holds the sentinel — which rollbacks would then faithfully restore
-        // into the sim (the placeholder-NaN class, spike log 2026-07-04).
-        Rotation(spawn_rot),
-        // The authority's turret/gun lay, for every non-predicted view of this tank
-        // (`net::publish_servo_angles` keeps it fresh).
-        ServoAngles::default(),
-        // The authority's atomic combat snapshot (`net::publish_net_crew` fills it once the rig's
-        // volumes exist): per-volume HP + per-seat occupancy/aliveness + in-flight swap, replicated
-        // so the client's damage/death/crew bar are server-driven.
-        NetCrew::default(),
-        // `None` until the turret cooks off (`net::publish_launched_turret_pose` fills it), so
-        // the client can show the authoritative toss it does not simulate locally.
-        LaunchedTurretPose::default(),
-        // Per-weapon belt supply (`net::publish_net_belts` fills it once the rig's weapons exist),
-        // replicated so the client's belt-fed fire-gating snaps to server truth.
-        NetBelts::default(),
-        Replicate::to_clients(NetworkTarget::All),
-        // Replicate the ROOT alone. Without this, `Replicate` propagates to every rig child
-        // via `ReplicateLike` — the whole sim skeleton (~19 child entities per tank, spawned
-        // synchronously under the root by `spawn_tank_sim`) would replicate to each client,
-        // where nothing simulates them (the client builds its own skeleton locally), each
-        // predicted+history-tracked: a standing spurious rollback-check source while the tank
-        // moves, plus per-tick child Position/Rotation bandwidth and B0004 orphan-transform
-        // warnings. The authority's turret/gun lay rides the root's `ServoAngles` instead.
-        DisableReplicateHierarchy,
-        // The committed model: the owner predicts its own tank (input feels instant, rollback
-        // reconciles), everyone else interpolates it — the standard pairing every lightyear
-        // multiplayer example ships (map §7).
-        PredictionTarget::to_clients(NetworkTarget::Single(client_id)),
-        InterpolationTarget::to_clients(NetworkTarget::AllExceptSingle(client_id)),
-        ControlledBy {
-            owner: link,
-            lifetime: default(),
-        },
-    ));
-    tank.observe(bind_tank_view);
-    let root = tank.id();
-    spawn_tank_sim(commands, root, geometry, spec);
-    root
+    spawn_complete_tank(
+        commands,
+        content,
+        assets.presentation(),
+        (
+            (
+                Name::new("Tank"),
+                NetTank,
+                Transform::default(),
+                // Authority body role and colliders enter the same command flush.
+                RigidBody::Dynamic,
+                ActionState::<TankCommand>::default(),
+                Position(spawn_pos),
+                // Explicit wire pose prevents Avian's required-component placeholder entering history.
+                Rotation(spawn_rot),
+                ServoAngles::default(),
+                NetCrew::default(),
+                LaunchedTurretPose::default(),
+                NetBelts::default(),
+                Replicate::to_clients(NetworkTarget::All),
+            ),
+            (
+                // Clients build their own local skeleton; replicate only root state.
+                DisableReplicateHierarchy,
+                // Owner predicts; every other client interpolates.
+                PredictionTarget::to_clients(NetworkTarget::Single(client_id)),
+                InterpolationTarget::to_clients(NetworkTarget::AllExceptSingle(client_id)),
+                ControlledBy {
+                    owner: link,
+                    lifetime: default(),
+                },
+            ),
+        ),
+    )
 }
 
 /// Marker for the ownerless test-bot tank ([`spawn_bot`]) — scopes [`drive_bot`] to it, and keeps
@@ -369,11 +334,7 @@ fn spawn_player_tank(
 #[derive(Component)]
 struct Bot;
 
-/// Spawn ONE ownerless "bot" tank that drives in a circle, replicated to every client as a pure
-/// interpolated remote — a solo test rig for the remote-tank interpolation/timing path, with no
-/// second client needed. Gated behind `OVERMATCH_BOT` (present = on, unset = off), default OFF so
-/// every existing run and harness recipe is unchanged. Spawns exactly once (the `spawned` guard)
-/// and mirrors the player spawn's component set minus ownership.
+/// Spawn the optional ownerless interpolation-test bot once.
 fn spawn_bot(
     mut spawned: Local<bool>,
     assets: Res<PendingTankAssets>,
@@ -384,58 +345,44 @@ fn spawn_bot(
     if *spawned || std::env::var("OVERMATCH_BOT").is_err() {
         return;
     }
-    let Some((geometry, spec)) = source.get(&assets.spec) else {
+    let Some(content) = source.get() else {
         return;
     };
     *spawned = true;
-    let root = spawn_bot_entity(&mut commands, &assets, geometry, spec);
+    let root = spawn_bot_entity(&mut commands, &assets, content);
     info!("server: spawned circling bot tank {root} (OVERMATCH_BOT)");
 }
 
-/// Build one ownerless bot tank (root + observed view binding + synchronous sim skeleton) and
-/// return its root. Shared by the initial [`spawn_bot`] and the [`respawn_dead_bots`] loop so both
-/// produce a byte-identical bot from the same spawn pose; the env gate and one-shot guard stay in
-/// `spawn_bot`, the death timing stays in the respawn systems.
+/// Construct the ownerless bot used by both initial spawn and respawn.
 fn spawn_bot_entity(
     commands: &mut Commands,
     assets: &PendingTankAssets,
-    geometry: &TankGeometry,
-    spec: &TankSpec,
+    content: TankContent<'_>,
 ) -> Entity {
-    let mut tank = commands.spawn((
-        Name::new("Bot"),
-        Bot,
-        // Replicated bot marker: `Name` doesn't ride the wire, so this is how the client's HUD
-        // recognizes the bot to prefix its nameplate with `[BOT]`.
-        super::protocol::NetBot,
-        rig::net_tank_rig(assets),
-        // Simulated as a normal Dynamic body on the SERVER (it drives); clients receive it via
-        // replication and, having no local body role for it, build a Static interpolated body
-        // (`net::rig::attach_replicated_rig` picks `Static` for non-`Predicted` tanks).
-        RigidBody::Dynamic,
-        // A distinct spot on the flat pad, a few metres up +Z — away from the per-client X lanes
-        // (`lane_offset`) and the −Z test course, so the circle stays on flat ground.
-        Position(Vec3::new(0.0, 2.0, 12.0)),
-        // Explicit, for the same replicated-placeholder reason as the player spawn (see there).
-        Rotation(Quat::IDENTITY),
-        ServoAngles::default(),
-        // Atomic combat snapshot for the bot too, so a client kills it from replicated state.
-        NetCrew::default(),
-        // Launched-turret pose datum for the bot too (`None` until its turret cooks off).
-        LaunchedTurretPose::default(),
-        // Per-weapon belt supply for the bot too (server truth for its belt-fed weapons).
-        NetBelts::default(),
-        Replicate::to_clients(NetworkTarget::All),
-        DisableReplicateHierarchy,
-        // NO `PredictionTarget`, NO `ControlledBy`: no client owns or predicts the bot, so on every
-        // client the replicated root lands `Interpolated` only — a Static local body — which is
-        // exactly the remote-tank path this rig exists to exercise solo.
-        InterpolationTarget::to_clients(NetworkTarget::All),
-    ));
-    tank.observe(bind_tank_view);
-    let root = tank.id();
-    spawn_tank_sim(commands, root, geometry, spec);
-    root
+    spawn_complete_tank(
+        commands,
+        content,
+        assets.presentation(),
+        (
+            Name::new("Bot"),
+            Bot,
+            // Name is not replicated; NetBot identifies it to the client HUD.
+            super::protocol::NetBot,
+            NetTank,
+            Transform::default(),
+            RigidBody::Dynamic,
+            Position(Vec3::new(0.0, 2.0, 12.0)),
+            Rotation(Quat::IDENTITY),
+            ServoAngles::default(),
+            NetCrew::default(),
+            LaunchedTurretPose::default(),
+            NetBelts::default(),
+            Replicate::to_clients(NetworkTarget::All),
+            DisableReplicateHierarchy,
+            // No owner or prediction target: every client interpolates this body.
+            InterpolationTarget::to_clients(NetworkTarget::All),
+        ),
+    )
 }
 
 /// Schedules a bot's respawn the tick its root gains [`TankKnockedOut`] — the emergent death label
@@ -478,7 +425,7 @@ fn respawn_dead_bots(
     if due.is_empty() {
         return;
     }
-    let Some((geometry, spec)) = source.get(&assets.spec) else {
+    let Some(content) = source.get() else {
         return;
     };
     for (root, turret) in due {
@@ -488,7 +435,7 @@ fn respawn_dead_bots(
         // turret is still an attached child (already swept above) or otherwise gone — no panic, no
         // double-free, so the one branch covers both the cookoff and crew-loss deaths.
         commands.entity(turret).try_despawn();
-        let fresh = spawn_bot_entity(&mut commands, &assets, geometry, spec);
+        let fresh = spawn_bot_entity(&mut commands, &assets, content);
         info!("server: respawned bot as {fresh} (was {root})");
     }
 }
@@ -545,7 +492,7 @@ fn respawn_player_tanks(
     if requests.is_empty() {
         return;
     }
-    let Some((geometry, spec)) = source.get(&assets.spec) else {
+    let Some(content) = source.get() else {
         return;
     };
     // A respawn takes the NEXT free lane (never reset — same rule a reconnecting client follows), so a
@@ -561,8 +508,7 @@ fn respawn_player_tanks(
         commands.entity(root).despawn();
         let fresh = spawn_player_tank(
             &mut commands,
-            geometry,
-            spec,
+            content,
             &assets,
             link,
             client_id,

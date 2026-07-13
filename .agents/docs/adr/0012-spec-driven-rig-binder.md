@@ -12,12 +12,19 @@ The rig bind in `on_tank_ready` no longer hardcodes `match name { "Turret" => �
 
 ## Bidirectional contract (fail-fast, two guards)
 
-The two-guard contract stands; its runtime seam moved (per [[0014-sim-view-split]]). The runtime guard now fires in `spawn_tank_sim`, resolving each spec-declared node against the extracted `TankGeometry` at spawn — a miss panics before the sim body exists, not after a scene-walk bind. The CI test is unchanged.
+The two-guard contract stands; its runtime seam moved (per [[0014-sim-view-split]]). The private
+tank body assembler now resolves each spec-declared node against extracted `TankGeometry` during
+complete construction. A miss panics before gameplay, not after a scene-walk bind. The CI guard is
+unchanged.
 
-- **Runtime (ships):** every spec-declared node must resolve, plus the fixed singletons / ≥1 collider / ≥1 roadwheel per side — a miss panics at bind ([[0011-required-model-contract-fails-fast]]). *(Superseded mechanics: the original binder asserted against the *bound* scene entities, after Bevy's name handling — skipping `GltfMaterialName` render-primitive leaves that carry the mangled `{mesh}.{material}` names. The resolve now runs against extracted geometry at spawn; the mesh-leaf discrimination survives in the view walk, `bind_tank_view`.)*
+- **Runtime (ships):** every spec-declared node must resolve, together with the fixed singletons,
+  collision geometry, and roadwheels on both tracks. A miss panics during complete construction
+  ([[0011-required-model-contract-fails-fast]]). The separate view walk still skips render-primitive
+  leaves when joining presentation by name.
 - **CI test:** `tiger_1_spec_binds_to_model` reads the `.glb` node names with the `gltf` crate and checks **both** directions — every spec reference resolves, and no `*_Ballistic` node is an orphan (undeclared). Catches name drift at `cargo test`, before a rename reaches a runtime panic.
 
-The design sketch warned against a "second glTF parser" testing a different name-resolution path than ships. We took it deliberately: the two guards are **complementary, not a substitute**. The runtime contract is the one that ships (it validates the real bound scene); the CI test is a cheap pre-flight, and crucially it owns the *reverse* direction (orphan detection), which is why the binder needs no runtime drift-scan.
+The guards are complementary: runtime validates extracted construction data in the shipping path;
+the CI test adds the reverse orphan check before launch.
 
 ## Considered options
 

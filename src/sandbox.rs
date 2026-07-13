@@ -31,8 +31,8 @@ use crate::command;
 use crate::crew_ui;
 use crate::damage::{self, Ammo, CookedOff, Dead, LaunchedTurret, TankKnockedOut};
 use crate::hud::{self, HudCamera};
-use crate::spec::{self, TankSpec, TankSpecHandle};
-use crate::tank::{Controlled, Tank, TankSimSource, ViewOf, bind_tank_view, spawn_tank_sim};
+use crate::spec;
+use crate::tank::{Controlled, Tank, TankPresentation, TankSimSource, ViewOf, spawn_complete_tank};
 use crate::world;
 
 /// Muzzle speed for sandbox shots (m/s) — the 88 mm, matching the game's gun for now. Becomes a
@@ -354,44 +354,43 @@ fn spawn_targets(
     }
 }
 
-/// Legacy spec-asset handle retained for `TankSpecHandle` and the view-shadow validator. Simulation
-/// data comes from `TankBlueprint` and does not wait for this handle to resolve.
+/// Presentation handles for a pending target. Simulation data comes from `TankBlueprint` and does
+/// not wait for either asset to resolve.
 #[derive(Resource)]
-struct PendingTarget(Handle<TankSpec>);
+struct PendingTarget(TankPresentation);
 
 fn load_target(mut commands: Commands, asset_server: Res<AssetServer>) {
-    commands.insert_resource(PendingTarget(asset_server.load("tiger_1/tiger_1.tank.ron")));
+    commands.insert_resource(PendingTarget(TankPresentation::new(
+        asset_server.load(GltfAssetLabel::Scene(0).from_asset("tiger_1/tiger_1.glb")),
+        asset_server.load("tiger_1/tiger_1.tank.ron"),
+    )));
 }
 
 /// Spawn the static target synchronously from the blueprint; its glb view may attach later.
 fn spawn_target_from_blueprint(
     mut commands: Commands,
-    asset_server: Res<AssetServer>,
     pending: Option<Res<PendingTarget>>,
     source: TankSimSource,
 ) {
     let Some(pending) = pending else {
         return;
     };
-    let Some((geometry, spec)) = source.get(&pending.0) else {
+    let Some(content) = source.get() else {
         return;
     };
-    let mut target = commands.spawn((
-        WorldAssetRoot(
-            asset_server.load(GltfAssetLabel::Scene(0).from_asset("tiger_1/tiger_1.glb")),
+    spawn_complete_tank(
+        &mut commands,
+        content,
+        pending.0.clone(),
+        (
+            Transform::from_xyz(0.0, 2.0, -12.0),
+            Name::new("Tiger I target"),
+            // The sandbox's single tank is the one under study — mark it `Controlled` so the shared
+            // crew bar (scoped to the controlled tank) drives it, exactly as in the game.
+            Controlled,
+            RigidBody::Static,
         ),
-        TankSpecHandle(pending.0.clone()),
-        Transform::from_xyz(0.0, 2.0, -12.0),
-        Name::new("Tiger I target"),
-        Tank,
-        // The sandbox's single tank is the one under study — mark it `Controlled` so the shared
-        // crew bar (scoped to the controlled tank) drives it, exactly as in the game.
-        Controlled,
-        RigidBody::Static,
-    ));
-    target.observe(bind_tank_view);
-    let root = target.id();
-    spawn_tank_sim(&mut commands, root, geometry, spec);
+    );
     commands.remove_resource::<PendingTarget>();
 }
 
@@ -846,7 +845,10 @@ fn reset_world(
     for entity in &targets {
         commands.entity(entity).despawn();
     }
-    commands.insert_resource(PendingTarget(asset_server.load("tiger_1/tiger_1.tank.ron")));
+    commands.insert_resource(PendingTarget(TankPresentation::new(
+        asset_server.load(GltfAssetLabel::Scene(0).from_asset("tiger_1/tiger_1.glb")),
+        asset_server.load("tiger_1/tiger_1.tank.ron"),
+    )));
 }
 
 /// Time controls on the **virtual** clock (which drives the fixed timestep the march/physics run

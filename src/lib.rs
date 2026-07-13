@@ -22,7 +22,7 @@ mod aim;
 mod assets;
 /// The tank-geometry extractor + shadow harness (sim/view split — design
 /// `sim-view-split-and-tank-bake.md` §8). `extract(glb) → TankGeometry` IS the sim skeleton's
-/// spawn source since step 1 (`tank::spawn_tank_sim`); the shadow harness keeps proving it
+/// construction source; the shadow harness keeps proving it
 /// equivalent to the instantiated scene on every view bind.
 mod bake;
 mod ballistics;

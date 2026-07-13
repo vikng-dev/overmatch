@@ -192,7 +192,7 @@ fn quat(q: Quat) -> Value {
 // tick?" with a single u64 compare, and localize a difference to a sub-component. World-independence
 // is by construction: the hash consumes ONLY f32 bit patterns of pose/velocity/carried-sim, in a
 // fixed field order, with every `Vec` walked in its spawn-sorted index order (`WheelIndex`/
-// `ServoIndex`/`WeaponIndex` — identical across the two ECS worlds by `spawn_tank_sim`'s
+// `ServoIndex`/`WeaponIndex` — identical across the two ECS worlds by construction's
 // sorted-by-name assignment). NOTHING that differs between worlds enters it — no entity id, no
 // pointer, no `HashMap` iteration, no archetype order. Two worlds that reached the same logical state
 // therefore hash identically even though their entity indices differ (measured 4294966669 vs

@@ -20,7 +20,7 @@ use crate::tank::{Muzzle, Tank, TankRoot, TankSim, Weapon, WeaponIndex, rig_worl
 const RECOIL_FEEL: f32 = 1.0;
 
 /// Procedural barrel recoil CONFIG: the damped-spring tuning + the barrel's rest (battery)
-/// position, built by `tank::spawn_tank_sim` from the weapon's `recoil` spec and the barrel
+/// position, built during complete tank construction from the weapon's `recoil` spec and barrel
 /// node's authored translation — spawn-time data, not a bind-time transform capture. The recoil
 /// STATE (offset/velocity) is sim truth — the muzzle rides the barrel — and lives root-resident
 /// in `TankSim::weapons` (see `TankSim`), keyed by the barrel's `WeaponIndex`. The translational
@@ -42,7 +42,7 @@ pub(crate) struct RecoilParams {
 /// two implementations).
 ///
 /// The `barrel` gate lives HERE, not at the call sites, and is load-bearing: `apply_recoil` only
-/// steps slots that have `RecoilParams`, which `spawn_tank_sim` builds on the barrel node — so a
+/// steps slots that have `RecoilParams`, which tank construction installs on the barrel node — so a
 /// kick on a barrel-less slot would land in `recoil_velocity` and NEVER decay, accumulating without
 /// bound in rollback-tracked `TankSim` state, shot after shot. Gating in one place makes that
 /// unreachable on both ends.

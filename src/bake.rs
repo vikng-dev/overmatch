@@ -7,7 +7,7 @@
 //! the typed part lists the sim classifies by naming convention (roadwheel stations tagged with
 //! their track side, `*_Collider` collision proxies) — so the runtime never re-parses a node name
 //! for sim meaning (design §8 step 3). Since step 1 this is what the sim skeleton spawns from
-//! (`tank::spawn_tank_sim`) — the scene walk it replaced was step-0-shadow-proven to read exactly
+//! (complete tank construction) — the scene walk it replaced was shadow-proven to read exactly
 //! these values. The same function is phase 2's offline compiler core (one parser, two mounting
 //! points — design §6A).
 //!
@@ -60,7 +60,7 @@ pub(crate) struct MeshGeometry {
     pub indices: Vec<u32>,
 }
 
-/// The whole model, extracted as data — the sim skeleton's spawn source (`tank::spawn_tank_sim`),
+/// The whole model, extracted as data — the sim skeleton's construction source,
 /// shadow-verified against every instantiated tank scene.
 pub(crate) struct TankGeometry {
     pub nodes: Vec<NodeGeometry>,

@@ -147,7 +147,7 @@ pub struct VolumeSnapshot {
 ///
 /// **One atomic snapshot, so no frame is internally inconsistent.** It SUBSUMES the former `NetHealth`:
 /// every health-bearing volume's HP travels here in `TankVolumes` iteration order (the SAME order both
-/// ends derive, since both build the rig from one RON spec via `spawn_tank_sim` — sorted-by-name volume
+/// ends derive, since both build the rig from one RON spec with sorted-by-name volume
 /// spawn), and each crew seat's occupancy (`Crewman.home`) and aliveness (`Dead`) ride the SAME entry.
 /// A crew swap moves a live occupant between seats; replicating HP alone (as `NetHealth` did) let the
 /// server's still-pre-swap HP re-assert onto the seat a client-side flip had just moved the live man
