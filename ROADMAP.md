@@ -1,5 +1,7 @@
 # Deliberately lean roadmap — ideas always shift, this is a general direction
 
+> **Status: historical.** This captured the pre-multiplayer sequence and is preserved as evidence, not current status. Multiplayer is now the product runtime. All quantities below are **DERIVED historical planning assumptions**, not measurements. See [`.agents/PRODUCT.md`](.agents/PRODUCT.md) for the current product target and [`.agents/docs/adr/`](.agents/docs/adr/) for accepted architecture.
+
 Goal: online tank PvP. 10v10 is the aspiration; the design target is 1v1–3v3
 (fun must be validated at small player counts — population is the existential
 risk for an indie MP game, not server capacity).

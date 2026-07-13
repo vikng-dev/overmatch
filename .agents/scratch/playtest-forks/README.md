@@ -117,3 +117,26 @@ around the lone-survivor state, so deciding late is more expensive than the code
 
 **Lives in.** Design §1a (A/B under test). Code: `action_available` / `TankKnockedOut`
 in `src/damage.rs`; cookoff hook on `CookedOff` (§8).
+
+---
+
+## F3 — Combat damage disclosure
+
+**Status:** open · authority semantics settled, presentation deliberately temporary
+
+**The question.** How much additional information should a shooter receive after the authority confirms enemy damage? The spectrum runs from no cue beyond visible world damage to an exact internal X-ray account.
+
+**Default — explicit authoritative confirmation with temporary presentation.** The player's firing action is predicted immediately, but damage is never predicted as fact. The current hit-marker-like cue is a disposable view of authoritative damage, not the product target and not the semantic interface.
+
+**Alternatives kept alive:**
+- **World evidence only.** No additional indication beyond visible damage, fire, smoke, lost capability, and enemy behavior.
+- **Restrained confirmation.** A subtle sound, crew callout, sight response, or other low-information acknowledgement that damage occurred.
+- **Detailed disclosure.** Increasingly precise penetration, crew, tank-module, or X-ray information, up to a complete internal account.
+
+The server owns disclosure. A live client must receive only the detail the current rule permits; hiding privileged truth in the UI is not concealment from a modified client. Armor inspection and scientific diagnostics may use a separate privileged adapter.
+
+**Why it's a playtest call.** The correct point depends on whether feedback improves comprehension and learning or erodes observation, uncertainty, and tank knowledge. It cannot be settled from implementation convenience.
+
+**Revert cost.** Low for presentation: the shooter already receives a discrete, shot-attributed authoritative `DamageConfirm`, deduplicated by `ShotId`, rather than inferring its cue from replicated health snapshots. Changing how much detail the server discloses may widen or narrow that semantic fact, but no presentation belongs in ballistics or damage truth.
+
+**Lives in.** `src/net/hit_feel.rs`, the authoritative damage/outcome path in `src/net/protocol.rs` and `src/net/server.rs`, and the future armor-inspection presentation.

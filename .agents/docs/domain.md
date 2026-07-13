@@ -4,8 +4,12 @@ How the engineering skills should consume this repo's domain documentation when 
 
 ## Before exploring, read these
 
-- **`.agents/GLOSSARY.md`** at the repo root, or
-- **`.agents/docs/adr/`** — read ADRs that touch the area you're about to work in. In multi-context repos, also check `src/<context>/docs/adr/` for context-scoped decisions.
+- **`.agents/PRODUCT.md`** for the current product target and explicit deferrals.
+- **`.agents/GLOSSARY.md`** for canonical vocabulary.
+- **`.agents/docs/adr/`** for accepted decisions that touch the area you're about to work in.
+- **`.agents/scratch/playtest-forks/`** when the work touches a deliberately provisional feel decision.
+
+Historical research and implementation logs are evidence, not current truth. Follow their successor links and verify their claims against the code and accepted ADRs before relying on them.
 
 If any of these files don't exist, **proceed silently**. Don't flag their absence; don't suggest creating them upfront. The `/domain-modeling` skill (reached via `/grill-with-docs` and `/improve-codebase-architecture`) creates them lazily when terms or decisions actually get resolved.
 
@@ -16,6 +20,7 @@ Single-context repo (this repo):
 ```
 /
 ├── .agents/
+│   ├── PRODUCT.md
 │   ├── GLOSSARY.md
 │   └── docs/adr/
 │       ├── 0001-some-decision.md

@@ -1,8 +1,8 @@
-//! Overmatch — a realistic 3D multiplayer tank game (single-player vertical slice).
+//! Shared simulation and runtime composition for Overmatch.
 //!
-//! Organized one plugin per feature. `GamePlugin` composes them; `main.rs` only supplies
-//! the runtime and runs the app. Each feature module owns its components, systems, and its
-//! own wiring (a `pub fn plugin(app: &mut App)`), so this list reads as a table of contents.
+//! Product binaries compose this crate as an authoritative server or predicted network client.
+//! Direct-simulation sandboxes are analytical tools, not alternate player runtimes. See
+//! `.agents/PRODUCT.md` and ADR-0024 for the current product topology.
 
 // Two clippy lints fight Bevy's ECS paradigm and are allowed crate-wide (as Bevy's own codebase
 // does): `type_complexity` fires on ordinary multi-component query tuples, and `too_many_arguments`
@@ -58,9 +58,19 @@ mod headless_test;
 /// The shared tank-state HUD (world-anchored capability/crew/damage readouts). Mounted by both
 /// `GamePlugin` and the sandbox; each tags its own world camera with `hud::HudCamera`.
 mod hud;
-/// The game's networking layer. Public so the `client`/`server` bins can call
-/// `net::client::run()`/`net::server::run()`; not part of `GamePlugin`.
-pub mod net;
+/// The networking implementation. Executables enter through [`run_client`] and [`run_server`];
+/// the adapter tree is private to the library.
+mod net;
+
+/// Run the predicted network client.
+pub fn run_client() {
+    net::client::run();
+}
+
+/// Run the authoritative dedicated server.
+pub fn run_server() {
+    net::server::run();
+}
 /// The net client's single overlay authority (active-set resource + pure input/cursor/scrim rules for
 /// the connect / death / menu / view-death overlays). Lives at the crate root, NOT under `net`,
 /// because it is pure view-state that the always-sim `sight` module also declares into — putting it

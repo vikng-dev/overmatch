@@ -1,35 +1,31 @@
-//! The game's networking layer (`net` feature). Both the client and the server mount [`plugin`]:
-//! lightyear requires IDENTICAL protocol registration on both sides of the wire, added after
-//! `ServerPlugins`/`ClientPlugins` and before the `Server`/`Client` connection entity is spawned
-//! (see the spike map §3 ordering note). The submodules split that layer by concern:
-//! [`protocol`] is the wire contract, [`physics`] the avian configuration, [`rig`] the networked
-//! tank-rig lifecycle, [`client`]/[`server`] the two composition roots, and [`diagnostics`] +
-//! [`harness`] the measurement/test tooling.
+//! Networking adapter shared by the client and dedicated server composition roots.
+//!
+//! [`protocol`] owns the symmetric wire contract, [`physics`] the Avian integration, [`rig`] the
+//! replicated tank lifecycle, and [`diagnostics`] plus [`harness`] the measurement tooling.
 
 use avian3d::schedule::PhysicsSystems;
 use bevy::prelude::*;
 
-pub mod client;
-pub mod contact_probe;
-pub mod death_screen;
-pub mod debug_hud;
-pub mod diagnostics;
-pub mod harness;
-pub mod hit_feel;
-pub mod physics;
-pub mod protocol;
-pub mod render_error;
-pub mod rig;
-pub mod server;
+pub(crate) mod client;
+mod contact_probe;
+pub(crate) mod death_screen;
+pub(crate) mod debug_hud;
+mod diagnostics;
+mod harness;
+pub(crate) mod hit_feel;
+mod physics;
+pub(crate) mod protocol;
+pub(crate) mod render_error;
+mod rig;
+pub(crate) mod server;
 /// The loss-injected end-to-end tripwire: two real apps over a real (conditioned) lightyear link,
 /// asserting exactly-once cosmetic-shell spawn and ricochet carry-through under seeded packet loss.
 /// Test-only — it exists to close the model-vs-reality gap the redundancy unit tests leave open.
 #[cfg(test)]
 mod shot_loss;
-pub mod watchdog;
+mod watchdog;
 
-pub use physics::physics_plugins;
-pub use rig::client_smoothing_plugin;
+use rig::client_smoothing_plugin;
 
 use crate::state::AppState;
 use crate::tank::PendingTankAssets;

@@ -2,6 +2,15 @@
 
 A realistic 3D multiplayer tank game (Bevy 0.19 + Avian 0.7).
 
+## Project map
+
+- [Architecture and debt map](ARCHITECTURE.md) — canonical repository structure, dependency direction, migration sequence, and open architectural debt.
+- [Product target](.agents/PRODUCT.md) — current player experience, authority model, scale, and intentionally deferred capabilities.
+- [Glossary](.agents/GLOSSARY.md) — canonical game and simulation vocabulary.
+- [Architecture decisions](.agents/docs/adr/) — durable decisions and their rationale.
+- [Playtest forks](.agents/scratch/playtest-forks/README.md) — provisional feel decisions that remain deliberately reversible.
+- [Historical roadmap](ROADMAP.md) — early sequencing preserved as history; it is not current status.
+
 ## Releasing
 
 Bump `version` in `Cargo.toml`, then tag it — the tag triggers CI to build and publish a GitHub Release:

@@ -1,7 +1,35 @@
 # Overmatch
 
-A realistic 3D multiplayer tank game (Bevy/Rust), single-player vertical slice in progress.
+A realistic, official-server-hosted online PvP tank game (Bevy/Rust).
 This file is the project glossary — terms only. Decisions live in `.agents/docs/adr/`.
+
+## Product loop
+
+**Battle**:
+A finite, server-authoritative contest governed by a game mode and completed when its victory condition produces a winner.
+_Avoid_: match, game (when referring to the contest itself)
+
+**Game mode**:
+The policy governing a Battle's teams, admission, spawn and respawn rules, eligible content, and victory condition.
+
+**Garage**:
+The persistent player context between Battles, where tanks and crews are configured and Progression is presented.
+
+**Progression**:
+Durable player advancement across Battles: unlocked tanks, tank improvements, crew development, currency, and tech-tree advancement.
+
+**Damage confirmation**:
+An authority-issued fact that the player's action damaged an enemy. Its presentation and level of disclosed detail are deliberately unsettled.
+_Avoid_: hit marker (that names one disposable presentation)
+
+## Battlefield
+
+**Battlefield destruction**:
+An authority-owned change to a placed world object that alters gameplay during a Battle, such as a fallen tree or breached wall.
+
+**Surface evidence**:
+Visual-only traces of action on an otherwise simulation-static surface, such as track marks, impact scars, scorch, dust, and shallow visual craters.
+_Avoid_: terrain deformation (surface evidence does not change ground collision or traversal)
 
 ## Aiming
 
