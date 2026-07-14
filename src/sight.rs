@@ -608,23 +608,10 @@ struct AimPublish {
     store: Option<Vec3>,
 }
 
-/// The **zero-input-identity** decision for the optic's aim commit. Both modes commit RESOLVED
-/// WORLD POINTS, but they resolve from different origins — third person raycasts from the orbit
-/// camera, the optic from the gun mount — so re-resolving an inherited commitment can land on
-/// DIFFERENT world geometry (a crest the elevated camera saw over occludes the mount's lower ray),
-/// and a mode transition must be identity on the aim. So the resolve is gated on actual input:
+/// Preserve an existing committed point until the optic receives mouse motion.
 ///
-/// - **No mouse motion this frame, with an existing commitment** (`committed_point = Some`,
-///   `!moved`): re-author the ORIGINAL committed point verbatim and store NOTHING. A mode
-///   transition with zero input is thus identity on `CommittedAim` and on the gun's lay — the gun
-///   keeps chasing exactly the point it chased in third person, floor / horizon / sky alike.
-/// - **The player moved the mouse** (`moved`): the optic takes ownership — publish and re-store
-///   the point just resolved along the moved sight line. From here the intention is the optic's
-///   own resolve, and the commander finds it (a real point on the world) on a later mode switch.
-/// - **No commitment yet** (`committed_point = None`: fresh spawn or a possession change): there
-///   is nothing to preserve, so the resolve seeded from the gun's lay must be published AND stored
-///   to establish the commitment — even with zero input, so the recirculation invariant still
-///   writes `command.aim`.
+/// Invariant: zero input is identity across view origins. Mouse motion, or no prior commitment,
+/// publishes and stores `resolved`.
 fn resume_commit(committed_point: Option<Vec3>, moved: bool, resolved: Vec3) -> AimPublish {
     match committed_point {
         Some(point) if !moved => AimPublish {
@@ -638,50 +625,12 @@ fn resume_commit(committed_point: Option<Vec3>, moved: bool, resolved: Vec3) -> 
     }
 }
 
-/// World-space position-control aiming. The one committed intention (the shared [`aim::CommittedAim`],
-/// resumed into yaw/pitch each frame — or seeded from the gun's lay when this tank has none yet)
-/// takes this frame's mouse deltas, is clamped, then RESOLVED against the world and re-published as
-/// the tank's commanded aim so `aim::drive_aim_servos` chases it with *every* servo, the gun and the
-/// hull MG alike, at their own slew rates. No servo command is written here; this only moves the aim
-/// intention.
+/// Resolve optic input into the shared hull-local [`aim::CommittedAim`] and `TankCommand`.
 ///
-/// **One frame convention, one origin.** The resume decomposes `point − mount` (the gun pivot, from
-/// the same physics-truth chain `drive_aim_servos` lays from), the clamps compare against the gun's
-/// lay measured at that same mount, and the resolve raycasts FROM that mount along the sight line —
-/// so the working angles, the servo convergence, and the gunner camera (parked at the pivot) all
-/// agree, and no conversion ever moves the gun by the mount↔hull-origin parallax (~2.5° at 50 m —
-/// most of the optic's 3.1° radius; the "snaps on first input" regression).
-///
-/// **Zero-input identity ([`resume_commit`]).** Both modes commit resolved points, but from
-/// different origins (orbit camera vs mount), so re-resolving an inherited commitment could land on
-/// different geometry (crest occlusion). The resolve is therefore published/re-stored ONLY once the
-/// player actually moves the mouse (or on a fresh tank with no commitment to preserve); until then
-/// the resume re-authors the ORIGINAL committed point verbatim — the gun does not move, the reticle
-/// does not jump, and `CommittedAim` is left untouched. From the first mouse delta the optic OWNS
-/// the intention and re-stores its own resolve, so the commander finds a real point on the world
-/// already committed on the next mode switch.
-///
-/// Two bounds shape the intent, in order:
-///
-/// 1. **Mechanical travel** — the intent is clamped to what the gun chain can actually reach, from
-///    the servos' authored travel limits ([`ServoSpec::travel_limits`], the same window
-///    `drive_servos` enforces on the lay). The servos limit the *lay* (bore); the intent tracks the
-///    *sight line* = lay − lob, so the reachable pitch window is those limits shifted DOWN by the
-///    superelevation θ. Without this the cursor could park above the gun's max elevation, the gun
-///    would saturate at its stop, and the reticle would peg at the optic rim forever, never settling.
-/// 2. **Circular optic margin** — the intent may then lead the gun's *current* sight line by at most
-///    `optic_margin(fov)` = [`OPTIC_RADIUS_FRACTION`] · half the authored optic FOV, so the cursor
-///    can't run past the optic edge ahead of the slow turret: pegged at the margin means "slewing at
-///    max," near centre means "caught up." Deriving the radius from the *authored* per-tank FOV (not
-///    a hardcoded angle) makes the travel circle the same object as the drawn optic rim. The clamp is
-///    circular (not per-axis) so diagonal lead feels uniform — a square clamp let you lead ~√2·margin
-///    on the diagonal — and yaw is wrapped (`shortest_angle`) so continuous traverse past ±π doesn't
-///    yank the intent across the wrap.
-///
-/// Inside both bounds the absolute intent is left untouched (hull-local) so the gun genuinely catches
-/// up as it slews — re-pinning to `current + offset` each frame would make the target recede with the
-/// gun (never arrives). The gun chain (`Turret`/`Gun`) is the lead reference; the hull MG rides the
-/// same point.
+/// Invariants: decomposition, clamping, and ray resolution share the gun-mount origin;
+/// [`resume_commit`] alone owns zero-input identity; mechanical travel is applied before the
+/// circular [`optic_margin`] clamp; and intent remains absolute inside both bounds rather than
+/// following the current servo lay.
 fn drive_gunner_aim(
     motion: Res<AccumulatedMouseMotion>,
     spatial: SpatialQuery,
@@ -703,19 +652,11 @@ fn drive_gunner_aim(
         return;
     };
 
-    // The one committed intention, filtered for finiteness: a poisoned committed value (rollback
-    // edge) reads as NO commitment, so the seed-from-lay path below overwrites it with a finite
-    // resolve instead of latching the optic dead (a NaN resume would trip the direction guard
-    // before every publish, forever, with nothing in gunner mode ever healing the memory).
+    // Treat non-finite memory as absent so a fresh finite resolve can replace it.
     let committed_point = committed.get(tank).filter(|point| point.is_finite());
-    // Zero motion this frame is exactly `Vec2::ZERO` from `AccumulatedMouseMotion`.
     let moved = motion.delta != Vec2::ZERO;
 
-    // Zero-input identity, taken FIRST — [`resume_commit`]'s no-motion arm, short-circuited before
-    // any pose work: with an existing commitment and no input, re-author the ORIGINAL point
-    // (recirculation: holding is an act) and touch nothing else. Publishing before the pose fetch
-    // keeps the hold alive even on a frame the resolve guards below would skip, and drops the
-    // world raycast that `resume_commit` would discard anyway.
+    // Fast path before pose guards so [`resume_commit`]'s preserved point is always re-authored.
     if let Some(point) = committed_point
         && !moved
     {
