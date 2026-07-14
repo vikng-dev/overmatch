@@ -49,6 +49,10 @@ lightyear = { version = "0.28", default-features = false, features = [
     "netcode", "udp",
     "avian3d",
 ] }
+# The facade does not expose transport send/ack metadata. Shot diagnostics use this direct handle
+# to report sent-but-unacknowledged reliable messages without claiming inaccessible queue bytes.
+# This is already in Lightyear's locked dependency graph, so Cargo unifies it at 0.28.0.
+lightyear_transport = "0.28"
 # Direct visibility-filter API for owner-only combat disclosure.
 bevy_replicon = "0.41"
 

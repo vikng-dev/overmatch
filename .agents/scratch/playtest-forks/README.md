@@ -152,9 +152,13 @@ The server owns disclosure. A live client must receive only the detail the curre
 readable before cadence, direction, or cause-and-effect feels broken?
 
 **Default — every authored automatic fact is eligible for bounded repair.** Fire, ricochet, and
-terminal visuals use three unordered-unreliable send opportunities and expire after 16 authority
-ticks. Both values are **DERIVED STARTING DEFAULTS**. The receiver deduplicates by `ShotId`; missing
-visuals never change authority or owner-private damage confirmation.
+terminal visuals receive up to three unordered-unreliable admission opportunities and expire after
+16 authority ticks. Both values are **DERIVED STARTING DEFAULTS**. Admission pressure may permit
+fewer opportunities; instrumentation distinguishes expiry before the first from expiry after a
+partial repair. The receiver deduplicates by `ShotId`; missing visuals never change authority or
+owner-private damage confirmation. Without contention, the present spacing is the emission tick and
+the next two authority ticks—a **DERIVED 31.25 ms** first-to-last span at 64 Hz. This is not yet a
+claim of resilience to correlated loss.
 
 **Alternatives kept alive:** fewer copies under contention; longer or shorter presentation expiry;
 distance/visibility-aware tracer density that never hides a gameplay-visible tank; or a compact
@@ -164,7 +168,11 @@ traffic is deliberately not an alternative because stale retransmit debt scales 
 **Why it's a playtest call.** Independent-loss arithmetic cannot tell us whether real correlated
 loss looks like an acceptable hole in a burst or a misleading silence. Test at normal and adverse
 RTT/loss while several tanks fire, watching remote muzzle cadence, post-bounce continuation, late
-visuals, and whether confirmation still feels causally attached to the shot.
+visuals, and whether confirmation still feels causally attached to the shot. **MEASURED on local
+loopback 2026-07-14:** all three server-traced copy opportunities fell inside a six-receive-update
+loss window; the covered automatic shot produced no presentation, while the following shot recovered
+exactly once. That establishes the current correlated-loss hole; it does not decide whether the hole
+is perceptually acceptable.
 
 **Revert cost.** Low for copy count, expiry, and batch admission; medium for a firing-generation
 state because that widens the wire contract and join-in-progress model.

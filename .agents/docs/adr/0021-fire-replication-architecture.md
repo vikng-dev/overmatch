@@ -26,12 +26,15 @@ an asset, or a replicated entity's eventual components.
 
 Automatic facts live in per-combatant queues and are admitted round-robin into bounded batches.
 Current-tick facts outrank older repair copies when the admission budget saturates.
-Each fact gets three send opportunities and expires after 16 authority ticks. Batches use a
-serialized worst-case upper-bound cap of 1,100 bytes and a four-batch per-tick admission budget.
-All four values are **DERIVED STARTING DEFAULTS**, not measured product limits. The cap sits below
-Lightyear 0.28's **DERIVED 1,156-byte** unfragmented-message ceiling. The sizer includes the
-**DERIVED four-byte** maximum message ID and Bevy's **MEASURED nine-byte** encoding of a Lightyear recipient-mapped entity;
-`Entity::PLACEHOLDER` is not a valid worst case.
+Each fact is eligible for up to three admission opportunities and expires after 16 authority
+ticks. Under saturation, a fact can expire before its first opportunity or after only some repairs;
+the persisted producer cursor prevents the same producers from always winning, and a smaller repair
+may use residual budget after a larger fresh fact is refused. Batches use a serialized worst-case
+upper-bound cap of 1,100 bytes and a four-batch per-tick admission budget. All four values are
+**DERIVED STARTING DEFAULTS**, not measured product limits. The cap sits below Lightyear 0.28's
+**DERIVED 1,156-byte** unfragmented-message ceiling. The sizer includes the **DERIVED four-byte**
+maximum message ID and Bevy's **MEASURED nine-byte** encoding of a Lightyear recipient-mapped
+entity; `Entity::PLACEHOLDER` is not a valid worst case.
 
 At 64 Hz, the four-batch admission ceiling is a **DERIVED 281,600 application bytes/s per public
 recipient** before Lightyear packing. This is a shot-visual work bound, not an observed link rate or a
@@ -57,6 +60,8 @@ correctness default.
   to an exact agreeing entity mapping or one unique live `CombatantId`; ambiguity fails closed.
 - Ricochet and terminal facts enter the sanctioned-outcome buffer without waiting for a shooter
   entity. A received ricochet re-seeds the cosmetic shell from the authority's post-bounce state.
+  Each shot stores at most **DERIVED 100 bounces**, matching the maximum reconstructible segment
+  count; excess distinct outcomes fail closed and are traced as capacity drops.
 - Visual batches are deduplicated within their bounded presentation horizon. The **DERIVED
   2,048-entry** fire ledger exceeds the 1,200 distinct IDs accepted across 100 ticks at the current
   30-combatant, dual-750-RPM load envelope. Owner-private damage
@@ -68,11 +73,16 @@ correctness default.
 
 ## Evidence and remaining tuning
 
-`net::shot_transport` exposes enqueue, application-send acceptance, expiry, deferral, batch-size,
-route-conflict, and error counters. An accepted send call means Lightyear buffered the fact for the
-resolved recipients; it is not a delivery acknowledgement. `net::shot_loss` exercises production
-protocol registration over real loopback UDP with seeded loss, delayed observer delivery, mixed
-single/automatic trajectories, private damage confirmation, and a **DERIVED 30-combatant ×
+`net::shot_transport` exposes enqueue, application-send acceptance, expiry-before-first-opportunity,
+expiry-after-partial-repair, fresh/repair budget refusal, deferral, batch-size, route-conflict, and
+error counters. For the two reliable shot channels it also records the sum of per-link messages that
+Lightyear has actually sent but not acknowledged, their greatest first-send age, and count high-water
+marks. It does not claim bytes, application facts accepted but not yet packed, or delivery. The same
+gauges are written to an armed shot trace whenever their summary changes.
+
+`net::shot_loss` exercises production protocol registration over real loopback UDP with seeded loss,
+delayed observer delivery, correlated receive-window loss, mixed single/automatic trajectories,
+private damage confirmation, late-join disclosure checks, and a **DERIVED 30-combatant ×
 two-weapon** same-tick volley. Its 30-receiver probe adds a **DERIVED one-second 768-RPM-per-slot**
 automatic stream and injects one reliable cannon plus owner-private damage during contention.
 
@@ -82,6 +92,15 @@ exactly once at 10% configured inbound loss, delivered the contended cannon fire
 4.05 seconds; the slowest cannon presentation completed after 44 harness orchestration steps. Raw
 counters remain opaque Lightyear link payloads—including control, acknowledgements, and
 replication—not per-shot bytes or IP/UDP headers.
+
+**MEASURED on 2026-07-14:** a late-joining observer received the existing root's public status with
+zero `NetCrew` and zero `NetBelts` arrivals, including transient component additions. A correlated
+six-receive-update loss window contained all three server-traced copy opportunities, dropped six
+opaque payloads, produced zero presentations for the covered automatic shot, and the following
+automatic shot recovered exactly once. The 30-receiver probe also observed nonzero
+sent-unacknowledged high-water marks for both reliable channels and both gauges returned to zero
+after its settlement window. These are local-loopback harness results, not a production Internet
+envelope.
 
 The exact automatic copy count, expiry, visual density, and failure presentation remain playtest
 and network-measurement decisions. Per-recipient visual interest and an enforced aggregate

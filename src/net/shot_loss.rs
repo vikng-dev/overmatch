@@ -7,7 +7,7 @@ use core::time::Duration;
 use std::collections::VecDeque;
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use avian3d::prelude::{
     Collider, CollisionLayers, LayerMask, PhysicsPlugins, Position, RigidBody, Rotation,
@@ -117,6 +117,13 @@ struct SeededLoss {
     passed: u32,
 }
 
+/// Content-blind consecutive receive-window loss for correlated-burst measurements.
+#[derive(Resource, Default)]
+struct InboundBurst {
+    remaining_updates: u32,
+    dropped: u32,
+}
+
 /// Raw payloads admitted to the client link before this harness delays or drops any of them.
 ///
 /// These are transport packets, not shot messages. They deliberately include handshake, replication,
@@ -184,6 +191,18 @@ fn drop_packets(mut links: Query<&mut Link, With<Client>>, mut loss: ResMut<Seed
                 loss.passed += 1;
                 link.recv.push_raw(payload);
             }
+        }
+    }
+}
+
+fn drop_inbound_burst(mut links: Query<&mut Link, With<Client>>, mut burst: ResMut<InboundBurst>) {
+    if burst.remaining_updates == 0 {
+        return;
+    }
+    burst.remaining_updates -= 1;
+    for mut link in &mut links {
+        for _ in link.recv.drain() {
+            burst.dropped += 1;
         }
     }
 }
@@ -650,6 +669,20 @@ fn collect_client_hit_confirm(
     confirmed.0.push(hit.receipt);
 }
 
+#[derive(Resource, Default)]
+struct PrivateCombatArrivals {
+    crew: u32,
+    belts: u32,
+}
+
+fn count_private_crew_arrival(_: On<Add, NetCrew>, mut arrivals: ResMut<PrivateCombatArrivals>) {
+    arrivals.crew += 1;
+}
+
+fn count_private_belts_arrival(_: On<Add, NetBelts>, mut arrivals: ResMut<PrivateCombatArrivals>) {
+    arrivals.belts += 1;
+}
+
 /// The muzzle, and the plate [`RANGE`] metres downrange — shared by both worlds, so the client's
 /// cosmetic shell contacts the same geometry the authority's shell resolved on (see the module doc on
 /// what this test deliberately does NOT vary).
@@ -815,9 +848,12 @@ fn build_client(port: u16, client_id: u64, seed: u64, role: HarnessClient) -> Ap
     app.init_resource::<ClientRenderedBounces>();
     app.init_resource::<ClientCatchUpArmorHolds>();
     app.init_resource::<ClientHitConfirms>();
+    app.init_resource::<PrivateCombatArrivals>();
     app.add_observer(collect_client_shells);
     app.add_observer(collect_client_bounces);
     app.add_observer(collect_client_hit_confirm);
+    app.add_observer(count_private_crew_arrival);
+    app.add_observer(count_private_belts_arrival);
     app.add_systems(FixedFirst, collect_catch_up_armor_holds);
     if role == HarnessClient::Observer {
         app.add_systems(
@@ -834,6 +870,7 @@ fn build_client(port: u16, client_id: u64, seed: u64, role: HarnessClient) -> Ap
         dropped: 0,
         passed: 0,
     });
+    app.init_resource::<InboundBurst>();
     app.init_resource::<RawInboundPayloads>();
     if role == HarnessClient::Observer {
         app.init_resource::<ObserverPayloadDelay>().add_systems(
@@ -851,9 +888,15 @@ fn build_client(port: u16, client_id: u64, seed: u64, role: HarnessClient) -> Ap
         );
         app.add_systems(
             PreUpdate,
-            drop_packets
+            drop_inbound_burst
                 .in_set(LinkSystems::Receive)
                 .after(count_raw_inbound_payloads),
+        );
+        app.add_systems(
+            PreUpdate,
+            drop_packets
+                .in_set(LinkSystems::Receive)
+                .after(drop_inbound_burst),
         );
     } else {
         app.add_systems(
@@ -865,9 +908,15 @@ fn build_client(port: u16, client_id: u64, seed: u64, role: HarnessClient) -> Ap
         );
         app.add_systems(
             PreUpdate,
-            drop_packets
+            drop_inbound_burst
                 .in_set(LinkSystems::Receive)
                 .after(count_raw_inbound_payloads),
+        );
+        app.add_systems(
+            PreUpdate,
+            drop_packets
+                .in_set(LinkSystems::Receive)
+                .after(drop_inbound_burst),
         );
     }
 
@@ -954,6 +1003,16 @@ fn arm_observer_catch_up_delay(observer: &mut App) {
         .world_mut()
         .resource_mut::<ObserverPayloadDelay>()
         .armed = true;
+}
+
+fn arm_inbound_burst(client: &mut App, receive_updates: u32) {
+    let mut burst = client.world_mut().resource_mut::<InboundBurst>();
+    assert_eq!(
+        burst.remaining_updates, 0,
+        "a correlated inbound burst cannot be re-armed while active"
+    );
+    burst.remaining_updates = receive_updates;
+    burst.dropped = 0;
 }
 
 fn clients_connected(shooter: &mut App, observer: &mut App) -> bool {
@@ -1764,6 +1823,21 @@ fn thirty_combatant_volley_reaches_thirty_independent_receivers_under_loss() {
         metrics.reliable_public_send_accepted_facts,
     );
     assert!(
+        metrics.max_reliable_outcome_sent_unacked_messages > 0
+            && metrics.max_reliable_damage_sent_unacked_messages > 0,
+        "the transport outbox probe did not observe both public outcome and private damage messages: outcome high-water={}, damage high-water={}",
+        metrics.max_reliable_outcome_sent_unacked_messages,
+        metrics.max_reliable_damage_sent_unacked_messages,
+    );
+    assert_eq!(
+        (
+            metrics.reliable_outcome_sent_unacked_messages,
+            metrics.reliable_damage_sent_unacked_messages,
+        ),
+        (0, 0),
+        "reliable sent-but-unacknowledged messages remained after the bounded settlement window"
+    );
+    assert!(
         metrics.visual_enqueued
             >= (expected + SUSTAINED_AUTOMATIC_FACTS_PER_TICK * SUSTAINED_STREAM_TICKS as usize)
                 as u64,
@@ -1892,10 +1966,269 @@ fn thirty_combatant_volley_reaches_thirty_independent_receivers_under_loss() {
          sustained 1-second target-envelope stream + reliable cannon completion packets min/max \
          {sustained_packet_min}/{sustained_packet_max}, bytes min/max {sustained_byte_min}/{sustained_byte_max}, aggregate \
          {sustained_packet_total} packets/{sustained_byte_total} bytes, slowest {slowest_sustained_completion} steps; \
+         reliable outcome/damage sent-unacked high-water {}/{}, settled {}/{}; \
          seeded loss drops per receiver min/max {dropped_min}/{dropped_max}; runtime {:?}. These Link counters include control, replication, \
          acknowledgement, and game payloads — not shot bytes or IP/UDP bytes.",
         FANOUT_RECEIVERS,
         FANOUT_RECEIVERS as usize * expected,
+        metrics.max_reliable_outcome_sent_unacked_messages,
+        metrics.max_reliable_damage_sent_unacked_messages,
+        metrics.reliable_outcome_sent_unacked_messages,
+        metrics.reliable_damage_sent_unacked_messages,
         started.elapsed(),
     );
+}
+
+/// A client that joins after the replicated combat root exists receives public life state but never
+/// the root's owner-private crew or ammunition snapshots.
+#[test]
+fn late_observer_receives_public_status_without_private_combat() {
+    let _udp = REAL_UDP_TEST_MUTEX
+        .lock()
+        .expect("real-UDP test mutex must not be poisoned");
+    let port = free_port();
+    let mut server = build_server(port);
+    let mut shooter = build_client(
+        port,
+        SHOOTER_CLIENT_ID,
+        SHOOTER_SEED,
+        HarnessClient::Shooter,
+    );
+    shooter.world_mut().resource_mut::<SeededLoss>().loss = 0.0;
+    finish(&mut server);
+    finish(&mut shooter);
+
+    let mut owner_ready = false;
+    for _ in 0..1_200 {
+        step_many(&mut server, std::slice::from_mut(&mut shooter));
+        owner_ready = shooter
+            .world_mut()
+            .query_filtered::<(&NetCrew, &NetBelts), (With<NetTank>, With<NetTankStatus>)>()
+            .iter(shooter.world())
+            .any(|(crew, belts)| {
+                crew.volumes
+                    == [VolumeSnapshot {
+                        hp: OWNER_SNAPSHOT_HP,
+                        crew: None,
+                    }]
+                    && belts.weapons
+                        == [Some(BeltSnapshot {
+                            belt: OWNER_BELT,
+                            swap_remaining: 0.0,
+                        })]
+            });
+        if client_connected(&mut shooter) && owner_ready {
+            break;
+        }
+    }
+    assert!(
+        owner_ready,
+        "the owner did not receive its private combat state before the late join"
+    );
+
+    let mut observer = build_client(
+        port,
+        OBSERVER_CLIENT_ID,
+        OBSERVER_SEED,
+        HarnessClient::FanoutReceiver,
+    );
+    observer.world_mut().resource_mut::<SeededLoss>().loss = 0.0;
+    finish(&mut observer);
+    let mut clients = vec![shooter, observer];
+
+    let mut late_public_ready = false;
+    for _ in 0..1_200 {
+        step_many(&mut server, &mut clients);
+        late_public_ready = clients[1]
+            .world_mut()
+            .query_filtered::<(), (With<NetTank>, With<NetTankStatus>)>()
+            .iter(clients[1].world())
+            .next()
+            .is_some();
+        if client_connected(&mut clients[1]) && late_public_ready {
+            break;
+        }
+    }
+    assert!(
+        late_public_ready,
+        "the late observer never received the existing tank's public life state"
+    );
+    let leaked = clients[1]
+        .world_mut()
+        .query_filtered::<(), (With<NetTank>, Or<(With<NetCrew>, With<NetBelts>)>)>()
+        .iter(clients[1].world())
+        .next()
+        .is_some();
+    let arrivals = clients[1].world().resource::<PrivateCombatArrivals>();
+    println!(
+        "MEASURED late-join disclosure: public_status=1, crew_arrivals={}, belt_arrivals={}",
+        arrivals.crew, arrivals.belts,
+    );
+    assert!(
+        !leaked && arrivals.crew == 0 && arrivals.belts == 0,
+        "the late observer received owner-private combat state: present={leaked}, crew arrivals={}, belt arrivals={}",
+        arrivals.crew,
+        arrivals.belts,
+    );
+}
+
+/// Measurement probe for the open automatic-fire continuity fork. A bounded correlated inbound
+/// burst covers the current consecutive copy opportunities; a later automatic shot proves the
+/// receiver and presentation path recover after the burst rather than merely disconnecting.
+#[test]
+fn correlated_burst_probe_isolates_consecutive_automatic_copies() {
+    let _udp = REAL_UDP_TEST_MUTEX
+        .lock()
+        .expect("real-UDP test mutex must not be poisoned");
+    let port = free_port();
+    let mut server = build_server(port);
+    let trace_path = std::env::temp_dir().join(format!(
+        "overmatch-correlated-burst-{}-{}.jsonl",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos()
+    ));
+    server.insert_resource(crate::shot_trace::ShotTrace::for_test(&trace_path));
+    let mut shooter = build_client(
+        port,
+        SHOOTER_CLIENT_ID,
+        SHOOTER_SEED,
+        HarnessClient::Shooter,
+    );
+    let mut observer = build_client(
+        port,
+        OBSERVER_CLIENT_ID,
+        OBSERVER_SEED,
+        HarnessClient::Observer,
+    );
+    shooter.world_mut().resource_mut::<SeededLoss>().loss = 0.0;
+    observer.world_mut().resource_mut::<SeededLoss>().loss = 0.0;
+    finish(&mut server);
+    finish(&mut shooter);
+    finish(&mut observer);
+
+    let mut ready = false;
+    for _ in 0..1_200 {
+        step(&mut server, &mut shooter, &mut observer);
+        let shooter_slot = shooter
+            .world_mut()
+            .query_filtered::<(), (With<NetTank>, With<ActionState<TankCommand>>)>()
+            .iter(shooter.world())
+            .next()
+            .is_some();
+        if clients_connected(&mut shooter, &mut observer)
+            && shooter_slot
+            && client_root_count(&mut observer) == 1
+        {
+            ready = true;
+            break;
+        }
+    }
+    assert!(
+        ready,
+        "the burst probe did not reach its replicated ready state"
+    );
+
+    server.world_mut().resource_mut::<FireArmed>().0 = true;
+    // DERIVED from the scripted cadence: after thirteen armed steps, the first reliable shot has
+    // fired and the first automatic shot is three authority steps away.
+    for _ in 0..13 {
+        step(&mut server, &mut shooter, &mut observer);
+    }
+    // DERIVED: six consecutive receive updates cover the current emission plus two immediate repair
+    // opportunities while tolerating bounded loopback hand-off jitter.
+    const BURST_RECEIVE_UPDATES: u32 = 6;
+    let burst_start_tick = server.world().resource::<LocalTimeline>().tick().0;
+    arm_inbound_burst(&mut observer, BURST_RECEIVE_UPDATES);
+    for _ in 0..BURST_RECEIVE_UPDATES {
+        step(&mut server, &mut shooter, &mut observer);
+    }
+    let burst_end_tick = server.world().resource::<LocalTimeline>().tick().0;
+    for _ in BURST_RECEIVE_UPDATES..320 {
+        step(&mut server, &mut shooter, &mut observer);
+    }
+
+    let automatic: Vec<_> = server
+        .world()
+        .resource::<ScriptedShotModes>()
+        .0
+        .iter()
+        .filter_map(|(shot, mechanism)| {
+            (*mechanism == crate::spec::FireMechanism::Automatic).then_some(*shot)
+        })
+        .collect();
+    assert!(
+        automatic.len() >= 2,
+        "the scripted run did not author both the burst-covered and recovery automatic shots"
+    );
+    assert!(
+        server
+            .world_mut()
+            .remove_resource::<crate::shot_trace::ShotTrace>()
+            .is_some(),
+        "the burst trace resource was installed"
+    );
+    let trace_rows: Vec<serde_json::Value> = std::fs::read_to_string(&trace_path)
+        .expect("burst trace readable after recorder drop")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("burst trace row is JSON"))
+        .collect();
+    let covered_send_ticks: Vec<u32> = trace_rows
+        .iter()
+        .filter(|row| {
+            row["k"] == "send"
+                && row["s"] == "fire"
+                && row["rel"] == false
+                && row["c"] == automatic[0].combatant.0
+                && row["w"] == automatic[0].weapon
+                && row["ft"] == automatic[0].fire_tick
+        })
+        .map(|row| row["t"].as_u64().expect("send tick is an integer") as u32)
+        .collect();
+    assert_eq!(
+        covered_send_ticks.len(),
+        usize::from(super::shot_transport::VISUAL_COPIES),
+        "the covered automatic fire must enter transport once per configured copy opportunity"
+    );
+    assert!(
+        covered_send_ticks
+            .windows(2)
+            .all(|ticks| ticks[1] == ticks[0] + 1),
+        "the current copy opportunities must remain consecutive: {covered_send_ticks:?}"
+    );
+    assert!(
+        covered_send_ticks
+            .iter()
+            .all(|tick| *tick > burst_start_tick && *tick <= burst_end_tick),
+        "the covered shot's send ticks {covered_send_ticks:?} escaped the armed burst interval ({burst_start_tick}, {burst_end_tick}]"
+    );
+    let shells = &observer.world().resource::<ClientShells>().0;
+    let covered = shells
+        .iter()
+        .filter(|(shot, _)| *shot == automatic[0])
+        .count();
+    let recovered = shells
+        .iter()
+        .filter(|(shot, _)| *shot == automatic[1])
+        .count();
+    let burst = observer.world().resource::<InboundBurst>();
+    println!(
+        "MEASURED correlated burst: send_ticks={covered_send_ticks:?}, armed_server_interval=({burst_start_tick}, {burst_end_tick}], dropped_payloads={}, covered_shot_presentations={covered}, recovery_shot_presentations={recovered}",
+        burst.dropped,
+    );
+    assert!(
+        burst.dropped > 0,
+        "the correlated burst dropped no payloads"
+    );
+    assert_eq!(
+        covered, 0,
+        "the burst-covered automatic fact escaped the configured consecutive-copy window"
+    );
+    assert_eq!(
+        recovered, 1,
+        "the first post-burst automatic fact did not recover exactly-once presentation"
+    );
+    std::fs::remove_file(trace_path).expect("burst trace removed");
 }

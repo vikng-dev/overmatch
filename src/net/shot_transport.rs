@@ -3,8 +3,11 @@
 use std::collections::VecDeque;
 
 use bevy::prelude::*;
-use lightyear::prelude::server::Server;
+use lightyear::prelude::server::{ClientOf, Server};
 use lightyear::prelude::*;
+use lightyear_transport::channel::registry::ChannelKind;
+use lightyear_transport::packet::message::MessageId;
+use lightyear_transport::plugin::TransportSystems;
 use serde_json::json;
 
 use super::protocol::{
@@ -17,7 +20,7 @@ use crate::state::GameplaySet;
 
 /// DERIVED STARTING DEFAULT: the emission plus the next two send opportunities gives each
 /// automatic-fire visual three bounded chances without creating reliable cosmetic debt.
-const VISUAL_COPIES: u8 = 3;
+pub(super) const VISUAL_COPIES: u8 = 3;
 /// DERIVED: sixteen 64 Hz ticks are 250 ms, matching the current client armor-outcome hold span.
 const VISUAL_TTL_TICKS: i32 = 16;
 /// DERIVED from Lightyear 0.28's 1,156-byte unfragmented-message ceiling, leaving 56 bytes of
@@ -53,6 +56,12 @@ pub(crate) struct ShotTransportMetrics {
     /// Facts whose Lightyear send call returned `Ok` with at least one public target.
     pub visual_send_accepted_facts: u64,
     pub visual_expired: u64,
+    /// Facts expired before visual admission created a send opportunity.
+    pub visual_expired_before_first_send_opportunity: u64,
+    /// Facts expired after at least one, but fewer than all, send opportunities.
+    pub visual_expired_after_partial_send_opportunities: u64,
+    pub visual_fresh_budget_refusal_attempts: u64,
+    pub visual_repair_budget_refusal_attempts: u64,
     pub visual_budget_deferred_producers: u64,
     pub visual_send_accepted_batches: u64,
     pub visual_send_accepted_wire_upper_bound_bytes: u64,
@@ -60,13 +69,99 @@ pub(crate) struct ShotTransportMetrics {
     pub max_batch_wire_bytes: usize,
     pub reliable_public_enqueued: u64,
     pub reliable_public_send_accepted_facts: u64,
+    /// Sum across connected links of reliable outcome messages sent but not yet acknowledged.
+    pub reliable_outcome_sent_unacked_messages: u64,
+    pub max_reliable_outcome_sent_unacked_messages: u64,
+    /// Greatest first-send age among those outcome messages, in authority ticks.
+    pub oldest_reliable_outcome_sent_unacked_ticks: u32,
     pub private_damage_enqueued: u64,
     pub private_damage_send_accepted_facts: u64,
+    /// Sum across connected links of reliable damage messages sent but not yet acknowledged.
+    pub reliable_damage_sent_unacked_messages: u64,
+    pub max_reliable_damage_sent_unacked_messages: u64,
+    /// Greatest first-send age among those damage messages, in authority ticks.
+    pub oldest_reliable_damage_sent_unacked_ticks: u32,
     pub public_no_recipient_facts: u64,
     pub private_damage_no_recipient_facts: u64,
     pub send_call_errors: u64,
     pub send_call_error_facts: u64,
     pub route_conflicts: u64,
+}
+
+#[derive(Clone, Copy)]
+enum ReliableOutboxChannel {
+    Outcome,
+    Damage,
+}
+
+#[derive(Default)]
+struct ReliableLinkOutbox {
+    outcomes: bevy::platform::collections::HashMap<MessageId, Tick>,
+    damages: bevy::platform::collections::HashMap<MessageId, Tick>,
+}
+
+#[derive(Resource, Default)]
+struct ReliableOutboxLedger {
+    links: bevy::platform::collections::HashMap<Entity, ReliableLinkOutbox>,
+}
+
+#[derive(Default, PartialEq, Eq, Debug)]
+struct ReliableOutboxSummary {
+    outcome_count: u64,
+    damage_count: u64,
+    oldest_outcome_ticks: u32,
+    oldest_damage_ticks: u32,
+}
+
+impl ReliableOutboxLedger {
+    /// Ledger invariant: a repeated unacknowledged `MessageId` is a transport retransmission.
+    fn observe(
+        &mut self,
+        link: Entity,
+        channel: ReliableOutboxChannel,
+        now: Tick,
+        sent: &[MessageId],
+        acknowledged: &[MessageId],
+    ) {
+        let link = self.links.entry(link).or_default();
+        let pending = match channel {
+            ReliableOutboxChannel::Outcome => &mut link.outcomes,
+            ReliableOutboxChannel::Damage => &mut link.damages,
+        };
+        for &message in acknowledged {
+            pending.remove(&message);
+        }
+        for &message in sent {
+            pending.entry(message).or_insert(now);
+        }
+    }
+
+    fn forget_link(&mut self, link: Entity) {
+        self.links.remove(&link);
+    }
+
+    fn summary(&self, now: Tick) -> ReliableOutboxSummary {
+        let mut summary = ReliableOutboxSummary::default();
+        for link in self.links.values() {
+            summary.outcome_count += link.outcomes.len() as u64;
+            summary.damage_count += link.damages.len() as u64;
+            summary.oldest_outcome_ticks = summary.oldest_outcome_ticks.max(
+                link.outcomes
+                    .values()
+                    .map(|first_sent| (now - *first_sent).max(0) as u32)
+                    .max()
+                    .unwrap_or_default(),
+            );
+            summary.oldest_damage_ticks = summary.oldest_damage_ticks.max(
+                link.damages
+                    .values()
+                    .map(|first_sent| (now - *first_sent).max(0) as u32)
+                    .max()
+                    .unwrap_or_default(),
+            );
+        }
+        summary
+    }
 }
 
 #[derive(Default)]
@@ -112,11 +207,18 @@ impl VisualQueue {
         metrics: &mut ShotTransportMetrics,
     ) -> Vec<FireVisualBatch> {
         for producer in &mut self.producers {
-            let before = producer.pending.len();
-            producer
-                .pending
-                .retain(|pending| now - pending.emitted <= VISUAL_TTL_TICKS);
-            metrics.visual_expired += (before - producer.pending.len()) as u64;
+            producer.pending.retain(|pending| {
+                let live = now - pending.emitted <= VISUAL_TTL_TICKS;
+                if !live {
+                    metrics.visual_expired += 1;
+                    if pending.last_sent.is_some() {
+                        metrics.visual_expired_after_partial_send_opportunities += 1;
+                    } else {
+                        metrics.visual_expired_before_first_send_opportunity += 1;
+                    }
+                }
+                live
+            });
         }
         self.producers
             .retain(|producer| !producer.pending.is_empty());
@@ -129,11 +231,7 @@ impl VisualQueue {
         let mut selected = Vec::new();
         let mut budget_used = 0;
         let mut budget_refused = false;
-        let mut fresh_budget_refused = false;
         for current_tick_only in [true, false] {
-            if !current_tick_only && fresh_budget_refused {
-                break;
-            }
             let mut producers_without_send = 0;
             while producers_without_send < self.producers.len() {
                 let index = self.cursor;
@@ -152,7 +250,11 @@ impl VisualQueue {
                 );
                 if budget_used + cost > VISUAL_TICK_WIRE_LIMIT {
                     budget_refused = true;
-                    fresh_budget_refused |= current_tick_only;
+                    if current_tick_only {
+                        metrics.visual_fresh_budget_refusal_attempts += 1;
+                    } else {
+                        metrics.visual_repair_budget_refusal_attempts += 1;
+                    }
                     producers_without_send += 1;
                     continue;
                 }
@@ -295,12 +397,17 @@ impl ShotTransport {
 pub(super) fn install_server(app: &mut App) {
     app.init_resource::<ShotTransport>();
     app.init_resource::<ShotTransportMetrics>();
+    app.init_resource::<ReliableOutboxLedger>();
     app.add_observer(queue_fire);
     app.add_observer(queue_ricochet);
     app.add_observer(queue_terminal);
     app.add_observer(queue_damage);
     app.add_observer(forget_route_on_projectile_removal);
     app.add_systems(FixedUpdate, flush_shot_transport.after(GameplaySet));
+    app.add_systems(
+        PostUpdate,
+        observe_reliable_outbox.after(TransportSystems::Send),
+    );
 }
 
 fn queue_fire(
@@ -491,6 +598,74 @@ fn forget_route_on_projectile_removal(
     }
 }
 
+fn observe_reliable_outbox(
+    timeline: Res<LocalTimeline>,
+    connections: Query<(Entity, &Transport), (With<ClientOf>, With<Connected>)>,
+    mut ledger: ResMut<ReliableOutboxLedger>,
+    mut metrics: ResMut<ShotTransportMetrics>,
+    mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
+) {
+    let disconnected: Vec<_> = ledger
+        .links
+        .keys()
+        .copied()
+        .filter(|entity| connections.get(*entity).is_err())
+        .collect();
+    for entity in disconnected {
+        ledger.forget_link(entity);
+    }
+    let now = timeline.tick();
+    for (entity, transport) in &connections {
+        if let Some(sender) = transport.senders.get(&ChannelKind::of::<OutcomeChannel>()) {
+            ledger.observe(
+                entity,
+                ReliableOutboxChannel::Outcome,
+                now,
+                &sender.messages_sent,
+                &sender.message_acks,
+            );
+        }
+        if let Some(sender) = transport.senders.get(&ChannelKind::of::<DamageChannel>()) {
+            ledger.observe(
+                entity,
+                ReliableOutboxChannel::Damage,
+                now,
+                &sender.messages_sent,
+                &sender.message_acks,
+            );
+        }
+    }
+    let summary = ledger.summary(now);
+    let previous = ReliableOutboxSummary {
+        outcome_count: metrics.reliable_outcome_sent_unacked_messages,
+        damage_count: metrics.reliable_damage_sent_unacked_messages,
+        oldest_outcome_ticks: metrics.oldest_reliable_outcome_sent_unacked_ticks,
+        oldest_damage_ticks: metrics.oldest_reliable_damage_sent_unacked_ticks,
+    };
+    metrics.reliable_outcome_sent_unacked_messages = summary.outcome_count;
+    metrics.max_reliable_outcome_sent_unacked_messages = metrics
+        .max_reliable_outcome_sent_unacked_messages
+        .max(summary.outcome_count);
+    metrics.oldest_reliable_outcome_sent_unacked_ticks = summary.oldest_outcome_ticks;
+    metrics.reliable_damage_sent_unacked_messages = summary.damage_count;
+    metrics.max_reliable_damage_sent_unacked_messages = metrics
+        .max_reliable_damage_sent_unacked_messages
+        .max(summary.damage_count);
+    metrics.oldest_reliable_damage_sent_unacked_ticks = summary.oldest_damage_ticks;
+    if summary != previous {
+        crate::shot_trace::record_global(&mut shot_trace, "reliable_outbox", now.0, || {
+            json!({
+                "outcome_sent_unacked_messages": summary.outcome_count,
+                "damage_sent_unacked_messages": summary.damage_count,
+                "oldest_outcome_sent_unacked_ticks": summary.oldest_outcome_ticks,
+                "oldest_damage_sent_unacked_ticks": summary.oldest_damage_ticks,
+                "max_outcome_sent_unacked_messages": metrics.max_reliable_outcome_sent_unacked_messages,
+                "max_damage_sent_unacked_messages": metrics.max_reliable_damage_sent_unacked_messages,
+            })
+        });
+    }
+}
+
 fn flush_shot_transport(
     servers: Query<&Server>,
     timeline: Res<LocalTimeline>,
@@ -507,6 +682,12 @@ fn flush_shot_transport(
     let public_recipient_count = server.collection().iter().count();
     let selected_before = metrics.visual_selected;
     let expired_before = metrics.visual_expired;
+    let expired_before_first_send_opportunity_before =
+        metrics.visual_expired_before_first_send_opportunity;
+    let expired_after_partial_send_opportunities_before =
+        metrics.visual_expired_after_partial_send_opportunities;
+    let fresh_budget_refusal_attempts_before = metrics.visual_fresh_budget_refusal_attempts;
+    let repair_budget_refusal_attempts_before = metrics.visual_repair_budget_refusal_attempts;
     let deferred_before = metrics.visual_budget_deferred_producers;
     let public_no_recipient_before = metrics.public_no_recipient_facts;
     let private_no_recipient_before = metrics.private_damage_no_recipient_facts;
@@ -622,6 +803,16 @@ fn flush_shot_transport(
     let visual_queue_after = transport.visual.len();
     let visual_selected = metrics.visual_selected - selected_before;
     let visual_expired = metrics.visual_expired - expired_before;
+    let visual_expired_before_first_send_opportunity = metrics
+        .visual_expired_before_first_send_opportunity
+        - expired_before_first_send_opportunity_before;
+    let visual_expired_after_partial_send_opportunities = metrics
+        .visual_expired_after_partial_send_opportunities
+        - expired_after_partial_send_opportunities_before;
+    let visual_fresh_budget_refusal_attempts =
+        metrics.visual_fresh_budget_refusal_attempts - fresh_budget_refusal_attempts_before;
+    let visual_repair_budget_refusal_attempts =
+        metrics.visual_repair_budget_refusal_attempts - repair_budget_refusal_attempts_before;
     let visual_deferred = metrics.visual_budget_deferred_producers - deferred_before;
     let public_no_recipient = metrics.public_no_recipient_facts - public_no_recipient_before;
     let private_no_recipient =
@@ -633,6 +824,8 @@ fn flush_shot_transport(
         || private_queued > 0
         || visual_selected > 0
         || visual_expired > 0
+        || visual_fresh_budget_refusal_attempts > 0
+        || visual_repair_budget_refusal_attempts > 0
         || visual_deferred > 0
         || public_no_recipient > 0
         || private_no_recipient > 0
@@ -647,6 +840,10 @@ fn flush_shot_transport(
                 "visual_batches_send_accepted": visual_batches_send_accepted,
                 "visual_wire_bytes_send_accepted_upper_bound": visual_wire_bytes_send_accepted,
                 "visual_expired": visual_expired,
+                "visual_expired_before_first_send_opportunity": visual_expired_before_first_send_opportunity,
+                "visual_expired_after_partial_send_opportunities": visual_expired_after_partial_send_opportunities,
+                "visual_fresh_budget_refusal_attempts": visual_fresh_budget_refusal_attempts,
+                "visual_repair_budget_refusal_attempts": visual_repair_budget_refusal_attempts,
                 "visual_budget_deferred_producers": visual_deferred,
                 "reliable_public_queued": reliable_queued,
                 "private_damage_queued": private_queued,
@@ -726,6 +923,113 @@ mod tests {
         })
     }
 
+    fn ricochet(combatant: u64, weapon: u8, tick: u32) -> FireVisualFact {
+        FireVisualFact::Ricochet(RicochetKeyframe {
+            shot: crate::ShotId {
+                combatant: crate::CombatantId(combatant),
+                weapon,
+                fire_tick: tick,
+            },
+            origin: Vec3::ZERO,
+            direction: Vec3::X,
+            speed: 500.0,
+            bounce_tick: Tick(tick),
+            sequence: 0,
+        })
+    }
+
+    #[test]
+    fn reliable_outbox_keeps_first_send_age_and_channel_message_scopes_separate() {
+        let link = Entity::from_raw_u32(1).unwrap();
+        let mut ledger = ReliableOutboxLedger::default();
+        ledger.observe(
+            link,
+            ReliableOutboxChannel::Outcome,
+            Tick(100),
+            &[MessageId(7), MessageId(8)],
+            &[],
+        );
+        ledger.observe(
+            link,
+            ReliableOutboxChannel::Damage,
+            Tick(102),
+            &[MessageId(7)],
+            &[],
+        );
+        ledger.observe(
+            link,
+            ReliableOutboxChannel::Outcome,
+            Tick(110),
+            &[MessageId(7)],
+            &[MessageId(8)],
+        );
+
+        assert_eq!(
+            ledger.summary(Tick(112)),
+            ReliableOutboxSummary {
+                outcome_count: 1,
+                damage_count: 1,
+                oldest_outcome_ticks: 12,
+                oldest_damage_ticks: 10,
+            }
+        );
+
+        ledger.observe(
+            link,
+            ReliableOutboxChannel::Damage,
+            Tick(113),
+            &[],
+            &[MessageId(7)],
+        );
+        assert_eq!(ledger.summary(Tick(113)).damage_count, 0);
+        ledger.forget_link(link);
+        assert_eq!(ledger.summary(Tick(113)), ReliableOutboxSummary::default());
+    }
+
+    #[test]
+    fn reliable_outbox_observer_tracks_connected_server_links_and_forgets_disconnects() {
+        let mut app = App::new();
+        app.init_resource::<LocalTimeline>();
+        app.init_resource::<ReliableOutboxLedger>();
+        app.init_resource::<ShotTransportMetrics>();
+        app.add_systems(Update, observe_reliable_outbox);
+        let link = app
+            .world_mut()
+            .spawn((
+                ClientOf,
+                RemoteId(PeerId::Netcode(1)),
+                Connected,
+                Transport::new(PriorityConfig::default()),
+            ))
+            .id();
+        app.world_mut()
+            .resource_mut::<ReliableOutboxLedger>()
+            .observe(
+                link,
+                ReliableOutboxChannel::Outcome,
+                Tick(1),
+                &[MessageId(3)],
+                &[],
+            );
+
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<ShotTransportMetrics>()
+                .reliable_outcome_sent_unacked_messages,
+            1
+        );
+
+        app.world_mut().entity_mut(link).remove::<Connected>();
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<ShotTransportMetrics>()
+                .reliable_outcome_sent_unacked_messages,
+            0
+        );
+    }
+
     #[test]
     fn thirty_tank_two_weapon_volley_keeps_every_first_copy_and_never_fragments() {
         let mut queue = VisualQueue::default();
@@ -803,6 +1107,23 @@ mod tests {
     }
 
     #[test]
+    fn expiry_reports_whether_a_visual_never_started_or_only_lost_repairs() {
+        let mut queue = VisualQueue::default();
+        let mut metrics = ShotTransportMetrics::default();
+
+        queue.enqueue(fire(1, 0, 100), Tick(100), &mut metrics);
+        queue.drain_batches(Tick(100 + VISUAL_TTL_TICKS as u32 + 1), &mut metrics);
+        assert_eq!(metrics.visual_expired_before_first_send_opportunity, 1);
+        assert_eq!(metrics.visual_expired_after_partial_send_opportunities, 0);
+
+        queue.enqueue(fire(2, 0, 200), Tick(200), &mut metrics);
+        queue.drain_batches(Tick(200), &mut metrics);
+        queue.drain_batches(Tick(200 + VISUAL_TTL_TICKS as u32 + 1), &mut metrics);
+        assert_eq!(metrics.visual_expired_before_first_send_opportunity, 1);
+        assert_eq!(metrics.visual_expired_after_partial_send_opportunities, 1);
+    }
+
+    #[test]
     fn one_busy_combatant_cannot_starve_other_combatants() {
         let mut queue = VisualQueue::default();
         let mut metrics = ShotTransportMetrics::default();
@@ -854,6 +1175,113 @@ mod tests {
             metrics.visual_budget_deferred_producers > 0,
             "saturated admission must expose the producers deferred by the byte budget"
         );
+    }
+
+    #[test]
+    fn residual_budget_admits_a_smaller_repair_after_fresh_refusal() {
+        let mut queue = VisualQueue::default();
+        let mut metrics = ShotTransportMetrics::default();
+        let repair = ricochet(1, 0, 100);
+        let fresh_cost = single_fact_wire_upper_bound(&fire(2, 0, 101));
+        let repair_cost = single_fact_wire_upper_bound(&repair);
+        assert!(
+            repair_cost < fresh_cost,
+            "the repair is the smaller known payload"
+        );
+        let smaller_fresh_count = 4;
+        let fresh_count = (VISUAL_TICK_WIRE_LIMIT - smaller_fresh_count * repair_cost) / fresh_cost;
+        assert!(
+            fresh_count * fresh_cost + smaller_fresh_count * repair_cost + fresh_cost
+                > VISUAL_TICK_WIRE_LIMIT,
+            "the larger fresh payload must be refused after smaller fresh facts fill the budget"
+        );
+        assert!(
+            fresh_count * fresh_cost + smaller_fresh_count * repair_cost + repair_cost
+                <= VISUAL_TICK_WIRE_LIMIT,
+            "the residual budget fits the old repair"
+        );
+
+        queue.enqueue(repair, Tick(100), &mut metrics);
+        queue.drain_batches(Tick(100), &mut metrics);
+        for combatant in 2..=fresh_count as u64 + 1 {
+            queue.enqueue(fire(combatant, 0, 101), Tick(101), &mut metrics);
+        }
+        let first_ricochet_combatant = fresh_count as u64 + 2;
+        for combatant in
+            first_ricochet_combatant..first_ricochet_combatant + smaller_fresh_count as u64
+        {
+            queue.enqueue(ricochet(combatant, 0, 101), Tick(101), &mut metrics);
+        }
+        queue.enqueue(
+            fire(
+                first_ricochet_combatant + smaller_fresh_count as u64,
+                0,
+                101,
+            ),
+            Tick(101),
+            &mut metrics,
+        );
+
+        let facts: Vec<_> = queue
+            .drain_batches(Tick(101), &mut metrics)
+            .into_iter()
+            .flat_map(|batch| batch.facts)
+            .collect();
+        assert_eq!(
+            facts
+                .iter()
+                .filter(|fact| fact.authority_tick() == Tick(101))
+                .count(),
+            fresh_count + smaller_fresh_count,
+            "fresh facts still consume every admission they can"
+        );
+        assert!(
+            facts.iter().any(|fact| {
+                fact.authority_tick() == Tick(100) && matches!(fact, FireVisualFact::Ricochet(_))
+            }),
+            "a smaller repair uses residual capacity after every fitting fresh fact was selected"
+        );
+        assert_eq!(metrics.visual_fresh_budget_refusal_attempts, 1);
+        assert_eq!(metrics.visual_repair_budget_refusal_attempts, 0);
+    }
+
+    #[test]
+    fn saturated_ticks_resume_with_producers_refused_by_the_previous_tick() {
+        let mut queue = VisualQueue::default();
+        let mut metrics = ShotTransportMetrics::default();
+        let first_combatant = 1_000_u64;
+        let fresh_cost = single_fact_wire_upper_bound(&fire(first_combatant, 0, 100));
+        let accepted_per_tick = VISUAL_TICK_WIRE_LIMIT / fresh_cost;
+        let producer_count = accepted_per_tick * 2;
+        for combatant in first_combatant..first_combatant + producer_count as u64 {
+            queue.enqueue(fire(combatant, 0, 100), Tick(100), &mut metrics);
+        }
+
+        let first: bevy::platform::collections::HashSet<_> = queue
+            .drain_batches(Tick(100), &mut metrics)
+            .into_iter()
+            .flat_map(|batch| batch.facts)
+            .map(|fact| fact.shot_id().combatant)
+            .collect();
+        assert_eq!(first.len(), accepted_per_tick);
+
+        for combatant in first_combatant..first_combatant + producer_count as u64 {
+            queue.enqueue(fire(combatant, 1, 101), Tick(101), &mut metrics);
+        }
+        let second: bevy::platform::collections::HashSet<_> = queue
+            .drain_batches(Tick(101), &mut metrics)
+            .into_iter()
+            .flat_map(|batch| batch.facts)
+            .filter(|fact| fact.authority_tick() == Tick(101))
+            .map(|fact| fact.shot_id().combatant)
+            .collect();
+
+        assert_eq!(second.len(), accepted_per_tick);
+        assert!(
+            first.is_disjoint(&second),
+            "the persisted cursor starts with producers refused by the previous saturated tick"
+        );
+        assert_eq!(first.len() + second.len(), producer_count);
     }
 
     #[test]

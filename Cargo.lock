@@ -5867,6 +5867,7 @@ dependencies = [
  "lightyear_inputs",
  "lightyear_inputs_native",
  "lightyear_sync",
+ "lightyear_transport",
  "ron",
  "serde",
  "serde_json",

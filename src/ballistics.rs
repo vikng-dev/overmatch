@@ -73,6 +73,11 @@ fn elapsed_ticks(now: u32, then: u32) -> Option<u32> {
     (elapsed <= i32::MAX as u32).then_some(elapsed)
 }
 
+/// DERIVED from the client's default 100-tick rollback window: cosmetic recovery never integrates
+/// farther than simulation can reconcile. A larger authority interval fails closed rather than
+/// drawing a shortened, invented trajectory.
+pub(crate) const MAX_COSMETIC_CATCH_UP_TICKS: u32 = 100;
+
 /// Reference-mm penetration capability using a DeMarre-shaped mass and speed curve.
 const PEN_K: f32 = 0.005_8;
 const PEN_N: f32 = 1.43;
@@ -338,21 +343,40 @@ pub(crate) struct SanctionedShots {
     shots: std::collections::HashMap<ShotId, SanctionedShot>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SanctionedBounceInsert {
+    Inserted,
+    Duplicate,
+    Capacity,
+}
+
 impl SanctionedShots {
     /// Configured expiry for unconsumed authority outcomes; recorded in trace metadata.
     pub(crate) const MAX_AGE_SECS: f32 = 3.0;
     /// DERIVED backstop: `30 combatants * 2 weapons * 750 rounds/min * 3 s / 60 = 2,250` shots;
     /// 4,096 is the next power of two.
     const MAX_SHOTS: usize = 4_096;
+    /// DERIVED: a shot cannot consume more bounces than the cosmetic segment-work horizon.
+    pub(crate) const MAX_BOUNCES_PER_SHOT: usize = MAX_COSMETIC_CATCH_UP_TICKS as usize;
+
+    /// Stable tie-break among already-buffered entries: the greatest tuple is evicted.
+    fn eviction_key(shot: ShotId) -> (u64, u8, u32) {
+        (shot.combatant.0, shot.weapon, shot.fire_tick)
+    }
 
     /// This shot's entry, fresh-touched, with the over-cap eviction applied.
     fn entry(&mut self, shot: ShotId) -> &mut SanctionedShot {
         if self.shots.len() >= Self::MAX_SHOTS && !self.shots.contains_key(&shot) {
-            // Capacity overflow evicts one oldest entry; normal removal remains time-based.
+            // Capacity overflow evicts one oldest entry; normal removal remains time-based. Equal
+            // ages use the stable ShotId-derived order so cosmetic traces reproduce across runs.
             if let Some(oldest) = self
                 .shots
                 .iter()
-                .max_by(|a, b| a.1.age.total_cmp(&b.1.age))
+                .max_by(|(a_shot, a), (b_shot, b)| {
+                    a.age.total_cmp(&b.age).then_with(|| {
+                        Self::eviction_key(**a_shot).cmp(&Self::eviction_key(**b_shot))
+                    })
+                })
                 .map(|(k, _)| *k)
             {
                 self.shots.remove(&oldest);
@@ -368,13 +392,20 @@ impl SanctionedShots {
     }
 
     /// Insert a server-sanctioned bounce idempotently by `(shot, sequence)`.
-    pub(crate) fn insert(&mut self, shot: ShotId, bounce: SanctionedBounce) -> bool {
+    pub(crate) fn insert(
+        &mut self,
+        shot: ShotId,
+        bounce: SanctionedBounce,
+    ) -> SanctionedBounceInsert {
         let entry = self.entry(shot);
         if entry.bounces.iter().any(|b| b.sequence == bounce.sequence) {
-            return false;
+            return SanctionedBounceInsert::Duplicate;
+        }
+        if entry.bounces.len() >= Self::MAX_BOUNCES_PER_SHOT {
+            return SanctionedBounceInsert::Capacity;
         }
         entry.bounces.push(bounce);
-        true
+        SanctionedBounceInsert::Inserted
     }
 
     /// Record a shot's terminal, idempotently by [`ShotId`].
@@ -434,7 +465,47 @@ struct SanctionedCatchUp {
     terminal: Option<SanctionedTerminal>,
 }
 
+/// Why an authority-outcome chain cannot be reconstructed safely on this client.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SanctionedCatchUpReject {
+    IntervalBeyondCosmeticHorizon,
+    ChainBeyondCosmeticHorizon,
+}
+
+impl SanctionedCatchUpReject {
+    fn trace_reason(self) -> &'static str {
+        match self {
+            Self::IntervalBeyondCosmeticHorizon => "interval_beyond_cosmetic_horizon",
+            Self::ChainBeyondCosmeticHorizon => "chain_beyond_cosmetic_horizon",
+        }
+    }
+}
+
+/// Reserve one disconnected authority segment before integrating it.
+///
+/// INVARIANT: one cosmetic reconstruction may integrate at most
+/// [`MAX_COSMETIC_CATCH_UP_TICKS`] total steps and materialize at most that many authority
+/// segments. The segment limit also bounds same-tick bounce chains, whose elapsed steps are zero.
+fn reserve_sanctioned_catch_up_work(
+    integrated_ticks: &mut u32,
+    segments: &mut u32,
+    steps: u32,
+) -> Result<(), SanctionedCatchUpReject> {
+    if *segments >= MAX_COSMETIC_CATCH_UP_TICKS
+        || steps > MAX_COSMETIC_CATCH_UP_TICKS.saturating_sub(*integrated_ticks)
+    {
+        return Err(SanctionedCatchUpReject::ChainBeyondCosmeticHorizon);
+    }
+    *integrated_ticks += steps;
+    *segments += 1;
+    Ok(())
+}
+
 /// Fast-forward authority outcomes without integrating through a known later outcome.
+///
+/// INVARIANT: outcome ingress may retain early or out-of-order facts, but this is the sole path to
+/// [`fast_forward_shell`] for a sanctioned chain; every segment reserves bounded work before it can
+/// allocate or integrate.
 fn catch_up_sanctioned_chain(
     shot: ShotId,
     consumed: usize,
@@ -445,7 +516,7 @@ fn catch_up_sanctioned_chain(
     fallback_velocity: Vec3,
     drag_k: f32,
     dt: f32,
-) -> SanctionedCatchUp {
+) -> Result<SanctionedCatchUp, SanctionedCatchUpReject> {
     enum NextOutcome {
         Bounce(SanctionedBounce, u32),
         Terminal(SanctionedTerminal, u32),
@@ -456,6 +527,8 @@ fn catch_up_sanctioned_chain(
     let mut seed_velocity =
         Dir3::new(bounce.direction).map_or(fallback_velocity, |dir| Vec3::from(dir) * bounce.speed);
     let mut consumed = consumed + 1;
+    let mut integrated_ticks = 0;
+    let mut segment_count = 0;
     loop {
         let next = present.and_then(|present| {
             let due_bounce = sanctioned.next(shot, consumed).and_then(|next| {
@@ -484,13 +557,13 @@ fn catch_up_sanctioned_chain(
 
         match next {
             Some(NextOutcome::Bounce(next, gap)) => {
-                let (_, velocity, points) = fast_forward_shell(
-                    bounce.origin,
-                    seed_velocity,
-                    drag_k,
-                    dt,
-                    gap.saturating_sub(1),
-                );
+                if gap > MAX_COSMETIC_CATCH_UP_TICKS {
+                    return Err(SanctionedCatchUpReject::IntervalBeyondCosmeticHorizon);
+                }
+                let steps = gap.saturating_sub(1);
+                reserve_sanctioned_catch_up_work(&mut integrated_ticks, &mut segment_count, steps)?;
+                let (_, velocity, points) =
+                    fast_forward_shell(bounce.origin, seed_velocity, drag_k, dt, steps);
                 segments.push(SanctionedFlightSegment { bounce, points });
                 bounce = next;
                 seed_velocity = Dir3::new(bounce.direction)
@@ -498,34 +571,38 @@ fn catch_up_sanctioned_chain(
                 consumed += 1;
             }
             Some(NextOutcome::Terminal(terminal, gap)) => {
-                let (_, velocity, points) = fast_forward_shell(
-                    bounce.origin,
-                    seed_velocity,
-                    drag_k,
-                    dt,
-                    gap.saturating_sub(1),
-                );
+                if gap > MAX_COSMETIC_CATCH_UP_TICKS {
+                    return Err(SanctionedCatchUpReject::IntervalBeyondCosmeticHorizon);
+                }
+                let steps = gap.saturating_sub(1);
+                reserve_sanctioned_catch_up_work(&mut integrated_ticks, &mut segment_count, steps)?;
+                let (_, velocity, points) =
+                    fast_forward_shell(bounce.origin, seed_velocity, drag_k, dt, steps);
                 segments.push(SanctionedFlightSegment { bounce, points });
-                return SanctionedCatchUp {
+                return Ok(SanctionedCatchUp {
                     segments,
                     position: terminal.position,
                     velocity,
                     terminal: Some(terminal),
-                };
+                });
             }
             None => {
                 let age = present
                     .and_then(|present| elapsed_ticks(present, bounce.bounce_tick))
                     .unwrap_or(fallback_age);
+                if age > MAX_COSMETIC_CATCH_UP_TICKS {
+                    return Err(SanctionedCatchUpReject::IntervalBeyondCosmeticHorizon);
+                }
+                reserve_sanctioned_catch_up_work(&mut integrated_ticks, &mut segment_count, age)?;
                 let (position, velocity, points) =
                     fast_forward_shell(bounce.origin, seed_velocity, drag_k, dt, age);
                 segments.push(SanctionedFlightSegment { bounce, points });
-                return SanctionedCatchUp {
+                return Ok(SanctionedCatchUp {
                     segments,
                     position,
                     velocity,
                     terminal: None,
-                };
+                });
             }
         }
     }
@@ -886,6 +963,22 @@ fn on_fire_shell(
     let now = present
         .as_deref()
         .map_or_else(|| shot_clock.as_deref().map_or(0, |clock| clock.0), |p| p.0);
+    if fire.catch_up_ticks > MAX_COSMETIC_CATCH_UP_TICKS {
+        warn!(
+            catch_up_ticks = fire.catch_up_ticks,
+            "ballistics: rejected FireShell catch-up beyond the cosmetic horizon"
+        );
+        if let Some(shot) = fire.shot {
+            crate::shot_trace::record(
+                &mut shot_trace,
+                "end",
+                now,
+                shot,
+                || json!({ "why": "catch_up_reject" }),
+            );
+        }
+        return;
+    }
     let drag = drag_k(fire.caliber, fire.mass);
     let dt = fixed_time.timestep().as_secs_f32();
     let (mut position, velocity, mut points) = fast_forward_shell(
@@ -1248,7 +1341,7 @@ fn integrate_projectiles(
                 let initial_age = present
                     .and_then(|present| elapsed_ticks(present, first_bounce.bounce_tick))
                     .unwrap_or(held.age);
-                let caught_up = catch_up_sanctioned_chain(
+                let caught_up = match catch_up_sanctioned_chain(
                     shot_id,
                     marks.ricochets.len(),
                     first_bounce,
@@ -1258,7 +1351,27 @@ fn integrate_projectiles(
                     projectile.velocity,
                     projectile.drag_k,
                     dt,
-                );
+                ) {
+                    Ok(caught_up) => caught_up,
+                    Err(reject) => {
+                        crate::shot_trace::record(
+                            &mut shot_trace,
+                            "overdue",
+                            now,
+                            shot_id,
+                            || json!({ "res": "reject", "why": reject.trace_reason() }),
+                        );
+                        crate::shot_trace::record(
+                            &mut shot_trace,
+                            "end",
+                            now,
+                            shot_id,
+                            || json!({ "why": "catch_up_reject" }),
+                        );
+                        commands.entity(entity).despawn();
+                        continue;
+                    }
+                };
                 for (index, segment) in caught_up.segments.iter().enumerate() {
                     // The candidate contact and every later authority correction can be spatially
                     // displaced. Each server origin begins a disconnected view segment, never a
@@ -1427,7 +1540,7 @@ fn integrate_projectiles(
                     // Re-seed through every already-buffered outcome up to the present. This is the
                     // same authority-bounded catch-up as the held path: no free-flight segment may
                     // cross a later bounce/terminal the client already knows about.
-                    let caught_up = catch_up_sanctioned_chain(
+                    let caught_up = match catch_up_sanctioned_chain(
                         shot.0,
                         consumed,
                         bounce,
@@ -1437,7 +1550,27 @@ fn integrate_projectiles(
                         projectile.velocity,
                         projectile.drag_k,
                         dt,
-                    );
+                    ) {
+                        Ok(caught_up) => caught_up,
+                        Err(reject) => {
+                            crate::shot_trace::record(
+                                &mut shot_trace,
+                                "overdue",
+                                now,
+                                shot.0,
+                                || json!({ "res": "reject", "why": reject.trace_reason() }),
+                            );
+                            crate::shot_trace::record(
+                                &mut shot_trace,
+                                "end",
+                                now,
+                                shot.0,
+                                || json!({ "why": "catch_up_reject" }),
+                            );
+                            commands.entity(entity).despawn();
+                            continue;
+                        }
+                    };
                     for segment in &caught_up.segments {
                         path.begin_segment();
                         path.points.extend(segment.points.iter().copied());
@@ -2241,16 +2374,19 @@ mod tests {
                         weapon,
                         fire_tick,
                     };
-                    assert!(sanctioned.insert(
-                        shot,
-                        SanctionedBounce {
-                            origin: Vec3::ZERO,
-                            direction: Vec3::X,
-                            speed: 500.0,
-                            bounce_tick: fire_tick,
-                            sequence: 0,
-                        }
-                    ));
+                    assert_eq!(
+                        sanctioned.insert(
+                            shot,
+                            SanctionedBounce {
+                                origin: Vec3::ZERO,
+                                direction: Vec3::X,
+                                speed: 500.0,
+                                bounce_tick: fire_tick,
+                                sequence: 0,
+                            }
+                        ),
+                        SanctionedBounceInsert::Inserted
+                    );
                 }
             }
         }
@@ -2260,6 +2396,115 @@ mod tests {
             sanctioned.shots.len(),
             expected,
             "the configured outcome lifetime must not evict a valid 30-player automatic-fire horizon"
+        );
+    }
+
+    /// Equal-age overflow eviction is deterministic even though the buffer is a hash map.
+    #[test]
+    fn sanctioned_outcome_capacity_evicts_the_stable_highest_shot_id_on_an_age_tie() {
+        let mut sanctioned = SanctionedShots::default();
+        for fire_tick in 0..SanctionedShots::MAX_SHOTS as u32 {
+            let shot = ShotId {
+                combatant: crate::CombatantId(1),
+                weapon: 0,
+                fire_tick,
+            };
+            assert_eq!(
+                sanctioned.insert(
+                    shot,
+                    SanctionedBounce {
+                        origin: Vec3::ZERO,
+                        direction: Vec3::X,
+                        speed: 500.0,
+                        bounce_tick: fire_tick,
+                        sequence: 0,
+                    }
+                ),
+                SanctionedBounceInsert::Inserted
+            );
+        }
+
+        let incoming = ShotId {
+            combatant: crate::CombatantId(1),
+            weapon: 0,
+            fire_tick: SanctionedShots::MAX_SHOTS as u32,
+        };
+        assert_eq!(
+            sanctioned.insert(
+                incoming,
+                SanctionedBounce {
+                    origin: Vec3::ZERO,
+                    direction: Vec3::X,
+                    speed: 500.0,
+                    bounce_tick: incoming.fire_tick,
+                    sequence: 0,
+                }
+            ),
+            SanctionedBounceInsert::Inserted
+        );
+
+        assert!(
+            sanctioned.has_shot(ShotId {
+                combatant: crate::CombatantId(1),
+                weapon: 0,
+                fire_tick: 0,
+            }),
+            "the lowest stable tie-break key remains"
+        );
+        assert!(sanctioned.has_shot(incoming), "the new fact is retained");
+        assert!(
+            !sanctioned.has_shot(ShotId {
+                combatant: crate::CombatantId(1),
+                weapon: 0,
+                fire_tick: SanctionedShots::MAX_SHOTS as u32 - 1,
+            }),
+            "the previous highest stable tie-break key is evicted"
+        );
+    }
+
+    /// One malformed shot cannot grow more buffered bounces than cosmetic reconstruction can
+    /// consume. The bound is DERIVED from the shared segment horizon.
+    #[test]
+    fn sanctioned_outcome_rejects_distinct_bounces_beyond_the_per_shot_bound() {
+        let shot = ShotId {
+            combatant: crate::CombatantId(1),
+            weapon: 0,
+            fire_tick: 100,
+        };
+        let mut sanctioned = SanctionedShots::default();
+        for sequence in 0..MAX_COSMETIC_CATCH_UP_TICKS {
+            assert_eq!(
+                sanctioned.insert(
+                    shot,
+                    SanctionedBounce {
+                        origin: Vec3::ZERO,
+                        direction: Vec3::X,
+                        speed: 500.0,
+                        bounce_tick: 100 + sequence,
+                        sequence,
+                    }
+                ),
+                SanctionedBounceInsert::Inserted
+            );
+        }
+
+        assert_eq!(
+            sanctioned.insert(
+                shot,
+                SanctionedBounce {
+                    origin: Vec3::ZERO,
+                    direction: Vec3::X,
+                    speed: 500.0,
+                    bounce_tick: 100 + MAX_COSMETIC_CATCH_UP_TICKS,
+                    sequence: MAX_COSMETIC_CATCH_UP_TICKS,
+                }
+            ),
+            SanctionedBounceInsert::Capacity,
+            "the first distinct bounce beyond the reconstruction bound is rejected"
+        );
+        assert_eq!(
+            sanctioned.shots[&shot].bounces.len(),
+            MAX_COSMETIC_CATCH_UP_TICKS as usize
         );
     }
 
@@ -2309,7 +2554,8 @@ mod tests {
             Vec3::X * first.speed,
             0.0,
             0.1,
-        );
+        )
+        .expect("the short authority chain is reconstructible");
 
         assert_eq!(
             caught_up.segments.len(),
@@ -2342,6 +2588,181 @@ mod tests {
             Some(terminal.position)
         );
         assert_eq!(caught_up.position, terminal.position);
+    }
+
+    /// A bogus authority tick must not turn cosmetic recovery into an unbounded integration. The
+    /// fallback is intentionally no trajectory: drawing a prefix would claim an authority path the
+    /// client cannot safely reconstruct.
+    #[test]
+    fn sanctioned_chain_rejects_an_implausibly_late_first_bounce() {
+        let shot = ShotId {
+            combatant: crate::CombatantId(1),
+            weapon: 0,
+            fire_tick: 90,
+        };
+        let first = SanctionedBounce {
+            origin: Vec3::ZERO,
+            direction: Vec3::X,
+            speed: 10.0,
+            bounce_tick: 100,
+            sequence: 0,
+        };
+        let sanctioned = SanctionedShots::default();
+
+        let caught_up = catch_up_sanctioned_chain(
+            shot,
+            0,
+            first,
+            Some(first.bounce_tick + MAX_COSMETIC_CATCH_UP_TICKS + 1),
+            0,
+            &sanctioned,
+            Vec3::X * first.speed,
+            0.0,
+            0.1,
+        );
+
+        assert!(
+            matches!(
+                caught_up,
+                Err(SanctionedCatchUpReject::IntervalBeyondCosmeticHorizon)
+            ),
+            "a catch-up beyond the configured cosmetic horizon must reject instead of drawing a partial trajectory"
+        );
+    }
+
+    /// A later authority fact cannot create an unbounded intermediate segment either. The entire
+    /// chain rejects, so the already-seen first bounce is not drawn as a misleading partial result.
+    #[test]
+    fn sanctioned_chain_rejects_an_implausible_inter_outcome_gap() {
+        let shot = ShotId {
+            combatant: crate::CombatantId(1),
+            weapon: 0,
+            fire_tick: 90,
+        };
+        let first = SanctionedBounce {
+            origin: Vec3::ZERO,
+            direction: Vec3::X,
+            speed: 10.0,
+            bounce_tick: 100,
+            sequence: 0,
+        };
+        let second = SanctionedBounce {
+            origin: Vec3::X,
+            direction: Vec3::Y,
+            speed: 10.0,
+            bounce_tick: first.bounce_tick + MAX_COSMETIC_CATCH_UP_TICKS + 1,
+            sequence: 1,
+        };
+        let mut sanctioned = SanctionedShots::default();
+        sanctioned.insert(shot, first);
+        sanctioned.insert(shot, second);
+
+        assert!(
+            matches!(
+                catch_up_sanctioned_chain(
+                    shot,
+                    0,
+                    first,
+                    Some(second.bounce_tick),
+                    0,
+                    &sanctioned,
+                    Vec3::X * first.speed,
+                    0.0,
+                    0.1,
+                ),
+                Err(SanctionedCatchUpReject::IntervalBeyondCosmeticHorizon)
+            ),
+            "the chain must not draw its first segment when the next sanctioned boundary is implausible"
+        );
+    }
+
+    /// Individually plausible segments may not accumulate into unbounded cosmetic work. This chain
+    /// would integrate 198 ticks: DERIVED as 99 pre-bounce steps plus 99 pre-terminal steps.
+    #[test]
+    fn sanctioned_chain_rejects_cumulative_multi_segment_work_beyond_its_horizon() {
+        let shot = ShotId {
+            combatant: crate::CombatantId(1),
+            weapon: 0,
+            fire_tick: 90,
+        };
+        let first = SanctionedBounce {
+            origin: Vec3::ZERO,
+            direction: Vec3::X,
+            speed: 10.0,
+            bounce_tick: 100,
+            sequence: 0,
+        };
+        let second = SanctionedBounce {
+            origin: Vec3::X,
+            direction: Vec3::Y,
+            speed: 10.0,
+            bounce_tick: first.bounce_tick + MAX_COSMETIC_CATCH_UP_TICKS,
+            sequence: 1,
+        };
+        let terminal = SanctionedTerminal {
+            position: Vec3::ONE,
+            normal: Vec3::Y,
+            penetrated: false,
+            impact_tick: second.bounce_tick + MAX_COSMETIC_CATCH_UP_TICKS,
+            after_bounces: 2,
+        };
+        let mut sanctioned = SanctionedShots::default();
+        sanctioned.insert(shot, first);
+        sanctioned.insert(shot, second);
+        sanctioned.insert_terminal(shot, terminal);
+
+        assert!(
+            matches!(
+                catch_up_sanctioned_chain(
+                    shot,
+                    0,
+                    first,
+                    Some(terminal.impact_tick),
+                    0,
+                    &sanctioned,
+                    Vec3::X * first.speed,
+                    0.0,
+                    0.1,
+                ),
+                Err(SanctionedCatchUpReject::ChainBeyondCosmeticHorizon)
+            ),
+            "the complete chain must fail closed once its combined integration exceeds the horizon"
+        );
+    }
+
+    /// A small true elapsed interval remains valid across the wrapping tick boundary.
+    #[test]
+    fn sanctioned_chain_accepts_a_small_wraparound_interval() {
+        let shot = ShotId {
+            combatant: crate::CombatantId(1),
+            weapon: 0,
+            fire_tick: u32::MAX - 3,
+        };
+        let first = SanctionedBounce {
+            origin: Vec3::ZERO,
+            direction: Vec3::X,
+            speed: 10.0,
+            bounce_tick: u32::MAX - 2,
+            sequence: 0,
+        };
+        let caught_up = catch_up_sanctioned_chain(
+            shot,
+            0,
+            first,
+            Some(3),
+            0,
+            &SanctionedShots::default(),
+            Vec3::X * first.speed,
+            0.0,
+            0.1,
+        )
+        .expect("a six-tick wrapping interval is inside the cosmetic horizon");
+
+        assert_eq!(
+            caught_up.segments[0].points.len(),
+            7,
+            "DERIVED: origin plus six integrated ticks"
+        );
     }
 }
 
@@ -2826,6 +3247,21 @@ mod march_tests {
             hits.is_empty(),
             "a stale catch-up must fire no late phantom impact, got {}",
             hits.len()
+        );
+    }
+
+    /// Every `FireShell` producer shares the allocation boundary, not only network receive. An
+    /// oversized catch-up therefore fails closed before it can materialize a shell or path.
+    #[test]
+    fn oversized_fire_shell_catch_up_fails_closed_before_spawning() {
+        let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.05), Vec3::new(0.0, 2.0, 0.0));
+        let hits = fire_shell_catch_up(&mut app, MAX_COSMETIC_CATCH_UP_TICKS + 1);
+
+        assert!(hits.is_empty(), "a rejected catch-up produces no impact");
+        let mut projectiles = app.world_mut().query_filtered::<Entity, With<Projectile>>();
+        assert!(
+            projectiles.iter(app.world()).next().is_none(),
+            "a rejected catch-up creates no projectile"
         );
     }
 

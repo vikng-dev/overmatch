@@ -25,7 +25,8 @@ use super::protocol::{
 };
 use super::{client_smoothing_plugin, diagnostics, harness, open_gameplay_gate, physics, rig};
 use crate::ballistics::{
-    FireShell, FireShellOrigin, SanctionedBounce, SanctionedShots, SanctionedTerminal, ShotSource,
+    FireShell, FireShellOrigin, MAX_COSMETIC_CATCH_UP_TICKS, SanctionedBounce,
+    SanctionedBounceInsert, SanctionedShots, SanctionedTerminal, ShotSource,
 };
 use crate::command::TankCommand;
 use crate::state::{AppState, GameplaySet};
@@ -780,7 +781,7 @@ pub(super) struct SeenShots {
 }
 
 impl SeenShots {
-    // DERIVED: 30 combatants x two weapons x ceil(750 RPM x `CATCH_UP_MAX_TICKS` / 64 Hz)
+    // DERIVED: 30 combatants x two weapons x ceil(750 RPM x `MAX_COSMETIC_CATCH_UP_TICKS` / 64 Hz)
     // is 1,200 ids. The next power of two covers every duplicate the catch-up gate can accept.
     const CAP: usize = 2_048;
     /// Record `shot`; return whether it was not already present.
@@ -1078,7 +1079,7 @@ fn consume_ricochet_keyframe(
     if Dir3::new(keyframe.direction).is_err() {
         return;
     }
-    let fresh = sanctioned.insert(
+    let result = sanctioned.insert(
         keyframe.shot,
         SanctionedBounce {
             origin: keyframe.origin,
@@ -1088,13 +1089,23 @@ fn consume_ricochet_keyframe(
             sequence: keyframe.sequence,
         },
     );
+    let duplicate = result == SanctionedBounceInsert::Duplicate;
     crate::shot_trace::record(
         shot_trace,
         "kf_rx",
         now.0,
         keyframe.shot,
-        || json!({ "dup": !fresh, "bt": keyframe.bounce_tick.0, "seq": keyframe.sequence }),
+        || json!({ "dup": duplicate, "bt": keyframe.bounce_tick.0, "seq": keyframe.sequence }),
     );
+    if result == SanctionedBounceInsert::Capacity {
+        crate::shot_trace::record(
+            shot_trace,
+            "drop",
+            now.0,
+            keyframe.shot,
+            || json!({ "s": "kf", "res": "sanctioned_bounce_capacity", "seq": keyframe.sequence }),
+        );
+    }
 }
 
 fn consume_impact_confirm(
@@ -1325,15 +1336,6 @@ pub(super) fn publish_predicted_present(
     present.0 = timeline.tick().0;
 }
 
-/// The largest catch-up a `FireEvent` may request. A shot older than the deepest state window we would
-/// ever reconcile is stale — its server shell has long since resolved on the authority, so a fresh
-/// cosmetic tracer for it is meaningless, and fast-forwarding it would burn that many ballistic steps
-/// for nothing. 100 ticks matches `RollbackPolicy`'s default `max_rollback_ticks` (the deepest replay
-/// this client runs — see the `PredictionManager` in [`run`]) and is ≈ 1.56 s / ~1.25 km of pre-drag
-/// flight at 800 m/s. A value this large is only ever reached by a corrupt/wrapped tick off the wire or
-/// a `FireEvent` delayed far past any cosmetic use — either way, skip rather than loop.
-const CATCH_UP_MAX_TICKS: u32 = 100;
-
 /// Ticks to fast-forward an opponent shell so it sits at OUR predicted present `P` — co-indexed with
 /// the client's own predicted hull (see `net::protocol::FireEvent::fire_tick` for why `P`, not the
 /// confirmed or server-now frame). `now` is `LocalTimeline::tick()`. `Some(n)` fast-forwards `n` ticks
@@ -1349,15 +1351,17 @@ const CATCH_UP_MAX_TICKS: u32 = 100;
 ///   - elapsed < 0: the fire tick is AHEAD of our predicted present. The server fires at a tick ≤ its
 ///     own now, and `P` runs ahead of the server, so this only happens on clock skew or a malicious /
 ///     wrapped tick — don't rewind; spawn at the muzzle (`Some(0)`).
-///   - 0 ≤ elapsed ≤ [`CATCH_UP_MAX_TICKS`]: fast-forward that many ticks (the normal case is ~10).
-///   - elapsed > [`CATCH_UP_MAX_TICKS`]: absurd / stale / wrapped nonsense — reject (`None`), no loop.
+///   - 0 ≤ elapsed ≤ [`MAX_COSMETIC_CATCH_UP_TICKS`]: fast-forward that many ticks (the normal
+///     case is DERIVED approximately 10).
+///   - elapsed > [`MAX_COSMETIC_CATCH_UP_TICKS`]: absurd / stale / wrapped nonsense — reject
+///     (`None`), no loop.
 fn fire_catch_up_ticks(fire: Tick, now: Tick) -> Option<u32> {
     let elapsed = now - fire;
     if elapsed < 0 {
         return Some(0);
     }
     let elapsed = elapsed as u32;
-    (elapsed <= CATCH_UP_MAX_TICKS).then_some(elapsed)
+    (elapsed <= MAX_COSMETIC_CATCH_UP_TICKS).then_some(elapsed)
 }
 
 /// Kick each opponent shot's barrel recoil spring, on the SIM clock — the "derive the consequence"
@@ -1713,6 +1717,16 @@ mod tests {
         assert_eq!(fire_catch_up_ticks(Tick(500), Tick(500)), Some(0));
     }
 
+    /// The shared cosmetic bound stays coupled to the rollback depth it was derived from.
+    #[test]
+    fn cosmetic_catch_up_horizon_matches_the_default_rollback_policy() {
+        assert_eq!(
+            MAX_COSMETIC_CATCH_UP_TICKS,
+            u32::from(RollbackPolicy::default().max_rollback_ticks),
+            "the cosmetic catch-up horizon must not drift from Lightyear's rollback window"
+        );
+    }
+
     /// A fire tick AHEAD of our predicted present (only reachable via clock skew / a malicious or
     /// wrapped tick, since the server fires at a tick <= its now and `P` leads the server) clamps to
     /// 0, never rewinds the shell.
@@ -1726,8 +1740,8 @@ mod tests {
     fn elapsed_within_bound_fast_forwards() {
         assert_eq!(fire_catch_up_ticks(Tick(500), Tick(505)), Some(5));
         assert_eq!(
-            fire_catch_up_ticks(Tick(500), Tick(500 + CATCH_UP_MAX_TICKS)),
-            Some(CATCH_UP_MAX_TICKS),
+            fire_catch_up_ticks(Tick(500), Tick(500 + MAX_COSMETIC_CATCH_UP_TICKS)),
+            Some(MAX_COSMETIC_CATCH_UP_TICKS),
             "exactly at the bound still fast-forwards",
         );
     }
@@ -1738,7 +1752,7 @@ mod tests {
     #[test]
     fn far_past_fire_tick_is_rejected() {
         assert_eq!(
-            fire_catch_up_ticks(Tick(500), Tick(500 + CATCH_UP_MAX_TICKS + 1)),
+            fire_catch_up_ticks(Tick(500), Tick(500 + MAX_COSMETIC_CATCH_UP_TICKS + 1)),
             None
         );
         assert_eq!(fire_catch_up_ticks(Tick(0), Tick(1_000_000)), None);
@@ -2101,7 +2115,7 @@ mod tests {
         let oldest = shot(0);
         assert!(seen.mark_new(oldest));
 
-        // DERIVED: 30 combatants x two weapons x ceil(750 RPM x CATCH_UP_MAX_TICKS / 64 Hz).
+        // DERIVED: 30 combatants x two weapons x ceil(750 RPM x MAX_COSMETIC_CATCH_UP_TICKS / 64 Hz).
         let accepted_horizon: u32 = 30 * 2 * 20;
         for fire_tick in 1..=accepted_horizon {
             assert!(seen.mark_new(shot(fire_tick)));

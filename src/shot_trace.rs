@@ -134,6 +134,7 @@ fn write_meta(mut trace: ResMut<ShotTrace>, fixed: Res<Time<Fixed>>) {
         "hold_ticks": RICOCHET_HOLD_TICKS,
         "overdue_ticks": OVERDUE_MARGIN_TICKS,
         "max_age_secs": SanctionedShots::MAX_AGE_SECS,
+        "max_bounces_per_shot": SanctionedShots::MAX_BOUNCES_PER_SHOT,
     });
     trace.sink.write(&row);
 }
