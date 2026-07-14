@@ -20,20 +20,22 @@ Severity is OUR impact, not upstream's triage.
 | 8 | [avian-solver-constraint-order.md](avian-solver-constraint-order.md) | avian3d 0.7 | LOW impact / **HIGHEST strategic** — the last same-machine non-determinism; linchpin for deterministic MP | none (bounded/self-healing, absorbed by server auth) | Nothing to delete. **The enabler for predict-everyone** (ADR-0017 names this file as its revisit condition) → tank-tank collision felt locally; tightens the rollback bars; makes deep replays cheap |
 | 9 | [lightyear-avian-childof-not-replicated-transform-mode.md](lightyear-avian-childof-not-replicated-transform-mode.md) | lightyear_avian 0.28 | NONE for us (we use Position mode) — upstream's own test fails at the 0.28.0 tag | none needed | **Nothing for us** — filed for the ecosystem (a failing test already in their tree; the cheapest issue here to act on) |
 | 10 | [lightyear-absent-anchor-input-freeze.md](lightyear-absent-anchor-input-freeze.md) | lightyear 0.28 | CRITICAL — server fires unauthored rounds after release (ammo + damage, nothing to roll back) | `fixed_input_delay(3)` + `TankCommand.for_tick` (REV 5) | Retire the delay pin + the anti-adaptive tripwire. `for_tick` **stays** (the invariant is ours) but its wire cost (+20 B/msg aiming, +140 B/msg idle, measured) becomes optional rather than load-bearing |
+| 11 | [lightyear-native-input-encoder-inverted-range-oom.md](lightyear-native-input-encoder-inverted-range-oom.md) | lightyear_inputs_native 0.28 | CRITICAL before containment — inverted client tick range allocates until OOM | pre-`PrepareInputMessage` buffer guard + fixed shipping delay | Delete the guard, metrics, malformed-composition fallback and focused tests. The Docker fan-out lane stays; adaptive delay remains blocked on #1 and #10 |
 
-**Note on `InputDelayConfig::balanced()`:** it is now implicated in **two** CRITICAL defects (#1 and #10)
-— it recomputes the input delay from live RTT/jitter on every sync, which breaks both the prediction-margin
-assumption (#1) and the input buffer's `Δend_tick == 1` invariant (#10). We have pinned it. Reconsider
-adaptive delay only when BOTH are resolved upstream.
+**Evidence note on `InputDelayConfig::balanced()`:** it is implicated in **three** CRITICAL failure paths
+(#1, #10 and #11). Its prediction-margin and fabricated-input failures are measured in #1/#10. Its role
+in exposing #11 is an inference from the source path and the zero-clear fixed-delay A/B recorded in #11.
+We have pinned it. Reconsider adaptive delay only when all three are resolved upstream.
 
 ## Cross-report unlocks — the things blocked on MORE THAN ONE fix
 
-- **Adaptive input delay (`balanced()`) — needs #1 AND #10.** A delay that tracks the link would give
-  near-0 input latency on a good connection and safety on a bad one. It is unsafe today for two
-  independent reasons: a *varying* delay corrupts the input stream (#10 — `Δend_tick != 1` strands stale
-  PRESSED inputs on the server and fabricates `SameAsPrecedent` ones on both ends), and a delay that grows
+- **Adaptive input delay (`balanced()`) — needs #1, #10 AND #11.** A delay that tracks the link would give
+  near-0 input latency on a good connection and safety on a bad one. It is unsafe today for three
+  independent failure paths: a *varying* delay corrupts the input stream (#10 — `Δend_tick != 1` strands stale
+  PRESSED inputs on the server and fabricates `SameAsPrecedent` ones on both ends), can invert the native
+  encoder range after resync (#11 — inferred trigger for an unbounded client allocation), and a delay that grows
   into the link's natural lead walks the prediction margin to zero, where state rollback is silently dead
-  (#1). Either alone is a shipping defect. This is the headline cross-report item.
+  (#1). Any one alone is a shipping defect. This is the headline cross-report item.
 - **0-tick input delay — mostly #1, softly #8, and NOT what you would guess.** The intuition that 0-tick
   squeezes the prediction margin is **backwards**: `sync_objective` subtracts input delay from the
   prediction lead one-for-one (`lightyear_sync` timeline/input.rs:285-310), so 0-tick *maximises* the

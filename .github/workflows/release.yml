@@ -5,13 +5,15 @@ name: Release
 #
 #   - A `vX.Y.Z` tag PUBLISHES a GitHub Release with per-platform archives:
 #       * Windows  `overmatch`        — the PVP client, server address baked to the droplet.
+#       * Linux    `overmatch`        — the PVP client, server address baked to the droplet.
 #       * macOS    `overmatch`        — the client, as a signed + notarized arm64 .dmg (Apple Silicon only).
 #       * Linux    `overmatch-server` — the dedicated server, tar with assets/.
-#     Cut one by bumping `version` in Cargo.toml, then: git tag vX.Y.Z && git push --tags
+#     Cut one by bumping `version` through a PR, deploying that merged main SHA, then tagging it.
+#     The create-release gate verifies all three identities before publishing.
 #
-#   - `workflow_dispatch` (no tag) builds ONLY the Linux `overmatch-server` and uploads it as a
-#     plain artifact for `scp` redeploys to the test droplet (see DEPLOY.md). This absorbs the
-#     old dedicated `server-build.yml`.
+#   - `workflow_dispatch` builds ONLY the Linux `overmatch-server` and uploads it as a plain
+#     artifact for `scp` redeploys to the test droplet (see DEPLOY.md), even if the dispatch is
+#     launched from a tag ref. This absorbs the old dedicated `server-build.yml`.
 #
 # Phase 1 (now): GitHub Releases. Phase 2 (later): the same output feeds Steam via SteamPipe.
 
@@ -23,7 +25,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -34,24 +36,78 @@ env:
   OVERMATCH_DEFAULT_SERVER: 157.245.48.161
 
 jobs:
-  # The GitHub Release shell — tags only (workflow_dispatch has no tag to release against). The
-  # client/macOS jobs `needs` this, so on a plain dispatch they skip with it; the server job runs
-  # regardless (see its `if`).
+  # The GitHub Release shell — tag pushes only. A manual dispatch never publishes, even when it is
+  # launched from a tag ref. The client/macOS jobs `needs` this, so on a dispatch they skip with it;
+  # the server job runs regardless (see its `if`).
   create-release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      actions: read
+      contents: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      # CARGO_PKG_VERSION participates in the network protocol fingerprint. Reject label/handshake
+      # skew and a stale lockfile before creating an empty or misleading GitHub Release shell.
+      - name: Verify release versions and tag agree
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo_version="$(awk -F '"' '/^version[[:space:]]*=/ { print $2; exit }' Cargo.toml)"
+          lock_version="$(awk -F '"' '$0 == "name = \"overmatch\"" { found = 1; next } found && /^version =/ { print $2; exit }' Cargo.lock)"
+          expected_tag="v${cargo_version}"
+          if [[ -z "${cargo_version}" || "${lock_version}" != "${cargo_version}" || "${GITHUB_REF_NAME}" != "${expected_tag}" ]]; then
+            echo "::error::Release identity mismatch: tag=${GITHUB_REF_NAME} Cargo.toml=${cargo_version:-<missing>} Cargo.lock=${lock_version:-<missing>}"
+            exit 1
+          fi
+      # A release client must match the server already running on our droplet. Require the tag to
+      # name current main, then require a successful, non-skipped deploy job for that exact SHA.
+      # This turns the README release order into an enforced invariant rather than operator lore.
+      - name: Verify tagged main is deployed
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 --no-tags origin +main:refs/remotes/origin/main
+          tag_sha="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          main_sha="$(git rev-parse origin/main)"
+          if [[ "${tag_sha}" != "${main_sha}" ]]; then
+            echo "::error::Release tag ${GITHUB_REF_NAME} points to ${tag_sha}, but origin/main is ${main_sha}"
+            exit 1
+          fi
+
+          deploy_run_id="$(
+            gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/deploy.yml/runs" \
+              --method GET -f branch=main -f event=push -f status=success -f per_page=100 \
+              | jq -r --arg sha "${tag_sha}" \
+                '[.workflow_runs[] | select(.head_sha == $sha and .conclusion == "success")][0].id // empty'
+          )"
+          if [[ -z "${deploy_run_id}" ]]; then
+            echo "::error::No successful Deploy to droplet workflow run found for ${tag_sha}"
+            exit 1
+          fi
+
+          deploy_job_conclusion="$(
+            gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${deploy_run_id}/jobs" \
+              | jq -r '[.jobs[] | select(.name == "deploy")][0].conclusion // empty'
+          )"
+          if [[ "${deploy_job_conclusion}" != "success" ]]; then
+            echo "::error::Deploy run ${deploy_run_id} did not execute its deploy job successfully (conclusion=${deploy_job_conclusion:-<missing>})"
+            exit 1
+          fi
       - uses: taiki-e/create-gh-release-action@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-  # The desktop PVP client → GitHub Release. Tags only (skips on dispatch with create-release).
-  # Windows + Linux client archives here; macOS is the signed/notarized .dmg job below. Covers both a
-  # Windows and a Linux friend. (Linux runtime floor: built on ubuntu-latest/glibc 2.39 + needs a
-  # working Vulkan driver — fine on a current desktop distro; AppImage would remove that floor later.)
-  upload-client:
+  # Build and package the Windows + Linux PVP clients without a release-write token. Tags only
+  # (skips on dispatch with create-release); the small upload-client job below publishes the sealed
+  # archives. macOS has the equivalent untrusted-build/trusted-sign split further down.
+  # Linux runtime floor follows the current ubuntu-latest runner glibc and requires a Vulkan driver.
+  build-client:
     needs: create-release
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -66,6 +122,7 @@ jobs:
       # yields pointer files and a broken bundle.
       - uses: actions/checkout@v7
         with:
+          persist-credentials: false
           lfs: true
 
       # The Linux client links alsa/udev + the windowing (X11/Wayland/xkb) stack — it RENDERS, unlike
@@ -80,7 +137,7 @@ jobs:
 
       # Ship only runtime assets: the game loads .glb meshes, so drop the build-time Blender sources
       # (.blend1 is gitignored, but prune defensively) AND the stale pre-restructure asset backups
-      # under assets/**/backup/ — ~63 MB of superseded glb+ron that stays in git but must not ship.
+      # under assets/**/backup/ — superseded glb+ron that stays in git but must not ship.
       - name: Prune non-runtime assets
         shell: bash
         run: |
@@ -91,12 +148,16 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      # Builds + archives + checksums + uploads to the release. The workflow-level
-      # OVERMATCH_DEFAULT_SERVER is baked in via option_env!.
-      - uses: taiki-e/upload-rust-binary-action@v1
+      # Build, archive, and checksum without uploading. In dry-run mode the action deliberately
+      # withholds github.token from its composite shell, including cargo/build.rs subprocesses.
+      # The workflow-level OVERMATCH_DEFAULT_SERVER is baked in via option_env!.
+      - name: Build and package client
+        id: package-client
+        uses: taiki-e/upload-rust-binary-action@v1
         with:
           bin: overmatch
           target: ${{ matrix.target }}
+          locked: true
           # e.g. overmatch-v0.3.0-alpha.1-x86_64-pc-windows-msvc.zip
           archive: $bin-$tag-$target
           # Bundle assets/ next to the binary, under a top-level dir so users extract one
@@ -106,16 +167,61 @@ jobs:
           tar: unix
           zip: windows
           checksum: sha256
-          token: ${{ secrets.GITHUB_TOKEN }}
+          dry-run: true
+          dry-run-intended: true
 
-  # The Linux dedicated server. Runs on BOTH triggers:
-  #   - tag: uploaded to the GitHub Release (renamed + checksummed).
-  #   - workflow_dispatch: uploaded as a plain artifact for scp redeploys (DEPLOY.md).
+      - uses: actions/upload-artifact@v4
+        with:
+          name: overmatch-client-${{ matrix.target }}
+          path: overmatch-${{ github.ref_name }}-${{ matrix.target }}.*
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+
+  # Publish only the archives produced above. This job has release-write permission but performs no
+  # checkout, compilation, build script, or proc-macro execution.
+  upload-client:
+    needs: [create-release, build-client]
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: overmatch-client-*
+          path: dist
+          merge-multiple: true
+
+      - name: Attach clients to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          assets=(
+            "dist/overmatch-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu.tar.gz"
+            "dist/overmatch-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu.sha256"
+            "dist/overmatch-${GITHUB_REF_NAME}-x86_64-pc-windows-msvc.zip"
+            "dist/overmatch-${GITHUB_REF_NAME}-x86_64-pc-windows-msvc.sha256"
+          )
+          for asset in "${assets[@]}"; do
+            if [[ ! -f "${asset}" ]]; then
+              echo "::error::Missing required client release asset: ${asset}"
+              exit 1
+            fi
+          done
+          gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" \
+            --repo "${GITHUB_REPOSITORY}" --clobber
+
+  # Build and package the Linux dedicated server without a release-write token. Runs on BOTH
+  # triggers and always uploads a plain workflow artifact for scp redeploys (DEPLOY.md).
   # `needs: create-release` + `if: always()` so it waits for (but isn't gated out by) the release
   # shell on tags, and still runs when create-release is skipped on a dispatch.
-  upload-server:
+  build-server:
     needs: create-release
     if: ${{ always() && (needs.create-release.result == 'success' || needs.create-release.result == 'skipped') }}
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -140,17 +246,31 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
-      # On a tag, also attach the server tar (renamed + checksummed) to the GitHub Release.
+  # Tag pushes only: publish the sealed server artifact from the read-only build job. This job has
+  # release-write permission but performs no checkout or compilation.
+  upload-server:
+    needs: [create-release, build-server]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: overmatch-server-x86_64-linux
+          path: dist
+
       - name: Attach server to release
-        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           tag="${GITHUB_REF_NAME}"
           asset="overmatch-server-${tag}-x86_64-unknown-linux-gnu.tar.gz"
-          mv overmatch-server.tar.gz "$asset"
+          mv dist/overmatch-server.tar.gz "$asset"
           sha256sum "$asset" > "$asset.sha256"
-          gh release upload "$tag" "$asset" "$asset.sha256" --repo "${GITHUB_REPOSITORY}"
+          gh release upload "$tag" "$asset" "$asset.sha256" \
+            --repo "${GITHUB_REPOSITORY}" --clobber
 
   # macOS client, part 1 of 2: the UNTRUSTED build. This job runs the `cargo build` (full dependency
   # graph, arbitrary build.rs / proc-macros) and holds NO Apple signing secrets — no cert import, no
@@ -161,10 +281,13 @@ jobs:
   # it belongs in sign-macos below.
   build-macos:
     needs: create-release
+    permissions:
+      contents: read
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
         with:
+          persist-credentials: false
           lfs: true
 
       # Apple-Silicon-ONLY (2026-07-11, was universal): Intel Macs are <0.5% of Steam and macOS 26
@@ -204,6 +327,8 @@ jobs:
   # Steam macOS depot). Tags only (inherits the skip via `needs: build-macos` -> create-release).
   sign-macos:
     needs: build-macos
+    permissions:
+      contents: write
     runs-on: macos-latest
     steps:
       # Only the entitlements plist, icon, and the sign script are needed here — no LFS assets (they
