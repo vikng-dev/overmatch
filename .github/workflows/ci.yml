@@ -39,12 +39,16 @@ jobs:
       - name: Formatting
         run: cargo fmt --all --check
 
-  # The heavy job: lints + tests. Uses the `ci` cargo profile (dependencies at
-  # opt-level 0, see Cargo.toml), so even a cold build is light and the rust-cache is
-  # small; warm runs finish in a few minutes. The ceiling only guards a cold build.
-  check:
-    runs-on: ubuntu-latest
+  # Compile-heavy checks share one matrix but run independently. In particular, the
+  # 30-receiver UDP probe must not contend with another libtest thread.
+  checks:
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        task: [clippy, tests, shot-stress]
+    name: check (${{ matrix.task }})
     steps:
       # Pull LFS: the spec-bind test (`tiger_1_spec_binds_to_model`) opens the real
       # `.glb` at runtime to check node names against the RON, so a pointer-file
@@ -67,7 +71,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             pkg-config libasound2-dev libudev-dev \
-            libwayland-dev libxkbcommon-dev libx11-dev
+            libwayland-dev libxkbcommon-dev libx11-dev jq time
 
       - uses: Swatinem/rust-cache@v2
 
@@ -81,7 +85,60 @@ jobs:
       # now lives in `tests/net_boundary.rs` (a source scan) + `src/headless_test.rs` (boots the sim
       # with no netcode mounted) — no second full build required.
       - name: Clippy
+        if: matrix.task == 'clippy'
         run: cargo clippy --profile ci --locked --all-targets -- -D warnings
 
       - name: Tests
-        run: cargo test --profile ci --locked
+        if: matrix.task == 'tests'
+        run: |
+          cargo test --profile ci --locked -- \
+            --skip net::shot_loss::thirty_combatant_volley_reaches_thirty_independent_receivers_under_loss
+
+      - name: Build shot stress test
+        if: matrix.task == 'shot-stress'
+        run: |
+          set -euo pipefail
+          artifacts="${RUNNER_TEMP}/overmatch-test-artifacts.jsonl"
+          manifest="$(realpath Cargo.toml)"
+          cargo test --profile ci --locked --lib --no-run --message-format=json > "${artifacts}"
+          mapfile -t executables < <(
+            jq -r --arg manifest "${manifest}" \
+              'select(.reason == "compiler-artifact" and .manifest_path == $manifest and .target.kind == ["lib"] and .profile.test and .executable != null) | .executable' \
+              "${artifacts}"
+          )
+          test "${#executables[@]}" -eq 1
+          test -x "${executables[0]}"
+          printf '%s\n' "${executables[0]}" > "${RUNNER_TEMP}/overmatch-libtest"
+
+      - name: Build shot stress runtime image
+        if: matrix.task == 'shot-stress'
+        run: |
+          docker build --pull \
+            --file scripts/ci/shot-stress.Dockerfile \
+            --tag overmatch-shot-stress-runtime:ci \
+            scripts/ci
+
+      - name: Shot stress test with memory telemetry
+        if: matrix.task == 'shot-stress'
+        env:
+          # DERIVED: four GiB is about ten times the MEASURED prior normal macOS-arm peak while
+          # leaving the hosted runner headroom to report a cgroup OOM instead of losing the VM.
+          MEMORY_MAX_BYTES: 4294967296
+        run: |
+          bash scripts/ci/measure-test-memory.sh \
+            "$(<"${RUNNER_TEMP}/overmatch-libtest")" \
+            net::shot_loss::thirty_combatant_volley_reaches_thirty_independent_receivers_under_loss \
+            --exact --test-threads=1 --nocapture
+
+  # Preserve the branch-protection context while requiring every matrix lane above.
+  check:
+    name: check
+    needs: checks
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require all check lanes
+        env:
+          CHECKS_RESULT: ${{ needs.checks.result }}
+        run: test "${CHECKS_RESULT}" = success

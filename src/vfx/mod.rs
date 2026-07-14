@@ -1,29 +1,7 @@
-//! Ship-facing view-layer combat VFX (ADR-0014): render-only subscribers to the sim's seams —
-//! `ballistics::Impact` (dust puffs + sparks) and `ballistics::FireShell` (the 88's and the MGs'
-//! muzzle dressings + the 88's smoke trail) — plus the shared machinery they are built from.
-//! Mounted ONLY by the two windowed client compositions (SP `ClientPlugin` and `NetClientPlugin`);
-//! the headless server and the scripted harness never mount any of it. Nothing here writes sim
-//! state, and all randomness is view-side ([`ViewRng`]) — the deterministic sim never sees it.
+//! View-layer combat VFX.
 //!
-//! Layout:
-//!   * [`billboard`] — the shared sprite machinery: camera-facing flipbook quads with an
-//!     erosion + gradient-map material (`VfxBillboardMaterial`), aging/ring-cap systems, and the
-//!     procedural gradient-LUT builder. The 88 dressing, the MG dressing, and the impact sparks
-//!     all consume it.
-//!   * [`muzzle`] — both guns' firing signatures: 1–2-frame flash clusters, transient muzzle lights
-//!     (shadow casting behind the `MuzzleShadows` lever), lingering eroded smoke (the MG's rationed
-//!     to every few rounds).
-//!   * [`trail`] — the 88 shell's smoke trail: one camera-facing ribbon per shell, built from the
-//!     sim's `ShellPath` recording, noise-eroded at the tail (`VfxTrailMaterial`).
-//!   * [`ember`] — the 88 shell's base tracer ember: a small dim red-orange emissive point riding
-//!     the shell, burning ~2 s then fading.
-//!   * [`tracer`] — the MG tracer streak origin clamp: shortens the drawn streak to the distance
-//!     flown since the muzzle/last ricochet so its tail never pokes behind the round.
-//!   * [`impact`] — the layered impact read: a Kenney dust billow + an additive contact ping on
-//!     every landed round plus stretched spark streaks kicked around the hit's surface normal.
-//!   * [`prewarm`] — startup warm-up spawns that force the shell scene and every VFX
-//!     mesh/material pipeline permutation to compile before the first shot, killing the measured
-//!     first-fire hitch.
+//! Invariant (ADR-0014): these systems subscribe to simulation seams but write no simulation state;
+//! randomness is view-local. Windowed client compositions mount this module, not the server.
 
 use bevy::prelude::*;
 
@@ -34,6 +12,14 @@ mod muzzle;
 mod prewarm;
 mod tracer;
 mod trail;
+
+#[cfg(test)]
+pub(crate) use trail::{TrailHarnessSet, TrailStationMeshEvidence};
+
+#[cfg(test)]
+pub(crate) fn mount_trail_loss_harness(app: &mut App) {
+    trail::mount_loss_harness(app);
+}
 
 pub fn plugin(app: &mut App) {
     app.init_resource::<ViewRng>();

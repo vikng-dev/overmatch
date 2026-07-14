@@ -2,5 +2,5 @@
 #![allow(clippy::type_complexity)]
 
 fn main() {
-    overmatch::net::server::run();
+    overmatch::run_server();
 }

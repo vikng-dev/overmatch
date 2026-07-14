@@ -1,13 +1,7 @@
-//! The armor ballistics sandbox — an isolated tool to develop and tune the penetration march
-//! deterministically, decoupled from driving/aiming. See
-//! `.agents/docs/design/armor-penetration-and-damage.md` §11. Mounted by `bin/armor_sandbox`, not
-//! by `GamePlugin`: it composes a *subset* of the game's feature plugins plus the sandbox controls.
+//! Isolated penetration-march sandbox, mounted only by `bin/armor_sandbox`.
 //!
-//! v1 increment: a free-fly camera that *is* the gun (WASD to float, Shift/Ctrl up/down, mouse to
-//! look, left-click to fire a shell straight down the view axis), basic time controls (pause +
-//! slow-mo, on real time so you can still fly while the sim is frozen), and placeholder target
-//! slabs. The penetration march, ballistic volumes, and spall grow on top of `ballistics::Impact`
-//! in later increments.
+//! The free-fly camera is the gun; sandbox controls use real time so inspection remains available
+//! while simulation time is paused.
 
 use avian3d::prelude::{
     Collider, CollisionLayers, LayerMask, PhysicsInterpolationPlugin, PhysicsPlugins, RigidBody,
@@ -17,7 +11,6 @@ use bevy::prelude::*;
 use bevy::time::{Real, Virtual};
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
-use bevy::asset::LoadState;
 use bevy::camera::ClearColorConfig;
 use bevy::camera::visibility::RenderLayers;
 use bevy::ui::IsDefaultUiCamera;
@@ -25,15 +18,15 @@ use bevy::ui::IsDefaultUiCamera;
 use crate::Layer;
 use crate::bake;
 use crate::ballistics::{
-    self, ArmorVolume, BallisticVolume, ComponentHealth, ComponentVolume, FireShell, Impact,
-    ImpactMarker, PenetrationMarks, ShellPath, ShellReadout, SpallMarks,
+    self, ArmorVolume, BallisticVolume, ComponentHealth, ComponentVolume, FireShell,
+    FireShellOrigin, Impact, ImpactMarker, PenetrationMarks, ShellPath, ShellReadout, SpallMarks,
 };
 use crate::command;
 use crate::crew_ui;
 use crate::damage::{self, Ammo, CookedOff, Dead, LaunchedTurret, TankKnockedOut};
 use crate::hud::{self, HudCamera};
-use crate::spec::{self, TankSpec, TankSpecHandle};
-use crate::tank::{Controlled, Tank, TankSimSource, ViewOf, bind_tank_view, spawn_tank_sim};
+use crate::spec;
+use crate::tank::{Controlled, Tank, TankPresentation, TankSimSource, ViewOf, spawn_complete_tank};
 use crate::world;
 
 /// Muzzle speed for sandbox shots (m/s) — the 88 mm, matching the game's gun for now. Becomes a
@@ -192,7 +185,7 @@ pub fn plugin(app: &mut App) {
         // `spec` registers the `.tank.ron` loader so the target tank's volumes bind with their data.
         spec::plugin,
         // The tank-geometry extractor: the target's sim body (armor volumes included) spawns from
-        // `ExtractedTankGeometry`, exactly like the game's tanks; the shadow harness rides along.
+        // `TankBlueprint`, exactly like the game's tanks; the shadow harness rides along.
         bake::plugin,
         // The render-side view attach: the target is static, but cook-off detaches the sim
         // turret and the rendered glb turret must follow the free body.
@@ -246,7 +239,7 @@ pub fn plugin(app: &mut App) {
             clear_shots,
             reset_world,
             toggle_march_mode,
-            spawn_target_when_ready,
+            spawn_target_from_blueprint,
             tag_hull_meshes,
             toggle_layers,
             apply_layer_visibility,
@@ -355,50 +348,43 @@ fn spawn_targets(
     }
 }
 
-/// The target tank's spec, loading. The tank is spawned only once it's ready (a load dependency,
-/// ADR-0011), so `spawn_tank_sim` builds its volumes with their data in one pass.
+/// Presentation handles for a pending target. Simulation data comes from `TankBlueprint` and does
+/// not wait for either asset to resolve.
 #[derive(Resource)]
-struct PendingTarget(Handle<TankSpec>);
+struct PendingTarget(TankPresentation);
 
 fn load_target(mut commands: Commands, asset_server: Res<AssetServer>) {
-    commands.insert_resource(PendingTarget(asset_server.load("tiger_1/tiger_1.tank.ron")));
+    commands.insert_resource(PendingTarget(TankPresentation::new(
+        asset_server.load(GltfAssetLabel::Scene(0).from_asset("tiger_1/tiger_1.glb")),
+        asset_server.load("tiger_1/tiger_1.tank.ron"),
+    )));
 }
 
-/// Once the spec is loaded, spawn the real Tiger as a **static** target (no driving/suspension — it
-/// just stands there to be shot): the sim body — ballistic-volume colliders the march raycasts
-/// included — synchronously from the extracted geometry (`spawn_tank_sim`), the glb scene as its
-/// view (`bind_tank_view`), exactly like the game's tanks.
-fn spawn_target_when_ready(
+/// Spawn the static target synchronously from the blueprint; its glb view may attach later.
+fn spawn_target_from_blueprint(
     mut commands: Commands,
-    asset_server: Res<AssetServer>,
     pending: Option<Res<PendingTarget>>,
     source: TankSimSource,
 ) {
     let Some(pending) = pending else {
         return;
     };
-    if !matches!(asset_server.load_state(&pending.0), LoadState::Loaded) {
-        return;
-    }
-    let Some((geometry, spec)) = source.get(&pending.0) else {
+    let Some(content) = source.get() else {
         return;
     };
-    let mut target = commands.spawn((
-        WorldAssetRoot(
-            asset_server.load(GltfAssetLabel::Scene(0).from_asset("tiger_1/tiger_1.glb")),
+    spawn_complete_tank(
+        &mut commands,
+        content,
+        pending.0.clone(),
+        (
+            Transform::from_xyz(0.0, 2.0, -12.0),
+            Name::new("Tiger I target"),
+            // The sandbox's single tank is the one under study — mark it `Controlled` so the shared
+            // crew bar (scoped to the controlled tank) drives it, exactly as in the game.
+            Controlled,
+            RigidBody::Static,
         ),
-        TankSpecHandle(pending.0.clone()),
-        Transform::from_xyz(0.0, 2.0, -12.0),
-        Name::new("Tiger I target"),
-        Tank,
-        // The sandbox's single tank is the one under study — mark it `Controlled` so the shared
-        // crew bar (scoped to the controlled tank) drives it, exactly as in the game.
-        Controlled,
-        RigidBody::Static,
-    ));
-    target.observe(bind_tank_view);
-    let root = target.id();
-    spawn_tank_sim(&mut commands, root, geometry, spec);
+    );
     commands.remove_resource::<PendingTarget>();
 }
 
@@ -753,6 +739,7 @@ fn fire(
         speed: MUZZLE_SPEED,
         caliber: CALIBER,
         mass: SHELL_MASS,
+        mechanism: crate::spec::FireMechanism::Single,
         // A single sighting round — mark it a tracer. Moot for the sandbox's own visuals (it retains
         // spent shells and draws its own path gizmos, and CALIBER is main-gun-sized so it keeps the
         // shell scene regardless), but keeps the field honest.
@@ -760,6 +747,7 @@ fn fire(
         // The free-fly camera is not a tank, so there is nothing to attribute (and the sandbox is
         // single-process anyway) — `None` never broadcasts.
         shooter: None,
+        shot_origin: FireShellOrigin::Local,
         // Locally fired: no net catch-up.
         catch_up_ticks: 0,
         // Single-process sandbox — no network identity, no bounce keyframes.
@@ -853,7 +841,10 @@ fn reset_world(
     for entity in &targets {
         commands.entity(entity).despawn();
     }
-    commands.insert_resource(PendingTarget(asset_server.load("tiger_1/tiger_1.tank.ron")));
+    commands.insert_resource(PendingTarget(TankPresentation::new(
+        asset_server.load(GltfAssetLabel::Scene(0).from_asset("tiger_1/tiger_1.glb")),
+        asset_server.load("tiger_1/tiger_1.tank.ron"),
+    )));
 }
 
 /// Time controls on the **virtual** clock (which drives the fixed timestep the march/physics run
@@ -901,7 +892,21 @@ fn toggle_march_mode(keys: Res<ButtonInput<KeyCode>>, mut mode: ResMut<ballistic
 /// inspection draw the penetration march will build on (path segments, entry/exit, spall cones).
 fn draw_shell_paths(mut gizmos: Gizmos, paths: Query<&ShellPath>) {
     for path in &paths {
-        gizmos.linestrip(path.points.iter().copied(), Color::srgb(1.0, 0.85, 0.2));
+        let mut start = 0;
+        for end in path
+            .segment_starts
+            .iter()
+            .copied()
+            .chain(std::iter::once(path.points.len()))
+        {
+            if end.saturating_sub(start) >= 2 {
+                gizmos.linestrip(
+                    path.points[start..end].iter().copied(),
+                    Color::srgb(1.0, 0.85, 0.2),
+                );
+            }
+            start = end;
+        }
     }
 }
 

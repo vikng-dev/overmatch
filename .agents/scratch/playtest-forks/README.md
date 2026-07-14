@@ -117,3 +117,65 @@ around the lone-survivor state, so deciding late is more expensive than the code
 
 **Lives in.** Design §1a (A/B under test). Code: `action_available` / `TankKnockedOut`
 in `src/damage.rs`; cookoff hook on `CookedOff` (§8).
+
+---
+
+## F3 — Combat damage disclosure
+
+**Status:** open · authority semantics settled, presentation deliberately temporary
+
+**The question.** How much additional information should a shooter receive after the authority confirms enemy damage? The spectrum runs from no cue beyond visible world damage to an exact internal X-ray account.
+
+**Default — explicit authoritative confirmation with temporary presentation.** The player's firing action is predicted immediately, but damage is never predicted as fact. The current hit-marker-like cue is a disposable view of authoritative damage, not the product target and not the semantic interface.
+
+**Alternatives kept alive:**
+- **World evidence only.** No additional indication beyond visible damage, fire, smoke, lost capability, and enemy behavior.
+- **Restrained confirmation.** A subtle sound, crew callout, sight response, or other low-information acknowledgement that damage occurred.
+- **Detailed disclosure.** Increasingly precise penetration, crew, tank-module, or X-ray information, up to a complete internal account.
+
+The server owns disclosure. A live client must receive only the detail the current rule permits; hiding privileged truth in the UI is not concealment from a modified client. Armor inspection and scientific diagnostics may use a separate privileged adapter.
+
+**Why it's a playtest call.** The correct point depends on whether feedback improves comprehension and learning or erodes observation, uncertainty, and tank knowledge. It cannot be settled from implementation convenience.
+
+**Revert cost.** Expected to be low for presentation once the confirmation seam is complete: the required interface is a discrete, shot-attributed authoritative damage fact, deduplicated by `ShotId`, rather than a cue inferred from replicated health snapshots. Changing how much detail the server discloses may widen or narrow that semantic fact, but no presentation belongs in ballistics or damage truth.
+
+**Lives in.** `src/net/hit_feel.rs`, the authoritative damage/outcome path in
+`src/net/protocol.rs` and `src/net/shot_transport.rs`, and the future armor-inspection presentation.
+
+---
+
+## F4 — Remote automatic-fire continuity
+
+**Status:** open · bounded default implemented 2026-07-13 · settle with impaired-network playtests
+
+**The question.** How much loss or thinning in another tank's automatic-fire presentation remains
+readable before cadence, direction, or cause-and-effect feels broken?
+
+**Default — every authored automatic fact is eligible for bounded repair.** Fire, ricochet, and
+terminal visuals receive up to three unordered-unreliable admission opportunities and expire after
+16 authority ticks. Both values are **DERIVED STARTING DEFAULTS**. Admission pressure may permit
+fewer opportunities; instrumentation distinguishes expiry before the first from expiry after a
+partial repair. The receiver deduplicates by `ShotId`; missing visuals never change authority or
+owner-private damage confirmation. Without contention, the present spacing is the emission tick and
+the next two authority ticks—a **DERIVED 31.25 ms** first-to-last span at 64 Hz. This is not yet a
+claim of resilience to correlated loss.
+
+**Alternatives kept alive:** fewer copies under contention; longer or shorter presentation expiry;
+distance/visibility-aware tracer density that never hides a gameplay-visible tank; or a compact
+firing-generation/cadence state for recovery after correlated loss. Reliable per-round automatic
+traffic is deliberately not an alternative because stale retransmit debt scales with the burst.
+
+**Why it's a playtest call.** Independent-loss arithmetic cannot tell us whether real correlated
+loss looks like an acceptable hole in a burst or a misleading silence. Test at normal and adverse
+RTT/loss while several tanks fire, watching remote muzzle cadence, post-bounce continuation, late
+visuals, and whether confirmation still feels causally attached to the shot. **MEASURED on local
+loopback 2026-07-14:** all three server-traced copy opportunities fell inside a six-receive-update
+loss window; the covered automatic shot produced no presentation, while the following shot recovered
+exactly once. That establishes the current correlated-loss hole; it does not decide whether the hole
+is perceptually acceptable.
+
+**Revert cost.** Low for copy count, expiry, and batch admission; medium for a firing-generation
+state because that widens the wire contract and join-in-progress model.
+
+**Lives in.** `src/net/shot_transport.rs`, `src/net/client.rs`, `src/net/shot_loss.rs`, and
+ADR-0021.

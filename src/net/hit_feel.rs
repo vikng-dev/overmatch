@@ -1,35 +1,14 @@
-//! View-layer combat feedback — "predict what you author, replicate what is authored against you".
+//! View-layer combat feedback for network clients.
 //!
-//! Getting shot, and landing a shot, are the two halves of the **unfelt hit**
-//! (`design/timelines-and-shear.md` §3): the authoritative shove is ~0.14 m/s ≈ 1.1 cm over 80 ms,
-//! below `ROLLBACK_POSITION_M` (5 cm), so it never enters the client's sim — and `on_hit_impulse`
-//! (`ballistics`) is gated OFF on the whole client anyway (`ClientReplica`). This module delivers the
-//! feedback the physics cannot: it watches the SERVER-AUTHORITATIVE per-volume health
-//! (`net::protocol::NetHealth`) for drops and answers each with a **presentation-only** cue —
-//! - **being hit** (a drop on the player's own `Controlled` tank): a decaying camera kick + a
-//!   screen-edge damage flash, the kick's bearing read off the struck volume's world pose;
-//! - **confirming your hit** (a drop on an opponent's tank): a brief centre hit-marker.
-//!
-//! **The sim/view split (ADR-0014), enforced.** Nothing here writes a value the sim or the aim path
-//! reads. The camera kick is applied ONLY to the camera's rendered `GlobalTransform`, never to its
-//! `Transform` (which `camera::orbit_camera` reads back to derive look yaw/pitch) and never to the
-//! gun/servos. `GlobalTransform` is re-derived from truth every frame — by `TransformSystems::Propagate`
-//! in commander view, by `camera::gunner_camera` in gunner view — so the offset can never accumulate,
-//! exactly as `net::render_error`'s offset rides avian's per-frame `position_to_transform`. The one
-//! reader of the camera pose that feeds the sim is `aim::commit_aim` (third-person: a screen-centre ray
-//! → committed aim), and it runs in `Update` off the camera's `GlobalTransform`; [`stabilize_camera_pose`]
-//! restores `GlobalTransform` to its un-kicked `Transform` at the head of each frame so that reader —
-//! and every other `Update`-schedule reader — sees the stable pose while only the rendered image shakes.
-//! The gunner optic commits aim from the mouse (`sight::drive_gunner_aim`), never the camera, so the
-//! more important gunner-view kick is decoupled by construction.
-//!
-//! Net-client only, mounted by `NetClientPlugin` (single-player has no authoritative-damage stream to
-//! read). The UI-writing systems use `Single`, so they simply don't run on a headless client that
-//! never spawned a camera/UI.
+//! The player's own replicated [`NetCrew`] drives incoming-hit kick and damage flash. An
+//! owner-private, deduplicated [`DamageReceipt`] drives the outgoing hit marker. Neither path writes
+//! simulation state or feeds aim: camera kick modifies rendered `GlobalTransform` only, and
+//! [`stabilize_camera_pose`] restores it before `Update` readers consume the camera pose.
 
 use bevy::prelude::*;
 use lightyear::prelude::client::Remote;
 
+use crate::ShotId;
 use crate::ballistics::ComponentHealth;
 use crate::camera::CameraKickApplied;
 use crate::damage::{CrewStation, TankVolumes};
@@ -37,20 +16,16 @@ use crate::hud::HudCamera;
 use crate::tank::Controlled;
 use crate::ui_font::UiFonts;
 
-use super::protocol::{NetCrew, health_bearing_volumes};
+use super::protocol::{DamageReceipt, NetCrew, health_bearing_volumes};
 
 // --- Feel dials (all in ONE place) -----------------------------------------------------------
-/// Camera-kick impulse added per hit, in radians, before severity scaling. Pitch is the always-up
-/// recoil punch; yaw/roll carry the bearing (which side of the hull absorbed the round). Signs are
-/// feel dials — the model's local axes decide which way "right" is, and any consistent jolt reads as
-/// a hit. ~0.06 rad ≈ 3.4°.
+/// Camera-kick impulse per hit before severity scaling.
 const KICK_PITCH_RAD: f32 = 0.055;
 const KICK_YAW_RAD: f32 = 0.035;
 const KICK_ROLL_RAD: f32 = 0.030;
 /// Per-axis clamp on the accumulated kick, so a burst of hits jolts hard but never spins the view.
 const KICK_MAX_RAD: f32 = 0.22;
-/// Fraction of the kick RETAINED per 60 Hz frame; `powf(dt*60)` normalizes it to any framerate. 0.80
-/// spends the kick in ~0.25 s — a snap out, then a quick settle back to the true (un-kicked) pose.
+/// Kick retention per 60 Hz frame; `powf(dt * 60)` makes decay frame-rate independent.
 const KICK_RETAIN: f32 = 0.80;
 /// Below this magnitude the kick is spent and zeroed, so it never lingers as denormal dust.
 const KICK_ZERO_EPS: f32 = 1e-4;
@@ -59,8 +34,7 @@ const KICK_ZERO_EPS: f32 = 1e-4;
 /// any float churn in the replicated snapshot re-triggering a cue.
 const HIT_EPS_HP: f32 = 0.01;
 
-/// Fraction of the damage flash / hit-marker RETAINED per 60 Hz frame (framerate-normalized). ~0.86
-/// gives a visible flash that fades over ~0.4 s.
+/// Damage-flash and marker retention per 60 Hz frame.
 const CUE_RETAIN: f32 = 0.86;
 /// Below this intensity the flash/marker is fully hidden (and its resource pinned to 0).
 const CUE_ZERO_EPS: f32 = 0.02;
@@ -78,24 +52,31 @@ struct CameraKick {
 #[derive(Resource, Default)]
 struct DamageFlash(f32);
 
-/// Hit-confirm intensity ∈ [0, 1]: 1.0 the instant an opponent's replicated health drops, decaying to
-/// 0. Drives the centre hit-marker's alpha.
+/// Hit-confirm intensity ∈ [0, 1]: 1.0 when a discrete server damage confirmation for an authored
+/// shot arrives, decaying to 0. Drives the centre hit-marker's alpha.
 #[derive(Resource, Default)]
 struct HitConfirm(f32);
 
-/// One remembered slot: its HP plus its OCCUPANT identity — `Some(home)` for a crew seat, `None` for a
-/// module/ammo volume. The occupant is what lets [`worst_drop`] tell a hit from a crew swap: a swap
-/// completion transposes two seats' HP within one `NetCrew` change, and the full→0 seat would read as a
-/// max-severity hit — except its occupant CHANGED (a live body moved in/out), so it is discounted.
+/// One server-confirmed damaging shot authored by this client. Raised by `net::client` only after the
+/// receipt has been accepted idempotently by [`DamageReceipt`]; the view consumes it without
+/// inferring shot count or attribution from `NetCrew` state deltas.
+#[derive(Event)]
+pub(super) struct LocalHitConfirmed {
+    pub receipt: DamageReceipt,
+    /// Client predicted-present tick at the wire receive boundary.
+    pub received_tick: u32,
+    /// Authority tick at which this shot first damaged an HP pool.
+    pub damage_tick: u32,
+}
+
+/// Remembered health and occupant identity. Occupant changes distinguish crew moves from damage.
 #[derive(Clone, Copy, PartialEq)]
 struct SlotMemory {
     hp: f32,
     occupant: Option<CrewStation>,
 }
 
-/// The last-seen per-volume snapshot for a tank, so a change can be diffed into per-volume drops.
-/// Armed once (seeded to the live value, so the spawn frame is never read as a hit), updated on every
-/// observed change. Read out of the replicated [`NetCrew`] (which subsumes the former `NetHealth`).
+/// Last observed [`NetCrew`] snapshot, seeded before diffing so a spawn does not read as damage.
 #[derive(Component)]
 struct HealthMemory(Vec<SlotMemory>);
 
@@ -126,6 +107,7 @@ pub fn plugin(app: &mut App) {
     app.init_resource::<CameraKick>()
         .init_resource::<DamageFlash>()
         .init_resource::<HitConfirm>()
+        .add_observer(on_local_hit_confirmed)
         .add_systems(Startup, spawn_cue_ui)
         .add_systems(
             Update,
@@ -133,7 +115,7 @@ pub fn plugin(app: &mut App) {
                 arm_health_memory,
                 detect_health_drops.after(arm_health_memory),
                 drive_damage_flash,
-                drive_hit_confirm,
+                drive_hit_confirm.after(super::client::receive_damage_confirms),
             ),
         )
         // Restore the camera's rendered pose to its un-kicked truth at the head of the frame, BEFORE
@@ -165,18 +147,10 @@ fn arm_health_memory(
     }
 }
 
-/// Diff every changed `NetHealth` against its remembered snapshot and raise the matching cue on any
+/// Diff every changed `NetCrew` against its remembered snapshot and raise the being-hit cue on any
 /// per-volume DROP (an increase — a respawn's health reset — raises nothing). The player's own
-/// (`Controlled`) tank drives the being-hit cue (camera kick + screen flash); every other replicated
-/// tank drives the hit-confirm cue.
-///
-/// **Attribution for hit-confirm is by NetHealth delta alone, and the ambiguity is named, not
-/// plumbed.** A drop on an opponent means SOMEONE's shell connected on the authority; in the 1-v-1
-/// (player vs one bot) this slice ships, the only shooter that can damage the opponent is the player,
-/// so the confirm is unambiguously yours. With a third shooter (a bot teammate, a 2-v-2) it is not —
-/// this cue would fire for a hit you did not land. Tightening it needs server-side shooter attribution
-/// on the wire (a protocol change), which is deliberately out of scope here; the honest graybox is the
-/// delta, documented.
+/// (`Controlled`) tank drives the being-hit cue (camera kick + screen flash). Opponent deltas are state
+/// only and raise no marker: the discrete, attributed [`LocalHitConfirmed`] path owns that semantic.
 fn detect_health_drops(
     mut tanks: Query<
         (
@@ -192,15 +166,13 @@ fn detect_health_drops(
     transforms: Query<&GlobalTransform>,
     mut kick: ResMut<CameraKick>,
     mut flash: ResMut<DamageFlash>,
-    mut confirm: ResMut<HitConfirm>,
 ) {
     for (root, volumes, net, mut memory, is_own) in &mut tanks {
         // The per-volume snapshot (HP + occupant) in the SAME health-bearing order the server published
         // (index i ↔ volume). `Changed<NetCrew>` also fires each tick a swap countdown ticks AND on the
         // tick a swap COMPLETES — when the two seats' HP transpose. `worst_drop` discounts any slot
         // whose occupant changed, so a completing swap raises no false cue on either the owner (a
-        // camera kick + damage flash) or an opponent (a hit-confirm); only an actual same-occupant HP
-        // drop is a hit.
+        // camera kick + damage flash). Opponent state deltas never own hit-confirm event count.
         let slots = slot_memory(net);
         let bearers = health_bearing_volumes(volumes, |v| health.contains(v));
         // A transient length skew while the rig is still spawning: resync memory, diff nothing.
@@ -233,11 +205,42 @@ fn detect_health_drops(
                 "hit-feel: OWN tank hit — worst drop {drop_hp:.1} hp (severity {severity:.2}, \
                  bearing {bearing:?}) → camera kick + damage flash"
             );
-        } else {
-            confirm.0 = 1.0;
-            info!("hit-feel: opponent {root} health dropped (worst {drop_hp:.1} hp) → hit-confirm");
         }
     }
+}
+
+/// Pulse the centre marker from the discrete authoritative fact. This is deliberately separate from
+/// health snapshot handling: a latest-state stream can preserve HP but cannot preserve one event per
+/// shot under coalescing/loss. The trace is written at this presentation boundary; receipt and dedup
+/// tracing remains at the receive boundary.
+fn on_local_hit_confirmed(
+    hit: On<LocalHitConfirmed>,
+    mut confirm: ResMut<HitConfirm>,
+    mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
+) {
+    confirm.0 = 1.0;
+    let shot = ShotId {
+        combatant: hit.receipt.combatant,
+        weapon: hit.receipt.weapon,
+        fire_tick: hit.receipt.fire_tick,
+    };
+    crate::shot_trace::record(
+        &mut shot_trace,
+        "marker",
+        hit.received_tick,
+        shot,
+        || serde_json::json!({ "own": true, "dt": hit.damage_tick }),
+    );
+    info!(
+        "hit-feel: receipt {:?} damaged on the authority → hit-confirm",
+        hit.receipt
+    );
+}
+
+#[cfg(test)]
+pub(super) fn mount_test_marker_boundary(app: &mut App) {
+    app.init_resource::<HitConfirm>()
+        .add_observer(on_local_hit_confirmed);
 }
 
 /// Scan two same-length slot snapshots for the single largest per-volume DROP, returning its index and
@@ -414,6 +417,31 @@ mod tests {
     }
 
     #[test]
+    fn authoritative_damage_confirm_pulses_without_a_health_snapshot_delta() {
+        let mut app = App::new();
+        app.init_resource::<HitConfirm>()
+            .add_observer(on_local_hit_confirmed);
+        let receipt = DamageReceipt {
+            combatant: crate::CombatantId(1),
+            weapon: 1,
+            fire_tick: 77,
+        };
+
+        app.world_mut().trigger(LocalHitConfirmed {
+            receipt,
+            received_tick: 77,
+            damage_tick: 77,
+        });
+        app.world_mut().flush();
+
+        assert_eq!(
+            app.world().resource::<HitConfirm>().0,
+            1.0,
+            "the discrete authoritative fact, not a NetCrew delta, owns the marker pulse"
+        );
+    }
+
+    #[test]
     fn no_change_is_no_hit() {
         assert_eq!(
             worst_drop(
@@ -459,7 +487,7 @@ mod tests {
     fn a_crew_swap_transposing_hp_is_not_a_hit() {
         // Snapshot A: the gunner seat is alive+full, the loader seat is dead (0). Snapshot B, the tick
         // a backfill swap COMPLETES: the live body moved, so the seats' HP transpose AND their `home`s
-        // swap with them. The full→0 seat is a personnel move, not a hit — no cue on own OR opponent.
+        // swap with them. The full→0 seat is a personnel move, not an own-damage cue.
         let a = [
             seat(100.0, CrewStation::Gunner),
             seat(0.0, CrewStation::Loader),
@@ -487,17 +515,20 @@ mod tests {
 
     #[test]
     fn a_kick_leans_toward_the_struck_side_and_clamps() {
-        // A hit on the right (+bearing) yaws one way; a burst never exceeds the per-axis clamp.
+        // Camera-local +yaw turns left, so a right-side (+bearing) hit yaws right (negative) and
+        // rolls right (positive); the left side is its literal inverse.
         let mut kick = CameraKick::default();
         add_camera_kick(&mut kick, 1.0, Some(2.0));
         assert!(kick.angular.x > 0.0, "always a pitch-up punch");
-        let right_yaw = kick.angular.y;
+        assert!(kick.angular.y < 0.0, "right-side hit yaws the camera right");
+        assert!(
+            kick.angular.z > 0.0,
+            "right-side hit rolls the camera right"
+        );
         let mut left = CameraKick::default();
         add_camera_kick(&mut left, 1.0, Some(-2.0));
-        assert!(
-            left.angular.y.signum() != right_yaw.signum(),
-            "left and right hits yaw opposite ways"
-        );
+        assert!(left.angular.y > 0.0, "left-side hit yaws the camera left");
+        assert!(left.angular.z < 0.0, "left-side hit rolls the camera left");
         for _ in 0..50 {
             add_camera_kick(&mut kick, 1.0, Some(2.0));
         }

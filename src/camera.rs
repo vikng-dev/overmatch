@@ -25,8 +25,7 @@ struct OrbitCamera {
     target_zoom: f32,
 }
 
-/// When false, the orbit camera holds its current pose instead of following the tank — a debug
-/// "detach" used to tell camera-follow jitter apart from physics jitter. Always true in release.
+/// Debug switch that freezes the orbit camera's follow transform.
 #[derive(Resource)]
 pub struct CameraFollow(pub bool);
 
@@ -82,29 +81,8 @@ pub fn plugin(app: &mut App) {
         .add_systems(Update, capture_turret_pivot)
         .add_systems(
             PostUpdate,
-            // The orbit camera reads the interpolated root *before* propagation (Avian's follow
-            // guidance), so it propagates together with the tank — but only if it reads *this*
-            // frame's written root `Transform`. Both edges are load-bearing:
-            //
-            // - `.after(PhysicsSystems::Writeback)`: in the MP composition the root `Transform` is
-            //   written in THIS PostUpdate by avian's `position_to_transform` (in `Writeback`), which
-            //   lightyear_avian's Position-mode chains Interpolate → VisualCorrection → Writeback →
-            //   Propagate. `orbit_camera` reads that root `Transform`. With only `.before(Propagate)`
-            //   and no edge to Writeback, the multithreaded executor is free to order us before OR
-            //   after Writeback and may flip frame to frame; a frame that reads *before* Writeback
-            //   targets last frame's pose (~7 cm at 8.6 m/s cruise), so the camera — and the whole
-            //   rendered world with it — lurches back a frame, then snaps forward the next: a
-            //   metronomic ~1/s hiccup along travel even though the tank's own stream is smooth.
-            //   Ordering after Writeback pins us to the pose Propagate is about to consume.
-            // - `.before(TransformSystems::Propagate)`: Propagation then computes the camera's and
-            //   the tank's `GlobalTransform` from the same root pose in one pass, so they render
-            //   consistent — no follow jitter.
-            //
-            // The edge must hold in BOTH compositions, so it anchors on `PhysicsSystems::Writeback`
-            // (avian's set, present with or without `net`) rather than lightyear's own sets. In SP
-            // the render-smoothed `Transform` is eased in `RunFixedMainLoop` (before `Update`), so
-            // this PostUpdate's `Writeback` set is empty and the edge is a harmless no-op — which is
-            // exactly why SP already renders smooth.
+            // Ordering invariant: read the writeback pose, then let propagation derive camera and
+            // tank globals from that same frame's transforms.
             orbit_camera
                 .run_if(in_third_person)
                 .in_set(GameplaySet)
@@ -114,12 +92,7 @@ pub fn plugin(app: &mut App) {
         )
         .add_systems(
             PostUpdate,
-            // Free-look rotation is the one device-reading half of the orbit camera, split out so it
-            // hangs on `PlayerInputSet`: with the cursor released (menu / alt-tab) the orbit freezes,
-            // but `orbit_camera` (the follow + zoom half, NOT in the set) keeps running, so the camera
-            // still tracks the tank behind the menu — only the mouse-orbit is frozen (Yan's call).
-            // `.before(orbit_camera)` so the position placement reads this frame's rotation; both
-            // mutate the camera `Transform`, so the order must be explicit.
+            // Input rotation is gated separately; placement must consume this frame's rotation.
             orbit_look
                 .run_if(in_third_person)
                 .in_set(GameplaySet)
@@ -201,16 +174,8 @@ pub fn view_fov(views: &Query<&TankViews, With<Controlled>>, kind: ViewKind, fal
 fn spawn_camera(mut commands: Commands) {
     commands.spawn((
         Camera3d::default(),
-        // HDR + bloom — the foundation the emissive tracer streak (`ballistics::on_fire_shell`) needs
-        // to actually GLOW: its material's emissive rides above 1.0 in linear space, which only reads
-        // as a bright streak once the camera renders HDR and bloom bleeds the over-bright pixels. In
-        // Bevy 0.19 HDR is the `Hdr` marker component (no longer a `Camera.hdr` field); `Bloom` also
-        // `#[require(Hdr)]`s it, but we spell both out for intent.
+        // Tracer emissive values require HDR and bloom to produce the intended highlight.
         Hdr,
-        // Conservative intensity: 0.19 moved bloom's Karis-average weighting to LINEAR space, so the
-        // same numeric intensity reads LOWER than pre-0.19 docs suggest — NATURAL (0.15) is a
-        // restrained starting point. NEEDS AN EYEBALL PASS against the tracer once it's on screen; bump
-        // if the streak reads flat, drop if the scene blooms hazy.
         Bloom::NATURAL,
         Transform::from_xyz(10.0, 7.0, -7.0).looking_at(Vec3::new(10.0, 1.0, 5.0), Vec3::Y),
         OrbitCamera {
@@ -292,9 +257,7 @@ fn orbit_camera(
     const ZOOM_SPEED: f32 = 0.01;
     const ZOOM_GLIDE: f32 = 12.0;
     orbit.target_zoom = (orbit.target_zoom + mouse_scroll.delta.y * ZOOM_SPEED).clamp(0.0, 1.0);
-    // Frame-rate-exact exponential glide: `1 - e^(-k·dt)` is the closed-form decay over `dt`, so the
-    // dolly lands identically regardless of frame time. The old `(k·dt).min(1)` was a linear
-    // approximation that eased faster at high frame rates.
+    // Exponential easing makes the dolly's response independent of frame time.
     let ease = 1.0 - (-ZOOM_GLIDE * time.delta_secs()).exp();
     orbit.zoom += (orbit.target_zoom - orbit.zoom) * ease;
 
@@ -309,29 +272,10 @@ fn orbit_camera(
     transform.translation = back_ray.get_point(ground_distance(&spatial, back_ray, distance));
 }
 
-/// Returning from the gunner optic to third person, re-aim the orbit camera so its screen-centre
-/// ray passes through the committed aim point: the mode transition is identity on the AIM, not on
-/// the camera's direction. There is one `Camera3d`, and [`gunner_camera`] overwrote its pose every
-/// optic frame — there is no pre-optic orientation to restore, only a stale gunner sight line whose
-/// ORIGIN is about to change (gun mount → orbit position, ~5 m up and 18 m back). Carrying that
-/// direction over parallel makes the centre ray hit the ground well beyond the committed point (a
-/// ~50 m floor aim re-picks at roughly twice the distance), so an RMB-up `commit_aim` immediately
-/// re-commits a farther, higher target and the gun self-corrects upward — the gunner→third-person
-/// half of the 2026-07-10 transition regression.
+/// Re-aim the orbit camera through the committed point when leaving the gunner view.
 ///
-/// Aiming the camera FROM THE PIVOT at the point makes pivot, camera body, and committed point
-/// collinear by construction — [`orbit_camera`] places the body on the line through the pivot along
-/// `−forward` — so the centre ray (which passes through the pivot) hits the committed point, the
-/// white reticle lands on it, and a fresh RMB-up commit re-picks the SAME point. Runs only on the
-/// toggle frame; from there `orbit_look` owns the direction again. No commitment (fresh spawn — or
-/// the startup fire of `resource_changed`): nothing to re-aim at, keep the current direction.
-///
-/// `resource_changed` also fires on a Tab possession swap (SP): `swap_controlled_tank` writes
-/// `SightMode::ThirdPerson` unconditionally, and a write counts as a change even when the value
-/// stands. That fire is a no-op BY the possession invariant, not by luck: [`CommittedAim`] is
-/// keyed to the tank that last committed — always the outgoing tank — so `get` on the freshly
-/// acquired tank reads `None` and the early return keeps the camera exactly where the player left
-/// it.
+/// Invariant: the orbit pivot, camera body, and committed point remain collinear. A fresh or newly
+/// possessed tank has no keyed [`CommittedAim`], so the transition is a no-op.
 fn reaim_orbit_on_optic_exit(
     mode: Res<SightMode>,
     committed: Res<CommittedAim>,
@@ -359,12 +303,8 @@ fn reaim_orbit_on_optic_exit(
         return;
     };
 
-    // Known one-frame seam: the target rides the hull `GlobalTransform` (last propagation) while
-    // the pivot rides the root `Transform` (this frame's render pose) — exiting while driving
-    // offsets the two by up to a frame of motion (~14 cm at cruise), a sub-pixel reticle nudge the
-    // next RMB-up commit absorbs. Unifying them needs a hull pose off the root `Transform` chain,
-    // which conflicts with holding the camera `Transform` mutably here (`rig_world_pose` wants an
-    // unfiltered `Query<&Transform>`); not worth the contortion for a toggle-frame-only nudge.
+    // The target uses the propagated hull pose while the pivot uses the current rendered root pose;
+    // this view-only transition can therefore span one render frame while moving.
     let target = hull_transform.affine().transform_point3(local);
     let pivot_point = orbit_pivot(tank_transform, turret_local);
     // Fallible: a zero/non-finite span (a poisoned pose on the toggle frame) must not NaN the

@@ -1,14 +1,11 @@
-//! Shared world-anchored HUD: labels both the game and the armor sandbox reproject over the world.
-//! The systems reproject through whichever camera carries [`HudCamera`], so each binary tags its own
-//! world camera (the game's third-person/gunner camera; the sandbox's free-fly camera) and the
-//! shared code depends on neither binary's camera marker. Two readouts live here: a per-component HP
-//! label floated over each *damaged* volume, and a name nameplate floated over each tank. Both read
-//! straight from the sim, so the HUD stays a pure *view*. The controlled tank's aggregate vitals
-//! (crew, capabilities, weapons) live in its fixed corner panel (`crew_ui`), not over the world.
+//! Shared world-anchored HUD for game and armor sandbox.
+//!
+//! Invariant: labels read simulation state but never write it; each composition supplies a
+//! [`HudCamera`] rather than coupling shared HUD systems to a camera implementation.
 
 use bevy::prelude::*;
 
-use crate::net::protocol::NetBot;
+use crate::net::NetBot;
 
 use crate::ballistics::{ComponentHealth, ComponentVolume};
 use crate::damage::{Ammo, CrewStation, FunctionRole};
@@ -25,10 +22,7 @@ pub struct HudCamera;
 #[derive(Component)]
 struct ComponentHpLabel;
 
-/// A pooled nameplate floated over each tank: just the tank's display name, reprojected each frame.
-/// Reassigned to a live tank each frame. The aggregate status this used to carry (crew, caps,
-/// weapons) now lives in the controlled tank's fixed corner panel (`crew_ui`) — a floating
-/// diagnostic block over *every* tank was noise; the local crew only need their own vitals.
+/// A pooled tank nameplate, reassigned and reprojected each frame.
 #[derive(Component)]
 struct TankNameplate;
 

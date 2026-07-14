@@ -13,8 +13,8 @@
 //! - the **dynamic** half — the sim must still *run* with no netcode mounted — is proved by
 //!   `src/headless_test.rs`, which boots `SimPlugin` alone, no lightyear plugins, and drives a tank.
 //!   That is strictly stronger than "compiles without lightyear in scope".
-//! - the **static** half is this test: no module outside `net` names a lightyear type or a
-//!   `crate::net` item.
+//! - the **static** half is this test: no module outside `net` names a lightyear type or reaches
+//!   into the private `net` implementation through either `crate::net` or `overmatch::net`.
 //!
 //! Deny-by-default. Every `.rs` file under `src/` is scanned unless it is listed in
 //! [`NET_AWARE_FILES`], so a new module is guarded the moment it is created. Reaching for netcode
@@ -32,11 +32,8 @@ use std::path::{Path, PathBuf};
 const NET_AWARE_FILES: &[&str] = &[
     // The netcode layer itself.
     "src/net/",
-    // The composition root: declares `pub mod net` and mounts `NetClientPlugin`.
+    // The library facade declares the private `net` module and mounts `NetClientPlugin`.
     "src/lib.rs",
-    // The two net bins: thin shells over `net::client::run()` / `net::server::run()`.
-    "src/main.rs",
-    "src/bin/overmatch-server.rs",
     // The divergence instrument reads rollback/prediction state by design — `LocalTimeline`,
     // `Rollback`, `ConfirmedHistory`, `VisualCorrection`, `net::render_error::RenderErrorOffset`.
     // A passive observer of the netcode, never a sim dependency: it writes no sim state.
@@ -46,9 +43,10 @@ const NET_AWARE_FILES: &[&str] = &[
     "src/hud.rs",
 ];
 
-/// The tokens that constitute naming the netcode layer from outside it: the crate itself, and any
-/// path into our own `net` module.
-const NETCODE_TOKENS: &[&str] = &["lightyear", "crate::net"];
+/// The tokens that constitute naming the netcode layer from outside it: the dependency itself,
+/// an in-crate reach into the implementation, or an executable reaching through the public crate
+/// instead of using its root runtime interface.
+const NETCODE_TOKENS: &[&str] = &["lightyear", "crate::net", "overmatch::net"];
 
 /// Whether `rel` (a `/`-separated repo-relative path) is allowed to name netcode. `src/net/` matches
 /// as a directory prefix; every other entry is an exact file.
@@ -166,6 +164,12 @@ fn sim_layer_does_not_name_the_netcode_layer() {
 }
 
 #[test]
+fn product_runtime_entry_points_are_public_at_the_crate_root() {
+    let _: fn() = overmatch::run_client;
+    let _: fn() = overmatch::run_server;
+}
+
+#[test]
 fn net_aware_allowlist_has_no_stale_entries() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let missing: Vec<&str> = NET_AWARE_FILES
@@ -211,6 +215,7 @@ fn strip_comments_blanks_prose_but_keeps_code() {
     let src = "\
 //! doc naming lightyear in prose
 use crate::net::protocol::NetBot; // trailing lightyear mention
+let run = overmatch::net::client::run;
 /* block /* nested */ still comment: lightyear */
 let x = 1;
 ";
@@ -238,10 +243,14 @@ let x = 1;
         "a trailing comment is blanked"
     );
     assert!(
+        stripped.contains("let run = overmatch::net::client::run;"),
+        "an external implementation reach survives for the scanner"
+    );
+    assert!(
         !stripped
             .lines()
-            .nth(2)
-            .expect("third line")
+            .nth(3)
+            .expect("fourth line")
             .contains("lightyear"),
         "nested block comments must be blanked to their true end"
     );

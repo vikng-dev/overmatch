@@ -1,6 +1,6 @@
 [package]
 name = "overmatch"
-version = "0.3.0-alpha.4"
+version = "0.3.0-alpha.5"
 edition = "2024"
 default-run = "overmatch"
 
@@ -17,6 +17,9 @@ serde = { version = "1", features = ["derive"] }
 # The jitter-trace recorder (`src/trace.rs`) writes JSONL rows for offline analysis. Already in the
 # tree transitively (via `gltf`), promoted to a direct dependency for the recorder's use.
 serde_json = "1"
+# Lightyear 0.28 uses this exact serializer/config for registered messages. Shot transport uses it
+# to enforce an application-level pre-fragmentation serialized-message upper bound.
+bincode = { version = "2.0.1", features = ["serde"] }
 ron = "0.12"
 # The same glam Bevy already compiles (feature unification) — this only switches on its serde
 # impls, so `Vec3` can ride in the serializable `TankCommand`.
@@ -46,6 +49,12 @@ lightyear = { version = "0.28", default-features = false, features = [
     "netcode", "udp",
     "avian3d",
 ] }
+# The facade does not expose transport send/ack metadata. Shot diagnostics use this direct handle
+# to report sent-but-unacknowledged reliable messages without claiming inaccessible queue bytes.
+# This is already in Lightyear's locked dependency graph, so Cargo unifies it at 0.28.0.
+lightyear_transport = "0.28"
+# Direct visibility-filter API for owner-only combat disclosure.
+bevy_replicon = "0.41"
 
 # `dev_tools` (physics-debug gizmos + the `G`/`X`/`F` debug key bindings) is the one real compile
 # gate: default-on, decoupled from `debug_assertions` so an optimized playtest build can still carry
@@ -63,16 +72,10 @@ lightyear = { version = "0.28", default-features = false, features = [
 [dev-dependencies]
 lightyear_sync = "0.28"
 lightyear_core = "0.28"
-# The input-buffer-wrap tripwire (tests/net_input_buffer_wrap.rs) pins the §7 connect-hang
-# degenerate (`build_from_input_buffer`'s unclamped negative-range wrap) that
-# `drop_stranded_input_buffer` in src/net/client.rs guards against.
+# The input-buffer-wrap tripwire (tests/net_input_buffer_wrap.rs) pins two safe enablers of the §7
+# connect hang. It never invokes the encoder's unbounded negative-range loop.
 lightyear_inputs = "0.28"
 lightyear_inputs_native = "0.28"
-# Measures the ACTUAL input-message wire cost (`input_message_wire_cost`, net/protocol.rs): lightyear
-# serializes with `bincode::serde::encode_into_std_write(.., bincode::config::standard())`
-# (lightyear_serde registry.rs:175), so measuring with the same crate + config is measuring the wire,
-# not a model of it. Already in the tree via lightyear_serde — cargo unifies it, no new build.
-bincode = { version = "2.0.1", features = ["serde"] }
 
 [features]
 default = ["dev_tools"]

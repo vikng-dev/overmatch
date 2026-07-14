@@ -1,92 +1,115 @@
-# Fire replication architecture: state is truth, events are cosmetics, delivery is never load-bearing
+# Shot replication separates trajectory presentation from authoritative consequence
 
-Opponent fire — the tracer you see leave another tank's barrel, the round that bounces off its glacis, the recoil that rocks its gun — is entirely cosmetic. Damage is server-authoritative ([[0016-replicate-causes-derive-consequences]]); a shell an observer flies deposits no HP and applies no impulse ([[0014-sim-view-split]], the `ClientReplica` gate). So the whole opponent-fire seam is built on one commitment: **a client's picture of another tank's fire is reconstructed from a few loss-tolerant events, and its *correctness* — where the round is, whether it hit — is carried by replicated state, never by whether an event arrived.** This ADR states the three invariants that follow, the `ShotId` spine that ties the messages together, and how the fail-closed guard and the bounce keyframe compose rather than fight.
+The authority resolves every projectile contact, penetration, ricochet, and damage result. A
+client may predict its own firing response immediately, but no transient shot message grants
+gameplay authority. Replicated combat state remains the durable result; shot messages explain and
+present discrete causes and confirmations.
 
-The shipped-game canon this rests on is annotated at the end; each invariant names its receipt inline.
+## Identity and source facts
 
-## The three invariants
+`ShotId { CombatantId, weapon, fire_tick }` is constructed with the shell at spawn. The current
+weapon mechanism emits at most once per weapon slot per fixed tick; that invariant makes the tuple
+unique. A future mechanism that can emit twice from one slot in one tick must widen `ShotId` before
+shipping.
 
-**1. No discrete action on extrapolated input.** Firing consumes ammunition and deals damage — a discrete, irreversible consequence. Extrapolation (holding a remote's last input when the next is missing) is for hiding *movement* latency, not for committing discrete state. When lightyear's native input holds a released trigger under packet loss, the automatic-fire *level* is failed **closed** on the extrapolated tick, and the fire *edge* is dropped, so a lost release cannot cycle one extra server round (`bridge_action_state_to_tank_command`). This is Overwatch's rule (predict-everything for feel, never commit ammo/damage on unconfirmed input) and GGPO's (a predicted input is a guess to be undone, not a fact to act on). The repair for the loss itself is redundancy, not reliability — invariant 3.
+`FireShell` carries `FireMechanism` from the spawn-ready weapon specification. Transport policy is
+therefore selected from simulation data present at spawn, never inferred later from caliber, VFX,
+an asset, or a replicated entity's eventual components.
 
-**2. No observer-improvised collisions.** A ricochet's outcome depends on the exact pose of the surface it hits *on the server*. A client re-simulating that bounce against an interpolated, ~100 ms-stale, non-authoritative pose diverges — the round wanders off where the authoritative shell never went. "Observer" here means *any client viewing a non-authoritative surface* — the shooter included: the target's hull is interpolated on the shooter's screen too, so an owner-side improvised bounce would be just as wrong. So a client's deterministic local flight is honest **only up to the first surface**. Past it, the client either renders the server's *actual* bounce (a replicated significant point) or renders nothing improvised. This is Unreal's "other players see only the server-replicated projectile" (the predicted copy does no collision) and Halo's grenades-as-replicated-object-state; it is [[0017-mutual-contact-resolves-on-the-authority]] applied to the shell-vs-plate interaction — the surface pose is not ours to resolve.
+## Delivery classes
 
-**3. Correctness from state, cosmetics from events, delivery never load-bearing.** A dropped fire event costs a missing tracer; a dropped keyframe costs a truncated trail. Neither can cost a wrong hit, because the hit is absorbing and replicated (`NetCrew`). This is Halo's model exactly — "please fire my weapon" / "this weapon was fired" ride the *unreliable Events* protocol and the game "degrades gracefully rather than stalling" under bandwidth pressure. Making the cosmetic channel reliable to stop tracer loss is the canon anti-pattern (head-of-line blocking on stale effects); the fix is redundancy on an unreliable channel plus receiver tolerance.
+| Fact | Delivery | Reason |
+|---|---|---|
+| Automatic-weapon `FireEvent`, `RicochetKeyframe`, `ImpactConfirm` | `FireVisualBatch` on `UnorderedUnreliable` | Frequent presentation may expire; it must not create reliable cosmetic debt. |
+| Single-shot `FireEvent`, `RicochetKeyframe`, `ImpactConfirm` | Individual message on `UnorderedReliable` | A cannon's start and post-bounce trajectory are sparse, legible events worth repairing. |
+| Owner-private `DamageConfirm` | Individual message on a separate `UnorderedReliable` channel | An authority-confirmed damaging action must reach its shooter exactly once and must not disclose target internals to observers. |
 
-## The `ShotId` spine
+Automatic facts live in per-combatant queues and are admitted round-robin into bounded batches.
+Current-tick facts outrank older repair copies when the admission budget saturates.
+Each fact is eligible for up to three admission opportunities and expires after 16 authority
+ticks. Under saturation, a fact can expire before its first opportunity or after only some repairs;
+the persisted producer cursor prevents the same producers from always winning, and a smaller repair
+may use residual budget after a larger fresh fact is refused. Batches use a serialized worst-case
+upper-bound cap of 1,100 bytes and a four-batch per-tick admission budget. All four values are
+**DERIVED STARTING DEFAULTS**, not measured product limits. The cap sits below Lightyear 0.28's
+**DERIVED 1,156-byte** unfragmented-message ceiling. The sizer includes the **DERIVED four-byte**
+maximum message ID and Bevy's **MEASURED nine-byte** encoding of a Lightyear recipient-mapped
+entity; `Entity::PLACEHOLDER` is not a valid worst case.
 
-One shot is `(shooter, weapon slot, fire tick)` — a `ShotId`. It is the correlation key every shot-scoped message shares, and it is deliberately **net-neutral** (a crate-root type with a plain `u32` tick, not lightyear's `Tick`) so the always-runnable sim layer can key a cosmetic shell on it without naming the netcode — the `tests/net_boundary` contract that keeps single-player a runtime mode rather than a compile variant. `net::protocol` converts to/from `Tick` at the wire boundary.
+At 64 Hz, the four-batch admission ceiling is a **DERIVED 281,600 application bytes/s per public
+recipient** before Lightyear packing. This is a shot-visual work bound, not an observed link rate or a
+whole-connection bandwidth reservation; reliable outcomes, replication, acknowledgements, and
+control traffic sit outside it.
 
-Three properties earn their place:
+The authority captures the owning connection when a shot fires. A later damage receipt targets
+only that owner and contains stable shot identity plus the authority damage tick—no target entity,
+HP amount, crew state, or module state. Public and private facts never share a recipient boundary.
 
-- **`fire_tick` is load-bearing, not decoration.** An automatic weapon fires the same `(shooter, weapon)` every few ticks; without the tick, every round of a burst shares one id and the redundancy dedup (invariant 3) would collapse the whole burst to a single tracer. It is strictly increasing per weapon, which the dedup relies on.
-- **Derived, not carried.** `FireEvent` exposes its `ShotId` by accessor over the fields already on the wire (`shooter`, `weapon`, `fire_tick`) — zero extra bytes, and the id can never disagree with the geometry it names. `RicochetKeyframe`, which has no geometry of its own to derive from, carries the `ShotId` as a field.
-- **Every machine stamps it on the local shell** (`ballistics::Shot`). An observer builds it from the wire; a *locally-fired attributed* shell — the server's authoritative round AND the shooter's own predicted round, neither of which can read the tick in the sim layer — is completed after spawn by the shared `net::protocol::stamp_shot_ids` from the shell's `ShotSource` plus the timeline. The stamp yields the *identical* id on every machine: prediction is tick-indexed (both ends run `fire` for tick T with the input for tick T — a late input is dropped, never fired late, so if the server fires at all it fires at T), and the keyframe's entity-mapped `shooter` resolves to the same local root `ShotSource.tank` named at fire time. A shell with **no** `Shot` (SP/sandbox — no wire; an unattributed shot) is not keyframe-eligible and fail-closes immediately at armor contact.
+Lightyear's configured channel priority fields are not an enforced bandwidth policy while its
+bandwidth limiter remains disabled. Separate channels currently provide delivery and disclosure
+seams, not a claimed cross-channel scheduler guarantee. Enabling Lightyear's post-packing token
+bucket is blocked on a representative whole-link baseline: it would also cap replication and can
+delay a quota-rejected reliable packet until its normal resend interval. No arbitrary quota is a
+correctness default.
 
-This is the same match-id discipline Unreal uses (a client-local `uint32` pairing predicted to replicated), generalised to a first-class type so future shot-scoped messages — an impact confirm, say — reuse it rather than inventing a parallel key.
+## Receive rules
 
-## The shot state machine: fail-closed, keyframes, and the terminal confirm compose
+- No receive rule infers causality from cross-channel arrival order. `ShotId`, ricochet sequence,
+  and `after_bounces` carry the ordering facts.
+- A fire whose mapped shooter root is not ready waits in a bounded `ShotId` queue. It resolves only
+  to an exact agreeing entity mapping or one unique live `CombatantId`; ambiguity fails closed.
+- Ricochet and terminal facts enter the sanctioned-outcome buffer without waiting for a shooter
+  entity. A received ricochet re-seeds the cosmetic shell from the authority's post-bounce state.
+  Each shot stores at most **DERIVED 100 bounces**, matching the maximum reconstructible segment
+  count; excess distinct outcomes fail closed and are traced as capacity drops.
+- Visual batches are deduplicated within their bounded presentation horizon. The **DERIVED
+  2,048-entry** fire ledger exceeds the 1,200 distinct IDs accepted across 100 ticks at the current
+  30-combatant, dual-750-RPM load envelope. Owner-private damage
+  receipts remain deduplicated for the whole connection identity scope and are cleared on a new
+  connection. An explicit Battle epoch in `ShotId` is a blocking prerequisite for any session flow
+  that keeps one connection alive across Battles; match-local ids may not be reused before it exists.
+- A cosmetic shell that reaches armor without a sanctioned outcome holds invisibly for a bounded
+  interval, then dissolves. It never improvises the authority's result.
 
-Before this slice the client march already did the honest thing at armor contact: stop dead, neutral spark, truncate the trail (the `!deposit` guard — invariant 2, before we had a way to show the real outcome). This slice **upgrades that guard without replacing it**, for *every* `Shot`-carrying shell a net client flies — an observer's replica **and the shooter's own predicted round**. The shooter is the one player who most needs the fall-of-shot read (the gunnery loop this game is built around); their shell holds and resolves exactly like an observer's, because both live on the same predicted-present timeline and carry the same id.
+## Evidence and remaining tuning
 
-**A shot now ends in exactly one of three states, and every armor visual a net client renders is server-sanctioned:**
+`net::shot_transport` exposes enqueue, application-send acceptance, expiry-before-first-opportunity,
+expiry-after-partial-repair, fresh/repair budget refusal, deferral, batch-size, route-conflict, and
+error counters. For the two reliable shot channels it also records the sum of per-link messages that
+Lightyear has actually sent but not acknowledged, their greatest first-send age, and count high-water
+marks. It does not claim bytes, application facts accepted but not yet packed, or delivery. The same
+gauges are written to an armed shot trace whenever their summary changes.
 
-1. **Terrain stop (client-local).** Static, pose-independent geometry — both ends already resolve it identically, so terrain never confirms and never holds.
-2. **Confirmed armor terminal (`ImpactConfirm`).** The server broadcasts the shot's END on armor — embed or perforation — mirroring its own `Impact` read: position, normal, and the `penetrated` verdict that gates the flame lick. The client resolves at the *server's* position with the full honest armor read the moment it arrives (or instantly at contact if pre-armed) — MP now gets the SP-grade penetration feedback, ~one-way latency late instead of window-late, and the neutral spark is no longer the common armor read.
-3. **Quiet dissolve (the lost-verdict fallback).** Only when *no* sanctioned outcome exists for the shot past the grace window: the shell ends **silently** — despawned, its trail simply stopping, **no spark**. A held shell that never got a verdict is one of two things and the client cannot tell which: a genuinely *lost* verdict (the server did resolve this contact, but every redundant confirm/keyframe dropped) or a pose-divergent *miss* (this client contacted a plate the server's round sailed past — the interpolated target pose differs at grazing geometry). The pre-slice fallback fired a *neutral spark* here, but in the miss case that spark asserts a contact the authority never resolved — fabricated geometry/verdict, the exact thing invariant 2 and the honesty doctrine forbid (`no fake viewer assistance: effects real-scaled to shell power + surface`). So the honest degradation is silence, not a fabricated spark. **F3(ii) decision (2026-07-12):** end the shell with a quiet dissolve. Correctness never depended on delivery — invariant 3 — and a server-confirmed contact whose verdict merely arrived *late* is still shown, by the pre-armed/hold paths or the tick-triggered consumption below; only a shot with truly no sanctioned outcome dissolves.
+`net::shot_loss` exercises production protocol registration over real loopback UDP with seeded loss,
+delayed observer delivery, correlated receive-window loss, mixed single/automatic trajectories,
+private damage confirmation, late-join disclosure checks, and a **DERIVED 30-combatant ×
+two-weapon** same-tick volley. Its 30-receiver probe adds a **DERIVED one-second 768-RPM-per-slot**
+automatic stream and injects one reliable cannon plus owner-private damage during contention.
 
-Ricochets are the non-terminal transition: a `RicochetKeyframe` re-seeds the shell through the bounce and it flies on toward one of the three ends. The composition at armor contact, in resolution order:
+**MEASURED on 2026-07-13:** repeated local runs presented all 1,800 volley receiver/shot pairs
+exactly once at 10% configured inbound loss, delivered the contended cannon fire exactly once to all
+30 receivers, and delivered its damage receipt once to its owner and to no observer. One run took
+4.05 seconds; the slowest cannon presentation completed after 44 harness orchestration steps. Raw
+counters remain opaque Lightyear link payloads—including control, acknowledgements, and
+replication—not per-shot bytes or IP/UDP headers.
 
-- **Hold (the expected first-contact path).** Every client shell lives at the predicted present P, *ahead* of server-now S — the shooter's natively, an observer's via the `fire_tick` catch-up — so it reaches the plate at local tick ≈ the server resolution tick B, which occurs wall-clock (P − S) ticks *before* the server resolves the contact; the keyframe/confirm then needs one-way latency to arrive. Expected hold ≈ (P − S) + OWL ≈ 4–8 ticks at droplet RTT. The shell freezes **hidden** at contact (invisible-stop: no impact VFX, no frozen round hanging on the plate — the shooter is watching this one) for a bounded grace window (~250 ms of ticks). Whichever sanctioned outcome arrives resolves it: a bounce keyframe re-seeds and re-shows the shell, **re-aged forward by exactly the ticks it held** — contact happens at local tick ≈ B and the present advances one tick per held tick, so the hold count *is* `present − bounce_tick`, the exact catch-up the shared integrator (`fast_forward_shell`) applies; a terminal confirm resolves the shell at the server's read immediately. Identical arithmetic for the shooter's shell and an observer's; the sim needs no clock reading to compute it.
-- **Pre-armed (opportunistic).** If the verdict *has* already arrived when the shell reaches the plate — a late contact from target-motion pose lag or a frame hitch, or a later event of a multi-bounce shot — it resolves inline without ever holding: a bounce re-seeds (the bounce point pushed onto `ShellPath` and `PenetrationMarks::ricochets` so the trail ribbon and tracer-clamp anchor continue *through* it, the ember riding the same entity untouched); a terminal reads and finalizes. Allocation-free either way. **Asymmetry, accepted (F5):** unlike the hold path, the pre-armed re-seed does NOT re-age — it resumes from `bounce.origin` with only the current tick's leftover march budget, so a late contact leaves the shell `(contact_tick − B)` ticks *behind* the present (it catches up over subsequent ticks, not instantly). This is bounded by the contact lateness (small — the pre-armed case is a *late* contact by definition, seldom more than the interpolation delay), so the "identical arithmetic, no branch" claim is a slight simplification: the hold path re-ages by its hold count, the pre-armed path by zero. `bounce_tick` rides the wire (and is now on the buffer) precisely so a future exact path can re-age the pre-armed re-seed by `present − bounce_tick` too.
-- **Tick-triggered (the pose-divergent MISS — F3).** The pose the client flies its shell against is interpolated (~100 ms stale); where it differs from the server's at grazing geometry — exactly where ricochets live — the client shell can sail *past* the plate the server's round resolved on and **never contact**. It then neither holds nor pre-arms, so its sanctioned bounce/terminal would age out unconsumed while the observer watches the round fly on through where the authoritative round bounced or terminated (the divergence invariant 2 kills, resurrected by sub-metre pose lag). So consumption is also **triggered by the clock, not only by a ray**: once the predicted present P (republished to the sim each forward tick, `PredictedPresent`) has passed the outcome's server tick (`bounce_tick` / `impact_tick`, both now carried net-neutral on the sanctioned buffer) by a small margin (`OVERDUE_MARGIN_TICKS` ≈ 6, sized to clear normal contact slop) without a local contact, the march re-seeds at the server bounce (re-aged `present − bounce_tick`, the same integrator the hold path uses) or finalizes at the server impact with the honest read. Symmetric to the hold path — same truth, different trigger. **This is the seam a future non-contact outcome slots into**: an airburst-HE detonation has no armor contact at all, and resolves through exactly this tick/position-triggered point rather than needing a new path.
-- **Truncate (the fallback).** Past the window with no verdict at all, the shell degrades to the quiet dissolve (state 3 above) — not a fabricated spark.
+**MEASURED on 2026-07-14:** a late-joining observer received the existing root's public status with
+zero `NetCrew` and zero `NetBelts` arrivals, including transient component additions. A correlated
+six-receive-update loss window contained all three server-traced copy opportunities, dropped six
+opaque payloads, produced zero presentations for the covered automatic shot, and the following
+automatic shot recovered exactly once. The 30-receiver probe also observed nonzero
+sent-unacknowledged high-water marks for both reliable channels and both gauges returned to zero
+after its settlement window. These are local-loopback harness results, not a production Internet
+envelope.
 
-**Ordering across a shot's events** is by construction, not luck: bounces carry a `sequence` ordinal consumed strictly in order, and the terminal carries `after_bounces` — the client consumes it only once its shell has re-seeded through that many bounces, so a terminal can never resolve a shell at the wrong plate while a bounce keyframe is merely late. At most one terminal per shot is structural: the authority strips the shell's `Shot` after emitting (plus a same-tick guard), so post-terminal interior events emit nothing.
+The exact automatic copy count, expiry, visual density, and failure presentation remain playtest
+and network-measurement decisions. Per-recipient visual interest and an enforced aggregate
+whole-link bandwidth budget remain acceptance work before claiming a production 30-player network
+envelope; gameplay-visible tanks may not be hidden as an optimization.
 
-**Perforation is a terminal for the cosmetic shell — the documented choice.** On the authority a perforation reads the struck plate at the entry face (`penetrated: true`) and the shell then continues *into the tank interior* — invisible from outside; only a rare far-side overpenetration re-emerges. A client shell cannot march that interior (interpolated volumes — invariant 2), and what an external viewer of the authority sees at the plate IS the entry-face read. So the cosmetic shell ends at the confirmed read; the interior transit and the rare far-side exit are not shown on MP clients (a future continuation field on `ImpactConfirm` can upgrade that). The *authoritative* shell is untouched — it marches on, interior damage and all.
+## Related
 
-The authority march (server, SP, sandbox) is otherwise completely unchanged: it resolves contacts for real and, on the authority, raises the sim-layer `ShellRicochet`/`ShellTerminal` that `net::server` maps onto the wire (`ADR-0016`: replicate the *cause*; every client derives the resolution). This keeps ballistics free of any netcode name — the sanctioned-shot buffer, `Shot`, and `ShotId` are all net-neutral crate-root/sim types the net layer fills and the march consumes.
-
-## Redundancy, not reliability
-
-WAN loss of a *cosmetic* stream is repaired the input-redundancy way (Overwatch's sliding window: every packet re-sends recent frames so one delivered packet repairs a burst of prior losses). A `FireBurst` envelope carries the recent fire events, ricochet keyframes, **and** impact confirms; the channel is now sequenced-unreliable, so a newer burst supersedes an older one and each burst carries the whole current window — dropping a stale or reordered burst loses nothing the next re-carries, at no acks/retries/head-of-line cost.
-
-**The window is sized by TIME, not by a per-stream count (F4).** An earlier depth-4 ring was a single *global* ring across all shooters, so k simultaneous tanks divided each event's survival window by k — at two MGs a depth-4 ring covers only ~120 ms, inside a routine WAN burst loss ("tracers vanish in big fights"). Retention is instead by age: every entry younger than `FIRE_RETAIN_TICKS` (≈ 20 ticks / ~312 ms, tuned to cover the consumer's ~250 ms grace window plus send jitter) rides every burst, independent of how many other shooters are firing. A defensive per-stream cap (`FIRE_WINDOW_MAX`) bounds a burst's size under a pathological fire rate; a duel never approaches it. The prune is trivial — the wire already carries each stream's tick (`fire_tick` / `bounce_tick` / `impact_tick`), so nothing new rides the wire and `PROTOCOL_REV` is unchanged.
-
-**And the window is broadcast by the CLOCK, not by new traffic (F8).** Retention is not redundancy: an entry is only *re-sent* if a burst actually goes out while it is still retained. The first cut drove the send from the events themselves — one burst per fire/ricochet/terminal — so the resends an entry got were exactly the events that happened to FOLLOW it inside the window, and the redundancy therefore scaled with the shooter's *fire rate*. At the bottom of that scale it vanished: the 88 is `Single(reload_secs: 3.0)`, one shot per ~192 ticks (≈10× the window), and a ricochet's deflected round ends in *terrain*, which never confirms — so an isolated bounce keyframe was followed by nothing at all and rode **exactly one datagram**. One dropped packet lost the carry-through outright and the observer's shell quietly dissolved at the plate; the identical hole cost an isolated 88 armor hit its `ImpactConfirm` (and post-F3 that degrades to a *silent* dissolve — no spark at all — on the observer AND on the shooter's own shell). The MGs, firing a round every ~5 ticks, re-carried their keyframes on the ~4 fires that followed and so effectively never lost one: same code, same window, 5× the loss resilience purely because the gun cycled faster. That asymmetry is exactly what the owner saw — "the second client does not always see the post-bounce shell", on the 88. The window is now sent on every tick it is non-empty (`broadcast_fire_window`, the single send site; the event observers only push), so every entry gets its full ~312 ms of resends whatever fired it. It costs nothing between shots — the window is empty, and nothing is sent — and in the *busy* case it is a reduction, since the old path sent one full burst per event and this sends at most one per tick however many events land on it.
-
-Two decisions fall out:
-
-- **Sent to `All`, deduped at the receiver** — by `ShotId` for fires (spawn each shell exactly once), by `(ShotId, sequence)` for keyframes, by `ShotId` alone for confirms (at most one terminal per shot; the buffer inserts are idempotent, terminal first-wins). This is what lets *one shared burst carry multiple shooters' events correctly*: an `AllExceptSingle(owner)` target could not, because a burst re-carrying shooter B's fires must still reach owner A, yet must not double A's own. The `locally_fired` guard drops a client's own **fire** echoes (a fire echo would duplicate the shell); it deliberately does **not** touch keyframes or confirms — those spawn nothing, they resolve an existing shell, and the shooter's own shell is a consumer. The `All` target is in fact *required* by the own-shell carry-through.
-- **Reliability is reconstructed from state, never bought with a reliable channel.** The reliable path already exists for the facts that need it — `NetCrew` (health/death) and `NetBelts` (ammo). The cosmetic streams stay unreliable and lean.
-
-## Costs, named not buried
-
-- **Armor-contact reads on a net client arrive ≈ one-way latency late.** Every `Shot`-carrying shell holds hidden at the plate until its confirm/keyframe arrives — ≈ (P − S) + OWL ≈ 4–8 ticks (~60–125 ms) at droplet RTT — and only a shot with a genuinely LOST verdict pays the full ~250 ms window before the quiet dissolve. The invisible-stop hides the wait (the shell vanishes at contact rather than hanging frozen), so the visible symptom is a slightly late — but now penetration-honest — armor read. Terrain hits are unaffected (both ends stop identically at static geometry, no hold, no confirm).
-- **A shooter's re-seeded round jumps.** On re-seed the shell reappears already downrange of the bounce (re-aged to the present); at the hold durations above that is metres, read as a fast round exiting the bounce — honest, since the server's round *is* there.
-- **The interior transit is not shown.** A perforating round's client shell ends at the entry-face read; interior crossings, interior spall, and the rare far-side overpenetration exit render only on the authority. Deferred, not forgotten (a continuation field on `ImpactConfirm`).
-- Redundancy costs bandwidth: each event re-rides every burst for `FIRE_RETAIN_TICKS` worth of ticks, and (since F8) a burst goes out on every one of those ticks. The window is EMPTY — zero sends — whenever nothing has been fired in ~312 ms, which is most of a match, and an isolated 88 shot costs ~60 small datagrams (~3.5 kB) across its whole fire→bounce→impact life. The peak is sustained MG fire, where the window holds a handful of ~50-byte structs and the burst goes out at the tick rate: ~20 kB/s per client at one MG, ~38 kB/s with both tanks firing (against ~4–15 kB/s under the old event-driven send — the busy case is only ~2.5–5× dearer, because the old path sent a *full* burst per event). Hard-capped by `FIRE_WINDOW_MAX`. Both `FIRE_RETAIN_TICKS` and a resend *cadence* (send every Nth tick rather than every tick) are available knobs if that peak ever matters; neither is needed at 1v1.
-- **The consumer's grace window, not the retain window, bounds the redundancy a bounce can USE.** The shell dissolves after `RICOCHET_HOLD_TICKS`, so only the copies broadcast in the first `RICOCHET_HOLD_TICKS − ((P − S) + OWL)` ticks after the bounce can still be consumed — ~8–12 of them at droplet RTT, but *shrinking as RTT grows*, and closing entirely at RTT ≈ 200 ms (where the first arriving copy is the only one that can land, and a single loss is again fatal to the carry-through). Sizing `RICOCHET_HOLD_TICKS` from measured RTT is the fix if high-latency play becomes a target; at droplet range the redundancy is the binding term and it is now ample.
-- The re-aging equates the hold count with `present − bounce_tick`. The equality is exact to within the target's motion over the interpolation delay (sub-metre at tank speeds) — within the integration tolerance the carry-through test asserts. `bounce_tick`/`impact_tick` ride the wire and are now carried net-neutral onto the sanctioned buffer: the hold/pre-armed re-age still uses the hold *duration* (which equals `present − bounce_tick`), while the tick-triggered miss path compares the predicted present against the tick directly (they still back a future RTT-adaptive re-age too).
-- **A pose-divergent miss is now consumed, not left divergent (F3).** If the client's shell sails past a plate the server's round resolved on (interpolated target pose differs at grazing geometry), the tick-triggered path re-seeds/finalizes it at server truth once P passes the outcome tick by `OVERDUE_MARGIN_TICKS`, instead of the round flying on through. The residual is a bounded fly-past (up to the margin ≈ metres) before the snap-to-truth, and the reverse case — the client contacts where the server's round missed — has no sanctioned outcome and ends in the quiet dissolve (state 3), no fabricated spark. Both cosmetic, both bounded by the interpolation delay, accepted.
-
-## What this ADR does not say
-
-It does not say observers should predict opponent fire. They interpolate other tanks ([[0017-mutual-contact-resolves-on-the-authority]]); the shell is a cosmetic reconstruction co-indexed with the client's *own* predicted present, not a prediction of the opponent. It does not make any cosmetic stream reliable. And it does not move the wire skew guard — `FireBurst`, `RicochetKeyframe`, `ImpactConfirm`, and `ShotId` are pinned into `WIRE_SURFACE`/`WIRE_TYPES_HASH` and refused on mismatch exactly like every other wire type ([[0018-wire-surface-fingerprinted-and-refused]]); this slice bumped `PROTOCOL_REV` 3 → 4 once, all three pieces plus the terminal inside the same break.
-
-## Roads not taken, and one plan hole to keep open
-
-- **Observer shells on the INTERPOLATED timeline (I), not the predicted present (P).** Spawning an observer's cosmetic shell on the same interpolated timeline the target tank renders on would make keyframes/confirms arrive *before* contact (no observer hold at all) and would fix the tracer-leaves-the-muzzle-downrange artifact against the I-rendered shooter hull. It is a real alternative. The stated benefit of P-alignment — dodge-honesty of the round against your *own* hull — is nearly worthless for an undodgeable ~800 m/s round, so that is **not** the actual reason. The real reason is **unification**: the shooter's OWN shell must live at P regardless (it is co-indexed with the shooter's own predicted hull), so putting observer shells at P too gives *one* timeline, *one* integrator, *one* hold/re-seed/tick-triggered arithmetic for own and observer shells alike — the hold machinery does not disappear on the I-timeline, it just gets rarer, at the cost of a second code path. We keep P-alignment for the unification, not the dodge read.
-- **`FireEvent` must SURVIVE the predict-everyone change — do not delete it.** An earlier plan note said `FireEvent` gets "deleted outright" once every tank is predicted (each client would run `fire` for every tank locally and spawn its own shells). That has a hole: a predicted remote tank under input STARVATION fails the automatic-fire level closed (invariant 1) and fires *nothing* locally, while the server — which had the input — *does* fire. Without `FireEvent` as the fallback, that shot is invisible on every client. So `FireEvent` stays as the starvation-fallback tracer even under predict-everyone; the `locally_fired` guard (semantic, on `ActionState`) already drops the echo for tanks that DID fire locally, so keeping the event costs a redundant tracer only in the exact case a local prediction produced none.
-
-## Canon receipts
-
-- **Halo: Reach — David Aldridge, "I Shot You First," GDC 2011.** Weapon fire rides the *unreliable Events* protocol ("unreliable notifications of transient occurrences"); under bandwidth pressure the prioritiser drops them and the game degrades gracefully. Grenades — bouncing projectiles — are replicated as *object state with continuous updates*, not fired-and-forgotten. Invariants 2 and 3.
-- **Unreal network prediction for projectiles — Steve Streeting, 2024.** Owner fires a predicted actor + a Server RPC; a client-local `uint32` match id pairs predicted to replicated; the server actor owns collision and impact, the predicted copy does none, and **"other players see only the server-replicated projectile."** The blueprint for invariant 2 and the `ShotId` spine.
-- **Overwatch — Tim Ford, GDC 2017.** The sliding input window ("bundles every input since the last server-acknowledged state") and predict-everything-then-reconcile; ammo/cooldown are server-authoritative and correct the client. Invariants 1 and 3.
-- **Gaffer On Games — Glenn Fiedler, *State Synchronization*.** On a correction "snap the physics state hard"; bounces are the significant points where local re-sim diverges, so replicate them rather than re-derive. The re-seed-from-truth shape of the keyframe upgrade.
-- **Rocket League — Jared Cone, GDC 2018.** Extrapolated remote input is *decayed by age* to zero over a few frames — a held value is never held forever. The fail-closed rule of invariant 1.
-
-## Related decisions
-
-[[0014-sim-view-split]] (cosmetic shells are view over sim state) · [[0015-divergence-doctrine]] (netcode as removable scaffolding) · [[0016-replicate-causes-derive-consequences]] (the keyframe replicates the cause; recoil derives) · [[0017-mutual-contact-resolves-on-the-authority]] (the surface pose is not the observer's to resolve) · [[0018-wire-surface-fingerprinted-and-refused]] (the new messages are pinned and refused on skew).
+[[0014-sim-view-split]] · [[0015-divergence-doctrine]] ·
+[[0016-replicate-causes-derive-consequences]] ·
+[[0017-mutual-contact-resolves-on-the-authority]] ·
+[[0018-wire-surface-fingerprinted-and-refused]]

@@ -1,6 +1,14 @@
 # Sim/view split: the tank is built from data at spawn, the glb is a view
 
-The tank's sim body — servo frames, wheel stations, collision hulls, armor trimeshes, `Rig`/`TankSim`/indices, mass properties — is now built **synchronously at spawn, from extracted data** (`bake::TankGeometry`), on every spawn path. The glb scene is no longer the sim's constructor; it is a **view** that attaches whenever it loads and only renders (`tank::bind_tank_view`). This dissolves the tank's two-phase birth — the single architectural mismatch behind a run of netcode bugs — by making the whole sim state exist the tick the entity spawns. It graduates phase 1 of `design/sim-view-split-and-tank-bake.md`; phase 2 (the offline bake) remains that sketch's to own (see *Deferred*). Inherits the spec-driven *declaration* model of [[0012-spec-driven-rig-binder]] and supersedes only its runtime-join *mechanics*; extends the fail-fast lineage of [[0010-per-variant-data-in-ron]] / [[0011-required-model-contract-fails-fast]].
+The tank's sim body — servo frames, wheel stations, collision hulls, armor trimeshes,
+`Rig`/`TankSim`/indices, and mass properties — is built synchronously from extracted data
+(`bake::TankGeometry`). Authority and analytical routes create the root and complete body together
+through `tank::spawn_complete_tank`. The GLB is only a view that may attach later.
+
+One explicit violation remains: the network client receives a replicated root first and calls
+`tank::attach_replicated_tank_body` after its wire pose arrives. That path is asset-independent and
+assembles the body in one flush, but it is still late rollback-state attachment. The debt and its
+required spawn-intent/ack evidence are tracked in the root `ARCHITECTURE.md`.
 
 ## The problem: the tank was born twice
 
@@ -15,13 +23,19 @@ That is one architectural mismatch surfacing five ways, not five bugs. Neither r
 
 ## The standing rule (tier 2)
 
-*Nothing rollback-registered may be initialized from an asset or inserted late onto a replicated entity — sim state must be constructible at spawn, synchronously, from data.* This ADR is the architecture that makes the rule **structural** rather than disciplinary: with the sim body built from `TankGeometry` at spawn, the rule holds by construction for all existing state. It is also recorded in AGENTS.md as standing working discipline.
+*Nothing rollback-registered may be initialized from an asset or inserted late onto a replicated
+entity — sim state must be constructible at spawn, synchronously, from data.* Complete construction
+makes this structural for authority and analytical routes. The replicated-client exception above
+does not weaken the target; it names the remaining work honestly.
 
 ## The architecture
 
 **Extract once, as pure data.** `bake::extract_tank_geometry` parses the tank's `.glb` **as data** — the `gltf` crate against the file, no Bevy scene, no asset dependency — into `TankGeometry`: every node's name, parent, local transform, root-relative pose, and (for sim-consumed meshes) raw vertex/index buffers. It runs at startup into a resource. The same function is phase 2's offline-compiler core: one parser, two mounting points.
 
-**Spawn the complete sim body synchronously.** `tank::spawn_tank_sim` builds the entire sim from `TankGeometry` in the root's spawn flush, on every path (SP at spawn, server at connect-spawn, client the tick the replicated root's **pose** lands — `attach_replicated_rig` gates on replicated `Position`/`Rotation`, which can trail the root's markers by a few frames on a cold join; that pose gate is the one gate that remains, and it is lightyear's own replicated-state arrival, not an asset):
+**Construct the complete sim body synchronously from data.** `tank::spawn_complete_tank` creates
+normal roots and queues the private body assembler in the same command batch. The client exception
+uses `tank::attach_replicated_tank_body` only after replicated `Position` and `Rotation` exist; view
+asset readiness is not an input to either constructor.
 
 - servo frames carrying `ServoRest` (the rest quaternion is spawned from data — it used to be lazily captured on the first tick, the field the `ConfirmedHistory` bug corrupted), wheel stations, and collider nodes;
 - **collision hulls** via `Collider::convex_hull` (≡ the old `ConvexHullFromMesh` at the parry call level — it ignores indices) and **armor trimeshes** via `trimesh_with_config` with `MERGE_DUPLICATE_VERTICES` (≡ the old `TrimeshFromMesh`), so raw-data construction reproduces today's shapes byte-for-byte;
@@ -40,11 +54,15 @@ Missing structure is fatal here — every spec-declared node must resolve agains
 
 ## Consequences
 
-- **The bind window is dead as a sim concept.** A late glb scene is now cosmetic pop-in (~100ms), which no netcode has to care about. Every remaining mention of "bind window" / "bound rig" in comments must describe the *view* attach or be deleted.
+- **The asset bind window is dead as a sim concept.** A late GLB scene is cosmetic. The separate
+  replicated-root timing violation remains open as described above.
 - **Two same-named sibling trees under one root** (the sim skeleton and the instantiated scene), and a **per-consumer skeleton-skip** in the view walk — accepted interim costs. `bind_tank_view` must skip sim parts or it self-references `ViewOf` and stamps `Visibility` onto bare skeleton nodes. Phase 2's baked artifact removes the second tree from the sim binary entirely.
 - **Contract violations are fatal at spawn.** A spec-declared node with no matching extracted node panics immediately, with a precise message (fail-fast, [[0010-per-variant-data-in-ron]] / [[0011-required-model-contract-fails-fast]]) — a broken rig is a bug, not a degraded runtime state.
-- **Lazy captures are gone.** Servo rest, recoil rest, the camera's turret-pivot capture, the COM `GlobalTransform` read — all spawned from data now. `ServoState` shrinks to true per-tick state.
-- **`strip_confirmed_history` stays load-bearing.** On the client the sim components are still, in lightyear's eyes, inserted *mid-life* onto an already-replicated root (the pose gate means the entity exists a few frames before the sim body attaches), so lightyear still seeds `ConfirmedHistory` with their add-time values — the split fixed what the corrupted restore *did* (the lazy rest capture), not the seeding itself. Deleting the strip guard would resurrect the aim-desync class with correct-looking spawn code.
+- **Lazy captures are gone.** Servo rest, recoil rest, camera pivot, and center of mass come from
+  construction data.
+- **`strip_confirmed_history` stays load-bearing while the replicated-root exception exists.** The
+  client still inserts sim components onto an existing root, so history guards must remain until a
+  spawn-intent/ack design removes that lifecycle.
 
 ## Addendum (2026-07-06): the split now also carries rollback-correction smoothing
 

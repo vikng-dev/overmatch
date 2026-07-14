@@ -252,10 +252,11 @@ mod tests {
     #[test]
     fn ring_caps_markers_and_evicts_oldest() {
         let mut app = harness(true);
-        // Fire past the cap; the ring must hold at exactly the cap, oldest evicted.
-        for _ in 0..IMPACT_MARKER_CAP + 5 {
+        // DERIVED: overflowing the cap by five distinct points must evict those five oldest
+        // positions while the newest cap-sized suffix remains observable.
+        for index in 0..IMPACT_MARKER_CAP + 5 {
             app.world_mut().trigger(Impact {
-                position: Vec3::ZERO,
+                position: Vec3::X * index as f32,
                 normal: Vec3::Y,
                 caliber: 0.088,
                 surface: ImpactSurface::Terrain,
@@ -269,5 +270,22 @@ mod tests {
             app.world().resource::<ImpactMarkerRing>().0.len(),
             IMPACT_MARKER_CAP
         );
+        let ring = &app.world().resource::<ImpactMarkerRing>().0;
+        let first = app.world().get::<Transform>(ring[0]).unwrap();
+        let last = app.world().get::<Transform>(*ring.back().unwrap()).unwrap();
+        assert_eq!(first.translation, Vec3::X * 5.0, "oldest five were evicted");
+        assert_eq!(
+            last.translation,
+            Vec3::X * (IMPACT_MARKER_CAP + 4) as f32,
+            "newest marker survives the overflow"
+        );
+        for evicted in 0..5 {
+            let still_live = app
+                .world_mut()
+                .query_filtered::<&Transform, With<ImpactMarker>>()
+                .iter(app.world())
+                .any(|transform| transform.translation == Vec3::X * evicted as f32);
+            assert!(!still_live, "oldest marker at x={evicted} was evicted");
+        }
     }
 }

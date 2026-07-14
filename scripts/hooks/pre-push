@@ -1,7 +1,8 @@
 #!/bin/sh
-# pre-push — mirrors CI's `check` job so a green push means green CI. Compiles, so it is
-# slower than pre-commit (tens of seconds to a couple of minutes on a warm cache); it runs
-# on push, not on every commit. Bypass once with `git push --no-verify`.
+# pre-push — mirrors CI's ordinary fmt, clippy, and test lanes. It skips the isolated
+# 30-receiver stress probe, which CI runs separately with resource limits. Compiles, so it is
+# slower than pre-commit (tens of seconds to a couple of minutes on a warm cache); it runs on
+# push, not on every commit. Bypass once with `git push --no-verify`.
 #
 # Commands mirror .github/workflows/ci.yml (minus `--profile ci`, which only speeds CI's
 # cold builds — it does not change lint/test pass-fail, and omitting it reuses your warm
@@ -15,7 +16,8 @@ cargo fmt --all --check >/dev/null || { printf '\033[31m  unformatted\033[0m —
 echo "pre-push ▸ cargo clippy --locked --all-targets -- -D warnings"
 cargo clippy --quiet --locked --all-targets -- -D warnings
 
-echo "pre-push ▸ cargo test --locked"
-cargo test --quiet --locked
+echo "pre-push ▸ cargo test --locked (skip isolated 30-receiver stress)"
+cargo test --quiet --locked -- \
+  --skip net::shot_loss::thirty_combatant_volley_reaches_thirty_independent_receivers_under_loss
 
 echo "pre-push ▸ ok"

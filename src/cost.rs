@@ -1,32 +1,9 @@
-//! `SPIKE_COST_TRACE`: a per-fixed-tick SIM-COST recorder — the reusable sibling of the jitter
-//! recorder (`crate::trace`), built to answer "what does machine-gun fire cost the FixedUpdate
-//! tick?" It times the whole fixed schedule (`FixedFirst`→`FixedLast`) per tick, attributes the
-//! projectile ray-march (`ballistics::integrate_projectiles`) inside that window, and stamps the
-//! entity/projectile/tank counts so spawn-despawn churn is visible next to the compute cost.
+//! Optional fixed-schedule cost recorder, enabled by `SPIKE_COST_TRACE`.
 //!
-//! OFF unless `SPIKE_COST_TRACE=<path>` is set: the recorder resource + systems are REGISTERED
-//! only in an armed run, so an unset var costs one `std::env::var` lookup at plugin-build and
-//! nothing thereafter (same discipline as `crate::trace`). The sink path is role-qualified through
-//! the shared `trace::role_path`, so a server and client launched from one shell with the same
-//! `SPIKE_COST_TRACE` value write `<path>.server.jsonl` / `<path>.client.jsonl` and never truncate
-//! each other. It is NOT de-conflicted against the jitter recorder, though: give `SPIKE_TRACE` and
-//! `SPIKE_COST_TRACE` DIFFERENT base paths when arming both, or the two recorders role-qualify to
-//! the SAME file and tear each other's lines (measured: two independent `File::create` handles on
-//! one path → interleaved truncating writes, ~torn rows the parsers then skip).
-//!
-//! Rows (JSONL, one per fixed tick past the warmup):
-//! - `meta`  — once at Startup: `role`, `tick_hz`, `ver` (crate version), `warmup` (skipped ticks),
-//!   `mgsc` (was the experimental MG short-circuit A/B arm armed this process — see
-//!   `ballistics::MgShortCircuit`).
-//! - `tick`  — `t` fixed-tick index, `us` whole-fixed-schedule wall micros (the headline
-//!   "FixedUpdate tick time"), `mus` the `integrate_projectiles` share of it (micros), `mc` how
-//!   many times the march ran this tick (rollback replay can re-run the fixed loop), `np` live
-//!   projectile count, `nt` tank count, `ne` total entity count.
-//!
-//! Timing is wall-clock `Instant` around the fixed schedule; on a shared box it carries scheduler
-//! noise, which is exactly why the summarizer (`scripts/cost/analyze.py`) reports percentiles over
-//! a long window rather than a mean. The warmup (`SPIKE_COST_WARMUP`, default 384 ticks ≈ 6 s)
-//! drops the connect/spawn/asset-load transient so the reported window is steady state.
+//! It writes role-qualified JSONL rows for the complete fixed schedule and projectile-march share.
+//! `scripts/cost/analyze.py` consumes the rows.
+//! Invariant: use a distinct base path from `SPIKE_TRACE`; both recorders otherwise open the same
+//! role-qualified file independently.
 
 use std::time::Instant;
 
@@ -37,39 +14,31 @@ use crate::ballistics::Projectile;
 use crate::tank::Tank;
 use crate::trace::{JsonlSink, role_path};
 
-/// The open cost sink + the per-tick accumulator. Present iff `SPIKE_COST_TRACE` was set at
-/// startup ([`install`] inserts it and returns whether it did, so the recorder systems gate on
-/// that at registration time, never per-frame).
+/// Open cost sink and per-tick accumulator, present only when tracing is armed.
 #[derive(Resource)]
 pub(crate) struct CostTrace {
     sink: JsonlSink,
-    /// Fixed-tick index (own counter — monotone across the whole run, unaffected by the net
-    /// timeline's tick numbering), also the warmup gate.
+    /// Monotone recorder tick index and warmup gate.
     tick: u64,
-    /// Ticks to skip before writing rows: drops the connect/spawn/asset-load transient.
+    /// Ticks to skip before writing rows.
     warmup: u64,
     /// `Instant` captured at `FixedFirst` this tick; the whole-schedule timer's start.
     tick_start: Option<Instant>,
-    /// Accumulated `integrate_projectiles` wall-micros this tick (ballistics adds to it; a rollback
-    /// replay that re-runs the fixed loop adds again, counted by `march_calls`).
+    /// Accumulated `integrate_projectiles` wall micros this tick.
     march_us: f64,
-    /// How many times the march ran this tick (>1 only under a fixed-loop re-run / rollback replay).
+    /// Number of projectile-march calls this tick.
     march_calls: u32,
 }
 
 impl CostTrace {
-    /// Attribute `us` micros of `integrate_projectiles` compute to the current tick. Called from
-    /// `ballistics::integrate_projectiles` behind an `Option<ResMut<CostTrace>>` — inert (the
-    /// resource is absent) unless the recorder is armed.
+    /// Attribute projectile-march wall micros to the current tick.
     pub(crate) fn record_march(&mut self, us: f64) {
         self.march_us += us;
         self.march_calls += 1;
     }
 }
 
-/// Open the role-qualified sink and register the recorder systems — only when `SPIKE_COST_TRACE`
-/// is set. Returns `true` iff armed, so each composition root registers its recorders only in a
-/// traced run.
+/// Open the role-qualified sink and register recorder systems when tracing is armed.
 fn install(app: &mut App, role: &'static str) -> bool {
     let Ok(path) = std::env::var("SPIKE_COST_TRACE") else {
         return false;
@@ -98,13 +67,8 @@ fn install(app: &mut App, role: &'static str) -> bool {
         march_us: 0.0,
         march_calls: 0,
     });
-    // Meta row from Startup (not here) so `tick_hz` reads the app's actual `Time<Fixed>` timestep —
-    // matches `crate::trace`'s ordering guarantee (Startup runs before any FixedUpdate recorder).
     app.add_systems(Startup, write_meta);
-    // Bracket the whole fixed schedule: start the timer FIRST in `FixedFirst`, close it LAST in
-    // `FixedLast`. The delta is the per-tick fixed-schedule compute (FixedPreUpdate/Update/PostUpdate
-    // included) — precisely "FixedUpdate tick time" — and excludes the Main-schedule replication/render
-    // that lives outside `FixedMain`.
+    // Invariant: `FixedFirst` and `FixedLast` bracket only the complete fixed schedule.
     app.add_systems(FixedFirst, open_tick);
     app.add_systems(FixedLast, close_tick);
     true
@@ -123,8 +87,7 @@ fn write_meta(mut cost: ResMut<CostTrace>, fixed: Res<Time<Fixed>>, role: Res<Co
     cost.sink.write(&row);
 }
 
-/// Carries the composition role into `write_meta` (a `Res` reads cleaner than threading it through
-/// the resource, and keeps `CostTrace` free of a field only Startup touches).
+/// Composition role for the startup metadata row.
 #[derive(Resource)]
 struct CostRole(&'static str);
 
@@ -135,8 +98,7 @@ fn open_tick(mut cost: ResMut<CostTrace>) {
     cost.march_calls = 0;
 }
 
-/// `FixedLast`, last: close the timer, sample the counts (AFTER the timing is captured, so counting
-/// never inflates the reported tick time), and write the row once past the warmup.
+/// `FixedLast`: capture elapsed time before sampling counts and writing past warmup.
 fn close_tick(
     mut cost: ResMut<CostTrace>,
     projectiles: Query<(), With<Projectile>>,

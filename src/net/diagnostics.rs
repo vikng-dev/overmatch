@@ -1,6 +1,4 @@
-//! The measurement instruments for prediction health — passive observers and periodic logs, kept
-//! deliberately as permanent tooling. Nothing here drives the sim; each system only reads state and
-//! reports. The composition roots (`net::client`/`net::server`) wire the subset each side needs.
+//! Passive network diagnostics. No system here mutates simulation state.
 
 use avian3d::prelude::{
     AngularVelocity, ColliderOf, ColliderTransform, LinearVelocity, Position, Rotation,
@@ -15,11 +13,7 @@ use crate::ballistics::ShellPath;
 use crate::driving::Suspension;
 use crate::tank::{Rig, ServoIndex, ServoState, Tank, TankRoot, TankSim, Turret};
 
-/// Diagnostic (physics NaN guard): at the top of each physics tick, name every entity whose
-/// physics state or `ColliderTransform` is non-finite — with values — then latch. Runs before
-/// `PhysicsSystems::Prepare`, i.e. before the step that would hit avian's panicking asserts.
-/// Guards a class wider than any one spawn path: a placeholder-magnitude pose surviving into the
-/// step, a solver blow-up, a NaN riding in on a replicated/rolled-back value.
+/// Log and latch corrupt physics state before Avian consumes it.
 pub(crate) fn fixed_nan_probe(
     bodies: Query<
         (
@@ -46,10 +40,7 @@ pub(crate) fn fixed_nan_probe(
     if *latched {
         return;
     }
-    // Non-finite OR placeholder-magnitude: avian's require-inserted `PLACEHOLDER` sentinels are
-    // f32::MAX — *finite*, so a pure `is_finite` probe is blind to exactly the poison a mistimed
-    // `RigidBody` insert (or a replicated placeholder) injects. Anything past 1e30 m is equally
-    // impossible and equally fatal.
+    // Avian placeholder positions are finite; reject them as well as non-finite values.
     let poisoned = |v: Vec3| !v.is_finite() || v.abs().max_element() > 1.0e30;
     let mut corrupt = false;
     for (entity, position, rotation, linear, angular) in &bodies {
@@ -87,10 +78,7 @@ pub(crate) fn fixed_nan_probe(
     }
 }
 
-/// NaN tripwire: names the first entity whose physics `Position` or local `Transform` goes
-/// non-finite, with its ancestry — runs before avian's own finite assert kills the app, so the
-/// culprit node is in the log. A permanent guard on the NaN class (a corrupt pose, a bad solver
-/// step), independent of any spawn timing.
+/// Log the first non-finite pose with its hierarchy, then latch.
 pub(crate) fn nan_tripwire(
     positions: Query<(Entity, &Position)>,
     transforms: Query<(Entity, &Transform)>,
@@ -139,10 +127,7 @@ pub(crate) fn nan_tripwire(
     }
 }
 
-/// Log `PredictionDiagnosticsPlugin`'s ROLLBACKS/ROLLBACK_DEPTH diagnostics periodically (every
-/// ~5s) — `PredictionPlugin::build` already mounts the plugin unconditionally (spike log,
-/// increment-5 setup notes), so this only reads `DiagnosticsStore`, it does not mount it again
-/// (mounting a second `PredictionDiagnosticsPlugin` would panic on the duplicate-plugin check).
+/// Periodically read the diagnostics plugin mounted by prediction.
 pub(crate) fn log_prediction_diagnostics(
     diagnostics: Res<DiagnosticsStore>,
     mut timer: Local<f32>,
@@ -164,18 +149,7 @@ pub(crate) fn log_prediction_diagnostics(
     info!("net: PredictionDiagnostics rollbacks={rollbacks} rollback_depth={depth:.2}");
 }
 
-/// Step-7 verification readout (every ~2 s, both sides): proof the *real* sim is running, not the
-/// retired stub — grounded-wheel count (suspension rays actually hitting the Terrain-layer game
-/// ground), each tank's turret servo angle (slewing toward the scripted aim), and every weapon's
-/// reload timer (the Tiger has two — MainGun + Coax; the MainGun's goes non-zero after a fire
-/// consumes the click).
-///
-/// **Per tank, labelled by root.** An earlier revision read `turrets.iter().next()` and flattened
-/// every tank's reloads into one unlabelled list — a single-tank assumption. With two humans (and/or
-/// the `OVERMATCH_BOT` circler) that collapsed the readout onto ONE arbitrary tank's turret (often
-/// not the one being examined) and made the reload list unattributable. Now the wheel count is one
-/// aggregate line (wheels carry no root join) and each tank emits its OWN turret angle + reloads,
-/// keyed by its root entity.
+/// Periodically log wheel contacts and each root's turret/reload state.
 pub(crate) fn log_sim_evidence(
     turrets: Query<(&ServoIndex, &TankRoot), With<Turret>>,
     sims: Query<(Entity, &TankSim)>,
@@ -192,8 +166,7 @@ pub(crate) fn log_sim_evidence(
     let total = wheels.iter().count();
     info!("net: SIM-EVIDENCE wheels_grounded={grounded}/{total} (all tanks)");
     for (root, sim) in &sims {
-        // This tank's OWN turret servo, found by the Turret-marked servo whose `TankRoot` is this
-        // root — never a `.next()` over the global turret set, which would read another tank's.
+        // `TankRoot` owns the turret-to-simulation join.
         let turret = turrets
             .iter()
             .find(|(_, tank_root)| tank_root.0 == root)
@@ -204,8 +177,7 @@ pub(crate) fn log_sim_evidence(
     }
 }
 
-/// Periodic authoritative/replicated position log (every ~2 s), so client and server positions can
-/// be diffed for the increment-5/6 convergence success criterion.
+/// Periodically log network-tank positions.
 pub(crate) fn log_positions(
     tanks: Query<(Entity, &Position), With<NetTank>>,
     mut timer: Local<f32>,
@@ -221,7 +193,7 @@ pub(crate) fn log_positions(
     }
 }
 
-/// Increment-5 success signal: the predicted tank arrives carrying `Predicted`.
+/// Log arrival of the predicted tank marker.
 pub(crate) fn log_predicted_tank(add: On<Add, Predicted>, tanks: Query<(), With<NetTank>>) {
     if tanks.contains(add.entity) {
         info!(
@@ -231,15 +203,12 @@ pub(crate) fn log_predicted_tank(add: On<Add, Predicted>, tanks: Query<(), With<
     }
 }
 
-/// Step-1 success signal.
+/// Log the first replicated tank marker.
 pub(crate) fn log_connected(add: On<Add, Connected>) {
     info!("client: connected (entity {})", add.entity);
 }
 
-/// Counts local shell/tracer spawns (`Added<ShellPath>` — inserted by `on_fire_shell` on every
-/// shell). The script fires exactly once, so a count above one during the forced-rollback pass is
-/// the "replayed fire duplicates the local tracer" wart the coordinator accepted for this step
-/// (fixed later by `PreSpawned`, map §2 — deliberately not added yet).
+/// Count locally spawned shell/tracer presentation effects.
 pub(crate) fn count_shell_spawns(shells: Query<Entity, Added<ShellPath>>, mut total: Local<u32>) {
     for entity in &shells {
         *total += 1;
@@ -291,30 +260,14 @@ pub(crate) fn watch_rollback_metrics(
     }
 }
 
-/// Verdict 2 (increment 6): the turret node's previous-tick pose relative to the hull, so a jump
-/// in that *relative* pose (as opposed to the hull's own world-space rollback snap) would mean
-/// `update_child_collider_position` failed to keep the child rig tracking the root through a
-/// replay. Logged around the perturbation window only.
+/// Per-root previous hull-to-turret offset for rollback diagnostics.
 #[derive(Resource, Default)]
 pub(crate) struct TurretWatch {
-    /// Per-tank previous hull→turret offset, keyed by the tank ROOT. A single `Option` here assumed
-    /// exactly one tank — with two humans (and/or the bot) the old `hulls.single()`/`turrets.single()`
-    /// both returned `Err` (many hulls, many turrets) and the whole detector silently went DEAD, so a
-    /// real child-rig desync on either tank would never have been logged.
+    /// Previous hull-to-turret offset keyed by root.
     last_relative: std::collections::HashMap<Entity, Vec3>,
 }
 
-/// Verdict 2 (increment 6): each tank's turret pose *relative to its own hull* — logged only when it
-/// moves more than the map's 0.1 m bar in one tick, which should never happen unless
-/// `update_child_collider_position` failed to keep the child rig glued to the root through a rollback
-/// replay. Absolute world deltas are expected (the perturbation moves the whole tank); only the
-/// hull-relative offset is diagnostic.
-///
-/// **Per tank, keyed by root.** Joins hull↔turret through the root's [`Rig`] (both handles live there)
-/// and tracks the previous offset per root, so the detector stays LIVE for two humans and the bot —
-/// the single-tank `.single()` form went inert the moment a second tank existed (see [`TurretWatch`]).
-/// The client builds a local skeleton (hence a `Rig`) for every replicated tank — its own predicted
-/// one and each interpolated opponent — so this covers all of them.
+/// Log discontinuities in each turret's hull-relative pose, keyed by root.
 pub(crate) fn watch_turret_pose(
     roots: Query<(Entity, &Rig)>,
     globals: Query<&GlobalTransform>,

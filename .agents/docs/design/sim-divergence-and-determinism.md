@@ -327,19 +327,21 @@ vendored 0.28 crates:
 3. `build_from_input_buffer` (lightyear_inputs_native input_message.rs:94) computes
    `(end_tick + 1 - buffer_start_tick) as usize` where `Tick - Tick → i32`: a strand of ≥ 2 ticks
    goes negative, sign-extends to ~2^64, and the loop `push`es one `Compressed` per iteration —
-   simultaneously the silent spin AND the RSS balloon (1.5 GB at wedge onset observed) → paging
-   collapse (`UN` state) → OS SIGKILL at 40-96 s, no crash report. `num_ticks` (redundancy·1 = 5
+   simultaneously the silent spin AND the RSS balloon (MEASURED: 1.5 GB at wedge onset) → paging
+   collapse (`UN` state) → SIGKILL (MEASURED: 40-96 s), no crash report. `num_ticks`
+   (DERIVED: redundancy·1 = 5
    for us) can never make the loop large; the wrap is the only route.
 Fix: `drop_stranded_input_buffer` in `src/net/client.rs` — PostUpdate,
 `.before(InputSystems::PrepareInputMessage)`, drops the own-tank `NativeBuffer<TankCommand>`
 whenever `start_tick` leads `current_tick + input_delay` (never true in steady state; the buffer
 is rebuilt at the correct tick on the next FixedPreUpdate write; cost when firing = a few ticks
-of unsent input the server hold-last extrapolates anyway). Tripwire:
-`tests/net_input_buffer_wrap.rs` pins both enablers + the degenerate itself (thread-timeout
-canary); if it fires, upstream clamped the range — re-verify with a loaded batch and retire the
-guard. Proof: loaded 24-run batch with the guard = **24/24 clean, guard fired in 20/24 runs**
-(strands of 1-17 ticks logged — delay-shrink sync events are ROUTINE under load; the old 3/10
-hang rate was the ≥2-tick subset), vs 4/12 wedges unguarded same day.
+of unsent input the server hold-last extrapolates anyway). The safe tripwires in
+`tests/net_input_buffer_wrap.rs` pin both enablers but deliberately do not execute the unbounded
+encoder call. If either changes, inspect the upstream encoder and use a hard-capped reproduction
+before retiring the guard. Proof: MEASURED loaded 24-run batch with the guard = **24/24 clean,
+guard fired in 20/24 runs**
+(MEASURED: strands of 1-17 ticks logged — delay-shrink sync events are ROUTINE under load; the old
+3/10 hang rate was the ≥2-tick subset), vs MEASURED 4/12 wedges unguarded the same day.
 
 **Upstream filing package (checked 2026-07-11: bug LIVE at lightyear HEAD — main's
 `build_from_input_buffer` is byte-identical; no duplicate issue; #1534 "only buffer inputs after
@@ -348,19 +350,20 @@ cousin; #1559 is our other open input-buffer filing):**
 (A) PRIMARY: `build_from_input_buffer` (inputs_native input_message.rs) computes
     `(end_tick + 1 - buffer_start_tick) as usize` with `Tick−Tick → i32`; a buffer leading
     `end_tick` by ≥ 2 sign-extends to ~2^64 and the per-iteration `states.push` allocates until
-    the OS kills the process — a silent unbounded loop where an empty/absent message (or a
+    the process is SIGKILLed — a silent unbounded loop where an empty/absent message (or a
     warn + bail) is correct. One-line shape: clamp both bounds at 0 / early-return on
     `buffer_start_tick > end_tick`.
 (B) TRIGGER: on `SyncEvent<InputTimelineConfig>`, `receive_tick_events` compensates the buffer
     for `tick_delta` but `recompute_input_delay_on_sync` changes `input_delay` with no
     corresponding buffer/message compensation — any delay SHRINK ≥ 2 ticks strands the buffer
     ahead of `end_tick = now + delay`, and `set_raw`'s refuse-lower rule makes the strand
-    permanent. Repro: link conditioner + CPU-loaded client, batch connects (or the unit shape in
-    our tests/net_input_buffer_wrap.rs canary). The constant-offset runaway (§10) stays open — it did NOT reproduce (0/57) and is not
+    permanent. Repro: link conditioner + CPU-loaded client batch connects, or a separately
+    hard-capped encoder process. The constant-offset runaway (§10) stays open — it did NOT
+    reproduce (MEASURED: 0/57) and is not
 explained by this mechanism, though the backward-resync window it lives in is now partially
 defused by the guard; re-sweep on future loaded batches.
 
-**Update (2026-07-11, verification batches @ e3ee1ab): the hang is CPU-LOAD-GATED.** 48 headless
+**Update (2026-07-11, MEASURED verification batches @ e3ee1ab): the hang is CPU-LOAD-GATED.** 48 headless
 scripted 80/10 connects on a quiet box — 24 on main @ e3ee1ab, 24 on the pre-`min_delay` baseline
 (d7d103e `src/net/client.rs`, A/B for the interp fix) — produced **0 hangs**; the interp
 `min_delay` pin is not the variable. Re-running 12 connects with all 10 cores saturated
@@ -368,7 +371,7 @@ scripted 80/10 connects on a quiet box — 24 on main @ e3ee1ab, 24 on the pre-`
 same signature: silence immediately after `rollback enabled` → connect `ROLLBACK-SNAP` → first
 `ROLLBACK fired`, trace recording stops at the same instant (FixedLast dead, wedged main loop),
 server keeps running, then the process dies **SIGKILL/exit 137 at 40–96 s** — three of the four
-killed by the OS before the harness's external 90 s timeout, with no jetsam/crash report found
+deaths preceded the harness's external 90 s timeout, with no jetsam/crash report found
 (kill source unconfirmed; RSS-balloon-then-jetsam per the check-starvation report's failure mode
 is plausible but unproven). Practical reads: (a) the old "3/10" was measured on a loaded box and
 matches the loaded rate, not the quiet-box rate; casual playtests on quiet machines won't feel
@@ -435,7 +438,7 @@ only in a traced run):
    differ for the same logical tank (measured: 4294966669 vs 4294966650), so the hash consumes NO
    entity id, no pointer, no `HashMap` iteration, no archetype order — only f32 bits, in a fixed
    field order, with every `TankSim` `Vec` walked in spawn-sorted slot order (`WheelIndex` /
-   `ServoIndex` / `WeaponIndex`, identical across worlds by `spawn_tank_sim`'s sorted-by-name
+   `ServoIndex` / `WeaponIndex`, identical across worlds by construction's sorted-by-name
    assignment). A fixed FNV-1a 64 (not std's version-seeded SipHash) keeps hashes reproducible
    across builds and re-derivable offline. The row's `own` field — the game `Controlled` marker
    on the client/SP, lightyear's `ControlledBy` on the server, `false` for the ownerless bot on

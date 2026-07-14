@@ -1,12 +1,6 @@
-//! The dedicated-server guard: the whole sim must boot and run with **no GPU, no window, no
-//! winit** — the M5 dedicated-server configuration. If a sim system grows a hard render
-//! dependency, this test fails before a netcode integration ever would.
+//! Headless boot regression tests.
 //!
-//! (An earlier version hand-assembled `MinimalPlugins` + individual asset/scene/gltf plugins;
-//! the gltf load never completed under that set. The canonical headless recipe — full
-//! `DefaultPlugins` with `backends: None` and no window — is what real Bevy dedicated servers
-//! use, and what the server binary will mount. Compile-out of render code is the later
-//! crates-split step, per the client-server-organization decision.)
+//! Invariant: simulation boots without GPU, window, or winit runtime initialization.
 
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -15,7 +9,7 @@ use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 
 use crate::SimPlugin;
-use crate::bake::ExtractedTankGeometry;
+use crate::bake::TankBlueprint;
 use crate::command::TankCommand;
 use crate::spec::TankSpec;
 use crate::state::AppState;
@@ -28,26 +22,42 @@ use crate::tank::{Controlled, PendingTankAssets, TIGER_GLB_PATH, Tank};
 /// is up, so a wide bound costs a healthy run exactly nothing.
 const BOOT_DEADLINE: Duration = Duration::from_secs(60);
 
-/// Booting one headless sim is a HEAVY fixture: a full Bevy app (assets, scenes, gltf, physics)
-/// that reads the 65 MB `tiger_1.glb` **twice** — `bake::extract_at_startup` parses it
-/// synchronously as data, and the asset server loads it again as a scene on the IO/compute pools.
-/// Measured: ~11 s of CPU per boot.
-///
-/// Four tests in this file each need one, and cargo runs them concurrently by default. Each app
-/// sizes its task pools to the core count, so on a 2-core CI runner four simultaneous boots
-/// oversubscribe the box roughly 4x: they starve each other's asset IO and every one of them blew
-/// its boot deadline while the machine had plenty of work in flight and none of it finishing. That
-/// was the headless-boot CI red — a contention timeout, not a broken asset.
-///
-/// So the boots take turns. The lease is held for the whole test body, not just the boot: a
-/// *booting* app contends with the sim phases of any already-booted sibling, so dropping it at
-/// `Playing` would move the starvation rather than remove it. These four are the only tests that
-/// mount a full app; the crate's other ~170 keep running in parallel around them.
-///
-/// Poisoning is deliberately ignored: the lease guards a *machine resource* (the box's cores), not
-/// shared mutable state, so a panicking test leaves nothing corrupted behind it. Propagating poison
-/// would turn one genuine failure into three misleading `PoisonError` panics and bury the real one.
+/// Serializes full-app fixtures. The lease spans each test because booting and running apps compete
+/// for the same host resources; mutex poisoning is irrelevant to this external resource.
 static BOOT_LEASE: Mutex<()> = Mutex::new(());
+
+fn assert_tank_state_at_add(
+    add: On<Add, Tank>,
+    tanks: Query<(Has<TankCommand>, Has<crate::driving::DriveState>)>,
+) {
+    let (command, drive) = tanks
+        .get(add.entity)
+        .expect("a newly added Tank must still exist during its observer");
+    assert!(
+        command && drive,
+        "TankCommand and DriveState must exist in the same insertion that adds Tank",
+    );
+}
+
+fn assert_suspension_at_add(
+    add: On<Add, crate::tank::Roadwheel>,
+    wheels: Query<Has<crate::driving::Suspension>>,
+) {
+    assert!(
+        wheels.get(add.entity).is_ok_and(|present| present),
+        "Suspension must exist in the same insertion that adds Roadwheel",
+    );
+}
+
+fn assert_range_table_at_add(
+    add: On<Add, crate::tank::Weapon>,
+    weapons: Query<Has<crate::firecontrol::RangeTable>>,
+) {
+    assert!(
+        weapons.get(add.entity).is_ok_and(|present| present),
+        "RangeTable must exist in the same insertion that adds Weapon",
+    );
+}
 
 /// A booted headless sim, plus the lease that serialized its boot. Derefs to the [`App`], so tests
 /// use it exactly like one; keep it alive for the whole test (dropping it early releases the lease).
@@ -69,9 +79,7 @@ impl std::ops::DerefMut for BootedSim {
     }
 }
 
-/// The canonical Bevy dedicated-server configuration: full plugin registration (assets, scenes,
-/// gltf, types) but **no GPU** (`backends: None` — wgpu never initializes), **no window, no
-/// winit**. This is exactly what the M5 server binary will mount.
+/// Full plugin registration without GPU, window, or winit runtime initialization.
 ///
 /// The clock starts at `ManualDuration(ZERO)`: asset IO is wall-clock, and if sim time advanced
 /// while it ran, the collider-less tanks would free-fall through the terrain for the whole load —
@@ -103,7 +111,10 @@ fn headless_app() -> App {
         avian3d::prelude::PhysicsPlugins::default(),
         SimPlugin,
         crate::tank::sp_spawn_plugin,
-    ));
+    ))
+    .add_observer(assert_tank_state_at_add)
+    .add_observer(assert_suspension_at_add)
+    .add_observer(assert_range_table_at_add);
 
     // `App::run` normally drives plugin finish/cleanup (some registration — e.g. Avian's
     // diagnostics resources — happens in `Plugin::finish`); a bare `update()` loop must do it.
@@ -115,15 +126,13 @@ fn headless_app() -> App {
     app
 }
 
-/// Exactly what the boot is still waiting on, spelled out. The old message ("spec or scene load
-/// failed") conflated *slow* with *broken* and cost a full investigation to tell apart; this one is
-/// meant to be read straight from a CI log.
+/// Reports each boot gate separately so a timeout identifies the unavailable prerequisite.
 fn boot_diagnosis(app: &App, elapsed: Duration) -> String {
     let world = app.world();
     let state = *world.resource::<State<AppState>>().get();
     let assets = world.resource::<AssetServer>();
     let specs = world.resource::<Assets<TankSpec>>();
-    let geometry = world.get_resource::<ExtractedTankGeometry>().is_some();
+    let blueprint = world.get_resource::<TankBlueprint>().is_some();
 
     // The three gates `tank::spawn_tank_when_loaded` waits on, reported individually.
     let (spec_state, scene_state, spec_parsed) = match world.get_resource::<PendingTankAssets>() {
@@ -161,7 +170,7 @@ fn boot_diagnosis(app: &App, elapsed: Duration) -> String {
            spec  (tiger_1.tank.ron) {spec_state}\n  \
            scene (tiger_1.glb) .... {scene_state}\n  \
            TankSpec parsed ........ {spec_parsed}\n  \
-           ExtractedTankGeometry .. {geometry}  (bake::extract_at_startup, Startup)\n  \
+           TankBlueprint ......... {blueprint}  (bake::extract_at_startup, Startup)\n  \
            glb on disk ............ {glb_report}\n\
          \n\
          How to read this:\n  \
@@ -225,6 +234,33 @@ fn booted_sim() -> BootedSim {
         "the sim reached Playing but the rigs never bound headless — the Tiger scene instantiated \
          no roadwheels (expected 32 across the two tanks, saw {wheels}). The spec and scene both \
          loaded, so this is a scene-bind/spec-match failure, not an asset-IO one.",
+    );
+
+    // Final census complements the insertion-time observers above and catches any alternate
+    // construction path that produced an incomplete entity without the expected marker.
+    let world = app.world_mut();
+    let incomplete_tanks = world
+        .query_filtered::<(Has<TankCommand>, Has<crate::driving::DriveState>), With<Tank>>()
+        .iter(world)
+        .filter(|(command, drive)| !command || !drive)
+        .count();
+    let incomplete_wheels = world
+        .query_filtered::<Has<crate::driving::Suspension>, With<crate::tank::Roadwheel>>()
+        .iter(world)
+        .filter(|suspension| !suspension)
+        .count();
+    let weapon_tables: Vec<bool> = world
+        .query_filtered::<Has<crate::firecontrol::RangeTable>, With<crate::tank::Weapon>>()
+        .iter(world)
+        .collect();
+    assert_eq!(
+        incomplete_tanks, 0,
+        "a spawned Tank lacks command or drive state"
+    );
+    assert_eq!(incomplete_wheels, 0, "a spawned Roadwheel lacks Suspension");
+    assert!(
+        !weapon_tables.is_empty() && weapon_tables.iter().all(|present| *present),
+        "a spawned Weapon lacks its RangeTable",
     );
 
     BootedSim { app, _lease: lease }
@@ -318,11 +354,10 @@ fn sim_boots_and_drives_headless() {
     );
 }
 
-/// The MG-tracer render gate, exercised on the real spawn path headless (the same dedicated-server
-/// recipe as above). Firing the secondary trigger (the two 7.9 mm MGs) must, over a burst:
+/// The MG-tracer render gate, exercised on the real spawn path headless. Firing the secondary trigger
+/// must, over a burst:
 ///   * spawn tracer STREAKS (`TracerStreak`) for the ~1-in-5 tracer rounds, and
-///   * spawn NO `shell.glb` scene root on ANY MG round — the bug this slice fixes (MG bullets used to
-///     render as full 88 mm shell scenes). A shell in flight carries `ShellPath`; only a
+///   * spawn NO `shell.glb` scene root on ANY MG round. A shell in flight carries `ShellPath`; only a
 ///     main-gun-calibre round also gets a `WorldAssetRoot` scene, so `ShellPath + WorldAssetRoot`
 ///     over an MG-only burst must stay empty while streaks appear.
 #[test]
@@ -394,19 +429,9 @@ fn mg_rounds_stream_tracers_and_spawn_no_shell_scene() {
     );
 }
 
-/// SHOOTER SELF-EXCLUSION on the REAL asset — the coax bug, at its root.
+/// Shooter self-exclusion regression on the real asset.
 ///
-/// The tiger's coax muzzle clears its own `Gun_Mantlet_Ballistic` by ~7 cm at rest, and its recoil
-/// spring retracts the barrel ~10 cm: from the second round of any burst on, the coax fires from INSIDE
-/// its own mantlet. With no self-exclusion the authority march resolved that contact for real and the
-/// 7.9 mm round EMBEDDED in its own mask a centimetre out of the barrel — the coax was a dud that shot
-/// itself, in single-player and on the server alike (and on a net client the same contact fail-closed,
-/// which is why the coax tracer never replicated while the bow MG — with no volume in front of it —
-/// always did).
-///
-/// So: hold the secondary trigger for a sustained burst and assert NO round ever impacts a volume of
-/// the tank that fired it, while rounds still reach the opposing tank downrange. The bow MG rides along
-/// as the control that always worked.
+/// A sustained MG burst must not impact the firing tank, while still reaching other geometry.
 #[test]
 fn a_burst_never_shoots_its_own_tank() {
     use crate::ballistics::{BallisticVolume, Impact};
@@ -510,25 +535,13 @@ fn a_burst_never_shoots_its_own_tank() {
     );
 }
 
-/// THE REPLICA (OBSERVER) PATH — Yan's report: "the hull MG tracers replicate perfectly, but the
-/// coaxial don't."
-///
-/// An observing client re-raises the shooter's shot as a local `FireShell` off the wire
-/// (`net::client::receive_fire_events`) with a `catch_up_ticks` fast-forward, and `on_fire_shell` first
-/// tests whether the round already landed during the skipped flight — a segment cast from the wire
-/// origin, i.e. FROM THE SHOOTER'S MUZZLE. Mid-burst that muzzle sits inside the shooter's own mantlet,
-/// so without self-exclusion that test reports an immediate hit and returns: the observer's shell is
-/// never spawned at all (no tracer, plus a phantom armour spark at the shooter's mask).
-///
-/// Fire the exact shape the wire produces — origin 12 cm behind the coax muzzle (the recoil retraction),
-/// `shooter` named and entity-mapped, `catch_up_ticks > 0`, `ClientReplica` present — and assert the
-/// shell IS spawned and flies. The `shooter: None` control (the old code's shape) is what proves the
-/// naming is load-bearing rather than incidental.
+/// Replica catch-up regression: a named shooter remains excluded from its own collision volumes.
+/// The control omits `shooter` and must remain held at the armor candidate.
 #[test]
 fn a_replica_coax_shell_clears_the_shooters_mantlet() {
     use crate::ClientReplica;
     use crate::ShotId;
-    use crate::ballistics::{FireShell, ShellPath, ShotSource};
+    use crate::ballistics::{FireShell, FireShellOrigin, ShellPath, ShotSource};
     use crate::tank::{Muzzle, TankRoot, Weapon, WeaponIndex, rig_world_pose};
     use avian3d::prelude::{Position, Rotation};
     use bevy::ecs::system::RunSystemOnce;
@@ -597,28 +610,34 @@ fn a_replica_coax_shell_clears_the_shooters_mantlet() {
         speed: 755.0,
         caliber: 0.0079,
         mass: 0.0118,
+        mechanism: crate::spec::FireMechanism::Automatic,
         tracer: true,
+        shot_origin: FireShellOrigin::Reconstructed,
         shooter,
         catch_up_ticks: 4,
         shot: Some(ShotId {
-            shooter: shot.tank,
+            combatant: crate::CombatantId(1),
             weapon: shot.slot as u8,
             fire_tick: 1,
         }),
     };
 
-    // CONTROL — the shape the old code raised (`shooter: None`). The already-landed test hits the
-    // shooter's own mantlet a centimetre out and swallows the shell whole: no tracer, ever. This is the
-    // bug, pinned.
+    // Control: omitting `shooter` holds the catch-up shell at the armor candidate.
     app.world_mut().trigger(fire(None));
     app.update();
-    let mut shells = app.world_mut().query::<&ShellPath>();
+    let mut shells = app.world_mut().query::<(Entity, &Visibility, &ShellPath)>();
+    let control = shells
+        .iter(app.world())
+        .next()
+        .map(|(entity, visibility, _)| (entity, *visibility))
+        .expect("the keyed control shell should survive as an authority-waiting candidate");
     assert_eq!(
-        shells.iter(app.world()).count(),
-        0,
-        "CONTROL: an un-attributed replica shell fired from inside the shooter's mantlet is swallowed \
-         by the already-landed catch-up test — this is exactly the coax's missing tracer",
+        control.1,
+        Visibility::Hidden,
+        "CONTROL: an un-attributed replica shell fired from inside the shooter's mantlet must be held \
+         hidden there — it cannot honestly fly or render a tracer",
     );
+    app.world_mut().despawn(control.0);
 
     // THE FIX — the same shot, naming its shooter. The shooter's own volumes are transparent to it, so
     // the round is spawned and flies.
@@ -653,4 +672,311 @@ fn a_replica_coax_shell_clears_the_shooters_mantlet() {
         "the replica coax shell must fly on, not freeze at the shooter's mantlet and dissolve; it \
          moved {flown:.2} m in 8 ticks (a ~755 m/s round covers ~90 m)",
     );
+}
+
+#[derive(Resource, Default)]
+struct ScriptedDeterminismRun {
+    digests: Vec<Vec<(String, crate::trace::CanonicalTankStateDigest)>>,
+    checkpoints: Vec<ScriptedPose>,
+    saw_airborne: bool,
+    saw_grounded: bool,
+    saw_brush_anchor: bool,
+    saw_steering_slip: bool,
+    saw_shot: bool,
+    fire_shells: usize,
+    saw_projectile_spawn: bool,
+    saw_projectile_march: bool,
+}
+
+#[derive(Clone, Copy)]
+struct ScriptedPose {
+    tick: usize,
+    position: Vec3,
+    rotation: Quat,
+}
+
+/// The observer is deliberately at the production `FireShell` seam: `rounds_fired > 0` proves
+/// only root bookkeeping, while this proves the forward script actually crossed the shell-spawn
+/// boundary. Bevy 0.19 applies `Commands::trigger` at its deferred barrier, where observers run.
+fn count_scripted_fire_shells(
+    _: On<crate::ballistics::FireShell>,
+    mut run: ResMut<ScriptedDeterminismRun>,
+) {
+    run.fire_shells += 1;
+}
+
+fn capture_scripted_determinism_tick(
+    roots: Query<
+        (
+            Entity,
+            &Name,
+            Has<Controlled>,
+            &avian3d::prelude::Position,
+            &avian3d::prelude::Rotation,
+            &avian3d::prelude::LinearVelocity,
+            &avian3d::prelude::AngularVelocity,
+            &avian3d::prelude::ComputedCenterOfMass,
+            &crate::driving::DriveState,
+            &crate::tank::TankSim,
+        ),
+        With<Tank>,
+    >,
+    children: Query<&Children>,
+    wheels: Query<&crate::driving::Suspension>,
+    projectiles: Query<&crate::ballistics::ShellPath>,
+    mut run: ResMut<ScriptedDeterminismRun>,
+) {
+    let tick = run.digests.len();
+    let mut digests = Vec::with_capacity(roots.iter().len());
+    let mut controlled = None;
+    for (tank, name, is_controlled, position, rotation, linear, angular, com, drive, sim) in &roots
+    {
+        digests.push((
+            name.as_str().to_owned(),
+            crate::trace::canonical_tank_state_digest(
+                position.0, rotation.0, linear.0, angular.0, drive, sim,
+            ),
+        ));
+        if is_controlled {
+            controlled = Some((
+                tank,
+                position.0,
+                rotation.0,
+                linear.0,
+                angular.0,
+                com.0,
+                drive.steer(),
+                sim,
+            ));
+        }
+    }
+    digests.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(digests.len(), 2, "the local duel has two simulation tanks");
+
+    let (tank, position, rotation, linear, angular, local_com, steer, sim) =
+        controlled.expect("one controlled tank");
+    let grounded = children
+        .iter_descendants(tank)
+        .filter_map(|entity| wheels.get(entity).ok())
+        .filter(|suspension| suspension.contact.is_some())
+        .count();
+    run.saw_airborne |= grounded == 0;
+    run.saw_grounded |= grounded > 0;
+
+    let anchors = sim.anchors.iter().filter(|anchor| anchor.is_some()).count();
+    run.saw_brush_anchor |= anchors > 0;
+
+    // Avian 0.7 `Forces::velocity_at_point`: v_point = v_linear + omega × (point − world_COM),
+    // where world_COM = position + rotation * local_COM. Project onto the ground plane before
+    // classifying with the exact production `static_weight` rule. A loaded anchor remains `Some`
+    // while sliding, so anchor-count changes cannot witness this regime.
+    let world_com = position + rotation * local_com;
+    let loaded_contact_is_slipping = children
+        .iter_descendants(tank)
+        .filter_map(|entity| wheels.get(entity).ok())
+        .filter_map(|suspension| {
+            (suspension.load > 0.0)
+                .then_some(suspension.contact)
+                .flatten()
+        })
+        .any(|contact| {
+            let point_velocity = linear + angular.cross(contact - world_com);
+            let planar_speed = Vec2::new(point_velocity.x, point_velocity.z).length();
+            crate::driving::static_weight_for_test(planar_speed) < 1.0
+        });
+    run.saw_steering_slip |=
+        tick >= 240 && steer.abs() > f32::EPSILON && loaded_contact_is_slipping;
+    run.saw_shot |= sim.weapons.iter().any(|weapon| weapon.rounds_fired > 0);
+    run.saw_projectile_spawn |= !projectiles.is_empty();
+    run.saw_projectile_march |= projectiles.iter().any(|path| path.points.len() > 1);
+    if matches!(tick, 119 | 219 | 339) {
+        run.checkpoints.push(ScriptedPose {
+            tick,
+            position,
+            rotation,
+        });
+    }
+    run.digests.push(digests);
+}
+
+fn assert_simulation_mutators_are_ordered(app: &App) {
+    let world = app.world();
+    let schedules = world.resource::<bevy::ecs::schedule::Schedules>();
+    let schedule = schedules
+        .get(FixedUpdate)
+        .expect("the full sim installs FixedUpdate");
+    let names: std::collections::HashMap<_, _> = schedule
+        .systems()
+        .expect("FixedUpdate ran and initialized its systems")
+        .map(|(key, system)| (key, system.name().to_string()))
+        .collect();
+    for expected in [
+        "driving::traction::ramp_drive",
+        "driving::suspension::apply_suspension",
+        "driving::traction::apply_drive",
+        "shooting::tick_reload",
+        "shooting::fire",
+        "shooting::apply_recoil",
+        "ballistics::integrate_projectiles",
+        "damage::process_cookoffs",
+        "damage::kill_crew",
+    ] {
+        assert_eq!(
+            names
+                .values()
+                .filter(|name| name.ends_with(expected))
+                .count(),
+            1,
+            "the schedule guard must find exactly one `{expected}` system",
+        );
+    }
+    let conflicts: Vec<_> = schedule
+        .graph()
+        .conflicting_systems()
+        .iter()
+        .filter_map(|(left, right, _)| Some((names.get(left)?, names.get(right)?)))
+        .filter(|(left, right)| {
+            let writes_physical_state = |name: &str| {
+                name.contains("driving::traction::ramp_drive")
+                    || name.contains("driving::suspension::apply_suspension")
+                    || name.contains("driving::traction::apply_drive")
+                    || name.contains("shooting::tick_reload")
+                    || name.contains("shooting::fire")
+                    || name.contains("shooting::apply_recoil")
+                    || name.contains("ballistics::integrate_projectiles")
+            };
+            let force_conflict = writes_physical_state(left) && writes_physical_state(right);
+            let projectile_damage_conflict = (left.contains("ballistics::integrate_projectiles")
+                && right.contains("damage::"))
+                || (right.contains("ballistics::integrate_projectiles")
+                    && left.contains("damage::"));
+            force_conflict || projectile_damage_conflict
+        })
+        .map(|(left, right)| (left.clone(), right.clone()))
+        .collect();
+    assert!(
+        conflicts.is_empty(),
+        "simulation mutators need an explicit order: {conflicts:#?}",
+    );
+}
+
+const SCRIPT_TICKS: usize = 600;
+
+fn scripted_determinism_run() -> ScriptedDeterminismRun {
+    let mut app = booted_sim();
+    app.init_resource::<ScriptedDeterminismRun>()
+        .add_observer(count_scripted_fire_shells)
+        .add_systems(FixedLast, capture_scripted_determinism_tick)
+        // Verified against Bevy 0.19: one `App::update` runs exactly one fixed loop.
+        .insert_resource(TimeUpdateStrategy::FixedTimesteps(1));
+
+    let mut controlled = app
+        .world_mut()
+        .query_filtered::<Entity, (With<Tank>, With<Controlled>)>();
+    let tank = controlled.single(app.world()).expect("one controlled tank");
+
+    for tick in 0..SCRIPT_TICKS {
+        {
+            let mut command = app
+                .world_mut()
+                .get_mut::<TankCommand>(tank)
+                .expect("controlled tank carries TankCommand");
+            command.throttle = if (120..420).contains(&tick) { 1.0 } else { 0.0 };
+            command.steer = if (240..420).contains(&tick) { 0.7 } else { 0.0 };
+            command.fire_primary = tick == 220;
+            command.fire_secondary = (360..420).contains(&tick);
+        }
+        app.update();
+        if tick == 0 {
+            assert_simulation_mutators_are_ordered(&app);
+        }
+    }
+
+    app.world_mut()
+        .remove_resource::<ScriptedDeterminismRun>()
+        .expect("the scripted digest collector remains installed")
+}
+
+fn assert_scripted_determinism_witnesses(run: &ScriptedDeterminismRun, label: &str) {
+    assert_eq!(
+        run.digests.len(),
+        SCRIPT_TICKS,
+        "{label} produced one digest per fixed tick",
+    );
+    assert!(run.saw_airborne, "{label} crossed an airborne state");
+    assert!(run.saw_grounded, "{label} reached ground contact");
+    assert!(run.saw_brush_anchor, "{label} established a brush anchor");
+    assert!(
+        run.saw_steering_slip,
+        "{label} put a loaded wheel in the blended/kinetic regime while steering",
+    );
+    assert!(run.saw_shot, "{label} fired at least one weapon");
+    assert!(
+        run.fire_shells > 0,
+        "{label} reached shooting::fire's FireShell spawn seam",
+    );
+    assert!(
+        run.saw_projectile_spawn,
+        "{label} spawned a projectile entity from FireShell",
+    );
+    assert!(
+        run.saw_projectile_march,
+        "{label} marched a projectile beyond its spawn point",
+    );
+
+    let [settled, powered, steered] = run.checkpoints.as_slice() else {
+        panic!("{label} did not capture the three scripted driving checkpoints");
+    };
+    assert_eq!(
+        [settled.tick, powered.tick, steered.tick],
+        [119, 219, 339],
+        "{label} driving checkpoint ticks moved",
+    );
+
+    // DERIVED broad semantic bounds: reject a deterministic broken drivetrain or reversed steering
+    // without treating one platform's floating-point trajectory as the portable contract.
+    const MIN_PROGRESS_M: f32 = 1.0;
+    const MIN_RIGHT_TURN_COMPONENT: f32 = 0.02;
+    let settled_forward = settled.rotation * Vec3::NEG_Z;
+    let straight_progress = (powered.position - settled.position).dot(settled_forward);
+    assert!(
+        straight_progress > MIN_PROGRESS_M,
+        "{label} did not drive forward during straight throttle: {straight_progress} m",
+    );
+
+    let powered_forward = powered.rotation * Vec3::NEG_Z;
+    let powered_right = powered.rotation * Vec3::X;
+    let steering_progress = (steered.position - powered.position).dot(powered_forward);
+    assert!(
+        steering_progress > MIN_PROGRESS_M,
+        "{label} stopped progressing when steering began: {steering_progress} m",
+    );
+    let right_turn_component = (steered.rotation * Vec3::NEG_Z).dot(powered_right);
+    assert!(
+        right_turn_component > MIN_RIGHT_TURN_COMPONENT,
+        "{label} positive steer did not turn the hull right: component {right_turn_component}",
+    );
+}
+
+/// Two fresh, full simulation compositions must replay one command script bit-for-bit. The witness
+/// assertions keep this from passing because the scenario never reached contact, brush traction,
+/// steering slip, or fire.
+#[test]
+fn full_simulation_replay_is_bit_exact_for_six_hundred_ticks() {
+    let first = scripted_determinism_run();
+    assert_scripted_determinism_witnesses(&first, "first fresh sim");
+
+    let second = scripted_determinism_run();
+    assert_scripted_determinism_witnesses(&second, "second fresh sim");
+    if let Some((tick, (left, right))) = first
+        .digests
+        .iter()
+        .zip(&second.digests)
+        .enumerate()
+        .find(|(_, (left, right))| left != right)
+    {
+        panic!(
+            "fresh full-sim worlds first differ at scripted tick {tick}:\nleft:  {left:#?}\nright: {right:#?}",
+        );
+    }
 }

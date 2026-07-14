@@ -1,18 +1,4 @@
-//! The gunner's sight — System B (coaxial, player-solved ranging). See
-//! `.agents/docs/design/gunner-sight.md`.
-//!
-//! Lshift toggles between the free third-person "commander" view (the orbit camera + `aim.rs`) and
-//! a zoomed gunner optic locked to the gun's line of sight. In gunner view the camera shows the
-//! gun's *reality* (the bore), and aiming is **world-space position control**: mouse deltas steer
-//! the sight line from the gun pivot (worked in yaw/pitch here), which is then RESOLVED against the
-//! world — terrain or another tank's armor, a far fallback in the sky — and committed as a
-//! hull-local POINT: the shared [`aim::CommittedAim`], the same domain form third person commits,
-//! so the two modes never convert between a point and a bare direction (the parallax bug class the
-//! 2026-07-10 unification exposed). The point is published as the tank's commanded aim
-//! (`TankCommand`) that every servo chases at its authored slew rate — so the view lags and
-//! settles (dead-stop on release, *not* rate control), and the hull MG traverses alongside the gun.
-//! Pure line of sight: superelevation (the ballistic lob for range) is a firing-side concern
-//! deferred to its own slice.
+//! Gunner sight input, presentation, and aim-point commitment.
 
 use avian3d::prelude::{Position, Rotation, SpatialQuery};
 use bevy::camera::visibility::RenderLayers;
@@ -56,10 +42,7 @@ pub enum SightMode {
     Gunner,
 }
 
-/// The Lshift view toggle's ordering anchor: `toggle_sight` flips [`SightMode`] here (`Update`).
-/// A system that must react to the flip the SAME frame (the orbit camera's optic-exit re-aim in
-/// `camera`) orders `.after` this set — reacting a frame late means one frame of camera and aim
-/// commit consuming the stale pre-toggle direction.
+/// Ordering anchor for systems reacting to a sight-mode change in the same frame.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SightToggled;
 
@@ -74,17 +57,10 @@ pub fn in_third_person(mode: Res<SightMode>) -> bool {
     *mode == SightMode::ThirdPerson
 }
 
-/// The committed gunner aim as yaw/pitch (radians, hull frame): the working form of the shared
-/// [`aim::CommittedAim`] while the optic drives it (position control — mouse deltas move it; it is
-/// NOT the gun's live lay, which lags). The angles are the bearing of the committed point **from
-/// the gun mount** (`point − mount`, the sight's true origin — where `camera::gunner_camera` parks
-/// and where `aim::drive_aim_servos` measures the pitch servo's target), NEVER from the hull-frame
-/// origin: the hull origin sits ~2.2 m below the mount at ground level, and a near floor point's
-/// bearing differs between the two by the mount parallax (~2.5° at 50 m, ~9° at 15 m — nearly the
-/// whole 3.1° optic radius under magnification; the 2026-07-10 "aim snaps on first optic input"
-/// regression). Not a resource: the persistent memory is the one `CommittedAim` point, which the
-/// optic resumes into yaw/pitch each frame, works the clamps on, and re-resolves — a per-frame
-/// scratch value, not a second source of truth to keep in sync.
+/// Per-frame yaw/pitch working form of the committed aim point.
+///
+/// Invariant: decompose `point - mount`, never the hull origin, to keep the optic and servo target
+/// at the same parallax origin. [`CommittedAim`] remains the sole persistent state.
 #[derive(Clone, Copy)]
 struct GunnerIntent {
     yaw: f32,
@@ -92,22 +68,14 @@ struct GunnerIntent {
 }
 
 impl GunnerIntent {
-    /// The intent as a direction in the hull's local frame (unit length). Inverse of the yaw/pitch
-    /// decomposition `aim.rs` uses (`yaw = atan2(-x, -z)`, `pitch = atan2(y, |xz|)`), so the
-    /// reticle agrees with what the servos are commanded toward.
+    /// Intent as a unit direction in hull-local space.
     fn local_dir(&self) -> Vec3 {
         let (sy, cy) = self.yaw.sin_cos();
         let (sp, cp) = self.pitch.sin_cos();
         Vec3::new(-sy * cp, sp, -cy * cp)
     }
 
-    /// Decompose a hull-local aim direction into yaw/pitch — the exact inverse of
-    /// [`local_dir`](Self::local_dir), and the SAME decomposition `aim::drive_aim_servos` applies
-    /// per servo (`yaw = atan2(-x, -z)`, `pitch = atan2(y, |xz|)`). Scale-invariant (`atan2`
-    /// ignores magnitude). The caller resumes the committed point by feeding `point − mount`, so
-    /// the bearing is measured from the sight's origin exactly as `drive_aim_servos` measures each
-    /// servo's target from its own pose — feeding the raw point would measure from the hull-frame
-    /// origin and reintroduce the mount parallax (see [`GunnerIntent`]).
+    /// Inverse of [`local_dir`](Self::local_dir); callers provide the mount-relative direction.
     fn from_hull_local_dir(dir: Vec3) -> Self {
         Self {
             yaw: (-dir.x).atan2(-dir.z),
@@ -153,8 +121,7 @@ impl Toast {
 #[derive(Component)]
 struct ToastText;
 
-/// HUD: the dialed range, shown in the optic so the ranging skill is legible — the player needs to
-/// read what they've set to estimate and correct it. Hidden outside gunner view.
+/// HUD dialed-range readout, hidden outside gunner view.
 #[derive(Component)]
 struct RangeReadout;
 
@@ -163,10 +130,7 @@ struct RangeReadout;
 #[derive(Component)]
 struct ReticleLine;
 
-/// One graduation of the moving range scale, tagged with the absolute range it marks. Majors (400 m
-/// multiples) carry a number; minors (the 200 m halves) don't. Repositioned each frame to
-/// `θ(dialed) − θ(range)` above centre, so the scale rides up with the gun as range is dialed out and
-/// the dialed graduation lands on the [`ReticleLine`].
+/// One moving range-scale graduation.
 #[derive(Component)]
 struct RangeScaleTick {
     range: f32,
@@ -525,17 +489,12 @@ fn update_intent_reticle(
     let Ok(hull) = hull.get(rig.hull) else {
         return;
     };
-    // The committed intention (the shared `CommittedAim`, republished by `drive_gunner_aim` every
-    // gunner frame), hull-local. `None` before the first commit for this tank (possession-keyed).
     let Some(local) = committed.get(tank) else {
         *visibility = Visibility::Hidden;
         return;
     };
     let (camera, cam_transform) = *camera;
 
-    // Reproject the ACTUAL committed world point, hull-local → world. The committed value is always
-    // a resolved point (both modes commit points), so this is exact at any range — projecting a
-    // bearing instead would place a near floor aim too high by the mount parallax (the regression).
     let point = hull.affine().transform_point3(local);
 
     match camera.world_to_viewport(cam_transform, point) {
@@ -548,16 +507,9 @@ fn update_intent_reticle(
     }
 }
 
-/// Lshift flips the view — but only if the target view's crewman is alive. **No aim handoff:** both
-/// modes read and write the one [`aim::CommittedAim`], so a switch preserves the committed intention
-/// by construction — the optic RESUMES the commander's committed aim on entry (`drive_gunner_aim`),
-/// and third-person re-authors the optic's last-published lay on return (`aim::commit_aim`'s RMB
-/// hold). What used to live here — seed-the-intent-from-the-gun's-lay on entry, reseed-the-free-look-
-/// hold-from-the-live-aim on exit — is gone: the seeding it did IS what sharing one memory does for
-/// free (a fresh, never-committed tank still starts from the gun's current lay, but that one rule now
-/// lives in `drive_gunner_aim`, keyed on the absence of a commitment). The controlled tank's own mesh
-/// is hidden from the optic by `reconcile_optic_render_layers` (which derives the hide from this mode
-/// every frame), so the camera parked inside the mantlet sees through its own geometry.
+/// Toggle only to a view with a live crewman.
+///
+/// Invariant: both modes share [`aim::CommittedAim`], so switching modes never performs an aim handoff.
 fn toggle_sight(
     keys: Res<ButtonInput<KeyCode>>,
     mut mode: ResMut<SightMode>,
@@ -568,14 +520,11 @@ fn toggle_sight(
     if !keys.just_pressed(KeyCode::ShiftLeft) {
         return;
     }
-    // Need a controlled rig to have a view to flip into.
     if controlled.rig().is_none() {
         return;
     }
     *mode = match *mode {
         SightMode::ThirdPerson => {
-            // Only switch to gunner optic if the gunner view is usable (gunner alive) — otherwise
-            // toast the reason, since the switch silently does nothing.
             if !view_available(&controlled, &views, ViewKind::Gunner) {
                 toast.show(format!("{} unavailable", ViewKind::Gunner.label()));
                 return;
@@ -583,7 +532,6 @@ fn toggle_sight(
             SightMode::Gunner
         }
         SightMode::Gunner => {
-            // Only switch to third-person if the commander view is usable (commander alive).
             if !view_available(&controlled, &views, ViewKind::Commander) {
                 toast.show(format!("{} unavailable", ViewKind::Commander.label()));
                 return;
@@ -593,16 +541,10 @@ fn toggle_sight(
     };
 }
 
-/// The render layer the controlled tank's meshes move to while in the gunner optic. The world,
-/// terrain, and other tanks stay on layer 0 (which the camera draws); the controlled tank's own
-/// meshes go here, which the camera does not draw — so the optic, parked inside the mantlet, sees
-/// through its own geometry while everything else renders normally.
+/// Render layer for the controlled tank while the gunner optic is active.
 const OPTIC_HIDDEN_LAYER: usize = 1;
 
-/// The render layer a tank mesh belongs on: [`OPTIC_HIDDEN_LAYER`] when it is a mesh of the
-/// controlled tank AND the gunner optic is up (hide it from the mount-parked camera), else the
-/// default layer 0 every camera draws. Pure so the reconcile invariant — controlled-and-gunner hides,
-/// everything else shows — is unit-tested without an app.
+/// Return the controlled-optic hidden layer; all other meshes use layer zero.
 fn desired_optic_layer(gunner: bool, is_controlled: bool) -> RenderLayers {
     if gunner && is_controlled {
         RenderLayers::layer(OPTIC_HIDDEN_LAYER)
@@ -611,28 +553,11 @@ fn desired_optic_layer(gunner: bool, is_controlled: bool) -> RenderLayers {
     }
 }
 
-/// Hide the controlled tank from its own gunner optic via **render layers, not `Visibility`**. While
-/// in the optic, the controlled tank's render meshes move to [`OPTIC_HIDDEN_LAYER`]; otherwise they
-/// sit on the default layer 0 the camera draws. Render layers are per-camera and, unlike
-/// `Visibility`, are not co-owned by Avian's debug renderer (`PhysicsDebugPlugin` rewrites mesh
-/// `Visibility` when gizmos are toggled), so a debug toggle can no longer defeat the hide.
+/// Reconcile every tank mesh's render layer from live sight mode, control ownership, and mesh set.
 ///
-/// **Runs unconditionally every frame — this hide is CONTINUOUS DERIVED RENDER STATE** of (SightMode
-/// × which tank is `Controlled` × the tank's live mesh set), the same shape as Bevy's own per-frame
-/// visibility and transform propagation, and derived the same way: recomputed from its inputs rather
-/// than event-driven. Event/`resource_changed`-driven was the original defect — it re-laid the layers
-/// only on a `SightMode` change, so two input-less mutations of the derived state silently went
-/// unhandled: (1) a multiplayer respawn swaps `Controlled` onto a fresh tank (and despawns the old)
-/// with no mode change, leaving the new tank's barrel rendering in the mount-parked optic; and (2)
-/// the tank's meshes attach ASYNCHRONOUSLY as the glb scene instantiates (default layer 0) — there is
-/// no mesh-set-changed event to subscribe, so meshes landing after a one-shot stamp were missed even
-/// on first gunner entry. A per-frame reconcile owns all three inputs by construction.
-///
-/// `RenderLayers` does not inherit, so the layer is written per render mesh, and **only on mismatch**:
-/// each mesh's current `Option<&RenderLayers>` is compared against the desired layer and left alone
-/// when it already matches, so steady state is reads-only (no per-frame change-detection dirtying) and
-/// the unconditional schedule costs one layer read per mesh. Non-controlled tanks' meshes stay on
-/// layer 0 in gunner mode, so the optic still sees opponents.
+/// Invariant: this runs every frame because control and asynchronously-instantiated meshes can
+/// change without a sight-mode event. `RenderLayers` does not inherit, so each mesh is written only
+/// when its layer differs.
 fn reconcile_optic_render_layers(
     mode: Res<SightMode>,
     controlled: Query<Entity, With<Controlled>>,
@@ -646,8 +571,6 @@ fn reconcile_optic_render_layers(
     for tank in &tanks {
         let desired = desired_optic_layer(gunner, Some(tank) == controlled_tank);
         for entity in children.iter_descendants(tank) {
-            // `meshes.get` doubles as the `Mesh3d` filter (non-mesh nodes `Err` out) and the current
-            // layer read; write only when it differs from the desired layer.
             if let Ok(current) = meshes.get(entity)
                 && current != Some(&desired)
             {
@@ -657,26 +580,18 @@ fn reconcile_optic_render_layers(
     }
 }
 
-/// The gunner optic's radius as a fraction of the view's **half** vertical FOV — the single shared
-/// object that ties the cursor's travel circle to the drawn optic rim. `drive_gunner_aim` uses it
-/// for the intent's angular margin (`margin = OPTIC_RADIUS_FRACTION · fov/2`); the circular
-/// sight-overlay UI (to come) MUST read this same constant for its rim radius, so the cursor can
-/// reach exactly the drawn edge — no more, no less — by construction rather than by two hand-tuned
-/// numbers drifting apart. Angular by half-FOV means it maps to a fixed fraction of the viewport's
-/// half-height regardless of magnification: the overlay's rim in pixels is `OPTIC_RADIUS_FRACTION ·
-/// viewport_height/2`. 0.9 leaves a sliver of margin between the cursor's reach and the hard edge.
+/// Cursor radius as a fraction of half the vertical FOV: `margin = fraction * fov / 2`.
+///
+/// Invariant: sight input and the optic overlay share this constant.
 pub const OPTIC_RADIUS_FRACTION: f32 = 0.9;
 
-/// The cursor-travel / optic-rim angular radius (radians) for a view of vertical FOV `fov`: a fixed
-/// fraction of the half-FOV (see [`OPTIC_RADIUS_FRACTION`]). Pulled out as a pure function so the
-/// derivation is unit-testable and the overlay UI can call the identical maths.
+/// Angular cursor radius for vertical FOV `fov`.
 fn optic_margin(fov: f32) -> f32 {
     OPTIC_RADIUS_FRACTION * (fov / 2.0)
 }
 
 /// Clamp `value` to a servo's authored travel `limits` (radians); a `None` (continuous) mount passes
-/// through untouched. Kept pure for the unit test — the caller shifts the pitch window by the lob
-/// before calling (sight line = lay − superelevation).
+/// through untouched.
 fn clamp_to_travel(value: f32, limits: Option<(f32, f32)>) -> f32 {
     match limits {
         Some((min, max)) => value.clamp(min, max),
@@ -684,34 +599,23 @@ fn clamp_to_travel(value: f32, limits: Option<(f32, f32)>) -> f32 {
     }
 }
 
-/// What `drive_gunner_aim` publishes this frame: the value re-authored into `command.aim` every
-/// frame (recirculation — never fall silent), and, when the optic OWNS the intention, the point to
-/// re-store into [`aim::CommittedAim`] (`None` = leave the committed memory untouched).
+/// Convert the elevation servo's lay limits into the sight-line window (`sight = lay − lob`).
+fn sight_pitch_limits(lay_limits: Option<(f32, f32)>, lob: f32) -> Option<(f32, f32)> {
+    lay_limits.map(|(min, max)| (min - lob, max - lob))
+}
+
+/// Values published by `drive_gunner_aim` for this frame.
 struct AimPublish {
-    /// Re-authored into `command.aim` every frame in the optic.
+    /// Command aim re-authored every optic frame.
     command_aim: Vec3,
-    /// `Some` = re-store into `CommittedAim` (the optic's freshly resolved point); `None` = leave
-    /// the committed memory exactly as it was (the zero-input-identity invariant).
+    /// Updated committed point; `None` preserves existing memory.
     store: Option<Vec3>,
 }
 
-/// The **zero-input-identity** decision for the optic's aim commit. Both modes commit RESOLVED
-/// WORLD POINTS, but they resolve from different origins — third person raycasts from the orbit
-/// camera, the optic from the gun mount — so re-resolving an inherited commitment can land on
-/// DIFFERENT world geometry (a crest the elevated camera saw over occludes the mount's lower ray),
-/// and a mode transition must be identity on the aim. So the resolve is gated on actual input:
+/// Preserve an existing committed point until the optic receives mouse motion.
 ///
-/// - **No mouse motion this frame, with an existing commitment** (`committed_point = Some`,
-///   `!moved`): re-author the ORIGINAL committed point verbatim and store NOTHING. A mode
-///   transition with zero input is thus identity on `CommittedAim` and on the gun's lay — the gun
-///   keeps chasing exactly the point it chased in third person, floor / horizon / sky alike.
-/// - **The player moved the mouse** (`moved`): the optic takes ownership — publish and re-store
-///   the point just resolved along the moved sight line. From here the intention is the optic's
-///   own resolve, and the commander finds it (a real point on the world) on a later mode switch.
-/// - **No commitment yet** (`committed_point = None`: fresh spawn or a possession change): there
-///   is nothing to preserve, so the resolve seeded from the gun's lay must be published AND stored
-///   to establish the commitment — even with zero input, so the recirculation invariant still
-///   writes `command.aim`.
+/// Invariant: zero input is identity across view origins. Mouse motion, or no prior commitment,
+/// publishes and stores `resolved`.
 fn resume_commit(committed_point: Option<Vec3>, moved: bool, resolved: Vec3) -> AimPublish {
     match committed_point {
         Some(point) if !moved => AimPublish {
@@ -725,50 +629,12 @@ fn resume_commit(committed_point: Option<Vec3>, moved: bool, resolved: Vec3) -> 
     }
 }
 
-/// World-space position-control aiming. The one committed intention (the shared [`aim::CommittedAim`],
-/// resumed into yaw/pitch each frame — or seeded from the gun's lay when this tank has none yet)
-/// takes this frame's mouse deltas, is clamped, then RESOLVED against the world and re-published as
-/// the tank's commanded aim so `aim::drive_aim_servos` chases it with *every* servo, the gun and the
-/// hull MG alike, at their own slew rates. No servo command is written here; this only moves the aim
-/// intention.
+/// Resolve optic input into the shared hull-local [`aim::CommittedAim`] and `TankCommand`.
 ///
-/// **One frame convention, one origin.** The resume decomposes `point − mount` (the gun pivot, from
-/// the same physics-truth chain `drive_aim_servos` lays from), the clamps compare against the gun's
-/// lay measured at that same mount, and the resolve raycasts FROM that mount along the sight line —
-/// so the working angles, the servo convergence, and the gunner camera (parked at the pivot) all
-/// agree, and no conversion ever moves the gun by the mount↔hull-origin parallax (~2.5° at 50 m —
-/// most of the optic's 3.1° radius; the "snaps on first input" regression).
-///
-/// **Zero-input identity ([`resume_commit`]).** Both modes commit resolved points, but from
-/// different origins (orbit camera vs mount), so re-resolving an inherited commitment could land on
-/// different geometry (crest occlusion). The resolve is therefore published/re-stored ONLY once the
-/// player actually moves the mouse (or on a fresh tank with no commitment to preserve); until then
-/// the resume re-authors the ORIGINAL committed point verbatim — the gun does not move, the reticle
-/// does not jump, and `CommittedAim` is left untouched. From the first mouse delta the optic OWNS
-/// the intention and re-stores its own resolve, so the commander finds a real point on the world
-/// already committed on the next mode switch.
-///
-/// Two bounds shape the intent, in order:
-///
-/// 1. **Mechanical travel** — the intent is clamped to what the gun chain can actually reach, from
-///    the servos' authored travel limits ([`ServoSpec::travel_limits`], the same window
-///    `drive_servos` enforces on the lay). The servos limit the *lay* (bore); the intent tracks the
-///    *sight line* = lay − lob, so the reachable pitch window is those limits shifted DOWN by the
-///    superelevation θ. Without this the cursor could park above the gun's max elevation, the gun
-///    would saturate at its stop, and the reticle would peg at the optic rim forever, never settling.
-/// 2. **Circular optic margin** — the intent may then lead the gun's *current* sight line by at most
-///    `optic_margin(fov)` = [`OPTIC_RADIUS_FRACTION`] · half the authored optic FOV, so the cursor
-///    can't run past the optic edge ahead of the slow turret: pegged at the margin means "slewing at
-///    max," near centre means "caught up." Deriving the radius from the *authored* per-tank FOV (not
-///    a hardcoded angle) makes the travel circle the same object as the drawn optic rim. The clamp is
-///    circular (not per-axis) so diagonal lead feels uniform — a square clamp let you lead ~√2·margin
-///    on the diagonal — and yaw is wrapped (`shortest_angle`) so continuous traverse past ±π doesn't
-///    yank the intent across the wrap.
-///
-/// Inside both bounds the absolute intent is left untouched (hull-local) so the gun genuinely catches
-/// up as it slews — re-pinning to `current + offset` each frame would make the target recede with the
-/// gun (never arrives). The gun chain (`Turret`/`Gun`) is the lead reference; the hull MG rides the
-/// same point.
+/// Invariants: decomposition, clamping, and ray resolution share the gun-mount origin;
+/// [`resume_commit`] alone owns zero-input identity; mechanical travel is applied before the
+/// circular [`optic_margin`] clamp; and intent remains absolute inside both bounds rather than
+/// following the current servo lay.
 fn drive_gunner_aim(
     motion: Res<AccumulatedMouseMotion>,
     spatial: SpatialQuery,
@@ -790,19 +656,11 @@ fn drive_gunner_aim(
         return;
     };
 
-    // The one committed intention, filtered for finiteness: a poisoned committed value (rollback
-    // edge) reads as NO commitment, so the seed-from-lay path below overwrites it with a finite
-    // resolve instead of latching the optic dead (a NaN resume would trip the direction guard
-    // before every publish, forever, with nothing in gunner mode ever healing the memory).
+    // Treat non-finite memory as absent so a fresh finite resolve can replace it.
     let committed_point = committed.get(tank).filter(|point| point.is_finite());
-    // Zero motion this frame is exactly `Vec2::ZERO` from `AccumulatedMouseMotion`.
     let moved = motion.delta != Vec2::ZERO;
 
-    // Zero-input identity, taken FIRST — [`resume_commit`]'s no-motion arm, short-circuited before
-    // any pose work: with an existing commitment and no input, re-author the ORIGINAL point
-    // (recirculation: holding is an act) and touch nothing else. Publishing before the pose fetch
-    // keeps the hold alive even on a frame the resolve guards below would skip, and drops the
-    // world raycast that `resume_commit` would discard anyway.
+    // Fast path before pose guards so [`resume_commit`]'s preserved point is always re-authored.
     if let Some(point) = committed_point
         && !moved
     {
@@ -911,11 +769,13 @@ fn drive_gunner_aim(
     // `Continuous` (yaw passes through); a limited-traverse turret would clamp yaw directly (no lob
     // on yaw). Clamping the absolute intent here — before the circular clamp — guarantees the final
     // intent is reachable, so the reticle always has an angle it can settle onto.
-    let pitch_limits = servo_specs
-        .get(rig.gun)
-        .ok()
-        .and_then(ServoSpec::travel_limits)
-        .map(|(min, max)| (min - theta, max - theta));
+    let pitch_limits = sight_pitch_limits(
+        servo_specs
+            .get(rig.gun)
+            .ok()
+            .and_then(ServoSpec::travel_limits),
+        theta,
+    );
     let yaw_limits = servo_specs
         .get(rig.turret)
         .ok()
@@ -1065,9 +925,7 @@ fn update_toast(
 mod tests {
     use super::*;
 
-    /// The pure hide invariant: a mesh is hidden from the optic ([`OPTIC_HIDDEN_LAYER`]) only when it
-    /// belongs to the controlled tank AND the gunner optic is up; every other combination is layer 0
-    /// (the world the camera draws — including opponents, so the optic sees them).
+    /// Regression: only the controlled tank is hidden in the optic.
     #[test]
     fn desired_optic_layer_hides_only_controlled_in_gunner() {
         let hidden = RenderLayers::layer(OPTIC_HIDDEN_LAYER);
@@ -1090,20 +948,13 @@ mod tests {
         );
     }
 
-    /// The reconcile is CONTINUOUS DERIVED RENDER STATE: it re-lays every mesh's render layer from the
-    /// live (`SightMode`, `Controlled`, mesh set) each frame, not on a `SightMode` event. This drives
-    /// the whole system through its transitions and asserts each mesh's `RenderLayers`, including the
-    /// two cases the old event-driven stamp missed (both fail without the per-frame reconcile):
-    /// a mesh attaching asynchronously WHILE in the optic, and `Controlled` moving to a fresh tank
-    /// with NO `SightMode` write (the multiplayer respawn that leaves the barrel in the sight).
+    /// Regression: the continuous reconcile handles mesh attachment and control changes.
     #[test]
     fn reconcile_lays_layers_across_transitions() {
         let mut app = App::new();
         app.init_resource::<SightMode>();
         app.add_systems(Update, reconcile_optic_render_layers);
 
-        // Two tanks: A controlled (a direct mesh + a mesh under a non-mesh sub-node, to exercise
-        // `iter_descendants`), B an opponent with its own meshes.
         let world = app.world_mut();
         let tank_a = world.spawn((Tank, Controlled)).id();
         let a_direct = world
@@ -1323,19 +1174,14 @@ mod tests {
         assert!((clamp_to_travel(0.1, limits) - 0.1).abs() < 1e-9);
     }
 
-    /// Superelevation slides the reachable *sight-line* pitch window down by the lob: the servo
-    /// limits bound the lay (= sight line + θ), so a sight line laid at `max − θ` puts the bore
-    /// exactly at its elevation stop. As range is dialed out and θ grows, the sight can't be laid as
-    /// high — the gun spends more of its travel on the lob.
+    /// Superelevation shifts the reachable sight-line pitch window down from the lay limits.
     #[test]
     fn superelevation_shifts_pitch_window() {
         let (min, max) = (-8.0_f32.to_radians(), 15.0_f32.to_radians());
         let theta = 0.01_f32;
-        let shifted = Some((min - theta, max - theta));
-        // A sight line just under the shifted ceiling stays; one above it is pulled to `max − θ`.
-        let ceiling = max - theta;
-        assert!((clamp_to_travel(ceiling + 0.05, shifted) - ceiling).abs() < 1e-6);
-        // Lay = clamped sight line + θ never exceeds the mechanical `max`.
-        assert!(clamp_to_travel(ceiling + 0.05, shifted) + theta <= max + 1e-6);
+        let clamped = clamp_to_travel(max, sight_pitch_limits(Some((min, max)), theta));
+
+        assert!((clamped - (max - theta)).abs() < 1e-6);
+        assert!((clamped + theta - max).abs() < 1e-6);
     }
 }

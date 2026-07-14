@@ -1,22 +1,7 @@
-//! The track-model sandbox — an isolated tool to develop the continuous-track locomotion model
-//! (belt/envelope-based contact + procedural track) deterministically, decoupled from the game's
-//! per-wheel raycast rig (ADR-0005). Mounted by `bin/track_sandbox`, not by `GamePlugin`. See
-//! `.agents/docs/design/track-model/HQ.md`.
+//! Isolated continuous-track locomotion sandbox (ADR-0005).
 //!
-//! Fully self-contained on purpose: its own code-generated primitive running gear (no glTF, no
-//! `TankSpec`) and its own locomotion, so the new belt model can be iterated in isolation and only
-//! promoted into the game once it's proven — exactly how `armor_sandbox` grew the penetration march.
-//!
-//! State: a free-fly camera (WASD/mouse); a deterministic test course (flat lane + two trenches +
-//! step + ramp); a code-generated **dynamic** primitive rig carried by **belt contact sampled around
-//! the whole loop along each station's outward normal** (down under the tracks, forward on the front
-//! face, …), driven by a **belt-speed / slip model** (each track has a belt speed; friction =
-//! μ·load·saturate(slip); the front face's drive axis points up, so a spinning belt grinds up walls).
-//! Hull + sprocket/idler colliders back it as a hard stop (frictionless — pure penetration stops;
-//! the belt owns all tangential physics). Arrow keys drive; contact dots colour green→red by slip.
-//! `R` tours the reset spots, `M` cycles the registered locomotion models (the live A/B — see
-//! [`Model`]), `L` logs state, `J` prints the jitter probe, `Esc` pauses. The procedural (animated)
-//! track lands in a later step.
+//! It owns code-generated rig, course, and belt-contact models so experimental locomotion remains
+//! independent from the game's data-driven simulation.
 
 use avian3d::prelude::{
     AngularInertia, AngularVelocity, CoefficientCombine, Collider, CollisionLayers, Forces,

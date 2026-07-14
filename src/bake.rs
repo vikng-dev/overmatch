@@ -1,36 +1,17 @@
-//! The sim/view split's data source (design `sim-view-split-and-tank-bake.md` §8): the
-//! tank-geometry extractor and its shadow harness.
+//! Tank-geometry extraction and view-shadow verification.
 //!
-//! `extract_tank_geometry` parses the tank's `.glb` **as data** — the `gltf` crate against the
-//! file, no Bevy scene, no asset dependency — into [`TankGeometry`]: every node's name, parent,
-//! local transform, root-relative pose, (for sim-consumed meshes) raw vertex/index buffers, and
-//! the typed part lists the sim classifies by naming convention (roadwheel stations tagged with
-//! their track side, `*_Collider` collision proxies) — so the runtime never re-parses a node name
-//! for sim meaning (design §8 step 3). Since step 1 this is what the sim skeleton spawns from
-//! (`tank::spawn_tank_sim`) — the scene walk it replaced was step-0-shadow-proven to read exactly
-//! these values. The same function is phase 2's offline compiler core (one parser, two mounting
-//! points — design §6A).
-//!
-//! The shadow harness stays on: the extractor runs at startup and a shadow observer compares its
-//! output against every instantiated tank scene — names, hierarchy, local transforms (bit-exact),
-//! composed root poses (bit-exact, in `rig_world_pose`'s own operation order), and
-//! collider/ballistic mesh bytes against `Assets<Mesh>`. Post-step-1 that direction reverses
-//! meaning: it proves the *view* the player sees matches the data the sim runs on (and still
-//! catches a bevy_gltf coordinate-conversion default flip — design §7.2). Mismatches panic in
-//! debug builds and log errors in release; a clean pass logs one grep-able `SHADOW-BAKE ok` line
-//! (harness evidence).
-//!
-//! The startup parse re-reads the glb the asset server also loads (~65 MB, once) — scaffolding
-//! that phase 2 deletes along with the runtime glb dependency.
+//! Invariant (ADR-0014): simulation construction uses synchronously extracted data, never a loaded
+//! scene. The shadow verifier compares that data with instantiated view geometry.
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use bevy::mesh::VertexAttributeValues;
 use bevy::prelude::*;
 use bevy::world_serialization::WorldInstanceReady;
 
-use crate::spec::TankSpecHandle;
+use crate::spec::{TankSpec, TankSpecHandle};
 use crate::tank::{SimParts, TrackSide};
 
 /// One glTF node, extracted. `name` follows bevy_gltf's rule exactly (authored name, else
@@ -59,7 +40,7 @@ pub(crate) struct MeshGeometry {
     pub indices: Vec<u32>,
 }
 
-/// The whole model, extracted as data — the sim skeleton's spawn source (`tank::spawn_tank_sim`),
+/// The whole model, extracted as data — the sim skeleton's construction source,
 /// shadow-verified against every instantiated tank scene.
 pub(crate) struct TankGeometry {
     pub nodes: Vec<NodeGeometry>,
@@ -75,8 +56,17 @@ pub(crate) struct TankGeometry {
     pub collision_proxies: Vec<usize>,
 }
 
-#[derive(Resource)]
-pub(crate) struct ExtractedTankGeometry(pub TankGeometry);
+/// Runtime spawn data for the shipped Tiger, assembled before network receive can run. The spec is
+/// embedded and geometry is parsed synchronously from the GLB, so spawn does not depend on Bevy's
+/// asset-server timing. Runtime GLB extraction and the missing content fingerprint remain the
+/// transitional seam recorded in `ARCHITECTURE.md`.
+#[derive(Resource, Clone)]
+pub(crate) struct TankBlueprint {
+    pub geometry: Arc<TankGeometry>,
+    pub spec: Arc<TankSpec>,
+}
+
+const TIGER_SPEC_RON: &str = include_str!("../assets/tiger_1/tiger_1.tank.ron");
 
 /// Which nodes' mesh buffers the sim consumes: collision proxies (`*_Collider` → convex hull,
 /// Vehicle layer) and ballistic volumes (`*_Ballistic` → trimesh, Armor layer). Volumes are
@@ -145,7 +135,15 @@ fn extract_at_startup(mut commands: Commands) {
         geometry.nodes.len(),
         mesh_nodes
     );
-    commands.insert_resource(ExtractedTankGeometry(geometry));
+    let spec: TankSpec = ron::de::from_str(TIGER_SPEC_RON)
+        .unwrap_or_else(|err| panic!("bake: embedded Tiger spec failed to parse: {err}"));
+    spec.validate()
+        .unwrap_or_else(|err| panic!("bake: embedded Tiger spec failed validation: {err}"));
+
+    commands.insert_resource(TankBlueprint {
+        geometry: Arc::new(geometry),
+        spec: Arc::new(spec),
+    });
 }
 
 /// Parse the glb as data into [`TankGeometry`]. Pure with respect to the app: `gltf` crate only,
@@ -291,7 +289,7 @@ pub(crate) fn extract_tank_geometry(path: &Path) -> Result<TankGeometry, String>
 /// writes nothing).
 fn shadow_compare_on_instance_ready(
     ready: On<WorldInstanceReady>,
-    geometry: Option<Res<ExtractedTankGeometry>>,
+    blueprint: Option<Res<TankBlueprint>>,
     tanks: Query<(), With<TankSpecHandle>>,
     sim_parts: Query<&SimParts>,
     children: Query<&Children>,
@@ -304,14 +302,12 @@ fn shadow_compare_on_instance_ready(
     if !tanks.contains(ready.entity) {
         return;
     }
-    let Some(geometry) = geometry.as_deref() else {
+    let Some(blueprint) = blueprint.as_deref() else {
         // Startup extraction precedes any instantiation; absence is a wiring bug, not a race.
-        fail(vec![
-            "ExtractedTankGeometry resource missing at bind".into(),
-        ]);
+        fail(vec!["TankBlueprint resource missing at bind".into()]);
         return;
     };
-    let geometry = &geometry.0;
+    let geometry = &blueprint.geometry;
     // The tank root's descendants hold TWO same-named trees since step 1: the data-spawned sim
     // skeleton and the instantiated glb scene (the view). The shadow's subject is the VIEW — skip
     // the sim parts, whose transforms are the extracted values by construction.

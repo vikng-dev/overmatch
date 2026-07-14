@@ -1,13 +1,7 @@
-//! MODEL 3 — box-belt: model 2's link-belt with the actual T-34 shoe as the contact primitive.
-//! Each link is a real **box** — 500 mm wide × 172 mm pitch × ~40 mm thick — hung symmetrically on
-//! the **pin line**, the true pitch line of a link chain (172 mm IS pin-to-pin; sprocket engagement
-//! is at pitch radius). One solved curve, three parallel offsets: wheels ride the **inner face**
-//! (pin − t/2), the chain state (joints, advection, Verlet solve) lives on the **pin line**, and
-//! terrain contact + force application happen at the **outer face** (pin + t/2 — the lever arm
-//! includes the shoe). Increment 1 (this file): pin-line chain + oriented box cast on the
-//! centerline. Increment 2: the real 500 mm width + lateral edge-column pressure profiles.
-//! Increment 3: draw the boxes. Parked consciously: link self-collision, end-face contact, guide
-//! horns (real castings interlock — the meshes' job, not physics).
+//! Box-belt model: model-2 chain dynamics with oriented box-shoe terrain contact.
+//!
+//! The chain solves on each shoe's pin line; wheel and terrain interfaces use inner and outer face
+//! offsets respectively so force lever arms include shoe thickness.
 
 use avian3d::prelude::ShapeCastConfig;
 
