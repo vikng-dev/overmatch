@@ -1,22 +1,7 @@
-//! The bundled UI typeface — Barlow Condensed, loaded once and handed to every `Text` the client
-//! spawns. Retires Bevy's ASCII-only default font (a FiraMono subset with no fallback, which draws
-//! tofu for any non-ASCII glyph — the reason for the `tests/ui_ascii.rs` stopgap). Barlow Condensed
-//! covers the full ASCII range plus the typographic set the UI actually uses (… — – ° × ± ≤), all
-//! verified against the shipped `.ttf` cmaps; anything past that still needs a fresh cmap check
-//! (see the rule in `.agents/AGENTS.md` and `tests/ui_ascii.rs`).
+//! Bundled Barlow Condensed UI fonts.
 //!
-//! Two weights ship: SemiBold for overlay/all-caps/identity text, Regular for the smaller, denser
-//! numeric readouts. Both files live under `assets/fonts/` alongside their SIL OFL license
-//! (`OFL.txt`), which the license requires to travel with the fonts — the release packaging copies
-//! `assets/` wholesale, so it rides along automatically.
-//!
-//! Handles are resolved at **plugin-build time** (not in a `Startup` system): `AssetServer::load`
-//! returns a handle synchronously, and inserting [`UiFonts`] during `build` guarantees it exists
-//! before any `Startup` UI-spawn system reads it, so no spawn can race a not-yet-inserted resource.
-//! Mounted by every composition root that spawns UI — [`crate::ClientPlugin`],
-//! [`crate::NetClientPlugin`], and the armor sandbox — so the shared HUD plugins (`hud`, `crew_ui`,
-//! …) always find the resource. The headless server and scripted harness mount no UI, so they never
-//! mount this.
+//! Handles are inserted during plugin setup so every `Startup` UI spawner can read [`UiFonts`]. UI
+//! strings must remain within the shipped font coverage enforced by `tests/ui_ascii.rs`.
 
 use bevy::prelude::*;
 

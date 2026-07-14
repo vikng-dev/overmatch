@@ -1,17 +1,6 @@
-//! Where this process reads its `assets/` from — one resolver, shared by the two subsystems that
-//! must agree on it: Bevy's `AssetPlugin` (wired in `net::client`) and the tank-geometry bake
-//! (`bake::extract_at_startup`). Both open the SAME `tiger_1.glb`; before the rule was shared they
-//! diverged on macOS — the bake used Bevy's raw [`FileAssetReader::get_base_path`], which in a
-//! double-clicked `.app` (no `BEVY_ASSET_ROOT` / `CARGO_MANIFEST_DIR`) falls through to the exe dir
-//! `…/Contents/MacOS`, while the asset server special-cased `…/Contents/Resources/assets` (where the
-//! packager actually puts them). The asset server found the meshes; the bake did not, and the client
-//! panicked on startup. That was the v0.3.0-alpha.2 macOS `.dmg` crash.
+//! Shared asset-root resolver for Bevy loading and geometry extraction.
 //!
-//! [`FileAssetReader::get_base_path`]: bevy::asset::io::file::FileAssetReader::get_base_path
-//!
-//! Lives at the crate root (not under `net`) because `bake` shares it: it was once a private copy
-//! inside `net::client`, unreachable from `bake`, and was lifted here so both subsystems resolve the
-//! asset root by the one rule.
+//! Invariant: both consumers resolve the same `assets/` tree, including packaged macOS bundles.
 
 use std::path::{Path, PathBuf};
 

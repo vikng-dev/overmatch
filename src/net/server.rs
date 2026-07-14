@@ -1,9 +1,4 @@
-//! The networked dedicated server (step 7 of the lightyear spike map's recommended order):
-//! `SimPlugin` mounted for real — driving/aim/shooting/damage all run under prediction now, not
-//! the increment-5 stub. Headless — the proven `headless_test.rs` recipe (full `DefaultPlugins`,
-//! no GPU/window/winit), NOT `MinimalPlugins`, because the rig loads the same `.glb`/`.tank.ron`
-//! assets the client does.
-//! Run with `cargo run --bin overmatch-server` (the `net` feature is on by default).
+//! Authoritative dedicated-server composition root.
 
 use core::time::Duration;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -50,58 +45,23 @@ pub fn run() {
             })
             .disable::<bevy::winit::WinitPlugin>(),
     )
-    // No winit means no runner: drive the main schedule ourselves, unthrottled enough for a
-    // 64 Hz fixed clock.
+    // Headless composition needs its own application runner.
     .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(2)));
 
-    // Ordering per the spike map §3: ServerPlugins, then protocol registration, then the Server
-    // entity. `net::plugin` also mounts `LightyearAvianPlugin` + Position/Rotation/velocity
-    // registration (map §5).
     app.add_plugins(ServerPlugins {
         tick_duration: Duration::from_secs_f64(1.0 / 64.0),
     });
     app.add_plugins(super::plugin);
     super::disclosure::install_server(&mut app);
     app.add_plugins(physics::physics_plugins());
-    // Step 7: the real sim, for real — driving/aim/shooting/damage all run under prediction now.
-    // `SimPlugin` no longer bundles physics (that split already happened in Milestone A), so it
-    // composes cleanly alongside `physics_plugins()` above. Not `tank::sp_spawn_plugin` (the
-    // single-player two-tank duel scenario) — the server keeps its own per-client spawn below.
     app.add_plugins(SimPlugin);
-    // Passive jitter-trace recorder: tick rows only (the server has no predicted view to render).
-    // Idle unless `SPIKE_TRACE` is set.
     app.add_plugins(crate::trace::server_plugin);
-    // Per-fixed-tick sim-cost recorder: idle unless `SPIKE_COST_TRACE` is set (the MG-march cost spike).
     app.add_plugins(crate::cost::server_plugin);
-    // Shot-lifecycle recorder: the authority's half (fire broadcast / ricochet keyframe / impact
-    // confirm, keyed by `ShotId`). Idle unless `SPIKE_SHOT_TRACE` is set — see `crate::shot_trace`.
     app.add_plugins(crate::shot_trace::server_plugin);
     super::shot_transport::install_server(&mut app);
-    // Server-authoritative input authorization: strip any `InputTarget::Entity` a client is NOT the
-    // `ControlledBy` owner of, before the input buffer ever applies it. lightyear ships this as an
-    // opt-in `InputSystems::ValidateInputs` system (`add_input_validator` = sugar for
-    // `add_systems(PreUpdate, .in_set(ValidateInputs))`, lightyear_inputs server.rs:153-160) and does
-    // NOT enable it by default — `ControlledBy` is an optional ownership model. We DO use it (every
-    // player tank is spawned `ControlledBy` its link), so register the built-in
-    // `authorize_controlled_targets` for our native `TankCommand` sequence. Placed on the SERVER only:
-    // it queries the server-side `MessageReceiver<InputMessage<S>>` + `ControlledByRemote` (which only
-    // exist on the authority) and is the enforcement point for "a client cannot drive a tank it does
-    // not own" — the second line of defense behind unique client ids, in case a client is modified to
-    // forge `InputTarget::Entity(opponent)`. Inert on the client (no such receiver), but scoped here so
-    // authorization is unambiguously an authority concern.
+    // Authority must reject input targets not controlled by their sending client.
     app.add_input_validator(authorize_controlled_targets::<NativeStateSequence<TankCommand>>);
-    // Give every remote client link a `ReplicationSender`. lightyear's per-client visibility hooks
-    // (`ReplicationTarget::on_insert` / `ControlledBy::on_insert`) only set the hide/show bits for
-    // `Predicted`/`Interpolated`/`Controlled` on links that carry `ReplicationSender` (or `HostClient`);
-    // without it those `on_insert` hooks no-op, and an UNSET visibility bit defaults to VISIBLE — so all
-    // three ownership markers broadcast to EVERY client and each one predicts + claims input on EVERY
-    // tank (the "one player controls both tanks" leak). The one visibility path that isn't
-    // `ReplicationSender`-gated (`handle_new_client_visibility`) fires only at connect, before
-    // `spawn_pending_tanks` creates the tanks, so it never covers them — the spawn-time path is
-    // always `on_insert`. Replication itself still works (replicon's `ConnectedClient` drives the send),
-    // which is why only the ownership markers leaked. Canonical lightyear examples add this in their
-    // `On<Add, LinkOf>` handler; `ReplicationSender` is a unit marker used solely by the visibility
-    // hooks (it does not start a duplicate send loop), so inserting it is safe.
+    // Lightyear visibility hooks require `ReplicationSender` on each remote link.
     app.add_observer(attach_replication_sender);
 
     let server = app
@@ -109,13 +69,7 @@ pub fn run() {
         .spawn((
             Name::new("Server"),
             NetcodeServer::new(NetcodeConfig {
-                // The protocol-compatibility guard's server end: only a client whose connect token was
-                // built with the SAME `PROTOCOL_FINGERPRINT` decrypts here (netcode folds `protocol_id`
-                // into the token AEAD), so a version/wire-skewed client is refused at the handshake
-                // rather than admitted into a replication stream it cannot apply. Must match the
-                // client's `Authentication::Manual.protocol_id` (`net::client`). A skewed client is
-                // transport-indistinguishable from a down server (the request is silently dropped) —
-                // the client-side overlay surfaces that as a combined hint after N failed attempts.
+                // Must match the client's `Authentication::Manual.protocol_id`.
                 protocol_id: PROTOCOL_FINGERPRINT,
                 private_key: [0; 32], // dev only — matches the client's Authentication::Manual
                 ..default()
@@ -143,11 +97,7 @@ pub fn run() {
         (
             handle_new_clients,
             spawn_pending_tanks,
-            // Ownerless test bot (`OVERMATCH_BOT`, default OFF): a self-driving remote every client
-            // interpolates, so the remote-tank path can be exercised without a second client.
             spawn_bot,
-            // The bot's death→respawn loop: schedule 5 s out when its root gains `TankKnockedOut`,
-            // then sweep the dead bot (and any detached launched turret) and spawn a fresh one.
             schedule_bot_respawn,
             respawn_dead_bots,
             open_gameplay_gate,
@@ -160,13 +110,8 @@ pub fn run() {
         (
             log_tank_commands,
             harness::perturb_after_delay,
-            // Steer the bot each tick — in `GameplaySet` before the edge-consumer, like every other
-            // command writer; a direct `TankCommand` write (the bot carries no `ActionState`, so
-            // `bridge_action_state_to_tank_command` skips it).
+            // Command writers must run before edge consumption.
             drive_bot.in_set(GameplaySet).before(ConsumeCommandEdges),
-            // Honor a dead client's respawn edge — a command READER, so in `GameplaySet` before the
-            // edge-consumer, alongside `drive_bot`, so it sees this tick's bridged `respawn` edge
-            // before `consume_edges` clears it.
             respawn_player_tanks
                 .in_set(GameplaySet)
                 .before(ConsumeCommandEdges),
@@ -217,26 +162,16 @@ impl CombatantIds {
     }
 }
 
-/// Insert [`ReplicationSender`] onto every remote client link the moment it spawns. This is the gate
-/// lightyear's per-client `Predicted`/`Interpolated`/`Controlled` visibility hooks require — see the
-/// registration in [`run`] for the full rationale. `On<Add, LinkOf>` fires structurally, before both
-/// `spawn_pending_tanks` and `spawn_bot`, so the sender is always present when a tank's `on_insert`
-/// visibility path runs.
+/// Insert the marker required by Lightyear's per-client visibility hooks before tank spawning.
 pub(super) fn attach_replication_sender(add: On<Add, LinkOf>, mut commands: Commands) {
     commands.entity(add.entity).insert(ReplicationSender);
 }
 
-/// Persistent spawn-lane counter so successive (and reconnecting) clients fan out along X instead
-/// of stacking on the shared base pose — two tanks spawned at the same spot interpenetrate and NaN
-/// the solver. Never reset: a reconnecting client just takes the next free lane. Lanes step 0, +8,
-/// −8, +16, −16 … metres ([`lane_offset`]), comfortably inside the 1000 m ground slab and clear of
-/// both the −Z test course and the +38 m side-slope.
+/// Monotonic spawn-lane allocator; concurrent tanks must not overlap at spawn.
 #[derive(Resource, Default)]
 struct SpawnLane(u32);
 
-/// The per-lane X offset laid on top of the base spawn pose: lane 0 is exactly on the base (so a
-/// single client — and the deterministic `SPIKE_SPAWN_POSE` harness repro — lands unshifted), then
-/// odd lanes step +8 m, even lanes −8 m, the magnitude growing 8 m each pair.
+/// Symmetric X offsets around the base spawn pose.
 fn lane_offset(lane: u32) -> Vec3 {
     let step = lane.div_ceil(2) as f32 * 8.0;
     let sign = if lane % 2 == 1 { 1.0 } else { -1.0 };
@@ -573,8 +508,7 @@ fn drive_bot(mut bots: Query<&mut TankCommand, With<Bot>>) {
     }
 }
 
-/// Step-4 success signal (carried over): the client's `TankCommand` arriving through lightyear's
-/// input buffer.
+/// Log commands received through Lightyear's input buffer.
 fn log_tank_commands(states: Query<(Entity, &ActionState<TankCommand>)>) {
     for (entity, state) in &states {
         let cmd = &state.0;

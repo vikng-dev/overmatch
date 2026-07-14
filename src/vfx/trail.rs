@@ -1,8 +1,7 @@
-//! Main-gun smoke ribbon built from [`ShellPath`], without new simulation state.
+//! Main-gun smoke ribbon derived from [`ShellPath`].
 //!
-//! Authority corrections create disconnected path segments. The ribbon uses one mesh but emits no
-//! bridge triangles between segments, preserving the invariant that a client-local contact never
-//! becomes a fictional trail to a server re-anchor.
+//! Invariant (ADR-0014): view state never extends a simulation path. Disconnected path segments
+//! receive no bridge triangles.
 
 use std::collections::VecDeque;
 
@@ -267,9 +266,7 @@ fn attach_trails(
             #[cfg(test)]
             mesh_evidence_pending: VecDeque::new(),
         };
-        // A net catch-up shell spawns with its skipped flight already in `ShellPath` — capture it
-        // now with HONEST ages (one fixed tick per recorded point, oldest first), so a remote
-        // trail's tail is already mid-dissolve exactly as the shooter saw it.
+        // Catch-up points receive elapsed ages so the ribbon starts at its current flight state.
         let pre = path.points.len();
         for (i, point) in path.points.iter().enumerate() {
             capture_point(

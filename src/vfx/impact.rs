@@ -1,43 +1,9 @@
-//! View-layer impact VFX, layered per the survey's impact recipe (trick 7, scaled to what `Impact`
-//! carries): a HYBRID read on every landed round —
-//!   * a Kenney dust BILLOW (alpha-blend billboard, its own warm-gray→earth LUT) that expands and
-//!     drifts along the surface normal — the mass of the read, replacing the old emissive sphere
-//!     that read as a glowing circle rather than kicked dust;
-//!   * a 1-frame additive PING (a small round glow) at the hit point — the instant of contact; and
-//!   * a handful of stretched-billboard SPARKS (survey trick 8: velocity-elongated additive streaks,
-//!     free motion blur) kicked in a cone around the hit's surface normal — the crisp hot garnish.
+//! View-only impact dressing for [`Impact`].
 //!
-//! All three ride the shared billboard machinery ([`super::billboard`]) — one aging system, one
-//! eviction ring — so an impact storm stays bounded with the muzzle dressing. The read exists so the
-//! four non-tracer rounds of an MG belt cycle still register at the target: the rounds themselves
-//! stay invisible in flight (only every fifth gets a streak — `ballistics::on_fire_shell`), but
-//! every round that lands billows + pings + sparks, so a burst visibly walks across whatever it is
-//! hitting instead of one lone tracer arriving out of nowhere.
-//!
-//! The read branches on TWO axes the `Impact` carries: the round's physical `caliber` and the
-//! `surface` it struck.
-//!
-//!   * Caliber: at/above [`TRACER_MAX_CALIBER`] (the same big/small boundary the muzzle + tracer
-//!     paths use) the 88 lands a full large-caliber read; below it, the MG's compact read.
-//!   * Surface: armor is categorically NOT dirt (War Thunder Drone-Age dev material + GHPC
-//!     reference). A TERRAIN hit reads as a dirt splash; an ARMOR hit reads as spark-on-steel.
-//!
-//! So the 88 on TERRAIN lands the full SPLASH stack — contact flash, dirt ejecta, a tall dirt plume,
-//! a low dust ring, a lingering cloud, and a flat ground scar; the 88 on ARMOR instead lands a
-//! white-hot contact flash, a dense fast hot spark fan, and a small gray spall/smoke puff — no plume,
-//! no dust ring, no ground scar, no lingering brown cloud — plus a brief flame lick ONLY when the
-//! round bit into the steel (`Impact.penetrated`). The MG on terrain is the byte-for-byte original
-//! small read; the MG on armor swaps its dirt-toned dust billow for a gray spall LUT (the honest
-//! minimum recolor — same shape, no change to the RNG draw order the small-read tests pin).
-//! The scale is HONEST throughout: the plume height/hang come from real large-caliber soil-strike
-//! footage, the armor read from steel-strike reference — never from screen size or camera distance
-//! (owner doctrine 2026-07-12 — no fake viewer assistance).
-//!
-//! Strictly view-only (ADR-0014): subscribes to the sim's [`Impact`] event and spawns short-lived
-//! render entities that no sim system ever reads — safe on a predicting net client (the replica
-//! still flies cosmetic shells and sparks `Impact`s; damage authority is untouched). Mounted by both
-//! windowed client compositions (SP `ClientPlugin` and `NetClientPlugin`); the headless server and
-//! the scripted harness never mount it.
+//! Invariant (ADR-0014): this module only reads simulation events and spawns transient render
+//! entities. Caliber and `ImpactSurface` choose the visual family; no visual entity affects damage.
+//! Product invariant (ADR-0023): visual scale and duration derive from physical event inputs, never
+//! viewer distance.
 
 use std::collections::VecDeque;
 
@@ -51,8 +17,7 @@ use super::billboard::{
     spawn_billboard_ring, unit_quad,
 };
 
-// --- The dust billow (survey trick 7): the mass of the impact read. Alpha-blend so it darkens and
-// occludes like real kicked dust, eroding as it thins — never the old uniform-fading emissive ball.
+// Alpha blending lets dust darken and occlude rather than behave as an emissive effect.
 
 /// Dust billow lifetime range (s): a short kicked cloud, not a smoke column; at the MG's cyclic rate
 /// anything longer stacks into fog. The RANGE is the per-impact variation.

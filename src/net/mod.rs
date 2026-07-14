@@ -1,7 +1,4 @@
-//! Networking adapter shared by the client and dedicated server composition roots.
-//!
-//! [`protocol`] owns the symmetric wire contract, [`physics`] the Avian integration, [`rig`] the
-//! replicated tank lifecycle, and [`diagnostics`] plus [`harness`] the measurement tooling.
+//! Networking adapter shared by client and server composition roots.
 
 use avian3d::schedule::PhysicsSystems;
 use bevy::prelude::*;
@@ -19,9 +16,7 @@ mod protocol;
 mod render_error;
 mod rig;
 mod server;
-/// The loss-injected end-to-end tripwire: two real apps over a real (conditioned) lightyear link,
-/// asserting exactly-once cosmetic-shell spawn and ricochet carry-through under seeded packet loss.
-/// Test-only — it exists to close the model-vs-reality gap the redundancy unit tests leave open.
+/// Real-UDP, loss-injected shot-transport integration tests.
 #[cfg(test)]
 mod shot_loss;
 mod shot_transport;
@@ -43,26 +38,19 @@ use rig::client_smoothing_plugin;
 use crate::state::AppState;
 use crate::tank::PendingTankAssets;
 
-/// The shared networking layer both composition roots mount: the wire contract (`protocol`), the
-/// physics re-anchor (`physics`), the networked rig lifecycle (`rig`), and the physics NaN probe.
-/// Identical on client and server, as lightyear demands.
+/// Shared protocol, physics, rig, and safety wiring. Both endpoints must mount it identically.
 fn plugin(app: &mut App) {
     protocol::plugin(app);
     physics::plugin(app);
     rig::plugin(app);
-    // Probe ahead of the physics pass, so the first corrupt value is named BEFORE avian's own
-    // finite-asserts panic mid-step (the Update-schedule tripwire never sees it — corruption and
-    // panic land inside one FixedMain run).
+    // Record corrupt values before Avian's physics preparation consumes them.
     app.add_systems(
         FixedPostUpdate,
         diagnostics::fixed_nan_probe.before(PhysicsSystems::Prepare),
     );
 }
 
-/// `SimPlugin` mounts `state::sim_plugin` (`AppState`, `GameplaySet` gated on `Playing`), and the
-/// composition roots have no menu/loading flow to drive that transition themselves. Tank spawn is
-/// independent of these assets; this gate only delays player gameplay until the current view is
-/// ready.
+/// Enter gameplay when the current tank view assets are ready.
 fn open_gameplay_gate(
     assets: Option<Res<PendingTankAssets>>,
     asset_server: Res<AssetServer>,

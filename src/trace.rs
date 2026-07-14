@@ -1,96 +1,12 @@
-//! The jitter-trace recorder: an env-gated, per-frame/per-tick JSONL log of the rendered vs.
-//! simulated tank pose, rollback events, and correction decay — the raw material an offline Python
-//! script graphs to explain MP hull jitter (worst under collision/suspension stress; SP is smooth).
+//! An opt-in, passive JSONL recorder for render pose, fixed-step state, and rollback events.
 //!
-//! A PASSIVE observer, like [`crate::net::diagnostics`]: nothing here writes sim state. Every system
-//! reads and appends a line, nothing more. The whole module is OFF unless `SPIKE_TRACE=<path>` is
-//! set at startup — [`install`] opens the file only then and reports whether it armed, so the
-//! recorder systems/observer are REGISTERED only in a traced run. An unset env var costs one
-//! `std::env::var` lookup at plugin-build and nothing thereafter (no per-frame run conditions).
+//! Invariant: tracing never writes simulation state. `SPIKE_TRACE` enables recorder registration;
+//! role-qualified paths prevent concurrently launched compositions from sharing a sink.
 //!
-//! The sink path is role-qualified so a server and client launched from one shell with the same
-//! `SPIKE_TRACE` value never truncate each other's file: `SPIKE_TRACE=/tmp/t.jsonl` writes
-//! `/tmp/t.client.jsonl` on the client, `/tmp/t.server.jsonl` on the server, `/tmp/t.sp.jsonl` in
-//! single-player (a value with no extension gets `.<role>.jsonl` appended). The startup `info!`
-//! line prints the RESOLVED path, not the raw env value.
-//!
-//! ## Row schema (one compact JSON object per line, `k` = kind)
-//! - `meta`   — once, at Startup: `role` ("sp"|"client"|"server"), `tick_hz` (derived from the app's
-//!   `Time<Fixed>` timestep, not hardcoded), `ver` (crate version). Written first (Startup runs
-//!   before any Update/FixedUpdate recorder).
-//! - `frame`  — per render frame, per tank root, AFTER transform propagation, so `p`/`q` are what
-//!   actually renders (`GlobalTransform`): `t` wall-secs, `dt` frame delta, `os` fixed overstep,
-//!   `e` entity bits, `p`/`q` world pose, `ctl` (present+true only for the controlled tank). `cam`
-//!   [x,y,z] + `camq` [x,y,z,w] the primary 3D camera's world pose (`GlobalTransform`), same on every
-//!   tank row of a frame — OMITTED (not null) on a headless client with no camera, so the analyzer's
-//!   camera-space section is opt-in and old traces parse unchanged. Client
-//!   extras: `tick` (predicted), `conf` (GLOBAL last-confirmed server tick or null — the whole
-//!   replication stream's high-water mark), `rb`/`rbt` (cumulative rollback / rolled-back-tick
-//!   counts), `cp`/`cq` (live `VisualCorrection` error translation/quat, present only while a
-//!   correction decays). Per-ENTITY confirmed authority for the predicted tank root, from its
-//!   `ConfirmedHistory<C>` newest present sample: `confp` [x,y,z] latest confirmed `Position`,
-//!   `confv` [x,y,z] latest confirmed `LinearVelocity`, `conft` the lightyear tick that
-//!   `confp`/`confv` belong to. `vo` [x,y,z] + `voq` [x,y,z,w] the predicted root's live
-//!   render-space error offset (`net::render_error::RenderErrorOffset`) — the sim-snap-hiding
-//!   displacement this frame adds to the render `Transform`. Present only on the predicted root that
-//!   carries the offset (omitted, not null, elsewhere and in SP). It separates a SIM snap (which
-//!   `confp`/`rb` show) from VIEW motion: the rendered `p`/`q` already fold the offset in (it is what
-//!   renders), so `p − vo` recovers the lightyear-visible pose. This tick is the entity's OWN last
-//!   authoritative update — it can
-//!   lag the global `conf` when the tank's replicated components stop changing (or stop arriving),
-//!   the key discriminator for a silent desync. All three are omitted (not null) when no confirmed
-//!   sample exists yet, and absent entirely in SP / SP-composition net builds (no `ConfirmedHistory`).
-//! - `tick`   — per fixed tick, per tank root: sim truth — `p`/`q`/`lv`/`av`, `gnd` grounded wheel
-//!   count, `anc` anchored (loaded/grounded) wheel count, `ancm` per-wheel anchor bitmask (bit i =
-//!   slot i anchored; transitions = grounding churn, wheels gaining/losing load — NOT grip flicker:
-//!   since the static↔kinetic blend in `driving.rs`, anchors stay `Some` while the wheel bears load
-//!   and the grip regime lives in the continuous `w_static` weight, so `anc`≈`gnd` by design),
-//!   `loads` per-wheel spring load (N, ~0.1 N), `thr`/`str` drive
-//!   intent, `hc` count of TOUCHING hull contact pairs (only pairs avian flags as actually
-//!   touching AND with still-overlapping AABBs — not the speculative pairs `Collisions::iter`
-//!   also carries, nor the stale pairs a rollback restore strands with a set `TOUCHING` flag but
-//!   disjoint AABBs), `pen` deepest real penetration among them (m, clamped `>= 0`: a speculative
-//!   contact's negative separation gap reads as zero, not a signed distance). Both are honest now
-//!   — `hc`/`pen` sit at 0 while the tank drives wheel-borne, and rise on genuine hull-vs-ground
-//!   overlap; the earlier multi-metre `pen` at hc=1 during normal driving was a phantom
-//!   (client-only) non-touching / rollback-stale pair. THE DIVERGENCE INSTRUMENT'S per-tick fields
-//!   (analyzed offline by `scripts/divergence/analyze.py`): `own` — the world-independent tank
-//!   identity the client/server join pairs on (the player's own tank: `Controlled` on the client/SP,
-//!   `ControlledBy` on the server; the ownerless bot is `false` on both — NEVER the entity id, which
-//!   differs per world). `h` — the combined canonical state hash: an exhaustive "did anything differ
-//!   this tick?" over the pose/velocity BITS plus the carried `TankSim`/`DriveState`, computed
-//!   world-independently (fixed field order, `Vec`s in spawn-sorted slot order, no entity id) so an
-//!   identical `h` on both ends is bit-exact agreement. `hpos`/`hrot`/`hlv`/`hav`/`hsim` — the
-//!   per-component sub-hashes (`hsim` folds `DriveState` + `TankSim` servos/weapons/anchors, the
-//!   hidden state no pose field exposes), so a mismatch localizes to a component and the analyzer can
-//!   name the first-divergence sub-component. `hsim` decodes further into `hdrv` (`DriveState`
-//!   throttle/steer), `hsrv` (servo current/previous/velocity), `hrld` (weapon fire timers + belt
-//!   counts), `hrec` (barrel recoil offset/velocity), `hanc` (wheel brush anchors incl. the
-//!   Some/None grip discriminant) — `hsim` is their fixed-order combination, so a carried-state
-//!   mismatch names its field family, not just "sim". With `SPIKE_TRACE_SIM_FIELDS` set the row
-//!   also carries `simf`, the RAW carried-state values (`srv` per-servo triples, `wpn` per-weapon
-//!   reload/recoil/belt quads, `anch`
-//!   per-wheel points-or-null), so the analyzer can report carried-state magnitudes, not just
-//!   booleans (`thr`/`str` are already row fields). See `hash_tank_state`. Caveat that remains BY
-//!   DESIGN: avian's
-//!   narrow phase measures manifolds from the START-of-step pose while this row records the
-//!   post-solve pose, so inside a client rollback-correction burst (rows near `rp`/`rollback`
-//!   activity) `pen` can report a deep pre-solve overlap the solver then pushed out — real
-//!   transient world state, not a filtering miss; server/SP rows never show it. Client-only: `rp`
-//!   (present+true only on a rollback-REPLAY tick — the corrected re-simulation of an
-//!   already-recorded tick number; absent on original ticks and in SP/server rows, which never
-//!   replay). Analysis keeps the LAST row per (tick, entity), i.e. the replayed/corrected value.
-//! - `rollback` — client only, one per rollback start: `t`, `tick`, `start`, `depth` (tick−start),
-//!   `cause` ("state"|"input"), `trg` the [component, magnitude] pairs whose rollback condition
-//!   tripped during THIS `check_rollback` — exact per-check attribution: the slot is cleared each
-//!   frame before lightyear's rollback check, so the correction-decay re-tests (which reuse the same
-//!   registered conditions) can't leak in.
-//!
-//! Analysis aligns rows across processes on `tick` + `role`, never on `e` (entity ids differ per
-//! process). Rows are line-buffered through [`JsonlSink`] (a `BufWriter` flushed ~every 1 s from
-//! `write` itself, and on a clean World drop via `BufWriter::drop`); a hard-killed process may
-//! lose the unflushed tail (acceptable). The sink + NaN-safe JSON helpers are `pub(crate)` — the
-//! suspension-force recorder (`susp_trace`, driving.rs) shares them.
+//! Rows have `k` values `meta`, `frame`, `tick`, or `rollback`. Fields unavailable in a composition
+//! are omitted rather than represented as null. Cross-process analysis joins on `tick` and `role`,
+//! never on entity identifiers. [`scripts/divergence/analyze.py`](../../scripts/divergence/analyze.py)
+//! consumes the schema.
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -111,16 +27,8 @@ use lightyear::prelude::{
     Rollback, RollbackSystems, VisualCorrection,
 };
 
-/// The one JSONL sink both recorders share (`TraceWriter` here, `susp_trace` in `driving.rs`):
-/// buffered line writes with a ~1 s flush cadence folded into `write` itself, so every consumer
-/// gets the same tail-protection behavior without owning a flush system. Rows go through
-/// `serde_json::Value` (see [`num`]) so a corrupt frame emits `null`, never invalid-JSON
-/// `NaN`/`inf` — the recorders exist precisely for the corrupt regimes.
-///
-/// Flushing is best-effort tail protection: line-buffered writes reach disk about every second
-/// (checked on each write — rows arrive every frame/tick while a recorder is armed) and on a
-/// clean exit (the `BufWriter` flushes on drop); a hard-killed process may lose the unflushed
-/// remainder (accepted).
+/// Shared JSONL sink. Values pass through `serde_json::Value` so non-finite floats serialize as
+/// `null`, preserving valid JSON. Writes are best-effort: diagnostics must not perturb simulation.
 pub(crate) struct JsonlSink {
     writer: BufWriter<File>,
     last_flush: Instant,
@@ -151,8 +59,7 @@ impl JsonlSink {
 #[derive(Resource)]
 struct TraceWriter {
     sink: JsonlSink,
-    /// The composition role, carried so the Startup `write_meta` system can stamp the `meta` row
-    /// (it runs after `install`, which no longer writes the row itself — see fix 6).
+    /// Composition role for the Startup `meta` row.
     role: &'static str,
     /// `SPIKE_TRACE_SIM_FIELDS` was set: tick rows also carry `simf`, the raw carried-state values
     /// behind the `hsim` sub-hashes, so the offline analyzer can report magnitudes (Δreload,
@@ -168,11 +75,7 @@ impl TraceWriter {
     }
 }
 
-// --- JSON leaf helpers -----------------------------------------------------------------------
-// serde_json's `From<f64>` maps NaN/Inf to `Null` rather than emitting invalid JSON — exactly the
-// safety a pose recorder needs, since a corrupt frame must still produce a parseable line.
-// `pub(crate)` so the suspension-force recorder (`susp_trace`, driving.rs) emits with the same
-// NaN discipline instead of growing a parallel implementation.
+// JSON helpers shared with the suspension recorder. Non-finite values become JSON `null`.
 
 pub(crate) fn num(x: f32) -> Value {
     Value::from(x as f64)
@@ -186,21 +89,8 @@ fn quat(q: Quat) -> Value {
     Value::Array(vec![num(q.x), num(q.y), num(q.z), num(q.w)])
 }
 
-// --- Per-tick state hash (the divergence instrument's exhaustive boolean) ---------------------
-// A canonical, WORLD-INDEPENDENT hash of a tank root's sim state, computed identically on client and
-// server so the offline join (`scripts/divergence/analyze.py`) can answer "did anything differ this
-// tick?" with a single u64 compare, and localize a difference to a sub-component. World-independence
-// is by construction: the hash consumes ONLY f32 bit patterns of pose/velocity/carried-sim, in a
-// fixed field order, with every `Vec` walked in its spawn-sorted index order (`WheelIndex`/
-// `ServoIndex`/`WeaponIndex` — identical across the two ECS worlds by construction's
-// sorted-by-name assignment). NOTHING that differs between worlds enters it — no entity id, no
-// pointer, no `HashMap` iteration, no archetype order. Two worlds that reached the same logical state
-// therefore hash identically even though their entity indices differ (measured 4294966669 vs
-// 4294966650 for the same tank). The per-tank ROW carries `own` (below) as the cross-world pairing
-// key, so the join never needs the entity id it cannot compare.
-//
-// Bit-exactness is the bar (flat-ground cruise is already measured bit-exact client-vs-server), so
-// every f32 enters as its raw `to_bits()` — `+0.0`/`−0.0` and any last-ulp difference flip the hash.
+// Per-tick state hashes use a fixed field/slot order and raw float bits. Entity IDs and unordered
+// collections must not enter the hash: client and server use different ECS identities.
 
 /// A tiny FNV-1a 64-bit hasher over an explicit byte stream. Chosen over `std::hash::DefaultHasher`
 /// deliberately: its algorithm is fixed here (not a std-version-dependent SipHash seed), so a hash is
@@ -255,11 +145,8 @@ impl Fnv64 {
     }
 }
 
-/// One tank's per-tick state hash: the combined exhaustive boolean plus a per-component breakdown so
-/// the analyzer can localize a divergence (the measured signature is `|Δav|`-first at contact
-/// transients). `sim` folds both `DriveState` and the carried `TankSim` (servos, weapon reloads/
-/// recoil, wheel anchors) — the hidden state no pose/velocity field exposes, so the hash is the ONLY
-/// cross-world witness for it.
+/// One tank's per-tick state hash plus per-component breakdown. `sim` includes carried state that
+/// pose and velocity fields do not expose.
 struct TankStateHash {
     combined: u64,
     pos: u64,
@@ -451,10 +338,8 @@ pub fn sp_plugin(app: &mut App) {
     app.add_systems(FixedLast, record_tick);
 }
 
-/// MP client: frame (with prediction/correction extras) + tick + the rollback observer. Replay ticks
-/// ARE recorded (stamped `rp` — fix 4), so analysis sees the corrected re-simulation, not the
-/// abandoned misprediction. A PreUpdate system clears the trigger slot before lightyear's rollback
-/// check so `trg` attribution is exact (fix 2).
+/// MP client: frame and tick rows plus rollback observation. Replay rows carry `rp`; clearing the
+/// trigger slot before Lightyear's check scopes `trg` attribution to that check.
 pub fn client_plugin(app: &mut App) {
     if !install(app, "client") {
         return;
@@ -502,11 +387,7 @@ fn record_frame(
     real: Res<Time<Real>>,
     fixed: Res<Time<Fixed>>,
     roots: Query<(Entity, &GlobalTransform, Has<Controlled>), With<Tank>>,
-    // The primary 3D world camera's pose. Recorded so the analyzer can resolve the controlled tank
-    // into camera space and catch viewer-side transients — a camera-follow scheduling race steps the
-    // camera a frame relative to the tank, which is invisible in the world-space pose stream but is a
-    // visible lurch on screen. Empty on a headless client (no camera spawned) → the fields are then
-    // OMITTED, not null, keeping the row shape identical to a pre-instrumentation trace.
+    // The optional world-camera pose permits camera-space analysis; headless rows omit it.
     camera: Query<&GlobalTransform, With<Camera3d>>,
     net: NetFrameCtx,
     corr: Query<(
@@ -555,10 +436,7 @@ fn record_frame(
             obj.insert("camq".into(), quat(cam_rot));
         }
         {
-            // The prediction/replication resources exist together on a real MP client. In the
-            // single-player composition none are present, so access them optionally and skip the net
-            // extras rather than panic on system-param validation (fix 3): the row then has the same
-            // shape as an SP frame row.
+            // Net resources are optional so this shared system remains valid in single-player.
             if let (Some(timeline), Some(checkpoints), Some(metrics)) = (
                 net.timeline.as_deref(),
                 net.checkpoints.as_deref(),
@@ -617,10 +495,8 @@ fn record_frame(
 /// loads, collision pairs). Runs in `FixedLast`, after the physics step and avian's contact update,
 /// so `Collisions` is current for this tick.
 ///
-/// Replay ticks are recorded too (client): a tick re-simulated during rollback is stamped `rp` so
-/// analysis keeps the corrected value over the abandoned misprediction for that same tick number
-/// (fix 4). The tick number comes from lightyear's `LocalTimeline` under net; when that resource is
-/// absent (SP, or an SP-composition net build) it falls back to a local monotonic counter.
+/// Replay ticks carry `rp`; network compositions use `LocalTimeline`, while others use a local
+/// monotonic counter.
 fn record_tick(
     mut trace: ResMut<TraceWriter>,
     roots: Query<
@@ -666,28 +542,8 @@ fn record_tick(
 
     let is_replay = !replaying.is_empty();
 
-    // Per-body count of TOUCHING contact pairs + deepest real penetration in ONE pass over the
-    // contact graph (fix 5), so the roots loop below is a map lookup rather than a full re-scan per
-    // tank. A tank-vs-tank pair counts for both roots, which is correct — each body has that
-    // contact. `body1`/`body2` are the rigid-body entities (the tank root here, since the hull/part
-    // colliders are its children).
-    //
-    // Only pairs avian reports as actually TOUCHING count (`ContactPair::is_touching` — the
-    // `TOUCHING` flag, verified in avian 0.7 source). A contact PAIR exists as soon as two colliders'
-    // speculative margins overlap, and a fast body's margin is unbounded; the client compounds it,
-    // since a rollback-restored contact graph can carry a stale manifold whose overlap never
-    // happened. Counting those inflated `hc` and, worse, `pen` — the measured hc=1 / pen≈2.9 m while
-    // the tank drove cleanly on its wheels. Penetration is likewise read only from a touching pair's
-    // deepest contact and clamped to `>= 0`: a speculative contact reports a NEGATIVE penetration
-    // (the separation gap), which must read as "no penetration", not a signed distance.
-    //
-    // `aabbs_disjoint` closes the remaining stale-flag hole (measured on rollback-REPLAY ticks of a
-    // drop test: multi-metre `pen` while airborne): when a rollback restore teleports the body, the
-    // pair's AABBs stop overlapping and avian's narrow phase EARLY-OUTS — it sets `DISJOINT_AABB`
-    // and returns without clearing `TOUCHING` or the manifolds (vendored 0.7 source,
-    // `narrow_phase/system_param.rs`), leaving the abandoned timeline's contact data flagged as
-    // touching until the pair's deferred removal. A pair both "touching" and "AABBs no longer
-    // overlap" is definitionally stale.
+    // `hc`/`pen` include only touching, overlapping Avian pairs. A non-overlapping AABB makes a
+    // contact record stale for this diagnostic; negative separations clamp to zero penetration.
     let mut contacts: std::collections::HashMap<Entity, (u32, f32)> =
         std::collections::HashMap::new();
     for pair in collisions.iter() {
@@ -725,20 +581,10 @@ fn record_tick(
             // row width.
             .map(|(_, suspension)| num((suspension.load * 10.0).round() / 10.0))
             .collect();
-        // `anc` counts anchored wheels — since the static↔kinetic friction blend (`ramp_drive`,
-        // src/driving.rs) an anchor stays `Some` for as long as the wheel bears load and releases
-        // only on the airborne/unloaded paths, so this is a loaded/grounded-wheel count (≈ `gnd`),
-        // NOT a grip-state count. The grip regime is the continuous `w_static` weight in
-        // `ramp_drive` now — it never appears here as a discrete state to count.
+        // `anc` counts anchored wheels; it is not a discrete grip-state count.
         let anchors = sim.anchors.iter().filter(|a| a.is_some()).count();
-        // Per-wheel anchor bitmask (bit i = slot i anchored), so analysis can count per-wheel
-        // anchor TRANSITIONS across ticks. Post-blend these transitions are grounding churn (a
-        // wheel gaining/losing load), not the stick-speed plant/release grip flicker the
-        // friction-continuity work measured with this field — that flicker no longer exists as a
-        // Some/None flip (see the anchor-relax comment in src/driving.rs). The plain `anc` count
-        // hides a simultaneous gain+loss (one wheel loads as another unloads, net count unchanged);
-        // the bitmask exposes each slot's flip. u32 covers any plausible wheel count (Tiger has
-        // 16); higher slots would silently drop, acceptable.
+        // `ancm` preserves per-wheel anchor transitions that aggregate `anc` can hide. Bits above
+        // 31 are intentionally omitted by the diagnostic schema.
         let anchor_mask: u32 = sim
             .anchors
             .iter()
@@ -867,8 +713,8 @@ static TRACE_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 static ROLLBACK_TRIGGERS: std::sync::Mutex<Vec<(&'static str, f32)>> =
     std::sync::Mutex::new(Vec::new());
 
-/// Record that `component`'s rollback condition tripped this check, by `magnitude` (the measured
-/// client/server divergence). Called from [`note_if_tripped`] when a condition returns true. No-op
+/// Record that `component`'s rollback condition tripped this check, by `magnitude`. Called from
+/// [`note_if_tripped`] when a condition returns true. No-op
 /// when tracing is off (the atomic guard) — so the closures pay nothing in an untraced run, and the
 /// server (which never runs check_rollback) never reaches the push.
 fn note_rollback_trigger(component: &'static str, magnitude: f32) {
@@ -882,9 +728,7 @@ fn note_rollback_trigger(component: &'static str, magnitude: f32) {
     }
 }
 
-/// The single rollback-condition body shared by every predicted component's closure (`net::protocol`
-/// — fix 7): trip when `magnitude >= threshold`, and note the trip for trace attribution when it
-/// does. Returns whether the component's condition tripped (lightyear's `should_rollback` contract).
+/// Shared rollback condition: trip when `magnitude >= threshold` and record the attribution.
 pub(crate) fn note_if_tripped(component: &'static str, magnitude: f32, threshold: f32) -> bool {
     let trip = magnitude >= threshold;
     if trip {
@@ -905,10 +749,8 @@ fn clear_rollback_triggers() {
     }
 }
 
-/// Take and clear the accumulated triggers. Called once per rollback start. With the
-/// clear-before-check discipline ([`clear_rollback_triggers`]) the slot holds exactly the trips from
-/// this frame's `check_rollback` at drain time — correction-decay re-tests from earlier frames were
-/// already wiped — so the drained pairs are exact per-check attribution, not a weight.
+/// Take and clear the accumulated triggers. Clearing immediately before `check_rollback` makes the
+/// result exact per-check attribution.
 fn drain_rollback_triggers() -> Vec<(&'static str, f32)> {
     ROLLBACK_TRIGGERS
         .lock()
@@ -916,11 +758,8 @@ fn drain_rollback_triggers() -> Vec<(&'static str, f32)> {
         .unwrap_or_default()
 }
 
-/// Net resources the `frame` row's client extras read, bundled so `record_frame`'s parameter stays a
-/// single name. All three exist together on a real MP client (`LocalTimeline` + `PredictionMetrics`
-/// from the prediction stack, `ReplicationCheckpointMap` from shared replication registration) — but
-/// accessed OPTIONALLY so the single-player composition (no lightyear plugins) doesn't panic
-/// system-param validation on the missing resources (fix 3).
+/// Optional net resources used by frame rows. Optional access keeps the shared system valid in
+/// single-player.
 #[derive(SystemParam)]
 struct NetFrameCtx<'w> {
     timeline: Option<Res<'w, LocalTimeline>>,

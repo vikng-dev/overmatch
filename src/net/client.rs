@@ -1,15 +1,7 @@
-//! The networked client: connects to a local server over UDP+netcode and is *playable* — windowed
-//! mode mounts the game's real presentation + device gather (`NetClientPlugin`: camera, HUD, mouse
-//! aim, gunner optic, range dial, crew bar), marks the replicated own tank with the game's
-//! `Controlled` on possession, and feeds the gathered `TankCommand` into lightyear's `ActionState`
-//! each tick (`feed_action_state`). The own tank is always PREDICTED — the committed model: input
-//! answers instantly, rollback reconciles against the authority. Esc is a cursor-release menu
-//! overlay, NOT a pause: the sim never stops (there is no online pause; a frozen predicting client
-//! desyncs from a server that keeps ticking).
+//! Predicted network-client composition root.
 //!
-//! Run with `cargo run` (the `overmatch` bin, `net` feature on by default). Pass `--simulate-input`
-//! (or set `SPIKE_SIMULATE_INPUT`) to run headless and programmatically drive throttle/aim/fire for a
-//! few seconds, proving prediction + rollback under a real sim workload without a human at the keyboard.
+//! The local tank is predicted and reconciled by rollback; client presentation never pauses the
+//! simulation while the authority continues ticking.
 
 use core::time::Duration;
 use std::hash::{BuildHasher, Hasher};
@@ -19,14 +11,12 @@ use bevy::app::ScheduleRunnerPlugin;
 use bevy::asset::AssetPlugin;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-// Not in any prelude: the snapshot-interpolation timeline config (the remote-tank delay knob).
 use lightyear::interpolation::timeline::InterpolationConfig;
 use lightyear::prediction::correction::CorrectionPolicy;
 use lightyear::prelude::client::*;
 use lightyear::prelude::input::client::InputSystems;
 use lightyear::prelude::input::native::{ActionState, InputMarker, NativeBuffer};
 use lightyear::prelude::{Controlled as NetControlled, *};
-// Row fields for the shot-lifecycle recorder (`crate::shot_trace`); evaluated only when it is armed.
 use serde_json::json;
 
 use super::protocol::{
@@ -48,56 +38,11 @@ use crate::{CombatantId, NetClientPlugin, ShotId, SimPlugin};
 
 const SERVER_PORT: u16 = 5888;
 
-/// The shipping input delay, in ticks. **CONSTANT — and the constancy is the point.**
-///
-/// # Why this may not go back to `balanced()`
-///
-/// lightyear's client files each tick's input into its `InputBuffer` at `local_tick + input_delay`
-/// (`lightyear_inputs` client.rs, `buffer_action_state`), and its `InputMessage` covers
-/// `[end_tick - N + 1, end_tick]` with `end_tick` computed the same way. **Every part of that
-/// pipeline assumes `end_tick` advances by exactly +1 per tick.** `InputDelayConfig::balanced()`
-/// breaks the assumption: it recomputes `input_delay` from LIVE RTT + jitter on every sync
-/// (`lightyear_sync` timeline/input.rs `input_delay_ticks`), so on any real link the delay WOBBLES —
-/// with `balanced()`'s 3-tick cap and our 64 Hz tick, anything under ~50 ms ping sits right in the
-/// varying band and flips continuously. Each flip breaks `Δend_tick == 1` in one of two ways, and
-/// both of them fire the machine gun after the player let go:
-///
-/// - **delay SHRINKS → `end_tick` STALLS.** Two consecutive local ticks author the SAME buffer tick.
-///   The client overwrites its own entry with the newer (released) command and re-sends it — but the
-///   server's `update_buffer` refuses to write any tick `<= last_remote_tick`
-///   (`lightyear_inputs` input_message.rs:195), so the SERVER never learns the correction and keeps
-///   the stale PRESSED value. It fires a round the client never predicted.
-/// - **delay GROWS → `end_tick` JUMPS.** The client SKIPS a buffer tick, and `InputBuffer::set_raw`
-///   gap-fills it with `Compressed::SameAsPrecedent` (input_buffer.rs:212) — a fabricated repeat of
-///   the last command, on a tick the player never authored. BOTH ends read it as genuine and fire.
-///
-/// `tests/net_fire_release.rs` drives both over the real lightyear pipeline and counts the rounds:
-/// with a wobbling delay it is thousands of unauthorized fire-ticks across the sweep; with a
-/// CONSTANT delay it is exactly zero, because the client then writes exactly one buffer tick per
-/// local tick, contiguously, and never revises one it has already sent. `input_delay_is_constant`
-/// (below) is the tripwire that keeps it that way.
-///
-/// This is NOT the only line of defence — `net::protocol`'s bridge refuses to commit a consumable on
-/// any tick the command cannot attest it was authored for, which catches these AND the seeds this
-/// pin cannot remove (notably `Absent`-anchored buffer freezes, which are seeded at connect time
-/// regardless of the delay). But the pin is what removes the seeds at source, so do not trade it
-/// away for adaptive latency without reading `.agents/scratch/upstream-reports/
-/// lightyear-absent-anchor-input-freeze.md` first.
-///
-/// # Why 3
-///
-/// It is the cap `balanced()` was already selecting on this link (`maximum_input_delay_before_
-/// prediction: 3`), so pinning there costs at most a tick or two of added input latency over what we
-/// shipped — and buys the DEEPEST input buffer, i.e. the most tolerance for droplet jitter before an
-/// input goes missing at all, plus the shallowest rollback window. ~47 ms at 64 Hz, on a vehicle
-/// whose controls are deliberately sluggish.
+/// Input delay is fixed: Lightyear input-buffer end ticks must advance exactly once per local tick.
+/// See `tests/net_fire_release.rs`.
 pub(crate) const SHIPPING_INPUT_DELAY_TICKS: u16 = 3;
 
-/// The shipping input-delay config. `fixed_input_delay` sets `minimum == maximum`, which is exactly
-/// the condition under which lightyear's `input_delay_ticks()` is RTT-INDEPENDENT: every branch of
-/// it returns that shared value for any `rtt_ticks <= maximum_predicted_ticks + minimum` (~1.6 s of
-/// ping at 64 Hz — far past playable). See [`SHIPPING_INPUT_DELAY_TICKS`] for why that matters, and
-/// `input_delay_is_constant` for the tripwire that pins it.
+/// Return an RTT-independent fixed input delay.
 pub(crate) fn shipping_input_delay() -> InputDelayConfig {
     InputDelayConfig::fixed_input_delay(SHIPPING_INPUT_DELAY_TICKS)
 }
@@ -105,19 +50,12 @@ pub(crate) fn shipping_input_delay() -> InputDelayConfig {
 pub fn run() {
     let simulate = std::env::args().any(|a| a == "--simulate-input")
         || std::env::var("SPIKE_SIMULATE_INPUT").is_ok();
-    // Diagnostic lever (rollback-storm investigation): scripted input in a REAL window — the
-    // deterministic headless baseline workload, but under vsync frame pacing, real rendering, and
-    // the full presentation stack. Separates "windowed render loop causes rollbacks" from "human
-    // device input causes rollbacks": same script, only the runtime differs.
     let sim_windowed = simulate && std::env::var("SPIKE_SIM_WINDOWED").is_ok();
 
     let mut app = App::new();
     if simulate && !sim_windowed {
-        // Headless: same no-GPU/no-window recipe as the server, so automation never opens a window.
         app.add_plugins(
             DefaultPlugins
-                // Exe-relative asset root (see `asset_root`), so a bundled/double-clicked client
-                // finds `assets/` regardless of cwd — headless automation loads the same rig.
                 .set(AssetPlugin {
                     file_path: asset_root(),
                     ..default()
@@ -155,9 +93,7 @@ pub fn run() {
         }
     }
 
-    // Ordering per the spike map §3: ClientPlugins, then protocol registration, then the Client
-    // entity. `net::plugin` also mounts `LightyearAvianPlugin` + Position/Rotation/velocity
-    // registration (map §5); `physics_plugins()` gives the matching disables.
+    // Register the shared protocol before creating the client link.
     app.add_plugins(ClientPlugins {
         tick_duration: Duration::from_secs_f64(1.0 / 64.0),
     });
@@ -243,10 +179,7 @@ pub fn run() {
     // once here and stable for the session; a fresh identity across restarts is fine (back-to-back runs
     // still can't collide inside the server's disconnect timeout — the whole reason the PID existed).
     let client_id = std::hash::RandomState::new().build_hasher().finish();
-    // ~100 ms delay + jitter on the inbound link, so the client's prediction genuinely runs ahead
-    // of the last-confirmed server state (increment 5 rollback-forcing mechanism #1).
-    // Env-tunable for bisecting rollback causes: SPIKE_LATENCY_MS=0 disables the conditioner
-    // entirely (pure loopback), isolating latency-window effects from genuine sim divergence.
+    // Optional receive conditioning for local diagnostics.
     let latency_ms: u64 = std::env::var("SPIKE_LATENCY_MS")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -262,22 +195,8 @@ pub fn run() {
             0.0,
         ))
     });
-    // Reconciliation DEPTH controls (jitter investigation: felt MP jitter = frequency × depth ×
-    // chaos-gain; the threshold coarsening in `protocol` attacked frequency, this attacks depth).
-    // Every rollback restores a ~12-tick-old confirmed state and RE-SIMULATES to the present; that
-    // replay is chaotic through friction/contact, landing the corrected present 6–35× farther from
-    // the old present than the cm-scale client/server error that triggered it. Depth = how many
-    // ticks each replay re-runs, and two lightyear defaults inflate it, so we ran the library's
-    // maximum-violence configuration by default. Both are set on the input timeline below.
-    //
-    // (1) Input delay. Every tick of input delay is a tick prediction does NOT run ahead, so it
-    //     shrinks the prediction window (hence max rollback depth) directly — lightyear's own
-    //     recommended lever "to reduce the amount of rollback ticks needed (to reduce the rollback
-    //     visual artifacts and CPU costs)" (lightyear_sync input.rs). We spend the full
-    //     `SHIPPING_INPUT_DELAY_TICKS` on it, ALWAYS — see that constant for why a CONSTANT delay is
-    //     load-bearing correctness, not just a depth knob.
-    //     `SPIKE_INPUT_DELAY_TICKS` overrides for A/B — `=0` selects `no_input_delay()` (the old
-    //     max-prediction behavior; also constant), `=n` pins `fixed_input_delay(n)`.
+    // Input delay and jitter margin bound the prediction window; environment values are diagnostic
+    // overrides only.
     let (input_delay, delay_label) = match harness::input_delay_ticks() {
         None => (
             shipping_input_delay(),
@@ -295,11 +214,6 @@ pub fn run() {
             format!("fixed_input_delay({n}) (SPIKE_INPUT_DELAY_TICKS={n})"),
         ),
     };
-    // (2) Sync jitter margin. `jitter_multiple` scales measured jitter into how far ahead prediction
-    //     runs purely as jitter safety — pure depth. lightyear defaults to 4 (99.7% packet
-    //     coverage); with the 20 ms test conditioner that's ~5 ticks of margin baked into the
-    //     prediction window. We ship 2 (95%). `SPIKE_JITTER_MULTIPLE` overrides for A/B; other
-    //     `SyncConfig` fields keep their defaults (`jitter_margin: 1.0` etc.).
     let jitter_multiple = harness::jitter_multiple();
     let sync_config = SyncConfig {
         jitter_multiple,
@@ -334,38 +248,10 @@ pub fn run() {
             correction_policy: CorrectionPolicy::instant_correction(),
             ..default()
         },
-        // The depth knobs (1)+(2), inserted ALWAYS (no longer only under the env lever): the
-        // shipping default is `balanced()` + `jitter_multiple: 2`, not lightyear's max-violence
-        // `no_input_delay()` + `jitter_multiple: 4`. `PredictionManager` `#[require]`s an
-        // `InputTimelineConfig`; giving it explicitly here wins over that default insert.
+        // Explicitly own the input timeline configuration required by prediction.
         InputTimelineConfig::new(sync_config, input_delay),
-        // THE REMOTE-TANK TELEPORT FIX (2026-07-11): pin the interpolation delay to a real
-        // buffer. Interpolated remotes render at `I = server_estimate − (delay + jitter_margin)`
-        // where `delay = max(send_interval·1.7, min_delay)` — and our server replicates every
-        // tick, advertising `send_interval = 0` (lightyear's `ReplicationMetadata` default), so
-        // the ratio path is dead (acknowledged upstream hole: the `TODO: deal with
-        // server_send_interval = 0` in `lightyear_interpolation` timeline.rs; issues #890/#423).
-        // Without this insert the required-component default applies and delay collapses to
-        // `min_delay = 5 ms`. That is not merely thin — it is NEGATIVE on a real link: the
-        // server estimate sits RTT/2 AHEAD of the newest keyframe actually received, so the
-        // headroom behind the newest keyframe is `RTT/2 − (min_delay + 1 tick + 4·jitter)` —
-        // past zero whenever RTT ≳ 41 ms. The interpolation clock then chronically overruns the
-        // buffer, and lightyear CLAMPS (holds newest, no extrapolation) — remote hulls freeze
-        // and step keyframe-to-keyframe: the "teleports along the driving path" jitter, immune
-        // to `SPIKE_LATENCY_MS=0` because real WAN RTT alone crosses the bar.
-        //
-        // 100 ms ≈ RTT/2 + 4–5 keyframes of headroom for droplet-range links (RTT ≲ 100 ms),
-        // sized by `min_delay ≥ RTT/2 + (N−1)·15.625 ms − 4·jitter`. Cost: interpolated remotes
-        // render a further ~100 ms in the past — the honest model for a non-predicted opponent
-        // (see `FireEvent::fire_tick`'s timeline taxonomy; shells deliberately do NOT live on
-        // `I`). Own-tank prediction is untouched, as is the per-tick confirmed stream feeding
-        // rollback — which is exactly why the fix is HERE and not a server send-interval: the
-        // lightyear examples' `ReplicationMetadata::new(100ms)` pattern would throttle the whole
-        // sender, starving prediction reconciliation to 10 Hz. Tune down toward ~60 ms if
-        // remote-lead feel demands, no lower (back into clamp territory at droplet RTT). The
-        // eventual robust form is RTT-adaptive delay (upstream filing candidate — parked, see
-        // `.agents/scratch/wave-a-adoption-memo.md` §interp-delay); `tests/net_interp_delay.rs`
-        // tripwires the upstream degenerate this insert compensates for.
+        // Interpolated replicas need a nonzero buffer behind the server estimate. Keep this explicit
+        // while `tests/net_interp_delay.rs` covers Lightyear's zero-send-interval default.
         InterpolationConfig {
             min_delay: Duration::from_millis(100),
             ..Default::default()
@@ -375,13 +261,7 @@ pub fn run() {
                 server_addr,
                 client_id,
                 private_key: [0; 32],
-                // The protocol-compatibility guard: bake this build's `PROTOCOL_FINGERPRINT` into the
-                // connect token's `protocol_id`. netcode folds it into the token AEAD, so a server
-                // built from a different revision (mismatched fingerprint) cannot decrypt the token
-                // and drops the request — the connection is refused at the handshake, BEFORE
-                // replication starts, instead of "succeeding" and then spamming replicon
-                // apply-failures forever (the 2026-07-11 skew incident). Must match the server's
-                // `NetcodeConfig.protocol_id` (`net::server`).
+                // Must match the server's `NetcodeConfig.protocol_id`.
                 protocol_id: PROTOCOL_FINGERPRINT,
             },
             NetcodeConfig {
@@ -814,9 +694,7 @@ fn asset_root() -> String {
     crate::assets::asset_root().to_string_lossy().into_owned()
 }
 
-/// Possession (spike map §6): the server's `ControlledBy` arrives as lightyear's `Controlled`
-/// marker on our avatar — claim it as the local input slot, and as the game's `Controlled` tank
-/// (step 8): the camera, HUD, aim commit, and crew bar all scope off that marker unchanged.
+/// Claim the locally controlled replicated tank for input and presentation.
 fn claim_input_slot(add: On<Add, NetControlled>, mut commands: Commands) {
     info!("client: controlled entity {} — input slot", add.entity);
     commands.entity(add.entity).insert((
@@ -827,30 +705,9 @@ fn claim_input_slot(add: On<Add, NetControlled>, mut commands: Commands) {
     ));
 }
 
-/// §7 connect-hang guard: drop the own-tank `InputBuffer` whenever it is stranded AHEAD of the
-/// timeline, before lightyear's `prepare_input_message` consumes it.
-///
-/// The wedge this prevents (2026-07-11, caught live under CPU saturation — thread samples in the
-/// §7 doc section): the first connect-window `SyncEvent` can re-anchor `LocalTimeline` BACKWARD
-/// (the RTT estimate is polluted by scheduler delay on a loaded machine, and `LocalTimeline` has
-/// been ticking since app start, so the freshly-computed server objective can land below it).
-/// `InputBuffer::set_raw` refuses writes below its `start_tick`, so the buffer stays anchored at
-/// the high pre-jump ticks forever — and `NativeStateSequence::build_from_input_buffer`
-/// (`lightyear_inputs_native` input_message.rs:94) computes `(end_tick + 1 - buffer_start_tick)
-/// as usize` with `Tick - Tick → i32`: a negative difference sign-extends to ~2^64, and its
-/// per-iteration `states.push` allocates unboundedly — main loop parked on the wedged worker,
-/// RSS balloons, OS SIGKILL at 40–96 s. `tests/net_input_buffer_wrap.rs` pins the two upstream
-/// enablers plus the degenerate itself; if that tripwire fires, upstream clamped the range and
-/// this guard becomes removable insurance.
-///
-/// The invariant enforced: the buffer's oldest retained tick must never LEAD `current_tick +
-/// input_delay` (the exact `end_tick` `prepare_input_message` will use). In steady state the
-/// buffer always trails it (writes happen AT the delayed tick), so this only fires in the
-/// already-broken post-backward-resync regime; the cost when it fires is a few ticks of
-/// not-yet-sent input the server would have hold-last extrapolated anyway. Rollback replays are
-/// no hazard: they restore `ActionState` from history without moving `start_tick` backward, and
-/// `prepare_input_message` is `Without<Rollback>` besides. Cheap enough to run unconditionally
-/// (one predicted tank, two Tick compares).
+/// Remove an input buffer that leads Lightyear's next send tick, preventing an invalid range from
+/// reaching the native encoder. Remove this guard when `tests/net_input_buffer_wrap.rs` proves the
+/// encoder clamps the range upstream.
 fn drop_stranded_input_buffer(
     timeline: Res<LocalTimeline>,
     sender: Query<&InputTimeline, With<Client>>,
@@ -878,12 +735,7 @@ fn drop_stranded_input_buffer(
     }
 }
 
-/// Opt-in ownership trace (`OVERMATCH_OWNERSHIP_TRACE`): once per second, dump every replicated
-/// tank's ownership markers. For a two-client loopback verification this is the ground truth — the
-/// OWN tank must be the only one with `Controlled` (the game marker `claim_input_slot` inserts),
-/// `InputMarker<TankCommand>`, and `Predicted`; every opponent must be `Interpolated`+`Remote` only.
-/// Any opponent showing `Controlled`/`Predicted` is the ownership-misroute this fix targets.
-/// Throttled to ~1 Hz via a `Local` deadline so it never floods the log.
+/// Opt-in ownership trace. Only the local tank may carry `Controlled`, `InputMarker`, and `Predicted`.
 #[expect(clippy::type_complexity, reason = "one-off diagnostic marker snapshot")]
 fn log_tank_ownership(
     tanks: Query<

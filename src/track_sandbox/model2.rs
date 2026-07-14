@@ -1,7 +1,4 @@
-//! MODEL 2 — link-belt: iteration on model 1 where the belt is a ring of **virtual track links**
-//! that travel with the belt (per-side arc-phase advanced by belt speed) and contact the terrain as
-//! **rigid plates** (segment casts, not point rays). Steps 1 (advected stations) and 2 (plate
-//! contact) built; next: link rendering.
+//! Link-belt model: advected virtual links with segment-cast terrain contact.
 
 use avian3d::prelude::ShapeCastConfig;
 
@@ -45,13 +42,8 @@ const CHAIN_DAMPING: f32 = 0.88;
 /// between whole-link wraps.)
 const CHAIN_DRIVE: f32 = 400.0;
 
-/// The chain's dynamic state per side — the joints are **Verlet particles in the hull's frame**
-/// (position + previous position = implicit velocity). Each frame: rotate indices by the whole
-/// links that passed (state advects with the belt), integrate gravity (transformed into hull-local,
-/// so drapes hang correctly on slopes) + the drive anchor, then run the constraint projections.
-/// This replaces the earlier quasi-static warm-start-with-decay: gravity + anchor ARE the tension
-/// (deformed chain falls/gets-pulled taut), damping sets the visible inertia, and a settled chain
-/// has zero velocity — it *sleeps* instead of re-solving into micro-jitter.
+/// Per-side Verlet chain state in the hull frame. Whole-link index rotation preserves link identity
+/// as the belt advances.
 #[derive(Resource, Default)]
 pub(super) struct ChainMemory {
     left: ChainSideMemory,
@@ -82,22 +74,8 @@ impl ChainMemory {
     }
 }
 
-/// MODEL 2 belt contact — a fork of [`apply_belt_support`] where the belt is a ring of **virtual
-/// track links**, in two mechanisms:
-///
-/// 1. **Advected** ([`BeltPhase`]): the ring's arc-phase advances with belt speed, so the links
-///    travel around the loop. Real link kinematics fall out — rolling without slip = contact points
-///    stationary on the ground while the hull passes over (model 1's fixed-in-hull stations scrub
-///    along the ground instead); wheelspin/skid = links visibly sliding.
-/// 2. **Plate contact**: each link (the segment between consecutive stations) is cast as a rigid
-///    plate along its outward normal (`cast_shape` with a segment collider) instead of probing a
-///    point per station. The cast finds where the plate *first touches* — including a terrain corner
-///    that pokes up **between** the stations, which point rays are structurally blind to (the clip
-///    the user spotted) — and support/traction are applied **at that true contact point**, so a link
-///    rests on a corner with its load there, like a real track plate.
-///
-/// Support/traction/belt-speed dynamics are otherwise model 1's; coefficients are per-metre × the
-/// actual link length (the seam link is shorter — it carries proportionally less).
+/// Applies link support and traction. Each advected link is segment-cast along its outward normal;
+/// force coefficients scale by actual link length, including the seam link.
 pub(super) fn apply_belt_support_links(
     mut hull: Query<(&GlobalTransform, Forces), With<Hull>>,
     spatial: SpatialQuery,

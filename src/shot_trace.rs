@@ -1,23 +1,8 @@
-//! Optional JSONL shot-lifecycle recorder (`SPIKE_SHOT_TRACE=<path>`).
+//! Optional passive shot-lifecycle JSONL recorder (`SPIKE_SHOT_TRACE=<path>`).
 //!
-//! It is passive and net-neutral: rows use plain ticks and [`ShotId`], allowing the sim, client, and
-//! server to report one shot lifecycle without coupling ballistics to netcode. Role-qualified paths
-//! keep simultaneous client and server traces separate.
-//!
-//! # Durable row schema
-//!
-//! Shot-scoped rows have `k`, `t`, and the stable [`ShotId`] fields `c`, `w`, `ft`; the analyzer joins
-//! on `(c, w, ft)`. Unscoped `meta` and `transport` rows record configuration and per-tick queue work.
-//!
-//! Server rows separate authority emissions (`fire`, `kf`, `cf`, `dmg`) from transport admission
-//! (`send`) and aggregate queue work (`transport`). A `send` row means a nonempty-target Lightyear
-//! call returned `Ok`; `rcpt` is its target count, not a delivery acknowledgement. `dmg.hp` is server
-//! trace-only diagnostic data; it is never a client receipt.
-//!
-//! Client rows record receipt/dedup (`fire_rx`, `kf_rx`, `cf_rx`, `dmg_rx`), shell lifecycle
-//! (`spawn`, `catchup`, `contact`, `hold`, `overdue`, `end`), marker presentation (`marker`), and
-//! renderer evidence (`trail`). Client `dmg_rx` and `marker` deliberately omit HP and target details.
-//! See `scripts/shot/analyze.py` for the current field-level checks.
+//! Rows join by the stable [`ShotId`] fields `(c, w, ft)`; role-qualified paths isolate concurrent
+//! compositions. `send` records transport admission, not delivery acknowledgement. See
+//! [`scripts/shot/analyze.py`](../../scripts/shot/analyze.py) for field-level checks.
 
 use bevy::prelude::*;
 use serde_json::{Value, json};

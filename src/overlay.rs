@@ -1,32 +1,7 @@
-//! The net client's single overlay authority. Four full-screen overlays used to be ad-hoc — connect
-//! status (`net::client`), the death screen (`net::death_screen`), the Esc menu (`net::client`), and
-//! the view-death black (`sight`) — each spawning/visibility-swapping on its own with NO shared
-//! stacking, and the input/cursor license inferred independently in ~four places (the `cursor_locked`
-//! run condition, `feed_action_state`'s zeroing, the `open_menu`/`close_menu` cursor calls, and the
-//! `focus_menu`/`tick_refocus_grab` pair). Stacking was spawn-order luck (the view-death opaque black
-//! could silently occlude "YOU DIED"), and the license was four copies that had to be kept in sync by
-//! hand.
+//! Net-client overlay state and derived input/cursor policy.
 //!
-//! This module makes overlay presence and its consequences DERIVED from one place:
-//!
-//! - [`Overlays`] holds the active set. Owners keep their domain logic (the connect state machine, the
-//!   death→respawn state machine, the dead-crewman condition) and only DECLARE their overlay's desired
-//!   presence idempotently every frame — the same declare-then-reconcile idiom `death_screen` already
-//!   uses internally. There is no imperative push/pop, so a dropped declaration self-heals next frame.
-//!   The Esc menu is the one genuine LATCH (edge-driven, nothing in the world to re-derive it from), so
-//!   its presence is toggled directly on [`Overlays`] — which is exactly the "retire `MenuOverlay`" the
-//!   redesign asks for: menu-openness has one home, `Overlays.contains(Menu)`.
-//! - The consequences are PURE functions of that set, so they are unit-testable with no app: whether
-//!   input is blocked ([`input_blocked`] — THE single license, replacing all four old inferences),
-//!   what Esc dismisses ([`top_dismissable`]), which overlay owns the one scrim ([`draws_scrim`]), and
-//!   whether the death status line takes over ([`death_status_line`]).
-//! - [`cursor_owner`] is the ONE system that moves the cursor: blocked → release, unblocked → grab. The
-//!   winit refocus-grab deferral lives here as its implementation detail.
-//!
-//! Everything here is view / input-routing only: it runs in `Update` outside `GameplaySet` and outside
-//! the fixed/rollback schedule, so the sim keeps ticking under every overlay (there is no online pause —
-//! a frozen predicting client desyncs from a server that keeps ticking). Net-client only: mounted by
-//! [`crate::NetClientPlugin`], never by single-player (which has `state::client_plugin`'s real pause).
+//! Invariant: [`Overlays`] is the single source of truth for overlay precedence, input blocking, and
+//! scrim ownership. This module is view/input routing only; it never pauses rollback simulation.
 
 use std::collections::BTreeSet;
 

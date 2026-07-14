@@ -1,8 +1,7 @@
 //! View-only MG tracer streak maintenance.
 //!
-//! Invariant: spawn seeds the streak clamped and this system re-derives the same transform from the
-//! distance since the muzzle or latest ricochet. This covers the first frame of `Update`-spawned
-//! observer shells, before this system can run.
+//! Invariant: spawn and maintenance derive the same clamped transform from distance since the
+//! muzzle or latest ricochet.
 
 use bevy::prelude::*;
 

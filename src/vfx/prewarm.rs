@@ -1,22 +1,7 @@
-//! First-shot pipeline prewarm: kill the measured one-time ~1 s hitch on the first 88 fire by
-//! making everything the first shot renders ALREADY WARM at startup.
+//! Startup render-pipeline prewarm.
 //!
-//! The hitch anatomy: the `shell.glb` HANDLE is preloaded at startup (`ballistics::setup_assets`),
-//! so the asset bytes are in flight early — but nothing ever *instantiates or draws* the shell
-//! until the first shot, which is when (a) the scene instantiates into entities and (b) wgpu
-//! specializes + compiles the render pipelines for its mesh-layout × material permutation (on
-//! Metal that shader compile is the classic ~1 s main-thread stall). The same lazy-compile applies
-//! to every NEW vfx pipeline this slice adds (billboard Add, billboard Blend, trail ribbon, and
-//! the impact puff's Blend `StandardMaterial`).
-//!
-//! The fix: at startup, spawn one of EACH — the real shell scene plus a quad/ribbon per vfx
-//! material — far below the terrain, with `NoFrustumCulling` so the render world queues and
-//! specializes them despite being nowhere near the frustum (a frustum-culled entity compiles
-//! nothing, which is why "hide it under the map" alone would be a no-op). After a few seconds the
-//! whole rig despawns; the pipelines stay cached for the session.
-//!
-//! View-only, mounted with the rest of `vfx` (windowed clients only) — the headless server never
-//! sees any of this.
+//! The rig instantiates representative render entities with `NoFrustumCulling`, then despawns after
+//! prewarm. It is view-only and mounted only with client VFX.
 
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::light::{NotShadowCaster, NotShadowReceiver};

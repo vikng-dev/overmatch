@@ -1,12 +1,6 @@
-//! The dedicated-server guard: the whole sim must boot and run with **no GPU, no window, no
-//! winit** — the M5 dedicated-server configuration. If a sim system grows a hard render
-//! dependency, this test fails before a netcode integration ever would.
+//! Headless boot regression tests.
 //!
-//! (An earlier version hand-assembled `MinimalPlugins` + individual asset/scene/gltf plugins;
-//! the gltf load never completed under that set. The canonical headless recipe — full
-//! `DefaultPlugins` with `backends: None` and no window — is what real Bevy dedicated servers
-//! use, and what the server binary will mount. Compile-out of render code is the later
-//! crates-split step, per the client-server-organization decision.)
+//! Invariant: simulation boots without GPU, window, or winit runtime initialization.
 
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -28,25 +22,8 @@ use crate::tank::{Controlled, PendingTankAssets, TIGER_GLB_PATH, Tank};
 /// is up, so a wide bound costs a healthy run exactly nothing.
 const BOOT_DEADLINE: Duration = Duration::from_secs(60);
 
-/// Booting one headless sim is a HEAVY fixture: a full Bevy app (assets, scenes, gltf, physics)
-/// that reads the 65 MB `tiger_1.glb` **twice** — `bake::extract_at_startup` parses it
-/// synchronously as data, and the asset server loads it again as a scene on the IO/compute pools.
-/// Measured: ~11 s of CPU per boot.
-///
-/// Four tests in this file each need one, and cargo runs them concurrently by default. Each app
-/// sizes its task pools to the core count, so on a 2-core CI runner four simultaneous boots
-/// oversubscribe the box roughly 4x: they starve each other's asset IO and every one of them blew
-/// its boot deadline while the machine had plenty of work in flight and none of it finishing. That
-/// was the headless-boot CI red — a contention timeout, not a broken asset.
-///
-/// So the boots take turns. The lease is held for the whole test body, not just the boot: a
-/// *booting* app contends with the sim phases of any already-booted sibling, so dropping it at
-/// `Playing` would move the starvation rather than remove it. These four are the only tests that
-/// mount a full app; the crate's other ~170 keep running in parallel around them.
-///
-/// Poisoning is deliberately ignored: the lease guards a *machine resource* (the box's cores), not
-/// shared mutable state, so a panicking test leaves nothing corrupted behind it. Propagating poison
-/// would turn one genuine failure into three misleading `PoisonError` panics and bury the real one.
+/// Serializes full-app fixtures. The lease spans each test because booting and running apps compete
+/// for the same host resources; mutex poisoning is irrelevant to this external resource.
 static BOOT_LEASE: Mutex<()> = Mutex::new(());
 
 fn assert_tank_state_at_add(
@@ -102,9 +79,7 @@ impl std::ops::DerefMut for BootedSim {
     }
 }
 
-/// The canonical Bevy dedicated-server configuration: full plugin registration (assets, scenes,
-/// gltf, types) but **no GPU** (`backends: None` — wgpu never initializes), **no window, no
-/// winit**. This is exactly what the M5 server binary will mount.
+/// Full plugin registration without GPU, window, or winit runtime initialization.
 ///
 /// The clock starts at `ManualDuration(ZERO)`: asset IO is wall-clock, and if sim time advanced
 /// while it ran, the collider-less tanks would free-fall through the terrain for the whole load —
@@ -151,9 +126,7 @@ fn headless_app() -> App {
     app
 }
 
-/// Exactly what the boot is still waiting on, spelled out. The old message ("spec or scene load
-/// failed") conflated *slow* with *broken* and cost a full investigation to tell apart; this one is
-/// meant to be read straight from a CI log.
+/// Reports each boot gate separately so a timeout identifies the unavailable prerequisite.
 fn boot_diagnosis(app: &App, elapsed: Duration) -> String {
     let world = app.world();
     let state = *world.resource::<State<AppState>>().get();
@@ -381,11 +354,10 @@ fn sim_boots_and_drives_headless() {
     );
 }
 
-/// The MG-tracer render gate, exercised on the real spawn path headless (the same dedicated-server
-/// recipe as above). Firing the secondary trigger (the two 7.9 mm MGs) must, over a burst:
+/// The MG-tracer render gate, exercised on the real spawn path headless. Firing the secondary trigger
+/// must, over a burst:
 ///   * spawn tracer STREAKS (`TracerStreak`) for the ~1-in-5 tracer rounds, and
-///   * spawn NO `shell.glb` scene root on ANY MG round — the bug this slice fixes (MG bullets used to
-///     render as full 88 mm shell scenes). A shell in flight carries `ShellPath`; only a
+///   * spawn NO `shell.glb` scene root on ANY MG round. A shell in flight carries `ShellPath`; only a
 ///     main-gun-calibre round also gets a `WorldAssetRoot` scene, so `ShellPath + WorldAssetRoot`
 ///     over an MG-only burst must stay empty while streaks appear.
 #[test]
@@ -457,19 +429,9 @@ fn mg_rounds_stream_tracers_and_spawn_no_shell_scene() {
     );
 }
 
-/// SHOOTER SELF-EXCLUSION on the REAL asset — the coax bug, at its root.
+/// Shooter self-exclusion regression on the real asset.
 ///
-/// The tiger's coax muzzle clears its own `Gun_Mantlet_Ballistic` by ~7 cm at rest, and its recoil
-/// spring retracts the barrel ~10 cm: from the second round of any burst on, the coax fires from INSIDE
-/// its own mantlet. With no self-exclusion the authority march resolved that contact for real and the
-/// 7.9 mm round EMBEDDED in its own mask a centimetre out of the barrel — the coax was a dud that shot
-/// itself, in single-player and on the server alike (and on a net client the same contact fail-closed,
-/// which is why the coax tracer never replicated while the bow MG — with no volume in front of it —
-/// always did).
-///
-/// So: hold the secondary trigger for a sustained burst and assert NO round ever impacts a volume of
-/// the tank that fired it, while rounds still reach the opposing tank downrange. The bow MG rides along
-/// as the control that always worked.
+/// A sustained MG burst must not impact the firing tank, while still reaching other geometry.
 #[test]
 fn a_burst_never_shoots_its_own_tank() {
     use crate::ballistics::{BallisticVolume, Impact};
@@ -573,20 +535,8 @@ fn a_burst_never_shoots_its_own_tank() {
     );
 }
 
-/// THE REPLICA (OBSERVER) PATH — Yan's report: "the hull MG tracers replicate perfectly, but the
-/// coaxial don't."
-///
-/// An observing client re-raises the shooter's shot as a local `FireShell` off the wire
-/// (`net::client::receive_fire_events`) with a `catch_up_ticks` fast-forward, and `on_fire_shell` first
-/// tests whether the round already landed during the skipped flight — a segment cast from the wire
-/// origin, i.e. FROM THE SHOOTER'S MUZZLE. Mid-burst that muzzle sits inside the shooter's own mantlet,
-/// so without self-exclusion that test reports an immediate hit and returns: the observer's shell is
-/// never spawned at all (no tracer, plus a phantom armour spark at the shooter's mask).
-///
-/// Fire the exact shape the wire produces — origin 12 cm behind the coax muzzle (the recoil retraction),
-/// `shooter` named and entity-mapped, `catch_up_ticks > 0`, `ClientReplica` present — and assert the
-/// shell IS spawned and flies. The `shooter: None` control (the old code's shape) is held hidden at
-/// the client-only armor candidate, which proves the naming is load-bearing rather than incidental.
+/// Replica catch-up regression: a named shooter remains excluded from its own collision volumes.
+/// The control omits `shooter` and must remain held at the armor candidate.
 #[test]
 fn a_replica_coax_shell_clears_the_shooters_mantlet() {
     use crate::ClientReplica;
@@ -672,9 +622,7 @@ fn a_replica_coax_shell_clears_the_shooters_mantlet() {
         }),
     };
 
-    // CONTROL — the shape the old code raised (`shooter: None`). The catch-up scan hits the shooter's
-    // own mantlet a centimetre out. A keyed armor candidate now waits hidden for authority instead of
-    // fabricating a terminal, but it still cannot fly: this is the missing-tracer bug, pinned.
+    // Control: omitting `shooter` holds the catch-up shell at the armor candidate.
     app.world_mut().trigger(fire(None));
     app.update();
     let mut shells = app.world_mut().query::<(Entity, &Visibility, &ShellPath)>();

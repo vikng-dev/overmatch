@@ -1,15 +1,11 @@
-//! Local simulation for replicated tank roots.
+//! Local simulation attachment for replicated tank roots.
 //!
-//! This is the explicit ADR-0014 exception: replication creates the root before local simulation
-//! can. The adapter waits for a valid replicated pose, attaches the body and its `RigidBody` in one
-//! command flush, then blocks rollback until one physics tick has prepared the body. A late
-//! `Predicted` marker promotes a static body to dynamic and re-arms the guard. Rig children derive
-//! their state from root-resident `TankSim` and are not rollback participants.
+//! ADR-0014 exception: a replicated root receives simulation only after it has a wire pose. The
+//! adapter blocks rollback until physics prepares that body; children derive from root simulation.
 
 use avian3d::prelude::{Position, RigidBody, Rotation};
 use bevy::prelude::*;
 use lightyear::frame_interpolation::{FrameInterpolate, FrameInterpolationPlugin};
-// `Remote` is the authority boundary: server roots never carry it; replicated client roots do.
 use lightyear::prelude::client::Remote;
 use lightyear::prelude::*;
 
@@ -18,19 +14,15 @@ use crate::tank::{PendingTankAssets, Rig, TankSimSource, attach_replicated_tank_
 
 pub(crate) fn plugin(app: &mut App) {
     app.add_observer(upgrade_predicted_to_dynamic);
-    // FixedLast = the earliest point provably AFTER the fresh rig's first full physics tick
-    // (collider-transform propagation included) — see `enable_rollback_after_first_tick`.
     app.add_systems(
         FixedLast,
         enable_rollback_after_first_tick.run_if(not(is_in_rollback)),
     );
 }
 
-/// Attach the complete local body as soon as a replicated root has a valid pose. Presentation
-/// handles may still be unresolved; simulation comes only from [`TankSimSource`]. A predicted root
-/// is dynamic, while an interpolated root (or one whose `Predicted` marker is late) starts static.
+/// Attach simulation from `TankSimSource` only after a replicated root has a valid pose.
 pub(crate) fn attach_replicated_rig(
-    // RigidBody require-inserts placeholder Position/Rotation. The wire pose must arrive first.
+    // Avoid registering Avian placeholder poses in rollback history.
     tanks: Query<
         (Entity, Has<Predicted>),
         (
@@ -66,10 +58,10 @@ pub(crate) fn attach_replicated_rig(
             assets.presentation(),
             (
                 NetTank,
-                // Required for the local hierarchy; Avian syncs it from Position/Rotation.
+                // The local hierarchy requires `Transform`; Avian writes it from the wire pose.
                 Transform::default(),
                 body,
-                // Collider transforms need one PhysicsSystems::Prepare pass before replay.
+                // Block replay until one physics preparation pass has built collider transforms.
                 DisableRollback,
             ),
         );
@@ -87,8 +79,7 @@ fn enable_rollback_after_first_tick(
     }
 }
 
-/// Promote a replicated body when `Predicted` arrives after its pose. Marker and pose visibility are
-/// independent, so the body may already exist as static. Promotion re-arms the first-tick guard.
+/// Promote a body when the independently replicated `Predicted` marker arrives late.
 fn upgrade_predicted_to_dynamic(
     add: On<Add, Predicted>,
     eligible: Query<(), (With<Remote>, With<NetTank>, With<Rig>)>,
@@ -106,19 +97,7 @@ fn upgrade_predicted_to_dynamic(
         .insert((RigidBody::Dynamic, DisableRollback));
 }
 
-/// Client-side render smoothing for the predicted tank — the half of lightyear's prediction stack
-/// `LightyearAvianPlugin` does NOT mount (it only *orders* these systems' sets; the plugins and the
-/// per-entity `FrameInterpolate` markers are the app's job, per `lightyear_frame_interpolation`'s
-/// docs and the `avian_3d_character` example). Two effects:
-///   - between fixed ticks the root's Position/Rotation render as an overstep blend instead of raw
-///     64 Hz steps;
-///   - rollback *correction* arms: `update_frame_interpolation_post_rollback` requires
-///     `FrameInterpolate<C>` on the entity, so without it the registered correction fn is inert and
-///     every rollback SNAPS the tank (measured 10–26 rollbacks/s while driving at 80 ms — the
-///     rubber-banding). Since 597ec21 the correction policy is `instant_correction()` — the sim
-///     snaps to the corrected present in one frame by design and the render-space error layer
-///     (`net/render_error.rs`) absorbs the discontinuity on the view side; this arming remains
-///     load-bearing for the between-ticks overstep blend and lightyear's correction plumbing.
+/// Install Lightyear frame interpolation for predicted root position and rotation.
 pub fn client_smoothing_plugin(app: &mut App) {
     app.add_plugins((
         FrameInterpolationPlugin::<Position>::default(),
@@ -127,11 +106,7 @@ pub fn client_smoothing_plugin(app: &mut App) {
     app.add_systems(Update, arm_predicted_smoothing);
 }
 
-/// Decorate the predicted tank ROOT with `FrameInterpolate` once `Predicted` and `Position` are
-/// both present. A polling system, not an `Add` observer: the prediction sync copies components
-/// from the confirmed entity in no guaranteed order (same shape as `strip_child_pose_history`).
-/// Root only — the children's poses are DERIVED state (root pose ∘ collider/servo transforms);
-/// frame-interpolating them would fight the systems that derive them.
+/// Arm only the root after independently replicated markers arrive; child poses are derived state.
 fn arm_predicted_smoothing(
     tanks: Query<
         Entity,

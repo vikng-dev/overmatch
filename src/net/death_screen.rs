@@ -1,13 +1,6 @@
-//! Net-client death screen + respawn request. The player-side counterpart to the server's
-//! [`crate::net::server`] respawn loop: when the player's OWN tank dies, show a minimal overlay and
-//! let the player latch a respawn.
+//! Net-client death overlay and respawn request.
 //!
-//! Death is read from the public, server-authored `NetTankStatus`; `net::disclosure` realizes that
-//! state as `TankKnockedOut` on replicas. Detailed `NetCrew` state remains owner-private and does not
-//! decide the client's public life-state label.
-//!
-//! Net-only by construction: this module lives under the `net`-gated `net` module and is mounted
-//! solely by `NetClientPlugin`. Single-player has no respawn flow.
+//! Life state comes from public `NetTankStatus`; private crew state must not drive an observer's UI.
 
 use bevy::prelude::*;
 
@@ -18,32 +11,22 @@ use crate::state::PlayerInputSet;
 use crate::tank::Controlled;
 use crate::ui_font::UiFonts;
 
-/// The respawn key. `R` for respawn — a graybox binding; a rebind screen later would move it into
-/// `command::Bindings` like the drive/fire keys, but the death screen is the only reader for now.
+/// Temporary respawn binding.
 const RESPAWN_KEY: KeyCode = KeyCode::KeyR;
 
-/// Which message the overlay is showing. Stored on the node so a state change (dead → respawning)
-/// rebuilds the text without churning the node every frame.
+/// Message represented by the status node.
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 enum DeathScreenNode {
-    /// The player's crew are dead and no respawn has been requested — offer the key.
+    /// Dead with no outstanding request.
     Died,
-    /// A respawn was requested and we are waiting out the round-trip for the fresh tank to replicate
-    /// back and be re-claimed. Keep the overlay up so there is never a bare, tankless frame.
+    /// Request sent; keep the overlay until a live controlled tank arrives or the request expires.
     Respawning,
 }
 
-/// How long a respawn request may sit unfulfilled before the overlay reverts from `RESPAWNING…` back
-/// to `Died` and re-enables the request. The happy path re-acquires a live tank within ~1 RTT (well
-/// under this), so the timeout only fires when the request genuinely stalls: the server asset-gate
-/// skipped the spawn, or the link dropped while dead and no fresh tank will ever replicate back.
-/// Without it the overlay sticks on `RESPAWNING…` forever with no way to re-request.
+/// Bound an unfulfilled request so the player can retry.
 const RESPAWN_TIMEOUT_SECS: f64 = 5.0;
 
-/// Tracks an in-flight respawn request. Latched the moment the player presses respawn, cleared once a
-/// fresh live `Controlled` tank is re-acquired — bridging the ~1-RTT gap in which the old tank has
-/// despawned but the new one has not yet replicated back (the window the overlay must NOT drop
-/// through) — OR cleared by the [`RESPAWN_TIMEOUT_SECS`] wall-clock timeout when the request stalls.
+/// In-flight request state. The overlay remains visible through the dead-to-replacement gap.
 #[derive(Resource, Default)]
 struct AwaitingRespawn {
     /// True from the respawn press until a live tank is re-acquired or the request times out.
@@ -65,17 +48,9 @@ pub fn plugin(app: &mut App) {
         .add_systems(
             Update,
             (
-                // Presence declaration for the death overlay joins the shared `Declare` phase, so the
-                // generic scrim reconciler AND the status-line one below read ONE fully-declared set
-                // (the ordering fix: death and menu visuals can no longer be computed from different
-                // generations of the set on the Esc edge while dead).
+                // All overlay reconcilers must read the same declared state.
                 toggle_death_screen.in_set(overlay::OverlaySet::Declare),
-                // `request_respawn` consumes a player keypress, so it carries `PlayerInputSet`'s cursor
-                // license. It ALSO runs after `Declare` and re-checks `overlay::input_blocked` on the
-                // reconciled set, so a respawn edge pressed the SAME frame a menu opens (R+Esc, or an
-                // alt-tab) — before `PlayerInputSet`'s cursor gate has caught up — is refused rather
-                // than latched into a command `feed_action_state` is about to zero (the phantom
-                // `RESPAWNING…` fix).
+                // Re-check the reconciled overlay input gate before latching a respawn edge.
                 request_respawn
                     .in_set(PlayerInputSet)
                     .after(overlay::OverlaySet::Declare),
@@ -86,22 +61,8 @@ pub fn plugin(app: &mut App) {
         );
 }
 
-/// Drive the death overlay through the full death→respawn round-trip, so it never drops through the
-/// tankless gap. The states, in order of precedence:
-///   - **Respawning** — a respawn was requested (`AwaitingRespawn`) and no live own tank exists yet.
-///     Covers both the still-dead-but-requested window AND the ~1-RTT gap after the old tank despawns
-///     but before the new one replicates back and `net::client::claim_input_slot` re-grants
-///     `Controlled`. This is the fix: the old code keyed solely on the dead tank existing, so the
-///     overlay vanished the instant that tank despawned, leaving the player with neither death screen
-///     nor a camera-bound tank until the replica arrived.
-///   - **Died** — the crew are dead and no respawn has been requested yet: offer the key.
-///   - **hidden** — a live own tank exists; clear `AwaitingRespawn` and take the overlay down.
-///
-/// A live own tank is `Controlled` without `TankKnockedOut` (the fresh tank spawns full-health, so its
-/// health-derived `TankKnockedOut` is absent). Runs in [`overlay::OverlaySet::Declare`] (so its `Death`
-/// declaration is reconciled before the scrim/status-line reconcilers read the set); a respawn pressed
-/// this frame by [`request_respawn`] — which now runs AFTER `Declare` — is reflected the next frame.
-/// Spawn/despawn only on a state change — not every frame.
+/// Declare respawning until a live controlled tank arrives or the request expires; otherwise declare
+/// death only for a controlled tank carrying `TankKnockedOut`.
 fn toggle_death_screen(
     time: Res<Time>,
     dead_own: Query<(), (With<Controlled>, With<TankKnockedOut>)>,

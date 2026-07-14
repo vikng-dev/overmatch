@@ -1,27 +1,7 @@
-//! The sim/view split's data source (design `sim-view-split-and-tank-bake.md` §8): the
-//! tank-geometry extractor and its shadow harness.
+//! Tank-geometry extraction and view-shadow verification.
 //!
-//! `extract_tank_geometry` parses the tank's `.glb` **as data** — the `gltf` crate against the
-//! file, no Bevy scene, no asset dependency — into [`TankGeometry`]: every node's name, parent,
-//! local transform, root-relative pose, (for sim-consumed meshes) raw vertex/index buffers, and
-//! the typed part lists the sim classifies by naming convention (roadwheel stations tagged with
-//! their track side, `*_Collider` collision proxies) — so the runtime never re-parses a node name
-//! for sim meaning (design §8 step 3). Since step 1 this is what the sim skeleton spawns from
-//! (complete tank construction) — the scene walk it replaced was shadow-proven to read exactly
-//! these values. The same function is phase 2's offline compiler core (one parser, two mounting
-//! points — design §6A).
-//!
-//! The shadow harness stays on: the extractor runs at startup and a shadow observer compares its
-//! output against every instantiated tank scene — names, hierarchy, local transforms (bit-exact),
-//! composed root poses (bit-exact, in `rig_world_pose`'s own operation order), and
-//! collider/ballistic mesh bytes against `Assets<Mesh>`. Post-step-1 that direction reverses
-//! meaning: it proves the *view* the player sees matches the data the sim runs on (and still
-//! catches a bevy_gltf coordinate-conversion default flip — design §7.2). Mismatches panic in
-//! debug builds and log errors in release; a clean pass logs one grep-able `SHADOW-BAKE ok` line
-//! (harness evidence).
-//!
-//! The startup parse re-reads the glb the asset server also loads (~65 MB, once) — scaffolding
-//! that phase 2 deletes along with the runtime glb dependency.
+//! Invariant (ADR-0014): simulation construction uses synchronously extracted data, never a loaded
+//! scene. The shadow verifier compares that data with instantiated view geometry.
 
 use std::collections::HashMap;
 use std::path::Path;

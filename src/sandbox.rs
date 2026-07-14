@@ -1,13 +1,7 @@
-//! The armor ballistics sandbox — an isolated tool to develop and tune the penetration march
-//! deterministically, decoupled from driving/aiming. See
-//! `.agents/docs/design/armor-penetration-and-damage.md` §11. Mounted by `bin/armor_sandbox`, not
-//! by `GamePlugin`: it composes a *subset* of the game's feature plugins plus the sandbox controls.
+//! Isolated penetration-march sandbox, mounted only by `bin/armor_sandbox`.
 //!
-//! v1 increment: a free-fly camera that *is* the gun (WASD to float, Shift/Ctrl up/down, mouse to
-//! look, left-click to fire a shell straight down the view axis), basic time controls (pause +
-//! slow-mo, on real time so you can still fly while the sim is frozen), and placeholder target
-//! slabs. The penetration march, ballistic volumes, and spall grow on top of `ballistics::Impact`
-//! in later increments.
+//! The free-fly camera is the gun; sandbox controls use real time so inspection remains available
+//! while simulation time is paused.
 
 use avian3d::prelude::{
     Collider, CollisionLayers, LayerMask, PhysicsInterpolationPlugin, PhysicsPlugins, RigidBody,

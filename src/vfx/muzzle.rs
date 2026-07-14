@@ -1,40 +1,7 @@
-//! The guns' firing signatures (survey tricks 1/2/3/5). The 88: a 1–2-FRAME billboard flash
-//! cluster (one camera-facing scorch-starburst core + two bore-aligned flame planes), a transient
-//! muzzle light (first frame hottest, ~100 ms decay, shadow-casting behind the [`MuzzleShadows`]
-//! lever), and one lingering eroded smoke puff (~1 s). The MGs (slice B, [`on_mg_fire`]): the same
-//! machinery at rifle scale — a small 1–2-frame round-glow core (+ one flame plane when near), a
-//! dim short light on EVERY round (tracer rounds spike ~1.5× brighter, visually coupling the flicker
-//! to the streaks), and one faint puff every few rounds (per-round smoke at 12.5 rds/s per gun
-//! stacks into fog — the overdraw trap). At 750 rpm per-shot VARIATION is the whole game: random
-//! flame frame + roll + size jitter per shot, because identical repeated flashes strobe. Strict
-//! lifetime discipline on every flash — the craft canon is emphatic that a flash alive past ~2
-//! frames reads slow and weak; the smoke and the light are what linger.
+//! View-only muzzle dressing for [`FireShell`] events.
 //!
-//! Shadows (Yan's 2026-07-12 decision): the muzzle light stays a direction-less `PointLight` (the
-//! hull occludes it physically, like any object), and shadow casting is ON by default but sits
-//! behind the [`MuzzleShadows`] measurement lever (`OVERMATCH_MUZZLE_SHADOWS`, the MG-march-lever
-//! precedent) so the shadowed-point cost — 6 cube-face passes per live light per frame — can be
-//! measured and, if the MG's sustained-fire population spikes, dialed back (every-Nth MG light, or
-//! off) without a rebuild.
-//!
-//! Hook: observers on the sim's [`FireShell`] event — the SAME seam the shell scene and the
-//! tracer child hang off (`ballistics::on_fire_shell`), split by the SAME caliber
-//! boundary (`ballistics::TRACER_MAX_CALIBER`): at/above it the 88 observer dresses the shot,
-//! below it the MG observer does. Both local fire (`shooting::fire`, FixedUpdate)
-//! and remote fire (`net::client::receive_fire_events` re-raising `FireShell` in Update) arrive
-//! here; `FireShell::origin`/`direction` are the muzzle pose at the fire tick on every path.
-//!
-//! Rollback honesty (the tracer-child precedent): a rollback replay that re-crosses the fire tick
-//! re-runs `shooting::fire` and can re-trigger `FireShell`, duplicating the dressing exactly as it
-//! duplicates the cosmetic shell + tracer child today. The dressing is idempotent in EFFECT —
-//! sub-second lifetimes and the shared billboard/light rings bound any pile-up — so it follows the
-//! precedent rather than inventing a dedup key the shell itself doesn't have.
-//!
-//! Staleness (survey trick 13): a remote shot arrives with `catch_up_ticks` of skipped flight; past
-//! [`STALE_FIRE_TICKS`] (~250 ms) the flash moment is long over on the shooter's screen, so the
-//! whole dressing is skipped rather than played late. Distance LOD: beyond [`FAR_FULL_DRESSING`]
-//! only the core + light spawn (they carry the read at range; the planes and smoke are sub-pixel
-//! overdraw there).
+//! Invariant (ADR-0014): spawned entities are render-only. Light and billboard rings bound replay
+//! duplicates; stale remote shots do not replay an already-expired flash.
 
 use bevy::prelude::*;
 
@@ -48,14 +15,11 @@ use super::billboard::{
     spawn_billboard, unit_quad,
 };
 
-/// Flash cluster lifetime (s): ~2 frames at 60 Hz. THE knob the survey warns about — push it past
-/// ~0.05 and the gun starts reading slow.
+/// Flash cluster lifetime in seconds.
 const FLASH_LIFETIME: f32 = 0.035;
-/// Core flash size range (m, diameter at the muzzle; the 88's fireball is car-sized for a frame).
-/// Punched up ~1.45× from the first cut (2.4–3.2) — the owner found the flash too subtle.
+/// Core flash diameter range in metres.
 const FLASH_CORE_SIZE: (f32, f32) = (3.5, 4.6);
-/// Directional flame-plane length range (m) and their width as a fraction of length. Punched up
-/// ~1.45× with the core (was 3.0–4.4).
+/// Directional flame-plane length range in metres and width ratio.
 const FLASH_PLANE_LENGTH: (f32, f32) = (4.3, 6.4);
 const FLASH_PLANE_WIDTH_RATIO: f32 = 0.55;
 /// Emissive boost on the flash LUT's heat lane — well above 1.0 so bloom catches the whole flash.
@@ -87,16 +51,11 @@ const SMOKE_SPIN_MAX: f32 = 0.6;
 /// Faint heat on young smoke (it is lit by the flash for the first instants).
 const SMOKE_GLOW: f32 = 5.0;
 
-/// Muzzle light (the 88's): peak luminous power (lm), falloff range (m), decay time (s). First
-/// frame hottest, gone in ~100 ms. Shadow casting rides the [`MuzzleShadows`] lever (the expensive
-/// half of a light — 6 cube-face passes per frame alive).
+/// Main-gun light peak (lm), range (m), and lifetime (s).
 const LIGHT_PEAK_LUMENS: f32 = 8.0e6;
 const LIGHT_RANGE: f32 = 35.0;
 const LIGHT_LIFETIME: f32 = 0.1;
-/// Live muzzle-light ring cap — pathological-refire bound, same shape as the billboard ring.
-/// Shared by the 88 and both MGs. MG lights now ride EVERY round (12.5/s per gun ×
-/// [`MG_LIGHT_LIFETIME`] ≈ 0.6 alive each, ~2.5 across two guns firing) so a two-tank MG exchange
-/// can hold several live at once; raised from 6 so that exchange never evicts a still-live light.
+/// Shared muzzle-light population cap; oldest lights are evicted first.
 const LIGHT_CAP: usize = 12;
 /// The MG tracer-round brightness spike: a tracer round's muzzle light is this much brighter than a
 /// ball round's, so the flicker still reads harder exactly when a streak leaves the barrel.
@@ -147,10 +106,7 @@ pub(super) fn plugin(app: &mut App) {
         .add_systems(Update, decay_muzzle_lights);
 }
 
-/// The muzzle-light shadow lever (`OVERMATCH_MUZZLE_SHADOWS`, the MG-march-lever precedent). Default
-/// `On` — the 2026-07-12 decision — with fallback positions the orchestrator can select from the
-/// cost measurements without a rebuild. Read once at plugin build (never per-frame), exactly like
-/// `ballistics::MgShortCircuit`.
+/// Muzzle-light shadow policy, read once at plugin setup.
 #[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(super) enum MuzzleShadows {
     /// Every muzzle light casts a shadow (the decision's default).
@@ -1004,14 +960,7 @@ mod tests {
         assert_eq!(lights(&mut app), LIGHT_CAP);
     }
 
-    /// Regression (owner playtest, 2026-07-12): the MG's per-round muzzle lights give
-    /// [`MuzzleLightRing`] eviction and [`decay_muzzle_lights`] the SAME live light to despawn in one
-    /// frame — the two-owner collision that, with a plain `despawn`, warned on a stale/recycled id
-    /// ("the entity ... is invalid; its index now has generation N"). This hammers a sustained MG
-    /// exchange — firing past the cap while lights age out every frame — and asserts the live light
-    /// population never exceeds the cap and the ring self-heals once fire stops. Both despawn owners
-    /// are the silent `try_despawn`, so the second despawn of an already-freed slot is a no-op, and
-    /// the ager never trips the command error handler.
+    /// Regression: simultaneous ring eviction and age expiry never double-despawn a muzzle light.
     #[test]
     fn sustained_mg_fire_caps_lights_without_stale_despawn() {
         let mut app = harness();

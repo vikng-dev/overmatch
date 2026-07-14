@@ -16,7 +16,6 @@ use lightyear::prelude::client::Remote;
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
-// Row fields for the shot-lifecycle recorder (`crate::shot_trace`); evaluated only when it is armed.
 
 use super::disclosure::{NetTankStatus, apply_net_tank_status};
 use crate::ballistics::ComponentHealth;
@@ -35,41 +34,17 @@ use crate::{CombatantId, ShotId};
 // ---------------------------------------------------------------------------
 // Protocol compatibility guard
 // ---------------------------------------------------------------------------
-//
-// WHY THIS EXISTS. bevy_replicon addresses replicated components by their REGISTRATION INDEX, not
-// by name, so a client and server built from different revisions of `plugin` (below) silently
-// misapply each other's messages: the deployed alpha.4 server replicated `NetHealth` at the index a
-// main-built client had since re-registered as `NetCrew`, and the client spammed per-tick
-// `unable to apply mutate message ... missing history component` forever, with no hint of the cause
-// (2026-07-11 incident). The netcode handshake already carries the mechanism to refuse this cleanly,
-// BEFORE replication ever starts: netcode.io's `protocol_id` is folded into the connect-token AEAD,
-// so a client whose `protocol_id` differs from the server's produces a token the server cannot
-// decrypt — it drops the request and the client times out, exactly as if the server were down (a
-// mismatch is transport-indistinguishable from a timeout; see `net::client`'s connect overlay). We
-// therefore bake [`PROTOCOL_FINGERPRINT`] into BOTH ends' `protocol_id` (`net::client`/`net::server`),
-// turning a version/wire skew into a clean refusal instead of a corrupt-forever connection.
+// Replicon registration order is wire compatibility. Both netcode endpoints must use
+// `PROTOCOL_FINGERPRINT` as their `protocol_id`; ADR-0018 and `wire_surface_is_pinned` own the
+// compatibility guard.
 
-/// The pinned protocol revision. It rides [`PROTOCOL_FINGERPRINT`] alongside the crate version, so
-/// two builds that share a crate version but differ on the WIRE SURFACE (the replicated
-/// component/message/channel set `plugin` registers) still refuse each other once this is bumped.
-///
-/// **Bump this — and re-pin [`WIRE_SURFACE_HASH`] — in the SAME diff whenever the wire surface
-/// changes** (a replicated component added/removed/reordered/renamed, a message or channel changed,
-/// the input type changed). The `wire_surface_is_pinned` tripwire fails until you do, which
-/// is the point: it makes a silent wire-breaking change impossible.
+/// Bump with [`WIRE_SURFACE_HASH`] for every wire-surface change.
 pub const PROTOCOL_REV: u32 = 11;
 
-/// The protocol fingerprint both ends bake into their netcode `protocol_id` (`Authentication::Manual`
-/// on the client, `NetcodeConfig` on the server). Derived at COMPILE TIME from [`PROTOCOL_REV`] + the
-/// crate version, so it is a pure function of the build — the SAME build always yields the SAME value
-/// (the two-app integration tests build both ends from this crate, so they always agree and still
-/// connect), and any version bump OR [`PROTOCOL_REV`] bump changes it, refusing a skewed peer.
+/// Compatibility tag derived from the protocol revision and crate version.
 pub const PROTOCOL_FINGERPRINT: u64 = protocol_fingerprint();
 
-/// FNV-1a over `bytes`, continuing from `seed` — a tiny, dependency-free, `const`-evaluable hash so
-/// [`PROTOCOL_FINGERPRINT`] is a compile-time constant with no build script or proc macro. Not
-/// cryptographic (it doesn't need to be — `protocol_id` is a compatibility tag, not a secret; the
-/// dev private key is a separate `[0; 32]`), just a stable well-mixed fold of the inputs.
+/// Const-evaluable FNV-1a fold for the compatibility tag; it is not a security primitive.
 const fn fnv1a_64(seed: u64, bytes: &[u8]) -> u64 {
     let mut hash = seed;
     let mut i = 0;
@@ -81,58 +56,38 @@ const fn fnv1a_64(seed: u64, bytes: &[u8]) -> u64 {
     hash
 }
 
-/// Fold [`PROTOCOL_REV`] then the crate version into one `u64` (FNV-1a offset basis as the seed).
+/// Fold the protocol revision and crate version into one compatibility tag.
 const fn protocol_fingerprint() -> u64 {
     let rev_bytes = PROTOCOL_REV.to_le_bytes();
     let after_rev = fnv1a_64(0xcbf2_9ce4_8422_2325, &rev_bytes);
     fnv1a_64(after_rev, env!("CARGO_PKG_VERSION").as_bytes())
 }
 
-/// Replicated tank-identity marker — how the client recognizes a replicated entity as a tank
-/// without replicating the sim's own `Tank` marker. Deliberately NOT `Tank`: the sim marker stays
-/// local and arrives only with the complete local body, including Tank's required command/drive
-/// state.
+/// Replicated tank identity; local `Tank` simulation state is never replicated.
 #[derive(Component, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct NetTank;
 
-/// Replicated bot marker — `Name` is not replicated, so the client can't read the server's
-/// `Name::new("Bot")`; this rides the wire so the client's HUD can prefix the bot's nameplate with
-/// `[BOT]`. Plain replication like [`NetTank`] (no prediction/interpolation).
+/// Replicated bot identity for client presentation.
 #[derive(Component, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct NetBot;
 
-/// Authoritative turret/gun angles (radians, parent-local — `ServoState::current`'s own frame),
-/// published on the tank root by the authority and replicated. Remote (interpolated) tanks —
-/// other players' tanks, from step 9 — have no local servo sim; this is how their rigs lay.
-///
-/// Applied as `ServoCommand` *targets*, not written into `ServoState`: the local servo mechanism
-/// (`drive_servos`) chases the authoritative angle under its real speed/accel profile, which
-/// smooths replication-rate steps for free — no interpolation registration, no transform fights
-/// with `interpolate_servos`. The hull MG's servos are deliberately not covered yet (per-weapon
-/// laying is its own slice); a remote hull MG rests until then.
+/// Authoritative parent-local turret/gun targets for remote local rigs.
 #[derive(Component, Clone, Copy, Default, PartialEq, Debug, Serialize, Deserialize)]
 pub struct ServoAngles {
     pub turret: f32,
     pub gun: f32,
 }
 
-/// Authoritative per-crew-seat occupancy, published on the tank root by the authority and replicated
-/// so the client renders swap progress and a foreign backfill (`Crewman.home != seat`) without
-/// running the swap flip locally. Travels INSIDE [`NetCrew`] so occupancy, HP, and aliveness are one
-/// atomic snapshot (see the type doc). `home` is the occupant's native station; `dead` is the
-/// server's authoritative aliveness (its monotonic `Dead` latch, fed only by its own sim).
+/// Authoritative occupant facts transmitted atomically with `NetCrew` health.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct CrewSnapshot {
-    /// The occupant's native station (specialty) — after a backfill swap this differs from the seat's
-    /// own [`CrewStation`], which is a fixed local fact both ends spawn from the RON.
+    /// Occupant's native station; it can differ from its current seat.
     pub home: CrewStation,
-    /// Whether the occupant is dead on the authority. The client DERIVES its local `Dead` marker from
-    /// this each tick (idempotent), never latching it from re-assertable HP.
+    /// Authority-owned death fact; clients derive their local marker from it.
     pub dead: bool,
 }
 
-/// One health-bearing volume's authoritative snapshot within [`NetCrew`]: its HP, plus — for a crew
-/// seat — the occupant facts. `crew` is `None` for module/ammo volumes (they have HP but no occupant).
+/// One health-bearing volume and, for crew seats, its occupant facts.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct VolumeSnapshot {
     /// The volume's live `ComponentHealth.current`.
@@ -141,28 +96,10 @@ pub struct VolumeSnapshot {
     pub crew: Option<CrewSnapshot>,
 }
 
-/// The owner-private combat snapshot of a tank, published on the root by the authority.
+/// Owner-private authoritative combat state.
 ///
-/// Its disclosure filter exposes it only to the controlling client. Public life state is
-/// [`NetTankStatus`], so observers never receive per-volume health, crew, or ammo facts.
-///
-/// **One atomic snapshot, so no frame is internally inconsistent.** It SUBSUMES the former `NetHealth`:
-/// every health-bearing volume's HP travels here in `TankVolumes` iteration order (the SAME order both
-/// ends derive, since both build the rig from one RON spec with sorted-by-name volume
-/// spawn), and each crew seat's occupancy (`Crewman.home`) and aliveness (`Dead`) ride the SAME entry.
-/// A crew swap moves a live occupant between seats; replicating HP alone (as `NetHealth` did) let the
-/// server's still-pre-swap HP re-assert onto the seat a client-side flip had just moved the live man
-/// into — the corruption this component exists to end (the client no longer flips; it reads this).
-/// Index `i` maps to the same volume on both ends; a length mismatch at apply time skips the tank.
-///
-/// `swap` carries the in-flight backfill (`(source seat, target seat, seconds remaining)`) so the crew
-/// bar's countdown is a cosmetic reading of replicated state (ADR-0014), not a client-predicted timer.
-///
-/// Plain replication (no prediction/interpolation), same idiom as [`ServoAngles`]; `set_if_neq` on
-/// publish so a resting tank stops churning change-detection. During a swap the `remaining` countdown
-/// changes every tick, so the snapshot DOES resend each tick then — deliberate: a swap is a rare 4 s
-/// event and replicating its progress is the point; at rest (`swap == None`, HP and crew stable) the
-/// snapshot is stable and `set_if_neq` suppresses idle churn exactly as `NetHealth` did.
+/// `volumes` follows `health_bearing_volumes` order on both peers. HP, occupancy, death, and the
+/// in-flight swap are one atomic snapshot; client UI reads it and never predicts those facts.
 #[derive(Component, Clone, Default, PartialEq, Debug, Serialize, Deserialize)]
 pub struct NetCrew {
     /// Every health-bearing volume in [`health_bearing_volumes`] order: HP + (for seats) occupancy.
@@ -171,41 +108,12 @@ pub struct NetCrew {
     pub swap: Option<(CrewStation, CrewStation, f32)>,
 }
 
-/// Authoritative world pose of the launched (cooked-off) turret, published on the tank root by the
-/// authority and replicated so the client can SHOW the toss it does NOT simulate locally
-/// (`damage::launch_turrets_on_cookoff` early-returns on the `ClientReplica` gate — a client-local
-/// launch pops to an unsynced origin and re-fires on reconnect). `None` until the turret launches,
-/// then `Some((world position, world rotation))` — the "Approach A" design: keep the turret on the
-/// client's locally-built rig (the `Rig.turret` join key) and drive it KINEMATICALLY from this
-/// datum instead of promoting it to its own replicated entity. Plain replication (no
-/// prediction/interpolation), same idiom as [`ServoAngles`]; `set_if_neq` on publish
-/// so a resting turret stops churning change-detection (and replication resends).
+/// Authoritative launched-turret pose; client rigs render it without simulating a second launch.
 #[derive(Component, Clone, Default, PartialEq, Debug, Serialize, Deserialize)]
 pub struct LaunchedTurretPose(pub Option<(Vec3, Quat)>);
 
-/// One belt-fed (`Automatic`) weapon's authoritative fire-supply facts within [`NetBelts`] — the
-/// two CORRELATED values a client cannot predict on a lossy input stream and so must be TOLD:
-///
-/// * `belt` — rounds left on the current belt (`WeaponState::belt_remaining`). This GATES fire
-///   (`shooting::fire`: an `Automatic` fires only while `belt > 0`), so the client's own predicted
-///   belt drifting below the server's is the exact bug this component fixes: under deep input loss
-///   the client predicts a shot the server never fires (`bridge_action_state_to_tank_command`'s
-///   documented loss trade), its `belt_remaining` (root-resident in `TankSim`, formerly NOT
-///   replicated) drops one under the server's, and — because `TankSim` is `local_rollback` with NO
-///   confirmed value to roll back TO — nothing ever corrected it until the next belt swap reset both
-///   ends to `belt_size`. That window is a phantom client MG round (no damage — damage is
-///   server-authoritative), a lying HUD count, and a per-tick `hrld` divergence flag (belt is folded
-///   into `trace::hash_tank_state`).
-///
-/// * `swap_remaining` — the belt-SWAP countdown, i.e. `WeaponState::reload_remaining` WHILE the belt
-///   is dry (`belt == 0`); `0.0` while `belt > 0` (not swapping). It must ride HERE, atomically with
-///   `belt`, because pinning `belt` alone leaves a boundary hazard: the moment the server's belt hits
-///   0 the client would see `belt == 0` but hold its own near-zero cyclic `reload_remaining`, so its
-///   local `tick_reload` would INSTANTLY complete the swap and refill to `belt_size`, which the next
-///   `apply_net_belts` overwrites back to 0 — an every-tick refill/overwrite OSCILLATION. Carrying
-///   the swap countdown lets the client pin `reload_remaining` to the server's while `belt == 0`, so
-///   the refill is server-driven (it arrives as `belt == belt_size`), never raced locally. This is
-///   the SAME "replicate the correlated facts atomically" shape as [`NetCrew`]'s `swap` countdown.
+/// Correlated authoritative belt state. `belt` and `swap_remaining` must be applied atomically so a
+/// client cannot locally complete a server-owned belt swap.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct BeltSnapshot {
     /// Rounds left on the belt (`WeaponState::belt_remaining`); `0` = a swap is in flight.
@@ -214,30 +122,10 @@ pub struct BeltSnapshot {
     pub swap_remaining: f32,
 }
 
-/// The owner-private per-weapon fire-supply snapshot, published on the root so the owning client's
-/// belt-fed weapons gate fire (and count the HUD) from server truth instead of a divergent prediction.
-/// The net half of the belt-replication fix
-/// (Option B, owner 2026-07-12): the server's belt overwrites the client's prediction.
-///
-/// **One entry per weapon slot, in `TankSim::weapons` order** (the SAME order both ends derive —
-/// sorted-by-name weapon spawn assigns `WeaponIndex`, exactly like [`NetCrew`]'s volume order), so
-/// index `i` addresses the same weapon on both ends. `None` = a non-belt-fed (`Single`) weapon,
-/// which carries no belt and whose `reload_remaining` this fix deliberately does NOT touch (the 88's
-/// reload divergence is inherent-and-self-reconciling — the next shot fixes it — per
-/// `bridge_action_state_to_tank_command`'s loss-trade note; only the belt's window is long enough to
-/// warrant replication). A length mismatch at apply time (rig still spawning) skips the tank.
-///
-/// Plain replication (no prediction/interpolation), same idiom as [`ServoAngles`]/[`NetCrew`];
-/// `set_if_neq` on publish so a resting tank stops churning change-detection. While an MG fires the
-/// `belt` changes ~12.5/s and the snapshot resends then (deliberate — lightyear's change-detection
-/// handles it, no custom throttle); `swap_remaining` is `0.0` throughout normal fire (so it does not
-/// add churn) and only ticks every tick during the rare multi-second belt swap, exactly like
-/// [`NetCrew`]'s swap countdown. At rest (belt full, not firing) the snapshot is stable and
-/// `set_if_neq` suppresses idle churn.
+/// Owner-private authoritative belt state. Entries follow `TankSim::weapons` order on both peers.
 #[derive(Component, Clone, Default, PartialEq, Debug, Serialize, Deserialize)]
 pub struct NetBelts {
-    /// Every weapon in `TankSim::weapons` order: `Some(BeltSnapshot)` for a belt-fed (`Automatic`)
-    /// weapon, `None` for a `Single` weapon (untouched by the belt fix).
+    /// `Some(BeltSnapshot)` for a belt-fed weapon, `None` for a `Single`, in `TankSim::weapons` order.
     pub weapons: Vec<Option<BeltSnapshot>>,
 }
 
@@ -513,39 +401,10 @@ struct VolumeSink {
     dead: Has<Dead>,
 }
 
-/// Client side: realize owner-private [`NetCrew`] onto its local tank — authoritative HP, occupant
-/// `home`, and `Dead`. Public knockout/cookoff state is applied from [`NetTankStatus`], not derived
-/// from this private snapshot.
+/// Apply owner-private authoritative crew state to a replica.
 ///
-/// **This system is TICK-AGNOSTIC, and that is only safe because state rollback runs in
-/// `RollbackMode::Check`.** It applies the newest confirmed snapshot to whatever tick is being
-/// simulated — forward tick or replayed tick alike. [`NetCrew`] is plain-replicated (no `.predict()`,
-/// hence no `ConfirmedHistory`), so it holds exactly one value, and a rollback replay of ticks
-/// `T..present` writes that one value onto every replayed tick.
-///
-/// Applying it FORWARD is correct: the newest-confirmed snapshot is the best estimate for a predicted
-/// tick, which is just prediction. Applying it BACKWARD — a post-death snapshot onto a genuinely
-/// pre-death tick — would suppress thrust the forward sim applied (the drive/reload/fire capability
-/// gate rides `Dead` via `damage::part_qualities`). Unlike the old `NetHealth` design this no longer
-/// depends on `Dead` being a *never-rolled-back* latch: here `Dead` is RE-DERIVED from the confirmed
-/// snapshot on every (forward or replayed) tick, so a replayed tick simply gets the same
-/// newest-confirmed aliveness — consistent by construction rather than by the latch's immunity.
-///
-/// It stays unreachable for the same structural reason `apply_net_health` was safe: **every STATE
-/// rollback starts at `server_confirmed_tick`** (`lightyear_prediction` rollback.rs — `Always`
-/// :494-509, `Check` :534-556/:613-635), so a state replay window never begins before the tick whose
-/// confirmed snapshot killed the crewman. The residual (a newer snapshot live while a rollback targets
-/// an older tick, because `last_confirmed_tick` is a GLOBAL Replicon value applied per-message) is the
-/// cross-entity replication lag (1-3 ticks, sub-centimetre), transient and self-healing.
-///
-/// **Enabling INPUT-side rollback is still the flag to watch** — it targets ticks OLDER than
-/// `server_confirmed_tick` (rollback.rs:669/:694) and could land before a death tick — but note this
-/// design already removes the old sharp edge there: the capability gate now reads a `Dead` that tracks
-/// the confirmed snapshot per tick rather than a never-rolled-back latch, so input rollback no longer
-/// needs a *separate* fix for the aliveness gate on top of a tick-correct health representation.
-///
-/// Ordered `.before(DamageConsequences)` for parity with the authority (whose chain is gated off on
-/// the client — `Without` `ClientReplica`); a length mismatch (rig still spawning) skips the tank.
+/// `NetCrew` is plain replication, so this may run during replay; `Dead` is re-derived from the
+/// snapshot, while public life state remains `NetTankStatus`. Run before `DamageConsequences`.
 fn apply_net_crew(
     tanks: Query<(&TankVolumes, &NetCrew), With<Remote>>,
     mut volumes: Query<VolumeSink>,
@@ -668,41 +527,10 @@ fn publish_net_belts(
     }
 }
 
-/// Client side: realize the replicated [`NetBelts`] onto each `Remote` tank's local `TankSim` — pin
-/// every belt-fed weapon's `belt_remaining` to server truth, and (while the belt is dry) its
-/// `reload_remaining` to the server's swap countdown. This is Option B (owner 2026-07-12): the
-/// server's belt OVERWRITES the client's prediction. `belt_remaining` is root-resident in the
-/// `local_rollback`-tracked `TankSim`, with NO replicated confirmed value to roll back to, so before
-/// this a client's mispredicted belt (a phantom shot the server never fired) stayed wrong until the
-/// next belt swap; here it snaps back every tick.
+/// Pin each replica's belt-fed weapon to authority state.
 ///
-/// **Why pin `reload_remaining` only when `belt == 0`.** While the belt has rounds, `reload_remaining`
-/// is the sub-0.1 s cyclic interval — cheap to let the client predict, self-correcting within one
-/// cycle, and it never gate-diverges because the belt (which actually gates fire) is authoritative.
-/// While the belt is DRY it is the multi-second swap timer, and pinning it is what stops the boundary
-/// oscillation the [`BeltSnapshot::swap_remaining`] doc describes (a client would otherwise instantly
-/// complete the swap locally and fight the overwrite every tick). A `None` entry (a `Single` weapon)
-/// is left entirely untouched — its reload divergence is inherent and self-reconciling (see
-/// [`NetBelts`]).
-///
-/// **This system is TICK-AGNOSTIC and runs during rollback replay too** — the same discipline as
-/// [`apply_net_crew`], and for the same reason: [`NetBelts`] is plain-replicated (no `.predict()`,
-/// hence no `ConfirmedHistory`), so it holds exactly one value, and a rollback replay of ticks
-/// `T..present` pins that newest-confirmed value onto every replayed tick. That is deliberate — we
-/// WANT the belt pinned to server truth on forward AND replayed ticks alike; gating it off during
-/// rollback would let the replay re-derive the divergent local belt from prediction history and
-/// re-open the very gap this closes. The residual is the same cross-entity replication lag
-/// `apply_net_crew` documents: the pinned belt is the newest CONFIRMED value (a few ticks old), so
-/// during a burst the client's belt trails the server's live belt by that lag — a bounded,
-/// transient, self-healing delta (the divergence analyzer's belt field reads transient-then-zero),
-/// not the old accumulate-until-swap divergence. A snap that flips fire-gating mid-burst is
-/// acceptable by owner decision: a predicted MG round silently does not happen (it was only a
-/// damage-free tracer — damage is server-authoritative).
-///
-/// Ordered `.after(ConsumeCommandEdges)` so it runs after `shooting::tick_reload`/`fire` (which order
-/// `.before(ConsumeCommandEdges)`) each tick — the confirmed belt is the tick's last word, so the
-/// end-of-tick state (and the `hrld` hash) reads exactly server truth. `With<Remote>` = replica-only
-/// in shared code, exactly like [`apply_net_crew`]; a length mismatch (rig still spawning) skips.
+/// `belt` and dry-belt `swap_remaining` must update together. This runs after fire/reload and during
+/// replay, so local prediction cannot complete a server-owned belt swap. `Single` weapons are untouched.
 fn apply_net_belts(mut tanks: Query<(&NetBelts, &mut TankSim), With<Remote>>) {
     for (belts, mut sim) in &mut tanks {
         // A length mismatch is expected transiently while the client's rig is still spawning and
@@ -844,46 +672,15 @@ fn apply_launched_turret_pose(
     }
 }
 
-/// Coarsened rollback thresholds for the tank root (map §1): the reference examples' 1 cm / 0.01
-/// rad bar is tuned for a single-collider capsule character, not a 16-contact 57 t rig — solver
-/// noise on a body this complex trips that bar far more often than genuine misprediction (measured:
-/// ~430 rollbacks/15s at 100ms latency vs 13 for the increment-5 primitive, all invisible/converging
-/// per the increment-6 log). Correction smoothing (`add_linear_correction_fn`, already wired) hides
-/// a ≤5 cm snap; coarsening to 0.05 trades some correctness-under-genuine-desync for a large CPU
-/// win on the honest-noise case. Position in metres, Rotation in radians, velocities in m/s or
-/// rad/s-equivalent — same shape as the map §1(b) reference thresholds, five times coarser.
+/// Shared rollback thresholds for Lightyear and `net::watchdog`.
 ///
-/// Velocity is deliberately DESYNC-ONLY (1.0), not a noise tripwire — the jitter investigation's
-/// reconciliation-amplification finding. A rollback is not free reconciliation: it restores a
-/// ~12-tick-old confirmed state and RE-SIMULATES to the present, and the replay is chaotic through
-/// friction/contact (stick-slip brush anchors, contact transients), so the corrected present lands
-/// farther from the old present than the triggering error ever was — measured on a windowed feel
-/// capture: applied visual correction = 5.6× the same-tick sim divergence at median, 43× at p90,
-/// corrections active on 41% of frames with |error| p50 0.35 m, from triggers barely over the old
-/// 0.20 m/s bar while true positions agreed to 0.5–4 cm. Velocity-triggered rollbacks were
-/// INJECTING visible motion, not removing desync. Velocity errors self-damp through the suspension;
-/// the position/rotation bars — which actually fire since the Interpolated-marker fix — are the
-/// honest desync backstops, so drift is caught at 5 cm regardless. 1.0 m/s keeps the velocity
-/// condition only for gross desync (teleports, missed impacts), where a replay is genuinely
-/// cheaper than waiting for the position bar. The conditions must stay: without one, lightyear
-/// falls back to `PartialEq::ne` — bit-equality that f32 solver output never satisfies.
-/// `pub(crate)` because `net::watchdog` re-runs the same comparisons with the same bars — one
-/// definition of "desynced enough to roll back", two detectors (receive-time + backstop).
-///
-/// Two notes from the 2026-07-06 review (ADR-0015): the rollback-count evidence above predates
-/// the watchdog — pre-watchdog lat0 rollback COUNTS measured check starvation (the receive-time
-/// check silently dead at zero prediction margin, see `net::watchdog`), not convergence, and are
-/// invalid as an A/B metric. And these coarsened bars are Layer-2 scaffolding, a ratchet rather
-/// than a setting: as the divergence they absorb collapses (contact-restore fix, upstream
-/// constraint ordering), tighten them toward the 1 cm / 0.01 rad reference values.
+/// Position and rotation own normal reconciliation. Velocity is deliberately a gross-desync gate;
+/// all conditions must remain registered because Lightyear otherwise falls back to float equality.
 pub(crate) const ROLLBACK_POSITION_M: f32 = 0.05;
 pub(crate) const ROLLBACK_ROTATION_RAD: f32 = 0.05;
 pub(crate) const ROLLBACK_VELOCITY: f32 = 1.0;
 
-// The mismatch METRICS those thresholds are measured against — like the bars above, defined once
-// and shared by both detectors (the registered rollback conditions below and `net::watchdog`'s
-// re-run of the same comparison), so "desynced enough to roll back" has exactly one definition:
-// one metric, one bar, two call sites.
+// The registered conditions and watchdog share these metrics and thresholds.
 
 /// Confirmed-vs-predicted `Position` divergence: straight-line distance (m).
 pub(crate) fn position_error(a: &Position, b: &Position) -> f32 {
@@ -905,23 +702,8 @@ pub(crate) fn angular_velocity_error(a: &AngularVelocity, b: &AngularVelocity) -
     (a.0 - b.0).length()
 }
 
-/// The ordered WIRE SURFACE: every replicated component, replicated message, channel, and input type
-/// that rides the wire, in the EXACT order [`plugin`] registers them below. This is the surface
-/// bevy_replicon addresses by registration index — the thing a version skew corrupts (the motivating
-/// `NetHealth`-vs-`NetCrew`-at-the-same-index incident).
-///
-/// It is HAND-MAINTAINED and bound to `plugin` by the `wire_surface_is_pinned` tripwire (in the test
-/// module): this list must mirror the registration block one-for-one, in order. Enumerating
-/// lightyear's `ComponentRegistry` at runtime was considered and rejected as disproportionate (it
-/// keys on `TypeId`, mixes in lightyear-internal registrations, and its `finish()` poisons the
-/// registry) — the sanctioned "ordered list adjacent to the registration block with a comment binding
-/// them" is the proportionate guard. Changing the wire (rename/add/remove/reorder a replicated type,
-/// message, channel, or the input) must edit this list too, which changes [`WIRE_SURFACE_HASH`] and
-/// fails the tripwire — forcing a [`PROTOCOL_REV`] bump + re-pin in the same diff.
-///
-/// `#[cfg(test)]`: this and [`WIRE_SURFACE_HASH`] exist only to drive that tripwire, so they compile
-/// only under test — but they live HERE, adjacent to `plugin`, so an editor of the registration block
-/// sees the list they must keep in step.
+/// Ordered wire registrations. Keep this list aligned with [`plugin`]; the test requires a matching
+/// [`WIRE_SURFACE_HASH`] and [`PROTOCOL_REV`] bump for every add, removal, rename, or reorder.
 #[cfg(test)]
 const WIRE_SURFACE: &[&str] = &[
     // Plain-replicated markers/snapshots — `app.component::<_>().replicate()`, in order:
@@ -951,9 +733,7 @@ const WIRE_SURFACE: &[&str] = &[
     "AngularVelocity",
 ];
 
-/// The pinned structural hash of [`WIRE_SURFACE`]. Re-pin this (and bump [`PROTOCOL_REV`]) in the
-/// same diff whenever the wire surface changes; the `wire_surface_is_pinned` tripwire prints the new
-/// value in its failure message. `#[cfg(test)]` for the same reason as `WIRE_SURFACE`.
+/// Pinned hash for the ordered wire surface; updated with [`PROTOCOL_REV`] by its tripwire.
 #[cfg(test)]
 const WIRE_SURFACE_HASH: u64 = 0xa21f_954b_03e6_a9cd;
 
@@ -1001,10 +781,7 @@ const WIRE_DEP_AVIAN3D: &str = "0.7.0";
 #[cfg(test)]
 const WIRE_DEP_LIGHTYEAR: &str = "0.28.0";
 
-/// Registers everything both sides of the wire must agree on: replicated components, shot messages
-/// and channels, and the `TankCommand` input protocol — the exact surface enumerated in
-/// `WIRE_SURFACE` above (keep the two in lockstep; the `wire_surface_is_pinned` tripwire enforces
-/// it). Grows as later increments add more (§5/§7 of the spike map).
+/// Register the exact shared wire surface represented by [`WIRE_SURFACE`].
 pub(crate) fn plugin(app: &mut App) {
     // `LocalTimeline` is incremented by lightyear in `FixedFirst` (lightyear_core 0.28's
     // `increment_local_tick`); publish it before every `GameplaySet` consumer, especially
@@ -1018,10 +795,7 @@ pub(crate) fn plugin(app: &mut App) {
     // Plain replication, no `.predict()`/interpolation: predicted tanks simulate their own servos,
     // and non-predicted consumers chase the raw angle through the servo mechanism (see the type).
     app.component::<ServoAngles>().replicate();
-    // Server-authoritative atomic combat snapshot (same plain-replication shape as `ServoAngles`):
-    // per-volume HP + per-seat occupancy/aliveness + in-flight swap, all in one component so no
-    // frame is internally inconsistent. Subsumes the former `NetHealth`. The client's damage/death
-    // internals emerge from this only for the owner; public life state is `NetTankStatus`.
+    // Owner-private atomic combat snapshot; public life state is `NetTankStatus`.
     app.component::<NetCrew>().replicate();
     // Minimal public tank-life state. It gives observers death/cookoff presentation without
     // replicating private crew, module, ammunition, or belt facts.
@@ -1177,52 +951,23 @@ pub(crate) fn plugin(app: &mut App) {
             .in_set(GameplaySet)
             .before(DamageConsequences),
     );
-    // Client: pin each belt-fed weapon's supply to server truth (Option B). `.after(ConsumeCommandEdges)`
-    // so it runs after `shooting::tick_reload`/`fire` (which order `.before(ConsumeCommandEdges)`) —
-    // the confirmed belt is the tick's last word. Runs during rollback replay too (tick-agnostic,
-    // like `apply_net_crew`), so the belt stays pinned on every replayed tick; see the system doc.
+    // Authority belt state is the final word each tick, including replay.
     app.add_systems(
         FixedUpdate,
         apply_net_belts
             .in_set(GameplaySet)
             .after(ConsumeCommandEdges),
     );
-    // Client: keep the crew bar's view-only `PendingSwap` in step with the replicated swap, so the
-    // sim-layer `crew_ui` reads it exactly as in single-player (never naming the netcode).
     app.add_systems(FixedUpdate, mirror_swap_from_net_crew.in_set(GameplaySet));
-    // Bridge lightyear's input buffer into the sim's own `TankCommand` (command.rs's contract):
-    // sim systems (`ramp_drive`, `fire`, `drive_aim_servos`) read `TankCommand`, never
-    // `ActionState` directly, so this is the one seam translating net input into sim input.
-    // `.before(GameplaySet)`, NOT merely `.before(ConsumeCommandEdges)`: every consumer — the
-    // readers (`fire`, `ramp_drive`, `drive_aim_servos`) AND the edge-clearer (`consume_edges`)
-    // — lives in `GameplaySet`, and ordering only against `ConsumeCommandEdges` leaves the bridge
-    // unordered vs `fire`. Measured failure with the weaker constraint: `fire` ran first, read
-    // the pre-bridge command, then `consume_edges` cleared the edge the bridge had just written —
-    // the click vanished without any tick consuming it (reload never left 0.0).
-    // Not gated `.run_if(not(is_in_rollback))`: replay must re-feed the same historical
-    // `ActionState` lightyear itself restores per tick (map §3.4's "no gate needed" class — this
-    // is a pure copy from already-correctly-restored state, not an externality).
+    // The sim reads `TankCommand`; bridge it before all `GameplaySet` consumers, including replay.
     app.add_systems(
         FixedUpdate,
         bridge_action_state_to_tank_command.before(GameplaySet),
     );
 }
 
-/// Kill lightyear's stale-confirmed poisoning of local-only rollback state: `add_prediction_history`
-/// (lightyear_prediction `predicted_history.rs`) fires when a `local_rollback` component is added to
-/// an entity that is `Predicted` + carries `ConfirmHistory` — our replicated tank root — and seeds
-/// `ConfirmedHistory<C>` with the component's ADD-TIME value, treating it as an authoritative
-/// init-message write. For a component the server never replicates that seed is the buffer's only
-/// entry forever, and `prepare_rollback` prefers confirmed history over predicted whenever it merely
-/// EXISTS — so every state rollback restored `TankSim`/`DriveState` to their add-time defaults
-/// instead of the rollback tick's predicted value. Measured symptom chain (2026-07-05): restored
-/// `captured=false` made `drive_servos` re-capture servo rest quats from the live (already-slewed)
-/// node transform, permanently baking the current lay into the servo zero — turret resolving away
-/// from the aim point, gun visibly outside its travel limits — plus per-rollback resets of turret
-/// angle, reload timers, and wheel anchors. Stripping the component on add makes `prepare_rollback`
-/// fall through to predicted history, which is the correct source for never-replicated state. The
-/// seed path is designed for replicated components arriving in init messages; a local-only component
-/// added later is outside its intent (upstream report candidate).
+/// Local-only rollback components must have no confirmed history: rollback restores them from
+/// prediction history, not their add-time value.
 fn strip_confirmed_history<C: Component + Clone>(
     add: On<Add, ConfirmedHistory<C>>,
     mut commands: Commands,
@@ -1232,105 +977,12 @@ fn strip_confirmed_history<C: Component + Clone>(
         .try_remove::<ConfirmedHistory<C>>();
 }
 
-/// Copy this tick's `ActionState<TankCommand>` (lightyear's input-buffer-backed component) into the
-/// entity's own `TankCommand` (the sim's actual read contract, `command.rs`) — the seam between
-/// networked input and every sim system. Only entities carrying both, which are exactly the
-/// locally-simulated tanks: the server's tanks get `ActionState` at spawn, the client's own
-/// predicted tank gets it when `InputMarker<TankCommand>` claims the slot (`claim_input_slot`,
-/// client module); remote (interpolated) tanks never carry one. `TankCommand` is a required
-/// component of the local `Tank` sim marker.
+/// Bridge Lightyear input to the simulation command.
 ///
-/// # A CONSUMABLE commits only on an ATTESTED tick
-///
-/// The whole struct is copied — matching `ActionState`'s "absolute snapshot per tick" contract —
-/// EXCEPT that the CONSUMABLES (`TankCommand::fail_consumables_closed`: the edges, plus the
-/// automatic-fire level) are failed closed on any tick the command cannot attest it was authored
-/// for. The test is a POSITIVE ATTESTATION, not a detector:
-///
-/// ```ignore
-/// if next.for_tick != tick.0 { next.fail_consumables_closed(); }
-/// ```
-///
-/// `TankCommand::for_tick` is stamped ONCE, on the client (`net::client`'s `stamp_input_tick`), with
-/// the exact tick lightyear's `buffer_action_state` files the command under (`local_tick +
-/// input_delay`), and then rides the input buffer, the wire, the server's buffer and rollback replay
-/// unmodified. So `for_tick == tick` iff the player really authored THIS command FOR THIS tick.
-///
-/// **Why a positive attestation and not a detector.** A value handed back by lightyear's
-/// `InputBuffer` for tick T is not necessarily an input the player gave for tick T. It can be:
-///
-/// 1. **Hold-last extrapolation.** Past the buffered range, the server's `update_action_state` calls
-///    `InputBuffer::get_predict(tick)`, which returns `get_last()` (`lightyear_inputs`
-///    input_buffer.rs:316 / server.rs:707) — "the player will keep playing the last action".
-/// 2. **A `SameAsPrecedent` gap-fill.** `InputBuffer::set_raw` fills any tick the writer SKIPS with
-///    `Compressed::SameAsPrecedent` (input_buffer.rs:212), a fabricated repeat of the last command
-///    on a tick nobody authored. The client skips a tick exactly when its `input_delay` GROWS.
-/// 3. **A stale entry the correction could not overwrite.** When the client's `input_delay` SHRINKS,
-///    two local ticks author the SAME buffer tick; the client fixes its own entry, but
-///    `update_buffer` refuses to write any tick `<= last_remote_tick` (input_message.rs:195), so the
-///    SERVER keeps the superseded value forever.
-/// 4. **An `Absent`-anchored freeze.** An `Absent` entry in the server's buffer makes `get` return
-///    `None` for the whole `SameAsPrecedent` tail behind it, `get_predict` return `None` (so
-///    `update_action_state` SKIPS the apply and the server's `ActionState` FREEZES at its last
-///    value), and — because `get_last` recurses back through `SameAsPrecedent` and DEAD-ENDS on the
-///    `Absent` — `get_last()` return `None` as well (input_buffer.rs:339/305). Upstream: lightyear
-///    issue #1559, open. See `.agents/scratch/upstream-reports/lightyear-absent-anchor-input-freeze.md`.
-///
-/// Every one of those returns an ordinary `Some(command)`, and cases 2/3/4 are invisible to the
-/// buffer's SHAPE — a fabricated gap-fill and a genuinely HELD trigger are the byte-identical
-/// `Compressed::SameAsPrecedent`. The detector this replaced (`get(tick).is_none() &&
-/// get_last().is_some()`, commit 2ea6cf5) saw only case 1, and case 4 defeats even that (its second
-/// conjunct goes FALSE precisely when the freeze bites). `for_tick` sees all four, and — the point —
-/// it sees the NEXT one too, because it never enumerates them: it asks the command to prove itself.
-/// `tests/net_fire_release.rs` drives all four over the real lightyear pipeline.
-///
-/// **Levels and absolutes are deliberately NOT gated.** Hold-last is CORRECT for `throttle`/`steer`
-/// and `aim`/`range`: a starved stream keeping the last drive and lay is the right guess, and none
-/// of it commits anything that cannot be taken back. Only the consumables spend ammo, deal damage,
-/// or change an entity's lifetime — see `TankCommand::fail_consumables_closed` for why that rule is
-/// OURS rather than practitioner canon.
-///
-/// # The four cases, per end
-///
-/// - **Client own tank, forward tick:** `stamp_input_tick` wrote `for_tick = tick + input_delay`
-///   this tick and `buffer_action_state` files it there; `input_delay` ticks later that tick comes
-///   round and `for_tick == tick`. Attested → the edge passes. In the PRE-SYNC window
-///   `input_delay()` is 0, so `for_tick == tick` immediately and a genuine click still passes.
-/// - **Client own tank, rollback replay:** lightyear restores the historical `ActionState` per
-///   replayed tick, stamp and all, and `LocalTimeline::tick()` IS the replayed tick — so the own
-///   fire edge re-fires during replay exactly as it must.
-/// - **Server tank, no input yet:** `ActionState::default()` carries `for_tick == 0` ≠ the server's
-///   tick → failed closed. There is no edge to carry anyway. Harmless.
-/// - **Server tank, starved / fabricated / stale / frozen:** the value's stamp names a DIFFERENT
-///   tick → consumables failed closed. The starvation re-latch (`701d0a7`) and the MG release leak
-///   both stay fixed, and so does every variant of them we have not met yet.
-///
-/// **Known non-coverage (honest).** Case 3 (`input_delay` SHRINKS) strands a value that IS correctly
-/// stamped for its own tick — the player authored it for that tick, then revised it, and the server
-/// never got the revision. No stamp can see that; the revision simply never arrived. That is closed
-/// upstream of here, by pinning `input_delay` CONSTANT (`net::client`'s
-/// `SHIPPING_INPUT_DELAY_TICKS`), which makes the client's write tick advance by exactly +1 and so
-/// makes cases 2 and 3 impossible to construct. The two fixes are complementary, not redundant: the
-/// pin removes the seeds it can, the attestation refuses to commit on any seed that survives.
-///
-/// **Loss trade (deliberate, NON-FIX).** A fire edge whose input arrives AFTER its tick was
-/// simulated is dropped, not fired late — firing an edge on a tick it was not issued for is the bug
-/// (the shot leaves at the wrong muzzle pose and diverges from what the client predicted), so past
-/// ticks are dropped in every netcode. lightyear's per-message redundancy normally prevents it: an
-/// `InputMessage` carries the inputs for the last N ticks before T (`num_ticks *= packet_redundancy`,
-/// client.rs:686), so an isolated packet loss does NOT lose the edge. Only under loss deep enough to
-/// outlast that window is an edge dropped rather than fired late; the client may then have predicted
-/// a shot the server never fires, leaving its `reload_remaining` (root-resident in `TankSim`, NOT
-/// replicated) disagreeing until the next shot reconciles it. Inherent to predicting fire on a lossy
-/// input stream.
-///
-/// **Load-bearing invariant.** Two consecutive buffered `fire_primary: true`s both bridge as edges
-/// and fire twice. That is fine because it can only happen for two DISTINCT clicks on back-to-back
-/// ticks (two intended shots): `gather_commands` latches the click from `just_pressed` (true for one
-/// frame per physical press) and `consume_edges` clears it before the next `feed_action_state`, so a
-/// single held mouse button produces exactly ONE buffered `true`. If `gather_commands` is ever
-/// changed to latch from `pressed`, a hold would put a run of `true`s in the buffer and this bridge
-/// would have to dedupe consecutive edges as well.
+/// Invariant: consumable actions commit only when `for_tick == LocalTimeline::tick()`. Level inputs
+/// may hold last; stale, fabricated, or frozen input must never spend ammo or create an entity.
+/// `SHIPPING_INPUT_DELAY_TICKS` removes delay-wobble sources, while this attestation fails closed for
+/// all remaining input-buffer substitutions. See `tests/net_fire_release.rs`.
 fn bridge_action_state_to_tank_command(
     timeline: Res<LocalTimeline>,
     mut tanks: Query<(&ActionState<TankCommand>, &mut TankCommand)>,
@@ -1351,8 +1003,7 @@ fn bridge_action_state_to_tank_command(
     }
 }
 
-/// The starvation bug the fix above targets, driven over real ECS state. `TankCommand`'s private
-/// types are unreachable from an external `tests/` crate, so the honest repro lives in-crate.
+/// In-crate tests for the input-attestation seam.
 #[cfg(test)]
 mod tests {
     use bevy::ecs::system::RunSystemOnce;

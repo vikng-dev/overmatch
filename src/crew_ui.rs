@@ -1,10 +1,6 @@
-//! The controlled tank's crew bar + swap input — the first piece of the controlled tank's fixed
-//! player UI (the rest of its scattered readouts fold in here over time). Shared: both `GamePlugin`
-//! and the armor sandbox mount it, each scoped to the tank marked [`Controlled`] (the sandbox marks
-//! its single target). Digit `1`–`5` taps a source seat then a target — pure client-side selection
-//! that resolves into a [`CrewSwap`] command; the sim (`damage::apply_crew_swap_commands`)
-//! validates and starts the actual [`PendingSwap`]. The bar shows each seat, its occupant, deaths,
-//! the current selection, and any in-flight swap countdown.
+//! Controlled-tank crew UI and swap selection.
+//!
+//! UI selection emits [`CrewSwap`]; simulation validates and executes the swap.
 
 use bevy::prelude::*;
 

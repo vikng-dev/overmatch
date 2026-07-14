@@ -1,15 +1,7 @@
-//! End-to-end transport test for the fire-replication window (ADR-0021).
+//! Real-UDP integration tests for shot transport (ADR-0021).
 //!
-//! The harness runs real server and client apps over loopback UDP with the production protocol
-//! registration. A replicated shooter gives `FireEvent::shooter` a live receiver-local replica; this
-//! live-root gate applies to `FireEvent` only. Keyframes and terminals are keyed by `ShotId` and do
-//! not require that replica. The rig is deliberately replaced by a fixed muzzle and plate.
-//!
-//! [`drop_packets`] injects seeded, content-blind loss after Lightyear's conditioner and before its
-//! decoder, so transport sequencing, serialization, entity mapping, redundancy, and receiver dedup
-//! all remain in the path under test. The test asserts exactly-one observer shell per authoritative
-//! shot, sanctioned ricochet carry-through and trail continuation, and exactly-one owner-private
-//! damage marker without disclosure to the observer.
+//! Seeded, content-blind inbound loss remains outside the production protocol path. The harness
+//! verifies observer exactly-once presentation, sanctioned outcomes, and owner-private damage facts.
 
 use core::time::Duration;
 use std::collections::VecDeque;
@@ -23,8 +15,6 @@ use avian3d::prelude::{
 use bevy::asset::AssetPlugin;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
-// The client and server preludes each export a DIFFERENT `NetcodeConfig`, so they are imported by
-// item (with the server's aliased) rather than by glob — the ambiguity is real, not incidental.
 use lightyear::connection::client_of::ClientOf;
 use lightyear::link::{LinkReceiveSystems, RecvPayload};
 use lightyear::prelude::client::{
@@ -72,20 +62,17 @@ const OWNER_BELT: u32 = 17;
 /// Shots fired by the scripted run.
 const SHOTS: u32 = 20;
 
-/// DERIVED: the real-link scale probe represents thirty combatants with two distinct weapon slots
-/// firing in one authority tick.
+/// DERIVED from the scale-probe scenario: combatants firing simultaneously.
 const VOLLEY_COMBATANTS: u64 = 30;
 const VOLLEY_WEAPONS: u8 = 2;
-/// DERIVED: twelve automatic fires per 64 Hz authority tick across 60 weapon slots is 12.8 rounds/s
-/// per slot (768 RPM), a close target-envelope approximation for 30 combatants with two 750 RPM guns.
+/// DERIVED from the target firing envelope and 64 Hz authority tick.
 const SUSTAINED_AUTOMATIC_FACTS_PER_TICK: usize = 12;
-/// DERIVED: sixty-four 64 Hz ticks provide one second of sustained target-envelope contention.
+/// DERIVED: one second of sustained traffic at 64 Hz.
 const SUSTAINED_STREAM_TICKS: u32 = 64;
 /// The reliable single is injected while the automatic stream is active. Its slot must not be one
 /// of that tick's automatic slots, preserving the once-per-(combatant, weapon, tick) invariant.
 const SUSTAINED_RELIABLE_TICK: u32 = 31;
-/// DERIVED: thirty independent receiver Apps are enough to exercise the intended first-match fan-out
-/// without turning this CI-scale transport probe into a load test.
+/// DERIVED from the fan-out scenario.
 const FANOUT_RECEIVERS: u64 = 30;
 /// Keep the owner-support connection separate from the observers: every measured receiver must
 /// present the shooter root rather than suppressing its own local echo.
@@ -95,8 +82,7 @@ const FANOUT_SEED_BASE: u64 = 0x000F_A110_u64;
 /// Configured spacing between scripted shots.
 const FIRE_INTERVAL: u32 = 8;
 
-/// Configured fixed-plate distance for this harness. Its real collision timing is asserted through
-/// the observed keyed armor hold rather than derived from muzzle speed alone.
+/// Fixed plate distance for this harness.
 const RANGE: f32 = 125.0;
 
 /// Configured raw receive delay.
@@ -104,7 +90,7 @@ const OBSERVER_CATCH_UP_DELAY_TICKS: u32 = 12;
 
 /// Fixed step, advanced once per `update()`.
 const TICK: Duration = Duration::from_nanos(1_000_000_000 / 64);
-/// DERIVED: 128 fixed 64 Hz steps are a two-second idle/active Link-level sampling window.
+/// DERIVED: two-second Link-level sampling window at 64 Hz.
 const MEASUREMENT_WINDOW_STEPS: u32 = 128;
 
 /// The real-UDP tests share loopback scheduling and open many sockets. Serializing them makes their
