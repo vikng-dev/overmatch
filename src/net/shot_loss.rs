@@ -1607,6 +1607,10 @@ fn thirty_combatant_two_weapon_volley_presents_each_observer_fire_once_under_los
 /// and game payloads rather than pretending to report per-shot or IP/UDP byte costs.
 #[test]
 fn thirty_combatant_volley_reaches_thirty_independent_receivers_under_loss() {
+    assert!(
+        std::env::var_os("SPIKE_MG_SHORTCIRCUIT").is_none(),
+        "the fan-out contract must run production ballistics; use scripts/cost for the MG short-circuit A/B",
+    );
     let _udp = lock_real_udp_test();
     let started = Instant::now();
     let port = free_port();

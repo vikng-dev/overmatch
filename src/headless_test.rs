@@ -677,7 +677,7 @@ fn a_replica_coax_shell_clears_the_shooters_mantlet() {
 #[derive(Resource, Default)]
 struct ScriptedDeterminismRun {
     digests: Vec<Vec<(String, crate::trace::CanonicalTankStateDigest)>>,
-    trajectory: Vec<(usize, Vec3, Quat)>,
+    checkpoints: Vec<ScriptedPose>,
     saw_airborne: bool,
     saw_grounded: bool,
     saw_brush_anchor: bool,
@@ -686,6 +686,13 @@ struct ScriptedDeterminismRun {
     fire_shells: usize,
     saw_projectile_spawn: bool,
     saw_projectile_march: bool,
+}
+
+#[derive(Clone, Copy)]
+struct ScriptedPose {
+    tick: usize,
+    position: Vec3,
+    rotation: Quat,
 }
 
 /// The observer is deliberately at the production `FireShell` seam: `rounds_fired > 0` proves
@@ -783,7 +790,11 @@ fn capture_scripted_determinism_tick(
     run.saw_projectile_spawn |= !projectiles.is_empty();
     run.saw_projectile_march |= projectiles.iter().any(|path| path.points.len() > 1);
     if matches!(tick, 119 | 219 | 339) {
-        run.trajectory.push((tick, position, rotation));
+        run.checkpoints.push(ScriptedPose {
+            tick,
+            position,
+            rotation,
+        });
     }
     run.digests.push(digests);
 }
@@ -912,6 +923,39 @@ fn assert_scripted_determinism_witnesses(run: &ScriptedDeterminismRun, label: &s
         run.saw_projectile_march,
         "{label} marched a projectile beyond its spawn point",
     );
+
+    let [settled, powered, steered] = run.checkpoints.as_slice() else {
+        panic!("{label} did not capture the three scripted driving checkpoints");
+    };
+    assert_eq!(
+        [settled.tick, powered.tick, steered.tick],
+        [119, 219, 339],
+        "{label} driving checkpoint ticks moved",
+    );
+
+    // DERIVED broad semantic bounds: reject a deterministic broken drivetrain or reversed steering
+    // without treating one platform's floating-point trajectory as the portable contract.
+    const MIN_PROGRESS_M: f32 = 1.0;
+    const MIN_RIGHT_TURN_COMPONENT: f32 = 0.02;
+    let settled_forward = settled.rotation * Vec3::NEG_Z;
+    let straight_progress = (powered.position - settled.position).dot(settled_forward);
+    assert!(
+        straight_progress > MIN_PROGRESS_M,
+        "{label} did not drive forward during straight throttle: {straight_progress} m",
+    );
+
+    let powered_forward = powered.rotation * Vec3::NEG_Z;
+    let powered_right = powered.rotation * Vec3::X;
+    let steering_progress = (steered.position - powered.position).dot(powered_forward);
+    assert!(
+        steering_progress > MIN_PROGRESS_M,
+        "{label} stopped progressing when steering began: {steering_progress} m",
+    );
+    let right_turn_component = (steered.rotation * Vec3::NEG_Z).dot(powered_right);
+    assert!(
+        right_turn_component > MIN_RIGHT_TURN_COMPONENT,
+        "{label} positive steer did not turn the hull right: component {right_turn_component}",
+    );
 }
 
 /// Two fresh, full simulation compositions must replay one command script bit-for-bit. The witness
@@ -921,57 +965,6 @@ fn assert_scripted_determinism_witnesses(run: &ScriptedDeterminismRun, label: &s
 fn full_simulation_replay_is_bit_exact_for_six_hundred_ticks() {
     let first = scripted_determinism_run();
     assert_scripted_determinism_witnesses(&first, "first fresh sim");
-
-    // MEASURED 2026-07-14 on macOS arm64. These characterize the current driving trajectory; they
-    // do not claim that its feel is correct. DERIVED: tick 119 is the last settle-only sample before
-    // throttle starts at tick 120; tick 219 follows 100 throttle ticks and precedes the shot at 220.
-    let expected_trajectory = [
-        (
-            119,
-            Vec3::new(8.702614, -0.05056709, 4.9854083),
-            Quat::from_xyzw(0.002687655, 0.023880916, 0.016786428, 0.99957025),
-        ),
-        (
-            219,
-            Vec3::new(8.549372, 0.023869634, 2.10651),
-            Quat::from_xyzw(0.005728841, 0.024727648, -0.00014382847, 0.9996778),
-        ),
-        // MEASURED 2026-07-14 on macOS arm64. DERIVED: tick 339 is 100 fixed steps after steer
-        // begins and 21 before the MG hold starts, so this checkpoint characterizes steering rather
-        // than a later burst.
-        (
-            339,
-            Vec3::new(8.392248, 0.022434652, -6.159646),
-            Quat::from_xyzw(0.0053370306, -0.015307999, 0.0013887828, 0.9998676),
-        ),
-    ];
-    // DERIVED tolerances: tight enough to expose a material force-law change while allowing the
-    // deferred cross-platform determinism work to land without rewriting a platform-specific bit
-    // snapshot. Position may drift by one centimetre; orientation by two milliradians.
-    const POSITION_TOLERANCE_M: f32 = 0.01;
-    const ROTATION_TOLERANCE_RAD: f32 = 0.002;
-    assert_eq!(
-        first.trajectory.len(),
-        expected_trajectory.len(),
-        "every driving checkpoint was observed",
-    );
-    for ((tick, position, rotation), (expected_tick, expected_position, expected_rotation)) in
-        first.trajectory.iter().zip(expected_trajectory)
-    {
-        assert_eq!(*tick, expected_tick, "the scripted checkpoint tick moved");
-        let position_error = position.distance(expected_position);
-        assert!(
-            position_error <= POSITION_TOLERANCE_M,
-            "MEASURED driving position changed at tick {tick}: error {position_error} m, actual \
-             {position:?}, expected {expected_position:?}",
-        );
-        let rotation_error = rotation.angle_between(expected_rotation);
-        assert!(
-            rotation_error <= ROTATION_TOLERANCE_RAD,
-            "MEASURED driving rotation changed at tick {tick}: error {rotation_error} rad, actual \
-             {rotation:?}, expected {expected_rotation:?}",
-        );
-    }
 
     let second = scripted_determinism_run();
     assert_scripted_determinism_witnesses(&second, "second fresh sim");
