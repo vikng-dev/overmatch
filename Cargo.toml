@@ -72,9 +72,8 @@ bevy_replicon = "0.41"
 [dev-dependencies]
 lightyear_sync = "0.28"
 lightyear_core = "0.28"
-# The input-buffer-wrap tripwire (tests/net_input_buffer_wrap.rs) pins the §7 connect-hang
-# degenerate (`build_from_input_buffer`'s unclamped negative-range wrap) that
-# `drop_stranded_input_buffer` in src/net/client.rs guards against.
+# The input-buffer-wrap tripwire (tests/net_input_buffer_wrap.rs) pins two safe enablers of the §7
+# connect hang. It never invokes the encoder's unbounded negative-range loop.
 lightyear_inputs = "0.28"
 lightyear_inputs_native = "0.28"
 

@@ -1,8 +1,8 @@
 # Git hooks
 
-Local pre-commit / pre-push gates that mirror CI, so formatting/lint drift is caught before it
-reaches `main` — never as a red CI run after the fact. (CI sat red for two days in July 2026 from
-formatting drift that a pre-commit hook would have blocked at the source.)
+Local pre-commit / pre-push gates that mirror CI's ordinary checks, so formatting/lint drift is
+caught before it reaches `main`. (MEASURED: CI sat red for two days in July 2026 from formatting
+drift that a pre-commit hook would have blocked at the source.)
 
 ## One-time setup (per clone)
 
@@ -19,10 +19,10 @@ travel with the repo instead of living in the un-versioned `.git/hooks`.
 
 | Hook | Command | Mirrors | Cost |
 |------|---------|---------|------|
-| pre-commit | `cargo fmt --all --check` | CI `fmt` job | ~1s, no compile |
-| pre-push | fmt check + `cargo clippy --locked --all-targets -- -D warnings` + `cargo test --locked` | CI `check` job | compiles; warm cache = tens of seconds |
+| pre-commit | `cargo fmt --all --check` | CI `fmt` job | no compile |
+| pre-push | fmt + clippy + ordinary tests, excluding the exact 30-receiver stress probe | CI fmt, clippy, and ordinary-test lanes | compiles; warm cache = tens of seconds |
 
-A green pre-push means CI will be green.
+A green pre-push does not certify the separately bounded CI stress lane; CI remains authoritative.
 
 ## Escape hatch
 

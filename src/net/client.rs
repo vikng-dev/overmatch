@@ -707,8 +707,9 @@ fn claim_input_slot(add: On<Add, NetControlled>, mut commands: Commands) {
 }
 
 /// Remove an input buffer that leads Lightyear's next send tick, preventing an invalid range from
-/// reaching the native encoder. Remove this guard when `tests/net_input_buffer_wrap.rs` proves the
-/// encoder clamps the range upstream.
+/// reaching the native encoder. Remove this guard only after verifying that the upstream encoder
+/// rejects inverted ranges; `tests/net_input_buffer_wrap.rs` pins the safe enablers, not the
+/// unbounded encoder call.
 fn drop_stranded_input_buffer(
     timeline: Res<LocalTimeline>,
     sender: Query<&InputTimeline, With<Client>>,

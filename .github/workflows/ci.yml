@@ -42,7 +42,7 @@ jobs:
   # Compile-heavy checks share one matrix but run independently. In particular, the
   # 30-receiver UDP probe must not contend with another libtest thread.
   checks:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -110,6 +110,14 @@ jobs:
           test -x "${executables[0]}"
           printf '%s\n' "${executables[0]}" > "${RUNNER_TEMP}/overmatch-libtest"
 
+      - name: Build shot stress runtime image
+        if: matrix.task == 'shot-stress'
+        run: |
+          docker build --pull \
+            --file scripts/ci/shot-stress.Dockerfile \
+            --tag overmatch-shot-stress-runtime:ci \
+            scripts/ci
+
       - name: Shot stress test with memory telemetry
         if: matrix.task == 'shot-stress'
         env:
@@ -118,7 +126,6 @@ jobs:
           MEMORY_MAX_BYTES: 4294967296
         run: |
           bash scripts/ci/measure-test-memory.sh \
-            /usr/bin/timeout --signal=TERM --kill-after=10s 300s \
             "$(<"${RUNNER_TEMP}/overmatch-libtest")" \
             net::shot_loss::thirty_combatant_volley_reaches_thirty_independent_receivers_under_loss \
             --exact --test-threads=1 --nocapture
