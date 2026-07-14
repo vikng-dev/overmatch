@@ -515,17 +515,20 @@ mod tests {
 
     #[test]
     fn a_kick_leans_toward_the_struck_side_and_clamps() {
-        // A hit on the right (+bearing) yaws one way; a burst never exceeds the per-axis clamp.
+        // Camera-local +yaw turns left, so a right-side (+bearing) hit yaws right (negative) and
+        // rolls right (positive); the left side is its literal inverse.
         let mut kick = CameraKick::default();
         add_camera_kick(&mut kick, 1.0, Some(2.0));
         assert!(kick.angular.x > 0.0, "always a pitch-up punch");
-        let right_yaw = kick.angular.y;
+        assert!(kick.angular.y < 0.0, "right-side hit yaws the camera right");
+        assert!(
+            kick.angular.z > 0.0,
+            "right-side hit rolls the camera right"
+        );
         let mut left = CameraKick::default();
         add_camera_kick(&mut left, 1.0, Some(-2.0));
-        assert!(
-            left.angular.y.signum() != right_yaw.signum(),
-            "left and right hits yaw opposite ways"
-        );
+        assert!(left.angular.y > 0.0, "left-side hit yaws the camera left");
+        assert!(left.angular.z < 0.0, "left-side hit rolls the camera left");
         for _ in 0..50 {
             add_camera_kick(&mut kick, 1.0, Some(2.0));
         }

@@ -3,13 +3,14 @@
 use std::time::Instant;
 
 use avian3d::prelude::{Forces, LayerMask, SpatialQuery, SpatialQueryFilter, WriteRigidBodyForces};
+use bevy::ecs::system::SystemParam;
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
 // `shot_trace::record` only evaluates its closure when tracing is armed.
 use serde_json::json;
 
-use crate::damage::{VolumeOf, hit_ancestor};
-use crate::state::GameplaySet;
+use crate::damage::{DamageConsequences, VolumeOf, hit_ancestor};
+use crate::state::{GameplaySet, SimPhase};
 use crate::{ClientReplica, Layer, PredictedPresent, Replaying, ShotId};
 
 /// Gravity applied to shells each fixed tick (m/s²).
@@ -848,14 +849,6 @@ pub(crate) struct Impact {
     pub(crate) deflection: Option<Vec3>,
 }
 
-/// Momentum absorbed by a volume crossing, applied at its entry point.
-#[derive(Event)]
-struct HitImpulse {
-    body: Entity,
-    impulse: Vec3,
-    point: Vec3,
-}
-
 /// Tags a debug impact marker for view observers.
 #[derive(Component)]
 pub struct ImpactMarker;
@@ -877,14 +870,17 @@ pub fn plugin(app: &mut App) {
         ))
         .add_observer(on_fire_shell)
         .add_observer(on_impact)
-        .add_observer(on_hit_impulse)
         .add_systems(Startup, setup_assets)
         // The same march, integrated on whichever clock the mode selects: `Real` on the fixed
         // server step (`Res<Time>` is `Time<Fixed>` here), `Demo` per-frame on virtual time
         // (`Res<Time>` is `Time<Virtual>` here). One reads as the true sim, the other as smooth.
         .add_systems(
             FixedUpdate,
-            integrate_projectiles.in_set(GameplaySet).run_if(march_real),
+            integrate_projectiles
+                .in_set(GameplaySet)
+                .in_set(SimPhase::ProjectileMarch)
+                .before(DamageConsequences)
+                .run_if(march_real),
         )
         .add_systems(
             Update,
@@ -1180,6 +1176,16 @@ fn on_fire_shell(
     }
 }
 
+/// Optional multiplayer state used by the shared projectile march. Grouping it keeps the march's
+/// simulation queries visible without exceeding Bevy's system-parameter arity.
+#[derive(SystemParam)]
+struct ProjectileMarchNet<'w> {
+    replica: Option<Res<'w, ClientReplica>>,
+    sanctioned: Option<Res<'w, SanctionedShots>>,
+    replaying: Option<Res<'w, Replaying>>,
+    present: Option<Res<'w, PredictedPresent>>,
+}
+
 fn integrate_projectiles(
     mut projectiles: Query<(
         Entity,
@@ -1204,24 +1210,11 @@ fn integrate_projectiles(
     )>,
     volumes: Query<&BallisticVolume>,
     owners: Query<&VolumeOf>,
+    mut bodies: Query<Forces>,
     mut health: Query<&mut ComponentHealth>,
     parents: Query<&ChildOf>,
     retain: Res<RetainSpentShells>,
-    // Present only on the net client (a replica): shells still fly, raycast, spark, and despawn, but
-    // HP deposition and hit impulse are the server's authority. Absent in SP / sandbox / server.
-    replica: Option<Res<ClientReplica>>,
-    // The observer's server-sanctioned bounce buffer (`net::client` fills it). Present only on a net
-    // client; absent in SP/sandbox/server, where the authority march resolves bounces for real and
-    // never consults it. An observer shell at armor contact re-seeds from here or holds for it.
-    sanctioned: Option<Res<SanctionedShots>>,
-    // F1: set (to `true`) only while lightyear is REPLAYING a rollback on a net client. The whole
-    // cosmetic march below is skipped on a replayed tick — see the early return. Absent on the
-    // authority (never rolls back).
-    replaying: Option<Res<Replaying>>,
-    // F3: this net client's predicted present tick `P` (every cosmetic shell lives at `P`). Read to
-    // consume an OVERDUE sanctioned outcome for a shell that MISSED the plate the server resolved on.
-    // Present only on a net client; absent on the authority (it resolves shots for real).
-    present: Option<Res<PredictedPresent>>,
+    net: ProjectileMarchNet,
     // EXPERIMENTAL cost-attribution A/B lever (`SPIKE_MG_SHORTCIRCUIT`, default off — see the type).
     shortcircuit: Res<MgShortCircuit>,
     // Sim-cost recorder attribution sink (`SPIKE_COST_TRACE`): absent unless the recorder is armed, so
@@ -1236,6 +1229,12 @@ fn integrate_projectiles(
     time: Res<Time>,
     mut commands: Commands,
 ) {
+    let ProjectileMarchNet {
+        replica,
+        sanctioned,
+        replaying,
+        present,
+    } = net;
     // F1 (rollback-safe cosmetics): on a net client, lightyear replays FixedMain N times per
     // rollback. Every shell this system marches is VIEW-ONLY (`deposit == false` — HP and impulse are
     // the server's authority; see `ClientReplica`) and its picture must advance exactly ONE step per
@@ -1788,7 +1787,8 @@ fn integrate_projectiles(
             };
 
             // Replica armor state machine: consume a buffered bounce/terminal, otherwise hold a keyed
-            // shell hidden; an unkeyed replica shell ends locally. Authority resolves armor below.
+            // shell hidden; an unkeyed replica shell ends locally. INVARIANT: every replica arm below
+            // continues or breaks, so the physical armor resolution after it is authority-only.
             if !deposit {
                 let next_bounce = shot
                     .zip(sanctioned.as_ref())
@@ -1938,11 +1938,12 @@ fn integrate_projectiles(
                 bent = true; // off the original free-flight segment (see the open-air break)
                 speed *= RICOCHET_BLEED;
                 if let Some(body) = body {
-                    commands.trigger(HitImpulse {
+                    apply_hit_impulse(
+                        &mut bodies,
                         body,
-                        impulse: projectile.mass * (v_in - Vec3::from(dir) * speed),
-                        point: entry,
-                    });
+                        projectile.mass * (v_in - Vec3::from(dir) * speed),
+                        entry,
+                    );
                 }
                 // The bounce reads on the struck face: a hard bright spark fan, biased along the
                 // deflected (outgoing) direction — a ricochet throws its sparks the way it kicked off.
@@ -2049,11 +2050,7 @@ fn integrate_projectiles(
                 }
                 // Stopped: the body absorbs the full remaining momentum (v_out = 0).
                 if let Some(body) = body {
-                    commands.trigger(HitImpulse {
-                        body,
-                        impulse: projectile.mass * v_in,
-                        point: entry,
-                    });
+                    apply_hit_impulse(&mut bodies, body, projectile.mass * v_in, entry);
                 }
                 pos = embed;
                 stopped = true;
@@ -2096,11 +2093,12 @@ fn integrate_projectiles(
             speed = speed_for(projectile.mass, cap - cost);
             // The body keeps the momentum the shell lost crossing it; the shell carries the rest on.
             if let Some(body) = body {
-                commands.trigger(HitImpulse {
+                apply_hit_impulse(
+                    &mut bodies,
                     body,
-                    impulse: projectile.mass * (v_in - Vec3::from(dir) * speed),
-                    point: entry,
-                });
+                    projectile.mass * (v_in - Vec3::from(dir) * speed),
+                    entry,
+                );
             }
             let exit = entry + dir * span;
             marks.events.push(PenetrationEvent {
@@ -2225,20 +2223,11 @@ fn integrate_projectiles(
     }
 }
 
-/// Apply a crossing's momentum share to the struck body (immediate velocity change; the off-CoM
-/// entry point also imparts the angular rock). A static or non-rigid owner simply won't match.
-fn on_hit_impulse(
-    hit: On<HitImpulse>,
-    // Authority-only: on the net client (a replica) the struck body's motion is server-owned and
-    // arrives by replication — applying a local impulse here would fight it (a divergent shove).
-    replica: Option<Res<ClientReplica>>,
-    mut bodies: Query<Forces>,
-) {
-    if replica.is_some() {
-        return;
-    }
-    if let Ok(mut forces) = bodies.get_mut(hit.body) {
-        forces.apply_linear_impulse_at_point(hit.impulse, hit.point);
+/// Apply a crossing's momentum share to the struck body. The declared `Forces` query keeps this
+/// immediate velocity write visible to Bevy's scheduler; static or non-rigid owners do not match.
+fn apply_hit_impulse(bodies: &mut Query<Forces>, body: Entity, impulse: Vec3, point: Vec3) {
+    if let Ok(mut forces) = bodies.get_mut(body) {
+        forces.apply_linear_impulse_at_point(impulse, point);
     }
 }
 
@@ -2774,7 +2763,10 @@ mod tests {
 mod march_tests {
     use std::time::Duration;
 
-    use avian3d::prelude::{Collider, CollisionLayers, PhysicsPlugins, RigidBody};
+    use avian3d::prelude::{
+        AngularInertia, AngularVelocity, Collider, CollisionLayers, GravityScale, LinearVelocity,
+        Mass, NoAutoAngularInertia, NoAutoMass, PhysicsPlugins, RigidBody,
+    };
     use bevy::prelude::*;
     use bevy::time::TimeUpdateStrategy;
 
@@ -2894,6 +2886,69 @@ mod march_tests {
             }
         }
         app.world().resource::<ImpactLog>().0.clone()
+    }
+
+    /// A volume crossing transfers momentum to its authority-owned tank body, while a replica keeps
+    /// both linear and angular velocity untouched. The off-centre plate makes both effects visible.
+    #[test]
+    fn hit_impulse_changes_only_the_authority_body() {
+        for replica in [false, true] {
+            let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.05), Vec3::new(0.0, 2.0, 0.0));
+            if replica {
+                app.insert_resource(crate::ClientReplica);
+            }
+            let body = app
+                .world_mut()
+                .spawn((
+                    RigidBody::Dynamic,
+                    Transform::default(),
+                    Mass(100.0),
+                    AngularInertia::new(Vec3::splat(50.0)),
+                    NoAutoMass,
+                    NoAutoAngularInertia,
+                    GravityScale(0.0),
+                ))
+                .id();
+            let mut plates = app
+                .world_mut()
+                .query_filtered::<Entity, With<BallisticVolume>>();
+            let plate = plates.single(app.world()).expect("one plate");
+            app.world_mut().entity_mut(plate).insert(VolumeOf(body));
+            app.update();
+
+            let before = (
+                app.world()
+                    .get::<LinearVelocity>(body)
+                    .expect("dynamic body has linear velocity")
+                    .0,
+                app.world()
+                    .get::<AngularVelocity>(body)
+                    .expect("dynamic body has angular velocity")
+                    .0,
+            );
+            let impacts = fire_and_capture(&mut app, Vec3::new(0.0, 2.0, 2.0), Vec3::NEG_Z, 800.0);
+            assert_eq!(impacts.len(), 1, "the owned plate was crossed once");
+            let after = (
+                app.world()
+                    .get::<LinearVelocity>(body)
+                    .expect("dynamic body keeps linear velocity")
+                    .0,
+                app.world()
+                    .get::<AngularVelocity>(body)
+                    .expect("dynamic body keeps angular velocity")
+                    .0,
+            );
+
+            if replica {
+                assert_eq!(after, before, "a replica never applies authority momentum");
+            } else {
+                assert_ne!(after.0, before.0, "the authority body absorbs momentum");
+                assert_ne!(
+                    after.1, before.1,
+                    "the off-centre authority hit imparts angular velocity",
+                );
+            }
+        }
     }
 
     /// SHOOTER SELF-EXCLUSION ([`not_own_volume`]): a round is transparent to the tank that FIRED it.

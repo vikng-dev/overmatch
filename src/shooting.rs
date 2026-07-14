@@ -12,7 +12,7 @@ use crate::ballistics::{FireShell, FireShellOrigin, ShotSource};
 use crate::command::{ConsumeCommandEdges, TankCommand};
 use crate::damage::{TankVolumes, VolumeFacets, requirement_met};
 use crate::spec::{FireMode, Trigger};
-use crate::state::GameplaySet;
+use crate::state::{GameplaySet, SimPhase};
 use crate::tank::{Muzzle, Tank, TankRoot, TankSim, Weapon, WeaponIndex, rig_world_pose};
 
 /// Feel multiplier on the hull recoil impulse (1.0 = physical momentum). On a 57 t hull true momentum
@@ -73,24 +73,16 @@ pub fn plugin(app: &mut App) {
     // The gun is sim: reload and firing run on the fixed clock, driven by each tank's `TankCommand`
     // — `fire` consumes the click edge, so it must precede the command layer's edge clear.
     //
-    // `apply_recoil.after(fire)` is DETERMINISM-LOAD-BEARING, not a preference: both systems take
-    // `&mut TankSim`, and without an explicit edge Bevy's executor may serialize them in either
-    // order — an order that measurably differed between client and server processes (2026-07-10,
-    // divergence instrument): on the fire tick one end integrated the spring before the kick and
-    // the other after, a one-tick recoil phase offset that read as a 33-tick `hrec` divergence
-    // window per shot. The canonical order is kick-then-integrate — a shot's kick springs the
-    // barrel the SAME tick, matching what the remote-fire path already promises
-    // (`net::client::apply_pending_recoil_kicks` runs `.before(GameplaySet)` for exactly that).
-    //
-    // The remaining unordered `&mut TankSim` neighbors (driving.rs's suspension/drive chain) write
-    // DISJOINT TankSim fields (anchors, never weapons), so their order against these systems
-    // cannot change values today. If a shooting system ever touches anchors — or a driving system
-    // touches weapons — that pair must be ordered explicitly too.
+    // `SimPhase` owns the cross-feature order: driving samples tick-start velocity before this
+    // impulse changes it, then recoil integrates the new kick in the same tick.
     app.add_systems(
         FixedUpdate,
         (
-            (tick_reload, fire).chain().before(ConsumeCommandEdges),
-            apply_recoil.after(fire),
+            (tick_reload, fire)
+                .chain()
+                .in_set(SimPhase::WeaponFire)
+                .before(ConsumeCommandEdges),
+            apply_recoil.in_set(SimPhase::Recoil),
         )
             .in_set(GameplaySet),
     );

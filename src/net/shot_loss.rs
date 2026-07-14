@@ -6,7 +6,7 @@
 use core::time::Duration;
 use std::collections::VecDeque;
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use avian3d::prelude::{
@@ -97,6 +97,15 @@ const MEASUREMENT_WINDOW_STEPS: u32 = 128;
 /// measurements repeatable and prevents the thirty-receiver probe from contending with another
 /// harness test in the same binary.
 static REAL_UDP_TEST_MUTEX: Mutex<()> = Mutex::new(());
+
+/// Serialize loopback harnesses even after a prior assertion panicked. The poisoned state says that
+/// test failed, not that the lock ceased to protect the sockets; recovering keeps later independent
+/// UDP probes runnable and their own failures visible.
+fn lock_real_udp_test() -> MutexGuard<'static, ()> {
+    REAL_UDP_TEST_MUTEX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 // ---------------------------------------------------------------------------------------------
 // The seeded loss injector — our conditioning seam (see the module doc).
@@ -1044,9 +1053,7 @@ fn client_root_count(client: &mut App) -> usize {
 /// broke.
 #[test]
 fn every_shot_spawns_exactly_one_shell_under_ten_percent_loss() {
-    let _udp = REAL_UDP_TEST_MUTEX
-        .lock()
-        .expect("real-UDP test mutex must not be poisoned");
+    let _udp = lock_real_udp_test();
     let port = free_port();
     let mut server = build_server(port);
     let mut shooter = build_client(
@@ -1435,9 +1442,7 @@ fn every_shot_spawns_exactly_one_shell_under_ten_percent_loss() {
 /// adding operating-system scheduling as an unmeasured variable.
 #[test]
 fn thirty_combatant_two_weapon_volley_presents_each_observer_fire_once_under_loss() {
-    let _udp = REAL_UDP_TEST_MUTEX
-        .lock()
-        .expect("real-UDP test mutex must not be poisoned");
+    let _udp = lock_real_udp_test();
     let port = free_port();
     let mut server = build_server(port);
     let mut shooter = build_client(
@@ -1602,9 +1607,7 @@ fn thirty_combatant_two_weapon_volley_presents_each_observer_fire_once_under_los
 /// and game payloads rather than pretending to report per-shot or IP/UDP byte costs.
 #[test]
 fn thirty_combatant_volley_reaches_thirty_independent_receivers_under_loss() {
-    let _udp = REAL_UDP_TEST_MUTEX
-        .lock()
-        .expect("real-UDP test mutex must not be poisoned");
+    let _udp = lock_real_udp_test();
     let started = Instant::now();
     let port = free_port();
     let mut server = build_server(port);
@@ -1983,9 +1986,7 @@ fn thirty_combatant_volley_reaches_thirty_independent_receivers_under_loss() {
 /// the root's owner-private crew or ammunition snapshots.
 #[test]
 fn late_observer_receives_public_status_without_private_combat() {
-    let _udp = REAL_UDP_TEST_MUTEX
-        .lock()
-        .expect("real-UDP test mutex must not be poisoned");
+    let _udp = lock_real_udp_test();
     let port = free_port();
     let mut server = build_server(port);
     let mut shooter = build_client(
@@ -2077,9 +2078,7 @@ fn late_observer_receives_public_status_without_private_combat() {
 /// receiver and presentation path recover after the burst rather than merely disconnecting.
 #[test]
 fn correlated_burst_probe_isolates_consecutive_automatic_copies() {
-    let _udp = REAL_UDP_TEST_MUTEX
-        .lock()
-        .expect("real-UDP test mutex must not be poisoned");
+    let _udp = lock_real_udp_test();
     let port = free_port();
     let mut server = build_server(port);
     let trace_path = std::env::temp_dir().join(format!(

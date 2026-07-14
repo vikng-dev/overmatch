@@ -8,11 +8,13 @@ mod traction;
 
 pub use contact::{SPHERE_CAST_TOI_SLACK, sphere_cast_ground_contact};
 pub use suspension::{Suspension, SuspensionParams, SuspensionProbe};
+#[cfg(test)]
+pub(crate) use traction::static_weight_for_test;
 pub use traction::{DriveState, Drivetrain};
 
 use bevy::prelude::*;
 
-use crate::state::GameplaySet;
+use crate::state::{GameplaySet, SimPhase};
 use suspension::{apply_suspension, log_suspension_probe};
 use traction::{apply_drive, ramp_drive};
 
@@ -30,6 +32,7 @@ pub fn plugin(app: &mut App) {
             FixedUpdate,
             (ramp_drive, apply_suspension, apply_drive)
                 .chain()
+                .in_set(SimPhase::DrivingForces)
                 .in_set(GameplaySet),
         );
 }

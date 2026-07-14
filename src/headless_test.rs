@@ -673,3 +673,317 @@ fn a_replica_coax_shell_clears_the_shooters_mantlet() {
          moved {flown:.2} m in 8 ticks (a ~755 m/s round covers ~90 m)",
     );
 }
+
+#[derive(Resource, Default)]
+struct ScriptedDeterminismRun {
+    digests: Vec<Vec<(String, crate::trace::CanonicalTankStateDigest)>>,
+    trajectory: Vec<(usize, Vec3, Quat)>,
+    saw_airborne: bool,
+    saw_grounded: bool,
+    saw_brush_anchor: bool,
+    saw_steering_slip: bool,
+    saw_shot: bool,
+    fire_shells: usize,
+    saw_projectile_spawn: bool,
+    saw_projectile_march: bool,
+}
+
+/// The observer is deliberately at the production `FireShell` seam: `rounds_fired > 0` proves
+/// only root bookkeeping, while this proves the forward script actually crossed the shell-spawn
+/// boundary. Bevy 0.19 applies `Commands::trigger` at its deferred barrier, where observers run.
+fn count_scripted_fire_shells(
+    _: On<crate::ballistics::FireShell>,
+    mut run: ResMut<ScriptedDeterminismRun>,
+) {
+    run.fire_shells += 1;
+}
+
+fn capture_scripted_determinism_tick(
+    roots: Query<
+        (
+            Entity,
+            &Name,
+            Has<Controlled>,
+            &avian3d::prelude::Position,
+            &avian3d::prelude::Rotation,
+            &avian3d::prelude::LinearVelocity,
+            &avian3d::prelude::AngularVelocity,
+            &avian3d::prelude::ComputedCenterOfMass,
+            &crate::driving::DriveState,
+            &crate::tank::TankSim,
+        ),
+        With<Tank>,
+    >,
+    children: Query<&Children>,
+    wheels: Query<&crate::driving::Suspension>,
+    projectiles: Query<&crate::ballistics::ShellPath>,
+    mut run: ResMut<ScriptedDeterminismRun>,
+) {
+    let tick = run.digests.len();
+    let mut digests = Vec::with_capacity(roots.iter().len());
+    let mut controlled = None;
+    for (tank, name, is_controlled, position, rotation, linear, angular, com, drive, sim) in &roots
+    {
+        digests.push((
+            name.as_str().to_owned(),
+            crate::trace::canonical_tank_state_digest(
+                position.0, rotation.0, linear.0, angular.0, drive, sim,
+            ),
+        ));
+        if is_controlled {
+            controlled = Some((
+                tank,
+                position.0,
+                rotation.0,
+                linear.0,
+                angular.0,
+                com.0,
+                drive.steer(),
+                sim,
+            ));
+        }
+    }
+    digests.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(digests.len(), 2, "the local duel has two simulation tanks");
+
+    let (tank, position, rotation, linear, angular, local_com, steer, sim) =
+        controlled.expect("one controlled tank");
+    let grounded = children
+        .iter_descendants(tank)
+        .filter_map(|entity| wheels.get(entity).ok())
+        .filter(|suspension| suspension.contact.is_some())
+        .count();
+    run.saw_airborne |= grounded == 0;
+    run.saw_grounded |= grounded > 0;
+
+    let anchors = sim.anchors.iter().filter(|anchor| anchor.is_some()).count();
+    run.saw_brush_anchor |= anchors > 0;
+
+    // Avian 0.7 `Forces::velocity_at_point`: v_point = v_linear + omega × (point − world_COM),
+    // where world_COM = position + rotation * local_COM. Project onto the ground plane before
+    // classifying with the exact production `static_weight` rule. A loaded anchor remains `Some`
+    // while sliding, so anchor-count changes cannot witness this regime.
+    let world_com = position + rotation * local_com;
+    let loaded_contact_is_slipping = children
+        .iter_descendants(tank)
+        .filter_map(|entity| wheels.get(entity).ok())
+        .filter_map(|suspension| {
+            (suspension.load > 0.0)
+                .then_some(suspension.contact)
+                .flatten()
+        })
+        .any(|contact| {
+            let point_velocity = linear + angular.cross(contact - world_com);
+            let planar_speed = Vec2::new(point_velocity.x, point_velocity.z).length();
+            crate::driving::static_weight_for_test(planar_speed) < 1.0
+        });
+    run.saw_steering_slip |=
+        tick >= 240 && steer.abs() > f32::EPSILON && loaded_contact_is_slipping;
+    run.saw_shot |= sim.weapons.iter().any(|weapon| weapon.rounds_fired > 0);
+    run.saw_projectile_spawn |= !projectiles.is_empty();
+    run.saw_projectile_march |= projectiles.iter().any(|path| path.points.len() > 1);
+    if matches!(tick, 119 | 219 | 339) {
+        run.trajectory.push((tick, position, rotation));
+    }
+    run.digests.push(digests);
+}
+
+fn assert_simulation_mutators_are_ordered(app: &App) {
+    let world = app.world();
+    let schedules = world.resource::<bevy::ecs::schedule::Schedules>();
+    let schedule = schedules
+        .get(FixedUpdate)
+        .expect("the full sim installs FixedUpdate");
+    let names: std::collections::HashMap<_, _> = schedule
+        .systems()
+        .expect("FixedUpdate ran and initialized its systems")
+        .map(|(key, system)| (key, system.name().to_string()))
+        .collect();
+    for expected in [
+        "driving::traction::ramp_drive",
+        "driving::suspension::apply_suspension",
+        "driving::traction::apply_drive",
+        "shooting::tick_reload",
+        "shooting::fire",
+        "shooting::apply_recoil",
+        "ballistics::integrate_projectiles",
+        "damage::process_cookoffs",
+        "damage::kill_crew",
+    ] {
+        assert_eq!(
+            names
+                .values()
+                .filter(|name| name.ends_with(expected))
+                .count(),
+            1,
+            "the schedule guard must find exactly one `{expected}` system",
+        );
+    }
+    let conflicts: Vec<_> = schedule
+        .graph()
+        .conflicting_systems()
+        .iter()
+        .filter_map(|(left, right, _)| Some((names.get(left)?, names.get(right)?)))
+        .filter(|(left, right)| {
+            let writes_physical_state = |name: &str| {
+                name.contains("driving::traction::ramp_drive")
+                    || name.contains("driving::suspension::apply_suspension")
+                    || name.contains("driving::traction::apply_drive")
+                    || name.contains("shooting::tick_reload")
+                    || name.contains("shooting::fire")
+                    || name.contains("shooting::apply_recoil")
+                    || name.contains("ballistics::integrate_projectiles")
+            };
+            let force_conflict = writes_physical_state(left) && writes_physical_state(right);
+            let projectile_damage_conflict = (left.contains("ballistics::integrate_projectiles")
+                && right.contains("damage::"))
+                || (right.contains("ballistics::integrate_projectiles")
+                    && left.contains("damage::"));
+            force_conflict || projectile_damage_conflict
+        })
+        .map(|(left, right)| (left.clone(), right.clone()))
+        .collect();
+    assert!(
+        conflicts.is_empty(),
+        "simulation mutators need an explicit order: {conflicts:#?}",
+    );
+}
+
+const SCRIPT_TICKS: usize = 600;
+
+fn scripted_determinism_run() -> ScriptedDeterminismRun {
+    let mut app = booted_sim();
+    app.init_resource::<ScriptedDeterminismRun>()
+        .add_observer(count_scripted_fire_shells)
+        .add_systems(FixedLast, capture_scripted_determinism_tick)
+        // Verified against Bevy 0.19: one `App::update` runs exactly one fixed loop.
+        .insert_resource(TimeUpdateStrategy::FixedTimesteps(1));
+
+    let mut controlled = app
+        .world_mut()
+        .query_filtered::<Entity, (With<Tank>, With<Controlled>)>();
+    let tank = controlled.single(app.world()).expect("one controlled tank");
+
+    for tick in 0..SCRIPT_TICKS {
+        {
+            let mut command = app
+                .world_mut()
+                .get_mut::<TankCommand>(tank)
+                .expect("controlled tank carries TankCommand");
+            command.throttle = if (120..420).contains(&tick) { 1.0 } else { 0.0 };
+            command.steer = if (240..420).contains(&tick) { 0.7 } else { 0.0 };
+            command.fire_primary = tick == 220;
+            command.fire_secondary = (360..420).contains(&tick);
+        }
+        app.update();
+        if tick == 0 {
+            assert_simulation_mutators_are_ordered(&app);
+        }
+    }
+
+    app.world_mut()
+        .remove_resource::<ScriptedDeterminismRun>()
+        .expect("the scripted digest collector remains installed")
+}
+
+fn assert_scripted_determinism_witnesses(run: &ScriptedDeterminismRun, label: &str) {
+    assert_eq!(
+        run.digests.len(),
+        SCRIPT_TICKS,
+        "{label} produced one digest per fixed tick",
+    );
+    assert!(run.saw_airborne, "{label} crossed an airborne state");
+    assert!(run.saw_grounded, "{label} reached ground contact");
+    assert!(run.saw_brush_anchor, "{label} established a brush anchor");
+    assert!(
+        run.saw_steering_slip,
+        "{label} put a loaded wheel in the blended/kinetic regime while steering",
+    );
+    assert!(run.saw_shot, "{label} fired at least one weapon");
+    assert!(
+        run.fire_shells > 0,
+        "{label} reached shooting::fire's FireShell spawn seam",
+    );
+    assert!(
+        run.saw_projectile_spawn,
+        "{label} spawned a projectile entity from FireShell",
+    );
+    assert!(
+        run.saw_projectile_march,
+        "{label} marched a projectile beyond its spawn point",
+    );
+}
+
+/// Two fresh, full simulation compositions must replay one command script bit-for-bit. The witness
+/// assertions keep this from passing because the scenario never reached contact, brush traction,
+/// steering slip, or fire.
+#[test]
+fn full_simulation_replay_is_bit_exact_for_six_hundred_ticks() {
+    let first = scripted_determinism_run();
+    assert_scripted_determinism_witnesses(&first, "first fresh sim");
+
+    // MEASURED 2026-07-14 on macOS arm64. These characterize the current driving trajectory; they
+    // do not claim that its feel is correct. DERIVED: tick 119 is the last settle-only sample before
+    // throttle starts at tick 120; tick 219 follows 100 throttle ticks and precedes the shot at 220.
+    let expected_trajectory = [
+        (
+            119,
+            Vec3::new(8.702614, -0.05056709, 4.9854083),
+            Quat::from_xyzw(0.002687655, 0.023880916, 0.016786428, 0.99957025),
+        ),
+        (
+            219,
+            Vec3::new(8.549372, 0.023869634, 2.10651),
+            Quat::from_xyzw(0.005728841, 0.024727648, -0.00014382847, 0.9996778),
+        ),
+        // MEASURED 2026-07-14 on macOS arm64. DERIVED: tick 339 is 100 fixed steps after steer
+        // begins and 21 before the MG hold starts, so this checkpoint characterizes steering rather
+        // than a later burst.
+        (
+            339,
+            Vec3::new(8.392248, 0.022434652, -6.159646),
+            Quat::from_xyzw(0.0053370306, -0.015307999, 0.0013887828, 0.9998676),
+        ),
+    ];
+    // DERIVED tolerances: tight enough to expose a material force-law change while allowing the
+    // deferred cross-platform determinism work to land without rewriting a platform-specific bit
+    // snapshot. Position may drift by one centimetre; orientation by two milliradians.
+    const POSITION_TOLERANCE_M: f32 = 0.01;
+    const ROTATION_TOLERANCE_RAD: f32 = 0.002;
+    assert_eq!(
+        first.trajectory.len(),
+        expected_trajectory.len(),
+        "every driving checkpoint was observed",
+    );
+    for ((tick, position, rotation), (expected_tick, expected_position, expected_rotation)) in
+        first.trajectory.iter().zip(expected_trajectory)
+    {
+        assert_eq!(*tick, expected_tick, "the scripted checkpoint tick moved");
+        let position_error = position.distance(expected_position);
+        assert!(
+            position_error <= POSITION_TOLERANCE_M,
+            "MEASURED driving position changed at tick {tick}: error {position_error} m, actual \
+             {position:?}, expected {expected_position:?}",
+        );
+        let rotation_error = rotation.angle_between(expected_rotation);
+        assert!(
+            rotation_error <= ROTATION_TOLERANCE_RAD,
+            "MEASURED driving rotation changed at tick {tick}: error {rotation_error} rad, actual \
+             {rotation:?}, expected {expected_rotation:?}",
+        );
+    }
+
+    let second = scripted_determinism_run();
+    assert_scripted_determinism_witnesses(&second, "second fresh sim");
+    if let Some((tick, (left, right))) = first
+        .digests
+        .iter()
+        .zip(&second.digests)
+        .enumerate()
+        .find(|(_, (left, right))| left != right)
+    {
+        panic!(
+            "fresh full-sim worlds first differ at scripted tick {tick}:\nleft:  {left:#?}\nright: {right:#?}",
+        );
+    }
+}

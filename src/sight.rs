@@ -591,13 +591,17 @@ fn optic_margin(fov: f32) -> f32 {
 }
 
 /// Clamp `value` to a servo's authored travel `limits` (radians); a `None` (continuous) mount passes
-/// through untouched. Kept pure for the unit test — the caller shifts the pitch window by the lob
-/// before calling (sight line = lay − superelevation).
+/// through untouched.
 fn clamp_to_travel(value: f32, limits: Option<(f32, f32)>) -> f32 {
     match limits {
         Some((min, max)) => value.clamp(min, max),
         None => value,
     }
+}
+
+/// Convert the elevation servo's lay limits into the sight-line window (`sight = lay − lob`).
+fn sight_pitch_limits(lay_limits: Option<(f32, f32)>, lob: f32) -> Option<(f32, f32)> {
+    lay_limits.map(|(min, max)| (min - lob, max - lob))
 }
 
 /// Values published by `drive_gunner_aim` for this frame.
@@ -765,11 +769,13 @@ fn drive_gunner_aim(
     // `Continuous` (yaw passes through); a limited-traverse turret would clamp yaw directly (no lob
     // on yaw). Clamping the absolute intent here — before the circular clamp — guarantees the final
     // intent is reachable, so the reticle always has an angle it can settle onto.
-    let pitch_limits = servo_specs
-        .get(rig.gun)
-        .ok()
-        .and_then(ServoSpec::travel_limits)
-        .map(|(min, max)| (min - theta, max - theta));
+    let pitch_limits = sight_pitch_limits(
+        servo_specs
+            .get(rig.gun)
+            .ok()
+            .and_then(ServoSpec::travel_limits),
+        theta,
+    );
     let yaw_limits = servo_specs
         .get(rig.turret)
         .ok()
@@ -1168,19 +1174,14 @@ mod tests {
         assert!((clamp_to_travel(0.1, limits) - 0.1).abs() < 1e-9);
     }
 
-    /// Superelevation slides the reachable *sight-line* pitch window down by the lob: the servo
-    /// limits bound the lay (= sight line + θ), so a sight line laid at `max − θ` puts the bore
-    /// exactly at its elevation stop. As range is dialed out and θ grows, the sight can't be laid as
-    /// high — the gun spends more of its travel on the lob.
+    /// Superelevation shifts the reachable sight-line pitch window down from the lay limits.
     #[test]
     fn superelevation_shifts_pitch_window() {
         let (min, max) = (-8.0_f32.to_radians(), 15.0_f32.to_radians());
         let theta = 0.01_f32;
-        let shifted = Some((min - theta, max - theta));
-        // A sight line just under the shifted ceiling stays; one above it is pulled to `max − θ`.
-        let ceiling = max - theta;
-        assert!((clamp_to_travel(ceiling + 0.05, shifted) - ceiling).abs() < 1e-6);
-        // Lay = clamped sight line + θ never exceeds the mechanical `max`.
-        assert!(clamp_to_travel(ceiling + 0.05, shifted) + theta <= max + 1e-6);
+        let clamped = clamp_to_travel(max, sight_pitch_limits(Some((min, max)), theta));
+
+        assert!((clamped - (max - theta)).abs() < 1e-6);
+        assert!((clamped + theta - max).abs() < 1e-6);
     }
 }

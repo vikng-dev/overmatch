@@ -151,6 +151,12 @@ fn static_weight(speed: f32) -> f32 {
     1.0 - t * t * (3.0 - 2.0 * t)
 }
 
+/// Test seam for classifying a measured contact speed with the production traction rule.
+#[cfg(test)]
+pub(crate) fn static_weight_for_test(speed: f32) -> f32 {
+    static_weight(speed)
+}
+
 /// Differential-thrust drive with skid-steer friction. Each grounded wheel applies, at its
 /// contact: longitudinal thrust (its track's command) minus rolling resistance, plus lateral
 /// grip resisting side-slip — the whole vector capped on the friction ellipse (μ·load fore-aft, a

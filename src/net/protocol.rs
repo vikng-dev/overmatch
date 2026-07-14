@@ -35,14 +35,21 @@ use crate::{CombatantId, ShotId};
 // Protocol compatibility guard
 // ---------------------------------------------------------------------------
 // Replicon registration order is wire compatibility. Both netcode endpoints must use
-// `PROTOCOL_FINGERPRINT` as their `protocol_id`; ADR-0018 and `wire_surface_is_pinned` own the
+// `PROTOCOL_FINGERPRINT` as their `protocol_id`; ADR-0018 and the manifest-pinning tests own the
 // compatibility guard.
 
-/// Bump with [`WIRE_SURFACE_HASH`] for every wire-surface change.
+/// Bump and re-pin the affected wire manifest value for every wire-surface change.
 pub const PROTOCOL_REV: u32 = 11;
 
-/// Compatibility tag derived from the protocol revision and crate version.
-pub const PROTOCOL_FINGERPRINT: u64 = protocol_fingerprint();
+/// Compatibility tag derived from the complete pinned wire manifest.
+pub const PROTOCOL_FINGERPRINT: u64 = protocol_fingerprint_for(
+    WIRE_SURFACE_HASH,
+    WIRE_TYPES_HASH,
+    WIRE_DEP_AVIAN3D,
+    WIRE_DEP_LIGHTYEAR,
+    PROTOCOL_REV,
+    env!("CARGO_PKG_VERSION"),
+);
 
 /// Const-evaluable FNV-1a fold for the compatibility tag; it is not a security primitive.
 const fn fnv1a_64(seed: u64, bytes: &[u8]) -> u64 {
@@ -56,11 +63,33 @@ const fn fnv1a_64(seed: u64, bytes: &[u8]) -> u64 {
     hash
 }
 
-/// Fold the protocol revision and crate version into one compatibility tag.
-const fn protocol_fingerprint() -> u64 {
-    let rev_bytes = PROTOCOL_REV.to_le_bytes();
-    let after_rev = fnv1a_64(0xcbf2_9ce4_8422_2325, &rev_bytes);
-    fnv1a_64(after_rev, env!("CARGO_PKG_VERSION").as_bytes())
+/// Fold one labeled manifest field, with delimiters around its value.
+const fn fingerprint_field(hash: u64, label: &[u8], value: &[u8]) -> u64 {
+    let after_label = fnv1a_64(hash, label);
+    let after_label_separator = fnv1a_64(after_label, b"\0");
+    let after_value = fnv1a_64(after_label_separator, value);
+    fnv1a_64(after_value, b"\0")
+}
+
+/// Derive a handshake tag from the complete pinned wire manifest.
+const fn protocol_fingerprint_for(
+    wire_surface_hash: u64,
+    wire_types_hash: u64,
+    avian_version: &str,
+    lightyear_version: &str,
+    protocol_rev: u32,
+    crate_version: &str,
+) -> u64 {
+    let hash = fnv1a_64(
+        0xcbf2_9ce4_8422_2325,
+        b"overmatch-protocol-fingerprint-v1\0",
+    );
+    let hash = fingerprint_field(hash, b"wire_surface_hash", &wire_surface_hash.to_le_bytes());
+    let hash = fingerprint_field(hash, b"wire_types_hash", &wire_types_hash.to_le_bytes());
+    let hash = fingerprint_field(hash, b"avian3d", avian_version.as_bytes());
+    let hash = fingerprint_field(hash, b"lightyear", lightyear_version.as_bytes());
+    let hash = fingerprint_field(hash, b"protocol_rev", &protocol_rev.to_le_bytes());
+    fingerprint_field(hash, b"crate_version", crate_version.as_bytes())
 }
 
 /// Replicated tank identity; local `Tank` simulation state is never replicated.
@@ -702,8 +731,8 @@ pub(crate) fn angular_velocity_error(a: &AngularVelocity, b: &AngularVelocity) -
     (a.0 - b.0).length()
 }
 
-/// Ordered wire registrations. Keep this list aligned with [`plugin`]; the test requires a matching
-/// [`WIRE_SURFACE_HASH`] and [`PROTOCOL_REV`] bump for every add, removal, rename, or reorder.
+/// Ordered wire registrations. Keep this list aligned with [`plugin`]; its pinned hash is a direct
+/// handshake-fingerprint input. House process also bumps [`PROTOCOL_REV`] for release bookkeeping.
 #[cfg(test)]
 const WIRE_SURFACE: &[&str] = &[
     // Plain-replicated markers/snapshots — `app.component::<_>().replicate()`, in order:
@@ -733,8 +762,7 @@ const WIRE_SURFACE: &[&str] = &[
     "AngularVelocity",
 ];
 
-/// Pinned hash for the ordered wire surface; updated with [`PROTOCOL_REV`] by its tripwire.
-#[cfg(test)]
+/// Pinned hash for the ordered wire surface and a direct handshake-fingerprint input.
 const WIRE_SURFACE_HASH: u64 = 0xa21f_954b_03e6_a9cd;
 
 // ---------------------------------------------------------------------------
@@ -745,7 +773,7 @@ const WIRE_SURFACE_HASH: u64 = 0xa21f_954b_03e6_a9cd;
 // wire_surface` tripwire binds that list to the actual `plugin` registration block, and the
 // `wire_surface_is_pinned` tripwire pins the list's hash. Together those catch a type ADDED, REMOVED,
 // RENAMED, or REORDERED. They do NOT catch a change to what a type SERIALIZES: adding a field to
-// `VolumeSnapshot`/`CrewSnapshot`/`NetCrew` renames no registered type, so the fingerprint stays put
+// `VolumeSnapshot`/`CrewSnapshot`/`NetCrew` renames no registered type, so the surface hash stays put
 // while the two ends misdeserialize each other — the exact silent skew the guard exists to refuse.
 //
 // COVERAGE MODEL, in two halves that together cover every byte on the wire:
@@ -759,26 +787,21 @@ const WIRE_SURFACE_HASH: u64 = 0xa21f_954b_03e6_a9cd;
 //     own wire framing) — their source is not in this tree to scan, so they are covered by DEP VERSION:
 //     [`WIRE_DEP_AVIAN3D`]/[`WIRE_DEP_LIGHTYEAR`] pin the resolved `Cargo.lock` versions, so a bump of
 //     either dep (which can silently change how those types serialize or how lightyear frames them)
-//     also trips a tripwire and demands a [`PROTOCOL_REV`] bump.
+//     also trips a tripwire and changes the fingerprint when re-pinned.
 //
-// Every one of these tripwires fails with the SAME instruction — bump `PROTOCOL_REV` and re-pin — so a
-// wire change on ANY axis (type set, field layout, or dep version) forces the fingerprint to move.
+// Every pinned value is folded directly into the fingerprint. Failure messages also request a
+// `PROTOCOL_REV` bump for release bookkeeping, but compatibility safety does not rely on that step.
 
-/// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin this
-/// (and bump [`PROTOCOL_REV`]) in the same diff whenever a wire-facing struct/enum's definition
-/// changes; the `wire_types_are_pinned` tripwire prints the new value. See the block above for the
-/// coverage model. `#[cfg(test)]` for the same reason as `WIRE_SURFACE`.
-#[cfg(test)]
+/// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
+/// whenever a wire-facing struct/enum definition changes; house process also bumps
+/// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
 const WIRE_TYPES_HASH: u64 = 0x792b_eb49_ae46_2fce;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
-/// change the on-wire bytes without touching any source in this tree, so it must also bump
-/// [`PROTOCOL_REV`]; the `wire_types_are_pinned` tripwire enforces it. `#[cfg(test)]` for the same
-/// reason as `WIRE_SURFACE`.
-#[cfg(test)]
+/// change the on-wire bytes without touching any source in this tree. Re-pinning either version
+/// changes the handshake directly; house process also bumps [`PROTOCOL_REV`].
 const WIRE_DEP_AVIAN3D: &str = "0.7.0";
-#[cfg(test)]
 const WIRE_DEP_LIGHTYEAR: &str = "0.28.0";
 
 /// Register the exact shared wire surface represented by [`WIRE_SURFACE`].
@@ -1030,11 +1053,11 @@ mod tests {
     }
 
     /// THE TRIPWIRE. The wire surface must equal its pinned snapshot. When this fails, the replicated
-    /// component/message/channel/input set changed — bump [`PROTOCOL_REV`] and re-pin
-    /// [`WIRE_SURFACE_HASH`] to the value this prints, in the SAME diff. That is what makes a silent
-    /// wire-breaking change impossible: mismatched builds already refuse at the netcode handshake
-    /// (both ends' `protocol_id` = [`PROTOCOL_FINGERPRINT`]), and bumping `PROTOCOL_REV` is what
-    /// actually moves that fingerprint so the refusal fires.
+    /// component/message/channel/input set changed — re-pin [`WIRE_SURFACE_HASH`] to the value this
+    /// prints and, by house process, bump [`PROTOCOL_REV`] in the same diff. The required re-pin is
+    /// itself a fingerprint input, so mismatched builds refuse at the netcode handshake (both ends'
+    /// `protocol_id` =
+    /// [`PROTOCOL_FINGERPRINT`]).
     #[test]
     fn wire_surface_is_pinned() {
         let actual = hash_wire_surface();
@@ -1164,10 +1187,9 @@ mod tests {
     /// FINDING 1 TRIPWIRE. The types `plugin` actually registers must equal [`WIRE_SURFACE`], in order.
     /// This is what stops the hand list from silently diverging from the code: add / remove / reorder a
     /// registration in `plugin` (e.g. `app.component::<NetSmoke>().replicate()`) WITHOUT editing
-    /// `WIRE_SURFACE` and this fails — which is the whole point, since forgetting the `PROTOCOL_REV`
-    /// bump means forgetting the adjacent list too. Fixing it (updating `WIRE_SURFACE`) then trips
-    /// `wire_surface_is_pinned`, which forces the `PROTOCOL_REV` bump + re-pin. One edit, two gates, no
-    /// silent wire skew.
+    /// `WIRE_SURFACE` and this fails. Updating the list then trips `wire_surface_is_pinned`; its
+    /// required re-pin moves the handshake directly. House process pairs that re-pin with a
+    /// `PROTOCOL_REV` bump, but the refusal does not rely on remembering it.
     #[test]
     fn plugin_registrations_match_wire_surface() {
         let src = read_source("src/net/protocol.rs");
@@ -1331,17 +1353,15 @@ mod tests {
 
     /// FINDING 2 TRIPWIRE. A field-level serde change to an own wire type (a field added to
     /// `VolumeSnapshot`/`CrewSnapshot`/`NetCrew`, etc.) renames no registered type, so `WIRE_SURFACE`
-    /// and its hash stay green — yet skewed builds would then CONNECT (same fingerprint) and
-    /// misdeserialize. This pins the definition TEXT of every own wire type, and the resolved versions
-    /// of the external wire deps (avian/lightyear), so either kind of change trips here and forces the
-    /// `PROTOCOL_REV` bump. See the coverage-model block by the consts.
+    /// and its hash stay green. This pins every own wire definition and the external wire-dependency
+    /// versions, so either kind of change requires a re-pin that moves the handshake fingerprint.
     #[test]
     fn wire_types_are_pinned() {
         let actual = hash_wire_types();
         assert_eq!(
             actual, WIRE_TYPES_HASH,
             "a wire-facing type DEFINITION changed (a field / variant / type / derive on one of the \
-             own wire types) without a PROTOCOL_REV bump: skewed builds would connect and \
+             own wire types) without a manifest re-pin: skewed builds would connect and \
              misdeserialize. Bump PROTOCOL_REV and re-pin WIRE_TYPES_HASH to {actual:#018x} in the \
              same diff.",
         );
@@ -1389,24 +1409,96 @@ mod tests {
         );
     }
 
-    /// The fingerprint is a pure function of the build (so a same-build client/server always agree
-    /// and connect) and actually MOVES with each of its inputs (so a rev or version skew is refused).
+    /// Every pinned wire-manifest value participates in the handshake fingerprint. This exercises
+    /// the production fold with one changed input at a time, rather than reimplementing it in test.
     #[test]
-    fn fingerprint_is_deterministic_and_sensitive() {
-        assert_eq!(
-            PROTOCOL_FINGERPRINT,
-            protocol_fingerprint(),
-            "the fingerprint must be a pure function of the build",
+    fn fingerprint_couples_every_pinned_wire_manifest_value() {
+        let changed_avian = format!("{WIRE_DEP_AVIAN3D}-changed");
+        let changed_lightyear = format!("{WIRE_DEP_LIGHTYEAR}-changed");
+        let changed_crate = format!("{}-changed", env!("CARGO_PKG_VERSION"));
+        let baseline = protocol_fingerprint_for(
+            WIRE_SURFACE_HASH,
+            WIRE_TYPES_HASH,
+            WIRE_DEP_AVIAN3D,
+            WIRE_DEP_LIGHTYEAR,
+            PROTOCOL_REV,
+            env!("CARGO_PKG_VERSION"),
         );
-        // A different PROTOCOL_REV changes the fingerprint.
-        let rev1 = fnv1a_64(0xcbf2_9ce4_8422_2325, &1u32.to_le_bytes());
-        let rev2 = fnv1a_64(0xcbf2_9ce4_8422_2325, &2u32.to_le_bytes());
-        assert_ne!(rev1, rev2, "PROTOCOL_REV must change the fingerprint");
-        // The crate version is folded in on top: a different version string changes the fingerprint.
+        assert_eq!(
+            PROTOCOL_FINGERPRINT, baseline,
+            "the handshake must use the pinned wire manifest",
+        );
         assert_ne!(
-            fnv1a_64(rev1, b"0.3.0-alpha.4"),
-            fnv1a_64(rev1, b"0.3.0-alpha.5"),
-            "the crate version must change the fingerprint",
+            baseline,
+            protocol_fingerprint_for(
+                WIRE_SURFACE_HASH ^ 1,
+                WIRE_TYPES_HASH,
+                WIRE_DEP_AVIAN3D,
+                WIRE_DEP_LIGHTYEAR,
+                PROTOCOL_REV,
+                env!("CARGO_PKG_VERSION"),
+            ),
+            "the ordered wire-surface pin must change the handshake",
+        );
+        assert_ne!(
+            baseline,
+            protocol_fingerprint_for(
+                WIRE_SURFACE_HASH,
+                WIRE_TYPES_HASH ^ 1,
+                WIRE_DEP_AVIAN3D,
+                WIRE_DEP_LIGHTYEAR,
+                PROTOCOL_REV,
+                env!("CARGO_PKG_VERSION"),
+            ),
+            "the own-wire-type pin must change the handshake",
+        );
+        assert_ne!(
+            baseline,
+            protocol_fingerprint_for(
+                WIRE_SURFACE_HASH,
+                WIRE_TYPES_HASH,
+                &changed_avian,
+                WIRE_DEP_LIGHTYEAR,
+                PROTOCOL_REV,
+                env!("CARGO_PKG_VERSION"),
+            ),
+            "the avian wire dependency pin must change the handshake",
+        );
+        assert_ne!(
+            baseline,
+            protocol_fingerprint_for(
+                WIRE_SURFACE_HASH,
+                WIRE_TYPES_HASH,
+                WIRE_DEP_AVIAN3D,
+                &changed_lightyear,
+                PROTOCOL_REV,
+                env!("CARGO_PKG_VERSION"),
+            ),
+            "the lightyear wire dependency pin must change the handshake",
+        );
+        assert_ne!(
+            baseline,
+            protocol_fingerprint_for(
+                WIRE_SURFACE_HASH,
+                WIRE_TYPES_HASH,
+                WIRE_DEP_AVIAN3D,
+                WIRE_DEP_LIGHTYEAR,
+                PROTOCOL_REV + 1,
+                env!("CARGO_PKG_VERSION"),
+            ),
+            "the protocol revision must change the handshake",
+        );
+        assert_ne!(
+            baseline,
+            protocol_fingerprint_for(
+                WIRE_SURFACE_HASH,
+                WIRE_TYPES_HASH,
+                WIRE_DEP_AVIAN3D,
+                WIRE_DEP_LIGHTYEAR,
+                PROTOCOL_REV,
+                &changed_crate,
+            ),
+            "the crate version must change the handshake",
         );
     }
 
@@ -1531,18 +1623,25 @@ mod tests {
             .spawn((ActionState(held), TankCommand::default()))
             .id();
 
-        let mut fired_ticks = 0;
-        for _ in 0..10 {
+        let mut fired_ticks = Vec::new();
+        for expected_tick in 20..30 {
+            assert_eq!(
+                world.resource::<LocalTimeline>().tick(),
+                Tick(expected_tick),
+                "the test must advance the real timeline between bridge runs",
+            );
             world
                 .run_system_once(bridge_action_state_to_tank_command)
                 .unwrap();
             if world.get::<TankCommand>(entity).unwrap().fire_secondary {
-                fired_ticks += 1;
+                fired_ticks.push(expected_tick);
             }
+            world.resource_mut::<LocalTimeline>().apply_delta(1);
         }
         assert_eq!(
-            fired_ticks, 0,
-            "a trigger held on unattested ticks must fire zero extra rounds after release",
+            fired_ticks,
+            Vec::<u32>::new(),
+            "a trigger held on unattested ticks must fire on no timeline tick after release",
         );
     }
 

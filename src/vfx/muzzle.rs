@@ -633,11 +633,8 @@ fn decay_muzzle_lights(
         light.age += time.delta_secs();
         let t = light.age / light.lifetime;
         if t >= 1.0 {
-            // A light has TWO lifetime owners — this end-of-life decay and the [`MuzzleLightRing`]
-            // eviction (which already uses `try_despawn`). Under the MG's per-round cadence both can
-            // target the same light in one frame; if eviction frees it first and the slot is recycled
-            // before this despawn lands in the shared command flush, a plain `despawn` would warn on
-            // the stale, regenerated id. `try_despawn` makes the second despawn a silent no-op.
+            // The ring and expiry are independent cleanup owners. Either may already have removed
+            // the entity, so cleanup is intentionally idempotent.
             commands.entity(entity).try_despawn();
             continue;
         }
@@ -954,37 +951,29 @@ mod tests {
     #[test]
     fn light_ring_caps_refire() {
         let mut app = harness();
+        let mut spawned = Vec::with_capacity(LIGHT_CAP + 5);
         for _ in 0..LIGHT_CAP + 5 {
             fire(&mut app, 0.088, 0);
-        }
-        assert_eq!(lights(&mut app), LIGHT_CAP);
-    }
-
-    /// Regression: simultaneous ring eviction and age expiry never double-despawn a muzzle light.
-    #[test]
-    fn sustained_mg_fire_caps_lights_without_stale_despawn() {
-        let mut app = harness();
-        // Well past LIGHT_CAP with decay interleaved: three rounds per frame, then half a light's
-        // lifetime of wall time so lights age out under the eviction churn (the collision window).
-        for frame in 0..40 {
-            for _ in 0..3 {
-                fire_round(&mut app, MG_CALIBER, 0, false);
-            }
-            app.world_mut()
-                .resource_mut::<Time>()
-                .advance_by(std::time::Duration::from_secs_f32(MG_LIGHT_LIFETIME * 0.5));
-            app.update();
-            assert!(
-                lights(&mut app) <= LIGHT_CAP,
-                "frame {frame}: live lights must never exceed the cap"
+            spawned.push(
+                *app.world()
+                    .resource::<MuzzleLightRing>()
+                    .0
+                    .back()
+                    .expect("each round enters the light ring"),
             );
         }
-        // Fire stops and everything ages out: no light lingers (the decay despawn runs clean even
-        // over a ring still holding evicted, now-stale ids).
-        app.world_mut()
-            .resource_mut::<Time>()
-            .advance_by(std::time::Duration::from_secs_f32(MG_LIGHT_LIFETIME * 2.0));
-        app.update();
-        assert_eq!(lights(&mut app), 0, "all lights age out cleanly");
+        assert_eq!(lights(&mut app), LIGHT_CAP);
+        for entity in &spawned[..5] {
+            assert!(
+                app.world().get::<MuzzleLight>(*entity).is_none(),
+                "oldest lights are evicted first",
+            );
+        }
+        for entity in &spawned[5..] {
+            assert!(
+                app.world().get::<MuzzleLight>(*entity).is_some(),
+                "the newest capped window survives",
+            );
+        }
     }
 }

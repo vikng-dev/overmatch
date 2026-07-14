@@ -145,8 +145,11 @@ impl Fnv64 {
     }
 }
 
-/// One tank's per-tick state hash plus per-component breakdown. `sim` includes carried state that
-/// pose and velocity fields do not expose.
+/// One tank's per-tick state hash plus per-component breakdown. `sim` includes authority-relevant
+/// carried state that pose and velocity fields do not expose. `WeaponState::rounds_fired` is
+/// deliberately absent: it selects a local tracer phase and can legitimately lag the authority by
+/// one predicted round, so feeding it into a cross-world divergence rate would make a benign view
+/// skew look like simulation drift. The fresh-App test has a stricter, rollback-complete digest.
 struct TankStateHash {
     combined: u64,
     pos: u64,
@@ -268,6 +271,61 @@ fn hash_tank_state(
         rld,
         rec,
         anc,
+    }
+}
+
+/// In-memory fresh-App digest. `simulation` is exactly the production trace's cross-world hash;
+/// `rollback` additionally folds every `WeaponState::rounds_fired` value. The latter is rollback
+/// state but deliberately excluded from the production trace (see [`TankStateHash`]), whose job is
+/// to compare authority-relevant simulation across a predicted client and server.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CanonicalTankStateDigest {
+    simulation: u64,
+    rollback: u64,
+    position: u64,
+    rotation: u64,
+    linear_velocity: u64,
+    angular_velocity: u64,
+    drive: u64,
+    servo: u64,
+    reload: u64,
+    recoil: u64,
+    anchors: u64,
+    rounds_fired: u64,
+}
+
+#[cfg(test)]
+pub(crate) fn canonical_tank_state_digest(
+    position: Vec3,
+    rotation: Quat,
+    linvel: Vec3,
+    angvel: Vec3,
+    drive: &DriveState,
+    sim: &TankSim,
+) -> CanonicalTankStateDigest {
+    let hash = hash_tank_state(position, rotation, linvel, angvel, drive, sim);
+    let mut phase = Fnv64::new();
+    for weapon in &sim.weapons {
+        phase.write_u32(weapon.rounds_fired);
+    }
+    let rounds_fired = phase.finish();
+    let mut rollback = Fnv64::new();
+    rollback.write_u64(hash.combined);
+    rollback.write_u64(rounds_fired);
+    CanonicalTankStateDigest {
+        simulation: hash.combined,
+        rollback: rollback.finish(),
+        position: hash.pos,
+        rotation: hash.rot,
+        linear_velocity: hash.lv,
+        angular_velocity: hash.av,
+        drive: hash.drv,
+        servo: hash.srv,
+        reload: hash.rld,
+        recoil: hash.rec,
+        anchors: hash.anc,
+        rounds_fired,
     }
 }
 
@@ -597,10 +655,9 @@ fn record_tick(
         // — the collision-stress signal the jitter correlates with.
         let (hull_contacts, penetration) = contacts.get(&entity).copied().unwrap_or((0, 0.0));
 
-        // The world-independent per-tick state hash — the divergence instrument's exhaustive boolean.
-        // Feeds off the tick-truth pose/velocity and the carried sim state already in hand; costs a
-        // few dozen FNV rounds, and only when tracing is armed (this whole system is registered only
-        // then).
+        // The world-independent authority-simulation hash. It feeds off tick-truth pose/velocity
+        // and carried state already in hand, except the view-only tracer phase documented on
+        // `TankStateHash`; costs a few dozen FNV rounds and runs only when tracing is armed.
         let hash = hash_tank_state(position.0, rotation.0, linvel.0, angvel.0, drive, sim);
 
         // The cross-world pairing key. Client / SP: the game `Controlled` marker (own predicted tank).
@@ -634,8 +691,8 @@ fn record_tick(
             "ctl": controlled,
             // Cross-world tank identity for the hash join (world-independent — never the entity id).
             "own": own,
-            // The per-tick state hash: `h` combined (exhaustive "did anything differ?"), then the
-            // per-component breakdown so a difference localizes to pose vs velocity vs carried sim.
+            // The per-tick authority-simulation hash: `h` combined, then the per-component
+            // breakdown so a difference localizes to pose vs velocity vs carried sim.
             "h": hash.combined,
             "hpos": hash.pos,
             "hrot": hash.rot,
@@ -814,8 +871,8 @@ mod tests {
     use crate::tank::WeaponState;
 
     /// A representative, non-trivial sim state (every `Vec` populated, one anchor set and one
-    /// released, non-default drive) so the canonicalization is exercised over every field path —
-    /// including each of the five carried-state sub-hash streams.
+    /// released, non-default drive) so the canonicalization is exercised over every production
+    /// field path — including each of the five carried-state sub-hash streams.
     fn sample() -> (Vec3, Quat, Vec3, Vec3, DriveState, TankSim) {
         let position = Vec3::new(1.5, 2.0, -70.25);
         let rotation = Quat::from_rotation_y(0.3);
@@ -1010,17 +1067,25 @@ mod tests {
         );
     }
 
-    /// Entity-id independence, made explicit: the hash function takes no entity and no ECS handle, so
-    /// two "worlds" whose only difference is the (absent) entity id produce the same hash. This is the
-    /// world-independence guarantee the join relies on, expressed as a test.
+    /// `rounds_fired` rolls back because it derives tracer cadence, but a dropped predicted round
+    /// may leave that phase one round from authority without changing simulation truth. The
+    /// production trace therefore excludes it; the same-platform fresh-App digest must not.
     #[test]
-    fn hash_is_entity_id_independent() {
-        // There is simply no entity to pass — the signature itself is the proof. Two calls standing in
-        // for the client world and the server world (different entity ids there, identical state here)
-        // agree.
+    fn fresh_app_digest_covers_the_rollback_tracer_phase() {
         let (p, q, lv, av, drive, sim) = sample();
-        let client_world = hash_tank_state(p, q, lv, av, &drive, &sim);
-        let server_world = hash_tank_state(p, q, lv, av, &drive, &sim);
-        assert_eq!(client_world.combined, server_world.combined);
+        let base_trace = hash_tank_state(p, q, lv, av, &drive, &sim);
+        let base = canonical_tank_state_digest(p, q, lv, av, &drive, &sim);
+
+        let mut phase_shifted = sim.clone();
+        phase_shifted.weapons[0].rounds_fired =
+            phase_shifted.weapons[0].rounds_fired.wrapping_add(1);
+        let shifted_trace = hash_tank_state(p, q, lv, av, &drive, &phase_shifted);
+        let shifted = canonical_tank_state_digest(p, q, lv, av, &drive, &phase_shifted);
+
+        assert_eq!(base_trace.combined, shifted_trace.combined);
+        assert_eq!(base.simulation, shifted.simulation);
+        assert_ne!(base.rounds_fired, shifted.rounds_fired);
+        assert_ne!(base.rollback, shifted.rollback);
+        assert_ne!(base, shifted);
     }
 }

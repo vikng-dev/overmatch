@@ -23,6 +23,16 @@ pub enum AppState {
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GameplaySet;
 
+/// Cross-feature fixed-step order: drive forces, weapon impulse, recoil spring, then projectile
+/// march. Each phase can change physical state read by the next one.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SimPhase {
+    DrivingForces,
+    WeaponFire,
+    Recoil,
+    ProjectileMarch,
+}
+
 /// The device-reading player-input systems — free-look mouse-orbit, gunner aim, the Lshift view
 /// toggle, the range dial, and the drive/command gather. Grouped so ONE `.run_if(cursor_locked)` in
 /// the composition root ([`crate::ClientPlugin`]/[`crate::NetClientPlugin`]) arms them all: the
@@ -54,6 +64,16 @@ pub fn sim_plugin(app: &mut App) {
         // Set configuration is per-schedule, so gate it in every schedule it's used in.
         .configure_sets(Update, GameplaySet.run_if(in_state(AppState::Playing)))
         .configure_sets(FixedUpdate, GameplaySet.run_if(in_state(AppState::Playing)))
+        .configure_sets(
+            FixedUpdate,
+            (
+                SimPhase::DrivingForces,
+                SimPhase::WeaponFire,
+                SimPhase::Recoil,
+                SimPhase::ProjectileMarch,
+            )
+                .chain(),
+        )
         .configure_sets(PostUpdate, GameplaySet.run_if(in_state(AppState::Playing)))
         .configure_sets(
             RunFixedMainLoop,

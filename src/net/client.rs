@@ -1491,6 +1491,11 @@ mod tests {
     #[derive(Resource, Default)]
     struct MarkerPulses(usize);
 
+    /// The production `FireShell` trigger is the cosmetic-shell spawn boundary. This records only
+    /// reconstructed shells, so tests can observe the fire-receive gate without inspecting it.
+    #[derive(Resource, Default)]
+    struct ReconstructedFireShells(Vec<(ShotId, Entity)>);
+
     fn feed_test_damage_copies(
         copies: Res<TestDamageCopies>,
         timeline: Res<LocalTimeline>,
@@ -1514,6 +1519,17 @@ mod tests {
         mut pulses: ResMut<MarkerPulses>,
     ) {
         pulses.0 += 1;
+    }
+
+    fn record_reconstructed_fire_shell(
+        fire: On<FireShell>,
+        mut shells: ResMut<ReconstructedFireShells>,
+    ) {
+        if fire.shot_origin == FireShellOrigin::Reconstructed
+            && let (Some(shot), Some(shooter)) = (fire.shot, fire.shooter)
+        {
+            shells.0.push((shot, shooter.tank));
+        }
     }
 
     /// TRIPWIRE — **the shipping input delay must be CONSTANT.**
@@ -1553,14 +1569,24 @@ mod tests {
 
     /// The stamp must name the tick lightyear will FILE the command under (`local_tick +
     /// input_delay`), not the tick that authored it — otherwise the bridge's comparison is off by
-    /// the delay and every consumable fails closed forever. With no `InputTimeline` (pre-sync, and
-    /// this bare `World`), the delay is 0 and the stamp is the current tick.
+    /// the delay and every consumable fails closed forever. This mounts the same fixed-delay
+    /// `InputTimelineConfig` as the shipping client so removing `+ delay` fails the assertion.
     #[test]
     fn stamp_names_the_tick_the_command_will_be_read_on() {
-        let mut world = World::new();
+        let mut app = App::new();
+        app.add_plugins(bevy::state::app::StatesPlugin)
+            .add_plugins(ClientPlugins {
+                tick_duration: Duration::from_secs_f64(1.0 / 64.0),
+            });
+        let world = app.world_mut();
         let mut timeline = LocalTimeline::default();
         timeline.apply_delta(42);
         world.insert_resource(timeline);
+        world.spawn((
+            Client::default(),
+            Link::default(),
+            InputTimelineConfig::new(SyncConfig::default(), shipping_input_delay()),
+        ));
         let entity = world
             .spawn((
                 ActionState(TankCommand::default()),
@@ -1576,8 +1602,8 @@ mod tests {
                 .unwrap()
                 .0
                 .for_tick,
-            42,
-            "with input_delay 0 the stamp is the current tick",
+            42 + u32::from(SHIPPING_INPUT_DELAY_TICKS),
+            "the stamp names Lightyear's delayed input-buffer tick",
         );
     }
     use crate::spec::{FireMode, RecoilSpec, Trigger};
@@ -1995,18 +2021,96 @@ mod tests {
 
     #[test]
     fn pending_fire_duplicate_is_suppressed_by_shot_id() {
+        let mut app = App::new();
+        app.init_resource::<PendingRecoilKicks>()
+            .init_resource::<SeenShots>()
+            .init_resource::<PendingFireEvents>()
+            .init_resource::<ReconstructedFireShells>()
+            .add_observer(record_reconstructed_fire_shell);
+        let world = app.world_mut();
         let unmapped = Entity::from_raw_u32(999).expect("non-placeholder entity");
         let event = fire_event(unmapped, 7, 42);
-        let mut seen = SeenShots::default();
-        let mut pending = PendingFireEvents::default();
+        let shot = event.shot_id();
+        let first = event.clone();
 
-        assert!(seen.mark_new(event.shot_id()));
-        pending.insert(event.clone(), Tick(42));
-        assert!(
-            !seen.mark_new(event.shot_id()),
-            "a redundant transport copy cannot become a second pending fire"
+        world
+            .run_system_once(
+                move |locally_fired: Query<(), With<ActionState<TankCommand>>>,
+                      tanks: Query<(Entity, &CombatantId), With<NetTank>>,
+                      mut recoil: ResMut<PendingRecoilKicks>,
+                      mut seen: ResMut<SeenShots>,
+                      mut pending: ResMut<PendingFireEvents>,
+                      mut commands: Commands| {
+                    let mut trace: Option<ResMut<crate::shot_trace::ShotTrace>> = None;
+                    consume_fire_event(
+                        &first,
+                        Tick(42),
+                        &locally_fired,
+                        &tanks,
+                        &mut recoil,
+                        &mut seen,
+                        &mut pending,
+                        &mut trace,
+                        &mut commands,
+                    );
+                },
+            )
+            .expect("production fire-consumption gate runs");
+        let root = world.spawn((NetTank, CombatantId(7))).id();
+        world
+            .run_system_once(
+                |locally_fired: Query<(), With<ActionState<TankCommand>>>,
+                 tanks: Query<(Entity, &CombatantId), With<NetTank>>,
+                 mut recoil: ResMut<PendingRecoilKicks>,
+                 mut pending: ResMut<PendingFireEvents>,
+                 mut commands: Commands| {
+                    let mut trace: Option<ResMut<crate::shot_trace::ShotTrace>> = None;
+                    resolve_pending_fire_events(
+                        Tick(42),
+                        &locally_fired,
+                        &tanks,
+                        &mut recoil,
+                        &mut pending,
+                        &mut trace,
+                        &mut commands,
+                    );
+                },
+            )
+            .expect("pending fire resolves through the production repair path");
+        world
+            .run_system_once(
+                move |locally_fired: Query<(), With<ActionState<TankCommand>>>,
+                      tanks: Query<(Entity, &CombatantId), With<NetTank>>,
+                      mut recoil: ResMut<PendingRecoilKicks>,
+                      mut seen: ResMut<SeenShots>,
+                      mut pending: ResMut<PendingFireEvents>,
+                      mut commands: Commands| {
+                    let mut trace: Option<ResMut<crate::shot_trace::ShotTrace>> = None;
+                    consume_fire_event(
+                        &event,
+                        Tick(42),
+                        &locally_fired,
+                        &tanks,
+                        &mut recoil,
+                        &mut seen,
+                        &mut pending,
+                        &mut trace,
+                        &mut commands,
+                    );
+                },
+            )
+            .expect("duplicate crosses the production fire-consumption gate");
+
+        assert_eq!(
+            world.resource::<PendingFireEvents>().len(),
+            0,
+            "the deferred visual resolves before its redundant transport copy arrives"
         );
-        assert_eq!(pending.len(), 1, "one ShotId owns one deferred visual");
+        assert_eq!(
+            world.resource::<ReconstructedFireShells>().0,
+            vec![(shot, root)],
+            "the real receive gate admits one reconstructed shell across pending repair and echo"
+        );
     }
 
     #[test]
@@ -2043,50 +2147,97 @@ mod tests {
         );
     }
 
-    /// A mapped `FireEvent.shooter` is only a display/recoil handle. Its stable shot identity must not
-    /// change when receivers map that handle to different local entities.
+    /// A mapped `FireEvent.shooter` is only a display/recoil handle. Two receiver-local mappings
+    /// for the same wire fact must share its stable identity, so the production visual-fact seam
+    /// spawns once and its sanctioned outcome remains available under that one [`ShotId`].
     #[test]
     fn shot_identity_is_independent_of_entity_mapping() {
-        let mut world = World::new();
-        let real = world.spawn(NetTank).id();
-        let mapped_elsewhere = world.spawn_empty().id();
+        let mut app = App::new();
+        app.init_resource::<PendingRecoilKicks>()
+            .init_resource::<SeenShots>()
+            .init_resource::<PendingFireEvents>()
+            .init_resource::<SanctionedShots>()
+            .init_resource::<ReconstructedFireShells>()
+            .add_observer(record_reconstructed_fire_shell);
+        let world = app.world_mut();
+        let mapped_here = world.spawn((NetTank, CombatantId(7))).id();
+        let mapped_elsewhere = world.spawn((NetTank, CombatantId(7))).id();
+        let here = fire_event(mapped_here, 7, 42);
+        let elsewhere = fire_event(mapped_elsewhere, 7, 42);
+        let shot = here.shot_id();
 
-        let truth = ShotId {
-            combatant: crate::CombatantId(7),
-            weapon: 0,
-            fire_tick: 42,
-        };
-        let other_receiver_view = ShotId { ..truth };
-        assert_eq!(truth, other_receiver_view);
-        assert_ne!(
-            real, mapped_elsewhere,
-            "different ECS worlds map a shooter independently"
-        );
-
-        let mut seen = SeenShots::default();
-        assert!(
-            seen.mark_new(truth),
-            "the first receiver-local fire view spawns one shell"
-        );
-        assert!(
-            !seen.mark_new(other_receiver_view),
-            "a remapped echo retains the same identity and cannot spawn a second shell"
+        assert_ne!(mapped_here, mapped_elsewhere, "receiver mappings differ");
+        assert_eq!(
+            shot,
+            elsewhere.shot_id(),
+            "stable wire fields, not an ECS mapping, define the ShotId"
         );
 
-        let mut buf = SanctionedShots::default();
-        buf.insert(
-            truth,
-            SanctionedBounce {
-                origin: Vec3::ZERO,
-                direction: Vec3::NEG_Z,
-                speed: 600.0,
-                bounce_tick: 0,
-                sequence: 0,
-            },
+        world
+            .run_system_once(
+                move |locally_fired: Query<(), With<ActionState<TankCommand>>>,
+                      tanks: Query<(Entity, &CombatantId), With<NetTank>>,
+                      mut recoil: ResMut<PendingRecoilKicks>,
+                      mut seen: ResMut<SeenShots>,
+                      mut pending: ResMut<PendingFireEvents>,
+                      mut sanctioned: ResMut<SanctionedShots>,
+                      mut commands: Commands| {
+                    let mut trace: Option<ResMut<crate::shot_trace::ShotTrace>> = None;
+                    consume_fire_visual_fact(
+                        FireVisualFact::Fire(here.clone()),
+                        Tick(42),
+                        &locally_fired,
+                        &tanks,
+                        &mut recoil,
+                        &mut seen,
+                        &mut pending,
+                        &mut sanctioned,
+                        &mut trace,
+                        &mut commands,
+                    );
+                    consume_fire_visual_fact(
+                        FireVisualFact::Fire(elsewhere.clone()),
+                        Tick(42),
+                        &locally_fired,
+                        &tanks,
+                        &mut recoil,
+                        &mut seen,
+                        &mut pending,
+                        &mut sanctioned,
+                        &mut trace,
+                        &mut commands,
+                    );
+                    consume_fire_visual_fact(
+                        FireVisualFact::Ricochet(RicochetKeyframe {
+                            shot,
+                            origin: Vec3::ZERO,
+                            direction: Vec3::NEG_Z,
+                            speed: 600.0,
+                            bounce_tick: Tick(43),
+                            sequence: 0,
+                        }),
+                        Tick(43),
+                        &locally_fired,
+                        &tanks,
+                        &mut recoil,
+                        &mut seen,
+                        &mut pending,
+                        &mut sanctioned,
+                        &mut trace,
+                        &mut commands,
+                    );
+                },
+            )
+            .expect("production visual-fact seam runs");
+
+        assert_eq!(
+            world.resource::<ReconstructedFireShells>().0,
+            vec![(shot, mapped_here)],
+            "the first mapped view reconstructs one shell; its remapped echo is deduped"
         );
         assert!(
-            buf.has_shot(other_receiver_view),
-            "an outcome keyed on the stable id serves either receiver-local entity view"
+            world.resource::<SanctionedShots>().has_shot(shot),
+            "the sanctioned bounce is retrievable through either mapped view's stable ShotId"
         );
     }
 
