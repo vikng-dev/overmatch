@@ -18,7 +18,7 @@ use bevy::time::TimeUpdateStrategy;
 use lightyear::connection::client_of::ClientOf;
 use lightyear::link::{LinkReceiveSystems, RecvPayload};
 use lightyear::prelude::client::{
-    Client, ClientPlugins, Connect, Connected, InputDelayConfig, NetcodeClient, NetcodeConfig,
+    Client, ClientPlugins, Connect, Connected, NetcodeClient, NetcodeConfig,
 };
 use lightyear::prelude::input::native::{ActionState, InputMarker};
 use lightyear::prelude::server::{
@@ -27,8 +27,9 @@ use lightyear::prelude::server::{
 use lightyear::prelude::*;
 
 use super::client::{
-    PendingFireEvents, PendingRecoilKicks, SeenDamage, SeenShots, age_sanctioned_shots,
-    publish_predicted_present, receive_damage_confirms, receive_fire_events,
+    InputBufferGuardMetrics, PendingFireEvents, PendingRecoilKicks, SeenDamage, SeenShots,
+    age_sanctioned_shots, install_input_buffer_guard, publish_predicted_present,
+    receive_damage_confirms, receive_fire_events, shipping_input_delay,
 };
 use super::disclosure::{CombatDisclosure, NetTankStatus};
 use super::hit_feel::LocalHitConfirmed;
@@ -74,6 +75,10 @@ const SUSTAINED_STREAM_TICKS: u32 = 64;
 const SUSTAINED_RELIABLE_TICK: u32 = 31;
 /// DERIVED from the fan-out scenario.
 const FANOUT_RECEIVERS: u64 = 30;
+/// DERIVED diagnostic cadence: frequent enough to locate a stalled phase without flooding CI logs.
+const FANOUT_PROGRESS_INTERVAL_STEPS: u32 = 256;
+/// DERIVED bounded repair and ACK-settlement window for the fan-out probe.
+const FANOUT_SETTLEMENT_STEPS: u32 = 64;
 /// Keep the owner-support connection separate from the observers: every measured receiver must
 /// present the shooter root rather than suppressing its own local echo.
 const FANOUT_CLIENT_ID_BASE: u64 = 10_000;
@@ -823,6 +828,7 @@ fn build_client(port: u16, client_id: u64, seed: u64, role: HarnessClient) -> Ap
     app.add_plugins(ClientPlugins {
         tick_duration: TICK,
     });
+    install_input_buffer_guard(&mut app);
     super::protocol::plugin(&mut app);
     app.add_plugins(crate::ballistics::plugin);
     if role == HarnessClient::Observer {
@@ -940,9 +946,9 @@ fn build_client(port: u16, client_id: u64, seed: u64, role: HarnessClient) -> Ap
             // The prediction stack is what SYNCS `LocalTimeline` to the server's tick — and the
             // client's predicted present `P` is what `fire_catch_up_ticks` measures a shot's age
             // against, so without it every arriving `FireEvent` would read as absurdly stale and be
-            // rejected. Same `balanced()` input delay the shipping client runs.
+            // rejected. Use the same fixed input delay as the shipping client.
             PredictionManager::default(),
-            InputTimelineConfig::new(SyncConfig::default(), InputDelayConfig::balanced()),
+            InputTimelineConfig::new(SyncConfig::default(), shipping_input_delay()),
             NetcodeClient::new(
                 Authentication::Manual {
                     server_addr,
@@ -1043,6 +1049,19 @@ fn client_root_count(client: &mut App) -> usize {
         .query_filtered::<(), With<NetTank>>()
         .iter(client.world())
         .count()
+}
+
+fn report_fanout_progress(phase: &str, step: u32, started: Instant, clients: &[App]) {
+    let guard_clears: u64 = clients
+        .iter()
+        .map(|client| client.world().resource::<InputBufferGuardMetrics>().cleared)
+        .sum();
+    println!(
+        "MEASURED fan-out progress phase={phase} step={step} clients={} \
+         input_buffer_guard_clears={guard_clears} elapsed={:?}",
+        clients.len(),
+        started.elapsed(),
+    );
 }
 
 /// **THE TRIPWIRE.** Over a real Lightyear link with configured seeded loss, every authority shot
@@ -1637,12 +1656,17 @@ fn thirty_combatant_volley_reaches_thirty_independent_receivers_under_loss() {
     for client in &mut clients {
         finish(client);
     }
+    report_fanout_progress("connect", 0, started, &clients);
 
     let mut connected = false;
-    for _ in 0..1_800 {
+    for step_index in 1..=1_800 {
         step_many(&mut server, &mut clients);
+        if step_index % FANOUT_PROGRESS_INTERVAL_STEPS == 0 {
+            report_fanout_progress("connect", step_index, started, &clients);
+        }
         if clients.iter_mut().all(client_connected) {
             connected = true;
+            report_fanout_progress("connected", step_index, started, &clients);
             break;
         }
     }
@@ -1653,13 +1677,17 @@ fn thirty_combatant_volley_reaches_thirty_independent_receivers_under_loss() {
 
     server.world_mut().resource_mut::<VolleyArmed>().0 = true;
     let mut roots_ready = false;
-    for _ in 0..1_800 {
+    for step_index in 1..=1_800 {
         step_many(&mut server, &mut clients);
+        if step_index % FANOUT_PROGRESS_INTERVAL_STEPS == 0 {
+            report_fanout_progress("replicate-roots", step_index, started, &clients);
+        }
         if clients[1..]
             .iter_mut()
             .all(|receiver| client_root_count(receiver) == VOLLEY_COMBATANTS as usize)
         {
             roots_ready = true;
+            report_fanout_progress("roots-ready", step_index, started, &clients);
             break;
         }
     }
@@ -1677,8 +1705,13 @@ fn thirty_combatant_volley_reaches_thirty_independent_receivers_under_loss() {
     // at each receiver's first exactly-once presentation, so a slow receiver cannot be hidden in an
     // aggregate average.
     let mut fired: Option<std::collections::HashSet<ShotId>> = None;
+    let mut initial_volley_steps = 0;
     for step_index in 1..=1_800 {
+        initial_volley_steps = step_index;
         step_many(&mut server, &mut clients);
+        if step_index % FANOUT_PROGRESS_INTERVAL_STEPS == 0 {
+            report_fanout_progress("initial-volley", step_index, started, &clients);
+        }
         let fired_now = server.world().resource::<ServerShots>().0.clone();
         if fired.is_none() && fired_now.len() == expected {
             fired = Some(fired_now.into_iter().collect());
@@ -1698,10 +1731,17 @@ fn thirty_combatant_volley_reaches_thirty_independent_receivers_under_loss() {
             }
         }
         if completed.iter().all(Option::is_some) {
+            report_fanout_progress("initial-volley-complete", step_index, started, &clients);
             break;
         }
     }
 
+    report_fanout_progress(
+        "initial-volley-terminal-check",
+        initial_volley_steps,
+        started,
+        &clients,
+    );
     let fired = fired.expect("the authoritative scale script never emitted its volley");
     assert_eq!(
         fired.len(),
@@ -1721,9 +1761,16 @@ fn thirty_combatant_volley_reaches_thirty_independent_receivers_under_loss() {
 
     // Let the bounded automatic repair horizon drain, then check the final ledger rather than only
     // the first-completion snapshot. Any later duplicate remains a product failure.
-    for _ in 0..64 {
+    report_fanout_progress("initial-volley-settlement-start", 0, started, &clients);
+    for _ in 0..FANOUT_SETTLEMENT_STEPS {
         step_many(&mut server, &mut clients);
     }
+    report_fanout_progress(
+        "initial-volley-settlement-complete",
+        FANOUT_SETTLEMENT_STEPS,
+        started,
+        &clients,
+    );
 
     // Sustain roughly 768 RPM per weapon slot for one second: automatic public visuals are now
     // continuously active when the reliable cannon fire, bounce, and owner-private consequence
@@ -1733,8 +1780,13 @@ fn thirty_combatant_volley_reaches_thirty_independent_receivers_under_loss() {
     let mut sustained_complete: Vec<Option<(u32, PayloadSample)>> =
         vec![None; FANOUT_RECEIVERS as usize];
     let mut reliable_shot = None;
+    let mut sustained_stream_steps = 0;
     for step_index in 1..=1_800 {
+        sustained_stream_steps = step_index;
         step_many(&mut server, &mut clients);
+        if step_index % FANOUT_PROGRESS_INTERVAL_STEPS == 0 {
+            report_fanout_progress("sustained-stream", step_index, started, &clients);
+        }
         let stream = server.world().resource::<SustainedStreamShots>();
         if reliable_shot.is_none() {
             reliable_shot = stream.reliable;
@@ -1768,10 +1820,17 @@ fn thirty_combatant_volley_reaches_thirty_independent_receivers_under_loss() {
             && owner_receipts == 1
             && sustained_complete.iter().all(Option::is_some)
         {
+            report_fanout_progress("sustained-stream-complete", step_index, started, &clients);
             break;
         }
     }
 
+    report_fanout_progress(
+        "sustained-stream-terminal-check",
+        sustained_stream_steps,
+        started,
+        &clients,
+    );
     let reliable =
         reliable_shot.expect("the sustained stream never injected its reliable cannon shot");
     assert_eq!(
@@ -1817,10 +1876,23 @@ fn thirty_combatant_volley_reaches_thirty_independent_receivers_under_loss() {
     // aggregate bounce counter cannot distinguish this cannon from the concurrent automatic hits.
     // The keyed assertion above proves receiver fire presentation; the authority bounce and the
     // reliable-send metrics below prove the remainder of this trajectory's transport route.
-    for _ in 0..64 {
+    report_fanout_progress("reliable-settlement-start", 0, started, &clients);
+    for _ in 0..FANOUT_SETTLEMENT_STEPS {
         step_many(&mut server, &mut clients);
     }
+    report_fanout_progress(
+        "reliable-settlement-complete",
+        FANOUT_SETTLEMENT_STEPS,
+        started,
+        &clients,
+    );
 
+    report_fanout_progress(
+        "terminal-transport-assertions",
+        FANOUT_SETTLEMENT_STEPS,
+        started,
+        &clients,
+    );
     let metrics = server
         .world()
         .resource::<super::shot_transport::ShotTransportMetrics>();

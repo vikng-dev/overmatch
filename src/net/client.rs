@@ -416,13 +416,7 @@ pub fn run() {
                 .run_if(not(is_in_rollback)),
         );
     }
-    // §7 connect-hang guard: must beat `prepare_input_message` to the stranded buffer within the
-    // same frame — `.before` the set, not `.after(SyncSystems::Sync)`, because lightyear orders
-    // PrepareInputMessage BEFORE Sync in PostUpdate and the strand persists across frames anyway.
-    app.add_systems(
-        PostUpdate,
-        drop_stranded_input_buffer.before(InputSystems::PrepareInputMessage),
-    );
+    install_input_buffer_guard(&mut app);
 
     // The Esc menu, the alt-tab focus watcher, and the ONE cursor owner now live in the overlay
     // authority (`crate::overlay::plugin`, mounted by `NetClientPlugin` on same windowed condition):
@@ -706,33 +700,95 @@ fn claim_input_slot(add: On<Add, NetControlled>, mut commands: Commands) {
     ));
 }
 
+/// Observable count of buffers cleared before Lightyear's native input encoder.
+#[derive(Resource, Default)]
+pub(super) struct InputBufferGuardMetrics {
+    pub(super) cleared: u64,
+}
+
+/// Mount the input-buffer safety boundary for every composition that installs `ClientPlugins` and
+/// can attach an [`InputMarker`]. It must precede `PrepareInputMessage` in the same `PostUpdate` and
+/// relies on the production invariant of exactly one client connection per [`App`].
+pub(super) fn install_input_buffer_guard(app: &mut App) {
+    app.init_resource::<InputBufferGuardMetrics>().add_systems(
+        PostUpdate,
+        drop_stranded_input_buffer.before(InputSystems::PrepareInputMessage),
+    );
+}
+
+fn clear_stranded_input_buffer(
+    buffer: &mut NativeBuffer<TankCommand>,
+    delayed_tick: Tick,
+) -> Option<Tick> {
+    let start = buffer.start_tick?;
+    if start - delayed_tick <= 0 {
+        return None;
+    }
+    buffer.start_tick = None;
+    buffer.buffer.clear();
+    buffer.last_remote_tick = None;
+    Some(start)
+}
+
 /// Remove an input buffer that leads Lightyear's next send tick, preventing an invalid range from
 /// reaching the native encoder. Remove this guard only after verifying that the upstream encoder
 /// rejects inverted ranges; `tests/net_input_buffer_wrap.rs` pins the safe enablers, not the
 /// unbounded encoder call.
 fn drop_stranded_input_buffer(
     timeline: Res<LocalTimeline>,
-    sender: Query<&InputTimeline, With<Client>>,
+    sender: Query<(Entity, &InputTimeline), With<Client>>,
     mut buffers: Query<&mut NativeBuffer<TankCommand>, With<InputMarker<TankCommand>>>,
+    mut metrics: ResMut<InputBufferGuardMetrics>,
 ) {
-    let Ok(input_timeline) = sender.single() else {
+    // There is no encoder work, and therefore no range-wrap risk, before an input buffer exists.
+    // Checking this first also leaves startup/teardown alone when no locally controlled tank is
+    // present. Once a buffer exists, one client timeline is the invariant that makes its delayed
+    // encoder tick meaningful.
+    if buffers.is_empty() {
         return;
+    }
+    let (client, input_timeline) = match sender.single() {
+        Ok(client) => client,
+        Err(error) => {
+            let mut cleared = 0_u64;
+            for mut buffer in &mut buffers {
+                if buffer.start_tick.is_some()
+                    || !buffer.buffer.is_empty()
+                    || buffer.last_remote_tick.is_some()
+                {
+                    cleared += 1;
+                }
+                buffer.start_tick = None;
+                buffer.buffer.clear();
+                buffer.last_remote_tick = None;
+            }
+            if cleared == 0 {
+                return;
+            }
+            metrics.cleared += cleared;
+            error!(
+                ?error,
+                cleared,
+                "client: input-buffer guard cleared marked buffers because it requires exactly one Client + InputTimeline"
+            );
+            debug_assert!(
+                false,
+                "input-buffer guard requires exactly one Client + InputTimeline while a local input buffer exists: {error:?}"
+            );
+            return;
+        }
     };
     let delayed_tick = timeline.tick() + input_timeline.input_delay() as i32;
     for mut buffer in &mut buffers {
-        let Some(start) = buffer.start_tick else {
-            continue;
-        };
-        if start - delayed_tick > 0 {
+        let buffered_states = buffer.buffer.len();
+        if let Some(start) = clear_stranded_input_buffer(&mut buffer, delayed_tick) {
+            metrics.cleared += 1;
+            let lead: i32 = start - delayed_tick;
             warn!(
-                "client: input buffer stranded ahead of timeline (start {:?} > delayed tick {:?}, \
-                 backward connect resync) — dropping it to dodge lightyear's unbounded \
-                 input-message loop (§7 guard)",
-                start, delayed_tick
+                "client: input-buffer guard clear; MEASURED client={client:?} start={start:?} \
+                 delayed_tick={delayed_tick:?} lead={lead} buffered_states={buffered_states}; observed \
+                 start ahead of encoder tick, likely after backward connection resync"
             );
-            buffer.start_tick = None;
-            buffer.buffer.clear();
-            buffer.last_remote_tick = None;
         }
     }
 }
@@ -1566,6 +1622,141 @@ mod tests {
             config.minimum_input_delay_ticks, SHIPPING_INPUT_DELAY_TICKS,
             "shipping input delay changed — intended?",
         );
+    }
+
+    #[test]
+    fn input_buffer_guard_clears_an_inverted_encoder_range() {
+        let mut buffer = NativeBuffer::<TankCommand> {
+            start_tick: Some(Tick(313)),
+            last_remote_tick: Some(Tick(312)),
+            ..default()
+        };
+        buffer
+            .buffer
+            .push_back(lightyear_inputs::input_buffer::Compressed::Absent);
+
+        assert_eq!(
+            clear_stranded_input_buffer(&mut buffer, Tick(20)),
+            Some(Tick(313))
+        );
+        assert_eq!(buffer.start_tick, None);
+        assert!(buffer.buffer.is_empty());
+        assert_eq!(buffer.last_remote_tick, None);
+    }
+
+    #[test]
+    fn input_buffer_guard_preserves_a_current_encoder_range() {
+        let mut buffer = NativeBuffer::<TankCommand> {
+            start_tick: Some(Tick(20)),
+            last_remote_tick: Some(Tick(20)),
+            ..default()
+        };
+        buffer
+            .buffer
+            .push_back(lightyear_inputs::input_buffer::Compressed::Absent);
+
+        assert_eq!(clear_stranded_input_buffer(&mut buffer, Tick(20)), None);
+        assert_eq!(buffer.start_tick, Some(Tick(20)));
+        assert_eq!(buffer.buffer.len(), 1);
+        assert_eq!(buffer.last_remote_tick, Some(Tick(20)));
+    }
+
+    /// Exercise the installed PostUpdate guard alone: this App deliberately does not install
+    /// `ClientPlugins`, so `PrepareInputMessage` and its unsafe native encoder are absent. The
+    /// schedule run still proves the guard's real system query updates the metric as well as the
+    /// buffer, rather than only proving the extracted helper in isolation.
+    #[test]
+    fn installed_input_buffer_guard_clears_only_inverted_ranges_and_counts_them() {
+        let mut app = App::new();
+        install_input_buffer_guard(&mut app);
+
+        let mut timeline = LocalTimeline::default();
+        timeline.apply_delta(20);
+        app.insert_resource(timeline);
+        app.world_mut()
+            .spawn((Client::default(), InputTimeline::default()));
+
+        let stranded = app
+            .world_mut()
+            .spawn((
+                InputMarker::<TankCommand>::default(),
+                NativeBuffer::<TankCommand> {
+                    start_tick: Some(Tick(313)),
+                    last_remote_tick: Some(Tick(312)),
+                    ..default()
+                },
+            ))
+            .id();
+        let current = app
+            .world_mut()
+            .spawn((
+                InputMarker::<TankCommand>::default(),
+                NativeBuffer::<TankCommand> {
+                    start_tick: Some(Tick(20)),
+                    last_remote_tick: Some(Tick(20)),
+                    ..default()
+                },
+            ))
+            .id();
+
+        app.world_mut().run_schedule(PostUpdate);
+
+        let stranded = app
+            .world()
+            .get::<NativeBuffer<TankCommand>>(stranded)
+            .unwrap();
+        assert_eq!(stranded.start_tick, None);
+        assert!(stranded.buffer.is_empty());
+        assert_eq!(stranded.last_remote_tick, None);
+
+        let current = app
+            .world()
+            .get::<NativeBuffer<TankCommand>>(current)
+            .unwrap();
+        assert_eq!(current.start_tick, Some(Tick(20)));
+        assert!(current.buffer.is_empty());
+        assert_eq!(current.last_remote_tick, Some(Tick(20)));
+        assert_eq!(app.world().resource::<InputBufferGuardMetrics>().cleared, 1);
+    }
+
+    /// A malformed composition must not leave a marked buffer for Lightyear's encoder. Debug and
+    /// test builds panic after the defensive clear; release records the error and keeps running.
+    /// As above, no `ClientPlugins` are present, so this cannot invoke the hazardous encoder.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn installed_input_buffer_guard_clears_before_rejecting_multiple_client_timelines() {
+        let mut app = App::new();
+        install_input_buffer_guard(&mut app);
+        app.insert_resource(LocalTimeline::default());
+        app.world_mut()
+            .spawn((Client::default(), InputTimeline::default()));
+        app.world_mut()
+            .spawn((Client::default(), InputTimeline::default()));
+        let buffer = app
+            .world_mut()
+            .spawn((
+                InputMarker::<TankCommand>::default(),
+                NativeBuffer::<TankCommand> {
+                    start_tick: Some(Tick(313)),
+                    last_remote_tick: Some(Tick(312)),
+                    ..default()
+                },
+            ))
+            .id();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            app.world_mut().run_schedule(PostUpdate);
+        }));
+        assert!(result.is_err(), "debug builds must reject multiple clients");
+
+        let buffer = app
+            .world()
+            .get::<NativeBuffer<TankCommand>>(buffer)
+            .unwrap();
+        assert_eq!(buffer.start_tick, None);
+        assert!(buffer.buffer.is_empty());
+        assert_eq!(buffer.last_remote_tick, None);
+        assert_eq!(app.world().resource::<InputBufferGuardMetrics>().cleared, 1);
     }
 
     /// The stamp must name the tick lightyear will FILE the command under (`local_tick +

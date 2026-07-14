@@ -290,11 +290,11 @@ pub(crate) fn spawn_pose() -> Option<(Vec3, Quat)> {
 
 /// `SPIKE_INPUT_DELAY_TICKS`: the input-delay A/B lever for the reconciliation-DEPTH work — input
 /// delay is the primary knob on how far prediction runs ahead, and thus on rollback replay depth.
-/// `None` (unset) is the shipping default: `InputDelayConfig::balanced()` (~50 ms of latency spent
-/// on input delay before prediction, lightyear's own recommendation to shrink rollback depth).
+/// `None` (unset) selects the shipping fixed delay from `net::client::shipping_input_delay`.
 /// `Some(0)` forces `no_input_delay()` — the pre-change max-prediction behavior, so the harness can
 /// A/B the old and new depths from the SAME binary. `Some(n>0)` pins `fixed_input_delay(n)`. Kept as
-/// an `Option` precisely so "unset" (balanced) and "explicitly 0" (no delay) stay distinguishable.
+/// an `Option` precisely so "unset" (shipping fixed delay) and "explicitly 0" (no delay) stay
+/// distinguishable.
 pub(crate) fn input_delay_ticks() -> Option<u16> {
     std::env::var("SPIKE_INPUT_DELAY_TICKS")
         .ok()
