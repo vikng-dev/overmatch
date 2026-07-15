@@ -2,6 +2,7 @@
 
 use avian3d::prelude::{Position, Rotation, SpatialQuery};
 use bevy::camera::visibility::RenderLayers;
+use bevy::ecs::system::SystemParam;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::math::Affine3A;
 use bevy::prelude::*;
@@ -55,6 +56,159 @@ pub fn in_gunner(mode: Res<SightMode>) -> bool {
 /// Run condition: the free third-person view is active AND the commander is alive.
 pub fn in_third_person(mode: Res<SightMode>) -> bool {
     *mode == SightMode::ThirdPerson
+}
+
+/// **Which gunner-view *handling* scheme is active** — an A/B harness knob, orthogonal to
+/// [`SightMode`] and consulted ONLY while `SightMode::Gunner`. All four schemes resolve to the same
+/// shared [`aim::CommittedAim`] point and drive the gun through the same authority-side servo path
+/// (`aim::drive_aim_servos`) — the gun *command* machinery is identical and untouched. They differ
+/// purely in the CLIENT/VIEW layer: where the camera sits and how it tracks the gun, and how the
+/// mouse maps to that one committed point. Cycle live with `V` to compare feel. Default is the
+/// shipped baseline (`BoundOptic`).
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub enum GunnerScheme {
+    /// **A** — camera bolted rigidly to the gun's sight line; mouse = bounded deflection inside the
+    /// ~3° optic circle. The reticle leads within the circle and drifts back as the gun catches up.
+    /// The one rigid body. (`camera::gunner_camera` + [`drive_gunner_aim`].)
+    #[default]
+    BoundOptic,
+    /// **B** — free-look camera at the mount; mouse points a free reticle (screen centre), the gun
+    /// chases it at servo rate with no circle. Two visible bodies: your look (instant) and the gun
+    /// (lagging). WoT "camera dictates intent". (`camera::free_aim_camera` + [`drive_free_aim`].)
+    FreeReticle,
+    /// **C** — the camera's look *damps* toward the mouse and the gun trails the camera; the gun-bore
+    /// is the swimming reticle you settle on target. Camera and gun glide relative to one another —
+    /// the War Thunder Realistic feel. (`camera::free_aim_camera` + [`drive_free_aim`], damped.)
+    DecoupledOptic,
+    /// **D** *(novel)* — A's exact aiming (same bounded commit), but the camera is an underdamped
+    /// elastic spring toward the aim intent instead of a rigid bolt: the view whips ahead and settles
+    /// while the gun grinds underneath, so three inertias (mouse → camera → gun) are legible. Pure
+    /// view-juice — the spring never touches the gun command. (`camera::elastic_bore_camera` +
+    /// [`drive_gunner_aim`].)
+    ElasticBore,
+    /// **E** *(camera follows the orange intent dot)* — A's exact bounded aiming, but the camera locks
+    /// to the *committed intent* (the orange lead cursor) instead of the gun. The view is crisp and
+    /// responsive — the orange dot sits at screen centre — while the gun bore (green) lags *behind* it,
+    /// visibly catching up within the same 3° circle. The instant-camera sibling of D (no spring) and
+    /// the inverse of A (which welds the camera to the gun and lets the dot lead a laggy view). Camera
+    /// only — the commit is unchanged. (`camera::lead_optic_camera` + [`drive_gunner_aim`].)
+    LeadOptic,
+}
+
+impl GunnerScheme {
+    /// On-screen name for the switch toast, so a playtester can name what they are feeling.
+    fn label(self) -> &'static str {
+        match self {
+            GunnerScheme::BoundOptic => "A — Bound Optic",
+            GunnerScheme::FreeReticle => "B — Free Reticle",
+            GunnerScheme::DecoupledOptic => "C — Decoupled Optic",
+            GunnerScheme::ElasticBore => "D — Elastic Bore",
+            GunnerScheme::LeadOptic => "E — Lead Optic",
+        }
+    }
+
+    /// The cycle order for the `V` hotkey: A → B → C → D → E → A.
+    fn next(self) -> Self {
+        match self {
+            GunnerScheme::BoundOptic => GunnerScheme::FreeReticle,
+            GunnerScheme::FreeReticle => GunnerScheme::DecoupledOptic,
+            GunnerScheme::DecoupledOptic => GunnerScheme::ElasticBore,
+            GunnerScheme::ElasticBore => GunnerScheme::LeadOptic,
+            GunnerScheme::LeadOptic => GunnerScheme::BoundOptic,
+        }
+    }
+
+    /// A, D and E share the bounded-deflection commit ([`drive_gunner_aim`]); the gun is commanded
+    /// identically (they differ only in where the camera rides — the gun, a spring, or the intent).
+    pub fn bounded_commit(self) -> bool {
+        matches!(
+            self,
+            GunnerScheme::BoundOptic | GunnerScheme::ElasticBore | GunnerScheme::LeadOptic
+        )
+    }
+
+    /// B and C share the mouse-driven look camera + screen-centre commit ([`drive_free_aim`]).
+    pub fn free_look(self) -> bool {
+        matches!(
+            self,
+            GunnerScheme::FreeReticle | GunnerScheme::DecoupledOptic
+        )
+    }
+}
+
+/// Run condition: gunner optic active AND scheme A (the rigid bolt camera).
+pub fn in_gunner_bound(mode: Res<SightMode>, scheme: Res<GunnerScheme>) -> bool {
+    *mode == SightMode::Gunner && *scheme == GunnerScheme::BoundOptic
+}
+
+/// Run condition: gunner optic active AND scheme D (the elastic-spring camera).
+pub fn in_gunner_elastic(mode: Res<SightMode>, scheme: Res<GunnerScheme>) -> bool {
+    *mode == SightMode::Gunner && *scheme == GunnerScheme::ElasticBore
+}
+
+/// Run condition: gunner optic active AND scheme E (camera locked to the intent/orange dot).
+pub fn in_gunner_lead(mode: Res<SightMode>, scheme: Res<GunnerScheme>) -> bool {
+    *mode == SightMode::Gunner && *scheme == GunnerScheme::LeadOptic
+}
+
+/// Run condition: gunner optic active AND a free-look scheme (B or C) — one camera + one commit,
+/// parameterized by the scheme.
+pub fn in_gunner_free_look(mode: Res<SightMode>, scheme: Res<GunnerScheme>) -> bool {
+    *mode == SightMode::Gunner && scheme.free_look()
+}
+
+/// Run condition: gunner optic active AND a bounded-deflection scheme (A or D) — both drive
+/// [`drive_gunner_aim`]. Mutually exclusive with [`in_gunner_free_look`], so exactly one gunner
+/// commit runs per frame and the single-writer invariant on [`aim::CommittedAim`] holds.
+pub fn in_gunner_bounded_commit(mode: Res<SightMode>, scheme: Res<GunnerScheme>) -> bool {
+    *mode == SightMode::Gunner && scheme.bounded_commit()
+}
+
+/// View-layer camera-look state for the free-look schemes (B/C).
+///
+/// This is the *camera's* aim, NOT the gun's: [`aim::CommittedAim`] remains the sole gun-command
+/// memory (the "no second aim memory" invariant). `target_*` is the raw mouse-integrated intent;
+/// `yaw`/`pitch` is the look the camera actually shows — equal to the target for B (instant), and an
+/// eased follow of it for C (damped). Both are hull-local (they ride the tank), decomposed exactly
+/// as [`GunnerIntent`]. `seeded` is cleared on scheme/mode entry ([`invalidate_gunner_view_state`])
+/// so the first frame reseeds from the current committed aim and the view never jumps.
+#[derive(Resource, Default)]
+pub struct GunnerFreeAim {
+    pub target_yaw: f32,
+    pub target_pitch: f32,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub seeded: bool,
+}
+
+/// View-layer spring state for the elastic-bore camera (D): the camera's current look (`yaw`/`pitch`,
+/// hull-local) and its angular velocity, integrated as an underdamped harmonic oscillator toward the
+/// committed aim (intent) direction in `camera::elastic_bore_camera`. Like [`GunnerFreeAim`] this is
+/// camera-only — it never feeds the gun command — and reseeds on entry.
+#[derive(Resource, Default)]
+pub struct ElasticCam {
+    pub yaw: f32,
+    pub pitch: f32,
+    pub vel_yaw: f32,
+    pub vel_pitch: f32,
+    pub seeded: bool,
+}
+
+/// Hull-local unit direction for a `(yaw, pitch)` sight bearing — the shared decomposition
+/// [`GunnerIntent`] uses, exposed for the camera-placement systems (`camera.rs`). Yaw is about hull
+/// up (0 = forward, +left), pitch is elevation.
+pub fn hull_local_dir(yaw: f32, pitch: f32) -> Vec3 {
+    let (sy, cy) = yaw.sin_cos();
+    let (sp, cp) = pitch.sin_cos();
+    Vec3::new(-sy * cp, sp, -cy * cp)
+}
+
+/// Inverse of [`hull_local_dir`]: recover `(yaw, pitch)` from a hull-local direction.
+pub fn yaw_pitch_of(dir: Vec3) -> (f32, f32) {
+    (
+        (-dir.x).atan2(-dir.z),
+        dir.y.atan2((dir.x * dir.x + dir.z * dir.z).sqrt()),
+    )
 }
 
 /// Per-frame yaw/pitch working form of the committed aim point.
@@ -140,6 +294,10 @@ struct RangeScaleTick {
 pub fn plugin(app: &mut App) {
     app.init_resource::<SightMode>()
         .init_resource::<Toast>()
+        // A/B harness: the active gunner-view scheme + the two free-look/elastic camera view-states.
+        .init_resource::<GunnerScheme>()
+        .init_resource::<GunnerFreeAim>()
+        .init_resource::<ElasticCam>()
         .add_systems(
             Startup,
             (
@@ -169,6 +327,22 @@ pub fn plugin(app: &mut App) {
                 .chain()
                 .in_set(GameplaySet),
         )
+        // A/B harness: cycle the gunner-view scheme (`V`), then reseed the camera view-state on any
+        // scheme/mode change so the switch never snaps the view.
+        .add_systems(
+            Update,
+            cycle_gunner_scheme
+                .in_set(PlayerInputSet)
+                .in_set(GameplaySet),
+        )
+        .add_systems(
+            Update,
+            invalidate_gunner_view_state
+                .run_if(gunner_view_context_changed)
+                .after(cycle_gunner_scheme)
+                .after(toggle_sight)
+                .in_set(GameplaySet),
+        )
         // Commit the commanded aim from the magnified mouse intent. In `BeforeFixedMainLoop` (with
         // `gather_commands`), NOT `Update`: the fixed loop runs its sim ticks *before* `Update`, so
         // an aim written in `Update` is one render frame stale by the time the sim consumes it —
@@ -182,8 +356,13 @@ pub fn plugin(app: &mut App) {
         // clock) reads whatever intention stands at each tick.
         .add_systems(
             RunFixedMainLoop,
-            drive_gunner_aim
-                .run_if(in_gunner)
+            // The active gunner commit (A/B harness): the bounded-deflection commit for schemes A+D,
+            // or the free-look commit for schemes B+C. Their run conditions are mutually exclusive, so
+            // exactly one authors `CommittedAim` per frame (the single-writer invariant).
+            (
+                drive_gunner_aim.run_if(in_gunner_bounded_commit),
+                drive_free_aim.run_if(in_gunner_free_look),
+            )
                 .after(gather_commands)
                 .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop)
                 .in_set(AimCommit)
@@ -837,6 +1016,222 @@ fn drive_gunner_aim(
     }
     if let Ok(mut command) = tank_commands.get_mut(tank) {
         command.aim = Some(publish.command_aim);
+    }
+}
+
+/// Scheme B's wide "camera dictates intent" FOV (radians) — a gunnery view, not the magnified optic.
+/// Shared with `camera::free_aim_camera` so the sensitivity (here) and the magnification (there) agree.
+pub(crate) const FREE_RETICLE_FOV: f32 = 0.6;
+
+/// Scheme C's look-ease rate (1/s): higher tracks the mouse more tightly (less decoupled), lower
+/// glides more. The gun chases this eased look, so it is also the aim lag. Feel knob, tuned in playtest.
+const DECOUPLED_LOOK_GLIDE: f32 = 16.0;
+
+/// Live A/B switch: cycle the gunner-view scheme with `V` and name it on-screen.
+///
+/// The scheme only *matters* in gunner view, but cycling is allowed from anywhere so a playtester can
+/// pre-pick; the toast is the feedback. The camera/commit swap itself is handled by the per-scheme run
+/// conditions — this only flips the resource, and the change reseeds the view state
+/// ([`invalidate_gunner_view_state`]).
+fn cycle_gunner_scheme(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut scheme: ResMut<GunnerScheme>,
+    mut toast: ResMut<Toast>,
+) {
+    if !keys.just_pressed(KeyCode::KeyV) {
+        return;
+    }
+    *scheme = scheme.next();
+    toast.show(format!("Sight: {}", scheme.label()));
+}
+
+/// Run condition: the gunner-view context (scheme or sight mode) changed this frame.
+fn gunner_view_context_changed(mode: Res<SightMode>, scheme: Res<GunnerScheme>) -> bool {
+    mode.is_changed() || scheme.is_changed()
+}
+
+/// Clear the free-look / elastic view-state seed whenever the scheme or sight mode changes, so the
+/// next frame reseeds the camera look from the current committed aim — the view continues from
+/// wherever the outgoing scheme was aimed instead of snapping. The gun command itself is already
+/// continuous through the shared [`aim::CommittedAim`]; this only keeps the *view* seamless.
+fn invalidate_gunner_view_state(mut free: ResMut<GunnerFreeAim>, mut elastic: ResMut<ElasticCam>) {
+    free.seeded = false;
+    elastic.seeded = false;
+}
+
+/// Commit for the free-look schemes (B/C): the mouse drives the *camera's* look, and the gun chases
+/// wherever the camera centre points. Writes the shared [`aim::CommittedAim`] every frame (the
+/// recirculation invariant) and the camera's look into [`GunnerFreeAim`] for `camera::free_aim_camera`
+/// to read this same frame. B is instant (look = target); C damps the look toward the target so the
+/// camera — and thus the gun that chases it — glides. No optic circle: the only bound is the gun's
+/// mechanical travel, so an out-of-reach look just leaves the gun chasing at its limit (the WoWS
+/// "aiming blockade"). Runs in the same `BeforeFixedMainLoop` slot as [`drive_gunner_aim`], mutually
+/// exclusive with it by run condition, so exactly one gunner commit authors `CommittedAim` per frame.
+/// The servo + ranging context [`drive_free_aim`] needs, bundled into one [`SystemParam`] so the
+/// system stays under Bevy's 16-argument limit (it mirrors the fields [`drive_gunner_aim`] takes
+/// loose).
+#[derive(SystemParam)]
+struct FreeAimServos<'w, 's> {
+    slots: Query<'w, 's, &'static ServoIndex>,
+    specs: Query<'w, 's, &'static ServoSpec>,
+    sims: Query<'w, 's, &'static TankSim>,
+    tables: Query<'w, 's, &'static RangeTable>,
+    ranging: Res<'w, Ranging>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn drive_free_aim(
+    motion: Res<AccumulatedMouseMotion>,
+    time: Res<Time>,
+    scheme: Res<GunnerScheme>,
+    mut free: ResMut<GunnerFreeAim>,
+    spatial: SpatialQuery,
+    mut committed: ResMut<CommittedAim>,
+    controlled: ControlledTank,
+    views: Query<&TankViews, With<Controlled>>,
+    servos: FreeAimServos,
+    poses: Query<(&Position, &Rotation)>,
+    parents: Query<&ChildOf>,
+    locals: Query<&Transform>,
+    volumes: Query<&VolumeOf>,
+    mut tank_commands: Query<&mut TankCommand>,
+) {
+    let (Some(tank), Some(rig)) = (controlled.entity(), controlled.rig()) else {
+        return;
+    };
+
+    // Optic FOV drives both the magnification (camera) and the mouse sensitivity (a
+    // magnification-invariant screen feel). B is a wide gunnery view; C the authored magnified optic.
+    let fov = if *scheme == GunnerScheme::FreeReticle {
+        FREE_RETICLE_FOV
+    } else {
+        view_fov(&views, ViewKind::Gunner, GUNNER_FOV_FALLBACK)
+    };
+    const SENSITIVITY_AT_REF: f32 = 0.0005;
+    const REF_FOV: f32 = 0.12;
+    let sensitivity = SENSITIVITY_AT_REF * (fov / REF_FOV);
+
+    // Tick-truth mount + hull pose (the SAME `rig_world_pose` chain `aim::drive_aim_servos` lays from,
+    // never a render `GlobalTransform`), so the resolve, the store, and the servo convergence all
+    // measure from one origin.
+    let Ok((root_position, root_rotation)) = poses.get(tank) else {
+        return;
+    };
+    let Some((hull_position, hull_rotation)) = rig_world_pose(
+        rig.hull,
+        tank,
+        root_position.0,
+        root_rotation.0,
+        &parents,
+        &locals,
+    ) else {
+        return;
+    };
+    let Some((mount_world, _)) = rig_world_pose(
+        rig.gun,
+        tank,
+        root_position.0,
+        root_rotation.0,
+        &parents,
+        &locals,
+    ) else {
+        return;
+    };
+    let hull_affine = Affine3A::from_rotation_translation(hull_rotation, hull_position);
+    let mount_local = hull_affine.inverse().transform_point3(mount_world);
+    if !(mount_world.is_finite() && mount_local.is_finite()) {
+        return;
+    }
+
+    let theta = servos
+        .tables
+        .get(rig.muzzle)
+        .map_or(0.0, |table| table.superelevation(servos.ranging.range));
+
+    // Seed the look on entry (scheme/mode change cleared `seeded`): continue from the current
+    // committed aim so the camera does not jump; a fresh tank with no commitment seeds from the gun's
+    // current lay (sight line = lay − lob).
+    if !free.seeded {
+        let (yaw, pitch) = match committed.get(tank).filter(|point| point.is_finite()) {
+            Some(point) => yaw_pitch_of(point - mount_local),
+            None => {
+                let angle = |servo| {
+                    servos
+                        .sims
+                        .get(tank)
+                        .ok()
+                        .zip(servos.slots.get(servo).ok())
+                        .and_then(|(sim, slot)| sim.servos.get(slot.0))
+                        .map(crate::tank::ServoState::current)
+                };
+                (
+                    angle(rig.turret).unwrap_or(0.0),
+                    angle(rig.gun).unwrap_or(0.0) - theta,
+                )
+            }
+        };
+        free.target_yaw = yaw;
+        free.target_pitch = pitch;
+        free.yaw = yaw;
+        free.pitch = pitch;
+        free.seeded = true;
+    }
+
+    // Integrate the raw target from the mouse (absolute intent, position control).
+    free.target_yaw -= motion.delta.x * sensitivity;
+    free.target_pitch -= motion.delta.y * sensitivity;
+
+    // Bound 1 — mechanical travel only (no optic circle for free-look). Pitch tracks the sight line =
+    // lay − θ, so shift the elevation window down by the lob; a limited turret clamps yaw, a
+    // continuous one passes through.
+    let pitch_limits = sight_pitch_limits(
+        servos
+            .specs
+            .get(rig.gun)
+            .ok()
+            .and_then(ServoSpec::travel_limits),
+        theta,
+    );
+    let yaw_limits = servos
+        .specs
+        .get(rig.turret)
+        .ok()
+        .and_then(ServoSpec::travel_limits);
+    free.target_pitch = clamp_to_travel(free.target_pitch, pitch_limits);
+    free.target_yaw = clamp_to_travel(free.target_yaw, yaw_limits);
+
+    // The look the camera shows: B snaps to the target; C eases toward it. The gun chases this eased
+    // look, so C's camera lag becomes aim lag — the decoupled glide.
+    if *scheme == GunnerScheme::DecoupledOptic {
+        let ease = 1.0 - (-DECOUPLED_LOOK_GLIDE * time.delta_secs()).exp();
+        free.yaw += shortest_angle(free.target_yaw - free.yaw) * ease;
+        free.pitch += (free.target_pitch - free.pitch) * ease;
+    } else {
+        free.yaw = free.target_yaw;
+        free.pitch = free.target_pitch;
+    }
+
+    // Resolve the look ray from the mount → world hit (or far fallback), store hull-local as the
+    // shared committed aim, and re-author the command every frame (recirculation).
+    let dir_local = hull_local_dir(free.yaw, free.pitch);
+    let Ok(dir_world) = Dir3::new(hull_rotation * dir_local) else {
+        return;
+    };
+    let distance = aim_distance(
+        &spatial,
+        Ray3d::new(mount_world, dir_world),
+        MAX_RANGE,
+        tank,
+        &volumes,
+        &parents,
+    );
+    let resolved = mount_local + dir_local * distance;
+    if !resolved.is_finite() {
+        return;
+    }
+    committed.set(tank, resolved);
+    if let Ok(mut command) = tank_commands.get_mut(tank) {
+        command.aim = Some(resolved);
     }
 }
 
