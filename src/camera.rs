@@ -11,10 +11,16 @@ use bevy::prelude::*;
 use crate::aim::CommittedAim;
 use crate::firecontrol::{RangeTable, Ranging};
 use crate::hud::HudCamera;
-use crate::sight::{SightMode, SightToggled, in_gunner, in_third_person};
+use crate::sight::{
+    ElasticCam, FREE_RETICLE_FOV, GunnerFreeAim, GunnerScheme, SightMode, SightToggled,
+    hull_local_dir, in_gunner_bound, in_gunner_elastic, in_gunner_free_look, in_gunner_lead,
+    in_third_person, yaw_pitch_of,
+};
 use crate::spec::ViewKind;
 use crate::state::{GameplaySet, PlayerInputSet};
-use crate::tank::{Controlled, Hull, Rig, Tank, TankViews, ViewNode, rig_world_pose};
+use crate::tank::{
+    Controlled, Hull, Rig, Tank, TankViews, ViewNode, rig_world_pose, shortest_angle,
+};
 use crate::world::ground_distance;
 
 /// Zoom state on the camera entity. Scroll sets `target_zoom`; `zoom` eases toward it for a
@@ -102,11 +108,21 @@ pub fn plugin(app: &mut App) {
         )
         .add_systems(
             PostUpdate,
-            // The gunner camera bolts to the gun's *propagated* pose, so it runs after propagation
-            // and writes its own `GlobalTransform` (no extra propagation pass). HUD markers order
-            // after `GunnerCameraPlaced` to reproject through this same pose.
-            gunner_camera
-                .run_if(in_gunner)
+            // The three gunner-view cameras (A/B harness), one per scheme family, gated by mutually
+            // exclusive run conditions so exactly one places the camera. Each bolts to the gun's
+            // *propagated* pose (or the mount) after propagation and writes its own `GlobalTransform`
+            // (no extra propagation pass). HUD markers order after `GunnerCameraPlaced` to reproject
+            // through this same pose.
+            //   A  — `gunner_camera`: rigid bolt to the gun sight line.
+            //   B/C — `free_aim_camera`: mouse-driven look at the mount, gun trails.
+            //   D  — `elastic_bore_camera`: elastic spring toward the aim intent.
+            //   E  — `lead_optic_camera`: locked to the intent/orange dot, gun lags behind centre.
+            (
+                gunner_camera.run_if(in_gunner_bound),
+                free_aim_camera.run_if(in_gunner_free_look),
+                elastic_bore_camera.run_if(in_gunner_elastic),
+                lead_optic_camera.run_if(in_gunner_lead),
+            )
                 .in_set(GameplaySet)
                 .in_set(GunnerCameraPlaced)
                 .after(TransformSystems::Propagate),
@@ -370,4 +386,221 @@ fn gunner_camera(
     // render and HUD reprojection (propagation already ran). The camera has no parent, so they match.
     *transform = pose;
     *global_transform = GlobalTransform::from(pose);
+}
+
+/// Park the (parentless) camera at `eye` looking along world `dir`, writing both `Transform` (for next
+/// frame's bookkeeping) and `GlobalTransform` (for *this* frame's render + HUD reprojection —
+/// propagation already ran), and setting the perspective FOV. Mirrors [`gunner_camera`]'s direct-write
+/// and is shared by the free-look (B/C) and elastic (D) gunner cameras. A non-finite/zero `dir` is a
+/// no-op that keeps the last good pose (a poisoned pose frame must not NaN the camera).
+fn place_optic_camera(
+    transform: &mut Transform,
+    global_transform: &mut GlobalTransform,
+    projection: &mut Projection,
+    eye: Vec3,
+    dir: Vec3,
+    up: Vec3,
+    fov: f32,
+) {
+    let Ok(dir) = Dir3::new(dir) else {
+        return;
+    };
+    if let Projection::Perspective(p) = projection {
+        p.fov = fov;
+    }
+    let pose = Transform::from_translation(eye).looking_to(dir, up);
+    *transform = pose;
+    *global_transform = GlobalTransform::from(pose);
+}
+
+/// Free-look gunner camera (schemes B and C): park at the gun mount and look along the camera's own
+/// aim ([`GunnerFreeAim`], driven by the mouse in `sight::drive_free_aim`) — NOT bolted to the gun.
+/// The gun trails the look, so the barrel bore drifts off-centre (the `aim` bore dot shows it). B is a
+/// wide "camera dictates intent" view; C is the magnified optic whose look damps toward the mouse.
+fn free_aim_camera(
+    camera: Single<(&mut Transform, &mut GlobalTransform, &mut Projection), With<Camera3d>>,
+    controlled: Query<&Rig, With<Controlled>>,
+    views: Query<&TankViews, With<Controlled>>,
+    view_nodes: Query<&ViewNode>,
+    gun: Query<&GlobalTransform, Without<Camera3d>>,
+    hull: Query<&GlobalTransform, (With<Hull>, Without<Camera3d>)>,
+    scheme: Res<GunnerScheme>,
+    free: Res<GunnerFreeAim>,
+) {
+    // Until the commit reseeds the look on entry (`sight::drive_free_aim`, next `BeforeFixedMainLoop`),
+    // hold the previous pose rather than snap to a default-zero look for one frame.
+    if !free.seeded {
+        return;
+    }
+    let Ok(rig) = controlled.single() else {
+        return;
+    };
+    let Ok(gun) = gun.get(ViewNode::resolve(view_nodes.get(rig.gun).ok(), rig.gun)) else {
+        return;
+    };
+    let Ok(hull) = hull.get(rig.hull) else {
+        return;
+    };
+    let (mut transform, mut global_transform, mut projection) = camera.into_inner();
+
+    // B is a wide gunnery view; C the authored (magnified) optic FOV — matched to the sensitivity in
+    // `drive_free_aim` so the screen feel agrees.
+    let fov = if *scheme == GunnerScheme::FreeReticle {
+        FREE_RETICLE_FOV
+    } else {
+        view_fov(&views, ViewKind::Gunner, GUNNER_FOV_FALLBACK)
+    };
+
+    // The look is hull-local (it rides the tank, like the optic); up stays hull-up so the horizon
+    // rolls *with* the tank on a side-slope rather than drifting off the bore.
+    let hull_rot = hull.rotation();
+    let look = hull_rot * hull_local_dir(free.yaw, free.pitch);
+    let up = hull_rot * Vec3::Y;
+    place_optic_camera(
+        &mut transform,
+        &mut global_transform,
+        &mut projection,
+        gun.translation(),
+        look,
+        up,
+        fov,
+    );
+}
+
+/// Elastic-bore feel knobs. `FREQ` is the oscillator's natural angular frequency (rad/s — higher =
+/// stiffer, faster settle); `DAMPING` is its ratio (< 1 = underdamped, so the view overshoots the
+/// intent and settles — the whole point of the scheme). Tuned in playtest.
+const ELASTIC_FREQ: f32 = 11.0;
+const ELASTIC_DAMPING: f32 = 0.62;
+
+/// One semi-implicit Euler step of a damped harmonic oscillator dragging `pos` (velocity `vel`) toward
+/// `target`. `wrap` uses shortest-angle error for the continuous-traverse yaw axis. dt is clamped so a
+/// frame hitch can't explode the spring.
+fn integrate_spring(pos: &mut f32, vel: &mut f32, target: f32, wrap: bool, dt: f32) {
+    let dt = dt.min(1.0 / 30.0);
+    let error = if wrap {
+        shortest_angle(*pos - target)
+    } else {
+        *pos - target
+    };
+    let accel = -2.0 * ELASTIC_DAMPING * ELASTIC_FREQ * *vel - ELASTIC_FREQ * ELASTIC_FREQ * error;
+    *vel += accel * dt;
+    *pos += *vel * dt;
+}
+
+/// Elastic-bore gunner camera (scheme D): park at the gun mount and look along a spring that chases the
+/// committed-aim (intent) direction as an underdamped oscillator — the view whips ahead of the trailing
+/// gun and settles, giving the *camera* its own mass. Aiming is unchanged from scheme A
+/// (`sight::drive_gunner_aim` still owns the commit); this only changes how the camera rides.
+fn elastic_bore_camera(
+    camera: Single<(&mut Transform, &mut GlobalTransform, &mut Projection), With<Camera3d>>,
+    controlled: Query<(Entity, &Rig), With<Controlled>>,
+    views: Query<&TankViews, With<Controlled>>,
+    view_nodes: Query<&ViewNode>,
+    gun: Query<&GlobalTransform, Without<Camera3d>>,
+    hull: Query<&GlobalTransform, (With<Hull>, Without<Camera3d>)>,
+    committed: Res<CommittedAim>,
+    mut elastic: ResMut<ElasticCam>,
+    time: Res<Time>,
+) {
+    let Ok((tank, rig)) = controlled.single() else {
+        return;
+    };
+    let Ok(gun) = gun.get(ViewNode::resolve(view_nodes.get(rig.gun).ok(), rig.gun)) else {
+        return;
+    };
+    let Ok(hull) = hull.get(rig.hull) else {
+        return;
+    };
+    let (mut transform, mut global_transform, mut projection) = camera.into_inner();
+
+    let hull_affine = hull.affine();
+    let eye = gun.translation();
+    let mount_local = hull_affine.inverse().transform_point3(eye);
+
+    // Target look = the committed-aim (intent) bearing from the mount, hull-local; fall back to the
+    // gun's own bore before the first commit exists.
+    let target = match committed.get(tank).filter(|point| point.is_finite()) {
+        Some(point) => yaw_pitch_of(point - mount_local),
+        None => yaw_pitch_of(
+            hull_affine
+                .inverse()
+                .transform_vector3(gun.rotation() * Vec3::NEG_Z),
+        ),
+    };
+
+    if !elastic.seeded {
+        // Seed on entry so the view continues from the current aim (no spring snap).
+        elastic.yaw = target.0;
+        elastic.pitch = target.1;
+        elastic.vel_yaw = 0.0;
+        elastic.vel_pitch = 0.0;
+        elastic.seeded = true;
+    } else {
+        let dt = time.delta_secs();
+        // Reborrow the inner struct once so the two axes are disjoint field borrows — `&mut elastic.x`
+        // twice in one call would each deref the `ResMut` and conflict.
+        let e = &mut *elastic;
+        integrate_spring(&mut e.yaw, &mut e.vel_yaw, target.0, true, dt);
+        integrate_spring(&mut e.pitch, &mut e.vel_pitch, target.1, false, dt);
+    }
+
+    let hull_rot = hull.rotation();
+    let look = hull_rot * hull_local_dir(elastic.yaw, elastic.pitch);
+    let up = hull_rot * Vec3::Y;
+    let fov = view_fov(&views, ViewKind::Gunner, GUNNER_FOV_FALLBACK);
+    place_optic_camera(
+        &mut transform,
+        &mut global_transform,
+        &mut projection,
+        eye,
+        look,
+        up,
+        fov,
+    );
+}
+
+/// Lead-optic gunner camera (scheme E): park at the gun mount and look straight at the committed-aim
+/// (intent / orange-dot) point — the camera locks to where you are commanding, so the orange cursor
+/// sits at screen centre and the gun bore (green) lags *behind* it, catching up within the bounded
+/// circle. Stateless and instant (the no-spring sibling of [`elastic_bore_camera`]); aiming is
+/// unchanged from scheme A (`sight::drive_gunner_aim` owns the commit).
+fn lead_optic_camera(
+    camera: Single<(&mut Transform, &mut GlobalTransform, &mut Projection), With<Camera3d>>,
+    controlled: Query<(Entity, &Rig), With<Controlled>>,
+    views: Query<&TankViews, With<Controlled>>,
+    view_nodes: Query<&ViewNode>,
+    gun: Query<&GlobalTransform, Without<Camera3d>>,
+    hull: Query<&GlobalTransform, (With<Hull>, Without<Camera3d>)>,
+    committed: Res<CommittedAim>,
+) {
+    let Ok((tank, rig)) = controlled.single() else {
+        return;
+    };
+    let Ok(gun) = gun.get(ViewNode::resolve(view_nodes.get(rig.gun).ok(), rig.gun)) else {
+        return;
+    };
+    let Ok(hull) = hull.get(rig.hull) else {
+        return;
+    };
+    let (mut transform, mut global_transform, mut projection) = camera.into_inner();
+
+    let eye = gun.translation();
+    // Look at the committed intent point (the orange dot), hull-local → world; before the first commit
+    // exists, fall back to the gun's own bore.
+    let dir = match committed.get(tank).filter(|point| point.is_finite()) {
+        Some(point) => hull.affine().transform_point3(point) - eye,
+        None => gun.rotation() * Vec3::NEG_Z,
+    };
+    let up = hull.rotation() * Vec3::Y;
+    let fov = view_fov(&views, ViewKind::Gunner, GUNNER_FOV_FALLBACK);
+    place_optic_camera(
+        &mut transform,
+        &mut global_transform,
+        &mut projection,
+        eye,
+        dir,
+        up,
+        fov,
+    );
 }
