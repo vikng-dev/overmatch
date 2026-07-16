@@ -180,16 +180,21 @@ pub fn run() {
     // once here and stable for the session; a fresh identity across restarts is fine (back-to-back runs
     // still can't collide inside the server's disconnect timeout — the whole reason the PID existed).
     let client_id = std::hash::RandomState::new().build_hasher().finish();
-    // Optional receive conditioning for local diagnostics.
+    // Optional receive conditioning for local diagnostics — OFF by default. A non-zero default
+    // silently inflated HUD Ping (and every inbound packet) by ~100 ms on real servers; set
+    // `SPIKE_LATENCY_MS` / `SPIKE_JITTER_MS` explicitly when you want a fake path.
     let latency_ms: u64 = std::env::var("SPIKE_LATENCY_MS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(100);
+        .unwrap_or(0);
     let jitter_ms: u64 = std::env::var("SPIKE_JITTER_MS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(20);
+        .unwrap_or(0);
     let conditioner = (latency_ms > 0).then(|| {
+        info!(
+            "client: RecvLinkConditioner ON — latency={latency_ms}ms jitter={jitter_ms}ms (SPIKE_*)"
+        );
         RecvLinkConditioner::new(LinkConditionerConfig::new(
             Duration::from_millis(latency_ms),
             Duration::from_millis(jitter_ms),
