@@ -235,6 +235,7 @@ pub(super) fn apply_belt_support_links(
             // (2) Traction: slip-saturated friction on the ellipse, drive axis = belt-travel
             // direction projected into the contact plane (see model 1).
             let mut slip_long = 0.0;
+            let mut traction = Vec3::ZERO;
             let drive = -affine.transform_vector3(Vec3::new(0.0, tan2.y, tan2.x));
             let long_plane = drive - drive.dot(normal) * normal;
             if long_plane.length() > 1e-4 {
@@ -252,7 +253,8 @@ pub(super) fn apply_belt_support_links(
                     f_long *= s;
                     f_lat *= s;
                 }
-                forces.apply_force_at_point(long_dir * f_long + lat_dir * f_lat, p);
+                traction = long_dir * f_long + lat_dir * f_lat;
+                forces.apply_force_at_point(traction, p);
                 belt_reaction += f_long; // the belt feels the longitudinal friction as a load
             }
 
@@ -266,6 +268,7 @@ pub(super) fn apply_belt_support_links(
                 load: SUPPORT_STIFFNESS_PER_M * area * engage,
                 normal,
                 slip: slip_long,
+                traction,
             });
         }
 

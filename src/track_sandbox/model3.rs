@@ -1,7 +1,13 @@
-//! Box-belt model: model-2 chain dynamics with oriented box-shoe terrain contact.
+//! Box-belt model: model-2 chain dynamics with oriented shoe-shaped terrain contact.
 //!
 //! The chain solves on each shoe's pin line; wheel and terrain interfaces use inner and outer face
-//! offsets respectively so force lever arms include shoe thickness.
+//! offsets respectively so force lever arms include shoe thickness. The shoe's cast shape is a
+//! **pill** (capsule, radius = t/2) along the link rather than a sharp box: every contact lands on
+//! a rounded surface, so the contact normal and penetration stay *continuous in pose* — a sharp
+//! box flips which corner wins the cast discretely (the divergence class the sphere-cast
+//! suspension fix killed in the game sim, and an MP rollback-resim requirement). Frozen as the
+//! cast-oracle A/B baseline for model 4 (field-belt); the 500 mm width increment (edge columns,
+//! design settled in HQ.md step 18/19) lands in whichever oracle wins the A/B.
 
 use avian3d::prelude::ShapeCastConfig;
 
@@ -12,10 +18,15 @@ use super::*;
 /// path. Half of it is the offset between the pin line and either face.
 pub(super) const TRACK_THICKNESS: f32 = 0.04;
 
-/// Box width (m) in increment 1: a sliver, so the cast is effectively the centerline plate with the
-/// thickness dimension live. Increment 2 widens it to the real 500 mm shoe and adds the lateral
-/// edge-column pressure profiles.
-const BOX_WIDTH: f32 = 0.02;
+/// The shoe's cast shape: a longitudinal pill on the centerline — a capsule of radius t/2 whose
+/// total extent along the link equals the link length, so its flat-ground footprint tiles the
+/// chain exactly like the sliver box it replaced (outermost surface at pin + t/2 over the
+/// cylindrical mid-section). The rounded ends make bump-corner hand-off a roll, not a drop.
+fn shoe_pill(len: f32) -> Collider {
+    let radius = TRACK_THICKNESS / 2.0;
+    let half = (len / 2.0 - radius).max(0.0);
+    Collider::capsule_endpoints(radius, Vec3::Z * -half, Vec3::Z * half)
+}
 
 // Chain-solve knobs: model 2's verified values, owned per model so the box-belt tunes independently.
 /// Per-frame velocity retention of the chain's Verlet integration — the swing knob (see model 2).
@@ -33,8 +44,8 @@ const MAX_LINK_ANGLE: f32 = 35.0 * std::f32::consts::PI / 180.0;
 /// eat most of the slack budget, so the pin belt owns its own length and link count.
 #[derive(Resource, Default)]
 pub(super) struct PinBelt {
-    length: f32,
-    count: usize,
+    pub(super) length: f32,
+    pub(super) count: usize,
 }
 
 pub(super) fn init_pin_belt(mut commands: Commands) {
@@ -46,8 +57,9 @@ pub(super) fn init_pin_belt(mut commands: Commands) {
 }
 
 /// The rest-pose wheel circles inflated to the pin line (radius + t/2): the wheels touch the inner
-/// face, so the pins run a half-thickness outside every wheel surface.
-fn pin_circles() -> Vec<(Vec2, f32)> {
+/// face, so the pins run a half-thickness outside every wheel surface. Shared with model 4 (the
+/// field-belt rides the same pin line).
+pub(super) fn pin_circles() -> Vec<(Vec2, f32)> {
     rest_circles()
         .iter()
         .map(|&(c, r)| (c, r + TRACK_THICKNESS / 2.0))
@@ -55,14 +67,15 @@ fn pin_circles() -> Vec<(Vec2, f32)> {
 }
 
 /// MODEL 3 belt contact — model 2's advected link ring on the **pin line**, each link contacting
-/// terrain as an **oriented box** (the shoe) instead of a zero-thickness segment:
+/// terrain as an **oriented pill** (the shoe, see [`shoe_pill`]) instead of a zero-thickness
+/// segment:
 ///
-/// - **Detection = box cast.** The box is centred on the pin segment (thickness symmetric about the
-///   pins) and cast from inside the loop along the link's outward normal; its first touch is the
-///   deepest terrain feature under the **outer face**, full-face. The travel-distance convention
-///   makes the face offset cancel: the origin backs off by `CONTACT_PROBE` and the box's own
-///   half-thickness rides along, so `pen = PROBE − distance` measures penetration past the outer
-///   face with no offset bookkeeping.
+/// - **Detection = pill cast.** The pill is centred on the pin segment (thickness symmetric about
+///   the pins) and cast from inside the loop along the link's outward normal; its first touch is
+///   the deepest terrain feature under the shoe. The travel-distance convention makes the face
+///   offset cancel: the origin backs off by `CONTACT_PROBE` and the pill's own radius rides along,
+///   so `pen = PROBE − distance` measures penetration past the outer tangent (pin + t/2) with no
+///   offset bookkeeping.
 /// - **Pressure profile on the outer face.** Endpoint rays probe from the pins' outer-face points;
 ///   the same closed-form clipped profile as model 2 yields the resultant + centroid.
 /// - **Force at the terrain surface.** Support + traction are applied at the centroid pushed out to
@@ -139,11 +152,11 @@ pub(super) fn apply_belt_support_boxes(
             };
             let filter = SpatialQueryFilter::from_mask(Layer::Terrain);
 
-            // The shoe: an oriented box about the pin segment. Right-handed basis (lat × out =
+            // The shoe: an oriented pill about the pin segment. Right-handed basis (lat × out =
             // axis): X = lateral, Y = outward (thickness), Z = along the link.
             let lat = out.cross(axis);
             let rot = Quat::from_mat3(&Mat3::from_cols(lat, out, axis));
-            let shoe = Collider::cuboid(BOX_WIDTH, TRACK_THICKNESS, len);
+            let shoe = shoe_pill(len);
             let Some(hit) = spatial.cast_shape(
                 &shoe,
                 center - out * CONTACT_PROBE,
@@ -207,6 +220,7 @@ pub(super) fn apply_belt_support_boxes(
 
             // (2) Traction: slip-saturated friction on the ellipse (see model 1/2).
             let mut slip_long = 0.0;
+            let mut traction = Vec3::ZERO;
             let drive = -affine.transform_vector3(Vec3::new(0.0, tan2.y, tan2.x));
             let long_plane = drive - drive.dot(normal) * normal;
             if long_plane.length() > 1e-4 {
@@ -224,7 +238,8 @@ pub(super) fn apply_belt_support_boxes(
                     f_long *= s;
                     f_lat *= s;
                 }
-                forces.apply_force_at_point(long_dir * f_long + lat_dir * f_lat, p);
+                traction = long_dir * f_long + lat_dir * f_lat;
+                forces.apply_force_at_point(traction, p);
                 belt_reaction += f_long;
             }
 
@@ -236,6 +251,7 @@ pub(super) fn apply_belt_support_boxes(
                 load: SUPPORT_STIFFNESS_PER_M * area * engage,
                 normal,
                 slip: slip_long,
+                traction,
             });
         }
 
@@ -256,7 +272,7 @@ pub(super) fn apply_belt_support_boxes(
 /// - **wheel circles + t/2**: the pins can't come closer to a wheel centre than the inner face;
 /// - **terrain planes hold the pins t/2 inside the contact plane** (`(p − q)·m ≥ t/2`): the outer
 ///   face rests on the ground, the pins ride a half-thickness above it;
-/// - contact planes + lifts come from the same **box casts** the physics uses.
+/// - contact planes + lifts come from the same **pill casts** the physics uses.
 ///
 /// Writes the shared [`ConformedBelts`]: its samples ARE the solved pin line (wheels ride it with a
 /// +t/2 face offset in `articulate_wheels`; `draw_rig_gizmos` adds the outer-face companion line).
@@ -269,6 +285,7 @@ pub(super) fn conform_belts_boxes(
     time: Res<Time>,
     mut memory: ResMut<ChainMemory>,
     mut belts: ResMut<ConformedBelts>,
+    mut reference: ResMut<ChainReference>,
 ) {
     let hull = *hull;
     let affine = hull.affine();
@@ -313,12 +330,23 @@ pub(super) fn conform_belts_boxes(
             continue;
         }
 
+        // The advected reference ring in world space, for the `-` viz layer (the drive-anchor
+        // target the Verlet chain is pulled toward).
+        let ref_world: Vec<Vec3> = joints
+            .iter()
+            .map(|j| affine.transform_point3(Vec3::new(track_x, j.y, j.x)))
+            .collect();
+        match side {
+            Side::Left => reference.left = ref_world,
+            Side::Right => reference.right = ref_world,
+        }
+
         let ref_len: Vec<f32> = (0..n)
             .map(|i| (joints[(i + 1) % n] - joints[i]).length())
             .collect();
 
         // Per contacting link, its terrain contact plane (point on the surface + inward normal)
-        // from the box cast at reference config; distance-0 casts (buried origin) yield no plane.
+        // from the pill cast at reference config; distance-0 casts (buried origin) yield no plane.
         let mut planes: Vec<Option<(Vec2, Vec2)>> = vec![None; n];
         let mut lifts = vec![0.0_f32; n];
         for i in 0..n {
@@ -343,7 +371,7 @@ pub(super) fn conform_belts_boxes(
             };
             let lat = out.cross(axis);
             let rot = Quat::from_mat3(&Mat3::from_cols(lat, out, axis));
-            let shoe = Collider::cuboid(BOX_WIDTH, TRACK_THICKNESS, len);
+            let shoe = shoe_pill(len);
             if let Some(hit) = spatial.cast_shape(
                 &shoe,
                 center - out * CONTACT_PROBE,
@@ -459,6 +487,73 @@ pub(super) fn conform_belts_boxes(
         match side {
             Side::Left => belts.left = samples,
             Side::Right => belts.right = samples,
+        }
+    }
+}
+
+/// The `9` viz layer: outline every shoe pill at the **physics** stations — the rigid reference
+/// ring `apply_belt_support_boxes` casts from, NOT the solved visual chain — so where the physics
+/// thinks the shoes are (and their tiling/scissor gaps) reads directly against the drawn chain.
+pub(super) fn draw_cast_shapes(
+    mut gizmos: Gizmos,
+    viz: Res<VizLayers>,
+    hull: Single<&GlobalTransform, With<Hull>>,
+    pin_belt: Res<PinBelt>,
+    phase: Res<BeltPhase>,
+) {
+    if !viz.casts {
+        return;
+    }
+    let affine = hull.affine();
+    for side in [Side::Left, Side::Right] {
+        let track_x = match side {
+            Side::Left => -TRACK_HALF_WIDTH,
+            Side::Right => TRACK_HALF_WIDTH,
+        };
+        // The exact station build of `apply_belt_support_boxes`.
+        let mut loop_pts = belt_loop(&pin_circles(), None);
+        if let Some(&first) = loop_pts.first() {
+            loop_pts.push(first);
+        }
+        let pitch = polyline_len(&loop_pts) / pin_belt.count.max(1) as f32;
+        let mut stations = resample(&loop_pts, pitch, phase.get(side).rem_euclid(pitch));
+        stations.truncate(pin_belt.count);
+        let n = stations.len();
+        if n < 3 {
+            continue;
+        }
+        for i in 0..n {
+            let a = stations[i];
+            let b = stations[(i + 1) % n];
+            let seg = b - a;
+            let len = seg.length();
+            if len < 1e-4 {
+                continue;
+            }
+            let tan2 = seg / len;
+            let out2 = Vec2::new(tan2.y, -tan2.x);
+            let wa = affine.transform_point3(Vec3::new(track_x, a.y, a.x));
+            let wb = affine.transform_point3(Vec3::new(track_x, b.y, b.x));
+            let center = (wa + wb) / 2.0;
+            let axis = (wb - wa) / len;
+            let out = affine
+                .transform_vector3(Vec3::new(0.0, out2.y, out2.x))
+                .normalize_or_zero();
+            let lat = out.cross(axis);
+            let rot = Quat::from_mat3(&Mat3::from_cols(lat, out, axis));
+            let radius = TRACK_THICKNESS / 2.0;
+            // The gizmo capsule's axis is local Y; ours is local Z — one +90° X-turn maps Y → Z.
+            gizmos.primitive_3d(
+                &Capsule3d {
+                    radius,
+                    half_length: (len / 2.0 - radius).max(0.0),
+                },
+                Isometry3d::new(
+                    center,
+                    rot * Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+                ),
+                CAST_COLOR,
+            );
         }
     }
 }

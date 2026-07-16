@@ -129,6 +129,7 @@ pub(super) fn apply_belt_support(
             // is belt speed minus the ground's speed along the drive axis; friction saturates at
             // μ·load. On the front face the drive axis points *up*, so a spinning belt climbs.
             let mut slip_long = 0.0;
+            let mut traction = Vec3::ZERO;
             let drive = -affine.transform_vector3(Vec3::new(0.0, tan2.y, tan2.x));
             let long_plane = drive - drive.dot(normal) * normal;
             if long_plane.length() > 1e-4 {
@@ -146,7 +147,8 @@ pub(super) fn apply_belt_support(
                     f_long *= s;
                     f_lat *= s;
                 }
-                forces.apply_force_at_point(long_dir * f_long + lat_dir * f_lat, p);
+                traction = long_dir * f_long + lat_dir * f_lat;
+                forces.apply_force_at_point(traction, p);
                 belt_reaction += f_long; // the belt feels the longitudinal friction as a load
             }
 
@@ -155,6 +157,7 @@ pub(super) fn apply_belt_support(
                 load,
                 normal,
                 slip: slip_long,
+                traction,
             });
         }
 

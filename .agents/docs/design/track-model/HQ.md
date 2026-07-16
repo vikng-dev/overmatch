@@ -1039,12 +1039,381 @@ both.
     display fix (17c) stand. The free-chain mm-shimmer at rest is accepted-for-now and parked
     below; focus returns to the model-3 increments.
 
+- 2026-07-16 — **STEP 18 DEFINED: cross-pill cast shape (user-driven, MP-motivated).** Direction
+  review with the user ("is model 3 good? will it hold up in MP?"): model 3's *structure* is
+  already the ADR-0014 sim/view split — the physics fork's persistent state is 4 scalars
+  (per-side BeltSpeed + BeltPhase; stations re-derived from the rest ring each tick), the entire
+  Verlet chain is view-only. Replication plan settled: replicate + roll back the 4 scalars as
+  components on the tank; remote tanks integrate phase locally from replicated speed; the chain
+  never crosses the wire. The one MP liability is the **sharp box cast** — the 2026-07-06
+  architecture review requires divergence-continuous contact primitives (sharp corners flip the
+  winning terrain feature discretely under mm pose differences → rollback-resim divergence; same
+  class the game's sphere-cast suspension fix killed). Fix adopted from Physics Tank Maker
+  (Unity): the shoe casts as a **cross of two pills**, diameter = link thickness — lateral pill =
+  track width, longitudinal pill = link length. We take the *shape*, not their architecture
+  (their links are real rigid bodies — the simulate-and-send path we rejected). Bonuses expected:
+  rounded trailing edge turns the washboard slap-down drop into a roll-off; `hit.point1` on a
+  rounded surface is unique (kills the coplanar tie-break class of 13b at the source). The
+  lateral pill merges with increment 2 (it IS the width detection; edge columns still do force
+  distribution). Plan: (a) longitudinal pill only on the centerline — flat behavior should be
+  identical, A/B the washboard quirks; (b) lateral pill + edge columns + lateral centroid.
+- 2026-07-16 — **Step 18a: longitudinal pill on the centerline** (green: fmt/clippy clean). New
+  `shoe_pill(len)`: `Collider::capsule_endpoints(t/2, ±Z·(len/2 − t/2))` — total extent along the
+  link = link length, so the flat-ground footprint tiles the chain exactly like the sliver box it
+  replaces (outermost surface at pin + t/2 over the cylindrical mid-section; the outer tangent
+  spans the middle ~132 mm of the 172 mm pitch, cap tips land ON the pin line at the pins). Both
+  cast sites swapped (physics `apply_belt_support_boxes` + conform `conform_belts_boxes` — fn
+  names kept, registry identity); `BOX_WIDTH` sliver const deleted. Everything else untouched:
+  the travel-distance pen convention holds (pill radius = box half-thickness along `out`),
+  endpoint rays, profile, centroid-at-surface, planes, wheel circles, Verlet.
+  - AWAITING USER TEST (model 3, A/B with `M`): (1) flat ground — identical to before (rest
+    height, sink, dots on the outer line, J-probe calm); (2) **washboard at crawl — the point of
+    the change**: link slap-down off bump corners should read as roll-off, softer than before
+    (A/B against model 2's sharp plates); (3) washboard at rest — corner-link jumpiness + the
+    zero-input creep: better, worse, unchanged? (4) wraps/ledge/trench sanity — no new artifacts
+    from the rounded ends (watch the ledge lip). J on washboard before/after if feel is
+    ambiguous.
+
+- 2026-07-16 — **Step 18b: viz-layer instrumentation** (green: fmt/clippy clean). User ask while
+  testing 18a: per-layer toggles for everything visible. New `VizLayers` resource — every visual
+  element on its own key, legend on screen (below the model label, ASCII-only):
+  `1` hull mesh · `2` wheel meshes (Visibility::Visible overrides the hidden-hull inheritance so
+  wheels stay drawable alone) · `3` chain line · `4` outer-face line (model 3) · `5` hub markers ·
+  `6` contact dots · `7` normal lines · `8` **force vectors** (new: support along the normal in
+  magenta + traction in orange, 20 kN/m arrows; `Contact` grew a `traction: Vec3` — all three
+  models fill it, frozen 1/2 touched as a shared-visibility change like 17c) · `9` **cast shapes**
+  (new, model 3: every shoe pill outlined at the *physics* stations — the rigid reference ring the
+  casts run from, NOT the solved chain, so physics-vs-visual placement reads directly) ·
+  `0` **Avian collider wireframes** (`PhysicsDebugPlugin` mounted, `PhysicsGizmos` group synced to
+  the toggle) · `-` **chain reference ring** (new, model 3: the advected drive-anchor target, dim
+  violet — chain-vs-reference deviation shows where terrain/wheels hold the chain off its rest
+  path). Defaults reproduce the pre-toggle look (diagnostic layers start off). Draw systems stay
+  pause-transparent (immediate-mode); mesh/collider mirrors run on `resource_changed`.
+  - AWAITING USER TEST: (1) each key flips exactly its layer, legend tracks; (2) hull off + wheels
+    on shows the far track through the hull; (3) forces layer reads at rest (uniform magenta belly
+    fans) and under throttle (orange traction swinging longitudinal); (4) casts layer: pill row
+    tiles the belly, scissor gaps at bends, pills sit ON the reference ring (expect them to hover
+    off the drawn chain wherever the chain deviates — that gap is real information, not a bug);
+    (5) colliders layer shows hull box + drive-cylinder backstops + terrain.
+
+- 2026-07-16 — **CONTACT-ORACLE RESEARCH (user-directed zoom-out, mid-step-19).** Increment (b)
+  implementation paused after Yan challenged the premise: rather than guarding witness noise
+  downstream (edge columns), can penetration be deterministic *by nature*? Four parallel research
+  agents (Drake hydroelastic / terramechanics + Chrono / shipped games / parry-manifold
+  internals) — findings + decision matrix in
+  **`.agents/docs/design/track-model/contact-oracle-research.md`**. Headlines: (1) every mature
+  field converged on *fixed-sample field evaluation* (collocation), never solver witness points —
+  our endpoint rays + closed-form profile are already the pattern, the cast is the outlier;
+  (2) parry can hand us a deterministic 2-point pill manifold TODAY (verified + benchmarked
+  locally: bit-stable endpoints, arbitrary GJK point labeled `UNKNOWN` and filterable, ~15%
+  cheaper than the cast) — with a guardrail: per-link rest pen (~25–50 mm) exceeds the t/2
+  = 20 mm radius → EPA fallback; fix = inflate query radius + subtract (also a free
+  edge-smoothing knob); (3) the endgame for MP determinism is an analytic terrain field
+  (rounded-box SDF union over the authored course), fixed samples per link per edge column, no
+  parry in the track loop at all — bit-deterministic pure arithmetic, and the rounding knob
+  plausibly retires the washboard slap-down + corner creep. RECOMMENDED: build the field oracle
+  as **MODEL 4 (field-belt)** forked from model 3 (same chain/profile/width design, oracle
+  swapped), live `M` A/B; manifold route recorded as bridge for arbitrary colliders; terrain
+  authoring commitment → promotion ADR. AWAITING Yan's verdict on the model-4 path. Increment
+  (b) width (edge columns at ±0.23 m, half coefficients — settled during the step-18 pill
+  discussion, cross-member pill REJECTED: lateral line-tie = 13b class on a new axis, and no
+  per-column max for the profile) applies to whichever oracle wins.
+
+- 2026-07-16 — **Step 19: MODEL 4 — field-belt, increment 1 (centerline collocation)** (green:
+  fmt/clippy clean). The contact-oracle research verdict, implemented (Yan: "accepted. let's
+  go"). New `model4.rs`, forked from model 3 — same pin-line chain, profile, drivetrain, face
+  offsets; ONLY the terrain oracle changes:
+  - **`TerrainField`**: every block `spawn_environment` lays down is also recorded as a
+    `FieldBox` (center, inv rotation, half-extents) — colliders and field share the same
+    transforms, cannot drift. Oracle = Quilez **rounded-box SDF union** (`FIELD_ROUNDING` 0.03 m
+    — exact on faces → flat ground bit-matches the cast answer; edges rounded → normals/depths
+    turn instead of snapping; must stay < smallest half-extent, washboard 0.06).
+  - **Physics `apply_belt_support_field`**: per link, signed depth at THREE fixed collocation
+    stations (pin a / mid / pin b, on the outer face), two-piece closed-form profile between
+    them (signed stations → the clip finds lift-off between samples), force machinery
+    byte-for-byte model 3's. No casts, no rays, no witness anywhere; ~1k field evals/tick ≈
+    trivial; pure fixed-order arithmetic → bit-deterministic.
+  - **Conform `conform_belts_field`**: contact planes from the field at each link's mid station —
+    anchor = projected surface point, normal = FD gradient (turns smoothly around rounded
+    edges); Verlet/projections/belly_extra/ChainReference unchanged.
+  - **Viz**: layer `9` for model 4 draws the collocation stations (grey = clear, orange =
+    penetrating); outer-face line, +t/2 wheel offset, `-` reference ring all extended to model 4
+    (`model_on_pins`). Registered: `M` cycles 1→2→3→4, **model 4 default**; model 3 frozen as
+    the cast-oracle A/B partner (its staged width consts removed — width lands in the winning
+    oracle). PinBelt/pin_circles shared pub(super) from model 3.
+  - AWAITING USER TEST (model 4 vs model 3 via `M`): (1) **flat parity** — rest height/sink/dot
+    loads identical to model 3 (the SDF is exact on faces); `J` + `L` numbers should match;
+    (2) **washboard crawl — the headline test**: slap-down should soften further (rounded field
+    corners = the link rolls off a rounded edge), corner-link jumpiness + zero-input creep
+    re-judged; (3) trench lips/ledge: chain wraps corners smoothly (gradient turns, no plane
+    snapping); (4) ramp: honest slope contact (the one rotated field box); (5) layer `9` shows
+    the station pattern breathing with the belt; (6) pit drop-in/grind-out still works (field
+    depth saturates at CONTACT_PROBE like the casts did).
+
+- 2026-07-16 — **Step 19b: field bottoms buried — the "washboard ignored" fix** (green: fmt/clippy
+  clean). USER TEST (19, ss×3): flat ≈ model 3, but **the washboard is largely ignored** — belt
+  swallows the boards, support arrows land on the flat ground between them. Diagnosed as a
+  `min()`-union SDF interior seam (a known limitation the research flagged, mis-scoped in 19): a
+  board rests ON the ground slab, so past mid-board the nearest union surface flips from the
+  board's TOP face to its BURIED BOTTOM face — depth *shrinks* with further sink (non-monotone
+  force, a trapdoor), the belt punches through, equilibrium = belly on the gap ground. Flat has
+  no stacked seams, hence perfect flat parity. Fix: `FieldBox::from_block` extends every box's
+  bottom by `FIELD_BURY` 2 m along its local −Y (top surfaces untouched; ramp extends along its
+  tilt) — no interior bottom seams remain; depth below a top face is monotone, then **plateaus**
+  at the box's side-face distance. Also answered: layer `9` on model 4 correctly draws collocation
+  *stations* (spheres — the oracle is point lookups), not cast shapes; model 3 keeps the pills.
+  - KNOWN LIMIT (parked below): the plateau bounds max force on THIN features — the fine
+    washboard's boards (side-face core ~0.10) read ~0.10 max depth vs the cast model's ~0.13
+    equilibrium indent → boards carry, tank rides them, but slightly softer than model 3 on the
+    fine set only (mid/coarse sets saturate ≥ 0.22, fully honest).
+  - AWAITING USER TEST (model 4 vs 3): (1) washboard now carries the tank — belly rides the board
+    tops (fine set may read slightly softer than model 3 — report); (2) flat parity still holds;
+    (3) slap-down/corner-jitter/creep A/B — the original headline test; (4) step/trench-lip/ramp
+    sanity (side faces unchanged by the bury).
+
+- 2026-07-16 — **Step 19c: capture harness + directional field depth — plateau defect measured
+  and fixed** (green: fmt/clippy clean). Yan's ask after 19b ("still reacts oddly — harness the
+  sandbox so you can see what I see programmatically"): new **`harness.rs`** — `SANDBOX_HARNESS`
+  env var (`model=,z=,warmup=,ticks=,throttle=,out=`) runs a scripted scenario and writes JSONL
+  (meta / field scans / per-tick: hull pose+vel, belt, every contact with load+slip+normal-y, the
+  conformed chain), then exits; cursor-grab suppressed during captures; normal runs untouched.
+  First captures (rest@z=−5 washboard + throttle-0.12 crawl, models 3 vs 4) diagnosed 19b's
+  residual: field VERTICAL profiles were monotone+exact (fix confirmed at field level), but the
+  Euclidean side-face **plateau** (~0.10 on fine boards) starved support — model 4 sat 32 mm low,
+  belly draped into gaps, Σload 82% of weight. Fix: **`TerrainField::depth_along`** — signed
+  directional depth along the link's outward normal by sphere-tracing the same rounded SDF
+  (≤12 iters, pure fixed-order arithmetic, deterministic; buried origin saturates like the casts;
+  unbounded through stacked geometry via the top face; lateral roll-off from the field rounding —
+  the tangent-graze jump of any first-hit query lands at zero depth on a rounded surface, the
+  same reason the pill cast was smooth). Physics stations, conform lifts/planes (plane anchor =
+  ray hit, normal = gradient at the surface), and the viz stations all moved to it;
+  `signed_depth` (Euclidean) retained for scans/reference.
+  - **MEASURED A/B (harness, washboard z=−5)**: rest — hull y 1.1862 vs 1.1884 (parity, rides
+    board tops, 20 vs 18 contacts on boards), vertical support = 100.0% weight exactly;
+    **model 4 p2p: hull 0.8 mm / pitch 89 mdeg / load 0.3%** vs **model 3: 5.7 mm / 491 mdeg /
+    11.0%** — the at-rest washboard limit cycle is ~7× stiller in position, ~5× in pitch, ~35×
+    in load noise under the continuous field. Crawl (0.12 throttle over the fine set): m4 ≈ m3
+    (pitch p2p 2.23° vs 2.26°, vy extremes slightly lower) — honest now, not soft.
+  - USER VERDICT (19c): **"okay, looks good"** — accepted; one observation: the **wheels seem a
+    bit "jumpy"** (view-layer suspect: `articulate_wheels` rides the conformed chain with
+    asymmetric ease; model 4's per-link plane hand-off may step the wheel target as links advect
+    — harness can capture wheel dy to confirm; parked below).
+
+- 2026-07-16 — **Step 20: MODEL 4 width — edge columns** (green: fmt/clippy clean). Yan confirmed
+  the missing-width artifact on a rib (wheel width phasing through terrain the centerline
+  stations can't see) — the settled edge-column design, in field terms: per link, the shoe
+  samples as **two columns at ±`COLUMN_OFFSET` (±0.23 m)** along the link's lateral axis, each
+  running its own three-station directional profile with **half the per-metre coefficients**,
+  each applying support + traction at its own point (roll torque from a curb under one edge,
+  cross-slope, half-off-a-ledge all emerge). Conform/visual chain stays centerline (width is a
+  physics concern). Viz layer `9` now draws 6 stations/link (both columns); contact dots show two
+  rows per track. KNOB documented: edge placement (±0.23) slightly overestimates roll stiffness
+  vs a uniform lateral strip (2-pt Gauss ±0.14 matches the uniform second moment) — move inward
+  if curb roll feels stiff. Cost: 6 directional traces/link/tick — still trivial.
+  - HARNESS PARITY (verified before handoff): contact x-rows exactly ±1.02/±1.48 (=±1.25∓0.23);
+    flat rest **perfectly still** (hull p2p 0.00 mm, pitch 0 mdeg, vertical support exactly
+    100.0% weight, p2p 0.00%); washboard rest: ride height preserved (1.1859 vs 19c's 1.1862),
+    support 99.9%, hull p2p 2.2 mm / pitch 60 mdeg (creep-crossing sampling; still ≫ calmer than
+    model 3's 5.7 mm / 491 mdeg).
+  - AWAITING USER TEST: (1) the rib case from the screenshot — drive one track onto a washboard's
+    lateral edge: the edge column should catch it, hull rolls, no more width phase-through
+    (layer 9 shows the outer station row engaging); (2) cross-slope on the ramp edge; (3) flat +
+    washboard feel unchanged; (4) wheel jumpiness — recheck (unrelated change, expect same).
+
+- 2026-07-16 — **Step 21: third column + moment-matched weights + conform-reads-all-columns +
+  adversarial wedge review + cost budget** (green: fmt/clippy clean). Yan's three asks: wedge
+  failure mode (2 adversarial agents), jumpiness diagnosis, third-column viability/cost.
+  1. **Columns**: 3 at (0, ±0.23), weights (0.606, 0.197, 0.197) solved so the edge pair matches
+     a laterally-uniform strip's second moment exactly — exact total load AND exact roll
+     stiffness (the step-20 "overstiff knob" retired), detection gap 0.46→0.23 m. Both agents
+     independently converged on exactly this ("positions set the detection Nyquist, weights set
+     the quadrature") — it kills the two SEVERE red-team scenarios: sustained centered ridge
+     (drive-through-able cover = MP fairness exploit) and the "phantom softening" inverted-W roll
+     oscillation when steering astride a ridge.
+  2. **Conform reads the physics columns** (max of the 3 lateral mid-stations per link): the
+     view/physics inversion — ranked by the red team as WORSE than the force ghosting (visual
+     chain climbing what the hull ignores reads as "broken game", visible on remote tanks; and it
+     was bidirectional) — closed by construction. Standing invariant adopted: **the visual chain
+     conforms only to what the physics samples.**
+  3. **Wedge residuals → map pipeline** (Yan: detailed maps coming): build-time lint — no
+     standalone force-bearing surface narrower than 0.25 m; narrower objects are cosmetic /
+     crushable props (WoT/War Thunder pattern — "the tank crushes it" is genre-standard and
+     reads correct at 26.5 t) / collision-widened proxies (Source clip-brush move). Closed-form
+     lateral segment-max REJECTED (C1 breaks + double-counting + dies on baked SDF grids; full
+     verdicts in the agents' reports). Sub-sink features (<~10 cm): ghosting ≈ honest crushing.
+  4. **Cost (measured, field_bench)**: 37 ns/trace bucketed (~5 candidate boxes), 211 ns
+     unbucketed (24 boxes). Per tank-tick at 3 columns (1494 traces): 0.056 ms bucketed —
+     **30-tank PvP ≈ 1.7 ms/tick server, ~0.8 ms with belly gating; a single column costs
+     ~19 µs/tank/tick**. Verdict: 3 columns trivially viable; spatial bucketing is MANDATORY at
+     promotion (unbucketed 30 tanks = 9.5 ms/tick); 5 columns held in reserve.
+  - HARNESS PARITY (3 columns): flat perfectly still (0.00 mm, 100.0%W, 0.00%); washboard rest
+    hull p2p 0.80 mm / pitch 57 mdeg / load 0.29% — equal-or-better than every prior config;
+    x-rows exactly ±1.02/±1.25/±1.48.
+  - FOLLOW-UP (red-team finding): the hull backstop box (±1.0 m) does NOT laterally cover the
+    track bands (1.0–1.5 m) — the ">0.6 m features bottom out on the hull" net is porous exactly
+    under the tracks. Track on next backstop pass.
+  - AWAITING USER TEST: rib/curb under one track (roll + no phase-through, layer 9 shows 9
+    stations), centered wedge now carries, feel unchanged elsewhere.
+
+- 2026-07-16 — **Step 21b: jumpiness fixes (view-layer, refinement on model 4 — NOT a model 5:
+  zero force change, nothing to A/B)** (green: fmt/clippy clean). (1) **Wheel spring smoothing**
+  (shared `articulate_wheels`, all models): the linear slew (`SUSP_RISE/FALL_RATE`) replaced by a
+  critically-damped semi-implicit spring (`SUSP_OMEGA_RISE` 18 / `SUSP_OMEGA_FALL` 7 rad/s,
+  `Suspension` gains `dvel`; lift still clamped 0..MAX) — eases in/out of every move instead of
+  slewing at a rate cap. (2) **Conform reads all 3 longitudinal stations × 3 columns** (model 4):
+  deepest of the same 9 samples the physics uses — the visual≡physics sample-set invariant now
+  holds on both axes.
+  - MEASURED (harness, 0.12-throttle crawl over the fine washboard, before → after): **wheels:
+    total travel 7778 → 1938 mm (4×), max step/tick 25.2 → 4.7 mm (5×), direction reversals
+    194 → 74**. Chain: max single-tick step 55.5 → 61.2 mm, mean unchanged (4.4 mm) — the
+    conform-9 closes the longitudinal inversion but does NOT reduce the chain snap: the snap is
+    the Verlet chain complying with a plane target that honestly rises a full board height
+    within ~1–2 ticks (edge rounding 3 cm ≈ 1.3 ticks of travel at crawl). Rest parity intact
+    (hull p2p 0.80 mm, 100.0%W). Wheel percept should improve sharply; the chain's residual
+    snap may now read as honest link clatter — Yan to judge; candidate levers if not: temporal
+    blend of per-link lift, or wider field rounding at the top of raised features.
+  - EXPERIMENT (Yan-directed): codex CLI (`gpt-5.6-sol`) engaged as an additional agent source —
+    bounded read-only second-opinion review of model4.rs + the lateral-rigidity design question;
+    verdict lands async.
+
+- 2026-07-16 — **Step 22: the accretion review + the kinematic track view** (green: fmt/clippy
+  clean; Yan-directed: "make sure we're not digging too deep with patch over patch"). Three
+  independent reviews (adversarial architecture audit, industry research, codex `gpt-5.6-sol` —
+  `scratchpad/codex_arch_review.md`) returned ONE verdict: the sim side is principled; the
+  Verlet view chain was nine patches deep, and its stabilization apparatus was built against
+  CAST-oracle artifacts (bistable tents, plane snapping) that step 19c's smooth field deleted —
+  the patch stack outlived its root cause. Key structural defect: the wheel↔chain feedback loop
+  (chain wraps the wheels' circles, wheels ride the solved chain, stabilized by a one-frame lag)
+  — the root of the wrong-side captures, which tuning can't fix ("a stateful solver discovering
+  topology the reference construction already knows"). Industry (WoT Blitz devblog, War Thunder
+  Hot Tracks, UE/Unity community consensus): NO mainstream gameplay title ships a force-based
+  visual chain; the norm is geometric fitting; per-segment sims exist only as per-model art-team
+  cosmetics (Gaijin). Also: the staged ω=90 wheel-spring retune (in the binary Yan drove, never
+  its own step) had explicitly-integrated damping DIVERGENT at 60 fps (2ωΔt = 3 > 2) — the
+  "getting worse" wrong-side captures were thrashing wheel circles. (21b's shipped ω=18 was
+  stable, just slow — codex correction, step 22b.)
+  **Landed, accepted by Yan ("accepted. let's go"):**
+  1. **Sim — exact ray oracle**: `depth_along`'s sphere-trace march (24 iters + exhaustion
+     fallback) replaced by the EXACT closed-form ray-vs-rounded-box first hit (3 face slabs + 12
+     edge cylinders + 8 corner spheres per box, union = min over entries; `FieldBox::ray_hit`).
+     Deletes MARCH_ITERS/MARCH_EPS/the fallback's convergence-boundary discontinuity AND the
+     staged 21c ghost-contact patch (obsolete — the failure class is gone). Harness: dd columns
+     0 rise-violations, 0 jumps, all 9 vscans.
+  2. **Sim — 21c fixes folded in**: force applied at the profile's own value at the centroid
+     (pen_c; mirror-symmetric traction lever) + columns at the TRUE shoe edges ±0.25 with exact
+     Simpson weights (1/6, 2/3, 1/6) — blind rim closed. Flat parity EXACT vs step-21 captures
+     (hull y 1.1418, 100.1 %W, 0.00 p2p).
+  3. **View — stateless kinematic wrap** (`conform_belts_field` rewritten; the step-21 chain
+     preserved verbatim as `conform_belts_field_chain` behind the **`V` toggle** as the frozen
+     A/B partner; harness `view=chain`): wheels-FIRST data direction (ground → wheels → belt,
+     acyclic). Lower convex envelope of the articulated pin circles (Graham scan; lifted wheels
+     drop out — wrong-side wrap unrepresentable), terrain conform as direct displacement along
+     the outward normal (max of the SAME 3 physics columns — visual≡physics invariant kept),
+     top-run sag from the FEED-FORWARD length budget (belly_extra EMA dead) clipped from above
+     onto the wheel circles, links = phase-scrolled resample. No integration, no constraints, no
+     memory: teleports/model-switches are ordinary recomputation.
+  4. **Wheels — spring deleted, all models**: rise INSTANT (terrain forcing a wheel up is
+     kinematic; smoothing it was the "slo-mo"), fall BALLISTIC (gravity-limited; ~190 ms off a
+     0.18 m board because g says so). Zero tuning constants, stable at any frame rate. Model 4
+     reads the field directly (`articulate_wheels_field`, 21 arc probes every 5° × 3 columns —
+     5-probe version quantized board-edge onsets into ~55 mm/tick belly steps; at 5° the step
+     hides under the true circle-on-edge ramp ~25 mm/tick).
+  - MEASURED (harness A/B, same binary, wrap vs chain): physics BIT-IDENTICAL (crawl trajectories
+    equal to the cm — the view provably never touches forces). Wheels: rise deficit 0.00 mm
+    (was mean 1.74 / max 165 with the spring). Belly shape Δ/tick: chain 14.8 mm mean / 57 max →
+    wrap 11.4 / 35.4. **Compression zigzag: 22.0 mean kinks (chain, 21b capture) → 0.00 (wrap)**
+    — closed by construction, not tuned. CORRECTION (codex, 22b): the staged 21c chain edits
+    (anchor split 400/60 + CHAIN_BEND 0.02) were NOT discarded — they were already in the working
+    tree and shipped inside the frozen chain view (its crawl kinks 5.2 vs the pre-split capture's
+    22 owe partly to them); the topology-aware push alone was never built.
+  - WATCH: washboard rest shows intermittent ±2–3 mm hull / ~5 %W support bursts (creep advecting
+    stations over board edges — the known stiction tab; flat rest is perfectly still). Sim-side,
+    pre-existing class, slightly more visible with the ±0.25 edge columns.
+  - AWAITING USER TEST: wheel reactivity (slo-mo gone?), wrap-vs-chain feel on `V` (top-run life
+    — the one honest loss is the chain's emergent slack migration; parametric sag-breathing is
+    the fallback juice), teleport/R/M cleanliness (wrong-side capture should be extinct in wrap
+    view). Chain + toggle get DELETED once the wrap wins the feel check.
+
+- 2026-07-17 — **Step 22b: Yan's A/B verdict + the wrap's two real bugs + the dual codex deep
+  dives** (green: fmt/clippy clean). Yan drove both views: prefers the CHAIN's feel ("natural
+  wheel movement, chain whip, tightness being responsive"; zigzag still its pain point) and filed
+  four wrap complaints. Triage: **two were one bug pair in my conform** — (a) displacement SIGN
+  inverted (pushed the belly INTO boards, shoved the nose off the sprocket at a wall — the
+  "wanders off the sprocket" + "phases through terrain" reports), (b) conform ran on the wrap's
+  sparse VERTICES, so a tangent segment crossing a board mid-span was never sampled. Fixed:
+  sign corrected; conform on a dense 0.1 m resample; displacement field gets a ±1-station MAX
+  filter + 3-tap smooth (the rigid link's edge OVERHANG the chain got from its per-link
+  constraint). (c) Global-parabola sag → per-span drape with wheel PROMOTION (`sag_span`:
+  recursive split at the wheel top, slack shared by chord — the "slack more substantial" fix).
+  (d) Instant wheel rise read robotic (Yan) → implicit critically-damped ease (WHEEL_EASE_OMEGA
+  45, unconditionally stable at any ωΔt), fall stays ballistic.
+  - MEASURED after fixes (crawl): belly-into-board interior penetration median 0.0 / p95 10.7 /
+    max 27.9 mm — now BETTER than the chain view (3.7 / 20.0 / 83.8); compression kinks 2.7
+    (terrain tents, not zigzag) vs chain-era 22; wheel rise lag mean 6 mm (the intended ~100 ms
+    ease). New standing harness check: belly-vs-board penetration (the check that would have
+    caught the sign bug — shape metrics alone were blind to it).
+  - CODEX DEEP DIVES (both `gpt-5.6-sol`, scratchpad/codex_chain_review.md +
+    codex_wrap_review.md): the two directions CONVERGE on "wrap skeleton owns topology,
+    dynamics layer on top". (1) PROPER CHAIN = topology-guided inextensible rod: joints live in
+    ROUTE COORDINATES (monotone material s per link + band-limited normal-displacement spline,
+    knots at 2·pitch) on the tagged wrap route — wrong-side states and per-link zigzag modes
+    UNREPRESENTABLE; XPBD with real bending energy (compliance in N·m², selects long bows over
+    kinks — the math for why alternating modes are the most expensive); exact length (belly_extra
+    deleted); drive applied ONLY at the sprocket sector (the all-joint advected anchor is itself
+    a zigzag cause — it injects compression everywhere); fixed 120 Hz view accumulator (0.88/frame
+    damping = three different chains at 30/60/144 fps); canonical reseed list. (2) LIVING WRAP =
+    ~42 floats/side of closed-form exact-update states: signed tension Δ (drive load →
+    tight/slack branches, conservative slack allocator solving one monotone H_c equation), a
+    COMPLEX slack moment advecting slack around the loop (the minimum state that can do
+    migration), 2 damped modal oscillators per free span (whip; support-motion + belt-accel
+    forced), exact asymmetric wheel filter with target-velocity feed-forward. Scorecard vs full
+    chain: 4/5 on all four of Yan's named feel elements, 5/5 stability/teleport/determinism,
+    weak only on link-level detail (piles, clatter, derail). Corrections taken: 21b ω=18 was
+    stable (divergence was the staged ω=90 retune); anchor-split/CHAIN_BEND shipped in the chain
+    view, not discarded; real T-34 sprocket is REAR (our rig says front — tension topology must
+    key on DriveEnd, not "front"; parked).
+  - PATH (proposed): staged LIVING-WRAP build (exact wheel filter → tension+slack allocator →
+    fundamental span mode → slack moment → second mode), each stage feelable; the route-chain
+    remains the endgame if link-level life is still missed — it REUSES the wrap skeleton, wheel
+    filter, and tension concepts (no-regret ordering). Chain view stays on `V` as the benchmark
+    until the living wrap wins or loses on feel.
+
 ## Open questions / parking lot
 
-- **Thrown-track capture** (model 2, rare): teleport-settle can droop the chain into a gap and the
-  unilateral constraints keep it there. Candidate fixes if it ever matters: re-init chain state a
-  few frames *after* a teleport settles; or an asymmetric reel-in anchor (stronger pull for belly
-  joints below the taut line). Might become a *feature* (track-throwing as damage/abuse mechanic).
+- **Lateral link rigidity (Yan, 2026-07-16, open tab)**: a real shoe is ~perfectly stiff
+  laterally, so if ANY lateral column of a link contacts, the link should arguably lift AS ONE
+  (deepest contact sets the link's pose; the other columns unload — currently the 3 columns
+  support independently, so a ridge under one edge + flat ground under the rest DOUBLE-SUPPORTS
+  the link). Sketch of a pose-continuous, argmax-free formulation: per link, lift = max column
+  depth (value-only); per-column effective pen = own pen − (max − own) clamped ≥ 0 (rigid-body
+  unloading), forces still applied at the columns → roll torque from the loaded column survives,
+  double-support dies. CHANGES FORCES → this is the first credible **model 5** candidate (A/B
+  rigid-lateral vs independent columns live). Codex verdict (step 22): legit sim candidate,
+  closed-form active-set solution recorded (`u_A = κΣw·d / (K + κΣw)` over the active set),
+  ORTHOGONAL to the view — do after the view rewrite, derive K from a real compliance target
+  (an arbitrary K "merely relocates the patch"). Both reviews: second-order; the 5-line
+  max-unloading approximation covers it if a playtest ever complains. Not scheduled.
+- **Chain snap residual (21b)** — MOOT in the step-22 kinematic wrap (belly Δ/tick max 35 mm ≈
+  honest terrain-following); applies only to the frozen `V` chain view until it's deleted.
+- **Zero-input creep on the washboard — now QUANTIFIED (19c harness)**: ~14 mm/s steady forward
+  drift at rest on the boards, essentially identical on models 3 and 4 (89 vs 84 mm over 6.1 s) —
+  confirms the 17d diagnosis that it is a contact-physics class (slip-saturated friction is
+  viscous below saturation, no stiction anchor; tilted board contacts leave a net tangential
+  residual that integrates), NOT an oracle/witness artifact. Fix when scheduled: stiction anchor
+  (brush-model-style) near zero slip, shared by all models.
+- **Euclidean-vs-directional field duality (model 4, resolved 19c, kept for reference)**: the
+  Euclidean SDF plateaus at side-face distance under thin raised features (19b's bounded-softness
+  limit — measured biting 18% of weight on the fine washboard); physics reads the directional
+  sphere-traced depth instead. The Euclidean field remains the conform-gradient/scan primitive.
+- **Top-run compression zigzag** — RESOLVED for the default view by step 22 (kinematic wrap:
+  22.0 mean kinks → 0.00, closed by construction — the surplus goes into the sag budget the same
+  frame). Still present in the frozen `V` chain view until it's deleted (the staged anchor-split/
+  CHAIN_BEND tuning for it was discarded unbuilt).
+
+- **Thrown-track capture** — UNREPRESENTABLE in the step-22 wrap (no state; which side of a wheel
+  the belt is on is given, never discovered). If track-throwing ever becomes a damage mechanic it
+  needs sim authority + a replicated flag, not a view accident (step-22 review consensus). The
+  model-2/3 chains (and model 4's frozen `V` view) keep the old failure mode.
 - **Static at-rest gizmo jitter** — RESOLVED on flat (steps 17b/17c, user-confirmed): geometry
   still (≤0.03 mm wheels/belt), flicker was the force-gizmo size displaying the damping term's
   micro-velocity noise; fixed by elastic-only display (models 2/3; model 1 keeps the raw strobe as
@@ -1065,6 +1434,10 @@ both.
   rocking rectifies into slow creep. Contact-level work: revisit corner-contact damping scaling
   and/or a stiction anchor (brush-model-style) for near-zero slip.
 
+- **Sprocket is at the wrong end (codex, 22b)**: the real T-34 drives from the REAR sprocket
+  (front wheel is the idler); our rig labels the front drive wheel "sprocket". Cosmetic today,
+  but tension/slack-side logic (living-wrap stage 2) must key on a `DriveEnd` identity + loop
+  direction, never on "front" — and the rig label should flip when convenient.
 - Envelope as taut convex-hull of wheel circles vs. sagging catenary on slack runs — start taut,
   add sag in step 2.
 - How belt-speed/slip couples to the (future) powertrain — deferred to step 4.

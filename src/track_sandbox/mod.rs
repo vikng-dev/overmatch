@@ -6,8 +6,9 @@
 use avian3d::prelude::{
     AngularInertia, AngularVelocity, CoefficientCombine, Collider, CollisionLayers, Forces,
     Friction, LayerMask, LinearVelocity, Mass, NoAutoAngularInertia, NoAutoCenterOfMass,
-    NoAutoMass, Physics, PhysicsInterpolationPlugin, PhysicsPlugins, PhysicsTime,
-    ReadRigidBodyForces, RigidBody, SpatialQuery, SpatialQueryFilter, WriteRigidBodyForces,
+    NoAutoMass, Physics, PhysicsDebugPlugin, PhysicsGizmos, PhysicsInterpolationPlugin,
+    PhysicsPlugins, PhysicsTime, ReadRigidBodyForces, RigidBody, SpatialQuery, SpatialQueryFilter,
+    WriteRigidBodyForces,
 };
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
@@ -18,15 +19,23 @@ use crate::Layer;
 
 // One file per locomotion model (the `M` A/B): shared course/rig/belt machinery lives here in
 // `mod.rs`; each model's force systems live in their own file and are gated on `ActiveModel`.
+mod harness;
 mod model1;
 mod model2;
 mod model3;
+mod model4;
 
 use model1::apply_belt_support;
 use model2::{
     BeltPhase, ChainMemory, apply_belt_support_links, conform_belts_links, init_link_count,
 };
-use model3::{TRACK_THICKNESS, apply_belt_support_boxes, conform_belts_boxes, init_pin_belt};
+use model3::{
+    TRACK_THICKNESS, apply_belt_support_boxes, conform_belts_boxes, draw_cast_shapes, init_pin_belt,
+};
+use model4::{
+    FieldBox, TerrainField, apply_belt_support_field, articulate_wheels_field, conform_belts_field,
+    conform_belts_field_chain, draw_sample_points,
+};
 
 // --- Rig geometry (metres), benchmarked on the **Soviet T-34** — well-documented numbers and a
 // running-gear layout (5 big road wheels, rear-ish drive, all-steel track) essentially identical to
@@ -159,22 +168,18 @@ const LATERAL_GRIP_RATIO: f32 = 0.55;
 /// Input ramp (per second): smooths the binary keys into an analog throttle/steer signal.
 const DRIVE_RAMP: f32 = 4.0;
 
-// --- Wheels carry NO force in Option 1: the belt is the *sole* ground-contact system (carries the
-// tank, tractions, does walls/gaps) — and the belt is also the sole ground *reader*. The visual model
-// is belt-primary all the way down: `conform_belts` reads the terrain once per frame (the hull-fixed
-// taut loop raised onto the ground), the drawn spline IS that conformed belt, and the road wheels
-// RIDE it (`articulate_wheels` — a rigid roller resting on the belt polyline, no raycast of its own).
-// One source of truth, one data direction: ground → belt → wheels. Purely visual: the *physics* belt
-// penalizes terrain against the rigid reference line, so the drape never nulls the support. Real
-// force-bearing per-wheel springs (the opposite dependency direction: ground → wheels → belt) are
-// Option 2. ---
-/// How fast a wheel's visible placement rises toward a higher target (m/s): terrain *forces* a
-/// wheel up, so rising is quick.
-const SUSP_RISE_RATE: f32 = 4.0;
-/// How fast it falls toward a lower target (m/s): a wheel drops under gravity (plus track weight),
-/// so falling is the slower, softer motion — the asymmetry that keeps wheels from snapping down
-/// into every dip.
-const SUSP_FALL_RATE: f32 = 1.5;
+// --- Wheels carry NO force: the belt is the *sole* ground-contact system (carries the tank,
+// tractions, does walls/gaps). The VISUAL data direction differs per model generation:
+// models 1–3 are belt-first (`conform_*` reads the ground once, wheels RIDE the conformed belt —
+// `articulate_wheels`); model 4 is wheels-first (`articulate_wheels_field` reads the terrain
+// field directly, then the kinematic wrap fits the belt around the wheels — ground → wheels →
+// belt, acyclic). The step-21 belt-first order on model 4 was circular (chain wrapped the wheels
+// that rode the chain, stabilized by a one-frame lag) — the root of the wrong-side captures.
+//
+// Wheel smoothing (all models) is asymmetric and physical, replacing the step-21b critically-
+// damped spring (explicit damping — divergent at 60 fps with 2ωΔt = 3, and smoothing the rise
+// was wrong anyway: terrain forcing a wheel up is kinematic, lag reads as the board entering the
+// wheel): a RISE is instant, a FALL is ballistic (gravity-limited). Zero tuning constants. ---
 /// Clamp on the cosmetic lift (m): a tall obstacle can't fling the visual wheel arbitrarily far.
 const SUSP_MAX_LIFT: f32 = 0.5;
 
@@ -194,11 +199,16 @@ enum Model {
     /// passes over (no contact scrubbing); wheelspin/skid = links visibly sliding. Step 1 advects the
     /// stations; segment (plate) contact and link rendering come next.
     LinkBelt,
-    /// MODEL 3 — box-belt: model 2 with the actual T-34 shoe (500 × 172 × 40 mm box) as the contact
+    /// MODEL 3 — box-belt: model 2 with the actual T-34 shoe (500 × 172 × 40 mm) as the contact
     /// primitive, hung on the **pin line** (the true pitch line). Wheels ride the inner face, terrain
-    /// meets the outer face (oriented box casts), the chain solve rides the pins — three parallel
+    /// meets the outer face (oriented pill casts), the chain solve rides the pins — three parallel
     /// offsets of one solved curve.
     BoxBelt,
+    /// MODEL 4 — field-belt: model 3's pin-line chain with terrain read from a deterministic
+    /// analytic field (rounded-box SDF over the authored course) at fixed collocation stations per
+    /// link — no narrow-phase queries, no witness points (the contact-oracle research verdict;
+    /// `.agents/docs/design/track-model/contact-oracle-research.md`).
+    FieldBelt,
 }
 
 impl Model {
@@ -206,14 +216,20 @@ impl Model {
         match self {
             Model::BeltPrimary => "1 - belt-primary (belt sole contact, cosmetic wheels)",
             Model::LinkBelt => "2 - link-belt (stations advect with the belt)",
-            Model::BoxBelt => "3 - box-belt (pin-line chain, box-cast links)",
+            Model::BoxBelt => "3 - box-belt (pin-line chain, pill-cast links)",
+            Model::FieldBelt => "4 - field-belt (SDF collocation, 500mm columns, kinematic view)",
         }
     }
 }
 
 /// The models registered for the `M` cycle, in order. Adding a model = a `Model` variant, an entry
 /// here, and its gated systems.
-const MODELS: [Model; 3] = [Model::BeltPrimary, Model::LinkBelt, Model::BoxBelt];
+const MODELS: [Model; 4] = [
+    Model::BeltPrimary,
+    Model::LinkBelt,
+    Model::BoxBelt,
+    Model::FieldBelt,
+];
 
 /// Which model's systems are live. Switched by `switch_model`; model-specific systems gate on
 /// [`model_is`].
@@ -222,14 +238,67 @@ struct ActiveModel(Model);
 
 impl Default for ActiveModel {
     fn default() -> Self {
-        // Model 3 is the live iteration front; models 1–2 stay registered as frozen baselines.
-        Self(Model::BoxBelt)
+        // Model 4 is the live iteration front; models 1–3 stay registered as baselines (model 3 =
+        // the cast-oracle A/B partner).
+        Self(Model::FieldBelt)
     }
 }
 
 /// Run condition: the given model is active.
 fn model_is(model: Model) -> impl Fn(Res<ActiveModel>) -> bool {
     move |active: Res<ActiveModel>| active.0 == model
+}
+
+/// Run condition: the active model rides the pin line (models 3/4 — shared face offsets and
+/// pin-line diagnostics).
+fn model_on_pins(active: Res<ActiveModel>) -> bool {
+    matches!(active.0, Model::BoxBelt | Model::FieldBelt)
+}
+
+/// Model 4's track-view A/B (`V`): the step-22 stateless kinematic wrap (default) vs the frozen
+/// step-21 Verlet chain — same sim, same terrain, flip live and feel the difference. The chain
+/// (and this toggle) gets deleted once the wrap wins the feel check.
+#[derive(Resource)]
+struct TrackViewMode {
+    kinematic: bool,
+}
+
+impl Default for TrackViewMode {
+    fn default() -> Self {
+        Self { kinematic: true }
+    }
+}
+
+/// Run condition: model 4 with the kinematic-wrap view (wheels-first data direction).
+fn view_kinematic(active: Res<ActiveModel>, view: Res<TrackViewMode>) -> bool {
+    active.0 == Model::FieldBelt && view.kinematic
+}
+
+/// Run condition: model 4 with the frozen Verlet-chain view (the A/B partner).
+fn view_chain(active: Res<ActiveModel>, view: Res<TrackViewMode>) -> bool {
+    active.0 == Model::FieldBelt && !view.kinematic
+}
+
+/// `V` flips model 4's track view live (kinematic wrap ↔ frozen Verlet chain). The chain state is
+/// cleared so the incoming chain solves fresh instead of waking a stale configuration.
+fn toggle_view_mode(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut view: ResMut<TrackViewMode>,
+    mut chain: ResMut<ChainMemory>,
+) {
+    if !keys.just_pressed(KeyCode::KeyV) {
+        return;
+    }
+    view.kinematic = !view.kinematic;
+    *chain = ChainMemory::default();
+    info!(
+        "model-4 track view → {}",
+        if view.kinematic {
+            "kinematic wrap (step 22)"
+        } else {
+            "verlet chain (step 21, frozen A/B)"
+        }
+    );
 }
 
 /// The drivetrain force available to spin one track's belt at the given belt speed: a
@@ -248,6 +317,7 @@ fn switch_model(
     mut belt: ResMut<BeltSpeed>,
     mut phase: ResMut<BeltPhase>,
     mut chain: ResMut<ChainMemory>,
+    mut wheels: Query<&mut Suspension>,
 ) {
     if !keys.just_pressed(KeyCode::KeyM) {
         return;
@@ -257,6 +327,12 @@ fn switch_model(
     *belt = BeltSpeed::default();
     *phase = BeltPhase::default();
     *chain = ChainMemory::default();
+    // Same hygiene as `reset_rig`: stale wheel lift makes phantom circles for the new model.
+    for mut susp in &mut wheels {
+        susp.dy = 0.0;
+        susp.dvel = 0.0;
+        susp.target = 0.0;
+    }
     info!("model → {}", active.0.label());
 }
 
@@ -285,12 +361,18 @@ struct RigWheel {
     kind: WheelKind,
 }
 
-/// A road wheel's cosmetic placement state: the rest pivot in hull-local space and the current eased
-/// vertical offset that rides it on the conformed belt. Visual only — no force.
+/// A road wheel's cosmetic placement state: the rest pivot in hull-local space and the current
+/// vertical lift. Rise is instant; `dvel` is the ballistic fall speed while the wheel drops
+/// toward a lower target (see the wheel-doctrine comment at [`SUSP_MAX_LIFT`]). Visual only — no
+/// force.
 #[derive(Component)]
 struct Suspension {
     pivot_local: Vec3,
     dy: f32,
+    dvel: f32,
+    /// The raw lift target this frame (what the terrain/belt demands) — recorded so the harness
+    /// can measure the fall lag directly.
+    target: f32,
 }
 
 /// One station of the conformed belt: its hull-local side-plane position on the rigid reference loop
@@ -355,6 +437,9 @@ struct FreeFlyCam;
 
 pub fn plugin(app: &mut App) {
     app.add_plugins(PhysicsPlugins::default().set(PhysicsInterpolationPlugin::interpolate_all()))
+        // Registers the `PhysicsGizmos` group for the collider-wireframe layer (`0`); starts
+        // disabled in `configure_collider_gizmos`.
+        .add_plugins(PhysicsDebugPlugin)
         .init_resource::<BeltContacts>()
         .init_resource::<Paused>()
         .init_resource::<ResetSpot>()
@@ -365,17 +450,24 @@ pub fn plugin(app: &mut App) {
         .init_resource::<ConformedBelts>()
         .init_resource::<ActiveModel>()
         .init_resource::<JitterProbe>()
+        .init_resource::<VizLayers>()
+        .init_resource::<ChainReference>()
+        .init_resource::<TerrainField>()
+        .init_resource::<TrackViewMode>()
         .add_systems(
             Startup,
             (
                 spawn_camera,
-                grab_cursor,
+                // A harness run must not steal the user's cursor while it captures.
+                grab_cursor.run_if(not(resource_exists::<harness::Harness>)),
                 spawn_environment,
                 spawn_rig,
                 init_belt_length,
                 init_link_count,
                 init_pin_belt,
                 spawn_model_label,
+                spawn_viz_label,
+                configure_collider_gizmos,
             ),
         )
         // Physics runs in the fixed step (before Avian integrates in FixedPostUpdate), NOT while
@@ -384,8 +476,10 @@ pub fn plugin(app: &mut App) {
         //
         // MODEL 1: `apply_belt_support` — single ground-contact system, stations fixed in hull space.
         // MODEL 2: `apply_belt_support_links` — same contact physics, stations advect with the belt.
-        // MODEL 3: `apply_belt_support_boxes` — advected links contact as oriented boxes on the pin
+        // MODEL 3: `apply_belt_support_boxes` — advected links contact as oriented pills on the pin
         // line (the real shoe: thickness live, width in increment 2).
+        // MODEL 4: `apply_belt_support_field` — the same ring, penetration from the analytic
+        // terrain field at fixed collocation stations (no narrow-phase queries).
         .add_systems(
             FixedUpdate,
             (
@@ -398,6 +492,9 @@ pub fn plugin(app: &mut App) {
                 apply_belt_support_boxes
                     .run_if(sim_running)
                     .run_if(model_is(Model::BoxBelt)),
+                apply_belt_support_field
+                    .run_if(sim_running)
+                    .run_if(model_is(Model::FieldBelt)),
             ),
         )
         .add_systems(
@@ -423,7 +520,21 @@ pub fn plugin(app: &mut App) {
                     conform_belts_boxes
                         .run_if(model_is(Model::BoxBelt))
                         .run_if(sim_running),
-                    articulate_wheels.run_if(sim_running),
+                    // MODEL 4 kinematic view is wheels-FIRST (ground → wheels → belt): the wheels
+                    // read the field, then the wrap fits around them. The frozen chain view (and
+                    // models 1–3) keep the belt-first order: conform, then wheels ride the belt.
+                    articulate_wheels_field
+                        .run_if(view_kinematic)
+                        .run_if(sim_running),
+                    conform_belts_field
+                        .run_if(view_kinematic)
+                        .run_if(sim_running),
+                    conform_belts_field_chain
+                        .run_if(view_chain)
+                        .run_if(sim_running),
+                    articulate_wheels
+                        .run_if(not(view_kinematic))
+                        .run_if(sim_running),
                     // Probe after the visual chain settles this frame's state, frozen while paused
                     // (constant samples would dilute the window).
                     sample_jitter_probe.run_if(sim_running),
@@ -431,24 +542,56 @@ pub fn plugin(app: &mut App) {
                 )
                     .chain(),
                 switch_model,
+                toggle_view_mode,
                 update_model_label,
                 toggle_pause,
                 reset_rig,
                 log_state,
                 report_jitter_probe,
                 draw_contacts,
+                // The viz-layer instrumentation: toggles, legend, mesh/collider mirrors, and the
+                // model-3 diagnostic layers (cast shapes at the physics stations, reference ring).
+                toggle_viz_layers,
+                update_viz_label.run_if(resource_changed::<VizLayers>),
+                apply_mesh_visibility.run_if(resource_changed::<VizLayers>),
+                sync_collider_gizmos.run_if(resource_changed::<VizLayers>),
+                draw_cast_shapes.run_if(model_is(Model::BoxBelt)),
+                draw_sample_points.run_if(model_is(Model::FieldBelt)),
+                draw_chain_reference.run_if(model_on_pins),
             ),
         );
+
+    // The scripted capture harness (`SANDBOX_HARNESS` env var): scenario in, JSONL out, exit.
+    if let Some(scenario) = harness::parse_env() {
+        app.insert_resource(scenario)
+            .add_systems(
+                Startup,
+                harness::harness_setup
+                    .after(spawn_rig)
+                    .after(spawn_environment),
+            )
+            .add_systems(Update, harness::harness_drive.after(read_drive_input))
+            .add_systems(
+                FixedUpdate,
+                harness::harness_record
+                    .after(apply_belt_support)
+                    .after(apply_belt_support_links)
+                    .after(apply_belt_support_boxes)
+                    .after(apply_belt_support_field),
+            );
+    }
 }
 
 /// A live belt contact station for visualization: the station in **hull-local** space (so the dot
 /// rides the interpolated rig instead of jittering against the last fixed-tick pose), its load, the
-/// ground normal it pushes along, and its longitudinal slip speed (m/s — colours the dot green→red).
+/// ground normal it pushes along, its longitudinal slip speed (m/s — colours the dot green→red),
+/// and the friction force it applied (world space — the force-vector layer).
 struct Contact {
     local: Vec3,
     load: f32,
     normal: Vec3,
     slip: f32,
+    traction: Vec3,
 }
 
 /// The belt contact stations found this tick — filled by `apply_belt_support` in the fixed step,
@@ -463,6 +606,131 @@ struct Paused(bool);
 
 fn sim_running(paused: Res<Paused>) -> bool {
     !paused.0
+}
+
+/// Per-layer visibility switches for every visual element in the sandbox, each on its own key
+/// (number row; see [`viz_label_text`] for the legend). Defaults reproduce the pre-toggle look;
+/// the diagnostic layers (forces, cast shapes, colliders, reference ring) start off.
+#[derive(Resource)]
+struct VizLayers {
+    /// `1` — the hull's render mesh.
+    hull: bool,
+    /// `2` — the wheel render meshes.
+    wheels: bool,
+    /// `3` — the conformed belt/chain line (model 3: the pin line).
+    chain: bool,
+    /// `4` — model 3's outer-face companion line.
+    outer: bool,
+    /// `5` — the hub marker spheres.
+    hubs: bool,
+    /// `6` — the contact dots (load-sized, slip-coloured).
+    dots: bool,
+    /// `7` — the contact-normal lines.
+    normals: bool,
+    /// `8` — force vectors per contact: support (magenta) + traction (orange), N-scaled.
+    forces: bool,
+    /// `9` — the cast shapes at the *physics* stations (model 3: the shoe pills on the rigid
+    /// reference ring — where the physics thinks the shoes are, vs the drawn solved chain).
+    casts: bool,
+    /// `0` — Avian collider wireframes (hull box, drive-wheel backstops, terrain).
+    colliders: bool,
+    /// `-` — the chain solver's advected reference ring (the drive-anchor target, model 3).
+    reference: bool,
+}
+
+impl Default for VizLayers {
+    fn default() -> Self {
+        Self {
+            hull: true,
+            wheels: true,
+            chain: true,
+            outer: true,
+            hubs: true,
+            dots: true,
+            normals: true,
+            forces: false,
+            casts: false,
+            colliders: false,
+            reference: false,
+        }
+    }
+}
+
+fn toggle_viz_layers(keys: Res<ButtonInput<KeyCode>>, mut viz: ResMut<VizLayers>) {
+    type Field = fn(&mut VizLayers) -> &mut bool;
+    const TOGGLES: [(KeyCode, Field); 11] = [
+        (KeyCode::Digit1, |v| &mut v.hull),
+        (KeyCode::Digit2, |v| &mut v.wheels),
+        (KeyCode::Digit3, |v| &mut v.chain),
+        (KeyCode::Digit4, |v| &mut v.outer),
+        (KeyCode::Digit5, |v| &mut v.hubs),
+        (KeyCode::Digit6, |v| &mut v.dots),
+        (KeyCode::Digit7, |v| &mut v.normals),
+        (KeyCode::Digit8, |v| &mut v.forces),
+        (KeyCode::Digit9, |v| &mut v.casts),
+        (KeyCode::Digit0, |v| &mut v.colliders),
+        (KeyCode::Minus, |v| &mut v.reference),
+    ];
+    for (key, field) in TOGGLES {
+        if keys.just_pressed(key) {
+            let flag = field(&mut viz);
+            *flag = !*flag;
+        }
+    }
+}
+
+/// Mirror the mesh layers onto the render entities. The wheels are children of the hull, so a
+/// hidden hull would inherit-hide them; `Visibility::Visible` is the unconditional override that
+/// keeps wheels drawable with the hull mesh off.
+fn apply_mesh_visibility(
+    viz: Res<VizLayers>,
+    mut hull: Query<&mut Visibility, (With<Hull>, Without<RigWheel>)>,
+    mut wheels: Query<&mut Visibility, With<RigWheel>>,
+) {
+    for mut v in &mut hull {
+        *v = if viz.hull {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+    }
+    for mut v in &mut wheels {
+        *v = if viz.wheels {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
+}
+
+/// Avian's `PhysicsGizmos` group (collider wireframes) starts silent; the `0` layer enables it.
+fn configure_collider_gizmos(mut store: ResMut<GizmoConfigStore>) {
+    store.config_mut::<PhysicsGizmos>().0.enabled = false;
+}
+
+fn sync_collider_gizmos(viz: Res<VizLayers>, mut store: ResMut<GizmoConfigStore>) {
+    store.config_mut::<PhysicsGizmos>().0.enabled = viz.colliders;
+}
+
+/// The chain solver's advected reference ring in world space (model 3) — the drive-anchor target
+/// the Verlet chain is pulled toward. Written by `conform_belts_boxes`, drawn by the `-` layer:
+/// chain-vs-reference deviation shows where terrain/wheels hold the chain off its rest path.
+#[derive(Resource, Default)]
+pub(super) struct ChainReference {
+    pub(super) left: Vec<Vec3>,
+    pub(super) right: Vec<Vec3>,
+}
+
+fn draw_chain_reference(mut gizmos: Gizmos, reference: Res<ChainReference>, viz: Res<VizLayers>) {
+    if !viz.reference {
+        return;
+    }
+    for pts in [&reference.left, &reference.right] {
+        if pts.len() < 2 {
+            continue;
+        }
+        gizmos.linestrip(pts.iter().copied().chain(pts.first().copied()), REF_COLOR);
+    }
 }
 
 /// Which reset spot `R` will drop the rig at next (index into [`RESET_SPOTS`]).
@@ -592,6 +860,54 @@ fn update_model_label(active: Res<ActiveModel>, label: Single<&mut Text, With<Mo
     label.into_inner().0 = model_label_text(active.0);
 }
 
+/// The on-screen viz-layer legend + key reference (below the model label).
+#[derive(Component)]
+struct VizLabel;
+
+fn viz_label_text(viz: &VizLayers) -> String {
+    fn s(on: bool) -> &'static str {
+        if on { "ON " } else { "off" }
+    }
+    format!(
+        "viz  1 hull:{}  2 wheels:{}  3 chain:{}  4 outer:{}  5 hubs:{}  6 dots:{}\n     \
+         7 normals:{}  8 forces:{}  9 casts:{}  0 colliders:{}  - reference:{}\n\
+         esc pause/cursor | m model | v view (m4: wrap/chain) | r reset | l log | j probe | arrows drive | wasd fly",
+        s(viz.hull),
+        s(viz.wheels),
+        s(viz.chain),
+        s(viz.outer),
+        s(viz.hubs),
+        s(viz.dots),
+        s(viz.normals),
+        s(viz.forces),
+        s(viz.casts),
+        s(viz.colliders),
+        s(viz.reference),
+    )
+}
+
+fn spawn_viz_label(mut commands: Commands, viz: Res<VizLayers>) {
+    commands.spawn((
+        VizLabel,
+        Text::new(viz_label_text(&viz)),
+        TextFont {
+            font_size: FontSize::Px(13.0),
+            ..default()
+        },
+        TextColor(Color::srgb(0.6, 0.75, 0.8)),
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(30.0),
+            left: Val::Px(12.0),
+            ..default()
+        },
+    ));
+}
+
+fn update_viz_label(viz: Res<VizLayers>, label: Single<&mut Text, With<VizLabel>>) {
+    label.into_inner().0 = viz_label_text(&viz);
+}
+
 /// Lock + hide the cursor for mouse-look (a query, so a not-yet-present cursor is a no-op).
 fn grab_cursor(mut windows: Query<(&mut Window, &mut CursorOptions), With<PrimaryWindow>>) {
     for (mut window, mut cursor) in &mut windows {
@@ -624,7 +940,15 @@ fn spawn_environment(
     let ground_mat = materials.add(Color::srgb(0.32, 0.42, 0.28));
     let obstacle_mat = materials.add(Color::srgb(0.44, 0.37, 0.27));
 
-    let block = |commands: &mut Commands, transform: Transform, mat: &Handle<StandardMaterial>| {
+    // Every block also lands in the analytic terrain field (model 4's oracle) — colliders and
+    // field are built from the same transforms, so the two representations cannot drift.
+    let mut field: Vec<FieldBox> = Vec::new();
+
+    let block = |commands: &mut Commands,
+                 field: &mut Vec<FieldBox>,
+                 transform: Transform,
+                 mat: &Handle<StandardMaterial>| {
+        field.push(FieldBox::from_block(&transform));
         commands.spawn((
             Mesh3d(cube.clone()),
             MeshMaterial3d(mat.clone()),
@@ -635,9 +959,10 @@ fn spawn_environment(
         ));
     };
     // A ground slab spanning z_hi..z_lo (z_hi > z_lo), top face at y=0.
-    let ground = |commands: &mut Commands, z_hi: f32, z_lo: f32| {
+    let ground = |commands: &mut Commands, field: &mut Vec<FieldBox>, z_hi: f32, z_lo: f32| {
         block(
             commands,
+            field,
             Transform::from_xyz(0.0, -0.5, (z_hi + z_lo) / 2.0).with_scale(Vec3::new(
                 LANE_W,
                 1.0,
@@ -653,20 +978,22 @@ fn spawn_environment(
     for (tz, tw) in TRENCHES {
         let near_lip = -(tz - tw / 2.0);
         let far_lip = -(tz + tw / 2.0);
-        ground(&mut commands, cursor, near_lip);
+        ground(&mut commands, &mut field, cursor, near_lip);
         block(
             &mut commands,
+            &mut field,
             Transform::from_xyz(0.0, TRENCH_FLOOR_Y - 0.5, -tz)
                 .with_scale(Vec3::new(LANE_W, 1.0, tw)),
             &ground_mat,
         );
         cursor = far_lip;
     }
-    ground(&mut commands, cursor, LANE_FAR);
+    ground(&mut commands, &mut field, cursor, LANE_FAR);
 
     // A step / curb (top at y=0.45), past the trenches: a hard vertical edge to climb.
     block(
         &mut commands,
+        &mut field,
         Transform::from_xyz(0.0, 0.225, -72.0).with_scale(Vec3::new(OBSTACLE_W, 0.45, 4.0)),
         &obstacle_mat,
     );
@@ -678,6 +1005,7 @@ fn spawn_environment(
     let center_y = -1.0 - (thick / 2.0) * cos + (run / 2.0) * sin;
     block(
         &mut commands,
+        &mut field,
         Transform::from_xyz(0.0, center_y, -88.0)
             .with_rotation(Quat::from_rotation_x(deg.to_radians()))
             .with_scale(Vec3::new(OBSTACLE_W, thick, run)),
@@ -693,12 +1021,15 @@ fn spawn_environment(
             let z = -(start + i as f32 * period);
             block(
                 &mut commands,
+                &mut field,
                 Transform::from_xyz(0.0, height / 2.0, z)
                     .with_scale(Vec3::new(OBSTACLE_W, height, thickness)),
                 &obstacle_mat,
             );
         }
     }
+
+    commands.insert_resource(TerrainField(field));
 }
 
 /// Spawn the code-generated primitive rig: a hull box with two tracks of wheels (sprocket + N road
@@ -832,6 +1163,8 @@ fn spawn_rig(
                     wheel.insert(Suspension {
                         pivot_local: pos,
                         dy: 0.0,
+                        dvel: 0.0,
+                        target: 0.0,
                     });
                 }
             }
@@ -928,10 +1261,10 @@ fn articulate_wheels(
 ) {
     let affine = hull.affine();
     let dt = time.delta_secs();
-    // Model 3's conformed belt is the *pin line*; the wheels rest on the inner face, a
-    // half-thickness above it. Models 1–2 conform the belt surface itself.
+    // Models 3/4 conform the *pin line*; the wheels rest on the inner face, a half-thickness
+    // above it. Models 1–2 conform the belt surface itself.
     let face = match active.0 {
-        Model::BoxBelt => TRACK_THICKNESS / 2.0,
+        Model::BoxBelt | Model::FieldBelt => TRACK_THICKNESS / 2.0,
         _ => 0.0,
     };
     for (wheel, mut susp, mut transform) in &mut wheels {
@@ -968,14 +1301,21 @@ fn articulate_wheels(
             continue;
         }
         // Ride up onto a raised belt (positive lift), never below the taut line → dips/gaps bridge.
-        // Rise fast (terrain forces the wheel up), fall slower (it drops under gravity).
+        // Rise instant (terrain forces the wheel up — smoothing it reads as the board entering
+        // the wheel), fall ballistic (the wheel drops at gravity, not at a tuned rate). See the
+        // wheel-doctrine comment at [`SUSP_MAX_LIFT`].
         let target_dy = (best - rest_world.y).clamp(0.0, SUSP_MAX_LIFT);
-        let rate = if target_dy > susp.dy {
-            SUSP_RISE_RATE
+        susp.target = target_dy;
+        if target_dy >= susp.dy {
+            susp.dy = target_dy;
+            susp.dvel = 0.0;
         } else {
-            SUSP_FALL_RATE
-        };
-        susp.dy = approach(susp.dy, target_dy, rate * dt);
+            susp.dvel += 9.81 * dt;
+            susp.dy = (susp.dy - susp.dvel * dt).max(target_dy);
+            if susp.dy <= target_dy {
+                susp.dvel = 0.0;
+            }
+        }
         transform.translation.y = susp.pivot_local.y + susp.dy;
     }
 }
@@ -989,6 +1329,7 @@ fn reset_rig(
     mut belt: ResMut<BeltSpeed>,
     mut phase: ResMut<BeltPhase>,
     mut chain: ResMut<ChainMemory>,
+    mut wheels: Query<&mut Suspension>,
 ) {
     if !keys.just_pressed(KeyCode::KeyR) {
         return;
@@ -1002,6 +1343,15 @@ fn reset_rig(
     *belt = BeltSpeed::default();
     *phase = BeltPhase::default();
     *chain = ChainMemory::default();
+    // Stale cosmetic wheel lift survives the teleport otherwise: for the first ~100 ms the
+    // conform solves against phantom raised wheel circles while the hull settles, and a chain
+    // point that lands inside a circle's lower half gets captured on the WRONG side (the
+    // wheel-outside-the-chain teleport quirk).
+    for mut susp in &mut wheels {
+        susp.dy = 0.0;
+        susp.dvel = 0.0;
+        susp.target = 0.0;
+    }
     info!("reset → {label} (z = {z:.1})");
 }
 
@@ -1182,29 +1532,34 @@ fn draw_rig_gizmos(
     belts: Res<ConformedBelts>,
     active: Res<ActiveModel>,
     hull: Single<&GlobalTransform, With<Hull>>,
+    viz: Res<VizLayers>,
 ) {
     // Hub markers, coloured by role so the drive wheels (sprocket/idler) read apart from the road
     // wheels. `kind` is also the seam for later drive/animation (e.g. torque on the sprocket).
-    for (wheel, gt) in &wheels {
-        let color = match wheel.kind {
-            WheelKind::Road => HUB_COLOR,
-            WheelKind::Sprocket | WheelKind::Idler => DRIVE_HUB_COLOR,
-        };
-        gizmos.sphere(Isometry3d::from_translation(gt.translation()), 0.05, color);
+    if viz.hubs {
+        for (wheel, gt) in &wheels {
+            let color = match wheel.kind {
+                WheelKind::Road => HUB_COLOR,
+                WheelKind::Sprocket | WheelKind::Idler => DRIVE_HUB_COLOR,
+            };
+            gizmos.sphere(Isometry3d::from_translation(gt.translation()), 0.05, color);
+        }
     }
 
     for side in [Side::Left, Side::Right] {
-        let mut world = belts.get(side).iter().map(|s| s.world);
-        gizmos.linestrip(world.clone(), BELT_COLOR);
-        if let (Some(a), Some(b)) = (world.next_back(), world.next()) {
-            gizmos.line(a, b, BELT_COLOR);
+        if viz.chain {
+            let mut world = belts.get(side).iter().map(|s| s.world);
+            gizmos.linestrip(world.clone(), BELT_COLOR);
+            if let (Some(a), Some(b)) = (world.next_back(), world.next()) {
+                gizmos.line(a, b, BELT_COLOR);
+            }
         }
 
-        // MODEL 3: the conformed line is the *pin line* — draw the **outer face** (each sample
+        // MODELS 3/4: the conformed line is the *pin line* — draw the **outer face** (each sample
         // offset by its local outward normal × t/2, from neighbour tangents of the solved chain) as
         // a dimmer companion, so the shoe thickness reads: the dark line rides the ground, the
         // wheels ride the light one.
-        if active.0 != Model::BoxBelt {
+        if !matches!(active.0, Model::BoxBelt | Model::FieldBelt) || !viz.outer {
             continue;
         }
         let samples = belts.get(side);
@@ -1235,24 +1590,42 @@ fn draw_rig_gizmos(
 
 /// Draw the live belt contact stations: a dot sized by load and coloured by **slip** (green =
 /// gripping, red = sliding/wheelspin), transformed by the *current* hull pose so it rides the
-/// interpolated rig; plus a short line along the support normal. Contact distribution, load, push
-/// direction, and where the track is slipping all read at a glance.
+/// interpolated rig; a short line along the support normal; and (the forces layer) the actual
+/// applied forces as N-scaled arrows — support along the normal, traction in the contact plane.
 fn draw_contacts(
     mut gizmos: Gizmos,
     hull: Single<&GlobalTransform, With<Hull>>,
     contacts: Res<BeltContacts>,
+    viz: Res<VizLayers>,
 ) {
+    if !(viz.dots || viz.normals || viz.forces) {
+        return;
+    }
     let hull = *hull;
     let k = SUPPORT_STIFFNESS_PER_M * CONTACT_SPACING;
     for c in &contacts.0 {
         let p = hull.transform_point(c.local);
         // load / k ≈ the station's penetration (m) — a stable size cue for the contact.
         let r = 0.03 + (c.load / k).clamp(0.0, 0.1);
-        // Slip fraction 0→1 grades green (grip) to red (sliding at μ·load).
-        let t = (c.slip.abs() / SLIP_SATURATION).clamp(0.0, 1.0);
-        let color = Color::srgb(t, 1.0 - 0.7 * t, 0.2);
-        gizmos.sphere(Isometry3d::from_translation(p), r, color);
-        gizmos.line(p, p + c.normal * (0.15 + r), NORMAL_COLOR);
+        if viz.dots {
+            // Slip fraction 0→1 grades green (grip) to red (sliding at μ·load).
+            let t = (c.slip.abs() / SLIP_SATURATION).clamp(0.0, 1.0);
+            let color = Color::srgb(t, 1.0 - 0.7 * t, 0.2);
+            gizmos.sphere(Isometry3d::from_translation(p), r, color);
+        }
+        if viz.normals {
+            gizmos.line(p, p + c.normal * (0.15 + r), NORMAL_COLOR);
+        }
+        if viz.forces {
+            gizmos.arrow(
+                p,
+                p + c.normal * (c.load * FORCE_VIZ_SCALE),
+                SUPPORT_FORCE_COLOR,
+            );
+            if c.traction.length_squared() > 1.0 {
+                gizmos.arrow(p, p + c.traction * FORCE_VIZ_SCALE, TRACTION_FORCE_COLOR);
+            }
+        }
     }
 }
 
@@ -1413,6 +1786,17 @@ const BELT_COLOR: Color = Color::srgb(0.2, 0.9, 1.0);
 /// read as inner vs ground face at a glance.
 const BELT_OUTER_COLOR: Color = Color::srgb(0.1, 0.45, 0.55);
 const NORMAL_COLOR: Color = Color::srgb(1.0, 0.9, 0.2);
+/// Support-force arrows (the `8` layer): magenta, apart from every geometry colour.
+const SUPPORT_FORCE_COLOR: Color = Color::srgb(0.95, 0.3, 0.9);
+/// Traction (friction) force arrows: orange, the game's drive-force convention.
+const TRACTION_FORCE_COLOR: Color = Color::srgb(1.0, 0.6, 0.1);
+/// The cast-shape outlines (the `9` layer): neutral grey-white wireframes.
+const CAST_COLOR: Color = Color::srgb(0.85, 0.85, 0.9);
+/// The chain solver's advected reference ring (the `-` layer): dim violet.
+const REF_COLOR: Color = Color::srgb(0.7, 0.5, 1.0);
+/// Metres of arrow per newton of contact force (~20 kN reads as 1 m). Typical per-station support
+/// at rest is ~6 kN over ~45 grounded stations.
+const FORCE_VIZ_SCALE: f32 = 1.0 / 20_000.0;
 
 /// The two tangent points of an external tangent line shared by two circles in a plane, on the side
 /// selected by `side_sign` (−1 = lower / smaller y, +1 = upper). Returns (point on circle 0, point on
