@@ -118,12 +118,16 @@ jobs:
             os: ubuntu-latest
     runs-on: ${{ matrix.os }}
     steps:
-      # lfs: true is required because assets (*.glb) are stored in Git LFS; without it the checkout
-      # yields pointer files and a broken bundle.
+      # LFS on R2 via committed `.lfsconfig` (RO). checkout `lfs: true` ignores
+      # `.lfsconfig` and still hits GitHub — so pull after checkout.
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-          lfs: true
+          lfs: false
+      - name: Git LFS pull (R2)
+        run: |
+          git lfs install --local
+          git lfs pull
 
       # The Linux client links alsa/udev + the windowing (X11/Wayland/xkb) stack — it RENDERS, unlike
       # the headless server, but needs the same compile-time libs. (Windows/MSVC needs none.)
@@ -225,13 +229,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      # lfs: true — the server bakes tank geometry from the real .glb at startup, so a pointer-file
-      # checkout yields a broken bundle. Checkout stays job-level (a local composite `uses: ./...`
-      # only resolves after the repo is on disk).
+      # LFS on R2 via `.lfsconfig`. Checkout stays job-level so the local composite resolves;
+      # pull after checkout (checkout `lfs: true` ignores `.lfsconfig` and hits GitHub).
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-          lfs: true
+          lfs: false
+      - name: Git LFS pull (R2)
+        run: |
+          git lfs install --local
+          git lfs pull
 
       # The canonical server build + package recipe (toolchain -> deps -> prune -> cache -> build ->
       # tar). Shared verbatim with deploy.yml. No DEPLOYED_SHA marker here, so the release/dispatch
@@ -285,10 +292,15 @@ jobs:
       contents: read
     runs-on: macos-latest
     steps:
+      # LFS on R2 via `.lfsconfig` — pull after checkout (checkout `lfs: true` hits GitHub).
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-          lfs: true
+          lfs: false
+      - name: Git LFS pull (R2)
+        run: |
+          git lfs install --local
+          git lfs pull
 
       # Apple-Silicon-ONLY (2026-07-11, was universal): Intel Macs are <0.5% of Steam and macOS 26
       # is the last Intel macOS; dropping the x86_64 slice + lipo halves this job (~1h25m → one

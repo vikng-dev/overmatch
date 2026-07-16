@@ -50,15 +50,16 @@ jobs:
         task: [clippy, tests, shot-stress]
     name: check (${{ matrix.task }})
     steps:
-      # Pull LFS: the spec-bind test (`tiger_1_spec_binds_to_model`) opens the real
-      # `.glb` at runtime to check node names against the RON, so a pointer-file
-      # checkout makes it panic on open. The LFS fetch runs during checkout using the
-      # job token; `persist-credentials: false` still keeps that token out of the local
-      # git config afterward (nothing here pushes).
+      # LFS on R2 via committed `.lfsconfig` (RO). checkout `lfs: true` ignores
+      # `.lfsconfig` and still hits GitHub — so pull after checkout.
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-          lfs: true
+          lfs: false
+      - name: Git LFS pull (R2)
+        run: |
+          git lfs install --local
+          git lfs pull
 
       - uses: dtolnay/rust-toolchain@stable
         with:

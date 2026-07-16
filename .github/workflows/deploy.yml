@@ -45,13 +45,16 @@ jobs:
     timeout-minutes: 30
     steps:
       # --- BUILD ------------------------------------------------------------------------------
-      # lfs: true — the server bakes tank geometry from the real .glb at startup, so a pointer-file
-      # checkout yields a broken bundle. Checkout stays job-level (a local composite `uses: ./...`
-      # only resolves after the repo is on disk).
+      # LFS on R2 via `.lfsconfig`. Checkout stays job-level so the local composite resolves;
+      # pull after checkout (checkout `lfs: true` ignores `.lfsconfig` and hits GitHub).
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-          lfs: true
+          lfs: false
+      - name: Git LFS pull (R2)
+        run: |
+          git lfs install --local
+          git lfs pull
 
       # The canonical server build + package recipe, shared verbatim with release.yml's
       # `upload-server`. deployed-sha: true bakes a DEPLOYED_SHA marker into the tar so the droplet

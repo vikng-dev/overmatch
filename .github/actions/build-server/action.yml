@@ -7,11 +7,9 @@ description: >-
   place.
 
 # CONTRACT (the seam):
-#   * The CALLER checks out the repo FIRST, with `lfs: true` (the server bakes
-#     tank geometry from real .glb at startup, so a pointer-file checkout yields a
-#     broken bundle) and `persist-credentials: false`. A checkout is mandatory
-#     before a local `uses: ./...` composite even resolves, and both callers want
-#     the identical LFS checkout, so it stays job-level — not hidden in here.
+#   * The CALLER checks out the repo FIRST, fetches LFS via committed `.lfsconfig`
+#     (`git lfs pull` after `lfs: false` checkout), and `persist-credentials: false`.
+#     Checkout stays job-level so the local composite resolves.
 #   * THIS action then does everything build-shaped and leaves
 #     `overmatch-server.tar.gz` in the workspace root (exposed as the `tar`
 #     output). What the caller does with that tar (upload-artifact / attach to

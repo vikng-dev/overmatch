@@ -7,3 +7,6 @@
 
 # Firecrawl research scratch (web search/scrape cache)
 .firecrawl/
+
+# Cloudflare wrangler local cache
+.wrangler/
