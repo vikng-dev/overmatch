@@ -350,13 +350,10 @@ mod tests {
         }
     }
 
-    /// Priority `Ord` is ConnectStatus > Menu > Death > ViewDead, so `top` picks the right scrim owner
-    /// for every combination. This is the ordering the whole authority hangs on.
+    /// `top` picks the right scrim owner for every combination — ConnectStatus > Menu > Death >
+    /// ViewDead — through the public overlay set, not by restating `Ord` literals.
     #[test]
     fn priority_orders_connect_over_menu_over_death_over_viewdead() {
-        assert!(Overlay::ConnectStatus > Overlay::Menu);
-        assert!(Overlay::Menu > Overlay::Death);
-        assert!(Overlay::Death > Overlay::ViewDead);
         assert_eq!(overlays(&[]).top(), None);
         assert_eq!(
             overlays(&[Overlay::Death, Overlay::ViewDead]).top(),

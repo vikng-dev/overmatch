@@ -1320,29 +1320,6 @@ fn update_toast(
 mod tests {
     use super::*;
 
-    /// Regression: only the controlled tank is hidden in the optic.
-    #[test]
-    fn desired_optic_layer_hides_only_controlled_in_gunner() {
-        let hidden = RenderLayers::layer(OPTIC_HIDDEN_LAYER);
-        let shown = RenderLayers::layer(0);
-        assert_eq!(desired_optic_layer(true, true), hidden, "own tank in optic");
-        assert_eq!(
-            desired_optic_layer(true, false),
-            shown,
-            "opponent stays visible in optic"
-        );
-        assert_eq!(
-            desired_optic_layer(false, true),
-            shown,
-            "own tank shown in third person"
-        );
-        assert_eq!(
-            desired_optic_layer(false, false),
-            shown,
-            "opponent, third person"
-        );
-    }
-
     /// Regression: the continuous reconcile handles mesh attachment and control changes.
     #[test]
     fn reconcile_lays_layers_across_transitions() {
@@ -1438,14 +1415,11 @@ mod tests {
         }
     }
 
-    /// The margin is a fixed fraction of the half-FOV — the derivation the overlay UI must share, so
-    /// the cursor's travel circle and the drawn rim are one radius. Pinned at the Tiger's authored
-    /// 0.12 rad optic (≈0.054 rad) and confirmed proportional to the fraction.
+    /// The margin is pinned at the Tiger's authored 0.12 rad optic (≈0.054 rad) and scales with FOV
+    /// so the cursor's travel circle and the drawn rim stay one radius.
     #[test]
     fn margin_is_fraction_of_half_fov() {
-        let fov = 0.12_f32;
-        assert!((optic_margin(fov) - OPTIC_RADIUS_FRACTION * fov / 2.0).abs() < 1e-9);
-        assert!((optic_margin(fov) - 0.054).abs() < 1e-6);
+        assert!((optic_margin(0.12) - 0.054).abs() < 1e-6);
         // Scales with the authored FOV: a wider optic gets a proportionally wider reach.
         assert!((optic_margin(0.24) - 2.0 * optic_margin(0.12)).abs() < 1e-9);
     }

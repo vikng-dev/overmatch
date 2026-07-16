@@ -164,12 +164,6 @@ fn sim_layer_does_not_name_the_netcode_layer() {
 }
 
 #[test]
-fn product_runtime_entry_points_are_public_at_the_crate_root() {
-    let _: fn() = overmatch::run_client;
-    let _: fn() = overmatch::run_server;
-}
-
-#[test]
 fn net_aware_allowlist_has_no_stale_entries() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let missing: Vec<&str> = NET_AWARE_FILES

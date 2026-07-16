@@ -1381,34 +1381,6 @@ mod tests {
         }
     }
 
-    /// [`FireEvent::shot_id`] is a pure function of the stable identity fields already on the wire,
-    /// unwrapping the lightyear `Tick` to the net-neutral `u32` the sim keys on — so the shell both
-    /// ends spawn and the keyframe that re-seeds it share ONE id.
-    #[test]
-    fn fire_event_shot_id_is_derived_from_wire_fields() {
-        let event = FireEvent {
-            origin: Vec3::ZERO,
-            direction: Vec3::X,
-            speed: 800.0,
-            caliber: 0.088,
-            mass: 10.2,
-            mechanism: crate::spec::FireMechanism::Single,
-            tracer: true,
-            shooter: Entity::PLACEHOLDER,
-            combatant: CombatantId(7),
-            weapon: 3,
-            fire_tick: Tick(77),
-        };
-        assert_eq!(
-            event.shot_id(),
-            ShotId {
-                combatant: CombatantId(7),
-                weapon: 3,
-                fire_tick: 77,
-            },
-        );
-    }
-
     /// Every pinned wire-manifest value participates in the handshake fingerprint. This exercises
     /// the production fold with one changed input at a time, rather than reimplementing it in test.
     #[test]

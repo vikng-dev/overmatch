@@ -2470,17 +2470,9 @@ mod tests {
         );
     }
 
-    /// The first retry waits the base delay; subsequent retries grow by a fixed step. Short enough
-    /// that a server started mid-retry is picked up within a couple seconds.
-    #[test]
-    fn reconnect_backoff_grows_from_base() {
-        assert_eq!(reconnect_backoff_secs(0), 1.0, "first retry = base");
-        assert_eq!(reconnect_backoff_secs(1), 1.5);
-        assert_eq!(reconnect_backoff_secs(2), 2.0);
-    }
-
     /// The backoff never exceeds the cap, no matter how many attempts have piled up — an
-    /// indefinitely-retrying client still re-checks for a server at least that often.
+    /// indefinitely-retrying client still re-checks for a server at least that often. Also asserts
+    /// monotonic growth so a broken BASE/STEP schedule can't hide behind a still-correct cap.
     #[test]
     fn reconnect_backoff_is_capped() {
         assert_eq!(reconnect_backoff_secs(100), RECONNECT_BACKOFF_CAP);

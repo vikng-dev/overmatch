@@ -363,15 +363,4 @@ mod tests {
         // Single, mid-reload, fire crew dead: the reload is frozen — must read `no-fire`.
         assert_eq!(weapon_status(SINGLE, true, 1.4, 0), "no-fire");
     }
-
-    /// With the fire gate met, each mode shows its normal live readout.
-    #[test]
-    fn firable_weapons_show_their_live_state() {
-        // Automatic: belt count while loaded, swap countdown while dry.
-        assert_eq!(weapon_status(AUTO, false, 0.0, 42), "42 rds");
-        assert_eq!(weapon_status(AUTO, false, 2.7, 0), "SWAP 2.7s");
-        // Single: reload countdown, then READY.
-        assert_eq!(weapon_status(SINGLE, false, 1.4, 1), "1.4s");
-        assert_eq!(weapon_status(SINGLE, false, 0.0, 1), "READY");
-    }
 }

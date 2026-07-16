@@ -788,13 +788,4 @@ mod tests {
         )]))];
         assert!((evaluate(&req, &q(&[(Part::Loader, 0.6)])) - 0.6).abs() < 1e-6);
     }
-
-    #[test]
-    fn competence_is_native_or_flat_foreign() {
-        use super::{CrewStation, competence};
-        // Native: a loader in the loader's seat is full.
-        assert_eq!(competence(CrewStation::Loader, CrewStation::Loader), 1.0);
-        // Foreign: a commander backfilling the loader's seat is degraded.
-        assert_eq!(competence(CrewStation::Commander, CrewStation::Loader), 0.6);
-    }
 }

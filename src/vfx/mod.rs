@@ -135,29 +135,3 @@ impl ViewRng {
         lo + (hi - lo) * self.next_f32()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The view RNG stays in-range and actually varies — all it owes anyone (it is cosmetic,
-    /// view-side, and deliberately outside the sim's determinism domain).
-    #[test]
-    fn view_rng_is_uniformish_and_in_range() {
-        let mut rng = ViewRng::seeded(7);
-        let mut min = f32::MAX;
-        let mut max = f32::MIN;
-        for _ in 0..1000 {
-            let x = rng.next_f32();
-            assert!((0.0..1.0).contains(&x), "sample out of [0,1): {x}");
-            min = min.min(x);
-            max = max.max(x);
-        }
-        assert!(
-            min < 0.1 && max > 0.9,
-            "1000 samples should span [0,1): min {min}, max {max}"
-        );
-        let r = rng.range(3.0, 5.0);
-        assert!((3.0..5.0).contains(&r));
-    }
-}

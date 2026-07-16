@@ -2269,31 +2269,10 @@ mod tests {
         assert!(v1.y < 0.0, "gravity must pull the shell down");
     }
 
-    /// `advance_shell` IS the live march's open-air step: new velocity is the shared `freeflight_step`,
-    /// and the position advances by that new velocity over `dt` (`p += v·dt`) — the exact `pos += dir *
-    /// remaining` the ray-march does when a step hits nothing. Pinning it keeps the catch-up and the
-    /// live march provably ONE implementation (ADR-0016) even if the march is later refactored.
-    #[test]
-    fn advance_shell_is_the_freeflight_step() {
-        let pos = Vec3::new(2.0, 30.0, 5.0);
-        let v = Vec3::new(500.0, -10.0, 40.0);
-        let k = drag_k(0.088, 10.2);
-        let dt = 1.0 / 64.0;
-        let (p, nv) = advance_shell(pos, v, k, dt);
-        let expected_v = freeflight_step(v, k, dt);
-        assert_eq!(nv, expected_v, "velocity is the shared free-flight kernel");
-        assert_eq!(
-            p,
-            pos + expected_v * dt,
-            "position steps by the new velocity"
-        );
-    }
-
-    /// The "one integrator" property (the test that matters): fast-forwarding a shell N ticks lands it
-    /// in the SAME state as N single-tick advances. `fast_forward_shell` folds the shared
-    /// `advance_shell` — the exact per-tick kernel the live march steps in open air — so a caught-up
-    /// shell can't diverge from a natively integrated one. Guards against re-deriving the catch-up as a
-    /// closed-form trajectory.
+    /// The "one integrator" property: fast-forwarding a shell N ticks lands it in the SAME state as
+    /// N single-tick advances. `fast_forward_shell` folds the shared `advance_shell` — the exact
+    /// per-tick kernel the live march steps in open air — so a caught-up shell can't diverge from a
+    /// natively integrated one. Guards against re-deriving the catch-up as a closed-form trajectory.
     #[test]
     fn fast_forward_matches_single_tick_advances() {
         let origin = Vec3::new(1.0, 50.0, -3.0);

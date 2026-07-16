@@ -98,8 +98,6 @@ TankSpec(
             fire_mode: Automatic(rpm: 750.0, belt_size: 150, belt_swap_secs: 3.5, tracer_every: 5),
             recoil: (kick: 3.0, stiffness: 240.0, damping: 18.0),
             fire: [Backup([(1.0, [Gunner]), (1.0, [Loader])])],
-            // The belt swap (not the cyclic rate) is the crew act — gated by whoever serves the
-            // gun, same crew that fires it.
             load: [Backup([(1.0, [Gunner]), (1.0, [Loader])])],
         ),
         "HullMG": (
