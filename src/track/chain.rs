@@ -251,11 +251,21 @@ impl ChainState {
 
                 let mut p: Vec<Vec2> = (0..n)
                     .map(|i| {
-                        // Anisotropic damping in the ROUTE frame.
+                        // Anisotropic damping in the ROUTE frame — tangentially centred on the
+                        // COMMANDED circulation, not on zero: in the hull frame the correct
+                        // steady state IS the whole loop moving at belt speed (ground links
+                        // stationary in the world), and damping absolute velocity was a DC
+                        // momentum drain across all n joints that the k-joint sprocket motor
+                        // could not repay (measured: the loop crawled at ~0.37× belt; wheels,
+                        // spun from phase, ran exact — the step-26 scroll-lag bug). Damping
+                        // the deviation leaves wave/flutter decay identical and is a no-op at
+                        // belt 0; a blocked joint sees only drive·(1−ret_t) ≈ 1% per substep.
                         let tan = route.tangent(mem.s[i]);
                         let nrm = Vec2::new(tan.y, -tan.x);
                         let v = mem.pos[i] - mem.prev[i];
-                        let mut vel = tan * (v.dot(tan) * ret_t) + nrm * (v.dot(nrm) * ret_n);
+                        let drive = belt_speed * h;
+                        let mut vel = tan * (drive + (v.dot(tan) - drive) * ret_t)
+                            + nrm * (v.dot(nrm) * ret_n);
                         // Sprocket motor: membership by ROUTE SECTOR (never the disk interior
                         // or a folded node), tangent from the route, rim-distance ramp so
                         // entering the sector is impulse-free.
@@ -327,6 +337,37 @@ impl ChainState {
                         let shift = d * ((l - pitch) / l * 0.5);
                         p[i] += shift;
                         p[j] -= shift;
+                    }
+                    // (a2) Sprocket TOOTH LOCK — positional, the real mechanism: a pin seated
+                    // in a tooth gap is kinematically at its material station, it cannot slip.
+                    // Joints on the drive arc are pulled TANGENTIALLY toward
+                    // `phase + i·pitch` (the seed convention — material identity), engage-
+                    // ramped by rim distance and capped per sweep. The velocity motor above
+                    // remains as the warm start; without this positional anchor the loop
+                    // circulated at only ~0.63× belt post-damping-fix (Gauss-Seidel length
+                    // sweeps diffuse the sector's velocity too slowly around the loop, and
+                    // pin friction eats the rest — measured step 26).
+                    #[allow(clippy::needless_range_loop)] // i is the MATERIAL index (s target)
+                    for i in 0..n {
+                        if route.tag(mem.s[i]) != RouteTag::Arc(0) {
+                            continue;
+                        }
+                        let rim = (p[i] - circ[0].0).length() - circ[0].1;
+                        let engage = (1.0 - rim.abs() / pitch).clamp(0.0, 1.0);
+                        if engage <= 0.0 {
+                            continue;
+                        }
+                        let s_t = route.wrap(phase_frac + i as f32 * pitch);
+                        // Only lock joints whose material station IS on the drive arc — a
+                        // drifted joint radially near the rim but materially past the wrap
+                        // must not be yanked back onto it.
+                        if route.tag(s_t) != RouteTag::Arc(0) {
+                            continue;
+                        }
+                        let tan = route.tangent(s_t);
+                        let err = (route.point(s_t) - p[i]).dot(tan);
+                        let corr = err.clamp(-0.25 * pitch, 0.25 * pitch) * engage;
+                        p[i] += tan * corr;
                     }
                     // (b) XPBD bending regularizer: C = θ − θ0, real compliance.
                     for i in 0..n {

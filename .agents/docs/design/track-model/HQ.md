@@ -1565,9 +1565,26 @@ both.
     schema debt kept local + Arc(0) front-drive hardcode named. Accepted-open: hull affine is
     per-frame (probes up to ~1 pitch early at 60 km/h on catch-up substeps — architecture §3
     honesty note); SP teleports between 1.2 m and the snap threshold unhandled by design.
+  5. **Scroll-lag fix (Yan's first-pass report: "chain lags visibly behind")** — two real
+     defects in the chain core, present since step 23 but invisible in the sandbox (no spinning
+     wheel meshes to compare against):
+     (a) **Damping drained the circulation DC**: `half_life_tan` damped ABSOLUTE tangential
+     velocity, so uniform loop circulation lost ~1%/substep × n joints while the sprocket
+     motor re-injected on only ~k wrapped joints → loop steady-stated at **0.44× belt**
+     (measured, pattern-drift metric). Fix: damp the deviation from commanded circulation
+     (`drive + (v_t − drive)·ret_t`) — no-op at rest, wave damping unchanged → 0.63×.
+     (b) **The velocity-servo sprocket could slip**: real teeth are positive engagement. New
+     sweep stage (a2): joints on `Arc(0)` pulled tangentially to their MATERIAL station
+     (`phase + i·pitch`), engage-ramped, ±0.25·pitch/sweep cap → **0.97× at speed, and the
+     physical check: ground links slide 0.08 m/s in world at 2.1 m/s drive (~0.02 of it real
+     sim belt slip)**. Isolation runs: friction-off 0.92 / stiff-motor 0.90 — pin friction was
+     the post-damping remainder; the positional lock overpowers it without touching the
+     feel-winning friction. Zero tears in reversal-slam + full-throttle washboard. Measurement
+     note: the 64 Hz pattern metric aliases above pitch/(2·dt) = 5.5 m/s — low-speed run is
+     the alias-free proof.
   - NEXT: **Tiger authoring session with Yan** (link mesh, rig nodes, bake bounds —
     `tiger-authoring-agenda.md` v3). Visual sign check (witness link + sprocket tooth lock)
-    in Yan's first feel pass. Phase B unchanged, gated.
+    in Yan's next feel pass — wheel↔chain sync now expected to hold. Phase B unchanged, gated.
 
 ## Open questions / parking lot
 
