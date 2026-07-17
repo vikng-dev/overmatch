@@ -59,6 +59,13 @@ pub fn plugin(app: &mut App) {
         PostUpdate,
         crate::camera::OrbitCameraSet.after(RenderErrorApplied),
     );
+    // So must the track view (links/wheels are written FROM the presented root pose). The edge
+    // lives here, not in `track::view`, because the net-boundary guard keeps that module from
+    // naming the netcode; in SP the set simply lacks this constraint.
+    app.configure_sets(
+        PostUpdate,
+        crate::track::view::TrackViewSet.after(RenderErrorApplied),
+    );
 }
 
 /// Arm a predicted root once both replication markers are visible.
@@ -159,4 +166,24 @@ fn decay_rotation(offset: &mut Quat, dt: f32) {
         return;
     }
     *offset = Quat::IDENTITY.slerp(q, new_angle / angle).normalize();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The track view detects discontinuities LOCALLY (pose delta per frame) because this
+    /// module publishes no signal. That only works while its thresholds sit strictly below the
+    /// snap thresholds here: a correction consumed unsmoothed (>= these bounds) must always
+    /// exceed the track's trip point, or a snapped hull keeps its old chain state and the
+    /// tracks tear. Changing either side's constants must confront this bracket.
+    #[test]
+    #[allow(clippy::assertions_on_constants)] // constant is the point: a compile-time bracket
+    fn track_discontinuity_thresholds_bracket_render_error_snaps() {
+        assert!(crate::track::view::SNAP_TRANSLATION < SNAP_TRANSLATION_M);
+        // The track compares AXIS CHORDS; a rotation snap of SNAP_ROTATION_DEG displaces at
+        // least one basis axis by 2·sin(θ/2) in the worst-aligned case it must still catch.
+        let snap_chord = 2.0 * (SNAP_ROTATION_DEG.to_radians() / 2.0).sin();
+        assert!(crate::track::view::SNAP_AXIS < snap_chord);
+    }
 }

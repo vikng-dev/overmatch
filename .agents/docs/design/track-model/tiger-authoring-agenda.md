@@ -44,3 +44,34 @@ track the procedural view will REPLACE).
 10. **Suspension travel source**: view wheels follow field-driven visual lift at the presented
     pose (NOT tick-world `Suspension.contact` — wrong hull position during corrections), and
     the track view writes GLB view nodes only, never the sim roadwheel entities.
+
+## Phase-A reality (step 26 — what the authoring session inherits)
+
+Live tracks already run on the CURRENT tiger_1.glb via interim authored geometry — the session
+upgrades the model out from under a working view, not into a void:
+
+- **Interim RON geometry to retire**: `track.plane_x`, `sprocket.center`, `idler.center/radius`
+  are numbers measured from visual-mesh accessor bounds (identity node transforms). The session
+  replaces them with rig nodes + bake subtree-bounds; the spec entries then become either baked
+  or an explicit `legacy_geometry_override` (codex: keep the migration debt LOCAL and loud —
+  absence of both baked geometry and override must fail).
+- **Sprocket pitch radius stays DERIVED** (`pitch × teeth / τ`) — the session authors teeth +
+  the `Sprocket_Phase_L/R` marker, never a radius. Item 6's formula sign is now settled:
+  every axle angle is NEGATIVE (`track::view::spin_angle` is the single flip point); the
+  marker contributes `baked_marker_offset` only and must never redefine route direction.
+- **Item 7 sharpened**: the chain's motor is `RouteTag::Arc(0)` = first circle = sprocket-first
+  hardcode. Front drive fits the Tiger; REAR drive needs drive identity derived from the typed
+  sprocket node before any rear-drive vehicle ships. Named debt.
+- **Wheel-lift probes want disc bounds**: phase A probes ±0.08 m around each wheel's real x
+  (the interleaved disc is 0.158 m wide; shoe-wide probes at an outboard column read terrain
+  BESIDE the track). Bake subtree-bounds should carry per-axle disc width so this constant
+  dies.
+- **"Width" must mean ground-contact shoe width** when the link mesh arrives (current 0.79 is
+  a strip-mesh measurement; real Tiger shoe is 0.725 — bevels/guide horns inflate AABBs). It
+  drives probes AND the link mesh footprint.
+- **Hot reload works**: re-instancing the GLB drops and rebinds the rig (links, hides, wheel
+  bindings) — iterate in Blender without restarting, EXCEPT spec (RON) changes: the blueprint
+  is embedded at compile time (`include_str!`), so spec edits still need a rebuild.
+- **Witness link**: link 0 renders rust-red; one pitch of forward travel must move it one pitch
+  rearward on the lower run with one negative tooth-step of sprocket. The first visual check
+  of the session (and of Yan's next feel pass).

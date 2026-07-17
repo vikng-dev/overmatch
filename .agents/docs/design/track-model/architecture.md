@@ -1,6 +1,8 @@
 # Track module architecture — promoting the sandbox model into the game
 
-Status: v2 (step 25, 2026-07-17) — v1 reconciled against the codex adversarial review
+Status: v3 (step 26, 2026-07-17) — phase A **shipped** (`src/track/view.rs`; §3/§6/§7 amended
+with the tier-line discussion + the codex view-plugin review,
+`scratchpad/codex_viewplugin_review.md`). v2 reconciled v1 against the codex adversarial review
 (`scratchpad/codex_arch25_review.md`, 10 findings, all dispositioned below). Companion to HQ.md
 (the step log) and the ADRs it will amend (ADR-0005 rewrite; ADR-0014 cited). Foundation
 document for "many tanks, one model"; every structural decision is judged against Yan's three
@@ -121,9 +123,17 @@ pub struct PresentedFrame {
 ```
 
 - Built after `RenderErrorApplied`, tracks run **before `TransformSystems::Propagate`**, writing
-  view nodes that propagation then carries.
-- Chain substeps interpolate `previous → current` (this also fixes the sandbox's remaining
-  fixed-clock hole: one end-of-frame hull affine was fed to every catch-up substep).
+  view nodes that propagation then carries. (Shipped shape: `track::view::TrackViewSet` owns the
+  slot; `net::render_error` orders it after `RenderErrorApplied` — the edge lives on the net
+  side because the net-boundary guard keeps `track` from naming the netcode.)
+- Chain substeps interpolate the **wheel circles** `previous → current`. HONESTY (codex
+  view-review #8): the hull affine itself is captured once per frame — every catch-up substep
+  probes terrain at the end-of-frame pose, up to ~one pitch early at 60 km/h. Accepted for
+  phase A; per-substep affine interpolation is an open item, not a shipped claim.
+- Shipped discontinuity detection is LOCAL (no lightyear coupling): presented pose delta per
+  frame (translation > 1.2 m, or forward/up axis chord > 0.5) or a `TerrainMap` revision
+  change → chain cold start + belt differentiator + wheel-lift re-base. The thresholds must
+  bracket `render_error`'s snap constants (2 m / 60°) — pinned by a test in `render_error`.
 - **Terrain probes use the interpolated presented pose.** Probing at tick pose and offsetting
   links afterwards is wrong — terrain doesn't receive the offset.
 - `discontinuity == true` → canonical reseed. The reseed must be self-triggering on this signal
@@ -187,6 +197,23 @@ pub trait TerrainOracle { fn sample_into(&self, probes: &[TerrainProbe],
 
 `enum TrackTier { Simulated, Route, Culled }` — assigned **per tank** (never per side).
 
+**Phase-A status + the value line (owner discussion, 2026-07-17):** NO tier machinery is built —
+the alpha is 1v1, every tank gets the chain, and the enum/metric/renderer split waits for tank
+counts past ~4. What was decided for when it returns:
+
+- **Detail adds value only as motion the player can resolve at the current projection.** The
+  chain's whole premium over Route is transients (slap, flap, tension redistribution) — sub-pixel
+  past ~40–50 m at normal FOV.
+- **The tier metric is SCREEN-SPACE** (projected link pitch in pixels, with hysteresis), not
+  distance: gunner optics at 8× promote the tank you're staring at automatically, and demotion
+  fires only when the shape difference is unresolvable — pop-free by construction, no crossfade
+  machinery.
+- **Pin friction guarantees chain-at-rest ≠ route shape** (it holds whatever sag friction locked
+  in), so v2's "demote when deviation relaxes" may never trigger — the screen-space rule
+  replaces it.
+- Chain population: own tank + ~2 by the metric. Tiers vary only state and sampling density,
+  never behavior — ribbon vs full-link is the SAME route sampled coarser.
+
 - Honest arithmetic at current measured rates (post-broadphase, M4): 4 simulated + 26 route ≈
   `4×41 + 26×4 = 268 ms CPU/s ≈ 4.5 ms/frame at 60 fps` — that is solver time only, and it
   does NOT fit a 2 ms all-in budget. Consequences: (a) the budget is a **cost model** (links ×
@@ -239,9 +266,15 @@ track: (
   axle-grouping concern.
 - **Drive end is derived** from the typed sprocket node's position — no redundant
   `sprocket: Front` field to disagree with geometry.
-- **Sprocket phase-lock**: `angle = phase · TAU / (pitch · teeth) + baked_marker_offset` —
-  pitch radius comes from pitch × teeth, never mesh bounds; the tooth-gap alignment comes from
-  an authored radial marker node (`Sprocket_Phase_L`), baked once.
+- **Sprocket phase-lock**: `angle = −phase / pitch_radius + baked_marker_offset`, with
+  `pitch_radius = pitch × teeth / τ` **derived, never authored** (two numbers that must agree
+  are one number) and never mesh bounds; the tooth-gap alignment comes from an authored radial
+  marker node (`Sprocket_Phase_L`), baked once. Signs (derived by codex, shipped in phase A):
+  positive phase = lower run rearward; **every axle angle is negative** (Bevy +X rotation moves
+  a wheel's bottom toward −Z); the single flip point is `track::view::spin_angle`.
+- **Drive identity**: the chain's motor sector is `RouteTag::Arc(0)` — the FIRST circle. Phase A
+  hard-codes sprocket-first (front drive, fits the Tiger); a rear-drive vehicle needs drive
+  identity derived from the typed sprocket node's position (named debt, not silent).
 - **Bake extension**: bake today captures only collision/ballistic mesh data — add
   subtree-bounds extraction for wheel/idler radii (spec override allowed) and the phase-marker
   transform.
@@ -278,11 +311,14 @@ pub trait TrackRenderer {
 
 ## 9. Phasing
 
-**Phase A — view promotion (next):** `TerrainMap` refactor in `world.rs`; extract pure core
-into `src/track/` (sandbox re-imports); `view_plugin` with PresentedFrame seam, tier policy,
-no-slip belt derivation, instanced renderer (entity-per-link acceptable behind the bring-up
-gate); legacy track meshes hidden. Deliverable: Tiger 1 drives with live tracks in SP + MP,
-zero sim risk. Unblocks Tiger authoring immediately.
+**Phase A — view promotion (SHIPPED, step 26 2026-07-17):** `TerrainMap` refactor in
+`world.rs`; pure core extracted into `src/track/` (sandbox re-imports); `track::view` with the
+presented-pose seam, no-slip belt derivation (f64 phase, per-consumer wrap), entity-per-link
+rendering (97×2 links, witness link 0, legacy `Track_Strip/Treads` hidden), oracle wheel lift
+at disc-width stations, spec-validated + bind-time loop-feasibility gate, GLB-reinstance
+rebind. Deliberately NOT built (owner LOC mandate): tiers, instancing, `PresentedFrame` ECS
+state, `TrackRenderer` trait, `SpatialQueryOracle`, tensioner/presets. Deliverable met: Tiger 1
+drives with live tracks in MP, zero sim risk. Tiger authoring unblocked.
 
 **Phase B — sim promotion (gated):** collocation forces replace `driving::{suspension,
 traction}` under the ADR-0005 rewrite; `BeltState` replicated+predicted; harness parity vs

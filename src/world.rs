@@ -15,11 +15,6 @@ use crate::Layer;
 /// list, so the two representations cannot drift. `revision` bumps whenever the set changes
 /// (map load; future streaming/destruction) so consumers know to rebuild and reseed.
 #[derive(Resource)]
-#[expect(
-    dead_code,
-    reason = "the phase-A track view plugin is the consumer (architecture §5); this expect \
-              trips when it lands"
-)]
 pub struct TerrainMap {
     pub revision: u64,
     pub blocks: Vec<Transform>,

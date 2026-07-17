@@ -422,10 +422,10 @@ pub(super) fn conform_belts_field_chain(
     };
     let mut out: [Vec<Vec2>; 2] = [Vec::new(), Vec::new()];
     let report = chain.0.step(&input, &chain_params(), &field.0, &mut out);
-    if report.reseeds > 0 {
+    if report.tears + report.overruns > 0 {
         warn!(
-            "route-chain reseed × {} (tear fuse / clock overrun)",
-            report.reseeds
+            "route-chain reseed: {} tear-fuse, {} overrun",
+            report.tears, report.overruns
         );
     }
 

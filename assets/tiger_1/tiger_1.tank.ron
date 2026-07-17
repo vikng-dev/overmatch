@@ -15,6 +15,24 @@ TankSpec(
         stiffness: 551613.0,
         damping: 61290.0,
     ),
+    // Continuous track (view-layer chain, track architecture §7). Material loop is exact:
+    // 97 × 0.130 = 12.610 m against a 12.577 m taut envelope (+33 mm ≈ 0.26% slack).
+    // Sprocket/idler circles are measured from the model's visual-mesh bounds (side-plane
+    // (z, y), mirrored across ±plane_x) — interim authoring until the model carries rig nodes.
+    track: (
+        pitch: 0.130,
+        link_count: 97,
+        width: 0.79,
+        thickness: 0.117,
+        link_mass: 30.0,
+        hinge_torque: 45.0,
+        max_link_angle: 0.6109,   // 35°
+        plane_x: 1.4904,
+        // 19 teeth × 0.130 pitch / τ = 0.3931 m pitch radius (mesh bound: 0.3956 — 2.5 mm off).
+        sprocket: ( center: (-2.5642, 0.7194), teeth: 19 ),
+        idler:    ( center: (2.3657, 0.5843),  radius: 0.4536 ),
+        wheel_radius: 0.458,
+    ),
     servos: {
         "Turret_Yaw":      (role: Yaw,   max_speed: 34.0, accel: 70.0, travel: Continuous,                      requires: [Gunner]),
         "Main_Gun_Pitch":  (role: Pitch, max_speed: 23.0, accel: 70.0, travel: Limited(min: -8.0,  max: 15.0),  requires: [Gunner]),

@@ -258,6 +258,9 @@ impl Plugin for ClientPlugin {
             crew_ui::plugin,
             // Impact dust puffs — every landed round reads at the target (view-only, ADR-0014).
             vfx::plugin,
+            // Live tracks: the simulated chain + wheel/sprocket animation on the presented pose
+            // (view-only, ADR-0014 — the server never mounts this).
+            track::view_plugin,
         ));
 
         // Physics visualization (collider/ray wireframes) + debug toggles, behind the `dev_tools`
@@ -306,6 +309,9 @@ impl Plugin for NetClientPlugin {
             // Impact dust puffs — every landed round reads at the target (view-only, ADR-0014; the
             // replica's cosmetic shells spark the same `Impact` seam, so remote fire puffs too).
             vfx::plugin,
+            // Live tracks on the presented pose — predicted AND remote tanks (one code path;
+            // `net::render_error` orders the set after its correction smoothing).
+            track::view_plugin,
         ));
 
         // Physics visualization + debug toggles, same pair `ClientPlugin` mounts for SP

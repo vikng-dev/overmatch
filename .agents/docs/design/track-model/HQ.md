@@ -1523,6 +1523,52 @@ both.
     tier policy, no-slip belt derivation, link instancing) → hide legacy track meshes → Tiger
     authoring session.
 
+- **Step 26 (2026-07-17) — phase A SHIPPED: live tracks in the game.** Preceded by the tier
+  value-line discussion (owner): detail = motion resolvable at the current projection →
+  screen-space tier metric when tiers return (>4 tanks), NO tier machinery at 1v1 — chain on
+  every tank. Architecture v3 records it (§6), plus the friction-held-shape demotion insight
+  (pin friction means the chain never relaxes to the route shape — demote below resolvability
+  instead of waiting for relaxation).
+  1. **Bit-repeatable harness** (`d1b981d`): ManualDuration clock (exactly 1/64 s/frame) +
+     `harness_drive` in FixedUpdate before the force systems → two identical runs byte-identical
+     (`cmp`); the exact A/B gate phase B needs. **TerrainMap + first core unit tests**
+     (`b7f69bb`): world.rs block transforms → `TerrainMap{revision, blocks}` resource; 5 tests
+     on the pure core (oracle semantics, broadphase miss, route closure/tags/length, projection
+     roundtrip, lifted-wheel dropout).
+  2. **`track::view` — the phase-A plugin** (~450 lines, one file + spec structs): mounted by
+     ClientPlugin + NetClientPlugin only; `TrackViewSet` in PostUpdate after
+     `PhysicsSystems::Writeback` before propagation, ordered after `RenderErrorApplied` FROM
+     the net side (net-boundary guard). BlockField from TerrainMap (revision-keyed). No-slip
+     belt from presented pose delta (f64 phase, per-consumer f64 wrap — chain wraps by
+     belt_len where shift ≡ 0 mod n). Local discontinuity detection (1.2 m / 0.5 axis chord on
+     forward AND up, bracket vs render_error snaps pinned by test) → chain cold start + belt
+     reset + wheel-lift re-base. Oracle wheel lift at REAL wheel x with DISC-width stations
+     (±0.08 — shoe-wide at an outboard interleaved column would read geometry beside the
+     track; codex catch). Entity-per-link (97/side, cuboid, witness link 0 rust-red for sign
+     verification), sprocket/idler spun about authored centres (`rotate_around` — GLB visuals
+     have identity transforms), wheels spin with rest-rotation preserved, Track_Strip/Treads
+     hidden, GLB-reinstance observer drops + rebinds the rig (authoring hot-reload).
+  3. **Spec**: `track:` block in tiger_1.tank.ron — pitch 0.130 × 97 links = 12.610 m vs
+     12.577 m measured taut envelope (+0.26% slack; real Tiger is 96 links — the model is
+     1 mm/link off scale). Sprocket pitch radius DERIVED from teeth (19 × 0.130/τ = 0.3931;
+     mesh bound 0.3956). Gear circles extracted from GLB accessor bounds (identity-transform
+     meshes; interim until authoring adds rig nodes). `validate()` rejects unphysical values;
+     bind refuses an infeasible loop (route.total() vs belt_len) with error_once instead of a
+     perpetual tear churn.
+  4. **Core telemetry split** (codex/smoke): `StepReport{tears, overruns}` — tear = warn
+     (anomaly), overrun = debug (load-hitch degradation); cold start + first-frame overrun no
+     longer counted. MP smoke: server+client, rig binds 97 links/8 wheels per side, zero
+     errors, zero tears.
+  - Codex view-plugin review (12 substantive findings) all dispositioned: signs derived (all
+    axle angles negative; single flip point `spin_angle`), joint-vs-centre rendering confirmed
+    midpoint, disc probes, discontinuity completeness (up-axis roll, wheel state), f64 phase,
+    schema debt kept local + Arc(0) front-drive hardcode named. Accepted-open: hull affine is
+    per-frame (probes up to ~1 pitch early at 60 km/h on catch-up substeps — architecture §3
+    honesty note); SP teleports between 1.2 m and the snap threshold unhandled by design.
+  - NEXT: **Tiger authoring session with Yan** (link mesh, rig nodes, bake bounds —
+    `tiger-authoring-agenda.md` v3). Visual sign check (witness link + sprocket tooth lock)
+    in Yan's first feel pass. Phase B unchanged, gated.
+
 ## Open questions / parking lot
 
 - **Lateral link rigidity (Yan, 2026-07-16, open tab)**: a real shoe is ~perfectly stiff

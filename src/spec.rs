@@ -183,6 +183,59 @@ pub struct ViewSpec {
     pub requires: Requirement,
 }
 
+/// The continuous-track running gear + material loop (track architecture §7, minimal phase-A
+/// cut). Every field is vehicle DATA — solver quality policy lives as constants in
+/// `track::view`; a new tracked vehicle is authored here, never tuned there. Geometry the model
+/// cannot express yet (sprocket/idler circles — their GLB visuals carry identity transforms with
+/// position baked into vertices) is authored in **side-plane coordinates**: hull-local `(z, y)`
+/// on the track's centreline plane, mirrored across `±plane_x`. The Tiger authoring pass replaces
+/// these with proper rig nodes + baked bounds (`tiger-authoring-agenda.md`).
+#[derive(Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct TrackSpec {
+    /// Link pitch (m). With `link_count` this is the IMMUTABLE material loop: its length is
+    /// `pitch × link_count`, exact — the solver never rounds or spreads residual (tooth lock).
+    pub pitch: f32,
+    /// Links per side.
+    pub link_count: usize,
+    /// Shoe width (m) — the link mesh and the lateral terrain-probe stations.
+    pub width: f32,
+    /// Plate thickness (m); the pin line runs through the middle of the plate.
+    pub thickness: f32,
+    /// One link assembly's mass (kg) — real inverse masses in the chain constraints.
+    pub link_mass: f32,
+    /// Pin dry-friction torque (N·m) — the rope-vs-track differentiator, scaled to link mass.
+    pub hinge_torque: f32,
+    /// Hard articulation stop between consecutive links (rad).
+    pub max_link_angle: f32,
+    /// Track centreline |x| (m): the side plane the chain solves in. Left −, right +.
+    pub plane_x: f32,
+    /// Drive sprocket: side-plane centre + tooth count. The pitch radius is DERIVED —
+    /// `pitch × teeth / τ` — never authored: one link advance ≡ one tooth advance by
+    /// construction, and two numbers that must agree are one number.
+    pub sprocket: SprocketSpec,
+    /// Idler: side-plane centre + pin-line radius (idler rim + half plate).
+    pub idler: IdlerSpec,
+    /// Road-wheel PIN-LINE radius (m): wheel rim + half plate — the chain's wheel circles.
+    pub wheel_radius: f32,
+}
+
+/// See [`TrackSpec::sprocket`]. `center` is side-plane `(z, y)`.
+#[derive(Deserialize, Clone, Copy)]
+#[serde(deny_unknown_fields)]
+pub struct SprocketSpec {
+    pub center: (f32, f32),
+    pub teeth: u32,
+}
+
+/// See [`TrackSpec::idler`]. `center` is side-plane `(z, y)`.
+#[derive(Deserialize, Clone, Copy)]
+#[serde(deny_unknown_fields)]
+pub struct IdlerSpec {
+    pub center: (f32, f32),
+    pub radius: f32,
+}
+
 #[derive(Asset, TypePath, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TankSpec {
@@ -192,6 +245,8 @@ pub struct TankSpec {
     pub inertia_extents: (f32, f32, f32),
     pub drivetrain: Drivetrain,
     pub suspension: SuspensionParams,
+    /// Continuous-track running gear + material loop — the track view's per-vehicle data.
+    pub track: TrackSpec,
     /// Servos (actuator mounts) keyed by model node name — the **source of truth** for which nodes
     /// rotate and how. Each carries its aim `role` (which also derives the rotation axis: Yaw→Y,
     /// Pitch→X) and slew tuning; tank construction resolves each name and binds the servo.
@@ -238,6 +293,53 @@ impl TankSpec {
     /// - `belt_swap_secs == 0.0` / `reload_secs == 0.0` — a degenerate instant reload, not bricked
     ///   (the belt refills / the gun readies immediately); left legal.
     pub fn validate(&self) -> Result<(), BevyError> {
+        // Track: values that parse but can never wrap a running gear. (The one check that needs
+        // GEOMETRY — the material loop closing around the rest wheel circles — lives at rig
+        // bind, where the baked wheel rests exist; these are the spec-local invariants.)
+        let t = &self.track;
+        for (field, value) in [
+            ("pitch", t.pitch),
+            ("width", t.width),
+            ("thickness", t.thickness),
+            ("link_mass", t.link_mass),
+            ("plane_x", t.plane_x),
+            ("idler.radius", t.idler.radius),
+            ("wheel_radius", t.wheel_radius),
+        ] {
+            if !value.is_finite() || value <= 0.0 {
+                return Err(format!("track.{field} must be finite and > 0 (got {value})").into());
+            }
+        }
+        if t.link_count < 3 {
+            return Err(format!("track.link_count must be >= 3 (got {})", t.link_count).into());
+        }
+        if t.sprocket.teeth == 0 {
+            return Err("track.sprocket.teeth must be > 0".into());
+        }
+        if t.wheel_radius <= t.thickness / 2.0 || t.idler.radius <= t.thickness / 2.0 {
+            return Err(
+                "track wheel/idler pin-line radii must exceed half the plate \
+                        thickness (the rolling radius would be <= 0)"
+                    .into(),
+            );
+        }
+        if !t.max_link_angle.is_finite()
+            || t.max_link_angle <= 0.0
+            || t.max_link_angle > std::f32::consts::FRAC_PI_2
+        {
+            return Err(format!(
+                "track.max_link_angle must be in (0, π/2] (got {})",
+                t.max_link_angle
+            )
+            .into());
+        }
+        if !t.hinge_torque.is_finite() || t.hinge_torque < 0.0 {
+            return Err(format!(
+                "track.hinge_torque must be finite and >= 0 (got {})",
+                t.hinge_torque
+            )
+            .into());
+        }
         for (name, weapon) in &self.weapons {
             match weapon.fire_mode {
                 FireMode::Single { reload_secs } => {
@@ -355,6 +457,12 @@ mod tests {
         assert_eq!(spec.inertia_extents, (3.0, 2.0, 6.3));
         assert_eq!(spec.drivetrain.max_thrust, 12500.0);
         assert_eq!(spec.suspension.stiffness, 551_613.0);
+        // Track: the material loop is authored exact (pitch × count = the immutable belt
+        // length); the sprocket's tooth count locks link advance to tooth advance.
+        assert_eq!(spec.track.pitch, 0.130);
+        assert_eq!(spec.track.link_count, 97);
+        assert_eq!(spec.track.sprocket.teeth, 19);
+        assert_eq!(spec.track.plane_x, 1.4904);
         // Servos are a node-keyed map now (not fixed turret/gun fields); the yaw + pitch mounts must
         // be declared for the rig to bind.
         assert!(spec.servos.contains_key("Turret_Yaw"));
@@ -518,6 +626,14 @@ mod tests {
             err.contains("NegReload") && err.contains("reload_secs"),
             "{err}"
         );
+
+        // Track: a zero pitch parses but can never wrap a gear — validate() rejects it and
+        // names the field (one representative case; the loop covers the whole dimension list).
+        let mut spec: TankSpec =
+            ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron")).unwrap();
+        spec.track.pitch = 0.0;
+        let err = spec.validate().unwrap_err().to_string();
+        assert!(err.contains("track.pitch"), "{err}");
 
         // Legal edges: a tracerless stealth belt (tracer_every: 0) and instant reloads pass.
         assert!(

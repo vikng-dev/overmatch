@@ -109,8 +109,11 @@ pub struct ChainState {
 pub struct StepReport {
     /// Fixed substeps executed this frame (per side).
     pub substeps: u32,
-    /// Canonical reseeds triggered (tear fuse or clock overrun), summed over sides.
-    pub reseeds: u32,
+    /// Tear-fuse reseeds (NaN / torn links after a solve) — a solver anomaly, worth a warning.
+    pub tears: u32,
+    /// Clock-overrun reseeds (a frame hitch outlasted the whole catch-up budget) — graceful
+    /// degradation, not an anomaly; expected on load/shader-compile hitches.
+    pub overruns: u32,
 }
 
 impl ChainState {
@@ -193,11 +196,13 @@ impl ChainState {
             // Material identity: rotate the stored ring (and its route coordinates) when the
             // phase crosses whole pitches.
             let shift = (side.phase / pitch).floor() as i64;
-            if overrun || mem.pos.len() != n || mem.s.len() != n {
+            let cold = mem.pos.len() != n || mem.s.len() != n;
+            if overrun || cold {
                 seed(&build_route(circles, input.belt_len), mem);
-                // A cold start (empty/resized state) is a normal spawn, not an anomaly.
-                if overrun {
-                    report.reseeds += 1;
+                // A cold start (empty/resized state) is a normal spawn, not an anomaly — even
+                // when the very first frame's dt also trips the overrun budget (a load hitch).
+                if overrun && !cold {
+                    report.overruns += 1;
                 }
             } else {
                 let rot = (shift - mem.shift).rem_euclid(n as i64) as usize;
@@ -524,7 +529,7 @@ impl ChainState {
                         .any(|i| ((p[(i + 1) % n] - p[i]).length() - pitch).abs() > 0.25 * pitch);
                 if torn {
                     seed(&route, mem);
-                    report.reseeds += 1;
+                    report.tears += 1;
                     continue;
                 }
                 // Velocity reconstruction — THE pinch fix: `prev = old_pos` would turn every
