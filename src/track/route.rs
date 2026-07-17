@@ -331,3 +331,65 @@ pub fn resample(points: &[Vec2], spacing: f32, offset: f32) -> Vec<Vec2> {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gear() -> Vec<(Vec2, f32)> {
+        vec![
+            (Vec2::new(-2.0, 0.5), 0.3), // front drive
+            (Vec2::new(-0.8, 0.0), 0.4),
+            (Vec2::new(0.8, 0.0), 0.4),
+            (Vec2::new(2.0, 0.5), 0.3), // rear idler
+        ]
+    }
+
+    fn taut_len(circles: &[(Vec2, f32)]) -> f32 {
+        // Generous estimate via a zero-slack build.
+        polyline_len(&build_route(circles, 0.0).pts)
+    }
+
+    #[test]
+    fn route_is_closed_tagged_and_length_budgeted() {
+        let circles = gear();
+        let belt_len = taut_len(&circles) + 0.2;
+        let route = build_route(&circles, belt_len);
+        assert_eq!(route.pts.first(), route.pts.last(), "loop must close");
+        assert!(route.pts.iter().all(|p| p.x.is_finite() && p.y.is_finite()));
+        // Front drive arc and rear idler arc are present; the sag consumed the slack budget
+        // (parabolic approximation: within a few percent).
+        let has = |t: RouteTag| (0..route.pts.len() - 1).any(|i| route.tags[i] == t);
+        assert!(has(RouteTag::Arc(0)) && has(RouteTag::Arc(3)) && has(RouteTag::Span));
+        assert!((route.total() - belt_len).abs() < 0.05 * belt_len);
+    }
+
+    #[test]
+    fn project_roundtrips_points_on_the_route() {
+        let circles = gear();
+        let route = build_route(&circles, taut_len(&circles) + 0.2);
+        for s in [0.5_f32, 2.0, 4.0, 6.0] {
+            let q = route.point(s);
+            let (s_hat, u) = route.project(q, s, 0.5);
+            assert!((route.wrap(s) - s_hat).abs() < 1e-3, "s {s} -> {s_hat}");
+            assert!(u.abs() < 1e-3, "u {u}");
+        }
+    }
+
+    #[test]
+    fn lifted_wheel_drops_out_of_the_envelope() {
+        let mut circles = gear();
+        circles[1].0.y += 0.6; // articulated far above the taut line
+        let route = build_route(&circles, taut_len(&circles) + 0.2);
+        let wrapped: Vec<usize> = (0..route.pts.len() - 1)
+            .filter_map(|i| match route.tags[i] {
+                RouteTag::Arc(k) => Some(k),
+                RouteTag::Span => None,
+            })
+            .collect();
+        assert!(
+            !wrapped.contains(&1),
+            "a lifted wheel must not be wrapped from below"
+        );
+    }
+}

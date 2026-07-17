@@ -314,3 +314,45 @@ impl TerrainOracle for BlockField {
         reach - t
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn slab() -> BlockField {
+        // Ground slab: top face at y = 0 (the world.rs idiom).
+        BlockField::new(vec![TerrainBlock::new(
+            Vec3::new(0.0, -0.5, 0.0),
+            Quat::IDENTITY,
+            Vec3::new(100.0, 1.0, 100.0),
+        )])
+    }
+
+    #[test]
+    fn depth_along_reads_clearance_and_penetration_exactly() {
+        let field = slab();
+        let down = Vec3::NEG_Y;
+        // 10 cm above the surface: 10 cm of clearance.
+        let d = field.depth_along(Vec3::new(0.0, 0.10, 0.0), down, 0.5);
+        assert!((d + 0.10).abs() < 1e-3, "clearance read {d}");
+        // 5 cm past the surface: 5 cm of penetration.
+        let d = field.depth_along(Vec3::new(0.0, -0.05, 0.0), down, 0.5);
+        assert!((d - 0.05).abs() < 1e-3, "penetration read {d}");
+        // Buried origin (station deep inside): saturates to the reach.
+        let d = field.depth_along(Vec3::new(0.0, -0.9, 0.0), down, 0.5);
+        assert_eq!(d, 0.5, "buried probe must saturate");
+    }
+
+    #[test]
+    fn broadphase_miss_is_full_clearance() {
+        // A small block far away; a probe elsewhere has no candidates and must read the same
+        // deep-clearance answer an exhaustive miss would.
+        let field = BlockField::new(vec![TerrainBlock::new(
+            Vec3::new(0.0, 0.0, -50.0),
+            Quat::IDENTITY,
+            Vec3::splat(1.0),
+        )]);
+        let d = field.depth_along(Vec3::new(0.0, 1.0, 50.0), Vec3::NEG_Y, 0.5);
+        assert_eq!(d, -0.5);
+    }
+}

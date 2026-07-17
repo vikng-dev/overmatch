@@ -9,6 +9,22 @@ use bevy::prelude::*;
 
 use crate::Layer;
 
+/// The world's static terrain as DATA (track architecture §5): every terrain block in authoring
+/// form — a unit cube posed/scaled by its Transform (the Avian collider idiom). Colliders are
+/// spawned FROM this list, and the track module's analytic `BlockField` is built from the SAME
+/// list, so the two representations cannot drift. `revision` bumps whenever the set changes
+/// (map load; future streaming/destruction) so consumers know to rebuild and reseed.
+#[derive(Resource)]
+#[expect(
+    dead_code,
+    reason = "the phase-A track view plugin is the consumer (architecture §5); this expect \
+              trips when it lands"
+)]
+pub struct TerrainMap {
+    pub revision: u64,
+    pub blocks: Vec<Transform>,
+}
+
 /// Side length of the (square) ground plane, in metres.
 const GROUND_SIZE: f32 = 1000.0;
 /// Thickness of the ground slab. Only the top face (at y=0) matters; the rest is buried.
@@ -23,6 +39,7 @@ fn spawn_environment(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    let mut blocks: Vec<Transform> = Vec::new();
     commands.spawn((
         DirectionalLight {
             illuminance: 10_000.0,
@@ -33,21 +50,18 @@ fn spawn_environment(
     ));
 
     // The ground: a static slab whose top face sits at y=0 — the same plane the analytic
-    // `ground_distance` assumes, so aim/camera are unaffected. A unit cuboid collider scaled
-    // by the Transform (the Avian idiom), buried so only the top surface is in play.
-    commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(1.0, 1.0, 1.0))),
-        MeshMaterial3d(materials.add(Color::srgb(0.32, 0.42, 0.28))),
+    // `ground_distance` assumes, so aim/camera are unaffected.
+    spawn_block(
+        &mut commands,
+        &mut blocks,
+        meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
+        materials.add(Color::srgb(0.32, 0.42, 0.28)),
         Transform::from_xyz(0.0, -GROUND_THICKNESS / 2.0, 0.0).with_scale(Vec3::new(
             GROUND_SIZE,
             GROUND_THICKNESS,
             GROUND_SIZE,
         )),
-        RigidBody::Static,
-        Collider::cuboid(1.0, 1.0, 1.0),
-        // Terrain layer: what the wheel suspension rays are allowed to hit.
-        CollisionLayers::new([Layer::Terrain], LayerMask::ALL),
-    ));
+    );
 
     // The suspension test course — deliberate, known geometry (not a scenic map) laid out down
     // the −Z lane in front of spawn, so each obstacle isolates one suspension behaviour and you
@@ -56,17 +70,24 @@ fn spawn_environment(
     let cube = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
     let ramp_mat = materials.add(Color::srgb(0.45, 0.38, 0.28));
     let bump_mat = materials.add(Color::srgb(0.40, 0.33, 0.24));
-    spawn_test_course(&mut commands, &cube, &ramp_mat, &bump_mat);
+    spawn_test_course(&mut commands, &mut blocks, &cube, &ramp_mat, &bump_mat);
+    commands.insert_resource(TerrainMap {
+        revision: 0,
+        blocks,
+    });
 }
 
 /// Spawn a static, unit-cube collision block scaled/posed by `transform` (the Avian idiom: a
-/// `Collider::cuboid(1,1,1)` that the Transform's scale stretches), on the Terrain layer.
+/// `Collider::cuboid(1,1,1)` that the Transform's scale stretches), on the Terrain layer — and
+/// record it in the [`TerrainMap`] block list (the single terrain data source).
 fn spawn_block(
     commands: &mut Commands,
+    blocks: &mut Vec<Transform>,
     mesh: Handle<Mesh>,
     material: Handle<StandardMaterial>,
     transform: Transform,
 ) {
+    blocks.push(transform);
     commands.spawn((
         Mesh3d(mesh),
         MeshMaterial3d(material),
@@ -82,6 +103,7 @@ fn spawn_block(
 /// materials, cloned per block.
 fn spawn_test_course(
     commands: &mut Commands,
+    blocks: &mut Vec<Transform>,
     cube: &Handle<Mesh>,
     ramp_mat: &Handle<StandardMaterial>,
     bump_mat: &Handle<StandardMaterial>,
@@ -99,6 +121,7 @@ fn spawn_test_course(
         let x = (i as f32 - 1.0) * 14.0; // −14, 0, +14
         spawn_block(
             commands,
+            blocks,
             cube.clone(),
             ramp_mat.clone(),
             Transform::from_xyz(x, center_y, -40.0)
@@ -112,6 +135,7 @@ fn spawn_test_course(
     //    at y=0 so the banked top crosses ground near the lane centre (a roughly flush approach).
     spawn_block(
         commands,
+        blocks,
         cube.clone(),
         ramp_mat.clone(),
         Transform::from_xyz(38.0, 0.0, -45.0)
@@ -123,6 +147,7 @@ fn spawn_test_course(
     //    Single-wheel articulation against a vertical edge (top at y=0.4).
     spawn_block(
         commands,
+        blocks,
         cube.clone(),
         bump_mat.clone(),
         Transform::from_xyz(0.0, 0.2, -70.0).with_scale(Vec3::new(14.0, 0.4, 4.0)),
@@ -135,6 +160,7 @@ fn spawn_test_course(
         let z = -82.0 - i as f32 * 1.6;
         spawn_block(
             commands,
+            blocks,
             cube.clone(),
             bump_mat.clone(),
             Transform::from_xyz(0.0, 0.12, z).with_scale(Vec3::new(14.0, 0.25, 0.6)),
