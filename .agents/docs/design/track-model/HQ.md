@@ -1437,6 +1437,57 @@ both.
     overflow, per-sweep contact reprobe, normal-velocity filtering on contacts.
   - AWAITING USER TEST: tightness (trim + damping), yank/whip character, zigzag on reversal.
 
+- 2026-07-17 — **Step 24: slice 3 (route tube) + T-34 physical alignment + pinch fuses** (green:
+  check clean; harness rest/crawl/compress/full-throttle). Yan's verdict on 23b: "somewhat
+  better... still behaves physically more like a rope than a track chain — align it with real
+  T-34 numbers; go for slice 3 too; also high-speed + strong bump can get the chain 'pinched',
+  completely break the rendering and shoot off the tank." Codex T-34 deep dive at
+  `scratchpad/codex_t34_review.md` (rich: real link masses, six-roller drive geometry matching
+  our radius to 1.2%, the pinch causal chain, slice-3 pitfall list). Landed:
+  1. **Tagged route tube (slice 3)**: `Route` = the wrap view's envelope machinery run on the
+     CURRENT articulated wheels **every substep**, kept as an arc-length table with per-segment
+     sector tags (Arc(k)/Span). Every joint carries a monotone route coordinate `s`
+     (`ChainSideMemory.s`, windowed ±2-pitch rebase per sweep, pairwise order clamps); normal
+     offset hard-clamped to the tube (OUT 0.30 / IN 0.40 — both under half the belly↔top route
+     gap so the (s,u) atlas never overlaps); **u ≥ 0 on wheel arcs** → wrong-side capture and
+     "chain off the tank" unrepresentable. θ0 and motor membership read the route at each
+     joint's own `s` (kills the 23b θ0-by-index deferral); link-CHORD wheel exclusion added
+     (two clear pins can still chord through a wheel).
+  2. **Fixed clock owns its inputs**: wheel circles interpolated prev-frame→current across the
+     substeps; solved output interpolated to render time (`acc/h` remainder); over-budget hitch
+     → canonical reseed instead of silent debt drop.
+  3. **T-34 numbers** (codex provenance): node mass 16 kg (cast link + pin share, ~1.15 t/72
+     links — real inverse masses in all compliant/limited denominators); bending B 10-normalized
+     (≈160 N·m² hidden) → **2 N·m² regularizer** — a pinned track has no bending spring, the
+     anti-flutter duty moved to **pin DRY friction**: torque-limited XPBD hinge constraint
+     toward the previous material angle, τ = 25 N·m (μ≈0.15 × 12 mm pin × 10–50 kN → 18–90),
+     λ accumulated across sweeps, clamped ONCE per substep (per-sweep clamping would 4× it);
+     **anisotropic route-frame damping** (tangential t½ 0.60 s, normal 0.060 s — yank lives,
+     flutter dies); slack trim 0.11 → ~0.02 m visible ≈ the manual's 30–50 mm sag spec (trim
+     shortens links 0.8% — the honest idler-shift tensioner is parked). Six-roller
+     alternate-link engagement character parked (flavor).
+  4. **Pinch autopsy + fuses** (codex ranked it; measured full-throttle washboard: max joint
+     speed 383 m/s before → 22 m/s after, reseeds 0 in all four scenarios):
+     the ROOT was `prev = old_pos` turning every unilateral depenetration into Verlet
+     restitution (0.5 m correction = 60 m/s) — fixed by **velocity reconstruction** (terrain
+     contacts keep only pre-projection escape velocity, wheels zero inward radial, anisotropic
+     guardrail caps clamp the stored velocity); saturated terrain probes skipped as invalid
+     linearizations; terrain corrections capped at pitch/2 and **yield to wheels** (no
+     alternating projectors on an empty feasible set); NaN/torn-link detector (0.25·pitch) →
+     canonical reseed, now **terrain-conformed** (the earlier taut-route seed landed inside
+     boards and re-tore next substep — the actual "shoots off" loop in the first cut of this
+     step).
+  - Measured (fixed-tick harness): steady pitch dev ~2–4 mm mean (transients only in warmup
+    settle); washboard phase-through 16.6 mm crawl / 58 mm at full throttle (was 45–84);
+    loop breathing ≤ 0.27 m under full-throttle terrain; belly kinks ~2–4 (polygonal drape is
+    now the intended look); trench dips are honest (floor at −1.2 m).
+  - DEFERRED: unwrapped-s ledger (order currently pairwise-clamped, wrapped), per-sweep terrain
+    reprobe, tension-dependent friction torque clamp(15,120) N·m, six-roller discrete drive,
+    idler-shift tensioner, `L_taut > Np` infeasibility handling (can't occur with sag-budget
+    route by construction today).
+  - AWAITING USER TEST: rope-vs-track verdict (pin friction + anisotropic damping are the two
+    labeled knobs), sag vs the real spec, pinch immunity at speed.
+
 ## Open questions / parking lot
 
 - **Lateral link rigidity (Yan, 2026-07-16, open tab)**: a real shoe is ~perfectly stiff

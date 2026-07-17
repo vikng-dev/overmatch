@@ -63,6 +63,12 @@ pub(super) struct ChainSideMemory {
     /// the chain lends its slack** when the belly tents over terrain (and sags back when it
     /// doesn't). Without this the surplus had nowhere to go and parked as belly squiggles.
     pub(super) belly_extra: f32,
+    /// Route coordinate per joint (m along the guide route, wrapped) — the slice-3 tube warm
+    /// start (model 4's route-chain view only).
+    pub(super) s: Vec<f32>,
+    /// Last frame's wheel circles (pin-line, front→rear), so the fixed-clock substeps see the
+    /// wheels MOVE across the frame instead of one big end-of-frame jump (model 4 route-chain).
+    pub(super) prev_circles: Vec<(Vec2, f32)>,
 }
 
 impl ChainMemory {

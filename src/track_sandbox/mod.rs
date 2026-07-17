@@ -296,7 +296,7 @@ fn toggle_view_mode(
         if view.kinematic {
             "kinematic wrap (step 22)"
         } else {
-            "route-chain (step 23: fixed clock, XPBD bending, sprocket drive)"
+            "route-chain (step 24: route tube, T-34 pin friction, pinch fuses)"
         }
     );
 }
