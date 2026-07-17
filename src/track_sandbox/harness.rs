@@ -168,8 +168,10 @@ pub(super) fn harness_setup(
     commands.insert_resource(HarnessLog { tick: 0, writer });
 }
 
-/// Drive the scenario: zero input through warmup, then the constant scripted throttle. Runs after
-/// `read_drive_input`, overriding whatever the (absent) user pressed.
+/// Drive the scenario: zero input through warmup, then the constant scripted throttle. Runs in
+/// FixedUpdate BEFORE the force systems, so phase boundaries (warmup end, `t2`) land on exact
+/// ticks regardless of frame pacing — one half of the harness's bit-repeatability (the other is
+/// the manual-duration clock). It overrides whatever `read_drive_input` wrote last frame.
 pub(super) fn harness_drive(
     harness: Res<Harness>,
     log: Option<Res<HarnessLog>>,

@@ -575,15 +575,30 @@ pub fn plugin(app: &mut App) {
         );
 
     // The scripted capture harness (`SANDBOX_HARNESS` env var): scenario in, JSONL out, exit.
+    // Bit-REPEATABLE (step 25b): virtual time advances exactly one fixed tick per rendered frame
+    // (wall clock never enters the sim), and the scripted throttle is written INSIDE FixedUpdate
+    // before the force systems — its phase boundaries land on exact ticks. Without both, frame
+    // pacing leaked into recorded trajectories (~mm-level hull drift between identical runs) and
+    // A/B gates could only ever be statistical.
     if let Some(scenario) = harness::parse_env() {
         app.insert_resource(scenario)
+            .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+                std::time::Duration::from_micros(15_625), // exactly 1/64 s
+            ))
             .add_systems(
                 Startup,
                 harness::harness_setup
                     .after(spawn_rig)
                     .after(spawn_environment),
             )
-            .add_systems(Update, harness::harness_drive.after(read_drive_input))
+            .add_systems(
+                FixedUpdate,
+                harness::harness_drive
+                    .before(apply_belt_support)
+                    .before(apply_belt_support_links)
+                    .before(apply_belt_support_boxes)
+                    .before(apply_belt_support_field),
+            )
             .add_systems(
                 FixedUpdate,
                 harness::harness_record
