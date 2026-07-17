@@ -327,6 +327,7 @@ pub fn plugin(app: &mut App) {
         // disabled in `configure_collider_gizmos`.
         .add_plugins(PhysicsDebugPlugin)
         .init_resource::<BeltContacts>()
+        .init_resource::<SideDynamics>()
         .init_resource::<Paused>()
         .init_resource::<ResetSpot>()
         .init_resource::<RawDriveInput>()
@@ -437,16 +438,36 @@ pub fn plugin(app: &mut App) {
 /// and the friction force it applied (world space — the force-vector layer).
 struct Contact {
     local: Vec3,
+    /// Actual damped load (what scaled the ellipse) — `load_elastic` is the spring-only part.
     load: f32,
+    load_elastic: f32,
     normal: Vec3,
     slip: f32,
+    slip_lat: f32,
+    f_long: f32,
+    f_lat: f32,
     traction: Vec3,
 }
 
-/// The belt contact stations found this tick — filled by `apply_belt_support` in the fixed step,
-/// drawn by `draw_contacts` per frame. Visualization only.
+/// The belt contact stations found this tick, PER SIDE `[left, right]` (side identity matters
+/// for steer diagnostics) — filled in the fixed step, drawn by `draw_contacts` per frame.
+/// Visualization/telemetry only.
 #[derive(Resource, Default)]
-struct BeltContacts(Vec<Contact>);
+struct BeltContacts([Vec<Contact>; 2]);
+
+impl BeltContacts {
+    fn all(&self) -> impl Iterator<Item = &Contact> {
+        self.0.iter().flatten()
+    }
+}
+
+/// Per-side belt-dynamics telemetry from the core report: engine force applied and ground
+/// reaction, `[left, right]`. Harness rows only.
+#[derive(Resource, Default)]
+struct SideDynamics {
+    engine: [f32; 2],
+    reaction: [f32; 2],
+}
 
 /// Whether the sim is frozen (`Esc`). The belt model gates on this so it doesn't accumulate force
 /// against a paused physics world.
@@ -1033,8 +1054,8 @@ fn log_state(
         return;
     }
     let (transform, lin) = *hull;
-    let count = contacts.0.len();
-    let total: f32 = contacts.0.iter().map(|c| c.load).sum();
+    let count = contacts.all().count();
+    let total: f32 = contacts.all().map(|c| c.load).sum();
     let weight = HULL_MASS * 9.81;
     let speed = lin.0.dot(transform.forward().into());
     info!(
@@ -1093,10 +1114,8 @@ fn sample_jitter_probe(
 
     // The left contact dot nearest hull-local z = 0, where it's drawn (current pose), and its
     // displayed load (the dot/normal size — the "force gizmo" flicker channel).
-    let dot = contacts
-        .0
+    let dot = contacts.0[0]
         .iter()
-        .filter(|c| c.local.x < 0.0)
         .min_by(|a, b| a.local.z.abs().total_cmp(&b.local.z.abs()));
     push(
         &mut probe.dot_y,
@@ -1265,7 +1284,7 @@ fn draw_contacts(
     }
     let hull = *hull;
     let k = SUPPORT_STIFFNESS_PER_M * CONTACT_SPACING;
-    for c in &contacts.0 {
+    for c in contacts.all() {
         let p = hull.transform_point(c.local);
         // load / k ≈ the station's penetration (m) — a stable size cue for the contact.
         let r = 0.03 + (c.load / k).clamp(0.0, 0.1);

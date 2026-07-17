@@ -92,12 +92,21 @@ pub struct ForceApp {
     pub point: Vec3,
 }
 
-/// One contact's telemetry (viz / traces): world application point, elastic load, slip,
-/// inward normal, traction vector.
+/// One contact's telemetry (viz / traces). `load` is the ACTUAL damped load that scaled the
+/// friction ellipse this tick — `load_elastic` is the spring-only component (static-sink
+/// analysis); inferring ellipse utilization from the elastic value understates grip under
+/// dynamic compression (codex steer review: the telemetry trap).
 pub struct BeltContact {
     pub point: Vec3,
     pub load: f32,
+    pub load_elastic: f32,
+    /// Longitudinal slip (belt speed − ground-point speed, m/s).
     pub slip: f32,
+    /// Lateral scrub speed at the contact (m/s).
+    pub slip_lat: f32,
+    /// Scalar friction components along the contact's longitudinal / lateral axes (N).
+    pub f_long: f32,
+    pub f_lat: f32,
     pub normal: Vec3,
     pub traction: Vec3,
 }
@@ -108,6 +117,10 @@ pub struct SideReport {
     pub state: SideState,
     pub apps: Vec<ForceApp>,
     pub contacts: Vec<BeltContact>,
+    /// The engine force actually applied to the belt this tick (post-governor, post-clamp, N).
+    pub engine_force: f32,
+    /// Ground reaction summed into belt dynamics (Σ f_long, N).
+    pub belt_reaction: f32,
 }
 
 /// Integrate `max(0, pen(x))` over one linear piece of a pressure profile: `pen` runs
@@ -254,6 +267,9 @@ pub fn step_side<O: TerrainOracle>(
             // (2) Traction: slip-saturated friction on the ellipse; grip scales with the
             // column's load.
             let mut slip_long = 0.0;
+            let mut slip_lat = 0.0;
+            let mut f_long = 0.0;
+            let mut f_lat = 0.0;
             let mut traction = Vec3::ZERO;
             let drive = -affine.transform_vector3(Vec3::new(0.0, tan2.y, tan2.x));
             let long_plane = drive - drive.dot(normal) * normal;
@@ -261,11 +277,11 @@ pub fn step_side<O: TerrainOracle>(
                 let long_dir = long_plane.normalize();
                 let lat_dir = normal.cross(long_dir).normalize_or_zero();
                 slip_long = belt_speed - vel.dot(long_dir);
-                let s_lat = vel.dot(lat_dir);
+                slip_lat = vel.dot(lat_dir);
                 let grip = params.mu * load;
                 let grip_lat = grip * params.lateral_ratio;
-                let mut f_long = grip * (slip_long / params.slip_saturation).clamp(-1.0, 1.0);
-                let mut f_lat = -grip_lat * (s_lat / params.slip_saturation).clamp(-1.0, 1.0);
+                f_long = grip * (slip_long / params.slip_saturation).clamp(-1.0, 1.0);
+                f_lat = -grip_lat * (slip_lat / params.slip_saturation).clamp(-1.0, 1.0);
                 let e = (f_long / grip).powi(2) + (f_lat / grip_lat).powi(2);
                 if e > 1.0 {
                     let s = e.sqrt().recip();
@@ -280,11 +296,14 @@ pub fn step_side<O: TerrainOracle>(
                 belt_reaction += f_long;
             }
 
-            // Telemetry load = the elastic component only, at the column's weight.
             report.contacts.push(BeltContact {
                 point: p,
-                load: weight * params.support_stiffness_per_m * area * engage,
+                load,
+                load_elastic: weight * params.support_stiffness_per_m * area * engage,
                 slip: slip_long,
+                slip_lat,
+                f_long,
+                f_lat,
                 normal,
                 traction,
             });
@@ -299,5 +318,7 @@ pub fn step_side<O: TerrainOracle>(
     let next = belt_speed + (engine - belt_reaction) / params.inertia * dt;
     report.state.speed = next.clamp(-params.max_speed, params.max_speed);
     report.state.phase = state.phase + f64::from(belt_speed * dt);
+    report.engine_force = engine;
+    report.belt_reaction = belt_reaction;
     report
 }

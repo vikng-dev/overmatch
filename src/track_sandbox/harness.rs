@@ -112,14 +112,19 @@ pub(super) fn harness_setup(
     writeln!(
         writer,
         // `"model":4` is pinned: the sandbox hosts only the promoted field-belt model, and the
-        // field stays for schema stability with existing analyzers.
-        "{{\"t\":\"meta\",\"model\":4,\"view\":\"{}\",\"z\":{:.3},\"warmup\":{},\"ticks\":{},\"throttle\":{:.3},\"steer\":{:.3},\"weight\":{:.0},\"hull_rest_y\":{HULL_REST_Y},\"thickness\":{TRACK_THICKNESS}}}",
+        // field stays for schema stability with existing analyzers. `schema:2` = raw/shaped
+        // commands, quaternion + full angular velocity, per-side contact arrays + aggregates.
+        "{{\"t\":\"meta\",\"model\":4,\"schema\":2,\"view\":\"{}\",\"z\":{:.3},\"warmup\":{},\"ticks\":{},\"throttle\":{:.3},\"steer\":{:.3},\"t2\":{},\"throttle2\":{:.3},\"steer2\":{:.3},\"slew\":{},\"half_tread\":{TRACK_HALF_WIDTH},\"mu\":{MU},\"lateral_ratio\":{LATERAL_GRIP_RATIO},\"slip_saturation\":{SLIP_SATURATION},\"weight\":{:.0},\"hull_rest_y\":{HULL_REST_Y},\"thickness\":{TRACK_THICKNESS}}}",
         if harness.chain_view { "chain" } else { "wrap" },
         harness.z,
         harness.warmup,
         harness.ticks,
         harness.throttle,
         harness.steer,
+        harness.t2,
+        harness.throttle2,
+        harness.steer2,
+        crate::track::drive::DRIVE_SLEW_PER_SECOND,
         HULL_MASS * 9.81,
     )
     .unwrap();
@@ -200,6 +205,7 @@ pub(super) fn harness_record(
     hull: Single<(&Transform, &LinearVelocity, &AngularVelocity), With<Hull>>,
     raw: Res<RawDriveInput>,
     shaped: Res<ShapedDrive>,
+    dynamics: Res<SideDynamics>,
     contacts: Res<BeltContacts>,
     belt: Res<BeltSpeed>,
     phase: Res<BeltPhase>,
@@ -212,17 +218,42 @@ pub(super) fn harness_record(
     };
     let (transform, lin, ang) = *hull;
     let (yaw, pitch, _) = transform.rotation.to_euler(EulerRot::YXZ);
-    let total: f32 = contacts.0.iter().map(|c| c.load).sum();
-    let contact_rows: Vec<String> = contacts
-        .0
-        .iter()
-        .map(|c| {
-            format!(
-                "[{:.4},{:.4},{:.4},{:.0},{:.3},{:.4}]",
-                c.local.x, c.local.y, c.local.z, c.load, c.slip, c.normal.y
-            )
-        })
-        .collect();
+    let total: f32 = contacts.all().map(|c| c.load).sum();
+    // Per-side contact arrays: positional prefix [x,y,z,load,slip,ny] kept from schema 1,
+    // appended [load_elastic, slip_lat, f_long, f_lat].
+    let side_rows = |si: usize| -> String {
+        contacts.0[si]
+            .iter()
+            .map(|c| {
+                format!(
+                    "[{:.4},{:.4},{:.4},{:.0},{:.3},{:.4},{:.0},{:.3},{:.1},{:.1}]",
+                    c.local.x,
+                    c.local.y,
+                    c.local.z,
+                    c.load,
+                    c.slip,
+                    c.normal.y,
+                    c.load_elastic,
+                    c.slip_lat,
+                    c.f_long,
+                    c.f_lat
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    // Per-side aggregates: [load, f_long, f_lat, max|slip|, max|slip_lat|] × 2.
+    let agg = |si: usize| -> [f32; 5] {
+        let cs = &contacts.0[si];
+        [
+            cs.iter().map(|c| c.load).sum(),
+            cs.iter().map(|c| c.f_long).sum(),
+            cs.iter().map(|c| c.f_lat).sum(),
+            cs.iter().map(|c| c.slip.abs()).fold(0.0, f32::max),
+            cs.iter().map(|c| c.slip_lat.abs()).fold(0.0, f32::max),
+        ]
+    };
+    let (al, ar) = (agg(0), agg(1));
     let chain_rows: Vec<String> = belts
         .left
         .iter()
@@ -253,12 +284,19 @@ pub(super) fn harness_record(
     let k = log.tick;
     writeln!(
         log.writer,
-        "{{\"t\":\"k\",\"k\":{k},\"hull\":{},\"pitch\":{:.5},\"yaw\":{:.5},\"yawrate\":{:.5},\"raw\":{},\"shaped\":{},\"vel\":{},\"belt\":{},\"phase\":{},\"sup\":{:.0},\"wheels\":[{}],\"contacts\":[{}],\"chain\":[{}]}}",
+        "{{\"t\":\"k\",\"k\":{k},\"hull\":{},\"q\":{},\"av\":{},\"pitch\":{:.5},\"yaw\":{:.5},\"yawrate\":{:.5},\"raw\":{},\"shaped\":{},\"vel\":{},\"belt\":{},\"phase\":{},\"engine\":{},\"reaction\":{},\"sload\":[{},{}],\"sup\":{:.0},\"wheels\":[{}],\"contacts\":[[{}],[{}]],\"chain\":[{}]}}",
         arr([
             transform.translation.x,
             transform.translation.y,
             transform.translation.z
         ]),
+        arr([
+            transform.rotation.x,
+            transform.rotation.y,
+            transform.rotation.z,
+            transform.rotation.w
+        ]),
+        arr([ang.0.x, ang.0.y, ang.0.z]),
         pitch,
         yaw,
         ang.0.y,
@@ -267,9 +305,14 @@ pub(super) fn harness_record(
         arr([lin.0.x, lin.0.y, lin.0.z]),
         arr([belt.left, belt.right]),
         arr([phase.get(Side::Left) as f32, phase.get(Side::Right) as f32]),
+        arr(dynamics.engine),
+        arr(dynamics.reaction),
+        arr(al),
+        arr(ar),
         total,
         wheel_json.join(","),
-        contact_rows.join(","),
+        side_rows(0),
+        side_rows(1),
         chain_rows.join(","),
     )
     .unwrap();

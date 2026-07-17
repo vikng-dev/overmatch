@@ -215,13 +215,15 @@ pub(super) fn apply_belt_support_field(
     mut belt: ResMut<BeltSpeed>,
     mut phase: ResMut<BeltPhase>,
     mut contacts: ResMut<BeltContacts>,
+    mut dynamics: ResMut<SideDynamics>,
 ) {
     let Ok((hull_gt, mut forces)) = hull.single_mut() else {
         return;
     };
     let affine = hull_gt.affine();
     let to_local = affine.inverse();
-    contacts.0.clear(); // the sole contact system this tick
+    contacts.0[0].clear(); // the sole contact system this tick
+    contacts.0[1].clear();
     let dt = time.delta_secs();
     // The shared command seam, on the fixed tick exactly like the game adapter: slew the raw
     // intent, then mix per side.
@@ -262,15 +264,25 @@ pub(super) fn apply_belt_support_field(
         for app in &report.apps {
             forces.apply_force_at_point(app.force, app.point);
         }
+        let si = match side {
+            Side::Left => 0,
+            Side::Right => 1,
+        };
         for c in &report.contacts {
-            contacts.0.push(Contact {
+            contacts.0[si].push(Contact {
                 local: to_local.transform_point3(c.point),
                 load: c.load,
+                load_elastic: c.load_elastic,
                 normal: c.normal,
                 slip: c.slip,
+                slip_lat: c.slip_lat,
+                f_long: c.f_long,
+                f_lat: c.f_lat,
                 traction: c.traction,
             });
         }
+        dynamics.engine[si] = report.engine_force;
+        dynamics.reaction[si] = report.belt_reaction;
         belt.set(side, report.state.speed);
         phase.set(side, report.state.phase);
     }
