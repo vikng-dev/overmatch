@@ -10,3 +10,4 @@
 
 # Cloudflare wrangler local cache
 .wrangler/
+__pycache__/
