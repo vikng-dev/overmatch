@@ -494,7 +494,17 @@ fn drive_track_views(
             // `from_rotation_x(-ang)` maps local +Z to (z, y) = (cos ang, sin ang) — the tangent.
             let pts = &out[si];
             if pts.len() == side.links.len() {
-                for (i, &link) in side.links.iter().enumerate() {
+                // Joint slots shift material identity by one every pitch of travel (the
+                // chain resamples at `phase mod pitch`), so a fixed entity↔slot binding
+                // makes any per-link identity — the witness paint today, damage/texture
+                // later — wander one link per pitch. Rotate the mapping by the whole-pitch
+                // quotient: entity m always wears material link m, and the witness RIDES
+                // the belt.
+                let n = side.links.len() as i64;
+                let pitch = f64::from(rig.belt_len) / n as f64;
+                let q = (phases[si] / pitch).floor() as i64;
+                for (i, _) in pts.iter().enumerate() {
+                    let link = side.links[(i as i64 - q).rem_euclid(n) as usize];
                     let a = pts[i];
                     let b = pts[(i + 1) % pts.len()];
                     let t = b - a;
