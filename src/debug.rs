@@ -91,8 +91,8 @@ fn toggle_camera_follow(keys: Res<ButtonInput<KeyCode>>, mut follow: ResMut<Came
     }
 }
 
-/// Draw each belt contact's forces: cyan = elastic support load (along the contact's inward
-/// normal), orange = traction. Reads the sim's per-tick contact telemetry ([`TrackContacts`],
+/// Draw each belt contact's forces: cyan = the ACTUAL applied support load (damped; what
+/// scaled the friction ellipse) along the contact's inward normal, orange = traction. Reads the sim's per-tick contact telemetry ([`TrackContacts`],
 /// world points at the tick pose) — a live load/traction readout of the phase-B belt model.
 fn draw_wheel_forces(tanks: Query<&TrackContacts>, mut gizmos: Gizmos) {
     for contacts in &tanks {

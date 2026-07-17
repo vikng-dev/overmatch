@@ -616,23 +616,28 @@ fn record_tick(
         &roots
     {
         // Trace schema v2 (phase B): the per-wheel suspension topology is gone. `gnd` counts
-        // contacting SIDES (0–2), `loads` is per-side elastic load sums, `thr`/`str` are the
-        // shaped command, and `belt`/`bph` are the per-side belt speed and phase.
+        // contacting SIDES (0–2), `loads` is per-side ELASTIC load sums (the stable baseline
+        // channel — the damped actual load, which scales grip, rides as `loads_act`),
+        // `thr`/`str` are the shaped command, `belt`/`bph` the per-side belt speed and phase.
         let grounded = track_contacts
             .0
             .iter()
             .filter(|side| !side.is_empty())
             .count();
-        let loads: Vec<Value> = track_contacts
-            .0
-            .iter()
-            // Round to ~0.1 N: solver-noise digits past that are neither meaningful nor worth
-            // the row width.
-            .map(|side| {
-                let sum: f32 = side.iter().map(|c| c.load).sum();
-                num((sum * 10.0).round() / 10.0)
-            })
-            .collect();
+        // Round to ~0.1 N: solver-noise digits past that are neither meaningful nor worth
+        // the row width.
+        let side_sum = |f: fn(&crate::track::forces::BeltContact) -> f32| -> Vec<Value> {
+            track_contacts
+                .0
+                .iter()
+                .map(|side| {
+                    let sum: f32 = side.iter().map(f).sum();
+                    num((sum * 10.0).round() / 10.0)
+                })
+                .collect()
+        };
+        let loads = side_sum(|c| c.load_elastic);
+        let loads_act = side_sum(|c| c.load);
 
         // Contact pairs whose rigid body is this tank root, and the deepest penetration among them
         // — the collision-stress signal the jitter correlates with.
@@ -665,6 +670,7 @@ fn record_tick(
             "av": vec3(angvel.0),
             "gnd": grounded,
             "loads": Value::Array(loads),
+            "loads_act": Value::Array(loads_act),
             "thr": num(drive.throttle),
             "str": num(drive.steer),
             "belt": [num(drive.sides[0].speed), num(drive.sides[1].speed)],

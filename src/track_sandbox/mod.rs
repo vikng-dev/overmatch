@@ -680,6 +680,8 @@ fn toggle_pause(
     mut windows: Query<(&mut Window, &mut CursorOptions), With<PrimaryWindow>>,
     mut physics: ResMut<Time<Physics>>,
     mut paused: ResMut<Paused>,
+    mut raw: ResMut<RawDriveInput>,
+    mut shaped: ResMut<ShapedDrive>,
 ) {
     if !keys.just_pressed(KeyCode::Escape) {
         return;
@@ -690,6 +692,11 @@ fn toggle_pause(
             cursor.visible = true;
             physics.pause();
             paused.0 = true;
+            // The force adapter (the only system that slews ShapedDrive) is gated off while
+            // paused — without this clear, resume would re-apply the pre-pause command and
+            // slew it down: stale thrust (codex parts-1/2 review #1).
+            raw.0 = crate::track::drive::DriveAxes::default();
+            shaped.0 = crate::track::drive::DriveAxes::default();
         } else {
             let center = window.size() / 2.0;
             window.set_cursor_position(Some(center));
@@ -1045,6 +1052,10 @@ fn reset_rig(
     mut spot: ResMut<ResetSpot>,
     mut belt: ResMut<BeltSpeed>,
     mut phase: ResMut<BeltPhase>,
+    mut raw: ResMut<RawDriveInput>,
+    mut shaped: ResMut<ShapedDrive>,
+    mut contacts: ResMut<BeltContacts>,
+    mut dynamics: ResMut<SideDynamics>,
     mut wheels: Query<&mut Suspension>,
 ) {
     if !keys.just_pressed(KeyCode::KeyR) {
@@ -1058,6 +1069,12 @@ fn reset_rig(
     ang.0 = Vec3::ZERO;
     *belt = BeltSpeed::default();
     *phase = BeltPhase::default();
+    // A reset is a fresh at-rest rig: stale command state would re-thrust it immediately,
+    // and stale contacts/dynamics display the pre-teleport tick (codex parts-1/2 review #2).
+    raw.0 = crate::track::drive::DriveAxes::default();
+    shaped.0 = crate::track::drive::DriveAxes::default();
+    *contacts = BeltContacts::default();
+    *dynamics = SideDynamics::default();
     // Stale cosmetic wheel lift survives the teleport otherwise: for the first ~100 ms the
     // conform solves against phantom raised wheel circles while the hull settles.
     for mut susp in &mut wheels {
@@ -1148,7 +1165,10 @@ fn sample_jitter_probe(
         &mut probe.dot_y,
         dot.map_or(f32::NAN, |c| gt.transform_point(c.local).y),
     );
-    push(&mut probe.dot_load, dot.map_or(f32::NAN, |c| c.load));
+    push(
+        &mut probe.dot_load,
+        dot.map_or(f32::NAN, |c| c.load_elastic),
+    );
 
     // Whole left ring, index-aligned (see the field doc).
     let ring: Vec<f32> = belts.get(Side::Left).iter().map(|s| s.world.y).collect();
@@ -1313,8 +1333,9 @@ fn draw_contacts(
     let k = SUPPORT_STIFFNESS_PER_M * CONTACT_SPACING;
     for c in contacts.all() {
         let p = hull.transform_point(c.local);
-        // load / k ≈ the station's penetration (m) — a stable size cue for the contact.
-        let r = 0.03 + (c.load / k).clamp(0.0, 0.1);
+        // elastic load / k ≈ the station's penetration (m) — a stable size cue (the damped
+        // actual load would add velocity-driven size flicker).
+        let r = 0.03 + (c.load_elastic / k).clamp(0.0, 0.1);
         if viz.dots {
             // Slip fraction 0→1 grades green (grip) to red (sliding at μ·load).
             let t = (c.slip.abs() / SLIP_SATURATION).clamp(0.0, 1.0);
