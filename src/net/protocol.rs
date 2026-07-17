@@ -708,9 +708,9 @@ fn apply_launched_turret_pose(
 pub(crate) const ROLLBACK_POSITION_M: f32 = 0.05;
 pub(crate) const ROLLBACK_ROTATION_RAD: f32 = 0.05;
 pub(crate) const ROLLBACK_VELOCITY: f32 = 1.0;
-/// `TrackDrive` divergence gate: max over per-side |speed| (m/s) / |phase| (m) / anchor (m)
-/// deltas. Coarse like the velocity gate — belt state is deterministic, so a real mismatch is
-/// gross desync, not solver noise.
+/// `TrackDrive` divergence gate: max over shaped-command and per-side |speed| (m/s) /
+/// |phase| (m) deltas. Coarse like the velocity gate — belt state is deterministic, so a real
+/// mismatch is gross desync, not solver noise.
 pub(crate) const ROLLBACK_TRACK_DRIVE: f32 = 0.25;
 
 // The registered conditions and watchdog share these metrics and thresholds.

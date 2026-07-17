@@ -46,10 +46,8 @@ pub(crate) struct TankGeometry {
     pub nodes: Vec<NodeGeometry>,
     pub by_name: HashMap<String, usize>,
     /// Load-bearing roadwheel stations — `(node index, TrackSide)`, one per `Wheel_L/R_<n>` empty
-    /// ([`roadwheel_side`]), **sorted by node name**. That order is the wheels' [`WheelIndex`]
-    /// (`crate::tank::WheelIndex`) slot identity — an index both wire ends derive, so the sort is
-    /// load-bearing determinism, not cosmetics: a `HashMap`- or extraction-order list would let
-    /// client and server disagree on which slot is which wheel.
+    /// ([`roadwheel_side`]), **sorted by node name** — a deterministic order every consumer
+    /// (spawn, the track gear build) can rely on, instead of `HashMap`/extraction order.
     pub roadwheels: Vec<(usize, TrackSide)>,
     /// Collision-proxy nodes — `*_Collider` node indices in extraction order. No wire-shared index
     /// derives from this order (each proxy just yields a convex hull), so it is not sorted.
@@ -271,7 +269,7 @@ pub(crate) fn extract_tank_geometry(path: &Path) -> Result<TankGeometry, String>
             collision_proxies.push(index);
         }
     }
-    // Name-sorted: this is the `WheelIndex` slot order both wire ends derive (see the field doc).
+    // Name-sorted: the deterministic consumer order (see the field doc).
     roadwheels.sort_by(|a, b| nodes[a.0].name.cmp(&nodes[b.0].name));
 
     Ok(TankGeometry {

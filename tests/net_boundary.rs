@@ -21,7 +21,7 @@
 //! from one is then a deliberate act: add the file below, with the reason it earns the coupling.
 //!
 //! Only *code* is scanned — comments are stripped first. The house style discusses lightyear's
-//! behaviour freely in prose (`tank.rs`, `camera.rs`, `aim.rs`, `driving.rs` and `command.rs` all
+//! behaviour freely in prose (`tank.rs`, `camera.rs`, `aim.rs`, `track/sim.rs` and `command.rs` all
 //! name it in doc comments), and that prose is documentation, not a dependency.
 
 use std::path::{Path, PathBuf};

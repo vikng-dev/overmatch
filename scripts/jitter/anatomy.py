@@ -39,7 +39,7 @@ from pathlib import Path
 import numpy as np
 
 # --- thresholds -------------------------------------------------------------------------------
-ONSET_DLV = 0.05    # m/s   onset trigger: quarter of the 0.20 m/s LinearVelocity rollback bar
+ONSET_DLV = 0.05    # m/s   onset trigger: well under the 1.0 m/s LinearVelocity rollback bar
 SETTLE = 32         # ticks below ONSET_DLV required before an onset can re-arm
 # "field moved" thresholds for the first-mover verdict — a field's departure from its noise floor.
 MOVED = {

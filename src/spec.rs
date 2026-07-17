@@ -372,6 +372,39 @@ impl TankSpec {
             )
             .into());
         }
+        // The force-law scalars: each reaches an integrator division or clamp bound in
+        // `track::forces` (engage/inertia divide; power/force/max_speed bound the engine
+        // curve; a NaN in any of them dissolves the belt state in one tick).
+        for (field, value) in [
+            ("powertrain.max_speed", t.powertrain.max_speed),
+            ("powertrain.power", t.powertrain.power),
+            ("powertrain.force", t.powertrain.force),
+            ("powertrain.governor_gain", t.powertrain.governor_gain),
+            ("powertrain.inertia", t.powertrain.inertia),
+            ("support.stiffness_per_m", t.support.stiffness_per_m),
+            ("support.engage", t.support.engage),
+        ] {
+            if !value.is_finite() || value <= 0.0 {
+                return Err(format!("track.{field} must be finite and > 0 (got {value})").into());
+            }
+        }
+        if !t.support.damping_per_m.is_finite() || t.support.damping_per_m < 0.0 {
+            return Err(format!(
+                "track.support.damping_per_m must be finite and >= 0 (got {})",
+                t.support.damping_per_m
+            )
+            .into());
+        }
+        for (field, value) in [
+            ("sprocket.center.0", t.sprocket.center.0),
+            ("sprocket.center.1", t.sprocket.center.1),
+            ("idler.center.0", t.idler.center.0),
+            ("idler.center.1", t.idler.center.1),
+        ] {
+            if !value.is_finite() {
+                return Err(format!("track.{field} must be finite (got {value})").into());
+            }
+        }
         for (name, weapon) in &self.weapons {
             match weapon.fire_mode {
                 FireMode::Single { reload_secs } => {
@@ -666,6 +699,43 @@ mod tests {
         spec.track.pitch = 0.0;
         let err = spec.validate().unwrap_err().to_string();
         assert!(err.contains("track.pitch"), "{err}");
+
+        // Force-law scalars: each mutation must be rejected BY NAME — a NaN or zero here
+        // reaches a division in `track::forces` and dissolves the belt state in one tick.
+        let fresh = || -> TankSpec {
+            ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron")).unwrap()
+        };
+        let cases: [(&str, fn(&mut TankSpec)); 9] = [
+            ("powertrain.max_speed", |s| {
+                s.track.powertrain.max_speed = f32::NAN;
+            }),
+            ("powertrain.power", |s| s.track.powertrain.power = 0.0),
+            ("powertrain.force", |s| s.track.powertrain.force = -1.0),
+            ("powertrain.governor_gain", |s| {
+                s.track.powertrain.governor_gain = 0.0;
+            }),
+            ("powertrain.inertia", |s| s.track.powertrain.inertia = 0.0),
+            ("support.stiffness_per_m", |s| {
+                s.track.support.stiffness_per_m = f32::INFINITY;
+            }),
+            ("support.engage", |s| s.track.support.engage = 0.0),
+            ("support.damping_per_m", |s| {
+                s.track.support.damping_per_m = -1.0;
+            }),
+            ("sprocket.center.0", |s| {
+                s.track.sprocket.center.0 = f32::NAN;
+            }),
+        ];
+        for (field, mutate) in cases {
+            let mut spec = fresh();
+            mutate(&mut spec);
+            let err = spec.validate().unwrap_err().to_string();
+            assert!(err.contains(field), "expected `{field}` in: {err}");
+        }
+        // Legal edge: zero damping (undamped support) is odd but not bricked.
+        let mut spec = fresh();
+        spec.track.support.damping_per_m = 0.0;
+        assert!(spec.validate().is_ok());
 
         // Legal edges: a tracerless stealth belt (tracer_every: 0) and instant reloads pass.
         assert!(

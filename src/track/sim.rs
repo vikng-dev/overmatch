@@ -1,7 +1,7 @@
 //! The locomotion sim (phase B): the track model's belt forces ARE how tanks drive. The ECS
-//! adapter over [`super::forces`] — one deep boundary; support, traction, hold, and belt
-//! dynamics live behind `step_side`, this module owns queries, scheduling, capability gating,
-//! and the netcode-visible [`TrackDrive`] state.
+//! adapter over [`super::forces`] — one deep boundary; support, traction, and belt dynamics
+//! live behind `step_side`, this module owns queries, scheduling, capability gating, and the
+//! netcode-visible [`TrackDrive`] state.
 //!
 //! Sim discipline (hard rules, each bought with a measured MP failure in the raycast sim this
 //! replaces):
@@ -11,8 +11,11 @@
 //!   queries, no BVH rollback dependency.
 //! - Runs every replayed tick (NO `Replaying` gate — this is sim state); stays inside
 //!   `SimPhase::DrivingForces` so drive samples velocity before the weapon-fire impulse.
-//! - `Drive` capability gates the COMMAND, not the contact model: a dead engine still grips
-//!   and holds; it just cannot thrust.
+//! - `Drive` capability gates the COMMAND, not the contact model: a dead engine still has
+//!   kinetic grip (the slip law keeps resisting motion — though it creeps on slopes, ADR-0025);
+//!   it just cannot thrust. The cut is not instant: the lost capability retargets the command
+//!   slew, so thrust fades over ~1/[`INPUT_RAMP`] s — deliberate, the same shaping as a
+//!   released key, and what makes capability loss/recovery feel mechanical rather than binary.
 
 use avian3d::prelude::{Forces, Position, ReadRigidBodyForces, Rotation, WriteRigidBodyForces};
 use bevy::math::{Affine3A, Vec2};
@@ -39,8 +42,9 @@ const MU: f32 = 0.9;
 const LATERAL_GRIP_RATIO: f32 = 0.55;
 const SLIP_SATURATION: f32 = 0.4;
 /// Command slew (per second): the vehicle's input shaping, SEPARATE from the belt governor —
-/// folding them changes keyboard feel and damage-recovery semantics (codex phase-B #9). The
-/// raycast sim's value, kept for the first playtest.
+/// folding them changes keyboard feel and damage-recovery semantics (codex phase-B #9).
+/// Provenance: adopted into the sandbox reference untuned; a playtest feel dial, not a
+/// physics constant.
 const INPUT_RAMP: f32 = 4.0;
 
 /// Per-tank tracked-drivetrain sim state: owner-predicted, replicated to remotes, rolled
@@ -199,8 +203,9 @@ fn apply_track_forces(
     for (pos, rot, mut forces, command, mut drive, mut contacts, tank_volumes, tank_caps) in
         &mut tanks
     {
-        // Drive gates THRUST, not grip: a dead driver/engine/transmission zeroes the command
-        // but the full contact model still runs, so the tracks hold the tank in place.
+        // Drive gates THRUST, not grip: a dead driver/engine/transmission retargets the
+        // command slew to zero (a ~1/INPUT_RAMP fade, see the module doc) while the full
+        // contact model keeps running, so the tracks keep their kinetic grip.
         let drive_ok = capability_available(tank_volumes, tank_caps, Capability::Drive, &volumes);
         let (target_throttle, target_steer) = if drive_ok {
             (command.throttle, command.steer)

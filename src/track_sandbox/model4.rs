@@ -1,19 +1,18 @@
-//! Field-belt model: model-3's pin-line chain with terrain contact read from a **deterministic
-//! analytic field** instead of narrow-phase queries.
+//! Field-belt model: an advected pin-line chain with terrain contact read from a **deterministic
+//! analytic field** instead of narrow-phase queries — the promoted model the sandbox hosts.
 //!
 //! The terrain oracle is a rounded-box SDF union over the course's authored blocks
 //! ([`TerrainField`], filled by `spawn_environment`). Per link, penetration is evaluated at
 //! **fixed link-local collocation stations** (the two pins + the midpoint, on the outer face) and
-//! fed to the same closed-form pressure profile as models 2/3. There is no witness point, no
-//! tie-breaking, and no collision engine anywhere in the loop: depth is a pure fixed-order
-//! arithmetic function of pose — pose-continuous (C0) and bit-deterministic by construction (the
-//! contact-oracle research verdict; see
-//! `.agents/docs/design/track-model/contact-oracle-research.md`).
+//! fed to a closed-form pressure profile. There is no witness point, no tie-breaking, and no
+//! collision engine anywhere in the loop: depth is a pure fixed-order arithmetic function of
+//! pose — pose-continuous (C0) and bit-deterministic by construction (the contact-oracle
+//! research verdict; see `.agents/docs/design/track-model/contact-oracle-research.md`).
 //!
 //! The field is **rounded** ([`FIELD_ROUNDING`]): box edges in the SDF turn instead of snapping,
 //! so normals and depths stay smooth as links cross bump corners — the "round the field, not the
-//! mesh" hardening (Drake margin / Jolt active-edge lesson), and the candidate cure for the
-//! washboard slap-down. Wheel/terrain face offsets and drivetrain: model 3's unchanged.
+//! mesh" hardening (Drake margin / Jolt active-edge lesson), and the cure for the washboard
+//! slap-down.
 //!
 //! **Width** ([`TRACK_WIDTH`]) enters as three lateral **columns** (the true shoe edges at
 //! ±[`COLUMN_OFFSET`] + the centerline, Simpson-weighted — see [`COLUMNS`]): each column samples
@@ -27,7 +26,6 @@
 //! and nothing about the drawn track is simulated or remembered. The step-21 Verlet chain remains
 //! behind the `V` toggle as the frozen A/B partner ([`conform_belts_field_chain`]).
 
-use super::model3::{PinBelt, TRACK_THICKNESS, pin_circles};
 use super::*;
 
 use crate::track::chain::{ChainInput, ChainParams, ChainSideInput, ChainState};
@@ -48,6 +46,60 @@ impl TerrainField {
     pub(super) fn signed_depth(&self, p: Vec3) -> f32 {
         self.0.signed_depth(p, CONTACT_PROBE)
     }
+}
+
+/// Link (shoe) thickness (m): the T-34's cast shoe is ~40 mm between the ground face and the
+/// wheel path. Half of it is the offset between the pin line and either face.
+pub(super) const TRACK_THICKNESS: f32 = 0.04;
+
+/// Each side's **total** belt travel (m) along the reference loop — advanced by belt speed each
+/// tick so the sampling stations travel with the belt like real links. Kept unwrapped: users wrap
+/// it mod the link pitch for the sampling offset, and its quotient is the **link-identity shift**
+/// the chain warm-start needs (how many whole links have passed).
+#[derive(Resource, Default)]
+pub(super) struct BeltPhase {
+    left: f32,
+    right: f32,
+}
+
+impl BeltPhase {
+    pub(super) fn get(&self, side: Side) -> f32 {
+        match side {
+            Side::Left => self.left,
+            Side::Right => self.right,
+        }
+    }
+    pub(super) fn advance(&mut self, side: Side, ds: f32) {
+        match side {
+            Side::Left => self.left += ds,
+            Side::Right => self.right += ds,
+        }
+    }
+}
+
+/// The belt lives on the **pin line** — `rest_circles` inflated by t/2 — whose perimeter is
+/// ~π·t longer than the belt-line loop, so the pin belt owns its own length and link count.
+#[derive(Resource, Default)]
+pub(super) struct PinBelt {
+    pub(super) length: f32,
+    pub(super) count: usize,
+}
+
+pub(super) fn init_pin_belt(mut commands: Commands) {
+    let length = polyline_len(&belt_loop(&pin_circles())) + TRACK_SLACK;
+    commands.insert_resource(PinBelt {
+        length,
+        count: (length / CONTACT_SPACING).round() as usize,
+    });
+}
+
+/// The rest-pose wheel circles inflated to the pin line (radius + t/2): the wheels touch the
+/// inner face, so the pins run a half-thickness outside every wheel surface.
+pub(super) fn pin_circles() -> Vec<(Vec2, f32)> {
+    rest_circles()
+        .iter()
+        .map(|&(c, r)| (c, r + TRACK_THICKNESS / 2.0))
+        .collect()
 }
 
 /// Shoe (link) width (m): the T-34's 500 mm plate.
@@ -121,7 +173,7 @@ const CHAIN_MOTOR_TAU: f32 = 0.05;
 /// regularizer; the anti-zigzag/anti-flutter duty moved to the pin friction + the route tube.
 const CHAIN_BEND_STIFFNESS: f32 = 2.0;
 /// Max articulation between consecutive links (rad): must clear the T-34 sprocket's wrap demand
-/// of ~31°/joint (see model 2). A hard link-geometry stop, distinct from the bending energy.
+/// of ~31°/joint. A hard link-geometry stop, distinct from the bending energy.
 const MAX_LINK_ANGLE: f32 = 35.0 * std::f32::consts::PI / 180.0;
 /// Post-solve velocity guardrails (m/s), decomposed in the route frame: route-normal speed caps
 /// hard (whip is real but bounded); tangential caps at max(8, |belt| + 5) computed inline. These
@@ -143,16 +195,15 @@ const CHAIN_TUBE_IN: f32 = 0.40;
 /// query) is what keeps the rebase from tunneling `s` across overlapping parts of the loop.
 const CHAIN_REBASE_WINDOW: f32 = 0.35;
 
-/// MODEL 4 belt contact — model 3's advected pin-line ring, penetration from the field at three
-/// fixed stations per link (pin a, midpoint, pin b — on the outer face), profile and force
-/// machinery unchanged:
+/// The belt contact — an advected pin-line ring, penetration from the field at three fixed
+/// stations per link (pin a, midpoint, pin b — on the outer face):
 ///
-/// - the two-piece linear profile between the stations replaces the cast's (pen_max, x_c) apex —
-///   the interior is interpolated instead of searched, so there is nothing to tie-break;
+/// - the two-piece linear profile between the stations interpolates the interior instead of
+///   searching it, so there is nothing to tie-break;
 /// - stations are signed (clearance below zero), so the profile's closed-form clipping still
 ///   finds the lift-off point between stations;
-/// - support + traction applied at the profile centroid on the terrain surface, exactly as
-///   model 3 (`+ out·(t/2 − pen_c)`).
+/// - support + traction applied at the profile centroid on the terrain surface
+///   (`+ out·(t/2 − pen_c)`), so the lever arm includes the shoe.
 pub(super) fn apply_belt_support_field(
     mut hull: Query<(&GlobalTransform, Forces), With<Hull>>,
     field: Res<TerrainField>,
@@ -171,8 +222,8 @@ pub(super) fn apply_belt_support_field(
     contacts.0.clear(); // the sole contact system this tick
     let dt = time.delta_secs();
 
-    // The fixed advected ring on the pin line (see model 3), closed for the core.
-    let mut loop_pts = belt_loop(&pin_circles(), None);
+    // The fixed advected ring on the pin line, closed for the core.
+    let mut loop_pts = belt_loop(&pin_circles());
     if let Some(&first) = loop_pts.first() {
         loop_pts.push(first);
     }
@@ -271,7 +322,7 @@ fn chain_params() -> ChainParams {
     }
 }
 
-/// MODEL 4's **route-chain view** (`V` toggle) — the simulated chain tier, step 24 math, now
+/// The **route-chain view** (`V` toggle) — the simulated chain tier, step 24 math, now
 /// living in [`track::chain`](crate::track::chain) (step 25 extraction): the sandbox side of the
 /// seam only gathers inputs (articulated circles, belt scalars, hull affine, gravity), calls
 /// `ChainState::step`, and writes the outputs into the sandbox's draw resources. The game's
@@ -396,7 +447,7 @@ pub(super) fn conform_belts_field_chain(
 /// 100 ms). Integrated implicitly — see [`articulate_wheels_field`].
 const WHEEL_EASE_OMEGA: f32 = 45.0;
 
-/// MODEL 4's road wheels, placed directly from the terrain FIELD — wheels first, then the belt
+/// The road wheels, placed directly from the terrain FIELD — wheels first, then the belt
 /// wraps them (`ground → wheels → belt`, acyclic; the step-21 circular order was the root of
 /// the teleport/settle wrong-side captures). Probe + easing live in
 /// [`track::wheels`](crate::track::wheels) (step 25 extraction): implicit critically-damped
@@ -431,7 +482,7 @@ pub(super) fn articulate_wheels_field(
     }
 }
 
-/// MODEL 4's track view — a **stateless kinematic wrap** (step 22): no integration, no
+/// The default track view — a **stateless kinematic wrap** (step 22): no integration, no
 /// constraints, no per-frame memory. The path is recomputed from scratch every frame as a pure
 /// function of the articulated wheels, the terrain field, and the belt phase:
 ///
@@ -662,7 +713,7 @@ fn close_loop(
     pts
 }
 
-/// The `9` viz layer for MODEL 4: the collocation stations at the **physics** ring (pins + mids
+/// The `9` viz layer: the collocation stations at the **physics** ring (pins + mids
 /// on the outer face) — grey when clear of terrain, orange when penetrating. The whole oracle,
 /// visible.
 pub(super) fn draw_sample_points(
@@ -682,7 +733,7 @@ pub(super) fn draw_sample_points(
             Side::Left => -TRACK_HALF_WIDTH,
             Side::Right => TRACK_HALF_WIDTH,
         };
-        let mut loop_pts = belt_loop(&pin_circles(), None);
+        let mut loop_pts = belt_loop(&pin_circles());
         if let Some(&first) = loop_pts.first() {
             loop_pts.push(first);
         }

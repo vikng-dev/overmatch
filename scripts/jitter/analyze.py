@@ -57,7 +57,7 @@ C_GRID = "#d9d8d5"     # recessive grid
 ROT_SPIKE_THRESHOLD = 20.0  # rad/s^2
 DIV_P = 0.05   # m   rollback position threshold
 DIV_Q = 0.05   # rad rollback rotation threshold
-DIV_LV = 0.20  # m/s rollback velocity threshold
+DIV_LV = 1.0  # m/s rollback velocity threshold (net::protocol::ROLLBACK_VELOCITY)
 
 # --- Camera-space high-pass transient detection (viewer-side hiccup hunt) ----------------------
 # A camera-follow scheduling race steps the camera ONE frame relative to the tank: the world-space

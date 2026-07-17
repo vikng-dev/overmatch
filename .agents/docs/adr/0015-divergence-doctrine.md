@@ -75,7 +75,10 @@ today* — avian issue #734 is the open upstream thread).
 *Contact and force laws must be continuous functions of pose and velocity* (divergence
 continuity). A discontinuous law lets mm/s-scale divergence pick different force regimes on the
 two machines — the sims bifurcate; a continuous law lets the same divergence nudge a blend weight
-— the sims converge. Two applications already shipped and measured:
+— the sims converge. Two applications shipped and measured in the raycast-era sim (both
+mechanisms retired with [[0025-belt-force-locomotion]]; the PRINCIPLE they proved carries —
+the belt model is continuous by construction: clipped-linear pressure profile, engagement
+ramp, slip-saturated ellipse — no regime switches anywhere in the force law):
 
 - **Sphere-cast suspension probe** ([[0005-raycast-roadwheel-locomotion]] evolved): washboard
   rollbacks −73%.

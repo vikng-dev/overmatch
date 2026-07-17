@@ -863,7 +863,7 @@ fn assert_scripted_determinism_witnesses(run: &ScriptedDeterminismRun, label: &s
     assert!(run.saw_grounded, "{label} reached ground contact");
     assert!(
         run.saw_steering_slip,
-        "{label} put a loaded wheel in the blended/kinetic regime while steering",
+        "{label} put a loaded belt contact in the slipping regime while steering",
     );
     assert!(run.saw_shot, "{label} fired at least one weapon");
     assert!(

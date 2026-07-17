@@ -1,17 +1,17 @@
 //! Scripted capture harness: run the sandbox with a scenario from the `SANDBOX_HARNESS` env var,
 //! record the full sim + visual-chain state per fixed tick as JSONL, then exit. Turns "look at
-//! the screen" into numbers — model A/Bs, field validation, and artifact diagnosis become
+//! the screen" into numbers — view A/Bs, field validation, and artifact diagnosis become
 //! reproducible offline analysis instead of screenshot forensics.
 //!
-//! `SANDBOX_HARNESS="model=4,z=-5,warmup=192,ticks=640,throttle=0.25,out=/tmp/run.jsonl"`
-//! - `model` 1–4 (registry index), `z` spawn lane position, `warmup` settle ticks at zero input,
-//!   `ticks` recorded ticks after warmup, `throttle` constant drive during the recorded window,
-//!   `view=chain` for model 4's frozen Verlet-chain view (default: kinematic wrap),
-//!   `out` JSONL path.
+//! `SANDBOX_HARNESS="z=-5,warmup=192,ticks=640,throttle=0.25,out=/tmp/run.jsonl"`
+//! - `z` spawn lane position, `warmup` settle ticks at zero input, `ticks` recorded ticks after
+//!   warmup, `throttle` constant drive during the recorded window, `view=chain` for the
+//!   route-chain view (default: kinematic wrap), `out` JSONL path. Unknown keys are ignored, so
+//!   historical scenario strings (e.g. `model=4`) keep working.
 //!
 //! Record types (one JSON object per line):
 //! - `meta` — the scenario + vehicle constants.
-//! - `scan` — model 4's terrain field sampled on fixed grids at startup (horizontal depth rows at
+//! - `scan` — the terrain field sampled on fixed grids at startup (horizontal depth rows at
 //!   several heights along the lane; vertical profiles at interesting z): validates the oracle
 //!   itself (monotonicity, plateaus, rounding) with no sim in the loop.
 //! - `k` — per fixed tick: hull pose/velocity, belt speed/phase, every contact
@@ -28,7 +28,6 @@ use super::*;
 /// on this resource existing).
 #[derive(Resource)]
 pub(super) struct Harness {
-    model: Model,
     z: f32,
     warmup: u64,
     ticks: u64,
@@ -37,8 +36,8 @@ pub(super) struct Harness {
     /// `throttle2` — e.g. accelerate then slam reverse (the track-compression scenario).
     t2: u64,
     throttle2: f32,
-    /// `view=chain` runs model 4 with the frozen Verlet-chain view instead of the kinematic wrap
-    /// (the step-22 view A/B, scripted).
+    /// `view=chain` runs the route-chain view instead of the kinematic wrap (the step-22 view
+    /// A/B, scripted).
     chain_view: bool,
     out: String,
 }
@@ -53,7 +52,6 @@ pub(super) struct HarnessLog {
 pub(super) fn parse_env() -> Option<Harness> {
     let spec = std::env::var("SANDBOX_HARNESS").ok()?;
     let mut h = Harness {
-        model: Model::FieldBelt,
         z: 0.0,
         warmup: 192,
         ticks: 640,
@@ -68,10 +66,6 @@ pub(super) fn parse_env() -> Option<Harness> {
             continue;
         };
         match key.trim() {
-            "model" => {
-                let idx: usize = value.trim().parse().unwrap_or(4);
-                h.model = MODELS[(idx - 1).min(MODELS.len() - 1)];
-            }
             "z" => h.z = value.trim().parse().unwrap_or(0.0),
             "warmup" => h.warmup = value.trim().parse().unwrap_or(192),
             "ticks" => h.ticks = value.trim().parse().unwrap_or(640),
@@ -91,16 +85,14 @@ fn arr(vals: impl IntoIterator<Item = f32>) -> String {
     format!("[{}]", inner.join(","))
 }
 
-/// Apply the scenario (model, spawn) and write the meta + field-scan records.
+/// Apply the scenario (view, spawn) and write the meta + field-scan records.
 pub(super) fn harness_setup(
     mut commands: Commands,
     harness: Res<Harness>,
     field: Res<TerrainField>,
-    mut active: ResMut<ActiveModel>,
     mut view: ResMut<TrackViewMode>,
     hull: Single<(&mut Transform, &mut LinearVelocity, &mut AngularVelocity), With<Hull>>,
 ) {
-    active.0 = harness.model;
     view.kinematic = !harness.chain_view;
     let (mut transform, mut lin, mut ang) = hull.into_inner();
     *transform = Transform::from_xyz(0.0, HULL_REST_Y, harness.z);
@@ -109,10 +101,11 @@ pub(super) fn harness_setup(
 
     let file = File::create(&harness.out).expect("harness out path must be writable");
     let mut writer = BufWriter::new(file);
-    let model_idx = MODELS.iter().position(|m| *m == harness.model).unwrap() + 1;
     writeln!(
         writer,
-        "{{\"t\":\"meta\",\"model\":{model_idx},\"view\":\"{}\",\"z\":{:.3},\"warmup\":{},\"ticks\":{},\"throttle\":{:.3},\"weight\":{:.0},\"hull_rest_y\":{HULL_REST_Y},\"thickness\":{TRACK_THICKNESS}}}",
+        // `"model":4` is pinned: the sandbox hosts only the promoted field-belt model, and the
+        // field stays for schema stability with existing analyzers.
+        "{{\"t\":\"meta\",\"model\":4,\"view\":\"{}\",\"z\":{:.3},\"warmup\":{},\"ticks\":{},\"throttle\":{:.3},\"weight\":{:.0},\"hull_rest_y\":{HULL_REST_Y},\"thickness\":{TRACK_THICKNESS}}}",
         if harness.chain_view { "chain" } else { "wrap" },
         harness.z,
         harness.warmup,
@@ -122,7 +115,7 @@ pub(super) fn harness_setup(
     )
     .unwrap();
 
-    // Field scans (meaningful for model 4; cheap and harmless otherwise). Horizontal rows: signed
+    // Field scans. Horizontal rows: signed
     // depth along the lane at the track line, at several heights — the terrain cross-section the
     // belly stations actually read. Vertical profiles: depth vs y at a board center / board edge /
     // gap center per washboard set — monotonicity and plateaus as numbers.

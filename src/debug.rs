@@ -74,7 +74,7 @@ fn sync_avian_gizmos(show: Res<ShowGizmos>, mut store: ResMut<GizmoConfigStore>)
 }
 
 /// Avian's raycast gizmo samples at the physics tick and can't interpolate, so we silence it and
-/// draw our own synced ray in `draw_wheel_forces`. Its collider gizmo uses `GlobalTransform` (so
+/// draw our own synced arrows in `draw_wheel_forces`. Its collider gizmo uses `GlobalTransform` (so
 /// it's already interpolated) — we keep that one. The result: all gizmos move with the rendered tank.
 fn configure_physics_gizmos(mut store: ResMut<GizmoConfigStore>) {
     let (_, gizmos) = store.config_mut::<PhysicsGizmos>();

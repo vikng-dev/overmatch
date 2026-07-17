@@ -149,7 +149,7 @@ pub(crate) fn log_prediction_diagnostics(
     info!("net: PredictionDiagnostics rollbacks={rollbacks} rollback_depth={depth:.2}");
 }
 
-/// Periodically log wheel contacts and each root's turret/reload state.
+/// Periodically log grounded track sides and each root's turret/reload state.
 pub(crate) fn log_sim_evidence(
     turrets: Query<(&ServoIndex, &TankRoot), With<Turret>>,
     sims: Query<(Entity, &TankSim)>,

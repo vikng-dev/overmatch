@@ -56,7 +56,7 @@ import numpy as np
 # Rollback thresholds (net/protocol.rs) — printed alongside the magnitudes for context, not gates.
 DIV_P = 0.05   # m
 DIV_Q = 0.05   # rad
-DIV_LV = 0.20  # m/s
+DIV_LV = 1.0  # m/s — net::protocol::ROLLBACK_VELOCITY (gross-desync gate)
 
 SUBS = ("hpos", "hrot", "hlv", "hav", "hsim")
 SUB_LABEL = {"hpos": "pos", "hrot": "rot", "hlv": "lv", "hav": "av", "hsim": "sim"}
@@ -304,7 +304,7 @@ def join(c_rows, s_rows, warmup_ticks):
         dav = (float(np.linalg.norm(c["av"] - s["av"]))
                if c["av"] is not None and s["av"] is not None else float("nan"))
         # Workload window from the sim's own contact signal on BOTH ends.
-        gnd_ok = (c["gnd"] == 16 and s["gnd"] == 16)
+        gnd_ok = (c["gnd"] == 2 and s["gnd"] == 2)
         hc_zero = ((c["hc"] in (0, None)) and (s["hc"] in (0, None)))
         flat = gnd_ok and hc_zero
         out.append({"tick": tk, "h_match": h_match, "sub_match": sub_match,
@@ -421,7 +421,7 @@ def print_tank(label, s):
     print("\n    HASH MATCH RATE (fraction of shared ticks bit-identical on both ends)")
     print(f"      overall           {fmt_pct(s['rate_all'])}   ({s['matched']}/{s['n']})")
     print(f"      flat-ground cruise{fmt_pct(s['rate_flat'])}   "
-          f"({s['n_flat']} ticks: gnd=16 & hc=0 both ends)")
+          f"({s['n_flat']} ticks: gnd=2 (both sides) & hc=0 both ends)")
     print(f"      contact transient {fmt_pct(s['rate_trans'])}   "
           f"({s['n_trans']} ticks: hull contact / tracks lifting / airborne)")
 

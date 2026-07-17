@@ -76,9 +76,9 @@ pub struct TrackDriveSide {
   `WIRE_SURFACE_HASH`/`WIRE_TYPES_HASH` re-pinned; `PROTOCOL_REV` bump.
 - Joins the determinism hash: new `hblt` stream in `trace::hash_tank_state` (speed +
   phase-bits per side); `anc`/`drv` streams retire with their state.
-- `DriveState` dies. Input shaping (`DRIVE_RAMP` smoothing of TankCommand) moves into the
-  belt-dynamics step — the governor chasing `command × max_speed` IS the smoothing; one model
-  instead of two.
+- `DriveState` dies. ~~Input shaping folds into the governor~~ (v1 claim, WRONG — see §3a):
+  command slew (`INPUT_RAMP`) and the governor are DISTINCT stages (input feel vs belt-speed
+  dynamics), exactly as the sandbox runs `DRIVE_RAMP` before its governor. Both survive.
 - Phase is sim state (stations advect with it → it affects forces): rolls back, replicates.
   Bonus: remote views get exact link phase — no client integration drift.
 
@@ -160,6 +160,33 @@ driving model was a pure placeholder — nothing structural carries over. Dispos
   scenario); headless determinism capture; MP smoke (server + client, drive + fire);
   feel-continuity checklist for Yan's playtest (climb limits, stop distance, pivot turn,
   slope hold, coast-down).
+
+## 5a. Purity gates (codex purity audit, 2026-07-17 — the standing review bar)
+
+Adopted from `scratchpad/codex_purity_review.md` so future transplants get caught in review:
+
+- `track/forces.rs` is the ONLY force-law module. Adapters gather inputs, call `step_side`,
+  replay ordered applications, commit returned state — nothing else. Any clamp, ramp, probe
+  rule, or force equation OUTSIDE the shared core requires explicit design review.
+- Only three adapter-level differences are legitimate: vehicle-authored data, game capability
+  gating, and tick-truth ECS/netcode plumbing.
+- Every spec scalar: one named consumer, finite/range validation (shipped — `spec::validate`),
+  and MEASURED/DERIVED provenance tied to a sandbox experiment or vehicle datum.
+- Deleted identifiers are deny-listed in live source/current docs: `crate::driving`,
+  `DriveState`, `SuspensionParams`, `TankSim::anchors`, `STICK_*`, brush-anchor terms,
+  driving-context casts. Historical documents (ADRs with superseded markers, HQ log,
+  measurement dossiers) are exempt BY marker.
+- Provenance ledger (codex genealogy findings): slip saturation 0.4, contact profile,
+  engagement ramp, constant-power curve, reflected inertia, probe layout = sandbox-native.
+  μ 0.9, lateral ratio 0.55, INPUT_RAMP 4.0/s = numerically inherited from the placeholder,
+  ADOPTED into the sandbox reference untuned — playtest feel dials, re-tune candidates, not
+  physics constants (comments in sim.rs say so; stop re-litigating unless feel says otherwise).
+- Open extraction debts: shared param-assembly constructor (`model4::force_params` vs
+  `init_track_gear` duplicate assembly); shared fixed-tick `DriveShaper` + a harness scenario
+  that enters through RAW command edges (today's harness writes shaped input directly, so the
+  ramp is untested in the parity path); sandbox `BeltPhase` still f32 (promote to f64 and
+  take `report.state.phase` verbatim — needs a deliberate re-baseline, it shifts the parity
+  bits).
 
 ## 6. Risks + watch items
 

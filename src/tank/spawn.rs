@@ -11,7 +11,7 @@ use bevy::prelude::*;
 use super::integrity::authored_attachment;
 use super::model::{
     Gun, GunBarrel, Hull, Muzzle, Rig, Roadwheel, Tank, TankRoot, TankSim, TankViews, TrackSide,
-    Turret, ViewConfig, Weapon, WeaponIndex, WeaponState, WheelIndex,
+    Turret, ViewConfig, Weapon, WeaponIndex, WeaponState,
 };
 use super::servo::{ServoCommand, ServoIndex, ServoRest, ServoRole, ServoState};
 use super::view::{SimParts, bind_tank_view};
@@ -490,10 +490,8 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
 
     // --- Wheels: rig stations in name-sorted order (the track view reads their side/pose; the
     // belt force model uses the BAKED rest circles — articulation is view-only).
-    for (slot, &(index, side)) in wheel_nodes.iter().enumerate() {
-        commands
-            .entity(entity_at(index))
-            .insert((Roadwheel { side }, WheelIndex(slot)));
+    for &(index, side) in wheel_nodes {
+        commands.entity(entity_at(index)).insert(Roadwheel { side });
     }
 
     // --- Structural markers.

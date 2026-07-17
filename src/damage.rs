@@ -548,7 +548,7 @@ pub fn requirement_met(
 /// controlled, *where its parts are* ([`Rig`]), and *what it can still do* (capabilities) — so a
 /// system takes one `ControlledTank` param instead of repeating a controlled-tank query, a
 /// [`VolumeFacets`] query, and a `capability_available(..)` call. Scoped to the single [`Controlled`]
-/// tank; per-tank consumers ([`apply_drive`](crate::driving), the HUD) keep using [`VolumeFacets`]
+/// tank; per-tank consumers (`track::sim::apply_track_forces`, the HUD) keep using [`VolumeFacets`]
 /// directly since they iterate every tank.
 #[derive(SystemParam)]
 pub struct ControlledTank<'w, 's> {

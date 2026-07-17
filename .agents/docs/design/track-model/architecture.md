@@ -1,10 +1,11 @@
 # Track module architecture — promoting the sandbox model into the game
 
-Status: v3 (step 26, 2026-07-17) — phase A **shipped** (`src/track/view.rs`; §3/§6/§7 amended
-with the tier-line discussion + the codex view-plugin review,
-`scratchpad/codex_viewplugin_review.md`). v2 reconciled v1 against the codex adversarial review
-(`scratchpad/codex_arch25_review.md`, 10 findings, all dispositioned below). Companion to HQ.md
-(the step log) and the ADRs it will amend (ADR-0005 rewrite; ADR-0014 cited). Foundation
+Status: v4 (step 27, 2026-07-17) — phase B **shipped**: the belt model IS the game's drive
+sim (see §0a; ADR-0025 written, supersedes ADR-0005, retires ADR-0006). v3 (step 26) shipped
+phase A (`src/track/view.rs`) with the tier-line discussion + codex view-plugin review. v2
+reconciled v1 against the codex adversarial review (`scratchpad/codex_arch25_review.md`, 10
+findings, all dispositioned below). Companion to HQ.md (the step log) and
+`phase-b-migration.md` (the cutover plan, v2). Foundation
 document for "many tanks, one model"; every structural decision is judged against Yan's three
 constraints:
 
@@ -28,6 +29,27 @@ constraints:
 - Sandbox: the math to promote (oracle/route/chain/wheels/forces) is entangled with
   sandbox-local types (`Side`, `RigWheel`, `Suspension`, `PinBelt`, `ConformedBelts` …) — the
   promotion is a seam rewrite around copied math bodies, not a file move (codex E).
+
+## 0a. Phase-B reality (v4, 2026-07-17 — commit 9758d97)
+
+§0 below is the PRE-cutover survey, kept as the baseline the migration was judged against.
+What is true now:
+
+- `src/driving/` is DELETED. Locomotion is `src/track/forces.rs` (pure belt force law — the
+  sandbox model, extracted verbatim, bit-parity-proven) + `src/track/sim.rs` (ECS adapter:
+  `TrackDrive`/`TrackContacts`/`TrackGear`, capability gate, `SimPhase::DrivingForces`).
+- `DriveState` is gone. `TrackDrive {throttle, steer, [speed, phase f64]×2}` is
+  owner-predicted + replicated + rolled back (LinearVelocity pattern, NOT local_rollback);
+  `hblt` hash stream; PROTOCOL_REV 12.
+- The terrain oracle is `track::terrain::TrackField` in SimPlugin — server, SP, and client
+  share one analytic field built from `TerrainMap` on revision change.
+- The view consumes `TrackDrive` phase/speed directly — the pose-delta no-slip derivation is
+  deleted; remote tracks scroll at exact authority phase.
+- The hold/bristle transplant was attempted and REVERTED (owner call — pure sandbox law;
+  slope creep accepted; future hill-hold = per-element bristle; `phase-b-migration.md` §3a).
+- Sandbox `model4` is a thin adapter over `track::forces` — the entanglement noted in §0
+  (codex E) was dissolved by the extraction; models 1–3 deleted in the consolidation pass.
+- Vehicle collision proxies carry `Friction::ZERO` (min-combine): all grip is the model's.
 
 ## 1. The shape: one geometric core, three consumers
 

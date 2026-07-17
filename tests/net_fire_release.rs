@@ -579,7 +579,7 @@ type Seq2 = NativeStateSequence<Cmd2>;
 ///
 /// **And that single tick is why consumables are gated and levels are not.** One tick is 15.6 ms.
 /// For a LEVEL it is 15.6 ms of extra throttle on a 57-tonne vehicle — a centimetre of travel, wiped
-/// out by the very next tick's real input, and physically beneath the suspension's noise floor. For a
+/// out by the very next tick's real input, and physically beneath the contact model's noise floor. For a
 /// CONSUMABLE it is a round out of the barrel: the MG's reload timer sits at 0 after a burst, so a
 /// single stray trigger-true tick fires immediately, spends ammo and deals damage — and there is
 /// nothing to take back. Same tick, same freeze, categorically different consequence. That asymmetry

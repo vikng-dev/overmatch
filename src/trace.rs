@@ -75,7 +75,7 @@ impl TraceWriter {
     }
 }
 
-// JSON helpers shared with the suspension recorder. Non-finite values become JSON `null`.
+// JSON helpers shared across the recorders. Non-finite values become JSON `null`.
 
 pub(crate) fn num(x: f32) -> Value {
     Value::from(x as f64)
@@ -668,7 +668,9 @@ fn record_tick(
             "thr": num(drive.throttle),
             "str": num(drive.steer),
             "belt": [num(drive.sides[0].speed), num(drive.sides[1].speed)],
-            "bph": [num(drive.sides[0].phase as f32), num(drive.sides[1].phase as f32)],
+            // Full f64 — the phase IS f64 sim state; narrowing here would hide sub-f32-ULP
+            // divergence from the offline join.
+            "bph": [Value::from(drive.sides[0].phase), Value::from(drive.sides[1].phase)],
             "hc": hull_contacts,
             "pen": num(penetration),
             "ctl": controlled,

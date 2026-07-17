@@ -127,18 +127,6 @@ pub struct TankSim {
 #[derive(Component, Clone, Copy)]
 pub struct WeaponIndex(pub usize);
 
-/// This roadwheel's slot in name-sorted rig order, spawn-assigned. Phase B removed its last
-/// reader (the per-wheel suspension trace); the slot CONTRACT (name-sorted = bake order on
-/// both wire ends) still holds and per-wheel telemetry will key on it again.
-#[derive(Component, Clone, Copy)]
-pub struct WheelIndex(
-    #[expect(
-        dead_code,
-        reason = "slot contract kept; phase-B trace v2 dropped the last per-wheel reader — next per-wheel telemetry rekeys on this"
-    )]
-    pub usize,
-);
-
 /// Compose tick-truth local transforms from the physics root. Simulation must not read
 /// `GlobalTransform`, which belongs to the interpolated render frame. Returns `None` when the node
 /// is no longer under `root`.

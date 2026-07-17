@@ -1586,6 +1586,22 @@ both.
     `tiger-authoring-agenda.md` v3). Visual sign check (witness link + sprocket tooth lock)
     in Yan's next feel pass — wheel↔chain sync now expected to hold. Phase B unchanged, gated.
 
+- 2026-07-17 — **Step 27 landed: PHASE B SHIPPED** (commit 9758d97, main; 223 tests green,
+  clippy 0, sandbox reversal harness bit-identical to the commit-B baseline, MP smoke clean).
+  The belt model IS the game's drive sim: `src/track/forces.rs` (pure sandbox law) +
+  `src/track/sim.rs` (ECS adapter, `TrackDrive`/`TrackContacts`/`TrackGear`); `src/driving/`
+  DELETED; `TrackDrive` owner-predicted/replicated/rolled-back (PROTOCOL_REV 12, `hblt` hash
+  stream); view scrolls on authority phase (f64, unbounded). Mid-cutover course correction
+  (Yan): the v1 plan's hold/bristle transplant + old-feel powertrain numbers were REMOVED —
+  pure sandbox law, sandbox-scaled Tiger numbers (stiff governor 60k, support 1.46M/m,
+  inertia 16k), slope-parking creep (~16 cm/s @ 20°, bounded) ACCEPTED as a known gap;
+  future hill-hold = per-element bristle of THIS model (`phase-b-migration.md` §3a).
+  ADR-0025 written (supersedes 0005, retires 0006); architecture.md v4 (§0a phase-B
+  reality); trace schema v2 + divergence/jitter analyzers retargeted; legacy-residue sweep
+  purged stale suspension/anchor/DriveState wording repo-wide.
+  - NEXT: sandbox consolidation (models 1–3 die, commit D), steer-feel scenarios + Yan feel
+    pass (steer is UNPLAYED in-game), Tiger link-mesh authoring session.
+
 ## Open questions / parking lot
 
 - **Lateral link rigidity (Yan, 2026-07-16, open tab)**: a real shoe is ~perfectly stiff

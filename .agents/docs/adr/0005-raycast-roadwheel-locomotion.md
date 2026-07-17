@@ -1,5 +1,7 @@
 # Tracked locomotion via raycast roadwheels; the track is cosmetic
 
+> **Status: superseded by [[0025-belt-force-locomotion]]** (2026-07-17). The raycast placeholder served through the first MP combat slices, then the sandbox-developed belt-force model replaced it wholesale (`src/driving/` deleted). Kept as the decision trail — the emergence rationale below (weight transfer, load-dependent grip from shared contact stations) is exactly what the belt model preserves, with the stations now on the belt itself.
+
 We model driving as a **raycast vehicle**: the hull is a single dynamic rigid body, and each roadwheel is a downward **ray with a spring-damper**, not a collider. Each ray's contact station does double duty — its spring force holds the hull up (**support**), and its normal load feeds a capped-Coulomb friction sample (**drive**: differential thrust plus skid-steer lateral resistance). The track belt is purely **cosmetic** and carries no physics.
 
 This is the near-universal pattern for game tanks. It buys emergence: ride height, pitch under acceleration, roll on slopes, weight transfer, and how normal load splits between the tracks all fall out of the per-wheel springs — nothing scripted. The friction sample points and the suspension wheels are the *same* set of contact stations, so support and drive share one declaration without entangling (support computes per-station load; drive reads it).
