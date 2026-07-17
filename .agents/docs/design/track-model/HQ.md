@@ -1602,6 +1602,21 @@ both.
   - NEXT: sandbox consolidation (models 1–3 die, commit D), steer-feel scenarios + Yan feel
     pass (steer is UNPLAYED in-game), Tiger link-mesh authoring session.
 
+- 2026-07-17 — **Step 28: commit-E steer gates** (codex steer review executed; commits
+  0dfe5bd/a0317ba/+analyzer). Shared `track/drive.rs` shaper seam (harness now enters RAW
+  edges — the slew is in the tested path); honest per-side telemetry (damped actual load,
+  slip_lat, f_long/f_lat, engine/reaction — the "elastic-only load" trap closed); harness
+  schema 2; `scripts/track/analyze_steer.py` = the offline gate suite. FIRST steer proof,
+  all bit-repeatable (T-34 lab): monotone turn radius 93.5/35.0/18.3 m at steer .1/.2/.3
+  (thr .5), pivot radius 0.033 m with 0.05% belt symmetry and clean counter-rotation,
+  ellipse never exceeded (103k contacts/run), dissipation signs 0 violations, understeer
+  ratio r_fit/r_noslip ≈ 1.4–1.5 (the ellipse feel flag). 2 accepted scenario artifacts:
+  turn-in lag at steer=0.1 (yaw-sign 91% over the full window, 100% settled), slalom net
+  heading 21.7° (washboard asymmetry + rest-start, not a sign bias). Course-exit trimming:
+  turn runs drive off the finite lane (support-collapse detection ends the window).
+  `feel-pass-checklist.md` written for Yan's first drive. Remaining commit-E tail: slope
+  presets (`pose=slope_*`), rollback steer-edge tests, remote circling-bot capture.
+
 ## Open questions / parking lot
 
 - **Lateral link rigidity (Yan, 2026-07-16, open tab)**: a real shoe is ~perfectly stiff
