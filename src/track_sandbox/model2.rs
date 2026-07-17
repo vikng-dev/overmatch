@@ -539,26 +539,6 @@ pub(super) fn conform_belts_links(
     }
 }
 
-/// Integrate `max(0, pen(x))` over one linear piece of a pressure profile: `pen` runs `p0 → p1`
-/// across `[x0, x1]`. Returns `(∫pen dx, ∫x·pen dx, contacting length)`, clipping the sub-range
-/// where the profile is negative (that part of the plate is clear of the ground). Closed form, so
-/// the plate's resultant force and centroid are smooth functions of pose — no sampling noise.
-pub(super) fn clipped_linear_piece(x0: f32, x1: f32, p0: f32, p1: f32) -> (f32, f32, f32) {
-    let w = x1 - x0;
-    if w <= 0.0 || (p0 <= 0.0 && p1 <= 0.0) {
-        return (0.0, 0.0, 0.0);
-    }
-    if p0 >= 0.0 && p1 >= 0.0 {
-        // Trapezoid: A = w·(p0+p1)/2; M = ∫x·pen dx with pen linear in x.
-        let area = w * (p0 + p1) / 2.0;
-        let moment = w * (p0 * (2.0 * x0 + x1) + p1 * (x0 + 2.0 * x1)) / 6.0;
-        return (area, moment, w);
-    }
-    // One end negative: clip at the zero crossing and integrate the positive triangle.
-    let xc = x0 + w * (p0 / (p0 - p1));
-    if p0 > 0.0 {
-        clipped_linear_piece(x0, xc, p0, 0.0)
-    } else {
-        clipped_linear_piece(xc, x1, 0.0, p1)
-    }
-}
+/// The pressure-profile integrator — promoted to the game's force core (phase B); re-exported
+/// so models 2–4 keep their import path until the lab consolidates on the promoted model.
+pub(super) use crate::track::forces::clipped_linear_piece;

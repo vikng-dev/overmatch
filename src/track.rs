@@ -11,6 +11,7 @@
 //! the game's ECS adapter, mounted by the windowed clients only.
 
 pub mod chain;
+pub mod forces;
 pub mod oracle;
 pub mod route;
 pub mod terrain;

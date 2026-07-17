@@ -27,10 +27,11 @@
 //! and nothing about the drawn track is simulated or remembered. The step-21 Verlet chain remains
 //! behind the `V` toggle as the frozen A/B partner ([`conform_belts_field_chain`]).
 
-use super::model2::clipped_linear_piece;
 use super::model3::{PinBelt, TRACK_THICKNESS, pin_circles};
 use super::*;
+
 use crate::track::chain::{ChainInput, ChainParams, ChainSideInput, ChainState};
+use crate::track::forces::{ForceParams, SideInput, SideState, step_side};
 use crate::track::oracle::{BlockField, TerrainOracle};
 use crate::track::wheels::{WheelParams, wheel_lift_step, wheel_lift_target};
 
@@ -170,6 +171,13 @@ pub(super) fn apply_belt_support_field(
     contacts.0.clear(); // the sole contact system this tick
     let dt = time.delta_secs();
 
+    // The fixed advected ring on the pin line (see model 3), closed for the core.
+    let mut loop_pts = belt_loop(&pin_circles(), None);
+    if let Some(&first) = loop_pts.first() {
+        loop_pts.push(first);
+    }
+    let params = force_params();
+
     for side in [Side::Left, Side::Right] {
         let track_x = match side {
             Side::Left => -TRACK_HALF_WIDTH,
@@ -180,143 +188,56 @@ pub(super) fn apply_belt_support_field(
             Side::Right => input.throttle - input.steer,
         }
         .clamp(-1.0, 1.0);
-        let belt_speed = belt.get(side);
-        let mut belt_reaction = 0.0;
 
-        // The fixed advected ring on the pin line (see model 3).
-        let mut loop_pts = belt_loop(&pin_circles(), None);
-        if let Some(&first) = loop_pts.first() {
-            loop_pts.push(first);
+        let side_input = SideInput {
+            loop_pts: &loop_pts,
+            count: pin_belt.count,
+            plane_x: track_x,
+            command,
+        };
+        let state = SideState {
+            speed: belt.get(side),
+            phase: phase.get(side),
+        };
+        let report = step_side(&side_input, state, affine, dt, &params, &field.0, |p| {
+            forces.velocity_at_point(p)
+        });
+        // Apply in report order — accumulation order is part of bit-reproducibility.
+        for app in &report.apps {
+            forces.apply_force_at_point(app.force, app.point);
         }
-        let pitch = polyline_len(&loop_pts) / pin_belt.count.max(1) as f32;
-        let mut stations = resample(&loop_pts, pitch, phase.get(side).rem_euclid(pitch));
-        stations.truncate(pin_belt.count);
-        let n = stations.len();
-        if n < 3 {
-            continue;
+        for c in &report.contacts {
+            contacts.0.push(Contact {
+                local: to_local.transform_point3(c.point),
+                load: c.load,
+                normal: c.normal,
+                slip: c.slip,
+                traction: c.traction,
+            });
         }
+        belt.set(side, report.state.speed);
+        phase.advance(side, state.speed * dt);
+    }
+}
 
-        for i in 0..n {
-            let a = stations[i];
-            let b = stations[(i + 1) % n];
-            let seg = b - a;
-            let len = seg.length();
-            if len < 1e-4 {
-                continue;
-            }
-            let tan2 = seg / len;
-            let out2 = Vec2::new(tan2.y, -tan2.x);
-
-            let wa = affine.transform_point3(Vec3::new(track_x, a.y, a.x));
-            let wb = affine.transform_point3(Vec3::new(track_x, b.y, b.x));
-            let out = affine
-                .transform_vector3(Vec3::new(0.0, out2.y, out2.x))
-                .normalize_or_zero();
-            let axis = (wb - wa) / len;
-            let lat = out.cross(axis);
-            let face = out * (TRACK_THICKNESS / 2.0);
-
-            // WIDTH: the 500 mm shoe is sampled as three lateral COLUMNS (edges + center; see
-            // [`COLUMNS`] — positions set the detection Nyquist, weights match the uniform
-            // strip's load AND roll moments exactly). Each column runs the full profile
-            // machinery on its own three stations with its weight of the per-metre
-            // coefficients and applies its resultant at its own point — roll torque from a
-            // curb under one track edge, cross-slope contact, and half-off-a-ledge support
-            // all emerge from the application points.
-            for (offset, weight) in COLUMNS {
-                let shift = lat * offset;
-                let ca = wa + shift;
-                let cb = wb + shift;
-
-                // The three collocation stations, on the outer face; depth along the link's own
-                // outward normal (the cast semantics — see `depth_along`).
-                let pen_a = field.depth_along(ca + face, out);
-                let pen_m = field.depth_along((ca + cb) / 2.0 + face, out);
-                let pen_b = field.depth_along(cb + face, out);
-                let pen_max = pen_a.max(pen_m).max(pen_b);
-                if pen_max <= 0.0 {
-                    continue;
-                }
-
-                let (a1, m1, l1) = clipped_linear_piece(0.0, len / 2.0, pen_a, pen_m);
-                let (a2, m2, l2) = clipped_linear_piece(len / 2.0, len, pen_m, pen_b);
-                let (area, moment, contact_len) = (a1 + a2, m1 + m2, l1 + l2);
-                if area <= 0.0 {
-                    continue;
-                }
-                // Resultant at the terrain surface, on this column: the profile's own value at
-                // the centroid position. (Model 3's `(pen_a+pen_max)/2` ignored pen_b and moved
-                // the traction point ±5 cm under mirroring — codex finding, step 21c. The normal
-                // force is offset-invariant along its own line; the traction lever is not.)
-                let x_c = moment / area;
-                let pen_c = if x_c <= len / 2.0 {
-                    pen_a + (pen_m - pen_a) * (x_c / (len / 2.0))
-                } else {
-                    pen_m + (pen_b - pen_m) * ((x_c - len / 2.0) / (len / 2.0))
-                }
-                .max(0.0);
-                let p = ca + axis * x_c + out * (TRACK_THICKNESS / 2.0 - pen_c);
-
-                // (1) Support: penalty spring along the belt's own inward normal (see model
-                // 1/2), at the column's share of the per-metre coefficients.
-                let normal = -out;
-                let vel = forces.velocity_at_point(p);
-                let engage = (pen_max / CONTACT_ENGAGE).clamp(0.0, 1.0);
-                let load = weight
-                    * (SUPPORT_STIFFNESS_PER_M * area
-                        - SUPPORT_DAMPING_PER_M * contact_len * vel.dot(normal))
-                    .max(0.0)
-                    * engage;
-                if load <= 0.0 {
-                    continue;
-                }
-                forces.apply_force_at_point(normal * load, p);
-
-                // (2) Traction: slip-saturated friction on the ellipse (see model 1/2); grip
-                // scales with the column's (halved) load.
-                let mut slip_long = 0.0;
-                let mut traction = Vec3::ZERO;
-                let drive = -affine.transform_vector3(Vec3::new(0.0, tan2.y, tan2.x));
-                let long_plane = drive - drive.dot(normal) * normal;
-                if long_plane.length() > 1e-4 {
-                    let long_dir = long_plane.normalize();
-                    let lat_dir = normal.cross(long_dir).normalize_or_zero();
-                    slip_long = belt_speed - vel.dot(long_dir);
-                    let s_lat = vel.dot(lat_dir);
-                    let grip = MU * load;
-                    let grip_lat = grip * LATERAL_GRIP_RATIO;
-                    let mut f_long = grip * (slip_long / SLIP_SATURATION).clamp(-1.0, 1.0);
-                    let mut f_lat = -grip_lat * (s_lat / SLIP_SATURATION).clamp(-1.0, 1.0);
-                    let e = (f_long / grip).powi(2) + (f_lat / grip_lat).powi(2);
-                    if e > 1.0 {
-                        let s = e.sqrt().recip();
-                        f_long *= s;
-                        f_lat *= s;
-                    }
-                    traction = long_dir * f_long + lat_dir * f_lat;
-                    forces.apply_force_at_point(traction, p);
-                    belt_reaction += f_long;
-                }
-
-                // Displayed load = the **elastic** component only (see model 2), at the
-                // column's weight like the physics.
-                contacts.0.push(Contact {
-                    local: to_local.transform_point3(p),
-                    load: weight * SUPPORT_STIFFNESS_PER_M * area * engage,
-                    normal,
-                    slip: slip_long,
-                    traction,
-                });
-            }
-        }
-
-        // Belt dynamics + advection, identical to models 2/3.
-        let target = command * MAX_BELT_SPEED;
-        let avail = engine_available(belt_speed);
-        let engine = (BELT_GOVERNOR_GAIN * (target - belt_speed)).clamp(-avail, avail);
-        let next = belt_speed + (engine - belt_reaction) / BELT_INERTIA * dt;
-        belt.set(side, next.clamp(-MAX_BELT_SPEED, MAX_BELT_SPEED));
-        phase.advance(side, belt_speed * dt);
+/// The sandbox's force parameters: the T-34 lab vehicle + the shared support/friction law,
+/// assembled for [`track::forces`](crate::track::forces) — the promoted single implementation.
+fn force_params() -> ForceParams {
+    ForceParams {
+        thickness: TRACK_THICKNESS,
+        columns: COLUMNS,
+        support_stiffness_per_m: SUPPORT_STIFFNESS_PER_M,
+        support_damping_per_m: SUPPORT_DAMPING_PER_M,
+        engage_depth: CONTACT_ENGAGE,
+        probe_reach: CONTACT_PROBE,
+        mu: MU,
+        lateral_ratio: LATERAL_GRIP_RATIO,
+        slip_saturation: SLIP_SATURATION,
+        max_speed: MAX_BELT_SPEED,
+        engine_power: ENGINE_POWER,
+        engine_force: ENGINE_FORCE,
+        governor_gain: BELT_GOVERNOR_GAIN,
+        inertia: BELT_INERTIA,
     }
 }
 
