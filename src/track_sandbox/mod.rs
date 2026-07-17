@@ -33,8 +33,15 @@ use model3::{
     TRACK_THICKNESS, apply_belt_support_boxes, conform_belts_boxes, draw_cast_shapes, init_pin_belt,
 };
 use model4::{
-    FieldBox, TerrainField, apply_belt_support_field, articulate_wheels_field, conform_belts_field,
+    TerrainField, apply_belt_support_field, articulate_wheels_field, conform_belts_field,
     conform_belts_field_chain, draw_sample_points,
+};
+// The pure track core (route geometry) — moved out for game promotion (architecture §2); the
+// sandbox consumes it exactly as the game's view plugin will. Re-exported so the model
+// submodules' `use super::*` keeps resolving.
+pub(crate) use crate::track::oracle::{BlockField, TerrainBlock};
+pub(crate) use crate::track::route::{
+    Route, RouteTag, arc, build_route, external_tangent, polyline_len, resample, sag_span,
 };
 
 // --- Rig geometry (metres), benchmarked on the **Soviet T-34** — well-documented numbers and a
@@ -943,13 +950,17 @@ fn spawn_environment(
 
     // Every block also lands in the analytic terrain field (model 4's oracle) — colliders and
     // field are built from the same transforms, so the two representations cannot drift.
-    let mut field: Vec<FieldBox> = Vec::new();
+    let mut field: Vec<TerrainBlock> = Vec::new();
 
     let block = |commands: &mut Commands,
-                 field: &mut Vec<FieldBox>,
+                 field: &mut Vec<TerrainBlock>,
                  transform: Transform,
                  mat: &Handle<StandardMaterial>| {
-        field.push(FieldBox::from_block(&transform));
+        field.push(TerrainBlock::new(
+            transform.translation,
+            transform.rotation,
+            transform.scale,
+        ));
         commands.spawn((
             Mesh3d(cube.clone()),
             MeshMaterial3d(mat.clone()),
@@ -960,7 +971,7 @@ fn spawn_environment(
         ));
     };
     // A ground slab spanning z_hi..z_lo (z_hi > z_lo), top face at y=0.
-    let ground = |commands: &mut Commands, field: &mut Vec<FieldBox>, z_hi: f32, z_lo: f32| {
+    let ground = |commands: &mut Commands, field: &mut Vec<TerrainBlock>, z_hi: f32, z_lo: f32| {
         block(
             commands,
             field,
@@ -1030,7 +1041,7 @@ fn spawn_environment(
         }
     }
 
-    commands.insert_resource(TerrainField::new(field));
+    commands.insert_resource(TerrainField(BlockField::new(field)));
 }
 
 /// Spawn the code-generated primitive rig: a hull box with two tracks of wheels (sprocket + N road
@@ -1683,11 +1694,6 @@ fn belt_loop(circles: &[(Vec2, f32)], length: Option<f32>) -> Vec<Vec2> {
     pts
 }
 
-/// Total length of a polyline (sum of segment lengths).
-fn polyline_len(pts: &[Vec2]) -> f32 {
-    pts.windows(2).map(|w| w[0].distance(w[1])).sum()
-}
-
 /// A top (return) run from `from` to `to` that sags downward to consume `arc_len` of belt. Parabolic
 /// droop; depth from the arc-length excess over the straight span (`s ≈ d(1 + 8h²/3d²)`).
 fn sagging_top(from: Vec2, to: Vec2, arc_len: f32) -> Vec<Vec2> {
@@ -1742,44 +1748,6 @@ fn rest_circles() -> Vec<(Vec2, f32)> {
     circles
 }
 
-/// Resample a polyline at uniform arc-length `spacing`, stations at arc positions `offset + i·spacing`
-/// (evenly spread along the belt, not bunched at the tangent vertices). `offset = 0` starts at the
-/// polyline's first point; MODEL 2 passes its advancing belt phase so the stations *travel with the
-/// belt*. Standard arc-length walk; degenerate short segments (the tiny hops across a wheel bottom)
-/// are skipped.
-fn resample(points: &[Vec2], spacing: f32, offset: f32) -> Vec<Vec2> {
-    if points.len() < 2 {
-        return points.to_vec();
-    }
-    let mut out = Vec::new();
-    // Arc length remaining until the next station: the first lands at `offset` along the polyline.
-    let mut since = spacing - offset.rem_euclid(spacing);
-    if since >= spacing {
-        out.push(points[0]); // offset 0: a station at the very start, as before
-        since = 0.0;
-    }
-    for w in points.windows(2) {
-        let seg = w[1] - w[0];
-        let len = seg.length();
-        if len < 1e-6 {
-            continue;
-        }
-        let dir = seg / len;
-        let mut pos = 0.0;
-        loop {
-            let step = spacing - since;
-            if pos + step > len {
-                since += len - pos;
-                break;
-            }
-            pos += step;
-            since = 0.0;
-            out.push(w[0] + dir * pos);
-        }
-    }
-    out
-}
-
 const HUB_COLOR: Color = Color::srgb(1.0, 0.85, 0.2);
 const DRIVE_HUB_COLOR: Color = Color::srgb(1.0, 0.45, 0.15);
 const BELT_COLOR: Color = Color::srgb(0.2, 0.9, 1.0);
@@ -1798,50 +1766,6 @@ const REF_COLOR: Color = Color::srgb(0.7, 0.5, 1.0);
 /// Metres of arrow per newton of contact force (~20 kN reads as 1 m). Typical per-station support
 /// at rest is ~6 kN over ~45 grounded stations.
 const FORCE_VIZ_SCALE: f32 = 1.0 / 20_000.0;
-
-/// The two tangent points of an external tangent line shared by two circles in a plane, on the side
-/// selected by `side_sign` (−1 = lower / smaller y, +1 = upper). Returns (point on circle 0, point on
-/// circle 1). Assumes neither circle contains the other (true for running gear).
-fn external_tangent(c0: Vec2, r0: f32, c1: Vec2, r1: f32, side_sign: f32) -> (Vec2, Vec2) {
-    let d = c1 - c0;
-    let dist = d.length().max(1e-4);
-    let dir = d / dist;
-    // Unit normal `n` with n·dir = (r0 − r1)/dist; the remaining component is perpendicular. Pick the
-    // perpendicular sign so n points to the requested side (its y has `side_sign`).
-    let along = ((r0 - r1) / dist).clamp(-1.0, 1.0);
-    let perp_mag = (1.0 - along * along).max(0.0).sqrt();
-    let perp = Vec2::new(-dir.y, dir.x);
-    let perp = if perp.y.signum() == side_sign.signum() {
-        perp
-    } else {
-        -perp
-    };
-    let n = dir * along + perp * perp_mag;
-    (c0 + n * r0, c1 + n * r1)
-}
-
-/// Points along a circle's arc from `from` to `to` (both on the circle), taking whichever sweep has
-/// its midpoint heading toward `toward` — so the belt wraps the *outer* side (the front of the
-/// sprocket, the rear of the idler) rather than cutting across. Endpoints included.
-fn arc(center: Vec2, radius: f32, from: Vec2, to: Vec2, toward: Vec2) -> Vec<Vec2> {
-    const SEGMENTS: usize = 10;
-    use std::f32::consts::{PI, TAU};
-    let a0 = (from - center).to_angle();
-    let mut delta = (to - center).to_angle() - a0;
-    // Reduce to the shortest signed sweep, then flip to the complement if it faces away from `toward`.
-    while delta <= -PI {
-        delta += TAU;
-    }
-    while delta > PI {
-        delta -= TAU;
-    }
-    if Vec2::from_angle(a0 + delta * 0.5).dot(toward) < 0.0 {
-        delta -= delta.signum() * TAU;
-    }
-    (0..=SEGMENTS)
-        .map(|i| center + Vec2::from_angle(a0 + delta * (i as f32 / SEGMENTS as f32)) * radius)
-        .collect()
-}
 
 /// Read the driver's arrow-key intent into a smoothed throttle/steer signal. Zeroed while the cursor
 /// is free (paused / unfocused) so a released window doesn't keep driving.

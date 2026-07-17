@@ -89,6 +89,9 @@ mod trace;
 /// The track-model sandbox (`bin/track_sandbox`). Public so the binary can mount it; not part of
 /// `GamePlugin`. Self-contained: its own code-generated primitive rig + locomotion, for developing
 /// the continuous-track model in isolation.
+/// The track model's pure core (route/oracle/chain math) — consumed by the sandbox lab and, in
+/// phase A, the game's track view. See `.agents/docs/design/track-model/architecture.md`.
+pub mod track;
 pub mod track_sandbox;
 /// The bundled UI typeface (Barlow Condensed): loads the two weights once and exposes them as a
 /// `ui_font::UiFonts` resource that every `Text`-spawning client plugin reads. Mounted by each
