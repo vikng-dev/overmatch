@@ -20,10 +20,9 @@ use bevy::world_serialization::WorldInstanceReady;
 use crate::bake::TankBlueprint;
 use crate::spec::TrackSpec;
 use crate::tank::{Roadwheel, Tank, TrackSide, ViewNode};
-use crate::world::TerrainMap;
 
 use super::chain::{ChainInput, ChainParams, ChainSideInput, ChainState};
-use super::oracle::{BlockField, TerrainBlock};
+use super::terrain::TrackField;
 use super::wheels::{WheelParams, wheel_lift_step, wheel_lift_target};
 
 /// Ordering owner for the track view's presented-pose read: after physics writeback (Avian has
@@ -36,7 +35,6 @@ use super::wheels::{WheelParams, wheel_lift_step, wheel_lift_target};
 pub struct TrackViewSet;
 
 pub fn view_plugin(app: &mut App) {
-    app.init_resource::<TrackField>();
     app.add_observer(rebind_on_reinstance);
     app.add_systems(Update, bind_track_rigs);
     app.configure_sets(
@@ -45,12 +43,7 @@ pub fn view_plugin(app: &mut App) {
             .after(PhysicsSystems::Writeback)
             .before(TransformSystems::Propagate),
     );
-    app.add_systems(
-        PostUpdate,
-        (build_track_field, drive_track_views)
-            .chain()
-            .in_set(TrackViewSet),
-    );
+    app.add_systems(PostUpdate, drive_track_views.in_set(TrackViewSet));
 }
 
 // Solver QUALITY policy — global, never per-vehicle (architecture §7: a new tank is data; these
@@ -88,32 +81,6 @@ pub(crate) const SNAP_AXIS: f32 = 0.5;
 /// outboard wheel column would read geometry entirely beside the track (codex finding C).
 /// Interim until the bake carries disc bounds. The CHAIN keeps shoe-wide stations at `plane_x`.
 const WHEEL_DISC_STATIONS: [f32; 3] = [-0.08, 0.0, 0.08];
-
-/// The game-side analytic terrain (architecture §5): a [`BlockField`] rebuilt from the
-/// [`TerrainMap`] whenever its revision changes — colliders and this field share one data
-/// source, so the physics and the track's terrain reads cannot drift. One oracle serves the
-/// chain contacts AND the view wheel lift.
-#[derive(Resource, Default)]
-struct TrackField {
-    revision: Option<u64>,
-    field: Option<BlockField>,
-}
-
-fn build_track_field(map: Option<Res<TerrainMap>>, mut track: ResMut<TrackField>) {
-    let Some(map) = map else {
-        return;
-    };
-    if track.revision == Some(map.revision) {
-        return;
-    }
-    let blocks = map
-        .blocks
-        .iter()
-        .map(|t| TerrainBlock::new(t.translation, t.rotation, t.scale))
-        .collect();
-    track.field = Some(BlockField::new(blocks));
-    track.revision = Some(map.revision);
-}
 
 /// One tank's track-view state, on the root. Pure view: despawns with the root, resets to a
 /// canonical cold start on any discontinuity.

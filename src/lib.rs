@@ -189,6 +189,10 @@ impl Plugin for SimPlugin {
         app.add_plugins((
             state::sim_plugin,
             world::plugin,
+            // The shared analytic terrain field (track architecture §5): built from
+            // `TerrainMap` for the sim force systems (phase B) and the client track view —
+            // one oracle on server, SP, and net client alike.
+            track::terrain_plugin,
             // `spec` registers the `.tank.ron` data-asset loader before `tank` spawns the tank
             // and requests one (ADR-0010).
             spec::plugin,
