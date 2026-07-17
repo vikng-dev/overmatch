@@ -296,7 +296,7 @@ fn toggle_view_mode(
         if view.kinematic {
             "kinematic wrap (step 22)"
         } else {
-            "verlet chain (step 21, frozen A/B)"
+            "route-chain (step 23: fixed clock, XPBD bending, sprocket drive)"
         }
     );
 }
@@ -520,11 +520,12 @@ pub fn plugin(app: &mut App) {
                     conform_belts_boxes
                         .run_if(model_is(Model::BoxBelt))
                         .run_if(sim_running),
-                    // MODEL 4 kinematic view is wheels-FIRST (ground → wheels → belt): the wheels
-                    // read the field, then the wrap fits around them. The frozen chain view (and
-                    // models 1–3) keep the belt-first order: conform, then wheels ride the belt.
+                    // MODEL 4 is wheels-FIRST in BOTH views (ground → wheels → belt, acyclic):
+                    // the wheels read the field, then the wrap fits — or the route-chain solves —
+                    // around them (step 23: the chain↔wheel circular dependency is gone). Models
+                    // 1–3 keep the belt-first order: conform, then wheels ride the belt.
                     articulate_wheels_field
-                        .run_if(view_kinematic)
+                        .run_if(model_is(Model::FieldBelt))
                         .run_if(sim_running),
                     conform_belts_field
                         .run_if(view_kinematic)
@@ -533,7 +534,7 @@ pub fn plugin(app: &mut App) {
                         .run_if(view_chain)
                         .run_if(sim_running),
                     articulate_wheels
-                        .run_if(not(view_kinematic))
+                        .run_if(not(model_is(Model::FieldBelt)))
                         .run_if(sim_running),
                     // Probe after the visual chain settles this frame's state, frozen while paused
                     // (constant samples would dilute the window).

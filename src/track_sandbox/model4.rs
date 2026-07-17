@@ -37,9 +37,6 @@ use super::*;
 /// authored half-extent (washboard bump half-height 0.06).
 const FIELD_ROUNDING: f32 = 0.03;
 
-/// Finite-difference step (m) for the field gradient (conform planes only).
-const GRAD_EPS: f32 = 1e-3;
-
 /// Shoe (link) width (m): the T-34's 500 mm plate.
 const TRACK_WIDTH: f32 = 0.5;
 
@@ -64,28 +61,39 @@ const COLUMNS: [(f32, f32); 3] = [
     (COLUMN_OFFSET, EDGE_WEIGHT),
 ];
 
-// Chain-solve knobs: model 3's verified values, owned per model so the field-belt tunes
-// independently.
-/// Per-frame velocity retention of the chain's Verlet integration — the swing knob (see model 2).
-const CHAIN_DAMPING: f32 = 0.88;
-/// Drive-anchor stiffness (s⁻²) toward the advected reference, ALONG the reference tangent: the
-/// advection/drive-yank coupling — full strength, so the chain still snaps to throttle.
-const CHAIN_DRIVE: f32 = 400.0;
-/// Drive-anchor stiffness ACROSS the reference tangent: deliberately weak, so gravity owns the
-/// transverse shape. An isotropic anchor pinned the chain to the reference line transversely —
-/// under compression the length surplus then buckled into many small alternating kinks around
-/// the reference (each kink costs the anchor little; one honest deep sag costs it a lot) — the
-/// step-18 ZIGZAG. Weak transverse anchoring inverts that preference.
-const CHAIN_DRIVE_ACROSS: f32 = 60.0;
-/// Per-iteration bending relaxation toward each joint's neighbour midpoint, at ALL articulation
-/// angles (the 35° cap only clips sharp folds — it cannot see a zigzag made of sub-cap angles).
-/// Alternating kinks are pure high curvature and get erased; a gravity sag is low curvature and
-/// survives; wheel wraps are re-asserted by the circle constraints each iteration.
-const CHAIN_BEND: f32 = 0.02;
-/// Gauss–Seidel passes of the constraint projections (see model 2).
-const CHAIN_ITERATIONS: usize = 20;
+// Route-chain solve knobs (step 23, from the codex chain deep dive — every knob has physical
+// units; per-frame damping factors, per-frame pass counts, and stiffness-by-iteration are gone).
+/// Fixed internal solve step (s): the chain advances on its OWN clock via a frame-time
+/// accumulator, so feel is identical at 30/60/144 fps (the old 0.88-per-frame damping + 20
+/// passes-per-frame was "three different chains" across render rates).
+const CHAIN_SUBSTEP: f32 = 1.0 / 120.0;
+/// Catch-up budget: at most this many substeps per rendered frame; longer hitches drop debt
+/// instead of integrating a monster step.
+const CHAIN_MAX_SUBSTEPS: usize = 8;
+/// Constraint sweeps per substep (many small steps beat many sweeps in one big step — XPBD
+/// "small steps" result).
+const CHAIN_SWEEPS: usize = 4;
+/// Chain motion damping as a real-time HALF-LIFE (s) — the one swing knob, in seconds. 0.15 read
+/// as "flabby" (Yan, step 23); 0.08 matches the old chain's 60 fps feel, now at every rate.
+const CHAIN_HALF_LIFE: f32 = 0.08;
+/// Belt length trimmed off the chain view's loop (m) — a stand-in for tensioner PRELOAD. With
+/// drive localized and the anchor gone, the full authored TRACK_SLACK hangs visibly loose
+/// everywhere (Yan: "too much slack?"); a real tensioner takes some of it up. Route-tube tension
+/// (slice 3) is the principled owner of this.
+const CHAIN_SLACK_TRIM: f32 = 0.05;
+/// Sprocket motor response time (s): how fast joints engaged on the drive wheel converge to the
+/// belt's surface speed. Drive is applied ONLY there — the old all-joint advected anchor
+/// injected compression around the whole loop and was itself a zigzag cause (codex, step 22b);
+/// the length constraints now transmit drive, so tight and slack sides emerge.
+const CHAIN_MOTOR_TAU: f32 = 0.05;
+/// Bending stiffness of the XPBD turning-angle constraint (higher = stiffer). Bending is
+/// measured RELATIVE to the taut route's own curvature, so wheel wraps and the authored sag are
+/// free — only deviation from the route's shape costs energy. This is the structural anti-zigzag:
+/// with real bending energy, alternating per-link kinks are the MOST expensive way to absorb
+/// compression instead of a free one (surplus buys one long bow instead).
+const CHAIN_BEND_STIFFNESS: f32 = 10.0;
 /// Max articulation between consecutive links (rad): must clear the T-34 sprocket's wrap demand
-/// of ~31°/joint (see model 2).
+/// of ~31°/joint (see model 2). A hard link-geometry stop, distinct from the bending energy.
 const MAX_LINK_ANGLE: f32 = 35.0 * std::f32::consts::PI / 180.0;
 
 /// How far (m) every field box's bottom is extended below its authored extent. A raised block
@@ -287,17 +295,6 @@ impl TerrainField {
             .fold(t_max, f32::min);
         CONTACT_PROBE - t
     }
-
-    /// Field gradient (unit, points out of terrain) by central differences — conform planes only.
-    fn gradient(&self, p: Vec3) -> Vec3 {
-        let h = GRAD_EPS;
-        Vec3::new(
-            self.sdf(p + Vec3::X * h) - self.sdf(p - Vec3::X * h),
-            self.sdf(p + Vec3::Y * h) - self.sdf(p - Vec3::Y * h),
-            self.sdf(p + Vec3::Z * h) - self.sdf(p - Vec3::Z * h),
-        )
-        .normalize_or_zero()
-    }
 }
 
 /// Quilez rounded-box SDF: exact distance on faces (the flat-ground answer is identical to the
@@ -486,19 +483,31 @@ pub(super) fn apply_belt_support_field(
     }
 }
 
-/// MODEL 4's **frozen A/B chain view** (`V` toggle; step-21 state) — model 3's Verlet chain solve
-/// on the pin line, with the per-link contact planes read from the field instead of casts: at each
-/// link's midpoint outer-face station, a negative SDF yields a plane anchored at the projected
-/// surface point (`p − ∇·depth`) with the field gradient as its normal. Kept verbatim so the
-/// kinematic wrap can be felt against it on identical terrain (the step-22 review's one honest
-/// loss is this chain's emergent slack migration); deleted once the wrap wins the feel check.
+/// MODEL 4's **route-chain view** (`V` toggle) — the simulated-chain candidate, rebuilt per the
+/// step-23 plan (codex chain deep dive, slices 1+2): a Verlet chain on the pin line with
+/// - a **fixed 1/120 s internal clock** (accumulator; feel is render-rate independent),
+/// - damping as a real-time half-life,
+/// - drive applied **only at the sprocket sector** (length constraints transmit it — tight and
+///   slack sides emerge; the old all-joint anchor is gone, and with it a zigzag cause),
+/// - **XPBD bending energy relative to the route's own curvature** in place of the midpoint
+///   blend (alternating kinks become the most expensive compression mode),
+/// - exact belt length (the smoothed `belly_extra` feedback is gone),
+/// - wheels solved UPSTREAM from the field ([`articulate_wheels_field`] runs for both views —
+///   the chain wraps wheels that already read the ground; the circular chain↔wheel dependency
+///   is gone).
+///
+/// Terrain planes per link from the field (depth-weighted blends, step-21b). Remaining step-23
+/// slices: route coordinates (wrong-side capture unrepresentable), band-limited transverse
+/// basis, canonical reseeds.
 pub(super) fn conform_belts_field_chain(
     hull: Single<&GlobalTransform, With<Hull>>,
     wheels: Query<(&RigWheel, &Transform)>,
     field: Res<TerrainField>,
     pin_belt: Res<PinBelt>,
     phase: Res<BeltPhase>,
+    belt: Res<BeltSpeed>,
     time: Res<Time>,
+    mut acc: Local<f32>,
     mut memory: ResMut<ChainMemory>,
     mut belts: ResMut<ConformedBelts>,
     mut reference: ResMut<ChainReference>,
@@ -506,8 +515,11 @@ pub(super) fn conform_belts_field_chain(
     let hull = *hull;
     let affine = hull.affine();
     let to_local = affine.inverse();
-    let dt = time.delta_secs().min(1.0 / 30.0);
-    let dt2 = dt * dt;
+    // Fixed-clock accumulator: whole substeps advance, the remainder carries; debt beyond the
+    // catch-up budget is dropped (never one monster step).
+    *acc = (*acc + time.delta_secs()).min(CHAIN_SUBSTEP * CHAIN_MAX_SUBSTEPS as f32);
+    let steps = (*acc / CHAIN_SUBSTEP) as usize;
+    *acc -= steps as f32 * CHAIN_SUBSTEP;
     let g3 = to_local.transform_vector3(Vec3::NEG_Y * 9.81);
     let g2 = Vec2::new(g3.z, g3.y);
     for side in [Side::Left, Side::Right] {
@@ -531,11 +543,16 @@ pub(super) fn conform_belts_field_chain(
             })
             .collect();
         let mem = memory.get_mut(side);
-        // The reference ring on the pin line, slack budget as model 2/3.
-        let mut loop_pts = belt_loop(&pin_circles(), Some(pin_belt.length - mem.belly_extra));
+        // The reference ring on the pin line — EXACT belt length (minus the tensioner trim):
+        // terrain consuming lower-run length must surface as tautness in the same solve, not
+        // through last frame's smoothed `belly_extra` estimate (deleted; codex slice 2).
+        let mut loop_pts = belt_loop(&pin_circles(), Some(pin_belt.length - CHAIN_SLACK_TRIM));
         if let Some(&first) = loop_pts.first() {
             loop_pts.push(first);
         }
+        // The IMMUTABLE material pitch: every link is exactly this long, always (codex step-23
+        // finding: reference-chord link lengths varied with belt phase — links breathed as
+        // samples crossed the polyline's vertices, part of the "flabby" read).
         let pitch = polyline_len(&loop_pts) / pin_belt.count.max(1) as f32;
         let mut joints = resample(&loop_pts, pitch, phase.get(side).rem_euclid(pitch));
         joints.truncate(pin_belt.count);
@@ -554,87 +571,8 @@ pub(super) fn conform_belts_field_chain(
             Side::Right => reference.right = ref_world,
         }
 
-        let ref_len: Vec<f32> = (0..n)
-            .map(|i| (joints[(i + 1) % n] - joints[i]).length())
-            .collect();
-
-        // Per contacting link, its terrain plane (surface point + inward normal, hull-local 2D)
-        // from the field at the link's midpoint outer-face station.
-        let mut planes: Vec<Option<(Vec2, Vec2)>> = vec![None; n];
-        let mut lifts = vec![0.0_f32; n];
-        for i in 0..n {
-            let a = joints[i];
-            let b = joints[(i + 1) % n];
-            let seg = b - a;
-            let len = seg.length();
-            if len < 1e-4 {
-                continue;
-            }
-            let tan2 = seg / len;
-            let out2 = Vec2::new(tan2.y, -tan2.x);
-            let mid = (a + b) / 2.0;
-            let w_mid = affine.transform_point3(Vec3::new(track_x, mid.y, mid.x));
-            let wa3 = affine.transform_point3(Vec3::new(track_x, a.y, a.x));
-            let wb3 = affine.transform_point3(Vec3::new(track_x, b.y, b.x));
-            let out = affine
-                .transform_vector3(Vec3::new(0.0, out2.y, out2.x))
-                .normalize_or_zero();
-            let axis3 = (wb3 - wa3).normalize_or_zero();
-            let lat = out.cross(axis3);
-            // The visual chain conforms to what the physics samples — ALL of it: the SAME
-            // 3 lateral columns × 3 longitudinal stations the forces use. Laterally this closes
-            // the view/physics inversion (a rigid 500 mm shoe over an off-center ridge is held
-            // up across its full width); longitudinally the pins are SHARED with the
-            // neighbouring links, so terrain-edge hand-offs spread over a full pitch. The lift
-            // is the deepest VALUE (continuous); the plane anchor/normal are DEPTH-WEIGHTED
-            // BLENDS over the penetrating stations — never the winning station's position,
-            // which jumps up to the full sample spread when near-tied stations swap (the one
-            // argmax consumption left in model 4; codex finding, step 21c).
-            let face = out * (TRACK_THICKNESS / 2.0);
-            let mut depth = 0.0_f32;
-            let mut q_acc = Vec3::ZERO;
-            let mut g_acc = Vec3::ZERO;
-            let mut w_acc = 0.0_f32;
-            for (offset, _) in COLUMNS {
-                let shift = lat * offset;
-                for base in [wa3, w_mid, wb3] {
-                    let s = base + shift + face;
-                    let d = field.depth_along(s, out);
-                    if d > 0.0 {
-                        depth = depth.max(d);
-                        let surf = s - out * d;
-                        q_acc += surf * d;
-                        g_acc += field.gradient(surf) * d;
-                        w_acc += d;
-                    }
-                }
-            }
-            if depth <= 0.0 || w_acc <= 0.0 {
-                continue;
-            }
-            let surface = q_acc / w_acc;
-            let grad = g_acc.normalize_or_zero();
-            let q = to_local.transform_point3(surface);
-            let m3 = to_local.transform_vector3(grad);
-            let m2 = Vec2::new(m3.z, m3.y).normalize_or_zero();
-            if m2 == Vec2::ZERO {
-                continue;
-            }
-            planes[i] = Some((Vec2::new(q.z, q.y), m2));
-            lifts[i] = depth;
-        }
-
-        // Slack bookkeeping for next frame (see model 2).
-        let joint_lift = |i: usize| lifts[(i + n - 1) % n].max(lifts[i]);
-        let extra: f32 = (0..n)
-            .map(|i| {
-                let d = joint_lift((i + 1) % n) - joint_lift(i);
-                d * d / (2.0 * ref_len[i].max(1e-3))
-            })
-            .sum();
-        mem.belly_extra = (mem.belly_extra * 0.8 + extra * 0.2).clamp(0.0, 0.5);
-
-        // Verlet step + projections, identical to model 3.
+        // Material identity: rotate the stored ring when the phase crosses whole pitches (links
+        // advect with the belt).
         let shift = (phase.get(side) / pitch).floor() as i64;
         if mem.pos.len() == n {
             let rot = (shift - mem.shift).rem_euclid(n as i64) as usize;
@@ -645,86 +583,213 @@ pub(super) fn conform_belts_field_chain(
             mem.prev = joints.clone();
         }
         mem.shift = shift;
-        let old_pos = mem.pos.clone();
-        let mut p: Vec<Vec2> = (0..n)
+        // Fixed-substep solve. Per-frame quantities that don't depend on the solve are hoisted:
+        // the route's own turning angle per joint (bending is measured relative to it, so wheel
+        // wraps and the authored sag are free), the sprocket circle (the motor sector), and the
+        // per-substep coefficients in real units.
+        let retention = (-(std::f32::consts::LN_2 / CHAIN_HALF_LIFE) * CHAIN_SUBSTEP).exp();
+        let motor_gain =
+            (CHAIN_SUBSTEP / CHAIN_MOTOR_TAU) / (1.0 + CHAIN_SUBSTEP / CHAIN_MOTOR_TAU);
+        let alpha_tilde = (pitch / CHAIN_BEND_STIFFNESS) / (CHAIN_SUBSTEP * CHAIN_SUBSTEP);
+        let theta0: Vec<f32> = (0..n)
             .map(|i| {
-                let vel = (mem.pos[i] - mem.prev[i]) * CHAIN_DAMPING;
-                // Anchor split into along/across the reference tangent (see the knob docs):
-                // advection + drive stay violent, the transverse shape belongs to gravity.
-                let tan = (joints[(i + 1) % n] - joints[(i + n - 1) % n]).normalize_or_zero();
-                let delta = joints[i] - mem.pos[i];
-                let along = tan * delta.dot(tan);
-                let across = delta - along;
-                mem.pos[i] + vel + (g2 + along * CHAIN_DRIVE + across * CHAIN_DRIVE_ACROSS) * dt2
+                let e0 = joints[i] - joints[(i + n - 1) % n];
+                let e1 = joints[(i + 1) % n] - joints[i];
+                e0.perp_dot(e1).atan2(e0.dot(e1))
             })
             .collect();
-        for _ in 0..CHAIN_ITERATIONS {
-            // (a) Rigid link lengths.
-            for i in 0..n {
-                let j = (i + 1) % n;
-                let d = p[j] - p[i];
-                let l = d.length();
-                if l < 1e-6 {
-                    continue;
-                }
-                let shift = d * ((l - ref_len[i]) / l * 0.5);
-                p[i] += shift;
-                p[j] -= shift;
-            }
-            // (b) Joint articulation cap.
-            for i in 0..n {
-                let prev = p[(i + n - 1) % n];
-                let next = p[(i + 1) % n];
-                let u = p[i] - prev;
-                let v = next - p[i];
-                let (lu, lv) = (u.length(), v.length());
-                if lu < 1e-6 || lv < 1e-6 {
-                    continue;
-                }
-                let ang = (u.dot(v) / (lu * lv)).clamp(-1.0, 1.0).acos();
-                if ang > MAX_LINK_ANGLE {
-                    let mid = (prev + next) / 2.0;
-                    let t = ((ang - MAX_LINK_ANGLE) / ang).min(1.0) * 0.5;
-                    p[i] = p[i].lerp(mid, t);
-                }
-            }
-            // (b2) Weak bending stiffness at all angles (see [`CHAIN_BEND`]): erases the
-            // compression zigzag, leaves sags and wraps.
-            for i in 0..n {
-                let mid = (p[(i + n - 1) % n] + p[(i + 1) % n]) / 2.0;
-                p[i] = p[i].lerp(mid, CHAIN_BEND);
-            }
-            // (c) Terrain: pins stay t/2 inside each contacting link's plane.
-            for (i, plane) in planes.iter().enumerate() {
-                let Some((q, m)) = *plane else {
-                    continue;
-                };
-                for idx in [i, (i + 1) % n] {
-                    let v = (p[idx] - q).dot(m) - TRACK_THICKNESS / 2.0;
-                    if v < 0.0 {
-                        p[idx] -= m * v;
+        let (sprocket_c, sprocket_r) = {
+            let (s, _) = drive_circles_local();
+            (s.0, s.1 + TRACK_THICKNESS / 2.0)
+        };
+        let belt_speed = belt.get(side);
+
+        for _ in 0..steps {
+            let old_pos = mem.pos.clone();
+            let mut p: Vec<Vec2> = (0..n)
+                .map(|i| {
+                    let mut vel = (mem.pos[i] - mem.prev[i]) * retention;
+                    // Sprocket motor: joints ENGAGED ON THE WRAP ARC (annulus around the rim,
+                    // loop-direction tangent — never the disk interior or a folded/wrong-side
+                    // node; codex step-23 finding) converge to the belt's surface displacement,
+                    // ramped by rim distance so entering the sector is impulse-free. Everything
+                    // else is carried by the length constraints — the upstream run goes taut,
+                    // the downstream run slackens.
+                    let radial = mem.pos[i] - sprocket_c;
+                    let dist = radial.length();
+                    if dist > 1e-4 && (dist - sprocket_r).abs() < pitch {
+                        let r_hat = radial / dist;
+                        // The loop runs CCW in (z, y): its tangent on the sprocket rim.
+                        let t_ccw = Vec2::new(-r_hat.y, r_hat.x);
+                        let tan =
+                            (mem.pos[(i + 1) % n] - mem.pos[(i + n - 1) % n]).normalize_or_zero();
+                        if tan.dot(t_ccw) > 0.3 {
+                            let engage = 1.0 - (dist - sprocket_r).abs() / pitch;
+                            let v_t = vel.dot(tan);
+                            vel += tan * ((belt_speed * CHAIN_SUBSTEP - v_t) * motor_gain * engage);
+                        }
                     }
-                }
-            }
-            // (d) Wheel circles (inflated to the pin line above).
-            for pt in p.iter_mut() {
-                for &(c, r) in &circles {
-                    let d = *pt - c;
+                    mem.pos[i] + vel + g2 * (CHAIN_SUBSTEP * CHAIN_SUBSTEP)
+                })
+                .collect();
+            // Terrain contact planes at the CHAIN's OWN predicted positions, refreshed every
+            // substep. With drive localized at the sprocket, material joints legitimately drift
+            // from the reference ring (slack migration) — reference-indexed planes then push a
+            // joint with its neighbour's plane (measured: 171 mm board phase-through). Per LINK:
+            // the SAME pin/mid/pin longitudinal stations × 3 lateral columns the physics
+            // collocates (one station per joint left a between-pins blind strip — codex
+            // step-23), deepest value, linearized along the link's outward normal.
+            let contact: Vec<Option<(Vec2, f32)>> = (0..n)
+                .map(|i| {
+                    let a = p[i];
+                    let b = p[(i + 1) % n];
+                    let seg = b - a;
+                    let len = seg.length();
+                    if len < 1e-4 {
+                        return None;
+                    }
+                    let tan = seg / len;
+                    let out2 = Vec2::new(tan.y, -tan.x);
+                    let out = affine
+                        .transform_vector3(Vec3::new(0.0, out2.y, out2.x))
+                        .normalize_or_zero();
+                    let axis = affine
+                        .transform_vector3(Vec3::new(0.0, tan.y, tan.x))
+                        .normalize_or_zero();
+                    let lat = out.cross(axis);
+                    let face2 = out2 * (TRACK_THICKNESS / 2.0);
+                    let mut d = f32::NEG_INFINITY;
+                    for s2 in [a + face2, (a + b) / 2.0 + face2, b + face2] {
+                        let w = affine.transform_point3(Vec3::new(track_x, s2.y, s2.x));
+                        for (offset, _) in COLUMNS {
+                            d = d.max(field.depth_along(w + lat * offset, out));
+                        }
+                    }
+                    // Keep nearly-clear planes too: sweeps move joints and must not tunnel past
+                    // a boundary probed as barely clear.
+                    (d > -0.08).then_some((out2, d))
+                })
+                .collect();
+            let p_start = p.clone();
+            // XPBD multipliers for the bending constraints — scratch per substep.
+            let mut lambda = vec![0.0_f32; n];
+            for _ in 0..CHAIN_SWEEPS {
+                // (a) Rigid link lengths (zero compliance).
+                for i in 0..n {
+                    let j = (i + 1) % n;
+                    let d = p[j] - p[i];
                     let l = d.length();
-                    if l < r && l > 1e-6 {
-                        *pt = c + d * (r / l);
+                    if l < 1e-6 {
+                        continue;
+                    }
+                    let shift = d * ((l - pitch) / l * 0.5);
+                    p[i] += shift;
+                    p[j] -= shift;
+                }
+                // (b) XPBD bending: C = θ − θ0 with the analytic turning-angle gradients; the
+                // compliance is real (α = pitch / B), so stiffness no longer depends on sweep
+                // count or frame rate. This is what makes a compression zigzag EXPENSIVE.
+                for i in 0..n {
+                    let (im, ip) = ((i + n - 1) % n, (i + 1) % n);
+                    let e0 = p[i] - p[im];
+                    let e1 = p[ip] - p[i];
+                    let (l0, l1) = (e0.length_squared(), e1.length_squared());
+                    if l0 < 1e-9 || l1 < 1e-9 {
+                        continue;
+                    }
+                    let theta = e0.perp_dot(e1).atan2(e0.dot(e1));
+                    let mut c = theta - theta0[i];
+                    if c > std::f32::consts::PI {
+                        c -= std::f32::consts::TAU;
+                    } else if c < -std::f32::consts::PI {
+                        c += std::f32::consts::TAU;
+                    }
+                    let g_prev = e0.perp() / l0;
+                    let g_next = e1.perp() / l1;
+                    let g_mid = -(g_prev + g_next);
+                    let denom = g_prev.length_squared()
+                        + g_mid.length_squared()
+                        + g_next.length_squared()
+                        + alpha_tilde;
+                    let dl = (-c - alpha_tilde * lambda[i]) / denom;
+                    lambda[i] += dl;
+                    p[im] += g_prev * dl;
+                    p[i] += g_mid * dl;
+                    p[ip] += g_next * dl;
+                }
+                // (c) Signed hinge stop — the hard link-geometry limit as a zero-compliance
+                // projection with the SAME turning-angle gradients as the bending pass (the old
+                // midpoint lerp moved only the middle node, never hit the bound exactly, and
+                // silently changed link lengths — codex step-23).
+                for i in 0..n {
+                    let (im, ip) = ((i + n - 1) % n, (i + 1) % n);
+                    let e0 = p[i] - p[im];
+                    let e1 = p[ip] - p[i];
+                    let (l0, l1) = (e0.length_squared(), e1.length_squared());
+                    if l0 < 1e-9 || l1 < 1e-9 {
+                        continue;
+                    }
+                    let theta = e0.perp_dot(e1).atan2(e0.dot(e1));
+                    let c = theta - theta.clamp(-MAX_LINK_ANGLE, MAX_LINK_ANGLE);
+                    if c == 0.0 {
+                        continue;
+                    }
+                    let g_prev = e0.perp() / l0;
+                    let g_next = e1.perp() / l1;
+                    let g_mid = -(g_prev + g_next);
+                    let denom =
+                        g_prev.length_squared() + g_mid.length_squared() + g_next.length_squared();
+                    let dl = -c / denom;
+                    p[im] += g_prev * dl;
+                    p[i] += g_mid * dl;
+                    p[ip] += g_next * dl;
+                }
+                // (d) Terrain: each joint stays out of its own contact plane. Violation = the
+                // probed depth plus however far the sweeps have moved the joint along its
+                // outward normal since the probe (linearized field around the substep start).
+                for (i, c) in contact.iter().enumerate() {
+                    let Some((out2, d)) = *c else {
+                        continue;
+                    };
+                    let v = d + (p[i] - p_start[i]).dot(out2);
+                    if v > 0.0 {
+                        p[i] -= out2 * v;
                     }
                 }
+                // (e) Wheel circles (inflated to the pin line above).
+                for pt in p.iter_mut() {
+                    for &(c, r) in &circles {
+                        let d = *pt - c;
+                        let l = d.length();
+                        if l < r && l > 1e-6 {
+                            *pt = c + d * (r / l);
+                        }
+                    }
+                }
+                // (f) Closing length pass: the contact/circle projections above must not leave
+                // accumulated pitch error in the loop (exact total length is the tension model).
+                for i in 0..n {
+                    let j = (i + 1) % n;
+                    let d = p[j] - p[i];
+                    let l = d.length();
+                    if l < 1e-6 {
+                        continue;
+                    }
+                    let shift = d * ((l - pitch) / l * 0.5);
+                    p[i] += shift;
+                    p[j] -= shift;
+                }
             }
+            mem.prev = old_pos;
+            mem.pos = p;
         }
 
-        mem.prev = old_pos;
-        mem.pos = p.clone();
-
-        let samples: Vec<BeltSample> = (0..n)
-            .map(|i| BeltSample {
-                local: p[i],
-                world: affine.transform_point3(Vec3::new(track_x, p[i].y, p[i].x)),
+        let samples: Vec<BeltSample> = mem
+            .pos
+            .iter()
+            .map(|&p| BeltSample {
+                local: p,
+                world: affine.transform_point3(Vec3::new(track_x, p.y, p.x)),
             })
             .collect();
         match side {

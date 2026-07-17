@@ -1378,6 +1378,65 @@ both.
     filter, and tension concepts (no-regret ordering). Chain view stays on `V` as the benchmark
     until the living wrap wins or loses on feel.
 
+- 2026-07-17 — **Step 23: route-chain slices 1+2 (fixed clock, XPBD bending, sprocket-only
+  drive)** (green: fmt/clippy clean; Yan: "accepted. let's go" on the convergent design — the
+  chain REHOUSED on the wrap skeleton, not a free-space rebuild; prior step committed @ c81f381).
+  The V-toggle chain view (`conform_belts_field_chain`) rebuilt per the codex staged plan:
+  1. **Fixed 1/120 s internal clock** (accumulator, ≤8 substeps/frame, debt dropped) — feel is
+     render-rate independent; damping is a real-time HALF-LIFE (0.15 s), not 0.88/frame.
+  2. **Drive at the sprocket sector ONLY** (motor τ=0.05 s toward belt surface speed on joints
+     engaged on the drive wheel): the all-joint advected anchor is DELETED — it was itself a
+     zigzag cause (injected compression around the whole loop). Length constraints transmit
+     drive; tight/slack sides now emerge.
+  3. **XPBD bending energy** (C = θ − θ0, analytic turning-angle gradients, compliance
+     α = pitch/B in real units, λ per substep) RELATIVE to the taut route's own curvature — wheel
+     wraps and authored sag free, deviation costs; replaces the CHAIN_BEND midpoint blend and the
+     35° cap stays as the hard link stop. Structural anti-zigzag: kinks are the most expensive
+     compression mode now.
+  4. **Exact belt length** (belly_extra deleted from this view) and **wheels upstream for BOTH
+     views** (`articulate_wheels_field` before either conform — the chain↔wheel circular
+     dependency is gone everywhere in model 4).
+  5. **Terrain planes probed at the CHAIN's OWN positions per substep** (linearized, with a
+     drift-correction term): drive localization lets joints drift from the reference ring (slack
+     migration — the feature), which broke the old reference-INDEXED plane assignment (measured
+     171 mm board phase-through when a joint got its neighbour's plane). The per-frame
+     reference-station plane build + the SDF `gradient()` helper died with it.
+  - MEASURED (fixed-tick harness): compression kinks 22 (anchor chain) → **2.6** (route-chain;
+    wrap 2.7) — the zigzag is structurally dead in BOTH views now; crawl board phase-through max
+    84 → 45 mm (median 1.6); reversal shows ~115 mm/tick top-run whip (the desired dynamics, now
+    real); rest drape settles at exactly road-wheel-top height (−0.301 vs −0.300 pin top) —
+    the T-34 look emerging from the solve instead of the anchor.
+  - Remaining step-23 slices (parked until Yan's feel verdict): route coordinates (wrong-side
+    capture unrepresentable — the old nearest-exit circle push-out is STILL live in this view),
+    band-limited transverse basis, canonical reseeds.
+
+- 2026-07-17 — **Step 23b: codex implementation review + the "flabby" fixes** (green: fmt/clippy
+  clean). Yan's first drive of the route-chain: "interesting direction... feels flabby/untuned,
+  perhaps too much slack?" Codex reviewed my implementation of its own design
+  (`scratchpad/codex_step23_review.md`; XPBD algebra/λ handling confirmed CORRECT) and found the
+  flab's mechanical half: **link lengths were reference-ring CHORDS** — shorter than arc spacing
+  around wraps and varying as phase slid samples across polyline vertices, so links breathed with
+  phase. Landed this batch:
+  1. **Immutable pitch**: every link is exactly `pitch` long; a **closing length pass** after the
+     contact/circle projections so they can't bank pitch error (exact total length IS the tension
+     model). Measured: pitch deviation ≤ 2.6 mm, loop length conserved.
+  2. **Per-LINK terrain contacts** (pin/mid/pin × 3 columns — the physics collocation; one
+     station per joint had a between-pins blind strip), retention band 80 mm.
+  3. **Sprocket motor gated to the wrap ARC**: annulus around the rim + loop-direction tangent
+     test + smooth radial engagement ramp (the old whole-disk radius test could grab folded or
+     wrong-side nodes and slammed newly-engaged nodes ~18 mm in one substep).
+  4. **Signed hinge stop**: the 35° cap as a zero-compliance projection with the same
+     turning-angle gradients (the midpoint-lerp version never hit the bound exactly and silently
+     changed link lengths).
+  5. **Feel tuning**: CHAIN_HALF_LIFE 0.15 → 0.08 s (0.15 was ~1.7× floatier than the old chain
+     at 60 fps — the tuning half of "flabby"); CHAIN_SLACK_TRIM 0.05 m off the chain loop as a
+     tensioner-preload stand-in (slice-3 route-tube tension is the principled owner).
+  - Codex items DEFERRED to slice 3 (by design): θ0-by-index misalignment under material drift
+    (route coordinates fix it; phase-periodic wrap impulses possible until then), full
+    fixed-clock ownership of wheels/inputs + output interpolation + canonical reseed on debt
+    overflow, per-sweep contact reprobe, normal-velocity filtering on contacts.
+  - AWAITING USER TEST: tightness (trim + damping), yank/whip character, zigzag on reversal.
+
 ## Open questions / parking lot
 
 - **Lateral link rigidity (Yan, 2026-07-16, open tab)**: a real shoe is ~perfectly stiff
