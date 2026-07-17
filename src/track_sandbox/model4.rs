@@ -727,7 +727,10 @@ pub(super) fn conform_belts_field_chain(
     mut memory: ResMut<ChainMemory>,
     mut belts: ResMut<ConformedBelts>,
     mut reference: ResMut<ChainReference>,
+    // Perf probe: (busy seconds, substep-sides, frames) — the promotion-budget number.
+    mut perf: Local<(f64, u64, u64)>,
 ) {
+    let t_perf = std::time::Instant::now();
     let hull = *hull;
     let affine = hull.affine();
     let to_local = affine.inverse();
@@ -1232,6 +1235,18 @@ pub(super) fn conform_belts_field_chain(
             Side::Right => belts.right = samples,
         }
     }
+    perf.0 += t_perf.elapsed().as_secs_f64();
+    perf.1 += steps as u64 * 2;
+    perf.2 += 1;
+    if perf.2.is_multiple_of(512) {
+        info!(
+            "route-chain perf: {:.0} µs/frame avg | {:.1} µs/substep-side ({} substep-sides / {} frames)",
+            perf.0 / perf.2 as f64 * 1e6,
+            perf.0 / (perf.1 as f64).max(1.0) * 1e6,
+            perf.1,
+            perf.2
+        );
+    }
 }
 
 /// Probe stations along a road wheel's lower arc as (sin θ, cos θ) from straight down, every 5°
@@ -1356,7 +1371,10 @@ pub(super) fn conform_belts_field(
     phase: Res<BeltPhase>,
     mut belts: ResMut<ConformedBelts>,
     mut reference: ResMut<ChainReference>,
+    // Perf probe: (busy seconds, frames) — the wrap's side of the promotion budget.
+    mut perf: Local<(f64, u64)>,
 ) {
+    let t_perf = std::time::Instant::now();
     let affine = hull.affine();
     for side in [Side::Left, Side::Right] {
         let track_x = match side {
@@ -1526,6 +1544,15 @@ pub(super) fn conform_belts_field(
             Side::Left => belts.left = samples,
             Side::Right => belts.right = samples,
         }
+    }
+    perf.0 += t_perf.elapsed().as_secs_f64();
+    perf.1 += 1;
+    if perf.1.is_multiple_of(512) {
+        info!(
+            "kinematic-wrap perf: {:.0} µs/frame avg ({} frames)",
+            perf.0 / perf.1 as f64 * 1e6,
+            perf.1
+        );
     }
 }
 
