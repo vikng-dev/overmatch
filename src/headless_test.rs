@@ -699,6 +699,7 @@ fn capture_scripted_determinism_tick(
             &avian3d::prelude::AngularVelocity,
             &avian3d::prelude::ComputedCenterOfMass,
             &crate::track::sim::TrackDrive,
+            &crate::track::sim::TrackGrip,
             &crate::track::sim::TrackContacts,
             &crate::tank::TankSim,
         ),
@@ -710,13 +711,25 @@ fn capture_scripted_determinism_tick(
     let tick = run.digests.len();
     let mut digests = Vec::with_capacity(roots.iter().len());
     let mut controlled = None;
-    for (_, name, is_controlled, position, rotation, linear, angular, com, drive, contacts, sim) in
-        &roots
+    for (
+        _,
+        name,
+        is_controlled,
+        position,
+        rotation,
+        linear,
+        angular,
+        com,
+        drive,
+        grip,
+        contacts,
+        sim,
+    ) in &roots
     {
         digests.push((
             name.as_str().to_owned(),
             crate::trace::canonical_tank_state_digest(
-                position.0, rotation.0, linear.0, angular.0, drive, sim,
+                position.0, rotation.0, linear.0, angular.0, drive, grip, sim,
             ),
         ));
         if is_controlled {

@@ -6,10 +6,12 @@ and behaviours that are BUGS no matter how they feel. Then the tuning dials.
 
 ## Expect these differences (pre-warned, by design)
 
-- **No hill-hold.** Parked on 20° the tank creeps DERIVED ~0.16 m/s along-slope, ~0.29 m/s
-  on a pure side-slope (the lateral grip budget is 0.55× — side-slope creep is ~1.8× the
-  longitudinal number, not the same). Bounded equilibrium, not runaway. Accepted gap; the
-  fix, if wanted, is the per-element bristle (ADR-0025).
+- **Hill-hold EXISTS now (ADR-0026)** — parked tanks are measurably still on 20° in any
+  orientation. Expect ~3 cm of settle-back as the shear strain loads ("rocking onto the
+  brakes"); pure side-slopes steeper than ~26° still slide (lateral budget limit, by design).
+- **Steering is GRIPPIER than the first drive** (the strain law's fuller sub-saturation
+  traction): turns 2–6× tighter, pivots ~2× faster, near no-slip radii. If it feels too
+  darty, `LATERAL_GRIP_RATIO` is the dial to restore turning resistance.
 - **Throttle onset feels layered.** The same 4.0/s input slew as before, but it now feeds
   belt inertia + a governor instead of direct thrust — key-tap response can feel slightly
   elastic. The slew itself is unchanged.

@@ -28,7 +28,7 @@ use crate::state::GameplaySet;
 use crate::tank::{
     Muzzle, Rig, ServoCommand, ServoIndex, ServoSpec, TankRoot, TankSim, Weapon, WeaponIndex,
 };
-use crate::track::sim::TrackDrive;
+use crate::track::sim::{TrackDrive, TrackGrip};
 use crate::{CombatantId, ShotId};
 
 // ---------------------------------------------------------------------------
@@ -39,7 +39,7 @@ use crate::{CombatantId, ShotId};
 // compatibility guard.
 
 /// Bump and re-pin the affected wire manifest value for every wire-surface change.
-pub const PROTOCOL_REV: u32 = 12;
+pub const PROTOCOL_REV: u32 = 13;
 
 /// Compatibility tag derived from the complete pinned wire manifest.
 pub const PROTOCOL_FINGERPRINT: u64 = protocol_fingerprint_for(
@@ -712,6 +712,10 @@ pub(crate) const ROLLBACK_VELOCITY: f32 = 1.0;
 /// |phase| (m) deltas. Coarse like the velocity gate — belt state is deterministic, so a real
 /// mismatch is gross desync, not solver noise.
 pub(crate) const ROLLBACK_TRACK_DRIVE: f32 = 0.25;
+/// `TrackGrip` divergence gate (N): max over the four elastic grip resultants. 2 kN is a
+/// one-tick hull-velocity discrepancy of ~1.1 mm/s on the Tiger and <1% of a flat side's
+/// grip budget — a netcode ratchet (tighten from MP measurements), not a friction constant.
+pub(crate) const ROLLBACK_TRACK_GRIP_N: f32 = 2_000.0;
 
 // The registered conditions and watchdog share these metrics and thresholds.
 
@@ -736,6 +740,15 @@ pub(crate) fn angular_velocity_error(a: &AngularVelocity, b: &AngularVelocity) -
 }
 
 /// Confirmed-vs-predicted `TrackDrive` divergence: the largest per-side belt-state delta.
+/// Confirmed-vs-predicted `TrackGrip` divergence: the largest per-side per-axis delta (N).
+pub(crate) fn track_grip_error(a: &TrackGrip, b: &TrackGrip) -> f32 {
+    let mut worst: f32 = 0.0;
+    for (sa, sb) in a.sides.iter().zip(&b.sides) {
+        worst = worst.max((sa[0] - sb[0]).abs()).max((sa[1] - sb[1]).abs());
+    }
+    worst
+}
+
 pub(crate) fn track_drive_error(a: &TrackDrive, b: &TrackDrive) -> f32 {
     let mut worst = (a.throttle - b.throttle)
         .abs()
@@ -778,10 +791,11 @@ const WIRE_SURFACE: &[&str] = &[
     "LinearVelocity",
     "AngularVelocity",
     "TrackDrive",
+    "TrackGrip",
 ];
 
 /// Pinned hash for the ordered wire surface and a direct handshake-fingerprint input.
-const WIRE_SURFACE_HASH: u64 = 0xc750_8fd8_93ff_31d2;
+const WIRE_SURFACE_HASH: u64 = 0x601e_ddd4_8c2c_4f91;
 
 // ---------------------------------------------------------------------------
 // Deep wire-surface coverage (field-level + external-dep skew)
@@ -813,7 +827,7 @@ const WIRE_SURFACE_HASH: u64 = 0xc750_8fd8_93ff_31d2;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x81a1_82a3_84d6_92ca;
+const WIRE_TYPES_HASH: u64 = 0xe89a_a5a8_3f08_467b;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -967,6 +981,18 @@ pub(crate) fn plugin(app: &mut App) {
                 "TrackDrive",
                 track_drive_error(a, b),
                 ROLLBACK_TRACK_DRIVE,
+            )
+        });
+    // The static-friction state (ADR-0026): same shape, its own newton-unit threshold so a
+    // grip mismatch attributes as grip, not as belt state.
+    app.component::<TrackGrip>()
+        .replicate()
+        .predict()
+        .with_rollback_condition(|a: &TrackGrip, b: &TrackGrip| {
+            crate::trace::note_if_tripped(
+                "TrackGrip",
+                track_grip_error(a, b),
+                ROLLBACK_TRACK_GRIP_N,
             )
         });
 
@@ -1253,6 +1279,7 @@ mod tests {
         ("src/net/protocol.rs", "NetTank"),
         ("src/track/sim.rs", "TrackDrive"),
         ("src/track/sim.rs", "TrackDriveSide"),
+        ("src/track/sim.rs", "TrackGrip"),
         ("src/net/protocol.rs", "NetBot"),
         ("src/lib.rs", "CombatantId"),
         ("src/net/protocol.rs", "ServoAngles"),

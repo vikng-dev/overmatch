@@ -6,7 +6,7 @@ use super::servo::ServoState;
 use crate::command::TankCommand;
 use crate::damage::Requirement;
 use crate::spec::{FireMode, RecoilSpec, Trigger, ViewKind};
-use crate::track::sim::{TrackContacts, TrackDrive};
+use crate::track::sim::{TrackContacts, TrackDrive, TrackGrip};
 
 #[derive(Component)]
 pub struct Turret;
@@ -19,7 +19,7 @@ pub struct Hull;
 
 /// Local simulation root. Command and drive state are required in the same construction flush.
 #[derive(Component)]
-#[require(TankCommand, TrackDrive, TrackContacts)]
+#[require(TankCommand, TrackDrive, TrackGrip, TrackContacts)]
 pub struct Tank;
 
 /// Selects the tank that local input and player-facing systems address.

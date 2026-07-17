@@ -345,6 +345,8 @@ pub fn plugin(app: &mut App) {
         .add_plugins(PhysicsDebugPlugin)
         .init_resource::<BeltContacts>()
         .init_resource::<SideDynamics>()
+        .init_resource::<BeltGrip>()
+        .init_resource::<GripSwitch>()
         .init_resource::<Paused>()
         .init_resource::<ResetSpot>()
         .init_resource::<RawDriveInput>()
@@ -484,6 +486,22 @@ impl BeltContacts {
 struct SideDynamics {
     engine: [f32; 2],
     reaction: [f32; 2],
+}
+
+/// The per-side elastic grip resultant (the static-friction state, `SideState::grip`),
+/// `[left, right]` — the sandbox analogue of the game's `TrackGrip` component.
+#[derive(Resource, Default)]
+struct BeltGrip([Vec2; 2]);
+
+/// Harness parity switch (`grip=off`): `false` zeroes the bristle stiffness, reducing the
+/// law to the kinetic-only baseline bit-for-bit. Interactive runs always drive with grip.
+#[derive(Resource)]
+struct GripSwitch(bool);
+
+impl Default for GripSwitch {
+    fn default() -> Self {
+        Self(true)
+    }
 }
 
 /// Whether the sim is frozen (`Esc`). The belt model gates on this so it doesn't accumulate force
@@ -1056,6 +1074,7 @@ fn reset_rig(
     mut shaped: ResMut<ShapedDrive>,
     mut contacts: ResMut<BeltContacts>,
     mut dynamics: ResMut<SideDynamics>,
+    mut grip_state: ResMut<BeltGrip>,
     mut wheels: Query<&mut Suspension>,
 ) {
     if !keys.just_pressed(KeyCode::KeyR) {
@@ -1075,6 +1094,7 @@ fn reset_rig(
     shaped.0 = crate::track::drive::DriveAxes::default();
     *contacts = BeltContacts::default();
     *dynamics = SideDynamics::default();
+    *grip_state = BeltGrip::default();
     // Stale cosmetic wheel lift survives the teleport otherwise: for the first ~100 ms the
     // conform solves against phantom raised wheel circles while the hull settles.
     for mut susp in &mut wheels {

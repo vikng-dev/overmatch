@@ -206,7 +206,20 @@ const CHAIN_REBASE_WINDOW: f32 = 0.35;
 /// - support + traction applied at the profile centroid on the terrain surface
 ///   (`+ out·(t/2 − pen_c)`), so the lever arm includes the shoe.
 pub(super) fn apply_belt_support_field(
-    mut hull: Query<(&GlobalTransform, Forces), With<Hull>>,
+    // Tick-truth Position/Rotation, NEVER GlobalTransform: the render pose updates once per
+    // FRAME, so on a multi-tick frame the second tick would probe terrain against a stale
+    // hull — phantom slip/penetration that the grip state INTEGRATES into real force
+    // oscillation (measured: period-2 load alternation, 212↔32 kN, with a perfectly smooth
+    // hull). This was "model4's one game-illegal habit" (architecture v3 §0) — now retired;
+    // the sim core and the game adapter always agreed on tick truth.
+    mut hull: Query<
+        (
+            &avian3d::prelude::Position,
+            &avian3d::prelude::Rotation,
+            Forces,
+        ),
+        With<Hull>,
+    >,
     field: Res<TerrainField>,
     raw: Res<RawDriveInput>,
     mut shaped: ResMut<ShapedDrive>,
@@ -216,11 +229,13 @@ pub(super) fn apply_belt_support_field(
     mut phase: ResMut<BeltPhase>,
     mut contacts: ResMut<BeltContacts>,
     mut dynamics: ResMut<SideDynamics>,
+    mut grip: ResMut<BeltGrip>,
+    grip_on: Res<GripSwitch>,
 ) {
-    let Ok((hull_gt, mut forces)) = hull.single_mut() else {
+    let Ok((hull_pos, hull_rot, mut forces)) = hull.single_mut() else {
         return;
     };
-    let affine = hull_gt.affine();
+    let affine = bevy::math::Affine3A::from_rotation_translation(hull_rot.0, hull_pos.0);
     let to_local = affine.inverse();
     contacts.0[0].clear(); // the sole contact system this tick
     contacts.0[1].clear();
@@ -235,7 +250,7 @@ pub(super) fn apply_belt_support_field(
     if let Some(&first) = loop_pts.first() {
         loop_pts.push(first);
     }
-    let params = force_params();
+    let params = force_params(grip_on.0);
 
     for side in [Side::Left, Side::Right] {
         let track_x = match side {
@@ -256,6 +271,10 @@ pub(super) fn apply_belt_support_field(
         let state = SideState {
             speed: belt.get(side),
             phase: phase.get(side),
+            grip: grip.0[match side {
+                Side::Left => 0,
+                Side::Right => 1,
+            }],
         };
         let report = step_side(&side_input, state, affine, dt, &params, &field.0, |p| {
             forces.velocity_at_point(p)
@@ -283,6 +302,7 @@ pub(super) fn apply_belt_support_field(
         }
         dynamics.engine[si] = report.engine_force;
         dynamics.reaction[si] = report.belt_reaction;
+        grip.0[si] = report.state.grip;
         belt.set(side, report.state.speed);
         phase.set(side, report.state.phase);
     }
@@ -290,7 +310,7 @@ pub(super) fn apply_belt_support_field(
 
 /// The sandbox's force parameters: the T-34 lab vehicle + the shared support/friction law,
 /// assembled for [`track::forces`](crate::track::forces) — the promoted single implementation.
-fn force_params() -> ForceParams {
+fn force_params(grip: bool) -> ForceParams {
     ForceParams {
         thickness: TRACK_THICKNESS,
         columns: COLUMNS,
@@ -306,6 +326,14 @@ fn force_params() -> ForceParams {
         engine_force: ENGINE_FORCE,
         governor_gain: BELT_GOVERNOR_GAIN,
         inertia: BELT_INERTIA,
+        // The declared park-target stiffness (forces.rs provenance doc); `false` = the
+        // harness parity switch (`grip=off`): kinetic-only law, bit-identical to the
+        // pre-grip baseline.
+        grip_stiffness: if grip {
+            crate::track::forces::grip_stiffness(MU, HULL_MASS * 9.81)
+        } else {
+            0.0
+        },
     }
 }
 

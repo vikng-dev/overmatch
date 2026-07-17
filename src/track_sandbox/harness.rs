@@ -48,6 +48,9 @@ pub(super) struct Harness {
     /// `view=chain` runs the route-chain view instead of the kinematic wrap (the step-22 view
     /// A/B, scripted).
     chain_view: bool,
+    /// `grip=off` disables the static-friction regime — the parity switch (kinetic-only
+    /// law, bit-identical to the pre-grip baseline).
+    grip: bool,
     out: String,
 }
 
@@ -71,6 +74,7 @@ pub(super) fn parse_env() -> Option<Harness> {
         throttle2: 0.0,
         steer2: 0.0,
         chain_view: false,
+        grip: true,
         out: "/tmp/track_harness.jsonl".into(),
     };
     for pair in spec.split(',') {
@@ -96,6 +100,7 @@ pub(super) fn parse_env() -> Option<Harness> {
             "throttle2" => h.throttle2 = value.trim().parse().unwrap_or(0.0),
             "steer2" => h.steer2 = value.trim().parse().unwrap_or(0.0),
             "view" => h.chain_view = value.trim() == "chain",
+            "grip" => h.grip = value.trim() != "off",
             "out" => h.out = value.trim().to_string(),
             _ => {}
         }
@@ -112,12 +117,14 @@ fn arr(vals: impl IntoIterator<Item = f32>) -> String {
 pub(super) fn harness_setup(
     mut commands: Commands,
     harness: Res<Harness>,
+    mut grip_switch: ResMut<GripSwitch>,
     fixed_time: Res<Time<Fixed>>,
     field: Res<TerrainField>,
     mut view: ResMut<TrackViewMode>,
     hull: Single<(&mut Transform, &mut LinearVelocity, &mut AngularVelocity), With<Hull>>,
 ) {
     view.kinematic = !harness.chain_view;
+    grip_switch.0 = harness.grip;
     let (mut transform, mut lin, mut ang) = hull.into_inner();
     *transform = match harness.pose {
         // Slope pad: rest height along the pad NORMAL, hull tilted with the incline and
@@ -127,7 +134,7 @@ pub(super) fn harness_setup(
             // from the flat-lane rest pose, and spawning intersected launches the penalty
             // spring (measured: +4.3 m/s pop). A short drop settles cleanly in warmup.
             let (top, tilt) = slope_pad_pose();
-            Transform::from_translation(top + tilt * Vec3::Y * (HULL_REST_Y + 0.35))
+            Transform::from_translation(top + tilt * Vec3::Y * (HULL_REST_Y + 0.12))
                 .with_rotation(tilt * Quat::from_rotation_y(yaw))
         }
         None => Transform::from_xyz(0.0, HULL_REST_Y, harness.z),
@@ -142,7 +149,7 @@ pub(super) fn harness_setup(
         // `"model":4` is pinned: the sandbox hosts only the promoted field-belt model, and the
         // field stays for schema stability with existing analyzers. `schema:2` = raw/shaped
         // commands, quaternion + full angular velocity, per-side contact arrays + aggregates.
-        "{{\"t\":\"meta\",\"model\":4,\"schema\":2,\"view\":\"{}\",\"pose\":\"{}\",\"slope_deg\":{},\"z\":{:.3},\"warmup\":{},\"ticks\":{},\"throttle\":{:.3},\"steer\":{:.3},\"t2\":{},\"throttle2\":{:.3},\"steer2\":{:.3},\"slew\":{},\"fixed_dt\":{},\"half_tread\":{TRACK_HALF_WIDTH},\"mu\":{MU},\"lateral_ratio\":{LATERAL_GRIP_RATIO},\"slip_saturation\":{SLIP_SATURATION},\"weight\":{:.0},\"hull_rest_y\":{HULL_REST_Y},\"thickness\":{TRACK_THICKNESS}}}",
+        "{{\"t\":\"meta\",\"model\":4,\"schema\":2,\"view\":\"{}\",\"pose\":\"{}\",\"slope_deg\":{},\"z\":{:.3},\"warmup\":{},\"ticks\":{},\"throttle\":{:.3},\"steer\":{:.3},\"t2\":{},\"throttle2\":{:.3},\"steer2\":{:.3},\"slew\":{},\"fixed_dt\":{},\"grip\":{},\"half_tread\":{TRACK_HALF_WIDTH},\"mu\":{MU},\"lateral_ratio\":{LATERAL_GRIP_RATIO},\"slip_saturation\":{SLIP_SATURATION},\"weight\":{:.0},\"hull_rest_y\":{HULL_REST_Y},\"thickness\":{TRACK_THICKNESS}}}",
         if harness.chain_view { "chain" } else { "wrap" },
         match harness.pose {
             None => "lane".into(),
@@ -163,6 +170,7 @@ pub(super) fn harness_setup(
         harness.steer2,
         crate::track::drive::DRIVE_SLEW_PER_SECOND,
         fixed_time.timestep().as_secs_f64(),
+        harness.grip,
         HULL_MASS * 9.81,
     )
     .unwrap();
@@ -244,6 +252,7 @@ pub(super) fn harness_record(
     raw: Res<RawDriveInput>,
     shaped: Res<ShapedDrive>,
     dynamics: Res<SideDynamics>,
+    grip: Res<BeltGrip>,
     contacts: Res<BeltContacts>,
     belt: Res<BeltSpeed>,
     phase: Res<BeltPhase>,
@@ -324,7 +333,7 @@ pub(super) fn harness_record(
     let k = log.tick;
     writeln!(
         log.writer,
-        "{{\"t\":\"k\",\"k\":{k},\"hull\":{},\"q\":{},\"av\":{},\"pitch\":{:.5},\"yaw\":{:.5},\"yawrate\":{:.5},\"raw\":{},\"shaped\":{},\"side_cmd\":{},\"vel\":{},\"belt\":{},\"phase\":{},\"engine\":{},\"reaction\":{},\"load\":{},\"load_el\":{},\"flat\":{},\"sup\":{:.0},\"wheels\":[{}],\"contacts\":[[{}],[{}]],\"chain\":[{}]}}",
+        "{{\"t\":\"k\",\"k\":{k},\"hull\":{},\"q\":{},\"av\":{},\"pitch\":{:.5},\"yaw\":{:.5},\"yawrate\":{:.5},\"raw\":{},\"shaped\":{},\"side_cmd\":{},\"vel\":{},\"belt\":{},\"phase\":{},\"engine\":{},\"reaction\":{},\"qgrip\":[{},{}],\"load\":{},\"load_el\":{},\"flat\":{},\"sup\":{:.0},\"wheels\":[{}],\"contacts\":[[{}],[{}]],\"chain\":[{}]}}",
         arr([
             transform.translation.x,
             transform.translation.y,
@@ -348,6 +357,8 @@ pub(super) fn harness_record(
         arr([phase.get(Side::Left) as f32, phase.get(Side::Right) as f32]),
         arr(dynamics.engine),
         arr(dynamics.reaction),
+        arr([grip.0[0].x, grip.0[0].y]),
+        arr([grip.0[1].x, grip.0[1].y]),
         arr([ll, rl]),
         arr([lel, rel]),
         arr([lfl, rfl]),

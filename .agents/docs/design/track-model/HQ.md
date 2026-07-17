@@ -1617,6 +1617,23 @@ both.
   `feel-pass-checklist.md` written for Yan's first drive. Remaining commit-E tail: slope
   presets (`pose=slope_*`), rollback steer-edge tests, remote circling-bot capture.
 
+- 2026-07-17 — **Step 29: STATIC FRICTION SHIPPED — the strain regime (ADR-0026)**. Yan's
+  first-drive verdict ("sideways slope slip… much higher category of static friction" + "declare
+  it, no patchy systems") → research fan-out (codex design, friction literature, engine
+  practice — three fields converged on elastic-plastic shear strain) → Yan-gated synthesis →
+  implementation. `TrackGrip` per-side strain resultants (replicated+predicted+rolled back,
+  PROTOCOL_REV 13, `hblt`), belt-hold blend, Wong 75 mm shear modulus. THREE design
+  corrections found by gates (recorded in ADR-0026): 5 mm target → Nyquist limit cycle
+  (→ Wong modulus); damped→ELASTIC load for the grip budget (damper transients poison the
+  integrating state); kinetic regularizer REMOVED from the grip regime (its near-rest slope
+  was a latent marginal instability the creep always masked — strain force per Rill). Plus:
+  sandbox tick-truth pose (GlobalTransform habit retired). GATES: hill-hold 0.00 mm/30 s all
+  four poses, drive-off <0.1 s no chatter, parity grip=off bit-identical, 248 tests, MP smoke
+  clean, analyzer suite green (net-energy dissipation gate). FEEL DELTA for Yan's next drive:
+  sub-saturation grip is FULLER — turns 2–6× tighter (34.8/15.2/5.0 m, ≈no-slip), pivot 2×
+  faster; `LATERAL_GRIP_RATIO` is the re-heavy dial. Slalom scenario outgrew the lane
+  (course retune parked).
+
 ## Open questions / parking lot
 
 - **Lateral link rigidity (Yan, 2026-07-16, open tab)**: a real shoe is ~perfectly stiff

@@ -18,11 +18,18 @@ scripted commands.
 HARD GATES (every run, every tick):
   - shaper      |Δshaped| per axis per tick ≤ slew/64, and shaped snaps exactly
                 to raw once within one step (drive.rs `approach` semantics).
-  - ellipse     per contact: (f_long/μ·load)² + (f_lat/μ·load·lat_ratio)² ≤ 1
+  - ellipse     per contact: (f_long/μ·L)² + (f_lat/μ·L·lat_ratio)² ≤ 1, where
+                L is the ELASTIC load when meta.grip is true (the static-friction
+                law scales by load_elastic) and the damped load otherwise
                 (forces.rs caps the ellipse; tolerance includes the JSONL
                 print quantization: f at 0.05 N, load at 0.5 N).
-  - dissipation friction never pumps energy: f_long·slip ≥ −tol and
+  - dissipation grip=false: friction never pumps energy — f_long·slip ≥ −tol and
                 f_lat·slip_lat ≤ +tol (f_long tracks slip sign, f_lat opposes).
+                grip=true: the bristle spring lags slip and legitimately returns
+                stored elastic energy, so the gate is NET — total friction work
+                over the run ≥ −(2·C_max²/2K), the most the two side springs can
+                have stored (C_max = per-side max Σ μ·load_elastic,
+                K = μ·weight/2/GRIP_SHEAR_MODULUS_M).
   - finite      every numeric field in every row is finite.
 
 SCENARIO GATES (settled window = tick ≥ warmup+64, before t2, trimmed at
@@ -41,8 +48,10 @@ analyzable window; everything after is falling/wedged off-course, not steering):
                 vs ~0.1 rad/s orbit — so a fitted circle measures the slow
                 precessing drift walk, which pivot_drift already bounds; the
                 walk loop is reported alongside, not gated.)
-  - turn        Kasa circle fit of the hull XZ path: fit RMS < 5% of radius;
-                radius cross-checked against |v|/|yawrate| and the no-slip
+  - turn        Kasa circle fit of the hull XZ path: fit RMS < 5% of radius OR
+                |r_fit − r_kinematic|/r_fit < 10% (tight turns with evolving
+                speed spiral slightly; the kinematic crosscheck rescues them);
+                radius also cross-checked against the no-slip
                 R_belt = half_tread·(vl+vr)/(vl−vr) (reported, not gated).
   - slalom      yawrate reverses sign after shaped steer crosses zero; net
                 heading change over paired equal-length settled half-cycles < 5°.
@@ -85,6 +94,9 @@ EXIT_SUPPORT_FRACTION = 0.3
 # half-ulp of the printed precision, folded into the ellipse tolerance.
 Q_FORCE = 0.05  # f_long / f_lat at 1 decimal
 Q_LOAD = 0.5  # load at 0 decimals
+# Grip (static-friction) regime bristle shear modulus — mirrors the Rust
+# GRIP_SHEAR_MODULUS_M in src/track/forces.rs; per-side stiffness K = mu·W/2 / this.
+GRIP_SHEAR_MODULUS_M = 0.075
 
 
 # --- loading -----------------------------------------------------------------------------------
@@ -139,14 +151,29 @@ def load_run(path: Path):
         "sup": np.array([r["sup"] for r in rows]),
         "ncontacts": np.array([[len(r["contacts"][0]), len(r["contacts"][1])] for r in rows]),
     }
-    # Flat contact table [load, slip, slip_lat, f_long, f_lat] across the whole run
-    # (contact row layout: x,y,z,load,slip,normal_y,load_elastic,slip_lat,f_long,f_lat).
+    # Flat contact table [load, slip, slip_lat, f_long, f_lat, load_elastic] across
+    # the whole run (contact row layout:
+    # x,y,z,load,slip,normal_y,load_elastic,slip_lat,f_long,f_lat).
     flat = []
-    for r in rows:
-        for side in r["contacts"]:
+    side_elastic = np.zeros((n, 2))  # per-tick per-side sum of load_elastic
+    for i, r in enumerate(rows):
+        for s, side in enumerate(r["contacts"]):
             for c in side:
-                flat.append((c[3], c[4], c[7], c[8], c[9]))
-    run["contacts"] = np.array(flat) if flat else np.zeros((0, 5))
+                flat.append((c[3], c[4], c[7], c[8], c[9], c[6]))
+                side_elastic[i, s] += c[6]
+    run["contacts"] = np.array(flat) if flat else np.zeros((0, 6))
+    run["side_elastic"] = side_elastic
+
+    # Grip regime flag: schema-2 metas gained "grip" alongside the static-friction
+    # (elastic-plastic strain) force law. Fallback for metas predating the field:
+    # a nonzero qgrip strain state anywhere in the run means grip was active.
+    if "grip" in meta:
+        run["grip"] = bool(meta["grip"])
+    else:
+        qg = [r.get("qgrip") for r in rows if r.get("qgrip") is not None]
+        nums = []
+        flatten_numeric(qg, nums)
+        run["grip"] = bool(nums) and bool(np.any(np.asarray(nums) != 0.0))
 
     # Finiteness sweep over EVERY numeric field the rows carry (chain, wheels, all).
     nonfinite = 0
@@ -224,10 +251,14 @@ def check_hard_gates(run, gates):
     # the print quantization of f (±0.05 N) and load (±0.5 N) — which dominates e
     # for feather-weight contacts, so max_e_loaded (load ≥ 100 N, quantization
     # ≤ ~1%) is the headline number and raw max_e is quantization noise).
+    # Grip regime (static-friction / elastic-plastic strain law): forces scale by
+    # the ELASTIC load (contact col 5 here), not the damped load — so the cap is
+    # mu·load_elastic. Kinetic-only captures keep the damped-load cap.
     c = run["contacts"]
-    loaded = c[c[:, 0] >= 1.0] if c.size else c
+    load_col = 5 if run["grip"] else 0
+    loaded = c[c[:, load_col] >= 1.0] if c.size else c
     if loaded.size:
-        load, f_long, f_lat = loaded[:, 0], loaded[:, 3], loaded[:, 4]
+        load, f_long, f_lat = loaded[:, load_col], loaded[:, 3], loaded[:, 4]
         grip = meta["mu"] * load
         grip_lat = grip * meta["lateral_ratio"]
         e = (f_long / grip) ** 2 + (f_lat / grip_lat) ** 2
@@ -249,20 +280,43 @@ def check_hard_gates(run, gates):
         {"contacts": int(loaded.shape[0]), "max_e_loaded": emax_loaded, "max_e": emax, "violations": viol},
     )
 
-    # (3) Dissipation: f_long follows slip sign, f_lat opposes slip_lat (forces.rs).
-    if c.size:
-        fscale = max(1.0, float(np.max(np.abs(c[:, 3:5]))))
-        tol = 1e-3 * fscale
-        long_viol = int(np.count_nonzero(c[:, 3] * c[:, 1] < -tol))
-        lat_viol = int(np.count_nonzero(c[:, 4] * c[:, 2] > tol))
+    # (3) Dissipation. Kinetic law: instantaneous sign check — f_long follows slip
+    # sign, f_lat opposes slip_lat (forces.rs). Grip law: the bristle spring lags
+    # slip and legitimately RETURNS stored elastic energy (instantaneous f·slip < 0
+    # moments are physical), so the gate becomes NET energy over the run: total
+    # friction work must not exceed what the springs can store, i.e.
+    # Σ (f_long·slip + (−f_lat)·slip_lat)·dt ≥ −E_store_bound with
+    # E_store_bound = 2 sides × C_max²/(2K), C_max = per-side max over the window
+    # of Σ mu·load_elastic, K = bristle stiffness mu·weight/2/GRIP_SHEAR_MODULUS_M.
+    if run["grip"]:
+        dt = meta.get("fixed_dt", 1.0 / TICK_HZ)
+        if c.size:
+            net_e = float(np.sum((c[:, 3] * c[:, 1] - c[:, 4] * c[:, 2]) * dt))
+        else:
+            net_e = 0.0
+        c_max = meta["mu"] * float(np.max(run["side_elastic"])) if run["side_elastic"].size else 0.0
+        k_bristle = meta["mu"] * meta["weight"] / 2.0 / GRIP_SHEAR_MODULUS_M
+        e_bound = 2.0 * c_max**2 / (2.0 * k_bristle) if k_bristle > 0 else 0.0
+        gate(
+            gates,
+            "dissipation",
+            net_e >= -e_bound,
+            {"net_energy_j": net_e, "store_bound_j": e_bound, "c_max_n": c_max, "k_n_per_m": k_bristle},
+        )
     else:
-        tol, long_viol, lat_viol = 0.0, 0, 0
-    gate(
-        gates,
-        "dissipation",
-        long_viol == 0 and lat_viol == 0,
-        {"tol": tol, "long_violations": long_viol, "lat_violations": lat_viol},
-    )
+        if c.size:
+            fscale = max(1.0, float(np.max(np.abs(c[:, 3:5]))))
+            tol = 1e-3 * fscale
+            long_viol = int(np.count_nonzero(c[:, 3] * c[:, 1] < -tol))
+            lat_viol = int(np.count_nonzero(c[:, 4] * c[:, 2] > tol))
+        else:
+            tol, long_viol, lat_viol = 0.0, 0, 0
+        gate(
+            gates,
+            "dissipation",
+            long_viol == 0 and lat_viol == 0,
+            {"tol": tol, "long_violations": long_viol, "lat_violations": lat_viol},
+        )
 
     # (4) Finiteness.
     gate(gates, "finite", run["nonfinite"] == 0, {"nonfinite_values": run["nonfinite"]})
@@ -373,15 +427,27 @@ def check_turn(run, gates, start, stop):
     meta = run["meta"]
     xz = run["hull"][start:stop][:, [0, 2]]
     _, _, radius, rms = kasa_fit(xz[:, 0], xz[:, 1])
-    gate(gates, "turn_fit_rms", rms < 0.05 * radius, {"radius_m": radius, "fit_rms_m": rms})
 
-    # Cross-checks (reported, not gated): kinematic |v|/|yawrate| and the no-slip
-    # differential radius from the belt speeds — the gap between R_fit and R_belt
-    # IS the model's understeer (lateral slip pushing the hull wide).
+    # Kinematic radius |v|/|yawrate| doubles as the fit's escape hatch: tight
+    # turns (r_fit < ~10 m) with evolving speed spiral slightly, inflating the
+    # RMS while the path is still a legitimate turn — so the gate passes on
+    # EITHER a tight circle fit (RMS < 5% of radius) OR fit/kinematic agreement
+    # (|r_fit − r_kin|/r_fit < 10%).
     yr = yawrate_body(run)[start:stop]
     v = run["vel"][start:stop]
     speed = np.hypot(v[:, 0], v[:, 2])
     r_kin = float(np.mean(speed) / max(np.mean(np.abs(yr)), 1e-9))
+    kin_gap = abs(radius - r_kin) / radius if radius > 0 else float("inf")
+    gate(
+        gates,
+        "turn_fit_rms",
+        rms < 0.05 * radius or kin_gap < 0.10,
+        {"radius_m": radius, "fit_rms_m": rms, "kinematic_gap": kin_gap},
+    )
+
+    # Cross-checks (reported, not gated): kinematic |v|/|yawrate| and the no-slip
+    # differential radius from the belt speeds — the gap between R_fit and R_belt
+    # IS the model's understeer (lateral slip pushing the hull wide).
     belt = run["belt"][start:stop]
     vl, vr = float(np.mean(belt[:, 0])), float(np.mean(belt[:, 1]))
     r_belt = abs(meta["half_tread"] * (vl + vr) / (vl - vr)) if vl != vr else float("inf")

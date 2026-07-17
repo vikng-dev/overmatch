@@ -28,6 +28,45 @@ use super::route::{polyline_len, resample};
 /// numerical policy, not vehicle data.
 const STALL_SPEED: f32 = 0.5;
 
+/// The static-grip shear modulus (m): the Janosi–Hanamoto `K` for RUBBER TRACK PADS ON
+/// FIRM GROUND (Wong & Chiang's measured parameter set — the terramechanics provenance,
+/// static-friction-design.md §3). Full grip develops over this much shear; a 20° park
+/// settles back ~28 mm before holding — the vehicle "rocks onto its brakes". When the
+/// ground-type mechanic lands, TERRAIN owns this dial (firm soil ~10 mm … loose sand 25 mm).
+///
+/// Deliberately NOT the design draft's 5 mm park target: at 64 Hz that stiffness drove a
+/// full-amplitude coupled roll/yaw limit cycle (measured: 32 Hz side-swap, 7× per-tick load
+/// swings — the textbook undamped-bristle oscillation). At 75 mm every coupled mode sits
+/// deep inside the semi-implicit stability region (ωΔt ≈ 0.27; per-tick growth damping
+/// ratio ≈ 0.07 of the limit).
+pub const GRIP_SHEAR_MODULUS_M: f32 = 0.075;
+
+/// Grip stiffness (N/m of shear, per side): the side's nominal saturated grip `μ·W/2`
+/// developed over one shear modulus. Declared from vehicle weight + terrain — never tuned.
+pub fn grip_stiffness(mu: f32, weight_n: f32) -> f32 {
+    mu * weight_n / 2.0 / GRIP_SHEAR_MODULUS_M
+}
+
+/// Bristle damping ratio ζ: the elastic-zone bristle is an undamped integrator in the hull's
+/// resonance loop — without its damping partner a large disturbance (spawn drop, explosion
+/// kick) can capture a saturated oscillation attractor the clipped kinetic term cannot damp
+/// (measured: per-tick load flips on slope parks; the literature's textbook pairing —
+/// TMeasy `F = c·x + d·ẋ`, Pacejka's Besselink term). σ1 = 2ζ√(K·m_side) reduces to the
+/// closed form `2ζ·K·√(shear/(μ·g))` via the stiffness derivation — no new vehicle datum.
+const GRIP_DAMPING_RATIO: f32 = 0.15;
+
+/// Elastic fraction of the grip budget: below `GRIP_BREAKAWAY·C` the state is a PURE spring
+/// (zero plastic flow) — the Dupont elasto-plastic branch that kills presliding drift
+/// (plain Dahl ratchets downhill under oscillating loads; our at-rest suspension limit
+/// cycle + MG recoil are exactly that). α blends smoothly to full Dahl flow at the cap.
+const GRIP_BREAKAWAY: f32 = 0.5;
+
+/// `1 − smoothstep` on [0, 1] — the belt-hold blend factor.
+fn hold_blend(x: f32) -> f32 {
+    let t = x.clamp(0.0, 1.0);
+    1.0 - t * t * (3.0 - 2.0 * t)
+}
+
 /// The force model's parameters: vehicle data (spec-authored) + the per-metre support law.
 /// Nothing here is solver-quality policy — quality lives in the station/column geometry the
 /// caller authors (link pitch sets station density).
@@ -58,6 +97,10 @@ pub struct ForceParams {
     pub engine_force: f32,
     pub governor_gain: f32,
     pub inertia: f32,
+    /// Static-grip bristle stiffness per side (N/m of shear) — [`grip_stiffness`]. `0.0`
+    /// disables the whole static regime (grip state AND belt-hold): the law is then
+    /// bit-identical to the kinetic-only law — the parity switch the gates rely on.
+    pub grip_stiffness: f32,
 }
 
 /// One side's dynamic state — the caller owns it (the game's `TrackDrive` component, the
@@ -70,6 +113,11 @@ pub struct SideState {
     /// grows unbounded and an f32 loses sub-pitch precision within a long match's driving
     /// distance (codex phase-B finding 8).
     pub phase: f64,
+    /// The side's elastic grip resultant (N), circularized: `x` longitudinal, `y` is the
+    /// LATERAL force divided by `lateral_ratio` (so both axes share one budget `C = Σ μ·load`).
+    /// A generalized force, NOT a world anchor — distributed through the tick's contacts in
+    /// load proportion. Zero ≡ today's kinetic-only law, bit-for-bit.
+    pub grip: Vec2,
 }
 
 /// One side's per-tick input.
@@ -188,6 +236,24 @@ pub fn step_side<O: TerrainOracle>(
         return report;
     }
 
+    // PASS 1 — geometry, support, and slip per contact column. Forces are NOT emitted yet:
+    // the elastic grip resultant needs this tick's total budget and load-weighted slip
+    // BEFORE per-contact traction can include it. Pass 2 emits apps in the exact
+    // support-then-traction per-contact order the one-pass law used — application order is
+    // the bit-reproducibility contract, and it is unchanged.
+    struct ColumnContact {
+        p: Vec3,
+        normal: Vec3,
+        load: f32,
+        load_elastic: f32,
+        long_dir: Vec3,
+        lat_dir: Vec3,
+        has_plane: bool,
+        slip_long: f32,
+        slip_lat: f32,
+    }
+    let mut cols: Vec<ColumnContact> = Vec::with_capacity(n);
+
     for i in 0..n {
         let a = stations[i];
         let b = stations[(i + 1) % n];
@@ -246,8 +312,8 @@ pub fn step_side<O: TerrainOracle>(
             .max(0.0);
             let p = ca + axis * x_c + out * (params.thickness / 2.0 - pen_c);
 
-            // (1) Support: penalty spring along the belt's own inward normal, at the
-            // column's share of the per-metre coefficients.
+            // Support: penalty spring along the belt's own inward normal, at the column's
+            // share of the per-metre coefficients.
             let normal = -out;
             let vel = vel_at(p);
             let engage = (pen_max / params.engage_depth).clamp(0.0, 1.0);
@@ -259,65 +325,186 @@ pub fn step_side<O: TerrainOracle>(
             if load <= 0.0 {
                 continue;
             }
-            report.apps.push(ForceApp {
-                force: normal * load,
-                point: p,
-            });
 
-            // (2) Traction: slip-saturated friction on the ellipse; grip scales with the
-            // column's load.
-            let mut slip_long = 0.0;
-            let mut slip_lat = 0.0;
-            let mut f_long = 0.0;
-            let mut f_lat = 0.0;
-            let mut traction = Vec3::ZERO;
             let drive = -affine.transform_vector3(Vec3::new(0.0, tan2.y, tan2.x));
             let long_plane = drive - drive.dot(normal) * normal;
-            if long_plane.length() > 1e-4 {
+            let has_plane = long_plane.length() > 1e-4;
+            let (long_dir, lat_dir, slip_long, slip_lat) = if has_plane {
                 let long_dir = long_plane.normalize();
                 let lat_dir = normal.cross(long_dir).normalize_or_zero();
-                slip_long = belt_speed - vel.dot(long_dir);
-                slip_lat = vel.dot(lat_dir);
-                let grip = params.mu * load;
-                let grip_lat = grip * params.lateral_ratio;
-                f_long = grip * (slip_long / params.slip_saturation).clamp(-1.0, 1.0);
-                f_lat = -grip_lat * (slip_lat / params.slip_saturation).clamp(-1.0, 1.0);
+                (
+                    long_dir,
+                    lat_dir,
+                    belt_speed - vel.dot(long_dir),
+                    vel.dot(lat_dir),
+                )
+            } else {
+                (Vec3::ZERO, Vec3::ZERO, 0.0, 0.0)
+            };
+
+            cols.push(ColumnContact {
+                p,
+                normal,
+                load,
+                load_elastic: weight * params.support_stiffness_per_m * area * engage,
+                long_dir,
+                lat_dir,
+                has_plane,
+                slip_long,
+                slip_lat,
+            });
+        }
+    }
+
+    // The elasto-plastic grip update (static-friction-design.md §3). Budget C = Σ μ·load —
+    // the ELASTIC load: the damped actual load carries the support damper's tick-scale
+    // transients, and feeding those into an integrating state amplified a marginal mm-scale
+    // Nyquist wobble into a full force limit cycle (measured: ±90 kN damped-load alternation
+    // over a ±11 kN elastic wobble, hull perfectly smooth — the support damper converts
+    // wobble rate into load asymmetry, grip fed it back). The Coulomb budget follows the
+    // sustained weight-bearing force; the kinetic regularizer keeps damped load, as shipped.
+    // Slip resultant in FORCE sign convention (x: +slip_long drives +long force; y:
+    // −slip_lat drives +lat force — matching the kinetic law's signs).
+    let k = params.grip_stiffness;
+    let budget: f32 = cols
+        .iter()
+        .filter(|c| c.has_plane)
+        .map(|c| params.mu * c.load_elastic)
+        .sum();
+    let mut grip_damp = Vec2::ZERO;
+    let grip_next = if k > 0.0 && budget > 0.0 {
+        let mut s_bar = Vec2::ZERO;
+        for c in cols.iter().filter(|c| c.has_plane) {
+            s_bar += params.mu * c.load_elastic * Vec2::new(c.slip_long, -c.slip_lat);
+        }
+        s_bar /= budget;
+        // Transport old memory into the current budget (a shrinking footprint clips force
+        // continuously; contact loss → zero — no reset regime).
+        let q_len = state.grip.length();
+        let q0 = if q_len > budget {
+            state.grip * (budget / q_len)
+        } else {
+            state.grip
+        };
+        // Dupont α: pure elastic below the breakaway fraction, and whenever slip unloads
+        // the spring (q·s̄ < 0); smoothstep to full Dahl flow at the cap. This is the
+        // drift-free branch — plain Dahl (α ≡ 1) ratchets under oscillating loads.
+        let alpha = if q0.dot(s_bar) < 0.0 {
+            0.0
+        } else {
+            let m =
+                ((q0.length() / budget - GRIP_BREAKAWAY) / (1.0 - GRIP_BREAKAWAY)).clamp(0.0, 1.0);
+            m * m * (3.0 - 2.0 * m)
+        };
+        // The damping partner (see GRIP_DAMPING_RATIO): a per-side viscous term on the
+        // load-weighted slip, distributed and ellipse-capped exactly like q.
+        grip_damp = 2.0
+            * GRIP_DAMPING_RATIO
+            * k
+            * (GRIP_SHEAR_MODULUS_M / (params.mu * 9.81)).sqrt()
+            * s_bar;
+        // Backward-Euler rational form of q̇ = K·s̄ − α·(K/C)·|s̄|·q — dissipative and
+        // self-limiting; the final projection is a safety net for the α < 1 band.
+        let q1 = (q0 + k * dt * s_bar) / (1.0 + alpha * (k * dt / budget) * s_bar.length());
+        let q1_len = q1.length();
+        if q1_len > budget {
+            q1 * (budget / q1_len)
+        } else {
+            q1
+        }
+    } else {
+        Vec2::ZERO
+    };
+
+    // PASS 2 — emit forces in the original per-contact order: support, then traction.
+    for c in &cols {
+        report.apps.push(ForceApp {
+            force: c.normal * c.load,
+            point: c.p,
+        });
+
+        let mut f_long = 0.0;
+        let mut f_lat = 0.0;
+        let mut traction = Vec3::ZERO;
+        if c.has_plane {
+            let grip = params.mu * c.load;
+            let grip_lat = grip * params.lateral_ratio;
+            if grip_next == Vec2::ZERO {
+                // The kinetic-only law, verbatim (the parity branch: with grip disabled or
+                // no stored force, these are the exact shipped expressions — bit-identical).
+                f_long = grip * (c.slip_long / params.slip_saturation).clamp(-1.0, 1.0);
+                f_lat = -grip_lat * (c.slip_lat / params.slip_saturation).clamp(-1.0, 1.0);
                 let e = (f_long / grip).powi(2) + (f_lat / grip_lat).powi(2);
                 if e > 1.0 {
                     let s = e.sqrt().recip();
                     f_long *= s;
                     f_lat *= s;
                 }
-                traction = long_dir * f_long + lat_dir * f_lat;
-                report.apps.push(ForceApp {
-                    force: traction,
-                    point: p,
-                });
-                belt_reaction += f_long;
+            } else {
+                // The grip regime: force comes from the STRAIN STATE (plus its small viscous
+                // partner), distributed in elastic-load proportion and ellipse-capped per
+                // contact — Janosi–Hanamoto proper. The kinetic regularizer is deliberately
+                // ABSENT here: near zero slip its slope is μN/slip_saturation — a ~270 kN·s/m
+                // explicit damper per side that sits at the 64 Hz stability margin and rang
+                // the contact modes (the old sim never noticed: creep kept slip saturated,
+                // dF/dv = 0). Under sustained slide the Dahl state saturates to C·ŝ — exactly
+                // the kinetic law's saturated ellipse — so steady sliding behavior converges;
+                // what changes is a physical relaxation lag (~C/K of slip distance) in force
+                // DIRECTION during fast slides, and fuller sub-saturation traction.
+                let grip_el = params.mu * c.load_elastic;
+                let grip_el_lat = grip_el * params.lateral_ratio;
+                let mut gx = (grip_next.x + grip_damp.x) / budget;
+                let mut gy = (grip_next.y + grip_damp.y) / budget;
+                let e = gx * gx + gy * gy;
+                if e > 1.0 {
+                    let s = e.sqrt().recip();
+                    gx *= s;
+                    gy *= s;
+                }
+                f_long = grip_el * gx;
+                f_lat = grip_el_lat * gy;
             }
-
-            report.contacts.push(BeltContact {
-                point: p,
-                load,
-                load_elastic: weight * params.support_stiffness_per_m * area * engage,
-                slip: slip_long,
-                slip_lat,
-                f_long,
-                f_lat,
-                normal,
-                traction,
+            traction = c.long_dir * f_long + c.lat_dir * f_lat;
+            report.apps.push(ForceApp {
+                force: traction,
+                point: c.p,
             });
+            belt_reaction += f_long;
         }
+
+        report.contacts.push(BeltContact {
+            point: c.p,
+            load: c.load,
+            load_elastic: c.load_elastic,
+            slip: c.slip_long,
+            slip_lat: c.slip_lat,
+            f_long,
+            f_lat,
+            normal: c.normal,
+            traction,
+        });
     }
 
     // Belt dynamics + advection: governor toward the command under the constant-power curve,
-    // ground reaction, reflected inertia; phase advects at the PRE-update speed.
+    // ground reaction, reflected inertia; phase advects at the PRE-update speed. The HOLD
+    // blend h lets the locked drivetrain bear the ground reaction at zero command + zero
+    // belt speed (h→1) instead of being back-driven through finite governor gain — the
+    // measured dominant longitudinal parking leak. During motion h→0: unchanged dynamics.
+    // Legitimate force balance: the belt's 1-D coordinate is fully known here. A future
+    // neutral/clutch or brake-damage mechanic weakens this term explicitly.
     let target = input.command * params.max_speed;
     let avail = engine_available(params, belt_speed);
     let engine = (params.governor_gain * (target - belt_speed)).clamp(-avail, avail);
-    let next = belt_speed + (engine - belt_reaction) / params.inertia * dt;
+    let hold = if k > 0.0 {
+        hold_blend(target.abs() / params.slip_saturation)
+            * hold_blend(belt_speed.abs() / params.slip_saturation)
+    } else {
+        0.0
+    };
+    let next = belt_speed + (engine - (1.0 - hold) * belt_reaction) / params.inertia * dt;
     report.state.speed = next.clamp(-params.max_speed, params.max_speed);
     report.state.phase = state.phase + f64::from(belt_speed * dt);
+    report.state.grip = grip_next;
     report.engine_force = engine;
     report.belt_reaction = belt_reaction;
     report

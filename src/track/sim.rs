@@ -31,7 +31,7 @@ use crate::state::{GameplaySet, SimPhase};
 use crate::tank::{Tank, TrackSide};
 
 use super::drive::{DriveAxes, shape_drive};
-use super::forces::{BeltContact, ForceParams, SideInput, SideState, step_side};
+use super::forces::{BeltContact, ForceParams, SideInput, SideState, grip_stiffness, step_side};
 use super::route::build_route;
 use super::terrain::TrackField;
 
@@ -63,6 +63,16 @@ pub struct TrackDriveSide {
     pub speed: f32,
     /// Unbounded belt travel (m) — advects the force stations; the view's exact scroll phase.
     pub phase: f64,
+}
+
+/// The static-friction state (static-friction-design.md, ADR-0026): per-side elastic grip
+/// resultants (N), `[left, right] × [longitudinal, lateral/ρ]`. Generalized forces, NOT
+/// world anchors. Owner-predicted, replicated, rolled back like [`TrackDrive`] — but a
+/// SEPARATE component because grip is measured in newtons and needs its own attributed
+/// rollback threshold. Hashed into the determinism trace (`hblt`).
+#[derive(Component, Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct TrackGrip {
+    pub sides: [[f32; 2]; 2],
 }
 
 /// Last tick's contact telemetry per side — viz/diagnostics ONLY (debug force arrows, the
@@ -156,6 +166,9 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
             engine_force: spec.powertrain.force,
             governor_gain: spec.powertrain.governor_gain,
             inertia: spec.powertrain.inertia,
+            // Derived from authored mass via the declared park target (forces.rs) — not a
+            // spec field: the target is model policy, the vehicle datum is its weight.
+            grip_stiffness: grip_stiffness(MU, blueprint.spec.mass * 9.81),
         },
     });
 }
@@ -174,6 +187,7 @@ fn apply_track_forces(
             Forces,
             &TankCommand,
             &mut TrackDrive,
+            &mut TrackGrip,
             &mut TrackContacts,
             Option<&TankVolumes>,
             Option<&TankCapabilities>,
@@ -188,8 +202,17 @@ fn apply_track_forces(
         return;
     };
     let dt = time.delta_secs();
-    for (pos, rot, mut forces, command, mut drive, mut contacts, tank_volumes, tank_caps) in
-        &mut tanks
+    for (
+        pos,
+        rot,
+        mut forces,
+        command,
+        mut drive,
+        mut grip,
+        mut contacts,
+        tank_volumes,
+        tank_caps,
+    ) in &mut tanks
     {
         // Drive gates THRUST, not grip: a dead driver/engine/transmission retargets the
         // command slew to zero (a fade over ~1/DRIVE_SLEW_PER_SECOND, see the module doc)
@@ -229,6 +252,7 @@ fn apply_track_forces(
             let state = SideState {
                 speed: side.speed,
                 phase: side.phase,
+                grip: bevy::math::Vec2::new(grip.sides[si][0], grip.sides[si][1]),
             };
             let report = step_side(&input, state, affine, dt, &gear.params, oracle, |p| {
                 forces.velocity_at_point(p)
@@ -241,6 +265,7 @@ fn apply_track_forces(
                 speed: report.state.speed,
                 phase: report.state.phase,
             };
+            grip.sides[si] = [report.state.grip.x, report.state.grip.y];
             contacts.0[si] = report.contacts;
         }
     }
