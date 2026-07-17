@@ -4,6 +4,8 @@
 //! reproducible offline analysis instead of screenshot forensics.
 //!
 //! `SANDBOX_HARNESS="z=-5,warmup=192,ticks=640,throttle=0.25,steer=0.4,out=/tmp/run.jsonl"`
+//! - `pose` spawn preset: `lane` (default; uses `z`) or `slope_up`/`slope_down`/`slope_left`/
+//!   `slope_right` — parked on the 20° pad facing up/down/across the fall line,
 //! - `z` spawn lane position, `warmup` settle ticks at zero input, `ticks` recorded ticks after
 //!   warmup, `throttle`/`steer` constant drive during the recorded window (`t2` +
 //!   `throttle2`/`steer2` switch both at one tick: reversal slam, pivot entry, slalom flip),
@@ -29,6 +31,9 @@ use super::*;
 /// on this resource existing).
 #[derive(Resource)]
 pub(super) struct Harness {
+    /// Spawn preset: `None` = the flat lane at `z`; `Some(yaw)` = the slope pad, hull yawed
+    /// `yaw` radians on the incline (0 = nose uphill).
+    pose: Option<f32>,
     z: f32,
     warmup: u64,
     ticks: u64,
@@ -56,6 +61,7 @@ pub(super) struct HarnessLog {
 pub(super) fn parse_env() -> Option<Harness> {
     let spec = std::env::var("SANDBOX_HARNESS").ok()?;
     let mut h = Harness {
+        pose: None,
         z: 0.0,
         warmup: 192,
         ticks: 640,
@@ -72,6 +78,15 @@ pub(super) fn parse_env() -> Option<Harness> {
             continue;
         };
         match key.trim() {
+            "pose" => {
+                h.pose = match value.trim() {
+                    "slope_up" => Some(0.0),
+                    "slope_down" => Some(std::f32::consts::PI),
+                    "slope_left" => Some(std::f32::consts::FRAC_PI_2),
+                    "slope_right" => Some(-std::f32::consts::FRAC_PI_2),
+                    _ => None, // "lane" and unknown values keep the flat-lane spawn
+                };
+            }
             "z" => h.z = value.trim().parse().unwrap_or(0.0),
             "warmup" => h.warmup = value.trim().parse().unwrap_or(192),
             "ticks" => h.ticks = value.trim().parse().unwrap_or(640),
@@ -103,7 +118,19 @@ pub(super) fn harness_setup(
 ) {
     view.kinematic = !harness.chain_view;
     let (mut transform, mut lin, mut ang) = hull.into_inner();
-    *transform = Transform::from_xyz(0.0, HULL_REST_Y, harness.z);
+    *transform = match harness.pose {
+        // Slope pad: rest height along the pad NORMAL, hull tilted with the incline and
+        // yawed about it (warmup settles the exact contact pose).
+        Some(yaw) => {
+            // +0.35 m clearance along the pad normal: a yawed hull's belt lowpoints differ
+            // from the flat-lane rest pose, and spawning intersected launches the penalty
+            // spring (measured: +4.3 m/s pop). A short drop settles cleanly in warmup.
+            let (top, tilt) = slope_pad_pose();
+            Transform::from_translation(top + tilt * Vec3::Y * (HULL_REST_Y + 0.35))
+                .with_rotation(tilt * Quat::from_rotation_y(yaw))
+        }
+        None => Transform::from_xyz(0.0, HULL_REST_Y, harness.z),
+    };
     lin.0 = Vec3::ZERO;
     ang.0 = Vec3::ZERO;
 
@@ -114,8 +141,17 @@ pub(super) fn harness_setup(
         // `"model":4` is pinned: the sandbox hosts only the promoted field-belt model, and the
         // field stays for schema stability with existing analyzers. `schema:2` = raw/shaped
         // commands, quaternion + full angular velocity, per-side contact arrays + aggregates.
-        "{{\"t\":\"meta\",\"model\":4,\"schema\":2,\"view\":\"{}\",\"z\":{:.3},\"warmup\":{},\"ticks\":{},\"throttle\":{:.3},\"steer\":{:.3},\"t2\":{},\"throttle2\":{:.3},\"steer2\":{:.3},\"slew\":{},\"half_tread\":{TRACK_HALF_WIDTH},\"mu\":{MU},\"lateral_ratio\":{LATERAL_GRIP_RATIO},\"slip_saturation\":{SLIP_SATURATION},\"weight\":{:.0},\"hull_rest_y\":{HULL_REST_Y},\"thickness\":{TRACK_THICKNESS}}}",
+        "{{\"t\":\"meta\",\"model\":4,\"schema\":2,\"view\":\"{}\",\"pose\":\"{}\",\"slope_deg\":{},\"z\":{:.3},\"warmup\":{},\"ticks\":{},\"throttle\":{:.3},\"steer\":{:.3},\"t2\":{},\"throttle2\":{:.3},\"steer2\":{:.3},\"slew\":{},\"half_tread\":{TRACK_HALF_WIDTH},\"mu\":{MU},\"lateral_ratio\":{LATERAL_GRIP_RATIO},\"slip_saturation\":{SLIP_SATURATION},\"weight\":{:.0},\"hull_rest_y\":{HULL_REST_Y},\"thickness\":{TRACK_THICKNESS}}}",
         if harness.chain_view { "chain" } else { "wrap" },
+        match harness.pose {
+            None => "lane".into(),
+            Some(yaw) => format!("slope_yaw{yaw:.3}"),
+        },
+        if harness.pose.is_some() {
+            SLOPE_PAD_DEG
+        } else {
+            0.0
+        },
         harness.z,
         harness.warmup,
         harness.ticks,

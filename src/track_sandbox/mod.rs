@@ -98,6 +98,23 @@ const OBSTACLE_W: f32 = 16.0;
 /// the ditch instead of dropping into a bottomless gap.
 const TRENCH_FLOOR_Y: f32 = -1.2;
 
+/// Slope test pad (harness `pose=slope_*`): a 20° incline parked OFF-lane at +X, large enough
+/// to hold any hull orientation through a 30 s parked-hold capture. Authored unconditionally —
+/// the lab course costs nothing and interactive drives can visit it.
+pub(super) const SLOPE_PAD_DEG: f32 = 20.0;
+const SLOPE_PAD_CENTER: Vec3 = Vec3::new(34.0, 0.0, -20.0);
+const SLOPE_PAD_SIZE: f32 = 24.0;
+const SLOPE_PAD_THICK: f32 = 2.0;
+
+/// The pad's top-face centre + its tilt rotation — the harness spawns slope poses from this.
+pub(super) fn slope_pad_pose() -> (Vec3, Quat) {
+    let rot = Quat::from_rotation_x(SLOPE_PAD_DEG.to_radians());
+    (
+        SLOPE_PAD_CENTER + rot * Vec3::Y * (SLOPE_PAD_THICK / 2.0),
+        rot,
+    )
+}
+
 // --- Belt contact model ---
 /// Target arc-length spacing of belt contact stations (m) — the **track link pitch**. T-34: 172 mm,
 /// 72 links per track (our slightly longer loop rounds to a few more). Because the coefficients
@@ -848,6 +865,16 @@ fn spawn_environment(
         Transform::from_xyz(0.0, center_y, -88.0)
             .with_rotation(Quat::from_rotation_x(deg.to_radians()))
             .with_scale(Vec3::new(OBSTACLE_W, thick, run)),
+        &obstacle_mat,
+    );
+
+    // The slope pad (see `slope_pad_pose`).
+    block(
+        &mut commands,
+        &mut field,
+        Transform::from_translation(SLOPE_PAD_CENTER)
+            .with_rotation(Quat::from_rotation_x(SLOPE_PAD_DEG.to_radians()))
+            .with_scale(Vec3::new(SLOPE_PAD_SIZE, SLOPE_PAD_THICK, SLOPE_PAD_SIZE)),
         &obstacle_mat,
     );
 
