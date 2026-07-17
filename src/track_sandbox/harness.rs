@@ -3,11 +3,12 @@
 //! the screen" into numbers — view A/Bs, field validation, and artifact diagnosis become
 //! reproducible offline analysis instead of screenshot forensics.
 //!
-//! `SANDBOX_HARNESS="z=-5,warmup=192,ticks=640,throttle=0.25,out=/tmp/run.jsonl"`
+//! `SANDBOX_HARNESS="z=-5,warmup=192,ticks=640,throttle=0.25,steer=0.4,out=/tmp/run.jsonl"`
 //! - `z` spawn lane position, `warmup` settle ticks at zero input, `ticks` recorded ticks after
-//!   warmup, `throttle` constant drive during the recorded window, `view=chain` for the
-//!   route-chain view (default: kinematic wrap), `out` JSONL path. Unknown keys are ignored, so
-//!   historical scenario strings (e.g. `model=4`) keep working.
+//!   warmup, `throttle`/`steer` constant drive during the recorded window (`t2` +
+//!   `throttle2`/`steer2` switch both at one tick: reversal slam, pivot entry, slalom flip),
+//!   `view=chain` for the route-chain view (default: kinematic wrap), `out` JSONL path.
+//!   Unknown keys are ignored, so historical scenario strings (e.g. `model=4`) keep working.
 //!
 //! Record types (one JSON object per line):
 //! - `meta` — the scenario + vehicle constants.
@@ -32,10 +33,13 @@ pub(super) struct Harness {
     warmup: u64,
     ticks: u64,
     throttle: f32,
-    /// Second throttle phase: from tick `t2` (absolute, incl. warmup) the throttle becomes
-    /// `throttle2` — e.g. accelerate then slam reverse (the track-compression scenario).
+    steer: f32,
+    /// Second command phase: from tick `t2` (absolute, incl. warmup) the command becomes
+    /// `throttle2`/`steer2` — e.g. accelerate then slam reverse (track compression), or flip
+    /// the steer sign (slalom half-cycle).
     t2: u64,
     throttle2: f32,
+    steer2: f32,
     /// `view=chain` runs the route-chain view instead of the kinematic wrap (the step-22 view
     /// A/B, scripted).
     chain_view: bool,
@@ -56,8 +60,10 @@ pub(super) fn parse_env() -> Option<Harness> {
         warmup: 192,
         ticks: 640,
         throttle: 0.0,
+        steer: 0.0,
         t2: u64::MAX,
         throttle2: 0.0,
+        steer2: 0.0,
         chain_view: false,
         out: "/tmp/track_harness.jsonl".into(),
     };
@@ -70,8 +76,10 @@ pub(super) fn parse_env() -> Option<Harness> {
             "warmup" => h.warmup = value.trim().parse().unwrap_or(192),
             "ticks" => h.ticks = value.trim().parse().unwrap_or(640),
             "throttle" => h.throttle = value.trim().parse().unwrap_or(0.0),
+            "steer" => h.steer = value.trim().parse().unwrap_or(0.0),
             "t2" => h.t2 = value.trim().parse().unwrap_or(u64::MAX),
             "throttle2" => h.throttle2 = value.trim().parse().unwrap_or(0.0),
+            "steer2" => h.steer2 = value.trim().parse().unwrap_or(0.0),
             "view" => h.chain_view = value.trim() == "chain",
             "out" => h.out = value.trim().to_string(),
             _ => {}
@@ -105,12 +113,13 @@ pub(super) fn harness_setup(
         writer,
         // `"model":4` is pinned: the sandbox hosts only the promoted field-belt model, and the
         // field stays for schema stability with existing analyzers.
-        "{{\"t\":\"meta\",\"model\":4,\"view\":\"{}\",\"z\":{:.3},\"warmup\":{},\"ticks\":{},\"throttle\":{:.3},\"weight\":{:.0},\"hull_rest_y\":{HULL_REST_Y},\"thickness\":{TRACK_THICKNESS}}}",
+        "{{\"t\":\"meta\",\"model\":4,\"view\":\"{}\",\"z\":{:.3},\"warmup\":{},\"ticks\":{},\"throttle\":{:.3},\"steer\":{:.3},\"weight\":{:.0},\"hull_rest_y\":{HULL_REST_Y},\"thickness\":{TRACK_THICKNESS}}}",
         if harness.chain_view { "chain" } else { "wrap" },
         harness.z,
         harness.warmup,
         harness.ticks,
         harness.throttle,
+        harness.steer,
         HULL_MASS * 9.81,
     )
     .unwrap();
@@ -173,21 +182,20 @@ pub(super) fn harness_drive(
     let Some(log) = log else {
         return;
     };
-    input.throttle = if log.tick < harness.warmup {
-        0.0
+    (input.throttle, input.steer) = if log.tick < harness.warmup {
+        (0.0, 0.0)
     } else if log.tick >= harness.t2 {
-        harness.throttle2
+        (harness.throttle2, harness.steer2)
     } else {
-        harness.throttle
+        (harness.throttle, harness.steer)
     };
-    input.steer = 0.0;
 }
 
 /// Record one `k` line per fixed tick (after the model force systems), then exit when done.
 pub(super) fn harness_record(
     harness: Res<Harness>,
     log: Option<ResMut<HarnessLog>>,
-    hull: Single<(&Transform, &LinearVelocity), With<Hull>>,
+    hull: Single<(&Transform, &LinearVelocity, &AngularVelocity), With<Hull>>,
     contacts: Res<BeltContacts>,
     belt: Res<BeltSpeed>,
     phase: Res<BeltPhase>,
@@ -198,8 +206,8 @@ pub(super) fn harness_record(
     let Some(mut log) = log else {
         return;
     };
-    let (transform, lin) = *hull;
-    let (_, pitch, _) = transform.rotation.to_euler(EulerRot::YXZ);
+    let (transform, lin, ang) = *hull;
+    let (yaw, pitch, _) = transform.rotation.to_euler(EulerRot::YXZ);
     let total: f32 = contacts.0.iter().map(|c| c.load).sum();
     let contact_rows: Vec<String> = contacts
         .0
@@ -241,13 +249,15 @@ pub(super) fn harness_record(
     let k = log.tick;
     writeln!(
         log.writer,
-        "{{\"t\":\"k\",\"k\":{k},\"hull\":{},\"pitch\":{:.5},\"vel\":{},\"belt\":{},\"phase\":{},\"sup\":{:.0},\"wheels\":[{}],\"contacts\":[{}],\"chain\":[{}]}}",
+        "{{\"t\":\"k\",\"k\":{k},\"hull\":{},\"pitch\":{:.5},\"yaw\":{:.5},\"yawrate\":{:.5},\"vel\":{},\"belt\":{},\"phase\":{},\"sup\":{:.0},\"wheels\":[{}],\"contacts\":[{}],\"chain\":[{}]}}",
         arr([
             transform.translation.x,
             transform.translation.y,
             transform.translation.z
         ]),
         pitch,
+        yaw,
+        ang.0.y,
         arr([lin.0.x, lin.0.y, lin.0.z]),
         arr([belt.left, belt.right]),
         arr([phase.get(Side::Left) as f32, phase.get(Side::Right) as f32]),
