@@ -1030,7 +1030,7 @@ fn spawn_environment(
         }
     }
 
-    commands.insert_resource(TerrainField(field));
+    commands.insert_resource(TerrainField::new(field));
 }
 
 /// Spawn the code-generated primitive rig: a hull box with two tracks of wheels (sprocket + N road

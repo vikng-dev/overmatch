@@ -158,6 +158,16 @@ impl FieldBox {
         }
     }
 
+    /// World-space AABB of the box (broadphase bounds): extent along each world axis is the
+    /// rotated half-extent's projection sum.
+    fn world_aabb(&self) -> (Vec3, Vec3) {
+        let m = Mat3::from_quat(self.inv_rot.inverse());
+        let ext = m.x_axis.abs() * self.half.x
+            + m.y_axis.abs() * self.half.y
+            + m.z_axis.abs() * self.half.z;
+        (self.center - ext, self.center + ext)
+    }
+
     /// Exact first-hit distance (t ≥ 0) of a ray with this ROUNDED box, or `None` on a miss. The
     /// rounded box is the Minkowski sum of the shrunken core and a [`FIELD_ROUNDING`] sphere, so
     /// its exact surface decomposes into: 3 face slabs (the core expanded by the rounding along
@@ -281,14 +291,90 @@ fn ray_sphere(o: Vec3, d: Vec3, r: f32) -> Option<f32> {
 /// The analytic terrain oracle: every block `spawn_environment` lays down, as data. The course's
 /// physics colliders and this field are built from the same transforms, so the two
 /// representations cannot drift.
+///
+/// **Broadphase** (step 25): probes were O(all boxes) with two quat rotations per box before the
+/// cheap reject — and probes dominate BOTH view tiers, the wheels, and the physics. Boxes get a
+/// world AABB at construction and a z-bucket grid over the course (the course is a lane along z);
+/// a probe tests only the boxes whose AABB overlaps its segment. A box can appear in several
+/// buckets a probe touches — duplicates are harmless (min-folds are idempotent), so no visited
+/// set is needed and evaluation order stays fixed (buckets ascending, indices ascending).
 #[derive(Resource, Default)]
-pub(super) struct TerrainField(pub(super) Vec<FieldBox>);
+pub(super) struct TerrainField {
+    boxes: Vec<FieldBox>,
+    /// Per-box world AABB (min, max) — exact bounds of the rounded box.
+    bounds: Vec<(Vec3, Vec3)>,
+    /// Bucket i covers z ∈ [z0 + i·cell, z0 + (i+1)·cell): indices of boxes overlapping it.
+    grid: Vec<Vec<u16>>,
+    z0: f32,
+    cell: f32,
+}
+
+/// Z-extent (m) of one broadphase bucket.
+const FIELD_CELL: f32 = 4.0;
 
 impl TerrainField {
+    pub(super) fn new(boxes: Vec<FieldBox>) -> Self {
+        let bounds: Vec<(Vec3, Vec3)> = boxes.iter().map(|b| b.world_aabb()).collect();
+        let z0 = bounds
+            .iter()
+            .map(|(lo, _)| lo.z)
+            .fold(f32::INFINITY, f32::min);
+        let z1 = bounds
+            .iter()
+            .map(|(_, hi)| hi.z)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let cells = if bounds.is_empty() {
+            0
+        } else {
+            ((z1 - z0) / FIELD_CELL).ceil().max(1.0) as usize
+        };
+        let mut grid = vec![Vec::new(); cells];
+        for (i, (lo, hi)) in bounds.iter().enumerate() {
+            let a = (((lo.z - z0) / FIELD_CELL) as usize).min(cells.saturating_sub(1));
+            let b = (((hi.z - z0) / FIELD_CELL) as usize).min(cells.saturating_sub(1));
+            for bucket in &mut grid[a..=b] {
+                bucket.push(i as u16);
+            }
+        }
+        Self {
+            boxes,
+            bounds,
+            grid,
+            z0,
+            cell: FIELD_CELL,
+        }
+    }
+
+    /// Visit every box whose AABB overlaps the z-interval AND the full AABB `[lo, hi]`, in fixed
+    /// order, possibly more than once (callers must be duplicate-tolerant).
+    fn candidates(&self, lo: Vec3, hi: Vec3, mut visit: impl FnMut(&FieldBox)) {
+        if self.grid.is_empty() {
+            return;
+        }
+        let last = self.grid.len() - 1;
+        let a = ((((lo.z - self.z0) / self.cell) as isize).clamp(0, last as isize)) as usize;
+        let b = ((((hi.z - self.z0) / self.cell) as isize).clamp(0, last as isize)) as usize;
+        for bucket in &self.grid[a..=b] {
+            for &i in bucket {
+                let (blo, bhi) = self.bounds[i as usize];
+                if lo.x <= bhi.x
+                    && hi.x >= blo.x
+                    && lo.y <= bhi.y
+                    && hi.y >= blo.y
+                    && lo.z <= bhi.z
+                    && hi.z >= blo.z
+                {
+                    visit(&self.boxes[i as usize]);
+                }
+            }
+        }
+    }
+
     /// Signed distance (m) from `p` to the terrain surface: negative inside. Union = min over
-    /// blocks; C0 everywhere, C1 except on inter-block Voronoi seams.
+    /// blocks; C0 everywhere, C1 except on inter-block Voronoi seams. Full fold over every box —
+    /// a correct GLOBAL nearest distance can't be bucket-pruned; offline/scan use only.
     fn sdf(&self, p: Vec3) -> f32 {
-        self.0
+        self.boxes
             .iter()
             .map(|b| box_sdf(p, b))
             .fold(f32::INFINITY, f32::min)
@@ -319,14 +405,21 @@ impl TerrainField {
         // the sign + slope there.
         let t_max = 2.0 * CONTACT_PROBE;
         let origin = station - out * CONTACT_PROBE;
-        if self.sdf(origin) <= 0.0 {
+        let end = origin + out * t_max;
+        let (lo, hi) = (origin.min(end), origin.max(end));
+        let mut t = t_max;
+        let mut buried = false;
+        self.candidates(lo, hi, |b| {
+            // A buried origin (inside any box) is fully saturated, like the casts. The origin
+            // lies inside the probe segment's AABB, so its box is always among the candidates.
+            buried = buried || box_sdf(origin, b) <= 0.0;
+            if !buried && let Some(hit) = b.ray_hit(origin, out) {
+                t = t.min(hit);
+            }
+        });
+        if buried {
             return CONTACT_PROBE;
         }
-        let t = self
-            .0
-            .iter()
-            .filter_map(|b| b.ray_hit(origin, out))
-            .fold(t_max, f32::min);
         CONTACT_PROBE - t
     }
 }
