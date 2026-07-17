@@ -33,15 +33,15 @@ use model3::{
     TRACK_THICKNESS, apply_belt_support_boxes, conform_belts_boxes, draw_cast_shapes, init_pin_belt,
 };
 use model4::{
-    TerrainField, apply_belt_support_field, articulate_wheels_field, conform_belts_field,
-    conform_belts_field_chain, draw_sample_points,
+    RouteChain, TerrainField, apply_belt_support_field, articulate_wheels_field,
+    conform_belts_field, conform_belts_field_chain, draw_sample_points,
 };
 // The pure track core (route geometry) — moved out for game promotion (architecture §2); the
 // sandbox consumes it exactly as the game's view plugin will. Re-exported so the model
 // submodules' `use super::*` keeps resolving.
 pub(crate) use crate::track::oracle::{BlockField, TerrainBlock};
 pub(crate) use crate::track::route::{
-    Route, RouteTag, arc, build_route, external_tangent, polyline_len, resample, sag_span,
+    arc, build_route, external_tangent, polyline_len, resample, sag_span,
 };
 
 // --- Rig geometry (metres), benchmarked on the **Soviet T-34** — well-documented numbers and a
@@ -292,12 +292,14 @@ fn toggle_view_mode(
     keys: Res<ButtonInput<KeyCode>>,
     mut view: ResMut<TrackViewMode>,
     mut chain: ResMut<ChainMemory>,
+    mut route_chain: ResMut<RouteChain>,
 ) {
     if !keys.just_pressed(KeyCode::KeyV) {
         return;
     }
     view.kinematic = !view.kinematic;
     *chain = ChainMemory::default();
+    *route_chain = RouteChain::default();
     info!(
         "model-4 track view → {}",
         if view.kinematic {
@@ -324,6 +326,7 @@ fn switch_model(
     mut belt: ResMut<BeltSpeed>,
     mut phase: ResMut<BeltPhase>,
     mut chain: ResMut<ChainMemory>,
+    mut route_chain: ResMut<RouteChain>,
     mut wheels: Query<&mut Suspension>,
 ) {
     if !keys.just_pressed(KeyCode::KeyM) {
@@ -334,6 +337,7 @@ fn switch_model(
     *belt = BeltSpeed::default();
     *phase = BeltPhase::default();
     *chain = ChainMemory::default();
+    *route_chain = RouteChain::default();
     // Same hygiene as `reset_rig`: stale wheel lift makes phantom circles for the new model.
     for mut susp in &mut wheels {
         susp.dy = 0.0;
@@ -460,6 +464,7 @@ pub fn plugin(app: &mut App) {
         .init_resource::<VizLayers>()
         .init_resource::<ChainReference>()
         .init_resource::<TerrainField>()
+        .init_resource::<RouteChain>()
         .init_resource::<TrackViewMode>()
         .add_systems(
             Startup,

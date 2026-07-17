@@ -9,5 +9,7 @@
 //!
 //! Everything in this module is pure (no ECS, no assets): callers own the adapters.
 
+pub mod chain;
 pub mod oracle;
 pub mod route;
+pub mod wheels;
