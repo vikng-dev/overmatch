@@ -23,12 +23,12 @@ carry), and per shared tick reports:
     overall and per window — the size of the divergence the hash flags.
 
 The hash answers "did anything differ?" exactly (including the carried
-`TankSim`/`DriveState` no pose field exposes, via `hsim`); the magnitudes answer
+`TankSim`/`TrackDrive` no pose field exposes, via `hsim`); the magnitudes answer
 "by how much?" for the pose/velocity part.
 
   - MISMATCH WINDOWS: each contiguous mismatched-tick span, attributed to the
     carried-state field families via the `hsim` decode (`hdrv`/`hsrv`/`hrld`/
-    `hrec`/`hanc` — drive, servo, reload, recoil, anchor), with whether the
+    `hrec`/`hblt` — drive, servo, reload, recoil, track belt), with whether the
     window opens at the first shared tick (spawn/connect transient vs mid-run
     event) and how many surviving client rows were rollback replays. When the
     trace was recorded with SPIKE_TRACE_SIM_FIELDS the raw carried values ride
@@ -63,8 +63,8 @@ SUB_LABEL = {"hpos": "pos", "hrot": "rot", "hlv": "lv", "hav": "av", "hsim": "si
 
 # The carried-state decode (src/trace.rs since the per-field split): `hsim` = the fixed-order
 # combination of these five streams. Absent in older traces — attribution then reports "n/a".
-SIM_SUBS = ("hdrv", "hsrv", "hrld", "hrec", "hanc")
-SIM_LABEL = {"hdrv": "drive", "hsrv": "servo", "hrld": "reload", "hrec": "recoil", "hanc": "anchor"}
+SIM_SUBS = ("hdrv", "hsrv", "hrld", "hrec", "hblt")
+SIM_LABEL = {"hdrv": "drive", "hsrv": "servo", "hrld": "reload", "hrec": "recoil", "hblt": "track-belt"}
 
 
 # --- quaternion helpers (layout [x, y, z, w], matching src/trace.rs) ---------------------------
@@ -217,9 +217,9 @@ def pair_tanks(client_ticks, server_ticks):
 def sim_field_deltas(c, s):
     """Max-abs per-family carried-state differences between two VERBOSE rows (SPIKE_TRACE_SIM_FIELDS).
 
-    Returns {servo, reload, recoil, belt, anchor, anchor_flips, drive} or None when either row lacks
-    `simf`. Anchor Some/None disagreements count as `anchor_flips` (a discriminant divergence has
-    no distance); torn/null elements make the family read NaN rather than crash the join.
+    Returns {servo, reload, recoil, belt, drive} or None when either row lacks `simf`
+    (`belt` here is the MG ammo count — the TRACK belt speed/phase lives in the `hblt` hash
+    stream, not in `simf`); torn/null elements make the family read NaN rather than crash the join.
 
     Each `wpn` row is [reload_remaining, recoil_offset, recoil_velocity, belt_remaining] — the belt
     count (wpn[3]) gates fire and is what the `hrld` sub-hash flags, so a belt-only divergence must
@@ -264,16 +264,6 @@ def sim_field_deltas(c, s):
     except TypeError:
         rld = rec = belt = float("nan")
     out["reload"], out["recoil"], out["belt"] = rld, rec, belt
-    anc, flips = 0.0, 0
-    try:
-        for aa, ab in zip(cf.get("anch") or [], sf.get("anch") or []):
-            if (aa is None) != (ab is None):
-                flips += 1
-            elif aa is not None:
-                anc = max(anc, math.dist(aa, ab))
-    except TypeError:
-        anc = float("nan")
-    out["anchor"], out["anchor_flips"] = anc, flips
     if c.get("thr") is not None and s.get("thr") is not None:
         out["drive"] = max(abs(c["thr"] - s["thr"]),
                            abs((c.get("str") or 0.0) - (s.get("str") or 0.0)))
@@ -371,8 +361,7 @@ def mismatch_windows(joined):
         deltas = [j["simd"] for j in w if j["simd"]]
         if deltas:
             mags = {k: max((d[k] for d in deltas), default=float("nan"))
-                    for k in ("servo", "reload", "recoil", "belt", "anchor", "drive")}
-            mags["anchor_flips"] = max(d["anchor_flips"] for d in deltas)
+                    for k in ("servo", "reload", "recoil", "belt", "drive")}
         out.append({
             "lo": w[0]["tick"], "hi": w[-1]["tick"], "n": len(w),
             "opens_at_first_shared": w[0]["tick"] == first_tick,
@@ -434,7 +423,7 @@ def print_tank(label, s):
     print(f"      flat-ground cruise{fmt_pct(s['rate_flat'])}   "
           f"({s['n_flat']} ticks: gnd=16 & hc=0 both ends)")
     print(f"      contact transient {fmt_pct(s['rate_trans'])}   "
-          f"({s['n_trans']} ticks: hull contact / wheels lifting / airborne)")
+          f"({s['n_trans']} ticks: hull contact / tracks lifting / airborne)")
 
     print("\n    FIRST DIVERGENCE")
     if s["first"] is None:
@@ -468,8 +457,7 @@ def print_tank(label, s):
                 m = w["mags"]
                 print(f"        max |Δ|: servo {m['servo']:.3e}  reload {m['reload']:.3e}  "
                       f"recoil {m['recoil']:.3e}  belt {m['belt']:.3e}  "
-                      f"anchor {m['anchor']:.3e} "
-                      f"(discriminant flips {m['anchor_flips']})  drive {m['drive']:.3e}")
+                      f"drive {m['drive']:.3e}")
 
     def mag_block(title, mag):
         print(f"\n    {title}")

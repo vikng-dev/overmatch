@@ -1,0 +1,249 @@
+//! The locomotion sim (phase B): the track model's belt forces ARE how tanks drive. The ECS
+//! adapter over [`super::forces`] — one deep boundary; support, traction, hold, and belt
+//! dynamics live behind `step_side`, this module owns queries, scheduling, capability gating,
+//! and the netcode-visible [`TrackDrive`] state.
+//!
+//! Sim discipline (hard rules, each bought with a measured MP failure in the raycast sim this
+//! replaces):
+//! - Pose from tick-truth `Position`/`Rotation`, never `GlobalTransform` (render lag differs
+//!   per machine and freezes through rollback replays).
+//! - Terrain from the analytic [`TrackField`] — pure closed-form arithmetic, no spatial
+//!   queries, no BVH rollback dependency.
+//! - Runs every replayed tick (NO `Replaying` gate — this is sim state); stays inside
+//!   `SimPhase::DrivingForces` so drive samples velocity before the weapon-fire impulse.
+//! - `Drive` capability gates the COMMAND, not the contact model: a dead engine still grips
+//!   and holds; it just cannot thrust.
+
+use avian3d::prelude::{Forces, Position, ReadRigidBodyForces, Rotation, WriteRigidBodyForces};
+use bevy::math::{Affine3A, Vec2};
+use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
+
+use crate::bake::TankBlueprint;
+use crate::command::TankCommand;
+use crate::damage::{
+    Capability, TankCapabilities, TankVolumes, VolumeFacets, capability_available,
+};
+use crate::state::{GameplaySet, SimPhase};
+use crate::tank::{Tank, TrackSide};
+
+use super::forces::{BeltContact, ForceParams, SideInput, SideState, step_side};
+use super::route::build_route;
+use super::terrain::TrackField;
+
+// Surface friction policy (ADR-0007 bucket 3: a property of the track–ground PAIR, destined
+// for the terrain/ground-type mechanic — deliberately not vehicle spec).
+const MU: f32 = 0.9;
+/// Wong/Merritt firm-ground turning-resistance ratio — the lower lateral grip budget that
+/// lets a heavy tank pivot at all.
+const LATERAL_GRIP_RATIO: f32 = 0.55;
+const SLIP_SATURATION: f32 = 0.4;
+/// Command slew (per second): the vehicle's input shaping, SEPARATE from the belt governor —
+/// folding them changes keyboard feel and damage-recovery semantics (codex phase-B #9). The
+/// raycast sim's value, kept for the first playtest.
+const INPUT_RAMP: f32 = 4.0;
+
+/// Per-tank tracked-drivetrain sim state: owner-predicted, replicated to remotes, rolled
+/// back — the `LinearVelocity` registration pattern in `net::protocol` (replicate + predict +
+/// float-threshold rollback condition). Hashed into the determinism trace (`hblt`).
+#[derive(Component, Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct TrackDrive {
+    /// The shaped drive signal in [−1, 1]: `TankCommand` targets slewed through
+    /// [`INPUT_RAMP`]. Sim state (not command) so every tank responds with the same feel.
+    pub throttle: f32,
+    pub steer: f32,
+    /// Per-side belt state, `[left, right]`.
+    pub sides: [TrackDriveSide; 2],
+}
+
+#[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct TrackDriveSide {
+    /// Belt surface speed (m/s).
+    pub speed: f32,
+    /// Unbounded belt travel (m) — advects the force stations; the view's exact scroll phase.
+    pub phase: f64,
+}
+
+/// Last tick's contact telemetry per side — viz/diagnostics ONLY (debug force arrows, the
+/// grounded count, traces). Rewritten every tick, never hashed, never rolled back.
+#[derive(Component, Default)]
+pub struct TrackContacts(pub [Vec<BeltContact>; 2]);
+
+/// The blueprint's running gear as force-station geometry, built once (single blueprint
+/// today; per-variant when a second vehicle lands): the closed rest pin-line loop, the
+/// station count, the side planes, and the assembled [`ForceParams`].
+#[derive(Resource)]
+pub struct TrackGear {
+    loop_pts: Vec<Vec2>,
+    count: usize,
+    plane_x: f32,
+    params: ForceParams,
+}
+
+pub fn sim_plugin(app: &mut App) {
+    // Lazy one-shot: the blueprint lands at Startup (bake); the gear builds on the first
+    // frame after and never again.
+    app.add_systems(
+        PreUpdate,
+        init_track_gear
+            .run_if(resource_exists::<TankBlueprint>.and_then(not(resource_exists::<TrackGear>))),
+    );
+    app.add_systems(
+        FixedUpdate,
+        apply_track_forces
+            .in_set(SimPhase::DrivingForces)
+            .in_set(GameplaySet),
+    );
+}
+
+/// Build [`TrackGear`] from the baked blueprint: same rest circles as the view's feasibility
+/// gate, closed via `build_route` with the authored material length (station pitch is then
+/// EXACTLY the spec pitch — loop length ≡ pitch × count).
+fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
+    let spec = &blueprint.spec.track;
+    let sprocket_r = spec.pitch * spec.sprocket.teeth as f32 / std::f32::consts::TAU;
+    let mut circles = vec![(
+        Vec2::new(spec.sprocket.center.0, spec.sprocket.center.1),
+        sprocket_r,
+    )];
+    let mut wheels: Vec<Vec2> = blueprint
+        .geometry
+        .roadwheels
+        .iter()
+        .filter(|(_, side)| *side == TrackSide::Left)
+        .map(|&(node, _)| {
+            let t = blueprint.geometry.nodes[node].root_position;
+            Vec2::new(t.z, t.y)
+        })
+        .collect();
+    wheels.sort_by(|a, b| a.x.total_cmp(&b.x));
+    circles.extend(wheels.into_iter().map(|c| (c, spec.wheel_radius)));
+    circles.push((
+        Vec2::new(spec.idler.center.0, spec.idler.center.1),
+        spec.idler.radius,
+    ));
+
+    let belt_len = spec.pitch * spec.link_count as f32;
+    let route = build_route(&circles, belt_len);
+    let mut loop_pts = route.pts.clone();
+    if loop_pts.first() != loop_pts.last()
+        && let Some(&first) = loop_pts.first()
+    {
+        loop_pts.push(first);
+    }
+
+    commands.insert_resource(TrackGear {
+        loop_pts,
+        count: spec.link_count,
+        plane_x: spec.plane_x,
+        params: ForceParams {
+            thickness: spec.thickness,
+            columns: [
+                (-spec.width / 2.0, 1.0 / 6.0),
+                (0.0, 2.0 / 3.0),
+                (spec.width / 2.0, 1.0 / 6.0),
+            ],
+            support_stiffness_per_m: spec.support.stiffness_per_m,
+            support_damping_per_m: spec.support.damping_per_m,
+            engage_depth: spec.support.engage,
+            probe_reach: 0.5,
+            mu: MU,
+            lateral_ratio: LATERAL_GRIP_RATIO,
+            slip_saturation: SLIP_SATURATION,
+            max_speed: spec.powertrain.max_speed,
+            engine_power: spec.powertrain.power,
+            engine_force: spec.powertrain.force,
+            governor_gain: spec.powertrain.governor_gain,
+            inertia: spec.powertrain.inertia,
+        },
+    });
+}
+
+/// Move `current` toward `target` by at most `step` — the command slew.
+fn approach(current: f32, target: f32, step: f32) -> f32 {
+    if current < target {
+        (current + step).min(target)
+    } else {
+        (current - step).max(target)
+    }
+}
+
+/// The drive step: shape the command, run each side's belt force model at the tick-truth
+/// pose, apply the returned forces in report order, commit the new belt state.
+fn apply_track_forces(
+    time: Res<Time>,
+    field: Res<TrackField>,
+    gear: Option<Res<TrackGear>>,
+    volumes: Query<VolumeFacets>,
+    mut tanks: Query<
+        (
+            &Position,
+            &Rotation,
+            Forces,
+            &TankCommand,
+            &mut TrackDrive,
+            &mut TrackContacts,
+            Option<&TankVolumes>,
+            Option<&TankCapabilities>,
+        ),
+        With<Tank>,
+    >,
+) {
+    let Some(gear) = gear else {
+        return;
+    };
+    let Some(oracle) = field.field.as_ref() else {
+        return;
+    };
+    let dt = time.delta_secs();
+    for (pos, rot, mut forces, command, mut drive, mut contacts, tank_volumes, tank_caps) in
+        &mut tanks
+    {
+        // Drive gates THRUST, not grip: a dead driver/engine/transmission zeroes the command
+        // but the full contact model still runs, so the tracks hold the tank in place.
+        let drive_ok = capability_available(tank_volumes, tank_caps, Capability::Drive, &volumes);
+        let (target_throttle, target_steer) = if drive_ok {
+            (command.throttle, command.steer)
+        } else {
+            (0.0, 0.0)
+        };
+        let step = INPUT_RAMP * dt;
+        drive.throttle = approach(drive.throttle, target_throttle, step);
+        drive.steer = approach(drive.steer, target_steer, step);
+
+        let affine = Affine3A::from_rotation_translation(rot.0, pos.0);
+
+        for si in 0..2 {
+            // Additive differential: steer adds to the left track, subtracts from the right.
+            let cmd = match si {
+                0 => drive.throttle + drive.steer,
+                _ => drive.throttle - drive.steer,
+            }
+            .clamp(-1.0, 1.0);
+            let plane_x = if si == 0 { -gear.plane_x } else { gear.plane_x };
+            let input = SideInput {
+                loop_pts: &gear.loop_pts,
+                count: gear.count,
+                plane_x,
+                command: cmd,
+            };
+            let side = drive.sides[si];
+            let state = SideState {
+                speed: side.speed,
+                phase: side.phase,
+            };
+            let report = step_side(&input, state, affine, dt, &gear.params, oracle, |p| {
+                forces.velocity_at_point(p)
+            });
+            // Apply in report order — accumulation order is part of determinism.
+            for app in &report.apps {
+                forces.apply_force_at_point(app.force, app.point);
+            }
+            drive.sides[si] = TrackDriveSide {
+                speed: report.state.speed,
+                phase: report.state.phase,
+            };
+            contacts.0[si] = report.contacts;
+        }
+    }
+}

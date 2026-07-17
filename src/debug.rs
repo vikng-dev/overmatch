@@ -1,15 +1,15 @@
 //! Dev-only debug helpers (compiled behind the `dev_tools` feature — default-on, and deliberately
 //! decoupled from `debug_assertions` so an optimized/`--release` playtest build still carries these
 //! keys; see `Cargo.toml`). Press `G` to toggle the debug
-//! gizmos: per-wheel force arrows (cyan = suspension load, orange = drive + friction, red line =
-//! the suspension ray) plus Avian's collider wireframes. Press `X` for the X-ray toggle: the tank
+//! gizmos: belt-contact force arrows (cyan = support load along the contact normal, orange =
+//! traction) plus Avian's collider wireframes. Press `X` for the X-ray toggle: the tank
 //! turns translucent so the gizmos that sit *inside* the model show through (Blend materials stop
 //! writing depth, so the depth-tested gizmos behind them become visible). `F` detaches the camera.
 //!
 //! Mounted by BOTH client compositions — `ClientPlugin` (single-player) and `NetClientPlugin`
 //! (the networked client bin) — always paired with Avian's `PhysicsDebugPlugin` (which registers
 //! the `PhysicsGizmos` group this module configures). Strictly view-only: every system reads sim
-//! state (`&Suspension`, `&GlobalTransform`) immutably and writes only render-side things (gizmos,
+//! state (`&TrackContacts`, `&GlobalTransform`) immutably and writes only render-side things (gizmos,
 //! materials, camera follow), so it is safe on a predicting net client; the headless server never
 //! mounts it.
 
@@ -21,12 +21,12 @@ use bevy::prelude::*;
 
 use crate::ballistics::{Impact, ImpactMarker};
 use crate::camera::CameraFollow;
-use crate::driving::Suspension;
 use crate::tank::{Controlled, Tank};
+use crate::track::sim::TrackContacts;
 
 /// How opaque the tank is in x-ray mode (0 = invisible, 1 = solid).
 const XRAY_ALPHA: f32 = 0.2;
-/// Metres of arrow per newton of suspension force (so ~35 kN reads as a ~1.75 m arrow).
+/// Metres of arrow per newton of contact force (so ~35 kN reads as a ~1.75 m arrow).
 const FORCE_VIZ_SCALE: f32 = 1.0 / 20_000.0;
 /// How many impact markers the game client keeps on screen before the oldest is despawned — the
 /// markers are never explicitly cleared here (unlike the sandbox's `C` key), so this ring bounds
@@ -43,7 +43,7 @@ pub fn plugin(app: &mut App) {
         // (ADR-0014), gated on `ShowGizmos` and ring-buffered to `IMPACT_MARKER_CAP`.
         .add_observer(spawn_impact_marker)
         .add_systems(Update, (toggle_xray, toggle_camera_follow, toggle_gizmos))
-        // Mirror the on/off state onto Avian's own gizmos (colliders, suspension rays).
+        // Mirror the on/off state onto Avian's own gizmos (collider wireframes).
         .add_systems(
             Update,
             sync_avian_gizmos.run_if(resource_changed::<ShowGizmos>),
@@ -91,28 +91,22 @@ fn toggle_camera_follow(keys: Res<ButtonInput<KeyCode>>, mut follow: ResMut<Came
     }
 }
 
-/// Draw each grounded wheel's forces: cyan = suspension load (up), orange = horizontal drive +
-/// friction. Anchored to the wheel's *interpolated* `GlobalTransform` (read after propagation) so
-/// the arrows stay glued to the rendered tank rather than stepping at the physics rate. Arrow
-/// length is proportional to force — a live load/traction readout.
-fn draw_wheel_forces(wheels: Query<(&GlobalTransform, &Suspension)>, mut gizmos: Gizmos) {
-    for (transform, suspension) in &wheels {
-        // The wheel's real ground contact (the ray's hit point); airborne wheels have none.
-        let Some(contact) = suspension.contact else {
-            continue;
-        };
-        let hub = transform.translation();
-        // Our synced replacement for Avian's physics-rate suspension ray (hub → hit point).
-        gizmos.line(hub, contact, Color::srgb(0.9, 0.2, 0.2));
-        if suspension.load > 0.0 {
-            // Normal load along the (interpolated) hull-up suspension axis, not world up — so it
-            // leans with the hull on a slope. (Wheel nodes share the hull's orientation.)
-            let tip = contact + transform.up() * (suspension.load * FORCE_VIZ_SCALE);
-            gizmos.arrow(contact, tip, Color::srgb(0.1, 0.9, 1.0));
-        }
-        if suspension.drive_force != Vec3::ZERO {
-            let tip = contact + suspension.drive_force * FORCE_VIZ_SCALE;
-            gizmos.arrow(contact, tip, Color::srgb(1.0, 0.55, 0.1));
+/// Draw each belt contact's forces: cyan = elastic support load (along the contact's inward
+/// normal), orange = traction. Reads the sim's per-tick contact telemetry ([`TrackContacts`],
+/// world points at the tick pose) — a live load/traction readout of the phase-B belt model.
+fn draw_wheel_forces(tanks: Query<&TrackContacts>, mut gizmos: Gizmos) {
+    for contacts in &tanks {
+        for side in &contacts.0 {
+            for c in side {
+                if c.load > 0.0 {
+                    let tip = c.point + c.normal * (c.load * FORCE_VIZ_SCALE);
+                    gizmos.arrow(c.point, tip, Color::srgb(0.1, 0.9, 1.0));
+                }
+                if c.traction != Vec3::ZERO {
+                    let tip = c.point + c.traction * FORCE_VIZ_SCALE;
+                    gizmos.arrow(c.point, tip, Color::srgb(1.0, 0.55, 0.1));
+                }
+            }
         }
     }
 }

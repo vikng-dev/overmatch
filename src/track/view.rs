@@ -22,6 +22,7 @@ use crate::spec::TrackSpec;
 use crate::tank::{Roadwheel, Tank, TrackSide, ViewNode};
 
 use super::chain::{ChainInput, ChainParams, ChainSideInput, ChainState};
+use super::sim::TrackDrive;
 use super::terrain::TrackField;
 use super::wheels::{WheelParams, wheel_lift_step, wheel_lift_target};
 
@@ -114,10 +115,6 @@ struct RigSide {
     idler_view: Entity,
     /// One entity per link, children of the tank root, local transforms in hull space.
     links: Vec<Entity>,
-    /// Integrated no-slip belt travel (m). `f64`: an f32 loses sub-pitch precision within a
-    /// long match's driving distance, and no wrap period is shared by every consumer (chain
-    /// loop, wheel/sprocket/idler circumferences) — each consumer wraps in f64 itself.
-    phase: f64,
 }
 
 struct RigWheel {
@@ -335,7 +332,6 @@ fn bind_track_rigs(
                 sprocket_view: sl,
                 idler_view: il,
                 links: links[0].clone(),
-                phase: 0.0,
             },
             RigSide {
                 plane_x: spec.plane_x,
@@ -343,7 +339,6 @@ fn bind_track_rigs(
                 sprocket_view: sr,
                 idler_view: ir,
                 links: links[1].clone(),
-                phase: 0.0,
             },
         ];
         info!(
@@ -379,7 +374,7 @@ fn bind_track_rigs(
 fn drive_track_views(
     time: Res<Time>,
     track: Res<TrackField>,
-    mut tanks: Query<(&Transform, &mut TrackRig)>,
+    mut tanks: Query<(&Transform, &TrackDrive, &mut TrackRig)>,
     mut views: Query<&mut Transform, Without<TrackRig>>,
 ) {
     let Some(field) = track.field.as_ref() else {
@@ -389,16 +384,15 @@ fn drive_track_views(
     if dt <= 0.0 {
         return;
     }
-    for (root, mut rig) in &mut tanks {
+    for (root, drive, mut rig) in &mut tanks {
         let rig = &mut *rig;
         let affine =
             Affine3A::from_scale_rotation_translation(root.scale, root.rotation, root.translation);
         // Discontinuity: teleport / respawn / snap-consumed correction / terrain swap → the
-        // chain's canonical cold start, a zeroed belt differentiator (never integrate a jump as
-        // belt travel), and re-based wheel lift (old-terrain lift must not seed the cold
-        // chain). Rotation is checked on BOTH forward and up axes — a pure roll leaves forward
-        // unchanged.
-        let mut prev = rig.prev_affine.unwrap_or(affine);
+        // chain's canonical cold start and re-based wheel lift (old-terrain lift must not seed
+        // the cold chain). Rotation is checked on BOTH forward and up axes — a pure roll
+        // leaves forward unchanged.
+        let prev = rig.prev_affine.unwrap_or(affine);
         let axis_jump = |axis: Vec3| {
             affine
                 .transform_vector3(axis)
@@ -411,23 +405,15 @@ fn drive_track_views(
             || rig.field_revision != track.revision;
         if snapped {
             rig.chain = ChainState::default();
-            prev = affine;
         }
         rig.prev_affine = Some(affine);
         rig.field_revision = track.revision;
 
-        // No-slip belt: each track centre's presented displacement projected on the presented
-        // forward axis (−Z). Includes yaw differential by construction; known-wrong on skids /
-        // wheelspin (accepted — phase B replaces the derivation, not the consumers). Positive
-        // phase drives the lower run rearward — ground lock for a hull moving forward.
-        let fwd = affine.transform_vector3(Vec3::NEG_Z).normalize_or_zero();
-        let mut speeds = [0.0_f32; 2];
-        for (si, side) in rig.sides.iter_mut().enumerate() {
-            let anchor = Vec3::new(side.plane_x, 0.0, 0.0);
-            let delta = (affine.transform_point3(anchor) - prev.transform_point3(anchor)).dot(fwd);
-            speeds[si] = delta / dt;
-            side.phase += delta as f64;
-        }
+        // Belt truth from the SIM (phase B): the owner's predicted `TrackDrive`, a remote's
+        // replicated one — real belt speed and phase, so a braked skid stops the links and
+        // wheelspin scrolls them honestly. The old presented-pose no-slip derivation is gone.
+        let speeds = [drive.sides[0].speed, drive.sides[1].speed];
+        let phases = [drive.sides[0].phase, drive.sides[1].phase];
 
         // View wheel lift: probe the field at each wheel's REAL position across its DISC (not
         // the shoe), ease the lift (implicit rise / ballistic fall), then the chain wraps the
@@ -468,7 +454,7 @@ fn drive_track_views(
         });
         // The chain wraps phase by the material loop itself: belt_len = pitch × count exactly,
         // so a whole-loop wrap shifts link identity by `count` ≡ 0 — seamless by construction.
-        let chain_phase = |side: &RigSide| side.phase.rem_euclid(f64::from(rig.belt_len)) as f32;
+        let chain_phase = |phase: f64| phase.rem_euclid(f64::from(rig.belt_len)) as f32;
         let g3 = affine.inverse().transform_vector3(Vec3::NEG_Y * 9.81);
         let input = ChainInput {
             dt,
@@ -480,13 +466,13 @@ fn drive_track_views(
                 ChainSideInput {
                     circles: &circles[0],
                     belt_speed: speeds[0],
-                    phase: chain_phase(&rig.sides[0]),
+                    phase: chain_phase(phases[0]),
                     plane_x: rig.sides[0].plane_x,
                 },
                 ChainSideInput {
                     circles: &circles[1],
                     belt_speed: speeds[1],
-                    phase: chain_phase(&rig.sides[1]),
+                    phase: chain_phase(phases[1]),
                     plane_x: rig.sides[1].plane_x,
                 },
             ],
@@ -528,7 +514,7 @@ fn drive_track_views(
             // positive phase scrolls the lower run toward +Z) — `spin_angle` is the single
             // flip point if a future model's conventions differ.
             let roll_r = rig.wheel_radius - rig.params.thickness / 2.0;
-            let wheel_spin = Quat::from_rotation_x(spin_angle(side.phase, roll_r));
+            let wheel_spin = Quat::from_rotation_x(spin_angle(phases[si], roll_r));
             for wheel in &side.wheels {
                 if let Ok(mut tr) = views.get_mut(wheel.view) {
                     tr.translation = wheel.pivot + Vec3::Y * wheel.dy;
@@ -539,14 +525,14 @@ fn drive_track_views(
                 &mut views,
                 side.sprocket_view,
                 rig.sprocket.0,
-                spin_angle(side.phase, rig.sprocket.1),
+                spin_angle(phases[si], rig.sprocket.1),
             );
             let idler_rim = rig.idler.1 - rig.params.thickness / 2.0;
             spin_about(
                 &mut views,
                 side.idler_view,
                 rig.idler.0,
-                spin_angle(side.phase, idler_rim),
+                spin_angle(phases[si], idler_rim),
             );
         }
     }

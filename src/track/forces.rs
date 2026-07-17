@@ -66,8 +66,10 @@ pub struct ForceParams {
 pub struct SideState {
     /// Belt surface speed (m/s).
     pub speed: f32,
-    /// Belt travel (m) — advects the force stations; also the view's scroll phase.
-    pub phase: f32,
+    /// Belt travel (m) — advects the force stations; also the view's scroll phase. `f64`: it
+    /// grows unbounded and an f32 loses sub-pitch precision within a long match's driving
+    /// distance (codex phase-B finding 8).
+    pub phase: f64,
 }
 
 /// One side's per-tick input.
@@ -162,7 +164,11 @@ pub fn step_side<O: TerrainOracle>(
     let mut belt_reaction = 0.0;
 
     let pitch = polyline_len(input.loop_pts) / input.count.max(1) as f32;
-    let mut stations = resample(input.loop_pts, pitch, state.phase.rem_euclid(pitch));
+    let mut stations = resample(
+        input.loop_pts,
+        pitch,
+        state.phase.rem_euclid(f64::from(pitch)) as f32,
+    );
     stations.truncate(input.count);
     let n = stations.len();
     if n < 3 {
@@ -292,6 +298,6 @@ pub fn step_side<O: TerrainOracle>(
     let engine = (params.governor_gain * (target - belt_speed)).clamp(-avail, avail);
     let next = belt_speed + (engine - belt_reaction) / params.inertia * dt;
     report.state.speed = next.clamp(-params.max_speed, params.max_speed);
-    report.state.phase = state.phase + belt_speed * dt;
+    report.state.phase = state.phase + f64::from(belt_speed * dt);
     report
 }

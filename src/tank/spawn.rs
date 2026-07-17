@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use avian3d::prelude::{
-    AngularInertia, CenterOfMass, Collider, CollisionLayers, LayerMask, Mass, NoAutoAngularInertia,
-    NoAutoCenterOfMass, NoAutoMass, TrimeshFlags,
+    AngularInertia, CenterOfMass, CoefficientCombine, Collider, CollisionLayers, Friction,
+    LayerMask, Mass, NoAutoAngularInertia, NoAutoCenterOfMass, NoAutoMass, TrimeshFlags,
 };
 use bevy::asset::LoadState;
 use bevy::ecs::system::SystemParam;
@@ -480,12 +480,16 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
                 authored_attachment(Transform::IDENTITY),
                 collider,
                 CollisionLayers::new([Layer::Vehicle], LayerMask::ALL),
+                // Penetration backstops ONLY: the analytic belt model owns ALL tangential
+                // ground physics (phase B). Avian's default friction on these hulls would
+                // silently add grip/wall-climb beneath it (codex phase-B blocker 10).
+                Friction::ZERO.with_combine_rule(CoefficientCombine::Min),
             ));
         }
     }
 
-    // --- Wheels: suspension/drive contact stations, slotted in name-sorted order. The suspension
-    // ray is cast by `apply_suspension` itself each tick (`SpatialQuery`, tick-truth wheel pose).
+    // --- Wheels: rig stations in name-sorted order (the track view reads their side/pose; the
+    // belt force model uses the BAKED rest circles — articulation is view-only).
     for (slot, &(index, side)) in wheel_nodes.iter().enumerate() {
         commands
             .entity(entity_at(index))
@@ -509,8 +513,6 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
         .filter_map(|(index, entity)| entity.map(|e| (geometry.nodes[index].name.clone(), e)))
         .collect();
     commands.entity(root).insert((
-        spec.drivetrain.clone(),
-        spec.suspension.clone(),
         Mass(spec.mass),
         AngularInertia::from_shape(&Cuboid::new(ex, ey, ez), spec.mass),
         NoAutoMass,
@@ -548,7 +550,6 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
                 .iter()
                 .map(|(_, weapon)| WeaponState::for_mode(&weapon.fire_mode))
                 .collect(),
-            anchors: vec![None; wheel_nodes.len()],
         },
         Rig {
             hull,

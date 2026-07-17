@@ -23,12 +23,12 @@ use crate::command::{ConsumeCommandEdges, TankCommand};
 use crate::damage::{
     CrewStation, Crewman, DamageConsequences, Dead, LaunchedTurret, PendingSwap, TankVolumes,
 };
-use crate::driving::DriveState;
 use crate::spec::FireMode;
 use crate::state::GameplaySet;
 use crate::tank::{
     Muzzle, Rig, ServoCommand, ServoIndex, ServoSpec, TankRoot, TankSim, Weapon, WeaponIndex,
 };
+use crate::track::sim::TrackDrive;
 use crate::{CombatantId, ShotId};
 
 // ---------------------------------------------------------------------------
@@ -39,7 +39,7 @@ use crate::{CombatantId, ShotId};
 // compatibility guard.
 
 /// Bump and re-pin the affected wire manifest value for every wire-surface change.
-pub const PROTOCOL_REV: u32 = 11;
+pub const PROTOCOL_REV: u32 = 12;
 
 /// Compatibility tag derived from the complete pinned wire manifest.
 pub const PROTOCOL_FINGERPRINT: u64 = protocol_fingerprint_for(
@@ -708,6 +708,10 @@ fn apply_launched_turret_pose(
 pub(crate) const ROLLBACK_POSITION_M: f32 = 0.05;
 pub(crate) const ROLLBACK_ROTATION_RAD: f32 = 0.05;
 pub(crate) const ROLLBACK_VELOCITY: f32 = 1.0;
+/// `TrackDrive` divergence gate: max over per-side |speed| (m/s) / |phase| (m) / anchor (m)
+/// deltas. Coarse like the velocity gate — belt state is deterministic, so a real mismatch is
+/// gross desync, not solver noise.
+pub(crate) const ROLLBACK_TRACK_DRIVE: f32 = 0.25;
 
 // The registered conditions and watchdog share these metrics and thresholds.
 
@@ -729,6 +733,19 @@ pub(crate) fn linear_velocity_error(a: &LinearVelocity, b: &LinearVelocity) -> f
 /// Confirmed-vs-predicted `AngularVelocity` divergence: vector difference magnitude (rad/s).
 pub(crate) fn angular_velocity_error(a: &AngularVelocity, b: &AngularVelocity) -> f32 {
     (a.0 - b.0).length()
+}
+
+/// Confirmed-vs-predicted `TrackDrive` divergence: the largest per-side belt-state delta.
+pub(crate) fn track_drive_error(a: &TrackDrive, b: &TrackDrive) -> f32 {
+    let mut worst = (a.throttle - b.throttle)
+        .abs()
+        .max((a.steer - b.steer).abs());
+    for (sa, sb) in a.sides.iter().zip(&b.sides) {
+        worst = worst
+            .max((sa.speed - sb.speed).abs())
+            .max((sa.phase - sb.phase).abs() as f32);
+    }
+    worst
 }
 
 /// Ordered wire registrations. Keep this list aligned with [`plugin`]; its pinned hash is a direct
@@ -760,10 +777,11 @@ const WIRE_SURFACE: &[&str] = &[
     "Rotation",
     "LinearVelocity",
     "AngularVelocity",
+    "TrackDrive",
 ];
 
 /// Pinned hash for the ordered wire surface and a direct handshake-fingerprint input.
-const WIRE_SURFACE_HASH: u64 = 0xa21f_954b_03e6_a9cd;
+const WIRE_SURFACE_HASH: u64 = 0xc750_8fd8_93ff_31d2;
 
 // ---------------------------------------------------------------------------
 // Deep wire-surface coverage (field-level + external-dep skew)
@@ -795,7 +813,7 @@ const WIRE_SURFACE_HASH: u64 = 0xa21f_954b_03e6_a9cd;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x792b_eb49_ae46_2fce;
+const WIRE_TYPES_HASH: u64 = 0x81a1_82a3_84d6_92ca;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -938,14 +956,25 @@ pub(crate) fn plugin(app: &mut App) {
                 ROLLBACK_VELOCITY,
             )
         });
+    // The tracked drivetrain (phase B): owner-predicted, replicated to remotes — velocity-like
+    // continuous sim state, same registration shape as LinearVelocity (never NetCrew snap-to,
+    // never local_rollback: remotes need it for their track view).
+    app.component::<TrackDrive>()
+        .replicate()
+        .predict()
+        .with_rollback_condition(|a: &TrackDrive, b: &TrackDrive| {
+            crate::trace::note_if_tripped(
+                "TrackDrive",
+                track_drive_error(a, b),
+                ROLLBACK_TRACK_DRIVE,
+            )
+        });
 
     // Non-replicated rollback state — ROOT-RESIDENT ONLY, by design: the root is the predicted
     // entity, so plain `local_rollback` attaches history with no child decoration machinery
     // (`TankSim` centralizes what used to live on turret/gun/muzzle/wheel children — see its doc
     // for the hazard cluster that design retired).
-    app.local_rollback::<DriveState>();
     app.local_rollback::<TankSim>();
-    app.add_observer(strip_confirmed_history::<DriveState>);
     app.add_observer(strip_confirmed_history::<TankSim>);
 
     app.add_systems(
@@ -1222,6 +1251,8 @@ mod tests {
     /// `damage.rs`. External wire types (avian/lightyear) are covered by dependency version.
     const WIRE_TYPE_DEFS: &[(&str, &str)] = &[
         ("src/net/protocol.rs", "NetTank"),
+        ("src/track/sim.rs", "TrackDrive"),
+        ("src/track/sim.rs", "TrackDriveSide"),
         ("src/net/protocol.rs", "NetBot"),
         ("src/lib.rs", "CombatantId"),
         ("src/net/protocol.rs", "ServoAngles"),
@@ -2013,7 +2044,6 @@ mod tests {
                 },
                 TankSim {
                     servos: Vec::new(),
-                    anchors: Vec::new(),
                     weapons: vec![
                         // Slot 0: the client's MISPREDICTED belt (fired a phantom round the server
                         // never fired), with a stale cyclic `reload_remaining`.

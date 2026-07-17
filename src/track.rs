@@ -14,9 +14,11 @@ pub mod chain;
 pub mod forces;
 pub mod oracle;
 pub mod route;
+pub mod sim;
 pub mod terrain;
 pub mod view;
 pub mod wheels;
 
+pub use sim::sim_plugin;
 pub use terrain::terrain_plugin;
 pub use view::view_plugin;

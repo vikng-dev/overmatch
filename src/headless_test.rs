@@ -28,24 +28,14 @@ static BOOT_LEASE: Mutex<()> = Mutex::new(());
 
 fn assert_tank_state_at_add(
     add: On<Add, Tank>,
-    tanks: Query<(Has<TankCommand>, Has<crate::driving::DriveState>)>,
+    tanks: Query<(Has<TankCommand>, Has<crate::track::sim::TrackDrive>)>,
 ) {
     let (command, drive) = tanks
         .get(add.entity)
         .expect("a newly added Tank must still exist during its observer");
     assert!(
         command && drive,
-        "TankCommand and DriveState must exist in the same insertion that adds Tank",
-    );
-}
-
-fn assert_suspension_at_add(
-    add: On<Add, crate::tank::Roadwheel>,
-    wheels: Query<Has<crate::driving::Suspension>>,
-) {
-    assert!(
-        wheels.get(add.entity).is_ok_and(|present| present),
-        "Suspension must exist in the same insertion that adds Roadwheel",
+        "TankCommand and TrackDrive must exist in the same insertion that adds Tank",
     );
 }
 
@@ -113,7 +103,6 @@ fn headless_app() -> App {
         crate::tank::sp_spawn_plugin,
     ))
     .add_observer(assert_tank_state_at_add)
-    .add_observer(assert_suspension_at_add)
     .add_observer(assert_range_table_at_add);
 
     // `App::run` normally drives plugin finish/cleanup (some registration — e.g. Avian's
@@ -240,14 +229,9 @@ fn booted_sim() -> BootedSim {
     // construction path that produced an incomplete entity without the expected marker.
     let world = app.world_mut();
     let incomplete_tanks = world
-        .query_filtered::<(Has<TankCommand>, Has<crate::driving::DriveState>), With<Tank>>()
+        .query_filtered::<(Has<TankCommand>, Has<crate::track::sim::TrackDrive>), With<Tank>>()
         .iter(world)
         .filter(|(command, drive)| !command || !drive)
-        .count();
-    let incomplete_wheels = world
-        .query_filtered::<Has<crate::driving::Suspension>, With<crate::tank::Roadwheel>>()
-        .iter(world)
-        .filter(|suspension| !suspension)
         .count();
     let weapon_tables: Vec<bool> = world
         .query_filtered::<Has<crate::firecontrol::RangeTable>, With<crate::tank::Weapon>>()
@@ -257,7 +241,6 @@ fn booted_sim() -> BootedSim {
         incomplete_tanks, 0,
         "a spawned Tank lacks command or drive state"
     );
-    assert_eq!(incomplete_wheels, 0, "a spawned Roadwheel lacks Suspension");
     assert!(
         !weapon_tables.is_empty() && weapon_tables.iter().all(|present| *present),
         "a spawned Weapon lacks its RangeTable",
@@ -266,7 +249,7 @@ fn booted_sim() -> BootedSim {
     BootedSim { app, _lease: lease }
 }
 
-/// [`booted_sim`] with the sim clock started and the tanks settled onto their suspension — the
+/// [`booted_sim`] with the sim clock started and the tanks settled onto their tracks — the
 /// shared scaffolding for the shooting tests, which need the REAL tiger geometry (a synthetic plate
 /// cannot reproduce a muzzle that recoils behind its own mantlet).
 fn booted_sp_app() -> BootedSim {
@@ -285,11 +268,11 @@ fn booted_sp_app() -> BootedSim {
 #[test]
 fn sim_boots_and_drives_headless() {
     // Boot to a bound rig with the sim clock still frozen — this test then starts the clock itself,
-    // because grounding the suspension from a standstill is part of what it proves.
+    // because settling onto the belt contacts from a standstill is part of what it proves.
     let mut app = booted_sim();
 
     // Start the clock (16 ms per `update()`, so the 64 Hz fixed sim ticks once per update) and let
-    // the suspension ground and settle.
+    // the belt contacts ground and settle.
     app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
         16,
     )));
@@ -298,17 +281,17 @@ fn sim_boots_and_drives_headless() {
         app.update();
         let world = app.world_mut();
         grounded = world
-            .query::<&crate::driving::Suspension>()
+            .query::<&crate::track::sim::TrackContacts>()
             .iter(world)
-            .filter(|s| s.contact.is_some())
-            .count();
-        if grounded >= 8 {
+            .map(|c| c.0.iter().filter(|side| !side.is_empty()).count())
+            .sum();
+        if grounded >= 4 {
             break;
         }
     }
     assert!(
-        grounded >= 8,
-        "suspension never grounded headless; grounded wheels: {grounded}"
+        grounded >= 4,
+        "the belt field never grounded headless; contacting track sides: {grounded}"
     );
     // Settle for a second of sim time.
     for _ in 0..60 {
@@ -329,7 +312,7 @@ fn sim_boots_and_drives_headless() {
         .throttle = 1.0;
 
     // ~4 sim-seconds of driving. The command is level state (no gather to re-write it), so it
-    // holds; the ramp, suspension, and drive all run on the fixed clock.
+    // holds; the command slew, belt forces, and drive all run on the fixed clock.
     for _ in 0..250 {
         app.update();
         app.world_mut()
@@ -680,7 +663,6 @@ struct ScriptedDeterminismRun {
     checkpoints: Vec<ScriptedPose>,
     saw_airborne: bool,
     saw_grounded: bool,
-    saw_brush_anchor: bool,
     saw_steering_slip: bool,
     saw_shot: bool,
     fire_shells: usize,
@@ -716,20 +698,20 @@ fn capture_scripted_determinism_tick(
             &avian3d::prelude::LinearVelocity,
             &avian3d::prelude::AngularVelocity,
             &avian3d::prelude::ComputedCenterOfMass,
-            &crate::driving::DriveState,
+            &crate::track::sim::TrackDrive,
+            &crate::track::sim::TrackContacts,
             &crate::tank::TankSim,
         ),
         With<Tank>,
     >,
-    children: Query<&Children>,
-    wheels: Query<&crate::driving::Suspension>,
     projectiles: Query<&crate::ballistics::ShellPath>,
     mut run: ResMut<ScriptedDeterminismRun>,
 ) {
     let tick = run.digests.len();
     let mut digests = Vec::with_capacity(roots.iter().len());
     let mut controlled = None;
-    for (tank, name, is_controlled, position, rotation, linear, angular, com, drive, sim) in &roots
+    for (_, name, is_controlled, position, rotation, linear, angular, com, drive, contacts, sim) in
+        &roots
     {
         digests.push((
             name.as_str().to_owned(),
@@ -739,53 +721,31 @@ fn capture_scripted_determinism_tick(
         ));
         if is_controlled {
             controlled = Some((
-                tank,
-                position.0,
-                rotation.0,
-                linear.0,
-                angular.0,
-                com.0,
-                drive.steer(),
-                sim,
+                position.0, rotation.0, linear.0, angular.0, com.0, drive, contacts, sim,
             ));
         }
     }
     digests.sort_unstable_by(|left, right| left.0.cmp(&right.0));
     assert_eq!(digests.len(), 2, "the local duel has two simulation tanks");
 
-    let (tank, position, rotation, linear, angular, local_com, steer, sim) =
+    let (position, rotation, linear, angular, local_com, drive, contacts, sim) =
         controlled.expect("one controlled tank");
-    let grounded = children
-        .iter_descendants(tank)
-        .filter_map(|entity| wheels.get(entity).ok())
-        .filter(|suspension| suspension.contact.is_some())
-        .count();
+    let grounded = contacts.0.iter().filter(|side| !side.is_empty()).count();
     run.saw_airborne |= grounded == 0;
     run.saw_grounded |= grounded > 0;
 
-    let anchors = sim.anchors.iter().filter(|anchor| anchor.is_some()).count();
-    run.saw_brush_anchor |= anchors > 0;
-
     // Avian 0.7 `Forces::velocity_at_point`: v_point = v_linear + omega × (point − world_COM),
-    // where world_COM = position + rotation * local_COM. Project onto the ground plane before
-    // classifying with the exact production `static_weight` rule. A loaded anchor remains `Some`
-    // while sliding, so anchor-count changes cannot witness this regime.
-    let world_com = position + rotation * local_com;
-    let loaded_contact_is_slipping = children
-        .iter_descendants(tank)
-        .filter_map(|entity| wheels.get(entity).ok())
-        .filter_map(|suspension| {
-            (suspension.load > 0.0)
-                .then_some(suspension.contact)
-                .flatten()
-        })
-        .any(|contact| {
-            let point_velocity = linear + angular.cross(contact - world_com);
-            let planar_speed = Vec2::new(point_velocity.x, point_velocity.z).length();
-            crate::driving::static_weight_for_test(planar_speed) < 1.0
-        });
+    // where world_COM = position + rotation * local_COM. Slip is witnessed directly from the
+    // belt model's contact telemetry: a loaded contact whose longitudinal slip is past the
+    // near-rest band while steer is commanded.
+    let _ = (position, rotation, linear, angular, local_com);
+    let loaded_contact_is_slipping = contacts
+        .0
+        .iter()
+        .flatten()
+        .any(|c| c.load > 0.0 && c.slip.abs() > 0.3);
     run.saw_steering_slip |=
-        tick >= 240 && steer.abs() > f32::EPSILON && loaded_contact_is_slipping;
+        tick >= 240 && drive.steer.abs() > f32::EPSILON && loaded_contact_is_slipping;
     run.saw_shot |= sim.weapons.iter().any(|weapon| weapon.rounds_fired > 0);
     run.saw_projectile_spawn |= !projectiles.is_empty();
     run.saw_projectile_march |= projectiles.iter().any(|path| path.points.len() > 1);
@@ -811,9 +771,7 @@ fn assert_simulation_mutators_are_ordered(app: &App) {
         .map(|(key, system)| (key, system.name().to_string()))
         .collect();
     for expected in [
-        "driving::traction::ramp_drive",
-        "driving::suspension::apply_suspension",
-        "driving::traction::apply_drive",
+        "track::sim::apply_track_forces",
         "shooting::tick_reload",
         "shooting::fire",
         "shooting::apply_recoil",
@@ -837,9 +795,7 @@ fn assert_simulation_mutators_are_ordered(app: &App) {
         .filter_map(|(left, right, _)| Some((names.get(left)?, names.get(right)?)))
         .filter(|(left, right)| {
             let writes_physical_state = |name: &str| {
-                name.contains("driving::traction::ramp_drive")
-                    || name.contains("driving::suspension::apply_suspension")
-                    || name.contains("driving::traction::apply_drive")
+                name.contains("track::sim::apply_track_forces")
                     || name.contains("shooting::tick_reload")
                     || name.contains("shooting::fire")
                     || name.contains("shooting::apply_recoil")
@@ -905,7 +861,6 @@ fn assert_scripted_determinism_witnesses(run: &ScriptedDeterminismRun, label: &s
     );
     assert!(run.saw_airborne, "{label} crossed an airborne state");
     assert!(run.saw_grounded, "{label} reached ground contact");
-    assert!(run.saw_brush_anchor, "{label} established a brush anchor");
     assert!(
         run.saw_steering_slip,
         "{label} put a loaded wheel in the blended/kinetic regime while steering",
@@ -959,7 +914,7 @@ fn assert_scripted_determinism_witnesses(run: &ScriptedDeterminismRun, label: &s
 }
 
 /// Two fresh, full simulation compositions must replay one command script bit-for-bit. The witness
-/// assertions keep this from passing because the scenario never reached contact, brush traction,
+/// assertions keep this from passing because the scenario never reached contact, slip traction,
 /// steering slip, or fire.
 #[test]
 fn full_simulation_replay_is_bit_exact_for_six_hundred_ticks() {

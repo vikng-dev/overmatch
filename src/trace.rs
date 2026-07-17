@@ -17,8 +17,8 @@ use avian3d::prelude::{AngularVelocity, Collisions, LinearVelocity, Position, Ro
 use bevy::prelude::*;
 use serde_json::{Value, json};
 
-use crate::driving::{DriveState, Suspension};
-use crate::tank::{Controlled, Tank, TankSim, WheelIndex};
+use crate::tank::{Controlled, Tank, TankSim};
+use crate::track::sim::{TrackContacts, TrackDrive};
 
 use bevy::ecs::system::SystemParam;
 use lightyear::core::confirmed_history::ConfirmedHistory;
@@ -63,7 +63,7 @@ struct TraceWriter {
     role: &'static str,
     /// `SPIKE_TRACE_SIM_FIELDS` was set: tick rows also carry `simf`, the raw carried-state values
     /// behind the `hsim` sub-hashes, so the offline analyzer can report magnitudes (Δreload,
-    /// Δservo angle, anchor point distance) instead of hash booleans. Off by default — it widens
+    /// Δservo angle) instead of hash booleans. Off by default — it widens
     /// every tick row.
     sim_fields: bool,
 }
@@ -156,10 +156,10 @@ struct TankStateHash {
     rot: u64,
     lv: u64,
     av: u64,
-    /// The carried-state combination (fixed order: `drv, srv, rld, rec, anc`) — kept so existing
+    /// The carried-state combination (fixed order: `drv, srv, rld, rec, blt`) — kept so existing
     /// analysis keyed on `hsim` still gets its single "did any carried state differ?" boolean.
     sim: u64,
-    /// `DriveState` throttle/steer.
+    /// `TrackDrive` shaped throttle/steer.
     drv: u64,
     /// Servo current/previous/velocity, every servo in slot order.
     srv: u64,
@@ -167,21 +167,22 @@ struct TankStateHash {
     rld: u64,
     /// Barrel recoil offset/velocity, every weapon in slot order.
     rec: u64,
-    /// Wheel brush anchors (Some/None discriminant + point), every wheel in slot order.
-    anc: u64,
+    /// Per-side belt state: speed + phase.
+    blt: u64,
 }
 
 /// Hash a tank root's canonical sim state (see the module-level note on world-independence). Pure and
 /// ECS-free precisely so it is unit-testable: same inputs → same hash, one flipped velocity bit → a
 /// different hash, and — because no entity ever enters it — hash equality is independent of the two
 /// worlds' entity ids. Field order is fixed and load-bearing: `position, rotation, linvel, angvel`,
-/// then `DriveState(throttle, steer)`, then each `TankSim` `Vec` in slot order.
+/// then `TrackDrive` (shaped command + per-side belt state), then each `TankSim` `Vec` in slot
+/// order.
 fn hash_tank_state(
     position: Vec3,
     rotation: Quat,
     linvel: Vec3,
     angvel: Vec3,
-    drive: &DriveState,
+    drive: &TrackDrive,
     sim: &TankSim,
 ) -> TankStateHash {
     let mut hp = Fnv64::new();
@@ -201,11 +202,11 @@ fn hash_tank_state(
     let av = ha.finish();
 
     // The carried state hashes as five per-field-family streams so a `hsim` mismatch names its
-    // field (servo vs reload vs recoil vs anchor vs drive), then combines into the single `sim`
+    // field (servo vs reload vs recoil vs belt vs drive), then combines into the single `sim`
     // boolean existing analysis keys on.
     let mut hd = Fnv64::new();
-    hd.write_f32(drive.throttle());
-    hd.write_f32(drive.steer());
+    hd.write_f32(drive.throttle);
+    hd.write_f32(drive.steer);
     let drv = hd.finish();
 
     let mut hsv = Fnv64::new();
@@ -232,23 +233,16 @@ fn hash_tank_state(
     let rld = hrl.finish();
     let rec = hrc.finish();
 
-    let mut han = Fnv64::new();
-    for anchor in &sim.anchors {
-        // A discriminant distinguishes `None` (slipping/airborne) from `Some((0,0,0))` — a grip
-        // released vs a grip anchored exactly at the origin are different sim states and must hash
-        // apart.
-        match anchor {
-            None => han.write_u32(0),
-            Some(point) => {
-                han.write_u32(1);
-                han.write_vec3(*point);
-            }
-        }
+    let mut hbl = Fnv64::new();
+    for side in &drive.sides {
+        hbl.write_f32(side.speed);
+        // Phase is f64 sim state; both halves enter so no precision is silently dropped.
+        hbl.write_u64(side.phase.to_bits());
     }
-    let anc = han.finish();
+    let blt = hbl.finish();
 
     let mut hs = Fnv64::new();
-    for sub in [drv, srv, rld, rec, anc] {
+    for sub in [drv, srv, rld, rec, blt] {
         hs.write_u64(sub);
     }
     let sim_hash = hs.finish();
@@ -270,7 +264,7 @@ fn hash_tank_state(
         srv,
         rld,
         rec,
-        anc,
+        blt,
     }
 }
 
@@ -291,7 +285,7 @@ pub(crate) struct CanonicalTankStateDigest {
     servo: u64,
     reload: u64,
     recoil: u64,
-    anchors: u64,
+    belts: u64,
     rounds_fired: u64,
 }
 
@@ -301,7 +295,7 @@ pub(crate) fn canonical_tank_state_digest(
     rotation: Quat,
     linvel: Vec3,
     angvel: Vec3,
-    drive: &DriveState,
+    drive: &TrackDrive,
     sim: &TankSim,
 ) -> CanonicalTankStateDigest {
     let hash = hash_tank_state(position, rotation, linvel, angvel, drive, sim);
@@ -324,7 +318,7 @@ pub(crate) fn canonical_tank_state_digest(
         servo: hash.srv,
         reload: hash.rld,
         recoil: hash.rec,
-        anchors: hash.anc,
+        belts: hash.blt,
         rounds_fired,
     }
 }
@@ -549,7 +543,7 @@ fn record_frame(
 }
 
 /// Per fixed tick, per tank root: sim truth (`Position`/`Rotation`/velocities are the rolled-back,
-/// replayed authority values) plus the derived contact state (grounded wheels, brush anchors, spring
+/// replayed authority values) plus the derived contact state (grounded track sides, per-side belt
 /// loads, collision pairs). Runs in `FixedLast`, after the physics step and avian's contact update,
 /// so `Collisions` is current for this tick.
 ///
@@ -564,14 +558,13 @@ fn record_tick(
             &Rotation,
             &LinearVelocity,
             &AngularVelocity,
-            &DriveState,
+            &TrackDrive,
+            &TrackContacts,
             &TankSim,
             Has<Controlled>,
         ),
         With<Tank>,
     >,
-    children: Query<&Children>,
-    wheels: Query<(&WheelIndex, &Suspension)>,
     collisions: Collisions,
     mut tick_counter: Local<u64>,
     timeline: Option<Res<LocalTimeline>>,
@@ -619,37 +612,27 @@ fn record_tick(
         }
     }
 
-    for (entity, position, rotation, linvel, angvel, drive, sim, controlled) in &roots {
-        // Wheels in stable `WheelIndex` order (the slot into `TankSim::anchors`), so the per-wheel
-        // `loads` array is comparable row-to-row. Only this tank's own descendant wheels, exactly as
-        // `apply_suspension` scopes support.
-        let mut slots: Vec<(usize, &Suspension)> = children
-            .iter_descendants(entity)
-            .filter_map(|wheel| wheels.get(wheel).ok())
-            .map(|(index, suspension)| (index.0, suspension))
-            .collect();
-        slots.sort_by_key(|(index, _)| *index);
-        let grounded = slots
+    for (entity, position, rotation, linvel, angvel, drive, track_contacts, sim, controlled) in
+        &roots
+    {
+        // Trace schema v2 (phase B): the per-wheel suspension topology is gone. `gnd` counts
+        // contacting SIDES (0–2), `loads` is per-side elastic load sums, `thr`/`str` are the
+        // shaped command, and `belt`/`bph` are the per-side belt speed and phase.
+        let grounded = track_contacts
+            .0
             .iter()
-            .filter(|(_, suspension)| suspension.contact.is_some())
+            .filter(|side| !side.is_empty())
             .count();
-        let loads: Vec<Value> = slots
+        let loads: Vec<Value> = track_contacts
+            .0
             .iter()
-            // Round to ~0.1 N: solver-noise digits past that are neither meaningful nor worth the
-            // row width.
-            .map(|(_, suspension)| num((suspension.load * 10.0).round() / 10.0))
+            // Round to ~0.1 N: solver-noise digits past that are neither meaningful nor worth
+            // the row width.
+            .map(|side| {
+                let sum: f32 = side.iter().map(|c| c.load).sum();
+                num((sum * 10.0).round() / 10.0)
+            })
             .collect();
-        // `anc` counts anchored wheels; it is not a discrete grip-state count.
-        let anchors = sim.anchors.iter().filter(|a| a.is_some()).count();
-        // `ancm` preserves per-wheel anchor transitions that aggregate `anc` can hide. Bits above
-        // 31 are intentionally omitted by the diagnostic schema.
-        let anchor_mask: u32 = sim
-            .anchors
-            .iter()
-            .take(32)
-            .enumerate()
-            .filter(|(_, a)| a.is_some())
-            .fold(0u32, |m, (i, _)| m | (1 << i));
 
         // Contact pairs whose rigid body is this tank root, and the deepest penetration among them
         // — the collision-stress signal the jitter correlates with.
@@ -681,11 +664,11 @@ fn record_tick(
             "lv": vec3(linvel.0),
             "av": vec3(angvel.0),
             "gnd": grounded,
-            "anc": anchors,
-            "ancm": anchor_mask,
             "loads": Value::Array(loads),
-            "thr": num(drive.throttle()),
-            "str": num(drive.steer()),
+            "thr": num(drive.throttle),
+            "str": num(drive.steer),
+            "belt": [num(drive.sides[0].speed), num(drive.sides[1].speed)],
+            "bph": [num(drive.sides[0].phase as f32), num(drive.sides[1].phase as f32)],
             "hc": hull_contacts,
             "pen": num(penetration),
             "ctl": controlled,
@@ -704,10 +687,10 @@ fn record_tick(
             "hsrv": hash.srv,
             "hrld": hash.rld,
             "hrec": hash.rec,
-            "hanc": hash.anc,
+            "hblt": hash.blt,
         });
         // Raw carried-state values (`SPIKE_TRACE_SIM_FIELDS`): the magnitudes behind the sub-hash
-        // booleans. `thr`/`str` (DriveState) are already row fields above.
+        // booleans. `thr`/`str` (TrackDrive) are already row fields above.
         if trace.sim_fields {
             let srv: Vec<Value> = sim
                 .servos
@@ -726,14 +709,9 @@ fn record_tick(
                     ])
                 })
                 .collect();
-            let anch: Vec<Value> = sim
-                .anchors
-                .iter()
-                .map(|a| a.map_or(Value::Null, vec3))
-                .collect();
             row.as_object_mut()
                 .expect("json! built an object")
-                .insert("simf".into(), json!({"srv": srv, "wpn": wpn, "anch": anch}));
+                .insert("simf".into(), json!({"srv": srv, "wpn": wpn}));
         }
         // Mark rollback-replay ticks so analysis keeps the corrected value for this tick number.
         // Never set in the single-player composition (`is_replay` is always false there — no rollback).
@@ -870,15 +848,28 @@ mod tests {
     use super::*;
     use crate::tank::WeaponState;
 
-    /// A representative, non-trivial sim state (every `Vec` populated, one anchor set and one
-    /// released, non-default drive) so the canonicalization is exercised over every production
-    /// field path — including each of the five carried-state sub-hash streams.
-    fn sample() -> (Vec3, Quat, Vec3, Vec3, DriveState, TankSim) {
+    /// A representative, non-trivial sim state (every `Vec` populated, one side anchored and
+    /// one released, non-default drive) so the canonicalization is exercised over every
+    /// production field path — including each of the five carried-state sub-hash streams.
+    fn sample() -> (Vec3, Quat, Vec3, Vec3, TrackDrive, TankSim) {
         let position = Vec3::new(1.5, 2.0, -70.25);
         let rotation = Quat::from_rotation_y(0.3);
         let linvel = Vec3::new(0.0, -0.153, 4.2);
         let angvel = Vec3::new(0.01, -0.02, 0.03);
-        let drive = DriveState::test_new(0.75, -0.25);
+        let drive = TrackDrive {
+            throttle: 0.75,
+            steer: -0.25,
+            sides: [
+                crate::track::sim::TrackDriveSide {
+                    speed: 4.2,
+                    phase: 137.25,
+                },
+                crate::track::sim::TrackDriveSide {
+                    speed: 4.1,
+                    phase: 136.9,
+                },
+            ],
+        };
         let sim = TankSim {
             servos: vec![crate::tank::ServoState::test_new(0.4, 0.39, 0.64)],
             weapons: vec![WeaponState {
@@ -892,7 +883,6 @@ mod tests {
                 // cosmetic counter above.
                 belt_remaining: 47,
             }],
-            anchors: vec![Some(Vec3::new(3.0, 0.0, -70.0)), None],
         };
         (position, rotation, linvel, angvel, drive, sim)
     }
@@ -950,26 +940,18 @@ mod tests {
         assert_ne!(pos_zero.lv, neg_zero.lv);
     }
 
-    /// A released anchor (`None`) must not collide with one anchored at the origin (`Some(0,0,0)`):
-    /// the discriminant is load-bearing carried sim state — and it localizes to the `anc` stream.
+    /// A one-ULP belt-phase difference must hash apart and localize to the `blt` stream —
+    /// phase is force-station-advecting sim state, not cosmetic.
     #[test]
-    fn anchor_none_differs_from_some_origin() {
-        let (p, q, lv, av, drive, _sim) = sample();
-        let none = TankSim {
-            servos: vec![],
-            weapons: vec![],
-            anchors: vec![None],
-        };
-        let some = TankSim {
-            servos: vec![],
-            weapons: vec![],
-            anchors: vec![Some(Vec3::ZERO)],
-        };
-        let hn = hash_tank_state(p, q, lv, av, &drive, &none);
-        let hs = hash_tank_state(p, q, lv, av, &drive, &some);
+    fn belt_phase_ulp_localizes_to_belt_stream() {
+        let (p, q, lv, av, drive, sim) = sample();
+        let mut shifted = drive;
+        shifted.sides[1].phase = f64::from_bits(drive.sides[1].phase.to_bits() ^ 1);
+        let hn = hash_tank_state(p, q, lv, av, &drive, &sim);
+        let hs = hash_tank_state(p, q, lv, av, &shifted, &sim);
         assert_ne!(hn.sim, hs.sim);
-        assert_ne!(hn.anc, hs.anc);
-        // The other carried-state streams are untouched by an anchor flip.
+        assert_ne!(hn.blt, hs.blt);
+        // The other carried-state streams are untouched by a belt flip.
         assert_eq!(hn.drv, hs.drv);
         assert_eq!(hn.srv, hs.srv);
         assert_eq!(hn.rld, hs.rld);
@@ -985,17 +967,15 @@ mod tests {
         let base = hash_tank_state(p, q, lv, av, &drive, &sim);
 
         // Drive: steer one ULP off.
-        let drive2 = DriveState::test_new(
-            drive.throttle(),
-            f32::from_bits(drive.steer().to_bits() ^ 1),
-        );
+        let mut drive2 = drive;
+        drive2.steer = f32::from_bits(drive.steer.to_bits() ^ 1);
         let d = hash_tank_state(p, q, lv, av, &drive2, &sim);
         assert_ne!(base.drv, d.drv);
         assert_ne!(base.sim, d.sim);
         assert_ne!(base.combined, d.combined);
         assert_eq!(
-            (base.srv, base.rld, base.rec, base.anc),
-            (d.srv, d.rld, d.rec, d.anc)
+            (base.srv, base.rld, base.rec, base.blt),
+            (d.srv, d.rld, d.rec, d.blt)
         );
         assert_eq!(
             (base.pos, base.rot, base.lv, base.av),
@@ -1011,8 +991,8 @@ mod tests {
         assert_ne!(base.srv, s.srv);
         assert_ne!(base.sim, s.sim);
         assert_eq!(
-            (base.drv, base.rld, base.rec, base.anc),
-            (s.drv, s.rld, s.rec, s.anc)
+            (base.drv, base.rld, base.rec, base.blt),
+            (s.drv, s.rld, s.rec, s.blt)
         );
 
         // Reload: timer one ULP off — must NOT touch the recoil stream despite sharing the weapon.
@@ -1023,8 +1003,8 @@ mod tests {
         assert_ne!(base.rld, r.rld);
         assert_ne!(base.sim, r.sim);
         assert_eq!(
-            (base.drv, base.srv, base.rec, base.anc),
-            (r.drv, r.srv, r.rec, r.anc)
+            (base.drv, base.srv, base.rec, base.blt),
+            (r.drv, r.srv, r.rec, r.blt)
         );
 
         // Belt count: one round off — a fire-gating difference, so it must land in the reload
@@ -1037,8 +1017,8 @@ mod tests {
         assert_ne!(base.sim, b.sim);
         assert_ne!(base.combined, b.combined);
         assert_eq!(
-            (base.drv, base.srv, base.rec, base.anc),
-            (b.drv, b.srv, b.rec, b.anc)
+            (base.drv, base.srv, base.rec, base.blt),
+            (b.drv, b.srv, b.rec, b.blt)
         );
 
         // Recoil: offset one ULP off — must NOT touch the reload stream.
@@ -1048,18 +1028,15 @@ mod tests {
         assert_ne!(base.rec, c.rec);
         assert_ne!(base.sim, c.sim);
         assert_eq!(
-            (base.drv, base.srv, base.rld, base.anc),
-            (c.drv, c.srv, c.rld, c.anc)
+            (base.drv, base.srv, base.rld, base.blt),
+            (c.drv, c.srv, c.rld, c.blt)
         );
 
-        // Anchor: point one ULP off.
-        let mut sim5 = sim.clone();
-        sim5.anchors[0] = sim.anchors[0].map(|mut a| {
-            a.x = f32::from_bits(a.x.to_bits() ^ 1);
-            a
-        });
-        let a = hash_tank_state(p, q, lv, av, &drive, &sim5);
-        assert_ne!(base.anc, a.anc);
+        // Belt state: the left side's speed one ULP off — localizes to the `blt` stream.
+        let mut drive5 = drive;
+        drive5.sides[0].speed = f32::from_bits(drive.sides[0].speed.to_bits() ^ 1);
+        let a = hash_tank_state(p, q, lv, av, &drive5, &sim);
+        assert_ne!(base.blt, a.blt);
         assert_ne!(base.sim, a.sim);
         assert_eq!(
             (base.drv, base.srv, base.rld, base.rec),

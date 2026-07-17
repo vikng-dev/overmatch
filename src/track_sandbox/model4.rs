@@ -197,7 +197,7 @@ pub(super) fn apply_belt_support_field(
         };
         let state = SideState {
             speed: belt.get(side),
-            phase: phase.get(side),
+            phase: f64::from(phase.get(side)),
         };
         let report = step_side(&side_input, state, affine, dt, &params, &field.0, |p| {
             forces.velocity_at_point(p)

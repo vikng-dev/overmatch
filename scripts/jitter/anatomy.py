@@ -15,11 +15,11 @@ It then reports, for the straight-flat-driving question:
   * the steady-state noise floor (median / p95 of each field over the constant-throttle cruise);
   * every "divergence onset" — the first tick |Δlv| crosses ONSET_DLV after >=SETTLE ticks below
     it — with the surrounding +/-4 ticks' full delta table and a first-mover verdict
-    (thr/str first => input-timing; loads first with matched pose => suspension/ray nondeterminism;
+    (thr/str first => input-timing; loads first with matched pose => belt-contact nondeterminism;
     lv first with matched thr+loads => solver; p only, growing => integration of an earlier vel
     offset);
   * the Delta-thr / input-timing verdict: count of cruise ticks where |Δthr|>1e-6 (a nonzero count
-    means the deterministic DriveState ramp is tick-shifted between ends — input application is not
+    means the deterministic TrackDrive command slew is tick-shifted between ends — input application is not
     aligned), plus the shift pattern at the ramp edges;
   * hull yaw/pitch drift on flat straight (the Δq decomposed into yaw / pitch / roll).
 
@@ -43,9 +43,9 @@ ONSET_DLV = 0.05    # m/s   onset trigger: quarter of the 0.20 m/s LinearVelocit
 SETTLE = 32         # ticks below ONSET_DLV required before an onset can re-arm
 # "field moved" thresholds for the first-mover verdict — a field's departure from its noise floor.
 MOVED = {
-    "dthr": 1e-6,   # DriveState throttle is deterministic to the bit given aligned input
+    "dthr": 1e-6,   # TrackDrive throttle is deterministic to the bit given aligned input
     "dstr": 1e-6,
-    "dload": 100.0,  # N; per-wheel spring load on a ~57 t tank rests ~30 kN, floor is ~single N
+    "dload": 100.0,  # N; per-SIDE belt support on a ~57 t tank rests ~280 kN, floor is ~single N
     "dlv": ONSET_DLV,
     "dav": 0.02,    # rad/s
     "dp": 2e-3,     # m
@@ -134,7 +134,7 @@ def parse_ticks(path):
                     "tick": r.get("tick"), "e": r.get("e"),
                     "p": p, "q": q,
                     "lv": _vec(r.get("lv"), 3), "av": _vec(r.get("av"), 3),
-                    "gnd": r.get("gnd"), "anc": r.get("anc"),
+                    "gnd": r.get("gnd"),
                     "loads": r.get("loads") or [],
                     "thr": r.get("thr"), "str": r.get("str"),
                     "hc": r.get("hc"), "pen": r.get("pen"),
@@ -259,7 +259,7 @@ def verdict_for(winner):
     return {
         "dthr": "INPUT-TIMING (throttle shifted between ends)",
         "dstr": "INPUT-TIMING (steer shifted between ends)",
-        "dload": "SUSPENSION/RAY nondeterminism (spring loads diverge first, pose still matched)",
+        "dload": "BELT-CONTACT nondeterminism (support loads diverge first, pose still matched)",
         "dav": "SOLVER (angular velocity diverges first)",
         "dlv": "SOLVER (linear velocity diverges with matched thr+loads)",
         "dp": "INTEGRATION (position drifts from an earlier velocity offset)",

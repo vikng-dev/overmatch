@@ -1,7 +1,7 @@
 //! Per-variant spec sheets as RON data assets (ADR-0010). The Blender model owns geometry and
-//! spatial anchors; this owns the tuning numbers — mass + inertia, drivetrain, suspension, servo
+//! spatial anchors; this owns the tuning numbers — mass + inertia, track powertrain/support, servo
 //! configs — that differ per tank variant. A `.tank.ron` file deserializes (via serde) straight
-//! into the same components the sim reads (`Mass`, `Drivetrain`, `SuspensionParams`, `ServoSpec`), so
+//! into the same values the sim reads (`Mass`, `ForceParams`, `ServoSpec`), so
 //! values stay plain-text, git-diffable, and separate from Blender. There are **no code defaults**
 //! (ADR-0011): a competitive sim never runs on guessed stats. The shipped RON is embedded into the
 //! eager `TankBlueprint` for simulation construction and also loaded as a Bevy asset for validation
@@ -14,7 +14,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::damage::{Capability, CrewStation, FunctionRole, Requirement};
-use crate::driving::{Drivetrain, SuspensionParams};
 use crate::tank::{ServoSpec, Tank};
 
 /// One tank variant's spec sheet — the typed contents of a `.tank.ron` file. Its fields *are* the
@@ -218,6 +217,39 @@ pub struct TrackSpec {
     pub idler: IdlerSpec,
     /// Road-wheel PIN-LINE radius (m): wheel rim + half plate — the chain's wheel circles.
     pub wheel_radius: f32,
+    /// The drivetrain spinning this track (phase B — the locomotion sim IS the track model).
+    pub powertrain: PowertrainSpec,
+    /// The belt-support contact law (replaces the raycast suspension spec).
+    pub support: SupportSpec,
+}
+
+/// Per-track powertrain: constant-power engine curve under a low-speed force cap, with a
+/// governor chasing `command × max_speed` against the reflected belt+drivetrain inertia.
+#[derive(Deserialize, Clone, Copy)]
+#[serde(deny_unknown_fields)]
+pub struct PowertrainSpec {
+    /// Top belt speed (m/s).
+    pub max_speed: f32,
+    /// Engine power per track (W).
+    pub power: f32,
+    /// Low-speed tractive force cap per track (N).
+    pub force: f32,
+    /// Governor gain (N per m/s of belt-speed error) — the throttle response feel.
+    pub governor_gain: f32,
+    /// Reflected belt + drivetrain inertia (kg).
+    pub inertia: f32,
+}
+
+/// The belt-support penalty law, per metre of contacting belt.
+#[derive(Deserialize, Clone, Copy)]
+#[serde(deny_unknown_fields)]
+pub struct SupportSpec {
+    /// Spring (N/m per metre of belt) — sets static sink under weight.
+    pub stiffness_per_m: f32,
+    /// Normal-velocity damping (N·s/m per metre).
+    pub damping_per_m: f32,
+    /// Soft-engagement ramp depth (m).
+    pub engage: f32,
 }
 
 /// See [`TrackSpec::sprocket`]. `center` is side-plane `(z, y)`.
@@ -243,9 +275,9 @@ pub struct TankSpec {
     pub mass: f32,
     /// Hull box full dimensions (x, y, z metres) approximating the angular-inertia distribution.
     pub inertia_extents: (f32, f32, f32),
-    pub drivetrain: Drivetrain,
-    pub suspension: SuspensionParams,
-    /// Continuous-track running gear + material loop — the track view's per-vehicle data.
+    /// Continuous-track running gear, material loop, powertrain, and contact law — the
+    /// locomotion spec (phase B: the track model IS the driving sim) and the track view's
+    /// per-vehicle data.
     pub track: TrackSpec,
     /// Servos (actuator mounts) keyed by model node name — the **source of truth** for which nodes
     /// rotate and how. Each carries its aim `role` (which also derives the rotation axis: Yaw→Y,
@@ -455,8 +487,8 @@ mod tests {
         // parsed".
         assert_eq!(spec.mass, 57000.0);
         assert_eq!(spec.inertia_extents, (3.0, 2.0, 6.3));
-        assert_eq!(spec.drivetrain.max_thrust, 12500.0);
-        assert_eq!(spec.suspension.stiffness, 551_613.0);
+        assert_eq!(spec.track.powertrain.force, 100_000.0);
+        assert_eq!(spec.track.support.stiffness_per_m, 1_460_000.0);
         // Track: the material loop is authored exact (pitch × count = the immutable belt
         // length); the sprocket's tooth count locks link advance to tooth advance.
         assert_eq!(spec.track.pitch, 0.130);

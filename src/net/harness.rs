@@ -142,8 +142,8 @@ pub(crate) fn buffer_input(
         state.0.fire_secondary = t > FIRE_WARMUP;
         return;
     }
-    // Step-7 script, exercising the real sim under prediction: 2 s idle (rig binds, suspension
-    // settles) → 4 s throttle 1.0 + steer 0.3 (ramp_drive + suspension + skid-steer, spanning
+    // Step-7 script, exercising the real sim under prediction: 2 s idle (rig binds, the hull
+    // settles onto the belt) → 4 s throttle 1.0 + steer 0.3 (belt forces + skid-steer, spanning
     // the ~2 s server perturbation) → coast to rest. The aim intention + range are held from
     // tick 0 so the turret/gun servos slew (drive_aim_servos → drive_servos) while driving;
     // one fire click at tick 300 (Reload starts ready) exercises fire + recoil + reload.

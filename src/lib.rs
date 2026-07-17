@@ -31,23 +31,17 @@ mod camera;
 /// The command layer: device reads → player bindings → per-tank serializable `TankCommand`. The
 /// seam authoritative multiplayer hangs off; sim modules consume commands, never devices.
 mod command;
+/// The per-fixed-tick sim-COST recorder (`SPIKE_COST_TRACE=<path>`): an env-gated JSONL log of
+/// FixedUpdate tick time, the `ballistics::integrate_projectiles` share of it, and entity/projectile
+/// counts — the reusable measurement rig for the machine-gun-march cost spike. Off (zero cost) unless
+/// the env var is set; registered on the net server and client composition roots.
+mod cost;
 /// The controlled tank's crew bar + swap input — a shared piece of the fixed player UI, mounted by
 /// both `GamePlugin` and the sandbox (each scoped to the `Controlled` tank).
 mod crew_ui;
 pub(crate) mod damage;
 #[cfg(feature = "dev_tools")]
 mod debug;
-mod driving;
-/// Re-exported for `tests/spherecast_scale.rs`: the sphere probe's witness-geometry distance
-/// reconstruction + its TOI-band guard (the parry TOI-tolerance workaround) are pinned against
-/// raw parry casts there — the helper's math and parry's behavior, not the `apply_suspension`
-/// call site (that wiring's live guard is the idle at-rest harness metric).
-pub use driving::{SPHERE_CAST_TOI_SLACK, sphere_cast_ground_contact};
-/// The per-fixed-tick sim-COST recorder (`SPIKE_COST_TRACE=<path>`): an env-gated JSONL log of
-/// FixedUpdate tick time, the `ballistics::integrate_projectiles` share of it, and entity/projectile
-/// counts — the reusable measurement rig for the machine-gun-march cost spike. Off (zero cost) unless
-/// the env var is set; registered on the net server and client composition roots.
-mod cost;
 /// Fire control: per-weapon superelevation range tables + the player-dialed range. Sits atop
 /// `ballistics`; the aim commit reads it to lob the aim point so the bore elevates for range.
 mod firecontrol;
@@ -139,8 +133,9 @@ pub(crate) struct PredictedPresent(pub u32);
 #[derive(Resource, Default)]
 pub(crate) struct ShotClock(pub u32);
 
-/// Physics collision layers. Wheel suspension rays filter to `Terrain` only, so they ignore
-/// the vehicle's own hull collider (ADR-0005). Shared infra, hence at the crate root.
+/// Physics collision layers. View/aim queries that want the ground (camera terrain ray, sight
+/// probes) filter to `Terrain` only, so they ignore vehicle colliders. Shared infra, hence at
+/// the crate root.
 #[derive(PhysicsLayer, Default, Clone, Copy, Debug)]
 pub(crate) enum Layer {
     #[default]
@@ -204,7 +199,9 @@ impl Plugin for SimPlugin {
             // Commands are the sim's only input: `core_plugin` puts a `TankCommand` on every tank
             // and consumes latched edges each tick; `driving`/`shooting`/`aim` read it.
             command::core_plugin,
-            driving::plugin,
+            // Phase-B locomotion: the track model's belt forces ARE the driving sim
+            // (ADR-0025; replaces the raycast-roadwheel model of ADR-0005).
+            track::sim_plugin,
             aim::sim_plugin,
             // `ballistics` owns the shell trajectory + impact seam; `shooting` is the gun control
             // that drives it (the sandbox drives the same `FireShell` from its camera).
@@ -320,7 +317,7 @@ impl Plugin for NetClientPlugin {
 
         // Physics visualization + debug toggles, same pair `ClientPlugin` mounts for SP
         // (`G` = force arrows + collider wireframes, `X` = x-ray, `F` = camera detach). View-only:
-        // it reads `Suspension`/`GlobalTransform` and draws gizmos — nothing sim-visible — so it is
+        // it reads `TrackContacts`/`GlobalTransform` and draws gizmos — nothing sim-visible — so it is
         // safe on a predicting client and is never mounted by the headless server (which composes
         // `SimPlugin` only, never this plugin). Behind the `dev_tools` feature (default-on).
         #[cfg(feature = "dev_tools")]

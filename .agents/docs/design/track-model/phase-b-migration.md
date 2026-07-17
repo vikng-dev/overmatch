@@ -1,7 +1,8 @@
 # Phase B migration — one locomotion sim, no forks
 
-Status: PLAN v1 (2026-07-17). Owner mandate: full cutover to the track model — "no old code
-lingering around, conditionals or forks — we're upgrading to the full end target." The
+Status: PLAN v2 (2026-07-17; v2 amends the hold disposition — see §3a). Owner mandate: full
+cutover to the track model — "no old code lingering around, conditionals or forks — we're
+upgrading to the full end target." The
 previously-planned dev-only A/B switch is CANCELLED; parity evidence comes from the
 bit-repeatable sandbox harness, the rewritten contract tests, and playtest. The only fork
 retained anywhere: the sandbox's two VIEW models (wrap vs chain, `V`).
@@ -16,8 +17,9 @@ Inputs: three research sweeps (sandbox sim inventory, deletion blast radius, net
 - **The steering gap does not exist.** Model-4 already has per-column lateral grip with a
   friction ellipse (`LATERAL_GRIP_RATIO 0.55`), per-side belt speeds from `throttle ± steer`,
   and yaw emerging from differential traction at ±half-tread lever arms on a free 6-DOF hull.
-  What it lacks: **hill-hold** (no static anchor — a parked tank creeps on slopes) and any
-  lateral reaction into belt dynamics (accepted, matches real skid-steer fidelity here).
+  What it lacks: **hill-hold** (no static anchor — a parked tank creeps on slopes: ~16 cm/s
+  on 20°, bounded by the friction ellipse, not runaway — ACCEPTED, see §3a) and any lateral
+  reaction into belt dynamics (accepted, matches real skid-steer fidelity here).
 - **`BlockField` must move into `SimPlugin`** — today it is built only by the client-side view
   plugin; the dedicated server has none. Shared resource, built from `TerrainMap` on revision
   change, consumed by sim forces AND the view (dedupe).
@@ -35,9 +37,9 @@ src/track/wheels.rs       view wheel lift (exists, unchanged)
 src/track/view.rs         chain/link/wheel view (exists; belt source → TrackDrive)
 src/track/terrain.rs      NEW: TrackField resource built from TerrainMap (SimPlugin-mounted,
                           shared by server + clients; view.rs's private copy dies)
-src/track/forces.rs       NEW: pure force math — support columns, traction ellipse, hold
-                          anchor rule, engine/governor. No ECS. Consumed by sim.rs AND the
-                          sandbox (source of truth).
+src/track/forces.rs       NEW: pure force math — support columns, traction ellipse,
+                          engine/governor belt dynamics. No ECS. Consumed by sim.rs AND the
+                          sandbox (source of truth). NOTHING beyond the sandbox law (§3a).
 src/track/sim.rs          NEW: ECS adapter — TrackDrive component, force system in
                           SimPhase::DrivingForces, capability gate, tick-truth pose reads.
 src/driving/              DELETED (suspension.rs, traction.rs, contact.rs, susp_trace.rs).
@@ -45,9 +47,11 @@ src/track_sandbox/        model4 physics becomes a thin adapter over track::forc
                           VIEWS (wrap V chain) stay. Models 1–3 (lab archaeology) DELETED.
 ```
 
-`TankSpec`: `drivetrain:` + `suspension:` blocks die; `track:` grows `powertrain:`,
-`support:`, `friction:` sections (ADR-0011 — all authored, no defaults). `Roadwheel` loses
-`#[require(Suspension)]`; `TankSim.anchors` dies (hold state lives in `TrackDrive`).
+`TankSpec`: `drivetrain:` + `suspension:` blocks die; `track:` grows `powertrain:` +
+`support:` sections (ADR-0011 — all authored, no defaults). Surface friction (μ, lateral
+ratio, slip saturation) stays a sim CONST — ADR-0007 bucket 3, a property of the
+track–ground pair destined for the terrain mechanic, deliberately not vehicle spec. `Roadwheel` loses
+`#[require(Suspension)]`; `TankSim.anchors` dies outright (no hold state exists — §3a).
 
 ## 2. TrackDrive — the sim state contract
 
@@ -56,23 +60,22 @@ src/track_sandbox/        model4 physics becomes a thin adapter over track::forc
 /// back — the LinearVelocity registration pattern (NOT NetCrew snap-to, NOT local_rollback).
 #[derive(Component, Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct TrackDrive {
+    pub throttle: f32,                // shaped command (INPUT_RAMP slew of TankCommand)
+    pub steer: f32,
     pub sides: [TrackDriveSide; 2],   // [left, right]
 }
 pub struct TrackDriveSide {
     pub speed: f32,     // belt surface speed (m/s) — engine/governor/reaction integrated
-    pub phase: f32,     // belt travel (m) — advects force stations AND drives the view;
-                        // wrapped by belt_len (shift ≡ 0 mod n, seamless)
-    pub anchor: Option<Vec3>,  // hill-hold brush anchor (world), ADR-0006 restationed:
-                               // ONE per side at the contact centroid (2 anchors give yaw
-                               // hold via lever arms; 16 per-wheel anchors were overkill)
+    pub phase: f64,     // unbounded belt travel (m) — advects force stations AND drives the
+                        // view (view wraps by belt_len at presentation)
 }
 ```
 
 - Registration: `.replicate().predict().with_rollback_condition(..)` with float thresholds
-  (speed/phase/anchor deltas) + `note_if_tripped` attribution; `WIRE_SURFACE` entry;
+  (throttle/steer/speed/phase deltas) + `note_if_tripped` attribution; `WIRE_SURFACE` entry;
   `WIRE_SURFACE_HASH`/`WIRE_TYPES_HASH` re-pinned; `PROTOCOL_REV` bump.
-- Joins the determinism hash: new `hblt` stream in `trace::hash_tank_state` (speed, phase,
-  anchor per side); `anc`/`drv` streams retire with their state.
+- Joins the determinism hash: new `hblt` stream in `trace::hash_tank_state` (speed +
+  phase-bits per side); `anc`/`drv` streams retire with their state.
 - `DriveState` dies. Input shaping (`DRIVE_RAMP` smoothing of TankCommand) moves into the
   belt-dynamics step — the governor chasing `command × max_speed` IS the smoothing; one model
   instead of two.
@@ -91,20 +94,36 @@ pub struct TrackDriveSide {
    implicit).
 4. Traction: slip vs `TrackDrive.speed` along drive direction; lateral scrub; friction
    ellipse (`μ·load`, lateral ratio); longitudinal force accumulates into belt reaction.
-5. Hold (NEW, ADR-0006 transplant): per side, when |belt speed| and contact-point hull speed
-   < STICK_SPEED and command ≈ 0 → plant anchor at contact centroid; spring-damper toward it
-   capped at μ × side load (inside the ellipse budget); release on command/speed. Karnopp
-   gate + bristle spring, 2 anchors instead of 16.
+5. ~~Hold~~ REMOVED (v2, §3a): no anchor pass — the model is the clean sandbox slip law.
 6. Belt dynamics: constant-power engine curve (`P/v` capped at F_max), governor toward
    `command × max_speed`, reaction subtraction, reflected inertia, clamp; phase advection.
-7. Capability gate: `Drive` capability zeroes COMMAND (not the friction/hold model) — same
-   gate point as old `apply_drive`.
+7. Capability gate: `Drive` capability zeroes COMMAND (not the contact model) — a dead
+   engine still grips; it just cannot thrust.
 
 Sim discipline: pose from tick-truth `Position`/`Rotation` (never GlobalTransform — model4's
 one game-illegal habit), velocity via Avian `Forces::velocity_at_point`, terrain via
 `TrackField` (pure analytic — no SpatialQuery in the drive path, no BVH rollback dependency).
 No `Replaying` gate (sim state must replay). Runs in `SimPhase::DrivingForces` + `GameplaySet`
 (preserves the "drive samples velocity before fire impulse" cross-phase contract).
+
+## 3a. Hold disposition (v2 — owner correction, 2026-07-17)
+
+The v1 plan transplanted the retired raycast sim's LuGre/Karnopp hold (brush anchor,
+STICK_* constants) into the new core, plus powertrain numbers reverse-engineered from the
+old sim's feel (soft governor ≈ the old rolling-resistance slope). Owner verdict: the old
+driving model was a pure placeholder — nothing structural carries over. Disposition:
+
+- **The force law is the sandbox law, exactly** — commit-B bit-parity was re-proven after
+  the hold removal (reversal harness, `cmp` clean).
+- **Tiger numbers are sandbox-SCALED, not old-feel-derived**: stiff sandbox governor
+  (60 kN·s/m), inertia and support scaled by the 57 t / 26.5 t mass ratio (same ~5 cm
+  static sink), force cap 100 kN/side (keeps 20° climb / 30° stall from physics alone).
+- **Slope-parking creep is an ACCEPTED known gap** (~16 cm/s on 20°, bounded equilibrium).
+  If playtest wants hill-hold it arrives as the per-element bristle extension of THIS
+  model (static friction inside the slip law, codex phase-B review) — never the old
+  brush anchor.
+- `DriveState`-era input shaping survives ONLY as `INPUT_RAMP` command slew in sim.rs
+  (vehicle input feel, deliberately separate from the belt governor — codex #9).
 
 ## 4. Spec mapping (feel continuity, Tiger)
 
@@ -116,8 +135,7 @@ No `Replaying` gate (sim state must replay). Runs in `SimPhase::DrivingForces` +
 | — | powertrain.governor_gain, inertia | scaled from sandbox by mass ratio | feel start point |
 | suspension.stiffness 551 613 N/m × 16 | support.stiffness_per_m ≈ 1.5 MN/m·m | same static sink (~5 cm) at 57 t over ~2×3.6 m contact | derived |
 | suspension.damping | support.damping_per_m (scaled) | critical-ish | derived |
-| drivetrain.lateral_grip 73 548 | friction.mu 0.9 + friction.lateral_ratio 0.55 | ellipse replaces linear | model change, tune in playtest |
-| drivetrain.brush_stiffness/damping | friction.hold_stiffness/damping | direct | ADR-0006 survives |
+| drivetrain.lateral_grip 73 548 | MU 0.9 + LATERAL_GRIP_RATIO 0.55 (sim consts) | ellipse replaces linear | model change, tune in playtest |
 | drivetrain.rolling_resistance | — (governor engine-brake) | — | feel dial changes; watch coast-down in playtest |
 | suspension.ray_length/rest_length | — | — | no rays exist |
 

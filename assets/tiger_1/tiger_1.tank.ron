@@ -2,19 +2,6 @@
 TankSpec(
     mass: 57_000.0,
     inertia_extents: (3.0, 2.0, 6.3),
-    drivetrain: (
-        max_thrust: 12_500.0,
-        rolling_resistance: 1410.0,
-        lateral_grip: 73548.0,
-        brush_stiffness: 306452.0,
-        brush_damping: 30645.0,
-    ),
-    suspension: (
-        ray_length: 0.85,
-        rest_length: 0.6,
-        stiffness: 551613.0,
-        damping: 61290.0,
-    ),
     // Continuous track (view-layer chain, track architecture §7). Material loop is exact:
     // 97 × 0.130 = 12.610 m against a 12.577 m taut envelope (+33 mm ≈ 0.26% slack).
     // Sprocket/idler circles are measured from the model's visual-mesh bounds (side-plane
@@ -32,6 +19,25 @@ TankSpec(
         sprocket: ( center: (-2.5642, 0.7194), teeth: 19 ),
         idler:    ( center: (2.3657, 0.5843),  radius: 0.4536 ),
         wheel_radius: 0.458,
+        // Phase-B locomotion: the SANDBOX force law scaled to the Tiger (the retired raycast
+        // sim was a placeholder — nothing structural carries over). Stiff sandbox governor;
+        // force cap 100 kN/side keeps "climbs 20°, stalls 30°" vs 559 kN weight; support =
+        // the sandbox law scaled by the 57 t / 26.5 t mass ratio (same ~5 cm static sink);
+        // inertia likewise. Slope-parking creep (~16 cm/s on 20°, bounded) is a KNOWN gap of
+        // the clean slip law — if playtest wants hill-hold, it arrives as the per-element
+        // bristle extension of THIS model, not the old brush anchor.
+        powertrain: (
+            max_speed: 10.5,
+            power: 260_000.0,
+            force: 100_000.0,
+            governor_gain: 60_000.0,
+            inertia: 16_000.0,
+        ),
+        support: (
+            stiffness_per_m: 1_460_000.0,
+            damping_per_m: 172_000.0,
+            engage: 0.02,
+        ),
     ),
     servos: {
         "Turret_Yaw":      (role: Yaw,   max_speed: 34.0, accel: 70.0, travel: Continuous,                      requires: [Gunner]),

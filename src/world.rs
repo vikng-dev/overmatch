@@ -1,4 +1,4 @@
-//! The battlefield: environment lighting and a suspension test course now, real terrain later.
+//! The battlefield: environment lighting and a locomotion test course now, real terrain later.
 //! Also home to the ground-plane query that aiming and the camera both use — the seam to swap
 //! for an Avian raycast once terrain has colliders.
 
@@ -58,8 +58,8 @@ fn spawn_environment(
         )),
     );
 
-    // The suspension test course — deliberate, known geometry (not a scenic map) laid out down
-    // the −Z lane in front of spawn, so each obstacle isolates one suspension behaviour and you
+    // The locomotion test course — deliberate, known geometry (not a scenic map) laid out down
+    // the −Z lane in front of spawn, so each obstacle isolates one track behaviour and you
     // can tell the *sim* from the *terrain*. All on the Terrain layer, so the wheel rays read it
     // identically to the ground.
     let cube = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
@@ -93,8 +93,8 @@ fn spawn_block(
     ));
 }
 
-/// The four-obstacle suspension course. Each obstacle is a static cuboid (or row of them) sized
-/// to isolate one thing the per-wheel suspension does. Reuses one unit-cube mesh and two
+/// The four-obstacle locomotion course. Each obstacle is a static cuboid (or row of them) sized
+/// to isolate one thing the belt contact model does. Reuses one unit-cube mesh and two
 /// materials, cloned per block.
 fn spawn_test_course(
     commands: &mut Commands,
@@ -149,7 +149,7 @@ fn spawn_test_course(
     );
 
     // 4. Washboard — a row of low bumps; wheels rise and fall independently while the hull stays
-    //    composed (the most legible "suspension is working" demo). Boxes approximate rounded bumps
+    //    composed (the most legible "terrain following works" demo). Boxes approximate rounded bumps
     //    — a round profile is a later refinement.
     for i in 0..6 {
         let z = -82.0 - i as f32 * 1.6;

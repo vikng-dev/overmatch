@@ -491,7 +491,7 @@ const MISMATCH_HINT_AFTER_ATTEMPTS: u32 = 3;
 ///     asset-gate did: the sim body spawns whole from extracted data the moment the replicated root
 ///     lands, and preloading keeps view pop-in to ~a frame. (No local ground spawn: `SimPlugin` →
 ///     `world::plugin` builds the real terrain on both sides; rollback replays collide with it and
-///     the suspension rays hit it.)
+///     the track force probes sample it.)
 ///   - **`Connecting`** — a connect is in flight (netcode `SendingConnectionRequest`/
 ///     `ChallengeResponse`); wait it out.
 ///   - **`Disconnected` after initiating** — the attempt failed (timeout / denied / link drop) and

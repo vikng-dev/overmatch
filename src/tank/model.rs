@@ -5,8 +5,8 @@ use bevy::prelude::*;
 use super::servo::ServoState;
 use crate::command::TankCommand;
 use crate::damage::Requirement;
-use crate::driving::{DriveState, Suspension};
 use crate::spec::{FireMode, RecoilSpec, Trigger, ViewKind};
+use crate::track::sim::{TrackContacts, TrackDrive};
 
 #[derive(Component)]
 pub struct Turret;
@@ -19,7 +19,7 @@ pub struct Hull;
 
 /// Local simulation root. Command and drive state are required in the same construction flush.
 #[derive(Component)]
-#[require(TankCommand, DriveState)]
+#[require(TankCommand, TrackDrive, TrackContacts)]
 pub struct Tank;
 
 /// Selects the tank that local input and player-facing systems address.
@@ -78,9 +78,8 @@ pub enum TrackSide {
     Right,
 }
 
-/// Load-bearing suspension/traction station; sprockets and idlers are excluded.
+/// Load-bearing belt-contact station; sprockets and idlers are excluded.
 #[derive(Component)]
-#[require(Suspension)]
 pub struct Roadwheel {
     pub side: TrackSide,
 }
@@ -121,9 +120,6 @@ impl WeaponState {
 pub struct TankSim {
     pub servos: Vec<ServoState>,
     pub weapons: Vec<WeaponState>,
-    /// Per-wheel brush anchor: the world point the contact "gripped" while near rest. `Some` =
-    /// static friction holds the tank there; `None` = slipping (kinetic) or airborne.
-    pub anchors: Vec<Option<Vec3>>,
 }
 
 /// This weapon's slot in [`TankSim::weapons`] — on the muzzle AND the recoiling barrel (both
@@ -131,9 +127,17 @@ pub struct TankSim {
 #[derive(Component, Clone, Copy)]
 pub struct WeaponIndex(pub usize);
 
-/// This roadwheel's slot in [`TankSim::anchors`], assigned at spawn in sorted-name order.
+/// This roadwheel's slot in name-sorted rig order, spawn-assigned. Phase B removed its last
+/// reader (the per-wheel suspension trace); the slot CONTRACT (name-sorted = bake order on
+/// both wire ends) still holds and per-wheel telemetry will key on it again.
 #[derive(Component, Clone, Copy)]
-pub struct WheelIndex(pub usize);
+pub struct WheelIndex(
+    #[expect(
+        dead_code,
+        reason = "slot contract kept; phase-B trace v2 dropped the last per-wheel reader — next per-wheel telemetry rekeys on this"
+    )]
+    pub usize,
+);
 
 /// Compose tick-truth local transforms from the physics root. Simulation must not read
 /// `GlobalTransform`, which belongs to the interpolated render frame. Returns `None` when the node

@@ -10,8 +10,8 @@ use lightyear::prelude::*;
 
 use super::protocol::NetTank;
 use crate::ballistics::ShellPath;
-use crate::driving::Suspension;
 use crate::tank::{Rig, ServoIndex, ServoState, Tank, TankRoot, TankSim, Turret};
+use crate::track::sim::TrackContacts;
 
 /// Log and latch corrupt physics state before Avian consumes it.
 pub(crate) fn fixed_nan_probe(
@@ -153,7 +153,7 @@ pub(crate) fn log_prediction_diagnostics(
 pub(crate) fn log_sim_evidence(
     turrets: Query<(&ServoIndex, &TankRoot), With<Turret>>,
     sims: Query<(Entity, &TankSim)>,
-    wheels: Query<&Suspension>,
+    tracks: Query<&TrackContacts>,
     mut timer: Local<f32>,
     time: Res<Time>,
 ) {
@@ -162,9 +162,12 @@ pub(crate) fn log_sim_evidence(
         return;
     }
     *timer = 0.0;
-    let grounded = wheels.iter().filter(|s| s.contact.is_some()).count();
-    let total = wheels.iter().count();
-    info!("net: SIM-EVIDENCE wheels_grounded={grounded}/{total} (all tanks)");
+    let grounded: usize = tracks
+        .iter()
+        .map(|c| c.0.iter().filter(|side| !side.is_empty()).count())
+        .sum();
+    let total = tracks.iter().count() * 2;
+    info!("net: SIM-EVIDENCE track_sides_grounded={grounded}/{total} (all tanks)");
     for (root, sim) in &sims {
         // `TankRoot` owns the turret-to-simulation join.
         let turret = turrets

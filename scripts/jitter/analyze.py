@@ -45,7 +45,7 @@ C_VERT = "#1baf7a"     # vertical-only jerk / divergence |Δlv|
 C_ROT = "#4a3aa7"      # rotational jerk / divergence rot diff
 C_CP = "#eb6834"       # correction |cp| (m)
 C_CQ = "#e87ba4"       # correction cq angle
-C_GND = "#008300"      # grounded-wheel count
+C_GND = "#008300"      # grounded track-side count
 C_HC = "#e34948"       # hull contacts
 C_THR = "#52514e"      # throttle
 C_SPIKE = "#d03b3b"    # spike dots + rollback event lines
@@ -1015,7 +1015,7 @@ def build_png(out_path, in_path, role, is_net, fm, cs, chosen_ticks, rollbacks,
         elif key == "ctx":
             _rollback_lines(ax, rollbacks)
             ax.step(ck_wall, gnd, where="post", color=C_GND, linewidth=1.2,
-                    label="grounded wheels", zorder=3)
+                    label="grounded sides", zorder=3)
             ax.step(ck_wall, hc, where="post", color=C_HC, linewidth=1.2,
                     label="hull contacts", zorder=2)
             ax.set_ylim(-0.5, 16.5)

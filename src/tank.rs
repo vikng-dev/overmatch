@@ -19,7 +19,7 @@ pub use model::WeaponState;
 pub(crate) use model::rig_world_pose;
 pub use model::{
     Controlled, Hull, Muzzle, Rig, Roadwheel, Tank, TankRoot, TankSim, TankViews, TrackSide,
-    Turret, Weapon, WeaponIndex, WheelIndex,
+    Turret, Weapon, WeaponIndex,
 };
 pub use scenario::{client_plugin, sp_spawn_plugin};
 pub use servo::{ServoCommand, ServoIndex, ServoRole, ServoSpec, ServoState, shortest_angle};
