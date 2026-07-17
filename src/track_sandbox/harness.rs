@@ -250,7 +250,7 @@ pub(super) fn harness_record(
         pitch,
         arr([lin.0.x, lin.0.y, lin.0.z]),
         arr([belt.left, belt.right]),
-        arr([phase.get(Side::Left), phase.get(Side::Right)]),
+        arr([phase.get(Side::Left) as f32, phase.get(Side::Right) as f32]),
         total,
         wheel_json.join(","),
         contact_rows.join(","),

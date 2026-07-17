@@ -52,27 +52,28 @@ impl TerrainField {
 /// wheel path. Half of it is the offset between the pin line and either face.
 pub(super) const TRACK_THICKNESS: f32 = 0.04;
 
-/// Each side's **total** belt travel (m) along the reference loop — advanced by belt speed each
-/// tick so the sampling stations travel with the belt like real links. Kept unwrapped: users wrap
-/// it mod the link pitch for the sampling offset, and its quotient is the **link-identity shift**
-/// the chain warm-start needs (how many whole links have passed).
+/// Each side's **total** belt travel (m) along the reference loop — the core's advected state
+/// ([`SideState::phase`]), committed back verbatim each tick. `f64` exactly like the shared
+/// core (and the game's `TrackDrive`): unbounded travel accumulates past f32 ULP within
+/// minutes. Kept unwrapped: consumers wrap mod the link pitch for the sampling offset, and its
+/// quotient is the **link-identity shift** the chain warm-start needs.
 #[derive(Resource, Default)]
 pub(super) struct BeltPhase {
-    left: f32,
-    right: f32,
+    left: f64,
+    right: f64,
 }
 
 impl BeltPhase {
-    pub(super) fn get(&self, side: Side) -> f32 {
+    pub(super) fn get(&self, side: Side) -> f64 {
         match side {
             Side::Left => self.left,
             Side::Right => self.right,
         }
     }
-    pub(super) fn advance(&mut self, side: Side, ds: f32) {
+    fn set(&mut self, side: Side, phase: f64) {
         match side {
-            Side::Left => self.left += ds,
-            Side::Right => self.right += ds,
+            Side::Left => self.left = phase,
+            Side::Right => self.right = phase,
         }
     }
 }
@@ -248,7 +249,7 @@ pub(super) fn apply_belt_support_field(
         };
         let state = SideState {
             speed: belt.get(side),
-            phase: f64::from(phase.get(side)),
+            phase: phase.get(side),
         };
         let report = step_side(&side_input, state, affine, dt, &params, &field.0, |p| {
             forces.velocity_at_point(p)
@@ -267,7 +268,7 @@ pub(super) fn apply_belt_support_field(
             });
         }
         belt.set(side, report.state.speed);
-        phase.advance(side, state.speed * dt);
+        phase.set(side, report.state.phase);
     }
 }
 
@@ -381,13 +382,13 @@ pub(super) fn conform_belts_field_chain(
             ChainSideInput {
                 circles: &side_circles[0],
                 belt_speed: belt.get(Side::Left),
-                phase: phase.get(Side::Left),
+                phase: phase.get(Side::Left).rem_euclid(f64::from(chain_len)) as f32,
                 plane_x: -TRACK_HALF_WIDTH,
             },
             ChainSideInput {
                 circles: &side_circles[1],
                 belt_speed: belt.get(Side::Right),
-                phase: phase.get(Side::Right),
+                phase: phase.get(Side::Right).rem_euclid(f64::from(chain_len)) as f32,
                 plane_x: TRACK_HALF_WIDTH,
             },
         ],
@@ -666,7 +667,11 @@ pub(super) fn conform_belts_field(
             loop_pts.push(first);
         }
         let pitch = polyline_len(&loop_pts) / pin_belt.count.max(1) as f32;
-        let mut joints = resample(&loop_pts, pitch, phase.get(side).rem_euclid(pitch));
+        let mut joints = resample(
+            &loop_pts,
+            pitch,
+            phase.get(side).rem_euclid(f64::from(pitch)) as f32,
+        );
         joints.truncate(pin_belt.count);
         if joints.len() < 3 {
             continue;
@@ -738,7 +743,11 @@ pub(super) fn draw_sample_points(
             loop_pts.push(first);
         }
         let pitch = polyline_len(&loop_pts) / pin_belt.count.max(1) as f32;
-        let mut stations = resample(&loop_pts, pitch, phase.get(side).rem_euclid(pitch));
+        let mut stations = resample(
+            &loop_pts,
+            pitch,
+            phase.get(side).rem_euclid(f64::from(pitch)) as f32,
+        );
         stations.truncate(pin_belt.count);
         let n = stations.len();
         if n < 3 {
