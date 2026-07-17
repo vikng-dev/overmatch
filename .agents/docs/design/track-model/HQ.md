@@ -1488,6 +1488,41 @@ both.
   - AWAITING USER TEST: rope-vs-track verdict (pin friction + anisotropic damping are the two
     labeled knobs), sag vs the real spec, pinch immunity at speed.
 
+- 2026-07-17 — **Step 25: promotion foundation** (Yan's verdict on 24: chain "feels pretty dang
+  good"; direction: measure before the view call, wary of two models, many-tanks authoring).
+  Landed, in order:
+  1. **Perf probes + measurement**: chain 405 µs/substep-side, wrap 254 µs/frame (M4, crawl).
+  2. **Field broadphase** (`8289fe9`): per-block world AABBs + z-bucket grid, candidates-only
+     probes (duplicate-tolerant min-folds, fixed order). Chain → 170 µs/substep-side, wrap →
+     66 µs/frame; hull trajectory unchanged. New budget math: simulated-chain tank ≈ 41 ms
+     CPU/s (fixed-rate), route tank ≈ 4 ms/s @60 fps.
+  3. **Architecture doc** (`architecture.md`, v2 after a 10-finding codex adversarial review):
+     one route core / three consumers; chain = VIEW state on a **PresentedFrame** seam (post
+     rollback-smoothing, pre propagation, interpolated across substeps, `discontinuity` →
+     reseed); batched TerrainOracle over a shared TerrainMap (world.rs currently discards its
+     block transforms — refactor queued); MaterialLoop (pitch × count) authoritative with the
+     tensioner reconciling geometry (kills "spread the residual"); axle topology in the spec
+     (Tiger interleaved discs = one route circle + one suspension station per axle — coincident
+     circles break external_tangent); tier cost model per TANK (the v1 "2 ms budget" failed its
+     own arithmetic: 4 sim + 26 route ≈ 4.5 ms/frame solver-only), TrackRenderer instance-buffer
+     seam (~5k links at 30 tanks), BeltState = root-born replicated+predicted (NOT
+     local_rollback — v1 conflated the contracts). Tiger agenda: `tiger-authoring-agenda.md`
+     (tiger_1.glb surveyed: 8 wheels/side + sprocket/idler visual pivots present; static
+     Track_Strip/Treads meshes to hide). Yan defers the Tiger session until authoring starts
+     (he provides a proper link model).
+  4. **Core extraction** (`8c602d1`, `d5387a6`): `src/track/` is real — oracle.rs (TerrainOracle
+     trait + BlockField, reach-parameterized), route.rs (tagged route + tube queries + envelope
+     geometry), chain.rs (ChainState/ChainParams/StepReport — the step-24 solver as a pure
+     fixed-clock stepper, T-34 constants → params), wheels.rs (lift target + implicit ease).
+     The sandbox is consumer #1: model4's chain view and wheel articulation are thin ECS
+     adapters (RouteChain resource wraps ChainState); ChainSideMemory lost its slice-3 fields
+     (old models 2/3 chain untouched). Harness parity within run noise (harness itself is NOT
+     bit-repeatable: throttle smoothing reads real frame time — worth fixing if bit-parity
+     gates are ever wanted). Startup hitch now visibly reseeds once (designed overrun path).
+  - NEXT (phase A remainder): TerrainMap refactor in world.rs → view_plugin (PresentedFrame,
+    tier policy, no-slip belt derivation, link instancing) → hide legacy track meshes → Tiger
+    authoring session.
+
 ## Open questions / parking lot
 
 - **Lateral link rigidity (Yan, 2026-07-16, open tab)**: a real shoe is ~perfectly stiff
