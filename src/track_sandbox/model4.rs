@@ -208,7 +208,8 @@ const CHAIN_REBASE_WINDOW: f32 = 0.35;
 pub(super) fn apply_belt_support_field(
     mut hull: Query<(&GlobalTransform, Forces), With<Hull>>,
     field: Res<TerrainField>,
-    input: Res<DriveInput>,
+    raw: Res<RawDriveInput>,
+    mut shaped: ResMut<ShapedDrive>,
     time: Res<Time>,
     pin_belt: Res<PinBelt>,
     mut belt: ResMut<BeltSpeed>,
@@ -222,6 +223,10 @@ pub(super) fn apply_belt_support_field(
     let to_local = affine.inverse();
     contacts.0.clear(); // the sole contact system this tick
     let dt = time.delta_secs();
+    // The shared command seam, on the fixed tick exactly like the game adapter: slew the raw
+    // intent, then mix per side.
+    shaped.0 = crate::track::drive::shape_drive(shaped.0, raw.0, dt);
+    let side_commands = shaped.0.side_commands();
 
     // The fixed advected ring on the pin line, closed for the core.
     let mut loop_pts = belt_loop(&pin_circles());
@@ -236,10 +241,9 @@ pub(super) fn apply_belt_support_field(
             Side::Right => TRACK_HALF_WIDTH,
         };
         let command = match side {
-            Side::Left => input.throttle + input.steer,
-            Side::Right => input.throttle - input.steer,
-        }
-        .clamp(-1.0, 1.0);
+            Side::Left => side_commands[0],
+            Side::Right => side_commands[1],
+        };
 
         let side_input = SideInput {
             loop_pts: &loop_pts,

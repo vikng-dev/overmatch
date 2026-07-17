@@ -170,19 +170,21 @@ pub(super) fn harness_setup(
     commands.insert_resource(HarnessLog { tick: 0, writer });
 }
 
-/// Drive the scenario: zero input through warmup, then the constant scripted throttle. Runs in
+/// Drive the scenario: zero input through warmup, then the scripted RAW command — the shared
+/// fixed-tick shaper slews it exactly as it slews a player's keys, so the ramp is part of the
+/// tested path (a `t2` reversal takes the same ~32 ticks a keyboard reversal does). Runs in
 /// FixedUpdate BEFORE the force systems, so phase boundaries (warmup end, `t2`) land on exact
 /// ticks regardless of frame pacing — one half of the harness's bit-repeatability (the other is
 /// the manual-duration clock). It overrides whatever `read_drive_input` wrote last frame.
 pub(super) fn harness_drive(
     harness: Res<Harness>,
     log: Option<Res<HarnessLog>>,
-    mut input: ResMut<DriveInput>,
+    mut input: ResMut<RawDriveInput>,
 ) {
     let Some(log) = log else {
         return;
     };
-    (input.throttle, input.steer) = if log.tick < harness.warmup {
+    (input.0.throttle, input.0.steer) = if log.tick < harness.warmup {
         (0.0, 0.0)
     } else if log.tick >= harness.t2 {
         (harness.throttle2, harness.steer2)
@@ -196,6 +198,8 @@ pub(super) fn harness_record(
     harness: Res<Harness>,
     log: Option<ResMut<HarnessLog>>,
     hull: Single<(&Transform, &LinearVelocity, &AngularVelocity), With<Hull>>,
+    raw: Res<RawDriveInput>,
+    shaped: Res<ShapedDrive>,
     contacts: Res<BeltContacts>,
     belt: Res<BeltSpeed>,
     phase: Res<BeltPhase>,
@@ -249,7 +253,7 @@ pub(super) fn harness_record(
     let k = log.tick;
     writeln!(
         log.writer,
-        "{{\"t\":\"k\",\"k\":{k},\"hull\":{},\"pitch\":{:.5},\"yaw\":{:.5},\"yawrate\":{:.5},\"vel\":{},\"belt\":{},\"phase\":{},\"sup\":{:.0},\"wheels\":[{}],\"contacts\":[{}],\"chain\":[{}]}}",
+        "{{\"t\":\"k\",\"k\":{k},\"hull\":{},\"pitch\":{:.5},\"yaw\":{:.5},\"yawrate\":{:.5},\"raw\":{},\"shaped\":{},\"vel\":{},\"belt\":{},\"phase\":{},\"sup\":{:.0},\"wheels\":[{}],\"contacts\":[{}],\"chain\":[{}]}}",
         arr([
             transform.translation.x,
             transform.translation.y,
@@ -258,6 +262,8 @@ pub(super) fn harness_record(
         pitch,
         yaw,
         ang.0.y,
+        arr([raw.0.throttle, raw.0.steer]),
+        arr([shaped.0.throttle, shaped.0.steer]),
         arr([lin.0.x, lin.0.y, lin.0.z]),
         arr([belt.left, belt.right]),
         arr([phase.get(Side::Left) as f32, phase.get(Side::Right) as f32]),

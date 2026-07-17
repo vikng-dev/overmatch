@@ -14,8 +14,8 @@
 //! - `Drive` capability gates the COMMAND, not the contact model: a dead engine still has
 //!   kinetic grip (the slip law keeps resisting motion — though it creeps on slopes, ADR-0025);
 //!   it just cannot thrust. The cut is not instant: the lost capability retargets the command
-//!   slew, so thrust fades over ~1/[`INPUT_RAMP`] s — deliberate, the same shaping as a
-//!   released key, and what makes capability loss/recovery feel mechanical rather than binary.
+//!   slew, so thrust fades over ~1/[`super::drive::DRIVE_SLEW_PER_SECOND`] s — deliberate, the
+//!   same shaping as a released key, making capability loss/recovery feel mechanical.
 
 use avian3d::prelude::{Forces, Position, ReadRigidBodyForces, Rotation, WriteRigidBodyForces};
 use bevy::math::{Affine3A, Vec2};
@@ -30,6 +30,7 @@ use crate::damage::{
 use crate::state::{GameplaySet, SimPhase};
 use crate::tank::{Tank, TrackSide};
 
+use super::drive::{DriveAxes, shape_drive};
 use super::forces::{BeltContact, ForceParams, SideInput, SideState, step_side};
 use super::route::build_route;
 use super::terrain::TrackField;
@@ -41,11 +42,6 @@ const MU: f32 = 0.9;
 /// lets a heavy tank pivot at all.
 const LATERAL_GRIP_RATIO: f32 = 0.55;
 const SLIP_SATURATION: f32 = 0.4;
-/// Command slew (per second): the vehicle's input shaping, SEPARATE from the belt governor —
-/// folding them changes keyboard feel and damage-recovery semantics (codex phase-B #9).
-/// Provenance: adopted into the sandbox reference untuned; a playtest feel dial, not a
-/// physics constant.
-const INPUT_RAMP: f32 = 4.0;
 
 /// Per-tank tracked-drivetrain sim state: owner-predicted, replicated to remotes, rolled
 /// back — the `LinearVelocity` registration pattern in `net::protocol` (replicate + predict +
@@ -53,7 +49,8 @@ const INPUT_RAMP: f32 = 4.0;
 #[derive(Component, Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct TrackDrive {
     /// The shaped drive signal in [−1, 1]: `TankCommand` targets slewed through
-    /// [`INPUT_RAMP`]. Sim state (not command) so every tank responds with the same feel.
+    /// [`super::drive::shape_drive`]. Sim state (not command) so every tank responds with the
+    /// same feel.
     pub throttle: f32,
     pub steer: f32,
     /// Per-side belt state, `[left, right]`.
@@ -163,15 +160,6 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
     });
 }
 
-/// Move `current` toward `target` by at most `step` — the command slew.
-fn approach(current: f32, target: f32, step: f32) -> f32 {
-    if current < target {
-        (current + step).min(target)
-    } else {
-        (current - step).max(target)
-    }
-}
-
 /// The drive step: shape the command, run each side's belt force model at the tick-truth
 /// pose, apply the returned forces in report order, commit the new belt state.
 fn apply_track_forces(
@@ -204,27 +192,32 @@ fn apply_track_forces(
         &mut tanks
     {
         // Drive gates THRUST, not grip: a dead driver/engine/transmission retargets the
-        // command slew to zero (a ~1/INPUT_RAMP fade, see the module doc) while the full
-        // contact model keeps running, so the tracks keep their kinetic grip.
+        // command slew to zero (a fade over ~1/DRIVE_SLEW_PER_SECOND, see the module doc)
+        // while the full contact model keeps running, so the tracks keep their kinetic grip.
         let drive_ok = capability_available(tank_volumes, tank_caps, Capability::Drive, &volumes);
-        let (target_throttle, target_steer) = if drive_ok {
-            (command.throttle, command.steer)
+        let target = if drive_ok {
+            DriveAxes {
+                throttle: command.throttle,
+                steer: command.steer,
+            }
         } else {
-            (0.0, 0.0)
+            DriveAxes::default()
         };
-        let step = INPUT_RAMP * dt;
-        drive.throttle = approach(drive.throttle, target_throttle, step);
-        drive.steer = approach(drive.steer, target_steer, step);
+        let shaped = shape_drive(
+            DriveAxes {
+                throttle: drive.throttle,
+                steer: drive.steer,
+            },
+            target,
+            dt,
+        );
+        drive.throttle = shaped.throttle;
+        drive.steer = shaped.steer;
+        let side_commands = shaped.side_commands();
 
         let affine = Affine3A::from_rotation_translation(rot.0, pos.0);
 
-        for si in 0..2 {
-            // Additive differential: steer adds to the left track, subtracts from the right.
-            let cmd = match si {
-                0 => drive.throttle + drive.steer,
-                _ => drive.throttle - drive.steer,
-            }
-            .clamp(-1.0, 1.0);
+        for (si, &cmd) in side_commands.iter().enumerate() {
             let plane_x = if si == 0 { -gear.plane_x } else { gear.plane_x };
             let input = SideInput {
                 loop_pts: &gear.loop_pts,

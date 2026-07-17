@@ -163,8 +163,6 @@ const MU: f32 = 0.9;
 /// Lateral fraction of the friction ellipse — a track's turning-resistance coefficient vs its
 /// longitudinal grip; the lower sideways budget is what lets the rig pivot (Wong/Merritt skid-steer).
 const LATERAL_GRIP_RATIO: f32 = 0.55;
-/// Input ramp (per second): smooths the binary keys into an analog throttle/steer signal.
-const DRIVE_RAMP: f32 = 4.0;
 
 // --- Wheels carry NO force: the belt is the *sole* ground-contact system (carries the tank,
 // tractions, does walls/gaps). The VISUAL data direction is wheels-first
@@ -331,7 +329,8 @@ pub fn plugin(app: &mut App) {
         .init_resource::<BeltContacts>()
         .init_resource::<Paused>()
         .init_resource::<ResetSpot>()
-        .init_resource::<DriveInput>()
+        .init_resource::<RawDriveInput>()
+        .init_resource::<ShapedDrive>()
         .init_resource::<BeltSpeed>()
         .init_resource::<BeltPhase>()
         .init_resource::<ConformedBelts>()
@@ -599,13 +598,18 @@ const RESET_SPOTS: [(f32, &str); 4] = [
     ),
 ];
 
-/// Smoothed driver intent in [-1, 1]: throttle (↑/↓) and steer (→/←). Arrow keys, so WASD stays the
-/// free-fly camera.
+/// RAW driver intent in [-1, 1]: throttle (↑/↓) and steer (→/←), unshaped — arrow keys (WASD
+/// stays the free-fly camera), or the harness script. The FIXED-tick force adapter slews it
+/// through the shared [`crate::track::drive::shape_drive`] (same seam as the game), so the
+/// harness tests the slew as part of the path.
 #[derive(Resource, Default)]
-struct DriveInput {
-    throttle: f32,
-    steer: f32,
-}
+struct RawDriveInput(crate::track::drive::DriveAxes);
+
+/// The slewed drive state — the sandbox's analogue of the game's `TrackDrive.throttle/steer`,
+/// advanced on the FIXED tick by the force adapter (never in `Update`: frame-rate-independent
+/// shaping is half of what makes harness runs bit-repeatable).
+#[derive(Resource, Default)]
+struct ShapedDrive(crate::track::drive::DriveAxes);
 
 /// Per-track belt surface speed (m/s, + = drives the tank forward): the integrated state of the
 /// slip model. Positive when the track is laying ground backward under the hull.
@@ -1380,20 +1384,19 @@ const REF_COLOR: Color = Color::srgb(0.7, 0.5, 1.0);
 /// at rest is ~6 kN over ~45 grounded stations.
 const FORCE_VIZ_SCALE: f32 = 1.0 / 20_000.0;
 
-/// Read the driver's arrow-key intent into a smoothed throttle/steer signal. Zeroed while the cursor
-/// is free (paused / unfocused) so a released window doesn't keep driving.
+/// Read the driver's arrow-key intent as the RAW axes. Zeroed while the cursor is free
+/// (paused / unfocused) so a released window doesn't keep driving.
 fn read_drive_input(
     keys: Res<ButtonInput<KeyCode>>,
-    time: Res<Time>,
     cursors: Query<&CursorOptions>,
-    mut input: ResMut<DriveInput>,
+    mut input: ResMut<RawDriveInput>,
 ) {
     let locked = cursors
         .single()
         .map(|c| c.grab_mode == CursorGrabMode::Locked)
         .unwrap_or(false);
     let axis = |pos, neg| keys.pressed(pos) as i8 as f32 - keys.pressed(neg) as i8 as f32;
-    let (target_throttle, target_steer) = if locked {
+    (input.0.throttle, input.0.steer) = if locked {
         (
             axis(KeyCode::ArrowUp, KeyCode::ArrowDown),
             axis(KeyCode::ArrowRight, KeyCode::ArrowLeft),
@@ -1401,18 +1404,6 @@ fn read_drive_input(
     } else {
         (0.0, 0.0)
     };
-    let step = DRIVE_RAMP * time.delta_secs();
-    input.throttle = approach(input.throttle, target_throttle, step);
-    input.steer = approach(input.steer, target_steer, step);
-}
-
-/// Move `current` toward `target` by at most `step`.
-fn approach(current: f32, target: f32, step: f32) -> f32 {
-    if current < target {
-        (current + step).min(target)
-    } else {
-        (current - step).max(target)
-    }
 }
 
 /// Free-fly the inspection camera. Mouse look (yaw/pitch read from the current rotation), WASD on the
