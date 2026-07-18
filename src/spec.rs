@@ -225,7 +225,7 @@ pub struct TrackSpec {
 
 /// Per-track powertrain: constant-power engine curve under a low-speed force cap, with a
 /// governor chasing `command × max_speed` against the reflected belt+drivetrain inertia.
-#[derive(Deserialize, Clone, Copy)]
+#[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct PowertrainSpec {
     /// Top belt speed (m/s).
@@ -238,6 +238,76 @@ pub struct PowertrainSpec {
     pub governor_gain: f32,
     /// Reflected belt + drivetrain inertia (kg).
     pub inertia: f32,
+    /// The DECLARED transmission (phase 2.5, transmission-design.md): engine torque curve,
+    /// gear ladders, steering table, brakes, architecture. `default` (absent) means the
+    /// vehicle only has the legacy symmetric governor — the RON stays valid without it and
+    /// every MP composition runs `Governor` regardless (the regenerative adapters are gated
+    /// to the offline composition and the sandbox under REV 13).
+    #[serde(default)]
+    pub transmission: Option<TransmissionSpec>,
+}
+
+/// Which regenerative adapter the vehicle's declared transmission is (the `Governor` parity
+/// mode is expressed by OMITTING the whole block, never authored).
+#[derive(Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TransmissionArchitecture {
+    /// Continuous regenerative hybrid (design menu C/D) — the arcade-honest default.
+    Hybrid,
+    /// Fixed-radius geared regenerative steering (the Tiger's L600, design menu B).
+    FixedRadii,
+}
+
+/// The declared drivetrain block. Authoring rule (tiger-transmission-data.md): per-gear
+/// SPEEDS are the anchors; total reductions derive at build time against the spec's own
+/// sprocket radius, so the ladder survives the open 19-vs-20-tooth sprocket discrepancy.
+#[derive(Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct TransmissionSpec {
+    pub architecture: TransmissionArchitecture,
+    pub engine: EngineSpec,
+    pub gearbox: GearboxSpec,
+    pub steering: SteeringSpec,
+    /// Per-side service/parking brake capacity at the sprocket (N).
+    pub brake_force: f32,
+}
+
+/// The engine's declared envelope: a piecewise-linear torque curve under a fuel governor.
+#[derive(Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct EngineSpec {
+    pub idle_rpm: f32,
+    /// Fuel-governor rpm — the fleet operating condition (Tiger: 2500 from Nov 1943).
+    pub governed_rpm: f32,
+    /// The rpm the per-gear speed anchors are quoted at (Tiger: 3000).
+    pub rated_rpm: f32,
+    /// `(rpm, N·m)` authoring points, ascending rpm.
+    pub torque_curve: Vec<(f32, f32)>,
+}
+
+/// The gear ladders as authored per-gear top belt speeds (km/h) at `rated_rpm`, plus the
+/// auto-shift rpm bands (hysteresis: the band gap must exceed one ratio step or the box hunts).
+#[derive(Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct GearboxSpec {
+    pub forward_speeds_kmh: Vec<f32>,
+    pub reverse_speeds_kmh: Vec<f32>,
+    pub shift_up_rpm: f32,
+    pub shift_down_rpm: f32,
+}
+
+/// The steering member: per-gear fixed radii (the L600's two detents; the hybrid interpolates
+/// the tight column continuously), its force capacity, and the regenerative power path.
+#[derive(Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct SteeringSpec {
+    /// Per FORWARD gear `(R_tight, R_wide)` turn radii (m); reverse mirrors the low gears.
+    pub radii: Vec<(f32, f32)>,
+    /// Steering-member force capacity on the belt-difference axis (N).
+    pub capacity: f32,
+    /// Brake-gated neutral-turn fraction of the 1st-gear tight ratio (L600 marginal pivot).
+    pub neutral_fraction: f32,
+    /// Inner→outer recirculation efficiency η.
+    pub recirculation: f32,
 }
 
 /// The belt-support penalty law, per metre of contacting belt.
@@ -405,6 +475,77 @@ impl TankSpec {
                 return Err(format!("track.{field} must be finite (got {value})").into());
             }
         }
+        // The declared transmission (optional block): values that parse but can never spin a
+        // gearbox — empty ladders index out, a radii/gear length mismatch mis-keys the
+        // steering table, a non-positive speed or radius reaches a division, and inverted
+        // shift bands hunt on every tick.
+        if let Some(tr) = &t.powertrain.transmission {
+            let gb = &tr.gearbox;
+            if gb.forward_speeds_kmh.is_empty() || gb.reverse_speeds_kmh.is_empty() {
+                return Err("transmission.gearbox ladders must be non-empty".into());
+            }
+            if tr.steering.radii.len() != gb.forward_speeds_kmh.len() {
+                return Err(format!(
+                    "transmission.steering.radii must have one (tight, wide) pair per forward \
+                     gear ({} pairs for {} gears)",
+                    tr.steering.radii.len(),
+                    gb.forward_speeds_kmh.len()
+                )
+                .into());
+            }
+            for (field, ok) in [
+                (
+                    "gearbox speeds",
+                    gb.forward_speeds_kmh
+                        .iter()
+                        .chain(&gb.reverse_speeds_kmh)
+                        .all(|v| v.is_finite() && *v > 0.0),
+                ),
+                (
+                    "steering.radii",
+                    tr.steering
+                        .radii
+                        .iter()
+                        .all(|(a, b)| a.is_finite() && b.is_finite() && *a > 0.0 && *b > 0.0),
+                ),
+                (
+                    "engine.torque_curve",
+                    tr.engine.torque_curve.len() >= 2
+                        && tr.engine.torque_curve.windows(2).all(|w| w[0].0 < w[1].0)
+                        && tr.engine.torque_curve.iter().all(|(r, tq)| {
+                            r.is_finite() && tq.is_finite() && *r > 0.0 && *tq >= 0.0
+                        }),
+                ),
+                (
+                    "engine rpms",
+                    [
+                        tr.engine.idle_rpm,
+                        tr.engine.governed_rpm,
+                        tr.engine.rated_rpm,
+                    ]
+                    .iter()
+                    .all(|v| v.is_finite() && *v > 0.0),
+                ),
+                (
+                    "gearbox shift bands",
+                    gb.shift_up_rpm.is_finite()
+                        && gb.shift_down_rpm.is_finite()
+                        && gb.shift_down_rpm > 0.0
+                        && gb.shift_down_rpm < gb.shift_up_rpm,
+                ),
+                (
+                    "steering capacity/efficiency + brake_force",
+                    tr.steering.capacity > 0.0
+                        && (0.0..=1.0).contains(&tr.steering.recirculation)
+                        && (0.0..=1.0).contains(&tr.steering.neutral_fraction)
+                        && tr.brake_force > 0.0,
+                ),
+            ] {
+                if !ok {
+                    return Err(format!("track.powertrain.transmission: invalid {field}").into());
+                }
+            }
+        }
         for (name, weapon) in &self.weapons {
             match weapon.fire_mode {
                 FireMode::Single { reload_secs } => {
@@ -524,6 +665,26 @@ mod tests {
         // could not break a neutral steer under the element grip law).
         assert_eq!(spec.track.powertrain.force, 250_000.0);
         assert_eq!(spec.track.support.stiffness_per_m, 1_460_000.0);
+        // The declared transmission block (phase 2.5 — DELIBERATE pin update with the new
+        // powertrain field): the Tiger authors the L600 fixed-radius regenerative box from
+        // the anchored tables (tiger-transmission-data.md). Spot-check the anchors: the 8F/4R
+        // speed ladder ends at 45.4 km/h @ 3000, the radii table is anchored at both corners
+        // (3.44 m F1-tight, 165 m F8-wide), and the fleet governor sits at 2500 rpm.
+        let tr = spec
+            .track
+            .powertrain
+            .transmission
+            .as_ref()
+            .expect("the Tiger authors a transmission block");
+        assert_eq!(tr.architecture, TransmissionArchitecture::FixedRadii);
+        assert_eq!(tr.engine.governed_rpm, 2500.0);
+        assert_eq!(tr.engine.rated_rpm, 3000.0);
+        assert_eq!(tr.gearbox.forward_speeds_kmh.len(), 8);
+        assert_eq!(tr.gearbox.reverse_speeds_kmh.len(), 4);
+        assert_eq!(*tr.gearbox.forward_speeds_kmh.last().unwrap(), 45.4);
+        assert_eq!(tr.steering.radii[0].0, 3.44);
+        assert_eq!(tr.steering.radii[7].1, 165.0);
+        assert_eq!(tr.brake_force, 250_000.0);
         // Track: the material loop is authored exact (pitch × count = the immutable belt
         // length); the sprocket's tooth count locks link advance to tooth advance.
         assert_eq!(spec.track.pitch, 0.130);
