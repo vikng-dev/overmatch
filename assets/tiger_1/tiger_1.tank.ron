@@ -40,6 +40,68 @@ TankSpec(
             force: 250_000.0,
             governor_gain: 60_000.0,
             inertia: 16_000.0,
+            // The DECLARED drivetrain (phase 2.5) — authored from the anchored tables in
+            // .agents/docs/design/track-model/tiger-transmission-data.md. Runs ONLY in the
+            // offline composition / sandbox (REV 13: MP stays on the governor above).
+            // Architecture: "wheel controlled hydraulic operated regenerative" [ANCHOR] — the
+            // L600 fixed-radius adapter is the historically right one.
+            transmission: (
+                architecture: FixedRadii,
+                engine: (
+                    // HL230 P45. idle INFERRED (~600, typical for the engine class);
+                    // governed 2500 = the fleet condition from Nov 1943 [ANCHOR]; per-gear
+                    // speed anchors are quoted @ 3000 [ANCHOR].
+                    idle_rpm: 600.0,
+                    governed_rpm: 2500.0,
+                    rated_rpm: 3000.0,
+                    // (rpm, N·m): 800→1300 INFERRED (~0.70 × peak); 2100→1850 ANCHOR
+                    // (medium); 2500→1686 DERIVED (600 PS); 3000→1639 DERIVED (700 PS).
+                    torque_curve: [(800.0, 1300.0), (2100.0, 1850.0), (2500.0, 1686.0), (3000.0, 1639.0)],
+                ),
+                gearbox: (
+                    // OLVAR OG 40 12 16, 8F/4R [ANCHOR]. Per-gear top speeds @ 3000 rpm
+                    // [ANCHOR — hamby / Jentz]; R1–R4 mirror F1–F4 [ANCHOR]. Reductions
+                    // derive at build against the spec's own sprocket radius (the
+                    // 19-vs-20-tooth discrepancy rule). F8 @ governed 2500 → 10.48 m/s,
+                    // matching max_speed 10.5.
+                    forward_speeds_kmh: [2.8, 4.3, 6.2, 9.2, 14.1, 20.9, 30.5, 45.4],
+                    reverse_speeds_kmh: [2.8, 4.3, 6.2, 9.2],
+                    // Auto-shift bands (INFERRED policy): up at 92% of governed; the largest
+                    // ratio step is 1.54, so post-upshift rpm ≈ 1497 stays above the 1400
+                    // down band — hysteresis by construction, no hunting.
+                    shift_up_rpm: 2300.0,
+                    shift_down_rpm: 1400.0,
+                ),
+                steering: (
+                    // (R_tight, R_wide) per forward gear (m): anchored at BOTH corners
+                    // (3.44 m F1-tight, 165 m F8-wide), R ∝ 1/G within each step, tight:wide
+                    // = 2.958 per gear [DERIVED — tiger-transmission-data.md table].
+                    radii: [
+                        (3.44,  10.2),
+                        (5.28,  15.6),
+                        (7.62,  22.5),
+                        (11.30, 33.4),
+                        (17.32, 51.2),
+                        (25.68, 76.0),
+                        (37.47, 110.8),
+                        (55.78, 165.0),
+                    ],
+                    // Steering-member force capacity on the belt-difference axis: the
+                    // per-output 250 kN datum (the grip-limit gearing rule) — INFERRED
+                    // sizing, no published steering-member torque rating reachable.
+                    capacity: 250_000.0,
+                    // Marginal brake-gated neutral turn (restoration-tier synthesis:
+                    // "technically yes, advisable no") — INFERRED fraction.
+                    neutral_fraction: 0.75,
+                    // Mechanical recirculation efficiency ~0.9 — INFERRED.
+                    recirculation: 0.9,
+                ),
+                // Per-side brake capacity at the sprocket: brake ≈ traction limit (the SOUND
+                // sizing rule, Rabiee friction cap — a bigger brake just locks the track);
+                // μ·W/2 ≈ 252 kN here. The 20° slope load ≈ 95.6 kN/side sits well inside,
+                // so hill-hold is capacity-tested, not infinite.
+                brake_force: 250_000.0,
+            ),
         ),
         support: (
             stiffness_per_m: 1_460_000.0,

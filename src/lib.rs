@@ -98,6 +98,53 @@ mod ui_font;
 mod vfx;
 mod world;
 
+#[cfg(test)]
+mod offline_feel_tests {
+    use super::*;
+    use track::sim::{TankTransmission, TransmissionFeelTest};
+    use track::transmission::{TransmissionMode, TransmissionState};
+
+    /// The offline `T` dial: each press advances governor → hybrid → L600 → governor and
+    /// resets every tank's transmission state to a freshly-constructed one (the mode flip
+    /// must never inherit another adapter's gear/shift leftovers). This is the scripted
+    /// stand-in for the interactive cycle proof — macOS blocks synthetic keystrokes into the
+    /// windowed launch, so the cycle path is pinned here instead.
+    #[test]
+    fn t_key_cycles_transmission_mode_and_resets_state() {
+        let mut app = App::new();
+        app.insert_resource(TransmissionFeelTest(TransmissionMode::FixedRadii));
+        app.init_resource::<ButtonInput<KeyCode>>();
+        app.add_systems(Update, cycle_transmission_feel);
+        let tank = app
+            .world_mut()
+            .spawn(TankTransmission(TransmissionState {
+                gear: 5,
+                shift_ticks: 3,
+                steer_step: 2,
+                reverse: true,
+            }))
+            .id();
+
+        let press = |app: &mut App| {
+            let mut input = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+            input.clear();
+            input.release(KeyCode::KeyT);
+            input.clear();
+            input.press(KeyCode::KeyT);
+            app.update();
+            app.world().resource::<TransmissionFeelTest>().0
+        };
+        assert_eq!(press(&mut app), TransmissionMode::Governor);
+        assert_eq!(
+            app.world().get::<TankTransmission>(tank).unwrap().0,
+            TransmissionState::default(),
+            "a mode flip must reset the transmission state"
+        );
+        assert_eq!(press(&mut app), TransmissionMode::Hybrid);
+        assert_eq!(press(&mut app), TransmissionMode::FixedRadii);
+    }
+}
+
 /// Marks a network-client replica. Ballistics uses it to suppress authority-only damage and impulse
 /// writes while retaining cosmetic flight and impacts.
 #[derive(Resource, Default)]
@@ -368,7 +415,9 @@ pub fn run_offline() {
             })
             .set(WindowPlugin {
                 primary_window: Some(Window {
-                    title: "Overmatch — offline".into(),
+                    // ASCII hyphen: `lib.rs` is scanned by the ui_ascii guard now that the
+                    // offline feel label spawns `Text` here (default-font surface).
+                    title: "Overmatch - offline".into(),
                     ..default()
                 }),
                 ..default()
@@ -379,5 +428,76 @@ pub fn run_offline() {
     app.add_plugins(GamePlugin);
     // The offline element-grip gate — latched at process start, ONLY here (see the resource doc).
     app.init_resource::<track::sim::ElementGripFeelTest>();
+    // The offline transmission feel test (phase 2.5): default the Tiger's authored
+    // architecture (L600 fixed-radius regenerative — per-vehicle SPEC eventually; the
+    // resource is the interim dial). `T` cycles governor → hybrid → L600 live; the mode is
+    // logged AND shown on a fixed screen line so a capture always states what it ran.
+    app.insert_resource(track::sim::TransmissionFeelTest(
+        track::transmission::TransmissionMode::FixedRadii,
+    ));
+    app.add_systems(Startup, spawn_transmission_feel_label);
+    app.add_systems(Update, cycle_transmission_feel);
     app.run();
+}
+
+/// Marker for the offline transmission-mode screen line.
+#[derive(Component)]
+struct TransmissionFeelLabel;
+
+/// The cheapest honest on-screen statement of the active drivetrain (offline only): one
+/// absolute-positioned text line, top-right — the game's debug overlay is gizmo-only, so a
+/// bare `Text` node (Bevy's built-in font) is the minimal surface that keeps the mode visible
+/// in every screenshot/feel note.
+fn spawn_transmission_feel_label(
+    mut commands: Commands,
+    feel: Res<track::sim::TransmissionFeelTest>,
+) {
+    info!("offline transmission mode → {} (T cycles)", feel.0.label());
+    commands.spawn((
+        TransmissionFeelLabel,
+        Text::new(String::new()),
+        TextFont {
+            font_size: FontSize::Px(14.0),
+            ..default()
+        },
+        TextColor(Color::srgb(0.8, 0.75, 0.5)),
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(8.0),
+            right: Val::Px(12.0),
+            ..default()
+        },
+    ));
+}
+
+/// `T` cycles the offline transmission mode (governor → hybrid → L600). Every tank's
+/// [`track::sim::TankTransmission`] resets so the incoming adapter starts from a constructed
+/// state (gear 1, no shift in flight) instead of another mode's leftovers.
+fn cycle_transmission_feel(
+    keys: Option<Res<ButtonInput<KeyCode>>>,
+    feel: Option<ResMut<track::sim::TransmissionFeelTest>>,
+    mut states: Query<&mut track::sim::TankTransmission>,
+    label: Query<&mut Text, With<TransmissionFeelLabel>>,
+) {
+    use track::transmission::TransmissionMode;
+    let Some(mut feel) = feel else {
+        return;
+    };
+    let cycled = keys.is_some_and(|keys| keys.just_pressed(KeyCode::KeyT));
+    if cycled {
+        feel.0 = match feel.0 {
+            TransmissionMode::Governor => TransmissionMode::Hybrid,
+            TransmissionMode::Hybrid => TransmissionMode::FixedRadii,
+            TransmissionMode::FixedRadii => TransmissionMode::Governor,
+        };
+        for mut state in &mut states {
+            *state = track::sim::TankTransmission::default();
+        }
+        info!("offline transmission mode → {}", feel.0.label());
+    }
+    if cycled || feel.is_added() {
+        for mut text in label {
+            text.0 = format!("trans [T]: {}", feel.0.label());
+        }
+    }
 }

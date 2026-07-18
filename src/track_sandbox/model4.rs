@@ -31,8 +31,13 @@
 use super::*;
 
 use crate::track::chain::{ChainInput, ChainParams, ChainSideInput, ChainState};
-use crate::track::forces::{ForceParams, SideInput, SideState, phase_decompose, step_side};
+use crate::track::forces::{
+    ForceParams, SideInput, SideReport, SideState, contact_side, phase_decompose,
+};
 use crate::track::oracle::{BlockField, TerrainOracle};
+use crate::track::transmission::{
+    self, TransmissionAuthoring, TransmissionInput, TransmissionParams,
+};
 use crate::track::wheels::{WheelParams, wheel_lift_step, wheel_lift_target};
 
 /// The sandbox's terrain resource: the track core's [`BlockField`] behind the sandbox's fixed
@@ -221,7 +226,15 @@ pub(super) fn apply_belt_support_field(
     mut grip: ResMut<BeltGrip>,
     mut grip_elements: ResMut<BeltGripElements>,
     grip_on: Res<GripSwitch>,
+    // One tuple param: the function is at Bevy's 16-arg SystemParam ceiling.
+    transmission_params: (
+        Res<TransSwitch>,
+        Res<T34Transmission>,
+        ResMut<TransState>,
+        ResMut<TransTelemetry>,
+    ),
 ) {
+    let (trans, t34, mut trans_state, mut telemetry) = transmission_params;
     let Ok((hull_pos, hull_rot, mut forces)) = hull.single_mut() else {
         return;
     };
@@ -243,6 +256,13 @@ pub(super) fn apply_belt_support_field(
     }
     let params = force_params(grip_on.0);
 
+    // Phase 1 — both sides' contact passes at their pre-tick belt speeds (transmission-design
+    // §2 scheduling: the joint drivetrain needs both reactions before either belt
+    // integrates). Force application stays all-left-then-all-right below; within a tick
+    // application never feeds back into the velocity field, so evaluating R's contacts
+    // before applying L's forces is exact — the governor parity captures pin it byte-level.
+    let mut reports: [SideReport; 2] = [SideReport::default(), SideReport::default()];
+    let mut live = [false; 2];
     for side in Side::ALL {
         let side_input = SideInput {
             loop_pts: &loop_pts,
@@ -259,7 +279,7 @@ pub(super) fn apply_belt_support_field(
             GripMode::Elements => Some(grip_elements.0.get_mut(side)),
             _ => None,
         };
-        let report = step_side(
+        let (report, ok) = contact_side(
             &side_input,
             state,
             affine,
@@ -269,6 +289,34 @@ pub(super) fn apply_belt_support_field(
             |p| forces.velocity_at_point(p),
             elements,
         );
+        reports[side.index()] = report;
+        live[side.index()] = ok;
+    }
+
+    // Phase 2 — ONE joint drivetrain solve. The governor adapter runs the legacy belt math
+    // verbatim; the regenerative adapters consume the T-34 lab tables.
+    let tr = transmission::step(
+        trans.0,
+        &params,
+        Some(&t34.0),
+        &mut trans_state.0,
+        &TransmissionInput {
+            throttle: shaped.0.throttle,
+            steer: shaped.0.steer,
+            side_commands,
+            speeds: [belt.get(Side::Left), belt.get(Side::Right)],
+            reactions: [reports[0].belt_reaction, reports[1].belt_reaction],
+            dt,
+        },
+    );
+    telemetry.0 = match trans.0 {
+        transmission::TransmissionMode::Governor => None,
+        _ => Some(tr),
+    };
+
+    // Phase 3 — apply forces in the same per-side report order as ever, commit the state.
+    for (si, report) in reports.into_iter().enumerate() {
+        let side = Side::ALL[si];
         // Apply in report order — accumulation order is part of bit-reproducibility.
         for app in &report.apps {
             forces.apply_force_at_point(app.force, app.point);
@@ -286,11 +334,66 @@ pub(super) fn apply_belt_support_field(
                 traction: c.traction,
             });
         }
-        *dynamics.engine.get_mut(side) = report.engine_force;
+        *dynamics.engine.get_mut(side) = tr.forces[si];
         *dynamics.reaction.get_mut(side) = report.belt_reaction;
         *grip.0.get_mut(side) = report.state.grip;
-        belt.set(side, report.state.speed);
-        phase.set(side, report.state.phase);
+        if live[si] {
+            // Phase advects at the PRE-update speed, exactly like the legacy tail.
+            let pre = belt.get(side);
+            let advected = phase.get(side) + f64::from(pre * dt);
+            belt.set(side, tr.next_speeds[si]);
+            phase.set(side, advected);
+        }
+    }
+}
+
+/// The T-34 lab vehicle's DECLARED transmission (phase 2.5): plausible tables in the authored
+/// shape — the V-2 diesel's envelope (500 hp @ 1800, peak torque @ ~1100), a 5F/1R ladder
+/// whose top gear at governed rpm lands the historical ~52 km/h, and an L600-style radii
+/// table anchored at a plausible 3.0 m 1st-gear tight radius with the Tiger-derived 2.958
+/// tight:wide ratio. PLACEHOLDER-plausible (the T-34's real box is clutch-and-brake — this
+/// config exists to exercise the regenerative adapters on the lab rig), all INFERRED.
+#[derive(Resource)]
+pub(super) struct T34Transmission(pub(super) TransmissionParams);
+
+impl Default for T34Transmission {
+    fn default() -> Self {
+        Self(TransmissionParams::from_authoring(&TransmissionAuthoring {
+            idle_rpm: 600.0,
+            governed_rpm: 1800.0,
+            rated_rpm: 1800.0,
+            // V-2 diesel: peak ~2200 N·m @ 1100 (INFERRED from the 500 hp/1800 rating);
+            // torque runs out at the governed 1800 so the top-speed root is emergent.
+            torque_nm: &[
+                (600.0, 1650.0),
+                (1100.0, 2200.0),
+                (1700.0, 1950.0),
+                (1800.0, 0.0),
+            ],
+            // Per-gear top speeds @ 1800 rpm (km/h): geometric-ish ladder to the historical
+            // ~52 km/h top; gearing-implied top speed = 14.5 m/s (the straight-line gate).
+            forward_speeds_kmh: &[8.0, 12.7, 20.4, 32.6, 52.2],
+            reverse_speeds_kmh: &[8.0],
+            shift_up_rpm: 1700.0,
+            shift_down_rpm: 950.0,
+            // (tight, wide) per gear: tight ∝ 1/G from 3.0 m; wide = tight × 2.958.
+            steer_radii_m: &[
+                (3.0, 8.9),
+                (4.8, 14.2),
+                (7.7, 22.8),
+                (12.3, 36.4),
+                (19.7, 58.3),
+            ],
+            // Steering-member sizing: 2× the per-track force cap (pivot moment ≈ 300 kN·m,
+            // the scale the governor pivot demonstrably breaks scrub with). INFERRED.
+            steer_capacity_n: 240_000.0,
+            neutral_fraction: 0.5,
+            recirculation: 0.9,
+            // Brake ≈ traction limit (μ·W/2 ≈ 117 kN) — the sound sizing rule.
+            brake_capacity_n: 120_000.0,
+            sprocket_radius_m: DRIVE_RADIUS + TRACK_THICKNESS / 2.0,
+            half_tread_m: TRACK_HALF_WIDTH,
+        }))
     }
 }
 

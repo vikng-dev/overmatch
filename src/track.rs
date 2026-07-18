@@ -18,6 +18,7 @@ pub mod route;
 pub mod side;
 pub mod sim;
 pub mod terrain;
+pub mod transmission;
 pub mod view;
 pub mod wheels;
 

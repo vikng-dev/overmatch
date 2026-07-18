@@ -22,7 +22,7 @@ use crate::damage::{Ammo, Crewman, TankCapabilities, VolumeOf};
 use crate::firecontrol::RangeTable;
 use crate::shooting::RecoilParams;
 use crate::spec::{TankSpec, TankSpecHandle, Trigger, ViewKind};
-use crate::track::sim::TrackGripElements;
+use crate::track::sim::{TankTransmission, TrackGripElements};
 
 /// Presentation handles. Loading may gate admission or view attachment, never simulation data.
 #[derive(Resource, Clone)]
@@ -124,6 +124,9 @@ pub(crate) fn spawn_complete_tank<B: Bundle>(
     let mut root = commands.spawn((
         presentation.root_bundle(),
         TrackGripElements::for_links(content.spec().track.link_count),
+        // The joint transmission's local state (phase 2.5) — spawn-constructed like the
+        // element slabs; inert on every MP path (only the offline gate reads it).
+        TankTransmission::default(),
         root_bundle,
     ));
     root.observe(bind_tank_view);
@@ -147,6 +150,7 @@ pub(crate) fn attach_replicated_tank_body<B: Bundle>(
             presentation.root_bundle(),
             // Same spawn-sized element slabs as `spawn_complete_tank` — see the note there.
             TrackGripElements::for_links(content.spec().track.link_count),
+            TankTransmission::default(),
             root_bundle,
         ))
         .observe(bind_tank_view);

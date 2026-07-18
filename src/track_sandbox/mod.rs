@@ -24,9 +24,9 @@ mod harness;
 mod model4;
 
 use model4::{
-    BeltPhase, PinBelt, RouteChain, TRACK_THICKNESS, TerrainField, apply_belt_support_field,
-    articulate_wheels_field, conform_belts_field, conform_belts_field_chain, draw_sample_points,
-    init_pin_belt,
+    BeltPhase, PinBelt, RouteChain, T34Transmission, TRACK_THICKNESS, TerrainField,
+    apply_belt_support_field, articulate_wheels_field, conform_belts_field,
+    conform_belts_field_chain, draw_sample_points, init_pin_belt,
 };
 // The pure track core (route geometry) — moved out for game promotion (architecture §2); the
 // sandbox consumes it exactly as the game's view plugin will. Re-exported so the model
@@ -107,6 +107,17 @@ pub(super) const SLOPE_PAD_DEG: f32 = 20.0;
 const SLOPE_PAD_CENTER: Vec3 = Vec3::new(34.0, 0.0, -20.0);
 const SLOPE_PAD_SIZE: f32 = 24.0;
 const SLOPE_PAD_THICK: f32 = 2.0;
+
+/// Flat runway/turn pad (harness `pose=runway`), far off-lane at +X: 400 m of straight run for
+/// gearing top-speed measurements plus room for full turning circles — the lane proper is too
+/// obstacle-dense for either. Its z-extent stays INSIDE the lane's z-range on purpose: the
+/// terrain broadphase buckets by z, so the grid shape (and with it every existing capture's
+/// candidate iteration) is unchanged — the slope-pad parity captures see zero new candidates
+/// (x-AABB rejection is pure comparison). Verified byte-identical against the merge-base build.
+const RUNWAY_CENTER: Vec3 = Vec3::new(260.0, 0.0, -45.0);
+const RUNWAY_SIZE: (f32, f32) = (400.0, 120.0);
+/// The `pose=runway` spawn: near the pad's −X end, facing +X down the long axis.
+pub(super) const RUNWAY_SPAWN: Vec3 = Vec3::new(70.0, 0.0, -45.0);
 
 /// The pad's top-face centre + its tilt rotation — the harness spawns slope poses from this.
 pub(super) fn slope_pad_pose() -> (Vec3, Quat) {
@@ -318,6 +329,10 @@ pub fn plugin(app: &mut App) {
         .init_resource::<BeltGrip>()
         .init_resource::<BeltGripElements>()
         .init_resource::<GripSwitch>()
+        .init_resource::<TransSwitch>()
+        .init_resource::<TransState>()
+        .init_resource::<TransTelemetry>()
+        .init_resource::<T34Transmission>()
         .init_resource::<Paused>()
         .init_resource::<ResetSpot>()
         .init_resource::<RawDriveInput>()
@@ -378,6 +393,7 @@ pub fn plugin(app: &mut App) {
                     .chain(),
                 toggle_view_mode,
                 toggle_grip_mode,
+                toggle_trans_mode,
                 toggle_pause,
                 reset_rig,
                 log_state,
@@ -508,6 +524,42 @@ impl Default for GripSwitch {
     fn default() -> Self {
         Self(GripMode::Aggregate)
     }
+}
+
+/// The active transmission adapter (harness `trans=` key; `T` cycles live). Interactive
+/// default: the shipped governor — the parity mode every existing capture ran.
+#[derive(Resource, Default)]
+struct TransSwitch(crate::track::transmission::TransmissionMode);
+
+/// The joint transmission's state (gear, shift countdown, steering detent, direction) — the
+/// sandbox analogue of the game's `TankTransmission` component. Reset with the rig and on
+/// every mode flip (a fresh adapter never inherits another's gear).
+#[derive(Resource, Default)]
+struct TransState(crate::track::transmission::TransmissionState);
+
+/// Last tick's transmission report (gear/rpm/detent/power scale) — harness `tr` rows + the
+/// legend. `None` while the governor runs (it has no operating point to report).
+#[derive(Resource, Default)]
+struct TransTelemetry(Option<crate::track::transmission::TransmissionReport>);
+
+/// `T` cycles the transmission adapter live (governor → hybrid → L600), resetting the
+/// transmission state so the incoming adapter starts constructed (gear 1, no shift).
+fn toggle_trans_mode(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut switch: ResMut<TransSwitch>,
+    mut state: ResMut<TransState>,
+) {
+    use crate::track::transmission::TransmissionMode;
+    if !keys.just_pressed(KeyCode::KeyT) {
+        return;
+    }
+    switch.0 = match switch.0 {
+        TransmissionMode::Governor => TransmissionMode::Hybrid,
+        TransmissionMode::Hybrid => TransmissionMode::FixedRadii,
+        TransmissionMode::FixedRadii => TransmissionMode::Governor,
+    };
+    *state = TransState::default();
+    info!("transmission → {}", switch.0.label());
 }
 
 /// `G` flips the grip regime live (aggregate ↔ per-element) — the feel A/B for the "pivots
@@ -772,13 +824,34 @@ fn viz_label_text(
     viz: &VizLayers,
     view: &TrackViewMode,
     grip: &GripSwitch,
+    trans: &TransSwitch,
+    telemetry: &TransTelemetry,
     paused: &Paused,
 ) -> String {
     fn s(on: bool) -> &'static str {
         if on { "ON " } else { "off" }
     }
+    use crate::track::transmission::TransmissionMode;
+    // The transmission line: mode, and (regenerative modes) the live operating point.
+    let trans_line = match (trans.0, &telemetry.0) {
+        (TransmissionMode::Governor, _) => "trans: GOVERNOR (shipped parity)".to_string(),
+        (mode, Some(t)) => format!(
+            "trans: {}  |  gear {}{} {}  rpm {:.0}  step {}  pwr x{:.2}",
+            match mode {
+                TransmissionMode::Hybrid => "HYBRID (regen)",
+                _ => "L600 (fixed-radius)",
+            },
+            if t.reverse { "R" } else { "F" },
+            t.gear,
+            if t.shifting { "(shift)" } else { "" },
+            t.rpm,
+            t.steer_step,
+            t.power_scale,
+        ),
+        (mode, None) => format!("trans: {}", mode.label()),
+    };
     let mode_line = format!(
-        "{}  |  grip: {}  |  view: {}\n",
+        "{}  |  grip: {}  |  view: {}\n{trans_line}\n",
         if paused.0 {
             "** PAUSED (esc) **"
         } else {
@@ -798,7 +871,7 @@ fn viz_label_text(
     format!(
         "{mode_line}viz  1 hull:{}  2 wheels:{}  3 chain:{}  4 outer:{}  5 hubs:{}  6 dots:{}\n     \
          7 normals:{}  8 forces:{}  9 casts:{}  0 colliders:{}  - reference:{}\n\
-         esc pause/cursor | v view (wrap/chain) | g grip (aggregate/element) | r reset | l log | arrows drive | wasd fly",
+         esc pause/cursor | v view (wrap/chain) | g grip (aggregate/element) | t trans (governor/hybrid/l600) | r reset | l log | arrows drive | wasd fly",
         s(viz.hull),
         s(viz.wheels),
         s(viz.chain),
@@ -838,13 +911,25 @@ fn update_viz_label(
     viz: Res<VizLayers>,
     view: Res<TrackViewMode>,
     grip: Res<GripSwitch>,
+    trans: Res<TransSwitch>,
+    telemetry: Res<TransTelemetry>,
     paused: Res<Paused>,
     label: Single<&mut Text, With<VizLabel>>,
 ) {
-    if !(viz.is_changed() || view.is_changed() || grip.is_changed() || paused.is_changed()) {
+    // `telemetry` changes every tick in the regenerative modes (gear/rpm are live readouts),
+    // so gate its refresh on those modes to keep the governor path's label writes sparse.
+    let telemetry_live =
+        telemetry.is_changed() && trans.0 != crate::track::transmission::TransmissionMode::Governor;
+    if !(viz.is_changed()
+        || view.is_changed()
+        || grip.is_changed()
+        || trans.is_changed()
+        || telemetry_live
+        || paused.is_changed())
+    {
         return;
     }
-    label.into_inner().0 = viz_label_text(&viz, &view, &grip, &paused);
+    label.into_inner().0 = viz_label_text(&viz, &view, &grip, &trans, &telemetry, &paused);
 }
 
 /// Lock + hide the cursor for mouse-look (a query, so a not-yet-present cursor is a no-op).
@@ -963,6 +1048,18 @@ fn spawn_environment(
             .with_rotation(Quat::from_rotation_x(SLOPE_PAD_DEG.to_radians()))
             .with_scale(Vec3::new(SLOPE_PAD_SIZE, SLOPE_PAD_THICK, SLOPE_PAD_SIZE)),
         &obstacle_mat,
+    );
+
+    // The runway/turn pad (see `RUNWAY_CENTER`), top face at y = 0 like the lane slabs.
+    block(
+        &mut commands,
+        &mut field,
+        Transform::from_xyz(RUNWAY_CENTER.x, -0.5, RUNWAY_CENTER.z).with_scale(Vec3::new(
+            RUNWAY_SIZE.0,
+            1.0,
+            RUNWAY_SIZE.1,
+        )),
+        &ground_mat,
     );
 
     // The washboards, in front of spawn and before the first trench: one set per density (see
@@ -1136,6 +1233,7 @@ fn reset_rig(
     mut dynamics: ResMut<SideDynamics>,
     mut grip_state: ResMut<BeltGrip>,
     mut grip_elements: ResMut<BeltGripElements>,
+    mut trans_state: ResMut<TransState>,
     mut wheels: Query<&mut Suspension>,
 ) {
     if !keys.just_pressed(KeyCode::KeyR) {
@@ -1158,6 +1256,8 @@ fn reset_rig(
     *grip_state = BeltGrip::default();
     // Pre-sized, never `default()` — the fixed-size invariant (see `size_grip_elements`).
     *grip_elements = BeltGripElements::sized(pin_belt.count);
+    // A fresh rig is in 1st gear with no shift in flight.
+    *trans_state = TransState::default();
     // Stale cosmetic wheel lift survives the teleport otherwise: for the first ~100 ms the
     // conform solves against phantom raised wheel circles while the hull settles.
     for mut susp in &mut wheels {
