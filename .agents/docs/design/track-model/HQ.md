@@ -1725,6 +1725,29 @@ both.
   REV 14. (Ops note: one agent worktree vanished mid-session — recovered by re-creating from
   the base commit; watch for recurrence.)
 
+- 2026-07-18 — **Step 31: PHASE 2.5 MERGED — THE DECLARED TRANSMISSION** (265 tests, tripwires
+  17/17, MP bit-parity ×3, CI pending at write time). Yan's arc: "Tiger can't neutral-steer"
+  → config diagnosis (100 kN cap = 0.40× grip limit → fixed 250 kN @ 1635f8f) → "still
+  sluggish at speed, explain don't patch" → full drivetrain audit (braking wrongly
+  power-limited by the symmetric governor clamp; no regenerative transfer) → codex design +
+  literature (both persisted) → Yan: "gearing makes sense, let's feel it". LANDED:
+  `src/track/transmission.rs` — joint two-output drivetrain (m/d internal, belt speeds
+  authoritative), THREE adapters: Governor (legacy verbatim — the parity switch; MP stays on
+  it, REV 13), Hybrid (curvature-servo continuous regenerative), FixedRadii (L600 λ-constraint,
+  two detents/gear with hysteresis, marginal brake-gated neutral). Gearbox: SPEEDS-authored
+  ladders (r_s-independent — the 19-vs-20-tooth rule), rpm auto-shift + 20-tick interruption;
+  HL230 torque curve. Brake law: −R always applied, B=clamp(R−Q,±h·B_max) — hold is now
+  capacity-tested (ADR-0026 hold blend superseded in the transmission path; Governor keeps it).
+  REAL TIGER DATA (tiger-transmission-data.md): per-gear speeds ANCHORED (hamby+Jentz scan),
+  radii table anchored at BOTH corners (3.44/165 m, tight:wide 2.958), "hydraulic operated
+  regenerative" architecture confirmed. Gates: hybrid turn R 25.7 vs governor 48.3 m @ same
+  command; L600 pivot 0.15 rad/s (8× statelier than the 1.23 snap); belt ratio ≤0.2% of
+  commanded κ (hull runs 35-65% wide = the μ(R) falloff EMERGING — the literature validation
+  curve); hill-hold identical to governor's on all four poses; energy-honesty unit gate.
+  --offline: T cycles Governor→Hybrid→L600 live, top-right mode line. OPEN: Yan three-way
+  feel drive; codex post-merge review in flight; refinements queued (T_drag(ω) curve, shift
+  time datum, L600 transfer loss, clutch-brake adapter when a T-34 ships).
+
 ## Open questions / parking lot
 
 - **Lateral link rigidity (Yan, 2026-07-16, open tab)**: a real shoe is ~perfectly stiff
