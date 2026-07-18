@@ -23,11 +23,15 @@
 //!   counter-rotation at a declared fraction of the 1st-gear tight ratio.
 //!
 //! Brakes (design §3, the hold reframe): the ground reaction is ALWAYS applied to the belt
-//! (never attenuated); at zero command a per-side capacity-limited static brake supplies
-//! `Bᵢ = clamp(Rᵢ − Qᵢ, ±h·B_max)`, with the legacy hold-blend shape reused ONLY as the
-//! engagement envelope `h` (zero command + near-zero belt speed → h→1, so a parked tank on a
-//! slope inside brake capacity holds EXACTLY, and a slope past capacity back-drives the belt
-//! honestly). The `Governor` adapter keeps the old hold blend verbatim instead.
+//! (never attenuated). The brake force is the capacity-limited STOP force
+//! `Bᵢ = clamp(Rᵢ − Qᵢ − vᵢ·I/dt, ±cap)` — at rest exactly the static balance `Rᵢ − Qᵢ`
+//! (a parked tank on a slope inside capacity holds EXACTLY), in motion strictly opposing
+//! where the belt is headed (settles creep, saturates against a slide, never pushes through
+//! zero). `cap` comes from the parking LATCH (zero command near standstill sets it, any
+//! drive command releases it; latched = full `B_max` however fast a capacity breach
+//! back-drives the belt), the legacy hold-blend entry envelope while unlatched, or the
+//! service pedal (opposite-throttle driver intent). The `Governor` adapter keeps the old
+//! hold blend verbatim instead.
 //!
 //! Pure math, no ECS (like [`forces`]): callers own the state. [`TransmissionState`] is the
 //! only path-dependent state (gear, shift countdown, steering detent, direction) — carried as
@@ -83,6 +87,13 @@ const DRAG_THROTTLE_RELEASE: f32 = 0.5;
 /// Input deadzone on the throttle axis for direction/brake intent (matches the swap logic's
 /// historical deadband).
 const DEAD: f32 = 0.05;
+
+/// Belt speed (m/s) below which a zero command LATCHES the parking brake (released by any
+/// drive command). A latch, not a blend: once parked the brake holds full capacity however
+/// fast a capacity breach back-drives the belt — the engagement blend alone faded to zero
+/// past `slip_saturation`, releasing the brake exactly when an over-capacity slope slid the
+/// tank (codex-2).
+const PARK_ENGAGE_SPEED: f32 = 0.05;
 
 /// Steering-servo proportional band (m/s of `d` error at which the servo saturates to the
 /// declared steering capacity). Sized against the grip law's `slip_saturation` scale.
@@ -281,8 +292,8 @@ impl TransmissionParams {
 }
 
 /// The joint transmission's path-dependent state — the ONLY memory (design §2's REV-14 list):
-/// selected gear, shift countdown, steering detent, direction. Constructed at spawn from tank
-/// data; a plain local component / sandbox resource under REV 13.
+/// selected gear, shift countdown, steering detent, direction, parking latch. Constructed at
+/// spawn from tank data; a plain local component / sandbox resource under REV 13.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct TransmissionState {
     /// 1-based gear in the active ladder.
@@ -293,6 +304,10 @@ pub struct TransmissionState {
     pub steer_step: u8,
     /// Which ladder is engaged (reverse uses the R ladder).
     pub reverse: bool,
+    /// Parking-brake latch: set by a zero command near standstill, released by any drive
+    /// command. Latched, the brake holds FULL capacity regardless of belt speed (see
+    /// [`PARK_ENGAGE_SPEED`]).
+    pub park: bool,
 }
 
 impl Default for TransmissionState {
@@ -302,6 +317,7 @@ impl Default for TransmissionState {
             shift_ticks: 0,
             steer_step: 0,
             reverse: false,
+            park: false,
         }
     }
 }
@@ -453,6 +469,14 @@ fn regenerative(
     } else {
         0.0
     };
+
+    // --- Parking latch (driver intent, cont.): a zero command near standstill sets the
+    // lever; any drive command releases it. State, not a blend — see [`PARK_ENGAGE_SPEED`].
+    if inp.throttle.abs() >= DEAD || inp.steer.abs() >= DEAD {
+        st.park = false;
+    } else if inp.speeds[0].abs().max(inp.speeds[1].abs()) < PARK_ENGAGE_SPEED {
+        st.park = true;
+    }
 
     // --- Engine operating point. Below the geared rpm the crank is allowed to rev toward the
     // torque peak with PROPULSIVE command (the declutch/slip band a preselector launch
@@ -609,24 +633,36 @@ fn regenerative(
     // engagement envelope (tick-stable, exact at rest); grip_stiffness = 0 keeps the
     // kinetic-only parity semantics brakeless, like the legacy hold.
     for (i, qi) in q.iter_mut().enumerate() {
+        // Engagement envelope: the parking LATCH holds full capacity (post-breach it keeps
+        // rubbing at B_max instead of fading with speed — codex-2); unlatched, the legacy
+        // smooth entry blend h (zero command + near-zero belt speed) eases the brake in
+        // during settle; the service pedal is the driver-intent brake command. The paths
+        // are mutually exclusive by construction (service ⇒ a drive command ⇒ unlatched,
+        // h≈0). grip_stiffness = 0 keeps the kinetic-only parity semantics brakeless, like
+        // the legacy hold.
         let h = if fp.grip_stiffness > 0.0 {
-            let target = inp.side_commands[i] * fp.max_speed;
-            forces::hold_blend(target.abs() / fp.slip_saturation)
-                * forces::hold_blend(inp.speeds[i].abs() / fp.slip_saturation)
+            if st.park {
+                1.0
+            } else {
+                let target = inp.side_commands[i] * fp.max_speed;
+                forces::hold_blend(target.abs() / fp.slip_saturation)
+                    * forces::hold_blend(inp.speeds[i].abs() / fp.slip_saturation)
+            }
         } else {
             0.0
         };
-        let cap = h * tp.brake_capacity_n;
-        *qi += (inp.reactions[i] - *qi).clamp(-cap, cap);
-        // SERVICE brakes (driver intent: throttle against the engaged ladder). The
-        // capacity-limited STOP force: the B that lands this belt at exactly zero after
-        // this tick's integration — equivalently `−I·v_next_unbraked/dt` clamped, so it
-        // always opposes where the belt is headed, saturates at ±capacity against a
-        // slide, and can neither speed the belt up nor push it through zero.
-        if service > 0.0 {
-            let cap_s = service * tp.brake_capacity_n;
+        let envelope = h.max(service);
+        if envelope > 0.0 {
+            let cap = envelope * tp.brake_capacity_n;
+            // The capacity-limited STOP force `B = R − Q − vI/dt = −I·v_unbraked_next/dt`
+            // (clamped): at rest it is exactly the static balance `R − Q` — the hold
+            // gates' law, bit-identical — and in motion it opposes where the belt is
+            // headed, so it SETTLES creep to zero instead of freezing v̇ at the creep
+            // speed (the old `R − Q` alone did exactly that: B·v > 0 cancelling grip and
+            // drag — codex-2 passivity), saturates at ±cap against a slide, and can
+            // neither speed the belt up nor push it through zero.
             let stop = inp.reactions[i] - *qi - inp.speeds[i] * fp.inertia / dt;
-            *qi += stop.clamp(-cap_s, cap_s);
+            *qi += stop.clamp(-cap, cap);
         }
     }
 
@@ -938,6 +974,125 @@ mod tests {
             "slope demand past B_max must back-drive the belt (got {:?})",
             rep.next_speeds
         );
+    }
+
+    /// Codex-2 regression, half 1: the parking brake SETTLES creep instead of freezing it.
+    /// The old `B = clamp(R − Q, ±cap)` at a small positive belt speed with `R > Q` set
+    /// `v̇ = 0` exactly — positive brake work cancelling grip and drag, preserving creep
+    /// forever. The stop-force law lands the belt at zero.
+    #[test]
+    fn parking_brake_settles_creep() {
+        let (fp, tp) = (lab_fp(), lab_tp());
+        let mut st = TransmissionState::default();
+        // Creep below the latch threshold, zero command, a ground reaction R > Q inside
+        // capacity (codex's exact configuration).
+        let rep = step(
+            TransmissionMode::Hybrid,
+            &fp,
+            Some(&tp),
+            &mut st,
+            &input(0.0, 0.0, [0.03, 0.03], [20_000.0, 20_000.0]),
+        );
+        assert!(st.park, "zero command near standstill must latch the park");
+        for v in rep.next_speeds {
+            assert!(
+                v.abs() < 1e-5,
+                "the parked brake must settle creep to zero, not hold it (next = {v})"
+            );
+        }
+    }
+
+    /// Codex-2 regression, half 2: past a capacity breach the latched parking brake stays
+    /// SATURATED against the slide — the blend-only envelope faded to zero once the
+    /// back-driven belt passed `slip_saturation`, releasing the brake exactly when it was
+    /// needed. The latched brake keeps rubbing at `B_max` however fast the belt slides.
+    #[test]
+    fn parking_brake_stays_saturated_past_breach() {
+        let (fp, tp) = (lab_fp(), lab_tp());
+        let mut st = TransmissionState::default();
+        let r_breach = 1.5 * tp.brake_capacity_n;
+        let mut speeds = [0.0f32; 2];
+        let mut last = TransmissionReport::default();
+        for _ in 0..30 {
+            let inp = input(0.0, 0.0, speeds, [r_breach, r_breach]);
+            last = step(TransmissionMode::Hybrid, &fp, Some(&tp), &mut st, &inp);
+            speeds = last.next_speeds;
+        }
+        assert!(
+            st.park,
+            "the latch must not release without a drive command"
+        );
+        assert!(
+            speeds[0] < -fp.slip_saturation,
+            "the breach must back-drive the belt well past the blend's fade band \
+             (speed = {})",
+            speeds[0]
+        );
+        for side in last.forces {
+            assert!(
+                side >= tp.brake_capacity_n,
+                "sliding past the breach, the sprocket force must still carry the full \
+                 saturated brake opposing the slide (got {side}, brake capacity {})",
+                tp.brake_capacity_n
+            );
+        }
+    }
+
+    /// Discrete passivity of the whole brake stack: against a brakeless baseline
+    /// (`grip_stiffness = 0` disables park/hold; same drag, same drive), the brake's
+    /// contribution over one tick never pushes the belt PAST the baseline in its direction
+    /// of motion, never reverses it through zero, and never increases |v_next| beyond the
+    /// baseline's. Swept over speeds and reactions on both sides of capacity, latched and
+    /// unlatched.
+    #[test]
+    fn brake_is_discretely_passive() {
+        let tp = lab_tp();
+        let fp_braked = lab_fp();
+        let mut fp_free = lab_fp();
+        fp_free.grip_stiffness = 0.0;
+        for park in [false, true] {
+            for v in [-0.6f32, -0.2, -0.03, 0.0, 0.03, 0.2, 0.6] {
+                for r in [-1.5f32, -0.5, 0.0, 0.5, 1.5] {
+                    let r = r * tp.brake_capacity_n;
+                    let inp = input(0.0, 0.0, [v, v], [r, r]);
+                    let mut st_b = TransmissionState {
+                        park,
+                        ..Default::default()
+                    };
+                    let braked = step(
+                        TransmissionMode::Hybrid,
+                        &fp_braked,
+                        Some(&tp),
+                        &mut st_b,
+                        &inp,
+                    );
+                    let mut st_f = TransmissionState {
+                        park,
+                        ..Default::default()
+                    };
+                    let free = step(
+                        TransmissionMode::Hybrid,
+                        &fp_free,
+                        Some(&tp),
+                        &mut st_f,
+                        &inp,
+                    );
+                    for i in 0..2 {
+                        let (b, f) = (braked.next_speeds[i], free.next_speeds[i]);
+                        assert!(
+                            b.abs() <= f.abs() + 1e-4,
+                            "park={park} v={v} R={r}: the brake increased belt speed \
+                             (braked {b} vs free {f})"
+                        );
+                        assert!(
+                            b * f >= -1e-6,
+                            "park={park} v={v} R={r}: the brake pushed the belt through \
+                             zero past the free trajectory (braked {b} vs free {f})"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// Energy honesty over 64-tick windows: Σ(Q_L·v_L + Q_R·v_R)·dt never exceeds the
