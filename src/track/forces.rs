@@ -76,6 +76,27 @@ const GRIP_ELEMENT_DAMPING_RATIO: f32 = 0.5;
 /// cycle + MG recoil are exactly that). α blends smoothly to full Dahl flow at the cap.
 const GRIP_BREAKAWAY: f32 = 0.5;
 
+/// The canonical belt-phase decomposition: travel → (integer wrap count, residual station
+/// offset in `[0, pitch)`). ONE function feeds BOTH the resample offset and material
+/// identity — computing them separately (f32 residual here, f64 floor there) let rounding
+/// disagree for one tick at exact pitch multiples, mis-keying element state by a whole link
+/// (netcode review defect 2). The residual comes from the exact f64 remainder; the wrap
+/// count is derived FROM that residual (never from an independently rounded division), and
+/// the carry branch absorbs the one remaining seam: the f32 cast of a residual just under
+/// `pitch` can round up to exactly `pitch`, which `resample`'s internal `rem_euclid` would
+/// silently treat as offset 0 — the wrap count must advance with it.
+pub fn phase_decompose(phase: f64, pitch: f32) -> (i64, f32) {
+    let p = f64::from(pitch);
+    let r = phase.rem_euclid(p);
+    let mut wraps = ((phase - r) / p).round() as i64;
+    let mut offset = r as f32;
+    if offset >= pitch {
+        wraps += 1;
+        offset = 0.0;
+    }
+    (wraps, offset)
+}
+
 /// `1 − smoothstep` on [0, 1] — the belt-hold blend factor.
 fn hold_blend(x: f32) -> f32 {
     let t = x.clamp(0.0, 1.0);
@@ -257,11 +278,8 @@ pub fn step_side<O: TerrainOracle>(
     let mut belt_reaction = 0.0;
 
     let pitch = polyline_len(input.loop_pts) / input.count.max(1) as f32;
-    let mut stations = resample(
-        input.loop_pts,
-        pitch,
-        state.phase.rem_euclid(f64::from(pitch)) as f32,
-    );
+    let (wraps, station_offset) = phase_decompose(state.phase, pitch);
+    let mut stations = resample(input.loop_pts, pitch, station_offset);
     stations.truncate(input.count);
     let n = stations.len();
     if n < 3 {
@@ -288,10 +306,10 @@ pub fn step_side<O: TerrainOracle>(
     }
     let mut cols: Vec<ColumnContact> = Vec::with_capacity(n);
 
-    // Material identity under advection: station `i` samples arc `(phase mod pitch) + i·pitch`,
-    // so the material link there is `i − ⌊phase/pitch⌋` (mod count) — when the sampling offset
-    // wraps, the identity shift absorbs the jump (the witness-link mapping).
-    let wraps = (state.phase / f64::from(pitch)).floor() as i64;
+    // Material identity under advection: station `i` samples arc `offset + i·pitch`, so the
+    // material link there is `i − wraps` (mod count) — when the sampling offset wraps, the
+    // identity shift absorbs the jump (the witness-link mapping). `wraps` and the offset come
+    // from the SAME [`phase_decompose`] call — the pair is consistent by construction.
     let material =
         |i: usize| -> usize { (i as i64 - wraps).rem_euclid(input.count as i64) as usize };
 
@@ -632,4 +650,76 @@ pub fn step_side<O: TerrainOracle>(
     report.engine_force = engine;
     report.belt_reaction = belt_reaction;
     report
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The decomposition contract: offset strictly in `[0, pitch)` — never `pitch` itself,
+    /// which `resample`'s internal `rem_euclid` would alias to 0 while material identity
+    /// stayed a link behind — and the pair reconstructs the phase, so the two consumers
+    /// cannot disagree.
+    fn assert_canonical(phase: f64, pitch: f32) {
+        let (wraps, offset) = phase_decompose(phase, pitch);
+        assert!(
+            (0.0..pitch).contains(&offset),
+            "offset {offset} outside [0, {pitch}) at phase {phase}"
+        );
+        let rebuilt = wraps as f64 * f64::from(pitch) + f64::from(offset);
+        let tol = f64::from(pitch) * 1e-6 + phase.abs() * 1e-9;
+        assert!(
+            (rebuilt - phase).abs() <= tol,
+            "wraps {wraps} + offset {offset} rebuilds {rebuilt}, phase {phase}"
+        );
+    }
+
+    #[test]
+    fn phase_decompose_pitch_boundaries() {
+        // Next-representable f64 on both sides of positive AND negative pitch multiples —
+        // the exact ticks where the old split (f32 remainder vs f64 floor) could disagree.
+        for pitch in [0.152_87_f32, 0.125] {
+            let p = f64::from(pitch);
+            for k in [-40_i64, -3, -1, 0, 1, 2, 7, 40] {
+                let m = k as f64 * p;
+                for phase in [m, m.next_down(), m.next_up()] {
+                    assert_canonical(phase, pitch);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn phase_decompose_long_travel() {
+        // ≈10 km of accumulated travel: the precision regime the f64 phase exists for
+        // (codex phase-B finding 8) — boundary neighbours must stay canonical out here too.
+        let pitch = 0.152_87_f32;
+        let p = f64::from(pitch);
+        let m = (10_000.0 / p).floor() * p;
+        for phase in [
+            m,
+            m.next_down(),
+            m.next_up(),
+            m + 0.3 * p,
+            -m,
+            (-m).next_down(),
+            (-m).next_up(),
+        ] {
+            assert_canonical(phase, pitch);
+        }
+    }
+
+    #[test]
+    fn phase_decompose_carry_advances_wraps() {
+        // The carry seam itself: an f64 residual just under one pitch whose f32 cast rounds
+        // UP to exactly `pitch`. Without the carry, resample would alias the offset to 0 (a
+        // full link ahead) while `wraps` lagged — the one-tick material mis-key.
+        let pitch = 0.152_87_f32;
+        let p = f64::from(pitch);
+        let r = p - 1e-12;
+        assert_eq!(r as f32, pitch, "test premise: the cast rounds up");
+        let (wraps, offset) = phase_decompose(5.0 * p + r, pitch);
+        assert_eq!(offset, 0.0);
+        assert_eq!(wraps, 6);
+    }
 }
