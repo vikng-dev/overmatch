@@ -112,7 +112,17 @@ const GRIP_ELEMENT_LOSS_DWELL_TICKS: u8 = 8;
 /// the carry branch absorbs the one remaining seam: the f32 cast of a residual just under
 /// `pitch` can round up to exactly `pitch`, which `resample`'s internal `rem_euclid` would
 /// silently treat as offset 0 — the wrap count must advance with it.
+///
+/// CONTRACT: `pitch` is a finite positive link pitch and the wrap count is representable in
+/// `i64`. A degenerate pitch (denormal/zero) would send `phase/pitch` past `i64::MAX` and the
+/// cast saturates rather than wrapping cleanly — the force path can't reach this (a degenerate
+/// pitch exits before material identity), but the guard documents the assumption for other
+/// callers.
 pub fn phase_decompose(phase: f64, pitch: f32) -> (i64, f32) {
+    debug_assert!(
+        pitch > 1e-6,
+        "phase_decompose needs a finite positive pitch"
+    );
     let p = f64::from(pitch);
     let r = phase.rem_euclid(p);
     let mut wraps = ((phase - r) / p).round() as i64;
@@ -912,6 +922,74 @@ mod tests {
         rig_tick(&loop_pts, &mut state, &mut elems, -10.0, Vec3::ZERO);
         assert_eq!(strain_sum(&elems), 0.0, "departed strain must be forgotten");
         assert!(elems.dwell.iter().all(|&d| d == 0));
+    }
+
+    /// Netcode review defect 3 (hysteresis band): an EXISTING member whose elastic load fades
+    /// into [leave, enter) — dwell still live, slip continuing — must HOLD its accumulated
+    /// strain, not keep integrating it. Integration is gated on `load_elastic >= enter`, NOT on
+    /// membership: writing the branch `if member` would let strain GROW in the band (the pad is
+    /// a member there) while the parity/departure tests stayed green. This pins that the branch
+    /// is load-keyed.
+    #[test]
+    fn element_member_fading_into_band_holds_strain() {
+        let params = rig_params();
+        let side_weight = params.grip_stiffness * GRIP_SHEAR_MODULUS_M / params.mu;
+        let enter = side_weight * GRIP_ELEMENT_ENTER_FRACTION;
+        let leave = side_weight * GRIP_ELEMENT_LEAVE_FRACTION;
+
+        // Phase 1 — deep contact (loads ≫ enter), slipping: accumulate real presliding strain.
+        let deep = rect_loop(0.02);
+        let mut state = SideState::default();
+        let mut elems = GripElements::default();
+        let mut report = rig_tick(&deep, &mut state, &mut elems, 0.0, Vec3::ZERO);
+        for _ in 0..20 {
+            report = rig_tick(
+                &deep,
+                &mut state,
+                &mut elems,
+                0.0,
+                Vec3::new(0.0, 0.0, 0.05),
+            );
+        }
+        assert!(
+            report.contacts.iter().any(|c| c.load_elastic >= enter),
+            "rig premise: phase-1 contacts clear the enter bound"
+        );
+        assert!(strain_sum(&elems) > 0.01, "rig premise: strain accumulated");
+
+        // Phase 2 — shallow contact (loads ≈ 100 N, mid-band [leave, enter)), same 25-link count
+        // so element identity + strain slab persist. The pad is fading but still a live member
+        // (dwell refreshed each tick); slip continues, so an `if member` integration branch WOULD
+        // move the strain. It must hold instead.
+        let band = rect_loop(0.024);
+        let held = elems.strain.clone();
+        for _ in 0..(2 * GRIP_ELEMENT_LOSS_DWELL_TICKS as usize) {
+            let report = rig_tick(
+                &band,
+                &mut state,
+                &mut elems,
+                0.0,
+                Vec3::new(0.0, 0.0, 0.05),
+            );
+            let loaded: Vec<f32> = report
+                .contacts
+                .iter()
+                .map(|c| c.load_elastic)
+                .filter(|&l| l > 0.0)
+                .collect();
+            assert!(
+                !loaded.is_empty() && loaded.iter().all(|&l| (leave..enter).contains(&l)),
+                "rig premise: fading contacts must sit in [leave, enter); got {loaded:?}"
+            );
+        }
+        assert!(
+            elems.dwell.iter().any(|&d| d > 0),
+            "rig premise: the fading pad stays a live member (dwell refreshed)"
+        );
+        assert_eq!(
+            elems.strain, held,
+            "strain integrated in the hysteresis band — the branch must gate on load_elastic >= enter, not membership"
+        );
     }
 
     /// Netcode review defect 3: an element that never clears the enter bound must not
