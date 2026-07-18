@@ -384,8 +384,12 @@ impl Default for T34Transmission {
                 (12.3, 36.4),
                 (19.7, 58.3),
             ],
-            // Steering-member sizing: 2× the per-track force cap (pivot moment ≈ 300 kN·m,
-            // the scale the governor pivot demonstrably breaks scrub with). INFERRED.
+            // Steering-member PER-OUTPUT capacity (the fixed convention: the difference
+            // axis F_s carries 2× this — 480 kN → 600 kN·m of pivot moment vs the lab's
+            // ~224 kN·m scrub). The phase-2.5 sizing (2× the per-track force cap) is kept
+            // verbatim: it was chosen under the old F_s-bound reading, and under the fixed
+            // convention it simply strengthens the lab's steering authority — the T-34
+            // gates re-measure it. Generous for a lab vehicle, all INFERRED.
             steer_capacity_n: 240_000.0,
             neutral_fraction: 0.5,
             recirculation: 0.9,

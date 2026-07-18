@@ -16,8 +16,9 @@
 //!   authored radii); power conservation with inner-track recirculation at declared η.
 //! - [`TransmissionMode::FixedRadii`] — the Tiger L600: the same machinery, but `d` is
 //!   CONSTRAINED to `s·κ(gear, step)·|m|` (two steering detents per gear with hysteresis);
-//!   the constraint force λ is solved semi-implicitly and clamped to the steering capacity
-//!   (beyond capacity the constraint slips). At `m≈0` the neutral turn is the MARGINAL
+//!   the constraint force λ is solved semi-implicitly and clamped so each output's steering
+//!   share stays inside the per-output capacity (beyond it the constraint slips). At `m≈0`
+//!   the neutral turn is the MARGINAL
 //!   brake-gated one the restoration literature describes: a slow capacity-limited
 //!   counter-rotation at a declared fraction of the 1st-gear tight ratio.
 //!
@@ -135,8 +136,13 @@ pub struct TransmissionParams {
     /// the hybrid reads `κ_tight` as its full-lock continuous curvature. Reverse gears index
     /// the same table (R1–R4 mirror F1–F4).
     pub steer_kappa: Vec<(f32, f32)>,
-    /// Steering-member force capacity on the `d` axis (N) — bounds the hybrid servo AND the
-    /// L600 constraint force λ (beyond it the constraint slips).
+    /// Steering-member force capacity PER OUTPUT (N). The steering member drives the two
+    /// outputs DIFFERENTIALLY — each output's steering share is bounded by its own
+    /// gearing/grip-scale cap (this datum), so the belt-difference axis `F_s` carries up to
+    /// 2× it (each side sees `F_s/2`), and the L600 constraint force λ is bounded by
+    /// `capacity / max|jᵢ|`. Reading this datum as an `F_s` bound was the pivot-dead bug:
+    /// it halves the yaw ceiling (Tiger: 373 kN·m < its ~478 kN·m footprint scrub — could
+    /// not break away; the T-34 lab's 300 vs 224 kN·m masked it).
     pub steer_capacity_n: f32,
     /// Full neutral-turn belt-speed half-difference (m/s): `κ_tight(F1) × v(F1 @ governed)` —
     /// the hybrid's genuine pivot scale.
@@ -170,6 +176,9 @@ pub struct TransmissionAuthoring<'a> {
     pub shift_down_rpm: f32,
     /// Per forward gear `(R_tight, R_wide)` turn radii (m).
     pub steer_radii_m: &'a [(f32, f32)],
+    /// Steering-member force capacity PER OUTPUT (N) — see
+    /// [`TransmissionParams::steer_capacity_n`] for the convention (the difference axis
+    /// carries 2× this).
     pub steer_capacity_n: f32,
     pub neutral_fraction: f32,
     pub recirculation: f32,
@@ -445,8 +454,11 @@ fn regenerative(
     let mut f_s = 0.0;
     let mut lambda = 0.0;
     let mut j = [0.0f32; 2];
-    let servo =
-        |target_d: f32| ((target_d - d) / STEER_SERVO_BAND).clamp(-1.0, 1.0) * tp.steer_capacity_n;
+    // The difference-axis bound is 2× the per-output capacity: `F_s` splits `±F_s/2` onto
+    // the outputs, and each output's share is what the per-output datum caps (see
+    // [`TransmissionParams::steer_capacity_n`] — the pivot-dead convention fix).
+    let f_s_max = 2.0 * tp.steer_capacity_n;
+    let servo = |target_d: f32| ((target_d - d) / STEER_SERVO_BAND).clamp(-1.0, 1.0) * f_s_max;
     match mode {
         TransmissionMode::Hybrid => {
             // Continuous curvature command, GEAR-INDEPENDENT: |steer| interpolates
@@ -522,8 +534,12 @@ fn regenerative(
                 let a_l = (f_p + f_drag) / 2.0 - inp.reactions[0];
                 let a_r = (f_p + f_drag) / 2.0 - inp.reactions[1];
                 let denom = jl * jl + jr * jr;
+                // Per-output honesty for the constraint too: output i sees `λ·jᵢ`, each
+                // bounded by the per-output capacity — so `|λ| ≤ capacity / max|jᵢ|`
+                // (straight-gear `max|j| = 1/2` gives the same 2× bound the servo uses).
+                let lambda_max = tp.steer_capacity_n / jl.abs().max(jr.abs()).max(1e-3);
                 lambda = (-(g_now * fp.inertia / dt + jl * a_l + jr * a_r) / denom)
-                    .clamp(-tp.steer_capacity_n, tp.steer_capacity_n);
+                    .clamp(-lambda_max, lambda_max);
                 j = [jl, jr];
             }
         }
@@ -927,6 +943,37 @@ mod tests {
                      > available {available:.0} J + released {released:.0} J"
                 );
             }
+        }
+    }
+
+    /// The pivot-authority convention (the Tiger pivot-dead fix): the steering member
+    /// drives the two OUTPUTS differentially, so at rest under full steer the saturated
+    /// servo puts the full PER-OUTPUT capacity on each side (`F_s = 2 × capacity`,
+    /// `±capacity` per belt) — not `±capacity/2`, which halves the yaw moment and left the
+    /// Tiger under its own footprint scrub. Checked on both regenerative adapters (the
+    /// L600 at rest is in its brake-gated neutral regime, which shares the servo).
+    #[test]
+    fn pivot_authority_is_per_output_capacity() {
+        let (fp, tp) = (lab_fp(), lab_tp());
+        for mode in [TransmissionMode::Hybrid, TransmissionMode::FixedRadii] {
+            let mut st = TransmissionState::default();
+            let rep = step(
+                mode,
+                &fp,
+                Some(&tp),
+                &mut st,
+                &input(0.0, 1.0, [0.0, 0.0], [0.0, 0.0]),
+            );
+            // Full steer at rest: the d target (neutral scale) is far past the servo band,
+            // so the servo saturates — each output must carry the full per-output datum.
+            assert_eq!(
+                rep.forces[0], tp.steer_capacity_n,
+                "{mode:?}: left output must saturate at the PER-OUTPUT capacity"
+            );
+            assert_eq!(
+                rep.forces[1], -tp.steer_capacity_n,
+                "{mode:?}: right output mirrors it (counter-rotation)"
+            );
         }
     }
 

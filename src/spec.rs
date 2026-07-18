@@ -302,7 +302,9 @@ pub struct GearboxSpec {
 pub struct SteeringSpec {
     /// Per FORWARD gear `(R_tight, R_wide)` turn radii (m); reverse mirrors the low gears.
     pub radii: Vec<(f32, f32)>,
-    /// Steering-member force capacity on the belt-difference axis (N).
+    /// Steering-member force capacity PER OUTPUT (N): the member drives the two outputs
+    /// differentially, so the belt-difference axis `F_s` carries up to 2× this (each side
+    /// sees `F_s/2`, bounded by this datum — the gearing/grip-scale per-track cap).
     pub capacity: f32,
     /// Brake-gated neutral-turn fraction of the 1st-gear tight ratio (L600 marginal pivot).
     pub neutral_fraction: f32,

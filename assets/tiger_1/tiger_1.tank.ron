@@ -86,9 +86,15 @@ TankSpec(
                         (37.47, 110.8),
                         (55.78, 165.0),
                     ],
-                    // Steering-member force capacity on the belt-difference axis: the
-                    // per-output 250 kN datum (the grip-limit gearing rule) — INFERRED
-                    // sizing, no published steering-member torque rating reachable.
+                    // Steering-member force capacity PER OUTPUT (N): the grip-limit
+                    // gearing rule's per-track datum (≈ μ·W/2, same as `force`). The
+                    // member drives the two outputs DIFFERENTIALLY, so the belt-difference
+                    // axis F_s is bounded by 2× this: 500 kN → 745 kN·m of yaw moment
+                    // against the ~478 kN·m footprint scrub — breakaway ratio 1.56, the
+                    // mirror of the force-cap fix above (T-34 lab: 1.33). Reading this
+                    // datum as the F_s bound itself gave 373 kN·m < scrub — the measured
+                    // "Tiger unable to steer in place" (2026-07-18). INFERRED sizing, no
+                    // published steering-member torque rating reachable.
                     capacity: 250_000.0,
                     // Marginal brake-gated neutral turn (restoration-tier synthesis:
                     // "technically yes, advisable no") — INFERRED fraction.
