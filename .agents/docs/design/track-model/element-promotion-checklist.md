@@ -1,5 +1,14 @@
 # Phase-2 offline gate + REV-14 landing checklist (codex, 2026-07-18)
 
+> **Post-merge review addendum (codex, same day):** the `step_side` runtime size-repair
+> branch (`forces.rs`, the clear-and-zero-resize of both `GripElements` slabs on length
+> mismatch) is a CONFIRMED REV-14 blocker with a concrete failure: a predicted root that
+> runs one driving tick before its authoritative seed records a zeroed field into local
+> history, and replay follows it; a snapshot with one mismatched slab erases valid strain
+> instead of surfacing the invariant violation. Phase 2 must construct both slabs
+> synchronously at spawn (link_count × 3) and REPLACE the resize branch with a fixed-size
+> invariant check. `Vec` is acceptable; runtime resizing is not.
+
 
 # Element grip follow-up
 
