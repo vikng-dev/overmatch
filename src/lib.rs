@@ -122,6 +122,7 @@ mod offline_feel_tests {
                 shift_ticks: 3,
                 steer_step: 2,
                 reverse: true,
+                park: true,
             }))
             .id();
 

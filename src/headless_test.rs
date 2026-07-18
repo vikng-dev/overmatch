@@ -788,6 +788,272 @@ fn a_replica_coax_shell_clears_the_shooters_mantlet() {
     );
 }
 
+// --- Tiger transmission gates -------------------------------------------------------------------
+//
+// The process fix behind the phase-2.5 postmortem: every physics gate ran on the sandbox's T-34
+// lab vehicle, and vehicle-scaling defects (steering capacity vs footprint scrub) sailed through
+// on the smaller tank. These gates drive the REAL Tiger blueprint through the offline
+// composition — the same boot, spawn path, spec, and terrain the `--offline` feel session runs —
+// with `TransmissionFeelTest` set per case. They are permanent `cargo test` members: the sandbox
+// gates remain, but can never again be the only physics evidence.
+
+/// [`booted_sim`] + the two offline feel gates exactly as `run_offline` mounts them
+/// (`ElementGripFeelTest` latched, `TransmissionFeelTest(mode)`), clock started, tracks
+/// grounded and settled. Returns the sim and the controlled Tiger.
+fn booted_offline_sim(mode: crate::track::transmission::TransmissionMode) -> (BootedSim, Entity) {
+    let mut app = booted_sim();
+    app.init_resource::<crate::track::sim::ElementGripFeelTest>();
+    app.insert_resource(crate::track::sim::TransmissionFeelTest(mode));
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+        16,
+    )));
+    let mut grounded = 0;
+    for _ in 0..300 {
+        app.update();
+        let world = app.world_mut();
+        grounded = world
+            .query::<&crate::track::sim::TrackContacts>()
+            .iter(world)
+            .map(|c| c.0.iter().filter(|side| !side.is_empty()).count())
+            .sum();
+        if grounded >= 4 {
+            break;
+        }
+    }
+    assert!(grounded >= 4, "the belt field never grounded headless");
+    for _ in 0..60 {
+        app.update();
+    }
+    let mut tank_q = app
+        .world_mut()
+        .query_filtered::<Entity, (With<Tank>, With<Controlled>)>();
+    let tank = tank_q.single(app.world()).expect("one controlled tank");
+    (app, tank)
+}
+
+/// Write the drive command (level state, re-asserted every tick like the other headless
+/// drives — no device gather exists here) and advance one 16 ms update (= one 64 Hz tick).
+fn drive_tick(app: &mut App, tank: Entity, throttle: f32, steer: f32) {
+    {
+        let mut cmd = app
+            .world_mut()
+            .get_mut::<TankCommand>(tank)
+            .expect("tank carries a command");
+        cmd.throttle = throttle;
+        cmd.steer = steer;
+    }
+    app.update();
+}
+
+/// Horizontal hull speed (m/s) from the tick-truth velocity.
+fn hull_speed(app: &mut App, tank: Entity) -> f32 {
+    let v = app
+        .world()
+        .get::<avian3d::prelude::LinearVelocity>(tank)
+        .expect("tank has velocity")
+        .0;
+    Vec3::new(v.x, 0.0, v.z).length()
+}
+
+/// Body-frame yaw rate (rad/s): world angular velocity projected on the hull's up axis
+/// (world `av.y` lies on slopes — the harness's own rule).
+fn yaw_rate(app: &mut App, tank: Entity) -> f32 {
+    let world = app.world();
+    let ang = world
+        .get::<avian3d::prelude::AngularVelocity>(tank)
+        .expect("tank has angular velocity")
+        .0;
+    let rot = world
+        .get::<avian3d::prelude::Rotation>(tank)
+        .expect("tank has rotation")
+        .0;
+    ang.dot(rot * Vec3::Y)
+}
+
+/// Point the hull down +Z (away from the SP duel partner at z = −12 and the −Z obstacle
+/// course) and re-settle: the long straight-line gates need the ~490 m of flat ground the
+/// +Z half of the map offers.
+fn face_positive_z(app: &mut App, tank: Entity) {
+    {
+        let mut e = app.world_mut().entity_mut(tank);
+        e.get_mut::<avian3d::prelude::Rotation>().unwrap().0 =
+            Quat::from_rotation_y(std::f32::consts::PI);
+        e.get_mut::<avian3d::prelude::LinearVelocity>().unwrap().0 = Vec3::ZERO;
+        e.get_mut::<avian3d::prelude::AngularVelocity>().unwrap().0 = Vec3::ZERO;
+    }
+    for _ in 0..120 {
+        app.update();
+    }
+}
+
+/// Full throttle until the hull reaches `target` m/s (bounded); returns ticks taken.
+fn drive_to_speed(app: &mut App, tank: Entity, target: f32, max_ticks: usize) -> usize {
+    for tick in 0..max_ticks {
+        drive_tick(app, tank, 1.0, 0.0);
+        if hull_speed(app, tank) >= target {
+            return tick;
+        }
+    }
+    panic!(
+        "full throttle never reached {target} m/s in {max_ticks} ticks (speed {})",
+        hull_speed(app, tank)
+    );
+}
+
+/// The pivot gate body shared by the two steering laws: zero throttle, full steer, ≥ 4 s;
+/// the mean yaw rate over the last second must clear 0.05 rad/s (statelier than the
+/// governor snap is fine — ZERO is the bug this pins: the Tiger's steering capacity read on
+/// the wrong axis could not break its own footprint scrub) and the belts must actually
+/// counter-rotate.
+fn tiger_pivot_gate(mode: crate::track::transmission::TransmissionMode) {
+    let (mut app, tank) = booted_offline_sim(mode);
+    let mut yaw_sum = 0.0f32;
+    let mut samples = 0u32;
+    for tick in 0..320 {
+        drive_tick(&mut app, tank, 0.0, 1.0);
+        if tick >= 256 {
+            yaw_sum += yaw_rate(&mut app, tank);
+            samples += 1;
+        }
+    }
+    let mean_yaw = yaw_sum / samples as f32;
+    let drive = app
+        .world()
+        .get::<crate::track::sim::TrackDrive>(tank)
+        .expect("tank drives");
+    let (l, r) = (drive.sides[0].speed, drive.sides[1].speed);
+    println!("tiger pivot [{mode:?}]: mean yaw {mean_yaw:.4} rad/s, belts L {l:.3} / R {r:.3}");
+    assert!(
+        l * r < 0.0,
+        "[{mode:?}] a neutral pivot must counter-rotate the belts (L {l:.3}, R {r:.3})"
+    );
+    assert!(
+        mean_yaw.abs() >= 0.05,
+        "[{mode:?}] pivot yaw {mean_yaw:.4} rad/s under full steer — the pivot-dead gate \
+         (≥ 0.05 rad/s)"
+    );
+}
+
+/// Tiger pivot, L600 fixed-radius adapter (the vehicle's authored architecture).
+#[test]
+fn pivot_tiger_l600() {
+    tiger_pivot_gate(crate::track::transmission::TransmissionMode::FixedRadii);
+}
+
+/// Tiger pivot, hybrid continuous adapter.
+#[test]
+fn pivot_tiger_hybrid() {
+    tiger_pivot_gate(crate::track::transmission::TransmissionMode::Hybrid);
+}
+
+/// Deceleration on the real Tiger (L600, the authored architecture), both driver intents:
+///
+/// * RELEASE (coast): engine drag at the declared `drag_fraction` (0.25 of peak torque)
+///   through the CURRENT gear, downshifting on the authored bands as speed falls — drag at
+///   6 m/s (F7) is ≈ 17 kN, growing through the downshifts, plus the grip law's slip
+///   losses. MEASURED on the declared data: 6 → 2 m/s in 10.6 s; the gate pins ≤ 14 s
+///   (margin for platform float drift, nothing else). The fix-round brief hoped for 8 s —
+///   that is unreachable without rolling resistance, WHICH THE CONTACT MODEL DOES NOT
+///   HAVE (a real Tiger's ~25–35 kN of rolling drag would dominate its own engine
+///   braking; ground resistance belongs to the terrain/ground-type mechanic, ADR-0007
+///   bucket 3 — not to the drivetrain, and not tunable-by-feel here). Also pinned: past
+///   the command-shaper's release slew, coasting never accelerates (the old code
+///   ACCELERATED on opposite input — the regression this kills).
+/// * OPPOSITE THROTTLE: service brakes at the declared capacity — ≤ 1 m/s within 3 s
+///   (MEASURED: 1.17 s).
+#[test]
+fn decel_tiger() {
+    use crate::track::transmission::TransmissionMode;
+    let (mut app, tank) = booted_offline_sim(TransmissionMode::FixedRadii);
+    face_positive_z(&mut app, tank);
+
+    // Phase 1 — coast from ≥ 6 m/s.
+    drive_to_speed(&mut app, tank, 6.0, 2400);
+    let mut released = hull_speed(&mut app, tank);
+    let mut coast_ticks = None;
+    let mut peak = 0.0f32;
+    for tick in 0..(14 * 64) {
+        drive_tick(&mut app, tank, 0.0, 0.0);
+        let v = hull_speed(&mut app, tank);
+        // The command SHAPER slews the released throttle to zero over ~0.5 s (the same
+        // ramp a lifted key gets); the drivetrain's own no-acceleration guarantee starts
+        // once the drive signal is actually zero.
+        if tick >= 48 {
+            peak = peak.max(v);
+        }
+        if v <= 2.0 {
+            coast_ticks = Some(tick + 1);
+            break;
+        }
+    }
+    let coasting_from = peak;
+    assert!(
+        coasting_from <= released + 0.15,
+        "released throttle must not meaningfully accelerate past the slew window \
+         (peak {coasting_from:.2} from {released:.2})"
+    );
+    let coast_ticks = coast_ticks.unwrap_or_else(|| {
+        panic!(
+            "coast never reached 2 m/s in 14 s (speed {:.2})",
+            hull_speed(&mut app, tank)
+        )
+    });
+    println!(
+        "tiger decel: released at {released:.2} m/s, coast to 2 m/s in {:.1} s",
+        coast_ticks as f32 / 64.0
+    );
+
+    // Phase 2 — service brakes: opposite throttle from ≥ 6 m/s.
+    drive_to_speed(&mut app, tank, 6.0, 2400);
+    released = hull_speed(&mut app, tank);
+    let mut brake_ticks = None;
+    for tick in 0..(3 * 64) {
+        drive_tick(&mut app, tank, -1.0, 0.0);
+        if hull_speed(&mut app, tank) <= 1.0 {
+            brake_ticks = Some(tick + 1);
+            break;
+        }
+    }
+    let brake_ticks = brake_ticks.unwrap_or_else(|| {
+        panic!(
+            "service brakes never reached 1 m/s within 3 s from {released:.2} m/s \
+             (speed {:.2})",
+            hull_speed(&mut app, tank)
+        )
+    });
+    println!(
+        "tiger decel: service brakes {released:.2} -> 1 m/s in {:.2} s",
+        brake_ticks as f32 / 64.0
+    );
+}
+
+/// The gearing-emergence check on the REAL vehicle: 30 s of full throttle on flat ground
+/// must land inside [10.0, 11.0] m/s — the authored ladder's F8 at the governed 2500 rpm
+/// is 10.48 m/s (matching the spec's max_speed 10.5), so both a broken ladder (too slow)
+/// and a governor that no longer binds (too fast) fail.
+#[test]
+fn top_speed_tiger() {
+    use crate::track::transmission::TransmissionMode;
+    let (mut app, tank) = booted_offline_sim(TransmissionMode::FixedRadii);
+    face_positive_z(&mut app, tank);
+    let mut speed_sum = 0.0f32;
+    let mut samples = 0u32;
+    let total = 30 * 64;
+    for tick in 0..total {
+        drive_tick(&mut app, tank, 1.0, 0.0);
+        if tick >= total - 128 {
+            speed_sum += hull_speed(&mut app, tank);
+            samples += 1;
+        }
+    }
+    let mean = speed_sum / samples as f32;
+    println!("tiger top speed: {mean:.2} m/s over the last 2 s");
+    assert!(
+        (10.0..=11.0).contains(&mean),
+        "30 s of full throttle must land the geared top speed (10.0–11.0 m/s), got {mean:.2}"
+    );
+}
+
 #[derive(Resource, Default)]
 struct ScriptedDeterminismRun {
     digests: Vec<Vec<(String, crate::trace::CanonicalTankStateDigest)>>,

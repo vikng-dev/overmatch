@@ -57,6 +57,11 @@ TankSpec(
                     // (rpm, N·m): 800→1300 INFERRED (~0.70 × peak); 2100→1850 ANCHOR
                     // (medium); 2500→1686 DERIVED (600 PS); 3000→1639 DERIVED (700 PS).
                     torque_curve: [(800.0, 1300.0), (2100.0, 1850.0), (2500.0, 1686.0), (3000.0, 1639.0)],
+                    // Compression braking at zero throttle, fraction of peak torque
+                    // reflected through the current gear: diesel motoring runs ~20–30%
+                    // of rated torque — INFERRED (no HL230 motoring curve reachable),
+                    // mid-band.
+                    drag_fraction: 0.25,
                 ),
                 gearbox: (
                     // OLVAR OG 40 12 16, 8F/4R [ANCHOR]. Per-gear top speeds @ 3000 rpm
@@ -71,6 +76,10 @@ TankSpec(
                     // down band — hysteresis by construction, no hunting.
                     shift_up_rpm: 2300.0,
                     shift_down_rpm: 1400.0,
+                    // OLVAR preselector: pre-selected shifts complete with drive uncoupled
+                    // for a noticeable fraction of a second — INFERRED ~0.31 s, no shift-
+                    // time datum reached.
+                    shift_secs: 0.31,
                 ),
                 steering: (
                     // (R_tight, R_wide) per forward gear (m): anchored at BOTH corners
@@ -86,9 +95,15 @@ TankSpec(
                         (37.47, 110.8),
                         (55.78, 165.0),
                     ],
-                    // Steering-member force capacity on the belt-difference axis: the
-                    // per-output 250 kN datum (the grip-limit gearing rule) — INFERRED
-                    // sizing, no published steering-member torque rating reachable.
+                    // Steering-member force capacity PER OUTPUT (N): the grip-limit
+                    // gearing rule's per-track datum (≈ μ·W/2, same as `force`). The
+                    // member drives the two outputs DIFFERENTIALLY, so the belt-difference
+                    // axis F_s is bounded by 2× this: 500 kN → 745 kN·m of yaw moment
+                    // against the ~478 kN·m footprint scrub — breakaway ratio 1.56, the
+                    // mirror of the force-cap fix above (T-34 lab: 1.33). Reading this
+                    // datum as the F_s bound itself gave 373 kN·m < scrub — the measured
+                    // "Tiger unable to steer in place" (2026-07-18). INFERRED sizing, no
+                    // published steering-member torque rating reachable.
                     capacity: 250_000.0,
                     // Marginal brake-gated neutral turn (restoration-tier synthesis:
                     // "technically yes, advisable no") — INFERRED fraction.

@@ -282,6 +282,17 @@ pub struct EngineSpec {
     pub rated_rpm: f32,
     /// `(rpm, N·m)` authoring points, ascending rpm.
     pub torque_curve: Vec<(f32, f32)>,
+    /// Zero-throttle engine drag (compression braking) as a fraction of peak torque,
+    /// reflected through the current gear. Diesel motoring torque runs ~20–30% of rated
+    /// (INFERRED band — no per-engine motoring curve reached); defaults to 0.25 when the
+    /// vehicle does not author one.
+    #[serde(default = "default_drag_fraction")]
+    pub drag_fraction: f32,
+}
+
+/// See [`EngineSpec::drag_fraction`] — the middle of the diesel compression-braking band.
+fn default_drag_fraction() -> f32 {
+    0.25
 }
 
 /// The gear ladders as authored per-gear top belt speeds (km/h) at `rated_rpm`, plus the
@@ -293,6 +304,16 @@ pub struct GearboxSpec {
     pub reverse_speeds_kmh: Vec<f32>,
     pub shift_up_rpm: f32,
     pub shift_down_rpm: f32,
+    /// Gear-shift torque-interruption time (s) — how long the drive is uncoupled through a
+    /// shift. Vehicle data (a preselector and a crash box differ); defaults to 0.31 s when
+    /// unauthored (INFERRED, no per-vehicle shift-time datum reached).
+    #[serde(default = "default_shift_secs")]
+    pub shift_secs: f32,
+}
+
+/// See [`GearboxSpec::shift_secs`].
+fn default_shift_secs() -> f32 {
+    0.31
 }
 
 /// The steering member: per-gear fixed radii (the L600's two detents; the hybrid interpolates
@@ -302,7 +323,9 @@ pub struct GearboxSpec {
 pub struct SteeringSpec {
     /// Per FORWARD gear `(R_tight, R_wide)` turn radii (m); reverse mirrors the low gears.
     pub radii: Vec<(f32, f32)>,
-    /// Steering-member force capacity on the belt-difference axis (N).
+    /// Steering-member force capacity PER OUTPUT (N): the member drives the two outputs
+    /// differentially, so the belt-difference axis `F_s` carries up to 2× this (each side
+    /// sees `F_s/2`, bounded by this datum — the gearing/grip-scale per-track cap).
     pub capacity: f32,
     /// Brake-gated neutral-turn fraction of the 1st-gear tight ratio (L600 marginal pivot).
     pub neutral_fraction: f32,
@@ -534,11 +557,48 @@ impl TankSpec {
                         && gb.shift_down_rpm < gb.shift_up_rpm,
                 ),
                 (
+                    // Ladders ascend (the shift logic assumes gear n+1 is faster) and fit
+                    // the runtime's u8 gear index.
+                    "gearbox ladder shape (ascending, u8-indexable)",
+                    gb.forward_speeds_kmh.len() <= u8::MAX as usize
+                        && gb.reverse_speeds_kmh.len() <= u8::MAX as usize
+                        && gb.forward_speeds_kmh.windows(2).all(|w| w[0] < w[1])
+                        && gb.reverse_speeds_kmh.windows(2).all(|w| w[0] < w[1]),
+                ),
+                (
+                    // The documented hysteresis-by-construction condition, ENFORCED (not
+                    // just down < up): a post-upshift rpm lands at `shift_up × v_g/v_g+1`,
+                    // which must stay above the down band for EVERY adjacent pair in both
+                    // ladders — otherwise an accepted sheet hunts up-down on a boundary
+                    // speed (codex-5).
+                    "gearbox shift-band hysteresis vs ratio steps",
+                    gb.forward_speeds_kmh
+                        .windows(2)
+                        .chain(gb.reverse_speeds_kmh.windows(2))
+                        .all(|w| gb.shift_up_rpm * w[0] / w[1] > gb.shift_down_rpm),
+                ),
+                (
+                    // `is_finite` matters beyond > 0: an infinite brake capacity meets
+                    // `0 × ∞ = NaN` in the engagement scaling before the clamp (codex-5).
                     "steering capacity/efficiency + brake_force",
-                    tr.steering.capacity > 0.0
+                    tr.steering.capacity.is_finite()
+                        && tr.steering.capacity > 0.0
                         && (0.0..=1.0).contains(&tr.steering.recirculation)
                         && (0.0..=1.0).contains(&tr.steering.neutral_fraction)
+                        && tr.brake_force.is_finite()
                         && tr.brake_force > 0.0,
+                ),
+                (
+                    // The compression-braking datum is a fraction of peak torque; the range
+                    // check also rejects NaN/∞.
+                    "engine.drag_fraction",
+                    (0.0..=1.0).contains(&tr.engine.drag_fraction),
+                ),
+                (
+                    // Bounded so the u8 tick countdown can represent it (255 ticks ≈ 4 s —
+                    // far past any honest shift); the range check also rejects NaN/∞.
+                    "gearbox.shift_secs",
+                    (0.0..=3.0).contains(&gb.shift_secs),
                 ),
             ] {
                 if !ok {
@@ -921,6 +981,48 @@ mod tests {
                 .is_ok(),
             "reload_secs: 0 is a legal instant reload"
         );
+    }
+
+    /// Transmission-block runtime invariants (codex-5): non-finite capacities NaN out the
+    /// brake engagement scaling, hunting shift bands and unordered ladders break the shift
+    /// logic's assumptions, and the u8 gear index must be able to address every gear. Each
+    /// rejection is named; the shipped Tiger sheet passes (see
+    /// `tiger_1_spec_passes_validation`).
+    #[test]
+    fn validate_rejects_broken_transmission_blocks() {
+        let fresh = || -> TankSpec {
+            ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron")).unwrap()
+        };
+        let cases: [(&str, fn(&mut TransmissionSpec)); 6] = [
+            ("steering capacity", |tr| {
+                tr.steering.capacity = f32::INFINITY;
+            }),
+            ("brake_force", |tr| tr.brake_force = f32::INFINITY),
+            // Post-upshift rpm = 2300 × v_g/v_g+1 ≈ 1494 at the Tiger's widest step — a
+            // 2200 down band re-downshifts immediately: hunting on a boundary speed.
+            ("hysteresis", |tr| tr.gearbox.shift_down_rpm = 2200.0),
+            ("ladder shape", |tr| {
+                tr.gearbox.forward_speeds_kmh.swap(2, 3);
+            }),
+            // 300 ascending reverse gears: passes ordering and hysteresis, but cannot be
+            // addressed by the runtime's u8 gear index.
+            ("ladder shape", |tr| {
+                tr.gearbox.reverse_speeds_kmh = (1..=300).map(|i| i as f32).collect();
+            }),
+            ("drag_fraction", |tr| tr.engine.drag_fraction = 1.5),
+        ];
+        for (needle, mutate) in cases {
+            let mut spec = fresh();
+            mutate(
+                spec.track
+                    .powertrain
+                    .transmission
+                    .as_mut()
+                    .expect("the Tiger authors a transmission block"),
+            );
+            let err = spec.validate().unwrap_err().to_string();
+            assert!(err.contains(needle), "expected `{needle}` in: {err}");
+        }
     }
 
     /// The spec↔model **bind contract** — the CI-time twin of the runtime contract in
