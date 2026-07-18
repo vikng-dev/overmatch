@@ -1711,6 +1711,20 @@ both.
   law switch) as the promotion's architecture frame; deferred at Yan's discretion:
   param-struct grouping, view.rs fan-outs, wrap-vs-chain sandbox verdict.
 
+- 2026-07-18 — **Step 30e: PHASE 2 MERGED (435a9ce, CI+deploy green)** — `overmatch --offline`
+  (or OVERMATCH_OFFLINE=1) mounts the previously-unmounted GamePlugin (full sim, two-Tiger SP
+  spawn, zero netcode) and startup-latches `ElementGripFeelTest`; `apply_track_forces` passes
+  the element slabs iff that resource exists — every MP composition compiles to the literal
+  pre-gate `None` (wire tripwires 17/17 unchanged, PROTOCOL_REV 13 untouched, MP bit-unchanged
+  by construction). `TrackGripElements` spawn-sized from blueprint link_count on BOTH root
+  paths; forces.rs runtime resize branch REPLACED by debug_assert + release-safe skip (the
+  REV-14 blocker — can never zero live strain); sandbox BeltGripElements pre-sized at startup
+  + both reset paths. Headless proof: strain engages with the resource, exactly 0.0 without;
+  spawn fixture asserts slab sizes at On<Add, Tank>. 256 tests; sandbox elem capture
+  bit-identical to merge-base. OPEN: Yan's Tiger feel drive in --offline = the phase gate for
+  REV 14. (Ops note: one agent worktree vanished mid-session — recovered by re-creating from
+  the base commit; watch for recurrence.)
+
 ## Open questions / parking lot
 
 - **Lateral link rigidity (Yan, 2026-07-16, open tab)**: a real shoe is ~perfectly stiff
