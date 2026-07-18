@@ -1654,6 +1654,27 @@ both.
   OPEN: Yan feel drive (G toggle A/B); netcode shape for ~600 floats of force-affecting
   state (codex brief out — element state self-heals while driving, parked is the hard case);
   turn-radius plateau may want a feel dial once the netcode question settles.
+- 2026-07-18 — **Step 30b: element-regime damping declared ζ = 0.5 (LuGre canonical)**. Yan's
+  second observation: post-pivot rotational wobble ("friction overshooting"). Measured: yaw
+  rings at 1.6 Hz decaying at ζ ≈ 0.146 — exactly the σ1=0.15 viscous partner; the ring is
+  96% LONGITUDINAL (antisymmetric strain, belt-hold as lossless termination). Yan gated:
+  "make sure we're not adding another patch force" → codex quantitative deep-dive + LuGre
+  primary source. VERDICT (codex_wobble_verdict.md): re-declare σ1 at the LuGre-1995
+  canonical ζ=0.5 — an existing constitutive term at its published value, NOT a patch.
+  Alternatives killed by numbers: elastic-zone reduction gives ζ_eq ≈ 0.002 at wobble
+  amplitude (79× short — Dupont hysteresis loop simulation); Coulomb belt clamp = unmeasured
+  constant, double-counts (σ1 acts on contact slip before the hold); ζ=1.0 exceeds the
+  270 kN·s/m/side slope precedent that rang (ζ=0.5 sits 47% below it, 11.7× Jury margin).
+  ELEMENT-ONLY constant (GRIP_ELEMENT_DAMPING_RATIO): the aggregate keeps 0.15 — ζ=0.5 was
+  tried there and made its polluted-signal cycle worse (ADR-0026). GATES: ring ELIMINATED
+  (opposite-sign rebounds 0.125/0.049/0.020/0.008 → 0.106/0.003; the remaining first swing
+  is the ENERGY-RELEASE recoil of cap-saturated strain — 3.3× more damping moved it only
+  15%, friction-cone-bounded, physical "rocks once onto its tracks"); hill-hold 0.00 mm all
+  four poses (45 s on slope_right); drive-off both signs < 0.08 s; pivot steady 1.235 rad/s
+  (unchanged); straight parity 9 mm/s; aggregate + off regimes bit-identical. RECORDED
+  FLOOR: slope-park shows a bounded machine-precision period-2 velocity dither (~1 N
+  print-scale load alternation, belts/pose exactly frozen, flat over 45 s) — deterministic,
+  nm-scale, present only at elem ζ=0.5.
 
 ## Open questions / parking lot
 

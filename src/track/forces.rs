@@ -55,6 +55,21 @@ pub fn grip_stiffness(mu: f32, weight_n: f32) -> f32 {
 /// closed form `2ζ·K·√(shear/(μ·g))` via the stiffness derivation — no new vehicle datum.
 const GRIP_DAMPING_RATIO: f32 = 0.15;
 
+/// Element-regime bristle damping ratio: LuGre sizes the bristle damper σ1 = 2ζ√(σ0·m)
+/// with ζ = 0.5 (Canudas de Wit et al., "A New Model for Control of Systems with
+/// Friction", IEEE TAC 1995 — the canonical bristle-mode damping choice, NOT a measured
+/// rubber loss factor). Sized against the 64 Hz explicit bound: 143.5 kN·s/m per side is
+/// 47% below the ~270 kN·s/m regularizer slope that measurably rang the contact modes
+/// (ADR-0026 §3), with an 11.7× Jury margin on the measured 1.6 Hz post-stop yaw mode —
+/// the wobble this constant exists to close (one ≤0.03 rad/s rebound instead of a ζ=0.15
+/// ring; the Dupont elastic zone is deliberately lossless there, and lowering it was
+/// quantitatively dead: ζ_eq ≈ 0.002 at the observed amplitude, 79× short).
+///
+/// The AGGREGATE regime keeps [`GRIP_DAMPING_RATIO`] = 0.15: ζ = 0.5 was tried there and
+/// made the limit cycle WORSE — its load-weighted mean slip carries support-damper
+/// transients the per-element geometric slip does not.
+const GRIP_ELEMENT_DAMPING_RATIO: f32 = 0.5;
+
 /// Elastic fraction of the grip budget: below `GRIP_BREAKAWAY·C` the state is a PURE spring
 /// (zero plastic flow) — the Dupont elasto-plastic branch that kills presliding drift
 /// (plain Dahl ratchets downhill under oscillating loads; our at-rest suspension limit
@@ -417,9 +432,11 @@ pub fn step_side<O: TerrainOracle>(
         }
         let mut touched = vec![false; len];
         elem_g = vec![Vec2::ZERO; cols.len()];
-        // The damping partner, normalized per unit budget: identical closed form to the
-        // aggregate's `grip_damp / C` (σ1 = 2ζ√(K·m) reduced through the stiffness derivation).
-        let d_coef = 2.0 * GRIP_DAMPING_RATIO / (GRIP_SHEAR_MODULUS_M * params.mu * 9.81).sqrt();
+        // The damping partner, normalized per unit budget: same closed form as the
+        // aggregate's `grip_damp / C` (σ1 = 2ζ√(K·m) reduced through the stiffness
+        // derivation), at the element regime's LuGre-canonical ζ.
+        let d_coef =
+            2.0 * GRIP_ELEMENT_DAMPING_RATIO / (GRIP_SHEAR_MODULUS_M * params.mu * 9.81).sqrt();
         for (idx, c) in cols.iter().enumerate() {
             if !c.has_plane || c.load_elastic <= 0.0 {
                 continue;
