@@ -221,6 +221,9 @@ fn apply_track_forces(
     time: Res<Time>,
     field: Res<TrackField>,
     gear: Option<Res<TrackGear>>,
+    // The offline element-grip gate (element-promotion-checklist.md Q1): present only in the
+    // `--offline` composition. Read as `Option` so every other composition runs unchanged.
+    feel: Option<Res<ElementGripFeelTest>>,
     volumes: Query<VolumeFacets>,
     mut tanks: Query<
         (
@@ -230,6 +233,7 @@ fn apply_track_forces(
             &TankCommand,
             &mut TrackDrive,
             &mut TrackGrip,
+            &mut TrackGripElements,
             &mut TrackContacts,
             Option<&TankVolumes>,
             Option<&TankCapabilities>,
@@ -251,6 +255,7 @@ fn apply_track_forces(
         command,
         mut drive,
         mut grip,
+        mut grip_elements,
         mut contacts,
         tank_volumes,
         tank_caps,
@@ -307,9 +312,18 @@ fn apply_track_forces(
                 &gear.params,
                 oracle,
                 |p| forces.velocity_at_point(p),
-                // The game runs the aggregate regime; the per-element prototype is sandbox-only
-                // until its netcode shape is designed (codex brief, 2026-07-18).
-                None,
+                // The element-regime gate. SAFETY ARGUMENT (this branch is the whole REV-13
+                // story): `ElementGripFeelTest` is inserted ONLY by the offline composition
+                // (`run_offline`) — the net client, net server, and headless server never
+                // insert it, so on every MP path this expression is `None`, exactly the
+                // literal `None` that stood here before the gate existed: MP behavior is
+                // BIT-unchanged, and the unregistered `TrackGripElements` slabs are never
+                // read or mutated (they cannot enter prediction/rollback). The regime is
+                // startup-latched — never flipped mid-session (see the resource doc).
+                match &feel {
+                    Some(_) => Some(&mut grip_elements.sides[si]),
+                    None => None,
+                },
             );
             // Apply in report order — accumulation order is part of determinism.
             for app in &report.apps {
