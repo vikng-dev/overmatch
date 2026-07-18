@@ -235,8 +235,10 @@ pub(super) fn harness_record(
     let total: f32 = contacts.all().map(|c| c.load).sum();
     // Per-side contact arrays: positional prefix [x,y,z,load,slip,ny] kept from schema 1,
     // appended [load_elastic, slip_lat, f_long, f_lat].
-    let side_rows = |si: usize| -> String {
-        contacts.0[si]
+    let side_rows = |side: Side| -> String {
+        contacts
+            .0
+            .get(side)
             .iter()
             .map(|c| {
                 format!(
@@ -258,15 +260,15 @@ pub(super) fn harness_record(
     };
     // Per-side aggregates, named: actual load, elastic load, lateral force. Longitudinal
     // force is the existing `reaction` field; per-contact slips live in the contact arrays.
-    let sums = |si: usize| -> [f32; 3] {
-        let cs = &contacts.0[si];
+    let sums = |side: Side| -> [f32; 3] {
+        let cs = contacts.0.get(side);
         [
             cs.iter().map(|c| c.load).sum(),
             cs.iter().map(|c| c.load_elastic).sum(),
             cs.iter().map(|c| c.f_lat).sum(),
         ]
     };
-    let ([ll, lel, lfl], [rl, rel, rfl]) = (sums(0), sums(1));
+    let ([ll, lel, lfl], [rl, rel, rfl]) = (sums(Side::Left), sums(Side::Right));
     let k = log.tick;
     writeln!(
         log.writer,
@@ -290,18 +292,18 @@ pub(super) fn harness_record(
         arr([shaped.0.throttle, shaped.0.steer]),
         arr(side_cmd),
         arr([lin.0.x, lin.0.y, lin.0.z]),
-        arr([belt.left, belt.right]),
+        arr([belt.get(Side::Left), belt.get(Side::Right)]),
         arr([phase.get(Side::Left) as f32, phase.get(Side::Right) as f32]),
-        arr(dynamics.engine),
-        arr(dynamics.reaction),
-        arr([grip.0[0].x, grip.0[0].y]),
-        arr([grip.0[1].x, grip.0[1].y]),
+        arr(dynamics.engine.0),
+        arr(dynamics.reaction.0),
+        arr([grip.0.get(Side::Left).x, grip.0.get(Side::Left).y]),
+        arr([grip.0.get(Side::Right).x, grip.0.get(Side::Right).y]),
         arr([ll, rl]),
         arr([lel, rel]),
         arr([lfl, rfl]),
         total,
-        side_rows(0),
-        side_rows(1),
+        side_rows(Side::Left),
+        side_rows(Side::Right),
     )
     .unwrap();
     // Element-regime strain telemetry (`e` line, `grip=elem` runs only — `k` lines stay
@@ -309,15 +311,15 @@ pub(super) fn harness_record(
     // Σ|j| / max|j| (m). Contact-loss erasure shows as a `jsum` sawtooth with no hull motion
     // — the parking-flutter instrument (netcode review defect 1).
     if grip_mode.0 == GripMode::Elements {
-        let e_side = |si: usize| -> (usize, f32, f32) {
-            let js = &grip_elements.0[si].strain;
+        let e_side = |side: Side| -> (usize, f32, f32) {
+            let js = &grip_elements.0.get(side).strain;
             let n = js.iter().filter(|j| **j != Vec3::ZERO).count();
             let sum: f32 = js.iter().map(|j| j.length()).sum();
             let max = js.iter().map(|j| j.length()).fold(0.0f32, f32::max);
             (n, sum, max)
         };
-        let (ln, ls, lm) = e_side(0);
-        let (rn, rs, rm) = e_side(1);
+        let (ln, ls, lm) = e_side(Side::Left);
+        let (rn, rs, rm) = e_side(Side::Right);
         writeln!(
             log.writer,
             "{{\"t\":\"e\",\"k\":{k},\"n\":[{ln},{rn}],\"jsum\":[{ls:.6},{rs:.6}],\"jmax\":[{lm:.6},{rm:.6}]}}"

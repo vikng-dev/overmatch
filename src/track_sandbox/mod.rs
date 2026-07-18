@@ -35,6 +35,8 @@ pub(crate) use crate::track::oracle::{BlockField, TerrainBlock};
 pub(crate) use crate::track::route::{
     arc, build_route, external_tangent, polyline_len, resample, sag_span,
 };
+// One side encoding for the whole track core; the sandbox's formerly-private `Side` migrated here.
+pub(crate) use crate::track::side::{PerSide, Side};
 
 // --- Rig geometry (metres), benchmarked on the **Soviet T-34** — well-documented numbers and a
 // running-gear layout (5 big road wheels, rear-ish drive, all-steel track) essentially identical to
@@ -242,13 +244,6 @@ fn toggle_view_mode(
     );
 }
 
-/// Which track a wheel belongs to. Left at −X, right at +X (matching the game's `TrackSide`).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Side {
-    Left,
-    Right,
-}
-
 /// A wheel's role in the running gear. The sprocket (front) and idler (rear) anchor the belt loop
 /// and carry no ground load; the road wheels are the suspension/contact stations.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -293,17 +288,15 @@ struct BeltSample {
 /// conformed to terrain, in loop order. Built once per frame by the active view system
 /// (`conform_belts_field` / `conform_belts_field_chain`); the drawn spline is exactly this.
 #[derive(Resource, Default)]
-struct ConformedBelts {
-    left: Vec<BeltSample>,
-    right: Vec<BeltSample>,
-}
+struct ConformedBelts(PerSide<Vec<BeltSample>>);
 
 impl ConformedBelts {
     fn get(&self, side: Side) -> &[BeltSample] {
-        match side {
-            Side::Left => &self.left,
-            Side::Right => &self.right,
-        }
+        self.0.get(side)
+    }
+
+    fn get_mut(&mut self, side: Side) -> &mut Vec<BeltSample> {
+        self.0.get_mut(side)
     }
 }
 
@@ -446,32 +439,32 @@ struct Contact {
 /// for steer diagnostics) — filled in the fixed step, drawn by `draw_contacts` per frame.
 /// Visualization/telemetry only.
 #[derive(Resource, Default)]
-struct BeltContacts([Vec<Contact>; 2]);
+struct BeltContacts(PerSide<Vec<Contact>>);
 
 impl BeltContacts {
     fn all(&self) -> impl Iterator<Item = &Contact> {
-        self.0.iter().flatten()
+        self.0.values().flatten()
     }
 }
 
 /// Per-side belt-dynamics telemetry from the core report: engine force applied and ground
-/// reaction, `[left, right]`. Harness rows only.
+/// reaction. Harness rows only.
 #[derive(Resource, Default)]
 struct SideDynamics {
-    engine: [f32; 2],
-    reaction: [f32; 2],
+    engine: PerSide<f32>,
+    reaction: PerSide<f32>,
 }
 
-/// The per-side elastic grip resultant (the static-friction state, `SideState::grip`),
-/// `[left, right]` — the sandbox analogue of the game's `TrackGrip` component. In the
-/// element regime this carries the summed element force instead (telemetry only).
+/// The per-side elastic grip resultant (the static-friction state, `SideState::grip`) — the
+/// sandbox analogue of the game's `TrackGrip` component. In the element regime this carries the
+/// summed element force instead (telemetry only).
 #[derive(Resource, Default)]
-struct BeltGrip([Vec2; 2]);
+struct BeltGrip(PerSide<Vec2>);
 
-/// The per-element isotropic shear state, `[left, right]` — the PROTOTYPE regime's state
+/// The per-element isotropic shear state — the PROTOTYPE regime's state
 /// (`track::forces::GripElements`): one world-space shear vector per material link × column.
 #[derive(Resource, Default)]
-struct BeltGripElements([crate::track::forces::GripElements; 2]);
+struct BeltGripElements(PerSide<crate::track::forces::GripElements>);
 
 /// Which grip regime the force law runs (harness `grip=` key; `G` cycles live).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -687,23 +680,14 @@ struct ShapedDrive(crate::track::drive::DriveAxes);
 /// Per-track belt surface speed (m/s, + = drives the tank forward): the integrated state of the
 /// slip model. Positive when the track is laying ground backward under the hull.
 #[derive(Resource, Default)]
-struct BeltSpeed {
-    left: f32,
-    right: f32,
-}
+struct BeltSpeed(PerSide<f32>);
 
 impl BeltSpeed {
     fn get(&self, side: Side) -> f32 {
-        match side {
-            Side::Left => self.left,
-            Side::Right => self.right,
-        }
+        *self.0.get(side)
     }
     fn set(&mut self, side: Side, value: f32) {
-        match side {
-            Side::Left => self.left = value,
-            Side::Right => self.right = value,
-        }
+        *self.0.get_mut(side) = value;
     }
 }
 
@@ -1010,11 +994,8 @@ fn spawn_rig(
         Handle<Mesh>,
         Handle<StandardMaterial>,
     )> = Vec::new();
-    for side in [Side::Left, Side::Right] {
-        let x = match side {
-            Side::Left => -TRACK_HALF_WIDTH,
-            Side::Right => TRACK_HALF_WIDTH,
-        };
+    for side in Side::ALL {
+        let x = side.plane_x(TRACK_HALF_WIDTH);
         // Road wheels front (−Z) to rear (+Z).
         for i in 0..ROAD_WHEELS {
             let z = -span / 2.0 + i as f32 * WHEEL_SPACING;
@@ -1180,8 +1161,8 @@ fn log_state(
         "hull y = {:.3} m | stations = {count} | support = {:.0}% of weight | belt L/R = {:.1}/{:.1} m/s | tank = {:.1} m/s",
         transform.translation.y,
         100.0 * total / weight,
-        belt.left,
-        belt.right,
+        belt.get(Side::Left),
+        belt.get(Side::Right),
         speed,
     );
 }
@@ -1209,7 +1190,7 @@ fn draw_rig_gizmos(
         }
     }
 
-    for side in [Side::Left, Side::Right] {
+    for side in Side::ALL {
         if viz.chain {
             let mut world = belts.get(side).iter().map(|s| s.world);
             gizmos.linestrip(world.clone(), BELT_COLOR);
@@ -1231,10 +1212,7 @@ fn draw_rig_gizmos(
             continue;
         }
         let affine = hull.affine();
-        let track_x = match side {
-            Side::Left => -TRACK_HALF_WIDTH,
-            Side::Right => TRACK_HALF_WIDTH,
-        };
+        let track_x = side.plane_x(TRACK_HALF_WIDTH);
         let outer: Vec<Vec3> = (0..n)
             .map(|i| {
                 let tan2 = (samples[(i + 1) % n].local - samples[(i + n - 1) % n].local)
