@@ -1,5 +1,16 @@
 # Phase-2 offline gate + REV-14 landing checklist (codex, 2026-07-18)
 
+> **Transmission-state addendum (codex post-merge review, 2026-07-18):** REV 14 now also
+> carries `TransmissionState { gear, shift_ticks, steer_step, reverse }`. The review found
+> its transitions are FLOAT-BOUNDARY BIFURCATIONS: gear/detent/direction decisions compare
+> continuous derived values (rpm from belt speed) against exact thresholds — a server and
+> predicted client can sit within accepted belt-speed tolerance yet land on opposite sides
+> of `shift_up_rpm`, one entering the SHIFT_TICKS interruption and one not (same for
+> detents and direction). REV 14 must (a) replicate + hash these discrete fields exactly,
+> and (b) make the decision inputs quantized or otherwise divergence-resistant — discrete
+> transitions must reconcile through rollback like any predicted state, not drift apart
+> silently inside tolerance bands.
+
 > **Post-merge review addendum (codex, same day):** the `step_side` runtime size-repair
 > branch (`forces.rs`, the clear-and-zero-resize of both `GripElements` slabs on length
 > mismatch) is a CONFIRMED REV-14 blocker with a concrete failure: a predicted root that
