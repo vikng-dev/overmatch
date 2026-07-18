@@ -31,7 +31,7 @@
 use super::*;
 
 use crate::track::chain::{ChainInput, ChainParams, ChainSideInput, ChainState};
-use crate::track::forces::{ForceParams, SideInput, SideState, step_side};
+use crate::track::forces::{ForceParams, SideInput, SideState, phase_decompose, step_side};
 use crate::track::oracle::{BlockField, TerrainOracle};
 use crate::track::wheels::{WheelParams, wheel_lift_step, wheel_lift_target};
 
@@ -721,11 +721,9 @@ pub(super) fn conform_belts_field(
             loop_pts.push(first);
         }
         let pitch = polyline_len(&loop_pts) / pin_belt.count.max(1) as f32;
-        let mut joints = resample(
-            &loop_pts,
-            pitch,
-            phase.get(side).rem_euclid(f64::from(pitch)) as f32,
-        );
+        // Resample offset from the canonical decomposition (wrap count unused for the wrap view).
+        let (_, offset) = phase_decompose(phase.get(side), pitch);
+        let mut joints = resample(&loop_pts, pitch, offset);
         joints.truncate(pin_belt.count);
         if joints.len() < 3 {
             continue;
@@ -797,11 +795,9 @@ pub(super) fn draw_sample_points(
             loop_pts.push(first);
         }
         let pitch = polyline_len(&loop_pts) / pin_belt.count.max(1) as f32;
-        let mut stations = resample(
-            &loop_pts,
-            pitch,
-            phase.get(side).rem_euclid(f64::from(pitch)) as f32,
-        );
+        // Resample offset from the canonical decomposition (wrap count unused here).
+        let (_, offset) = phase_decompose(phase.get(side), pitch);
+        let mut stations = resample(&loop_pts, pitch, offset);
         stations.truncate(pin_belt.count);
         let n = stations.len();
         if n < 3 {
