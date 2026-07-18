@@ -282,6 +282,17 @@ pub struct EngineSpec {
     pub rated_rpm: f32,
     /// `(rpm, N·m)` authoring points, ascending rpm.
     pub torque_curve: Vec<(f32, f32)>,
+    /// Zero-throttle engine drag (compression braking) as a fraction of peak torque,
+    /// reflected through the current gear. Diesel motoring torque runs ~20–30% of rated
+    /// (INFERRED band — no per-engine motoring curve reached); defaults to 0.25 when the
+    /// vehicle does not author one.
+    #[serde(default = "default_drag_fraction")]
+    pub drag_fraction: f32,
+}
+
+/// See [`EngineSpec::drag_fraction`] — the middle of the diesel compression-braking band.
+fn default_drag_fraction() -> f32 {
+    0.25
 }
 
 /// The gear ladders as authored per-gear top belt speeds (km/h) at `rated_rpm`, plus the

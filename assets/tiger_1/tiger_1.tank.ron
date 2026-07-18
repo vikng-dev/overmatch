@@ -57,6 +57,11 @@ TankSpec(
                     // (rpm, N·m): 800→1300 INFERRED (~0.70 × peak); 2100→1850 ANCHOR
                     // (medium); 2500→1686 DERIVED (600 PS); 3000→1639 DERIVED (700 PS).
                     torque_curve: [(800.0, 1300.0), (2100.0, 1850.0), (2500.0, 1686.0), (3000.0, 1639.0)],
+                    // Compression braking at zero throttle, fraction of peak torque
+                    // reflected through the current gear: diesel motoring runs ~20–30%
+                    // of rated torque — INFERRED (no HL230 motoring curve reachable),
+                    // mid-band.
+                    drag_fraction: 0.25,
                 ),
                 gearbox: (
                     // OLVAR OG 40 12 16, 8F/4R [ANCHOR]. Per-gear top speeds @ 3000 rpm

@@ -70,18 +70,19 @@ pub const SHIFT_TICKS: u8 = 20;
 /// INFERRED numerical policy, not vehicle data.
 const GOVERNOR_CUT_RPM: f32 = 100.0;
 
-/// Engine drag torque as a fraction of peak torque — the reflected drag-torque curve stand-in
-/// (design §3: engine braking is a drag TORQUE, never the negative half of rated power).
-/// INFERRED ~8% of peak (typical diesel motoring torque); the codex data pass may refine it.
-const ENGINE_DRAG_FRACTION: f32 = 0.08;
-
 /// Belt-speed span (m/s) over which the engine-drag torque saturates — a viscous-near-zero
 /// ramp so drag cannot sign-flip chatter around standstill (the parking brake owns standstill).
 const DRAG_SAT_SPEED: f32 = 0.2;
 
-/// Throttle magnitude above which engine drag is fully released (blends out with the
-/// hold-blend shape below it): an open throttle is not motoring.
+/// PROPULSIVE throttle magnitude above which engine drag is fully released (blends out with
+/// the hold-blend shape below it): an open throttle is not motoring. A BRAKE command
+/// (throttle against the engaged ladder) is not propulsive — the engine keeps motoring, so
+/// drag stays engaged under it.
 const DRAG_THROTTLE_RELEASE: f32 = 0.5;
+
+/// Input deadzone on the throttle axis for direction/brake intent (matches the swap logic's
+/// historical deadband).
+const DEAD: f32 = 0.05;
 
 /// Steering-servo proportional band (m/s of `d` error at which the servo saturates to the
 /// declared steering capacity). Sized against the grip law's `slip_saturation` scale.
@@ -155,6 +156,11 @@ pub struct TransmissionParams {
     pub recirculation: f32,
     /// Per-side service/parking brake capacity at the sprocket (N).
     pub brake_capacity_n: f32,
+    /// Zero-throttle engine drag (compression braking) as a fraction of peak torque,
+    /// reflected through the CURRENT gear — a drag TORQUE (design §3), never the negative
+    /// half of rated power. Diesel motoring/compression braking runs ~20–30% of rated
+    /// torque (INFERRED band, tagged at the authoring site).
+    pub drag_fraction: f32,
     /// Derived at construction: the torque curve's peak (the low-speed rev target).
     pub peak_torque_rpm: f32,
     pub peak_torque_nm: f32,
@@ -183,6 +189,8 @@ pub struct TransmissionAuthoring<'a> {
     pub neutral_fraction: f32,
     pub recirculation: f32,
     pub brake_capacity_n: f32,
+    /// See [`TransmissionParams::drag_fraction`].
+    pub drag_fraction: f32,
     pub sprocket_radius_m: f32,
     /// Track half-tread `b` (m) — the spec's `plane_x`.
     pub half_tread_m: f32,
@@ -235,6 +243,7 @@ impl TransmissionParams {
             neutral_fraction: a.neutral_fraction,
             recirculation: a.recirculation,
             brake_capacity_n: a.brake_capacity_n,
+            drag_fraction: a.drag_fraction,
             peak_torque_rpm,
             peak_torque_nm,
         }
@@ -385,8 +394,7 @@ fn regenerative(
     let d = (vl - vr) / 2.0;
 
     // --- Direction: the F/R ladder swap happens near standstill only; above it a commanded
-    // reversal drives the propulsion force against the motion (driveline braking) first.
-    const DEAD: f32 = 0.05;
+    // reversal is a BRAKE command (service brakes, below) until the tank is nearly stopped.
     if st.shift_ticks == 0 {
         let want_rev = inp.throttle < -DEAD;
         let want_fwd = inp.throttle > DEAD;
@@ -423,11 +431,35 @@ fn regenerative(
     }
     let g = ladder[(st.gear - 1) as usize];
 
+    // --- Driver intent (the game-layer W/S contract, declared HERE once with honest
+    // mechanisms — the Governor conflated zero-throttle with brake-to-zero):
+    //   * throttle WITH the engaged ladder → drive (`propulsive`);
+    //   * throttle AGAINST it → SERVICE BRAKES (`service`, the declared brake capacity)
+    //     until near standstill, where the ladder swap above engages the opposite gears —
+    //     never `|throttle|`-drive in the engaged direction (that was the measured
+    //     "cannot decelerate" bug: full reverse at speed produced full FORWARD force);
+    //   * throttle released → coast under engine drag (compression braking through the
+    //     CURRENT gear, growing as the box downshifts);
+    //   * zero command at rest → the parking hold (unchanged).
+    let dir = if st.reverse { -1.0 } else { 1.0 };
+    let opposing = inp.throttle * dir < -DEAD;
+    let propulsive = if opposing {
+        0.0
+    } else {
+        inp.throttle.abs().clamp(0.0, 1.0)
+    };
+    let service = if opposing {
+        inp.throttle.abs().clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+
     // --- Engine operating point. Below the geared rpm the crank is allowed to rev toward the
-    // torque peak with command (the declutch/slip band a preselector launch actually uses —
-    // INFERRED simplification standing in for clutch-slip state; without it a standing start
-    // would read idle rpm and a governed-out curve would read zero torque).
-    let cmd_mag = inp.throttle.abs().max(inp.steer.abs()).clamp(0.0, 1.0);
+    // torque peak with PROPULSIVE command (the declutch/slip band a preselector launch
+    // actually uses — INFERRED simplification standing in for clutch-slip state; without it a
+    // standing start would read idle rpm and a governed-out curve would read zero torque). A
+    // brake command does not rev the crank.
+    let cmd_mag = propulsive.max(inp.steer.abs()).clamp(0.0, 1.0);
     let rpm_floor = tp.engine.idle_rpm + (tp.peak_torque_rpm - tp.engine.idle_rpm) * cmd_mag;
     let rpm = rpm_geared(g).max(rpm_floor);
     let torque = tp.torque_at(rpm);
@@ -435,16 +467,17 @@ fn regenerative(
 
     // --- Propulsion on m: torque curve × total reduction at the sprocket, throttle-scaled,
     // zero through a shift's interruption window. Engine drag is a reflected drag TORQUE
-    // (design §3), saturating over DRAG_SAT_SPEED and released as the throttle opens.
-    let dir = if st.reverse { -1.0 } else { 1.0 };
+    // (design §3), saturating over DRAG_SAT_SPEED and released as the throttle opens —
+    // release keys on the PROPULSIVE component only, so a brake command keeps the engine
+    // motoring (compression braking stacks under the service brakes).
     let mut f_p = if shifting {
         0.0
     } else {
-        dir * inp.throttle.abs() * (torque * g / tp.sprocket_radius)
+        dir * propulsive * (torque * g / tp.sprocket_radius)
     };
-    let f_drag = -(tp.peak_torque_nm * ENGINE_DRAG_FRACTION * g / tp.sprocket_radius)
+    let f_drag = -(tp.peak_torque_nm * tp.drag_fraction * g / tp.sprocket_radius)
         * (m / DRAG_SAT_SPEED).clamp(-1.0, 1.0)
-        * forces::hold_blend(inp.throttle.abs() / DRAG_THROTTLE_RELEASE);
+        * forces::hold_blend(propulsive / DRAG_THROTTLE_RELEASE);
 
     // --- Steering. κ table indexed by the active gear (reverse mirrors the low forward
     // gears); `d` follows the steer SIGN regardless of travel direction — the superimposed
@@ -585,6 +618,16 @@ fn regenerative(
         };
         let cap = h * tp.brake_capacity_n;
         *qi += (inp.reactions[i] - *qi).clamp(-cap, cap);
+        // SERVICE brakes (driver intent: throttle against the engaged ladder). The
+        // capacity-limited STOP force: the B that lands this belt at exactly zero after
+        // this tick's integration — equivalently `−I·v_next_unbraked/dt` clamped, so it
+        // always opposes where the belt is headed, saturates at ±capacity against a
+        // slide, and can neither speed the belt up nor push it through zero.
+        if service > 0.0 {
+            let cap_s = service * tp.brake_capacity_n;
+            let stop = inp.reactions[i] - *qi - inp.speeds[i] * fp.inertia / dt;
+            *qi += stop.clamp(-cap_s, cap_s);
+        }
     }
 
     // --- Integrate both sides simultaneously: I·v̇ = Q − R (the reaction ALWAYS applies).
@@ -660,6 +703,7 @@ mod tests {
             neutral_fraction: 0.5,
             recirculation: 0.9,
             brake_capacity_n: 120_000.0,
+            drag_fraction: 0.25,
             sprocket_radius_m: 0.34,
             half_tread_m: 1.25,
         })
@@ -943,6 +987,83 @@ mod tests {
                      > available {available:.0} J + released {released:.0} J"
                 );
             }
+        }
+    }
+
+    /// The codex-1 regression (the "cannot decelerate" bug): a forward-moving tank given
+    /// full REVERSE throttle must brake monotonically to near standstill (service brakes),
+    /// then engage the reverse ladder at the swap seam and actually drive backward — the
+    /// old code fed `dir × |throttle|` through the still-forward ladder, producing full
+    /// FORWARD force and releasing engine drag: opposite input accelerated the tank.
+    #[test]
+    fn opposite_throttle_at_speed_brakes_then_reverses() {
+        let (fp, tp) = (lab_fp(), lab_tp());
+        let mut st = TransmissionState {
+            gear: 4,
+            ..Default::default()
+        };
+        let mut speeds = [6.0f32, 6.0];
+        let mut m = 6.0f32;
+        let mut swapped_at = None;
+        for tick in 0..1024 {
+            // Reactions zero — the hardest case: the OLD code accelerated forward here.
+            let inp = input(-1.0, 0.0, speeds, [0.0, 0.0]);
+            let rep = step(TransmissionMode::Hybrid, &fp, Some(&tp), &mut st, &inp);
+            let m_next = (rep.next_speeds[0] + rep.next_speeds[1]) / 2.0;
+            if swapped_at.is_none() {
+                assert!(
+                    m_next <= m + 1e-4,
+                    "tick {tick}: opposite throttle must never accelerate forward \
+                     (m {m} -> {m_next})"
+                );
+            }
+            if st.reverse && swapped_at.is_none() {
+                assert!(
+                    m.abs() < DIRECTION_SWAP_SPEED,
+                    "the reverse ladder must engage only near standstill (m = {m})"
+                );
+                swapped_at = Some(tick);
+            }
+            speeds = rep.next_speeds;
+            m = m_next;
+        }
+        assert!(
+            swapped_at.is_some(),
+            "the held reverse command never engaged the reverse ladder (m = {m})"
+        );
+        assert!(
+            m < -0.5,
+            "after the swap the tank must actually drive backward (m = {m})"
+        );
+    }
+
+    /// Coast intent: zero throttle at speed applies the DECLARED compression-braking drag —
+    /// `drag_fraction × peak torque` reflected through the current gear, split per side —
+    /// and nothing else (no parking brake at speed, no thrust).
+    #[test]
+    fn coast_drag_is_declared_fraction_through_current_gear() {
+        let (fp, tp) = (lab_fp(), lab_tp());
+        let mut st = TransmissionState {
+            gear: 3,
+            ..Default::default()
+        };
+        // Mid-band speed for gear 3 (no shift decision interferes).
+        let g3 = tp.gears_fwd[2];
+        let v = 1_300.0 * RPM_TO_RAD * tp.sprocket_radius / g3;
+        let rep = step(
+            TransmissionMode::Hybrid,
+            &fp,
+            Some(&tp),
+            &mut st,
+            &input(0.0, 0.0, [v, v], [0.0, 0.0]),
+        );
+        assert_eq!(st.gear, 3, "mid-band coast must not shift");
+        let expect = -(tp.peak_torque_nm * tp.drag_fraction * g3 / tp.sprocket_radius) / 2.0;
+        for side in rep.forces {
+            assert!(
+                (side - expect).abs() < 1.0,
+                "coasting side force {side} N must be the declared drag share {expect} N"
+            );
         }
     }
 

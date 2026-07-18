@@ -395,6 +395,8 @@ impl Default for T34Transmission {
             recirculation: 0.9,
             // Brake ≈ traction limit (μ·W/2 ≈ 117 kN) — the sound sizing rule.
             brake_capacity_n: 120_000.0,
+            // Compression braking ~25% of peak torque (diesel 20–30% band) — INFERRED.
+            drag_fraction: 0.25,
             sprocket_radius_m: DRIVE_RADIUS + TRACK_THICKNESS / 2.0,
             half_tread_m: TRACK_HALF_WIDTH,
         }))
