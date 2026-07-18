@@ -547,11 +547,42 @@ impl TankSpec {
                         && gb.shift_down_rpm < gb.shift_up_rpm,
                 ),
                 (
+                    // Ladders ascend (the shift logic assumes gear n+1 is faster) and fit
+                    // the runtime's u8 gear index.
+                    "gearbox ladder shape (ascending, u8-indexable)",
+                    gb.forward_speeds_kmh.len() <= u8::MAX as usize
+                        && gb.reverse_speeds_kmh.len() <= u8::MAX as usize
+                        && gb.forward_speeds_kmh.windows(2).all(|w| w[0] < w[1])
+                        && gb.reverse_speeds_kmh.windows(2).all(|w| w[0] < w[1]),
+                ),
+                (
+                    // The documented hysteresis-by-construction condition, ENFORCED (not
+                    // just down < up): a post-upshift rpm lands at `shift_up × v_g/v_g+1`,
+                    // which must stay above the down band for EVERY adjacent pair in both
+                    // ladders — otherwise an accepted sheet hunts up-down on a boundary
+                    // speed (codex-5).
+                    "gearbox shift-band hysteresis vs ratio steps",
+                    gb.forward_speeds_kmh
+                        .windows(2)
+                        .chain(gb.reverse_speeds_kmh.windows(2))
+                        .all(|w| gb.shift_up_rpm * w[0] / w[1] > gb.shift_down_rpm),
+                ),
+                (
+                    // `is_finite` matters beyond > 0: an infinite brake capacity meets
+                    // `0 × ∞ = NaN` in the engagement scaling before the clamp (codex-5).
                     "steering capacity/efficiency + brake_force",
-                    tr.steering.capacity > 0.0
+                    tr.steering.capacity.is_finite()
+                        && tr.steering.capacity > 0.0
                         && (0.0..=1.0).contains(&tr.steering.recirculation)
                         && (0.0..=1.0).contains(&tr.steering.neutral_fraction)
+                        && tr.brake_force.is_finite()
                         && tr.brake_force > 0.0,
+                ),
+                (
+                    // The compression-braking datum is a fraction of peak torque; the range
+                    // check also rejects NaN/∞.
+                    "engine.drag_fraction",
+                    (0.0..=1.0).contains(&tr.engine.drag_fraction),
                 ),
             ] {
                 if !ok {
@@ -934,6 +965,48 @@ mod tests {
                 .is_ok(),
             "reload_secs: 0 is a legal instant reload"
         );
+    }
+
+    /// Transmission-block runtime invariants (codex-5): non-finite capacities NaN out the
+    /// brake engagement scaling, hunting shift bands and unordered ladders break the shift
+    /// logic's assumptions, and the u8 gear index must be able to address every gear. Each
+    /// rejection is named; the shipped Tiger sheet passes (see
+    /// `tiger_1_spec_passes_validation`).
+    #[test]
+    fn validate_rejects_broken_transmission_blocks() {
+        let fresh = || -> TankSpec {
+            ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron")).unwrap()
+        };
+        let cases: [(&str, fn(&mut TransmissionSpec)); 6] = [
+            ("steering capacity", |tr| {
+                tr.steering.capacity = f32::INFINITY;
+            }),
+            ("brake_force", |tr| tr.brake_force = f32::INFINITY),
+            // Post-upshift rpm = 2300 × v_g/v_g+1 ≈ 1494 at the Tiger's widest step — a
+            // 2200 down band re-downshifts immediately: hunting on a boundary speed.
+            ("hysteresis", |tr| tr.gearbox.shift_down_rpm = 2200.0),
+            ("ladder shape", |tr| {
+                tr.gearbox.forward_speeds_kmh.swap(2, 3);
+            }),
+            // 300 ascending reverse gears: passes ordering and hysteresis, but cannot be
+            // addressed by the runtime's u8 gear index.
+            ("ladder shape", |tr| {
+                tr.gearbox.reverse_speeds_kmh = (1..=300).map(|i| i as f32).collect();
+            }),
+            ("drag_fraction", |tr| tr.engine.drag_fraction = 1.5),
+        ];
+        for (needle, mutate) in cases {
+            let mut spec = fresh();
+            mutate(
+                spec.track
+                    .powertrain
+                    .transmission
+                    .as_mut()
+                    .expect("the Tiger authors a transmission block"),
+            );
+            let err = spec.validate().unwrap_err().to_string();
+            assert!(err.contains(needle), "expected `{needle}` in: {err}");
+        }
     }
 
     /// The spec↔model **bind contract** — the CI-time twin of the runtime contract in
