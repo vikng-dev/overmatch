@@ -265,6 +265,8 @@ pub(super) fn harness_record(
     shaped: Res<ShapedDrive>,
     dynamics: Res<SideDynamics>,
     grip: Res<BeltGrip>,
+    grip_mode: Res<GripSwitch>,
+    grip_elements: Res<BeltGripElements>,
     contacts: Res<BeltContacts>,
     belt: Res<BeltSpeed>,
     phase: Res<BeltPhase>,
@@ -381,6 +383,26 @@ pub(super) fn harness_record(
         chain_rows.join(","),
     )
     .unwrap();
+    // Element-regime strain telemetry (`e` line, `grip=elem` runs only — `k` lines stay
+    // byte-stable for the parity gates): per side, the count of elements holding strain and
+    // Σ|j| / max|j| (m). Contact-loss erasure shows as a `jsum` sawtooth with no hull motion
+    // — the parking-flutter instrument (netcode review defect 1).
+    if grip_mode.0 == GripMode::Elements {
+        let e_side = |si: usize| -> (usize, f32, f32) {
+            let js = &grip_elements.0[si].strain;
+            let n = js.iter().filter(|j| **j != Vec3::ZERO).count();
+            let sum: f32 = js.iter().map(|j| j.length()).sum();
+            let max = js.iter().map(|j| j.length()).fold(0.0f32, f32::max);
+            (n, sum, max)
+        };
+        let (ln, ls, lm) = e_side(0);
+        let (rn, rs, rm) = e_side(1);
+        writeln!(
+            log.writer,
+            "{{\"t\":\"e\",\"k\":{k},\"n\":[{ln},{rn}],\"jsum\":[{ls:.6},{rs:.6}],\"jmax\":[{lm:.6},{rm:.6}]}}"
+        )
+        .unwrap();
+    }
     log.tick += 1;
     if log.tick >= harness.warmup + harness.ticks {
         log.writer.flush().unwrap();
