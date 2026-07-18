@@ -605,13 +605,19 @@ fn regenerative(
 
     // --- Power conservation: delivered ≤ engine power available at the operating point, with
     // inner-track negative power recirculated at η. One common scale on the drive + steer
-    // forces (a tight turn slows the tank — the physically required speed loss). The λ
-    // constraint transfers power between the tracks and is excluded (zero ideal work); drag
-    // and brakes only remove energy.
-    let p_p = f_p * m;
-    let p_s = f_s * d;
-    let pos = p_p.max(0.0) + p_s.max(0.0);
-    let neg = (-p_p).max(0.0) + (-p_s).max(0.0);
+    // forces (a tight turn slows the tank — the physically required speed loss). The split is
+    // over the PHYSICAL OUTPUTS: the engine-borne per-side forces `(F_p ± F_s)/2` deliver
+    // `Qᵢ·vᵢ` at each sprocket, and it is a SPROCKET going negative that recirculates —
+    // modal powers (`F_p·m`, `F_s·d`) sum to the same total but mis-split it: with
+    // `F_s > F_p` the inner sprocket is negative while both modal terms read positive, so η
+    // was never charged (codex-3). The λ constraint transfers power between the tracks at
+    // zero IDEAL work and is excluded from the engine budget — its declared-η transfer loss
+    // is a known-open refinement (HQ: "L600 transfer loss"), not modeled here. Drag and
+    // brakes only remove energy.
+    let p_l = (f_p + f_s) / 2.0 * vl;
+    let p_r = (f_p - f_s) / 2.0 * vr;
+    let pos = p_l.max(0.0) + p_r.max(0.0);
+    let neg = (-p_l).max(0.0) + (-p_r).max(0.0);
     let net = pos - tp.recirculation * neg;
     let power_scale = if net > p_avail && net > 0.0 {
         p_avail / net
@@ -1098,20 +1104,27 @@ mod tests {
     /// Energy honesty over 64-tick windows: Σ(Q_L·v_L + Q_R·v_R)·dt never exceeds the
     /// integrated engine power available plus released belt-inertia energy — regeneration
     /// recirculates, it does not create (the design's no-free-energy bound). Exercised over
-    /// a launch, a driving turn, and a pivot, in both regenerative modes.
+    /// a launch, a driving turn, and a pivot, in both regenerative modes — and, for the
+    /// codex-3 split, from an asymmetric rolling start with a hard steer command at gentle
+    /// throttle (`F_s ≫ F_p`, `m > d > 0`): the case where one SPROCKET's power is negative
+    /// while both MODAL powers read positive, so the modal split never charged η.
     #[test]
     fn energy_bound_no_free_energy() {
         let (fp, tp) = (lab_fp(), lab_tp());
-        for (mode, throttle, steer) in [
-            (TransmissionMode::Hybrid, 1.0, 0.0),
-            (TransmissionMode::Hybrid, 0.7, 0.6),
-            (TransmissionMode::Hybrid, 0.0, 1.0),
-            (TransmissionMode::FixedRadii, 1.0, 0.0),
-            (TransmissionMode::FixedRadii, 0.7, 0.8),
-            (TransmissionMode::FixedRadii, 0.0, 1.0),
+        for (mode, throttle, steer, seed) in [
+            (TransmissionMode::Hybrid, 1.0, 0.0, [0.0f32, 0.0]),
+            (TransmissionMode::Hybrid, 0.7, 0.6, [0.0, 0.0]),
+            (TransmissionMode::Hybrid, 0.0, 1.0, [0.0, 0.0]),
+            // Codex-3: steer-dominant at a rolling start — inner sprocket goes negative.
+            (TransmissionMode::Hybrid, 0.2, 1.0, [4.0, 2.0]),
+            (TransmissionMode::Hybrid, 0.2, -1.0, [4.0, 2.0]),
+            (TransmissionMode::FixedRadii, 1.0, 0.0, [0.0, 0.0]),
+            (TransmissionMode::FixedRadii, 0.7, 0.8, [0.0, 0.0]),
+            (TransmissionMode::FixedRadii, 0.0, 1.0, [0.0, 0.0]),
+            (TransmissionMode::FixedRadii, 0.2, 1.0, [4.0, 2.0]),
         ] {
             let mut st = TransmissionState::default();
-            let mut speeds = [0.0f32; 2];
+            let mut speeds = seed;
             let dt_s = 1.0_f64 / 64.0;
             for window in 0..6 {
                 let mut delivered = 0.0f64;
@@ -1143,6 +1156,45 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Codex-3 pin: the recirculation split reads the PHYSICAL sprocket powers, not the
+    /// modal ones. Steer-only at an asymmetric rolling start (`F_p = 0`, saturated `F_s`,
+    /// `v_L = 5, v_R = 3`): the outer sprocket delivers `F_s/2·v_L`, the inner ABSORBS
+    /// `F_s/2·v_R` — physical net `= F_s/2·(v_L − η·v_R)`, while the modal split reads
+    /// `F_s·d` with no negative term at all. The reported power_scale must be the physical
+    /// one (and measurably NOT the modal one).
+    #[test]
+    fn recirculation_splits_physical_output_powers() {
+        let (fp, tp) = (lab_fp(), lab_tp());
+        let mut st = TransmissionState {
+            gear: 5,
+            ..Default::default()
+        };
+        let (vl, vr) = (5.0f32, 3.0);
+        let rep = step(
+            TransmissionMode::Hybrid,
+            &fp,
+            Some(&tp),
+            &mut st,
+            &input(0.0, 1.0, [vl, vr], [0.0, 0.0]),
+        );
+        // Saturated servo (target far past the band): F_s = 2 × per-output capacity.
+        let f_s = 2.0 * tp.steer_capacity_n;
+        let (p_l, p_r) = (f_s / 2.0 * vl, -f_s / 2.0 * vr);
+        let physical_net = p_l - tp.recirculation * -p_r;
+        let expect = rep.power_available / physical_net;
+        assert!(
+            (rep.power_scale - expect).abs() < 1e-3,
+            "power_scale {} must be the physical-output split {expect}",
+            rep.power_scale
+        );
+        let modal = rep.power_available / (f_s * ((vl - vr) / 2.0));
+        assert!(
+            (rep.power_scale - modal).abs() > 0.02,
+            "the physical split must be distinguishable from the modal one here \
+             (physical {expect} vs modal {modal}) — otherwise this test pins nothing"
+        );
     }
 
     /// The codex-1 regression (the "cannot decelerate" bug): a forward-moving tank given
