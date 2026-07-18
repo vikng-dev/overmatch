@@ -1694,6 +1694,23 @@ both.
   REV-14 checklist incl. the CatchUpGated JIP correction). NEXT: cleanup slot A
   (improve-codebase-architecture scan), then Phase 2 offline gate.
 
+- 2026-07-18 — **Step 30d: CLEANUP SLOT A executed (merged 8c8c826)** — first run of the
+  between-phases cleanup cadence (improve-codebase-architecture scan → HTML report → Yan
+  accepted the recommended set). Landed: (A) deletions −248 net (JitterProbe retired,
+  harness scan/vscan + k-line chain/wheels payloads dropped — chain was the measured
+  run-nondeterministic field; inverted fate-comments fixed: the route chain WON and SHIPPED
+  as the game view, the wrap is the sandbox A/B partner, neither awaiting deletion);
+  (B) all material-identity math routed through canonical phase_decompose (chain.rs,
+  view.rs, model4.rs ×2); (C) src/track/side.rs — core Side + PerSide&lt;T&gt; (fixed
+  left-then-right order, exact sign(), plane_x helper; 7 sandbox resources + sim.rs
+  converted; wire shapes untouched); (D) codex post-merge review fixes (hysteresis-band
+  regression test — verified to FAIL on the broken variant; phase_decompose contract
+  guard). Gate ladder: post-A field-wise 5/5, post-B/C/D bit-identical 5/5 each, analyzer
+  8/8, 255 tests. Codex review also confirmed the REV-14 resize blocker (addendum in
+  element-promotion-checklist.md). Carried into Phase 2: candidate 1 (collapse the 3-way
+  law switch) as the promotion's architecture frame; deferred at Yan's discretion:
+  param-struct grouping, view.rs fan-outs, wrap-vs-chain sandbox verdict.
+
 ## Open questions / parking lot
 
 - **Lateral link rigidity (Yan, 2026-07-16, open tab)**: a real shoe is ~perfectly stiff
