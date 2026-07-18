@@ -31,7 +31,9 @@ use crate::state::{GameplaySet, SimPhase};
 use crate::tank::{Tank, TrackSide};
 
 use super::drive::{DriveAxes, shape_drive};
-use super::forces::{BeltContact, ForceParams, SideInput, SideState, grip_stiffness, step_side};
+use super::forces::{
+    BeltContact, ForceParams, GripElements, SideInput, SideState, grip_stiffness, step_side,
+};
 use super::route::build_route;
 use super::side::Side;
 use super::terrain::TrackField;
@@ -89,6 +91,36 @@ pub struct TrackGrip {
 /// grounded count, traces). Rewritten every tick, never hashed, never rolled back.
 #[derive(Component, Default)]
 pub struct TrackContacts(pub [Vec<BeltContact>; 2]);
+
+/// The per-element grip state, `[left, right]` (one [`GripElements`] per side): one world-space
+/// shear vector + loss dwell per material link × lateral column. A plain LOCAL component —
+/// NOT registered in the net protocol, never serialized, never hashed (this is REV 13; the
+/// wire promotion is REV 14, element-netcode-design.md).
+///
+/// Constructed at tank spawn with both slabs pre-sized `link_count * 3`
+/// ([`Self::for_links`], called from the two root-construction paths in `tank::spawn`) — the
+/// REV-14 fixed-size invariant: `step_side` never resizes at runtime, because a runtime
+/// rebuild silently erases strain a rollback replay would then trust. Attached to EVERY tank
+/// root (MP included): construction belongs to the one shared spawn path, sized synchronously
+/// from the same spec that sizes `TankSim`. MP never reads or writes it — `apply_track_forces`
+/// only touches it under the offline [`ElementGripFeelTest`] gate, so on the net client/server
+/// it is inert zeroed memory.
+#[derive(Component, Clone, Debug, Default, PartialEq)]
+pub struct TrackGripElements {
+    pub sides: [GripElements; 2],
+}
+
+impl TrackGripElements {
+    /// Both sides pre-sized for `link_count` material links (see the type doc).
+    pub fn for_links(link_count: usize) -> Self {
+        Self {
+            sides: [
+                GripElements::for_links(link_count),
+                GripElements::for_links(link_count),
+            ],
+        }
+    }
+}
 
 /// The blueprint's running gear as force-station geometry, built once (single blueprint
 /// today; per-variant when a second vehicle lands): the closed rest pin-line loop, the

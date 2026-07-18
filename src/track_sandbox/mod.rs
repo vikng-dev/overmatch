@@ -24,7 +24,7 @@ mod harness;
 mod model4;
 
 use model4::{
-    BeltPhase, RouteChain, TRACK_THICKNESS, TerrainField, apply_belt_support_field,
+    BeltPhase, PinBelt, RouteChain, TRACK_THICKNESS, TerrainField, apply_belt_support_field,
     articulate_wheels_field, conform_belts_field, conform_belts_field_chain, draw_sample_points,
     init_pin_belt,
 };
@@ -338,7 +338,10 @@ pub fn plugin(app: &mut App) {
                 grab_cursor.run_if(not(resource_exists::<harness::Harness>)),
                 spawn_environment,
                 spawn_rig,
-                init_pin_belt,
+                // The element slabs size from the pin belt, so the pair is chained: `step_side`
+                // no longer resizes at runtime (the REV-14 fixed-size invariant) — empty slabs
+                // would skip the element regime instead of lazily growing on the first tick.
+                (init_pin_belt, size_grip_elements).chain(),
                 spawn_viz_label,
                 configure_collider_gizmos,
             ),
@@ -463,8 +466,28 @@ struct BeltGrip(PerSide<Vec2>);
 
 /// The per-element isotropic shear state — the PROTOTYPE regime's state
 /// (`track::forces::GripElements`): one world-space shear vector per material link × column.
+/// Always PRE-SIZED from the pin belt ([`Self::sized`]; startup, `G` toggle, `R` reset):
+/// `step_side` no longer resizes at runtime, and empty slabs would skip the element regime.
 #[derive(Resource, Default)]
 struct BeltGripElements(PerSide<crate::track::forces::GripElements>);
+
+impl BeltGripElements {
+    /// Both sides at rest, slabs pre-sized for `link_count` material links (the REV-14
+    /// fixed-size invariant — see `track::forces::GripElements::for_links`).
+    fn sized(link_count: usize) -> Self {
+        use crate::track::forces::GripElements;
+        Self(PerSide::new(
+            GripElements::for_links(link_count),
+            GripElements::for_links(link_count),
+        ))
+    }
+}
+
+/// Pre-size both sides' element slabs from the pin belt (`count` links × 3 columns per side) —
+/// runs at Startup chained after [`init_pin_belt`], and is the template every reset uses.
+fn size_grip_elements(pin_belt: Res<PinBelt>, mut elems: ResMut<BeltGripElements>) {
+    *elems = BeltGripElements::sized(pin_belt.count);
+}
 
 /// Which grip regime the force law runs (harness `grip=` key; `G` cycles live).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -492,6 +515,7 @@ impl Default for GripSwitch {
 /// (stale strain would fire a phantom force on the first tick).
 fn toggle_grip_mode(
     keys: Res<ButtonInput<KeyCode>>,
+    pin_belt: Res<PinBelt>,
     mut switch: ResMut<GripSwitch>,
     mut grip: ResMut<BeltGrip>,
     mut elems: ResMut<BeltGripElements>,
@@ -504,7 +528,9 @@ fn toggle_grip_mode(
         _ => GripMode::Elements,
     };
     *grip = BeltGrip::default();
-    *elems = BeltGripElements::default();
+    // Unloaded but still PRE-SIZED (never `default()`): empty slabs would fail the
+    // fixed-size invariant and silently skip the element regime after a toggle.
+    *elems = BeltGripElements::sized(pin_belt.count);
     info!(
         "grip regime → {}",
         match switch.0 {
@@ -1100,6 +1126,7 @@ fn spawn_rig(
 fn reset_rig(
     keys: Res<ButtonInput<KeyCode>>,
     hull: Single<(&mut Transform, &mut LinearVelocity, &mut AngularVelocity), With<Hull>>,
+    pin_belt: Res<PinBelt>,
     mut spot: ResMut<ResetSpot>,
     mut belt: ResMut<BeltSpeed>,
     mut phase: ResMut<BeltPhase>,
@@ -1129,7 +1156,8 @@ fn reset_rig(
     *contacts = BeltContacts::default();
     *dynamics = SideDynamics::default();
     *grip_state = BeltGrip::default();
-    *grip_elements = BeltGripElements::default();
+    // Pre-sized, never `default()` — the fixed-size invariant (see `size_grip_elements`).
+    *grip_elements = BeltGripElements::sized(pin_belt.count);
     // Stale cosmetic wheel lift survives the teleport otherwise: for the first ~100 ms the
     // conform solves against phantom raised wheel circles while the hull settles.
     for mut susp in &mut wheels {

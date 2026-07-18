@@ -202,6 +202,21 @@ pub struct GripElements {
     pub dwell: Vec<u8>,
 }
 
+impl GripElements {
+    /// Both slabs pre-sized for `link_count` material links × 3 lateral columns, at rest
+    /// (zero strain, zero dwell) — the ONLY legal construction for a caller entering the
+    /// element regime. `step_side` no longer resizes at runtime (the REV-14 fixed-size
+    /// invariant, element-promotion-checklist.md addendum): wrong-length slabs skip the
+    /// regime instead of being silently rebuilt.
+    pub fn for_links(link_count: usize) -> Self {
+        let n = link_count * 3;
+        Self {
+            strain: vec![Vec3::ZERO; n],
+            dwell: vec![0; n],
+        }
+    }
+}
+
 /// One side's dynamic state — the caller owns it (the game's `TrackDrive` component, the
 /// sandbox's `BeltSpeed`/`BeltPhase` resources).
 #[derive(Clone, Copy, Default, PartialEq, Debug)]
@@ -307,9 +322,11 @@ fn engine_available(params: &ForceParams, belt_speed: f32) -> f32 {
 /// `vel_at`), integrate belt dynamics, and return the forces for the caller to apply IN
 /// ORDER. Force application does not feed back into `vel_at` within a tick (velocities
 /// integrate later), so reading everything first and applying afterwards is exact.
-/// `elements`: `Some` runs the PROTOTYPE per-element isotropic shear regime (see
-/// [`GripElements`]) instead of the per-side aggregate — the caller owns the state vector
-/// (resized here to `count * 3`). `None` = the shipped aggregate law (the game).
+/// `elements`: `Some` runs the per-element isotropic shear regime (see [`GripElements`])
+/// instead of the per-side aggregate — the caller owns the state vector and must construct
+/// it pre-sized to `count * 3` ([`GripElements::for_links`]; wrong-length slabs skip the
+/// regime — see the invariant below). `None` = the shipped aggregate law (the game's MP
+/// compositions).
 pub fn step_side<O: TerrainOracle>(
     input: &SideInput,
     state: SideState,
@@ -337,6 +354,27 @@ pub fn step_side<O: TerrainOracle>(
     }
 
     let k = params.grip_stiffness;
+    // INVARIANT (REV-14 blocker, element-promotion-checklist.md addendum): the caller owns
+    // FIXED-SIZE slabs, constructed `count * 3` at spawn ([`GripElements::for_links`]). The
+    // branch that used to live here cleared and re-sized mismatched slabs at runtime — which
+    // erases valid strain exactly when it matters most: a predicted root that runs one
+    // driving tick before its authoritative JIP seed arrives records a zeroed field into
+    // local prediction history and replay follows it; a snapshot with one mismatched slab
+    // wipes real state instead of surfacing the violation. Wrong-length slabs are therefore
+    // a caller defect: assert loudly in debug, and in release SKIP the element regime for
+    // this tick (the aggregate law runs instead) WITHOUT touching the stored state.
+    let element_len = input.count * 3;
+    let elements = elements.filter(|e| {
+        let sized = e.strain.len() == element_len && e.dwell.len() == element_len;
+        debug_assert!(
+            sized,
+            "GripElements slabs must be pre-sized to count*3 = {element_len} at construction \
+             (strain {}, dwell {}) — runtime resizing erases rollback-visible strain",
+            e.strain.len(),
+            e.dwell.len(),
+        );
+        sized
+    });
     let elements_mode = elements.is_some() && k > 0.0;
     // Membership evidence pass 1 cannot put in `cols`: columns whose damped support load
     // clipped to zero while elastic penetration remains — the pad is still ON the ground
@@ -503,19 +541,12 @@ pub fn step_side<O: TerrainOracle>(
     let mut elem_g: Vec<Vec2> = Vec::new();
     if elements_mode {
         let elems = elements.unwrap();
-        let len = input.count * 3;
-        if elems.strain.len() != len || elems.dwell.len() != len {
-            elems.strain.clear();
-            elems.strain.resize(len, Vec3::ZERO);
-            elems.dwell.clear();
-            elems.dwell.resize(len, 0);
-        }
         // Membership bounds from the side's nominal weight, recovered from the declared
         // stiffness (`grip_stiffness = μ·W/2/K`) — no new vehicle datum.
         let side_weight = k * GRIP_SHEAR_MODULUS_M / params.mu;
         let enter = side_weight * GRIP_ELEMENT_ENTER_FRACTION;
         let leave = side_weight * GRIP_ELEMENT_LEAVE_FRACTION;
-        let mut kept = vec![false; len];
+        let mut kept = vec![false; element_len];
         elem_g = vec![Vec2::ZERO; cols.len()];
         // The damping partner, normalized per unit budget: same closed form as the
         // aggregate's `grip_damp / C` (σ1 = 2ζ√(K·m) reduced through the stiffness
@@ -845,7 +876,7 @@ mod tests {
     fn element_strain_survives_damped_load_dropout() {
         let loop_pts = rect_loop(0.02);
         let mut state = SideState::default();
-        let mut elems = GripElements::default();
+        let mut elems = GripElements::for_links(25);
         // Build presliding strain: hull creeping +z against a stationary belt.
         let mut report = rig_tick(&loop_pts, &mut state, &mut elems, 0.0, Vec3::ZERO);
         for _ in 0..20 {
@@ -900,7 +931,7 @@ mod tests {
     fn element_strain_forgets_on_definitive_departure() {
         let loop_pts = rect_loop(0.02);
         let mut state = SideState::default();
-        let mut elems = GripElements::default();
+        let mut elems = GripElements::for_links(25);
         for _ in 0..20 {
             rig_tick(
                 &loop_pts,
@@ -940,7 +971,7 @@ mod tests {
         // Phase 1 — deep contact (loads ≫ enter), slipping: accumulate real presliding strain.
         let deep = rect_loop(0.02);
         let mut state = SideState::default();
-        let mut elems = GripElements::default();
+        let mut elems = GripElements::for_links(25);
         let mut report = rig_tick(&deep, &mut state, &mut elems, 0.0, Vec3::ZERO);
         for _ in 0..20 {
             report = rig_tick(
@@ -1000,7 +1031,7 @@ mod tests {
         // 0.05 mm of face penetration: real contact, but orders below the enter bound.
         let loop_pts = rect_loop(0.024_95);
         let mut state = SideState::default();
-        let mut elems = GripElements::default();
+        let mut elems = GripElements::for_links(25);
         let leave =
             rig_params().grip_stiffness * GRIP_SHEAR_MODULUS_M / 0.9 * GRIP_ELEMENT_LEAVE_FRACTION;
         for _ in 0..50 {
