@@ -389,7 +389,7 @@ pub(super) fn harness_record(
     // — the parking-flutter instrument (netcode review defect 1).
     if grip_mode.0 == GripMode::Elements {
         let e_side = |si: usize| -> (usize, f32, f32) {
-            let js = &grip_elements.0[si];
+            let js = &grip_elements.0[si].strain;
             let n = js.iter().filter(|j| **j != Vec3::ZERO).count();
             let sum: f32 = js.iter().map(|j| j.length()).sum();
             let max = js.iter().map(|j| j.length()).fold(0.0f32, f32::max);
