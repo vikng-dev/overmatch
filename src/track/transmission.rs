@@ -562,8 +562,9 @@ fn regenerative(
             } else {
                 // The geared-radius constraint g = d − s·κ·|m| = 0, solved semi-implicitly:
                 // λ is the force that lands g at zero after this tick's integration, clamped
-                // to the steering capacity (beyond it the constraint slips). Zero ideal work:
-                // Q_c·v = λ·g, which the solve drives to zero.
+                // so each output's share stays inside the per-output capacity (beyond it the
+                // constraint slips). Zero ideal work: Q_c·v = λ·g, which the solve drives to
+                // zero.
                 let s = if inp.steer > 0.0 {
                     1.0
                 } else if inp.steer < 0.0 {
@@ -576,28 +577,50 @@ fn regenerative(
                     1 => k_wide,
                     _ => k_tight,
                 };
-                let e = s
-                    * kappa
-                    * if m > 0.0 {
-                        1.0
-                    } else if m < 0.0 {
-                        -1.0
-                    } else {
-                        0.0
-                    };
-                let jl = (1.0 - e) / 2.0;
-                let jr = -(1.0 + e) / 2.0;
-                let g_now = d - s * kappa * m.abs();
                 let a_l = (f_p + f_drag) / 2.0 - inp.reactions[0];
                 let a_r = (f_p + f_drag) / 2.0 - inp.reactions[1];
-                let denom = jl * jl + jr * jr;
-                // Per-output honesty for the constraint too: output i sees `λ·jᵢ`, each
-                // bounded by the per-output capacity — so `|λ| ≤ capacity / max|jᵢ|`
-                // (straight-gear `max|j| = 1/2` gives the same 2× bound the servo uses).
-                let lambda_max = tp.steer_capacity_n / jl.abs().max(jr.abs()).max(1e-3);
-                lambda = (-(g_now * fp.inertia / dt + jl * a_l + jr * a_r) / denom)
-                    .clamp(-lambda_max, lambda_max);
-                j = [jl, jr];
+                // One |m| branch of the solve: on branch b, |m| linearizes as `b·m`, so
+                // `g = jl·v_L + jr·v_R` with the branch's Jacobian. Returns λ (per-output
+                // capacity clamp — straight-gear `max|j| = 1/2` gives the same 2× bound
+                // the servo uses), the Jacobian, and the m the tick lands on under that λ
+                // (brakes are disengaged in this regime: throttle is past the neutral
+                // band, so no park/service term perturbs the prediction).
+                let solve = |branch: f32| -> (f32, [f32; 2], f32) {
+                    let e = s * kappa * branch;
+                    let jl = (1.0 - e) / 2.0;
+                    let jr = -(1.0 + e) / 2.0;
+                    let g_now = jl * vl + jr * vr;
+                    let denom = jl * jl + jr * jr;
+                    let lambda_max = tp.steer_capacity_n / jl.abs().max(jr.abs()).max(1e-3);
+                    let l = (-(g_now * fp.inertia / dt + jl * a_l + jr * a_r) / denom)
+                        .clamp(-lambda_max, lambda_max);
+                    let m_next = m + (a_l + l * jl + a_r + l * jr) / (2.0 * fp.inertia) * dt;
+                    (l, [jl, jr], m_next)
+                };
+                let b0 = if m > 0.0 {
+                    1.0
+                } else if m < 0.0 {
+                    -1.0
+                } else {
+                    0.0
+                };
+                let (l0, j0, m_next) = solve(b0);
+                if b0 != 0.0 && m_next * b0 < 0.0 {
+                    // The tick crosses m = 0: the pre-tick branch would project onto
+                    // `d = s·κ·m` on the WRONG side of the |m| cusp — a one-tick
+                    // steering-sign reversal (codex-4). Re-solve on the branch the belt
+                    // actually lands on; if the branches disagree about the landing side
+                    // (the genuine cusp), the constraint takes the tick off — λ = 0 is
+                    // stable and passive there.
+                    let (l1, j1, m1) = solve(-b0);
+                    if m1 * b0 <= 0.0 {
+                        lambda = l1;
+                        j = j1;
+                    }
+                } else {
+                    lambda = l0;
+                    j = j0;
+                }
             }
         }
         TransmissionMode::Governor => unreachable!("handled by the caller"),
@@ -914,6 +937,43 @@ mod tests {
             (ratio - kappa).abs() < 0.01 * kappa.max(0.05),
             "d/m = {ratio} must hold κ_tight = {kappa} (gear {})",
             last.gear
+        );
+    }
+
+    /// Codex-4 regression: a tick that carries `m` through zero must not project the
+    /// constraint onto the pre-tick |m| branch — that enforces `d = s·κ·m` on the wrong
+    /// side of the cusp, flipping `d` AGAINST the commanded steer for a tick (a yaw
+    /// impulse, and ringing if m chatters around zero). Codex's scenario: slow forward
+    /// roll, tight detent, strong equal reactions during a shift interruption — the tick
+    /// lands m well negative; `d` must stay on the steer's side.
+    #[test]
+    fn l600_constraint_survives_m_zero_crossing() {
+        let (fp, tp) = (lab_fp(), lab_tp());
+        let mut st = TransmissionState {
+            steer_step: 2,
+            shift_ticks: 5,
+            ..Default::default()
+        };
+        let (m0, d0) = (0.100f32, 0.043);
+        let inp = input(0.5, 1.0, [m0 + d0, m0 - d0], [250_000.0, 250_000.0]);
+        let rep = step(TransmissionMode::FixedRadii, &fp, Some(&tp), &mut st, &inp);
+        let m_next = (rep.next_speeds[0] + rep.next_speeds[1]) / 2.0;
+        let d_next = (rep.next_speeds[0] - rep.next_speeds[1]) / 2.0;
+        assert!(
+            m_next < 0.0,
+            "the scenario must actually cross zero (m {m0} -> {m_next})"
+        );
+        assert!(
+            d_next > -1e-4,
+            "positive steer must not produce a flipped (negative) belt difference across \
+             the crossing (d {d0} -> {d_next})"
+        );
+        // And the landing obeys the constraint on the branch it landed on: d = s·κ·|m|.
+        let kappa = tp.steer_kappa[0].0;
+        assert!(
+            (d_next - kappa * m_next.abs()).abs() < 0.02,
+            "the re-solved branch must land ON the geared ratio (d {d_next} vs κ|m| {})",
+            kappa * m_next.abs()
         );
     }
 
