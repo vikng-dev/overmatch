@@ -48,6 +48,12 @@ pub(super) struct Harness {
     /// law, bit-identical to the pre-grip baseline); `grip=elem` runs the per-element
     /// isotropic shear prototype; default is the shipped aggregate regime.
     grip: GripMode,
+    /// `trans=governor|hybrid|l600` selects the drivetrain adapter (phase 2.5). Default
+    /// governor — the parity mode; a merge-base build ignores the key entirely.
+    trans: crate::track::transmission::TransmissionMode,
+    /// `pose=runway`: spawn on the flat runway/turn pad facing +X (top-speed and turning
+    /// gates — the lane is too obstacle-dense for either).
+    runway: bool,
     out: String,
 }
 
@@ -72,6 +78,8 @@ pub(super) fn parse_env() -> Option<Harness> {
         steer2: 0.0,
         chain_view: false,
         grip: GripMode::Aggregate,
+        trans: crate::track::transmission::TransmissionMode::Governor,
+        runway: false,
         out: "/tmp/track_harness.jsonl".into(),
     };
     for pair in spec.split(',') {
@@ -80,12 +88,13 @@ pub(super) fn parse_env() -> Option<Harness> {
         };
         match key.trim() {
             "pose" => {
+                h.runway = value.trim() == "runway";
                 h.pose = match value.trim() {
                     "slope_up" => Some(0.0),
                     "slope_down" => Some(std::f32::consts::PI),
                     "slope_left" => Some(std::f32::consts::FRAC_PI_2),
                     "slope_right" => Some(-std::f32::consts::FRAC_PI_2),
-                    _ => None, // "lane" and unknown values keep the flat-lane spawn
+                    _ => None, // "lane"/"runway" and unknown values keep the flat spawn
                 };
             }
             "z" => h.z = value.trim().parse().unwrap_or(0.0),
@@ -102,6 +111,14 @@ pub(super) fn parse_env() -> Option<Harness> {
                     "off" => GripMode::Off,
                     "elem" | "elements" => GripMode::Elements,
                     _ => GripMode::Aggregate,
+                };
+            }
+            "trans" => {
+                use crate::track::transmission::TransmissionMode;
+                h.trans = match value.trim() {
+                    "hybrid" => TransmissionMode::Hybrid,
+                    "l600" | "fixed" | "fixed_radii" => TransmissionMode::FixedRadii,
+                    _ => TransmissionMode::Governor,
                 };
             }
             "out" => h.out = value.trim().to_string(),
@@ -121,12 +138,14 @@ pub(super) fn harness_setup(
     mut commands: Commands,
     harness: Res<Harness>,
     mut grip_switch: ResMut<GripSwitch>,
+    mut trans_switch: ResMut<TransSwitch>,
     fixed_time: Res<Time<Fixed>>,
     mut view: ResMut<TrackViewMode>,
     hull: Single<(&mut Transform, &mut LinearVelocity, &mut AngularVelocity), With<Hull>>,
 ) {
     view.kinematic = !harness.chain_view;
     grip_switch.0 = harness.grip;
+    trans_switch.0 = harness.trans;
     let (mut transform, mut lin, mut ang) = hull.into_inner();
     *transform = match harness.pose {
         // Slope pad: rest height along the pad NORMAL, hull tilted with the incline and
@@ -139,6 +158,10 @@ pub(super) fn harness_setup(
             Transform::from_translation(top + tilt * Vec3::Y * (HULL_REST_Y + 0.12))
                 .with_rotation(tilt * Quat::from_rotation_y(yaw))
         }
+        // Runway pad: at rest height facing +X down the 400 m axis (the −Z hull forward
+        // yawed −90°).
+        None if harness.runway => Transform::from_xyz(RUNWAY_SPAWN.x, HULL_REST_Y, RUNWAY_SPAWN.z)
+            .with_rotation(Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2)),
         None => Transform::from_xyz(0.0, HULL_REST_Y, harness.z),
     };
     lin.0 = Vec3::ZERO;
@@ -146,14 +169,23 @@ pub(super) fn harness_setup(
 
     let file = File::create(&harness.out).expect("harness out path must be writable");
     let mut writer = BufWriter::new(file);
+    // The trans field is APPENDED only for the regenerative modes: a `trans=governor` capture
+    // must stay byte-identical to a merge-base build's (which ignores the key) — the phase-2.5
+    // parity gate diffs the whole file.
+    let trans_meta = match harness.trans {
+        crate::track::transmission::TransmissionMode::Governor => "",
+        crate::track::transmission::TransmissionMode::Hybrid => ",\"trans\":\"hybrid\"",
+        crate::track::transmission::TransmissionMode::FixedRadii => ",\"trans\":\"l600\"",
+    };
     writeln!(
         writer,
         // `"model":4` is pinned: the sandbox hosts only the promoted field-belt model, and the
         // field stays for schema stability with existing analyzers. `schema:2` = raw/shaped
         // commands, quaternion + full angular velocity, per-side contact arrays + aggregates.
-        "{{\"t\":\"meta\",\"model\":4,\"schema\":2,\"view\":\"{}\",\"pose\":\"{}\",\"slope_deg\":{},\"z\":{:.3},\"warmup\":{},\"ticks\":{},\"throttle\":{:.3},\"steer\":{:.3},\"t2\":{},\"throttle2\":{:.3},\"steer2\":{:.3},\"slew\":{},\"fixed_dt\":{},\"grip\":{},\"grip_mode\":\"{}\",\"half_tread\":{TRACK_HALF_WIDTH},\"mu\":{MU},\"lateral_ratio\":{LATERAL_GRIP_RATIO},\"slip_saturation\":{SLIP_SATURATION},\"weight\":{:.0},\"hull_rest_y\":{HULL_REST_Y},\"thickness\":{TRACK_THICKNESS}}}",
+        "{{\"t\":\"meta\",\"model\":4,\"schema\":2,\"view\":\"{}\",\"pose\":\"{}\",\"slope_deg\":{},\"z\":{:.3},\"warmup\":{},\"ticks\":{},\"throttle\":{:.3},\"steer\":{:.3},\"t2\":{},\"throttle2\":{:.3},\"steer2\":{:.3},\"slew\":{},\"fixed_dt\":{},\"grip\":{},\"grip_mode\":\"{}\",\"half_tread\":{TRACK_HALF_WIDTH},\"mu\":{MU},\"lateral_ratio\":{LATERAL_GRIP_RATIO},\"slip_saturation\":{SLIP_SATURATION},\"weight\":{:.0},\"hull_rest_y\":{HULL_REST_Y},\"thickness\":{TRACK_THICKNESS}{trans_meta}}}",
         if harness.chain_view { "chain" } else { "wrap" },
         match harness.pose {
+            None if harness.runway => "runway".into(),
             None => "lane".into(),
             Some(yaw) => format!("slope_yaw{yaw:.3}"),
         },
@@ -219,6 +251,7 @@ pub(super) fn harness_record(
     grip: Res<BeltGrip>,
     grip_mode: Res<GripSwitch>,
     grip_elements: Res<BeltGripElements>,
+    trans_telemetry: Res<TransTelemetry>,
     contacts: Res<BeltContacts>,
     belt: Res<BeltSpeed>,
     phase: Res<BeltPhase>,
@@ -323,6 +356,24 @@ pub(super) fn harness_record(
         writeln!(
             log.writer,
             "{{\"t\":\"e\",\"k\":{k},\"n\":[{ln},{rn}],\"jsum\":[{ls:.6},{rs:.6}],\"jmax\":[{lm:.6},{rm:.6}]}}"
+        )
+        .unwrap();
+    }
+    // Transmission telemetry (`tr` line, regenerative modes only — governor `k` lines stay
+    // byte-stable for the parity gates): operating point + the joint solve's outputs.
+    if let Some(t) = &trans_telemetry.0 {
+        writeln!(
+            log.writer,
+            "{{\"t\":\"tr\",\"k\":{k},\"gear\":{},\"rev\":{},\"step\":{},\"shift\":{},\"rpm\":{:.1},\"scale\":{:.4},\"pavail\":{:.0},\"q\":[{:.1},{:.1}]}}",
+            t.gear,
+            u8::from(t.reverse),
+            t.steer_step,
+            u8::from(t.shifting),
+            t.rpm,
+            t.power_scale,
+            t.power_available,
+            t.forces[0],
+            t.forces[1],
         )
         .unwrap();
     }
