@@ -520,7 +520,9 @@ mod tests {
         // parsed".
         assert_eq!(spec.mass, 57000.0);
         assert_eq!(spec.inertia_extents, (3.0, 2.0, 6.3));
-        assert_eq!(spec.track.powertrain.force, 100_000.0);
+        // Grip-limit gearing rule (≈ μ·W/2; see the RON comment — the 100 kN placeholder cap
+        // could not break a neutral steer under the element grip law).
+        assert_eq!(spec.track.powertrain.force, 250_000.0);
         assert_eq!(spec.track.support.stiffness_per_m, 1_460_000.0);
         // Track: the material loop is authored exact (pitch × count = the immutable belt
         // length); the sprocket's tooth count locks link advance to tooth advance.

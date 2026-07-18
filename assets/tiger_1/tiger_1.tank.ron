@@ -21,15 +21,23 @@ TankSpec(
         wheel_radius: 0.458,
         // Phase-B locomotion: the SANDBOX force law scaled to the Tiger (the retired raycast
         // sim was a placeholder — nothing structural carries over). Stiff sandbox governor;
-        // force cap 100 kN/side keeps "climbs 20°, stalls 30°" vs 559 kN weight; support =
-        // the sandbox law scaled by the 57 t / 26.5 t mass ratio (same ~5 cm static sink);
-        // inertia likewise. Slope-parking creep (~16 cm/s on 20°, bounded) is a KNOWN gap of
-        // the clean slip law — if playtest wants hill-hold, it arrives as the per-element
-        // bristle extension of THIS model, not the old brush anchor.
+        // support = the sandbox law scaled by the 57 t / 26.5 t mass ratio (same ~5 cm
+        // static sink); inertia likewise. Hill-hold arrived with the grip regime (ADR-0026);
+        // parking creep is gone.
+        //
+        // Force cap = the GRIP-LIMIT gearing rule (the T-34 lab benchmark: first gear can
+        // just spin the tracks, cap ≈ μ·W/2 ≈ 252 kN here). The previous 100 kN was tuned
+        // under the retired placeholder law for "climbs 20°, stalls 30°" and at 0.40× the
+        // grip limit could not break a neutral steer (thrust moment 298 kN·m vs 478 kN·m of
+        // footprint scrub — measured "Tiger unable to steer in place", 2026-07-18). At the
+        // grip limit the pivot ratio is 1.56 (T-34 lab: 1.33) and the real Tiger could
+        // neutral-steer. Consequence: steep climbs are now traction/power-limited, not
+        // cap-limited — 30° crawls (~1.9 m/s power-limited) instead of stalling; the
+        // traction stall moves to ~arctan μ ≈ 42°.
         powertrain: (
             max_speed: 10.5,
             power: 260_000.0,
-            force: 100_000.0,
+            force: 250_000.0,
             governor_gain: 60_000.0,
             inertia: 16_000.0,
         ),
