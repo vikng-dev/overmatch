@@ -345,3 +345,39 @@ impl Plugin for GamePlugin {
         ));
     }
 }
+
+/// The offline feel-test route (`overmatch --offline` / `OVERMATCH_OFFLINE=1`): the windowed
+/// runtime plugin set [`run_client`](net::run_client) mounts — exe-relative asset root, continuous
+/// winit updates — plus [`GamePlugin`], the true single-player composition. NO netcode: no
+/// lightyear plugins, no connection entity, nothing that can attempt a connect.
+///
+/// This is the ONLY composition that inserts [`track::sim::ElementGripFeelTest`], the
+/// startup-latched gate under which `apply_track_forces` runs the per-element grip regime
+/// (element-promotion-checklist.md Q1, phase 2 of the element promotion). Every other composition
+/// leaves the resource absent and keeps today's aggregate law bit-for-bit.
+pub fn run_offline() {
+    let mut app = App::new();
+    // Exe-relative asset root, exactly as `run_client` resolves it: a double-clicked binary
+    // finds `assets/` beside it no matter the launch cwd.
+    app.add_plugins(
+        DefaultPlugins
+            .set(bevy::asset::AssetPlugin {
+                // The same `String` conversion `net::client`'s wrapper applies.
+                file_path: assets::asset_root().to_string_lossy().into_owned(),
+                ..default()
+            })
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: "Overmatch — offline".into(),
+                    ..default()
+                }),
+                ..default()
+            }),
+    );
+    // Same policy as the net client: never drop below the 64 Hz tick when unfocused.
+    app.insert_resource(bevy::winit::WinitSettings::continuous());
+    app.add_plugins(GamePlugin);
+    // The offline element-grip gate — latched at process start, ONLY here (see the resource doc).
+    app.init_resource::<track::sim::ElementGripFeelTest>();
+    app.run();
+}

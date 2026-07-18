@@ -22,6 +22,7 @@ use crate::damage::{Ammo, Crewman, TankCapabilities, VolumeOf};
 use crate::firecontrol::RangeTable;
 use crate::shooting::RecoilParams;
 use crate::spec::{TankSpec, TankSpecHandle, Trigger, ViewKind};
+use crate::track::sim::TrackGripElements;
 
 /// Presentation handles. Loading may gate admission or view attachment, never simulation data.
 #[derive(Resource, Clone)]
@@ -117,7 +118,14 @@ pub(crate) fn spawn_complete_tank<B: Bundle>(
     presentation: TankPresentation,
     root_bundle: B,
 ) -> Entity {
-    let mut root = commands.spawn((presentation.root_bundle(), root_bundle));
+    // The element-grip slabs ride the SAME insertion that adds `Tank`: pre-sized synchronously
+    // from the spec's link count (the REV-14 fixed-size invariant — `track::sim::TrackGripElements`),
+    // never an empty vector awaiting a first-tick resize.
+    let mut root = commands.spawn((
+        presentation.root_bundle(),
+        TrackGripElements::for_links(content.spec().track.link_count),
+        root_bundle,
+    ));
     root.observe(bind_tank_view);
     let entity = root.id();
     assemble_tank_body(commands, entity, content);
@@ -135,7 +143,12 @@ pub(crate) fn attach_replicated_tank_body<B: Bundle>(
 ) {
     commands
         .entity(root)
-        .insert((presentation.root_bundle(), root_bundle))
+        .insert((
+            presentation.root_bundle(),
+            // Same spawn-sized element slabs as `spawn_complete_tank` — see the note there.
+            TrackGripElements::for_links(content.spec().track.link_count),
+            root_bundle,
+        ))
         .observe(bind_tank_view);
     assemble_tank_body(commands, root, content);
 }

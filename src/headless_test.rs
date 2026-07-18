@@ -28,15 +28,37 @@ static BOOT_LEASE: Mutex<()> = Mutex::new(());
 
 fn assert_tank_state_at_add(
     add: On<Add, Tank>,
-    tanks: Query<(Has<TankCommand>, Has<crate::track::sim::TrackDrive>)>,
+    tanks: Query<(
+        Has<TankCommand>,
+        Has<crate::track::sim::TrackDrive>,
+        Option<&crate::track::sim::TrackGripElements>,
+    )>,
+    blueprint: Option<Res<TankBlueprint>>,
 ) {
-    let (command, drive) = tanks
+    let (command, drive, elements) = tanks
         .get(add.entity)
         .expect("a newly added Tank must still exist during its observer");
     assert!(
         command && drive,
         "TankCommand and TrackDrive must exist in the same insertion that adds Tank",
     );
+    // The REV-14 fixed-size invariant at its source: every Tank is born with element slabs
+    // pre-sized `link_count * 3` — never an empty vector awaiting a first-tick resize
+    // (element-promotion-checklist.md §5 spawn fixture).
+    let elements = elements.expect("TrackGripElements must exist in the same insertion as Tank");
+    let expected = blueprint
+        .expect("the blueprint bakes at Startup, before any Tank can spawn")
+        .spec
+        .track
+        .link_count
+        * 3;
+    for side in &elements.sides {
+        assert_eq!(
+            (side.strain.len(), side.dwell.len()),
+            (expected, expected),
+            "a Tank spawned with wrong-sized element slabs (want link_count*3 = {expected})",
+        );
+    }
 }
 
 fn assert_range_table_at_add(
@@ -229,9 +251,13 @@ fn booted_sim() -> BootedSim {
     // construction path that produced an incomplete entity without the expected marker.
     let world = app.world_mut();
     let incomplete_tanks = world
-        .query_filtered::<(Has<TankCommand>, Has<crate::track::sim::TrackDrive>), With<Tank>>()
+        .query_filtered::<(
+            Has<TankCommand>,
+            Has<crate::track::sim::TrackDrive>,
+            Has<crate::track::sim::TrackGripElements>,
+        ), With<Tank>>()
         .iter(world)
-        .filter(|(command, drive)| !command || !drive)
+        .filter(|(command, drive, elements)| !command || !drive || !elements)
         .count();
     let weapon_tables: Vec<bool> = world
         .query_filtered::<Has<crate::firecontrol::RangeTable>, With<crate::tank::Weapon>>()
@@ -334,6 +360,111 @@ fn sim_boots_and_drives_headless() {
         horizontal > 2.0,
         "full throttle for ~4 s should move the tank on flat ground; moved {horizontal:.2} m \
          (sim not actually running headless?)"
+    );
+}
+
+/// One scripted headless drive for the element-gate proof: boot the sim (the headless equivalent
+/// of the `--offline` composition — [`headless_app`] mounts physics + `SimPlugin` + the SP duel
+/// spawn, exactly what `GamePlugin` composes minus presentation), optionally latch
+/// `ElementGripFeelTest`, settle, hold full throttle for ~4 sim-seconds, and return
+/// `(horizontal metres moved, total element strain in metres)`.
+fn element_gate_run(feel: bool) -> (f32, f32) {
+    let mut app = booted_sim();
+    if feel {
+        // The offline latch, exactly as `run_offline` inserts it: present from before the
+        // first sim tick, never toggled.
+        app.init_resource::<crate::track::sim::ElementGripFeelTest>();
+    }
+
+    // Start the clock and let the belt contacts ground and settle (the
+    // `sim_boots_and_drives_headless` scaffold).
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+        16,
+    )));
+    let mut grounded = 0;
+    for _ in 0..300 {
+        app.update();
+        let world = app.world_mut();
+        grounded = world
+            .query::<&crate::track::sim::TrackContacts>()
+            .iter(world)
+            .map(|c| c.0.iter().filter(|side| !side.is_empty()).count())
+            .sum();
+        if grounded >= 4 {
+            break;
+        }
+    }
+    assert!(grounded >= 4, "the belt field never grounded headless");
+    for _ in 0..60 {
+        app.update();
+    }
+
+    let mut tank_q = app
+        .world_mut()
+        .query_filtered::<(Entity, &Transform), (With<Tank>, With<Controlled>)>();
+    let (tank, start) = tank_q.single(app.world()).expect("one controlled tank");
+    let start = start.translation;
+
+    // ~4 sim-seconds of full throttle, re-asserted every tick (no device gather headless).
+    for _ in 0..250 {
+        app.world_mut()
+            .entity_mut(tank)
+            .get_mut::<TankCommand>()
+            .expect("tank carries a command")
+            .throttle = 1.0;
+        app.update();
+    }
+
+    let end = app
+        .world()
+        .get::<Transform>(tank)
+        .expect("tank survived")
+        .translation;
+    let moved = Vec3::new(end.x - start.x, 0.0, end.z - start.z).length();
+    let world = app.world_mut();
+    let strain: f32 = world
+        .query::<&crate::track::sim::TrackGripElements>()
+        .iter(world)
+        .flat_map(|elements| elements.sides.iter())
+        .flat_map(|side| side.strain.iter())
+        .map(|j| j.length())
+        .sum();
+    (moved, strain)
+}
+
+/// Phase-2 offline gate proof (element-promotion-checklist.md Q1). Two identical scripted drives:
+///   * WITH `ElementGripFeelTest` latched (the `--offline` composition's gate): the tank drives
+///     AND the per-element law actually engages — spawn-sized `TrackGripElements` strain becomes
+///     nonzero.
+///   * WITHOUT the resource (every MP-shaped composition): identical ticks, element strain stays
+///     EXACTLY zero — the gate holds, and the unregistered element state provably cannot be
+///     touched outside the offline route.
+///
+/// The spawn-sizing half of the checklist fixture lives in [`assert_tank_state_at_add`], which
+/// every boot in this file runs.
+#[test]
+fn offline_element_gate_engages_only_under_feel_resource() {
+    let (moved, strain) = element_gate_run(true);
+    assert!(
+        moved > 2.0,
+        "the element regime should still drive the tank forward; moved {moved:.2} m"
+    );
+    assert!(
+        strain > 0.0,
+        "with ElementGripFeelTest present the element law must engage — strain stayed zero \
+         (the gate never passed Some(&mut GripElements) through, or the slabs were mis-sized \
+         and the invariant early-out silently skipped the regime)"
+    );
+
+    let (moved, strain) = element_gate_run(false);
+    assert!(
+        moved > 2.0,
+        "the aggregate regime should drive the tank forward; moved {moved:.2} m"
+    );
+    assert_eq!(
+        strain, 0.0,
+        "without ElementGripFeelTest the element slabs must stay EXACTLY zero — something \
+         outside the offline gate wrote element state"
     );
 }
 

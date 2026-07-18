@@ -31,7 +31,9 @@ use crate::state::{GameplaySet, SimPhase};
 use crate::tank::{Tank, TrackSide};
 
 use super::drive::{DriveAxes, shape_drive};
-use super::forces::{BeltContact, ForceParams, SideInput, SideState, grip_stiffness, step_side};
+use super::forces::{
+    BeltContact, ForceParams, GripElements, SideInput, SideState, grip_stiffness, step_side,
+};
 use super::route::build_route;
 use super::side::Side;
 use super::terrain::TrackField;
@@ -66,6 +68,15 @@ pub struct TrackDriveSide {
     pub phase: f64,
 }
 
+/// Startup-latched marker for the OFFLINE element-grip feel test (element-promotion-checklist.md
+/// Q1, phase 2): when present, [`apply_track_forces`] runs the per-element isotropic shear regime
+/// instead of the per-side aggregate. Inserted ONLY by the `--offline` composition
+/// (`crate::run_offline`) at process start — never by the net client, the net server, or the
+/// sandboxes — and never inserted or removed mid-session (regime flips would reinterpret hidden
+/// elastic state; see the checklist's mid-session-connection section).
+#[derive(Resource, Default)]
+pub struct ElementGripFeelTest;
+
 /// The static-friction state (static-friction-design.md, ADR-0026): per-side elastic grip
 /// resultants (N), `[left, right] × [longitudinal, lateral/ρ]`. Generalized forces, NOT
 /// world anchors. Owner-predicted, replicated, rolled back like [`TrackDrive`] — but a
@@ -80,6 +91,36 @@ pub struct TrackGrip {
 /// grounded count, traces). Rewritten every tick, never hashed, never rolled back.
 #[derive(Component, Default)]
 pub struct TrackContacts(pub [Vec<BeltContact>; 2]);
+
+/// The per-element grip state, `[left, right]` (one [`GripElements`] per side): one world-space
+/// shear vector + loss dwell per material link × lateral column. A plain LOCAL component —
+/// NOT registered in the net protocol, never serialized, never hashed (this is REV 13; the
+/// wire promotion is REV 14, element-netcode-design.md).
+///
+/// Constructed at tank spawn with both slabs pre-sized `link_count * 3`
+/// ([`Self::for_links`], called from the two root-construction paths in `tank::spawn`) — the
+/// REV-14 fixed-size invariant: `step_side` never resizes at runtime, because a runtime
+/// rebuild silently erases strain a rollback replay would then trust. Attached to EVERY tank
+/// root (MP included): construction belongs to the one shared spawn path, sized synchronously
+/// from the same spec that sizes `TankSim`. MP never reads or writes it — `apply_track_forces`
+/// only touches it under the offline [`ElementGripFeelTest`] gate, so on the net client/server
+/// it is inert zeroed memory.
+#[derive(Component, Clone, Debug, Default, PartialEq)]
+pub struct TrackGripElements {
+    pub sides: [GripElements; 2],
+}
+
+impl TrackGripElements {
+    /// Both sides pre-sized for `link_count` material links (see the type doc).
+    pub fn for_links(link_count: usize) -> Self {
+        Self {
+            sides: [
+                GripElements::for_links(link_count),
+                GripElements::for_links(link_count),
+            ],
+        }
+    }
+}
 
 /// The blueprint's running gear as force-station geometry, built once (single blueprint
 /// today; per-variant when a second vehicle lands): the closed rest pin-line loop, the
@@ -180,6 +221,9 @@ fn apply_track_forces(
     time: Res<Time>,
     field: Res<TrackField>,
     gear: Option<Res<TrackGear>>,
+    // The offline element-grip gate (element-promotion-checklist.md Q1): present only in the
+    // `--offline` composition. Read as `Option` so every other composition runs unchanged.
+    feel: Option<Res<ElementGripFeelTest>>,
     volumes: Query<VolumeFacets>,
     mut tanks: Query<
         (
@@ -189,6 +233,7 @@ fn apply_track_forces(
             &TankCommand,
             &mut TrackDrive,
             &mut TrackGrip,
+            &mut TrackGripElements,
             &mut TrackContacts,
             Option<&TankVolumes>,
             Option<&TankCapabilities>,
@@ -210,6 +255,7 @@ fn apply_track_forces(
         command,
         mut drive,
         mut grip,
+        mut grip_elements,
         mut contacts,
         tank_volumes,
         tank_caps,
@@ -266,9 +312,18 @@ fn apply_track_forces(
                 &gear.params,
                 oracle,
                 |p| forces.velocity_at_point(p),
-                // The game runs the aggregate regime; the per-element prototype is sandbox-only
-                // until its netcode shape is designed (codex brief, 2026-07-18).
-                None,
+                // The element-regime gate. SAFETY ARGUMENT (this branch is the whole REV-13
+                // story): `ElementGripFeelTest` is inserted ONLY by the offline composition
+                // (`run_offline`) — the net client, net server, and headless server never
+                // insert it, so on every MP path this expression is `None`, exactly the
+                // literal `None` that stood here before the gate existed: MP behavior is
+                // BIT-unchanged, and the unregistered `TrackGripElements` slabs are never
+                // read or mutated (they cannot enter prediction/rollback). The regime is
+                // startup-latched — never flipped mid-session (see the resource doc).
+                match &feel {
+                    Some(_) => Some(&mut grip_elements.sides[si]),
+                    None => None,
+                },
             );
             // Apply in report order — accumulation order is part of determinism.
             for app in &report.apps {
