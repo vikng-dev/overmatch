@@ -1676,6 +1676,24 @@ both.
   print-scale load alternation, belts/pose exactly frozen, flat over 45 s) — deterministic,
   nm-scale, present only at elem ζ=0.5.
 
+- 2026-07-18 — **Step 30c: PHASE 1 HARDENING MERGED (c7ebea7) + eigen-audit + promotion docs**.
+  Yan accepted the 4-phase promotion arc (cleanup slots between phases, orchestrator + Fable/
+  Opus subagents + codex). LANDED: (a) Fable-implementer hardening — membership hysteresis on
+  ELASTIC load (enter 0.1% / leave 0.025% of side weight) + 8-tick loss dwell (u8 parallel vec),
+  strain survives damped-load dropout ticks (deterministic unit rig proves pre-fix erasure);
+  canonical `phase_decompose` (wraps + offset from ONE call, carry-safe; boundary/10 km/carry
+  tests); low-load policy (integration shares membership hysteresis); `"t":"e"` strain telemetry
+  line; 254 tests, aggregate/off BIT-IDENTICAL, elem regression numbers unchanged (pivot
+  −1.2348, rebounds 0.106/0.003). Micro-delta recorded: cross-slope settle continues ~0.2 mm
+  longer (strain retention working; 0.00 mm with longer warmup). Known: harness `chain` field is
+  run-nondeterministic (view-layer) — strip it for byte-diffs. (b) Eigen-audit (see memory +
+  scratchpad eigen_audit/): ζ_elem=0.5 safe everywhere, worst margin 2.34×, ζ is a CEILING;
+  bonus: support-damper 32 Hz roll Nyquist micro limit cycle decoded (support-law item, lever =
+  SUPPORT_DAMPING_PER_M). (c) Promotion references persisted: element-netcode-design.md +
+  element-promotion-checklist.md (verified: GamePlugin offline composition exists unmounted;
+  REV-14 checklist incl. the CatchUpGated JIP correction). NEXT: cleanup slot A
+  (improve-codebase-architecture scan), then Phase 2 offline gate.
+
 ## Open questions / parking lot
 
 - **Lateral link rigidity (Yan, 2026-07-16, open tab)**: a real shoe is ~perfectly stiff
