@@ -83,6 +83,13 @@ const GRIP_BREAKAWAY: f32 = 0.5;
 /// parked tank's strain on one noisy tick (netcode review defect 1: unsafe for parking).
 /// The bounds are tiny against a real bearing column (~0.1% / 0.025% of side weight vs the
 /// several percent a grounded column carries) — they exclude numeric dust, not load.
+///
+/// LOW-LOAD POLICY (netcode review defect 3): strain INTEGRATES only while the element is a
+/// member — accumulation shares exactly the membership hysteresis, one regime, one set of
+/// bounds. A barely-touching pad never clears the enter bound, so it accumulates nothing
+/// and later real load finds no stored-up strain to fire as a sudden force; a member that
+/// fades into the leave..enter band holds (not grows) its strain. Force always scales by
+/// the CURRENT elastic load, so engagement fades continuously in every branch.
 const GRIP_ELEMENT_ENTER_FRACTION: f32 = 1e-3;
 const GRIP_ELEMENT_LEAVE_FRACTION: f32 = 2.5e-4;
 
@@ -522,7 +529,7 @@ pub fn step_side<O: TerrainOracle>(
             // hull (+slip_long along long_dir, −slip_lat along lat_dir — the kinetic law's
             // signs, vectorized).
             let sdot = c.long_dir * c.slip_long - c.lat_dir * c.slip_lat;
-            let j1 = if member {
+            let j1 = if c.load_elastic >= enter {
                 let speed = sdot.length();
                 let j0 = elems.strain[c.element];
                 // Dupont elasto-plastic α, per element: pure spring below breakaway or when
@@ -548,8 +555,10 @@ pub fn step_side<O: TerrainOracle>(
                 elems.strain[c.element] = j1;
                 j1
             } else {
-                // Below the membership floor: stored strain HELD, not integrated — force
-                // still scales by the (tiny) elastic load, so engagement fades continuously.
+                // Below the enter bound (hysteresis band, or a fading straggler): stored
+                // strain HELD, not integrated — the low-load policy (see
+                // [`GRIP_ELEMENT_ENTER_FRACTION`]); force still scales by the current
+                // elastic load, so engagement fades continuously.
                 elems.strain[c.element]
             };
             let mut g = j1 / GRIP_SHEAR_MODULUS_M + sdot * d_coef;
