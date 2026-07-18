@@ -125,7 +125,7 @@ mod offline_feel_tests {
             }))
             .id();
 
-        let mut press = |app: &mut App| {
+        let press = |app: &mut App| {
             let mut input = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
             input.clear();
             input.release(KeyCode::KeyT);
@@ -415,7 +415,9 @@ pub fn run_offline() {
             })
             .set(WindowPlugin {
                 primary_window: Some(Window {
-                    title: "Overmatch — offline".into(),
+                    // ASCII hyphen: `lib.rs` is scanned by the ui_ascii guard now that the
+                    // offline feel label spawns `Text` here (default-font surface).
+                    title: "Overmatch - offline".into(),
                     ..default()
                 }),
                 ..default()

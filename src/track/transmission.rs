@@ -9,7 +9,7 @@
 //!
 //! Three adapters behind one mode enum:
 //! - [`TransmissionMode::Governor`] — the EXACT legacy math ([`forces::governor_belt`],
-//!!   verbatim): every MP composition and every existing baseline runs this. The parity switch.
+//!   verbatim): every MP composition and every existing baseline runs this. The parity switch.
 //! - [`TransmissionMode::Hybrid`] — the arcade-honest continuous regenerative box (design
 //!   menu C/D): engine torque curve × gear ratio → propulsion force on `m`; a
 //!   capacity-limited steering servo on `d` (continuous curvature command interpolating the
@@ -449,12 +449,18 @@ fn regenerative(
         |target_d: f32| ((target_d - d) / STEER_SERVO_BAND).clamp(-1.0, 1.0) * tp.steer_capacity_n;
     match mode {
         TransmissionMode::Hybrid => {
-            // Continuous curvature command: |steer| interpolates 0..κ_tight of the current
-            // gear (interpolating radii continuously is exactly what makes this the hybrid,
-            // not an L600 — design menu B's closing note), with the genuine-pivot floor so
-            // steering authority never vanishes at low m.
+            // Continuous curvature command, GEAR-INDEPENDENT: |steer| interpolates
+            // 0..κ(R_min) where R_min is the vehicle's tightest authored radius (the
+            // 1st-gear tight entry). This is the hydrostatic-superimposed family's defining
+            // trait (design menu C: "infinitely variable… variable-speed pivot turns") — the
+            // steer path bypasses the gearbox, so full lock always commands the minimum
+            // radius and the POWER budget, not the ratio ladder, is what forces a fast tank
+            // wide (measured: the power scale slows the hull into the radius it can afford —
+            // the design's "strong turn-in, then physically required speed loss"). The
+            // genuine-pivot floor keeps steering authority alive at m → 0.
+            let k_full = tp.steer_kappa[0].0;
             let target = inp.steer.signum()
-                * (inp.steer.abs() * k_tight * m.abs()).max(inp.steer.abs() * tp.neutral_d_full);
+                * (inp.steer.abs() * k_full * m.abs()).max(inp.steer.abs() * tp.neutral_d_full);
             if inp.steer != 0.0 || d != 0.0 {
                 f_s = servo(target);
             }
@@ -553,7 +559,7 @@ fn regenerative(
     // doesn't, inside its capacity. h reuses the legacy hold-blend SHAPE purely as the
     // engagement envelope (tick-stable, exact at rest); grip_stiffness = 0 keeps the
     // kinetic-only parity semantics brakeless, like the legacy hold.
-    for i in 0..2 {
+    for (i, qi) in q.iter_mut().enumerate() {
         let h = if fp.grip_stiffness > 0.0 {
             let target = inp.side_commands[i] * fp.max_speed;
             forces::hold_blend(target.abs() / fp.slip_saturation)
@@ -562,13 +568,13 @@ fn regenerative(
             0.0
         };
         let cap = h * tp.brake_capacity_n;
-        q[i] += (inp.reactions[i] - q[i]).clamp(-cap, cap);
+        *qi += (inp.reactions[i] - *qi).clamp(-cap, cap);
     }
 
     // --- Integrate both sides simultaneously: I·v̇ = Q − R (the reaction ALWAYS applies).
     let mut next = [0.0f32; 2];
-    for i in 0..2 {
-        next[i] = (inp.speeds[i] + (q[i] - inp.reactions[i]) / fp.inertia * dt)
+    for (i, ni) in next.iter_mut().enumerate() {
+        *ni = (inp.speeds[i] + (q[i] - inp.reactions[i]) / fp.inertia * dt)
             .clamp(-fp.max_speed, fp.max_speed);
     }
 
@@ -891,7 +897,7 @@ mod tests {
         ] {
             let mut st = TransmissionState::default();
             let mut speeds = [0.0f32; 2];
-            let dt = 1.0 / 64.0;
+            let dt_s = 1.0_f64 / 64.0;
             for window in 0..6 {
                 let mut delivered = 0.0f64;
                 let mut available = 0.0f64;
@@ -905,9 +911,9 @@ mod tests {
                     let reactions = speeds.map(|v| (v * 30_000.0).clamp(-25_000.0, 25_000.0));
                     let inp = input(throttle, steer, speeds, reactions);
                     let rep = step(mode, &fp, Some(&tp), &mut st, &inp);
-                    delivered += f64::from(rep.forces[0] * speeds[0] + rep.forces[1] * speeds[1])
-                        * f64::from(dt);
-                    available += f64::from(rep.power_available) * f64::from(dt);
+                    delivered +=
+                        f64::from(rep.forces[0] * speeds[0] + rep.forces[1] * speeds[1]) * dt_s;
+                    available += f64::from(rep.power_available) * dt_s;
                     speeds = rep.next_speeds;
                 }
                 let e1: f64 = speeds

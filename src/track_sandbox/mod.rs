@@ -836,7 +836,7 @@ fn viz_label_text(
     let trans_line = match (trans.0, &telemetry.0) {
         (TransmissionMode::Governor, _) => "trans: GOVERNOR (shipped parity)".to_string(),
         (mode, Some(t)) => format!(
-            "trans: {}  |  gear {}{} {}  rpm {:.0}  step {}  pwr× {:.2}",
+            "trans: {}  |  gear {}{} {}  rpm {:.0}  step {}  pwr x{:.2}",
             match mode {
                 TransmissionMode::Hybrid => "HYBRID (regen)",
                 _ => "L600 (fixed-radius)",

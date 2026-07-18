@@ -217,6 +217,15 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
     // sprocket radius (tiger-transmission-data.md rule: speeds are the anchors, reductions
     // derive, so the ladder survives the 19-vs-20-tooth discrepancy).
     let trans = spec.powertrain.transmission.as_ref().map(|tr| {
+        // The authored architecture is informational until the offline default is
+        // spec-driven (TransmissionFeelTest is the interim dial) — log it so a feel session
+        // states what the vehicle declares.
+        info!(
+            "declared transmission: {:?}, {}F/{}R",
+            tr.architecture,
+            tr.gearbox.forward_speeds_kmh.len(),
+            tr.gearbox.reverse_speeds_kmh.len()
+        );
         TransmissionParams::from_authoring(&transmission::TransmissionAuthoring {
             idle_rpm: tr.engine.idle_rpm,
             governed_rpm: tr.engine.governed_rpm,
