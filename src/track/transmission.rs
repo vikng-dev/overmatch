@@ -51,7 +51,6 @@
 //! | [`DRAG_THROTTLE_RELEASE`] | SIM POLICY | driver-intent shaping: where "open throttle" stops meaning "motoring"; part of the uniform input contract, same for every tank |
 //! | [`DEAD`] | SIM POLICY | input deadzone on one shared axis mapping |
 //! | [`PARK_ENGAGE_SPEED`] | SIM POLICY | latch threshold for "at rest" — a determinism/stability guard on the shared intent layer |
-//! | [`STEER_SERVO_BAND`] | SIM POLICY | servo proportional band sized against the grip law's `slip_saturation` scale — pure control shaping (the AUTHORITY it saturates to is spec) |
 //! | [`DIRECTION_SWAP_SPEED`] | SIM POLICY | the intent seam where a held opposite throttle becomes a gear-direction change; uniform game semantics |
 //! | [`NEUTRAL_THROTTLE`], [`NEUTRAL_M_SPEED`] | SIM POLICY | regime-entry thresholds for the L600 neutral turn (the neutral turn's SPEED SCALE — `neutral_d_full × neutral_fraction` — is spec-derived) |
 //! | [`WIDE_ON`]/[`WIDE_OFF`]/[`TIGHT_ON`]/[`TIGHT_OFF`] | SIM POLICY | stick-to-detent input mapping with hysteresis; the DETENT RATIOS they select are spec |
@@ -59,9 +58,12 @@
 //!
 //! Moved OUT of this module to the spec (they were vehicle data wearing const clothing):
 //! shift time (`gearbox.shift_secs` — a Tiger preselector and a T-34 crash box differ),
-//! engine drag (`engine.drag_fraction` — an engine datum). Everything else the vehicle
-//! authors was already spec: torque curve, ladders, radii, capacities, brake, η, neutral
-//! fraction.
+//! engine drag (`engine.drag_fraction` — an engine datum). REMOVED rather than classified:
+//! `STEER_SERVO_BAND` — the steering servo is now the semi-implicit exact law (like the
+//! brakes and λ), so no proportional band exists to tune; its droop was itself a
+//! vehicle-scaling bug (the Tiger's neutral target sat inside the band). Everything else
+//! the vehicle authors was already spec: torque curve, ladders, radii, capacities, brake,
+//! η, neutral fraction.
 
 use super::forces::{self, ForceParams};
 
@@ -118,11 +120,6 @@ const DEAD: f32 = 0.05;
 /// past `slip_saturation`, releasing the brake exactly when an over-capacity slope slid the
 /// tank (codex-2).
 const PARK_ENGAGE_SPEED: f32 = 0.05;
-
-/// Steering-servo proportional band (m/s of `d` error at which the servo saturates to the
-/// declared steering capacity). Sized against the grip law's `slip_saturation` scale.
-/// INFERRED control policy.
-const STEER_SERVO_BAND: f32 = 0.25;
 
 /// |m| below which a commanded direction reversal actually swaps the F/R ladder (above it the
 /// opposing gear force acts as driveline braking first — you cannot slam reverse at speed).
@@ -546,7 +543,18 @@ fn regenerative(
     // the outputs, and each output's share is what the per-output datum caps (see
     // [`TransmissionParams::steer_capacity_n`] — the pivot-dead convention fix).
     let f_s_max = 2.0 * tp.steer_capacity_n;
-    let servo = |target_d: f32| ((target_d - d) / STEER_SERVO_BAND).clamp(-1.0, 1.0) * f_s_max;
+    // The steering member as a capacity-limited KINEMATIC servo, semi-implicit like the
+    // brakes and λ: the F_s that lands `d` exactly on target after this tick's integration
+    // (`d` dynamics: `d_next = d + (F_s/2 − R_d)/I·dt`), reaction-compensated, clamped to
+    // the per-output convention's bound. Exact inside capacity, honest slip beyond it — and
+    // no proportional band: the old P law's steady-state droop let the ground reaction eat
+    // the command (the Tiger's whole neutral target, 0.21 m/s, sat INSIDE the 0.25 m/s
+    // band, so a sustained pivot ran at ≤ half capacity and crawled at 0.03 rad/s — the
+    // second vehicle-scaling defect of this fix round; the T-34's 0.46 m/s target masked
+    // it).
+    let r_d = (inp.reactions[0] - inp.reactions[1]) / 2.0;
+    let servo =
+        |target_d: f32| (2.0 * ((target_d - d) * fp.inertia / dt + r_d)).clamp(-f_s_max, f_s_max);
     match mode {
         TransmissionMode::Hybrid => {
             // Continuous curvature command, GEAR-INDEPENDENT: |steer| interpolates
@@ -1367,15 +1375,26 @@ mod tests {
     }
 
     /// The pivot-authority convention (the Tiger pivot-dead fix): the steering member
-    /// drives the two OUTPUTS differentially, so at rest under full steer the saturated
-    /// servo puts the full PER-OUTPUT capacity on each side (`F_s = 2 × capacity`,
-    /// `±capacity` per belt) — not `±capacity/2`, which halves the yaw moment and left the
-    /// Tiger under its own footprint scrub. Checked on both regenerative adapters (the
-    /// L600 at rest is in its brake-gated neutral regime, which shares the servo).
+    /// drives the two OUTPUTS differentially, so each output may carry up to the full
+    /// PER-OUTPUT capacity (`F_s` bounded by `2 × capacity`, `±capacity` per belt) — not
+    /// `±capacity/2`, which halves the yaw moment and left the Tiger under its own
+    /// footprint scrub. At rest under full steer the semi-implicit servo asks for the
+    /// exact-landing force `2·target·I/dt`, capacity-clamped — each side must carry
+    /// `min(capacity, target·I/dt)`, which for the lab's neutral targets is ≥ 98% of the
+    /// per-output datum (and EXCEEDS the old difference-axis reading's `capacity/2` ceiling
+    /// outright). Checked on both regenerative adapters (the L600 at rest is in its
+    /// brake-gated neutral regime, which shares the servo).
     #[test]
     fn pivot_authority_is_per_output_capacity() {
         let (fp, tp) = (lab_fp(), lab_tp());
-        for mode in [TransmissionMode::Hybrid, TransmissionMode::FixedRadii] {
+        let dt = 1.0 / 64.0;
+        for (mode, target) in [
+            (TransmissionMode::Hybrid, tp.neutral_d_full),
+            (
+                TransmissionMode::FixedRadii,
+                tp.neutral_d_full * tp.neutral_fraction,
+            ),
+        ] {
             let mut st = TransmissionState::default();
             let rep = step(
                 mode,
@@ -1384,15 +1403,23 @@ mod tests {
                 &mut st,
                 &input(0.0, 1.0, [0.0, 0.0], [0.0, 0.0]),
             );
-            // Full steer at rest: the d target (neutral scale) is far past the servo band,
-            // so the servo saturates — each output must carry the full per-output datum.
-            assert_eq!(
-                rep.forces[0], tp.steer_capacity_n,
-                "{mode:?}: left output must saturate at the PER-OUTPUT capacity"
+            let expect = (target * fp.inertia / dt).min(tp.steer_capacity_n);
+            assert!(
+                (rep.forces[0] - expect).abs() < 1.0,
+                "{mode:?}: left output must carry min(capacity, exact-landing) = {expect}, \
+                 got {}",
+                rep.forces[0]
             );
-            assert_eq!(
-                rep.forces[1], -tp.steer_capacity_n,
-                "{mode:?}: right output mirrors it (counter-rotation)"
+            assert!(
+                (rep.forces[1] + expect).abs() < 1.0,
+                "{mode:?}: right output mirrors it (counter-rotation), got {}",
+                rep.forces[1]
+            );
+            assert!(
+                expect > 0.9 * tp.steer_capacity_n,
+                "the lab targets must exercise near-capacity authority ({expect} vs \
+                 {}) — under the old difference-axis reading the ceiling was capacity/2",
+                tp.steer_capacity_n
             );
         }
     }
