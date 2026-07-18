@@ -66,6 +66,15 @@ pub struct TrackDriveSide {
     pub phase: f64,
 }
 
+/// Startup-latched marker for the OFFLINE element-grip feel test (element-promotion-checklist.md
+/// Q1, phase 2): when present, [`apply_track_forces`] runs the per-element isotropic shear regime
+/// instead of the per-side aggregate. Inserted ONLY by the `--offline` composition
+/// (`crate::run_offline`) at process start — never by the net client, the net server, or the
+/// sandboxes — and never inserted or removed mid-session (regime flips would reinterpret hidden
+/// elastic state; see the checklist's mid-session-connection section).
+#[derive(Resource, Default)]
+pub struct ElementGripFeelTest;
+
 /// The static-friction state (static-friction-design.md, ADR-0026): per-side elastic grip
 /// resultants (N), `[left, right] × [longitudinal, lateral/ρ]`. Generalized forces, NOT
 /// world anchors. Owner-predicted, replicated, rolled back like [`TrackDrive`] — but a
