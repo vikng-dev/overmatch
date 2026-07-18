@@ -20,11 +20,13 @@
 //! resultant at its own point — curb-under-one-edge roll torque, cross-slope contact, and
 //! half-off-a-ledge support emerge from the application points.
 //!
-//! The track **view** is a stateless kinematic wrap (step 22): the road wheels read the field
-//! directly ([`articulate_wheels_field`]), the belt path is *fitted* around the articulated
-//! wheels every frame ([`conform_belts_field`]) — tangent wrap + terrain conform + budgeted sag —
-//! and nothing about the drawn track is simulated or remembered. The step-21 Verlet chain remains
-//! behind the `V` toggle as the frozen A/B partner ([`conform_belts_field_chain`]).
+//! The sandbox's DEFAULT track view is a stateless kinematic wrap (step 22): the road wheels read
+//! the field directly ([`articulate_wheels_field`]), the belt path is *fitted* around the
+//! articulated wheels every frame ([`conform_belts_field`]) — tangent wrap + terrain conform +
+//! budgeted sag — and nothing about the drawn track is simulated or remembered. The step-24 route
+//! chain rides behind the `V` toggle as its live A/B partner ([`conform_belts_field_chain`], the
+//! same [`track::chain`](crate::track::chain) core the game runs) — and it is the view that WON and
+//! SHIPPED as the game's own (`track::view`). Neither is awaiting deletion.
 
 use super::*;
 
@@ -41,10 +43,6 @@ pub(super) struct TerrainField(pub(super) BlockField);
 impl TerrainField {
     pub(super) fn depth_along(&self, station: Vec3, out: Vec3) -> f32 {
         self.0.depth_along(station, out, CONTACT_PROBE)
-    }
-
-    pub(super) fn signed_depth(&self, p: Vec3) -> f32 {
-        self.0.signed_depth(p, CONTACT_PROBE)
     }
 }
 

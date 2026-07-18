@@ -14,17 +14,13 @@
 //!
 //! Record types (one JSON object per line):
 //! - `meta` — the scenario + vehicle constants.
-//! - `scan` — the terrain field sampled on fixed grids at startup (horizontal depth rows at
-//!   several heights along the lane; vertical profiles at interesting z): validates the oracle
-//!   itself (monotonicity, plateaus, rounding) with no sim in the loop.
-//! - `k` — per fixed tick: hull pose/velocity, belt speed/phase, every contact
-//!   (hull-local position, load, slip), and the conformed chain (left side, hull-local) — the
-//!   physics AND what the eye sees, aligned on one clock.
+//! - `k` — per fixed tick: hull pose/velocity, belt speed/phase, and every contact (hull-local
+//!   position, load, slip) — the physics on one clock. The `grip=elem` runs add an `e` line per
+//!   tick (strain telemetry).
 
 use std::fs::File;
 use std::io::{BufWriter, Write as _};
 
-use super::model4::TerrainField;
 use super::*;
 
 /// The parsed scenario (present only when `SANDBOX_HARNESS` is set — every harness system gates
@@ -120,13 +116,12 @@ fn arr(vals: impl IntoIterator<Item = f32>) -> String {
     format!("[{}]", inner.join(","))
 }
 
-/// Apply the scenario (view, spawn) and write the meta + field-scan records.
+/// Apply the scenario (view, spawn) and write the meta record.
 pub(super) fn harness_setup(
     mut commands: Commands,
     harness: Res<Harness>,
     mut grip_switch: ResMut<GripSwitch>,
     fixed_time: Res<Time<Fixed>>,
-    field: Res<TerrainField>,
     mut view: ResMut<TrackViewMode>,
     hull: Single<(&mut Transform, &mut LinearVelocity, &mut AngularVelocity), With<Hull>>,
 ) {
@@ -187,49 +182,6 @@ pub(super) fn harness_setup(
     )
     .unwrap();
 
-    // Field scans. Horizontal rows: signed
-    // depth along the lane at the track line, at several heights — the terrain cross-section the
-    // belly stations actually read. Vertical profiles: depth vs y at a board center / board edge /
-    // gap center per washboard set — monotonicity and plateaus as numbers.
-    let (z0, z1, dz) = (6.0_f32, -30.0_f32, -0.02_f32);
-    let steps = ((z1 - z0) / dz) as usize;
-    for y in [0.02_f32, 0.06, 0.10, 0.15, 0.20, 0.30] {
-        let row: Vec<f32> = (0..=steps)
-            .map(|i| field.signed_depth(Vec3::new(TRACK_HALF_WIDTH, y, z0 + dz * i as f32)))
-            .collect();
-        writeln!(
-            writer,
-            "{{\"t\":\"scan\",\"y\":{y:.3},\"z0\":{z0},\"dz\":{dz},\"d\":{}}}",
-            arr(row)
-        )
-        .unwrap();
-    }
-    for z in [
-        -3.0_f32, -3.2, -3.4, -10.0, -10.3, -10.75, -19.0, -19.5, -20.25,
-    ] {
-        let (ylo, yhi, dy) = (-0.15_f32, 0.5_f32, 0.005_f32);
-        let steps = ((yhi - ylo) / dy) as usize;
-        let col: Vec<f32> = (0..=steps)
-            .map(|i| field.signed_depth(Vec3::new(TRACK_HALF_WIDTH, ylo + dy * i as f32, z)))
-            .collect();
-        // The same column through the physics' directional query (straight-down probe).
-        let coldir: Vec<f32> = (0..=steps)
-            .map(|i| {
-                field.depth_along(
-                    Vec3::new(TRACK_HALF_WIDTH, ylo + dy * i as f32, z),
-                    Vec3::NEG_Y,
-                )
-            })
-            .collect();
-        writeln!(
-            writer,
-            "{{\"t\":\"vscan\",\"z\":{z:.3},\"y0\":{ylo},\"dy\":{dy},\"d\":{},\"dd\":{}}}",
-            arr(col),
-            arr(coldir)
-        )
-        .unwrap();
-    }
-
     commands.insert_resource(HarnessLog { tick: 0, writer });
 }
 
@@ -270,8 +222,6 @@ pub(super) fn harness_record(
     contacts: Res<BeltContacts>,
     belt: Res<BeltSpeed>,
     phase: Res<BeltPhase>,
-    belts: Res<ConformedBelts>,
-    wheels: Query<(&RigWheel, &Suspension)>,
     mut exit: MessageWriter<AppExit>,
 ) {
     let Some(mut log) = log else {
@@ -317,37 +267,10 @@ pub(super) fn harness_record(
         ]
     };
     let ([ll, lel, lfl], [rl, rel, rfl]) = (sums(0), sums(1));
-    let chain_rows: Vec<String> = belts
-        .left
-        .iter()
-        .map(|s| format!("[{:.4},{:.4}]", s.local.x, s.local.y))
-        .collect();
-    // Road wheels: (side sign, pivot z, smoothed lift dy, raw target) — the wheel-jumpiness
-    // channel, with the un-smoothed target so smoothing lag is directly measurable.
-    let mut wheel_rows: Vec<(f32, f32, f32, f32)> = wheels
-        .iter()
-        .filter(|(w, _)| w.kind == WheelKind::Road)
-        .map(|(w, s)| {
-            (
-                match w.side {
-                    Side::Left => -1.0,
-                    Side::Right => 1.0,
-                },
-                s.pivot_local.z,
-                s.dy,
-                s.target,
-            )
-        })
-        .collect();
-    wheel_rows.sort_by(|a, b| (a.0, a.1).partial_cmp(&(b.0, b.1)).unwrap());
-    let wheel_json: Vec<String> = wheel_rows
-        .iter()
-        .map(|(side, z, dy, target)| format!("[{side:.0},{z:.3},{dy:.4},{target:.4}]"))
-        .collect();
     let k = log.tick;
     writeln!(
         log.writer,
-        "{{\"t\":\"k\",\"k\":{k},\"hull\":{},\"q\":{},\"av\":{},\"pitch\":{:.5},\"yaw\":{:.5},\"yawrate\":{:.5},\"raw\":{},\"shaped\":{},\"side_cmd\":{},\"vel\":{},\"belt\":{},\"phase\":{},\"engine\":{},\"reaction\":{},\"qgrip\":[{},{}],\"load\":{},\"load_el\":{},\"flat\":{},\"sup\":{:.0},\"wheels\":[{}],\"contacts\":[[{}],[{}]],\"chain\":[{}]}}",
+        "{{\"t\":\"k\",\"k\":{k},\"hull\":{},\"q\":{},\"av\":{},\"pitch\":{:.5},\"yaw\":{:.5},\"yawrate\":{:.5},\"raw\":{},\"shaped\":{},\"side_cmd\":{},\"vel\":{},\"belt\":{},\"phase\":{},\"engine\":{},\"reaction\":{},\"qgrip\":[{},{}],\"load\":{},\"load_el\":{},\"flat\":{},\"sup\":{:.0},\"contacts\":[[{}],[{}]]}}",
         arr([
             transform.translation.x,
             transform.translation.y,
@@ -377,10 +300,8 @@ pub(super) fn harness_record(
         arr([lel, rel]),
         arr([lfl, rfl]),
         total,
-        wheel_json.join(","),
         side_rows(0),
         side_rows(1),
-        chain_rows.join(","),
     )
     .unwrap();
     // Element-regime strain telemetry (`e` line, `grip=elem` runs only — `k` lines stay
