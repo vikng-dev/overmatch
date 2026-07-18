@@ -134,8 +134,11 @@ pub fn phase_decompose(phase: f64, pitch: f32) -> (i64, f32) {
     (wraps, offset)
 }
 
-/// `1 − smoothstep` on [0, 1] — the belt-hold blend factor.
-fn hold_blend(x: f32) -> f32 {
+/// `1 − smoothstep` on [0, 1] — the belt-hold blend factor. Public because the transmission
+/// module reuses the SAME shape as the brake-engagement envelope (transmission-design.md §3:
+/// the hold reframe keeps the blend only as the engagement smoothing, never as a reaction
+/// attenuator).
+pub fn hold_blend(x: f32) -> f32 {
     let t = x.clamp(0.0, 1.0);
     1.0 - t * t * (3.0 - 2.0 * t)
 }
@@ -317,6 +320,36 @@ fn engine_available(params: &ForceParams, belt_speed: f32) -> f32 {
     (params.engine_power / belt_speed.abs().max(STALL_SPEED)).min(params.engine_force)
 }
 
+/// The LEGACY symmetric-governor belt integration, verbatim (the parity branch of the
+/// transmission seam): constant-power curve under the force cap, governor chasing
+/// `command × max_speed`, the ADR-0026 hold blend attenuating the ground reaction at zero
+/// command + zero belt speed, reflected inertia, and the top-speed clamp. Returns
+/// `(engine force applied, next belt speed)`.
+///
+/// Extracted from the tail of [`step_side`] EXACTLY as it stood (phase-2.5 commit A) so the
+/// joint transmission's `Governor` adapter and `step_side` share one implementation — every
+/// float op in the same order, bit-identical to the shipped law. Any change here is an MP
+/// behavior change; the sandbox parity captures gate it.
+pub fn governor_belt(
+    params: &ForceParams,
+    command: f32,
+    belt_speed: f32,
+    belt_reaction: f32,
+    dt: f32,
+) -> (f32, f32) {
+    let target = command * params.max_speed;
+    let avail = engine_available(params, belt_speed);
+    let engine = (params.governor_gain * (target - belt_speed)).clamp(-avail, avail);
+    let hold = if params.grip_stiffness > 0.0 {
+        hold_blend(target.abs() / params.slip_saturation)
+            * hold_blend(belt_speed.abs() / params.slip_saturation)
+    } else {
+        0.0
+    };
+    let next = belt_speed + (engine - (1.0 - hold) * belt_reaction) / params.inertia * dt;
+    (engine, next.clamp(-params.max_speed, params.max_speed))
+}
+
 /// Advance one side by one fixed tick: compute support + traction at the advected stations
 /// (probing `oracle` at the presented `affine`, reading the hull's velocity field through
 /// `vel_at`), integrate belt dynamics, and return the forces for the caller to apply IN
@@ -327,6 +360,11 @@ fn engine_available(params: &ForceParams, belt_speed: f32) -> f32 {
 /// it pre-sized to `count * 3` ([`GripElements::for_links`]; wrong-length slabs skip the
 /// regime — see the invariant below). `None` = the shipped aggregate law (the game's MP
 /// compositions).
+///
+/// This is [`contact_side`] + the legacy [`governor_belt`] tail — the one-call shape every
+/// MP composition and the sandbox's governor mode run. The joint-transmission callers
+/// (offline / sandbox regenerative modes) call `contact_side` on both sides first and run
+/// `track::transmission::step` once instead (transmission-design.md §2 scheduling).
 pub fn step_side<O: TerrainOracle>(
     input: &SideInput,
     state: SideState,
@@ -337,6 +375,35 @@ pub fn step_side<O: TerrainOracle>(
     vel_at: impl Fn(Vec3) -> Vec3,
     elements: Option<&mut GripElements>,
 ) -> SideReport {
+    let (mut report, live) =
+        contact_side(input, state, affine, dt, params, oracle, vel_at, elements);
+    if !live {
+        return report;
+    }
+    let (engine, next) =
+        governor_belt(params, input.command, state.speed, report.belt_reaction, dt);
+    report.state.speed = next;
+    report.state.phase = state.phase + f64::from(state.speed * dt);
+    report.engine_force = engine;
+    report
+}
+
+/// The contact pass of [`step_side`] WITHOUT belt integration: support + traction forces,
+/// contacts, grip-state update, and the summed longitudinal ground reaction. Returns the
+/// report (with `state.speed`/`state.phase` still the INPUT values and `engine_force` 0)
+/// plus `true` iff the station geometry was live — the same condition under which
+/// `step_side` integrates at all (a degenerate loop returns untouched state, verbatim the
+/// old early-return).
+pub fn contact_side<O: TerrainOracle>(
+    input: &SideInput,
+    state: SideState,
+    affine: Affine3A,
+    dt: f32,
+    params: &ForceParams,
+    oracle: &O,
+    vel_at: impl Fn(Vec3) -> Vec3,
+    elements: Option<&mut GripElements>,
+) -> (SideReport, bool) {
     let mut report = SideReport {
         state,
         ..Default::default()
@@ -350,7 +417,7 @@ pub fn step_side<O: TerrainOracle>(
     stations.truncate(input.count);
     let n = stations.len();
     if n < 3 {
-        return report;
+        return (report, false);
     }
 
     let k = params.grip_stiffness;
@@ -759,31 +826,14 @@ pub fn step_side<O: TerrainOracle>(
         });
     }
 
-    // Belt dynamics + advection: governor toward the command under the constant-power curve,
-    // ground reaction, reflected inertia; phase advects at the PRE-update speed. The HOLD
-    // blend h lets the locked drivetrain bear the ground reaction at zero command + zero
-    // belt speed (h→1) instead of being back-driven through finite governor gain — the
-    // measured dominant longitudinal parking leak. During motion h→0: unchanged dynamics.
-    // Legitimate force balance: the belt's 1-D coordinate is fully known here. A future
-    // neutral/clutch or brake-damage mechanic weakens this term explicitly.
-    let target = input.command * params.max_speed;
-    let avail = engine_available(params, belt_speed);
-    let engine = (params.governor_gain * (target - belt_speed)).clamp(-avail, avail);
-    let hold = if k > 0.0 {
-        hold_blend(target.abs() / params.slip_saturation)
-            * hold_blend(belt_speed.abs() / params.slip_saturation)
-    } else {
-        0.0
-    };
-    let next = belt_speed + (engine - (1.0 - hold) * belt_reaction) / params.inertia * dt;
-    report.state.speed = next.clamp(-params.max_speed, params.max_speed);
-    report.state.phase = state.phase + f64::from(belt_speed * dt);
     // In the element regime the aggregate slot carries the summed element force (long, lat) —
-    // telemetry only (the element state is authoritative and lives with the caller).
+    // telemetry only (the element state is authoritative and lives with the caller). Belt
+    // dynamics (the governor tail, or the joint transmission) integrate AFTER this pass —
+    // `state.speed`/`state.phase` are returned untouched, the pre-tick truth the phase
+    // advection and the transmission both key on.
     report.state.grip = if elements_mode { elem_sum } else { grip_next };
-    report.engine_force = engine;
     report.belt_reaction = belt_reaction;
-    report
+    (report, true)
 }
 
 #[cfg(test)]
