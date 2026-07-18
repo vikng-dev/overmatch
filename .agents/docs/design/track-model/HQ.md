@@ -1748,6 +1748,24 @@ both.
   feel drive; codex post-merge review in flight; refinements queued (T_drag(ω) curve, shift
   time datum, L600 transfer loss, clutch-brake adapter when a T-34 ships).
 
+- 2026-07-19 — **Step 31b: TRANSMISSION FIX ROUND MERGED (278 tests)** — Yan's Tiger verdict
+  ("can't decelerate; pivot dead in both new modes") + codex adversarial review, one merge.
+  THREE vehicle-scaling defects the T-34 lab had masked: (1) steering capacity applied to the
+  difference axis (373 < 478 kN·m scrub — pivot dead; now PER-OUTPUT, F_s = 2×cap → 745 kN·m);
+  (2) reversal-at-speed drove |throttle| in the ENGAGED direction (accelerated on brake input;
+  now driver-intent layer: opposite = service brakes → swap → reverse; coast = declared
+  drag_fraction 0.25 compression braking, spec datum); (3) steering-servo P-band droop (Tiger's
+  neutral target sat inside the 0.25 m/s band → 0.031 rad/s crawl; band DELETED — semi-implicit
+  exact servo). Also closed codex 2-5: brake passivity (stop-force law + parking LATCH, stays
+  saturated post-breach), recirculation on PHYSICAL sprocket powers, L600 m=0 cusp re-solve,
+  spec validation (finite, hysteresis-per-pair, ladder shape). Law/spec split table in the
+  module doc (moved: shift_secs, drag_fraction → spec). PERMANENT Tiger gates in headless
+  suite: pivot L600 0.098 / hybrid 0.131 rad/s, brakes 6→1 m/s in 1.17 s, top speed 10.49
+  (geared F8@2500 predicts 10.48), coast gate 14 s with the honest note that rolling
+  resistance (~25-35 kN, terrain mechanic ADR-0007) is the missing decel term. T-34 numbers
+  strengthened (pivot 0.15→0.23, hybrid turn 25.7→21.4 m). MP bit-parity held; REV-13 intact.
+  OPEN: Yan re-drive; REV-14 discrete-state determinism rule recorded in checklist.
+
 ## Open questions / parking lot
 
 - **Lateral link rigidity (Yan, 2026-07-16, open tab)**: a real shoe is ~perfectly stiff
