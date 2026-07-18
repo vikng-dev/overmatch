@@ -76,6 +76,10 @@ TankSpec(
                     // down band — hysteresis by construction, no hunting.
                     shift_up_rpm: 2300.0,
                     shift_down_rpm: 1400.0,
+                    // OLVAR preselector: pre-selected shifts complete with drive uncoupled
+                    // for a noticeable fraction of a second — INFERRED ~0.31 s, no shift-
+                    // time datum reached.
+                    shift_secs: 0.31,
                 ),
                 steering: (
                     // (R_tight, R_wide) per forward gear (m): anchored at BOTH corners

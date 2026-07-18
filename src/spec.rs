@@ -304,6 +304,16 @@ pub struct GearboxSpec {
     pub reverse_speeds_kmh: Vec<f32>,
     pub shift_up_rpm: f32,
     pub shift_down_rpm: f32,
+    /// Gear-shift torque-interruption time (s) — how long the drive is uncoupled through a
+    /// shift. Vehicle data (a preselector and a crash box differ); defaults to 0.31 s when
+    /// unauthored (INFERRED, no per-vehicle shift-time datum reached).
+    #[serde(default = "default_shift_secs")]
+    pub shift_secs: f32,
+}
+
+/// See [`GearboxSpec::shift_secs`].
+fn default_shift_secs() -> f32 {
+    0.31
 }
 
 /// The steering member: per-gear fixed radii (the L600's two detents; the hybrid interpolates
@@ -583,6 +593,12 @@ impl TankSpec {
                     // check also rejects NaN/∞.
                     "engine.drag_fraction",
                     (0.0..=1.0).contains(&tr.engine.drag_fraction),
+                ),
+                (
+                    // Bounded so the u8 tick countdown can represent it (255 ticks ≈ 4 s —
+                    // far past any honest shift); the range check also rejects NaN/∞.
+                    "gearbox.shift_secs",
+                    (0.0..=3.0).contains(&gb.shift_secs),
                 ),
             ] {
                 if !ok {

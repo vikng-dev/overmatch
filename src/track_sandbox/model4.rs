@@ -397,6 +397,8 @@ impl Default for T34Transmission {
             brake_capacity_n: 120_000.0,
             // Compression braking ~25% of peak torque (diesel 20–30% band) — INFERRED.
             drag_fraction: 0.25,
+            // Manual crash-box shift, drive uncoupled ~0.3 s — INFERRED.
+            shift_secs: 0.31,
             sprocket_radius_m: DRIVE_RADIUS + TRACK_THICKNESS / 2.0,
             half_tread_m: TRACK_HALF_WIDTH,
         }))

@@ -37,6 +37,31 @@
 //! only path-dependent state (gear, shift countdown, steering detent, direction) — carried as
 //! a plain LOCAL component / sandbox resource, NOT replicated, NOT hashed (this is REV 13;
 //! only the offline composition and the sandbox ever run the regenerative adapters).
+//!
+//! # The law/spec split (every constant in this module, classified)
+//!
+//! The module is the complete LAW; the spec block is the complete per-vehicle BEHAVIOR. The
+//! test: would a different tank author it differently? If yes it must live in the spec —
+//! everything below is what legitimately remains a module constant, with the rationale.
+//!
+//! | constant | class | rationale |
+//! |---|---|---|
+//! | [`GOVERNOR_CUT_RPM`] | SIM POLICY | numerical smoothing width so the top-speed equilibrium is a smooth root, not a hard clip; any governed engine gets the same treatment |
+//! | [`DRAG_SAT_SPEED`] | SIM POLICY | anti-chatter ramp for the drag sign near standstill (the parking brake owns standstill); a solver guard, not a vehicle trait |
+//! | [`DRAG_THROTTLE_RELEASE`] | SIM POLICY | driver-intent shaping: where "open throttle" stops meaning "motoring"; part of the uniform input contract, same for every tank |
+//! | [`DEAD`] | SIM POLICY | input deadzone on one shared axis mapping |
+//! | [`PARK_ENGAGE_SPEED`] | SIM POLICY | latch threshold for "at rest" — a determinism/stability guard on the shared intent layer |
+//! | [`STEER_SERVO_BAND`] | SIM POLICY | servo proportional band sized against the grip law's `slip_saturation` scale — pure control shaping (the AUTHORITY it saturates to is spec) |
+//! | [`DIRECTION_SWAP_SPEED`] | SIM POLICY | the intent seam where a held opposite throttle becomes a gear-direction change; uniform game semantics |
+//! | [`NEUTRAL_THROTTLE`], [`NEUTRAL_M_SPEED`] | SIM POLICY | regime-entry thresholds for the L600 neutral turn (the neutral turn's SPEED SCALE — `neutral_d_full × neutral_fraction` — is spec-derived) |
+//! | [`WIDE_ON`]/[`WIDE_OFF`]/[`TIGHT_ON`]/[`TIGHT_OFF`] | SIM POLICY | stick-to-detent input mapping with hysteresis; the DETENT RATIOS they select are spec |
+//! | [`TICK_HZ`] | SIM POLICY | the fixed simulation tick the shift countdown quantizes against |
+//!
+//! Moved OUT of this module to the spec (they were vehicle data wearing const clothing):
+//! shift time (`gearbox.shift_secs` — a Tiger preselector and a T-34 crash box differ),
+//! engine drag (`engine.drag_fraction` — an engine datum). Everything else the vehicle
+//! authors was already spec: torque curve, ladders, radii, capacities, brake, η, neutral
+//! fraction.
 
 use super::forces::{self, ForceParams};
 
@@ -64,10 +89,9 @@ impl TransmissionMode {
     }
 }
 
-/// Gear-shift torque interruption (fixed 64 Hz ticks): the OLVAR preselector's shift takes a
-/// noticeable fraction of a second with drive uncoupled. 20 ticks ≈ 0.31 s. Declared model
-/// policy (INFERRED — no per-vehicle shift-time datum reached; refine with the codex table).
-pub const SHIFT_TICKS: u8 = 20;
+/// The fixed simulation tick rate the shift countdown quantizes against (the module operates
+/// on fixed 64 Hz ticks — module doc). SIM POLICY.
+const TICK_HZ: f32 = 64.0;
 
 /// Fuel-governor cut width (rpm): torque ramps linearly to zero over this band past the
 /// governed rpm, so the top-speed equilibrium is a smooth root instead of a hard clip.
@@ -172,6 +196,10 @@ pub struct TransmissionParams {
     /// half of rated power. Diesel motoring/compression braking runs ~20–30% of rated
     /// torque (INFERRED band, tagged at the authoring site).
     pub drag_fraction: f32,
+    /// Gear-shift torque-interruption window in fixed ticks — DERIVED from the authored
+    /// `shift_secs` (a Tiger preselector and a crash box shift very differently: vehicle
+    /// data, not module policy).
+    pub shift_ticks: u8,
     /// Derived at construction: the torque curve's peak (the low-speed rev target).
     pub peak_torque_rpm: f32,
     pub peak_torque_nm: f32,
@@ -202,6 +230,8 @@ pub struct TransmissionAuthoring<'a> {
     pub brake_capacity_n: f32,
     /// See [`TransmissionParams::drag_fraction`].
     pub drag_fraction: f32,
+    /// Gear-shift torque-interruption time (s) — see [`TransmissionParams::shift_ticks`].
+    pub shift_secs: f32,
     pub sprocket_radius_m: f32,
     /// Track half-tread `b` (m) — the spec's `plane_x`.
     pub half_tread_m: f32,
@@ -255,6 +285,7 @@ impl TransmissionParams {
             recirculation: a.recirculation,
             brake_capacity_n: a.brake_capacity_n,
             drag_fraction: a.drag_fraction,
+            shift_ticks: (a.shift_secs * TICK_HZ).round().clamp(0.0, 255.0) as u8,
             peak_torque_rpm,
             peak_torque_nm,
         }
@@ -417,7 +448,7 @@ fn regenerative(
         if (want_rev || want_fwd) && want_rev != st.reverse && m.abs() < DIRECTION_SWAP_SPEED {
             st.reverse = want_rev;
             st.gear = 1;
-            st.shift_ticks = SHIFT_TICKS;
+            st.shift_ticks = tp.shift_ticks;
         }
     }
     let ladder: &[f32] = if st.reverse {
@@ -435,10 +466,10 @@ fn regenerative(
         let rpm = rpm_geared(ladder[(st.gear - 1) as usize]);
         if rpm > tp.shift_up_rpm && st.gear < top {
             st.gear += 1;
-            st.shift_ticks = SHIFT_TICKS;
+            st.shift_ticks = tp.shift_ticks;
         } else if rpm < tp.shift_down_rpm && st.gear > 1 {
             st.gear -= 1;
-            st.shift_ticks = SHIFT_TICKS;
+            st.shift_ticks = tp.shift_ticks;
         }
     }
     let shifting = st.shift_ticks > 0;
@@ -769,6 +800,7 @@ mod tests {
             recirculation: 0.9,
             brake_capacity_n: 120_000.0,
             drag_fraction: 0.25,
+            shift_secs: 0.31,
             sprocket_radius_m: 0.34,
             half_tread_m: 1.25,
         })
@@ -861,7 +893,7 @@ mod tests {
         // Drain the window at a mid-band speed for gear 2: no hunting either way.
         let g2 = tp.gears_fwd[1];
         let v_mid = 1_300.0 * RPM_TO_RAD * tp.sprocket_radius / g2;
-        for _ in 0..(SHIFT_TICKS as usize + 5) {
+        for _ in 0..(tp.shift_ticks as usize + 5) {
             step(
                 TransmissionMode::Hybrid,
                 &fp,
@@ -886,7 +918,7 @@ mod tests {
     }
 
     /// The shift is a torque interruption: propulsion force is zero for exactly
-    /// [`SHIFT_TICKS`] ticks, then returns. (Throttle 1.0 keeps engine drag released, and
+    /// the authored `shift_secs` worth of ticks, then returns. (Throttle 1.0 keeps engine drag released, and
     /// reactions are zero, so the per-side force IS the propulsion share.)
     #[test]
     fn shift_torque_interruption_window() {
@@ -909,9 +941,9 @@ mod tests {
                 assert!(r.forces[0] > 0.0, "torque must return after the window");
                 break;
             }
-            assert!(zero_ticks <= SHIFT_TICKS as usize, "window must end");
+            assert!(zero_ticks <= tp.shift_ticks as usize, "window must end");
         }
-        assert_eq!(zero_ticks, SHIFT_TICKS as usize);
+        assert_eq!(zero_ticks, tp.shift_ticks as usize);
     }
 
     /// The L600 constraint converges to the geared ratio: under sustained throttle + tight
