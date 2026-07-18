@@ -14,17 +14,13 @@
 //!
 //! Record types (one JSON object per line):
 //! - `meta` — the scenario + vehicle constants.
-//! - `scan` — the terrain field sampled on fixed grids at startup (horizontal depth rows at
-//!   several heights along the lane; vertical profiles at interesting z): validates the oracle
-//!   itself (monotonicity, plateaus, rounding) with no sim in the loop.
-//! - `k` — per fixed tick: hull pose/velocity, belt speed/phase, every contact
-//!   (hull-local position, load, slip), and the conformed chain (left side, hull-local) — the
-//!   physics AND what the eye sees, aligned on one clock.
+//! - `k` — per fixed tick: hull pose/velocity, belt speed/phase, and every contact (hull-local
+//!   position, load, slip) — the physics on one clock. The `grip=elem` runs add an `e` line per
+//!   tick (strain telemetry).
 
 use std::fs::File;
 use std::io::{BufWriter, Write as _};
 
-use super::model4::TerrainField;
 use super::*;
 
 /// The parsed scenario (present only when `SANDBOX_HARNESS` is set — every harness system gates
@@ -120,13 +116,12 @@ fn arr(vals: impl IntoIterator<Item = f32>) -> String {
     format!("[{}]", inner.join(","))
 }
 
-/// Apply the scenario (view, spawn) and write the meta + field-scan records.
+/// Apply the scenario (view, spawn) and write the meta record.
 pub(super) fn harness_setup(
     mut commands: Commands,
     harness: Res<Harness>,
     mut grip_switch: ResMut<GripSwitch>,
     fixed_time: Res<Time<Fixed>>,
-    field: Res<TerrainField>,
     mut view: ResMut<TrackViewMode>,
     hull: Single<(&mut Transform, &mut LinearVelocity, &mut AngularVelocity), With<Hull>>,
 ) {
@@ -187,49 +182,6 @@ pub(super) fn harness_setup(
     )
     .unwrap();
 
-    // Field scans. Horizontal rows: signed
-    // depth along the lane at the track line, at several heights — the terrain cross-section the
-    // belly stations actually read. Vertical profiles: depth vs y at a board center / board edge /
-    // gap center per washboard set — monotonicity and plateaus as numbers.
-    let (z0, z1, dz) = (6.0_f32, -30.0_f32, -0.02_f32);
-    let steps = ((z1 - z0) / dz) as usize;
-    for y in [0.02_f32, 0.06, 0.10, 0.15, 0.20, 0.30] {
-        let row: Vec<f32> = (0..=steps)
-            .map(|i| field.signed_depth(Vec3::new(TRACK_HALF_WIDTH, y, z0 + dz * i as f32)))
-            .collect();
-        writeln!(
-            writer,
-            "{{\"t\":\"scan\",\"y\":{y:.3},\"z0\":{z0},\"dz\":{dz},\"d\":{}}}",
-            arr(row)
-        )
-        .unwrap();
-    }
-    for z in [
-        -3.0_f32, -3.2, -3.4, -10.0, -10.3, -10.75, -19.0, -19.5, -20.25,
-    ] {
-        let (ylo, yhi, dy) = (-0.15_f32, 0.5_f32, 0.005_f32);
-        let steps = ((yhi - ylo) / dy) as usize;
-        let col: Vec<f32> = (0..=steps)
-            .map(|i| field.signed_depth(Vec3::new(TRACK_HALF_WIDTH, ylo + dy * i as f32, z)))
-            .collect();
-        // The same column through the physics' directional query (straight-down probe).
-        let coldir: Vec<f32> = (0..=steps)
-            .map(|i| {
-                field.depth_along(
-                    Vec3::new(TRACK_HALF_WIDTH, ylo + dy * i as f32, z),
-                    Vec3::NEG_Y,
-                )
-            })
-            .collect();
-        writeln!(
-            writer,
-            "{{\"t\":\"vscan\",\"z\":{z:.3},\"y0\":{ylo},\"dy\":{dy},\"d\":{},\"dd\":{}}}",
-            arr(col),
-            arr(coldir)
-        )
-        .unwrap();
-    }
-
     commands.insert_resource(HarnessLog { tick: 0, writer });
 }
 
@@ -270,8 +222,6 @@ pub(super) fn harness_record(
     contacts: Res<BeltContacts>,
     belt: Res<BeltSpeed>,
     phase: Res<BeltPhase>,
-    belts: Res<ConformedBelts>,
-    wheels: Query<(&RigWheel, &Suspension)>,
     mut exit: MessageWriter<AppExit>,
 ) {
     let Some(mut log) = log else {
@@ -285,8 +235,10 @@ pub(super) fn harness_record(
     let total: f32 = contacts.all().map(|c| c.load).sum();
     // Per-side contact arrays: positional prefix [x,y,z,load,slip,ny] kept from schema 1,
     // appended [load_elastic, slip_lat, f_long, f_lat].
-    let side_rows = |si: usize| -> String {
-        contacts.0[si]
+    let side_rows = |side: Side| -> String {
+        contacts
+            .0
+            .get(side)
             .iter()
             .map(|c| {
                 format!(
@@ -308,46 +260,19 @@ pub(super) fn harness_record(
     };
     // Per-side aggregates, named: actual load, elastic load, lateral force. Longitudinal
     // force is the existing `reaction` field; per-contact slips live in the contact arrays.
-    let sums = |si: usize| -> [f32; 3] {
-        let cs = &contacts.0[si];
+    let sums = |side: Side| -> [f32; 3] {
+        let cs = contacts.0.get(side);
         [
             cs.iter().map(|c| c.load).sum(),
             cs.iter().map(|c| c.load_elastic).sum(),
             cs.iter().map(|c| c.f_lat).sum(),
         ]
     };
-    let ([ll, lel, lfl], [rl, rel, rfl]) = (sums(0), sums(1));
-    let chain_rows: Vec<String> = belts
-        .left
-        .iter()
-        .map(|s| format!("[{:.4},{:.4}]", s.local.x, s.local.y))
-        .collect();
-    // Road wheels: (side sign, pivot z, smoothed lift dy, raw target) — the wheel-jumpiness
-    // channel, with the un-smoothed target so smoothing lag is directly measurable.
-    let mut wheel_rows: Vec<(f32, f32, f32, f32)> = wheels
-        .iter()
-        .filter(|(w, _)| w.kind == WheelKind::Road)
-        .map(|(w, s)| {
-            (
-                match w.side {
-                    Side::Left => -1.0,
-                    Side::Right => 1.0,
-                },
-                s.pivot_local.z,
-                s.dy,
-                s.target,
-            )
-        })
-        .collect();
-    wheel_rows.sort_by(|a, b| (a.0, a.1).partial_cmp(&(b.0, b.1)).unwrap());
-    let wheel_json: Vec<String> = wheel_rows
-        .iter()
-        .map(|(side, z, dy, target)| format!("[{side:.0},{z:.3},{dy:.4},{target:.4}]"))
-        .collect();
+    let ([ll, lel, lfl], [rl, rel, rfl]) = (sums(Side::Left), sums(Side::Right));
     let k = log.tick;
     writeln!(
         log.writer,
-        "{{\"t\":\"k\",\"k\":{k},\"hull\":{},\"q\":{},\"av\":{},\"pitch\":{:.5},\"yaw\":{:.5},\"yawrate\":{:.5},\"raw\":{},\"shaped\":{},\"side_cmd\":{},\"vel\":{},\"belt\":{},\"phase\":{},\"engine\":{},\"reaction\":{},\"qgrip\":[{},{}],\"load\":{},\"load_el\":{},\"flat\":{},\"sup\":{:.0},\"wheels\":[{}],\"contacts\":[[{}],[{}]],\"chain\":[{}]}}",
+        "{{\"t\":\"k\",\"k\":{k},\"hull\":{},\"q\":{},\"av\":{},\"pitch\":{:.5},\"yaw\":{:.5},\"yawrate\":{:.5},\"raw\":{},\"shaped\":{},\"side_cmd\":{},\"vel\":{},\"belt\":{},\"phase\":{},\"engine\":{},\"reaction\":{},\"qgrip\":[{},{}],\"load\":{},\"load_el\":{},\"flat\":{},\"sup\":{:.0},\"contacts\":[[{}],[{}]]}}",
         arr([
             transform.translation.x,
             transform.translation.y,
@@ -367,20 +292,18 @@ pub(super) fn harness_record(
         arr([shaped.0.throttle, shaped.0.steer]),
         arr(side_cmd),
         arr([lin.0.x, lin.0.y, lin.0.z]),
-        arr([belt.left, belt.right]),
+        arr([belt.get(Side::Left), belt.get(Side::Right)]),
         arr([phase.get(Side::Left) as f32, phase.get(Side::Right) as f32]),
-        arr(dynamics.engine),
-        arr(dynamics.reaction),
-        arr([grip.0[0].x, grip.0[0].y]),
-        arr([grip.0[1].x, grip.0[1].y]),
+        arr(dynamics.engine.0),
+        arr(dynamics.reaction.0),
+        arr([grip.0.get(Side::Left).x, grip.0.get(Side::Left).y]),
+        arr([grip.0.get(Side::Right).x, grip.0.get(Side::Right).y]),
         arr([ll, rl]),
         arr([lel, rel]),
         arr([lfl, rfl]),
         total,
-        wheel_json.join(","),
-        side_rows(0),
-        side_rows(1),
-        chain_rows.join(","),
+        side_rows(Side::Left),
+        side_rows(Side::Right),
     )
     .unwrap();
     // Element-regime strain telemetry (`e` line, `grip=elem` runs only — `k` lines stay
@@ -388,15 +311,15 @@ pub(super) fn harness_record(
     // Σ|j| / max|j| (m). Contact-loss erasure shows as a `jsum` sawtooth with no hull motion
     // — the parking-flutter instrument (netcode review defect 1).
     if grip_mode.0 == GripMode::Elements {
-        let e_side = |si: usize| -> (usize, f32, f32) {
-            let js = &grip_elements.0[si].strain;
+        let e_side = |side: Side| -> (usize, f32, f32) {
+            let js = &grip_elements.0.get(side).strain;
             let n = js.iter().filter(|j| **j != Vec3::ZERO).count();
             let sum: f32 = js.iter().map(|j| j.length()).sum();
             let max = js.iter().map(|j| j.length()).fold(0.0f32, f32::max);
             (n, sum, max)
         };
-        let (ln, ls, lm) = e_side(0);
-        let (rn, rs, rm) = e_side(1);
+        let (ln, ls, lm) = e_side(Side::Left);
+        let (rn, rs, rm) = e_side(Side::Right);
         writeln!(
             log.writer,
             "{{\"t\":\"e\",\"k\":{k},\"n\":[{ln},{rn}],\"jsum\":[{ls:.6},{rs:.6}],\"jmax\":[{lm:.6},{rm:.6}]}}"

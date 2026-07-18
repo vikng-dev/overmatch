@@ -35,6 +35,8 @@ pub(crate) use crate::track::oracle::{BlockField, TerrainBlock};
 pub(crate) use crate::track::route::{
     arc, build_route, external_tangent, polyline_len, resample, sag_span,
 };
+// One side encoding for the whole track core; the sandbox's formerly-private `Side` migrated here.
+pub(crate) use crate::track::side::{PerSide, Side};
 
 // --- Rig geometry (metres), benchmarked on the **Soviet T-34** — well-documented numbers and a
 // running-gear layout (5 big road wheels, rear-ish drive, all-steel track) essentially identical to
@@ -194,9 +196,11 @@ const LATERAL_GRIP_RATIO: f32 = 0.55;
 /// Clamp on the cosmetic lift (m): a tall obstacle can't fling the visual wheel arbitrarily far.
 const SUSP_MAX_LIFT: f32 = 0.5;
 
-/// The track-view A/B (`V`): the step-22 stateless kinematic wrap (default) vs the step-24 route
-/// chain — same sim, same terrain, flip live and feel the difference. The chain (and this toggle)
-/// gets deleted once the wrap wins the feel check.
+/// The track-view A/B (`V`): the step-22 stateless kinematic wrap (this sandbox's default) vs the
+/// step-24 route chain — same sim, same terrain, flip live and feel the difference. The chain WON
+/// the feel check and SHIPPED as the game's view (`track::view` steps `ChainState` every frame);
+/// the wrap stays the sandbox-local default and the chain's live A/B partner here. Both are
+/// permanent — neither this toggle nor either view is awaiting deletion.
 #[derive(Resource)]
 struct TrackViewMode {
     kinematic: bool,
@@ -238,13 +242,6 @@ fn toggle_view_mode(
             "route-chain (step 24: route tube, T-34 pin friction, pinch fuses)"
         }
     );
-}
-
-/// Which track a wheel belongs to. Left at −X, right at +X (matching the game's `TrackSide`).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Side {
-    Left,
-    Right,
 }
 
 /// A wheel's role in the running gear. The sprocket (front) and idler (rear) anchor the belt loop
@@ -291,48 +288,21 @@ struct BeltSample {
 /// conformed to terrain, in loop order. Built once per frame by the active view system
 /// (`conform_belts_field` / `conform_belts_field_chain`); the drawn spline is exactly this.
 #[derive(Resource, Default)]
-struct ConformedBelts {
-    left: Vec<BeltSample>,
-    right: Vec<BeltSample>,
-}
+struct ConformedBelts(PerSide<Vec<BeltSample>>);
 
 impl ConformedBelts {
     fn get(&self, side: Side) -> &[BeltSample] {
-        match side {
-            Side::Left => &self.left,
-            Side::Right => &self.right,
-        }
+        self.0.get(side)
+    }
+
+    fn get_mut(&mut self, side: Side) -> &mut Vec<BeltSample> {
+        self.0.get_mut(side)
     }
 }
 
 /// Marker for the hull body (the single dynamic rigid body, static for now in increment 1).
 #[derive(Component)]
 struct Hull;
-
-/// How many frames (~2 s) the jitter probe remembers.
-const JITTER_WINDOW: usize = 120;
-
-/// Per-frame world-space samples of the jitter-suspect elements (ring buffers over
-/// [`JITTER_WINDOW`] frames) — the element-first diagnosis instrument for the at-rest gizmo
-/// jitter. `J` prints each element's
-/// peak-to-peak amplitude: who actually moves, and by how much. Splits physics-side (hull pose)
-/// from visual-side (conformed belt, wheel placement, contact-dot position/size) at a keypress.
-#[derive(Resource, Default)]
-struct JitterProbe {
-    hull_y: std::collections::VecDeque<f32>,
-    hull_pitch: std::collections::VecDeque<f32>,
-    wheel_y: std::collections::VecDeque<f32>,
-    belt_y: std::collections::VecDeque<f32>,
-    dot_y: std::collections::VecDeque<f32>,
-    dot_load: std::collections::VecDeque<f32>,
-    /// Whole-ring channel: per-frame snapshot of every left-side conformed sample's world y,
-    /// index-aligned across frames (the ring is index-stable at rest, which is when the probe is
-    /// read; cleared if the sample count changes). Finds the worst-moving link *anywhere* on the
-    /// loop — the "some links jump around" channel the single-spot channels can't see.
-    ring_y: std::collections::VecDeque<Vec<f32>>,
-    /// Latest frame's hull-local sample positions, to name where the worst link sits.
-    ring_local: Vec<Vec2>,
-}
 
 /// The free-fly inspection camera (own copy, like `armor_sandbox`'s).
 #[derive(Component)]
@@ -355,7 +325,6 @@ pub fn plugin(app: &mut App) {
         .init_resource::<BeltSpeed>()
         .init_resource::<BeltPhase>()
         .init_resource::<ConformedBelts>()
-        .init_resource::<JitterProbe>()
         .init_resource::<VizLayers>()
         .init_resource::<ChainReference>()
         .init_resource::<TerrainField>()
@@ -401,9 +370,6 @@ pub fn plugin(app: &mut App) {
                     conform_belts_field_chain
                         .run_if(view_chain)
                         .run_if(sim_running),
-                    // Probe after the visual chain settles this frame's state, frozen while paused
-                    // (constant samples would dilute the window).
-                    sample_jitter_probe.run_if(sim_running),
                     draw_rig_gizmos,
                 )
                     .chain(),
@@ -412,7 +378,6 @@ pub fn plugin(app: &mut App) {
                 toggle_pause,
                 reset_rig,
                 log_state,
-                report_jitter_probe,
                 draw_contacts,
                 // The viz-layer instrumentation: toggles, legend, mesh/collider mirrors, and the
                 // diagnostic layers (collocation stations at the physics ring, reference ring).
@@ -474,32 +439,32 @@ struct Contact {
 /// for steer diagnostics) — filled in the fixed step, drawn by `draw_contacts` per frame.
 /// Visualization/telemetry only.
 #[derive(Resource, Default)]
-struct BeltContacts([Vec<Contact>; 2]);
+struct BeltContacts(PerSide<Vec<Contact>>);
 
 impl BeltContacts {
     fn all(&self) -> impl Iterator<Item = &Contact> {
-        self.0.iter().flatten()
+        self.0.values().flatten()
     }
 }
 
 /// Per-side belt-dynamics telemetry from the core report: engine force applied and ground
-/// reaction, `[left, right]`. Harness rows only.
+/// reaction. Harness rows only.
 #[derive(Resource, Default)]
 struct SideDynamics {
-    engine: [f32; 2],
-    reaction: [f32; 2],
+    engine: PerSide<f32>,
+    reaction: PerSide<f32>,
 }
 
-/// The per-side elastic grip resultant (the static-friction state, `SideState::grip`),
-/// `[left, right]` — the sandbox analogue of the game's `TrackGrip` component. In the
-/// element regime this carries the summed element force instead (telemetry only).
+/// The per-side elastic grip resultant (the static-friction state, `SideState::grip`) — the
+/// sandbox analogue of the game's `TrackGrip` component. In the element regime this carries the
+/// summed element force instead (telemetry only).
 #[derive(Resource, Default)]
-struct BeltGrip([Vec2; 2]);
+struct BeltGrip(PerSide<Vec2>);
 
-/// The per-element isotropic shear state, `[left, right]` — the PROTOTYPE regime's state
+/// The per-element isotropic shear state — the PROTOTYPE regime's state
 /// (`track::forces::GripElements`): one world-space shear vector per material link × column.
 #[derive(Resource, Default)]
-struct BeltGripElements([crate::track::forces::GripElements; 2]);
+struct BeltGripElements(PerSide<crate::track::forces::GripElements>);
 
 /// Which grip regime the force law runs (harness `grip=` key; `G` cycles live).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -715,23 +680,14 @@ struct ShapedDrive(crate::track::drive::DriveAxes);
 /// Per-track belt surface speed (m/s, + = drives the tank forward): the integrated state of the
 /// slip model. Positive when the track is laying ground backward under the hull.
 #[derive(Resource, Default)]
-struct BeltSpeed {
-    left: f32,
-    right: f32,
-}
+struct BeltSpeed(PerSide<f32>);
 
 impl BeltSpeed {
     fn get(&self, side: Side) -> f32 {
-        match side {
-            Side::Left => self.left,
-            Side::Right => self.right,
-        }
+        *self.0.get(side)
     }
     fn set(&mut self, side: Side, value: f32) {
-        match side {
-            Side::Left => self.left = value,
-            Side::Right => self.right = value,
-        }
+        *self.0.get_mut(side) = value;
     }
 }
 
@@ -816,7 +772,7 @@ fn viz_label_text(
     format!(
         "{mode_line}viz  1 hull:{}  2 wheels:{}  3 chain:{}  4 outer:{}  5 hubs:{}  6 dots:{}\n     \
          7 normals:{}  8 forces:{}  9 casts:{}  0 colliders:{}  - reference:{}\n\
-         esc pause/cursor | v view (wrap/chain) | g grip (aggregate/element) | r reset | l log | j probe | arrows drive | wasd fly",
+         esc pause/cursor | v view (wrap/chain) | g grip (aggregate/element) | r reset | l log | arrows drive | wasd fly",
         s(viz.hull),
         s(viz.wheels),
         s(viz.chain),
@@ -1038,11 +994,8 @@ fn spawn_rig(
         Handle<Mesh>,
         Handle<StandardMaterial>,
     )> = Vec::new();
-    for side in [Side::Left, Side::Right] {
-        let x = match side {
-            Side::Left => -TRACK_HALF_WIDTH,
-            Side::Right => TRACK_HALF_WIDTH,
-        };
+    for side in Side::ALL {
+        let x = side.plane_x(TRACK_HALF_WIDTH);
         // Road wheels front (−Z) to rear (+Z).
         for i in 0..ROAD_WHEELS {
             let z = -span / 2.0 + i as f32 * WHEEL_SPACING;
@@ -1208,148 +1161,9 @@ fn log_state(
         "hull y = {:.3} m | stations = {count} | support = {:.0}% of weight | belt L/R = {:.1}/{:.1} m/s | tank = {:.1} m/s",
         transform.translation.y,
         100.0 * total / weight,
-        belt.left,
-        belt.right,
+        belt.get(Side::Left),
+        belt.get(Side::Right),
         speed,
-    );
-}
-
-/// Sample the jitter suspects once per frame (see [`JitterProbe`]): hull pose (physics side), and —
-/// on the left track, at hull-local z ≈ 0, so every channel watches the same spot — the articulated
-/// wheel placement, the conformed belt sample, and the contact dot's drawn position + displayed
-/// load (visual side). Elements picked spatially, not by index, so the advected rings don't rotate
-/// the watched element away.
-fn sample_jitter_probe(
-    hull: Single<&GlobalTransform, With<Hull>>,
-    wheels: Query<(&RigWheel, &Suspension)>,
-    belts: Res<ConformedBelts>,
-    contacts: Res<BeltContacts>,
-    mut probe: ResMut<JitterProbe>,
-) {
-    let gt = *hull;
-    let affine = gt.affine();
-    fn push(buf: &mut std::collections::VecDeque<f32>, v: f32) {
-        buf.push_back(v);
-        if buf.len() > JITTER_WINDOW {
-            buf.pop_front();
-        }
-    }
-    push(&mut probe.hull_y, gt.translation().y);
-    push(
-        &mut probe.hull_pitch,
-        gt.rotation().to_euler(EulerRot::YXZ).1,
-    );
-
-    // The left-side road wheel nearest the hull centre, at its current articulated placement.
-    let wheel = wheels
-        .iter()
-        .filter(|(w, _)| w.side == Side::Left && w.kind == WheelKind::Road)
-        .min_by(|(_, a), (_, b)| a.pivot_local.z.abs().total_cmp(&b.pivot_local.z.abs()))
-        .map(|(_, s)| affine.transform_point3(s.pivot_local + Vec3::Y * s.dy).y);
-    push(&mut probe.wheel_y, wheel.unwrap_or(f32::NAN));
-
-    // The left belly sample nearest hull-local z = 0 (under the hull centre).
-    let hub_y = ROAD_RADIUS - HULL_REST_Y;
-    let belt = belts
-        .get(Side::Left)
-        .iter()
-        .filter(|s| s.local.y < hub_y)
-        .min_by(|a, b| a.local.x.abs().total_cmp(&b.local.x.abs()))
-        .map(|s| s.world.y);
-    push(&mut probe.belt_y, belt.unwrap_or(f32::NAN));
-
-    // The left contact dot nearest hull-local z = 0, where it's drawn (current pose), and its
-    // displayed load (the dot/normal size — the "force gizmo" flicker channel).
-    let dot = contacts.0[0]
-        .iter()
-        .min_by(|a, b| a.local.z.abs().total_cmp(&b.local.z.abs()));
-    push(
-        &mut probe.dot_y,
-        dot.map_or(f32::NAN, |c| gt.transform_point(c.local).y),
-    );
-    push(
-        &mut probe.dot_load,
-        dot.map_or(f32::NAN, |c| c.load_elastic),
-    );
-
-    // Whole left ring, index-aligned (see the field doc).
-    let ring: Vec<f32> = belts.get(Side::Left).iter().map(|s| s.world.y).collect();
-    if probe.ring_y.front().is_some_and(|f| f.len() != ring.len()) {
-        probe.ring_y.clear();
-    }
-    probe.ring_y.push_back(ring);
-    if probe.ring_y.len() > JITTER_WINDOW {
-        probe.ring_y.pop_front();
-    }
-    probe.ring_local = belts.get(Side::Left).iter().map(|s| s.local).collect();
-}
-
-/// `J` prints the probe: peak-to-peak amplitude of each watched element over the ring window.
-/// Position channels in mm, pitch in degrees, load as ± percent of its mean.
-fn report_jitter_probe(keys: Res<ButtonInput<KeyCode>>, probe: Res<JitterProbe>) {
-    if !keys.just_pressed(KeyCode::KeyJ) {
-        return;
-    }
-    fn p2p(buf: &std::collections::VecDeque<f32>) -> f32 {
-        let (mut min, mut max) = (f32::INFINITY, f32::NEG_INFINITY);
-        for &v in buf {
-            if !v.is_nan() {
-                min = min.min(v);
-                max = max.max(v);
-            }
-        }
-        if max >= min { max - min } else { 0.0 }
-    }
-    let (mut sum, mut cnt) = (0.0_f32, 0u32);
-    for &v in &probe.dot_load {
-        if !v.is_nan() {
-            sum += v;
-            cnt += 1;
-        }
-    }
-    let load_pct = if cnt > 0 && sum > 0.0 {
-        p2p(&probe.dot_load) / (sum / cnt as f32) * 50.0 // half the p2p, as ±%
-    } else {
-        0.0
-    };
-    info!(
-        "jitter p2p over {} frames: hull y {:.3} mm | hull pitch {:.4}° | wheel y {:.3} mm | belt y {:.3} mm | dot y {:.3} mm | dot load ±{:.1}%",
-        probe.hull_y.len(),
-        p2p(&probe.hull_y) * 1000.0,
-        p2p(&probe.hull_pitch).to_degrees(),
-        p2p(&probe.wheel_y) * 1000.0,
-        p2p(&probe.belt_y) * 1000.0,
-        p2p(&probe.dot_y) * 1000.0,
-        load_pct,
-    );
-
-    // Whole-ring sweep: per-sample p2p over the window; the worst link + how many are visibly live.
-    let m = probe.ring_y.front().map_or(0, |f| f.len());
-    if m == 0 || probe.ring_local.len() != m {
-        return;
-    }
-    let (mut worst, mut worst_i, mut over) = (0.0_f32, 0usize, 0u32);
-    for i in 0..m {
-        let (mut mn, mut mx) = (f32::INFINITY, f32::NEG_INFINITY);
-        for frame in &probe.ring_y {
-            mn = mn.min(frame[i]);
-            mx = mx.max(frame[i]);
-        }
-        let p = mx - mn;
-        if p > worst {
-            worst = p;
-            worst_i = i;
-        }
-        if p > 0.0005 {
-            over += 1;
-        }
-    }
-    let at = probe.ring_local[worst_i];
-    info!(
-        "ring sweep ({m} links): worst link y {:.3} mm at hull-local (z {:.2}, y {:.2}) | {over} links > 0.5 mm",
-        worst * 1000.0,
-        at.x,
-        at.y,
     );
 }
 
@@ -1376,7 +1190,7 @@ fn draw_rig_gizmos(
         }
     }
 
-    for side in [Side::Left, Side::Right] {
+    for side in Side::ALL {
         if viz.chain {
             let mut world = belts.get(side).iter().map(|s| s.world);
             gizmos.linestrip(world.clone(), BELT_COLOR);
@@ -1398,10 +1212,7 @@ fn draw_rig_gizmos(
             continue;
         }
         let affine = hull.affine();
-        let track_x = match side {
-            Side::Left => -TRACK_HALF_WIDTH,
-            Side::Right => TRACK_HALF_WIDTH,
-        };
+        let track_x = side.plane_x(TRACK_HALF_WIDTH);
         let outer: Vec<Vec3> = (0..n)
             .map(|i| {
                 let tan2 = (samples[(i + 1) % n].local - samples[(i + n - 1) % n].local)

@@ -12,6 +12,7 @@
 
 use bevy::math::{Affine3A, Vec2, Vec3};
 
+use super::forces::phase_decompose;
 use super::oracle::TerrainOracle;
 use super::route::{Route, RouteTag, build_route};
 
@@ -153,7 +154,10 @@ impl ChainState {
                 continue;
             }
             let belt_speed = side.belt_speed;
-            let phase_frac = side.phase.rem_euclid(pitch);
+            // ONE decomposition (the canonical `phase_decompose`) feeds BOTH the resample
+            // offset (the seed below) and the whole-pitch link-identity shift (below) — a
+            // separately-rounded floor/rem pair could disagree by a link at a pitch boundary.
+            let (shift, phase_frac) = phase_decompose(f64::from(side.phase), pitch);
             let plane_x = side.plane_x;
             let mem = &mut self.sides[si];
 
@@ -194,8 +198,7 @@ impl ChainState {
             };
 
             // Material identity: rotate the stored ring (and its route coordinates) when the
-            // phase crosses whole pitches.
-            let shift = (side.phase / pitch).floor() as i64;
+            // phase crosses whole pitches (`shift` from the decomposition above).
             let cold = mem.pos.len() != n || mem.s.len() != n;
             if overrun || cold {
                 seed(&build_route(circles, input.belt_len), mem);

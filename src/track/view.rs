@@ -22,6 +22,7 @@ use crate::spec::TrackSpec;
 use crate::tank::{Roadwheel, Tank, TrackSide, ViewNode};
 
 use super::chain::{ChainInput, ChainParams, ChainSideInput, ChainState};
+use super::forces::phase_decompose;
 use super::sim::TrackDrive;
 use super::terrain::TrackField;
 use super::wheels::{WheelParams, wheel_lift_step, wheel_lift_target};
@@ -501,8 +502,10 @@ fn drive_track_views(
                 // quotient: entity m always wears material link m, and the witness RIDES
                 // the belt.
                 let n = side.links.len() as i64;
-                let pitch = f64::from(rig.belt_len) / n as f64;
-                let q = (phases[si] / pitch).floor() as i64;
+                let pitch = rig.belt_len / n as f32;
+                // The whole-pitch quotient from the canonical decomposition (the offset half
+                // is the chain's own sampling concern) — one home for the wrap arithmetic.
+                let (q, _) = phase_decompose(phases[si], pitch);
                 for (i, _) in pts.iter().enumerate() {
                     let link = side.links[(i as i64 - q).rem_euclid(n) as usize];
                     let a = pts[i];

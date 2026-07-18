@@ -33,6 +33,7 @@ use crate::tank::{Tank, TrackSide};
 use super::drive::{DriveAxes, shape_drive};
 use super::forces::{BeltContact, ForceParams, SideInput, SideState, grip_stiffness, step_side};
 use super::route::build_route;
+use super::side::Side;
 use super::terrain::TrackField;
 
 // Surface friction policy (ADR-0007 bucket 3: a property of the track–ground PAIR, destined
@@ -240,18 +241,21 @@ fn apply_track_forces(
 
         let affine = Affine3A::from_rotation_translation(rot.0, pos.0);
 
-        for (si, &cmd) in side_commands.iter().enumerate() {
-            let plane_x = if si == 0 { -gear.plane_x } else { gear.plane_x };
+        // Fixed left-then-right — the accumulation order is part of determinism. `plane_x`'s
+        // sign is the side's (`Side::plane_x` is an exact ±1 flip); `sides`/`grip.sides` stay
+        // bare `[T; 2]` (replicated wire shape), indexed by `side.index()`.
+        for side in Side::ALL {
+            let si = side.index();
             let input = SideInput {
                 loop_pts: &gear.loop_pts,
                 count: gear.count,
-                plane_x,
-                command: cmd,
+                plane_x: side.plane_x(gear.plane_x),
+                command: side_commands[si],
             };
-            let side = drive.sides[si];
+            let ds = drive.sides[si];
             let state = SideState {
-                speed: side.speed,
-                phase: side.phase,
+                speed: ds.speed,
+                phase: ds.phase,
                 grip: bevy::math::Vec2::new(grip.sides[si][0], grip.sides[si][1]),
             };
             let report = step_side(

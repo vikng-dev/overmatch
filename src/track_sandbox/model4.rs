@@ -20,16 +20,18 @@
 //! resultant at its own point — curb-under-one-edge roll torque, cross-slope contact, and
 //! half-off-a-ledge support emerge from the application points.
 //!
-//! The track **view** is a stateless kinematic wrap (step 22): the road wheels read the field
-//! directly ([`articulate_wheels_field`]), the belt path is *fitted* around the articulated
-//! wheels every frame ([`conform_belts_field`]) — tangent wrap + terrain conform + budgeted sag —
-//! and nothing about the drawn track is simulated or remembered. The step-21 Verlet chain remains
-//! behind the `V` toggle as the frozen A/B partner ([`conform_belts_field_chain`]).
+//! The sandbox's DEFAULT track view is a stateless kinematic wrap (step 22): the road wheels read
+//! the field directly ([`articulate_wheels_field`]), the belt path is *fitted* around the
+//! articulated wheels every frame ([`conform_belts_field`]) — tangent wrap + terrain conform +
+//! budgeted sag — and nothing about the drawn track is simulated or remembered. The step-24 route
+//! chain rides behind the `V` toggle as its live A/B partner ([`conform_belts_field_chain`], the
+//! same [`track::chain`](crate::track::chain) core the game runs) — and it is the view that WON and
+//! SHIPPED as the game's own (`track::view`). Neither is awaiting deletion.
 
 use super::*;
 
 use crate::track::chain::{ChainInput, ChainParams, ChainSideInput, ChainState};
-use crate::track::forces::{ForceParams, SideInput, SideState, step_side};
+use crate::track::forces::{ForceParams, SideInput, SideState, phase_decompose, step_side};
 use crate::track::oracle::{BlockField, TerrainOracle};
 use crate::track::wheels::{WheelParams, wheel_lift_step, wheel_lift_target};
 
@@ -41,10 +43,6 @@ pub(super) struct TerrainField(pub(super) BlockField);
 impl TerrainField {
     pub(super) fn depth_along(&self, station: Vec3, out: Vec3) -> f32 {
         self.0.depth_along(station, out, CONTACT_PROBE)
-    }
-
-    pub(super) fn signed_depth(&self, p: Vec3) -> f32 {
-        self.0.signed_depth(p, CONTACT_PROBE)
     }
 }
 
@@ -58,23 +56,14 @@ pub(super) const TRACK_THICKNESS: f32 = 0.04;
 /// minutes. Kept unwrapped: consumers wrap mod the link pitch for the sampling offset, and its
 /// quotient is the **link-identity shift** the chain warm-start needs.
 #[derive(Resource, Default)]
-pub(super) struct BeltPhase {
-    left: f64,
-    right: f64,
-}
+pub(super) struct BeltPhase(PerSide<f64>);
 
 impl BeltPhase {
     pub(super) fn get(&self, side: Side) -> f64 {
-        match side {
-            Side::Left => self.left,
-            Side::Right => self.right,
-        }
+        *self.0.get(side)
     }
     fn set(&mut self, side: Side, phase: f64) {
-        match side {
-            Side::Left => self.left = phase,
-            Side::Right => self.right = phase,
-        }
+        *self.0.get_mut(side) = phase;
     }
 }
 
@@ -238,8 +227,9 @@ pub(super) fn apply_belt_support_field(
     };
     let affine = bevy::math::Affine3A::from_rotation_translation(hull_rot.0, hull_pos.0);
     let to_local = affine.inverse();
-    contacts.0[0].clear(); // the sole contact system this tick
-    contacts.0[1].clear();
+    for cs in contacts.0.values_mut() {
+        cs.clear(); // the sole contact system this tick
+    }
     let dt = time.delta_secs();
     // The shared command seam, on the fixed tick exactly like the game adapter: slew the raw
     // intent, then mix per side.
@@ -253,36 +243,20 @@ pub(super) fn apply_belt_support_field(
     }
     let params = force_params(grip_on.0);
 
-    for side in [Side::Left, Side::Right] {
-        let track_x = match side {
-            Side::Left => -TRACK_HALF_WIDTH,
-            Side::Right => TRACK_HALF_WIDTH,
-        };
-        let command = match side {
-            Side::Left => side_commands[0],
-            Side::Right => side_commands[1],
-        };
-
+    for side in Side::ALL {
         let side_input = SideInput {
             loop_pts: &loop_pts,
             count: pin_belt.count,
-            plane_x: track_x,
-            command,
+            plane_x: side.plane_x(TRACK_HALF_WIDTH),
+            command: side_commands[side.index()],
         };
         let state = SideState {
             speed: belt.get(side),
             phase: phase.get(side),
-            grip: grip.0[match side {
-                Side::Left => 0,
-                Side::Right => 1,
-            }],
-        };
-        let si = match side {
-            Side::Left => 0,
-            Side::Right => 1,
+            grip: *grip.0.get(side),
         };
         let elements = match grip_on.0 {
-            GripMode::Elements => Some(&mut grip_elements.0[si]),
+            GripMode::Elements => Some(grip_elements.0.get_mut(side)),
             _ => None,
         };
         let report = step_side(
@@ -300,7 +274,7 @@ pub(super) fn apply_belt_support_field(
             forces.apply_force_at_point(app.force, app.point);
         }
         for c in &report.contacts {
-            contacts.0[si].push(Contact {
+            contacts.0.get_mut(side).push(Contact {
                 local: to_local.transform_point3(c.point),
                 load: c.load,
                 load_elastic: c.load_elastic,
@@ -312,9 +286,9 @@ pub(super) fn apply_belt_support_field(
                 traction: c.traction,
             });
         }
-        dynamics.engine[si] = report.engine_force;
-        dynamics.reaction[si] = report.belt_reaction;
-        grip.0[si] = report.state.grip;
+        *dynamics.engine.get_mut(side) = report.engine_force;
+        *dynamics.reaction.get_mut(side) = report.belt_reaction;
+        *grip.0.get_mut(side) = report.state.grip;
         belt.set(side, report.state.speed);
         phase.set(side, report.state.phase);
     }
@@ -408,7 +382,7 @@ pub(super) fn conform_belts_field_chain(
     // Per-side pin-line circles, front→rear: fixed drive circles + the ARTICULATED road wheels,
     // sorted so the envelope scan and the frame-to-frame interpolation see a stable order.
     let (sprocket, idler) = drive_circles_local();
-    let side_circles: [Vec<(Vec2, f32)>; 2] = [Side::Left, Side::Right].map(|side| {
+    let side_circles: [Vec<(Vec2, f32)>; 2] = Side::ALL.map(|side| {
         let mut roads: Vec<(Vec2, f32)> = wheels
             .iter()
             .filter(|(w, _)| w.side == side && w.kind == WheelKind::Road)
@@ -458,7 +432,7 @@ pub(super) fn conform_belts_field_chain(
         );
     }
 
-    for (si, side) in [Side::Left, Side::Right].into_iter().enumerate() {
+    for (si, side) in Side::ALL.into_iter().enumerate() {
         let track_x = input.sides[si].plane_x;
         // The current route is the `-` viz layer: chain-vs-route deviation shows exactly where
         // terrain, slack, and whip hold the belt off its taut path.
@@ -476,15 +450,10 @@ pub(super) fn conform_belts_field_chain(
             })
             .collect();
         match side {
-            Side::Left => {
-                reference.left = ref_world;
-                belts.left = samples;
-            }
-            Side::Right => {
-                reference.right = ref_world;
-                belts.right = samples;
-            }
+            Side::Left => reference.left = ref_world,
+            Side::Right => reference.right = ref_world,
         }
+        *belts.get_mut(side) = samples;
     }
     perf.0 += t_perf.elapsed().as_secs_f64();
     perf.1 += report.substeps as u64 * 2;
@@ -571,11 +540,8 @@ pub(super) fn conform_belts_field(
 ) {
     let t_perf = std::time::Instant::now();
     let affine = hull.affine();
-    for side in [Side::Left, Side::Right] {
-        let track_x = match side {
-            Side::Left => -TRACK_HALF_WIDTH,
-            Side::Right => TRACK_HALF_WIDTH,
-        };
+    for side in Side::ALL {
+        let track_x = side.plane_x(TRACK_HALF_WIDTH);
         // Pin-line circles, front→rear: sprocket, the ARTICULATED road wheels, idler.
         let (sprocket, idler) = drive_circles_local();
         let mut roads: Vec<(Vec2, f32)> = wheels
@@ -723,11 +689,9 @@ pub(super) fn conform_belts_field(
             loop_pts.push(first);
         }
         let pitch = polyline_len(&loop_pts) / pin_belt.count.max(1) as f32;
-        let mut joints = resample(
-            &loop_pts,
-            pitch,
-            phase.get(side).rem_euclid(f64::from(pitch)) as f32,
-        );
+        // Resample offset from the canonical decomposition (wrap count unused for the wrap view).
+        let (_, offset) = phase_decompose(phase.get(side), pitch);
+        let mut joints = resample(&loop_pts, pitch, offset);
         joints.truncate(pin_belt.count);
         if joints.len() < 3 {
             continue;
@@ -739,10 +703,7 @@ pub(super) fn conform_belts_field(
                 world: affine.transform_point3(Vec3::new(track_x, p.y, p.x)),
             })
             .collect();
-        match side {
-            Side::Left => belts.left = samples,
-            Side::Right => belts.right = samples,
-        }
+        *belts.get_mut(side) = samples;
     }
     perf.0 += t_perf.elapsed().as_secs_f64();
     perf.1 += 1;
@@ -789,21 +750,16 @@ pub(super) fn draw_sample_points(
         return;
     }
     let affine = hull.affine();
-    for side in [Side::Left, Side::Right] {
-        let track_x = match side {
-            Side::Left => -TRACK_HALF_WIDTH,
-            Side::Right => TRACK_HALF_WIDTH,
-        };
+    for side in Side::ALL {
+        let track_x = side.plane_x(TRACK_HALF_WIDTH);
         let mut loop_pts = belt_loop(&pin_circles());
         if let Some(&first) = loop_pts.first() {
             loop_pts.push(first);
         }
         let pitch = polyline_len(&loop_pts) / pin_belt.count.max(1) as f32;
-        let mut stations = resample(
-            &loop_pts,
-            pitch,
-            phase.get(side).rem_euclid(f64::from(pitch)) as f32,
-        );
+        // Resample offset from the canonical decomposition (wrap count unused here).
+        let (_, offset) = phase_decompose(phase.get(side), pitch);
+        let mut stations = resample(&loop_pts, pitch, offset);
         stations.truncate(pin_belt.count);
         let n = stations.len();
         if n < 3 {

@@ -15,6 +15,7 @@ pub mod drive;
 pub mod forces;
 pub mod oracle;
 pub mod route;
+pub mod side;
 pub mod sim;
 pub mod terrain;
 pub mod view;
