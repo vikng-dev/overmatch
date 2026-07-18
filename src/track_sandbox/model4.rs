@@ -230,6 +230,7 @@ pub(super) fn apply_belt_support_field(
     mut contacts: ResMut<BeltContacts>,
     mut dynamics: ResMut<SideDynamics>,
     mut grip: ResMut<BeltGrip>,
+    mut grip_elements: ResMut<BeltGripElements>,
     grip_on: Res<GripSwitch>,
 ) {
     let Ok((hull_pos, hull_rot, mut forces)) = hull.single_mut() else {
@@ -276,17 +277,28 @@ pub(super) fn apply_belt_support_field(
                 Side::Right => 1,
             }],
         };
-        let report = step_side(&side_input, state, affine, dt, &params, &field.0, |p| {
-            forces.velocity_at_point(p)
-        });
-        // Apply in report order — accumulation order is part of bit-reproducibility.
-        for app in &report.apps {
-            forces.apply_force_at_point(app.force, app.point);
-        }
         let si = match side {
             Side::Left => 0,
             Side::Right => 1,
         };
+        let elements = match grip_on.0 {
+            GripMode::Elements => Some(&mut grip_elements.0[si]),
+            _ => None,
+        };
+        let report = step_side(
+            &side_input,
+            state,
+            affine,
+            dt,
+            &params,
+            &field.0,
+            |p| forces.velocity_at_point(p),
+            elements,
+        );
+        // Apply in report order — accumulation order is part of bit-reproducibility.
+        for app in &report.apps {
+            forces.apply_force_at_point(app.force, app.point);
+        }
         for c in &report.contacts {
             contacts.0[si].push(Contact {
                 local: to_local.transform_point3(c.point),
@@ -310,7 +322,7 @@ pub(super) fn apply_belt_support_field(
 
 /// The sandbox's force parameters: the T-34 lab vehicle + the shared support/friction law,
 /// assembled for [`track::forces`](crate::track::forces) — the promoted single implementation.
-fn force_params(grip: bool) -> ForceParams {
+fn force_params(grip: GripMode) -> ForceParams {
     ForceParams {
         thickness: TRACK_THICKNESS,
         columns: COLUMNS,
@@ -326,13 +338,13 @@ fn force_params(grip: bool) -> ForceParams {
         engine_force: ENGINE_FORCE,
         governor_gain: BELT_GOVERNOR_GAIN,
         inertia: BELT_INERTIA,
-        // The declared park-target stiffness (forces.rs provenance doc); `false` = the
+        // The declared park-target stiffness (forces.rs provenance doc); `Off` = the
         // harness parity switch (`grip=off`): kinetic-only law, bit-identical to the
-        // pre-grip baseline.
-        grip_stiffness: if grip {
-            crate::track::forces::grip_stiffness(MU, HULL_MASS * 9.81)
-        } else {
-            0.0
+        // pre-grip baseline. (`Elements` needs it nonzero too — it gates the regime and
+        // the belt-hold; the element law derives its stiffness from μ·load/K directly.)
+        grip_stiffness: match grip {
+            GripMode::Off => 0.0,
+            _ => crate::track::forces::grip_stiffness(MU, HULL_MASS * 9.81),
         },
     }
 }

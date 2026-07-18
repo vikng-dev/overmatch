@@ -1633,6 +1633,27 @@ both.
   sub-saturation grip is FULLER — turns 2–6× tighter (34.8/15.2/5.0 m, ≈no-slip), pivot 2×
   faster; `LATERAL_GRIP_RATIO` is the re-heavy dial. Slalom scenario outgrew the lane
   (course retune parked).
+- 2026-07-18 — **Step 30: PER-ELEMENT ISOTROPIC SHEAR PROTOTYPE (sandbox A/B)**. Yan's
+  second-drive verdict on step 29: hold works, but "turns too fast, slides around, pivots
+  like ice" — and he independently proposed the per-link isotropic shear model, which IS
+  Wong & Chiang's resultant-j (the literature-preferred form the aggregate deliberately
+  deferred). Root cause of the ice CONFIRMED structural: the per-side aggregate's
+  load-weighted mean slip cancels the antisymmetric lateral slip of a yawing footprint —
+  zero rotational stick — compounded by the removed kinetic scrub (the only distributed yaw
+  damper). Prototype in `forces.rs` behind `step_side(..., elements)`: one world-space
+  shear vector per material link × column (witness-link identity mapping), same shear
+  modulus / Dupont branch / ζ as the aggregate, force = capped strain direction × μ·load —
+  isotropic, NO ellipse, no `lateral_ratio`. Sandbox `G` key + harness `grip=elem`.
+  MEASURED A/B (T-34 lab, throttle 0.5): pivot 3.4→1.22 rad/s (both steers — grip-limited,
+  belts churn at 2.49 m/s), spin-down to 10% 2.2–6 s → 0.5 s (ice killed), hill-hold 0.00 mm
+  all four poses (better than aggregate's 2.2 mm side-slope settle), straight-line speed
+  identical to 1 mm/s, turn radii 29/10/4.9 → 104/53/33 m at steer .1/.2/.3 with a
+  clutch-brake knee to 2.1 m at steer .5 (inner track stops) — Wong-realistic understeer,
+  monotonic, all gates pass (one marginal yaw_sign at steer .1: 90% vs 95%, tiny-yaw noise).
+  BOTH old regimes bit-identical to HEAD (parity proved against the pre-change binary).
+  OPEN: Yan feel drive (G toggle A/B); netcode shape for ~600 floats of force-affecting
+  state (codex brief out — element state self-heals while driving, parked is the hard case);
+  turn-radius plateau may want a feel dial once the netcode question settles.
 
 ## Open questions / parking lot
 

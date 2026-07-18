@@ -346,6 +346,7 @@ pub fn plugin(app: &mut App) {
         .init_resource::<BeltContacts>()
         .init_resource::<SideDynamics>()
         .init_resource::<BeltGrip>()
+        .init_resource::<BeltGripElements>()
         .init_resource::<GripSwitch>()
         .init_resource::<Paused>()
         .init_resource::<ResetSpot>()
@@ -407,6 +408,7 @@ pub fn plugin(app: &mut App) {
                 )
                     .chain(),
                 toggle_view_mode,
+                toggle_grip_mode,
                 toggle_pause,
                 reset_rig,
                 log_state,
@@ -489,19 +491,62 @@ struct SideDynamics {
 }
 
 /// The per-side elastic grip resultant (the static-friction state, `SideState::grip`),
-/// `[left, right]` — the sandbox analogue of the game's `TrackGrip` component.
+/// `[left, right]` — the sandbox analogue of the game's `TrackGrip` component. In the
+/// element regime this carries the summed element force instead (telemetry only).
 #[derive(Resource, Default)]
 struct BeltGrip([Vec2; 2]);
 
-/// Harness parity switch (`grip=off`): `false` zeroes the bristle stiffness, reducing the
-/// law to the kinetic-only baseline bit-for-bit. Interactive runs always drive with grip.
+/// The per-element isotropic shear state, `[left, right]` — the PROTOTYPE regime's state
+/// (`track::forces::GripElements`): one world-space shear vector per material link × column.
+#[derive(Resource, Default)]
+struct BeltGripElements([crate::track::forces::GripElements; 2]);
+
+/// Which grip regime the force law runs (harness `grip=` key; `G` cycles live).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum GripMode {
+    /// Parity switch (`grip=off`): kinetic-only law, bit-identical to the pre-grip baseline.
+    Off,
+    /// The shipped per-side aggregate strain resultant (ADR-0026).
+    Aggregate,
+    /// The per-element isotropic shear prototype (`grip=elem`).
+    Elements,
+}
+
+/// The active grip regime. Interactive default: the shipped aggregate law.
 #[derive(Resource)]
-struct GripSwitch(bool);
+struct GripSwitch(GripMode);
 
 impl Default for GripSwitch {
     fn default() -> Self {
-        Self(true)
+        Self(GripMode::Aggregate)
     }
+}
+
+/// `G` flips the grip regime live (aggregate ↔ per-element) — the feel A/B for the "pivots
+/// on ice" investigation. Both grip states clear so the incoming regime starts unloaded
+/// (stale strain would fire a phantom force on the first tick).
+fn toggle_grip_mode(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut switch: ResMut<GripSwitch>,
+    mut grip: ResMut<BeltGrip>,
+    mut elems: ResMut<BeltGripElements>,
+) {
+    if !keys.just_pressed(KeyCode::KeyG) {
+        return;
+    }
+    switch.0 = match switch.0 {
+        GripMode::Elements => GripMode::Aggregate,
+        _ => GripMode::Elements,
+    };
+    *grip = BeltGrip::default();
+    *elems = BeltGripElements::default();
+    info!(
+        "grip regime → {}",
+        match switch.0 {
+            GripMode::Elements => "PER-ELEMENT isotropic shear (prototype)",
+            _ => "aggregate per-side resultant (shipped)",
+        }
+    );
 }
 
 /// Whether the sim is frozen (`Esc`). The belt model gates on this so it doesn't accumulate force
@@ -748,7 +793,7 @@ fn viz_label_text(viz: &VizLayers) -> String {
     format!(
         "viz  1 hull:{}  2 wheels:{}  3 chain:{}  4 outer:{}  5 hubs:{}  6 dots:{}\n     \
          7 normals:{}  8 forces:{}  9 casts:{}  0 colliders:{}  - reference:{}\n\
-         esc pause/cursor | v view (wrap/chain) | r reset | l log | j probe | arrows drive | wasd fly",
+         esc pause/cursor | v view (wrap/chain) | g grip (aggregate/element) | r reset | l log | j probe | arrows drive | wasd fly",
         s(viz.hull),
         s(viz.wheels),
         s(viz.chain),
@@ -1075,6 +1120,7 @@ fn reset_rig(
     mut contacts: ResMut<BeltContacts>,
     mut dynamics: ResMut<SideDynamics>,
     mut grip_state: ResMut<BeltGrip>,
+    mut grip_elements: ResMut<BeltGripElements>,
     mut wheels: Query<&mut Suspension>,
 ) {
     if !keys.just_pressed(KeyCode::KeyR) {
@@ -1095,6 +1141,7 @@ fn reset_rig(
     *contacts = BeltContacts::default();
     *dynamics = SideDynamics::default();
     *grip_state = BeltGrip::default();
+    *grip_elements = BeltGripElements::default();
     // Stale cosmetic wheel lift survives the teleport otherwise: for the first ~100 ms the
     // conform solves against phantom raised wheel circles while the hull settles.
     for mut susp in &mut wheels {

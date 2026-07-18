@@ -103,6 +103,19 @@ pub struct ForceParams {
     pub grip_stiffness: f32,
 }
 
+/// PROTOTYPE (sandbox A/B, not wired into the game): per-element isotropic shear state — the
+/// Wong & Chiang resultant-j / Janosi–Hanamoto form proper. One accumulated shear vector per
+/// material link × lateral column (flat index `link * 3 + column`), WORLD space, meters.
+/// Each grounded element resists relative ground motion in ANY direction (no friction
+/// ellipse, no `lateral_ratio`); turning resistance emerges from the footprint geometry —
+/// fore and aft elements strain in opposing directions under yaw, which is exactly the
+/// rotational stick the per-side aggregate resultant cannot represent (its load-weighted
+/// mean slip cancels antisymmetric lateral slip — the "pivots on ice" defect).
+/// State rides MATERIAL identity (advects with belt phase, same mapping as the witness
+/// link) and resets when the element leaves ground contact — memory expires after one
+/// contact-patch dwell while driving; only a parked tank holds it indefinitely.
+pub type GripElements = Vec<Vec3>;
+
 /// One side's dynamic state — the caller owns it (the game's `TrackDrive` component, the
 /// sandbox's `BeltSpeed`/`BeltPhase` resources).
 #[derive(Clone, Copy, Default, PartialEq, Debug)]
@@ -208,6 +221,9 @@ fn engine_available(params: &ForceParams, belt_speed: f32) -> f32 {
 /// `vel_at`), integrate belt dynamics, and return the forces for the caller to apply IN
 /// ORDER. Force application does not feed back into `vel_at` within a tick (velocities
 /// integrate later), so reading everything first and applying afterwards is exact.
+/// `elements`: `Some` runs the PROTOTYPE per-element isotropic shear regime (see
+/// [`GripElements`]) instead of the per-side aggregate — the caller owns the state vector
+/// (resized here to `count * 3`). `None` = the shipped aggregate law (the game).
 pub fn step_side<O: TerrainOracle>(
     input: &SideInput,
     state: SideState,
@@ -216,6 +232,7 @@ pub fn step_side<O: TerrainOracle>(
     params: &ForceParams,
     oracle: &O,
     vel_at: impl Fn(Vec3) -> Vec3,
+    elements: Option<&mut GripElements>,
 ) -> SideReport {
     let mut report = SideReport {
         state,
@@ -251,8 +268,17 @@ pub fn step_side<O: TerrainOracle>(
         has_plane: bool,
         slip_long: f32,
         slip_lat: f32,
+        /// Flat material-element index (`link * 3 + column`) — the per-element grip key.
+        element: usize,
     }
     let mut cols: Vec<ColumnContact> = Vec::with_capacity(n);
+
+    // Material identity under advection: station `i` samples arc `(phase mod pitch) + i·pitch`,
+    // so the material link there is `i − ⌊phase/pitch⌋` (mod count) — when the sampling offset
+    // wraps, the identity shift absorbs the jump (the witness-link mapping).
+    let wraps = (state.phase / f64::from(pitch)).floor() as i64;
+    let material =
+        |i: usize| -> usize { (i as i64 - wraps).rem_euclid(input.count as i64) as usize };
 
     for i in 0..n {
         let a = stations[i];
@@ -279,7 +305,7 @@ pub fn step_side<O: TerrainOracle>(
         // per-metre coefficients and applies its resultant at its own point — roll torque
         // from a curb under one track edge, cross-slope contact, and half-off-a-ledge
         // support all emerge from the application points.
-        for (offset, weight) in params.columns {
+        for (ci, &(offset, weight)) in params.columns.iter().enumerate() {
             let shift = lat * offset;
             let ca = wa + shift;
             let cb = wb + shift;
@@ -352,6 +378,7 @@ pub fn step_side<O: TerrainOracle>(
                 has_plane,
                 slip_long,
                 slip_lat,
+                element: material(i) * 3 + ci,
             });
         }
     }
@@ -371,8 +398,77 @@ pub fn step_side<O: TerrainOracle>(
         .filter(|c| c.has_plane)
         .map(|c| params.mu * c.load_elastic)
         .sum();
+
+    // PROTOTYPE: the per-element isotropic shear regime (see [`GripElements`]). Each grounded
+    // element integrates its own world-space shear vector at the SAME shear modulus, breakaway
+    // branch, and damping ratio as the aggregate law (per-element stiffness μ·load/K sums to
+    // exactly the aggregate side stiffness — same coupled-mode class the 75 mm modulus was
+    // validated against, plus the yaw/pitch bristle modes the aggregate never had). Force is
+    // the strain direction itself — isotropic, NO ellipse: lateral-vs-longitudinal asymmetry
+    // and turning resistance are left to emerge from footprint geometry.
+    let elements_mode = elements.is_some() && k > 0.0;
+    let mut elem_g: Vec<Vec2> = Vec::new();
+    if elements_mode {
+        let elems = elements.unwrap();
+        let len = input.count * 3;
+        if elems.len() != len {
+            elems.clear();
+            elems.resize(len, Vec3::ZERO);
+        }
+        let mut touched = vec![false; len];
+        elem_g = vec![Vec2::ZERO; cols.len()];
+        // The damping partner, normalized per unit budget: identical closed form to the
+        // aggregate's `grip_damp / C` (σ1 = 2ζ√(K·m) reduced through the stiffness derivation).
+        let d_coef = 2.0 * GRIP_DAMPING_RATIO / (GRIP_SHEAR_MODULUS_M * params.mu * 9.81).sqrt();
+        for (idx, c) in cols.iter().enumerate() {
+            if !c.has_plane || c.load_elastic <= 0.0 {
+                continue;
+            }
+            touched[c.element] = true;
+            // World-space shear rate in FORCE convention: the direction friction pushes the
+            // hull (+slip_long along long_dir, −slip_lat along lat_dir — the kinetic law's
+            // signs, vectorized).
+            let sdot = c.long_dir * c.slip_long - c.lat_dir * c.slip_lat;
+            let speed = sdot.length();
+            let j0 = elems[c.element];
+            // Dupont elasto-plastic α, per element: pure spring below breakaway or when slip
+            // unloads it; smoothstep to full Dahl flow at one shear modulus of strain.
+            let alpha = if j0.dot(sdot) < 0.0 {
+                0.0
+            } else {
+                let m = ((j0.length() / GRIP_SHEAR_MODULUS_M - GRIP_BREAKAWAY)
+                    / (1.0 - GRIP_BREAKAWAY))
+                    .clamp(0.0, 1.0);
+                m * m * (3.0 - 2.0 * m)
+            };
+            let mut j1 = (j0 + sdot * dt) / (1.0 + alpha * (dt / GRIP_SHEAR_MODULUS_M) * speed);
+            // Keep the strain in the contact tangent plane (terrain curvature rotates it out),
+            // and cap at one shear modulus (the Dahl saturation the rational update converges
+            // to; the projection is the α < 1 safety net, as in the aggregate).
+            j1 -= j1.dot(c.normal) * c.normal;
+            let j_len = j1.length();
+            if j_len > GRIP_SHEAR_MODULUS_M {
+                j1 *= GRIP_SHEAR_MODULUS_M / j_len;
+            }
+            elems[c.element] = j1;
+            let mut g = j1 / GRIP_SHEAR_MODULUS_M + sdot * d_coef;
+            let g_len = g.length();
+            if g_len > 1.0 {
+                g /= g_len;
+            }
+            elem_g[idx] = Vec2::new(g.dot(c.long_dir), g.dot(c.lat_dir));
+        }
+        // An element that left contact (cycled to the return run, or lifted off) forgets: its
+        // shear was relieved by the ground it no longer touches.
+        for (idx, j) in elems.iter_mut().enumerate() {
+            if !touched[idx] {
+                *j = Vec3::ZERO;
+            }
+        }
+    }
+
     let mut grip_damp = Vec2::ZERO;
-    let grip_next = if k > 0.0 && budget > 0.0 {
+    let grip_next = if !elements_mode && k > 0.0 && budget > 0.0 {
         let mut s_bar = Vec2::ZERO;
         for c in cols.iter().filter(|c| c.has_plane) {
             s_bar += params.mu * c.load_elastic * Vec2::new(c.slip_long, -c.slip_lat);
@@ -417,7 +513,8 @@ pub fn step_side<O: TerrainOracle>(
     };
 
     // PASS 2 — emit forces in the original per-contact order: support, then traction.
-    for c in &cols {
+    let mut elem_sum = Vec2::ZERO;
+    for (idx, c) in cols.iter().enumerate() {
         report.apps.push(ForceApp {
             force: c.normal * c.load,
             point: c.p,
@@ -429,7 +526,15 @@ pub fn step_side<O: TerrainOracle>(
         if c.has_plane {
             let grip = params.mu * c.load;
             let grip_lat = grip * params.lateral_ratio;
-            if grip_next == Vec2::ZERO {
+            if elements_mode {
+                // The per-element regime: each element's own capped strain+damping direction,
+                // scaled by ITS elastic load — isotropic, full μ in every direction.
+                let grip_el = params.mu * c.load_elastic;
+                let g = elem_g[idx];
+                f_long = grip_el * g.x;
+                f_lat = grip_el * g.y;
+                elem_sum += Vec2::new(f_long, f_lat);
+            } else if grip_next == Vec2::ZERO {
                 // The kinetic-only law, verbatim (the parity branch: with grip disabled or
                 // no stored force, these are the exact shipped expressions — bit-identical).
                 f_long = grip * (c.slip_long / params.slip_saturation).clamp(-1.0, 1.0);
@@ -504,7 +609,9 @@ pub fn step_side<O: TerrainOracle>(
     let next = belt_speed + (engine - (1.0 - hold) * belt_reaction) / params.inertia * dt;
     report.state.speed = next.clamp(-params.max_speed, params.max_speed);
     report.state.phase = state.phase + f64::from(belt_speed * dt);
-    report.state.grip = grip_next;
+    // In the element regime the aggregate slot carries the summed element force (long, lat) —
+    // telemetry only (the element state is authoritative and lives with the caller).
+    report.state.grip = if elements_mode { elem_sum } else { grip_next };
     report.engine_force = engine;
     report.belt_reaction = belt_reaction;
     report

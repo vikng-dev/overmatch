@@ -254,9 +254,18 @@ fn apply_track_forces(
                 phase: side.phase,
                 grip: bevy::math::Vec2::new(grip.sides[si][0], grip.sides[si][1]),
             };
-            let report = step_side(&input, state, affine, dt, &gear.params, oracle, |p| {
-                forces.velocity_at_point(p)
-            });
+            let report = step_side(
+                &input,
+                state,
+                affine,
+                dt,
+                &gear.params,
+                oracle,
+                |p| forces.velocity_at_point(p),
+                // The game runs the aggregate regime; the per-element prototype is sandbox-only
+                // until its netcode shape is designed (codex brief, 2026-07-18).
+                None,
+            );
             // Apply in report order — accumulation order is part of determinism.
             for app in &report.apps {
                 forces.apply_force_at_point(app.force, app.point);

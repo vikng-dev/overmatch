@@ -48,9 +48,10 @@ pub(super) struct Harness {
     /// `view=chain` runs the route-chain view instead of the kinematic wrap (the step-22 view
     /// A/B, scripted).
     chain_view: bool,
-    /// `grip=off` disables the static-friction regime — the parity switch (kinetic-only
-    /// law, bit-identical to the pre-grip baseline).
-    grip: bool,
+    /// `grip=off` disables the static-friction regime (the parity switch — kinetic-only
+    /// law, bit-identical to the pre-grip baseline); `grip=elem` runs the per-element
+    /// isotropic shear prototype; default is the shipped aggregate regime.
+    grip: GripMode,
     out: String,
 }
 
@@ -74,7 +75,7 @@ pub(super) fn parse_env() -> Option<Harness> {
         throttle2: 0.0,
         steer2: 0.0,
         chain_view: false,
-        grip: true,
+        grip: GripMode::Aggregate,
         out: "/tmp/track_harness.jsonl".into(),
     };
     for pair in spec.split(',') {
@@ -100,7 +101,13 @@ pub(super) fn parse_env() -> Option<Harness> {
             "throttle2" => h.throttle2 = value.trim().parse().unwrap_or(0.0),
             "steer2" => h.steer2 = value.trim().parse().unwrap_or(0.0),
             "view" => h.chain_view = value.trim() == "chain",
-            "grip" => h.grip = value.trim() != "off",
+            "grip" => {
+                h.grip = match value.trim() {
+                    "off" => GripMode::Off,
+                    "elem" | "elements" => GripMode::Elements,
+                    _ => GripMode::Aggregate,
+                };
+            }
             "out" => h.out = value.trim().to_string(),
             _ => {}
         }
@@ -149,7 +156,7 @@ pub(super) fn harness_setup(
         // `"model":4` is pinned: the sandbox hosts only the promoted field-belt model, and the
         // field stays for schema stability with existing analyzers. `schema:2` = raw/shaped
         // commands, quaternion + full angular velocity, per-side contact arrays + aggregates.
-        "{{\"t\":\"meta\",\"model\":4,\"schema\":2,\"view\":\"{}\",\"pose\":\"{}\",\"slope_deg\":{},\"z\":{:.3},\"warmup\":{},\"ticks\":{},\"throttle\":{:.3},\"steer\":{:.3},\"t2\":{},\"throttle2\":{:.3},\"steer2\":{:.3},\"slew\":{},\"fixed_dt\":{},\"grip\":{},\"half_tread\":{TRACK_HALF_WIDTH},\"mu\":{MU},\"lateral_ratio\":{LATERAL_GRIP_RATIO},\"slip_saturation\":{SLIP_SATURATION},\"weight\":{:.0},\"hull_rest_y\":{HULL_REST_Y},\"thickness\":{TRACK_THICKNESS}}}",
+        "{{\"t\":\"meta\",\"model\":4,\"schema\":2,\"view\":\"{}\",\"pose\":\"{}\",\"slope_deg\":{},\"z\":{:.3},\"warmup\":{},\"ticks\":{},\"throttle\":{:.3},\"steer\":{:.3},\"t2\":{},\"throttle2\":{:.3},\"steer2\":{:.3},\"slew\":{},\"fixed_dt\":{},\"grip\":{},\"grip_mode\":\"{}\",\"half_tread\":{TRACK_HALF_WIDTH},\"mu\":{MU},\"lateral_ratio\":{LATERAL_GRIP_RATIO},\"slip_saturation\":{SLIP_SATURATION},\"weight\":{:.0},\"hull_rest_y\":{HULL_REST_Y},\"thickness\":{TRACK_THICKNESS}}}",
         if harness.chain_view { "chain" } else { "wrap" },
         match harness.pose {
             None => "lane".into(),
@@ -170,7 +177,12 @@ pub(super) fn harness_setup(
         harness.steer2,
         crate::track::drive::DRIVE_SLEW_PER_SECOND,
         fixed_time.timestep().as_secs_f64(),
-        harness.grip,
+        harness.grip != GripMode::Off,
+        match harness.grip {
+            GripMode::Off => "off",
+            GripMode::Aggregate => "aggregate",
+            GripMode::Elements => "elements",
+        },
         HULL_MASS * 9.81,
     )
     .unwrap();

@@ -169,6 +169,10 @@ def load_run(path: Path):
     # a nonzero qgrip strain state anywhere in the run means grip was active.
     if "grip" in meta:
         run["grip"] = bool(meta["grip"])
+        # The per-element isotropic regime (grip_mode=elements) has NO friction
+        # ellipse — the per-contact cap is a circle at full mu in every direction.
+        if meta.get("grip_mode") == "elements":
+            meta["lateral_ratio"] = 1.0
     else:
         qg = [r.get("qgrip") for r in rows if r.get("qgrip") is not None]
         nums = []
