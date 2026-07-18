@@ -32,11 +32,15 @@ use crate::tank::{Tank, TrackSide};
 
 use super::drive::{DriveAxes, shape_drive};
 use super::forces::{
-    BeltContact, ForceParams, GripElements, SideInput, SideState, grip_stiffness, step_side,
+    BeltContact, ForceParams, GripElements, SideInput, SideReport, SideState, contact_side,
+    grip_stiffness, step_side,
 };
 use super::route::build_route;
 use super::side::Side;
 use super::terrain::TrackField;
+use super::transmission::{
+    self, TransmissionInput, TransmissionMode, TransmissionParams, TransmissionState,
+};
 
 // Surface friction policy (ADR-0007 bucket 3: a property of the track–ground PAIR, destined
 // for the terrain/ground-type mechanic — deliberately not vehicle spec).
@@ -76,6 +80,26 @@ pub struct TrackDriveSide {
 /// elastic state; see the checklist's mid-session-connection section).
 #[derive(Resource, Default)]
 pub struct ElementGripFeelTest;
+
+/// The OFFLINE transmission feel test (phase 2.5, same gating pattern as
+/// [`ElementGripFeelTest`]): which drivetrain adapter [`apply_track_forces`] runs. Inserted
+/// ONLY by the `--offline` composition — every other composition (net client, net server,
+/// headless) never sees it and stays on the legacy governor bit-for-bit. Unlike the element
+/// gate this one is a live dial (the offline `T` key cycles governor → hybrid → L600): the
+/// transmission's state is plainly re-constructible ([`TankTransmission`] resets on every
+/// flip), so a mid-session mode change cannot poison hidden state the way an element-regime
+/// flip would. Eventually per-vehicle SPEC (`transmission.architecture`); the resource is the
+/// interim feel-test dial.
+#[derive(Resource)]
+pub struct TransmissionFeelTest(pub TransmissionMode);
+
+/// The joint transmission's path-dependent state (gear, shift countdown, steering detent,
+/// direction) — a plain LOCAL component on every tank root, spawn-constructed like
+/// [`TrackGripElements`]: NOT registered in the net protocol, never serialized, never hashed
+/// (REV 13; the wire promotion is REV 14). MP never reads or writes it — only the offline
+/// composition's non-governor branch of [`apply_track_forces`] touches it.
+#[derive(Component, Clone, Copy, PartialEq, Debug, Default)]
+pub struct TankTransmission(pub TransmissionState);
 
 /// The static-friction state (static-friction-design.md, ADR-0026): per-side elastic grip
 /// resultants (N), `[left, right] × [longitudinal, lateral/ρ]`. Generalized forces, NOT
@@ -131,6 +155,10 @@ pub struct TrackGear {
     count: usize,
     plane_x: f32,
     params: ForceParams,
+    /// The declared joint transmission, if the spec authors one (phase 2.5). Present on every
+    /// composition (it is inert data); CONSUMED only under the offline
+    /// [`TransmissionFeelTest`] gate.
+    trans: Option<TransmissionParams>,
 }
 
 pub fn sim_plugin(app: &mut App) {
@@ -185,10 +213,34 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
         loop_pts.push(first);
     }
 
+    // The declared transmission, derived from the authored tables against the spec's OWN
+    // sprocket radius (tiger-transmission-data.md rule: speeds are the anchors, reductions
+    // derive, so the ladder survives the 19-vs-20-tooth discrepancy).
+    let trans = spec.powertrain.transmission.as_ref().map(|tr| {
+        TransmissionParams::from_authoring(&transmission::TransmissionAuthoring {
+            idle_rpm: tr.engine.idle_rpm,
+            governed_rpm: tr.engine.governed_rpm,
+            rated_rpm: tr.engine.rated_rpm,
+            torque_nm: &tr.engine.torque_curve,
+            forward_speeds_kmh: &tr.gearbox.forward_speeds_kmh,
+            reverse_speeds_kmh: &tr.gearbox.reverse_speeds_kmh,
+            shift_up_rpm: tr.gearbox.shift_up_rpm,
+            shift_down_rpm: tr.gearbox.shift_down_rpm,
+            steer_radii_m: &tr.steering.radii,
+            steer_capacity_n: tr.steering.capacity,
+            neutral_fraction: tr.steering.neutral_fraction,
+            recirculation: tr.steering.recirculation,
+            brake_capacity_n: tr.brake_force,
+            sprocket_radius_m: sprocket_r,
+            half_tread_m: spec.plane_x,
+        })
+    });
+
     commands.insert_resource(TrackGear {
         loop_pts,
         count: spec.link_count,
         plane_x: spec.plane_x,
+        trans,
         params: ForceParams {
             thickness: spec.thickness,
             columns: [
@@ -224,6 +276,10 @@ fn apply_track_forces(
     // The offline element-grip gate (element-promotion-checklist.md Q1): present only in the
     // `--offline` composition. Read as `Option` so every other composition runs unchanged.
     feel: Option<Res<ElementGripFeelTest>>,
+    // The offline transmission gate (phase 2.5, same pattern): absent everywhere but the
+    // `--offline` composition, so every MP path takes the `Governor` branch below — which is
+    // the UNTOUCHED legacy loop, not merely equivalent code.
+    trans_feel: Option<Res<TransmissionFeelTest>>,
     volumes: Query<VolumeFacets>,
     mut tanks: Query<
         (
@@ -234,6 +290,7 @@ fn apply_track_forces(
             &mut TrackDrive,
             &mut TrackGrip,
             &mut TrackGripElements,
+            &mut TankTransmission,
             &mut TrackContacts,
             Option<&TankVolumes>,
             Option<&TankCapabilities>,
@@ -247,6 +304,10 @@ fn apply_track_forces(
     let Some(oracle) = field.field.as_ref() else {
         return;
     };
+    let mode = trans_feel
+        .as_ref()
+        .map(|r| r.0)
+        .unwrap_or(TransmissionMode::Governor);
     let dt = time.delta_secs();
     for (
         pos,
@@ -256,6 +317,7 @@ fn apply_track_forces(
         mut drive,
         mut grip,
         mut grip_elements,
+        mut trans_state,
         mut contacts,
         tank_volumes,
         tank_caps,
@@ -286,6 +348,84 @@ fn apply_track_forces(
         let side_commands = shaped.side_commands();
 
         let affine = Affine3A::from_rotation_translation(rot.0, pos.0);
+
+        // The JOINT drivetrain branch (phase 2.5): reachable only under the offline
+        // [`TransmissionFeelTest`] gate with a spec-declared transmission — every MP
+        // composition falls through to the UNTOUCHED legacy loop below.
+        let joint = match (mode, gear.trans.as_ref()) {
+            (TransmissionMode::Governor, _) | (_, None) => None,
+            (m, Some(tp)) => Some((m, tp)),
+        };
+        if let Some((mode, tp)) = joint {
+            // Transmission-design §2 scheduling: evaluate BOTH contact patches at their
+            // pre-tick belt speeds, solve the joint transmission once, integrate both
+            // speeds, advect both phases. Emitting all of L's forces then all of R's keeps
+            // the legacy accumulation order — within a tick force application never feeds
+            // back into `vel_at`, so contact evaluation order cannot change the numbers.
+            let mut reports: [SideReport; 2] = [SideReport::default(), SideReport::default()];
+            let mut live = [false; 2];
+            for side in Side::ALL {
+                let si = side.index();
+                let input = SideInput {
+                    loop_pts: &gear.loop_pts,
+                    count: gear.count,
+                    plane_x: side.plane_x(gear.plane_x),
+                    command: side_commands[si],
+                };
+                let ds = drive.sides[si];
+                let state = SideState {
+                    speed: ds.speed,
+                    phase: ds.phase,
+                    grip: bevy::math::Vec2::new(grip.sides[si][0], grip.sides[si][1]),
+                };
+                let (report, ok) = contact_side(
+                    &input,
+                    state,
+                    affine,
+                    dt,
+                    &gear.params,
+                    oracle,
+                    |p| forces.velocity_at_point(p),
+                    // Same element-regime gate as the legacy loop (offline-only resource).
+                    match &feel {
+                        Some(_) => Some(&mut grip_elements.sides[si]),
+                        None => None,
+                    },
+                );
+                reports[si] = report;
+                live[si] = ok;
+            }
+            let tr = transmission::step(
+                mode,
+                &gear.params,
+                Some(tp),
+                &mut trans_state.0,
+                &TransmissionInput {
+                    throttle: drive.throttle,
+                    steer: drive.steer,
+                    side_commands,
+                    speeds: [drive.sides[0].speed, drive.sides[1].speed],
+                    reactions: [reports[0].belt_reaction, reports[1].belt_reaction],
+                    dt,
+                },
+            );
+            for (si, report) in reports.into_iter().enumerate() {
+                for app in &report.apps {
+                    forces.apply_force_at_point(app.force, app.point);
+                }
+                if live[si] {
+                    let pre_speed = drive.sides[si].speed;
+                    drive.sides[si] = TrackDriveSide {
+                        speed: tr.next_speeds[si],
+                        // Phase advects at the PRE-update speed, like the legacy tail.
+                        phase: drive.sides[si].phase + f64::from(pre_speed * dt),
+                    };
+                }
+                grip.sides[si] = [report.state.grip.x, report.state.grip.y];
+                contacts.0[si] = report.contacts;
+            }
+            continue;
+        }
 
         // Fixed left-then-right — the accumulation order is part of determinism. `plane_x`'s
         // sign is the side's (`Side::plane_x` is an exact ±1 flip); `sides`/`grip.sides` stay
