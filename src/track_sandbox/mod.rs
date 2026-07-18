@@ -417,7 +417,7 @@ pub fn plugin(app: &mut App) {
                 // The viz-layer instrumentation: toggles, legend, mesh/collider mirrors, and the
                 // diagnostic layers (collocation stations at the physics ring, reference ring).
                 toggle_viz_layers,
-                update_viz_label.run_if(resource_changed::<VizLayers>),
+                update_viz_label,
                 apply_mesh_visibility.run_if(resource_changed::<VizLayers>),
                 sync_collider_gizmos.run_if(resource_changed::<VizLayers>),
                 draw_sample_points,
@@ -786,12 +786,35 @@ fn spawn_camera(mut commands: Commands) {
 #[derive(Component)]
 struct VizLabel;
 
-fn viz_label_text(viz: &VizLayers) -> String {
+fn viz_label_text(
+    viz: &VizLayers,
+    view: &TrackViewMode,
+    grip: &GripSwitch,
+    paused: &Paused,
+) -> String {
     fn s(on: bool) -> &'static str {
         if on { "ON " } else { "off" }
     }
+    let mode_line = format!(
+        "{}  |  grip: {}  |  view: {}\n",
+        if paused.0 {
+            "** PAUSED (esc) **"
+        } else {
+            "running"
+        },
+        match grip.0 {
+            GripMode::Off => "OFF (kinetic parity)",
+            GripMode::Aggregate => "AGGREGATE (shipped)",
+            GripMode::Elements => "PER-ELEMENT (prototype)",
+        },
+        if view.kinematic {
+            "kinematic wrap"
+        } else {
+            "route chain"
+        },
+    );
     format!(
-        "viz  1 hull:{}  2 wheels:{}  3 chain:{}  4 outer:{}  5 hubs:{}  6 dots:{}\n     \
+        "{mode_line}viz  1 hull:{}  2 wheels:{}  3 chain:{}  4 outer:{}  5 hubs:{}  6 dots:{}\n     \
          7 normals:{}  8 forces:{}  9 casts:{}  0 colliders:{}  - reference:{}\n\
          esc pause/cursor | v view (wrap/chain) | g grip (aggregate/element) | r reset | l log | j probe | arrows drive | wasd fly",
         s(viz.hull),
@@ -808,10 +831,11 @@ fn viz_label_text(viz: &VizLayers) -> String {
     )
 }
 
-fn spawn_viz_label(mut commands: Commands, viz: Res<VizLayers>) {
+fn spawn_viz_label(mut commands: Commands) {
+    // Text filled by `update_viz_label` on the first frame (fresh resources count as changed).
     commands.spawn((
         VizLabel,
-        Text::new(viz_label_text(&viz)),
+        Text::new(String::new()),
         TextFont {
             font_size: FontSize::Px(13.0),
             ..default()
@@ -826,8 +850,19 @@ fn spawn_viz_label(mut commands: Commands, viz: Res<VizLayers>) {
     ));
 }
 
-fn update_viz_label(viz: Res<VizLayers>, label: Single<&mut Text, With<VizLabel>>) {
-    label.into_inner().0 = viz_label_text(&viz);
+/// Refresh the on-screen legend whenever ANY displayed mode changes (viz layers, grip
+/// regime, view, pause) — the screen always states the current modes, no terminal needed.
+fn update_viz_label(
+    viz: Res<VizLayers>,
+    view: Res<TrackViewMode>,
+    grip: Res<GripSwitch>,
+    paused: Res<Paused>,
+    label: Single<&mut Text, With<VizLabel>>,
+) {
+    if !(viz.is_changed() || view.is_changed() || grip.is_changed() || paused.is_changed()) {
+        return;
+    }
+    label.into_inner().0 = viz_label_text(&viz, &view, &grip, &paused);
 }
 
 /// Lock + hide the cursor for mouse-look (a query, so a not-yet-present cursor is a no-op).
