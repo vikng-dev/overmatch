@@ -1104,7 +1104,7 @@ fn gear_climb_monotone_tiger() {
 ///   energy-impossible tell). Analytic prediction: 2 × 96 kN / 57 t = 3.37 m/s² in the
 ///   full phase, plus engine drag (~17 kN in F7, growing through downshifts)
 ///   ≈ 3.6+ m/s², plus the command shaper's ~0.5 s press slew dead time → from 6.0 m/s
-///   ≈ 0.5 + 5.0/3.6 ≈ 1.9 s to 1 m/s. MEASURED: 2.23 s. Gate ≤ 3 s (margin for
+///   ≈ 0.5 + 5.0/3.6 ≈ 1.9 s to 1 m/s. MEASURED: 2.36 s. Gate ≤ 3 s (margin for
 ///   platform float drift, nothing else). The coast leg above is UNCHANGED (no brake in
 ///   the release intent).
 #[test]
@@ -1175,14 +1175,10 @@ fn decel_tiger() {
     );
 }
 
-/// The brake datum's own regression gate (review round): the Tiger parks on the course's
-/// 20° ramp and HOLDS. `brake_force` is dual-anchored on exactly this capability —
-/// W·sin 20°/2 ≈ 95.6 kN/side demand against the 96 kN/side capacity — so the settled
-/// ADR-0026 hill-hold behavior is pinned by test, not by comment. Teleport onto the 20°
-/// ramp mid-face (test course §1: x = 0, z = −40, pitched about X), release all inputs,
-/// settle; the park latch must engage and the hull must not back-drive over a sustained
-/// window. 30° is now genuinely beyond capacity (139.8 kN/side demand) and is NOT gated —
-/// it back-drives honestly under the capacity-breach law.
+/// The established 20° park regression stays pinned while static breakaway and dynamic
+/// dissipation become separate capacities. Teleport onto the 20° ramp mid-face (test course §1:
+/// x = 0, z = −40, pitched about X), release all inputs, settle; the park latch must engage and
+/// the hull must not back-drive over a sustained window.
 #[test]
 fn slope_park_holds_20_deg_tiger() {
     use crate::track::transmission::TransmissionMode;
@@ -1229,6 +1225,193 @@ fn slope_park_holds_20_deg_tiger() {
     assert!(
         drift < 0.05,
         "the latched park must hold the 20-deg ramp (drifted {drift:.3} m over 4 s)"
+    );
+}
+
+/// Static-breakaway acceptance gate on the real Tiger and the course's 30° face. The DERIVED
+/// arithmetic is 2 × 96,000 N × 1.5 = 288,000 N static capacity against
+/// 57,000 kg × 9.81 m/s² × sin(30°) = 279,585 N demand: an 8,415 N DERIVED margin. Zero input
+/// must latch the park brake and hold through the same four-second MEASURED window as the 20° gate.
+#[test]
+fn slope_park_holds_30_deg_tiger() {
+    use crate::track::transmission::TransmissionMode;
+    let (mut app, tank) = booted_offline_sim(TransmissionMode::FixedRadii);
+    let course_rotation = Quat::from_rotation_x(30.0_f32.to_radians());
+    let (mass, dynamic_capacity, static_factor) = {
+        let world = app.world();
+        let mass = world.resource::<TankBlueprint>().spec.mass;
+        let tp = world
+            .resource::<crate::track::sim::TrackGear>()
+            .trans()
+            .expect("the Tiger declares a transmission");
+        (mass, tp.brake_capacity_n, tp.brake_static_factor)
+    };
+    let demand = mass * 9.81 * 30.0_f32.to_radians().sin();
+    let static_capacity = 2.0 * dynamic_capacity * static_factor;
+    let margin = static_capacity - demand;
+    assert!(
+        margin > 0.0,
+        "30-degree static-hold fixture needs positive capacity margin (capacity \
+         {static_capacity:.0} N, demand {demand:.0} N)"
+    );
+
+    {
+        let mut e = app.world_mut().entity_mut(tank);
+        e.get_mut::<avian3d::prelude::Position>().unwrap().0 = Vec3::new(14.0, 3.4, -40.0);
+        e.get_mut::<avian3d::prelude::Rotation>().unwrap().0 = course_rotation;
+        e.get_mut::<avian3d::prelude::LinearVelocity>().unwrap().0 = Vec3::ZERO;
+        e.get_mut::<avian3d::prelude::AngularVelocity>().unwrap().0 = Vec3::ZERO;
+    }
+    for _ in 0..256 {
+        drive_tick(&mut app, tank, 0.0, 0.0);
+    }
+    let p0 = app
+        .world()
+        .get::<avian3d::prelude::Position>(tank)
+        .expect("tank has a position")
+        .0;
+    for _ in 0..(4 * FIXED_TICKS_PER_SECOND) {
+        drive_tick(&mut app, tank, 0.0, 0.0);
+    }
+    let world = app.world();
+    let p1 = world
+        .get::<avian3d::prelude::Position>(tank)
+        .expect("tank has a position")
+        .0;
+    let st = world
+        .get::<crate::track::sim::TankTransmission>(tank)
+        .expect("tank carries transmission state")
+        .0;
+    let drift = (p1 - p0).length();
+    println!(
+        "tiger 30-deg slope park: MEASURED drift {drift:.4} m over 4 s, park latch {}; \
+         DERIVED static {static_capacity:.0} N, demand {demand:.0} N, margin {margin:.0} N",
+        st.park
+    );
+    assert!(
+        st.park,
+        "zero input at rest on the 30-degree ramp must latch the park brake"
+    );
+    assert!(
+        drift < 0.05,
+        "the latched static brake must hold the 30-degree ramp (drifted {drift:.3} m over 4 s)"
+    );
+}
+
+/// Beyond-capability inverse gate: keep the real Tiger geometry and dynamic brakes, but author a
+/// valid synthetic 1.1× static factor. The DERIVED 211,200 N static capacity remains below the
+/// DERIVED 279,585 N 30° demand, so a zero-input parking latch must breach. Once either belt leaves
+/// the at-rest band, query the production capacity seam and assert that the latch has dropped to
+/// 96,000 N/side dynamic braking while the tank continues downhill.
+#[test]
+fn synthetic_30_deg_park_breaches_to_dynamic_braking() {
+    use crate::track::transmission::{
+        PARK_ENGAGE_SPEED, TransmissionMode, brake_capacity_for_regime,
+    };
+    let (mut app, tank) = booted_offline_sim(TransmissionMode::FixedRadii);
+    let course_rotation = Quat::from_rotation_x(30.0_f32.to_radians());
+    let uphill = course_rotation * Vec3::NEG_Z;
+    let mass = app.world().resource::<TankBlueprint>().spec.mass;
+    let (dynamic_capacity, static_factor) = {
+        let mut gear = app
+            .world_mut()
+            .resource_mut::<crate::track::sim::TrackGear>();
+        let tp = gear.trans_mut().expect("the Tiger declares a transmission");
+        tp.brake_static_factor = 1.1;
+        (tp.brake_capacity_n, tp.brake_static_factor)
+    };
+    let demand = mass * 9.81 * 30.0_f32.to_radians().sin();
+    let static_capacity = 2.0 * dynamic_capacity * static_factor;
+    assert!(
+        static_capacity < demand,
+        "synthetic park must be beyond static capability (capacity {static_capacity:.0} N, \
+         demand {demand:.0} N)"
+    );
+
+    let start_position = {
+        let mut e = app.world_mut().entity_mut(tank);
+        e.get_mut::<avian3d::prelude::Position>().unwrap().0 = Vec3::new(14.0, 3.4, -40.0);
+        e.get_mut::<avian3d::prelude::Rotation>().unwrap().0 = course_rotation;
+        e.get_mut::<avian3d::prelude::LinearVelocity>().unwrap().0 = Vec3::ZERO;
+        e.get_mut::<avian3d::prelude::AngularVelocity>().unwrap().0 = Vec3::ZERO;
+        *e.get_mut::<crate::track::sim::TankTransmission>().unwrap() =
+            crate::track::sim::TankTransmission::default();
+        let mut drive = e.get_mut::<crate::track::sim::TrackDrive>().unwrap();
+        drive.throttle = 0.0;
+        drive.steer = 0.0;
+        drive.sides[0].speed = 0.0;
+        drive.sides[1].speed = 0.0;
+        e.get::<avian3d::prelude::Position>().unwrap().0
+    };
+
+    let mut moving_capacity = None;
+    let mut final_belt_m = 0.0;
+    for _ in 0..(2 * FIXED_TICKS_PER_SECOND) {
+        // Inspect the PRE-TICK belt state that the production brake law will consume below. The
+        // first tick after breakaway may cross the threshold while still using static capacity;
+        // this pins the following tick, whose input is already outside the band, to dynamic.
+        {
+            let world = app.world();
+            let drive = world
+                .get::<crate::track::sim::TrackDrive>(tank)
+                .expect("tank drives");
+            if moving_capacity.is_none()
+                && drive
+                    .sides
+                    .iter()
+                    .any(|side| side.speed.abs() >= PARK_ENGAGE_SPEED)
+            {
+                let tp = world
+                    .resource::<crate::track::sim::TrackGear>()
+                    .trans()
+                    .expect("the Tiger declares a transmission");
+                moving_capacity = Some(brake_capacity_for_regime(
+                    tp,
+                    true,
+                    0.0,
+                    drive.sides[0].speed,
+                ));
+            }
+        }
+        drive_tick(&mut app, tank, 0.0, 0.0);
+        let world = app.world();
+        let drive = world
+            .get::<crate::track::sim::TrackDrive>(tank)
+            .expect("tank drives");
+        final_belt_m = (drive.sides[0].speed + drive.sides[1].speed) / 2.0;
+    }
+
+    let world = app.world();
+    let end_position = world
+        .get::<avian3d::prelude::Position>(tank)
+        .expect("tank has a position")
+        .0;
+    let state = world
+        .get::<crate::track::sim::TankTransmission>(tank)
+        .expect("tank carries transmission state")
+        .0;
+    let downhill_distance = -(end_position - start_position).dot(uphill);
+    let moving_capacity = moving_capacity.expect("the breached park never left the at-rest band");
+    println!(
+        "synthetic 30-deg park: DERIVED static {static_capacity:.0} N vs demand {demand:.0} N; \
+         MEASURED moving cap {moving_capacity:.0} N/side, belt_m {final_belt_m:.3} m/s, \
+         downhill {downhill_distance:.3} m"
+    );
+    assert!(
+        state.park,
+        "zero input must retain the parking latch after breach"
+    );
+    assert_eq!(
+        moving_capacity, dynamic_capacity,
+        "a breached moving latch must drop to dynamic braking that same tick"
+    );
+    assert!(
+        final_belt_m < -PARK_ENGAGE_SPEED,
+        "the beyond-capability park must keep sliding (belt_m {final_belt_m:.3} m/s)"
+    );
+    assert!(
+        downhill_distance > 0.25,
+        "the beyond-capability park must move downhill (moved {downhill_distance:.3} m)"
     );
 }
 

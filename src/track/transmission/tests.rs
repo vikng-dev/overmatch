@@ -48,6 +48,7 @@ fn lab_tp() -> TransmissionParams {
         steer_capacity_n: 240_000.0,
         recirculation: 0.9,
         brake_capacity_n: 120_000.0,
+        brake_static_factor: 1.6,
         drag_fraction: 0.25,
         // Stage B lab crank: same class band as the vehicle authoring (J mid-band,
         // clutch ≈ 1.3 × the 2200 N·m peak).
@@ -92,6 +93,7 @@ fn tiger_tp() -> TransmissionParams {
         steer_capacity_n: 250_000.0,
         recirculation: 0.9,
         brake_capacity_n: 96_000.0,
+        brake_static_factor: 1.5,
         drag_fraction: 0.25,
         engine_inertia_kgm2: 4.0,
         clutch_capacity_nm: 2400.0,
@@ -1113,6 +1115,7 @@ fn reverse_backslide_holds_gear_and_keeps_reverse_drive() {
         steer_capacity_n: 240_000.0,
         recirculation: 0.9,
         brake_capacity_n: 120_000.0,
+        brake_static_factor: 1.6,
         drag_fraction: 0.25,
         engine_inertia_kgm2: 4.0,
         clutch_capacity_nm: 2860.0,
@@ -1480,6 +1483,7 @@ fn overrev_gate_refuses_too_early_downshift() {
         steer_capacity_n: 240_000.0,
         recirculation: 0.9,
         brake_capacity_n: 120_000.0,
+        brake_static_factor: 1.6,
         drag_fraction: 0.25,
         engine_inertia_kgm2: 4.0,
         clutch_capacity_nm: 2860.0,
@@ -1665,14 +1669,15 @@ fn steer_step_hysteresis() {
     assert_eq!(at(0.02), 0, "below WIDE_OFF releases to straight");
 }
 
-/// The brake reframe: a parked belt inside capacity holds EXACTLY (v̇ = 0, bit-zero);
-/// slope demand beyond B_max back-drives the belt honestly.
+/// Static breakaway and dynamic dissipation are separate capacities. A parked belt inside the
+/// multiplied static capacity holds EXACTLY (v̇ = 0, bit-zero); demand past it back-drives.
 #[test]
 fn brake_capacity_breach_backdrives() {
     let (fp, tp) = (lab_fp(), lab_tp());
     let mut st = TransmissionState::default();
-    // Inside capacity: R = 0.8·B_max, zero command, zero speed → exact hold.
-    let r_in = 0.8 * tp.brake_capacity_n;
+    // Above dynamic but inside static: R = 1.5·B_dynamic < 1.6·B_dynamic, zero command, zero
+    // speed -> exact hold.
+    let r_in = 1.5 * tp.brake_capacity_n;
     let rep = step(
         TransmissionMode::Hybrid,
         &fp,
@@ -1683,10 +1688,10 @@ fn brake_capacity_breach_backdrives() {
     assert_eq!(
         rep.next_speeds,
         [0.0, 0.0],
-        "inside capacity the brake holds exactly"
+        "inside static capacity the parked brake holds exactly"
     );
-    // Past capacity: R = 1.5·B_max → the belt is back-driven.
-    let r_out = 1.5 * tp.brake_capacity_n;
+    // Past static capacity: R = 1.7·B_dynamic > 1.6·B_dynamic -> honest back-drive.
+    let r_out = 1.7 * tp.brake_capacity_n;
     let rep = step(
         TransmissionMode::Hybrid,
         &fp,
@@ -1696,8 +1701,36 @@ fn brake_capacity_breach_backdrives() {
     );
     assert!(
         rep.next_speeds[0] < 0.0 && rep.next_speeds[1] < 0.0,
-        "slope demand past B_max must back-drive the belt (got {:?})",
+        "slope demand past static capacity must back-drive the belt (got {:?})",
         rep.next_speeds
+    );
+}
+
+#[test]
+fn static_brake_capacity_requires_every_hold_predicate() {
+    let tp = lab_tp();
+    let dynamic = tp.brake_capacity_n;
+    let static_capacity = dynamic * tp.brake_static_factor;
+
+    assert_eq!(
+        brake_capacity_for_regime(&tp, true, 0.0, 0.0),
+        static_capacity,
+        "a latched belt strictly inside the at-rest band gets static breakaway capacity"
+    );
+    assert_eq!(
+        brake_capacity_for_regime(&tp, false, 0.0, 0.0),
+        dynamic,
+        "an unlatched settle envelope stays dynamic"
+    );
+    assert_eq!(
+        brake_capacity_for_regime(&tp, true, 1.0, 0.0),
+        dynamic,
+        "service braking stays dynamic even if stale latch state is present"
+    );
+    assert_eq!(
+        brake_capacity_for_regime(&tp, true, 0.0, PARK_ENGAGE_SPEED),
+        dynamic,
+        "leaving the strict at-rest band drops the cap that same tick"
     );
 }
 
@@ -1735,7 +1768,7 @@ fn parking_brake_settles_creep() {
 fn parking_brake_stays_saturated_past_breach() {
     let (fp, tp) = (lab_fp(), lab_tp());
     let mut st = TransmissionState::default();
-    let r_breach = 1.5 * tp.brake_capacity_n;
+    let r_breach = 1.7 * tp.brake_capacity_n;
     let mut speeds = [0.0f32; 2];
     let mut last = TransmissionReport::default();
     for _ in 0..30 {
@@ -1761,6 +1794,39 @@ fn parking_brake_stays_saturated_past_breach() {
             tp.brake_capacity_n
         );
     }
+
+    // Once moving, the result is bit-identical to a factor-1.0 fixture: the latch persists, but
+    // its static multiplier is gone rather than becoming 192 kN/side dynamic braking.
+    let moving = input(0.0, 0.0, [-fp.slip_saturation; 2], [r_breach; 2]);
+    let mut dynamic_tp = tp.clone();
+    dynamic_tp.brake_static_factor = 1.0;
+    let mut static_state = TransmissionState {
+        park: true,
+        ..Default::default()
+    };
+    let mut dynamic_state = static_state;
+    let static_report = step(
+        TransmissionMode::Hybrid,
+        &fp,
+        Some(&tp),
+        &mut static_state,
+        &moving,
+    );
+    let dynamic_report = step(
+        TransmissionMode::Hybrid,
+        &fp,
+        Some(&dynamic_tp),
+        &mut dynamic_state,
+        &moving,
+    );
+    assert_eq!(
+        static_report.forces, dynamic_report.forces,
+        "a moving latched slide must drop to dynamic brake capacity"
+    );
+    assert_eq!(
+        static_report.next_speeds, dynamic_report.next_speeds,
+        "the post-breach slide must be bit-identical to factor-1.0 dynamic braking"
+    );
 }
 
 /// Discrete passivity of the whole brake stack: against a brakeless baseline

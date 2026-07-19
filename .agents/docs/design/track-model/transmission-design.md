@@ -266,9 +266,9 @@ WWII 57-t heavies) → `brake_force: 96_000` per side. The stop-force law
 Measured service-brake stop 6 → 1 m/s: **2.23 s** (analytic ≈ 0.5 s input slew +
 5.0 m/s ÷ ~3.6 m/s² brake+drag); gate `decel_tiger` ≤ 3 s, coast leg unchanged (10.7 s);
 new gate `slope_park_holds_20_deg_tiger` pins the 20° hold (measured drift 0.000 m over
-4 s, latch engaged). 30° ramps now back-drive honestly (139.8 kN/side demand > capacity —
-physical; the old 250 kN held them for free). Supersede with a real Argus
-brake/output-torque rating when sourced.
+4 s, latch engaged). At this stage, before the static/dynamic split below, 30° ramps
+back-drove (139.8 kN/side DERIVED demand > dynamic capacity). Supersede the inferred
+values with a real Argus brake/output-torque rating when sourced.
 
 ### Review round (same day) — three adversarial findings, dispositions
 
@@ -620,7 +620,33 @@ over-rev path; confirmation counter decays instead of hard-resetting; reverse-la
 HUD labels. The 30° gate now boots the untouched Tiger blueprint and asserts the
 HONEST result: the Tiger CLIMBS 30° from a hill-hold launch (500 kN modeled F1 launch
 force vs 279.6 kN demand) — the previous synthetic fixture faked a grade limit. The
-parked 30° slide (192 kN brake < 279.6 kN) remains correct and emergent; a
-static-vs-dynamic brake capacity split is queued pending a real Argus rating. A
+parked 30° slide was correct under the then-single 192 kN DERIVED brake capacity; this
+finding is SUPERSEDED by the static-vs-dynamic split below. A
 two-world bit-exact FixedRadii slope replay (full TransmissionState incl. EMA,
 counter, target, latch; 512 ticks) now guards stage-C determinism.
+
+### Static brake capacity + steering visibility (2026-07-20)
+
+The brake datum is now two limits. `brake_force` remains the dynamic per-side capacity for every
+service stop, moving belt, post-breach latched slide, and scheduler rollback-arrest calculation.
+The new required `brake_static_factor` multiplies it only when a parking or hill-hold latch is
+active, no service-brake command exists, and that individual belt is strictly inside the
+`PARK_ENGAGE_SPEED` at-rest band. Leaving the band selects dynamic capacity in that same tick.
+
+Tiger authoring uses **1.5× INFERRED provisional**: static hold does no work, sourced material
+ratios span **1.05–2.0×**, and the Argus discs are described as self-energizing by both British
+Report No. 19 and D 656/30, but no numerical Argus rating survives. That produces
+`2 × 96,000 × 1.5 = 288,000 N` **DERIVED** static capacity against
+`57,000 × 9.81 × sin(30°) = 279,585 N` **DERIVED** demand, an **8,415 N DERIVED** margin.
+The real 30° park gate measured **0.0393 m MEASURED** drift over **4 s DERIVED**; the unchanged
+20° gate measured **0.0000 m MEASURED**. A synthetic **1.1× INFERRED test fixture** has only
+**211,200 N DERIVED** static capacity, breaches, drops to **96,000 N/side MEASURED** dynamic
+capacity at the moving-band transition, and measured **−0.527 m/s MEASURED** belt speed plus
+**1.825 m MEASURED** downhill travel after **2 s DERIVED**. Service braking remains
+**2.36 s MEASURED** from 6 to 1 m/s.
+
+The offline FixedRadii HUD now renders the live detent with the authored gear-table radius:
+`STEER I R~165m` for F8 wide and `STEER II R~3m` for F1 tight, blank at released detent. The
+field is fixed-width and ASCII-only. Hybrid remains intentionally blank: its instantaneous target
+is internal continuous solve state, and duplicating that derivation in UI would make the display a
+second drivetrain law rather than a read of authored/live truth.

@@ -165,6 +165,49 @@ mod offline_feel_tests {
         };
         assert_eq!(scheduler_hud_line(&state), "sched GRADE R4->R2");
     }
+
+    #[test]
+    fn fixed_radii_steering_hud_names_detent_and_authored_radius() {
+        let radii = [
+            (3.44, 10.2),
+            (5.28, 15.6),
+            (7.62, 22.5),
+            (11.30, 33.4),
+            (17.32, 51.2),
+            (25.68, 76.0),
+            (37.47, 110.8),
+            (55.78, 165.0),
+        ];
+        let mut state = TransmissionState {
+            gear: 1,
+            steer_step: 2,
+            ..Default::default()
+        };
+        assert_eq!(
+            steering_hud_line(TransmissionMode::FixedRadii, &state, Some(&radii)),
+            "STEER II R~3m"
+        );
+
+        state.gear = 8;
+        state.steer_step = 1;
+        assert_eq!(
+            steering_hud_line(TransmissionMode::FixedRadii, &state, Some(&radii)),
+            "STEER I R~165m"
+        );
+
+        state.steer_step = 0;
+        assert_eq!(
+            steering_hud_line(TransmissionMode::FixedRadii, &state, Some(&radii)),
+            "",
+            "released steering leaves the visibility field blank"
+        );
+        state.steer_step = 2;
+        assert_eq!(
+            steering_hud_line(TransmissionMode::Hybrid, &state, Some(&radii)),
+            "",
+            "the authored-detent readout is FixedRadii-only"
+        );
+    }
 }
 
 /// Marks a network-client replica. Ballistics uses it to suppress authority-only damage and impulse
@@ -536,6 +579,31 @@ fn scheduler_hud_line(st: &track::transmission::TransmissionState) -> String {
     }
 }
 
+/// Fixed-radius steering visibility from the live detent state and the source radius table retained
+/// by [`track::transmission::TransmissionParams`]. The Hybrid adapter deliberately stays blank:
+/// its continuous command target is internal to the solve, while this line promises an AUTHORED
+/// gear/detent radius rather than a second UI-side derivation of drivetrain math.
+fn steering_hud_line(
+    mode: track::transmission::TransmissionMode,
+    st: &track::transmission::TransmissionState,
+    authored_radii: Option<&[(f32, f32)]>,
+) -> String {
+    if mode != track::transmission::TransmissionMode::FixedRadii || st.steer_step == 0 {
+        return String::new();
+    }
+    let Some(radii) = authored_radii.filter(|radii| !radii.is_empty()) else {
+        return String::new();
+    };
+    let gear = usize::from(st.gear).clamp(1, radii.len()) - 1;
+    let (tight, wide) = radii[gear];
+    let (detent, radius) = if st.steer_step == 1 {
+        ("I", wide)
+    } else {
+        ("II", tight)
+    };
+    format!("STEER {detent} R~{radius:.0}m")
+}
+
 /// The offline drive-telemetry HUD: rebuild the top-right block from the controlled tank's
 /// tick-truth components every frame. Reading sim components in `Update` (not a fixed system)
 /// is fine for a display — it never writes sim state. Every numeric field is fixed-width so the
@@ -545,7 +613,8 @@ fn scheduler_hud_line(st: &track::transmission::TransmissionState) -> String {
 /// a `*` marker through a shift's torque interruption and `P` on the parking latch); line 3 the
 /// reserve scheduler; line 4 the hull ground speed (horizontal |velocity|, signed by
 /// hull-forward); line 5 the per-side belt speeds and their slip against the projected hull speed;
-/// line 6 the shaped drive command and the L600 steering detent.
+/// line 6 the shaped drive command and, while engaged, the L600 steering detent plus its authored
+/// radius. The final field reserves a fixed width and stays blank when steering is released.
 fn update_drive_hud(
     feel: Option<Res<track::sim::TransmissionFeelTest>>,
     gear: Option<Res<track::sim::TrackGear>>,
@@ -609,14 +678,8 @@ fn update_drive_hud(
         let proj = horiz.dot(fwd_h);
         let ground = horiz.length() * proj.signum();
 
-        let detent = match mode {
-            TransmissionMode::FixedRadii => match trans.0.steer_step {
-                0 => "NEUTRAL",
-                1 => "WIDE",
-                _ => "TIGHT",
-            },
-            _ => "-",
-        };
+        let steering =
+            steering_hud_line(mode, &trans.0, joint.map(|tp| tp.steer_radii_m.as_slice()));
 
         out.push_str(&format!("\n{gear_line}"));
         out.push_str(&format!("\n{scheduler_line}"));
@@ -632,8 +695,8 @@ fn update_drive_hud(
             speeds[1] - proj,
         ));
         out.push_str(&format!(
-            "\ncmd thr {:+5.2} steer {:+5.2} | detent {detent}",
-            drive.throttle, drive.steer,
+            "\ncmd thr {:+5.2} steer {:+5.2} | {steering:<15}",
+            drive.throttle, drive.steer
         ));
     }
 
