@@ -904,9 +904,17 @@ fn refresh_hill_hold(
     fp: &ForceParams,
     ladder: &[f32],
     shaft: f32,
+    rollback_rescue: bool,
 ) -> bool {
+    let downshift_allowed = shaft > -PARK_ENGAGE_SPEED || rollback_rescue;
     match select_hill_hold_target(tp, fp, ladder, shaft, st.gear, st.demand_n) {
-        Some(target) if target < st.gear => {
+        Some(target) if target < st.gear && downshift_allowed => {
+            // A latched rollback that the current gear plus full brakes cannot arrest is the
+            // deliberate exception to both ordinary grade-shift guards: this downshift is crew
+            // action to GAIN enough launch capability, not a claim that the declutched landing will
+            // be forward or in-band. Like the purpose-scoped protective-upshift waiver below, only
+            // this named rescue path waives the landing-sign policy; free backslides never call it
+            // with permission.
             commit_grade_shift(st, tp, target);
             st.scheduler = SchedulerState::HillHold;
             true
@@ -1133,20 +1141,25 @@ fn regenerative(
             // on the first decision tick after this window; starting another window here would
             // erase part of the declared shift cost.
             st.scheduler = SchedulerState::HillHold;
-        } else if st.hill_hold && real_rollback {
-            // The cooldown override catches a REAL moving rollback immediately, but the existing
-            // signed-shaft contract still holds the engaged gear while genuinely back-driven. The
-            // brakes arrest the slide first; live retargeting resumes once it re-enters the
-            // near-rest selector domain.
-            st.grade_target = 0;
-            st.scheduler = SchedulerState::HillHold;
         } else if st.hill_hold {
-            hill_hold_step_committed = refresh_hill_hold(st, tp, fp, ladder, shaft);
+            // The live selector still runs during every REAL rollback so HILL HOLD / GRADE LIMIT is
+            // truthful. The negative-shaft shift permission is narrower: only when the current
+            // gear's modeled force PLUS both full declared brakes still has negative arrest reserve
+            // is the crew actively rescuing rather than freely backsliding. Direct pays one event;
+            // Sequential repeats this capability decision after each paid window. This explicit
+            // flag is the sole bypass for the ordinary signed-shaft and landing-sign guards.
+            let braked_rollback_rescue =
+                real_rollback && current_reserve + 2.0 * tp.brake_capacity_n < 0.0;
+            hill_hold_step_committed =
+                refresh_hill_hold(st, tp, fp, ladder, shaft, braked_rollback_rescue);
         }
     }
     let r_mean = (inp.reactions[0] + inp.reactions[1]) / 2.0;
-    let grade_landing_positive =
-        st.hill_hold || dir * predict_shift_landing_m(tp, fp, m, r_mean, dt) > 0.0;
+    // Ordinary grade shifts still require a forward landing. The braked rollback rescue commits
+    // through `refresh_hill_hold` above instead: its purpose is gaining capability, so that named
+    // path deliberately waives this sign gate just as the protective-upshift arm deliberately
+    // waives its ordinary landing-band gate for engine protection.
+    let grade_landing_positive = dir * predict_shift_landing_m(tp, fp, m, r_mean, dt) > 0.0;
     // Predictor-domain guard (review round): while the L600 detent is engaged the
     // constraint force λ loads the outputs in a way the predictor cannot model (it carries
     // no λ/steer state), so its landing prediction is invalid mid-geared-turn — DEFER
@@ -1276,9 +1289,11 @@ fn regenerative(
             {
                 // Backslide hold (stage A, thresholded in the review round): while GENUINELY
                 // back-driven the vehicle is NOT "running slow forward" — gear changes are
-                // decisions about forward operation, and the backslide state HOLDS the engaged
-                // gear (no downshift walk on a slide either; the negative signed rpm would
-                // otherwise sit permanently under the down band). The threshold is
+                // decisions about forward operation, and a FREE backslide HOLDS the engaged gear
+                // (the negative signed rpm would otherwise downshift-walk forever). The one narrow
+                // exception is handled above: when a latched hill hold's current gear plus declared
+                // brakes cannot arrest the slide, `refresh_hill_hold` may downshift to gain that
+                // capability while the shaft is negative. The threshold here is
                 // −PARK_ENGAGE_SPEED, the existing at-rest policy scale, NOT exact zero: the
                 // brake stop-force/integration order leaves a stable numerical residual at
                 // rest (measured ≈ −1.7e−9 m/s coasting to a stop in gear 3 against a 20 kN

@@ -1847,6 +1847,260 @@ fn real_tiger_30_deg_reports_capability_truthfully() {
     );
 }
 
+/// Regression: the REAL Tiger starts on the course's 30-degree face in F8, already rolling
+/// backward faster than the 0.25 m/s DERIVED hill-hold threshold with W held. Its shipped
+/// 96 kN/side brakes cannot arrest the 279.6 kN DERIVED grade demand by themselves, while F1-F3
+/// are capable launch gears. The Direct preselector must rescue the rollback through a paid shift,
+/// expose HILL HOLD throughout the latched rescue, arrest the hull, and resume uphill travel.
+#[test]
+fn real_tiger_f8_30_deg_rollback_rescues_to_capable_gear() {
+    use crate::track::transmission::{SchedulerState, TransmissionMode, TransmissionState};
+    let (mut app, tank) = booted_offline_sim(TransmissionMode::FixedRadii);
+    let course_rotation = Quat::from_rotation_x(30.0_f32.to_radians());
+    let uphill = course_rotation * Vec3::NEG_Z;
+    let initial_rollback_speed = 0.5;
+    {
+        let mut e = app.world_mut().entity_mut(tank);
+        e.get_mut::<avian3d::prelude::Position>().unwrap().0 = Vec3::new(14.0, 3.4, -40.0);
+        e.get_mut::<avian3d::prelude::Rotation>().unwrap().0 = course_rotation;
+        e.get_mut::<avian3d::prelude::LinearVelocity>().unwrap().0 = Vec3::ZERO;
+        e.get_mut::<avian3d::prelude::AngularVelocity>().unwrap().0 = Vec3::ZERO;
+    }
+    // Seat the real suspension/contact field on the face before injecting the rollback. Starting
+    // the belt in mid-air would exercise an unloaded free-rev, not the 30-degree rescue.
+    for _ in 0..64 {
+        drive_tick(&mut app, tank, 0.0, 0.0);
+    }
+    let grounded_sides = app
+        .world()
+        .get::<crate::track::sim::TrackContacts>(tank)
+        .expect("tank has contact telemetry")
+        .0
+        .iter()
+        .filter(|side| !side.is_empty())
+        .count();
+    assert_eq!(grounded_sides, 2, "rollback fixture must start grounded");
+    {
+        let mut e = app.world_mut().entity_mut(tank);
+        e.get_mut::<avian3d::prelude::LinearVelocity>().unwrap().0 =
+            -uphill * initial_rollback_speed;
+        *e.get_mut::<crate::track::sim::TankTransmission>().unwrap() =
+            crate::track::sim::TankTransmission(TransmissionState {
+                gear: 8,
+                ..Default::default()
+            });
+        let mut drive = e.get_mut::<crate::track::sim::TrackDrive>().unwrap();
+        drive.throttle = 1.0;
+        drive.steer = 0.0;
+        drive.sides[0].speed = -initial_rollback_speed;
+        drive.sides[1].speed = -initial_rollback_speed;
+    }
+
+    let mut gear_path = vec![8u8];
+    let mut state_trace = Vec::new();
+    let mut previous_state = None;
+    let mut reached_capable_tick = None;
+    let mut arrest_tick = None;
+    let mut arrest_position = None;
+    let mut progress_tick = None;
+    for tick in 0..(12 * 64) {
+        drive_tick(&mut app, tank, 1.0, 0.0);
+        let world = app.world();
+        let state = world
+            .get::<crate::track::sim::TankTransmission>(tank)
+            .expect("tank has transmission state")
+            .0;
+        let marker = (state.gear, state.scheduler, state.hill_hold);
+        if previous_state != Some(marker) {
+            state_trace.push((tick + 1, marker));
+            previous_state = Some(marker);
+        }
+        if gear_path.last() != Some(&state.gear) {
+            gear_path.push(state.gear);
+        }
+        if state.hill_hold {
+            assert_eq!(
+                state.scheduler,
+                SchedulerState::HillHold,
+                "tick {tick}: a capable rollback rescue must expose HILL HOLD (trace \
+                 {state_trace:?})"
+            );
+        }
+        assert_ne!(
+            state.scheduler,
+            SchedulerState::GradeLimit,
+            "tick {tick}: the real Tiger has a capable launch gear (trace {state_trace:?})"
+        );
+        if state.gear <= 3 {
+            reached_capable_tick.get_or_insert(tick + 1);
+        }
+
+        let position = world
+            .get::<avian3d::prelude::Position>(tank)
+            .expect("tank has position")
+            .0;
+        let course_speed = world
+            .get::<avian3d::prelude::LinearVelocity>(tank)
+            .expect("tank has velocity")
+            .0
+            .dot(uphill);
+        if course_speed >= 0.0 && arrest_tick.is_none() {
+            arrest_tick = Some(tick + 1);
+            arrest_position = Some(position);
+        }
+        if let Some(p_arrest) = arrest_position
+            && (position - p_arrest).dot(uphill) >= 0.5
+        {
+            progress_tick = Some(tick + 1);
+            break;
+        }
+    }
+
+    let reached_capable_tick =
+        reached_capable_tick.expect("F8 rollback rescue never reached a capable F1-F3 gear");
+    let arrest_tick = arrest_tick.expect("capable launch gear never arrested the rollback");
+    let progress_tick = progress_tick.expect("the rescued Tiger never made 0.5 m uphill progress");
+    println!(
+        "30-deg real Tiger F8 rollback rescue: capable tick {reached_capable_tick}, arrest tick \
+         {arrest_tick}, +0.5 m tick {progress_tick}, gears {gear_path:?}, states {state_trace:?}"
+    );
+    assert!(
+        reached_capable_tick <= 64,
+        "the Direct preselector must not remain silently stuck in F8 (trace {state_trace:?})"
+    );
+    assert!(
+        arrest_tick <= 4 * 64,
+        "the capable gear must arrest rollback within 4 s (trace {state_trace:?})"
+    );
+    assert!(
+        progress_tick <= 12 * 64,
+        "the rescued Tiger must make uphill progress within 12 s (trace {state_trace:?})"
+    );
+}
+
+/// Synthetic inverse regression: retain the Tiger geometry/contact model and its shipped
+/// 96 kN/side brakes on the course's 30-degree face, but deliberately replace the engine curve
+/// and clutch with a 100 N m DERIVED test fixture. No claim is made about a real vehicle: this
+/// synthetic powertrain makes every gear incapable, so a grounded rollback with W held must expose
+/// GRADE LIMIT rather than HILL HOLD and must continue downhill without a hidden holding force.
+#[test]
+fn synthetic_weak_powertrain_30_deg_rollback_reports_grade_limit() {
+    use crate::track::transmission::{SchedulerState, TransmissionMode, TransmissionState};
+    let (mut app, tank) = booted_offline_sim(TransmissionMode::FixedRadii);
+    let course_rotation = Quat::from_rotation_x(30.0_f32.to_radians());
+    let uphill = course_rotation * Vec3::NEG_Z;
+    let mass = app.world().resource::<TankBlueprint>().spec.mass;
+    let demand = mass * 9.81 * 30.0_f32.to_radians().sin();
+    let force_cap = 2.0
+        * app
+            .world()
+            .resource::<TankBlueprint>()
+            .spec
+            .track
+            .powertrain
+            .force;
+    {
+        let mut e = app.world_mut().entity_mut(tank);
+        e.get_mut::<avian3d::prelude::Position>().unwrap().0 = Vec3::new(14.0, 3.4, -40.0);
+        e.get_mut::<avian3d::prelude::Rotation>().unwrap().0 = course_rotation;
+        e.get_mut::<avian3d::prelude::LinearVelocity>().unwrap().0 = Vec3::ZERO;
+        e.get_mut::<avian3d::prelude::AngularVelocity>().unwrap().0 = Vec3::ZERO;
+    }
+    for _ in 0..64 {
+        drive_tick(&mut app, tank, 0.0, 0.0);
+    }
+    let (max_launch_force, brake_capacity) = {
+        let mut gear = app
+            .world_mut()
+            .resource_mut::<crate::track::sim::TrackGear>();
+        let tp = gear.trans_mut().expect("the Tiger declares a transmission");
+        for (_, torque) in &mut tp.engine.torque_nm {
+            *torque = 100.0;
+        }
+        tp.peak_torque_nm = 100.0;
+        tp.clutch_capacity = 100.0;
+        let max_launch_force = tp
+            .gears_fwd
+            .iter()
+            .map(|&ratio| (tp.torque_at(0.0) * ratio / tp.sprocket_radius).min(force_cap))
+            .fold(0.0f32, f32::max);
+        (max_launch_force, tp.brake_capacity_n)
+    };
+    assert!(
+        max_launch_force < demand,
+        "synthetic fixture must leave every gear incapable: max {max_launch_force:.0} N, demand \
+         {demand:.0} N"
+    );
+    assert!(
+        2.0 * brake_capacity < demand,
+        "synthetic fixture must be unarrestable on brakes alone: brakes {:.0} N, demand \
+         {demand:.0} N",
+        2.0 * brake_capacity
+    );
+
+    let initial_rollback_speed = 0.5;
+    let start_position = {
+        let mut e = app.world_mut().entity_mut(tank);
+        e.get_mut::<avian3d::prelude::LinearVelocity>().unwrap().0 =
+            -uphill * initial_rollback_speed;
+        *e.get_mut::<crate::track::sim::TankTransmission>().unwrap() =
+            crate::track::sim::TankTransmission(TransmissionState {
+                gear: 8,
+                ..Default::default()
+            });
+        let mut drive = e.get_mut::<crate::track::sim::TrackDrive>().unwrap();
+        drive.throttle = 1.0;
+        drive.steer = 0.0;
+        drive.sides[0].speed = -initial_rollback_speed;
+        drive.sides[1].speed = -initial_rollback_speed;
+        e.get::<avian3d::prelude::Position>().unwrap().0
+    };
+
+    let mut final_course_speed = -initial_rollback_speed;
+    for tick in 0..64 {
+        drive_tick(&mut app, tank, 1.0, 0.0);
+        let world = app.world();
+        let state = world
+            .get::<crate::track::sim::TankTransmission>(tank)
+            .expect("tank has transmission state")
+            .0;
+        assert!(
+            state.hill_hold,
+            "tick {tick}: GRADE LIMIT must keep the brake latch"
+        );
+        assert_eq!(
+            state.scheduler,
+            SchedulerState::GradeLimit,
+            "tick {tick}: no synthetic gear has non-negative reserve"
+        );
+        final_course_speed = world
+            .get::<avian3d::prelude::LinearVelocity>(tank)
+            .expect("tank has velocity")
+            .0
+            .dot(uphill);
+        assert!(
+            final_course_speed < 0.0,
+            "tick {tick}: deliberately insufficient brakes and power must not arrest the rollback"
+        );
+    }
+    let end_position = app
+        .world()
+        .get::<avian3d::prelude::Position>(tank)
+        .expect("tank has position")
+        .0;
+    let downhill_distance = -(end_position - start_position).dot(uphill);
+    println!(
+        "synthetic 30-deg weak-powertrain rollback: torque/clutch 100 N m, brakes {:.0} N/side, \
+         max launch {max_launch_force:.0} N, demand {demand:.0} N; GRADE LIMIT 64/64 ticks, \
+         final speed {final_course_speed:.3} m/s, downhill {downhill_distance:.3} m",
+        brake_capacity
+    );
+    assert!(
+        downhill_distance > 0.25,
+        "the incapable synthetic fixture must continue downhill (moved {downhill_distance:.3} m)"
+    );
+}
+
 /// The gearing-emergence check on the REAL vehicle: 30 s of full throttle on flat ground
 /// must land inside [10.0, 11.0] m/s — the authored ladder's F8 at the governed 2500 rpm
 /// is 10.48 m/s (matching the spec's max_speed 10.5), so both a broken ladder (too slow)
