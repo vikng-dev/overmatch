@@ -127,6 +127,12 @@ mod offline_feel_tests {
                 dwell_ticks: 7,
                 omega_e: 250.0,
                 clutch_out: true,
+                demand_n: 42_000.0,
+                demand_initialized: true,
+                grade_confirm_ticks: 9,
+                grade_target: 3,
+                scheduler: track::transmission::SchedulerState::GradeShift { from: 5, to: 3 },
+                hill_hold: true,
             }))
             .id();
 
@@ -510,9 +516,9 @@ fn cycle_transmission_feel(
 ///
 /// Line 1 the active mode; line 2 gear + rpm THROUGH THE LAW ([`track::transmission::readout`],
 /// a `*` marker through a shift's torque interruption and `P` on the parking latch); line 3 the
-/// hull ground speed (horizontal |velocity|, signed by hull-forward); line 4 the per-side belt
-/// speeds and their slip against the projected hull speed; line 5 the shaped drive command and
-/// the L600 steering detent.
+/// reserve scheduler; line 4 the hull ground speed (horizontal |velocity|, signed by
+/// hull-forward); line 5 the per-side belt speeds and their slip against the projected hull speed;
+/// line 6 the shaped drive command and the L600 steering detent.
 fn update_drive_hud(
     feel: Option<Res<track::sim::TransmissionFeelTest>>,
     gear: Option<Res<track::sim::TrackGear>>,
@@ -562,6 +568,24 @@ fn update_drive_hud(
         } else {
             "gear --  | rpm ----".to_string()
         };
+        let scheduler_line = if let Some(tp) = joint {
+            let r = track::transmission::readout(&trans.0, tp);
+            match r.scheduler {
+                track::transmission::SchedulerState::Normal => "sched NORMAL       ".to_string(),
+                track::transmission::SchedulerState::GradeShift { from, to } => {
+                    // `src/lib.rs` is an ASCII-only-font dev surface (tests/ui_ascii.rs), so the
+                    // requested visual arrow is rendered as `->`; U+2192 is absent from both
+                    // shipped Barlow weights and from Bevy's default font.
+                    format!("sched GRADE F{from}->F{to}")
+                }
+                track::transmission::SchedulerState::HillHold => "sched HILL HOLD    ".to_string(),
+                track::transmission::SchedulerState::GradeLimit => {
+                    "sched GRADE LIMIT  ".to_string()
+                }
+            }
+        } else {
+            "sched --           ".to_string()
+        };
 
         // Hull ground speed: horizontal |velocity| signed by the hull-forward projection; slip
         // measures each belt against that projected hull speed (an approximation — labelled slip).
@@ -581,6 +605,7 @@ fn update_drive_hud(
         };
 
         out.push_str(&format!("\n{gear_line}"));
+        out.push_str(&format!("\n{scheduler_line}"));
         out.push_str(&format!(
             "\nhull {ground:+5.2} m/s ({:+6.1} km/h)",
             ground * 3.6

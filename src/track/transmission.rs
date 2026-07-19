@@ -64,14 +64,33 @@
 //! equilibrium; pivot power spools with the crank; `readout` reports ω_e directly (the
 //! state IS the display).
 //!
+//! Reserve scheduler (stage C): on every decision tick the regenerative adapters project the
+//! two owned ground reactions onto the signed `m` axis and low-pass the positive load demand
+//! `D` with a fixed-tick EMA (DERIVED time scale: 8 ticks / 64 Hz = 0.125 s). The filter freezes
+//! through shift windows. For every gear `j`, full-throttle capability at current speed is
+//! `F_j = min(torque_at(rpm_j)·G_j/r_s, 2·engine_force)` and reserve is `R_j = F_j − D`.
+//! Upshifts retain every stage-A/B gate and add `R_next ≥ 0.10·D + 10 kN`; a negative current
+//! reserve held for 13 decision ticks (DERIVED 0.203125 s) commands the highest lower gear that
+//! clears the same margin, bounded by the signed-landing and over-rev gates. The scheduler names
+//! one target; vehicle data [`ShiftAddressing`] decides whether one window commits straight to it
+//! or a sequential box pays one window per adjacent step.
+//!
+//! Anti-rollback (stage C): held forward command near rest with negative effective reserve latches
+//! [`TransmissionState::hill_hold`]. The hold uses the existing full-envelope brake stop-force
+//! path—no extra force—and selects a capable launch gear through the same reserve rule. A shift
+//! cut has effective `F = 0`, so a sequential cascade can engage the hold even when its landing
+//! gear is statically capable. Release occurs only after coupling-transmitted force exceeds
+//! `D + margin`; if no gear has non-negative reserve, [`SchedulerState::GradeLimit`] stays exposed
+//! and the declared brakes remain applied while W is held.
+//!
 //! Pure math, no ECS (like [`forces`]): callers own the state. [`TransmissionState`] is the
-//! only path-dependent state (gear, shift countdown, steering detent, direction, crank
-//! speed ω_e) — carried as a plain LOCAL component / sandbox resource, NOT replicated, NOT
-//! hashed (this is REV 13; only the offline composition and the sandbox ever run the
-//! regenerative adapters). ω_e's wire registration rides the later netcode arc with the
-//! rest of the REV-14 list (element-netcode-design.md): when the regenerative box goes
-//! multiplayer, ω_e replicates/rolls back alongside gear + shift countdown — it is sim
-//! state a rollback replay must restore, not derivable from the belt (the clutch slips).
+//! only path-dependent state—gear, shift countdown, steering detent, direction, crank speed ω_e,
+//! filtered demand, reserve-confirm counter, held target, scheduler status, and hill-hold latch—
+//! carried as a plain LOCAL component / sandbox resource, NOT replicated, NOT hashed (REV 13;
+//! only the offline composition and sandbox run the regenerative adapters). **REV-14 rider:** all
+//! of those stage-C values, including the discrete counter/target/status/hold state, must join ω_e,
+//! gear, and shift countdown when the regenerative box goes multiplayer; replay cannot derive an
+//! EMA history, an in-flight sequential target, or a brake latch from the instantaneous belt.
 //!
 //! # The law/spec split (every constant in this module, classified)
 //!
@@ -86,11 +105,17 @@
 //! | [`DRAG_THROTTLE_RELEASE`] | SIM POLICY | driver-intent shaping: where "open throttle" stops meaning "motoring"; part of the uniform input contract, same for every tank |
 //! | [`DEAD`] | SIM POLICY | input deadzone on one shared axis mapping |
 //! | [`PARK_ENGAGE_SPEED`] | SIM POLICY | latch threshold for "at rest" — a determinism/stability guard on the shared intent layer |
+//! | [`HILL_HOLD_ENGAGE_SPEED`] | SIM POLICY | anti-rollback near-rest threshold, DERIVED as `5 × PARK_ENGAGE_SPEED` = 0.25 m/s; gives the existing brake/grip law enough stopping distance through a sequential cut without becoming a moving brake |
 //! | [`DIRECTION_SWAP_SPEED`] | SIM POLICY | the intent seam where a held opposite throttle becomes a gear-direction change; uniform game semantics |
 //! | [`NEUTRAL_THROTTLE`], [`NEUTRAL_M_SPEED`] | SIM POLICY | regime-entry thresholds for the L600 neutral turn (the neutral turn's SPEED SCALE — [`TransmissionParams::neutral_d_full`] — is spec-DERIVED); `NEUTRAL_M_SPEED` doubles as the hybrid's blend width into its power-limited pivot regime |
 //! | [`POSTSHIFT_MARGIN_RPM`] | SIM POLICY | fix-1a anti-hunting: an upshift must PREDICT landing this far above the down band at the end of its own torque-cut window (the cut bleeds belt speed; the static band gap alone was erased in low gears — the measured 1-2-1-2 climb). Upshifts are also intent-gated (`propulsive > 0`) and L600-detent-deferred so the predictor is only consulted inside its domain (review round). Stage A: the predicted landing SHAFT speed must be POSITIVE on the engaged ladder — a sign-flipped landing always refuses (under `|m|` a backward landing read as high forward rpm and the gate blessed catastrophic on-grade upshifts) |
 //! | [`REVERSAL_DWELL_TICKS`] | SIM POLICY | fix-1b anti-hunting: a committed shift blocks the OPPOSITE-direction shift for this many ticks AFTER its interruption window (the dwell counts only outside the frozen window — review round); same-direction climbs stay free |
 //! | [`OVERREV_MARGIN_RPM`] | SIM POLICY | fix-1c: a downshift must land at least this far under the engine's max curve rpm — the box never commands an over-rev |
+//! | [`RESERVE_MARGIN_FRACTION`] | SIM POLICY | common capability headroom: DERIVED policy value 0.10 of filtered demand keeps a target away from the zero-acceleration knife edge |
+//! | [`RESERVE_MARGIN_FLOOR_N`] | SIM POLICY | common low-load/jitter floor: DERIVED policy value 10 kN total, 1.8% of Tiger weight and about half its fractional margin at the DERIVED 191.2 kN 20-degree demand |
+//! | [`DEMAND_FILTER_TICKS`] | SIM POLICY | deterministic reaction low-pass: DERIVED 8 decision ticks = 0.125 s at 64 Hz; frozen through shift cuts |
+//! | [`GRADE_CONFIRM_TICKS`] | SIM POLICY | persistence before a reserve downshift: DERIVED 13 ticks = 0.203125 s at 64 Hz, rejecting shorter load spikes |
+//! | `gearbox.shift_addressing` / [`ShiftAddressing`] | VEHICLE DATA | the model accepts arbitrary targets; the spec declares whether this gearbox can address one directly or must step sequentially—an era/mechanism capability, not scheduler policy |
 //! | [`WIDE_ON`]/[`WIDE_OFF`]/[`TIGHT_ON`]/[`TIGHT_OFF`] | SIM POLICY | stick-to-detent input mapping with hysteresis; the DETENT RATIOS they select are spec |
 //! | [`TICK_HZ`] | SIM POLICY | the fixed simulation tick the shift countdown quantizes against |
 //! | [`K_IDLE_DROOP_RPM`] | SIM POLICY | idle-governor gain, expressed as the droop width: FULL recovery torque (`torque_at(idle)`) is reached ~50 rpm below idle. A governor stand-in, not an engine datum — any governed engine gets the same recovery shape; the TORQUE it recovers with is the vehicle's own curve |
@@ -100,7 +125,8 @@
 //!
 //! Moved OUT of this module to the spec (they were vehicle data wearing const clothing):
 //! shift time (`gearbox.shift_secs` — a Tiger preselector and a T-34 crash box differ),
-//! engine drag (`engine.drag_fraction` — an engine datum). REMOVED rather than classified:
+//! shift addressing (`gearbox.shift_addressing`), engine drag (`engine.drag_fraction` — an engine
+//! datum). REMOVED rather than classified:
 //! `STEER_SERVO_BAND` — the steering servo is now the semi-implicit exact law (like the
 //! brakes and λ), so no proportional band exists to tune; its droop was itself a
 //! vehicle-scaling bug (the Tiger's neutral target sat inside the band). Also REMOVED:
@@ -124,6 +150,35 @@ pub enum TransmissionMode {
     Hybrid,
     /// `Regenerative { fixed_radii }` — the L600 geared-steering adapter (design menu B).
     FixedRadii,
+}
+
+/// Gear-selection capability declared by the vehicle spec. The scheduler may name any target;
+/// this datum decides whether one interruption reaches it directly or pays one window per
+/// adjacent step.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Deserialize)]
+pub enum ShiftAddressing {
+    /// Preselector/automatic capability: one shift event commits straight to the legal target.
+    Direct,
+    /// Conservative crash-box capability: each event moves one adjacent gear and the held target
+    /// is approached over repeated interruption windows.
+    #[default]
+    Sequential,
+}
+
+/// Observable state of the reserve scheduler. Kept compact and copyable because the same value is
+/// local sim memory and the readout/HUD contract; it is not a wire type under REV 13.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum SchedulerState {
+    #[default]
+    Normal,
+    /// A reserve-commanded shift, retaining the original and final gear across a sequential
+    /// cascade so the readout describes the capability target rather than each adjacent step.
+    GradeShift {
+        from: u8,
+        to: u8,
+    },
+    HillHold,
+    GradeLimit,
 }
 
 impl TransmissionMode {
@@ -166,6 +221,26 @@ const REVERSAL_DWELL_TICKS: u8 = 32;
 /// gear would exceed the engine's max authored curve rpm minus this margin — the box never
 /// commands an over-rev. SIM POLICY.
 const OVERREV_MARGIN_RPM: f32 = 100.0;
+
+/// Stage-C reserve margin as a fraction of the filtered mean-axis demand. Ten percent keeps a
+/// target gear away from the zero-acceleration knife edge without encoding a vehicle-specific
+/// force. SIM POLICY.
+const RESERVE_MARGIN_FRACTION: f32 = 0.10;
+
+/// Stage-C absolute reserve floor (N, both tracks together). 10 kN is large enough to dominate
+/// contact-reaction float jitter yet only 1.8% of the Tiger's weight and about half the fractional
+/// margin on the DERIVED 191 kN 20-degree demand. SIM POLICY.
+const RESERVE_MARGIN_FLOOR_N: f32 = 10_000.0;
+
+/// Stage-C load filter time scale in fixed decision ticks. An EMA divisor of eight is a
+/// deterministic ~0.125 s DERIVED low-pass at the 64 Hz SIM POLICY; the state freezes while the box is declutched so
+/// torque-cut reaction transients cannot rewrite grade demand. SIM POLICY.
+const DEMAND_FILTER_TICKS: f32 = 8.0;
+
+/// Consecutive reserve-deficit decision ticks required before a grade downshift (13 ticks DERIVED
+/// = 0.203125 s DERIVED at the 64 Hz SIM POLICY). Shorter reaction spikes remain load telemetry, not shift commands.
+/// SIM POLICY.
+const GRADE_CONFIRM_TICKS: u8 = 13;
 
 /// Fuel-governor cut width (rpm): torque ramps linearly to zero over this band past the
 /// governed rpm, so the top-speed equilibrium is a smooth root instead of a hard clip.
@@ -219,6 +294,11 @@ const DEAD: f32 = 0.05;
 /// past `slip_saturation`, releasing the brake exactly when an over-capacity slope slid the
 /// tank (codex-2).
 const PARK_ENGAGE_SPEED: f32 = 0.05;
+
+/// Hill-hold near-rest threshold (m/s), derived from the existing parking-latch scale. Five times the
+/// park threshold (0.25 m/s DERIVED = 0.90 km/h DERIVED) catches the sequential cascade before a perceptible
+/// rollback while remaining firmly in the stop-force law's near-rest regime. SIM POLICY.
+const HILL_HOLD_ENGAGE_SPEED: f32 = PARK_ENGAGE_SPEED * 5.0;
 
 /// |m| below which a commanded direction reversal actually swaps the F/R ladder (above it the
 /// opposing gear force acts as driveline braking first — you cannot slam reverse at speed).
@@ -307,6 +387,8 @@ pub struct TransmissionParams {
     /// `shift_secs` (a Tiger preselector and a crash box shift very differently: vehicle
     /// data, not module policy).
     pub shift_ticks: u8,
+    /// Whether a scheduler target is reached directly or one adjacent step per shift event.
+    pub shift_addressing: ShiftAddressing,
     /// Derived at construction: the torque curve's peak (the low-speed rev target).
     pub peak_torque_rpm: f32,
     pub peak_torque_nm: f32,
@@ -342,6 +424,8 @@ pub struct TransmissionAuthoring<'a> {
     pub clutch_capacity_nm: f32,
     /// Gear-shift torque-interruption time (s) — see [`TransmissionParams::shift_ticks`].
     pub shift_secs: f32,
+    /// See [`TransmissionParams::shift_addressing`].
+    pub shift_addressing: ShiftAddressing,
     pub sprocket_radius_m: f32,
     /// Track half-tread `b` (m) — the spec's `plane_x`.
     pub half_tread_m: f32,
@@ -397,6 +481,7 @@ impl TransmissionParams {
             engine_inertia: a.engine_inertia_kgm2,
             clutch_capacity: a.clutch_capacity_nm,
             shift_ticks: (a.shift_secs * TICK_HZ).round().clamp(0.0, 255.0) as u8,
+            shift_addressing: a.shift_addressing,
             peak_torque_rpm,
             peak_torque_nm,
         }
@@ -440,9 +525,9 @@ impl TransmissionParams {
 }
 
 /// The joint transmission's path-dependent state — the ONLY memory (design §2's REV-14 list):
-/// selected gear, shift countdown, steering detent, direction, parking latch, crank speed.
-/// Constructed at spawn from tank data; a plain local component / sandbox resource under
-/// REV 13 (ω_e's wire registration rides the later netcode arc — module doc).
+/// gear/window/detent/direction/brake/coupling state plus stage-C demand, confirmation, target,
+/// scheduler status, and hill hold. Constructed at spawn from tank data; a plain local component /
+/// sandbox resource under REV 13 (the complete REV-14 rider is in the module doc).
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct TransmissionState {
     /// 1-based gear in the active ladder.
@@ -478,6 +563,28 @@ pub struct TransmissionState {
     /// [`CLUTCH_IN_M_SPEED`] or on any propulsive command. Local scheduler-adjacent memory
     /// (REV 13, like `last_shift_dir`): not replicated, not hashed.
     pub clutch_out: bool,
+    /// Filtered positive load demand on the signed mean shaft axis (N, both tracks). Updated only
+    /// on decision ticks and frozen through shift windows so the torque cut cannot pollute it.
+    /// Local scheduler memory (REV 13: not replicated, not hashed).
+    pub demand_n: f32,
+    /// Spawn seed for `demand_n`: the first owned reaction sample initializes the EMA directly
+    /// instead of ramping from a fictitious zero-load history. Local discrete memory; REV-14
+    /// rider in the module doc.
+    pub demand_initialized: bool,
+    /// Consecutive decision ticks for which the current gear has negative reserve. Saturating u8;
+    /// reset as soon as capability recovers. Local scheduler memory (REV 13), with the REV-14
+    /// rider documented at module level.
+    pub grade_confirm_ticks: u8,
+    /// Held reserve target (1-based; zero means none). Direct addressing retains it through its
+    /// one interruption window; Sequential retains it across every adjacent window.
+    pub grade_target: u8,
+    /// Scheduler/readout state. Local discrete sim memory under REV 13; REV-14 rider in the
+    /// module doc.
+    pub scheduler: SchedulerState,
+    /// Anti-rollback latch. While true, the existing service-brake stop-force law runs at its full
+    /// declared envelope until the selected launch gear transmits demand plus reserve margin.
+    /// Local discrete sim memory (REV 13), with a REV-14 rider in the module doc.
+    pub hill_hold: bool,
 }
 
 impl Default for TransmissionState {
@@ -492,6 +599,12 @@ impl Default for TransmissionState {
             dwell_ticks: 0,
             omega_e: 0.0,
             clutch_out: false,
+            demand_n: 0.0,
+            demand_initialized: false,
+            grade_confirm_ticks: 0,
+            grade_target: 0,
+            scheduler: SchedulerState::Normal,
+            hill_hold: false,
         }
     }
 }
@@ -508,6 +621,8 @@ pub struct DriveReadout {
     pub rpm: f32,
     /// The engaged gear as a display label: `F1..Fn` forward, `R1..Rn` reverse.
     pub gear_label: String,
+    /// Reserve-scheduler state, copied from the local transmission truth for HUD rendering.
+    pub scheduler: SchedulerState,
 }
 
 /// Read the drivetrain operating point THROUGH THE LAW: the engaged gear from
@@ -532,6 +647,7 @@ pub fn readout(st: &TransmissionState, tp: &TransmissionParams) -> DriveReadout 
     DriveReadout {
         rpm,
         gear_label: format!("{}{gear}", if st.reverse { 'R' } else { 'F' }),
+        scheduler: st.scheduler,
     }
 }
 
@@ -655,6 +771,81 @@ fn predict_shift_landing_m(
     pm
 }
 
+/// Full-throttle mean-axis force available in one gear at the current signed shaft speed. The
+/// engine reads only non-negative rpm (stage A); the result is capped by the existing two-track
+/// low-speed/traction envelope (`engine_force` is authored per track).
+fn available_force_in_gear(
+    tp: &TransmissionParams,
+    fp: &ForceParams,
+    shaft: f32,
+    gear: f32,
+) -> f32 {
+    let rpm = shaft.max(0.0) * gear / tp.sprocket_radius / RPM_TO_RAD;
+    (tp.torque_at(rpm) * gear / tp.sprocket_radius).min(2.0 * fp.engine_force)
+}
+
+/// Positive capability headroom required of a selected gear (N, both tracks together).
+fn reserve_margin(demand: f32) -> f32 {
+    demand.max(0.0) * RESERVE_MARGIN_FRACTION + RESERVE_MARGIN_FLOOR_N
+}
+
+/// Choose the highest gear below `current` that clears reserve margin, then apply the downshift
+/// over-rev bound. If the ideal gear itself over-revs, return the closest legal gear on the path
+/// toward it (which may not yet clear margin); later decisions can continue after speed falls.
+fn select_grade_target(
+    tp: &TransmissionParams,
+    fp: &ForceParams,
+    ladder: &[f32],
+    shaft: f32,
+    current: u8,
+    demand: f32,
+) -> Option<u8> {
+    if current <= 1 || shaft <= -PARK_ENGAGE_SPEED {
+        return None;
+    }
+    let margin = reserve_margin(demand);
+    let ideal = (1..current).rev().find(|&gear| {
+        available_force_in_gear(tp, fp, shaft, ladder[(gear - 1) as usize]) - demand >= margin
+    })?;
+    let lowest_legal = (1..current).find(|&gear| {
+        let rpm = shaft * ladder[(gear - 1) as usize] / tp.sprocket_radius / RPM_TO_RAD;
+        rpm <= tp.max_curve_rpm() - OVERREV_MARGIN_RPM
+    })?;
+    Some(ideal.max(lowest_legal))
+}
+
+/// Whether any lower gear has non-negative reserve at this operating point. This separates an
+/// honest grade limit from a merely margin-short launch choice.
+fn any_lower_gear_can_pull(
+    tp: &TransmissionParams,
+    fp: &ForceParams,
+    ladder: &[f32],
+    shaft: f32,
+    current: u8,
+    demand: f32,
+) -> bool {
+    (1..current)
+        .any(|gear| available_force_in_gear(tp, fp, shaft, ladder[(gear - 1) as usize]) >= demand)
+}
+
+/// Commit one grade-target event according to the vehicle's addressing capability.
+fn commit_grade_shift(st: &mut TransmissionState, tp: &TransmissionParams, target: u8) {
+    let from = match st.scheduler {
+        SchedulerState::GradeShift { from, .. } => from,
+        _ => st.gear,
+    };
+    st.grade_target = target;
+    st.scheduler = SchedulerState::GradeShift { from, to: target };
+    st.gear = match tp.shift_addressing {
+        ShiftAddressing::Direct => target,
+        ShiftAddressing::Sequential => st.gear.saturating_sub(1).max(target),
+    };
+    st.shift_ticks = tp.shift_ticks;
+    st.last_shift_dir = -1;
+    st.dwell_ticks = REVERSAL_DWELL_TICKS;
+    st.grade_confirm_ticks = 0;
+}
+
 /// THE COUPLING-LAW SLOT (stage B): the engaged main clutch between crank and geared shaft,
 /// solved semi-implicitly and capacity-clamped; returns the transmitted clutch torque τ_c.
 /// This is deliberately ONE seamed function — a torque-converter characteristic replaces
@@ -738,8 +929,11 @@ fn regenerative(
             // A ladder swap is not an up/down shift: the reversal dwell restarts clean.
             st.last_shift_dir = 0;
             st.dwell_ticks = 0;
+            st.grade_target = 0;
+            st.scheduler = SchedulerState::Normal;
         }
     }
+
     let ladder: &[f32] = if st.reverse {
         &tp.gears_rev
     } else {
@@ -771,6 +965,21 @@ fn regenerative(
         0.0
     };
 
+    // Stage C demand observer: the contact reactions are the load signal the sim already owns.
+    // Project their sum onto the engaged ladder's signed m-axis and keep only propulsive demand;
+    // downhill assistance is zero demand, not negative reserve. The first sample seeds directly,
+    // then a fixed 1/8 EMA filters contact chatter. The update is deliberately absent during a
+    // shift window: the declutched cut changes slip/reactions and is not a change in the grade.
+    if st.shift_ticks == 0 {
+        let sample = (dir * (inp.reactions[0] + inp.reactions[1])).max(0.0);
+        if st.demand_initialized {
+            st.demand_n += (sample - st.demand_n) / DEMAND_FILTER_TICKS;
+        } else {
+            st.demand_n = sample;
+            st.demand_initialized = true;
+        }
+    }
+
     // --- Auto-shift on engine-rpm bands, hysteresis from the band gap; a shift in flight
     // blocks further decisions until its interruption window has elapsed. Three SIM-POLICY
     // gates (the fix-1 anti-hunting batch) kill the shift-cut oscillation the static bands
@@ -794,6 +1003,59 @@ fn regenerative(
     let shaft = dir * m;
     let shaft_rpm_of = |sh: f32, g: f32| sh * g / tp.sprocket_radius / RPM_TO_RAD;
     let shaft_rpm_geared = |g: f32| shaft_rpm_of(shaft, g);
+    let current_reserve =
+        available_force_in_gear(tp, fp, shaft, ladder[(st.gear - 1) as usize]) - st.demand_n;
+
+    // Stage C anti-rollback. Only held FORWARD propulsive intent can own the latch; release or
+    // reverse intent drops it immediately and lets the established direction-swap semantics run.
+    // Engagement is near rest on the existing PARK speed scale and only when the engaged gear
+    // cannot pull the filtered load. Launch selection uses the same reserve rule as the scheduler.
+    let forward_intent = !st.reverse && inp.throttle > DEAD;
+    if !forward_intent {
+        st.hill_hold = false;
+        if matches!(
+            st.scheduler,
+            SchedulerState::HillHold | SchedulerState::GradeLimit
+        ) {
+            st.scheduler = SchedulerState::Normal;
+            st.grade_target = 0;
+        }
+    } else if !st.hill_hold
+        && shaft.abs() < HILL_HOLD_ENGAGE_SPEED
+        // During a paid interruption the selected gear's *static* capability is not being
+        // transmitted: effective F = 0, so reserve is `-D`. This is how anti-rollback catches a
+        // sequential cascade that loses the climb inside an otherwise-capable landing gear.
+        && (current_reserve < 0.0 || (st.shift_ticks > 0 && st.demand_n > 0.0))
+    {
+        st.hill_hold = true;
+        if st.shift_ticks > 0 {
+            // Finish the already-paid event under the brakes. A retained sequential target resumes
+            // on the first decision tick after this window; starting another window here would
+            // erase part of the declared shift cost.
+            st.scheduler = SchedulerState::HillHold;
+        } else if let Some(target) =
+            select_grade_target(tp, fp, ladder, shaft, st.gear, st.demand_n)
+        {
+            commit_grade_shift(st, tp, target);
+            st.scheduler = SchedulerState::HillHold;
+        } else if any_lower_gear_can_pull(tp, fp, ladder, shaft, st.gear, st.demand_n) {
+            // A non-negative but margin-short gear cannot release the hold yet; select the highest
+            // such gear and let later demand/speed samples decide. This branch is deliberately
+            // conservative and distinct from a true grade limit.
+            if let Some(target) = (1..st.gear).rev().find(|&gear| {
+                available_force_in_gear(tp, fp, shaft, ladder[(gear - 1) as usize]) >= st.demand_n
+            }) {
+                commit_grade_shift(st, tp, target);
+            }
+            st.scheduler = SchedulerState::HillHold;
+        } else {
+            st.grade_target = 0;
+            st.scheduler = SchedulerState::GradeLimit;
+        }
+    }
+    let r_mean = (inp.reactions[0] + inp.reactions[1]) / 2.0;
+    let grade_landing_positive =
+        st.hill_hold || dir * predict_shift_landing_m(tp, fp, m, r_mean, dt) > 0.0;
     // Predictor-domain guard (review round): while the L600 detent is engaged the
     // constraint force λ loads the outputs in a way the predictor cannot model (it carries
     // no λ/steer state), so its landing prediction is invalid mid-geared-turn — DEFER
@@ -805,7 +1067,38 @@ fn regenerative(
         // SIGNED shaft rpm (stage A): while back-driven this is negative, so the up band
         // can never fire mid-backslide (negative never exceeds the band).
         let rpm = shaft_rpm_geared(ladder[(st.gear - 1) as usize]);
-        let dwell_blocks = |shift_dir: i8| st.dwell_ticks > 0 && st.last_shift_dir == -shift_dir;
+        let (dwell_ticks, last_shift_dir) = (st.dwell_ticks, st.last_shift_dir);
+        let dwell_blocks = |shift_dir: i8| dwell_ticks > 0 && last_shift_dir == -shift_dir;
+        let mut grade_step_committed = false;
+        if st.grade_target > 0 {
+            if st.gear > st.grade_target {
+                let next = st.gear - 1;
+                if shaft > -PARK_ENGAGE_SPEED
+                    && grade_landing_positive
+                    && shaft_rpm_geared(ladder[(next - 1) as usize])
+                        <= tp.max_curve_rpm() - OVERREV_MARGIN_RPM
+                {
+                    commit_grade_shift(st, tp, st.grade_target);
+                    if st.hill_hold {
+                        st.scheduler = SchedulerState::HillHold;
+                    }
+                    grade_step_committed = true;
+                }
+            } else {
+                st.grade_target = 0;
+                st.scheduler = SchedulerState::Normal;
+            }
+        }
+        if !grade_step_committed
+            && propulsive > 0.0
+            && st.gear > 1
+            && shaft > -PARK_ENGAGE_SPEED
+            && current_reserve < 0.0
+        {
+            st.grade_confirm_ticks = st.grade_confirm_ticks.saturating_add(1);
+        } else {
+            st.grade_confirm_ticks = 0;
+        }
         // Intent gate (review round): an upshift is only ever WANTED while actually
         // driving (`propulsive > 0`) — a braking or coasting driver never needs one — and
         // only there is the predictor inside its domain (it integrates drag but no brake
@@ -813,14 +1106,14 @@ fn regenerative(
         // 2500 rpm + full opposing throttle predicted 1652 on drag alone while the live
         // window with the brakes landed at 1262, below the down band → a false shift +
         // reversal cycle).
-        if rpm > tp.shift_up_rpm
+        if !grade_step_committed
+            && rpm > tp.shift_up_rpm
             && st.gear < top
             && propulsive > 0.0
             && !detent_turn
             && !dwell_blocks(1)
         {
             let g_up = ladder[st.gear as usize];
-            let r_mean = (inp.reactions[0] + inp.reactions[1]) / 2.0;
             // The predictor returns a SIGNED m; the gate reads its SIGNED shaft speed
             // (stage A): the landing must be POSITIVE on the engaged ladder AND clear the
             // down band + margin. A sign-flipped landing always refuses the upshift — under
@@ -831,17 +1124,33 @@ fn regenerative(
             // numerical residual — so the sign check is a belt-and-braces refusal.
             let landing = predict_shift_landing_m(tp, fp, m, r_mean, dt);
             let landing_shaft = dir * landing;
+            let next_reserve = available_force_in_gear(tp, fp, shaft, g_up) - st.demand_n;
             if landing_shaft > 0.0
                 && shaft_rpm_of(landing_shaft, g_up) >= tp.shift_down_rpm + POSTSHIFT_MARGIN_RPM
+                && next_reserve >= reserve_margin(st.demand_n)
             {
                 st.gear += 1;
                 st.shift_ticks = tp.shift_ticks;
                 st.last_shift_dir = 1;
                 st.dwell_ticks = REVERSAL_DWELL_TICKS;
+                st.grade_confirm_ticks = 0;
+                st.grade_target = 0;
+                st.scheduler = SchedulerState::Normal;
             }
-        } else if shaft > -PARK_ENGAGE_SPEED
+        } else if !grade_step_committed
+            && st.grade_confirm_ticks >= GRADE_CONFIRM_TICKS
+            && grade_landing_positive
+            && !dwell_blocks(-1)
+            && let Some(target) = select_grade_target(tp, fp, ladder, shaft, st.gear, st.demand_n)
+        {
+            commit_grade_shift(st, tp, target);
+        } else if !grade_step_committed
+            && shaft > -PARK_ENGAGE_SPEED
             && rpm < tp.shift_down_rpm
             && st.gear > 1
+            // A persistent capability deficit is owned by the confirmed reserve branch above;
+            // the established band path remains unchanged for ordinary capable slowdowns.
+            && current_reserve >= 0.0
             && !dwell_blocks(-1)
         {
             // Backslide hold (stage A, thresholded in the review round): while GENUINELY
@@ -861,7 +1170,13 @@ fn regenerative(
                 st.shift_ticks = tp.shift_ticks;
                 st.last_shift_dir = -1;
                 st.dwell_ticks = REVERSAL_DWELL_TICKS;
+                st.grade_confirm_ticks = 0;
+                st.grade_target = 0;
+                st.scheduler = SchedulerState::Normal;
             }
+        }
+        if st.hill_hold && st.scheduler != SchedulerState::GradeLimit {
+            st.scheduler = SchedulerState::HillHold;
         }
     }
     // The dwell counts only OUTSIDE the interruption window (review round): the frozen
@@ -1170,6 +1485,16 @@ fn regenerative(
     f_c *= power_scale;
     f_s *= power_scale;
 
+    // Release is capability-based, not timer-based: only force actually transmitted through the
+    // coupling (after the power gate) may hand the slope from the modeled brakes back to the
+    // drivetrain. The hold remains through every declutched window because `f_c = 0` there.
+    let hill_brake_active = st.hill_hold;
+    if st.hill_hold && dir * f_c > st.demand_n + reserve_margin(st.demand_n) {
+        st.hill_hold = false;
+        st.scheduler = SchedulerState::Normal;
+        st.grade_target = 0;
+    }
+
     // --- Integrate the crank: J·ω̇_e = τ_free − τ_c (the transmitted torque scaled by the
     // power gate exactly as the belt-side force was — one bookkeeping for both ends of the
     // clutch; a bound power gate leaves MORE speed on the crank, never less, so the stall
@@ -1206,7 +1531,9 @@ fn regenerative(
         } else {
             0.0
         };
-        let envelope = h.max(service);
+        let envelope = h
+            .max(service)
+            .max(if hill_brake_active { 1.0 } else { 0.0 });
         if envelope > 0.0 {
             let cap = envelope * tp.brake_capacity_n;
             // The capacity-limited STOP force `B = R − Q − vI/dt = −I·v_unbraked_next/dt`
@@ -1330,8 +1657,49 @@ mod tests {
             engine_inertia_kgm2: 4.0,
             clutch_capacity_nm: 2860.0,
             shift_secs: 0.31,
+            shift_addressing: ShiftAddressing::Sequential,
             sprocket_radius_m: 0.34,
             half_tread_m: 1.25,
+        })
+    }
+
+    /// The shipped Tiger's declared drivetrain, kept local to arithmetic tests so they exercise
+    /// the same authored curve and speed anchors without reaching through the ECS/spec adapter.
+    fn tiger_tp() -> TransmissionParams {
+        TransmissionParams::from_authoring(&TransmissionAuthoring {
+            idle_rpm: 600.0,
+            governed_rpm: 2500.0,
+            rated_rpm: 3000.0,
+            torque_nm: &[
+                (800.0, 1300.0),
+                (2100.0, 1850.0),
+                (2500.0, 1686.0),
+                (3000.0, 1639.0),
+            ],
+            forward_speeds_kmh: &[2.8, 4.3, 6.2, 9.2, 14.1, 20.9, 30.5, 45.4],
+            reverse_speeds_kmh: &[2.8, 4.3, 6.2, 9.2],
+            shift_up_rpm: 2300.0,
+            shift_down_rpm: 1400.0,
+            steer_radii_m: &[
+                (3.44, 10.2),
+                (5.28, 15.6),
+                (7.62, 22.5),
+                (11.30, 33.4),
+                (17.32, 51.2),
+                (25.68, 76.0),
+                (37.47, 110.8),
+                (55.78, 165.0),
+            ],
+            steer_capacity_n: 250_000.0,
+            recirculation: 0.9,
+            brake_capacity_n: 96_000.0,
+            drag_fraction: 0.25,
+            engine_inertia_kgm2: 4.0,
+            clutch_capacity_nm: 2400.0,
+            shift_secs: 0.31,
+            shift_addressing: ShiftAddressing::Direct,
+            sprocket_radius_m: 19.0 * 0.130 / std::f32::consts::TAU,
+            half_tread_m: 1.4904,
         })
     }
 
@@ -1352,6 +1720,337 @@ mod tests {
             reactions,
             dt: 1.0 / 64.0,
         }
+    }
+
+    /// Stage C reserve arithmetic at the slope investigation's reconstructed operating point.
+    /// At the belt speed that puts Tiger F4 at 980 rpm DERIVED, its authored curve gives about
+    /// 169 kN DERIVED total sprocket force (the investigation's 165 kN DERIVED rounding), below the DERIVED 20°
+    /// grade demand `57_000 * 9.81 * sin(20°) = 191.2 kN`. F3 at the same speed has enough
+    /// reserve to clear the DERIVED 10% + absolute margin.
+    #[test]
+    fn reserve_uses_authored_curve_and_traction_cap() {
+        let tp = tiger_tp();
+        let mut fp = lab_fp();
+        fp.engine_force = 250_000.0;
+        let f4 = tp.gears_fwd[3];
+        let shaft = 980.0 * RPM_TO_RAD * tp.sprocket_radius / f4;
+        let demand = 57_000.0 * 9.81 * 20.0_f32.to_radians().sin();
+
+        let force_f4 = available_force_in_gear(&tp, &fp, shaft, f4);
+        let force_f3 = available_force_in_gear(&tp, &fp, shaft, tp.gears_fwd[2]);
+        let margin = reserve_margin(demand);
+
+        assert!(
+            (165_000.0..=172_000.0).contains(&force_f4),
+            "F4 @ 980 rpm must reconstruct the investigation's ~165 kN force (got {force_f4:.0})"
+        );
+        assert!(
+            force_f4 - demand < 0.0,
+            "F4 must be in reserve deficit on 20° ({force_f4:.0} - {demand:.0})"
+        );
+        assert!(
+            force_f3 - demand >= margin,
+            "F3 must clear the reserve margin ({force_f3:.0} - {demand:.0} >= {margin:.0})"
+        );
+    }
+
+    /// Stage C composes reserve with (rather than replacing) the established upshift gates.
+    /// With zero window and isolated bands, the slope investigation's DERIVED operating point
+    /// puts F4 at 980 rpm and F3 just above the test's up band. It therefore shifts on flat
+    /// ground. Under the DERIVED 191.2 kN 20-degree load, F4's reserve is below the DERIVED
+    /// 10% + 10 kN policy margin, so the otherwise-identical upshift is vetoed.
+    #[test]
+    fn grade_reserve_veto_blocks_f3_to_f4_on_20_degrees() {
+        let mut tp = tiger_tp();
+        tp.shift_ticks = 0;
+        tp.shift_up_rpm = 980.0 * tp.gears_fwd[2] / tp.gears_fwd[3] - 1.0;
+        tp.shift_down_rpm = 800.0;
+        let mut fp = lab_fp();
+        fp.engine_force = 250_000.0;
+        fp.inertia = 16_000.0;
+        let shaft = 980.0 * RPM_TO_RAD * tp.sprocket_radius / tp.gears_fwd[3];
+
+        let mut flat = TransmissionState {
+            gear: 3,
+            ..Default::default()
+        };
+        step(
+            TransmissionMode::FixedRadii,
+            &fp,
+            Some(&tp),
+            &mut flat,
+            &input(1.0, 0.0, [shaft, shaft], [0.0, 0.0]),
+        );
+        assert_eq!(
+            flat.gear, 4,
+            "the accepted flat-ground upshift must stay intact"
+        );
+
+        let demand = 57_000.0 * 9.81 * 20.0_f32.to_radians().sin();
+        let mut grade = TransmissionState {
+            gear: 3,
+            ..Default::default()
+        };
+        step(
+            TransmissionMode::FixedRadii,
+            &fp,
+            Some(&tp),
+            &mut grade,
+            &input(1.0, 0.0, [shaft, shaft], [demand / 2.0; 2]),
+        );
+        assert_eq!(
+            grade.gear, 3,
+            "the 20-degree reserve deficit must veto F3 -> F4"
+        );
+    }
+
+    /// A reserve deficit must persist for the full 13 DERIVED decision ticks. Warm the DERIVED
+    /// eight-tick EMA on flat ground, inject a 12-tick DERIVED 20-degree demand spike at an F5 operating point where F5 is
+    /// deficient but F4 is capable, then remove it. Filtering plus confirmation must reject the
+    /// transient without commanding any shift.
+    #[test]
+    fn transient_reserve_deficit_shorter_than_confirmation_does_not_downshift() {
+        let mut tp = tiger_tp();
+        tp.shift_ticks = 0;
+        let mut fp = lab_fp();
+        fp.engine_force = 250_000.0;
+        fp.inertia = 16_000.0;
+        let shaft = 1500.0 * RPM_TO_RAD * tp.sprocket_radius / tp.gears_fwd[4];
+        let demand = 57_000.0 * 9.81 * 20.0_f32.to_radians().sin();
+        let mut st = TransmissionState {
+            gear: 5,
+            ..Default::default()
+        };
+
+        for _ in 0..32 {
+            step(
+                TransmissionMode::FixedRadii,
+                &fp,
+                Some(&tp),
+                &mut st,
+                &input(1.0, 0.0, [shaft; 2], [0.0; 2]),
+            );
+        }
+        for _ in 0..(GRADE_CONFIRM_TICKS - 1) {
+            step(
+                TransmissionMode::FixedRadii,
+                &fp,
+                Some(&tp),
+                &mut st,
+                &input(1.0, 0.0, [shaft; 2], [demand / 2.0; 2]),
+            );
+        }
+        for _ in 0..32 {
+            step(
+                TransmissionMode::FixedRadii,
+                &fp,
+                Some(&tp),
+                &mut st,
+                &input(1.0, 0.0, [shaft; 2], [0.0; 2]),
+            );
+        }
+
+        assert_eq!(
+            st.gear, 5,
+            "a sub-confirmation load spike must not downshift"
+        );
+        assert_eq!(
+            st.grade_confirm_ticks, 0,
+            "the cleared deficit resets confirmation"
+        );
+    }
+
+    /// The scheduler names one capability target; addressing changes only how it is executed.
+    /// This custom band setting isolates the reserve path at Tiger F6 = 600 rpm DERIVED test input under the
+    /// DERIVED 20-degree demand: F4 lacks margin, F3 clears it, and F2 would over-rev. Direct
+    /// commits F6 -> F3 in one event; Sequential pays F6 -> F5 first and holds F3 across the
+    /// remaining windows.
+    #[test]
+    fn direct_and_sequential_execute_the_same_grade_target_differently() {
+        let mut base = tiger_tp();
+        base.shift_down_rpm = 0.0;
+        base.shift_ticks = 2;
+        let mut fp = lab_fp();
+        fp.engine_force = 250_000.0;
+        fp.inertia = 16_000.0;
+        let shaft = 600.0 * RPM_TO_RAD * base.sprocket_radius / base.gears_fwd[5];
+        let demand = 57_000.0 * 9.81 * 20.0_f32.to_radians().sin();
+        let seeded = || TransmissionState {
+            gear: 6,
+            demand_n: demand,
+            demand_initialized: true,
+            grade_confirm_ticks: GRADE_CONFIRM_TICKS - 1,
+            ..Default::default()
+        };
+
+        let mut direct_tp = base.clone();
+        direct_tp.shift_addressing = ShiftAddressing::Direct;
+        let mut direct = seeded();
+        step(
+            TransmissionMode::FixedRadii,
+            &fp,
+            Some(&direct_tp),
+            &mut direct,
+            &input(1.0, 0.0, [shaft; 2], [demand / 2.0; 2]),
+        );
+        assert_eq!(
+            direct.gear, 3,
+            "Direct must commit straight to the legal target"
+        );
+        assert_eq!(
+            direct.scheduler,
+            SchedulerState::GradeShift { from: 6, to: 3 }
+        );
+
+        let mut sequential_tp = base;
+        sequential_tp.shift_addressing = ShiftAddressing::Sequential;
+        let mut sequential = seeded();
+        step(
+            TransmissionMode::FixedRadii,
+            &fp,
+            Some(&sequential_tp),
+            &mut sequential,
+            &input(1.0, 0.0, [shaft; 2], [demand / 2.0; 2]),
+        );
+        assert_eq!(
+            sequential.gear, 5,
+            "Sequential may move only one adjacent gear"
+        );
+        assert_eq!(
+            sequential.grade_target, 3,
+            "Sequential must retain the F3 target"
+        );
+        assert_eq!(
+            sequential.scheduler,
+            SchedulerState::GradeShift { from: 6, to: 3 }
+        );
+
+        for _ in 0..8 {
+            step(
+                TransmissionMode::FixedRadii,
+                &fp,
+                Some(&sequential_tp),
+                &mut sequential,
+                &input(1.0, 0.0, [shaft; 2], [demand / 2.0; 2]),
+            );
+        }
+        assert_eq!(
+            sequential.gear, 3,
+            "Sequential must eventually reach the held target"
+        );
+    }
+
+    /// Direct addressing never bypasses the signed landing gate. The same F6 -> F3 reserve target
+    /// as the addressing test is presented with the 20-tick DERIVED window; freezing the DERIVED
+    /// 20-degree reaction through that cut predicts `landing_m < 0`, so no grade shift may commit.
+    #[test]
+    fn direct_skip_refuses_a_predicted_backward_landing() {
+        let mut tp = tiger_tp();
+        tp.shift_down_rpm = 0.0;
+        tp.shift_ticks = 20;
+        tp.shift_addressing = ShiftAddressing::Direct;
+        let mut fp = lab_fp();
+        fp.engine_force = 250_000.0;
+        fp.inertia = 16_000.0;
+        let shaft = 600.0 * RPM_TO_RAD * tp.sprocket_radius / tp.gears_fwd[5];
+        let demand = 57_000.0 * 9.81 * 20.0_f32.to_radians().sin();
+        let mut st = TransmissionState {
+            gear: 6,
+            demand_n: demand,
+            demand_initialized: true,
+            grade_confirm_ticks: GRADE_CONFIRM_TICKS - 1,
+            ..Default::default()
+        };
+
+        step(
+            TransmissionMode::FixedRadii,
+            &fp,
+            Some(&tp),
+            &mut st,
+            &input(1.0, 0.0, [shaft; 2], [demand / 2.0; 2]),
+        );
+        assert_eq!(
+            st.gear, 6,
+            "a sign-flipped direct landing must hold the engaged gear"
+        );
+        assert_eq!(st.shift_ticks, 0, "no interruption window may start");
+        assert_eq!(st.scheduler, SchedulerState::Normal);
+    }
+
+    /// Hill hold is a stateful use of the existing brake law, not an extra force. At rest on the
+    /// DERIVED Tiger 20-degree load, F5 has negative reserve, so held W engages the flag and
+    /// Direct-addresses capable F3 while the full service-brake envelope keeps both belts stopped.
+    /// Once the shift ends, F3 transmits more than demand + margin; the hold releases and the same
+    /// tick begins a forward launch. Releasing W always clears the flag.
+    #[test]
+    fn hill_hold_engages_selects_launch_gear_and_releases_on_capability() {
+        let mut tp = tiger_tp();
+        tp.shift_ticks = 2;
+        tp.shift_addressing = ShiftAddressing::Direct;
+        let mut fp = lab_fp();
+        fp.engine_force = 250_000.0;
+        fp.inertia = 16_000.0;
+        let demand = 57_000.0 * 9.81 * 20.0_f32.to_radians().sin();
+        let mut st = TransmissionState {
+            gear: 5,
+            ..Default::default()
+        };
+
+        let first = step(
+            TransmissionMode::FixedRadii,
+            &fp,
+            Some(&tp),
+            &mut st,
+            &input(1.0, 0.0, [0.0; 2], [demand / 2.0; 2]),
+        );
+        assert!(
+            st.hill_hold,
+            "negative launch reserve must engage hill hold"
+        );
+        assert_eq!(
+            st.gear, 3,
+            "the hold must Direct-address the capable launch gear"
+        );
+        assert_eq!(st.scheduler, SchedulerState::HillHold);
+        assert_eq!(
+            first.next_speeds, [0.0; 2],
+            "the modeled brakes hold through the cut"
+        );
+
+        let mut released = None;
+        let mut speeds = first.next_speeds;
+        for tick in 1..8 {
+            let report = step(
+                TransmissionMode::FixedRadii,
+                &fp,
+                Some(&tp),
+                &mut st,
+                &input(1.0, 0.0, speeds, [demand / 2.0; 2]),
+            );
+            speeds = report.next_speeds;
+            if !st.hill_hold {
+                released = Some(tick);
+                break;
+            }
+        }
+        assert!(
+            released.is_some(),
+            "capable F3 must release the hold after its window"
+        );
+        assert!(
+            speeds[0] > 0.0 && speeds[1] > 0.0,
+            "release must begin a forward launch"
+        );
+        assert_eq!(st.scheduler, SchedulerState::Normal);
+
+        step(
+            TransmissionMode::FixedRadii,
+            &fp,
+            Some(&tp),
+            &mut st,
+            &input(0.0, 0.0, speeds, [demand / 2.0; 2]),
+        );
+        assert!(!st.hill_hold, "command release always disengages hill hold");
     }
 
     /// The Governor adapter IS the legacy tail: per side, bit-equal to `governor_belt`.
@@ -1633,6 +2332,7 @@ mod tests {
             engine_inertia_kgm2: 4.0,
             clutch_capacity_nm: 2860.0,
             shift_secs: 0.31,
+            shift_addressing: ShiftAddressing::Sequential,
             sprocket_radius_m: 0.34,
             half_tread_m: 1.25,
         });
@@ -1996,6 +2696,7 @@ mod tests {
             engine_inertia_kgm2: 4.0,
             clutch_capacity_nm: 2860.0,
             shift_secs: 0.31,
+            shift_addressing: ShiftAddressing::Sequential,
             sprocket_radius_m: 0.34,
             half_tread_m: 1.25,
         });
