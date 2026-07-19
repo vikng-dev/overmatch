@@ -347,6 +347,34 @@ mid-face on the 20° course ramp under held W the Tiger crests in **7.1 s, gear 
 while a shift commits. Flat-ground behavior is undisturbed (driving with the ladder,
 `dir·m ≡ |m|`): the anti-hunting climbs, top speed, decel, and pivot gates are unchanged.
 
+### Stage-A review round (same day) — three findings, dispositions
+
+1. **Hard `shaft >= 0` down-guard stranded the cruise gear at rest (real defect).**
+   Coasting to rest in a cruise gear (Hybrid, gear 3, zero command, 20 kN/side reaction),
+   the brake stop-force/integration order leaves a stable numerical residual of
+   ≈ −1.7e−9 m/s — the exact-zero guard read it as "back-driven" and blocked the
+   downshift chain forever (tank parks stranded in gear 3). The backslide hold must only
+   engage for a GENUINE backslide: the guard is now `shaft > −PARK_ENGAGE_SPEED`,
+   reusing the existing at-rest policy scale — residuals orders of magnitude below it
+   downshift normally, a real slide at −0.5 m/s+ still holds. The up band needs no
+   threshold (negative can't exceed it either way), and the landing gate's `> 0` needs
+   none either: its rpm bound already demands a landing ≥ down band + margin, solidly
+   positive. Regression: `coast_to_rest_completes_downshift_chain` (proven to bite —
+   fails under the reverted `>= 0` guard).
+2. **Spec validation accepted absurd torque data.** Any finite non-negative torque passed
+   (including `f32::MAX`); `reflected_drag`'s multiplication then overflows to ∞, and
+   `∞ × 0.0` (full drag release) is NaN inside the landing predictor. The gate fails
+   SAFE on NaN (`NaN > 0` is false — the upshift refuses), but the spec layer now
+   refuses the data outright: every torque point ≤ 100 kN·m (an order of magnitude above
+   any tank engine) and every curve rpm ≤ 20 000 (far past any piston redline), on top
+   of the existing finite/ascending checks (`spec.rs`).
+3. **Coverage: reverse-ladder mirror + reverse readout.** Reverse symmetry HOLDS by
+   construction (`dir` mirrors everything), now pinned:
+   `reverse_backslide_holds_gear_and_keeps_reverse_drive` (driving in R, back-driven
+   forward → shaft < 0: no shifts on a 3-gear R ladder, drive stays R-signed, governor
+   does not cut) and `readout_reverse_reads_signed_shaft` (R label + positive geared rpm
+   while reversing; idle while back-driven).
+
 ## Ranked recommendation
 
 1. **Tiger: fixed-radius, geared regenerative model behind the joint transmission seam.** Historically characteristic, fixes high-speed sluggishness, and derives stately pivot behavior from ratios and power.
