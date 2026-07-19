@@ -1149,6 +1149,129 @@ fn slope_park_holds_20_deg_tiger() {
     );
 }
 
+/// Stage A (signed shaft) grade gate: from REST mid-face on the course's 20° ramp, held
+/// full W on the real Tiger (L600). Two assertions the `|m|` shaft made impossible:
+///
+/// * the box must NEVER walk the gear ladder UPWARD while the hull is moving backward —
+///   pre-fix a backslide read as high FORWARD rpm, the governor cut drive to zero, and
+///   the scheduler laddered 1→6 while the tank slid backward at −2..−3 m/s off the ramp;
+/// * the tank must either CREST the ramp or hold position — it must never end up sliding
+///   backward off the ramp in a forward gear with W held.
+///
+/// MEASURED post-fix (recorded per the stage-A brief): from rest at z = −40 the Tiger
+/// launches in F1 with no backward roll beyond the settle jitter and CRESTS (hull past
+/// the high edge at z ≈ −44.7, ~4.9 m along the face) in 7.1 s — mean ~0.7 m/s climb
+/// including the ~0.5 s input slew — with gear trace [1] the whole way: F1 holds 20°,
+/// and no upshift is predicted to land, so none is attempted. Budget 30 s with a hold
+/// fallback so grade-scheduling changes in later stages don't spuriously fail the gate.
+#[test]
+fn ramp_climb_20_deg_never_upshifts_backward_tiger() {
+    use crate::track::transmission::TransmissionMode;
+    let (mut app, tank) = booted_offline_sim(TransmissionMode::FixedRadii);
+    {
+        let mut e = app.world_mut().entity_mut(tank);
+        e.get_mut::<avian3d::prelude::Position>().unwrap().0 = Vec3::new(0.0, 2.6, -40.0);
+        e.get_mut::<avian3d::prelude::Rotation>().unwrap().0 =
+            Quat::from_rotation_x(20.0_f32.to_radians());
+        e.get_mut::<avian3d::prelude::LinearVelocity>().unwrap().0 = Vec3::ZERO;
+        e.get_mut::<avian3d::prelude::AngularVelocity>().unwrap().0 = Vec3::ZERO;
+    }
+    // Settle onto the face under zero input (drop + ring-down + park latch) — the same
+    // seat the park gate uses; the climb starts from a genuine held rest.
+    for _ in 0..256 {
+        drive_tick(&mut app, tank, 0.0, 0.0);
+    }
+    let z0 = app
+        .world()
+        .get::<avian3d::prelude::Position>(tank)
+        .expect("tank has a position")
+        .0
+        .z;
+    let mut prev_gear = app
+        .world()
+        .get::<crate::track::sim::TankTransmission>(tank)
+        .expect("tank carries transmission state")
+        .0
+        .gear;
+    let mut trace = vec![prev_gear];
+    let mut crest_tick = None;
+    for tick in 0..(30 * 64) {
+        drive_tick(&mut app, tank, 1.0, 0.0);
+        let world = app.world();
+        let v = world
+            .get::<avian3d::prelude::LinearVelocity>(tank)
+            .expect("tank has velocity")
+            .0;
+        let rot = world
+            .get::<avian3d::prelude::Rotation>(tank)
+            .expect("tank has rotation")
+            .0;
+        // Signed hull speed along the hull's forward axis (−Z local; uphill here).
+        let v_fwd = v.dot(rot * Vec3::NEG_Z);
+        let st = world
+            .get::<crate::track::sim::TankTransmission>(tank)
+            .expect("tank carries transmission state")
+            .0;
+        assert!(!st.reverse, "held W must stay on the F ladder");
+        if st.gear > prev_gear {
+            assert!(
+                v_fwd >= -0.05,
+                "tick {tick}: upshift {prev_gear} -> {} committed while the hull was \
+                 moving BACKWARD ({v_fwd:.2} m/s) — the signed-shaft scheduler must make \
+                 this impossible",
+                st.gear
+            );
+        }
+        if trace.last() != Some(&st.gear) {
+            trace.push(st.gear);
+        }
+        prev_gear = st.gear;
+        let z = world
+            .get::<avian3d::prelude::Position>(tank)
+            .expect("tank has a position")
+            .0
+            .z;
+        assert!(
+            z < -36.5,
+            "tick {tick}: the tank slid backward off the ramp under held W (z {z:.1}, \
+             started {z0:.1}, gear trace {trace:?})"
+        );
+        if z <= -44.6 {
+            crest_tick = Some(tick + 1);
+            break;
+        }
+    }
+    match crest_tick {
+        Some(t) => println!(
+            "tiger 20-deg ramp climb from rest: CRESTED in {:.1} s, gear trace {trace:?}",
+            t as f32 / 64.0
+        ),
+        None => {
+            // Not cresting is acceptable ONLY as a hold: no net rollback, not sliding.
+            let world = app.world();
+            let z1 = world
+                .get::<avian3d::prelude::Position>(tank)
+                .expect("tank has a position")
+                .0
+                .z;
+            let v = world
+                .get::<avian3d::prelude::LinearVelocity>(tank)
+                .expect("tank has velocity")
+                .0;
+            println!(
+                "tiger 20-deg ramp climb from rest: HELD at z {z1:.2} (from {z0:.2}), \
+                 gear trace {trace:?}"
+            );
+            assert!(
+                z1 <= z0 + 0.5 && v.length() < 0.3,
+                "30 s of held W on the 20-deg face must crest or HOLD — not roll back \
+                 (z {z0:.2} -> {z1:.2}, |v| {:.2}, gear trace {trace:?})",
+                v.length()
+            );
+        }
+    }
+}
+
 /// The gearing-emergence check on the REAL vehicle: 30 s of full throttle on flat ground
 /// must land inside [10.0, 11.0] m/s — the authored ladder's F8 at the governed 2500 rpm
 /// is 10.48 m/s (matching the spec's max_speed 10.5), so both a broken ladder (too slow)
