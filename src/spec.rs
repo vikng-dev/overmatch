@@ -270,6 +270,8 @@ pub struct TransmissionSpec {
     pub steering: SteeringSpec,
     /// Per-side service/parking brake capacity at the sprocket (N).
     pub brake_force: f32,
+    /// Static breakaway multiplier for an at-rest parking or hill-hold latch.
+    pub brake_static_factor: f32,
 }
 
 impl TransmissionSpec {
@@ -294,6 +296,7 @@ impl TransmissionSpec {
             steer_capacity_n: self.steering.capacity,
             recirculation: self.steering.recirculation,
             brake_capacity_n: self.brake_force,
+            brake_static_factor: self.brake_static_factor,
             drag_fraction: self.engine.drag_fraction,
             engine_inertia_kgm2: self.engine.inertia_kgm2,
             clutch_capacity_nm: self.engine.clutch_capacity_nm,
@@ -708,6 +711,10 @@ mod tests {
         // kN/side) and 0.343 g total service decel (inside the 0.2–0.35 g WWII heavy-tank
         // band) → 96 kN/side.
         assert_eq!(tr.brake_force, 96_000.0);
+        // Static breakaway is distinct from dynamic dissipation: the 1.5 INFERRED multiplier makes
+        // 96 kN/side × 1.5 = 144 kN/side DERIVED, enough for the DERIVED 139.7925 kN/side demand
+        // at 30°.
+        assert_eq!(tr.brake_static_factor, 1.5);
         // Track: the material loop is authored exact (pitch × count = the immutable belt
         // length); the sprocket's tooth count locks link advance to tooth advance.
         assert_eq!(spec.track.pitch, 0.130);
@@ -981,7 +988,7 @@ mod tests {
         let fresh = || -> TankSpec {
             ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron")).unwrap()
         };
-        let cases: [(&str, fn(&mut TransmissionSpec)); 13] = [
+        let cases: [(&str, fn(&mut TransmissionSpec)); 16] = [
             // Stage-B crank block: absurd-but-finite values must be refused outright, in
             // BOTH directions (review round FIX 4 added the lower bounds — the coupling
             // divides by J and the capacity gates every transmitted torque).
@@ -1004,6 +1011,11 @@ mod tests {
                 tr.steering.capacity = f32::INFINITY;
             }),
             ("brake_force", |tr| tr.brake_force = f32::INFINITY),
+            ("brake_static_factor", |tr| {
+                tr.brake_static_factor = f32::NAN;
+            }),
+            ("brake_static_factor", |tr| tr.brake_static_factor = 0.99),
+            ("brake_static_factor", |tr| tr.brake_static_factor = 2.51),
             // Post-upshift rpm = 2300 × v_g/v_g+1 ≈ 1494 at the Tiger's widest step — a
             // 2200 down band re-downshifts immediately: hunting on a boundary speed.
             ("hysteresis", |tr| tr.gearbox.shift_down_rpm = 2200.0),
@@ -1029,6 +1041,16 @@ mod tests {
             let err = spec.validate().unwrap_err().to_string();
             assert!(err.contains(needle), "expected `{needle}` in: {err}");
         }
+        let missing_static_factor = include_str!("../assets/tiger_1/tiger_1.tank.ron")
+            .replace("                brake_static_factor: 1.5,\n", "");
+        let err = ron::de::from_str::<TankSpec>(&missing_static_factor)
+            .err()
+            .expect("brake_static_factor must be required")
+            .to_string();
+        assert!(
+            err.contains("brake_static_factor"),
+            "missing required brake_static_factor should be named: {err}"
+        );
         // FIX 4, belt-inertia floor: with a transmission declared the coupling divides by
         // 2 × powertrain.inertia — a tiny-but-positive value passes the generic finite/> 0
         // check and must be caught by the transmission-block floor.

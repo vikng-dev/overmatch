@@ -144,11 +144,17 @@ TankSpec(
                 // Replaces the circular grip-limit sizing (250 kN was sized against
                 // μ·W/2 — the very friction it was meant to be tested by — and implied
                 // 2.9 MW through two 1940s Argus discs at speed: energy-impossible).
-                // Consequence: 30° ramps now back-drive the latch honestly
-                // (W·sin 30°/2 ≈ 139.8 kN/side > capacity) — physical, where 250 kN
-                // held them for free. Supersede with a real Argus brake/output-torque
-                // rating when sourced.
+                // The dynamic datum still governs every moving slide and service-brake stop;
+                // static breakaway is authored separately below.
                 brake_force: 96_000.0,
+                // INFERRED provisional — static breakaway vs dynamic dissipation are different
+                // physical limits (static hold does no work; sourced material ratios span
+                // 1.05–2.0×). The Tiger's Argus discs are documented as self-energizing in both
+                // British Report No. 19 and D 656/30, but no numerical Argus rating
+                // survives; supersede when sourced. At 1.5×, the DERIVED static capacity is
+                // 2 × 96,000 × 1.5 = 288,000 N total against the DERIVED 30° demand
+                // 57,000 × 9.81 × sin(30°) = 279,585 N: an 8,415 N DERIVED margin.
+                brake_static_factor: 1.5,
             ),
         ),
         support: (

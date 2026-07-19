@@ -29,10 +29,11 @@
 //! (a parked tank on a slope inside capacity holds EXACTLY), in motion strictly opposing
 //! where the belt is headed (settles creep, saturates against a slide, never pushes through
 //! zero). `cap` comes from the parking LATCH (zero command near standstill sets it, any
-//! drive command releases it; latched = full `B_max` however fast a capacity breach
-//! back-drives the belt), the legacy hold-blend entry envelope while unlatched, or the
-//! service pedal (opposite-throttle driver intent). The `Governor` adapter keeps the old
-//! hold blend verbatim instead.
+//! drive command releases it), the hill-hold latch, the legacy hold-blend entry envelope
+//! while unlatched, or the service pedal (opposite-throttle driver intent). A latched belt
+//! strictly inside [`PARK_ENGAGE_SPEED`] gets the authored static breakaway multiplier; a
+//! moving belt, service braking, and every post-breach latched slide stay at dynamic
+//! `B_max`. The `Governor` adapter keeps the old hold blend verbatim instead.
 //!
 //! Signed shaft (stage A): the regenerative adapters measure the geared shaft RELATIVE TO
 //! THE ENGAGED LADDER — `shaft = dir·m` with `dir = −1` on the R ladder — so driving
@@ -321,7 +322,7 @@ const DEAD: f32 = 0.05;
 /// fast a capacity breach back-drives the belt — the engagement blend alone faded to zero
 /// past `slip_saturation`, releasing the brake exactly when an over-capacity slope slid the
 /// tank (codex-2).
-const PARK_ENGAGE_SPEED: f32 = 0.05;
+pub(crate) const PARK_ENGAGE_SPEED: f32 = 0.05;
 
 /// Hill-hold near-rest threshold (m/s), derived from the existing parking-latch scale. Five times the
 /// park threshold (0.25 m/s DERIVED = 0.90 km/h DERIVED) catches the sequential cascade before a perceptible
@@ -382,6 +383,10 @@ pub struct TransmissionParams {
     /// the hybrid reads `κ_tight` as its full-lock continuous curvature. Reverse gears index
     /// the same table (R1–R4 mirror F1–F4).
     pub steer_kappa: Vec<(f32, f32)>,
+    /// The authored per-forward-gear `(R_tight, R_wide)` table (m), retained verbatim for
+    /// presentation. The sim law consumes [`Self::steer_kappa`]; retaining the source table keeps
+    /// the HUD from re-deriving and rounding away the authored radii.
+    pub steer_radii_m: Vec<(f32, f32)>,
     /// Steering-member force capacity PER OUTPUT (N). The steering member drives the two
     /// outputs DIFFERENTIALLY — each output's steering share is bounded by its own
     /// gearing/grip-scale cap (this datum), so the belt-difference axis `F_s` carries up to
@@ -403,6 +408,9 @@ pub struct TransmissionParams {
     pub recirculation: f32,
     /// Per-side service/parking brake capacity at the sprocket (N).
     pub brake_capacity_n: f32,
+    /// Static breakaway capacity multiplier for a latched, at-rest belt. Dynamic dissipation,
+    /// service braking, and every moving slide use [`Self::brake_capacity_n`] unchanged.
+    pub brake_static_factor: f32,
     /// Zero-throttle engine drag (compression braking) as a fraction of peak torque,
     /// reflected through the CURRENT gear — a drag TORQUE (design §3), never the negative
     /// half of rated power. Diesel motoring/compression braking runs ~20–30% of rated
@@ -450,6 +458,7 @@ pub struct TransmissionAuthoring<'a> {
     pub steer_capacity_n: f32,
     pub recirculation: f32,
     pub brake_capacity_n: f32,
+    pub brake_static_factor: f32,
     /// See [`TransmissionParams::drag_fraction`].
     pub drag_fraction: f32,
     /// See [`TransmissionParams::engine_inertia`] (kg·m²).
@@ -561,6 +570,12 @@ impl TransmissionParams {
                     && a.brake_capacity_n > 0.0,
             ),
             (
+                "brake_static_factor",
+                a.brake_static_factor.is_finite()
+                    && (1.0..=2.5).contains(&a.brake_static_factor)
+                    && (a.brake_capacity_n * a.brake_static_factor).is_finite(),
+            ),
+            (
                 "engine.drag_fraction",
                 (0.0..=1.0).contains(&a.drag_fraction),
             ),
@@ -622,10 +637,12 @@ impl TransmissionParams {
             shift_up_rpm: a.shift_up_rpm,
             shift_down_rpm: a.shift_down_rpm,
             steer_kappa,
+            steer_radii_m: a.steer_radii_m.to_vec(),
             steer_capacity_n: a.steer_capacity_n,
             neutral_d_full,
             recirculation: a.recirculation,
             brake_capacity_n: a.brake_capacity_n,
+            brake_static_factor: a.brake_static_factor,
             drag_fraction: a.drag_fraction,
             engine_inertia: a.engine_inertia_kgm2,
             clutch_capacity: a.clutch_capacity_nm,
@@ -776,8 +793,6 @@ pub struct DriveReadout {
     pub rpm: f32,
     /// The engaged gear as a display label: `F1..Fn` forward, `R1..Rn` reverse.
     pub gear_label: String,
-    /// Reserve-scheduler state, copied from the local transmission truth for HUD rendering.
-    pub scheduler: SchedulerState,
 }
 
 /// Read the drivetrain operating point THROUGH THE LAW: the engaged gear from
@@ -802,7 +817,6 @@ pub fn readout(st: &TransmissionState, tp: &TransmissionParams) -> DriveReadout 
     DriveReadout {
         rpm,
         gear_label: format!("{}{gear}", if st.reverse { 'R' } else { 'F' }),
-        scheduler: st.scheduler,
     }
 }
 
@@ -1145,6 +1159,21 @@ fn clutch_coupling(
         tau_c = (tau_free - (omega_floor - omega_e) * j_e / dt).clamp(-capacity, capacity);
     }
     tau_c
+}
+
+/// Per-side brake capacity for the current regime. Static breakaway is a zero-work latch property,
+/// not a stronger moving brake: every missing predicate returns the authored dynamic capacity.
+pub(crate) fn brake_capacity_for_regime(
+    tp: &TransmissionParams,
+    latch_active: bool,
+    service: f32,
+    belt_speed: f32,
+) -> f32 {
+    if latch_active && service == 0.0 && belt_speed.abs() < PARK_ENGAGE_SPEED {
+        tp.brake_capacity_n * tp.brake_static_factor
+    } else {
+        tp.brake_capacity_n
+    }
 }
 
 fn regenerative(
@@ -1838,7 +1867,14 @@ fn regenerative(
             .max(service)
             .max(if hill_brake_active { 1.0 } else { 0.0 });
         if envelope > 0.0 {
-            let cap = envelope * tp.brake_capacity_n;
+            // Static breakaway capacity applies ONLY to a latched, at-rest belt without a
+            // service-brake command. The speed test is per belt and reads the PRE-TICK state:
+            // as soon as a breached belt leaves the at-rest band, this same tick uses the
+            // dynamic cap. The scheduler's rollback-rescue arithmetic deliberately continues to
+            // read `brake_capacity_n`, so no moving rescue path quietly gains static capacity.
+            let capacity =
+                brake_capacity_for_regime(tp, st.park || hill_brake_active, service, inp.speeds[i]);
+            let cap = envelope * capacity;
             // The capacity-limited STOP force `B = R − Q − vI/dt = −I·v_unbraked_next/dt`
             // (clamped): at rest it is exactly the static balance `R − Q` — the hold
             // gates' law, bit-identical — and in motion it opposes where the belt is
