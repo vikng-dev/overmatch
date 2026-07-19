@@ -11,6 +11,7 @@ use lightyear::prelude::*;
 
 use super::protocol::NetTank;
 use crate::tank::{PendingTankAssets, Rig, TankSimSource, attach_replicated_tank_body};
+use crate::track::sim::TankTransmission;
 
 pub(crate) fn plugin(app: &mut App) {
     app.add_observer(upgrade_predicted_to_dynamic);
@@ -30,6 +31,9 @@ pub(crate) fn attach_replicated_rig(
             With<NetTank>,
             With<Position>,
             With<Rotation>,
+            // The replicated current transmission snapshot must precede body attachment, so the
+            // first predicted fixed tick cannot run on a freshly reconstructed JIP value.
+            With<TankTransmission>,
             Without<RigidBody>,
         ),
     >,

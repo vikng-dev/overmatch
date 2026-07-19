@@ -18,7 +18,8 @@ use bevy::prelude::*;
 use serde_json::{Value, json};
 
 use crate::tank::{Controlled, Tank, TankSim};
-use crate::track::sim::{TrackContacts, TrackDrive, TrackGrip};
+use crate::track::sim::{TankTransmission, TrackContacts, TrackDrive, TrackGrip};
+use crate::track::transmission::SchedulerState;
 
 use bevy::ecs::system::SystemParam;
 use lightyear::core::confirmed_history::ConfirmedHistory;
@@ -114,6 +115,19 @@ impl Fnv64 {
         }
     }
 
+    fn write_u8(&mut self, x: u8) {
+        self.0 ^= u64::from(x);
+        self.0 = self.0.wrapping_mul(Self::PRIME);
+    }
+
+    fn write_i8(&mut self, x: i8) {
+        self.write_u8(x.to_le_bytes()[0]);
+    }
+
+    fn write_bool(&mut self, x: bool) {
+        self.write_u8(u8::from(x));
+    }
+
     fn write_u64(&mut self, x: u64) {
         for b in x.to_le_bytes() {
             self.0 ^= u64::from(b);
@@ -156,8 +170,9 @@ struct TankStateHash {
     rot: u64,
     lv: u64,
     av: u64,
-    /// The carried-state combination (fixed order: `drv, srv, rld, rec, blt`) — kept so existing
-    /// analysis keyed on `hsim` still gets its single "did any carried state differ?" boolean.
+    /// The carried-state combination (fixed order: `drv, srv, rld, rec, blt, trn`) — kept so
+    /// existing analysis keyed on `hsim` still gets its single "did any carried state differ?"
+    /// boolean.
     sim: u64,
     /// `TrackDrive` shaped throttle/steer.
     drv: u64,
@@ -169,14 +184,16 @@ struct TankStateHash {
     rec: u64,
     /// Per-side belt state: speed + phase.
     blt: u64,
+    /// Complete atomic `TankTransmission` state in authoritative inventory order.
+    trn: u64,
 }
 
 /// Hash a tank root's canonical sim state (see the module-level note on world-independence). Pure and
 /// ECS-free precisely so it is unit-testable: same inputs → same hash, one flipped velocity bit → a
 /// different hash, and — because no entity ever enters it — hash equality is independent of the two
 /// worlds' entity ids. Field order is fixed and load-bearing: `position, rotation, linvel, angvel`,
-/// then `TrackDrive` (shaped command + per-side belt state), then each `TankSim` `Vec` in slot
-/// order.
+/// then `TrackDrive` (shaped command + per-side belt state), `TrackGrip`, the complete
+/// `TankTransmission` inventory, then each `TankSim` `Vec` in slot order.
 fn hash_tank_state(
     position: Vec3,
     rotation: Quat,
@@ -184,6 +201,7 @@ fn hash_tank_state(
     angvel: Vec3,
     drive: &TrackDrive,
     grip: &TrackGrip,
+    transmission: &TankTransmission,
     sim: &TankSim,
 ) -> TankStateHash {
     let mut hp = Fnv64::new();
@@ -247,8 +265,41 @@ fn hash_tank_state(
     }
     let blt = hbl.finish();
 
+    // REV-14 transmission order is the authoritative 16-field inventory order. Discrete scalars
+    // enter as their exact one-byte values; f32s enter by raw bits. Scheduler tags are pinned here
+    // rather than relying on Rust discriminants: Normal=0, GradeShift=1 (+ from, to), HillHold=2,
+    // GradeLimit=3.
+    let st = &transmission.0;
+    let mut htr = Fnv64::new();
+    htr.write_u8(st.gear);
+    htr.write_u8(st.shift_ticks);
+    htr.write_u8(st.steer_step);
+    htr.write_bool(st.reverse);
+    htr.write_bool(st.park);
+    htr.write_i8(st.last_shift_dir);
+    htr.write_u8(st.dwell_ticks);
+    htr.write_f32(st.omega_e);
+    htr.write_bool(st.clutch_out);
+    htr.write_f32(st.demand_n);
+    htr.write_bool(st.demand_initialized);
+    htr.write_u8(st.grade_confirm_ticks);
+    htr.write_u8(st.grade_target);
+    match st.scheduler {
+        SchedulerState::Normal => htr.write_u8(0),
+        SchedulerState::GradeShift { from, to } => {
+            htr.write_u8(1);
+            htr.write_u8(from);
+            htr.write_u8(to);
+        }
+        SchedulerState::HillHold => htr.write_u8(2),
+        SchedulerState::GradeLimit => htr.write_u8(3),
+    }
+    htr.write_bool(st.hill_hold);
+    htr.write_u8(st.hold_reengage_ticks);
+    let trn = htr.finish();
+
     let mut hs = Fnv64::new();
-    for sub in [drv, srv, rld, rec, blt] {
+    for sub in [drv, srv, rld, rec, blt, trn] {
         hs.write_u64(sub);
     }
     let sim_hash = hs.finish();
@@ -271,6 +322,7 @@ fn hash_tank_state(
         rld,
         rec,
         blt,
+        trn,
     }
 }
 
@@ -292,6 +344,7 @@ pub(crate) struct CanonicalTankStateDigest {
     reload: u64,
     recoil: u64,
     belts: u64,
+    transmission: u64,
     rounds_fired: u64,
 }
 
@@ -303,9 +356,19 @@ pub(crate) fn canonical_tank_state_digest(
     angvel: Vec3,
     drive: &TrackDrive,
     grip: &TrackGrip,
+    transmission: &TankTransmission,
     sim: &TankSim,
 ) -> CanonicalTankStateDigest {
-    let hash = hash_tank_state(position, rotation, linvel, angvel, drive, grip, sim);
+    let hash = hash_tank_state(
+        position,
+        rotation,
+        linvel,
+        angvel,
+        drive,
+        grip,
+        transmission,
+        sim,
+    );
     let mut phase = Fnv64::new();
     for weapon in &sim.weapons {
         phase.write_u32(weapon.rounds_fired);
@@ -326,6 +389,7 @@ pub(crate) fn canonical_tank_state_digest(
         reload: hash.rld,
         recoil: hash.rec,
         belts: hash.blt,
+        transmission: hash.trn,
         rounds_fired,
     }
 }
@@ -567,6 +631,7 @@ fn record_tick(
             &AngularVelocity,
             &TrackDrive,
             &TrackGrip,
+            &TankTransmission,
             &TrackContacts,
             &TankSim,
             Has<Controlled>,
@@ -628,6 +693,7 @@ fn record_tick(
         angvel,
         drive,
         grip,
+        transmission,
         track_contacts,
         sim,
         controlled,
@@ -664,7 +730,16 @@ fn record_tick(
         // The world-independent authority-simulation hash. It feeds off tick-truth pose/velocity
         // and carried state already in hand, except the view-only tracer phase documented on
         // `TankStateHash`; costs a few dozen FNV rounds and runs only when tracing is armed.
-        let hash = hash_tank_state(position.0, rotation.0, linvel.0, angvel.0, drive, grip, sim);
+        let hash = hash_tank_state(
+            position.0,
+            rotation.0,
+            linvel.0,
+            angvel.0,
+            drive,
+            grip,
+            transmission,
+            sim,
+        );
 
         // The cross-world pairing key. Client / SP: the game `Controlled` marker (own predicted tank).
         // Server: `ControlledBy` (the authoritative copy of that same player tank). Kept per-role so a
@@ -714,6 +789,7 @@ fn record_tick(
             "hrld": hash.rld,
             "hrec": hash.rec,
             "hblt": hash.blt,
+            "htrn": hash.trn,
         });
         // Raw carried-state values (`SPIKE_TRACE_SIM_FIELDS`): the magnitudes behind the sub-hash
         // booleans. `thr`/`str` (TrackDrive) are already row fields above.
@@ -735,9 +811,37 @@ fn record_tick(
                     ])
                 })
                 .collect();
+            let (scheduler_tag, scheduler_from, scheduler_to) = match transmission.0.scheduler {
+                SchedulerState::Normal => (0, 0, 0),
+                SchedulerState::GradeShift { from, to } => (1, from, to),
+                SchedulerState::HillHold => (2, 0, 0),
+                SchedulerState::GradeLimit => (3, 0, 0),
+            };
+            // Same stable field order as `htrn`; the scheduler occupies tag/from/to slots so the
+            // verbose diagnostic shape stays fixed across variants.
+            let trn = json!([
+                transmission.0.gear,
+                transmission.0.shift_ticks,
+                transmission.0.steer_step,
+                transmission.0.reverse,
+                transmission.0.park,
+                transmission.0.last_shift_dir,
+                transmission.0.dwell_ticks,
+                num(transmission.0.omega_e),
+                transmission.0.clutch_out,
+                num(transmission.0.demand_n),
+                transmission.0.demand_initialized,
+                transmission.0.grade_confirm_ticks,
+                transmission.0.grade_target,
+                scheduler_tag,
+                scheduler_from,
+                scheduler_to,
+                transmission.0.hill_hold,
+                transmission.0.hold_reengage_ticks,
+            ]);
             row.as_object_mut()
                 .expect("json! built an object")
-                .insert("simf".into(), json!({"srv": srv, "wpn": wpn}));
+                .insert("simf".into(), json!({"srv": srv, "wpn": wpn, "trn": trn}));
         }
         // Mark rollback-replay ticks so analysis keeps the corrected value for this tick number.
         // Never set in the single-player composition (`is_replay` is always false there — no rollback).
@@ -876,7 +980,7 @@ mod tests {
 
     /// A representative, non-trivial sim state (every `Vec` populated, one side anchored and
     /// one released, non-default drive) so the canonicalization is exercised over every
-    /// production field path — including each of the five carried-state sub-hash streams.
+    /// production field path — including every carried-state sub-hash stream.
     fn sample() -> (Vec3, Quat, Vec3, Vec3, TrackDrive, TankSim) {
         // Callers bind a default TrackGrip separately (`let grip = ...`) — zero grip keeps
         // the legacy expectations intact; the grip-ULP test flips it explicitly.
@@ -916,14 +1020,36 @@ mod tests {
         (position, rotation, linvel, angvel, drive, sim)
     }
 
+    fn sample_transmission() -> TankTransmission {
+        TankTransmission(crate::track::transmission::TransmissionState {
+            gear: 5,
+            shift_ticks: 3,
+            steer_step: 2,
+            reverse: true,
+            park: true,
+            last_shift_dir: -1,
+            dwell_ticks: 7,
+            omega_e: 250.0,
+            clutch_out: true,
+            demand_n: 42_000.0,
+            demand_initialized: true,
+            grade_confirm_ticks: 9,
+            grade_target: 3,
+            scheduler: SchedulerState::GradeShift { from: 5, to: 3 },
+            hill_hold: true,
+            hold_reengage_ticks: 11,
+        })
+    }
+
     /// Same state → same combined hash AND same sub-hashes. This is the join's core assumption: two
     /// worlds that reached an identical logical state must produce byte-identical hashes.
     #[test]
     fn identical_state_hashes_identically() {
         let (p, q, lv, av, drive, sim) = sample();
         let grip = TrackGrip::default();
-        let a = hash_tank_state(p, q, lv, av, &drive, &grip, &sim);
-        let b = hash_tank_state(p, q, lv, av, &drive, &grip, &sim);
+        let transmission = sample_transmission();
+        let a = hash_tank_state(p, q, lv, av, &drive, &grip, &transmission, &sim);
+        let b = hash_tank_state(p, q, lv, av, &drive, &grip, &transmission, &sim);
         assert_eq!(a.combined, b.combined);
         assert_eq!(
             (a.pos, a.rot, a.lv, a.av, a.sim),
@@ -938,7 +1064,8 @@ mod tests {
     fn one_flipped_velocity_bit_diverges_only_that_component() {
         let (p, q, lv, av, drive, sim) = sample();
         let grip = TrackGrip::default();
-        let base = hash_tank_state(p, q, lv, av, &drive, &grip, &sim);
+        let transmission = sample_transmission();
+        let base = hash_tank_state(p, q, lv, av, &drive, &grip, &transmission, &sim);
 
         let mut av2 = av;
         av2.z = f32::from_bits(av.z.to_bits() ^ 1);
@@ -947,7 +1074,7 @@ mod tests {
             av.z.to_bits(),
             "the bit flip must change the bits"
         );
-        let flipped = hash_tank_state(p, q, lv, av2, &drive, &grip, &sim);
+        let flipped = hash_tank_state(p, q, lv, av2, &drive, &grip, &transmission, &sim);
 
         assert_ne!(
             base.combined, flipped.combined,
@@ -967,8 +1094,27 @@ mod tests {
     fn signed_zero_hashes_apart() {
         let (p, q, _lv, av, drive, sim) = sample();
         let grip = TrackGrip::default();
-        let pos_zero = hash_tank_state(p, q, Vec3::new(0.0, 0.0, 0.0), av, &drive, &grip, &sim);
-        let neg_zero = hash_tank_state(p, q, Vec3::new(-0.0, 0.0, 0.0), av, &drive, &grip, &sim);
+        let transmission = sample_transmission();
+        let pos_zero = hash_tank_state(
+            p,
+            q,
+            Vec3::new(0.0, 0.0, 0.0),
+            av,
+            &drive,
+            &grip,
+            &transmission,
+            &sim,
+        );
+        let neg_zero = hash_tank_state(
+            p,
+            q,
+            Vec3::new(-0.0, 0.0, 0.0),
+            av,
+            &drive,
+            &grip,
+            &transmission,
+            &sim,
+        );
         assert_ne!(pos_zero.lv, neg_zero.lv);
     }
 
@@ -978,10 +1124,11 @@ mod tests {
     fn belt_phase_ulp_localizes_to_belt_stream() {
         let (p, q, lv, av, drive, sim) = sample();
         let grip = TrackGrip::default();
+        let transmission = sample_transmission();
         let mut shifted = drive;
         shifted.sides[1].phase = f64::from_bits(drive.sides[1].phase.to_bits() ^ 1);
-        let hn = hash_tank_state(p, q, lv, av, &drive, &grip, &sim);
-        let hs = hash_tank_state(p, q, lv, av, &shifted, &grip, &sim);
+        let hn = hash_tank_state(p, q, lv, av, &drive, &grip, &transmission, &sim);
+        let hs = hash_tank_state(p, q, lv, av, &shifted, &grip, &transmission, &sim);
         assert_ne!(hn.sim, hs.sim);
         assert_ne!(hn.blt, hs.blt);
         // The other carried-state streams are untouched by a belt flip.
@@ -989,6 +1136,7 @@ mod tests {
         assert_eq!(hn.srv, hs.srv);
         assert_eq!(hn.rld, hs.rld);
         assert_eq!(hn.rec, hs.rec);
+        assert_eq!(hn.trn, hs.trn);
     }
 
     /// Each carried-state field family flips ITS sub-hash (plus `sim` and `combined`) and no other —
@@ -998,18 +1146,19 @@ mod tests {
     fn carried_state_flip_localizes_to_its_family() {
         let (p, q, lv, av, drive, sim) = sample();
         let grip = TrackGrip::default();
-        let base = hash_tank_state(p, q, lv, av, &drive, &grip, &sim);
+        let transmission = sample_transmission();
+        let base = hash_tank_state(p, q, lv, av, &drive, &grip, &transmission, &sim);
 
         // Drive: steer one ULP off.
         let mut drive2 = drive;
         drive2.steer = f32::from_bits(drive.steer.to_bits() ^ 1);
-        let d = hash_tank_state(p, q, lv, av, &drive2, &grip, &sim);
+        let d = hash_tank_state(p, q, lv, av, &drive2, &grip, &transmission, &sim);
         assert_ne!(base.drv, d.drv);
         assert_ne!(base.sim, d.sim);
         assert_ne!(base.combined, d.combined);
         assert_eq!(
-            (base.srv, base.rld, base.rec, base.blt),
-            (d.srv, d.rld, d.rec, d.blt)
+            (base.srv, base.rld, base.rec, base.blt, base.trn),
+            (d.srv, d.rld, d.rec, d.blt, d.trn)
         );
         assert_eq!(
             (base.pos, base.rot, base.lv, base.av),
@@ -1021,24 +1170,24 @@ mod tests {
         let mut sim2 = sim.clone();
         sim2.servos[0] =
             crate::tank::ServoState::test_new(cur, prev, f32::from_bits(vel.to_bits() ^ 1));
-        let s = hash_tank_state(p, q, lv, av, &drive, &grip, &sim2);
+        let s = hash_tank_state(p, q, lv, av, &drive, &grip, &transmission, &sim2);
         assert_ne!(base.srv, s.srv);
         assert_ne!(base.sim, s.sim);
         assert_eq!(
-            (base.drv, base.rld, base.rec, base.blt),
-            (s.drv, s.rld, s.rec, s.blt)
+            (base.drv, base.rld, base.rec, base.blt, base.trn),
+            (s.drv, s.rld, s.rec, s.blt, s.trn)
         );
 
         // Reload: timer one ULP off — must NOT touch the recoil stream despite sharing the weapon.
         let mut sim3 = sim.clone();
         sim3.weapons[0].reload_remaining =
             f32::from_bits(sim.weapons[0].reload_remaining.to_bits() ^ 1);
-        let r = hash_tank_state(p, q, lv, av, &drive, &grip, &sim3);
+        let r = hash_tank_state(p, q, lv, av, &drive, &grip, &transmission, &sim3);
         assert_ne!(base.rld, r.rld);
         assert_ne!(base.sim, r.sim);
         assert_eq!(
-            (base.drv, base.srv, base.rec, base.blt),
-            (r.drv, r.srv, r.rec, r.blt)
+            (base.drv, base.srv, base.rec, base.blt, base.trn),
+            (r.drv, r.srv, r.rec, r.blt, r.trn)
         );
 
         // Belt count: one round off — a fire-gating difference, so it must land in the reload
@@ -1046,36 +1195,82 @@ mod tests {
         // has no such case: it is cosmetic and deliberately unhashed.)
         let mut simb = sim.clone();
         simb.weapons[0].belt_remaining = sim.weapons[0].belt_remaining.wrapping_add(1);
-        let b = hash_tank_state(p, q, lv, av, &drive, &grip, &simb);
+        let b = hash_tank_state(p, q, lv, av, &drive, &grip, &transmission, &simb);
         assert_ne!(base.rld, b.rld);
         assert_ne!(base.sim, b.sim);
         assert_ne!(base.combined, b.combined);
         assert_eq!(
-            (base.drv, base.srv, base.rec, base.blt),
-            (b.drv, b.srv, b.rec, b.blt)
+            (base.drv, base.srv, base.rec, base.blt, base.trn),
+            (b.drv, b.srv, b.rec, b.blt, b.trn)
         );
 
         // Recoil: offset one ULP off — must NOT touch the reload stream.
         let mut sim4 = sim.clone();
         sim4.weapons[0].recoil_offset = f32::from_bits(sim.weapons[0].recoil_offset.to_bits() ^ 1);
-        let c = hash_tank_state(p, q, lv, av, &drive, &grip, &sim4);
+        let c = hash_tank_state(p, q, lv, av, &drive, &grip, &transmission, &sim4);
         assert_ne!(base.rec, c.rec);
         assert_ne!(base.sim, c.sim);
         assert_eq!(
-            (base.drv, base.srv, base.rld, base.blt),
-            (c.drv, c.srv, c.rld, c.blt)
+            (base.drv, base.srv, base.rld, base.blt, base.trn),
+            (c.drv, c.srv, c.rld, c.blt, c.trn)
         );
 
         // Belt state: the left side's speed one ULP off — localizes to the `blt` stream.
         let mut drive5 = drive;
         drive5.sides[0].speed = f32::from_bits(drive.sides[0].speed.to_bits() ^ 1);
-        let a = hash_tank_state(p, q, lv, av, &drive5, &grip, &sim);
+        let a = hash_tank_state(p, q, lv, av, &drive5, &grip, &transmission, &sim);
         assert_ne!(base.blt, a.blt);
         assert_ne!(base.sim, a.sim);
         assert_eq!(
-            (base.drv, base.srv, base.rld, base.rec),
-            (a.drv, a.srv, a.rld, a.rec)
+            (base.drv, base.srv, base.rld, base.rec, base.trn),
+            (a.drv, a.srv, a.rld, a.rec, a.trn)
         );
+
+        // Transmission: one crank bit off — localizes to the atomic `trn` stream.
+        let mut transmission2 = transmission;
+        transmission2.0.omega_e = f32::from_bits(transmission.0.omega_e.to_bits() ^ 1);
+        let t = hash_tank_state(p, q, lv, av, &drive, &grip, &transmission2, &sim);
+        assert_ne!(base.trn, t.trn);
+        assert_ne!(base.sim, t.sim);
+        assert_ne!(base.combined, t.combined);
+        assert_eq!(
+            (base.drv, base.srv, base.rld, base.rec, base.blt),
+            (t.drv, t.srv, t.rld, t.rec, t.blt)
+        );
+    }
+
+    /// Every field in the authoritative 16-field inventory affects the exact transmission stream.
+    #[test]
+    fn transmission_inventory_fields_all_affect_hash() {
+        let (p, q, lv, av, drive, sim) = sample();
+        let grip = TrackGrip::default();
+        let base = sample_transmission();
+        let base_hash = hash_tank_state(p, q, lv, av, &drive, &grip, &base, &sim).trn;
+        let mut variants = [base; 16];
+        variants[0].0.gear = variants[0].0.gear.wrapping_add(1);
+        variants[1].0.shift_ticks = variants[1].0.shift_ticks.wrapping_add(1);
+        variants[2].0.steer_step = variants[2].0.steer_step.wrapping_add(1);
+        variants[3].0.reverse = !variants[3].0.reverse;
+        variants[4].0.park = !variants[4].0.park;
+        variants[5].0.last_shift_dir = 1;
+        variants[6].0.dwell_ticks = variants[6].0.dwell_ticks.wrapping_add(1);
+        variants[7].0.omega_e = f32::from_bits(variants[7].0.omega_e.to_bits() ^ 1);
+        variants[8].0.clutch_out = !variants[8].0.clutch_out;
+        variants[9].0.demand_n = f32::from_bits(variants[9].0.demand_n.to_bits() ^ 1);
+        variants[10].0.demand_initialized = !variants[10].0.demand_initialized;
+        variants[11].0.grade_confirm_ticks = variants[11].0.grade_confirm_ticks.wrapping_add(1);
+        variants[12].0.grade_target = variants[12].0.grade_target.wrapping_add(1);
+        variants[13].0.scheduler = SchedulerState::HillHold;
+        variants[14].0.hill_hold = !variants[14].0.hill_hold;
+        variants[15].0.hold_reengage_ticks = variants[15].0.hold_reengage_ticks.wrapping_add(1);
+
+        for (index, variant) in variants.iter().enumerate() {
+            let hash = hash_tank_state(p, q, lv, av, &drive, &grip, variant, &sim).trn;
+            assert_ne!(
+                base_hash, hash,
+                "transmission inventory field {index} was not hashed"
+            );
+        }
     }
 
     /// `rounds_fired` rolls back because it derives tracer cadence, but a dropped predicted round
@@ -1085,14 +1280,17 @@ mod tests {
     fn fresh_app_digest_covers_the_rollback_tracer_phase() {
         let (p, q, lv, av, drive, sim) = sample();
         let grip = TrackGrip::default();
-        let base_trace = hash_tank_state(p, q, lv, av, &drive, &grip, &sim);
-        let base = canonical_tank_state_digest(p, q, lv, av, &drive, &grip, &sim);
+        let transmission = sample_transmission();
+        let base_trace = hash_tank_state(p, q, lv, av, &drive, &grip, &transmission, &sim);
+        let base = canonical_tank_state_digest(p, q, lv, av, &drive, &grip, &transmission, &sim);
 
         let mut phase_shifted = sim.clone();
         phase_shifted.weapons[0].rounds_fired =
             phase_shifted.weapons[0].rounds_fired.wrapping_add(1);
-        let shifted_trace = hash_tank_state(p, q, lv, av, &drive, &grip, &phase_shifted);
-        let shifted = canonical_tank_state_digest(p, q, lv, av, &drive, &grip, &phase_shifted);
+        let shifted_trace =
+            hash_tank_state(p, q, lv, av, &drive, &grip, &transmission, &phase_shifted);
+        let shifted =
+            canonical_tank_state_digest(p, q, lv, av, &drive, &grip, &transmission, &phase_shifted);
 
         assert_eq!(base_trace.combined, shifted_trace.combined);
         assert_eq!(base.simulation, shifted.simulation);

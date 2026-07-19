@@ -27,6 +27,7 @@ use crate::command::TankCommand;
 use crate::damage::{
     Capability, TankCapabilities, TankVolumes, VolumeFacets, capability_available,
 };
+use crate::spec::TransmissionArchitecture;
 use crate::state::{GameplaySet, SimPhase};
 use crate::tank::{Tank, TrackSide};
 
@@ -81,27 +82,21 @@ pub struct TrackDriveSide {
 #[derive(Resource, Default)]
 pub struct ElementGripFeelTest;
 
-/// The OFFLINE transmission feel test (phase 2.5, same gating pattern as
-/// [`ElementGripFeelTest`]): which drivetrain adapter [`apply_track_forces`] runs. Inserted
-/// ONLY by the `--offline` composition — every other composition (net client, net server,
-/// headless) never sees it and stays on the legacy governor bit-for-bit. Unlike the element
-/// gate this one is a live dial (the offline `T` key cycles governor → hybrid → L600): the
-/// transmission's state is plainly re-constructible ([`TankTransmission`] resets on every
-/// flip), so a mid-session mode change cannot poison hidden state the way an element-regime
-/// flip would. Eventually per-vehicle SPEC (`transmission.architecture`); the resource is the
-/// interim feel-test dial.
+/// The OFFLINE transmission feel-test override: which drivetrain adapter [`apply_track_forces`]
+/// runs instead of the vehicle's declared architecture. Inserted ONLY by the `--offline`
+/// composition; MP has no dial and follows the spec. Unlike the element gate this one is live (the
+/// offline `T` key cycles governor → hybrid → L600): [`TankTransmission`] resets on every flip, so
+/// a mid-session mode change cannot poison hidden state the way an element-regime flip would.
 #[derive(Resource)]
 pub struct TransmissionFeelTest(pub TransmissionMode);
 
 /// The joint transmission's path-dependent state (gear/window/detent/direction/crank plus the
-/// stage-C demand/filter/target/hill-hold scheduler state) — a plain LOCAL component on every tank root,
-/// spawn-constructed like [`TrackGripElements`]: NOT registered in the net protocol, never
-/// serialized, never hashed (REV 13; the wire promotion is REV 14 — ω_e rides that later
-/// netcode arc with the rest of the list, since a slipping clutch makes it underivable
-/// from the belt). MP never reads or writes it — only the offline composition's
-/// non-governor branch of [`apply_track_forces`] touches it. The design doc's authoritative
-/// REV-14 inventory classifies every inner field; no wire field is added here.
-#[derive(Component, Clone, Copy, PartialEq, Debug)]
+/// stage-C demand/filter/target/hill-hold scheduler state). REV 14 replicates this one atomic root
+/// component: server-authoritative, predicted and rolled back for the owner, visible but not
+/// predicted for remote tanks. Server and owning client both advance it through the same
+/// spec-selected branch of [`apply_track_forces`]. The determinism trace hashes all 16 inventory
+/// fields in stable order, with raw bits for both floats.
+#[derive(Component, Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct TankTransmission(pub TransmissionState);
 
 impl TankTransmission {
@@ -168,16 +163,16 @@ pub struct TrackGear {
     count: usize,
     plane_x: f32,
     params: ForceParams,
-    /// The declared joint transmission, if the spec authors one (phase 2.5). Present on every
-    /// composition (it is inert data); CONSUMED only under the offline
-    /// [`TransmissionFeelTest`] gate.
+    /// The declared joint transmission, if the spec authors one.
     trans: Option<TransmissionParams>,
+    /// Spec-selected adapter. `Governor` means the transmission block is absent.
+    mode: TransmissionMode,
 }
 
 impl TrackGear {
-    /// The declared joint transmission params, if the spec authored one (phase 2.5). Read-only
-    /// accessor for the offline drive HUD (`crate::run_offline`); the field stays private so
-    /// only the gated drive step and the HUD legend consume it.
+    /// The declared joint transmission params, if the spec authored one. Read-only accessor for
+    /// the offline drive HUD (`crate::run_offline`); the field stays private so only the drive step
+    /// and HUD legend consume it.
     pub fn trans(&self) -> Option<&TransmissionParams> {
         self.trans.as_ref()
     }
@@ -246,9 +241,6 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
     // sprocket radius (tiger-transmission-data.md rule: speeds are the anchors, reductions
     // derive, so the ladder survives the 19-vs-20-tooth discrepancy).
     if let Some(tr) = &spec.powertrain.transmission {
-        // The authored architecture is informational until the offline default is
-        // spec-driven (TransmissionFeelTest is the interim dial) — log it so a feel session
-        // states what the vehicle declares.
         info!(
             "declared transmission: {:?}, {}F/{}R",
             tr.architecture,
@@ -259,12 +251,21 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
     let trans = spec
         .transmission_params()
         .expect("TankSpec transmission was validated before TrackGear construction");
+    let mode = spec
+        .powertrain
+        .transmission
+        .as_ref()
+        .map_or(TransmissionMode::Governor, |tr| match tr.architecture {
+            TransmissionArchitecture::Hybrid => TransmissionMode::Hybrid,
+            TransmissionArchitecture::FixedRadii => TransmissionMode::FixedRadii,
+        });
 
     commands.insert_resource(TrackGear {
         loop_pts,
         count: spec.link_count,
         plane_x: spec.plane_x,
         trans,
+        mode,
         params: ForceParams {
             thickness: spec.thickness,
             columns: [
@@ -300,9 +301,8 @@ fn apply_track_forces(
     // The offline element-grip gate (element-promotion-checklist.md Q1): present only in the
     // `--offline` composition. Read as `Option` so every other composition runs unchanged.
     feel: Option<Res<ElementGripFeelTest>>,
-    // The offline transmission gate (phase 2.5, same pattern): absent everywhere but the
-    // `--offline` composition, so every MP path takes the `Governor` branch below — which is
-    // the UNTOUCHED legacy loop, not merely equivalent code.
+    // Offline-only adapter override. MP leaves it absent and follows `TrackGear::mode`, derived
+    // from the spec; a missing transmission block selects the untouched Governor fallback.
     trans_feel: Option<Res<TransmissionFeelTest>>,
     volumes: Query<VolumeFacets>,
     mut tanks: Query<
@@ -328,10 +328,7 @@ fn apply_track_forces(
     let Some(oracle) = field.field.as_ref() else {
         return;
     };
-    let mode = trans_feel
-        .as_ref()
-        .map(|r| r.0)
-        .unwrap_or(TransmissionMode::Governor);
+    let mode = trans_feel.as_ref().map(|r| r.0).unwrap_or(gear.mode);
     let dt = time.delta_secs();
     for (
         pos,
@@ -373,9 +370,9 @@ fn apply_track_forces(
 
         let affine = Affine3A::from_rotation_translation(rot.0, pos.0);
 
-        // The JOINT drivetrain branch (phase 2.5): reachable only under the offline
-        // [`TransmissionFeelTest`] gate with a spec-declared transmission — every MP
-        // composition falls through to the UNTOUCHED legacy loop below.
+        // The JOINT drivetrain branch: MP selects the declared architecture; the offline-only
+        // [`TransmissionFeelTest`] can override it. A spec-less vehicle or explicit Governor
+        // override falls through to the untouched legacy loop below.
         let joint = match (mode, gear.trans.as_ref()) {
             (TransmissionMode::Governor, _) | (_, None) => None,
             (m, Some(tp)) => Some((m, tp)),
