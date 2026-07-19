@@ -246,7 +246,6 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
             shift_down_rpm: tr.gearbox.shift_down_rpm,
             steer_radii_m: &tr.steering.radii,
             steer_capacity_n: tr.steering.capacity,
-            neutral_fraction: tr.steering.neutral_fraction,
             recirculation: tr.steering.recirculation,
             brake_capacity_n: tr.brake_force,
             drag_fraction: tr.engine.drag_fraction,

@@ -327,10 +327,12 @@ pub struct SteeringSpec {
     /// differentially, so the belt-difference axis `F_s` carries up to 2× this (each side
     /// sees `F_s/2`, bounded by this datum — the gearing/grip-scale per-track cap).
     pub capacity: f32,
-    /// Brake-gated neutral-turn fraction of the 1st-gear tight ratio (L600 marginal pivot).
-    pub neutral_fraction: f32,
     /// Inner→outer recirculation efficiency η.
     pub recirculation: f32,
+    // `neutral_fraction` DELETED (transmission fix 3, 2026-07-19): it was an unprovenanced
+    // authored feel scalar; the L600 neutral turn now uses the DERIVED
+    // `neutral_d_full = κ_tight(F1) × v1_governed` directly (the radii table's own
+    // gear-independent invariant makes that the correct emergent pivot scale).
 }
 
 /// The belt-support penalty law, per metre of contacting belt.
@@ -584,7 +586,6 @@ impl TankSpec {
                     tr.steering.capacity.is_finite()
                         && tr.steering.capacity > 0.0
                         && (0.0..=1.0).contains(&tr.steering.recirculation)
-                        && (0.0..=1.0).contains(&tr.steering.neutral_fraction)
                         && tr.brake_force.is_finite()
                         && tr.brake_force > 0.0,
                 ),
@@ -744,7 +745,11 @@ mod tests {
         assert_eq!(*tr.gearbox.forward_speeds_kmh.last().unwrap(), 45.4);
         assert_eq!(tr.steering.radii[0].0, 3.44);
         assert_eq!(tr.steering.radii[7].1, 165.0);
-        assert_eq!(tr.brake_force, 250_000.0);
+        // DELIBERATE pin update (transmission fix 4, 2026-07-19): brake_force re-anchored
+        // from the circular grip-limit sizing (250 kN — sized against the very μ it was
+        // meant to test, and energy-impossible for two 1940s discs) to the documented
+        // 0.3 g deceleration target: 0.3 × 9.81 × 57 000 kg ≈ 167.7 kN total → 84 kN/side.
+        assert_eq!(tr.brake_force, 84_000.0);
         // Track: the material loop is authored exact (pitch × count = the immutable belt
         // length); the sprocket's tooth count locks link advance to tooth advance.
         assert_eq!(spec.track.pitch, 0.130);

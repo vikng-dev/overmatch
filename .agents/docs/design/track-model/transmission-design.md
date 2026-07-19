@@ -197,6 +197,71 @@ P_{\rm yaw}=M_{\rm scrub}V/R
 
 With 520 kW, sustaining 478 kN·m requires approximately `R ≥ 3.68 m` at 4 m/s and `R ≥ 7.35 m` at 8 m/s. Tighter commands must slow the tank. That is the desirable emerging high-speed behavior: strong turn-in, followed by physically required speed loss.
 
+## Correctness batch (2026-07-19) — four fixes, post-implementation
+
+Applied after the phase-2.5 implementation landed; all four are SIM POLICY or datum
+re-anchors — the Governor parity path, the grip law, μ, and the wire surface are untouched.
+
+### 1. Shift scheduler anti-hunting (SIM POLICY, all vehicles)
+
+The static up/down bands (2300/1400, gap > one ratio step) were sound in statics but not
+under the shift's own dynamics: the 0.31 s torque-cut window bleeds belt speed while
+`I·v̇ = Q − R` keeps subtracting the ground reaction, and the low gears' rpm-per-speed
+slope (~2500 rpm per m/s in Tiger gear 2) turned ~0.19 m/s of bleed into ~480 rpm —
+erasing the ~100 rpm static margin, so the down band fired the tick the freeze lifted
+(measured full-throttle climb trace `[1,2,1,2,1,2,3,2,3,4,3,4,5,6,7,8]`). Three gates,
+fixed-tick deterministic, in `transmission.rs`:
+
+- **Predicted-landing gate on upshifts** (`POSTSHIFT_MARGIN_RPM = 150`): the upshift only
+  commits if rolling the shift window's own integration (drive torque cut, engine drag
+  through the landing gear, reaction frozen at its current per-tick mean — the same code
+  path via `reflected_drag`) lands the rpm ≥ down band + margin. Frozen-R is conservative
+  under load (the true post-cut reaction collapses with slip), so a loaded box revs
+  further up each gear before shifting — correct hill behavior for free.
+- **Reversal-only dwell** (`REVERSAL_DWELL_TICKS = 32` = 0.5 s): a committed shift blocks
+  the opposite-direction shift; same-direction 1-2-3 climbs stay free. State:
+  `last_shift_dir` + `dwell_ticks` in `TransmissionState` (local, REV 13 unaffected).
+- **Over-rev gate on downshifts** (`OVERREV_MARGIN_RPM = 100`): a downshift landing past
+  the engine's max curve rpm − margin is refused.
+
+Post-fix measured climb trace: `[1,2,3,4,5,6,7,8]`, gated monotone by
+`gear_climb_monotone_tiger`; unit gates for all three policies in `transmission.rs`.
+
+### 2. Hybrid pivot is power-limited (doctrine correctness)
+
+The Hybrid floored its standstill steer target at `neutral_d_full` — a kinematic speed
+command that used ~68 kW of the ~407 kW budget and pivoted at 0.131 rad/s, contradicting
+this document's own §C doctrine (the hydrostatic family is limited by the POWER budget).
+Now at `m → 0` the box commands steer FORCE up to the per-output capacity bound and the
+existing power-conservation scale is the binding limiter: the pivot rate settles where
+engine power balances scrub dissipation. The moving curvature servo is unchanged; the two
+regimes blend continuously on |m| over `NEUTRAL_M_SPEED` (`hold_blend`). Measured
+emergent Tiger pivot: **0.654 rad/s** (belts ±1.40 m/s), against the §5 prediction of the
+0.5–0.6+ rad/s class; gate `pivot_tiger_hybrid` ≥ 0.35 rad/s.
+
+### 3. `neutral_fraction` deleted (unprovenanced authored scalar)
+
+The RON's `neutral_fraction: 0.75` was an INFERRED feel scalar with no source. The
+derived datum `neutral_d_full = κ_tight(F1) × v1_governed = 0.2808 m/s` IS the correct
+emergent value for a fixed-radius box — the radii table's own invariant makes
+`κ_tight(g) × v(g)` gear-independent (≈ 0.337 m/s @ 3000 rpm in every gear). Field
+removed from spec struct, RON, validation, and the L600 neutral path (which now servos to
+`neutral_d_full` directly). Measured L600 neutral turn: **0.131 rad/s** (belts exactly
+±0.281 m/s); gate `pivot_tiger_l600` ≥ 0.10 rad/s.
+
+### 4. Brake datum re-anchored (was circular)
+
+`brake_force: 250_000` per side was sized by the grip-limit rule against μ = 0.9 —
+circular (sized against the very friction it was to be tested by) and energy-impossible
+(~2.9 MW through two 1940s Argus discs at speed; §3 above already flagged that ship
+values need a real brake source). Re-anchored to a documented deceleration target:
+**0.3 g total-vehicle** (mid of the 0.2–0.35 g band realistic for WWII 57-t heavies):
+0.3 g × 57 000 kg × 9.81 = 167.7 kN → `brake_force: 84_000` per side. The stop-force law
+`B = clamp(R − Q − vI/dt, ±cap)` and the park latch are untouched — only the datum moved.
+Measured service-brake stop 6 → 1 m/s: **2.45 s** (analytic ≈ 0.5 s input slew +
+5.0 m/s ÷ ~3.2 m/s² brake+drag); gate `decel_tiger` ≤ 3.5 s, coast leg unchanged
+(10.7 s). Supersede with a real Argus brake/output-torque rating when sourced.
+
 ## Ranked recommendation
 
 1. **Tiger: fixed-radius, geared regenerative model behind the joint transmission seam.** Historically characteristic, fixes high-speed sluggishness, and derives stately pivot behavior from ratios and power.

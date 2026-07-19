@@ -20,7 +20,8 @@
 //!   share stays inside the per-output capacity (beyond it the constraint slips). At `m≈0`
 //!   the neutral turn is the MARGINAL
 //!   brake-gated one the restoration literature describes: a slow capacity-limited
-//!   counter-rotation at a declared fraction of the 1st-gear tight ratio.
+//!   counter-rotation at the DERIVED 1st-gear pivot scale
+//!   [`TransmissionParams::neutral_d_full`].
 //!
 //! Brakes (design §3, the hold reframe): the ground reaction is ALWAYS applied to the belt
 //! (never attenuated). The brake force is the capacity-limited STOP force
@@ -52,7 +53,10 @@
 //! | [`DEAD`] | SIM POLICY | input deadzone on one shared axis mapping |
 //! | [`PARK_ENGAGE_SPEED`] | SIM POLICY | latch threshold for "at rest" — a determinism/stability guard on the shared intent layer |
 //! | [`DIRECTION_SWAP_SPEED`] | SIM POLICY | the intent seam where a held opposite throttle becomes a gear-direction change; uniform game semantics |
-//! | [`NEUTRAL_THROTTLE`], [`NEUTRAL_M_SPEED`] | SIM POLICY | regime-entry thresholds for the L600 neutral turn (the neutral turn's SPEED SCALE — `neutral_d_full × neutral_fraction` — is spec-derived) |
+//! | [`NEUTRAL_THROTTLE`], [`NEUTRAL_M_SPEED`] | SIM POLICY | regime-entry thresholds for the L600 neutral turn (the neutral turn's SPEED SCALE — [`TransmissionParams::neutral_d_full`] — is spec-DERIVED); `NEUTRAL_M_SPEED` doubles as the hybrid's blend width into its power-limited pivot regime |
+//! | [`POSTSHIFT_MARGIN_RPM`] | SIM POLICY | fix-1a anti-hunting: an upshift must PREDICT landing this far above the down band at the end of its own torque-cut window (the cut bleeds belt speed; the static band gap alone was erased in low gears — the measured 1-2-1-2 climb) |
+//! | [`REVERSAL_DWELL_TICKS`] | SIM POLICY | fix-1b anti-hunting: a committed shift blocks the OPPOSITE-direction shift for this many ticks; same-direction climbs stay free |
+//! | [`OVERREV_MARGIN_RPM`] | SIM POLICY | fix-1c: a downshift must land at least this far under the engine's max curve rpm — the box never commands an over-rev |
 //! | [`WIDE_ON`]/[`WIDE_OFF`]/[`TIGHT_ON`]/[`TIGHT_OFF`] | SIM POLICY | stick-to-detent input mapping with hysteresis; the DETENT RATIOS they select are spec |
 //! | [`TICK_HZ`] | SIM POLICY | the fixed simulation tick the shift countdown quantizes against |
 //!
@@ -61,9 +65,12 @@
 //! engine drag (`engine.drag_fraction` — an engine datum). REMOVED rather than classified:
 //! `STEER_SERVO_BAND` — the steering servo is now the semi-implicit exact law (like the
 //! brakes and λ), so no proportional band exists to tune; its droop was itself a
-//! vehicle-scaling bug (the Tiger's neutral target sat inside the band). Everything else
-//! the vehicle authors was already spec: torque curve, ladders, radii, capacities, brake,
-//! η, neutral fraction.
+//! vehicle-scaling bug (the Tiger's neutral target sat inside the band). Also REMOVED:
+//! `neutral_fraction` (spec field DELETED, fix 3 of the correctness batch) — an
+//! unprovenanced authored feel scalar; the DERIVED `neutral_d_full = κ_tight(F1) ×
+//! v1_governed` is itself the correct emergent pivot scale for a fixed-radius box (the
+//! radii table's own invariant: `κ_tight(g) × v(g)` is gear-independent). Everything else
+//! the vehicle authors was already spec: torque curve, ladders, radii, capacities, brake, η.
 
 use super::forces::{self, ForceParams};
 
@@ -94,6 +101,25 @@ impl TransmissionMode {
 /// The fixed simulation tick rate the shift countdown quantizes against (the module operates
 /// on fixed 64 Hz ticks — module doc). SIM POLICY.
 const TICK_HZ: f32 = 64.0;
+
+/// Fix-1a anti-hunting margin (rpm): an upshift only commits if the belt state PREDICTED at
+/// the end of the shift's own torque-cut window (same integration law, drive torque cut,
+/// reaction frozen — [`predict_shift_landing_m`]) lands at least this far ABOVE the down
+/// band in the new gear. The static band gap (~100 rpm at the Tiger's widest step) is
+/// erased by the cut's own belt-speed bleed in low gears (~2500 rpm per m/s slope in gear
+/// 2), which fired the down band the tick the freeze lifted — the measured 1-2-1-2 climb
+/// trace. SIM POLICY.
+const POSTSHIFT_MARGIN_RPM: f32 = 150.0;
+
+/// Fix-1b anti-hunting dwell (fixed ticks, 0.5 s at 64 Hz): after a shift commits, the
+/// OPPOSITE-direction shift stays blocked this long. Same-direction shifts stay free — a
+/// rapid 1-2-3 climb must not slow down. SIM POLICY.
+const REVERSAL_DWELL_TICKS: u8 = 32;
+
+/// Fix-1c over-rev margin (rpm): a downshift is refused if its landing rpm in the lower
+/// gear would exceed the engine's max authored curve rpm minus this margin — the box never
+/// commands an over-rev. SIM POLICY.
+const OVERREV_MARGIN_RPM: f32 = 100.0;
 
 /// Fuel-governor cut width (rpm): torque ramps linearly to zero over this band past the
 /// governed rpm, so the top-speed equilibrium is a smooth root instead of a hard clip.
@@ -178,11 +204,13 @@ pub struct TransmissionParams {
     /// not break away; the T-34 lab's 300 vs 224 kN·m masked it).
     pub steer_capacity_n: f32,
     /// Full neutral-turn belt-speed half-difference (m/s): `κ_tight(F1) × v(F1 @ governed)` —
-    /// the hybrid's genuine pivot scale.
+    /// the L600's brake-gated neutral-turn target. DERIVED, and the correct emergent pivot
+    /// scale for a fixed-radius box: the radii table's own invariant makes `κ_tight(g) ×
+    /// v(g)` gear-independent (Tiger: ≈ 0.337 m/s @ 3000 rpm in every gear). The authored
+    /// `neutral_fraction` feel scalar that used to shrink it was DELETED (fix 3 — no
+    /// provenance). The hybrid does not read this: its standstill pivot is POWER-limited
+    /// (fix 2), not speed-targeted.
     pub neutral_d_full: f32,
-    /// The L600's brake-gated pivot fraction of [`Self::neutral_d_full`] (marginal neutral
-    /// turn, literature synthesis).
-    pub neutral_fraction: f32,
     /// Inner→outer recirculation efficiency η (mechanical ~0.9, INFERRED tag at the authoring
     /// site).
     pub recirculation: f32,
@@ -222,7 +250,6 @@ pub struct TransmissionAuthoring<'a> {
     /// [`TransmissionParams::steer_capacity_n`] for the convention (the difference axis
     /// carries 2× this).
     pub steer_capacity_n: f32,
-    pub neutral_fraction: f32,
     pub recirculation: f32,
     pub brake_capacity_n: f32,
     /// See [`TransmissionParams::drag_fraction`].
@@ -278,7 +305,6 @@ impl TransmissionParams {
             steer_kappa,
             steer_capacity_n: a.steer_capacity_n,
             neutral_d_full,
-            neutral_fraction: a.neutral_fraction,
             recirculation: a.recirculation,
             brake_capacity_n: a.brake_capacity_n,
             drag_fraction: a.drag_fraction,
@@ -311,6 +337,12 @@ impl TransmissionParams {
         raw * cut
     }
 
+    /// The engine's max authored curve rpm (the last torque point — the curve is authored
+    /// ascending): the ceiling the fix-1c over-rev gate measures downshift landings against.
+    pub fn max_curve_rpm(&self) -> f32 {
+        self.engine.torque_nm[self.engine.torque_nm.len() - 1].0
+    }
+
     /// The belt speed (m/s) the top forward gear reaches at the governed rpm — the
     /// gearing-implied top speed the straight-line gate asserts against.
     pub fn geared_top_speed(&self) -> f32 {
@@ -336,6 +368,13 @@ pub struct TransmissionState {
     /// command. Latched, the brake holds FULL capacity regardless of belt speed (see
     /// [`PARK_ENGAGE_SPEED`]).
     pub park: bool,
+    /// Direction of the last committed gear shift (+1 up, −1 down, 0 none) — the axis the
+    /// fix-1b reversal dwell blocks against. Local scheduler memory (REV 13: not
+    /// replicated, not hashed), reset by a ladder swap.
+    pub last_shift_dir: i8,
+    /// Remaining ticks of the fix-1b reversal dwell: while non-zero, the shift OPPOSITE to
+    /// `last_shift_dir` stays blocked (same-direction shifts stay free).
+    pub dwell_ticks: u8,
 }
 
 impl Default for TransmissionState {
@@ -346,6 +385,8 @@ impl Default for TransmissionState {
             steer_step: 0,
             reverse: false,
             park: false,
+            last_shift_dir: 0,
+            dwell_ticks: 0,
         }
     }
 }
@@ -459,6 +500,41 @@ pub fn step(
     }
 }
 
+/// The zero-throttle engine-drag force (compression braking) reflected through gear `g` at
+/// mean-axis belt speed `m` (design §3): a drag TORQUE, saturating over [`DRAG_SAT_SPEED`]
+/// and released as the PROPULSIVE throttle opens. ONE implementation shared verbatim
+/// between the live tick and the fix-1a shift predictor, so prediction and reality run the
+/// same law.
+fn reflected_drag(tp: &TransmissionParams, g: f32, m: f32, propulsive: f32) -> f32 {
+    -(tp.peak_torque_nm * tp.drag_fraction * g / tp.sprocket_radius)
+        * (m / DRAG_SAT_SPEED).clamp(-1.0, 1.0)
+        * forces::hold_blend(propulsive / DRAG_THROTTLE_RELEASE)
+}
+
+/// Fix-1a: roll the shift's torque-cut window forward on the mean belt axis and return the
+/// PREDICTED landing speed `m`. Exactly the live integration's mean — per side
+/// `v += (Q − R)/I·dt` with `Q = (f_p + f_drag)/2` — under the shift window's own rules:
+/// drive torque cut (`f_p = 0`), engine drag through the LANDING gear (the live tick's `g`
+/// is already the new gear during the window), and the ground reaction frozen at its
+/// current per-tick mean (deterministic, and conservative while the reaction is easing off
+/// — the true post-cut reaction collapses with the slip). Fixed-tick, f32-exact.
+fn predict_shift_landing_m(
+    tp: &TransmissionParams,
+    fp: &ForceParams,
+    g_landing: f32,
+    propulsive: f32,
+    m: f32,
+    r_mean: f32,
+    dt: f32,
+) -> f32 {
+    let mut pm = m;
+    for _ in 0..tp.shift_ticks {
+        let f_drag = reflected_drag(tp, g_landing, pm, propulsive);
+        pm = (pm + (f_drag / 2.0 - r_mean) / fp.inertia * dt).clamp(-fp.max_speed, fp.max_speed);
+    }
+    pm
+}
+
 fn regenerative(
     mode: TransmissionMode,
     fp: &ForceParams,
@@ -480,6 +556,9 @@ fn regenerative(
             st.reverse = want_rev;
             st.gear = 1;
             st.shift_ticks = tp.shift_ticks;
+            // A ladder swap is not an up/down shift: the reversal dwell restarts clean.
+            st.last_shift_dir = 0;
+            st.dwell_ticks = 0;
         }
     }
     let ladder: &[f32] = if st.reverse {
@@ -489,25 +568,6 @@ fn regenerative(
     };
     let top = ladder.len() as u8;
     st.gear = st.gear.clamp(1, top);
-
-    // --- Auto-shift on engine-rpm bands, hysteresis from the band gap; a shift in flight
-    // blocks further decisions until its interruption window has elapsed.
-    let rpm_geared = |g: f32| m.abs() * g / tp.sprocket_radius / RPM_TO_RAD;
-    if st.shift_ticks == 0 {
-        let rpm = rpm_geared(ladder[(st.gear - 1) as usize]);
-        if rpm > tp.shift_up_rpm && st.gear < top {
-            st.gear += 1;
-            st.shift_ticks = tp.shift_ticks;
-        } else if rpm < tp.shift_down_rpm && st.gear > 1 {
-            st.gear -= 1;
-            st.shift_ticks = tp.shift_ticks;
-        }
-    }
-    let shifting = st.shift_ticks > 0;
-    if shifting {
-        st.shift_ticks -= 1;
-    }
-    let g = ladder[(st.gear - 1) as usize];
 
     // --- Driver intent (the game-layer W/S contract, declared HERE once with honest
     // mechanisms — the Governor conflated zero-throttle with brake-to-zero):
@@ -531,6 +591,51 @@ fn regenerative(
     } else {
         0.0
     };
+
+    // --- Auto-shift on engine-rpm bands, hysteresis from the band gap; a shift in flight
+    // blocks further decisions until its interruption window has elapsed. Three SIM-POLICY
+    // gates (the fix-1 anti-hunting batch) kill the shift-cut oscillation the static bands
+    // alone could not — the cut's own belt-speed bleed erased the ~100 rpm band margin in
+    // low gears (measured full-throttle climb trace: 1-2-1-2-1-2-3-2-…):
+    //   a) upshifts must PREDICT a landing rpm ≥ down band + POSTSHIFT_MARGIN_RPM at the
+    //      END of the torque-cut window ([`predict_shift_landing_m`] — the same
+    //      integration the window itself runs);
+    //   b) a committed shift blocks the OPPOSITE-direction shift for REVERSAL_DWELL_TICKS
+    //      (same-direction climbs stay free);
+    //   c) downshifts must land under the engine's max curve rpm − OVERREV_MARGIN_RPM.
+    let rpm_of = |mm: f32, g: f32| mm.abs() * g / tp.sprocket_radius / RPM_TO_RAD;
+    let rpm_geared = |g: f32| rpm_of(m, g);
+    if st.shift_ticks == 0 {
+        let rpm = rpm_geared(ladder[(st.gear - 1) as usize]);
+        let dwell_blocks = |shift_dir: i8| st.dwell_ticks > 0 && st.last_shift_dir == -shift_dir;
+        if rpm > tp.shift_up_rpm && st.gear < top && !dwell_blocks(1) {
+            let g_up = ladder[st.gear as usize];
+            let r_mean = (inp.reactions[0] + inp.reactions[1]) / 2.0;
+            let landing = predict_shift_landing_m(tp, fp, g_up, propulsive, m, r_mean, dt);
+            if rpm_of(landing, g_up) >= tp.shift_down_rpm + POSTSHIFT_MARGIN_RPM {
+                st.gear += 1;
+                st.shift_ticks = tp.shift_ticks;
+                st.last_shift_dir = 1;
+                st.dwell_ticks = REVERSAL_DWELL_TICKS;
+            }
+        } else if rpm < tp.shift_down_rpm && st.gear > 1 && !dwell_blocks(-1) {
+            let g_down = ladder[(st.gear - 2) as usize];
+            if rpm_geared(g_down) <= tp.max_curve_rpm() - OVERREV_MARGIN_RPM {
+                st.gear -= 1;
+                st.shift_ticks = tp.shift_ticks;
+                st.last_shift_dir = -1;
+                st.dwell_ticks = REVERSAL_DWELL_TICKS;
+            }
+        }
+    }
+    if st.dwell_ticks > 0 {
+        st.dwell_ticks -= 1;
+    }
+    let shifting = st.shift_ticks > 0;
+    if shifting {
+        st.shift_ticks -= 1;
+    }
+    let g = ladder[(st.gear - 1) as usize];
 
     // --- Parking latch (driver intent, cont.): a zero command near standstill sets the
     // lever; any drive command releases it. State, not a blend — see [`PARK_ENGAGE_SPEED`].
@@ -561,9 +666,7 @@ fn regenerative(
     } else {
         dir * propulsive * (torque * g / tp.sprocket_radius)
     };
-    let f_drag = -(tp.peak_torque_nm * tp.drag_fraction * g / tp.sprocket_radius)
-        * (m / DRAG_SAT_SPEED).clamp(-1.0, 1.0)
-        * forces::hold_blend(propulsive / DRAG_THROTTLE_RELEASE);
+    let f_drag = reflected_drag(tp, g, m, propulsive);
 
     // --- Steering. κ table indexed by the active gear (reverse mirrors the low forward
     // gears); `d` follows the steer SIGN regardless of travel direction — the superimposed
@@ -598,13 +701,24 @@ fn regenerative(
             // steer path bypasses the gearbox, so full lock always commands the minimum
             // radius and the POWER budget, not the ratio ladder, is what forces a fast tank
             // wide (measured: the power scale slows the hull into the radius it can afford —
-            // the design's "strong turn-in, then physically required speed loss"). The
-            // genuine-pivot floor keeps steering authority alive at m → 0.
+            // the design's "strong turn-in, then physically required speed loss").
+            //
+            // At m → 0 the SAME doctrine holds (fix 2): the hydrostatic family's pivot is
+            // limited by the POWER budget, not by a speed target — the old neutral_d_full
+            // FLOOR was a kinematic speed command that left the engine at ~1/6 of its
+            // budget and pivoted at 0.131 rad/s. Standing still, the box commands steer
+            // FORCE up to the capacity bound (steer-proportional, the per-output
+            // convention's ±2×capacity on the difference axis) and the power-conservation
+            // scale below is the binding limiter, so the pivot rate settles where engine
+            // power balances scrub dissipation. The two regimes blend continuously on |m|
+            // over NEUTRAL_M_SPEED with the module's regime-blend shape (`hold_blend`) —
+            // no one-tick force jump crosses the seam.
             let k_full = tp.steer_kappa[0].0;
-            let target = inp.steer.signum()
-                * (inp.steer.abs() * k_full * m.abs()).max(inp.steer.abs() * tp.neutral_d_full);
             if inp.steer != 0.0 || d != 0.0 {
-                f_s = servo(target);
+                let servo_f = servo(inp.steer.signum() * (inp.steer.abs() * k_full * m.abs()));
+                let pivot_f = inp.steer * f_s_max;
+                let w = forces::hold_blend(m.abs() / NEUTRAL_M_SPEED);
+                f_s = servo_f + (pivot_f - servo_f) * w;
             }
         }
         TransmissionMode::FixedRadii => {
@@ -629,9 +743,11 @@ fn regenerative(
             };
             let neutral = inp.throttle.abs() < NEUTRAL_THROTTLE && m.abs() < NEUTRAL_M_SPEED;
             if neutral {
-                // The marginal brake-gated neutral turn: a slow servo toward the declared
-                // fraction of the 1st-gear tight ratio, capacity-limited.
-                f_s = servo(inp.steer * tp.neutral_d_full * tp.neutral_fraction);
+                // The marginal brake-gated neutral turn: a slow capacity-limited servo
+                // toward the DERIVED pivot scale `neutral_d_full = κ_tight(F1) ×
+                // v1_governed` — the radii table's own gear-independent invariant (fix 3
+                // deleted the unprovenanced `neutral_fraction` that used to shrink it).
+                f_s = servo(inp.steer * tp.neutral_d_full);
             } else {
                 // The geared-radius constraint g = d − s·κ·|m| = 0, solved semi-implicitly:
                 // λ is the force that lands g at zero after this tick's integration, clamped
@@ -838,7 +954,6 @@ mod tests {
                 (19.7, 58.3),
             ],
             steer_capacity_n: 240_000.0,
-            neutral_fraction: 0.5,
             recirculation: 0.9,
             brake_capacity_n: 120_000.0,
             drag_fraction: 0.25,
@@ -910,7 +1025,9 @@ mod tests {
         let m_for = |rpm: f32| rpm * RPM_TO_RAD * tp.sprocket_radius / g1;
 
         // Above the up band → one upshift, then the window holds further decisions.
-        let v = m_for(1_750.0);
+        // 1780 rpm: comfortably past the band AND past the fix-1a landing gate (unloaded
+        // landing 1780 × 8/12.7 ≈ 1121 rpm ≥ down band 950 + margin 150).
+        let v = m_for(1_780.0);
         step(
             TransmissionMode::Hybrid,
             &fp,
@@ -932,10 +1049,11 @@ mod tests {
             "no second decision inside the interruption window"
         );
 
-        // Drain the window at a mid-band speed for gear 2: no hunting either way.
+        // Drain the window AND the fix-1b reversal dwell at a mid-band speed for gear 2:
+        // no hunting either way.
         let g2 = tp.gears_fwd[1];
         let v_mid = 1_300.0 * RPM_TO_RAD * tp.sprocket_radius / g2;
-        for _ in 0..(tp.shift_ticks as usize + 5) {
+        for _ in 0..(tp.shift_ticks as usize + REVERSAL_DWELL_TICKS as usize + 5) {
             step(
                 TransmissionMode::Hybrid,
                 &fp,
@@ -967,7 +1085,8 @@ mod tests {
         let (fp, tp) = (lab_fp(), lab_tp());
         let mut st = TransmissionState::default();
         let g1 = tp.gears_fwd[0];
-        let v = 1_750.0 * RPM_TO_RAD * tp.sprocket_radius / g1;
+        // 1780 rpm — past the up band and the fix-1a landing gate (see gear_shift_hysteresis).
+        let v = 1_780.0 * RPM_TO_RAD * tp.sprocket_radius / g1;
         let inp = input(1.0, 0.0, [v, v], [0.0, 0.0]);
         let mut zero_ticks = 0;
         loop {
@@ -986,6 +1105,152 @@ mod tests {
             assert!(zero_ticks <= tp.shift_ticks as usize, "window must end");
         }
         assert_eq!(zero_ticks, tp.shift_ticks as usize);
+    }
+
+    /// Fix-1a: the upshift commits only if the belt state PREDICTED at the end of the
+    /// torque-cut window still lands above the down band + POSTSHIFT_MARGIN_RPM. Same
+    /// operating point, two loads: unloaded the landing holds and the shift engages; under
+    /// a heavy frozen reaction (25 kN/side) the cut would bleed ≈ 0.98 m/s
+    /// (25 kN / 8 t × 20 ticks / 64 Hz) and land deep inside the down band — the shift
+    /// must be refused. Pre-fix, exactly this bleed fired the down band the tick the
+    /// freeze lifted: the measured 1-2-1-2 climb.
+    #[test]
+    fn upshift_landing_gate_blocks_shift_cut_hunting() {
+        let (fp, tp) = (lab_fp(), lab_tp());
+        let g1 = tp.gears_fwd[0];
+        let v = 1_780.0 * RPM_TO_RAD * tp.sprocket_radius / g1;
+        let mut st = TransmissionState::default();
+        step(
+            TransmissionMode::Hybrid,
+            &fp,
+            Some(&tp),
+            &mut st,
+            &input(1.0, 0.0, [v, v], [25_000.0, 25_000.0]),
+        );
+        assert_eq!(
+            st.gear, 1,
+            "a landing predicted inside the down band must refuse the upshift"
+        );
+        let mut st = TransmissionState::default();
+        step(
+            TransmissionMode::Hybrid,
+            &fp,
+            Some(&tp),
+            &mut st,
+            &input(1.0, 0.0, [v, v], [0.0, 0.0]),
+        );
+        assert_eq!(st.gear, 2, "unloaded, the same operating point upshifts");
+    }
+
+    /// Fix-1b: after a shift commits, the OPPOSITE-direction shift is dwell-blocked for
+    /// REVERSAL_DWELL_TICKS, but SAME-direction shifts stay free (a rapid 1-2-3 climb must
+    /// not slow down).
+    #[test]
+    fn dwell_blocks_reversal_not_same_direction() {
+        let (fp, tp) = (lab_fp(), lab_tp());
+        let rpm_v = |rpm: f32, g: f32| rpm * RPM_TO_RAD * tp.sprocket_radius / g;
+        let mut st = TransmissionState::default();
+        let at = |st: &mut TransmissionState, v: f32| {
+            step(
+                TransmissionMode::Hybrid,
+                &fp,
+                Some(&tp),
+                st,
+                &input(1.0, 0.0, [v, v], [0.0, 0.0]),
+            );
+        };
+        // 1 → 2 commits (dwell armed).
+        at(&mut st, rpm_v(1_780.0, tp.gears_fwd[0]));
+        assert_eq!(st.gear, 2);
+        // Drain the interruption window at a mid-band gear-2 speed; the dwell (32 ticks)
+        // must still be live when the window (≈ 20 ticks) ends, or this test bites nothing.
+        for _ in 0..tp.shift_ticks {
+            at(&mut st, rpm_v(1_300.0, tp.gears_fwd[1]));
+        }
+        assert_eq!(st.gear, 2);
+        assert!(st.dwell_ticks > 0, "the dwell must outlive the window");
+        // SAME direction: 2 → 3 engages immediately despite the live dwell (1780 rpm is
+        // past the up band, landing 1780 × 12.7/20.4 ≈ 1108 ≥ 1100 clears the fix-1a gate).
+        at(&mut st, rpm_v(1_780.0, tp.gears_fwd[1]));
+        assert_eq!(
+            st.gear, 3,
+            "same-direction shifts must not be dwell-blocked"
+        );
+        // OPPOSITE direction: drop below gear-3's down band. The downshift must wait out
+        // the dwell — strictly longer than the interruption window alone would hold it.
+        let v_low = rpm_v(900.0, tp.gears_fwd[2]);
+        let mut ticks = 0usize;
+        while st.gear == 3 {
+            at(&mut st, v_low);
+            ticks += 1;
+            assert!(ticks < 200, "the downshift must eventually engage");
+        }
+        assert!(
+            ticks > tp.shift_ticks as usize + 5,
+            "the reversal must stay dwell-blocked past the interruption window \
+             (fired after {ticks} ticks)"
+        );
+    }
+
+    /// Fix-1c: a downshift whose landing rpm would exceed the engine's max curve rpm minus
+    /// OVERREV_MARGIN_RPM is refused. Custom two-gear ladder with a 2.55 ratio step (a
+    /// shape the spec-level hysteresis validation would reject — deliberately extreme to
+    /// make the gate the ONLY thing standing between the down band and a 2295-rpm landing
+    /// on an 1800-rpm curve): at 900 rpm in gear 2 (below the 950 down band) the landing
+    /// in gear 1 ≈ 2295 > 1800 − 100 → refused; at 600 rpm the landing ≈ 1530 is inside
+    /// the envelope and the downshift proceeds.
+    #[test]
+    fn overrev_gate_refuses_too_early_downshift() {
+        let fp = lab_fp();
+        let tp = TransmissionParams::from_authoring(&TransmissionAuthoring {
+            idle_rpm: 600.0,
+            governed_rpm: 1800.0,
+            rated_rpm: 1800.0,
+            torque_nm: &[
+                (600.0, 1650.0),
+                (1100.0, 2200.0),
+                (1700.0, 1950.0),
+                (1800.0, 0.0),
+            ],
+            forward_speeds_kmh: &[8.0, 20.4],
+            reverse_speeds_kmh: &[8.0],
+            shift_up_rpm: 1700.0,
+            shift_down_rpm: 950.0,
+            steer_radii_m: &[(3.0, 8.9), (7.7, 22.8)],
+            steer_capacity_n: 240_000.0,
+            recirculation: 0.9,
+            brake_capacity_n: 120_000.0,
+            drag_fraction: 0.25,
+            shift_secs: 0.31,
+            sprocket_radius_m: 0.34,
+            half_tread_m: 1.25,
+        });
+        let g2 = tp.gears_fwd[1];
+        let mut st = TransmissionState {
+            gear: 2,
+            ..Default::default()
+        };
+        let v = 900.0 * RPM_TO_RAD * tp.sprocket_radius / g2;
+        step(
+            TransmissionMode::Hybrid,
+            &fp,
+            Some(&tp),
+            &mut st,
+            &input(1.0, 0.0, [v, v], [0.0, 0.0]),
+        );
+        assert_eq!(
+            st.gear, 2,
+            "a landing past max curve rpm − margin must refuse the downshift"
+        );
+        let v = 600.0 * RPM_TO_RAD * tp.sprocket_radius / g2;
+        step(
+            TransmissionMode::Hybrid,
+            &fp,
+            Some(&tp),
+            &mut st,
+            &input(1.0, 0.0, [v, v], [0.0, 0.0]),
+        );
+        assert_eq!(st.gear, 1, "an in-envelope landing must downshift");
     }
 
     /// The L600 constraint converges to the geared ratio: under sustained throttle + tight
@@ -1412,23 +1677,17 @@ mod tests {
     /// drives the two OUTPUTS differentially, so each output may carry up to the full
     /// PER-OUTPUT capacity (`F_s` bounded by `2 × capacity`, `±capacity` per belt) — not
     /// `±capacity/2`, which halves the yaw moment and left the Tiger under its own
-    /// footprint scrub. At rest under full steer the semi-implicit servo asks for the
-    /// exact-landing force `2·target·I/dt`, capacity-clamped — each side must carry
-    /// `min(capacity, target·I/dt)`, which for the lab's neutral targets is ≥ 98% of the
-    /// per-output datum (and EXCEEDS the old difference-axis reading's `capacity/2` ceiling
-    /// outright). Checked on both regenerative adapters (the L600 at rest is in its
-    /// brake-gated neutral regime, which shares the servo).
+    /// footprint scrub. At rest under full steer the Hybrid commands full steer FORCE
+    /// outright (fix 2 — the power-limited pivot; the power scale cannot bind at v = 0),
+    /// and the L600's brake-gated neutral regime asks the semi-implicit servo for the
+    /// exact-landing force `2·neutral_d_full·I/dt`, capacity-clamped — for the lab data
+    /// both must land each side at the FULL per-output datum (which EXCEEDS the old
+    /// difference-axis reading's `capacity/2` ceiling outright).
     #[test]
     fn pivot_authority_is_per_output_capacity() {
         let (fp, tp) = (lab_fp(), lab_tp());
         let dt = 1.0 / 64.0;
-        for (mode, target) in [
-            (TransmissionMode::Hybrid, tp.neutral_d_full),
-            (
-                TransmissionMode::FixedRadii,
-                tp.neutral_d_full * tp.neutral_fraction,
-            ),
-        ] {
+        for mode in [TransmissionMode::Hybrid, TransmissionMode::FixedRadii] {
             let mut st = TransmissionState::default();
             let rep = step(
                 mode,
@@ -1437,7 +1696,12 @@ mod tests {
                 &mut st,
                 &input(0.0, 1.0, [0.0, 0.0], [0.0, 0.0]),
             );
-            let expect = (target * fp.inertia / dt).min(tp.steer_capacity_n);
+            let expect = match mode {
+                // Fix 2: force command up to capacity, power-limited thereafter.
+                TransmissionMode::Hybrid => tp.steer_capacity_n,
+                // The neutral servo's exact-landing force, per-output capacity clamp.
+                _ => (tp.neutral_d_full * fp.inertia / dt).min(tp.steer_capacity_n),
+            };
             assert!(
                 (rep.forces[0] - expect).abs() < 1.0,
                 "{mode:?}: left output must carry min(capacity, exact-landing) = {expect}, \

@@ -901,11 +901,11 @@ fn drive_to_speed(app: &mut App, tank: Entity, target: f32, max_ticks: usize) ->
 }
 
 /// The pivot gate body shared by the two steering laws: zero throttle, full steer, ≥ 4 s;
-/// the mean yaw rate over the last second must clear 0.05 rad/s (statelier than the
-/// governor snap is fine — ZERO is the bug this pins: the Tiger's steering capacity read on
-/// the wrong axis could not break its own footprint scrub) and the belts must actually
-/// counter-rotate.
-fn tiger_pivot_gate(mode: crate::track::transmission::TransmissionMode) {
+/// the mean yaw rate over the last second must clear the per-adapter floor (each adapter's
+/// pivot scale is a different LAW — see the callers) and the belts must actually
+/// counter-rotate. ZERO is the original bug this family pins: the Tiger's steering
+/// capacity read on the wrong axis could not break its own footprint scrub.
+fn tiger_pivot_gate(mode: crate::track::transmission::TransmissionMode, min_yaw: f32) {
     let (mut app, tank) = booted_offline_sim(mode);
     let mut yaw_sum = 0.0f32;
     let mut samples = 0u32;
@@ -928,22 +928,77 @@ fn tiger_pivot_gate(mode: crate::track::transmission::TransmissionMode) {
         "[{mode:?}] a neutral pivot must counter-rotate the belts (L {l:.3}, R {r:.3})"
     );
     assert!(
-        mean_yaw.abs() >= 0.05,
-        "[{mode:?}] pivot yaw {mean_yaw:.4} rad/s under full steer — the pivot-dead gate \
-         (≥ 0.05 rad/s)"
+        mean_yaw.abs() >= min_yaw,
+        "[{mode:?}] pivot yaw {mean_yaw:.4} rad/s under full steer — gate ≥ {min_yaw} rad/s"
     );
 }
 
-/// Tiger pivot, L600 fixed-radius adapter (the vehicle's authored architecture).
+/// Tiger pivot, L600 fixed-radius adapter (the vehicle's authored architecture): the
+/// MARGINAL brake-gated neutral turn toward the DERIVED `neutral_d_full` = 0.2808 m/s
+/// (fix 3 deleted the unprovenanced 0.75 fraction that used to shrink the target).
+/// MEASURED on the declared data: 0.131 rad/s mean ground yaw, belts exactly ±0.281 m/s
+/// (the belt-kinematic ceiling d/half-tread ≈ 0.188 rad/s, less scrub slip); gated at
+/// ≥ 0.10 rad/s (margin for platform float drift — the restoration literature's
+/// "technically yes, advisable no" crawl is exactly this regime).
 #[test]
 fn pivot_tiger_l600() {
-    tiger_pivot_gate(crate::track::transmission::TransmissionMode::FixedRadii);
+    tiger_pivot_gate(
+        crate::track::transmission::TransmissionMode::FixedRadii,
+        0.10,
+    );
 }
 
-/// Tiger pivot, hybrid continuous adapter.
+/// Tiger pivot, hybrid continuous adapter: POWER-limited (fix 2 — the standstill pivot
+/// commands steer force up to capacity and the power-conservation scale is the binding
+/// limiter, so the rate settles where engine power balances scrub dissipation; the old
+/// neutral_d_full speed FLOOR used ~68 kW of the ~407 kW budget and pivoted at
+/// 0.131 rad/s). MEASURED on the declared data: 0.654 rad/s mean ground yaw, belts
+/// ±1.40 m/s; gated at ≥ 0.35 rad/s (margin, same policy as the L600 gate).
 #[test]
 fn pivot_tiger_hybrid() {
-    tiger_pivot_gate(crate::track::transmission::TransmissionMode::Hybrid);
+    tiger_pivot_gate(crate::track::transmission::TransmissionMode::Hybrid, 0.35);
+}
+
+/// The fix-1 smoking gun: a standstill full-throttle climb must walk the Tiger ladder
+/// MONOTONICALLY. Pre-fix, every shift's own torque-cut window bled belt speed
+/// (I·v̇ = Q − R keeps subtracting the ground reaction while Q is cut) and the low gears'
+/// steep rpm-per-speed slope turned that into hundreds of rpm — the down band fired the
+/// tick the freeze lifted (measured trace [1,2,1,2,1,2,3,2,3,4,3,4,5,6,7,8]). With the
+/// predicted-landing gate + reversal dwell the gear sequence never decreases.
+#[test]
+fn gear_climb_monotone_tiger() {
+    use crate::track::transmission::TransmissionMode;
+    let (mut app, tank) = booted_offline_sim(TransmissionMode::FixedRadii);
+    face_positive_z(&mut app, tank);
+    let mut trace: Vec<u8> = vec![];
+    let mut max_gear = 0u8;
+    for _ in 0..(20 * 64) {
+        drive_tick(&mut app, tank, 1.0, 0.0);
+        let st = app
+            .world()
+            .get::<crate::track::sim::TankTransmission>(tank)
+            .expect("tank carries transmission state")
+            .0;
+        assert!(
+            !st.reverse,
+            "full forward throttle must stay on the F ladder"
+        );
+        if trace.last() != Some(&st.gear) {
+            trace.push(st.gear);
+        }
+        assert!(
+            st.gear >= max_gear,
+            "gear decreased during the full-throttle climb — shift hunting is back \
+             (trace {trace:?})"
+        );
+        max_gear = max_gear.max(st.gear);
+    }
+    println!("tiger full-throttle gear climb trace: {trace:?}");
+    assert!(
+        max_gear >= 6,
+        "20 s of full throttle must climb well up the ladder (reached F{max_gear}, \
+         trace {trace:?})"
+    );
 }
 
 /// Deceleration on the real Tiger (L600, the authored architecture), both driver intents:
@@ -959,8 +1014,14 @@ fn pivot_tiger_hybrid() {
 ///   bucket 3 — not to the drivetrain, and not tunable-by-feel here). Also pinned: past
 ///   the command-shaper's release slew, coasting never accelerates (the old code
 ///   ACCELERATED on opposite input — the regression this kills).
-/// * OPPOSITE THROTTLE: service brakes at the declared capacity — ≤ 1 m/s within 3 s
-///   (MEASURED: 1.17 s).
+/// * OPPOSITE THROTTLE: service brakes at the declared capacity, re-anchored by fix 4 to
+///   the documented 0.3 g decel target (84 kN/side; the old 250 kN was the circular
+///   grip-limit sizing — and 1.17 s from 6 m/s was the energy-impossible tell). Analytic
+///   prediction: 2 × 84 kN / 57 t = 2.94 m/s² in the full phase, plus engine drag
+///   (~17 kN in F7, growing through downshifts) ≈ 3.2 m/s², plus the command shaper's
+///   ~0.5 s press slew dead time → from 6.0 m/s ≈ 0.5 + 5.0/3.2 ≈ 2.1–2.4 s to 1 m/s.
+///   MEASURED: 2.45 s. Gate ≤ 3.5 s (margin for platform float drift, nothing else).
+///   The coast leg above is UNCHANGED by fix 4 (no brake in the release intent).
 #[test]
 fn decel_tiger() {
     use crate::track::transmission::TransmissionMode;
@@ -1003,11 +1064,13 @@ fn decel_tiger() {
         coast_ticks as f32 / 64.0
     );
 
-    // Phase 2 — service brakes: opposite throttle from ≥ 6 m/s.
+    // Phase 2 — service brakes: opposite throttle from ≥ 6 m/s. Budget 3.5 s: the fix-4
+    // decel-anchored capacity predicts ≈ 2.2 s including the input slew dead time (see
+    // the doc comment's arithmetic).
     drive_to_speed(&mut app, tank, 6.0, 2400);
     released = hull_speed(&mut app, tank);
     let mut brake_ticks = None;
-    for tick in 0..(3 * 64) {
+    for tick in 0..(7 * 32) {
         drive_tick(&mut app, tank, -1.0, 0.0);
         if hull_speed(&mut app, tank) <= 1.0 {
             brake_ticks = Some(tick + 1);
@@ -1016,7 +1079,7 @@ fn decel_tiger() {
     }
     let brake_ticks = brake_ticks.unwrap_or_else(|| {
         panic!(
-            "service brakes never reached 1 m/s within 3 s from {released:.2} m/s \
+            "service brakes never reached 1 m/s within 3.5 s from {released:.2} m/s \
              (speed {:.2})",
             hull_speed(&mut app, tank)
         )

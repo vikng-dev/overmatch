@@ -105,17 +105,27 @@ TankSpec(
                     // "Tiger unable to steer in place" (2026-07-18). INFERRED sizing, no
                     // published steering-member torque rating reachable.
                     capacity: 250_000.0,
-                    // Marginal brake-gated neutral turn (restoration-tier synthesis:
-                    // "technically yes, advisable no") — INFERRED fraction.
-                    neutral_fraction: 0.75,
+                    // `neutral_fraction` DELETED (fix 3, 2026-07-19): the 0.75 was an
+                    // INFERRED feel scalar with no source. The marginal brake-gated
+                    // neutral turn now uses the DERIVED datum directly:
+                    // neutral_d_full = κ_tight(F1) × v1_governed = 0.2808 m/s — the radii
+                    // table's own invariant (κ_tight(g) × v(g) ≈ 0.337 m/s @ 3000 rpm in
+                    // EVERY gear) makes that the correct emergent value for a fixed-radius
+                    // box.
                     // Mechanical recirculation efficiency ~0.9 — INFERRED.
                     recirculation: 0.9,
                 ),
-                // Per-side brake capacity at the sprocket: brake ≈ traction limit (the SOUND
-                // sizing rule, Rabiee friction cap — a bigger brake just locks the track);
-                // μ·W/2 ≈ 252 kN here. The 20° slope load ≈ 95.6 kN/side sits well inside,
-                // so hill-hold is capacity-tested, not infinite.
-                brake_force: 250_000.0,
+                // Per-side brake capacity at the sprocket: decel-anchored 0.3 g (the
+                // 0.2–0.35 g historical band for WWII heavy tanks; even modern heavy
+                // trucks certify ~0.5 g): 0.3 g × 57 000 kg × 9.81 = 167.7 kN total →
+                // 84 kN per side. Replaces the circular grip-limit sizing (250 kN was
+                // sized against μ·W/2 — the very friction it was meant to be tested by —
+                // and implied 2.9 MW through two 1940s Argus discs at speed: energy-
+                // impossible). Supersede with a real Argus brake/output-torque rating
+                // when sourced. Consequence: the park hold caps at ~17.5° of slope
+                // (W·sinθ = 168 kN); beyond it the latch back-drives honestly (the
+                // capacity-breach law) instead of holding an unphysical 20°+.
+                brake_force: 84_000.0,
             ),
         ),
         support: (

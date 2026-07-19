@@ -391,7 +391,6 @@ impl Default for T34Transmission {
             // convention it simply strengthens the lab's steering authority — the T-34
             // gates re-measure it. Generous for a lab vehicle, all INFERRED.
             steer_capacity_n: 240_000.0,
-            neutral_fraction: 0.5,
             recirculation: 0.9,
             // Brake ≈ traction limit (μ·W/2 ≈ 117 kN) — the sound sizing rule.
             brake_capacity_n: 120_000.0,
