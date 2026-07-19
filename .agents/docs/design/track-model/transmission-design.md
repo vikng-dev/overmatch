@@ -606,3 +606,21 @@ and would author its own characteristic. Stage C does not implement one.
 2. **Arcade default: geared regenerative `m/d` hybrid.** Best controls and least mechanism state while retaining honest energy flow.
 3. **Full continuous Merritt-Brown/HSWL adapter** for vehicles that actually use it.
 4. **Clutch-and-brake adapter** only for T-34-class vehicles; its lack of neutral steer and heat-wasting turns should remain genuine traits.
+
+### Stage C review round (2026-07-19)
+
+Adversarial review (codex) rejected the first cut with 1 blocking + 5 serious findings;
+all dispositioned: hill-hold is now a LIVE latch (per-tick reselection, truthful
+GradeLimit, reserve-scaled release formula, 32-tick re-engage cooldown overridden by
+real rollback); a CONFIRMED reserve deficit outranks the upshift arm and is exempt
+from the reversal dwell (a correction, not hunting); sequential targets revalidate
+intent + demand every step; the demand EMA reseeds on direction swap; protective
+overrun upshift (governed + 150 rpm, no propulsive intent needed) closes the downhill
+over-rev path; confirmation counter decays instead of hard-resetting; reverse-ladder
+HUD labels. The 30° gate now boots the untouched Tiger blueprint and asserts the
+HONEST result: the Tiger CLIMBS 30° from a hill-hold launch (500 kN modeled F1 launch
+force vs 279.6 kN demand) — the previous synthetic fixture faked a grade limit. The
+parked 30° slide (192 kN brake < 279.6 kN) remains correct and emergent; a
+static-vs-dynamic brake capacity split is queued pending a real Argus rating. A
+two-world bit-exact FixedRadii slope replay (full TransmissionState incl. EMA,
+counter, target, latch; 512 ticks) now guards stage-C determinism.

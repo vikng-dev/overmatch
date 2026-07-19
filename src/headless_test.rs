@@ -1538,6 +1538,125 @@ fn grade_approach_20_deg_direct_vs_sequential_tiger() {
     );
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct StageCReplayTick {
+    state: crate::track::transmission::TransmissionState,
+    belt_speed_bits: [u32; 2],
+}
+
+/// A slope script that exercises stage-C memory in the real FixedRadii offline composition. The
+/// Sequential F6 approach pays adjacent windows, accumulating the demand EMA and confirmation
+/// evidence, retaining a target, and entering hill hold before it crests.
+fn scripted_stage_c_replay_run() -> Vec<StageCReplayTick> {
+    use crate::track::transmission::{ShiftAddressing, TransmissionMode, TransmissionState};
+
+    let (mut app, tank) = booted_offline_sim(TransmissionMode::FixedRadii);
+    app.world_mut()
+        .resource_mut::<crate::track::sim::TrackGear>()
+        .trans_mut()
+        .expect("the Tiger declares a transmission")
+        .shift_addressing = ShiftAddressing::Sequential;
+
+    let rot = Quat::from_rotation_x(20.0_f32.to_radians());
+    let approach_speed = 4.0;
+    {
+        let mut e = app.world_mut().entity_mut(tank);
+        e.get_mut::<avian3d::prelude::Position>().unwrap().0 = Vec3::new(0.0, 1.50, -37.0);
+        e.get_mut::<avian3d::prelude::Rotation>().unwrap().0 = rot;
+        e.get_mut::<avian3d::prelude::LinearVelocity>().unwrap().0 =
+            rot * Vec3::NEG_Z * approach_speed;
+        e.get_mut::<avian3d::prelude::AngularVelocity>().unwrap().0 = Vec3::ZERO;
+        let mut drive = e.get_mut::<crate::track::sim::TrackDrive>().unwrap();
+        drive.throttle = 1.0;
+        drive.steer = 0.0;
+        drive.sides[0].speed = approach_speed;
+        drive.sides[1].speed = approach_speed;
+        *e.get_mut::<crate::track::sim::TankTransmission>().unwrap() =
+            crate::track::sim::TankTransmission(TransmissionState {
+                gear: 6,
+                ..Default::default()
+            });
+    }
+
+    let mut ticks = Vec::with_capacity(512);
+    for _ in 0..512 {
+        drive_tick(&mut app, tank, 1.0, 0.0);
+        let world = app.world();
+        let state = world
+            .get::<crate::track::sim::TankTransmission>(tank)
+            .expect("tank carries transmission state")
+            .0;
+        let drive = world
+            .get::<crate::track::sim::TrackDrive>(tank)
+            .expect("tank carries belt state");
+        ticks.push(StageCReplayTick {
+            state,
+            belt_speed_bits: [
+                drive.sides[0].speed.to_bits(),
+                drive.sides[1].speed.to_bits(),
+            ],
+        });
+    }
+    ticks
+}
+
+/// D-replay: two fresh FixedRadii offline worlds must reproduce every stage-C state field and both
+/// belt speeds bit-for-bit on every scripted slope tick. The witnesses prevent a vacuous pass that
+/// never exercised the EMA, counter, held target, or hill-hold latch.
+#[test]
+fn stage_c_slope_replay_is_bit_exact_every_tick() {
+    let first = scripted_stage_c_replay_run();
+    let max_demand = first
+        .iter()
+        .map(|tick| tick.state.demand_n)
+        .fold(0.0f32, f32::max);
+    let max_counter = first
+        .iter()
+        .map(|tick| tick.state.grade_confirm_ticks)
+        .max()
+        .unwrap_or(0);
+    let target_ticks = first
+        .iter()
+        .filter(|tick| tick.state.grade_target > 0)
+        .count();
+    let hold_ticks = first.iter().filter(|tick| tick.state.hill_hold).count();
+    assert!(
+        max_demand > 0.0,
+        "slope script never exercised the demand EMA"
+    );
+    assert!(
+        max_counter > 0,
+        "slope script never accumulated deficit evidence"
+    );
+    assert!(
+        target_ticks > 0,
+        "slope script never retained a sequential target"
+    );
+    assert!(hold_ticks > 0, "slope script never latched hill hold");
+
+    let second = scripted_stage_c_replay_run();
+    assert_eq!(first.len(), second.len());
+    if let Some((tick, (left, right))) = first
+        .iter()
+        .zip(&second)
+        .enumerate()
+        .find(|(_, (left, right))| left != right)
+    {
+        panic!(
+            "stage-C replay first differs at slope tick {tick}:\nleft:  {left:#?}\nright: {right:#?}"
+        );
+    }
+    println!(
+        "stage-C bit replay: {}/{} ticks exact; max demand {:.0} N, max counter {}, target {} ticks, hold {} ticks",
+        first.len(),
+        second.len(),
+        max_demand,
+        max_counter,
+        target_ticks,
+        hold_ticks,
+    );
+}
+
 /// Stage-C hill hold on the real 20-degree face. After the normal zero-input settle, force the
 /// preselector into F5 at rest and hold W: F5 cannot launch against the DERIVED 191.2 kN slope
 /// demand, so hill hold must engage, directly select a capable lower gear, and then release into
@@ -1622,27 +1741,41 @@ fn hill_hold_20_deg_engages_and_pulls_away_tiger() {
     assert!(saw_hold, "F5 at rest on 20 degrees must engage hill hold");
 }
 
-/// Honest grade-limit fixture on the course's 30-degree ramp. The Tiger-derived variant keeps a
-/// declared 160 kN/side DERIVED fixture brake (above the DERIVED 139.8 kN/side slope demand) but
-/// reduces engine torque/coupling to a 100 N m DERIVED fixture value, leaving F1 below demand.
-/// Held W must therefore expose
-/// `GRADE LIMIT` and stay on the brakes indefinitely; no hidden holding force is introduced.
+/// D4 honest 30-degree capability gate using the REAL Tiger blueprint values. The prior fixture
+/// manufactured `GRADE LIMIT` with DERIVED test overrides of 100 N m engine/clutch torque and
+/// 160 kN/side brake force. The shipped Tiger's MEASURED blueprint values instead author a
+/// 250 kN/side force cap and 96 kN/side brake: its F1 launch capability exceeds the DERIVED
+/// 30-degree demand plus scheduler margin, so truthful
+/// selection must NOT report `GRADE LIMIT`; held W climbs. This gate prints and pins those numbers
+/// so a future fixture cannot mask another engage/release capability mismatch.
 #[test]
-fn hill_hold_30_deg_grade_limit_stays_held_variant() {
+fn real_tiger_30_deg_reports_capability_truthfully() {
     use crate::track::transmission::{SchedulerState, TransmissionMode, TransmissionState};
     let (mut app, tank) = booted_offline_sim(TransmissionMode::FixedRadii);
-    {
-        let mut gear = app
-            .world_mut()
-            .resource_mut::<crate::track::sim::TrackGear>();
-        let tp = gear.trans_mut().expect("the Tiger declares a transmission");
-        for (_, torque) in &mut tp.engine.torque_nm {
-            *torque = 100.0;
-        }
-        tp.peak_torque_nm = 100.0;
-        tp.clutch_capacity = 100.0;
-        tp.brake_capacity_n = 160_000.0;
-    }
+    let mass = app.world().resource::<TankBlueprint>().spec.mass;
+    let demand = mass * 9.81 * 30.0_f32.to_radians().sin();
+    let scheduler_margin = demand * 0.10 + 10_000.0;
+    let max_launch_force = {
+        let gear = app.world().resource::<crate::track::sim::TrackGear>();
+        let tp = gear.trans().expect("the Tiger declares a transmission");
+        let force_cap = 2.0
+            * app
+                .world()
+                .resource::<TankBlueprint>()
+                .spec
+                .track
+                .powertrain
+                .force;
+        tp.gears_fwd
+            .iter()
+            .map(|&ratio| (tp.torque_at(0.0) * ratio / tp.sprocket_radius).min(force_cap))
+            .fold(0.0f32, f32::max)
+    };
+    assert!(
+        max_launch_force >= demand + scheduler_margin,
+        "real Tiger fixture must be capable on 30 degrees: force {max_launch_force:.0}, demand \
+         {demand:.0}, margin {scheduler_margin:.0}"
+    );
     {
         let mut e = app.world_mut().entity_mut(tank);
         e.get_mut::<avian3d::prelude::Position>().unwrap().0 = Vec3::new(14.0, 3.4, -40.0);
@@ -1694,23 +1827,23 @@ fn hill_hold_30_deg_grade_limit_stays_held_variant() {
         .get::<crate::track::sim::TrackDrive>(tank)
         .expect("tank drives");
     let belt_m = (drive.sides[0].speed + drive.sides[1].speed) / 2.0;
-    let drift = (p1 - p0).length();
+    let uphill_progress = (p1 - p0).dot(Quat::from_rotation_x(30.0_f32.to_radians()) * Vec3::NEG_Z);
     println!(
-        "30-deg weak-engine grade limit: exposed {grade_limit_ticks}/384 ticks, \
-         drift {drift:.4} m, belt_m {belt_m:.4} m/s"
+        "30-deg real Tiger: modeled max launch {max_launch_force:.0} N, demand {demand:.0} N, \
+         margin {scheduler_margin:.0} N; GRADE LIMIT {grade_limit_ticks}/384 ticks, uphill \
+         {uphill_progress:.4} m, belt_m {belt_m:.4} m/s"
     );
     assert_eq!(
-        grade_limit_ticks,
-        6 * 64,
-        "GRADE LIMIT must stay exposed indefinitely"
+        grade_limit_ticks, 0,
+        "a capable real Tiger must never expose GRADE LIMIT on 30 degrees"
     );
     assert!(
-        drift < 0.05,
-        "modeled 160 kN/side brakes must hold (drift {drift:.4} m)"
+        uphill_progress > 0.5,
+        "the capable real Tiger must pull uphill (progress {uphill_progress:.4} m)"
     );
     assert!(
-        belt_m.abs() < 0.01,
-        "held belts must remain stopped (m = {belt_m})"
+        belt_m > 0.0,
+        "the capable real Tiger must drive its belts uphill (m = {belt_m})"
     );
 }
 

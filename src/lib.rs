@@ -133,6 +133,7 @@ mod offline_feel_tests {
                 grade_target: 3,
                 scheduler: track::transmission::SchedulerState::GradeShift { from: 5, to: 3 },
                 hill_hold: true,
+                hold_reengage_ticks: 11,
             }))
             .id();
 
@@ -153,6 +154,16 @@ mod offline_feel_tests {
         );
         assert_eq!(press(&mut app), TransmissionMode::Hybrid);
         assert_eq!(press(&mut app), TransmissionMode::FixedRadii);
+    }
+
+    #[test]
+    fn reverse_grade_shift_hud_uses_reverse_ladder_letter() {
+        let state = TransmissionState {
+            reverse: true,
+            scheduler: track::transmission::SchedulerState::GradeShift { from: 4, to: 2 },
+            ..Default::default()
+        };
+        assert_eq!(scheduler_hud_line(&state), "sched GRADE R4->R2");
     }
 }
 
@@ -509,6 +520,22 @@ fn cycle_transmission_feel(
     }
 }
 
+/// Render scheduler truth for the offline HUD. Grade targets live on whichever ladder the state
+/// currently engages, so reverse shifts must read `R4->R2`, not a hard-coded forward label.
+fn scheduler_hud_line(st: &track::transmission::TransmissionState) -> String {
+    match st.scheduler {
+        track::transmission::SchedulerState::Normal => "sched NORMAL       ".to_string(),
+        track::transmission::SchedulerState::GradeShift { from, to } => {
+            // `src/lib.rs` is an ASCII-only-font dev surface (tests/ui_ascii.rs), so the requested
+            // visual arrow is rendered as `->`; U+2192 is absent from Bevy's default font.
+            let ladder = if st.reverse { 'R' } else { 'F' };
+            format!("sched GRADE {ladder}{from}->{ladder}{to}")
+        }
+        track::transmission::SchedulerState::HillHold => "sched HILL HOLD    ".to_string(),
+        track::transmission::SchedulerState::GradeLimit => "sched GRADE LIMIT  ".to_string(),
+    }
+}
+
 /// The offline drive-telemetry HUD: rebuild the top-right block from the controlled tank's
 /// tick-truth components every frame. Reading sim components in `Update` (not a fixed system)
 /// is fine for a display — it never writes sim state. Every numeric field is fixed-width so the
@@ -568,21 +595,8 @@ fn update_drive_hud(
         } else {
             "gear --  | rpm ----".to_string()
         };
-        let scheduler_line = if let Some(tp) = joint {
-            let r = track::transmission::readout(&trans.0, tp);
-            match r.scheduler {
-                track::transmission::SchedulerState::Normal => "sched NORMAL       ".to_string(),
-                track::transmission::SchedulerState::GradeShift { from, to } => {
-                    // `src/lib.rs` is an ASCII-only-font dev surface (tests/ui_ascii.rs), so the
-                    // requested visual arrow is rendered as `->`; U+2192 is absent from both
-                    // shipped Barlow weights and from Bevy's default font.
-                    format!("sched GRADE F{from}->F{to}")
-                }
-                track::transmission::SchedulerState::HillHold => "sched HILL HOLD    ".to_string(),
-                track::transmission::SchedulerState::GradeLimit => {
-                    "sched GRADE LIMIT  ".to_string()
-                }
-            }
+        let scheduler_line = if joint.is_some() {
+            scheduler_hud_line(&trans.0)
         } else {
             "sched --           ".to_string()
         };
