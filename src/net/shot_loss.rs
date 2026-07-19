@@ -106,7 +106,7 @@ static REAL_UDP_TEST_MUTEX: Mutex<()> = Mutex::new(());
 /// Serialize loopback harnesses even after a prior assertion panicked. The poisoned state says that
 /// test failed, not that the lock ceased to protect the sockets; recovering keeps later independent
 /// UDP probes runnable and their own failures visible.
-fn lock_real_udp_test() -> MutexGuard<'static, ()> {
+pub(super) fn lock_real_udp_test() -> MutexGuard<'static, ()> {
     REAL_UDP_TEST_MUTEX
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -736,7 +736,7 @@ fn spawn_plate(app: &mut App) {
 /// physics the march raycasts against + the assets `setup_assets` preloads), with no rig, no tank, and
 /// no render. `DefaultPlugins` is deliberately NOT used (the production bins need it for the `.glb`
 /// rig; this test fires into the `FireShell` seam directly), which keeps the run to a few seconds.
-fn base_app() -> App {
+pub(super) fn base_app() -> App {
     let mut app = App::new();
     app.add_plugins((
         MinimalPlugins,
@@ -970,7 +970,7 @@ fn build_client(port: u16, client_id: u64, seed: u64, role: HarnessClient) -> Ap
 
 /// Drive plugin finish/cleanup by hand — a bare `update()` loop skips it, and avian registers its
 /// diagnostics resources (which the spatial-query systems require) in `Plugin::finish`.
-fn finish(app: &mut App) {
+pub(super) fn finish(app: &mut App) {
     while app.plugins_state() == bevy::app::PluginsState::Adding {
         std::thread::sleep(Duration::from_millis(1));
     }
@@ -980,7 +980,7 @@ fn finish(app: &mut App) {
 
 /// Grab a free loopback UDP port by binding one and dropping it. A fixed port would collide with a
 /// concurrent test binary (or a stray dev server) on the same machine.
-fn free_port() -> u16 {
+pub(super) fn free_port() -> u16 {
     UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
         .expect("loopback UDP must be bindable")
         .local_addr()

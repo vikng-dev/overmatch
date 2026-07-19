@@ -446,6 +446,35 @@ pub(crate) fn canonical_tank_state_digest(
     }
 }
 
+/// Test-only readout for the exact `helm` stream. Keeping the digest fields private prevents
+/// production callers from depending on its decomposition while the netcode battery can name the
+/// element-hash assertion explicitly.
+#[cfg(test)]
+pub(crate) fn canonical_element_hash(
+    position: Vec3,
+    rotation: Quat,
+    linvel: Vec3,
+    angvel: Vec3,
+    drive: &TrackDrive,
+    grip: &TrackGrip,
+    elements: &TrackGripElements,
+    transmission: &TankTransmission,
+    sim: &TankSim,
+) -> u64 {
+    canonical_tank_state_digest(
+        position,
+        rotation,
+        linvel,
+        angvel,
+        drive,
+        grip,
+        elements,
+        transmission,
+        sim,
+    )
+    .elements
+}
+
 /// Insert `role` before the extension of the raw `SPIKE_TRACE` value, so concurrently-launched
 /// processes sharing one value write to distinct files. `/tmp/t.jsonl` → `/tmp/t.<role>.jsonl`; a
 /// value with no extension gets `.<role>.jsonl` appended (`/tmp/t` → `/tmp/t.<role>.jsonl`).
