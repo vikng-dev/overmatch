@@ -15,7 +15,7 @@ use std::collections::HashMap;
 
 use crate::damage::{Capability, CrewStation, FunctionRole, Requirement};
 use crate::tank::{ServoSpec, Tank};
-use crate::track::transmission::ShiftAddressing;
+use crate::track::transmission::{ShiftAddressing, TransmissionAuthoring, TransmissionParams};
 
 /// One tank variant's spec sheet — the typed contents of a `.tank.ron` file. Its fields *are* the
 /// components the sim consumes; `tank::apply_tank_spec` copies them onto the rig once ready.
@@ -272,6 +272,40 @@ pub struct TransmissionSpec {
     pub brake_force: f32,
 }
 
+impl TransmissionSpec {
+    /// Adapt this RON shape into the shared validated authoring seam. Both asset validation and
+    /// synchronous sim construction call this mapping, so the accepted domain cannot drift.
+    pub(crate) fn params(
+        &self,
+        sprocket_radius_m: f32,
+        half_tread_m: f32,
+        belt_inertia: f32,
+    ) -> Result<TransmissionParams, BevyError> {
+        TransmissionParams::from_authoring(&TransmissionAuthoring {
+            idle_rpm: self.engine.idle_rpm,
+            governed_rpm: self.engine.governed_rpm,
+            rated_rpm: self.engine.rated_rpm,
+            torque_nm: &self.engine.torque_curve,
+            forward_speeds_kmh: &self.gearbox.forward_speeds_kmh,
+            reverse_speeds_kmh: &self.gearbox.reverse_speeds_kmh,
+            shift_up_rpm: self.gearbox.shift_up_rpm,
+            shift_down_rpm: self.gearbox.shift_down_rpm,
+            steer_radii_m: &self.steering.radii,
+            steer_capacity_n: self.steering.capacity,
+            recirculation: self.steering.recirculation,
+            brake_capacity_n: self.brake_force,
+            drag_fraction: self.engine.drag_fraction,
+            engine_inertia_kgm2: self.engine.inertia_kgm2,
+            clutch_capacity_nm: self.engine.clutch_capacity_nm,
+            belt_inertia,
+            shift_secs: self.gearbox.shift_secs,
+            shift_addressing: self.gearbox.shift_addressing,
+            sprocket_radius_m,
+            half_tread_m,
+        })
+    }
+}
+
 /// The engine's declared envelope: a piecewise-linear torque curve under a fuel governor.
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
@@ -515,165 +549,13 @@ impl TankSpec {
                 return Err(format!("track.{field} must be finite (got {value})").into());
             }
         }
-        // The declared transmission (optional block): values that parse but can never spin a
-        // gearbox — empty ladders index out, a radii/gear length mismatch mis-keys the
-        // steering table, a non-positive speed or radius reaches a division, and inverted
-        // shift bands hunt on every tick.
-        if let Some(tr) = &t.powertrain.transmission {
-            let gb = &tr.gearbox;
-            if gb.forward_speeds_kmh.is_empty() || gb.reverse_speeds_kmh.is_empty() {
-                return Err("transmission.gearbox ladders must be non-empty".into());
-            }
-            if tr.steering.radii.len() != gb.forward_speeds_kmh.len() {
-                return Err(format!(
-                    "transmission.steering.radii must have one (tight, wide) pair per forward \
-                     gear ({} pairs for {} gears)",
-                    tr.steering.radii.len(),
-                    gb.forward_speeds_kmh.len()
-                )
-                .into());
-            }
-            for (field, ok) in [
-                (
-                    "gearbox speeds",
-                    gb.forward_speeds_kmh
-                        .iter()
-                        .chain(&gb.reverse_speeds_kmh)
-                        .all(|v| v.is_finite() && *v > 0.0),
-                ),
-                (
-                    "steering.radii",
-                    tr.steering
-                        .radii
-                        .iter()
-                        .all(|(a, b)| a.is_finite() && b.is_finite() && *a > 0.0 && *b > 0.0),
-                ),
-                (
-                    // Sanity BOUNDS beyond finiteness (stage-A review round): an absurd
-                    // finite torque (e.g. f32::MAX) survives `is_finite` but overflows the
-                    // reflected-drag multiplication to ∞, and `∞ × 0.0` (full drag
-                    // release) is NaN inside the shift-landing predictor — the landing
-                    // gate fails safe on NaN, but the spec layer should refuse absurd
-                    // data outright. 100 kN·m is an order of magnitude above any tank
-                    // engine (the largest WWII tank diesels peaked well under 10 kN·m);
-                    // 20 000 rpm is far past any piston engine's redline.
-                    "engine.torque_curve",
-                    tr.engine.torque_curve.len() >= 2
-                        && tr.engine.torque_curve.windows(2).all(|w| w[0].0 < w[1].0)
-                        && tr.engine.torque_curve.iter().all(|(r, tq)| {
-                            r.is_finite()
-                                && tq.is_finite()
-                                && *r > 0.0
-                                && *r <= 20_000.0
-                                && *tq >= 0.0
-                                && *tq <= 100_000.0
-                        }),
-                ),
-                (
-                    "engine rpms",
-                    [
-                        tr.engine.idle_rpm,
-                        tr.engine.governed_rpm,
-                        tr.engine.rated_rpm,
-                    ]
-                    .iter()
-                    .all(|v| v.is_finite() && *v > 0.0),
-                ),
-                (
-                    // Stage-B review round (FIX 2/4): the sim's stall-guard floor is
-                    // `idle − 100 rpm` and the crank hard-clamps there every tick — the
-                    // floor must stay POSITIVE with margin (300 = 100 band + 100 margin
-                    // + headroom), which also keeps the ω_e = 0.0 spawn sentinel
-                    // unambiguous. No real engine idles under 300 rpm anyway.
-                    "engine.idle_rpm floor",
-                    tr.engine.idle_rpm >= 300.0,
-                ),
-                (
-                    "gearbox shift bands",
-                    gb.shift_up_rpm.is_finite()
-                        && gb.shift_down_rpm.is_finite()
-                        && gb.shift_down_rpm > 0.0
-                        && gb.shift_down_rpm < gb.shift_up_rpm,
-                ),
-                (
-                    // Ladders ascend (the shift logic assumes gear n+1 is faster) and fit
-                    // the runtime's u8 gear index.
-                    "gearbox ladder shape (ascending, u8-indexable)",
-                    gb.forward_speeds_kmh.len() <= u8::MAX as usize
-                        && gb.reverse_speeds_kmh.len() <= u8::MAX as usize
-                        && gb.forward_speeds_kmh.windows(2).all(|w| w[0] < w[1])
-                        && gb.reverse_speeds_kmh.windows(2).all(|w| w[0] < w[1]),
-                ),
-                (
-                    // The documented hysteresis-by-construction condition, ENFORCED (not
-                    // just down < up): a post-upshift rpm lands at `shift_up × v_g/v_g+1`,
-                    // which must stay above the down band for EVERY adjacent pair in both
-                    // ladders — otherwise an accepted sheet hunts up-down on a boundary
-                    // speed (codex-5).
-                    "gearbox shift-band hysteresis vs ratio steps",
-                    gb.forward_speeds_kmh
-                        .windows(2)
-                        .chain(gb.reverse_speeds_kmh.windows(2))
-                        .all(|w| gb.shift_up_rpm * w[0] / w[1] > gb.shift_down_rpm),
-                ),
-                (
-                    // `is_finite` matters beyond > 0: an infinite brake capacity meets
-                    // `0 × ∞ = NaN` in the engagement scaling before the clamp (codex-5).
-                    "steering capacity/efficiency + brake_force",
-                    tr.steering.capacity.is_finite()
-                        && tr.steering.capacity > 0.0
-                        && (0.0..=1.0).contains(&tr.steering.recirculation)
-                        && tr.brake_force.is_finite()
-                        && tr.brake_force > 0.0,
-                ),
-                (
-                    // The compression-braking datum is a fraction of peak torque; the range
-                    // check also rejects NaN/∞.
-                    "engine.drag_fraction",
-                    (0.0..=1.0).contains(&tr.engine.drag_fraction),
-                ),
-                (
-                    // The crank inertia is a per-tick divisor, sanity-bounded BOTH ways
-                    // (review round FIX 4): 100 kg·m² is an order of magnitude above any
-                    // tank engine's crank+flywheel+clutch (heavy WWII flywheels land in
-                    // the low single digits), and below 0.1 the semi-implicit coupling's
-                    // `1/J` term degenerates (a 0.1 kg·m² crank under a kN·m-scale τ_free
-                    // slews thousands of rpm per tick — no engine is that light).
-                    "engine.inertia_kgm2",
-                    tr.engine.inertia_kgm2.is_finite()
-                        && (0.1..=100.0).contains(&tr.engine.inertia_kgm2),
-                ),
-                (
-                    // Clutch capacity, sanity-bounded BOTH ways (review round FIX 4):
-                    // 50 kN·m is half the absurd-torque ceiling above (any honest
-                    // capacity is ~1.3 × peak torque, well under it); below 100 N·m the
-                    // coupling could never transmit even an idling engine's torque — the
-                    // vehicle would be undrivable-by-construction.
-                    "engine.clutch_capacity_nm",
-                    tr.engine.clutch_capacity_nm.is_finite()
-                        && (100.0..=50_000.0).contains(&tr.engine.clutch_capacity_nm),
-                ),
-                (
-                    // Review round FIX 4: with a transmission declared, the coupling
-                    // divides by the belt inertia (`I_m = 2 × powertrain.inertia`) in the
-                    // lock denominator `1/J + k²/I_m` — the generic finite/> 0 check
-                    // above admits values (1e-30) that blow the k² term up. 1 kg is far
-                    // below any honest per-side belt-drivetrain effective inertia
-                    // (Tiger 16 000, lab 8 000).
-                    "powertrain.inertia floor (coupling divisor)",
-                    t.powertrain.inertia >= 1.0,
-                ),
-                (
-                    // Bounded so the u8 tick countdown can represent it (255 ticks ≈ 4 s —
-                    // far past any honest shift); the range check also rejects NaN/∞.
-                    "gearbox.shift_secs",
-                    (0.0..=3.0).contains(&gb.shift_secs),
-                ),
-            ] {
-                if !ok {
-                    return Err(format!("track.powertrain.transmission: invalid {field}").into());
-                }
-            }
+        // The declared transmission is validated through the same fallible constructor used by
+        // synchronous sim construction, the sandbox, and its arithmetic tests.
+        if let Some(transmission) = &t.powertrain.transmission {
+            let sprocket_radius = t.pitch * t.sprocket.teeth as f32 / std::f32::consts::TAU;
+            transmission
+                .params(sprocket_radius, t.plane_x, t.powertrain.inertia)
+                .map(|_| ())?;
         }
         for (name, weapon) in &self.weapons {
             match weapon.fire_mode {

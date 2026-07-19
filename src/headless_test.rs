@@ -22,6 +22,19 @@ use crate::tank::{Controlled, PendingTankAssets, TIGER_GLB_PATH, Tank};
 /// is up, so a wide bound costs a healthy run exactly nothing.
 const BOOT_DEADLINE: Duration = Duration::from_secs(60);
 
+/// The simulation clock configured by the netcode composition. Fixtures advance it by one exact
+/// fixed loop per [`App::update`], so every bound and elapsed-time report is stated in ticks.
+const FIXED_TICKS_PER_SECOND: usize = 64;
+
+fn start_fixed_clock(app: &mut App) {
+    // Verified against Bevy 0.19: one `App::update` runs exactly one fixed loop.
+    app.insert_resource(TimeUpdateStrategy::FixedTimesteps(1));
+}
+
+fn elapsed_secs(ticks: usize) -> f32 {
+    ticks as f32 / FIXED_TICKS_PER_SECOND as f32
+}
+
 /// Serializes full-app fixtures. The lease spans each test because booting and running apps compete
 /// for the same host resources; mutex poisoning is irrelevant to this external resource.
 static BOOT_LEASE: Mutex<()> = Mutex::new(());
@@ -280,9 +293,7 @@ fn booted_sim() -> BootedSim {
 /// cannot reproduce a muzzle that recoils behind its own mantlet).
 fn booted_sp_app() -> BootedSim {
     let mut sim = booted_sim();
-    sim.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
-        16,
-    )));
+    start_fixed_clock(&mut sim);
     for _ in 0..30 {
         sim.update();
     }
@@ -297,11 +308,9 @@ fn sim_boots_and_drives_headless() {
     // because settling onto the belt contacts from a standstill is part of what it proves.
     let mut app = booted_sim();
 
-    // Start the clock (16 ms per `update()`, so the 64 Hz fixed sim ticks once per update) and let
-    // the belt contacts ground and settle.
-    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
-        16,
-    )));
+    // Start the clock at exactly one 64 Hz fixed tick per update, then let the belt contacts ground
+    // and settle.
+    start_fixed_clock(&mut app);
     let mut grounded = 0;
     for _ in 0..300 {
         app.update();
@@ -319,7 +328,7 @@ fn sim_boots_and_drives_headless() {
         grounded >= 4,
         "the belt field never grounded headless; contacting track sides: {grounded}"
     );
-    // Settle for a second of sim time.
+    // Settle for 60 exact ticks (DERIVED 60 / 64 = 0.9375 s).
     for _ in 0..60 {
         app.update();
     }
@@ -337,8 +346,8 @@ fn sim_boots_and_drives_headless() {
         .expect("tank carries a command")
         .throttle = 1.0;
 
-    // ~4 sim-seconds of driving. The command is level state (no gather to re-write it), so it
-    // holds; the command slew, belt forces, and drive all run on the fixed clock.
+    // 250 ticks (DERIVED 250 / 64 = 3.90625 s) of driving. The command is level state (no gather
+    // to re-write it), so it holds; command slew, belt forces, and drive all run on the fixed clock.
     for _ in 0..250 {
         app.update();
         app.world_mut()
@@ -376,11 +385,9 @@ fn element_gate_run(feel: bool) -> (f32, f32) {
         app.init_resource::<crate::track::sim::ElementGripFeelTest>();
     }
 
-    // Start the clock and let the belt contacts ground and settle (the
+    // Start the exact fixed clock and let the belt contacts ground and settle (the
     // `sim_boots_and_drives_headless` scaffold).
-    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
-        16,
-    )));
+    start_fixed_clock(&mut app);
     let mut grounded = 0;
     for _ in 0..300 {
         app.update();
@@ -405,7 +412,8 @@ fn element_gate_run(feel: bool) -> (f32, f32) {
     let (tank, start) = tank_q.single(app.world()).expect("one controlled tank");
     let start = start.translation;
 
-    // ~4 sim-seconds of full throttle, re-asserted every tick (no device gather headless).
+    // 250 ticks (DERIVED 250 / 64 = 3.90625 s) of full throttle, re-asserted every tick (no device
+    // gather headless).
     for _ in 0..250 {
         app.world_mut()
             .entity_mut(tank)
@@ -804,9 +812,7 @@ fn booted_offline_sim(mode: crate::track::transmission::TransmissionMode) -> (Bo
     let mut app = booted_sim();
     app.init_resource::<crate::track::sim::ElementGripFeelTest>();
     app.insert_resource(crate::track::sim::TransmissionFeelTest(mode));
-    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
-        16,
-    )));
+    start_fixed_clock(&mut app);
     let mut grounded = 0;
     for _ in 0..300 {
         app.update();
@@ -832,7 +838,7 @@ fn booted_offline_sim(mode: crate::track::transmission::TransmissionMode) -> (Bo
 }
 
 /// Write the drive command (level state, re-asserted every tick like the other headless
-/// drives — no device gather exists here) and advance one 16 ms update (= one 64 Hz tick).
+/// drives — no device gather exists here) and advance one exact 64 Hz tick.
 fn drive_tick(app: &mut App, tank: Entity, throttle: f32, steer: f32) {
     {
         let mut cmd = app
@@ -977,7 +983,7 @@ fn pivot_tiger_hybrid() {
 fn pivot_spin_up_tiger_hybrid() {
     use crate::track::transmission::TransmissionMode;
     let (mut app, tank) = booted_offline_sim(TransmissionMode::Hybrid);
-    let total = 8 * 64;
+    let total = 8 * FIXED_TICKS_PER_SECOND;
     let mut yaws = Vec::with_capacity(total);
     let mut early_rpm = 0.0f32;
     for tick in 0..total {
@@ -994,7 +1000,8 @@ fn pivot_spin_up_tiger_hybrid() {
                 / (std::f32::consts::TAU / 60.0);
         }
     }
-    let steady: f32 = yaws[total - 64..].iter().sum::<f32>() / 64.0;
+    let steady: f32 =
+        yaws[total - FIXED_TICKS_PER_SECOND..].iter().sum::<f32>() / FIXED_TICKS_PER_SECOND as f32;
     assert!(
         steady.abs() > 0.35,
         "the steady pivot must be live for the spin-up measurement (got {steady:.3})"
@@ -1004,7 +1011,7 @@ fn pivot_spin_up_tiger_hybrid() {
         .iter()
         .position(|y| y.abs() >= target)
         .expect("yaw must reach 90% of steady inside the run");
-    let secs = (rise_tick + 1) as f32 / 64.0;
+    let secs = elapsed_secs(rise_tick + 1);
     let steady_rpm = app
         .world()
         .get::<crate::track::sim::TankTransmission>(tank)
@@ -1045,7 +1052,7 @@ fn gear_climb_monotone_tiger() {
     face_positive_z(&mut app, tank);
     let mut trace: Vec<u8> = vec![];
     let mut max_gear = 0u8;
-    for _ in 0..(20 * 64) {
+    for _ in 0..(20 * FIXED_TICKS_PER_SECOND) {
         drive_tick(&mut app, tank, 1.0, 0.0);
         let st = app
             .world()
@@ -1111,7 +1118,7 @@ fn decel_tiger() {
     let mut released = hull_speed(&mut app, tank);
     let mut coast_ticks = None;
     let mut peak = 0.0f32;
-    for tick in 0..(14 * 64) {
+    for tick in 0..(14 * FIXED_TICKS_PER_SECOND) {
         drive_tick(&mut app, tank, 0.0, 0.0);
         let v = hull_speed(&mut app, tank);
         // The command SHAPER slews the released throttle to zero over ~0.5 s (the same
@@ -1139,7 +1146,7 @@ fn decel_tiger() {
     });
     println!(
         "tiger decel: released at {released:.2} m/s, coast to 2 m/s in {:.1} s",
-        coast_ticks as f32 / 64.0
+        elapsed_secs(coast_ticks)
     );
 
     // Phase 2 — service brakes: opposite throttle from ≥ 6 m/s. Budget 3 s: the
@@ -1148,7 +1155,7 @@ fn decel_tiger() {
     drive_to_speed(&mut app, tank, 6.0, 2400);
     released = hull_speed(&mut app, tank);
     let mut brake_ticks = None;
-    for tick in 0..(3 * 64) {
+    for tick in 0..(3 * FIXED_TICKS_PER_SECOND) {
         drive_tick(&mut app, tank, -1.0, 0.0);
         if hull_speed(&mut app, tank) <= 1.0 {
             brake_ticks = Some(tick + 1);
@@ -1164,7 +1171,7 @@ fn decel_tiger() {
     });
     println!(
         "tiger decel: service brakes {released:.2} -> 1 m/s in {:.2} s",
-        brake_ticks as f32 / 64.0
+        elapsed_secs(brake_ticks)
     );
 }
 
@@ -1197,7 +1204,7 @@ fn slope_park_holds_20_deg_tiger() {
         .get::<avian3d::prelude::Position>(tank)
         .expect("tank has a position")
         .0;
-    for _ in 0..(4 * 64) {
+    for _ in 0..(4 * FIXED_TICKS_PER_SECOND) {
         drive_tick(&mut app, tank, 0.0, 0.0);
     }
     let p1 = app
@@ -1279,7 +1286,7 @@ fn ramp_climb_20_deg_never_upshifts_backward_tiger() {
     // (k₁²·J ≈ 20× the belt inertia in F1) pins it there — MEASURED stage B: 0.155 m/s,
     // a 58% cut. Printed, not gated — the crest/no-rollback asserts are the gate.
     let mut max_launch_slip = 0.0f32;
-    for tick in 0..(30 * 64) {
+    for tick in 0..(30 * FIXED_TICKS_PER_SECOND) {
         drive_tick(&mut app, tank, 1.0, 0.0);
         let world = app.world();
         let v = world
@@ -1292,7 +1299,7 @@ fn ramp_climb_20_deg_never_upshifts_backward_tiger() {
             .0;
         // Signed hull speed along the hull's forward axis (−Z local; uphill here).
         let v_fwd = v.dot(rot * Vec3::NEG_Z);
-        if tick < 3 * 64 {
+        if tick < 3 * FIXED_TICKS_PER_SECOND {
             let drive = world
                 .get::<crate::track::sim::TrackDrive>(tank)
                 .expect("tank drives");
@@ -1338,7 +1345,7 @@ fn ramp_climb_20_deg_never_upshifts_backward_tiger() {
     match crest_tick {
         Some(t) => println!(
             "tiger 20-deg ramp climb from rest: CRESTED in {:.1} s, gear trace {trace:?}",
-            t as f32 / 64.0
+            elapsed_secs(t)
         ),
         None => {
             // Not cresting is acceptable ONLY as a hold: no net rollback, not sliding.
@@ -1421,7 +1428,7 @@ fn run_grade_approach_20_deg(
     let mut min_uphill_speed = f32::INFINITY;
     let mut furthest_uphill_z = z0;
     let mut max_rollback_m = 0.0f32;
-    for tick in 0..(20 * 64) {
+    for tick in 0..(20 * FIXED_TICKS_PER_SECOND) {
         drive_tick(&mut app, tank, 1.0, 0.0);
         let world = app.world();
         let state = world
@@ -1485,7 +1492,7 @@ fn run_grade_approach_20_deg(
         );
         if position.z <= -44.6 {
             return GradeApproachResult {
-                crest_secs: (tick + 1) as f32 / 64.0,
+                crest_secs: elapsed_secs(tick + 1),
                 gear_trace: trace,
                 grade_shift,
                 hill_hold_ticks,
@@ -1700,7 +1707,7 @@ fn hill_hold_20_deg_engages_and_pulls_away_tiger() {
     let mut min_z = z0;
     let mut max_rollback = 0.0f32;
     let mut launch_tick = None;
-    for tick in 0..(12 * 64) {
+    for tick in 0..(12 * FIXED_TICKS_PER_SECOND) {
         drive_tick(&mut app, tank, 1.0, 0.0);
         let world = app.world();
         let state = world
@@ -1735,8 +1742,8 @@ fn hill_hold_20_deg_engages_and_pulls_away_tiger() {
     println!(
         "tiger 20-deg hill hold: engaged {saw_hold}, release {:.3} s, pulled 0.5 m in {:.3} s, \
          rollback {max_rollback:.4} m",
-        release_tick.expect("capable launch gear must release the hold") as f32 / 64.0,
-        launch_tick.expect("capable launch gear must pull uphill") as f32 / 64.0,
+        elapsed_secs(release_tick.expect("capable launch gear must release the hold")),
+        elapsed_secs(launch_tick.expect("capable launch gear must pull uphill")),
     );
     assert!(saw_hold, "F5 at rest on 20 degrees must engage hill hold");
 }
@@ -1803,7 +1810,7 @@ fn real_tiger_30_deg_reports_capability_truthfully() {
     }
 
     let mut grade_limit_ticks = 0usize;
-    for _ in 0..(6 * 64) {
+    for _ in 0..(6 * FIXED_TICKS_PER_SECOND) {
         drive_tick(&mut app, tank, 1.0, 0.0);
         let state = app
             .world()
@@ -1905,7 +1912,7 @@ fn real_tiger_f8_30_deg_rollback_rescues_to_capable_gear() {
     let mut arrest_tick = None;
     let mut arrest_position = None;
     let mut progress_tick = None;
-    for tick in 0..(12 * 64) {
+    for tick in 0..(12 * FIXED_TICKS_PER_SECOND) {
         drive_tick(&mut app, tank, 1.0, 0.0);
         let world = app.world();
         let state = world
@@ -1971,11 +1978,11 @@ fn real_tiger_f8_30_deg_rollback_rescues_to_capable_gear() {
         "the Direct preselector must not remain silently stuck in F8 (trace {state_trace:?})"
     );
     assert!(
-        arrest_tick <= 4 * 64,
+        arrest_tick <= 4 * FIXED_TICKS_PER_SECOND,
         "the capable gear must arrest rollback within 4 s (trace {state_trace:?})"
     );
     assert!(
-        progress_tick <= 12 * 64,
+        progress_tick <= 12 * FIXED_TICKS_PER_SECOND,
         "the rescued Tiger must make uphill progress within 12 s (trace {state_trace:?})"
     );
 }
@@ -2114,7 +2121,7 @@ fn top_speed_tiger() {
     face_positive_z(&mut app, tank);
     let mut speed_sum = 0.0f32;
     let mut samples = 0u32;
-    let total = 30 * 64;
+    let total = 30 * FIXED_TICKS_PER_SECOND;
     for tick in 0..total {
         drive_tick(&mut app, tank, 1.0, 0.0);
         if tick >= total - 128 {
@@ -2358,7 +2365,6 @@ fn scripted_determinism_run() -> ScriptedDeterminismRun {
     app.init_resource::<ScriptedDeterminismRun>()
         .add_observer(count_scripted_fire_shells)
         .add_systems(FixedLast, capture_scripted_determinism_tick)
-        // Verified against Bevy 0.19: one `App::update` runs exactly one fixed loop.
         .insert_resource(TimeUpdateStrategy::FixedTimesteps(1));
 
     let mut controlled = app

@@ -10,7 +10,8 @@
 //!   warmup, `throttle`/`steer` constant drive during the recorded window (`t2` +
 //!   `throttle2`/`steer2` switch both at one tick: reversal slam, pivot entry, slalom flip),
 //!   `view=chain` for the route-chain view (default: kinematic wrap), `out` JSONL path.
-//!   Unknown keys are ignored, so historical scenario strings (e.g. `model=4`) keep working.
+//!   Unknown keys and values are errors. The retired `model` key alone is accepted and ignored so
+//!   historical `model=4` scenario strings keep working.
 //!
 //! Record types (one JSON object per line):
 //! - `meta` — the scenario + vehicle constants.
@@ -25,7 +26,7 @@ use super::*;
 
 /// The parsed scenario (present only when `SANDBOX_HARNESS` is set — every harness system gates
 /// on this resource existing).
-#[derive(Resource)]
+#[derive(Resource, Debug, PartialEq)]
 pub(super) struct Harness {
     /// Spawn preset: `None` = the flat lane at `z`; `Some(yaw)` = the slope pad, hull yawed
     /// `yaw` radians on the incline (0 = nose uphill).
@@ -57,6 +58,27 @@ pub(super) struct Harness {
     out: String,
 }
 
+impl Default for Harness {
+    fn default() -> Self {
+        Self {
+            pose: None,
+            z: 0.0,
+            warmup: 192,
+            ticks: 640,
+            throttle: 0.0,
+            steer: 0.0,
+            t2: u64::MAX,
+            throttle2: 0.0,
+            steer2: 0.0,
+            chain_view: false,
+            grip: GripMode::Aggregate,
+            trans: crate::track::transmission::TransmissionMode::Governor,
+            runway: false,
+            out: "/tmp/track_harness.jsonl".into(),
+        }
+    }
+}
+
 /// The open log + tick counter, created by [`harness_setup`].
 #[derive(Resource)]
 pub(super) struct HarnessLog {
@@ -64,68 +86,113 @@ pub(super) struct HarnessLog {
     writer: BufWriter<File>,
 }
 
-pub(super) fn parse_env() -> Option<Harness> {
-    let spec = std::env::var("SANDBOX_HARNESS").ok()?;
-    let mut h = Harness {
-        pose: None,
-        z: 0.0,
-        warmup: 192,
-        ticks: 640,
-        throttle: 0.0,
-        steer: 0.0,
-        t2: u64::MAX,
-        throttle2: 0.0,
-        steer2: 0.0,
-        chain_view: false,
-        grip: GripMode::Aggregate,
-        trans: crate::track::transmission::TransmissionMode::Governor,
-        runway: false,
-        out: "/tmp/track_harness.jsonl".into(),
-    };
-    for pair in spec.split(',') {
+pub(super) fn parse_env() -> Result<Option<Harness>, String> {
+    match std::env::var("SANDBOX_HARNESS") {
+        Ok(spec) => parse_spec(&spec).map(Some),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err("SANDBOX_HARNESS is not valid Unicode".into())
+        }
+    }
+}
+
+fn parse_number<T>(key: &str, value: &str) -> Result<T, String>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    value
+        .parse()
+        .map_err(|err| format!("invalid value `{value}` for `{key}`: {err}"))
+}
+
+fn parse_spec(spec: &str) -> Result<Harness, String> {
+    let mut h = Harness::default();
+    for (index, pair) in spec.split(',').enumerate() {
+        let pair = pair.trim();
         let Some((key, value)) = pair.split_once('=') else {
-            continue;
+            return Err(format!(
+                "invalid SANDBOX_HARNESS entry {} `{pair}`: expected key=value",
+                index + 1
+            ));
         };
-        match key.trim() {
+        let key = key.trim();
+        let value = value.trim();
+        match key {
             "pose" => {
-                h.runway = value.trim() == "runway";
-                h.pose = match value.trim() {
+                h.runway = value == "runway";
+                h.pose = match value {
+                    "lane" | "runway" => None,
                     "slope_up" => Some(0.0),
                     "slope_down" => Some(std::f32::consts::PI),
                     "slope_left" => Some(std::f32::consts::FRAC_PI_2),
                     "slope_right" => Some(-std::f32::consts::FRAC_PI_2),
-                    _ => None, // "lane"/"runway" and unknown values keep the flat spawn
+                    _ => {
+                        return Err(format!(
+                            "unknown value `{value}` for `pose`; expected lane, runway, or slope_*"
+                        ));
+                    }
                 };
             }
-            "z" => h.z = value.trim().parse().unwrap_or(0.0),
-            "warmup" => h.warmup = value.trim().parse().unwrap_or(192),
-            "ticks" => h.ticks = value.trim().parse().unwrap_or(640),
-            "throttle" => h.throttle = value.trim().parse().unwrap_or(0.0),
-            "steer" => h.steer = value.trim().parse().unwrap_or(0.0),
-            "t2" => h.t2 = value.trim().parse().unwrap_or(u64::MAX),
-            "throttle2" => h.throttle2 = value.trim().parse().unwrap_or(0.0),
-            "steer2" => h.steer2 = value.trim().parse().unwrap_or(0.0),
-            "view" => h.chain_view = value.trim() == "chain",
+            "z" => h.z = parse_number(key, value)?,
+            "warmup" => h.warmup = parse_number(key, value)?,
+            "ticks" => h.ticks = parse_number(key, value)?,
+            "throttle" => h.throttle = parse_number(key, value)?,
+            "steer" => h.steer = parse_number(key, value)?,
+            "t2" => h.t2 = parse_number(key, value)?,
+            "throttle2" => h.throttle2 = parse_number(key, value)?,
+            "steer2" => h.steer2 = parse_number(key, value)?,
+            "view" => {
+                h.chain_view = match value {
+                    "chain" => true,
+                    "wrap" => false,
+                    _ => {
+                        return Err(format!(
+                            "unknown value `{value}` for `view`; expected chain or wrap"
+                        ));
+                    }
+                };
+            }
             "grip" => {
-                h.grip = match value.trim() {
+                h.grip = match value {
                     "off" => GripMode::Off,
+                    "aggregate" => GripMode::Aggregate,
                     "elem" | "elements" => GripMode::Elements,
-                    _ => GripMode::Aggregate,
+                    _ => {
+                        return Err(format!(
+                            "unknown value `{value}` for `grip`; expected off, aggregate, or elem"
+                        ));
+                    }
                 };
             }
             "trans" => {
                 use crate::track::transmission::TransmissionMode;
-                h.trans = match value.trim() {
+                h.trans = match value {
+                    "governor" => TransmissionMode::Governor,
                     "hybrid" => TransmissionMode::Hybrid,
                     "l600" | "fixed" | "fixed_radii" => TransmissionMode::FixedRadii,
-                    _ => TransmissionMode::Governor,
+                    _ => {
+                        return Err(format!(
+                            "unknown value `{value}` for `trans`; expected governor, hybrid, or l600"
+                        ));
+                    }
                 };
             }
-            "out" => h.out = value.trim().to_string(),
-            _ => {}
+            "out" if !value.is_empty() => h.out = value.to_string(),
+            "out" => return Err("`out` must not be empty".into()),
+            // Retired with models 1–3. Kept as an explicit no-op so historical captures remain
+            // runnable without making misspelled live keys silently vacuous.
+            "model" => {}
+            "" => {
+                return Err(format!(
+                    "SANDBOX_HARNESS entry {} has an empty key",
+                    index + 1
+                ));
+            }
+            _ => return Err(format!("unknown SANDBOX_HARNESS key `{key}`")),
         }
     }
-    Some(h)
+    Ok(h)
 }
 
 fn arr(vals: impl IntoIterator<Item = f32>) -> String {
@@ -382,5 +449,56 @@ pub(super) fn harness_record(
         log.writer.flush().unwrap();
         info!("harness: wrote {} ticks to {}", log.tick, harness.out);
         exit.write(AppExit::Success);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn malformed_number_is_rejected() {
+        let err = parse_spec("ticks=many").unwrap_err();
+        assert!(err.contains("ticks") && err.contains("many"), "{err}");
+    }
+
+    #[test]
+    fn unknown_key_is_rejected() {
+        let err = parse_spec("throtle=0.5").unwrap_err();
+        assert!(err.contains("unknown") && err.contains("throtle"), "{err}");
+    }
+
+    #[test]
+    fn retired_model_key_is_accepted_and_ignored() {
+        assert_eq!(parse_spec("model=4").unwrap(), Harness::default());
+    }
+
+    #[test]
+    fn valid_scenario_keeps_the_previous_parse_semantics() {
+        let parsed = parse_spec(
+            "pose=slope_left,z=-5.5,warmup=12,ticks=34,throttle=0.25,steer=-0.4,\
+             t2=20,throttle2=-1,steer2=0.75,view=chain,grip=elements,\
+             trans=fixed_radii,out=/tmp/capture.jsonl",
+        )
+        .unwrap();
+        assert_eq!(
+            parsed,
+            Harness {
+                pose: Some(std::f32::consts::FRAC_PI_2),
+                z: -5.5,
+                warmup: 12,
+                ticks: 34,
+                throttle: 0.25,
+                steer: -0.4,
+                t2: 20,
+                throttle2: -1.0,
+                steer2: 0.75,
+                chain_view: true,
+                grip: GripMode::Elements,
+                trans: crate::track::transmission::TransmissionMode::FixedRadii,
+                runway: false,
+                out: "/tmp/capture.jsonl".into(),
+            }
+        );
     }
 }

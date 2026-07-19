@@ -109,61 +109,83 @@ _Avoid_: "stab" (write it out)
 ## Driving
 
 **Running gear**:
-The whole ground-contact mechanism of one side — roadwheels, track, sprocket, idler.
+The whole belt-contact mechanism of one side — roadwheels, track, sprocket, idler, and the belt stations through which support and traction reach the hull.
 
 **Roadwheel**:
-A load-bearing wheel of the running gear; the wheels whose share of the tank's weight presses the track onto the ground.
-_Avoid_: wheel (ambiguous with the sprocket / idler / return rollers, which carry no ground load)
+A load-bearing wheel that shapes the track route and its presentation. Roadwheels no longer own locomotion samples; the belt's contact stations carry support and traction.
+_Avoid_: wheel (ambiguous with the sprocket / idler / return rollers)
 
 **Sprocket / Idler**:
-The drive sprocket (where engine torque enters the track) and the idler (track tensioner) at the ends of each side. They shape the track loop but bear no ground load.
+The drive sprocket, where transmission output sets belt motion, and the idler, which closes and tensions the route at the other end. Their pin-line circles shape the belt loop.
 _Avoid_: drive wheel
 
-**Track**:
-The continuous belt around the running gear. In the sim it is **cosmetic** — it carries no physics; locomotion is modelled at the roadwheels.
-_Avoid_: tread, caterpillar
+**Track** (belt):
+The continuous material loop around one side's running gear. Its advected speed and phase are simulation state; its pitch-spaced stations are the tank's ground-contact model, while the rendered links are only its view.
+_Avoid_: cosmetic track, tread, caterpillar
 
 **Contact station**:
-A longitudinal point where a roadwheel transfers load to the ground; the unit at which both suspension and track-against-ground friction are sampled.
-_Avoid_: contact patch
+A pitch-spaced sample on the belt's ground-facing route. Each station probes across the shoe width and contributes belt-normal support plus longitudinal and lateral traction.
+_Avoid_: roadwheel contact, contact patch
 
-**Effective radius**:
-The hub-centre-to-ground distance — wheel radius plus track thickness — shared by the suspension and the visual track so they agree on where the ground is.
-_Avoid_: wheel radius (that is only part of it)
+**Belt element**:
+A material track-link identity crossed with one lateral collocation column. Elements advect with belt phase, so grip state follows the piece of track carrying it instead of whichever geometric station happens to occupy that place.
+
+**Per-element strain grip**:
+The elastic–plastic ground-shear state carried by each belt element: world-space strain develops force, stays elastic below breakaway, saturates into sliding at the available grip budget, and is forgotten only after definitive contact loss. There are no grip anchors and no stick-speed switch.
+_Avoid_: grip anchor, static/kinetic gate
+
+**Belt speed / Belt phase**:
+*Speed* is the signed material speed of one track against its route. *Phase* is its unbounded accumulated travel, used both to advect contact stations and to identify which belt elements occupy them.
+
+**Sprocket pitch radius**:
+The radius derived from authored track pitch and sprocket tooth count. Declared per-gear belt speeds derive the transmission reductions against this radius.
+_Avoid_: wheel radius, effective radius
 
 **Ride height**:
-The hull's resting height, set by where the loaded suspension settles each roadwheel above the ground.
-
-**Suspension travel**:
-A roadwheel's vertical range between full compression (bump) and full extension (droop).
+The hull's resting height where the belt-normal support field carries its weight. It emerges from belt penetration and the declared support law, not from roadwheel suspension rays.
 
 **Differential thrust**:
-Independent longitudinal force per track; steering arises from the left–right difference, not a separate turn input.
+The left–right difference in track force. Steering and yaw emerge from the two belts' traction lever arms, not from a separate yaw actuator.
 
 **Skid steer**:
-Turning by differential thrust, resisted by the tracks shearing sideways against the ground.
+Turning through differential belt motion while the contact elements shear laterally against the ground.
 
 **Neutral steer**:
-Pivoting in place with the tracks counter-rotating — equal and opposite thrust giving a pure yaw couple and zero net travel.
+Counter-rotating the belts at near-zero mean speed so their equal-and-opposite traction produces yaw with little translation.
 _Avoid_: pivot turn, neutral turn
 
-**Friction circle**:
-The shared grip budget at a contact station — longitudinal and lateral force together capped at μ × normal load.
-_Avoid_: friction ellipse
+**Grip ellipse**:
+The shared longitudinal/lateral traction budget of one belt contact, capped by normal load and the terrain's lateral-grip ratio. Per-element strain and sliding both spend this same budget.
+_Avoid_: friction circle (the lateral budget is deliberately lower)
 
-**Grip anchor**:
-The world point a roadwheel's contact sticks to at rest; a brush spring pulls the contact back toward it (capped at the friction circle) to hold the tank statically. Planted when the contact slows past the stick speed, dropped when it breaks loose.
-_Avoid_: contact patch (that is the contact station)
+**Declared transmission**:
+The vehicle-authored engine envelope, gear ladders, steering radii, capacities, brakes, shift behavior, and architecture. Speeds and radii are source data; reductions, curvatures, and other coupled quantities derive in one validated constructor.
 
-**Stick speed**:
-The contact speed below which a roadwheel grips — plants a grip anchor and holds with static friction — and above which it slips into kinetic friction. The static↔kinetic gate.
+**Transmission adapter**:
+The drivetrain law selected behind the shared joint two-output seam:
+
+- *Governor* — the legacy independent-belt path and multiplayer parity mode.
+- *Hybrid* — continuously variable regenerative steering with inner-to-outer power recirculation.
+- *Fixed radii* — geared regenerative steering constrained to the declared radius detents.
+
+**Signed shaft**:
+Mean belt motion expressed relative to the engaged forward or reverse ladder. Normal motion in the selected direction is positive; a belt back-driven against that direction is negative. The sign belongs to the shaft, not the engine crank.
+
+**Engine crank** (`ω_e`):
+The non-negative engine-side angular-speed state. Engine torque, drag, inertia, clutch coupling, stall guard, and declutched rev matching evolve it directly; geared belt speed no longer stands in for engine rpm.
+
+**Reserve scheduler**:
+The gear selector for the regenerative adapters. It filters signed mean-axis load demand, compares each legal gear's available force with the required reserve, and schedules protective downshifts, hill-hold recovery, or grade-limit truth without discarding the shift and landing guards.
+
+**Steering detent**:
+A fixed-radii steering state selected with hysteresis: straight, wide radius, or tight radius. While a turn detent is engaged, the transmission constrains belt-speed difference to the declared curvature and defers predictor-blind upshifts.
 
 **Hill-hold**:
-The tank holding station on a slope under its own grip anchors with no throttle — emergent static friction up to μ × load. Past that the slope wins and it slides.
-_Avoid_: handbrake (that is a separate, future input)
+The reserve scheduler and brake latch holding or rescuing a tank on a grade when the engaged gear lacks launch reserve. Grip remains the belt elements' strain law; hill-hold is drivetrain state, not a world anchor.
+_Avoid_: grip anchor
 
 **Engine-brake / coast-down**:
-The light longitudinal resistance applied when the throttle is released while the tank is still rolling — bleeds speed toward a stop before the grip anchors take over. The "heavy-glide" feel: how much momentum a released tank keeps.
+Zero-throttle crank drag transmitted through the engaged clutch and gear, bleeding belt and hull speed toward the parking regime. Service braking comes from opposite-throttle intent and is a separate, capacity-limited stop force.
 
 ## Netcode
 
