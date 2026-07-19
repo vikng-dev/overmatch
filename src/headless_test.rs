@@ -1849,9 +1849,11 @@ fn real_tiger_30_deg_reports_capability_truthfully() {
 
 /// Regression: the REAL Tiger starts on the course's 30-degree face in F8, already rolling
 /// backward faster than the 0.25 m/s DERIVED hill-hold threshold with W held. Its shipped
-/// 96 kN/side brakes cannot arrest the 279.6 kN DERIVED grade demand by themselves, while F1-F3
-/// are capable launch gears. The Direct preselector must rescue the rollback through a paid shift,
-/// expose HILL HOLD throughout the latched rescue, arrest the hull, and resume uphill travel.
+/// 96 kN/side brakes cannot arrest the 279.6 kN DERIVED grade demand by themselves. At the
+/// DERIVED 317.5 kN selection threshold, only F1-F2 are capable launch gears: F1 is capped at
+/// 500 kN DERIVED, F2 makes 341.9 kN DERIVED, and F3's 237.1 kN DERIVED fails. The Direct
+/// preselector must rescue the rollback through a paid shift, expose HILL HOLD throughout the
+/// latched rescue, arrest the hull, and resume uphill travel.
 #[test]
 fn real_tiger_f8_30_deg_rollback_rescues_to_capable_gear() {
     use crate::track::transmission::{SchedulerState, TransmissionMode, TransmissionState};
@@ -1931,7 +1933,7 @@ fn real_tiger_f8_30_deg_rollback_rescues_to_capable_gear() {
             SchedulerState::GradeLimit,
             "tick {tick}: the real Tiger has a capable launch gear (trace {state_trace:?})"
         );
-        if state.gear <= 3 {
+        if state.gear <= 2 {
             reached_capable_tick.get_or_insert(tick + 1);
         }
 
@@ -1957,7 +1959,7 @@ fn real_tiger_f8_30_deg_rollback_rescues_to_capable_gear() {
     }
 
     let reached_capable_tick =
-        reached_capable_tick.expect("F8 rollback rescue never reached a capable F1-F3 gear");
+        reached_capable_tick.expect("F8 rollback rescue never reached a capable F1-F2 gear");
     let arrest_tick = arrest_tick.expect("capable launch gear never arrested the rollback");
     let progress_tick = progress_tick.expect("the rescued Tiger never made 0.5 m uphill progress");
     println!(

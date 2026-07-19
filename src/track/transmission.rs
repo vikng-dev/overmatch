@@ -138,6 +138,7 @@
 //! | [`STALL_GUARD_BAND_RPM`] | SIM POLICY | one-sided clamp band under idle: the coupling may never land the crank below `ω_floor = idle − band`, and (review round FIX 2) `ω_floor` is ALSO a hard end-of-tick clamp on ω_e — the floor IS the no-stall policy while stall death is deliberately unmodeled, so no legal spec corner (e.g. strongly negative τ_free from a large drag fraction over a weak idle curve) may carry the crank below it or to a negative speed. Sized so the idle governor SATURATES before the guard floor (band = 2× the droop width). The spec layer keeps `ω_floor > 0` by requiring `idle_rpm ≥ 300` (band 100 + 100 margin, spec.rs) |
 //! | [`CLUTCH_OUT_M_SPEED`]/[`CLUTCH_IN_M_SPEED`] | SIM POLICY | coupling-seam hysteresis (review round FIX 3): declutch below 0.8×, re-engage at 1.2× of `NEUTRAL_M_SPEED` (or on any propulsive command) — a regime seam needs separated thresholds or it chatters, same doctrine as the steering detents |
 //! | [`REV_MATCH_BAND_RPM`] | SIM POLICY | proportional band of the declutched rev-match drive (`u_match = clamp((ω_target − ω_e)/band, 0, 1)`): full fueling one band below target, tapering to zero at it — smooth approach at 64 Hz instead of bang-bang chatter. Match AUTHORITY is the vehicle's own torque curve / J |
+//! | [`BELT_RUNAWAY_LIMIT_MULTIPLIER`] | SIM POLICY | pure numerical runaway protection on each regenerative output, DERIVED per vehicle as `1.5 × max_speed`; legal steering differential may exceed `max_speed`, and this ceiling must never bind in legal operation |
 //!
 //! Moved OUT of this module to the spec (they were vehicle data wearing const clothing):
 //! shift time (`gearbox.shift_secs` — a Tiger preselector and a T-34 crash box differ),
@@ -341,6 +342,12 @@ const WIDE_ON: f32 = 0.15;
 const WIDE_OFF: f32 = 0.05;
 const TIGHT_ON: f32 = 0.55;
 const TIGHT_OFF: f32 = 0.45;
+
+/// Pure numerical runaway protection for each regenerative belt output. The ceiling is
+/// DERIVED per vehicle as `1.5 × max_speed`; unlike the mean-axis top-speed limit, it has no
+/// physical role and must never bind in legal operation (including an authored outer-belt
+/// steering differential). SIM POLICY — see the classification table.
+const BELT_RUNAWAY_LIMIT_MULTIPLIER: f32 = 1.5;
 
 /// The engine's declared operating envelope: a piecewise-linear torque curve (N·m over rpm,
 /// ascending, clamped at the ends) under a fuel governor at `governed_rpm`.
@@ -780,14 +787,15 @@ fn engine_drag(tp: &TransmissionParams, omega_e: f32, u_fuel: f32) -> f32 {
 /// DECLUTCHED, so the belt gets NO engine force and NO engine drag (the old predictor's
 /// drag-through-the-landing-gear term died with the belt-side drag), and the ground
 /// reaction is frozen at its current per-tick mean. Fixed-tick, f32-exact — prediction and
-/// reality run the same (now purely reaction-driven) window law.
+/// reality run the same (now purely reaction-driven) window law. `max_speed` bounds this
+/// vehicle/mean axis, matching the live regenerative integration; it is not a per-belt bound.
 ///
 /// DOMAIN (review round): valid for the PROPULSIVE straight-line case ONLY — the only case
 /// the scheduler consults it for (upshifts are intent-gated on `propulsive > 0` and
 /// detent-deferred on the L600). It carries no brake term and no λ/steer state, so under
 /// service braking or a geared turn it would over-predict the landing. Inside its domain,
 /// frozen-R is CONSERVATIVE (the true post-cut reaction collapses with the slip), and the
-/// single mean-axis clamp is an accepted approximation of the live per-side clamps.
+/// mean-axis clamp is therefore the exact live speed-limit semantic in this domain.
 fn predict_shift_landing_m(
     tp: &TransmissionParams,
     fp: &ForceParams,
@@ -797,9 +805,40 @@ fn predict_shift_landing_m(
 ) -> f32 {
     let mut pm = m;
     for _ in 0..tp.shift_ticks {
-        pm = (pm - r_mean / fp.inertia * dt).clamp(-fp.max_speed, fp.max_speed);
+        pm = clamp_mean_speed(pm - r_mean / fp.inertia * dt, fp.max_speed);
     }
     pm
+}
+
+/// Apply the regenerative path's speed limits without conflating its superimposed axes:
+/// `max_speed` bounds the vehicle/mean axis `m`, while the legal steering difference `d`
+/// passes through unchanged. Only the much wider per-belt runaway ceiling can clip `d`.
+///
+/// The in-range branch returns the raw integration results directly so scenarios that never
+/// touched the old clamp retain their exact f32 values.
+fn limit_regenerative_belt_speeds(raw: [f32; 2], max_speed: f32) -> [f32; 2] {
+    let mean = (raw[0] + raw[1]) / 2.0;
+    let limited_mean = clamp_mean_speed(mean, max_speed);
+    let mut limited = if limited_mean != mean {
+        let correction = limited_mean - mean;
+        [raw[0] + correction, raw[1] + correction]
+    } else {
+        raw
+    };
+
+    let runaway_limit = BELT_RUNAWAY_LIMIT_MULTIPLIER * max_speed;
+    for speed in &mut limited {
+        if *speed > runaway_limit {
+            *speed = runaway_limit;
+        } else if *speed < -runaway_limit {
+            *speed = -runaway_limit;
+        }
+    }
+    limited
+}
+
+fn clamp_mean_speed(mean: f32, max_speed: f32) -> f32 {
+    mean.clamp(-max_speed, max_speed)
 }
 
 /// Full-throttle mean-axis force available in one gear at the current signed shaft speed. The
@@ -1696,18 +1735,19 @@ fn regenerative(
     }
 
     // --- Integrate both sides simultaneously: I·v̇ = Q − R (the reaction ALWAYS applies).
-    let mut next = [0.0f32; 2];
-    for (i, ni) in next.iter_mut().enumerate() {
-        *ni = (inp.speeds[i] + (q[i] - inp.reactions[i]) / fp.inertia * dt)
-            .clamp(-fp.max_speed, fp.max_speed);
-    }
+    let raw_next = [
+        inp.speeds[0] + (q[0] - inp.reactions[0]) / fp.inertia * dt,
+        inp.speeds[1] + (q[1] - inp.reactions[1]) / fp.inertia * dt,
+    ];
+    let next = limit_regenerative_belt_speeds(raw_next, fp.max_speed);
 
     // --- Drift kill / re-anchor (stage B + review round FIX 1): snap the crank to the
     // belt that ACTUALLY integrated only if the snap is FEASIBLE — the implied TOTAL
     // clutch torque `τ_impl = τ_free − (k·s·m_next − ω_e)·J/dt` must fit the capacity.
     // The coupling pre-solve's F_other (reactions only) is a PREDICTOR approximation:
-    // brakes, the FixedRadii λ mean-axis share, and the belt speed clamp all move m_next
-    // after it, and exact pre-accounting is circular (the brake law reads the q that
+    // brakes, the FixedRadii λ mean-axis share, the mean-axis speed limit, and (only on
+    // numerical runaway) the per-belt safety ceiling all move m_next after it, and exact
+    // pre-accounting is circular (the brake law reads the q that
     // needs F_c) — so feasibility is decided HERE, on the final m_next, not on the
     // pre-solve's stale clamp flag. An eager flag let a full-opposing-throttle brake tick
     // snap the crank down the belt's brake-driven drop, implying ≈ 9.7 kN·m through a
@@ -3287,6 +3327,60 @@ mod tests {
             (ratio - kappa).abs() < 0.01 * kappa.max(0.05),
             "d/m = {ratio} must hold κ_tight = {kappa} (gear {})",
             last.gear
+        );
+    }
+
+    /// At the Tiger's F8 cruise, the WIDE fixed-radius differential legitimately puts the
+    /// outer belt above the vehicle's mean-axis speed limit. The transmission must preserve
+    /// that authored `d = kappa * m` instead of clipping the outer belt back to `max_speed`.
+    #[test]
+    fn tiger_f8_wide_outer_belt_exceeds_mean_speed_limit() {
+        let tp = tiger_tp();
+        let mut fp = lab_fp();
+        fp.max_speed = 10.5;
+        let half_tread_m = 1.4904f32;
+        let cruise_m = 10.49f32;
+        let mut st = TransmissionState {
+            gear: 8,
+            omega_e: cruise_m * tp.gears_fwd[7] / tp.sprocket_radius,
+            ..Default::default()
+        };
+        let rep = step(
+            TransmissionMode::FixedRadii,
+            &fp,
+            Some(&tp),
+            &mut st,
+            &input(1.0, 0.3, [cruise_m, cruise_m], [0.0, 0.0]),
+        );
+
+        assert_eq!(rep.steer_step, 1, "0.3 steer must engage the WIDE detent");
+        let m = (rep.next_speeds[0] + rep.next_speeds[1]) / 2.0;
+        let d = (rep.next_speeds[0] - rep.next_speeds[1]) / 2.0;
+        let expected_d = tp.steer_kappa[7].1 * m.abs();
+        assert!(
+            m <= fp.max_speed + 1e-5,
+            "F8 cruise mean speed must remain bounded at max_speed (m {m}, limit {})",
+            fp.max_speed,
+        );
+        assert!(
+            rep.next_speeds[0] > fp.max_speed,
+            "F8 WIDE outer belt must exceed the {limit} m/s mean-axis limit by its kinematic \
+             differential (belts {:?}, m {m}, d {d})",
+            rep.next_speeds,
+            limit = fp.max_speed,
+        );
+        let outer_excess = rep.next_speeds[0] - m;
+        assert!(
+            (d - expected_d).abs() <= 0.02 * expected_d
+                && (outer_excess - expected_d).abs() <= 0.02 * expected_d,
+            "F8 WIDE must preserve outer = m + d with d = kappa*m \
+             (d {d}, outer excess {outer_excess}, expected {expected_d})"
+        );
+        let belt_radius = half_tread_m / (d / m.abs());
+        assert!(
+            (belt_radius - 165.0).abs() <= 0.02 * 165.0,
+            "F8 WIDE belt-kinematic radius must stay within 2% of the authored 165 m \
+             (got {belt_radius})"
         );
     }
 
