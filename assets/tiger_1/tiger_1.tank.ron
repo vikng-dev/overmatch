@@ -115,17 +115,23 @@ TankSpec(
                     // Mechanical recirculation efficiency ~0.9 — INFERRED.
                     recirculation: 0.9,
                 ),
-                // Per-side brake capacity at the sprocket: decel-anchored 0.3 g (the
-                // 0.2–0.35 g historical band for WWII heavy tanks; even modern heavy
-                // trucks certify ~0.5 g): 0.3 g × 57 000 kg × 9.81 = 167.7 kN total →
-                // 84 kN per side. Replaces the circular grip-limit sizing (250 kN was
-                // sized against μ·W/2 — the very friction it was meant to be tested by —
-                // and implied 2.9 MW through two 1940s Argus discs at speed: energy-
-                // impossible). Supersede with a real Argus brake/output-torque rating
-                // when sourced. Consequence: the park hold caps at ~17.5° of slope
-                // (W·sinθ = 168 kN); beyond it the latch back-drives honestly (the
-                // capacity-breach law) instead of holding an unphysical 20°+.
-                brake_force: 84_000.0,
+                // Per-side brake capacity at the sprocket, DUAL-anchored (fix-4 +
+                // review round):
+                //   (1) the settled 20° park-hold capability (ADR-0026 records 20°
+                //       holds; the test course has 20° ramps): W·sin 20°/2 =
+                //       57 000 × 9.81 × 0.342 / 2 ≈ 95.6 kN/side — 96 kN holds it
+                //       with margin;
+                //   (2) 192 kN total = 0.343 g service decel — inside the 0.2–0.35 g
+                //       historical band for WWII heavy tanks (even modern heavy trucks
+                //       certify ~0.5 g).
+                // Replaces the circular grip-limit sizing (250 kN was sized against
+                // μ·W/2 — the very friction it was meant to be tested by — and implied
+                // 2.9 MW through two 1940s Argus discs at speed: energy-impossible).
+                // Consequence: 30° ramps now back-drive the latch honestly
+                // (W·sin 30°/2 ≈ 139.8 kN/side > capacity) — physical, where 250 kN
+                // held them for free. Supersede with a real Argus brake/output-torque
+                // rating when sourced.
+                brake_force: 96_000.0,
             ),
         ),
         support: (

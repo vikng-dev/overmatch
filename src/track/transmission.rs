@@ -54,8 +54,8 @@
 //! | [`PARK_ENGAGE_SPEED`] | SIM POLICY | latch threshold for "at rest" — a determinism/stability guard on the shared intent layer |
 //! | [`DIRECTION_SWAP_SPEED`] | SIM POLICY | the intent seam where a held opposite throttle becomes a gear-direction change; uniform game semantics |
 //! | [`NEUTRAL_THROTTLE`], [`NEUTRAL_M_SPEED`] | SIM POLICY | regime-entry thresholds for the L600 neutral turn (the neutral turn's SPEED SCALE — [`TransmissionParams::neutral_d_full`] — is spec-DERIVED); `NEUTRAL_M_SPEED` doubles as the hybrid's blend width into its power-limited pivot regime |
-//! | [`POSTSHIFT_MARGIN_RPM`] | SIM POLICY | fix-1a anti-hunting: an upshift must PREDICT landing this far above the down band at the end of its own torque-cut window (the cut bleeds belt speed; the static band gap alone was erased in low gears — the measured 1-2-1-2 climb) |
-//! | [`REVERSAL_DWELL_TICKS`] | SIM POLICY | fix-1b anti-hunting: a committed shift blocks the OPPOSITE-direction shift for this many ticks; same-direction climbs stay free |
+//! | [`POSTSHIFT_MARGIN_RPM`] | SIM POLICY | fix-1a anti-hunting: an upshift must PREDICT landing this far above the down band at the end of its own torque-cut window (the cut bleeds belt speed; the static band gap alone was erased in low gears — the measured 1-2-1-2 climb). Upshifts are also intent-gated (`propulsive > 0`) and L600-detent-deferred so the predictor is only consulted inside its domain (review round) |
+//! | [`REVERSAL_DWELL_TICKS`] | SIM POLICY | fix-1b anti-hunting: a committed shift blocks the OPPOSITE-direction shift for this many ticks AFTER its interruption window (the dwell counts only outside the frozen window — review round); same-direction climbs stay free |
 //! | [`OVERREV_MARGIN_RPM`] | SIM POLICY | fix-1c: a downshift must land at least this far under the engine's max curve rpm — the box never commands an over-rev |
 //! | [`WIDE_ON`]/[`WIDE_OFF`]/[`TIGHT_ON`]/[`TIGHT_OFF`] | SIM POLICY | stick-to-detent input mapping with hysteresis; the DETENT RATIOS they select are spec |
 //! | [`TICK_HZ`] | SIM POLICY | the fixed simulation tick the shift countdown quantizes against |
@@ -516,8 +516,15 @@ fn reflected_drag(tp: &TransmissionParams, g: f32, m: f32, propulsive: f32) -> f
 /// `v += (Q − R)/I·dt` with `Q = (f_p + f_drag)/2` — under the shift window's own rules:
 /// drive torque cut (`f_p = 0`), engine drag through the LANDING gear (the live tick's `g`
 /// is already the new gear during the window), and the ground reaction frozen at its
-/// current per-tick mean (deterministic, and conservative while the reaction is easing off
-/// — the true post-cut reaction collapses with the slip). Fixed-tick, f32-exact.
+/// current per-tick mean. Fixed-tick, f32-exact.
+///
+/// DOMAIN (review round): valid for the PROPULSIVE straight-line case ONLY — the only case
+/// the scheduler consults it for (upshifts are intent-gated on `propulsive > 0` and
+/// detent-deferred on the L600). It integrates drag but carries no brake term and no
+/// λ/steer state, so under service braking or a geared turn it would over-predict the
+/// landing. Inside its domain, frozen-R is CONSERVATIVE (the true post-cut reaction
+/// collapses with the slip), and the single mean-axis clamp is an accepted approximation
+/// of the live per-side clamps.
 fn predict_shift_landing_m(
     tp: &TransmissionParams,
     fp: &ForceParams,
@@ -597,18 +604,39 @@ fn regenerative(
     // gates (the fix-1 anti-hunting batch) kill the shift-cut oscillation the static bands
     // alone could not — the cut's own belt-speed bleed erased the ~100 rpm band margin in
     // low gears (measured full-throttle climb trace: 1-2-1-2-1-2-3-2-…):
-    //   a) upshifts must PREDICT a landing rpm ≥ down band + POSTSHIFT_MARGIN_RPM at the
-    //      END of the torque-cut window ([`predict_shift_landing_m`] — the same
-    //      integration the window itself runs);
+    //   a) upshifts are CONSIDERED only under propulsive drive AND (for the L600) with the
+    //      steering detent released — the predictor-domain gates below — and must PREDICT
+    //      a landing rpm ≥ down band + POSTSHIFT_MARGIN_RPM at the END of the torque-cut
+    //      window ([`predict_shift_landing_m`] — the same integration the window itself
+    //      runs);
     //   b) a committed shift blocks the OPPOSITE-direction shift for REVERSAL_DWELL_TICKS
     //      (same-direction climbs stay free);
     //   c) downshifts must land under the engine's max curve rpm − OVERREV_MARGIN_RPM.
     let rpm_of = |mm: f32, g: f32| mm.abs() * g / tp.sprocket_radius / RPM_TO_RAD;
     let rpm_geared = |g: f32| rpm_of(m, g);
+    // Predictor-domain guard (review round): while the L600 detent is engaged the
+    // constraint force λ loads the outputs in a way the predictor cannot model (it carries
+    // no λ/steer state), so its landing prediction is invalid mid-geared-turn — DEFER
+    // upshifts until the detent releases. Downshifts stay allowed (the over-rev gate still
+    // applies). The broader "hold gear during any turn" UX rule is a separate pending
+    // design decision, deliberately NOT implemented here.
+    let detent_turn = mode == TransmissionMode::FixedRadii && st.steer_step != 0;
     if st.shift_ticks == 0 {
         let rpm = rpm_geared(ladder[(st.gear - 1) as usize]);
         let dwell_blocks = |shift_dir: i8| st.dwell_ticks > 0 && st.last_shift_dir == -shift_dir;
-        if rpm > tp.shift_up_rpm && st.gear < top && !dwell_blocks(1) {
+        // Intent gate (review round): an upshift is only ever WANTED while actually
+        // driving (`propulsive > 0`) — a braking or coasting driver never needs one — and
+        // only there is the predictor inside its domain (it integrates drag but no brake
+        // term; under service braking it over-predicted the landing by ~400 rpm: F7 @
+        // 2500 rpm + full opposing throttle predicted 1652 on drag alone while the live
+        // window with the brakes landed at 1262, below the down band → a false shift +
+        // reversal cycle).
+        if rpm > tp.shift_up_rpm
+            && st.gear < top
+            && propulsive > 0.0
+            && !detent_turn
+            && !dwell_blocks(1)
+        {
             let g_up = ladder[st.gear as usize];
             let r_mean = (inp.reactions[0] + inp.reactions[1]) / 2.0;
             let landing = predict_shift_landing_m(tp, fp, g_up, propulsive, m, r_mean, dt);
@@ -628,7 +656,10 @@ fn regenerative(
             }
         }
     }
-    if st.dwell_ticks > 0 {
+    // The dwell counts only OUTSIDE the interruption window (review round): the frozen
+    // window blocks all decisions anyway, so draining the dwell inside it left only ~12
+    // effective post-engagement ticks of the promised 32.
+    if st.shift_ticks == 0 && st.dwell_ticks > 0 {
         st.dwell_ticks -= 1;
     }
     let shifting = st.shift_ticks > 0;
@@ -710,14 +741,18 @@ fn regenerative(
             // FORCE up to the capacity bound (steer-proportional, the per-output
             // convention's ±2×capacity on the difference axis) and the power-conservation
             // scale below is the binding limiter, so the pivot rate settles where engine
-            // power balances scrub dissipation. The two regimes blend continuously on |m|
-            // over NEUTRAL_M_SPEED with the module's regime-blend shape (`hold_blend`) —
-            // no one-tick force jump crosses the seam.
+            // power balances scrub dissipation. The blend weight is continuous in BOTH
+            // regime axes — `hold_blend` over |m| (NEUTRAL_M_SPEED) × |steer| — so no
+            // one-tick force jump crosses either seam, and steer → 0 continuously returns
+            // the whole force to the curvature servo, whose target is then 0: releasing
+            // the stick actively ARRESTS the belt difference (review round: weighting on
+            // |m| alone zeroed both terms at steer = 0 and left an airborne pivot
+            // counter-rotating forever).
             let k_full = tp.steer_kappa[0].0;
             if inp.steer != 0.0 || d != 0.0 {
                 let servo_f = servo(inp.steer.signum() * (inp.steer.abs() * k_full * m.abs()));
                 let pivot_f = inp.steer * f_s_max;
-                let w = forces::hold_blend(m.abs() / NEUTRAL_M_SPEED);
+                let w = forces::hold_blend(m.abs() / NEUTRAL_M_SPEED) * inp.steer.abs().min(1.0);
                 f_s = servo_f + (pivot_f - servo_f) * w;
             }
         }
@@ -1177,7 +1212,9 @@ mod tests {
             "same-direction shifts must not be dwell-blocked"
         );
         // OPPOSITE direction: drop below gear-3's down band. The downshift must wait out
-        // the dwell — strictly longer than the interruption window alone would hold it.
+        // the FULL dwell after the window — the dwell counts only outside the frozen
+        // window (review round), so the reversal engages exactly at
+        // window + REVERSAL_DWELL_TICKS.
         let v_low = rpm_v(900.0, tp.gears_fwd[2]);
         let mut ticks = 0usize;
         while st.gear == 3 {
@@ -1185,10 +1222,129 @@ mod tests {
             ticks += 1;
             assert!(ticks < 200, "the downshift must eventually engage");
         }
+        assert_eq!(
+            ticks,
+            tp.shift_ticks as usize + REVERSAL_DWELL_TICKS as usize,
+            "the reversal must get the full post-engagement dwell (window {} + dwell {})",
+            tp.shift_ticks,
+            REVERSAL_DWELL_TICKS
+        );
+    }
+
+    /// Review round (intent gate): upshifts are considered only under PROPULSIVE drive. A
+    /// braking (opposing-throttle) or coasting driver at high rpm never needs one — and
+    /// the landing predictor has no brake term, so consulting it there produced a false
+    /// shift (predicted 1652 rpm on drag alone vs 1262 real under the brakes) followed by
+    /// a reversal cycle.
+    #[test]
+    fn no_upshift_while_braking_or_coasting() {
+        let (fp, tp) = (lab_fp(), lab_tp());
+        let g1 = tp.gears_fwd[0];
+        let v = 1_780.0 * RPM_TO_RAD * tp.sprocket_radius / g1;
+        for throttle in [0.0, -1.0] {
+            let mut st = TransmissionState::default();
+            step(
+                TransmissionMode::Hybrid,
+                &fp,
+                Some(&tp),
+                &mut st,
+                &input(throttle, 0.0, [v, v], [0.0, 0.0]),
+            );
+            assert_eq!(
+                st.gear, 1,
+                "throttle {throttle}: no upshift without propulsive drive"
+            );
+            assert_eq!(st.shift_ticks, 0, "throttle {throttle}: no shift committed");
+        }
+    }
+
+    /// Review round (predictor-domain guard): while the L600 steering detent is engaged
+    /// the landing predictor has no λ/steer state, so upshifts are DEFERRED until the
+    /// detent releases; downshifts stay allowed mid-turn.
+    #[test]
+    fn l600_detent_defers_upshift() {
+        let (fp, tp) = (lab_fp(), lab_tp());
+        let v_up = 1_780.0 * RPM_TO_RAD * tp.sprocket_radius / tp.gears_fwd[0];
+        // Detent engaged (tight) at an above-band operating point: upshift deferred.
+        let mut st = TransmissionState {
+            steer_step: 2,
+            ..Default::default()
+        };
+        step(
+            TransmissionMode::FixedRadii,
+            &fp,
+            Some(&tp),
+            &mut st,
+            &input(1.0, 1.0, [v_up, v_up], [0.0, 0.0]),
+        );
+        assert_eq!(st.gear, 1, "detent-active upshift must be deferred");
+        // Same operating point, detent released: the upshift proceeds — it is the detent
+        // that defers, not the operating point.
+        let mut st = TransmissionState::default();
+        step(
+            TransmissionMode::FixedRadii,
+            &fp,
+            Some(&tp),
+            &mut st,
+            &input(1.0, 0.0, [v_up, v_up], [0.0, 0.0]),
+        );
+        assert_eq!(st.gear, 2, "detent released, the upshift proceeds");
+        // Downshifts stay allowed mid-turn (over-rev gate permitting).
+        let v_low = 900.0 * RPM_TO_RAD * tp.sprocket_radius / tp.gears_fwd[2];
+        let mut st = TransmissionState {
+            gear: 3,
+            steer_step: 2,
+            ..Default::default()
+        };
+        step(
+            TransmissionMode::FixedRadii,
+            &fp,
+            Some(&tp),
+            &mut st,
+            &input(1.0, 1.0, [v_low, v_low], [0.0, 0.0]),
+        );
+        assert_eq!(st.gear, 2, "downshifts stay allowed during a detent turn");
+    }
+
+    /// Review round (fix B): releasing the steer at a standstill pivot must actively
+    /// ARREST the belt difference — with zero ground reactions (airborne), only the servo
+    /// can. The |m|-only blend weight zeroed both force terms at steer = 0 (w = 1,
+    /// pivot_f = 0), leaving the belts counter-rotating forever; the steer-scaled weight
+    /// returns the released stick to the curvature servo, whose target is 0.
+    #[test]
+    fn hybrid_steer_release_arrests_pivot() {
+        let (fp, tp) = (lab_fp(), lab_tp());
+        let mut st = TransmissionState::default();
+        let mut speeds = [0.0f32; 2];
+        // Spin up a standstill pivot (zero reactions — the worst case: nothing external
+        // ever damps the belts).
+        for _ in 0..64 {
+            let rep = step(
+                TransmissionMode::Hybrid,
+                &fp,
+                Some(&tp),
+                &mut st,
+                &input(0.0, 1.0, speeds, [0.0, 0.0]),
+            );
+            speeds = rep.next_speeds;
+        }
+        let d0 = (speeds[0] - speeds[1]) / 2.0;
+        assert!(d0 > 0.1, "the pivot must actually be turning (d = {d0})");
+        // Release the steer: d must decay to ~0 within a bounded window.
+        for _ in 0..32 {
+            let rep = step(
+                TransmissionMode::Hybrid,
+                &fp,
+                Some(&tp),
+                &mut st,
+                &input(0.0, 0.0, speeds, [0.0, 0.0]),
+            );
+            speeds = rep.next_speeds;
+        }
+        let d1 = (speeds[0] - speeds[1]) / 2.0;
         assert!(
-            ticks > tp.shift_ticks as usize + 5,
-            "the reversal must stay dwell-blocked past the interruption window \
-             (fired after {ticks} ticks)"
+            d1.abs() < 0.01,
+            "released steer must arrest the pivot (d {d0} -> {d1})"
         );
     }
 

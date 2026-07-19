@@ -745,11 +745,13 @@ mod tests {
         assert_eq!(*tr.gearbox.forward_speeds_kmh.last().unwrap(), 45.4);
         assert_eq!(tr.steering.radii[0].0, 3.44);
         assert_eq!(tr.steering.radii[7].1, 165.0);
-        // DELIBERATE pin update (transmission fix 4, 2026-07-19): brake_force re-anchored
-        // from the circular grip-limit sizing (250 kN — sized against the very μ it was
-        // meant to test, and energy-impossible for two 1940s discs) to the documented
-        // 0.3 g deceleration target: 0.3 × 9.81 × 57 000 kg ≈ 167.7 kN total → 84 kN/side.
-        assert_eq!(tr.brake_force, 84_000.0);
+        // DELIBERATE pin update (transmission fix 4 + review round, 2026-07-19):
+        // brake_force re-anchored from the circular grip-limit sizing (250 kN — sized
+        // against the very μ it was meant to test, and energy-impossible for two 1940s
+        // discs) to the DUAL anchor: the settled 20° park hold (W·sin 20°/2 ≈ 95.6
+        // kN/side) and 0.343 g total service decel (inside the 0.2–0.35 g WWII heavy-tank
+        // band) → 96 kN/side.
+        assert_eq!(tr.brake_force, 96_000.0);
         // Track: the material loop is authored exact (pitch × count = the immutable belt
         // length); the sprocket's tooth count locks link advance to tooth advance.
         assert_eq!(spec.track.pitch, 0.130);

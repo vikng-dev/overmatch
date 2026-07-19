@@ -1014,14 +1014,16 @@ fn gear_climb_monotone_tiger() {
 ///   bucket 3 — not to the drivetrain, and not tunable-by-feel here). Also pinned: past
 ///   the command-shaper's release slew, coasting never accelerates (the old code
 ///   ACCELERATED on opposite input — the regression this kills).
-/// * OPPOSITE THROTTLE: service brakes at the declared capacity, re-anchored by fix 4 to
-///   the documented 0.3 g decel target (84 kN/side; the old 250 kN was the circular
-///   grip-limit sizing — and 1.17 s from 6 m/s was the energy-impossible tell). Analytic
-///   prediction: 2 × 84 kN / 57 t = 2.94 m/s² in the full phase, plus engine drag
-///   (~17 kN in F7, growing through downshifts) ≈ 3.2 m/s², plus the command shaper's
-///   ~0.5 s press slew dead time → from 6.0 m/s ≈ 0.5 + 5.0/3.2 ≈ 2.1–2.4 s to 1 m/s.
-///   MEASURED: 2.45 s. Gate ≤ 3.5 s (margin for platform float drift, nothing else).
-///   The coast leg above is UNCHANGED by fix 4 (no brake in the release intent).
+/// * OPPOSITE THROTTLE: service brakes at the declared capacity, DUAL-anchored by fix 4
+///   and the review round (96 kN/side: the settled 20° park hold at 95.6 kN/side demand,
+///   0.343 g total service decel inside the 0.2–0.35 g WWII heavy-tank band; the old
+///   250 kN was the circular grip-limit sizing — 1.17 s from 6 m/s was the
+///   energy-impossible tell). Analytic prediction: 2 × 96 kN / 57 t = 3.37 m/s² in the
+///   full phase, plus engine drag (~17 kN in F7, growing through downshifts)
+///   ≈ 3.6+ m/s², plus the command shaper's ~0.5 s press slew dead time → from 6.0 m/s
+///   ≈ 0.5 + 5.0/3.6 ≈ 1.9 s to 1 m/s. MEASURED: 2.23 s. Gate ≤ 3 s (margin for
+///   platform float drift, nothing else). The coast leg above is UNCHANGED (no brake in
+///   the release intent).
 #[test]
 fn decel_tiger() {
     use crate::track::transmission::TransmissionMode;
@@ -1064,13 +1066,13 @@ fn decel_tiger() {
         coast_ticks as f32 / 64.0
     );
 
-    // Phase 2 — service brakes: opposite throttle from ≥ 6 m/s. Budget 3.5 s: the fix-4
-    // decel-anchored capacity predicts ≈ 2.2 s including the input slew dead time (see
+    // Phase 2 — service brakes: opposite throttle from ≥ 6 m/s. Budget 3 s: the
+    // dual-anchored capacity predicts ≈ 1.9 s including the input slew dead time (see
     // the doc comment's arithmetic).
     drive_to_speed(&mut app, tank, 6.0, 2400);
     released = hull_speed(&mut app, tank);
     let mut brake_ticks = None;
-    for tick in 0..(7 * 32) {
+    for tick in 0..(3 * 64) {
         drive_tick(&mut app, tank, -1.0, 0.0);
         if hull_speed(&mut app, tank) <= 1.0 {
             brake_ticks = Some(tick + 1);
@@ -1079,7 +1081,7 @@ fn decel_tiger() {
     }
     let brake_ticks = brake_ticks.unwrap_or_else(|| {
         panic!(
-            "service brakes never reached 1 m/s within 3.5 s from {released:.2} m/s \
+            "service brakes never reached 1 m/s within 3 s from {released:.2} m/s \
              (speed {:.2})",
             hull_speed(&mut app, tank)
         )
@@ -1087,6 +1089,63 @@ fn decel_tiger() {
     println!(
         "tiger decel: service brakes {released:.2} -> 1 m/s in {:.2} s",
         brake_ticks as f32 / 64.0
+    );
+}
+
+/// The brake datum's own regression gate (review round): the Tiger parks on the course's
+/// 20° ramp and HOLDS. `brake_force` is dual-anchored on exactly this capability —
+/// W·sin 20°/2 ≈ 95.6 kN/side demand against the 96 kN/side capacity — so the settled
+/// ADR-0026 hill-hold behavior is pinned by test, not by comment. Teleport onto the 20°
+/// ramp mid-face (test course §1: x = 0, z = −40, pitched about X), release all inputs,
+/// settle; the park latch must engage and the hull must not back-drive over a sustained
+/// window. 30° is now genuinely beyond capacity (139.8 kN/side demand) and is NOT gated —
+/// it back-drives honestly under the capacity-breach law.
+#[test]
+fn slope_park_holds_20_deg_tiger() {
+    use crate::track::transmission::TransmissionMode;
+    let (mut app, tank) = booted_offline_sim(TransmissionMode::FixedRadii);
+    {
+        let mut e = app.world_mut().entity_mut(tank);
+        e.get_mut::<avian3d::prelude::Position>().unwrap().0 = Vec3::new(0.0, 2.6, -40.0);
+        e.get_mut::<avian3d::prelude::Rotation>().unwrap().0 =
+            Quat::from_rotation_x(20.0_f32.to_radians());
+        e.get_mut::<avian3d::prelude::LinearVelocity>().unwrap().0 = Vec3::ZERO;
+        e.get_mut::<avian3d::prelude::AngularVelocity>().unwrap().0 = Vec3::ZERO;
+    }
+    // Settle onto the face under zero input (drop + suspension ring-down + latch).
+    for _ in 0..256 {
+        drive_tick(&mut app, tank, 0.0, 0.0);
+    }
+    let p0 = app
+        .world()
+        .get::<avian3d::prelude::Position>(tank)
+        .expect("tank has a position")
+        .0;
+    for _ in 0..(4 * 64) {
+        drive_tick(&mut app, tank, 0.0, 0.0);
+    }
+    let p1 = app
+        .world()
+        .get::<avian3d::prelude::Position>(tank)
+        .expect("tank has a position")
+        .0;
+    let st = app
+        .world()
+        .get::<crate::track::sim::TankTransmission>(tank)
+        .expect("tank carries transmission state")
+        .0;
+    let drift = (p1 - p0).length();
+    println!(
+        "tiger 20-deg slope park: drift {drift:.4} m over 4 s, park latch {}",
+        st.park
+    );
+    assert!(
+        st.park,
+        "zero input at rest on the ramp must latch the park brake"
+    );
+    assert!(
+        drift < 0.05,
+        "the latched park must hold the 20-deg ramp (drifted {drift:.3} m over 4 s)"
     );
 }
 

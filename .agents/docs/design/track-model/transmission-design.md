@@ -254,13 +254,46 @@ removed from spec struct, RON, validation, and the L600 neutral path (which now 
 `brake_force: 250_000` per side was sized by the grip-limit rule against μ = 0.9 —
 circular (sized against the very friction it was to be tested by) and energy-impossible
 (~2.9 MW through two 1940s Argus discs at speed; §3 above already flagged that ship
-values need a real brake source). Re-anchored to a documented deceleration target:
-**0.3 g total-vehicle** (mid of the 0.2–0.35 g band realistic for WWII 57-t heavies):
-0.3 g × 57 000 kg × 9.81 = 167.7 kN → `brake_force: 84_000` per side. The stop-force law
+values need a real brake source). Re-anchored (final value set in the review round below)
+to a DUAL documented anchor: the settled 20° park-hold capability (W·sin 20°/2 ≈
+95.6 kN/side) and 0.343 g total service decel (inside the 0.2–0.35 g band realistic for
+WWII 57-t heavies) → `brake_force: 96_000` per side. The stop-force law
 `B = clamp(R − Q − vI/dt, ±cap)` and the park latch are untouched — only the datum moved.
-Measured service-brake stop 6 → 1 m/s: **2.45 s** (analytic ≈ 0.5 s input slew +
-5.0 m/s ÷ ~3.2 m/s² brake+drag); gate `decel_tiger` ≤ 3.5 s, coast leg unchanged
-(10.7 s). Supersede with a real Argus brake/output-torque rating when sourced.
+Measured service-brake stop 6 → 1 m/s: **2.23 s** (analytic ≈ 0.5 s input slew +
+5.0 m/s ÷ ~3.6 m/s² brake+drag); gate `decel_tiger` ≤ 3 s, coast leg unchanged (10.7 s);
+new gate `slope_park_holds_20_deg_tiger` pins the 20° hold (measured drift 0.000 m over
+4 s, latch engaged). 30° ramps now back-drive honestly (139.8 kN/side demand > capacity —
+physical; the old 250 kN held them for free). Supersede with a real Argus
+brake/output-torque rating when sourced.
+
+### Review round (same day) — three adversarial findings, dispositions
+
+1. **Landing gate consulted outside its domain (High).** The predictor integrates drag
+   but no brake term and carries no λ/steer state, yet upshifts were considered under
+   service braking (F7 @ 2500 rpm + full opposing throttle: predicted landing 1652 rpm on
+   drag alone, live window with brakes landed 1262 — below the down band → false shift +
+   reversal cycling) and during L600 geared turns. Fixed by INTENT-gating: upshifts are
+   considered only while `propulsive > 0` (a braking/coasting driver never needs one),
+   and the L600 DEFERS upshifts while a steering detent is engaged (downshifts stay
+   allowed; the over-rev gate still applies — the broader "hold gear during any turn" UX
+   rule remains a separate pending design decision). The predictor's doc now states its
+   domain honestly: propulsive straight-line only, frozen-R conservative there, single
+   mean-axis clamp an accepted approximation of the per-side clamps. Also: the dwell now
+   counts only OUTSIDE the interruption window, so a reversal gets the full 32
+   post-engagement ticks (it previously drained to ~12 during the frozen window). Tests:
+   `no_upshift_while_braking_or_coasting`, `l600_detent_defers_upshift`, and the dwell
+   test now pins the exact window + 32 timing.
+2. **Hybrid steer release at pivot cancelled the d-arrest servo (Medium).** At m ≈ 0 with
+   steer released, the |m|-only blend weight kept w = 1 while pivot_f = 0 — f_s = 0, so
+   an airborne pivot kept counter-rotating forever. The blend weight is now
+   `hold_blend(|m|/NEUTRAL_M_SPEED) × |steer|`: continuous in both axes, and steer → 0
+   returns the whole force to the curvature servo whose target is then 0 (active arrest).
+   Test: `hybrid_steer_release_arrests_pivot`. Measured pivot rates unchanged
+   (0.654 / 0.131 rad/s).
+3. **84 kN broke the settled 20° hill-hold (Medium).** The single 0.3 g anchor
+   (167.7 kN total) sat just under the 20° slope demand (191.2 kN total) that ADR-0026
+   and the test course had settled as capability. Re-anchored to the dual anchor above
+   (96 kN/side) and the previously missing slope-park gate now pins it.
 
 ## Ranked recommendation
 
