@@ -350,6 +350,40 @@ impl Default for TransmissionState {
     }
 }
 
+/// A compact operating-point readout of the joint drivetrain — the ONE place the HUD/legend
+/// reads gear and rpm from, so the display never re-derives drivetrain math (the gear/rpm
+/// relation lives here, beside the adapter that integrates on it).
+#[derive(Clone, Debug, PartialEq)]
+pub struct DriveReadout {
+    /// Engine rpm at the engaged gear from the MEAN belt speed, floored at idle — the geared
+    /// crank speed the regenerative adapter reads before its command-dependent rev floor (a
+    /// state-only readout cannot know the launch throttle, so it reports the geared point).
+    pub rpm: f32,
+    /// The engaged gear as a display label: `F1..Fn` forward, `R1..Rn` reverse.
+    pub gear_label: String,
+}
+
+/// Read the drivetrain operating point THROUGH THE LAW: the engaged gear from [`TransmissionState`]
+/// against the active ladder, and the geared engine rpm from the pre-tick belt speeds — the same
+/// `rpm = |m|·G / r_s` relation [`regenerative`] runs, floored at idle. Pure (no ECS), so the HUD
+/// and any legend share one implementation.
+pub fn readout(st: &TransmissionState, tp: &TransmissionParams, speeds: [f32; 2]) -> DriveReadout {
+    let m = (speeds[0] + speeds[1]) / 2.0;
+    let ladder: &[f32] = if st.reverse {
+        &tp.gears_rev
+    } else {
+        &tp.gears_fwd
+    };
+    let top = ladder.len() as u8;
+    let gear = st.gear.clamp(1, top);
+    let g = ladder[(gear - 1) as usize];
+    let rpm = (m.abs() * g / tp.sprocket_radius / RPM_TO_RAD).max(tp.engine.idle_rpm);
+    DriveReadout {
+        rpm,
+        gear_label: format!("{}{gear}", if st.reverse { 'R' } else { 'F' }),
+    }
+}
+
 /// One tick's joint input: the SHAPED drive axes plus the per-side mixed commands (the brake
 /// envelope and the governor adapter consume the sides; the regenerative adapters consume the
 /// axes), the pre-tick belt speeds, and this tick's summed longitudinal ground reactions.

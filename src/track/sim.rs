@@ -161,6 +161,15 @@ pub struct TrackGear {
     trans: Option<TransmissionParams>,
 }
 
+impl TrackGear {
+    /// The declared joint transmission params, if the spec authored one (phase 2.5). Read-only
+    /// accessor for the offline drive HUD (`crate::run_offline`); the field stays private so
+    /// only the gated drive step and the HUD legend consume it.
+    pub fn trans(&self) -> Option<&TransmissionParams> {
+        self.trans.as_ref()
+    }
+}
+
 pub fn sim_plugin(app: &mut App) {
     // Lazy one-shot: the blueprint lands at Startup (bake); the gear builds on the first
     // frame after and never again.

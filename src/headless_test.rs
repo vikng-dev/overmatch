@@ -1054,6 +1054,57 @@ fn top_speed_tiger() {
     );
 }
 
+/// The offline drive HUD's readout fn, exercised on the REAL Tiger through the offline
+/// composition: after driving forward under the L600 adapter, [`transmission::readout`] must
+/// report a sane geared operating point — the engaged FORWARD gear label and an rpm inside the
+/// engine's idle..governed band (never below idle, never past the governor). This pins the one
+/// place the HUD reads gear/rpm from, on the same tick-truth components the HUD queries.
+#[test]
+fn drive_readout_reports_sane_operating_point() {
+    use crate::track::transmission::{self, TransmissionMode};
+    let (mut app, tank) = booted_offline_sim(TransmissionMode::FixedRadii);
+    face_positive_z(&mut app, tank);
+    drive_to_speed(&mut app, tank, 6.0, 2400);
+    // A second more at full throttle so the box has settled onto a gear/rpm.
+    for _ in 0..64 {
+        drive_tick(&mut app, tank, 1.0, 0.0);
+    }
+
+    let world = app.world();
+    let drive = world
+        .get::<crate::track::sim::TrackDrive>(tank)
+        .expect("the controlled tank drives");
+    let state = world
+        .get::<crate::track::sim::TankTransmission>(tank)
+        .expect("the controlled tank carries transmission state");
+    let tp = world
+        .resource::<crate::track::sim::TrackGear>()
+        .trans()
+        .expect("the Tiger blueprint declares a transmission");
+    let readout = transmission::readout(&state.0, tp, [drive.sides[0].speed, drive.sides[1].speed]);
+    println!(
+        "drive readout: gear {} rpm {:.0} (idle {}, governed {})",
+        readout.gear_label, readout.rpm, tp.engine.idle_rpm, tp.engine.governed_rpm
+    );
+
+    assert!(
+        (tp.engine.idle_rpm..=tp.engine.governed_rpm).contains(&readout.rpm),
+        "a driven Tiger's readout rpm {} must lie in idle..governed [{}, {}]",
+        readout.rpm,
+        tp.engine.idle_rpm,
+        tp.engine.governed_rpm,
+    );
+    assert!(
+        !state.0.reverse,
+        "the tank drove forward — the state must be on the forward ladder"
+    );
+    assert_eq!(
+        readout.gear_label,
+        format!("F{}", state.0.gear),
+        "the label must name the actually-engaged forward gear",
+    );
+}
+
 #[derive(Resource, Default)]
 struct ScriptedDeterminismRun {
     digests: Vec<Vec<(String, crate::trace::CanonicalTankStateDigest)>>,
