@@ -396,6 +396,13 @@ impl Default for T34Transmission {
             brake_capacity_n: 120_000.0,
             // Compression braking ~25% of peak torque (diesel 20–30% band) — INFERRED.
             drag_fraction: 0.25,
+            // Crank + flywheel + clutch inertia (kg·m²) — the stage-B crank state. Same
+            // class-scaling band as the Tiger authoring (2.5–6, flywheel-dominant),
+            // mid-band 4.0 — INFERRED lab value.
+            engine_inertia_kgm2: 4.0,
+            // Main clutch capacity ≈ 1.3 × the 2200 N·m peak — the usual dry-clutch
+            // sizing margin, INFERRED lab value.
+            clutch_capacity_nm: 2860.0,
             // Manual crash-box shift, drive uncoupled ~0.3 s — INFERRED.
             shift_secs: 0.31,
             sprocket_radius_m: DRIVE_RADIUS + TRACK_THICKNESS / 2.0,

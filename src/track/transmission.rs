@@ -38,19 +38,40 @@
 //! THE ENGAGED LADDER — `shaft = dir·m` with `dir = −1` on the R ladder — so driving
 //! normally reads POSITIVE and a BACK-DRIVEN belt (rolling against the engaged gear on a
 //! grade) reads NEGATIVE. The SHAFT is signed (rigid gearing); the ENGINE never is — it
-//! cannot follow a back-driven shaft, so the operating point floors at the non-negative
-//! command-proxy rev floor (the implicit slipping clutch, until the ω_e crank-state arc
-//! lands). The old `|m|` read a backslide as high FORWARD rpm, which produced the whole
-//! reproduced bug family: the governor cut drive to zero mid-backslide (tank rolls
-//! backward on flat ground under full W at "2770 rpm", zero force, indefinitely), the
-//! scheduler walked the ladder 1→6 while sliding backward at −2..−3 m/s, and the fix-1a
-//! landing gate PASSED catastrophic on-grade upshifts (a predicted backward landing
-//! `landing_m = −3.62` read as "9092 rpm" ≥ band + margin).
+//! cannot follow a back-driven shaft. The old `|m|` read a backslide as high FORWARD rpm,
+//! which produced the whole reproduced bug family: the governor cut drive to zero
+//! mid-backslide (tank rolls backward on flat ground under full W at "2770 rpm", zero
+//! force, indefinitely), the scheduler walked the ladder 1→6 while sliding backward at
+//! −2..−3 m/s, and the fix-1a landing gate PASSED catastrophic on-grade upshifts (a
+//! predicted backward landing `landing_m = −3.62` read as "9092 rpm" ≥ band + margin).
+//!
+//! Engine crank state ω_e (stage B): the crank is now REAL STATE
+//! ([`TransmissionState::omega_e`], rad/s) with its own inertia J
+//! ([`TransmissionParams::engine_inertia`]) — stage A's command-proxy rev floor is DEAD.
+//! Per tick the crank produces a free torque `τ_free = τ_ind + τ_idle − τ_drag` (induced
+//! torque at the crank's OWN rpm under the governor cut; a saturating idle-governor
+//! recovery below idle; compression-braking drag, now ENGINE-side — the belt lost its
+//! separate drag term and drag reaches the belt only through the coupling), and a
+//! capacity-clamped main clutch couples it to the geared shaft
+//! ([`clutch_coupling`] — the semi-implicit lock torque, the ONE seamed coupling-law
+//! slot). Engaged, the belt's engine force is `F_c = k·s·τ_c` in place of the old
+//! `f_p + f_drag`; a STALL GUARD slips the clutch one-sidedly so the crank never lands
+//! below idle − [`STALL_GUARD_BAND_RPM`] (no stall death — that is a later,
+//! playtest-gated rung). Declutched (shift window / the generalized neutral-idle seam),
+//! the belt gets NO engine force and NO engine drag, and the crank REV-MATCHES toward the
+//! larger of the landing shaft speed and the steer-demand rpm target (the steering member
+//! is engine-driven in every regime). Launch rpm is now the emergent clutch-slip
+//! equilibrium; pivot power spools with the crank; `readout` reports ω_e directly (the
+//! state IS the display).
 //!
 //! Pure math, no ECS (like [`forces`]): callers own the state. [`TransmissionState`] is the
-//! only path-dependent state (gear, shift countdown, steering detent, direction) — carried as
-//! a plain LOCAL component / sandbox resource, NOT replicated, NOT hashed (this is REV 13;
-//! only the offline composition and the sandbox ever run the regenerative adapters).
+//! only path-dependent state (gear, shift countdown, steering detent, direction, crank
+//! speed ω_e) — carried as a plain LOCAL component / sandbox resource, NOT replicated, NOT
+//! hashed (this is REV 13; only the offline composition and the sandbox ever run the
+//! regenerative adapters). ω_e's wire registration rides the later netcode arc with the
+//! rest of the REV-14 list (element-netcode-design.md): when the regenerative box goes
+//! multiplayer, ω_e replicates/rolls back alongside gear + shift countdown — it is sim
+//! state a rollback replay must restore, not derivable from the belt (the clutch slips).
 //!
 //! # The law/spec split (every constant in this module, classified)
 //!
@@ -61,7 +82,7 @@
 //! | constant | class | rationale |
 //! |---|---|---|
 //! | [`GOVERNOR_CUT_RPM`] | SIM POLICY | numerical smoothing width so the top-speed equilibrium is a smooth root, not a hard clip; any governed engine gets the same treatment |
-//! | [`DRAG_SAT_SPEED`] | SIM POLICY | anti-chatter ramp for the drag sign near standstill (the parking brake owns standstill); a solver guard, not a vehicle trait |
+//! | `DRAG_SAT_SPEED` (REMOVED, stage B) | — | the belt-side drag saturation ramp died with the belt-side drag term; engine-side drag saturates over the crank's own `ω_idle` (DERIVED from spec, no new const) — the same "fade only near standstill" role reflected engine-side, since any motoring crank sits at or above idle exactly as any driving belt exceeded 0.2 m/s |
 //! | [`DRAG_THROTTLE_RELEASE`] | SIM POLICY | driver-intent shaping: where "open throttle" stops meaning "motoring"; part of the uniform input contract, same for every tank |
 //! | [`DEAD`] | SIM POLICY | input deadzone on one shared axis mapping |
 //! | [`PARK_ENGAGE_SPEED`] | SIM POLICY | latch threshold for "at rest" — a determinism/stability guard on the shared intent layer |
@@ -72,6 +93,9 @@
 //! | [`OVERREV_MARGIN_RPM`] | SIM POLICY | fix-1c: a downshift must land at least this far under the engine's max curve rpm — the box never commands an over-rev |
 //! | [`WIDE_ON`]/[`WIDE_OFF`]/[`TIGHT_ON`]/[`TIGHT_OFF`] | SIM POLICY | stick-to-detent input mapping with hysteresis; the DETENT RATIOS they select are spec |
 //! | [`TICK_HZ`] | SIM POLICY | the fixed simulation tick the shift countdown quantizes against |
+//! | [`K_IDLE_DROOP_RPM`] | SIM POLICY | idle-governor gain, expressed as the droop width: FULL recovery torque (`torque_at(idle)`) is reached ~50 rpm below idle. A governor stand-in, not an engine datum — any governed engine gets the same recovery shape; the TORQUE it recovers with is the vehicle's own curve |
+//! | [`STALL_GUARD_BAND_RPM`] | SIM POLICY | one-sided clamp band under idle: the coupling may never land the crank below `idle − band`. Sized so the idle governor SATURATES before the guard floor (band = 2× the droop width), which guarantees the guard can always hold the floor with `τ_free > 0`. A solver/robustness guard, not a vehicle trait |
+//! | [`REV_MATCH_BAND_RPM`] | SIM POLICY | proportional band of the declutched rev-match drive (`u_match = clamp((ω_target − ω_e)/band, 0, 1)`): full fueling one band below target, tapering to zero at it — smooth approach at 64 Hz instead of bang-bang chatter. Match AUTHORITY is the vehicle's own torque curve / J |
 //!
 //! Moved OUT of this module to the spec (they were vehicle data wearing const clothing):
 //! shift time (`gearbox.shift_secs` — a Tiger preselector and a T-34 crash box differ),
@@ -122,6 +146,14 @@ const TICK_HZ: f32 = 64.0;
 /// erased by the cut's own belt-speed bleed in low gears (~2500 rpm per m/s slope in gear
 /// 2), which fired the down band the tick the freeze lifted — the measured 1-2-1-2 climb
 /// trace. SIM POLICY.
+///
+/// Stage-B re-derivation (window physics changed: the declutched window carries NO drag on
+/// the belt, in prediction AND reality): 150 stays. At full throttle — the dominant
+/// upshift intent — drag was already fully released (`hold_blend(1/0.5) = 0`), so the
+/// predictor's full-throttle arithmetic is bit-identical to stage A; at partial throttle
+/// the old predictor's drag term matched the old window's real drag, and both died
+/// together. What the margin covers is unchanged: the frozen-reaction bleed error
+/// (`r_mean/I × window`), which stage B does not touch.
 const POSTSHIFT_MARGIN_RPM: f32 = 150.0;
 
 /// Fix-1b anti-hunting dwell (fixed ticks, 0.5 s at 64 Hz): after a shift commits, the
@@ -139,9 +171,24 @@ const OVERREV_MARGIN_RPM: f32 = 100.0;
 /// INFERRED numerical policy, not vehicle data.
 const GOVERNOR_CUT_RPM: f32 = 100.0;
 
-/// Belt-speed span (m/s) over which the engine-drag torque saturates — a viscous-near-zero
-/// ramp so drag cannot sign-flip chatter around standstill (the parking brake owns standstill).
-const DRAG_SAT_SPEED: f32 = 0.2;
+/// Idle-governor droop width (rpm): the idle governor's recovery torque ramps linearly from
+/// zero at idle to FULL `torque_at(idle)` this far below it (gain = `torque_at(idle) /
+/// (K_IDLE_DROOP_RPM·RPM_TO_RAD)` N·m per rad/s), saturating beyond. Stage B SIM POLICY —
+/// see the classification table.
+const K_IDLE_DROOP_RPM: f32 = 50.0;
+
+/// Stall-guard band (rpm): the one-sided clamp under idle — the coupling reduces the clutch
+/// torque so the crank never lands below `idle − STALL_GUARD_BAND_RPM`. At 2× the idle
+/// droop width the idle governor is fully saturated at the guard floor, so `τ_free ≥
+/// torque_at(idle) − τ_drag_max > 0` there and the guard can always hold it (the clutch
+/// slips to protect the crank; stall DEATH is a later, playtest-gated rung). Stage B SIM
+/// POLICY — see the classification table.
+const STALL_GUARD_BAND_RPM: f32 = 100.0;
+
+/// Declutched rev-match proportional band (rpm): full fueling one band below the landing
+/// target, tapering to zero at it (`u_match = clamp((ω_target − ω_e)/band, 0, 1)`). Stage B
+/// SIM POLICY — see the classification table.
+const REV_MATCH_BAND_RPM: f32 = 200.0;
 
 /// PROPULSIVE throttle magnitude above which engine drag is fully released (blends out with
 /// the hold-blend shape below it): an open throttle is not motoring. A BRAKE command
@@ -234,6 +281,15 @@ pub struct TransmissionParams {
     /// half of rated power. Diesel motoring/compression braking runs ~20–30% of rated
     /// torque (INFERRED band, tagged at the authoring site).
     pub drag_fraction: f32,
+    /// Crank + flywheel + clutch rotational inertia J (kg·m²) — the engine-side inertia the
+    /// stage-B crank state integrates against. Vehicle data (INFERRED at the authoring
+    /// sites: class scaling, flywheel-dominant).
+    pub engine_inertia: f32,
+    /// Main clutch torque capacity (N·m) — the coupling's clamp: the largest torque the
+    /// engaged clutch transmits before slipping (≈ 1.3 × peak engine torque by the usual
+    /// sizing rule; INFERRED at the authoring sites). THE COUPLING-LAW SLOT's one datum —
+    /// a torque-converter characteristic replaces the clamp for modern automatics later.
+    pub clutch_capacity: f32,
     /// Gear-shift torque-interruption window in fixed ticks — DERIVED from the authored
     /// `shift_secs` (a Tiger preselector and a crash box shift very differently: vehicle
     /// data, not module policy).
@@ -267,6 +323,10 @@ pub struct TransmissionAuthoring<'a> {
     pub brake_capacity_n: f32,
     /// See [`TransmissionParams::drag_fraction`].
     pub drag_fraction: f32,
+    /// See [`TransmissionParams::engine_inertia`] (kg·m²).
+    pub engine_inertia_kgm2: f32,
+    /// See [`TransmissionParams::clutch_capacity`] (N·m).
+    pub clutch_capacity_nm: f32,
     /// Gear-shift torque-interruption time (s) — see [`TransmissionParams::shift_ticks`].
     pub shift_secs: f32,
     pub sprocket_radius_m: f32,
@@ -321,6 +381,8 @@ impl TransmissionParams {
             recirculation: a.recirculation,
             brake_capacity_n: a.brake_capacity_n,
             drag_fraction: a.drag_fraction,
+            engine_inertia: a.engine_inertia_kgm2,
+            clutch_capacity: a.clutch_capacity_nm,
             shift_ticks: (a.shift_secs * TICK_HZ).round().clamp(0.0, 255.0) as u8,
             peak_torque_rpm,
             peak_torque_nm,
@@ -365,9 +427,10 @@ impl TransmissionParams {
 }
 
 /// The joint transmission's path-dependent state — the ONLY memory (design §2's REV-14 list):
-/// selected gear, shift countdown, steering detent, direction, parking latch. Constructed at
-/// spawn from tank data; a plain local component / sandbox resource under REV 13.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// selected gear, shift countdown, steering detent, direction, parking latch, crank speed.
+/// Constructed at spawn from tank data; a plain local component / sandbox resource under
+/// REV 13 (ω_e's wire registration rides the later netcode arc — module doc).
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct TransmissionState {
     /// 1-based gear in the active ladder.
     pub gear: u8,
@@ -388,6 +451,14 @@ pub struct TransmissionState {
     /// Remaining ticks of the fix-1b reversal dwell: while non-zero, the shift OPPOSITE to
     /// `last_shift_dir` stays blocked (same-direction shifts stay free).
     pub dwell_ticks: u8,
+    /// Engine crank speed ω_e (rad/s) — stage B's crank state. `0.0` is the UNINITIALIZED
+    /// sentinel: `Default` cannot see the spec (the state must be constructible before the
+    /// spec arrives — the same spawn-time invariant as the pre-sized element slabs,
+    /// element-promotion-checklist.md), so the first [`regenerative`] step with params snaps
+    /// it to the vehicle's idle. A live crank can never legitimately read 0.0 — the idle
+    /// governor holds it within ~[`STALL_GUARD_BAND_RPM`] of idle — so the sentinel is
+    /// unambiguous (checked as `!(ω_e > 0)`, which also catches NaN garbage defensively).
+    pub omega_e: f32,
 }
 
 impl Default for TransmissionState {
@@ -400,6 +471,7 @@ impl Default for TransmissionState {
             park: false,
             last_shift_dir: 0,
             dwell_ticks: 0,
+            omega_e: 0.0,
         }
     }
 }
@@ -409,22 +481,21 @@ impl Default for TransmissionState {
 /// relation lives here, beside the adapter that integrates on it).
 #[derive(Clone, Debug, PartialEq)]
 pub struct DriveReadout {
-    /// Engine rpm at the engaged gear from the MEAN belt speed, floored at idle — the geared
-    /// crank speed the regenerative adapter reads before its command-dependent rev floor (a
-    /// state-only readout cannot know the launch throttle, so it reports the geared point).
+    /// Engine rpm — the crank state ω_e DIRECTLY (stage B: the state IS the display). The
+    /// uninitialized sentinel (never stepped) reads idle; a live crank reads its honest
+    /// speed, sub-idle grade lug included (the stall guard bounds it at idle −
+    /// [`STALL_GUARD_BAND_RPM`]).
     pub rpm: f32,
     /// The engaged gear as a display label: `F1..Fn` forward, `R1..Rn` reverse.
     pub gear_label: String,
 }
 
-/// Read the drivetrain operating point THROUGH THE LAW: the engaged gear from [`TransmissionState`]
-/// against the active ladder, and the geared engine rpm from the pre-tick belt speeds — the same
-/// SIGNED-shaft relation [`regenerative`] runs (stage A: `rpm = max(dir·m·G / r_s, idle)`; a
-/// back-driven shaft reads IDLE, because the engine cannot follow it — the old `|m|` read a
-/// backslide as high forward rpm, the "F1 @ 2770 rpm" display lie). Pure (no ECS), so the HUD
-/// and any legend share one implementation.
-pub fn readout(st: &TransmissionState, tp: &TransmissionParams, speeds: [f32; 2]) -> DriveReadout {
-    let m = (speeds[0] + speeds[1]) / 2.0;
+/// Read the drivetrain operating point THROUGH THE LAW: the engaged gear from
+/// [`TransmissionState`] against the active ladder, and the engine rpm from the CRANK STATE
+/// ω_e (stage B — no belt-derived re-derivation: the crank slips against the shaft at
+/// launch, rev-matches through shifts, and idles while back-driven, and the display shows
+/// exactly that state). Pure (no ECS), so the HUD and any legend share one implementation.
+pub fn readout(st: &TransmissionState, tp: &TransmissionParams) -> DriveReadout {
     let ladder: &[f32] = if st.reverse {
         &tp.gears_rev
     } else {
@@ -432,9 +503,12 @@ pub fn readout(st: &TransmissionState, tp: &TransmissionParams, speeds: [f32; 2]
     };
     let top = ladder.len() as u8;
     let gear = st.gear.clamp(1, top);
-    let g = ladder[(gear - 1) as usize];
-    let dir = if st.reverse { -1.0 } else { 1.0 };
-    let rpm = (dir * m * g / tp.sprocket_radius / RPM_TO_RAD).max(tp.engine.idle_rpm);
+    let rpm = if st.omega_e > 0.0 {
+        st.omega_e / RPM_TO_RAD
+    } else {
+        // Uninitialized sentinel (state constructed, no regenerative step yet): idle.
+        tp.engine.idle_rpm
+    };
     DriveReadout {
         rpm,
         gear_label: format!("{}{gear}", if st.reverse { 'R' } else { 'F' }),
@@ -516,50 +590,111 @@ pub fn step(
     }
 }
 
-/// The zero-throttle engine-drag force (compression braking) reflected through gear `g` at
-/// mean-axis belt speed `m` (design §3): a drag TORQUE, saturating over [`DRAG_SAT_SPEED`]
-/// and released as the PROPULSIVE throttle opens. ONE implementation shared verbatim
-/// between the live tick and the fix-1a shift predictor, so prediction and reality run the
-/// same law.
-///
-/// Sign audit (stage A): `m/DRAG_SAT_SPEED` is already SIGNED, so under a backslide
-/// (`m < 0` in a forward gear) the drag comes out POSITIVE — opposing the actual belt
-/// motion, as compression braking must. Correct as-is; deliberately untouched.
-fn reflected_drag(tp: &TransmissionParams, g: f32, m: f32, propulsive: f32) -> f32 {
-    -(tp.peak_torque_nm * tp.drag_fraction * g / tp.sprocket_radius)
-        * (m / DRAG_SAT_SPEED).clamp(-1.0, 1.0)
-        * forces::hold_blend(propulsive / DRAG_THROTTLE_RELEASE)
+/// The engine's compression-braking drag torque at the CRANK (stage B — drag moved
+/// engine-side; the belt lost its separate `f_drag` term and drag reaches the belt only
+/// through the coupling): `drag_fraction × peak torque`, released as the fueling demand
+/// opens (`hold_blend(u/DRAG_THROTTLE_RELEASE)` — a brake command is not fueling, so drag
+/// stays engaged under it, exactly the old release contract), saturating over the crank's
+/// own speed scale ω_idle (the engine-side reflection of the old belt-side
+/// `DRAG_SAT_SPEED` role: fade only near a stopped crank — a motoring crank sits at or
+/// above idle and reads full drag, as any driving belt exceeded 0.2 m/s). ω_e is never
+/// negative, so the torque always opposes crank rotation.
+fn engine_drag(tp: &TransmissionParams, omega_e: f32, u_fuel: f32) -> f32 {
+    let omega_idle = tp.engine.idle_rpm * RPM_TO_RAD;
+    tp.peak_torque_nm
+        * tp.drag_fraction
+        * forces::hold_blend(u_fuel / DRAG_THROTTLE_RELEASE)
+        * (omega_e / omega_idle).clamp(0.0, 1.0)
 }
 
 /// Fix-1a: roll the shift's torque-cut window forward on the mean belt axis and return the
 /// PREDICTED landing speed `m`. Exactly the live integration's mean — per side
-/// `v += (Q − R)/I·dt` with `Q = (f_p + f_drag)/2` — under the shift window's own rules:
-/// drive torque cut (`f_p = 0`), engine drag through the LANDING gear (the live tick's `g`
-/// is already the new gear during the window), and the ground reaction frozen at its
-/// current per-tick mean. Fixed-tick, f32-exact.
+/// `v += (Q − R)/I·dt` — under the shift window's own stage-B rules: the box is
+/// DECLUTCHED, so the belt gets NO engine force and NO engine drag (the old predictor's
+/// drag-through-the-landing-gear term died with the belt-side drag), and the ground
+/// reaction is frozen at its current per-tick mean. Fixed-tick, f32-exact — prediction and
+/// reality run the same (now purely reaction-driven) window law.
 ///
 /// DOMAIN (review round): valid for the PROPULSIVE straight-line case ONLY — the only case
 /// the scheduler consults it for (upshifts are intent-gated on `propulsive > 0` and
-/// detent-deferred on the L600). It integrates drag but carries no brake term and no
-/// λ/steer state, so under service braking or a geared turn it would over-predict the
-/// landing. Inside its domain, frozen-R is CONSERVATIVE (the true post-cut reaction
-/// collapses with the slip), and the single mean-axis clamp is an accepted approximation
-/// of the live per-side clamps.
+/// detent-deferred on the L600). It carries no brake term and no λ/steer state, so under
+/// service braking or a geared turn it would over-predict the landing. Inside its domain,
+/// frozen-R is CONSERVATIVE (the true post-cut reaction collapses with the slip), and the
+/// single mean-axis clamp is an accepted approximation of the live per-side clamps.
 fn predict_shift_landing_m(
     tp: &TransmissionParams,
     fp: &ForceParams,
-    g_landing: f32,
-    propulsive: f32,
     m: f32,
     r_mean: f32,
     dt: f32,
 ) -> f32 {
     let mut pm = m;
     for _ in 0..tp.shift_ticks {
-        let f_drag = reflected_drag(tp, g_landing, pm, propulsive);
-        pm = (pm + (f_drag / 2.0 - r_mean) / fp.inertia * dt).clamp(-fp.max_speed, fp.max_speed);
+        pm = (pm - r_mean / fp.inertia * dt).clamp(-fp.max_speed, fp.max_speed);
     }
     pm
+}
+
+/// What the coupling solve produced: the clutch torque actually transmitted and whether the
+/// lock was EXACT (inside capacity, stall guard quiet) — only an exact lock is drift-killed
+/// to the shaft at end of step.
+struct CouplingSolve {
+    tau_c: f32,
+    exact: bool,
+}
+
+/// THE COUPLING-LAW SLOT (stage B): the engaged main clutch between crank and geared shaft,
+/// solved semi-implicitly and capacity-clamped. This is deliberately ONE seamed function —
+/// a torque-converter characteristic replaces the clamp here for modern automatic vehicles
+/// later (do NOT build the converter now); everything upstream (τ_free) and downstream
+/// (belt split, drift kill) is coupling-law-agnostic.
+///
+/// The LOCK torque is the τ_c that lands `ω_e_next = k·s·m_next` under both semi-implicit
+/// integrations (`ω_e_next = ω_e + (τ_free − τ_c)·dt/J`; `m_next = m + (k·s·τ_c +
+/// F_other)·dt/I_m` with `I_m = 2·belt inertia` on the mean axis):
+///
+/// ```text
+/// τ_c* = [(ω_e − k·s·m)/dt + τ_free/J − k·s·F_other/I_m] / (1/J + k²/I_m)
+/// ```
+///
+/// clamped to ±`clutch_capacity` (beyond it the clutch slips honestly — the launch force is
+/// the capacity, not the lock demand). `F_other` is the m-axis force sum EXCLUDING the
+/// engine path — the summed ground reactions; the later λ/brake terms are excluded as an
+/// accepted approximation (they are zero or near-zero in the engaged drive regimes, and the
+/// end-of-step drift kill re-anchors an exact lock to the belt that actually integrated).
+///
+/// STALL GUARD (one-sided): if the transmitted τ_c would land the crank below
+/// `ω_floor = idle − STALL_GUARD_BAND_RPM`, τ_c is REDUCED to land exactly at ω_floor
+/// (the clutch slips to protect the crank; the guard never increases τ_c, and at the floor
+/// the saturated idle governor guarantees `τ_free > 0`, so the floor is always holdable).
+/// No stall death — that is a later, playtest-gated rung.
+#[allow(clippy::too_many_arguments)]
+fn clutch_coupling(
+    j_e: f32,
+    capacity: f32,
+    k: f32,
+    s: f32,
+    omega_e: f32,
+    m: f32,
+    tau_free: f32,
+    i_m: f32,
+    f_other: f32,
+    omega_floor: f32,
+    dt: f32,
+) -> CouplingSolve {
+    let tau_star = ((omega_e - k * s * m) / dt + tau_free / j_e - k * s * f_other / i_m)
+        / (1.0 / j_e + k * k / i_m);
+    let mut tau_c = tau_star.clamp(-capacity, capacity);
+    let mut exact = tau_c == tau_star;
+    let omega_next = omega_e + (tau_free - tau_c) * dt / j_e;
+    if omega_next < omega_floor {
+        // Land exactly at the floor: τ_guard = τ_free − J·(ω_floor − ω_e)/dt. By
+        // construction τ_guard < τ_c (less torque = higher landing), so the guard only
+        // ever reduces — one-sided.
+        tau_c = (tau_free - (omega_floor - omega_e) * j_e / dt).clamp(-capacity, capacity);
+        exact = false;
+    }
+    CouplingSolve { tau_c, exact }
 }
 
 fn regenerative(
@@ -677,7 +812,7 @@ fn regenerative(
             // at-rest threshold is needed HERE (review round): the rpm bound already
             // demands a landing ≥ down band + margin — solidly positive, far above any
             // numerical residual — so the sign check is a belt-and-braces refusal.
-            let landing = predict_shift_landing_m(tp, fp, g_up, propulsive, m, r_mean, dt);
+            let landing = predict_shift_landing_m(tp, fp, m, r_mean, dt);
             let landing_shaft = dir * landing;
             if landing_shaft > 0.0
                 && shaft_rpm_of(landing_shaft, g_up) >= tp.shift_down_rpm + POSTSHIFT_MARGIN_RPM
@@ -732,38 +867,104 @@ fn regenerative(
         st.park = true;
     }
 
-    // --- Engine operating point. Below the geared rpm the crank is allowed to rev toward the
-    // torque peak with PROPULSIVE command (the declutch/slip band a preselector launch
-    // actually uses — INFERRED simplification standing in for clutch-slip state; without it a
-    // standing start would read idle rpm and a governed-out curve would read zero torque). A
-    // brake command does not rev the crank.
-    //
-    // Stage A: the torque lookup evaluates at a NON-NEGATIVE engine rpm —
-    // `engine_rpm = max(shaft_rpm, rpm_floor)` with the SIGNED shaft rpm. The engine is
-    // never negative: it cannot follow a back-driven shaft (the rev floor is the implicit
-    // slipping-clutch stand-in until the ω_e crank arc lands), so during a backslide
-    // (shaft < 0) the engine keeps delivering FORWARD drive at the floored rpm (`f_p`
-    // below follows the engaged direction via `dir·propulsive·…`). The governor cut inside
-    // `torque_at` therefore applies only to real forward over-speed — never to `|shaft|`,
-    // which is what cut drive to zero mid-backslide ("2770 rpm", zero force, rolling
-    // backward under full W).
-    let cmd_mag = propulsive.max(inp.steer.abs()).clamp(0.0, 1.0);
-    let rpm_floor = tp.engine.idle_rpm + (tp.peak_torque_rpm - tp.engine.idle_rpm) * cmd_mag;
-    let rpm = shaft_rpm_geared(g).max(rpm_floor);
-    let torque = tp.torque_at(rpm);
-    let p_avail = torque * (rpm * RPM_TO_RAD);
+    // --- Engine crank state ω_e (stage B). The crank is real state with inertia J; stage
+    // A's command-proxy rev floor is DEAD (launch rpm is now the emergent clutch-slip
+    // equilibrium). The crank is NEVER negative — it cannot follow a back-driven shaft
+    // (stage A's principle, now enforced by the stall guard instead of a floor).
+    let omega_idle = tp.engine.idle_rpm * RPM_TO_RAD;
+    if !st.omega_e.is_finite() || st.omega_e <= 0.0 {
+        // Uninitialized sentinel (Default cannot see the spec — the state must be
+        // constructible before the spec arrives, the pre-sized-slab spawn invariant):
+        // snap to idle on the first step with params. The finiteness arm is defensive
+        // NaN/∞ hygiene, same intent as the sentinel check.
+        st.omega_e = omega_idle;
+    }
+    let omega_e = st.omega_e;
+    let k = g / tp.sprocket_radius;
+    let omega_floor = (tp.engine.idle_rpm - STALL_GUARD_BAND_RPM) * RPM_TO_RAD;
 
-    // --- Propulsion on m: torque curve × total reduction at the sprocket, throttle-scaled,
-    // zero through a shift's interruption window. Engine drag is a reflected drag TORQUE
-    // (design §3), saturating over DRAG_SAT_SPEED and released as the throttle opens —
-    // release keys on the PROPULSIVE component only, so a brake command keeps the engine
-    // motoring (compression braking stacks under the service brakes).
-    let mut f_p = if shifting {
-        0.0
+    // COUPLING seam: engaged ⇔ not shifting ∧ not the neutral-idle regime. The neutral-idle
+    // regime generalizes the L600 neutral-turn seam to BOTH regenerative adapters — no
+    // propulsive drive near standstill means the driver has the main clutch out (an engaged
+    // idle-governed crank at standstill would otherwise ride the clutch: idle torque through
+    // a first-gear reduction is hundreds of kN of spurious creep/pivot-drag force). Keyed on
+    // `propulsive` (not |throttle|) so a service-brake command at speed stays engaged
+    // (engine braking through the coupling); the L600's own steering-regime check keeps its
+    // historical |throttle| form — the seams coincide except transiently under
+    // opposing-throttle-at-standstill, where the direction swap + shift window take over
+    // within a tick.
+    let engaged = !(shifting || (propulsive < NEUTRAL_THROTTLE && m.abs() < NEUTRAL_M_SPEED));
+
+    // Fueling demand u. Engaged: the propulsive throttle (a brake command is not fueling).
+    // Declutched: a proportional-band rev governor ([`REV_MATCH_BAND_RPM`]) toward the
+    // LARGER of two targets —
+    //   * the REV-MATCH target `|m|·k` (st.gear is already the landing gear during the
+    //     window), so the clutch re-engages near-synchronous;
+    //   * the STEER demand target `idle + (peak_torque_rpm − idle)·|steer|`: the steering
+    //     member is engine-driven in every regime, so a steer command revs the crank
+    //     whether or not the main clutch is out — the surviving half of the old `cmd_mag`
+    //     rev-floor contract, now reached DYNAMICALLY (pivot power spools with the crank).
+    // Deliberate deviations from the memo's shorthand (`τ_ind = propulsive·torque_at`,
+    // `u_match` bang-bang), both documented for review: (1) without the steer target a
+    // declutched pivot would idle at ~1/5 of its power budget and the memo's own spin-up
+    // expectation (crank spool preceding pivot spool) could not occur; (2) the target is a
+    // SPEED, not blind full fueling, because an unloaded crank under u = 1 spools past the
+    // peak-power point to the governor cut-out where `torque_at·ω = 0` — the d-path draw
+    // does not load the crank in this stage (deferred honestly; the power gate caps the
+    // draw instead), so the steer demand must PARK the crank at the peak-torque point the
+    // old floor used, or steady pivot power collapses to zero.
+    let u_fuel = if engaged {
+        propulsive
     } else {
-        dir * propulsive * (torque * g / tp.sprocket_radius)
+        let omega_match = m.abs() * k;
+        let omega_steer =
+            omega_idle + (tp.peak_torque_rpm * RPM_TO_RAD - omega_idle) * inp.steer.abs().min(1.0);
+        let omega_target = omega_match.max(omega_steer);
+        ((omega_target - omega_e) / (REV_MATCH_BAND_RPM * RPM_TO_RAD)).clamp(0.0, 1.0)
     };
-    let f_drag = reflected_drag(tp, g, m, propulsive);
+
+    // Free torque from the PRE-tick crank speed: induced torque at the crank's own rpm
+    // (the governor cut now acts on the crank), the idle-governor recovery (linear over
+    // K_IDLE_DROOP_RPM below idle, saturating at torque_at(idle) — it may stack over τ_ind
+    // below idle: the governor stand-in's over-fueling stall resistance, bounded by the
+    // clutch capacity and charged by the power gate), minus engine-side compression drag.
+    let rpm = omega_e / RPM_TO_RAD;
+    let idle_gain = tp.torque_at(tp.engine.idle_rpm) / (K_IDLE_DROOP_RPM * RPM_TO_RAD);
+    let tau_idle =
+        (idle_gain * (omega_idle - omega_e)).clamp(0.0, tp.torque_at(tp.engine.idle_rpm));
+    let tau_ind = u_fuel * tp.torque_at(rpm);
+    let tau_free = tau_ind + tau_idle - engine_drag(tp, omega_e, u_fuel);
+
+    // Power available at the crank's operating point — the energy gate's per-tick bound.
+    // Follows the crank, not the input slew: a standstill pivot's power SPOOLS as the
+    // crank revs (the measured spin-up), and a lugged crank offers lug power.
+    let p_avail = tp.torque_at(rpm) * omega_e;
+
+    // The engine force on the mean belt axis: the coupling's transmitted torque reflected
+    // through the gear (in place of the old f_p + f_drag — drag reaches the belt only
+    // through the coupling now). Declutched, the belt gets NOTHING from the engine.
+    let i_m = 2.0 * fp.inertia;
+    let coupling = if engaged {
+        clutch_coupling(
+            tp.engine_inertia,
+            tp.clutch_capacity,
+            k,
+            dir,
+            omega_e,
+            m,
+            tau_free,
+            i_m,
+            -(inp.reactions[0] + inp.reactions[1]),
+            omega_floor,
+            dt,
+        )
+    } else {
+        CouplingSolve {
+            tau_c: 0.0,
+            exact: false,
+        }
+    };
+    let mut f_c = k * dir * coupling.tau_c;
 
     // --- Steering. κ table indexed by the active gear (reverse mirrors the low forward
     // gears); `d` follows the steer SIGN regardless of travel direction — the superimposed
@@ -867,8 +1068,8 @@ fn regenerative(
                     1 => k_wide,
                     _ => k_tight,
                 };
-                let a_l = (f_p + f_drag) / 2.0 - inp.reactions[0];
-                let a_r = (f_p + f_drag) / 2.0 - inp.reactions[1];
+                let a_l = f_c / 2.0 - inp.reactions[0];
+                let a_r = f_c / 2.0 - inp.reactions[1];
                 // One |m| branch of the solve: on branch b, |m| linearizes as `b·m`, so
                 // `g = jl·v_L + jr·v_R` with the branch's Jacobian. Returns λ (per-output
                 // capacity clamp — straight-gear `max|j| = 1/2` gives the same 2× bound
@@ -927,8 +1128,8 @@ fn regenerative(
     // zero IDEAL work and is excluded from the engine budget — its declared-η transfer loss
     // is a known-open refinement (HQ: "L600 transfer loss"), not modeled here. Drag and
     // brakes only remove energy.
-    let p_l = (f_p + f_s) / 2.0 * vl;
-    let p_r = (f_p - f_s) / 2.0 * vr;
+    let p_l = (f_c + f_s) / 2.0 * vl;
+    let p_r = (f_c - f_s) / 2.0 * vr;
     let pos = p_l.max(0.0) + p_r.max(0.0);
     let neg = (-p_l).max(0.0) + (-p_r).max(0.0);
     let net = pos - tp.recirculation * neg;
@@ -937,13 +1138,19 @@ fn regenerative(
     } else {
         1.0
     };
-    f_p *= power_scale;
+    f_c *= power_scale;
     f_s *= power_scale;
+
+    // --- Integrate the crank: J·ω̇_e = τ_free − τ_c (the transmitted torque scaled by the
+    // power gate exactly as the belt-side force was — one bookkeeping for both ends of the
+    // clutch; a bound power gate leaves MORE speed on the crank, never less, so the stall
+    // guard's floor promise survives scaling).
+    st.omega_e = omega_e + (tau_free - coupling.tau_c * power_scale) * dt / tp.engine_inertia;
 
     // --- Assemble per-side sprocket forces.
     let mut q = [
-        (f_p + f_drag) / 2.0 + f_s / 2.0 + lambda * j[0],
-        (f_p + f_drag) / 2.0 - f_s / 2.0 + lambda * j[1],
+        f_c / 2.0 + f_s / 2.0 + lambda * j[0],
+        f_c / 2.0 - f_s / 2.0 + lambda * j[1],
     ];
 
     // --- The reframed brake (design §3): −R always reaches the belt; near zero command +
@@ -992,10 +1199,25 @@ fn regenerative(
             .clamp(-fp.max_speed, fp.max_speed);
     }
 
+    // --- Drift kill (stage B, end of step): an EXACT lock (inside capacity, stall guard
+    // quiet, power gate unbound) re-anchors the crank to the belt that ACTUALLY integrated
+    // — λ, brakes, and the speed clamp all moved m past the coupling solve's F_other
+    // approximation, and rigid lock means the crank follows the shaft bit-exactly instead
+    // of accumulating f32 drift. Guarded by the stall floor: a snap may never land the
+    // crank below it (the next tick's guard takes over instead).
+    if engaged && coupling.exact && power_scale == 1.0 {
+        let m_next = (next[0] + next[1]) / 2.0;
+        let locked = k * dir * m_next;
+        if locked >= omega_floor {
+            st.omega_e = locked;
+        }
+    }
+
     TransmissionReport {
         next_speeds: next,
         forces: q,
-        rpm,
+        // The crank state, post-tick — the report shows the same truth `readout` does.
+        rpm: st.omega_e / RPM_TO_RAD,
         gear: st.gear,
         reverse: st.reverse,
         steer_step: st.steer_step,
@@ -1058,6 +1280,10 @@ mod tests {
             recirculation: 0.9,
             brake_capacity_n: 120_000.0,
             drag_fraction: 0.25,
+            // Stage B lab crank: same class band as the vehicle authoring (J mid-band,
+            // clutch ≈ 1.3 × the 2200 N·m peak).
+            engine_inertia_kgm2: 4.0,
+            clutch_capacity_nm: 2860.0,
             shift_secs: 0.31,
             sprocket_radius_m: 0.34,
             half_tread_m: 1.25,
@@ -1359,6 +1585,8 @@ mod tests {
             recirculation: 0.9,
             brake_capacity_n: 120_000.0,
             drag_fraction: 0.25,
+            engine_inertia_kgm2: 4.0,
+            clutch_capacity_nm: 2860.0,
             shift_secs: 0.31,
             sprocket_radius_m: 0.34,
             half_tread_m: 1.25,
@@ -1411,32 +1639,76 @@ mod tests {
         assert_eq!(st.shift_ticks, 0);
     }
 
-    /// Stage-A review round: the HUD readout shares the signed-shaft convention in
-    /// REVERSE. Driving in R (m < 0) reads a positive geared rpm and the R label;
-    /// back-driven forward while in R, the shaft is negative — the engine cannot follow
-    /// it, so the readout floors at idle instead of showing a fake forward rpm.
+    /// Stage B: the HUD readout reports the CRANK STATE ω_e directly — the state IS the
+    /// display. Unstepped (sentinel), it reads idle; driving in reverse it reads the
+    /// crank's geared speed with the R label; back-driven forward while in R (the stage-A
+    /// scenario), the crank cannot follow the negative shaft — the stall guard keeps ω_e
+    /// idle-ish, and the readout shows exactly that state, never a fake forward rpm.
     #[test]
-    fn readout_reverse_reads_signed_shaft() {
-        let tp = lab_tp();
+    fn readout_reports_crank_state() {
+        let (fp, tp) = (lab_fp(), lab_tp());
+        // Sentinel (constructed, never stepped): idle.
         let st = TransmissionState {
             reverse: true,
             ..Default::default()
         };
-        // Driving in reverse: shaft = dir·m = +2.0 → geared rpm, positive, above idle.
-        let r = readout(&st, &tp, [-2.0, -2.0]);
-        assert_eq!(r.gear_label, "R1");
-        let expect = 2.0 * tp.gears_rev[0] / tp.sprocket_radius / RPM_TO_RAD;
-        assert!(
-            (r.rpm - expect).abs() < 0.5 && r.rpm > tp.engine.idle_rpm,
-            "reversing must read the geared rpm ({expect:.0}), got {:.0}",
-            r.rpm
-        );
-        // Back-driven while in R (rolling forward): shaft < 0 → idle, not a fake rpm.
-        let r = readout(&st, &tp, [2.0, 2.0]);
+        let r = readout(&st, &tp);
         assert_eq!(r.gear_label, "R1");
         assert_eq!(
             r.rpm, tp.engine.idle_rpm,
-            "a back-driven R shaft must read idle (the engine cannot follow it)"
+            "the unstepped sentinel must read idle"
+        );
+        // Driving in reverse at a steady R1 speed: the lock puts the crank AT the geared
+        // speed of the belt the transmission itself integrated (`k·s·m_next` — with this
+        // harness holding the INPUT speeds externally, the belt it computes each tick sits
+        // `k·τ_free·dt/I_m` above the held value, and the crank rides THAT belt exactly).
+        let mut st = TransmissionState {
+            reverse: true,
+            ..Default::default()
+        };
+        let mut rep = TransmissionReport::default();
+        for _ in 0..64 {
+            rep = step(
+                TransmissionMode::Hybrid,
+                &fp,
+                Some(&tp),
+                &mut st,
+                &input(-1.0, 0.0, [-2.0, -2.0], [0.0, 0.0]),
+            );
+        }
+        let r = readout(&st, &tp);
+        assert_eq!(r.gear_label, "R1");
+        let m_next = (rep.next_speeds[0] + rep.next_speeds[1]) / 2.0;
+        let geared = -m_next * tp.gears_rev[0] / tp.sprocket_radius / RPM_TO_RAD;
+        assert!(
+            geared > tp.engine.idle_rpm && (r.rpm - geared).abs() < 25.0,
+            "driving in reverse, the crank readout must sit at the geared rpm of the \
+             integrated belt ({geared:.0}), got {:.0}",
+            r.rpm
+        );
+        // Back-driven while in R (rolling forward, shaft < 0): the crank never follows —
+        // the stall guard bounds it at idle − STALL_GUARD_BAND_RPM, and the readout shows
+        // the honest idle-ish crank, not a fake geared rpm.
+        let mut st = TransmissionState {
+            reverse: true,
+            ..Default::default()
+        };
+        for _ in 0..64 {
+            step(
+                TransmissionMode::Hybrid,
+                &fp,
+                Some(&tp),
+                &mut st,
+                &input(-1.0, 0.0, [2.0, 2.0], [-40_000.0, -40_000.0]),
+            );
+        }
+        let r = readout(&st, &tp);
+        assert_eq!(r.gear_label, "R1");
+        assert!(
+            r.rpm >= tp.engine.idle_rpm - STALL_GUARD_BAND_RPM - 1.0
+                && r.rpm <= tp.engine.governed_rpm,
+            "a back-driven R shaft must read the idle-ish crank (≥ idle − band), got {:.0}",
+            r.rpm
         );
     }
 
@@ -1676,6 +1948,8 @@ mod tests {
             recirculation: 0.9,
             brake_capacity_n: 120_000.0,
             drag_fraction: 0.25,
+            engine_inertia_kgm2: 4.0,
+            clutch_capacity_nm: 2860.0,
             shift_secs: 0.31,
             sprocket_radius_m: 0.34,
             half_tread_m: 1.25,
@@ -2017,12 +2291,17 @@ mod tests {
     /// `v_L = 5, v_R = 3`): the outer sprocket delivers `F_s/2·v_L`, the inner ABSORBS
     /// `F_s/2·v_R` — physical net `= F_s/2·(v_L − η·v_R)`, while the modal split reads
     /// `F_s·d` with no negative term at all. The reported power_scale must be the physical
-    /// one (and measurably NOT the modal one).
+    /// one (and measurably NOT the modal one). Stage B: the scenario runs inside a shift
+    /// window (`shift_ticks: 5`, declutched) so the engine path contributes NO m-axis
+    /// force — what is pinned here is the SPLIT LAW, isolated from the crank coupling
+    /// (engaged, the cold crank against a 4 m/s shaft would add a clutch transient that
+    /// obscures the arithmetic).
     #[test]
     fn recirculation_splits_physical_output_powers() {
         let (fp, tp) = (lab_fp(), lab_tp());
         let mut st = TransmissionState {
             gear: 5,
+            shift_ticks: 5,
             ..Default::default()
         };
         let (vl, vr) = (5.0f32, 3.0);
@@ -2098,11 +2377,18 @@ mod tests {
         );
     }
 
-    /// Coast intent: zero throttle at speed applies the DECLARED compression-braking drag —
-    /// `drag_fraction × peak torque` reflected through the current gear, split per side —
-    /// and nothing else (no parking brake at speed, no thrust).
+    /// Coast intent (stage B shape): zero throttle at speed applies the DECLARED
+    /// compression-braking drag — `drag_fraction × peak torque` — at the CRANK, and it
+    /// reaches the belt only through the engaged coupling. With the belt speed HELD
+    /// constant (this harness feeds fixed speeds), the crank must be steady too, so the
+    /// clutch transmits the FULL drag torque: the converged per-side force is exactly the
+    /// old declared share `drag_fraction × peak × G/r_s / 2` (the steady state is
+    /// coupling-law-invariant; only the transient shares drag with the crank's inertia).
+    /// Convergence takes a few ticks: the coupling's per-tick contraction factor is
+    /// `k²J/(I_m + k²J)` ≈ 0.22 in lab gear 3, plus the first ticks resolve the cold
+    /// crank (sentinel → idle) against the geared shaft at clutch capacity.
     #[test]
-    fn coast_drag_is_declared_fraction_through_current_gear() {
+    fn coast_drag_reaches_belt_through_coupling() {
         let (fp, tp) = (lab_fp(), lab_tp());
         let mut st = TransmissionState {
             gear: 3,
@@ -2111,21 +2397,32 @@ mod tests {
         // Mid-band speed for gear 3 (no shift decision interferes).
         let g3 = tp.gears_fwd[2];
         let v = 1_300.0 * RPM_TO_RAD * tp.sprocket_radius / g3;
-        let rep = step(
-            TransmissionMode::Hybrid,
-            &fp,
-            Some(&tp),
-            &mut st,
-            &input(0.0, 0.0, [v, v], [0.0, 0.0]),
-        );
+        let mut rep = TransmissionReport::default();
+        for _ in 0..32 {
+            rep = step(
+                TransmissionMode::Hybrid,
+                &fp,
+                Some(&tp),
+                &mut st,
+                &input(0.0, 0.0, [v, v], [0.0, 0.0]),
+            );
+        }
         assert_eq!(st.gear, 3, "mid-band coast must not shift");
         let expect = -(tp.peak_torque_nm * tp.drag_fraction * g3 / tp.sprocket_radius) / 2.0;
         for side in rep.forces {
             assert!(
-                (side - expect).abs() < 1.0,
-                "coasting side force {side} N must be the declared drag share {expect} N"
+                (side - expect).abs() < 100.0,
+                "converged coasting side force {side} N must be the declared drag share \
+                 {expect} N through the coupling"
             );
         }
+        // And the crank sits AT the geared speed (locked coast — the readout truth).
+        let geared_rpm = v * g3 / tp.sprocket_radius / RPM_TO_RAD;
+        assert!(
+            (rep.rpm - geared_rpm).abs() < 25.0,
+            "locked coast must carry the crank at the geared rpm ({geared_rpm:.0}), got {:.0}",
+            rep.rpm
+        );
     }
 
     /// The pivot-authority convention (the Tiger pivot-dead fix): the steering member
@@ -2185,5 +2482,212 @@ mod tests {
         let tp = lab_tp();
         let expect = 52.2 / 3.6 * (1800.0 / 1800.0);
         assert!((tp.geared_top_speed() - expect).abs() < 0.01);
+    }
+
+    /// Stage B: a standing start under full W is CLUTCH-SLIP-LIMITED. From rest the lock
+    /// torque `τ_c*` (lab arithmetic: `[ω_idle/dt + τ_free/J]/(1/J + k₁²/I_m)` =
+    /// `[62.8·64 + 1650/4]/[0.25 + 84.8²·(1/16000)]` ≈ 6.3 kN·m) far exceeds the 2860 N·m
+    /// clutch capacity, so the belt force is `k₁ × capacity` ≈ 242.5 kN — NOT the old
+    /// rev-floor peak-torque value `peak × G₁/r_s` ≈ 186.6 kN. The crank must never dip
+    /// below the stall-guard floor while the clutch slips (the saturated idle governor
+    /// holds a sub-idle slip equilibrium ≈ 37 rpm of droop where `τ_ind + τ_idle` meets
+    /// the capacity).
+    #[test]
+    fn launch_is_clutch_slip_limited() {
+        let (fp, tp) = (lab_fp(), lab_tp());
+        let k1 = tp.gears_fwd[0] / tp.sprocket_radius;
+        let expect = k1 * tp.clutch_capacity;
+        let old_rev_floor = tp.peak_torque_nm * tp.gears_fwd[0] / tp.sprocket_radius;
+        let floor = (tp.engine.idle_rpm - STALL_GUARD_BAND_RPM) * RPM_TO_RAD;
+        let mut st = TransmissionState::default();
+        for tick in 0..16 {
+            let rep = step(
+                TransmissionMode::Hybrid,
+                &fp,
+                Some(&tp),
+                &mut st,
+                &input(1.0, 0.0, [0.0, 0.0], [0.0, 0.0]),
+            );
+            let total = rep.forces[0] + rep.forces[1];
+            assert!(
+                (total - expect).abs() < 0.01 * expect,
+                "tick {tick}: launch belt force {total:.0} N must be clutch-capacity \
+                 limited ({expect:.0} N)"
+            );
+            assert!(
+                (total - old_rev_floor).abs() > 0.1 * old_rev_floor,
+                "the capacity-limited launch must be measurably NOT the old rev-floor \
+                 value ({old_rev_floor:.0} N) — otherwise this test pins nothing"
+            );
+            assert!(
+                st.omega_e >= floor - 1e-3,
+                "tick {tick}: the slipping-clutch launch must never stall the crank \
+                 below idle − band ({:.0} rpm)",
+                st.omega_e / RPM_TO_RAD
+            );
+        }
+    }
+
+    /// Stage B: the stall guard under a grade lug — the crank NEVER lands below
+    /// idle − [`STALL_GUARD_BAND_RPM`], in both slip regimes: (a) full-W lug against an
+    /// impossible reaction (capacity-clamped slip: the sub-idle equilibrium sits where the
+    /// saturated idle governor + low-end torque meet the 2860 N·m capacity, ≈ 37 rpm of
+    /// droop — above the 100 rpm guard band); (b) a zero-throttle engaged backslide
+    /// (τ_c* wants the crank at the NEGATIVE shaft speed — the guard slips the clutch
+    /// instead and the belt receives the crank's forward τ_free through it).
+    #[test]
+    fn stall_guard_holds_crank_under_grade_lug() {
+        let (fp, tp) = (lab_fp(), lab_tp());
+        let floor = (tp.engine.idle_rpm - STALL_GUARD_BAND_RPM) * RPM_TO_RAD;
+        for (throttle, speeds, reactions, label) in [
+            (
+                1.0f32,
+                [0.0f32, 0.0],
+                [200_000.0f32, 200_000.0],
+                "full-W lug",
+            ),
+            (0.0, [-2.0, -2.0], [-40_000.0, -40_000.0], "coast backslide"),
+        ] {
+            let mut st = TransmissionState::default();
+            for tick in 0..128 {
+                let rep = step(
+                    TransmissionMode::Hybrid,
+                    &fp,
+                    Some(&tp),
+                    &mut st,
+                    &input(throttle, 0.0, speeds, reactions),
+                );
+                assert!(
+                    st.omega_e >= floor - 1e-3,
+                    "{label} tick {tick}: ω_e {:.0} rpm fell below the stall-guard floor \
+                     ({:.0} rpm)",
+                    st.omega_e / RPM_TO_RAD,
+                    floor / RPM_TO_RAD
+                );
+                assert!(
+                    rep.forces[0] > 0.0 && rep.forces[1] > 0.0,
+                    "{label} tick {tick}: the slipping clutch must keep delivering \
+                     FORWARD drive (forces {:?})",
+                    rep.forces
+                );
+            }
+        }
+    }
+
+    /// Stage B: rev-match across an upshift — the crank is CONTINUOUS through the window
+    /// (no teleport: per-tick slew bounded by `(capacity + τ_free)/J·dt` ≈ 189 rpm/tick in
+    /// the lab), lands within a bounded gap of the new geared speed at window end (drag-only
+    /// shedding covers ≈ 410 of the ≈ 660 rpm step in the 0.31 s window; the clutch
+    /// shoulders the ≈ 250 rpm residual at capacity for a few ticks — the bounded physical
+    /// cost of the shift), and re-locks to the geared point within a handful of engaged
+    /// ticks.
+    #[test]
+    fn rev_match_across_upshift_is_continuous() {
+        let (fp, tp) = (lab_fp(), lab_tp());
+        let g1 = tp.gears_fwd[0];
+        let g2 = tp.gears_fwd[1];
+        let v_warm = 1_600.0 * RPM_TO_RAD * tp.sprocket_radius / g1;
+        let v_up = 1_780.0 * RPM_TO_RAD * tp.sprocket_radius / g1;
+        let mut st = TransmissionState::default();
+        // Warm to the locked geared point below the up band.
+        for _ in 0..32 {
+            step(
+                TransmissionMode::Hybrid,
+                &fp,
+                Some(&tp),
+                &mut st,
+                &input(1.0, 0.0, [v_warm, v_warm], [0.0, 0.0]),
+            );
+        }
+        let target_rpm = v_up * g2 / tp.sprocket_radius / RPM_TO_RAD; // ≈ 1121
+        let mut prev_rpm = st.omega_e / RPM_TO_RAD;
+        let mut window_end_gap = None;
+        let mut ticks_since_window = 0u32;
+        let mut rep = TransmissionReport::default();
+        for tick in 0..96 {
+            rep = step(
+                TransmissionMode::Hybrid,
+                &fp,
+                Some(&tp),
+                &mut st,
+                &input(1.0, 0.0, [v_up, v_up], [0.0, 0.0]),
+            );
+            let rpm = st.omega_e / RPM_TO_RAD;
+            assert!(
+                (rpm - prev_rpm).abs() <= 250.0,
+                "tick {tick}: crank teleported {prev_rpm:.0} -> {rpm:.0} rpm"
+            );
+            prev_rpm = rpm;
+            if st.gear == 2 && !rep.shifting && window_end_gap.is_none() {
+                window_end_gap = Some((rpm - target_rpm).abs());
+            }
+            if window_end_gap.is_some() {
+                ticks_since_window += 1;
+            }
+        }
+        assert_eq!(st.gear, 2, "the upshift must have committed");
+        let gap = window_end_gap.expect("the window must end inside the run");
+        assert!(
+            gap <= 400.0,
+            "rpm at window end must be within 400 rpm of the geared landing \
+             ({target_rpm:.0}), gap {gap:.0}"
+        );
+        assert!(
+            ticks_since_window > 16,
+            "post-window settling must be observed"
+        );
+        // Re-lock anchor: the geared rpm of the belt the transmission itself integrated
+        // (this harness holds the INPUT speeds, so the lock's fixed point rides
+        // `k·τ_free·dt/I_m` above the held value — the crank follows THAT belt exactly).
+        let m_next = (rep.next_speeds[0] + rep.next_speeds[1]) / 2.0;
+        let lock_rpm = m_next * g2 / tp.sprocket_radius / RPM_TO_RAD;
+        let final_rpm = st.omega_e / RPM_TO_RAD;
+        assert!(
+            (final_rpm - lock_rpm).abs() < 50.0,
+            "the engaged clutch must re-lock the crank to the geared point of the \
+             integrated belt ({lock_rpm:.0}), got {final_rpm:.0}"
+        );
+    }
+
+    /// Stage B: unloaded free-rev — declutched full steer at standstill (the pivot's crank
+    /// demand) revs the crank from idle toward the steer-demand target (the PEAK-TORQUE
+    /// rpm — the old floor's operating point, reached dynamically; deliberately NOT the
+    /// governed cut-out, where `torque_at·ω = 0` would zero the pivot's power budget).
+    /// Lab arithmetic: Δω = 500 rpm = 52.4 rad/s at ≈ τ/J ≈ 2000/4 = 500 rad/s² plus the
+    /// proportional-band taper → ≈ 0.15–0.3 s to 95%; the steady point parks ≈ 30 rpm
+    /// under the target where the taper's fueling meets the re-engaging drag. Pinned with
+    /// margin.
+    #[test]
+    fn free_rev_reaches_steer_target_promptly() {
+        let (fp, tp) = (lab_fp(), lab_tp());
+        let mut st = TransmissionState::default();
+        let mut reached = None;
+        for tick in 0..128 {
+            step(
+                TransmissionMode::Hybrid,
+                &fp,
+                Some(&tp),
+                &mut st,
+                &input(0.0, 1.0, [0.0, 0.0], [0.0, 0.0]),
+            );
+            let rpm = st.omega_e / RPM_TO_RAD;
+            if reached.is_none() && rpm >= 0.95 * tp.peak_torque_rpm {
+                reached = Some(tick + 1);
+            }
+        }
+        let ticks = reached.expect("the crank must reach 95% of the steer target in 2 s");
+        let secs = ticks as f32 / TICK_HZ;
+        println!("lab free-rev idle -> 95% of peak-torque rpm: {secs:.3} s");
+        assert!(
+            (0.05..=0.6).contains(&secs),
+            "free-rev time {secs:.3} s outside the pinned band"
+        );
+        let steady = st.omega_e / RPM_TO_RAD;
+        assert!(
+            (tp.peak_torque_rpm - 150.0..=tp.peak_torque_rpm + 50.0).contains(&steady),
+            "the declutched full-steer crank must park at the peak-torque operating point \
+             (~{:.0} rpm), got {steady:.0} — a cut-out park would zero pivot power",
+            tp.peak_torque_rpm
+        );
     }
 }

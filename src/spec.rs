@@ -288,6 +288,15 @@ pub struct EngineSpec {
     /// vehicle does not author one.
     #[serde(default = "default_drag_fraction")]
     pub drag_fraction: f32,
+    /// Crank + flywheel + main-clutch rotational inertia J (kg·m²) — the stage-B engine
+    /// crank state integrates against this. A declared transmission must declare its crank
+    /// (no default): the coupling law divides by it every tick.
+    pub inertia_kgm2: f32,
+    /// Main clutch torque capacity (N·m) — the largest torque the engaged coupling
+    /// transmits before slipping (≈ 1.3 × peak engine torque by the usual sizing rule).
+    /// The stage-B coupling clamp; a torque-converter characteristic replaces the clamp
+    /// for modern automatics later.
+    pub clutch_capacity_nm: f32,
 }
 
 /// See [`EngineSpec::drag_fraction`] — the middle of the diesel compression-braking band.
@@ -609,6 +618,25 @@ impl TankSpec {
                     (0.0..=1.0).contains(&tr.engine.drag_fraction),
                 ),
                 (
+                    // The crank inertia is a per-tick divisor (finite, positive) and
+                    // sanity-bounded: 100 kg·m² is an order of magnitude above any tank
+                    // engine's crank+flywheel+clutch (heavy WWII tank flywheels land in
+                    // the low single digits).
+                    "engine.inertia_kgm2",
+                    tr.engine.inertia_kgm2.is_finite()
+                        && tr.engine.inertia_kgm2 > 0.0
+                        && tr.engine.inertia_kgm2 <= 100.0,
+                ),
+                (
+                    // Clutch capacity: finite, positive, sanity-bounded at 50 kN·m — half
+                    // the absurd-torque ceiling above; any honest capacity is ~1.3 × peak
+                    // torque, well under it.
+                    "engine.clutch_capacity_nm",
+                    tr.engine.clutch_capacity_nm.is_finite()
+                        && tr.engine.clutch_capacity_nm > 0.0
+                        && tr.engine.clutch_capacity_nm <= 50_000.0,
+                ),
+                (
                     // Bounded so the u8 tick countdown can represent it (255 ticks ≈ 4 s —
                     // far past any honest shift); the range check also rejects NaN/∞.
                     "gearbox.shift_secs",
@@ -753,6 +781,11 @@ mod tests {
         assert_eq!(tr.architecture, TransmissionArchitecture::FixedRadii);
         assert_eq!(tr.engine.governed_rpm, 2500.0);
         assert_eq!(tr.engine.rated_rpm, 3000.0);
+        // DELIBERATE pin update (stage B, engine crank state): the crank block is now
+        // required authoring. J = 4.0 kg·m² (INFERRED, 2.5–6 class band, flywheel-
+        // dominant); clutch capacity 2400 N·m ≈ 1.3 × the 1850 N·m peak.
+        assert_eq!(tr.engine.inertia_kgm2, 4.0);
+        assert_eq!(tr.engine.clutch_capacity_nm, 2400.0);
         assert_eq!(tr.gearbox.forward_speeds_kmh.len(), 8);
         assert_eq!(tr.gearbox.reverse_speeds_kmh.len(), 4);
         assert_eq!(*tr.gearbox.forward_speeds_kmh.last().unwrap(), 45.4);
@@ -1013,7 +1046,16 @@ mod tests {
         let fresh = || -> TankSpec {
             ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron")).unwrap()
         };
-        let cases: [(&str, fn(&mut TransmissionSpec)); 6] = [
+        let cases: [(&str, fn(&mut TransmissionSpec)); 10] = [
+            // Stage-B crank block: absurd-but-finite values must be refused outright.
+            ("inertia_kgm2", |tr| tr.engine.inertia_kgm2 = 0.0),
+            ("inertia_kgm2", |tr| tr.engine.inertia_kgm2 = 250.0),
+            ("clutch_capacity_nm", |tr| {
+                tr.engine.clutch_capacity_nm = f32::NAN;
+            }),
+            ("clutch_capacity_nm", |tr| {
+                tr.engine.clutch_capacity_nm = 80_000.0;
+            }),
             ("steering capacity", |tr| {
                 tr.steering.capacity = f32::INFINITY;
             }),
