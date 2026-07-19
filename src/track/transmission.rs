@@ -100,12 +100,10 @@
 //! Pure math, no ECS (like [`forces`]): callers own the state. [`TransmissionState`] is the
 //! only path-dependent state—gear, shift countdown, steering detent, direction, crank speed ω_e,
 //! filtered demand, reserve-confirm counter, held target, scheduler status, hill-hold latch, and
-//! re-engagement cooldown—carried as a plain LOCAL component / sandbox resource, NOT replicated,
-//! NOT hashed (REV 13; only the offline composition and sandbox run the regenerative adapters).
-//! **REV-14 rider:** all of those stage-C values, including the discrete
-//! counter/target/status/hold/cooldown state, must join ω_e, gear, and shift countdown when the
-//! regenerative box goes multiplayer; replay cannot derive an EMA history, an in-flight sequential
-//! target, or a brake latch from the instantaneous belt.
+//! re-engagement cooldown. REV 14 discharges the multiplayer rider: the ECS wrapper replicates and
+//! rolls back the complete state atomically, and the determinism trace hashes every field exactly.
+//! Replay cannot derive an EMA history, an in-flight sequential target, or a brake latch from the
+//! instantaneous belt.
 //!
 //! # The law/spec split (every constant in this module, classified)
 //!
@@ -186,8 +184,8 @@ pub enum ShiftAddressing {
 }
 
 /// Observable state of the reserve scheduler. Kept compact and copyable because the same value is
-/// local sim memory and the readout/HUD contract; it is not a wire type under REV 13.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+/// replicated sim memory and the readout/HUD contract.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub enum SchedulerState {
     #[default]
     Normal,
@@ -691,9 +689,9 @@ impl TransmissionParams {
 
 /// The joint transmission's path-dependent state — the ONLY memory (design §2's REV-14 list):
 /// gear/window/detent/direction/brake/coupling state plus stage-C demand, confirmation, target,
-/// scheduler status, and hill hold. Constructed at spawn from tank data; a plain local component /
-/// sandbox resource under REV 13 (the complete REV-14 rider is in the module doc).
-#[derive(Clone, Copy, PartialEq, Debug)]
+/// scheduler status, and hill hold. Constructed at spawn from tank data and replicated atomically
+/// through [`crate::track::sim::TankTransmission`] under REV 14.
+#[derive(Clone, Copy, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TransmissionState {
     /// 1-based gear in the active ladder.
     pub gear: u8,
@@ -708,8 +706,7 @@ pub struct TransmissionState {
     /// [`PARK_ENGAGE_SPEED`]).
     pub park: bool,
     /// Direction of the last committed gear shift (+1 up, −1 down, 0 none) — the axis the
-    /// fix-1b reversal dwell blocks against. Local scheduler memory (REV 13: not
-    /// replicated, not hashed), reset by a ladder swap.
+    /// fix-1b reversal dwell blocks against. Reset by a ladder swap.
     pub last_shift_dir: i8,
     /// Remaining ticks of the fix-1b reversal dwell: while non-zero, the shift OPPOSITE to
     /// `last_shift_dir` stays blocked (same-direction shifts stay free).
@@ -719,35 +716,30 @@ pub struct TransmissionState {
     pub omega_e: f32,
     /// Main-clutch-out latch (stage-B review round, FIX 3): the coupling-seam regime with
     /// hysteresis — set below [`CLUTCH_OUT_M_SPEED`] without propulsive drive, cleared at
-    /// [`CLUTCH_IN_M_SPEED`] or on any propulsive command. Local scheduler-adjacent memory
-    /// (REV 13, like `last_shift_dir`): not replicated, not hashed.
+    /// [`CLUTCH_IN_M_SPEED`] or on any propulsive command.
     pub clutch_out: bool,
     /// Filtered positive load demand on the signed mean shaft axis (N, both tracks). Updated only
     /// on decision ticks and frozen through shift windows so the torque cut cannot pollute it.
-    /// Local scheduler memory (REV 13: not replicated, not hashed).
     pub demand_n: f32,
     /// First-sample marker for `demand_n`: the contact-derived seed is unavailable at spawn, so
     /// the first owned reaction sample initializes the EMA directly instead of ramping from a
-    /// fictitious zero-load history. Local discrete memory; REV-14 rider in the module doc.
+    /// fictitious zero-load history.
     pub demand_initialized: bool,
     /// Persistent decision-tick evidence that the current gear has negative reserve. Negative
     /// ticks increment it and other ticks decay it by one, so one contact-jitter sample cannot erase
-    /// a nearly confirmed deficit. Saturating u8; local scheduler memory (REV 13), with the REV-14
-    /// rider documented at module level.
+    /// a nearly confirmed deficit. Saturating u8.
     pub grade_confirm_ticks: u8,
     /// Held reserve target (1-based; zero means none). Direct addressing retains it through its
     /// one interruption window; Sequential retains it across every adjacent window.
     pub grade_target: u8,
-    /// Scheduler/readout state. Local discrete sim memory under REV 13; REV-14 rider in the
-    /// module doc.
+    /// Scheduler/readout state.
     pub scheduler: SchedulerState,
     /// Anti-rollback latch. While true, the existing service-brake stop-force law runs at its full
     /// declared envelope until the selected launch gear transmits the capability-derived release
-    /// threshold. Local discrete sim memory (REV 13), with a REV-14 rider in the module doc.
+    /// threshold.
     pub hill_hold: bool,
     /// Remaining post-release hill-hold cooldown ticks. While nonzero, a near-rest deficit cannot
     /// re-latch; actual backward motion past [`HILL_HOLD_ENGAGE_SPEED`] overrides the cooldown.
-    /// Local discrete sim memory under REV 13; REV-14 rider in the module doc.
     pub hold_reengage_ticks: u8,
 }
 

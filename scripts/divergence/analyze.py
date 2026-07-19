@@ -23,12 +23,12 @@ carry), and per shared tick reports:
     overall and per window — the size of the divergence the hash flags.
 
 The hash answers "did anything differ?" exactly (including the carried
-`TankSim`/`TrackDrive` no pose field exposes, via `hsim`); the magnitudes answer
+`TankSim`/`TrackDrive`/`TankTransmission` no pose field exposes, via `hsim`); the magnitudes answer
 "by how much?" for the pose/velocity part.
 
   - MISMATCH WINDOWS: each contiguous mismatched-tick span, attributed to the
     carried-state field families via the `hsim` decode (`hdrv`/`hsrv`/`hrld`/
-    `hrec`/`hblt` — drive, servo, reload, recoil, track belt), with whether the
+    `hrec`/`hblt`/`htrn` — drive, servo, reload, recoil, track belt, transmission), with whether the
     window opens at the first shared tick (spawn/connect transient vs mid-run
     event) and how many surviving client rows were rollback replays. When the
     trace was recorded with SPIKE_TRACE_SIM_FIELDS the raw carried values ride
@@ -62,9 +62,10 @@ SUBS = ("hpos", "hrot", "hlv", "hav", "hsim")
 SUB_LABEL = {"hpos": "pos", "hrot": "rot", "hlv": "lv", "hav": "av", "hsim": "sim"}
 
 # The carried-state decode (src/trace.rs since the per-field split): `hsim` = the fixed-order
-# combination of these five streams. Absent in older traces — attribution then reports "n/a".
-SIM_SUBS = ("hdrv", "hsrv", "hrld", "hrec", "hblt")
-SIM_LABEL = {"hdrv": "drive", "hsrv": "servo", "hrld": "reload", "hrec": "recoil", "hblt": "track-belt"}
+# combination of these six streams. Absent in older traces — attribution then reports "n/a".
+SIM_SUBS = ("hdrv", "hsrv", "hrld", "hrec", "hblt", "htrn")
+SIM_LABEL = {"hdrv": "drive", "hsrv": "servo", "hrld": "reload", "hrec": "recoil",
+             "hblt": "track-belt", "htrn": "transmission"}
 
 
 # --- quaternion helpers (layout [x, y, z, w], matching src/trace.rs) ---------------------------
@@ -217,7 +218,7 @@ def pair_tanks(client_ticks, server_ticks):
 def sim_field_deltas(c, s):
     """Max-abs per-family carried-state differences between two VERBOSE rows (SPIKE_TRACE_SIM_FIELDS).
 
-    Returns {servo, reload, recoil, belt, drive} or None when either row lacks `simf`
+    Returns {servo, reload, recoil, belt, drive, transmission} or None when either row lacks `simf`
     (`belt` here is the MG ammo count — the TRACK belt speed/phase lives in the `hblt` hash
     stream, not in `simf`); torn/null elements make the family read NaN rather than crash the join.
 
@@ -269,6 +270,7 @@ def sim_field_deltas(c, s):
                            abs((c.get("str") or 0.0) - (s.get("str") or 0.0)))
     else:
         out["drive"] = float("nan")
+    out["transmission"] = max_abs(zip(cf.get("trn") or [], sf.get("trn") or []))
     return out
 
 
@@ -361,7 +363,7 @@ def mismatch_windows(joined):
         deltas = [j["simd"] for j in w if j["simd"]]
         if deltas:
             mags = {k: max((d[k] for d in deltas), default=float("nan"))
-                    for k in ("servo", "reload", "recoil", "belt", "drive")}
+                    for k in ("servo", "reload", "recoil", "belt", "drive", "transmission")}
         out.append({
             "lo": w[0]["tick"], "hi": w[-1]["tick"], "n": len(w),
             "opens_at_first_shared": w[0]["tick"] == first_tick,

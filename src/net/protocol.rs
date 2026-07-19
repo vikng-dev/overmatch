@@ -28,7 +28,8 @@ use crate::state::GameplaySet;
 use crate::tank::{
     Muzzle, Rig, ServoCommand, ServoIndex, ServoSpec, TankRoot, TankSim, Weapon, WeaponIndex,
 };
-use crate::track::sim::{TrackDrive, TrackGrip};
+use crate::track::sim::{TankTransmission, TrackDrive, TrackGrip};
+use crate::track::transmission::TransmissionState;
 use crate::{CombatantId, ShotId};
 
 // ---------------------------------------------------------------------------
@@ -39,7 +40,7 @@ use crate::{CombatantId, ShotId};
 // compatibility guard.
 
 /// Bump and re-pin the affected wire manifest value for every wire-surface change.
-pub const PROTOCOL_REV: u32 = 13;
+pub const PROTOCOL_REV: u32 = 14;
 
 /// Compatibility tag derived from the complete pinned wire manifest.
 pub const PROTOCOL_FINGERPRINT: u64 = protocol_fingerprint_for(
@@ -712,6 +713,9 @@ pub(crate) const ROLLBACK_VELOCITY: f32 = 1.0;
 /// |phase| (m) deltas. Coarse like the velocity gate — belt state is deterministic, so a real
 /// mismatch is gross desync, not solver noise.
 pub(crate) const ROLLBACK_TRACK_DRIVE: f32 = 0.25;
+/// Exact transmission divergence gate expressed as a Boolean 0/1 magnitude for trace attribution.
+/// Every discrete field compares exactly; both floats compare by raw bits.
+pub(crate) const ROLLBACK_TANK_TRANSMISSION: f32 = 1.0;
 /// `TrackGrip` divergence gate (N): max over the four elastic grip resultants. 2 kN is a
 /// one-tick hull-velocity discrepancy of ~1.1 mm/s on the Tiger and <1% of a flat side's
 /// grip budget — a netcode ratchet (tighten from MP measurements), not a friction constant.
@@ -761,6 +765,64 @@ pub(crate) fn track_drive_error(a: &TrackDrive, b: &TrackDrive) -> f32 {
     worst
 }
 
+/// Whether two atomic transmission snapshots differ under the REV-14 wire contract. Exhaustive
+/// destructuring makes a future field addition fail compilation until its comparison is classified.
+pub(crate) fn tank_transmission_mismatch(a: &TankTransmission, b: &TankTransmission) -> bool {
+    let TransmissionState {
+        gear: a_gear,
+        shift_ticks: a_shift_ticks,
+        steer_step: a_steer_step,
+        reverse: a_reverse,
+        park: a_park,
+        last_shift_dir: a_last_shift_dir,
+        dwell_ticks: a_dwell_ticks,
+        omega_e: a_omega_e,
+        clutch_out: a_clutch_out,
+        demand_n: a_demand_n,
+        demand_initialized: a_demand_initialized,
+        grade_confirm_ticks: a_grade_confirm_ticks,
+        grade_target: a_grade_target,
+        scheduler: a_scheduler,
+        hill_hold: a_hill_hold,
+        hold_reengage_ticks: a_hold_reengage_ticks,
+    } = a.0;
+    let TransmissionState {
+        gear: b_gear,
+        shift_ticks: b_shift_ticks,
+        steer_step: b_steer_step,
+        reverse: b_reverse,
+        park: b_park,
+        last_shift_dir: b_last_shift_dir,
+        dwell_ticks: b_dwell_ticks,
+        omega_e: b_omega_e,
+        clutch_out: b_clutch_out,
+        demand_n: b_demand_n,
+        demand_initialized: b_demand_initialized,
+        grade_confirm_ticks: b_grade_confirm_ticks,
+        grade_target: b_grade_target,
+        scheduler: b_scheduler,
+        hill_hold: b_hill_hold,
+        hold_reengage_ticks: b_hold_reengage_ticks,
+    } = b.0;
+
+    a_gear != b_gear
+        || a_shift_ticks != b_shift_ticks
+        || a_steer_step != b_steer_step
+        || a_reverse != b_reverse
+        || a_park != b_park
+        || a_last_shift_dir != b_last_shift_dir
+        || a_dwell_ticks != b_dwell_ticks
+        || a_omega_e.to_bits() != b_omega_e.to_bits()
+        || a_clutch_out != b_clutch_out
+        || a_demand_n.to_bits() != b_demand_n.to_bits()
+        || a_demand_initialized != b_demand_initialized
+        || a_grade_confirm_ticks != b_grade_confirm_ticks
+        || a_grade_target != b_grade_target
+        || a_scheduler != b_scheduler
+        || a_hill_hold != b_hill_hold
+        || a_hold_reengage_ticks != b_hold_reengage_ticks
+}
+
 /// Ordered wire registrations. Keep this list aligned with [`plugin`]; its pinned hash is a direct
 /// handshake-fingerprint input. House process also bumps [`PROTOCOL_REV`] for release bookkeeping.
 #[cfg(test)]
@@ -791,11 +853,12 @@ const WIRE_SURFACE: &[&str] = &[
     "LinearVelocity",
     "AngularVelocity",
     "TrackDrive",
+    "TankTransmission",
     "TrackGrip",
 ];
 
 /// Pinned hash for the ordered wire surface and a direct handshake-fingerprint input.
-const WIRE_SURFACE_HASH: u64 = 0x601e_ddd4_8c2c_4f91;
+const WIRE_SURFACE_HASH: u64 = 0x7e9a_36b9_0584_c64f;
 
 // ---------------------------------------------------------------------------
 // Deep wire-surface coverage (field-level + external-dep skew)
@@ -813,8 +876,9 @@ const WIRE_SURFACE_HASH: u64 = 0x601e_ddd4_8c2c_4f91;
 //     tripwire source-scans each wire-facing struct/enum's DEFINITION TEXT (comments/whitespace
 //     stripped, so a doc or reformat edit is invisible; a field/variant/type change is not) and hashes
 //     the lot. This is the whole `WIRE_SURFACE` own-type graph, followed through embeds: `NetCrew`
-//     carries `VolumeSnapshot` which carries `CrewSnapshot`, `TankCommand` (src/command.rs) carries
-//     `CrewSwap`, and both `CrewSnapshot` and `CrewSwap` carry `CrewStation` (src/damage.rs).
+//     carries `VolumeSnapshot` which carries `CrewSnapshot`, `TankTransmission` carries
+//     `TransmissionState`/`SchedulerState`, `TankCommand` (src/command.rs) carries `CrewSwap`, and
+//     both `CrewSnapshot` and `CrewSwap` carry `CrewStation` (src/damage.rs).
 //   * EXTERNAL types (avian `Position`/`Rotation`/`LinearVelocity`/`AngularVelocity`, plus lightyear's
 //     own wire framing) — their source is not in this tree to scan, so they are covered by DEP VERSION:
 //     [`WIRE_DEP_AVIAN3D`]/[`WIRE_DEP_LIGHTYEAR`] pin the resolved `Cargo.lock` versions, so a bump of
@@ -827,7 +891,7 @@ const WIRE_SURFACE_HASH: u64 = 0x601e_ddd4_8c2c_4f91;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0xe89a_a5a8_3f08_467b;
+const WIRE_TYPES_HASH: u64 = 0xccfa_d8e4_fc3a_e835;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -983,6 +1047,19 @@ pub(crate) fn plugin(app: &mut App) {
                 ROLLBACK_TRACK_DRIVE,
             )
         });
+    // The declared transmission's correlated state: one atomic owner-predicted snapshot. Unlike
+    // TrackDrive's coarse velocity-like threshold, every field is exact; floats compare by bits so
+    // equal NaN payloads stay equal and signed zero stays distinct.
+    app.component::<TankTransmission>()
+        .replicate()
+        .predict()
+        .with_rollback_condition(|a: &TankTransmission, b: &TankTransmission| {
+            crate::trace::note_if_tripped(
+                "TankTransmission",
+                u8::from(tank_transmission_mismatch(a, b)).into(),
+                ROLLBACK_TANK_TRANSMISSION,
+            )
+        });
     // The static-friction state (ADR-0026): same shape, its own newton-unit threshold so a
     // grip mismatch attributes as grip, not as belt state.
     app.component::<TrackGrip>()
@@ -1090,6 +1167,55 @@ mod tests {
     use super::*;
     use crate::command::CrewSwap;
     use crate::damage::CrewStation;
+
+    #[test]
+    fn transmission_rollback_comparison_is_bit_exact() {
+        let base = TankTransmission(TransmissionState::for_governor());
+
+        let mut discrete = base;
+        discrete.0.gear = 2;
+        assert!(tank_transmission_mismatch(&base, &discrete));
+
+        let mut positive_zero = base;
+        positive_zero.0.demand_n = 0.0;
+        let mut negative_zero = base;
+        negative_zero.0.demand_n = -0.0;
+        assert!(tank_transmission_mismatch(&positive_zero, &negative_zero));
+
+        let mut nan_a = base;
+        nan_a.0.omega_e = f32::from_bits(0x7fc0_0042);
+        let nan_a_copy = nan_a;
+        assert!(nan_a != nan_a_copy, "f32 PartialEq treats NaN as unequal");
+        assert!(
+            !tank_transmission_mismatch(&nan_a, &nan_a_copy),
+            "matching NaN payloads are the same wire state"
+        );
+        let mut nan_b = nan_a;
+        nan_b.0.omega_e = f32::from_bits(0x7fc0_0043);
+        assert!(tank_transmission_mismatch(&nan_a, &nan_b));
+    }
+
+    #[test]
+    fn replicated_rig_preserves_the_join_in_progress_transmission_snapshot() {
+        let rig = strip_comments(&read_source("src/net/rig.rs"));
+        assert!(
+            rig.contains("With<TankTransmission>"),
+            "client rig attachment must wait for the replicated current transmission state"
+        );
+
+        let spawn = strip_comments(&read_source("src/tank/spawn.rs"));
+        let attach = spawn
+            .split_once("pub(crate) fn attach_replicated_tank_body")
+            .expect("replicated attachment function exists")
+            .1
+            .split_once("fn first_geometry_ancestor")
+            .expect("next function bounds the attachment body")
+            .0;
+        assert!(
+            !attach.contains("tank_transmission("),
+            "client attachment must not overwrite a JIP snapshot with fresh from-spec state"
+        );
+    }
 
     /// FNV-1a over the ordered [`WIRE_SURFACE`] names, each terminated by a `\n` separator so no two
     /// distinct lists can collide by concatenation (`["ab","c"]` must not hash as `["a","bc"]`). The
@@ -1279,6 +1405,9 @@ mod tests {
         ("src/net/protocol.rs", "NetTank"),
         ("src/track/sim.rs", "TrackDrive"),
         ("src/track/sim.rs", "TrackDriveSide"),
+        ("src/track/sim.rs", "TankTransmission"),
+        ("src/track/transmission.rs", "TransmissionState"),
+        ("src/track/transmission.rs", "SchedulerState"),
         ("src/track/sim.rs", "TrackGrip"),
         ("src/net/protocol.rs", "NetBot"),
         ("src/lib.rs", "CombatantId"),

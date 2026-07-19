@@ -256,9 +256,8 @@ pub struct PowertrainSpec {
     pub inertia: f32,
     /// The DECLARED transmission (phase 2.5, transmission-design.md): engine torque curve,
     /// gear ladders, steering table, brakes, architecture. `default` (absent) means the
-    /// vehicle only has the legacy symmetric governor — the RON stays valid without it and
-    /// every MP composition runs `Governor` regardless (the regenerative adapters are gated
-    /// to the offline composition and the sandbox under REV 13).
+    /// vehicle only has the legacy symmetric governor. REV 14 makes this architecture selection
+    /// authoritative on MP paths; the RON stays valid without the block.
     #[serde(default)]
     pub transmission: Option<TransmissionSpec>,
 }

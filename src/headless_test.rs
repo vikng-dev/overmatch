@@ -370,6 +370,16 @@ fn sim_boots_and_drives_headless() {
         "full throttle for ~4 s should move the tank on flat ground; moved {horizontal:.2} m \
          (sim not actually running headless?)"
     );
+    let current = app
+        .world()
+        .get::<crate::track::sim::TankTransmission>(tank)
+        .expect("the tank carries transmission state");
+    assert_ne!(
+        *current,
+        fresh_tank_transmission(&app),
+        "without the offline dial, the declared transmission must advance instead of leaving its \
+         spawn state inert; the net server and predicted client use this same SimPlugin path"
+    );
 }
 
 /// One scripted headless drive for the element-gate proof: boot the sim (the headless equivalent
@@ -2411,6 +2421,7 @@ fn capture_scripted_determinism_tick(
             &avian3d::prelude::ComputedCenterOfMass,
             &crate::track::sim::TrackDrive,
             &crate::track::sim::TrackGrip,
+            &crate::track::sim::TankTransmission,
             &crate::track::sim::TrackContacts,
             &crate::tank::TankSim,
         ),
@@ -2433,6 +2444,7 @@ fn capture_scripted_determinism_tick(
         com,
         drive,
         grip,
+        transmission,
         contacts,
         sim,
     ) in &roots
@@ -2440,7 +2452,14 @@ fn capture_scripted_determinism_tick(
         digests.push((
             name.as_str().to_owned(),
             crate::trace::canonical_tank_state_digest(
-                position.0, rotation.0, linear.0, angular.0, drive, grip, sim,
+                position.0,
+                rotation.0,
+                linear.0,
+                angular.0,
+                drive,
+                grip,
+                transmission,
+                sim,
             ),
         ));
         if is_controlled {
@@ -2473,7 +2492,7 @@ fn capture_scripted_determinism_tick(
     run.saw_shot |= sim.weapons.iter().any(|weapon| weapon.rounds_fired > 0);
     run.saw_projectile_spawn |= !projectiles.is_empty();
     run.saw_projectile_march |= projectiles.iter().any(|path| path.points.len() > 1);
-    if matches!(tick, 119 | 219 | 339) {
+    if matches!(tick, 119 | 239 | 359) {
         run.checkpoints.push(ScriptedPose {
             tick,
             position,
@@ -2607,7 +2626,7 @@ fn assert_scripted_determinism_witnesses(run: &ScriptedDeterminismRun, label: &s
     };
     assert_eq!(
         [settled.tick, powered.tick, steered.tick],
-        [119, 219, 339],
+        [119, 239, 359],
         "{label} driving checkpoint ticks moved",
     );
 

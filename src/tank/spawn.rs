@@ -134,8 +134,8 @@ pub(crate) fn spawn_complete_tank<B: Bundle>(
     let mut root = commands.spawn((
         presentation.root_bundle(),
         TrackGripElements::for_links(content.spec().track.link_count),
-        // The joint transmission's local state (phase 2.5) — spawn-constructed like the
-        // element slabs; inert on every MP path (only the offline gate reads it).
+        // Complete REV-14 transmission state, synchronously constructed from spec data before the
+        // root can replicate or simulate.
         tank_transmission(content.spec()),
         root_bundle,
     ));
@@ -145,8 +145,9 @@ pub(crate) fn spawn_complete_tank<B: Bundle>(
     entity
 }
 
-/// Transitional ADR-0014 exception for `net::rig`: attach to a replicated root with a valid pose.
-/// Normal spawn paths must use [`spawn_complete_tank`].
+/// Transitional ADR-0014 exception for `net::rig`: attach to a replicated root with a valid pose
+/// and its authoritative [`TankTransmission`] already present. Normal spawn paths must use
+/// [`spawn_complete_tank`].
 pub(crate) fn attach_replicated_tank_body<B: Bundle>(
     commands: &mut Commands,
     root: Entity,
@@ -160,7 +161,8 @@ pub(crate) fn attach_replicated_tank_body<B: Bundle>(
             presentation.root_bundle(),
             // Same spawn-sized element slabs as `spawn_complete_tank` — see the note there.
             TrackGripElements::for_links(content.spec().track.link_count),
-            tank_transmission(content.spec()),
+            // TankTransmission arrived in the replication init snapshot. Do not overwrite a late
+            // joiner's current authority state with a fresh spec-derived value here.
             root_bundle,
         ))
         .observe(bind_tank_view);

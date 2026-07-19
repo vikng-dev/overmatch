@@ -122,16 +122,19 @@ Minimal scheduling change:
 2. Solve the joint transmission once.
 3. Integrate both speeds simultaneously; advect both existing phases.
 
-Constraint forces are algebraic and need not replicate. REV 14 should add only genuine
-path-dependent transmission state.
+Constraint forces are algebraic and need not replicate. REV 14 adds only the genuine
+path-dependent transmission state inventoried below.
 
 ### Authoritative REV-14 transmission-state inventory
 
 This section supersedes the former five-bullet state sketch. The authoritative inventory is the
 current `TransmissionState` shape: **16 fields DERIVED by exhaustive struct inventory**, all
 `REPLICATE-EXACT`; `DERIVE` and `LOCAL-VIEW` each contain **0 fields DERIVED**. `f32` fields require
-their raw bits, and discrete fields require their exact value. The component remains local,
-unhashed REV-13 state in this batch; these classifications specify its later REV-14 registration.
+their raw bits, and discrete fields require their exact value. **REV-14 rider DISCHARGED:**
+`TankTransmission` now replicates as one atomic server-authoritative component, predicts and rolls
+back for the owning client, and joins the exact determinism hash in this field order. A replicated
+root waits for the current snapshot before attaching its local sim body, so join-in-progress cannot
+replace authority state with a fresh spec-derived value.
 
 `REPLICATE-EXACT`:
 
@@ -264,7 +267,8 @@ fixed-tick deterministic, in `transmission.rs`:
   landings stayed positive, i.e. on the flat.)*
 - **Reversal-only dwell** (`REVERSAL_DWELL_TICKS = 32` = 0.5 s): a committed shift blocks
   the opposite-direction shift; same-direction 1-2-3 climbs stay free. State:
-  `last_shift_dir` + `dwell_ticks` in `TransmissionState` (local, REV 13 unaffected).
+  `last_shift_dir` + `dwell_ticks` in `TransmissionState` (path-dependent state promoted atomically
+  in REV 14).
 - **Over-rev gate on downshifts** (`OVERREV_MARGIN_RPM = 100`): a downshift landing past
   the engine's max curve rpm − margin is refused.
 
@@ -481,10 +485,10 @@ finite, positive, J ≤ 100, capacity ≤ 50 000. Spec pin test updated delibera
 7. `readout` returns ω_e directly — the state IS the display (rpm is still rpm; HUD
    line shape unchanged).
 
-**REV-14 rider.** ω_e is LOCAL state under REV 13 (not replicated, not hashed). Its wire
-registration follows the authoritative §2 inventory: it is exact sim state a rollback replay must
-restore — NOT derivable from the belt, because the clutch slips. Spawn now initializes it directly
-to the authored idle speed; no in-band zero sentinel remains.
+**REV-14 rider — DISCHARGED.** ω_e now replicates and hashes by raw `f32` bits with the complete
+atomic §2 inventory. It is exact sim state a rollback replay restores — NOT derivable from the belt,
+because the clutch slips. Spawn initializes it directly to the authored idle speed; no in-band zero
+sentinel remains.
 
 **Measured gates (all re-derived; before → after on the declared Tiger data):**
 
@@ -549,7 +553,8 @@ stage-A regression surface, and the REV-13 boundary all held; four findings fixe
    `omega_e` directly at authored idle and the tick-path sentinel branch no longer exists.
 3. **Engagement seam chatter (Medium).** A boundary creeper sawtoothed engage/declutch
    on the single NEUTRAL_M_SPEED line. The seam is now a LATCH with detent-style
-   hysteresis: `TransmissionState.clutch_out` (local, REV 13), out below
+   hysteresis: `TransmissionState.clutch_out` (path-dependent state promoted atomically in REV 14),
+   out below
    `NEUTRAL_M_SPEED × 0.8` (0.4 m/s) without propulsive drive, back in at
    `NEUTRAL_M_SPEED × 1.2` (0.6 m/s) or on any propulsive command (the launch).
    Deterministic, no blend. Regression: `clutch_seam_hysteresis_kills_boundary_chatter`
@@ -615,10 +620,10 @@ reserve law. It releases only when post-power-gate coupling force exceeds `D + m
 brake envelope retained for that handoff tick. Command release or reverse intent clears it. If no
 gear has non-negative reserve, `GRADE LIMIT` remains exposed and the declared brakes stay applied.
 
-**REV-14 rider.** The authoritative §2 inventory supersedes this stage-local sketch. In particular,
-`demand_initialized` remains the intentional first-contact-sample marker because its seed is
-unavailable at spawn; changing it would change the EMA. All listed state remains local under REV 13,
-and no replication field was added in this stage.
+**REV-14 rider — DISCHARGED.** The authoritative §2 inventory supersedes this stage-local sketch.
+In particular, `demand_initialized` remains the intentional first-contact-sample marker because its
+seed is unavailable at spawn; changing it would change the EMA. REV 14 replicates and hashes all
+listed state exactly in the one `TankTransmission` component.
 
 **Coupling seam only.** A future torque converter belongs at the existing `clutch_coupling` seam
 and would author its own characteristic. Stage C does not implement one.
