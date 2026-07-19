@@ -38,6 +38,16 @@ fn replica_role_ready(
         && (!predicted || grip_elements.is_some_and(|field| field.is_sized_for(link_count)))
 }
 
+#[cfg(test)]
+pub(super) fn replica_role_ready_for_test(
+    predicted: bool,
+    interpolated: bool,
+    grip_elements: Option<&TrackGripElements>,
+    link_count: usize,
+) -> bool {
+    replica_role_ready(predicted, interpolated, grip_elements, link_count)
+}
+
 /// Attach simulation from `TankSimSource` only after a replicated root has a valid pose.
 pub(crate) fn attach_replicated_rig(
     // Avoid registering Avian placeholder poses in rollback history.

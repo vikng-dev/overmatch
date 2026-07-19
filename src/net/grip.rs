@@ -1622,3 +1622,7 @@ mod tests {
         assert!(low < high);
     }
 }
+
+#[cfg(test)]
+#[path = "grip_battery.rs"]
+mod battery;
