@@ -62,6 +62,18 @@ TankSpec(
                     // of rated torque — INFERRED (no HL230 motoring curve reachable),
                     // mid-band.
                     drag_fraction: 0.25,
+                    // Crank + flywheel + main-clutch inertia J (kg·m²), the stage-B
+                    // engine crank state. INFERRED by engine-class scaling (no HL230
+                    // flywheel datum reachable): large multi-cylinder tank diesels/petrols
+                    // land in a 2.5–6 kg·m² band, flywheel-dominant (a ~0.5 m, ~50–80 kg
+                    // flywheel rim alone is 2–4 kg·m²; crank + clutch add the rest) —
+                    // mid-band 4.0.
+                    inertia_kgm2: 4.0,
+                    // Main clutch torque capacity (N·m) ≈ 1.3 × the 1850 N·m peak —
+                    // the usual dry-clutch sizing margin (INFERRED, no Argus/OLVAR clutch
+                    // rating reachable). The stage-B coupling clamp: launch force and
+                    // grade-lug drive are capacity-limited through the slipping clutch.
+                    clutch_capacity_nm: 2400.0,
                 ),
                 gearbox: (
                     // OLVAR OG 40 12 16, 8F/4R [ANCHOR]. Per-gear top speeds @ 3000 rpm

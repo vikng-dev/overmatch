@@ -125,6 +125,8 @@ mod offline_feel_tests {
                 park: true,
                 last_shift_dir: 1,
                 dwell_ticks: 7,
+                omega_e: 250.0,
+                clutch_out: true,
             }))
             .id();
 
@@ -540,13 +542,15 @@ fn update_drive_hud(
 
         // Gear + rpm through the transmission law — but ONLY when the joint drivetrain actually
         // runs (the exact gate `apply_track_forces` uses): under `Governor`, or with no declared
-        // transmission, `TankTransmission` is inert and there is no gear/rpm to report.
+        // transmission, `TankTransmission` is inert and there is no gear/rpm to report. The rpm
+        // is the crank state ω_e directly (stage B — the state IS the display; still rpm, same
+        // line shape).
         let joint = match (mode, gear.as_ref().and_then(|g| g.trans())) {
             (TransmissionMode::Governor, _) | (_, None) => None,
             (_, Some(tp)) => Some(tp),
         };
         let gear_line = if let Some(tp) = joint {
-            let r = track::transmission::readout(&trans.0, tp, speeds);
+            let r = track::transmission::readout(&trans.0, tp);
             let marker = if trans.0.park {
                 'P'
             } else if trans.0.shift_ticks > 0 {

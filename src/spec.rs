@@ -288,6 +288,15 @@ pub struct EngineSpec {
     /// vehicle does not author one.
     #[serde(default = "default_drag_fraction")]
     pub drag_fraction: f32,
+    /// Crank + flywheel + main-clutch rotational inertia J (kg·m²) — the stage-B engine
+    /// crank state integrates against this. A declared transmission must declare its crank
+    /// (no default): the coupling law divides by it every tick.
+    pub inertia_kgm2: f32,
+    /// Main clutch torque capacity (N·m) — the largest torque the engaged coupling
+    /// transmits before slipping (≈ 1.3 × peak engine torque by the usual sizing rule).
+    /// The stage-B coupling clamp; a torque-converter characteristic replaces the clamp
+    /// for modern automatics later.
+    pub clutch_capacity_nm: f32,
 }
 
 /// See [`EngineSpec::drag_fraction`] — the middle of the diesel compression-braking band.
@@ -565,6 +574,15 @@ impl TankSpec {
                     .all(|v| v.is_finite() && *v > 0.0),
                 ),
                 (
+                    // Stage-B review round (FIX 2/4): the sim's stall-guard floor is
+                    // `idle − 100 rpm` and the crank hard-clamps there every tick — the
+                    // floor must stay POSITIVE with margin (300 = 100 band + 100 margin
+                    // + headroom), which also keeps the ω_e = 0.0 spawn sentinel
+                    // unambiguous. No real engine idles under 300 rpm anyway.
+                    "engine.idle_rpm floor",
+                    tr.engine.idle_rpm >= 300.0,
+                ),
+                (
                     "gearbox shift bands",
                     gb.shift_up_rpm.is_finite()
                         && gb.shift_down_rpm.is_finite()
@@ -607,6 +625,37 @@ impl TankSpec {
                     // check also rejects NaN/∞.
                     "engine.drag_fraction",
                     (0.0..=1.0).contains(&tr.engine.drag_fraction),
+                ),
+                (
+                    // The crank inertia is a per-tick divisor, sanity-bounded BOTH ways
+                    // (review round FIX 4): 100 kg·m² is an order of magnitude above any
+                    // tank engine's crank+flywheel+clutch (heavy WWII flywheels land in
+                    // the low single digits), and below 0.1 the semi-implicit coupling's
+                    // `1/J` term degenerates (a 0.1 kg·m² crank under a kN·m-scale τ_free
+                    // slews thousands of rpm per tick — no engine is that light).
+                    "engine.inertia_kgm2",
+                    tr.engine.inertia_kgm2.is_finite()
+                        && (0.1..=100.0).contains(&tr.engine.inertia_kgm2),
+                ),
+                (
+                    // Clutch capacity, sanity-bounded BOTH ways (review round FIX 4):
+                    // 50 kN·m is half the absurd-torque ceiling above (any honest
+                    // capacity is ~1.3 × peak torque, well under it); below 100 N·m the
+                    // coupling could never transmit even an idling engine's torque — the
+                    // vehicle would be undrivable-by-construction.
+                    "engine.clutch_capacity_nm",
+                    tr.engine.clutch_capacity_nm.is_finite()
+                        && (100.0..=50_000.0).contains(&tr.engine.clutch_capacity_nm),
+                ),
+                (
+                    // Review round FIX 4: with a transmission declared, the coupling
+                    // divides by the belt inertia (`I_m = 2 × powertrain.inertia`) in the
+                    // lock denominator `1/J + k²/I_m` — the generic finite/> 0 check
+                    // above admits values (1e-30) that blow the k² term up. 1 kg is far
+                    // below any honest per-side belt-drivetrain effective inertia
+                    // (Tiger 16 000, lab 8 000).
+                    "powertrain.inertia floor (coupling divisor)",
+                    t.powertrain.inertia >= 1.0,
                 ),
                 (
                     // Bounded so the u8 tick countdown can represent it (255 ticks ≈ 4 s —
@@ -753,6 +802,11 @@ mod tests {
         assert_eq!(tr.architecture, TransmissionArchitecture::FixedRadii);
         assert_eq!(tr.engine.governed_rpm, 2500.0);
         assert_eq!(tr.engine.rated_rpm, 3000.0);
+        // DELIBERATE pin update (stage B, engine crank state): the crank block is now
+        // required authoring. J = 4.0 kg·m² (INFERRED, 2.5–6 class band, flywheel-
+        // dominant); clutch capacity 2400 N·m ≈ 1.3 × the 1850 N·m peak.
+        assert_eq!(tr.engine.inertia_kgm2, 4.0);
+        assert_eq!(tr.engine.clutch_capacity_nm, 2400.0);
         assert_eq!(tr.gearbox.forward_speeds_kmh.len(), 8);
         assert_eq!(tr.gearbox.reverse_speeds_kmh.len(), 4);
         assert_eq!(*tr.gearbox.forward_speeds_kmh.last().unwrap(), 45.4);
@@ -1013,7 +1067,25 @@ mod tests {
         let fresh = || -> TankSpec {
             ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron")).unwrap()
         };
-        let cases: [(&str, fn(&mut TransmissionSpec)); 6] = [
+        let cases: [(&str, fn(&mut TransmissionSpec)); 13] = [
+            // Stage-B crank block: absurd-but-finite values must be refused outright, in
+            // BOTH directions (review round FIX 4 added the lower bounds — the coupling
+            // divides by J and the capacity gates every transmitted torque).
+            ("inertia_kgm2", |tr| tr.engine.inertia_kgm2 = 0.0),
+            ("inertia_kgm2", |tr| tr.engine.inertia_kgm2 = 0.05),
+            ("inertia_kgm2", |tr| tr.engine.inertia_kgm2 = 250.0),
+            ("clutch_capacity_nm", |tr| {
+                tr.engine.clutch_capacity_nm = f32::NAN;
+            }),
+            ("clutch_capacity_nm", |tr| {
+                tr.engine.clutch_capacity_nm = 50.0;
+            }),
+            ("clutch_capacity_nm", |tr| {
+                tr.engine.clutch_capacity_nm = 80_000.0;
+            }),
+            // FIX 2/4: an idle under 300 rpm would put the sim's hard stall floor
+            // (idle − 100) inside the spawn sentinel's territory.
+            ("engine.idle_rpm floor", |tr| tr.engine.idle_rpm = 200.0),
             ("steering capacity", |tr| {
                 tr.steering.capacity = f32::INFINITY;
             }),
@@ -1043,6 +1115,16 @@ mod tests {
             let err = spec.validate().unwrap_err().to_string();
             assert!(err.contains(needle), "expected `{needle}` in: {err}");
         }
+        // FIX 4, belt-inertia floor: with a transmission declared the coupling divides by
+        // 2 × powertrain.inertia — a tiny-but-positive value passes the generic finite/> 0
+        // check and must be caught by the transmission-block floor.
+        let mut spec = fresh();
+        spec.track.powertrain.inertia = 0.5;
+        let err = spec.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("powertrain.inertia floor"),
+            "expected the belt-inertia floor in: {err}"
+        );
     }
 
     /// The spec↔model **bind contract** — the CI-time twin of the runtime contract in

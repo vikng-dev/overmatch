@@ -952,11 +952,84 @@ fn pivot_tiger_l600() {
 /// commands steer force up to capacity and the power-conservation scale is the binding
 /// limiter, so the rate settles where engine power balances scrub dissipation; the old
 /// neutral_d_full speed FLOOR used ~68 kW of the ~407 kW budget and pivoted at
-/// 0.131 rad/s). MEASURED on the declared data: 0.654 rad/s mean ground yaw, belts
-/// ±1.40 m/s; gated at ≥ 0.35 rad/s (margin, same policy as the L600 gate).
+/// 0.131 rad/s). MEASURED on the declared data: 0.654 rad/s mean ground yaw pre-stage-B;
+/// 0.646 rad/s with the stage-B crank (the declutched steer demand parks the crank at the
+/// same peak-torque operating point the old rev floor used, minus the rev-governor's ~30
+/// rpm taper droop — steady rate preserved by design); gated at ≥ 0.35 rad/s (margin,
+/// same policy as the L600 gate).
 #[test]
 fn pivot_tiger_hybrid() {
     tiger_pivot_gate(crate::track::transmission::TransmissionMode::Hybrid, 0.35);
+}
+
+/// Stage B pivot SPIN-UP gate (new): the standstill pivot's power budget now follows the
+/// CRANK, not the input slew. MEASURED on the declared data: 0.95 s to 90% of steady yaw —
+/// essentially the old 0.94 s, NOT the memo's expected 1.2–1.5 s, and the reason is honest
+/// physics of this model: the power gate cannot bind at v ≈ 0 (delivered power is F·v),
+/// so the early pivot phase is CAPACITY-limited while the crank spool (idle → ~2100 rpm at
+/// τ/J ≈ 400 rad/s² ≈ 0.4 s, J = 4 kg·m²) completes underneath the ~0.5 s steer input
+/// slew — by the time the belts are fast enough for power to bind, the crank has arrived.
+/// The yaw-time gate therefore pins the measured 0.95 s with margin, and the CRANK STATE
+/// itself is what discriminates stage B from the rpm-floor hack: ω_e must still be LOW
+/// shortly after the command (a floor would teleport it) and must park at the peak-torque
+/// operating point at steady state.
+#[test]
+fn pivot_spin_up_tiger_hybrid() {
+    use crate::track::transmission::TransmissionMode;
+    let (mut app, tank) = booted_offline_sim(TransmissionMode::Hybrid);
+    let total = 8 * 64;
+    let mut yaws = Vec::with_capacity(total);
+    let mut early_rpm = 0.0f32;
+    for tick in 0..total {
+        drive_tick(&mut app, tank, 0.0, 1.0);
+        yaws.push(yaw_rate(&mut app, tank));
+        if tick == 6 {
+            // ~0.1 s in: the crank must still be climbing (idle + a few hundred rpm).
+            early_rpm = app
+                .world()
+                .get::<crate::track::sim::TankTransmission>(tank)
+                .expect("tank carries transmission state")
+                .0
+                .omega_e
+                / (std::f32::consts::TAU / 60.0);
+        }
+    }
+    let steady: f32 = yaws[total - 64..].iter().sum::<f32>() / 64.0;
+    assert!(
+        steady.abs() > 0.35,
+        "the steady pivot must be live for the spin-up measurement (got {steady:.3})"
+    );
+    let target = 0.9 * steady.abs();
+    let rise_tick = yaws
+        .iter()
+        .position(|y| y.abs() >= target)
+        .expect("yaw must reach 90% of steady inside the run");
+    let secs = (rise_tick + 1) as f32 / 64.0;
+    let steady_rpm = app
+        .world()
+        .get::<crate::track::sim::TankTransmission>(tank)
+        .expect("tank carries transmission state")
+        .0
+        .omega_e
+        / (std::f32::consts::TAU / 60.0);
+    println!(
+        "tiger hybrid pivot spin-up: {secs:.2} s to 90% of steady {steady:.3} rad/s; \
+         crank {early_rpm:.0} rpm @ 0.1 s -> {steady_rpm:.0} rpm steady"
+    );
+    assert!(
+        (0.6..=1.6).contains(&secs),
+        "pivot spin-up {secs:.2} s outside the pinned band around the measured 0.95 s"
+    );
+    assert!(
+        early_rpm < 1_500.0,
+        "0.1 s after the command the crank must still be spooling ({early_rpm:.0} rpm) — \
+         an instant high rpm means the rpm-floor hack is back"
+    );
+    assert!(
+        (1_900.0..=2_200.0).contains(&steady_rpm),
+        "the steady pivot crank must park at the peak-torque operating point \
+         (~2100 rpm), got {steady_rpm:.0}"
+    );
 }
 
 /// The fix-1 smoking gun: a standstill full-throttle climb must walk the Tiger ladder
@@ -1003,17 +1076,20 @@ fn gear_climb_monotone_tiger() {
 
 /// Deceleration on the real Tiger (L600, the authored architecture), both driver intents:
 ///
-/// * RELEASE (coast): engine drag at the declared `drag_fraction` (0.25 of peak torque)
-///   through the CURRENT gear, downshifting on the authored bands as speed falls — drag at
-///   6 m/s (F7) is ≈ 17 kN, growing through the downshifts, plus the grip law's slip
-///   losses. MEASURED on the declared data: 6 → 2 m/s in 10.6 s; the gate pins ≤ 14 s
-///   (margin for platform float drift, nothing else). The fix-round brief hoped for 8 s —
-///   that is unreachable without rolling resistance, WHICH THE CONTACT MODEL DOES NOT
-///   HAVE (a real Tiger's ~25–35 kN of rolling drag would dominate its own engine
-///   braking; ground resistance belongs to the terrain/ground-type mechanic, ADR-0007
-///   bucket 3 — not to the drivetrain, and not tunable-by-feel here). Also pinned: past
-///   the command-shaper's release slew, coasting never accelerates (the old code
-///   ACCELERATED on opposite input — the regression this kills).
+/// * RELEASE (coast): engine drag at the declared `drag_fraction` (0.25 of peak torque),
+///   stage B: at the CRANK, reaching the belt through the engaged coupling — so the drag
+///   torque now decelerates crank AND belt together, and the belt's share is the old
+///   force × `I_m/(I_m + k²J)` (F7: 32 000/(32 000 + 37.1²·4) ≈ 0.85), plus the shift
+///   windows are now genuinely drag-free (declutched). MEASURED on the declared data:
+///   6 → 2 m/s in 12.2 s (was 10.6 s pre-crank — the ≈ 15% slower coast is exactly the
+///   reflected-crank-inertia share; the gate's ≤ 14 s absorbs it with margin for float
+///   drift, nothing else). The fix-round brief hoped for 8 s — unreachable without
+///   rolling resistance, WHICH THE CONTACT MODEL DOES NOT HAVE (a real Tiger's ~25–35 kN
+///   of rolling drag would dominate its own engine braking; ground resistance belongs to
+///   the terrain/ground-type mechanic, ADR-0007 bucket 3 — not to the drivetrain, and not
+///   tunable-by-feel here). Also pinned: past the command-shaper's release slew, coasting
+///   never accelerates (the old code ACCELERATED on opposite input — the regression this
+///   kills).
 /// * OPPOSITE THROTTLE: service brakes at the declared capacity, DUAL-anchored by fix 4
 ///   and the review round (96 kN/side: the settled 20° park hold at 95.6 kN/side demand,
 ///   0.343 g total service decel inside the 0.2–0.35 g WWII heavy-tank band; the old
@@ -1195,6 +1271,14 @@ fn ramp_climb_20_deg_never_upshifts_backward_tiger() {
         .gear;
     let mut trace = vec![prev_gear];
     let mut crest_tick = None;
+    // Stage-B launch grip-utilization measurement (the slope-investigation wheelspin): max
+    // belt-vs-hull slip during the first 3 s of the from-rest grade launch. Pre-stage-B the
+    // rev floor held peak-torque force (~747 kN) against the ~473 kN on-slope grip ceiling
+    // for the whole launch (MEASURED baseline: 0.370 m/s max slip); the clutch-limited
+    // launch locks the belt to the crank within ticks and the reflected crank inertia
+    // (k₁²·J ≈ 20× the belt inertia in F1) pins it there — MEASURED stage B: 0.155 m/s,
+    // a 58% cut. Printed, not gated — the crest/no-rollback asserts are the gate.
+    let mut max_launch_slip = 0.0f32;
     for tick in 0..(30 * 64) {
         drive_tick(&mut app, tank, 1.0, 0.0);
         let world = app.world();
@@ -1208,6 +1292,13 @@ fn ramp_climb_20_deg_never_upshifts_backward_tiger() {
             .0;
         // Signed hull speed along the hull's forward axis (−Z local; uphill here).
         let v_fwd = v.dot(rot * Vec3::NEG_Z);
+        if tick < 3 * 64 {
+            let drive = world
+                .get::<crate::track::sim::TrackDrive>(tank)
+                .expect("tank drives");
+            let belt_m = (drive.sides[0].speed + drive.sides[1].speed) / 2.0;
+            max_launch_slip = max_launch_slip.max(belt_m - v_fwd);
+        }
         let st = world
             .get::<crate::track::sim::TankTransmission>(tank)
             .expect("tank carries transmission state")
@@ -1241,6 +1332,9 @@ fn ramp_climb_20_deg_never_upshifts_backward_tiger() {
             break;
         }
     }
+    println!(
+        "tiger 20-deg ramp launch: max belt-vs-hull slip {max_launch_slip:.3} m/s (first 3 s)"
+    );
     match crest_tick {
         Some(t) => println!(
             "tiger 20-deg ramp climb from rest: CRESTED in {:.1} s, gear trace {trace:?}",
@@ -1316,9 +1410,6 @@ fn drive_readout_reports_sane_operating_point() {
     }
 
     let world = app.world();
-    let drive = world
-        .get::<crate::track::sim::TrackDrive>(tank)
-        .expect("the controlled tank drives");
     let state = world
         .get::<crate::track::sim::TankTransmission>(tank)
         .expect("the controlled tank carries transmission state");
@@ -1326,7 +1417,8 @@ fn drive_readout_reports_sane_operating_point() {
         .resource::<crate::track::sim::TrackGear>()
         .trans()
         .expect("the Tiger blueprint declares a transmission");
-    let readout = transmission::readout(&state.0, tp, [drive.sides[0].speed, drive.sides[1].speed]);
+    // Stage B: the readout is the crank state directly — no belt speeds involved.
+    let readout = transmission::readout(&state.0, tp);
     println!(
         "drive readout: gear {} rpm {:.0} (idle {}, governed {})",
         readout.gear_label, readout.rpm, tp.engine.idle_rpm, tp.engine.governed_rpm

@@ -94,10 +94,12 @@ pub struct ElementGripFeelTest;
 pub struct TransmissionFeelTest(pub TransmissionMode);
 
 /// The joint transmission's path-dependent state (gear, shift countdown, steering detent,
-/// direction) — a plain LOCAL component on every tank root, spawn-constructed like
-/// [`TrackGripElements`]: NOT registered in the net protocol, never serialized, never hashed
-/// (REV 13; the wire promotion is REV 14). MP never reads or writes it — only the offline
-/// composition's non-governor branch of [`apply_track_forces`] touches it.
+/// direction, engine crank speed ω_e) — a plain LOCAL component on every tank root,
+/// spawn-constructed like [`TrackGripElements`]: NOT registered in the net protocol, never
+/// serialized, never hashed (REV 13; the wire promotion is REV 14 — ω_e rides that later
+/// netcode arc with the rest of the list, since a slipping clutch makes it underivable
+/// from the belt). MP never reads or writes it — only the offline composition's
+/// non-governor branch of [`apply_track_forces`] touches it.
 #[derive(Component, Clone, Copy, PartialEq, Debug, Default)]
 pub struct TankTransmission(pub TransmissionState);
 
@@ -249,6 +251,8 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
             recirculation: tr.steering.recirculation,
             brake_capacity_n: tr.brake_force,
             drag_fraction: tr.engine.drag_fraction,
+            engine_inertia_kgm2: tr.engine.inertia_kgm2,
+            clutch_capacity_nm: tr.engine.clutch_capacity_nm,
             shift_secs: tr.gearbox.shift_secs,
             sprocket_radius_m: sprocket_r,
             half_tread_m: spec.plane_x,

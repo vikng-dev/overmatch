@@ -375,6 +375,157 @@ while a shift commits. Flat-ground behavior is undisturbed (driving with the lad
    does not cut) and `readout_reverse_reads_signed_shaft` (R label + positive geared rpm
    while reversing; idle while back-driven).
 
+## Stage B (2026-07-19) — engine crank state ω_e
+
+The crank is now real state: `TransmissionState.omega_e` (rad/s, f32) with inertia J
+(`engine.inertia_kgm2`), coupled to the geared shaft by a capacity-clamped main clutch
+(`engine.clutch_capacity_nm`). Stage A's command-proxy rev floor is DELETED — launch rpm
+is the emergent clutch-slip equilibrium. All in `transmission.rs` behind the regenerative
+path (Governor float path untouched — parity test green bit-for-bit; no wire/replication,
+no μ/grip changes, deterministic f32 at 64 Hz).
+
+**Spec provenance.** `inertia_kgm2: 4.0` — INFERRED by engine-class scaling
+(flywheel-dominant; large tank engines land in a 2.5–6 kg·m² band: a ~0.5 m, 50–80 kg
+flywheel rim alone is 2–4 kg·m²), mid-band. `clutch_capacity_nm: 2400` ≈ 1.3 × the
+1850 N·m peak (the usual dry-clutch sizing margin; no Argus/OLVAR rating reachable).
+Lab (T-34 config + unit tests): J = 4.0, capacity = 2860 (1.3 × 2200). Validation:
+finite, positive, J ≤ 100, capacity ≤ 50 000. Spec pin test updated deliberately.
+
+**Update law (per tick, inside `regenerative`, replacing the rpm_floor block):**
+
+1. Free torque from the PRE-tick crank: `τ_free = τ_ind + τ_idle − τ_drag` with
+   `τ_ind = u·torque_at(ω_e)` (the governor cut now acts on the crank),
+   `τ_idle = clamp(gain·(ω_idle − ω_e), 0, torque_at(idle))` (gain = full recovery over
+   `K_IDLE_DROOP_RPM` = 50 rpm of droop), `τ_drag = drag_fraction·peak·
+   hold_blend(u/DRAG_THROTTLE_RELEASE)·sat(ω_e/ω_idle)`. Drag moved ENGINE-side: the
+   belt lost its separate `f_drag` term and drag reaches the belt only through the
+   coupling (`reflected_drag` deleted; the old belt-side `DRAG_SAT_SPEED` role is played
+   by the ω_idle saturation).
+2. COUPLING (engaged ⇔ not shifting ∧ not neutral-idle, where neutral-idle =
+   `propulsive < NEUTRAL_THROTTLE ∧ |m| < NEUTRAL_M_SPEED` — the L600 neutral seam
+   GENERALIZED to both adapters; without it an engaged idle-governed crank at standstill
+   rides the clutch at hundreds of kN of creep/pivot-drag force): ONE seamed function
+   `clutch_coupling` — the coupling-law slot; a torque-converter characteristic replaces
+   the clamp for modern automatics later —
+   `τ_c* = [(ω_e − k·s·m)/dt + τ_free/J − k·s·F_other/I_m] / (1/J + k²/I_m)` with
+   `k = G/r_s`, `s` the ladder direction, `I_m = 2·belt inertia`, `F_other = −ΣR`
+   (λ/brakes excluded — near-zero in engaged drive regimes; the end-of-step drift kill
+   re-anchors an exact lock). `τ_c = clamp(τ_c*, ±capacity)`; belt receives
+   `F_c = k·s·τ_c` split per side IN PLACE OF `f_p + f_drag`; crank integrates
+   `ω_e += (τ_free − τ_c·power_scale)·dt/J`. STALL GUARD (ships with this): a landing
+   below `ω_idle − STALL_GUARD_BAND_RPM` (100) reduces τ_c one-sidedly to land exactly
+   at the floor — the clutch slips to protect the crank; the band is 2× the idle droop
+   so the saturated idle governor guarantees the floor is holdable. No stall death
+   (later, playtest-gated).
+3. DECLUTCHED (shift window / neutral-idle): belt gets NO engine force and NO drag; the
+   crank runs a proportional-band rev governor (`REV_MATCH_BAND_RPM` = 200) toward
+   `max(|m|·k_landing, idle + (peak_torque_rpm − idle)·|steer|)`. Two DOCUMENTED
+   deviations from the memo's shorthand: (a) the steer-demand target (the surviving half
+   of the old `cmd_mag` contract) — without it a declutched pivot idles at ~1/5 of its
+   power budget; (b) the target is a SPEED, not blind full fueling — an unloaded crank
+   under u = 1 spools past the peak-power point to the governor cut-out where
+   `torque_at·ω = 0` (the d-path draw does not load the crank in this stage — deferred
+   honestly; the power gate caps the draw instead), so the steer demand must park the
+   crank at the peak-torque point or steady pivot power collapses to zero.
+4. `predict_shift_landing_m` rewritten to the new window physics: reaction-only bleed
+   (no drag — the window is declutched in reality too, so prediction and reality agree).
+   `POSTSHIFT_MARGIN_RPM` = 150 re-derived UNCHANGED: at full throttle (the dominant
+   upshift intent) drag was already fully released (`hold_blend(1/0.5) = 0`), so the
+   predictor's arithmetic is identical there; the margin covered reaction-bleed
+   prediction error, which is untouched.
+5. Power gate: `p_avail = torque_at(ω_e)·ω_e` — the crank, not the input slew. The
+   rpm_floor hack is deleted.
+6. End of step: if engaged ∧ τ_c unclamped ∧ guard quiet ∧ power_scale = 1, snap
+   `ω_e = k·s·m_next` exactly (drift kill; refused if it would land below the guard
+   floor).
+7. `readout` returns ω_e directly — the state IS the display (rpm is still rpm; HUD
+   line shape unchanged).
+
+**REV-14 rider.** ω_e is LOCAL state under REV 13 (not replicated, not hashed). Its wire
+registration rides the later netcode arc with the rest of the REV-14 list: it is sim
+state a rollback replay must restore — NOT derivable from the belt, because the clutch
+slips.
+
+**Measured gates (all re-derived; before → after on the declared Tiger data):**
+
+| gate | before | after |
+|---|---|---|
+| flat-ground full-W climb | monotone [1..8] | monotone [1,2,3,4,5,6,7,8] — survives |
+| top speed (30 s) | 10.49 m/s | 10.49 m/s (governed equilibrium now ON the crank) |
+| coast 6→2 m/s | 10.6 s | 12.2 s — the belt's drag share is `I_m/(I_m + k²J)` ≈ 0.85 in F7 (crank+belt decelerate together) and shift windows are genuinely drag-free; gate ≤ 14 s holds |
+| service brake 6→1 m/s | 2.23 s | 2.31 s (gate ≤ 3 s) |
+| L600 pivot | 0.131 rad/s | 0.1314 rad/s (steady preserved) |
+| Hybrid pivot | 0.654 rad/s | 0.637 rad/s (crank parks at peak-torque point minus ~30 rpm rev-governor droop) |
+| Hybrid pivot spin-up (NEW gate) | 0.94 s | 0.95 s to 90% yaw — NOT the memo's 1.2–1.5 s: the power gate cannot bind at v ≈ 0, so the capacity-limited early phase hides the ~0.4 s crank spool under the ~0.5 s steer slew. The gate pins 0.95 s ± margin AND the crank state itself (908 rpm @ 0.1 s → 2064 rpm steady) — the discriminator the yaw time alone is not |
+| 20° from-rest crest | 7.1 s, trace [1] | 8.1 s, trace [1] — the launch is gentler (clutch-limited, then lock) |
+| launch wheelspin (20° ramp, max belt-vs-hull slip) | 0.370 m/s | 0.155 m/s — 58% cut: the lock catches within ticks and the reflected crank inertia (k₁²J ≈ 20× belt inertia in F1) pins the belt |
+| slope park 20° | holds, 0.000 m | holds, 0.000 m |
+| readout | geared-rpm proxy | crank truth (F7 @ 2345 rpm driven; sub-idle lug reads honestly) |
+
+New unit pins: `launch_is_clutch_slip_limited` (standing start full W: belt force =
+k₁ × capacity ≈ 242.5 kN lab, measurably NOT the old rev-floor 186.6 kN),
+`stall_guard_holds_crank_under_grade_lug` (full-W lug + coast backslide: ω_e never below
+idle − 100 rpm; forward drive persists through the slipping clutch),
+`rev_match_across_upshift_is_continuous` (≤ 250 rpm/tick slew, ≤ 400 rpm gap at window
+end, re-locks to the geared point), `free_rev_reaches_steer_target_promptly` (lab
+idle → 95% of peak-torque target in 0.05–0.6 s; parks at the peak-torque point, NOT the
+cut-out), `coast_drag_reaches_belt_through_coupling` (steady coast force through the
+clutch = the declared drag share exactly — the steady state is coupling-law-invariant),
+`readout_reports_crank_state`. Backslide behavior: forward drive during slides now comes
+through the clutch — capacity-clamped under full W (`F_c = k·2400`), `τ_free`-limited on
+a coast slide; the stage-A backslide unit tests hold unchanged.
+
+Deliberately NOT in this stage: grade-aware scheduling / skip shifts (stage C), stall
+death, torque-converter coupling, d-path crank loading (the power gate stands in).
+
+### Stage-B review round (same day) — four findings, dispositions
+
+Adversarial review of the landed stage B: coupling signs, rev-governor stability, the
+stage-A regression surface, and the REV-13 boundary all held; four findings fixed:
+
+1. **Stale `exact` flag let the drift kill violate clutch capacity (Critical).** The
+   flag was decided at the pre-brake/pre-λ coupling solve, but brakes, the FixedRadii λ
+   mean-axis share (`j_L + j_R = −e` does NOT cancel), and the belt ±max_speed clamp all
+   move `m_next` afterwards — the snap then teleported the crank with the belt (traced:
+   a full-opposing-throttle F1 brake tick implied τ_c ≈ 9.7 kN·m through the 2.4 kN·m
+   clutch). Replaced by an END-OF-STEP feasibility check on the final belt state:
+   `τ_impl = τ_free − (k·s·m_next − ω_e)·J/dt`; snap only if `|τ_impl| ≤ capacity` (and
+   ≥ the stall floor), else the honestly integrated slipping crank stands. The
+   pre-solve's reactions-only `F_other` is now documented as a PREDICTOR approximation —
+   exact pre-accounting is circular (the brake law reads the q that needs F_c) — made
+   safe by exactly this check. The power_scale condition dropped (any within-capacity
+   landing is a legitimate clutch outcome). Regression (proven to bite against the
+   eager flag): `braking_never_teleports_crank_past_clutch_capacity` — per-tick crank
+   slew bounded by `(capacity + drag)/J·dt` through a closed-loop brake stop.
+2. **Stall guard + sentinel not spec-robust (High).** The guard's ±capacity clamp meant
+   a legal strongly-negative τ_free (big drag fraction over a weak idle curve) could
+   carry ω_e below the floor and negative, where the old `≤ 0` sentinel teleported it
+   back to idle every tick (traced 600 → −3130 → 600 rpm oscillation). Fixed: (a) HARD
+   end-of-tick clamp `ω_e ≥ ω_floor` — policy-honest, the floor IS the no-stall policy
+   while stall death stays unmodeled (classification table updated; also self-heals NaN
+   via f32::max); (b) the sentinel tightened to exactly `== 0.0` — it now fires at true
+   spawn only — with spec validation `idle_rpm ≥ 300` (100 band + 100 margin +
+   headroom) keeping `ω_floor > 0` always.
+3. **Engagement seam chatter (Medium).** A boundary creeper sawtoothed engage/declutch
+   on the single NEUTRAL_M_SPEED line. The seam is now a LATCH with detent-style
+   hysteresis: `TransmissionState.clutch_out` (local, REV 13), out below
+   `NEUTRAL_M_SPEED × 0.8` (0.4 m/s) without propulsive drive, back in at
+   `NEUTRAL_M_SPEED × 1.2` (0.6 m/s) or on any propulsive command (the launch).
+   Deterministic, no blend. Regression: `clutch_seam_hysteresis_kills_boundary_chatter`
+   — a forced ±0.05 oscillation around the old 0.5 threshold produces ZERO regime
+   flips; only genuine excursions past the separated thresholds transition, once each.
+4. **Validation lower bounds (Medium).** The solver's numeric assumptions are now spec-
+   protected: `inertia_kgm2 ∈ [0.1, 100]` (the coupling divides by J),
+   `clutch_capacity_nm ∈ [100, 50 000]`, `idle_rpm ≥ 300` (finding 2's floor), and —
+   with a transmission declared — `powertrain.inertia ≥ 1.0` (the lock denominator's
+   `k²/I_m` term; the generic finite/> 0 check admitted 1e-30). Negative cases for each.
+
+All gates re-measured after the fixes — deltas are noise: crest 8.1 → 8.2 s, driven
+readout 2345 → 2343 rpm, ramp launch slip 0.155 → 0.154 m/s; coast 12.2 s, brake
+2.31 s, pivots 0.637/0.1314 rad/s, spin-up 0.95 s (crank 908 → 2064 rpm), climb
+monotone [1..8], top speed 10.49 m/s, slope park exact, Governor parity bit-identical —
+all unchanged.
+
 ## Ranked recommendation
 
 1. **Tiger: fixed-radius, geared regenerative model behind the joint transmission seam.** Historically characteristic, fixes high-speed sluggishness, and derives stately pivot behavior from ratios and power.
