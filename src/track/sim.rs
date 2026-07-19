@@ -245,27 +245,8 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
             tr.gearbox.forward_speeds_kmh.len(),
             tr.gearbox.reverse_speeds_kmh.len()
         );
-        TransmissionParams::from_authoring(&transmission::TransmissionAuthoring {
-            idle_rpm: tr.engine.idle_rpm,
-            governed_rpm: tr.engine.governed_rpm,
-            rated_rpm: tr.engine.rated_rpm,
-            torque_nm: &tr.engine.torque_curve,
-            forward_speeds_kmh: &tr.gearbox.forward_speeds_kmh,
-            reverse_speeds_kmh: &tr.gearbox.reverse_speeds_kmh,
-            shift_up_rpm: tr.gearbox.shift_up_rpm,
-            shift_down_rpm: tr.gearbox.shift_down_rpm,
-            steer_radii_m: &tr.steering.radii,
-            steer_capacity_n: tr.steering.capacity,
-            recirculation: tr.steering.recirculation,
-            brake_capacity_n: tr.brake_force,
-            drag_fraction: tr.engine.drag_fraction,
-            engine_inertia_kgm2: tr.engine.inertia_kgm2,
-            clutch_capacity_nm: tr.engine.clutch_capacity_nm,
-            shift_secs: tr.gearbox.shift_secs,
-            shift_addressing: tr.gearbox.shift_addressing,
-            sprocket_radius_m: sprocket_r,
-            half_tread_m: spec.plane_x,
-        })
+        tr.params(sprocket_r, spec.plane_x, spec.powertrain.inertia)
+            .expect("TankSpec transmission was validated before TrackGear construction")
     });
 
     commands.insert_resource(TrackGear {

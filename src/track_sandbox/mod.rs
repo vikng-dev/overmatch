@@ -415,7 +415,9 @@ pub fn plugin(app: &mut App) {
     // before the force systems — its phase boundaries land on exact ticks. Without both, frame
     // pacing leaked into recorded trajectories (~mm-level hull drift between identical runs) and
     // A/B gates could only ever be statistical.
-    if let Some(scenario) = harness::parse_env() {
+    let harness_scenario =
+        harness::parse_env().unwrap_or_else(|err| panic!("invalid SANDBOX_HARNESS: {err}"));
+    if let Some(scenario) = harness_scenario {
         app.insert_resource(scenario)
             .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
                 std::time::Duration::from_micros(15_625), // exactly 1/64 s

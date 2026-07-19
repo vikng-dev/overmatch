@@ -358,57 +358,61 @@ pub(super) struct T34Transmission(pub(super) TransmissionParams);
 
 impl Default for T34Transmission {
     fn default() -> Self {
-        Self(TransmissionParams::from_authoring(&TransmissionAuthoring {
-            idle_rpm: 600.0,
-            governed_rpm: 1800.0,
-            rated_rpm: 1800.0,
-            // V-2 diesel: peak ~2200 N·m @ 1100 (INFERRED from the 500 hp/1800 rating);
-            // torque runs out at the governed 1800 so the top-speed root is emergent.
-            torque_nm: &[
-                (600.0, 1650.0),
-                (1100.0, 2200.0),
-                (1700.0, 1950.0),
-                (1800.0, 0.0),
-            ],
-            // Per-gear top speeds @ 1800 rpm (km/h): geometric-ish ladder to the historical
-            // ~52 km/h top; gearing-implied top speed = 14.5 m/s (the straight-line gate).
-            forward_speeds_kmh: &[8.0, 12.7, 20.4, 32.6, 52.2],
-            reverse_speeds_kmh: &[8.0],
-            shift_up_rpm: 1700.0,
-            shift_down_rpm: 950.0,
-            // (tight, wide) per gear: tight ∝ 1/G from 3.0 m; wide = tight × 2.958.
-            steer_radii_m: &[
-                (3.0, 8.9),
-                (4.8, 14.2),
-                (7.7, 22.8),
-                (12.3, 36.4),
-                (19.7, 58.3),
-            ],
-            // Steering-member PER-OUTPUT capacity (the fixed convention: the difference
-            // axis F_s carries 2× this — 480 kN → 600 kN·m of pivot moment vs the lab's
-            // ~224 kN·m scrub). The phase-2.5 sizing (2× the per-track force cap) is kept
-            // verbatim: it was chosen under the old F_s-bound reading, and under the fixed
-            // convention it simply strengthens the lab's steering authority — the T-34
-            // gates re-measure it. Generous for a lab vehicle, all INFERRED.
-            steer_capacity_n: 240_000.0,
-            recirculation: 0.9,
-            // Brake ≈ traction limit (μ·W/2 ≈ 117 kN) — the sound sizing rule.
-            brake_capacity_n: 120_000.0,
-            // Compression braking ~25% of peak torque (diesel 20–30% band) — INFERRED.
-            drag_fraction: 0.25,
-            // Crank + flywheel + clutch inertia (kg·m²) — the stage-B crank state. Same
-            // class-scaling band as the Tiger authoring (2.5–6, flywheel-dominant),
-            // mid-band 4.0 — INFERRED lab value.
-            engine_inertia_kgm2: 4.0,
-            // Main clutch capacity ≈ 1.3 × the 2200 N·m peak — the usual dry-clutch
-            // sizing margin, INFERRED lab value.
-            clutch_capacity_nm: 2860.0,
-            // Manual crash-box shift, drive uncoupled ~0.3 s — INFERRED.
-            shift_secs: 0.31,
-            shift_addressing: ShiftAddressing::Sequential,
-            sprocket_radius_m: DRIVE_RADIUS + TRACK_THICKNESS / 2.0,
-            half_tread_m: TRACK_HALF_WIDTH,
-        }))
+        Self(
+            TransmissionParams::from_authoring(&TransmissionAuthoring {
+                idle_rpm: 600.0,
+                governed_rpm: 1800.0,
+                rated_rpm: 1800.0,
+                // V-2 diesel: peak ~2200 N·m @ 1100 (INFERRED from the 500 hp/1800 rating);
+                // torque runs out at the governed 1800 so the top-speed root is emergent.
+                torque_nm: &[
+                    (600.0, 1650.0),
+                    (1100.0, 2200.0),
+                    (1700.0, 1950.0),
+                    (1800.0, 0.0),
+                ],
+                // Per-gear top speeds @ 1800 rpm (km/h): geometric-ish ladder to the historical
+                // ~52 km/h top; gearing-implied top speed = 14.5 m/s (the straight-line gate).
+                forward_speeds_kmh: &[8.0, 12.7, 20.4, 32.6, 52.2],
+                reverse_speeds_kmh: &[8.0],
+                shift_up_rpm: 1700.0,
+                shift_down_rpm: 950.0,
+                // (tight, wide) per gear: tight ∝ 1/G from 3.0 m; wide = tight × 2.958.
+                steer_radii_m: &[
+                    (3.0, 8.9),
+                    (4.8, 14.2),
+                    (7.7, 22.8),
+                    (12.3, 36.4),
+                    (19.7, 58.3),
+                ],
+                // Steering-member PER-OUTPUT capacity (the fixed convention: the difference
+                // axis F_s carries 2× this — 480 kN → 600 kN·m of pivot moment vs the lab's
+                // ~224 kN·m scrub). The phase-2.5 sizing (2× the per-track force cap) is kept
+                // verbatim: it was chosen under the old F_s-bound reading, and under the fixed
+                // convention it simply strengthens the lab's steering authority — the T-34
+                // gates re-measure it. Generous for a lab vehicle, all INFERRED.
+                steer_capacity_n: 240_000.0,
+                recirculation: 0.9,
+                // Brake ≈ traction limit (μ·W/2 ≈ 117 kN) — the sound sizing rule.
+                brake_capacity_n: 120_000.0,
+                // Compression braking ~25% of peak torque (diesel 20–30% band) — INFERRED.
+                drag_fraction: 0.25,
+                // Crank + flywheel + clutch inertia (kg·m²) — the stage-B crank state. Same
+                // class-scaling band as the Tiger authoring (2.5–6, flywheel-dominant),
+                // mid-band 4.0 — INFERRED lab value.
+                engine_inertia_kgm2: 4.0,
+                // Main clutch capacity ≈ 1.3 × the 2200 N·m peak — the usual dry-clutch
+                // sizing margin, INFERRED lab value.
+                clutch_capacity_nm: 2860.0,
+                belt_inertia: BELT_INERTIA,
+                // Manual crash-box shift, drive uncoupled ~0.3 s — INFERRED.
+                shift_secs: 0.31,
+                shift_addressing: ShiftAddressing::Sequential,
+                sprocket_radius_m: DRIVE_RADIUS + TRACK_THICKNESS / 2.0,
+                half_tread_m: TRACK_HALF_WIDTH,
+            })
+            .expect("T-34 sandbox transmission authoring must be semantically valid"),
+        )
     }
 }
 
