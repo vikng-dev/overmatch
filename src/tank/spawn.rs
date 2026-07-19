@@ -111,6 +111,16 @@ pub(crate) fn load_tank_assets(mut commands: Commands, asset_server: Res<AssetSe
     });
 }
 
+fn tank_transmission(spec: &TankSpec) -> TankTransmission {
+    let params = spec
+        .track
+        .transmission_params()
+        .expect("TankSpec transmission was validated before tank construction");
+    params
+        .as_ref()
+        .map_or_else(TankTransmission::for_governor, TankTransmission::from_spec)
+}
+
 /// Spawn a root and its complete local simulation body in one command batch.
 pub(crate) fn spawn_complete_tank<B: Bundle>(
     commands: &mut Commands,
@@ -126,7 +136,7 @@ pub(crate) fn spawn_complete_tank<B: Bundle>(
         TrackGripElements::for_links(content.spec().track.link_count),
         // The joint transmission's local state (phase 2.5) — spawn-constructed like the
         // element slabs; inert on every MP path (only the offline gate reads it).
-        TankTransmission::default(),
+        tank_transmission(content.spec()),
         root_bundle,
     ));
     root.observe(bind_tank_view);
@@ -150,7 +160,7 @@ pub(crate) fn attach_replicated_tank_body<B: Bundle>(
             presentation.root_bundle(),
             // Same spawn-sized element slabs as `spawn_complete_tank` — see the note there.
             TrackGripElements::for_links(content.spec().track.link_count),
-            TankTransmission::default(),
+            tank_transmission(content.spec()),
             root_bundle,
         ))
         .observe(bind_tank_view);

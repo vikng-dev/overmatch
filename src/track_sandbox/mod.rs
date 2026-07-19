@@ -320,7 +320,13 @@ struct Hull;
 struct FreeFlyCam;
 
 pub fn plugin(app: &mut App) {
-    app.add_plugins(PhysicsPlugins::default().set(PhysicsInterpolationPlugin::interpolate_all()))
+    let transmission = T34Transmission::default();
+    let transmission_state = TransState(crate::track::transmission::TransmissionState::from_spec(
+        &transmission.0,
+    ));
+    app.insert_resource(transmission)
+        .insert_resource(transmission_state)
+        .add_plugins(PhysicsPlugins::default().set(PhysicsInterpolationPlugin::interpolate_all()))
         // Registers the `PhysicsGizmos` group for the collider-wireframe layer (`0`); starts
         // disabled in `configure_collider_gizmos`.
         .add_plugins(PhysicsDebugPlugin)
@@ -330,9 +336,7 @@ pub fn plugin(app: &mut App) {
         .init_resource::<BeltGripElements>()
         .init_resource::<GripSwitch>()
         .init_resource::<TransSwitch>()
-        .init_resource::<TransState>()
         .init_resource::<TransTelemetry>()
-        .init_resource::<T34Transmission>()
         .init_resource::<Paused>()
         .init_resource::<ResetSpot>()
         .init_resource::<RawDriveInput>()
@@ -536,7 +540,7 @@ struct TransSwitch(crate::track::transmission::TransmissionMode);
 /// The joint transmission's state (gear, shift countdown, steering detent, direction) — the
 /// sandbox analogue of the game's `TankTransmission` component. Reset with the rig and on
 /// every mode flip (a fresh adapter never inherits another's gear).
-#[derive(Resource, Default)]
+#[derive(Resource)]
 struct TransState(crate::track::transmission::TransmissionState);
 
 /// Last tick's transmission report (gear/rpm/detent/power scale) — harness `tr` rows + the
@@ -549,6 +553,7 @@ struct TransTelemetry(Option<crate::track::transmission::TransmissionReport>);
 fn toggle_trans_mode(
     keys: Res<ButtonInput<KeyCode>>,
     mut switch: ResMut<TransSwitch>,
+    transmission: Res<T34Transmission>,
     mut state: ResMut<TransState>,
 ) {
     use crate::track::transmission::TransmissionMode;
@@ -560,7 +565,9 @@ fn toggle_trans_mode(
         TransmissionMode::Hybrid => TransmissionMode::FixedRadii,
         TransmissionMode::FixedRadii => TransmissionMode::Governor,
     };
-    *state = TransState::default();
+    *state = TransState(crate::track::transmission::TransmissionState::from_spec(
+        &transmission.0,
+    ));
     info!("transmission → {}", switch.0.label());
 }
 
@@ -1235,6 +1242,7 @@ fn reset_rig(
     mut dynamics: ResMut<SideDynamics>,
     mut grip_state: ResMut<BeltGrip>,
     mut grip_elements: ResMut<BeltGripElements>,
+    transmission: Res<T34Transmission>,
     mut trans_state: ResMut<TransState>,
     mut wheels: Query<&mut Suspension>,
 ) {
@@ -1259,7 +1267,9 @@ fn reset_rig(
     // Pre-sized, never `default()` — the fixed-size invariant (see `size_grip_elements`).
     *grip_elements = BeltGripElements::sized(pin_belt.count);
     // A fresh rig is in 1st gear with no shift in flight.
-    *trans_state = TransState::default();
+    *trans_state = TransState(crate::track::transmission::TransmissionState::from_spec(
+        &transmission.0,
+    ));
     // Stale cosmetic wheel lift survives the teleport otherwise: for the first ~100 ms the
     // conform solves against phantom raised wheel circles while the hull settles.
     for mut susp in &mut wheels {

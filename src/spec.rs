@@ -224,6 +224,21 @@ pub struct TrackSpec {
     pub support: SupportSpec,
 }
 
+impl TrackSpec {
+    /// Build the declared joint transmission through the same validated authoring seam used by
+    /// spawn-time state construction and the runtime track gear.
+    pub(crate) fn transmission_params(&self) -> Result<Option<TransmissionParams>, BevyError> {
+        let sprocket_radius = self.pitch * self.sprocket.teeth as f32 / std::f32::consts::TAU;
+        self.powertrain
+            .transmission
+            .as_ref()
+            .map(|transmission| {
+                transmission.params(sprocket_radius, self.plane_x, self.powertrain.inertia)
+            })
+            .transpose()
+    }
+}
+
 /// Per-track powertrain: constant-power engine curve under a low-speed force cap, with a
 /// governor chasing `command × max_speed` against the reflected belt+drivetrain inertia.
 #[derive(Deserialize, Clone)]
@@ -554,12 +569,7 @@ impl TankSpec {
         }
         // The declared transmission is validated through the same fallible constructor used by
         // synchronous sim construction, the sandbox, and its arithmetic tests.
-        if let Some(transmission) = &t.powertrain.transmission {
-            let sprocket_radius = t.pitch * t.sprocket.teeth as f32 / std::f32::consts::TAU;
-            transmission
-                .params(sprocket_radius, t.plane_x, t.powertrain.inertia)
-                .map(|_| ())?;
-        }
+        t.transmission_params().map(|_| ())?;
         for (name, weapon) in &self.weapons {
             match weapon.fire_mode {
                 FireMode::Single { reload_secs } => {

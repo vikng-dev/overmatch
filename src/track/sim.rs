@@ -99,10 +99,20 @@ pub struct TransmissionFeelTest(pub TransmissionMode);
 /// serialized, never hashed (REV 13; the wire promotion is REV 14 — ω_e rides that later
 /// netcode arc with the rest of the list, since a slipping clutch makes it underivable
 /// from the belt). MP never reads or writes it — only the offline composition's
-/// non-governor branch of [`apply_track_forces`] touches it. The module-level REV-14 rider names
-/// every field that must eventually join rollback together; no wire field is added here.
-#[derive(Component, Clone, Copy, PartialEq, Debug, Default)]
+/// non-governor branch of [`apply_track_forces`] touches it. The design doc's authoritative
+/// REV-14 inventory classifies every inner field; no wire field is added here.
+#[derive(Component, Clone, Copy, PartialEq, Debug)]
 pub struct TankTransmission(pub TransmissionState);
+
+impl TankTransmission {
+    pub fn from_spec(tp: &TransmissionParams) -> Self {
+        Self(TransmissionState::from_spec(tp))
+    }
+
+    pub(crate) fn for_governor() -> Self {
+        Self(TransmissionState::for_governor())
+    }
+}
 
 /// The static-friction state (static-friction-design.md, ADR-0026): per-side elastic grip
 /// resultants (N), `[left, right] × [longitudinal, lateral/ρ]`. Generalized forces, NOT
@@ -235,7 +245,7 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
     // The declared transmission, derived from the authored tables against the spec's OWN
     // sprocket radius (tiger-transmission-data.md rule: speeds are the anchors, reductions
     // derive, so the ladder survives the 19-vs-20-tooth discrepancy).
-    let trans = spec.powertrain.transmission.as_ref().map(|tr| {
+    if let Some(tr) = &spec.powertrain.transmission {
         // The authored architecture is informational until the offline default is
         // spec-driven (TransmissionFeelTest is the interim dial) — log it so a feel session
         // states what the vehicle declares.
@@ -245,9 +255,10 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
             tr.gearbox.forward_speeds_kmh.len(),
             tr.gearbox.reverse_speeds_kmh.len()
         );
-        tr.params(sprocket_r, spec.plane_x, spec.powertrain.inertia)
-            .expect("TankSpec transmission was validated before TrackGear construction")
-    });
+    }
+    let trans = spec
+        .transmission_params()
+        .expect("TankSpec transmission was validated before TrackGear construction");
 
     commands.insert_resource(TrackGear {
         loop_pts,

@@ -122,15 +122,55 @@ Minimal scheduling change:
 2. Solve the joint transmission once.
 3. Integrate both speeds simultaneously; advect both existing phases.
 
-Constraint forces are algebraic and need not replicate. REV 14 should add only genuine path-dependent transmission state:
+Constraint forces are algebraic and need not replicate. REV 14 should add only genuine
+path-dependent transmission state.
 
-- selected gear;
-- shift countdown/phase;
-- steering detent for fixed-radius boxes;
-- clutch lock/slip state if modeled;
-- engine speed only if it cannot be derived while shifting.
+### Authoritative REV-14 transmission-state inventory
 
-That state must be constructed from tank data at spawn, alongside the existing rollback state.
+This section supersedes the former five-bullet state sketch. The authoritative inventory is the
+current `TransmissionState` shape: **16 fields DERIVED by exhaustive struct inventory**, all
+`REPLICATE-EXACT`; `DERIVE` and `LOCAL-VIEW` each contain **0 fields DERIVED**. `f32` fields require
+their raw bits, and discrete fields require their exact value. The component remains local,
+unhashed REV-13 state in this batch; these classifications specify its later REV-14 registration.
+
+`REPLICATE-EXACT`:
+
+- `gear` — prior shift decisions select it; the instantaneous belts do not reveal the engaged ratio.
+- `shift_ticks` — elapsed progress through an interruption window is history, not a belt sample.
+- `steer_step` — detent hysteresis retains which threshold was crossed most recently.
+- `reverse` — the engaged ladder depends on a prior near-standstill direction swap.
+- `park` — zero-input near-rest engagement and later command release form a persistent latch.
+- `last_shift_dir` — the last committed band-shift direction is historical anti-hunting memory.
+- `dwell_ticks` — remaining reversal dwell depends on the prior shift time and elapsed decision ticks.
+- `omega_e` — crank inertia and clutch slip integrate an independent speed that the belts cannot
+  reconstruct. The in-band `0.0` sentinel is removed: `from_spec` initializes exact idle speed at
+  spawn.
+- `clutch_out` — the coupling seam is hysteretic, so an in-band belt speed admits either latch state.
+- `demand_n` — raw `f32` EMA history cannot be reconstructed from the current reaction sample.
+- `demand_initialized` — exact first-sample EMA marker: its contact-derived seed is unavailable at
+  spawn, so REV 14 replicates and hashes this discrete bool rather than changing seeding semantics.
+- `grade_confirm_ticks` — the leaky deficit-evidence count depends on prior reserve samples.
+- `grade_target` — a sequential cascade retains its selected final gear across paid windows.
+- `scheduler` — `Normal`, grade-shift endpoints, hill hold, and grade limit encode prior decisions.
+- `hill_hold` — anti-rollback engagement/release is a persistent capability-derived latch.
+- `hold_reengage_ticks` — the remaining post-release cooldown depends on the release tick history.
+
+`DERIVE`: none. Mean/difference coordinates, shaft rpm, reserve, constraint forces, brake forces,
+and readouts are algebraic from exact state plus the current belt/input/spec sample and are never
+replicated as transmission state.
+
+`LOCAL-VIEW`: none. HUD/readout values are ephemeral consumers, not sibling per-tank transmission
+state. `TankTransmission` is only the ECS wrapper around `TransmissionState`; crank state is not
+stored separately.
+
+The stale sketch omitted `reverse`, `park`, `last_shift_dir`, `dwell_ticks`, `clutch_out`,
+`demand_n`, `demand_initialized`, `grade_confirm_ticks`, `grade_target`, `scheduler`, `hill_hold`,
+and `hold_reengage_ticks`; it also left engine speed conditional instead of definitively classifying
+`omega_e` as exact state.
+
+The complete state is constructed from tank data at spawn, alongside the existing rollback state.
+`demand_initialized = false` is intentional complete state: only the first owned contact sample can
+seed the EMA directly.
 
 ## 3. Braking law
 
@@ -442,9 +482,9 @@ finite, positive, J ≤ 100, capacity ≤ 50 000. Spec pin test updated delibera
    line shape unchanged).
 
 **REV-14 rider.** ω_e is LOCAL state under REV 13 (not replicated, not hashed). Its wire
-registration rides the later netcode arc with the rest of the REV-14 list: it is sim
-state a rollback replay must restore — NOT derivable from the belt, because the clutch
-slips.
+registration follows the authoritative §2 inventory: it is exact sim state a rollback replay must
+restore — NOT derivable from the belt, because the clutch slips. Spawn now initializes it directly
+to the authored idle speed; no in-band zero sentinel remains.
 
 **Measured gates (all re-derived; before → after on the declared Tiger data):**
 
@@ -503,9 +543,10 @@ stage-A regression surface, and the REV-13 boundary all held; four findings fixe
    back to idle every tick (traced 600 → −3130 → 600 rpm oscillation). Fixed: (a) HARD
    end-of-tick clamp `ω_e ≥ ω_floor` — policy-honest, the floor IS the no-stall policy
    while stall death stays unmodeled (classification table updated; also self-heals NaN
-   via f32::max); (b) the sentinel tightened to exactly `== 0.0` — it now fires at true
-   spawn only — with spec validation `idle_rpm ≥ 300` (100 band + 100 margin +
-   headroom) keeping `ω_floor > 0` always.
+   via f32::max); (b) at that review stage the sentinel tightened to exactly `== 0.0`, with
+   spec validation `idle_rpm ≥ 300` (100 band + 100 margin + headroom) keeping
+   `ω_floor > 0` always. The REV-14 prerequisite cleanup later superseded (b): spawn constructs
+   `omega_e` directly at authored idle and the tick-path sentinel branch no longer exists.
 3. **Engagement seam chatter (Medium).** A boundary creeper sawtoothed engage/declutch
    on the single NEUTRAL_M_SPEED line. The seam is now a LATCH with detent-style
    hysteresis: `TransmissionState.clutch_out` (local, REV 13), out below
@@ -574,10 +615,10 @@ reserve law. It releases only when post-power-gate coupling force exceeds `D + m
 brake envelope retained for that handoff tick. Command release or reverse intent clears it. If no
 gear has non-negative reserve, `GRADE LIMIT` remains exposed and the declared brakes stay applied.
 
-**REV-14 rider.** `demand_n`, its spawn seed, `grade_confirm_ticks`, held target,
-`SchedulerState`, and `hill_hold` are local `TransmissionState` under REV 13. They are sim state a
-future rollback replay must restore alongside gear/shift/crank; none is derivable from an
-instantaneous belt sample. No replication field was added in this stage.
+**REV-14 rider.** The authoritative §2 inventory supersedes this stage-local sketch. In particular,
+`demand_initialized` remains the intentional first-contact-sample marker because its seed is
+unavailable at spawn; changing it would change the EMA. All listed state remains local under REV 13,
+and no replication field was added in this stage.
 
 **Coupling seam only.** A future torque converter belongs at the existing `clutch_coupling` seam
 and would author its own characteristic. Stage C does not implement one.

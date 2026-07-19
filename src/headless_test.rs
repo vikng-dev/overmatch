@@ -837,6 +837,15 @@ fn booted_offline_sim(mode: crate::track::transmission::TransmissionMode) -> (Bo
     (app, tank)
 }
 
+fn fresh_tank_transmission(app: &BootedSim) -> crate::track::sim::TankTransmission {
+    let params = app
+        .world()
+        .resource::<crate::track::sim::TrackGear>()
+        .trans()
+        .expect("the Tiger declares a transmission");
+    crate::track::sim::TankTransmission::from_spec(params)
+}
+
 /// Write the drive command (level state, re-asserted every tick like the other headless
 /// drives — no device gather exists here) and advance one exact 64 Hz tick.
 fn drive_tick(app: &mut App, tank: Entity, throttle: f32, steer: f32) {
@@ -1328,14 +1337,14 @@ fn synthetic_30_deg_park_breaches_to_dynamic_braking() {
          demand {demand:.0} N)"
     );
 
+    let fresh_transmission = fresh_tank_transmission(&app);
     let start_position = {
         let mut e = app.world_mut().entity_mut(tank);
         e.get_mut::<avian3d::prelude::Position>().unwrap().0 = Vec3::new(14.0, 3.4, -40.0);
         e.get_mut::<avian3d::prelude::Rotation>().unwrap().0 = course_rotation;
         e.get_mut::<avian3d::prelude::LinearVelocity>().unwrap().0 = Vec3::ZERO;
         e.get_mut::<avian3d::prelude::AngularVelocity>().unwrap().0 = Vec3::ZERO;
-        *e.get_mut::<crate::track::sim::TankTransmission>().unwrap() =
-            crate::track::sim::TankTransmission::default();
+        *e.get_mut::<crate::track::sim::TankTransmission>().unwrap() = fresh_transmission;
         let mut drive = e.get_mut::<crate::track::sim::TrackDrive>().unwrap();
         drive.throttle = 0.0;
         drive.steer = 0.0;
@@ -1574,7 +1583,7 @@ struct GradeApproachResult {
 fn run_grade_approach_20_deg(
     addressing: crate::track::transmission::ShiftAddressing,
 ) -> GradeApproachResult {
-    use crate::track::transmission::{SchedulerState, TransmissionMode, TransmissionState};
+    use crate::track::transmission::{SchedulerState, TransmissionMode};
     let (mut app, tank) = booted_offline_sim(TransmissionMode::FixedRadii);
     app.world_mut()
         .resource_mut::<crate::track::sim::TrackGear>()
@@ -1584,6 +1593,8 @@ fn run_grade_approach_20_deg(
 
     let rot = Quat::from_rotation_x(20.0_f32.to_radians());
     let approach_speed = 4.0;
+    let mut transmission = fresh_tank_transmission(&app);
+    transmission.0.gear = 6;
     {
         let mut e = app.world_mut().entity_mut(tank);
         e.get_mut::<avian3d::prelude::Position>().unwrap().0 = Vec3::new(0.0, 1.50, -37.0);
@@ -1596,11 +1607,7 @@ fn run_grade_approach_20_deg(
         drive.steer = 0.0;
         drive.sides[0].speed = approach_speed;
         drive.sides[1].speed = approach_speed;
-        *e.get_mut::<crate::track::sim::TankTransmission>().unwrap() =
-            crate::track::sim::TankTransmission(TransmissionState {
-                gear: 6,
-                ..Default::default()
-            });
+        *e.get_mut::<crate::track::sim::TankTransmission>().unwrap() = transmission;
     }
 
     let z0 = -37.0f32;
@@ -1738,7 +1745,7 @@ struct StageCReplayTick {
 /// Sequential F6 approach pays adjacent windows, accumulating the demand EMA and confirmation
 /// evidence, retaining a target, and entering hill hold before it crests.
 fn scripted_stage_c_replay_run() -> Vec<StageCReplayTick> {
-    use crate::track::transmission::{ShiftAddressing, TransmissionMode, TransmissionState};
+    use crate::track::transmission::{ShiftAddressing, TransmissionMode};
 
     let (mut app, tank) = booted_offline_sim(TransmissionMode::FixedRadii);
     app.world_mut()
@@ -1749,6 +1756,8 @@ fn scripted_stage_c_replay_run() -> Vec<StageCReplayTick> {
 
     let rot = Quat::from_rotation_x(20.0_f32.to_radians());
     let approach_speed = 4.0;
+    let mut transmission = fresh_tank_transmission(&app);
+    transmission.0.gear = 6;
     {
         let mut e = app.world_mut().entity_mut(tank);
         e.get_mut::<avian3d::prelude::Position>().unwrap().0 = Vec3::new(0.0, 1.50, -37.0);
@@ -1761,11 +1770,7 @@ fn scripted_stage_c_replay_run() -> Vec<StageCReplayTick> {
         drive.steer = 0.0;
         drive.sides[0].speed = approach_speed;
         drive.sides[1].speed = approach_speed;
-        *e.get_mut::<crate::track::sim::TankTransmission>().unwrap() =
-            crate::track::sim::TankTransmission(TransmissionState {
-                gear: 6,
-                ..Default::default()
-            });
+        *e.get_mut::<crate::track::sim::TankTransmission>().unwrap() = transmission;
     }
 
     let mut ticks = Vec::with_capacity(512);
@@ -1853,7 +1858,7 @@ fn stage_c_slope_replay_is_bit_exact_every_tick() {
 /// uphill travel without more than the established 5 cm DERIVED static-compliance gate bound.
 #[test]
 fn hill_hold_20_deg_engages_and_pulls_away_tiger() {
-    use crate::track::transmission::{SchedulerState, TransmissionMode, TransmissionState};
+    use crate::track::transmission::{SchedulerState, TransmissionMode};
     let (mut app, tank) = booted_offline_sim(TransmissionMode::FixedRadii);
     {
         let mut e = app.world_mut().entity_mut(tank);
@@ -1872,13 +1877,11 @@ fn hill_hold_20_deg_engages_and_pulls_away_tiger() {
         .expect("tank has position")
         .0
         .z;
+    let mut transmission = fresh_tank_transmission(&app);
+    transmission.0.gear = 5;
     {
         let mut e = app.world_mut().entity_mut(tank);
-        *e.get_mut::<crate::track::sim::TankTransmission>().unwrap() =
-            crate::track::sim::TankTransmission(TransmissionState {
-                gear: 5,
-                ..Default::default()
-            });
+        *e.get_mut::<crate::track::sim::TankTransmission>().unwrap() = transmission;
         let mut drive = e.get_mut::<crate::track::sim::TrackDrive>().unwrap();
         drive.throttle = 1.0;
         drive.sides[0].speed = 0.0;
@@ -1940,7 +1943,7 @@ fn hill_hold_20_deg_engages_and_pulls_away_tiger() {
 /// so a future fixture cannot mask another engage/release capability mismatch.
 #[test]
 fn real_tiger_30_deg_reports_capability_truthfully() {
-    use crate::track::transmission::{SchedulerState, TransmissionMode, TransmissionState};
+    use crate::track::transmission::{SchedulerState, TransmissionMode};
     let (mut app, tank) = booted_offline_sim(TransmissionMode::FixedRadii);
     let mass = app.world().resource::<TankBlueprint>().spec.mass;
     let demand = mass * 9.81 * 30.0_f32.to_radians().sin();
@@ -1982,10 +1985,10 @@ fn real_tiger_30_deg_reports_capability_truthfully() {
         .get::<avian3d::prelude::Position>(tank)
         .expect("tank has position")
         .0;
+    let fresh_transmission = fresh_tank_transmission(&app);
     {
         let mut e = app.world_mut().entity_mut(tank);
-        *e.get_mut::<crate::track::sim::TankTransmission>().unwrap() =
-            crate::track::sim::TankTransmission(TransmissionState::default());
+        *e.get_mut::<crate::track::sim::TankTransmission>().unwrap() = fresh_transmission;
         let mut drive = e.get_mut::<crate::track::sim::TrackDrive>().unwrap();
         drive.throttle = 1.0;
         drive.sides[0].speed = 0.0;
@@ -2046,7 +2049,7 @@ fn real_tiger_30_deg_reports_capability_truthfully() {
 /// latched rescue, arrest the hull, and resume uphill travel.
 #[test]
 fn real_tiger_f8_30_deg_rollback_rescues_to_capable_gear() {
-    use crate::track::transmission::{SchedulerState, TransmissionMode, TransmissionState};
+    use crate::track::transmission::{SchedulerState, TransmissionMode};
     let (mut app, tank) = booted_offline_sim(TransmissionMode::FixedRadii);
     let course_rotation = Quat::from_rotation_x(30.0_f32.to_radians());
     let uphill = course_rotation * Vec3::NEG_Z;
@@ -2072,15 +2075,13 @@ fn real_tiger_f8_30_deg_rollback_rescues_to_capable_gear() {
         .filter(|side| !side.is_empty())
         .count();
     assert_eq!(grounded_sides, 2, "rollback fixture must start grounded");
+    let mut transmission = fresh_tank_transmission(&app);
+    transmission.0.gear = 8;
     {
         let mut e = app.world_mut().entity_mut(tank);
         e.get_mut::<avian3d::prelude::LinearVelocity>().unwrap().0 =
             -uphill * initial_rollback_speed;
-        *e.get_mut::<crate::track::sim::TankTransmission>().unwrap() =
-            crate::track::sim::TankTransmission(TransmissionState {
-                gear: 8,
-                ..Default::default()
-            });
+        *e.get_mut::<crate::track::sim::TankTransmission>().unwrap() = transmission;
         let mut drive = e.get_mut::<crate::track::sim::TrackDrive>().unwrap();
         drive.throttle = 1.0;
         drive.steer = 0.0;
@@ -2177,7 +2178,7 @@ fn real_tiger_f8_30_deg_rollback_rescues_to_capable_gear() {
 /// GRADE LIMIT rather than HILL HOLD and must continue downhill without a hidden holding force.
 #[test]
 fn synthetic_weak_powertrain_30_deg_rollback_reports_grade_limit() {
-    use crate::track::transmission::{SchedulerState, TransmissionMode, TransmissionState};
+    use crate::track::transmission::{SchedulerState, TransmissionMode};
     let (mut app, tank) = booted_offline_sim(TransmissionMode::FixedRadii);
     let course_rotation = Quat::from_rotation_x(30.0_f32.to_radians());
     let uphill = course_rotation * Vec3::NEG_Z;
@@ -2231,15 +2232,13 @@ fn synthetic_weak_powertrain_30_deg_rollback_reports_grade_limit() {
     );
 
     let initial_rollback_speed = 0.5;
+    let mut transmission = fresh_tank_transmission(&app);
+    transmission.0.gear = 8;
     let start_position = {
         let mut e = app.world_mut().entity_mut(tank);
         e.get_mut::<avian3d::prelude::LinearVelocity>().unwrap().0 =
             -uphill * initial_rollback_speed;
-        *e.get_mut::<crate::track::sim::TankTransmission>().unwrap() =
-            crate::track::sim::TankTransmission(TransmissionState {
-                gear: 8,
-                ..Default::default()
-            });
+        *e.get_mut::<crate::track::sim::TankTransmission>().unwrap() = transmission;
         let mut drive = e.get_mut::<crate::track::sim::TrackDrive>().unwrap();
         drive.throttle = 1.0;
         drive.steer = 0.0;
