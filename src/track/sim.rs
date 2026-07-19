@@ -17,7 +17,10 @@
 //!   slew, so thrust fades over ~1/[`super::drive::DRIVE_SLEW_PER_SECOND`] s — deliberate, the
 //!   same shaping as a released key, making capability loss/recovery feel mechanical.
 
-use avian3d::prelude::{Forces, Position, ReadRigidBodyForces, Rotation, WriteRigidBodyForces};
+use avian3d::prelude::{
+    ComputedCenterOfMass, Forces, Position, ReadRigidBodyForces, RigidBody, Rotation,
+    WriteRigidBodyForces,
+};
 use bevy::math::{Affine3A, Vec2};
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -75,12 +78,19 @@ pub struct TrackDriveSide {
 
 /// Startup-latched marker for the OFFLINE element-grip feel test (element-promotion-checklist.md
 /// Q1, phase 2): when present, [`apply_track_forces`] runs the per-element isotropic shear regime
-/// instead of the per-side aggregate. Inserted ONLY by the `--offline` composition
-/// (`crate::run_offline`) at process start — never by the net client, the net server, or the
-/// sandboxes — and never inserted or removed mid-session (regime flips would reinterpret hidden
-/// elastic state; see the checklist's mid-session-connection section).
+/// instead of the per-side aggregate. Inserted only by the `--offline` composition at process
+/// start; network compositions use [`ElementGripNetcode`] and sandboxes use neither. It is never
+/// inserted or removed mid-session because a regime flip would reinterpret hidden elastic state.
 #[derive(Resource, Default)]
 pub struct ElementGripFeelTest;
+
+/// Startup-latched marker for the network compositions' promoted per-element grip regime.
+/// The server inserts it once and simulates every dynamic authority tank; the client inserts it
+/// once but only its owner-predicted dynamic body uses the field (remote bodies remain static and
+/// interpolated). The ordinary offline composition does not insert it, preserving its aggregate
+/// behavior bit-for-bit; [`ElementGripFeelTest`] keeps the existing opt-in offline A/B path.
+#[derive(Resource, Default)]
+pub struct ElementGripNetcode;
 
 /// The OFFLINE transmission feel-test override: which drivetrain adapter [`apply_track_forces`]
 /// runs instead of the vehicle's declared architecture. Inserted ONLY by the `--offline`
@@ -111,12 +121,54 @@ impl TankTransmission {
 
 /// The static-friction state (static-friction-design.md, ADR-0026): per-side elastic grip
 /// resultants (N), `[left, right] × [longitudinal, lateral/ρ]`. Generalized forces, NOT
-/// world anchors. Owner-predicted, replicated, rolled back like [`TrackDrive`] — but a
-/// SEPARATE component because grip is measured in newtons and needs its own attributed
-/// rollback threshold. Hashed into the determinism trace (`hblt`).
+/// world anchors. Hashed into the determinism trace (`hblt`).
+///
+/// Off the wire as of REV 15: in element mode this is derived telemetry, and rolling it back from
+/// ordinary replication would create the forbidden correction-free loop when the undisclosed
+/// [`TrackGripElements`] differ. The aggregate offline force path remains untouched; Phase 4 decides
+/// whether its compatibility law is retired. [`TrackGripEffect`] is the reconciliation effect summary.
 #[derive(Component, Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct TrackGrip {
     pub sides: [[f32; 2]; 2],
+}
+
+/// Local per-tick rigid-body/belt effect of track traction. The force and torque already include
+/// every per-element damping contribution because they are accumulated from the final emitted
+/// traction applications. Locally rollback-historied so a server anchor can be compared at the
+/// tick that produced it rather than against the client's present.
+#[derive(Component, Clone, Copy, PartialEq, Debug, Default)]
+pub struct TrackGripEffect {
+    /// Total world-space traction force on the hull (N).
+    pub traction_force: Vec3,
+    /// Total world-space traction torque about the hull center of mass (N*m).
+    pub traction_torque: Vec3,
+    /// Longitudinal ground reaction on `[left, right]` belts (N).
+    pub belt_reaction: [f32; 2],
+    /// Coarse, quantized digest of the complete element field. Diagnostic/request evidence only;
+    /// it never triggers rollback without an exact checkpoint.
+    pub field_digest: u32,
+}
+
+/// Monotonic notification that an explicit hull impulse was applied this tick.
+///
+/// The server's rest-epoch detector consumes generation changes so recoil and projectile hits wake
+/// a parked field on the impulse tick. This is bookkeeping only: it is neither rollback state nor
+/// an input to the force law, and therefore cannot gate or alter local physics.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub(crate) struct TrackGripWake {
+    generation: u32,
+}
+
+impl TrackGripWake {
+    pub(crate) fn record_impulse(&mut self, impulse: Vec3) {
+        if impulse != Vec3::ZERO {
+            self.generation = self.generation.wrapping_add(1);
+        }
+    }
+
+    pub(crate) fn generation(self) -> u32 {
+        self.generation
+    }
 }
 
 /// Last tick's contact telemetry per side — viz/diagnostics ONLY (debug force arrows, the
@@ -125,19 +177,18 @@ pub struct TrackGrip {
 pub struct TrackContacts(pub [Vec<BeltContact>; 2]);
 
 /// The per-element grip state, `[left, right]` (one [`GripElements`] per side): one world-space
-/// shear vector + loss dwell per material link × lateral column. A plain LOCAL component —
-/// NOT registered in the net protocol, never serialized, never hashed (this is REV 13; the
-/// wire promotion is REV 14, element-netcode-design.md).
+/// shear vector + loss dwell per material link × lateral column. REV 15 transmits one exact
+/// owner-private initialization snapshot, then restores this component from local rollback history;
+/// sparse exact checkpoints provide later authoritative convergence.
 ///
 /// Constructed at tank spawn with both slabs pre-sized `link_count * 3`
-/// ([`Self::for_links`], called from the two root-construction paths in `tank::spawn`) — the
-/// REV-14 fixed-size invariant: `step_side` never resizes at runtime, because a runtime
+/// ([`Self::for_links`], called by the authoritative/shared root construction path) — the
+/// REV-15 fixed-size invariant: `step_side` never resizes at runtime, because a runtime
 /// rebuild silently erases strain a rollback replay would then trust. Attached to EVERY tank
-/// root (MP included): construction belongs to the one shared spawn path, sized synchronously
-/// from the same spec that sizes `TankSim`. MP never reads or writes it — `apply_track_forces`
-/// only touches it under the offline [`ElementGripFeelTest`] gate, so on the net client/server
-/// it is inert zeroed memory.
-#[derive(Component, Clone, Debug, Default, PartialEq)]
+/// authority root. A predicted joining replica waits for that exact fixed-size snapshot before its
+/// body attaches; interpolated remotes neither receive nor simulate the private field.
+#[derive(Component, Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[require(TrackGripEffect)]
 pub struct TrackGripElements {
     pub sides: [GripElements; 2],
 }
@@ -152,6 +203,41 @@ impl TrackGripElements {
             ],
         }
     }
+
+    /// Whether both fixed slabs match the spec-authored material-link count.
+    pub fn is_sized_for(&self, link_count: usize) -> bool {
+        let expected = link_count * 3;
+        self.sides
+            .iter()
+            .all(|side| side.strain.len() == expected && side.dwell.len() == expected)
+    }
+}
+
+/// Coarse field digest used by [`TrackGripEffect`] and the replicated anchor. Strain axes are
+/// projected to signed 8-bit bins across the force law's exact `[-K, K]` range before FNV-1a. This
+/// deliberately ignores sub-bin float noise; the exact checkpoint/hash path remains raw-bit exact.
+pub(crate) fn coarse_grip_digest(elements: &TrackGripElements) -> u32 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    let mut write = |byte: u8| {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    };
+    for (side_index, side) in elements.sides.iter().enumerate() {
+        write(side_index as u8);
+        for (element, (&strain, &dwell)) in side.strain.iter().zip(&side.dwell).enumerate() {
+            for byte in (element as u16).to_le_bytes() {
+                write(byte);
+            }
+            for axis in strain.to_array() {
+                let bin = (axis / super::forces::GRIP_SHEAR_MODULUS_M * 127.0)
+                    .round()
+                    .clamp(-127.0, 127.0) as i8;
+                write(bin.to_le_bytes()[0]);
+            }
+            write(dwell);
+        }
+    }
+    (hash ^ (hash >> 32)) as u32
 }
 
 /// The blueprint's running gear as force-station geometry, built once (single blueprint
@@ -175,6 +261,11 @@ impl TrackGear {
     /// and HUD legend consume it.
     pub fn trans(&self) -> Option<&TransmissionParams> {
         self.trans.as_ref()
+    }
+
+    /// Per-side reflected belt inertia used by the anchor's physical belt-speed error metric.
+    pub(crate) fn belt_inertia(&self) -> f32 {
+        self.params.inertia
     }
 
     /// Test-only variant fixture seam: headless gates may vary a declared transmission capability
@@ -301,6 +392,9 @@ fn apply_track_forces(
     // The offline element-grip gate (element-promotion-checklist.md Q1): present only in the
     // `--offline` composition. Read as `Option` so every other composition runs unchanged.
     feel: Option<Res<ElementGripFeelTest>>,
+    // Present only in network compositions. Dynamic authority/owner bodies use elements; static
+    // interpolated client bodies never do.
+    net_elements: Option<Res<ElementGripNetcode>>,
     // Offline-only adapter override. MP leaves it absent and follows `TrackGear::mode`, derived
     // from the spec; a missing transmission block selects the untouched Governor fallback.
     trans_feel: Option<Res<TransmissionFeelTest>>,
@@ -309,11 +403,14 @@ fn apply_track_forces(
         (
             &Position,
             &Rotation,
+            &ComputedCenterOfMass,
+            &RigidBody,
             Forces,
             &TankCommand,
             &mut TrackDrive,
             &mut TrackGrip,
             &mut TrackGripElements,
+            &mut TrackGripEffect,
             &mut TankTransmission,
             &mut TrackContacts,
             Option<&TankVolumes>,
@@ -333,11 +430,14 @@ fn apply_track_forces(
     for (
         pos,
         rot,
+        center_of_mass,
+        body,
         mut forces,
         command,
         mut drive,
         mut grip,
         mut grip_elements,
+        mut grip_effect,
         mut trans_state,
         mut contacts,
         tank_volumes,
@@ -369,6 +469,12 @@ fn apply_track_forces(
         let side_commands = shaped.side_commands();
 
         let affine = Affine3A::from_rotation_translation(rot.0, pos.0);
+        // avian3d 0.7 `ForcesItem` keeps this helper private; this is its version-pinned source
+        // expression (`query_data.rs`): position + rotation * local computed COM.
+        let center_of_mass = pos.0 + rot.0 * center_of_mass.0;
+        let elements_enabled =
+            feel.is_some() || (net_elements.is_some() && matches!(*body, RigidBody::Dynamic));
+        let mut effect = TrackGripEffect::default();
 
         // The JOINT drivetrain branch: MP selects the declared architecture; the offline-only
         // [`TransmissionFeelTest`] can override it. A spec-less vehicle or explicit Governor
@@ -407,11 +513,8 @@ fn apply_track_forces(
                     &gear.params,
                     oracle,
                     |p| forces.velocity_at_point(p),
-                    // Same element-regime gate as the legacy loop (offline-only resource).
-                    match &feel {
-                        Some(_) => Some(&mut grip_elements.sides[si]),
-                        None => None,
-                    },
+                    // Same startup-latched element-regime gate as the legacy loop.
+                    elements_enabled.then_some(&mut grip_elements.sides[si]),
                 );
                 reports[si] = report;
                 live[si] = ok;
@@ -431,6 +534,12 @@ fn apply_track_forces(
                 },
             );
             for (si, report) in reports.into_iter().enumerate() {
+                effect.belt_reaction[si] = report.belt_reaction;
+                for contact in &report.contacts {
+                    effect.traction_force += contact.traction;
+                    effect.traction_torque +=
+                        (contact.point - center_of_mass).cross(contact.traction);
+                }
                 for app in &report.apps {
                     forces.apply_force_at_point(app.force, app.point);
                 }
@@ -445,6 +554,8 @@ fn apply_track_forces(
                 grip.sides[si] = [report.state.grip.x, report.state.grip.y];
                 contacts.0[si] = report.contacts;
             }
+            effect.field_digest = coarse_grip_digest(&grip_elements);
+            *grip_effect = effect;
             continue;
         }
 
@@ -473,19 +584,17 @@ fn apply_track_forces(
                 &gear.params,
                 oracle,
                 |p| forces.velocity_at_point(p),
-                // The element-regime gate. SAFETY ARGUMENT (this branch is the whole REV-13
-                // story): `ElementGripFeelTest` is inserted ONLY by the offline composition
-                // (`run_offline`) — the net client, net server, and headless server never
-                // insert it, so on every MP path this expression is `None`, exactly the
-                // literal `None` that stood here before the gate existed: MP behavior is
-                // BIT-unchanged, and the unregistered `TrackGripElements` slabs are never
-                // read or mutated (they cannot enter prediction/rollback). The regime is
-                // startup-latched — never flipped mid-session (see the resource doc).
-                match &feel {
-                    Some(_) => Some(&mut grip_elements.sides[si]),
-                    None => None,
-                },
+                // Startup-latched regime selection. Offline defaults to the aggregate law unless
+                // its feel-test resource is present. Network compositions insert
+                // `ElementGripNetcode`; dynamic authority/owner bodies use elements while static
+                // interpolated remotes do not simulate their private field.
+                elements_enabled.then_some(&mut grip_elements.sides[si]),
             );
+            effect.belt_reaction[si] = report.belt_reaction;
+            for contact in &report.contacts {
+                effect.traction_force += contact.traction;
+                effect.traction_torque += (contact.point - center_of_mass).cross(contact.traction);
+            }
             // Apply in report order — accumulation order is part of determinism.
             for app in &report.apps {
                 forces.apply_force_at_point(app.force, app.point);
@@ -497,5 +606,7 @@ fn apply_track_forces(
             grip.sides[si] = [report.state.grip.x, report.state.grip.y];
             contacts.0[si] = report.contacts;
         }
+        effect.field_digest = coarse_grip_digest(&grip_elements);
+        *grip_effect = effect;
     }
 }

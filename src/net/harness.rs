@@ -240,11 +240,16 @@ pub(crate) struct PendingPerturbation {
 /// server applies, so the client's prediction (which never saw it coming) mispredicts and must
 /// roll back when the replicated `Position` disagrees.
 pub(crate) fn perturb_after_delay(
-    mut tanks: Query<(Entity, &PendingPerturbation, Forces)>,
+    mut tanks: Query<(
+        Entity,
+        &PendingPerturbation,
+        Forces,
+        Option<&mut crate::track::sim::TrackGripWake>,
+    )>,
     time: Res<Time<Virtual>>,
     mut commands: Commands,
 ) {
-    for (entity, pending, mut forces) in &mut tanks {
+    for (entity, pending, mut forces, wake) in &mut tanks {
         if time.elapsed() < pending.at {
             continue;
         }
@@ -256,7 +261,11 @@ pub(crate) fn perturb_after_delay(
         // (~1.1 m/tick) was tripping the snap detector on its own, misread as rollback oscillation
         // (see spike log).
         const IMPULSE: f32 = 171_000.0;
-        forces.apply_linear_impulse(Vec3::X * IMPULSE);
+        let impulse = Vec3::X * IMPULSE;
+        forces.apply_linear_impulse(impulse);
+        if let Some(mut wake) = wake {
+            wake.record_impulse(impulse);
+        }
         info!("server: {entity} perturbation impulse applied (forced rollback trigger)");
         commands.entity(entity).remove::<PendingPerturbation>();
     }

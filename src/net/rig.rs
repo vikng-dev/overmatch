@@ -5,27 +5,49 @@
 
 use avian3d::prelude::{Position, RigidBody, Rotation};
 use bevy::prelude::*;
+use lightyear::core::confirmed_history::ConfirmedHistory;
 use lightyear::frame_interpolation::{FrameInterpolate, FrameInterpolationPlugin};
 use lightyear::prelude::client::Remote;
 use lightyear::prelude::*;
 
 use super::protocol::NetTank;
 use crate::tank::{PendingTankAssets, Rig, TankSimSource, attach_replicated_tank_body};
-use crate::track::sim::TankTransmission;
+use crate::track::sim::{TankTransmission, TrackGripElements};
 
 pub(crate) fn plugin(app: &mut App) {
-    app.add_observer(upgrade_predicted_to_dynamic);
+    app.add_observer(queue_predicted_promotion)
+        .add_systems(Update, upgrade_predicted_to_dynamic);
     app.add_systems(
         FixedLast,
         enable_rollback_after_first_tick.run_if(not(is_in_rollback)),
     );
 }
 
+/// A late `Predicted` marker arrived on an already attached interpolated rig. Keep the body static
+/// until the same exact-field gate used by initial JIP attachment is satisfied.
+#[derive(Component)]
+struct PendingPredictedPromotion;
+
+fn replica_role_ready(
+    predicted: bool,
+    interpolated: bool,
+    grip_elements: Option<&TrackGripElements>,
+    link_count: usize,
+) -> bool {
+    (predicted || interpolated)
+        && (!predicted || grip_elements.is_some_and(|field| field.is_sized_for(link_count)))
+}
+
 /// Attach simulation from `TankSimSource` only after a replicated root has a valid pose.
 pub(crate) fn attach_replicated_rig(
     // Avoid registering Avian placeholder poses in rollback history.
     tanks: Query<
-        (Entity, Has<Predicted>),
+        (
+            Entity,
+            Has<Predicted>,
+            Has<Interpolated>,
+            Option<&TrackGripElements>,
+        ),
         (
             With<Remote>,
             With<NetTank>,
@@ -48,7 +70,18 @@ pub(crate) fn attach_replicated_rig(
     let Some(content) = source.get() else {
         return;
     };
-    for (entity, predicted) in &tanks {
+    for (entity, predicted, interpolated, grip_elements) in &tanks {
+        // Wait until Lightyear declares the replica's role. An owner may not enter its first fixed
+        // tick until the replicate-once exact field is present and sized; an interpolated remote
+        // deliberately receives no private element state.
+        if !replica_role_ready(
+            predicted,
+            interpolated,
+            grip_elements,
+            content.spec().track.link_count,
+        ) {
+            continue;
+        }
         let body = if predicted {
             RigidBody::Dynamic
         } else {
@@ -74,17 +107,23 @@ pub(crate) fn attach_replicated_rig(
 
 /// Enable rollback after one complete physics tick has prepared a newly attached or promoted body.
 fn enable_rollback_after_first_tick(
-    fresh: Query<Entity, (With<Rig>, With<NetTank>, With<DisableRollback>)>,
+    fresh: Query<(Entity, Has<Predicted>), (With<Rig>, With<NetTank>, With<DisableRollback>)>,
     mut commands: Commands,
 ) {
-    for entity in &fresh {
+    for (entity, predicted) in &fresh {
         info!("net: {entity} first physics tick complete — rollback enabled");
-        commands.entity(entity).remove::<DisableRollback>();
+        let mut entity_commands = commands.entity(entity);
+        entity_commands.remove::<DisableRollback>();
+        if predicted {
+            // The replicate-once value has seeded local PredictionHistory and survived the first
+            // complete physics tick. From here rollback must restore only that local history.
+            entity_commands.try_remove::<ConfirmedHistory<TrackGripElements>>();
+        }
     }
 }
 
-/// Promote a body when the independently replicated `Predicted` marker arrives late.
-fn upgrade_predicted_to_dynamic(
+/// Queue promotion when the independently replicated `Predicted` marker arrives late.
+fn queue_predicted_promotion(
     add: On<Add, Predicted>,
     eligible: Query<(), (With<Remote>, With<NetTank>, With<Rig>)>,
     mut commands: Commands,
@@ -92,13 +131,45 @@ fn upgrade_predicted_to_dynamic(
     if !eligible.contains(add.entity) {
         return;
     }
-    info!(
-        "net: {} predicted marker arrived after spawn — body goes Dynamic",
-        add.entity
-    );
     commands
         .entity(add.entity)
-        .insert((RigidBody::Dynamic, DisableRollback));
+        .insert(PendingPredictedPromotion);
+}
+
+/// Promote only after the authoritative replicate-once element slab exists at the blueprint size.
+fn upgrade_predicted_to_dynamic(
+    candidates: Query<
+        (Entity, &RigidBody, Option<&TrackGripElements>),
+        (
+            With<Remote>,
+            With<NetTank>,
+            With<Rig>,
+            With<Predicted>,
+            With<PendingPredictedPromotion>,
+        ),
+    >,
+    source: TankSimSource,
+    mut commands: Commands,
+) {
+    let Some(content) = source.get() else {
+        return;
+    };
+    for (entity, body, grip_elements) in &candidates {
+        if *body == RigidBody::Dynamic {
+            commands
+                .entity(entity)
+                .remove::<PendingPredictedPromotion>();
+            continue;
+        }
+        if !replica_role_ready(true, false, grip_elements, content.spec().track.link_count) {
+            continue;
+        }
+        info!("net: {entity} predicted marker and exact grip seed ready — body goes Dynamic");
+        commands
+            .entity(entity)
+            .insert((RigidBody::Dynamic, DisableRollback))
+            .remove::<PendingPredictedPromotion>();
+    }
 }
 
 /// Install Lightyear frame interpolation for predicted root position and rotation.
@@ -129,5 +200,25 @@ fn arm_predicted_smoothing(
             FrameInterpolate::<Position>::default(),
             FrameInterpolate::<Rotation>::default(),
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn joining_predicted_role_cannot_attach_before_exact_element_seed() {
+        let exact = TrackGripElements::for_links(97);
+        let wrong_size = TrackGripElements::for_links(96);
+
+        assert!(!replica_role_ready(true, false, None, 97));
+        assert!(!replica_role_ready(true, false, Some(&wrong_size), 97));
+        assert!(replica_role_ready(true, false, Some(&exact), 97));
+        assert!(
+            replica_role_ready(false, true, None, 97),
+            "an interpolated remote deliberately has no private element field"
+        );
+        assert!(!replica_role_ready(false, false, Some(&exact), 97));
     }
 }

@@ -4,8 +4,9 @@ use bevy::prelude::*;
 use bevy_replicon::prelude::{AppVisibilityExt, AuthorizedClient, VisibilityFilter};
 use serde::{Deserialize, Serialize};
 
-use super::protocol::{NetBelts, NetCrew, NetTank};
+use super::protocol::{NetBelts, NetCrew, NetTank, NetTrackGripAnchor};
 use crate::damage::{KnockoutReason, TankKnockedOut};
+use crate::track::sim::TrackGripElements;
 
 /// Public, server-authored tank-life fact. Detailed damage and ammunition state stay owner-only.
 #[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,7 +54,7 @@ impl CombatDisclosure {
 
 impl VisibilityFilter for CombatDisclosure {
     type ClientComponent = AuthorizedClient;
-    type Scope = (NetCrew, NetBelts);
+    type Scope = (NetCrew, NetBelts, NetTrackGripAnchor, TrackGripElements);
 
     fn is_visible(&self, client: Entity, authorized: Option<&AuthorizedClient>) -> bool {
         authorized.is_some() && self.owner == Some(client)
