@@ -532,8 +532,7 @@ impl TransmissionParams {
             ),
             (
                 // The sim hard-clamps at `idle - 100 rpm` (DERIVED from the stall-guard band);
-                // keep that floor positive with margin and the `omega_e = 0.0` spawn sentinel
-                // unambiguous.
+                // keep that floor positive with margin.
                 "engine.idle_rpm floor",
                 a.idle_rpm >= 300.0,
             ),
@@ -715,14 +714,8 @@ pub struct TransmissionState {
     /// Remaining ticks of the fix-1b reversal dwell: while non-zero, the shift OPPOSITE to
     /// `last_shift_dir` stays blocked (same-direction shifts stay free).
     pub dwell_ticks: u8,
-    /// Engine crank speed ω_e (rad/s) — stage B's crank state. `0.0` is the UNINITIALIZED
-    /// sentinel: `Default` cannot see the spec (the state must be constructible before the
-    /// spec arrives — the same spawn-time invariant as the pre-sized element slabs,
-    /// element-promotion-checklist.md), so the first [`regenerative`] step with params snaps
-    /// it to the vehicle's idle. A live crank can never read 0.0 — the end-of-tick hard
-    /// floor (review round FIX 2) keeps every stepped ω_e ≥ `idle −`
-    /// [`STALL_GUARD_BAND_RPM`] `> 0` (the spec layer requires `idle_rpm ≥ 300`) — so the
-    /// sentinel check is EXACTLY `== 0.0` and only ever fires at true spawn.
+    /// Engine crank speed ω_e (rad/s) — stage B's crank state. Initialized explicitly from
+    /// vehicle data by [`Self::from_spec`]; the regenerative tick path has no in-band sentinel.
     pub omega_e: f32,
     /// Main-clutch-out latch (stage-B review round, FIX 3): the coupling-seam regime with
     /// hysteresis — set below [`CLUTCH_OUT_M_SPEED`] without propulsive drive, cleared at
@@ -733,9 +726,9 @@ pub struct TransmissionState {
     /// on decision ticks and frozen through shift windows so the torque cut cannot pollute it.
     /// Local scheduler memory (REV 13: not replicated, not hashed).
     pub demand_n: f32,
-    /// Spawn seed for `demand_n`: the first owned reaction sample initializes the EMA directly
-    /// instead of ramping from a fictitious zero-load history. Local discrete memory; REV-14
-    /// rider in the module doc.
+    /// First-sample marker for `demand_n`: the contact-derived seed is unavailable at spawn, so
+    /// the first owned reaction sample initializes the EMA directly instead of ramping from a
+    /// fictitious zero-load history. Local discrete memory; REV-14 rider in the module doc.
     pub demand_initialized: bool,
     /// Persistent decision-tick evidence that the current gear has negative reserve. Negative
     /// ticks increment it and other ticks decay it by one, so one contact-jitter sample cannot erase
@@ -758,8 +751,22 @@ pub struct TransmissionState {
     pub hold_reengage_ticks: u8,
 }
 
-impl Default for TransmissionState {
-    fn default() -> Self {
+impl TransmissionState {
+    /// Construct complete regenerative transmission state synchronously from validated vehicle
+    /// data. The crank starts at the authored idle speed; demand remains intentionally unseeded
+    /// until the first owned contact-reaction sample arrives.
+    pub fn from_spec(tp: &TransmissionParams) -> Self {
+        Self::with_crank_speed(tp.engine.idle_rpm * RPM_TO_RAD)
+    }
+
+    /// Canonical inert state for a vehicle with no declared regenerative transmission. The
+    /// Governor adapter never reads or mutates this state, so its absent crank has no vehicle
+    /// speed to initialize from and remains explicitly zero rather than acting as a sentinel.
+    pub(crate) fn for_governor() -> Self {
+        Self::with_crank_speed(0.0)
+    }
+
+    fn with_crank_speed(omega_e: f32) -> Self {
         Self {
             gear: 1,
             shift_ticks: 0,
@@ -768,7 +775,7 @@ impl Default for TransmissionState {
             park: false,
             last_shift_dir: 0,
             dwell_ticks: 0,
-            omega_e: 0.0,
+            omega_e,
             clutch_out: false,
             demand_n: 0.0,
             demand_initialized: false,
@@ -786,9 +793,8 @@ impl Default for TransmissionState {
 /// relation lives here, beside the adapter that integrates on it).
 #[derive(Clone, Debug, PartialEq)]
 pub struct DriveReadout {
-    /// Engine rpm — the crank state ω_e DIRECTLY (stage B: the state IS the display). The
-    /// uninitialized sentinel (never stepped) reads idle; a live crank reads its honest
-    /// speed, sub-idle grade lug included (the stall guard bounds it at idle −
+    /// Engine rpm — the crank state ω_e DIRECTLY (stage B: the state IS the display), including
+    /// an honest sub-idle grade lug (the stall guard bounds it at idle −
     /// [`STALL_GUARD_BAND_RPM`]).
     pub rpm: f32,
     /// The engaged gear as a display label: `F1..Fn` forward, `R1..Rn` reverse.
@@ -808,12 +814,7 @@ pub fn readout(st: &TransmissionState, tp: &TransmissionParams) -> DriveReadout 
     };
     let top = ladder.len() as u8;
     let gear = st.gear.clamp(1, top);
-    let rpm = if st.omega_e > 0.0 {
-        st.omega_e / RPM_TO_RAD
-    } else {
-        // Uninitialized sentinel (state constructed, no regenerative step yet): idle.
-        tp.engine.idle_rpm
-    };
+    let rpm = st.omega_e / RPM_TO_RAD;
     DriveReadout {
         rpm,
         gear_label: format!("{}{gear}", if st.reverse { 'R' } else { 'F' }),
@@ -1526,17 +1527,6 @@ fn regenerative(
     // equilibrium). The crank is NEVER negative — it cannot follow a back-driven shaft
     // (stage A's principle, now enforced by the stall guard instead of a floor).
     let omega_idle = tp.engine.idle_rpm * RPM_TO_RAD;
-    if st.omega_e == 0.0 {
-        // Uninitialized sentinel, EXACTLY 0.0 (review round FIX 2): Default cannot see
-        // the spec — the state must be constructible before the spec arrives (the
-        // pre-sized-slab spawn invariant) — so the first step with params snaps to idle.
-        // A stepped crank can never return to 0.0: the end-of-tick hard floor keeps it
-        // ≥ ω_floor > 0 (spec requires idle_rpm ≥ 300 > STALL_GUARD_BAND_RPM + margin),
-        // so this branch fires at true spawn only — a broader `≤ 0` arm would instead
-        // TELEPORT a floor-violating crank back to idle every tick (the traced
-        // 600 → −3130 → 600 rpm oscillation under a legal strongly-negative-τ_free spec).
-        st.omega_e = omega_idle;
-    }
     let omega_e = st.omega_e;
     let k = g / tp.sprocket_radius;
     let omega_floor = (tp.engine.idle_rpm - STALL_GUARD_BAND_RPM) * RPM_TO_RAD;
@@ -1921,8 +1911,7 @@ fn regenerative(
     // --- Hard stall floor (review round FIX 2): the crank never ENDS a tick below
     // ω_floor, whatever the spec's torque/drag corner did to τ_free — the floor IS the
     // no-stall policy while stall death stays deliberately unmodeled (classification
-    // table). This is also what makes the ω_e = 0.0 spawn sentinel unambiguous, and it
-    // self-heals a NaN (f32::max drops the NaN operand).
+    // table). It also self-heals a NaN (f32::max drops the NaN operand).
     st.omega_e = st.omega_e.max(omega_floor);
 
     TransmissionReport {

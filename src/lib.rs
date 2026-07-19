@@ -149,7 +149,7 @@ mod offline_feel_tests {
         assert_eq!(press(&mut app), TransmissionMode::Governor);
         assert_eq!(
             app.world().get::<TankTransmission>(tank).unwrap().0,
-            TransmissionState::default(),
+            TransmissionState::for_governor(),
             "a mode flip must reset the transmission state"
         );
         assert_eq!(press(&mut app), TransmissionMode::Hybrid);
@@ -161,7 +161,7 @@ mod offline_feel_tests {
         let state = TransmissionState {
             reverse: true,
             scheduler: track::transmission::SchedulerState::GradeShift { from: 4, to: 2 },
-            ..Default::default()
+            ..TransmissionState::for_governor()
         };
         assert_eq!(scheduler_hud_line(&state), "sched GRADE R4->R2");
     }
@@ -181,7 +181,7 @@ mod offline_feel_tests {
         let mut state = TransmissionState {
             gear: 1,
             steer_step: 2,
-            ..Default::default()
+            ..TransmissionState::for_governor()
         };
         assert_eq!(
             steering_hud_line(TransmissionMode::FixedRadii, &state, Some(&radii)),
@@ -543,6 +543,7 @@ fn spawn_transmission_feel_label(
 fn cycle_transmission_feel(
     keys: Option<Res<ButtonInput<KeyCode>>>,
     feel: Option<ResMut<track::sim::TransmissionFeelTest>>,
+    gear: Option<Res<track::sim::TrackGear>>,
     mut states: Query<&mut track::sim::TankTransmission>,
 ) {
     use track::transmission::TransmissionMode;
@@ -556,8 +557,15 @@ fn cycle_transmission_feel(
             TransmissionMode::Hybrid => TransmissionMode::FixedRadii,
             TransmissionMode::FixedRadii => TransmissionMode::Governor,
         };
+        let fresh = gear
+            .as_deref()
+            .and_then(track::sim::TrackGear::trans)
+            .map_or_else(
+                track::sim::TankTransmission::for_governor,
+                track::sim::TankTransmission::from_spec,
+            );
         for mut state in &mut states {
-            *state = track::sim::TankTransmission::default();
+            *state = fresh;
         }
         info!("offline transmission mode → {}", feel.0.label());
     }
