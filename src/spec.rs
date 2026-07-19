@@ -534,11 +534,24 @@ impl TankSpec {
                         .all(|(a, b)| a.is_finite() && b.is_finite() && *a > 0.0 && *b > 0.0),
                 ),
                 (
+                    // Sanity BOUNDS beyond finiteness (stage-A review round): an absurd
+                    // finite torque (e.g. f32::MAX) survives `is_finite` but overflows the
+                    // reflected-drag multiplication to ∞, and `∞ × 0.0` (full drag
+                    // release) is NaN inside the shift-landing predictor — the landing
+                    // gate fails safe on NaN, but the spec layer should refuse absurd
+                    // data outright. 100 kN·m is an order of magnitude above any tank
+                    // engine (the largest WWII tank diesels peaked well under 10 kN·m);
+                    // 20 000 rpm is far past any piston engine's redline.
                     "engine.torque_curve",
                     tr.engine.torque_curve.len() >= 2
                         && tr.engine.torque_curve.windows(2).all(|w| w[0].0 < w[1].0)
                         && tr.engine.torque_curve.iter().all(|(r, tq)| {
-                            r.is_finite() && tq.is_finite() && *r > 0.0 && *tq >= 0.0
+                            r.is_finite()
+                                && tq.is_finite()
+                                && *r > 0.0
+                                && *r <= 20_000.0
+                                && *tq >= 0.0
+                                && *tq <= 100_000.0
                         }),
                 ),
                 (

@@ -217,7 +217,11 @@ fixed-tick deterministic, in `transmission.rs`:
   through the landing gear, reaction frozen at its current per-tick mean — the same code
   path via `reflected_drag`) lands the rpm ≥ down band + margin. Frozen-R is conservative
   under load (the true post-cut reaction collapses with slip), so a loaded box revs
-  further up each gear before shifting — correct hill behavior for free.
+  further up each gear before shifting — correct hill behavior for free. *(REFUTED on
+  grades by stage A below: the landing rpm was computed through `|m|`, so a landing
+  driven NEGATIVE by the frozen reaction read as a huge positive rpm and PASSED the gate
+  — the abs() annulled the gate exactly where it mattered. The claim held only while
+  landings stayed positive, i.e. on the flat.)*
 - **Reversal-only dwell** (`REVERSAL_DWELL_TICKS = 32` = 0.5 s): a committed shift blocks
   the opposite-direction shift; same-direction 1-2-3 climbs stay free. State:
   `last_shift_dir` + `dwell_ticks` in `TransmissionState` (local, REV 13 unaffected).
@@ -294,6 +298,82 @@ brake/output-torque rating when sourced.
    (167.7 kN total) sat just under the 20° slope demand (191.2 kN total) that ADR-0026
    and the test course had settled as capability. Re-anchored to the dual anchor above
    (96 kN/side) and the previously missing slope-park gate now pins it.
+
+## Stage A (2026-07-19) — signed shaft correctness
+
+`rpm_of` measured the shaft through `|m|`, so a belt BACK-DRIVEN in a forward gear read
+as high FORWARD rpm. Design principle (director): **the SHAFT is signed** — rigid gearing
+— **the ENGINE is never negative** — it cannot follow a back-driven shaft; the existing
+command-proxy rev floor is the implicit clutch slip until the ω_e crank-state arc lands.
+All three consequences were reproduced before the fix:
+
+1. the fuel governor cut drive to zero on backslides (tank rolling backward on flat
+   ground under full W, F1 showing "2770 rpm", zero force, indefinitely);
+2. the scheduler's up band fired repeatedly during backslides (measured ladder walk 1→6
+   while sliding backward at −2..−3 m/s);
+3. the fix-1a landing gate PASSED catastrophic on-grade upshifts — a predicted BACKWARD
+   landing (`landing_m = −3.62`, traced r_mean = 221 kN) read as "9092 rpm" ≥ band +
+   margin. This is the refutation of the "correct hill behavior for free" claim in fix 1
+   above.
+
+The fix, all in `transmission.rs` (Governor float path untouched — parity green; no
+wire/replication, no μ/grip changes, deterministic f32):
+
+- **Signed shaft**: `shaft = dir·m` (dir = −1 on the R ladder); signed
+  `shaft_rpm = shaft·G/r_s` used by the scheduler, the landing gate, and the engine
+  operating point.
+- **Scheduler**: the up band compares the signed rpm (negative can never exceed it); the
+  down band additionally requires `shaft ≥ 0` — a back-driven vehicle is not "running
+  slow forward". Gear changes are decisions about FORWARD operation; the backslide state
+  HOLDS the engaged gear in both directions.
+- **Landing gate**: the predicted landing's SIGNED shaft speed must be positive AND its
+  rpm ≥ down band + `POSTSHIFT_MARGIN_RPM`; a sign-flipped landing always refuses.
+- **Engine side**: torque evaluates at `engine_rpm = max(shaft_rpm, rpm_floor)` — never
+  negative; during a backslide the engine keeps delivering forward drive at the floored
+  rpm (`f_p = dir·propulsive·…`, verified), and the governor cut applies only to real
+  forward over-speed. The HUD `readout` shares the convention (a back-driven shaft reads
+  idle, not a fake forward rpm).
+- **`reflected_drag` audited**: `m/DRAG_SAT_SPEED` is already signed and opposes the
+  actual belt motion under back-drive — correct, left as-is.
+
+Deliberately NOT in this stage: engine crank state (ω_e — next arc), grade-aware
+scheduling, skip-shifts, manual gear hold.
+
+Measured gates: `backslide_holds_gear_and_keeps_forward_drive`,
+`landing_gate_refuses_sign_flipped_landing` (units);
+`ramp_climb_20_deg_never_upshifts_backward_tiger` (headless, real Tiger L600): from REST
+mid-face on the 20° course ramp under held W the Tiger crests in **7.1 s, gear trace
+[1]** — F1 holds the grade, no upshift is predicted to land, and it never moves backward
+while a shift commits. Flat-ground behavior is undisturbed (driving with the ladder,
+`dir·m ≡ |m|`): the anti-hunting climbs, top speed, decel, and pivot gates are unchanged.
+
+### Stage-A review round (same day) — three findings, dispositions
+
+1. **Hard `shaft >= 0` down-guard stranded the cruise gear at rest (real defect).**
+   Coasting to rest in a cruise gear (Hybrid, gear 3, zero command, 20 kN/side reaction),
+   the brake stop-force/integration order leaves a stable numerical residual of
+   ≈ −1.7e−9 m/s — the exact-zero guard read it as "back-driven" and blocked the
+   downshift chain forever (tank parks stranded in gear 3). The backslide hold must only
+   engage for a GENUINE backslide: the guard is now `shaft > −PARK_ENGAGE_SPEED`,
+   reusing the existing at-rest policy scale — residuals orders of magnitude below it
+   downshift normally, a real slide at −0.5 m/s+ still holds. The up band needs no
+   threshold (negative can't exceed it either way), and the landing gate's `> 0` needs
+   none either: its rpm bound already demands a landing ≥ down band + margin, solidly
+   positive. Regression: `coast_to_rest_completes_downshift_chain` (proven to bite —
+   fails under the reverted `>= 0` guard).
+2. **Spec validation accepted absurd torque data.** Any finite non-negative torque passed
+   (including `f32::MAX`); `reflected_drag`'s multiplication then overflows to ∞, and
+   `∞ × 0.0` (full drag release) is NaN inside the landing predictor. The gate fails
+   SAFE on NaN (`NaN > 0` is false — the upshift refuses), but the spec layer now
+   refuses the data outright: every torque point ≤ 100 kN·m (an order of magnitude above
+   any tank engine) and every curve rpm ≤ 20 000 (far past any piston redline), on top
+   of the existing finite/ascending checks (`spec.rs`).
+3. **Coverage: reverse-ladder mirror + reverse readout.** Reverse symmetry HOLDS by
+   construction (`dir` mirrors everything), now pinned:
+   `reverse_backslide_holds_gear_and_keeps_reverse_drive` (driving in R, back-driven
+   forward → shaft < 0: no shifts on a 3-gear R ladder, drive stays R-signed, governor
+   does not cut) and `readout_reverse_reads_signed_shaft` (R label + positive geared rpm
+   while reversing; idle while back-driven).
 
 ## Ranked recommendation
 

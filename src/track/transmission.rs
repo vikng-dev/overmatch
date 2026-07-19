@@ -34,6 +34,19 @@
 //! service pedal (opposite-throttle driver intent). The `Governor` adapter keeps the old
 //! hold blend verbatim instead.
 //!
+//! Signed shaft (stage A): the regenerative adapters measure the geared shaft RELATIVE TO
+//! THE ENGAGED LADDER — `shaft = dir·m` with `dir = −1` on the R ladder — so driving
+//! normally reads POSITIVE and a BACK-DRIVEN belt (rolling against the engaged gear on a
+//! grade) reads NEGATIVE. The SHAFT is signed (rigid gearing); the ENGINE never is — it
+//! cannot follow a back-driven shaft, so the operating point floors at the non-negative
+//! command-proxy rev floor (the implicit slipping clutch, until the ω_e crank-state arc
+//! lands). The old `|m|` read a backslide as high FORWARD rpm, which produced the whole
+//! reproduced bug family: the governor cut drive to zero mid-backslide (tank rolls
+//! backward on flat ground under full W at "2770 rpm", zero force, indefinitely), the
+//! scheduler walked the ladder 1→6 while sliding backward at −2..−3 m/s, and the fix-1a
+//! landing gate PASSED catastrophic on-grade upshifts (a predicted backward landing
+//! `landing_m = −3.62` read as "9092 rpm" ≥ band + margin).
+//!
 //! Pure math, no ECS (like [`forces`]): callers own the state. [`TransmissionState`] is the
 //! only path-dependent state (gear, shift countdown, steering detent, direction) — carried as
 //! a plain LOCAL component / sandbox resource, NOT replicated, NOT hashed (this is REV 13;
@@ -54,7 +67,7 @@
 //! | [`PARK_ENGAGE_SPEED`] | SIM POLICY | latch threshold for "at rest" — a determinism/stability guard on the shared intent layer |
 //! | [`DIRECTION_SWAP_SPEED`] | SIM POLICY | the intent seam where a held opposite throttle becomes a gear-direction change; uniform game semantics |
 //! | [`NEUTRAL_THROTTLE`], [`NEUTRAL_M_SPEED`] | SIM POLICY | regime-entry thresholds for the L600 neutral turn (the neutral turn's SPEED SCALE — [`TransmissionParams::neutral_d_full`] — is spec-DERIVED); `NEUTRAL_M_SPEED` doubles as the hybrid's blend width into its power-limited pivot regime |
-//! | [`POSTSHIFT_MARGIN_RPM`] | SIM POLICY | fix-1a anti-hunting: an upshift must PREDICT landing this far above the down band at the end of its own torque-cut window (the cut bleeds belt speed; the static band gap alone was erased in low gears — the measured 1-2-1-2 climb). Upshifts are also intent-gated (`propulsive > 0`) and L600-detent-deferred so the predictor is only consulted inside its domain (review round) |
+//! | [`POSTSHIFT_MARGIN_RPM`] | SIM POLICY | fix-1a anti-hunting: an upshift must PREDICT landing this far above the down band at the end of its own torque-cut window (the cut bleeds belt speed; the static band gap alone was erased in low gears — the measured 1-2-1-2 climb). Upshifts are also intent-gated (`propulsive > 0`) and L600-detent-deferred so the predictor is only consulted inside its domain (review round). Stage A: the predicted landing SHAFT speed must be POSITIVE on the engaged ladder — a sign-flipped landing always refuses (under `|m|` a backward landing read as high forward rpm and the gate blessed catastrophic on-grade upshifts) |
 //! | [`REVERSAL_DWELL_TICKS`] | SIM POLICY | fix-1b anti-hunting: a committed shift blocks the OPPOSITE-direction shift for this many ticks AFTER its interruption window (the dwell counts only outside the frozen window — review round); same-direction climbs stay free |
 //! | [`OVERREV_MARGIN_RPM`] | SIM POLICY | fix-1c: a downshift must land at least this far under the engine's max curve rpm — the box never commands an over-rev |
 //! | [`WIDE_ON`]/[`WIDE_OFF`]/[`TIGHT_ON`]/[`TIGHT_OFF`] | SIM POLICY | stick-to-detent input mapping with hysteresis; the DETENT RATIOS they select are spec |
@@ -406,7 +419,9 @@ pub struct DriveReadout {
 
 /// Read the drivetrain operating point THROUGH THE LAW: the engaged gear from [`TransmissionState`]
 /// against the active ladder, and the geared engine rpm from the pre-tick belt speeds — the same
-/// `rpm = |m|·G / r_s` relation [`regenerative`] runs, floored at idle. Pure (no ECS), so the HUD
+/// SIGNED-shaft relation [`regenerative`] runs (stage A: `rpm = max(dir·m·G / r_s, idle)`; a
+/// back-driven shaft reads IDLE, because the engine cannot follow it — the old `|m|` read a
+/// backslide as high forward rpm, the "F1 @ 2770 rpm" display lie). Pure (no ECS), so the HUD
 /// and any legend share one implementation.
 pub fn readout(st: &TransmissionState, tp: &TransmissionParams, speeds: [f32; 2]) -> DriveReadout {
     let m = (speeds[0] + speeds[1]) / 2.0;
@@ -418,7 +433,8 @@ pub fn readout(st: &TransmissionState, tp: &TransmissionParams, speeds: [f32; 2]
     let top = ladder.len() as u8;
     let gear = st.gear.clamp(1, top);
     let g = ladder[(gear - 1) as usize];
-    let rpm = (m.abs() * g / tp.sprocket_radius / RPM_TO_RAD).max(tp.engine.idle_rpm);
+    let dir = if st.reverse { -1.0 } else { 1.0 };
+    let rpm = (dir * m * g / tp.sprocket_radius / RPM_TO_RAD).max(tp.engine.idle_rpm);
     DriveReadout {
         rpm,
         gear_label: format!("{}{gear}", if st.reverse { 'R' } else { 'F' }),
@@ -505,6 +521,10 @@ pub fn step(
 /// and released as the PROPULSIVE throttle opens. ONE implementation shared verbatim
 /// between the live tick and the fix-1a shift predictor, so prediction and reality run the
 /// same law.
+///
+/// Sign audit (stage A): `m/DRAG_SAT_SPEED` is already SIGNED, so under a backslide
+/// (`m < 0` in a forward gear) the drag comes out POSITIVE — opposing the actual belt
+/// motion, as compression braking must. Correct as-is; deliberately untouched.
 fn reflected_drag(tp: &TransmissionParams, g: f32, m: f32, propulsive: f32) -> f32 {
     -(tp.peak_torque_nm * tp.drag_fraction * g / tp.sprocket_radius)
         * (m / DRAG_SAT_SPEED).clamp(-1.0, 1.0)
@@ -612,8 +632,16 @@ fn regenerative(
     //   b) a committed shift blocks the OPPOSITE-direction shift for REVERSAL_DWELL_TICKS
     //      (same-direction climbs stay free);
     //   c) downshifts must land under the engine's max curve rpm − OVERREV_MARGIN_RPM.
-    let rpm_of = |mm: f32, g: f32| mm.abs() * g / tp.sprocket_radius / RPM_TO_RAD;
-    let rpm_geared = |g: f32| rpm_of(m, g);
+    //
+    // Stage A (signed shaft): the shaft speed is defined RELATIVE TO THE ENGAGED LADDER,
+    // `shaft = dir·m` — rigid gearing has a sign. Driving normally shaft > 0; back-driven
+    // (a grade rolling the tank against the engaged gear) shaft < 0, and its geared rpm is
+    // NEGATIVE. The old `|m|` read a backslide as high forward rpm, which walked the
+    // ladder upward mid-slide and (via the landing predictor) blessed sign-flipped
+    // landings — see the module doc's stage-A paragraph for the reproduced trio.
+    let shaft = dir * m;
+    let shaft_rpm_of = |sh: f32, g: f32| sh * g / tp.sprocket_radius / RPM_TO_RAD;
+    let shaft_rpm_geared = |g: f32| shaft_rpm_of(shaft, g);
     // Predictor-domain guard (review round): while the L600 detent is engaged the
     // constraint force λ loads the outputs in a way the predictor cannot model (it carries
     // no λ/steer state), so its landing prediction is invalid mid-geared-turn — DEFER
@@ -622,7 +650,9 @@ fn regenerative(
     // design decision, deliberately NOT implemented here.
     let detent_turn = mode == TransmissionMode::FixedRadii && st.steer_step != 0;
     if st.shift_ticks == 0 {
-        let rpm = rpm_geared(ladder[(st.gear - 1) as usize]);
+        // SIGNED shaft rpm (stage A): while back-driven this is negative, so the up band
+        // can never fire mid-backslide (negative never exceeds the band).
+        let rpm = shaft_rpm_geared(ladder[(st.gear - 1) as usize]);
         let dwell_blocks = |shift_dir: i8| st.dwell_ticks > 0 && st.last_shift_dir == -shift_dir;
         // Intent gate (review round): an upshift is only ever WANTED while actually
         // driving (`propulsive > 0`) — a braking or coasting driver never needs one — and
@@ -639,16 +669,42 @@ fn regenerative(
         {
             let g_up = ladder[st.gear as usize];
             let r_mean = (inp.reactions[0] + inp.reactions[1]) / 2.0;
+            // The predictor returns a SIGNED m; the gate reads its SIGNED shaft speed
+            // (stage A): the landing must be POSITIVE on the engaged ladder AND clear the
+            // down band + margin. A sign-flipped landing always refuses the upshift — under
+            // `|m|` the traced grade case (r_mean = 221 kN, landing_m = −3.62) read as
+            // "9092 rpm" and PASSED, committing catastrophic on-grade upshifts. No
+            // at-rest threshold is needed HERE (review round): the rpm bound already
+            // demands a landing ≥ down band + margin — solidly positive, far above any
+            // numerical residual — so the sign check is a belt-and-braces refusal.
             let landing = predict_shift_landing_m(tp, fp, g_up, propulsive, m, r_mean, dt);
-            if rpm_of(landing, g_up) >= tp.shift_down_rpm + POSTSHIFT_MARGIN_RPM {
+            let landing_shaft = dir * landing;
+            if landing_shaft > 0.0
+                && shaft_rpm_of(landing_shaft, g_up) >= tp.shift_down_rpm + POSTSHIFT_MARGIN_RPM
+            {
                 st.gear += 1;
                 st.shift_ticks = tp.shift_ticks;
                 st.last_shift_dir = 1;
                 st.dwell_ticks = REVERSAL_DWELL_TICKS;
             }
-        } else if rpm < tp.shift_down_rpm && st.gear > 1 && !dwell_blocks(-1) {
+        } else if shaft > -PARK_ENGAGE_SPEED
+            && rpm < tp.shift_down_rpm
+            && st.gear > 1
+            && !dwell_blocks(-1)
+        {
+            // Backslide hold (stage A, thresholded in the review round): while GENUINELY
+            // back-driven the vehicle is NOT "running slow forward" — gear changes are
+            // decisions about forward operation, and the backslide state HOLDS the engaged
+            // gear (no downshift walk on a slide either; the negative signed rpm would
+            // otherwise sit permanently under the down band). The threshold is
+            // −PARK_ENGAGE_SPEED, the existing at-rest policy scale, NOT exact zero: the
+            // brake stop-force/integration order leaves a stable numerical residual at
+            // rest (measured ≈ −1.7e−9 m/s coasting to a stop in gear 3 against a 20 kN
+            // reaction), and a hard `shaft >= 0` stranded the box in its cruise gear
+            // forever. A residual orders of magnitude below the threshold downshifts
+            // normally; a real slide (−0.5 m/s and beyond) still holds.
             let g_down = ladder[(st.gear - 2) as usize];
-            if rpm_geared(g_down) <= tp.max_curve_rpm() - OVERREV_MARGIN_RPM {
+            if shaft_rpm_geared(g_down) <= tp.max_curve_rpm() - OVERREV_MARGIN_RPM {
                 st.gear -= 1;
                 st.shift_ticks = tp.shift_ticks;
                 st.last_shift_dir = -1;
@@ -681,9 +737,19 @@ fn regenerative(
     // actually uses — INFERRED simplification standing in for clutch-slip state; without it a
     // standing start would read idle rpm and a governed-out curve would read zero torque). A
     // brake command does not rev the crank.
+    //
+    // Stage A: the torque lookup evaluates at a NON-NEGATIVE engine rpm —
+    // `engine_rpm = max(shaft_rpm, rpm_floor)` with the SIGNED shaft rpm. The engine is
+    // never negative: it cannot follow a back-driven shaft (the rev floor is the implicit
+    // slipping-clutch stand-in until the ω_e crank arc lands), so during a backslide
+    // (shaft < 0) the engine keeps delivering FORWARD drive at the floored rpm (`f_p`
+    // below follows the engaged direction via `dir·propulsive·…`). The governor cut inside
+    // `torque_at` therefore applies only to real forward over-speed — never to `|shaft|`,
+    // which is what cut drive to zero mid-backslide ("2770 rpm", zero force, rolling
+    // backward under full W).
     let cmd_mag = propulsive.max(inp.steer.abs()).clamp(0.0, 1.0);
     let rpm_floor = tp.engine.idle_rpm + (tp.peak_torque_rpm - tp.engine.idle_rpm) * cmd_mag;
-    let rpm = rpm_geared(g).max(rpm_floor);
+    let rpm = shaft_rpm_geared(g).max(rpm_floor);
     let torque = tp.torque_at(rpm);
     let p_avail = torque * (rpm * RPM_TO_RAD);
 
@@ -1175,6 +1241,239 @@ mod tests {
             &input(1.0, 0.0, [v, v], [0.0, 0.0]),
         );
         assert_eq!(st.gear, 2, "unloaded, the same operating point upshifts");
+    }
+
+    /// Stage A (signed shaft): a belt BACK-DRIVEN in a forward gear (m < 0, W held — the
+    /// backslide) commits NO shifts in either direction, and the engine keeps delivering
+    /// FORWARD drive (the governor must not cut). Pre-fix, `|m| = 2.5` in gear 1 read as
+    /// 2025 rpm: past the up band (ladder walk while sliding backward) AND past the
+    /// governed cut (torque → 0, so the tank back-slid under full W indefinitely). The
+    /// signed shaft reads −2025 rpm: the up band can never fire, the down band is held
+    /// (a backslide is not "running slow forward"), and the engine evaluates at the
+    /// non-negative rev floor, delivering forward force.
+    #[test]
+    fn backslide_holds_gear_and_keeps_forward_drive() {
+        let (fp, tp) = (lab_fp(), lab_tp());
+        // Up-band side: gear 1 at m = −2.5 under a grade-like reaction.
+        let mut st = TransmissionState::default();
+        for tick in 0..96 {
+            let rep = step(
+                TransmissionMode::Hybrid,
+                &fp,
+                Some(&tp),
+                &mut st,
+                &input(1.0, 0.0, [-2.5, -2.5], [40_000.0, 40_000.0]),
+            );
+            assert_eq!(
+                st.gear, 1,
+                "tick {tick}: a backslide must not walk the ladder"
+            );
+            assert_eq!(
+                st.shift_ticks, 0,
+                "tick {tick}: no shift may commit during a backslide"
+            );
+            assert!(
+                rep.forces[0] > 0.0 && rep.forces[1] > 0.0,
+                "tick {tick}: the engine must keep delivering FORWARD drive during a \
+                 backslide — the governor must not cut on |shaft| (forces {:?})",
+                rep.forces
+            );
+        }
+        // Down-band side: gear 3 back-driven — the signed rpm sits under the down band,
+        // but the backslide state HOLDS the engaged gear (no downshift walk either).
+        let mut st = TransmissionState {
+            gear: 3,
+            ..Default::default()
+        };
+        step(
+            TransmissionMode::Hybrid,
+            &fp,
+            Some(&tp),
+            &mut st,
+            &input(1.0, 0.0, [-2.5, -2.5], [40_000.0, 40_000.0]),
+        );
+        assert_eq!(
+            st.gear, 3,
+            "a backslide must hold the engaged gear, not downshift-walk"
+        );
+        assert_eq!(st.shift_ticks, 0);
+    }
+
+    /// Stage A (signed landing gate): an upshift whose PREDICTED landing is sign-flipped
+    /// (backward) is always refused. The traced grade case: at 1780 rpm in gear 1 under a
+    /// frozen r_mean = 221 kN, the torque-cut window bleeds 221 kN / 8 t × 0.3125 s ≈
+    /// 8.6 m/s — landing ≈ −6.4 m/s, BACKWARD. Under `|m|` that read as ≈ 3280 rpm ≥
+    /// band + margin and the gate PASSED the catastrophic on-grade upshift; the signed
+    /// gate requires a POSITIVE landing shaft.
+    #[test]
+    fn landing_gate_refuses_sign_flipped_landing() {
+        let (fp, tp) = (lab_fp(), lab_tp());
+        let g1 = tp.gears_fwd[0];
+        let v = 1_780.0 * RPM_TO_RAD * tp.sprocket_radius / g1; // above the up band
+        let mut st = TransmissionState::default();
+        step(
+            TransmissionMode::Hybrid,
+            &fp,
+            Some(&tp),
+            &mut st,
+            &input(1.0, 0.0, [v, v], [221_000.0, 221_000.0]),
+        );
+        assert_eq!(
+            st.gear, 1,
+            "a sign-flipped predicted landing must refuse the upshift"
+        );
+        assert_eq!(st.shift_ticks, 0, "no shift may have committed");
+    }
+
+    /// Stage-A review round: the REVERSE-ladder mirror of the backslide test. Driving in
+    /// R (dir = −1) while back-driven FORWARD (m > 0 → shaft = dir·m < 0): no shifts in
+    /// either direction, and the drive force stays R-SIGNED and non-zero (the governor
+    /// must not cut on |shaft| — pre-fix, |m| = 2.5 in R1 read 2025 rpm, past the
+    /// governed cut, torque → 0). Uses a 3-gear reverse ladder so "no shifts" actually
+    /// has shifts to refuse.
+    #[test]
+    fn reverse_backslide_holds_gear_and_keeps_reverse_drive() {
+        let fp = lab_fp();
+        let tp = TransmissionParams::from_authoring(&TransmissionAuthoring {
+            idle_rpm: 600.0,
+            governed_rpm: 1800.0,
+            rated_rpm: 1800.0,
+            torque_nm: &[
+                (600.0, 1650.0),
+                (1100.0, 2200.0),
+                (1700.0, 1950.0),
+                (1800.0, 0.0),
+            ],
+            forward_speeds_kmh: &[8.0, 12.7, 20.4, 32.6, 52.2],
+            reverse_speeds_kmh: &[8.0, 12.7, 20.4],
+            shift_up_rpm: 1700.0,
+            shift_down_rpm: 950.0,
+            steer_radii_m: &[
+                (3.0, 8.9),
+                (4.8, 14.2),
+                (7.7, 22.8),
+                (12.3, 36.4),
+                (19.7, 58.3),
+            ],
+            steer_capacity_n: 240_000.0,
+            recirculation: 0.9,
+            brake_capacity_n: 120_000.0,
+            drag_fraction: 0.25,
+            shift_secs: 0.31,
+            sprocket_radius_m: 0.34,
+            half_tread_m: 1.25,
+        });
+        // Up-band mirror: R1 back-driven at m = +2.5 (|m| would read 2025 rpm — ladder
+        // walk + governed cut pre-fix). Held S (reverse throttle), grade-like reaction.
+        let mut st = TransmissionState {
+            reverse: true,
+            ..Default::default()
+        };
+        for tick in 0..96 {
+            let rep = step(
+                TransmissionMode::Hybrid,
+                &fp,
+                Some(&tp),
+                &mut st,
+                &input(-1.0, 0.0, [2.5, 2.5], [-40_000.0, -40_000.0]),
+            );
+            assert!(st.reverse, "tick {tick}: the R ladder stays engaged");
+            assert_eq!(
+                st.gear, 1,
+                "tick {tick}: a reverse backslide must not walk the R ladder"
+            );
+            assert_eq!(st.shift_ticks, 0, "tick {tick}: no shift may commit");
+            assert!(
+                rep.forces[0] < 0.0 && rep.forces[1] < 0.0,
+                "tick {tick}: the engine must keep delivering R-SIGNED drive during a \
+                 reverse backslide (forces {:?})",
+                rep.forces
+            );
+        }
+        // Down-band mirror: R2 back-driven slowly forward (shaft = −0.3, a genuine slide
+        // past the at-rest threshold) — the backslide state holds the engaged gear.
+        let mut st = TransmissionState {
+            gear: 2,
+            reverse: true,
+            ..Default::default()
+        };
+        step(
+            TransmissionMode::Hybrid,
+            &fp,
+            Some(&tp),
+            &mut st,
+            &input(-1.0, 0.0, [0.3, 0.3], [0.0, 0.0]),
+        );
+        assert_eq!(
+            st.gear, 2,
+            "a reverse backslide must hold the engaged gear, not downshift-walk"
+        );
+        assert_eq!(st.shift_ticks, 0);
+    }
+
+    /// Stage-A review round: the HUD readout shares the signed-shaft convention in
+    /// REVERSE. Driving in R (m < 0) reads a positive geared rpm and the R label;
+    /// back-driven forward while in R, the shaft is negative — the engine cannot follow
+    /// it, so the readout floors at idle instead of showing a fake forward rpm.
+    #[test]
+    fn readout_reverse_reads_signed_shaft() {
+        let tp = lab_tp();
+        let st = TransmissionState {
+            reverse: true,
+            ..Default::default()
+        };
+        // Driving in reverse: shaft = dir·m = +2.0 → geared rpm, positive, above idle.
+        let r = readout(&st, &tp, [-2.0, -2.0]);
+        assert_eq!(r.gear_label, "R1");
+        let expect = 2.0 * tp.gears_rev[0] / tp.sprocket_radius / RPM_TO_RAD;
+        assert!(
+            (r.rpm - expect).abs() < 0.5 && r.rpm > tp.engine.idle_rpm,
+            "reversing must read the geared rpm ({expect:.0}), got {:.0}",
+            r.rpm
+        );
+        // Back-driven while in R (rolling forward): shaft < 0 → idle, not a fake rpm.
+        let r = readout(&st, &tp, [2.0, 2.0]);
+        assert_eq!(r.gear_label, "R1");
+        assert_eq!(
+            r.rpm, tp.engine.idle_rpm,
+            "a back-driven R shaft must read idle (the engine cannot follow it)"
+        );
+    }
+
+    /// Stage-A review round (FIX 1 regression): coasting to rest in a cruise gear must
+    /// complete the downshift chain to gear 1. The brake stop-force/integration order
+    /// leaves a stable numerical residual at rest (measured ≈ −1.7e−9 m/s: Hybrid, gear
+    /// 3, zero command, 20 kN/side reaction) — a hard `shaft >= 0` backslide guard read
+    /// that residual as "back-driven" and stranded the box in gear 3 forever. The guard's
+    /// −PARK_ENGAGE_SPEED threshold lets numerical rest downshift normally.
+    #[test]
+    fn coast_to_rest_completes_downshift_chain() {
+        let (fp, tp) = (lab_fp(), lab_tp());
+        let mut st = TransmissionState {
+            gear: 3,
+            ..Default::default()
+        };
+        let mut speeds = [-1.0e-5f32, -1.0e-5];
+        for _ in 0..256 {
+            let rep = step(
+                TransmissionMode::Hybrid,
+                &fp,
+                Some(&tp),
+                &mut st,
+                &input(0.0, 0.0, speeds, [20_000.0, 20_000.0]),
+            );
+            speeds = rep.next_speeds;
+        }
+        assert!(
+            speeds[0].abs() < PARK_ENGAGE_SPEED && speeds[1].abs() < PARK_ENGAGE_SPEED,
+            "the scenario must actually be at (numerical) rest, got {speeds:?}"
+        );
+        assert!(st.park, "zero command at rest must have latched the park");
+        assert_eq!(
+            st.gear, 1,
+            "coasting to rest must complete the downshift chain, not strand the cruise \
+             gear behind the backslide guard"
+        );
     }
 
     /// Fix-1b: after a shift commits, the OPPOSITE-direction shift is dwell-blocked for
