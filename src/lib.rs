@@ -127,6 +127,13 @@ mod offline_feel_tests {
                 dwell_ticks: 7,
                 omega_e: 250.0,
                 clutch_out: true,
+                demand_n: 42_000.0,
+                demand_initialized: true,
+                grade_confirm_ticks: 9,
+                grade_target: 3,
+                scheduler: track::transmission::SchedulerState::GradeShift { from: 5, to: 3 },
+                hill_hold: true,
+                hold_reengage_ticks: 11,
             }))
             .id();
 
@@ -147,6 +154,16 @@ mod offline_feel_tests {
         );
         assert_eq!(press(&mut app), TransmissionMode::Hybrid);
         assert_eq!(press(&mut app), TransmissionMode::FixedRadii);
+    }
+
+    #[test]
+    fn reverse_grade_shift_hud_uses_reverse_ladder_letter() {
+        let state = TransmissionState {
+            reverse: true,
+            scheduler: track::transmission::SchedulerState::GradeShift { from: 4, to: 2 },
+            ..Default::default()
+        };
+        assert_eq!(scheduler_hud_line(&state), "sched GRADE R4->R2");
     }
 }
 
@@ -503,6 +520,22 @@ fn cycle_transmission_feel(
     }
 }
 
+/// Render scheduler truth for the offline HUD. Grade targets live on whichever ladder the state
+/// currently engages, so reverse shifts must read `R4->R2`, not a hard-coded forward label.
+fn scheduler_hud_line(st: &track::transmission::TransmissionState) -> String {
+    match st.scheduler {
+        track::transmission::SchedulerState::Normal => "sched NORMAL       ".to_string(),
+        track::transmission::SchedulerState::GradeShift { from, to } => {
+            // `src/lib.rs` is an ASCII-only-font dev surface (tests/ui_ascii.rs), so the requested
+            // visual arrow is rendered as `->`; U+2192 is absent from Bevy's default font.
+            let ladder = if st.reverse { 'R' } else { 'F' };
+            format!("sched GRADE {ladder}{from}->{ladder}{to}")
+        }
+        track::transmission::SchedulerState::HillHold => "sched HILL HOLD    ".to_string(),
+        track::transmission::SchedulerState::GradeLimit => "sched GRADE LIMIT  ".to_string(),
+    }
+}
+
 /// The offline drive-telemetry HUD: rebuild the top-right block from the controlled tank's
 /// tick-truth components every frame. Reading sim components in `Update` (not a fixed system)
 /// is fine for a display — it never writes sim state. Every numeric field is fixed-width so the
@@ -510,9 +543,9 @@ fn cycle_transmission_feel(
 ///
 /// Line 1 the active mode; line 2 gear + rpm THROUGH THE LAW ([`track::transmission::readout`],
 /// a `*` marker through a shift's torque interruption and `P` on the parking latch); line 3 the
-/// hull ground speed (horizontal |velocity|, signed by hull-forward); line 4 the per-side belt
-/// speeds and their slip against the projected hull speed; line 5 the shaped drive command and
-/// the L600 steering detent.
+/// reserve scheduler; line 4 the hull ground speed (horizontal |velocity|, signed by
+/// hull-forward); line 5 the per-side belt speeds and their slip against the projected hull speed;
+/// line 6 the shaped drive command and the L600 steering detent.
 fn update_drive_hud(
     feel: Option<Res<track::sim::TransmissionFeelTest>>,
     gear: Option<Res<track::sim::TrackGear>>,
@@ -562,6 +595,11 @@ fn update_drive_hud(
         } else {
             "gear --  | rpm ----".to_string()
         };
+        let scheduler_line = if joint.is_some() {
+            scheduler_hud_line(&trans.0)
+        } else {
+            "sched --           ".to_string()
+        };
 
         // Hull ground speed: horizontal |velocity| signed by the hull-forward projection; slip
         // measures each belt against that projected hull speed (an approximation — labelled slip).
@@ -581,6 +619,7 @@ fn update_drive_hud(
         };
 
         out.push_str(&format!("\n{gear_line}"));
+        out.push_str(&format!("\n{scheduler_line}"));
         out.push_str(&format!(
             "\nhull {ground:+5.2} m/s ({:+6.1} km/h)",
             ground * 3.6

@@ -92,6 +92,11 @@ TankSpec(
                     // for a noticeable fraction of a second — INFERRED ~0.31 s, no shift-
                     // time datum reached.
                     shift_secs: 0.31,
+                    // OLVAR preselector capability [ANCHOR]: British Preliminary Report
+                    // No. 19 and period operating instructions describe preselection of an
+                    // arbitrary gear while any gear is engaged; one shift event therefore
+                    // addresses the scheduler's target directly.
+                    shift_addressing: Direct,
                 ),
                 steering: (
                     // (R_tight, R_wide) per forward gear (m): anchored at BOTH corners

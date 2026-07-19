@@ -526,9 +526,101 @@ readout 2345 → 2343 rpm, ramp launch slip 0.155 → 0.154 m/s; coast 12.2 s, b
 monotone [1..8], top speed 10.49 m/s, slope park exact, Governor parity bit-identical —
 all unchanged.
 
+## Stage C (2026-07-19) — reserve scheduler and anti-rollback
+
+Stage C replaces speed-band-only grade decisions inside the regenerative adapters with a
+load-aware composition. The Governor adapter remains the untouched parity path; there are no
+wire/replication changes, no manual controls, no crew-delay model, no terrain look-ahead, and no
+time/random input. All arithmetic is deterministic f32/integer-tick at the **64 Hz SIM POLICY**.
+
+**Demand and reserve law.** On each decision tick (`shift_ticks == 0`), the scheduler projects the
+owned ground reactions onto the signed mean-shaft axis and filters positive demand with
+`D_n = D_(n-1) + (sample - D_(n-1))/8`. The **8-tick = 0.125 s DERIVED** EMA freezes through a
+shift window so the torque cut cannot masquerade as a grade change. At current belt speed, each
+gear's full-throttle capability is
+
+`F_j(v) = min(torque_at(max(0, v) * G_j / r_s) * G_j / r_s, 2 * engine_force)`,
+
+and `R_j = F_j - D`. Required headroom is `0.10 D + 10 kN` (**DERIVED policy values**): the
+fraction avoids a zero-acceleration target, while 10 kN is 1.8% of Tiger weight and about half the
+fractional margin on the **191.2 kN DERIVED** 20-degree demand. The authored-curve reconstruction
+gives **~169 kN DERIVED** for Tiger F4 at **~980 rpm DERIVED** (the slope investigation's
+**165 kN DERIVED** rounding), so F4 is correctly deficient against **191.2 kN DERIVED** while F3
+clears margin.
+
+**Scheduler composition.** Upshifts retain the asymmetric stage-A/B contract—up band,
+propulsive intent, straight/detent domain, predicted positive landing, postshift band margin, and
+reversal dwell—then add `R_next >= margin`. Flat ground remains the same path because reserve is
+ample. Downshifts retain the ordinary low-rpm path while the current gear is capable; a negative
+reserve instead owns a **13-tick = 0.203125 s DERIVED** confirmation, after which the target is the
+highest lower gear clearing margin. A shorter spike resets the counter. The target is bounded by
+the current-speed over-rev gate; if the ideal target over-revs, the closest legal gear toward it is
+chosen. A direct skip must also predict a positive signed landing through its one cut window.
+
+**Capability principle: the model accepts all variants; the spec declares the vehicle.**
+`gearbox.shift_addressing` is `Direct | Sequential`, with `Sequential` the conservative serde
+default because adjacent, separately paid shifts assume no arbitrary-selection mechanism.
+`Direct` commits the legal target in one event/window. `Sequential` retains the same original→final
+target in local state and steps one adjacent gear per event, paying every window. The Tiger OLVAR
+authors `Direct` from its arbitrary-gear preselection provenance; the T-34-class lab box stays
+`Sequential`. The enum shape itself rejects unknown authored values during deserialization.
+
+**Anti-rollback.** Forward command near rest with negative effective reserve latches hill hold.
+The near-rest threshold is **0.25 m/s DERIVED** as `5 × PARK_ENGAGE_SPEED`; an active shift cut has
+effective `F = 0`, allowing the hold to catch a sequential cascade whose landing gear is statically
+capable but temporarily disconnected. Hold calls the existing service-brake stop-force path at its
+full declared envelope—no duplicate or hidden force—and selects a launch gear through the same
+reserve law. It releases only when post-power-gate coupling force exceeds `D + margin`, with the
+brake envelope retained for that handoff tick. Command release or reverse intent clears it. If no
+gear has non-negative reserve, `GRADE LIMIT` remains exposed and the declared brakes stay applied.
+
+**REV-14 rider.** `demand_n`, its spawn seed, `grade_confirm_ticks`, held target,
+`SchedulerState`, and `hill_hold` are local `TransmissionState` under REV 13. They are sim state a
+future rollback replay must restore alongside gear/shift/crank; none is derivable from an
+instantaneous belt sample. No replication field was added in this stage.
+
+**Coupling seam only.** A future torque converter belongs at the existing `clutch_coupling` seam
+and would author its own characteristic. Stage C does not implement one.
+
+| gate | Stage-C result |
+|---|---|
+| Reserve arithmetic + 20-degree upshift veto | F4@**~980 rpm DERIVED** gives **~169 kN DERIVED** < **191.2 kN DERIVED** demand; F3 clears margin; F3→F4 veto unit green |
+| Confirmation transient | **12 ticks DERIVED test input** does not shift; counter clears before the **13-tick DERIVED** threshold |
+| Direct vs Sequential unit | same F6→F3 target: Direct commits F3 in one event; Sequential commits F5 and later reaches F3 through paid windows |
+| Direct signed landing | negative predicted landing refuses the skip; no window starts |
+| 20-degree F6 approach, Direct | **3.281 s MEASURED** crest, trace `[6,4]`, reserve state `F6→F4`, **1.393 m/s MEASURED** minimum uphill speed, **0.0000 m MEASURED** retreat, no hill hold |
+| 20-degree F6 approach, Sequential | **5.938 s MEASURED** crest, trace `[6,5,4,3,2,1]`, **43 ticks MEASURED** hill hold, **-0.124 m/s MEASURED** minimum course-tangent settling speed; **0.0364 m MEASURED** static-compliance settle (inside the existing **0.05 m DERIVED gate bound**), not a slide-off |
+| 20-degree hill-hold launch from F5 | hold releases at **0.906 s MEASURED**; reaches 0.5 m uphill at **2.062 s MEASURED**; **0.0000 m MEASURED** retreat |
+| 30-degree no-capable-gear fixture | weak-engine/160 kN-per-side modeled-brake variant exposes `GRADE LIMIT` for **384/384 ticks MEASURED** (6 s DERIVED), drift **0.0041 m MEASURED**, belt m **0.0000 m/s MEASURED** |
+| Existing 20-degree from-rest F1 | **8.2 s MEASURED**, trace `[1]`, launch slip **0.154 m/s MEASURED**—unchanged |
+| Existing flat anti-hunting | monotone `[1,2,3,4,5,6,7,8]` **MEASURED**—unchanged |
+| Existing top speed, coast, brake | **10.49 m/s MEASURED**; **12.2 s MEASURED** from release to the **2 m/s DERIVED gate threshold**; **2.31 s MEASURED** from opposite command to the **1 m/s DERIVED gate threshold** |
+| Existing pivots and spin-up | L600 **-0.1314 rad/s MEASURED**; Hybrid **-0.6373 rad/s MEASURED**; Hybrid reaches the **90% DERIVED threshold** in **0.95 s MEASURED**, crank **908 rpm MEASURED** at the **0.1 s DERIVED sample** and **2064 rpm MEASURED** steady |
+| Existing slope park/backslide | 20-degree park drift **0.0000 m MEASURED** over the **4 s DERIVED gate window**; signed-shaft forward/reverse backslide units green |
+| Governor parity | bit-identical parity test green **MEASURED**; float path untouched |
+| Wire and spec pins | wire-surface/types/fingerprint and Tiger schema/bind/validation pins all green **MEASURED**; no replication registration changed |
+
 ## Ranked recommendation
 
 1. **Tiger: fixed-radius, geared regenerative model behind the joint transmission seam.** Historically characteristic, fixes high-speed sluggishness, and derives stately pivot behavior from ratios and power.
 2. **Arcade default: geared regenerative `m/d` hybrid.** Best controls and least mechanism state while retaining honest energy flow.
 3. **Full continuous Merritt-Brown/HSWL adapter** for vehicles that actually use it.
 4. **Clutch-and-brake adapter** only for T-34-class vehicles; its lack of neutral steer and heat-wasting turns should remain genuine traits.
+
+### Stage C review round (2026-07-19)
+
+Adversarial review (codex) rejected the first cut with 1 blocking + 5 serious findings;
+all dispositioned: hill-hold is now a LIVE latch (per-tick reselection, truthful
+GradeLimit, reserve-scaled release formula, 32-tick re-engage cooldown overridden by
+real rollback); a CONFIRMED reserve deficit outranks the upshift arm and is exempt
+from the reversal dwell (a correction, not hunting); sequential targets revalidate
+intent + demand every step; the demand EMA reseeds on direction swap; protective
+overrun upshift (governed + 150 rpm, no propulsive intent needed) closes the downhill
+over-rev path; confirmation counter decays instead of hard-resetting; reverse-ladder
+HUD labels. The 30° gate now boots the untouched Tiger blueprint and asserts the
+HONEST result: the Tiger CLIMBS 30° from a hill-hold launch (500 kN modeled F1 launch
+force vs 279.6 kN demand) — the previous synthetic fixture faked a grade limit. The
+parked 30° slide (192 kN brake < 279.6 kN) remains correct and emergent; a
+static-vs-dynamic brake capacity split is queued pending a real Argus rating. A
+two-world bit-exact FixedRadii slope replay (full TransmissionState incl. EMA,
+counter, target, latch; 512 ticks) now guards stage-C determinism.

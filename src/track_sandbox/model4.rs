@@ -36,7 +36,7 @@ use crate::track::forces::{
 };
 use crate::track::oracle::{BlockField, TerrainOracle};
 use crate::track::transmission::{
-    self, TransmissionAuthoring, TransmissionInput, TransmissionParams,
+    self, ShiftAddressing, TransmissionAuthoring, TransmissionInput, TransmissionParams,
 };
 use crate::track::wheels::{WheelParams, wheel_lift_step, wheel_lift_target};
 
@@ -405,6 +405,7 @@ impl Default for T34Transmission {
             clutch_capacity_nm: 2860.0,
             // Manual crash-box shift, drive uncoupled ~0.3 s — INFERRED.
             shift_secs: 0.31,
+            shift_addressing: ShiftAddressing::Sequential,
             sprocket_radius_m: DRIVE_RADIUS + TRACK_THICKNESS / 2.0,
             half_tread_m: TRACK_HALF_WIDTH,
         }))

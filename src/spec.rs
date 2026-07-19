@@ -15,6 +15,7 @@ use std::collections::HashMap;
 
 use crate::damage::{Capability, CrewStation, FunctionRole, Requirement};
 use crate::tank::{ServoSpec, Tank};
+use crate::track::transmission::ShiftAddressing;
 
 /// One tank variant's spec sheet — the typed contents of a `.tank.ron` file. Its fields *are* the
 /// components the sim consumes; `tank::apply_tank_spec` copies them onto the rig once ready.
@@ -318,6 +319,11 @@ pub struct GearboxSpec {
     /// unauthored (INFERRED, no per-vehicle shift-time datum reached).
     #[serde(default = "default_shift_secs")]
     pub shift_secs: f32,
+    /// Selection capability. Missing sheets default to [`ShiftAddressing::Sequential`]: paying
+    /// one window per adjacent gear is the conservative behavior, while arbitrary selection is a
+    /// vehicle capability that must be declared.
+    #[serde(default)]
+    pub shift_addressing: ShiftAddressing,
 }
 
 /// See [`GearboxSpec::shift_secs`].
@@ -809,6 +815,7 @@ mod tests {
         assert_eq!(tr.engine.clutch_capacity_nm, 2400.0);
         assert_eq!(tr.gearbox.forward_speeds_kmh.len(), 8);
         assert_eq!(tr.gearbox.reverse_speeds_kmh.len(), 4);
+        assert_eq!(tr.gearbox.shift_addressing, ShiftAddressing::Direct);
         assert_eq!(*tr.gearbox.forward_speeds_kmh.last().unwrap(), 45.4);
         assert_eq!(tr.steering.radii[0].0, 3.44);
         assert_eq!(tr.steering.radii[7].1, 165.0);
@@ -901,6 +908,31 @@ mod tests {
         assert_eq!(
             spec.views[&ViewKind::Gunner].requires,
             vec![Group::Single(Part::Gunner)]
+        );
+    }
+
+    /// Older/unspecified vehicle sheets get the mechanically conservative crash-box behavior:
+    /// one adjacent gear per paid interruption window. Arbitrary direct selection must be an
+    /// explicit capability declaration.
+    #[test]
+    fn gearbox_shift_addressing_defaults_to_sequential() {
+        let gearbox: GearboxSpec = ron::de::from_str(
+            "(forward_speeds_kmh:[8.0,12.0],reverse_speeds_kmh:[8.0],\
+             shift_up_rpm:1700.0,shift_down_rpm:900.0)",
+        )
+        .expect("a gearbox may omit the backward-compatible addressing field");
+        assert_eq!(
+            gearbox.shift_addressing,
+            crate::track::transmission::ShiftAddressing::Sequential
+        );
+
+        let invalid = ron::de::from_str::<GearboxSpec>(
+            "(forward_speeds_kmh:[8.0,12.0],reverse_speeds_kmh:[8.0],\
+             shift_up_rpm:1700.0,shift_down_rpm:900.0,shift_addressing:Warp)",
+        );
+        assert!(
+            invalid.is_err(),
+            "the closed addressing enum must reject unknown vehicle capabilities"
         );
     }
 

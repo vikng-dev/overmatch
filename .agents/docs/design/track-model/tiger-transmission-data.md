@@ -8,6 +8,10 @@ ANCHOR (source-stated) / DERIVED (arithmetic from anchors) / INFERRED (assumptio
 ## Anchors
 
 - Maybach OLVAR OG 40 12 16, 8F/4R preselector [ANCHOR]
+- OLVAR direct addressing: British Preliminary Report No. 19 and period operating instructions
+  describe preselection of an arbitrary gear while any gear is engaged [ANCHOR]. Therefore the
+  Tiger authors `gearbox.shift_addressing: Direct`: the scheduler may commit F6→F4 in one paid
+  shift window. This is a selection capability, not a faster generic gearbox rule.
 - Per-gear max speeds @ 3000 rpm (km/h): F1 2.8, F2 4.3, F3 6.2, F4 9.2, F5 14.1, F6 20.9,
   F7 30.5, F8 45.4; R1–R4 identical to F1–F4 [ANCHOR — hamby; Jentz scan gives 2.84 for F1]
 - Top gear: gearbox 0.98 × final drive 10.55 = total 10.339 [ANCHOR]
@@ -67,3 +71,8 @@ Governed fleet condition = 2500 rpm [ANCHOR]; keep 3000-rpm point for reference 
 - F8 @ 2500 → 10.48 m/s ✓ matches authored max_speed 10.5.
 - F1 combined sprocket force at peak torque ≈ 1850×167.6/r_s ≈ 750–790 kN (r_s-dependent)
   → far past the 2×252 kN grip cap: first gear saturates traction, as it should.
+- Stage-C 20-degree reconstruction: total grade demand is **191.2 kN DERIVED** from
+  `57 000 × 9.81 × sin(20°)`. At the investigation's **~980 rpm DERIVED** F4 landing, the authored
+  curve and reduction give **~169 kN DERIVED** (the original investigation's **165 kN DERIVED**
+  rounding), a
+  reserve deficit; F3 clears the `0.10 D + 10 kN` scheduler margin.

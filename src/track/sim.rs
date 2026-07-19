@@ -93,13 +93,14 @@ pub struct ElementGripFeelTest;
 #[derive(Resource)]
 pub struct TransmissionFeelTest(pub TransmissionMode);
 
-/// The joint transmission's path-dependent state (gear, shift countdown, steering detent,
-/// direction, engine crank speed ω_e) — a plain LOCAL component on every tank root,
+/// The joint transmission's path-dependent state (gear/window/detent/direction/crank plus the
+/// stage-C demand/filter/target/hill-hold scheduler state) — a plain LOCAL component on every tank root,
 /// spawn-constructed like [`TrackGripElements`]: NOT registered in the net protocol, never
 /// serialized, never hashed (REV 13; the wire promotion is REV 14 — ω_e rides that later
 /// netcode arc with the rest of the list, since a slipping clutch makes it underivable
 /// from the belt). MP never reads or writes it — only the offline composition's
-/// non-governor branch of [`apply_track_forces`] touches it.
+/// non-governor branch of [`apply_track_forces`] touches it. The module-level REV-14 rider names
+/// every field that must eventually join rollback together; no wire field is added here.
 #[derive(Component, Clone, Copy, PartialEq, Debug, Default)]
 pub struct TankTransmission(pub TransmissionState);
 
@@ -169,6 +170,13 @@ impl TrackGear {
     /// only the gated drive step and the HUD legend consume it.
     pub fn trans(&self) -> Option<&TransmissionParams> {
         self.trans.as_ref()
+    }
+
+    /// Test-only variant fixture seam: headless gates may vary a declared transmission capability
+    /// without rebuilding the Tiger asset/spec. Production callers get read-only params.
+    #[cfg(test)]
+    pub(crate) fn trans_mut(&mut self) -> Option<&mut TransmissionParams> {
+        self.trans.as_mut()
     }
 }
 
@@ -254,6 +262,7 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
             engine_inertia_kgm2: tr.engine.inertia_kgm2,
             clutch_capacity_nm: tr.engine.clutch_capacity_nm,
             shift_secs: tr.gearbox.shift_secs,
+            shift_addressing: tr.gearbox.shift_addressing,
             sprocket_radius_m: sprocket_r,
             half_tread_m: spec.plane_x,
         })
