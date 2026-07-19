@@ -18,7 +18,9 @@ use bevy::prelude::*;
 use serde_json::{Value, json};
 
 use crate::tank::{Controlled, Tank, TankSim};
-use crate::track::sim::{TankTransmission, TrackContacts, TrackDrive, TrackGrip};
+use crate::track::sim::{
+    TankTransmission, TrackContacts, TrackDrive, TrackGrip, TrackGripElements,
+};
 use crate::track::transmission::SchedulerState;
 
 use bevy::ecs::system::SystemParam;
@@ -170,7 +172,7 @@ struct TankStateHash {
     rot: u64,
     lv: u64,
     av: u64,
-    /// The carried-state combination (fixed order: `drv, srv, rld, rec, blt, trn`) — kept so
+    /// The carried-state combination (fixed order: `drv, srv, rld, rec, blt, trn, elm`) — kept so
     /// existing analysis keyed on `hsim` still gets its single "did any carried state differ?"
     /// boolean.
     sim: u64,
@@ -186,21 +188,24 @@ struct TankStateHash {
     blt: u64,
     /// Complete atomic `TankTransmission` state in authoritative inventory order.
     trn: u64,
+    /// Exact per-element strain/dwell in side, link, column order.
+    elm: u64,
 }
 
 /// Hash a tank root's canonical sim state (see the module-level note on world-independence). Pure and
 /// ECS-free precisely so it is unit-testable: same inputs → same hash, one flipped velocity bit → a
 /// different hash, and — because no entity ever enters it — hash equality is independent of the two
 /// worlds' entity ids. Field order is fixed and load-bearing: `position, rotation, linvel, angvel`,
-/// then `TrackDrive` (shaped command + per-side belt state), `TrackGrip`, the complete
-/// `TankTransmission` inventory, then each `TankSim` `Vec` in slot order.
-fn hash_tank_state(
+/// then `TrackDrive` (shaped command + per-side belt state), `TrackGrip`, `TrackGripElements`, the
+/// complete `TankTransmission` inventory, then each `TankSim` `Vec` in slot order.
+fn hash_tank_state_with_elements(
     position: Vec3,
     rotation: Quat,
     linvel: Vec3,
     angvel: Vec3,
     drive: &TrackDrive,
     grip: &TrackGrip,
+    elements: Option<&TrackGripElements>,
     transmission: &TankTransmission,
     sim: &TankSim,
 ) -> TankStateHash {
@@ -220,9 +225,8 @@ fn hash_tank_state(
     ha.write_vec3(angvel);
     let av = ha.finish();
 
-    // The carried state hashes as five per-field-family streams so a `hsim` mismatch names its
-    // field (servo vs reload vs recoil vs belt vs drive), then combines into the single `sim`
-    // boolean existing analysis keys on.
+    // The carried state hashes as independent field-family streams so a `hsim` mismatch names its
+    // field, then combines into the single `sim` boolean existing analysis keys on.
     let mut hd = Fnv64::new();
     hd.write_f32(drive.throttle);
     hd.write_f32(drive.steer);
@@ -298,8 +302,25 @@ fn hash_tank_state(
     htr.write_u8(st.hold_reengage_ticks);
     let trn = htr.finish();
 
+    // Explicit side then flat `link * 3 + column` order. Raw float bits and the exact
+    // force-affecting dwell byte make this the determinism hash, not the coarse anchor digest.
+    let mut hel = Fnv64::new();
+    hel.write_bool(elements.is_some());
+    if let Some(elements) = elements {
+        for (side_index, side) in elements.sides.iter().enumerate() {
+            hel.write_u8(side_index as u8);
+            hel.write_u32(side.strain.len() as u32);
+            for (element, (&strain, &dwell)) in side.strain.iter().zip(&side.dwell).enumerate() {
+                hel.write_u32(element as u32);
+                hel.write_vec3(strain);
+                hel.write_u8(dwell);
+            }
+        }
+    }
+    let elm = hel.finish();
+
     let mut hs = Fnv64::new();
-    for sub in [drv, srv, rld, rec, blt, trn] {
+    for sub in [drv, srv, rld, rec, blt, trn, elm] {
         hs.write_u64(sub);
     }
     let sim_hash = hs.finish();
@@ -323,7 +344,34 @@ fn hash_tank_state(
         rec,
         blt,
         trn,
+        elm,
     }
+}
+
+/// Test convenience for hashes whose element field is intentionally absent. Production always
+/// calls [`hash_tank_state_with_elements`] explicitly so omission cannot be accidental.
+#[cfg(test)]
+fn hash_tank_state(
+    position: Vec3,
+    rotation: Quat,
+    linvel: Vec3,
+    angvel: Vec3,
+    drive: &TrackDrive,
+    grip: &TrackGrip,
+    transmission: &TankTransmission,
+    sim: &TankSim,
+) -> TankStateHash {
+    hash_tank_state_with_elements(
+        position,
+        rotation,
+        linvel,
+        angvel,
+        drive,
+        grip,
+        None,
+        transmission,
+        sim,
+    )
 }
 
 /// In-memory fresh-App digest. `simulation` is exactly the production trace's cross-world hash;
@@ -345,6 +393,7 @@ pub(crate) struct CanonicalTankStateDigest {
     recoil: u64,
     belts: u64,
     transmission: u64,
+    elements: u64,
     rounds_fired: u64,
 }
 
@@ -356,16 +405,18 @@ pub(crate) fn canonical_tank_state_digest(
     angvel: Vec3,
     drive: &TrackDrive,
     grip: &TrackGrip,
+    elements: &TrackGripElements,
     transmission: &TankTransmission,
     sim: &TankSim,
 ) -> CanonicalTankStateDigest {
-    let hash = hash_tank_state(
+    let hash = hash_tank_state_with_elements(
         position,
         rotation,
         linvel,
         angvel,
         drive,
         grip,
+        Some(elements),
         transmission,
         sim,
     );
@@ -390,6 +441,7 @@ pub(crate) fn canonical_tank_state_digest(
         recoil: hash.rec,
         belts: hash.blt,
         transmission: hash.trn,
+        elements: hash.elm,
         rounds_fired,
     }
 }
@@ -631,6 +683,7 @@ fn record_tick(
             &AngularVelocity,
             &TrackDrive,
             &TrackGrip,
+            Option<&TrackGripElements>,
             &TankTransmission,
             &TrackContacts,
             &TankSim,
@@ -693,6 +746,7 @@ fn record_tick(
         angvel,
         drive,
         grip,
+        elements,
         transmission,
         track_contacts,
         sim,
@@ -727,20 +781,6 @@ fn record_tick(
         // — the collision-stress signal the jitter correlates with.
         let (hull_contacts, penetration) = contacts.get(&entity).copied().unwrap_or((0, 0.0));
 
-        // The world-independent authority-simulation hash. It feeds off tick-truth pose/velocity
-        // and carried state already in hand, except the view-only tracer phase documented on
-        // `TankStateHash`; costs a few dozen FNV rounds and runs only when tracing is armed.
-        let hash = hash_tank_state(
-            position.0,
-            rotation.0,
-            linvel.0,
-            angvel.0,
-            drive,
-            grip,
-            transmission,
-            sim,
-        );
-
         // The cross-world pairing key. Client / SP: the game `Controlled` marker (own predicted tank).
         // Server: `ControlledBy` (the authoritative copy of that same player tank). Kept per-role so a
         // 2-player world stays correct — on the client only OUR avatar carries `Controlled`, while the
@@ -751,6 +791,24 @@ fn record_tick(
         } else {
             controlled
         };
+
+        // The world-independent authority-simulation hash. It feeds off tick-truth pose/velocity
+        // and carried state already in hand, except the view-only tracer phase documented on
+        // `TankStateHash`; costs a few dozen FNV rounds and runs only when tracing is armed.
+        let hash = hash_tank_state_with_elements(
+            position.0,
+            rotation.0,
+            linvel.0,
+            angvel.0,
+            drive,
+            grip,
+            elements,
+            transmission,
+            sim,
+        );
+        // Remote clients intentionally receive no exact element field. Null makes that disclosure
+        // boundary explicit so the analyzer omits private-state and combined equality for the pair.
+        let disclosed_element_hash = own.then_some(hash.elm);
 
         // `mut` for the `rp` stamp and the `simf` verbose dump below.
         let mut row = json!({
@@ -790,6 +848,7 @@ fn record_tick(
             "hrec": hash.rec,
             "hblt": hash.blt,
             "htrn": hash.trn,
+            "helm": disclosed_element_hash,
         });
         // Raw carried-state values (`SPIKE_TRACE_SIM_FIELDS`): the magnitudes behind the sub-hash
         // booleans. `thr`/`str` (TrackDrive) are already row fields above.
@@ -1273,6 +1332,69 @@ mod tests {
         }
     }
 
+    /// Element strain and force-affecting contact lifetime are exact state, ordered by side then
+    /// flat material `link * 3 + column`, and localize to their own carried-state stream.
+    #[test]
+    fn element_field_bits_localize_to_element_stream() {
+        let (p, q, lv, av, drive, sim) = sample();
+        let grip = TrackGrip::default();
+        let transmission = sample_transmission();
+        let elements = TrackGripElements::for_links(2);
+        let base = hash_tank_state_with_elements(
+            p,
+            q,
+            lv,
+            av,
+            &drive,
+            &grip,
+            Some(&elements),
+            &transmission,
+            &sim,
+        );
+
+        let mut strain = elements.clone();
+        strain.sides[1].strain[4].z = f32::from_bits(1);
+        let strain_hash = hash_tank_state_with_elements(
+            p,
+            q,
+            lv,
+            av,
+            &drive,
+            &grip,
+            Some(&strain),
+            &transmission,
+            &sim,
+        );
+        assert_ne!(base.elm, strain_hash.elm);
+        assert_ne!(base.sim, strain_hash.sim);
+        assert_eq!(
+            (base.drv, base.srv, base.rld, base.rec, base.blt, base.trn),
+            (
+                strain_hash.drv,
+                strain_hash.srv,
+                strain_hash.rld,
+                strain_hash.rec,
+                strain_hash.blt,
+                strain_hash.trn,
+            )
+        );
+
+        let mut dwell = elements.clone();
+        dwell.sides[0].dwell[0] = 1;
+        let dwell_hash = hash_tank_state_with_elements(
+            p,
+            q,
+            lv,
+            av,
+            &drive,
+            &grip,
+            Some(&dwell),
+            &transmission,
+            &sim,
+        );
+        assert_ne!(base.elm, dwell_hash.elm);
+    }
+
     /// `rounds_fired` rolls back because it derives tracer cadence, but a dropped predicted round
     /// may leave that phase one round from authority without changing simulation truth. The
     /// production trace therefore excludes it; the same-platform fresh-App digest must not.
@@ -1280,17 +1402,37 @@ mod tests {
     fn fresh_app_digest_covers_the_rollback_tracer_phase() {
         let (p, q, lv, av, drive, sim) = sample();
         let grip = TrackGrip::default();
+        let elements = TrackGripElements::for_links(2);
         let transmission = sample_transmission();
         let base_trace = hash_tank_state(p, q, lv, av, &drive, &grip, &transmission, &sim);
-        let base = canonical_tank_state_digest(p, q, lv, av, &drive, &grip, &transmission, &sim);
+        let base = canonical_tank_state_digest(
+            p,
+            q,
+            lv,
+            av,
+            &drive,
+            &grip,
+            &elements,
+            &transmission,
+            &sim,
+        );
 
         let mut phase_shifted = sim.clone();
         phase_shifted.weapons[0].rounds_fired =
             phase_shifted.weapons[0].rounds_fired.wrapping_add(1);
         let shifted_trace =
             hash_tank_state(p, q, lv, av, &drive, &grip, &transmission, &phase_shifted);
-        let shifted =
-            canonical_tank_state_digest(p, q, lv, av, &drive, &grip, &transmission, &phase_shifted);
+        let shifted = canonical_tank_state_digest(
+            p,
+            q,
+            lv,
+            av,
+            &drive,
+            &grip,
+            &elements,
+            &transmission,
+            &phase_shifted,
+        );
 
         assert_eq!(base_trace.combined, shifted_trace.combined);
         assert_eq!(base.simulation, shifted.simulation);

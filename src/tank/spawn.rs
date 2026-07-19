@@ -22,7 +22,7 @@ use crate::damage::{Ammo, Crewman, TankCapabilities, VolumeOf};
 use crate::firecontrol::RangeTable;
 use crate::shooting::RecoilParams;
 use crate::spec::{TankSpec, TankSpecHandle, Trigger, ViewKind};
-use crate::track::sim::{TankTransmission, TrackGripElements};
+use crate::track::sim::{TankTransmission, TrackGripElements, TrackGripWake};
 
 /// Presentation handles. Loading may gate admission or view attachment, never simulation data.
 #[derive(Resource, Clone)]
@@ -99,7 +99,7 @@ impl<'a> TankContent<'a> {
         self.geometry
     }
 
-    pub(super) fn spec(self) -> &'a TankSpec {
+    pub(crate) fn spec(self) -> &'a TankSpec {
         self.spec
     }
 }
@@ -134,6 +134,7 @@ pub(crate) fn spawn_complete_tank<B: Bundle>(
     let mut root = commands.spawn((
         presentation.root_bundle(),
         TrackGripElements::for_links(content.spec().track.link_count),
+        TrackGripWake::default(),
         // Complete REV-14 transmission state, synchronously constructed from spec data before the
         // root can replicate or simulate.
         tank_transmission(content.spec()),
@@ -159,10 +160,8 @@ pub(crate) fn attach_replicated_tank_body<B: Bundle>(
         .entity(root)
         .insert((
             presentation.root_bundle(),
-            // Same spawn-sized element slabs as `spawn_complete_tank` — see the note there.
-            TrackGripElements::for_links(content.spec().track.link_count),
-            // TankTransmission arrived in the replication init snapshot. Do not overwrite a late
-            // joiner's current authority state with a fresh spec-derived value here.
+            // TankTransmission and TrackGripElements arrived in the replication init snapshot. Do
+            // not overwrite a late joiner's current authority state with fresh spec-derived values.
             root_bundle,
         ))
         .observe(bind_tank_view);

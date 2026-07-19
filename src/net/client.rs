@@ -99,6 +99,7 @@ pub fn run() {
         tick_duration: Duration::from_secs_f64(1.0 / 64.0),
     });
     app.add_plugins(super::plugin);
+    super::grip::install_client(&mut app);
     app.add_plugins(physics::physics_plugins());
     // The render half of prediction (frame interpolation + armed rollback correction) — client
     // only; the server has no `Predicted` view to smooth. Mounted in simulate mode too: headless

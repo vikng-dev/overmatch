@@ -20,6 +20,7 @@
 //!   chasing `command × max_speed`, ground reaction, reflected inertia; phase advection.
 
 use bevy::math::{Affine3A, Vec2, Vec3};
+use serde::{Deserialize, Serialize};
 
 use super::oracle::TerrainOracle;
 use super::route::{polyline_len, resample};
@@ -193,7 +194,7 @@ pub struct ForceParams {
 /// ([`GRIP_ELEMENT_LOSS_DWELL_TICKS`]), and only definitive departure (dwell expired —
 /// cycled to the return run, or lifted off) forgets — memory expires within one
 /// contact-patch dwell while driving; a parked tank holds it through contact flicker.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct GripElements {
     /// The pads' accumulated shear against the ground (bristle deflection, world-space
     /// meters), one per material link × lateral column, flat index `link * 3 + column`.

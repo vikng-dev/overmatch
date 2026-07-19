@@ -12,8 +12,10 @@ use lightyear::prelude::server::*;
 use lightyear::prelude::*;
 
 use super::disclosure::{CombatDisclosure, NetTankStatus};
+use super::grip::GripRestState;
 use super::protocol::{
-    LaunchedTurretPose, NetBelts, NetCrew, NetTank, PROTOCOL_FINGERPRINT, ServoAngles,
+    LaunchedTurretPose, NetBelts, NetCrew, NetTank, NetTrackGripAnchor, PROTOCOL_FINGERPRINT,
+    ServoAngles,
 };
 use super::{diagnostics, harness, open_gameplay_gate, physics};
 use crate::command::{ConsumeCommandEdges, TankCommand};
@@ -52,6 +54,7 @@ pub fn run() {
         tick_duration: Duration::from_secs_f64(1.0 / 64.0),
     });
     app.add_plugins(super::plugin);
+    super::grip::install_server(&mut app);
     super::disclosure::install_server(&mut app);
     app.add_plugins(physics::physics_plugins());
     app.add_plugins(SimPlugin);
@@ -282,6 +285,7 @@ fn spawn_player_tank(
                     lifetime: default(),
                 },
             ),
+            (NetTrackGripAnchor::default(), GripRestState::default()),
         ),
     )
 }
@@ -349,6 +353,7 @@ fn spawn_bot_entity(
                 // No owner or prediction target: every client interpolates this body.
                 InterpolationTarget::to_clients(NetworkTarget::All),
             ),
+            (NetTrackGripAnchor::default(), GripRestState::default()),
         ),
     )
 }

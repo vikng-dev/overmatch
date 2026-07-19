@@ -18,6 +18,9 @@ use super::protocol::{
 /// Distinct samples required before this fallback requests a rollback.
 const BREACH_STREAK_TO_FIRE: u8 = 3;
 
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) struct RollbackWatchdog;
+
 /// Per-component state; a sample contributes to the streak at most once.
 #[derive(Default, Clone, Copy)]
 struct ComponentState {
@@ -36,6 +39,7 @@ pub(crate) fn plugin(app: &mut App) {
     app.add_systems(
         PreUpdate,
         rollback_watchdog
+            .in_set(RollbackWatchdog)
             .after(ReplicationSystems::Receive)
             .before(RollbackSystems::Check)
             .run_if(not(is_in_rollback)),

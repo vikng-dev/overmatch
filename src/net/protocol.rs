@@ -28,7 +28,7 @@ use crate::state::GameplaySet;
 use crate::tank::{
     Muzzle, Rig, ServoCommand, ServoIndex, ServoSpec, TankRoot, TankSim, Weapon, WeaponIndex,
 };
-use crate::track::sim::{TankTransmission, TrackDrive, TrackGrip};
+use crate::track::sim::{TankTransmission, TrackDrive, TrackGripEffect, TrackGripElements};
 use crate::track::transmission::TransmissionState;
 use crate::{CombatantId, ShotId};
 
@@ -40,7 +40,7 @@ use crate::{CombatantId, ShotId};
 // compatibility guard.
 
 /// Bump and re-pin the affected wire manifest value for every wire-surface change.
-pub const PROTOCOL_REV: u32 = 14;
+pub const PROTOCOL_REV: u32 = 15;
 
 /// Compatibility tag derived from the complete pinned wire manifest.
 pub const PROTOCOL_FINGERPRINT: u64 = protocol_fingerprint_for(
@@ -157,6 +157,69 @@ pub struct BeltSnapshot {
 pub struct NetBelts {
     /// `Some(BeltSnapshot)` for a belt-fed weapon, `None` for a `Single`, in `TankSim::weapons` order.
     pub weapons: Vec<Option<BeltSnapshot>>,
+}
+
+/// Loss-tolerant server anchor for the local per-element grip history.
+///
+/// The eight floats are physical effects produced by one completed fixed tick: total traction force,
+/// traction torque about the hull center of mass, and the longitudinal reaction on each belt. The
+/// digest is diagnostic/correction-request evidence only; it never directly forces rollback.
+#[derive(Component, Clone, Copy, Default, PartialEq, Debug, Serialize, Deserialize)]
+pub struct NetTrackGripAnchor {
+    /// Tick whose end-of-tick field produced this effect.
+    pub producing_tick: Tick,
+    /// Authority rest epoch current at `producing_tick`.
+    pub rest_epoch: u32,
+    pub traction_force: Vec3,
+    pub traction_torque: Vec3,
+    pub belt_reaction: [f32; 2],
+    pub field_digest: u32,
+}
+
+/// One occupied/non-zero element in an exact sparse grip checkpoint.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub struct GripCheckpointEntry {
+    pub side: u8,
+    pub element: u16,
+    /// World-space elastic strain, preserved as exact `f32` values.
+    pub strain: Vec3,
+    /// The current force law's exact contact-lifetime generation: its force-affecting dwell byte.
+    pub contact_generation: u8,
+}
+
+/// One independently delivered piece of an exact owner-private grip checkpoint.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct GripCheckpointChunk {
+    pub tank: Entity,
+    pub epoch: u32,
+    /// The checkpoint is the field entering this fixed tick.
+    pub state_entering_tick: Tick,
+    pub elements_per_side: u16,
+    pub chunk_index: u8,
+    pub chunk_count: u8,
+    pub entries: Vec<GripCheckpointEntry>,
+    /// Hash of the complete canonical sparse checkpoint, repeated on every chunk.
+    pub checkpoint_hash: u64,
+}
+
+impl MapEntities for GripCheckpointChunk {
+    fn map_entities<M: EntityMapper>(&mut self, mapper: &mut M) {
+        self.tank = mapper.get_mapped(self.tank);
+    }
+}
+
+/// Owner request for a fresh checkpoint; the authority rate-limits and deduplicates it per tank and
+/// epoch, then captures current state rather than replaying an older snapshot.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub struct GripResyncRequest {
+    pub tank: Entity,
+    pub epoch: u32,
+}
+
+impl MapEntities for GripResyncRequest {
+    fn map_entities<M: EntityMapper>(&mut self, mapper: &mut M) {
+        self.tank = mapper.get_mapped(self.tank);
+    }
 }
 
 /// A public, loss-tolerant reconstruction of an authoritative shot. The receiver maps `shooter` for
@@ -346,6 +409,12 @@ pub struct OutcomeChannel;
 
 /// Owner-private reliable channel for individual [`DamageConfirm`] facts.
 pub struct DamageChannel;
+
+/// Owner-private unordered-reliable lane for independently deliverable checkpoint chunks.
+pub struct GripCheckpointChannel;
+
+/// Reliable owner-to-authority lane for deduplicated fresh-checkpoint requests.
+pub struct GripRequestChannel;
 
 /// The tank's health-bearing volumes in `TankVolumes` order — the SINGLE definition of which volumes
 /// (and in what order) [`NetCrew`] snapshots, so publish and apply can never drift out of alignment
@@ -716,11 +785,6 @@ pub(crate) const ROLLBACK_TRACK_DRIVE: f32 = 0.25;
 /// Exact transmission divergence gate expressed as a Boolean 0/1 magnitude for trace attribution.
 /// Every discrete field compares exactly; both floats compare by raw bits.
 pub(crate) const ROLLBACK_TANK_TRANSMISSION: f32 = 1.0;
-/// `TrackGrip` divergence gate (N): max over the four elastic grip resultants. 2 kN is a
-/// one-tick hull-velocity discrepancy of ~1.1 mm/s on the Tiger and <1% of a flat side's
-/// grip budget — a netcode ratchet (tighten from MP measurements), not a friction constant.
-pub(crate) const ROLLBACK_TRACK_GRIP_N: f32 = 2_000.0;
-
 // The registered conditions and watchdog share these metrics and thresholds.
 
 /// Confirmed-vs-predicted `Position` divergence: straight-line distance (m).
@@ -744,15 +808,6 @@ pub(crate) fn angular_velocity_error(a: &AngularVelocity, b: &AngularVelocity) -
 }
 
 /// Confirmed-vs-predicted `TrackDrive` divergence: the largest per-side belt-state delta.
-/// Confirmed-vs-predicted `TrackGrip` divergence: the largest per-side per-axis delta (N).
-pub(crate) fn track_grip_error(a: &TrackGrip, b: &TrackGrip) -> f32 {
-    let mut worst: f32 = 0.0;
-    for (sa, sb) in a.sides.iter().zip(&b.sides) {
-        worst = worst.max((sa[0] - sb[0]).abs()).max((sa[1] - sb[1]).abs());
-    }
-    worst
-}
-
 pub(crate) fn track_drive_error(a: &TrackDrive, b: &TrackDrive) -> f32 {
     let mut worst = (a.throttle - b.throttle)
         .abs()
@@ -836,29 +891,34 @@ const WIRE_SURFACE: &[&str] = &[
     "NetTankStatus",
     "LaunchedTurretPose",
     "NetBelts",
-    // Shot transport channels, followed by their message types.
+    "NetTrackGripAnchor",
+    // Message channels, followed by their message types.
     "FireChannel",
     "OutcomeChannel",
     "DamageChannel",
+    "GripCheckpointChannel",
+    "GripRequestChannel",
     "FireVisualBatch",
     "FireEvent",
     "RicochetKeyframe",
     "ImpactConfirm",
     "DamageConfirm",
+    "GripCheckpointChunk",
+    "GripResyncRequest",
     // The input protocol — `InputPlugin::<TankCommand>`:
     "TankCommand",
-    // Predicted+rollback avian components — `app.component::<_>().replicate().predict()`, in order:
+    // Predicted/rollback components, then the replicate-once local-rollback field, in order:
     "Position",
     "Rotation",
     "LinearVelocity",
     "AngularVelocity",
     "TrackDrive",
     "TankTransmission",
-    "TrackGrip",
+    "TrackGripElements",
 ];
 
 /// Pinned hash for the ordered wire surface and a direct handshake-fingerprint input.
-const WIRE_SURFACE_HASH: u64 = 0x7e9a_36b9_0584_c64f;
+const WIRE_SURFACE_HASH: u64 = 0x0ffa_08a5_f2cf_458e;
 
 // ---------------------------------------------------------------------------
 // Deep wire-surface coverage (field-level + external-dep skew)
@@ -891,7 +951,7 @@ const WIRE_SURFACE_HASH: u64 = 0x7e9a_36b9_0584_c64f;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0xccfa_d8e4_fc3a_e835;
+const WIRE_TYPES_HASH: u64 = 0x1227_b38c_a867_f508;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -926,6 +986,9 @@ pub(crate) fn plugin(app: &mut App) {
     // weapon's `belt_remaining` + swap countdown, so the client's fire-gating belt (root-resident in
     // the un-replicated `TankSim`) snaps to server truth instead of a divergent local prediction.
     app.component::<NetBelts>().replicate();
+    // Owner-private, per-tick physical-effect anchor; intermediate values may be skipped because the
+    // producing tick lets the owner compare against local PredictionHistory.
+    app.component::<NetTrackGripAnchor>().replicate();
 
     // Automatic-fire visuals may be lost or reordered. Application ShotId dedup and bounded copies
     // repair ordinary loss without retaining stale cosmetic debt in the transport.
@@ -944,6 +1007,16 @@ pub(crate) fn plugin(app: &mut App) {
         ..default()
     })
     .add_direction(NetworkDirection::ServerToClient);
+    app.add_channel::<GripCheckpointChannel>(ChannelSettings {
+        mode: ChannelMode::UnorderedReliable(ReliableSettings::default()),
+        ..default()
+    })
+    .add_direction(NetworkDirection::ServerToClient);
+    app.add_channel::<GripRequestChannel>(ChannelSettings {
+        mode: ChannelMode::UnorderedReliable(ReliableSettings::default()),
+        ..default()
+    })
+    .add_direction(NetworkDirection::ClientToServer);
 
     app.register_message::<FireVisualBatch>()
         .add_map_entities()
@@ -960,6 +1033,12 @@ pub(crate) fn plugin(app: &mut App) {
     // owner-private, so mapping a shooter replica would make post-respawn confirmation fragile.
     app.register_message::<DamageConfirm>()
         .add_direction(NetworkDirection::ServerToClient);
+    app.register_message::<GripCheckpointChunk>()
+        .add_map_entities()
+        .add_direction(NetworkDirection::ServerToClient);
+    app.register_message::<GripResyncRequest>()
+        .add_map_entities()
+        .add_direction(NetworkDirection::ClientToServer);
 
     app.add_plugins(input::native::InputPlugin::<TankCommand>::default());
 
@@ -1060,18 +1139,14 @@ pub(crate) fn plugin(app: &mut App) {
                 ROLLBACK_TANK_TRANSMISSION,
             )
         });
-    // The static-friction state (ADR-0026): same shape, its own newton-unit threshold so a
-    // grip mismatch attributes as grip, not as belt state.
-    app.component::<TrackGrip>()
-        .replicate()
-        .predict()
-        .with_rollback_condition(|a: &TrackGrip, b: &TrackGrip| {
-            crate::trace::note_if_tripped(
-                "TrackGrip",
-                track_grip_error(a, b),
-                ROLLBACK_TRACK_GRIP_N,
-            )
-        });
+    // Exact per-element state crosses the wire only in the owner's initialization snapshot. Replay
+    // thereafter restores it from local PredictionHistory; checkpoints repair that local history.
+    app.component::<TrackGripElements>()
+        .replicate_once()
+        .local_rollback()
+        .add_confirmed_write();
+    // The locally produced physical-effect summary must be readable at an anchor's producing tick.
+    app.local_rollback::<TrackGripEffect>();
 
     // Non-replicated rollback state — ROOT-RESIDENT ONLY, by design: the root is the predicted
     // entity, so plain `local_rollback` attaches history with no child decoration machinery
@@ -1214,6 +1289,16 @@ mod tests {
         assert!(
             !attach.contains("tank_transmission("),
             "client attachment must not overwrite a JIP snapshot with fresh from-spec state"
+        );
+        assert!(
+            rig.contains("Option<&TrackGripElements>")
+                && rig.contains("replica_role_ready(")
+                && rig.contains("content.spec().track.link_count"),
+            "a predicted rig must wait for the exact, correctly sized replicate-once grip field"
+        );
+        assert!(
+            !attach.contains("TrackGripElements::for_links"),
+            "client attachment must not overwrite the exact JIP grip field with an empty field"
         );
     }
 
@@ -1388,6 +1473,23 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_track_grip_is_absent_from_the_wire() {
+        let src = read_source("src/net/protocol.rs");
+        let stripped = strip_comments(&src);
+        let registrations = plugin_body(&stripped);
+        assert!(
+            !registrations.contains("component::<TrackGrip>"),
+            "REV-15 aggregate TrackGrip telemetry must not replicate, predict, or trigger rollback"
+        );
+        assert!(!WIRE_SURFACE.contains(&"TrackGrip"));
+        assert!(
+            !WIRE_TYPE_DEFS
+                .iter()
+                .any(|(_, type_name)| *type_name == "TrackGrip")
+        );
+    }
+
+    #[test]
     fn combatant_identity_is_predicted_with_the_owner_root() {
         let source = strip_comments(&read_source("src/net/protocol.rs"));
         assert!(
@@ -1408,7 +1510,6 @@ mod tests {
         ("src/track/sim.rs", "TankTransmission"),
         ("src/track/transmission.rs", "TransmissionState"),
         ("src/track/transmission.rs", "SchedulerState"),
-        ("src/track/sim.rs", "TrackGrip"),
         ("src/net/protocol.rs", "NetBot"),
         ("src/lib.rs", "CombatantId"),
         ("src/net/protocol.rs", "ServoAngles"),
@@ -1419,9 +1520,12 @@ mod tests {
         ("src/net/protocol.rs", "LaunchedTurretPose"),
         ("src/net/protocol.rs", "NetBelts"),
         ("src/net/protocol.rs", "BeltSnapshot"),
+        ("src/net/protocol.rs", "NetTrackGripAnchor"),
         ("src/net/protocol.rs", "FireChannel"),
         ("src/net/protocol.rs", "OutcomeChannel"),
         ("src/net/protocol.rs", "DamageChannel"),
+        ("src/net/protocol.rs", "GripCheckpointChannel"),
+        ("src/net/protocol.rs", "GripRequestChannel"),
         ("src/net/protocol.rs", "FireVisualBatch"),
         ("src/net/protocol.rs", "FireVisualFact"),
         ("src/net/protocol.rs", "FireEvent"),
@@ -1430,10 +1534,15 @@ mod tests {
         ("src/net/protocol.rs", "ImpactConfirm"),
         ("src/net/protocol.rs", "DamageReceipt"),
         ("src/net/protocol.rs", "DamageConfirm"),
+        ("src/net/protocol.rs", "GripCheckpointEntry"),
+        ("src/net/protocol.rs", "GripCheckpointChunk"),
+        ("src/net/protocol.rs", "GripResyncRequest"),
         ("src/lib.rs", "ShotId"),
         ("src/command.rs", "TankCommand"),
         ("src/command.rs", "CrewSwap"),
         ("src/damage.rs", "CrewStation"),
+        ("src/track/sim.rs", "TrackGripElements"),
+        ("src/track/forces.rs", "GripElements"),
     ];
 
     /// Whether `line` is the `struct NAME`/`enum NAME` DEFINITION line — the keyword immediately

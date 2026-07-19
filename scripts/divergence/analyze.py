@@ -28,7 +28,8 @@ The hash answers "did anything differ?" exactly (including the carried
 
   - MISMATCH WINDOWS: each contiguous mismatched-tick span, attributed to the
     carried-state field families via the `hsim` decode (`hdrv`/`hsrv`/`hrld`/
-    `hrec`/`hblt`/`htrn` — drive, servo, reload, recoil, track belt, transmission), with whether the
+    `hrec`/`hblt`/`htrn`/`helm` — drive, servo, reload, recoil, track belt, transmission,
+    per-element grip), with whether the
     window opens at the first shared tick (spawn/connect transient vs mid-run
     event) and how many surviving client rows were rollback replays. When the
     trace was recorded with SPIKE_TRACE_SIM_FIELDS the raw carried values ride
@@ -62,10 +63,10 @@ SUBS = ("hpos", "hrot", "hlv", "hav", "hsim")
 SUB_LABEL = {"hpos": "pos", "hrot": "rot", "hlv": "lv", "hav": "av", "hsim": "sim"}
 
 # The carried-state decode (src/trace.rs since the per-field split): `hsim` = the fixed-order
-# combination of these six streams. Absent in older traces — attribution then reports "n/a".
-SIM_SUBS = ("hdrv", "hsrv", "hrld", "hrec", "hblt", "htrn")
+# combination of these seven streams. Absent in older traces — attribution then reports "n/a".
+SIM_SUBS = ("hdrv", "hsrv", "hrld", "hrec", "hblt", "htrn", "helm")
 SIM_LABEL = {"hdrv": "drive", "hsrv": "servo", "hrld": "reload", "hrec": "recoil",
-             "hblt": "track-belt", "htrn": "transmission"}
+             "hblt": "track-belt", "htrn": "transmission", "helm": "track-elements"}
 
 
 # --- quaternion helpers (layout [x, y, z, w], matching src/trace.rs) ---------------------------
@@ -291,9 +292,18 @@ def join(c_rows, s_rows, warmup_ticks):
     out = []
     for tk in shared:
         c, s = cmap[tk], smap[tk]
-        h_match = (c["h"] is not None and c["h"] == s["h"])
         sub_match = {sub: (c["sub"][sub] is not None and c["sub"][sub] == s["sub"][sub])
                      for sub in SUBS}
+        owner_pair = bool(c["own"]) and bool(s["own"])
+        if owner_pair:
+            h_match = (c["h"] is not None and c["h"] == s["h"])
+        else:
+            # Remote replicas intentionally receive neither the exact element field nor the
+            # aggregate telemetry removed from REV-15's wire. Their combined/hsim hashes therefore
+            # are not comparable; retain honest pose/velocity equality without reporting private
+            # state divergence by construction.
+            sub_match["hsim"] = None
+            h_match = all(sub_match[sub] is True for sub in ("hpos", "hrot", "hlv", "hav"))
         # Carried-state decode: tri-state — None when either trace predates the sub-hash split
         # (an absent field is UNKNOWN, not diverged).
         sim_match = {sub: (None if (c["simsub"][sub] is None or s["simsub"][sub] is None)
@@ -357,7 +367,7 @@ def mismatch_windows(joined):
         tally = ({SIM_LABEL[s]: sum(1 for j in w if j["sim_match"][s] is False)
                   for s in SIM_SUBS} if have_decode else None)
         # pose/velocity families too, so a physics-diverging window is named as such
-        pose_tally = {SUB_LABEL[s]: sum(1 for j in w if not j["sub_match"][s])
+        pose_tally = {SUB_LABEL[s]: sum(1 for j in w if j["sub_match"][s] is False)
                       for s in SUBS}
         mags = None
         deltas = [j["simd"] for j in w if j["simd"]]
@@ -381,12 +391,12 @@ def summarize(joined):
     trans = [j for j in joined if not j["flat"]]
 
     first = next((j for j in joined if not j["h_match"]), None)
-    first_subs = ([SUB_LABEL[s] for s in SUBS if not first["sub_match"][s]]
+    first_subs = ([SUB_LABEL[s] for s in SUBS if first["sub_match"][s] is False]
                   if first else [])
 
     # Among mismatched ticks, which sub-components diverged (the "|Δav|-first" signature check).
     mismatched = [j for j in joined if not j["h_match"]]
-    sub_tally = {SUB_LABEL[s]: sum(1 for j in mismatched if not j["sub_match"][s])
+    sub_tally = {SUB_LABEL[s]: sum(1 for j in mismatched if j["sub_match"][s] is False)
                  for s in SUBS}
 
     def rate(rows):

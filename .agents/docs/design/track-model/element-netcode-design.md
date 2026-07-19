@@ -174,7 +174,9 @@ The checkpoint should represent state entering an explicitly named fixed tick. A
 
 - capture the end-of-tick field in `FixedPostUpdate`;
 - label it as the state entering the next tick;
-- force rollback to that entering tick.
+- force rollback to the BASELINE tick before it (implementation correction — see the
+  Rollback flow section: Lightyear restores the requested tick as baseline and replays
+  from the tick after, so the entering-\(T\) field installs at \(B = T - 1\)).
 
 On wake:
 
@@ -264,12 +266,12 @@ For join-in-progress, transmit an exact once-only initial value. Lightyear `0.28
 
 ### Rollback flow
 
-When an exact checkpoint for state-entering tick \(T\) is fully assembled:
+When an exact checkpoint for state-entering tick \(T\) is fully assembled (CORRECTED at implementation, adversarial review 2026-07-20: Lightyear treats the requested rollback tick as the restored BASELINE and begins replay at the tick after it — [rollback.rs](/Users/Yan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lightyear_prediction-0.28.0/src/rollback.rs:1208) — so requesting \(T\) itself would install the entering-\(T\) field as if it were end-of-\(T\) and tick \(T\) would never consume the correction; the flow below uses baseline \(B = T - 1\)):
 
-1. Wait until normal replication has confirmed macro state through \(T\), so pose, velocity, and drive history are available.
+1. Wait until normal replication has confirmed macro state through \(B = T - 1\), so pose, velocity, and drive history are available at the baseline.
 2. Stage the checkpoint in a non-rollback pending-correction resource.
-3. Call `StateRollbackMetadata::request_forced_rollback(T)`. This public mechanism is intended for externally deposited state that must be replayed from a specific tick ([manager.rs](/Users/Yan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lightyear_prediction-0.28.0/src/manager.rs:241)).
-4. After Lightyear restores ordinary histories, but before `SimPhase::DrivingForces` at \(T\), overwrite `TrackGripElements` with the checkpoint.
+3. Call `StateRollbackMetadata::request_forced_rollback(B)`. This public mechanism is intended for externally deposited state that must be replayed from a specific tick ([manager.rs](/Users/Yan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lightyear_prediction-0.28.0/src/manager.rs:241)).
+4. After Lightyear restores ordinary histories (`RollbackSystems::Prepare`), but before replay begins, overwrite `TrackGripElements` with the checkpoint and replace the local history entry at \(B\), so replay's first tick \(T\) consumes the corrected field and the divergent value cannot resurrect.
 5. Let `FixedPostUpdate` record the corrected field into ordinary prediction history.
 6. Clear the pending correction only after its epoch has been applied.
 
@@ -306,7 +308,7 @@ This avoids the current failure mode where a threshold trip can cause a rollback
 
 ### Protocol impact
 
-The current code reports MEASURED `PROTOCOL_REV = 13` ([protocol.rs](/Users/Yan/Desktop/github/vikng-dev/personal/overmatch/src/net/protocol.rs:41)). If no intervening protocol change lands, this design requires DERIVED `PROTOCOL_REV = 14`.
+The current code reports MEASURED `PROTOCOL_REV = 13` ([protocol.rs](/Users/Yan/Desktop/github/vikng-dev/personal/overmatch/src/net/protocol.rs:41)). If no intervening protocol change lands, this design requires DERIVED `PROTOCOL_REV = 14`. (As landed: the transmission replication batch took rev 14 first, and this design shipped as `PROTOCOL_REV = 15` — the extra bump because the old replicated `TrackGrip` left the wire in the same change; in element mode it is derived telemetry whose rollback would be the correction-free loop this document forbids.)
 
 The same change must update:
 

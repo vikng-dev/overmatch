@@ -1210,7 +1210,7 @@ fn integrate_projectiles(
     )>,
     volumes: Query<&BallisticVolume>,
     owners: Query<&VolumeOf>,
-    mut bodies: Query<Forces>,
+    mut bodies: Query<(Forces, Option<&mut crate::track::sim::TrackGripWake>)>,
     mut health: Query<&mut ComponentHealth>,
     parents: Query<&ChildOf>,
     retain: Res<RetainSpentShells>,
@@ -2225,9 +2225,17 @@ fn integrate_projectiles(
 
 /// Apply a crossing's momentum share to the struck body. The declared `Forces` query keeps this
 /// immediate velocity write visible to Bevy's scheduler; static or non-rigid owners do not match.
-fn apply_hit_impulse(bodies: &mut Query<Forces>, body: Entity, impulse: Vec3, point: Vec3) {
-    if let Ok(mut forces) = bodies.get_mut(body) {
+fn apply_hit_impulse(
+    bodies: &mut Query<(Forces, Option<&mut crate::track::sim::TrackGripWake>)>,
+    body: Entity,
+    impulse: Vec3,
+    point: Vec3,
+) {
+    if let Ok((mut forces, wake)) = bodies.get_mut(body) {
         forces.apply_linear_impulse_at_point(impulse, point);
+        if let Some(mut wake) = wake {
+            wake.record_impulse(impulse);
+        }
     }
 }
 
