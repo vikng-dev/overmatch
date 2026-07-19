@@ -126,6 +126,7 @@ mod offline_feel_tests {
                 last_shift_dir: 1,
                 dwell_ticks: 7,
                 omega_e: 250.0,
+                clutch_out: true,
             }))
             .id();
 

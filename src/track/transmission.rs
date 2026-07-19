@@ -94,7 +94,8 @@
 //! | [`WIDE_ON`]/[`WIDE_OFF`]/[`TIGHT_ON`]/[`TIGHT_OFF`] | SIM POLICY | stick-to-detent input mapping with hysteresis; the DETENT RATIOS they select are spec |
 //! | [`TICK_HZ`] | SIM POLICY | the fixed simulation tick the shift countdown quantizes against |
 //! | [`K_IDLE_DROOP_RPM`] | SIM POLICY | idle-governor gain, expressed as the droop width: FULL recovery torque (`torque_at(idle)`) is reached ~50 rpm below idle. A governor stand-in, not an engine datum — any governed engine gets the same recovery shape; the TORQUE it recovers with is the vehicle's own curve |
-//! | [`STALL_GUARD_BAND_RPM`] | SIM POLICY | one-sided clamp band under idle: the coupling may never land the crank below `idle − band`. Sized so the idle governor SATURATES before the guard floor (band = 2× the droop width), which guarantees the guard can always hold the floor with `τ_free > 0`. A solver/robustness guard, not a vehicle trait |
+//! | [`STALL_GUARD_BAND_RPM`] | SIM POLICY | one-sided clamp band under idle: the coupling may never land the crank below `ω_floor = idle − band`, and (review round FIX 2) `ω_floor` is ALSO a hard end-of-tick clamp on ω_e — the floor IS the no-stall policy while stall death is deliberately unmodeled, so no legal spec corner (e.g. strongly negative τ_free from a large drag fraction over a weak idle curve) may carry the crank below it or to a negative speed. Sized so the idle governor SATURATES before the guard floor (band = 2× the droop width). The spec layer keeps `ω_floor > 0` by requiring `idle_rpm ≥ 300` (band 100 + 100 margin, spec.rs) |
+//! | [`CLUTCH_OUT_M_SPEED`]/[`CLUTCH_IN_M_SPEED`] | SIM POLICY | coupling-seam hysteresis (review round FIX 3): declutch below 0.8×, re-engage at 1.2× of `NEUTRAL_M_SPEED` (or on any propulsive command) — a regime seam needs separated thresholds or it chatters, same doctrine as the steering detents |
 //! | [`REV_MATCH_BAND_RPM`] | SIM POLICY | proportional band of the declutched rev-match drive (`u_match = clamp((ω_target − ω_e)/band, 0, 1)`): full fueling one band below target, tapering to zero at it — smooth approach at 64 Hz instead of bang-bang chatter. Match AUTHORITY is the vehicle's own torque curve / J |
 //!
 //! Moved OUT of this module to the spec (they were vehicle data wearing const clothing):
@@ -189,6 +190,18 @@ const STALL_GUARD_BAND_RPM: f32 = 100.0;
 /// target, tapering to zero at it (`u_match = clamp((ω_target − ω_e)/band, 0, 1)`). Stage B
 /// SIM POLICY — see the classification table.
 const REV_MATCH_BAND_RPM: f32 = 200.0;
+
+/// Clutch-seam hysteresis on |m| (stage-B review round, FIX 3) — the coupling seam is a
+/// REGIME boundary and a single threshold chatters on it (traced: a boundary creeper at
+/// constant sub-neutral throttle sawtoothed engage/declutch every few ticks — the engaged
+/// tick's drag/creep impulse threw the belt back across the line the declutched tick let
+/// it re-cross). Detent-style separated thresholds, derived from [`NEUTRAL_M_SPEED`]
+/// (±20%): the clutch goes OUT below `NEUTRAL_M_SPEED × 0.8`, back IN at
+/// `NEUTRAL_M_SPEED × 1.2` (or any propulsive drive command, which re-engages at any
+/// speed — the launch). Deterministic state ([`TransmissionState::clutch_out`]), no blend.
+/// SIM POLICY.
+const CLUTCH_OUT_M_SPEED: f32 = NEUTRAL_M_SPEED * 0.8;
+const CLUTCH_IN_M_SPEED: f32 = NEUTRAL_M_SPEED * 1.2;
 
 /// PROPULSIVE throttle magnitude above which engine drag is fully released (blends out with
 /// the hold-blend shape below it): an open throttle is not motoring. A BRAKE command
@@ -455,10 +468,16 @@ pub struct TransmissionState {
     /// sentinel: `Default` cannot see the spec (the state must be constructible before the
     /// spec arrives — the same spawn-time invariant as the pre-sized element slabs,
     /// element-promotion-checklist.md), so the first [`regenerative`] step with params snaps
-    /// it to the vehicle's idle. A live crank can never legitimately read 0.0 — the idle
-    /// governor holds it within ~[`STALL_GUARD_BAND_RPM`] of idle — so the sentinel is
-    /// unambiguous (checked as `!(ω_e > 0)`, which also catches NaN garbage defensively).
+    /// it to the vehicle's idle. A live crank can never read 0.0 — the end-of-tick hard
+    /// floor (review round FIX 2) keeps every stepped ω_e ≥ `idle −`
+    /// [`STALL_GUARD_BAND_RPM`] `> 0` (the spec layer requires `idle_rpm ≥ 300`) — so the
+    /// sentinel check is EXACTLY `== 0.0` and only ever fires at true spawn.
     pub omega_e: f32,
+    /// Main-clutch-out latch (stage-B review round, FIX 3): the coupling-seam regime with
+    /// hysteresis — set below [`CLUTCH_OUT_M_SPEED`] without propulsive drive, cleared at
+    /// [`CLUTCH_IN_M_SPEED`] or on any propulsive command. Local scheduler-adjacent memory
+    /// (REV 13, like `last_shift_dir`): not replicated, not hashed.
+    pub clutch_out: bool,
 }
 
 impl Default for TransmissionState {
@@ -472,6 +491,7 @@ impl Default for TransmissionState {
             last_shift_dir: 0,
             dwell_ticks: 0,
             omega_e: 0.0,
+            clutch_out: false,
         }
     }
 }
@@ -635,19 +655,12 @@ fn predict_shift_landing_m(
     pm
 }
 
-/// What the coupling solve produced: the clutch torque actually transmitted and whether the
-/// lock was EXACT (inside capacity, stall guard quiet) — only an exact lock is drift-killed
-/// to the shaft at end of step.
-struct CouplingSolve {
-    tau_c: f32,
-    exact: bool,
-}
-
 /// THE COUPLING-LAW SLOT (stage B): the engaged main clutch between crank and geared shaft,
-/// solved semi-implicitly and capacity-clamped. This is deliberately ONE seamed function —
-/// a torque-converter characteristic replaces the clamp here for modern automatic vehicles
-/// later (do NOT build the converter now); everything upstream (τ_free) and downstream
-/// (belt split, drift kill) is coupling-law-agnostic.
+/// solved semi-implicitly and capacity-clamped; returns the transmitted clutch torque τ_c.
+/// This is deliberately ONE seamed function — a torque-converter characteristic replaces
+/// the clamp here for modern automatic vehicles later (do NOT build the converter now);
+/// everything upstream (τ_free) and downstream (belt split, re-anchor) is
+/// coupling-law-agnostic.
 ///
 /// The LOCK torque is the τ_c that lands `ω_e_next = k·s·m_next` under both semi-implicit
 /// integrations (`ω_e_next = ω_e + (τ_free − τ_c)·dt/J`; `m_next = m + (k·s·τ_c +
@@ -659,15 +672,21 @@ struct CouplingSolve {
 ///
 /// clamped to ±`clutch_capacity` (beyond it the clutch slips honestly — the launch force is
 /// the capacity, not the lock demand). `F_other` is the m-axis force sum EXCLUDING the
-/// engine path — the summed ground reactions; the later λ/brake terms are excluded as an
-/// accepted approximation (they are zero or near-zero in the engaged drive regimes, and the
-/// end-of-step drift kill re-anchors an exact lock to the belt that actually integrated).
+/// engine path — the summed ground reactions. This is a PREDICTOR approximation (review
+/// round FIX 1): the later brake stop-forces, the FixedRadii λ mean-axis share
+/// (`j_L + j_R = −e` does NOT cancel), and the belt ±max_speed clamp all move `m_next`
+/// after this solve, and exact pre-accounting is CIRCULAR (the brake law reads the very
+/// `q` that needs `F_c`). What makes the approximation safe is the end-of-step FEASIBILITY
+/// check in [`regenerative`]: the crank re-anchors to the belt that actually integrated
+/// only if the implied total clutch torque fits the capacity — otherwise the honestly
+/// integrated (slipping) crank stands.
 ///
 /// STALL GUARD (one-sided): if the transmitted τ_c would land the crank below
 /// `ω_floor = idle − STALL_GUARD_BAND_RPM`, τ_c is REDUCED to land exactly at ω_floor
 /// (the clutch slips to protect the crank; the guard never increases τ_c, and at the floor
-/// the saturated idle governor guarantees `τ_free > 0`, so the floor is always holdable).
-/// No stall death — that is a later, playtest-gated rung.
+/// the saturated idle governor keeps `τ_free > 0` for any sane torque curve). The
+/// end-of-tick hard floor in [`regenerative`] backstops the legal-but-extreme spec corner
+/// where even `τ_c = −capacity` cannot hold the floor (strongly negative τ_free).
 #[allow(clippy::too_many_arguments)]
 fn clutch_coupling(
     j_e: f32,
@@ -681,20 +700,18 @@ fn clutch_coupling(
     f_other: f32,
     omega_floor: f32,
     dt: f32,
-) -> CouplingSolve {
+) -> f32 {
     let tau_star = ((omega_e - k * s * m) / dt + tau_free / j_e - k * s * f_other / i_m)
         / (1.0 / j_e + k * k / i_m);
     let mut tau_c = tau_star.clamp(-capacity, capacity);
-    let mut exact = tau_c == tau_star;
     let omega_next = omega_e + (tau_free - tau_c) * dt / j_e;
     if omega_next < omega_floor {
         // Land exactly at the floor: τ_guard = τ_free − J·(ω_floor − ω_e)/dt. By
         // construction τ_guard < τ_c (less torque = higher landing), so the guard only
         // ever reduces — one-sided.
         tau_c = (tau_free - (omega_floor - omega_e) * j_e / dt).clamp(-capacity, capacity);
-        exact = false;
     }
-    CouplingSolve { tau_c, exact }
+    tau_c
 }
 
 fn regenerative(
@@ -872,11 +889,15 @@ fn regenerative(
     // equilibrium). The crank is NEVER negative — it cannot follow a back-driven shaft
     // (stage A's principle, now enforced by the stall guard instead of a floor).
     let omega_idle = tp.engine.idle_rpm * RPM_TO_RAD;
-    if !st.omega_e.is_finite() || st.omega_e <= 0.0 {
-        // Uninitialized sentinel (Default cannot see the spec — the state must be
-        // constructible before the spec arrives, the pre-sized-slab spawn invariant):
-        // snap to idle on the first step with params. The finiteness arm is defensive
-        // NaN/∞ hygiene, same intent as the sentinel check.
+    if st.omega_e == 0.0 {
+        // Uninitialized sentinel, EXACTLY 0.0 (review round FIX 2): Default cannot see
+        // the spec — the state must be constructible before the spec arrives (the
+        // pre-sized-slab spawn invariant) — so the first step with params snaps to idle.
+        // A stepped crank can never return to 0.0: the end-of-tick hard floor keeps it
+        // ≥ ω_floor > 0 (spec requires idle_rpm ≥ 300 > STALL_GUARD_BAND_RPM + margin),
+        // so this branch fires at true spawn only — a broader `≤ 0` arm would instead
+        // TELEPORT a floor-violating crank back to idle every tick (the traced
+        // 600 → −3130 → 600 rpm oscillation under a legal strongly-negative-τ_free spec).
         st.omega_e = omega_idle;
     }
     let omega_e = st.omega_e;
@@ -893,7 +914,18 @@ fn regenerative(
     // historical |throttle| form — the seams coincide except transiently under
     // opposing-throttle-at-standstill, where the direction swap + shift window take over
     // within a tick.
-    let engaged = !(shifting || (propulsive < NEUTRAL_THROTTLE && m.abs() < NEUTRAL_M_SPEED));
+    //
+    // Review round FIX 3: the seam is a LATCH with hysteresis (`st.clutch_out`, the
+    // steering-detent doctrine), not a single threshold — a boundary creeper chattered
+    // engage/declutch on the bare NEUTRAL_M_SPEED line. Any propulsive command re-engages
+    // at any speed (the launch); otherwise the belt must fall below CLUTCH_OUT_M_SPEED to
+    // take the clutch out and climb past CLUTCH_IN_M_SPEED to put it back in.
+    if propulsive >= NEUTRAL_THROTTLE || m.abs() >= CLUTCH_IN_M_SPEED {
+        st.clutch_out = false;
+    } else if m.abs() < CLUTCH_OUT_M_SPEED {
+        st.clutch_out = true;
+    }
+    let engaged = !shifting && !st.clutch_out;
 
     // Fueling demand u. Engaged: the propulsive throttle (a brake command is not fueling).
     // Declutched: a proportional-band rev governor ([`REV_MATCH_BAND_RPM`]) toward the
@@ -944,7 +976,7 @@ fn regenerative(
     // through the gear (in place of the old f_p + f_drag — drag reaches the belt only
     // through the coupling now). Declutched, the belt gets NOTHING from the engine.
     let i_m = 2.0 * fp.inertia;
-    let coupling = if engaged {
+    let tau_c = if engaged {
         clutch_coupling(
             tp.engine_inertia,
             tp.clutch_capacity,
@@ -959,12 +991,9 @@ fn regenerative(
             dt,
         )
     } else {
-        CouplingSolve {
-            tau_c: 0.0,
-            exact: false,
-        }
+        0.0
     };
-    let mut f_c = k * dir * coupling.tau_c;
+    let mut f_c = k * dir * tau_c;
 
     // --- Steering. κ table indexed by the active gear (reverse mirrors the low forward
     // gears); `d` follows the steer SIGN regardless of travel direction — the superimposed
@@ -1145,7 +1174,7 @@ fn regenerative(
     // power gate exactly as the belt-side force was — one bookkeeping for both ends of the
     // clutch; a bound power gate leaves MORE speed on the crank, never less, so the stall
     // guard's floor promise survives scaling).
-    st.omega_e = omega_e + (tau_free - coupling.tau_c * power_scale) * dt / tp.engine_inertia;
+    st.omega_e = omega_e + (tau_free - tau_c * power_scale) * dt / tp.engine_inertia;
 
     // --- Assemble per-side sprocket forces.
     let mut q = [
@@ -1199,19 +1228,35 @@ fn regenerative(
             .clamp(-fp.max_speed, fp.max_speed);
     }
 
-    // --- Drift kill (stage B, end of step): an EXACT lock (inside capacity, stall guard
-    // quiet, power gate unbound) re-anchors the crank to the belt that ACTUALLY integrated
-    // — λ, brakes, and the speed clamp all moved m past the coupling solve's F_other
-    // approximation, and rigid lock means the crank follows the shaft bit-exactly instead
-    // of accumulating f32 drift. Guarded by the stall floor: a snap may never land the
-    // crank below it (the next tick's guard takes over instead).
-    if engaged && coupling.exact && power_scale == 1.0 {
+    // --- Drift kill / re-anchor (stage B + review round FIX 1): snap the crank to the
+    // belt that ACTUALLY integrated only if the snap is FEASIBLE — the implied TOTAL
+    // clutch torque `τ_impl = τ_free − (k·s·m_next − ω_e)·J/dt` must fit the capacity.
+    // The coupling pre-solve's F_other (reactions only) is a PREDICTOR approximation:
+    // brakes, the FixedRadii λ mean-axis share, and the belt speed clamp all move m_next
+    // after it, and exact pre-accounting is circular (the brake law reads the q that
+    // needs F_c) — so feasibility is decided HERE, on the final m_next, not on the
+    // pre-solve's stale clamp flag. An eager flag let a full-opposing-throttle brake tick
+    // snap the crank down the belt's brake-driven drop, implying ≈ 9.7 kN·m through a
+    // 2.4 kN·m clutch (the traced teleport); an infeasible snap now leaves the honestly
+    // integrated crank — the clutch is slipping, and that is the truth. Inside capacity
+    // the snap is a legitimate clutch outcome regardless of the power gate (any
+    // within-capacity landing is reachable), so no power_scale condition. Still guarded
+    // by the stall floor: a snap may never land the crank below it.
+    if engaged {
         let m_next = (next[0] + next[1]) / 2.0;
         let locked = k * dir * m_next;
-        if locked >= omega_floor {
+        let tau_impl = tau_free - (locked - omega_e) * tp.engine_inertia / dt;
+        if tau_impl.abs() <= tp.clutch_capacity && locked >= omega_floor {
             st.omega_e = locked;
         }
     }
+
+    // --- Hard stall floor (review round FIX 2): the crank never ENDS a tick below
+    // ω_floor, whatever the spec's torque/drag corner did to τ_free — the floor IS the
+    // no-stall policy while stall death stays deliberately unmodeled (classification
+    // table). This is also what makes the ω_e = 0.0 spawn sentinel unambiguous, and it
+    // self-heals a NaN (f32::max drops the NaN operand).
+    st.omega_e = st.omega_e.max(omega_floor);
 
     TransmissionReport {
         next_speeds: next,
@@ -2689,5 +2734,112 @@ mod tests {
              (~{:.0} rpm), got {steady:.0} — a cut-out park would zero pivot power",
             tp.peak_torque_rpm
         );
+    }
+
+    /// Review round FIX 1: service braking must never TELEPORT the crank through an
+    /// infeasible snap. The eager `exact` flag was decided at the pre-brake coupling
+    /// solve; the brake stop-force then dropped the belt ≈ 0.23 m/s per tick
+    /// (120 kN / 8 t / 64 Hz) and the drift kill snapped the crank down with it —
+    /// ≈ 20 rad/s per tick, an implied clutch torque
+    /// `τ_impl = τ_free − Δω·J/dt ≈ −550 − 20·4·64 ≈ −5.7 kN·m` through a 2.86 kN·m
+    /// clutch. Post-fix the snap is feasibility-checked on the FINAL belt state: the crank
+    /// integrates honestly with the torque the clutch actually carried, so its per-tick
+    /// change obeys `|Δω|·J/dt ≤ capacity + |τ_free|` (braking: |τ_free| = drag ≤
+    /// drag_fraction × peak = 550 N·m → |Δω| ≤ (2860 + 550)·dt/J ≈ 13.3 rad/s).
+    #[test]
+    fn braking_never_teleports_crank_past_clutch_capacity() {
+        let (fp, tp) = (lab_fp(), lab_tp());
+        let dt = 1.0 / 64.0;
+        let mut st = TransmissionState::default();
+        // Warm to a locked coast in gear 1 at m = 1.0 (held speeds).
+        for _ in 0..32 {
+            step(
+                TransmissionMode::Hybrid,
+                &fp,
+                Some(&tp),
+                &mut st,
+                &input(0.0, 0.0, [1.0, 1.0], [0.0, 0.0]),
+            );
+        }
+        assert!(
+            st.omega_e / RPM_TO_RAD > tp.engine.idle_rpm,
+            "the warm-up must have locked the crank above idle"
+        );
+        // Full opposing throttle, CLOSED loop: the brake-driven belt drop must not drag
+        // the crank faster than the clutch can physically pull it.
+        let drag_max = tp.peak_torque_nm * tp.drag_fraction;
+        let slew_bound = (tp.clutch_capacity + drag_max) * dt / tp.engine_inertia + 0.1;
+        let mut speeds = [1.0f32, 1.0];
+        for tick in 0..64 {
+            let m_pre = (speeds[0] + speeds[1]) / 2.0;
+            if m_pre < 0.5 {
+                break; // swap/declutch territory — the teleport window is over.
+            }
+            let omega_pre = st.omega_e;
+            let rep = step(
+                TransmissionMode::Hybrid,
+                &fp,
+                Some(&tp),
+                &mut st,
+                &input(-1.0, 0.0, speeds, [0.0, 0.0]),
+            );
+            let delta = st.omega_e - omega_pre;
+            assert!(
+                delta >= -slew_bound,
+                "tick {tick}: braking dragged the crank {delta:.1} rad/s in one tick — \
+                 an implied clutch torque past capacity (bound {slew_bound:.1} rad/s); \
+                 the infeasible snap is back"
+            );
+            speeds = rep.next_speeds;
+        }
+        let floor = (tp.engine.idle_rpm - STALL_GUARD_BAND_RPM) * RPM_TO_RAD;
+        assert!(
+            st.omega_e >= floor,
+            "the crank must end above the hard floor"
+        );
+    }
+
+    /// Review round FIX 3: the coupling seam is a LATCH with hysteresis — a belt speed
+    /// oscillating INSIDE the 0.4–0.6 m/s dead band (forced ±0.05 around the old single
+    /// 0.5 threshold, which flipped the regime every crossing) produces ZERO regime
+    /// flips; only genuine excursions past the separated thresholds transition it, once
+    /// each. Scripted open-loop: park below 0.4 (one transition out), 64 boundary
+    /// oscillations (none), one push past 0.6 (one transition in), 64 more oscillations
+    /// (none).
+    #[test]
+    fn clutch_seam_hysteresis_kills_boundary_chatter() {
+        let (fp, tp) = (lab_fp(), lab_tp());
+        let mut st = TransmissionState::default();
+        let at = |st: &mut TransmissionState, v: f32| {
+            step(
+                TransmissionMode::Hybrid,
+                &fp,
+                Some(&tp),
+                st,
+                &input(0.0, 0.0, [v, v], [0.0, 0.0]),
+            );
+            st.clutch_out
+        };
+        // Park below CLUTCH_OUT_M_SPEED: the clutch goes out.
+        assert!(at(&mut st, 0.3), "below 0.4 m/s the clutch must go out");
+        // Boundary oscillation across the OLD single threshold: no flips.
+        for tick in 0..64 {
+            let v = if tick % 2 == 0 { 0.55 } else { 0.45 };
+            assert!(
+                at(&mut st, v),
+                "tick {tick}: an in-band oscillation (0.45/0.55) must not re-engage — \
+                 the single-threshold chatter is back"
+            );
+        }
+        // A genuine excursion past CLUTCH_IN_M_SPEED re-engages…
+        assert!(!at(&mut st, 0.65), "past 0.6 m/s the clutch must re-engage");
+        // …and the same boundary oscillation now holds ENGAGED: no flips either way.
+        for tick in 0..64 {
+            let v = if tick % 2 == 0 { 0.55 } else { 0.45 };
+            assert!(
+                !at(&mut st, v),
+                "tick {tick}: an in-band oscillation must not declutch after engagement"
+            );
+        }
     }
 }

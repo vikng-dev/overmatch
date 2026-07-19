@@ -478,7 +478,55 @@ a coast slide; the stage-A backslide unit tests hold unchanged.
 Deliberately NOT in this stage: grade-aware scheduling / skip shifts (stage C), stall
 death, torque-converter coupling, d-path crank loading (the power gate stands in).
 
+### Stage-B review round (same day) — four findings, dispositions
 
+Adversarial review of the landed stage B: coupling signs, rev-governor stability, the
+stage-A regression surface, and the REV-13 boundary all held; four findings fixed:
+
+1. **Stale `exact` flag let the drift kill violate clutch capacity (Critical).** The
+   flag was decided at the pre-brake/pre-λ coupling solve, but brakes, the FixedRadii λ
+   mean-axis share (`j_L + j_R = −e` does NOT cancel), and the belt ±max_speed clamp all
+   move `m_next` afterwards — the snap then teleported the crank with the belt (traced:
+   a full-opposing-throttle F1 brake tick implied τ_c ≈ 9.7 kN·m through the 2.4 kN·m
+   clutch). Replaced by an END-OF-STEP feasibility check on the final belt state:
+   `τ_impl = τ_free − (k·s·m_next − ω_e)·J/dt`; snap only if `|τ_impl| ≤ capacity` (and
+   ≥ the stall floor), else the honestly integrated slipping crank stands. The
+   pre-solve's reactions-only `F_other` is now documented as a PREDICTOR approximation —
+   exact pre-accounting is circular (the brake law reads the q that needs F_c) — made
+   safe by exactly this check. The power_scale condition dropped (any within-capacity
+   landing is a legitimate clutch outcome). Regression (proven to bite against the
+   eager flag): `braking_never_teleports_crank_past_clutch_capacity` — per-tick crank
+   slew bounded by `(capacity + drag)/J·dt` through a closed-loop brake stop.
+2. **Stall guard + sentinel not spec-robust (High).** The guard's ±capacity clamp meant
+   a legal strongly-negative τ_free (big drag fraction over a weak idle curve) could
+   carry ω_e below the floor and negative, where the old `≤ 0` sentinel teleported it
+   back to idle every tick (traced 600 → −3130 → 600 rpm oscillation). Fixed: (a) HARD
+   end-of-tick clamp `ω_e ≥ ω_floor` — policy-honest, the floor IS the no-stall policy
+   while stall death stays unmodeled (classification table updated; also self-heals NaN
+   via f32::max); (b) the sentinel tightened to exactly `== 0.0` — it now fires at true
+   spawn only — with spec validation `idle_rpm ≥ 300` (100 band + 100 margin +
+   headroom) keeping `ω_floor > 0` always.
+3. **Engagement seam chatter (Medium).** A boundary creeper sawtoothed engage/declutch
+   on the single NEUTRAL_M_SPEED line. The seam is now a LATCH with detent-style
+   hysteresis: `TransmissionState.clutch_out` (local, REV 13), out below
+   `NEUTRAL_M_SPEED × 0.8` (0.4 m/s) without propulsive drive, back in at
+   `NEUTRAL_M_SPEED × 1.2` (0.6 m/s) or on any propulsive command (the launch).
+   Deterministic, no blend. Regression: `clutch_seam_hysteresis_kills_boundary_chatter`
+   — a forced ±0.05 oscillation around the old 0.5 threshold produces ZERO regime
+   flips; only genuine excursions past the separated thresholds transition, once each.
+4. **Validation lower bounds (Medium).** The solver's numeric assumptions are now spec-
+   protected: `inertia_kgm2 ∈ [0.1, 100]` (the coupling divides by J),
+   `clutch_capacity_nm ∈ [100, 50 000]`, `idle_rpm ≥ 300` (finding 2's floor), and —
+   with a transmission declared — `powertrain.inertia ≥ 1.0` (the lock denominator's
+   `k²/I_m` term; the generic finite/> 0 check admitted 1e-30). Negative cases for each.
+
+All gates re-measured after the fixes — deltas are noise: crest 8.1 → 8.2 s, driven
+readout 2345 → 2343 rpm, ramp launch slip 0.155 → 0.154 m/s; coast 12.2 s, brake
+2.31 s, pivots 0.637/0.1314 rad/s, spin-up 0.95 s (crank 908 → 2064 rpm), climb
+monotone [1..8], top speed 10.49 m/s, slope park exact, Governor parity bit-identical —
+all unchanged.
+
+## Ranked recommendation
 
 1. **Tiger: fixed-radius, geared regenerative model behind the joint transmission seam.** Historically characteristic, fixes high-speed sluggishness, and derives stately pivot behavior from ratios and power.
 2. **Arcade default: geared regenerative `m/d` hybrid.** Best controls and least mechanism state while retaining honest energy flow.
