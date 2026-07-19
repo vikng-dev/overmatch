@@ -437,7 +437,7 @@ pub fn run_offline() {
         track::transmission::TransmissionMode::FixedRadii,
     ));
     app.add_systems(Startup, spawn_transmission_feel_label);
-    app.add_systems(Update, cycle_transmission_feel);
+    app.add_systems(Update, (cycle_transmission_feel, update_drive_hud).chain());
     app.run();
 }
 
@@ -445,10 +445,11 @@ pub fn run_offline() {
 #[derive(Component)]
 struct TransmissionFeelLabel;
 
-/// The cheapest honest on-screen statement of the active drivetrain (offline only): one
-/// absolute-positioned text line, top-right — the game's debug overlay is gizmo-only, so a
-/// bare `Text` node (Bevy's built-in font) is the minimal surface that keeps the mode visible
-/// in every screenshot/feel note.
+/// The offline drive-telemetry HUD surface (offline only): one absolute-positioned, top-right
+/// `Text` node (Bevy's built-in font) — the game's debug overlay is gizmo-only, so this bare
+/// node is the minimal surface that keeps the active drivetrain AND its live operating point
+/// visible in every screenshot/feel note. Spawned empty; [`update_drive_hud`] fills it every
+/// frame (the mode line plus the tick-truth telemetry block).
 fn spawn_transmission_feel_label(
     mut commands: Commands,
     feel: Res<track::sim::TransmissionFeelTest>,
@@ -473,12 +474,12 @@ fn spawn_transmission_feel_label(
 
 /// `T` cycles the offline transmission mode (governor → hybrid → L600). Every tank's
 /// [`track::sim::TankTransmission`] resets so the incoming adapter starts from a constructed
-/// state (gear 1, no shift in flight) instead of another mode's leftovers.
+/// state (gear 1, no shift in flight) instead of another mode's leftovers. The mode is logged
+/// here; the on-screen line is owned by [`update_drive_hud`] (its first line).
 fn cycle_transmission_feel(
     keys: Option<Res<ButtonInput<KeyCode>>>,
     feel: Option<ResMut<track::sim::TransmissionFeelTest>>,
     mut states: Query<&mut track::sim::TankTransmission>,
-    label: Query<&mut Text, With<TransmissionFeelLabel>>,
 ) {
     use track::transmission::TransmissionMode;
     let Some(mut feel) = feel else {
@@ -496,9 +497,100 @@ fn cycle_transmission_feel(
         }
         info!("offline transmission mode → {}", feel.0.label());
     }
-    if cycled || feel.is_added() {
-        for mut text in label {
-            text.0 = format!("trans [T]: {}", feel.0.label());
-        }
+}
+
+/// The offline drive-telemetry HUD: rebuild the top-right block from the controlled tank's
+/// tick-truth components every frame. Reading sim components in `Update` (not a fixed system)
+/// is fine for a display — it never writes sim state. Every numeric field is fixed-width so the
+/// block does not jitter as digits and signs change.
+///
+/// Line 1 the active mode; line 2 gear + rpm THROUGH THE LAW ([`track::transmission::readout`],
+/// a `*` marker through a shift's torque interruption and `P` on the parking latch); line 3 the
+/// hull ground speed (horizontal |velocity|, signed by hull-forward); line 4 the per-side belt
+/// speeds and their slip against the projected hull speed; line 5 the shaped drive command and
+/// the L600 steering detent.
+fn update_drive_hud(
+    feel: Option<Res<track::sim::TransmissionFeelTest>>,
+    gear: Option<Res<track::sim::TrackGear>>,
+    controlled: Query<
+        (
+            &track::sim::TrackDrive,
+            &track::sim::TankTransmission,
+            &avian3d::prelude::LinearVelocity,
+            &avian3d::prelude::Rotation,
+        ),
+        With<tank::Controlled>,
+    >,
+    mut label: Query<&mut Text, With<TransmissionFeelLabel>>,
+) {
+    use track::transmission::TransmissionMode;
+    let Some(feel) = feel else {
+        return;
+    };
+    let Ok(mut text) = label.single_mut() else {
+        return;
+    };
+    let mode = feel.0;
+    let mut out = format!("trans [T]: {}", mode.label());
+
+    if let Ok((drive, trans, vel, rot)) = controlled.single() {
+        let speeds = [drive.sides[0].speed, drive.sides[1].speed];
+
+        // Gear + rpm through the transmission law — but ONLY when the joint drivetrain actually
+        // runs (the exact gate `apply_track_forces` uses): under `Governor`, or with no declared
+        // transmission, `TankTransmission` is inert and there is no gear/rpm to report.
+        let joint = match (mode, gear.as_ref().and_then(|g| g.trans())) {
+            (TransmissionMode::Governor, _) | (_, None) => None,
+            (_, Some(tp)) => Some(tp),
+        };
+        let gear_line = if let Some(tp) = joint {
+            let r = track::transmission::readout(&trans.0, tp, speeds);
+            let marker = if trans.0.park {
+                'P'
+            } else if trans.0.shift_ticks > 0 {
+                '*'
+            } else {
+                ' '
+            };
+            format!("gear {}{marker} | rpm {:4.0}", r.gear_label, r.rpm)
+        } else {
+            "gear --  | rpm ----".to_string()
+        };
+
+        // Hull ground speed: horizontal |velocity| signed by the hull-forward projection; slip
+        // measures each belt against that projected hull speed (an approximation — labelled slip).
+        let fwd = rot.0 * Vec3::NEG_Z;
+        let fwd_h = Vec3::new(fwd.x, 0.0, fwd.z).normalize_or_zero();
+        let horiz = Vec3::new(vel.0.x, 0.0, vel.0.z);
+        let proj = horiz.dot(fwd_h);
+        let ground = horiz.length() * proj.signum();
+
+        let detent = match mode {
+            TransmissionMode::FixedRadii => match trans.0.steer_step {
+                0 => "NEUTRAL",
+                1 => "WIDE",
+                _ => "TIGHT",
+            },
+            _ => "-",
+        };
+
+        out.push_str(&format!("\n{gear_line}"));
+        out.push_str(&format!(
+            "\nhull {ground:+5.2} m/s ({:+6.1} km/h)",
+            ground * 3.6
+        ));
+        out.push_str(&format!(
+            "\nbelt L {:+5.2} R {:+5.2} | slip L {:+5.2} R {:+5.2}",
+            speeds[0],
+            speeds[1],
+            speeds[0] - proj,
+            speeds[1] - proj,
+        ));
+        out.push_str(&format!(
+            "\ncmd thr {:+5.2} steer {:+5.2} | detent {detent}",
+            drive.throttle, drive.steer,
+        ));
     }
+
+    text.0 = out;
 }
