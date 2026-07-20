@@ -14,7 +14,7 @@ pub(super) use authority::GripRestState;
 use authority::{answer_resync_requests, publish_grip_anchor_and_rest_checkpoints};
 use checkpoint::CheckpointAssembler;
 use client::{
-    AnchorWatch, PendingGripCorrection, compare_track_grip_anchors,
+    AnchorWatch, DeferredCheckpointChunks, PendingGripCorrection, compare_track_grip_anchors,
     install_checkpoint_after_history_restore, receive_checkpoint_chunks,
     request_checkpoint_rollback, reset_client_grip_state,
 };
@@ -38,8 +38,9 @@ use checkpoint::{
 };
 #[cfg(test)]
 use client::{
-    AdmissionError, EffectErrors, checkpoint_rollback_baseline, claim_checkpoint_rollback,
-    effect_errors, historical_anchor_state,
+    AdmissionError, CheckpointDisposition, EffectErrors, admit_completed_checkpoint,
+    checkpoint_rollback_baseline, claim_checkpoint_rollback, effect_errors,
+    historical_anchor_state,
 };
 
 /// DERIVED from the existing 1,100-byte application-payload ceiling: 48 worst-case exact
@@ -51,6 +52,12 @@ const MAX_CHECKPOINT_CHUNKS: usize = 16;
 /// DERIVED defensive cap: one predicted owner normally needs one assembly, while 16 permits several
 /// overlapping epoch/resync responses without allowing an unbounded reliable-message ledger.
 const MAX_CHECKPOINT_LEDGERS: usize = 16;
+/// DERIVED from the existing assembly bounds: 16 ledgers × 16 chunks retains every chunk that could
+/// otherwise participate in all permitted concurrent assemblies while identity replication catches up.
+const MAX_DEFERRED_CHECKPOINT_CHUNKS: usize = MAX_CHECKPOINT_LEDGERS * MAX_CHECKPOINT_CHUNKS;
+/// DERIVED as 2 s at the project's MEASURED 64 Hz configuration: enough for ordinary JIP ordering,
+/// short enough that a checkpoint whose combatant never becomes unique cannot occupy the queue forever.
+const DEFERRED_CHECKPOINT_EXPIRY_TICKS: u32 = 128;
 /// DERIVED defensive cap: one owner and two epochs need only a handful of stamps; 32 retains a full
 /// 8-second window at the 250 ms request interval before evicting oldest dedupe history.
 const MAX_REQUEST_STAMPS: usize = 32;
@@ -124,6 +131,7 @@ impl GripRequestLimiter {
 
 pub(super) fn install_client(app: &mut App) {
     app.init_resource::<CheckpointAssembler>()
+        .init_resource::<DeferredCheckpointChunks>()
         .init_resource::<PendingGripCorrection>()
         .init_resource::<GripRequestLimiter>()
         .init_resource::<AnchorWatch>()
@@ -156,13 +164,15 @@ pub(super) fn install_server(app: &mut App) {
     app
         // Receivers are cleared in `Last`, so owner requests are drained at render rate.
         .add_systems(Update, answer_resync_requests)
-        // `apply_track_forces` completed in FixedUpdate. This captures the end-of-tick field and
-        // labels checkpoints as entering the next tick.
+        // `apply_track_forces` completed in FixedUpdate. The anchor names this completed tick,
+        // matching Lightyear's end-of-tick prediction-history label; checkpoints name the same
+        // field as state entering the next tick.
         .add_systems(FixedPostUpdate, publish_grip_anchor_and_rest_checkpoints);
 }
 
 #[cfg(test)]
 mod tests {
+    use super::checkpoint::fields_bit_equal;
     use super::*;
 
     fn populated_field() -> TrackGripElements {
@@ -185,6 +195,7 @@ mod tests {
     fn exact_checkpoint(tank: Entity, epoch: u32, tick: u32, hash: u64) -> ExactCheckpoint {
         ExactCheckpoint {
             tank,
+            combatant: crate::CombatantId(1),
             epoch,
             state_entering_tick: Tick(tick),
             field: TrackGripElements::for_links(1),
@@ -196,26 +207,26 @@ mod tests {
     fn chunk_assembly_is_atomic_and_idempotent() {
         let tank = Entity::from_raw_u32(7).unwrap();
         let field = populated_field();
-        let chunks = make_checkpoint_chunks(tank, 4, Tick(90), &field).unwrap();
+        let chunks = make_checkpoint_chunks(crate::CombatantId(7), 4, Tick(90), &field).unwrap();
         let expected_elements_per_side = field.sides[0].strain.len();
         assert!(chunks.len() > 1);
         let mut assembler = CheckpointAssembler::default();
         assert!(
             assembler
-                .push(chunks[1].clone(), expected_elements_per_side)
+                .push(chunks[1].clone(), tank, expected_elements_per_side)
                 .unwrap()
                 .is_none()
         );
         assert!(
             assembler
-                .push(chunks[1].clone(), expected_elements_per_side)
+                .push(chunks[1].clone(), tank, expected_elements_per_side)
                 .unwrap()
                 .is_none()
         );
         let mut completed = None;
         for chunk in chunks.iter().skip(2).chain(chunks.iter().take(1)) {
             completed = assembler
-                .push(chunk.clone(), expected_elements_per_side)
+                .push(chunk.clone(), tank, expected_elements_per_side)
                 .unwrap()
                 .or(completed);
         }
@@ -224,7 +235,7 @@ mod tests {
         for chunk in chunks {
             assert!(
                 assembler
-                    .push(chunk, expected_elements_per_side)
+                    .push(chunk, tank, expected_elements_per_side)
                     .unwrap()
                     .is_none()
             );
@@ -235,12 +246,13 @@ mod tests {
     fn chunk_assembly_rejects_whole_hash_corruption() {
         let tank = Entity::from_raw_u32(8).unwrap();
         let field = populated_field();
-        let mut chunks = make_checkpoint_chunks(tank, 5, Tick(91), &field).unwrap();
+        let mut chunks =
+            make_checkpoint_chunks(crate::CombatantId(8), 5, Tick(91), &field).unwrap();
         chunks[0].entries[0].strain.x = f32::from_bits(chunks[0].entries[0].strain.x.to_bits() ^ 1);
         let mut assembler = CheckpointAssembler::default();
         let mut result = Ok(None);
         for chunk in chunks {
-            result = assembler.push(chunk, field.sides[0].strain.len());
+            result = assembler.push(chunk, tank, field.sides[0].strain.len());
         }
         assert_eq!(result, Err(AssemblyError::HashMismatch));
     }
@@ -251,7 +263,7 @@ mod tests {
         let tick = Tick(92);
         let elements_per_side = u16::MAX;
         let chunk = GripCheckpointChunk {
-            tank: Entity::from_raw_u32(10).unwrap(),
+            combatant: crate::CombatantId(10),
             epoch,
             state_entering_tick: tick,
             elements_per_side,
@@ -262,7 +274,7 @@ mod tests {
         };
 
         assert_eq!(
-            CheckpointAssembler::default().push(chunk, 3),
+            CheckpointAssembler::default().push(chunk, Entity::from_raw_u32(10).unwrap(), 3,),
             Err(AssemblyError::FieldShapeMismatch)
         );
     }
@@ -279,7 +291,7 @@ mod tests {
             contact_generation: 1,
         }];
         let chunk = GripCheckpointChunk {
-            tank: Entity::from_raw_u32(11).unwrap(),
+            combatant: crate::CombatantId(11),
             epoch,
             state_entering_tick: tick,
             elements_per_side,
@@ -290,7 +302,7 @@ mod tests {
         };
 
         assert_eq!(
-            CheckpointAssembler::default().push(chunk, 3),
+            CheckpointAssembler::default().push(chunk, Entity::from_raw_u32(11).unwrap(), 3,),
             Err(AssemblyError::InvalidStrain)
         );
     }
@@ -303,11 +315,11 @@ mod tests {
         let entries = vec![GripCheckpointEntry {
             side: 0,
             element: 0,
-            strain: Vec3::new(f32::from_bits(GRIP_SHEAR_MODULUS_M.to_bits() + 1), 0.0, 0.0),
+            strain: Vec3::new(GRIP_SHEAR_MODULUS_M * 1.01, 0.0, 0.0),
             contact_generation: 1,
         }];
         let chunk = GripCheckpointChunk {
-            tank: Entity::from_raw_u32(19).unwrap(),
+            combatant: crate::CombatantId(19),
             epoch,
             state_entering_tick: tick,
             elements_per_side,
@@ -318,15 +330,57 @@ mod tests {
         };
 
         assert_eq!(
-            CheckpointAssembler::default().push(chunk, 3),
+            CheckpointAssembler::default().push(chunk, Entity::from_raw_u32(19).unwrap(), 3,),
             Err(AssemblyError::InvalidStrain)
+        );
+    }
+
+    #[test]
+    fn chunk_assembly_accepts_a_rounded_producer_saturation() {
+        let epoch = 9;
+        let tick = Tick(95);
+        let elements_per_side = 3;
+        // DERIVED witness from the force law's unchanged `j1 *= K / |j1|` expression. Its
+        // f32 `length_squared()` is two ULPs above the old zero-tolerance `K * K` bound.
+        let strain = Vec3::new(-0.023_136_795, 0.064_153_15, 0.031_209_983);
+        assert!(
+            strain.length_squared() > GRIP_SHEAR_MODULUS_M * GRIP_SHEAR_MODULUS_M,
+            "the regression witness must remain outside the old validator contract"
+        );
+        let entries = vec![GripCheckpointEntry {
+            side: 0,
+            element: 0,
+            strain,
+            contact_generation: 1,
+        }];
+        let chunk = GripCheckpointChunk {
+            combatant: crate::CombatantId(20),
+            epoch,
+            state_entering_tick: tick,
+            elements_per_side,
+            chunk_index: 0,
+            chunk_count: 1,
+            checkpoint_hash: checkpoint_hash(epoch, tick, elements_per_side, &entries),
+            entries,
+        };
+
+        assert!(
+            CheckpointAssembler::default()
+                .push(
+                    chunk,
+                    Entity::from_raw_u32(20).unwrap(),
+                    usize::from(elements_per_side),
+                )
+                .unwrap()
+                .is_some(),
+            "a value emitted by the producer's saturation expression is valid authority state"
         );
     }
 
     #[test]
     fn checkpoint_chunk_round_trip_preserves_signed_zero_and_nan_payloads() {
         let chunk = GripCheckpointChunk {
-            tank: Entity::from_raw_u32(12).unwrap(),
+            combatant: crate::CombatantId(12),
             epoch: 8,
             state_entering_tick: Tick(94),
             elements_per_side: 3,
@@ -518,9 +572,13 @@ mod tests {
             traction_force: Vec3::ZERO,
             ..default()
         };
-        let (predicted, rotation) =
-            historical_anchor_state(&effect_history, &rotation_history, anchor.producing_tick)
-                .unwrap();
+        let (predicted, rotation) = historical_anchor_state(
+            &effect_history,
+            &rotation_history,
+            anchor.producing_tick,
+            Tick(10),
+        )
+        .unwrap();
         assert_eq!(rotation.0.to_array(), historical_rotation.0.to_array());
         let errors = effect_errors(
             &anchor,
@@ -531,6 +589,158 @@ mod tests {
             1.0,
         );
         assert_eq!(errors.linear_velocity, 1.0);
+    }
+
+    #[test]
+    fn changing_field_anchor_waits_for_its_producing_tick_then_matches_tick_for_tick() {
+        let field_320 = populated_field();
+        let mut field_321 = field_320.clone();
+        field_321.sides[0].strain[0].x = 1.0;
+        let effect_320 = TrackGripEffect {
+            traction_force: Vec3::new(1.0, 2.0, 3.0),
+            field_digest: crate::track::sim::coarse_grip_digest(&field_320),
+            ..default()
+        };
+        let effect_321 = TrackGripEffect {
+            traction_force: Vec3::new(4.0, 5.0, 6.0),
+            field_digest: crate::track::sim::coarse_grip_digest(&field_321),
+            ..default()
+        };
+        let mut effects = PredictionHistory::<TrackGripEffect>::default();
+        let mut rotations = PredictionHistory::<Rotation>::default();
+        effects.add_predicted(Tick(320), Some(effect_320));
+        rotations.add_predicted(Tick(320), Some(Rotation::default()));
+
+        assert!(
+            historical_anchor_state(&effects, &rotations, Tick(321), Tick(320)).is_none(),
+            "a future changing-effect anchor must not reuse tick 320 through HistoryBuffer's floor lookup"
+        );
+        let mut watch = AnchorWatch::default();
+        assert!(!watch.anchor_was_compared(Entity::PLACEHOLDER, Tick(321)));
+
+        effects.add_predicted(Tick(321), Some(effect_321));
+        rotations.add_predicted(Tick(321), Some(Rotation::default()));
+        let (predicted, _) = historical_anchor_state(&effects, &rotations, Tick(321), Tick(321))
+            .expect("the anchor becomes comparable when its producing tick has run");
+        assert_eq!(*predicted, effect_321);
+        watch.mark_anchor_compared(Entity::PLACEHOLDER, Tick(321));
+        assert!(watch.anchor_was_compared(Entity::PLACEHOLDER, Tick(321)));
+    }
+
+    #[test]
+    fn bit_identical_checkpoint_is_a_no_op_and_rearms_only_for_new_evidence() {
+        let tank = Entity::from_raw_u32(21).unwrap();
+        let field = populated_field();
+        let digest = crate::track::sim::coarse_grip_digest(&field);
+        let checkpoint = ExactCheckpoint {
+            tank,
+            combatant: crate::CombatantId(21),
+            epoch: 4,
+            state_entering_tick: Tick(100),
+            field: field.clone(),
+            hash: 0xfeed,
+        };
+        let mut pending = PendingGripCorrection::default();
+        let mut watch = AnchorWatch::default();
+        let mut field_history = PredictionHistory::<TrackGripElements>::default();
+        field_history.add_predicted(Tick(99), Some(field.clone()));
+        let mut current_field = field.clone();
+        current_field.sides[0].strain[0].x = 1.0;
+        assert!(fields_bit_equal(
+            field_history.get(Tick(99)).unwrap(),
+            &checkpoint.field
+        ));
+        assert!(!fields_bit_equal(&current_field, &checkpoint.field));
+
+        assert_eq!(
+            admit_completed_checkpoint(
+                &mut pending,
+                &mut watch,
+                checkpoint,
+                &field_history,
+                Tick(100),
+            ),
+            Ok(CheckpointDisposition::NoOp)
+        );
+        assert!(
+            pending.checkpoint.is_none(),
+            "the forced-rollback system must have no correction to claim"
+        );
+        assert!(watch.evidence_spent(tank, 4, digest));
+        assert!(
+            !watch.evidence_spent(tank, 5, digest),
+            "a new epoch is new request evidence"
+        );
+        watch.spend_evidence(tank, 5, digest);
+        assert!(watch.evidence_spent(tank, 5, digest));
+        assert!(
+            !watch.evidence_spent(tank, 5, digest.wrapping_add(1)),
+            "a new digest is new request evidence"
+        );
+        watch.spend_evidence(tank, 5, digest.wrapping_add(1));
+        assert!(watch.evidence_spent(tank, 5, digest.wrapping_add(1)));
+
+        let mut different_bits = field.clone();
+        different_bits.sides[0].strain[1].x = -0.0;
+        let mut changed_pending = PendingGripCorrection::default();
+        assert_eq!(
+            admit_completed_checkpoint(
+                &mut changed_pending,
+                &mut AnchorWatch::default(),
+                ExactCheckpoint {
+                    tank,
+                    combatant: crate::CombatantId(21),
+                    epoch: 6,
+                    state_entering_tick: Tick(102),
+                    field: different_bits,
+                    hash: 0xbeef,
+                },
+                &field_history,
+                Tick(102),
+            ),
+            Ok(CheckpointDisposition::NeedsRollback),
+            "signed zero differs on the exact raw-bit contract"
+        );
+        assert!(changed_pending.checkpoint.is_some());
+    }
+
+    #[test]
+    fn combatant_address_round_trip_and_unresolvable_chunk_deferral() {
+        let combatant = crate::CombatantId(0x0123_4567_89ab_cdef);
+        let field = populated_field();
+        let chunk = make_checkpoint_chunks(combatant, 5, Tick(101), &field)
+            .unwrap()
+            .remove(0);
+        let encoded = bincode::serde::encode_to_vec(&chunk, bincode::config::standard()).unwrap();
+        let (decoded, consumed) = bincode::serde::decode_from_slice::<GripCheckpointChunk, _>(
+            &encoded,
+            bincode::config::standard(),
+        )
+        .unwrap();
+        assert_eq!(consumed, encoded.len());
+        assert_eq!(decoded.combatant, combatant);
+
+        let mut deferred = DeferredCheckpointChunks::default();
+        deferred.defer(decoded, Tick(10));
+        assert!(
+            deferred.take_resolvable(Tick(11), |_| None).is_empty(),
+            "an unresolved combatant must retain its exact chunk"
+        );
+        assert_eq!(deferred.len(), 1);
+        let tank = Entity::from_raw_u32(22).unwrap();
+        let ready = deferred.take_resolvable(Tick(12), |id| (id == combatant).then_some(tank));
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].0, tank);
+        assert_eq!(ready[0].1.combatant, combatant);
+        assert_eq!(deferred.len(), 0);
+
+        deferred.defer(ready[0].1.clone(), Tick(20));
+        assert!(
+            deferred
+                .take_resolvable(Tick(20 + DEFERRED_CHECKPOINT_EXPIRY_TICKS + 1), |_| None,)
+                .is_empty()
+        );
+        assert_eq!(deferred.len(), 0, "an unresolved chunk expires boundedly");
     }
 
     #[test]
@@ -597,9 +807,7 @@ mod tests {
             })
             .collect();
         let chunk = GripCheckpointChunk {
-            // Lightyear maps entities per recipient before bincode. Force the nine-byte `u64`
-            // tier, matching the existing shot-transport mapped-entity size tripwire.
-            tank: Entity::from_bits(0x8000_0000_0000_0001),
+            combatant: crate::CombatantId(u64::MAX),
             epoch: u32::MAX,
             state_entering_tick: Tick(u32::MAX),
             elements_per_side: u16::MAX - 2,
@@ -610,7 +818,7 @@ mod tests {
         };
         let encoded = bincode::serde::encode_to_vec(&chunk, bincode::config::standard()).unwrap();
         println!(
-            "worst mapped 48-entry checkpoint chunk plus message type id: {} B",
+            "worst stable-id 48-entry checkpoint chunk plus message type id: {} B",
             encoded.len() + 4
         );
         assert!(
@@ -632,7 +840,7 @@ mod tests {
                 }
             }
             make_checkpoint_chunks(
-                Entity::from_bits(0x8000_0000_0000_0001),
+                crate::CombatantId(u64::MAX),
                 u32::MAX,
                 Tick(u32::MAX),
                 &field,

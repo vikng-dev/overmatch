@@ -1,4 +1,4 @@
-//! REV-15 element-netcode failure battery.
+//! REV-16 element-netcode failure battery.
 //!
 //! These tests stay below the ECS adapter wherever transport is not the behavior under test: the
 //! pure force-law interface is the production seam, and fixed-tick fixtures make every injection
@@ -251,14 +251,14 @@ fn checkpoint_round_trip(
     tick: Tick,
     authority: &TrackGripElements,
 ) -> ExactCheckpoint {
-    let chunks = make_checkpoint_chunks(tank, epoch, tick, authority)
+    let chunks = make_checkpoint_chunks(crate::CombatantId(tank.to_bits()), epoch, tick, authority)
         .expect("the fixed test field has a valid sparse checkpoint");
     let expected = authority.sides[0].strain.len();
     let mut assembler = CheckpointAssembler::default();
     let mut completed = None;
     for chunk in chunks.iter().rev() {
         completed = assembler
-            .push(chunk.clone(), expected)
+            .push(chunk.clone(), tank, expected)
             .expect("valid checkpoint chunk")
             .or(completed);
     }
@@ -343,14 +343,16 @@ fn parked_divergence_wrench_anchor_and_checkpoint_close_hidden_couples_without_l
         }),
         ..default()
     };
-    let chunks = make_checkpoint_chunks(tank, 11, Tick(90), &authority).unwrap();
+    let chunks =
+        make_checkpoint_chunks(crate::CombatantId(tank.to_bits()), 11, Tick(90), &authority)
+            .unwrap();
     let mut duplicate_assembler = CheckpointAssembler::default();
     let mut duplicate_completions = 0;
     for _ in 0..3 {
         for chunk in &chunks {
             duplicate_completions += usize::from(
                 duplicate_assembler
-                    .push(chunk.clone(), client.sides[0].strain.len())
+                    .push(chunk.clone(), tank, client.sides[0].strain.len())
                     .unwrap()
                     .is_some(),
             );
@@ -1220,8 +1222,10 @@ fn packet_loss_anchor_compare_tolerates_isolated_and_burst_gaps() {
     }
 
     for tick in delivered_ticks {
-        let (predicted, rotation) = historical_anchor_state(&effects, &rotations, Tick(tick))
-            .expect("a delivered anchor compares at its own producing tick despite sequence gaps");
+        let (predicted, rotation) =
+            historical_anchor_state(&effects, &rotations, Tick(tick), Tick(50)).expect(
+                "a delivered anchor compares at its own producing tick despite sequence gaps",
+            );
         assert_eq!(predicted.field_digest, tick);
         assert_eq!(rotation.0, Quat::from_rotation_y(tick as f32));
         let anchor = NetTrackGripAnchor {
@@ -1247,7 +1251,7 @@ fn packet_loss_anchor_compare_tolerates_isolated_and_burst_gaps() {
     }
 
     assert!(
-        historical_anchor_state(&effects, &rotations, Tick(39)).is_none(),
+        historical_anchor_state(&effects, &rotations, Tick(39), Tick(50)).is_none(),
         "an anchor older than retained history must wait rather than compare against the present"
     );
 }
@@ -1268,7 +1272,8 @@ fn dense_checkpoint_field() -> TrackGripElements {
 fn packet_loss_checkpoint_chunks_stay_atomic_and_idempotent_under_drop_duplicate_reorder() {
     let tank = Entity::from_raw_u32(950).unwrap();
     let field = dense_checkpoint_field();
-    let chunks = make_checkpoint_chunks(tank, 31, Tick(400), &field).unwrap();
+    let chunks =
+        make_checkpoint_chunks(crate::CombatantId(tank.to_bits()), 31, Tick(400), &field).unwrap();
     assert!(
         chunks.len() >= 3,
         "fixture needs individual, burst, and completion chunks"
@@ -1282,25 +1287,25 @@ fn packet_loss_checkpoint_chunks_stay_atomic_and_idempotent_under_drop_duplicate
         for index in (0..chunks.len()).rev().filter(|index| *index != dropped) {
             assert!(
                 assembler
-                    .push(chunks[index].clone(), expected)
+                    .push(chunks[index].clone(), tank, expected)
                     .unwrap()
                     .is_none()
             );
             assert!(
                 assembler
-                    .push(chunks[index].clone(), expected)
+                    .push(chunks[index].clone(), tank, expected)
                     .unwrap()
                     .is_none()
             );
         }
         let completed = assembler
-            .push(chunks[dropped].clone(), expected)
+            .push(chunks[dropped].clone(), tank, expected)
             .unwrap()
             .expect("the reliable resend of the one dropped chunk completes atomically");
         assert_field_bits_eq(&completed.field, &field);
         assert!(
             assembler
-                .push(chunks[dropped].clone(), expected)
+                .push(chunks[dropped].clone(), tank, expected)
                 .unwrap()
                 .is_none(),
             "a duplicated completion delivery must be idempotent"
@@ -1311,16 +1316,21 @@ fn packet_loss_checkpoint_chunks_stay_atomic_and_idempotent_under_drop_duplicate
     // shortcut can make the assertion vacuous.
     let mut assembler = CheckpointAssembler::default();
     for chunk in chunks.iter().skip(2) {
-        assert!(assembler.push(chunk.clone(), expected).unwrap().is_none());
+        assert!(
+            assembler
+                .push(chunk.clone(), tank, expected)
+                .unwrap()
+                .is_none()
+        );
     }
     assert!(
         assembler
-            .push(chunks[1].clone(), expected)
+            .push(chunks[1].clone(), tank, expected)
             .unwrap()
             .is_none()
     );
     let completed = assembler
-        .push(chunks[0].clone(), expected)
+        .push(chunks[0].clone(), tank, expected)
         .unwrap()
         .expect("the reordered anchor burst repair completes once");
     assert_field_bits_eq(&completed.field, &field);

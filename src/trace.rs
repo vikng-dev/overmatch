@@ -3,10 +3,12 @@
 //! Invariant: tracing never writes simulation state. `SPIKE_TRACE` enables recorder registration;
 //! role-qualified paths prevent concurrently launched compositions from sharing a sink.
 //!
-//! Rows have `k` values `meta`, `frame`, `tick`, or `rollback`. Fields unavailable in a composition
-//! are omitted rather than represented as null. Cross-process analysis joins on `tick` and `role`,
-//! never on entity identifiers. [`scripts/divergence/analyze.py`](../../scripts/divergence/analyze.py)
-//! consumes the schema.
+//! Rows have `k` values `meta`, `frame`, `tick`, `rollback`, `grip_anchor_compare`,
+//! `grip_resync_request`, or `grip_checkpoint_apply`. Fields unavailable in a composition are omitted
+//! rather than represented as null, except a resync with no retained anchor context, whose diagnostic
+//! values are explicitly null. Cross-process analysis joins on `tick` and `role`, never on entity
+//! identifiers. [`scripts/divergence/analyze.py`](../../scripts/divergence/analyze.py) consumes the
+//! base schema; grip rows are the repair-loop root-cause capture.
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -17,9 +19,10 @@ use avian3d::prelude::{AngularVelocity, Collisions, LinearVelocity, Position, Ro
 use bevy::prelude::*;
 use serde_json::{Value, json};
 
+use crate::CombatantId;
 use crate::tank::{Controlled, Tank, TankSim};
 use crate::track::sim::{
-    TankTransmission, TrackContacts, TrackDrive, TrackGrip, TrackGripElements,
+    TankTransmission, TrackContacts, TrackDrive, TrackGrip, TrackGripEffect, TrackGripElements,
 };
 use crate::track::transmission::{TransmissionProjectionValue, transmission_state_projection};
 
@@ -68,7 +71,7 @@ impl JsonlSink {
 /// and returns whether it did, so the recorder systems gate on that return value at registration
 /// time rather than on a per-frame `resource_exists` check.
 #[derive(Resource)]
-struct TraceWriter {
+pub(crate) struct TraceWriter {
     sink: JsonlSink,
     /// Composition role for the Startup `meta` row.
     role: &'static str,
@@ -84,6 +87,154 @@ impl TraceWriter {
     fn write(&mut self, row: &Value) {
         self.sink.write(row);
     }
+
+    pub(crate) fn record_grip_anchor_compare(
+        &mut self,
+        sample: GripAnchorTrace,
+        request_reason: GripRequestReason,
+        evidence_spent: bool,
+        request_due: bool,
+        request_sent: bool,
+    ) {
+        let mut row = grip_trace_row("grip_anchor_compare", sample, request_reason);
+        let object = row.as_object_mut().expect("grip trace row is an object");
+        object.insert("evidence_spent".into(), Value::Bool(evidence_spent));
+        object.insert("request_due".into(), Value::Bool(request_due));
+        object.insert("request_sent".into(), Value::Bool(request_sent));
+        self.write(&row);
+    }
+
+    pub(crate) fn record_grip_resync_request(
+        &mut self,
+        sample: GripAnchorTrace,
+        request_reason: GripRequestReason,
+    ) {
+        self.write(&grip_trace_row(
+            "grip_resync_request",
+            sample,
+            request_reason,
+        ));
+    }
+
+    pub(crate) fn record_grip_resync_without_anchor(
+        &mut self,
+        combatant: CombatantId,
+        tick: u32,
+        epoch: u32,
+        request_reason: GripRequestReason,
+    ) {
+        self.write(&json!({
+            "k": "grip_resync_request",
+            "tick": tick,
+            "combatant": combatant.0,
+            "request_reason": request_reason.as_str(),
+            "anchor_producing_tick": Value::Null,
+            "history_tick": Value::Null,
+            "authority_force": Value::Null,
+            "predicted_force": Value::Null,
+            "authority_torque": Value::Null,
+            "predicted_torque": Value::Null,
+            "authority_belt": Value::Null,
+            "predicted_belt": Value::Null,
+            "e_v": Value::Null,
+            "e_omega": Value::Null,
+            "e_belt": Value::Null,
+            "epoch": epoch,
+            "authority_digest": Value::Null,
+            "predicted_digest": Value::Null,
+            "digest_match": Value::Null,
+        }));
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_grip_checkpoint_apply(
+        &mut self,
+        tick: u32,
+        combatant: CombatantId,
+        epoch: u32,
+        state_entering_tick: u32,
+        checkpoint_hash: u64,
+        field_bits_changed: bool,
+        rollback: bool,
+    ) {
+        self.write(&json!({
+            "k": "grip_checkpoint_apply",
+            "tick": tick,
+            "combatant": combatant.0,
+            "epoch": epoch,
+            "state_entering_tick": state_entering_tick,
+            "checkpoint_hash": checkpoint_hash,
+            "field_bits_changed": field_bits_changed,
+            "rollback": rollback,
+        }));
+    }
+}
+
+/// Complete values at one anchor/history comparison, copied so an ensuing resync request can emit
+/// the same evidence into a separate JSONL row.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GripAnchorTrace {
+    pub(crate) tick: u32,
+    pub(crate) combatant: CombatantId,
+    pub(crate) anchor_producing_tick: u32,
+    pub(crate) history_tick: u32,
+    pub(crate) authority: TrackGripEffect,
+    pub(crate) predicted: TrackGripEffect,
+    pub(crate) e_v: f32,
+    pub(crate) e_omega: f32,
+    pub(crate) e_belt: [f32; 2],
+    pub(crate) epoch: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GripRequestReason {
+    None,
+    Effect,
+    Digest,
+    EffectAndDigest,
+    StaleCheckpoint,
+}
+
+impl GripRequestReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Effect => "effect",
+            Self::Digest => "digest",
+            Self::EffectAndDigest => "effect_and_digest",
+            Self::StaleCheckpoint => "stale_checkpoint",
+        }
+    }
+}
+
+fn grip_trace_row(kind: &'static str, sample: GripAnchorTrace, reason: GripRequestReason) -> Value {
+    json!({
+        "k": kind,
+        "tick": sample.tick,
+        "combatant": sample.combatant.0,
+        "request_reason": reason.as_str(),
+        "anchor_producing_tick": sample.anchor_producing_tick,
+        "history_tick": sample.history_tick,
+        "authority_force": vec3(sample.authority.traction_force),
+        "predicted_force": vec3(sample.predicted.traction_force),
+        "authority_torque": vec3(sample.authority.traction_torque),
+        "predicted_torque": vec3(sample.predicted.traction_torque),
+        "authority_belt": [
+            num(sample.authority.belt_reaction[0]),
+            num(sample.authority.belt_reaction[1]),
+        ],
+        "predicted_belt": [
+            num(sample.predicted.belt_reaction[0]),
+            num(sample.predicted.belt_reaction[1]),
+        ],
+        "e_v": num(sample.e_v),
+        "e_omega": num(sample.e_omega),
+        "e_belt": [num(sample.e_belt[0]), num(sample.e_belt[1])],
+        "epoch": sample.epoch,
+        "authority_digest": sample.authority.field_digest,
+        "predicted_digest": sample.predicted.field_digest,
+        "digest_match": sample.authority.field_digest == sample.predicted.field_digest,
+    })
 }
 
 // JSON helpers shared across the recorders. Non-finite values become JSON `null`.
@@ -671,4 +822,63 @@ fn record_rollback(
         "trg": Value::Array(triggers),
     });
     trace.write(&row);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grip_anchor_trace_contains_the_root_cause_capture_fields() {
+        let row = grip_trace_row(
+            "grip_anchor_compare",
+            GripAnchorTrace {
+                tick: 20,
+                combatant: CombatantId(7),
+                anchor_producing_tick: 18,
+                history_tick: 18,
+                authority: TrackGripEffect {
+                    traction_force: Vec3::X,
+                    traction_torque: Vec3::Y,
+                    belt_reaction: [1.0, 2.0],
+                    field_digest: 3,
+                },
+                predicted: TrackGripEffect {
+                    traction_force: Vec3::Z,
+                    traction_torque: -Vec3::Y,
+                    belt_reaction: [4.0, 5.0],
+                    field_digest: 6,
+                },
+                e_v: 0.1,
+                e_omega: 0.2,
+                e_belt: [0.3, 0.4],
+                epoch: 8,
+            },
+            GripRequestReason::Effect,
+        );
+        let object = row.as_object().expect("trace row is an object");
+        for field in [
+            "request_reason",
+            "anchor_producing_tick",
+            "history_tick",
+            "authority_force",
+            "predicted_force",
+            "authority_torque",
+            "predicted_torque",
+            "authority_belt",
+            "predicted_belt",
+            "e_v",
+            "e_omega",
+            "e_belt",
+            "epoch",
+            "authority_digest",
+            "predicted_digest",
+            "digest_match",
+        ] {
+            assert!(
+                object.contains_key(field),
+                "missing grip trace field {field}"
+            );
+        }
+    }
 }
