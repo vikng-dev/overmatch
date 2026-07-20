@@ -286,10 +286,15 @@ pub struct TrackGear {
 
 impl TrackGear {
     /// The declared joint transmission params, if the spec authored one. Read-only accessor for
-    /// the offline drive HUD (`crate::run_offline`); the field stays private so only the drive step
-    /// and HUD legend consume it.
+    /// the shared drive HUD; the field stays private so only the drive step and HUD consume it.
     pub fn trans(&self) -> Option<&TransmissionParams> {
         self.trans.as_ref()
+    }
+
+    /// Spec-selected adapter for the shared client HUD. Read-only view access; the drive step remains
+    /// the sole owner of how this choice affects simulation.
+    pub(crate) fn mode(&self) -> TransmissionMode {
+        self.mode
     }
 
     /// Per-side reflected belt inertia used by the anchor's physical belt-speed error metric.
