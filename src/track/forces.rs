@@ -102,7 +102,7 @@ const GRIP_ELEMENT_LEAVE_FRACTION: f32 = 2.5e-4;
 /// advects, so stale world-space strain is never re-presented to different ground. Chosen
 /// over a geometric departure test: one u8 per element, deterministic, and departure
 /// geometry is already implied by the load evidence the dwell counts down on.
-const GRIP_ELEMENT_LOSS_DWELL_TICKS: u8 = 8;
+pub(crate) const GRIP_ELEMENT_LOSS_DWELL_TICKS: u8 = 8;
 
 /// The canonical belt-phase decomposition: travel → (integer wrap count, residual station
 /// offset in `[0, pitch)`). ONE function feeds BOTH the resample offset and material

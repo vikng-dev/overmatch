@@ -21,6 +21,8 @@ mod server;
 #[cfg(test)]
 mod shot_loss;
 mod shot_transport;
+#[cfg(test)]
+mod test_harness;
 mod watchdog;
 
 /// Run the predicted network client.

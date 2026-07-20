@@ -4,11 +4,12 @@
 
 use core::time::Duration;
 
-use avian3d::prelude::{Forces, WriteRigidBodyForces};
+use avian3d::prelude::Forces;
 use bevy::prelude::*;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
 
 use crate::command::TankCommand;
+use crate::track::sim::{ExplicitImpulse, apply_explicit_impulse};
 
 /// `--simulate-input` state: a fixed-tick counter driving a scripted throttle window, then a
 /// clean exit once enough time has passed to observe the forced rollback + convergence.
@@ -249,7 +250,7 @@ pub(crate) fn perturb_after_delay(
     time: Res<Time<Virtual>>,
     mut commands: Commands,
 ) {
-    for (entity, pending, mut forces, wake) in &mut tanks {
+    for (entity, pending, forces, wake) in &mut tanks {
         if time.elapsed() < pending.at {
             continue;
         }
@@ -262,10 +263,7 @@ pub(crate) fn perturb_after_delay(
         // (see spike log).
         const IMPULSE: f32 = 171_000.0;
         let impulse = Vec3::X * IMPULSE;
-        forces.apply_linear_impulse(impulse);
-        if let Some(mut wake) = wake {
-            wake.record_impulse(impulse);
-        }
+        apply_explicit_impulse(forces, wake, ExplicitImpulse::Center(impulse));
         info!("server: {entity} perturbation impulse applied (forced rollback trigger)");
         commands.entity(entity).remove::<PendingPerturbation>();
     }

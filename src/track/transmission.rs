@@ -743,6 +743,161 @@ pub struct TransmissionState {
     pub hold_reengage_ticks: u8,
 }
 
+/// One field in the authoritative REV-14 transmission projection. Float values retain their raw
+/// bits; the scheduler carries its pinned trace/hash tag plus stable `from`/`to` slots.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum TransmissionProjectionValue {
+    U8(u8),
+    I8(i8),
+    Bool(bool),
+    F32(f32),
+    Scheduler { tag: u8, from: u8, to: u8 },
+}
+
+impl TransmissionProjectionValue {
+    /// Bit-exact equality under the atomic replication contract.
+    pub(crate) fn bit_eq(self, other: Self) -> bool {
+        match (self, other) {
+            (Self::U8(a), Self::U8(b)) => a == b,
+            (Self::I8(a), Self::I8(b)) => a == b,
+            (Self::Bool(a), Self::Bool(b)) => a == b,
+            (Self::F32(a), Self::F32(b)) => a.to_bits() == b.to_bits(),
+            (
+                Self::Scheduler {
+                    tag: a_tag,
+                    from: a_from,
+                    to: a_to,
+                },
+                Self::Scheduler {
+                    tag: b_tag,
+                    from: b_from,
+                    to: b_to,
+                },
+            ) => a_tag == b_tag && a_from == b_from && a_to == b_to,
+            _ => false,
+        }
+    }
+}
+
+/// A named field in the exhaustive authoritative transmission projection.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TransmissionProjectionField {
+    pub(crate) name: &'static str,
+    pub(crate) value: TransmissionProjectionValue,
+}
+
+/// The exhaustive REV-14 transmission inventory in its canonical replication/hash/trace order.
+/// Adding state fails this destructure until the field is classified exactly once here.
+pub(crate) fn transmission_state_projection(
+    state: &TransmissionState,
+) -> [TransmissionProjectionField; 16] {
+    let TransmissionState {
+        gear,
+        shift_ticks,
+        steer_step,
+        reverse,
+        park,
+        last_shift_dir,
+        dwell_ticks,
+        omega_e,
+        clutch_out,
+        demand_n,
+        demand_initialized,
+        grade_confirm_ticks,
+        grade_target,
+        scheduler,
+        hill_hold,
+        hold_reengage_ticks,
+    } = *state;
+    let scheduler = match scheduler {
+        SchedulerState::Normal => TransmissionProjectionValue::Scheduler {
+            tag: 0,
+            from: 0,
+            to: 0,
+        },
+        SchedulerState::GradeShift { from, to } => {
+            TransmissionProjectionValue::Scheduler { tag: 1, from, to }
+        }
+        SchedulerState::HillHold => TransmissionProjectionValue::Scheduler {
+            tag: 2,
+            from: 0,
+            to: 0,
+        },
+        SchedulerState::GradeLimit => TransmissionProjectionValue::Scheduler {
+            tag: 3,
+            from: 0,
+            to: 0,
+        },
+    };
+    use TransmissionProjectionValue::{Bool, F32, I8, U8};
+    [
+        TransmissionProjectionField {
+            name: "gear",
+            value: U8(gear),
+        },
+        TransmissionProjectionField {
+            name: "shift_ticks",
+            value: U8(shift_ticks),
+        },
+        TransmissionProjectionField {
+            name: "steer_step",
+            value: U8(steer_step),
+        },
+        TransmissionProjectionField {
+            name: "reverse",
+            value: Bool(reverse),
+        },
+        TransmissionProjectionField {
+            name: "park",
+            value: Bool(park),
+        },
+        TransmissionProjectionField {
+            name: "last_shift_dir",
+            value: I8(last_shift_dir),
+        },
+        TransmissionProjectionField {
+            name: "dwell_ticks",
+            value: U8(dwell_ticks),
+        },
+        TransmissionProjectionField {
+            name: "omega_e",
+            value: F32(omega_e),
+        },
+        TransmissionProjectionField {
+            name: "clutch_out",
+            value: Bool(clutch_out),
+        },
+        TransmissionProjectionField {
+            name: "demand_n",
+            value: F32(demand_n),
+        },
+        TransmissionProjectionField {
+            name: "demand_initialized",
+            value: Bool(demand_initialized),
+        },
+        TransmissionProjectionField {
+            name: "grade_confirm_ticks",
+            value: U8(grade_confirm_ticks),
+        },
+        TransmissionProjectionField {
+            name: "grade_target",
+            value: U8(grade_target),
+        },
+        TransmissionProjectionField {
+            name: "scheduler",
+            value: scheduler,
+        },
+        TransmissionProjectionField {
+            name: "hill_hold",
+            value: Bool(hill_hold),
+        },
+        TransmissionProjectionField {
+            name: "hold_reengage_ticks",
+            value: U8(hold_reengage_ticks),
+        },
+    ]
+}
+
 impl TransmissionState {
     /// Construct complete regenerative transmission state synchronously from validated vehicle
     /// data. The crank starts at the authored idle speed; demand remains intentionally unseeded

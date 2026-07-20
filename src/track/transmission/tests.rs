@@ -189,61 +189,10 @@ fn rev14_transmission_state_inventory_tripwire() {
     const LOCAL_VIEW_FIELDS: usize = 0;
 
     // Adding a field? Classify it in transmission-design.md's authoritative REV-14 inventory,
-    // then extend this exhaustive destructure and the classified name list. Do not add `..`.
-    let TransmissionState {
-        gear,
-        shift_ticks,
-        steer_step,
-        reverse,
-        park,
-        last_shift_dir,
-        dwell_ticks,
-        omega_e,
-        clutch_out,
-        demand_n,
-        demand_initialized,
-        grade_confirm_ticks,
-        grade_target,
-        scheduler,
-        hill_hold,
-        hold_reengage_ticks,
-    } = fresh(&lab_tp());
-    let classified_fields = [
-        "gear",
-        "shift_ticks",
-        "steer_step",
-        "reverse",
-        "park",
-        "last_shift_dir",
-        "dwell_ticks",
-        "omega_e",
-        "clutch_out",
-        "demand_n",
-        "demand_initialized",
-        "grade_confirm_ticks",
-        "grade_target",
-        "scheduler",
-        "hill_hold",
-        "hold_reengage_ticks",
-    ];
-    let _ = (
-        gear,
-        shift_ticks,
-        steer_step,
-        reverse,
-        park,
-        last_shift_dir,
-        dwell_ticks,
-        omega_e,
-        clutch_out,
-        demand_n,
-        demand_initialized,
-        grade_confirm_ticks,
-        grade_target,
-        scheduler,
-        hill_hold,
-        hold_reengage_ticks,
-    );
+    // then extend the exhaustive canonical projection. Do not add `..` there.
+    let classified_fields = transmission_state_projection(&fresh(&lab_tp()));
+    assert_eq!(classified_fields[0].name, "gear");
+    assert_eq!(classified_fields[15].name, "hold_reengage_ticks");
 
     assert_eq!(
         classified_fields.len(),

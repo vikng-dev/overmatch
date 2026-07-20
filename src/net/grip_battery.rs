@@ -10,7 +10,8 @@ use lightyear::prelude::Tick;
 use super::*;
 use crate::tank::TankSim;
 use crate::track::forces::{
-    ForceParams, SideInput, SideReport, SideState, contact_side, grip_stiffness,
+    ForceParams, GRIP_ELEMENT_LOSS_DWELL_TICKS, SideInput, SideReport, SideState, contact_side,
+    grip_stiffness,
 };
 use crate::track::oracle::TerrainOracle;
 use crate::track::sim::{
@@ -19,7 +20,7 @@ use crate::track::sim::{
 
 const DT: f32 = 1.0 / 64.0;
 const LINKS: usize = 20;
-const LOSS_DWELL: u8 = 8;
+const LOSS_DWELL: u8 = GRIP_ELEMENT_LOSS_DWELL_TICKS;
 
 #[derive(Clone, Copy)]
 struct TestGround {
@@ -961,8 +962,7 @@ mod jip_udp {
     use super::*;
     use crate::CombatantId;
     use crate::net::protocol::{NetTank, PROTOCOL_FINGERPRINT};
-
-    const TICK: core::time::Duration = core::time::Duration::from_nanos(1_000_000_000 / 64);
+    use crate::net::test_harness::{TICK, base_app, finish, free_port, lock_real_udp_test};
 
     #[derive(Resource, Default)]
     struct Spawned(bool);
@@ -1077,7 +1077,7 @@ mod jip_udp {
     }
 
     fn build_server(port: u16) -> App {
-        let mut app = crate::net::shot_loss::base_app();
+        let mut app = base_app();
         app.add_plugins(ServerPlugins {
             tick_duration: TICK,
         });
@@ -1103,7 +1103,7 @@ mod jip_udp {
     }
 
     fn build_client(port: u16) -> App {
-        let mut app = crate::net::shot_loss::base_app();
+        let mut app = base_app();
         app.add_plugins(ClientPlugins {
             tick_duration: TICK,
         });
@@ -1142,12 +1142,12 @@ mod jip_udp {
 
     #[test]
     fn join_in_progress_replicate_once_seed_precedes_first_predicted_force_tick_over_udp() {
-        let _udp = crate::net::shot_loss::lock_real_udp_test();
-        let port = crate::net::shot_loss::free_port();
+        let _udp = lock_real_udp_test();
+        let port = free_port();
         let mut server = build_server(port);
         let mut client = build_client(port);
-        crate::net::shot_loss::finish(&mut server);
-        crate::net::shot_loss::finish(&mut client);
+        finish(&mut server);
+        finish(&mut client);
 
         for _ in 0..1_200 {
             server.update();
