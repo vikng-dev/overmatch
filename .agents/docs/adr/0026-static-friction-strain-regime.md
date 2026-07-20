@@ -1,5 +1,8 @@
 # Static friction: an elastic–plastic strain regime inside the belt law
 
+> **REV-15 scope:** retained for the aggregate offline compatibility path; superseded for networked
+> element-mode composition by [[0027-element-grip-netcode]].
+
 Tanks hold and grip through a **per-side elastic–plastic shear strain state** — the
 Janosi–Hanamoto form from tracked-vehicle terramechanics, carried as `TrackGrip` (4 floats:
 `[left,right] × [longitudinal, lateral/ρ]`, generalized force resultants, never world
@@ -56,7 +59,8 @@ stays retired.
   re-heavy steering if the feel pass wants Wong/Merritt turning resistance back.
 - Netcode: `TrackGrip` replicates + predicts + rolls back (LinearVelocity pattern,
   16 bytes, own 2 kN threshold, `hblt` hash stream); PROTOCOL_REV 13.
-  (SUPERSEDED at PROTOCOL_REV 15: `TrackGrip` left the wire with the element-netcode
+  (SUPERSEDED at PROTOCOL_REV 15 by [[0027-element-grip-netcode]]: `TrackGrip` left the wire with
+  the element-netcode
   batch — in element mode it is derived telemetry, and rolling back on it without an
   exact field checkpoint is the correction-free rollback loop element-netcode-design.md
   forbids. The component and offline aggregate path remain; per-element state now

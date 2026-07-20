@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use avian3d::prelude::{Forces, LayerMask, SpatialQuery, SpatialQueryFilter, WriteRigidBodyForces};
+use avian3d::prelude::{Forces, LayerMask, SpatialQuery, SpatialQueryFilter};
 use bevy::ecs::system::SystemParam;
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
@@ -2231,11 +2231,12 @@ fn apply_hit_impulse(
     impulse: Vec3,
     point: Vec3,
 ) {
-    if let Ok((mut forces, wake)) = bodies.get_mut(body) {
-        forces.apply_linear_impulse_at_point(impulse, point);
-        if let Some(mut wake) = wake {
-            wake.record_impulse(impulse);
-        }
+    if let Ok((forces, wake)) = bodies.get_mut(body) {
+        crate::track::sim::apply_explicit_impulse(
+            forces,
+            wake,
+            crate::track::sim::ExplicitImpulse::AtPoint { impulse, point },
+        );
     }
 }
 

@@ -17,6 +17,7 @@
 //!   slew, so thrust fades over ~1/[`super::drive::DRIVE_SLEW_PER_SECOND`] s — deliberate, the
 //!   same shaping as a released key, making capability loss/recovery feel mechanical.
 
+use avian3d::dynamics::rigid_body::forces::ForcesItem;
 use avian3d::prelude::{
     ComputedCenterOfMass, Forces, Position, ReadRigidBodyForces, RigidBody, Rotation,
     WriteRigidBodyForces,
@@ -168,6 +169,34 @@ impl TrackGripWake {
 
     pub(crate) fn generation(self) -> u32 {
         self.generation
+    }
+}
+
+/// The two physically distinct explicit hull-impulse operations. Point impulses retain their
+/// torque arm; center impulses do not synthesize one.
+pub(crate) enum ExplicitImpulse {
+    Center(Vec3),
+    AtPoint { impulse: Vec3, point: Vec3 },
+}
+
+/// Apply an explicit hull impulse and notify the grip rest detector as one operation.
+pub(crate) fn apply_explicit_impulse(
+    mut forces: ForcesItem<'_, '_>,
+    wake: Option<Mut<'_, TrackGripWake>>,
+    explicit: ExplicitImpulse,
+) {
+    let impulse = match explicit {
+        ExplicitImpulse::Center(impulse) => {
+            forces.apply_linear_impulse(impulse);
+            impulse
+        }
+        ExplicitImpulse::AtPoint { impulse, point } => {
+            forces.apply_linear_impulse_at_point(impulse, point);
+            impulse
+        }
+    };
+    if let Some(mut wake) = wake {
+        wake.record_impulse(impulse);
     }
 }
 

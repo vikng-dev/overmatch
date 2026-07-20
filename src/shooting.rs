@@ -5,7 +5,7 @@
 //! the *player's* gun. The armor sandbox drives the same `FireShell` from its free-fly camera
 //! instead.
 
-use avian3d::prelude::{Forces, Position, Rotation, WriteRigidBodyForces};
+use avian3d::prelude::{Forces, Position, Rotation};
 use bevy::prelude::*;
 
 use crate::ballistics::{FireShell, FireShellOrigin, ShotSource};
@@ -14,7 +14,7 @@ use crate::damage::{TankVolumes, VolumeFacets, requirement_met};
 use crate::spec::{FireMode, Trigger};
 use crate::state::{GameplaySet, SimPhase};
 use crate::tank::{Muzzle, Tank, TankRoot, TankSim, Weapon, WeaponIndex, rig_world_pose};
-use crate::track::sim::TrackGripWake;
+use crate::track::sim::{ExplicitImpulse, TrackGripWake, apply_explicit_impulse};
 
 /// Feel multiplier on the hull recoil impulse (1.0 = physical momentum). On a 57 t hull true momentum
 /// is a gentle rock by design; bump this if the firing kick should read more dramatically.
@@ -316,12 +316,16 @@ fn fire(
         // axis. The line of action passes above the centre of mass, so the impulse-at-point also
         // pitches the nose up (gun climb), not just shoves the hull back. Each weapon kicks by its
         // own momentum, so the MGs barely register.
-        if let Ok((mut forces, wake)) = bodies.get_mut(root.0) {
+        if let Ok((forces, wake)) = bodies.get_mut(root.0) {
             let impulse = bore * (-weapon.mass * weapon.speed * RECOIL_FEEL);
-            forces.apply_linear_impulse_at_point(impulse, muzzle_position);
-            if let Some(mut wake) = wake {
-                wake.record_impulse(impulse);
-            }
+            apply_explicit_impulse(
+                forces,
+                wake,
+                ExplicitImpulse::AtPoint {
+                    impulse,
+                    point: muzzle_position,
+                },
+            );
         }
         // Arm the fire timer per mechanism. `Single`: the crew-gated reload. `Automatic`: consume
         // one belt round; a dry belt automatically starts the (crew-gated) belt swap, otherwise

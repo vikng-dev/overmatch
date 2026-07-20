@@ -3,6 +3,24 @@
 
 # Netcode shape for per-element track grip state
 
+## As built at REV-14/15
+
+The REV-15 game path now runs the per-element law; the sandbox-only finding below is historical.
+`TrackGripElements` is constructed synchronously from tank data at authority spawn, seeds an owner's
+join-in-progress root through replicate-once initialization, and then rewinds through local rollback
+history. The server publishes a per-tick wrench/digest anchor and sends exact sparse checkpoints on
+rest entry, explicit request, and a DERIVED 256-tick fallback cadence at the MEASURED 64 Hz
+configuration (DERIVED 4 s). Validated checkpoints install at the state-entering tick through forced
+rollback; a digest mismatch alone never rolls back.
+
+`TrackGrip` kept its name because it still serves the aggregate offline compatibility path and is
+derived telemetry in element mode; it left the wire at REV 15. The join-in-progress ordering has
+both direct first-force-tick coverage and a real loopback-UDP replicate-once gate. Batch D's
+MEASURED cumulative-belt-phase curves concluded that moving fields self-heal, but the periodic
+checkpoint remains until Phase-4 multiplayer evidence justifies removing it. The settled contract
+is [[0027-element-grip-netcode]]; future-tense statements below are the historical design record and
+are superseded where they conflict with this section or that ADR.
+
 ## Decision
 
 Recommend a hybrid:
@@ -23,7 +41,12 @@ This is not mathematically equivalent to authoritative per-tick field replicatio
 
 ## Repository findings
 
-The shipped law integrates one aggregate `TrackGrip` resultant and distributes it in load proportion. The prototype now present in the worktree instead carries world-space `Vec3` values keyed by material link and column ([forces.rs](/Users/Yan/Desktop/github/vikng-dev/personal/overmatch/src/track/forces.rs:106)). It remains sandbox-only in the game adapter ([sim.rs](/Users/Yan/Desktop/github/vikng-dev/personal/overmatch/src/track/sim.rs:257)).
+Historical finding, SUPERSEDED at REV 15: the shipped law integrated one aggregate `TrackGrip`
+resultant and distributed it in load proportion, while the prototype carried world-space `Vec3`
+values keyed by material link and column and remained sandbox-only in the game adapter
+([forces.rs](/Users/Yan/Desktop/github/vikng-dev/personal/overmatch/src/track/forces.rs:106),
+[sim.rs](/Users/Yan/Desktop/github/vikng-dev/personal/overmatch/src/track/sim.rs:257)). The as-built
+game path now uses that element field.
 
 Two prototype details need resolution before promotion:
 
@@ -220,7 +243,9 @@ Recommended reconciliation policy:
 - Effect mismatch above threshold: request an exact checkpoint immediately.
 - Coarse digest mismatch while parked or non-turning: request immediately.
 - Coarse digest mismatch while a side is turning over: allow at most a MEASURED contact-dwell interval; request if it persists.
-- Optional periodic exact checkpoint: retain initially, then remove only after an injected-divergence test measures reliable self-healing.
+- Periodic exact checkpoint: Batch D's MEASURED cumulative-belt-phase curves concluded that moving
+  fields self-heal. The DERIVED 256-tick fallback at the MEASURED 64 Hz configuration (DERIVED 4 s)
+  remains until Phase-4 multiplayer evidence justifies removing it.
 
 Do not make a digest mismatch alone trigger a Lightyear rollback. A rollback without corrective field data can restore the same divergent local history and create a loop. The grip-attributed rollback should happen when an exact checkpoint is ready to install.
 
@@ -237,7 +262,7 @@ Do not make a digest mismatch alone trigger a Lightyear rollback. A rollback wit
 - Included in the exact determinism hash in side/link/column order.
 - No `HashMap`, runtime resize, or iteration-order ambiguity.
 
-For join-in-progress, transmit an exact once-only initial value. Lightyear `0.28` provides an initial confirmed-write path specifically for once-replicated, subsequently local-rollback state. After catch-up activation, remove the one-time `ConfirmedHistory<TrackGripElements>` so later ordinary rollbacks use local prediction history, matching the reason behind the current `TankSim` stripping code ([protocol.rs](/Users/Yan/Desktop/github/vikng-dev/personal/overmatch/src/net/protocol.rs:1047)). This init ordering needs an integration test: the tank must not run one fixed tick with a default empty field.
+For join-in-progress, transmit an exact once-only initial value. Lightyear `0.28` provides an initial confirmed-write path specifically for once-replicated, subsequently local-rollback state. After catch-up activation, remove the one-time `ConfirmedHistory<TrackGripElements>` so later ordinary rollbacks use local prediction history, matching the reason behind the current `TankSim` stripping code ([protocol.rs](/Users/Yan/Desktop/github/vikng-dev/personal/overmatch/src/net/protocol.rs:1047)). REV-15 rider DISCHARGED: direct first-force-tick cases and a real loopback-UDP replicate-once gate verify that a tank does not run one fixed tick with a default empty field.
 
 `TrackGripEffect`
 
@@ -319,7 +344,10 @@ The same change must update:
 - channel and message registrations;
 - handshake fixtures/tests.
 
-The old replicated `TrackGrip` should not silently change meaning from elastic state to telemetry. Rename it or remove it. `TrackGripEffect` is an output summary; `TrackGripElements` is the simulation state.
+Historical advice, DISCHARGED at REV 15: the old replicated `TrackGrip` should not silently change
+meaning from elastic state to telemetry. The implementation instead removed it from the wire while
+retaining the name for aggregate offline compatibility and derived element-mode telemetry.
+`TrackGripEffect` is the output summary; `TrackGripElements` is the simulation state.
 
 ## Failure modes and required tests
 

@@ -29,7 +29,9 @@ use crate::tank::{
     Muzzle, Rig, ServoCommand, ServoIndex, ServoSpec, TankRoot, TankSim, Weapon, WeaponIndex,
 };
 use crate::track::sim::{TankTransmission, TrackDrive, TrackGripEffect, TrackGripElements};
+#[cfg(test)]
 use crate::track::transmission::TransmissionState;
+use crate::track::transmission::transmission_state_projection;
 use crate::{CombatantId, ShotId};
 
 // ---------------------------------------------------------------------------
@@ -821,61 +823,16 @@ pub(crate) fn track_drive_error(a: &TrackDrive, b: &TrackDrive) -> f32 {
 }
 
 /// Whether two atomic transmission snapshots differ under the REV-14 wire contract. Exhaustive
-/// destructuring makes a future field addition fail compilation until its comparison is classified.
+/// projection in the transmission module makes a future field addition fail compilation until its
+/// comparison is classified.
 pub(crate) fn tank_transmission_mismatch(a: &TankTransmission, b: &TankTransmission) -> bool {
-    let TransmissionState {
-        gear: a_gear,
-        shift_ticks: a_shift_ticks,
-        steer_step: a_steer_step,
-        reverse: a_reverse,
-        park: a_park,
-        last_shift_dir: a_last_shift_dir,
-        dwell_ticks: a_dwell_ticks,
-        omega_e: a_omega_e,
-        clutch_out: a_clutch_out,
-        demand_n: a_demand_n,
-        demand_initialized: a_demand_initialized,
-        grade_confirm_ticks: a_grade_confirm_ticks,
-        grade_target: a_grade_target,
-        scheduler: a_scheduler,
-        hill_hold: a_hill_hold,
-        hold_reengage_ticks: a_hold_reengage_ticks,
-    } = a.0;
-    let TransmissionState {
-        gear: b_gear,
-        shift_ticks: b_shift_ticks,
-        steer_step: b_steer_step,
-        reverse: b_reverse,
-        park: b_park,
-        last_shift_dir: b_last_shift_dir,
-        dwell_ticks: b_dwell_ticks,
-        omega_e: b_omega_e,
-        clutch_out: b_clutch_out,
-        demand_n: b_demand_n,
-        demand_initialized: b_demand_initialized,
-        grade_confirm_ticks: b_grade_confirm_ticks,
-        grade_target: b_grade_target,
-        scheduler: b_scheduler,
-        hill_hold: b_hill_hold,
-        hold_reengage_ticks: b_hold_reengage_ticks,
-    } = b.0;
-
-    a_gear != b_gear
-        || a_shift_ticks != b_shift_ticks
-        || a_steer_step != b_steer_step
-        || a_reverse != b_reverse
-        || a_park != b_park
-        || a_last_shift_dir != b_last_shift_dir
-        || a_dwell_ticks != b_dwell_ticks
-        || a_omega_e.to_bits() != b_omega_e.to_bits()
-        || a_clutch_out != b_clutch_out
-        || a_demand_n.to_bits() != b_demand_n.to_bits()
-        || a_demand_initialized != b_demand_initialized
-        || a_grade_confirm_ticks != b_grade_confirm_ticks
-        || a_grade_target != b_grade_target
-        || a_scheduler != b_scheduler
-        || a_hill_hold != b_hill_hold
-        || a_hold_reengage_ticks != b_hold_reengage_ticks
+    transmission_state_projection(&a.0)
+        .into_iter()
+        .zip(transmission_state_projection(&b.0))
+        .any(|(a, b)| {
+            debug_assert_eq!(a.name, b.name);
+            !a.value.bit_eq(b.value)
+        })
 }
 
 /// Ordered wire registrations. Keep this list aligned with [`plugin`]; its pinned hash is a direct

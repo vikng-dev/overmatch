@@ -1,5 +1,18 @@
 # Transmission declaration — design brief (codex, 2026-07-18)
 
+## As built at REV-14/15
+
+REV 14 landed the declared transmission behind one joint two-output seam. Its complete
+`TransmissionState` is constructed synchronously from tank data at spawn and carried atomically in
+`TankTransmission`: the owning client predicts and rolls it back, exact comparisons use raw float
+bits, and canonical hashing follows the same exhaustive DERIVED 16-field projection. A replicated
+root waits for its authoritative current transmission snapshot before its sim body attaches, so
+join-in-progress cannot overwrite history with a fresh spec-derived state.
+
+REV 15 retained that transmission contract unchanged while the element-grip wire surface landed.
+The architecture menu, staged findings, and cost/performance tables below remain the historical
+design record; the authoritative inventory in section 2 describes the as-built state.
+
 
 Put a single two-output transmission module between contact-force calculation and belt integration:
 
