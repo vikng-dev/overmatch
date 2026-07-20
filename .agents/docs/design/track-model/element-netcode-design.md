@@ -3,7 +3,7 @@
 
 # Netcode shape for per-element track grip state
 
-## As built at REV-14/15
+## As built at REV-14/15/16
 
 The REV-15 game path now runs the per-element law; the sandbox-only finding below is historical.
 `TrackGripElements` is constructed synchronously from tank data at authority spawn, seeds an owner's
@@ -20,6 +20,20 @@ MEASURED cumulative-belt-phase curves concluded that moving fields self-heal, bu
 checkpoint remains until Phase-4 multiplayer evidence justifies removing it. The settled contract
 is [[0027-element-grip-netcode]]; future-tense statements below are the historical design record and
 are superseded where they conflict with this section or that ADR.
+
+REV-16 closes three repair-contract defects without changing the force law, effect thresholds,
+coarse digest, rest epochs, or checkpoint cadence. Checkpoint and request identity is now stable
+`CombatantId`, resolved locally; unresolved JIP chunks defer in a DERIVED 256-chunk queue and expire
+with a warning after DERIVED 128 ticks (DERIVED 2 s at the MEASURED 64 Hz configuration). The strain
+validator admits the unchanged f32 saturation producer's DERIVED rounding envelope instead of using
+an impossible zero-tolerance `K^2` postcondition. A raw-bit-identical completed checkpoint is a no-op:
+it fires no rollback and spends request evidence for the current `(tank, epoch, digest)` until epoch
+or digest changes. `SPIKE_TRACE` now emits complete effect/history comparison, request, and checkpoint
+field-change rows. Follow-up MEASURED capture showed that the apparent anchor label skew was a future
+anchor passed to Lightyear's floor lookup: `PredictionHistory::get(N)` returned the newest older
+sample before the client had completed `N`. Anchors retain their completed-tick label and now wait for
+that tick; no compensating tick arithmetic is applied. No-op checkpoints compare against retained
+field history at their rollback baseline rather than against the later live field.
 
 ## Decision
 
@@ -193,7 +207,9 @@ Replicon mutations use an unreliable latest-state channel but resend unacknowled
 
 #### Transition semantics
 
-The checkpoint should represent state entering an explicitly named fixed tick. A simple convention is:
+The checkpoint should represent state entering an explicitly named fixed tick. This convention is
+checkpoint-specific; an effect anchor instead names the completed tick whose history value it
+summarizes. The checkpoint convention is:
 
 - capture the end-of-tick field in `FixedPostUpdate`;
 - label it as the state entering the next tick;
@@ -279,14 +295,15 @@ For join-in-progress, transmit an exact once-only initial value. Lightyear `0.28
 `GripCheckpointChunk`
 
 - Owner-private, server-to-client, unordered reliable message.
-- Contains tank identity, epoch, state-entering tick, chunk index/count, explicit occupancy/element IDs, exact strains, contact generations, and a whole-checkpoint hash.
+- Contains stable `CombatantId`, epoch, state-entering tick, chunk index/count, explicit occupancy/element IDs, exact strains, contact generations, and a whole-checkpoint hash. REV-16 receivers resolve that plain identity to exactly one local controlled replica and boundedly defer chunks during JIP instead of accepting Lightyear's irreversible mapped-entity placeholder.
 - Apply only after all chunks validate.
 - Keep chunks below transport packet limits; Replicon deliberately avoids splitting one entity’s mutation across messages even if it exceeds the usual packet size ([channels.rs](/Users/Yan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bevy_replicon-0.41.1/src/shared/backend/channels.rs:117)).
 
 `GripResyncRequest`
 
 - Owner-to-server reliable message.
-- Rate-limited and deduplicated by tank and epoch.
+- Addresses the owned tank by stable `CombatantId`; the server resolves it and verifies ownership.
+- Rate-limited and deduplicated by resolved tank and authoritative epoch.
 - Server responds with a fresh current checkpoint, not a stale historical one.
 
 ### Rollback flow
@@ -299,6 +316,13 @@ When an exact checkpoint for state-entering tick \(T\) is fully assembled (CORRE
 4. After Lightyear restores ordinary histories (`RollbackSystems::Prepare`), but before replay begins, overwrite `TrackGripElements` with the checkpoint and replace the local history entry at \(B\), so replay's first tick \(T\) consumes the corrected field and the divergent value cannot resurrect.
 5. Let `FixedPostUpdate` record the corrected field into ordinary prediction history.
 6. Clear the pending correction only after its epoch has been applied.
+
+REV-16 exit rule: before step 3, compare the complete checkpoint with the retained exact field history
+at baseline `B` by raw `f32` bits plus dwell bytes. The current field is not equivalent because it may
+have evolved since `B`. If no baseline bit differs, steps 3–6 are a completed no-op: do not request
+rollback, mark the checkpoint applied, and mark request evidence for the current
+`(tank, epoch, digest)` SPENT. Epoch or digest change re-arms evidence. A field checkpoint cannot
+repair a persistent effect/history mismatch once its exact baseline field is already identical.
 
 If \(T\) is older than retained rollback history, request a fresh checkpoint. Do not apply a stale moving snapshot to the present. A parked snapshot may be reusable only if the server explicitly confirms the same rest epoch, contact fingerprint, and unchanged field.
 
@@ -327,13 +351,20 @@ Recommended behavior:
 - Effect error crossing threshold requests a checkpoint.
 - Epoch/checkpoint arrival causes the forced rollback.
 - Coarse digest mismatch alone never causes repeated automatic rollback.
-- Exact checkpoint contents have no tolerance: applying a new epoch is authoritative.
+- Exact checkpoint contents are never clamped or rewritten: applying changed bits is authoritative.
+- The validator's DERIVED admission envelope matches f32 values the unchanged producer can emit. With binary32 unit roundoff `u` and `gamma_3 = 3u / (1 - 3u)`, its squared-length ceiling is `K^2 * (1 + gamma_3)/(1 - gamma_3) * (1 + u)^4/(1 - u)^2`, rounded outward once for the producer's length/sqrt/divide/component multiply and the validator's final three-term dot.
+- A raw-bit-identical checkpoint is a completed no-op and spends unchanged request evidence; it never forces correction-free replay.
 
 This avoids the current failure mode where a threshold trip can cause a rollback but supplies no authoritative replacement for the divergent field.
 
 ### Protocol impact
 
 The current code reports MEASURED `PROTOCOL_REV = 13` ([protocol.rs](/Users/Yan/Desktop/github/vikng-dev/personal/overmatch/src/net/protocol.rs:41)). If no intervening protocol change lands, this design requires DERIVED `PROTOCOL_REV = 14`. (As landed: the transmission replication batch took rev 14 first, and this design shipped as `PROTOCOL_REV = 15` — the extra bump because the old replicated `TrackGrip` left the wire in the same change; in element mode it is derived telemetry whose rollback would be the correction-free loop this document forbids.)
+
+REV-16 inventory: replacing mapped `Entity` with `CombatantId` in both grip messages changes their
+wire definitions but not registration order. `WIRE_TYPES_HASH`, `PROTOCOL_REV`, and the handshake
+fingerprint therefore move; `WIRE_SURFACE_HASH` remains unchanged. The message registrations no
+longer install entity mapping hooks.
 
 The same change must update:
 

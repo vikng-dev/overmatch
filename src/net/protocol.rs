@@ -42,7 +42,7 @@ use crate::{CombatantId, ShotId};
 // compatibility guard.
 
 /// Bump and re-pin the affected wire manifest value for every wire-surface change.
-pub const PROTOCOL_REV: u32 = 15;
+pub const PROTOCOL_REV: u32 = 16;
 
 /// Compatibility tag derived from the complete pinned wire manifest.
 pub const PROTOCOL_FINGERPRINT: u64 = protocol_fingerprint_for(
@@ -192,7 +192,9 @@ pub struct GripCheckpointEntry {
 /// One independently delivered piece of an exact owner-private grip checkpoint.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct GripCheckpointChunk {
-    pub tank: Entity,
+    /// Stable match-local identity. The receiver resolves it to its local replica before assembly;
+    /// unlike a mapped `Entity`, it remains intact when a checkpoint races JIP replication.
+    pub combatant: CombatantId,
     pub epoch: u32,
     /// The checkpoint is the field entering this fixed tick.
     pub state_entering_tick: Tick,
@@ -204,24 +206,13 @@ pub struct GripCheckpointChunk {
     pub checkpoint_hash: u64,
 }
 
-impl MapEntities for GripCheckpointChunk {
-    fn map_entities<M: EntityMapper>(&mut self, mapper: &mut M) {
-        self.tank = mapper.get_mapped(self.tank);
-    }
-}
-
 /// Owner request for a fresh checkpoint; the authority rate-limits and deduplicates it per tank and
 /// epoch, then captures current state rather than replaying an older snapshot.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct GripResyncRequest {
-    pub tank: Entity,
+    /// Stable match-local identity; never entity-mapped on either endpoint.
+    pub combatant: CombatantId,
     pub epoch: u32,
-}
-
-impl MapEntities for GripResyncRequest {
-    fn map_entities<M: EntityMapper>(&mut self, mapper: &mut M) {
-        self.tank = mapper.get_mapped(self.tank);
-    }
 }
 
 /// A public, loss-tolerant reconstruction of an authoritative shot. The receiver maps `shooter` for
@@ -908,7 +899,7 @@ const WIRE_SURFACE_HASH: u64 = 0x0ffa_08a5_f2cf_458e;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x1227_b38c_a867_f508;
+const WIRE_TYPES_HASH: u64 = 0x5a87_1e11_7ca3_d4d0;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -991,10 +982,8 @@ pub(crate) fn plugin(app: &mut App) {
     app.register_message::<DamageConfirm>()
         .add_direction(NetworkDirection::ServerToClient);
     app.register_message::<GripCheckpointChunk>()
-        .add_map_entities()
         .add_direction(NetworkDirection::ServerToClient);
     app.register_message::<GripResyncRequest>()
-        .add_map_entities()
         .add_direction(NetworkDirection::ClientToServer);
 
     app.add_plugins(input::native::InputPlugin::<TankCommand>::default());

@@ -3,15 +3,41 @@
 use bevy::prelude::*;
 use lightyear::prelude::Tick;
 
+use crate::CombatantId;
 use crate::net::protocol::{GripCheckpointChunk, GripCheckpointEntry};
 use crate::track::forces::GRIP_SHEAR_MODULUS_M;
 use crate::track::sim::TrackGripElements;
 
 use super::{CHECKPOINT_ENTRIES_PER_CHUNK, MAX_CHECKPOINT_CHUNKS, MAX_CHECKPOINT_LEDGERS};
 
+// DERIVED validator bound for the producer's unchanged `j *= K / |j|` saturation. Let
+// `u = 2^-24` be binary32 unit roundoff and `gamma_3 = 3u / (1 - 3u)` bound a three-term dot
+// product. In the worst outward direction, the producer's first dot may underestimate by
+// `(1 - gamma_3)`, sqrt may underestimate by `(1 - u)`, division and each component multiply
+// may overestimate by `(1 + u)`, and the validator's final dot may overestimate by
+// `(1 + gamma_3)`. Squaring the division/component factors gives
+//
+//   K^2 * (1 + gamma_3)/(1 - gamma_3) * (1 + u)^4/(1 - u)^2.
+//
+// The final `next_up` prevents the f64-to-f32 constant fold from rounding the allowance inward.
+// This changes only admission of values the f32 producer can emit; checkpoint bytes remain exact.
+const F32_UNIT_ROUNDOFF: f64 = f32::EPSILON as f64 / 2.0;
+const DOT3_GAMMA: f64 = (3.0 * F32_UNIT_ROUNDOFF) / (1.0 - 3.0 * F32_UNIT_ROUNDOFF);
+const RESCALE_LENGTH_SQUARED_FACTOR: f64 = ((1.0 + DOT3_GAMMA) / (1.0 - DOT3_GAMMA))
+    * ((1.0 + F32_UNIT_ROUNDOFF)
+        * (1.0 + F32_UNIT_ROUNDOFF)
+        * (1.0 + F32_UNIT_ROUNDOFF)
+        * (1.0 + F32_UNIT_ROUNDOFF))
+    / ((1.0 - F32_UNIT_ROUNDOFF) * (1.0 - F32_UNIT_ROUNDOFF));
+pub(super) const STRAIN_LENGTH_SQUARED_BOUND: f32 = (((GRIP_SHEAR_MODULUS_M as f64)
+    * (GRIP_SHEAR_MODULUS_M as f64)
+    * RESCALE_LENGTH_SQUARED_FACTOR) as f32)
+    .next_up();
+
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct ExactCheckpoint {
     pub(super) tank: Entity,
+    pub(super) combatant: CombatantId,
     pub(super) epoch: u32,
     pub(super) state_entering_tick: Tick,
     pub(super) field: TrackGripElements,
@@ -21,6 +47,7 @@ pub(super) struct ExactCheckpoint {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct CheckpointKey {
     pub(super) tank: Entity,
+    pub(super) combatant: CombatantId,
     pub(super) epoch: u32,
     pub(super) tick: Tick,
     pub(super) hash: u64,
@@ -30,6 +57,7 @@ impl From<&ExactCheckpoint> for CheckpointKey {
     fn from(checkpoint: &ExactCheckpoint) -> Self {
         Self {
             tank: checkpoint.tank,
+            combatant: checkpoint.combatant,
             epoch: checkpoint.epoch,
             tick: checkpoint.state_entering_tick,
             hash: checkpoint.hash,
@@ -115,7 +143,7 @@ pub(super) fn checkpoint_hash(
 }
 
 pub(super) fn make_checkpoint_chunks(
-    tank: Entity,
+    combatant: CombatantId,
     epoch: u32,
     state_entering_tick: Tick,
     field: &TrackGripElements,
@@ -131,7 +159,7 @@ pub(super) fn make_checkpoint_chunks(
         let start = chunk_index * CHECKPOINT_ENTRIES_PER_CHUNK;
         let end = (start + CHECKPOINT_ENTRIES_PER_CHUNK).min(entries.len());
         chunks.push(GripCheckpointChunk {
-            tank,
+            combatant,
             epoch,
             state_entering_tick,
             elements_per_side,
@@ -158,10 +186,26 @@ fn entries_bit_equal(a: &[GripCheckpointEntry], b: &[GripCheckpointEntry]) -> bo
         })
 }
 
+/// Exact field identity at the repair seam. `PartialEq` is not sufficient because IEEE equality
+/// merges signed zero and rejects equal NaN payloads; checkpoints preserve authority bits verbatim.
+pub(super) fn fields_bit_equal(a: &TrackGripElements, b: &TrackGripElements) -> bool {
+    a.sides.iter().zip(&b.sides).all(|(a, b)| {
+        a.dwell == b.dwell
+            && a.strain.len() == b.strain.len()
+            && a.strain.iter().zip(&b.strain).all(|(a, b)| {
+                a.to_array()
+                    .iter()
+                    .zip(b.to_array())
+                    .all(|(a, b)| a.to_bits() == b.to_bits())
+            })
+    })
+}
+
 impl CheckpointAssembler {
     pub(super) fn push(
         &mut self,
         chunk: GripCheckpointChunk,
+        tank: Entity,
         expected_elements_per_side: usize,
     ) -> Result<Option<ExactCheckpoint>, AssemblyError> {
         let count = usize::from(chunk.chunk_count);
@@ -183,16 +227,21 @@ impl CheckpointAssembler {
                 return Err(AssemblyError::InvalidEntries);
             }
             let axes = entry.strain.to_array();
-            if axes
-                .iter()
-                .any(|axis| !axis.is_finite() || axis.abs() > GRIP_SHEAR_MODULUS_M)
-                || entry.strain.length_squared() > GRIP_SHEAR_MODULUS_M * GRIP_SHEAR_MODULUS_M
+            let length_squared = entry.strain.length_squared();
+            if axes.iter().any(|axis| !axis.is_finite())
+                || length_squared > STRAIN_LENGTH_SQUARED_BOUND
             {
+                warn!(
+                    "client: rejected grip checkpoint strain: side={} element={} axes={axes:?} \
+                     length_squared={length_squared:.9e} bound={STRAIN_LENGTH_SQUARED_BOUND:.9e}",
+                    entry.side, entry.element,
+                );
                 return Err(AssemblyError::InvalidStrain);
             }
         }
         let key = CheckpointKey {
-            tank: chunk.tank,
+            tank,
+            combatant: chunk.combatant,
             epoch: chunk.epoch,
             tick: chunk.state_entering_tick,
             hash: chunk.checkpoint_hash,
@@ -269,6 +318,7 @@ impl CheckpointAssembler {
         }
         Ok(Some(ExactCheckpoint {
             tank: partial.key.tank,
+            combatant: partial.key.combatant,
             epoch: partial.key.epoch,
             state_entering_tick: partial.key.tick,
             field,

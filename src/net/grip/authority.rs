@@ -5,6 +5,7 @@ use lightyear::connection::client_of::ClientOf;
 use lightyear::prelude::client::Remote;
 use lightyear::prelude::*;
 
+use crate::CombatantId;
 use crate::command::TankCommand;
 use crate::net::protocol::{
     GripCheckpointChannel, GripCheckpointChunk, GripResyncRequest, NetTrackGripAnchor,
@@ -146,7 +147,7 @@ pub(super) fn publish_grip_anchor_and_rest_checkpoints(
     mut sender: ServerMultiMessageSender,
     mut tanks: Query<
         (
-            Entity,
+            &CombatantId,
             &TrackGripElements,
             &TrackGripEffect,
             &TrackDrive,
@@ -160,7 +161,8 @@ pub(super) fn publish_grip_anchor_and_rest_checkpoints(
     >,
 ) {
     let now = timeline.tick();
-    for (tank, field, effect, drive, command, wake, controlled, mut anchor, mut rest) in &mut tanks
+    for (combatant, field, effect, drive, command, wake, controlled, mut anchor, mut rest) in
+        &mut tanks
     {
         if !rest.initialized {
             for side_index in 0..2 {
@@ -197,6 +199,8 @@ pub(super) fn publish_grip_anchor_and_rest_checkpoints(
             rest.last_checkpoint_tick = now;
         }
 
+        // Lightyear records predicted end-of-tick effects under `now`. Keep the anchor on that
+        // completed-tick label; only exact checkpoints use the entering-next-tick convention.
         anchor.set_if_neq(NetTrackGripAnchor {
             producing_tick: now,
             rest_epoch: rest.epoch,
@@ -211,7 +215,7 @@ pub(super) fn publish_grip_anchor_and_rest_checkpoints(
         if (entered_rest || periodic)
             && let (Some(controlled), Ok(_server)) = (controlled, servers.single())
             && let Some(chunks) =
-                make_checkpoint_chunks(tank, rest.epoch, entering_next_tick(now), field)
+                make_checkpoint_chunks(*combatant, rest.epoch, entering_next_tick(now), field)
         {
             send_checkpoint(&chunks, controlled.owner, &mut sender);
             rest.last_checkpoint_tick = now;
@@ -239,7 +243,13 @@ pub(super) fn permit_server_resync(
 pub(super) fn answer_resync_requests(
     timeline: Res<LocalTimeline>,
     mut receivers: Query<(Entity, &mut MessageReceiver<GripResyncRequest>), With<ClientOf>>,
-    tanks: Query<(&TrackGripElements, &GripRestState, &ControlledBy)>,
+    tanks: Query<(
+        Entity,
+        &CombatantId,
+        &TrackGripElements,
+        &GripRestState,
+        &ControlledBy,
+    )>,
     mut limiter: Local<GripRequestLimiter>,
     mut sender: ServerMultiMessageSender,
 ) {
@@ -247,23 +257,31 @@ pub(super) fn answer_resync_requests(
     for (requester, mut receiver) in &mut receivers {
         let mut responses = 0;
         for request in receiver.receive() {
-            let Ok((field, rest, controlled)) = tanks.get(request.tank) else {
+            let mut matches = tanks.iter().filter(|(_, combatant, _, _, controlled)| {
+                **combatant == request.combatant && controlled.owner == requester
+            });
+            let Some((tank, combatant, field, rest, _controlled)) = matches.next() else {
                 continue;
             };
-            if controlled.owner != requester
-                || !permit_server_resync(
-                    &mut limiter,
-                    &mut responses,
-                    request.tank,
-                    request.epoch,
-                    rest.epoch,
-                    now,
-                )
-            {
+            if matches.next().is_some() {
+                warn!(
+                    "server: ignored grip resync for ambiguous combatant {:?}",
+                    request.combatant
+                );
+                continue;
+            }
+            if !permit_server_resync(
+                &mut limiter,
+                &mut responses,
+                tank,
+                request.epoch,
+                rest.epoch,
+                now,
+            ) {
                 continue;
             }
             let Some(chunks) =
-                make_checkpoint_chunks(request.tank, rest.epoch, entering_next_tick(now), field)
+                make_checkpoint_chunks(*combatant, rest.epoch, entering_next_tick(now), field)
             else {
                 continue;
             };
