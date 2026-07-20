@@ -146,6 +146,31 @@ pub(crate) fn spawn_complete_tank<B: Bundle>(
     entity
 }
 
+/// Spawn the production simulation body without presentation assets.
+///
+/// The differential harness is deliberately headless: it needs the same eagerly baked geometry,
+/// spec-derived components, colliders, and rollback-visible state as an authority tank, but no
+/// `WorldAssetRoot`, asset handle, or view-binding observer. This is feature-gated out of every
+/// production build; the shared [`assemble_tank_body`] remains the one simulation constructor.
+#[cfg(feature = "bitprobe")]
+pub(crate) fn spawn_bitprobe_tank<B: Bundle>(
+    commands: &mut Commands,
+    content: TankContent,
+    root_bundle: B,
+) -> Entity {
+    let root = commands
+        .spawn((
+            Tank,
+            TrackGripElements::for_links(content.spec().track.link_count),
+            TrackGripWake::default(),
+            tank_transmission(content.spec()),
+            root_bundle,
+        ))
+        .id();
+    assemble_tank_body(commands, root, content);
+    root
+}
+
 /// Transitional ADR-0014 exception for `net::rig`: attach to a replicated root with a valid pose
 /// and its authoritative [`TankTransmission`] already present. Normal spawn paths must use
 /// [`spawn_complete_tank`].

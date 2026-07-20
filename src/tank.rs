@@ -23,6 +23,8 @@ pub use model::{
 };
 pub use scenario::{client_plugin, sp_spawn_plugin};
 pub use servo::{ServoCommand, ServoIndex, ServoRole, ServoSpec, ServoState, shortest_angle};
+#[cfg(feature = "bitprobe")]
+pub(crate) use spawn::spawn_bitprobe_tank;
 pub(crate) use spawn::{
     PendingTankAssets, TIGER_GLB_PATH, TankContent, TankPresentation, TankSimSource,
     attach_replicated_tank_body, load_tank_assets, spawn_complete_tank,

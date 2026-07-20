@@ -156,6 +156,9 @@ use bevy::ecs::error::BevyError;
 
 use super::forces::{self, ForceParams};
 
+#[cfg(feature = "bitprobe")]
+use crate::bitprobe::TransmissionProbe;
+
 /// Which drivetrain adapter computes the sprocket forces. Per-vehicle SPEC eventually
 /// (`TankSpec.track.powertrain.transmission.architecture` selects between the regenerative
 /// adapters); `Governor` is what every composition without an explicit selection runs.
@@ -996,6 +999,8 @@ pub struct TransmissionReport {
     pub power_scale: f32,
     /// Engine power available at the operating point (W) — the energy gate's per-tick bound.
     pub power_available: f32,
+    #[cfg(feature = "bitprobe")]
+    pub(crate) bitprobe: TransmissionProbe,
 }
 
 /// Advance the joint drivetrain one fixed tick and integrate both belt speeds.
@@ -1295,16 +1300,27 @@ fn clutch_coupling(
     f_other: f32,
     omega_floor: f32,
     dt: f32,
+    #[cfg(feature = "bitprobe")] probe: &mut TransmissionProbe,
 ) -> f32 {
     let tau_star = ((omega_e - k * s * m) / dt + tau_free / j_e - k * s * f_other / i_m)
         / (1.0 / j_e + k * k / i_m);
     let mut tau_c = tau_star.clamp(-capacity, capacity);
     let omega_next = omega_e + (tau_free - tau_c) * dt / j_e;
+    #[cfg(feature = "bitprobe")]
+    {
+        probe.tau_star = tau_star;
+        probe.tau_clamped = tau_c;
+        probe.omega_coupled = omega_next;
+    }
     if omega_next < omega_floor {
         // Land exactly at the floor: τ_guard = τ_free − J·(ω_floor − ω_e)/dt. By
         // construction τ_guard < τ_c (less torque = higher landing), so the guard only
         // ever reduces — one-sided.
         tau_c = (tau_free - (omega_floor - omega_e) * j_e / dt).clamp(-capacity, capacity);
+    }
+    #[cfg(feature = "bitprobe")]
+    {
+        probe.tau_c = tau_c;
     }
     tau_c
 }
@@ -1335,6 +1351,20 @@ fn regenerative(
     let [vl, vr] = inp.speeds;
     let m = (vl + vr) / 2.0;
     let d = (vl - vr) / 2.0;
+    #[cfg(feature = "bitprobe")]
+    let mut bitprobe = TransmissionProbe {
+        throttle: inp.throttle,
+        steer: inp.steer,
+        side_commands: inp.side_commands,
+        speeds: inp.speeds,
+        reactions: inp.reactions,
+        dt,
+        mean_speed: m,
+        difference_speed: d,
+        demand_pre: st.demand_n,
+        omega_pre: st.omega_e,
+        ..Default::default()
+    };
 
     // --- Direction: the F/R ladder swap happens near standstill only; above it a commanded
     // reversal is a BRAKE command (service brakes, below) until the tank is nearly stopped.
@@ -1378,6 +1408,10 @@ fn regenerative(
     //     CURRENT gear, growing as the box downshifts);
     //   * zero command at rest → the parking hold (unchanged).
     let dir = if st.reverse { -1.0 } else { 1.0 };
+    #[cfg(feature = "bitprobe")]
+    {
+        bitprobe.direction = dir;
+    }
     let opposing = inp.throttle * dir < -DEAD;
     let propulsive = if opposing {
         0.0
@@ -1397,12 +1431,21 @@ fn regenerative(
     // shift window: the declutched cut changes slip/reactions and is not a change in the grade.
     if st.shift_ticks == 0 {
         let sample = (dir * (inp.reactions[0] + inp.reactions[1])).max(0.0);
+        #[cfg(feature = "bitprobe")]
+        {
+            bitprobe.demand_sample = sample;
+            bitprobe.demand_updated = true;
+        }
         if st.demand_initialized {
             st.demand_n += (sample - st.demand_n) / DEMAND_FILTER_TICKS;
         } else {
             st.demand_n = sample;
             st.demand_initialized = true;
         }
+    }
+    #[cfg(feature = "bitprobe")]
+    {
+        bitprobe.demand_post = st.demand_n;
     }
 
     // --- Auto-shift on engine-rpm bands, hysteresis from the band gap; a shift in flight
@@ -1426,6 +1469,10 @@ fn regenerative(
     // ladder upward mid-slide and (via the landing predictor) blessed sign-flipped
     // landings — see the module doc's stage-A paragraph for the reproduced trio.
     let shaft = dir * m;
+    #[cfg(feature = "bitprobe")]
+    {
+        bitprobe.shaft_speed = shaft;
+    }
     let shaft_rpm_of = |sh: f32, g: f32| sh * g / tp.sprocket_radius / RPM_TO_RAD;
     let shaft_rpm_geared = |g: f32| shaft_rpm_of(shaft, g);
     let current_reserve =
@@ -1677,6 +1724,14 @@ fn regenerative(
     let omega_e = st.omega_e;
     let k = g / tp.sprocket_radius;
     let omega_floor = (tp.engine.idle_rpm - STALL_GUARD_BAND_RPM) * RPM_TO_RAD;
+    #[cfg(feature = "bitprobe")]
+    {
+        bitprobe.gear_reduction = g;
+        bitprobe.k = k;
+        bitprobe.omega_idle = omega_idle;
+        bitprobe.omega_floor = omega_floor;
+        bitprobe.shifting = shifting;
+    }
 
     // COUPLING seam: engaged ⇔ not shifting ∧ not the neutral-idle regime. The neutral-idle
     // regime generalizes the L600 neutral-turn seam to BOTH regenerative adapters — no
@@ -1700,6 +1755,10 @@ fn regenerative(
         st.clutch_out = true;
     }
     let engaged = !shifting && !st.clutch_out;
+    #[cfg(feature = "bitprobe")]
+    {
+        bitprobe.engaged = engaged;
+    }
 
     // Fueling demand u. Engaged: the propulsive throttle (a brake command is not fueling).
     // Declutched: a proportional-band rev governor ([`REV_MATCH_BAND_RPM`]) toward the
@@ -1745,6 +1804,17 @@ fn regenerative(
     // Follows the crank, not the input slew: a standstill pivot's power SPOOLS as the
     // crank revs (the measured spin-up), and a lugged crank offers lug power.
     let p_avail = tp.torque_at(rpm) * omega_e;
+    #[cfg(feature = "bitprobe")]
+    {
+        let tau_drag = engine_drag(tp, omega_e, u_fuel);
+        bitprobe.u_fuel = u_fuel;
+        bitprobe.rpm = rpm;
+        bitprobe.tau_idle = tau_idle;
+        bitprobe.tau_induced = tau_ind;
+        bitprobe.tau_drag = tau_drag;
+        bitprobe.tau_free = tau_free;
+        bitprobe.power_available = p_avail;
+    }
 
     // The engine force on the mean belt axis: the coupling's transmitted torque reflected
     // through the gear (in place of the old f_p + f_drag — drag reaches the belt only
@@ -1763,11 +1833,19 @@ fn regenerative(
             -(inp.reactions[0] + inp.reactions[1]),
             omega_floor,
             dt,
+            #[cfg(feature = "bitprobe")]
+            &mut bitprobe,
         )
     } else {
         0.0
     };
     let mut f_c = k * dir * tau_c;
+    #[cfg(feature = "bitprobe")]
+    {
+        bitprobe.i_mean = i_m;
+        bitprobe.f_other = -(inp.reactions[0] + inp.reactions[1]);
+        bitprobe.f_c_pre_scale = f_c;
+    }
 
     // --- Steering. κ table indexed by the active gear (reverse mirrors the low forward
     // gears); `d` follows the steer SIGN regardless of travel direction — the superimposed
@@ -1941,6 +2019,18 @@ fn regenerative(
     } else {
         1.0
     };
+    #[cfg(feature = "bitprobe")]
+    {
+        bitprobe.f_s_pre_scale = f_s;
+        bitprobe.lambda = lambda;
+        bitprobe.j = j;
+        bitprobe.power_left = p_l;
+        bitprobe.power_right = p_r;
+        bitprobe.power_positive = pos;
+        bitprobe.power_negative = neg;
+        bitprobe.power_net = net;
+        bitprobe.power_scale = power_scale;
+    }
     f_c *= power_scale;
     f_s *= power_scale;
 
@@ -1969,6 +2059,10 @@ fn regenerative(
     // clutch; a bound power gate leaves MORE speed on the crank, never less, so the stall
     // guard's floor promise survives scaling).
     st.omega_e = omega_e + (tau_free - tau_c * power_scale) * dt / tp.engine_inertia;
+    #[cfg(feature = "bitprobe")]
+    {
+        bitprobe.omega_integrated = st.omega_e;
+    }
 
     // --- Assemble per-side sprocket forces.
     let mut q = [
@@ -2030,6 +2124,12 @@ fn regenerative(
         inp.speeds[1] + (q[1] - inp.reactions[1]) / fp.inertia * dt,
     ];
     let next = limit_regenerative_belt_speeds(raw_next, fp.max_speed);
+    #[cfg(feature = "bitprobe")]
+    {
+        bitprobe.forces = q;
+        bitprobe.raw_next = raw_next;
+        bitprobe.next_speeds = next;
+    }
 
     // --- Drift kill / re-anchor (stage B + review round FIX 1): snap the crank to the
     // belt that ACTUALLY integrated only if the snap is FEASIBLE — the implied TOTAL
@@ -2050,6 +2150,14 @@ fn regenerative(
         let m_next = (next[0] + next[1]) / 2.0;
         let locked = k * dir * m_next;
         let tau_impl = tau_free - (locked - omega_e) * tp.engine_inertia / dt;
+        #[cfg(feature = "bitprobe")]
+        {
+            let feasible = tau_impl.abs() <= tp.clutch_capacity && locked >= omega_floor;
+            bitprobe.reanchor_attempted = true;
+            bitprobe.reanchor_locked = locked;
+            bitprobe.reanchor_tau_impl = tau_impl;
+            bitprobe.reanchor_feasible = feasible;
+        }
         if tau_impl.abs() <= tp.clutch_capacity && locked >= omega_floor {
             st.omega_e = locked;
         }
@@ -2060,6 +2168,10 @@ fn regenerative(
     // no-stall policy while stall death stays deliberately unmodeled (classification
     // table). It also self-heals a NaN (f32::max drops the NaN operand).
     st.omega_e = st.omega_e.max(omega_floor);
+    #[cfg(feature = "bitprobe")]
+    {
+        bitprobe.omega_end = st.omega_e;
+    }
 
     TransmissionReport {
         next_speeds: next,
@@ -2072,6 +2184,8 @@ fn regenerative(
         shifting,
         power_scale,
         power_available: p_avail,
+        #[cfg(feature = "bitprobe")]
+        bitprobe,
     }
 }
 

@@ -26,6 +26,10 @@ mod assets;
 /// equivalent to the instantiated scene on every view bind.
 mod bake;
 mod ballistics;
+#[cfg(feature = "bitprobe")]
+mod bitprobe;
+#[cfg(feature = "bitprobe")]
+pub use bitprobe::run_bitprobe;
 mod branding;
 mod camera;
 /// The command layer: device reads → player bindings → per-tank serializable `TankCommand`. The

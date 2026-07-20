@@ -247,6 +247,37 @@ impl BlockField {
         }
     }
 
+    /// Dump the exact constructed oracle, including derived transforms and broadphase layout.
+    #[cfg(feature = "bitprobe")]
+    pub(crate) fn bitprobe_startup(&self, out: &mut crate::bitprobe::StartupBuilder) {
+        out.f32("oracle.FIELD_ROUNDING", FIELD_ROUNDING);
+        out.f32("oracle.FIELD_BURY", FIELD_BURY);
+        out.f32("oracle.FIELD_CELL", FIELD_CELL);
+        out.f32("oracle.z0", self.z0);
+        out.f32("oracle.cell", self.cell);
+        out.u32("oracle.block_count", self.blocks.len() as u32);
+        for (index, block) in self.blocks.iter().enumerate() {
+            out.vec3(&format!("oracle.blocks[{index}].center"), block.center);
+            out.quat(&format!("oracle.blocks[{index}].inv_rot"), block.inv_rot);
+            out.vec3(&format!("oracle.blocks[{index}].half"), block.half);
+            out.vec3(
+                &format!("oracle.blocks[{index}].bounds_lo"),
+                self.bounds[index].0,
+            );
+            out.vec3(
+                &format!("oracle.blocks[{index}].bounds_hi"),
+                self.bounds[index].1,
+            );
+        }
+        out.u32("oracle.grid.bucket_count", self.grid.len() as u32);
+        for (bucket, indices) in self.grid.iter().enumerate() {
+            out.u32(&format!("oracle.grid[{bucket}].len"), indices.len() as u32);
+            for (slot, index) in indices.iter().copied().enumerate() {
+                out.u32(&format!("oracle.grid[{bucket}][{slot}]"), u32::from(index));
+            }
+        }
+    }
+
     /// Visit every block whose AABB overlaps `[lo, hi]`, in fixed order, possibly more than
     /// once (callers must be duplicate-tolerant — min-folds are).
     fn candidates(&self, lo: Vec3, hi: Vec3, mut visit: impl FnMut(&TerrainBlock)) {
