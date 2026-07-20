@@ -52,6 +52,7 @@ fn is_font_covered(c: char, allow_typographic: bool) -> bool {
 const BARLOW_TEXT_FILES: &[&str] = &[
     "src/hud.rs",
     "src/crew_ui.rs",
+    "src/drive_hud.rs",
     "src/sight.rs",
     "src/state.rs",
     "src/ui_font.rs",
@@ -63,13 +64,7 @@ const BARLOW_TEXT_FILES: &[&str] = &[
 
 /// The dev-sandbox files that spawn `Text`. These keep Bevy's default ASCII-only font (AGENTS.md), so
 /// their rendered literals must be pure printable ASCII — the typographic set is NOT available to them.
-const ASCII_ONLY_TEXT_FILES: &[&str] = &[
-    "src/sandbox.rs",
-    "src/track_sandbox/mod.rs",
-    // The offline transmission-mode line (`run_offline`'s feel-test label) — a dev surface on
-    // Bevy's default font, like the sandboxes.
-    "src/lib.rs",
-];
+const ASCII_ONLY_TEXT_FILES: &[&str] = &["src/sandbox.rs", "src/track_sandbox/mod.rs"];
 
 /// Macros whose string arguments are diagnostics, never rendered — skipped by the scanner.
 const DIAGNOSTIC_MACROS: &[&str] = &[

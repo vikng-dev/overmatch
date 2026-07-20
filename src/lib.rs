@@ -42,6 +42,9 @@ mod crew_ui;
 pub(crate) mod damage;
 #[cfg(feature = "dev_tools")]
 mod debug;
+/// The controlled tank's standard drive row + F3 diagnostics — one view-only implementation mounted
+/// by both the offline and predicted-network client roots.
+mod drive_hud;
 /// Fire control: per-weapon superelevation range tables + the player-dialed range. Sits atop
 /// `ballistics`; the aim commit reads it to lob the aim point so the bore elevates for range.
 mod firecontrol;
@@ -102,7 +105,7 @@ mod world;
 mod offline_feel_tests {
     use super::*;
     use track::sim::{TankTransmission, TransmissionFeelTest};
-    use track::transmission::{TransmissionMode, TransmissionState};
+    use track::transmission::{DriveReadout, TransmissionMode, TransmissionState};
 
     /// The offline `T` dial: each press advances governor → hybrid → L600 → governor and
     /// resets every tank's transmission state to a freshly-constructed one (the mode flip
@@ -163,7 +166,7 @@ mod offline_feel_tests {
             scheduler: track::transmission::SchedulerState::GradeShift { from: 4, to: 2 },
             ..TransmissionState::for_governor()
         };
-        assert_eq!(scheduler_hud_line(&state), "sched GRADE R4->R2");
+        assert_eq!(drive_hud::scheduler_hud_line(&state), "sched GRADE R4->R2");
     }
 
     #[test]
@@ -184,29 +187,129 @@ mod offline_feel_tests {
             ..TransmissionState::for_governor()
         };
         assert_eq!(
-            steering_hud_line(TransmissionMode::FixedRadii, &state, Some(&radii)),
+            drive_hud::steering_hud_line(TransmissionMode::FixedRadii, &state, Some(&radii)),
             "STEER II R~3m"
         );
 
         state.gear = 8;
         state.steer_step = 1;
         assert_eq!(
-            steering_hud_line(TransmissionMode::FixedRadii, &state, Some(&radii)),
+            drive_hud::steering_hud_line(TransmissionMode::FixedRadii, &state, Some(&radii)),
             "STEER I R~165m"
         );
 
         state.steer_step = 0;
         assert_eq!(
-            steering_hud_line(TransmissionMode::FixedRadii, &state, Some(&radii)),
+            drive_hud::steering_hud_line(TransmissionMode::FixedRadii, &state, Some(&radii)),
             "",
             "released steering leaves the visibility field blank"
         );
         state.steer_step = 2;
         assert_eq!(
-            steering_hud_line(TransmissionMode::Hybrid, &state, Some(&radii)),
+            drive_hud::steering_hud_line(TransmissionMode::Hybrid, &state, Some(&radii)),
             "",
             "the authored-detent readout is FixedRadii-only"
         );
+    }
+
+    /// One formatter owns the exact normal row in both client roots. `P` and `*` are independent
+    /// park/hill-hold markers; cruise/reverse leave both marker columns blank; Governor hides the
+    /// inapplicable gear/rpm fields without hiding speed.
+    #[test]
+    fn standard_drive_row_format_is_shared_and_compact() {
+        let speed_mps = 12.5; // DERIVED 45 km/h.
+        let mut state = TransmissionState {
+            gear: 1,
+            park: true,
+            hill_hold: true,
+            ..TransmissionState::for_governor()
+        };
+        let mut operating = DriveReadout {
+            rpm: 2_600.0,
+            gear_label: "F1".to_string(),
+        };
+        assert_eq!(
+            drive_hud::standard_drive_row(Some((&state, &operating)), speed_mps),
+            "Gear F1P*  RPM 2.6k  Speed  45 km/h"
+        );
+
+        state.hill_hold = false;
+        assert_eq!(
+            drive_hud::standard_drive_row(Some((&state, &operating)), speed_mps),
+            "Gear F1P   RPM 2.6k  Speed  45 km/h",
+            "park owns P independently of hill hold"
+        );
+        state.park = false;
+        state.hill_hold = true;
+        assert_eq!(
+            drive_hud::standard_drive_row(Some((&state, &operating)), speed_mps),
+            "Gear F1*   RPM 2.6k  Speed  45 km/h",
+            "hill hold owns * independently of park"
+        );
+
+        state.park = false;
+        state.hill_hold = false;
+        state.gear = 8;
+        operating.gear_label = "F8".to_string();
+        assert_eq!(
+            drive_hud::standard_drive_row(Some((&state, &operating)), speed_mps),
+            "Gear F8    RPM 2.6k  Speed  45 km/h"
+        );
+
+        state.gear = 2;
+        state.reverse = true;
+        operating.gear_label = "R2".to_string();
+        assert_eq!(
+            drive_hud::standard_drive_row(Some((&state, &operating)), speed_mps),
+            "Gear R2    RPM 2.6k  Speed  45 km/h"
+        );
+        assert_eq!(
+            drive_hud::standard_drive_row(None, speed_mps),
+            "Speed  45 km/h",
+            "Governor/spec-less vehicles retain speed and omit inapplicable fields"
+        );
+    }
+
+    #[test]
+    fn standard_drive_row_rounds_rpm_and_horizontal_ground_speed() {
+        let state = TransmissionState::for_governor();
+        let operating = DriveReadout {
+            rpm: 2_649.0,
+            gear_label: "F1".to_string(),
+        };
+        let ground = drive_hud::horizontal_ground_speed(Vec3::new(3.0, 99.0, 4.0));
+        assert_eq!(ground, 5.0, "vertical velocity is excluded");
+        assert_eq!(
+            drive_hud::standard_drive_row(Some((&state, &operating)), ground),
+            "Gear F1    RPM 2.6k  Speed  18 km/h"
+        );
+        let rounded = drive_hud::standard_drive_row(Some((&state, &operating)), 12.7);
+        assert_eq!(rounded, "Gear F1    RPM 2.6k  Speed  46 km/h");
+
+        let narrow = DriveReadout {
+            rpm: 849.0,
+            gear_label: "F1".to_string(),
+        };
+        let narrow = drive_hud::standard_drive_row(Some((&state, &narrow)), 2.0);
+        assert_eq!(narrow, "Gear F1    RPM 0.8k  Speed   7 km/h");
+        assert_eq!(
+            rounded.len(),
+            narrow.len(),
+            "compact rpm and speed fields retain a stable row width"
+        );
+    }
+
+    #[test]
+    fn f3_debug_toggle_defaults_closed_and_latches_each_press() {
+        let mut visible = false;
+        visible = drive_hud::debug_visible_after_f3(visible, false);
+        assert!(!visible, "default/no press stays hidden");
+        visible = drive_hud::debug_visible_after_f3(visible, true);
+        assert!(visible, "first F3 press opens the drive diagnostics");
+        visible = drive_hud::debug_visible_after_f3(visible, false);
+        assert!(visible, "the view state latches between presses");
+        visible = drive_hud::debug_visible_after_f3(visible, true);
+        assert!(!visible, "second F3 press closes the drive diagnostics");
     }
 }
 
@@ -375,6 +478,7 @@ impl Plugin for ClientPlugin {
             // (view-only, ADR-0014 — the server never mounts this).
             track::view_plugin,
         ));
+        app.add_plugins(drive_hud::plugin);
 
         // Physics visualization (collider/ray wireframes) + debug toggles, behind the `dev_tools`
         // feature (default-on, droppable from an optimized build via `--no-default-features`).
@@ -426,6 +530,7 @@ impl Plugin for NetClientPlugin {
             // `net::render_error` orders the set after its correction smoothing).
             track::view_plugin,
         ));
+        app.add_plugins(drive_hud::plugin);
 
         // Physics visualization + debug toggles, same pair `ClientPlugin` mounts for SP
         // (`G` = force arrows + collider wireframes, `X` = x-ray, `F` = camera detach). View-only:
@@ -495,51 +600,22 @@ pub fn run_offline() {
     app.init_resource::<track::sim::ElementGripFeelTest>();
     // The offline transmission feel test (phase 2.5): default the Tiger's authored
     // architecture (L600 fixed-radius regenerative — per-vehicle SPEC eventually; the
-    // resource is the interim dial). `T` cycles governor → hybrid → L600 live; the mode is
-    // logged AND shown on a fixed screen line so a capture always states what it ran.
+    // resource is the interim dial). `T` cycles governor → hybrid → L600 live; the shared F3
+    // drive panel names the selected adapter while the diagnostic view is open.
     app.insert_resource(track::sim::TransmissionFeelTest(
         track::transmission::TransmissionMode::FixedRadii,
     ));
-    app.add_systems(Startup, spawn_transmission_feel_label);
-    app.add_systems(Update, (cycle_transmission_feel, update_drive_hud).chain());
+    app.add_systems(
+        Update,
+        cycle_transmission_feel.before(drive_hud::DriveHudUpdate),
+    );
     app.run();
-}
-
-/// Marker for the offline transmission-mode screen line.
-#[derive(Component)]
-struct TransmissionFeelLabel;
-
-/// The offline drive-telemetry HUD surface (offline only): one absolute-positioned, top-right
-/// `Text` node (Bevy's built-in font) — the game's debug overlay is gizmo-only, so this bare
-/// node is the minimal surface that keeps the active drivetrain AND its live operating point
-/// visible in every screenshot/feel note. Spawned empty; [`update_drive_hud`] fills it every
-/// frame (the mode line plus the tick-truth telemetry block).
-fn spawn_transmission_feel_label(
-    mut commands: Commands,
-    feel: Res<track::sim::TransmissionFeelTest>,
-) {
-    info!("offline transmission mode → {} (T cycles)", feel.0.label());
-    commands.spawn((
-        TransmissionFeelLabel,
-        Text::new(String::new()),
-        TextFont {
-            font_size: FontSize::Px(14.0),
-            ..default()
-        },
-        TextColor(Color::srgb(0.8, 0.75, 0.5)),
-        Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(8.0),
-            right: Val::Px(12.0),
-            ..default()
-        },
-    ));
 }
 
 /// `T` cycles the offline transmission mode (governor → hybrid → L600). Every tank's
 /// [`track::sim::TankTransmission`] resets so the incoming adapter starts from a constructed
 /// state (gear 1, no shift in flight) instead of another mode's leftovers. The mode is logged
-/// here; the on-screen line is owned by [`update_drive_hud`] (its first line).
+/// here; the shared F3 drive panel renders the active mode.
 fn cycle_transmission_feel(
     keys: Option<Res<ButtonInput<KeyCode>>>,
     feel: Option<ResMut<track::sim::TransmissionFeelTest>>,
@@ -569,144 +645,4 @@ fn cycle_transmission_feel(
         }
         info!("offline transmission mode → {}", feel.0.label());
     }
-}
-
-/// Render scheduler truth for the offline HUD. Grade targets live on whichever ladder the state
-/// currently engages, so reverse shifts must read `R4->R2`, not a hard-coded forward label.
-fn scheduler_hud_line(st: &track::transmission::TransmissionState) -> String {
-    match st.scheduler {
-        track::transmission::SchedulerState::Normal => "sched NORMAL       ".to_string(),
-        track::transmission::SchedulerState::GradeShift { from, to } => {
-            // `src/lib.rs` is an ASCII-only-font dev surface (tests/ui_ascii.rs), so the requested
-            // visual arrow is rendered as `->`; U+2192 is absent from Bevy's default font.
-            let ladder = if st.reverse { 'R' } else { 'F' };
-            format!("sched GRADE {ladder}{from}->{ladder}{to}")
-        }
-        track::transmission::SchedulerState::HillHold => "sched HILL HOLD    ".to_string(),
-        track::transmission::SchedulerState::GradeLimit => "sched GRADE LIMIT  ".to_string(),
-    }
-}
-
-/// Fixed-radius steering visibility from the live detent state and the source radius table retained
-/// by [`track::transmission::TransmissionParams`]. The Hybrid adapter deliberately stays blank:
-/// its continuous command target is internal to the solve, while this line promises an AUTHORED
-/// gear/detent radius rather than a second UI-side derivation of drivetrain math.
-fn steering_hud_line(
-    mode: track::transmission::TransmissionMode,
-    st: &track::transmission::TransmissionState,
-    authored_radii: Option<&[(f32, f32)]>,
-) -> String {
-    if mode != track::transmission::TransmissionMode::FixedRadii || st.steer_step == 0 {
-        return String::new();
-    }
-    let Some(radii) = authored_radii.filter(|radii| !radii.is_empty()) else {
-        return String::new();
-    };
-    let gear = usize::from(st.gear).clamp(1, radii.len()) - 1;
-    let (tight, wide) = radii[gear];
-    let (detent, radius) = if st.steer_step == 1 {
-        ("I", wide)
-    } else {
-        ("II", tight)
-    };
-    format!("STEER {detent} R~{radius:.0}m")
-}
-
-/// The offline drive-telemetry HUD: rebuild the top-right block from the controlled tank's
-/// tick-truth components every frame. Reading sim components in `Update` (not a fixed system)
-/// is fine for a display — it never writes sim state. Every numeric field is fixed-width so the
-/// block does not jitter as digits and signs change.
-///
-/// Line 1 the active mode; line 2 gear + rpm THROUGH THE LAW ([`track::transmission::readout`],
-/// a `*` marker through a shift's torque interruption and `P` on the parking latch); line 3 the
-/// reserve scheduler; line 4 the hull ground speed (horizontal |velocity|, signed by
-/// hull-forward); line 5 the per-side belt speeds and their slip against the projected hull speed;
-/// line 6 the shaped drive command and, while engaged, the L600 steering detent plus its authored
-/// radius. The final field reserves a fixed width and stays blank when steering is released.
-fn update_drive_hud(
-    feel: Option<Res<track::sim::TransmissionFeelTest>>,
-    gear: Option<Res<track::sim::TrackGear>>,
-    controlled: Query<
-        (
-            &track::sim::TrackDrive,
-            &track::sim::TankTransmission,
-            &avian3d::prelude::LinearVelocity,
-            &avian3d::prelude::Rotation,
-        ),
-        With<tank::Controlled>,
-    >,
-    mut label: Query<&mut Text, With<TransmissionFeelLabel>>,
-) {
-    use track::transmission::TransmissionMode;
-    let Some(feel) = feel else {
-        return;
-    };
-    let Ok(mut text) = label.single_mut() else {
-        return;
-    };
-    let mode = feel.0;
-    let mut out = format!("trans [T]: {}", mode.label());
-
-    if let Ok((drive, trans, vel, rot)) = controlled.single() {
-        let speeds = [drive.sides[0].speed, drive.sides[1].speed];
-
-        // Gear + rpm through the transmission law — but ONLY when the joint drivetrain actually
-        // runs (the exact gate `apply_track_forces` uses): under `Governor`, or with no declared
-        // transmission, `TankTransmission` is inert and there is no gear/rpm to report. The rpm
-        // is the crank state ω_e directly (stage B — the state IS the display; still rpm, same
-        // line shape).
-        let joint = match (mode, gear.as_ref().and_then(|g| g.trans())) {
-            (TransmissionMode::Governor, _) | (_, None) => None,
-            (_, Some(tp)) => Some(tp),
-        };
-        let gear_line = if let Some(tp) = joint {
-            let r = track::transmission::readout(&trans.0, tp);
-            let marker = if trans.0.park {
-                'P'
-            } else if trans.0.shift_ticks > 0 {
-                '*'
-            } else {
-                ' '
-            };
-            format!("gear {}{marker} | rpm {:4.0}", r.gear_label, r.rpm)
-        } else {
-            "gear --  | rpm ----".to_string()
-        };
-        let scheduler_line = if joint.is_some() {
-            scheduler_hud_line(&trans.0)
-        } else {
-            "sched --           ".to_string()
-        };
-
-        // Hull ground speed: horizontal |velocity| signed by the hull-forward projection; slip
-        // measures each belt against that projected hull speed (an approximation — labelled slip).
-        let fwd = rot.0 * Vec3::NEG_Z;
-        let fwd_h = Vec3::new(fwd.x, 0.0, fwd.z).normalize_or_zero();
-        let horiz = Vec3::new(vel.0.x, 0.0, vel.0.z);
-        let proj = horiz.dot(fwd_h);
-        let ground = horiz.length() * proj.signum();
-
-        let steering =
-            steering_hud_line(mode, &trans.0, joint.map(|tp| tp.steer_radii_m.as_slice()));
-
-        out.push_str(&format!("\n{gear_line}"));
-        out.push_str(&format!("\n{scheduler_line}"));
-        out.push_str(&format!(
-            "\nhull {ground:+5.2} m/s ({:+6.1} km/h)",
-            ground * 3.6
-        ));
-        out.push_str(&format!(
-            "\nbelt L {:+5.2} R {:+5.2} | slip L {:+5.2} R {:+5.2}",
-            speeds[0],
-            speeds[1],
-            speeds[0] - proj,
-            speeds[1] - proj,
-        ));
-        out.push_str(&format!(
-            "\ncmd thr {:+5.2} steer {:+5.2} | {steering:<15}",
-            drive.throttle, drive.steer
-        ));
-    }
-
-    text.0 = out;
 }
