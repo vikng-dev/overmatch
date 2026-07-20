@@ -23,7 +23,10 @@ use bevy::math::{Affine3A, Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 
 use super::oracle::TerrainOracle;
+
 use super::route::{polyline_len, resample};
+#[cfg(feature = "bitprobe")]
+use crate::bitprobe::{ContactInputProbe, ElementOutputProbe};
 
 /// Belt-speed floor (m/s) for the constant-power curve — keeps stall force finite. Global
 /// numerical policy, not vehicle data.
@@ -287,6 +290,12 @@ pub struct SideReport {
     pub engine_force: f32,
     /// Ground reaction summed into belt dynamics (Σ f_long, N).
     pub belt_reaction: f32,
+    /// Full oracle-call inputs/results, in execution order. Measurement builds only.
+    #[cfg(feature = "bitprobe")]
+    pub(crate) bitprobe_contacts: Vec<ContactInputProbe>,
+    /// Per-station/column post-update load, slip, force, strain, and dwell. Measurement builds only.
+    #[cfg(feature = "bitprobe")]
+    pub(crate) bitprobe_elements: Vec<ElementOutputProbe>,
 }
 
 /// Integrate `max(0, pen(x))` over one linear piece of a pressure profile: `pen` runs
@@ -467,6 +476,8 @@ pub fn contact_side<O: TerrainOracle>(
         slip_lat: f32,
         /// Flat material-element index (`link * 3 + column`) — the per-element grip key.
         element: usize,
+        #[cfg(feature = "bitprobe")]
+        probe_index: usize,
     }
     let mut cols: Vec<ColumnContact> = Vec::with_capacity(n);
 
@@ -512,6 +523,29 @@ pub fn contact_side<O: TerrainOracle>(
             let pen_a = oracle.depth_along(ca + face, out, params.probe_reach);
             let pen_m = oracle.depth_along((ca + cb) / 2.0 + face, out, params.probe_reach);
             let pen_b = oracle.depth_along(cb + face, out, params.probe_reach);
+            #[cfg(feature = "bitprobe")]
+            let probe_index = {
+                let (query_a, query_m, query_b) = (ca + face, (ca + cb) / 2.0 + face, cb + face);
+                let material = material(i);
+                report.bitprobe_contacts.push(ContactInputProbe {
+                    station: i as u32,
+                    material: material as u32,
+                    column: ci as u32,
+                    query_a,
+                    query_m,
+                    query_b,
+                    out,
+                    reach: params.probe_reach,
+                    depths: [pen_a, pen_m, pen_b],
+                });
+                report.bitprobe_elements.push(ElementOutputProbe {
+                    station: i as u32,
+                    material: material as u32,
+                    column: ci as u32,
+                    ..Default::default()
+                });
+                report.bitprobe_elements.len() - 1
+            };
             let pen_max = pen_a.max(pen_m).max(pen_b);
             if pen_max <= 0.0 {
                 continue;
@@ -546,6 +580,14 @@ pub fn contact_side<O: TerrainOracle>(
                     - params.support_damping_per_m * contact_len * vel.dot(normal))
                 .max(0.0)
                 * engage;
+            #[cfg(feature = "bitprobe")]
+            {
+                let output = &mut report.bitprobe_elements[probe_index];
+                output.load = load;
+                output.load_elastic = load_elastic;
+                output.point = p;
+                output.normal = normal;
+            }
             if load <= 0.0 {
                 if elements_mode && load_elastic > 0.0 {
                     held.push((material(i) * 3 + ci, load_elastic));
@@ -580,6 +622,8 @@ pub fn contact_side<O: TerrainOracle>(
                 slip_long,
                 slip_lat,
                 element: material(i) * 3 + ci,
+                #[cfg(feature = "bitprobe")]
+                probe_index,
             });
         }
     }
@@ -701,6 +745,12 @@ pub fn contact_side<O: TerrainOracle>(
                     *strain = Vec3::ZERO;
                 }
             }
+        }
+        #[cfg(feature = "bitprobe")]
+        for output in &mut report.bitprobe_elements {
+            let element = output.material as usize * 3 + output.column as usize;
+            output.strain = elems.strain[element];
+            output.dwell = u32::from(elems.dwell[element]);
         }
     }
 
@@ -825,6 +875,15 @@ pub fn contact_side<O: TerrainOracle>(
             normal: c.normal,
             traction,
         });
+        #[cfg(feature = "bitprobe")]
+        {
+            let output = &mut report.bitprobe_elements[c.probe_index];
+            output.active = true;
+            output.slip_long = c.slip_long;
+            output.slip_lat = c.slip_lat;
+            output.f_long = f_long;
+            output.f_lat = f_lat;
+        }
     }
 
     // In the element regime the aggregate slot carries the summed element force (long, lat) —

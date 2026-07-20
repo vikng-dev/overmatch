@@ -1,0 +1,58 @@
+name: Cross-target bitprobe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux-x86_64:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      # Same checkout/LFS transport as the deployed-server workflow, narrowed to the one LFS object
+      # the synchronous production bake consumes. The Tiger RON is ordinary Git content.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          lfs: false
+      - name: Pull bitprobe simulation geometry from R2
+        run: |
+          git lfs install --local
+          git lfs pull --include='assets/tiger_1/tiger_1.glb'
+
+      # Keep toolchain, host libraries, cache family, release profile, and --locked behavior aligned
+      # with .github/actions/build-server/action.yml. `--features bitprobe` is the observation-only
+      # delta required to make the additional bin target available.
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libasound2-dev libudev-dev \
+            libwayland-dev libxkbcommon-dev libx11-dev
+      - name: Prune non-runtime assets
+        run: |
+          find assets -type f \( -name '*.blend' -o -name '*.blend1' \) -delete
+          find assets -type d -name backup -prune -exec rm -rf {} +
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: server-net
+      - name: Build bitprobe with deployed-server codegen settings
+        run: cargo build --release --locked --features bitprobe --bin bitprobe
+
+      - name: Run deterministic fixture
+        env:
+          BEVY_ASSET_ROOT: ${{ github.workspace }}
+        run: ./target/release/bitprobe bitprobe-linux-x86_64.obp.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bitprobe-linux-x86_64
+          path: bitprobe-linux-x86_64.obp.gz
+          retention-days: 14
+          if-no-files-found: error

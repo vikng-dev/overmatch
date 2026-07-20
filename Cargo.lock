@@ -5859,6 +5859,7 @@ dependencies = [
  "bevy",
  "bevy_replicon",
  "bincode",
+ "flate2",
  "glam 0.30.10",
  "gltf",
  "image",

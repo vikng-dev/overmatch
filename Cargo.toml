@@ -27,6 +27,9 @@ glam = { version = "0.30", features = ["serde"] }
 
 winit = "0.30"
 image = { version = "0.25", default-features = false, features = ["png"] }
+# Deterministic streaming compression for the feature-gated cross-target dump. Optional so normal
+# product builds do not gain a new direct dependency edge.
+flate2 = { version = "1", optional = true }
 
 # Read a `.glb` directly as data (no Bevy scene): the sim/view-split geometry extractor (`bake`,
 # design sim-view-split-and-tank-bake.md) and the spec↔model bind-contract test. Matches the
@@ -83,6 +86,9 @@ default = ["dev_tools"]
 # pure compile gate the code reads via `#[cfg(feature = "dev_tools")]`, kept separate from
 # `debug_assertions` so it survives into optimized builds.
 dev_tools = []
+# Cross-target raw-bit differential harness. No production binary enables this: it adds only
+# observation payloads and the `bitprobe` composition used by the dedicated measurement workflow.
+bitprobe = ["dep:flate2"]
 
 [[bin]]
 name = "overmatch"
@@ -92,6 +98,11 @@ path = "src/main.rs"
 [[bin]]
 name = "overmatch-server"
 path = "src/bin/overmatch-server.rs"
+
+[[bin]]
+name = "bitprobe"
+path = "src/bin/bitprobe.rs"
+required-features = ["bitprobe"]
 
 # Debuginfo slimming (measured 2026-07-11): a fleet sweep found ~90% of a 169 GB
 # target-dir footprint was debuginfo, and 37 GB of it was our own crate's `.o` files.

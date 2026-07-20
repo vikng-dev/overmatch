@@ -35,6 +35,9 @@ use crate::spec::TransmissionArchitecture;
 use crate::state::{GameplaySet, SimPhase};
 use crate::tank::{Tank, TrackSide};
 
+#[cfg(feature = "bitprobe")]
+use crate::bitprobe::BitprobeCapture;
+
 use super::drive::{DriveAxes, shape_drive};
 use super::forces::{
     BeltContact, ForceParams, GripElements, SideInput, SideReport, SideState, contact_side,
@@ -302,6 +305,92 @@ impl TrackGear {
         self.params.inertia
     }
 
+    #[cfg(feature = "bitprobe")]
+    pub(crate) fn bitprobe_startup(&self, out: &mut crate::bitprobe::StartupBuilder) {
+        out.u32("track_gear.count", self.count as u32);
+        out.f32("track_gear.plane_x", self.plane_x);
+        out.u32(
+            "track_gear.mode",
+            match self.mode {
+                TransmissionMode::Governor => 0,
+                TransmissionMode::Hybrid => 1,
+                TransmissionMode::FixedRadii => 2,
+            },
+        );
+        for (index, point) in self.loop_pts.iter().enumerate() {
+            out.vec2(&format!("track_gear.route[{index}]"), *point);
+        }
+        let p = &self.params;
+        out.f32("force.thickness", p.thickness);
+        for (index, (offset, weight)) in p.columns.iter().copied().enumerate() {
+            out.f32(&format!("force.columns[{index}].offset"), offset);
+            out.f32(&format!("force.columns[{index}].weight"), weight);
+        }
+        out.f32("force.support_stiffness_per_m", p.support_stiffness_per_m);
+        out.f32("force.support_damping_per_m", p.support_damping_per_m);
+        out.f32("force.engage_depth", p.engage_depth);
+        out.f32("force.probe_reach", p.probe_reach);
+        out.f32("force.mu", p.mu);
+        out.f32("force.lateral_ratio", p.lateral_ratio);
+        out.f32("force.slip_saturation", p.slip_saturation);
+        out.f32("force.max_speed", p.max_speed);
+        out.f32("force.engine_power", p.engine_power);
+        out.f32("force.engine_force", p.engine_force);
+        out.f32("force.governor_gain", p.governor_gain);
+        out.f32("force.inertia", p.inertia);
+        out.f32("force.grip_stiffness", p.grip_stiffness);
+
+        let Some(tp) = self.trans.as_ref() else {
+            out.bool("transmission.present", false);
+            return;
+        };
+        out.bool("transmission.present", true);
+        out.f32("transmission.engine.idle_rpm", tp.engine.idle_rpm);
+        out.f32("transmission.engine.governed_rpm", tp.engine.governed_rpm);
+        for (index, (rpm, torque)) in tp.engine.torque_nm.iter().copied().enumerate() {
+            out.f32(&format!("transmission.engine.torque[{index}].rpm"), rpm);
+            out.f32(
+                &format!("transmission.engine.torque[{index}].torque_nm"),
+                torque,
+            );
+        }
+        for (index, value) in tp.gears_fwd.iter().copied().enumerate() {
+            out.f32(&format!("transmission.gears_fwd[{index}]"), value);
+        }
+        for (index, value) in tp.gears_rev.iter().copied().enumerate() {
+            out.f32(&format!("transmission.gears_rev[{index}]"), value);
+        }
+        out.f32("transmission.sprocket_radius", tp.sprocket_radius);
+        out.f32("transmission.shift_up_rpm", tp.shift_up_rpm);
+        out.f32("transmission.shift_down_rpm", tp.shift_down_rpm);
+        for (index, (tight, wide)) in tp.steer_kappa.iter().copied().enumerate() {
+            out.f32(&format!("transmission.steer_kappa[{index}].tight"), tight);
+            out.f32(&format!("transmission.steer_kappa[{index}].wide"), wide);
+        }
+        for (index, (tight, wide)) in tp.steer_radii_m.iter().copied().enumerate() {
+            out.f32(&format!("transmission.steer_radii[{index}].tight"), tight);
+            out.f32(&format!("transmission.steer_radii[{index}].wide"), wide);
+        }
+        out.f32("transmission.steer_capacity_n", tp.steer_capacity_n);
+        out.f32("transmission.neutral_d_full", tp.neutral_d_full);
+        out.f32("transmission.recirculation", tp.recirculation);
+        out.f32("transmission.brake_capacity_n", tp.brake_capacity_n);
+        out.f32("transmission.brake_static_factor", tp.brake_static_factor);
+        out.f32("transmission.drag_fraction", tp.drag_fraction);
+        out.f32("transmission.engine_inertia", tp.engine_inertia);
+        out.f32("transmission.clutch_capacity", tp.clutch_capacity);
+        out.u32("transmission.shift_ticks", u32::from(tp.shift_ticks));
+        out.u32(
+            "transmission.shift_addressing",
+            match tp.shift_addressing {
+                super::transmission::ShiftAddressing::Direct => 0,
+                super::transmission::ShiftAddressing::Sequential => 1,
+            },
+        );
+        out.f32("transmission.peak_torque_rpm", tp.peak_torque_rpm);
+        out.f32("transmission.peak_torque_nm", tp.peak_torque_nm);
+    }
+
     /// Test-only variant fixture seam: headless gates may vary a declared transmission capability
     /// without rebuilding the Tiger asset/spec. Production callers get read-only params.
     #[cfg(test)]
@@ -432,6 +521,7 @@ fn apply_track_forces(
     // Offline-only adapter override. MP leaves it absent and follows `TrackGear::mode`, derived
     // from the spec; a missing transmission block selects the untouched Governor fallback.
     trans_feel: Option<Res<TransmissionFeelTest>>,
+    #[cfg(feature = "bitprobe")] mut bitprobe: Option<ResMut<BitprobeCapture>>,
     volumes: Query<VolumeFacets>,
     mut tanks: Query<
         (
@@ -453,6 +543,10 @@ fn apply_track_forces(
         With<Tank>,
     >,
 ) {
+    #[cfg(feature = "bitprobe")]
+    if let Some(capture) = bitprobe.as_deref_mut() {
+        capture.clear_tick();
+    }
     let Some(gear) = gear else {
         return;
     };
@@ -478,6 +572,11 @@ fn apply_track_forces(
         tank_caps,
     ) in &mut tanks
     {
+        #[cfg(feature = "bitprobe")]
+        if let Some(capture) = bitprobe.as_deref_mut() {
+            capture.tanks_seen += 1;
+            capture.command = [command.throttle, command.steer];
+        }
         // Drive gates THRUST, not grip: a dead driver/engine/transmission retargets the
         // command slew to zero (a fade over ~1/DRIVE_SLEW_PER_SECOND, see the module doc)
         // while the full contact model keeps running, so the tracks keep their kinetic grip.
@@ -567,6 +666,15 @@ fn apply_track_forces(
                     dt,
                 },
             );
+            #[cfg(feature = "bitprobe")]
+            if let Some(capture) = bitprobe.as_deref_mut() {
+                for (side, report) in reports.iter_mut().enumerate() {
+                    capture.contact_inputs[side] = std::mem::take(&mut report.bitprobe_contacts);
+                    capture.element_outputs[side] = std::mem::take(&mut report.bitprobe_elements);
+                }
+                capture.belt_reaction = [reports[0].belt_reaction, reports[1].belt_reaction];
+                capture.transmission = tr.bitprobe;
+            }
             for (si, report) in reports.into_iter().enumerate() {
                 effect.belt_reaction[si] = report.belt_reaction;
                 for contact in &report.contacts {
