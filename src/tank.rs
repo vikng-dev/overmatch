@@ -19,10 +19,13 @@ pub use model::WeaponState;
 pub(crate) use model::rig_world_pose;
 #[allow(unused_imports)]
 pub use model::{
-    Controlled, Hull, Muzzle, Rig, Roadwheel, Tank, TankRoot, TankSim, TankViews, TrackSide,
-    Turret, Weapon, WeaponGate, WeaponGateState, WeaponIndex,
+    Controlled, Hull, Muzzle, Rig, Roadwheel, Tank, TankRoot, TankServos, TankSim, TankViews,
+    TrackSide, Turret, Weapon, WeaponGate, WeaponGateState, WeaponIndex,
 };
 pub use scenario::{client_plugin, sp_spawn_plugin};
+pub(crate) use servo::RemoteServos;
+#[cfg(test)]
+pub(crate) use servo::ServoRest;
 pub use servo::{ServoCommand, ServoIndex, ServoRole, ServoSpec, ServoState, shortest_angle};
 #[cfg(feature = "bitprobe")]
 pub(crate) use spawn::spawn_bitprobe_tank;

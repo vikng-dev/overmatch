@@ -11,7 +11,10 @@ use lightyear::prelude::client::Remote;
 use lightyear::prelude::*;
 
 use super::protocol::NetTank;
-use crate::tank::{PendingTankAssets, Rig, TankSimSource, WeaponGate, attach_replicated_tank_body};
+use crate::tank::{
+    PendingTankAssets, RemoteServos, Rig, TankServos, TankSimSource, WeaponGate,
+    attach_replicated_tank_body,
+};
 use crate::track::sim::{TankTransmission, TrackGripElements};
 
 pub(crate) fn plugin(app: &mut App) {
@@ -58,6 +61,7 @@ pub(crate) fn attach_replicated_rig(
             Has<Interpolated>,
             Option<&TrackGripElements>,
             Option<&WeaponGate>,
+            Option<&TankServos>,
         ),
         (
             With<Remote>,
@@ -81,16 +85,16 @@ pub(crate) fn attach_replicated_rig(
     let Some(content) = source.get() else {
         return;
     };
-    for (entity, predicted, interpolated, grip_elements, weapon_gate) in &tanks {
+    for (entity, predicted, interpolated, grip_elements, weapon_gate, tank_servos) in &tanks {
         // Wait until Lightyear declares the replica's role. An owner may not enter its first fixed
-        // tick until the replicate-once exact field is present and sized; an interpolated remote
-        // deliberately receives no private element state.
+        // tick until its exact private snapshots (WeaponGate and TankServos) and replicate-once
+        // element field are present; an interpolated remote deliberately receives none of them.
         if !replica_role_ready(
             predicted,
             interpolated,
             grip_elements,
             content.spec().track.link_count,
-        ) || (predicted && weapon_gate.is_none())
+        ) || (predicted && (weapon_gate.is_none() || tank_servos.is_none()))
         {
             continue;
         }
@@ -105,6 +109,7 @@ pub(crate) fn attach_replicated_rig(
             entity,
             content,
             assets.presentation(),
+            predicted,
             (
                 NetTank,
                 // The local hierarchy requires `Transform`; Avian writes it from the wire pose.
@@ -158,6 +163,7 @@ fn upgrade_predicted_to_dynamic(
             With<Rig>,
             With<Predicted>,
             With<WeaponGate>,
+            With<TankServos>,
             With<PendingPredictedPromotion>,
         ),
     >,
@@ -171,7 +177,7 @@ fn upgrade_predicted_to_dynamic(
         if *body == RigidBody::Dynamic {
             commands
                 .entity(entity)
-                .remove::<PendingPredictedPromotion>();
+                .remove::<(PendingPredictedPromotion, RemoteServos)>();
             continue;
         }
         if !replica_role_ready(true, false, grip_elements, content.spec().track.link_count) {
@@ -181,7 +187,7 @@ fn upgrade_predicted_to_dynamic(
         commands
             .entity(entity)
             .insert((RigidBody::Dynamic, DisableRollback))
-            .remove::<PendingPredictedPromotion>();
+            .remove::<(PendingPredictedPromotion, RemoteServos)>();
     }
 }
 

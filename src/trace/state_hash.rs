@@ -2,7 +2,9 @@
 
 use bevy::prelude::{Quat, Vec3};
 
-use crate::tank::{TankSim, WeaponGate};
+#[cfg(test)]
+use crate::tank::TankServos;
+use crate::tank::{ServoState, TankSim, WeaponGate};
 use crate::track::sim::{TankTransmission, TrackDrive, TrackGrip, TrackGripElements};
 use crate::track::transmission::{TransmissionProjectionValue, transmission_state_projection};
 
@@ -113,7 +115,8 @@ pub(super) struct TankStateHash {
 /// worlds' entity ids. Field order is fixed and load-bearing: `position, rotation, linvel, angvel`,
 /// then `TrackDrive` (shaped command + per-side belt state), `TrackGrip`, `TrackGripElements`, the
 /// complete `TankTransmission` inventory, `WeaponGate` (`present`, then per slot: deadline-present,
-/// deadline, pause-present, pause tick, belt count), then each `TankSim` `Vec` in slot order.
+/// deadline, pause-present, pause tick, belt count), `TankServos` in slot order with each slot's
+/// `current, previous, velocity`, then `TankSim::weapons` in slot order.
 pub(super) fn hash_tank_state_with_elements(
     position: Vec3,
     rotation: Quat,
@@ -124,6 +127,7 @@ pub(super) fn hash_tank_state_with_elements(
     elements: Option<&TrackGripElements>,
     transmission: &TankTransmission,
     weapon_gate: Option<&WeaponGate>,
+    servos: &[ServoState],
     sim: &TankSim,
 ) -> TankStateHash {
     let mut hp = Fnv64::new();
@@ -150,7 +154,7 @@ pub(super) fn hash_tank_state_with_elements(
     let drv = hd.finish();
 
     let mut hsv = Fnv64::new();
-    for servo in &sim.servos {
+    for servo in servos {
         for field in servo.hash_fields() {
             hsv.write_f32(field);
         }
@@ -277,6 +281,13 @@ fn test_weapon_gate() -> WeaponGate {
 }
 
 #[cfg(test)]
+fn test_servos() -> TankServos {
+    TankServos {
+        states: vec![crate::tank::ServoState::test_new(0.4, 0.39, 0.64)],
+    }
+}
+
+#[cfg(test)]
 fn hash_tank_state_with_gate(
     position: Vec3,
     rotation: Quat,
@@ -286,6 +297,34 @@ fn hash_tank_state_with_gate(
     grip: &TrackGrip,
     transmission: &TankTransmission,
     weapon_gate: &WeaponGate,
+    sim: &TankSim,
+) -> TankStateHash {
+    hash_tank_state_with_gate_and_servos(
+        position,
+        rotation,
+        linvel,
+        angvel,
+        drive,
+        grip,
+        transmission,
+        weapon_gate,
+        &test_servos(),
+        sim,
+    )
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn hash_tank_state_with_gate_and_servos(
+    position: Vec3,
+    rotation: Quat,
+    linvel: Vec3,
+    angvel: Vec3,
+    drive: &TrackDrive,
+    grip: &TrackGrip,
+    transmission: &TankTransmission,
+    weapon_gate: &WeaponGate,
+    servos: &TankServos,
     sim: &TankSim,
 ) -> TankStateHash {
     hash_tank_state_with_elements(
@@ -298,6 +337,7 @@ fn hash_tank_state_with_gate(
         None,
         transmission,
         Some(weapon_gate),
+        &servos.states,
         sim,
     )
 }
@@ -360,6 +400,7 @@ pub(crate) fn canonical_tank_state_digest(
     elements: &TrackGripElements,
     transmission: &TankTransmission,
     weapon_gate: &WeaponGate,
+    servos: &TankServos,
     sim: &TankSim,
 ) -> CanonicalTankStateDigest {
     let hash = hash_tank_state_with_elements(
@@ -372,6 +413,7 @@ pub(crate) fn canonical_tank_state_digest(
         Some(elements),
         transmission,
         Some(weapon_gate),
+        &servos.states,
         sim,
     );
     let mut phase = Fnv64::new();
@@ -414,6 +456,7 @@ pub(crate) fn canonical_element_hash(
     elements: &TrackGripElements,
     transmission: &TankTransmission,
     weapon_gate: &WeaponGate,
+    servos: &TankServos,
     sim: &TankSim,
 ) -> u64 {
     canonical_tank_state_digest(
@@ -426,6 +469,7 @@ pub(crate) fn canonical_element_hash(
         elements,
         transmission,
         weapon_gate,
+        servos,
         sim,
     )
     .elements
@@ -463,7 +507,6 @@ mod tests {
             ],
         };
         let sim = TankSim {
-            servos: vec![crate::tank::ServoState::test_new(0.4, 0.39, 0.64)],
             weapons: vec![WeaponState {
                 recoil_offset: -0.4,
                 recoil_velocity: 0.0,
@@ -505,7 +548,8 @@ mod tests {
         let transmission = sample_transmission();
         let a = hash_tank_state(p, q, lv, av, &drive, &grip, &transmission, &sim);
         let b = hash_tank_state(p, q, lv, av, &drive, &grip, &transmission, &sim);
-        // MEASURED for REV-17 after the weapon gate joined the canonical stream.
+        // MEASURED for REV-18 after servo state moved to the reconciled component; field order and
+        // bytes stay unchanged.
         assert_eq!(
             [
                 a.combined, a.pos, a.rot, a.lv, a.av, a.sim, a.drv, a.srv, a.rld, a.rec, a.blt,
@@ -643,11 +687,22 @@ mod tests {
         );
 
         // Servo: velocity one ULP off.
-        let [cur, prev, vel] = sim.servos[0].hash_fields();
-        let mut sim2 = sim.clone();
-        sim2.servos[0] =
+        let mut servo_states = test_servos();
+        let [cur, prev, vel] = servo_states.states[0].hash_fields();
+        servo_states.states[0] =
             crate::tank::ServoState::test_new(cur, prev, f32::from_bits(vel.to_bits() ^ 1));
-        let s = hash_tank_state(p, q, lv, av, &drive, &grip, &transmission, &sim2);
+        let s = hash_tank_state_with_gate_and_servos(
+            p,
+            q,
+            lv,
+            av,
+            &drive,
+            &grip,
+            &transmission,
+            &test_weapon_gate(),
+            &servo_states,
+            &sim,
+        );
         assert_ne!(base.srv, s.srv);
         assert_ne!(base.sim, s.sim);
         assert_eq!(
@@ -794,6 +849,7 @@ mod tests {
             Some(&elements),
             &transmission,
             Some(&test_weapon_gate()),
+            &test_servos().states,
             &sim,
         );
 
@@ -809,6 +865,7 @@ mod tests {
             Some(&strain),
             &transmission,
             Some(&test_weapon_gate()),
+            &test_servos().states,
             &sim,
         );
         assert_ne!(base.elm, strain_hash.elm);
@@ -837,6 +894,7 @@ mod tests {
             Some(&dwell),
             &transmission,
             Some(&test_weapon_gate()),
+            &test_servos().states,
             &sim,
         );
         assert_ne!(base.elm, dwell_hash.elm);
@@ -862,9 +920,11 @@ mod tests {
             &elements,
             &transmission,
             &test_weapon_gate(),
+            &test_servos(),
             &sim,
         );
-        // MEASURED for REV-17, including the weapon gate, element, and rollback streams.
+        // MEASURED for REV-18, including reconciled servo, weapon gate, element, and rollback
+        // streams.
         assert_eq!(
             base,
             CanonicalTankStateDigest {
@@ -900,6 +960,7 @@ mod tests {
             &elements,
             &transmission,
             &test_weapon_gate(),
+            &test_servos(),
             &phase_shifted,
         );
 

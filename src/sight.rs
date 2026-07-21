@@ -16,7 +16,7 @@ use crate::overlay::{self, Overlay, Overlays};
 use crate::spec::ViewKind;
 use crate::state::{GameplaySet, PlayerInputSet};
 use crate::tank::{
-    Controlled, Hull, Rig, ServoIndex, ServoSpec, Tank, TankSim, TankViews, rig_world_pose,
+    Controlled, Hull, Rig, ServoIndex, ServoSpec, Tank, TankServos, TankViews, rig_world_pose,
     shortest_angle,
 };
 use crate::ui_font::UiFonts;
@@ -822,7 +822,7 @@ fn drive_gunner_aim(
     views: Query<&TankViews, With<Controlled>>,
     servo_slots: Query<&ServoIndex>,
     servo_specs: Query<&ServoSpec>,
-    sims: Query<&TankSim>,
+    servo_states: Query<&TankServos>,
     ranging: Res<Ranging>,
     tables: Query<&RangeTable>,
     poses: Query<(&Position, &Rotation)>,
@@ -865,12 +865,13 @@ fn drive_gunner_aim(
     const REF_FOV: f32 = 0.12;
     let sensitivity = SENSITIVITY_AT_REF * (fov / REF_FOV);
 
-    // Servo angles live root-resident (`TankSim`), addressed by each node's `ServoIndex`.
+    // Servo angles live root-resident (`TankServos`), addressed by each node's `ServoIndex`.
     let angle = |servo| {
-        sims.get(tank)
+        servo_states
+            .get(tank)
             .ok()
             .zip(servo_slots.get(servo).ok())
-            .and_then(|(sim, slot)| sim.servos.get(slot.0))
+            .and_then(|(servos, slot)| servos.states.get(slot.0))
             .map(crate::tank::ServoState::current)
     };
     let Some(t_current) = angle(rig.turret) else {
@@ -1074,7 +1075,7 @@ fn invalidate_gunner_view_state(mut free: ResMut<GunnerFreeAim>, mut elastic: Re
 struct FreeAimServos<'w, 's> {
     slots: Query<'w, 's, &'static ServoIndex>,
     specs: Query<'w, 's, &'static ServoSpec>,
-    sims: Query<'w, 's, &'static TankSim>,
+    states: Query<'w, 's, &'static TankServos>,
     tables: Query<'w, 's, &'static RangeTable>,
     ranging: Res<'w, Ranging>,
 }
@@ -1157,11 +1158,11 @@ fn drive_free_aim(
             None => {
                 let angle = |servo| {
                     servos
-                        .sims
+                        .states
                         .get(tank)
                         .ok()
                         .zip(servos.slots.get(servo).ok())
-                        .and_then(|(sim, slot)| sim.servos.get(slot.0))
+                        .and_then(|(states, slot)| states.states.get(slot.0))
                         .map(crate::tank::ServoState::current)
                 };
                 (

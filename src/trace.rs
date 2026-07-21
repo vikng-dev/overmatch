@@ -21,7 +21,7 @@ use chrono::Local as LocalTime;
 use serde_json::{Value, json};
 
 use crate::CombatantId;
-use crate::tank::{Controlled, Tank, TankSim, WeaponGate};
+use crate::tank::{Controlled, RemoteServos, Tank, TankServos, TankSim, WeaponGate};
 use crate::track::sim::{
     TankTransmission, TrackContacts, TrackDrive, TrackGrip, TrackGripEffect, TrackGripElements,
 };
@@ -513,6 +513,8 @@ fn record_tick(
             Option<&TrackGripElements>,
             &TankTransmission,
             Option<&WeaponGate>,
+            Option<&TankServos>,
+            Option<&RemoteServos>,
             &TrackContacts,
             &TankSim,
             Has<Controlled>,
@@ -577,6 +579,8 @@ fn record_tick(
         elements,
         transmission,
         weapon_gate,
+        servos,
+        remote_servos,
         track_contacts,
         sim,
         controlled,
@@ -624,6 +628,14 @@ fn record_tick(
         // The world-independent authority-simulation hash. It feeds off tick-truth pose/velocity
         // and carried state already in hand, except the view-only tracer phase documented on
         // `TankStateHash`; costs a few dozen FNV rounds and runs only when tracing is armed.
+        // The owner/server path always selects the reconciled `TankServos`; only an interpolated
+        // remote has `RemoteServos`, which preserves the established public-angle chase. A
+        // late-role replica temporarily has both and still presents from `RemoteServos` until
+        // promotion removes it.
+        let servo_states = remote_servos
+            .map(|servos| servos.0.as_slice())
+            .or_else(|| servos.map(|servos| servos.states.as_slice()))
+            .unwrap_or(&[]);
         let hash = hash_tank_state_with_elements(
             position.0,
             rotation.0,
@@ -634,6 +646,7 @@ fn record_tick(
             elements,
             transmission,
             weapon_gate,
+            servo_states,
             sim,
         );
         // Remote clients intentionally receive no exact element field. Null makes that disclosure
@@ -683,8 +696,8 @@ fn record_tick(
         // Raw carried-state values (`SPIKE_TRACE_SIM_FIELDS`): the magnitudes behind the sub-hash
         // booleans. `thr`/`str` (TrackDrive) are already row fields above.
         if trace.sim_fields {
-            let srv: Vec<Value> = sim
-                .servos
+            // Fixed field order per deterministic slot: current, previous, angular velocity.
+            let srv: Vec<Value> = servo_states
                 .iter()
                 .map(|s| Value::Array(s.hash_fields().iter().map(|&f| num(f)).collect()))
                 .collect();

@@ -10,10 +10,10 @@ use bevy::prelude::*;
 
 use super::integrity::authored_attachment;
 use super::model::{
-    Gun, GunBarrel, Hull, Muzzle, Rig, Roadwheel, Tank, TankRoot, TankSim, TankViews, TrackSide,
-    Turret, ViewConfig, Weapon, WeaponGate, WeaponGateState, WeaponIndex, WeaponState,
+    Gun, GunBarrel, Hull, Muzzle, Rig, Roadwheel, Tank, TankRoot, TankServos, TankSim, TankViews,
+    TrackSide, Turret, ViewConfig, Weapon, WeaponGate, WeaponGateState, WeaponIndex, WeaponState,
 };
-use super::servo::{ServoCommand, ServoIndex, ServoRest, ServoRole, ServoState};
+use super::servo::{RemoteServos, ServoCommand, ServoIndex, ServoRest, ServoRole};
 use super::view::{SimParts, bind_tank_view};
 use crate::Layer;
 use crate::bake::{TankBlueprint, TankGeometry};
@@ -133,6 +133,10 @@ fn weapon_gate(spec: &TankSpec) -> WeaponGate {
     }
 }
 
+fn tank_servos(spec: &TankSpec) -> TankServos {
+    TankServos::for_count(spec.servos.len())
+}
+
 /// Spawn a root and its complete local simulation body in one command batch.
 pub(crate) fn spawn_complete_tank<B: Bundle>(
     commands: &mut Commands,
@@ -153,6 +157,9 @@ pub(crate) fn spawn_complete_tank<B: Bundle>(
         // Complete REV-17 weapon gate, synchronously constructed from the same sorted spec data as
         // its weapon slots. Replicated client attachment must preserve the arriving authority value.
         weapon_gate(content.spec()),
+        // Complete servo integrator inventory is data-built in the same spawn flush. The glb is a
+        // view and never initializes rollback state.
+        tank_servos(content.spec()),
         root_bundle,
     ));
     root.observe(bind_tank_view);
@@ -180,6 +187,7 @@ pub(crate) fn spawn_bitprobe_tank<B: Bundle>(
             TrackGripWake::default(),
             tank_transmission(content.spec()),
             weapon_gate(content.spec()),
+            tank_servos(content.spec()),
             root_bundle,
         ))
         .id();
@@ -195,17 +203,25 @@ pub(crate) fn attach_replicated_tank_body<B: Bundle>(
     root: Entity,
     content: TankContent,
     presentation: TankPresentation,
+    predicted: bool,
     root_bundle: B,
 ) {
-    commands
-        .entity(root)
+    let mut root_commands = commands.entity(root);
+    root_commands
         .insert((
             presentation.root_bundle(),
-            // TankTransmission, WeaponGate, and TrackGripElements arrived in the replication init
-            // snapshot. Do not overwrite current authority state with fresh spec-derived values.
+            // TankTransmission, WeaponGate, TankServos, and TrackGripElements arrived in the
+            // predicted replication init snapshot. Do not overwrite current authority state with
+            // fresh spec-derived values.
             root_bundle,
         ))
         .observe(bind_tank_view);
+    if !predicted {
+        // Interpolated remotes retain the established public-angle chase without manufacturing the
+        // owner-private component. If this is an owner whose Predicted marker is merely late, this
+        // separate state leaves the arriving TankServos snapshot untouched for promotion.
+        root_commands.insert(RemoteServos::for_count(content.spec().servos.len()));
+    }
     assemble_tank_body(commands, root, content);
 }
 
@@ -608,11 +624,11 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
         // the gun pivot, inside the mantlet) sees no own-tank geometry — no near-plane clipping.
         Visibility::Inherited,
         // `TankSim` sized to the spawned rig: every local recoil/tracer slot exists from birth;
-        // authoritative readiness and belt supply live in the root's `WeaponGate` above.
+        // authoritative readiness and belt supply live in the root's `WeaponGate`, while servo
+        // integration lives in the root's separately constructed `TankServos`/`RemoteServos`.
         // Weapon slots follow `weapon_entries`' sorted-by-name order — the same order the
         // `WeaponIndex` loop above assigned, so slot i's state matches slot i's `Weapon`.
         TankSim {
-            servos: vec![ServoState::default(); spec.servos.len()],
             weapons: vec![WeaponState::default(); weapon_entries.len()],
         },
         Rig {

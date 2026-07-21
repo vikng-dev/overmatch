@@ -2022,7 +2022,6 @@ mod tests {
         let root = world
             .spawn(TankSim {
                 weapons: vec![WeaponState::default(); slots],
-                ..default()
             })
             .id();
         world.spawn((

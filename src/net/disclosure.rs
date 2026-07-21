@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use super::protocol::{NetCrew, NetTank, NetTrackGripAnchor};
 use crate::damage::{KnockoutReason, TankKnockedOut};
-use crate::tank::WeaponGate;
+use crate::tank::{TankServos, WeaponGate};
 use crate::track::sim::TrackGripElements;
 
 /// Public, server-authored tank-life fact. Detailed damage and ammunition state stay owner-only.
@@ -55,7 +55,13 @@ impl CombatDisclosure {
 
 impl VisibilityFilter for CombatDisclosure {
     type ClientComponent = AuthorizedClient;
-    type Scope = (NetCrew, WeaponGate, NetTrackGripAnchor, TrackGripElements);
+    type Scope = (
+        NetCrew,
+        WeaponGate,
+        TankServos,
+        NetTrackGripAnchor,
+        TrackGripElements,
+    );
 
     fn is_visible(&self, client: Entity, authorized: Option<&AuthorizedClient>) -> bool {
         authorized.is_some() && self.owner == Some(client)

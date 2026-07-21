@@ -2426,7 +2426,7 @@ fn capture_scripted_determinism_tick(
             &crate::track::sim::TankTransmission,
             &crate::tank::WeaponGate,
             &crate::track::sim::TrackContacts,
-            &crate::tank::TankSim,
+            (&crate::tank::TankServos, &crate::tank::TankSim),
         ),
         With<Tank>,
     >,
@@ -2451,7 +2451,7 @@ fn capture_scripted_determinism_tick(
         transmission,
         weapon_gate,
         contacts,
-        sim,
+        (servos, sim),
     ) in &roots
     {
         digests.push((
@@ -2466,6 +2466,7 @@ fn capture_scripted_determinism_tick(
                 elements,
                 transmission,
                 weapon_gate,
+                servos,
                 sim,
             ),
         ));

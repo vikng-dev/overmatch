@@ -10,7 +10,7 @@ use lightyear::prelude::*;
 
 use super::protocol::NetTank;
 use crate::ballistics::ShellPath;
-use crate::tank::{Rig, ServoIndex, ServoState, Tank, TankRoot, TankSim, Turret};
+use crate::tank::{RemoteServos, Rig, ServoIndex, ServoState, Tank, TankRoot, TankServos, Turret};
 use crate::track::sim::TrackContacts;
 
 /// Log and latch corrupt physics state before Avian consumes it.
@@ -152,7 +152,15 @@ pub(crate) fn log_prediction_diagnostics(
 /// Periodically log grounded track sides and each root's turret/reload state.
 pub(crate) fn log_sim_evidence(
     turrets: Query<(&ServoIndex, &TankRoot), With<Turret>>,
-    sims: Query<(Entity, &TankSim, Option<&crate::tank::WeaponGate>)>,
+    sims: Query<
+        (
+            Entity,
+            Option<&TankServos>,
+            Option<&RemoteServos>,
+            Option<&crate::tank::WeaponGate>,
+        ),
+        With<Tank>,
+    >,
     tracks: Query<&TrackContacts>,
     mut timer: Local<f32>,
     time: Res<Time>,
@@ -168,12 +176,16 @@ pub(crate) fn log_sim_evidence(
         .sum();
     let total = tracks.iter().count() * 2;
     info!("net: SIM-EVIDENCE track_sides_grounded={grounded}/{total} (all tanks)");
-    for (root, sim, gate) in &sims {
+    for (root, servos, remote_servos, gate) in &sims {
         // `TankRoot` owns the turret-to-simulation join.
         let turret = turrets
             .iter()
             .find(|(_, tank_root)| tank_root.0 == root)
-            .and_then(|(slot, _)| sim.servos.get(slot.0))
+            .and_then(|(slot, _)| {
+                remote_servos
+                    .and_then(|servos| servos.0.get(slot.0))
+                    .or_else(|| servos.and_then(|servos| servos.states.get(slot.0)))
+            })
             .map(ServoState::current);
         let weapon_gate = gate.map(|gate| &gate.weapons);
         info!("net: SIM-EVIDENCE {root} turret_angle={turret:?} weapon_gate={weapon_gate:?}");

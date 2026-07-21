@@ -24,7 +24,7 @@ use crate::damage::{
     CrewStation, Crewman, DamageConsequences, Dead, LaunchedTurret, PendingSwap, TankVolumes,
 };
 use crate::state::GameplaySet;
-use crate::tank::{Rig, ServoCommand, ServoIndex, ServoSpec, TankSim, WeaponGate};
+use crate::tank::{Rig, ServoCommand, ServoIndex, ServoSpec, TankServos, TankSim, WeaponGate};
 use crate::track::sim::{TankTransmission, TrackDrive, TrackGripEffect, TrackGripElements};
 #[cfg(test)]
 use crate::track::transmission::TransmissionState;
@@ -39,7 +39,7 @@ use crate::{CombatantId, ShotId};
 // compatibility guard.
 
 /// Bump and re-pin the affected wire manifest value for every wire-surface change.
-pub const PROTOCOL_REV: u32 = 17;
+pub const PROTOCOL_REV: u32 = 18;
 
 /// Compatibility tag derived from the complete pinned wire manifest.
 pub const PROTOCOL_FINGERPRINT: u64 = protocol_fingerprint_for(
@@ -576,15 +576,15 @@ fn publish_shot_clock(
 /// arrived by replication and carries `Remote` (see `upgrade_predicted_to_dynamic` on why the
 /// `Predicted`/`Interpolated` markers can NOT discriminate here — the server carries both).
 fn publish_servo_angles(
-    mut tanks: Query<(&Rig, &TankSim, &mut ServoAngles), Without<Remote>>,
+    mut tanks: Query<(&Rig, &TankServos, &mut ServoAngles), Without<Remote>>,
     servo_slots: Query<&ServoIndex>,
 ) {
-    for (rig, sim, mut angles) in &mut tanks {
+    for (rig, servos, mut angles) in &mut tanks {
         let angle = |servo| {
             servo_slots
                 .get(servo)
                 .ok()
-                .and_then(|slot| sim.servos.get(slot.0))
+                .and_then(|slot| servos.states.get(slot.0))
                 .map(crate::tank::ServoState::current)
         };
         let (Some(turret), Some(gun)) = (angle(rig.turret), angle(rig.gun)) else {
@@ -698,6 +698,9 @@ pub(crate) const ROLLBACK_TANK_TRANSMISSION: f32 = 1.0;
 /// Exact weapon-gate divergence gate expressed as a Boolean 0/1 magnitude for trace attribution.
 /// The complete component is integer/discrete state, so ordinary equality is bit-exact.
 pub(crate) const ROLLBACK_WEAPON_GATE: f32 = 1.0;
+/// Exact servo-integrator divergence gate expressed as a Boolean 0/1 magnitude for trace
+/// attribution. Every float compares by raw bits across every deterministic slot.
+pub(crate) const ROLLBACK_TANK_SERVOS: f32 = 1.0;
 // The registered conditions and watchdog share these metrics and thresholds.
 
 /// Confirmed-vs-predicted `Position` divergence: straight-line distance (m).
@@ -752,6 +755,16 @@ pub(crate) fn weapon_gate_mismatch(a: &WeaponGate, b: &WeaponGate) -> bool {
     a != b
 }
 
+/// Whether two complete servo-integrator snapshots differ. Slot count and all fields compare
+/// exactly; raw float bits make matching NaN payloads equal and signed zero distinct.
+pub(crate) fn tank_servos_mismatch(a: &TankServos, b: &TankServos) -> bool {
+    a.states.len() != b.states.len()
+        || a.states
+            .iter()
+            .zip(&b.states)
+            .any(|(left, right)| !left.bit_eq(right))
+}
+
 /// Ordered wire registrations. Keep this list aligned with [`plugin`]; its pinned hash is a direct
 /// handshake-fingerprint input. House process also bumps [`PROTOCOL_REV`] for release bookkeeping.
 #[cfg(test)]
@@ -788,11 +801,12 @@ const WIRE_SURFACE: &[&str] = &[
     "TrackDrive",
     "TankTransmission",
     "WeaponGate",
+    "TankServos",
     "TrackGripElements",
 ];
 
 /// Pinned hash for the ordered wire surface and a direct handshake-fingerprint input.
-const WIRE_SURFACE_HASH: u64 = 0x5e1f_8a96_7ada_3e00;
+const WIRE_SURFACE_HASH: u64 = 0x44c3_b31a_1cdc_0134;
 
 // ---------------------------------------------------------------------------
 // Deep wire-surface coverage (field-level + external-dep skew)
@@ -811,9 +825,9 @@ const WIRE_SURFACE_HASH: u64 = 0x5e1f_8a96_7ada_3e00;
 //     stripped, so a doc or reformat edit is invisible; a field/variant/type change is not) and hashes
 //     the lot. This is the whole `WIRE_SURFACE` own-type graph, followed through embeds: `NetCrew`
 //     carries `VolumeSnapshot` which carries `CrewSnapshot`, `TankTransmission` carries
-//     `TransmissionState`/`SchedulerState`, `WeaponGate` carries `WeaponGateState`, `TankCommand`
-//     (src/command.rs) carries `CrewSwap`, and both `CrewSnapshot` and `CrewSwap` carry
-//     `CrewStation` (src/damage.rs).
+//     `TransmissionState`/`SchedulerState`, `WeaponGate` carries `WeaponGateState`, `TankServos`
+//     carries `ServoState`, `TankCommand` (src/command.rs) carries `CrewSwap`, and both
+//     `CrewSnapshot` and `CrewSwap` carry `CrewStation` (src/damage.rs).
 //   * EXTERNAL types (avian `Position`/`Rotation`/`LinearVelocity`/`AngularVelocity`, plus lightyear's
 //     own wire framing) — their source is not in this tree to scan, so they are covered by DEP VERSION:
 //     [`WIRE_DEP_AVIAN3D`]/[`WIRE_DEP_LIGHTYEAR`] pin the resolved `Cargo.lock` versions, so a bump of
@@ -826,7 +840,7 @@ const WIRE_SURFACE_HASH: u64 = 0x5e1f_8a96_7ada_3e00;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x7238_4425_0ced_db84;
+const WIRE_TYPES_HASH: u64 = 0x66be_d94f_4232_074b;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -1022,6 +1036,19 @@ pub(crate) fn plugin(app: &mut App) {
                 ROLLBACK_WEAPON_GATE,
             )
         });
+    // Complete servo integrator state: one atomic owner-predicted snapshot, exact like the
+    // transmission. Restoring current/previous/velocity at the producing tick makes replay derive
+    // the same turret/gun transform before collider and recoil readers run.
+    app.component::<TankServos>()
+        .replicate()
+        .predict()
+        .with_rollback_condition(|a: &TankServos, b: &TankServos| {
+            crate::trace::note_if_tripped(
+                "TankServos",
+                u8::from(tank_servos_mismatch(a, b)).into(),
+                ROLLBACK_TANK_SERVOS,
+            )
+        });
     // Exact per-element state crosses the wire only in the owner's initialization snapshot. Replay
     // thereafter restores it from local PredictionHistory; checkpoints repair that local history.
     app.component::<TrackGripElements>()
@@ -1033,8 +1060,8 @@ pub(crate) fn plugin(app: &mut App) {
 
     // Non-replicated rollback state — ROOT-RESIDENT ONLY, by design: the root is the predicted
     // entity, so plain `local_rollback` attaches history with no child decoration machinery
-    // (`TankSim` centralizes what used to live on turret/gun/muzzle/wheel children — see its doc
-    // for the hazard cluster that design retired).
+    // (`TankSim` centralizes local weapon state that used to live on muzzle/barrel children; servo
+    // state is the separately authoritative `TankServos` component above).
     app.local_rollback::<TankSim>();
     app.add_observer(strip_confirmed_history::<TankSim>);
 
@@ -1168,6 +1195,75 @@ mod tests {
     }
 
     #[test]
+    fn tank_servos_rollback_comparison_is_bit_exact_and_atomic() {
+        use crate::tank::ServoState;
+
+        let base = TankServos {
+            states: vec![ServoState::test_new(0.25, 0.2, 0.5)],
+        };
+        assert!(!tank_servos_mismatch(&base, &base));
+
+        let mut velocity = base.clone();
+        velocity.states[0] = ServoState::test_new(0.25, 0.2, 0.500_000_06);
+        assert!(tank_servos_mismatch(&base, &velocity));
+
+        let positive_zero = TankServos {
+            states: vec![ServoState::test_new(0.0, 0.2, 0.5)],
+        };
+        let negative_zero = TankServos {
+            states: vec![ServoState::test_new(-0.0, 0.2, 0.5)],
+        };
+        assert!(tank_servos_mismatch(&positive_zero, &negative_zero));
+
+        let nan = f32::from_bits(0x7fc0_0042);
+        let nan_a = TankServos {
+            states: vec![ServoState::test_new(nan, 0.2, 0.5)],
+        };
+        let nan_a_copy = nan_a.clone();
+        assert!(nan_a != nan_a_copy, "f32 PartialEq treats NaN as unequal");
+        assert!(
+            !tank_servos_mismatch(&nan_a, &nan_a_copy),
+            "matching NaN payloads are the same wire state"
+        );
+        let nan_b = TankServos {
+            states: vec![ServoState::test_new(f32::from_bits(0x7fc0_0043), 0.2, 0.5)],
+        };
+        assert!(tank_servos_mismatch(&nan_a, &nan_b));
+
+        assert!(tank_servos_mismatch(
+            &base,
+            &TankServos { states: Vec::new() }
+        ));
+    }
+
+    #[test]
+    fn public_servo_angles_still_drive_only_non_predicted_remote_tanks() {
+        let mut world = World::new();
+        let turret = world.spawn(ServoCommand::default()).id();
+        let gun = world.spawn(ServoCommand::default()).id();
+        let hull = world.spawn_empty().id();
+        let muzzle = world.spawn_empty().id();
+        world.spawn((
+            Remote,
+            ServoAngles {
+                turret: 0.75,
+                gun: -0.2,
+            },
+            Rig {
+                hull,
+                turret,
+                gun,
+                muzzle,
+            },
+        ));
+
+        world.run_system_once(apply_servo_angles).unwrap();
+
+        assert_eq!(world.get::<ServoCommand>(turret).unwrap().target, 0.75);
+        assert_eq!(world.get::<ServoCommand>(gun).unwrap().target, -0.2);
+    }
+
+    #[test]
     fn replicated_rig_preserves_join_in_progress_authoritative_sim_snapshots() {
         let rig = strip_comments(&read_source("src/net/rig.rs"));
         assert!(
@@ -1177,6 +1273,10 @@ mod tests {
         assert!(
             rig.contains("With<WeaponGate>") && rig.contains("Option<&WeaponGate>"),
             "the predicted rig must wait for its owner-private authoritative weapon gate"
+        );
+        assert!(
+            rig.contains("With<TankServos>") && rig.contains("Option<&TankServos>"),
+            "the predicted rig must wait for its owner-private authoritative servo integrator"
         );
 
         let spawn = strip_comments(&read_source("src/tank/spawn.rs"));
@@ -1194,6 +1294,10 @@ mod tests {
         assert!(
             !attach.contains("weapon_gate("),
             "client attachment must not overwrite a JIP weapon-gate snapshot with spawn defaults"
+        );
+        assert!(
+            !attach.contains("TankServos::for_count"),
+            "client attachment must not overwrite a JIP servo snapshot with spawn defaults"
         );
         assert!(
             rig.contains("Option<&TrackGripElements>")
@@ -1238,14 +1342,14 @@ mod tests {
         );
     }
 
-    /// Handshake fixture: the complete REV-17 manifest fold is pinned as a concrete netcode
+    /// Handshake fixture: the complete REV-18 manifest fold is pinned as a concrete netcode
     /// `protocol_id`, so fixture drift is visible even when every constituent pin was edited.
     #[test]
     fn protocol_fingerprint_is_pinned() {
-        const EXPECTED_PROTOCOL_FINGERPRINT: u64 = 0x0b50_36ca_a095_1f04;
+        const EXPECTED_PROTOCOL_FINGERPRINT: u64 = 0x9559_994b_2156_67bc;
         assert_eq!(
             PROTOCOL_FINGERPRINT, EXPECTED_PROTOCOL_FINGERPRINT,
-            "protocol fingerprint changed: re-pin the REV-17 handshake fixture to \
+            "protocol fingerprint changed: re-pin the REV-18 handshake fixture to \
              {PROTOCOL_FINGERPRINT:#018x}",
         );
     }
@@ -1418,7 +1522,8 @@ mod tests {
     /// The own wire-facing types whose DEFINITION TEXT rides [`WIRE_TYPES_HASH`], each as
     /// `(source file, type name)`. This is the `WIRE_SURFACE` own-type graph followed through its
     /// embeds (see the coverage-model block by the const): protocol types, the public status in
-    /// `disclosure.rs`, `WeaponGate`/`WeaponGateState` from `tank/model.rs`,
+    /// `disclosure.rs`, `WeaponGate`/`WeaponGateState`/`TankServos` from `tank/model.rs`,
+    /// `ServoState` from `tank/servo.rs`,
     /// `TankCommand`/`CrewSwap` from `command.rs`, and `CrewStation` from `damage.rs`. External wire
     /// types (avian/lightyear) are covered by dependency version.
     const WIRE_TYPE_DEFS: &[(&str, &str)] = &[
@@ -1430,6 +1535,8 @@ mod tests {
         ("src/track/transmission.rs", "SchedulerState"),
         ("src/tank/model.rs", "WeaponGate"),
         ("src/tank/model.rs", "WeaponGateState"),
+        ("src/tank/model.rs", "TankServos"),
+        ("src/tank/servo.rs", "ServoState"),
         ("src/net/protocol.rs", "NetBot"),
         ("src/lib.rs", "CombatantId"),
         ("src/net/protocol.rs", "ServoAngles"),
@@ -2227,13 +2334,35 @@ mod tests {
         );
     }
 
-    /// THE STORM-KILLER PROPERTY. A forced state rollback restores the complete gate, local recoil,
-    /// and hull velocities from their authoritative producing tick; then the production weapon
-    /// systems replay the same fire tick and derive the same next deadline plus exactly one recoil
-    /// kick and hull impulse. This exercises Lightyear's real rollback schedule and confirmed
-    /// histories, not direct assignments in the test.
+    /// Servo authority enters live owner simulation only through Lightyear's producing-tick
+    /// rollback restore. The public `ServoAngles` pump is retained solely for non-predicted remotes.
     #[test]
-    fn weapon_gate_rollback_restores_producing_tick_and_replays_identical_cadence() {
+    fn tank_servos_has_no_latest_arrival_sim_writer() {
+        let protocol = strip_comments(&read_source("src/net/protocol.rs"));
+        assert!(
+            protocol.contains("app.component::<TankServos>()")
+                && protocol.contains(".replicate()")
+                && protocol.contains(".predict()")
+                && protocol.contains("tank_servos_mismatch"),
+            "TankServos must reconcile through the ordinary replicated prediction path",
+        );
+        assert!(
+            protocol.contains("With<Remote>, Without<Predicted>"),
+            "the legacy ServoAngles writer must remain scoped to non-predicted remotes",
+        );
+        assert!(
+            !protocol.contains("fn apply_tank_servos"),
+            "latest network arrival must never copy TankServos into owner simulation",
+        );
+    }
+
+    /// THE STORM-KILLER PROPERTY. A forced state rollback restores the complete servo integrator,
+    /// weapon gate, local recoil, and hull velocities from their authoritative producing tick. The
+    /// production servo and weapon systems then replay: the restored state re-derives the firing
+    /// pose, and the actual recoil impulse follows that exact bore. This exercises Lightyear's real
+    /// rollback schedule and confirmed histories, not direct assignments in the test.
+    #[test]
+    fn servo_and_weapon_rollback_restore_producing_tick_and_replay_identical_pose_and_cadence() {
         use avian3d::prelude::{
             AngularInertia, AngularVelocity, CenterOfMass, GravityScale, LinearVelocity, Mass,
             NoAutoAngularInertia, NoAutoCenterOfMass, NoAutoMass, Position, RigidBody, Rotation,
@@ -2250,7 +2379,8 @@ mod tests {
         use crate::command::TankCommand;
         use crate::spec::{FireMode, RecoilSpec, Trigger};
         use crate::tank::{
-            Muzzle, Tank, TankRoot, TankSim, Weapon, WeaponGateState, WeaponIndex, WeaponState,
+            Muzzle, ServoCommand, ServoIndex, ServoRest, ServoRole, ServoSpec, Tank, TankRoot,
+            TankServos, TankSim, Weapon, WeaponGateState, WeaponIndex, WeaponState, rig_world_pose,
         };
 
         const PRODUCING_TICK: Tick = Tick(100);
@@ -2273,18 +2403,60 @@ mod tests {
         #[derive(Resource, Default)]
         struct ReplayEvidence {
             restored_gate: Option<WeaponGate>,
+            restored_servos: Option<TankServos>,
+            fire_pose: Option<ReplayFirePose>,
             fire_ticks: Vec<u32>,
             replayed_effects: Vec<(f32, Vec3, Vec3)>,
         }
 
-        fn observe_restored_gate(
+        #[derive(Clone)]
+        struct ReplayFirePose {
+            servos: TankServos,
+            servo_rotation: Quat,
+            muzzle_position: Vec3,
+            bore: Vec3,
+        }
+
+        fn observe_restored_state(
             timeline: Res<LocalTimeline>,
-            gates: Query<&WeaponGate, With<Predicted>>,
+            roots: Query<(&WeaponGate, &TankServos), With<Predicted>>,
             mut evidence: ResMut<ReplayEvidence>,
         ) {
             if timeline.tick() == PRODUCING_TICK + 1 && evidence.restored_gate.is_none() {
-                evidence.restored_gate = gates.single().ok().cloned();
+                let Ok((gate, servos)) = roots.single() else {
+                    return;
+                };
+                evidence.restored_gate = Some(gate.clone());
+                evidence.restored_servos = Some(servos.clone());
             }
+        }
+
+        fn observe_replay_fire_pose(
+            timeline: Res<LocalTimeline>,
+            roots: Query<(Entity, &Position, &Rotation, &TankServos), With<Predicted>>,
+            servo_nodes: Query<&Transform, With<ServoIndex>>,
+            muzzles: Query<Entity, With<Muzzle>>,
+            parents: Query<&ChildOf>,
+            locals: Query<&Transform>,
+            mut evidence: ResMut<ReplayEvidence>,
+        ) {
+            if timeline.tick().0 != REPLAY_FIRE_TICK || evidence.fire_pose.is_some() {
+                return;
+            }
+            let (root, position, rotation, servos) =
+                roots.single().expect("one predicted servo fixture");
+            let servo_rotation = servo_nodes.single().expect("one servo node").rotation;
+            let muzzle = muzzles.single().expect("one muzzle");
+            let (muzzle_position, muzzle_rotation) =
+                rig_world_pose(muzzle, root, position.0, rotation.0, &parents, &locals)
+                    .expect("muzzle remains under the predicted root");
+            evidence.fire_pose = Some(ReplayFirePose {
+                servos: servos.clone(),
+                servo_rotation,
+                muzzle_position,
+                // This is the exact expression `shooting::fire` uses for recoil and shell bore.
+                bore: muzzle_rotation * Vec3::NEG_Z,
+            });
         }
 
         fn observe_fire(fire: On<FireShell>, mut evidence: ResMut<ReplayEvidence>) {
@@ -2311,11 +2483,20 @@ mod tests {
         app.add_plugins(ClientPlugins {
             tick_duration: crate::net::test_harness::TICK,
         });
+        crate::state::sim_plugin(&mut app);
         plugin(&mut app);
+        crate::tank::sim_plugin(&mut app);
         crate::shooting::plugin(&mut app);
+        app.insert_state(crate::state::AppState::Playing);
         app.init_resource::<ReplayEvidence>();
         app.add_observer(observe_fire);
-        app.add_systems(FixedPreUpdate, observe_restored_gate);
+        app.add_systems(FixedPreUpdate, observe_restored_state);
+        app.add_systems(
+            FixedUpdate,
+            observe_replay_fire_pose
+                .in_set(crate::state::GameplaySet)
+                .before(crate::state::SimPhase::WeaponFire),
+        );
         app.add_systems(
             FixedUpdate,
             observe_replayed_effects
@@ -2344,9 +2525,19 @@ mod tests {
         let mut predicted_gate = PredictionHistory::<WeaponGate>::default();
         predicted_gate.add_predicted(PRODUCING_TICK, Some(authority_gate.clone()));
 
+        let authority_servos = TankServos {
+            states: vec![crate::tank::ServoState::test_new(0.25, 0.2, 0.1)],
+        };
+        let stale_servos = TankServos {
+            states: vec![crate::tank::ServoState::test_new(-0.75, -0.8, -1.5)],
+        };
+        let mut confirmed_servos = ConfirmedHistory::<TankServos>::default();
+        confirmed_servos.insert_present_explicit(PRODUCING_TICK, authority_servos.clone());
+        let mut predicted_servos = PredictionHistory::<TankServos>::default();
+        predicted_servos.add_predicted(PRODUCING_TICK, Some(authority_servos.clone()));
+
         let authority_sim = TankSim {
             weapons: vec![WeaponState::default()],
-            ..default()
         };
         let mut predicted_sim = PredictionHistory::<TankSim>::default();
         predicted_sim.add_predicted(PRODUCING_TICK, Some(authority_sim.clone()));
@@ -2381,7 +2572,6 @@ mod tests {
                         recoil_velocity: 9.0,
                         rounds_fired: 4,
                     }],
-                    ..default()
                 },
                 predicted_sim,
                 WeaponGate {
@@ -2393,6 +2583,9 @@ mod tests {
                 },
                 predicted_gate,
                 confirmed_gate,
+                stale_servos.clone(),
+                predicted_servos,
+                confirmed_servos,
                 crate::CombatantId(1),
             ))
             .id();
@@ -2419,6 +2612,18 @@ mod tests {
             crate::damage::CrewStation::Loader,
             crate::damage::VolumeOf(root),
         ));
+        let servo = app
+            .world_mut()
+            .spawn((
+                ServoIndex(0),
+                TankRoot(root),
+                ServoCommand { target: 0.6 },
+                ServoSpec::test_continuous(ServoRole::Yaw, 90.0, 180.0),
+                ServoRest(Quat::IDENTITY),
+                Transform::default(),
+                ChildOf(root),
+            ))
+            .id();
         let barrel_rest = Vec3::Y;
         let barrel = app
             .world_mut()
@@ -2426,7 +2631,7 @@ mod tests {
                 WeaponIndex(0),
                 TankRoot(root),
                 Transform::from_translation(barrel_rest),
-                ChildOf(root),
+                ChildOf(servo),
                 crate::shooting::RecoilParams {
                     rest: barrel_rest,
                     stiffness: 100.0,
@@ -2469,6 +2674,11 @@ mod tests {
             },
             "confirmed-history arrival alone must not rewind the live cadence",
         );
+        assert_eq!(
+            app.world().get::<TankServos>(root).unwrap(),
+            &stale_servos,
+            "confirmed-history arrival alone must not overwrite the stale live servo pose",
+        );
 
         app.world_mut()
             .resource_mut::<LocalTimeline>()
@@ -2490,6 +2700,30 @@ mod tests {
             "before replaying tick 101, the live gate must be the tick-100 authority snapshot",
         );
         assert_eq!(
+            evidence.restored_servos.as_ref(),
+            Some(&authority_servos),
+            "before replaying tick 101, stale local servo state must be replaced by tick-100 authority",
+        );
+        let fire_pose = evidence
+            .fire_pose
+            .as_ref()
+            .expect("replay must expose the reconciled firing pose");
+        assert_ne!(
+            fire_pose.servos, authority_servos,
+            "tick 101 must actually re-integrate the restored state before the tick-102 shot",
+        );
+        assert_ne!(
+            fire_pose.servos, stale_servos,
+            "the stale local integrator must not survive into the replayed firing pose",
+        );
+        let [fire_angle, _, _] = fire_pose.servos.states[0].hash_fields();
+        let expected_servo_rotation = Quat::from_axis_angle(Vec3::Y, fire_angle);
+        assert_eq!(
+            fire_pose.servo_rotation.to_array().map(f32::to_bits),
+            expected_servo_rotation.to_array().map(f32::to_bits),
+            "restore + replay must derive the sim-node pose bit-exactly from reconciled TankServos",
+        );
+        assert_eq!(
             evidence.fire_ticks,
             [REPLAY_FIRE_TICK],
             "replay must fire on the authority-derived deadline exactly once",
@@ -2501,8 +2735,9 @@ mod tests {
         );
         let (recoil_velocity, linear_velocity, angular_velocity) = evidence.replayed_effects[0];
         let momentum = PROJECTILE_MASS * PROJECTILE_SPEED;
-        let expected_linear = Vec3::Z * (momentum / HULL_MASS);
-        let expected_angular = Vec3::X * (momentum / HULL_INERTIA);
+        let expected_impulse = fire_pose.bore * -momentum;
+        let expected_linear = expected_impulse / HULL_MASS;
+        let expected_angular = fire_pose.muzzle_position.cross(expected_impulse) / HULL_INERTIA;
         assert!(
             (recoil_velocity - RECOIL_KICK).abs() <= f32::EPSILON,
             "authority-restored recoil receives one replayed kick: {recoil_velocity}",
@@ -2514,6 +2749,10 @@ mod tests {
         assert!(
             angular_velocity.distance(expected_angular) <= 1e-6,
             "the off-centre replayed impulse is applied once: {angular_velocity:?}",
+        );
+        assert!(
+            (-linear_velocity.normalize()).distance(fire_pose.bore) <= 1e-6,
+            "the replayed recoil direction must be exactly opposite the reconciled firing bore",
         );
         let replayed = app.world().get::<WeaponGate>(root).unwrap();
         assert_eq!(

@@ -547,7 +547,6 @@ mod tests {
                 Rotation::default(),
                 TankSim {
                     weapons: vec![WeaponState::default()],
-                    ..default()
                 },
                 WeaponGate {
                     weapons: vec![WeaponGateState::for_mode(&MG_MODE)],
@@ -590,7 +589,6 @@ mod tests {
                 Rotation::default(),
                 TankSim {
                     weapons: vec![WeaponState::default()],
-                    ..default()
                 },
                 WeaponGate {
                     weapons: vec![WeaponGateState::for_mode(&MAIN_GUN_MODE)],

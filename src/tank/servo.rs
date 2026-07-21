@@ -1,7 +1,7 @@
 use bevy::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-use super::model::{TankRoot, TankSim};
+use super::model::{TankRoot, TankServos};
 use super::view::{ViewOf, ViewServo};
 use crate::damage::{Requirement, TankVolumes, VolumeFacets, evaluate, part_qualities};
 
@@ -51,6 +51,17 @@ impl ServoSpec {
             Travel::Continuous => None,
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn test_continuous(role: ServoRole, max_speed: f32, accel: f32) -> Self {
+        Self {
+            role,
+            max_speed,
+            accel,
+            travel: Travel::Continuous,
+            requires: Vec::new(),
+        }
+    }
 }
 
 /// Parent-local target angle written by aiming and consumed by the fixed-step mechanism.
@@ -61,7 +72,7 @@ pub struct ServoCommand {
 
 /// Root-resident servo mechanism state. `drive_servos` writes fixed-step truth to the sim node;
 /// `interpolate_servos` blends `previous` to `current` only on its view node.
-#[derive(Clone, Copy, PartialEq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct ServoState {
     current: f32,
     /// The angle at the previous fixed tick — the render interpolation's blend-from.
@@ -73,9 +84,21 @@ pub struct ServoState {
 #[derive(Component, Clone, Copy)]
 pub struct ServoRest(pub Quat);
 
-/// This servo's slot in its tank's [`TankSim::servos`], assigned in sorted-name order.
+/// This servo's slot in its tank's [`TankServos::states`], assigned in sorted-name order.
 #[derive(Component, Clone, Copy)]
 pub struct ServoIndex(pub usize);
+
+/// Client-local mechanism state for a non-predicted remote tank. Public [`ServoAngles`](crate::net::
+/// protocol::ServoAngles) remains the remote target stream; keeping its integrator separate means a
+/// late `Predicted` marker can wait for an untouched authoritative [`TankServos`] snapshot.
+#[derive(Component, Clone, PartialEq, Debug, Default)]
+pub(crate) struct RemoteServos(pub Vec<ServoState>);
+
+impl RemoteServos {
+    pub(super) fn for_count(count: usize) -> Self {
+        Self(vec![ServoState::default(); count])
+    }
+}
 
 impl ServoState {
     /// The servo's current angle (radians, parent-local) — its live mechanism position. Read by the
@@ -86,7 +109,21 @@ impl ServoState {
 
     /// Canonical fixed-field order consumed by the passive divergence hash.
     pub(crate) fn hash_fields(&self) -> [f32; 3] {
-        [self.current, self.previous, self.velocity]
+        let Self {
+            current,
+            previous,
+            velocity,
+        } = *self;
+        [current, previous, velocity]
+    }
+
+    /// Exact wire-state comparison. Raw bits make matching NaN payloads equal and signed zero
+    /// distinct, matching the transmission's rollback gate.
+    pub(crate) fn bit_eq(&self, other: &Self) -> bool {
+        self.hash_fields()
+            .into_iter()
+            .zip(other.hash_fields())
+            .all(|(left, right)| left.to_bits() == right.to_bits())
     }
 
     /// Construct non-default state for divergence-hash tests without exposing production writers.
@@ -113,10 +150,24 @@ pub(super) fn restore_servo_truth(
         &ServoIndex,
         &TankRoot,
     )>,
-    sims: Query<&TankSim>,
+    servos: Query<&TankServos>,
+    remote_servos: Query<&RemoteServos>,
 ) {
     for (mut transform, spec, rest, slot, root) in &mut q {
-        let Some(state) = sims.get(root.0).ok().and_then(|sim| sim.servos.get(slot.0)) else {
+        // A late-role replica can temporarily carry both. Its public remote mechanism remains live
+        // until `net::rig` promotes the body and removes `RemoteServos`, leaving the untouched
+        // authority snapshot as the predicted integrator seed.
+        let state = remote_servos
+            .get(root.0)
+            .ok()
+            .and_then(|servos| servos.0.get(slot.0))
+            .or_else(|| {
+                servos
+                    .get(root.0)
+                    .ok()
+                    .and_then(|servos| servos.states.get(slot.0))
+            });
+        let Some(state) = state else {
             continue;
         };
         transform.rotation = servo_rotation(spec, rest, state.current);
@@ -132,19 +183,29 @@ pub(super) fn drive_servos(
         &ServoIndex,
         &TankRoot,
     )>,
-    mut sims: Query<&mut TankSim>,
+    mut servos: Query<&mut TankServos>,
+    mut remote_servos: Query<&mut RemoteServos>,
     tanks: Query<&TankVolumes>,
     facets: Query<VolumeFacets>,
     time: Res<Time>,
 ) {
     let dt = time.delta_secs();
     for (mut transform, spec, rest, command, slot, root) in &mut q {
-        let Ok(mut sim) = sims.get_mut(root.0) else {
-            continue;
+        let mut remote = remote_servos.get_mut(root.0).ok();
+        let mut authoritative = if remote.is_none() {
+            servos.get_mut(root.0).ok()
+        } else {
+            None
         };
-        let Some(state) = sim.servos.get_mut(slot.0) else {
-            continue;
-        };
+        let state = remote
+            .as_mut()
+            .and_then(|servos| servos.0.get_mut(slot.0))
+            .or_else(|| {
+                authoritative
+                    .as_mut()
+                    .and_then(|servos| servos.states.get_mut(slot.0))
+            });
+        let Some(state) = state else { continue };
         // Preserve the prior fixed-step value for view interpolation.
         state.previous = state.current;
 
@@ -215,14 +276,25 @@ pub(super) fn interpolate_servos(
     time: Res<Time<Fixed>>,
     mut views: Query<(&mut Transform, &ViewOf), With<ViewServo>>,
     servos: Query<(&ServoSpec, &ServoRest, &ServoIndex, &TankRoot)>,
-    sims: Query<&TankSim>,
+    states: Query<&TankServos>,
+    remote_states: Query<&RemoteServos>,
 ) {
     let alpha = time.overstep_fraction();
     for (mut transform, view_of) in &mut views {
         let Ok((spec, rest, slot, root)) = servos.get(view_of.0) else {
             continue;
         };
-        let Some(state) = sims.get(root.0).ok().and_then(|sim| sim.servos.get(slot.0)) else {
+        let state = remote_states
+            .get(root.0)
+            .ok()
+            .and_then(|servos| servos.0.get(slot.0))
+            .or_else(|| {
+                states
+                    .get(root.0)
+                    .ok()
+                    .and_then(|servos| servos.states.get(slot.0))
+            });
+        let Some(state) = state else {
             continue;
         };
         let angle = state.previous + shortest_angle(state.current - state.previous) * alpha;
@@ -238,4 +310,56 @@ pub(super) fn interpolate_servos(
 pub fn shortest_angle(diff: f32) -> f32 {
     use std::f32::consts::{PI, TAU};
     (diff + PI).rem_euclid(TAU) - PI
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use bevy::ecs::system::RunSystemOnce;
+
+    use super::*;
+
+    #[test]
+    fn remote_servo_state_remains_the_view_interpolation_source_during_late_promotion() {
+        let mut world = World::new();
+        let authority = TankServos {
+            states: vec![ServoState::test_new(-1.0, -1.0, -1.0)],
+        };
+        let root = world
+            .spawn((
+                authority.clone(),
+                RemoteServos(vec![ServoState::test_new(1.0, 0.0, 0.5)]),
+            ))
+            .id();
+        let servo = world
+            .spawn((
+                ServoSpec::test_continuous(ServoRole::Yaw, 90.0, 180.0),
+                ServoRest(Quat::IDENTITY),
+                ServoIndex(0),
+                TankRoot(root),
+            ))
+            .id();
+        let view = world
+            .spawn((Transform::default(), ViewOf(servo), ViewServo))
+            .id();
+
+        let mut fixed = Time::<Fixed>::from_seconds(1.0);
+        fixed.accumulate_overstep(Duration::from_millis(500));
+        world.insert_resource(fixed);
+        world.run_system_once(interpolate_servos).unwrap();
+
+        let rendered = world.get::<Transform>(view).unwrap().rotation;
+        let expected = Quat::from_axis_angle(Vec3::Y, shortest_angle(1.0) * 0.5);
+        assert_eq!(
+            rendered.to_array().map(f32::to_bits),
+            expected.to_array().map(f32::to_bits),
+            "the established remote state must still provide the interpolated pose",
+        );
+        assert_eq!(
+            world.get::<TankServos>(root).unwrap(),
+            &authority,
+            "remote presentation must not alter the arriving authority snapshot",
+        );
+    }
 }

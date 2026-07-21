@@ -104,4 +104,5 @@ The wire change removes plain `NetBelts` and adds predicted `WeaponGate` plus it
 [[0014-sim-view-split]] · [[0015-divergence-doctrine]] ·
 [[0018-wire-surface-fingerprinted-and-refused]] · [[0020-fire-mode-mechanism-enum]] ·
 [[0021-fire-replication-architecture]] · [[0022-input-attestation-not-detection]] ·
+[[0030-servo-pose-is-owner-reconciled]] ·
 `design/sim-divergence-and-determinism.md`

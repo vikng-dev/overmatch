@@ -36,7 +36,7 @@ use crate::ballistics::{
     ShellDamage, Shot, ShotSource,
 };
 use crate::command::TankCommand;
-use crate::tank::{WeaponGate, WeaponGateState};
+use crate::tank::{TankServos, WeaponGate, WeaponGateState};
 use crate::{ClientReplica, CombatantId, Layer, ShotId};
 
 /// Configured seeded packet-loss rate on each client's inbound link.
@@ -382,6 +382,7 @@ fn spawn_owned_shooter(
                         belt_remaining: OWNER_BELT,
                     }],
                 },
+                TankServos::for_count(2),
                 NetTankStatus::Active,
                 CombatDisclosure::owner(link),
                 Replicate::to_clients(NetworkTarget::All),
@@ -667,6 +668,7 @@ fn collect_client_hit_confirm(
 struct PrivateCombatArrivals {
     crew: u32,
     weapon_gate: u32,
+    tank_servos: u32,
 }
 
 fn count_private_crew_arrival(_: On<Add, NetCrew>, mut arrivals: ResMut<PrivateCombatArrivals>) {
@@ -678,6 +680,13 @@ fn count_private_weapon_gate_arrival(
     mut arrivals: ResMut<PrivateCombatArrivals>,
 ) {
     arrivals.weapon_gate += 1;
+}
+
+fn count_private_tank_servos_arrival(
+    _: On<Add, TankServos>,
+    mut arrivals: ResMut<PrivateCombatArrivals>,
+) {
+    arrivals.tank_servos += 1;
 }
 
 /// The muzzle, and the plate [`RANGE`] metres downrange — shared by both worlds, so the client's
@@ -830,6 +839,7 @@ fn build_client(port: u16, client_id: u64, seed: u64, role: HarnessClient) -> Ap
     app.add_observer(collect_client_hit_confirm);
     app.add_observer(count_private_crew_arrival);
     app.add_observer(count_private_weapon_gate_arrival);
+    app.add_observer(count_private_tank_servos_arrival);
     app.add_systems(FixedFirst, collect_catch_up_armor_holds);
     if role == HarnessClient::Observer {
         app.add_systems(
@@ -1139,14 +1149,15 @@ fn every_shot_spawns_exactly_one_shell_under_ten_percent_loss() {
     let observer_hit_confirms = observer.world().resource::<ClientHitConfirms>().0.clone();
     let shooter_has_exact_private_combat = shooter
         .world_mut()
-        .query_filtered::<(&NetCrew, &WeaponGate), (
+        .query_filtered::<(&NetCrew, &WeaponGate, &TankServos), (
             With<NetTank>,
             With<NetCrew>,
             With<WeaponGate>,
+            With<TankServos>,
             With<NetTankStatus>,
         )>()
         .iter(shooter.world())
-        .any(|(crew, gate)| {
+        .any(|(crew, gate, servos)| {
             crew.volumes
                 == [VolumeSnapshot {
                     hp: OWNER_SNAPSHOT_HP,
@@ -1159,6 +1170,7 @@ fn every_shot_spawns_exactly_one_shell_under_ten_percent_loss() {
                         paused_at_tick: None,
                         belt_remaining: OWNER_BELT,
                     }]
+                && servos.states.len() == 2
         });
     let observer_has_public_status = observer
         .world_mut()
@@ -1168,7 +1180,10 @@ fn every_shot_spawns_exactly_one_shell_under_ten_percent_loss() {
         .is_some();
     let observer_has_private_combat = observer
         .world_mut()
-        .query_filtered::<(), (With<NetTank>, Or<(With<NetCrew>, With<WeaponGate>)>)>()
+        .query_filtered::<(), (
+            With<NetTank>,
+            Or<(With<NetCrew>, With<WeaponGate>, With<TankServos>)>,
+        )>()
         .iter(observer.world())
         .next()
         .is_some();
@@ -1359,11 +1374,11 @@ fn every_shot_spawns_exactly_one_shell_under_ten_percent_loss() {
     );
     assert!(
         shooter_has_exact_private_combat,
-        "the owning shooter did not receive the expected private NetCrew/WeaponGate snapshot"
+        "the owning shooter did not receive the expected private NetCrew/WeaponGate/TankServos snapshot"
     );
     assert!(
         observer_has_public_status && !observer_has_private_combat,
-        "combat disclosure leaked NetCrew/WeaponGate to the observer or hid its public tank status"
+        "combat disclosure leaked NetCrew/WeaponGate/TankServos to the observer or hid its public tank status"
     );
 
     println!(
@@ -2001,7 +2016,7 @@ fn thirty_combatant_volley_reaches_thirty_independent_receivers_under_loss() {
 }
 
 /// A client that joins after the replicated combat root exists receives public life state but never
-/// the root's owner-private crew or weapon-gate snapshots.
+/// the root's owner-private crew, weapon-gate, or servo-integrator snapshots.
 #[test]
 fn late_observer_receives_public_status_without_private_combat() {
     let _udp = lock_real_udp_test();
@@ -2022,9 +2037,12 @@ fn late_observer_receives_public_status_without_private_combat() {
         step_many(&mut server, std::slice::from_mut(&mut shooter));
         owner_ready = shooter
             .world_mut()
-            .query_filtered::<(&NetCrew, &WeaponGate), (With<NetTank>, With<NetTankStatus>)>()
+            .query_filtered::<
+                (&NetCrew, &WeaponGate, &TankServos),
+                (With<NetTank>, With<NetTankStatus>),
+            >()
             .iter(shooter.world())
-            .any(|(crew, gate)| {
+            .any(|(crew, gate, servos)| {
                 crew.volumes
                     == [VolumeSnapshot {
                         hp: OWNER_SNAPSHOT_HP,
@@ -2036,6 +2054,7 @@ fn late_observer_receives_public_status_without_private_combat() {
                             paused_at_tick: None,
                             belt_remaining: OWNER_BELT,
                         }]
+                    && servos.states.len() == 2
             });
         if client_connected(&mut shooter) && owner_ready {
             break;
@@ -2075,20 +2094,24 @@ fn late_observer_receives_public_status_without_private_combat() {
     );
     let leaked = clients[1]
         .world_mut()
-        .query_filtered::<(), (With<NetTank>, Or<(With<NetCrew>, With<WeaponGate>)>)>()
+        .query_filtered::<(), (
+            With<NetTank>,
+            Or<(With<NetCrew>, With<WeaponGate>, With<TankServos>)>,
+        )>()
         .iter(clients[1].world())
         .next()
         .is_some();
     let arrivals = clients[1].world().resource::<PrivateCombatArrivals>();
     println!(
-        "MEASURED late-join disclosure: public_status=1, crew_arrivals={}, weapon_gate_arrivals={}",
-        arrivals.crew, arrivals.weapon_gate,
+        "MEASURED late-join disclosure: public_status=1, crew_arrivals={}, weapon_gate_arrivals={}, tank_servos_arrivals={}",
+        arrivals.crew, arrivals.weapon_gate, arrivals.tank_servos,
     );
     assert!(
-        !leaked && arrivals.crew == 0 && arrivals.weapon_gate == 0,
-        "the late observer received owner-private combat state: present={leaked}, crew arrivals={}, weapon-gate arrivals={}",
+        !leaked && arrivals.crew == 0 && arrivals.weapon_gate == 0 && arrivals.tank_servos == 0,
+        "the late observer received owner-private combat state: present={leaked}, crew arrivals={}, weapon-gate arrivals={}, tank-servos arrivals={}",
         arrivals.crew,
         arrivals.weapon_gate,
+        arrivals.tank_servos,
     );
 }
 
