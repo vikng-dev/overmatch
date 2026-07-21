@@ -2,7 +2,7 @@
 
 use bevy::prelude::{Quat, Vec3};
 
-use crate::tank::TankSim;
+use crate::tank::{TankSim, WeaponGate};
 use crate::track::sim::{TankTransmission, TrackDrive, TrackGrip, TrackGripElements};
 use crate::track::transmission::{TransmissionProjectionValue, transmission_state_projection};
 
@@ -79,7 +79,8 @@ impl Fnv64 {
 /// carried state that pose and velocity fields do not expose. `WeaponState::rounds_fired` is
 /// deliberately absent: it selects a local tracer phase and can legitimately lag the authority by
 /// one predicted round, so feeding it into a cross-world divergence rate would make a benign view
-/// skew look like simulation drift. The fresh-App test has a stricter, rollback-complete digest.
+/// skew look like simulation drift. The separately replicated `WeaponGate` is included in full.
+/// The fresh-App test has a stricter, rollback-complete digest.
 pub(super) struct TankStateHash {
     pub(super) combined: u64,
     pub(super) pos: u64,
@@ -94,7 +95,7 @@ pub(super) struct TankStateHash {
     pub(super) drv: u64,
     /// Servo current/previous/velocity, every servo in slot order.
     pub(super) srv: u64,
-    /// Weapon reload timers, every weapon in slot order.
+    /// Weapon gate (`ready_tick`, pause tick, then belt count), every weapon in slot order.
     pub(super) rld: u64,
     /// Barrel recoil offset/velocity, every weapon in slot order.
     pub(super) rec: u64,
@@ -111,7 +112,8 @@ pub(super) struct TankStateHash {
 /// different hash, and — because no entity ever enters it — hash equality is independent of the two
 /// worlds' entity ids. Field order is fixed and load-bearing: `position, rotation, linvel, angvel`,
 /// then `TrackDrive` (shaped command + per-side belt state), `TrackGrip`, `TrackGripElements`, the
-/// complete `TankTransmission` inventory, then each `TankSim` `Vec` in slot order.
+/// complete `TankTransmission` inventory, `WeaponGate` (`present`, then per slot: deadline-present,
+/// deadline, pause-present, pause tick, belt count), then each `TankSim` `Vec` in slot order.
 pub(super) fn hash_tank_state_with_elements(
     position: Vec3,
     rotation: Quat,
@@ -121,6 +123,7 @@ pub(super) fn hash_tank_state_with_elements(
     grip: &TrackGrip,
     elements: Option<&TrackGripElements>,
     transmission: &TankTransmission,
+    weapon_gate: Option<&WeaponGate>,
     sim: &TankSim,
 ) -> TankStateHash {
     let mut hp = Fnv64::new();
@@ -156,14 +159,24 @@ pub(super) fn hash_tank_state_with_elements(
 
     let mut hrl = Fnv64::new();
     let mut hrc = Fnv64::new();
+    hrl.write_bool(weapon_gate.is_some());
+    if let Some(weapon_gate) = weapon_gate {
+        hrl.write_u32(weapon_gate.weapons.len() as u32);
+        for weapon in &weapon_gate.weapons {
+            hrl.write_bool(weapon.ready_tick.is_some());
+            if let Some(ready_tick) = weapon.ready_tick {
+                hrl.write_u32(ready_tick);
+            }
+            hrl.write_bool(weapon.paused_at_tick.is_some());
+            if let Some(paused_at_tick) = weapon.paused_at_tick {
+                hrl.write_u32(paused_at_tick);
+            }
+            // Belt count and absolute deadline are the complete authoritative fire gate. Contrast
+            // `rounds_fired`, deliberately excluded because it only chooses cosmetic tracers.
+            hrl.write_u32(weapon.belt_remaining);
+        }
+    }
     for weapon in &sim.weapons {
-        hrl.write_f32(weapon.reload_remaining);
-        // `belt_remaining` GATES fire (a dry belt cannot shoot; the swap timer's meaning depends
-        // on it), so it enters the hash — in the reload stream, whose fire-timer it modulates.
-        // Contrast `rounds_fired`, which is deliberately EXCLUDED: that counter only picks which
-        // rounds trace, a cosmetic phase that a dropped predicted shot legitimately skews by one
-        // (see `WeaponState::rounds_fired`) — hashing it would flag benign skew as divergence.
-        hrl.write_u32(weapon.belt_remaining);
         hrc.write_f32(weapon.recoil_offset);
         hrc.write_f32(weapon.recoil_velocity);
     }
@@ -253,7 +266,18 @@ pub(super) fn hash_tank_state_with_elements(
 /// Test convenience for hashes whose element field is intentionally absent. Production always
 /// calls [`hash_tank_state_with_elements`] explicitly so omission cannot be accidental.
 #[cfg(test)]
-fn hash_tank_state(
+fn test_weapon_gate() -> WeaponGate {
+    WeaponGate {
+        weapons: vec![crate::tank::WeaponGateState {
+            ready_tick: Some(1_250),
+            paused_at_tick: None,
+            belt_remaining: 47,
+        }],
+    }
+}
+
+#[cfg(test)]
+fn hash_tank_state_with_gate(
     position: Vec3,
     rotation: Quat,
     linvel: Vec3,
@@ -261,6 +285,7 @@ fn hash_tank_state(
     drive: &TrackDrive,
     grip: &TrackGrip,
     transmission: &TankTransmission,
+    weapon_gate: &WeaponGate,
     sim: &TankSim,
 ) -> TankStateHash {
     hash_tank_state_with_elements(
@@ -272,6 +297,31 @@ fn hash_tank_state(
         grip,
         None,
         transmission,
+        Some(weapon_gate),
+        sim,
+    )
+}
+
+#[cfg(test)]
+fn hash_tank_state(
+    position: Vec3,
+    rotation: Quat,
+    linvel: Vec3,
+    angvel: Vec3,
+    drive: &TrackDrive,
+    grip: &TrackGrip,
+    transmission: &TankTransmission,
+    sim: &TankSim,
+) -> TankStateHash {
+    hash_tank_state_with_gate(
+        position,
+        rotation,
+        linvel,
+        angvel,
+        drive,
+        grip,
+        transmission,
+        &test_weapon_gate(),
         sim,
     )
 }
@@ -291,7 +341,7 @@ pub(crate) struct CanonicalTankStateDigest {
     angular_velocity: u64,
     drive: u64,
     servo: u64,
-    reload: u64,
+    weapon_gate: u64,
     recoil: u64,
     belts: u64,
     transmission: u64,
@@ -309,6 +359,7 @@ pub(crate) fn canonical_tank_state_digest(
     grip: &TrackGrip,
     elements: &TrackGripElements,
     transmission: &TankTransmission,
+    weapon_gate: &WeaponGate,
     sim: &TankSim,
 ) -> CanonicalTankStateDigest {
     let hash = hash_tank_state_with_elements(
@@ -320,6 +371,7 @@ pub(crate) fn canonical_tank_state_digest(
         grip,
         Some(elements),
         transmission,
+        Some(weapon_gate),
         sim,
     );
     let mut phase = Fnv64::new();
@@ -339,7 +391,7 @@ pub(crate) fn canonical_tank_state_digest(
         angular_velocity: hash.av,
         drive: hash.drv,
         servo: hash.srv,
-        reload: hash.rld,
+        weapon_gate: hash.rld,
         recoil: hash.rec,
         belts: hash.blt,
         transmission: hash.trn,
@@ -361,6 +413,7 @@ pub(crate) fn canonical_element_hash(
     grip: &TrackGrip,
     elements: &TrackGripElements,
     transmission: &TankTransmission,
+    weapon_gate: &WeaponGate,
     sim: &TankSim,
 ) -> u64 {
     canonical_tank_state_digest(
@@ -372,6 +425,7 @@ pub(crate) fn canonical_element_hash(
         grip,
         elements,
         transmission,
+        weapon_gate,
         sim,
     )
     .elements
@@ -411,15 +465,11 @@ mod tests {
         let sim = TankSim {
             servos: vec![crate::tank::ServoState::test_new(0.4, 0.39, 0.64)],
             weapons: vec![WeaponState {
-                reload_remaining: 1.25,
                 recoil_offset: -0.4,
                 recoil_velocity: 0.0,
                 // Belt counter — cosmetic, deliberately NOT folded into the state hash below (see
                 // `WeaponState::rounds_fired`); carried here only so the literal is complete.
                 rounds_fired: 3,
-                // Rounds left on the belt — fire-gating, hashed (in the `rld` stream), unlike the
-                // cosmetic counter above.
-                belt_remaining: 47,
             }],
         };
         (position, rotation, linvel, angvel, drive, sim)
@@ -455,22 +505,22 @@ mod tests {
         let transmission = sample_transmission();
         let a = hash_tank_state(p, q, lv, av, &drive, &grip, &transmission, &sim);
         let b = hash_tank_state(p, q, lv, av, &drive, &grip, &transmission, &sim);
-        // MEASURED before the extraction: every stream remains byte-identical across the refactor.
+        // MEASURED for REV-17 after the weapon gate joined the canonical stream.
         assert_eq!(
             [
                 a.combined, a.pos, a.rot, a.lv, a.av, a.sim, a.drv, a.srv, a.rld, a.rec, a.blt,
                 a.trn, a.elm,
             ],
             [
-                13_073_156_975_648_890_420,
+                5_951_655_309_051_648_376,
                 5_276_285_167_157_175_194,
                 5_407_327_877_548_523_030,
                 8_825_002_124_784_658_797,
                 15_886_300_944_198_297_253,
-                11_243_118_599_694_738_606,
+                8_220_460_421_950_752_781,
                 3_269_583_271_824_065_410,
                 14_071_911_453_643_095_408,
-                222_436_822_907_033_607,
+                3_439_918_263_059_415_993,
                 12_037_784_973_900_930_602,
                 16_317_528_332_690_472_771,
                 4_854_495_176_564_399_426,
@@ -605,11 +655,10 @@ mod tests {
             (s.drv, s.rld, s.rec, s.blt, s.trn)
         );
 
-        // Reload: timer one ULP off — must NOT touch the recoil stream despite sharing the weapon.
-        let mut sim3 = sim.clone();
-        sim3.weapons[0].reload_remaining =
-            f32::from_bits(sim.weapons[0].reload_remaining.to_bits() ^ 1);
-        let r = hash_tank_state(p, q, lv, av, &drive, &grip, &transmission, &sim3);
+        // Readiness deadline: one tick off — must NOT touch recoil despite sharing a weapon slot.
+        let mut gate = test_weapon_gate();
+        gate.weapons[0].ready_tick = gate.weapons[0].ready_tick.map(|tick| tick + 1);
+        let r = hash_tank_state_with_gate(p, q, lv, av, &drive, &grip, &transmission, &gate, &sim);
         assert_ne!(base.rld, r.rld);
         assert_ne!(base.sim, r.sim);
         assert_eq!(
@@ -617,12 +666,39 @@ mod tests {
             (r.drv, r.srv, r.rec, r.blt, r.trn)
         );
 
+        // Crew-work pause tick: discrete phase within the same atomic gate stream.
+        let mut paused_gate = test_weapon_gate();
+        paused_gate.weapons[0].paused_at_tick = Some(1_200);
+        let pause_hash = hash_tank_state_with_gate(
+            p,
+            q,
+            lv,
+            av,
+            &drive,
+            &grip,
+            &transmission,
+            &paused_gate,
+            &sim,
+        );
+        assert_ne!(base.rld, pause_hash.rld);
+        assert_eq!(
+            (base.drv, base.srv, base.rec, base.blt, base.trn),
+            (
+                pause_hash.drv,
+                pause_hash.srv,
+                pause_hash.rec,
+                pause_hash.blt,
+                pause_hash.trn,
+            )
+        );
+
         // Belt count: one round off — a fire-gating difference, so it must land in the reload
         // stream (`rld`, the fire-timer family it modulates) and nowhere else. (`rounds_fired`
         // has no such case: it is cosmetic and deliberately unhashed.)
-        let mut simb = sim.clone();
-        simb.weapons[0].belt_remaining = sim.weapons[0].belt_remaining.wrapping_add(1);
-        let b = hash_tank_state(p, q, lv, av, &drive, &grip, &transmission, &simb);
+        let mut belt_gate = test_weapon_gate();
+        belt_gate.weapons[0].belt_remaining = belt_gate.weapons[0].belt_remaining.wrapping_add(1);
+        let b =
+            hash_tank_state_with_gate(p, q, lv, av, &drive, &grip, &transmission, &belt_gate, &sim);
         assert_ne!(base.rld, b.rld);
         assert_ne!(base.sim, b.sim);
         assert_ne!(base.combined, b.combined);
@@ -717,6 +793,7 @@ mod tests {
             &grip,
             Some(&elements),
             &transmission,
+            Some(&test_weapon_gate()),
             &sim,
         );
 
@@ -731,6 +808,7 @@ mod tests {
             &grip,
             Some(&strain),
             &transmission,
+            Some(&test_weapon_gate()),
             &sim,
         );
         assert_ne!(base.elm, strain_hash.elm);
@@ -758,6 +836,7 @@ mod tests {
             &grip,
             Some(&dwell),
             &transmission,
+            Some(&test_weapon_gate()),
             &sim,
         );
         assert_ne!(base.elm, dwell_hash.elm);
@@ -782,21 +861,22 @@ mod tests {
             &grip,
             &elements,
             &transmission,
+            &test_weapon_gate(),
             &sim,
         );
-        // MEASURED before the extraction, including the disclosed element and rollback streams.
+        // MEASURED for REV-17, including the weapon gate, element, and rollback streams.
         assert_eq!(
             base,
             CanonicalTankStateDigest {
-                simulation: 13_429_289_563_660_402_279,
-                rollback: 12_321_758_811_062_536_473,
+                simulation: 5_840_021_617_347_367_097,
+                rollback: 3_809_993_660_403_022_490,
                 position: 5_276_285_167_157_175_194,
                 rotation: 5_407_327_877_548_523_030,
                 linear_velocity: 8_825_002_124_784_658_797,
                 angular_velocity: 15_886_300_944_198_297_253,
                 drive: 3_269_583_271_824_065_410,
                 servo: 14_071_911_453_643_095_408,
-                reload: 222_436_822_907_033_607,
+                weapon_gate: 3_439_918_263_059_415_993,
                 recoil: 12_037_784_973_900_930_602,
                 belts: 16_317_528_332_690_472_771,
                 transmission: 4_854_495_176_564_399_426,
@@ -819,6 +899,7 @@ mod tests {
             &grip,
             &elements,
             &transmission,
+            &test_weapon_gate(),
             &phase_shifted,
         );
 

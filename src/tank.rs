@@ -17,9 +17,10 @@ mod view;
 #[cfg(test)]
 pub use model::WeaponState;
 pub(crate) use model::rig_world_pose;
+#[allow(unused_imports)]
 pub use model::{
     Controlled, Hull, Muzzle, Rig, Roadwheel, Tank, TankRoot, TankSim, TankViews, TrackSide,
-    Turret, Weapon, WeaponIndex,
+    Turret, Weapon, WeaponGate, WeaponGateState, WeaponIndex,
 };
 pub use scenario::{client_plugin, sp_spawn_plugin};
 pub use servo::{ServoCommand, ServoIndex, ServoRole, ServoSpec, ServoState, shortest_angle};

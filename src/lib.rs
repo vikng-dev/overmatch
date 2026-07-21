@@ -353,6 +353,12 @@ pub(crate) struct PredictedPresent(pub u32);
 #[derive(Resource, Default)]
 pub(crate) struct ShotClock(pub u32);
 
+/// Current simulation tick used by the tick-correlated weapon gate. Network compositions publish
+/// `LocalTimeline` into it before gameplay (including rollback replay); non-network compositions
+/// advance it once after each playing fixed tick and saturate at `u32::MAX` like Lightyear.
+#[derive(Resource, Default)]
+pub(crate) struct WeaponClock(pub u32);
+
 /// Physics collision layers. View/aim queries that want the ground (camera terrain ray, sight
 /// probes) filter to `Terrain` only, so they ignore vehicle colliders. Shared infra, hence at
 /// the crate root.

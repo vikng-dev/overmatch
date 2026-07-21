@@ -506,10 +506,10 @@ fn mg_rounds_stream_tracers_and_spawn_no_shell_scene() {
     let tank = tank_q.single(app.world()).expect("one controlled tank");
 
     // Hold the secondary trigger (the MGs) — a burst. Do NOT press primary, so no 88 round is fired.
-    // The MGs are `Automatic(rpm: 750)` — a 0.08 s cyclic interval (~5 ticks) — so ~60 ticks yields
-    // ~10 shots per MG across the two MGs, with the belt's tracer_every=5 giving several tracer
-    // rounds. The 150-round belts stay far from dry (~12 rounds each), so no belt swap interrupts
-    // the burst.
+    // DERIVED: the MGs' authored 750 rpm interval is 5.12 ticks at 64 Hz, which ceilings to 6 ticks
+    // (640 rpm effective), so 60 ticks yields about 10 shots per MG. Across the two MGs, the belt's
+    // tracer_every=5 gives several tracer rounds. The 150-round belts stay far from dry (about 10
+    // rounds each), so no belt swap interrupts the burst.
     let mut saw_streak = false;
     let mut saw_mg_shell_scene = false;
     let mut saw_shell = false;
@@ -638,8 +638,9 @@ fn a_burst_never_shoots_its_own_tank() {
         },
     );
 
-    // A sustained burst: both MGs are `Automatic(750 rpm)` — ~5 ticks apart — so 120 ticks is ~24
-    // rounds per gun, far past the first-round-of-the-burst case that always worked.
+    // DERIVED: both MGs' authored 750 rpm cadence ceilings to 6 ticks at 64 Hz (640 rpm effective),
+    // so 120 ticks is about 20 rounds per gun — far past the first-round-of-the-burst case that
+    // always worked.
     for _ in 0..120 {
         {
             let mut entity = app.world_mut().entity_mut(shooter);
@@ -2423,6 +2424,7 @@ fn capture_scripted_determinism_tick(
             &crate::track::sim::TrackGrip,
             &crate::track::sim::TrackGripElements,
             &crate::track::sim::TankTransmission,
+            &crate::tank::WeaponGate,
             &crate::track::sim::TrackContacts,
             &crate::tank::TankSim,
         ),
@@ -2447,6 +2449,7 @@ fn capture_scripted_determinism_tick(
         grip,
         elements,
         transmission,
+        weapon_gate,
         contacts,
         sim,
     ) in &roots
@@ -2462,6 +2465,7 @@ fn capture_scripted_determinism_tick(
                 grip,
                 elements,
                 transmission,
+                weapon_gate,
                 sim,
             ),
         ));
@@ -2518,7 +2522,7 @@ fn assert_simulation_mutators_are_ordered(app: &App) {
         .collect();
     for expected in [
         "track::sim::apply_track_forces",
-        "shooting::tick_reload",
+        "shooting::tick_weapon_gate",
         "shooting::fire",
         "shooting::apply_recoil",
         "ballistics::integrate_projectiles",
@@ -2542,7 +2546,7 @@ fn assert_simulation_mutators_are_ordered(app: &App) {
         .filter(|(left, right)| {
             let writes_physical_state = |name: &str| {
                 name.contains("track::sim::apply_track_forces")
-                    || name.contains("shooting::tick_reload")
+                    || name.contains("shooting::tick_weapon_gate")
                     || name.contains("shooting::fire")
                     || name.contains("shooting::apply_recoil")
                     || name.contains("ballistics::integrate_projectiles")

@@ -28,9 +28,7 @@ use super::client::{
 };
 use super::disclosure::{CombatDisclosure, NetTankStatus};
 use super::hit_feel::LocalHitConfirmed;
-use super::protocol::{
-    BeltSnapshot, DamageReceipt, NetBelts, NetCrew, NetTank, PROTOCOL_FINGERPRINT, VolumeSnapshot,
-};
+use super::protocol::{DamageReceipt, NetCrew, NetTank, PROTOCOL_FINGERPRINT, VolumeSnapshot};
 use super::server::attach_replication_sender;
 use super::test_harness::{TICK, base_app, finish, free_port, lock_real_udp_test};
 use crate::ballistics::{
@@ -38,6 +36,7 @@ use crate::ballistics::{
     ShellDamage, Shot, ShotSource,
 };
 use crate::command::TankCommand;
+use crate::tank::{WeaponGate, WeaponGateState};
 use crate::{ClientReplica, CombatantId, Layer, ShotId};
 
 /// Configured seeded packet-loss rate on each client's inbound link.
@@ -376,11 +375,12 @@ fn spawn_owned_shooter(
                     }],
                     swap: None,
                 },
-                NetBelts {
-                    weapons: vec![Some(BeltSnapshot {
-                        belt: OWNER_BELT,
-                        swap_remaining: 0.0,
-                    })],
+                WeaponGate {
+                    weapons: vec![WeaponGateState {
+                        ready_tick: None,
+                        paused_at_tick: None,
+                        belt_remaining: OWNER_BELT,
+                    }],
                 },
                 NetTankStatus::Active,
                 CombatDisclosure::owner(link),
@@ -666,15 +666,18 @@ fn collect_client_hit_confirm(
 #[derive(Resource, Default)]
 struct PrivateCombatArrivals {
     crew: u32,
-    belts: u32,
+    weapon_gate: u32,
 }
 
 fn count_private_crew_arrival(_: On<Add, NetCrew>, mut arrivals: ResMut<PrivateCombatArrivals>) {
     arrivals.crew += 1;
 }
 
-fn count_private_belts_arrival(_: On<Add, NetBelts>, mut arrivals: ResMut<PrivateCombatArrivals>) {
-    arrivals.belts += 1;
+fn count_private_weapon_gate_arrival(
+    _: On<Add, WeaponGate>,
+    mut arrivals: ResMut<PrivateCombatArrivals>,
+) {
+    arrivals.weapon_gate += 1;
 }
 
 /// The muzzle, and the plate [`RANGE`] metres downrange — shared by both worlds, so the client's
@@ -826,7 +829,7 @@ fn build_client(port: u16, client_id: u64, seed: u64, role: HarnessClient) -> Ap
     app.add_observer(collect_client_bounces);
     app.add_observer(collect_client_hit_confirm);
     app.add_observer(count_private_crew_arrival);
-    app.add_observer(count_private_belts_arrival);
+    app.add_observer(count_private_weapon_gate_arrival);
     app.add_systems(FixedFirst, collect_catch_up_armor_holds);
     if role == HarnessClient::Observer {
         app.add_systems(
@@ -1136,25 +1139,26 @@ fn every_shot_spawns_exactly_one_shell_under_ten_percent_loss() {
     let observer_hit_confirms = observer.world().resource::<ClientHitConfirms>().0.clone();
     let shooter_has_exact_private_combat = shooter
         .world_mut()
-        .query_filtered::<(&NetCrew, &NetBelts), (
+        .query_filtered::<(&NetCrew, &WeaponGate), (
             With<NetTank>,
             With<NetCrew>,
-            With<NetBelts>,
+            With<WeaponGate>,
             With<NetTankStatus>,
         )>()
         .iter(shooter.world())
-        .any(|(crew, belts)| {
+        .any(|(crew, gate)| {
             crew.volumes
                 == [VolumeSnapshot {
                     hp: OWNER_SNAPSHOT_HP,
                     crew: None,
                 }]
                 && crew.swap.is_none()
-                && belts.weapons
-                    == [Some(BeltSnapshot {
-                        belt: OWNER_BELT,
-                        swap_remaining: 0.0,
-                    })]
+                && gate.weapons
+                    == [WeaponGateState {
+                        ready_tick: None,
+                        paused_at_tick: None,
+                        belt_remaining: OWNER_BELT,
+                    }]
         });
     let observer_has_public_status = observer
         .world_mut()
@@ -1164,7 +1168,7 @@ fn every_shot_spawns_exactly_one_shell_under_ten_percent_loss() {
         .is_some();
     let observer_has_private_combat = observer
         .world_mut()
-        .query_filtered::<(), (With<NetTank>, Or<(With<NetCrew>, With<NetBelts>)>)>()
+        .query_filtered::<(), (With<NetTank>, Or<(With<NetCrew>, With<WeaponGate>)>)>()
         .iter(observer.world())
         .next()
         .is_some();
@@ -1355,11 +1359,11 @@ fn every_shot_spawns_exactly_one_shell_under_ten_percent_loss() {
     );
     assert!(
         shooter_has_exact_private_combat,
-        "the owning shooter did not receive the expected private NetCrew/NetBelts snapshot"
+        "the owning shooter did not receive the expected private NetCrew/WeaponGate snapshot"
     );
     assert!(
         observer_has_public_status && !observer_has_private_combat,
-        "combat disclosure leaked NetCrew/NetBelts to the observer or hid its public tank status"
+        "combat disclosure leaked NetCrew/WeaponGate to the observer or hid its public tank status"
     );
 
     println!(
@@ -1997,7 +2001,7 @@ fn thirty_combatant_volley_reaches_thirty_independent_receivers_under_loss() {
 }
 
 /// A client that joins after the replicated combat root exists receives public life state but never
-/// the root's owner-private crew or ammunition snapshots.
+/// the root's owner-private crew or weapon-gate snapshots.
 #[test]
 fn late_observer_receives_public_status_without_private_combat() {
     let _udp = lock_real_udp_test();
@@ -2018,19 +2022,20 @@ fn late_observer_receives_public_status_without_private_combat() {
         step_many(&mut server, std::slice::from_mut(&mut shooter));
         owner_ready = shooter
             .world_mut()
-            .query_filtered::<(&NetCrew, &NetBelts), (With<NetTank>, With<NetTankStatus>)>()
+            .query_filtered::<(&NetCrew, &WeaponGate), (With<NetTank>, With<NetTankStatus>)>()
             .iter(shooter.world())
-            .any(|(crew, belts)| {
+            .any(|(crew, gate)| {
                 crew.volumes
                     == [VolumeSnapshot {
                         hp: OWNER_SNAPSHOT_HP,
                         crew: None,
                     }]
-                    && belts.weapons
-                        == [Some(BeltSnapshot {
-                            belt: OWNER_BELT,
-                            swap_remaining: 0.0,
-                        })]
+                    && gate.weapons
+                        == [WeaponGateState {
+                            ready_tick: None,
+                            paused_at_tick: None,
+                            belt_remaining: OWNER_BELT,
+                        }]
             });
         if client_connected(&mut shooter) && owner_ready {
             break;
@@ -2070,20 +2075,20 @@ fn late_observer_receives_public_status_without_private_combat() {
     );
     let leaked = clients[1]
         .world_mut()
-        .query_filtered::<(), (With<NetTank>, Or<(With<NetCrew>, With<NetBelts>)>)>()
+        .query_filtered::<(), (With<NetTank>, Or<(With<NetCrew>, With<WeaponGate>)>)>()
         .iter(clients[1].world())
         .next()
         .is_some();
     let arrivals = clients[1].world().resource::<PrivateCombatArrivals>();
     println!(
-        "MEASURED late-join disclosure: public_status=1, crew_arrivals={}, belt_arrivals={}",
-        arrivals.crew, arrivals.belts,
+        "MEASURED late-join disclosure: public_status=1, crew_arrivals={}, weapon_gate_arrivals={}",
+        arrivals.crew, arrivals.weapon_gate,
     );
     assert!(
-        !leaked && arrivals.crew == 0 && arrivals.belts == 0,
-        "the late observer received owner-private combat state: present={leaked}, crew arrivals={}, belt arrivals={}",
+        !leaked && arrivals.crew == 0 && arrivals.weapon_gate == 0,
+        "the late observer received owner-private combat state: present={leaked}, crew arrivals={}, weapon-gate arrivals={}",
         arrivals.crew,
-        arrivals.belts,
+        arrivals.weapon_gate,
     );
 }
 

@@ -5,6 +5,8 @@
 //! the *player's* gun. The armor sandbox drives the same `FireShell` from its free-fly camera
 //! instead.
 
+use core::time::Duration;
+
 use avian3d::prelude::{Forces, Position, Rotation};
 use bevy::prelude::*;
 
@@ -12,8 +14,10 @@ use crate::ballistics::{FireShell, FireShellOrigin, ShotSource};
 use crate::command::{ConsumeCommandEdges, TankCommand};
 use crate::damage::{TankVolumes, VolumeFacets, requirement_met};
 use crate::spec::{FireMode, Trigger};
-use crate::state::{GameplaySet, SimPhase};
-use crate::tank::{Muzzle, Tank, TankRoot, TankSim, Weapon, WeaponIndex, rig_world_pose};
+use crate::state::{AppState, GameplaySet, SimPhase};
+use crate::tank::{
+    Muzzle, Tank, TankRoot, TankSim, Weapon, WeaponGate, WeaponIndex, rig_world_pose,
+};
 use crate::track::sim::{ExplicitImpulse, TrackGripWake, apply_explicit_impulse};
 
 /// Feel multiplier on the hull recoil impulse (1.0 = physical momentum). On a 57 t hull true momentum
@@ -71,78 +75,103 @@ pub(crate) fn tracer_round(rounds_fired: u32, tracer_every: u32) -> bool {
 }
 
 pub fn plugin(app: &mut App) {
-    // The gun is sim: reload and firing run on the fixed clock, driven by each tank's `TankCommand`
-    // — `fire` consumes the click edge, so it must precede the command layer's edge clear.
+    // The gun is sim: readiness and firing run on the fixed clock, driven by each tank's
+    // `TankCommand` — `fire` consumes the click edge, so it must precede edge clearing.
     //
     // `SimPhase` owns the cross-feature order: driving samples tick-start velocity before this
     // impulse changes it, then recoil integrates the new kick in the same tick.
-    app.add_systems(
-        FixedUpdate,
-        (
-            (tick_reload, fire)
-                .chain()
-                .in_set(SimPhase::WeaponFire)
-                .before(ConsumeCommandEdges),
-            apply_recoil.in_set(SimPhase::Recoil),
+    app.init_resource::<crate::WeaponClock>()
+        .add_systems(
+            FixedLast,
+            advance_weapon_clock.run_if(in_state(AppState::Playing)),
         )
-            .in_set(GameplaySet),
-    );
+        .add_systems(
+            FixedUpdate,
+            (
+                (tick_weapon_gate, fire)
+                    .chain()
+                    .in_set(SimPhase::WeaponFire)
+                    .before(ConsumeCommandEdges),
+                apply_recoil.in_set(SimPhase::Recoil),
+            )
+                .in_set(GameplaySet),
+        );
 }
 
-/// Tick every weapon's fire timer down, with the crew gate applied per [`FireMode`] — this is
-/// where "what does the crew actually do" splits by mechanism:
+/// Advance the local-only fallback clock after a completed fixed tick. Network compositions
+/// overwrite it from `LocalTimeline` before the next gameplay pass, including every replay tick.
+fn advance_weapon_clock(mut clock: ResMut<crate::WeaponClock>) {
+    clock.0 = clock.0.saturating_add(1);
+}
+
+/// Quantize one authored duration to the first fixed tick at or after it. Integer nanosecond
+/// ceiling keeps the runtime gate free of a changing float; `arm` separately enforces at least one
+/// tick so a slot cannot emit twice in one simulated tick.
+fn duration_ticks(seconds: f32, timestep: Duration) -> u32 {
+    let duration_ns = Duration::from_secs_f32(seconds).as_nanos();
+    let timestep_ns = timestep.as_nanos();
+    assert!(
+        timestep_ns > 0,
+        "weapon gate requires a non-zero fixed timestep"
+    );
+    let ticks = duration_ns.div_ceil(timestep_ns);
+    u32::try_from(ticks).expect("authored weapon delay exceeds u32 ticks")
+}
+
+/// Mature every weapon's absolute readiness deadline, with the crew gate applied per [`FireMode`]:
 ///
-/// * `Single`: the timer is the reload, and the whole reload is gated by the weapon's `load`
-///   requirement (Loader staffed + Breech intact). A dead Loader or broken Breech freezes the
-///   reload partway through; a backfilled Loader (slice 2) would resume it.
-/// * `Automatic`, belt has rounds: the timer is the cyclic interval (60/rpm), pure mechanism —
-///   it ticks UNGATED. Crew-gating it was the old single-path latent trap: a dead loader would
-///   have frozen an MG's rate of fire mid-belt, which no crew casualty physically does.
-/// * `Automatic`, belt dry: the timer is the belt swap, and the SWAP is what `load` gates (the
-///   human act, same machinery as the 88's reload). When it reaches 0 the belt refills — inside
-///   the gated tick, so a crew-dead tank never completes a swap.
+/// * `Single`: unmet `load` advances `ready_tick` one-for-one, preserving the remaining reload.
+/// * `Automatic`, belt has rounds: the cyclic deadline matures without a crew gate.
+/// * `Automatic`, belt dry: unmet `load` likewise advances the swap deadline; the belt refills
+///   only on a met-gate tick that reaches the deadline.
 ///
 /// Per-tank, not controlled-only: a tank keeps loading whether you're in it or it's a network
 /// peer's.
-fn tick_reload(
-    time: Res<Time>,
+fn tick_weapon_gate(
+    clock: Res<crate::WeaponClock>,
     tanks: Query<Option<&TankVolumes>, With<Tank>>,
     volumes: Query<VolumeFacets>,
     weapons: Query<(&Weapon, &WeaponIndex, &TankRoot), With<Muzzle>>,
-    mut sims: Query<&mut TankSim>,
+    mut gates: Query<&mut WeaponGate>,
 ) {
+    let now = clock.0;
     for (weapon, slot, root) in &weapons {
         let Ok(tank_volumes) = tanks.get(root.0) else {
             continue;
         };
-        let Ok(mut sim) = sims.get_mut(root.0) else {
+        let Ok(mut gate) = gates.get_mut(root.0) else {
             continue;
         };
-        let Some(state) = sim.weapons.get_mut(slot.0) else {
+        let Some(state) = gate.weapons.get_mut(slot.0) else {
             continue;
         };
-        if state.reload_remaining <= 0.0 {
+        if state.ready_tick.is_none() {
             continue;
         }
         match weapon.fire_mode {
-            // Single-shot reload: crew-gated, unchanged.
             FireMode::Single { .. } => {
                 if requirement_met(tank_volumes, &weapon.load, &volumes) {
-                    state.reload_remaining = (state.reload_remaining - time.delta_secs()).max(0.0);
+                    state.resume(now);
+                    if state.deadline_reached(now) {
+                        state.ready_tick = None;
+                    }
+                } else {
+                    state.pause(now);
                 }
             }
             FireMode::Automatic { belt_size, .. } => {
                 if state.belt_remaining > 0 {
-                    // Cyclic interval: mechanism, never crew-gated.
-                    state.reload_remaining = (state.reload_remaining - time.delta_secs()).max(0.0);
-                } else if requirement_met(tank_volumes, &weapon.load, &volumes) {
-                    // Belt swap: the crew-gated act. The refill lives INSIDE the gated tick, on
-                    // the exact tick the timer bottoms out — so completion is impossible while
-                    // the gate is unmet, and happens exactly once per swap.
-                    state.reload_remaining = (state.reload_remaining - time.delta_secs()).max(0.0);
-                    if state.reload_remaining <= 0.0 {
-                        state.belt_remaining = belt_size;
+                    if state.deadline_reached(now) {
+                        state.ready_tick = None;
                     }
+                } else if requirement_met(tank_volumes, &weapon.load, &volumes) {
+                    state.resume(now);
+                    if state.deadline_reached(now) {
+                        state.belt_remaining = belt_size;
+                        state.ready_tick = None;
+                    }
+                } else {
+                    state.pause(now);
                 }
             }
         }
@@ -171,6 +200,7 @@ fn fire(
     volumes: Query<VolumeFacets>,
     weapons: Query<(Entity, &Weapon, &WeaponIndex, &TankRoot), With<Muzzle>>,
     mut sims: Query<&mut TankSim>,
+    mut gates: Query<&mut WeaponGate>,
     mut bodies: Query<(Forces, Option<&mut TrackGripWake>), With<Tank>>,
     parents: Query<&ChildOf>,
     locals: Query<&Transform>,
@@ -185,6 +215,8 @@ fn fire(
     // before `GameplaySet`, so an attributed local FireShell is born with the identity that changes
     // its ballistic hold/keyframe behaviour. Single-player and sandboxes deliberately have no clock.
     shot_clock: Option<Res<crate::ShotClock>>,
+    weapon_clock: Res<crate::WeaponClock>,
+    fixed_time: Res<Time<Fixed>>,
     mut commands: Commands,
 ) {
     let replaying = replaying.is_some_and(|r| r.0);
@@ -200,15 +232,14 @@ fn fire(
             Trigger::Primary => command.fire_primary,
             Trigger::Secondary => command.fire_secondary,
         };
-        // Ready = fire timer at 0, plus rounds on the belt for an `Automatic` (a dry belt is
-        // mid-swap: `reload_remaining` then carries the swap timer, which a dead crew can freeze
-        // at >0 forever — the belt check keeps "no rounds" firm even at timer 0 edge cases).
-        let ready = sims
+        // Ready = no active absolute deadline, plus rounds for an `Automatic`. A dry belt remains
+        // firm even if malformed state ever carries no deadline.
+        let ready = gates
             .get(root.0)
             .ok()
-            .and_then(|sim| sim.weapons.get(slot.0))
+            .and_then(|gate| gate.weapons.get(slot.0))
             .is_some_and(|w| {
-                w.reload_remaining <= 0.0
+                w.is_ready()
                     && match weapon.fire_mode {
                         FireMode::Single { .. } => true,
                         FireMode::Automatic { .. } => w.belt_remaining > 0,
@@ -327,27 +358,30 @@ fn fire(
                 },
             );
         }
-        // Arm the fire timer per mechanism. `Single`: the crew-gated reload. `Automatic`: consume
-        // one belt round; a dry belt automatically starts the (crew-gated) belt swap, otherwise
-        // the timer is the plain cyclic interval.
-        if let Ok(mut sim) = sims.get_mut(root.0)
-            && let Some(state) = sim.weapons.get_mut(slot.0)
+        // Arm an absolute deadline per mechanism. `Single`: crew-gated reload. `Automatic`: consume
+        // one belt round, then arm either the crew-gated swap or the ungated cyclic interval.
+        if let Ok(mut gate) = gates.get_mut(root.0)
+            && let Some(state) = gate.weapons.get_mut(slot.0)
         {
-            match weapon.fire_mode {
-                FireMode::Single { reload_secs } => state.reload_remaining = reload_secs,
+            let delay_secs = match weapon.fire_mode {
+                FireMode::Single { reload_secs } => reload_secs,
                 FireMode::Automatic {
                     rpm,
                     belt_swap_secs,
                     ..
                 } => {
                     state.belt_remaining = state.belt_remaining.saturating_sub(1);
-                    state.reload_remaining = if state.belt_remaining == 0 {
+                    if state.belt_remaining == 0 {
                         belt_swap_secs
                     } else {
                         60.0 / rpm
-                    };
+                    }
                 }
-            }
+            };
+            state.arm(
+                weapon_clock.0,
+                duration_ticks(delay_secs, fixed_time.timestep()),
+            );
         }
     }
 }
@@ -385,17 +419,20 @@ fn apply_recoil(
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use avian3d::prelude::{Position, Rotation};
     use bevy::ecs::system::RunSystemOnce;
     use bevy::prelude::*;
 
-    use super::{fire, tick_reload, tracer_round};
+    use super::{
+        advance_weapon_clock, duration_ticks, fire, plugin, tick_weapon_gate, tracer_round,
+    };
     use crate::command::TankCommand;
     use crate::damage::{CrewStation, Dead, Group, Part, Requirement, VolumeOf};
     use crate::spec::{FireMode, Trigger};
-    use crate::tank::{Muzzle, Tank, TankRoot, TankSim, Weapon, WeaponIndex, WeaponState};
+    use crate::tank::{
+        Muzzle, Tank, TankRoot, TankSim, Weapon, WeaponGate, WeaponGateState, WeaponIndex,
+        WeaponState,
+    };
 
     /// The belt-fed test mode: 600 rpm = a 0.1 s cyclic interval, a 2-round belt, a 1 s swap.
     const MG_MODE: FireMode = FireMode::Automatic {
@@ -404,9 +441,98 @@ mod tests {
         belt_swap_secs: 1.0,
         tracer_every: 5,
     };
+    const MAIN_GUN_MODE: FireMode = FireMode::Single { reload_secs: 0.5 };
 
-    /// A minimal `Automatic` rig the real `fire`/`tick_reload` systems run over: a tank root
-    /// (command holding the secondary trigger, physics pose, one-slot `TankSim` with a FULL belt),
+    /// DERIVED: the Tiger's authored 750 rpm interval is 5.12 ticks at 64 Hz, so the absolute gate
+    /// rounds up to the 6-tick bucket (640 rpm effective). The ceiling prevents firing early.
+    #[test]
+    fn tiger_mg_rate_quantizes_to_six_tick_bucket() {
+        let tick = core::time::Duration::from_nanos(1_000_000_000 / 64);
+        assert_eq!(duration_ticks(60.0 / 750.0, tick), 6);
+    }
+
+    #[test]
+    fn absolute_gate_uses_numeric_order_at_tick_zero() {
+        let gate = WeaponGateState {
+            ready_tick: Some(u32::MAX),
+            paused_at_tick: None,
+            belt_remaining: 0,
+        };
+
+        assert!(!gate.deadline_reached(0));
+        assert_eq!(gate.remaining_ticks(0), u32::MAX);
+    }
+
+    #[test]
+    fn absolute_gate_can_reach_the_last_tick() {
+        let mut gate = WeaponGateState::default();
+        gate.arm(u32::MAX - 1, 1);
+
+        assert_eq!(gate.ready_tick, Some(u32::MAX));
+        assert!(!gate.deadline_reached(u32::MAX - 1));
+        assert_eq!(gate.remaining_ticks(u32::MAX - 1), 1);
+        assert!(gate.deadline_reached(u32::MAX));
+    }
+
+    #[test]
+    fn absolute_gate_freezes_when_the_tick_range_is_exhausted() {
+        let exhausted = WeaponGateState {
+            ready_tick: None,
+            paused_at_tick: Some(u32::MAX),
+            belt_remaining: 0,
+        };
+
+        let mut armed = WeaponGateState::default();
+        armed.arm(u32::MAX - 1, 3);
+        assert_eq!(armed, exhausted, "an unrepresentable delay must fail-stop");
+        assert!(!armed.is_ready());
+        assert!(armed.is_exhausted());
+        assert_eq!(armed.remaining_ticks(u32::MAX), u32::MAX);
+
+        let mut paused = WeaponGateState {
+            ready_tick: Some(u32::MAX),
+            paused_at_tick: None,
+            belt_remaining: 0,
+        };
+        paused.pause(u32::MAX - 1);
+        assert_eq!(paused, exhausted, "an unrepresentable pause must fail-stop");
+
+        let mut resumed = WeaponGateState {
+            ready_tick: Some(u32::MAX),
+            paused_at_tick: Some(u32::MAX - 2),
+            belt_remaining: 0,
+        };
+        resumed.resume(u32::MAX);
+        assert_eq!(
+            resumed, exhausted,
+            "an unrepresentable resume shift must fail-stop"
+        );
+    }
+
+    #[test]
+    fn absolute_gate_none_deadline_is_ready_at_every_tick() {
+        let gate = WeaponGateState::default();
+
+        assert!(gate.is_ready());
+        assert!(gate.deadline_reached(0));
+        assert!(gate.deadline_reached(u32::MAX));
+        assert_eq!(gate.remaining_ticks(0), 0);
+        assert_eq!(gate.remaining_ticks(u32::MAX), 0);
+    }
+
+    #[test]
+    fn fallback_weapon_clock_saturates() {
+        let mut world = World::new();
+        world.insert_resource(crate::WeaponClock(u32::MAX - 1));
+
+        world.run_system_once(advance_weapon_clock).unwrap();
+        assert_eq!(world.resource::<crate::WeaponClock>().0, u32::MAX);
+        world.run_system_once(advance_weapon_clock).unwrap();
+        assert_eq!(world.resource::<crate::WeaponClock>().0, u32::MAX);
+    }
+
+    /// A minimal `Automatic` rig the real `fire`/`tick_weapon_gate` systems run over: a tank root
+    /// (command holding the secondary trigger, physics pose, one-slot gate with a FULL belt),
     /// a live Loader crew volume (so `TankVolumes` exists and a `[Loader]` gate is meetable), and
     /// a muzzle child carrying the `Weapon` with the given `load` gate. Returns (root, loader).
     fn spawn_mg_rig(world: &mut World, load: Requirement) -> (Entity, Entity) {
@@ -420,8 +546,11 @@ mod tests {
                 Position::default(),
                 Rotation::default(),
                 TankSim {
-                    weapons: vec![WeaponState::for_mode(&MG_MODE)],
+                    weapons: vec![WeaponState::default()],
                     ..default()
+                },
+                WeaponGate {
+                    weapons: vec![WeaponGateState::for_mode(&MG_MODE)],
                 },
                 crate::CombatantId(1),
             ))
@@ -449,36 +578,107 @@ mod tests {
         (root, loader)
     }
 
+    fn spawn_main_gun_rig(world: &mut World) -> Entity {
+        let root = world
+            .spawn((
+                Tank,
+                TankCommand {
+                    fire_primary: true,
+                    ..default()
+                },
+                Position::default(),
+                Rotation::default(),
+                TankSim {
+                    weapons: vec![WeaponState::default()],
+                    ..default()
+                },
+                WeaponGate {
+                    weapons: vec![WeaponGateState::for_mode(&MAIN_GUN_MODE)],
+                },
+                crate::CombatantId(1),
+            ))
+            .id();
+        world.spawn((CrewStation::Loader, VolumeOf(root)));
+        world.spawn((
+            Muzzle,
+            WeaponIndex(0),
+            TankRoot(root),
+            Transform::default(),
+            ChildOf(root),
+            Weapon {
+                name: "88 mm".into(),
+                speed: 810.0,
+                caliber: 0.088,
+                mass: 10.2,
+                fire_mode: MAIN_GUN_MODE,
+                recoil: None,
+                barrel: None,
+                fire: Vec::new(),
+                load: Vec::new(),
+                trigger: Trigger::Primary,
+            },
+        ));
+        root
+    }
+
     fn weapon_state(world: &mut World, root: Entity) -> WeaponState {
         world.get::<TankSim>(root).expect("sim on root").weapons[0]
     }
 
-    fn advance(world: &mut World, secs: f32) {
+    fn gate_state(world: &World, root: Entity) -> WeaponGateState {
+        world.get::<WeaponGate>(root).expect("gate on root").weapons[0]
+    }
+
+    fn test_world() -> World {
+        let mut world = World::new();
+        let mut fixed = Time::<Fixed>::default();
+        fixed.set_timestep_hz(64.0);
+        world.insert_resource(fixed);
+        world.insert_resource(crate::WeaponClock(0));
         world
-            .resource_mut::<Time>()
-            .advance_by(Duration::from_secs_f32(secs));
-        world.run_system_once(tick_reload).unwrap();
+    }
+
+    fn pause_test_app() -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin));
+        crate::state::sim_plugin(&mut app);
+        app.insert_state(crate::state::AppState::Playing);
+        plugin(&mut app);
+        app.world_mut()
+            .resource_mut::<Time<Fixed>>()
+            .set_timestep_hz(64.0);
+        app
+    }
+
+    fn set_app_state(app: &mut App, state: crate::state::AppState) {
+        app.insert_state(state);
+        app.world_mut().run_schedule(StateTransition);
+    }
+
+    fn advance(world: &mut World, ticks: u32) {
+        for _ in 0..ticks {
+            let mut clock = world.resource_mut::<crate::WeaponClock>();
+            clock.0 = clock.0.saturating_add(1);
+            world.run_system_once(tick_weapon_gate).unwrap();
+        }
     }
 
     /// The determinism-relevant belt lifecycle, on the real systems: firing walks the belt down,
     /// a dry belt BLOCKS fire and automatically starts the swap, the swap timer runs it out, the
-    /// belt refills, and fire resumes — all of it in root-resident `TankSim` state (so a rollback
-    /// replay re-derives the identical sequence).
+    /// belt refills, and fire resumes — the authoritative gate in root-resident `WeaponGate`, with
+    /// cosmetic recoil/tracer phase in `TankSim`.
     #[test]
     fn belt_runs_dry_swap_completes_fire_resumes() {
-        let mut world = World::new();
-        world.insert_resource(Time::<()>::default());
+        let mut world = test_world();
         // Ungated swap (`load: []`) — the crew gate has its own test below.
         let (root, _) = spawn_mg_rig(&mut world, Vec::new());
 
         // Round 1: belt 2→1, the cyclic interval (60/600 = 0.1 s) arms.
         world.run_system_once(fire).unwrap();
         let s = weapon_state(&mut world, root);
-        assert_eq!((s.rounds_fired, s.belt_remaining), (1, 1));
-        assert!(
-            (s.reload_remaining - 0.1).abs() < 1e-6,
-            "cyclic interval armed"
-        );
+        let gate = gate_state(&world, root);
+        assert_eq!((s.rounds_fired, gate.belt_remaining), (1, 1));
+        assert_eq!(gate.ready_tick, Some(7), "0.1 s quantizes up to 7 ticks");
 
         // Held trigger inside the cyclic interval: no shot.
         world.run_system_once(fire).unwrap();
@@ -486,32 +686,143 @@ mod tests {
 
         // Interval elapses; round 2 empties the belt — the swap starts AUTOMATICALLY (timer
         // becomes belt_swap_secs, not the cyclic interval).
-        advance(&mut world, 0.15);
+        advance(&mut world, 7);
         world.run_system_once(fire).unwrap();
         let s = weapon_state(&mut world, root);
-        assert_eq!((s.rounds_fired, s.belt_remaining), (2, 0));
-        assert_eq!(s.reload_remaining, 1.0, "dry belt arms the swap timer");
+        let gate = gate_state(&world, root);
+        assert_eq!((s.rounds_fired, gate.belt_remaining), (2, 0));
+        assert_eq!(gate.ready_tick, Some(71), "dry belt arms a 64-tick swap");
 
         // Dry belt blocks fire mid-swap.
         world.run_system_once(fire).unwrap();
         assert_eq!(weapon_state(&mut world, root).rounds_fired, 2);
 
         // Half the swap: still dry, still blocked.
-        advance(&mut world, 0.5);
-        let s = weapon_state(&mut world, root);
-        assert_eq!(s.belt_remaining, 0);
-        assert!((s.reload_remaining - 0.5).abs() < 1e-6);
+        advance(&mut world, 32);
+        let gate = gate_state(&world, root);
+        assert_eq!(gate.belt_remaining, 0);
+        assert_eq!(gate.remaining_ticks(39), 32);
         world.run_system_once(fire).unwrap();
         assert_eq!(weapon_state(&mut world, root).rounds_fired, 2);
 
         // Swap completes: the belt refills to belt_size and fire resumes.
-        advance(&mut world, 0.6);
-        let s = weapon_state(&mut world, root);
-        assert_eq!(s.belt_remaining, 2, "completed swap refills the belt");
-        assert_eq!(s.reload_remaining, 0.0);
+        advance(&mut world, 32);
+        let gate = gate_state(&world, root);
+        assert_eq!(gate.belt_remaining, 2, "completed swap refills the belt");
+        assert_eq!(gate.ready_tick, None);
         world.run_system_once(fire).unwrap();
         let s = weapon_state(&mut world, root);
-        assert_eq!((s.rounds_fired, s.belt_remaining), (3, 1));
+        assert_eq!(
+            (s.rounds_fired, gate_state(&world, root).belt_remaining),
+            (3, 1)
+        );
+    }
+
+    /// The existing single-shot path uses the same absolute gate without acquiring belt semantics.
+    #[test]
+    fn single_weapon_reloads_on_absolute_deadline() {
+        let mut world = test_world();
+        let root = spawn_main_gun_rig(&mut world);
+
+        world.run_system_once(fire).unwrap();
+        assert_eq!(weapon_state(&mut world, root).rounds_fired, 1);
+        assert_eq!(
+            gate_state(&world, root),
+            WeaponGateState {
+                ready_tick: Some(32),
+                paused_at_tick: None,
+                belt_remaining: 0,
+            },
+        );
+
+        world.run_system_once(fire).unwrap();
+        assert_eq!(weapon_state(&mut world, root).rounds_fired, 1);
+        advance(&mut world, 32);
+        assert_eq!(gate_state(&world, root).ready_tick, None);
+        world.run_system_once(fire).unwrap();
+        assert_eq!(weapon_state(&mut world, root).rounds_fired, 2);
+    }
+
+    #[test]
+    fn saturated_clock_refuses_repeated_shots() {
+        let mut world = test_world();
+        world.resource_mut::<crate::WeaponClock>().0 = u32::MAX;
+        let root = spawn_main_gun_rig(&mut world);
+
+        world.run_system_once(fire).unwrap();
+        assert_eq!(weapon_state(&mut world, root).rounds_fired, 1);
+        assert!(gate_state(&world, root).is_exhausted());
+
+        world.run_system_once(tick_weapon_gate).unwrap();
+        world.run_system_once(fire).unwrap();
+        assert_eq!(
+            weapon_state(&mut world, root).rounds_fired,
+            1,
+            "a clock pinned at MAX must not repeatedly mature a saturated deadline"
+        );
+        assert!(gate_state(&world, root).is_exhausted());
+    }
+
+    #[test]
+    fn offline_pause_freezes_main_gun_reload_deadline() {
+        let mut app = pause_test_app();
+        let root = spawn_main_gun_rig(app.world_mut());
+
+        app.world_mut().run_schedule(FixedUpdate);
+        app.world_mut().run_schedule(FixedLast);
+        let paused_gate = gate_state(app.world(), root);
+        assert_eq!(paused_gate.ready_tick, Some(32));
+        assert_eq!(app.world().resource::<crate::WeaponClock>().0, 1);
+
+        set_app_state(&mut app, crate::state::AppState::Paused);
+        for _ in 0..64 {
+            app.world_mut().run_schedule(FixedUpdate);
+            app.world_mut().run_schedule(FixedLast);
+        }
+        assert_eq!(gate_state(app.world(), root), paused_gate);
+        assert_eq!(
+            app.world().resource::<crate::WeaponClock>().0,
+            1,
+            "the fallback clock must not consume reload time while paused"
+        );
+
+        set_app_state(&mut app, crate::state::AppState::Playing);
+        app.world_mut().run_schedule(FixedUpdate);
+        assert_eq!(gate_state(app.world(), root), paused_gate);
+        assert_eq!(weapon_state(app.world_mut(), root).rounds_fired, 1);
+    }
+
+    #[test]
+    fn offline_pause_freezes_mg_belt_swap_deadline() {
+        let mut app = pause_test_app();
+        let (root, _) = spawn_mg_rig(app.world_mut(), Vec::new());
+
+        app.world_mut().run_schedule(FixedUpdate);
+        for _ in 0..7 {
+            app.world_mut().run_schedule(FixedLast);
+            app.world_mut().run_schedule(FixedUpdate);
+        }
+        let paused_gate = gate_state(app.world(), root);
+        assert_eq!(paused_gate.belt_remaining, 0);
+        assert_eq!(paused_gate.ready_tick, Some(71));
+        assert_eq!(app.world().resource::<crate::WeaponClock>().0, 7);
+
+        set_app_state(&mut app, crate::state::AppState::Paused);
+        for _ in 0..128 {
+            app.world_mut().run_schedule(FixedUpdate);
+            app.world_mut().run_schedule(FixedLast);
+        }
+        assert_eq!(gate_state(app.world(), root), paused_gate);
+        assert_eq!(
+            app.world().resource::<crate::WeaponClock>().0,
+            7,
+            "the fallback clock must not consume belt-swap time while paused"
+        );
+
+        set_app_state(&mut app, crate::state::AppState::Playing);
+        app.world_mut().run_schedule(FixedUpdate);
+        assert_eq!(gate_state(app.world(), root), paused_gate);
+        assert_eq!(weapon_state(app.world_mut(), root).rounds_fired, 2);
     }
 
     /// The crew-gate split the redesign exists for: the CYCLIC interval ticks with the gun crew
@@ -520,8 +831,7 @@ mod tests {
     /// revived crew resumes and completes it.
     #[test]
     fn belt_swap_is_crew_gated_but_cyclic_interval_is_not() {
-        let mut world = World::new();
-        world.insert_resource(Time::<()>::default());
+        let mut world = test_world();
         let (root, loader) = spawn_mg_rig(&mut world, vec![Group::Single(Part::Loader)]);
 
         // Kill the loader BEFORE anything fires (`fire: []` stays met — only `load` cares).
@@ -529,36 +839,48 @@ mod tests {
 
         // Round 1 fires, and the cyclic interval ticks out DESPITE the dead loader.
         world.run_system_once(fire).unwrap();
-        assert_eq!(weapon_state(&mut world, root).belt_remaining, 1);
-        advance(&mut world, 0.15);
+        assert_eq!(gate_state(&world, root).belt_remaining, 1);
+        advance(&mut world, 7);
         assert_eq!(
-            weapon_state(&mut world, root).reload_remaining,
-            0.0,
+            gate_state(&world, root).ready_tick,
+            None,
             "the cyclic interval is mechanism, not crew work — it must tick with the crew dead"
         );
 
         // Round 2 empties the belt; the swap arms…
         world.run_system_once(fire).unwrap();
         let s = weapon_state(&mut world, root);
-        assert_eq!((s.rounds_fired, s.belt_remaining), (2, 0));
-        assert_eq!(s.reload_remaining, 1.0);
+        let gate = gate_state(&world, root);
+        assert_eq!((s.rounds_fired, gate.belt_remaining), (2, 0));
+        assert_eq!(gate.ready_tick, Some(71));
 
         // …and FREEZES: dead gun crew = no swap, however long we wait, and no fire.
-        for _ in 0..4 {
-            advance(&mut world, 5.0);
-        }
-        let s = weapon_state(&mut world, root);
-        assert_eq!(s.reload_remaining, 1.0, "dead crew freezes the swap timer");
-        assert_eq!(s.belt_remaining, 0, "no refill while the swap is frozen");
+        advance(&mut world, 1);
+        let paused_gate = gate_state(&world, root);
+        assert_eq!(paused_gate.paused_at_tick, Some(8));
+        advance(&mut world, 255);
+        let gate = gate_state(&world, root);
+        assert_eq!(
+            gate, paused_gate,
+            "the replicated gate stays byte-identical throughout a crew-work pause"
+        );
+        assert_eq!(
+            gate.remaining_ticks(263),
+            64,
+            "dead crew freezes the swap deadline"
+        );
+        assert_eq!(gate.belt_remaining, 0, "no refill while the swap is frozen");
         world.run_system_once(fire).unwrap();
         assert_eq!(weapon_state(&mut world, root).rounds_fired, 2);
 
         // Revive the loader (slice-2 backfill shape): the swap resumes, completes, fire returns.
         world.entity_mut(loader).remove::<Dead>();
-        advance(&mut world, 0.6);
-        advance(&mut world, 0.6);
-        let s = weapon_state(&mut world, root);
-        assert_eq!(s.belt_remaining, 2, "revived crew completes the swap");
+        advance(&mut world, 64);
+        assert_eq!(
+            gate_state(&world, root).belt_remaining,
+            2,
+            "revived crew completes the swap"
+        );
         world.run_system_once(fire).unwrap();
         assert_eq!(weapon_state(&mut world, root).rounds_fired, 3);
     }
@@ -611,8 +933,7 @@ mod tests {
             fired.0 = fire.shot;
         }
 
-        let mut world = World::new();
-        world.insert_resource(Time::<()>::default());
+        let mut world = test_world();
         world.insert_resource(crate::ShotClock(81));
         world.init_resource::<FiredShot>();
         world.add_observer(capture);
@@ -634,8 +955,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "network tank fired without spawn-complete CombatantId")]
     fn network_fire_rejects_a_root_missing_its_spawn_identity() {
-        let mut world = World::new();
-        world.insert_resource(Time::<()>::default());
+        let mut world = test_world();
         world.insert_resource(crate::ShotClock(81));
         let (root, _) = spawn_mg_rig(&mut world, Vec::new());
         world.entity_mut(root).remove::<crate::CombatantId>();
@@ -657,8 +977,7 @@ mod tests {
             c.0 += 1;
         }
 
-        let mut world = World::new();
-        world.insert_resource(Time::<()>::default());
+        let mut world = test_world();
         world.init_resource::<FireShellCount>();
         world.add_observer(count_fire_shells);
         let (root, _) = spawn_mg_rig(&mut world, Vec::new());
@@ -671,10 +990,10 @@ mod tests {
             1,
             "the forward tick spawns exactly one own shell",
         );
-        assert_eq!(weapon_state(&mut world, root).belt_remaining, 1);
+        assert_eq!(gate_state(&world, root).belt_remaining, 1);
 
         // Arm past the cyclic interval so the weapon is ready to fire again.
-        advance(&mut world, 0.15);
+        advance(&mut world, 7);
 
         // Now REPLAYING: `fire` re-runs for this ready tick. The belt still walks 1 → 0 (determinism),
         // but no SECOND cosmetic shell may spawn.
@@ -686,9 +1005,9 @@ mod tests {
             "a replayed fire tick spawns NO duplicate own shell",
         );
         assert_eq!(
-            weapon_state(&mut world, root).belt_remaining,
+            gate_state(&world, root).belt_remaining,
             0,
-            "the belt still decrements on the replay — TankSim must re-derive the rolled-back state",
+            "the belt still decrements on replay — WeaponGate must re-derive the rolled-back state",
         );
     }
 }

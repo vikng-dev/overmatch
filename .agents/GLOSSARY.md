@@ -98,6 +98,12 @@ The barrel's rearward kick on firing and its damped spring back to battery — a
 **Battery**:
 The barrel's rest (fully forward) position, to which recoil returns. "Return to battery."
 
+**Weapon gate**:
+The complete authority-owned state that decides whether one weapon slot may fire: its absolute
+next-ready simulation tick and, for an automatic weapon, its belt count. The owner predicts it, but
+corrections restore at the authority sample's producing tick and replay forward (ADR-0029).
+_Avoid_: reload timer (the gate also covers cyclic readiness and belt swaps), belt snapshot
+
 **Stabilization**:
 Keeping the gun's lay steady against hull motion. Three regimes, by what is held fixed:
 - *Unstabilized* — the gun holds a hull-relative bearing and sweeps as the hull moves (WW2). Aim stored hull-local.
