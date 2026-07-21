@@ -21,9 +21,9 @@ serde_json = "1"
 # to enforce an application-level pre-fragmentation serialized-message upper bound.
 bincode = { version = "2.0.1", features = ["serde"] }
 ron = "0.12"
-# The same glam Bevy already compiles (feature unification) — this only switches on its serde
-# impls, so `Vec3` can ride in the serializable `TankCommand`.
-glam = { version = "0.30", features = ["serde"] }
+# The same glam Bevy/Avian already compile (feature unification). `serde` lets `Vec3` ride in the
+# serializable `TankCommand`; `scalar-math` keeps sim math on the same scalar path across targets.
+glam = { version = "0.32.1", features = ["serde", "scalar-math"] }
 
 winit = "0.30"
 image = { version = "0.25", default-features = false, features = ["png"] }
@@ -89,6 +89,14 @@ dev_tools = []
 # Cross-target raw-bit differential harness. No production binary enables this: it adds only
 # observation payloads and the `bitprobe` composition used by the dedicated measurement workflow.
 bitprobe = ["dep:flate2"]
+
+# glam 0.32.1 intentionally omits serde for scalar BVec3A/BVec4A, while bevy_reflect 0.19.0
+# unconditionally registers serde type data for them. Keep the pinned Bevy crate and omit only
+# those two unsupported registrations in the local compatibility patch. Scalar Vec4 also exposes
+# a Bevy 0.19 MeshUniform allocation bug; the bevy_pbr patch restores its required GPU alignment.
+[patch.crates-io]
+bevy_reflect = { path = "vendor/bevy_reflect-0.19.0-scalar-math" }
+bevy_pbr = { path = "vendor/bevy_pbr-0.19.0-scalar-math" }
 
 [[bin]]
 name = "overmatch"

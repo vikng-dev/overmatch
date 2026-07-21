@@ -12,7 +12,9 @@ solo-divergence model and the two-layer doctrine — whose canonical home is
 post-shield measurement) and §7 (a lat0 connect-hang open finding). **Updated 2026-07-10:** §8
 added — the divergence instrument (per-tick world-independent state hash + offline join) and its
 measured baseline: physics state bit-exact on every shared tick of both harness runs, residual
-divergence entirely in carried mechanism state (`hsim`).
+divergence entirely in carried mechanism state (`hsim`). **Updated 2026-07-21:** §11 closes the
+cross-architecture SIMD-reduction class with the validated scalar-math bitprobe pair and records
+the current divergence inventory.
 
 ## 1. Why two runs of "the same sim" diverge at all
 
@@ -703,3 +705,40 @@ Everything below is MEASURED (80/10 unless noted; N given per claim).
 - Rebaseline note: the pre-recoil-fix bimodal short course (§9's fire-seeded 2/3 incidence) is
   gone as such post-f516fb6; what remains is the rarer class-3 above. The long course is the
   stable regression gate (94.45–94.85% across all builds, physics bit-exact, hsim-only).
+
+## 11. 2026-07-21: cross-architecture bit determinism achieved
+
+The live macOS-aarch64-client/Linux-x86_64-server storm survived the
+[[0027-element-grip-netcode]] protocol repairs, while a subsequent MEASURED same-platform release
+control produced zero mismatches. That exonerated the repair/rollback path for this symptom and
+isolated a cross-target arithmetic or code-generation class.
+
+The cross-target bitprobe localized it after MEASURED 2,314 identical completed ticks. Under
+asymmetric steering load, glam's SSE2 and NEON paths grouped `Quat::length_squared()` differently
+inside Avian's `fast_renormalize`: a MEASURED 1-ULP change in two quaternion lanes became a
+MEASURED 16-ULP `position.y` change through rotated-center-of-mass compensation. Contact switches
+in the stiff law then amplified that seed chaotically into force, grip, and transmission state.
+Avian `enhanced-determinism` did not cover this class because it did not select glam's scalar
+reductions.
+
+The workspace-wide `glam/scalar-math` decision in
+[[0028-cross-architecture-bit-determinism-via-glam-scalar-math]] closes the class for the current
+pinned simulation graph. Its validating pair at `codex-scalarmath` commit `020f9fd` was MEASURED
+startup `IDENTICAL` for all 1,345 named raw values and tick payloads `IDENTICAL` for all 3,072
+ticks across all seven seams. The full probe including dump took MEASURED 18.2 s with scalar math
+vs 20.3 s with SIMD, a difference within measurement noise.
+
+"Achieved" is deliberately scoped: identical initial data and inputs now produce bit-identical
+results across the two supported architecture legs for the complete probe fixture. It does not
+turn genuinely different inputs into the same simulation.
+
+| Divergence class | Current status | Verification / handling |
+|---|---|---|
+| Architecture-specific glam SIMD reduction order | **CLOSED** by workspace-wide `scalar-math` | Cross-target bitprobe pair: raw startup and every tick seam must be identical |
+| Deliberate gameplay impulses applied differently or on different ticks | **REMAINS** as a different-input/ordering class | Live state hashes and rollback metrics detect it; the bitprobe separates it from background architecture drift |
+| Other-client inputs not yet known to the predictor | **REMAINS**, irreducible misprediction rather than numerical divergence | Server authority re-anchors it; the render-error layer presents the correction |
+| Future dependency, compiler, profile, or target-feature upgrades | **CAN REOPEN** numerical divergence | Rerun the macOS-aarch64/Linux-x86_64 bitprobe pair before merge for every math/physics-affecting upgrade |
+
+The bitprobe is now the cross-architecture verification instrument, not a one-off diagnosis. Keep
+the raw dumps when a pair fails: `scripts/bitprobe/diff.py` names the first field and seam, then
+reports downstream seam growth without rounding payload values.

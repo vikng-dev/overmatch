@@ -9,6 +9,12 @@ model explicitly included. It records the 2026-07-06 architecture-review finding
 detail lives in `design/sim-divergence-and-determinism.md` §5, and every number below is measured,
 none conjectured.
 
+> **2026-07-21 annotation:** [[0028-cross-architecture-bit-determinism-via-glam-scalar-math]]
+> eliminates the architecture-specific glam SIMD reduction class: the validating cross-target
+> bitprobe was MEASURED identical for all 1,345 startup values and all 3,072 ticks across seven
+> seams. The two-layer doctrine and the divergence/misprediction distinction are unchanged; one
+> divergence class is now closed.
+
 ## Context: what divergence actually is here
 
 We run state replication + prediction ([[0004-avian-physics]] world, lightyear 0.28): the server
