@@ -9,6 +9,7 @@
 //! | `SPIKE_CONTACT_PROBE` | flag; off | Client contact-graph diagnostic. |
 //! | `SPIKE_COST_TRACE` | path; off | Role-qualified fixed-tick cost JSONL. |
 //! | `SPIKE_COST_WARMUP` | ticks; `384` | Cost rows skipped before recording. |
+//! | `SPIKE_FIRE_INTERVAL` | ticks; `256` | Combat primary-fire interval; zero disables clicks. |
 //! | `SPIKE_FIRE_SECONDARY` | flag; off | Hold the scripted secondary trigger. |
 //! | `SPIKE_FIRE_TICK` | tick; `300` | Scripted primary-fire tick. |
 //! | `SPIKE_INPUT_DELAY_TICKS` | ticks; shipping default | Input-delay A/B override; zero is meaningful. |
@@ -20,6 +21,7 @@
 //! | `SPIKE_SHOT_TRACE` | path; off | Role-qualified shot-lifecycle JSONL. |
 //! | `SPIKE_SIMULATE_INPUT` | flag; off | Run the scripted client input harness. |
 //! | `SPIKE_SIM_AIM_SWEEP` | flag; off | Sweep scripted aim around the tank. |
+//! | `SPIKE_SIM_COMBAT` | flag; off | Straight drive while aiming/firing; beats forward/reverse/idle. |
 //! | `SPIKE_SIM_FORWARD` | flag; off | Straight forward scripted drive; beats reverse. |
 //! | `SPIKE_SIM_IDLE` | flag; off | Zero-input scripted observation. |
 //! | `SPIKE_SIM_LONG` | flag; off | Extend the scripted drive and run. |
@@ -64,6 +66,9 @@ use crate::track::sim::{ExplicitImpulse, apply_explicit_impulse};
 pub(crate) struct SimulateInput {
     pub(crate) ticks: u32,
     fire_tick: u32,
+    /// `SPIKE_FIRE_INTERVAL`: ticks between primary-fire clicks in the combat script, anchored at
+    /// `fire_tick`. DERIVED: at the fixed 64 Hz tick rate, the 256-tick default is four seconds.
+    fire_interval: u32,
     /// Last tick of the throttle window (steer is zeroed when extended, so the course features
     /// dead ahead are actually reached).
     drive_until: u32,
@@ -82,6 +87,10 @@ pub(crate) struct SimulateInput {
     /// divergence from every servo/fire/steer transient. `forward` and `reverse` are mutually
     /// exclusive; `forward` wins if both are set.
     forward: bool,
+    /// `SPIKE_SIM_COMBAT`: follow the straight-forward drive window while aiming and firing. This
+    /// reproduces fire-event divergence under link jitter: recoil, shell spawn, and reload all run
+    /// while the tank is driving under prediction. Overrides every other scripted workload.
+    combat: bool,
     /// `SPIKE_FIRE_SECONDARY` (the MG-cost workload): stay stationary and HOLD the secondary trigger
     /// from a short warmup to the end of the run, so the only difference from the `SPIKE_SIM_IDLE`
     /// baseline is the machine-gun fire itself — the clean A/B for `integrate_projectiles` cost.
@@ -112,11 +121,13 @@ impl Default for SimulateInput {
         Self {
             ticks: 0,
             fire_tick: env_parse("SPIKE_FIRE_TICK").unwrap_or(300),
+            fire_interval: env_parse("SPIKE_FIRE_INTERVAL").unwrap_or(256),
             drive_until: if long { 1088 } else { 384 },
             total: total_override.unwrap_or(if long { 1280 } else { 600 }),
             idle: env_flag("SPIKE_SIM_IDLE", false),
             reverse: !forward && env_flag("SPIKE_SIM_REVERSE", false),
             forward,
+            combat: env_flag("SPIKE_SIM_COMBAT", false),
             fire_secondary: env_flag("SPIKE_FIRE_SECONDARY", false),
             aim_point: parse_aim_point().unwrap_or(Vec3::new(200.0, 0.0, -800.0)),
             range: env_parse("SPIKE_SIM_RANGE").unwrap_or(800.0),
@@ -150,6 +161,27 @@ pub(crate) fn buffer_input(
     };
     sim.ticks += 1;
     let t = sim.ticks;
+    // Combat script (`SPIKE_SIM_COMBAT`): drive the same dead-straight forward window while the
+    // servos chase the downrange aim and both weapons operate. It exists to reproduce fire-event
+    // divergence under link jitter — recoil + shell spawn + reload while driving under prediction.
+    // This new branch deliberately precedes every existing workload so combinations cannot fall
+    // back to the stationary MG-cost or minimal-divergence scripts.
+    if sim.combat {
+        // Match SPIKE_SIM_FORWARD's drive window, including its initial settling period and coast.
+        let driving = (128..sim.drive_until).contains(&t);
+        state.0.throttle = if driving { 1.0 } else { 0.0 };
+        state.0.steer = 0.0;
+        state.0.aim = Some(sim.aim_point);
+        state.0.range = sim.range;
+        state.0.fire_primary = sim.fire_interval != 0
+            && t >= sim.fire_tick
+            && (t - sim.fire_tick).is_multiple_of(sim.fire_interval);
+        // Preserve the stationary MG workload's warmup boundary when secondary fire is combined
+        // with combat, so an A/B changes the motion context rather than the burst start tick.
+        const FIRE_WARMUP: u32 = 192;
+        state.0.fire_secondary = sim.fire_secondary && t > FIRE_WARMUP;
+        return;
+    }
     // MG-cost workload (`SPIKE_FIRE_SECONDARY`): stay stationary and hold the secondary trigger from a
     // short warmup to the end. Stationary + constant aim means the ONLY delta from the `SPIKE_SIM_IDLE`
     // baseline is the machine-gun fire, so the per-tick cost recorder's idle-vs-fire difference is
