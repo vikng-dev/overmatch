@@ -135,3 +135,23 @@ impl ViewRng {
         lo + (hi - lo) * self.next_f32()
     }
 }
+
+#[cfg(test)]
+mod gpu_layout_tests {
+    use std::mem::size_of;
+
+    use bevy::render::render_resource::ShaderType;
+
+    use super::{billboard::VfxParams, trail::TrailParams};
+
+    #[test]
+    fn project_vfx_uniform_rust_and_shader_sizes_stay_pinned() {
+        // DERIVED from three Vec4 lanes in VfxParams and two in TrailParams. These uniforms use
+        // Encase writers rather than raw Rust uploads, but they are the project's scalar-Vec4
+        // canaries for future layout-sensitive paths.
+        assert_eq!(size_of::<VfxParams>(), 48);
+        assert_eq!(VfxParams::min_size().get(), 48);
+        assert_eq!(size_of::<TrailParams>(), 32);
+        assert_eq!(TrailParams::min_size().get(), 32);
+    }
+}
