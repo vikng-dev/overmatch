@@ -6,6 +6,7 @@
 //! | Variable / flag | Kind and default | Effect |
 //! |---|---|---|
 //! | `SPIKE_AIM_POINT` | `x,y,z`; downrange default | Scripted hull-local aim point. |
+//! | `SPIKE_COMBAT_NOAIM` | flag; off | Hold combat turret servos at rest instead of chasing the aim point. |
 //! | `SPIKE_COMBAT_STEER` | `f32`; `0.0` | Combat steer at/after its engagement tick; zero preserves straight driving. |
 //! | `SPIKE_COMBAT_STEER_TICK` | tick; `0` | Tick at which combat steering engages. |
 //! | `SPIKE_CONTACT_PROBE` | flag; off | Client contact-graph diagnostic. |
@@ -93,6 +94,9 @@ pub(crate) struct SimulateInput {
     /// fire-event divergence under link jitter: recoil, shell spawn, and reload all run while the
     /// tank is driving under prediction. Overrides every other scripted workload.
     combat: bool,
+    /// `SPIKE_COMBAT_NOAIM`: hold the combat-script turret servos at rest instead of slewing toward
+    /// `aim_point`. Ignored outside the combat script.
+    combat_noaim: bool,
     /// `SPIKE_COMBAT_STEER`: steer applied by the combat script at/after
     /// `SPIKE_COMBAT_STEER_TICK`. Zero preserves the original dead-straight combat workload.
     combat_steer: f32,
@@ -135,6 +139,7 @@ impl Default for SimulateInput {
             reverse: !forward && env_flag("SPIKE_SIM_REVERSE", false),
             forward,
             combat: env_flag("SPIKE_SIM_COMBAT", false),
+            combat_noaim: env_flag("SPIKE_COMBAT_NOAIM", false),
             combat_steer: env_parse("SPIKE_COMBAT_STEER").unwrap_or(0.0),
             combat_steer_tick: env_parse("SPIKE_COMBAT_STEER_TICK").unwrap_or(0),
             fire_secondary: env_flag("SPIKE_FIRE_SECONDARY", false),
@@ -185,7 +190,11 @@ pub(crate) fn buffer_input(
         } else {
             0.0
         };
-        state.0.aim = Some(sim.aim_point);
+        state.0.aim = if sim.combat_noaim {
+            None
+        } else {
+            Some(sim.aim_point)
+        };
         state.0.range = sim.range;
         state.0.fire_primary = sim.fire_interval != 0
             && t >= sim.fire_tick
