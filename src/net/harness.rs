@@ -6,6 +6,9 @@
 //! | Variable / flag | Kind and default | Effect |
 //! |---|---|---|
 //! | `SPIKE_AIM_POINT` | `x,y,z`; downrange default | Scripted hull-local aim point. |
+//! | `SPIKE_COMBAT_NOAIM` | flag; off | Hold combat turret servos at rest instead of chasing the aim point. |
+//! | `SPIKE_COMBAT_STEER` | `f32`; `0.0` | Combat steer at/after its engagement tick; zero preserves straight driving. |
+//! | `SPIKE_COMBAT_STEER_TICK` | tick; `0` | Tick at which combat steering engages. |
 //! | `SPIKE_CONTACT_PROBE` | flag; off | Client contact-graph diagnostic. |
 //! | `SPIKE_COST_TRACE` | path; off | Role-qualified fixed-tick cost JSONL. |
 //! | `SPIKE_COST_WARMUP` | ticks; `384` | Cost rows skipped before recording. |
@@ -21,7 +24,7 @@
 //! | `SPIKE_SHOT_TRACE` | path; off | Role-qualified shot-lifecycle JSONL. |
 //! | `SPIKE_SIMULATE_INPUT` | flag; off | Run the scripted client input harness. |
 //! | `SPIKE_SIM_AIM_SWEEP` | flag; off | Sweep scripted aim around the tank. |
-//! | `SPIKE_SIM_COMBAT` | flag; off | Straight drive while aiming/firing; beats forward/reverse/idle. |
+//! | `SPIKE_SIM_COMBAT` | flag; off | Forward drive while aiming/firing, with optional delayed steer; beats forward/reverse/idle. |
 //! | `SPIKE_SIM_FORWARD` | flag; off | Straight forward scripted drive; beats reverse. |
 //! | `SPIKE_SIM_IDLE` | flag; off | Zero-input scripted observation. |
 //! | `SPIKE_SIM_LONG` | flag; off | Extend the scripted drive and run. |
@@ -87,10 +90,18 @@ pub(crate) struct SimulateInput {
     /// divergence from every servo/fire/steer transient. `forward` and `reverse` are mutually
     /// exclusive; `forward` wins if both are set.
     forward: bool,
-    /// `SPIKE_SIM_COMBAT`: follow the straight-forward drive window while aiming and firing. This
-    /// reproduces fire-event divergence under link jitter: recoil, shell spawn, and reload all run
-    /// while the tank is driving under prediction. Overrides every other scripted workload.
+    /// `SPIKE_SIM_COMBAT`: follow the forward drive window while aiming and firing. This reproduces
+    /// fire-event divergence under link jitter: recoil, shell spawn, and reload all run while the
+    /// tank is driving under prediction. Overrides every other scripted workload.
     combat: bool,
+    /// `SPIKE_COMBAT_NOAIM`: hold the combat-script turret servos at rest instead of slewing toward
+    /// `aim_point`. Ignored outside the combat script.
+    combat_noaim: bool,
+    /// `SPIKE_COMBAT_STEER`: steer applied by the combat script at/after
+    /// `SPIKE_COMBAT_STEER_TICK`. Zero preserves the original dead-straight combat workload.
+    combat_steer: f32,
+    /// `SPIKE_COMBAT_STEER_TICK`: combat-script tick at which `combat_steer` engages.
+    combat_steer_tick: u32,
     /// `SPIKE_FIRE_SECONDARY` (the MG-cost workload): stay stationary and HOLD the secondary trigger
     /// from a short warmup to the end of the run, so the only difference from the `SPIKE_SIM_IDLE`
     /// baseline is the machine-gun fire itself — the clean A/B for `integrate_projectiles` cost.
@@ -128,6 +139,9 @@ impl Default for SimulateInput {
             reverse: !forward && env_flag("SPIKE_SIM_REVERSE", false),
             forward,
             combat: env_flag("SPIKE_SIM_COMBAT", false),
+            combat_noaim: env_flag("SPIKE_COMBAT_NOAIM", false),
+            combat_steer: env_parse("SPIKE_COMBAT_STEER").unwrap_or(0.0),
+            combat_steer_tick: env_parse("SPIKE_COMBAT_STEER_TICK").unwrap_or(0),
             fire_secondary: env_flag("SPIKE_FIRE_SECONDARY", false),
             aim_point: parse_aim_point().unwrap_or(Vec3::new(200.0, 0.0, -800.0)),
             range: env_parse("SPIKE_SIM_RANGE").unwrap_or(800.0),
@@ -161,17 +175,26 @@ pub(crate) fn buffer_input(
     };
     sim.ticks += 1;
     let t = sim.ticks;
-    // Combat script (`SPIKE_SIM_COMBAT`): drive the same dead-straight forward window while the
-    // servos chase the downrange aim and both weapons operate. It exists to reproduce fire-event
-    // divergence under link jitter — recoil + shell spawn + reload while driving under prediction.
-    // This new branch deliberately precedes every existing workload so combinations cannot fall
-    // back to the stationary MG-cost or minimal-divergence scripts.
+    // Combat script (`SPIKE_SIM_COMBAT`): drive the forward window while the servos chase the
+    // downrange aim and both weapons operate. Optional steering engages only at its configured tick,
+    // after a straight run can build speed. It exists to reproduce fire-event divergence under link
+    // jitter — recoil + shell spawn + reload while driving under prediction. This branch deliberately
+    // precedes every other workload so combinations cannot fall back to the stationary MG-cost or
+    // minimal-divergence scripts.
     if sim.combat {
         // Match SPIKE_SIM_FORWARD's drive window, including its initial settling period and coast.
         let driving = (128..sim.drive_until).contains(&t);
         state.0.throttle = if driving { 1.0 } else { 0.0 };
-        state.0.steer = 0.0;
-        state.0.aim = Some(sim.aim_point);
+        state.0.steer = if t >= sim.combat_steer_tick {
+            sim.combat_steer
+        } else {
+            0.0
+        };
+        state.0.aim = if sim.combat_noaim {
+            None
+        } else {
+            Some(sim.aim_point)
+        };
         state.0.range = sim.range;
         state.0.fire_primary = sim.fire_interval != 0
             && t >= sim.fire_tick
