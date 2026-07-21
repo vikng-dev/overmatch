@@ -1,6 +1,37 @@
-//! Reproducible workload levers for the rollback/feel measurements — env-gated test drivers that
-//! actively steer the sim: the client's scripted input, the server's forced-rollback impulse, and
-//! the input-delay A/B knob. All off or inert unless their `SPIKE_*` env var asks for them.
+//! Reproducible workload levers for rollback/feel measurements and the shared `SPIKE_*` environment
+//! parser. Boolean/value switches treat `0`, `false` (case-insensitive), and the empty string as
+//! off; every other non-numeric value is on. Numeric values retain ordinary parsing (including a
+//! meaningful zero) and ignore an empty string.
+//!
+//! | Variable / flag | Kind and default | Effect |
+//! |---|---|---|
+//! | `SPIKE_AIM_POINT` | `x,y,z`; downrange default | Scripted hull-local aim point. |
+//! | `SPIKE_CONTACT_PROBE` | flag; off | Client contact-graph diagnostic. |
+//! | `SPIKE_COST_TRACE` | path; off | Role-qualified fixed-tick cost JSONL. |
+//! | `SPIKE_COST_WARMUP` | ticks; `384` | Cost rows skipped before recording. |
+//! | `SPIKE_FIRE_SECONDARY` | flag; off | Hold the scripted secondary trigger. |
+//! | `SPIKE_FIRE_TICK` | tick; `300` | Scripted primary-fire tick. |
+//! | `SPIKE_INPUT_DELAY_TICKS` | ticks; shipping default | Input-delay A/B override; zero is meaningful. |
+//! | `SPIKE_JITTER_MS` | milliseconds; `0` | Receive-conditioner jitter. |
+//! | `SPIKE_JITTER_MULTIPLE` | integer; `2` | Sync safety-margin multiplier. |
+//! | `SPIKE_LATENCY_MS` | milliseconds; `0` | Receive-conditioner latency. |
+//! | `SPIKE_MG_SHORTCIRCUIT` | flag; off | Experimental MG march short-circuit. |
+//! | `SPIKE_PERTURB` | flag; on | Server-only forced rollback impulse. |
+//! | `SPIKE_SHOT_TRACE` | path; off | Role-qualified shot-lifecycle JSONL. |
+//! | `SPIKE_SIMULATE_INPUT` | flag; off | Run the scripted client input harness. |
+//! | `SPIKE_SIM_AIM_SWEEP` | flag; off | Sweep scripted aim around the tank. |
+//! | `SPIKE_SIM_FORWARD` | flag; off | Straight forward scripted drive; beats reverse. |
+//! | `SPIKE_SIM_IDLE` | flag; off | Zero-input scripted observation. |
+//! | `SPIKE_SIM_LONG` | flag; off | Extend the scripted drive and run. |
+//! | `SPIKE_SIM_RANGE` | metres; `800` | Scripted fire-control range. |
+//! | `SPIKE_SIM_REVERSE` | flag; off | Straight reverse scripted drive. |
+//! | `SPIKE_SIM_TICKS` | ticks; script default | Override scripted run length. |
+//! | `SPIKE_SIM_WINDOWED` | flag; off | Keep the presentation stack in simulate mode. |
+//! | `SPIKE_SPAWN_POSE` | `x,y,z,qx,qy,qz,qw`; off | Server spawn-pose override. |
+//! | `SPIKE_TRACE` | path; off | Role-qualified jitter/divergence JSONL. |
+//! | `SPIKE_TRACE_SIM_FIELDS` | flag; off | Add raw sim fields to trace tick rows. |
+//! | `--local` | client flag; off | Force `127.0.0.1:5888`, ahead of env/baked targets. |
+//! | `--capture` | client/server flag; off | Auto-path `SPIKE_TRACE` capture with sim fields on. |
 
 use core::time::Duration;
 
@@ -69,34 +100,26 @@ pub(crate) struct SimulateInput {
 
 impl Default for SimulateInput {
     fn default() -> Self {
-        let long = std::env::var("SPIKE_SIM_LONG").is_ok();
+        let long = env_flag("SPIKE_SIM_LONG", false);
         // "`forward` wins if both are set" (the field doc's contract) is resolved HERE, once:
         // `forward` masks `reverse` at parse time, so every downstream site that reads the flags
         // (throttle sign, steer/aim/fire gating) sees at most one of them set and needs no
         // precedence logic of its own.
-        let forward = std::env::var("SPIKE_SIM_FORWARD").is_ok();
+        let forward = env_flag("SPIKE_SIM_FORWARD", false);
         // `SPIKE_SIM_TICKS` overrides the script length — the MG-cost workload needs ≥30 s of steady
         // fire (≈2000+ ticks past the warmup), far longer than either default arc.
-        let total_override: Option<u32> = std::env::var("SPIKE_SIM_TICKS")
-            .ok()
-            .and_then(|v| v.parse().ok());
+        let total_override: Option<u32> = env_parse("SPIKE_SIM_TICKS");
         Self {
             ticks: 0,
-            fire_tick: std::env::var("SPIKE_FIRE_TICK")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(300),
+            fire_tick: env_parse("SPIKE_FIRE_TICK").unwrap_or(300),
             drive_until: if long { 1088 } else { 384 },
             total: total_override.unwrap_or(if long { 1280 } else { 600 }),
-            idle: std::env::var("SPIKE_SIM_IDLE").is_ok(),
-            reverse: !forward && std::env::var("SPIKE_SIM_REVERSE").is_ok(),
+            idle: env_flag("SPIKE_SIM_IDLE", false),
+            reverse: !forward && env_flag("SPIKE_SIM_REVERSE", false),
             forward,
-            fire_secondary: std::env::var("SPIKE_FIRE_SECONDARY").is_ok(),
+            fire_secondary: env_flag("SPIKE_FIRE_SECONDARY", false),
             aim_point: parse_aim_point().unwrap_or(Vec3::new(200.0, 0.0, -800.0)),
-            range: std::env::var("SPIKE_SIM_RANGE")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(800.0),
+            range: env_parse("SPIKE_SIM_RANGE").unwrap_or(800.0),
         }
     }
 }
@@ -104,7 +127,7 @@ impl Default for SimulateInput {
 /// Parse `SPIKE_AIM_POINT="x,y,z"` into a hull-local aim point; `None` (unset or malformed) falls
 /// back to the downrange default. Three comma-separated f32s.
 fn parse_aim_point() -> Option<Vec3> {
-    let raw = std::env::var("SPIKE_AIM_POINT").ok()?;
+    let raw = env_value("SPIKE_AIM_POINT")?;
     let nums: Vec<f32> = raw
         .split(',')
         .filter_map(|s| s.trim().parse().ok())
@@ -178,7 +201,7 @@ pub(crate) fn buffer_input(
     // pose divergence under study.
     state.0.aim = if sim.reverse || sim.forward {
         None
-    } else if std::env::var("SPIKE_SIM_AIM_SWEEP").is_ok() {
+    } else if env_flag("SPIKE_SIM_AIM_SWEEP", false) {
         let theta = 0.02 * t as f32;
         Some(Vec3::new(800.0 * theta.sin(), 0.0, -800.0 * theta.cos()))
     } else {
@@ -221,12 +244,37 @@ pub(crate) struct PerturbConfig {
     pub(crate) perturb: bool,
 }
 
+fn value_is_enabled(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+}
+
+fn parse_env_flag(value: Option<&str>, default: bool) -> bool {
+    value.map(value_is_enabled).unwrap_or(default)
+}
+
+/// Read a `SPIKE_*` boolean using the shared off vocabulary.
 pub(crate) fn env_flag(name: &str, default: bool) -> bool {
+    parse_env_flag(std::env::var(name).ok().as_deref(), default)
+}
+
+/// Read a non-numeric `SPIKE_*` value, treating the shared off vocabulary as absent.
+pub(crate) fn env_value(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
-        .and_then(|v| v.parse::<u8>().ok())
-        .map(|v| v != 0)
-        .unwrap_or(default)
+        .filter(|value| value_is_enabled(value))
+}
+
+/// Parse a numeric `SPIKE_*` value. Numeric zero remains meaningful; empty values are ignored.
+pub(crate) fn env_parse<T: std::str::FromStr>(name: &str) -> Option<T> {
+    std::env::var(name).ok().and_then(|value| {
+        let value = value.trim();
+        if value.is_empty() {
+            None
+        } else {
+            value.parse().ok()
+        }
+    })
 }
 
 /// Per-client one-shot: fires ~2 s after connect, applying a large lateral impulse the client
@@ -276,7 +324,7 @@ pub(crate) fn perturb_after_delay(
 /// resting contact (the field-captured beached pose on the §2 side-slope slab edge) so the
 /// rollback storm reproduces deterministically. Inert when unset.
 pub(crate) fn spawn_pose() -> Option<(Vec3, Quat)> {
-    let raw = std::env::var("SPIKE_SPAWN_POSE").ok()?;
+    let raw = env_value("SPIKE_SPAWN_POSE")?;
     let nums: Vec<f32> = raw
         .split(',')
         .filter_map(|s| s.trim().parse().ok())
@@ -303,9 +351,7 @@ pub(crate) fn spawn_pose() -> Option<(Vec3, Quat)> {
 /// an `Option` precisely so "unset" (shipping fixed delay) and "explicitly 0" (no delay) stay
 /// distinguishable.
 pub(crate) fn input_delay_ticks() -> Option<u16> {
-    std::env::var("SPIKE_INPUT_DELAY_TICKS")
-        .ok()
-        .and_then(|v| v.parse().ok())
+    env_parse("SPIKE_INPUT_DELAY_TICKS")
 }
 
 /// `SPIKE_JITTER_MULTIPLE` (default 2): the sync-margin A/B lever, the depth work's second knob.
@@ -315,8 +361,25 @@ pub(crate) fn input_delay_ticks() -> Option<u16> {
 /// the 20 ms test conditioner is ~5 ticks of pure margin; we ship 2 (95%). The lever restores 4 (or
 /// any value) to A/B the old margin against the new from one binary.
 pub(crate) fn jitter_multiple() -> u8 {
-    std::env::var("SPIKE_JITTER_MULTIPLE")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(2)
+    env_parse("SPIKE_JITTER_MULTIPLE").unwrap_or(2)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_env_flag;
+
+    #[test]
+    fn env_flag_value_parsing_truth_table() {
+        for off in ["0", "false", "FALSE", "FaLsE", "", "  false  ", "   "] {
+            assert!(!parse_env_flag(Some(off), true), "{off:?} must be off");
+        }
+        for on in ["1", "true", "yes", "no", "00", "anything"] {
+            assert!(parse_env_flag(Some(on), false), "{on:?} must be on");
+        }
+        assert!(parse_env_flag(None, true), "missing uses the true default");
+        assert!(
+            !parse_env_flag(None, false),
+            "missing uses the false default"
+        );
+    }
 }

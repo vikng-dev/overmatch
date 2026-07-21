@@ -62,6 +62,7 @@ mod hud;
 /// The networking implementation. Executables enter through [`run_client`] and [`run_server`];
 /// the adapter tree is private to the library.
 mod net;
+pub(crate) use net::{env_flag, env_parse, env_value};
 pub use net::{run_client, run_server};
 /// The net client's single overlay authority (active-set resource + pure input/cursor/scrim rules for
 /// the connect / death / menu / view-death overlays). Lives at the crate root, NOT under `net`,

@@ -5,7 +5,8 @@
 
 use core::time::Duration;
 use std::hash::{BuildHasher, Hasher};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::io;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 
 use bevy::app::ScheduleRunnerPlugin;
 use bevy::asset::AssetPlugin;
@@ -38,6 +39,63 @@ use crate::ui_font::UiFonts;
 use crate::{CombatantId, NetClientPlugin, ShotId, SimPlugin};
 
 const SERVER_PORT: u16 = 5888;
+const LOCAL_SERVER: &str = "127.0.0.1:5888";
+const DEFAULT_SERVER: &str = match option_env!("OVERMATCH_DEFAULT_SERVER") {
+    Some(server) => server,
+    None => "droplet.overmatch.win:5888",
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServerSource {
+    LocalFlag,
+    Environment,
+    BakedDefault,
+}
+
+impl ServerSource {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::LocalFlag => "--local",
+            Self::Environment => "OVERMATCH_SERVER",
+            Self::BakedDefault => "baked default",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ServerSelection<'a> {
+    raw: &'a str,
+    source: ServerSource,
+}
+
+fn choose_server<'a>(
+    local: bool,
+    environment: Option<&'a str>,
+    baked_default: &'a str,
+) -> ServerSelection<'a> {
+    if local {
+        ServerSelection {
+            raw: LOCAL_SERVER,
+            source: ServerSource::LocalFlag,
+        }
+    } else if let Some(raw) = environment {
+        ServerSelection {
+            raw,
+            source: ServerSource::Environment,
+        }
+    } else {
+        ServerSelection {
+            raw: baked_default,
+            source: ServerSource::BakedDefault,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ServerEndpoint {
+    Socket(SocketAddr),
+    Host { name: String, port: u16 },
+}
 
 /// Input delay is fixed: Lightyear input-buffer end ticks must advance exactly once per local tick.
 /// See `tests/net_fire_release.rs`.
@@ -50,8 +108,8 @@ pub(crate) fn shipping_input_delay() -> InputDelayConfig {
 
 pub fn run() {
     let simulate = std::env::args().any(|a| a == "--simulate-input")
-        || std::env::var("SPIKE_SIMULATE_INPUT").is_ok();
-    let sim_windowed = simulate && std::env::var("SPIKE_SIM_WINDOWED").is_ok();
+        || harness::env_flag("SPIKE_SIMULATE_INPUT", false);
+    let sim_windowed = simulate && harness::env_flag("SPIKE_SIM_WINDOWED", false);
 
     let mut app = App::new();
     if simulate && !sim_windowed {
@@ -147,26 +205,23 @@ pub fn run() {
     // `NetClientPlugin`) — NOT part of `DefaultPlugins`, so it must be added explicitly here.
     app.add_plugins(bevy::diagnostic::FrameTimeDiagnosticsPlugin::default());
 
-    // Server address resolution, in priority order:
-    //   1. runtime `OVERMATCH_SERVER` — points a dev/playtest client at any server.
-    //   2. compile-time `OVERMATCH_DEFAULT_SERVER` (baked via `option_env!`): CI sets it on the
-    //      release client to the deployed droplet, so a double-clicked build connects there with no
-    //      env. A dev build leaves it unset and falls through.
-    //   3. loopback — the single-machine dev/harness default.
-    // Both the runtime and the baked form accept `host:port` (a full `SocketAddr`) or a bare IP
-    // (default port appended); see [`parse_server_addr`].
-    let loopback = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), SERVER_PORT);
-    let server_addr = match std::env::var("OVERMATCH_SERVER") {
-        // A malformed RUNTIME override falls back to loopback, not to the baked default: an explicit
-        // bad `OVERMATCH_SERVER` shouldn't silently redirect the player to the compiled-in server.
-        Ok(raw) => parse_server_addr(&raw).unwrap_or_else(|| {
-            error!("client: OVERMATCH_SERVER=\"{raw}\" is not an ip or ip:port — using loopback");
-            loopback
-        }),
-        // No runtime override: use the compile-time baked default if this build has a (valid) one.
-        Err(_) => option_env!("OVERMATCH_DEFAULT_SERVER")
-            .and_then(parse_server_addr)
-            .unwrap_or(loopback),
+    // Resolve once at startup. Raw socket addresses bypass DNS; hostnames select their resolver's
+    // first IPv4 result because the UDP transport binds an IPv4 wildcard below.
+    let local = std::env::args().any(|arg| arg == "--local");
+    let environment = std::env::var("OVERMATCH_SERVER").ok();
+    let selection = choose_server(local, environment.as_deref(), DEFAULT_SERVER);
+    let server_addr = match parse_server_endpoint(selection.raw)
+        .and_then(|endpoint| resolve_server_endpoint(&endpoint).map_err(|error| error.to_string()))
+    {
+        Ok(server_addr) => server_addr,
+        Err(error) => {
+            error!(
+                "client: cannot resolve target server {:?} from {}: {error}; exiting",
+                selection.raw,
+                selection.source.label()
+            );
+            return;
+        }
     };
     // A per-process RANDOM client id, generated once at startup. NOT the PID (the old
     // `u64::from(std::process::id())`): netcode does NOT enforce client-id uniqueness, so a duplicate
@@ -184,14 +239,8 @@ pub fn run() {
     // Optional receive conditioning for local diagnostics — OFF by default. A non-zero default
     // silently inflated HUD Ping (and every inbound packet) by ~100 ms on real servers; set
     // `SPIKE_LATENCY_MS` / `SPIKE_JITTER_MS` explicitly when you want a fake path.
-    let latency_ms: u64 = std::env::var("SPIKE_LATENCY_MS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
-    let jitter_ms: u64 = std::env::var("SPIKE_JITTER_MS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
+    let latency_ms: u64 = harness::env_parse("SPIKE_LATENCY_MS").unwrap_or(0);
+    let jitter_ms: u64 = harness::env_parse("SPIKE_JITTER_MS").unwrap_or(0);
     let conditioner = (latency_ms > 0).then(|| {
         info!(
             "client: RecvLinkConditioner ON — latency={latency_ms}ms jitter={jitter_ms}ms (SPIKE_*)"
@@ -283,7 +332,10 @@ pub fn run() {
     // The connection state machine: gate the FIRST connect on the tank assets, then auto-retry a
     // failed/dropped connection on a short backoff. See [`drive_connection`] for the full states;
     // the target endpoint is fixed for the session, so record it once for the retry driver's log.
-    info!("client: target server {server_addr}, client_id={client_id}");
+    info!(
+        "client: target server {server_addr} (source: {}), client_id={client_id}",
+        selection.source.label()
+    );
     app.init_resource::<ConnectRetry>()
         .add_systems(Update, drive_connection);
     app.add_systems(Startup, load_tank_assets);
@@ -674,16 +726,68 @@ fn update_connect_status(
     }
 }
 
-/// Parse a server address from a string in either accepted form: a full `host:port` `SocketAddr`,
-/// or a bare IP (the default [`SERVER_PORT`] is appended). Shared by the runtime `OVERMATCH_SERVER`
-/// override and the compile-time `OVERMATCH_DEFAULT_SERVER` baked default. `None` on a malformed
-/// value; the caller decides the fallback.
-fn parse_server_addr(raw: &str) -> Option<SocketAddr> {
-    raw.parse::<SocketAddr>().ok().or_else(|| {
-        raw.parse::<IpAddr>()
-            .ok()
-            .map(|ip| SocketAddr::new(ip, SERVER_PORT))
+/// Parse without touching DNS so address shape and source precedence remain unit-testable offline.
+fn parse_server_endpoint(raw: &str) -> Result<ServerEndpoint, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err("address is empty".to_string());
+    }
+    if let Ok(address) = raw.parse::<SocketAddr>() {
+        return Ok(ServerEndpoint::Socket(address));
+    }
+    if let Ok(ip) = raw.parse::<IpAddr>() {
+        return Ok(ServerEndpoint::Socket(SocketAddr::new(ip, SERVER_PORT)));
+    }
+    if let Some(ip) = raw
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .and_then(|value| value.parse::<IpAddr>().ok())
+    {
+        return Ok(ServerEndpoint::Socket(SocketAddr::new(ip, SERVER_PORT)));
+    }
+
+    let (name, port) = match raw.rsplit_once(':') {
+        Some((name, port)) if !name.contains(':') => {
+            let port = port
+                .parse::<u16>()
+                .map_err(|_| format!("invalid port {port:?}"))?;
+            (name, port)
+        }
+        Some(_) => return Err("invalid socket address or hostname".to_string()),
+        None => (raw, SERVER_PORT),
+    };
+    if name.is_empty() {
+        return Err("hostname is empty".to_string());
+    }
+    Ok(ServerEndpoint::Host {
+        name: name.to_string(),
+        port,
     })
+}
+
+fn resolve_server_endpoint(endpoint: &ServerEndpoint) -> io::Result<SocketAddr> {
+    resolve_server_endpoint_with(endpoint, |name, port| (name, port).to_socket_addrs())
+}
+
+fn resolve_server_endpoint_with<I>(
+    endpoint: &ServerEndpoint,
+    resolve_hostname: impl FnOnce(&str, u16) -> io::Result<I>,
+) -> io::Result<SocketAddr>
+where
+    I: IntoIterator<Item = SocketAddr>,
+{
+    match endpoint {
+        ServerEndpoint::Socket(address) => Ok(*address),
+        ServerEndpoint::Host { name, port } => resolve_hostname(name, *port)?
+            .into_iter()
+            .find(SocketAddr::is_ipv4)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::AddrNotAvailable,
+                    format!("{name}:{port} resolved without an IPv4 address"),
+                )
+            }),
+    }
 }
 
 /// `AssetPlugin`'s `file_path` — the `assets/` directory this client reads from, as a `String`
@@ -1553,6 +1657,79 @@ mod tests {
 
     #[derive(Resource, Default)]
     struct MarkerPulses(usize);
+
+    #[test]
+    fn server_endpoint_parsing_distinguishes_hostnames_and_raw_ips_without_dns() {
+        assert_eq!(
+            parse_server_endpoint("192.0.2.10").unwrap(),
+            ServerEndpoint::Socket("192.0.2.10:5888".parse().unwrap())
+        );
+        assert_eq!(
+            parse_server_endpoint("192.0.2.10:6000").unwrap(),
+            ServerEndpoint::Socket("192.0.2.10:6000".parse().unwrap())
+        );
+        assert_eq!(
+            parse_server_endpoint("[2001:db8::10]:6000").unwrap(),
+            ServerEndpoint::Socket("[2001:db8::10]:6000".parse().unwrap())
+        );
+        assert_eq!(
+            parse_server_endpoint("droplet.overmatch.win").unwrap(),
+            ServerEndpoint::Host {
+                name: "droplet.overmatch.win".to_string(),
+                port: SERVER_PORT,
+            }
+        );
+        assert_eq!(
+            parse_server_endpoint("droplet.overmatch.win:6000").unwrap(),
+            ServerEndpoint::Host {
+                name: "droplet.overmatch.win".to_string(),
+                port: 6000,
+            }
+        );
+    }
+
+    #[test]
+    fn hostname_resolution_chooses_the_first_ipv4_without_network_access() {
+        let endpoint = parse_server_endpoint("example.test:6000").unwrap();
+        let resolved = resolve_server_endpoint_with(&endpoint, |name, port| {
+            assert_eq!(name, "example.test");
+            assert_eq!(port, 6000);
+            Ok(vec![
+                "[2001:db8::1]:6000".parse().unwrap(),
+                "192.0.2.20:6000".parse().unwrap(),
+                "192.0.2.21:6000".parse().unwrap(),
+            ])
+        })
+        .unwrap();
+        assert_eq!(resolved, "192.0.2.20:6000".parse().unwrap());
+    }
+
+    #[test]
+    fn local_server_flag_beats_environment_and_baked_default() {
+        let selected = choose_server(true, Some("environment.example:6000"), "baked.example:7000");
+        assert_eq!(
+            selected,
+            ServerSelection {
+                raw: LOCAL_SERVER,
+                source: ServerSource::LocalFlag,
+            }
+        );
+
+        assert_eq!(
+            choose_server(false, Some("environment.example"), "baked.example"),
+            ServerSelection {
+                raw: "environment.example",
+                source: ServerSource::Environment,
+            }
+        );
+        assert_eq!(
+            choose_server(false, None, "baked.example"),
+            ServerSelection {
+                raw: "baked.example",
+                source: ServerSource::BakedDefault,
+            }
+        );
+    }
 
     /// The production `FireShell` trigger is the cosmetic-shell spawn boundary. This records only
     /// reconstructed shells, so tests can observe the fire-receive gate without inspecting it.

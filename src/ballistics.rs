@@ -865,9 +865,10 @@ const MG_SHORTCIRCUIT_CALIBER_MAX: f32 = 0.020;
 pub fn plugin(app: &mut App) {
     app.init_resource::<RetainSpentShells>()
         .init_resource::<MarchMode>()
-        .insert_resource(MgShortCircuit(
-            std::env::var("SPIKE_MG_SHORTCIRCUIT").is_ok(),
-        ))
+        .insert_resource(MgShortCircuit(crate::env_flag(
+            "SPIKE_MG_SHORTCIRCUIT",
+            false,
+        )))
         .add_observer(on_fire_shell)
         .add_observer(on_impact)
         .add_systems(Startup, setup_assets)

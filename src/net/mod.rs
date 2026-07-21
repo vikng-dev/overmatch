@@ -11,6 +11,7 @@ mod diagnostics;
 mod disclosure;
 mod grip;
 mod harness;
+pub(crate) use harness::{env_flag, env_parse, env_value};
 mod hit_feel;
 mod physics;
 mod protocol;
