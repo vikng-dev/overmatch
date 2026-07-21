@@ -97,6 +97,30 @@ enum ServerEndpoint {
     Host { name: String, port: u16 },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecvConditionerMode {
+    Off,
+    Stock,
+    Seeded(u64),
+}
+
+/// Preserve the existing receive path unless all seeded-jitter prerequisites are explicit.
+fn recv_conditioner_mode(
+    latency_ms: u64,
+    jitter_ms: u64,
+    jitter_seed: Option<u64>,
+) -> RecvConditionerMode {
+    if latency_ms == 0 {
+        RecvConditionerMode::Off
+    } else if jitter_ms > 0
+        && let Some(seed) = jitter_seed
+    {
+        RecvConditionerMode::Seeded(seed)
+    } else {
+        RecvConditionerMode::Stock
+    }
+}
+
 /// Input delay is fixed: Lightyear input-buffer end ticks must advance exactly once per local tick.
 /// See `tests/net_fire_release.rs`.
 pub(crate) const SHIPPING_INPUT_DELAY_TICKS: u16 = 3;
@@ -241,16 +265,27 @@ pub fn run() {
     // `SPIKE_LATENCY_MS` / `SPIKE_JITTER_MS` explicitly when you want a fake path.
     let latency_ms: u64 = harness::env_parse("SPIKE_LATENCY_MS").unwrap_or(0);
     let jitter_ms: u64 = harness::env_parse("SPIKE_JITTER_MS").unwrap_or(0);
-    let conditioner = (latency_ms > 0).then(|| {
-        info!(
-            "client: RecvLinkConditioner ON — latency={latency_ms}ms jitter={jitter_ms}ms (SPIKE_*)"
-        );
-        RecvLinkConditioner::new(LinkConditionerConfig::new(
-            Duration::from_millis(latency_ms),
-            Duration::from_millis(jitter_ms),
-            0.0,
-        ))
-    });
+    let jitter_seed: Option<u64> = harness::env_parse("SPIKE_JITTER_SEED");
+    let conditioner_mode = recv_conditioner_mode(latency_ms, jitter_ms, jitter_seed);
+    let conditioner = match conditioner_mode {
+        RecvConditionerMode::Stock => {
+            info!(
+                "client: RecvLinkConditioner ON — latency={latency_ms}ms jitter={jitter_ms}ms (SPIKE_*)"
+            );
+            Some(RecvLinkConditioner::new(LinkConditionerConfig::new(
+                Duration::from_millis(latency_ms),
+                Duration::from_millis(jitter_ms),
+                0.0,
+            )))
+        }
+        RecvConditionerMode::Seeded(seed) => {
+            info!(
+                "client: SeededRecvConditioner ON — latency={latency_ms}ms jitter={jitter_ms}ms seed={seed} (SPIKE_*)"
+            );
+            None
+        }
+        RecvConditionerMode::Off => None,
+    };
     // Input delay and jitter margin bound the prediction window; environment values are diagnostic
     // overrides only.
     let (input_delay, delay_label) = match harness::input_delay_ticks() {
@@ -276,9 +311,16 @@ pub fn run() {
         ..default()
     };
     info!("client: input delay = {delay_label}; sync jitter_multiple = {jitter_multiple}");
+    if matches!(conditioner_mode, RecvConditionerMode::Seeded(_)) {
+        app.add_systems(
+            PreUpdate,
+            harness::apply_seeded_recv_conditioner
+                .in_set(lightyear::link::LinkReceiveSystems::ApplyConditioner),
+        );
+    }
     // The single client connection entity — found by the retry driver via `With<NetcodeClient>`
     // (there is exactly one), so its id need not be threaded through.
-    app.world_mut().spawn((
+    let mut client_entity = app.world_mut().spawn((
         Name::new("Client"),
         Client::default(),
         Link::new(conditioner),
@@ -329,6 +371,11 @@ pub fn run() {
         .expect("manual dev token should always build"),
         UdpIo::default(),
     ));
+    if let RecvConditionerMode::Seeded(seed) = conditioner_mode {
+        client_entity.insert(harness::SeededRecvConditioner::new(
+            seed, latency_ms, jitter_ms,
+        ));
+    }
     // The connection state machine: gate the FIRST connect on the tank assets, then auto-retry a
     // failed/dropped connection on a short backoff. See [`drive_connection`] for the full states;
     // the target endpoint is fixed for the session, so record it once for the retry driver's log.
@@ -1728,6 +1775,30 @@ mod tests {
                 raw: "baked.example",
                 source: ServerSource::BakedDefault,
             }
+        );
+    }
+
+    #[test]
+    fn seeded_conditioner_requires_an_explicit_active_jitter_path() {
+        assert_eq!(
+            recv_conditioner_mode(80, 10, None),
+            RecvConditionerMode::Stock,
+            "an unset seed must preserve the stock conditioner",
+        );
+        assert_eq!(
+            recv_conditioner_mode(0, 10, Some(7)),
+            RecvConditionerMode::Off,
+            "zero base latency must preserve the existing disabled path",
+        );
+        assert_eq!(
+            recv_conditioner_mode(80, 0, Some(7)),
+            RecvConditionerMode::Stock,
+            "a seed without active jitter must not replace the stock latency path",
+        );
+        assert_eq!(
+            recv_conditioner_mode(80, 10, Some(0)),
+            RecvConditionerMode::Seeded(0),
+            "zero is a valid deterministic seed",
         );
     }
 
