@@ -1565,7 +1565,7 @@ fn thirty_combatant_two_weapon_volley_presents_each_observer_fire_once_under_los
 #[test]
 fn thirty_combatant_volley_reaches_thirty_independent_receivers_under_loss() {
     assert!(
-        std::env::var_os("SPIKE_MG_SHORTCIRCUIT").is_none(),
+        !crate::env_flag("SPIKE_MG_SHORTCIRCUIT", false),
         "the fan-out contract must run production ballistics; use scripts/cost for the MG short-circuit A/B",
     );
     let _udp = lock_real_udp_test();

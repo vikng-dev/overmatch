@@ -17,6 +17,9 @@ serde = { version = "1", features = ["derive"] }
 # The jitter-trace recorder (`src/trace.rs`) writes JSONL rows for offline analysis. Already in the
 # tree transitively (via `gltf`), promoted to a direct dependency for the recorder's use.
 serde_json = "1"
+# Human-readable local timestamps for the CLI-only `--capture` path. Chrono is already in the
+# locked graph through lightyear; this makes the runtime use explicit.
+chrono = "0.4.45"
 # Lightyear 0.28 uses this exact serializer/config for registered messages. Shot transport uses it
 # to enforce an application-level pre-fragmentation serialized-message upper bound.
 bincode = { version = "2.0.1", features = ["serde"] }

@@ -33,7 +33,7 @@ env:
   # `option_env!("OVERMATCH_DEFAULT_SERVER")` (net::client::run), so a friend's double-clicked build
   # connects to the droplet with no env set. Overridable at runtime with `OVERMATCH_SERVER`. Every
   # step's cargo build inherits this workflow-level env, so the client jobs need no extra wiring.
-  OVERMATCH_DEFAULT_SERVER: 157.245.48.161
+  OVERMATCH_DEFAULT_SERVER: droplet.overmatch.win:5888
 
 jobs:
   # The GitHub Release shell — tag pushes only. A manual dispatch never publishes, even when it is

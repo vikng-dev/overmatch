@@ -40,7 +40,7 @@ impl CostTrace {
 
 /// Open the role-qualified sink and register recorder systems when tracing is armed.
 fn install(app: &mut App, role: &'static str) -> bool {
-    let Ok(path) = std::env::var("SPIKE_COST_TRACE") else {
+    let Some(path) = crate::env_value("SPIKE_COST_TRACE") else {
         return false;
     };
     let resolved = role_path(&path, role);
@@ -51,10 +51,7 @@ fn install(app: &mut App, role: &'static str) -> bool {
             return false;
         }
     };
-    let warmup: u64 = std::env::var("SPIKE_COST_WARMUP")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(384);
+    let warmup: u64 = crate::env_parse("SPIKE_COST_WARMUP").unwrap_or(384);
     info!(
         "cost: recording {role} rows to {} (warmup {warmup} ticks)",
         resolved.display()
@@ -82,7 +79,7 @@ fn write_meta(mut cost: ResMut<CostTrace>, fixed: Res<Time<Fixed>>, role: Res<Co
         "tick_hz": tick_hz,
         "ver": env!("CARGO_PKG_VERSION"),
         "warmup": cost.warmup,
-        "mgsc": std::env::var("SPIKE_MG_SHORTCIRCUIT").is_ok(),
+        "mgsc": crate::env_flag("SPIKE_MG_SHORTCIRCUIT", false),
     });
     cost.sink.write(&row);
 }

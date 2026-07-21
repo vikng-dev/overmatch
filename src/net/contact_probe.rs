@@ -62,13 +62,13 @@ use crate::tank::{Controlled, Tank};
 /// probe keeps watching the slab across the whole beached window.
 const NEAR_MARGIN: f32 = 1.5;
 
-/// Register the probe iff `SPIKE_CONTACT_PROBE` is set. Mirrors the trace.rs pattern: the gate
+/// Register the probe iff `SPIKE_CONTACT_PROBE` is enabled. Mirrors the trace.rs pattern: the gate
 /// is evaluated once at plugin build, so an unarmed run registers nothing.
 pub fn plugin(app: &mut App) {
-    if std::env::var("SPIKE_CONTACT_PROBE").is_err() {
+    if !super::harness::env_flag("SPIKE_CONTACT_PROBE", false) {
         return;
     }
-    info!("contact_probe: armed (SPIKE_CONTACT_PROBE set)");
+    info!("contact_probe: armed (SPIKE_CONTACT_PROBE enabled)");
     app.add_systems(FixedLast, probe);
 }
 
