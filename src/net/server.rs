@@ -14,8 +14,7 @@ use lightyear::prelude::*;
 use super::disclosure::{CombatDisclosure, NetTankStatus};
 use super::grip::GripRestState;
 use super::protocol::{
-    LaunchedTurretPose, NetBelts, NetCrew, NetTank, NetTrackGripAnchor, PROTOCOL_FINGERPRINT,
-    ServoAngles,
+    LaunchedTurretPose, NetCrew, NetTank, NetTrackGripAnchor, PROTOCOL_FINGERPRINT, ServoAngles,
 };
 use super::{diagnostics, harness, open_gameplay_gate, physics};
 use crate::command::{ConsumeCommandEdges, TankCommand};
@@ -270,7 +269,6 @@ fn spawn_player_tank(
                 NetCrew::default(),
                 NetTankStatus::Active,
                 LaunchedTurretPose::default(),
-                NetBelts::default(),
                 CombatDisclosure::owner(link),
                 Replicate::to_clients(NetworkTarget::All),
             ),
@@ -344,7 +342,6 @@ fn spawn_bot_entity(
             (
                 NetTankStatus::Active,
                 LaunchedTurretPose::default(),
-                NetBelts::default(),
                 CombatDisclosure::hidden(),
                 Replicate::to_clients(NetworkTarget::All),
             ),

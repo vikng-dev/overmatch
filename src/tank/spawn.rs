@@ -11,7 +11,7 @@ use bevy::prelude::*;
 use super::integrity::authored_attachment;
 use super::model::{
     Gun, GunBarrel, Hull, Muzzle, Rig, Roadwheel, Tank, TankRoot, TankSim, TankViews, TrackSide,
-    Turret, ViewConfig, Weapon, WeaponIndex, WeaponState,
+    Turret, ViewConfig, Weapon, WeaponGate, WeaponGateState, WeaponIndex, WeaponState,
 };
 use super::servo::{ServoCommand, ServoIndex, ServoRest, ServoRole, ServoState};
 use super::view::{SimParts, bind_tank_view};
@@ -121,6 +121,18 @@ fn tank_transmission(spec: &TankSpec) -> TankTransmission {
         .map_or_else(TankTransmission::for_governor, TankTransmission::from_spec)
 }
 
+/// Complete fire-gate state in the same name-sorted order used to assign every [`WeaponIndex`].
+fn weapon_gate(spec: &TankSpec) -> WeaponGate {
+    let mut weapons: Vec<_> = spec.weapons.iter().collect();
+    weapons.sort_by_key(|(name, _)| name.as_str());
+    WeaponGate {
+        weapons: weapons
+            .into_iter()
+            .map(|(_, weapon)| WeaponGateState::for_mode(&weapon.fire_mode))
+            .collect(),
+    }
+}
+
 /// Spawn a root and its complete local simulation body in one command batch.
 pub(crate) fn spawn_complete_tank<B: Bundle>(
     commands: &mut Commands,
@@ -138,6 +150,9 @@ pub(crate) fn spawn_complete_tank<B: Bundle>(
         // Complete REV-14 transmission state, synchronously constructed from spec data before the
         // root can replicate or simulate.
         tank_transmission(content.spec()),
+        // Complete REV-17 weapon gate, synchronously constructed from the same sorted spec data as
+        // its weapon slots. Replicated client attachment must preserve the arriving authority value.
+        weapon_gate(content.spec()),
         root_bundle,
     ));
     root.observe(bind_tank_view);
@@ -164,6 +179,7 @@ pub(crate) fn spawn_bitprobe_tank<B: Bundle>(
             TrackGripElements::for_links(content.spec().track.link_count),
             TrackGripWake::default(),
             tank_transmission(content.spec()),
+            weapon_gate(content.spec()),
             root_bundle,
         ))
         .id();
@@ -185,8 +201,8 @@ pub(crate) fn attach_replicated_tank_body<B: Bundle>(
         .entity(root)
         .insert((
             presentation.root_bundle(),
-            // TankTransmission and TrackGripElements arrived in the replication init snapshot. Do
-            // not overwrite a late joiner's current authority state with fresh spec-derived values.
+            // TankTransmission, WeaponGate, and TrackGripElements arrived in the replication init
+            // snapshot. Do not overwrite current authority state with fresh spec-derived values.
             root_bundle,
         ))
         .observe(bind_tank_view);
@@ -591,16 +607,13 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
         // propagates `HIDDEN` to every descendant mesh, so the gunner optic (camera parked at
         // the gun pivot, inside the mantlet) sees no own-tank geometry — no near-plane clipping.
         Visibility::Inherited,
-        // `TankSim` sized to the spawned rig: every slot exists from birth (reloads start 0.0 =
-        // loaded, automatic belts start full; servo rests are spawned config, not captured state).
+        // `TankSim` sized to the spawned rig: every local recoil/tracer slot exists from birth;
+        // authoritative readiness and belt supply live in the root's `WeaponGate` above.
         // Weapon slots follow `weapon_entries`' sorted-by-name order — the same order the
         // `WeaponIndex` loop above assigned, so slot i's state matches slot i's `Weapon`.
         TankSim {
             servos: vec![ServoState::default(); spec.servos.len()],
-            weapons: weapon_entries
-                .iter()
-                .map(|(_, weapon)| WeaponState::for_mode(&weapon.fire_mode))
-                .collect(),
+            weapons: vec![WeaponState::default(); weapon_entries.len()],
         },
         Rig {
             hull,

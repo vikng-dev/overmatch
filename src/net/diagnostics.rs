@@ -152,7 +152,7 @@ pub(crate) fn log_prediction_diagnostics(
 /// Periodically log grounded track sides and each root's turret/reload state.
 pub(crate) fn log_sim_evidence(
     turrets: Query<(&ServoIndex, &TankRoot), With<Turret>>,
-    sims: Query<(Entity, &TankSim)>,
+    sims: Query<(Entity, &TankSim, Option<&crate::tank::WeaponGate>)>,
     tracks: Query<&TrackContacts>,
     mut timer: Local<f32>,
     time: Res<Time>,
@@ -168,15 +168,15 @@ pub(crate) fn log_sim_evidence(
         .sum();
     let total = tracks.iter().count() * 2;
     info!("net: SIM-EVIDENCE track_sides_grounded={grounded}/{total} (all tanks)");
-    for (root, sim) in &sims {
+    for (root, sim, gate) in &sims {
         // `TankRoot` owns the turret-to-simulation join.
         let turret = turrets
             .iter()
             .find(|(_, tank_root)| tank_root.0 == root)
             .and_then(|(slot, _)| sim.servos.get(slot.0))
             .map(ServoState::current);
-        let reloads: Vec<f32> = sim.weapons.iter().map(|w| w.reload_remaining).collect();
-        info!("net: SIM-EVIDENCE {root} turret_angle={turret:?} reloads={reloads:?}");
+        let weapon_gate = gate.map(|gate| &gate.weapons);
+        info!("net: SIM-EVIDENCE {root} turret_angle={turret:?} weapon_gate={weapon_gate:?}");
     }
 }
 

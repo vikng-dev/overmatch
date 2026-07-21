@@ -94,7 +94,8 @@ counters remain opaque Lightyear link payloads—including control, acknowledgem
 replication—not per-shot bytes or IP/UDP headers.
 
 **MEASURED on 2026-07-14:** a late-joining observer received the existing root's public status with
-zero `NetCrew` and zero `NetBelts` arrivals, including transient component additions. A correlated
+zero `NetCrew` and zero owner-private ammunition arrivals, including transient component additions.
+The REV-17 fixture now names that state `WeaponGate` and preserves the same disclosure assertion. A correlated
 six-receive-update loss window contained all three server-traced copy opportunities, dropped six
 opaque payloads, produced zero presentations for the covered automatic shot, and the following
 automatic shot recovered exactly once. The 30-receiver probe also observed nonzero
@@ -112,4 +113,5 @@ envelope; gameplay-visible tanks may not be hidden as an optimization.
 [[0014-sim-view-split]] · [[0015-divergence-doctrine]] ·
 [[0016-replicate-causes-derive-consequences]] ·
 [[0017-mutual-contact-resolves-on-the-authority]] ·
-[[0018-wire-surface-fingerprinted-and-refused]]
+[[0018-wire-surface-fingerprinted-and-refused]] ·
+[[0029-weapon-gate-is-tick-correlated-authority-state]]

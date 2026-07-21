@@ -11,7 +11,7 @@ use lightyear::prelude::client::Remote;
 use lightyear::prelude::*;
 
 use super::protocol::NetTank;
-use crate::tank::{PendingTankAssets, Rig, TankSimSource, attach_replicated_tank_body};
+use crate::tank::{PendingTankAssets, Rig, TankSimSource, WeaponGate, attach_replicated_tank_body};
 use crate::track::sim::{TankTransmission, TrackGripElements};
 
 pub(crate) fn plugin(app: &mut App) {
@@ -57,6 +57,7 @@ pub(crate) fn attach_replicated_rig(
             Has<Predicted>,
             Has<Interpolated>,
             Option<&TrackGripElements>,
+            Option<&WeaponGate>,
         ),
         (
             With<Remote>,
@@ -80,7 +81,7 @@ pub(crate) fn attach_replicated_rig(
     let Some(content) = source.get() else {
         return;
     };
-    for (entity, predicted, interpolated, grip_elements) in &tanks {
+    for (entity, predicted, interpolated, grip_elements, weapon_gate) in &tanks {
         // Wait until Lightyear declares the replica's role. An owner may not enter its first fixed
         // tick until the replicate-once exact field is present and sized; an interpolated remote
         // deliberately receives no private element state.
@@ -89,7 +90,8 @@ pub(crate) fn attach_replicated_rig(
             interpolated,
             grip_elements,
             content.spec().track.link_count,
-        ) {
+        ) || (predicted && weapon_gate.is_none())
+        {
             continue;
         }
         let body = if predicted {
@@ -155,6 +157,7 @@ fn upgrade_predicted_to_dynamic(
             With<NetTank>,
             With<Rig>,
             With<Predicted>,
+            With<WeaponGate>,
             With<PendingPredictedPromotion>,
         ),
     >,

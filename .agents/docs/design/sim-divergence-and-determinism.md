@@ -627,7 +627,7 @@ this instrument is the discriminating experiment. Handed off via
 
 ### Standing updates
 
-- **Misfire-feel risk: no measured support.** `hrld` diverged on ZERO ticks across every run
+- **SUPERSEDED by §12 / ADR-0029 — the 2026-07-10 fixture had no measured support.** `hrld` diverged on ZERO ticks across every run
   and every window class. The handoff's concrete fear (client accepts a fire click the server
   rejects on reload skew) has no observed mechanism today; the one carried-state fire term is
   fixed. What predict-both would re-open is class-1-style input-stream windows, not reload skew.
@@ -742,3 +742,24 @@ turn genuinely different inputs into the same simulation.
 The bitprobe is now the cross-architecture verification instrument, not a one-off diagnosis. Keep
 the raw dumps when a pair fails: `scripts/bitprobe/diff.py` names the first field and seam, then
 reports downstream seam growth without rounding payload values.
+
+## 12. 2026-07-21: MG rollback storm traced to an arrival-pumped weapon gate
+
+A later two-client jittered-combat trace found a different-input correlation defect after the
+cross-architecture arithmetic class was closed. MEASURED zero-jitter combat produced zero
+rollbacks, while jittered combat produced 990 rollbacks over a MEASURED 60-second capture. The
+first divergent cause was not fire identity, input phase, recoil order, the force law, or the exact
+transmission comparator. It was the weapon gate split between local cyclic timing and the
+latest-arrival `NetBelts` pump.
+
+The dry-belt snapshot arrived on a jitter-dependent tick and rewound the client cyclic timer. Fire
+and recoil then ran MEASURED about 2 ticks from authority. That physical seed propagated through
+hull velocity and contact response into MEASURED `demand_n` differences up to 5.9 kN, so the exact
+`TankTransmission` rollback gate correctly kept tripping on a real downstream difference.
+
+[[0029-weapon-gate-is-tick-correlated-authority-state]] removes the seed. REV-17 replaces the
+arrival pump with an atomic owner-predicted `WeaponGate`: discrete belt count plus an absolute
+`ready_tick`, restored from confirmed history at the authority sample's producing tick and then
+replayed. `simf.wpn` now exposes each slot as `[ready_tick, paused_at_tick, recoil_offset,
+recoil_velocity, belt_remaining]`; the `hrld` stream hashes both optional ticks and belt count in slot order.
+The force law, `demand_n`, input delay, recoil impulse, and `TankTransmission` gate remain unchanged.

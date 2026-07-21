@@ -19,15 +19,12 @@ use serde::{Deserialize, Serialize};
 
 use super::disclosure::{NetTankStatus, apply_net_tank_status};
 use crate::ballistics::ComponentHealth;
-use crate::command::{ConsumeCommandEdges, TankCommand};
+use crate::command::TankCommand;
 use crate::damage::{
     CrewStation, Crewman, DamageConsequences, Dead, LaunchedTurret, PendingSwap, TankVolumes,
 };
-use crate::spec::FireMode;
 use crate::state::GameplaySet;
-use crate::tank::{
-    Muzzle, Rig, ServoCommand, ServoIndex, ServoSpec, TankRoot, TankSim, Weapon, WeaponIndex,
-};
+use crate::tank::{Rig, ServoCommand, ServoIndex, ServoSpec, TankSim, WeaponGate};
 use crate::track::sim::{TankTransmission, TrackDrive, TrackGripEffect, TrackGripElements};
 #[cfg(test)]
 use crate::track::transmission::TransmissionState;
@@ -42,7 +39,7 @@ use crate::{CombatantId, ShotId};
 // compatibility guard.
 
 /// Bump and re-pin the affected wire manifest value for every wire-surface change.
-pub const PROTOCOL_REV: u32 = 16;
+pub const PROTOCOL_REV: u32 = 17;
 
 /// Compatibility tag derived from the complete pinned wire manifest.
 pub const PROTOCOL_FINGERPRINT: u64 = protocol_fingerprint_for(
@@ -143,23 +140,6 @@ pub struct NetCrew {
 /// Authoritative launched-turret pose; client rigs render it without simulating a second launch.
 #[derive(Component, Clone, Default, PartialEq, Debug, Serialize, Deserialize)]
 pub struct LaunchedTurretPose(pub Option<(Vec3, Quat)>);
-
-/// Correlated authoritative belt state. `belt` and `swap_remaining` must be applied atomically so a
-/// client cannot locally complete a server-owned belt swap.
-#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
-pub struct BeltSnapshot {
-    /// Rounds left on the belt (`WeaponState::belt_remaining`); `0` = a swap is in flight.
-    pub belt: u32,
-    /// The belt-swap countdown (`reload_remaining` while `belt == 0`), else `0.0`. See the type doc.
-    pub swap_remaining: f32,
-}
-
-/// Owner-private authoritative belt state. Entries follow `TankSim::weapons` order on both peers.
-#[derive(Component, Clone, Default, PartialEq, Debug, Serialize, Deserialize)]
-pub struct NetBelts {
-    /// `Some(BeltSnapshot)` for a belt-fed weapon, `None` for a `Single`, in `TankSim::weapons` order.
-    pub weapons: Vec<Option<BeltSnapshot>>,
-}
 
 /// Loss-tolerant server anchor for the local per-element grip history.
 ///
@@ -577,80 +557,17 @@ fn mirror_swap_from_net_crew(
     }
 }
 
-/// Authority side: collect each tank's per-weapon belt supply — for every belt-fed (`Automatic`)
-/// weapon, its `belt_remaining` plus the swap countdown while dry — into the replicated [`NetBelts`],
-/// one entry per `TankSim::weapons` slot in slot order (`None` for a `Single` weapon). `FireMode`
-/// lives on the muzzle's [`Weapon`] (not in `TankSim`), so this joins the muzzles to their root by
-/// `TankRoot` and scatters into the slot-indexed vector by [`WeaponIndex`] — the same slot both ends
-/// derive. `FixedPostUpdate` (after `shooting::tick_reload`/`fire` have stepped this tick),
-/// `Without<Remote>` = authority-only in shared code (every client tank carries `Remote`, see
-/// `publish_servo_angles`). The collect order is exactly the apply order in [`apply_net_belts`].
-fn publish_net_belts(
-    mut tanks: Query<(Entity, &TankSim, &mut NetBelts), Without<Remote>>,
-    muzzles: Query<(&Weapon, &WeaponIndex, &TankRoot), With<Muzzle>>,
-) {
-    for (root, sim, mut belts) in &mut tanks {
-        // `None` by default — a slot with no belt (a `Single` weapon) or whose muzzle hasn't spawned.
-        let mut snapshot: Vec<Option<BeltSnapshot>> = vec![None; sim.weapons.len()];
-        for (weapon, slot, tank_root) in &muzzles {
-            if tank_root.0 != root {
-                continue;
-            }
-            // Bounds-guarded: a muzzle whose slot outruns this tank's `TankSim::weapons` (rig still
-            // spawning) is skipped rather than indexed past the end.
-            let Some(state) = sim.weapons.get(slot.0) else {
-                continue;
-            };
-            if let FireMode::Automatic { .. } = weapon.fire_mode {
-                snapshot[slot.0] = Some(BeltSnapshot {
-                    belt: state.belt_remaining,
-                    // The swap countdown ONLY while the belt is dry (`reload_remaining` is then the
-                    // swap timer); `0.0` during cyclic fire so it adds no change-detection churn.
-                    swap_remaining: if state.belt_remaining == 0 {
-                        state.reload_remaining
-                    } else {
-                        0.0
-                    },
-                });
-            }
-        }
-        // `set_if_neq`: no change-detection churn (nor replication resends) while at rest.
-        belts.set_if_neq(NetBelts { weapons: snapshot });
-    }
-}
-
-/// Pin each replica's belt-fed weapon to authority state.
-///
-/// `belt` and dry-belt `swap_remaining` must update together. This runs after fire/reload and during
-/// replay, so local prediction cannot complete a server-owned belt swap. `Single` weapons are untouched.
-fn apply_net_belts(mut tanks: Query<(&NetBelts, &mut TankSim), With<Remote>>) {
-    for (belts, mut sim) in &mut tanks {
-        // A length mismatch is expected transiently while the client's rig is still spawning and
-        // self-heals once built; a persistent mismatch means client/server spec skew. Skip rather
-        // than write misaligned (same discipline as `apply_net_crew`).
-        if belts.weapons.len() != sim.weapons.len() {
-            continue;
-        }
-        for (snap, state) in belts.weapons.iter().zip(sim.weapons.iter_mut()) {
-            // `None` = a non-belt-fed weapon: leave its `belt_remaining`/`reload_remaining` alone.
-            let Some(snap) = snap else {
-                continue;
-            };
-            state.belt_remaining = snap.belt;
-            if snap.belt == 0 {
-                // Swap in flight on the authority: pin the countdown so the client neither completes
-                // a phantom swap early nor oscillates refilling against the overwrite (see the doc).
-                state.reload_remaining = snap.swap_remaining;
-            }
-        }
-    }
-}
-
 /// Republish the network timeline as net-neutral sim vocabulary before every gameplay tick. It runs
 /// during rollback too: `LocalTimeline` is the replayed tick there, so `shooting::fire` re-derives
 /// the same `ShotId` even though [`crate::Replaying`] suppresses its cosmetic `FireShell` trigger.
-fn publish_shot_clock(mut shot_clock: ResMut<crate::ShotClock>, timeline: Res<LocalTimeline>) {
-    shot_clock.0 = timeline.tick().0;
+fn publish_shot_clock(
+    mut shot_clock: ResMut<crate::ShotClock>,
+    mut weapon_clock: ResMut<crate::WeaponClock>,
+    timeline: Res<LocalTimeline>,
+) {
+    let tick = timeline.tick().0;
+    shot_clock.0 = tick;
+    weapon_clock.0 = tick;
 }
 
 /// Authority side: mirror the live `ServoState` angles onto the replicated root component.
@@ -778,6 +695,9 @@ pub(crate) const ROLLBACK_TRACK_DRIVE: f32 = 0.25;
 /// Exact transmission divergence gate expressed as a Boolean 0/1 magnitude for trace attribution.
 /// Every discrete field compares exactly; both floats compare by raw bits.
 pub(crate) const ROLLBACK_TANK_TRANSMISSION: f32 = 1.0;
+/// Exact weapon-gate divergence gate expressed as a Boolean 0/1 magnitude for trace attribution.
+/// The complete component is integer/discrete state, so ordinary equality is bit-exact.
+pub(crate) const ROLLBACK_WEAPON_GATE: f32 = 1.0;
 // The registered conditions and watchdog share these metrics and thresholds.
 
 /// Confirmed-vs-predicted `Position` divergence: straight-line distance (m).
@@ -826,6 +746,12 @@ pub(crate) fn tank_transmission_mismatch(a: &TankTransmission, b: &TankTransmiss
         })
 }
 
+/// Whether two complete weapon-gate snapshots differ. Every field is discrete and the component
+/// derives `Eq`, so this is the exact atomic comparison used for owner rollback.
+pub(crate) fn weapon_gate_mismatch(a: &WeaponGate, b: &WeaponGate) -> bool {
+    a != b
+}
+
 /// Ordered wire registrations. Keep this list aligned with [`plugin`]; its pinned hash is a direct
 /// handshake-fingerprint input. House process also bumps [`PROTOCOL_REV`] for release bookkeeping.
 #[cfg(test)]
@@ -838,7 +764,6 @@ const WIRE_SURFACE: &[&str] = &[
     "NetCrew",
     "NetTankStatus",
     "LaunchedTurretPose",
-    "NetBelts",
     "NetTrackGripAnchor",
     // Message channels, followed by their message types.
     "FireChannel",
@@ -862,11 +787,12 @@ const WIRE_SURFACE: &[&str] = &[
     "AngularVelocity",
     "TrackDrive",
     "TankTransmission",
+    "WeaponGate",
     "TrackGripElements",
 ];
 
 /// Pinned hash for the ordered wire surface and a direct handshake-fingerprint input.
-const WIRE_SURFACE_HASH: u64 = 0x0ffa_08a5_f2cf_458e;
+const WIRE_SURFACE_HASH: u64 = 0x5e1f_8a96_7ada_3e00;
 
 // ---------------------------------------------------------------------------
 // Deep wire-surface coverage (field-level + external-dep skew)
@@ -885,8 +811,9 @@ const WIRE_SURFACE_HASH: u64 = 0x0ffa_08a5_f2cf_458e;
 //     stripped, so a doc or reformat edit is invisible; a field/variant/type change is not) and hashes
 //     the lot. This is the whole `WIRE_SURFACE` own-type graph, followed through embeds: `NetCrew`
 //     carries `VolumeSnapshot` which carries `CrewSnapshot`, `TankTransmission` carries
-//     `TransmissionState`/`SchedulerState`, `TankCommand` (src/command.rs) carries `CrewSwap`, and
-//     both `CrewSnapshot` and `CrewSwap` carry `CrewStation` (src/damage.rs).
+//     `TransmissionState`/`SchedulerState`, `WeaponGate` carries `WeaponGateState`, `TankCommand`
+//     (src/command.rs) carries `CrewSwap`, and both `CrewSnapshot` and `CrewSwap` carry
+//     `CrewStation` (src/damage.rs).
 //   * EXTERNAL types (avian `Position`/`Rotation`/`LinearVelocity`/`AngularVelocity`, plus lightyear's
 //     own wire framing) — their source is not in this tree to scan, so they are covered by DEP VERSION:
 //     [`WIRE_DEP_AVIAN3D`]/[`WIRE_DEP_LIGHTYEAR`] pin the resolved `Cargo.lock` versions, so a bump of
@@ -899,7 +826,7 @@ const WIRE_SURFACE_HASH: u64 = 0x0ffa_08a5_f2cf_458e;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x5a87_1e11_7ca3_d4d0;
+const WIRE_TYPES_HASH: u64 = 0x7238_4425_0ced_db84;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -914,6 +841,7 @@ pub(crate) fn plugin(app: &mut App) {
     // `increment_local_tick`); publish it before every `GameplaySet` consumer, especially
     // `shooting::fire`, which must put the id on its initial FireShell event.
     app.init_resource::<crate::ShotClock>();
+    app.init_resource::<crate::WeaponClock>();
     app.add_systems(FixedUpdate, publish_shot_clock.before(GameplaySet));
     app.component::<NetTank>().replicate();
     app.component::<NetBot>().replicate();
@@ -930,10 +858,6 @@ pub(crate) fn plugin(app: &mut App) {
     // Authoritative launched-turret world pose (same plain-replication shape): the client shows the
     // cooked-off toss it does NOT simulate locally, driving its own rig turret kinematically.
     app.component::<LaunchedTurretPose>().replicate();
-    // Server-authoritative per-weapon belt supply (same plain-replication shape): each belt-fed
-    // weapon's `belt_remaining` + swap countdown, so the client's fire-gating belt (root-resident in
-    // the un-replicated `TankSim`) snaps to server truth instead of a divergent local prediction.
-    app.component::<NetBelts>().replicate();
     // Owner-private, per-tick physical-effect anchor; intermediate values may be skipped because the
     // producing tick lets the owner compare against local PredictionHistory.
     app.component::<NetTrackGripAnchor>().replicate();
@@ -1085,6 +1009,19 @@ pub(crate) fn plugin(app: &mut App) {
                 ROLLBACK_TANK_TRANSMISSION,
             )
         });
+    // Complete weapon eligibility state: one atomic owner-predicted snapshot, exact like the
+    // transmission. Confirmed history is keyed to the producing replication tick, so rollback
+    // restores belt + absolute deadline together and replay derives the same fire/recoil ticks.
+    app.component::<WeaponGate>()
+        .replicate()
+        .predict()
+        .with_rollback_condition(|a: &WeaponGate, b: &WeaponGate| {
+            crate::trace::note_if_tripped(
+                "WeaponGate",
+                u8::from(weapon_gate_mismatch(a, b)).into(),
+                ROLLBACK_WEAPON_GATE,
+            )
+        });
     // Exact per-element state crosses the wire only in the owner's initialization snapshot. Replay
     // thereafter restores it from local PredictionHistory; checkpoints repair that local history.
     app.component::<TrackGripElements>()
@@ -1107,7 +1044,6 @@ pub(crate) fn plugin(app: &mut App) {
             publish_servo_angles,
             publish_net_crew,
             publish_launched_turret_pose,
-            publish_net_belts,
         ),
     );
     app.add_systems(
@@ -1126,13 +1062,6 @@ pub(crate) fn plugin(app: &mut App) {
         apply_net_tank_status
             .in_set(GameplaySet)
             .before(DamageConsequences),
-    );
-    // Authority belt state is the final word each tick, including replay.
-    app.add_systems(
-        FixedUpdate,
-        apply_net_belts
-            .in_set(GameplaySet)
-            .after(ConsumeCommandEdges),
     );
     app.add_systems(FixedUpdate, mirror_swap_from_net_crew.in_set(GameplaySet));
     // The sim reads `TankCommand`; bridge it before all `GameplaySet` consumers, including replay.
@@ -1217,11 +1146,37 @@ mod tests {
     }
 
     #[test]
-    fn replicated_rig_preserves_the_join_in_progress_transmission_snapshot() {
+    fn weapon_gate_rollback_comparison_is_exact_and_atomic() {
+        use crate::tank::WeaponGateState;
+
+        let base = WeaponGate {
+            weapons: vec![WeaponGateState {
+                ready_tick: Some(123),
+                paused_at_tick: None,
+                belt_remaining: 17,
+            }],
+        };
+        assert!(!weapon_gate_mismatch(&base, &base));
+
+        let mut deadline = base.clone();
+        deadline.weapons[0].ready_tick = Some(124);
+        assert!(weapon_gate_mismatch(&base, &deadline));
+
+        let mut belt = base.clone();
+        belt.weapons[0].belt_remaining = 16;
+        assert!(weapon_gate_mismatch(&base, &belt));
+    }
+
+    #[test]
+    fn replicated_rig_preserves_join_in_progress_authoritative_sim_snapshots() {
         let rig = strip_comments(&read_source("src/net/rig.rs"));
         assert!(
             rig.contains("With<TankTransmission>"),
             "client rig attachment must wait for the replicated current transmission state"
+        );
+        assert!(
+            rig.contains("With<WeaponGate>") && rig.contains("Option<&WeaponGate>"),
+            "the predicted rig must wait for its owner-private authoritative weapon gate"
         );
 
         let spawn = strip_comments(&read_source("src/tank/spawn.rs"));
@@ -1235,6 +1190,10 @@ mod tests {
         assert!(
             !attach.contains("tank_transmission("),
             "client attachment must not overwrite a JIP snapshot with fresh from-spec state"
+        );
+        assert!(
+            !attach.contains("weapon_gate("),
+            "client attachment must not overwrite a JIP weapon-gate snapshot with spawn defaults"
         );
         assert!(
             rig.contains("Option<&TrackGripElements>")
@@ -1276,6 +1235,18 @@ mod tests {
         assert_eq!(
             actual, WIRE_SURFACE_HASH,
             "wire surface changed: bump PROTOCOL_REV and re-pin WIRE_SURFACE_HASH to {actual:#018x}",
+        );
+    }
+
+    /// Handshake fixture: the complete REV-17 manifest fold is pinned as a concrete netcode
+    /// `protocol_id`, so fixture drift is visible even when every constituent pin was edited.
+    #[test]
+    fn protocol_fingerprint_is_pinned() {
+        const EXPECTED_PROTOCOL_FINGERPRINT: u64 = 0x0b50_36ca_a095_1f04;
+        assert_eq!(
+            PROTOCOL_FINGERPRINT, EXPECTED_PROTOCOL_FINGERPRINT,
+            "protocol fingerprint changed: re-pin the REV-17 handshake fixture to \
+             {PROTOCOL_FINGERPRINT:#018x}",
         );
     }
 
@@ -1447,8 +1418,9 @@ mod tests {
     /// The own wire-facing types whose DEFINITION TEXT rides [`WIRE_TYPES_HASH`], each as
     /// `(source file, type name)`. This is the `WIRE_SURFACE` own-type graph followed through its
     /// embeds (see the coverage-model block by the const): protocol types, the public status in
-    /// `disclosure.rs`, `TankCommand`/`CrewSwap` from `command.rs`, and `CrewStation` from
-    /// `damage.rs`. External wire types (avian/lightyear) are covered by dependency version.
+    /// `disclosure.rs`, `WeaponGate`/`WeaponGateState` from `tank/model.rs`,
+    /// `TankCommand`/`CrewSwap` from `command.rs`, and `CrewStation` from `damage.rs`. External wire
+    /// types (avian/lightyear) are covered by dependency version.
     const WIRE_TYPE_DEFS: &[(&str, &str)] = &[
         ("src/net/protocol.rs", "NetTank"),
         ("src/track/sim.rs", "TrackDrive"),
@@ -1456,6 +1428,8 @@ mod tests {
         ("src/track/sim.rs", "TankTransmission"),
         ("src/track/transmission.rs", "TransmissionState"),
         ("src/track/transmission.rs", "SchedulerState"),
+        ("src/tank/model.rs", "WeaponGate"),
+        ("src/tank/model.rs", "WeaponGateState"),
         ("src/net/protocol.rs", "NetBot"),
         ("src/lib.rs", "CombatantId"),
         ("src/net/protocol.rs", "ServoAngles"),
@@ -1464,8 +1438,6 @@ mod tests {
         ("src/net/protocol.rs", "VolumeSnapshot"),
         ("src/net/protocol.rs", "CrewSnapshot"),
         ("src/net/protocol.rs", "LaunchedTurretPose"),
-        ("src/net/protocol.rs", "NetBelts"),
-        ("src/net/protocol.rs", "BeltSnapshot"),
         ("src/net/protocol.rs", "NetTrackGripAnchor"),
         ("src/net/protocol.rs", "FireChannel"),
         ("src/net/protocol.rs", "OutcomeChannel"),
@@ -2233,111 +2205,331 @@ mod tests {
         assert!(world.get::<Dead>(seat_b).is_some(), "seat B stays dead");
     }
 
-    /// A `Remote` tank carrying a two-slot `TankSim` whose belt-fed weapon has DIVERGED below the
-    /// authoritative belt (the phantom-shot bug), plus a `Single` weapon whose reload must be left
-    /// alone. Seeds the root's [`NetBelts`] with server truth for the belt weapon and `None` for the
-    /// `Single`.
-    fn diverged_belt_tank(world: &mut World, server_belt: u32, server_swap: f32) -> Entity {
-        use crate::tank::{TankSim, WeaponState};
-        world
+    /// The removed arrival pump is an architectural invariant, not just an implementation detail:
+    /// network arrival may update `ConfirmedHistory<WeaponGate>`, but no ordinary update system may
+    /// copy a latest-arrival value into live simulation state. Lightyear's rollback machinery is the
+    /// sole authority-to-prediction bridge.
+    #[test]
+    fn weapon_gate_has_no_latest_arrival_sim_writer() {
+        let protocol = strip_comments(&read_source("src/net/protocol.rs"));
+        let old_apply = ["fn apply_", "net_belts"].concat();
+        let old_publish = ["fn publish_", "net_belts"].concat();
+        let old_component = ["struct Net", "Belts"].concat();
+        assert!(!protocol.contains(&old_apply));
+        assert!(!protocol.contains(&old_publish));
+        assert!(!protocol.contains(&old_component));
+        assert!(
+            protocol.contains("app.component::<WeaponGate>()")
+                && protocol.contains(".replicate()")
+                && protocol.contains(".predict()")
+                && protocol.contains("weapon_gate_mismatch"),
+            "WeaponGate must reconcile through the ordinary replicated prediction path",
+        );
+    }
+
+    /// THE STORM-KILLER PROPERTY. A forced state rollback restores the complete gate, local recoil,
+    /// and hull velocities from their authoritative producing tick; then the production weapon
+    /// systems replay the same fire tick and derive the same next deadline plus exactly one recoil
+    /// kick and hull impulse. This exercises Lightyear's real rollback schedule and confirmed
+    /// histories, not direct assignments in the test.
+    #[test]
+    fn weapon_gate_rollback_restores_producing_tick_and_replays_identical_cadence() {
+        use avian3d::prelude::{
+            AngularInertia, AngularVelocity, CenterOfMass, GravityScale, LinearVelocity, Mass,
+            NoAutoAngularInertia, NoAutoCenterOfMass, NoAutoMass, Position, RigidBody, Rotation,
+        };
+        use bevy_replicon::client::confirm_history::ConfirmHistory;
+        use bevy_replicon::prelude::RepliconTick;
+        use lightyear::prelude::client::{Client, ClientPlugins, Connected};
+        use lightyear::prelude::{
+            InputTimeline, IsSynced, LocalTimeline, PeerId, Predicted, PredictionHistory,
+            PredictionManager, RemoteId, StateRollbackMetadata, Tick,
+        };
+
+        use crate::ballistics::FireShell;
+        use crate::command::TankCommand;
+        use crate::spec::{FireMode, RecoilSpec, Trigger};
+        use crate::tank::{
+            Muzzle, Tank, TankRoot, TankSim, Weapon, WeaponGateState, WeaponIndex, WeaponState,
+        };
+
+        const PRODUCING_TICK: Tick = Tick(100);
+        const PRESENT_TICK: Tick = Tick(108);
+        const AUTHORITY_READY_TICK: u32 = 102;
+        const REPLAY_FIRE_TICK: u32 = 102;
+        const REPLAY_NEXT_READY_TICK: u32 = 109;
+        const RECOIL_KICK: f32 = 2.0;
+        const HULL_MASS: f32 = 100.0;
+        const HULL_INERTIA: f32 = 50.0;
+        const PROJECTILE_MASS: f32 = 0.0118;
+        const PROJECTILE_SPEED: f32 = 755.0;
+        const MODE: FireMode = FireMode::Automatic {
+            rpm: 600.0,
+            belt_size: 2,
+            belt_swap_secs: 1.0,
+            tracer_every: 5,
+        };
+
+        #[derive(Resource, Default)]
+        struct ReplayEvidence {
+            restored_gate: Option<WeaponGate>,
+            fire_ticks: Vec<u32>,
+            replayed_effects: Vec<(f32, Vec3, Vec3)>,
+        }
+
+        fn observe_restored_gate(
+            timeline: Res<LocalTimeline>,
+            gates: Query<&WeaponGate, With<Predicted>>,
+            mut evidence: ResMut<ReplayEvidence>,
+        ) {
+            if timeline.tick() == PRODUCING_TICK + 1 && evidence.restored_gate.is_none() {
+                evidence.restored_gate = gates.single().ok().cloned();
+            }
+        }
+
+        fn observe_fire(fire: On<FireShell>, mut evidence: ResMut<ReplayEvidence>) {
+            evidence
+                .fire_ticks
+                .push(fire.shot.expect("network replay shot is keyed").fire_tick);
+        }
+
+        fn observe_replayed_effects(
+            timeline: Res<LocalTimeline>,
+            bodies: Query<(&TankSim, &LinearVelocity, &AngularVelocity), With<Predicted>>,
+            mut evidence: ResMut<ReplayEvidence>,
+        ) {
+            if timeline.tick().0 != REPLAY_FIRE_TICK {
+                return;
+            }
+            let (sim, linear, angular) = bodies.single().expect("one predicted recoil fixture");
+            evidence
+                .replayed_effects
+                .push((sim.weapons[0].recoil_velocity, linear.0, angular.0));
+        }
+
+        let mut app = crate::net::test_harness::base_app();
+        app.add_plugins(ClientPlugins {
+            tick_duration: crate::net::test_harness::TICK,
+        });
+        plugin(&mut app);
+        crate::shooting::plugin(&mut app);
+        app.init_resource::<ReplayEvidence>();
+        app.add_observer(observe_fire);
+        app.add_systems(FixedPreUpdate, observe_restored_gate);
+        app.add_systems(
+            FixedUpdate,
+            observe_replayed_effects
+                .after(crate::state::SimPhase::WeaponFire)
+                .before(crate::state::SimPhase::Recoil),
+        );
+        crate::net::test_harness::finish(&mut app);
+
+        app.world_mut().spawn((
+            Client::default(),
+            RemoteId(PeerId::Server),
+            Connected,
+            PredictionManager::default(),
+            IsSynced::<InputTimeline>::default(),
+        ));
+
+        let authority_gate = WeaponGate {
+            weapons: vec![WeaponGateState {
+                ready_tick: Some(AUTHORITY_READY_TICK),
+                paused_at_tick: None,
+                belt_remaining: 2,
+            }],
+        };
+        let mut confirmed_gate = ConfirmedHistory::<WeaponGate>::default();
+        confirmed_gate.insert_present_explicit(PRODUCING_TICK, authority_gate.clone());
+        let mut predicted_gate = PredictionHistory::<WeaponGate>::default();
+        predicted_gate.add_predicted(PRODUCING_TICK, Some(authority_gate.clone()));
+
+        let authority_sim = TankSim {
+            weapons: vec![WeaponState::default()],
+            ..default()
+        };
+        let mut predicted_sim = PredictionHistory::<TankSim>::default();
+        predicted_sim.add_predicted(PRODUCING_TICK, Some(authority_sim.clone()));
+
+        let mut confirmed_linear = ConfirmedHistory::<LinearVelocity>::default();
+        confirmed_linear.insert_present_explicit(PRODUCING_TICK, LinearVelocity::ZERO);
+        let mut predicted_linear = PredictionHistory::<LinearVelocity>::default();
+        predicted_linear.add_predicted(PRODUCING_TICK, Some(LinearVelocity::ZERO));
+        let mut confirmed_angular = ConfirmedHistory::<AngularVelocity>::default();
+        confirmed_angular.insert_present_explicit(PRODUCING_TICK, AngularVelocity::ZERO);
+        let mut predicted_angular = PredictionHistory::<AngularVelocity>::default();
+        predicted_angular.add_predicted(PRODUCING_TICK, Some(AngularVelocity::ZERO));
+
+        // The live state deliberately has the old defect's shape: it is already in a newer,
+        // phase-shifted cadence. Arrival of the tick-100 sample must not write this component; the
+        // forced rollback below is the only operation allowed to restore it.
+        let root = app
+            .world_mut()
             .spawn((
-                Remote,
-                NetBelts {
-                    weapons: vec![
-                        // Slot 0: the belt-fed weapon, server truth.
-                        Some(BeltSnapshot {
-                            belt: server_belt,
-                            swap_remaining: server_swap,
-                        }),
-                        // Slot 1: a `Single` weapon — no belt, must stay untouched.
-                        None,
-                    ],
+                Predicted,
+                ConfirmHistory::new(RepliconTick::new(1)),
+                Tank,
+                TankCommand {
+                    fire_secondary: true,
+                    ..default()
                 },
+                Position::default(),
+                Rotation::default(),
                 TankSim {
-                    servos: Vec::new(),
-                    weapons: vec![
-                        // Slot 0: the client's MISPREDICTED belt (fired a phantom round the server
-                        // never fired), with a stale cyclic `reload_remaining`.
-                        WeaponState {
-                            belt_remaining: 3,
-                            reload_remaining: 0.05,
-                            ..WeaponState::default()
-                        },
-                        // Slot 1: the `Single` weapon mid-reload — its `reload_remaining` is the 88's
-                        // reload countdown and must survive `apply_net_belts` intact.
-                        WeaponState {
-                            belt_remaining: 0,
-                            reload_remaining: 4.2,
-                            ..WeaponState::default()
-                        },
-                    ],
+                    weapons: vec![WeaponState {
+                        recoil_offset: 9.0,
+                        recoil_velocity: 9.0,
+                        rounds_fired: 4,
+                    }],
+                    ..default()
+                },
+                predicted_sim,
+                WeaponGate {
+                    weapons: vec![WeaponGateState {
+                        ready_tick: Some(105),
+                        paused_at_tick: None,
+                        belt_remaining: 1,
+                    }],
+                },
+                predicted_gate,
+                confirmed_gate,
+                crate::CombatantId(1),
+            ))
+            .id();
+        app.world_mut().entity_mut(root).insert((
+            Transform::default(),
+            RigidBody::Dynamic,
+            Mass(HULL_MASS),
+            AngularInertia::new(Vec3::splat(HULL_INERTIA)),
+            CenterOfMass(Vec3::ZERO),
+            NoAutoMass,
+            NoAutoAngularInertia,
+            NoAutoCenterOfMass,
+            GravityScale(0.0),
+        ));
+        app.world_mut().entity_mut(root).insert((
+            LinearVelocity(Vec3::splat(9.0)),
+            predicted_linear,
+            confirmed_linear,
+            AngularVelocity(Vec3::splat(9.0)),
+            predicted_angular,
+            confirmed_angular,
+        ));
+        app.world_mut().spawn((
+            crate::damage::CrewStation::Loader,
+            crate::damage::VolumeOf(root),
+        ));
+        let barrel_rest = Vec3::Y;
+        let barrel = app
+            .world_mut()
+            .spawn((
+                WeaponIndex(0),
+                TankRoot(root),
+                Transform::from_translation(barrel_rest),
+                ChildOf(root),
+                crate::shooting::RecoilParams {
+                    rest: barrel_rest,
+                    stiffness: 100.0,
+                    damping: 10.0,
                 },
             ))
-            .id()
-    }
+            .id();
+        app.world_mut().spawn((
+            Muzzle,
+            WeaponIndex(0),
+            TankRoot(root),
+            Transform::default(),
+            ChildOf(barrel),
+            Weapon {
+                name: "rollback MG".into(),
+                speed: PROJECTILE_SPEED,
+                caliber: 0.0079,
+                mass: PROJECTILE_MASS,
+                fire_mode: MODE,
+                recoil: Some(RecoilSpec {
+                    kick: RECOIL_KICK,
+                    stiffness: 100.0,
+                    damping: 10.0,
+                }),
+                barrel: Some(barrel),
+                fire: Vec::new(),
+                load: Vec::new(),
+                trigger: Trigger::Secondary,
+            },
+        ));
+        app.world_mut().flush();
 
-    /// THE BELT-CONVERGENCE TRIPWIRE. Injects a belt divergence (client belt != server belt) and
-    /// asserts `apply_net_belts` snaps the client's `belt_remaining` to server truth in ONE apply —
-    /// which clears the `hrld` divergence, since `belt_remaining` is exactly the term
-    /// `trace::hash_tank_state` folds into that hash. Also proves the fix stays off the `Single`
-    /// weapon (whose reload divergence is out of scope) and off the belt weapon's cyclic reload while
-    /// rounds remain (that stays client-predicted).
-    #[test]
-    fn diverged_belt_converges_to_server_truth() {
-        use crate::tank::TankSim;
-
-        let mut world = World::new();
-        // Server belt is 6 (client mispredicted down to 3); belt has rounds so no swap.
-        let tank = diverged_belt_tank(&mut world, 6, 0.0);
-
-        world.run_system_once(apply_net_belts).unwrap();
-
-        let sim = world.get::<TankSim>(tank).unwrap();
+        // A stale authority sample can arrive now without touching the live component.
         assert_eq!(
-            sim.weapons[0].belt_remaining, 6,
-            "the client's mispredicted belt must snap to server truth (hrld belt term now matches)",
+            app.world().get::<WeaponGate>(root).unwrap().weapons[0],
+            WeaponGateState {
+                ready_tick: Some(105),
+                paused_at_tick: None,
+                belt_remaining: 1,
+            },
+            "confirmed-history arrival alone must not rewind the live cadence",
         );
-        assert_eq!(
-            sim.weapons[0].reload_remaining, 0.05,
-            "while the belt has rounds the cyclic reload stays client-predicted (not pinned)",
-        );
-        // The `Single` weapon (a `None` entry) is untouched — its reload divergence is out of scope.
-        assert_eq!(
-            sim.weapons[1].belt_remaining, 0,
-            "a Single weapon carries no belt and is left alone",
-        );
-        assert_eq!(
-            sim.weapons[1].reload_remaining, 4.2,
-            "a Single weapon's reload countdown must survive apply_net_belts intact",
-        );
-    }
 
-    /// While the authoritative belt is DRY, `apply_net_belts` pins the client's swap countdown to the
-    /// server's — the anti-oscillation guarantee ([`BeltSnapshot::swap_remaining`]): without it the
-    /// client, seeing `belt == 0` with a near-zero cyclic reload, would instantly complete the swap
-    /// locally and fight the overwrite every tick. Convergence in one apply.
-    #[test]
-    fn dry_belt_pins_swap_countdown_no_oscillation() {
-        use crate::tank::TankSim;
-
-        let mut world = World::new();
-        // Server belt is DRY, 2.5 s into the swap; the client wrongly thinks it still has 3 rounds
-        // with a near-zero reload (the boundary the oscillation would have exploited).
-        let tank = diverged_belt_tank(&mut world, 0, 2.5);
-
-        // Two applies (two ticks) — the belt stays pinned at 0 and the countdown at server truth,
-        // never refilling locally: the oscillation would show up as belt flipping back to belt_size.
-        for _ in 0..2 {
-            world.run_system_once(apply_net_belts).unwrap();
-            let sim = world.get::<TankSim>(tank).unwrap();
-            assert_eq!(
-                sim.weapons[0].belt_remaining, 0,
-                "a dry authoritative belt stays dry on the client — no local refill oscillation",
-            );
-            assert_eq!(
-                sim.weapons[0].reload_remaining, 2.5,
-                "the swap countdown is pinned to server truth while the belt is dry",
-            );
+        app.world_mut()
+            .resource_mut::<LocalTimeline>()
+            .apply_delta(PRESENT_TICK.0 as i32);
+        for _ in 0..PRESENT_TICK.0 {
+            app.world_mut()
+                .resource_mut::<Time<Fixed>>()
+                .advance_by(crate::net::test_harness::TICK);
         }
+        app.world_mut()
+            .resource_mut::<StateRollbackMetadata>()
+            .request_forced_rollback(PRODUCING_TICK);
+        app.world_mut().run_schedule(PreUpdate);
+
+        let evidence = app.world().resource::<ReplayEvidence>();
+        assert_eq!(
+            evidence.restored_gate.as_ref(),
+            Some(&authority_gate),
+            "before replaying tick 101, the live gate must be the tick-100 authority snapshot",
+        );
+        assert_eq!(
+            evidence.fire_ticks,
+            [REPLAY_FIRE_TICK],
+            "replay must fire on the authority-derived deadline exactly once",
+        );
+        assert_eq!(
+            evidence.replayed_effects.len(),
+            1,
+            "the replayed fire tick must apply its deterministic effects exactly once",
+        );
+        let (recoil_velocity, linear_velocity, angular_velocity) = evidence.replayed_effects[0];
+        let momentum = PROJECTILE_MASS * PROJECTILE_SPEED;
+        let expected_linear = Vec3::Z * (momentum / HULL_MASS);
+        let expected_angular = Vec3::X * (momentum / HULL_INERTIA);
+        assert!(
+            (recoil_velocity - RECOIL_KICK).abs() <= f32::EPSILON,
+            "authority-restored recoil receives one replayed kick: {recoil_velocity}",
+        );
+        assert!(
+            linear_velocity.distance(expected_linear) <= 1e-6,
+            "authority-restored hull receives one replayed linear impulse: {linear_velocity:?}",
+        );
+        assert!(
+            angular_velocity.distance(expected_angular) <= 1e-6,
+            "the off-centre replayed impulse is applied once: {angular_velocity:?}",
+        );
+        let replayed = app.world().get::<WeaponGate>(root).unwrap();
+        assert_eq!(
+            replayed.weapons[0],
+            WeaponGateState {
+                ready_tick: Some(REPLAY_NEXT_READY_TICK),
+                paused_at_tick: None,
+                belt_remaining: 1,
+            },
+            "the replayed round must derive the identical next-fire tick and belt",
+        );
+        assert_eq!(
+            app.world().get::<TankSim>(root).unwrap().weapons[0].rounds_fired,
+            1,
+            "local rollback state replays the same one round beside the authoritative gate",
+        );
+        assert_eq!(app.world().resource::<LocalTimeline>().tick(), PRESENT_TICK);
     }
 }

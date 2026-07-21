@@ -70,7 +70,7 @@ pub enum FireMode {
     /// Belt-fed cyclic fire on a held trigger *level*. `rpm` sets the cyclic interval (60/rpm s
     /// between rounds — pure mechanism, NEVER crew-gated: a dead loader does not slow a working
     /// action). The belt is finite (`belt_size` rounds, tracked as sim state in
-    /// [`crate::tank::WeaponState::belt_remaining`]) over an INFINITE reserve (no stowed-ammo
+    /// [`crate::tank::WeaponGateState::belt_remaining`]) over an INFINITE reserve (no stowed-ammo
     /// inventory — owner call 2026-07-12): running dry automatically starts a belt swap of
     /// `belt_swap_secs`, and the *swap* is what the weapon's `load` requirement gates, same as the
     /// 88's reload. `tracer_every` is the belt's composition (real belts are loaded e.g.

@@ -506,6 +506,7 @@ struct MiniTank {
     grip: TrackGrip,
     elements: TrackGripElements,
     transmission: TankTransmission,
+    weapon_gate: crate::tank::WeaponGate,
     sim: TankSim,
     last_frame: ForceFrame,
 }
@@ -553,6 +554,7 @@ impl MiniTank {
             &self.grip,
             &self.elements,
             &self.transmission,
+            &self.weapon_gate,
             &self.sim,
         )
     }
@@ -567,6 +569,7 @@ impl MiniTank {
             &self.grip,
             &self.elements,
             &self.transmission,
+            &self.weapon_gate,
             &self.sim,
         )
     }
@@ -589,6 +592,7 @@ fn mini_tank(elements: TrackGripElements, speeds: [f32; 2], phases: [f64; 2]) ->
         grip: TrackGrip::default(),
         elements,
         transmission: TankTransmission::for_governor(),
+        weapon_gate: crate::tank::WeaponGate::default(),
         sim: TankSim::default(),
         last_frame: ForceFrame::default(),
     }

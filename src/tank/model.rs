@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use super::servo::ServoState;
 use crate::command::TankCommand;
@@ -88,30 +89,122 @@ pub struct Roadwheel {
 #[derive(Component)]
 pub struct TankRoot(pub Entity);
 
+/// Local per-weapon rollback state that does not decide whether a round may fire. The authoritative
+/// fire gate lives in the separately replicated [`WeaponGate`] component.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct WeaponState {
-    /// Reload timer for single-shot weapons, or cyclic/belt-swap timer for automatics.
-    pub reload_remaining: f32,
     pub recoil_offset: f32,
     pub recoil_velocity: f32,
     /// Belt phase used to derive tracer cadence. It rolls back, but stays outside the determinism
     /// hash because a phase mismatch is cosmetic and does not gate simulation.
     pub rounds_fired: u32,
-    /// Remaining automatic rounds. Unlike tracer phase, this gates fire and is hashed.
+}
+
+/// One weapon's complete fire-eligibility state. `ready_tick` is an absolute simulation deadline:
+/// `None` with no pause means loaded/ready, while `Some(tick)` means cyclic, single reload, or belt
+/// swap according to the weapon's authored [`FireMode`] and `belt_remaining`. `paused_at_tick`
+/// freezes crew work without changing this component again until work resumes; there is no per-tick
+/// countdown.
+///
+/// Lightyear ticks saturate rather than wrap. If arming or shifting a deadline would exceed
+/// `u32::MAX`, the gate fail-stops as `(ready_tick: None, paused_at_tick: Some(u32::MAX))`. That
+/// otherwise-unreachable pair is permanently not-ready, so a clock pinned at its maximum cannot
+/// repeatedly fire a deadline that saturated to the same tick.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct WeaponGateState {
+    pub ready_tick: Option<u32>,
+    pub paused_at_tick: Option<u32>,
     pub belt_remaining: u32,
 }
 
-impl WeaponState {
+impl WeaponGateState {
+    const EXHAUSTED_TICK: u32 = u32::MAX;
+
     /// Loaded spawn state; automatic weapons start with a full belt.
     pub fn for_mode(mode: &FireMode) -> Self {
         Self {
+            ready_tick: None,
+            paused_at_tick: None,
             belt_remaining: match mode {
                 FireMode::Single { .. } => 0,
                 FireMode::Automatic { belt_size, .. } => *belt_size,
             },
-            ..Self::default()
         }
     }
+
+    pub fn is_ready(self) -> bool {
+        self.ready_tick.is_none() && self.paused_at_tick.is_none()
+    }
+
+    pub fn is_exhausted(self) -> bool {
+        self.ready_tick.is_none() && self.paused_at_tick == Some(Self::EXHAUSTED_TICK)
+    }
+
+    /// Whether an armed deadline is due in Lightyear's ordinary numeric tick order. An absent
+    /// deadline remains due; [`Self::is_ready`] separately distinguishes ready from fail-stopped.
+    pub fn deadline_reached(self, now: u32) -> bool {
+        self.ready_tick.is_none_or(|ready_tick| now >= ready_tick)
+    }
+
+    pub fn arm(&mut self, now: u32, delay_ticks: u32) {
+        if let Some(ready_tick) = now.checked_add(delay_ticks.max(1)) {
+            self.ready_tick = Some(ready_tick);
+            self.paused_at_tick = None;
+        } else {
+            self.freeze_exhausted();
+        }
+    }
+
+    /// Freeze a crew-gated reload/swap. Repeated unmet ticks leave the gate byte-identical.
+    pub fn pause(&mut self, now: u32) {
+        if let (Some(ready_tick), None) = (self.ready_tick, self.paused_at_tick) {
+            // This first unmet tick must not consume work, so defer once on entry. Later paused
+            // ticks are accounted for in one shift on resume.
+            if let Some(ready_tick) = ready_tick.checked_add(1) {
+                self.ready_tick = Some(ready_tick);
+                self.paused_at_tick = Some(now);
+            } else {
+                self.freeze_exhausted();
+            }
+        }
+    }
+
+    /// Resume crew work by shifting the deadline once by the paused interval.
+    pub fn resume(&mut self, now: u32) {
+        let (Some(ready_tick), Some(paused_at_tick)) = (self.ready_tick, self.paused_at_tick)
+        else {
+            return;
+        };
+        let later_paused_ticks = now.saturating_sub(paused_at_tick).saturating_sub(1);
+        if let Some(ready_tick) = ready_tick.checked_add(later_paused_ticks) {
+            self.ready_tick = Some(ready_tick);
+            self.paused_at_tick = None;
+        } else {
+            self.freeze_exhausted();
+        }
+    }
+
+    pub fn remaining_ticks(self, now: u32) -> u32 {
+        if self.is_exhausted() {
+            return u32::MAX;
+        }
+        let effective_now = self.paused_at_tick.unwrap_or(now);
+        self.ready_tick
+            .map_or(0, |ready_tick| ready_tick.saturating_sub(effective_now))
+    }
+
+    fn freeze_exhausted(&mut self) {
+        self.ready_tick = None;
+        self.paused_at_tick = Some(Self::EXHAUSTED_TICK);
+    }
+}
+
+/// Tick-correlated authority state for every weapon slot, in deterministic name-sorted slot order.
+/// This is one atomic replicated + owner-predicted component, following `TankTransmission`: a
+/// confirmed value is restored at its producing tick and normal replay derives the present.
+#[derive(Component, Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct WeaponGate {
+    pub weapons: Vec<WeaponGateState>,
 }
 
 /// Rollback state lives on the replicated root. Children carry deterministic, name-sorted indices

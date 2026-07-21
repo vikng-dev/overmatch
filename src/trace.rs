@@ -21,7 +21,7 @@ use chrono::Local as LocalTime;
 use serde_json::{Value, json};
 
 use crate::CombatantId;
-use crate::tank::{Controlled, Tank, TankSim};
+use crate::tank::{Controlled, Tank, TankSim, WeaponGate};
 use crate::track::sim::{
     TankTransmission, TrackContacts, TrackDrive, TrackGrip, TrackGripEffect, TrackGripElements,
 };
@@ -512,6 +512,7 @@ fn record_tick(
             &TrackGrip,
             Option<&TrackGripElements>,
             &TankTransmission,
+            Option<&WeaponGate>,
             &TrackContacts,
             &TankSim,
             Has<Controlled>,
@@ -575,6 +576,7 @@ fn record_tick(
         grip,
         elements,
         transmission,
+        weapon_gate,
         track_contacts,
         sim,
         controlled,
@@ -631,6 +633,7 @@ fn record_tick(
             grip,
             elements,
             transmission,
+            weapon_gate,
             sim,
         );
         // Remote clients intentionally receive no exact element field. Null makes that disclosure
@@ -688,12 +691,17 @@ fn record_tick(
             let wpn: Vec<Value> = sim
                 .weapons
                 .iter()
-                .map(|w| {
+                .enumerate()
+                .map(|(slot, w)| {
+                    let gate = weapon_gate.and_then(|gate| gate.weapons.get(slot));
                     Value::Array(vec![
-                        num(w.reload_remaining),
+                        gate.and_then(|gate| gate.ready_tick)
+                            .map_or(Value::Null, Value::from),
+                        gate.and_then(|gate| gate.paused_at_tick)
+                            .map_or(Value::Null, Value::from),
                         num(w.recoil_offset),
                         num(w.recoil_velocity),
-                        Value::from(w.belt_remaining),
+                        gate.map_or(Value::Null, |gate| Value::from(gate.belt_remaining)),
                     ])
                 })
                 .collect();

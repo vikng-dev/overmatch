@@ -10,7 +10,7 @@ use crate::damage::{
     TankVolumes, VolumeFacets, VolumeOf, capability_effectiveness, evaluate, part_qualities,
 };
 use crate::spec::{FireMode, ViewKind};
-use crate::tank::{Controlled, TankRoot, TankSim, TankViews, Weapon, WeaponIndex};
+use crate::tank::{Controlled, TankRoot, TankViews, Weapon, WeaponIndex};
 use crate::ui_font::UiFonts;
 
 /// The controlled tank's crew bar: one cell per seat, driven by the `1`–`5` swap input.
@@ -85,20 +85,20 @@ fn spawn_status_panel(mut commands: Commands, fonts: Res<UiFonts>) {
 /// One weapon's status readout, split out so the precedence is unit-testable without standing up the
 /// whole ECS panel. `no_fire` is the per-weapon fire gate (dead gunner/breech/barrel) — an *unusable*
 /// weapon. The crew-gate/no-fire state wins over any timer readout: a weapon that can't fire must not
-/// tease a reload or swap countdown (a dead gun's `reload_remaining` freezes, so the timer would
-/// otherwise stick forever — the bug this precedence fixes for the belt swap).
+/// tease a reload or swap countdown (a dead gun's ready deadline advances to preserve its remaining
+/// work, so the derived countdown would otherwise stick forever).
 fn weapon_status(
     fire_mode: FireMode,
     no_fire: bool,
-    reload_remaining: f32,
+    remaining_secs: f32,
     belt_remaining: u32,
 ) -> String {
     match fire_mode {
         FireMode::Single { .. } => {
             if no_fire {
                 "no-fire".to_string()
-            } else if reload_remaining > 0.0 {
-                format!("{reload_remaining:.1}s")
+            } else if remaining_secs > 0.0 {
+                format!("{remaining_secs:.1}s")
             } else {
                 "READY".to_string()
             }
@@ -110,7 +110,7 @@ fn weapon_status(
                 // Dry belt = swap in flight; the timer freezes (and this readout with it) while the
                 // gun crew can't work the swap. Only reached when the gun CAN fire (no_fire is
                 // false) — a crew-dead MG reads `no-fire`, not a stuck `SWAP` countdown.
-                format!("SWAP {reload_remaining:.1}s")
+                format!("SWAP {remaining_secs:.1}s")
             } else {
                 format!("{belt_remaining} rds")
             }
@@ -134,7 +134,9 @@ fn update_status_panel(
     >,
     seats: Query<(Option<&Dead>, &VolumeOf), With<CrewStation>>,
     weapons: Query<(&Weapon, &WeaponIndex, &TankRoot)>,
-    sims: Query<&TankSim>,
+    gates: Query<&crate::tank::WeaponGate>,
+    weapon_clock: Res<crate::WeaponClock>,
+    fixed_time: Res<Time<Fixed>>,
     facets: Query<VolumeFacets>,
     mut panel: Query<(&mut Text, &mut Visibility), With<StatusPanelText>>,
 ) {
@@ -180,17 +182,19 @@ fn update_status_panel(
         .iter()
         .filter(|(_, _, root)| root.0 == tank)
         .map(|(weapon, slot, root)| {
-            // Fire-timer/belt state is root-resident (`TankSim`), addressed by the weapon's slot.
-            let state = sims
+            // Fire-gate state is the root's tick-correlated `WeaponGate`, addressed by slot.
+            let state = gates
                 .get(root.0)
                 .ok()
-                .and_then(|sim| sim.weapons.get(slot.0).copied())
+                .and_then(|gate| gate.weapons.get(slot.0).copied())
                 .unwrap_or_default();
+            let remaining_secs =
+                state.remaining_ticks(weapon_clock.0) as f32 * fixed_time.timestep().as_secs_f32();
             let no_fire = evaluate(&weapon.fire, &quality) <= 0.0;
             let status = weapon_status(
                 weapon.fire_mode,
                 no_fire,
-                state.reload_remaining,
+                remaining_secs,
                 state.belt_remaining,
             );
             (
