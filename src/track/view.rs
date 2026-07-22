@@ -481,7 +481,11 @@ fn drive_track_views(
         let mut out: [Vec<Vec2>; 2] = [Vec::new(), Vec::new()];
         let report = rig.chain.step(&input, &rig.params, field, &mut out);
         if report.tears > 0 {
-            warn!("track view tear-fuse reseed × {}", report.tears);
+            // `debug!`, not `warn!`: a tear-fuse reseed is a cosmetic self-heal (this view is
+            // reseedable-from-data by construction, never sim/rollback state), and it recurs per
+            // frame while a tank grinds terrain — so at `warn` it flooded the console. Matches the
+            // sibling overrun line below. Raise with `RUST_LOG=overmatch=debug` to watch tears.
+            debug!("track view tear-fuse reseed × {}", report.tears);
         }
         if report.overruns > 0 {
             debug!(
