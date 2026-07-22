@@ -117,13 +117,18 @@ impl ServoState {
         [current, previous, velocity]
     }
 
-    /// Exact wire-state comparison. Raw bits make matching NaN payloads equal and signed zero
-    /// distinct, matching the transmission's rollback gate.
-    pub(crate) fn bit_eq(&self, other: &Self) -> bool {
-        self.hash_fields()
-            .into_iter()
-            .zip(other.hash_fields())
-            .all(|(left, right)| left.to_bits() == right.to_bits())
+    /// Rollback-trigger comparison with physical tolerance. The bit-exact servo gate stormed on
+    /// ULP-scale aim jitter (~6e-8 rad observed) that the coarse hull bars already forgive; the aim
+    /// angle and its rate now compare within small physical bands (far below aim/hit resolution),
+    /// and the render-interpolation `previous` (a view-only blend-from, never sim-affecting) is
+    /// excluded entirely. Matching raw bits stay equal so NaN payloads compare equal. The
+    /// determinism state hash still consumes the raw `hash_fields`; tolerance lives only here.
+    pub(crate) fn rollback_eq(&self, other: &Self, current_band: f32, velocity_band: f32) -> bool {
+        fn within(a: f32, b: f32, eps: f32) -> bool {
+            a.to_bits() == b.to_bits() || (a - b).abs() <= eps
+        }
+        within(self.current, other.current, current_band)
+            && within(self.velocity, other.velocity, velocity_band)
     }
 
     /// Construct non-default state for divergence-hash tests without exposing production writers.
