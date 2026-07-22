@@ -28,7 +28,7 @@ use crate::tank::{Rig, ServoCommand, ServoIndex, ServoSpec, TankServos, TankSim,
 use crate::track::sim::{TankTransmission, TrackDrive, TrackGripEffect, TrackGripElements};
 #[cfg(test)]
 use crate::track::transmission::TransmissionState;
-use crate::track::transmission::transmission_state_projection;
+use crate::track::transmission::{RESERVE_MARGIN_FLOOR_N, transmission_state_projection};
 use crate::{CombatantId, ShotId};
 
 // ---------------------------------------------------------------------------
@@ -692,8 +692,22 @@ pub(crate) const ROLLBACK_VELOCITY: f32 = 1.0;
 /// |phase| (m) deltas. Coarse like the velocity gate — belt state is deterministic, so a real
 /// mismatch is gross desync, not solver noise.
 pub(crate) const ROLLBACK_TRACK_DRIVE: f32 = 0.25;
-/// Exact transmission divergence gate expressed as a Boolean 0/1 magnitude for trace attribution.
-/// Every discrete field compares exactly; both floats compare by raw bits.
+/// Largest first-gear `k = gear / sprocket_radius` in the authored transmission set. The global
+/// rollback comparator receives only two `TankTransmission` snapshots, so it cannot reach an
+/// entity's `TransmissionParams`. This conservative fallback is DERIVED from the shipped Tiger's
+/// largest ratio: `(3000 rpm × TAU / 60) / (2.8 km/h / 3.6) = 403.919 rad/m`; the T-34 sandbox's
+/// DERIVED first-gear value is only 84.823 rad/m. A future slower first-gear authoring must raise
+/// this bound.
+const MAX_AUTHORED_FIRST_GEAR_K_RAD_PER_M: f32 =
+    (3_000.0 * std::f32::consts::TAU / 60.0) / (2.8 / 3.6);
+/// Belt-inherited crank tolerance. DERIVED `403.919 rad/m × 0.25 m/s = 100.980 rad/s`.
+pub(crate) const ROLLBACK_TANK_TRANSMISSION_OMEGA_E_RAD_S: f32 =
+    MAX_AUTHORED_FIRST_GEAR_K_RAD_PER_M * ROLLBACK_TRACK_DRIVE;
+/// Decision-only demand tolerance, shared with the DERIVED 10 kN reserve-margin floor. A demand
+/// delta no larger than this cannot by itself cross a reserve decision's absolute floor.
+pub(crate) const ROLLBACK_TANK_TRANSMISSION_DEMAND_N: f32 = RESERVE_MARGIN_FLOOR_N;
+/// Transmission divergence gate expressed as a Boolean 0/1 magnitude for trace attribution. The
+/// 14 discrete fields compare exactly; `omega_e` and `demand_n` use their declared bands above.
 pub(crate) const ROLLBACK_TANK_TRANSMISSION: f32 = 1.0;
 /// Exact weapon-gate divergence gate expressed as a Boolean 0/1 magnitude for trace attribution.
 /// The complete component is integer/discrete state, so ordinary equality is bit-exact.
@@ -736,16 +750,26 @@ pub(crate) fn track_drive_error(a: &TrackDrive, b: &TrackDrive) -> f32 {
     worst
 }
 
-/// Whether two atomic transmission snapshots differ under the REV-14 wire contract. Exhaustive
-/// projection in the transmission module makes a future field addition fail compilation until its
-/// comparison is classified.
+/// Whether two atomic transmission snapshots differ under the REV-14 carried-state contract.
+/// Exhaustive projection in the transmission module makes a future field addition fail compilation
+/// until classified. Trace and determinism hashes continue to consume every projected raw value;
+/// tolerance exists only at this rollback gate.
 pub(crate) fn tank_transmission_mismatch(a: &TankTransmission, b: &TankTransmission) -> bool {
     transmission_state_projection(&a.0)
         .into_iter()
         .zip(transmission_state_projection(&b.0))
-        .any(|(a, b)| {
-            debug_assert_eq!(a.name, b.name);
-            !a.value.bit_eq(b.value)
+        .any(|(left, right)| {
+            debug_assert_eq!(left.name, right.name);
+            let equal = match left.name {
+                "omega_e" => left
+                    .value
+                    .float_eq(right.value, ROLLBACK_TANK_TRANSMISSION_OMEGA_E_RAD_S),
+                "demand_n" => left
+                    .value
+                    .float_eq(right.value, ROLLBACK_TANK_TRANSMISSION_DEMAND_N),
+                _ => left.value.bit_eq(right.value),
+            };
+            !equal
         })
 }
 
@@ -1010,9 +1034,9 @@ pub(crate) fn plugin(app: &mut App) {
                 ROLLBACK_TRACK_DRIVE,
             )
         });
-    // The declared transmission's correlated state: one atomic owner-predicted snapshot. Unlike
-    // TrackDrive's coarse velocity-like threshold, every field is exact; floats compare by bits so
-    // equal NaN payloads stay equal and signed zero stays distinct.
+    // The declared transmission's correlated state: one atomic owner-predicted snapshot. Its 14
+    // discrete fields are exact; the two continuous floats inherit explicit physical tolerance
+    // bands. Matching NaN payloads remain equal, while distinct NaNs still force reconciliation.
     app.component::<TankTransmission>()
         .replicate()
         .predict()
@@ -1146,18 +1170,48 @@ mod tests {
     use crate::damage::CrewStation;
 
     #[test]
-    fn transmission_rollback_comparison_is_bit_exact() {
+    fn transmission_rollback_comparison_is_exact_for_discrete_and_tolerant_for_floats() {
         let base = TankTransmission(TransmissionState::for_governor());
 
-        let mut discrete = base;
-        discrete.0.gear = 2;
-        assert!(tank_transmission_mismatch(&base, &discrete));
+        let mut discrete = [base; 14];
+        discrete[0].0.gear = 2;
+        discrete[1].0.shift_ticks = 1;
+        discrete[2].0.steer_step = 1;
+        discrete[3].0.reverse = true;
+        discrete[4].0.park = true;
+        discrete[5].0.last_shift_dir = 1;
+        discrete[6].0.dwell_ticks = 1;
+        discrete[7].0.clutch_out = true;
+        discrete[8].0.demand_initialized = true;
+        discrete[9].0.grade_confirm_ticks = 1;
+        discrete[10].0.grade_target = 1;
+        discrete[11].0.scheduler = crate::track::transmission::SchedulerState::HillHold;
+        discrete[12].0.hill_hold = true;
+        discrete[13].0.hold_reengage_ticks = 1;
+        for (index, variant) in discrete.iter().enumerate() {
+            assert!(
+                tank_transmission_mismatch(&base, variant),
+                "discrete transmission field {index} must stay exact"
+            );
+        }
 
         let mut positive_zero = base;
         positive_zero.0.demand_n = 0.0;
         let mut negative_zero = base;
         negative_zero.0.demand_n = -0.0;
-        assert!(tank_transmission_mismatch(&positive_zero, &negative_zero));
+        assert!(!tank_transmission_mismatch(&positive_zero, &negative_zero));
+
+        let mut omega_inside = base;
+        omega_inside.0.omega_e = ROLLBACK_TANK_TRANSMISSION_OMEGA_E_RAD_S;
+        assert!(!tank_transmission_mismatch(&base, &omega_inside));
+        omega_inside.0.omega_e = f32::from_bits(omega_inside.0.omega_e.to_bits() + 1);
+        assert!(tank_transmission_mismatch(&base, &omega_inside));
+
+        let mut demand_inside = base;
+        demand_inside.0.demand_n = ROLLBACK_TANK_TRANSMISSION_DEMAND_N;
+        assert!(!tank_transmission_mismatch(&base, &demand_inside));
+        demand_inside.0.demand_n = f32::from_bits(demand_inside.0.demand_n.to_bits() + 1);
+        assert!(tank_transmission_mismatch(&base, &demand_inside));
 
         let mut nan_a = base;
         nan_a.0.omega_e = f32::from_bits(0x7fc0_0042);
