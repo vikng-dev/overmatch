@@ -2242,7 +2242,9 @@ fn apply_hit_impulse(
 }
 
 fn on_impact(impact: On<Impact>) {
-    info!("shell impact at {:?}", impact.position);
+    // `debug!`, not `info!`: this fires once per shell/pellet impact, so sustained MG fire made it
+    // the dominant console spam. Kept as a diagnostic under `RUST_LOG=overmatch=debug`.
+    debug!("shell impact at {:?}", impact.position);
     // The sim-side seam: the armor penetration march/spall hook in here. The debug marker is a
     // separate, view-side observer on this same event (`debug::spawn_impact_marker`), kept out of
     // the sim per ADR-0014.
