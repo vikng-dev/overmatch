@@ -41,7 +41,8 @@ use crate::{CombatantId, ShotId};
 /// Bump and re-pin the affected wire manifest value for every wire-surface change.
 pub const PROTOCOL_REV: u32 = 18;
 
-/// Compatibility tag derived from the complete pinned wire manifest.
+/// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
+/// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
 pub const PROTOCOL_FINGERPRINT: u64 = protocol_fingerprint_for(
     WIRE_SURFACE_HASH,
     WIRE_TYPES_HASH,
@@ -71,14 +72,17 @@ const fn fingerprint_field(hash: u64, label: &[u8], value: &[u8]) -> u64 {
     fnv1a_64(after_value, b"\0")
 }
 
-/// Derive a handshake tag from the complete pinned wire manifest.
-const fn protocol_fingerprint_for(
+/// Fold the VERSION-INDEPENDENT wire manifest: surface, own-type graph, wire dependencies, and
+/// protocol revision. This is the portion a real wire skew moves, and it is what the pin tripwire
+/// guards. The crate version is deliberately NOT folded here, so a routine release bump does not
+/// force a re-pin — it still enters the runtime [`PROTOCOL_FINGERPRINT`] below (version-exact
+/// handshakes), just not this pinned invariant.
+const fn wire_manifest_fingerprint(
     wire_surface_hash: u64,
     wire_types_hash: u64,
     avian_version: &str,
     lightyear_version: &str,
     protocol_rev: u32,
-    crate_version: &str,
 ) -> u64 {
     let hash = fnv1a_64(
         0xcbf2_9ce4_8422_2325,
@@ -88,7 +92,27 @@ const fn protocol_fingerprint_for(
     let hash = fingerprint_field(hash, b"wire_types_hash", &wire_types_hash.to_le_bytes());
     let hash = fingerprint_field(hash, b"avian3d", avian_version.as_bytes());
     let hash = fingerprint_field(hash, b"lightyear", lightyear_version.as_bytes());
-    let hash = fingerprint_field(hash, b"protocol_rev", &protocol_rev.to_le_bytes());
+    fingerprint_field(hash, b"protocol_rev", &protocol_rev.to_le_bytes())
+}
+
+/// Derive a handshake tag from the pinned wire manifest PLUS the crate version. The version is
+/// folded LAST onto [`wire_manifest_fingerprint`], so this value is byte-identical to the
+/// pre-split single fold — the split only exposes the version-independent prefix for pinning.
+const fn protocol_fingerprint_for(
+    wire_surface_hash: u64,
+    wire_types_hash: u64,
+    avian_version: &str,
+    lightyear_version: &str,
+    protocol_rev: u32,
+    crate_version: &str,
+) -> u64 {
+    let hash = wire_manifest_fingerprint(
+        wire_surface_hash,
+        wire_types_hash,
+        avian_version,
+        lightyear_version,
+        protocol_rev,
+    );
     fingerprint_field(hash, b"crate_version", crate_version.as_bytes())
 }
 
@@ -1454,12 +1478,23 @@ mod tests {
     /// Handshake fixture: the complete REV-18 manifest fold is pinned as a concrete netcode
     /// `protocol_id`, so fixture drift is visible even when every constituent pin was edited.
     #[test]
-    fn protocol_fingerprint_is_pinned() {
-        const EXPECTED_PROTOCOL_FINGERPRINT: u64 = 0x953b_034b_213c_6b4b;
+    fn wire_manifest_fingerprint_is_pinned() {
+        // Pin the VERSION-INDEPENDENT wire manifest, not the full handshake tag: this trips on a
+        // real wire skew (surface / own types / wire deps / PROTOCOL_REV) but NOT on a routine
+        // crate-version bump. The version still folds into the runtime PROTOCOL_FINGERPRINT for
+        // version-exact handshakes (see `fingerprint_couples_every_pinned_wire_manifest_value`); it
+        // simply no longer forces a re-pin here on every release.
+        let wire_manifest = wire_manifest_fingerprint(
+            WIRE_SURFACE_HASH,
+            WIRE_TYPES_HASH,
+            WIRE_DEP_AVIAN3D,
+            WIRE_DEP_LIGHTYEAR,
+            PROTOCOL_REV,
+        );
+        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0xe4b4_584a_b8fb_1215;
         assert_eq!(
-            PROTOCOL_FINGERPRINT, EXPECTED_PROTOCOL_FINGERPRINT,
-            "protocol fingerprint changed: re-pin the REV-18 handshake fixture to \
-             {PROTOCOL_FINGERPRINT:#018x}",
+            wire_manifest, EXPECTED_WIRE_MANIFEST_FINGERPRINT,
+            "wire manifest changed: re-pin to {wire_manifest:#018x}",
         );
     }
 
