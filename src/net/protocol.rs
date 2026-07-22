@@ -712,9 +712,21 @@ pub(crate) const ROLLBACK_TANK_TRANSMISSION: f32 = 1.0;
 /// Exact weapon-gate divergence gate expressed as a Boolean 0/1 magnitude for trace attribution.
 /// The complete component is integer/discrete state, so ordinary equality is bit-exact.
 pub(crate) const ROLLBACK_WEAPON_GATE: f32 = 1.0;
-/// Exact servo-integrator divergence gate expressed as a Boolean 0/1 magnitude for trace
-/// attribution. Every float compares by raw bits across every deterministic slot.
+/// Servo divergence gate expressed as a Boolean 0/1 magnitude for trace attribution. The aim
+/// angle and rate ride the physical bands below; the view-only `previous` is excluded. (The
+/// determinism hash still consumes every raw servo float — tolerance lives only at the gate.)
 pub(crate) const ROLLBACK_TANK_SERVOS: f32 = 1.0;
+/// Servo aim-angle rollback tolerance (rad). The bit-exact servo gate stormed on ULP-scale aim
+/// jitter (~6e-8 rad observed) that the coarse hull bars already forgive; 1e-5 rad (5.7e-4 deg,
+/// ~8 mm at 800 m) is ~160x that margin yet far below aim/hit resolution and 5000x tighter than
+/// the hull `ROLLBACK_ROTATION_RAD` bar.
+pub(crate) const ROLLBACK_TANK_SERVOS_CURRENT_RAD: f32 = 1.0e-5;
+/// Servo rate rollback tolerance (rad/s). Velocity is bit-stable at rest (the captured storm's
+/// servos were settling, so its velocity divergence was zero) but carries ULP-scale noise while
+/// slewing (~5e-8 rad/s near max slew); this band forgives that on the same footing as `current`,
+/// staying ~2000x under max slew and far above any real one-tick rate desync (an accel step is
+/// ~2e-2 rad/s, 200x this band, so genuine divergences still reconcile).
+pub(crate) const ROLLBACK_TANK_SERVOS_VELOCITY_RAD_S: f32 = 1.0e-4;
 // The registered conditions and watchdog share these metrics and thresholds.
 
 /// Confirmed-vs-predicted `Position` divergence: straight-line distance (m).
@@ -779,14 +791,19 @@ pub(crate) fn weapon_gate_mismatch(a: &WeaponGate, b: &WeaponGate) -> bool {
     a != b
 }
 
-/// Whether two complete servo-integrator snapshots differ. Slot count and all fields compare
-/// exactly; raw float bits make matching NaN payloads equal and signed zero distinct.
+/// Whether two servo-integrator snapshots differ enough to force a rollback. Slot count is exact;
+/// the aim angle and rate compare within physical bands and the view-only `previous` is excluded
+/// (see [`ServoState::rollback_eq`]) — this de-sensitizes the gate that stormed on ULP aim jitter
+/// while the determinism hash keeps consuming every raw float.
 pub(crate) fn tank_servos_mismatch(a: &TankServos, b: &TankServos) -> bool {
     a.states.len() != b.states.len()
-        || a.states
-            .iter()
-            .zip(&b.states)
-            .any(|(left, right)| !left.bit_eq(right))
+        || a.states.iter().zip(&b.states).any(|(left, right)| {
+            !left.rollback_eq(
+                right,
+                ROLLBACK_TANK_SERVOS_CURRENT_RAD,
+                ROLLBACK_TANK_SERVOS_VELOCITY_RAD_S,
+            )
+        })
 }
 
 /// Ordered wire registrations. Keep this list aligned with [`plugin`]; its pinned hash is a direct
@@ -1249,7 +1266,8 @@ mod tests {
     }
 
     #[test]
-    fn tank_servos_rollback_comparison_is_bit_exact_and_atomic() {
+    fn tank_servos_rollback_comparison_bands_floats_and_excludes_view() {
+        use super::{ROLLBACK_TANK_SERVOS_CURRENT_RAD, ROLLBACK_TANK_SERVOS_VELOCITY_RAD_S};
         use crate::tank::ServoState;
 
         let base = TankServos {
@@ -1257,18 +1275,54 @@ mod tests {
         };
         assert!(!tank_servos_mismatch(&base, &base));
 
-        let mut velocity = base.clone();
-        velocity.states[0] = ServoState::test_new(0.25, 0.2, 0.500_000_06);
-        assert!(tank_servos_mismatch(&base, &velocity));
+        // Aim angle: within its band does NOT roll back; beyond it does.
+        let cur_in = TankServos {
+            states: vec![ServoState::test_new(
+                0.25 + ROLLBACK_TANK_SERVOS_CURRENT_RAD * 0.5,
+                0.2,
+                0.5,
+            )],
+        };
+        assert!(!tank_servos_mismatch(&base, &cur_in));
+        let cur_out = TankServos {
+            states: vec![ServoState::test_new(
+                0.25 + ROLLBACK_TANK_SERVOS_CURRENT_RAD * 4.0,
+                0.2,
+                0.5,
+            )],
+        };
+        assert!(tank_servos_mismatch(&base, &cur_out));
 
+        // Rate: within band no rollback; beyond band rolls back.
+        let vel_in = TankServos {
+            states: vec![ServoState::test_new(
+                0.25,
+                0.2,
+                0.5 + ROLLBACK_TANK_SERVOS_VELOCITY_RAD_S * 0.5,
+            )],
+        };
+        assert!(!tank_servos_mismatch(&base, &vel_in));
+        let vel_out = TankServos {
+            states: vec![ServoState::test_new(0.25, 0.2, 0.6)],
+        };
+        assert!(tank_servos_mismatch(&base, &vel_out));
+
+        // `previous` is view-only render-interp: any divergence is excluded from the trigger.
+        let prev_only = TankServos {
+            states: vec![ServoState::test_new(0.25, 0.9, 0.5)],
+        };
+        assert!(!tank_servos_mismatch(&base, &prev_only));
+
+        // Signed zero now compares equal (delta 0, within band).
         let positive_zero = TankServos {
             states: vec![ServoState::test_new(0.0, 0.2, 0.5)],
         };
         let negative_zero = TankServos {
             states: vec![ServoState::test_new(-0.0, 0.2, 0.5)],
         };
-        assert!(tank_servos_mismatch(&positive_zero, &negative_zero));
+        assert!(!tank_servos_mismatch(&positive_zero, &negative_zero));
 
+        // NaN: matching payloads stay equal; distinct payloads still force reconciliation.
         let nan = f32::from_bits(0x7fc0_0042);
         let nan_a = TankServos {
             states: vec![ServoState::test_new(nan, 0.2, 0.5)],
@@ -1284,6 +1338,7 @@ mod tests {
         };
         assert!(tank_servos_mismatch(&nan_a, &nan_b));
 
+        // Slot-count mismatch still triggers.
         assert!(tank_servos_mismatch(
             &base,
             &TankServos { states: Vec::new() }
