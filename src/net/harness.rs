@@ -17,6 +17,7 @@
 //! | `SPIKE_FIRE_TICK` | tick; `300` | Scripted primary-fire tick. |
 //! | `SPIKE_INPUT_DELAY_TICKS` | ticks; shipping default | Input-delay A/B override; zero is meaningful. |
 //! | `SPIKE_JITTER_MS` | milliseconds; `0` | Receive-conditioner jitter. |
+//! | `SPIKE_JITTER_SEED` | `u64`; off | Make active receive jitter reproducible by packet index. |
 //! | `SPIKE_JITTER_MULTIPLE` | integer; `2` | Sync safety-margin multiplier. |
 //! | `SPIKE_LATENCY_MS` | milliseconds; `0` | Receive-conditioner latency. |
 //! | `SPIKE_MG_SHORTCIRCUIT` | flag; off | Experimental MG march short-circuit. |
@@ -37,11 +38,22 @@
 //! | `SPIKE_TRACE_SIM_FIELDS` | flag; off | Add raw sim fields to trace tick rows. |
 //! | `--local` | client flag; off | Force `127.0.0.1:5888`, ahead of env/baked targets. |
 //! | `--capture` | client/server flag; off | Auto-path `SPIKE_TRACE` capture with sim fields on. |
+//!
+//! Seeded jitter is active only when latency and jitter are both nonzero. For example,
+//! `SPIKE_LATENCY_MS=80 SPIKE_JITTER_MS=10 SPIKE_JITTER_SEED=1` gives every received packet the
+//! same deterministic delay offset on every run with the same packet sequence. The seed controls
+//! only those offsets: it is not simulation state and does not enter messages, replication, or the
+//! protocol fingerprint. Without `SPIKE_JITTER_SEED`, the client keeps Lightyear's stock unseeded
+//! receive conditioner.
 
 use core::time::Duration;
+use std::collections::{BTreeMap, VecDeque};
 
 use avian3d::prelude::Forces;
 use bevy::prelude::*;
+use lightyear::core::time::Instant;
+use lightyear::link::RecvPayload;
+use lightyear::prelude::Link;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
 
 use crate::command::TankCommand;
@@ -332,6 +344,117 @@ pub(crate) fn env_parse<T: std::str::FromStr>(name: &str) -> Option<T> {
     })
 }
 
+/// Harness-only receive conditioner selected by `SPIKE_JITTER_SEED`.
+///
+/// Lightyear 0.28's stock conditioner obtains a fresh thread RNG for every packet and exposes no
+/// seeded constructor. This component therefore intercepts raw receive payloads in Lightyear's
+/// `ApplyConditioner` set, exactly between UDP buffering and connection/transport consumption.
+/// Its SplitMix64 output is keyed only by `(seed, packet_index)`: neither OS randomness nor the
+/// delivery clock contributes to the chosen delay. [`Instant`] only anchors and polls that already
+/// chosen duration, as every latency conditioner must.
+#[derive(Component)]
+pub(crate) struct SeededRecvConditioner {
+    seed: u64,
+    packet_index: u64,
+    latency_ms: u64,
+    jitter_ms: u64,
+    pending: BTreeMap<Instant, VecDeque<RecvPayload>>,
+}
+
+impl SeededRecvConditioner {
+    pub(crate) fn new(seed: u64, latency_ms: u64, jitter_ms: u64) -> Self {
+        Self {
+            seed,
+            packet_index: 0,
+            latency_ms,
+            jitter_ms,
+            pending: BTreeMap::new(),
+        }
+    }
+
+    /// Match the pinned stock conditioner's actual distribution: an integer offset in
+    /// `[-jitter_ms, jitter_ms)` is added to base latency, then a negative result is clamped to
+    /// immediate delivery. For ordinary millisecond ranges, modulo bucket counts differ by at most
+    /// one output over the full `u64` domain and, unlike `rand::rng`, the result is reproducible.
+    fn next_delay(&mut self) -> Duration {
+        let delay_ms = seeded_delay_ms(
+            self.seed,
+            self.packet_index,
+            self.latency_ms,
+            self.jitter_ms,
+        );
+        self.packet_index = self.packet_index.wrapping_add(1);
+        Duration::from_millis(delay_ms)
+    }
+
+    fn condition_packet(&mut self, packet: RecvPayload, received_at: Instant) {
+        let ready_at = received_at + self.next_delay();
+        self.pending.entry(ready_at).or_default().push_back(packet);
+    }
+
+    fn pop_ready(&mut self, now: Instant) -> Option<RecvPayload> {
+        let ready_at = self
+            .pending
+            .first_key_value()
+            .map(|(ready_at, _)| *ready_at)?;
+        if ready_at > now {
+            return None;
+        }
+
+        let (packet, empty) = {
+            let packets = self
+                .pending
+                .get_mut(&ready_at)
+                .expect("first pending jitter timestamp must still exist");
+            let packet = packets
+                .pop_front()
+                .expect("a pending jitter timestamp must contain a packet");
+            (packet, packets.is_empty())
+        };
+        if empty {
+            self.pending.remove(&ready_at);
+        }
+        Some(packet)
+    }
+}
+
+/// Intercept newly received payloads after Lightyear's IO buffer step, then return only payloads
+/// whose seeded delay has elapsed. Registered only when seeded jitter is active, so an unset seed
+/// does not add a system or replace the stock conditioner.
+pub(crate) fn apply_seeded_recv_conditioner(
+    mut links: Query<(&mut Link, &mut SeededRecvConditioner)>,
+) {
+    let now = Instant::now();
+    for (mut link, mut conditioner) in &mut links {
+        for packet in link.recv.drain() {
+            conditioner.condition_packet(packet, now);
+        }
+        while let Some(packet) = conditioner.pop_ready(now) {
+            link.recv.push_raw(packet);
+        }
+    }
+}
+
+fn seeded_delay_ms(seed: u64, packet_index: u64, latency_ms: u64, jitter_ms: u64) -> u64 {
+    if jitter_ms == 0 {
+        return latency_ms;
+    }
+
+    // SplitMix64's fixed odd increment gives every packet index a distinct input across the full
+    // u64 cycle. This is a keyed function, not mutable entropy: packet N is determined entirely by
+    // `(seed, N)` even if an earlier delivery is reordered by jitter.
+    const GAMMA: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut mixed = seed.wrapping_add(GAMMA.wrapping_mul(packet_index.wrapping_add(1)));
+    mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    mixed ^= mixed >> 31;
+
+    let span = jitter_ms.saturating_mul(2);
+    let bucket = mixed % span;
+    let delay_ms = i128::from(latency_ms) + i128::from(bucket) - i128::from(jitter_ms);
+    delay_ms.clamp(0, i128::from(u64::MAX)) as u64
+}
+
 /// Per-client one-shot: fires ~2 s after connect, applying a large lateral impulse the client
 /// cannot have predicted (server-only side effect) — guarantees a misprediction and thus a
 /// rollback (increment 5 success criterion).
@@ -421,7 +544,9 @@ pub(crate) fn jitter_multiple() -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_env_flag;
+    use core::time::Duration;
+
+    use super::{SeededRecvConditioner, parse_env_flag};
 
     #[test]
     fn env_flag_value_parsing_truth_table() {
@@ -435,6 +560,26 @@ mod tests {
         assert!(
             !parse_env_flag(None, false),
             "missing uses the false default"
+        );
+    }
+
+    #[test]
+    fn seeded_jitter_delay_sequence_is_reproducible() {
+        let mut first = SeededRecvConditioner::new(0x5eed_cafe_f00d_beef, 80, 10);
+        let mut second = SeededRecvConditioner::new(0x5eed_cafe_f00d_beef, 80, 10);
+        let mut different = SeededRecvConditioner::new(0x5eed_cafe_f00d_bef0, 80, 10);
+
+        let first: Vec<_> = (0..64).map(|_| first.next_delay()).collect();
+        let second: Vec<_> = (0..64).map(|_| second.next_delay()).collect();
+        let different: Vec<_> = (0..64).map(|_| different.next_delay()).collect();
+
+        assert_eq!(first, second, "the same seed must reproduce every delay");
+        assert_ne!(first, different, "different seeds must change the pattern");
+        assert!(
+            first.iter().all(
+                |delay| (Duration::from_millis(70)..Duration::from_millis(90)).contains(delay)
+            ),
+            "80 ms base plus stock-shaped 10 ms jitter must stay in [70, 90) ms",
         );
     }
 }

@@ -256,7 +256,7 @@ const RESERVE_MARGIN_FRACTION: f32 = 0.10;
 /// Stage-C absolute reserve floor (N, both tracks together). 10 kN is large enough to dominate
 /// contact-reaction float jitter yet only 1.8% of the Tiger's weight and about half the fractional
 /// margin on the DERIVED 191 kN 20-degree demand. SIM POLICY.
-const RESERVE_MARGIN_FLOOR_N: f32 = 10_000.0;
+pub(crate) const RESERVE_MARGIN_FLOOR_N: f32 = 10_000.0;
 
 /// Stage-C load filter time scale in fixed decision ticks. An EMA divisor of eight is a
 /// deterministic ~0.125 s DERIVED low-pass at the 64 Hz SIM POLICY; the state freezes while the box is declutched so
@@ -777,6 +777,16 @@ impl TransmissionProjectionValue {
                     to: b_to,
                 },
             ) => a_tag == b_tag && a_from == b_from && a_to == b_to,
+            _ => false,
+        }
+    }
+
+    /// Absolute-tolerance equality for a projected float. Raw-bit equality is checked first so
+    /// matching NaN payloads remain the same carried state; distinct NaNs and non-float variants
+    /// never compare equal through a tolerance.
+    pub(crate) fn float_eq(self, other: Self, eps: f32) -> bool {
+        match (self, other) {
+            (Self::F32(a), Self::F32(b)) => a.to_bits() == b.to_bits() || (a - b).abs() <= eps,
             _ => false,
         }
     }
