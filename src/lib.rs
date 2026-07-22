@@ -83,6 +83,11 @@ mod shot_trace;
 mod sight;
 mod spec;
 mod state;
+/// The suspension editor (`bin/suspension_editor`). Public so the binary can mount it; not part of
+/// `GamePlugin`. A read-only dev tool: it loads the Tiger blueprint (geometry + spec) and overlays
+/// the derived suspension/track geometry (route, cast shapes, pin/tooth markers, contact) as
+/// toggleable gizmo layers, live-tweakable — the workbench for the track-model source-of-truth work.
+pub mod suspension_editor;
 mod tank;
 /// The jitter-trace recorder (`SPIKE_TRACE=<path>`): an env-gated JSONL log of rendered vs. simulated
 /// pose, rollback events, and correction decay — passive instrumentation for the MP hull-jitter

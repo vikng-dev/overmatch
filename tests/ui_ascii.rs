@@ -64,7 +64,11 @@ const BARLOW_TEXT_FILES: &[&str] = &[
 
 /// The dev-sandbox files that spawn `Text`. These keep Bevy's default ASCII-only font (AGENTS.md), so
 /// their rendered literals must be pure printable ASCII — the typographic set is NOT available to them.
-const ASCII_ONLY_TEXT_FILES: &[&str] = &["src/sandbox.rs", "src/track_sandbox/mod.rs"];
+const ASCII_ONLY_TEXT_FILES: &[&str] = &[
+    "src/sandbox.rs",
+    "src/track_sandbox/mod.rs",
+    "src/suspension_editor/mod.rs",
+];
 
 /// Macros whose string arguments are diagnostics, never rendered — skipped by the scanner.
 const DIAGNOSTIC_MACROS: &[&str] = &[
