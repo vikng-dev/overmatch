@@ -1455,7 +1455,7 @@ mod tests {
     /// `protocol_id`, so fixture drift is visible even when every constituent pin was edited.
     #[test]
     fn protocol_fingerprint_is_pinned() {
-        const EXPECTED_PROTOCOL_FINGERPRINT: u64 = 0x9559_994b_2156_67bc;
+        const EXPECTED_PROTOCOL_FINGERPRINT: u64 = 0x953b_034b_213c_6b4b;
         assert_eq!(
             PROTOCOL_FINGERPRINT, EXPECTED_PROTOCOL_FINGERPRINT,
             "protocol fingerprint changed: re-pin the REV-18 handshake fixture to \
