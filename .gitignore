@@ -3,6 +3,7 @@
 .DS_Store
 **/.DS_Store
 /handoff.md
+*.blend
 *.blend1
 
 # Firecrawl research scratch (web search/scrape cache)
