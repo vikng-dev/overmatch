@@ -27,6 +27,7 @@
 //! and draws.
 
 mod derive;
+mod model;
 
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
@@ -36,9 +37,16 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use bevy::world_serialization::WorldAssetRoot;
 
 use crate::bake::{self, TankBlueprint};
-use crate::spec::{self, TrackSpec};
+use crate::spec;
 use crate::tank::TrackSide;
 use derive::SuspensionParams;
+use model::DerivedModel;
+
+/// Path to the Tiger glb, resolved through the shared asset root (same as the bake), for the direct
+/// mesh-radius read the blueprint doesn't cover.
+fn tiger_glb() -> std::path::PathBuf {
+    crate::assets::asset_root().join("tiger_1/tiger_1.glb")
+}
 
 /// Which vertical offset the running-gear circles get before the route is built — the three cast
 /// poses the editor overlays.
@@ -59,6 +67,7 @@ pub fn plugin(app: &mut App) {
         // sim/physics/tank-spawn: this is a pure read-and-draw dev tool.
         .add_plugins((spec::plugin, bake::plugin))
         .init_resource::<EditorParams>()
+        .init_resource::<Teeth>()
         .init_resource::<VizToggles>()
         .add_systems(
             Startup,
@@ -93,6 +102,18 @@ pub fn plugin(app: &mut App) {
 /// The live-tweakable suspension knobs (the NEW authoring params not yet in the RON).
 #[derive(Resource, Default)]
 struct EditorParams(SuspensionParams);
+
+/// The sprocket tooth count — the one authored count, kept a live editor knob (default 20, the
+/// model's value) rather than read from the RON, so the editor reflects the model without touching
+/// the game's gearing. `,` / `.` nudge it.
+#[derive(Resource)]
+struct Teeth(u32);
+
+impl Default for Teeth {
+    fn default() -> Self {
+        Self(20)
+    }
+}
 
 /// Which overlay layers are drawn. All on by default; number keys toggle them.
 #[derive(Resource)]
@@ -221,17 +242,20 @@ fn scene_unbuilt(scene: Option<Res<SceneGeom>>, blueprint: Option<Res<TankBluepr
 fn setup_scene(
     mut commands: Commands,
     blueprint: Res<TankBlueprint>,
+    teeth: Res<Teeth>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let track = &blueprint.spec.track;
-    let belt_len = track.pitch * track.link_count as f32;
+    // Derive the whole track model from the glb markers/nodes (falls back to the RON on an old glb).
+    let derived = DerivedModel::build(&blueprint, &tiger_glb());
+    let belt_len = derived.pitch * derived.link_count as f32;
 
     // Ground at the rest track's lowest point: build the rest route and take its min y.
     let circles = side_circles(
-        track,
+        &derived,
         &blueprint,
         TrackSide::Right,
+        teeth.0,
         Pose::Rest,
         &Default::default(),
     );
@@ -258,7 +282,7 @@ fn setup_scene(
     ));
     // The belly bump — a raised block so the footprint penetration varies across the track.
     let span = geom.bump_z.1 - geom.bump_z.0;
-    let width = track.plane_x * 2.0 + track.width;
+    let width = derived.plane_x * 2.0 + blueprint.spec.track.width;
     commands.spawn((
         Mesh3d(meshes.add(Cuboid::new(width, geom.bump_h, span))),
         MeshMaterial3d(materials.add(StandardMaterial {
@@ -273,6 +297,7 @@ fn setup_scene(
         ),
     ));
 
+    commands.insert_resource(derived);
     commands.insert_resource(geom);
 }
 
@@ -285,21 +310,22 @@ fn setup_scene(
 /// SPRUNG road wheels move from their loaded rest (sprocket + idler are hull-fixed, so the cast
 /// shapes pin at the ends and swing in the middle — the trapezoid the design sketched).
 fn side_circles(
-    track: &TrackSpec,
+    model: &DerivedModel,
     blueprint: &TankBlueprint,
     side: TrackSide,
+    teeth: u32,
     pose: Pose,
     params: &SuspensionParams,
 ) -> Vec<(Vec2, f32)> {
+    // Sprocket pin line = chord-exact from pitch × teeth (its centre from the Sprocket node).
     let sprocket = (
-        Vec2::new(track.sprocket.center.0, track.sprocket.center.1),
-        derive::sprocket_pitch_radius(track.pitch, track.sprocket.teeth),
+        model.sprocket_center,
+        derive::sprocket_pitch_radius(model.pitch, teeth),
     );
-    // Idler: its measured radius (pin-line handling for the idler is a convention the editor is
-    // here to settle — the shipped view feeds the raw radius, so match that for now).
+    // Idler pin line = its measured rim + the pin→inner offset (centre from the Idler node).
     let idler = (
-        Vec2::new(track.idler.center.0, track.idler.center.1),
-        track.idler.radius,
+        model.idler_center,
+        derive::pin_line_radius(model.idler_radius, model.pin_to_inner),
     );
     let wheels: Vec<Vec2> = blueprint
         .geometry
@@ -311,8 +337,9 @@ fn side_circles(
             Vec2::new(p.z, p.y)
         })
         .collect();
-    let pin_r = derive::pin_line_radius(track.wheel_radius, track.thickness);
-    assemble_circles(sprocket, idler, &wheels, pin_r, pose, params)
+    // Wheel pin line = measured tread + the pin→inner offset.
+    let wheel_pin_r = derive::pin_line_radius(model.wheel_tread, model.pin_to_inner);
+    assemble_circles(sprocket, idler, &wheels, wheel_pin_r, pose, params)
 }
 
 /// Assemble the front→rear pin-line circle list from raw running-gear data, applying the cast-pose
@@ -368,32 +395,34 @@ const WHITE: Color = Color::srgb(0.95, 0.96, 1.0);
 fn draw_suspension(
     mut gizmos: Gizmos,
     blueprint: Res<TankBlueprint>,
+    model: Res<DerivedModel>,
+    teeth: Res<Teeth>,
     params: Res<EditorParams>,
     toggles: Res<VizToggles>,
     geom: Res<SceneGeom>,
 ) {
-    let track = &blueprint.spec.track;
-    let plane_x = track.plane_x;
+    let plane_x = model.plane_x;
     let p = &params.0;
+    let width = blueprint.spec.track.width;
 
     for side in [TrackSide::Left, TrackSide::Right] {
         // --- Circles (pin-line running gear) ---
         if toggles.circles {
-            for (c, r) in side_circles(track, &blueprint, side, Pose::Rest, p) {
+            for (c, r) in side_circles(&model, &blueprint, side, teeth.0, Pose::Rest, p) {
                 draw_circle(&mut gizmos, world(side, c, plane_x), r, CYAN);
             }
         }
 
         // --- Cast poses: rest route, droop (green), compression (red) ---
         let rest = crate::track::route::build_route(
-            &side_circles(track, &blueprint, side, Pose::Rest, p),
+            &side_circles(&model, &blueprint, side, teeth.0, Pose::Rest, p),
             geom.belt_len,
         );
         if toggles.route {
             draw_loop(&mut gizmos, side, &rest.pts, plane_x, ORANGE);
         }
         let droop = crate::track::route::build_route(
-            &side_circles(track, &blueprint, side, Pose::Droop, p),
+            &side_circles(&model, &blueprint, side, teeth.0, Pose::Droop, p),
             geom.belt_len,
         );
         if toggles.droop {
@@ -401,7 +430,7 @@ fn draw_suspension(
         }
         if toggles.compression {
             let comp = crate::track::route::build_route(
-                &side_circles(track, &blueprint, side, Pose::Compression, p),
+                &side_circles(&model, &blueprint, side, teeth.0, Pose::Compression, p),
                 geom.belt_len,
             );
             draw_loop(&mut gizmos, side, &comp.pts, plane_x, RED);
@@ -409,12 +438,12 @@ fn draw_suspension(
 
         // --- Buoyant box: convex bound of the droop shape's lower (ground) run ---
         if toggles.buoyant_box {
-            draw_buoyant_box(&mut gizmos, side, &droop.pts, plane_x, track.width, GREEN);
+            draw_buoyant_box(&mut gizmos, side, &droop.pts, plane_x, width, GREEN);
         }
 
         // --- Belt: discrete links resampled at pitch, with pin markers ---
         if toggles.belt {
-            let pins = crate::track::route::resample(&rest.pts, track.pitch, 0.0);
+            let pins = crate::track::route::resample(&rest.pts, model.pitch, 0.0);
             for (i, w) in pins.windows(2).enumerate() {
                 let a = world(side, w[0], plane_x);
                 let b = world(side, w[1], plane_x);
@@ -427,7 +456,7 @@ fn draw_suspension(
 
         // --- Sprocket teeth ring + tooth-0 ---
         if toggles.sprocket {
-            draw_sprocket(&mut gizmos, side, track, plane_x);
+            draw_sprocket(&mut gizmos, side, &model, teeth.0, plane_x);
         }
 
         // --- Contact: droop-shape penetration against the ground ---
@@ -516,12 +545,17 @@ fn draw_buoyant_box(
 /// The sprocket tooth ring: `teeth` radial ticks at the pitch radius, `tooth-0` highlighted. Teeth
 /// mesh BETWEEN pins (the settled convention), so the ticks sit at the pitch circle where the pin
 /// line rides.
-fn draw_sprocket(gizmos: &mut Gizmos, side: TrackSide, track: &TrackSpec, plane_x: f32) {
-    let center = Vec2::new(track.sprocket.center.0, track.sprocket.center.1);
-    let r = derive::sprocket_pitch_radius(track.pitch, track.sprocket.teeth);
+fn draw_sprocket(
+    gizmos: &mut Gizmos,
+    side: TrackSide,
+    model: &DerivedModel,
+    teeth: u32,
+    plane_x: f32,
+) {
+    let center = model.sprocket_center;
+    let r = derive::sprocket_pitch_radius(model.pitch, teeth);
     let center_w = world(side, center, plane_x);
     draw_circle(gizmos, center_w, r, WHITE);
-    let teeth = track.sprocket.teeth;
     for t in 0..teeth {
         let ang = std::f32::consts::TAU * t as f32 / teeth as f32;
         let dir = Vec2::from_angle(ang);
@@ -671,8 +705,13 @@ fn toggle_layers(keys: Res<ButtonInput<KeyCode>>, mut t: ResMut<VizToggles>) {
 }
 
 /// `[` `]` nudge ride frequency (softer/stiffer → droop shape moves); `-` `=` nudge the bump-stop
-/// (compression shape moves). This live re-derivation is what makes it an editor.
-fn tweak_params(keys: Res<ButtonInput<KeyCode>>, mut params: ResMut<EditorParams>) {
+/// (compression shape moves); `,` `.` nudge the tooth count (sprocket radius moves). This live
+/// re-derivation is what makes it an editor.
+fn tweak_params(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut params: ResMut<EditorParams>,
+    mut teeth: ResMut<Teeth>,
+) {
     let p = &mut params.0;
     if keys.just_pressed(KeyCode::BracketLeft) {
         p.ride_frequency = (p.ride_frequency - 0.1).max(0.4);
@@ -685,6 +724,12 @@ fn tweak_params(keys: Res<ButtonInput<KeyCode>>, mut params: ResMut<EditorParams
     }
     if keys.just_pressed(KeyCode::Equal) {
         p.bump_stop = (p.bump_stop + 0.02).min(0.5);
+    }
+    if keys.just_pressed(KeyCode::Comma) {
+        teeth.0 = teeth.0.saturating_sub(1).max(6);
+    }
+    if keys.just_pressed(KeyCode::Period) {
+        teeth.0 = (teeth.0 + 1).min(40);
     }
 }
 
@@ -728,6 +773,8 @@ fn spawn_panel(mut commands: Commands) {
 
 fn update_panel(
     blueprint: Option<Res<TankBlueprint>>,
+    model: Option<Res<DerivedModel>>,
+    teeth: Res<Teeth>,
     params: Res<EditorParams>,
     toggles: Res<VizToggles>,
     geom: Option<Res<SceneGeom>>,
@@ -736,54 +783,54 @@ fn update_panel(
     let Ok(mut text) = text.single_mut() else {
         return;
     };
-    let Some(blueprint) = blueprint else {
-        *text = Text::new("loading Tiger blueprint...");
+    let (Some(blueprint), Some(model)) = (blueprint, model) else {
+        *text = Text::new("deriving model from glb markers...");
         return;
     };
-    let spec = &blueprint.spec;
-    let track = &spec.track;
+    let m = &*model;
     let p = &params.0;
+    let teeth = teeth.0;
 
-    let sprocket_r = derive::sprocket_pitch_radius(track.pitch, track.sprocket.teeth);
+    let sprocket_pin = derive::sprocket_pitch_radius(m.pitch, teeth);
+    let sprocket_seat = sprocket_pin - m.pin_to_inner;
+    let wheel_pin = derive::pin_line_radius(m.wheel_tread, m.pin_to_inner);
+    let idler_pin = derive::pin_line_radius(m.idler_radius, m.pin_to_inner);
     let droop = derive::static_deflection(p.ride_frequency);
-    let k = derive::spring_rate(spec.mass, p.ride_frequency);
-    let c = derive::damping_coefficient(spec.mass, p.ride_frequency, p.damping_ratio);
-    let pin_r = derive::pin_line_radius(track.wheel_radius, track.thickness);
+    let k = derive::spring_rate(m.mass, p.ride_frequency);
+    let c = derive::damping_coefficient(m.mass, p.ride_frequency, p.damping_ratio);
     let belt_len = geom.as_ref().map(|g| g.belt_len).unwrap_or(0.0);
     let n_wheels = track_side_count(&blueprint, TrackSide::Right);
 
-    // Self-check: rebuild the rest route and confirm the derived link count matches the authored
-    // one, and that the belt resampled at pitch really does step by `pitch` (the loop closes on the
-    // material length). This is the editor validating the universal laws against the RON.
-    let rest_circles = side_circles(track, &blueprint, TrackSide::Right, Pose::Rest, p);
+    // Self-check: the taut wrap's implied link count vs the authored one, and the belt resampled at
+    // pitch stepping by pitch — the editor validating the derivation.
+    let rest_circles = side_circles(m, &blueprint, TrackSide::Right, teeth, Pose::Rest, p);
     let taut = crate::track::route::build_route(&rest_circles, 0.0);
-    let derived_count = derive::link_count(taut.total(), track.pitch);
-    let draped = crate::track::route::build_route(&rest_circles, belt_len);
-    let pins = crate::track::route::resample(&draped.pts, track.pitch, 0.0);
-    let pin_pitch = if pins.len() >= 2 {
-        derive::pitch_from_pins(pins[0], pins[1])
-    } else {
-        0.0
-    };
+    let taut_count = derive::link_count(taut.total(), m.pitch);
 
+    let src = if m.marker_driven {
+        "glb markers"
+    } else {
+        "RON fallback (re-export!)"
+    };
     let on = |b: bool| if b { "on " } else { "off" };
     *text = Text::new(format!(
-        "SUSPENSION EDITOR - Tiger I\n\
+        "SUSPENSION EDITOR - Tiger I     [{src}]\n\
          \n\
-         SOURCES (glb + RON)\n\
-         mass          {:.0} kg\n\
-         pitch         {:.3} m   link_count {}\n\
-         wheel_radius  {:.3} m   thickness  {:.3} m\n\
-         sprocket      {} teeth\n\
-         idler_radius  {:.3} m   plane_x    {:.3} m\n\
-         road wheels   {} / side\n\
+         SOURCES (measured from model)\n\
+         pitch          {:.4} m   (Pin_End-Pin_Start)\n\
+         pin->inner     {:.4} m   pin->outer {:.4} m\n\
+         thickness      {:.4} m   plane_x    {:.4} m\n\
+         wheel tread    {:.4} m   idler rim  {:.4} m\n\
+         sprocket ctr   ({:.3},{:.3})  idler ctr ({:.3},{:.3})\n\
+         road wheels    {} / side\n\
+         \n\
+         AUTHORED         teeth {} (, .)   link_count {}   mass {:.0} kg\n\
          \n\
          DERIVED (universal laws)\n\
-         sprocket pitch r  {:.4} m  (pitch*teeth/tau)\n\
-         pin-line r        {:.4} m  (wheel_r + thick/2)\n\
-         belt loop         {:.3} m  (pitch*count)\n\
-         taut wrap         {:.3} m  -> derived links {} (authored {})\n\
-         pin pitch check   {:.4} m  (authored {:.3})\n\
+         sprocket pin-line {:.4} m  (pitch/2sin(pi/teeth), chord)\n\
+         sprocket seat     {:.4} m  (pin-line - pin->inner)\n\
+         wheel pin-line    {:.4} m   idler pin-line {:.4} m\n\
+         belt loop         {:.3} m   taut wrap {:.3} m -> {} links\n\
          \n\
          SUSPENSION (tweakable)\n\
          ride freq [ ]     {:.2} Hz\n\
@@ -797,23 +844,28 @@ fn update_panel(
          5 box:{}  6 belt:{}  7 sprocket:{}  8 contact:{}\n\
          M model   WASD/mouse fly   Esc cursor\n\
          green=max droop (soft)  red=max compression (hard)  orange=rest route",
-        spec.mass,
-        track.pitch,
-        track.link_count,
-        track.wheel_radius,
-        track.thickness,
-        track.sprocket.teeth,
-        track.idler.radius,
-        track.plane_x,
+        m.pitch,
+        m.pin_to_inner,
+        m.pin_to_outer,
+        m.pin_to_inner + m.pin_to_outer,
+        m.plane_x,
+        m.wheel_tread,
+        m.idler_radius,
+        m.sprocket_center.x,
+        m.sprocket_center.y,
+        m.idler_center.x,
+        m.idler_center.y,
         n_wheels,
-        sprocket_r,
-        pin_r,
+        teeth,
+        m.link_count,
+        m.mass,
+        sprocket_pin,
+        sprocket_seat,
+        wheel_pin,
+        idler_pin,
         belt_len,
         taut.total(),
-        derived_count,
-        track.link_count,
-        pin_pitch,
-        track.pitch,
+        taut_count,
         p.ride_frequency,
         p.bump_stop,
         p.damping_ratio,
@@ -836,6 +888,8 @@ fn update_panel(
 /// scripting hook) — zero cost otherwise.
 fn dump_and_exit(
     blueprint: Res<TankBlueprint>,
+    model: Res<DerivedModel>,
+    teeth: Res<Teeth>,
     params: Res<EditorParams>,
     geom: Res<SceneGeom>,
     mut exit: MessageWriter<AppExit>,
@@ -843,10 +897,11 @@ fn dump_and_exit(
     if std::env::var("SUSPENSION_EDITOR_DUMP").is_err() {
         return;
     }
-    let track = &blueprint.spec.track;
+    let m = &*model;
+    let teeth = teeth.0;
     let p = &params.0;
     let bounds = |pose: Pose| {
-        let c = side_circles(track, &blueprint, TrackSide::Right, pose, p);
+        let c = side_circles(m, &blueprint, TrackSide::Right, teeth, pose, p);
         let r = crate::track::route::build_route(&c, geom.belt_len);
         let (mut ylo, mut yhi, mut zlo, mut zhi) = (
             f32::INFINITY,
@@ -865,23 +920,39 @@ fn dump_and_exit(
     let (r_ylo, r_yhi, r_zlo, r_zhi, r_len) = bounds(Pose::Rest);
     let (d_ylo, ..) = bounds(Pose::Droop);
     let (c_ylo, ..) = bounds(Pose::Compression);
-    let taut = crate::track::route::build_route(
-        &side_circles(track, &blueprint, TrackSide::Right, Pose::Rest, p),
-        0.0,
-    );
-    info!("=== SUSPENSION EDITOR DUMP (Tiger, right side) ===");
+    let sprocket_pin = derive::sprocket_pitch_radius(m.pitch, teeth);
     info!(
-        "wheels/side {}  pitch {:.3}  authored links {}  derived(taut {:.3}) {}",
+        "=== SUSPENSION EDITOR DUMP (Tiger, right side) — source: {} ===",
+        if m.marker_driven {
+            "glb markers"
+        } else {
+            "RON fallback"
+        }
+    );
+    info!(
+        "wheels/side {}  pitch {:.4}  teeth {}  link_count {}",
         track_side_count(&blueprint, TrackSide::Right),
-        track.pitch,
-        track.link_count,
-        taut.total(),
-        derive::link_count(taut.total(), track.pitch),
+        m.pitch,
+        teeth,
+        m.link_count,
     );
     info!(
-        "sprocket pitch_r {:.4}  pin-line_r {:.4}  belt_len {:.3}  rest route_len {:.3}",
-        derive::sprocket_pitch_radius(track.pitch, track.sprocket.teeth),
-        derive::pin_line_radius(track.wheel_radius, track.thickness),
+        "pin->inner {:.4}  pin->outer {:.4}  plane_x {:.4}  wheel tread {:.4}  idler rim {:.4}",
+        m.pin_to_inner, m.pin_to_outer, m.plane_x, m.wheel_tread, m.idler_radius,
+    );
+    info!(
+        "sprocket: pin-line {:.4}  seat {:.4}  ctr ({:.3},{:.3})   idler pin-line {:.4}  ctr ({:.3},{:.3})",
+        sprocket_pin,
+        sprocket_pin - m.pin_to_inner,
+        m.sprocket_center.x,
+        m.sprocket_center.y,
+        derive::pin_line_radius(m.idler_radius, m.pin_to_inner),
+        m.idler_center.x,
+        m.idler_center.y,
+    );
+    info!(
+        "wheel pin-line {:.4}  belt_len {:.3}  rest route_len {:.3}",
+        derive::pin_line_radius(m.wheel_tread, m.pin_to_inner),
         geom.belt_len,
         r_len,
     );
@@ -898,12 +969,6 @@ fn dump_and_exit(
         c_ylo - r_ylo,
         p.ride_frequency,
         p.bump_stop,
-    );
-    info!(
-        "static deflection {:.3}  spring_rate {:.0} N/m  damper {:.0} N.s/m",
-        derive::static_deflection(p.ride_frequency),
-        derive::spring_rate(blueprint.spec.mass, p.ride_frequency),
-        derive::damping_coefficient(blueprint.spec.mass, p.ride_frequency, p.damping_ratio),
     );
     exit.write(AppExit::Success);
 }

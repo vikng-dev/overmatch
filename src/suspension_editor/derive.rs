@@ -7,7 +7,7 @@
 //! the sim/view tiers. Nothing here reads a file, an asset, or the ECS — it is all `f32` in, `f32`
 //! out, so the tests below pin the laws directly.
 
-use bevy::math::Vec2;
+use bevy::math::Vec3;
 
 /// Standard gravity (m/s²) — the load every static-deflection law divides by.
 pub const G: f32 = 9.81;
@@ -59,17 +59,20 @@ pub fn damping_coefficient(sprung_mass: f32, ride_frequency: f32, zeta: f32) -> 
     2.0 * zeta * (spring_rate(sprung_mass, ride_frequency) * sprung_mass).sqrt()
 }
 
-/// Track pitch from the two pin markers = `|pin1 − pin0|`. The pitch is READ from the link glb's
-/// `pin-0`/`pin-1` empties, never authored — the physical rigid-link loop's one immutable length.
-pub fn pitch_from_pins(pin0: Vec2, pin1: Vec2) -> f32 {
+/// Track pitch from the two pin markers = `|Pin_End − Pin_Start|`. The pitch is READ from the glb's
+/// `Pin_Start`/`Pin_End` empties, never authored — the physical rigid-link loop's one immutable
+/// length.
+pub fn pitch_from_pins(pin0: Vec3, pin1: Vec3) -> f32 {
     (pin1 - pin0).length()
 }
 
-/// Sprocket pitch radius that GUARANTEES meshing: `r = pitch·teeth/(2π)`. Deriving the radius from
-/// the tooth count (rather than measuring it off the mesh) makes tooth pitch equal link pitch by
-/// construction — pins can't walk off the teeth. `teeth` is the authored count.
+/// Sprocket pin-line radius that GUARANTEES meshing: the pins seat as a CHORD of the pitch circle,
+/// so `r = pitch / (2·sin(π/teeth))` — exact, not the `pitch·teeth/2π` ARC approximation (which
+/// under-sizes by ~0.5% at 20 teeth; that was the RON's "0.3931 derived vs 0.3956 measured" gap).
+/// This is the circle the pin CENTERS ride, so the route wraps it; the visible track-contact seat is
+/// `r − pin_to_inner`. `teeth` is the authored count.
 pub fn sprocket_pitch_radius(pitch: f32, teeth: u32) -> f32 {
-    pitch * teeth as f32 / std::f32::consts::TAU
+    pitch / (2.0 * (std::f32::consts::PI / teeth as f32).sin())
 }
 
 /// Link count that fills a belt loop of `perimeter` at `pitch`: `round(perimeter/pitch)`. The
@@ -78,10 +81,15 @@ pub fn link_count(perimeter: f32, pitch: f32) -> usize {
     (perimeter / pitch).round().max(1.0) as usize
 }
 
-/// Pin-line radius for a running-gear circle: `wheel_radius + thickness/2` (route.rs convention —
-/// the pins ride half a track-thickness outboard of the wheel tread).
-pub fn pin_line_radius(wheel_radius: f32, thickness: f32) -> f32 {
-    wheel_radius + thickness * 0.5
+/// Pin-line radius from a running-gear contact surface: `contact_radius + pin_to_inner`. The track's
+/// inner face rides the wheel/idler tread at `contact_radius`; the pin centers sit `pin_to_inner`
+/// outboard of that (`pin_to_inner` is MEASURED from the link's Pin/Inner_Surface markers, not
+/// assumed to be half the thickness). The two surface offsets — `pin_to_inner` and `pin_to_outer` —
+/// are read independently, so there's no mid-plate assumption: asymmetric shoes just work, which is
+/// also where the deferred grouser re-enters (put `Outer_Surface` on the cleat tip and the outer
+/// offset carries it). See [`crate::suspension_editor::model`] for the marker read.
+pub fn pin_line_radius(contact_radius: f32, pin_to_inner: f32) -> f32 {
+    contact_radius + pin_to_inner
 }
 
 #[cfg(test)]
@@ -90,12 +98,14 @@ mod tests {
 
     #[test]
     fn sprocket_radius_guarantees_tiger_mesh() {
-        // 19 teeth × 0.130 pitch / τ — the RON's own derived 0.3931 m (spec.rs:231, ron:18).
-        let r = sprocket_pitch_radius(0.130, 19);
-        assert!((r - 0.3931).abs() < 1e-3, "got {r}");
-        // Meshing invariant: tooth pitch (arc per tooth) == link pitch, exactly.
-        let tooth_pitch = std::f32::consts::TAU * r / 19.0;
-        assert!((tooth_pitch - 0.130).abs() < 1e-4);
+        // Chord-exact pin circle for the model's 20 teeth at the measured 0.13043 pitch.
+        let r = sprocket_pitch_radius(0.13043, 20);
+        assert!((r - 0.41688).abs() < 1e-3, "got {r}");
+        // Meshing invariant: the pin CHORD between adjacent teeth equals the link pitch, exactly.
+        let chord = 2.0 * r * (std::f32::consts::PI / 20.0).sin();
+        assert!((chord - 0.13043).abs() < 1e-5);
+        // The arc approximation would under-size it — the source of the RON's 2.5 mm gap.
+        assert!(r > 0.13043 * 20.0 / std::f32::consts::TAU);
     }
 
     #[test]
@@ -120,10 +130,10 @@ mod tests {
 
     #[test]
     fn pitch_reads_off_pin_markers() {
-        assert!((pitch_from_pins(Vec2::ZERO, Vec2::new(0.130, 0.0)) - 0.130).abs() < 1e-6);
+        assert!((pitch_from_pins(Vec3::ZERO, Vec3::new(0.0, 0.130, 0.0)) - 0.130).abs() < 1e-6);
         // Orientation-free: a diagonal pin span of length 0.13.
-        let p = Vec2::new(0.078, 0.104); // 3-4-5 → 0.130
-        assert!((pitch_from_pins(Vec2::ZERO, p) - 0.130).abs() < 1e-4);
+        let p = Vec3::new(0.078, 0.0, 0.104); // 3-4-5 → 0.130
+        assert!((pitch_from_pins(Vec3::ZERO, p) - 0.130).abs() < 1e-4);
     }
 
     #[test]
@@ -140,7 +150,9 @@ mod tests {
     }
 
     #[test]
-    fn pin_line_sits_outboard_of_the_tread() {
-        assert!((pin_line_radius(0.458, 0.117) - (0.458 + 0.0585)).abs() < 1e-6);
+    fn pin_line_sits_outboard_of_the_contact_surface() {
+        // Tiger: measured tread 0.405 + measured pin→inner 0.0246 ≈ 0.4296 pin line (the correct
+        // wheel circle — vs the old inflated 0.458 + thickness/2 = 0.5165).
+        assert!((pin_line_radius(0.405, 0.0246) - 0.4296).abs() < 1e-4);
     }
 }
