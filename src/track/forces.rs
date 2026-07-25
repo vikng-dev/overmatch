@@ -9,13 +9,17 @@
 //! arithmetic — no spatial queries, no BVH, safe under rollback replay by construction.
 //!
 //! The model, per station segment × three lateral collocation columns:
-//! - **Support**: directional field depth at pin/mid/pin on the outer face → two-piece
-//!   clipped-linear pressure profile → penalty spring along the belt's own inward normal
-//!   (minus normal-velocity damping, soft engagement ramp), applied at the profile centroid on
-//!   the terrain surface. Roll/pitch/weight transfer are lever-arm implicit.
-//! - **Traction**: slip-saturated friction on an ellipse — longitudinal slip against the belt
-//!   surface speed, lateral scrub against the hull's side motion (`lateral_ratio` of the
-//!   grip), combined magnitude capped. Longitudinal force reacts back into belt dynamics.
+//! - **Support**: directional field depth at pin/mid/pin on the contact envelope (the outer
+//!   face pushed out by `free_travel` — the drooped suspension's maximum reach) → two-piece
+//!   clipped-linear pressure profile → spring along the belt's own inward normal (minus
+//!   normal-velocity damping, soft engagement ramp), applied at the profile centroid on the
+//!   terrain surface. Ground intruding into the envelope→rest band IS the suspension
+//!   compression; `free_travel = 0` degenerates to a rest-anchored pad (no droop band).
+//!   Roll/pitch/weight transfer are lever-arm implicit.
+//! - **Traction**: per-element isotropic shear ([`GripElements`]) — every grounded link ×
+//!   column carries its own bristle strain, force follows the strain direction, each element
+//!   saturates against μ × its own elastic load. Longitudinal force reacts back into belt
+//!   dynamics.
 //! - **Belt dynamics**: constant-power engine curve under a low-speed force cap, a governor
 //!   chasing `command × max_speed`, ground reaction, reflected inertia; phase advection.
 
@@ -51,27 +55,18 @@ pub fn grip_stiffness(mu: f32, weight_n: f32) -> f32 {
     mu * weight_n / 2.0 / GRIP_SHEAR_MODULUS_M
 }
 
-/// Bristle damping ratio ζ: the elastic-zone bristle is an undamped integrator in the hull's
+/// Bristle damping ratio: the elastic-zone bristle is an undamped integrator in the hull's
 /// resonance loop — without its damping partner a large disturbance (spawn drop, explosion
-/// kick) can capture a saturated oscillation attractor the clipped kinetic term cannot damp
-/// (measured: per-tick load flips on slope parks; the literature's textbook pairing —
-/// TMeasy `F = c·x + d·ẋ`, Pacejka's Besselink term). σ1 = 2ζ√(K·m_side) reduces to the
-/// closed form `2ζ·K·√(shear/(μ·g))` via the stiffness derivation — no new vehicle datum.
-const GRIP_DAMPING_RATIO: f32 = 0.15;
-
-/// Element-regime bristle damping ratio: LuGre sizes the bristle damper σ1 = 2ζ√(σ0·m)
-/// with ζ = 0.5 (Canudas de Wit et al., "A New Model for Control of Systems with
-/// Friction", IEEE TAC 1995 — the canonical bristle-mode damping choice, NOT a measured
-/// rubber loss factor). Sized against the 64 Hz explicit bound: 143.5 kN·s/m per side is
-/// 47% below the ~270 kN·s/m regularizer slope that measurably rang the contact modes
-/// (ADR-0026 §3), with an 11.7× Jury margin on the measured 1.6 Hz post-stop yaw mode —
-/// the wobble this constant exists to close (one ≤0.03 rad/s rebound instead of a ζ=0.15
+/// kick) can capture a saturated oscillation attractor (the literature's textbook pairing —
+/// TMeasy `F = c·x + d·ẋ`, Pacejka's Besselink term). LuGre sizes the bristle damper
+/// σ1 = 2ζ√(σ0·m) with ζ = 0.5 (Canudas de Wit et al., "A New Model for Control of Systems
+/// with Friction", IEEE TAC 1995 — the canonical bristle-mode damping choice, NOT a
+/// measured rubber loss factor). Sized against the 64 Hz explicit bound: 143.5 kN·s/m per
+/// side is 47% below the ~270 kN·s/m regularizer slope that measurably rang the contact
+/// modes (ADR-0026 §3), with an 11.7× Jury margin on the measured 1.6 Hz post-stop yaw mode
+/// — the wobble this constant exists to close (one ≤0.03 rad/s rebound instead of a ζ=0.15
 /// ring; the Dupont elastic zone is deliberately lossless there, and lowering it was
 /// quantitatively dead: ζ_eq ≈ 0.002 at the observed amplitude, 79× short).
-///
-/// The AGGREGATE regime keeps [`GRIP_DAMPING_RATIO`] = 0.15: ζ = 0.5 was tried there and
-/// made the limit cycle WORSE — its load-weighted mean slip carries support-damper
-/// transients the per-element geometric slip does not.
 const GRIP_ELEMENT_DAMPING_RATIO: f32 = 0.5;
 
 /// Elastic fraction of the grip budget: below `GRIP_BREAKAWAY·C` the state is a PURE spring
@@ -151,24 +146,32 @@ pub fn hold_blend(x: f32) -> f32 {
 /// Nothing here is solver-quality policy — quality lives in the station/column geometry the
 /// caller authors (link pitch sets station density).
 pub struct ForceParams {
-    /// Plate thickness (m); the pin line runs mid-plate, contacts probe the outer face.
-    pub thickness: f32,
-    /// Lateral collocation columns: (offset from centreline, weight). Weights sum to 1;
-    /// edge offsets at ±width/2 with Simpson-style weights reproduce a uniform strip's load
-    /// AND roll moment exactly.
-    pub columns: [(f32, f32); 3],
+    /// Pin line → outer contact face (m), along the belt's outward normal. The measured
+    /// `pin_to_outer` — never `thickness / 2`: the pin does not run mid-plate.
+    pub face_offset: f32,
+    /// Outer face at rest → the contact envelope (m): the suspension's free travel. The
+    /// support spring's zero-force datum sits this far PAST the outer face — the drooped
+    /// ("green") envelope, maximum suspension reach — so ground intruding into the
+    /// envelope→rest band is what carries the hull, and the authored rest pose is the
+    /// flat-ground equilibrium when the stiffness is calibrated to it. `0.0` anchors the
+    /// spring at the rest face itself — the degenerate no-droop pad some test rigs use.
+    pub free_travel: f32,
     /// Support spring (N/m per metre of contacting belt) and damping (N·s/m per metre).
     pub support_stiffness_per_m: f32,
     pub support_damping_per_m: f32,
     /// Soft-engagement ramp depth (m): full support only past this penetration.
     pub engage_depth: f32,
-    /// Terrain probe reach (m).
+    /// BASE terrain probe reach (m): how far behind the REST face every probe ray starts.
+    /// The law extends each probe's reach by its own local free travel, so callers pass the
+    /// plain base (no `+ free_travel`) — the ray origin must sit at `face − base` for every
+    /// station or zero-travel return-run origins start too deep (buried-origin saturation).
     pub probe_reach: f32,
-    /// Coulomb friction coefficient (longitudinal) and the lateral share of the grip ellipse
-    /// (< 1 is what lets a skid-steer pivot).
+    /// Coulomb friction coefficient — the element law is isotropic, so this is the whole
+    /// friction story per element (μ × elastic load); turning resistance emerges from
+    /// footprint geometry, not from an authored lateral share.
     pub mu: f32,
-    pub lateral_ratio: f32,
-    /// Slip speed (m/s) at which friction saturates to μ·load.
+    /// Slip speed (m/s) normalizing the belt-hold blend (and the transmission's brake
+    /// release threshold) — the scale on which a belt counts as "moving".
     pub slip_saturation: f32,
     /// Powertrain: top belt speed (m/s), per-track engine power (W) and low-speed force cap
     /// (N), governor gain (N per m/s of speed error), reflected belt+drivetrain inertia (kg).
@@ -178,18 +181,18 @@ pub struct ForceParams {
     pub governor_gain: f32,
     pub inertia: f32,
     /// Static-grip bristle stiffness per side (N/m of shear) — [`grip_stiffness`]. `0.0`
-    /// disables the whole static regime (grip state AND belt-hold): the law is then
-    /// bit-identical to the kinetic-only law — the parity switch the gates rely on.
+    /// disables traction and belt-hold entirely (support only) — the envelope calibration
+    /// runs the law this way to measure penetration area without traction in the loop.
     pub grip_stiffness: f32,
 }
 
-/// PROTOTYPE (sandbox A/B, not wired into the game): per-element isotropic shear state — the
-/// Wong & Chiang resultant-j / Janosi–Hanamoto form proper. One accumulated shear vector per
+/// THE traction state: per-element isotropic shear — the Wong & Chiang resultant-j /
+/// Janosi–Hanamoto form proper. One accumulated shear vector per
 /// material link × lateral column (flat index `link * 3 + column`), WORLD space, meters.
 /// Each grounded element resists relative ground motion in ANY direction (no friction
-/// ellipse, no `lateral_ratio`); turning resistance emerges from the footprint geometry —
+/// ellipse, no authored lateral share); turning resistance emerges from the footprint geometry —
 /// fore and aft elements strain in opposing directions under yaw, which is exactly the
-/// rotational stick the per-side aggregate resultant cannot represent (its load-weighted
+/// rotational stick a single per-side resultant could never represent (a load-weighted
 /// mean slip cancels antisymmetric lateral slip — the "pivots on ice" defect).
 /// State rides MATERIAL identity (advects with belt phase, same mapping as the witness
 /// link). A pad's memory survives as long as the pad is plausibly on the ground: membership
@@ -205,7 +208,7 @@ pub struct GripElements {
     /// Ticks of contact-loss grace left per element before its shear is forgotten. A
     /// parallel `Vec<u8>` rather than a widened strain entry: 1 byte/element with no
     /// padding (a `(Vec3, u8)` entry rounds up to 16 bytes) and the strain slab stays
-    /// densely packed — this state is headed for replication/rollback, every byte counts.
+    /// densely packed — this state is rollback-historied and checkpointed, every byte counts.
     pub dwell: Vec<u8>,
 }
 
@@ -213,7 +216,7 @@ impl GripElements {
     /// Both slabs pre-sized for `link_count` material links × 3 lateral columns, at rest
     /// (zero strain, zero dwell) — the ONLY legal construction for a caller entering the
     /// element regime. `step_side` no longer resizes at runtime (the REV-14 fixed-size
-    /// invariant, element-promotion-checklist.md addendum): wrong-length slabs skip the
+    /// invariant): wrong-length slabs skip the
     /// regime instead of being silently rebuilt.
     pub fn for_links(link_count: usize) -> Self {
         let n = link_count * 3;
@@ -234,11 +237,45 @@ pub struct SideState {
     /// grows unbounded and an f32 loses sub-pitch precision within a long match's driving
     /// distance (codex phase-B finding 8).
     pub phase: f64,
-    /// The side's elastic grip resultant (N), circularized: `x` longitudinal, `y` is the
-    /// LATERAL force divided by `lateral_ratio` (so both axes share one budget `C = Σ μ·load`).
-    /// A generalized force, NOT a world anchor — distributed through the tick's contacts in
-    /// load proportion. Zero ≡ today's kinetic-only law, bit-for-bit.
+    /// The side's summed element grip force (N): `x` longitudinal, `y` lateral. Derived
+    /// telemetry over the element field (the authoritative state is the caller-owned
+    /// [`GripElements`]); ignored on input, overwritten every tick.
     pub grip: Vec2,
+}
+
+/// A piecewise-linear free-travel profile over the side-plane longitudinal axis (z): `knots`
+/// sorted ascending by z, value clamped to the end knots outside the span. Callers put
+/// 0-travel knots at the UNSPRUNG sprocket/idler centres and full-droop knots at the road
+/// wheels, so the envelope reaches only where the suspension physically can — the approach
+/// runs taper linearly, the wrap arcs beyond the end knots stay unsprung. Top-run stations
+/// probe skyward and never see ground, so their lookup value is harmless.
+#[derive(Clone, Copy)]
+pub struct TravelField<'a> {
+    pub knots: &'a [(f32, f32)],
+}
+
+impl TravelField<'_> {
+    /// The profile value at longitudinal position `z` (piecewise linear, end-clamped).
+    pub fn at(&self, z: f32) -> f32 {
+        let Some(&(z0, t0)) = self.knots.first() else {
+            return 0.0;
+        };
+        if z <= z0 {
+            return t0;
+        }
+        let mut prev = (z0, t0);
+        for &(zk, tk) in &self.knots[1..] {
+            if z <= zk {
+                let w = zk - prev.0;
+                if w <= 0.0 {
+                    return tk;
+                }
+                return prev.1 + (tk - prev.1) * ((z - prev.0) / w);
+            }
+            prev = (zk, tk);
+        }
+        prev.1
+    }
 }
 
 /// One side's per-tick input.
@@ -250,8 +287,22 @@ pub struct SideInput<'a> {
     pub count: usize,
     /// Signed track-centreline x (hull-local).
     pub plane_x: f32,
+    /// Lateral collocation columns: (signed hull-x offset from THIS side's pin plane, load
+    /// share), ordered inboard → centre → outboard, applied along the hull's lateral axis
+    /// (the pin axis — column placement never tilts with segment orientation). Weights sum
+    /// to 1: edge columns at the shoe's TRUE lateral faces with Simpson shares (1/6, 2/3,
+    /// 1/6) reproduce a laterally-uniform strip's load AND roll moment exactly — the shares
+    /// are a statement about the strip's shape, so they survive the shoe's own outboard
+    /// bias. Per-side and SIGNED because the shoe is not centred on its pins (the Tiger's
+    /// runs ~17 mm outboard: flush with the wheel pack inboard, overhanging outboard) —
+    /// `RigGeom::grip_column_offsets(side)` is the measured source; a symmetric
+    /// `±width/2` here is the very approximation it replaced.
+    pub columns: [(f32, f32); 3],
     /// Drive command −1..1 (throttle ± steer, capability-gated by the caller).
     pub command: f32,
+    /// Per-position free travel (the contact envelope's local reach). `None` = uniform
+    /// [`ForceParams::free_travel`] everywhere (flat-rig test fixtures).
+    pub travel: Option<TravelField<'a>>,
 }
 
 /// One force application, in emission order. The caller applies these verbatim — order is
@@ -261,10 +312,9 @@ pub struct ForceApp {
     pub point: Vec3,
 }
 
-/// One contact's telemetry (viz / traces). `load` is the ACTUAL damped load that scaled the
-/// friction ellipse this tick — `load_elastic` is the spring-only component (static-sink
-/// analysis); inferring ellipse utilization from the elastic value understates grip under
-/// dynamic compression (codex steer review: the telemetry trap).
+/// One contact's telemetry (viz / traces). `load` is the ACTUAL damped load applied this
+/// tick — `load_elastic` is the spring-only component (static-sink analysis, and the one
+/// the element law's friction budget and membership key on).
 pub struct BeltContact {
     pub point: Vec3,
     pub load: f32,
@@ -330,16 +380,16 @@ fn engine_available(params: &ForceParams, belt_speed: f32) -> f32 {
     (params.engine_power / belt_speed.abs().max(STALL_SPEED)).min(params.engine_force)
 }
 
-/// The LEGACY symmetric-governor belt integration, verbatim (the parity branch of the
-/// transmission seam): constant-power curve under the force cap, governor chasing
-/// `command × max_speed`, the ADR-0026 hold blend attenuating the ground reaction at zero
+/// The symmetric-governor belt integration (the Governor branch of the transmission
+/// seam): constant-power curve under the force cap, governor chasing
+/// `command × max_speed`, the hold blend attenuating the ground reaction at zero
 /// command + zero belt speed, reflected inertia, and the top-speed clamp. Returns
 /// `(engine force applied, next belt speed)`.
 ///
 /// Extracted from the tail of [`step_side`] EXACTLY as it stood (phase-2.5 commit A) so the
 /// joint transmission's `Governor` adapter and `step_side` share one implementation — every
 /// float op in the same order, bit-identical to the shipped law. Any change here is an MP
-/// behavior change; the sandbox parity captures gate it.
+/// behavior change; the sandbox capture-diff gates guard it.
 pub fn governor_belt(
     params: &ForceParams,
     command: f32,
@@ -365,11 +415,10 @@ pub fn governor_belt(
 /// `vel_at`), integrate belt dynamics, and return the forces for the caller to apply IN
 /// ORDER. Force application does not feed back into `vel_at` within a tick (velocities
 /// integrate later), so reading everything first and applying afterwards is exact.
-/// `elements`: `Some` runs the per-element isotropic shear regime (see [`GripElements`])
-/// instead of the per-side aggregate — the caller owns the state vector and must construct
-/// it pre-sized to `count * 3` ([`GripElements::for_links`]; wrong-length slabs skip the
-/// regime — see the invariant below). `None` = the shipped aggregate law (the game's MP
-/// compositions).
+/// `elements`: the per-element isotropic shear state (see [`GripElements`]) — the caller
+/// owns the state vector and must construct it pre-sized to `count * 3`
+/// ([`GripElements::for_links`]; wrong-length slabs skip traction for the tick — see the
+/// invariant below).
 ///
 /// This is [`contact_side`] + the legacy [`governor_belt`] tail — the one-call shape every
 /// MP composition and the sandbox's governor mode run. The joint-transmission callers
@@ -383,7 +432,7 @@ pub fn step_side<O: TerrainOracle>(
     params: &ForceParams,
     oracle: &O,
     vel_at: impl Fn(Vec3) -> Vec3,
-    elements: Option<&mut GripElements>,
+    elements: &mut GripElements,
 ) -> SideReport {
     let (mut report, live) =
         contact_side(input, state, affine, dt, params, oracle, vel_at, elements);
@@ -412,7 +461,7 @@ pub fn contact_side<O: TerrainOracle>(
     params: &ForceParams,
     oracle: &O,
     vel_at: impl Fn(Vec3) -> Vec3,
-    elements: Option<&mut GripElements>,
+    elements: &mut GripElements,
 ) -> (SideReport, bool) {
     let mut report = SideReport {
         state,
@@ -430,29 +479,33 @@ pub fn contact_side<O: TerrainOracle>(
         return (report, false);
     }
 
+    // The support datum: probes cast from the contact envelope (outer face + local free
+    // travel), so penetration measures the ground's intrusion into the suspension band, not
+    // into the rest face. The travel is position-dependent when the caller supplies a
+    // profile (unsprung arcs at 0, road-wheel span at full droop).
+    let travel_at =
+        |z: f32| -> f32 { input.travel.map_or(params.free_travel, |field| field.at(z)) };
+
     let k = params.grip_stiffness;
-    // INVARIANT (REV-14 blocker, element-promotion-checklist.md addendum): the caller owns
+    // INVARIANT (REV-14): the caller owns
     // FIXED-SIZE slabs, constructed `count * 3` at spawn ([`GripElements::for_links`]). The
     // branch that used to live here cleared and re-sized mismatched slabs at runtime — which
     // erases valid strain exactly when it matters most: a predicted root that runs one
     // driving tick before its authoritative JIP seed arrives records a zeroed field into
     // local prediction history and replay follows it; a snapshot with one mismatched slab
     // wipes real state instead of surfacing the violation. Wrong-length slabs are therefore
-    // a caller defect: assert loudly in debug, and in release SKIP the element regime for
-    // this tick (the aggregate law runs instead) WITHOUT touching the stored state.
+    // a caller defect: assert loudly in debug, and in release SKIP traction for this tick
+    // (support still carries the hull) WITHOUT touching the stored state.
     let element_len = input.count * 3;
-    let elements = elements.filter(|e| {
-        let sized = e.strain.len() == element_len && e.dwell.len() == element_len;
-        debug_assert!(
-            sized,
-            "GripElements slabs must be pre-sized to count*3 = {element_len} at construction \
-             (strain {}, dwell {}) — runtime resizing erases rollback-visible strain",
-            e.strain.len(),
-            e.dwell.len(),
-        );
-        sized
-    });
-    let elements_mode = elements.is_some() && k > 0.0;
+    let sized = elements.strain.len() == element_len && elements.dwell.len() == element_len;
+    debug_assert!(
+        sized,
+        "GripElements slabs must be pre-sized to count*3 = {element_len} at construction \
+         (strain {}, dwell {}) — runtime resizing erases rollback-visible strain",
+        elements.strain.len(),
+        elements.dwell.len(),
+    );
+    let elements_mode = sized && k > 0.0;
     // Membership evidence pass 1 cannot put in `cols`: columns whose damped support load
     // clipped to zero while elastic penetration remains — the pad is still ON the ground
     // (a separating/noisy tick), and element strain must survive it. Station order —
@@ -488,6 +541,11 @@ pub fn contact_side<O: TerrainOracle>(
     let material =
         |i: usize| -> usize { (i as i64 - wraps).rem_euclid(input.count as i64) as usize };
 
+    // The pin axis in world space: column offsets are hull-x measurements (shoe faces
+    // relative to the pin plane), so they shift along the hull's lateral axis — never along
+    // a per-segment cross product, whose sign would depend on the loop's winding.
+    let lat_axis = affine.transform_vector3(Vec3::X);
+
     for i in 0..n {
         let a = stations[i];
         let b = stations[(i + 1) % n];
@@ -505,27 +563,47 @@ pub fn contact_side<O: TerrainOracle>(
             .transform_vector3(Vec3::new(0.0, out2.y, out2.x))
             .normalize_or_zero();
         let axis = (wb - wa) / len;
-        let lat = out.cross(axis);
-        let face = out * (params.thickness / 2.0);
+        // Local envelope datum at the three collocation stations (a / mid / b) — the profile
+        // varies along the approach runs, so each probe carries its own offset. Ground-facing
+        // segments only (hull-local outward normal pointing down): the suspension band exists
+        // under the belly, never over the return run.
+        let (t_a, t_m, t_b) = if out2.y < 0.0 {
+            (travel_at(a.x), travel_at((a.x + b.x) / 2.0), travel_at(b.x))
+        } else {
+            (0.0, 0.0, 0.0)
+        };
+        let face_a = out * (params.face_offset + t_a);
+        let face_m = out * (params.face_offset + t_m);
+        let face_b = out * (params.face_offset + t_b);
 
-        // WIDTH: the shoe is sampled as three lateral COLUMNS (edges + centre): each column
-        // runs the full profile machinery on its own three stations with its weight of the
-        // per-metre coefficients and applies its resultant at its own point — roll torque
-        // from a curb under one track edge, cross-slope contact, and half-off-a-ledge
-        // support all emerge from the application points.
-        for (ci, &(offset, weight)) in params.columns.iter().enumerate() {
-            let shift = lat * offset;
+        // The shoe is sampled as three lateral COLUMNS (measured faces + centre — see
+        // [`SideInput::columns`]): each column runs the full profile machinery on its own
+        // three stations with its weight of the per-metre coefficients and applies its
+        // resultant at its own point — roll torque from a curb under one track edge,
+        // cross-slope contact, and half-off-a-ledge support all emerge from the
+        // application points.
+        for (ci, &(offset, weight)) in input.columns.iter().enumerate() {
+            let shift = lat_axis * offset;
             let ca = wa + shift;
             let cb = wb + shift;
 
             // The three collocation stations, on the outer face; depth along the link's own
             // outward normal (cast semantics).
-            let pen_a = oracle.depth_along(ca + face, out, params.probe_reach);
-            let pen_m = oracle.depth_along((ca + cb) / 2.0 + face, out, params.probe_reach);
-            let pen_b = oracle.depth_along(cb + face, out, params.probe_reach);
+            // Per-probe reach = base + LOCAL travel, so the ray ORIGIN sits at `face − base`
+            // for every station regardless of its travel — the shipped law's origin geometry.
+            // A uniform `base + max_travel` reach put zero-travel stations' origins `travel`
+            // too deep; on the RETURN run that is downward, and a settle transient dipped the
+            // up-facing origins underground — buried-origin saturation then reported full
+            // reach of phantom penetration whose load points DOWN (−out), a self-burying
+            // feedback (measured: the headless Tiger tail-sunk at 1.46 m of 4 s full
+            // throttle).
+            let pen_a = oracle.depth_along(ca + face_a, out, params.probe_reach + t_a);
+            let pen_m = oracle.depth_along((ca + cb) / 2.0 + face_m, out, params.probe_reach + t_m);
+            let pen_b = oracle.depth_along(cb + face_b, out, params.probe_reach + t_b);
             #[cfg(feature = "bitprobe")]
             let probe_index = {
-                let (query_a, query_m, query_b) = (ca + face, (ca + cb) / 2.0 + face, cb + face);
+                let (query_a, query_m, query_b) =
+                    (ca + face_a, (ca + cb) / 2.0 + face_m, cb + face_b);
                 let material = material(i);
                 report.bitprobe_contacts.push(ContactInputProbe {
                     station: i as u32,
@@ -567,7 +645,14 @@ pub fn contact_side<O: TerrainOracle>(
                 pen_m + (pen_b - pen_m) * ((x_c - len / 2.0) / (len / 2.0))
             }
             .max(0.0);
-            let p = ca + axis * x_c + out * (params.thickness / 2.0 - pen_c);
+            // The centroid's own datum: interpolate the travel exactly like the penetration,
+            // so `p` lands on the terrain surface under a varying profile too.
+            let t_c = if x_c <= len / 2.0 {
+                t_a + (t_m - t_a) * (x_c / (len / 2.0))
+            } else {
+                t_m + (t_b - t_m) * ((x_c - len / 2.0) / (len / 2.0))
+            };
+            let p = ca + axis * x_c + out * (params.face_offset + t_c - pen_c);
 
             // Support: penalty spring along the belt's own inward normal, at the column's
             // share of the per-metre coefficients.
@@ -628,31 +713,19 @@ pub fn contact_side<O: TerrainOracle>(
         }
     }
 
-    // The elasto-plastic grip update (static-friction-design.md §3). Budget C = Σ μ·load —
-    // the ELASTIC load: the damped actual load carries the support damper's tick-scale
-    // transients, and feeding those into an integrating state amplified a marginal mm-scale
-    // Nyquist wobble into a full force limit cycle (measured: ±90 kN damped-load alternation
-    // over a ±11 kN elastic wobble, hull perfectly smooth — the support damper converts
-    // wobble rate into load asymmetry, grip fed it back). The Coulomb budget follows the
-    // sustained weight-bearing force; the kinetic regularizer keeps damped load, as shipped.
-    // Slip resultant in FORCE sign convention (x: +slip_long drives +long force; y:
-    // −slip_lat drives +lat force — matching the kinetic law's signs).
-    let budget: f32 = cols
-        .iter()
-        .filter(|c| c.has_plane)
-        .map(|c| params.mu * c.load_elastic)
-        .sum();
-
-    // PROTOTYPE: the per-element isotropic shear regime (see [`GripElements`]). Each grounded
-    // element integrates its own world-space shear vector at the SAME shear modulus, breakaway
-    // branch, and damping ratio as the aggregate law (per-element stiffness μ·load/K sums to
-    // exactly the aggregate side stiffness — same coupled-mode class the 75 mm modulus was
-    // validated against, plus the yaw/pitch bristle modes the aggregate never had). Force is
-    // the strain direction itself — isotropic, NO ellipse: lateral-vs-longitudinal asymmetry
-    // and turning resistance are left to emerge from footprint geometry.
+    // The per-element isotropic shear regime (static-friction-design.md §3; see
+    // [`GripElements`]). Each grounded element integrates its own world-space shear vector;
+    // membership and budgets key on the ELASTIC load, never the damped actual load: the
+    // damped load carries the support damper's tick-scale transients, and feeding those into
+    // an integrating state amplified a marginal mm-scale Nyquist wobble into a full force
+    // limit cycle (measured: ±90 kN damped-load alternation over a ±11 kN elastic wobble,
+    // hull perfectly smooth — the support damper converts wobble rate into load asymmetry,
+    // grip fed it back). Force is the strain direction itself — isotropic, NO ellipse:
+    // lateral-vs-longitudinal asymmetry and turning resistance are left to emerge from
+    // footprint geometry.
     let mut elem_g: Vec<Vec2> = Vec::new();
     if elements_mode {
-        let elems = elements.unwrap();
+        let elems = &mut *elements;
         // Membership bounds from the side's nominal weight, recovered from the declared
         // stiffness (`grip_stiffness = μ·W/2/K`) — no new vehicle datum.
         let side_weight = k * GRIP_SHEAR_MODULUS_M / params.mu;
@@ -660,9 +733,8 @@ pub fn contact_side<O: TerrainOracle>(
         let leave = side_weight * GRIP_ELEMENT_LEAVE_FRACTION;
         let mut kept = vec![false; element_len];
         elem_g = vec![Vec2::ZERO; cols.len()];
-        // The damping partner, normalized per unit budget: same closed form as the
-        // aggregate's `grip_damp / C` (σ1 = 2ζ√(K·m) reduced through the stiffness
-        // derivation), at the element regime's LuGre-canonical ζ.
+        // The damping partner, normalized per unit budget: σ1 = 2ζ√(K·m) reduced through
+        // the stiffness derivation, at the LuGre-canonical ζ.
         let d_coef =
             2.0 * GRIP_ELEMENT_DAMPING_RATIO / (GRIP_SHEAR_MODULUS_M * params.mu * 9.81).sqrt();
         for (idx, c) in cols.iter().enumerate() {
@@ -699,7 +771,7 @@ pub fn contact_side<O: TerrainOracle>(
                 let mut j1 = (j0 + sdot * dt) / (1.0 + alpha * (dt / GRIP_SHEAR_MODULUS_M) * speed);
                 // Keep the strain in the contact tangent plane (terrain curvature rotates it
                 // out), and cap at one shear modulus (the Dahl saturation the rational update
-                // converges to; the projection is the α < 1 safety net, as in the aggregate).
+                // converges to; the projection is the α < 1 safety net).
                 j1 -= j1.dot(c.normal) * c.normal;
                 let j_len = j1.length();
                 if j_len > GRIP_SHEAR_MODULUS_M {
@@ -754,51 +826,6 @@ pub fn contact_side<O: TerrainOracle>(
         }
     }
 
-    let mut grip_damp = Vec2::ZERO;
-    let grip_next = if !elements_mode && k > 0.0 && budget > 0.0 {
-        let mut s_bar = Vec2::ZERO;
-        for c in cols.iter().filter(|c| c.has_plane) {
-            s_bar += params.mu * c.load_elastic * Vec2::new(c.slip_long, -c.slip_lat);
-        }
-        s_bar /= budget;
-        // Transport old memory into the current budget (a shrinking footprint clips force
-        // continuously; contact loss → zero — no reset regime).
-        let q_len = state.grip.length();
-        let q0 = if q_len > budget {
-            state.grip * (budget / q_len)
-        } else {
-            state.grip
-        };
-        // Dupont α: pure elastic below the breakaway fraction, and whenever slip unloads
-        // the spring (q·s̄ < 0); smoothstep to full Dahl flow at the cap. This is the
-        // drift-free branch — plain Dahl (α ≡ 1) ratchets under oscillating loads.
-        let alpha = if q0.dot(s_bar) < 0.0 {
-            0.0
-        } else {
-            let m =
-                ((q0.length() / budget - GRIP_BREAKAWAY) / (1.0 - GRIP_BREAKAWAY)).clamp(0.0, 1.0);
-            m * m * (3.0 - 2.0 * m)
-        };
-        // The damping partner (see GRIP_DAMPING_RATIO): a per-side viscous term on the
-        // load-weighted slip, distributed and ellipse-capped exactly like q.
-        grip_damp = 2.0
-            * GRIP_DAMPING_RATIO
-            * k
-            * (GRIP_SHEAR_MODULUS_M / (params.mu * 9.81)).sqrt()
-            * s_bar;
-        // Backward-Euler rational form of q̇ = K·s̄ − α·(K/C)·|s̄|·q — dissipative and
-        // self-limiting; the final projection is a safety net for the α < 1 band.
-        let q1 = (q0 + k * dt * s_bar) / (1.0 + alpha * (k * dt / budget) * s_bar.length());
-        let q1_len = q1.length();
-        if q1_len > budget {
-            q1 * (budget / q1_len)
-        } else {
-            q1
-        }
-    } else {
-        Vec2::ZERO
-    };
-
     // PASS 2 — emit forces in the original per-contact order: support, then traction.
     let mut elem_sum = Vec2::ZERO;
     for (idx, c) in cols.iter().enumerate() {
@@ -810,52 +837,20 @@ pub fn contact_side<O: TerrainOracle>(
         let mut f_long = 0.0;
         let mut f_lat = 0.0;
         let mut traction = Vec3::ZERO;
-        if c.has_plane {
-            let grip = params.mu * c.load;
-            let grip_lat = grip * params.lateral_ratio;
-            if elements_mode {
-                // The per-element regime: each element's own capped strain+damping direction,
-                // scaled by ITS elastic load — isotropic, full μ in every direction.
-                let grip_el = params.mu * c.load_elastic;
-                let g = elem_g[idx];
-                f_long = grip_el * g.x;
-                f_lat = grip_el * g.y;
-                elem_sum += Vec2::new(f_long, f_lat);
-            } else if grip_next == Vec2::ZERO {
-                // The kinetic-only law, verbatim (the parity branch: with grip disabled or
-                // no stored force, these are the exact shipped expressions — bit-identical).
-                f_long = grip * (c.slip_long / params.slip_saturation).clamp(-1.0, 1.0);
-                f_lat = -grip_lat * (c.slip_lat / params.slip_saturation).clamp(-1.0, 1.0);
-                let e = (f_long / grip).powi(2) + (f_lat / grip_lat).powi(2);
-                if e > 1.0 {
-                    let s = e.sqrt().recip();
-                    f_long *= s;
-                    f_lat *= s;
-                }
-            } else {
-                // The grip regime: force comes from the STRAIN STATE (plus its small viscous
-                // partner), distributed in elastic-load proportion and ellipse-capped per
-                // contact — Janosi–Hanamoto proper. The kinetic regularizer is deliberately
-                // ABSENT here: near zero slip its slope is μN/slip_saturation — a ~270 kN·s/m
-                // explicit damper per side that sits at the 64 Hz stability margin and rang
-                // the contact modes (the old sim never noticed: creep kept slip saturated,
-                // dF/dv = 0). Under sustained slide the Dahl state saturates to C·ŝ — exactly
-                // the kinetic law's saturated ellipse — so steady sliding behavior converges;
-                // what changes is a physical relaxation lag (~C/K of slip distance) in force
-                // DIRECTION during fast slides, and fuller sub-saturation traction.
-                let grip_el = params.mu * c.load_elastic;
-                let grip_el_lat = grip_el * params.lateral_ratio;
-                let mut gx = (grip_next.x + grip_damp.x) / budget;
-                let mut gy = (grip_next.y + grip_damp.y) / budget;
-                let e = gx * gx + gy * gy;
-                if e > 1.0 {
-                    let s = e.sqrt().recip();
-                    gx *= s;
-                    gy *= s;
-                }
-                f_long = grip_el * gx;
-                f_lat = grip_el_lat * gy;
-            }
+        if c.has_plane && elements_mode {
+            // Each element's own capped strain+damping direction, scaled by ITS elastic load
+            // — isotropic, full μ in every direction. The kinetic regularizer is deliberately
+            // ABSENT: near zero slip its slope is μN/slip_saturation — a ~270 kN·s/m explicit
+            // damper per side that sits at the 64 Hz stability margin and rang the contact
+            // modes. Under sustained slide the Dahl state saturates to the strain cap — the
+            // saturated friction ellipse — so steady sliding converges; what changes is a
+            // physical relaxation lag (~C/K of slip distance) in force DIRECTION during fast
+            // slides, and fuller sub-saturation traction.
+            let grip_el = params.mu * c.load_elastic;
+            let g = elem_g[idx];
+            f_long = grip_el * g.x;
+            f_lat = grip_el * g.y;
+            elem_sum += Vec2::new(f_long, f_lat);
             traction = c.long_dir * f_long + c.lat_dir * f_lat;
             report.apps.push(ForceApp {
                 force: traction,
@@ -886,12 +881,12 @@ pub fn contact_side<O: TerrainOracle>(
         }
     }
 
-    // In the element regime the aggregate slot carries the summed element force (long, lat) —
-    // telemetry only (the element state is authoritative and lives with the caller). Belt
-    // dynamics (the governor tail, or the joint transmission) integrate AFTER this pass —
-    // `state.speed`/`state.phase` are returned untouched, the pre-tick truth the phase
-    // advection and the transmission both key on.
-    report.state.grip = if elements_mode { elem_sum } else { grip_next };
+    // The grip slot carries the summed element force (long, lat) — telemetry only (the
+    // element state is authoritative and lives with the caller). Belt dynamics (the governor
+    // tail, or the joint transmission) integrate AFTER this pass — `state.speed`/
+    // `state.phase` are returned untouched, the pre-tick truth the phase advection and the
+    // transmission both key on.
+    report.state.grip = elem_sum;
     report.belt_reaction = belt_reaction;
     (report, true)
 }
@@ -913,7 +908,7 @@ mod tests {
 
     /// A closed rectangular pin-line loop in the side plane (z, y), bottom run traversed +z
     /// so its outward normal points DOWN (`out2 = (tan.y, −tan.x)`). `bottom_y` positions the
-    /// pin line; the contact face sits `thickness/2` further out.
+    /// pin line; the contact face sits `face_offset` further out.
     fn rect_loop(bottom_y: f32) -> Vec<Vec2> {
         vec![
             Vec2::new(-1.0, bottom_y),
@@ -924,20 +919,23 @@ mod tests {
         ]
     }
 
+    /// The rig's collocation columns: symmetric about the pin plane (a fixture, not the
+    /// measured-shoe form the game feeds — flat ground makes the tests offset-invariant).
+    const TEST_COLUMNS: [(f32, f32); 3] = [(-0.1, 0.25), (0.0, 0.5), (0.1, 0.25)];
+
     /// A small parked test vehicle for the element regime: perimeter 5 m, 25 links (pitch
     /// 0.2 m), 5 mm of bottom-face penetration at `bottom_y = 0.02`. The support damping is
     /// sized so a 2 m/s separation velocity clips every damped load to zero while elastic
     /// penetration remains — the exact one-tick dropout of netcode review defect 1.
     fn rig_params() -> ForceParams {
         ForceParams {
-            thickness: 0.05,
-            columns: [(-0.1, 0.25), (0.0, 0.5), (0.1, 0.25)],
+            face_offset: 0.025,
+            free_travel: 0.0,
             support_stiffness_per_m: 2.0e6,
             support_damping_per_m: 1.0e5,
             engage_depth: 0.002,
             probe_reach: 0.5,
             mu: 0.9,
-            lateral_ratio: 0.5,
             slip_saturation: 0.5,
             max_speed: 10.0,
             engine_power: 1.0e5,
@@ -959,7 +957,9 @@ mod tests {
             loop_pts,
             count: 25,
             plane_x: 0.0,
+            columns: TEST_COLUMNS,
             command: 0.0,
+            travel: None,
         };
         let report = step_side(
             &input,
@@ -969,7 +969,7 @@ mod tests {
             &rig_params(),
             &FlatGround { surface_y },
             |_| vel,
-            Some(elems),
+            elems,
         );
         *state = report.state;
         report
@@ -977,6 +977,139 @@ mod tests {
 
     fn strain_sum(elems: &GripElements) -> f32 {
         elems.strain.iter().map(|j| j.length()).sum()
+    }
+
+    /// Terrain fills `y > under_y` — an overhang/bridge deck for the return-run gate test.
+    /// Directional: only upward probes see it.
+    struct Ceiling {
+        under_y: f32,
+    }
+    impl TerrainOracle for Ceiling {
+        fn depth_along(&self, station: Vec3, out: Vec3, reach: f32) -> f32 {
+            if out.y <= 0.0 {
+                return -reach;
+            }
+            (station.y - self.under_y).min(reach)
+        }
+    }
+
+    /// The travel band exists UNDER the belly only: a return-run station shares a belly
+    /// station's z, and an ungated profile mirrored the suspension band onto the top of the
+    /// loop — meeting overhead geometry `free_travel` too early. Rig: the top face passes
+    /// 25 mm under a ceiling; the raised (ungated) datum would penetrate it 75 mm.
+    #[test]
+    fn the_envelope_band_never_mirrors_onto_the_return_run() {
+        let params = ForceParams {
+            free_travel: 0.1,
+            ..rig_params()
+        };
+        let loop_pts = rect_loop(0.0);
+        let input = SideInput {
+            loop_pts: &loop_pts,
+            count: 25,
+            plane_x: 0.0,
+            columns: TEST_COLUMNS,
+            command: 0.0,
+            travel: None,
+        };
+        let (report, live) = contact_side(
+            &input,
+            SideState::default(),
+            Affine3A::IDENTITY,
+            1.0 / 64.0,
+            &params,
+            &Ceiling { under_y: 0.55 },
+            |_| Vec3::ZERO,
+            &mut GripElements::for_links(25),
+        );
+        assert!(live);
+        assert!(
+            report.contacts.is_empty(),
+            "the return run must meet the ceiling at its FACE, not at a phantom suspension \
+             band ({} contacts)",
+            report.contacts.len(),
+        );
+        // Receipt: the ceiling IS inside the ungated band's reach — drop it to the face line
+        // and the top run must contact (the gate must not have killed top-run contact
+        // outright).
+        let (report, _) = contact_side(
+            &input,
+            SideState::default(),
+            Affine3A::IDENTITY,
+            1.0 / 64.0,
+            &params,
+            &Ceiling { under_y: 0.51 },
+            |_| Vec3::ZERO,
+            &mut GripElements::for_links(25),
+        );
+        assert!(
+            !report.contacts.is_empty(),
+            "a ceiling below the top face must still contact through the gated law"
+        );
+    }
+
+    /// The envelope reframing: with the rest face exactly kissing flat ground, the rest
+    /// datum (`free_travel = 0`) carries nothing — while a free-travel band turns the same
+    /// kiss into a fully-drooped spring at exactly `free_travel` of intrusion, so the total
+    /// elastic load is `k · travel · bottom_run` to closed form. Same stations, same probes,
+    /// same profile machinery — only the zero-force surface moved.
+    #[test]
+    fn the_free_travel_moves_the_support_datum_to_the_droop_envelope() {
+        // Pin belly at +face_offset → outer face at y = 0 = the ground surface.
+        let params = rig_params();
+        let loop_pts = rect_loop(params.face_offset);
+        let input = SideInput {
+            loop_pts: &loop_pts,
+            count: 25,
+            plane_x: 0.0,
+            columns: TEST_COLUMNS,
+            command: 0.0,
+            travel: None,
+        };
+        let tick = |params: &ForceParams| {
+            let (report, live) = contact_side(
+                &input,
+                SideState::default(),
+                Affine3A::IDENTITY,
+                1.0 / 64.0,
+                params,
+                &FlatGround { surface_y: 0.0 },
+                |_| Vec3::ZERO,
+                &mut GripElements::for_links(25),
+            );
+            assert!(live);
+            report
+        };
+
+        // Rest datum: a kissing face has zero penetration — no contacts at all.
+        assert!(
+            tick(&params).contacts.is_empty(),
+            "a kissing face must carry nothing under the rest-anchored law"
+        );
+
+        // Envelope datum: the same pose sits `travel` deep into the suspension band. The
+        // bottom run is 2 m; every column weight sums to 1 and the engage ramp saturates far
+        // below the travel, so Σ elastic = k · travel · 2 m exactly.
+        let travel = 0.08;
+        let env = ForceParams {
+            free_travel: travel,
+            ..rig_params()
+        };
+        let report = tick(&env);
+        let total: f32 = report.contacts.iter().map(|c| c.load_elastic).sum();
+        let expected = env.support_stiffness_per_m * travel * 2.0;
+        assert!(
+            (total - expected).abs() / expected < 1e-3,
+            "envelope load {total:.1} N vs closed-form {expected:.1} N"
+        );
+        // And the reported contact points sit on the terrain surface, not on the envelope.
+        for c in &report.contacts {
+            assert!(
+                c.point.y.abs() < 1e-4,
+                "contact must land on the ground plane, got y = {}",
+                c.point.y
+            );
+        }
     }
 
     /// Netcode review defect 1: one separating tick (damped load clipped to zero, elastic
@@ -1069,7 +1202,7 @@ mod tests {
     /// into [leave, enter) — dwell still live, slip continuing — must HOLD its accumulated
     /// strain, not keep integrating it. Integration is gated on `load_elastic >= enter`, NOT on
     /// membership: writing the branch `if member` would let strain GROW in the band (the pad is
-    /// a member there) while the parity/departure tests stayed green. This pins that the branch
+    /// a member there) while the departure tests stayed green. This pins that the branch
     /// is load-keyed.
     #[test]
     fn element_member_fading_into_band_holds_strain() {

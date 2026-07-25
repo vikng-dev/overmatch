@@ -1,7 +1,8 @@
 # Static friction: an elastic–plastic strain regime inside the belt law
 
-> **REV-15 scope:** retained for the aggregate offline compatibility path; superseded for networked
-> element-mode composition by [[0027-element-grip-netcode]].
+> **Status: SUPERSEDED** by [[0027-element-grip-netcode]] and the element settlement — the
+> per-element isotropic shear law is the sole grip law; the aggregate single-resultant strain
+> path this ADR describes is retired. Body retained as the decision record.
 
 Tanks hold and grip through a **per-side elastic–plastic shear strain state** — the
 Janosi–Hanamoto form from tracked-vehicle terramechanics, carried as `TrackGrip` (4 floats:

@@ -1,8 +1,15 @@
 # Static friction as a first-class regime of the belt law — design brief
 
-Status: IMPLEMENTED (2026-07-17, Yan-approved 'go') — see ADR-0026 for the shipped law
-AND the three places implementation falsified this draft (stiffness provenance, elastic
-vs damped budget, kinetic term removed from the grip regime).
+Status: SETTLED as the **per-element isotropic shear law**. This brief is the physics-derivation
+record: the shear-modulus provenance, the elasto-plastic drift fix, the damping choice, and the
+budget-on-elastic-load rationale below are the law's foundations and stand. Two things the brief
+proposed were superseded on the way to the shipped law: the **single per-side aggregate resultant**
+representation (`TrackGrip { sides: [[f32;2];2] }`, 16 bytes on the wire) gave way to the exact
+**per-element strain field** (`TrackGripElements`; netcode is [[0027-element-grip-netcode]] and
+`element-netcode-design.md`), and the **anisotropic ellipse** (a 0.55 lateral share) gave way to
+the **isotropic circle** (full μN in every direction; the `lateral_ratio` knob is deleted). ADR-0026 also records
+the three places implementation falsified the draft (stiffness provenance, elastic vs damped
+budget, the kinetic term removed from the grip regime).
 Inputs: codex design deep-dive (`scratchpad/codex_friction_design.md` — regenerable), a
 literature sweep (Dahl/LuGre/elasto-plastic, Janosi–Hanamoto terramechanics, tire transient
 models, fixed-step numerics), an engine-practice sweep (solver friction internals, vehicle
@@ -50,8 +57,10 @@ lab, 20° pad, zero command, 64 Hz):
   ~0.8 Hz suspension limit cycle + MG recoil are exactly the oscillating loads that would
   make a plain-Dahl tank walk downhill at rest.
 - **Per-element bristle state** (97×3×2×2 floats): honest but ~4.7 KB/tank of
-  force-affecting state; needs material-identity advection bookkeeping; wire/rollback cost
-  unjustified until playtest shows a failure only independent per-column release solves.
+  force-affecting state; needs material-identity advection bookkeeping. Weighed here as the
+  costly alternative to the aggregate — but this IS what shipped: the per-element field became
+  the grip law, reconciled by wrench anchor + exact checkpoints rather than per-tick wire state
+  ([[0027-element-grip-netcode]], `element-netcode-design.md`).
 - **`local_rollback` for grip state**: disqualified — parked means zero slip distance, so a
   stale local grip state NEVER heals (Dahl mismatch decays only with accumulated slip), and
   grip has no separate authoritative correction path. The one case being fixed is the one
@@ -69,18 +78,21 @@ elastic–plastic shear state per contact patch**. We declare it per track side.
 
 ### State
 
+> The single per-side resultant below was the brief's proposal; it was superseded by the exact
+> per-element field `TrackGripElements` (one strain per material link × column × side). The
+> `TrackGrip` name survives as the summed derived telemetry over that field (hashed into `hblt`,
+> off the wire). The elastic-load-proportional distribution, generalized-force (not world-anchor)
+> character, and shared-ellipse cap described here carry over unchanged to the per-element law.
+
 ```rust
 /// Per-side elastic grip resultant (N), [left, right] × [longitudinal, lateral/ρ].
 /// Generalized forces, NOT world anchors — distributed through the existing per-column
 /// contacts in load proportion (application points and lever arms unchanged).
-#[derive(Component, ...)]  // replicate + predict + own rollback threshold, TrackDrive pattern
 pub struct TrackGrip { pub sides: [[f32; 2]; 2] }
 ```
 
-16 bytes/tank on the wire (~1 KiB/s/tank-recipient worst case). Root-resident `#[require]`
-beside TrackDrive; joins the determinism hash; PROTOCOL_REV bump. Rollback threshold
-`ROLLBACK_TRACK_GRIP_N ≈ 2_000` (≈1.1 mm/s one-tick velocity discrepancy — a netcode
-ratchet, not a friction constant).
+The per-element field is root-resident local-rollback state that never crosses the wire per tick;
+reconciliation is the wrench anchor + exact sparse checkpoints of [[0027-element-grip-netcode]].
 
 ### Law (inside `step_side`, one law, no branches)
 
@@ -127,10 +139,11 @@ unchanged. Legitimate force balance: the belt's 1-D coordinate is fully known in
 
 ### What we deliberately do NOT adopt
 
-- **Wong & Chiang's isotropic resultant-j (no ellipse)** — literature-preferred for soft
-  soil against field data, but it would repeal our declared anisotropy (lateral_ratio =
-  the pivot feel dial) and re-tune all shipped steering gates. Recorded as the soft-soil-era
-  alternative for the terrain mechanic.
+- **Isotropy (no ellipse, full μN laterally)** — the brief deferred this as the soft-soil-era
+  alternative, wary of repealing the `lateral_ratio` pivot dial and re-tuning the steering gates.
+  The settled law took it: the per-element cap is an isotropic **circle** (no lateral share),
+  which is what re-tightened the steering gates. Wong & Chiang applied it as an aggregate
+  resultant; the shipped law applies it per element.
 - Full LuGre (Stribeck curve, bristle-rate damping): unnecessary complexity + the
   passivity trap.
 - Sleep as the hold mechanism: stays available as a later bandwidth/bit-exactness lid
@@ -152,16 +165,18 @@ unchanged. Legitimate force balance: the belt's 1-D coordinate is fully known in
 4. **Steering regression**: the full existing analyze_steer suite (pivot/turn/slalom/
    monotonicity/ellipse/dissipation) — low-speed pivot feel is the main regression risk
    (sub-saturation slip now builds resistance instead of the weak creep branch).
-5. **Rollback**: TrackGrip in the canonical hash; slope-park replay bit-identical; solo MP
-   slope parks ≈ zero post-settle rollbacks; injected grip mismatch reconciles without a
-   park/correct/park loop.
-6. **Parity**: with q ≡ 0 (grip disabled), harness output bit-identical to today's baseline.
+5. **Rollback**: the element field (`TrackGripElements`) in the canonical hash; slope-park replay
+   bit-identical; solo MP slope parks ≈ zero post-settle rollbacks; injected grip mismatch
+   reconciles without a park/correct/park loop.
+6. **Parity** (historical): a `q ≡ 0` grip-disabled switch let the strain regime land bit-identical
+   to the pre-grip baseline during bring-up. That parity switch and the pre-grip baseline no longer
+   exist — the strain law is the only grip law — so this gate is retired, not live.
 
 ## 5. Failure modes to watch (from all three inputs)
 
 Prediction corrections fighting stick (threshold too tight → repeated TrackGrip-attributed
 rollbacks); remote parked pose jitter (measure confirmed pose vs render-error separately);
 low-speed steering too resistant (the creep branch is gone — deliberate, but feel-check);
-aggregate-state insufficiency on curbs/one-track contact (the evidence that would justify
-per-element state later); ledge-transition traction pulse (memory clips to a shrinking
+curb / one-track-contact behaviour (the aggregate's insufficiency here was the evidence that
+justified the per-element field that shipped); ledge-transition traction pulse (memory clips to a shrinking
 budget — continuous but watch it); coast-down capture feel through the h-blend band.

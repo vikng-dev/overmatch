@@ -2,28 +2,48 @@
 TankSpec(
     mass: 57_000.0,
     inertia_extents: (3.0, 2.0, 6.3),
-    // Continuous track (view-layer chain, track architecture §7). Material loop is exact:
-    // 97 × 0.130 = 12.610 m against a 12.577 m taut envelope (+33 mm ≈ 0.26% slack).
-    // Sprocket/idler circles are measured from the model's visual-mesh bounds (side-plane
-    // (z, y), mirrored across ±plane_x) — interim authoring until the model carries rig nodes.
+    // Continuous track (track architecture §7). link_count 97 = the marker-derived window's
+    // lowest SPRING-limited count (window 96..97 at ride_frequency 1.2 Hz): full suspension
+    // travel with the minimum slack that permits it — playtest-confirmed 2026-07-24. The real
+    // Tiger ran 96/side (chain-limited, as a tensioned track is); revisit if belt-tension
+    // forces ever land. Window recomputes when ride_frequency moves — recheck after retuning.
+    // This block is authored VEHICLE DATA only — link count, link physicals, articulation limits,
+    // the sprocket tooth count, and the suspension ride / powertrain models. All running-gear
+    // GEOMETRY (pitch, plate thickness, shoe width, the track plane, and every sprocket/idler/wheel
+    // circle) is MEASURED off the glb markers now — one source of truth, in the model — so nothing
+    // geometric is authored here (see track::rig_geom / track::marker_model).
     track: (
-        pitch: 0.130,
         link_count: 97,
-        width: 0.79,
-        thickness: 0.117,
         link_mass: 30.0,
         hinge_torque: 45.0,
-        max_link_angle: 0.6109,   // 35°
-        plane_x: 1.4904,
-        // 19 teeth × 0.130 pitch / τ = 0.3931 m pitch radius (mesh bound: 0.3956 — 2.5 mm off).
-        sprocket: ( center: (-2.5642, 0.7194), teeth: 19 ),
-        idler:    ( center: (2.3657, 0.5843),  radius: 0.4536 ),
-        wheel_radius: 0.458,
+        // Hard articulation stops, in DEGREES (the `_deg` suffix is the unit contract; `spec.rs`
+        // converts to radians once, at the deserialisation seam — nothing downstream sees
+        // degrees). ASYMMETRIC because the shoe is: folding INWARD (toward the wheels) the guide
+        // horns close on each other, folding OUTWARD (away from them) the ground-side structure
+        // does. Two different features, two different numbers, both authored as POSITIVE
+        // magnitudes named for their direction — a signed pair here is a sign convention waiting
+        // to be read backwards.
+        //   inward  40° — the WRAP direction: every wheel the belt bends around costs a fold this
+        //           way (the tightest, the idler, demands 20.44°).
+        //   outward 18° — a return run sagging, a shoe cresting a rock.
+        // HAND-MEASURED in Blender, not derived. An automatic mesh sweep was built and rejected:
+        // the shoe is modelled with near-zero clearance (~18 µm at the outward faces), so the
+        // first-contact angle it reported moved with the penetration threshold (17.7° at 0.1 mm,
+        // 42.9° at 0.5 mm, 46.0° at 2 mm) — an arbitrary number wearing a measurement's clothes.
+        // And the mesh is only ever an UPPER BOUND anyway: real articulation is also limited by
+        // pin/bushing clearance and the end connectors, none of which the shoe mesh models.
+        link_angle: ( inward_deg: 40.0, outward_deg: 18.0 ),
+        // 20 teeth (model-verified count) — the ONLY sprocket datum still authored. The pitch
+        // radius is chord-exact from the MEASURED pitch × teeth (marker-derived, ~0.4155 m); the
+        // sprocket centre and every other running-gear circle are measured off the glb too.
+        // Reductions absorb the radius (speeds are anchored), so the tooth count is feel-neutral
+        // for the transmission.
+        sprocket: ( teeth: 20 ),
         // Phase-B locomotion: the SANDBOX force law scaled to the Tiger (the retired raycast
         // sim was a placeholder — nothing structural carries over). Stiff sandbox governor;
-        // support = the sandbox law scaled by the 57 t / 26.5 t mass ratio (same ~5 cm
-        // static sink); inertia likewise. Hill-hold arrived with the grip regime (ADR-0026);
-        // parking creep is gone.
+        // the contact-envelope law derives its spring/damper from `suspension` below (same
+        // ~5 cm static sink at 57 t); inertia likewise. Hill-hold arrived with the grip regime
+        // (ADR-0026); parking creep is gone.
         //
         // Force cap = the GRIP-LIMIT gearing rule (the T-34 lab benchmark: first gear can
         // just spin the tracks, cap ≈ μ·W/2 ≈ 252 kN here). The previous 100 kN was tuned
@@ -157,9 +177,19 @@ TankSpec(
                 brake_static_factor: 1.5,
             ),
         ),
-        support: (
-            stiffness_per_m: 1_460_000.0,
-            damping_per_m: 172_000.0,
+        // The ride model — everything else derives: spring rate m·(2πf)², static deflection
+        // g/(2πf)² ≈ 0.173 m (the droop envelope depth, chain-clamped by the link window),
+        // damper 2ζ√(k·m). Real tanks ride at ~1–1.5 Hz.
+        suspension: (
+            ride_frequency: 1.2, // Hz
+            damping_ratio: 0.35,
+            // Compression travel above rest (m) — the red hard stop. Tuned in the sandbox
+            // 2026-07-24: raised until the compression wrap clears the hull; note the belly
+            // hand-off — past ~0.10 m the unsprung idler/sprocket own the red belly, so the
+            // extra travel here mostly widens the per-wheel stop, not the collider floor.
+            bump_stop: 0.200,
+            // Contact engage-ramp depth (m): the penetration over which a contact ramps from
+            // zero to full support — the anti-pop smoothing of the contact law.
             engage: 0.02,
         ),
     ),
@@ -190,22 +220,26 @@ TankSpec(
         // --- Coax MG (pure armour for now; damageability/function deferred to the weapons work) ---
         "Coax_MG_Body_Ballistic":    (material_factor:  300.0),
         "Coax_MG_Barrel_Ballistic":  (material_factor: 1000.0),
-        "Wheel_L_0_Ballistic": (material_factor: 1000.0),
-        "Wheel_L_1_Ballistic": (material_factor: 1000.0),
-        "Wheel_L_2_Ballistic": (material_factor: 1000.0),
-        "Wheel_L_3_Ballistic": (material_factor: 1000.0),
-        "Wheel_L_4_Ballistic": (material_factor: 1000.0),
-        "Wheel_L_5_Ballistic": (material_factor: 1000.0),
-        "Wheel_L_6_Ballistic": (material_factor: 1000.0),
-        "Wheel_L_7_Ballistic": (material_factor: 1000.0),
-        "Wheel_R_0_Ballistic": (material_factor: 1000.0),
-        "Wheel_R_1_Ballistic": (material_factor: 1000.0),
-        "Wheel_R_2_Ballistic": (material_factor: 1000.0),
-        "Wheel_R_3_Ballistic": (material_factor: 1000.0),
-        "Wheel_R_4_Ballistic": (material_factor: 1000.0),
-        "Wheel_R_5_Ballistic": (material_factor: 1000.0),
-        "Wheel_R_6_Ballistic": (material_factor: 1000.0),
-        "Wheel_R_7_Ballistic": (material_factor: 1000.0),
+        // --- Roadwheels: the SAME node is the suspension station and its armour volume. The wheels
+        // are exported as one watertight mesh per station (no `_Visual`/`_Ballistic` split), so the
+        // key is the bare station name — `bake::captures_mesh` captures it under that name and
+        // `bake::roadwheel_side` classifies it as a station off the same node. ---
+        "Wheel_L_0":            (material_factor: 1000.0),
+        "Wheel_L_1":            (material_factor: 1000.0),
+        "Wheel_L_2":            (material_factor: 1000.0),
+        "Wheel_L_3":            (material_factor: 1000.0),
+        "Wheel_L_4":            (material_factor: 1000.0),
+        "Wheel_L_5":            (material_factor: 1000.0),
+        "Wheel_L_6":            (material_factor: 1000.0),
+        "Wheel_L_7":            (material_factor: 1000.0),
+        "Wheel_R_0":            (material_factor: 1000.0),
+        "Wheel_R_1":            (material_factor: 1000.0),
+        "Wheel_R_2":            (material_factor: 1000.0),
+        "Wheel_R_3":            (material_factor: 1000.0),
+        "Wheel_R_4":            (material_factor: 1000.0),
+        "Wheel_R_5":            (material_factor: 1000.0),
+        "Wheel_R_6":            (material_factor: 1000.0),
+        "Wheel_R_7":            (material_factor: 1000.0),
         // --- Modules (damageable; HP = function/integrity, material = resistance, independent) ---
         "Engine_Ballistic":         (material_factor:  600.0, hp: 10.0, function: Engine),
         "Transmission_Ballistic":   (material_factor:  600.0, hp: 10.0, function: Transmission),
@@ -261,8 +295,17 @@ TankSpec(
         ),
     },
     views: {
-        // fov in radians: the gunner optic is magnified (~7° → ~6×), the commander view is wide
-        // (~45°). requires gates the view — a dead crewman blacks it out.
+        // fov in RADIANS — the one angle in this file still authored that way (everything else is
+        // degrees, converted once at the spec seam). Deliberately left alone, because the field is
+        // not going to stay an angle: the INTENT is to express these as ZOOM instead.
+        //   * the third-person view gets a continuous fov SLIDER (a viewer comfort control),
+        //   * the gunner sight gets DISCRETE zoom levels, as real optics have — e.g. 4x / 8x —
+        //     rather than a free angle, so magnification is a property of the sight, not a knob.
+        // Converting to degrees now would be churn on a field that wants to become a different
+        // quantity entirely. Revisit when the sight/zoom work lands.
+        //
+        // Today: the gunner optic is magnified (~7° → ~6×), the commander view is wide (~45°).
+        // `requires` gates the view — a dead crewman blacks it out.
         Gunner:    (node: "Main_Gun_Pitch", fov: 0.12,    requires: [Gunner]),
         Commander: (node: "Turret_Yaw",     fov: 0.785,   requires: [Commander]),
     },

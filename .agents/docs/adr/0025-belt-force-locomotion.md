@@ -7,8 +7,10 @@ pitch-spaced force stations advected by belt travel; each ground-facing segment 
 analytic terrain field across three lateral collocation columns (Simpson weights over the shoe
 width), takes a clipped-linear pressure profile, and applies **support** (penalty spring along
 the belt's inward normal, normal-velocity damped, engagement-ramped) and **traction**
-(slip-saturated friction ellipse: longitudinal slip vs belt surface speed, lateral scrub, both
-budgeted against μ × load with a lateral grip ratio). Longitudinal reactions accumulate into
+(per-element isotropic shear: each grounded link accumulates a directional strain whose force
+saturates against an isotropic μ × its own elastic load — one circular budget, no friction
+ellipse and no lateral grip ratio; see [[0026-static-friction-strain-regime]] /
+[[0027-element-grip-netcode]]). Longitudinal reactions accumulate into
 **belt dynamics**: a constant-power engine curve (P/v, force-capped), a governor chasing
 `command × max_speed`, reflected inertia, and phase advection. Steering is the differential
 command `throttle ± steer` per side; yaw torque emerges from traction lever arms — nothing
@@ -51,14 +53,15 @@ telemetry only: never hashed, never rolled back.
 - **Support acts along the belt normal, not the ground normal** — honest model quirk; watch
   steep side-slope behaviour.
 - **No bump-stop cap** — deep penetration resolves through the pressure profile alone.
-- **Slope-parking creep is accepted**: the clean slip law has no static friction, so a parked
-  Tiger creeps ~16 cm/s on a 20° slope (bounded equilibrium — the ellipse prevents runaway).
-  The recorded fix, if playtest demands one, is the per-element bristle above.
+- **Slope-parking hold shipped**: the per-element elastic–plastic strain law (the "per-element
+  bristle" foreseen in the options above) landed as the grip law — a parked Tiger holds on grade
+  rather than creeping. See [[0026-static-friction-strain-regime]] and the settled per-element
+  contract [[0027-element-grip-netcode]].
 - **Coast-down feel changed**: governor engine-brake replaced the rolling-resistance dial.
-- **Surface friction is a sim constant** (μ 0.9, lateral ratio 0.55, slip saturation 0.4) —
+- **Surface friction is a sim constant** (μ 0.9, slip saturation 0.4 — isotropic, no lateral ratio) —
   ADR-0007-bucket-3 material: a property of the track–ground *pair*, reserved for the future
   terrain/ground-type mechanic, deliberately not vehicle spec. Vehicle spec (`.tank.ron
-  track:`) carries only `powertrain` + `support`, scaled from sandbox tuning by mass ratio.
+  track:`) carries only `powertrain` + `suspension`, scaled from sandbox tuning by mass ratio.
 - **Vehicle collision proxies run `Friction::ZERO` (min-combine)** — all grip is the model's;
   Avian's default contact friction would silently add unmodeled hold.
 - **`Drive` capability gates the command, not the contact model** — a dead engine still

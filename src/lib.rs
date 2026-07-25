@@ -83,22 +83,19 @@ mod shot_trace;
 mod sight;
 mod spec;
 mod state;
-/// The suspension editor (`bin/suspension_editor`). Public so the binary can mount it; not part of
-/// `GamePlugin`. A read-only dev tool: it loads the Tiger blueprint (geometry + spec) and overlays
-/// the derived suspension/track geometry (route, cast shapes, pin/tooth markers, contact) as
-/// toggleable gizmo layers, live-tweakable — the workbench for the track-model source-of-truth work.
-pub mod suspension_editor;
 mod tank;
 /// The jitter-trace recorder (`SPIKE_TRACE=<path>`): an env-gated JSONL log of rendered vs. simulated
 /// pose, rollback events, and correction decay — passive instrumentation for the MP hull-jitter
 /// investigation. Off (zero cost) unless the env var is set. Net-specific rows are `#[cfg(net)]`.
 mod trace;
-/// The track-model sandbox (`bin/track_sandbox`). Public so the binary can mount it; not part of
-/// `GamePlugin`. Self-contained: its own code-generated primitive rig + locomotion, for developing
-/// the continuous-track model in isolation.
 /// The track model's pure core (route/oracle/chain math) — consumed by the sandbox lab and, in
 /// phase A, the game's track view. See `.agents/docs/design/track-model/architecture.md`.
 pub mod track;
+/// The track-model sandbox (`bin/track_sandbox`) — the single dev tool for the track/suspension
+/// work, having absorbed the retired suspension editor. Public so the binary can mount it; not part
+/// of `GamePlugin`. Tiger-only: it loads the real blueprint (geometry + spec), derives the running
+/// gear from the glb markers, and overlays the derived suspension/track geometry (cast shapes,
+/// route, contact) as live-tweakable gizmo layers on a hull that actually drives.
 pub mod track_sandbox;
 /// The bundled UI typeface (Barlow Condensed): loads the two weights once and exposes them as a
 /// `ui_font::UiFonts` resource that every `Text`-spawning client plugin reads. Mounted by each
@@ -584,10 +581,6 @@ impl Plugin for GamePlugin {
 /// winit updates — plus [`GamePlugin`], the true single-player composition. NO netcode: no
 /// lightyear plugins, no connection entity, nothing that can attempt a connect.
 ///
-/// This is the ONLY composition that inserts [`track::sim::ElementGripFeelTest`], the
-/// startup-latched gate under which `apply_track_forces` runs the per-element grip regime
-/// (element-promotion-checklist.md Q1, phase 2 of the element promotion). Every other composition
-/// leaves the resource absent and keeps today's aggregate law bit-for-bit.
 pub fn run_offline() {
     let mut app = App::new();
     // Exe-relative asset root, exactly as `run_client` resolves it: a double-clicked binary
@@ -612,8 +605,6 @@ pub fn run_offline() {
     // Same policy as the net client: never drop below the 64 Hz tick when unfocused.
     app.insert_resource(bevy::winit::WinitSettings::continuous());
     app.add_plugins(GamePlugin);
-    // The offline element-grip gate — latched at process start, ONLY here (see the resource doc).
-    app.init_resource::<track::sim::ElementGripFeelTest>();
     // The offline transmission feel test (phase 2.5): default the Tiger's authored
     // architecture (L600 fixed-radius regenerative — per-vehicle SPEC eventually; the
     // resource is the interim dial). `T` cycles governor → hybrid → L600 live; the shared F3

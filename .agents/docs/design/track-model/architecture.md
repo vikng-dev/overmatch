@@ -45,8 +45,10 @@ What is true now:
   share one analytic field built from `TerrainMap` on revision change.
 - The view consumes `TrackDrive` phase/speed directly — the pose-delta no-slip derivation is
   deleted; remote tracks scroll at exact authority phase.
-- The hold/bristle transplant was attempted and REVERTED (owner call — pure sandbox law;
-  slope creep accepted; future hill-hold = per-element bristle; `phase-b-migration.md` §3a).
+- The raycast hold/bristle transplant was REVERTED at cutover (owner call — pure sandbox law;
+  `phase-b-migration.md` §3a). Hill-hold later shipped as physics inside the slip law: the
+  per-element elastic–plastic strain grip ([[0026-static-friction-strain-regime]], settled
+  per-element in [[0027-element-grip-netcode]]) — a parked tank holds on grade.
 - Sandbox `model4` is a thin adapter over `track::forces` — the entanglement noted in §0
   (codex E) was dissolved by the extraction; models 1–3 deleted in the consolidation pass.
 - Vehicle collision proxies carry `Friction::ZERO` (min-combine): all grip is the model's.
@@ -342,11 +344,12 @@ rebind. Deliberately NOT built (owner LOC mandate): tiers, instancing, `Presente
 state, `TrackRenderer` trait, `SpatialQueryOracle`, tensioner/presets. Deliverable met: Tiger 1
 drives with live tracks in MP, zero sim risk. Tiger authoring unblocked.
 
-**Phase B — sim promotion (gated):** collocation forces replace `driving::{suspension,
-traction}` under the ADR-0005 rewrite; `BeltState` replicated+predicted; harness parity vs
-sandbox baselines + MP soak (rollback storm, JIP) before default flip. The raycast/track switch
-during soak is whole-process, development-only, with a **deletion gate** — it must never ship
-as a per-tank tier or alternate locomotion model.
+**Phase B — sim promotion (SHIPPED):** collocation forces replaced `driving::{suspension,
+traction}` under the ADR-0005 rewrite; the belt model is the game's drive sim; harness parity vs
+sandbox baselines held. The raycast/track switch was whole-process, development-only, behind a
+**deletion gate** — the raycast path is gone; no per-tank tier or alternate locomotion model
+ships. (Grip and support have since settled further: per-element strain grip
+[[0027-element-grip-netcode]] and the contact-envelope support calibration.)
 
 ## 10. Testing
 

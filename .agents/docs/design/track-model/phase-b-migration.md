@@ -7,6 +7,14 @@ previously-planned dev-only A/B switch is CANCELLED; parity evidence comes from 
 bit-repeatable sandbox harness, the rewritten contract tests, and playtest. The only fork
 retained anywhere: the sandbox's two VIEW models (wrap vs chain, `V`).
 
+> SETTLED-SURFACE CORRECTION (post-plan, ADR-0026/0027): two migrated-surface declarations below
+> were superseded on the way to the shipped law. **Traction is the per-element ISOTROPIC shear law
+> — no friction ellipse, no `LATERAL_GRIP_RATIO`/lateral share** (full μN in every direction; the
+> `lateral_ratio` knob is deleted). **Support is the contact-envelope calibration DERIVED from the
+> `suspension:` spec block** (ride frequency / damping ratio); the `track: support:` stiffness/damping
+> fields this plan proposed were never authored — only `suspension.engage` is authored. See
+> `architecture.md` and `static-friction-design.md`.
+
 Inputs: three research sweeps (sandbox sim inventory, deletion blast radius, netcode patterns)
 
 - codex design review (`scratchpad/codex_phaseb_review.md`). Companion to `architecture.md`
@@ -47,9 +55,10 @@ src/track_sandbox/        model4 physics becomes a thin adapter over track::forc
                           VIEWS (wrap V chain) stay. Models 1–3 (lab archaeology) DELETED.
 ```
 
-`TankSpec`: `drivetrain:` + `suspension:` blocks die; `track:` grows `powertrain:` +
-`support:` sections (ADR-0011 — all authored, no defaults). Surface friction (μ, lateral
-ratio, slip saturation) stays a sim CONST — ADR-0007 bucket 3, a property of the
+`TankSpec`: `drivetrain:` dies; `track:` grows `powertrain:` (SETTLED: + `transmission:`; the
+proposed authored `support:` section was NOT built — the `suspension:` block STAYS and the
+contact envelope derives its stiffness/damping from it, only `suspension.engage` authored).
+Surface friction (μ, slip saturation — SETTLED: isotropic, no lateral ratio) stays a sim CONST — ADR-0007 bucket 3, a property of the
 track–ground pair destined for the terrain mechanic, deliberately not vehicle spec. `Roadwheel` loses
 `#[require(Suspension)]`; `TankSim.anchors` dies outright (no hold state exists — §3a).
 
@@ -192,7 +201,8 @@ Adopted from `scratchpad/codex_purity_review.md` so future transplants get caugh
 
 - **Steer feel is unproven** — the ellipse math existed but the sandbox never *played* steer
   (harness was straight-line). Mitigation: new harness steer scenario + Yan feel pass first
-  thing after cutover. Turn radius / pivot authority tuned via `lateral_ratio` + `μ`.
+  thing after cutover. Turn radius / pivot authority tuned via `μ` (the settled element law
+  is isotropic — there is no lateral-ratio dial).
 - **Support along belt normal** (not ground normal) — honest model quirk, recorded in
   ADR-0025; watch on steep side-slopes.
 - **Coast-down feel changes** (governor engine-brake replaces rolling_resistance dial).

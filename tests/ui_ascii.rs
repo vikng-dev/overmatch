@@ -67,7 +67,7 @@ const BARLOW_TEXT_FILES: &[&str] = &[
 const ASCII_ONLY_TEXT_FILES: &[&str] = &[
     "src/sandbox.rs",
     "src/track_sandbox/mod.rs",
-    "src/suspension_editor/mod.rs",
+    "src/track_sandbox/suspension_viz.rs",
 ];
 
 /// Macros whose string arguments are diagnostics, never rendered — skipped by the scanner.

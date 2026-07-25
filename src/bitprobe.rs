@@ -25,9 +25,7 @@ use crate::bake::TankBlueprint;
 use crate::command::TankCommand;
 use crate::state::AppState;
 use crate::tank::{Controlled, TankSimSource, spawn_bitprobe_tank};
-use crate::track::sim::{
-    ElementGripNetcode, TankTransmission, TrackDrive, TrackGear, TrackGrip, TrackGripEffect,
-};
+use crate::track::sim::{TankTransmission, TrackDrive, TrackGear, TrackGrip, TrackGripEffect};
 use crate::track::terrain::TrackField;
 use crate::track::transmission::{TransmissionProjectionValue, transmission_state_projection};
 use crate::world::TerrainMap;
@@ -481,7 +479,6 @@ fn build_app() -> App {
         .disable::<IslandSleepingPlugin>();
     app.add_plugins(physics)
         .add_plugins(SimPlugin)
-        .init_resource::<ElementGripNetcode>()
         .init_resource::<BitprobeCapture>()
         .add_systems(PreUpdate, spawn_fixture);
     app
@@ -561,21 +558,21 @@ fn startup_dump(app: &App, tank: Entity) -> StartupBuilder {
     out.f32("spec.inertia_extents.y", spec.inertia_extents.1);
     out.f32("spec.inertia_extents.z", spec.inertia_extents.2);
     let track = &spec.track;
-    out.f32("spec.track.pitch", track.pitch);
     out.u32("spec.track.link_count", track.link_count as u32);
-    out.f32("spec.track.width", track.width);
-    out.f32("spec.track.thickness", track.thickness);
     out.f32("spec.track.link_mass", track.link_mass);
     out.f32("spec.track.hinge_torque", track.hinge_torque);
-    out.f32("spec.track.max_link_angle", track.max_link_angle);
-    out.f32("spec.track.plane_x", track.plane_x);
-    out.f32("spec.track.sprocket.center.z", track.sprocket.center.0);
-    out.f32("spec.track.sprocket.center.y", track.sprocket.center.1);
+    // The hinge stops as the sim sees them — RADIANS, past the spec's degrees seam.
+    out.f32("spec.track.link_angle.inward", track.link_angle.inward());
+    out.f32("spec.track.link_angle.outward", track.link_angle.outward());
     out.u32("spec.track.sprocket.teeth", track.sprocket.teeth);
-    out.f32("spec.track.idler.center.z", track.idler.center.0);
-    out.f32("spec.track.idler.center.y", track.idler.center.1);
-    out.f32("spec.track.idler.radius", track.idler.radius);
-    out.f32("spec.track.wheel_radius", track.wheel_radius);
+    // Running-gear GEOMETRY is MEASURED off the glb now — a fresh cross-target divergence surface
+    // (marker measurement + derivation runs per target). Echo the derived scalars the `TrackGear`
+    // dump does not already carry: `plane_x` is `track_gear.plane_x`, the sprocket pitch radius is
+    // `transmission.sprocket_radius`, and the full rest route is `track_gear.route[..]`.
+    let geom = world.resource::<crate::track::rig_geom::RigGeom>();
+    out.f32("derived.pitch", geom.pitch);
+    out.f32("derived.thickness", geom.thickness);
+    out.f32("derived.width", geom.width);
     out.f32(
         "spec.track.powertrain.max_speed",
         track.powertrain.max_speed,
@@ -587,15 +584,7 @@ fn startup_dump(app: &App, tank: Entity) -> StartupBuilder {
         track.powertrain.governor_gain,
     );
     out.f32("spec.track.powertrain.inertia", track.powertrain.inertia);
-    out.f32(
-        "spec.track.support.stiffness_per_m",
-        track.support.stiffness_per_m,
-    );
-    out.f32(
-        "spec.track.support.damping_per_m",
-        track.support.damping_per_m,
-    );
-    out.f32("spec.track.support.engage", track.support.engage);
+    out.f32("spec.track.suspension.engage", track.suspension.engage);
 
     let position = world.get::<Position>(tank).expect("tank has Position").0;
     let rotation = world.get::<Rotation>(tank).expect("tank has Rotation").0;

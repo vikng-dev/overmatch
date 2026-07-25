@@ -28,8 +28,13 @@ pub(crate) struct NodeGeometry {
     /// (`pos += rot * t; rot *= r`) so equal inputs give bit-equal outputs.
     pub root_position: Vec3,
     pub root_rotation: Quat,
-    /// Raw mesh buffers, captured only where the sim consumes them ([`captures_mesh`]):
-    /// collision proxies (convex hull source) and ballistic volumes (trimesh source).
+    /// Raw mesh buffers, captured only where the sim consumes them ([`captures_mesh`]): collision
+    /// proxies (convex hull source), ballistic volumes and roadwheel stations (trimesh source).
+    /// Vertices are **node-local and unscaled** — exactly the bytes the glb holds, which is what the
+    /// shadow compare needs to diff against the loaded `Mesh` assets. Consumers that build colliders
+    /// hang them under the node entity and let avian compose [`transform`](Self::transform)'s scale
+    /// down the hierarchy (`ColliderTransform`), so a node authored at scale ≠ 1 (the wheels, the
+    /// coax MG volumes) is sized correctly without the extractor pre-baking anything.
     pub primitives: Vec<MeshGeometry>,
 }
 
@@ -45,9 +50,10 @@ pub(crate) struct MeshGeometry {
 pub(crate) struct TankGeometry {
     pub nodes: Vec<NodeGeometry>,
     pub by_name: HashMap<String, usize>,
-    /// Load-bearing roadwheel stations — `(node index, TrackSide)`, one per `Wheel_L/R_<n>` empty
+    /// Load-bearing roadwheel stations — `(node index, TrackSide)`, one per `Wheel_L/R_<n>` node
     /// ([`roadwheel_side`]), **sorted by node name** — a deterministic order every consumer
-    /// (spawn, the track gear build) can rely on, instead of `HashMap`/extraction order.
+    /// (spawn, the track gear build) can rely on, instead of `HashMap`/extraction order. These
+    /// nodes now carry the wheel mesh itself, so they are also ballistic volumes ([`captures_mesh`]).
     pub roadwheels: Vec<(usize, TrackSide)>,
     /// Collision-proxy nodes — `*_Collider` node indices in extraction order. No wire-shared index
     /// derives from this order (each proxy just yields a convex hull), so it is not sorted.
@@ -67,19 +73,30 @@ pub(crate) struct TankBlueprint {
 const TIGER_SPEC_RON: &str = include_str!("../assets/tiger_1/tiger_1.tank.ron");
 
 /// Which nodes' mesh buffers the sim consumes: collision proxies (`*_Collider` → convex hull,
-/// Vehicle layer) and ballistic volumes (`*_Ballistic` → trimesh, Armor layer). Volumes are
-/// spec-keyed at bind, not name-matched — the golden test pins every declared volume to this
-/// rule so a differently-suffixed volume can't silently dodge capture.
+/// Vehicle layer), ballistic volumes (`*_Ballistic` → trimesh, Armor layer), and the roadwheel
+/// stations ([`roadwheel_side`]).
+///
+/// Wheels are the one node class that is BOTH. The Tiger's wheels were re-exported as one unified
+/// watertight mesh per station (was: a `Wheel_L_0` empty parenting a `_Visual` + a `_Ballistic`
+/// child), so the same node is the suspension station AND its own armour volume — and its buffers
+/// have to be captured under the bare `Wheel_<side>_<n>` name or the spec's wheel volumes bind to
+/// empty geometry. Nothing downstream required a station to be transform-only: the station role is
+/// a marker component (`Roadwheel`) and the volume role a bundle + trimesh child, and they compose
+/// on one entity (`tank::spawn::assemble_tank_body`).
+///
+/// Volumes are spec-keyed at bind, not name-matched — the golden test pins every declared volume to
+/// this rule so a differently-suffixed volume can't silently dodge capture.
 fn captures_mesh(name: &str) -> bool {
-    name.ends_with("_Collider") || name.ends_with("_Ballistic")
+    name.ends_with("_Collider") || name.ends_with("_Ballistic") || roadwheel_side(name).is_some()
 }
 
-/// The track side of a roadwheel *rig empty* — `Wheel_L_<n>` / `Wheel_R_<n>` with a purely numeric
-/// index, and nothing else. The numeric check is load-bearing: it excludes the wheel's typed
-/// children (`Wheel_L_0_Ballistic`, `Wheel_L_0_Visual`), which also begin with `Wheel_` but are a
-/// volume / render mesh, not a suspension station. Lives here (not in the sim) because classifying
-/// a node name into sim meaning is the extractor's job (design §8 step 3); [`TrackSide`] itself is
-/// sim vocabulary, imported from `crate::tank`.
+/// The track side of a roadwheel station — `Wheel_L_<n>` / `Wheel_R_<n>` with a purely numeric
+/// index, and nothing else. The numeric check is load-bearing: it is what keeps a *typed* sibling
+/// (`Wheel_L_0_Visual`, a spare `Wheel_L_0_Collider`) from being classified as a second station on
+/// the same axle, which would double-count the wheel in the name-sorted slot order both wire ends
+/// derive. Lives here (not in the sim) because classifying a node name into sim meaning is the
+/// extractor's job (design §8 step 3); [`TrackSide`] itself is sim vocabulary, imported from
+/// `crate::tank`.
 fn roadwheel_side(name: &str) -> Option<TrackSide> {
     for (prefix, side) in [
         ("Wheel_L_", TrackSide::Left),
@@ -607,6 +624,16 @@ mod tests {
             wheel_names, sorted,
             "roadwheels must be extracted name-sorted"
         );
+        // Station AND armour in one node: the unified wheel mesh means every station is also a
+        // volume, so it must be declared (the volume loop above then proves its geometry captured).
+        // Re-split the asset into `Wheel_L_0` + a `_Ballistic` child and this fails at CI time
+        // instead of leaving the wheels silently invisible to the penetration march.
+        for &name in &wheel_names {
+            assert!(
+                spec.volumes.contains_key(name),
+                "roadwheel `{name}` carries the wheel mesh but has no volume declaration"
+            );
+        }
 
         // Collision proxies: present (extraction order), captured, indexed — via the typed list.
         assert!(
@@ -645,5 +672,54 @@ mod tests {
                 "rig node `{name}` is not scale-1"
             );
         }
+    }
+
+    /// Every node that SPINS must carry its axle in its own origin.
+    ///
+    /// A rotating part is driven by writing a local rotation onto its node — which turns the mesh
+    /// about that node's origin. If the origin sits at the model root (geometry baked into the
+    /// vertices, zero node translation — Blender's default for a mesh that was never re-origined),
+    /// the part orbits the tank instead of spinning in place, and any consumer that reads the
+    /// origin as the axle centre reads `(0, 0, 0)`.
+    ///
+    /// The check is deliberately blunt — *at the root* is the failure mode that actually happens on
+    /// export, and it is invisible in Blender unless you look at the gizmo. It is not a proof that
+    /// the origin is on the true axle (only the mesh centroid can say that; see
+    /// `track::marker_model`), just that an origin was authored at all.
+    #[test]
+    fn rotating_nodes_carry_their_own_axle_origin() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets")
+            .join(crate::tank::TIGER_GLB_PATH);
+        let geometry = extract_tank_geometry(&path).expect("tiger_1.glb must extract");
+
+        // Roadwheels come from the extractor's typed list; the drive/idler hubs are named directly
+        // (they are rig meshes, not `Wheel_<side>_<n>` empties, so no typed list carries them).
+        let spinning: Vec<&NodeGeometry> = geometry
+            .roadwheels
+            .iter()
+            .map(|&(index, _)| &geometry.nodes[index])
+            .chain(
+                ["Sprocket_L", "Sprocket_R", "Idler_L", "Idler_R"]
+                    .into_iter()
+                    .map(|name| {
+                        let index = geometry.by_name.get(name).unwrap_or_else(|| {
+                            panic!("extracted geometry is missing drive hub `{name}`")
+                        });
+                        &geometry.nodes[*index]
+                    }),
+            )
+            .collect();
+
+        let at_root: Vec<&str> = spinning
+            .iter()
+            .filter(|n| n.root_position.length() < 1.0e-4)
+            .map(|n| n.name.as_str())
+            .collect();
+        assert!(
+            at_root.is_empty(),
+            "rotating nodes whose origin is at the model root (set the object origin to the axle \
+             in Blender and re-export): {at_root:?}"
+        );
     }
 }

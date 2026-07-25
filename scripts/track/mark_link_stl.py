@@ -14,9 +14,10 @@ with no metric grounding and no markers. Auto-detected pin spacing = 6.0 units a
 axis (z). Scaling that span to the RON pitch (0.130 m) implies a link width of 0.96 m and thickness
 0.24 m — vs the RON's 0.79 m / 0.117 m. So the art asset's PROPORTIONS do not match the spec: it
 needs a metric authoring pass (uniform scale + pin markers) before it can drive the model. That
-mismatch is exactly the art↔spec gap the suspension editor exists to expose; this script is the
-first automated step of closing it. Confidence: MEDIUM (pins inferred from the upper knuckle band,
-not from hole-axis fitting) — treat the emitted markers as a starting point to refine in Blender.
+mismatch is exactly the art↔spec gap the track sandbox's suspension overlay exists to expose; this
+script is the first automated step of closing it. Confidence: MEDIUM (pins inferred from the upper
+knuckle band, not from hole-axis fitting) — treat the emitted markers as a starting point to refine
+in Blender.
 """
 
 import bpy

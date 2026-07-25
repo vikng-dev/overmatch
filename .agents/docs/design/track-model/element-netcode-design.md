@@ -13,8 +13,9 @@ rest entry, explicit request, and a DERIVED 256-tick fallback cadence at the MEA
 configuration (DERIVED 4 s). Validated checkpoints install at the state-entering tick through forced
 rollback; a digest mismatch alone never rolls back.
 
-`TrackGrip` kept its name because it still serves the aggregate offline compatibility path and is
-derived telemetry in element mode; it left the wire at REV 15. The join-in-progress ordering has
+`TrackGrip` kept its name but there is NO aggregate offline path: the per-element law runs for
+every DYNAMIC body in every composition (non-dynamic bodies simply skip the belt sim). `TrackGrip`
+is now only derived telemetry in element mode; it left the wire at REV 15. The join-in-progress ordering has
 both direct first-force-tick coverage and a real loopback-UDP replicate-once gate. Batch D's
 MEASURED cumulative-belt-phase curves concluded that moving fields self-heal, but the periodic
 checkpoint remains until Phase-4 multiplayer evidence justifies removing it. The settled contract
@@ -95,96 +96,9 @@ Lightyear `0.28` normal replication is Replicon `OnChange`. The old Lightyear de
 
 ## Strategy analysis
 
-### A. Local elements plus the four-float aggregate
+### A / B. Superseded alternatives — aggregate-only local rollback; quantized / structured per-tick replication
 
-This satisfies rollback coherence but not authoritative convergence.
-
-On every rollback, Lightyear can restore the element field from its local `PredictionHistory`, so replay does not use future-state bristles. That fixes the classic “force state was not rolled back at all” poison.
-
-It does not make those bristles equal to the server’s bristles. At a park, deterministic local evolution stops, so any existing mismatch persists indefinitely.
-
-#### Hidden distribution and torque
-
-Let the two fields produce per-element forces \(f_i\) and \(f'_i\), with the same aggregate:
-
-\[
-\sum_i f_i = \sum_i f'_i.
-\]
-
-Their force difference has zero resultant, but its torque is:
-
-\[
-\Delta\tau = \sum_i (r_i-r_0)\times(f_i-f'_i).
-\]
-
-If every element obeys \(|f_i|\le c_i=\mu N_i\), and the contact patch fits within radius \(R\) of \(r_0\), a conservative bound is:
-
-\[
-|\Delta\tau| \le 2R\sum_i c_i = D\,C,
-\]
-
-where \(D=2R\) is the contact-patch diameter and \(C=\sum_i\mu N_i\).
-
-That is a finite bound, but not a useful small-error bound: it is on the order of friction budget times track-contact length. Front and rear elements can carry equal and opposite lateral forces, giving zero aggregate force and a large yaw couple. Reversing that distribution produces the opposite couple with the same four-float summary.
-
-On non-flat contact, the current scalar longitudinal/lateral sums are even weaker: different element distributions can produce different world resultants because their local traction directions differ.
-
-Therefore:
-
-- Pose, velocity, and four-float aggregate agreement do not imply matching acceleration.
-- Matching aggregate does not make the parked distribution observationally irrelevant.
-- A load or contact redistribution can expose a previously hidden mode after the comparison tick.
-
-#### Can renormalization fix it?
-
-A common scale cannot:
-
-- create a nonzero aggregate from a zero-sum field;
-- change the resultant direction;
-- alter the front/rear or inner/outer moment;
-- correctly handle partially saturated elements.
-
-A load-proportional additive correction can force a desired two-axis sum in the unsaturated linear region, but leaves most spatial modes untouched and can corrupt the physical strain history.
-
-A constrained least-squares projection against a full wrench can match the instantaneous rigid-body effect, but still has a large nullspace. It is an optional transient mitigation, not convergence.
-
-Verdict: aggregate-only is acceptable for sandbox experimentation, but not as the shipped reconciliation mechanism.
-
-### B. Quantized or structured per-tick replication
-
-This is the only strategy here that can provide an authoritative element representation at every correction tick without reconstructing history.
-
-#### Eight-bit quantization
-
-For axes spanning `[-K, K]` with MEASURED \(K=75\) mm:
-
-- DERIVED axis step: \(150/255 = 0.588\) mm.
-- DERIVED maximum rounded axis error: 0.294 mm.
-- DERIVED maximum two-axis vector error: 0.416 mm.
-- DERIVED maximum linear-zone force error: approximately 0.56% of that element’s \(\mu N\).
-
-That is plausible as a network correction error.
-
-It is not safe as the simulation’s canonical storage resolution. Re-quantizing after every tick creates a DERIVED strain-increment deadband corresponding to about 18.8 mm/s of slip at the measured 64 Hz configuration. Small presliding motion would stop accumulating—the very regime this law exists to model.
-
-Higher-resolution canonical integer state is more credible:
-
-- DERIVED 12-bit half-step corresponds to about 1.17 mm/s per tick.
-- DERIVED signed 16-bit half-step corresponds to about 0.073 mm/s per tick.
-
-If bit-exact client/server grip state is required, the server must simulate the same canonical integer representation it transmits. Quantizing only the wire snapshot means the client deliberately resumes from a nearby state that the server never occupied.
-
-#### Determinism consequences
-
-Three different claims must not be conflated:
-
-- Local replay can be bit-exact from a deterministically dequantized checkpoint.
-- A quantized client seed need not be bit-equal to the server’s unquantized field.
-- A hash over quantized projections can agree while exact `f32` fields differ.
-
-If eight-bit network checkpoints are used, keep separate exact-local and wire-quantized hashes. The anchor rollback threshold must exceed the force/torque envelope introduced by quantization or the correction itself will cause another correction.
-
-Verdict: viable if DERIVED roughly 25–30 KiB/s per predicted tank-recipient is acceptable, or as a fallback if the hybrid fails. Use explicit element occupancy/identity.
+Weighed and rejected as the shipped reconciliation: aggregate-only local rollback cannot converge a parked client's hidden strain distribution to the server's (equal aggregate, opposite yaw couple, no slip to heal it), and per-tick quantized replication either deadbands presliding accumulation or costs ~25–30 KiB/s per predicted tank. Full derivations in git history; the Decision above and [[0027-element-grip-netcode]] carry the result.
 
 ### C. Exact state when parked
 
@@ -228,15 +142,7 @@ Verdict: strongly recommended as part of the hybrid. Alone, it does not repair a
 
 ### D. Reconstruct from pose, velocity, aggregate, and phase
 
-Not viable as an exact rollback mechanism.
-
-With 75–90 grounded elements per side, the field has roughly 150–180 active scalar degrees of freedom per side. The proposed aggregate provides two constraints per side. Even a complete rigid-body wrench and belt reactions provide only a handful of constraints. The inverse is underdetermined.
-
-Load-proportional redistribution is especially bad during a pivot. Pivot strain is approximately antisymmetric along the footprint: front and rear lateral strains oppose each other. Their aggregate can be near zero while their yaw moment is the principal desired effect. Reconstructing from the aggregate replaces that field with nearly zero yaw mode and recreates “turns on ice” during replay.
-
-Exact reconstruction is theoretically possible only by replaying each material element from its last contact-entry reset through the complete authoritative slip/load/contact history. That history may exceed the rollback window and still needs a full seed for join-in-progress and parking. It moves the state cost into a longer event history rather than eliminating it.
-
-Verdict: never use macro reconstruction for a predicted owner. It is acceptable only for a non-simulated remote presentation proxy.
+Superseded alternative — not viable: the per-side field has ~150–180 active scalar DOF against a handful of wrench constraints, so the inverse is underdetermined (load-proportional redistribution wipes the pivot yaw mode → "turns on ice" on replay). Never used for a predicted owner. See git history.
 
 ### E. Wrench anchor plus exact checkpoints
 
@@ -377,7 +283,7 @@ The same change must update:
 
 Historical advice, DISCHARGED at REV 15: the old replicated `TrackGrip` should not silently change
 meaning from elastic state to telemetry. The implementation instead removed it from the wire while
-retaining the name for aggregate offline compatibility and derived element-mode telemetry.
+retaining the name for derived element-mode telemetry only (there is no aggregate offline path).
 `TrackGripEffect` is the output summary; `TrackGripElements` is the simulation state.
 
 ## Failure modes and required tests
@@ -537,7 +443,7 @@ Per-element damping must:
 
 ### Isotropic steering change
 
-Removing the MEASURED `lateral_ratio = 0.55` policy restores full lateral \(\mu N\) capacity. That is not merely a better state representation; it changes the steering law and can greatly increase pivot resistance. The sandbox result must therefore be judged as both:
+Removing the measured 0.55 lateral-share policy restored full lateral \(\mu N\) capacity. That was not merely a better state representation; it changed the steering law and increased pivot resistance. The sandbox A/B judged both at once (settled in the element law's favor):
 
 - per-element versus aggregate memory;
 - isotropic circle versus the shipped anisotropic ellipse.

@@ -10,7 +10,7 @@ committed; everything worth keeping from it is distilled here.
   the Model-2 steps (12–15b) and the Model-3 design entries (step 16 area) are the direct context.
 - `src/track_sandbox/` — `mod.rs` (shared rig/course/registry/viz/drivetrain), `model1.rs` (frozen
   belt-primary baseline), `model2.rs` (link-belt, the model 3 forks from). All ~self-contained;
-  mounted by `src/bin/track_sandbox.rs`, NOT by GamePlugin. Run: `cargo run --bin track_sandbox`.
+  mounted by `src/bin/track_sandbox.rs`, NOT by GamePlugin. Run: `cargo sandbox`.
 - Memory dir (`MEMORY.md` index): working-style-overmatch, visualization-first, lower-proactivity
   (discuss/propose before editing), question-style (one plain-text question at a time),
   scope-guard-vertical-slice.

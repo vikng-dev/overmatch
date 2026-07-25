@@ -8,8 +8,8 @@
 //! saves nothing and every contact call is per-side).
 //!
 //! Three adapters behind one mode enum:
-//! - [`TransmissionMode::Governor`] — the EXACT legacy math ([`forces::governor_belt`],
-//!   verbatim): every MP composition and every existing baseline runs this. The parity switch.
+//! - [`TransmissionMode::Governor`] — the EXACT governor math ([`forces::governor_belt`],
+//!   verbatim): every MP composition and every existing baseline runs this.
 //! - [`TransmissionMode::Hybrid`] — the arcade-honest continuous regenerative box (design
 //!   menu C/D): engine torque curve × gear ratio → propulsion force on `m`; a
 //!   capacity-limited steering servo on `d` (continuous curvature command interpolating the
@@ -29,7 +29,7 @@
 //! (a parked tank on a slope inside capacity holds EXACTLY), in motion strictly opposing
 //! where the belt is headed (settles creep, saturates against a slide, never pushes through
 //! zero). `cap` comes from the parking LATCH (zero command near standstill sets it, any
-//! drive command releases it), the hill-hold latch, the legacy hold-blend entry envelope
+//! drive command releases it), the hill-hold latch, the governor hold-blend entry envelope
 //! while unlatched, or the service pedal (opposite-throttle driver intent). A latched belt
 //! strictly inside [`PARK_ENGAGE_SPEED`] gets the authored static breakaway multiplier; a
 //! moving belt, service braking, and every post-breach latched slide stay at dynamic
@@ -164,7 +164,8 @@ use crate::bitprobe::TransmissionProbe;
 /// adapters); `Governor` is what every composition without an explicit selection runs.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum TransmissionMode {
-    /// The legacy per-side symmetric governor + hold blend, bit-for-bit (the parity switch).
+    /// The per-side symmetric governor + hold blend, bit-for-bit — the default drivetrain
+    /// for vehicles without a declared architecture.
     #[default]
     Governor,
     /// `Regenerative { continuous }` — the arcade-honest hybrid (design menu D).
@@ -205,7 +206,7 @@ pub enum SchedulerState {
 impl TransmissionMode {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Governor => "governor (legacy parity)",
+            Self::Governor => "governor (symmetric per-side)",
             Self::Hybrid => "hybrid (continuous regenerative)",
             Self::FixedRadii => "L600 (fixed-radius regenerative)",
         }
@@ -1015,7 +1016,7 @@ pub struct TransmissionReport {
 
 /// Advance the joint drivetrain one fixed tick and integrate both belt speeds.
 ///
-/// `Governor` is the exact legacy per-side path ([`forces::governor_belt`]) — `state` is not
+/// `Governor` is the exact per-side path ([`forces::governor_belt`]) — `state` is not
 /// touched, and the results are bit-identical to the shipped `step_side` tail. The
 /// regenerative adapters implement the m/d superimposed model documented at module level.
 pub fn step(
@@ -2082,17 +2083,16 @@ fn regenerative(
 
     // --- The reframed brake (design §3): −R always reaches the belt; near zero command +
     // zero belt speed the parking/service brake statically balances what the drivetrain
-    // doesn't, inside its capacity. h reuses the legacy hold-blend SHAPE purely as the
-    // engagement envelope (tick-stable, exact at rest); grip_stiffness = 0 keeps the
-    // kinetic-only parity semantics brakeless, like the legacy hold.
+    // doesn't, inside its capacity. h reuses the governor hold-blend SHAPE purely as the
+    // engagement envelope (tick-stable, exact at rest); grip_stiffness = 0 (support-only
+    // rigs, e.g. calibration) keeps the brake disengaged, like the hold it extends.
     for (i, qi) in q.iter_mut().enumerate() {
         // Engagement envelope: the parking LATCH holds full capacity (post-breach it keeps
-        // rubbing at B_max instead of fading with speed — codex-2); unlatched, the legacy
+        // rubbing at B_max instead of fading with speed — codex-2); unlatched, the
         // smooth entry blend h (zero command + near-zero belt speed) eases the brake in
         // during settle; the service pedal is the driver-intent brake command. The paths
         // are mutually exclusive by construction (service ⇒ a drive command ⇒ unlatched,
-        // h≈0). grip_stiffness = 0 keeps the kinetic-only parity semantics brakeless, like
-        // the legacy hold.
+        // h≈0). grip_stiffness = 0 (support-only rigs) keeps the brake disengaged.
         let h = if fp.grip_stiffness > 0.0 {
             if st.park {
                 1.0

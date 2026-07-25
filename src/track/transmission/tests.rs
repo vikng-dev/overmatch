@@ -4,14 +4,13 @@ use super::*;
 /// slip_saturation, grip_stiffness envelope switch, and the governor's own knobs).
 fn lab_fp() -> ForceParams {
     ForceParams {
-        thickness: 0.04,
-        columns: [(-0.25, 1.0 / 6.0), (0.0, 2.0 / 3.0), (0.25, 1.0 / 6.0)],
+        face_offset: 0.02,
+        free_travel: 0.0,
         support_stiffness_per_m: 680_000.0,
         support_damping_per_m: 80_000.0,
         engage_depth: 0.02,
         probe_reach: 0.5,
         mu: 0.9,
-        lateral_ratio: 0.55,
         slip_saturation: 0.4,
         max_speed: 15.0,
         engine_power: 186_500.0,

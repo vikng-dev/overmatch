@@ -1,5 +1,5 @@
 //! Per-variant spec sheets as RON data assets (ADR-0010). The Blender model owns geometry and
-//! spatial anchors; this owns the tuning numbers — mass + inertia, track powertrain/support, servo
+//! spatial anchors; this owns the tuning numbers — mass + inertia, track powertrain/suspension, servo
 //! configs — that differ per tank variant. A `.tank.ron` file deserializes (via serde) straight
 //! into the same values the sim reads (`Mass`, `ForceParams`, `ServoSpec`), so
 //! values stay plain-text, git-diffable, and separate from Blender. There are **no code defaults**
@@ -178,62 +178,68 @@ impl ViewKind {
 #[serde(deny_unknown_fields)]
 pub struct ViewSpec {
     pub node: String,
+    /// Vertical field of view, in RADIANS — the one spec angle not authored in degrees (contrast
+    /// [`ServoSpec`], whose `_deg`-style authoring converts at this seam). That is deliberate and
+    /// temporary: the field is expected to stop being an angle. The intent is ZOOM — a continuous
+    /// fov slider for the third-person view, and DISCRETE magnification steps for the gunner sight
+    /// (e.g. 4x / 8x), the way real optics work, so the sight's magnification is a property of the
+    /// instrument rather than a free-floating number. Converting it to degrees first would be churn
+    /// on a field that wants to become a different quantity; revisit with the sight/zoom work.
     pub fov: f32,
     #[serde(default)]
     pub requires: Requirement,
 }
 
-/// The continuous-track running gear + material loop (track architecture §7, minimal phase-A
-/// cut). Every field is vehicle DATA — solver quality policy lives as constants in
-/// `track::view`; a new tracked vehicle is authored here, never tuned there. Geometry the model
-/// cannot express yet (sprocket/idler circles — their GLB visuals carry identity transforms with
-/// position baked into vertices) is authored in **side-plane coordinates**: hull-local `(z, y)`
-/// on the track's centreline plane, mirrored across `±plane_x`. The Tiger authoring pass replaces
-/// these with proper rig nodes + baked bounds (`tiger-authoring-agenda.md`).
+/// The continuous-track material loop + drivetrain (track architecture §7). Every field here is
+/// authored vehicle DATA — link counts, link physicals, articulation limits, tooth count, and the
+/// ride/powertrain models. It carries NO geometry: pitch, plate thickness, shoe width, the track
+/// plane, and every running-gear circle (sprocket/idler/wheel) are MEASURED off the glb markers
+/// (see [`crate::track::rig_geom`] / [`crate::track::marker_model`]) — one source of truth, in the
+/// model. Solver-quality policy lives as constants in `track::view`; a new tracked vehicle is
+/// authored here, never tuned there.
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct TrackSpec {
-    /// Link pitch (m). With `link_count` this is the IMMUTABLE material loop: its length is
-    /// `pitch × link_count`, exact — the solver never rounds or spreads residual (tooth lock).
-    pub pitch: f32,
-    /// Links per side.
+    /// Links per side. With the MEASURED pitch this is the immutable material loop
+    /// (`pitch × link_count`, exact — tooth lock); the pitch itself is read off the glb markers.
     pub link_count: usize,
-    /// Shoe width (m) — the link mesh and the lateral terrain-probe stations.
-    pub width: f32,
-    /// Plate thickness (m); the pin line runs through the middle of the plate.
-    pub thickness: f32,
     /// One link assembly's mass (kg) — real inverse masses in the chain constraints.
     pub link_mass: f32,
     /// Pin dry-friction torque (N·m) — the rope-vs-track differentiator, scaled to link mass.
     pub hinge_torque: f32,
-    /// Hard articulation stop between consecutive links (rad).
-    pub max_link_angle: f32,
-    /// Track centreline |x| (m): the side plane the chain solves in. Left −, right +.
-    pub plane_x: f32,
-    /// Drive sprocket: side-plane centre + tooth count. The pitch radius is DERIVED —
+    /// Hard articulation stops between consecutive links (rad) — see [`LinkAngleSpec`].
+    pub link_angle: LinkAngleSpec,
+    /// Drive sprocket: tooth count ONLY. The pitch radius is DERIVED from the MEASURED pitch —
     /// `pitch × teeth / τ` — never authored: one link advance ≡ one tooth advance by
-    /// construction, and two numbers that must agree are one number.
+    /// construction, and two numbers that must agree are one number. Its centre (and every other
+    /// running-gear circle) is measured off the glb markers (see [`crate::track::rig_geom`]).
     pub sprocket: SprocketSpec,
-    /// Idler: side-plane centre + pin-line radius (idler rim + half plate).
-    pub idler: IdlerSpec,
-    /// Road-wheel PIN-LINE radius (m): wheel rim + half plate — the chain's wheel circles.
-    pub wheel_radius: f32,
     /// The drivetrain spinning this track (phase B — the locomotion sim IS the track model).
     pub powertrain: PowertrainSpec,
-    /// The belt-support contact law (replaces the raycast suspension spec).
-    pub support: SupportSpec,
+    /// The ride model — the contact-envelope law derives its spring rate and damping from
+    /// these three numbers, and its contact engage-ramp from `engage`.
+    pub suspension: SuspensionSpec,
 }
 
 impl TrackSpec {
     /// Build the declared joint transmission through the same validated authoring seam used by
-    /// spawn-time state construction and the runtime track gear.
-    pub(crate) fn transmission_params(&self) -> Result<Option<TransmissionParams>, BevyError> {
-        let sprocket_radius = self.pitch * self.sprocket.teeth as f32 / std::f32::consts::TAU;
+    /// spawn-time state construction and the runtime track gear. Geometry is no longer authored,
+    /// so the CALLER supplies the measured sprocket pin-line radius and the half-tread (`plane_x`):
+    /// [`crate::track::sim`]'s `init_track_gear` passes the
+    /// [`RigGeom`](crate::track::rig_geom::RigGeom) values; the geometry-independent validators
+    /// (asset-load `validate`, spawn-time state) pass nominal placeholders, because only
+    /// `engine.idle_rpm` reaches replicated state — the geometry only SCALES the derived ladder,
+    /// which is finite for any finite positive radius, so the validation verdict is identical.
+    pub(crate) fn transmission_params(
+        &self,
+        sprocket_radius: f32,
+        half_tread: f32,
+    ) -> Result<Option<TransmissionParams>, BevyError> {
         self.powertrain
             .transmission
             .as_ref()
             .map(|transmission| {
-                transmission.params(sprocket_radius, self.plane_x, self.powertrain.inertia)
+                transmission.params(sprocket_radius, half_tread, self.powertrain.inertia)
             })
             .transpose()
     }
@@ -401,32 +407,83 @@ pub struct SteeringSpec {
     // gear-independent invariant makes that the correct emergent pivot scale).
 }
 
-/// The belt-support penalty law, per metre of contacting belt.
+/// The ride model: three numbers, everything else derives. Spring rate `k = m·(2πf)²`,
+/// static deflection `g/(2πf)²` (the droop/"green" envelope depth, chain-clamped by the link
+/// window), damper `2ζ√(k·m)` — see `track::envelope::calibrate`.
 #[derive(Deserialize, Clone, Copy)]
 #[serde(deny_unknown_fields)]
-pub struct SupportSpec {
-    /// Spring (N/m per metre of belt) — sets static sink under weight.
-    pub stiffness_per_m: f32,
-    /// Normal-velocity damping (N·s/m per metre).
-    pub damping_per_m: f32,
-    /// Soft-engagement ramp depth (m).
+pub struct SuspensionSpec {
+    /// Ride (bounce) natural frequency, Hz. Real tracked vehicles sit around 1–1.5 Hz.
+    pub ride_frequency: f32,
+    /// Suspension damping ratio ζ (dimensionless; 0.3–0.5 typical).
+    pub damping_ratio: f32,
+    /// Bump-stop travel above rest (m) — full compression, the red hard-stop pose.
+    pub bump_stop: f32,
+    /// Contact engage-ramp depth (m): the penetration over which a contact ramps from zero to
+    /// full support — the anti-pop smoothing of the contact law (a contact-boundary policy, not
+    /// a spring rate).
     pub engage: f32,
 }
 
-/// See [`TrackSpec::sprocket`]. `center` is side-plane `(z, y)`.
+impl SuspensionSpec {
+    /// The runtime parameter block (`track::derive::SuspensionParams`) — the ONE conversion
+    /// seam, like the degree→radian rule: nothing downstream re-reads the spec.
+    pub(crate) fn params(&self) -> crate::track::derive::SuspensionParams {
+        crate::track::derive::SuspensionParams {
+            ride_frequency: self.ride_frequency,
+            damping_ratio: self.damping_ratio,
+            bump_stop: self.bump_stop,
+        }
+    }
+}
+
+/// See [`TrackSpec::sprocket`]. Tooth count only — the sprocket's centre and pitch radius are
+/// measured/derived off the glb markers, never authored.
 #[derive(Deserialize, Clone, Copy)]
 #[serde(deny_unknown_fields)]
 pub struct SprocketSpec {
-    pub center: (f32, f32),
     pub teeth: u32,
 }
 
-/// See [`TrackSpec::idler`]. `center` is side-plane `(z, y)`.
+/// How far one pin joint may fold, per DIRECTION — a fact about the shoe, not a feel knob.
+///
+/// The limit is asymmetric because the shoe is: fold toward the wheels and the guide horns meet,
+/// fold away and the ground-side structure does. Both are authored as POSITIVE MAGNITUDES named
+/// for their direction rather than as a signed range, so no reader has to know (or guess) which
+/// way the sim's joint angle counts; the one place a sign is applied is the chain solver's hinge
+/// stop, where the belt's own orientation defines it.
+///
+/// **Units.** This is the DEGREES side of the boundary — the whole struct is, which is why every
+/// field carries `_deg` and every reader goes through [`Self::inward`] / [`Self::outward`]. A
+/// hinge limit is measured in Blender, in degrees, so degrees is what the RON authors; the
+/// conversion happens exactly here, and nothing downstream (chain solver, sandbox rig, probes)
+/// ever holds a degree.
+///
+/// Hand-measured per vehicle, deliberately: the shoe MESH is only an upper bound (real
+/// articulation also spends clearance in the pin/bushing and the end connectors), and an
+/// automatic mesh sweep on the Tiger proved threshold-dependent on a shoe modelled with
+/// near-zero clearance. See the RON's comment for the numbers and the rejected experiment.
 #[derive(Deserialize, Clone, Copy)]
 #[serde(deny_unknown_fields)]
-pub struct IdlerSpec {
-    pub center: (f32, f32),
-    pub radius: f32,
+pub struct LinkAngleSpec {
+    /// Folding TOWARD the wheels (DEGREES, positive): the wrap direction — every running-gear
+    /// circle the belt bends around spends one fold of `2·asin(pitch / 2r)` here.
+    pub inward_deg: f32,
+    /// Folding AWAY from the wheels (DEGREES, positive): a sagging return run, a shoe cresting a
+    /// rock.
+    pub outward_deg: f32,
+}
+
+impl LinkAngleSpec {
+    /// The inward (wrap-direction) stop in RADIANS — the only form anything but the RON sees.
+    pub fn inward(&self) -> f32 {
+        self.inward_deg.to_radians()
+    }
+
+    /// The outward stop in RADIANS.
+    pub fn outward(&self) -> f32 {
+        self.outward_deg.to_radians()
+    }
 }
 
 #[derive(Asset, TypePath, Deserialize)]
@@ -490,18 +547,12 @@ impl TankSpec {
         // GEOMETRY — the material loop closing around the rest wheel circles — lives at rig
         // bind, where the baked wheel rests exist; these are the spec-local invariants.)
         let t = &self.track;
-        for (field, value) in [
-            ("pitch", t.pitch),
-            ("width", t.width),
-            ("thickness", t.thickness),
-            ("link_mass", t.link_mass),
-            ("plane_x", t.plane_x),
-            ("idler.radius", t.idler.radius),
-            ("wheel_radius", t.wheel_radius),
-        ] {
-            if !value.is_finite() || value <= 0.0 {
-                return Err(format!("track.{field} must be finite and > 0 (got {value})").into());
-            }
+        if !t.link_mass.is_finite() || t.link_mass <= 0.0 {
+            return Err(format!(
+                "track.link_mass must be finite and > 0 (got {})",
+                t.link_mass
+            )
+            .into());
         }
         if t.link_count < 3 {
             return Err(format!("track.link_count must be >= 3 (got {})", t.link_count).into());
@@ -509,20 +560,29 @@ impl TankSpec {
         if t.sprocket.teeth == 0 {
             return Err("track.sprocket.teeth must be > 0".into());
         }
-        if t.wheel_radius <= t.thickness / 2.0 || t.idler.radius <= t.thickness / 2.0 {
-            return Err(
-                "track wheel/idler pin-line radii must exceed half the plate \
-                        thickness (the rolling radius would be <= 0)"
-                    .into(),
-            );
+        // Both hinge stops are MAGNITUDES, so both must be positive; 90° is the ceiling because a
+        // joint that folds further has already buried the next shoe in this one on any real track.
+        // Checked in the AUTHORED unit (degrees) so the error quotes what the author typed.
+        for (field, value) in [
+            ("link_angle.inward_deg", t.link_angle.inward_deg),
+            ("link_angle.outward_deg", t.link_angle.outward_deg),
+        ] {
+            if !value.is_finite() || value <= 0.0 || value > 90.0 {
+                return Err(format!(
+                    "track.{field} must be a magnitude in (0, 90] degrees (got {value})"
+                )
+                .into());
+            }
         }
-        if !t.max_link_angle.is_finite()
-            || t.max_link_angle <= 0.0
-            || t.max_link_angle > std::f32::consts::FRAC_PI_2
-        {
+        // The wrap direction is the roomier one on every track ever built — the belt has to fold
+        // inward around its own sprocket, and nothing demands the outward fold at all. A spec
+        // with these swapped is the signature of the sign confusion the named pair exists to
+        // prevent, so it fails loudly here rather than kinking the chain in the view.
+        if t.link_angle.outward_deg > t.link_angle.inward_deg {
             return Err(format!(
-                "track.max_link_angle must be in (0, π/2] (got {})",
-                t.max_link_angle
+                "track.link_angle.outward_deg ({}) exceeds .inward_deg ({}) — inward is the WRAP \
+                 direction and must be the roomier one; the pair is probably swapped",
+                t.link_angle.outward_deg, t.link_angle.inward_deg
             )
             .into());
         }
@@ -542,33 +602,23 @@ impl TankSpec {
             ("powertrain.force", t.powertrain.force),
             ("powertrain.governor_gain", t.powertrain.governor_gain),
             ("powertrain.inertia", t.powertrain.inertia),
-            ("support.stiffness_per_m", t.support.stiffness_per_m),
-            ("support.engage", t.support.engage),
+            ("suspension.ride_frequency", t.suspension.ride_frequency),
+            ("suspension.damping_ratio", t.suspension.damping_ratio),
+            ("suspension.bump_stop", t.suspension.bump_stop),
+            ("suspension.engage", t.suspension.engage),
         ] {
             if !value.is_finite() || value <= 0.0 {
                 return Err(format!("track.{field} must be finite and > 0 (got {value})").into());
             }
         }
-        if !t.support.damping_per_m.is_finite() || t.support.damping_per_m < 0.0 {
-            return Err(format!(
-                "track.support.damping_per_m must be finite and >= 0 (got {})",
-                t.support.damping_per_m
-            )
-            .into());
-        }
-        for (field, value) in [
-            ("sprocket.center.0", t.sprocket.center.0),
-            ("sprocket.center.1", t.sprocket.center.1),
-            ("idler.center.0", t.idler.center.0),
-            ("idler.center.1", t.idler.center.1),
-        ] {
-            if !value.is_finite() {
-                return Err(format!("track.{field} must be finite (got {value})").into());
-            }
-        }
         // The declared transmission is validated through the same fallible constructor used by
-        // synchronous sim construction, the sandbox, and its arithmetic tests.
-        t.transmission_params().map(|_| ())?;
+        // synchronous sim construction, the sandbox, and its arithmetic tests. Geometry is measured
+        // off the glb at RigGeom build, not authored here, so this domain-only pass feeds nominal
+        // positive placeholders: every `from_authoring` rejection is independent of the sprocket
+        // radius / half-tread (they only scale the derived ladder, finite for any finite positive
+        // radius), and the geometry-coupled construction is re-run with the real measured values at
+        // TrackGear build.
+        t.transmission_params(1.0, 1.0).map(|_| ())?;
         for (name, weapon) in &self.weapons {
             match weapon.fire_mode {
                 FireMode::Single { reload_secs } => {
@@ -687,7 +737,11 @@ mod tests {
         // Grip-limit gearing rule (≈ μ·W/2; see the RON comment — the 100 kN placeholder cap
         // could not break a neutral steer under the element grip law).
         assert_eq!(spec.track.powertrain.force, 250_000.0);
-        assert_eq!(spec.track.support.stiffness_per_m, 1_460_000.0);
+        // The ride model the envelope law derives from (spring/damper are NOT authored).
+        assert_eq!(spec.track.suspension.ride_frequency, 1.2);
+        assert_eq!(spec.track.suspension.damping_ratio, 0.35);
+        assert_eq!(spec.track.suspension.bump_stop, 0.200);
+        assert_eq!(spec.track.suspension.engage, 0.02);
         // The declared transmission block (phase 2.5 — DELIBERATE pin update with the new
         // powertrain field): the Tiger authors the L600 fixed-radius regenerative box from
         // the anchored tables (tiger-transmission-data.md). Spot-check the anchors: the 8F/4R
@@ -724,12 +778,22 @@ mod tests {
         // 96 kN/side × 1.5 = 144 kN/side DERIVED, enough for the DERIVED 139.7925 kN/side demand
         // at 30°.
         assert_eq!(tr.brake_static_factor, 1.5);
-        // Track: the material loop is authored exact (pitch × count = the immutable belt
-        // length); the sprocket's tooth count locks link advance to tooth advance.
-        assert_eq!(spec.track.pitch, 0.130);
+        // Track: links per side (the material loop closes at MEASURED pitch × this count); the
+        // sprocket's tooth count locks link advance to tooth advance. Geometry (pitch, plane_x,
+        // sprocket/idler/wheel circles) is no longer authored — it is measured off the glb markers.
         assert_eq!(spec.track.link_count, 97);
-        assert_eq!(spec.track.sprocket.teeth, 19);
-        assert_eq!(spec.track.plane_x, 1.4904);
+        // 20 = the model-verified tooth count. Feel-neutral for the transmission: reductions
+        // derive against the measured sprocket radius, so the radius cancels out of both
+        // thrust (τ·gear/R) and per-gear speed (ω·R/gear) — the anchored speeds are the truth.
+        assert_eq!(spec.track.sprocket.teeth, 20);
+        // DELIBERATE pin (2026-07-23): the symmetric 0.6109 rad stop became a HAND-MEASURED
+        // asymmetric pair authored in degrees. Pinned in both units on purpose — the degrees are
+        // what Yan measured in Blender, the radians are what everything downstream consumes, and
+        // this is the one assertion that would catch a conversion silently going missing.
+        assert_eq!(spec.track.link_angle.inward_deg, 40.0);
+        assert_eq!(spec.track.link_angle.outward_deg, 18.0);
+        assert!((spec.track.link_angle.inward() - 0.698_13).abs() < 1e-5);
+        assert!((spec.track.link_angle.outward() - 0.314_16).abs() < 1e-5);
         // Servos are a node-keyed map now (not fixed turret/gun fields); the yaw + pitch mounts must
         // be declared for the rig to bind.
         assert!(spec.servos.contains_key("Turret_Yaw"));
@@ -919,20 +983,21 @@ mod tests {
             "{err}"
         );
 
-        // Track: a zero pitch parses but can never wrap a gear — validate() rejects it and
-        // names the field (one representative case; the loop covers the whole dimension list).
+        // Track: a non-positive link_mass parses but yields zero-inverse-mass chain constraints —
+        // validate() rejects it and names the field (the one surviving track dimension check now
+        // that all geometry is measured off the glb, not authored).
         let mut spec: TankSpec =
             ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron")).unwrap();
-        spec.track.pitch = 0.0;
+        spec.track.link_mass = 0.0;
         let err = spec.validate().unwrap_err().to_string();
-        assert!(err.contains("track.pitch"), "{err}");
+        assert!(err.contains("track.link_mass"), "{err}");
 
         // Force-law scalars: each mutation must be rejected BY NAME — a NaN or zero here
         // reaches a division in `track::forces` and dissolves the belt state in one tick.
         let fresh = || -> TankSpec {
             ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron")).unwrap()
         };
-        let cases: [(&str, fn(&mut TankSpec)); 9] = [
+        let cases: [(&str, fn(&mut TankSpec)); 6] = [
             ("powertrain.max_speed", |s| {
                 s.track.powertrain.max_speed = f32::NAN;
             }),
@@ -942,16 +1007,7 @@ mod tests {
                 s.track.powertrain.governor_gain = 0.0;
             }),
             ("powertrain.inertia", |s| s.track.powertrain.inertia = 0.0),
-            ("support.stiffness_per_m", |s| {
-                s.track.support.stiffness_per_m = f32::INFINITY;
-            }),
-            ("support.engage", |s| s.track.support.engage = 0.0),
-            ("support.damping_per_m", |s| {
-                s.track.support.damping_per_m = -1.0;
-            }),
-            ("sprocket.center.0", |s| {
-                s.track.sprocket.center.0 = f32::NAN;
-            }),
+            ("suspension.engage", |s| s.track.suspension.engage = 0.0),
         ];
         for (field, mutate) in cases {
             let mut spec = fresh();
@@ -959,10 +1015,6 @@ mod tests {
             let err = spec.validate().unwrap_err().to_string();
             assert!(err.contains(field), "expected `{field}` in: {err}");
         }
-        // Legal edge: zero damping (undamped support) is odd but not bricked.
-        let mut spec = fresh();
-        spec.track.support.damping_per_m = 0.0;
-        assert!(spec.validate().is_ok());
 
         // Legal edges: a tracerless stealth belt (tracer_every: 0) and instant reloads pass.
         assert!(
@@ -1075,9 +1127,11 @@ mod tests {
     /// The spec↔model **bind contract** — the CI-time twin of the runtime contract in
     /// the private tank assembler, but without launching Bevy: it reads glTF node names directly and
     /// checks both directions. Every node the spec references must exist in the `.glb`; the fixed
-    /// structural nodes must be present; and every authored `*_Ballistic` node must be a declared
-    /// volume (no orphans). This catches name drift — a rename, a typo, a forgotten declaration —
-    /// before it ever reaches a runtime panic. Add a tank variant → add a case here.
+    /// structural nodes must be present; and every authored node the capture convention treats as a
+    /// ballistic solid — `*_Ballistic`, plus the roadwheel stations, whose unified mesh makes each
+    /// station its own armour volume — must be a declared volume (no orphans). This catches name
+    /// drift — a rename, a typo, a forgotten declaration — before it ever reaches a runtime panic.
+    /// Add a tank variant → add a case here.
     #[test]
     fn tiger_1_spec_binds_to_model() {
         use std::collections::HashSet;
@@ -1121,22 +1175,28 @@ mod tests {
             nodes.iter().any(|n| n.ends_with("_Collider")),
             "model has no `*_Collider` proxy"
         );
-        let has_roadwheel = |side: &str| {
-            nodes.iter().any(|n| {
-                n.strip_prefix(side).is_some_and(|rest| {
+        // `bake::roadwheel_side`'s rule, restated — this test reads the glTF directly (no Bevy, no
+        // extractor), so the convention is mirrored rather than imported.
+        let roadwheel_side = |name: &str| {
+            ["Wheel_L_", "Wheel_R_"].into_iter().find(|side| {
+                name.strip_prefix(side).is_some_and(|rest| {
                     !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit())
                 })
             })
         };
+        let has_roadwheel = |side: &str| nodes.iter().any(|n| roadwheel_side(n) == Some(side));
         assert!(has_roadwheel("Wheel_L_"), "model has no left roadwheel");
         assert!(has_roadwheel("Wheel_R_"), "model has no right roadwheel");
 
-        // Reverse: no orphan volumes — every authored `*_Ballistic` node is a declared volume.
+        // Reverse: no orphan volumes. A node is a ballistic solid if it is named `*_Ballistic` OR is
+        // a roadwheel station — the wheels ship as ONE unified mesh per station (station and armour
+        // in the same node), so their bare names carry geometry the march must see. Either way, an
+        // authored solid with no spec entry is armour the game would never resolve.
         for node in &nodes {
-            if node.ends_with("_Ballistic") {
+            if node.ends_with("_Ballistic") || roadwheel_side(node).is_some() {
                 assert!(
                     spec.volumes.contains_key(node),
-                    "model node `{node}` is named like a ballistic volume but has no spec entry"
+                    "model node `{node}` is a ballistic solid but has no spec volume entry"
                 );
             }
         }

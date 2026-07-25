@@ -11,24 +11,23 @@ whether the tank "turns right about right", every run is checked against what
 the model (src/track/forces.rs + drive.rs) promises by construction.
 
 Each file self-describes via its `meta` row (schema:2 — slew, half_tread, mu,
-lateral_ratio, slip_saturation, plus the command script), so the analyzer needs
+slip_saturation, plus the command script), so the analyzer needs
 no scenario flags: pivot / turn / slalom / straight are detected from the
 scripted commands.
 
 HARD GATES (every run, every tick):
   - shaper      |Δshaped| per axis per tick ≤ slew/64, and shaped snaps exactly
                 to raw once within one step (drive.rs `approach` semantics).
-  - ellipse     per contact: (f_long/μ·L)² + (f_lat/μ·L·lat_ratio)² ≤ 1, where
-                L is the ELASTIC load when meta.grip is true (the static-friction
-                law scales by load_elastic) and the damped load otherwise
-                (forces.rs caps the ellipse; tolerance includes the JSONL
-                print quantization: f at 0.05 N, load at 0.5 N).
-  - dissipation grip=false: friction never pumps energy — f_long·slip ≥ −tol and
-                f_lat·slip_lat ≤ +tol (f_long tracks slip sign, f_lat opposes).
-                grip=true: the bristle spring lags slip and legitimately returns
-                stored elastic energy, so the gate is NET — total friction work
-                over the run ≥ −(2·C_max²/2K), the most the two side springs can
-                have stored (C_max = per-side max Σ μ·load_elastic,
+  - ellipse     per contact: (f_long/μ·L)² + (f_lat/μ·L)² ≤ 1 — the per-element
+                isotropic law caps each contact at a CIRCLE of radius μ·L in
+                every direction, where L is the ELASTIC support load (the strain
+                law scales by load_elastic; forces.rs caps the ellipse; tolerance
+                includes the JSONL print quantization: f at 0.05 N, load at
+                0.5 N).
+  - dissipation the bristle spring lags slip and legitimately returns stored
+                elastic energy, so the gate is NET — total friction work over the
+                run ≥ −(2·C_max²/2K), the most the two side springs can have
+                stored (C_max = per-side max Σ μ·load_elastic,
                 K = μ·weight/2/GRIP_SHEAR_MODULUS_M).
   - finite      every numeric field in every row is finite.
 
@@ -164,20 +163,9 @@ def load_run(path: Path):
     run["contacts"] = np.array(flat) if flat else np.zeros((0, 6))
     run["side_elastic"] = side_elastic
 
-    # Grip regime flag: schema-2 metas gained "grip" alongside the static-friction
-    # (elastic-plastic strain) force law. Fallback for metas predating the field:
-    # a nonzero qgrip strain state anywhere in the run means grip was active.
-    if "grip" in meta:
-        run["grip"] = bool(meta["grip"])
-        # The per-element isotropic regime (grip_mode=elements) has NO friction
-        # ellipse — the per-contact cap is a circle at full mu in every direction.
-        if meta.get("grip_mode") == "elements":
-            meta["lateral_ratio"] = 1.0
-    else:
-        qg = [r.get("qgrip") for r in rows if r.get("qgrip") is not None]
-        nums = []
-        flatten_numeric(qg, nums)
-        run["grip"] = bool(nums) and bool(np.any(np.asarray(nums) != 0.0))
+    # Per-element isotropic strain law: the per-contact cap is a CIRCLE at full mu
+    # in every direction. (Captures predating the settled law carry extra meta keys
+    # — lateral_ratio, grip, grip_mode; they are read-but-ignored.)
 
     # Finiteness sweep over EVERY numeric field the rows carry (chain, wheels, all).
     nonfinite = 0
@@ -255,20 +243,18 @@ def check_hard_gates(run, gates):
     # the print quantization of f (±0.05 N) and load (±0.5 N) — which dominates e
     # for feather-weight contacts, so max_e_loaded (load ≥ 100 N, quantization
     # ≤ ~1%) is the headline number and raw max_e is quantization noise).
-    # Grip regime (static-friction / elastic-plastic strain law): forces scale by
-    # the ELASTIC load (contact col 5 here), not the damped load — so the cap is
-    # mu·load_elastic. Kinetic-only captures keep the damped-load cap.
+    # The element strain law scales forces by the ELASTIC support load (contact
+    # col 5), so the per-contact cap is mu·load_elastic, isotropic (lat_ratio 1).
     c = run["contacts"]
-    load_col = 5 if run["grip"] else 0
+    load_col = 5
     loaded = c[c[:, load_col] >= 1.0] if c.size else c
     if loaded.size:
         load, f_long, f_lat = loaded[:, load_col], loaded[:, 3], loaded[:, 4]
         grip = meta["mu"] * load
-        grip_lat = grip * meta["lateral_ratio"]
-        e = (f_long / grip) ** 2 + (f_lat / grip_lat) ** 2
+        e = (f_long / grip) ** 2 + (f_lat / grip) ** 2
         slack = (
             (2.0 * np.abs(f_long) * Q_FORCE + Q_FORCE**2) / grip**2
-            + (2.0 * np.abs(f_lat) * Q_FORCE + Q_FORCE**2) / grip_lat**2
+            + (2.0 * np.abs(f_lat) * Q_FORCE + Q_FORCE**2) / grip**2
             + 2.0 * e * Q_LOAD / load
         )
         viol = int(np.count_nonzero(e > 1.0 + 1e-4 + slack))
@@ -284,43 +270,26 @@ def check_hard_gates(run, gates):
         {"contacts": int(loaded.shape[0]), "max_e_loaded": emax_loaded, "max_e": emax, "violations": viol},
     )
 
-    # (3) Dissipation. Kinetic law: instantaneous sign check — f_long follows slip
-    # sign, f_lat opposes slip_lat (forces.rs). Grip law: the bristle spring lags
-    # slip and legitimately RETURNS stored elastic energy (instantaneous f·slip < 0
-    # moments are physical), so the gate becomes NET energy over the run: total
-    # friction work must not exceed what the springs can store, i.e.
-    # Σ (f_long·slip + (−f_lat)·slip_lat)·dt ≥ −E_store_bound with
-    # E_store_bound = 2 sides × C_max²/(2K), C_max = per-side max over the window
-    # of Σ mu·load_elastic, K = bristle stiffness mu·weight/2/GRIP_SHEAR_MODULUS_M.
-    if run["grip"]:
-        dt = meta.get("fixed_dt", 1.0 / TICK_HZ)
-        if c.size:
-            net_e = float(np.sum((c[:, 3] * c[:, 1] - c[:, 4] * c[:, 2]) * dt))
-        else:
-            net_e = 0.0
-        c_max = meta["mu"] * float(np.max(run["side_elastic"])) if run["side_elastic"].size else 0.0
-        k_bristle = meta["mu"] * meta["weight"] / 2.0 / GRIP_SHEAR_MODULUS_M
-        e_bound = 2.0 * c_max**2 / (2.0 * k_bristle) if k_bristle > 0 else 0.0
-        gate(
-            gates,
-            "dissipation",
-            net_e >= -e_bound,
-            {"net_energy_j": net_e, "store_bound_j": e_bound, "c_max_n": c_max, "k_n_per_m": k_bristle},
-        )
+    # (3) Dissipation. The bristle spring lags slip and legitimately RETURNS stored
+    # elastic energy (instantaneous f·slip < 0 moments are physical), so the gate is
+    # NET energy over the run: total friction work must not exceed what the springs
+    # can store, i.e. Σ (f_long·slip + (−f_lat)·slip_lat)·dt ≥ −E_store_bound with
+    # E_store_bound = 2 sides × C_max²/(2K), C_max = per-side max over the window of
+    # Σ mu·load_elastic, K = bristle stiffness mu·weight/2/GRIP_SHEAR_MODULUS_M.
+    dt = meta.get("fixed_dt", 1.0 / TICK_HZ)
+    if c.size:
+        net_e = float(np.sum((c[:, 3] * c[:, 1] - c[:, 4] * c[:, 2]) * dt))
     else:
-        if c.size:
-            fscale = max(1.0, float(np.max(np.abs(c[:, 3:5]))))
-            tol = 1e-3 * fscale
-            long_viol = int(np.count_nonzero(c[:, 3] * c[:, 1] < -tol))
-            lat_viol = int(np.count_nonzero(c[:, 4] * c[:, 2] > tol))
-        else:
-            tol, long_viol, lat_viol = 0.0, 0, 0
-        gate(
-            gates,
-            "dissipation",
-            long_viol == 0 and lat_viol == 0,
-            {"tol": tol, "long_violations": long_viol, "lat_violations": lat_viol},
-        )
+        net_e = 0.0
+    c_max = meta["mu"] * float(np.max(run["side_elastic"])) if run["side_elastic"].size else 0.0
+    k_bristle = meta["mu"] * meta["weight"] / 2.0 / GRIP_SHEAR_MODULUS_M
+    e_bound = 2.0 * c_max**2 / (2.0 * k_bristle) if k_bristle > 0 else 0.0
+    gate(
+        gates,
+        "dissipation",
+        net_e >= -e_bound,
+        {"net_energy_j": net_e, "store_bound_j": e_bound, "c_max_n": c_max, "k_n_per_m": k_bristle},
+    )
 
     # (4) Finiteness.
     gate(gates, "finite", run["nonfinite"] == 0, {"nonfinite_values": run["nonfinite"]})

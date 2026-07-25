@@ -1,102 +1,47 @@
 [package]
 name = "overmatch"
-version = "0.3.0-alpha.8"
+version = "0.3.0-alpha.9"
 edition = "2024"
 default-run = "overmatch"
 
 [dependencies]
 bevy = { version = "0.19", features = ["debug"] }
-# `serialize` adds the Serialize/Deserialize impls on Position/Rotation/velocities that lightyear's
-# replication registration needs. Unconditional since the collapse of the `net` feature — it used to
-# ride `net = [..., "avian3d/serialize"]`.
 avian3d = { version = "0.7", features = ["serialize"] }
-
-# Per-variant spec sheets are authored as RON data assets (ADR-0010): plain-text,
-# git-diffable, deserialized straight into our components via serde.
 serde = { version = "1", features = ["derive"] }
-# The jitter-trace recorder (`src/trace.rs`) writes JSONL rows for offline analysis. Already in the
-# tree transitively (via `gltf`), promoted to a direct dependency for the recorder's use.
 serde_json = "1"
-# Human-readable local timestamps for the CLI-only `--capture` path. Chrono is already in the
-# locked graph through lightyear; this makes the runtime use explicit.
 chrono = "0.4.45"
-# Lightyear 0.28 uses this exact serializer/config for registered messages. Shot transport uses it
-# to enforce an application-level pre-fragmentation serialized-message upper bound.
 bincode = { version = "2.0.1", features = ["serde"] }
 ron = "0.12"
-# The same glam Bevy/Avian already compile (feature unification). `serde` lets `Vec3` ride in the
-# serializable `TankCommand`; `scalar-math` keeps sim math on the same scalar path across targets.
 glam = { version = "0.32.1", features = ["serde", "scalar-math"] }
-
 winit = "0.30"
 image = { version = "0.25", default-features = false, features = ["png"] }
-# Deterministic streaming compression for the feature-gated cross-target dump. Optional so normal
-# product builds do not gain a new direct dependency edge.
 flate2 = { version = "1", optional = true }
-
-# Read a `.glb` directly as data (no Bevy scene): the sim/view-split geometry extractor (`bake`,
-# design sim-view-split-and-tank-bake.md) and the spec↔model bind-contract test. Matches the
-# version `bevy_gltf` already resolves, so it adds nothing to the dep tree.
+bevy_egui = { version = "0.41", optional = true }
 gltf = "1.4"
-
-# The netcode layer. The PVP client IS the product, so lightyear is an unconditional dependency —
-# it compiles into every build (single-player returns as a runtime mode inside the client, not a
-# compile variant; `tests/net_boundary.rs` keeps the sim layer from depending on it). `prediction`/
-# `interpolation` are default-on lightyear features (kept explicit for clarity); `avian3d` pulls in
-# `lightyear_avian3d` (increment 5, spike map §1/§5).
 lightyear = { version = "0.28", default-features = false, features = [
     "std",
     "client", "server",
     "replication", "prediction", "interpolation",
-    # The render half of prediction (fixed-tick→frame blending; also what arms rollback
-    # correction). NOT implied by `prediction` — see net::client_smoothing_plugin.
     "frame_interpolation",
     "input_native",
     "netcode", "udp",
     "avian3d",
 ] }
-# The facade does not expose transport send/ack metadata. Shot diagnostics use this direct handle
-# to report sent-but-unacknowledged reliable messages without claiming inaccessible queue bytes.
-# This is already in Lightyear's locked dependency graph, so Cargo unifies it at 0.28.0.
 lightyear_transport = "0.28"
-# Direct visibility-filter API for owner-only combat disclosure.
 bevy_replicon = "0.41"
 
-# `dev_tools` (physics-debug gizmos + the `G`/`X`/`F` debug key bindings) is the one real compile
-# gate: default-on, decoupled from `debug_assertions` so an optimized playtest build can still carry
-# the tooling, and flipped off for a public beta. `net` used to be a second feature here; it was
-# collapsed away once the product converged on the networked client (halving every gate run and
-# build cache — the second dependency resolution is gone).
-#
-# `avian3d/serialize` is additive (Serialize/Deserialize impls on Position/Rotation/velocities) that
-# lightyear's replication registration needs; unconditional now that lightyear always compiles.
-# Test-only direct handles on lightyear's sub-crates (already in the dependency graph via the
-# `lightyear` facade, so these add no new builds — cargo unifies them with the locked 0.28.0).
-# The facade does not re-export the `SyncedTimeline`/`SyncTargetTimeline` traits or the
-# fixed-point time types, and the interpolation-delay tripwire (tests/net_interp_delay.rs) must
-# call `sync_objective` directly to pin the send_interval=0 degenerate it guards against.
 [dev-dependencies]
 lightyear_sync = "0.28"
 lightyear_core = "0.28"
-# The input-buffer-wrap tripwire (tests/net_input_buffer_wrap.rs) pins two safe enablers of the §7
-# connect hang. It never invokes the encoder's unbounded negative-range loop.
 lightyear_inputs = "0.28"
 lightyear_inputs_native = "0.28"
 
 [features]
 default = ["dev_tools"]
-# Player-facing debug tooling (physics wireframes + the `G`/`X`/`F` debug keys). Empty deps: it is a
-# pure compile gate the code reads via `#[cfg(feature = "dev_tools")]`, kept separate from
-# `debug_assertions` so it survives into optimized builds.
 dev_tools = []
-# Cross-target raw-bit differential harness. No production binary enables this: it adds only
-# observation payloads and the `bitprobe` composition used by the dedicated measurement workflow.
 bitprobe = ["dep:flate2"]
+dev_ui = ["dep:bevy_egui"]
 
-# glam 0.32.1 intentionally omits serde for scalar BVec3A/BVec4A, while bevy_reflect 0.19.0
-# unconditionally registers serde type data for them. Keep the pinned Bevy crate and omit only
-# those two unsupported registrations in the local compatibility patch. Scalar Vec4 also exposes
-# a Bevy 0.19 MeshUniform allocation bug; the bevy_pbr patch restores its required GPU alignment.
 [patch.crates-io]
 bevy_reflect = { path = "vendor/bevy_reflect-0.19.0-scalar-math" }
 bevy_pbr = { path = "vendor/bevy_pbr-0.19.0-scalar-math" }
@@ -105,7 +50,6 @@ bevy_pbr = { path = "vendor/bevy_pbr-0.19.0-scalar-math" }
 name = "overmatch"
 path = "src/main.rs"
 
-# The dedicated server.
 [[bin]]
 name = "overmatch-server"
 path = "src/bin/overmatch-server.rs"
@@ -115,16 +59,16 @@ name = "bitprobe"
 path = "src/bin/bitprobe.rs"
 required-features = ["bitprobe"]
 
-# Debuginfo slimming (measured 2026-07-11): a fleet sweep found ~90% of a 169 GB
-# target-dir footprint was debuginfo, and 37 GB of it was our own crate's `.o` files.
-# Cargo's dev default is `debug = 2` (full DWARF), and on macOS the default
-# `split-debuginfo = "unpacked"` scatters that into per-object `.o`/`.dSYM` files that
-# never get reaped — so an every-day rebuild loop sheds GB/day of stale debug churn.
-# The fix is profile config, not worktree tricks:
-#   - own crate -> `line-tables-only`: keeps file:line in backtraces (what panic
-#     reports and agents actually read) while dropping variable/type DWARF.
-#   - deps -> `debug = 0`: nobody sets breakpoints inside bevy/wgpu/avian/lightyear.
-# For real lldb variable inspection, opt in with the `dev-full` profile below.
+[[bin]]
+name = "track_sandbox"
+path = "src/bin/track_sandbox.rs"
+required-features = ["dev_ui"]
+
+[[bin]]
+name = "armor_sandbox"
+path = "src/bin/armor_sandbox.rs"
+required-features = ["dev_ui"]
+
 [profile.dev]
 opt-level = 1
 debug = "line-tables-only"
@@ -133,21 +77,10 @@ debug = "line-tables-only"
 opt-level = 3
 debug = 0
 
-# Opt-in full-debuginfo escape hatch for a genuine lldb / variable-inspection session:
-# `cargo build --profile dev-full`. Inherits dev (same opt split) but restores full
-# DWARF on our crate. Deps stay at the inherited `debug = 0` — bump them here too if you
-# ever need to step into a dependency. Not used by any gate; purely a local debugging lever.
 [profile.dev-full]
 inherits = "dev"
 debug = 2
 
-# CI profile: clippy (type-check) + fast unit tests only, which gain nothing from
-# optimized dependencies. Inherit dev but drop every package back to opt-level 0 —
-# the dev profile's opt-level-3 deps are exactly what make a cold CI build slow (~25
-# min) and the rust-cache large (~1.5 GB). Used via `cargo {clippy,test} --profile ci`
-# in .github/workflows/ci.yml. Debuginfo slimming rides in via `inherits = "dev"`:
-# our crate stays `line-tables-only` (so a CI test panic still logs file:line) and deps
-# inherit `debug = 0` — clippy and the type-check need no debuginfo of their own.
 [profile.ci]
 inherits = "dev"
 opt-level = 0
@@ -155,8 +88,6 @@ opt-level = 0
 [profile.ci.package."*"]
 opt-level = 0
 
-# Optimized for distribution: strip symbols and shrink code size. These slow
-# down compile time (full recompile + LTO), which is fine for release bundles.
 [profile.release]
 strip = true
 lto = "thin"

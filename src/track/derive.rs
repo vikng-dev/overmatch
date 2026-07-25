@@ -1,22 +1,31 @@
-//! The NEW suspension-model derivations the editor prototypes — pure math, no ECS, unit-tested.
+//! The NEW suspension-model derivations — pure math, no ECS, unit-tested.
 //!
 //! These are the "universal laws" of the source-of-truth split (design `track-model/`): everything
 //! a tank does NOT author is derived here from the sharp sources (glb geometry + a handful of RON
-//! knobs). The editor calls them to visualize the model; when the model graduates into the game
-//! (per Yan's plan — settle the editor first, then wire the sim), these functions move verbatim into
-//! the sim/view tiers. Nothing here reads a file, an asset, or the ECS — it is all `f32` in, `f32`
-//! out, so the tests below pin the laws directly.
+//! knobs). They live beside the sandbox — the tier
+//! that actually DRIVES the derived rig ([`super::rig_geom`] assembles them into geometry;
+//! [`crate::track_sandbox::suspension_viz`] draws them). Nothing in THIS file reads a file, an asset, or the ECS —
+//! it is all `f32` in, `f32` out, so the tests below pin the laws directly.
+//!
+//! One law that is deliberately NOT here: the hinge-angle limit. It looks derivable — the shoe mesh
+//! decides how far a joint can fold — and a tri-tri sweep that measured it was built and thrown
+//! away (2026-07-23). The Tiger's shoe is modelled with near-zero clearance, so the first-contact
+//! angle moved with the penetration threshold (17.7° at 0.1 mm, 42.9° at 0.5 mm, 46.0° at 2 mm):
+//! a guard built on it would pass or fail arbitrarily. And the mesh is only an upper bound in any
+//! case — real articulation also spends pin/bushing clearance and end connectors the shoe does not
+//! model. The limits are HAND-MEASURED and authored (`track.link_angle`); what survives here is
+//! the DEMAND side, [`wrap_joint_angle`], which is pure geometry, and the clearance test that
+//! stands on it (`super::rig_geom`).
 
 use bevy::math::Vec3;
 
 /// Standard gravity (m/s²) — the load every static-deflection law divides by.
 pub const G: f32 = 9.81;
 
-/// The suspension authoring knobs that are NOT yet in the `.tank.ron` (`SupportSpec` today carries
-/// only the belt-support penalty law). These are the emergent-suspension inputs the editor tweaks
-/// live; graduating the model adds them to `TrackSpec`. Defaults are a plausible Tiger torsion-bar
-/// setup (soft, ~1.2 Hz heave, moderately damped) — a starting point to tune against the model, not
-/// a sourced datum.
+/// The suspension authoring knobs — the runtime mirror of the `.tank.ron` `suspension:`
+/// block (`SuspensionSpec::params` is the seam). The sandbox tweaks these live; the game
+/// reads them once at rig build. Defaults are a plausible Tiger torsion-bar setup (soft,
+/// ~1.2 Hz heave, moderately damped) — the test fixture, not a sourced datum.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SuspensionParams {
     /// Heave natural frequency (Hz). The single knob that sets spring softness: lower = softer =
@@ -47,8 +56,8 @@ pub fn spring_rate(sprung_mass: f32, ride_frequency: f32) -> f32 {
 
 /// Static deflection under 1 g: `mg/k = g/(2πf)²` (m). Mass cancels — a 1.2 Hz suspension sinks the
 /// same whether it carries 26 t or 57 t. This IS the max droop: the travel from the loaded rest pose
-/// (what Blender models) down to the fully-extended, spring-unloaded pose. The editor's green
-/// max-droop cast shape is the rest circles lowered by exactly this.
+/// (what Blender models) down to the fully-extended, spring-unloaded pose. The green max-droop cast
+/// shape ([`crate::track_sandbox::suspension_viz`]) is the rest circles lowered by exactly this.
 pub fn static_deflection(ride_frequency: f32) -> f32 {
     G / (std::f32::consts::TAU * ride_frequency).powi(2)
 }
@@ -75,6 +84,19 @@ pub fn sprocket_pitch_radius(pitch: f32, teeth: u32) -> f32 {
     pitch / (2.0 * (std::f32::consts::PI / teeth as f32).sin())
 }
 
+/// The joint angle a wrap DEMANDS: how far each hinge must fold for a chain of `pitch`-long rigid
+/// links to follow a circle of pin-line radius `r`.
+///
+/// The pins sit on the circle and the link between them is its CHORD, so the exterior angle at each
+/// pin is `2·asin(pitch / 2r)` — the same chord relation [`sprocket_pitch_radius`] inverts. It is
+/// the demand side of the hinge budget: the authored `track.link_angle.inward` is the supply, and
+/// a wheel whose radius drops below `pitch / (2·sin(θ_max/2))` can no longer be wrapped at all. A
+/// radius under half the pitch is geometrically impossible to wrap (the chord cannot exceed the
+/// diameter) and returns π.
+pub fn wrap_joint_angle(pitch: f32, radius: f32) -> f32 {
+    2.0 * (pitch / (2.0 * radius.max(1e-6))).clamp(-1.0, 1.0).asin()
+}
+
 /// Link count that fills a belt loop of `perimeter` at `pitch`: `round(perimeter/pitch)`. The
 /// rounding residual is the loop's tension/sag budget (the material loop is exact; the wrap is not).
 pub fn link_count(perimeter: f32, pitch: f32) -> usize {
@@ -87,7 +109,7 @@ pub fn link_count(perimeter: f32, pitch: f32) -> usize {
 /// assumed to be half the thickness). The two surface offsets — `pin_to_inner` and `pin_to_outer` —
 /// are read independently, so there's no mid-plate assumption: asymmetric shoes just work, which is
 /// also where the deferred grouser re-enters (put `Outer_Surface` on the cleat tip and the outer
-/// offset carries it). See [`crate::suspension_editor::model`] for the marker read.
+/// offset carries it). See [`super::marker_model`] for the marker read.
 pub fn pin_line_radius(contact_radius: f32, pin_to_inner: f32) -> f32 {
     contact_radius + pin_to_inner
 }
@@ -106,6 +128,33 @@ mod tests {
         assert!((chord - 0.13043).abs() < 1e-5);
         // The arc approximation would under-size it — the source of the RON's 2.5 mm gap.
         assert!(r > 0.13043 * 20.0 / std::f32::consts::TAU);
+    }
+
+    /// The wrap angle and the sprocket radius are ONE constraint seen from two ends — the chord
+    /// relation, inverted. Anything that "fixes" one without the other breaks this.
+    #[test]
+    fn the_wrap_angle_inverts_the_sprocket_chord_relation() {
+        let pitch = 0.13043;
+        for teeth in [12_u32, 20, 33] {
+            let r = sprocket_pitch_radius(pitch, teeth);
+            // Wrapping a sprocket costs exactly one tooth pitch per joint: τ/teeth, no radius in
+            // sight. That the radius-based formula reproduces it is the whole check.
+            let per_tooth = std::f32::consts::TAU / teeth as f32;
+            assert!(
+                (wrap_joint_angle(pitch, r) - per_tooth).abs() < 1e-5,
+                "{teeth} teeth: {} vs {per_tooth}",
+                wrap_joint_angle(pitch, r),
+            );
+        }
+        // Bigger circle, gentler joint — the monotonicity every clearance argument leans on.
+        assert!(wrap_joint_angle(pitch, 0.30) > wrap_joint_angle(pitch, 0.42));
+        // The Tiger's three wraps, from the current geometry (idler is the tightest).
+        assert!((wrap_joint_angle(pitch, 0.3675).to_degrees() - 20.44).abs() < 0.02);
+        assert!((wrap_joint_angle(pitch, 0.4126).to_degrees() - 18.19).abs() < 0.02);
+        // A circle the chain cannot wrap at all: the chord would have to exceed the diameter.
+        assert_eq!(wrap_joint_angle(pitch, pitch * 0.4), std::f32::consts::PI);
+        // ...and the degenerate radius is clamped rather than dividing by zero.
+        assert!(wrap_joint_angle(pitch, 0.0).is_finite());
     }
 
     #[test]

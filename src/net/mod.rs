@@ -44,9 +44,6 @@ use crate::tank::PendingTankAssets;
 
 /// Shared protocol, physics, rig, and safety wiring. Both endpoints must mount it identically.
 fn plugin(app: &mut App) {
-    // Network compositions promote the element law once at startup. The adapter itself still gates
-    // on body role, so interpolated static remotes never simulate or receive the private field.
-    app.insert_resource(crate::track::sim::ElementGripNetcode);
     protocol::plugin(app);
     physics::plugin(app);
     rig::plugin(app);

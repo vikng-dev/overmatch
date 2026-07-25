@@ -9,8 +9,8 @@ late to an already-replicated authority entity, or replicated every tick.
 
 This settles the hybrid from `element-netcode-design.md`: a cheap authoritative effect anchor finds
 meaningful divergence, while exact checkpoints provide the missing state required for correction.
-The aggregate `TrackGrip` component remains available to the offline compatibility law and as
-derived telemetry in element mode, but it is not network authority and stays off the wire.
+The `TrackGrip` component is the per-side summed telemetry over that field (hashed into `hblt`); it
+is not network authority and stays off the wire.
 
 ## Authority and repair
 

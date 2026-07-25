@@ -33,7 +33,7 @@ use crate::damage::{
 };
 use crate::spec::TransmissionArchitecture;
 use crate::state::{GameplaySet, SimPhase};
-use crate::tank::{Tank, TrackSide};
+use crate::tank::Tank;
 
 #[cfg(feature = "bitprobe")]
 use crate::bitprobe::BitprobeCapture;
@@ -53,9 +53,6 @@ use super::transmission::{
 // Surface friction policy (ADR-0007 bucket 3: a property of the track–ground PAIR, destined
 // for the terrain/ground-type mechanic — deliberately not vehicle spec).
 const MU: f32 = 0.9;
-/// Wong/Merritt firm-ground turning-resistance ratio — the lower lateral grip budget that
-/// lets a heavy tank pivot at all.
-const LATERAL_GRIP_RATIO: f32 = 0.55;
 const SLIP_SATURATION: f32 = 0.4;
 
 /// Per-tank tracked-drivetrain sim state: owner-predicted, replicated to remotes, rolled
@@ -79,22 +76,6 @@ pub struct TrackDriveSide {
     /// Unbounded belt travel (m) — advects the force stations; the view's exact scroll phase.
     pub phase: f64,
 }
-
-/// Startup-latched marker for the OFFLINE element-grip feel test (element-promotion-checklist.md
-/// Q1, phase 2): when present, [`apply_track_forces`] runs the per-element isotropic shear regime
-/// instead of the per-side aggregate. Inserted only by the `--offline` composition at process
-/// start; network compositions use [`ElementGripNetcode`] and sandboxes use neither. It is never
-/// inserted or removed mid-session because a regime flip would reinterpret hidden elastic state.
-#[derive(Resource, Default)]
-pub struct ElementGripFeelTest;
-
-/// Startup-latched marker for the network compositions' promoted per-element grip regime.
-/// The server inserts it once and simulates every dynamic authority tank; the client inserts it
-/// once but only its owner-predicted dynamic body uses the field (remote bodies remain static and
-/// interpolated). The ordinary offline composition does not insert it, preserving its aggregate
-/// behavior bit-for-bit; [`ElementGripFeelTest`] keeps the existing opt-in offline A/B path.
-#[derive(Resource, Default)]
-pub struct ElementGripNetcode;
 
 /// The OFFLINE transmission feel-test override: which drivetrain adapter [`apply_track_forces`]
 /// runs instead of the vehicle's declared architecture. Inserted ONLY by the `--offline`
@@ -123,14 +104,13 @@ impl TankTransmission {
     }
 }
 
-/// The static-friction state (static-friction-design.md, ADR-0026): per-side elastic grip
-/// resultants (N), `[left, right] × [longitudinal, lateral/ρ]`. Generalized forces, NOT
-/// world anchors. Hashed into the determinism trace (`hblt`).
+/// Per-side summed element grip force (N), `[left, right] × [longitudinal, lateral]` —
+/// derived telemetry over [`TrackGripElements`] (the authoritative state). Generalized
+/// forces, NOT world anchors. Hashed into the determinism trace (`hblt`).
 ///
-/// Off the wire as of REV 15: in element mode this is derived telemetry, and rolling it back from
-/// ordinary replication would create the forbidden correction-free loop when the undisclosed
-/// [`TrackGripElements`] differ. The aggregate offline force path remains untouched; Phase 4 decides
-/// whether its compatibility law is retired. [`TrackGripEffect`] is the reconciliation effect summary.
+/// Off the wire as of REV 15: rolling derived telemetry back from ordinary replication would
+/// create the forbidden correction-free loop when the undisclosed [`TrackGripElements`]
+/// differ. [`TrackGripEffect`] is the reconciliation effect summary.
 #[derive(Component, Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct TrackGrip {
     pub sides: [[f32; 2]; 2],
@@ -280,6 +260,15 @@ pub struct TrackGear {
     loop_pts: Vec<Vec2>,
     count: usize,
     plane_x: f32,
+    /// The contact envelope's per-position reach profile ((z, travel) knots — 0 at the
+    /// unsprung sprocket/idler, full droop at the road wheels), ridden via
+    /// [`super::forces::TravelField`] every tick.
+    travel_knots: Vec<(f32, f32)>,
+    /// Per-side collocation columns ([`SideInput::columns`], indexed by `Side::index()`):
+    /// the MEASURED shoe faces + centre from
+    /// [`RigGeom::grip_column_offsets`](super::rig_geom::RigGeom::grip_column_offsets) — signed
+    /// per-side because the shoe is not centred on its pins (~17 mm outboard on the Tiger).
+    columns: [[(f32, f32); 3]; 2],
     params: ForceParams,
     /// The declared joint transmission, if the spec authors one.
     trans: Option<TransmissionParams>,
@@ -305,6 +294,23 @@ impl TrackGear {
         self.params.inertia
     }
 
+    /// The chain-clamped droop (m): the maximum wheel-travel knot — how far below its rest line a
+    /// road wheel may drop. `0.0` when the profile is empty. The track view spans its cosmetic
+    /// wheels this far below rest so a fully-drooped wheel's drawn belt wrap stays feasible at the
+    /// chain-limited link count (the knots' peak IS `RigGeom::droop_travel(..).effective`, floored).
+    pub(crate) fn max_droop(&self) -> f32 {
+        self.travel_knots
+            .iter()
+            .map(|&(_, travel)| travel)
+            .fold(0.0_f32, f32::max)
+    }
+
+    /// The measured plate face offset (m): pin line → outer ground face (`pin_to_outer`). The view's
+    /// wheel-probe reach adds it to the pin-line wheel radius — no mid-plate assumption.
+    pub(crate) fn face_offset(&self) -> f32 {
+        self.params.face_offset
+    }
+
     #[cfg(feature = "bitprobe")]
     pub(crate) fn bitprobe_startup(&self, out: &mut crate::bitprobe::StartupBuilder) {
         out.u32("track_gear.count", self.count as u32);
@@ -321,17 +327,23 @@ impl TrackGear {
             out.vec2(&format!("track_gear.route[{index}]"), *point);
         }
         let p = &self.params;
-        out.f32("force.thickness", p.thickness);
-        for (index, (offset, weight)) in p.columns.iter().copied().enumerate() {
-            out.f32(&format!("force.columns[{index}].offset"), offset);
-            out.f32(&format!("force.columns[{index}].weight"), weight);
+        out.f32("force.face_offset", p.face_offset);
+        out.f32("force.free_travel", p.free_travel);
+        for (index, (z, travel)) in self.travel_knots.iter().copied().enumerate() {
+            out.f32(&format!("force.travel_knots[{index}].z"), z);
+            out.f32(&format!("force.travel_knots[{index}].travel"), travel);
+        }
+        for (si, side) in ["left", "right"].into_iter().enumerate() {
+            for (index, (offset, weight)) in self.columns[si].iter().copied().enumerate() {
+                out.f32(&format!("force.columns.{side}[{index}].offset"), offset);
+                out.f32(&format!("force.columns.{side}[{index}].weight"), weight);
+            }
         }
         out.f32("force.support_stiffness_per_m", p.support_stiffness_per_m);
         out.f32("force.support_damping_per_m", p.support_damping_per_m);
         out.f32("force.engage_depth", p.engage_depth);
         out.f32("force.probe_reach", p.probe_reach);
         out.f32("force.mu", p.mu);
-        out.f32("force.lateral_ratio", p.lateral_ratio);
         out.f32("force.slip_saturation", p.slip_saturation);
         out.f32("force.max_speed", p.max_speed);
         out.f32("force.engine_power", p.engine_power);
@@ -415,34 +427,26 @@ pub fn sim_plugin(app: &mut App) {
     );
 }
 
-/// Build [`TrackGear`] from the baked blueprint: same rest circles as the view's feasibility
-/// gate, closed via `build_route` with the authored material length (station pitch is then
-/// EXACTLY the spec pitch — loop length ≡ pitch × count).
+/// Build [`TrackGear`] from the baked blueprint: the marker-derived running gear
+/// ([`RigGeom`](super::rig_geom::RigGeom) — the SAME derivation the track sandbox proved),
+/// closed via `build_route` with the material length, and the contact-envelope support law
+/// calibrated on that loop so the authored rest pose is the flat-ground equilibrium
+/// ([`super::envelope`]). The RON's sprocket/idler/wheel-radius circle fields are no longer
+/// read here — geometry is measured, the spec keeps counts and the ride model.
 fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
     let spec = &blueprint.spec.track;
-    let sprocket_r = spec.pitch * spec.sprocket.teeth as f32 / std::f32::consts::TAU;
-    let mut circles = vec![(
-        Vec2::new(spec.sprocket.center.0, spec.sprocket.center.1),
-        sprocket_r,
-    )];
-    let mut wheels: Vec<Vec2> = blueprint
-        .geometry
-        .roadwheels
-        .iter()
-        .filter(|(_, side)| *side == TrackSide::Left)
-        .map(|&(node, _)| {
-            let t = blueprint.geometry.nodes[node].root_position;
-            Vec2::new(t.z, t.y)
-        })
-        .collect();
-    wheels.sort_by(|a, b| a.x.total_cmp(&b.x));
-    circles.extend(wheels.into_iter().map(|c| (c, spec.wheel_radius)));
-    circles.push((
-        Vec2::new(spec.idler.center.0, spec.idler.center.1),
-        spec.idler.radius,
-    ));
-
-    let belt_len = spec.pitch * spec.link_count as f32;
+    let sus = spec.suspension.params();
+    let geom = super::rig_geom::RigGeom::build(
+        &blueprint,
+        &crate::assets::asset_root().join(crate::tank::TIGER_GLB_PATH),
+        spec.sprocket.teeth,
+        spec.link_count,
+        &sus,
+    );
+    // ONE shared loop for both sides (the shipped asset's sides measure within ~60 µm; the
+    // Right side is the `hull_rest_y` datum side). Per-side loops land with per-side gear.
+    let circles = geom.rest.get(Side::Right).clone();
+    let belt_len = geom.belt_len();
     let route = build_route(&circles, belt_len);
     let mut loop_pts = route.pts.clone();
     if loop_pts.first() != loop_pts.last()
@@ -451,8 +455,48 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
         loop_pts.push(first);
     }
 
-    // The declared transmission, derived from the authored tables against the spec's OWN
-    // sprocket radius (tiger-transmission-data.md rule: speeds are the anchors, reductions
+    // The envelope law, calibrated against the exact loop/columns/engage the live law rides.
+    // Columns are the MEASURED shoe faces + centre per side (`grip_column_offsets`), not a
+    // symmetric ±width/2 about the pin plane — the shoe rides ~17 mm outboard of its pins.
+    let droop = geom.droop_travel(&sus);
+    let columns = [Side::Left, Side::Right].map(|s| geom.grip_column_offsets(s));
+    let travel_knots = super::envelope::wheel_travel_knots(
+        &circles,
+        droop.effective.max(super::envelope::MIN_ENVELOPE_TRAVEL),
+    );
+    let cal = super::envelope::calibrate(
+        &[Side::Left, Side::Right].map(|s| super::envelope::EnvelopeSide {
+            loop_pts: &loop_pts,
+            plane_x: s.plane_x(geom.plane_x),
+            knots: &travel_knots,
+            columns: columns[s.index()],
+        }),
+        spec.link_count,
+        geom.model.pin_to_outer,
+        spec.suspension.engage,
+        0.5,
+        blueprint.spec.mass * super::derive::G,
+        droop.effective,
+        sus.ride_frequency,
+        sus.damping_ratio,
+    );
+    info!(
+        "envelope law: travel {:.1} mm ({}), k {:.0} kN/m per m, c {:.2} kN·s/m per m \
+         (ride {:.2} Hz, ζ {:.2})",
+        cal.free_travel * 1e3,
+        if droop.chain_limited() {
+            "CHAIN-limited"
+        } else {
+            "spring-limited"
+        },
+        cal.stiffness_per_m / 1e3,
+        cal.damping_per_m / 1e3,
+        sus.ride_frequency,
+        sus.damping_ratio,
+    );
+
+    // The declared transmission, derived from the authored tables against the MEASURED sprocket
+    // radius and half-tread (tiger-transmission-data.md rule: speeds are the anchors, reductions
     // derive, so the ladder survives the 19-vs-20-tooth discrepancy).
     if let Some(tr) = &spec.powertrain.transmission {
         info!(
@@ -462,8 +506,11 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
             tr.gearbox.reverse_speeds_kmh.len()
         );
     }
+    // Measured geometry: the sprocket pin-line pitch radius is the rest running gear's first
+    // circle (chord-exact `derive::sprocket_pitch_radius(geom.pitch, teeth)` by construction), and
+    // the half-tread is `geom.plane_x` — the same measured values the belt/envelope ride.
     let trans = spec
-        .transmission_params()
+        .transmission_params(circles[0].1, geom.plane_x)
         .expect("TankSpec transmission was validated before TrackGear construction");
     let mode = spec
         .powertrain
@@ -477,22 +524,23 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
     commands.insert_resource(TrackGear {
         loop_pts,
         count: spec.link_count,
-        plane_x: spec.plane_x,
+        plane_x: geom.plane_x,
+        travel_knots,
+        columns,
         trans,
         mode,
         params: ForceParams {
-            thickness: spec.thickness,
-            columns: [
-                (-spec.width / 2.0, 1.0 / 6.0),
-                (0.0, 2.0 / 3.0),
-                (spec.width / 2.0, 1.0 / 6.0),
-            ],
-            support_stiffness_per_m: spec.support.stiffness_per_m,
-            support_damping_per_m: spec.support.damping_per_m,
-            engage_depth: spec.support.engage,
+            // The contact-envelope suspension: measured face datum, free length at the
+            // droop envelope, spring/damper calibrated above — the authored rest pose is
+            // the flat-ground equilibrium by construction (nothing about the support law
+            // is authored except the ride model in the RON's `suspension:` block).
+            face_offset: geom.model.pin_to_outer,
+            free_travel: cal.free_travel,
+            support_stiffness_per_m: cal.stiffness_per_m,
+            support_damping_per_m: cal.damping_per_m,
+            engage_depth: spec.suspension.engage,
             probe_reach: 0.5,
             mu: MU,
-            lateral_ratio: LATERAL_GRIP_RATIO,
             slip_saturation: SLIP_SATURATION,
             max_speed: spec.powertrain.max_speed,
             engine_power: spec.powertrain.power,
@@ -504,6 +552,11 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
             grip_stiffness: grip_stiffness(MU, blueprint.spec.mass * 9.81),
         },
     });
+
+    // Keep the marker-derived running gear alive as the game's single geometry source: the track
+    // VIEW (`track::view`) reads its rest circles / pitch / plate / plane directly, and the bit
+    // probe echoes the measured scalars. Built once here alongside `TrackGear`, never re-derived.
+    commands.insert_resource(geom);
 }
 
 /// The drive step: shape the command, run each side's belt force model at the tick-truth
@@ -512,12 +565,6 @@ fn apply_track_forces(
     time: Res<Time>,
     field: Res<TrackField>,
     gear: Option<Res<TrackGear>>,
-    // The offline element-grip gate (element-promotion-checklist.md Q1): present only in the
-    // `--offline` composition. Read as `Option` so every other composition runs unchanged.
-    feel: Option<Res<ElementGripFeelTest>>,
-    // Present only in network compositions. Dynamic authority/owner bodies use elements; static
-    // interpolated client bodies never do.
-    net_elements: Option<Res<ElementGripNetcode>>,
     // Offline-only adapter override. MP leaves it absent and follows `TrackGear::mode`, derived
     // from the spec; a missing transmission block selects the untouched Governor fallback.
     trans_feel: Option<Res<TransmissionFeelTest>>,
@@ -577,6 +624,18 @@ fn apply_track_forces(
             capture.tanks_seen += 1;
             capture.command = [command.throttle, command.steer];
         }
+        // Only dynamic bodies simulate the belt — and the guard sits BEFORE command shaping:
+        // `TrackDrive` is replicated state, and a late-promotion tick that lands while the
+        // body is still Static must not locally slew the replicated throttle/steer once and
+        // hand the first dynamic predicted tick an altered starting value (codex review
+        // 2026-07-25, finding 2). Forces are no-ops on kinematic/static bodies, remotes'
+        // `TrackDrive` is replicated for their track view, and interpolated remotes neither
+        // receive nor simulate the private element field (ADR-0027 disclosure). Skipping
+        // them entirely also keeps their replicated belt state from being fought by a
+        // locally-integrated one.
+        if !matches!(*body, RigidBody::Dynamic) {
+            continue;
+        }
         // Drive gates THRUST, not grip: a dead driver/engine/transmission retargets the
         // command slew to zero (a fade over ~1/DRIVE_SLEW_PER_SECOND, see the module doc)
         // while the full contact model keeps running, so the tracks keep their kinetic grip.
@@ -605,13 +664,11 @@ fn apply_track_forces(
         // avian3d 0.7 `ForcesItem` keeps this helper private; this is its version-pinned source
         // expression (`query_data.rs`): position + rotation * local computed COM.
         let center_of_mass = pos.0 + rot.0 * center_of_mass.0;
-        let elements_enabled =
-            feel.is_some() || (net_elements.is_some() && matches!(*body, RigidBody::Dynamic));
         let mut effect = TrackGripEffect::default();
 
         // The JOINT drivetrain branch: MP selects the declared architecture; the offline-only
         // [`TransmissionFeelTest`] can override it. A spec-less vehicle or explicit Governor
-        // override falls through to the untouched legacy loop below.
+        // override falls through to the governor loop below.
         let joint = match (mode, gear.trans.as_ref()) {
             (TransmissionMode::Governor, _) | (_, None) => None,
             (m, Some(tp)) => Some((m, tp)),
@@ -620,7 +677,7 @@ fn apply_track_forces(
             // Transmission-design §2 scheduling: evaluate BOTH contact patches at their
             // pre-tick belt speeds, solve the joint transmission once, integrate both
             // speeds, advect both phases. Emitting all of L's forces then all of R's keeps
-            // the legacy accumulation order — within a tick force application never feeds
+            // the governor loop's accumulation order — within a tick force application never feeds
             // back into `vel_at`, so contact evaluation order cannot change the numbers.
             let mut reports: [SideReport; 2] = [SideReport::default(), SideReport::default()];
             let mut live = [false; 2];
@@ -630,7 +687,11 @@ fn apply_track_forces(
                     loop_pts: &gear.loop_pts,
                     count: gear.count,
                     plane_x: side.plane_x(gear.plane_x),
+                    columns: gear.columns[si],
                     command: side_commands[si],
+                    travel: Some(super::forces::TravelField {
+                        knots: &gear.travel_knots,
+                    }),
                 };
                 let ds = drive.sides[si];
                 let state = SideState {
@@ -646,8 +707,7 @@ fn apply_track_forces(
                     &gear.params,
                     oracle,
                     |p| forces.velocity_at_point(p),
-                    // Same startup-latched element-regime gate as the legacy loop.
-                    elements_enabled.then_some(&mut grip_elements.sides[si]),
+                    &mut grip_elements.sides[si],
                 );
                 reports[si] = report;
                 live[si] = ok;
@@ -689,7 +749,7 @@ fn apply_track_forces(
                     let pre_speed = drive.sides[si].speed;
                     drive.sides[si] = TrackDriveSide {
                         speed: tr.next_speeds[si],
-                        // Phase advects at the PRE-update speed, like the legacy tail.
+                        // Phase advects at the PRE-update speed, like the governor tail.
                         phase: drive.sides[si].phase + f64::from(pre_speed * dt),
                     };
                 }
@@ -710,7 +770,11 @@ fn apply_track_forces(
                 loop_pts: &gear.loop_pts,
                 count: gear.count,
                 plane_x: side.plane_x(gear.plane_x),
+                columns: gear.columns[si],
                 command: side_commands[si],
+                travel: Some(super::forces::TravelField {
+                    knots: &gear.travel_knots,
+                }),
             };
             let ds = drive.sides[si];
             let state = SideState {
@@ -726,11 +790,7 @@ fn apply_track_forces(
                 &gear.params,
                 oracle,
                 |p| forces.velocity_at_point(p),
-                // Startup-latched regime selection. Offline defaults to the aggregate law unless
-                // its feel-test resource is present. Network compositions insert
-                // `ElementGripNetcode`; dynamic authority/owner bodies use elements while static
-                // interpolated remotes do not simulate their private field.
-                elements_enabled.then_some(&mut grip_elements.sides[si]),
+                &mut grip_elements.sides[si],
             );
             effect.belt_reaction[si] = report.belt_reaction;
             for contact in &report.contacts {

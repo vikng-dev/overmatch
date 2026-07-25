@@ -112,9 +112,14 @@ pub(crate) fn load_tank_assets(mut commands: Commands, asset_server: Res<AssetSe
 }
 
 fn tank_transmission(spec: &TankSpec) -> TankTransmission {
+    // Only `engine.idle_rpm` reaches the replicated `TankTransmission` state (the crank seed); the
+    // geometry-coupled params (gears, kappa, sprocket radius) live in `TrackGear.trans`, built from
+    // the measured `RigGeom` in `track::sim::init_track_gear`. So nominal geometry here is
+    // deterministic — it never enters replicated state, and construction was already validated at
+    // asset load.
     let params = spec
         .track
-        .transmission_params()
+        .transmission_params(1.0, 1.0)
         .expect("TankSpec transmission was validated before tank construction");
     params
         .as_ref()
@@ -454,6 +459,12 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
     // construction avian's `TrimeshFromMesh` performs (design §7.1, vendored-source proven), on
     // the `Armor` layer with NO collision response (`filters = NONE`) so it never perturbs the
     // body — watertight solids may be concave, fine for the march's raycast (ADR-0008).
+    //
+    // The extracted buffers are node-LOCAL and unscaled, and each collider is spawned as a child of
+    // its volume's node entity: avian's `ColliderTransform` composes the ancestor `Transform` scales
+    // onto the shape, so a volume authored at scale != 1 (the coax MG plates, and the roadwheels
+    // until their export bakes scale away) is sized right without pre-baking anything here — and
+    // stays right once the export DOES bake it, since identity scale composes to identity.
     for (name, volume, index) in &volume_nodes {
         let index = index.expect("contract checked");
         let node = &geometry.nodes[index];
@@ -466,8 +477,8 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
         // A declared volume without captured mesh data would be invisible to penetration queries.
         assert!(
             !node.primitives.is_empty(),
-            "ballistic volume `{name}` captured no mesh data (does its node name follow the \
-             `*_Ballistic` capture rule?)"
+            "ballistic volume `{name}` captured no mesh data (does its node name follow \
+             `bake::captures_mesh` — `*_Ballistic`, `*_Collider`, or a `Wheel_<side>_<n>` station?)"
         );
         {
             let mut entity = commands.entity(entity);
@@ -575,6 +586,19 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
 
     // --- Wheels: rig stations in name-sorted order (the track view reads their side/pose; the
     // belt force model uses the BAKED rest circles — articulation is view-only).
+    //
+    // The station entity is ALSO the wheel's ballistic volume: the wheel ships as one unified mesh,
+    // so `Roadwheel` lands on an entity the volume loop above already gave `BallisticVolume` +
+    // `ArmorVolume` + a trimesh child. Nothing here conflicts — the two roles are disjoint
+    // components — and it is deliberate: the armour follows the station's rest pose, and the
+    // wheels being pure armour (no `hp`) means no damage path can despawn a station out from
+    // under the track rig.
+    //
+    // These nodes are also scene ROOTS in the current export (was: children of `Track_*` under
+    // `Hull`). The spawn loop maps `parent: Some(0) | None` to the tank root, so a top-level wheel
+    // simply parents to the root instead of the hull entity — and since `Hull`/`Track_*` were
+    // identity, every composed pose the sim reads (`root_position`, `rig_world_pose`, and the
+    // wheel's own local `Transform` the track view sorts by) is numerically unchanged.
     for &(index, side) in wheel_nodes {
         commands.entity(entity_at(index)).insert(Roadwheel { side });
     }

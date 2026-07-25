@@ -29,30 +29,75 @@ use crate::spec;
 use crate::tank::{Controlled, Tank, TankPresentation, TankSimSource, ViewOf, spawn_complete_tank};
 use crate::world;
 
-/// Muzzle speed for sandbox shots (m/s) — the 88 mm, matching the game's gun for now. Becomes a
-/// live knob (with shell type) once the march needs tuning.
+// The clickable egui control panel — the sandbox's Layers / Shot / Time / Telemetry / Scene surface.
+// Behind `dev_ui` so `bevy_egui` compiles ONLY into the sandbox build, never the shipping client
+// (`bin/overmatch`); mounted below under the same gate. (`cargo armor` = `--features dev_ui`.)
+#[cfg(feature = "dev_ui")]
+mod panel;
+
+/// Muzzle speed for sandbox shots (m/s) — the 88 mm, matching the game's gun for now. The seed for
+/// [`ShotParams::default`]; live-tunable from the panel.
 const MUZZLE_SPEED: f32 = 773.0;
 /// Shell calibre (m) — the 88. Drives overmatch against the thin plates.
 const CALIBER: f32 = 0.088;
 /// Projectile mass (kg) — the 88's PzGr 39 (~10.2 kg). Primary driver of penetration capability.
 const SHELL_MASS: f32 = 10.2;
 
+/// The live shot parameters every fired shell reads — muzzle speed, calibre, and mass, the three
+/// penetration drivers. Seeded from the 88 mm constants above; the `dev_ui` panel's Shot section
+/// edits them so penetration can be studied against the plate ladder without a recompile. Read only
+/// by [`fire`] (no change-detection reactor), so the panel writes it back on change purely for tidy
+/// change-ticks. `Copy + PartialEq` for that local-copy → write-on-change pattern.
+#[derive(Resource, Clone, Copy, PartialEq)]
+struct ShotParams {
+    muzzle_speed: f32,
+    caliber: f32,
+    mass: f32,
+}
+
+impl Default for ShotParams {
+    fn default() -> Self {
+        Self {
+            muzzle_speed: MUZZLE_SPEED,
+            caliber: CALIBER,
+            mass: SHELL_MASS,
+        }
+    }
+}
+
+/// Whether the egui panel currently holds keyboard or pointer focus — written each frame by the
+/// `dev_ui` panel, read by [`panel_capturing`] to gate the firing/fly/time input off so a slider
+/// drag or an arrow-key nudge on a focused widget never leaks into the sim. Always present (default
+/// false) so those gates behave identically when the panel is not compiled in.
+#[derive(Resource, Default)]
+struct PanelWantsInput {
+    keyboard: bool,
+    pointer: bool,
+}
+
+/// Run condition: an egui widget has focus, so player input must be suppressed this frame.
+fn panel_capturing(want: Res<PanelWantsInput>) -> bool {
+    want.keyboard || want.pointer
+}
+
+/// Panel→system intent seam for the board wipe (`C` or the Scene button): the panel raises it and
+/// [`clear_shots`] consumes it, so keyboard and panel share one commit path. Always present.
+#[derive(Resource, Default)]
+struct ClearRequested(bool);
+
+/// Panel→system intent seam for the world rebuild (`R` or the Scene button); consumed by
+/// [`reset_world`]. Always present.
+#[derive(Resource, Default)]
+struct ResetRequested(bool);
+
 /// The free-fly camera that doubles as the gun: shells spawn at its centre, firing down its view
 /// axis. Inspection viewpoint and firing solution are one object.
 #[derive(Component)]
 struct FreeFlyCam;
 
-/// The status line (time scale + live shell count).
-#[derive(Component)]
-struct StatusText;
-
 /// A pooled floating label, reassigned to a live shell each frame (no per-shell UI churn).
 #[derive(Component)]
 struct ShellLabel;
-
-/// The top-right readout of each layer's current tap-loop state.
-#[derive(Component)]
-struct LayerStatusText;
 
 /// The slow-motion ladder the Up/Down arrows step through (a shell flies ~773 m/s).
 const SPEEDS: [f32; 6] = [1.0, 0.25, 0.06, 0.015, 0.004, 0.001];
@@ -71,6 +116,11 @@ enum MeshState {
 }
 
 impl MeshState {
+    /// The three states in tap order, for the panel's segmented control. `allow(dead_code)`: only
+    /// the `dev_ui` panel references it, and the module compiles without that feature.
+    #[cfg_attr(not(feature = "dev_ui"), allow(dead_code))]
+    const ALL: [MeshState; 3] = [MeshState::Solid, MeshState::Xray, MeshState::Hidden];
+
     fn next(self) -> Self {
         match self {
             MeshState::Solid => MeshState::Xray,
@@ -79,6 +129,8 @@ impl MeshState {
         }
     }
 
+    /// `allow(dead_code)`: only the `dev_ui` panel's segmented control reads the label now.
+    #[cfg_attr(not(feature = "dev_ui"), allow(dead_code))]
     fn label(self) -> &'static str {
         match self {
             MeshState::Solid => "solid",
@@ -99,6 +151,16 @@ enum VolumeState {
 }
 
 impl VolumeState {
+    /// The four states in tap order, for the panel's segmented control. `allow(dead_code)`: see
+    /// [`MeshState::ALL`].
+    #[cfg_attr(not(feature = "dev_ui"), allow(dead_code))]
+    const ALL: [VolumeState; 4] = [
+        VolumeState::Hidden,
+        VolumeState::OnTop,
+        VolumeState::Solid,
+        VolumeState::Xray,
+    ];
+
     fn next(self) -> Self {
         match self {
             VolumeState::Hidden => VolumeState::OnTop,
@@ -108,6 +170,8 @@ impl VolumeState {
         }
     }
 
+    /// `allow(dead_code)`: only the `dev_ui` panel's segmented control reads the label now.
+    #[cfg_attr(not(feature = "dev_ui"), allow(dead_code))]
     fn label(self) -> &'static str {
         match self {
             VolumeState::Hidden => "off",
@@ -118,10 +182,14 @@ impl VolumeState {
     }
 }
 
-/// The target's per-layer view state, advanced by `F1/F2/F3`. Opens on a useful default: hull
-/// translucent (xray), armour translucent (xray), components solid — so the inner volumes read at
-/// a glance without first cycling the layers.
-#[derive(Resource)]
+/// The target's per-layer view state, advanced by `F1/F2/F3` (or the panel's Layers rows). Opens on
+/// a useful default: hull translucent (xray), armour translucent (xray), components solid — so the
+/// inner volumes read at a glance without first cycling the layers.
+///
+/// `Copy + PartialEq` so the `dev_ui` panel edits a LOCAL copy behind its segmented controls and
+/// writes the resource back only on a real change (the write-on-change discipline the panel doc
+/// explains).
+#[derive(Resource, Clone, Copy, PartialEq)]
 struct LayerView {
     mesh: MeshState,
     armor: VolumeState,
@@ -209,6 +277,13 @@ pub fn plugin(app: &mut App) {
     .insert_resource(ballistics::MarchMode::Demo)
     .init_resource::<LayerView>()
     .init_resource::<SpeedIndex>()
+    .init_resource::<ShotParams>()
+    // Panel↔keyboard shared seams + the egui input-capture flags. Always present (default) so the
+    // firing/fly/time run-conditions compile and behave without `dev_ui`; the panel writes them only
+    // when it is compiled in.
+    .init_resource::<PanelWantsInput>()
+    .init_resource::<ClearRequested>()
+    .init_resource::<ResetRequested>()
     // Paint translucent materials onto the volume meshes as the view binds to the sim parts.
     .add_observer(paint_view_volumes)
     // The sandbox's own impact marker: `ballistics` no longer spawns one (it stays pure sim,
@@ -232,9 +307,20 @@ pub fn plugin(app: &mut App) {
     .add_systems(
         Update,
         (
-            fly_camera.run_if(cursor_locked),
-            fire.run_if(cursor_locked),
-            time_controls,
+            // The direct-manipulation input gates OFF while an egui widget has focus, so a slider
+            // drag or an arrow-key nudge on a focused widget never leaks into the gun/camera/clock
+            // (`panel_capturing`). `fly_camera`/`fire` stay cursor-locked as well — freeing the
+            // cursor to reach the panel already stops them; the focus gate is belt-and-suspenders and
+            // the ONLY thing standing between a panel click and a fired shell were the cursor ever
+            // free while a widget is live.
+            fly_camera
+                .run_if(cursor_locked)
+                .run_if(not(panel_capturing)),
+            fire.run_if(cursor_locked).run_if(not(panel_capturing)),
+            // Up/Down step the slow-mo ladder; a focused egui slider also reads the arrows, so gate
+            // this the same way the fly does (the armour-sandbox analogue of the track sandbox's
+            // `read_drive_input` gate).
+            time_controls.run_if(not(panel_capturing)),
             toggle_full_pause,
             clear_shots,
             reset_world,
@@ -243,15 +329,20 @@ pub fn plugin(app: &mut App) {
             tag_hull_meshes,
             toggle_layers,
             apply_layer_visibility,
-            update_layer_status,
             draw_shell_paths,
             draw_penetrations,
             draw_spall,
             draw_consequence_gizmos,
-            update_status,
             update_shell_labels,
         ),
     );
+
+    // The egui control panel — the sandbox's whole non-camera control surface (Layers / Shot / Time /
+    // Telemetry / Scene). Behind `dev_ui` so `bevy_egui` is compiled ONLY here (the `armor_sandbox`
+    // bin declares `required-features = ["dev_ui"]`), never into `bin/overmatch`. It brings its own
+    // `EguiPlugin` and runs in `EguiPrimaryContextPass`. Launch it with the `cargo armor` alias.
+    #[cfg(feature = "dev_ui")]
+    app.add_plugins(panel::plugin);
 }
 
 fn spawn_camera(mut commands: Commands) {
@@ -562,20 +653,8 @@ fn spawn_overlay_light(mut commands: Commands) {
     ));
 }
 
-/// Refresh the top-right readout of each layer's tap-loop state.
-fn update_layer_status(view: Res<LayerView>, mut text: Query<&mut Text, With<LayerStatusText>>) {
-    let Ok(mut text) = text.single_mut() else {
-        return;
-    };
-    *text = Text::new(format!(
-        "F1 mesh: {}\nF2 armor: {}\nF3 components: {}",
-        view.mesh.label(),
-        view.armor.label(),
-        view.components.label(),
-    ));
-}
-
-/// `1/2/3` advance the mesh / armor / component tap-loops.
+/// `F1/F2/F3` advance the mesh / armor / component tap-loops — kept as accelerators for the panel's
+/// Layers rows (both write the same [`LayerView`], write-on-change on the panel side).
 fn toggle_layers(keys: Res<ButtonInput<KeyCode>>, mut view: ResMut<LayerView>) {
     // Moved off the number row (now the crew bar, `1`–`5`) onto the function keys.
     if keys.just_pressed(KeyCode::F1) {
@@ -728,6 +807,7 @@ fn fly_camera(
 fn fire(
     camera: Single<&Transform, With<FreeFlyCam>>,
     mouse: Res<ButtonInput<MouseButton>>,
+    shot: Res<ShotParams>,
     mut commands: Commands,
 ) {
     if !mouse.just_pressed(MouseButton::Left) {
@@ -736,9 +816,9 @@ fn fire(
     commands.trigger(FireShell {
         origin: camera.translation,
         direction: camera.forward(),
-        speed: MUZZLE_SPEED,
-        caliber: CALIBER,
-        mass: SHELL_MASS,
+        speed: shot.muzzle_speed,
+        caliber: shot.caliber,
+        mass: shot.mass,
         mechanism: crate::spec::FireMechanism::Single,
         // A single sighting round — mark it a tracer. Moot for the sandbox's own visuals (it retains
         // spent shells and draws its own path gizmos, and CALIBER is main-gun-sized so it keeps the
@@ -795,6 +875,7 @@ fn toggle_full_pause(
 /// every impact marker — so you can start a clean shot.
 fn clear_shots(
     keys: Res<ButtonInput<KeyCode>>,
+    mut requested: ResMut<ClearRequested>,
     shots: Query<Entity, Or<(With<ShellPath>, With<ImpactMarker>)>>,
     mut health: Query<&mut ComponentHealth>,
     dead: Query<Entity, With<Dead>>,
@@ -802,7 +883,13 @@ fn clear_shots(
     knocked_out: Query<Entity, With<TankKnockedOut>>,
     mut commands: Commands,
 ) {
-    if !keys.just_pressed(KeyCode::KeyC) {
+    // `C` or the panel's Scene button. Consume the flag on the frame it fires so the deref (and its
+    // change-tick) lands only on a real clear.
+    let by_panel = requested.0;
+    if by_panel {
+        requested.0 = false;
+    }
+    if !(keys.just_pressed(KeyCode::KeyC) || by_panel) {
         return;
     }
     for entity in &shots {
@@ -827,12 +914,18 @@ fn clear_shots(
 /// restores hierarchy after cookoff has detached/launched the turret.
 fn reset_world(
     keys: Res<ButtonInput<KeyCode>>,
+    mut requested: ResMut<ResetRequested>,
     asset_server: Res<AssetServer>,
     targets: Query<Entity, Or<(With<Tank>, With<LaunchedTurret>)>>,
     shots: Query<Entity, Or<(With<ShellPath>, With<ImpactMarker>)>>,
     mut commands: Commands,
 ) {
-    if !keys.just_pressed(KeyCode::KeyR) {
+    // `R` or the panel's Scene button; consume the flag on the frame it fires (see `clear_shots`).
+    let by_panel = requested.0;
+    if by_panel {
+        requested.0 = false;
+    }
+    if !(keys.just_pressed(KeyCode::KeyR) || by_panel) {
         return;
     }
     for entity in &shots {
@@ -992,14 +1085,16 @@ fn draw_consequence_gizmos(
     }
 }
 
-/// The static keybindings legend, the status line, and a small pool of floating shell labels.
+/// The slim keybindings legend (the direct-manipulation keys that survive alongside the egui panel)
+/// and a small pool of floating shell labels. Layer / shot / time / scene controls, and the time +
+/// shell-count readouts, all moved into the panel's Layers / Shot / Time / Telemetry / Scene sections.
 fn spawn_hud(mut commands: Commands) {
     commands.spawn((
         Text::new(
-            "WASD / Shift / Ctrl  fly\n\
-             LMB  fire    C  clear shots    R  reset world\n\
-             Space  freeze    Esc  pause + free cursor    Up/Down  slow-mo    T  real/demo time\n\
-             1-5  crew seats: tap source then target to swap occupants (re-tap cancels)",
+            "WASD / Shift / Ctrl  fly     LMB  fire     Esc  free cursor for the panel\n\
+             F1/F2/F3  cycle mesh / armor / component layers (also on the panel)\n\
+             1-5  crew seats: tap source then target to swap occupants (re-tap cancels)\n\
+             Everything else (shot / time / clear / reset) lives on the left panel.",
         ),
         TextFont {
             font_size: FontSize::Px(14.0),
@@ -1009,38 +1104,8 @@ fn spawn_hud(mut commands: Commands) {
         Node {
             position_type: PositionType::Absolute,
             top: Val::Px(8.0),
-            left: Val::Px(10.0),
-            ..default()
-        },
-    ));
-    commands.spawn((
-        StatusText,
-        Text::new(""),
-        TextFont {
-            font_size: FontSize::Px(14.0),
-            ..default()
-        },
-        TextColor(Color::srgb(0.6, 1.0, 0.7)),
-        Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(86.0),
-            left: Val::Px(10.0),
-            ..default()
-        },
-    ));
-    // Layer-state readout, top-right.
-    commands.spawn((
-        LayerStatusText,
-        Text::new(""),
-        TextFont {
-            font_size: FontSize::Px(14.0),
-            ..default()
-        },
-        TextColor(Color::srgb(0.85, 0.88, 0.95)),
-        Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(8.0),
-            right: Val::Px(12.0),
+            // Clear of the left panel (default width ~300 px).
+            left: Val::Px(330.0),
             ..default()
         },
     ));
@@ -1082,33 +1147,6 @@ fn spawn_hud(mut commands: Commands) {
         ));
     }
     // The component-HP and aggregate tank-status label pools live in the shared `hud` module.
-}
-
-/// Refresh the status line: current time scale (or "paused") and the live shell count.
-fn update_status(
-    time: Res<Time<Virtual>>,
-    mode: Res<ballistics::MarchMode>,
-    shells: Query<(), With<ShellReadout>>,
-    mut status: Query<&mut Text, With<StatusText>>,
-) {
-    let Ok(mut text) = status.single_mut() else {
-        return;
-    };
-    let rate = if time.is_paused() {
-        "paused".to_string()
-    } else {
-        format!("{:.3}x", time.relative_speed())
-    };
-    let mode = match *mode {
-        ballistics::MarchMode::Real => "real",
-        ballistics::MarchMode::Demo => "demo",
-    };
-    *text = Text::new(format!(
-        "time {} [{}]   shells {}",
-        rate,
-        mode,
-        shells.iter().count()
-    ));
 }
 
 /// Position each pooled label beside a live shell (reprojected to screen) and write its speed,

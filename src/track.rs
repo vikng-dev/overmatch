@@ -14,6 +14,14 @@ pub mod chain;
 pub mod drive;
 pub mod forces;
 pub mod oracle;
+// The marker-driven suspension/track model, promoted out of `track_sandbox` (mirrors `forces`):
+// `derive` = the universal laws (pure f32 math), `marker_model` = the glb marker read (the
+// `DerivedModel`), `rig_geom` = the assembled geometry contract. Crate-internal — only the sandbox
+// consumes them today.
+pub(crate) mod derive;
+pub(crate) mod envelope;
+pub(crate) mod marker_model;
+pub(crate) mod rig_geom;
 pub mod route;
 pub mod side;
 pub mod sim;

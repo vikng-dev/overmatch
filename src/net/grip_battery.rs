@@ -56,14 +56,13 @@ fn loop_points() -> Vec<Vec2> {
 
 fn force_params() -> ForceParams {
     ForceParams {
-        thickness: 0.05,
-        columns: [(-0.2, 1.0 / 6.0), (0.0, 2.0 / 3.0), (0.2, 1.0 / 6.0)],
+        face_offset: 0.025,
+        free_travel: 0.0,
         support_stiffness_per_m: 2.0e6,
         support_damping_per_m: 1.0e5,
         engage_depth: 0.002,
         probe_reach: 0.5,
         mu: 0.9,
-        lateral_ratio: 0.55,
         slip_saturation: 0.4,
         max_speed: 10.0,
         engine_power: 1.0e5,
@@ -79,7 +78,7 @@ struct ForceFrame {
     traction_force: Vec3,
     traction_torque: Vec3,
     belt_reaction: [f32; 2],
-    aggregate: [[f32; 2]; 2],
+    derived_grip: [[f32; 2]; 2],
 }
 
 impl ForceFrame {
@@ -105,9 +104,11 @@ fn side_contact(
     let points = loop_points();
     let (report, live) = contact_side(
         &SideInput {
+            travel: None,
             loop_pts: &points,
             count: LINKS,
             plane_x: if side == 0 { -0.5 } else { 0.5 },
+            columns: [(-0.2, 1.0 / 6.0), (0.0, 2.0 / 3.0), (0.2, 1.0 / 6.0)],
             command: 0.0,
         },
         SideState {
@@ -122,7 +123,7 @@ fn side_contact(
         |point| {
             linear_velocity + angular_velocity.cross(point - affine.transform_point3(Vec3::ZERO))
         },
-        Some(elements),
+        elements,
     );
     assert!(
         live,
@@ -152,7 +153,7 @@ fn force_frame(
             &mut field.sides[side],
         );
         frame.belt_reaction[side] = report.belt_reaction;
-        frame.aggregate[side] = [report.state.grip.x, report.state.grip.y];
+        frame.derived_grip[side] = [report.state.grip.x, report.state.grip.y];
         for contact in report.contacts {
             frame.traction_force += contact.traction;
             frame.traction_torque += (contact.point - center).cross(contact.traction);
@@ -226,8 +227,8 @@ fn assert_frame_bits_eq(left: ForceFrame, right: ForceFrame) {
         right.belt_reaction.map(f32::to_bits)
     );
     assert_eq!(
-        left.aggregate.map(|side| side.map(f32::to_bits)),
-        right.aggregate.map(|side| side.map(f32::to_bits))
+        left.derived_grip.map(|side| side.map(f32::to_bits)),
+        right.derived_grip.map(|side| side.map(f32::to_bits))
     );
 }
 
@@ -292,20 +293,20 @@ fn parked_divergence_wrench_anchor_and_checkpoint_close_hidden_couples_without_l
         &ground,
     );
 
-    let authority_legacy = TrackGrip::default();
-    let client_legacy = TrackGrip::default();
+    let authority_grip = TrackGrip::default();
+    let client_grip = TrackGrip::default();
     assert_eq!(
-        authority_legacy, client_legacy,
+        authority_grip, client_grip,
         "the injected four-float state matches"
     );
     assert!(
         authority_frame
-            .aggregate
+            .derived_grip
             .iter()
             .flatten()
             .all(|value| value.abs() < 0.01)
             && client_frame
-                .aggregate
+                .derived_grip
                 .iter()
                 .flatten()
                 .all(|value| value.abs() < 0.01),
@@ -523,7 +524,7 @@ impl MiniTank {
             self.angular_velocity,
             ground,
         );
-        self.grip.sides = frame.aggregate;
+        self.grip.sides = frame.derived_grip;
 
         // DERIVED battery-body constants. The integration order is explicit and identical on the
         // authority and replay paths; it exists only to make a one-tick-late grip install observable
@@ -943,7 +944,7 @@ fn join_in_progress_gate_seeds_authoritative_field_before_three_first_force_tick
         if case.name == "zero-aggregate-yaw-couple" {
             assert!(
                 authority_first
-                    .aggregate
+                    .derived_grip
                     .iter()
                     .flatten()
                     .all(|value| value.abs() < 0.01)

@@ -56,8 +56,7 @@ fn assert_tank_state_at_add(
         "TankCommand and TrackDrive must exist in the same insertion that adds Tank",
     );
     // The REV-14 fixed-size invariant at its source: every Tank is born with element slabs
-    // pre-sized `link_count * 3` — never an empty vector awaiting a first-tick resize
-    // (element-promotion-checklist.md §5 spawn fixture).
+    // pre-sized `link_count * 3` — never an empty vector awaiting a first-tick resize.
     let elements = elements.expect("TrackGripElements must exist in the same insertion as Tank");
     let expected = blueprint
         .expect("the blueprint bakes at Startup, before any Tank can spawn")
@@ -382,18 +381,12 @@ fn sim_boots_and_drives_headless() {
     );
 }
 
-/// One scripted headless drive for the element-gate proof: boot the sim (the headless equivalent
+/// One scripted headless drive for the element-law proof: boot the sim (the headless equivalent
 /// of the `--offline` composition — [`headless_app`] mounts physics + `SimPlugin` + the SP duel
-/// spawn, exactly what `GamePlugin` composes minus presentation), optionally latch
-/// `ElementGripFeelTest`, settle, hold full throttle for ~4 sim-seconds, and return
-/// `(horizontal metres moved, total element strain in metres)`.
-fn element_gate_run(feel: bool) -> (f32, f32) {
+/// spawn, exactly what `GamePlugin` composes minus presentation), settle, hold full throttle for
+/// ~4 sim-seconds, and return `(horizontal metres moved, total element strain in metres)`.
+fn element_gate_run() -> (f32, f32) {
     let mut app = booted_sim();
-    if feel {
-        // The offline latch, exactly as `run_offline` inserts it: present from before the
-        // first sim tick, never toggled.
-        app.init_resource::<crate::track::sim::ElementGripFeelTest>();
-    }
 
     // Start the exact fixed clock and let the belt contacts ground and settle (the
     // `sim_boots_and_drives_headless` scaffold).
@@ -450,39 +443,23 @@ fn element_gate_run(feel: bool) -> (f32, f32) {
     (moved, strain)
 }
 
-/// Phase-2 offline gate proof (element-promotion-checklist.md Q1). Two identical scripted drives:
-///   * WITH `ElementGripFeelTest` latched (the `--offline` composition's gate): the tank drives
-///     AND the per-element law actually engages — spawn-sized `TrackGripElements` strain becomes
-///     nonzero.
-///   * WITHOUT the resource (every MP-shaped composition): identical ticks, element strain stays
-///     EXACTLY zero — the gate holds, and the unregistered element state provably cannot be
-///     touched outside the offline route.
+/// The element law is THE traction law — a scripted drive must both move the tank and put
+/// real strain into the spawn-sized `TrackGripElements` slabs (a zero field would mean the
+/// slabs were mis-sized and the invariant early-out silently skipped traction).
 ///
-/// The spawn-sizing half of the checklist fixture lives in [`assert_tank_state_at_add`], which
-/// every boot in this file runs.
+/// The spawn-sizing half of the fixture lives in [`assert_tank_state_at_add`], which every
+/// boot in this file runs.
 #[test]
-fn offline_element_gate_engages_only_under_feel_resource() {
-    let (moved, strain) = element_gate_run(true);
+fn the_element_law_drives_and_strains_on_a_scripted_drive() {
+    let (moved, strain) = element_gate_run();
     assert!(
         moved > 2.0,
-        "the element regime should still drive the tank forward; moved {moved:.2} m"
+        "the element regime should drive the tank forward; moved {moved:.2} m"
     );
     assert!(
         strain > 0.0,
-        "with ElementGripFeelTest present the element law must engage — strain stayed zero \
-         (the gate never passed Some(&mut GripElements) through, or the slabs were mis-sized \
-         and the invariant early-out silently skipped the regime)"
-    );
-
-    let (moved, strain) = element_gate_run(false);
-    assert!(
-        moved > 2.0,
-        "the aggregate regime should drive the tank forward; moved {moved:.2} m"
-    );
-    assert_eq!(
-        strain, 0.0,
-        "without ElementGripFeelTest the element slabs must stay EXACTLY zero — something \
-         outside the offline gate wrote element state"
+        "the element law must engage on a driving tank — strain stayed zero (mis-sized slabs \
+         and the invariant early-out silently skipped the regime?)"
     );
 }
 
@@ -816,12 +793,11 @@ fn a_replica_coax_shell_clears_the_shooters_mantlet() {
 // with `TransmissionFeelTest` set per case. They are permanent `cargo test` members: the sandbox
 // gates remain, but can never again be the only physics evidence.
 
-/// [`booted_sim`] + the two offline feel gates exactly as `run_offline` mounts them
-/// (`ElementGripFeelTest` latched, `TransmissionFeelTest(mode)`), clock started, tracks
-/// grounded and settled. Returns the sim and the controlled Tiger.
+/// [`booted_sim`] + the offline transmission dial exactly as `run_offline` mounts it
+/// (`TransmissionFeelTest(mode)`), clock started, tracks grounded and settled. Returns the
+/// sim and the controlled Tiger.
 fn booted_offline_sim(mode: crate::track::transmission::TransmissionMode) -> (BootedSim, Entity) {
     let mut app = booted_sim();
-    app.init_resource::<crate::track::sim::ElementGripFeelTest>();
     app.insert_resource(crate::track::sim::TransmissionFeelTest(mode));
     start_fixed_clock(&mut app);
     let mut grounded = 0;

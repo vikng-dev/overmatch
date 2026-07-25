@@ -1638,13 +1638,13 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_track_grip_is_absent_from_the_wire() {
+    fn derived_track_grip_is_absent_from_the_wire() {
         let src = read_source("src/net/protocol.rs");
         let stripped = strip_comments(&src);
         let registrations = plugin_body(&stripped);
         assert!(
             !registrations.contains("component::<TrackGrip>"),
-            "REV-15 aggregate TrackGrip telemetry must not replicate, predict, or trigger rollback"
+            "TrackGrip is derived element telemetry — it must not replicate, predict, or trigger rollback (REV-15)"
         );
         assert!(!WIRE_SURFACE.contains(&"TrackGrip"));
         assert!(

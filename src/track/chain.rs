@@ -41,8 +41,14 @@ pub struct ChainParams {
     /// Bending regularizer stiffness (N·m²) relative to the route's own curvature — SMALL: a
     /// pinned track has no bending spring away from its stops.
     pub bend_stiffness: f32,
-    /// Hard articulation stop between consecutive links (rad).
-    pub max_link_angle: f32,
+    // The hard articulation stops between consecutive links (rad), ASYMMETRIC and both POSITIVE
+    // magnitudes — the shoe's guide horns and its ground-side structure are different features
+    // that meet at different angles. Vehicle data (`track.link_angle`), never a solver knob; the
+    // solver's stop (c) is where the sign convention that orients them lives.
+    /// Folding TOWARD the wheels: the WRAP direction, what every running-gear circle costs.
+    pub link_angle_inward: f32,
+    /// Folding AWAY from them: the return run's sag, a shoe cresting a rock.
+    pub link_angle_outward: f32,
     /// Route-normal stored-velocity guardrail (m/s); tangential caps at max(8, |belt| + 5).
     pub max_normal_speed: f32,
     /// Route-tube half-widths (m): outside the loop / inside it. Both must stay below half the
@@ -54,8 +60,6 @@ pub struct ChainParams {
     pub rebase_window: f32,
     /// Track plate thickness (m): pin line → outer face offset for terrain probes.
     pub thickness: f32,
-    /// Lateral probe stations across the shoe (m from centerline) — the physics collocation.
-    pub lateral_stations: [f32; 3],
     /// Terrain probe reach (m).
     pub probe_reach: f32,
 }
@@ -68,6 +72,11 @@ pub struct ChainSideInput<'a> {
     pub phase: f32,
     /// Lateral offset (m) of this side's plane in hull-local space.
     pub plane_x: f32,
+    /// Lateral probe stations across the shoe: signed hull-x offsets from THIS side's plane
+    /// (the physics collocation columns — `SideInput::columns` without the shares), applied
+    /// along the hull's lateral axis. Per-side and signed because the shoe is not centred
+    /// on its pins.
+    pub lateral_stations: [f32; 3],
 }
 
 /// Per-frame inputs shared by both sides.
@@ -301,17 +310,17 @@ impl ChainState {
                         let outw = affine
                             .transform_vector3(Vec3::new(0.0, out2.y, out2.x))
                             .normalize_or_zero();
-                        let axis = affine
-                            .transform_vector3(Vec3::new(0.0, tan.y, tan.x))
-                            .normalize_or_zero();
-                        let lat = outw.cross(axis);
+                        // Station offsets are hull-x measurements (shoe faces relative to
+                        // the pin plane), so they shift along the hull's lateral axis —
+                        // never a per-segment cross product, whose sign depends on winding.
+                        let lat_axis = affine.transform_vector3(Vec3::X);
                         let face2 = out2 * (params.thickness / 2.0);
                         let mut d = f32::NEG_INFINITY;
                         for s2 in [a + face2, (a + b) / 2.0 + face2, b + face2] {
                             let w = affine.transform_point3(Vec3::new(plane_x, s2.y, s2.x));
-                            for offset in params.lateral_stations {
+                            for offset in side.lateral_stations {
                                 d = d.max(oracle.depth_along(
-                                    w + lat * offset,
+                                    w + lat_axis * offset,
                                     outw,
                                     params.probe_reach,
                                 ));
@@ -441,7 +450,18 @@ impl ChainState {
                         p[i] += g_mid * (w_inv * dl);
                         p[ip] += g_next * (w_inv * dl);
                     }
-                    // (c) Signed hinge stop — the hard link-geometry limit.
+                    // (c) Signed hinge stop — the hard link-geometry limit, ASYMMETRIC.
+                    //
+                    // THE SIGN CONVENTION, derived rather than assumed: the loop runs CCW in the
+                    // side plane (`route`'s module doc, and the outward normal `(tan.y, −tan.x)`
+                    // that only names the outside for a CCW traversal). θ below is the turn from
+                    // the incoming edge to the outgoing one, POSITIVE for a left turn — and on a
+                    // CCW loop the left is the interior, where the wheels are. So θ > 0 is folding
+                    // INWARD (the wrap: every wheel arc bends this way, which is why `turning` is
+                    // positive on every `Arc`), and θ < 0 is folding OUTWARD — the return run's
+                    // sag and a shoe cresting a bump, whose centres of curvature sit on the
+                    // ground side. Hence the clamp window `[−outward, +inward]`, built from two
+                    // POSITIVE authored magnitudes so neither field ever carries the sign.
                     for i in 0..n {
                         let (im, ip) = ((i + n - 1) % n, (i + 1) % n);
                         let e0 = p[i] - p[im];
@@ -451,7 +471,8 @@ impl ChainState {
                             continue;
                         }
                         let theta = e0.perp_dot(e1).atan2(e0.dot(e1));
-                        let c = theta - theta.clamp(-params.max_link_angle, params.max_link_angle);
+                        let c = theta
+                            - theta.clamp(-params.link_angle_outward, params.link_angle_inward);
                         if c == 0.0 {
                             continue;
                         }

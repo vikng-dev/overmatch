@@ -16,8 +16,8 @@
 //! Record types (one JSON object per line):
 //! - `meta` — the scenario + vehicle constants.
 //! - `k` — per fixed tick: hull pose/velocity, belt speed/phase, and every contact (hull-local
-//!   position, load, slip) — the physics on one clock. The `grip=elem` runs add an `e` line per
-//!   tick (strain telemetry).
+//!   position, load, slip) — the physics on one clock. Each tick also carries an `e` line (the
+//!   per-element strain telemetry).
 
 use std::fs::File;
 use std::io::{BufWriter, Write as _};
@@ -45,12 +45,8 @@ pub(super) struct Harness {
     /// `view=chain` runs the route-chain view instead of the kinematic wrap (the step-22 view
     /// A/B, scripted).
     chain_view: bool,
-    /// `grip=off` disables the static-friction regime (the parity switch — kinetic-only
-    /// law, bit-identical to the pre-grip baseline); `grip=elem` runs the per-element
-    /// isotropic shear prototype; default is the shipped aggregate regime.
-    grip: GripMode,
-    /// `trans=governor|hybrid|l600` selects the drivetrain adapter (phase 2.5). Default
-    /// governor — the parity mode; a merge-base build ignores the key entirely.
+    /// `trans=governor|hybrid|l600` selects the drivetrain adapter (phase 2.5). Default governor;
+    /// the meta line omits the `trans` field for governor so its captures diff cleanly.
     trans: crate::track::transmission::TransmissionMode,
     /// `pose=runway`: spawn on the flat runway/turn pad facing +X (top-speed and turning
     /// gates — the lane is too obstacle-dense for either).
@@ -71,7 +67,6 @@ impl Default for Harness {
             throttle2: 0.0,
             steer2: 0.0,
             chain_view: false,
-            grip: GripMode::Aggregate,
             trans: crate::track::transmission::TransmissionMode::Governor,
             runway: false,
             out: "/tmp/track_harness.jsonl".into(),
@@ -153,18 +148,6 @@ fn parse_spec(spec: &str) -> Result<Harness, String> {
                     }
                 };
             }
-            "grip" => {
-                h.grip = match value {
-                    "off" => GripMode::Off,
-                    "aggregate" => GripMode::Aggregate,
-                    "elem" | "elements" => GripMode::Elements,
-                    _ => {
-                        return Err(format!(
-                            "unknown value `{value}` for `grip`; expected off, aggregate, or elem"
-                        ));
-                    }
-                };
-            }
             "trans" => {
                 use crate::track::transmission::TransmissionMode;
                 h.trans = match value {
@@ -200,18 +183,20 @@ fn arr(vals: impl IntoIterator<Item = f32>) -> String {
     format!("[{}]", inner.join(","))
 }
 
-/// Apply the scenario (view, spawn) and write the meta record.
+/// Apply the scenario (view, spawn) and write the meta record. Runs in `Update` right after the
+/// deferred [`build_rig`](super::build_rig) — the rig it poses does not exist at `Startup` any
+/// more — and exactly once: writing `HarnessLog` is its own latch.
 pub(super) fn harness_setup(
     mut commands: Commands,
     harness: Res<Harness>,
-    mut grip_switch: ResMut<GripSwitch>,
     mut trans_switch: ResMut<TransSwitch>,
     fixed_time: Res<Time<Fixed>>,
     mut view: ResMut<TrackViewMode>,
+    geom: Res<RigGeom>,
+    rig: Res<RigSpec>,
     hull: Single<(&mut Transform, &mut LinearVelocity, &mut AngularVelocity), With<Hull>>,
 ) {
     view.kinematic = !harness.chain_view;
-    grip_switch.0 = harness.grip;
     trans_switch.0 = harness.trans;
     let (mut transform, mut lin, mut ang) = hull.into_inner();
     *transform = match harness.pose {
@@ -222,23 +207,27 @@ pub(super) fn harness_setup(
             // from the flat-lane rest pose, and spawning intersected launches the penalty
             // spring (measured: +4.3 m/s pop). A short drop settles cleanly in warmup.
             let (top, tilt) = slope_pad_pose();
-            Transform::from_translation(top + tilt * Vec3::Y * (HULL_REST_Y + 0.12))
+            Transform::from_translation(top + tilt * Vec3::Y * (geom.hull_rest_y + 0.12))
                 .with_rotation(tilt * Quat::from_rotation_y(yaw))
         }
         // Runway pad: at rest height facing +X down the 400 m axis (the −Z hull forward
         // yawed −90°).
-        None if harness.runway => Transform::from_xyz(RUNWAY_SPAWN.x, HULL_REST_Y, RUNWAY_SPAWN.z)
-            .with_rotation(Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2)),
-        None => Transform::from_xyz(0.0, HULL_REST_Y, harness.z),
+        None if harness.runway => {
+            Transform::from_xyz(RUNWAY_SPAWN.x, geom.hull_rest_y, RUNWAY_SPAWN.z)
+                .with_rotation(Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2))
+        }
+        None => Transform::from_xyz(0.0, geom.hull_rest_y, harness.z),
     };
     lin.0 = Vec3::ZERO;
     ang.0 = Vec3::ZERO;
 
     let file = File::create(&harness.out).expect("harness out path must be writable");
     let mut writer = BufWriter::new(file);
-    // The trans field is APPENDED only for the regenerative modes: a `trans=governor` capture
-    // must stay byte-identical to a merge-base build's (which ignores the key) — the phase-2.5
-    // parity gate diffs the whole file.
+    // The trans field is APPENDED only for the regenerative modes, so a `trans=governor` capture's
+    // meta line carries no trans key and its captures diff cleanly against each other.
+    // Vehicle constants in the meta line come off the derived rig now, not from consts — an
+    // analyzer reading a capture still gets the exact geometry that produced it.
+    let (half_tread, hull_rest_y, thickness) = (geom.plane_x, geom.hull_rest_y, geom.thickness);
     let trans_meta = match harness.trans {
         crate::track::transmission::TransmissionMode::Governor => "",
         crate::track::transmission::TransmissionMode::Hybrid => ",\"trans\":\"hybrid\"",
@@ -249,7 +238,7 @@ pub(super) fn harness_setup(
         // `"model":4` is pinned: the sandbox hosts only the promoted field-belt model, and the
         // field stays for schema stability with existing analyzers. `schema:2` = raw/shaped
         // commands, quaternion + full angular velocity, per-side contact arrays + aggregates.
-        "{{\"t\":\"meta\",\"model\":4,\"schema\":2,\"view\":\"{}\",\"pose\":\"{}\",\"slope_deg\":{},\"z\":{:.3},\"warmup\":{},\"ticks\":{},\"throttle\":{:.3},\"steer\":{:.3},\"t2\":{},\"throttle2\":{:.3},\"steer2\":{:.3},\"slew\":{},\"fixed_dt\":{},\"grip\":{},\"grip_mode\":\"{}\",\"half_tread\":{TRACK_HALF_WIDTH},\"mu\":{MU},\"lateral_ratio\":{LATERAL_GRIP_RATIO},\"slip_saturation\":{SLIP_SATURATION},\"weight\":{:.0},\"hull_rest_y\":{HULL_REST_Y},\"thickness\":{TRACK_THICKNESS}{trans_meta}}}",
+        "{{\"t\":\"meta\",\"model\":4,\"schema\":2,\"view\":\"{}\",\"pose\":\"{}\",\"slope_deg\":{},\"z\":{:.3},\"warmup\":{},\"ticks\":{},\"throttle\":{:.3},\"steer\":{:.3},\"t2\":{},\"throttle2\":{:.3},\"steer2\":{:.3},\"slew\":{},\"fixed_dt\":{},\"half_tread\":{half_tread},\"mu\":{MU},\"slip_saturation\":{SLIP_SATURATION},\"weight\":{:.0},\"hull_rest_y\":{hull_rest_y},\"thickness\":{thickness}{trans_meta}}}",
         if harness.chain_view { "chain" } else { "wrap" },
         match harness.pose {
             None if harness.runway => "runway".into(),
@@ -271,13 +260,7 @@ pub(super) fn harness_setup(
         harness.steer2,
         crate::track::drive::DRIVE_SLEW_PER_SECOND,
         fixed_time.timestep().as_secs_f64(),
-        harness.grip != GripMode::Off,
-        match harness.grip {
-            GripMode::Off => "off",
-            GripMode::Aggregate => "aggregate",
-            GripMode::Elements => "elements",
-        },
-        HULL_MASS * 9.81,
+        rig.weight_n,
     )
     .unwrap();
 
@@ -292,12 +275,9 @@ pub(super) fn harness_setup(
 /// the manual-duration clock). It overrides whatever `read_drive_input` wrote last frame.
 pub(super) fn harness_drive(
     harness: Res<Harness>,
-    log: Option<Res<HarnessLog>>,
+    log: Res<HarnessLog>,
     mut input: ResMut<RawDriveInput>,
 ) {
-    let Some(log) = log else {
-        return;
-    };
     (input.0.throttle, input.0.steer) = if log.tick < harness.warmup {
         (0.0, 0.0)
     } else if log.tick >= harness.t2 {
@@ -310,13 +290,12 @@ pub(super) fn harness_drive(
 /// Record one `k` line per fixed tick (after the model force systems), then exit when done.
 pub(super) fn harness_record(
     harness: Res<Harness>,
-    log: Option<ResMut<HarnessLog>>,
+    mut log: ResMut<HarnessLog>,
     hull: Single<(&Transform, &LinearVelocity, &AngularVelocity), With<Hull>>,
     raw: Res<RawDriveInput>,
     shaped: Res<ShapedDrive>,
     dynamics: Res<SideDynamics>,
     grip: Res<BeltGrip>,
-    grip_mode: Res<GripSwitch>,
     grip_elements: Res<BeltGripElements>,
     trans_telemetry: Res<TransTelemetry>,
     contacts: Res<BeltContacts>,
@@ -324,9 +303,6 @@ pub(super) fn harness_record(
     phase: Res<BeltPhase>,
     mut exit: MessageWriter<AppExit>,
 ) {
-    let Some(mut log) = log else {
-        return;
-    };
     let (transform, lin, ang) = *hull;
     let (yaw, pitch, _) = transform.rotation.to_euler(EulerRot::YXZ);
     // Body-frame yaw rate: world av.y lies on slopes (codex parts-1/2 review #3).
@@ -406,28 +382,26 @@ pub(super) fn harness_record(
         side_rows(Side::Right),
     )
     .unwrap();
-    // Element-regime strain telemetry (`e` line, `grip=elem` runs only — `k` lines stay
-    // byte-stable for the parity gates): per side, the count of elements holding strain and
-    // Σ|j| / max|j| (m). Contact-loss erasure shows as a `jsum` sawtooth with no hull motion
-    // — the parking-flutter instrument (netcode review defect 1).
-    if grip_mode.0 == GripMode::Elements {
-        let e_side = |side: Side| -> (usize, f32, f32) {
-            let js = &grip_elements.0.get(side).strain;
-            let n = js.iter().filter(|j| **j != Vec3::ZERO).count();
-            let sum: f32 = js.iter().map(|j| j.length()).sum();
-            let max = js.iter().map(|j| j.length()).fold(0.0f32, f32::max);
-            (n, sum, max)
-        };
-        let (ln, ls, lm) = e_side(Side::Left);
-        let (rn, rs, rm) = e_side(Side::Right);
-        writeln!(
-            log.writer,
-            "{{\"t\":\"e\",\"k\":{k},\"n\":[{ln},{rn}],\"jsum\":[{ls:.6},{rs:.6}],\"jmax\":[{lm:.6},{rm:.6}]}}"
-        )
-        .unwrap();
-    }
+    // Per-element strain telemetry (`e` line): per side, the count of elements holding strain and
+    // Σ|j| / max|j| (m). A separate line from `k`, so the `k` lines stay byte-stable for the
+    // capture-diff gates. Contact-loss erasure shows as a `jsum` sawtooth with no hull motion — the
+    // parking-flutter instrument (netcode review defect 1).
+    let e_side = |side: Side| -> (usize, f32, f32) {
+        let js = &grip_elements.0.get(side).strain;
+        let n = js.iter().filter(|j| **j != Vec3::ZERO).count();
+        let sum: f32 = js.iter().map(|j| j.length()).sum();
+        let max = js.iter().map(|j| j.length()).fold(0.0f32, f32::max);
+        (n, sum, max)
+    };
+    let (ln, ls, lm) = e_side(Side::Left);
+    let (rn, rs, rm) = e_side(Side::Right);
+    writeln!(
+        log.writer,
+        "{{\"t\":\"e\",\"k\":{k},\"n\":[{ln},{rn}],\"jsum\":[{ls:.6},{rs:.6}],\"jmax\":[{lm:.6},{rm:.6}]}}"
+    )
+    .unwrap();
     // Transmission telemetry (`tr` line, regenerative modes only — governor `k` lines stay
-    // byte-stable for the parity gates): operating point + the joint solve's outputs.
+    // byte-stable for the capture-diff gates): operating point + the joint solve's outputs.
     if let Some(t) = &trans_telemetry.0 {
         writeln!(
             log.writer,
@@ -477,7 +451,7 @@ mod tests {
     fn valid_scenario_keeps_the_previous_parse_semantics() {
         let parsed = parse_spec(
             "pose=slope_left,z=-5.5,warmup=12,ticks=34,throttle=0.25,steer=-0.4,\
-             t2=20,throttle2=-1,steer2=0.75,view=chain,grip=elements,\
+             t2=20,throttle2=-1,steer2=0.75,view=chain,\
              trans=fixed_radii,out=/tmp/capture.jsonl",
         )
         .unwrap();
@@ -494,7 +468,6 @@ mod tests {
                 throttle2: -1.0,
                 steer2: 0.75,
                 chain_view: true,
-                grip: GripMode::Elements,
                 trans: crate::track::transmission::TransmissionMode::FixedRadii,
                 runway: false,
                 out: "/tmp/capture.jsonl".into(),

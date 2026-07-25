@@ -4,6 +4,24 @@ Living command post for the continuous-track slice (physics + procedural animati
 work lands so a fresh session / post-compaction context can pick up without re-deriving. Keep it
 terse and current; move settled detail into ADRs when a step stabilizes.
 
+## Status — the track model is SETTLED (2026-07)
+
+The slice shipped; the model is settled. The dated step log further down is the historical
+derivation trail (git is the authority) — anything there framed as an open "NEXT" toward
+promotion / REV-14 / aggregate retirement is DONE; read it as history, not the live frontier.
+The live contracts are the ADRs:
+
+- **Grip** = per-element isotropic shear strain — the per-contact cap is a **circle** at μ·load
+  in every direction (isotropic — there is no lateral-share knob), reconciled by wrench anchor + exact checkpoints:
+  [[0027-element-grip-netcode]] (supersedes the aggregate single-resultant strain path of
+  [[0026-static-friction-strain-regime]]; the summed `TrackGrip` survives only as derived
+  telemetry, off the wire).
+- **Support** = the contact-envelope calibration derived from `SuspensionSpec` (ride frequency,
+  damping ratio, bump-stop). The authored `support:` stiffness/damping pad is **not** the live
+  law — only its `engage` ramp survives. See `architecture.md`.
+- **Drive / transmission** = belt-force locomotion [[0025-belt-force-locomotion]] plus the
+  declared transmission (`transmission-design.md`).
+
 ## North star
 
 A **belt/envelope-based** track model that replaces "16 points under the hubs" with continuous
@@ -84,7 +102,7 @@ both.
   Free-fly cam (WASD/Shift/Ctrl + mouse). `Esc` releases cursor + pauses Avian time (for screenshots).
   - Fixed after first run: removed a stray second camera that re-rendered the scene (the "split
     screen"); added the `Esc` pause.
-  - Controls: `cargo run --bin track_sandbox`; WASD move, Shift/Ctrl up/down, mouse look, `Esc`
+  - Controls: `cargo sandbox`; WASD move, Shift/Ctrl up/down, mouse look, `Esc`
     pause/screenshot.
 - 2026-07-01 — **Step 3a landed** (green: fmt/clippy/build; clean launch, no panics/mass warnings).
   Reordered ahead of the sag refinement (step 2) to hit the physics thesis first (user is physics-
