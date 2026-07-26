@@ -104,7 +104,8 @@ fn side_contact(
     let points = loop_points();
     let (report, live) = contact_side(
         &SideInput {
-            travel: None,
+            // Empty knots: a rest-anchored zero-droop pad (this battery's free_travel is 0).
+            travel: crate::track::forces::TravelField { knots: &[] },
             loop_pts: &points,
             count: LINKS,
             plane_x: if side == 0 { -0.5 } else { 0.5 },

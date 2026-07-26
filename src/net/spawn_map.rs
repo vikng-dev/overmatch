@@ -103,14 +103,17 @@ pub fn plugin(app: &mut App) {
         .add_systems(
             Update,
             (
-                // Declare presence with every other overlay owner, so the cursor owner and the
-                // one-scrim reconciler read one settled generation of the set.
-                toggle_spawn_map.in_set(overlay::OverlaySet::Declare),
+                // The `M` toggle is a GATED one — it reads the set to decide whether the map may
+                // open — so it runs in `OverlaySet::Toggle`, after every state-driven declarer has
+                // written this frame. Declaring it alongside them would let `M` pressed on the same
+                // frame a connect or death screen appears read a set that did not have that overlay
+                // in it yet, pass `may_open`, and latch an invisible map.
+                toggle_spawn_map.in_set(overlay::OverlaySet::Toggle),
                 // Everything below reads the reconciled set (`draws_scrim`), so a click can never
                 // land through a menu drawn on top of the map.
                 (size_spawn_map, click_spawn_map, place_markers)
                     .chain()
-                    .after(overlay::OverlaySet::Declare),
+                    .after(overlay::OverlaySet::Toggle),
             ),
         );
 }
@@ -128,9 +131,12 @@ fn toggle_spawn_map(
         // CLOSING is unconditional; OPENING requires that nothing latched outranks the map
         // ([`overlay::may_open`]). Without that gate, `M` pressed under the menu or the connect
         // screen latched a map the one-scrim rule immediately hid — invisible, yet input-blocking,
-        // and it seized the cursor the instant the higher overlay closed. Like `esc_toggle`, this
-        // reads the set as reconciled so far this frame (worst case, the previous frame's
-        // generation): the declaration below is absolute, so any read-order skew self-heals.
+        // and it seized the cursor the instant the higher overlay closed.
+        //
+        // The gate reads the set, which is why this system lives in `OverlaySet::Toggle` rather than
+        // with the declarers: the OPEN decision is a one-shot latch held in `map.open`, so a read of a
+        // half-written generation does NOT self-heal — the absolute declaration below faithfully
+        // re-asserts the wrong latch every frame after.
         map.open = !map.open && overlay::may_open(&overlays, Overlay::SpawnMap);
     }
     overlays.declare(Overlay::SpawnMap, map.open);
@@ -145,7 +151,7 @@ fn size_spawn_map(
     mut panel: Single<(&mut Node, &mut SpawnMapPanel)>,
 ) {
     // Writing `Node` marks it changed and re-lays-out the tree, so a closed map costs nothing. The
-    // toggle declares in `OverlaySet::Declare`, before this, so the opening frame is already sized.
+    // toggle declares in `OverlaySet::Toggle`, before this, so the opening frame is already sized.
     if !map.open {
         return;
     }
@@ -528,6 +534,80 @@ mod tests {
         assert!(
             (panel_origin - (window - edge) * 0.5).abs() < 1e-4,
             "panel origin {panel_origin} must equal the plain centred offset",
+        );
+    }
+
+    /// Whether the fixture's state-driven owner latches the connect screen this frame — the stand-in
+    /// for `net::client::update_connect_status` reading the live link.
+    #[derive(Resource)]
+    struct LinkDown(bool);
+
+    fn declare_connect_status(link: Res<LinkDown>, mut overlays: ResMut<Overlays>) {
+        overlays.declare(Overlay::ConnectStatus, link.0);
+    }
+
+    /// The same-frame declare race on the `M` gate, scheduled rather than pure — `may_open`'s own unit
+    /// tests prove the rule, this proves the toggle READS a settled set.
+    ///
+    /// The declarer is registered in `OverlaySet::Declare` and, deliberately, LAST: absent the
+    /// `Declare → Toggle` chain the single-threaded executor would run `toggle_spawn_map` first,
+    /// against a generation with no connect screen in it, and `may_open` would wave the map through.
+    ///
+    /// Phase 2 is why the race matters and why an absolute declaration does not save us: the OPEN
+    /// decision is a one-shot latch in `SpawnMap::open`, so a map that won the race would be re-declared
+    /// every frame afterwards and surface — input-blocking, cursor-grabbing — the instant the connect
+    /// screen cleared, over a player who never saw a map.
+    #[test]
+    fn m_cannot_latch_a_map_under_an_overlay_declared_the_same_frame() {
+        let mut app = App::new();
+        app.init_resource::<Overlays>();
+        app.init_resource::<SpawnMap>();
+        app.init_resource::<ButtonInput<KeyCode>>();
+        app.insert_resource(LinkDown(true));
+        app.configure_sets(
+            Update,
+            (
+                overlay::OverlaySet::Declare,
+                overlay::OverlaySet::Toggle,
+                overlay::OverlaySet::Cursor,
+            )
+                .chain(),
+        );
+        app.add_systems(
+            Update,
+            (
+                toggle_spawn_map.in_set(overlay::OverlaySet::Toggle),
+                declare_connect_status.in_set(overlay::OverlaySet::Declare),
+            ),
+        );
+        app.edit_schedule(Update, |schedule| {
+            schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
+        });
+
+        // Phase 1: `M` on the very frame the connect screen is declared.
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(SPAWN_MAP_KEY);
+        app.update();
+        assert!(
+            !app.world().resource::<SpawnMap>().open,
+            "M pressed the frame a connect screen appears must latch no map",
+        );
+
+        // Phase 2: the link comes back and the connect screen withdraws. Nothing may be left latched.
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .clear();
+        app.world_mut().resource_mut::<LinkDown>().0 = false;
+        app.update();
+        assert!(
+            !app.world().resource::<SpawnMap>().open,
+            "no map may surface once the connect screen clears",
+        );
+        assert!(
+            !overlay::input_blocked(app.world().resource::<Overlays>(), true),
+            "with nothing latched the cursor is the player's again — an invisible map would have \
+             kept input blocked here",
         );
     }
 

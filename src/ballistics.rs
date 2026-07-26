@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use avian3d::prelude::{Forces, LayerMask, SpatialQuery, SpatialQueryFilter};
+use avian3d::prelude::{Forces, SpatialQuery, SpatialQueryFilter};
 use bevy::ecs::system::SystemParam;
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
@@ -11,6 +11,7 @@ use serde_json::json;
 
 use crate::damage::{DamageConsequences, VolumeOf, hit_ancestor};
 use crate::state::{GameplaySet, SimPhase};
+use crate::terrain_grid::HeightGrid;
 use crate::{ClientReplica, Layer, PredictedPresent, Replaying, ShotId};
 
 /// Gravity applied to shells each fixed tick (m/s²).
@@ -229,6 +230,71 @@ fn not_own_volume(
     // Ownership sits on the hit's ancestry (`hit_ancestor`, the shared hierarchy-resolution rule) —
     // the same walk `aim_distance` makes for the aim ray.
     hit_ancestor(entity, owners, parents).is_none_or(|(_, owner)| owner.tank() != shooter)
+}
+
+/// One first-surface contact along a march segment (see [`cast_march_segment`]).
+enum SegmentHit {
+    /// A parry hit on the `Armor` layer — real, entity-addressed geometry the penetration
+    /// resolution then probes (thickness/exit casts, ancestry, HP).
+    Armor(avian3d::prelude::RayHitData),
+    /// The ground.
+    Terrain { distance: f32, normal: Vec3 },
+}
+
+/// First surface along one march segment: armor and terrain probed SEPARATELY, nearer wins.
+///
+/// Armor KEEPS the Avian/parry spatial query — tank volumes are posed, entity-owned geometry the
+/// march must then keep probing (thickness, exit faces, ancestry, HP). Terrain, though, comes
+/// from [`HeightGrid::cast_ray`] whenever the heightmap world is live: parry's raycast float
+/// path is not one the deterministic sim may depend on — parry ≤ 0.29's raycasts were not
+/// cross-platform reproducible (SIMD dot-product non-associativity; parry 0.29 changelog) — and
+/// we cannot pin a third-party float path, while the ground is the one world-spanning surface
+/// every shell crosses. The exact caster reads the SAME triangular surface the collider carries
+/// (the ONE-SURFACE invariant, `terrain_grid` module doc), so within float rounding the hit is
+/// unchanged; the arithmetic is now ours to keep bit-stable. The flat fallback world (slab +
+/// authored test course, dev-only — no [`HeightGrid`] resource) keeps the parry terrain cast.
+///
+/// Splitting the old single `Terrain | Armor` cast into two and folding by min preserves its
+/// semantics exactly: parry returned the nearest hit across both layers, and the predicate was
+/// vacuous on terrain (nothing on the `Terrain` layer has `VolumeOf` ancestry).
+fn cast_march_segment(
+    spatial: &SpatialQuery,
+    grid: Option<&HeightGrid>,
+    origin: Vec3,
+    dir: Dir3,
+    max: f32,
+    not_own: &dyn Fn(Entity) -> bool,
+) -> Option<SegmentHit> {
+    let armor = spatial.cast_ray_predicate(
+        origin,
+        dir,
+        max,
+        true,
+        &SpatialQueryFilter::from_mask(Layer::Armor),
+        not_own,
+    );
+    let terrain: Option<(f32, Vec3)> = match grid {
+        Some(grid) => grid
+            .cast_ray(origin, Vec3::from(dir), max)
+            .map(|hit| (hit.t, hit.normal)),
+        None => spatial
+            .cast_ray(
+                origin,
+                dir,
+                max,
+                true,
+                &SpatialQueryFilter::from_mask(Layer::Terrain),
+            )
+            .map(|hit| (hit.distance, hit.normal)),
+    };
+    match (armor, terrain) {
+        (Some(armor), Some((distance, normal))) if distance < armor.distance => {
+            Some(SegmentHit::Terrain { distance, normal })
+        }
+        (Some(armor), _) => Some(SegmentHit::Armor(armor)),
+        (None, Some((distance, normal))) => Some(SegmentHit::Terrain { distance, normal }),
+        (None, None) => None,
+    }
 }
 
 /// Whether a spent shell freezes in place — keeping its stuck mesh, tracer, and penetration marks
@@ -943,6 +1009,10 @@ fn on_fire_shell(
     // would otherwise report "already landed" 1 cm out and swallow the shell whole.
     owners: Query<&VolumeOf>,
     parents: Query<&ChildOf>,
+    // The heightmap ground, when the heightmap world is live: catch-up terrain contacts read the
+    // exact deterministic caster, not parry (see [`cast_march_segment`]). Absent on the flat
+    // fallback world, where the parry terrain cast remains.
+    grid: Option<Res<HeightGrid>>,
     // The net client's predicted present `P` — the tick every cosmetic shell lives at, and the one
     // the shot-lifecycle recorder stamps its rows with. Absent on the authority (server / SP /
     // sandbox), where an OBSERVER shell (the only kind that carries `fire.shot` here) never exists.
@@ -1000,9 +1070,6 @@ fn on_fire_shell(
         // DERIVED numerical guard: match the live march's 1 mm boundary nudge so catch-up casts
         // neither begin inside the muzzle surface nor end by re-touching the next chord boundary.
         const EPS: f32 = 1.0e-3;
-        let filter = SpatialQueryFilter::from_mask(
-            LayerMask::from(Layer::Terrain) | LayerMask::from(Layer::Armor),
-        );
         // The shooter's own volumes are transparent to its own round — the same rule the live march
         // applies (see [`not_own_volume`]).
         let shooter = fire.shooter.map(|source| source.tank);
@@ -1013,20 +1080,31 @@ fn on_fire_shell(
                 continue;
             };
             let reach = (step.length() - EPS).max(0.0);
-            if let Some(hit) = spatial.cast_ray_predicate(
+            if let Some(hit) = cast_march_segment(
+                &spatial,
+                grid.as_deref(),
                 segment[0] + Vec3::from(dir) * EPS,
                 dir,
                 reach,
-                true,
-                &filter,
                 &not_own,
             ) {
-                let contact = segment[0] + Vec3::from(dir) * (EPS + hit.distance);
-                let surface = if hit_ancestor(hit.entity, &volumes, &parents).is_some() {
-                    ImpactSurface::Armor
-                } else {
-                    ImpactSurface::Terrain
+                // An Armor-layer hit without volume ancestry stays classified terrain — the
+                // exact rule the live march's `resolved` branch applies.
+                let (distance, normal, surface) = match &hit {
+                    SegmentHit::Armor(hit) => (
+                        hit.distance,
+                        hit.normal,
+                        if hit_ancestor(hit.entity, &volumes, &parents).is_some() {
+                            ImpactSurface::Armor
+                        } else {
+                            ImpactSurface::Terrain
+                        },
+                    ),
+                    SegmentHit::Terrain { distance, normal } => {
+                        (*distance, *normal, ImpactSurface::Terrain)
+                    }
                 };
+                let contact = segment[0] + Vec3::from(dir) * (EPS + distance);
 
                 if surface == ImpactSurface::Armor && fire.shot.is_some() {
                     // Preserve only the honest pre-contact trail. `segment_index` starts at p0→p1, so
@@ -1040,7 +1118,7 @@ fn on_fire_shell(
                     catch_up_hold = Some(Held {
                         waited: 0,
                         age: fire.catch_up_ticks.saturating_sub(contact_tick),
-                        normal: hit.normal,
+                        normal,
                     });
                     if let Some(shot) = fire.shot {
                         crate::shot_trace::record(&mut shot_trace, "catchup", now, shot, || {
@@ -1059,7 +1137,7 @@ fn on_fire_shell(
                 if fire.catch_up_ticks <= STALE_FIRE_TICKS {
                     commands.trigger(Impact {
                         position: contact,
-                        normal: hit.normal,
+                        normal,
                         caliber: fire.caliber,
                         surface,
                         penetrated: false,
@@ -1218,6 +1296,10 @@ fn integrate_projectiles(
     net: ProjectileMarchNet,
     // EXPERIMENTAL cost-attribution A/B lever (`SPIKE_MG_SHORTCIRCUIT`, default off — see the type).
     shortcircuit: Res<MgShortCircuit>,
+    // The heightmap ground, when the heightmap world is live: the march's terrain contacts read
+    // the exact deterministic caster, not parry (see [`cast_march_segment`]). Absent on the flat
+    // fallback world, where the parry terrain cast remains.
+    grid: Option<Res<HeightGrid>>,
     // Sim-cost recorder attribution sink (`SPIKE_COST_TRACE`): absent unless the recorder is armed, so
     // an unmeasured run pays only the `Option` check. This system's whole wall-time is stamped into it.
     mut cost: Option<ResMut<crate::cost::CostTrace>>,
@@ -1262,10 +1344,8 @@ fn integrate_projectiles(
     // tick each cosmetic shell lives at). Never read on the authority — every row site is `!deposit`.
     let now = present.unwrap_or(0);
     // The march casts against terrain (which stops the shell) and ballistic volumes (which it
-    // crosses); the struck entity being a `BallisticVolume` is what tells the two apart.
-    let world = SpatialQueryFilter::from_mask(
-        LayerMask::from(Layer::Terrain) | LayerMask::from(Layer::Armor),
-    );
+    // crosses) — split per [`cast_march_segment`], nearer hit wins. This filter serves the
+    // interior probes (thickness / exit faces / spall), which are armor-only by construction.
     let armor = SpatialQueryFilter::from_mask(Layer::Armor);
     // Nudge past each boundary we resolve so we don't immediately re-hit it.
     const EPS: f32 = 1.0e-3;
@@ -1712,8 +1792,8 @@ fn integrate_projectiles(
         // perforate or embed) — and keep marching the leftover budget along the new direction.
         while remaining > EPS {
             let origin = pos + dir * EPS;
-            let Some(hit) =
-                spatial.cast_ray_predicate(origin, dir, remaining, true, &world, &not_own)
+            let Some(step_hit) =
+                cast_march_segment(&spatial, grid.as_deref(), origin, dir, remaining, &not_own)
             else {
                 // Open air — fly out the rest of the step. On the original (unbent) segment this is
                 // exactly the shared `advance_shell` landing point; a `continue` past this point only
@@ -1724,6 +1804,44 @@ fn integrate_projectiles(
                     freeflight_pos
                 };
                 break;
+            };
+            // The ground stops the shell: same `Impact` read whether or not the MG short-circuit
+            // is armed (the B-arm's terrain stop was already identical); only the lifecycle row
+            // differs — the short-circuit records nothing, exactly as before.
+            let hit = match step_hit {
+                SegmentHit::Terrain { distance, normal } => {
+                    let entry = origin + dir * distance;
+                    let shorted =
+                        shortcircuit.0 && projectile.caliber < MG_SHORTCIRCUIT_CALIBER_MAX;
+                    commands.trigger(Impact {
+                        position: entry,
+                        normal,
+                        caliber: projectile.caliber,
+                        surface: ImpactSurface::Terrain,
+                        penetrated: false,
+                        deflection: None,
+                    });
+                    // A terrain stop is the one shot terminal that needs NO confirm: static,
+                    // pose-independent geometry, so both ends already agree (ADR-0021's
+                    // invariant). Recorded on the client so the analyzer can close the lifecycle
+                    // of a shot that simply never reached armor.
+                    if !shorted
+                        && !deposit
+                        && let Some(shot) = shot
+                    {
+                        crate::shot_trace::record(
+                            &mut shot_trace,
+                            "end",
+                            now,
+                            shot.0,
+                            || json!({ "why": "terrain" }),
+                        );
+                    }
+                    pos = entry;
+                    stopped = true;
+                    break;
+                }
+                SegmentHit::Armor(hit) => hit,
             };
             let entry = origin + dir * hit.distance;
             let travelled = EPS + hit.distance;
@@ -1756,11 +1874,12 @@ fn integrate_projectiles(
 
             // The struck `BallisticVolume` sits on the hit's ancestry (`hit_ancestor`, the shared
             // hierarchy-resolution rule), keeping the node entity so transit damage and spall can
-            // address the component. No volume in the ancestry ⇒ terrain.
+            // address the component. No volume in the ancestry ⇒ classified terrain (an
+            // Armor-layer entity without ownership — same rule as before the cast split).
             let resolved = hit_ancestor(hit.entity, &volumes, &parents)
                 .map(|(node, volume)| (node, volume.material_factor));
             let Some((node_entity, factor)) = resolved else {
-                // Terrain: stop here.
+                // Terrain-classified: stop here.
                 commands.trigger(Impact {
                     position: entry,
                     normal: hit.normal,
@@ -2755,8 +2874,8 @@ mod march_tests {
     use std::time::Duration;
 
     use avian3d::prelude::{
-        AngularInertia, AngularVelocity, Collider, CollisionLayers, GravityScale, LinearVelocity,
-        Mass, NoAutoAngularInertia, NoAutoMass, PhysicsPlugins, RigidBody,
+        AngularInertia, AngularVelocity, Collider, CollisionLayers, GravityScale, LayerMask,
+        LinearVelocity, Mass, NoAutoAngularInertia, NoAutoMass, PhysicsPlugins, RigidBody,
     };
     use bevy::prelude::*;
     use bevy::time::TimeUpdateStrategy;
@@ -4605,5 +4724,65 @@ mod march_tests {
         let stored = buf.terminal(shot, 0).expect("terminal stored");
         assert_eq!(stored.position, Vec3::X, "first insert wins");
         assert!(stored.penetrated, "first insert's verdict kept");
+    }
+
+    /// A flat [`HeightGrid`] at `height` metres spanning the world square (raw meters, like the
+    /// production resource).
+    fn flat_grid(height: f32) -> HeightGrid {
+        let size = 33usize;
+        HeightGrid::new(vec![height; size * size].into(), size as u32)
+    }
+
+    /// Terrain stops come from the exact `HeightGrid` caster when the heightmap world is live:
+    /// the app carries the grid resource but NO terrain collider at all — a parry-only march
+    /// would fly straight through — and the shell must still stop on the grid surface with a
+    /// terrain read (position on the surface, up normal, no penetration).
+    #[test]
+    fn terrain_stop_reads_the_height_grid_surface() {
+        // The plate is parked far off the flight path: this is the plain march app.
+        let mut app = world_with_plate(Vec3::splat(0.5), Vec3::new(900.0, 900.0, 900.0));
+        app.insert_resource(flat_grid(30.0));
+        let impacts = fire_and_capture(&mut app, Vec3::new(10.0, 80.0, -20.0), Vec3::NEG_Y, 800.0);
+        assert_eq!(impacts.len(), 1, "one terrain stop");
+        let hit = impacts[0];
+        assert_eq!(hit.surface, ImpactSurface::Terrain);
+        assert!(!hit.penetrated, "terrain never reads as a penetration");
+        assert!(
+            (hit.position - Vec3::new(10.0, 30.0, -20.0)).length() < 1e-2,
+            "the shell must stop ON the grid surface, got {:?}",
+            hit.position
+        );
+    }
+
+    /// Nearer-hit selection with BOTH sources live: a plate above the ground resolves as armor
+    /// (the parry path unchanged), and the perforating round then ends on the grid terrain
+    /// below — armor first, terrain second, in that order.
+    #[test]
+    fn armor_above_the_ground_still_resolves_before_the_terrain() {
+        // A thin horizontal 50 mm plate at y = 50, ground grid at y = 30.
+        let mut app = world_with_plate(Vec3::new(6.0, 0.05, 6.0), Vec3::new(0.0, 50.0, 0.0));
+        app.insert_resource(flat_grid(30.0));
+        fire_and_capture(&mut app, Vec3::new(0.0, 60.0, 0.0), Vec3::NEG_Y, 800.0);
+        // Keep marching past the first capture until the round lands.
+        for _ in 0..8 {
+            app.update();
+        }
+        let impacts = app.world().resource::<ImpactLog>().0.clone();
+        assert!(
+            impacts.len() >= 2,
+            "expected the armor read then the terrain stop, got {}",
+            impacts.len()
+        );
+        let armor = impacts[0];
+        assert_eq!(armor.surface, ImpactSurface::Armor, "the nearer plate wins");
+        assert!(armor.penetrated, "an 88 perforates 50 mm flat");
+        assert!((armor.position.y - 50.0).abs() < 0.2, "at the plate face");
+        let last = *impacts.last().unwrap();
+        assert_eq!(last.surface, ImpactSurface::Terrain);
+        assert!(
+            (last.position.y - 30.0).abs() < 1e-2,
+            "the round ends on the grid ground, got {:?}",
+            last.position
+        );
     }
 }

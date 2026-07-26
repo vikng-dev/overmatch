@@ -226,17 +226,32 @@ fn spawn_test_course(
     }
 }
 
+/// Longest CAST any view-layer ground/aim ray needs, metres: the world is the
+/// ±`terrain_grid::WORLD_HALF_EXTENT` square, so no terrain sightline can exceed the full
+/// diagonal — 2560·√2 ≈ 3620.6 m — from any in-world origin; 3700 adds headroom (compile-time
+/// checked below). Purely a parry-traversal cap for the view layer (aim/sight picks, the bore
+/// dot, the camera pull-in): `aim::MAX_RANGE` (10 km) keeps its separate role as the far "sky"
+/// FALLBACK distance, so committed aim points and all in-range behavior are unchanged — nothing
+/// exists between the diagonal and 10 km for a ray to hit. Sim code must not read this.
+pub(crate) const VIEW_CAST_MAX_M: f32 = 3_700.0;
+const _: () = assert!(
+    VIEW_CAST_MAX_M * VIEW_CAST_MAX_M
+        >= 2.0 * crate::terrain_grid::WORLD_SIZE * crate::terrain_grid::WORLD_SIZE,
+    "VIEW_CAST_MAX_M must cover the world diagonal"
+);
+
 /// Distance along `ray` to the terrain, capped at `max`, falling back to `max` when the ray
 /// misses (sky / above the horizon). A world raycast against the `Terrain` layer ONLY — the orbit
 /// camera's ground pull-in, which must ignore tanks (a tank crossing behind the player must not
 /// yank the camera in). Aim rays use `aim::aim_distance` instead, which adds the `Armor` layer so
-/// the aim dots predict what a shell would actually meet, tanks included.
+/// the aim dots predict what a shell would actually meet, tanks included. The CAST is clamped to
+/// [`VIEW_CAST_MAX_M`] (nothing exists beyond the world diagonal); the miss fallback stays `max`.
 pub fn ground_distance(spatial: &SpatialQuery, ray: Ray3d, max: f32) -> f32 {
     spatial
         .cast_ray(
             ray.origin,
             ray.direction,
-            max,
+            max.min(VIEW_CAST_MAX_M),
             true,
             &SpatialQueryFilter::from_mask(Layer::Terrain),
         )

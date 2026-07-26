@@ -4,15 +4,21 @@
 //! The trait is deliberately scalar-and-minimal today: `depth_along` is the one query every
 //! consumer (belt physics, wheel articulation, the wrap view's terrain conform) actually makes,
 //! and the sandbox proved its semantics (exact analytic first hit, C0, deterministic). The
-//! architecture doc records the growth path — batched `sample_into`, hit normals, surface
-//! material, `covered` for streamed terrain — to be added WITH their first consumer, not
-//! before.
+//! architecture doc records the growth path — batched probes, hit normals, surface material,
+//! `covered` for streamed terrain — to be added WITH their first consumer, not before.
 //!
-//! [`BlockField`] is the default implementation: the union of authored rounded boxes, built
-//! from the same transforms that spawn the terrain colliders (the sandbox's step-19..25 field,
-//! generalized). An Avian `SpatialQuery` adapter for non-block geometry is a per-system
-//! construction (the query is a borrowed `SystemParam` and cannot live in a resource) and lands
-//! with its first consumer.
+//! [`BlockField`] is the one implementation, a min-fold of two EXACT analytic terms:
+//!
+//! - the **heightmap ground** ([`HeightGrid::cast_ray`]) — the shipped surface on the product
+//!   map, a closed-form ray-vs-triangle first hit on the same triangulation the parry collider
+//!   uses, with no sampling rate to outrun;
+//! - the **authored blocks** — the union of rounded boxes built from the same transforms that
+//!   spawn the terrain colliders (the sandbox's step-19..25 field, generalized), which is the
+//!   whole surface in the sandbox and the obstacle layer on the map.
+//!
+//! An Avian `SpatialQuery` adapter for non-block geometry is a per-system construction (the
+//! query is a borrowed `SystemParam` and cannot live in a resource) and would land with its
+//! first consumer; nothing has needed one.
 
 use bevy::math::{Mat3, Quat, Vec2, Vec3};
 
@@ -29,8 +35,10 @@ pub trait TerrainOracle {
 }
 
 /// Edge rounding radius (m) of the block field: every authored box is evaluated as a rounded
-/// box, so the union's surface is C1 across box edges at the cost of visually-invisible 3 cm
-/// corner rounding. Must stay below the smallest authored half-extent.
+/// box, so the BLOCK term is C1 across box edges at the cost of visually-invisible 3 cm corner
+/// rounding. Must stay below the smallest authored half-extent. (The heightmap term is only
+/// C0 — it is the collider's triangulation exactly, and matching the collider outranks
+/// smoothness there.)
 pub const FIELD_ROUNDING: f32 = 0.03;
 
 /// How far (m) every block's bottom is extended below its authored extent, so a raised block
@@ -40,17 +48,6 @@ pub const FIELD_BURY: f32 = 2.0;
 
 /// Z-extent (m) of one broadphase bucket.
 const FIELD_CELL: f32 = 4.0;
-
-/// Fixed segment count of the coarse sign-change scan the height-term intersect runs over
-/// `[0, t_max]` before bisecting (see `depth_along`): the first segment whose far end reads
-/// `f ≤ 0` brackets the FIRST surface crossing, provided the surface does not cross back and
-/// forth within one segment (t_max = 2·reach = 1 m for the suspension's 0.5 m probes, so a
-/// segment is 12.5 cm of ray — far below any terrain feature the 2.5 m grid can express).
-const HEIGHT_SCAN_SEGMENTS: u32 = 8;
-
-/// Fixed bisection count refining the bracketed crossing: interval shrinks by 2⁻²⁴ — sub-µm on
-/// a 1 m probe, and DETERMINISTIC (no convergence test, no adaptive iteration).
-const HEIGHT_BISECT_STEPS: u32 = 24;
 
 /// One authored terrain block (world-space oriented box, bottom extended by [`FIELD_BURY`]).
 pub struct TerrainBlock {
@@ -338,7 +335,8 @@ impl BlockField {
 
     /// Signed distance (m) from `p` to the terrain surface: negative inside. Union = min over
     /// blocks; full fold — a correct GLOBAL nearest distance can't be bucket-pruned.
-    /// Offline/scan use only; hot paths use [`TerrainOracle::depth_along`].
+    /// Diagnostic/authoring surface with no live caller: every consumer wants the directional
+    /// first hit, so the hot path is [`TerrainOracle::depth_along`].
     pub fn sdf(&self, p: Vec3) -> f32 {
         let blocks = self
             .blocks
@@ -347,16 +345,16 @@ impl BlockField {
             .fold(f32::INFINITY, f32::min);
         match &self.height {
             // Vertical distance to the height surface: exact on flat ground, a conservative
-            // bound on slopes — adequate for this fn's scan/diagnostic role (hot paths ray-cast
-            // via `depth_along`).
+            // bound on slopes — adequate for this fn's diagnostic role (hot paths ray-cast via
+            // `depth_along`).
             Some(grid) => blocks.min(p.y - grid.height_at(p.x, p.z)),
             None => blocks,
         }
     }
 
     /// Signed EUCLIDEAN penetration of `p` (nearest-surface distance, capped at `reach`):
-    /// positive inside. Scan/diagnostic use — Euclidean depth under a raised block plateaus at
-    /// the block's side-face distance, which is why the physics reads `depth_along`.
+    /// positive inside. Diagnostic use — Euclidean depth under a raised block plateaus at the
+    /// block's side-face distance, which is why the physics reads `depth_along`.
     pub fn signed_depth(&self, p: Vec3, reach: f32) -> f32 {
         (-self.sdf(p)).min(reach)
     }
@@ -380,49 +378,28 @@ impl TerrainOracle for BlockField {
                 t = t.min(hit);
             }
         });
-        // The heightmap ground term: a FIXED-count bracketed bisection on
-        // f(t) = ray_y(t) − h(ray_xz(t)) over [0, t_max] (deterministic — fixed iteration
-        // budget, pure arithmetic, no adaptive convergence test). The old 3-step reprojection
-        // intersect (t ← (h(xz(t)) − o.y)/o_y) has iteration derivative −slope/|dir slope| that
-        // reaches −1 on a 45° slope probed along the slope normal: it OSCILLATES between two
-        // points forever and returns non-intersections. Bisection cannot oscillate: f(0) > 0 is
-        // guaranteed here (the buried branch above caught f(0) ≤ 0), a coarse fixed scan finds
-        // the FIRST sign change (so a ray that pierces a bump and re-emerges still reports the
-        // ENTRY, and rays of any direction — even horizontal ones into rising ground — are
-        // handled), and HEIGHT_BISECT_STEPS halvings pin the crossing to t_max/2²⁴ ≈ 60 nm.
-        // No sign change over the whole interval = no hit. Composes with the blocks by the same
-        // min-entry union rule.
+        // The heightmap ground term: the EXACT first-hit caster (`HeightGrid::cast_ray` — a 2-D
+        // DDA over the 1–2 cells a suspension probe's XZ footprint crosses, closed-form
+        // ray-vs-triangle per cell on the same anti-diagonal split the collider uses).
+        // Deterministic: fixed iteration order, pure f32 arithmetic, no transcendentals. It
+        // replaced a fixed 8-segment sign-change scan + 24-step bisection, whose 12.5 cm
+        // checkpoints could straddle a thin ridge the ray pierces AND exits between two
+        // checkpoints (no sign change at any checkpoint = the crossing was invisible — see the
+        // ridge-graze test below); the closed-form crossing has no resolution to slip through.
+        // Composes with the blocks by the same min-entry union rule.
+        //
+        // f(0) ≤ 0 saturation: an origin under the surface saturates to the reach, exactly like
+        // a buried block origin (a contact cast) — but only WITHIN the grid span. Outside it the
+        // world ends at the collider edge (`HeightGrid::cast_ray` doc): the height term reports
+        // no ground at all, so the oracle agrees with the parry collider instead of feeling the
+        // clamped phantom ground `height_at` extends for placement queries.
         if let Some(grid) = &self.height {
-            if origin.y <= grid.height_at(origin.x, origin.z) {
-                // Origin under the surface: saturated, like a buried block origin.
+            if grid.contains_xz(origin.x, origin.z)
+                && origin.y <= grid.height_at(origin.x, origin.z)
+            {
                 buried = true;
-            } else {
-                let f = |s: f32| {
-                    let p = origin + out * s;
-                    p.y - grid.height_at(p.x, p.z)
-                };
-                let mut bracket = None;
-                let mut prev = 0.0_f32;
-                for k in 1..=HEIGHT_SCAN_SEGMENTS {
-                    let tk = t_max * (k as f32 / HEIGHT_SCAN_SEGMENTS as f32);
-                    if f(tk) <= 0.0 {
-                        bracket = Some((prev, tk));
-                        break;
-                    }
-                    prev = tk;
-                }
-                if let Some((mut lo, mut hi)) = bracket {
-                    for _ in 0..HEIGHT_BISECT_STEPS {
-                        let mid = 0.5 * (lo + hi);
-                        if f(mid) <= 0.0 {
-                            hi = mid;
-                        } else {
-                            lo = mid;
-                        }
-                    }
-                    // `hi` is the tightest bound with f(hi) ≤ 0: the first crossing.
-                    t = t.min(hi);
-                }
+            } else if let Some(hit) = grid.cast_ray(origin, out, t_max) {
+                t = t.min(hit.t);
             }
         }
         if buried {
@@ -520,8 +497,9 @@ mod tests {
     /// The steep-slope case the OLD 3-step reprojection intersect could not solve: on a 45°
     /// slope probed along the slope NORMAL, the reprojection map t ← (h(xz(t)) − o.y)/o_y has
     /// derivative exactly −1 — it oscillates between two points forever and returns whatever
-    /// the third iterate happened to be (analytic divergence factor −1). The bracketed
-    /// bisection must read the exact plane distance.
+    /// the third iterate happened to be (analytic divergence factor −1). The exact caster
+    /// (`HeightGrid::cast_ray`, which replaced the interim bracketed bisection) must read the
+    /// exact plane distance.
     #[test]
     fn slope_normal_probe_on_a_45_degree_slope_reads_exact_depth() {
         // h(x) = x: a 45° plane through the origin. `HeightGrid::new` takes raw meters, so the
@@ -552,6 +530,75 @@ mod tests {
         // Far off the slope: full clearance floor.
         let d = field.depth_along(surface - out * 50.0, out, 0.5);
         assert_eq!(d, -0.5);
+    }
+
+    /// The ridge-graze case the OLD checkpoint scan MISSED: the 8-segment sign-change scan
+    /// sampled f every t_max/8 = 12.5 cm (reach 0.5 m), so a ray that pierces a thin ridge AND
+    /// re-emerges between two consecutive checkpoints saw no sign change and reported full
+    /// clearance. The exact caster solves the crossing in closed form — no resolution to slip
+    /// through.
+    #[test]
+    fn ridge_graze_between_old_scan_checkpoints_is_caught() {
+        use crate::terrain_grid::WORLD_HALF_EXTENT;
+        // A 45° tent ridge along z: nodes at x = −1280, 0, +1280 with h = 1280 − |x| (raw
+        // meters; the PNG's range bound does not constrain a test grid). Apex h = 1280 at x = 0.
+        let size = 3u32;
+        let mut samples = Vec::with_capacity((size * size) as usize);
+        for _j in 0..size {
+            for i in 0..size {
+                let x = -WORLD_HALF_EXTENT + i as f32 * WORLD_HALF_EXTENT;
+                samples.push(WORLD_HALF_EXTENT - x.abs());
+            }
+        }
+        let field =
+            BlockField::new(vec![]).with_height(Some(HeightGrid::new(samples.into(), size)));
+        // A horizontal +X probe 4 cm below the apex: inside the ridge only for x ∈ (−0.04, 0.04)
+        // — 8 cm of ray. Station at x = 0.3, reach 0.5 ⇒ ray origin x = −0.2, so the old scan's
+        // checkpoints sat at x = −0.075 and +0.05: the penetration interval lies strictly
+        // BETWEEN them. Verify that claim against the surface itself: every old checkpoint reads
+        // positive clearance.
+        let reach = 0.5_f32;
+        let out = Vec3::X;
+        let station = Vec3::new(0.3, WORLD_HALF_EXTENT - 0.04, 7.0);
+        let origin = station - out * reach;
+        for k in 1..=8 {
+            let p = origin + out * (2.0 * reach) * (k as f32 / 8.0);
+            let h = WORLD_HALF_EXTENT - p.x.abs();
+            assert!(
+                p.y - h > 0.0,
+                "checkpoint {k} at x={} must sit clear of the ridge (old-scan miss premise)",
+                p.x
+            );
+        }
+        // Exact caster: first crossing at x = −0.04 ⇒ t = 0.16 ⇒ depth = reach − t = 0.34.
+        let d = field.depth_along(station, out, reach);
+        assert!(
+            (d - 0.34).abs() < 1e-3,
+            "ridge graze must read 0.34 m past the entry face, got {d}"
+        );
+    }
+
+    /// THE MAP-EDGE CONSISTENCY HOLE (fixed): outside the grid span the collider ends, so the
+    /// oracle's height term must report NO ground — not the clamped flat phantom `height_at`
+    /// extends for placement queries (belts feeling ground the hull would fall through).
+    #[test]
+    fn beyond_the_map_edge_the_height_term_reports_no_ground() {
+        use crate::terrain_grid::{HEIGHT_RANGE, WORLD_HALF_EXTENT};
+        // Flat surface at 0.2 · HEIGHT_RANGE across the whole span.
+        let h = 51.0 / 255.0 * HEIGHT_RANGE;
+        let field = BlockField::new(vec![]).with_height(Some(height_grid(4, |_, _| 51)));
+        let down = Vec3::NEG_Y;
+        let outside = WORLD_HALF_EXTENT + 10.0;
+        // A probe 5 cm "under" the clamped phantom surface: no ground, full clearance.
+        let d = field.depth_along(Vec3::new(outside, h - 0.05, 0.0), down, 0.5);
+        assert_eq!(d, -0.5, "outside the span there is no surface to penetrate");
+        // Even deep below the phantom: NOT saturated-buried.
+        let d = field.depth_along(Vec3::new(0.0, h - 50.0, -outside), down, 0.5);
+        assert_eq!(d, -0.5, "outside the span nothing is buried");
+        // Just inside the edge the surface still answers exactly.
+        let inside = WORLD_HALF_EXTENT - 1.0;
+        let d = field.depth_along(Vec3::new(inside, h - 0.05, 0.0), down, 0.5);
+        assert!((d - 0.05).abs() < 1e-3, "inside the edge reads {d}");
     }
 
     #[test]

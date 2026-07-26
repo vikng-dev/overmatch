@@ -540,7 +540,7 @@ struct BeltGrip(PerSide<Vec2>);
 
 /// The per-element isotropic shear state (`track::forces::GripElements`): one world-space shear
 /// vector per material link × column. Always PRE-SIZED from the pin belt ([`Self::sized`]; startup,
-/// `R` reset, count retune): `step_side` never resizes at runtime, and empty slabs would skip
+/// `R` reset, count retune): `contact_side` never resizes at runtime, and empty slabs would skip
 /// traction for the tick.
 #[derive(Resource, Default)]
 struct BeltGripElements(PerSide<crate::track::forces::GripElements>);
@@ -1220,7 +1220,7 @@ fn build_rig(
     );
 
     // The pin belt IS the material loop now (see `PinBelt::for_rig`); the element slabs size from it
-    // here rather than in a chained system — `step_side` never resizes at runtime (the fixed-size
+    // here rather than in a chained system — `contact_side` never resizes at runtime (the fixed-size
     // invariant), so empty slabs would silently skip traction.
     let pin_belt = PinBelt::for_rig(&geom);
     *grip_elements = BeltGripElements::sized(pin_belt.count);
@@ -1551,8 +1551,8 @@ struct BeltState<'w> {
 impl BeltState<'_> {
     /// Back to a cold, correctly-sized belt for a loop of `link_count` links.
     ///
-    /// The link-count knob in particular MUST re-size the slabs — `step_side` never resizes at
-    /// runtime (the fixed-size invariant), so a stale slab silently drops traction for the rest of
+    /// The link-count knob in particular MUST re-size the slabs — `contact_side` never resizes
+    /// at runtime (the fixed-size invariant), so a stale slab silently drops traction for the rest of
     /// the session.
     ///
     /// Not touched, deliberately: belt SPEED, the drive command, the transmission gear and the hull

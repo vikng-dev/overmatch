@@ -194,10 +194,17 @@ const SPAWN_FOOTPRINT_HALF_M: f32 = 5.0;
 /// colliders and let the solver fling them.
 const SPAWN_OCCUPIED_RADIUS_M: f32 = 6.0;
 
-/// Deterministic outward search pattern for an occupied spawn point: 8 fixed compass directions
-/// (unit vectors — exact constants, no trig at runtime) tried at each of [`SPAWN_SEARCH_RADII_M`]
-/// in order; the first free candidate wins. Fixed order = same result on every peer/replay.
-const SPAWN_SEARCH_DIRECTIONS: [Vec2; 8] = [
+/// Deterministic outward search pattern for an occupied spawn point: per-radius direction
+/// tables of fixed unit vectors (exact constants — no trig at runtime, so every peer/replay
+/// resolves the identical candidate), tried ring by ring through [`SPAWN_SEARCH_RINGS`]; the
+/// first free candidate wins.
+///
+/// WHY per-radius counts: 8 fixed compass spokes leave 2π·48/8 ≈ 37.7 m arc gaps at the outer
+/// ring — six whole occupancy diameters of free ground the search never sampled, so a crowded
+/// click could fall back to the lane spawn with room in plain sight. Each ring's count is
+/// `max(8, ceil(2πr / 8 m))` — candidates at most ~8 m of arc apart, comparable to the 6 m
+/// occupancy radius — pinned by `spawn_search_rings_are_unit_uniform_and_dense_enough`.
+const SPAWN_DIRS_8: [Vec2; 8] = [
     Vec2::new(1.0, 0.0),
     Vec2::new(
         core::f32::consts::FRAC_1_SQRT_2,
@@ -220,9 +227,176 @@ const SPAWN_SEARCH_DIRECTIONS: [Vec2; 8] = [
     ),
 ];
 
-/// Ring radii (m) of the outward spawn search, inside the ~50 m budget; past the last ring the
-/// caller falls back to the lane spawn.
-const SPAWN_SEARCH_RADII_M: [f32; 6] = [8.0, 16.0, 24.0, 32.0, 40.0, 48.0];
+/// 13 unit directions for the 16 m ring: cos/sin(2πk/13), CCW from +X — spacing
+/// 2π·16/13 ≈ 7.73 m of arc (≤ the 8 m coverage target). Exact constants,
+/// no runtime trig; near-zero components snapped to 0. Pinned by
+/// `spawn_search_rings_are_unit_uniform_and_dense_enough`.
+const SPAWN_DIRS_13: [Vec2; 13] = [
+    Vec2::new(1.0, 0.0),
+    Vec2::new(0.885456, 0.46472317),
+    Vec2::new(0.56806475, 0.82298386),
+    Vec2::new(0.12053668, 0.99270886),
+    Vec2::new(-0.3546049, 0.9350162),
+    Vec2::new(-0.7485108, 0.66312265),
+    Vec2::new(-0.97094184, 0.23931566),
+    Vec2::new(-0.97094184, -0.23931566),
+    Vec2::new(-0.7485108, -0.66312265),
+    Vec2::new(-0.3546049, -0.9350162),
+    Vec2::new(0.12053668, -0.99270886),
+    Vec2::new(0.56806475, -0.82298386),
+    Vec2::new(0.885456, -0.46472317),
+];
+/// 19 unit directions for the 24 m ring: cos/sin(2πk/19), CCW from +X — spacing
+/// 2π·24/19 ≈ 7.94 m of arc (≤ the 8 m coverage target). Exact constants,
+/// no runtime trig; near-zero components snapped to 0. Pinned by
+/// `spawn_search_rings_are_unit_uniform_and_dense_enough`.
+const SPAWN_DIRS_19: [Vec2; 19] = [
+    Vec2::new(1.0, 0.0),
+    Vec2::new(0.94581723, 0.32469946),
+    Vec2::new(0.7891405, 0.6142127),
+    Vec2::new(0.54694813, 0.8371665),
+    Vec2::new(0.24548548, 0.9694003),
+    Vec2::new(-0.082579345, 0.9965845),
+    Vec2::new(-0.40169543, 0.91577333),
+    Vec2::new(-0.67728156, 0.7357239),
+    Vec2::new(-0.87947375, 0.47594738),
+    Vec2::new(-0.9863613, 0.16459459),
+    Vec2::new(-0.9863613, -0.16459459),
+    Vec2::new(-0.87947375, -0.47594738),
+    Vec2::new(-0.67728156, -0.7357239),
+    Vec2::new(-0.40169543, -0.91577333),
+    Vec2::new(-0.082579345, -0.9965845),
+    Vec2::new(0.24548548, -0.9694003),
+    Vec2::new(0.54694813, -0.8371665),
+    Vec2::new(0.7891405, -0.6142127),
+    Vec2::new(0.94581723, -0.32469946),
+];
+/// 26 unit directions for the 32 m ring: cos/sin(2πk/26), CCW from +X — spacing
+/// 2π·32/26 ≈ 7.73 m of arc (≤ the 8 m coverage target). Exact constants,
+/// no runtime trig; near-zero components snapped to 0. Pinned by
+/// `spawn_search_rings_are_unit_uniform_and_dense_enough`.
+const SPAWN_DIRS_26: [Vec2; 26] = [
+    Vec2::new(1.0, 0.0),
+    Vec2::new(0.97094184, 0.23931566),
+    Vec2::new(0.885456, 0.46472317),
+    Vec2::new(0.7485108, 0.66312265),
+    Vec2::new(0.56806475, 0.82298386),
+    Vec2::new(0.3546049, 0.9350162),
+    Vec2::new(0.12053668, 0.99270886),
+    Vec2::new(-0.12053668, 0.99270886),
+    Vec2::new(-0.3546049, 0.9350162),
+    Vec2::new(-0.56806475, 0.82298386),
+    Vec2::new(-0.7485108, 0.66312265),
+    Vec2::new(-0.885456, 0.46472317),
+    Vec2::new(-0.97094184, 0.23931566),
+    Vec2::new(-1.0, 0.0),
+    Vec2::new(-0.97094184, -0.23931566),
+    Vec2::new(-0.885456, -0.46472317),
+    Vec2::new(-0.7485108, -0.66312265),
+    Vec2::new(-0.56806475, -0.82298386),
+    Vec2::new(-0.3546049, -0.9350162),
+    Vec2::new(-0.12053668, -0.99270886),
+    Vec2::new(0.12053668, -0.99270886),
+    Vec2::new(0.3546049, -0.9350162),
+    Vec2::new(0.56806475, -0.82298386),
+    Vec2::new(0.7485108, -0.66312265),
+    Vec2::new(0.885456, -0.46472317),
+    Vec2::new(0.97094184, -0.23931566),
+];
+/// 32 unit directions for the 40 m ring: cos/sin(2πk/32), CCW from +X — spacing
+/// 2π·40/32 ≈ 7.85 m of arc (≤ the 8 m coverage target). Exact constants,
+/// no runtime trig; near-zero components snapped to 0. Pinned by
+/// `spawn_search_rings_are_unit_uniform_and_dense_enough`.
+const SPAWN_DIRS_32: [Vec2; 32] = [
+    Vec2::new(1.0, 0.0),
+    Vec2::new(0.98078525, 0.19509032),
+    Vec2::new(0.9238795, 0.38268343),
+    Vec2::new(0.8314696, 0.55557024),
+    Vec2::new(0.70710677, 0.70710677),
+    Vec2::new(0.55557024, 0.8314696),
+    Vec2::new(0.38268343, 0.9238795),
+    Vec2::new(0.19509032, 0.98078525),
+    Vec2::new(0.0, 1.0),
+    Vec2::new(-0.19509032, 0.98078525),
+    Vec2::new(-0.38268343, 0.9238795),
+    Vec2::new(-0.55557024, 0.8314696),
+    Vec2::new(-0.70710677, 0.70710677),
+    Vec2::new(-0.8314696, 0.55557024),
+    Vec2::new(-0.9238795, 0.38268343),
+    Vec2::new(-0.98078525, 0.19509032),
+    Vec2::new(-1.0, 0.0),
+    Vec2::new(-0.98078525, -0.19509032),
+    Vec2::new(-0.9238795, -0.38268343),
+    Vec2::new(-0.8314696, -0.55557024),
+    Vec2::new(-0.70710677, -0.70710677),
+    Vec2::new(-0.55557024, -0.8314696),
+    Vec2::new(-0.38268343, -0.9238795),
+    Vec2::new(-0.19509032, -0.98078525),
+    Vec2::new(0.0, -1.0),
+    Vec2::new(0.19509032, -0.98078525),
+    Vec2::new(0.38268343, -0.9238795),
+    Vec2::new(0.55557024, -0.8314696),
+    Vec2::new(0.70710677, -0.70710677),
+    Vec2::new(0.8314696, -0.55557024),
+    Vec2::new(0.9238795, -0.38268343),
+    Vec2::new(0.98078525, -0.19509032),
+];
+/// 38 unit directions for the 48 m ring: cos/sin(2πk/38), CCW from +X — spacing
+/// 2π·48/38 ≈ 7.94 m of arc (≤ the 8 m coverage target). Exact constants,
+/// no runtime trig; near-zero components snapped to 0. Pinned by
+/// `spawn_search_rings_are_unit_uniform_and_dense_enough`.
+const SPAWN_DIRS_38: [Vec2; 38] = [
+    Vec2::new(1.0, 0.0),
+    Vec2::new(0.9863613, 0.16459459),
+    Vec2::new(0.94581723, 0.32469946),
+    Vec2::new(0.87947375, 0.47594738),
+    Vec2::new(0.7891405, 0.6142127),
+    Vec2::new(0.67728156, 0.7357239),
+    Vec2::new(0.54694813, 0.8371665),
+    Vec2::new(0.40169543, 0.91577333),
+    Vec2::new(0.24548548, 0.9694003),
+    Vec2::new(0.082579345, 0.9965845),
+    Vec2::new(-0.082579345, 0.9965845),
+    Vec2::new(-0.24548548, 0.9694003),
+    Vec2::new(-0.40169543, 0.91577333),
+    Vec2::new(-0.54694813, 0.8371665),
+    Vec2::new(-0.67728156, 0.7357239),
+    Vec2::new(-0.7891405, 0.6142127),
+    Vec2::new(-0.87947375, 0.47594738),
+    Vec2::new(-0.94581723, 0.32469946),
+    Vec2::new(-0.9863613, 0.16459459),
+    Vec2::new(-1.0, 0.0),
+    Vec2::new(-0.9863613, -0.16459459),
+    Vec2::new(-0.94581723, -0.32469946),
+    Vec2::new(-0.87947375, -0.47594738),
+    Vec2::new(-0.7891405, -0.6142127),
+    Vec2::new(-0.67728156, -0.7357239),
+    Vec2::new(-0.54694813, -0.8371665),
+    Vec2::new(-0.40169543, -0.91577333),
+    Vec2::new(-0.24548548, -0.9694003),
+    Vec2::new(-0.082579345, -0.9965845),
+    Vec2::new(0.082579345, -0.9965845),
+    Vec2::new(0.24548548, -0.9694003),
+    Vec2::new(0.40169543, -0.91577333),
+    Vec2::new(0.54694813, -0.8371665),
+    Vec2::new(0.67728156, -0.7357239),
+    Vec2::new(0.7891405, -0.6142127),
+    Vec2::new(0.87947375, -0.47594738),
+    Vec2::new(0.94581723, -0.32469946),
+    Vec2::new(0.9863613, -0.16459459),
+];
+
+/// The outward spawn search, inside the ~50 m budget: ring radii (m) ascending, each paired
+/// with its direction table (see [`SPAWN_DIRS_8`] for the density rationale). Past the last
+/// ring the caller falls back to the lane spawn.
+const SPAWN_SEARCH_RINGS: [(f32, &[Vec2]); 6] = [
+    (8.0, &SPAWN_DIRS_8),
+    (16.0, &SPAWN_DIRS_13),
+    (24.0, &SPAWN_DIRS_19),
+    (32.0, &SPAWN_DIRS_26),
+    (40.0, &SPAWN_DIRS_32),
+    (48.0, &SPAWN_DIRS_38),
+];
 
 /// Per-client spawn overrides chosen on the client's spawn map, keyed by the CLIENT LINK entity —
 /// the same key [`CombatantIds`] and `ControlledBy::owner` use, so a client can only ever move its
@@ -292,7 +466,7 @@ fn spawn_surface_height(grid: Option<&crate::terrain_grid::HeightGrid>, xz: Vec2
 /// Resolve a requested spawn XZ against live tank positions (Finding: two players clicking the
 /// same point spawned overlapping dynamic colliders). Returns the first UNOCCUPIED point — the
 /// request itself, or the first free candidate of a deterministic outward ring search
-/// ([`SPAWN_SEARCH_DIRECTIONS`] × [`SPAWN_SEARCH_RADII_M`], candidates clamped into the placeable
+/// ([`SPAWN_SEARCH_RINGS`], candidates clamped into the placeable
 /// square) — plus whether it was nudged; `None` when everything within ~50 m is occupied (the
 /// caller falls back to the lane spawn). Pure, so the policy is unit-testable without a world.
 fn resolve_free_spawn_xz(desired: Vec2, occupied: &[Vec2]) -> Option<(Vec2, bool)> {
@@ -305,8 +479,8 @@ fn resolve_free_spawn_xz(desired: Vec2, occupied: &[Vec2]) -> Option<(Vec2, bool
     if free(desired) {
         return Some((desired, false));
     }
-    for radius in SPAWN_SEARCH_RADII_M {
-        for dir in SPAWN_SEARCH_DIRECTIONS {
+    for (radius, dirs) in SPAWN_SEARCH_RINGS {
+        for &dir in dirs {
             let candidate = (desired + dir * radius).clamp(Vec2::splat(-limit), Vec2::splat(limit));
             if free(candidate) {
                 return Some((candidate, true));
@@ -712,7 +886,7 @@ fn respawn_player_tanks(
                              {} m occupied — falling back to the lane spawn",
                             xz.x,
                             xz.y,
-                            SPAWN_SEARCH_RADII_M[SPAWN_SEARCH_RADII_M.len() - 1]
+                            SPAWN_SEARCH_RINGS[SPAWN_SEARCH_RINGS.len() - 1].0
                         );
                         None
                     }
@@ -915,17 +1089,17 @@ mod tests {
         assert!(nudged);
         assert_eq!(
             spot,
-            desired + SPAWN_SEARCH_DIRECTIONS[2] * SPAWN_SEARCH_RADII_M[0],
+            desired + SPAWN_DIRS_8[2] * SPAWN_SEARCH_RINGS[0].0,
             "first free candidate in fixed ring order"
         );
         // A tank ON the point (opponent parked there): first candidate +X@8 is 8 m away — free.
         let (spot, nudged) = resolve_free_spawn_xz(desired, &[desired]).expect("a ring is free");
         assert!(nudged);
-        assert_eq!(spot, desired + Vec2::new(SPAWN_SEARCH_RADII_M[0], 0.0));
+        assert_eq!(spot, desired + Vec2::new(SPAWN_SEARCH_RINGS[0].0, 0.0));
         // Every candidate occupied (a tank parked on each): lane fallback.
         let mut crowd = vec![desired];
-        for radius in SPAWN_SEARCH_RADII_M {
-            for dir in SPAWN_SEARCH_DIRECTIONS {
+        for (radius, dirs) in SPAWN_SEARCH_RINGS {
+            for &dir in dirs {
                 crowd.push(desired + dir * radius);
             }
         }
@@ -936,6 +1110,72 @@ mod tests {
         let (spot, nudged) = resolve_free_spawn_xz(corner, &[corner]).expect("a ring is free");
         assert!(nudged);
         assert!(spot.x.abs() <= limit && spot.y.abs() <= limit);
+    }
+
+    /// The ring tables are what their doc claims: per-ring count `max(8, ceil(2πr / 8 m))` (so
+    /// candidate spacing never exceeds ~8 m of arc — the 8-spoke pattern left 37.7 m gaps at
+    /// 48 m), radii ascending, and every entry the exact unit vector `(cos, sin)(2πk/n)` CCW
+    /// from +X. Test-side trig only — the tables themselves are constants.
+    #[test]
+    fn spawn_search_rings_are_unit_uniform_and_dense_enough() {
+        let mut previous = 0.0_f32;
+        for (radius, dirs) in SPAWN_SEARCH_RINGS {
+            assert!(radius > previous, "ring radii must ascend");
+            previous = radius;
+            let n = dirs.len();
+            let want = ((core::f32::consts::TAU * radius / 8.0).ceil() as usize).max(8);
+            assert_eq!(n, want, "ring {radius} m needs {want} directions, has {n}");
+            for (k, dir) in dirs.iter().enumerate() {
+                let angle = core::f32::consts::TAU * k as f32 / n as f32;
+                let exact = Vec2::new(angle.cos(), angle.sin());
+                assert!(
+                    (*dir - exact).length() < 1e-6,
+                    "ring {radius} m dir {k} is {dir:?}, wants {exact:?}"
+                );
+            }
+        }
+        assert_eq!(
+            SPAWN_SEARCH_RINGS[SPAWN_SEARCH_RINGS.len() - 1].0,
+            48.0,
+            "the ~50 m search budget is unchanged"
+        );
+    }
+
+    /// The between-spokes case the 8-spoke pattern MISSED: park tanks on every candidate the
+    /// old search would have tried (all inner-ring candidates plus the 8 compass points at
+    /// 48 m) — the old search returned `None` (lane fallback) with whole occupancy-diameters of
+    /// free ground between the outer spokes; the dense rings find the spoke neighbour ~7.9 m of
+    /// arc away, deterministically.
+    #[test]
+    fn outer_ring_between_spokes_gap_is_searched() {
+        let desired = Vec2::new(100.0, -50.0);
+        let mut crowd = vec![desired];
+        // Every candidate of every ring below 48 m…
+        for (radius, dirs) in &SPAWN_SEARCH_RINGS[..SPAWN_SEARCH_RINGS.len() - 1] {
+            for &dir in *dirs {
+                crowd.push(desired + dir * *radius);
+            }
+        }
+        // …plus exactly the old 8 compass spokes at 48 m.
+        for dir in SPAWN_DIRS_8 {
+            crowd.push(desired + dir * 48.0);
+        }
+        let (spot, nudged) =
+            resolve_free_spawn_xz(desired, &crowd).expect("a between-spokes candidate is free");
+        assert!(nudged);
+        // The first free candidate in fixed order: ring 48's direction 1 (9.47° — 7.93 m of arc
+        // from the occupied +X spoke, outside the 6 m occupancy radius).
+        assert_eq!(spot, desired + SPAWN_DIRS_38[1] * 48.0);
+        assert!(
+            (spot - desired).length() > 47.9,
+            "the free spot sits on the outer ring"
+        );
+        for tank in &crowd {
+            assert!(
+                spot.distance(*tank) >= SPAWN_OCCUPIED_RADIUS_M,
+                "the found spot must clear every occupant"
+            );
+        }
     }
 
     /// The footprint ground query (Finding: sampling only the tank-root point buried the uphill

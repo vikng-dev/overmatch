@@ -36,7 +36,10 @@ pub(crate) const MAX_RANGE: f32 = 10_000.0;
 /// `own` tank's volumes are excluded: every aim ray legitimately starts inside or behind them (the
 /// optic resolve at the gun pivot inside the mantlet, the third-person pick behind own turret, the
 /// bore ray at the muzzle inside the barrel's exposed-component volume), and a self-hit would weld
-/// the aim to the tank itself. Falls back to `max` on a miss (sky / above the horizon).
+/// the aim to the tank itself. Falls back to `max` on a miss (sky / above the horizon); the CAST
+/// itself is clamped to [`crate::world::VIEW_CAST_MAX_M`] — nothing exists between the world
+/// diagonal and [`MAX_RANGE`] for a ray to hit, so behavior is identical at a fraction of the
+/// parry traversal.
 pub(crate) fn aim_distance(
     spatial: &SpatialQuery,
     ray: Ray3d,
@@ -54,7 +57,7 @@ pub(crate) fn aim_distance(
         .cast_ray_predicate(
             ray.origin,
             ray.direction,
-            max,
+            max.min(crate::world::VIEW_CAST_MAX_M),
             true,
             &SpatialQueryFilter::from_mask(
                 LayerMask::from(Layer::Terrain) | LayerMask::from(Layer::Armor),

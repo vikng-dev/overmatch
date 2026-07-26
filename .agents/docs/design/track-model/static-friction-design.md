@@ -94,7 +94,7 @@ pub struct TrackGrip { pub sides: [[f32; 2]; 2] }
 The per-element field is root-resident local-rollback state that never crosses the wire per tick;
 reconciliation is the wrench anchor + exact sparse checkpoints of [[0027-element-grip-netcode]].
 
-### Law (inside `step_side`, one law, no branches)
+### Law (inside `contact_side`, one law, no branches)
 
 Per side: load-weighted slip resultant s̄ from the existing per-column slips; budget
 C = Σ μ·load_i. The stored elastic resultant q updates by the **elasto-plastic Dahl** form
@@ -116,8 +116,10 @@ C = Σ μ·load_i. The stored elastic resultant q updates by the **elasto-plasti
 h = H(|target|/vs)·H(|belt|/vs) (smoothstep, the existing 0.4 m/s scale):
 `ḃ = (engine − (1−h)·R)/I` — at zero command + zero belt speed the locked drivetrain bears
 the ground reaction instead of being back-driven; during motion h→0, today's dynamics
-unchanged. Legitimate force balance: the belt's 1-D coordinate is fully known inside
-`step_side`. A future neutral/clutch or brake-damage mechanic weakens this term explicitly.
+unchanged. Legitimate force balance: the belt's 1-D coordinate is fully known to the belt
+integrator, which is `transmission::step` — the Governor arm calls `forces::governor_belt` (this
+term, verbatim), and the declared-gearbox arm builds the same hold from `forces::hold_blend`. A
+future neutral/clutch or brake-damage mechanic weakens this term explicitly.
 
 ### Constants (declared, with provenance)
 

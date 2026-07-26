@@ -8,8 +8,7 @@
 //! dip or in the air) up to the bump stop (`max_lift` above rest, where an obstacle bottoms it).
 //! `wheel_lift_target` therefore reports the TRUE signed deepest reach of the lower arc — negative
 //! on open ground (the wheel wants to drop to green), positive under terrain — clamped to that
-//! `[-max_droop, max_lift]` band. A caller with `max_droop = 0` gets the old lift-only floor at
-//! rest.
+//! `[-max_droop, max_lift]` band.
 //!
 //! Rise is a fast critically-damped ease integrated IMPLICITLY (unconditionally stable at any
 //! ω·Δt); fall is ballistic (the wheel drops at gravity, not at a tuned rate), toward the target —
@@ -58,8 +57,9 @@ pub struct WheelParams {
     pub reach: f32,
     pub ease_omega: f32,
     pub max_lift: f32,
-    /// How far BELOW the rest line the wheel may droop (m, ≥ 0). `0.0` reproduces the old lift-only
-    /// behaviour: the target then floors at rest instead of dropping toward the green envelope.
+    /// How far BELOW the rest line the wheel may droop (m). REQUIRED to be the caller's real
+    /// chain-clamped droop (`TrackGear::max_droop` / `RigGeom::droop_travel(..).effective`) —
+    /// there is no lift-only compatibility mode.
     pub max_droop: f32,
     pub lateral_stations: [f32; 3],
     pub probe_reach: f32,
@@ -71,10 +71,7 @@ pub struct WheelParams {
 /// is the hull's world down.
 ///
 /// `TerrainOracle::depth_along` returns negative clearance, so on clear ground the arc max is
-/// negative and the target lands at `-max_droop` (full droop). A caller passing `max_droop = 0.0`
-/// gets exactly the old lift-only behaviour: the clamp floors at rest, and the seed of
-/// `f32::NEG_INFINITY` is bit-equivalent to the old `0.0` seed once any station reads clearance
-/// (both fold to the same non-negative max under a `min(max_lift)` cap).
+/// negative and the target lands at `-max_droop` (full droop).
 pub fn wheel_lift_target<O: TerrainOracle>(
     oracle: &O,
     affine: &Affine3A,
@@ -199,44 +196,5 @@ mod tests {
             &p,
         );
         assert_eq!(target, p.max_lift);
-    }
-
-    /// `max_droop = 0.0` reproduces the OLD lift-only computation bit for bit on a scenario with
-    /// real penetration: the new signed-max-then-clamp folds to the same value the old
-    /// `max`-from-zero-then-`min(max_lift)` did, because the clamp's lower bound is exactly the old
-    /// zero floor.
-    #[test]
-    fn max_droop_of_zero_reproduces_the_lift_only_behaviour_bit_for_bit() {
-        let p = params(0.0, 0.12);
-        // Bottom station 3 cm inside the surface, upper arc clear — a genuine mixed read.
-        let pivot = Vec3::new(0.0, p.reach, 0.0);
-        let ground = FlatGround { y: 0.03 };
-        let affine = Affine3A::IDENTITY;
-        let down = Vec3::NEG_Y;
-
-        // The pre-envelope algorithm, verbatim: seed 0.0, max the arc, cap at max_lift.
-        let old = {
-            let mut t = 0.0_f32;
-            for (s, c) in WHEEL_ARC {
-                for offset in p.lateral_stations {
-                    let local = pivot + Vec3::new(offset, -p.reach * c, p.reach * s);
-                    t = t.max(ground.depth_along(
-                        affine.transform_point3(local),
-                        down,
-                        p.probe_reach,
-                    ));
-                }
-            }
-            t.min(p.max_lift)
-        };
-        let new = wheel_lift_target(&ground, &affine, down, pivot, &p);
-        assert_eq!(
-            new, old,
-            "max_droop=0 must match the old lift-only target exactly"
-        );
-        assert!(
-            new > 0.0,
-            "the scenario should carry real penetration, got {new}"
-        );
     }
 }

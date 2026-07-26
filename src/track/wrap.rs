@@ -25,7 +25,7 @@ use bevy::math::{Affine3A, Vec2, Vec3};
 
 use super::forces::phase_decompose;
 use super::oracle::TerrainOracle;
-use super::route::{arc, external_tangent, polyline_len, resample, sag_span};
+use super::route::{external_tangent, polyline_len, resample, sag_span, taut_lower_run};
 
 /// Gravity (m/s²) for the wrap-feel BALLISTIC laws — the SAME value
 /// [`wheel_lift_step`](super::wheels::wheel_lift_step) falls the view wheels at, so the belt memory
@@ -468,9 +468,10 @@ struct RawBelly {
     sprocket_up: Vec2,
 }
 
-/// Build one side's taut wrap + raw conform: the lower convex envelope over the ordered pin-line
-/// `circles` (`[sprocket, road wheels…, idler]`, already articulated & sorted front→rear), then the
-/// bottom run densely resampled and probed against the field along its outward normal.
+/// Build one side's taut wrap + raw conform: [`taut_lower_run`]'s lower-envelope walk over the
+/// ordered pin-line `circles` (`[sprocket, road wheels…, idler]`, already articulated & sorted
+/// front→rear), then the bottom run densely resampled and probed against the field along its
+/// outward normal.
 fn raw_belly<O: TerrainOracle>(
     oracle: &O,
     affine: &Affine3A,
@@ -480,44 +481,13 @@ fn raw_belly<O: TerrainOracle>(
     lateral_stations: [f32; 3],
     circles: &[(Vec2, f32)],
 ) -> RawBelly {
-    // Lower convex envelope over the ordered circles (Graham-style scan): a circle whose body stays
-    // above its neighbours' lower tangent is not part of the taut run and drops out — a lifted wheel
-    // is skipped, never wrapped from the wrong side.
-    let mut active: Vec<usize> = vec![0];
-    for c in 1..circles.len() {
-        while active.len() >= 2 {
-            let (p, a) = (active[active.len() - 2], active[active.len() - 1]);
-            let (t0, _) =
-                external_tangent(circles[p].0, circles[p].1, circles[c].0, circles[c].1, -1.0);
-            let n = (t0 - circles[p].0) / circles[p].1;
-            if (circles[a].0 - t0).dot(n) + circles[a].1 > 1e-4 {
-                break;
-            }
-            active.pop();
-        }
-        active.push(c);
-    }
-
-    // The taut bottom polyline, sprocket_up → front arc → tangents/arcs → idler_up.
+    // The taut bottom polyline, sprocket_up → front arc → tangents/arcs → idler_up — the shared
+    // envelope walk, sunk RAW (no dedupe: the conform resample rides the walk's own spacing).
     let (sprocket_c, sprocket_r) = circles[0];
     let (idler_c, idler_r) = *circles.last().unwrap();
     let (idler_up, sprocket_up) = external_tangent(idler_c, idler_r, sprocket_c, sprocket_r, 1.0);
     let mut taut: Vec<Vec2> = Vec::new();
-    let mut cursor = sprocket_up;
-    for w in active.windows(2) {
-        let (i, j) = (w[0], w[1]);
-        let (t0, t1) =
-            external_tangent(circles[i].0, circles[i].1, circles[j].0, circles[j].1, -1.0);
-        let toward = if i == 0 {
-            Vec2::new(-1.0, 0.0) // the sprocket wraps around its front
-        } else {
-            Vec2::new(0.0, -1.0) // road wheels wrap under
-        };
-        taut.extend(arc(circles[i].0, circles[i].1, cursor, t0, toward));
-        taut.push(t1);
-        cursor = t1;
-    }
-    taut.extend(arc(idler_c, idler_r, cursor, idler_up, Vec2::new(1.0, 0.0)));
+    taut_lower_run(circles, sprocket_up, idler_up, |p| taut.push(p));
 
     // The conform stations: a dense resample of the taut bottom, so a board mid-tangent is sampled.
     // Displace each ground-facing station AGAINST its outward normal by the directional field depth

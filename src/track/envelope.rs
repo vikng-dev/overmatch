@@ -73,8 +73,9 @@ impl TerrainOracle for FlatRest {
 
 /// One side's loop for calibration: the CLOSED pin-line polyline the force law will actually
 /// ride (last point == first), its signed track-plane x, and its free-travel profile knots
-/// (see [`wheel_travel_knots`]). Callers with per-side measured loops pass two different
-/// polylines; a caller with one shared loop passes it twice at ± plane_x.
+/// (see [`wheel_travel_knots`]). A vehicle has exactly two — callers with per-side measured
+/// loops pass two different polylines; a caller with one shared loop passes it twice at
+/// ± plane_x.
 pub(crate) struct EnvelopeSide<'a> {
     pub loop_pts: &'a [Vec2],
     pub plane_x: f32,
@@ -92,7 +93,7 @@ pub(crate) struct EnvelopeSide<'a> {
 /// [`ForceParams`]/[`SideInput`] will carry, `count` the material link count — the whole
 /// point is that the calibration pass and the live law are the same computation.
 pub(crate) fn calibrate(
-    sides: &[EnvelopeSide<'_>],
+    sides: &[EnvelopeSide<'_>; 2],
     count: usize,
     face_offset: f32,
     engage_depth: f32,
@@ -140,7 +141,7 @@ pub(crate) fn calibrate(
             plane_x: side.plane_x,
             columns: side.columns,
             command: 0.0,
-            travel: Some(TravelField { knots: side.knots }),
+            travel: TravelField { knots: side.knots },
         };
         let (report, _) = contact_side(
             &input,
@@ -228,12 +229,13 @@ mod tests {
         let loop_pts = rect_loop(0.0);
         // Real callers floor the travel BEFORE building knots — mirror that here.
         let knots = [(-1.0, MIN_ENVELOPE_TRAVEL), (1.0, MIN_ENVELOPE_TRAVEL)];
-        let sides = [EnvelopeSide {
+        let columns = [(-0.1, 0.25), (0.0, 0.5), (0.1, 0.25)];
+        let sides = [-1.5_f32, 1.5].map(|plane_x| EnvelopeSide {
             loop_pts: &loop_pts,
-            plane_x: 0.0,
+            plane_x,
             knots: &knots,
-            columns: [(-0.1, 0.25), (0.0, 0.5), (0.1, 0.25)],
-        }];
+            columns,
+        });
         let cal = calibrate(&sides, 25, 0.025, 0.002, 0.5, 100_000.0, 0.0, 1.2, 0.35);
         assert_eq!(cal.free_travel, MIN_ENVELOPE_TRAVEL);
         assert!(cal.stiffness_per_m.is_finite() && cal.stiffness_per_m > 0.0);

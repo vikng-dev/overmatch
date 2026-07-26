@@ -1,7 +1,8 @@
 //! The locomotion sim (phase B): the track model's belt forces ARE how tanks drive. The ECS
 //! adapter over [`super::forces`] — one deep boundary; support, traction, and belt dynamics
-//! live behind `step_side`, this module owns queries, scheduling, capability gating, and the
-//! netcode-visible [`TrackDrive`] state.
+//! live behind `contact_side` + `transmission::step` (one joint form for every architecture),
+//! this module owns queries, scheduling, capability gating, and the netcode-visible
+//! [`TrackDrive`] state.
 //!
 //! Sim discipline (hard rules, each bought with a measured MP failure in the raycast sim this
 //! replaces):
@@ -40,7 +41,7 @@ use crate::bitprobe::BitprobeCapture;
 use super::drive::{DriveAxes, shape_drive};
 use super::forces::{
     BeltContact, ForceParams, GripElements, SideInput, SideReport, SideState, contact_side,
-    grip_stiffness, step_side,
+    grip_stiffness,
 };
 use super::route::build_route;
 use super::side::Side;
@@ -194,7 +195,7 @@ pub struct TrackContacts(pub [Vec<BeltContact>; 2]);
 ///
 /// Constructed at tank spawn with both slabs pre-sized `link_count * 3`
 /// ([`Self::for_links`], called by the authoritative/shared root construction path) — the
-/// REV-15 fixed-size invariant: `step_side` never resizes at runtime, because a runtime
+/// REV-15 fixed-size invariant: `contact_side` never resizes at runtime, because a runtime
 /// rebuild silently erases strain a rollback replay would then trust. Attached to EVERY tank
 /// authority root. A predicted joining replica waits for that exact fixed-size snapshot before its
 /// body attaches; interpolated remotes neither receive nor simulate the private field.
@@ -675,114 +676,37 @@ fn apply_track_forces(
         let center_of_mass = pos.0 + rot.0 * center_of_mass.0;
         let mut effect = TrackGripEffect::default();
 
-        // The JOINT drivetrain branch: MP runs the declared architecture; the offline-only
-        // [`TransmissionFeelTest`] can override it. An explicit Governor selection falls
-        // through to the governor loop below. A regenerative override on a vehicle whose spec
-        // declares `architecture: Governor` has no tables to run — say so instead of silently
-        // demoting to the governor (dev-time loudness; the spec path can never hit this arm
-        // because `mode` and `trans` come from the same validated block).
-        let joint = match (mode, gear.trans.as_ref()) {
-            (TransmissionMode::Governor, _) => None,
+        // THE joint drivetrain form — every architecture, one path. MP runs the declared
+        // architecture; the offline-only [`TransmissionFeelTest`] can override it. An explicit
+        // Governor selection runs through [`transmission::step`] like the others: its Governor
+        // arm is the exact per-side [`super::forces::governor_belt`] law, bit-identical to the
+        // `step_side` tail this module no longer calls (pinned by `transmission::tests::
+        // governor_adapter_matches_legacy_belt`), and it never touches the transmission state.
+        // A regenerative override on a vehicle whose spec declares `architecture: Governor`
+        // has no tables to run — say so instead of silently pretending (dev-time loudness;
+        // the spec path can never hit this arm because `mode` and `trans` come from the same
+        // validated block).
+        let (mode, tp) = match (mode, gear.trans.as_ref()) {
+            (TransmissionMode::Governor, _) => (TransmissionMode::Governor, None),
+            (m, Some(tp)) => (m, Some(tp)),
             (m, None) => {
                 bevy::log::warn_once!(
                     "transmission override {m:?} needs declared tables, but this vehicle's \
                      spec selects architecture: Governor (tableless) — running the governor"
                 );
-                None
+                (TransmissionMode::Governor, None)
             }
-            (m, Some(tp)) => Some((m, tp)),
         };
-        if let Some((mode, tp)) = joint {
-            // Transmission-design §2 scheduling: evaluate BOTH contact patches at their
-            // pre-tick belt speeds, solve the joint transmission once, integrate both
-            // speeds, advect both phases. Emitting all of L's forces then all of R's keeps
-            // the governor loop's accumulation order — within a tick force application never feeds
-            // back into `vel_at`, so contact evaluation order cannot change the numbers.
-            let mut reports: [SideReport; 2] = [SideReport::default(), SideReport::default()];
-            let mut live = [false; 2];
-            for side in Side::ALL {
-                let si = side.index();
-                let input = SideInput {
-                    loop_pts: &gear.loop_pts,
-                    count: gear.count,
-                    plane_x: side.plane_x(gear.plane_x),
-                    columns: gear.columns[si],
-                    command: side_commands[si],
-                    travel: Some(super::forces::TravelField {
-                        knots: &gear.travel_knots,
-                    }),
-                };
-                let ds = drive.sides[si];
-                let state = SideState {
-                    speed: ds.speed,
-                    phase: ds.phase,
-                    grip: bevy::math::Vec2::new(grip.sides[si][0], grip.sides[si][1]),
-                };
-                let (report, ok) = contact_side(
-                    &input,
-                    state,
-                    affine,
-                    dt,
-                    &gear.params,
-                    oracle,
-                    |p| forces.velocity_at_point(p),
-                    &mut grip_elements.sides[si],
-                );
-                reports[si] = report;
-                live[si] = ok;
-            }
-            let tr = transmission::step(
-                mode,
-                &gear.params,
-                Some(tp),
-                &mut trans_state.0,
-                &TransmissionInput {
-                    throttle: drive.throttle,
-                    steer: drive.steer,
-                    side_commands,
-                    speeds: [drive.sides[0].speed, drive.sides[1].speed],
-                    reactions: [reports[0].belt_reaction, reports[1].belt_reaction],
-                    dt,
-                },
-            );
-            #[cfg(feature = "bitprobe")]
-            if let Some(capture) = bitprobe.as_deref_mut() {
-                for (side, report) in reports.iter_mut().enumerate() {
-                    capture.contact_inputs[side] = std::mem::take(&mut report.bitprobe_contacts);
-                    capture.element_outputs[side] = std::mem::take(&mut report.bitprobe_elements);
-                }
-                capture.belt_reaction = [reports[0].belt_reaction, reports[1].belt_reaction];
-                capture.transmission = tr.bitprobe;
-            }
-            for (si, report) in reports.into_iter().enumerate() {
-                effect.belt_reaction[si] = report.belt_reaction;
-                for contact in &report.contacts {
-                    effect.traction_force += contact.traction;
-                    effect.traction_torque +=
-                        (contact.point - center_of_mass).cross(contact.traction);
-                }
-                for app in &report.apps {
-                    forces.apply_force_at_point(app.force, app.point);
-                }
-                if live[si] {
-                    let pre_speed = drive.sides[si].speed;
-                    drive.sides[si] = TrackDriveSide {
-                        speed: tr.next_speeds[si],
-                        // Phase advects at the PRE-update speed, like the governor tail.
-                        phase: drive.sides[si].phase + f64::from(pre_speed * dt),
-                    };
-                }
-                grip.sides[si] = [report.state.grip.x, report.state.grip.y];
-                contacts.0[si] = report.contacts;
-            }
-            effect.field_digest = coarse_grip_digest(&grip_elements);
-            *grip_effect = effect;
-            continue;
-        }
-
-        // Fixed left-then-right — the accumulation order is part of determinism. `plane_x`'s
-        // sign is the side's (`Side::plane_x` is an exact ±1 flip); `sides`/`grip.sides` stay
-        // bare `[T; 2]` (replicated wire shape), indexed by `side.index()`.
+        // Transmission-design §2 scheduling: evaluate BOTH contact patches at their
+        // pre-tick belt speeds, solve the joint transmission once, integrate both
+        // speeds, advect both phases. Emitting all of L's forces then all of R's keeps
+        // the fixed left-then-right accumulation order — within a tick force application
+        // never feeds back into `vel_at`, so contact evaluation order cannot change the
+        // numbers. `sides`/`grip.sides` stay bare `[T; 2]` (replicated wire shape),
+        // indexed by `side.index()`; `plane_x`'s sign is the side's (`Side::plane_x` is
+        // an exact ±1 flip).
+        let mut reports: [SideReport; 2] = [SideReport::default(), SideReport::default()];
+        let mut live = [false; 2];
         for side in Side::ALL {
             let si = side.index();
             let input = SideInput {
@@ -791,9 +715,9 @@ fn apply_track_forces(
                 plane_x: side.plane_x(gear.plane_x),
                 columns: gear.columns[si],
                 command: side_commands[si],
-                travel: Some(super::forces::TravelField {
+                travel: super::forces::TravelField {
                     knots: &gear.travel_knots,
-                }),
+                },
             };
             let ds = drive.sides[si];
             let state = SideState {
@@ -801,7 +725,7 @@ fn apply_track_forces(
                 phase: ds.phase,
                 grip: bevy::math::Vec2::new(grip.sides[si][0], grip.sides[si][1]),
             };
-            let report = step_side(
+            let (report, ok) = contact_side(
                 &input,
                 state,
                 affine,
@@ -811,6 +735,33 @@ fn apply_track_forces(
                 |p| forces.velocity_at_point(p),
                 &mut grip_elements.sides[si],
             );
+            reports[si] = report;
+            live[si] = ok;
+        }
+        let tr = transmission::step(
+            mode,
+            &gear.params,
+            tp,
+            &mut trans_state.0,
+            &TransmissionInput {
+                throttle: drive.throttle,
+                steer: drive.steer,
+                side_commands,
+                speeds: [drive.sides[0].speed, drive.sides[1].speed],
+                reactions: [reports[0].belt_reaction, reports[1].belt_reaction],
+                dt,
+            },
+        );
+        #[cfg(feature = "bitprobe")]
+        if let Some(capture) = bitprobe.as_deref_mut() {
+            for (side, report) in reports.iter_mut().enumerate() {
+                capture.contact_inputs[side] = std::mem::take(&mut report.bitprobe_contacts);
+                capture.element_outputs[side] = std::mem::take(&mut report.bitprobe_elements);
+            }
+            capture.belt_reaction = [reports[0].belt_reaction, reports[1].belt_reaction];
+            capture.transmission = tr.bitprobe;
+        }
+        for (si, report) in reports.into_iter().enumerate() {
             effect.belt_reaction[si] = report.belt_reaction;
             for contact in &report.contacts {
                 effect.traction_force += contact.traction;
@@ -820,10 +771,15 @@ fn apply_track_forces(
             for app in &report.apps {
                 forces.apply_force_at_point(app.force, app.point);
             }
-            drive.sides[si] = TrackDriveSide {
-                speed: report.state.speed,
-                phase: report.state.phase,
-            };
+            if live[si] {
+                let pre_speed = drive.sides[si].speed;
+                drive.sides[si] = TrackDriveSide {
+                    speed: tr.next_speeds[si],
+                    // Phase advects at the PRE-update speed — `contact_side` evaluated the
+                    // stations there, and the retired governor tail advected the same way.
+                    phase: drive.sides[si].phase + f64::from(pre_speed * dt),
+                };
+            }
             grip.sides[si] = [report.state.grip.x, report.state.grip.y];
             contacts.0[si] = report.contacts;
         }

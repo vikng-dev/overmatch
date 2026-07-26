@@ -1,6 +1,8 @@
-//! The shared analytic terrain field (architecture §5): a [`BlockField`] built from the
-//! [`TerrainMap`] whenever its revision changes — colliders and this field derive from ONE
-//! block list, so physics, sim forces, and the track view can never disagree about terrain.
+//! The shared analytic terrain field (architecture §5): a [`BlockField`] rebuilt whenever the
+//! [`TerrainMap`]'s revision changes, carrying BOTH ground terms — the authored blocks (the
+//! colliders and this field derive from ONE block list) and the decoded `HeightGrid` (the same
+//! immutable samples the collider, the render mesh, spawn placement and ballistics read). So
+//! physics, sim forces, and the track view can never disagree about terrain.
 //!
 //! Mounted by `SimPlugin` (the plugin fn below), so it exists on the dedicated server, the SP
 //! client, and the net client alike: the phase-B force systems read it inside `FixedUpdate`,

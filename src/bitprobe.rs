@@ -565,8 +565,14 @@ fn startup_dump(app: &App, tank: Entity) -> StartupBuilder {
     out.f32("spec.track.link_mass", track.link_mass);
     out.f32("spec.track.hinge_torque", track.hinge_torque);
     // The hinge stops as the sim sees them — RADIANS, past the spec's degrees seam.
-    out.f32("spec.track.link_angle.inward", track.link_angle.inward());
-    out.f32("spec.track.link_angle.outward", track.link_angle.outward());
+    out.f32(
+        "spec.track.link_angle.inward",
+        track.link_angle.inward_deg.to_radians(),
+    );
+    out.f32(
+        "spec.track.link_angle.outward",
+        track.link_angle.outward_deg.to_radians(),
+    );
     out.u32("spec.track.sprocket.teeth", track.sprocket.teeth);
     // Running-gear GEOMETRY is MEASURED off the glb now — a fresh cross-target divergence surface
     // (marker measurement + derivation runs per target). Echo the derived scalars the `TrackGear`
@@ -575,7 +581,7 @@ fn startup_dump(app: &App, tank: Entity) -> StartupBuilder {
     let geom = world.resource::<crate::track::rig_geom::RigGeom>();
     out.f32("derived.pitch", geom.pitch);
     out.f32("derived.thickness", geom.thickness);
-    out.f32("derived.width", geom.width);
+    out.f32("derived.width", geom.model.width);
     out.f32(
         "spec.track.powertrain.max_speed",
         track.powertrain.max_speed,

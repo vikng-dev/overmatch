@@ -17,17 +17,13 @@
 //!     link window are all functions of `(z, y)` alone — width never enters them, because a wider
 //!     shoe does not change where the belt goes. Everything LATERAL goes through the measured shoe
 //!     faces in exactly two places: the GRIP COLUMNS ([`RigGeom::grip_columns`]) and rendering
-//!     ([`RigGeom::link_center_x`], with the `width` scalar as the drawn link's SIZE). Keeping
+//!     ([`RigGeom::link_center_x`]; [`DerivedModel::width`] is the drawn link's SIZE). Keeping
 //!     that seam sharp is what lets the whole rig be derived from a handful of side-plane numbers.
 //!
 //! The three CAST POSES ([`Pose`]) are the design's trapezoid: sprocket and idler are bolted to the
 //! hull and never move, only the sprung road wheels swing, so the belt envelope pins at its ends and
 //! breathes at the belly. That asymmetry is also why the link-count window ([`LinkWindow`]) exists —
 //! see [`link_window`].
-
-// The contract is written before its consumers: the sandbox rig, the wheel spawn, and the belt
-// build land alongside it. Remove this once `mod.rs` drives the derived rig.
-#![allow(dead_code)]
 
 use std::path::Path;
 
@@ -114,11 +110,6 @@ pub(crate) struct RigGeom {
     pub pitch: f32,
     /// Plate thickness (m) = `pin_to_inner + pin_to_outer`, measured, no mid-plate assumption.
     pub thickness: f32,
-    /// Shoe width (m), lateral — measured off the link's `Link_Box` volume (see
-    /// [`DerivedModel::width`]). A SIZE, not a position: the shoe is not centred on
-    /// [`Self::plane_x`], so anything that needs a lateral POSITION must go through
-    /// [`Self::grip_columns`] / [`Self::link_center_x`] rather than `plane_x ± width/2`.
-    pub width: f32,
     /// The track's lateral median plane |x| (m); left sits at −`plane_x`, right at +`plane_x`.
     /// This is the PIN plane — where the 2-D route lives — not the shoe's centre.
     pub plane_x: f32,
@@ -208,7 +199,6 @@ impl RigGeom {
             link_count,
             pitch: model.pitch,
             thickness: model.pin_to_inner + model.pin_to_outer,
-            width: model.width,
             plane_x: model.plane_x,
             window: window_of(
                 rest.get(Side::Right),
@@ -424,6 +414,11 @@ impl RigGeom {
     /// roller or a second idler is covered the day the circle appears — the list IS the set of
     /// things the belt has to bend around. Pose-independent by construction: a cast pose moves
     /// wheel CENTRES, and a wrap angle is a function of the RADIUS alone.
+    ///
+    /// Test-only: this exists for the wrap-clearance asset guard
+    /// (`the_authored_hinge_clears_every_wrap_the_running_gear_demands`), which is the thing that
+    /// catches a silently re-exported smaller wheel. No runtime consumer.
+    #[cfg(test)]
     pub(crate) fn wrap_demands(&self, side: Side) -> Vec<WrapDemand> {
         let circles = self.rest.get(side);
         let last = circles.len().saturating_sub(1);
@@ -443,6 +438,7 @@ impl RigGeom {
     }
 
     /// The TIGHTEST wrap on a side — the one circle the hinge limit actually has to clear.
+    #[cfg(test)]
     pub(crate) fn worst_wrap_demand(&self, side: Side) -> WrapDemand {
         self.wrap_demands(side)
             .into_iter()
@@ -453,6 +449,7 @@ impl RigGeom {
 
 /// Which running-gear circle a [`WrapDemand`] came off — for the report, and so a failing
 /// clearance assertion can name the part rather than an index.
+#[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum WrapRole {
     Sprocket,
@@ -461,6 +458,7 @@ pub(crate) enum WrapRole {
     Idler,
 }
 
+#[cfg(test)]
 impl std::fmt::Display for WrapRole {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -472,7 +470,9 @@ impl std::fmt::Display for WrapRole {
 }
 
 /// How far ONE joint must fold to wrap a given circle. The demand side of the hinge budget; see
-/// [`derive::wrap_joint_angle`] for the chord relation and [`derive::hinge`] for the supply side.
+/// [`derive::wrap_joint_angle`] for the chord relation — the supply side is the authored
+/// `track.link_angle.inward_deg`.
+#[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) struct WrapDemand {
     pub role: WrapRole,
@@ -1174,10 +1174,10 @@ mod tests {
             [m.lateral_min, m.link_center_x, m.lateral_max]
         );
         // The symmetric construction would have put them here — 20 mm out on BOTH edges.
-        assert!((right[0].0 - (rig.plane_x - rig.width / 2.0)).abs() > 0.019);
-        assert!((right[2].0 - (rig.plane_x + rig.width / 2.0)).abs() > 0.019);
+        assert!((right[0].0 - (rig.plane_x - m.width / 2.0)).abs() > 0.019);
+        assert!((right[2].0 - (rig.plane_x + m.width / 2.0)).abs() > 0.019);
         // The span is still exactly the width, and the centre is still the mid of the faces.
-        assert!((right[2].0 - right[0].0 - rig.width).abs() < 1e-6);
+        assert!((right[2].0 - right[0].0 - m.width).abs() < 1e-6);
         assert!(((right[0].0 + right[2].0) * 0.5 - right[1].0).abs() < 1e-6);
 
         // Left mirrors the right, keeping the inboard→outboard order (so index 0 is the inboard

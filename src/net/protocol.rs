@@ -1527,7 +1527,7 @@ mod tests {
         );
     }
 
-    /// Handshake fixture: the complete REV-18 manifest fold is pinned as a concrete netcode
+    /// Handshake fixture: the complete REV-19 manifest fold is pinned as a concrete netcode
     /// `protocol_id`, so fixture drift is visible even when every constituent pin was edited.
     #[test]
     fn wire_manifest_fingerprint_is_pinned() {

@@ -93,6 +93,10 @@ pub fn sprocket_pitch_radius(pitch: f32, teeth: u32) -> f32 {
 /// a wheel whose radius drops below `pitch / (2·sin(θ_max/2))` can no longer be wrapped at all. A
 /// radius under half the pitch is geometrically impossible to wrap (the chord cannot exceed the
 /// diameter) and returns π.
+///
+/// Test-only: the demand side feeds the wrap-clearance asset guard in `super::rig_geom`'s tests
+/// (plus the chord-relation pins below); the running game never consumes a wrap demand.
+#[cfg(test)]
 pub fn wrap_joint_angle(pitch: f32, radius: f32) -> f32 {
     2.0 * (pitch / (2.0 * radius.max(1e-6))).clamp(-1.0, 1.0).asin()
 }

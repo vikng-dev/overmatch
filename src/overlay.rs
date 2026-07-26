@@ -139,6 +139,11 @@ pub(crate) fn top_dismissable(overlays: &Overlays) -> Option<Overlay> {
 /// one-scrim rule immediately hides — invisible, yet counted by [`input_blocked`] and ready to seize
 /// the cursor the instant the layer above closes. `<=` rather than `<`: an overlay that is already the
 /// top layer trivially may re-open, and re-opening is what a self-healing declaration does.
+///
+/// The gate is only as good as the SET GENERATION it reads, so every caller must run in
+/// [`OverlaySet::Toggle`] — after the state-driven declarers have all written this frame. Read from
+/// inside [`OverlaySet::Declare`] it can miss a higher overlay declared later in the same frame and
+/// wave through exactly the invisible latch it exists to prevent.
 pub(crate) fn may_open(overlays: &Overlays, overlay: Overlay) -> bool {
     overlays.top().is_none_or(|top| top <= overlay)
 }
@@ -199,13 +204,26 @@ fn stamp_overlay_zindex(mut world: DeferredWorld, HookContext { entity, .. }: Ho
         .insert(GlobalZIndex(overlay.zindex()));
 }
 
-/// The pinned intra-frame order for the overlay authority: owners DECLARE presence, THEN the cursor
-/// owner derives the license and moves the cursor. Chained so the cursor (and, transitively, the
-/// `PlayerInputSet` gate it drives) reads a fully-reconciled set.
+/// The pinned intra-frame order for the overlay authority: state-driven owners DECLARE presence, THEN
+/// the priority-gated key TOGGLES read that settled set, THEN the cursor owner derives the license and
+/// moves the cursor. Chained so each stage — and, transitively, the `PlayerInputSet` gate the cursor
+/// drives — reads a fully-reconciled set rather than a half-written one.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum OverlaySet {
-    /// Owners declare desired overlay presence into [`Overlays`]. Runs first.
+    /// State-driven owners declare desired overlay presence into [`Overlays`]: the connect screen from
+    /// the link state, the death screen from the crew, view-death from the active station, the menu
+    /// from a focus loss. None of them READS the set, so their order among themselves is free. Runs
+    /// first.
     Declare,
+    /// The key toggles whose OPEN side is gated on priority: Esc's menu ([`esc_menu_target`]) and the
+    /// spawn map's `M` ([`may_open`]). Separated from [`OverlaySet::Declare`] — and ordered after it —
+    /// precisely BECAUSE their gate reads the set. Sharing the declare stage, a toggle could read a
+    /// generation in which a higher overlay declared later that same frame was still missing, pass the
+    /// gate, and latch an overlay the one-scrim rule then hides: invisible, yet counted by
+    /// [`input_blocked`], and seizing the cursor the instant the layer above closes. Toggles among
+    /// themselves are unordered — Esc and `M` in one frame land on a legitimate state either way (a
+    /// map under a menu the player opened is reachable again on menu close).
+    Toggle,
     /// The single cursor owner: release when [`input_blocked`], (deferred) grab when not.
     Cursor,
 }
@@ -213,23 +231,30 @@ pub(crate) enum OverlaySet {
 pub(crate) fn plugin(app: &mut App) {
     app.init_resource::<Overlays>()
         .init_resource::<RefocusGrab>()
-        // Declare presence → cursor owner. The wire-command zeroing (`feed_action_state`) is the fourth
-        // conceptual link but lives in `FixedPreUpdate`; it reads the same [`input_blocked`] authority
-        // off the set reconciled by the previous frame's declarations, exactly as the old zeroing read
-        // last frame's `menu.open`.
-        .configure_sets(Update, (OverlaySet::Declare, OverlaySet::Cursor).chain())
+        // Declare presence → gated toggles → cursor owner. The wire-command zeroing
+        // (`feed_action_state`) is the fourth conceptual link but lives in `FixedPreUpdate`; it reads
+        // the same [`input_blocked`] authority off the set reconciled by the previous frame's
+        // declarations, exactly as the old zeroing read last frame's `menu.open`.
+        .configure_sets(
+            Update,
+            (OverlaySet::Declare, OverlaySet::Toggle, OverlaySet::Cursor).chain(),
+        )
         .add_systems(Startup, spawn_menu_overlay)
         .add_systems(
             Update,
             (
-                (esc_toggle, focus_declare).in_set(OverlaySet::Declare),
+                // Focus loss is state, not a gated toggle: it declares the menu present unconditionally
+                // and reads nothing, so it belongs with the other owners.
+                focus_declare.in_set(OverlaySet::Declare),
+                // Esc's routing READS the set, so it runs in the toggle stage.
+                esc_toggle.in_set(OverlaySet::Toggle),
                 cursor_owner.in_set(OverlaySet::Cursor),
-                // The ONE scrim reconciler for every marked overlay node. Ordered after ALL
-                // declarations (`OverlaySet::Declare`, which now holds the connect / death / view-death
-                // owners too) so it reads one fully-reconciled generation of the set — the fix for the
+                // The ONE scrim reconciler for every marked overlay node. Ordered after every writer —
+                // the connect / death / view-death owners in `Declare` AND the Esc / `M` toggles in
+                // `Toggle` — so it reads one fully-reconciled generation of the set, the fix for the
                 // cross-overlay one-frame skew. The death status line is the lone exemption and runs in
-                // `net::death_screen`, also after `Declare`.
-                apply_overlay_visibility.after(OverlaySet::Declare),
+                // `net::death_screen`, also after `Toggle`.
+                apply_overlay_visibility.after(OverlaySet::Toggle),
             ),
         );
 }
@@ -253,6 +278,9 @@ fn spawn_menu_overlay(mut commands: Commands, fonts: Res<UiFonts>) {
 /// Esc toggles the menu presence directly on [`Overlays`] — the menu's one home, retiring the old
 /// `MenuOverlay{open}`. The routing is the pure [`esc_menu_target`]; the cursor follows from
 /// [`input_blocked`] via the cursor owner — this system moves no cursor itself.
+///
+/// Runs in [`OverlaySet::Toggle`], after every state-driven declarer: the routing reads the set, so it
+/// needs this frame's connect / death declarations already in it.
 fn esc_toggle(keys: Res<ButtonInput<KeyCode>>, mut overlays: ResMut<Overlays>) {
     if !keys.just_pressed(KeyCode::Escape) {
         return;
@@ -349,8 +377,9 @@ fn cursor_owner(
 /// and `Hidden` otherwise (visibility-swap, never despawn, so it snaps back the instant the layer above
 /// closes). Replaces the three hand-copied per-overlay visibility systems (menu / death backdrop /
 /// connect) with one; the death status line is the lone exemption (`net::death_screen`). Runs after
-/// [`OverlaySet::Declare`] so all owners — including the connect / death / view-death declarers now
-/// gathered there — have written their presence into the SAME set generation this reads.
+/// [`OverlaySet::Toggle`] — hence after [`OverlaySet::Declare`] too — so every owner, the connect /
+/// death / view-death declarers and the Esc / `M` toggles alike, has written its presence into the
+/// SAME set generation this reads.
 fn apply_overlay_visibility(
     overlays: Res<Overlays>,
     mut nodes: Query<(&OverlayNode, &mut Visibility)>,
@@ -570,6 +599,56 @@ mod tests {
             may_open(&overlays(&[Overlay::SpawnMap]), Overlay::SpawnMap),
             "already the top layer → re-declaring is always allowed",
         );
+    }
+
+    /// The SCHEDULED half of the gate — the pure `esc_menu_target` tests above prove the routing, this
+    /// proves the toggle READS a settled set. A declarer that latches the connect screen is registered
+    /// in [`OverlaySet::Declare`] and, deliberately, LAST — so absent the `Declare → Toggle` chain the
+    /// schedule would run `esc_toggle` first, against a set that does not have the connect screen in it
+    /// yet, and Esc would latch an invisible input-blocking menu under it (the same-frame declare race).
+    /// The executor is pinned single-threaded so registration order is the only thing the chain has to
+    /// beat.
+    #[test]
+    fn esc_cannot_latch_a_menu_under_an_overlay_declared_the_same_frame() {
+        let mut app = App::new();
+        app.init_resource::<Overlays>();
+        app.init_resource::<ButtonInput<KeyCode>>();
+        app.configure_sets(
+            Update,
+            (OverlaySet::Declare, OverlaySet::Toggle, OverlaySet::Cursor).chain(),
+        );
+        app.add_systems(
+            Update,
+            (
+                esc_toggle.in_set(OverlaySet::Toggle),
+                declare_connect_status.in_set(OverlaySet::Declare),
+            ),
+        );
+        app.edit_schedule(Update, |schedule| {
+            schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
+        });
+
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Escape);
+        app.update();
+
+        let overlays = app.world().resource::<Overlays>();
+        assert!(
+            overlays.contains(Overlay::ConnectStatus),
+            "fixture: the connect screen must have been declared this frame",
+        );
+        assert!(
+            !overlays.contains(Overlay::Menu),
+            "Esc pressed the frame a connect screen appears must latch NO menu — the gate has to \
+             read the settled declarations, not the half-written ones",
+        );
+    }
+
+    /// The declarer half of the race fixture: an ordinary state-driven owner latching the highest
+    /// overlay, exactly like `net::client::update_connect_status` does from the live link state.
+    fn declare_connect_status(mut overlays: ResMut<Overlays>) {
+        overlays.declare(Overlay::ConnectStatus, true);
     }
 
     /// The status line is menu-over-death ONLY: it does not show when Death owns the scrim (full screen

@@ -48,15 +48,17 @@ pub fn plugin(app: &mut App) {
         .add_systems(
             Update,
             (
-                // All overlay reconcilers must read the same declared state.
+                // All overlay reconcilers must read the same declared state. This is a state-driven
+                // owner (crew + respawn deadline), not a gated toggle: it reads nothing.
                 toggle_death_screen.in_set(overlay::OverlaySet::Declare),
-                // Re-check the reconciled overlay input gate before latching a respawn edge.
+                // Re-check the reconciled overlay input gate before latching a respawn edge — after
+                // `Toggle`, so a menu or spawn map opened this frame already counts.
                 request_respawn
                     .in_set(PlayerInputSet)
-                    .after(overlay::OverlaySet::Declare),
+                    .after(overlay::OverlaySet::Toggle),
                 // The death STATUS LINE is the one one-scrim exemption; its tiny reconciler runs after
-                // `Declare` alongside the generic `overlay::apply_overlay_visibility`.
-                apply_death_status_line.after(overlay::OverlaySet::Declare),
+                // `Toggle` alongside the generic `overlay::apply_overlay_visibility`.
+                apply_death_status_line.after(overlay::OverlaySet::Toggle),
             ),
         );
 }
@@ -136,7 +138,8 @@ fn request_respawn(
     }
     // Same-frame guard against a phantom `RESPAWNING…`: a menu opened THIS frame (R+Esc together) or
     // an alt-tab (`focus_declare` declares the menu) is already in the reconciled set — we run after
-    // `OverlaySet::Declare` — but `PlayerInputSet`'s cursor gate hasn't caught up yet (the cursor owner
+    // `OverlaySet::Toggle`, so both the declarers AND Esc have written — but `PlayerInputSet`'s cursor
+    // gate hasn't caught up yet (the cursor owner
     // releases later this frame). If input is blocked, refuse: do not write the wire `respawn` edge
     // (`feed_action_state` would zero it anyway) nor latch `AwaitingRespawn`, so the overlay never
     // sticks on `RESPAWNING…` for a request the server never sees. `window_focused = true` because a
@@ -222,7 +225,8 @@ fn spawn_death_status_line(mut commands: Commands, fonts: Res<UiFonts>) {
 /// existence (spawn/despawn on the death STATE) stays `toggle_death_screen`'s. This system only swaps
 /// the thin status line: `Visible` exactly while the death state is latched but the menu is drawn on
 /// top of it ([`overlay::death_status_line`]) — "DEAD — respawn on menu close", legible THROUGH the
-/// menu — and `Hidden` otherwise. Runs after `OverlaySet::Declare` so it reads the fully-reconciled set.
+/// menu — and `Hidden` otherwise. Runs after `OverlaySet::Toggle` so it reads the fully-reconciled set
+/// (the declarers AND the Esc / `M` toggles have both written by then).
 fn apply_death_status_line(
     overlays: Res<Overlays>,
     mut status: Query<&mut Visibility, With<DeathStatusLine>>,

@@ -10,12 +10,14 @@
 //!
 //! The model, per station segment × three lateral collocation columns:
 //! - **Support**: directional field depth at pin/mid/pin on the contact envelope (the outer
-//!   face pushed out by `free_travel` — the drooped suspension's maximum reach) → two-piece
-//!   clipped-linear pressure profile → spring along the belt's own inward normal (minus
-//!   normal-velocity damping, soft engagement ramp), applied at the profile centroid on the
-//!   terrain surface. Ground intruding into the envelope→rest band IS the suspension
-//!   compression; `free_travel = 0` degenerates to a rest-anchored pad (no droop band).
-//!   Roll/pitch/weight transfer are lever-arm implicit.
+//!   face pushed out by the drooped suspension's maximum reach) → two-piece clipped-linear
+//!   pressure profile → spring along the belt's own inward normal (minus normal-velocity
+//!   damping, soft engagement ramp), applied at the profile centroid on the terrain surface.
+//!   Ground intruding into the envelope→rest band IS the suspension compression. The reach is
+//!   the REQUIRED per-position [`SideInput::travel`] profile, not a scalar: 0 at the unsprung
+//!   sprocket/idler, full droop at every road wheel (`envelope::wheel_travel_knots`). An empty
+//!   knot slice degenerates to a rest-anchored pad with no droop band — a test fixture, not a
+//!   production mode. Roll/pitch/weight transfer are lever-arm implicit.
 //! - **Traction**: per-element isotropic shear ([`GripElements`]) — every grounded link ×
 //!   column carries its own bristle strain, force follows the strain direction, each element
 //!   saturates against μ × its own elastic load. Longitudinal force reacts back into belt
@@ -153,8 +155,10 @@ pub struct ForceParams {
     /// support spring's zero-force datum sits this far PAST the outer face — the drooped
     /// ("green") envelope, maximum suspension reach — so ground intruding into the
     /// envelope→rest band is what carries the hull, and the authored rest pose is the
-    /// flat-ground equilibrium when the stiffness is calibrated to it. `0.0` anchors the
-    /// spring at the rest face itself — the degenerate no-droop pad some test rigs use.
+    /// flat-ground equilibrium when the stiffness is calibrated to it. The LAW reads the
+    /// per-position [`SideInput::travel`] profile (whose road-wheel peak is this value);
+    /// this scalar is the calibrated vehicle datum it derives from, kept here as telemetry
+    /// (the bitprobe startup digest echoes it).
     pub free_travel: f32,
     /// Support spring (N/m per metre of contacting belt) and damping (N·s/m per metre).
     pub support_stiffness_per_m: f32,
@@ -300,9 +304,10 @@ pub struct SideInput<'a> {
     pub columns: [(f32, f32); 3],
     /// Drive command −1..1 (throttle ± steer, capability-gated by the caller).
     pub command: f32,
-    /// Per-position free travel (the contact envelope's local reach). `None` = uniform
-    /// [`ForceParams::free_travel`] everywhere (flat-rig test fixtures).
-    pub travel: Option<TravelField<'a>>,
+    /// Per-position free travel (the contact envelope's local reach), REQUIRED: production
+    /// callers pass the rig's measured knot profile (`envelope::wheel_travel_knots`); test
+    /// fixtures pass uniform knots (empty knots = a rest-anchored zero-droop pad).
+    pub travel: TravelField<'a>,
 }
 
 /// One force application, in emission order. The caller applies these verbatim — order is
@@ -420,10 +425,12 @@ pub fn governor_belt(
 /// ([`GripElements::for_links`]; wrong-length slabs skip traction for the tick — see the
 /// invariant below).
 ///
-/// This is [`contact_side`] + the legacy [`governor_belt`] tail — the one-call shape every
-/// MP composition and the sandbox's governor mode run. The joint-transmission callers
-/// (offline / sandbox regenerative modes) call `contact_side` on both sides first and run
-/// `track::transmission::step` once instead (transmission-design.md §2 scheduling).
+/// This is [`contact_side`] + the [`governor_belt`] tail in one call — the shape this
+/// module's own tests drive. The LIVE compositions (the game's `track::sim` and the sandbox)
+/// call `contact_side` on both sides first and run `track::transmission::step` once
+/// (transmission-design.md §2 scheduling) for EVERY architecture; that seam's `Governor` arm
+/// is this exact tail, bit-identical (pinned by
+/// `transmission::tests::governor_adapter_matches_legacy_belt`).
 pub fn step_side<O: TerrainOracle>(
     input: &SideInput,
     state: SideState,
@@ -481,10 +488,9 @@ pub fn contact_side<O: TerrainOracle>(
 
     // The support datum: probes cast from the contact envelope (outer face + local free
     // travel), so penetration measures the ground's intrusion into the suspension band, not
-    // into the rest face. The travel is position-dependent when the caller supplies a
-    // profile (unsprung arcs at 0, road-wheel span at full droop).
-    let travel_at =
-        |z: f32| -> f32 { input.travel.map_or(params.free_travel, |field| field.at(z)) };
+    // into the rest face. The travel is position-dependent (unsprung arcs at 0, road-wheel
+    // span at full droop).
+    let travel_at = |z: f32| -> f32 { input.travel.at(z) };
 
     let k = params.grip_stiffness;
     // INVARIANT (REV-14): the caller owns
@@ -959,7 +965,8 @@ mod tests {
             plane_x: 0.0,
             columns: TEST_COLUMNS,
             command: 0.0,
-            travel: None,
+            // Empty knots: a rest-anchored zero-droop pad (the fixture's free_travel is 0).
+            travel: TravelField { knots: &[] },
         };
         let report = step_side(
             &input,
@@ -1004,13 +1011,16 @@ mod tests {
             ..rig_params()
         };
         let loop_pts = rect_loop(0.0);
+        // Uniform 0.1 m of travel across the span (end-clamped): the belly gate in the law is
+        // what must keep it off the return run, not the profile shape.
+        let knots = [(-1.0, 0.1), (1.0, 0.1)];
         let input = SideInput {
             loop_pts: &loop_pts,
             count: 25,
             plane_x: 0.0,
             columns: TEST_COLUMNS,
             command: 0.0,
-            travel: None,
+            travel: TravelField { knots: &knots },
         };
         let (report, live) = contact_side(
             &input,
@@ -1048,31 +1058,31 @@ mod tests {
         );
     }
 
-    /// The envelope reframing: with the rest face exactly kissing flat ground, the rest
-    /// datum (`free_travel = 0`) carries nothing — while a free-travel band turns the same
-    /// kiss into a fully-drooped spring at exactly `free_travel` of intrusion, so the total
-    /// elastic load is `k · travel · bottom_run` to closed form. Same stations, same probes,
-    /// same profile machinery — only the zero-force surface moved.
+    /// The envelope reframing: with the rest face exactly kissing flat ground, a zero-travel
+    /// profile carries nothing — while a travel band turns the same kiss into a fully-drooped
+    /// spring at exactly that much intrusion, so the total elastic load is
+    /// `k · travel · bottom_run` to closed form. Same stations, same probes, same profile
+    /// machinery — only the zero-force surface moved.
     #[test]
     fn the_free_travel_moves_the_support_datum_to_the_droop_envelope() {
         // Pin belly at +face_offset → outer face at y = 0 = the ground surface.
         let params = rig_params();
         let loop_pts = rect_loop(params.face_offset);
-        let input = SideInput {
-            loop_pts: &loop_pts,
-            count: 25,
-            plane_x: 0.0,
-            columns: TEST_COLUMNS,
-            command: 0.0,
-            travel: None,
-        };
-        let tick = |params: &ForceParams| {
+        let tick = |knots: &[(f32, f32)]| {
+            let input = SideInput {
+                loop_pts: &loop_pts,
+                count: 25,
+                plane_x: 0.0,
+                columns: TEST_COLUMNS,
+                command: 0.0,
+                travel: TravelField { knots },
+            };
             let (report, live) = contact_side(
                 &input,
                 SideState::default(),
                 Affine3A::IDENTITY,
                 1.0 / 64.0,
-                params,
+                &params,
                 &FlatGround { surface_y: 0.0 },
                 |_| Vec3::ZERO,
                 &mut GripElements::for_links(25),
@@ -1083,7 +1093,7 @@ mod tests {
 
         // Rest datum: a kissing face has zero penetration — no contacts at all.
         assert!(
-            tick(&params).contacts.is_empty(),
+            tick(&[]).contacts.is_empty(),
             "a kissing face must carry nothing under the rest-anchored law"
         );
 
@@ -1091,13 +1101,9 @@ mod tests {
         // bottom run is 2 m; every column weight sums to 1 and the engage ramp saturates far
         // below the travel, so Σ elastic = k · travel · 2 m exactly.
         let travel = 0.08;
-        let env = ForceParams {
-            free_travel: travel,
-            ..rig_params()
-        };
-        let report = tick(&env);
+        let report = tick(&[(-1.0, travel), (1.0, travel)]);
         let total: f32 = report.contacts.iter().map(|c| c.load_elastic).sum();
-        let expected = env.support_stiffness_per_m * travel * 2.0;
+        let expected = params.support_stiffness_per_m * travel * 2.0;
         assert!(
             (total - expected).abs() / expected < 1e-3,
             "envelope load {total:.1} N vs closed-form {expected:.1} N"

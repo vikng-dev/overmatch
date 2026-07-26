@@ -142,12 +142,25 @@ pub struct ForceFlatWorld;
 /// Mapping (the single convention every consumer uses): sample `(i, j)` sits at
 /// `x = -WORLD_HALF_EXTENT + i * WORLD_SIZE / (size - 1)` (same for `z` with `j`), so the grid
 /// spans `[-WORLD_HALF_EXTENT, +WORLD_HALF_EXTENT]` inclusive on both axes. Outside the span
-/// the map clamps (the edge continues flat).
+/// [`Self::height_at`] clamps (a placement-only convenience) — but THE WORLD ENDS AT THE
+/// COLLIDER EDGE: the parry heightfield stops at the span, and so do the surface queries
+/// ([`Self::cast_ray`], the track oracle's ground term). See [`Self::contains_xz`].
 #[derive(Resource, Clone)]
 pub struct HeightGrid {
     samples: Arc<[f32]>,
-    /// Samples per side (4096 for the shipped map; tests build smaller grids).
+    /// Samples per side ([`GRID_RESOLUTION`] = 1025 for the shipped map after the one-time
+    /// downsample; tests build smaller grids).
     size: u32,
+}
+
+/// One terrain-surface hit from [`HeightGrid::cast_ray`]: `t` is the hit parameter along the
+/// (not necessarily unit) direction — the hit point is `origin + dir * t` — and `normal` is the
+/// struck triangle's unit normal, flipped to face the incoming ray (the same convention a parry
+/// raycast reports).
+#[derive(Clone, Copy, Debug)]
+pub struct TerrainRayHit {
+    pub t: f32,
+    pub normal: Vec3,
 }
 
 impl HeightGrid {
@@ -180,8 +193,11 @@ impl HeightGrid {
     }
 
     /// Terrain height (m) at world `(x, z)` — piecewise TRIANGULAR over the grid, clamped at the
-    /// map edges (the surface continues flat outward). Pure arithmetic, no platform-varying ops:
-    /// this is the ground surface the DETERMINISTIC belt sim probes.
+    /// map edges. THE CLAMP IS PLACEMENT-ONLY (spawn queries want a defined answer everywhere):
+    /// the collider ends at the span, so surface consumers — the track oracle's ground term and
+    /// [`Self::cast_ray`] — report NO ground outside it instead of the clamped phantom (belts
+    /// feeling ground the hull collider would fall through). Pure arithmetic, no
+    /// platform-varying ops: this is the ground surface the DETERMINISTIC belt sim probes.
     ///
     /// THE ONE-SURFACE INVARIANT (module doc): every cell is split along the SAME diagonal
     /// parry's heightfield triangulation uses — the ANTI-diagonal, connecting the cell's
@@ -239,6 +255,200 @@ impl HeightGrid {
             }
         }
         max
+    }
+
+    /// Whether world `(x, z)` lies on the grid's span. The surface EXISTS only here: beyond the
+    /// span the parry collider ends and so does the ground ([`Self::cast_ray`] reports no hit
+    /// there) — [`Self::height_at`]'s clamped reads outside the span are for placement queries
+    /// only, never a surface anything can stand on.
+    pub fn contains_xz(&self, x: f32, z: f32) -> bool {
+        x.abs() <= WORLD_HALF_EXTENT && z.abs() <= WORLD_HALF_EXTENT
+    }
+
+    /// Exact first hit of a ray with the triangular surface within `t ∈ [0, t_max]`, or `None`.
+    ///
+    /// THE deterministic terrain raycast (fixed iteration order, pure f32 arithmetic, no
+    /// transcendentals, hard iteration bound): a 2-D DDA walks exactly the cells the ray's XZ
+    /// footprint crosses, in ray order, and solves the ray against each cell's two triangles —
+    /// the SAME anti-diagonal split [`Self::height_at`] evaluates and parry triangulates (the
+    /// ONE-SURFACE invariant, module doc) — in closed form: over one triangle's plane the
+    /// surface gap `f(t) = ray_y(t) − plane(ray_xz(t))` is LINEAR in `t`, so the crossing is one
+    /// division. No scan resolution for a thin ridge to slip through, no bisection budget.
+    ///
+    /// The surface is the same two-sided sheet parry casts against: a crossing from below
+    /// reports like a crossing from above, and a ray that stays on one side reports nothing.
+    ///
+    /// THE WORLD ENDS AT THE COLLIDER EDGE: outside the grid span there is no ground — the ray
+    /// meets the surface only where cells exist, exactly like the parry heightfield collider
+    /// (which spans the same square and stops). Spawn placement clamps every tank inside
+    /// ±`net::spawn_map::SPAWN_LIMIT_M` (= 95% of the half-extent, ±1216 m), well off the edge.
+    /// This deliberately DISAGREES with `height_at`'s clamped, placement-only reads.
+    ///
+    /// `dir` need not be unit: `t` is in units of `dir`'s length.
+    pub fn cast_ray(&self, origin: Vec3, dir: Vec3, t_max: f32) -> Option<TerrainRayHit> {
+        let n = self.size as usize;
+        let last = (n - 1) as f32;
+        // Grid-space ray: u(t) = u0 + du·t, v(t) = v0 + dv·t (the exact `height_at` mapping).
+        let u0 = (origin.x + WORLD_HALF_EXTENT) / WORLD_SIZE * last;
+        let v0 = (origin.z + WORLD_HALF_EXTENT) / WORLD_SIZE * last;
+        let du = dir.x / WORLD_SIZE * last;
+        let dv = dir.z / WORLD_SIZE * last;
+        // Clip [0, t_max] against the grid span (slab test per axis): an empty clip means the
+        // footprint never crosses the span — no ground anywhere along the ray.
+        let (mut t0, mut t1) = (0.0_f32, t_max);
+        for (o, d) in [(u0, du), (v0, dv)] {
+            if d == 0.0 {
+                if !(0.0..=last).contains(&o) {
+                    return None;
+                }
+            } else {
+                let (ta, tb) = ((0.0 - o) / d, (last - o) / d);
+                t0 = t0.max(ta.min(tb));
+                t1 = t1.min(ta.max(tb));
+            }
+        }
+        if t0 > t1 {
+            return None;
+        }
+        // Cell-interval padding: a crossing landing exactly on a shared cell boundary (float
+        // rounding) must not fall between two cells' intervals — both accept it, first-in-ray-
+        // order wins. 0.1 mm of `t` slop on a unit direction, far under every consumer tolerance.
+        // OWNERSHIP slop only: the global interval `[t0, t1] ⊆ [0, t_max]` stays a HARD bound
+        // (no padding, no clamping) — a root behind the origin or past `t_max` is never a hit.
+        // Clamping such a root to an endpoint turned micron-scale clearance into full-reach
+        // penetration for an away-facing probe (Codex alpha.11 blocker).
+        const EPS_T: f32 = 1.0e-4;
+        let cell = |w: f32| (w as usize).min(n - 2); // `as usize` saturates negatives to 0
+        let (mut i, mut j) = (cell(u0 + du * t0), cell(v0 + dv * t0));
+        let mut t_in = t0;
+        // Fixed bound: each iteration either returns or crosses one cell boundary, and the clip
+        // window holds at most (n − 1) boundaries per axis.
+        for _ in 0..2 * n {
+            // Where the ray leaves this cell along each axis (∞ when it never does).
+            let t_u = if du > 0.0 {
+                ((i + 1) as f32 - u0) / du
+            } else if du < 0.0 {
+                (i as f32 - u0) / du
+            } else {
+                f32::INFINITY
+            };
+            let t_v = if dv > 0.0 {
+                ((j + 1) as f32 - v0) / dv
+            } else if dv < 0.0 {
+                (j as f32 - v0) / dv
+            } else {
+                f32::INFINITY
+            };
+            let t_out = t_u.min(t_v).min(t1);
+            if let Some(hit) = self.cell_crossing(
+                i,
+                j,
+                origin.y,
+                dir,
+                (u0, du),
+                (v0, dv),
+                t_in - EPS_T,
+                t_out + EPS_T,
+                (t0, t1),
+            ) {
+                return Some(hit);
+            }
+            if t_out >= t1 {
+                return None;
+            }
+            // Step to the neighbouring cell (both axes on an exact corner crossing).
+            if t_u <= t_out {
+                if du > 0.0 {
+                    i += 1;
+                } else if i == 0 {
+                    return None;
+                } else {
+                    i -= 1;
+                }
+            }
+            if t_v <= t_out {
+                if dv > 0.0 {
+                    j += 1;
+                } else if j == 0 {
+                    return None;
+                } else {
+                    j -= 1;
+                }
+            }
+            if i > n - 2 || j > n - 2 {
+                return None;
+            }
+            t_in = t_out;
+        }
+        None
+    }
+
+    /// The ray's first crossing of cell `(i, j)`'s two triangles within `t ∈ [t_lo, t_hi]`.
+    /// Each triangle's plane makes the surface gap linear in `t` (see [`Self::cast_ray`]); the
+    /// diagonal side test picks which plane owns the crossing point, with a hair of tolerance —
+    /// both planes contain the shared diagonal, so the overlap band is consistent.
+    ///
+    /// `[t_lo, t_hi]` is the EPS-padded per-cell window (boundary-ownership slop only);
+    /// `hard` is the unpadded global clip `[t0, t1] ⊆ [0, t_max]` — a root outside it is
+    /// rejected outright, never clamped onto an endpoint.
+    #[expect(clippy::too_many_arguments, reason = "private kernel of cast_ray")]
+    fn cell_crossing(
+        &self,
+        i: usize,
+        j: usize,
+        y0: f32,
+        dir: Vec3,
+        (u0, du): (f32, f32),
+        (v0, dv): (f32, f32),
+        t_lo: f32,
+        t_hi: f32,
+        hard: (f32, f32),
+    ) -> Option<TerrainRayHit> {
+        const EPS_DIAG: f32 = 1.0e-5;
+        let in_window = |t: f32| t >= t_lo && t <= t_hi && t >= hard.0 && t <= hard.1;
+        let scale = (self.size - 1) as f32 / WORLD_SIZE; // cells per world metre (slope units)
+        let h00 = self.sample(i, j);
+        let h10 = self.sample(i + 1, j);
+        let h01 = self.sample(i, j + 1);
+        let h11 = self.sample(i + 1, j + 1);
+        let fu0 = u0 - i as f32;
+        let fv0 = v0 - j as f32;
+        let mut best: Option<(f32, Vec3)> = None;
+        // Lower triangle {h00, h10, h01}: the plane below/on fu + fv = 1 (height_at's form).
+        let (a, b) = (h10 - h00, h01 - h00);
+        let df = dir.y - (a * du + b * dv);
+        if df != 0.0 {
+            let t = -(y0 - (h00 + a * fu0 + b * fv0)) / df;
+            if in_window(t) {
+                let (fu, fv) = (fu0 + du * t, fv0 + dv * t);
+                if fu + fv <= 1.0 + EPS_DIAG {
+                    best = Some((t, Vec3::new(-a * scale, 1.0, -b * scale)));
+                }
+            }
+        }
+        // Upper triangle {h11, h10, h01}: the plane above/on the diagonal.
+        let (c, d) = (h10 - h11, h01 - h11);
+        let df = dir.y + c * dv + d * du;
+        if df != 0.0 {
+            let t = -(y0 - (h11 + c * (1.0 - fv0) + d * (1.0 - fu0))) / df;
+            if in_window(t) && best.is_none_or(|(lower, _)| t < lower) {
+                let (fu, fv) = (fu0 + du * t, fv0 + dv * t);
+                if fu + fv >= 1.0 - EPS_DIAG {
+                    best = Some((t, Vec3::new(d * scale, 1.0, c * scale)));
+                }
+            }
+        }
+        best.map(|(t, normal)| {
+            let normal = normal.normalize();
+            TerrainRayHit {
+                t,
+                normal: if normal.dot(dir) > 0.0 {
+                    -normal
+                } else {
+                    normal
+                },
+            }
+        })
     }
 
     /// Deterministic content fingerprint for the bitprobe startup dump (exact bit patterns, so
@@ -507,7 +717,8 @@ mod tests {
     use avian3d::parry::query::Ray;
 
     /// A grid whose samples come from `f(i, j)` in 8-bit terms (normalized like the decoder,
-    /// no smoothing — these tests pin the raw bilinear surface).
+    /// no smoothing — these tests pin the raw PIECEWISE-TRIANGULAR surface, which is the
+    /// collider's and deliberately not bilinear).
     fn grid_from(size: u32, f: impl Fn(u32, u32) -> u8) -> HeightGrid {
         let mut samples = Vec::with_capacity((size * size) as usize);
         for j in 0..size {
@@ -521,12 +732,21 @@ mod tests {
     /// Downward parry raycast against the collider at world `(x, z)`; returns the hit height.
     fn cast_down(collider: &Collider, x: f32, z: f32) -> f32 {
         let origin_y = HEIGHT_RANGE + 100.0;
-        let ray = Ray::new(Vector::new(x, origin_y, z), Vector::new(0.0, -1.0, 0.0));
-        let toi = collider
-            .shape()
-            .cast_ray(&Pose::IDENTITY, &ray, 1.0e5, true)
+        let toi = parry_cast(collider, Vec3::new(x, origin_y, z), Vec3::NEG_Y, 1.0e5)
             .unwrap_or_else(|| panic!("terrain collider missed a vertical ray at ({x}, {z})"));
         origin_y - toi
+    }
+
+    /// Parry raycast against the collider along an arbitrary direction — the reference the
+    /// exact caster is pinned against. Returns the hit `t`, or `None` on a miss.
+    fn parry_cast(collider: &Collider, origin: Vec3, dir: Vec3, t_max: f32) -> Option<f32> {
+        let ray = Ray::new(
+            Vector::new(origin.x, origin.y, origin.z),
+            Vector::new(dir.x, dir.y, dir.z),
+        );
+        collider
+            .shape()
+            .cast_ray(&Pose::IDENTITY, &ray, t_max, true)
     }
 
     #[test]
@@ -626,41 +846,187 @@ mod tests {
         }
     }
 
-    /// The ONE-SURFACE tolerance pin: `height_at` vs a parry raycast of the production collider
-    /// at many random-but-seeded interior points over a rough (seeded-noise) grid — the two
-    /// must agree to a few MILLIMETRES everywhere (before this invariant the measured
-    /// disagreement was up to 0.519 m, more than the suspension's 0.5 m probe reach).
-    #[test]
-    fn oracle_matches_collider_at_seeded_points() {
-        // Deterministic LCG noise for the grid and the sample points (no platform RNG).
-        let mut state: u64 = 0x243F_6A88_85A3_08D3; // seeded, fixed
-        let mut next = move || {
+    /// A deterministic LCG stream (no platform RNG) for the seeded oracle-vs-collider pins.
+    fn lcg(seed: u64) -> impl FnMut() -> f32 {
+        let mut state = seed;
+        move || {
             state = state
                 .wrapping_mul(6364136223846793005)
                 .wrapping_add(1442695040888963407);
             ((state >> 33) as u32) as f32 / u32::MAX as f32 // 0..1
-        };
+        }
+    }
+
+    /// The seeded-noise grid every oracle-vs-collider pin below casts against.
+    fn noise_grid(next: &mut impl FnMut() -> f32) -> HeightGrid {
         let size = 33u32;
         let mut samples = Vec::with_capacity((size * size) as usize);
         for _ in 0..size * size {
             samples.push(next() * HEIGHT_RANGE);
         }
-        let grid = HeightGrid::new(samples.into(), size);
+        HeightGrid::new(samples.into(), size)
+    }
+
+    /// The ONE-SURFACE tolerance pin: `height_at` AND `cast_ray` vs a parry raycast of the
+    /// production collider at many random-but-seeded points over a rough (seeded-noise) grid —
+    /// the surfaces must agree to a few MILLIMETRES everywhere (before this invariant the
+    /// measured disagreement was up to 0.519 m, more than the suspension's 0.5 m probe reach).
+    ///
+    /// Coverage spans the FULL square including the outer 2%, plus just-outside points where
+    /// hit/no-hit itself must agree: the collider ends at the span edge, and so must the exact
+    /// caster (the map-edge consistency fix — `height_at`'s clamp is placement-only).
+    #[test]
+    fn oracle_matches_collider_at_seeded_points() {
+        let mut next = lcg(0x243F_6A88_85A3_08D3);
+        let grid = noise_grid(&mut next);
         let collider = heightfield_collider(&grid);
-        let span = WORLD_HALF_EXTENT * 0.98; // interior only (edge rays can graze the border)
         let mut worst = 0.0f32;
-        for _ in 0..512 {
+        for k in 0..512 {
+            // Full span, outer 2% included: 1/8 of the points land in the outer band, and
+            // boundary-exact rays (a measure-zero parry edge case) are avoided by the noise.
+            let span = if k % 8 == 0 {
+                WORLD_HALF_EXTENT * 0.9999
+            } else {
+                WORLD_HALF_EXTENT
+            };
             let x = (next() * 2.0 - 1.0) * span;
             let z = (next() * 2.0 - 1.0) * span;
+            if x.abs() >= WORLD_HALF_EXTENT || z.abs() >= WORLD_HALF_EXTENT {
+                continue;
+            }
             let cast = cast_down(&collider, x, z);
             let analytic = grid.height_at(x, z);
             worst = worst.max((cast - analytic).abs());
+            // The exact caster reads the identical surface point.
+            let origin = Vec3::new(x, HEIGHT_RANGE + 100.0, z);
+            let ours = grid
+                .cast_ray(origin, Vec3::NEG_Y, 1.0e5)
+                .unwrap_or_else(|| panic!("cast_ray missed a vertical ray at ({x}, {z})"));
+            worst = worst.max((origin.y - ours.t - analytic).abs());
         }
-        // Measured on first run: worst 6.1e-5 m over these 512 points — the 3 mm pin is pure
-        // headroom for parry/f32 arithmetic changes, not observed error.
+        // Measured: worst 6.9e-5 m over these points (height_at alone read 6.1e-5 before the
+        // caster joined the pin) — the 3 mm bound is pure headroom, not observed error.
         assert!(
             worst < 3e-3,
             "oracle-vs-collider disagreement {worst} m exceeds the few-mm pin"
+        );
+
+        // Just OUTSIDE the span both surfaces must agree there is NO ground: the collider ends
+        // at the edge, and the caster ends with it (a vertical ray outside misses both).
+        for _ in 0..64 {
+            let along = (next() * 2.0 - 1.0) * (WORLD_HALF_EXTENT + 200.0);
+            let out = WORLD_HALF_EXTENT + 0.5 + next() * 200.0;
+            let (x, z) = match (next() > 0.5, next() > 0.5) {
+                (true, flip) => (if flip { out } else { -out }, along),
+                (false, flip) => (along, if flip { out } else { -out }),
+            };
+            let origin = Vec3::new(x, HEIGHT_RANGE + 100.0, z);
+            assert!(
+                parry_cast(&collider, origin, Vec3::NEG_Y, 1.0e5).is_none(),
+                "collider must end at the span edge (hit at ({x}, {z}))"
+            );
+            assert!(
+                grid.cast_ray(origin, Vec3::NEG_Y, 1.0e5).is_none(),
+                "cast_ray must end at the span edge (hit at ({x}, {z}))"
+            );
+        }
+    }
+
+    /// The DIRECTIONAL pin: the exact caster vs a parry cast of the production collider over a
+    /// seeded sweep of ray directions — steep to shallow-grazing — from origins across the full
+    /// span. Both must agree on hit/no-hit everywhere, and on the hit parameter within the
+    /// pinned tolerance wherever both report one. (Shallow rays amplify any surface mismatch
+    /// along `t` by 1/sin(elevation), so this is the harshest agreement test the two float
+    /// paths face.)
+    #[test]
+    fn oracle_cast_matches_collider_cast_for_seeded_directions() {
+        let mut next = lcg(0x452_821E_638D_0137);
+        let grid = noise_grid(&mut next);
+        let collider = heightfield_collider(&grid);
+        let t_max = 4_000.0_f32; // beyond the world diagonal: range never truncates a hit
+        let mut worst = 0.0f32;
+        let mut hits = 0u32;
+        for _ in 0..512 {
+            let x = (next() * 2.0 - 1.0) * WORLD_HALF_EXTENT * 0.98;
+            let z = (next() * 2.0 - 1.0) * WORLD_HALF_EXTENT * 0.98;
+            let origin = Vec3::new(x, grid.height_at(x, z) + 0.5 + next() * 30.0, z);
+            // Downward elevation from 1.7° (shallow graze) to ~86°; any azimuth. Test-only
+            // trig — the production caster itself stays transcendental-free.
+            let elevation = 0.03 + next() * 1.47;
+            let azimuth = next() * core::f32::consts::TAU;
+            let dir = Vec3::new(
+                elevation.cos() * azimuth.cos(),
+                -elevation.sin(),
+                elevation.cos() * azimuth.sin(),
+            );
+            let theirs = parry_cast(&collider, origin, dir, t_max);
+            let ours = grid.cast_ray(origin, dir, t_max).map(|hit| hit.t);
+            match (ours, theirs) {
+                (Some(a), Some(b)) => {
+                    hits += 1;
+                    worst = worst.max((a - b).abs());
+                }
+                (None, None) => {}
+                (a, b) => panic!(
+                    "hit/no-hit disagreement at origin {origin:?} dir {dir:?}: ours {a:?}, parry {b:?}"
+                ),
+            }
+        }
+        assert!(hits > 300, "the sweep must actually exercise hits ({hits})");
+        // Measured: worst 3.3e-4 m of ray parameter over 509 seeded hits (graze-amplified);
+        // the 5 cm pin is headroom for parry/f32 arithmetic changes, not observed error.
+        assert!(
+            worst < 5e-2,
+            "cast_ray vs parry cast disagreement {worst} m over {hits} hits"
+        );
+    }
+
+    /// Hard global bounds on the exact caster (Codex alpha.11 blocker): the ±EPS_T cell-window
+    /// padding is boundary-OWNERSHIP slop only. A plane root behind the origin or past `t_max`
+    /// must be rejected outright — the old code accepted roots inside the padded window and
+    /// clamped them onto `[0, t_max]`, turning micron-scale clearance into a full-reach
+    /// penetration for an away-facing suspension probe (and admitting ballistics hits that
+    /// belong to the next march chord).
+    #[test]
+    fn cast_ray_rejects_roots_outside_the_ray_interval() {
+        let grid = grid_from(2, |_, _| 100); // flat ground, one cell spanning the world
+        let ground = grid.height_at(3.0, -7.0);
+
+        // Away-facing ray from a hair above the surface: the only crossing is BEHIND the
+        // origin (t ≈ −5e-5, inside the old −EPS_T padding). Must be a miss, not a t = 0 hit.
+        let origin = Vec3::new(3.0, ground + 5.0e-5, -7.0);
+        assert!(
+            grid.cast_ray(origin, Vec3::Y, 2.0).is_none(),
+            "away-facing graze must be clearance, not clamped-to-zero contact"
+        );
+
+        // Toward-facing from just above: a genuine tiny-positive root must still hit.
+        let hit = grid
+            .cast_ray(Vec3::new(3.0, ground + 5.0e-3, -7.0), Vec3::NEG_Y, 2.0)
+            .expect("downward graze must hit");
+        assert!(
+            hit.t >= 0.0 && (hit.t - 5.0e-3).abs() < 1.0e-4,
+            "t = {}",
+            hit.t
+        );
+
+        // Root just past `t_max` (inside the old +EPS_T padding): this chord must miss —
+        // the crossing belongs to the next march segment.
+        let above = Vec3::new(3.0, ground + 10.0, -7.0);
+        assert!(
+            grid.cast_ray(above, Vec3::NEG_Y, 10.0 - 5.0e-5).is_none(),
+            "root past t_max must not be clamped onto the endpoint"
+        );
+        let hit = grid
+            .cast_ray(above, Vec3::NEG_Y, 10.0 + 1.0e-3)
+            .expect("same root inside t_max must hit");
+        assert!((hit.t - 10.0).abs() < 1.0e-3, "t = {}", hit.t);
+
+        // Origin below the surface casting further down: the crossing is far behind — a miss
+        // (the oracle's explicit buried check owns that regime, not the caster).
+        assert!(
+            grid.cast_ray(Vec3::new(3.0, ground - 0.5, -7.0), Vec3::NEG_Y, 2.0)
+                .is_none()
         );
     }
 

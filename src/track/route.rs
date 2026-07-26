@@ -35,48 +35,14 @@ pub fn build_route(circles: &[(Vec2, f32)], belt_len: f32) -> Route {
         }
     }
 
-    // Lower convex envelope over the ordered circles (Graham-style scan): a circle whose body
-    // stays above its neighbours' lower tangent is not part of the taut run and drops out — a
-    // lifted wheel is skipped, never wrapped from the wrong side.
-    let mut active: Vec<usize> = vec![0];
-    for k in 1..circles.len() {
-        while active.len() >= 2 {
-            let (p, a) = (active[active.len() - 2], active[active.len() - 1]);
-            let (t0, _) =
-                external_tangent(circles[p].0, circles[p].1, circles[k].0, circles[k].1, -1.0);
-            let n = (t0 - circles[p].0) / circles[p].1;
-            if (circles[a].0 - t0).dot(n) + circles[a].1 > 1e-4 {
-                break;
-            }
-            active.pop();
-        }
-        active.push(k);
-    }
-
     let (front_c, front_r) = circles[0];
     let (rear_c, rear_r) = *circles.last().unwrap();
     let (rear_up, front_up) = external_tangent(rear_c, rear_r, front_c, front_r, 1.0);
 
+    // The EXACT tangent point seeds the polyline; the walk's own arc reconstruction of it then
+    // dedupes away, so pts[0] stays bit-exact `front_up`.
     let mut pts: Vec<Vec2> = vec![front_up];
-    let mut cursor = front_up;
-    for w in active.windows(2) {
-        let (i, j) = (w[0], w[1]);
-        let (t0, t1) =
-            external_tangent(circles[i].0, circles[i].1, circles[j].0, circles[j].1, -1.0);
-        let toward = if i == 0 {
-            Vec2::new(-1.0, 0.0) // the front drive circle wraps around its front
-        } else {
-            Vec2::new(0.0, -1.0) // road wheels wrap under
-        };
-        for p in arc(circles[i].0, circles[i].1, cursor, t0, toward) {
-            push(&mut pts, p);
-        }
-        push(&mut pts, t1);
-        cursor = t1;
-    }
-    for p in arc(rear_c, rear_r, cursor, rear_up, Vec2::new(1.0, 0.0)) {
-        push(&mut pts, p);
-    }
+    taut_lower_run(circles, front_up, rear_up, |p| push(&mut pts, p));
 
     // Return run: the leftover belt length as budgeted sag over the road wheels.
     let chord = rear_up.distance(front_up);
@@ -98,6 +64,66 @@ pub fn build_route(circles: &[(Vec2, f32)], belt_len: f32) -> Route {
         cum.push(s);
     }
     Route { pts, cum }
+}
+
+/// The taut LOWER run — THE shared builder of "where the belt's bottom is": the lower convex
+/// envelope over the ordered circles (Graham-style scan) chained into tangent segments and wrap
+/// arcs, walked front→rear. [`build_route`] (the sim/route consumer) and the kinematic wrap's
+/// `raw_belly` (`super::wrap`) both run exactly this; neither re-implements the scan or the walk.
+///
+/// A circle whose body stays above its neighbours' lower tangent is not part of the taut run and
+/// drops out — a lifted wheel is skipped, never wrapped from the wrong side.
+///
+/// Points are EMITTED through `emit` rather than collected, because the two consumers sink them
+/// differently and each sink is bit-load-bearing: `build_route` dedupes near-coincident vertices
+/// (its `push`) onto a polyline seeded with the exact `front_up` tangent point, while the wrap
+/// keeps every raw arc point (its conform resample counts on the raw spacing). `front_up` /
+/// `rear_up` are the upper external tangent points between the LAST circle and the FIRST
+/// (`external_tangent(rear.., front.., 1.0)`, computed by the caller, which needs them for its
+/// seed/closing anyway): the walk starts its front arc at `front_up` and ends its rear arc at
+/// `rear_up`. Emission starts with the front arc's own reconstruction of `front_up` (endpoints
+/// included), then alternates arcs and tangent points to `rear_up`.
+pub fn taut_lower_run(
+    circles: &[(Vec2, f32)],
+    front_up: Vec2,
+    rear_up: Vec2,
+    mut emit: impl FnMut(Vec2),
+) {
+    let mut active: Vec<usize> = vec![0];
+    for k in 1..circles.len() {
+        while active.len() >= 2 {
+            let (p, a) = (active[active.len() - 2], active[active.len() - 1]);
+            let (t0, _) =
+                external_tangent(circles[p].0, circles[p].1, circles[k].0, circles[k].1, -1.0);
+            let n = (t0 - circles[p].0) / circles[p].1;
+            if (circles[a].0 - t0).dot(n) + circles[a].1 > 1e-4 {
+                break;
+            }
+            active.pop();
+        }
+        active.push(k);
+    }
+
+    let (rear_c, rear_r) = *circles.last().unwrap();
+    let mut cursor = front_up;
+    for w in active.windows(2) {
+        let (i, j) = (w[0], w[1]);
+        let (t0, t1) =
+            external_tangent(circles[i].0, circles[i].1, circles[j].0, circles[j].1, -1.0);
+        let toward = if i == 0 {
+            Vec2::new(-1.0, 0.0) // the front drive circle wraps around its front
+        } else {
+            Vec2::new(0.0, -1.0) // road wheels wrap under
+        };
+        for p in arc(circles[i].0, circles[i].1, cursor, t0, toward) {
+            emit(p);
+        }
+        emit(t1);
+        cursor = t1;
+    }
+    for p in arc(rear_c, rear_r, cursor, rear_up, Vec2::new(1.0, 0.0)) {
+        emit(p);
+    }
 }
 
 /// Drape one return-run span with `excess` metres of slack as a parabola — and if the curve
@@ -246,6 +272,83 @@ pub fn resample(points: &[Vec2], spacing: f32, offset: f32) -> Vec<Vec2> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// FNV-1a 64 over the exact little-endian f32 bits of every route vertex and cumulative
+    /// arc-length entry — the whole observable output of [`build_route`].
+    fn route_bits_hash(route: &Route) -> u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+        let mut write = |v: f32| {
+            for byte in v.to_le_bytes() {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+        for p in &route.pts {
+            write(p.x);
+            write(p.y);
+        }
+        for i in 0..route.pts.len() {
+            write(route.cum[i]);
+        }
+        hash
+    }
+
+    /// BIT-IDENTITY PIN for the two wire-adjacent productions of [`build_route`] on the
+    /// shipped Tiger rig: the material-length loop that becomes `TrackGear::loop_pts` (sim
+    /// force stations — replicated-state adjacent) and the taut (`belt_len = 0`) wrap whose
+    /// belly minimum is `RigGeom::hull_rest_y` (the spawn datum). Captured BEFORE the shared
+    /// taut-walk extraction and required to hold bit-for-bit after it: any refactor of the
+    /// envelope scan / tangent-arc chaining that moves one bit here is a sim change, not a
+    /// cleanup. (Asset re-exports legitimately move these values — re-pin from the printed
+    /// actuals when the GLB or authored counts change on purpose.)
+    #[test]
+    fn build_route_is_bit_stable_on_the_shipped_tiger_rig() {
+        use crate::track::side::Side;
+        let rig = crate::track::rig_geom::tiger_rig();
+        let circles = rig.rest.get(Side::Right);
+
+        let loop_route = build_route(circles, rig.belt_len());
+        let taut_route = build_route(circles, 0.0);
+        let belly_y = taut_route
+            .pts
+            .iter()
+            .map(|p| p.y)
+            .fold(f32::INFINITY, f32::min);
+
+        println!(
+            "tiger route pin: loop pts {} hash {:#018x} total bits {:#010x} | taut pts {} \
+             hash {:#018x} belly bits {:#010x}",
+            loop_route.pts.len(),
+            route_bits_hash(&loop_route),
+            loop_route.total().to_bits(),
+            taut_route.pts.len(),
+            route_bits_hash(&taut_route),
+            belly_y.to_bits(),
+        );
+
+        assert_eq!(loop_route.pts.len(), 172, "loop route vertex count moved");
+        assert_eq!(
+            route_bits_hash(&loop_route),
+            0x553a_c4ba_777d_a774,
+            "loop route bits moved (TrackGear::loop_pts would change)"
+        );
+        assert_eq!(
+            loop_route.total().to_bits(),
+            0x414a_9637,
+            "loop length bits moved"
+        );
+        assert_eq!(taut_route.pts.len(), 60, "taut route vertex count moved");
+        assert_eq!(
+            route_bits_hash(&taut_route),
+            0x9b28_2f46_9bbb_413e,
+            "taut route bits moved (hull_rest_y datum would change)"
+        );
+        assert_eq!(
+            belly_y.to_bits(),
+            0x3dc5_1704,
+            "hull_rest_y source bits moved"
+        );
+    }
 
     fn gear() -> Vec<(Vec2, f32)> {
         vec![

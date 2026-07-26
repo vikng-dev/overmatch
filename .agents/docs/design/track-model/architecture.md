@@ -45,7 +45,8 @@ What is true now:
   owner-predicted + replicated + rolled back (LinearVelocity pattern, NOT local_rollback);
   `hblt` hash stream; PROTOCOL_REV 12.
 - The terrain oracle is `track::terrain::TrackField` in SimPlugin — server, SP, and client
-  share one analytic field built from `TerrainMap` on revision change.
+  share one field, rebuilt from `TerrainMap` on revision change and carrying the decoded
+  `HeightGrid` alongside the authored blocks (§5).
 - The view consumes `TrackDrive` phase/speed directly — the pose-delta no-slip derivation is
   deleted; remote tracks scroll at exact authority phase.
 - The raycast hold/bristle transplant was REVERTED at cutover (owner call — pure sandbox law;
@@ -113,34 +114,79 @@ and the pure-core surface is `wrap::step` + the route/envelope builders, with no
 `src/track/` as a peer of `driving/`, facade `src/track.rs` (plugin-per-feature, ADR-0002):
 
 ```
-src/track.rs          pub fn view_plugin(app), pub fn sim_plugin(app) [phase B]
-src/track/spec.rs     TrackSpec + MaterialLoop + track-type presets (serde)
-src/track/rig.rs      RunningGear: per-side gear from bake + spec; validation
-src/track/oracle.rs   TerrainOracle (batched) + BlockField + SpatialQueryOracle
-src/track/route.rs    route core (pure)
-src/track/wrap.rs     the kinematic wrap + its two feel filters (pure struct + stepper)
-src/track/wheels.rs   view wheel-lift filter (pure)
-src/track/view.rs     ECS: PresentedFrame, belt derivation, view-node writes
-src/track/render.rs   TrackRenderer adapters (instanced; entity-per-link bring-up)
-src/track/sim.rs      [phase B] collocation forces in SimPhase::DrivingForces
+src/track.rs              pub fn view_plugin(app), pub fn sim_plugin(app)
+src/track/side.rs         Side + PerSide — the one L/R encoding (left −X, right +X)
+src/track/rig_geom.rs     RigGeom: the derived running-gear geometry contract
+src/track/marker_model.rs the glb's sharp sources of truth (Pin_* markers, Link_Box, rig meshes)
+src/track/derive.rs       the universal suspension-model derivations (pure)
+src/track/oracle.rs       TerrainOracle (scalar `depth_along`) + BlockField (§5)
+src/track/terrain.rs      TrackField resource: the ONE field, rebuilt on TerrainMap revision
+src/track/route.rs        route core (pure) — incl. `taut_lower_run`, shared with the wrap
+src/track/envelope.rs     contact-envelope calibration: k from ride frequency, travel knots
+src/track/forces.rs       the belt force law: `contact_side` (support + per-element grip)
+src/track/transmission.rs the joint drivetrain step — ONE form, every architecture
+src/track/drive.rs        command seam: intent → slewed axes → per-side belt commands
+src/track/wrap.rs         the kinematic wrap + its two feel filters (pure struct + stepper)
+src/track/wheels.rs       view wheel-lift filter (pure)
+src/track/gear_phase.rs   the phase law: belt travel → the angle every rotating node carries
+src/track/link_view.rs    the instanced shoe render layer (the §8 seam, as shipped)
+src/track/view.rs         ECS: presented-pose seam, belt derivation, view-node writes
+src/track/sim.rs          collocation forces in SimPhase::DrivingForces
 ```
+
+`TrackSpec` lives in the crate-wide `src/spec.rs` with the rest of the vehicle schema, not in a
+track-local `spec.rs`; there is no `rig.rs` and no `render.rs` (the render seam shipped as
+`link_view.rs`), and `SpatialQueryOracle` was never needed — see §5.
 
 **Pure-core API surface** (codex E — sandbox types stay OUT; the sandbox re-imports these and
 keeps its own ECS adapters):
 
 ```rust
-pub fn build_route(gear: &SideGear, wheel_lifts: &[f32], material: MaterialLoop)
-    -> Result<Route, RouteError>;
-pub fn sample_route<O: TerrainOracle>(route: &Route, phase: f32, presented: Affine3A,
-    oracle: &O, out: &mut Vec<LinkPose>) -> Result<(), TrackError>;
-pub fn articulate_wheels<O: TerrainOracle>(gear: &SideGear, state: &mut [WheelViewState],
-    frame: &PresentedFrame, gravity_world: Vec3, oracle: &O);
-pub fn wrap_step<O: TerrainOracle>(input: &WrapInput, oracle: &O,
+// Geometry
+pub fn build_route(circles: &[(Vec2, f32)], belt_len: f32) -> Route;
+pub fn taut_lower_run(circles: &[(Vec2, f32)], front_up: Vec2, rear_up: Vec2,
+    emit: impl FnMut(Vec2));                              // the shared belly walk (below)
+
+// Sim
+pub fn contact_side<O: TerrainOracle>(input: &SideInput, state: SideState, affine: Affine3A,
+    dt: f32, params: &ForceParams, oracle: &O, vel_at: impl Fn(Vec3) -> Vec3,
+    elements: &mut GripElements) -> (SideReport, bool);
+pub fn step(mode: TransmissionMode, fp: &ForceParams, tp: Option<&TransmissionParams>,
+    state: &mut TransmissionState, inp: &TransmissionInput) -> TransmissionReport;
+
+// View
+pub fn wheel_lift_target<O: TerrainOracle>(oracle: &O, affine: &Affine3A, down: Vec3,
+    pivot_local: Vec3, params: &WheelParams) -> f32;
+pub fn wheel_lift_step(dy: &mut f32, dvel: &mut f32, target: f32, dt: f32,
+    params: &WheelParams);
+pub fn step<O: TerrainOracle>(input: &WrapInput, oracle: &O,
     state: &mut [WrapState; 2]) -> [WrapSideOutput; 2];   // the ONE view stepper; no options
 ```
 
-(Shipped as `track::wrap::step`. `WrapState` is the per-side filter memory, `WrapState::reset` is
-the discontinuity path — there is no reseed, no report and no tier/feel parameter.)
+(The view stepper is `track::wrap::step`. `WrapState` is the per-side filter memory,
+`WrapState::reset` is the discontinuity path — there is no reseed, no report and no tier/feel
+parameter.)
+
+**`taut_lower_run` is the one belly walk, and it is shared on purpose.** The sim's route
+(`build_route`) and the view's belly (`wrap::raw_belly`) are the same lower convex envelope over
+the side-plane circles — chained external tangents and wrap arcs, with a circle that rises above
+its neighbours' tangent dropping out, so a lifted wheel is skipped by construction. It emits
+through a callback rather than returning a `Vec` because the two sinks differ in exactly one
+respect and both are load-bearing: the route dedupes near-coincident vertices onto a polyline
+seeded with the exact front tangent point, while the view keeps the raw walk spacing for its
+conform resample. One walk, two consumers, no second implementation to drift.
+
+**The sim has ONE force path.** `apply_track_forces` runs `contact_side` per side and then
+`transmission::step` once, for every architecture — the Governor arm goes through the same joint
+form as a declared gearbox, with `(mode, params)` normalized at the call site. There is no
+alternate governor tail and no branch to pick between them. (`forces::step_side` survives only as
+the `contact_side` + governor convenience wrapper that the forces unit tests drive.)
+
+**Suspension travel is not optional.** `SideInput::travel` is a required per-position
+`TravelField` — the contact envelope's local reach, built by `envelope::wheel_travel_knots` (0 at
+the unsprung sprocket/idler, full droop at every road wheel, linear tapers between). There is no
+`Option`, no lift-only compatibility mode, and no scalar fallback: the law reads the profile
+unconditionally.
 
 Type mapping from the sandbox: `PinBelt` → `MaterialLoop` (immutable, §7); sandbox `Suspension`
 → `WheelViewState` (never reuse the game's sim `Suspension` name); `BeltSample` → `LinkPose`
@@ -216,33 +262,51 @@ predicts and rolls it back; remotes consume the replicated scalars for their Rou
 bandwidth ever forces a split, `BeltState` goes local-rollback and a separate `NetBeltState`
 becomes the replicated adapter — named here so it's a decision, not drift.
 
-## 5. TerrainOracle — batched, sourced from one TerrainMap (codex F)
+## 5. TerrainOracle — one scalar query, one ground surface (codex F)
 
-`SpatialQuery` is a borrowed `SystemParam` — it cannot live in a resource. The oracle is a
-**batched pure trait**, constructed per system invocation where needed, matched outside the hot
-loop:
+`SpatialQuery` is a borrowed `SystemParam` — it cannot live in a resource, and the sim path must
+not depend on parry's raycast floats anyway (they were not cross-platform reproducible). The
+oracle is a **pure trait of exactly one scalar query** — the one every consumer (belt physics,
+wheel articulation, the wrap view's conform) actually makes:
 
 ```rust
-pub struct TerrainProbe { pub station: Vec3, pub outward: Dir3, pub reach: f32 }
-pub struct TerrainSample { pub depth: f32, pub normal: Dir3,
-                           pub material: TerrainMaterialId, pub covered: bool }
-pub trait TerrainOracle { fn sample_into(&self, probes: &[TerrainProbe],
-                                         out: &mut [TerrainSample]); }
+pub trait TerrainOracle {
+    /// Signed directional penetration of `station` past the first surface along `out`; the ray
+    /// starts `reach` behind the station and reports at most `reach` (a buried origin
+    /// saturates, like a contact cast). Positive = past the surface, negative = clearance.
+    fn depth_along(&self, station: Vec3, out: Vec3, reach: f32) -> f32;
+}
 ```
 
-- **`BlockField`** (default, resource): the sandbox field generalized. Prerequisite refactor:
-  `world.rs` currently builds block transforms and discards them — introduce
-  `TerrainMap { revision, blocks: Arc<[TerrainBlock]> }`, consumed by BOTH collider spawning
-  and `BlockField::from_map`, so the representations share one source. (`revision` feeds the
-  reseed/discontinuity signal on terrain change.)
-- **`SpatialQueryOracle`**: Avian casts on `Layer::Terrain`, built inside the system from the
-  borrowed param. View tiers may use it; determinism-sensitive sim paths must not.
-- Honesty note: the field rounds corners and buries block bottoms — deliberate policy, not
-  representational identity with colliders. "Visual ≡ physics" means both sample the SAME
-  oracle, not that the oracle equals the collider mesh.
-- Real terrain later: heightfields fit under this interface. Streaming meshes, overhangs,
-  destructibles need chunk coverage + revisioning + a "clear vs unloaded" distinction
-  (`covered`) — explicitly out of scope now, named so the trait doesn't pretend otherwise.
+Batched probes, hit normals, surface material and `covered` are the recorded growth path — to be
+added WITH their first consumer, not before. `SpatialQueryOracle` was on that list and never
+needed one.
+
+- **`BlockField`** (the one implementation, held by `track::terrain::TrackField`): a min-fold of
+  two exact analytic terms, built as `BlockField::new(blocks).with_height(grid)`.
+  - **The height grid is the shipped ground.** `HeightGrid::cast_ray` returns the EXACT first
+    hit — a 2-D DDA over the one or two cells the probe's XZ footprint crosses, closed-form
+    ray-vs-triangle per cell, on the same anti-diagonal split the parry collider triangulates
+    with. It replaced a fixed-segment sign-change scan plus bisection refinement: no sampling
+    rate to outrun, so a ridge between old checkpoints can no longer be missed. Outside the grid
+    span the height term reports NO ground — agreeing with the collider, deliberately
+    disagreeing with `height_at`'s placement-only clamp.
+  - **Authored blocks** are the secondary term (the sandbox's obstacle course, and whatever the
+    product map places on top of the heightmap): exact analytic ray-vs-rounded-box.
+- **`TerrainMap { revision, blocks }`** in `world.rs` is the shared block source consumed by BOTH
+  collider spawning and the field, so the two representations cannot drift; `revision` feeds the
+  reseed/discontinuity signal on terrain change.
+- **ONE surface, past the track model.** The same `HeightGrid` feeds the oracle, the parry
+  collider, the render mesh, spawn placement — and ballistics: a shell's terrain hit is
+  `HeightGrid::cast_ray` too, min-folded against the separate armor cast so the nearer wins.
+  Parry's terrain cast survives only on the flat fallback world that has no grid. What a shell
+  stops on is what the tracks drive on.
+- Honesty note: the block term rounds corners and buries block bottoms — deliberate policy, not
+  representational identity with colliders. The height term IS the collider's triangulation, to a
+  pinned tolerance. "Visual ≡ physics" means both sample the SAME oracle.
+- Streaming meshes, overhangs and destructibles still need chunk coverage + revisioning + a
+  "clear vs unloaded" distinction (`covered`) — out of scope, named so the trait doesn't pretend
+  otherwise.
 
 ## 6. Tiers and budget (codex G — numbers corrected)
 

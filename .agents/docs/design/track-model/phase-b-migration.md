@@ -42,7 +42,8 @@ Inputs: three research sweeps (sandbox sim inventory, deletion blast radius, net
 
 ```
 src/track.rs              facade: view_plugin (exists), sim_plugin (new), terrain_plugin (new)
-src/track/oracle.rs       TerrainOracle + BlockField (exists, unchanged)
+src/track/oracle.rs       TerrainOracle + BlockField (the block union plus the heightmap
+                          ground term, both exact analytic first-hit — architecture §5)
 src/track/route.rs        route core (exists, unchanged)
 src/track/wheels.rs       view wheel lift (exists, unchanged)
 src/track/wrap.rs         the ONE track view: kinematic wrap + its two feel filters (shared by
@@ -179,9 +180,11 @@ driving model was a pure placeholder — nothing structural carries over. Dispos
 
 Adopted from `scratchpad/codex_purity_review.md` so future transplants get caught in review:
 
-- `track/forces.rs` is the ONLY force-law module. Adapters gather inputs, call `step_side`,
-  replay ordered applications, commit returned state — nothing else. Any clamp, ramp, probe
-  rule, or force equation OUTSIDE the shared core requires explicit design review.
+- `track/forces.rs` is the ONLY contact-force module and `track/transmission.rs` the only belt
+  integrator. Adapters gather inputs, call `contact_side` then `transmission::step` — one joint
+  path for every architecture, no adapter-side branch — replay ordered applications, commit
+  returned state, nothing else. Any clamp, ramp, probe rule, or force equation OUTSIDE the
+  shared core requires explicit design review.
 - Only three adapter-level differences are legitimate: vehicle-authored data, game capability
   gating, and tick-truth ECS/netcode plumbing.
 - Every spec scalar: one named consumer, finite/range validation (shipped — `spec::validate`),

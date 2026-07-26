@@ -162,9 +162,9 @@ pub(super) fn apply_belt_support_field(
             command: side_commands[side.index()],
             // The envelope's per-position reach profile: full droop over the road-wheel span,
             // tapering to zero at the unsprung sprocket/idler centres.
-            travel: Some(crate::track::forces::TravelField {
+            travel: crate::track::forces::TravelField {
                 knots: &envelope.knots.get(side)[..],
-            }),
+            },
         };
         let state = SideState {
             speed: belt.get(side),
@@ -714,9 +714,9 @@ mod tests {
                 plane_x: side.plane_x(geom.plane_x),
                 columns: geom.grip_column_offsets(side),
                 command: 0.0,
-                travel: Some(crate::track::forces::TravelField {
+                travel: crate::track::forces::TravelField {
                     knots: law.knots.get(side),
-                }),
+                },
             };
             let (report, live) = contact_side(
                 &input,
