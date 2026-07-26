@@ -21,40 +21,31 @@
 //! resultant at its own point — curb-under-one-edge roll torque, cross-slope contact, and
 //! half-off-a-ledge support emerge from the application points.
 //!
-//! The sandbox's DEFAULT track view is a stateless kinematic wrap (step 22): the road wheels read
-//! the field directly ([`articulate_wheels_field`]), the belt path is *fitted* around the
+//! The sandbox's track view is the memory-enabled kinematic wrap ([`crate::track::wrap`]) — the
+//! SAME module the game's `track::view` runs, and the only track view there is: the road wheels
+//! read the field directly ([`articulate_wheels_field`]), then the belt path is *fitted* around the
 //! articulated wheels every frame ([`conform_belts_field`]) — tangent wrap + terrain conform +
-//! budgeted sag — and nothing about the drawn track is simulated or remembered. The step-24 route
-//! chain rides behind the `V` toggle as its live A/B partner ([`conform_belts_field_chain`], the
-//! same [`track::chain`](crate::track::chain) core the game runs) — and it is the view that WON and
-//! SHIPPED as the game's own (`track::view`). Neither is awaiting deletion.
+//! budgeted sag, over a self-healing filter memory.
 
 use super::*;
 
-use crate::track::chain::{ChainInput, ChainParams, ChainSideInput, ChainState};
 use crate::track::forces::{
     ForceParams, SideInput, SideReport, SideState, contact_side, phase_decompose,
 };
 use crate::track::oracle::{BlockField, TerrainOracle};
 use crate::track::transmission::{self, TransmissionInput, TransmissionParams};
 use crate::track::wheels::{WheelParams, wheel_lift_step, wheel_lift_target};
+use crate::track::wrap;
 
-/// The sandbox's terrain resource: the track core's [`BlockField`] behind the sandbox's fixed
-/// probe reach ([`CONTACT_PROBE`]), so every call site keeps the historical two-argument shape.
+/// The sandbox's terrain resource: the track core's [`BlockField`], probed at [`CONTACT_PROBE`]
+/// reach by every call site.
 #[derive(Resource, Default)]
 pub(super) struct TerrainField(pub(super) BlockField);
-
-impl TerrainField {
-    pub(super) fn depth_along(&self, station: Vec3, out: Vec3) -> f32 {
-        self.0.depth_along(station, out, CONTACT_PROBE)
-    }
-}
 
 /// Each side's **total** belt travel (m) along the reference loop — the core's advected state
 /// ([`SideState::phase`]), committed back verbatim each tick. `f64` exactly like the shared
 /// core (and the game's `TrackDrive`): unbounded travel accumulates past f32 ULP within
-/// minutes. Kept unwrapped: consumers wrap mod the link pitch for the sampling offset, and its
-/// quotient is the **link-identity shift** the chain warm-start needs.
+/// minutes. Kept unwrapped: consumers wrap mod the link pitch for the sampling offset.
 #[derive(Resource, Default)]
 pub(super) struct BeltPhase(PerSide<f64>);
 
@@ -70,8 +61,7 @@ impl BeltPhase {
 /// The belt as the physics sees it: the MATERIAL loop's length and its link count. Both come
 /// straight off [`RigGeom`] — `pitch × link_count` and `link_count` — because the loop is a real
 /// chain of rigid links, not a length budget: there is no slack term to add and no rounding to do.
-/// (The old rig derived both from a taut wrap plus an authored `TRACK_SLACK`; slack is now simply
-/// what the authored link count leaves over, reported by `RigGeom::window`.)
+/// Slack is simply what the authored link count leaves over, reported by `RigGeom::window`.
 #[derive(Resource, Default)]
 pub(super) struct PinBelt {
     pub(super) length: f32,
@@ -87,70 +77,6 @@ impl PinBelt {
     }
 }
 
-// Route-chain solve knobs (step 23, from the codex chain deep dive — every knob has physical
-// units; per-frame damping factors, per-frame pass counts, and stiffness-by-iteration are gone).
-/// Fixed internal solve step (s): the chain advances on its OWN clock via a frame-time
-/// accumulator, so feel is identical at 30/60/144 fps (the old 0.88-per-frame damping + 20
-/// passes-per-frame was "three different chains" across render rates).
-const CHAIN_SUBSTEP: f32 = 1.0 / 120.0;
-/// Catch-up budget: at most this many substeps per rendered frame; longer hitches drop debt
-/// instead of integrating a monster step.
-const CHAIN_MAX_SUBSTEPS: usize = 8;
-/// Constraint sweeps per substep (many small steps beat many sweeps in one big step — XPBD
-/// "small steps" result).
-const CHAIN_SWEEPS: usize = 4;
-/// Damping as real-time half-lives (s), ANISOTROPIC in the route frame (step 24, codex T-34
-/// review): isotropic drag is rope physics — it kills the longitudinal yank along with the
-/// flutter. Tangential motion (yank, slack migration) barely decays; route-normal motion
-/// (transverse flutter) dies fast. The other half of transverse deadness is the pin friction.
-const CHAIN_HALF_LIFE_TAN: f32 = 0.60;
-const CHAIN_HALF_LIFE_NORM: f32 = 0.060;
-// Node mass, pin friction torque, and the articulation stop are VEHICLE data, authored per tank
-// (`track.link_mass` / `hinge_torque` / `link_angle`) and carried on [`RigSpec`] — the game's
-// `track::view` reads the same fields. What they mean:
-//   * node mass (kg) — one link assembly. It enters the XPBD denominators (w = 1/m), which is what
-//     makes the bending compliance and the friction torque REAL units instead of normalized view
-//     parameters.
-//   * pin dry-friction torque (N·m) — a torque-LIMITED XPBD hinge constraint toward the joint's
-//     previous material angle (multiplier accumulated across sweeps, clamped once per substep at
-//     |λ| ≤ τ·h²). THE physical rope-vs-track differentiator: real track pins are heavily-loaded
-//     dry steel bearings, so flutter dies within a link or two and slack settles near-polygonal,
-//     while bulk yank passes through because it doesn't articulate joints.
-//   * the link-angle pair (rad, both positive) — the hard link-geometry stops, distinct from the
-//     bending energy. ASYMMETRIC: the inward one (toward the wheels) is the wrap direction and
-//     must clear every running-gear circle's demand per joint; the outward one is the tighter
-//     stop the ground-side structure imposes, and it is what limits sag and bump crests.
-/// Sprocket motor response time (s): how fast joints engaged on the drive wheel converge to the
-/// belt's surface speed. Drive is applied ONLY there — the old all-joint advected anchor
-/// injected compression around the whole loop and was itself a zigzag cause (codex, step 22b);
-/// the length constraints now transmit drive, so tight and slack sides emerge.
-const CHAIN_MOTOR_TAU: f32 = 0.05;
-/// Bending stiffness (N·m², REAL units now that node mass is real) of the XPBD turning-angle
-/// constraint relative to the route's own curvature. Small on purpose: a pinned track has no
-/// bending spring away from its stops — the old normalized B=10 with unit masses was secretly
-/// ~160 N·m² of route-shaped spring (part of the rubber-band read). This is a numerical
-/// regularizer; the anti-zigzag/anti-flutter duty moved to the pin friction + the route tube.
-const CHAIN_BEND_STIFFNESS: f32 = 2.0;
-/// Post-solve velocity guardrails (m/s), decomposed in the route frame: route-normal speed caps
-/// hard (whip is real but bounded); tangential caps at max(8, |belt| + 5) computed inline. These
-/// clamp the STORED velocity after reconstruction — containment, not the root fix (that's the
-/// no-restitution reconstruction below).
-const CHAIN_MAX_NORMAL_SPEED: f32 = 4.0;
-/// Route-tube half-widths (m): how far a joint may sit OUTSIDE the loop (whip overshoot) and
-/// INSIDE it (terrain holds the belly a board-stack in off the taut line; slack droops under
-/// spans). Both stay below half the belly↔top-run route gap (~0.85 m) so the tube atlas never
-/// overlaps — one 2D point, one (s,u). A joint clamped to the tube can never be "off the tank"
-/// no matter what the solve did — and on wheel arcs the inner bound is zero, which is what makes
-/// wrong-side capture UNREPRESENTABLE (codex Priority B): a node on a wheel sector can only move
-/// radially off the rim.
-const CHAIN_TUBE_OUT: f32 = 0.30;
-const CHAIN_TUBE_IN: f32 = 0.40;
-/// Half-width (m) of the windowed route-projection search around a joint's previous route
-/// coordinate — ±2 pitches: comfortably above the largest legal per-substep motion (~0.17 m),
-/// far below the distance to any other route branch. A window (not a global nearest-point
-/// query) is what keeps the rebase from tunneling `s` across overlapping parts of the loop.
-const CHAIN_REBASE_WINDOW: f32 = 0.35;
-
 /// The belt contact — an advected pin-line ring, penetration from the field at three fixed
 /// stations per link (pin a, midpoint, pin b — on the outer face):
 ///
@@ -165,8 +91,8 @@ pub(super) fn apply_belt_support_field(
     // FRAME, so on a multi-tick frame the second tick would probe terrain against a stale
     // hull — phantom slip/penetration that the grip state INTEGRATES into real force
     // oscillation (measured: period-2 load alternation, 212↔32 kN, with a perfectly smooth
-    // hull). This was "model4's one game-illegal habit" (architecture v3 §0) — now retired;
-    // the sim core and the game adapter always agreed on tick truth.
+    // hull). This was the sandbox model's "one game-illegal habit" (architecture v3 §0) — now
+    // retired; the sim core and the game adapter always agreed on tick truth.
     mut hull: Query<
         (
             &avian3d::prelude::Position,
@@ -261,9 +187,14 @@ pub(super) fn apply_belt_support_field(
     }
 
     // Phase 2 — ONE joint drivetrain solve. The governor adapter runs the direct belt math
-    // verbatim; the regenerative adapters consume the Tiger's declared L600 tables.
+    // verbatim; the regenerative adapters consume the Tiger's declared L600 tables. The
+    // switch is seeded from the SPEC by `build_rig` (same command flush as the `RigGeom`
+    // gate this system runs behind), so a `None` here is a scheduling bug, not a default.
+    let mode = trans
+        .0
+        .expect("build_rig seeds TransSwitch from the spec before the sim runs");
     let tr = transmission::step(
-        trans.0,
+        mode,
         &params,
         Some(&transmission.0),
         &mut trans_state.0,
@@ -276,7 +207,7 @@ pub(super) fn apply_belt_support_field(
             dt,
         },
     );
-    telemetry.0 = match trans.0 {
+    telemetry.0 = match mode {
         transmission::TransmissionMode::Governor => None,
         _ => Some(tr),
     };
@@ -429,171 +360,14 @@ fn force_params(geom: &RigGeom, rig: &RigSpec, envelope: &EnvelopeLaw) -> ForceP
     }
 }
 
-/// The route-chain view's solver state — `track::chain::ChainState` behind a sandbox resource.
-/// Reset to default for a canonical cold start (view toggle, model switch).
-#[derive(Resource, Default)]
-pub(super) struct RouteChain(pub(super) ChainState);
-
-/// The sandbox's chain parameters: the rig's measured geometry + global solver policy, assembled
-/// for [`track::chain`](crate::track::chain). Every field is either vehicle data or quality policy —
-/// none is a per-vehicle feel knob (architecture §7).
-fn chain_params(geom: &RigGeom, rig: &RigSpec) -> ChainParams {
-    ChainParams {
-        substep: CHAIN_SUBSTEP,
-        max_substeps: CHAIN_MAX_SUBSTEPS,
-        sweeps: CHAIN_SWEEPS,
-        half_life_tan: CHAIN_HALF_LIFE_TAN,
-        half_life_norm: CHAIN_HALF_LIFE_NORM,
-        node_mass: rig.link_mass,
-        hinge_torque: rig.hinge_torque,
-        motor_tau: CHAIN_MOTOR_TAU,
-        bend_stiffness: CHAIN_BEND_STIFFNESS,
-        link_angle_inward: rig.link_angle_inward,
-        link_angle_outward: rig.link_angle_outward,
-        max_normal_speed: CHAIN_MAX_NORMAL_SPEED,
-        tube_out: CHAIN_TUBE_OUT,
-        tube_in: CHAIN_TUBE_IN,
-        rebase_window: CHAIN_REBASE_WINDOW,
-        thickness: geom.thickness,
-        probe_reach: CONTACT_PROBE,
-    }
-}
-
-/// The **route-chain view** (`V` toggle) — the simulated chain tier, step 24 math, now
-/// living in [`track::chain`](crate::track::chain) (step 25 extraction): the sandbox side of the
-/// seam only gathers inputs (articulated circles, belt scalars, hull affine, gravity), calls
-/// `ChainState::step`, and writes the outputs into the sandbox's draw resources. The game's
-/// phase-A view plugin will consume the identical core behind the tank rig.
-pub(super) fn conform_belts_field_chain(
-    hull: Single<&GlobalTransform, With<Hull>>,
-    wheels: Query<(&RigWheel, &Transform)>,
-    field: Res<TerrainField>,
-    pin_belt: Res<PinBelt>,
-    phase: Res<BeltPhase>,
-    belt: Res<BeltSpeed>,
-    time: Res<Time>,
-    mut chain: ResMut<RouteChain>,
-    mut belts: ResMut<ConformedBelts>,
-    mut reference: ResMut<ChainReference>,
-    geom: Res<RigGeom>,
-    rig: Res<RigSpec>,
-    // Perf probe: (busy seconds, substep-sides, frames) — the promotion-budget number.
-    mut perf: Local<(f64, u64, u64)>,
-) {
-    let t_perf = std::time::Instant::now();
-    let hull = *hull;
-    let affine = hull.affine();
-    let to_local = affine.inverse();
-    let g3 = to_local.transform_vector3(Vec3::NEG_Y * 9.81);
-    let g2 = Vec2::new(g3.z, g3.y);
-
-    // Per-side pin-line circles, front→rear: the hull-fixed drive circles from the derived rest
-    // list (already ON the pin line — no inflation) + the ARTICULATED road wheels at their pin
-    // radius, sorted so the envelope scan and the frame-to-frame interpolation see a stable order.
-    let wheel_r = geom.wheel_pin_radius();
-    let side_circles: [Vec<(Vec2, f32)>; 2] = Side::ALL.map(|side| {
-        let rest = geom.rest.get(side);
-        let mut roads: Vec<(Vec2, f32)> = wheels
-            .iter()
-            .filter(|(w, _)| w.side == side && w.kind == WheelKind::Road)
-            .map(|(_, t)| (Vec2::new(t.translation.z, t.translation.y), wheel_r))
-            .collect();
-        roads.sort_by(|a, b| a.0.x.total_cmp(&b.0.x));
-        let mut circles = vec![rest[0]];
-        circles.extend(roads);
-        circles.push(*rest.last().expect("a side has a sprocket and an idler"));
-        circles
-    });
-
-    // The IMMUTABLE material length: the authored loop, `pitch × link_count`, exact. The old
-    // `CHAIN_SLACK_TRIM` (a tensioner-preload stand-in that shortened a slack-budgeted belt) is
-    // retired with the budget it corrected — the link count IS the tension now, and trimming a
-    // derived loop below its own taut wrap would simply make the chain unsolvable.
-    let chain_len = pin_belt.length;
-    let input = ChainInput {
-        dt: time.delta_secs(),
-        affine,
-        gravity_local: g2,
-        belt_len: chain_len,
-        count: pin_belt.count,
-        sides: [
-            ChainSideInput {
-                circles: &side_circles[0],
-                belt_speed: belt.get(Side::Left),
-                phase: phase.get(Side::Left).rem_euclid(f64::from(chain_len)) as f32,
-                plane_x: Side::Left.plane_x(geom.plane_x),
-                lateral_stations: geom.grip_stations(Side::Left),
-            },
-            ChainSideInput {
-                circles: &side_circles[1],
-                belt_speed: belt.get(Side::Right),
-                phase: phase.get(Side::Right).rem_euclid(f64::from(chain_len)) as f32,
-                plane_x: Side::Right.plane_x(geom.plane_x),
-                lateral_stations: geom.grip_stations(Side::Right),
-            },
-        ],
-    };
-    let mut out: [Vec<Vec2>; 2] = [Vec::new(), Vec::new()];
-    let report = chain
-        .0
-        .step(&input, &chain_params(&geom, &rig), &field.0, &mut out);
-    if report.tears + report.overruns > 0 {
-        // `debug!`, not `warn!`: a tear-fuse reseed is a cosmetic self-heal (the chain view is
-        // reseedable-from-data by construction, never sim state), and it recurs every frame
-        // past the chain's speed ceiling — the game's `track::view` demoted the same message
-        // for the same reason.
-        debug!(
-            "route-chain reseed: {} tear-fuse, {} overrun",
-            report.tears, report.overruns
-        );
-    }
-
-    for (si, side) in Side::ALL.into_iter().enumerate() {
-        let track_x = input.sides[si].plane_x;
-        // The current route is the `-` viz layer: chain-vs-route deviation shows exactly where
-        // terrain, slack, and whip hold the belt off its taut path.
-        let route_now = build_route(&side_circles[si], chain_len);
-        let ref_world: Vec<Vec3> = route_now
-            .pts
-            .iter()
-            .map(|p| affine.transform_point3(Vec3::new(track_x, p.y, p.x)))
-            .collect();
-        let samples: Vec<BeltSample> = out[si]
-            .iter()
-            .map(|&p| BeltSample {
-                local: p,
-                world: affine.transform_point3(Vec3::new(track_x, p.y, p.x)),
-            })
-            .collect();
-        match side {
-            Side::Left => reference.left = ref_world,
-            Side::Right => reference.right = ref_world,
-        }
-        *belts.get_mut(side) = samples;
-    }
-    perf.0 += t_perf.elapsed().as_secs_f64();
-    perf.1 += report.substeps as u64 * 2;
-    perf.2 += 1;
-    if perf.2.is_multiple_of(512) {
-        info!(
-            "route-chain perf: {:.0} µs/frame avg | {:.1} µs/substep-side ({} substep-sides / {} frames)",
-            perf.0 / perf.2 as f64 * 1e6,
-            perf.0 / (perf.1 as f64).max(1.0) * 1e6,
-            perf.1,
-            perf.2
-        );
-    }
-}
-
 /// Critically-damped ease frequency (rad/s) of a wrap-view wheel's RISE (settle ≈ 4.7/ω ≈
 /// 100 ms). Integrated implicitly — see [`articulate_wheels_field`].
 const WHEEL_EASE_OMEGA: f32 = 45.0;
 
 /// The road wheels, placed directly from the terrain FIELD — wheels first, then the belt
-/// wraps them (`ground → wheels → belt`, acyclic; the step-21 circular order was the root of
-/// the teleport/settle wrong-side captures). Probe + easing live in
-/// [`track::wheels`](crate::track::wheels) (step 25 extraction): implicit critically-damped
-/// rise, ballistic fall, deepest of the physics' lateral columns along the lower arc.
+/// wraps them (`ground → wheels → belt`, acyclic; a belt-first order is circular). Probe + easing
+/// live in [`track::wheels`](crate::track::wheels): implicit critically-damped rise, ballistic
+/// fall, deepest of the physics' lateral columns along the lower arc.
 pub(super) fn articulate_wheels_field(
     hull: Single<&GlobalTransform, With<Hull>>,
     field: Res<TerrainField>,
@@ -625,7 +399,6 @@ pub(super) fn articulate_wheels_field(
         }
         let params = &params[wheel.side.index()];
         let target = wheel_lift_target(&field.0, &affine, down, susp.pivot_local, params);
-        susp.target = target;
         let (mut dy, mut dvel) = (susp.dy, susp.dvel);
         wheel_lift_step(&mut dy, &mut dvel, target, time.delta_secs(), params);
         susp.dy = dy;
@@ -634,9 +407,42 @@ pub(super) fn articulate_wheels_field(
     }
 }
 
-/// The default track view — a **stateless kinematic wrap** (step 22): no integration, no
-/// constraints, no per-frame memory. The path is recomputed from scratch every frame as a pure
-/// function of the articulated wheels, the terrain field, and the belt phase:
+/// Per-side live filter memory for the kinematic wrap — the shared [`wrap::WrapState`], indexed
+/// `[left, right]`. Mutated ONLY by [`conform_belts_field`]. It is pure FILTER state: it holds no
+/// sim truth, cannot tear, and self-heals from the current frame's raw targets on any reset.
+#[derive(Resource, Default)]
+pub(super) struct WrapMemory {
+    states: [wrap::WrapState; 2],
+}
+
+impl WrapMemory {
+    /// Drop the per-side filter memory — the sandbox's discontinuity paths (`R` reseat, live count
+    /// rebuild) call this so the wrap re-inits from the fresh pose instead of settling in from
+    /// stale memory, exactly as the game's view resets on a presented-pose snap.
+    pub(super) fn reset(&mut self) {
+        for state in &mut self.states {
+            state.reset();
+        }
+    }
+}
+
+/// Per-frame cost of the track view (µs/frame, cumulative average), written by
+/// [`conform_belts_field`] and surfaced in the panel's Telemetry section — the same number the
+/// every-512-frames log line prints. Sandbox cost is for ONE tank; the game pays it per rendered
+/// tank.
+///
+/// The field is read only by the `dev_ui` panel, so it reads as dead on the default-feature lane.
+#[derive(Resource, Default)]
+#[cfg_attr(not(feature = "dev_ui"), allow(dead_code))]
+pub(super) struct ViewPerf {
+    /// Kinematic wrap ([`conform_belts_field`]).
+    pub(super) wrap_us: f32,
+}
+
+/// The track view — the **memory-enabled kinematic wrap**, the one and only track view, run here
+/// through the SAME [`wrap`](crate::track::wrap) module the game's `track::view` runs. The path is
+/// refitted from scratch every frame as a function of the articulated wheels, the terrain field and
+/// the belt phase:
 ///
 /// 1. **taut wrap** — the lower convex envelope of the pin-line circles (tangent segments + wheel
 ///    arcs, front→rear; a wheel above the taut line between its neighbours simply drops out);
@@ -650,28 +456,38 @@ pub(super) fn articulate_wheels_field(
 /// 4. **links** — the closed path resampled at link pitch with the belt phase.
 ///
 /// Wrong-side wheel capture, compression zigzag, teleport transients, and solver stability are
-/// not tuned away here — they are unrepresentable: there is no state to capture, buckle, stale,
-/// or diverge. Remote tanks render identically on every client as a pure function of replicated
-/// pose + phase (ADR-0014 satisfied by construction).
+/// unrepresentable in the wrap CORE: the envelope+conform+sag geometry has no state to capture,
+/// buckle, stale, or diverge. Over it sit the two parameter-free feel tiers (a hull-frame conform
+/// ease and a slack spring, always on), whose CLIENT-LOCAL filter memory means the drawn belt
+/// carries this client's own history rather than being a pure function of replicated state
+/// (ADR-0014) — cosmetic view juice, while the pins/wheels/gear still derive from replicated state
+/// alone.
+///
+/// This system is a thin ADAPTER over [`wrap::step`](crate::track::wrap::step): it gathers the
+/// articulated circles off the sandbox rig and writes the drawn joints into the sandbox draw
+/// resources. It additionally asks the wrap for the taut REFERENCE loop, which the game never does
+/// — that is the sandbox's `-` diagnostic layer, not a view option.
 pub(super) fn conform_belts_field(
     hull: Single<&GlobalTransform, With<Hull>>,
     wheels: Query<(&RigWheel, &Suspension)>,
     field: Res<TerrainField>,
     pin_belt: Res<PinBelt>,
     phase: Res<BeltPhase>,
+    time: Res<Time>,
+    mut memory: ResMut<WrapMemory>,
     mut belts: ResMut<ConformedBelts>,
-    mut reference: ResMut<ChainReference>,
+    mut reference: ResMut<TautReference>,
+    mut view_perf: ResMut<ViewPerf>,
     geom: Res<RigGeom>,
-    // Perf probe: (busy seconds, frames) — the wrap's side of the promotion budget.
+    // Perf probe: (busy seconds, frames) — the standing per-tank view budget measurement.
     mut perf: Local<(f64, u64)>,
 ) {
     let t_perf = std::time::Instant::now();
     let affine = hull.affine();
     let wheel_r = geom.wheel_pin_radius();
-    for side in Side::ALL {
-        let track_x = side.plane_x(geom.plane_x);
-        // Pin-line circles, front→rear: the hull-fixed sprocket + idler straight from the derived
-        // rest list (already pin-line), the ARTICULATED road wheels at their pin radius.
+    // Articulated pin-line circles per side, front→rear: the hull-fixed sprocket + idler from the
+    // rig's `rest` list, the road wheels at their pin radius lifted by the cosmetic suspension travel.
+    let circles: [Vec<(Vec2, f32)>; 2] = Side::ALL.map(|side| {
         let rest = geom.rest.get(side);
         let mut roads: Vec<(Vec2, f32)> = wheels
             .iter()
@@ -679,164 +495,55 @@ pub(super) fn conform_belts_field(
             .map(|(_, s)| (Vec2::new(s.pivot_local.z, s.pivot_local.y + s.dy), wheel_r))
             .collect();
         roads.sort_by(|a, b| a.0.x.total_cmp(&b.0.x));
-        let mut circles = vec![rest[0]];
-        circles.extend(roads.iter().copied());
-        circles.push(*rest.last().expect("a side has a sprocket and an idler"));
+        let mut c = vec![rest[0]];
+        c.extend(roads);
+        c.push(*rest.last().expect("a side has a sprocket and an idler"));
+        c
+    });
+    let input = wrap::WrapInput {
+        dt: time.delta_secs(),
+        affine,
+        belt_len: pin_belt.length,
+        count: pin_belt.count,
+        pitch: geom.pitch,
+        thickness: geom.thickness,
+        probe_reach: CONTACT_PROBE,
+        // The sandbox draws the `-` reference layer, so it asks the wrap to build it.
+        reference: true,
+        sides: Side::ALL.map(|side| wrap::WrapSideInput {
+            circles: &circles[side.index()],
+            plane_x: side.plane_x(geom.plane_x),
+            lateral_stations: geom.grip_stations(side),
+            phase: phase.get(side),
+        }),
+    };
+    let out = wrap::step(&input, &field.0, &mut memory.states);
 
-        // 1. Lower convex envelope over the ordered circles (Graham-style scan): a circle whose
-        // body stays above its neighbours' lower tangent is not part of the taut run and drops
-        // out — a lifted wheel is skipped, never wrapped from the wrong side (the route-selection
-        // rule; fixed logical order, no per-frame hull search).
-        let mut active: Vec<usize> = vec![0];
-        for k in 1..circles.len() {
-            while active.len() >= 2 {
-                let (p, a) = (active[active.len() - 2], active[active.len() - 1]);
-                let (t0, _) =
-                    external_tangent(circles[p].0, circles[p].1, circles[k].0, circles[k].1, -1.0);
-                // Unit lower normal of the p→k tangent line (t0 sits on circle p by construction).
-                let n = (t0 - circles[p].0) / circles[p].1;
-                // Keep `a` only if it protrudes below that line.
-                if (circles[a].0 - t0).dot(n) + circles[a].1 > 1e-4 {
-                    break;
-                }
-                active.pop();
-            }
-            active.push(k);
-        }
-
-        // The taut bottom polyline, sprocket_up → front arc → tangents/arcs → idler_up.
-        let (sprocket_c, sprocket_r) = circles[0];
-        let (idler_c, idler_r) = *circles.last().unwrap();
-        let (idler_up, sprocket_up) =
-            external_tangent(idler_c, idler_r, sprocket_c, sprocket_r, 1.0);
-        let mut bottom: Vec<Vec2> = Vec::new();
-        let mut cursor = sprocket_up;
-        for w in active.windows(2) {
-            let (i, j) = (w[0], w[1]);
-            let (t0, t1) =
-                external_tangent(circles[i].0, circles[i].1, circles[j].0, circles[j].1, -1.0);
-            let toward = if i == 0 {
-                Vec2::new(-1.0, 0.0) // the sprocket wraps around its front
-            } else {
-                Vec2::new(0.0, -1.0) // road wheels wrap under
-            };
-            bottom.extend(arc(circles[i].0, circles[i].1, cursor, t0, toward));
-            bottom.push(t1);
-            cursor = t1;
-        }
-        bottom.extend(arc(idler_c, idler_r, cursor, idler_up, Vec2::new(1.0, 0.0)));
-
-        // The taut (unconformed) loop is the `-` reference layer: chain-vs-reference deviation
-        // shows exactly where terrain holds the belt off its rest path.
-        let ref_loop = close_loop(&bottom, idler_up, sprocket_up, pin_belt.length, &roads);
-        let ref_world: Vec<Vec3> = ref_loop
-            .iter()
-            .map(|p| affine.transform_point3(Vec3::new(track_x, p.y, p.x)))
-            .collect();
+    for side in Side::ALL {
+        let track_x = side.plane_x(geom.plane_x);
+        let si = side.index();
+        let to_world = |p: &Vec2| affine.transform_point3(Vec3::new(track_x, p.y, p.x));
+        let ref_world: Vec<Vec3> = out[si].reference.iter().map(&to_world).collect();
         match side {
             Side::Left => reference.left = ref_world,
             Side::Right => reference.right = ref_world,
         }
-
-        // 2. Terrain conform: displace each ground-facing station AGAINST its outward normal by
-        // the directional field depth — a buried station is lifted back INSIDE the loop until its
-        // outer face sits on the terrain surface (belly rises onto boards, nose backs off a
-        // wall). The step-22 first cut had this sign inverted, pushing the belly INTO boards and
-        // the nose off the sprocket — Yan's wall/phase-through findings. Deepest of the physics'
-        // 3 lateral columns; C0 because the field is rounded.
-        //
-        // Conform on a DENSE resample, not the wrap's vertices: a tangent segment between two
-        // wheels is one long edge — with only its endpoints conformed, a board mid-segment goes
-        // unsampled and the belt cuts through it (the second half of the phase-through finding).
-        let mut bottom = resample(&bottom, BELT_DRAW_SPACING, 0.0);
-        bottom.push(idler_up);
-        let m = bottom.len();
-        let outs: Vec<Vec2> = (0..m)
-            .map(|i| {
-                let tan =
-                    (bottom[(i + 1).min(m - 1)] - bottom[i.saturating_sub(1)]).normalize_or_zero();
-                Vec2::new(tan.y, -tan.x)
-            })
-            .collect();
-        let depths: Vec<f32> = (0..m)
-            .map(|i| {
-                let out2 = outs[i];
-                if out2 == Vec2::ZERO {
-                    return 0.0;
-                }
-                let s2 = bottom[i] + out2 * (geom.thickness / 2.0);
-                let w = affine.transform_point3(Vec3::new(track_x, s2.y, s2.x));
-                let out = affine
-                    .transform_vector3(Vec3::new(0.0, out2.y, out2.x))
-                    .normalize_or_zero();
-                // Station offsets are hull-x measurements (shoe faces relative to the pin
-                // plane) — shift along the hull's lateral axis, per-side signed.
-                let lat_axis = affine.transform_vector3(Vec3::X);
-                let mut d = 0.0_f32;
-                for offset in geom.grip_stations(side) {
-                    d = d.max(field.depth_along(w + lat_axis * offset, out));
-                }
-                d.max(0.0)
-            })
-            .collect();
-        // A rigid link OVERHANGS a board edge: the line stays high for about half a pitch before
-        // the pin clears the edge, then articulates down over the next — the chain got this from
-        // its per-link constraint. Reproduce it on the displacement field: a ±1-station max
-        // filter (the overhang; never sinks a lift) followed by a 3-tap triangular smooth (the
-        // articulation rounding). Without it, the pointwise ramp starts AT the edge and the belt
-        // shaves the corner (~100 mm transients at the 0.18 m boards).
-        let widened: Vec<f32> = (0..m)
-            .map(|i| {
-                depths[i.saturating_sub(1)]
-                    .max(depths[i])
-                    .max(depths[(i + 1).min(m - 1)])
-            })
-            .collect();
-        let conformed: Vec<Vec2> = (0..m)
-            .map(|i| {
-                let d = 0.25 * widened[i.saturating_sub(1)]
-                    + 0.5 * widened[i]
-                    + 0.25 * widened[(i + 1).min(m - 1)];
-                if d > 0.0 {
-                    bottom[i] - outs[i] * d
-                } else {
-                    bottom[i]
-                }
-            })
-            .collect();
-
-        // 3 + 4. Close with the budgeted sag and scroll the links along the loop.
-        let mut loop_pts = close_loop(&conformed, idler_up, sprocket_up, pin_belt.length, &roads);
-        if let Some(&first) = loop_pts.first() {
-            loop_pts.push(first);
-        }
-        // Space the pins at the MATERIAL pitch, not the drawn one. The links are rigid — the loop
-        // is exactly `geom.pitch · count` long — so the conformed polyline is read as a uniform-
-        // strain image of it and sampled in material arc-length ([`station_params`]). Resampling at
-        // the naive `polyline_len / count` spaced pins at the ~0.08%-off DRAWN pitch, which walked
-        // the belt out from under the sprocket tooth lock at one tooth per ~160 m.
-        let (spacing, offset) = station_params(
-            phase.get(side),
-            geom.pitch,
-            polyline_len(&loop_pts),
-            pin_belt.count,
-        );
-        let mut joints = resample(&loop_pts, spacing, offset);
-        joints.truncate(pin_belt.count);
-        if joints.len() < 3 {
+        if out[si].joints.len() < 3 {
             continue;
         }
-        let samples: Vec<BeltSample> = joints
+        *belts.get_mut(side) = out[si]
+            .joints
             .iter()
-            .map(|&p| BeltSample {
-                local: p,
-                world: affine.transform_point3(Vec3::new(track_x, p.y, p.x)),
+            .map(|p| BeltSample {
+                local: *p,
+                world: to_world(p),
             })
             .collect();
-        *belts.get_mut(side) = samples;
     }
     perf.0 += t_perf.elapsed().as_secs_f64();
     perf.1 += 1;
+    // Surface the cumulative average to the panel (the same number the 512-frame log prints).
+    view_perf.wrap_us = (perf.0 / perf.1 as f64 * 1e6) as f32;
     if perf.1.is_multiple_of(512) {
         info!(
             "kinematic-wrap perf: {:.0} µs/frame avg ({} frames)",
@@ -844,51 +551,6 @@ pub(super) fn conform_belts_field(
             perf.1
         );
     }
-}
-
-/// Resample spacing and phase offset that place the drawn pin stations exactly `material_pitch`
-/// apart along a conformed loop — the pin spacing the sprocket phase lock ([`super::wheel_view`])
-/// assumes, and the one that keeps the drawn belt registered to the teeth over any travel.
-///
-/// The links are RIGID: the material loop is exactly `material_pitch · count`. The conformed
-/// polyline only approximates it — arc and sag polyline discretisation leave `poly_len` ~0.08% off
-/// — so resampling at the naive `poly_len / count` spaces the pins at the DRAWN pitch, and the
-/// drawn belt walks out from under the material-pitch tooth lock at ~one tooth per 160 m.
-///
-/// The cure is a uniform-strain reparametrisation: treat the polyline as the drawn image of the
-/// material loop (`strain = poly_len / (material_pitch · count)` drawn metres per material metre)
-/// and sample at material positions `offset_m + i · material_pitch` mapped back through the strain.
-/// Pin spacing is then the material pitch to float precision, pin 0 advances exactly one station
-/// per material pitch of travel (so the sprocket's one-tooth-per-pitch lock never drifts), and the
-/// loop closes: `phase += count · material_pitch` returns `offset_m`, and every station, to itself.
-fn station_params(phase: f64, material_pitch: f32, poly_len: f32, count: usize) -> (f32, f32) {
-    let material_len = material_pitch * count.max(1) as f32;
-    let strain = if material_len > 1e-6 {
-        poly_len / material_len
-    } else {
-        1.0
-    };
-    let (_, offset_m) = phase_decompose(phase, material_pitch);
-    (material_pitch * strain, offset_m * strain)
-}
-
-/// Close a bottom polyline (sprocket_up → … → idler_up) into the full belt loop: the belt length
-/// left over after the bottom run becomes the return run's drape ([`sag_span`]). The
-/// `max(0)` on the excess is the explicit length-budget clamp: a conform-lengthened bottom run
-/// beyond the total belt length runs the top taut instead of laundering the deficit into the
-/// shape (the step-22 infeasibility rule).
-fn close_loop(
-    bottom: &[Vec2],
-    idler_up: Vec2,
-    sprocket_up: Vec2,
-    belt_length: f32,
-    wheels: &[(Vec2, f32)],
-) -> Vec<Vec2> {
-    let mut pts = bottom.to_vec();
-    let chord = idler_up.distance(sprocket_up);
-    let excess = (belt_length - polyline_len(bottom) - chord).max(0.0);
-    sag_span(idler_up, sprocket_up, excess, wheels, 0, &mut pts);
-    pts
 }
 
 /// The `9` viz layer: the collocation stations at the **physics** ring — the CONTACT ENVELOPE
@@ -963,7 +625,7 @@ pub(super) fn draw_sample_points(
                 let shift = lat_axis * offset;
                 let (ca, cb) = (wa + shift, wb + shift);
                 for s in [ca + face_a, (ca + cb) / 2.0 + face_m, cb + face_b] {
-                    let color = if field.depth_along(s, out) > 0.0 {
+                    let color = if field.0.depth_along(s, out, CONTACT_PROBE) > 0.0 {
                         TRACTION_FORCE_COLOR
                     } else {
                         CAST_COLOR
@@ -978,8 +640,8 @@ pub(super) fn draw_sample_points(
 #[cfg(test)]
 mod tests {
     use super::super::rig_geom::{RigGeom, tiger_rig};
-    use super::super::wheel_view::tooth_tip_angle;
     use super::*;
+    use crate::track::gear_phase::tooth_tip_angle;
 
     /// Signed representative of `angle` within one `period`, nearest zero — the same `fold` the
     /// sprocket phase tests use to ask "how far off a tooth, and which way".
@@ -992,7 +654,7 @@ mod tests {
     /// [`conform_belts_field`] runs, so its polyline carries the same discretisation strain the fix
     /// corrects. Closed (first == last), ready for [`resample`].
     fn flat_loop(geom: &RigGeom, side: Side) -> Vec<Vec2> {
-        build_route(geom.rest.get(side), geom.belt_len()).pts
+        crate::track::route::build_route(geom.rest.get(side), geom.belt_len()).pts
     }
 
     /// The contact-envelope model's one non-negotiable invariant, on the REAL shipped Tiger:
@@ -1127,7 +789,8 @@ mod tests {
             let total = 350.0_f64;
             for k in 0..=steps {
                 let travel = total * k as f64 / steps as f64;
-                let (spacing, offset) = station_params(travel, geom.pitch, poly, geom.link_count);
+                let (spacing, offset) =
+                    wrap::station_params(travel, geom.pitch, poly, geom.link_count);
 
                 // Pin spacing IS the material pitch (to float precision) and the loop closes: the
                 // `link_count` stations at `spacing` exactly tile the polyline, so there is no

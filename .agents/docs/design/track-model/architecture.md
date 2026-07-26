@@ -1,7 +1,10 @@
 # Track module architecture — promoting the sandbox model into the game
 
-Status: v4 (step 27, 2026-07-17) — phase B **shipped**: the belt model IS the game's drive
-sim (see §0a; ADR-0025 written, supersedes ADR-0005, retires ADR-0006). v3 (step 26) shipped
+Status: v5 (2026-07-26) — the VIEW settled: the memory-enabled kinematic wrap
+(`src/track/wrap.rs`) is the one and only track view, in the game AND the sandbox; the simulated
+chain tier, its `V` toggle and its feel switches are DELETED (see §1a). v4 (step 27, 2026-07-17)
+— phase B **shipped**: the belt model IS the game's drive sim (see §0a; ADR-0025 written,
+supersedes ADR-0005, retires ADR-0006). v3 (step 26) shipped
 phase A (`src/track/view.rs`) with the tier-line discussion + codex view-plugin review. v2
 reconciled v1 against the codex adversarial review (`scratchpad/codex_arch25_review.md`, 10
 findings, all dispositioned below). Companion to HQ.md (the step log) and
@@ -13,7 +16,7 @@ constraints:
 2. **Many tanks** — 30-tank MP scenes; per-tank cost is a policy decision (tier), not a tax.
 3. **Spec-sheet authoring** — a new vehicle is data. If adding a tank requires touching a
    solver constant, the design failed. (Codex C: this rules out several constants currently
-   hard-coded in `model4.rs` — see §7.)
+   hard-coded in `belt.rs` — see §7.)
 
 ## 0. What exists (survey, 2026-07-17)
 
@@ -26,7 +29,7 @@ constraints:
   in `net/render_error.rs` writes the root `Transform` in `PostUpdate` before propagation.
 - Terrain: static cuboid colliders on `Layer::Terrain`; transforms are built procedurally in
   `world.rs` and **discarded** — no shared data source for an analytic field yet.
-- Sandbox: the math to promote (oracle/route/chain/wheels/forces) is entangled with
+- Sandbox: the math to promote (oracle/route/wheels/forces) is entangled with
   sandbox-local types (`Side`, `RigWheel`, `Suspension`, `PinBelt`, `ConformedBelts` …) — the
   promotion is a seam rewrite around copied math bodies, not a file move (codex E).
 
@@ -49,13 +52,14 @@ What is true now:
   `phase-b-migration.md` §3a). Hill-hold later shipped as physics inside the slip law: the
   per-element elastic–plastic strain grip ([[0026-static-friction-strain-regime]], settled
   per-element in [[0027-element-grip-netcode]]) — a parked tank holds on grade.
-- Sandbox `model4` is a thin adapter over `track::forces` — the entanglement noted in §0
+- Sandbox `belt` (renamed from `model4` 2026-07-26) is a thin adapter over `track::forces` — the entanglement noted in §0
   (codex E) was dissolved by the extraction; models 1–3 deleted in the consolidation pass.
 - Vehicle collision proxies carry `Friction::ZERO` (min-combine): all grip is the model's.
 
-## 1. The shape: one geometric core, three consumers
+## 1. The shape: one geometric core, two consumers
 
-Step 24 dissolved the "two models" question: the chain's skeleton IS the route. Literally:
+Step 24 dissolved the "two models" question — the drawn belt's skeleton IS the route — and the
+2026-07-26 view settlement collapsed the render side to a single tier:
 
 ```
             authored data                          runtime inputs
@@ -65,21 +69,44 @@ Step 24 dissolved the "two models" question: the chain's skeleton IS the route. 
       └────────────┬─────────────┘        │ BeltKinematics (§4)            │
                    ▼                      └───────────────┬────────────────┘
             ┌──────────────────────────────────────────────▼──────┐
-            │                route core (pure fns, §2)            │
-            │   wheel filter → tagged route → arc/tube queries    │
-            └──────┬────────────────┬────────────────┬────────────┘
-                   ▼                ▼                ▼
-            ┌────────────┐  ┌──────────────┐  ┌─────────────────┐
-            │ SIM forces │  │ chain tier   │  │ route tier      │
-            │ (phase B)  │  │ (view: own + │  │ (view: rest;    │
-            │            │  │  near tanks) │  │  decimated far) │
-            └────────────┘  └──────┬───────┘  └───────┬─────────┘
-                                   └───────┬──────────┘
-                                           ▼
-                                  TrackRenderer (§8)
+            │            route/wrap core (pure fns, §2)           │
+            │   wheel filter → taut envelope → conform → sag      │
+            └──────────────┬─────────────────────┬────────────────┘
+                           ▼                     ▼
+                  ┌────────────────┐   ┌──────────────────────────┐
+                  │   SIM forces   │   │  kinematic wrap VIEW     │
+                  │   (phase B)    │   │  (every tank, no tiers)  │
+                  └────────────────┘   └────────────┬─────────────┘
+                                                    ▼
+                                           TrackRenderer (§8)
 ```
 
-Deleting any consumer leaves the others intact; adding a tank touches none of them.
+Deleting either consumer leaves the other intact; adding a tank touches neither.
+
+## 1a. The view settlement (2026-07-26)
+
+The sandbox ran two views side by side for three steps: the step-24 **simulated chain** (XPBD
+nodes in a route tube, real pin friction, hinge stops) and the step-22 **kinematic wrap** (taut
+envelope + terrain conform + budgeted sag, refitted every frame). The chain lost, and is deleted:
+
+- **Cost.** ~56 µs/tank/frame for the wrap against 809–907 µs for the chain — a ~15× gap that
+  decides "many tanks" (§6) on its own.
+- **Failure mode.** The chain tear-churns: at top speed it reseeded on 1768 of 2048 measured
+  frames. A solver can tear, buckle, stale and diverge; a fitted curve cannot.
+- **What the wrap gives up, and how it got it back.** Stateless fitting snaps between shapes.
+  The cure is two self-healing FILTER tiers over the stateless core — a hull-frame temporal ease
+  on the conform depth (rise instant, fall BALLISTIC at the same gravity the view wheels fall at)
+  and a 1-DOF spring on the sag budget (frequency = a hanging span's pendulum rate
+  `√(g / sag_depth)`, damping = the canonical ζ = 0.5). Both are **parameter-free derived laws**,
+  which is why they are unconditional: there is no dial to set and therefore no toggle to offer.
+  A filter cannot tear; only a solver can.
+- **A third tier was built and deleted.** A droop LIMIT on the conform was tried and removed:
+  clamping is a solver's job, and the two laws above already bound the shape.
+
+Consequences carried through the rest of this document: there is one view tier, not two (§6);
+the view's per-frame memory is filter state with a reset, not solver state with a reseed (§3);
+and the pure-core surface is `wrap::step` + the route/envelope builders, with no
+`ChainState`/`RouteTag` (§2).
 
 ## 2. Module layout, pure-core API, migration
 
@@ -91,9 +118,9 @@ src/track/spec.rs     TrackSpec + MaterialLoop + track-type presets (serde)
 src/track/rig.rs      RunningGear: per-side gear from bake + spec; validation
 src/track/oracle.rs   TerrainOracle (batched) + BlockField + SpatialQueryOracle
 src/track/route.rs    route core (pure)
-src/track/chain.rs    ChainState (pure struct + stepper)
+src/track/wrap.rs     the kinematic wrap + its two feel filters (pure struct + stepper)
 src/track/wheels.rs   view wheel-lift filter (pure)
-src/track/view.rs     ECS: PresentedFrame, tiers, belt derivation, view-node writes
+src/track/view.rs     ECS: PresentedFrame, belt derivation, view-node writes
 src/track/render.rs   TrackRenderer adapters (instanced; entity-per-link bring-up)
 src/track/sim.rs      [phase B] collocation forces in SimPhase::DrivingForces
 ```
@@ -108,27 +135,28 @@ pub fn sample_route<O: TerrainOracle>(route: &Route, phase: f32, presented: Affi
     oracle: &O, out: &mut Vec<LinkPose>) -> Result<(), TrackError>;
 pub fn articulate_wheels<O: TerrainOracle>(gear: &SideGear, state: &mut [WheelViewState],
     frame: &PresentedFrame, gravity_world: Vec3, oracle: &O);
-impl ChainState {
-    pub fn step<O: TerrainOracle>(&mut self, input: ChainFrame<'_>, oracle: &O,
-        out: &mut Vec<LinkPose>) -> StepReport;      // StepReport: reseeds, residuals, cost
-    pub fn reseed<O: TerrainOracle>(&mut self, input: ChainFrame<'_>, oracle: &O);
-}
+pub fn wrap_step<O: TerrainOracle>(input: &WrapInput, oracle: &O,
+    state: &mut [WrapState; 2]) -> [WrapSideOutput; 2];   // the ONE view stepper; no options
 ```
+
+(Shipped as `track::wrap::step`. `WrapState` is the per-side filter memory, `WrapState::reset` is
+the discontinuity path — there is no reseed, no report and no tier/feel parameter.)
 
 Type mapping from the sandbox: `PinBelt` → `MaterialLoop` (immutable, §7); sandbox `Suspension`
 → `WheelViewState` (never reuse the game's sim `Suspension` name); `BeltSample` → `LinkPose`
-(one representation, full orthonormal frame — §8); `ChainSideMemory` → private in `ChainState`;
-`ConformedBelts`/`ChainReference` stay sandbox debug adapters. `RunningGear` is baked
+(one representation, full orthonormal frame — §8); the wrap's filter memory is private inside
+`WrapState`; `ConformedBelts`/`TautReference` stay sandbox debug adapters. `RunningGear` is baked
 synchronously from `TankGeometry + TrackSpec`, born with the root, and holds **no asset
 handles**.
 
 Mounting: `view_plugin` in the presentation roots only (like `vfx`); `sim_plugin` (phase B) in
 `SimPlugin`'s `SimPhase::DrivingForces` slot.
 
-## 3. The chain is VIEW state — and the seam is the PRESENTED pose (codex A)
+## 3. The track VIEW is cosmetic state — and the seam is the PRESENTED pose (codex A)
 
-The chain is cosmetic: not rollback-registered, never re-solved in replays, reseedable from
-data at any instant (ADR-0014 tier-2 spirit). But "read the view pose" needs a precise
+The track view (the kinematic wrap plus its two feel-filter tiers) is cosmetic: not
+rollback-registered, never re-solved in replays, reseedable from data at any instant (ADR-0014
+tier-2 spirit). But "read the view pose" needs a precise
 implementation, because rollback smoothing writes the root `Transform` in `PostUpdate` after
 Avian writeback and before propagation — an `Update` system reads a stale propagation, and a
 post-propagation system is too late to move child links.
@@ -150,19 +178,18 @@ pub struct PresentedFrame {
   view nodes that propagation then carries. (Shipped shape: `track::view::TrackViewSet` owns the
   slot; `net::render_error` orders it after `RenderErrorApplied` — the edge lives on the net
   side because the net-boundary guard keeps `track` from naming the netcode.)
-- Chain substeps interpolate the **wheel circles** `previous → current`. HONESTY (codex
-  view-review #8): the hull affine itself is captured once per frame — every catch-up substep
-  probes terrain at the end-of-frame pose, up to ~one pitch early at 60 km/h. Accepted for
-  phase A; per-substep affine interpolation is an open item, not a shipped claim.
+- The wrap fits the belt once per frame — no substeps, no catch-up: the hull affine is captured
+  once and terrain is probed at that end-of-frame pose. The wheel-lift filter and the feel-filter
+  tiers carry the only per-frame memory; the wrap geometry itself is stateless.
 - Shipped discontinuity detection is LOCAL (no lightyear coupling): presented pose delta per
   frame (translation > 1.2 m, or forward/up axis chord > 0.5) or a `TerrainMap` revision
-  change → chain cold start + belt differentiator + wheel-lift re-base. The thresholds must
-  bracket `render_error`'s snap constants (2 m / 60°) — pinned by a test in `render_error`.
+  change → wrap filter reset + wheel-lift re-base. The thresholds must bracket `render_error`'s
+  snap constants (2 m / 60°) — pinned by a test in `render_error`.
 - **Terrain probes use the interpolated presented pose.** Probing at tick pose and offsetting
   links afterwards is wrong — terrain doesn't receive the offset.
-- `discontinuity == true` → canonical reseed. The reseed must be self-triggering on this signal
-  (the sandbox's reset clears chain memory externally today — promotion makes the signal part
-  of the input contract).
+- `discontinuity == true` → the view resets its filter memory (the wrap re-inits from the current
+  frame's raw targets, the wheel lift re-bases). Self-healing: the filters cannot carry stale
+  state past a reset, so a missed signal costs at most a one-fall-period settle, never a tear.
 
 **Wheel articulation writes GLB view nodes only** (codex I). Roadwheel sim entities' transforms
 participate in tick-truth suspension casts — cosmetic writes there would feed view state back
@@ -219,40 +246,25 @@ pub trait TerrainOracle { fn sample_into(&self, probes: &[TerrainProbe],
 
 ## 6. Tiers and budget (codex G — numbers corrected)
 
-`enum TrackTier { Simulated, Route, Culled }` — assigned **per tank** (never per side).
+**There is no tier machinery, and the reason is now a measurement, not a deferral.** Every tank
+gets the same kinematic wrap, because the wrap costs ~56 µs/tank/frame: 30 tanks is ~1.7 ms of
+CPU, which fits the budget the tiering was invented to protect. The `TrackTier` enum, the
+screen-space metric and the promote/demote machinery are NOT built and are not scheduled.
 
-**Phase-A status + the value line (owner discussion, 2026-07-17):** NO tier machinery is built —
-the alpha is 1v1, every tank gets the chain, and the enum/metric/renderer split waits for tank
-counts past ~4. What was decided for when it returns:
+What the deleted chain tier cost, kept as the record of why the question closed: ~810–910
+µs/tank/frame — 4 simulated + 26 route was `4×41 + 26×4 = 268 ms CPU/s ≈ 4.5 ms/frame at 60 fps`,
+solver time only, against a 2 ms all-in budget. That arithmetic is what made tiers mandatory for
+a solver view and irrelevant for a fitted one.
 
-- **Detail adds value only as motion the player can resolve at the current projection.** The
-  chain's whole premium over Route is transients (slap, flap, tension redistribution) — sub-pixel
-  past ~40–50 m at normal FOV.
-- **The tier metric is SCREEN-SPACE** (projected link pitch in pixels, with hysteresis), not
-  distance: gunner optics at 8× promote the tank you're staring at automatically, and demotion
-  fires only when the shape difference is unresolvable — pop-free by construction, no crossfade
-  machinery.
-- **Pin friction guarantees chain-at-rest ≠ route shape** (it holds whatever sag friction locked
-  in), so v2's "demote when deviation relaxes" may never trigger — the screen-space rule
-  replaces it.
-- Chain population: own tank + ~2 by the metric. Tiers vary only state and sampling density,
-  never behavior — ribbon vs full-link is the SAME route sampled coarser.
+If tank counts ever do demand a cheaper far tier, the surviving design notes are:
 
-- Honest arithmetic at current measured rates (post-broadphase, M4): 4 simulated + 26 route ≈
-  `4×41 + 26×4 = 268 ms CPU/s ≈ 4.5 ms/frame at 60 fps` — that is solver time only, and it
-  does NOT fit a 2 ms all-in budget. Consequences: (a) the budget is a **cost model** (links ×
-  substeps × probes), not a tank count; (b) simulated tier is own tank + ~2 nearest by default
-  until further optimization; (c) parallelism is explicit (`par_iter`/task pool over tanks) —
-  Bevy does not parallelize inside one system on its own; (d) the render side has its own gate
-  (§8).
-- **Culled** (renamed from Scroll): maintain scalar phase, produce no geometry. Distant visible
-  tanks are NOT this — they're Route with a decimated/ribbon renderer.
-- Transitions (corrected claims): Route→Simulated is pop-free **only if** the chain seeds from
-  the exact Route-renderer poses at the same phase — the seed function and the route renderer
-  must share one code path (design requirement, not an assumption). Simulated→Route: downgrade
-  only after chain deviation from the route relaxes below a visual threshold, or crossfade the
-  same instance buffer; dropped chain state is discarded (stale state is debt, reseed on
-  re-promotion). Hysteresis on thresholds.
+- **Detail adds value only as motion the player can resolve at the current projection.**
+- **The metric would be SCREEN-SPACE** (projected link pitch in pixels, with hysteresis), not
+  distance: gunner optics at 8× promote the tank you're staring at automatically.
+- Tiers must vary only state and sampling density, never behavior — a ribbon is the SAME belt
+  sampled coarser, so there is no pop and no crossfade machinery.
+- **Culled**: maintain scalar phase, produce no geometry. Distant visible tanks are NOT this.
+- The render side has its own gate (§8), and it binds before the view math does.
 
 ## 7. Authoring schema (codex B + C — the many-tanks contract)
 
@@ -296,21 +308,21 @@ track: (
   marker node (`Sprocket_Phase_L`), baked once. Signs (derived by codex, shipped in phase A):
   positive phase = lower run rearward; **every axle angle is negative** (Bevy +X rotation moves
   a wheel's bottom toward −Z); the single flip point is `track::view::spin_angle`.
-- **Drive identity**: the chain's motor sector is `RouteTag::Arc(0)` — the FIRST circle. Phase A
-  hard-codes sprocket-first (front drive, fits the Tiger); a rear-drive vehicle needs drive
-  identity derived from the typed sprocket node's position (named debt, not silent).
+- **Drive identity**: the FIRST circle of a side's front→rear list is the drive circle — a
+  sprocket-first hardcode shared by the route builder, the wrap's end arcs and the belt physics
+  (front drive, fits the Tiger). A rear-drive vehicle needs drive identity derived from the typed
+  sprocket node's position (named debt, not silent).
 - **Bake extension**: bake today captures only collision/ballistic mesh data — add
   subtree-bounds extraction for wheel/idler radii (spec override allowed) and the phase-marker
   transform.
-- **De-specialization** (codex C): `TRACK_WIDTH/THICKNESS`, node mass, `MAX_LINK_ANGLE`,
-  gravity, drive identity → data. `CHAIN_SLACK_TRIM` dies (tensioner owns preload).
-  `CHAIN_REBASE_WINDOW` derives from pitch; tube bounds derive from pitch + minimum
-  non-adjacent route-branch separation (atlas can't overlap on a small vehicle). Pin friction
-  = preset **coefficient** + authored pin geometry + solver tension — a fixed torque inside a
-  preset is per-type tuning wearing a costume. Substep rate, sweep count, guardrails stay
-  global quality policy.
-- Presets: `DryPin` (T-34, Tiger) / `LiveBushed` (modern: articulation return curl, higher B,
-  lower friction).
+- **De-specialization** (codex C): `TRACK_WIDTH/THICKNESS`, gravity and drive identity → data.
+  The whole solver-knob half of this item died with the chain: slack trim, rebase window, tube
+  bounds, substep/sweep rates, guardrails and per-preset pin friction have no consumer, and the
+  wrap has no knobs at all (its two filters are derived laws — §1a). `link_mass`, `hinge_torque`
+  and `link_angle` stay AUTHORED and validated: they are measurements of the shoe, and they are
+  the honest inputs a future per-vehicle return-run flavor would derive from.
+- Presets (`DryPin` / `LiveBushed`) are unbuilt and now unmotivated: the surviving per-vehicle
+  differences are geometry and mass, both already data.
 - Phase A must **hide the legacy static track nodes** (`Track_Strip_*`, `Track_Treads_*`) or
   links double-render.
 
@@ -335,14 +347,15 @@ pub trait TrackRenderer {
 
 ## 9. Phasing
 
-**Phase A — view promotion (SHIPPED, step 26 2026-07-17):** `TerrainMap` refactor in
-`world.rs`; pure core extracted into `src/track/` (sandbox re-imports); `track::view` with the
+**Phase A — view promotion (SHIPPED, step 26 2026-07-17; view settled 2026-07-26, §1a):**
+`TerrainMap` refactor in `world.rs`; pure core extracted into `src/track/` (sandbox re-imports); `track::view` with the
 presented-pose seam, no-slip belt derivation (f64 phase, per-consumer wrap), entity-per-link
 rendering (97×2 links, witness link 0, legacy `Track_Strip/Treads` hidden), oracle wheel lift
 at disc-width stations, spec-validated + bind-time loop-feasibility gate, GLB-reinstance
 rebind. Deliberately NOT built (owner LOC mandate): tiers, instancing, `PresentedFrame` ECS
-state, `TrackRenderer` trait, `SpatialQueryOracle`, tensioner/presets. Deliverable met: Tiger 1
-drives with live tracks in MP, zero sim risk. Tiger authoring unblocked.
+state, `TrackRenderer` trait, `SpatialQueryOracle`, tensioner/presets. The view itself has since
+settled on the kinematic wrap alone (§1a) — the chain tier is deleted, not deferred.
+Deliverable met: Tiger 1 drives with live tracks in MP, zero sim risk. Tiger authoring unblocked.
 
 **Phase B — sim promotion (SHIPPED):** collocation forces replaced `driving::{suspension,
 traction}` under the ADR-0005 rewrite; the belt model is the game's drive sim; harness parity vs
@@ -354,17 +367,18 @@ ships. (Grip and support have since settled further: per-element strain grip
 ## 10. Testing
 
 - Pure core: unit tests (envelope: lifted/interleaved/return-roller/coincident-circle
-  rejection; chain: pitch exactness, tube residency, reseed determinism, StepReport budgets).
+  rejection; wrap: material-pitch station spacing over a session of travel, and its receipt that
+  the naive drawn pitch drifts a pin onto a tooth).
 - Sandbox harness stays the feel/regression lab; scenarios become CI-runnable with numeric
   gates (step-24 metrics + perf probes).
 - Phase A adds a presented-pose torture scenario (scripted rollback corrections + teleports →
-  zero tears, bounded belt-vs-ground error).
+  bounded belt-vs-ground error; tearing is unrepresentable now that the view is a filter over a
+  fitted curve).
 - Phase B adds A/B harness parity + MP soak gates.
 
 ## Open items (tracked, not blocking)
 
-- Six-roller / discrete tooth engagement pulses (flavor; DryPin preset extension).
-- Chain only-if-artifacts list (unwrapped-s ledger, per-sweep terrain reprobe — HQ).
+- Six-roller / discrete tooth engagement pulses (flavor; would ride the wrap's phase, not a solver).
 - Thrown track as replicated damage state with alternate route topology (far future).
 - Streaming/destructible terrain under the oracle (`covered`, chunk revisioning) — named in §5,
   deliberately unscheduled.

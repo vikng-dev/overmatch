@@ -4,8 +4,8 @@ Status: PLAN v2 (2026-07-17; v2 amends the hold disposition — see §3a). Owner
 cutover to the track model — "no old code lingering around, conditionals or forks — we're
 upgrading to the full end target." The
 previously-planned dev-only A/B switch is CANCELLED; parity evidence comes from the
-bit-repeatable sandbox harness, the rewritten contract tests, and playtest. The only fork
-retained anywhere: the sandbox's two VIEW models (wrap vs chain, `V`).
+bit-repeatable sandbox harness, the rewritten contract tests, and playtest. No fork is retained
+anywhere — including the one this plan carved out (see the correction below).
 
 > SETTLED-SURFACE CORRECTION (post-plan, ADR-0026/0027): two migrated-surface declarations below
 > were superseded on the way to the shipped law. **Traction is the per-element ISOTROPIC shear law
@@ -13,7 +13,11 @@ retained anywhere: the sandbox's two VIEW models (wrap vs chain, `V`).
 > `lateral_ratio` knob is deleted). **Support is the contact-envelope calibration DERIVED from the
 > `suspension:` spec block** (ride frequency / damping ratio); the `track: support:` stiffness/damping
 > fields this plan proposed were never authored — only `suspension.engage` is authored. See
-> `architecture.md` and `static-friction-design.md`.
+> `architecture.md` and `static-friction-design.md`. **The sandbox's two VIEW models are one**:
+> the wrap-vs-chain `V` A/B this plan retained was decided on perf (~56 µs/frame vs 809–907, with
+> the chain tear-churning at top speed), the simulated chain and its toggle were DELETED, and the
+> memory-enabled kinematic wrap (`src/track/wrap.rs`) is the single track view the game and the
+> sandbox both run.
 
 Inputs: three research sweeps (sandbox sim inventory, deletion blast radius, netcode patterns)
 
@@ -40,9 +44,10 @@ Inputs: three research sweeps (sandbox sim inventory, deletion blast radius, net
 src/track.rs              facade: view_plugin (exists), sim_plugin (new), terrain_plugin (new)
 src/track/oracle.rs       TerrainOracle + BlockField (exists, unchanged)
 src/track/route.rs        route core (exists, unchanged)
-src/track/chain.rs        chain view solver (exists, unchanged)
 src/track/wheels.rs       view wheel lift (exists, unchanged)
-src/track/view.rs         chain/link/wheel view (exists; belt source → TrackDrive)
+src/track/wrap.rs         the ONE track view: kinematic wrap + its two feel filters (shared by
+                          the game view and the sandbox; the chain solver it replaced is deleted)
+src/track/view.rs         belt/link/wheel view (exists; belt source → TrackDrive)
 src/track/terrain.rs      NEW: TrackField resource built from TerrainMap (SimPlugin-mounted,
                           shared by server + clients; view.rs's private copy dies)
 src/track/forces.rs       NEW: pure force math — support columns, traction ellipse,
@@ -51,8 +56,8 @@ src/track/forces.rs       NEW: pure force math — support columns, traction ell
 src/track/sim.rs          NEW: ECS adapter — TrackDrive component, force system in
                           SimPhase::DrivingForces, capability gate, tick-truth pose reads.
 src/driving/              DELETED (suspension.rs, traction.rs, contact.rs, susp_trace.rs).
-src/track_sandbox/        model4 physics becomes a thin adapter over track::forces; the two
-                          VIEWS (wrap V chain) stay. Models 1–3 (lab archaeology) DELETED.
+src/track_sandbox/        model4 physics becomes a thin adapter over track::forces, and its view
+                          a thin adapter over track::wrap. Models 1–3 (lab archaeology) DELETED.
 ```
 
 `TankSpec`: `drivetrain:` dies; `track:` grows `powertrain:` (SETTLED: + `transmission:`; the
@@ -190,7 +195,7 @@ Adopted from `scratchpad/codex_purity_review.md` so future transplants get caugh
   μ 0.9, lateral ratio 0.55, INPUT_RAMP 4.0/s = numerically inherited from the placeholder,
   ADOPTED into the sandbox reference untuned — playtest feel dials, re-tune candidates, not
   physics constants (comments in sim.rs say so; stop re-litigating unless feel says otherwise).
-- Open extraction debts: shared param-assembly constructor (`model4::force_params` vs
+- Open extraction debts: shared param-assembly constructor (`track_sandbox::belt::force_params` vs
   `init_track_gear` duplicate assembly); shared fixed-tick `DriveShaper` + a harness scenario
   that enters through RAW command edges (today's harness writes shaped input directly, so the
   ramp is untested in the parity path); sandbox `BeltPhase` still f32 (promote to f64 and

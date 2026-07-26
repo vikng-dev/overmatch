@@ -121,6 +121,8 @@ fn tank_transmission(spec: &TankSpec) -> TankTransmission {
         .track
         .transmission_params(1.0, 1.0)
         .expect("TankSpec transmission was validated before tank construction");
+    // `None` ⇔ the spec EXPLICITLY declares `architecture: Governor` (a missing block is a
+    // load-time validation error, so this branch is never a silent fallback).
     params
         .as_ref()
         .map_or_else(TankTransmission::for_governor, TankTransmission::from_spec)

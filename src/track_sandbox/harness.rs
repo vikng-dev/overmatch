@@ -1,7 +1,7 @@
 //! Scripted capture harness: run the sandbox with a scenario from the `SANDBOX_HARNESS` env var,
-//! record the full sim + visual-chain state per fixed tick as JSONL, then exit. Turns "look at
-//! the screen" into numbers — view A/Bs, field validation, and artifact diagnosis become
-//! reproducible offline analysis instead of screenshot forensics.
+//! record the full sim state per fixed tick as JSONL, then exit. Turns "look at the screen" into
+//! numbers — model A/Bs, field validation, and artifact diagnosis become reproducible offline
+//! analysis instead of screenshot forensics.
 //!
 //! `SANDBOX_HARNESS="z=-5,warmup=192,ticks=640,throttle=0.25,steer=0.4,out=/tmp/run.jsonl"`
 //! - `pose` spawn preset: `lane` (default; uses `z`) or `slope_up`/`slope_down`/`slope_left`/
@@ -9,9 +9,8 @@
 //! - `z` spawn lane position, `warmup` settle ticks at zero input, `ticks` recorded ticks after
 //!   warmup, `throttle`/`steer` constant drive during the recorded window (`t2` +
 //!   `throttle2`/`steer2` switch both at one tick: reversal slam, pivot entry, slalom flip),
-//!   `view=chain` for the route-chain view (default: kinematic wrap), `out` JSONL path.
-//!   Unknown keys and values are errors. The retired `model` key alone is accepted and ignored so
-//!   historical `model=4` scenario strings keep working.
+//!   `out` JSONL path. Unknown keys and values are errors. The retired `model` key alone is
+//!   accepted and ignored so historical `model=4` scenario strings keep working.
 //!
 //! Record types (one JSON object per line):
 //! - `meta` — the scenario + vehicle constants.
@@ -42,12 +41,12 @@ pub(super) struct Harness {
     t2: u64,
     throttle2: f32,
     steer2: f32,
-    /// `view=chain` runs the route-chain view instead of the kinematic wrap (the step-22 view
-    /// A/B, scripted).
-    chain_view: bool,
-    /// `trans=governor|hybrid|l600` selects the drivetrain adapter (phase 2.5). Default governor;
-    /// the meta line omits the `trans` field for governor so its captures diff cleanly.
-    trans: crate::track::transmission::TransmissionMode,
+    /// `trans=governor|hybrid|l600` EXPLICITLY overrides the drivetrain adapter (phase 2.5).
+    /// `None` (no key) follows the SPEC's declared architecture — the seed `build_rig` wrote
+    /// into [`TransSwitch`] — so a bare harness run sims the same transmission the shipped
+    /// tank does (the old implicit-Governor default silently captured a different drivetrain
+    /// than the game runs). The meta line always records the adapter that actually ran.
+    trans: Option<crate::track::transmission::TransmissionMode>,
     /// `pose=runway`: spawn on the flat runway/turn pad facing +X (top-speed and turning
     /// gates — the lane is too obstacle-dense for either).
     runway: bool,
@@ -66,8 +65,7 @@ impl Default for Harness {
             t2: u64::MAX,
             throttle2: 0.0,
             steer2: 0.0,
-            chain_view: false,
-            trans: crate::track::transmission::TransmissionMode::Governor,
+            trans: None,
             runway: false,
             out: "/tmp/track_harness.jsonl".into(),
         }
@@ -137,20 +135,9 @@ fn parse_spec(spec: &str) -> Result<Harness, String> {
             "t2" => h.t2 = parse_number(key, value)?,
             "throttle2" => h.throttle2 = parse_number(key, value)?,
             "steer2" => h.steer2 = parse_number(key, value)?,
-            "view" => {
-                h.chain_view = match value {
-                    "chain" => true,
-                    "wrap" => false,
-                    _ => {
-                        return Err(format!(
-                            "unknown value `{value}` for `view`; expected chain or wrap"
-                        ));
-                    }
-                };
-            }
             "trans" => {
                 use crate::track::transmission::TransmissionMode;
-                h.trans = match value {
+                h.trans = Some(match value {
                     "governor" => TransmissionMode::Governor,
                     "hybrid" => TransmissionMode::Hybrid,
                     "l600" | "fixed" | "fixed_radii" => TransmissionMode::FixedRadii,
@@ -159,12 +146,11 @@ fn parse_spec(spec: &str) -> Result<Harness, String> {
                             "unknown value `{value}` for `trans`; expected governor, hybrid, or l600"
                         ));
                     }
-                };
+                });
             }
             "out" if !value.is_empty() => h.out = value.to_string(),
             "out" => return Err("`out` must not be empty".into()),
-            // Retired with models 1–3. Kept as an explicit no-op so historical captures remain
-            // runnable without making misspelled live keys silently vacuous.
+            // Retired: an explicit no-op so historical captures stay runnable.
             "model" => {}
             "" => {
                 return Err(format!(
@@ -183,7 +169,7 @@ fn arr(vals: impl IntoIterator<Item = f32>) -> String {
     format!("[{}]", inner.join(","))
 }
 
-/// Apply the scenario (view, spawn) and write the meta record. Runs in `Update` right after the
+/// Apply the scenario (transmission, spawn) and write the meta record. Runs in `Update` right after the
 /// deferred [`build_rig`](super::build_rig) — the rig it poses does not exist at `Startup` any
 /// more — and exactly once: writing `HarnessLog` is its own latch.
 pub(super) fn harness_setup(
@@ -191,13 +177,19 @@ pub(super) fn harness_setup(
     harness: Res<Harness>,
     mut trans_switch: ResMut<TransSwitch>,
     fixed_time: Res<Time<Fixed>>,
-    mut view: ResMut<TrackViewMode>,
     geom: Res<RigGeom>,
     rig: Res<RigSpec>,
     hull: Single<(&mut Transform, &mut LinearVelocity, &mut AngularVelocity), With<Hull>>,
 ) {
-    view.kinematic = !harness.chain_view;
-    trans_switch.0 = harness.trans;
+    // An explicit `trans=` key overrides the spec-declared adapter `build_rig` seeded; no key
+    // leaves the spec's truth in place. Either way `resolved` below is what actually runs —
+    // and what the meta line records.
+    if let Some(mode) = harness.trans {
+        trans_switch.0 = Some(mode);
+    }
+    let resolved = trans_switch
+        .0
+        .expect("build_rig seeds TransSwitch from the spec before harness_setup runs");
     let (mut transform, mut lin, mut ang) = hull.into_inner();
     *transform = match harness.pose {
         // Slope pad: rest height along the pad NORMAL, hull tilted with the incline and
@@ -223,23 +215,25 @@ pub(super) fn harness_setup(
 
     let file = File::create(&harness.out).expect("harness out path must be writable");
     let mut writer = BufWriter::new(file);
-    // The trans field is APPENDED only for the regenerative modes, so a `trans=governor` capture's
-    // meta line carries no trans key and its captures diff cleanly against each other.
+    // The trans field ALWAYS records the adapter that ran (resolved: explicit `trans=` key or
+    // the spec's declared architecture) — a capture whose meta line omitted the governor used
+    // to be indistinguishable from one that never chose at all, and a bare run silently
+    // captured a different drivetrain than the shipped tank sims.
     // Vehicle constants in the meta line come off the derived rig now, not from consts — an
     // analyzer reading a capture still gets the exact geometry that produced it.
     let (half_tread, hull_rest_y, thickness) = (geom.plane_x, geom.hull_rest_y, geom.thickness);
-    let trans_meta = match harness.trans {
-        crate::track::transmission::TransmissionMode::Governor => "",
+    let trans_meta = match resolved {
+        crate::track::transmission::TransmissionMode::Governor => ",\"trans\":\"governor\"",
         crate::track::transmission::TransmissionMode::Hybrid => ",\"trans\":\"hybrid\"",
         crate::track::transmission::TransmissionMode::FixedRadii => ",\"trans\":\"l600\"",
     };
     writeln!(
         writer,
-        // `"model":4` is pinned: the sandbox hosts only the promoted field-belt model, and the
-        // field stays for schema stability with existing analyzers. `schema:2` = raw/shaped
-        // commands, quaternion + full angular velocity, per-side contact arrays + aggregates.
-        "{{\"t\":\"meta\",\"model\":4,\"schema\":2,\"view\":\"{}\",\"pose\":\"{}\",\"slope_deg\":{},\"z\":{:.3},\"warmup\":{},\"ticks\":{},\"throttle\":{:.3},\"steer\":{:.3},\"t2\":{},\"throttle2\":{:.3},\"steer2\":{:.3},\"slew\":{},\"fixed_dt\":{},\"half_tread\":{half_tread},\"mu\":{MU},\"slip_saturation\":{SLIP_SATURATION},\"weight\":{:.0},\"hull_rest_y\":{hull_rest_y},\"thickness\":{thickness}{trans_meta}}}",
-        if harness.chain_view { "chain" } else { "wrap" },
+        // `"model":4` and `"view":"wrap"` are both pinned: the sandbox hosts only the promoted
+        // field-belt model and only the kinematic-wrap view, and the fields stay for schema
+        // stability with existing analyzers. `schema:2` = raw/shaped commands, quaternion + full
+        // angular velocity, per-side contact arrays + aggregates.
+        "{{\"t\":\"meta\",\"model\":4,\"schema\":2,\"view\":\"wrap\",\"pose\":\"{}\",\"slope_deg\":{},\"z\":{:.3},\"warmup\":{},\"ticks\":{},\"throttle\":{:.3},\"steer\":{:.3},\"t2\":{},\"throttle2\":{:.3},\"steer2\":{:.3},\"slew\":{},\"fixed_dt\":{},\"half_tread\":{half_tread},\"mu\":{MU},\"slip_saturation\":{SLIP_SATURATION},\"weight\":{:.0},\"hull_rest_y\":{hull_rest_y},\"thickness\":{thickness}{trans_meta}}}",
         match harness.pose {
             None if harness.runway => "runway".into(),
             None => "lane".into(),
@@ -442,16 +436,23 @@ mod tests {
         assert!(err.contains("unknown") && err.contains("throtle"), "{err}");
     }
 
+    /// No `trans=` key means FOLLOW THE SPEC (the `build_rig` seed), never an implicit
+    /// governor; the governor is still reachable, but only by naming it.
     #[test]
-    fn retired_model_key_is_accepted_and_ignored() {
-        assert_eq!(parse_spec("model=4").unwrap(), Harness::default());
+    fn trans_defaults_to_the_spec_and_governor_is_explicit() {
+        use crate::track::transmission::TransmissionMode;
+        assert_eq!(parse_spec("ticks=8").unwrap().trans, None);
+        assert_eq!(
+            parse_spec("trans=governor").unwrap().trans,
+            Some(TransmissionMode::Governor)
+        );
     }
 
     #[test]
     fn valid_scenario_keeps_the_previous_parse_semantics() {
         let parsed = parse_spec(
             "pose=slope_left,z=-5.5,warmup=12,ticks=34,throttle=0.25,steer=-0.4,\
-             t2=20,throttle2=-1,steer2=0.75,view=chain,\
+             t2=20,throttle2=-1,steer2=0.75,\
              trans=fixed_radii,out=/tmp/capture.jsonl",
         )
         .unwrap();
@@ -467,8 +468,7 @@ mod tests {
                 t2: 20,
                 throttle2: -1.0,
                 steer2: 0.75,
-                chain_view: true,
-                trans: crate::track::transmission::TransmissionMode::FixedRadii,
+                trans: Some(crate::track::transmission::TransmissionMode::FixedRadii),
                 runway: false,
                 out: "/tmp/capture.jsonl".into(),
             }

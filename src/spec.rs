@@ -230,18 +230,26 @@ impl TrackSpec {
     /// (asset-load `validate`, spawn-time state) pass nominal placeholders, because only
     /// `engine.idle_rpm` reaches replicated state — the geometry only SCALES the derived ladder,
     /// which is finite for any finite positive radius, so the validation verdict is identical.
+    ///
+    /// A MISSING transmission block is an error, not a silent Governor: every vehicle declares
+    /// its architecture explicitly (`Governor` included — `transmission: (architecture:
+    /// Governor)`). `Ok(None)` means the spec explicitly selected the tableless governor.
     pub(crate) fn transmission_params(
         &self,
         sprocket_radius: f32,
         half_tread: f32,
     ) -> Result<Option<TransmissionParams>, BevyError> {
-        self.powertrain
-            .transmission
-            .as_ref()
-            .map(|transmission| {
-                transmission.params(sprocket_radius, half_tread, self.powertrain.inertia)
-            })
-            .transpose()
+        let Some(transmission) = self.powertrain.transmission.as_ref() else {
+            return Err(
+                "track.powertrain.transmission block is missing — every vehicle must declare \
+                 its drivetrain architecture explicitly: `transmission: (architecture: \
+                 Governor)` for the plain per-side governor, or architecture: Hybrid / \
+                 FixedRadii with the full declared tables (a missing block used to silently \
+                 select the governor; that fallback is retired)"
+                    .into(),
+            );
+        };
+        transmission.params(sprocket_radius, half_tread, self.powertrain.inertia)
     }
 }
 
@@ -261,71 +269,144 @@ pub struct PowertrainSpec {
     /// Reflected belt + drivetrain inertia (kg).
     pub inertia: f32,
     /// The DECLARED transmission (phase 2.5, transmission-design.md): engine torque curve,
-    /// gear ladders, steering table, brakes, architecture. `default` (absent) means the
-    /// vehicle only has the legacy symmetric governor. REV 14 makes this architecture selection
-    /// authoritative on MP paths; the RON stays valid without the block.
+    /// gear ladders, steering table, brakes, architecture. REV 14 makes this architecture
+    /// selection authoritative on MP paths. REQUIRED: `validate()` rejects a spec without it
+    /// (the old absent-block-runs-the-governor fallback is retired — the governor is selected
+    /// explicitly with `transmission: (architecture: Governor)`). Kept `Option` at the serde
+    /// layer only so validation owns the error message and tests can strip it.
     #[serde(default)]
     pub transmission: Option<TransmissionSpec>,
 }
 
-/// Which regenerative adapter the vehicle's declared transmission is (the `Governor` parity
-/// mode is expressed by OMITTING the whole block, never authored).
+/// Which drivetrain adapter the vehicle's declared transmission selects. The selection is
+/// ALWAYS explicit: `validate()` rejects a spec without a transmission block, and the plain
+/// governor is chosen by NAMING it (`transmission: (architecture: Governor)`) — never by
+/// omission. (The old contract — omit the block, silently run the governor — is retired: a
+/// forgotten block used to sim a different drivetrain than the author intended, silently.)
 #[derive(Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TransmissionArchitecture {
+    /// The legacy symmetric per-side governor. It has NO declared tables — the block is just
+    /// `(architecture: Governor)`; the `powertrain` scalars (power/force/gain/inertia) are the
+    /// whole model. The honest WIP placeholder for a vehicle whose real transmission data has
+    /// not been researched yet.
+    Governor,
     /// Continuous regenerative hybrid (design menu C/D) — the arcade-honest default.
     Hybrid,
     /// Fixed-radius geared regenerative steering (the Tiger's L600, design menu B).
     FixedRadii,
 }
 
+impl TransmissionArchitecture {
+    /// The runtime adapter this declared architecture selects — the ONE mapping between the
+    /// authored spec value and [`TransmissionMode`], shared by the game (`track::sim`) and the
+    /// sandbox so the two can never disagree on what a spec runs.
+    pub(crate) fn mode(self) -> crate::track::transmission::TransmissionMode {
+        use crate::track::transmission::TransmissionMode;
+        match self {
+            Self::Governor => TransmissionMode::Governor,
+            Self::Hybrid => TransmissionMode::Hybrid,
+            Self::FixedRadii => TransmissionMode::FixedRadii,
+        }
+    }
+}
+
 /// The declared drivetrain block. Authoring rule (tiger-transmission-data.md): per-gear
 /// SPEEDS are the anchors; total reductions derive at build time against the spec's own
 /// sprocket radius, so the ladder survives the open 19-vs-20-tooth sprocket discrepancy.
+///
+/// The table fields are `Option` ONLY so `architecture: Governor` (tableless by design) can be
+/// authored without inventing fake engine data; [`Self::params`] enforces the per-architecture
+/// contract loudly — regenerative architectures REQUIRE every table, Governor REJECTS any.
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct TransmissionSpec {
     pub architecture: TransmissionArchitecture,
-    pub engine: EngineSpec,
-    pub gearbox: GearboxSpec,
-    pub steering: SteeringSpec,
+    #[serde(default)]
+    pub engine: Option<EngineSpec>,
+    #[serde(default)]
+    pub gearbox: Option<GearboxSpec>,
+    #[serde(default)]
+    pub steering: Option<SteeringSpec>,
     /// Per-side service/parking brake capacity at the sprocket (N).
-    pub brake_force: f32,
+    #[serde(default)]
+    pub brake_force: Option<f32>,
     /// Static breakaway multiplier for an at-rest parking or hill-hold latch.
-    pub brake_static_factor: f32,
+    #[serde(default)]
+    pub brake_static_factor: Option<f32>,
 }
 
 impl TransmissionSpec {
     /// Adapt this RON shape into the shared validated authoring seam. Both asset validation and
     /// synchronous sim construction call this mapping, so the accepted domain cannot drift.
+    ///
+    /// Returns `Ok(None)` for `architecture: Governor` — the governor has no joint params by
+    /// design. The per-architecture table contract is enforced HERE (the one seam every caller
+    /// funnels through): a regenerative architecture missing a table fails by name, and a
+    /// Governor block carrying tables fails too (authored-but-never-run data is exactly the
+    /// silent-selection disease this contract exists to kill).
     pub(crate) fn params(
         &self,
         sprocket_radius_m: f32,
         half_tread_m: f32,
         belt_inertia: f32,
-    ) -> Result<TransmissionParams, BevyError> {
+    ) -> Result<Option<TransmissionParams>, BevyError> {
+        let arch = self.architecture;
+        if arch == TransmissionArchitecture::Governor {
+            let stray = [
+                ("engine", self.engine.is_some()),
+                ("gearbox", self.gearbox.is_some()),
+                ("steering", self.steering.is_some()),
+                ("brake_force", self.brake_force.is_some()),
+                ("brake_static_factor", self.brake_static_factor.is_some()),
+            ];
+            if let Some((name, _)) = stray.iter().find(|(_, authored)| *authored) {
+                return Err(format!(
+                    "transmission.{name} is authored, but architecture: Governor has no tables \
+                     — it would never run. Delete it, or declare Hybrid/FixedRadii"
+                )
+                .into());
+            }
+            return Ok(None);
+        }
+        fn required<'a, T>(
+            field: &'a Option<T>,
+            name: &str,
+            arch: TransmissionArchitecture,
+        ) -> Result<&'a T, BevyError> {
+            field.as_ref().ok_or_else(|| {
+                format!("transmission.{name} is required for architecture: {arch:?}").into()
+            })
+        }
+        let engine = required(&self.engine, "engine", arch)?;
+        let gearbox = required(&self.gearbox, "gearbox", arch)?;
+        let steering = required(&self.steering, "steering", arch)?;
+        let brake_force = *required(&self.brake_force, "brake_force", arch)?;
+        let brake_static_factor =
+            *required(&self.brake_static_factor, "brake_static_factor", arch)?;
         TransmissionParams::from_authoring(&TransmissionAuthoring {
-            idle_rpm: self.engine.idle_rpm,
-            governed_rpm: self.engine.governed_rpm,
-            rated_rpm: self.engine.rated_rpm,
-            torque_nm: &self.engine.torque_curve,
-            forward_speeds_kmh: &self.gearbox.forward_speeds_kmh,
-            reverse_speeds_kmh: &self.gearbox.reverse_speeds_kmh,
-            shift_up_rpm: self.gearbox.shift_up_rpm,
-            shift_down_rpm: self.gearbox.shift_down_rpm,
-            steer_radii_m: &self.steering.radii,
-            steer_capacity_n: self.steering.capacity,
-            recirculation: self.steering.recirculation,
-            brake_capacity_n: self.brake_force,
-            brake_static_factor: self.brake_static_factor,
-            drag_fraction: self.engine.drag_fraction,
-            engine_inertia_kgm2: self.engine.inertia_kgm2,
-            clutch_capacity_nm: self.engine.clutch_capacity_nm,
+            idle_rpm: engine.idle_rpm,
+            governed_rpm: engine.governed_rpm,
+            rated_rpm: engine.rated_rpm,
+            torque_nm: &engine.torque_curve,
+            forward_speeds_kmh: &gearbox.forward_speeds_kmh,
+            reverse_speeds_kmh: &gearbox.reverse_speeds_kmh,
+            shift_up_rpm: gearbox.shift_up_rpm,
+            shift_down_rpm: gearbox.shift_down_rpm,
+            steer_radii_m: &steering.radii,
+            steer_capacity_n: steering.capacity,
+            recirculation: steering.recirculation,
+            brake_capacity_n: brake_force,
+            brake_static_factor,
+            drag_fraction: engine.drag_fraction,
+            engine_inertia_kgm2: engine.inertia_kgm2,
+            clutch_capacity_nm: engine.clutch_capacity_nm,
             belt_inertia,
-            shift_secs: self.gearbox.shift_secs,
-            shift_addressing: self.gearbox.shift_addressing,
+            shift_secs: gearbox.shift_secs,
+            shift_addressing: gearbox.shift_addressing,
             sprocket_radius_m,
             half_tread_m,
         })
+        .map(Some)
     }
 }
 
@@ -450,14 +531,13 @@ pub struct SprocketSpec {
 /// The limit is asymmetric because the shoe is: fold toward the wheels and the guide horns meet,
 /// fold away and the ground-side structure does. Both are authored as POSITIVE MAGNITUDES named
 /// for their direction rather than as a signed range, so no reader has to know (or guess) which
-/// way the sim's joint angle counts; the one place a sign is applied is the chain solver's hinge
-/// stop, where the belt's own orientation defines it.
+/// way a joint angle counts; a reader applies the sign its own belt orientation defines.
 ///
-/// **Units.** This is the DEGREES side of the boundary — the whole struct is, which is why every
-/// field carries `_deg` and every reader goes through [`Self::inward`] / [`Self::outward`]. A
-/// hinge limit is measured in Blender, in degrees, so degrees is what the RON authors; the
-/// conversion happens exactly here, and nothing downstream (chain solver, sandbox rig, probes)
-/// ever holds a degree.
+/// **Units.** DEGREES, which is why every field carries `_deg`: a hinge limit is measured in
+/// Blender, in degrees, so degrees is what the RON authors. Any consumer converts at its own
+/// boundary — there is none today (the stops were the deleted chain solver's; the measurement is
+/// kept because it is a fact about the vehicle, not a solver knob), so nothing downstream holds
+/// either form.
 ///
 /// Hand-measured per vehicle, deliberately: the shoe MESH is only an upper bound (real
 /// articulation also spends clearance in the pin/bushing and the end connectors), and an
@@ -472,18 +552,6 @@ pub struct LinkAngleSpec {
     /// Folding AWAY from the wheels (DEGREES, positive): a sagging return run, a shoe cresting a
     /// rock.
     pub outward_deg: f32,
-}
-
-impl LinkAngleSpec {
-    /// The inward (wrap-direction) stop in RADIANS — the only form anything but the RON sees.
-    pub fn inward(&self) -> f32 {
-        self.inward_deg.to_radians()
-    }
-
-    /// The outward stop in RADIANS.
-    pub fn outward(&self) -> f32 {
-        self.outward_deg.to_radians()
-    }
 }
 
 #[derive(Asset, TypePath, Deserialize)]
@@ -617,7 +685,9 @@ impl TankSpec {
         // positive placeholders: every `from_authoring` rejection is independent of the sprocket
         // radius / half-tread (they only scale the derived ladder, finite for any finite positive
         // radius), and the geometry-coupled construction is re-run with the real measured values at
-        // TrackGear build.
+        // TrackGear build. This same call is the load-time gate that REQUIRES the block: a spec
+        // without a transmission architecture fails here, loudly, instead of silently running
+        // the governor.
         t.transmission_params(1.0, 1.0).map(|_| ())?;
         for (name, weapon) in &self.weapons {
             match weapon.fire_mode {
@@ -754,30 +824,39 @@ mod tests {
             .as_ref()
             .expect("the Tiger authors a transmission block");
         assert_eq!(tr.architecture, TransmissionArchitecture::FixedRadii);
-        assert_eq!(tr.engine.governed_rpm, 2500.0);
-        assert_eq!(tr.engine.rated_rpm, 3000.0);
+        // The regenerative tables are Option only for `architecture: Governor`'s sake — a
+        // FixedRadii sheet must author all of them (params() enforces it; see
+        // `governor_architecture_is_explicit_and_tableless`).
+        let engine = tr
+            .engine
+            .as_ref()
+            .expect("FixedRadii requires engine tables");
+        let gearbox = tr.gearbox.as_ref().expect("FixedRadii requires a gearbox");
+        let steering = tr.steering.as_ref().expect("FixedRadii requires steering");
+        assert_eq!(engine.governed_rpm, 2500.0);
+        assert_eq!(engine.rated_rpm, 3000.0);
         // DELIBERATE pin update (stage B, engine crank state): the crank block is now
         // required authoring. J = 4.0 kg·m² (INFERRED, 2.5–6 class band, flywheel-
         // dominant); clutch capacity 2400 N·m ≈ 1.3 × the 1850 N·m peak.
-        assert_eq!(tr.engine.inertia_kgm2, 4.0);
-        assert_eq!(tr.engine.clutch_capacity_nm, 2400.0);
-        assert_eq!(tr.gearbox.forward_speeds_kmh.len(), 8);
-        assert_eq!(tr.gearbox.reverse_speeds_kmh.len(), 4);
-        assert_eq!(tr.gearbox.shift_addressing, ShiftAddressing::Direct);
-        assert_eq!(*tr.gearbox.forward_speeds_kmh.last().unwrap(), 45.4);
-        assert_eq!(tr.steering.radii[0].0, 3.44);
-        assert_eq!(tr.steering.radii[7].1, 165.0);
+        assert_eq!(engine.inertia_kgm2, 4.0);
+        assert_eq!(engine.clutch_capacity_nm, 2400.0);
+        assert_eq!(gearbox.forward_speeds_kmh.len(), 8);
+        assert_eq!(gearbox.reverse_speeds_kmh.len(), 4);
+        assert_eq!(gearbox.shift_addressing, ShiftAddressing::Direct);
+        assert_eq!(*gearbox.forward_speeds_kmh.last().unwrap(), 45.4);
+        assert_eq!(steering.radii[0].0, 3.44);
+        assert_eq!(steering.radii[7].1, 165.0);
         // DELIBERATE pin update (transmission fix 4 + review round, 2026-07-19):
         // brake_force re-anchored from the circular grip-limit sizing (250 kN — sized
         // against the very μ it was meant to test, and energy-impossible for two 1940s
         // discs) to the DUAL anchor: the settled 20° park hold (W·sin 20°/2 ≈ 95.6
         // kN/side) and 0.343 g total service decel (inside the 0.2–0.35 g WWII heavy-tank
         // band) → 96 kN/side.
-        assert_eq!(tr.brake_force, 96_000.0);
+        assert_eq!(tr.brake_force, Some(96_000.0));
         // Static breakaway is distinct from dynamic dissipation: the 1.5 INFERRED multiplier makes
         // 96 kN/side × 1.5 = 144 kN/side DERIVED, enough for the DERIVED 139.7925 kN/side demand
         // at 30°.
-        assert_eq!(tr.brake_static_factor, 1.5);
+        assert_eq!(tr.brake_static_factor, Some(1.5));
         // Track: links per side (the material loop closes at MEASURED pitch × this count); the
         // sprocket's tooth count locks link advance to tooth advance. Geometry (pitch, plane_x,
         // sprocket/idler/wheel circles) is no longer authored — it is measured off the glb markers.
@@ -787,13 +866,10 @@ mod tests {
         // thrust (τ·gear/R) and per-gear speed (ω·R/gear) — the anchored speeds are the truth.
         assert_eq!(spec.track.sprocket.teeth, 20);
         // DELIBERATE pin (2026-07-23): the symmetric 0.6109 rad stop became a HAND-MEASURED
-        // asymmetric pair authored in degrees. Pinned in both units on purpose — the degrees are
-        // what Yan measured in Blender, the radians are what everything downstream consumes, and
-        // this is the one assertion that would catch a conversion silently going missing.
+        // asymmetric pair authored in degrees. The measurement is a fact about the shoe, so it
+        // stays authored (and validated) even though the solver that consumed it is gone.
         assert_eq!(spec.track.link_angle.inward_deg, 40.0);
         assert_eq!(spec.track.link_angle.outward_deg, 18.0);
-        assert!((spec.track.link_angle.inward() - 0.698_13).abs() < 1e-5);
-        assert!((spec.track.link_angle.outward() - 0.314_16).abs() < 1e-5);
         // Servos are a node-keyed map now (not fixed turret/gun fields); the yaw + pitch mounts must
         // be declared for the rig to bind.
         assert!(spec.servos.contains_key("Turret_Yaw"));
@@ -1049,46 +1125,61 @@ mod tests {
         let fresh = || -> TankSpec {
             ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron")).unwrap()
         };
+        // The table fields are Option (for `architecture: Governor`); the Tiger authors all of
+        // them, so the mutation closures unwrap through these helpers.
+        fn engine(tr: &mut TransmissionSpec) -> &mut EngineSpec {
+            tr.engine.as_mut().expect("the Tiger authors engine tables")
+        }
+        fn gearbox(tr: &mut TransmissionSpec) -> &mut GearboxSpec {
+            tr.gearbox.as_mut().expect("the Tiger authors a gearbox")
+        }
         let cases: [(&str, fn(&mut TransmissionSpec)); 16] = [
             // Stage-B crank block: absurd-but-finite values must be refused outright, in
             // BOTH directions (review round FIX 4 added the lower bounds — the coupling
             // divides by J and the capacity gates every transmitted torque).
-            ("inertia_kgm2", |tr| tr.engine.inertia_kgm2 = 0.0),
-            ("inertia_kgm2", |tr| tr.engine.inertia_kgm2 = 0.05),
-            ("inertia_kgm2", |tr| tr.engine.inertia_kgm2 = 250.0),
+            ("inertia_kgm2", |tr| engine(tr).inertia_kgm2 = 0.0),
+            ("inertia_kgm2", |tr| engine(tr).inertia_kgm2 = 0.05),
+            ("inertia_kgm2", |tr| engine(tr).inertia_kgm2 = 250.0),
             ("clutch_capacity_nm", |tr| {
-                tr.engine.clutch_capacity_nm = f32::NAN;
+                engine(tr).clutch_capacity_nm = f32::NAN;
             }),
             ("clutch_capacity_nm", |tr| {
-                tr.engine.clutch_capacity_nm = 50.0;
+                engine(tr).clutch_capacity_nm = 50.0;
             }),
             ("clutch_capacity_nm", |tr| {
-                tr.engine.clutch_capacity_nm = 80_000.0;
+                engine(tr).clutch_capacity_nm = 80_000.0;
             }),
             // FIX 2/4: an idle under 300 rpm would put the sim's hard stall floor
             // (idle − 100) inside the spawn sentinel's territory.
-            ("engine.idle_rpm floor", |tr| tr.engine.idle_rpm = 200.0),
+            ("engine.idle_rpm floor", |tr| engine(tr).idle_rpm = 200.0),
             ("steering capacity", |tr| {
-                tr.steering.capacity = f32::INFINITY;
+                tr.steering
+                    .as_mut()
+                    .expect("the Tiger authors steering")
+                    .capacity = f32::INFINITY;
             }),
-            ("brake_force", |tr| tr.brake_force = f32::INFINITY),
+            ("brake_force", |tr| tr.brake_force = Some(f32::INFINITY)),
             ("brake_static_factor", |tr| {
-                tr.brake_static_factor = f32::NAN;
+                tr.brake_static_factor = Some(f32::NAN);
             }),
-            ("brake_static_factor", |tr| tr.brake_static_factor = 0.99),
-            ("brake_static_factor", |tr| tr.brake_static_factor = 2.51),
+            ("brake_static_factor", |tr| {
+                tr.brake_static_factor = Some(0.99)
+            }),
+            ("brake_static_factor", |tr| {
+                tr.brake_static_factor = Some(2.51)
+            }),
             // Post-upshift rpm = 2300 × v_g/v_g+1 ≈ 1494 at the Tiger's widest step — a
             // 2200 down band re-downshifts immediately: hunting on a boundary speed.
-            ("hysteresis", |tr| tr.gearbox.shift_down_rpm = 2200.0),
+            ("hysteresis", |tr| gearbox(tr).shift_down_rpm = 2200.0),
             ("ladder shape", |tr| {
-                tr.gearbox.forward_speeds_kmh.swap(2, 3);
+                gearbox(tr).forward_speeds_kmh.swap(2, 3);
             }),
             // 300 ascending reverse gears: passes ordering and hysteresis, but cannot be
             // addressed by the runtime's u8 gear index.
             ("ladder shape", |tr| {
-                tr.gearbox.reverse_speeds_kmh = (1..=300).map(|i| i as f32).collect();
+                gearbox(tr).reverse_speeds_kmh = (1..=300).map(|i| i as f32).collect();
             }),
-            ("drag_fraction", |tr| tr.engine.drag_fraction = 1.5),
+            ("drag_fraction", |tr| engine(tr).drag_fraction = 1.5),
         ];
         for (needle, mutate) in cases {
             let mut spec = fresh();
@@ -1102,15 +1193,17 @@ mod tests {
             let err = spec.validate().unwrap_err().to_string();
             assert!(err.contains(needle), "expected `{needle}` in: {err}");
         }
+        // A regenerative block missing one of its (serde-optional, Governor-only-optional)
+        // tables must fail VALIDATION by name — the field parses as absent now, so the
+        // per-architecture contract in `TransmissionSpec::params` is the gate.
         let missing_static_factor = include_str!("../assets/tiger_1/tiger_1.tank.ron")
             .replace("                brake_static_factor: 1.5,\n", "");
-        let err = ron::de::from_str::<TankSpec>(&missing_static_factor)
-            .err()
-            .expect("brake_static_factor must be required")
-            .to_string();
+        let spec = ron::de::from_str::<TankSpec>(&missing_static_factor)
+            .expect("a Governor-optional field may be absent at parse time");
+        let err = spec.validate().unwrap_err().to_string();
         assert!(
-            err.contains("brake_static_factor"),
-            "missing required brake_static_factor should be named: {err}"
+            err.contains("brake_static_factor") && err.contains("FixedRadii"),
+            "missing brake_static_factor should be named with its architecture: {err}"
         );
         // FIX 4, belt-inertia floor: with a transmission declared the coupling divides by
         // 2 × powertrain.inertia — a tiny-but-positive value passes the generic finite/> 0
@@ -1121,6 +1214,86 @@ mod tests {
         assert!(
             err.contains("powertrain.inertia floor"),
             "expected the belt-inertia floor in: {err}"
+        );
+    }
+
+    /// A spec WITHOUT a transmission block must fail validation loudly — the old silent
+    /// Governor fallback is retired. The error names the block and the fix.
+    #[test]
+    fn validate_requires_an_explicit_transmission_selection() {
+        let mut spec: TankSpec =
+            ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron")).unwrap();
+        spec.track.powertrain.transmission = None;
+        let err = spec.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("track.powertrain.transmission")
+                && err.contains("architecture")
+                && err.contains("Governor"),
+            "a missing transmission block must name the block and the explicit fix: {err}"
+        );
+    }
+
+    /// The governor stays reachable ON PURPOSE: `transmission: (architecture: Governor)` is a
+    /// legal, tableless block (Ok(None) params — no joint drivetrain), while a Governor block
+    /// smuggling regenerative tables, or a regenerative block missing one, is rejected by name.
+    #[test]
+    fn governor_architecture_is_explicit_and_tableless() {
+        let fresh = || -> TankSpec {
+            ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron")).unwrap()
+        };
+
+        // The bare explicit-Governor block: parses, validates, selects no joint params.
+        let block: TransmissionSpec = ron::de::from_str("(architecture: Governor)")
+            .expect("a tableless Governor block must parse");
+        let mut spec = fresh();
+        spec.track.powertrain.transmission = Some(block);
+        spec.validate()
+            .expect("an explicit Governor selection is valid without tables");
+        assert!(
+            spec.track.transmission_params(1.0, 1.0).unwrap().is_none(),
+            "Governor selects NO joint transmission params"
+        );
+
+        // Governor + authored tables = dead data hiding a selection bug — rejected by name.
+        let mut spec = fresh();
+        spec.track
+            .powertrain
+            .transmission
+            .as_mut()
+            .unwrap()
+            .architecture = TransmissionArchitecture::Governor;
+        let err = spec.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("Governor") && err.contains("engine"),
+            "authored tables under Governor must be rejected by name: {err}"
+        );
+
+        // A regenerative architecture missing a table is named with its architecture.
+        let mut spec = fresh();
+        spec.track.powertrain.transmission.as_mut().unwrap().engine = None;
+        let err = spec.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("transmission.engine") && err.contains("FixedRadii"),
+            "a missing regenerative table must be named: {err}"
+        );
+    }
+
+    /// Each declared architecture selects ITS OWN runtime adapter — the single shared mapping
+    /// (`TransmissionArchitecture::mode`) the game and the sandbox both ride.
+    #[test]
+    fn each_architecture_selects_its_own_mode() {
+        use crate::track::transmission::TransmissionMode;
+        assert_eq!(
+            TransmissionArchitecture::Governor.mode(),
+            TransmissionMode::Governor
+        );
+        assert_eq!(
+            TransmissionArchitecture::Hybrid.mode(),
+            TransmissionMode::Hybrid
+        );
+        assert_eq!(
+            TransmissionArchitecture::FixedRadii.mode(),
+            TransmissionMode::FixedRadii
         );
     }
 

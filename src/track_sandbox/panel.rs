@@ -1,5 +1,5 @@
-//! The `track_sandbox` control panel — one clickable egui `SidePanel` that REPLACED the old
-//! keyboard-only text HUD (paged `F1`-`F8` overlay + number-row layer toggles + bracket knobs).
+//! The `track_sandbox` control panel — one clickable egui `SidePanel` carrying every non-driving
+//! control the sandbox has.
 //!
 //! Compiled ONLY under the `dev_ui` feature (`cargo run --bin track_sandbox --features dev_ui`), so
 //! `bevy_egui` never lands in the shipping client — the whole reason the panel is its own module
@@ -28,8 +28,8 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 
+use super::belt::{EnvelopeLaw, ViewPerf};
 use super::derive;
-use super::model4::EnvelopeLaw;
 use super::rig_geom::{DroopLimiter, RigGeom};
 use super::suspension_viz::SuspensionViz;
 use super::{
@@ -69,6 +69,7 @@ struct Read<'w> {
     blueprint: Option<Res<'w, TankBlueprint>>,
     contacts: Res<'w, BeltContacts>,
     belt: Res<'w, BeltSpeed>,
+    view_perf: Res<'w, ViewPerf>,
 }
 
 const WARN: egui::Color32 = egui::Color32::from_rgb(235, 90, 70);
@@ -137,17 +138,20 @@ fn panel(
                     .show(ui, |ui| {
                         // The drivetrain adapter — the live selector the `T` key also cycles. The
                         // support law (calibrated contact envelope) and grip law (per-element shear)
-                        // are the settled model, not switchable.
+                        // are the settled model, not switchable. `TransSwitch` holds an Option:
+                        // `None` only on the pre-rig frames (no radio lit), then `build_rig` seeds
+                        // it from the spec's declared architecture — a click is always an EXPLICIT
+                        // override of that seed.
                         ui.label("transmission");
-                        ui.radio_value(&mut trans, TransmissionMode::Governor, "Governor");
+                        ui.radio_value(&mut trans, Some(TransmissionMode::Governor), "Governor");
                         ui.radio_value(
                             &mut trans,
-                            TransmissionMode::Hybrid,
+                            Some(TransmissionMode::Hybrid),
                             "Hybrid (continuous regenerative)",
                         );
                         ui.radio_value(
                             &mut trans,
-                            TransmissionMode::FixedRadii,
+                            Some(TransmissionMode::FixedRadii),
                             "L600 (geared steering)",
                         );
                     });
@@ -325,7 +329,7 @@ fn layers_section(ui: &mut egui::Ui, layers: &mut VizLayers, viz: &mut Suspensio
     ui.checkbox(&mut layers.running_gear, "running gear (driven)");
     ui.checkbox(&mut layers.wheels, "wheel meshes");
     ui.checkbox(&mut layers.links, "track links");
-    ui.checkbox(&mut layers.chain, "belt line");
+    ui.checkbox(&mut layers.belt_line, "belt line");
 
     ui.separator();
     ui.label("Volumes");
@@ -393,4 +397,11 @@ fn telemetry_section(
             load / 1e3,
         ));
     }
+
+    // Track-view cost (µs/frame, cumulative avg for ONE tank — the game pays it per rendered tank).
+    ui.separator();
+    ui.monospace(format!(
+        "view cost (1 tank)  {:>6.0} µs/frame",
+        r.view_perf.wrap_us
+    ));
 }

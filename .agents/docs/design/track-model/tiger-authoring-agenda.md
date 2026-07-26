@@ -59,9 +59,12 @@ upgrades the model out from under a working view, not into a void:
   the `Sprocket_Phase_L/R` marker, never a radius. Item 6's formula sign is now settled:
   every axle angle is NEGATIVE (`track::view::spin_angle` is the single flip point); the
   marker contributes `baked_marker_offset` only and must never redefine route direction.
-- **Item 7 sharpened**: the chain's motor is `RouteTag::Arc(0)` = first circle = sprocket-first
-  hardcode. Front drive fits the Tiger; REAR drive needs drive identity derived from the typed
-  sprocket node before any rear-drive vehicle ships. Named debt.
+- **Item 7 sharpened**: drive identity is the FIRST circle of a side's front→rear list — a
+  sprocket-first hardcode shared by the route builder, the wrap view and the belt physics. Front
+  drive fits the Tiger; REAR drive needs drive identity derived from the typed sprocket node
+  before any rear-drive vehicle ships. Named debt. (Stated in terms of the chain solver's
+  `RouteTag::Arc(0)` when written; that solver and its route tags are deleted, the hardcode is
+  not.)
 - **Wheel-lift probes want disc bounds**: phase A probes ±0.08 m around each wheel's real x
   (the interleaved disc is 0.158 m wide; shoe-wide probes at an outboard column read terrain
   BESIDE the track). Bake subtree-bounds should carry per-axle disc width so this constant

@@ -22,18 +22,15 @@
 //! this frame. That live re-derivation is what made the editor an *editor*; it survives the port.
 //!
 //! What this module is NOT: it never writes a transform, spawns a body, or touches physics — it
-//! reads the rig contract and draws. Nor does it own any control input any more: which layers draw
-//! (the [`SuspensionViz`] switches) and the suspension knobs ([`RigSuspension`]) are set by the egui
-//! [`super::panel`] now, not by keys. This module is pure gizmo output over resources the panel
-//! writes; the whole text readout it used to own (a status line + a paged detail panel) is gone,
-//! folded into the panel's collapsing sections.
+//! reads the rig contract and draws. It owns no control input either. Which layers draw (the
+//! [`SuspensionViz`] switches) and the suspension knobs ([`RigSuspension`]) are set by the egui
+//! [`super::panel`], so this module is pure gizmo output over resources the panel writes.
 
 use bevy::prelude::*;
 
+use super::belt::BeltPhase;
 use super::derive;
-use super::model4::BeltPhase;
 use super::rig_geom::{Pose, RigGeom};
-use super::wheel_view;
 // `mod.rs`'s own sandbox state (a child module may read its parent's private items).
 use super::{Hull, RigSuspension};
 use crate::track::route::{build_route, resample};
@@ -68,10 +65,10 @@ pub(crate) enum GripDetail {
 }
 
 impl GripDetail {
-    /// Advance the tap-loop (the pen sandbox's `MeshState::next()` pattern). Used by the
-    /// `dev_ui` panel's grip-detail cycle button and by the unit test; `allow(dead_code)` covers the
-    /// default (no-`dev_ui`) build where only the always-compiled draw code references this type.
-    #[allow(dead_code)]
+    /// Advance the tap-loop. Used by the `dev_ui` panel's grip-detail cycle button and by the unit
+    /// test; the gated `allow` covers the default (no-`dev_ui`) build, where only the
+    /// always-compiled draw code references this type.
+    #[cfg_attr(not(feature = "dev_ui"), allow(dead_code))]
     pub(crate) fn next(self) -> Self {
         match self {
             Self::Off => Self::Columns,
@@ -80,8 +77,8 @@ impl GripDetail {
         }
     }
 
-    /// The panel's label for this detail level. See [`Self::next`] for the `allow`.
-    #[allow(dead_code)]
+    /// The panel's label for this detail level. See [`Self::next`] for the gated `allow`.
+    #[cfg_attr(not(feature = "dev_ui"), allow(dead_code))]
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Off => "off",
@@ -246,7 +243,7 @@ fn draw_loop(
 /// meshing angle must not be half a tooth out and static while the thing it checks turns — so this
 /// draws the RULE, live:
 ///
-///   * white ticks at [`wheel_view::tooth_tip_angle`] + `k·τ/teeth` — the angles a tooth tip MUST
+///   * white ticks at [`crate::track::gear_phase::tooth_tip_angle`] + `k·τ/teeth` — the angles a tooth tip MUST
 ///     occupy for a pin to land in a gullet, derived from the belt alone (loop origin + phase),
 ///     with no reference to the sprocket mesh;
 ///   * the leading tooth in RED, so the ring reads as rotating and its direction is unambiguous;
@@ -284,7 +281,7 @@ fn draw_sprocket(
         );
     };
     let origin = geom.belt_origin_angle(side);
-    let lead = wheel_view::tooth_tip_angle(travel, geom.pitch, geom.teeth, origin);
+    let lead = crate::track::gear_phase::tooth_tip_angle(travel, geom.pitch, geom.teeth, origin);
     for t in 0..geom.teeth {
         let angle = lead + std::f32::consts::TAU * t as f32 / geom.teeth as f32;
         tick(angle, r - 0.05, r + 0.05, if t == 0 { RED } else { WHITE });

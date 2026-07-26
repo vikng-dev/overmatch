@@ -250,11 +250,15 @@ fn update_drive_hud(
     let projected = horizontal.dot(forward_horizontal);
     let signed_ground = horizontal.length() * projected.signum();
     let speeds = [drive.sides[0].speed, drive.sides[1].speed];
-    let steering = steering_hud_line(
-        mode.unwrap_or(TransmissionMode::Governor),
-        &transmission.0,
-        params.map(|params| params.steer_radii_m.as_slice()),
-    );
+    // No mode ⇒ no steering line. (This used to default to Governor — display-inert, since
+    // only FixedRadii prints, but implicit transmission selection is banned everywhere.)
+    let steering = mode.map_or_else(String::new, |mode| {
+        steering_hud_line(
+            mode,
+            &transmission.0,
+            params.map(|params| params.steer_radii_m.as_slice()),
+        )
+    });
 
     debug_text.0 = format!(
         "{mode_line}\n{scheduler_line}\n\

@@ -272,11 +272,12 @@ impl RigGeom {
     /// the sprocket centre) — i.e. **where `BeltPhase = 0` puts the first pin**.
     ///
     /// Both belt views parameterise the loop from the same vertex: `build_route` (and
-    /// `model4::conform_belts_field`, which repeats its construction) start the point list at the
-    /// UPPER external tangent between the rear circle and the front one, then wrap forward around
-    /// the sprocket's front. `resample(.., offset)` puts station 0 at exactly `offset` along that
-    /// list and `phase_decompose` makes `offset` the belt phase mod one pitch — so at zero phase pin
-    /// 0 sits precisely on that tangent point, where the return run lands back on the sprocket.
+    /// `track_sandbox::belt::conform_belts_field`, which repeats its construction) start the point
+    /// list at the UPPER external tangent between the rear circle and the front one, then wrap
+    /// forward around the sprocket's front. `resample(.., offset)` puts station 0 at exactly `offset`
+    /// along that list and `phase_decompose` makes `offset` the belt phase mod one pitch — so at
+    /// zero phase pin 0 sits precisely on that tangent point, where the return run lands back on the
+    /// sprocket.
     ///
     /// That is the ONE fact `wheel_view`'s sprocket needs in order to be phase-locked rather than
     /// merely rate-locked, and it belongs here because it is a statement about the RIG's route
@@ -324,9 +325,8 @@ impl RigGeom {
     /// rim and the ground — the full plate, `pin_to_inner + pin_to_outer` (~50 mm) — is track
     /// material the support penalty may dig into for support and grinding traction (owner
     /// verdict 2026-07-24: give the track its full thickness of bite). A rigid boundary at the
-    /// belt face masks the penalty entirely (the retired `DRIVE_COLLIDER_SCALE` cylinders
-    /// existed to dodge exactly that), and a pin-line stop only granted the outer half. This
-    /// matters most at the unsprung sprocket/idler arcs, where the envelope's travel profile
+    /// belt face would mask the penalty entirely, and a pin-line stop would grant only the outer
+    /// half. This matters most at the unsprung sprocket/idler arcs, where the envelope's travel profile
     /// is zero and the plate is the ONLY compliance. Cost: at most one full plate depth of
     /// visual crush at a bottoming impact. Built taut (`belt_len = 0`) like every perimeter.
     ///
@@ -390,9 +390,9 @@ impl RigGeom {
         self.grip_columns(side).map(|(x, w)| (x - median_x, w))
     }
 
-    /// Just the lateral OFFSETS of [`Self::grip_column_offsets`] — what the chain solver's
-    /// and wheel probes' terrain stations sample at (they carry no per-column weight; only
-    /// the force law splits the coefficients across the columns).
+    /// Just the lateral OFFSETS of [`Self::grip_column_offsets`] — what the wrap conform's and
+    /// the wheel probes' terrain stations sample at (they carry no per-column weight; only the
+    /// force law splits the coefficients across the columns).
     pub(crate) fn grip_stations(&self, side: Side) -> [f32; 3] {
         self.grip_column_offsets(side).map(|(x, _)| x)
     }
@@ -1082,13 +1082,9 @@ mod tests {
     /// SUPPLY is read from the shipped RON. A changed asset or a re-authored limit is still
     /// covered; today's numbers are printed, not pinned.
     ///
-    /// The supply used to be MEASURED off the shoe mesh (a tri-tri fold sweep, deleted
-    /// 2026-07-23). It was thrown away because this shoe is modelled with near-zero clearance, so
-    /// the measured first-contact angle moved with the penetration threshold — 17.7° at 0.1 mm vs
-    /// 46.0° at 2 mm — and a guard whose supply side swings by 2.6× on a solver epsilon guards
-    /// nothing. The authored number is a hand measurement in Blender, and it is also the number
-    /// the chain solver actually clamps with, which makes this test a check on the SHIPPED
-    /// behaviour rather than on a parallel derivation.
+    /// The supply is AUTHORED rather than measured off the shoe mesh — a hand measurement in
+    /// Blender of the SHIPPED shoe, which makes this test a check on the real vehicle rather than on
+    /// a parallel derivation. See `super::derive`'s module doc for why the mesh cannot supply it.
     #[test]
     fn the_authored_hinge_clears_every_wrap_the_running_gear_demands() {
         /// How much slack the tightest wrap must leave. Not a taste knob: a joint riding at its
@@ -1098,15 +1094,15 @@ mod tests {
         const MARGIN: f32 = 1.25;
 
         let rig = tiger_rig();
-        // The AUTHORED supply, in radians past the spec's degrees seam — the same value
-        // `track::view` hands the chain solver as its inward stop.
+        // The AUTHORED supply — the RON's hand-measured inward stop, degrees on the RON side
+        // (the authoring convention), converted here at the one place that reads it.
         let spec = tiger_spec();
-        let supply = spec.track.link_angle.inward();
+        let supply = spec.track.link_angle.inward_deg.to_radians();
 
         println!(
             "\nwrap clearance — authored inward hinge limit {:.3}° (outward {:.3}°), pitch {:.5} m",
             supply.to_degrees(),
-            spec.track.link_angle.outward().to_degrees(),
+            spec.track.link_angle.outward_deg,
             rig.pitch,
         );
         let demands = rig.wrap_demands(Side::Right);

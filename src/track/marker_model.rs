@@ -8,10 +8,9 @@
 //! the RON at all; `link_count` and `teeth` are caller knobs (see [`super::rig_geom::RigGeom`]).
 //!
 //! **No fallback.** [`DerivedModel::build`] either measures the glb or aborts — see [`refuse`].
-//! There used to be a substitute path (rebuild the old RON geometry when a lookup failed); a
-//! re-export deleted three marker nodes, the tool quietly measured a DIFFERENT tank, and the only
-//! trace was a substring in one log line. A missing marker is now fatal by policy: declared
-//! correctly, or fail loud.
+//! A substitute path (rebuilding RON geometry when a lookup fails) means a re-export that deletes
+//! marker nodes leaves the tool quietly measuring a DIFFERENT tank, with the only trace a substring
+//! in one log line. A missing marker is fatal by policy: declared correctly, or fail loud.
 //!
 //! It reads the glb DIRECTLY via the `gltf` crate, composing the FULL `T·R·S` world transform down
 //! the node tree. The bake's `root_position` is not usable here: it omits scale, and the markers sit
@@ -29,8 +28,8 @@
 //!
 //! **Robustness.** Every SIZE here is computed on a vertex cloud an artist owns, so it is written to
 //! survive loose greebles: the rim radius is a quantile-anchored maximum rather than a raw `max`,
-//! which one stray vertex destroys. Every CENTRE, by contrast, is no longer computed at all — it is
-//! the node's authored origin, a fact no stray vertex can move. See [`measure_mesh`].
+//! which one stray vertex destroys. Every CENTRE, by contrast, is not computed at all — it is the
+//! node's authored origin, a fact no stray vertex can move. See [`measure_mesh`].
 
 use std::collections::HashMap;
 use std::fmt;
@@ -320,10 +319,9 @@ struct MeshMeasure {
     /// It is a stated fact, not an estimate, and that is the whole reason to prefer it: a rotation
     /// centre is something the rig DECLARES (Blender spins the wheel about this point), whereas any
     /// vertex statistic only ever approximates it and does so worst exactly where the mesh is least
-    /// regular. The estimator that used to stand in here dates from an export whose `Sprocket_*` /
-    /// `Idler_*` origins all sat at the model root, i.e. carried no information; they carry it now
-    /// (`bake::tests::rotating_nodes_carry_their_own_axle_origin` pins that), so the workaround is
-    /// gone. Only the lateral `x` is not on the axle mid-plane (the origin sits on the outer disc
+    /// regular. The `Sprocket_*` / `Idler_*` nodes carry a real axle origin
+    /// (`bake::tests::rotating_nodes_carry_their_own_axle_origin` pins that), so no vertex-statistic
+    /// estimator is needed. Only the lateral `x` is not on the axle mid-plane (the origin sits on the outer disc
     /// row) — irrelevant, because every circle in this module is a side-plane `(z, y)` construction.
     origin: Vec3,
     /// Axis-aligned bounds of the mesh's vertices.
@@ -471,10 +469,8 @@ fn node_matrix(node: &gltf::Node) -> Mat4 {
 //
 // The strategy is to DERIVE AS LITTLE AS POSSIBLE. There are only two questions a circle asks, and
 // they have different answers:
-//   * the CENTRE is not derived at all any more: it is the node's authored origin, a fact the rig
-//     states (see `MeshMeasure::origin`). Nothing a stray vertex does can move a stated fact. What
-//     used to stand here — a median-seeded outlier rejection feeding an AABB centre — existed only
-//     because the old export's rotating nodes had no usable origin, and it is deleted with that era.
+//   * the CENTRE is not derived at all: it is the node's authored origin, a fact the rig states
+//     (see `MeshMeasure::origin`). Nothing a stray vertex does can move a stated fact.
 //   * the RADIUS must still be derived, and it is a MAXIMUM, the statistic one stray destroys. So it
 //     is ANCHORED to a quantile: take the largest in-plane radius still within a hair of the 95th
 //     percentile. A rim is a RING — hundreds of vertices at one radius — so it always clears the
@@ -563,8 +559,8 @@ mod tests {
 
     /// The user's stated hazard: a mesh that carries loose parts. The rim radius must be the SAME
     /// number with the strays present as without — a naive `max` reads the stray instead of the
-    /// tread. The CENTRE needs no such defence any more (it is the authored origin), and this test
-    /// also pins WHY: the bounds centre the old code derived is visibly wrecked by the same strays.
+    /// tread. The CENTRE needs no such defence (it is the authored origin), and this test pins WHY:
+    /// a derived bounds centre is visibly wrecked by the same strays.
     #[test]
     fn rim_radius_ignores_loose_greebles() {
         let axle = Vec3::new(1.5, 0.5, -1.9);

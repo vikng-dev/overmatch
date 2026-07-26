@@ -1,12 +1,10 @@
 //! Semantic mesh layering for the track sandbox — the multi-state inspection view the ballistics
 //! sandbox ([`crate::sandbox`]) pioneered, ported to the driving rig.
 //!
-//! The old track-sandbox view was a flat on/off: the whole glb model was one `bool`
-//! ([`super::VizLayers::hull`]), and the asset's authored `*_Collider` / `*_Ballistic` volume nodes —
-//! which the raw `WorldAssetRoot` scene spawn instantiates verbatim (the game's `bind_tank_view`
-//! filter never runs here, because the sandbox does not spawn through `SimParts`) — were part of the
-//! "dump everything" opaque pile. This module turns each of those three mesh classes into its own
-//! layer with the ballistics-sandbox state model:
+//! The raw `WorldAssetRoot` scene spawn instantiates the asset's authored `*_Collider` /
+//! `*_Ballistic` volume nodes verbatim (the game's `bind_tank_view` filter never runs here, because
+//! the sandbox does not spawn through `SimParts`), so without layering they render as one opaque
+//! pile. This module gives each mesh class its own layer with the ballistics-sandbox state model:
 //!
 //!   * **hull** (the `*_Visual` render meshes) → [`MeshState`]: solid → x-ray → hidden.
 //!   * **collider volumes** (`*_Collider` proxy meshes, amber) → [`VolumeState`]: off → on-top →
@@ -20,9 +18,10 @@
 //! The hull fallback is scoped to the TANK by a real ancestry check, not a name heuristic: [`classify`]
 //! walks the `ChildOf` chain and a walk that reaches the [`Hull`] body with no role name is a hull
 //! visual, while a walk that runs off the top of the tree without passing through [`Hull`] is a WORLD
-//! mesh (the course slabs/obstacles [`super::spawn_environment`] spawns at the scene root). Without the
-//! scope, x-raying the hull also ghosted the terrain — every parent-less course mesh fell through the
-//! walk to `Hull`. World meshes are visibility/material only; their static colliders are never touched.
+//! mesh (the course slabs/obstacles [`super::spawn_environment`] spawns at the scene root). The scope
+//! is what keeps x-raying the hull from also ghosting the terrain: without it every parent-less
+//! course mesh falls through the walk to `Hull`. World meshes are visibility/material only; their
+//! static colliders are never touched.
 //!
 //! The running gear (wheels/sprocket/idler) and the instanced track links are NOT layered here —
 //! they are moving simulation views owned by [`super::wheel_view`] / [`super::link_view`] and their
@@ -31,12 +30,12 @@
 //!
 //! # Reusing the glb meshes, not rebuilding from proxy data
 //!
-//! The rendered volumes are the glb node meshes the scene already instantiated — the same meshes that
-//! WERE the dump — not fresh meshes built from `blueprint.geometry.collision_proxies`. Two reasons:
-//! only the two `*_Collider` nodes have a physics-proxy position buffer at all (the ~30 `*_Ballistic`
-//! nodes are render-only in this tool — the sandbox builds no ballistic colliders), so rebuilding
-//! would cover a fraction of the volumes; and tagging the existing meshes fixes the dump and supplies
-//! the render geometry in one stroke, exactly as [`crate::sandbox`] does via `ViewOf`.
+//! The rendered volumes are the glb node meshes the scene already instantiated, not fresh meshes
+//! built from `blueprint.geometry.collision_proxies`. Two reasons: only the two `*_Collider` nodes
+//! have a physics-proxy position buffer at all (the ~30 `*_Ballistic` nodes are render-only in this
+//! tool — the sandbox builds no ballistic colliders), so rebuilding would cover a fraction of the
+//! volumes; and tagging the existing meshes both tames the pile and supplies the render geometry in
+//! one stroke, exactly as [`crate::sandbox`] does via `ViewOf`.
 //!
 //! # On-top rendering
 //!
@@ -49,9 +48,9 @@
 use bevy::camera::visibility::RenderLayers;
 use bevy::prelude::*;
 
-use super::link_view::TrackLink;
 use super::wheel_view::gear_slot;
 use super::{Hull, VizLayers};
+use crate::track::link_view::TrackLink;
 
 /// Render layer for volumes drawn "on top" — the [`OverlayCamera`] renders only this, with its own
 /// depth buffer and no clear, so it composites over the main scene regardless of containment. Layer 0
@@ -70,13 +69,12 @@ pub(crate) enum MeshState {
 }
 
 impl MeshState {
-    /// The three states in tap order, for the panel's segmented control. `allow(dead_code)`: only the
-    /// `dev_ui` panel references it, and the module compiles without that feature (same pattern as
-    /// `suspension_viz::GripDetail::label`).
-    #[allow(dead_code)]
+    /// The three states in tap order, for the panel's segmented control. Only the `dev_ui` panel
+    /// references it, and the module compiles without that feature — hence the gated `allow`.
+    #[cfg_attr(not(feature = "dev_ui"), allow(dead_code))]
     pub(crate) const ALL: [MeshState; 3] = [MeshState::Solid, MeshState::Xray, MeshState::Hidden];
 
-    #[allow(dead_code)]
+    #[cfg_attr(not(feature = "dev_ui"), allow(dead_code))]
     pub(crate) fn label(self) -> &'static str {
         match self {
             MeshState::Solid => "solid",
@@ -98,9 +96,9 @@ pub(crate) enum VolumeState {
 }
 
 impl VolumeState {
-    /// The four states in tap order, for the panel's segmented control. `allow(dead_code)`: see
-    /// [`MeshState::ALL`].
-    #[allow(dead_code)]
+    /// The four states in tap order, for the panel's segmented control. See [`MeshState::ALL`] for
+    /// the gated `allow`.
+    #[cfg_attr(not(feature = "dev_ui"), allow(dead_code))]
     pub(crate) const ALL: [VolumeState; 4] = [
         VolumeState::Hidden,
         VolumeState::OnTop,
@@ -108,7 +106,7 @@ impl VolumeState {
         VolumeState::Xray,
     ];
 
-    #[allow(dead_code)]
+    #[cfg_attr(not(feature = "dev_ui"), allow(dead_code))]
     pub(crate) fn label(self) -> &'static str {
         match self {
             VolumeState::Hidden => "off",

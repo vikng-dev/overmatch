@@ -1,7 +1,7 @@
 //! The route core (architecture §1/§2): the tagged taut guide route of one track side, as pure
 //! geometry over the side-plane circles of its running gear. Single source of truth for "where
-//! the track is" — the route render tier draws it, the chain tier solves inside a tube around
-//! it, and (phase B) the belt physics samples along it.
+//! the track is" — the kinematic-wrap view fits the drawn belt around it and (phase B) the belt
+//! physics samples along it.
 //!
 //! Conventions (inherited from the sandbox, steps 17–25): everything is in the hull-local SIDE
 //! PLANE as (z, y) `Vec2`s; the loop runs CCW in that plane (lower run front→rear, return run
@@ -10,115 +10,28 @@
 
 use bevy::math::Vec2;
 
-/// One sector of the guide route: which primitive a segment lies on. The tags make the route a
-/// CHART, not just a polyline — motor membership, bending rest angles, and the tube's inner
-/// bound are all sector questions.
-#[derive(Clone, Copy, PartialEq)]
-pub enum RouteTag {
-    /// Wrap arc of circle `k` in the side's front→rear circle list (0 = front drive circle).
-    Arc(usize),
-    /// Free span: a lower tangent segment or the sagging return run.
-    Span,
-}
-
-/// The tagged taut guide route, kept as an arc-length table. Built fresh from the CURRENT
-/// articulated circles whenever consumed (shape-as-function; no state).
+/// The taut guide route, kept as a polyline plus its arc-length table. Built fresh from the
+/// CURRENT articulated circles whenever consumed (shape-as-function; no state).
 pub struct Route {
     pub pts: Vec<Vec2>,
     /// Cumulative arc length at each vertex; last = total loop length.
     cum: Vec<f32>,
-    /// Per-SEGMENT sector tag (`len == pts.len() − 1`).
-    tags: Vec<RouteTag>,
 }
 
 impl Route {
     pub fn total(&self) -> f32 {
         *self.cum.last().unwrap()
     }
-
-    pub fn wrap(&self, s: f32) -> f32 {
-        s.rem_euclid(self.total().max(1e-4))
-    }
-
-    /// Segment index containing WRAPPED arc position `s`.
-    fn seg(&self, s: f32) -> usize {
-        self.cum
-            .partition_point(|&c| c <= s)
-            .saturating_sub(1)
-            .min(self.tags.len() - 1)
-    }
-
-    pub fn point(&self, s: f32) -> Vec2 {
-        let s = self.wrap(s);
-        let i = self.seg(s);
-        let len = (self.cum[i + 1] - self.cum[i]).max(1e-9);
-        self.pts[i].lerp(self.pts[i + 1], (s - self.cum[i]) / len)
-    }
-
-    pub fn tangent(&self, s: f32) -> Vec2 {
-        let i = self.seg(self.wrap(s));
-        (self.pts[i + 1] - self.pts[i]).normalize_or_zero()
-    }
-
-    pub fn tag(&self, s: f32) -> RouteTag {
-        self.tags[self.seg(self.wrap(s))]
-    }
-
-    /// The route's own turning angle (rad) over one link pitch centred at `s` — the bending
-    /// rest angle θ0 at a joint's OWN route coordinate. Discrete chords at the actual neighbour
-    /// coordinates (matching a chain's own θ), not point curvature — point sampling at
-    /// arc/tangent tessellation seams concentrates curvature into single stations.
-    pub fn turning(&self, s: f32, pitch: f32) -> f32 {
-        let a = self.point(s - pitch);
-        let b = self.point(s);
-        let c = self.point(s + pitch);
-        let e0 = b - a;
-        let e1 = c - b;
-        e0.perp_dot(e1).atan2(e0.dot(e1))
-    }
-
-    /// Windowed projection of `p` onto the route near `hint`: (s, u) with `u` signed along the
-    /// route's OUTWARD normal (positive = outside the loop). Only segments within the window
-    /// are candidates — a global nearest-point query could tunnel `s` across overlapping parts
-    /// of the loop (top run over belly); the window makes the rebase topology-safe.
-    pub fn project(&self, p: Vec2, hint: f32, window: f32) -> (f32, f32) {
-        let mut best = (self.wrap(hint), 0.0, f32::INFINITY);
-        let mut s0 = hint - window;
-        let hi = hint + window;
-        while s0 < hi {
-            let sw = self.wrap(s0);
-            let i = self.seg(sw);
-            let a = self.pts[i];
-            let b = self.pts[i + 1];
-            let ab = b - a;
-            let len2 = ab.length_squared();
-            if len2 > 1e-12 {
-                let t = ((p - a).dot(ab) / len2).clamp(0.0, 1.0);
-                let q = a + ab * t;
-                let d2 = p.distance_squared(q);
-                if d2 < best.2 {
-                    let len = len2.sqrt();
-                    let tan = ab / len;
-                    let out = Vec2::new(tan.y, -tan.x);
-                    best = (self.cum[i] + t * len, (p - q).dot(out), d2);
-                }
-            }
-            // Advance to the segment's end (in unwrapped window coordinates).
-            s0 += (self.cum[i + 1] - sw).max(1e-6);
-        }
-        (best.0, best.1)
-    }
 }
 
-/// Build the tagged guide route from one side's CURRENT circles (front→rear, pin-line radii):
-/// the lower convex envelope + external tangents + budgeted top-run sag, with every segment
-/// tagged by the primitive it lies on. Closed: last point == first point. `belt_len` is the
-/// loop length budget; its excess over the taut perimeter drapes into the return run.
+/// Build the guide route from one side's CURRENT circles (front→rear, pin-line radii): the lower
+/// convex envelope + external tangents + budgeted top-run sag. Closed: last point == first point.
+/// `belt_len` is the loop length budget; its excess over the taut perimeter drapes into the return
+/// run.
 pub fn build_route(circles: &[(Vec2, f32)], belt_len: f32) -> Route {
-    fn push(pts: &mut Vec<Vec2>, tags: &mut Vec<RouteTag>, p: Vec2, tag: RouteTag) {
+    fn push(pts: &mut Vec<Vec2>, p: Vec2) {
         if pts.last().is_none_or(|l| l.distance_squared(p) > 1e-10) {
             pts.push(p);
-            tags.push(tag);
         }
     }
 
@@ -145,7 +58,6 @@ pub fn build_route(circles: &[(Vec2, f32)], belt_len: f32) -> Route {
     let (rear_up, front_up) = external_tangent(rear_c, rear_r, front_c, front_r, 1.0);
 
     let mut pts: Vec<Vec2> = vec![front_up];
-    let mut tags: Vec<RouteTag> = Vec::new();
     let mut cursor = front_up;
     for w in active.windows(2) {
         let (i, j) = (w[0], w[1]);
@@ -157,14 +69,13 @@ pub fn build_route(circles: &[(Vec2, f32)], belt_len: f32) -> Route {
             Vec2::new(0.0, -1.0) // road wheels wrap under
         };
         for p in arc(circles[i].0, circles[i].1, cursor, t0, toward) {
-            push(&mut pts, &mut tags, p, RouteTag::Arc(i));
+            push(&mut pts, p);
         }
-        push(&mut pts, &mut tags, t1, RouteTag::Span);
+        push(&mut pts, t1);
         cursor = t1;
     }
-    let last = circles.len() - 1;
     for p in arc(rear_c, rear_r, cursor, rear_up, Vec2::new(1.0, 0.0)) {
-        push(&mut pts, &mut tags, p, RouteTag::Arc(last));
+        push(&mut pts, p);
     }
 
     // Return run: the leftover belt length as budgeted sag over the road wheels.
@@ -174,10 +85,10 @@ pub fn build_route(circles: &[(Vec2, f32)], belt_len: f32) -> Route {
     let mut top: Vec<Vec2> = Vec::new();
     sag_span(rear_up, front_up, excess, roads, 0, &mut top);
     for p in top {
-        push(&mut pts, &mut tags, p, RouteTag::Span);
+        push(&mut pts, p);
     }
     let first = pts[0];
-    push(&mut pts, &mut tags, first, RouteTag::Span);
+    push(&mut pts, first);
 
     let mut cum = Vec::with_capacity(pts.len());
     let mut s = 0.0;
@@ -186,7 +97,7 @@ pub fn build_route(circles: &[(Vec2, f32)], belt_len: f32) -> Route {
         s += w[0].distance(w[1]);
         cum.push(s);
     }
-    Route { pts, cum, tags }
+    Route { pts, cum }
 }
 
 /// Drape one return-run span with `excess` metres of slack as a parabola — and if the curve
@@ -350,30 +261,36 @@ mod tests {
         polyline_len(&build_route(circles, 0.0).pts)
     }
 
+    /// Closest approach of the route's LOWER run to a circle's centre, in radii: `1.0` means the
+    /// route lies ON the circle (it wraps it from below), `> 1.0` means it clears it entirely.
+    /// Only vertices at or below the centre count — the return run passes over the end circles and
+    /// says nothing about whether the taut bottom wraps them.
+    fn lower_wrap_ratio(route: &Route, (c, r): (Vec2, f32)) -> f32 {
+        route
+            .pts
+            .iter()
+            .filter(|p| p.y <= c.y)
+            .map(|p| p.distance(c) / r)
+            .fold(f32::INFINITY, f32::min)
+    }
+
     #[test]
-    fn route_is_closed_tagged_and_length_budgeted() {
+    fn route_is_closed_wraps_its_end_circles_and_is_length_budgeted() {
         let circles = gear();
         let belt_len = taut_len(&circles) + 0.2;
         let route = build_route(&circles, belt_len);
         assert_eq!(route.pts.first(), route.pts.last(), "loop must close");
         assert!(route.pts.iter().all(|p| p.x.is_finite() && p.y.is_finite()));
-        // Front drive arc and rear idler arc are present; the sag consumed the slack budget
-        // (parabolic approximation: within a few percent).
-        let has = |t: RouteTag| (0..route.pts.len() - 1).any(|i| route.tags[i] == t);
-        assert!(has(RouteTag::Arc(0)) && has(RouteTag::Arc(3)) && has(RouteTag::Span));
-        assert!((route.total() - belt_len).abs() < 0.05 * belt_len);
-    }
-
-    #[test]
-    fn project_roundtrips_points_on_the_route() {
-        let circles = gear();
-        let route = build_route(&circles, taut_len(&circles) + 0.2);
-        for s in [0.5_f32, 2.0, 4.0, 6.0] {
-            let q = route.point(s);
-            let (s_hat, u) = route.project(q, s, 0.5);
-            assert!((route.wrap(s) - s_hat).abs() < 1e-3, "s {s} -> {s_hat}");
-            assert!(u.abs() < 1e-3, "u {u}");
+        // The front drive circle and the rear idler are always wrapped — the route sits ON them.
+        for end in [circles[0], circles[3]] {
+            let ratio = lower_wrap_ratio(&route, end);
+            assert!(
+                (ratio - 1.0).abs() < 1e-3,
+                "an end circle must be wrapped, closest approach was {ratio}x its radius"
+            );
         }
+        // The sag consumed the slack budget (parabolic approximation: within a few percent).
+        assert!((route.total() - belt_len).abs() < 0.05 * belt_len);
     }
 
     #[test]
@@ -381,15 +298,11 @@ mod tests {
         let mut circles = gear();
         circles[1].0.y += 0.6; // articulated far above the taut line
         let route = build_route(&circles, taut_len(&circles) + 0.2);
-        let wrapped: Vec<usize> = (0..route.pts.len() - 1)
-            .filter_map(|i| match route.tags[i] {
-                RouteTag::Arc(k) => Some(k),
-                RouteTag::Span => None,
-            })
-            .collect();
+        let ratio = lower_wrap_ratio(&route, circles[1]);
         assert!(
-            !wrapped.contains(&1),
-            "a lifted wheel must not be wrapped from below"
+            ratio > 1.05,
+            "a lifted wheel must not be wrapped from below — the route came within {ratio}x \
+             its radius"
         );
     }
 }

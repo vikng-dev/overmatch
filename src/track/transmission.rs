@@ -159,14 +159,15 @@ use super::forces::{self, ForceParams};
 #[cfg(feature = "bitprobe")]
 use crate::bitprobe::TransmissionProbe;
 
-/// Which drivetrain adapter computes the sprocket forces. Per-vehicle SPEC eventually
-/// (`TankSpec.track.powertrain.transmission.architecture` selects between the regenerative
-/// adapters); `Governor` is what every composition without an explicit selection runs.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+/// Which drivetrain adapter computes the sprocket forces. Selected per-vehicle by the SPEC
+/// (`TankSpec.track.powertrain.transmission.architecture` — mandatory, `Governor` included),
+/// or by an explicit dev-time switch (offline `TransmissionFeelTest`, sandbox `TransSwitch`,
+/// harness `trans=` key). Deliberately NO `Default` impl: every selection path must name its
+/// adapter — an implicit Governor is exactly the silent-selection bug this enum used to hide.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TransmissionMode {
-    /// The per-side symmetric governor + hold blend, bit-for-bit — the default drivetrain
-    /// for vehicles without a declared architecture.
-    #[default]
+    /// The per-side symmetric governor + hold blend, bit-for-bit — the tableless adapter a
+    /// spec selects with `architecture: Governor`.
     Governor,
     /// `Regenerative { continuous }` — the arcade-honest hybrid (design menu D).
     Hybrid,
@@ -1026,9 +1027,17 @@ pub fn step(
     state: &mut TransmissionState,
     inp: &TransmissionInput,
 ) -> TransmissionReport {
+    // Selection is the CALLER's explicit contract: a regenerative mode without its declared
+    // tables is a selection bug upstream, and it fails loudly here instead of silently
+    // demoting to the governor (both live callers — `track::sim` and the sandbox — pass
+    // `Some` by construction).
     let (mode, tp) = match (mode, tp) {
-        (TransmissionMode::Governor, _) | (_, None) => (TransmissionMode::Governor, None),
+        (TransmissionMode::Governor, _) => (TransmissionMode::Governor, None),
         (m, Some(tp)) => (m, Some(tp)),
+        (m, None) => panic!(
+            "transmission::step: {m:?} selected without TransmissionParams — regenerative \
+             adapters require the spec's declared tables; there is no silent governor demotion"
+        ),
     };
     match mode {
         TransmissionMode::Governor => {

@@ -175,8 +175,9 @@ mod tests {
     /// The track view detects discontinuities LOCALLY (pose delta per frame) because this
     /// module publishes no signal. That only works while its thresholds sit strictly below the
     /// snap thresholds here: a correction consumed unsmoothed (>= these bounds) must always
-    /// exceed the track's trip point, or a snapped hull keeps its old chain state and the
-    /// tracks tear. Changing either side's constants must confront this bracket.
+    /// exceed the track's trip point, or a snapped hull keeps its old wrap filter memory and the
+    /// tracks settle in from a stale pose. Changing either side's constants must confront this
+    /// bracket.
     #[test]
     #[allow(clippy::assertions_on_constants)] // constant is the point: a compile-time bracket
     fn track_discontinuity_thresholds_bracket_render_error_snaps() {

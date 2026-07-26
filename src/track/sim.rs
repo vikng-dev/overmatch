@@ -31,7 +31,6 @@ use crate::command::TankCommand;
 use crate::damage::{
     Capability, TankCapabilities, TankVolumes, VolumeFacets, capability_available,
 };
-use crate::spec::TransmissionArchitecture;
 use crate::state::{GameplaySet, SimPhase};
 use crate::tank::Tank;
 
@@ -270,9 +269,12 @@ pub struct TrackGear {
     /// per-side because the shoe is not centred on its pins (~17 mm outboard on the Tiger).
     columns: [[(f32, f32); 3]; 2],
     params: ForceParams,
-    /// The declared joint transmission, if the spec authors one.
+    /// The declared joint transmission tables. `None` ⇔ the spec explicitly selects
+    /// `architecture: Governor` (the tableless adapter) — never "the block was absent"
+    /// (validation rejects that at load).
     trans: Option<TransmissionParams>,
-    /// Spec-selected adapter. `Governor` means the transmission block is absent.
+    /// Spec-selected adapter — the RON's explicit `transmission.architecture`, mapped through
+    /// [`crate::spec::TransmissionArchitecture::mode`]. Always an explicit authored choice.
     mode: TransmissionMode,
 }
 
@@ -495,16 +497,29 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
         sus.damping_ratio,
     );
 
+    // The spec's EXPLICIT architecture selection. There is no fallback here any more: a spec
+    // without a transmission block fails validation at load (spec.rs), so Governor runs only
+    // when a sheet NAMES it (`architecture: Governor`) — never because a block was forgotten.
+    let declared = spec
+        .powertrain
+        .transmission
+        .as_ref()
+        .expect("TankSpec transmission was validated before TrackGear construction");
     // The declared transmission, derived from the authored tables against the MEASURED sprocket
     // radius and half-tread (tiger-transmission-data.md rule: speeds are the anchors, reductions
-    // derive, so the ladder survives the 19-vs-20-tooth discrepancy).
-    if let Some(tr) = &spec.powertrain.transmission {
-        info!(
+    // derive, so the ladder survives the 19-vs-20-tooth discrepancy). Governor is tableless
+    // by contract (params() rejects a Governor block carrying tables).
+    match declared.gearbox.as_ref() {
+        Some(gearbox) => info!(
             "declared transmission: {:?}, {}F/{}R",
-            tr.architecture,
-            tr.gearbox.forward_speeds_kmh.len(),
-            tr.gearbox.reverse_speeds_kmh.len()
-        );
+            declared.architecture,
+            gearbox.forward_speeds_kmh.len(),
+            gearbox.reverse_speeds_kmh.len()
+        ),
+        None => info!(
+            "declared transmission: {:?} (tableless)",
+            declared.architecture
+        ),
     }
     // Measured geometry: the sprocket pin-line pitch radius is the rest running gear's first
     // circle (chord-exact `derive::sprocket_pitch_radius(geom.pitch, teeth)` by construction), and
@@ -512,14 +527,7 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
     let trans = spec
         .transmission_params(circles[0].1, geom.plane_x)
         .expect("TankSpec transmission was validated before TrackGear construction");
-    let mode = spec
-        .powertrain
-        .transmission
-        .as_ref()
-        .map_or(TransmissionMode::Governor, |tr| match tr.architecture {
-            TransmissionArchitecture::Hybrid => TransmissionMode::Hybrid,
-            TransmissionArchitecture::FixedRadii => TransmissionMode::FixedRadii,
-        });
+    let mode = declared.architecture.mode();
 
     commands.insert_resource(TrackGear {
         loop_pts,
@@ -565,8 +573,9 @@ fn apply_track_forces(
     time: Res<Time>,
     field: Res<TrackField>,
     gear: Option<Res<TrackGear>>,
-    // Offline-only adapter override. MP leaves it absent and follows `TrackGear::mode`, derived
-    // from the spec; a missing transmission block selects the untouched Governor fallback.
+    // Offline-only adapter override. MP leaves it absent and follows `TrackGear::mode` — the
+    // spec's EXPLICIT `transmission.architecture` (a missing block is a load-time validation
+    // error now, not a silent Governor).
     trans_feel: Option<Res<TransmissionFeelTest>>,
     #[cfg(feature = "bitprobe")] mut bitprobe: Option<ResMut<BitprobeCapture>>,
     volumes: Query<VolumeFacets>,
@@ -666,11 +675,21 @@ fn apply_track_forces(
         let center_of_mass = pos.0 + rot.0 * center_of_mass.0;
         let mut effect = TrackGripEffect::default();
 
-        // The JOINT drivetrain branch: MP selects the declared architecture; the offline-only
-        // [`TransmissionFeelTest`] can override it. A spec-less vehicle or explicit Governor
-        // override falls through to the governor loop below.
+        // The JOINT drivetrain branch: MP runs the declared architecture; the offline-only
+        // [`TransmissionFeelTest`] can override it. An explicit Governor selection falls
+        // through to the governor loop below. A regenerative override on a vehicle whose spec
+        // declares `architecture: Governor` has no tables to run — say so instead of silently
+        // demoting to the governor (dev-time loudness; the spec path can never hit this arm
+        // because `mode` and `trans` come from the same validated block).
         let joint = match (mode, gear.trans.as_ref()) {
-            (TransmissionMode::Governor, _) | (_, None) => None,
+            (TransmissionMode::Governor, _) => None,
+            (m, None) => {
+                bevy::log::warn_once!(
+                    "transmission override {m:?} needs declared tables, but this vehicle's \
+                     spec selects architecture: Governor (tableless) — running the governor"
+                );
+                None
+            }
             (m, Some(tp)) => Some((m, tp)),
         };
         if let Some((mode, tp)) = joint {

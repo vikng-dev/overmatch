@@ -4,14 +4,11 @@
 //! `track::forces`), so track work can be driven, captured, and A/B'd without the rest of the game
 //! in the way.
 //!
-//! What it no longer owns is the VEHICLE. The old wall — a code-generated primitive T-34 built from
-//! hard-coded consts, deliberately independent of the game's data — is down: the sandbox now drives
-//! the REAL TIGER I, spawned from the same `TankBlueprint` (glb + `.tank.ron`) the game spawns from,
-//! with every geometry number coming out of the marker-derived [`rig_geom::RigGeom`] contract. That
-//! independence bought isolation and cost us the only thing the sandbox is for — if the lab rig and
-//! the shipped tank are different vehicles, a lab verdict is not a game verdict. The isolation that
-//! remains is the one that was always the point: a deterministic course, a scripted harness, and no
-//! netcode.
+//! What it does NOT own is the VEHICLE. The sandbox drives the REAL TIGER I, spawned from the same
+//! `TankBlueprint` (glb + `.tank.ron`) the game spawns from, with every geometry number coming out
+//! of the marker-derived [`rig_geom::RigGeom`] contract: if the lab rig and the shipped tank are
+//! different vehicles, a lab verdict is not a game verdict. The isolation is in the ENVIRONMENT — a
+//! deterministic course, a scripted harness, and no netcode.
 //!
 //! One consequence to hold onto: the blueprint is **not available at `Startup`** (the bake inserts it
 //! there, so it first becomes visible in `Update`). Everything that needs the rig therefore hangs off
@@ -19,14 +16,13 @@
 //!
 //! # Control surface
 //!
-//! The old keyboard-only text HUD (paged `F1`-`F8` overlay + number-row layer toggles + bracket-key
-//! knob tweaks) is gone. Every non-driving control now lives in one clickable egui [`panel`] (a left
-//! `SidePanel` with collapsing Tune / Model / Layers / Telemetry / Scene sections), compiled ONLY
-//! under the `dev_ui` feature — `cargo run --bin track_sandbox --features dev_ui` — so egui never
-//! reaches the shipping client. The KEYBOARD that survives is exactly the direct-manipulation set:
+//! Every non-driving control lives in one clickable egui [`panel`] (a left `SidePanel` with
+//! collapsing Tune / Model / Layers / Telemetry / Scene sections), compiled ONLY under the `dev_ui`
+//! feature — `cargo run --bin track_sandbox --features dev_ui` — so egui never reaches the shipping
+//! client. The KEYBOARD is exactly the direct-manipulation set:
 //! arrow keys drive, `WASD`+mouse+Shift/Ctrl free-fly the camera, `R` cycles the reset spots, `Esc`
-//! pauses/frees the cursor, and the live toggles `V` (track view), `T` (transmission), `L` (log) and
-//! `;`/`'` `n`/`m` (link/tooth counts) still work — where a panel widget shares the resource (the
+//! pauses/frees the cursor, and the live toggles are `T` (transmission), `L` (log) and
+//! `;`/`'` `n`/`m` (link/tooth counts) — where a panel widget shares the resource (the
 //! transmission selector, the counts stepper) keyboard and panel write it the same way
 //! (write-on-change), so they never fight. The panel gates the driving/camera input systems off while
 //! an egui widget has focus ([`PanelWantsInput`]).
@@ -53,10 +49,10 @@ use crate::Layer;
 use crate::bake::TankBlueprint;
 
 // Shared course/rig/belt machinery lives here in `mod.rs`; the model's force and view systems
-// live in `model4.rs` (the field-belt — the sandbox's single model, promoted into the game as
+// live in `belt.rs` (the field-belt — the sandbox's single model, promoted into the game as
 // `track::forces`).
 mod harness;
-// The TRACK-LINK render layer (`=`): the Tiger's own shoe mesh, instanced onto the belt stations the
+// The TRACK-LINK render layer: the Tiger's own shoe mesh, instanced onto the belt stations the
 // active view resamples. Everything else in this file draws the track as a line; this is the one
 // module that draws it as track.
 mod link_view;
@@ -64,26 +60,18 @@ mod link_view;
 // solid/x-ray/hidden loop and the `*_Collider` / `*_Ballistic` volume layers with their
 // off/on-top/solid/x-ray states, plus the overlay camera that draws "on-top" volumes over the scene.
 // Owns the [`MeshState`] / [`VolumeState`] enums the panel and [`VizLayers`] use.
+mod belt;
 mod mesh_layers;
-mod model4;
-// The RUNNING-GEAR render layer (`F9`): the glb's own wheel/sprocket/idler nodes, bound by name and
-// driven from the suspension travel + the belt phase. Without it the model's wheels sit frozen while
-// the shoes scroll past them — `articulate_wheels_field` was updating a number nothing rendered.
+// The RUNNING-GEAR render layer: the glb's own wheel/sprocket/idler nodes, bound by name and driven
+// from the suspension travel + the belt phase. Without it the model's wheels sit frozen while the
+// shoes scroll past them — `articulate_wheels_field` would be updating a number nothing rendered.
 mod wheel_view;
 // The marker-driven track model — the universal suspension laws (`derive`), the glb marker read
-// (`marker_model`'s `DerivedModel`), and the assembled geometry contract (`rig_geom`) that REPLACED
-// this file's hard-coded T-34 consts and is now the sandbox's only source of "where the running gear
-// is". PROMOTED into the shared track core (`crate::track`), mirroring `track::forces`; re-exported
-// here (with `marker_model` kept under its historical sandbox name `model`) so every `super::derive`
-// / `super::model` / `super::rig_geom` path in the sandbox keeps resolving unchanged.
+// (`crate::track::marker_model`'s `DerivedModel`), and the assembled geometry contract (`rig_geom`),
+// which is the sandbox's only source of "where the running gear is". It lives in the shared track
+// core (`crate::track`), mirroring `track::forces`; re-exported here so the sandbox's
+// `super::derive` / `super::rig_geom` paths resolve.
 pub(crate) use crate::track::derive;
-// No CODE path names `model` post-promotion (rig_geom reads `marker_model` directly), but several
-// sandbox doc-links still say `super::model`; the alias keeps them resolving to the promoted module.
-#[expect(
-    unused_imports,
-    reason = "doc-link alias: keeps `super::model` intra-doc references resolving to `track::marker_model`"
-)]
-pub(crate) use crate::track::marker_model as model;
 pub(crate) use crate::track::rig_geom;
 // The suspension visualisation (migrated here from the suspension editor, which this tool replaces):
 // the cast routes (rest / max droop / max compression), the grip columns, the sprocket ring. Drawn
@@ -96,20 +84,18 @@ pub(crate) mod suspension_viz;
 #[cfg(feature = "dev_ui")]
 mod panel;
 
+use belt::{
+    BeltPhase, PinBelt, RigTransmission, TerrainField, ViewPerf, WrapMemory,
+    apply_belt_support_field, articulate_wheels_field, conform_belts_field, draw_sample_points,
+};
 use derive::SuspensionParams;
 use mesh_layers::{MeshState, VolumeState};
-use model4::{
-    BeltPhase, PinBelt, RigTransmission, RouteChain, TerrainField, apply_belt_support_field,
-    articulate_wheels_field, conform_belts_field, conform_belts_field_chain, draw_sample_points,
-};
 use rig_geom::{Pose, RigGeom};
 // The pure track core (route geometry) — moved out for game promotion (architecture §2); the
 // sandbox consumes it exactly as the game's view plugin will. Re-exported so the model
 // submodules' `use super::*` keeps resolving.
 pub(crate) use crate::track::oracle::{BlockField, TerrainBlock};
-pub(crate) use crate::track::route::{
-    arc, build_route, external_tangent, polyline_len, resample, sag_span,
-};
+pub(crate) use crate::track::route::{arc, external_tangent, polyline_len, resample};
 // One side encoding for the whole track core; the sandbox's formerly-private `Side` migrated here.
 pub(crate) use crate::track::side::{PerSide, Side};
 
@@ -120,11 +106,11 @@ pub(crate) use crate::track::side::{PerSide, Side};
 
 /// The LIVE suspension knobs ([`SuspensionParams`] — ride frequency, damping ratio, bump-stop) as a
 /// sandbox resource: seeded from the authored `track.suspension` RON block at rig build (the same
-/// source the game's envelope calibration reads) and tweaked live from there
-/// ([`suspension_viz::tweak_knobs`], `[` `]` and `,` `.`); [`RigGeom`] measures its
-/// droop/compression cast poses and its link-count window against them. One resource so there is one answer, wherever it's read from — the overlay's own
-/// `SuspensionKnobs` copy was a merge artefact, and a second copy is exactly how the panel's live
-/// verdict and [`tune_rig_counts`]'s clamp band would end up disagreeing about the same rig.
+/// source the game's envelope calibration reads) and tweaked live from the [`panel`]'s Tune section;
+/// [`RigGeom`] measures its droop/compression cast poses and its link-count window against them.
+/// ONE resource so there is one answer wherever it is read from — a second copy is exactly how the
+/// panel's live verdict and [`tune_rig_counts`]'s clamp band would end up disagreeing about the same
+/// rig.
 #[derive(Resource, Default)]
 pub(crate) struct RigSuspension(pub(crate) SuspensionParams);
 
@@ -154,15 +140,6 @@ struct RigSpec {
     governor_gain: f32,
     /// Reflected belt + drivetrain inertia (kg).
     belt_inertia: f32,
-    /// The MATERIAL link's own data (`track.link_mass` / `hinge_torque` / `link_angle`) — what
-    /// the route-chain view solves with. Same fields the game's `track::view` reads off the spec,
-    /// so the sandbox's chain and the shipped chain are the same chain. The two hinge stops are
-    /// POSITIVE magnitudes in RADIANS (the spec converts from the authored degrees); inward is
-    /// the wrap direction.
-    link_mass: f32,
-    hinge_torque: f32,
-    link_angle_inward: f32,
-    link_angle_outward: f32,
 }
 
 // --- Test course (module-level so the reset + trench floors can reference the trenches) ---
@@ -221,19 +198,14 @@ pub(super) fn slope_pad_pose() -> (Vec3, Quat) {
 }
 
 // --- Belt contact model. The station SPACING is the track's own link pitch (`geom.pitch`) and the
-// belt LENGTH is the material loop (`geom.belt_len()` = pitch × link_count) — both derived, neither
-// authored here any more. Because every coefficient below is **per metre of belt**, resolution and
-// total force are independent: a different pitch changes only how finely the loop is sampled (the
-// fix for "finer spacing launched the rig"). The old `TRACK_SLACK` is gone with them: slack is no
-// longer a budget you add to a taut wrap, it is what the authored link count leaves over
-// (`belt_len − taut_perimeter`, reported by `RigGeom::window`). ---
+// belt LENGTH is the material loop (`geom.belt_len()` = pitch × link_count) — both derived. Because
+// every coefficient below is **per metre of belt**, resolution and total force are independent: a
+// different pitch changes only how finely the loop is sampled. Slack is not a budget added to a taut
+// wrap either — it is what the authored link count leaves over (`belt_len − taut_perimeter`,
+// reported by `RigGeom::window`). ---
 /// Downward ray length used to find ground just beneath each station (m); also the sink at which
 /// support saturates.
 const CONTACT_PROBE: f32 = 0.5;
-
-/// Arc-length spacing (m) for the *drawn* belt spline: fine enough that a bump between two wheels is
-/// sampled so the terrain-conform can raise the line onto it (finer = smoother drape, more rays).
-const BELT_DRAW_SPACING: f32 = 0.1;
 
 // --- Drive: belt-speed / slip model. Each track has a belt *speed*; friction comes from the slip
 // between belt and ground, so wheelspin, skid, engine-braking, hill-hold, and top speed all emerge.
@@ -250,64 +222,14 @@ const MU: f32 = 0.9;
 // --- Wheels carry NO force: the belt is the *sole* ground-contact system (carries the tank,
 // tractions, does walls/gaps). The VISUAL data direction is wheels-first
 // (`articulate_wheels_field` reads the terrain field directly, then the view fits the belt
-// around the wheels — ground → wheels → belt, acyclic; the step-21 belt-first order was circular
-// and the root of the wrong-side captures).
+// around the wheels — ground → wheels → belt, acyclic; a belt-first order is circular).
 //
-// Wheel smoothing is asymmetric and physical, replacing the step-21b critically-damped spring
-// (explicit damping — divergent at 60 fps with 2ωΔt = 3, and smoothing the rise was wrong
-// anyway: terrain forcing a wheel up is kinematic, lag reads as the board entering the wheel):
-// a RISE is instant, a FALL is ballistic (gravity-limited). Zero tuning constants. The cosmetic
+// Wheel smoothing is asymmetric and physical: a RISE is instant, a FALL is ballistic
+// (gravity-limited). Zero tuning constants — smoothing the rise would be wrong anyway, because
+// terrain forcing a wheel up is kinematic and lag there reads as the board entering the wheel. The cosmetic
 // travel spans the physical CONTACT ENVELOPE — up to the bump stop, down to the chain-clamped
 // droop ([`SuspensionParams::bump_stop`] and `RigGeom::droop_travel(..).effective`, wired in
-// `model4::articulate_wheels_field`) — not an arbitrary clamp. ---
-
-/// The track-view A/B (`V`): the step-22 stateless kinematic wrap (this sandbox's default) vs the
-/// step-24 route chain — same sim, same terrain, flip live and feel the difference. The chain WON
-/// the feel check and SHIPPED as the game's view (`track::view` steps `ChainState` every frame);
-/// the wrap stays the sandbox-local default and the chain's live A/B partner here. Both are
-/// permanent — neither this toggle nor either view is awaiting deletion.
-#[derive(Resource)]
-struct TrackViewMode {
-    kinematic: bool,
-}
-
-impl Default for TrackViewMode {
-    fn default() -> Self {
-        Self { kinematic: true }
-    }
-}
-
-/// Run condition: the kinematic-wrap view (wheels-first data direction).
-fn view_kinematic(view: Res<TrackViewMode>) -> bool {
-    view.kinematic
-}
-
-/// Run condition: the route-chain view (the A/B partner).
-fn view_chain(view: Res<TrackViewMode>) -> bool {
-    !view.kinematic
-}
-
-/// `V` flips the track view live (kinematic wrap ↔ route chain). The chain state is cleared so
-/// the incoming chain solves fresh instead of waking a stale configuration.
-fn toggle_view_mode(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut view: ResMut<TrackViewMode>,
-    mut route_chain: ResMut<RouteChain>,
-) {
-    if !keys.just_pressed(KeyCode::KeyV) {
-        return;
-    }
-    view.kinematic = !view.kinematic;
-    *route_chain = RouteChain::default();
-    info!(
-        "track view → {}",
-        if view.kinematic {
-            "kinematic wrap (step 22)"
-        } else {
-            "route-chain (step 24: route tube, authored pin friction, pinch fuses)"
-        }
-    );
-}
+// `belt::articulate_wheels_field`) — not an arbitrary clamp. ---
 
 /// A wheel's role in the running gear. The sprocket (front) and idler (rear) anchor the belt loop
 /// and carry no ground load; the road wheels are the suspension/contact stations.
@@ -336,9 +258,6 @@ struct Suspension {
     pivot_local: Vec3,
     dy: f32,
     dvel: f32,
-    /// The raw lift target this frame (what the terrain/belt demands) — recorded so the harness
-    /// can measure the fall lag directly.
-    target: f32,
 }
 
 /// One station of the conformed belt: its hull-local side-plane position on the rigid reference loop
@@ -350,8 +269,8 @@ struct BeltSample {
 }
 
 /// Each side's conformed belt this frame — the belt path fitted around the articulated wheels and
-/// conformed to terrain, in loop order. Built once per frame by the active view system
-/// (`conform_belts_field` / `conform_belts_field_chain`); the drawn spline is exactly this.
+/// conformed to terrain, in loop order. Built once per frame by the view system
+/// (`conform_belts_field`); the drawn spline is exactly this.
 #[derive(Resource, Default)]
 struct ConformedBelts(PerSide<Vec<BeltSample>>);
 
@@ -378,13 +297,7 @@ pub(crate) struct Hull;
 /// bump-stop reserve and touches nothing. Marked so [`refresh_hard_stops`] can despawn and rebuild it
 /// whenever a retune moves the geometry it was cut from.
 #[derive(Component)]
-struct HardStop {
-    #[expect(
-        dead_code,
-        reason = "identifies the side for debugging / future per-side queries"
-    )]
-    side: Side,
-}
+struct HardStop;
 
 /// The free-fly inspection camera (own copy, like `armor_sandbox`'s).
 #[derive(Component)]
@@ -399,10 +312,10 @@ pub fn plugin(app: &mut App) {
         // The suspension cast/route/grip-column overlay + its readout panel. Self-gated on
         // `RigGeom` and on a `Hull` existing, so it simply no-ops on the pre-build frames.
         .add_plugins(suspension_viz::plugin)
-        // The instanced shoes (`=`). Self-gated on `RigGeom` + the glb template, so it no-ops on
+        // The instanced shoes. Self-gated on `RigGeom` + the glb template, so it no-ops on
         // the pre-build frames exactly like the overlay does.
         .add_plugins(link_view::plugin)
-        // The driven running gear (`F9`). Self-gated on `RigGeom` + a bound glb node, so it no-ops
+        // The driven running gear. Self-gated on `RigGeom` + a bound glb node, so it no-ops
         // on the pre-build frames like the other two view layers.
         .add_plugins(wheel_view::plugin)
         // Semantic mesh layering: the hull's solid/x-ray/hidden loop and the collider/ballistic
@@ -428,10 +341,13 @@ pub fn plugin(app: &mut App) {
         .init_resource::<BeltPhase>()
         .init_resource::<ConformedBelts>()
         .init_resource::<VizLayers>()
-        .init_resource::<ChainReference>()
+        .init_resource::<TautReference>()
         .init_resource::<TerrainField>()
-        .init_resource::<RouteChain>()
-        .init_resource::<TrackViewMode>()
+        // The kinematic wrap's per-side filter memory — `conform_belts_field` owns the mutation,
+        // the reseat paths drop it. There is no config beside it: the feel tiers are unconditional
+        // parameter-free laws.
+        .init_resource::<WrapMemory>()
+        .init_resource::<ViewPerf>()
         .init_resource::<RigSuspension>()
         // Panel↔keyboard shared seams: the reset trigger and the egui input-capture flags. Always
         // present (default false) so the driving/camera run-conditions compile and behave without
@@ -471,22 +387,17 @@ pub fn plugin(app: &mut App) {
         .add_systems(
             Update,
             (
-                // The visual chain, in data order — wheels-FIRST in BOTH views (ground → wheels →
-                // belt, acyclic): the wheels read the field, then the wrap fits — or the
-                // route-chain solves — around them (step 23: the chain↔wheel circular dependency
-                // is gone). The stateful pieces gate on `sim_running` like the physics — Esc
-                // pauses Avian's clock but NOT the Update schedule, so ungated they kept easing
-                // wheels / re-solving the chain against a frozen sim ("deforms while paused" —
-                // the second clock). The draw systems stay ungated: gizmos are immediate-mode and
-                // must redraw the frozen state.
+                // The visual pipeline, in data order — wheels FIRST (ground → wheels → belt,
+                // acyclic): the wheels read the field, then the wrap fits around them. A
+                // belt-first order is circular.
+                // The stateful pieces gate on `sim_running` like the physics — Esc pauses Avian's
+                // clock but NOT the Update schedule, so ungated they kept easing wheels / advancing
+                // the wrap's filter memory against a frozen sim ("deforms while paused" — the
+                // second clock). The draw systems stay ungated: gizmos are immediate-mode and must
+                // redraw the frozen state.
                 (
                     articulate_wheels_field.run_if(sim_running),
-                    conform_belts_field
-                        .run_if(view_kinematic)
-                        .run_if(sim_running),
-                    conform_belts_field_chain
-                        .run_if(view_chain)
-                        .run_if(sim_running),
+                    conform_belts_field.run_if(sim_running),
                     draw_rig_gizmos,
                 )
                     .chain(),
@@ -521,7 +432,6 @@ pub fn plugin(app: &mut App) {
                     .run_if(cursor_locked)
                     .run_if(not(panel_capturing)),
                 read_drive_input.run_if(not(panel_capturing)),
-                toggle_view_mode,
                 toggle_pause,
                 // The mesh/collider visibility mirrors + the reference-ring draw. The layer TOGGLES
                 // moved to the egui panel (Layers section); these systems still read the same
@@ -535,7 +445,7 @@ pub fn plugin(app: &mut App) {
                 // Asserting the state every frame is what makes the toggle authoritative.
                 apply_mesh_visibility,
                 sync_collider_gizmos.run_if(resource_changed::<VizLayers>),
-                draw_chain_reference,
+                draw_taut_reference,
             ),
         );
 
@@ -648,9 +558,13 @@ impl BeltGripElements {
 }
 
 /// The active transmission adapter (harness `trans=` key; `T` or the panel's Model selector cycle
-/// live). Default: the governor, the adapter every capture runs without an explicit `trans=`.
+/// live). `None` ONLY on the pre-rig frames: [`build_rig`] seeds it from the SPEC's declared
+/// `transmission.architecture`, so a bare sandbox/harness run sims the same drivetrain the
+/// shipped tank does — the old implicit Governor default silently A/B'd against the wrong
+/// transmission. Every sim consumer runs behind the `RigGeom` gate, which lands in the same
+/// command flush as the seed, so no tick ever executes on `None`.
 #[derive(Resource, Default)]
-struct TransSwitch(crate::track::transmission::TransmissionMode);
+struct TransSwitch(Option<crate::track::transmission::TransmissionMode>);
 
 /// The joint transmission's state (gear, shift countdown, steering detent, direction) — the
 /// sandbox analogue of the game's `TankTransmission` component. Reset with the rig and on
@@ -672,11 +586,16 @@ fn toggle_trans_mode(keys: Res<ButtonInput<KeyCode>>, mut switch: ResMut<TransSw
     if !keys.just_pressed(KeyCode::KeyT) {
         return;
     }
-    switch.0 = match switch.0 {
+    // Behind the `RigGeom` gate the switch is always seeded; the `else` is unreachable belt
+    // and suspenders, not a hidden default.
+    let Some(current) = switch.0 else {
+        return;
+    };
+    switch.0 = Some(match current {
         TransmissionMode::Governor => TransmissionMode::Hybrid,
         TransmissionMode::Hybrid => TransmissionMode::FixedRadii,
         TransmissionMode::FixedRadii => TransmissionMode::Governor,
-    };
+    });
 }
 
 /// Reset the transmission state whenever the adapter changes (from the `T` key or the panel): the
@@ -692,25 +611,28 @@ fn reset_trans_on_change(
     if switch.is_added() || !switch.is_changed() {
         return;
     }
+    let Some(mode) = switch.0 else {
+        return;
+    };
     *state = TransState(crate::track::transmission::TransmissionState::from_spec(
         &transmission.0,
     ));
-    info!("transmission → {}", switch.0.label());
+    info!("transmission → {}", mode.label());
 }
 
 /// Recalibrate the envelope law whenever its inputs move: a rig rebuild (`;`/`'`, `n`/`m`,
-/// `R`) or a suspension knob (`[`/`]`, `,`/`.`). Change-detection driven — the calibration
+/// `R`) or a suspension knob (the panel's Tune section). Change-detection driven — the calibration
 /// runs one contact pass per side, far too heavy for every tick and trivial on a knob turn.
 fn refresh_envelope(
     geom: Res<RigGeom>,
     suspension: Res<RigSuspension>,
     rig: Res<RigSpec>,
-    mut law: ResMut<model4::EnvelopeLaw>,
+    mut law: ResMut<belt::EnvelopeLaw>,
 ) {
     if !(geom.is_changed() || suspension.is_changed() || rig.is_changed()) {
         return;
     }
-    *law = model4::calibrate_envelope(&geom, &suspension.0, rig.weight_n, rig.engage_depth);
+    *law = belt::calibrate_envelope(&geom, &suspension.0, rig.weight_n, rig.engage_depth);
     info!(
         "envelope recalibrated: travel {:.1} mm ({}), k {:.0} kN/m per m, c {:.2} kN·s/m per m",
         law.free_travel * 1e3,
@@ -733,14 +655,11 @@ fn sim_running(paused: Res<Paused>) -> bool {
     !paused.0
 }
 
-/// Per-layer visibility switches for every visual element in the sandbox, each on its own key
-/// (the number row, plus `F9` for the one layer that arrived after the row ran out; the live map is
-/// the readout's CONTROLS page — `suspension_viz`).
+/// Per-layer visibility switches for every visual element in the sandbox, each independently
+/// toggleable from the [`panel`]'s Layers section.
 ///
-/// The defaults used to reproduce the pre-toggle look, which meant model + wheels + chain + outer +
-/// hubs + dots + normals all drew at once: the visual soup half of the unreadable screen. They are
-/// QUIET now — the tank and its conformed belt line, and nothing else. Every layer is still
-/// independently toggleable from the panel's Layers section; only the starting state moved.
+/// The boot defaults are QUIET — the tank and its shoes, and nothing else. Everything below that is
+/// a diagnostic you ask for; drawing them all at once is unreadable.
 ///
 /// `Copy + PartialEq` so the [`panel`] can edit a LOCAL copy behind its checkboxes and write the
 /// resource back only on a real change — the write-on-change discipline that keeps
@@ -751,21 +670,19 @@ struct VizLayers {
     /// ([`MeshState`]). Driven per-mesh by [`mesh_layers`], which tags each hull visual mesh and
     /// re-asserts its `Visibility` + material EVERY frame (write-on-change) — so a late writer on the
     /// model tree (the async glb scene finishing instantiation, a hot-reload re-spawning it, or the
-    /// deferred [`build_rig`] bringing the model up a frame after a panel edit) can no longer
-    /// resurrect a hidden model: the next frame puts it back. This was the old `1`-layer bug (an
-    /// edge-triggered mirror that lost every such race); the fix is the ballistics sandbox's
-    /// continuous-assert pattern. X-ray swaps a translucent material in (the suspension story reads
-    /// through the shell), which the flat on/off could not express.
+    /// deferred [`build_rig`] bringing the model up a frame after a panel edit) cannot resurrect a
+    /// hidden model: the next frame puts it back. THE INVARIANT: re-assert visibility every frame —
+    /// an edge-triggered mirror loses races to late `Visibility` writers. X-ray swaps a translucent
+    /// material in, so the suspension story reads through the shell.
     hull: MeshState,
     /// The asset's authored `*_Collider` proxy meshes — the two convex-hull backstops (`Hull_Collider`,
     /// `Turret_Collider`) rendered as translucent AMBER volumes (off → on-top → solid → x-ray). These
-    /// are the same glb meshes the raw `WorldAssetRoot` spawn instantiates; before this layer they
-    /// were part of the opaque dump. DISTINCT from [`Self::colliders`], which draws the AVIAN physics
-    /// collider WIREFRAMES via `PhysicsGizmos`.
+    /// are the same glb meshes the raw `WorldAssetRoot` spawn instantiates. DISTINCT from
+    /// [`Self::colliders`], which draws the AVIAN physics collider WIREFRAMES via `PhysicsGizmos`.
     collider_volumes: VolumeState,
     /// The asset's authored `*_Ballistic` armour/component meshes, rendered as translucent STEEL-BLUE
-    /// volumes (off → on-top → solid → x-ray). Render-only in this tool (the sandbox builds no
-    /// ballistic colliders); same glb meshes, previously part of the dump.
+    /// volumes (off → on-top → solid → x-ray). Render-only in this tool — the sandbox builds no
+    /// ballistic colliders.
     ballistic_volumes: VolumeState,
     /// The sandbox COURSE — the terrain slabs, obstacles, ramps and pads [`spawn_environment`] spawns
     /// at the scene root (everything NOT under the tank) — as a solid → x-ray → hidden loop
@@ -773,47 +690,42 @@ struct VizLayers {
     /// neutral ghost so the tank stays the subject; hidden clears the visual clutter for a
     /// running-gear/belt close-up. Visibility/material ONLY — the static terrain colliders (and the
     /// belt's analytic field) are untouched, so the physics is identical whatever this shows.
-    /// Default SOLID: the course is the ground the tank drives on, not a diagnostic. This is the fix
-    /// for the old bug where x-raying the hull also ghosted the world — the course meshes are
-    /// parent-less scene-root meshes that `mesh_layers`' walk used to mis-classify as hull.
+    /// Default SOLID: the course is the ground the tank drives on, not a diagnostic. It is a layer of
+    /// its own because the course meshes are parent-less scene-root meshes — classified by
+    /// [`mesh_layers`]' ancestry walk, not by name, so x-raying the hull cannot ghost the world.
     world: MeshState,
-    /// `2` — the wheel render meshes. LIVE again: the re-export lifted the wheel/sprocket/idler
-    /// nodes out to the scene root, so [`wheel_view`] binds them and this switch hides exactly the
-    /// running gear (verified on the shipped glb — the road wheels, sprockets and idlers vanish and
-    /// the shoes stay). It writes `Visible`/`Hidden` rather than `Inherited`, the same override the
-    /// shoes take, so "model off, running gear on" — the view for a tooth-mesh check — is a state
-    /// the layer can express the day the `1` layer above works again.
+    /// The wheel render meshes: the glb's wheel/sprocket/idler nodes live at the scene root, so
+    /// [`wheel_view`] binds them and this switch hides exactly the running gear. It writes
+    /// `Visible`/`Hidden` rather than `Inherited`, the same override the shoes take, so "model off,
+    /// running gear on" — the view for a tooth-mesh check — is a state the layer can express.
     wheels: bool,
-    /// `3` — the conformed belt/chain line (the pin line).
-    chain: bool,
-    /// `4` — the outer-face companion line.
+    /// The conformed belt line (the drawn pin line).
+    belt_line: bool,
+    /// The outer-face companion line.
     outer: bool,
-    /// `5` — the hub marker spheres.
+    /// The hub marker spheres.
     hubs: bool,
-    /// `6` — the contact dots (load-sized, slip-coloured).
+    /// The contact dots (load-sized, slip-coloured).
     dots: bool,
-    /// `7` — the contact-normal lines.
+    /// The contact-normal lines.
     normals: bool,
-    /// `8` — force vectors per contact: support (magenta) + traction (orange), N-scaled.
+    /// Force vectors per contact: support (magenta) + traction (orange), N-scaled.
     forces: bool,
-    /// `9` — the collocation stations at the *physics* ring (where the physics thinks the shoes
-    /// are, vs the drawn view).
+    /// The collocation stations at the *physics* ring (where the physics thinks the shoes are, vs
+    /// the drawn view).
     casts: bool,
-    /// `0` — Avian collider wireframes (hull box, drive-wheel backstops, terrain).
+    /// Avian collider wireframes (hull box, hard-stop prisms, terrain).
     colliders: bool,
-    /// `-` — the taut reference loop (the belt's rest path, vs the conformed/solved view).
+    /// The taut reference loop (the belt's rest path, vs the conformed/solved view).
     reference: bool,
-    /// `=` — the INSTANCED TRACK LINKS ([`link_view`]): the model's own shoe mesh laid on the belt
-    /// stations, one entity per material link. Continues the number row rather than joining the
-    /// function-key bank because that is what the number row IS here — the tank's render layers —
-    /// and this is the biggest of them. ON at boot: it is the track, not a diagnostic.
+    /// The INSTANCED TRACK LINKS ([`link_view`]): the model's own shoe mesh laid on the belt
+    /// stations, one entity per material link. ON at boot: it is the track, not a diagnostic.
     links: bool,
-    /// `F9` — DRIVE the running gear ([`wheel_view`]): suspension travel on the road-wheel nodes,
+    /// DRIVE the running gear ([`wheel_view`]): suspension travel on the road-wheel nodes,
     /// belt-derived spin on all of them, the sprocket tooth-locked to the belt phase. Off parks
-    /// every node at its authored pose, which is the A/B against the derived rest gear the `F1`/`F6`
-    /// overlays draw. NOT on the number row because the row is full — and because this is the one
-    /// switch here that changes MOTION rather than visibility. ON at boot: a tank whose wheels don't
-    /// turn is the bug, not the baseline.
+    /// every node at its authored pose — the A/B against the derived rest gear the suspension
+    /// overlay draws. The one switch here that changes MOTION rather than visibility. ON at boot: a
+    /// tank whose wheels don't turn is the bug, not the baseline.
     running_gear: bool,
 }
 
@@ -830,7 +742,7 @@ impl Default for VizLayers {
             world: MeshState::Solid,
             wheels: true,
             // Off at boot — the belt LINE is a diagnostic; the shoes (below) are the track.
-            chain: false,
+            belt_line: false,
             outer: false,
             hubs: false,
             dots: false,
@@ -859,13 +771,12 @@ impl Default for VizLayers {
 /// on the very frame it appears (before this system next runs); from then on this system re-asserts
 /// it every frame.
 ///
-/// Runs UNCONDITIONALLY, every frame — not gated on `resource_changed::<VizLayers>`. The gate was
-/// the `1`-layer bug: an edge-triggered mirror asserts the override only on the frame the toggle
-/// flips, so any writer that touches `Visibility` on the model tree AFTERWARDS wins until the next
-/// keypress — the async glb scene instantiation completing, a hot-reload re-instantiating the scene,
-/// or the deferred [`build_rig`] spawning a node a frame after an early toggle. The `set_if_neq`
-/// keeps the every-frame run cheap: it only actually writes (and so only trips visibility
-/// propagation) when the value truly changes, exactly like the ballistics sandbox's
+/// Runs UNCONDITIONALLY, every frame — NOT gated on `resource_changed::<VizLayers>`. Re-assert
+/// visibility every frame; an edge-triggered mirror loses races to late `Visibility` writers (the
+/// async glb scene instantiation completing, a hot-reload re-instantiating the scene, or the
+/// deferred [`build_rig`] spawning a node a frame after an early toggle). The `set_if_neq` keeps the
+/// every-frame run cheap: it only actually writes (and so only trips visibility propagation) when
+/// the value truly changes, exactly like the ballistics sandbox's
 /// [`crate::sandbox::apply_layer_visibility`].
 fn apply_mesh_visibility(
     viz: Res<VizLayers>,
@@ -890,16 +801,18 @@ fn sync_collider_gizmos(viz: Res<VizLayers>, mut store: ResMut<GizmoConfigStore>
     store.config_mut::<PhysicsGizmos>().0.enabled = viz.colliders;
 }
 
-/// The taut reference loop in world space — the belt's rest path around the articulated wheels.
-/// Written by the view systems, drawn by the `-` layer: belt-vs-reference deviation shows where
-/// terrain, slack, and whip hold the belt off its rest path.
+/// The taut reference loop in world space — the belt's rest path around the articulated wheels,
+/// built by the wrap on request ([`wrap::WrapInput::reference`](crate::track::wrap::WrapInput)).
+/// Written by [`conform_belts_field`], drawn by the `-` layer: belt-vs-reference deviation shows
+/// where terrain and slack hold the belt off its rest path. A DIAGNOSTIC overlay, not a view option
+/// — the game never asks the wrap to build it.
 #[derive(Resource, Default)]
-pub(super) struct ChainReference {
+pub(super) struct TautReference {
     pub(super) left: Vec<Vec3>,
     pub(super) right: Vec<Vec3>,
 }
 
-fn draw_chain_reference(mut gizmos: Gizmos, reference: Res<ChainReference>, viz: Res<VizLayers>) {
+fn draw_taut_reference(mut gizmos: Gizmos, reference: Res<TautReference>, viz: Res<VizLayers>) {
     if !viz.reference {
         return;
     }
@@ -1196,12 +1109,13 @@ fn build_rig(
     asset_server: Res<AssetServer>,
     mut suspension: ResMut<RigSuspension>,
     mut grip_elements: ResMut<BeltGripElements>,
+    mut trans_switch: ResMut<TransSwitch>,
 ) {
     let spec = &blueprint.spec;
     let track = &spec.track;
     // Seed the live knobs from the AUTHORED ride model — the same `track.suspension` block
     // the game's envelope calibration reads, so the sandbox boots as the shipped tank and
-    // the `[`/`]`/`,`/`.` knobs tune from there.
+    // the panel's Tune knobs move it from there.
     suspension.0 = track.suspension.params();
     // The two AUTHORED counts the rig owns; every other number below is measured or derived from
     // them. `teeth` sets the chord-exact sprocket pitch circle, `link_count` IS the material loop.
@@ -1213,7 +1127,7 @@ fn build_rig(
         &suspension.0,
     );
     let window = geom.window;
-    // No provenance branch: a failed marker read aborts in `model::refuse` rather than falling
+    // No provenance branch: a failed marker read aborts in `marker_model::refuse` rather than falling
     // back to the RON, so a rig that exists was measured off the glb by construction.
     info!(
         "rig: Tiger I (glb markers) — {} road wheels/side, pitch {:.4} m × {} links = {:.3} m loop \
@@ -1261,15 +1175,11 @@ fn build_rig(
         engine_force: track.powertrain.force,
         governor_gain: track.powertrain.governor_gain,
         belt_inertia: track.powertrain.inertia,
-        link_mass: track.link_mass,
-        hinge_torque: track.hinge_torque,
-        link_angle_inward: track.link_angle.inward(),
-        link_angle_outward: track.link_angle.outward(),
     });
 
     // The calibrated contact-envelope law, lands in the same command flush as `RigGeom` (the
     // force step reads both behind the one `resource_exists::<RigGeom>` gate).
-    commands.insert_resource(model4::calibrate_envelope(
+    commands.insert_resource(belt::calibrate_envelope(
         &geom,
         &suspension.0,
         spec.mass * derive::G,
@@ -1293,6 +1203,21 @@ fn build_rig(
         crate::track::transmission::TransmissionState::from_spec(&transmission.0),
     ));
     commands.insert_resource(transmission);
+    // Seed the adapter switch from the SPEC's declared architecture — the sandbox boots
+    // geared exactly like the shipped tank (the shared `TransmissionArchitecture::mode`
+    // mapping, so game and sandbox can never disagree on what a spec runs). A harness
+    // `trans=` key or a live `T`/panel flip overrides it EXPLICITLY afterwards; before this
+    // seed the switch is `None` and nothing sims (everything gates on `RigGeom`, which lands
+    // in this same command flush).
+    trans_switch.0 = Some(
+        track
+            .powertrain
+            .transmission
+            .as_ref()
+            .expect("the Tiger's transmission block is validated at bake")
+            .architecture
+            .mode(),
+    );
 
     // The pin belt IS the material loop now (see `PinBelt::for_rig`); the element slabs size from it
     // here rather than in a chained system — `step_side` never resizes at runtime (the fixed-size
@@ -1435,22 +1360,13 @@ fn build_rig(
                             pivot_local: centre,
                             dy: 0.0,
                             dvel: 0.0,
-                            target: 0.0,
                         },
                     ));
                 }
 
-                // Sprocket/idler data carriers for the hub-gizmo layer — NO colliders. The old
-                // minified backstop cylinders (`radius · 0.6`, spanning `plane_x ± width/2`)
-                // were retired when the RED hard-stop prism landed (`spawn_hard_stops`): the
-                // prism's end arcs ride the unsprung wheels' INNER (wheel-rim) surface — the
-                // full plate below stays the support penalty's dig-in band (the same masking
-                // hazard the 0.6 inset existed for, now solved once at the prism), and still
-                // ~0.14 m OUTSIDE where the cylinders began. The cylinders' one unshared strip
-                // — 16.9 mm inboard of the shoe's inboard face, an artefact of the symmetric
-                // `plane_x ± width/2` assumption — contains no track material and no course
-                // obstacle can reach it without hitting the prism first; phantom coverage at
-                // the wrong radius is not a backstop.
+                // Sprocket/idler data carriers for the hub-gizmo layer — NO colliders. The RED
+                // hard-stop prism (`spawn_hard_stops`) is the whole rig's penetration backstop,
+                // its end arcs riding the unsprung wheels' INNER (wheel-rim) surface.
                 for (kind, (centre, _radius)) in
                     [(WheelKind::Sprocket, sprocket), (WheelKind::Idler, idler)]
                 {
@@ -1468,9 +1384,8 @@ fn build_rig(
     // The RED hard-stop backstops — one convex-hull prism per side, cut from the compression-pose
     // INNER-surface (wheel-rim) wrap (see `RigGeom::hard_stop_polyline` — the full plate below it
     // is the support penalty's dig-in band). Spawned here so the rig is never up for a
-    // frame without its bottoming stop; [`refresh_hard_stops`] recuts them on every retune. Unlike
-    // the sprocket/idler cylinders above, this covers the whole belly the suspension bottoms onto —
-    // but it does NOT make those cylinders redundant (see the audit note at their spawn site).
+    // frame without its bottoming stop; [`refresh_hard_stops`] recuts them on every retune. It
+    // covers the whole belly the suspension bottoms onto — it is the rig's only penetration stop.
     spawn_hard_stops(&mut commands, hull, &geom, &suspension.0);
 
     // The authored counts as the panel/keyboard INTENT seam (see [`RigCounts`] / [`apply_rig_counts`]).
@@ -1579,7 +1494,7 @@ fn spawn_hard_stops(
             continue;
         };
         commands.spawn((
-            HardStop { side },
+            HardStop,
             collider,
             // The extruded points are ALREADY full hull-local, so identity — there is no glb node
             // pose to compose (unlike the authored `*_Collider` proxies, which carry their node's
@@ -1594,7 +1509,7 @@ fn spawn_hard_stops(
 
 /// Rebuild the red hard-stop colliders whenever the geometry they are cut from moves: a rig rebuild
 /// (`;`/`'`, `n`/`m`, `R` — [`tune_rig_counts`] commits with `*geom = next`, so `is_changed` fires)
-/// or the bump-stop knob (`,`/`.` on [`RigSuspension`], which sets the compression pose). The whole
+/// or the bump-stop knob ([`RigSuspension`], which sets the compression pose). The whole
 /// prism is despawned and recut rather than reshaped in place — a collider's convex hull is not a
 /// mutable field, and a retune is rare (a keypress), so the allocation is free. Mirrors
 /// [`refresh_envelope`]'s change-gate; unordered against [`tune_rig_counts`] like it, so a retune is
@@ -1615,9 +1530,9 @@ fn refresh_hard_stops(
     spawn_hard_stops(&mut commands, *hull, &geom, &suspension.0);
 }
 
-/// Every piece of belt state that is INDEXED BY the loop — its link count (the grip-element slabs,
-/// the chain's node array) or its travel phase (the advected ring, and the contacts/grip/dynamics
-/// that last tick's ring produced), as ONE system param.
+/// Every piece of belt state that is INDEXED BY the loop — its link count (the grip-element slabs)
+/// or its travel phase (the advected ring, the contacts/grip/dynamics that last tick's ring
+/// produced, and the view wrap's filter memory), as ONE system param.
 ///
 /// Bundled because there are two ways to invalidate exactly this set and they must agree:
 /// teleporting the rig ([`reset_rig`]) and re-lengthening the loop under it ([`tune_rig_counts`]).
@@ -1630,7 +1545,7 @@ struct BeltState<'w> {
     dynamics: ResMut<'w, SideDynamics>,
     grip: ResMut<'w, BeltGrip>,
     elements: ResMut<'w, BeltGripElements>,
-    chain: ResMut<'w, RouteChain>,
+    wrap: ResMut<'w, WrapMemory>,
 }
 
 impl BeltState<'_> {
@@ -1652,9 +1567,10 @@ impl BeltState<'_> {
         *self.grip = BeltGrip::default();
         // Pre-sized, never `default()` — the fixed-size invariant (see `build_rig`).
         *self.elements = BeltGripElements::sized(link_count);
-        // The solved chain is a configuration of a specific loop at a specific place; both events
-        // invalidate it, so clear it and let the solver cold-seed (the same reason `V` clears it).
-        *self.chain = RouteChain::default();
+        // The kinematic-wrap filter memory is a configuration of a specific pose and loop; both
+        // events invalidate it, so drop it and let the wrap re-init from the fresh state instead of
+        // settling in from stale cells.
+        self.wrap.reset();
     }
 }
 
@@ -1708,7 +1624,6 @@ fn reset_rig(
     for mut susp in &mut wheels {
         susp.dy = 0.0;
         susp.dvel = 0.0;
-        susp.target = 0.0;
     }
     info!("reset → {label} (z = {z:.1})");
 }
@@ -1717,7 +1632,7 @@ fn reset_rig(
 /// not taste: at the Tiger's 0.13 m pitch this is ±1.6 m of chain either side, which is enough to
 /// walk into the `Impossible` regime and see the verdict flip, and enough to hang a frankly-sloppy
 /// belt on the far side — while making "0 links" or "500 links" unreachable. The band is derived
-/// from the LIVE window, so softening the springs (`[`) widens it with the rig.
+/// from the LIVE window, so softening the springs widens it with the rig.
 ///
 /// Note the two ends mean different things. Below `n_min` the knob is walking into a genuinely
 /// invalid rig, on purpose, to show the fault. Above `n_droop` every count is VALID (springs limit
@@ -1912,7 +1827,7 @@ fn draw_rig_gizmos(
     }
 
     for side in Side::ALL {
-        if viz.chain {
+        if viz.belt_line {
             let mut world = belts.get(side).iter().map(|s| s.world);
             gizmos.linestrip(world.clone(), BELT_COLOR);
             if let (Some(a), Some(b)) = (world.next_back(), world.next()) {
@@ -1921,7 +1836,7 @@ fn draw_rig_gizmos(
         }
 
         // The conformed line is the *pin line* — draw the **outer face** (each sample offset by
-        // its local outward normal × t/2, from neighbour tangents of the solved chain) as a
+        // its local outward normal × t/2, from neighbour tangents of the drawn belt) as a
         // dimmer companion, so the shoe thickness reads: the dark line rides the ground, the
         // wheels ride the light one.
         if !viz.outer {
@@ -1960,7 +1875,7 @@ fn draw_contacts(
     contacts: Res<BeltContacts>,
     viz: Res<VizLayers>,
     geom: Res<RigGeom>,
-    law: Res<model4::EnvelopeLaw>,
+    law: Res<belt::EnvelopeLaw>,
 ) {
     if !(viz.dots || viz.normals || viz.forces) {
         return;
