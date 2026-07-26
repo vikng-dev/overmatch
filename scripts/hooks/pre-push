@@ -10,6 +10,13 @@
 set -e
 cd "$(git rev-parse --show-toplevel)"
 
+# git-lfs upload. `core.hooksPath` REPLACES .git/hooks, so the hook git-lfs installs there
+# never runs — without this line a push ships the pointers but not the objects, and CI dies
+# at "Git LFS pull (R2)" with "object not found" (the alpha.9 outage). First, before the
+# cargo lanes: `git lfs pre-push` reads the ref list from STDIN, which must reach it intact.
+echo "pre-push ▸ git lfs pre-push"
+git lfs pre-push "$@"
+
 echo "pre-push ▸ cargo fmt --all --check"
 cargo fmt --all --check >/dev/null || { printf '\033[31m  unformatted\033[0m — run: cargo fmt --all\n' >&2; exit 1; }
 

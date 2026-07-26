@@ -2,5 +2,5 @@
 # never compile into the shipping client), and cargo does not auto-enable required features —
 # these aliases make the invocation one word instead of a flag to remember.
 [alias]
-sandbox = "run --bin track_sandbox --features dev_ui"
+track = "run --bin track_sandbox --features dev_ui"
 armor = "run --bin armor_sandbox --features dev_ui"
