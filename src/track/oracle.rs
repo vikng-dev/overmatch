@@ -2,7 +2,7 @@
 //! made of (architecture §5).
 //!
 //! The trait is deliberately scalar-and-minimal today: `depth_along` is the one query every
-//! consumer (belt physics, chain contacts, wheel articulation, route conform) actually makes,
+//! consumer (belt physics, wheel articulation, the wrap view's terrain conform) actually makes,
 //! and the sandbox proved its semantics (exact analytic first hit, C0, deterministic). The
 //! architecture doc records the growth path — batched `sample_into`, hit normals, surface
 //! material, `covered` for streamed terrain — to be added WITH their first consumer, not
@@ -15,6 +15,8 @@
 //! with its first consumer.
 
 use bevy::math::{Mat3, Quat, Vec2, Vec3};
+
+use crate::terrain_grid::HeightGrid;
 
 /// A terrain query surface for track consumers. Implementations must be pose-continuous and
 /// deterministic (fixed evaluation order, pure arithmetic) — the belt physics samples this.
@@ -38,6 +40,17 @@ pub const FIELD_BURY: f32 = 2.0;
 
 /// Z-extent (m) of one broadphase bucket.
 const FIELD_CELL: f32 = 4.0;
+
+/// Fixed segment count of the coarse sign-change scan the height-term intersect runs over
+/// `[0, t_max]` before bisecting (see `depth_along`): the first segment whose far end reads
+/// `f ≤ 0` brackets the FIRST surface crossing, provided the surface does not cross back and
+/// forth within one segment (t_max = 2·reach = 1 m for the suspension's 0.5 m probes, so a
+/// segment is 12.5 cm of ray — far below any terrain feature the 2.5 m grid can express).
+const HEIGHT_SCAN_SEGMENTS: u32 = 8;
+
+/// Fixed bisection count refining the bracketed crossing: interval shrinks by 2⁻²⁴ — sub-µm on
+/// a 1 m probe, and DETERMINISTIC (no convergence test, no adaptive iteration).
+const HEIGHT_BISECT_STEPS: u32 = 24;
 
 /// One authored terrain block (world-space oriented box, bottom extended by [`FIELD_BURY`]).
 pub struct TerrainBlock {
@@ -212,6 +225,11 @@ pub struct BlockField {
     grid: Vec<Vec<u16>>,
     z0: f32,
     cell: f32,
+    /// The heightmap ground term: when present, the ground is the piecewise-triangular surface
+    /// `h(x, z)` — the SAME surface the collider and render mesh carry (the ONE-SURFACE
+    /// invariant, `terrain_grid` module doc) — instead of the flat-slab block the old world
+    /// authored. Blocks still union on top.
+    height: Option<HeightGrid>,
 }
 
 impl BlockField {
@@ -244,7 +262,15 @@ impl BlockField {
             grid,
             z0,
             cell: FIELD_CELL,
+            height: None,
         }
+    }
+
+    /// Attach (or clear) the heightmap ground term. Builder-style so the sandbox's existing
+    /// `BlockField::new(..)` call sites stay valid without a signature change.
+    pub fn with_height(mut self, height: Option<HeightGrid>) -> Self {
+        self.height = height;
+        self
     }
 
     /// Dump the exact constructed oracle, including derived transforms and broadphase layout.
@@ -268,6 +294,13 @@ impl BlockField {
                 &format!("oracle.blocks[{index}].bounds_hi"),
                 self.bounds[index].1,
             );
+        }
+        out.u32("oracle.height.present", u32::from(self.height.is_some()));
+        if let Some(grid) = &self.height {
+            out.u32("oracle.height.size", grid.size());
+            out.u32("oracle.height.byte_sum", grid.byte_sum());
+            out.f32("oracle.height.world_size", crate::terrain_grid::WORLD_SIZE);
+            out.f32("oracle.height.range", crate::terrain_grid::HEIGHT_RANGE);
         }
         out.u32("oracle.grid.bucket_count", self.grid.len() as u32);
         for (bucket, indices) in self.grid.iter().enumerate() {
@@ -307,10 +340,18 @@ impl BlockField {
     /// blocks; full fold — a correct GLOBAL nearest distance can't be bucket-pruned.
     /// Offline/scan use only; hot paths use [`TerrainOracle::depth_along`].
     pub fn sdf(&self, p: Vec3) -> f32 {
-        self.blocks
+        let blocks = self
+            .blocks
             .iter()
             .map(|b| block_sdf(p, b))
-            .fold(f32::INFINITY, f32::min)
+            .fold(f32::INFINITY, f32::min);
+        match &self.height {
+            // Vertical distance to the height surface: exact on flat ground, a conservative
+            // bound on slopes — adequate for this fn's scan/diagnostic role (hot paths ray-cast
+            // via `depth_along`).
+            Some(grid) => blocks.min(p.y - grid.height_at(p.x, p.z)),
+            None => blocks,
+        }
     }
 
     /// Signed EUCLIDEAN penetration of `p` (nearest-surface distance, capped at `reach`):
@@ -339,6 +380,51 @@ impl TerrainOracle for BlockField {
                 t = t.min(hit);
             }
         });
+        // The heightmap ground term: a FIXED-count bracketed bisection on
+        // f(t) = ray_y(t) − h(ray_xz(t)) over [0, t_max] (deterministic — fixed iteration
+        // budget, pure arithmetic, no adaptive convergence test). The old 3-step reprojection
+        // intersect (t ← (h(xz(t)) − o.y)/o_y) has iteration derivative −slope/|dir slope| that
+        // reaches −1 on a 45° slope probed along the slope normal: it OSCILLATES between two
+        // points forever and returns non-intersections. Bisection cannot oscillate: f(0) > 0 is
+        // guaranteed here (the buried branch above caught f(0) ≤ 0), a coarse fixed scan finds
+        // the FIRST sign change (so a ray that pierces a bump and re-emerges still reports the
+        // ENTRY, and rays of any direction — even horizontal ones into rising ground — are
+        // handled), and HEIGHT_BISECT_STEPS halvings pin the crossing to t_max/2²⁴ ≈ 60 nm.
+        // No sign change over the whole interval = no hit. Composes with the blocks by the same
+        // min-entry union rule.
+        if let Some(grid) = &self.height {
+            if origin.y <= grid.height_at(origin.x, origin.z) {
+                // Origin under the surface: saturated, like a buried block origin.
+                buried = true;
+            } else {
+                let f = |s: f32| {
+                    let p = origin + out * s;
+                    p.y - grid.height_at(p.x, p.z)
+                };
+                let mut bracket = None;
+                let mut prev = 0.0_f32;
+                for k in 1..=HEIGHT_SCAN_SEGMENTS {
+                    let tk = t_max * (k as f32 / HEIGHT_SCAN_SEGMENTS as f32);
+                    if f(tk) <= 0.0 {
+                        bracket = Some((prev, tk));
+                        break;
+                    }
+                    prev = tk;
+                }
+                if let Some((mut lo, mut hi)) = bracket {
+                    for _ in 0..HEIGHT_BISECT_STEPS {
+                        let mid = 0.5 * (lo + hi);
+                        if f(mid) <= 0.0 {
+                            hi = mid;
+                        } else {
+                            lo = mid;
+                        }
+                    }
+                    // `hi` is the tightest bound with f(hi) ≤ 0: the first crossing.
+                    t = t.min(hi);
+                }
+            }
+        }
         if buried {
             return reach;
         }
@@ -372,6 +458,120 @@ mod tests {
         // Buried origin (station deep inside): saturates to the reach.
         let d = field.depth_along(Vec3::new(0.0, -0.9, 0.0), down, 0.5);
         assert_eq!(d, 0.5, "buried probe must saturate");
+    }
+
+    /// A height grid whose samples come from `f(i, j)` in 8-bit terms (normalized to meters
+    /// like the decoder; see `terrain_grid` for the mapping).
+    fn height_grid(size: u32, f: impl Fn(u32, u32) -> u8) -> HeightGrid {
+        use crate::terrain_grid::HEIGHT_RANGE;
+        let mut samples = Vec::with_capacity((size * size) as usize);
+        for j in 0..size {
+            for i in 0..size {
+                samples.push(f32::from(f(i, j)) * (HEIGHT_RANGE / 255.0));
+            }
+        }
+        HeightGrid::new(samples.into(), size)
+    }
+
+    #[test]
+    fn height_term_reads_flat_ground_like_the_slab() {
+        use crate::terrain_grid::HEIGHT_RANGE;
+        // All samples 51 → a flat surface at 51/255 · HEIGHT_RANGE = 0.2 · HEIGHT_RANGE.
+        let h = 51.0 / 255.0 * HEIGHT_RANGE;
+        let field = BlockField::new(vec![]).with_height(Some(height_grid(4, |_, _| 51)));
+        let down = Vec3::NEG_Y;
+        // 10 cm above the surface: 10 cm of clearance.
+        let d = field.depth_along(Vec3::new(3.0, h + 0.10, -7.0), down, 0.5);
+        assert!((d + 0.10).abs() < 1e-3, "clearance read {d}");
+        // 5 cm past the surface: 5 cm of penetration.
+        let d = field.depth_along(Vec3::new(-20.0, h - 0.05, 11.0), down, 0.5);
+        assert!((d - 0.05).abs() < 1e-3, "penetration read {d}");
+        // Buried origin (station deep under the surface): saturates to the reach.
+        let d = field.depth_along(Vec3::new(0.0, h - 0.9, 0.0), down, 0.5);
+        assert_eq!(d, 0.5, "buried probe must saturate");
+        // Far above: full clearance floor (reach − t_max = −reach).
+        let d = field.depth_along(Vec3::new(0.0, h + 50.0, 0.0), down, 0.5);
+        assert_eq!(d, -0.5);
+    }
+
+    #[test]
+    fn height_term_reads_a_known_slope_exactly() {
+        use crate::terrain_grid::{HEIGHT_RANGE, WORLD_HALF_EXTENT};
+        // A pure x-ramp: h(x) = (x + half) / world · HEIGHT_RANGE, linear — the triangular
+        // surface IS the plane, so a vertical probe must read h(x) − station.y exactly.
+        let field = BlockField::new(vec![])
+            .with_height(Some(height_grid(2, |i, _| if i == 1 { 255 } else { 0 })));
+        let down = Vec3::NEG_Y;
+        for x in [-900.0_f32, -100.0, 0.0, 333.0, 1200.0] {
+            let h = (x + WORLD_HALF_EXTENT) / (2.0 * WORLD_HALF_EXTENT) * HEIGHT_RANGE;
+            let d = field.depth_along(Vec3::new(x, h - 0.07, 5.0), down, 0.5);
+            assert!(
+                (d - 0.07).abs() < 1e-3,
+                "slope penetration at x={x}: read {d}"
+            );
+            let d = field.depth_along(Vec3::new(x, h + 0.12, -5.0), down, 0.5);
+            assert!(
+                (d + 0.12).abs() < 1e-3,
+                "slope clearance at x={x}: read {d}"
+            );
+        }
+    }
+
+    /// The steep-slope case the OLD 3-step reprojection intersect could not solve: on a 45°
+    /// slope probed along the slope NORMAL, the reprojection map t ← (h(xz(t)) − o.y)/o_y has
+    /// derivative exactly −1 — it oscillates between two points forever and returns whatever
+    /// the third iterate happened to be (analytic divergence factor −1). The bracketed
+    /// bisection must read the exact plane distance.
+    #[test]
+    fn slope_normal_probe_on_a_45_degree_slope_reads_exact_depth() {
+        // h(x) = x: a 45° plane through the origin. `HeightGrid::new` takes raw meters, so the
+        // PNG's 0..HEIGHT_RANGE bound does not constrain a test grid.
+        use crate::terrain_grid::WORLD_HALF_EXTENT;
+        let size = 3u32;
+        let mut samples = Vec::with_capacity((size * size) as usize);
+        for _j in 0..size {
+            for i in 0..size {
+                samples.push(-WORLD_HALF_EXTENT + i as f32 * WORLD_HALF_EXTENT);
+            }
+        }
+        let field =
+            BlockField::new(vec![]).with_height(Some(HeightGrid::new(samples.into(), size)));
+        // Outward probe direction = downhill surface normal, exactly the divergent case.
+        let normal = Vec3::new(-1.0, 1.0, 0.0).normalize();
+        let out = -normal;
+        let surface = Vec3::new(0.0, 0.0, 5.0); // on the plane (h(0) = 0)
+        // 7 cm past the surface along the probe: exactly 7 cm of penetration.
+        let d = field.depth_along(surface + out * 0.07, out, 0.5);
+        assert!((d - 0.07).abs() < 1e-3, "45° penetration read {d}");
+        // 12 cm of clearance.
+        let d = field.depth_along(surface - out * 0.12, out, 0.5);
+        assert!((d + 0.12).abs() < 1e-3, "45° clearance read {d}");
+        // Deeply buried station: saturates like any buried origin.
+        let d = field.depth_along(surface + out * 0.9, out, 0.5);
+        assert_eq!(d, 0.5, "buried 45° probe must saturate");
+        // Far off the slope: full clearance floor.
+        let d = field.depth_along(surface - out * 50.0, out, 0.5);
+        assert_eq!(d, -0.5);
+    }
+
+    #[test]
+    fn blocks_still_union_on_top_of_the_height_term() {
+        // Flat height ground at 0.2·40 = 8 m, plus a block whose top sits 1 m above it: a probe
+        // over the block reads the block's top; a probe beside it reads the ground.
+        let ground = 51.0 / 255.0 * crate::terrain_grid::HEIGHT_RANGE;
+        let field = BlockField::new(vec![TerrainBlock::new(
+            Vec3::new(0.0, ground + 0.5, 0.0),
+            Quat::IDENTITY,
+            Vec3::new(4.0, 1.0, 4.0),
+        )])
+        .with_height(Some(height_grid(4, |_, _| 51)));
+        let down = Vec3::NEG_Y;
+        // 10 cm above the block top (ground + 1): reads clearance to the BLOCK, not the ground.
+        let d = field.depth_along(Vec3::new(0.0, ground + 1.10, 0.0), down, 0.5);
+        assert!((d + 0.10).abs() < 2e-2, "block-top clearance read {d}");
+        // Beside the block: the ground term answers.
+        let d = field.depth_along(Vec3::new(30.0, ground - 0.05, 0.0), down, 0.5);
+        assert!((d - 0.05).abs() < 1e-3, "ground penetration read {d}");
     }
 
     #[test]

@@ -84,11 +84,14 @@ mod sight;
 mod spec;
 mod state;
 mod tank;
+/// The world heightmap: PNG → shared height grid (oracle ground term, heightfield collider,
+/// client render mesh, server spawn heights). See the module doc for the mapping constants.
+pub mod terrain_grid;
 /// The jitter-trace recorder (`SPIKE_TRACE=<path>`): an env-gated JSONL log of rendered vs. simulated
 /// pose, rollback events, and correction decay — passive instrumentation for the MP hull-jitter
 /// investigation. Off (zero cost) unless the env var is set. Net-specific rows are `#[cfg(net)]`.
 mod trace;
-/// The track model's pure core (route/oracle/chain math) — consumed by the sandbox lab and, in
+/// The track model's pure core (route/oracle/wrap math) — consumed by the sandbox lab and, in
 /// phase A, the game's track view. See `.agents/docs/design/track-model/architecture.md`.
 pub mod track;
 /// The track-model sandbox (`bin/track_sandbox`) — the single dev tool for the track/suspension
@@ -487,8 +490,8 @@ impl Plugin for ClientPlugin {
             crew_ui::plugin,
             // Impact dust puffs — every landed round reads at the target (view-only, ADR-0014).
             vfx::plugin,
-            // Live tracks: the simulated chain + wheel/sprocket animation on the presented pose
-            // (view-only, ADR-0014 — the server never mounts this).
+            // Live tracks: the kinematic-wrap belt + wheel/sprocket animation on the presented
+            // pose (view-only, ADR-0014 — the server never mounts this).
             track::view_plugin,
         ));
         app.add_plugins(drive_hud::plugin);
@@ -543,7 +546,13 @@ impl Plugin for NetClientPlugin {
             // `net::render_error` orders the set after its correction smoothing).
             track::view_plugin,
         ));
-        app.add_plugins(drive_hud::plugin);
+        // (Separate call: the tuple above is at bevy's 15-plugin tuple arity limit.)
+        app.add_plugins((
+            drive_hud::plugin,
+            // The `M` spawn map — net-client only: a top view of the terrain whose click asks the
+            // authority to place this player's NEXT respawn there (nothing teleports now).
+            net::spawn_map_plugin,
+        ));
 
         // Physics visualization + debug toggles, same pair `ClientPlugin` mounts for SP
         // (`G` = force arrows + collider wireframes, `X` = x-ray, `F` = camera detach). View-only:
@@ -605,10 +614,11 @@ pub fn run_offline() {
     // Same policy as the net client: never drop below the 64 Hz tick when unfocused.
     app.insert_resource(bevy::winit::WinitSettings::continuous());
     app.add_plugins(GamePlugin);
-    // The offline transmission feel test (phase 2.5): default the Tiger's authored
-    // architecture (L600 fixed-radius regenerative — per-vehicle SPEC eventually; the
-    // resource is the interim dial). `T` cycles governor → hybrid → L600 live; the shared F3
-    // drive panel names the selected adapter while the diagnostic view is open.
+    // The offline transmission feel test (phase 2.5): an EXPLICIT override of the spec's
+    // declared architecture (which is authoritative and mandatory since REV 14), seeded to
+    // the Tiger's own L600 so a bare offline boot matches the shipped spec. `T` cycles
+    // governor → hybrid → L600 live; the shared F3 drive panel names the selected adapter
+    // while the diagnostic view is open.
     app.insert_resource(track::sim::TransmissionFeelTest(
         track::transmission::TransmissionMode::FixedRadii,
     ));

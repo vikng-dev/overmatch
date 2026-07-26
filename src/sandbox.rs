@@ -243,6 +243,9 @@ struct HullMesh {
 }
 
 pub fn plugin(app: &mut App) {
+    // The armor sandbox stays on the flat slab + authored blocks: its target placement and shot
+    // scripting assume y=0 ground, and a dev tool should not shift when the game's heightmap does.
+    app.insert_resource(crate::terrain_grid::ForceFlatWorld);
     // The sandbox's own App composition — physics + the shared shell mechanic + a battlefield to
     // hit. Deliberately omits driving, aim, the game cameras, sight, and shooting.
     app.add_plugins((

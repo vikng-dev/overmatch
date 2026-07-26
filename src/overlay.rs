@@ -15,7 +15,8 @@ use crate::ui_font::UiFonts;
 /// The client's full-screen overlays, ordered by PRIORITY via the derived `Ord`. The variants are
 /// declared LOW→HIGH, so the greatest is the top layer: `ConnectStatus` is the maximum (a connect /
 /// reconnect takes over everything), then `Menu` (an open menu is the top INTERACTIVE layer — Esc
-/// closes it, R can't respawn under it), then `Death`, then `ViewDead` at the bottom.
+/// closes it, R can't respawn under it), then `SpawnMap`, then `Death`, then `ViewDead` at the
+/// bottom.
 ///
 /// Priority is deliberately DISTINCT from [`Overlay::zindex`] (the physical draw order): `Menu`
 /// outranks `Death` in priority (so the menu, not the death screen, owns the scrim while both are
@@ -28,6 +29,10 @@ pub(crate) enum Overlay {
     ViewDead,
     /// The player's own tank is knocked out: "YOU DIED / press R".
     Death,
+    /// The `M` spawn map: a top view of the terrain whose click picks where the NEXT respawn lands.
+    /// Above `Death` because it is opened FROM the death screen (pick where to come back, then press
+    /// R), below `Menu` so Esc still reaches the menu over it.
+    SpawnMap,
     /// The Esc / alt-tab cursor-release menu (the net stand-in for SP pause; the sim never stops).
     Menu,
     /// Not connected yet, or the in-game link dropped: "CONNECTING…" / "RECONNECTING…". Highest.
@@ -43,6 +48,7 @@ impl Overlay {
         match self {
             Overlay::ConnectStatus => 300,
             Overlay::Death => 200,
+            Overlay::SpawnMap => 150,
             Overlay::Menu => 100,
             Overlay::ViewDead => 50,
         }
@@ -53,13 +59,20 @@ impl Overlay {
     /// visible cursor over "CONNECTING…" is the honest state). Death and view-death do NOT block: the
     /// respawn key and the Lshift view switch both ride `PlayerInputSet`, which needs the cursor
     /// captured — the player is still "in" the tank, just with a dead station.
+    /// The spawn map blocks too, and must: picking a point needs a visible, free cursor, which is
+    /// exactly what a blocking overlay buys (the cursor owner releases, `feed_action_state` zeroes
+    /// the wire command, so the tank coasts to a stop instead of driving blind under the map).
     const fn blocks_input(self) -> bool {
-        matches!(self, Overlay::Menu | Overlay::ConnectStatus)
+        matches!(
+            self,
+            Overlay::Menu | Overlay::ConnectStatus | Overlay::SpawnMap
+        )
     }
 
     /// Whether Esc may dismiss this overlay. Only the menu: Death and ConnectStatus are NEVER
-    /// Esc-dismissed (you don't Esc away being dead or disconnected), and ViewDead clears on a crew
-    /// switch or a respawn, never on Esc.
+    /// Esc-dismissed (you don't Esc away being dead or disconnected), ViewDead clears on a crew
+    /// switch or a respawn, never on Esc, and the SpawnMap is closed by its own `M` toggle (so Esc
+    /// over the map opens the menu, exactly as it does over the death screen).
     const fn dismissable(self) -> bool {
         matches!(self, Overlay::Menu)
     }
@@ -115,6 +128,19 @@ pub(crate) fn input_blocked(overlays: &Overlays, window_focused: bool) -> bool {
 /// which layer it is dismissing.
 pub(crate) fn top_dismissable(overlays: &Overlays) -> Option<Overlay> {
     overlays.top().filter(|o| o.dismissable())
+}
+
+/// Whether `overlay` may be OPENED right now: only when nothing latched OUTRANKS it. CLOSING is
+/// never gated — an owner may always withdraw its own declaration, so a key that toggles an overlay
+/// stays able to dismiss what it opened.
+///
+/// This is the open-side generalization of [`esc_menu_target`]'s "never latch beneath an overlay that
+/// outranks you" rule. Without it, a toggle key pressed under a higher layer latches an overlay the
+/// one-scrim rule immediately hides — invisible, yet counted by [`input_blocked`] and ready to seize
+/// the cursor the instant the layer above closes. `<=` rather than `<`: an overlay that is already the
+/// top layer trivially may re-open, and re-opening is what a self-healing declaration does.
+pub(crate) fn may_open(overlays: &Overlays, overlay: Overlay) -> bool {
+    overlays.top().is_none_or(|top| top <= overlay)
 }
 
 /// The one-scrim-total rule: only the TOP active overlay draws its backdrop + centered content; every
@@ -369,6 +395,16 @@ mod tests {
             overlays(&[Overlay::ConnectStatus, Overlay::Menu, Overlay::Death]).top(),
             Some(Overlay::ConnectStatus),
         );
+        assert_eq!(
+            overlays(&[Overlay::SpawnMap, Overlay::Death]).top(),
+            Some(Overlay::SpawnMap),
+            "the spawn map is opened from the death screen and draws over it",
+        );
+        assert_eq!(
+            overlays(&[Overlay::Menu, Overlay::SpawnMap]).top(),
+            Some(Overlay::Menu),
+            "Esc's menu still comes out on top of the map",
+        );
     }
 
     /// The z-order contract is fixed AND deliberately not the priority order: Death draws above Menu so
@@ -399,6 +435,10 @@ mod tests {
             "unfocused always blocks"
         );
         assert!(input_blocked(&overlays(&[Overlay::Menu]), true));
+        assert!(
+            input_blocked(&overlays(&[Overlay::SpawnMap]), true),
+            "the spawn map must block — clicking it needs the cursor released",
+        );
         assert!(input_blocked(&overlays(&[Overlay::ConnectStatus]), true));
         assert!(
             !input_blocked(&overlays(&[Overlay::Death]), true),
@@ -501,6 +541,34 @@ mod tests {
         assert!(
             !esc_menu_target(&overlays(&[Overlay::Menu, Overlay::Death])),
             "menu over death → Esc closes it",
+        );
+    }
+
+    /// Opening is gated on priority, closing never is. The spawn map is the live case: `M` under the
+    /// menu or a connect screen must latch NOTHING (an invisible input-blocking map that grabs the
+    /// cursor when the layer above closes), while `M` over the death screen — which the map outranks,
+    /// and is the whole point of the feature — still opens.
+    #[test]
+    fn may_open_refuses_to_latch_beneath_a_higher_overlay() {
+        assert!(
+            may_open(&overlays(&[]), Overlay::SpawnMap),
+            "nothing latched → the map opens",
+        );
+        assert!(
+            may_open(&overlays(&[Overlay::Death]), Overlay::SpawnMap),
+            "the map outranks Death — picking a spawn from the death screen is the feature",
+        );
+        assert!(
+            !may_open(&overlays(&[Overlay::Menu]), Overlay::SpawnMap),
+            "M under the menu must not latch an invisible map",
+        );
+        assert!(
+            !may_open(&overlays(&[Overlay::ConnectStatus]), Overlay::SpawnMap),
+            "M under the connect screen must not latch an invisible map",
+        );
+        assert!(
+            may_open(&overlays(&[Overlay::SpawnMap]), Overlay::SpawnMap),
+            "already the top layer → re-declaring is always allowed",
         );
     }
 

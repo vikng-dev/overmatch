@@ -479,6 +479,9 @@ fn build_app() -> App {
         .disable::<IslandSleepingPlugin>();
     app.add_plugins(physics)
         .add_plugins(SimPlugin)
+        // The probe's scripted scenario (settle/ramp/climb/cruise phases) is fixtured on the
+        // authored course + flat slab; keep the heightmap world out of the instrument.
+        .insert_resource(crate::terrain_grid::ForceFlatWorld)
         .init_resource::<BitprobeCapture>()
         .add_systems(PreUpdate, spawn_fixture);
     app

@@ -111,6 +111,10 @@ impl std::ops::DerefMut for BootedSim {
 /// the rig is bound.
 fn headless_app() -> App {
     let mut app = App::new();
+    // These gates are FIXTURED on the flat slab + authored test course (the 10°/20°/30° ramps,
+    // the flat straight-line lanes): keep the heightmap world out even though the PNG ships in
+    // assets/. Inserted before the first update, so `terrain_grid::decode_height_grid` sees it.
+    app.insert_resource(crate::terrain_grid::ForceFlatWorld);
     app.add_plugins(
         DefaultPlugins
             .set(bevy::render::RenderPlugin {

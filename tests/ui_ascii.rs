@@ -60,6 +60,7 @@ const BARLOW_TEXT_FILES: &[&str] = &[
     "src/net/death_screen.rs",
     "src/net/debug_hud.rs",
     "src/net/hit_feel.rs",
+    "src/net/spawn_map.rs",
 ];
 
 /// The dev-sandbox files that spawn `Text`. These keep Bevy's default ASCII-only font (AGENTS.md), so

@@ -22,6 +22,7 @@ mod server;
 #[cfg(test)]
 mod shot_loss;
 mod shot_transport;
+mod spawn_map;
 #[cfg(test)]
 mod test_harness;
 mod watchdog;
@@ -36,6 +37,7 @@ pub(super) use debug_hud::plugin as debug_hud_plugin;
 pub(super) use hit_feel::plugin as hit_feel_plugin;
 pub(crate) use protocol::NetBot;
 pub(crate) use render_error::RenderErrorOffset;
+pub(super) use spawn_map::plugin as spawn_map_plugin;
 
 use rig::client_smoothing_plugin;
 

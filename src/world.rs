@@ -26,13 +26,21 @@ const GROUND_SIZE: f32 = 1000.0;
 const GROUND_THICKNESS: f32 = 1.0;
 
 pub fn plugin(app: &mut App) {
-    app.add_systems(Startup, spawn_environment);
+    // Decode the heightmap FIRST (synchronous, ADR-0014), then spawn whichever world it selects:
+    // the heightfield when the grid decoded, the flat slab + authored course otherwise.
+    app.add_systems(
+        Startup,
+        (crate::terrain_grid::decode_height_grid, spawn_environment).chain(),
+    );
 }
 
 fn spawn_environment(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    grid: Option<Res<crate::terrain_grid::HeightGrid>>,
+    windows: Query<&Window>,
+    asset_server: Res<AssetServer>,
 ) {
     let mut blocks: Vec<Transform> = Vec::new();
     commands.spawn((
@@ -43,6 +51,61 @@ fn spawn_environment(
         },
         Transform::from_xyz(4.0, 8.0, 4.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
+
+    // The heightmap world: when the grid decoded, the heightfield IS the world — no flat slab,
+    // no authored test course. `TerrainMap` stays (empty) so `TrackField` rebuilds on the same
+    // revision semantics; the oracle's ground term comes from the grid, not the block list.
+    if let Some(grid) = grid {
+        commands.spawn((
+            Transform::IDENTITY,
+            RigidBody::Static,
+            crate::terrain_grid::heightfield_collider(&grid),
+            CollisionLayers::new([Layer::Terrain], LayerMask::ALL),
+        ));
+        // The render mesh is view-only: windowed compositions have a primary window; the
+        // dedicated server (and the headless harness) has none and must not pay for it.
+        if !windows.is_empty() {
+            // The placeholder ground diffuse (CC0 — assets/terrain/cc.txt), world-space tiled
+            // by the mesh's UVs; the loader settings force REPEAT addressing (bevy's default
+            // sampler clamps, which would smear the first tile across the map). Async load is
+            // fine here: this is pure view (ADR-0014), nothing sim-side reads it.
+            use bevy::image::{
+                ImageAddressMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor,
+            };
+            let diffuse = asset_server
+                .load_builder()
+                .with_settings(|settings: &mut ImageLoaderSettings| {
+                    settings.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+                        address_mode_u: ImageAddressMode::Repeat,
+                        address_mode_v: ImageAddressMode::Repeat,
+                        ..ImageSamplerDescriptor::default()
+                    });
+                })
+                .load(crate::terrain_grid::TEXTURE_PATH);
+            let material = materials.add(StandardMaterial {
+                base_color_texture: Some(diffuse),
+                perceptual_roughness: 0.95,
+                metallic: 0.0,
+                ..default()
+            });
+            // The ONE-SURFACE invariant (terrain_grid module doc): the drawn ground is built
+            // from the grid's own samples with the collider's own cell diagonal — identical
+            // geometry, chunked into world-space tiles (positions are absolute, transforms
+            // identity) purely so bevy frustum-culls per tile.
+            for mesh in crate::terrain_grid::terrain_mesh_tiles(&grid) {
+                commands.spawn((
+                    Transform::IDENTITY,
+                    Mesh3d(meshes.add(mesh)),
+                    MeshMaterial3d(material.clone()),
+                ));
+            }
+        }
+        commands.insert_resource(TerrainMap {
+            revision: 0,
+            blocks,
+        });
+        return;
+    }
 
     // The ground: a static slab whose top face sits at y=0 — the same plane the analytic
     // `ground_distance` assumes, so aim/camera are unaffected.

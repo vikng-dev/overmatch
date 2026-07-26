@@ -29,7 +29,11 @@ pub fn terrain_plugin(app: &mut App) {
     app.add_systems(PreUpdate, build_track_field);
 }
 
-fn build_track_field(map: Option<Res<TerrainMap>>, mut track: ResMut<TrackField>) {
+fn build_track_field(
+    map: Option<Res<TerrainMap>>,
+    grid: Option<Res<crate::terrain_grid::HeightGrid>>,
+    mut track: ResMut<TrackField>,
+) {
     let Some(map) = map else {
         return;
     };
@@ -41,6 +45,8 @@ fn build_track_field(map: Option<Res<TerrainMap>>, mut track: ResMut<TrackField>
         .iter()
         .map(|t| TerrainBlock::new(t.translation, t.rotation, t.scale))
         .collect();
-    track.field = Some(BlockField::new(blocks));
+    // The heightmap ground term rides along when the grid decoded (Startup, before the first
+    // PreUpdate build): an Arc-cheap clone of the same immutable samples every peer decoded.
+    track.field = Some(BlockField::new(blocks).with_height(grid.map(|g| g.clone())));
     track.revision = Some(map.revision);
 }

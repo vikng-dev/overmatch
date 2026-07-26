@@ -39,7 +39,13 @@ use crate::{CombatantId, ShotId};
 // compatibility guard.
 
 /// Bump and re-pin the affected wire manifest value for every wire-surface change.
-pub const PROTOCOL_REV: u32 = 18;
+///
+/// REV 19: added the client→authority spawn-point request ([`SpawnChannel`] + [`SetSpawnPoint`]) for
+/// the playtest spawn map — one new channel and one new message on the wire. The same REV also
+/// widened the manifest: every channel now rides [`WIRE_SURFACE`] with its delivery mode and
+/// direction, so a lane's CONFIG can no longer skew between two ends that shake hands. REV 19 has
+/// not shipped, so both landed as edits to it rather than a further bump.
+pub const PROTOCOL_REV: u32 = 19;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -217,6 +223,20 @@ pub struct GripResyncRequest {
     /// Stable match-local identity; never entity-mapped on either endpoint.
     pub combatant: CombatantId,
     pub epoch: u32,
+}
+
+/// A client's REQUEST to place its own next respawn at a world XZ (the spawn map). It is a request,
+/// not a fact: the authority validates the bounds, resolves the ground height itself, and consumes
+/// the override on that client's next respawn — the client never names a Y and never teleports.
+///
+/// It carries no entity or combatant reference: the authority keys the override by the SENDING LINK
+/// (the same key `CombatantIds`/`ControlledBy` use), so a forged id cannot move another player.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub struct SetSpawnPoint {
+    /// World X, metres. Server-clamped to the playable square.
+    pub x: f32,
+    /// World Z, metres. Server-clamped to the playable square.
+    pub z: f32,
 }
 
 /// A public, loss-tolerant reconstruction of an authoritative shot. The receiver maps `shooter` for
@@ -412,6 +432,12 @@ pub struct GripCheckpointChannel;
 
 /// Reliable owner-to-authority lane for deduplicated fresh-checkpoint requests.
 pub struct GripRequestChannel;
+
+/// Ordered-reliable client-to-authority lane for spawn-placement requests ([`SetSpawnPoint`]). Its
+/// own lane rather than a shared one: a lost spawn choice must not be repaired by, or delay, grip
+/// resync. Ordered because the authority resolves the requests by keeping the last one it received,
+/// so delivery order IS the decision (see the registration in [`plugin`]).
+pub struct SpawnChannel;
 
 /// The tank's health-bearing volumes in `TankVolumes` order — the SINGLE definition of which volumes
 /// (and in what order) [`NetCrew`] snapshots, so publish and apply can never drift out of alignment
@@ -832,6 +858,14 @@ pub(crate) fn tank_servos_mismatch(a: &TankServos, b: &TankServos) -> bool {
 
 /// Ordered wire registrations. Keep this list aligned with [`plugin`]; its pinned hash is a direct
 /// handshake-fingerprint input. House process also bumps [`PROTOCOL_REV`] for release bookkeeping.
+///
+/// A CHANNEL is listed as `Name|Mode|Direction`, because a channel's identity on the wire is not its
+/// type name alone: the delivery MODE (ordering/reliability) and the DIRECTION are the lane's
+/// contract, and changing either — `UnorderedReliable` to `OrderedReliable`, `ClientToServer` to
+/// `ServerToClient` — renames nothing. Without them in the manifest, two ends built with different
+/// channel config would shake hands and then disagree about how a lane delivers. Everything else
+/// (components, messages, the input protocol) is identified by type name alone; what those types
+/// SERIALIZE is covered separately by [`WIRE_TYPES_HASH`].
 #[cfg(test)]
 const WIRE_SURFACE: &[&str] = &[
     // Plain-replicated markers/snapshots — `app.component::<_>().replicate()`, in order:
@@ -843,12 +877,13 @@ const WIRE_SURFACE: &[&str] = &[
     "NetTankStatus",
     "LaunchedTurretPose",
     "NetTrackGripAnchor",
-    // Message channels, followed by their message types.
-    "FireChannel",
-    "OutcomeChannel",
-    "DamageChannel",
-    "GripCheckpointChannel",
-    "GripRequestChannel",
+    // Message channels (`Name|Mode|Direction`), followed by their message types.
+    "FireChannel|UnorderedUnreliable|ServerToClient",
+    "OutcomeChannel|UnorderedReliable|ServerToClient",
+    "DamageChannel|UnorderedReliable|ServerToClient",
+    "GripCheckpointChannel|UnorderedReliable|ServerToClient",
+    "GripRequestChannel|UnorderedReliable|ClientToServer",
+    "SpawnChannel|OrderedReliable|ClientToServer",
     "FireVisualBatch",
     "FireEvent",
     "RicochetKeyframe",
@@ -856,6 +891,7 @@ const WIRE_SURFACE: &[&str] = &[
     "DamageConfirm",
     "GripCheckpointChunk",
     "GripResyncRequest",
+    "SetSpawnPoint",
     // The input protocol — `InputPlugin::<TankCommand>`:
     "TankCommand",
     // Predicted/rollback components, then the replicate-once local-rollback field, in order:
@@ -871,7 +907,7 @@ const WIRE_SURFACE: &[&str] = &[
 ];
 
 /// Pinned hash for the ordered wire surface and a direct handshake-fingerprint input.
-const WIRE_SURFACE_HASH: u64 = 0x44c3_b31a_1cdc_0134;
+const WIRE_SURFACE_HASH: u64 = 0x8547_0760_1afc_dc0f;
 
 // ---------------------------------------------------------------------------
 // Deep wire-surface coverage (field-level + external-dep skew)
@@ -880,7 +916,9 @@ const WIRE_SURFACE_HASH: u64 = 0x44c3_b31a_1cdc_0134;
 // [`WIRE_SURFACE`] pins the ordered SET OF TYPES that ride the wire; the `plugin_registrations_match_
 // wire_surface` tripwire binds that list to the actual `plugin` registration block, and the
 // `wire_surface_is_pinned` tripwire pins the list's hash. Together those catch a type ADDED, REMOVED,
-// RENAMED, or REORDERED. They do NOT catch a change to what a type SERIALIZES: adding a field to
+// RENAMED, or REORDERED — and, for channels, a delivery MODE or DIRECTION changed, since a channel
+// rides the list annotated as `Name|Mode|Direction` (see [`WIRE_SURFACE`]).
+// They do NOT catch a change to what a type SERIALIZES: adding a field to
 // `VolumeSnapshot`/`CrewSnapshot`/`NetCrew` renames no registered type, so the surface hash stays put
 // while the two ends misdeserialize each other — the exact silent skew the guard exists to refuse.
 //
@@ -905,7 +943,7 @@ const WIRE_SURFACE_HASH: u64 = 0x44c3_b31a_1cdc_0134;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x66be_d94f_4232_074b;
+const WIRE_TYPES_HASH: u64 = 0x0a55_8028_8bc3_d1c1;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -968,6 +1006,16 @@ pub(crate) fn plugin(app: &mut App) {
         ..default()
     })
     .add_direction(NetworkDirection::ClientToServer);
+    // Spawn placement is a rare, decisive choice: reliable so one click always lands, and ORDERED
+    // because the authority keeps only the LAST request per client. Under an unordered lane, rapid
+    // clicks A-then-B can be delivered B-then-A and the authority would settle on the stale A —
+    // the click the player visibly overrode. Ordering is what makes "last received" mean "last
+    // clicked"; the lane is low-rate enough that head-of-line blocking costs nothing.
+    app.add_channel::<SpawnChannel>(ChannelSettings {
+        mode: ChannelMode::OrderedReliable(ReliableSettings::default()),
+        ..default()
+    })
+    .add_direction(NetworkDirection::ClientToServer);
 
     app.register_message::<FireVisualBatch>()
         .add_map_entities()
@@ -987,6 +1035,10 @@ pub(crate) fn plugin(app: &mut App) {
     app.register_message::<GripCheckpointChunk>()
         .add_direction(NetworkDirection::ServerToClient);
     app.register_message::<GripResyncRequest>()
+        .add_direction(NetworkDirection::ClientToServer);
+    // No entity mapping: the authority keys the spawn override by the sending link, never by a
+    // client-named entity.
+    app.register_message::<SetSpawnPoint>()
         .add_direction(NetworkDirection::ClientToServer);
 
     app.add_plugins(input::native::InputPlugin::<TankCommand>::default());
@@ -1491,7 +1543,7 @@ mod tests {
             WIRE_DEP_LIGHTYEAR,
             PROTOCOL_REV,
         );
-        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0xe4b4_584a_b8fb_1215;
+        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0x75ff_0a65_3714_1c0a;
         assert_eq!(
             wire_manifest, EXPECTED_WIRE_MANIFEST_FINGERPRINT,
             "wire manifest changed: re-pin to {wire_manifest:#018x}",
@@ -1582,35 +1634,76 @@ mod tests {
     /// state that never crosses the wire, so they are deliberately absent.
     const REG_MARKERS: &[&str] = &[
         ".component::<",        // `app.component::<T>().replicate()` (+ `.predict()` chains)
-        ".add_channel::<",      // `app.add_channel::<T>(..)`
+        CHANNEL_MARKER,         // `app.add_channel::<T>(..)` — also carries mode + direction
         ".register_message::<", // `app.register_message::<T>()`
         "InputPlugin::<",       // `InputPlugin::<T>::default()` — the input protocol
     ];
 
+    /// The marker that identifies a channel registration, whose lane CONFIG (not just its type name)
+    /// rides the manifest.
+    const CHANNEL_MARKER: &str = ".add_channel::<";
+
+    /// The `|Mode|Direction` annotation a channel carries into [`WIRE_SURFACE`], read from the
+    /// `add_channel` statement's own text: the `ChannelMode::` variant and the `NetworkDirection::`
+    /// variant, each taken as the bare identifier that follows (so `UnorderedReliable(ReliableSettings
+    /// ::default())` reads as `UnorderedReliable` — the settings inside are transport tuning, not lane
+    /// semantics). Missing either is a hard panic rather than a silent empty annotation: a channel with
+    /// no readable mode or direction must never hash as if it had been checked.
+    fn channel_config(statement: &str) -> String {
+        fn variant(statement: &str, prefix: &str) -> String {
+            let at = statement.find(prefix).unwrap_or_else(|| {
+                panic!("add_channel statement has no `{prefix}`: {statement:?}")
+            });
+            let after = &statement[at + prefix.len()..];
+            let end = after
+                .find(|c: char| !c.is_alphanumeric() && c != '_')
+                .unwrap_or(after.len());
+            after[..end].to_string()
+        }
+        let mode = variant(statement, "ChannelMode::");
+        let direction = variant(statement, "NetworkDirection::");
+        format!("|{mode}|{direction}")
+    }
+
     /// Derive the ordered wire-type list straight from `plugin`'s registration calls, left-to-right,
     /// top-to-bottom. Each marker is immediately followed by `<Type>`; the last `::`-segment is the
-    /// bare type name `WIRE_SURFACE` lists.
+    /// bare type name `WIRE_SURFACE` lists. A channel additionally carries its `|Mode|Direction`,
+    /// scanned from the rest of its statement (up to the terminating `;`), so a lane reconfigured in
+    /// `plugin` without touching `WIRE_SURFACE` trips exactly like a renamed type.
     fn registered_types(body: &str) -> Vec<String> {
         let mut out = Vec::new();
-        for line in body.lines() {
-            let mut rest = line;
-            while let Some((idx, marker)) = REG_MARKERS
-                .iter()
-                .filter_map(|m| rest.find(m).map(|i| (i, *m)))
-                .min_by_key(|(i, _)| *i)
-            {
-                let after = &rest[idx + marker.len()..];
-                let Some(end) = after.find('>') else { break };
-                let name = after[..end]
-                    .trim()
-                    .rsplit("::")
-                    .next()
-                    .expect("split yields at least one segment")
-                    .trim()
-                    .to_string();
-                out.push(name);
-                rest = &after[end + 1..];
-            }
+        let mut rest = body;
+        while let Some((idx, marker)) = REG_MARKERS
+            .iter()
+            .filter_map(|m| rest.find(m).map(|i| (i, *m)))
+            .min_by_key(|(i, _)| *i)
+        {
+            let after = &rest[idx + marker.len()..];
+            // `<Type>` never spans a line, so bound the NAME scan to this line: a marker without a
+            // closing `>` skips its line instead of swallowing the rest of the body.
+            let line_end = after.find('\n').unwrap_or(after.len());
+            let Some(end) = after[..line_end].find('>') else {
+                rest = &after[line_end..];
+                continue;
+            };
+            let name = after[..end]
+                .trim()
+                .rsplit("::")
+                .next()
+                .expect("split yields at least one segment")
+                .trim()
+                .to_string();
+            let tail = &after[end + 1..];
+            // The channel's own statement — `add_channel::<T>(ChannelSettings { .. }).add_direction(..);`
+            // — holds both config facts; every other registration form is its type name alone.
+            let annotation = if marker == CHANNEL_MARKER {
+                let statement_end = tail.find(';').unwrap_or(tail.len());
+                channel_config(&tail[..statement_end])
+            } else {
+                String::new()
+            };
+            out.push(format!("{name}{annotation}"));
+            rest = tail;
         }
         out
     }
@@ -1630,10 +1723,11 @@ mod tests {
             derived.as_slice(),
             WIRE_SURFACE,
             "plugin()'s registration block no longer matches WIRE_SURFACE. A replicated component, \
-             channel, message, or input was added / removed / reordered in plugin() without updating \
-             the hand-maintained WIRE_SURFACE list beside it. Update WIRE_SURFACE to match plugin() \
-             (which then fails wire_surface_is_pinned), then bump PROTOCOL_REV and re-pin \
-             WIRE_SURFACE_HASH — all in the same diff.",
+             channel, message, or input was added / removed / reordered — or a channel's delivery \
+             mode / direction was changed — in plugin() without updating the hand-maintained \
+             WIRE_SURFACE list beside it. Update WIRE_SURFACE to match plugin() (which then fails \
+             wire_surface_is_pinned), then bump PROTOCOL_REV and re-pin WIRE_SURFACE_HASH — all in \
+             the same diff.",
         );
     }
 
@@ -1695,6 +1789,7 @@ mod tests {
         ("src/net/protocol.rs", "DamageChannel"),
         ("src/net/protocol.rs", "GripCheckpointChannel"),
         ("src/net/protocol.rs", "GripRequestChannel"),
+        ("src/net/protocol.rs", "SpawnChannel"),
         ("src/net/protocol.rs", "FireVisualBatch"),
         ("src/net/protocol.rs", "FireVisualFact"),
         ("src/net/protocol.rs", "FireEvent"),
@@ -1706,6 +1801,7 @@ mod tests {
         ("src/net/protocol.rs", "GripCheckpointEntry"),
         ("src/net/protocol.rs", "GripCheckpointChunk"),
         ("src/net/protocol.rs", "GripResyncRequest"),
+        ("src/net/protocol.rs", "SetSpawnPoint"),
         ("src/lib.rs", "ShotId"),
         ("src/command.rs", "TankCommand"),
         ("src/command.rs", "CrewSwap"),
