@@ -22,6 +22,10 @@ bincode = { version = "2.0.1", features = ["serde"] }
 ron = "0.12"
 glam = { version = "0.32.1", features = ["serde", "scalar-math"] }
 winit = "0.30"
+# Already in the tree through bevy (same locked version); named directly only by the present-mode
+# capability probe (`settings::probe`), which needs `SurfaceTargetUnsafe` and the wgpu-side
+# `PresentMode` — neither of which bevy re-exports. No features: bevy enables what the backend needs.
+wgpu = { version = "29.0", default-features = false }
 image = { version = "0.25", default-features = false, features = ["png"] }
 flate2 = { version = "1", optional = true }
 bevy_egui = { version = "0.41", optional = true }
@@ -38,6 +42,19 @@ lightyear = { version = "0.28", default-features = false, features = [
 lightyear_transport = "0.28"
 bevy_replicon = "0.41"
 
+# The Objective-C runtime's own C declarations. Already in the tree through winit's `objc2` (same
+# locked version — this adds no compiled crate); named directly only by `quit::terminate`, which
+# installs one `applicationShouldTerminate:` method on winit's delegate class.
+#
+# WHY THE CRATE RATHER THAN A HAND-WRITTEN `extern "C"` BLOCK: the two types in that call are the
+# two that are easiest to get silently wrong, and a foreign declaration whose ABI does not match the
+# library is unsound whatever it happens to do today. `BOOL` is C `_Bool` on aarch64-apple and
+# `signed char` on x86_64-apple (`objc-sys`' `types.rs` carries the cfg matrix), and `IMP` is a
+# NULLABLE FUNCTION pointer — `Option<unsafe extern "C" fn()>` — not a `*const c_void`. We ship
+# macOS on arm64 only, but correctness here does not get to depend on that.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc-sys = "0.3"
+
 [dev-dependencies]
 lightyear_sync = "0.28"
 lightyear_core = "0.28"
@@ -53,6 +70,7 @@ dev_ui = ["dep:bevy_egui"]
 [patch.crates-io]
 bevy_reflect = { path = "vendor/bevy_reflect-0.19.0-scalar-math" }
 bevy_pbr = { path = "vendor/bevy_pbr-0.19.0-scalar-math" }
+bevy_light = { path = "vendor/bevy_light-0.19.0-cascade-count" }
 
 [[bin]]
 name = "overmatch"
