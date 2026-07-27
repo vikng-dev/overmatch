@@ -147,6 +147,7 @@ pub fn hold_blend(x: f32) -> f32 {
 /// The force model's parameters: vehicle data (spec-authored) + the per-metre support law.
 /// Nothing here is solver-quality policy — quality lives in the station/column geometry the
 /// caller authors (link pitch sets station density).
+#[derive(Clone)]
 pub struct ForceParams {
     /// Pin line → outer contact face (m), along the belt's outward normal. The measured
     /// `pin_to_outer` — never `thickness / 2`: the pin does not run mid-plate.

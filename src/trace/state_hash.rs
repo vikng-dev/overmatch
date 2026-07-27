@@ -532,6 +532,7 @@ mod tests {
             demand_n: 42_000.0,
             demand_initialized: true,
             grade_confirm_ticks: 9,
+            band_confirm_ticks: 4,
             grade_target: 3,
             scheduler: SchedulerState::GradeShift { from: 5, to: 3 },
             hill_hold: true,
@@ -548,26 +549,26 @@ mod tests {
         let transmission = sample_transmission();
         let a = hash_tank_state(p, q, lv, av, &drive, &grip, &transmission, &sim);
         let b = hash_tank_state(p, q, lv, av, &drive, &grip, &transmission, &sim);
-        // MEASURED for REV-18 after servo state moved to the reconciled component; field order and
-        // bytes stay unchanged.
+        // MEASURED for REV-20 (descent round: `band_confirm_ticks` joined the transmission
+        // projection); field order and bytes otherwise unchanged.
         assert_eq!(
             [
                 a.combined, a.pos, a.rot, a.lv, a.av, a.sim, a.drv, a.srv, a.rld, a.rec, a.blt,
                 a.trn, a.elm,
             ],
             [
-                5_951_655_309_051_648_376,
+                17_496_020_387_936_353_359,
                 5_276_285_167_157_175_194,
                 5_407_327_877_548_523_030,
                 8_825_002_124_784_658_797,
                 15_886_300_944_198_297_253,
-                8_220_460_421_950_752_781,
+                2_278_136_831_584_015_957,
                 3_269_583_271_824_065_410,
                 14_071_911_453_643_095_408,
                 3_439_918_263_059_415_993,
                 12_037_784_973_900_930_602,
                 16_317_528_332_690_472_771,
-                4_854_495_176_564_399_426,
+                16_561_026_162_406_393_170,
                 12_638_153_115_695_167_455,
             ]
         );
@@ -923,13 +924,13 @@ mod tests {
             &test_servos(),
             &sim,
         );
-        // MEASURED for REV-18, including reconciled servo, weapon gate, element, and rollback
-        // streams.
+        // MEASURED for REV-20 (descent round transmission projection), including reconciled
+        // servo, weapon gate, element, and rollback streams.
         assert_eq!(
             base,
             CanonicalTankStateDigest {
-                simulation: 5_840_021_617_347_367_097,
-                rollback: 3_809_993_660_403_022_490,
+                simulation: 17_452_262_217_714_196_273,
+                rollback: 1_649_749_266_986_927_987,
                 position: 5_276_285_167_157_175_194,
                 rotation: 5_407_327_877_548_523_030,
                 linear_velocity: 8_825_002_124_784_658_797,
@@ -939,7 +940,7 @@ mod tests {
                 weapon_gate: 3_439_918_263_059_415_993,
                 recoil: 12_037_784_973_900_930_602,
                 belts: 16_317_528_332_690_472_771,
-                transmission: 4_854_495_176_564_399_426,
+                transmission: 16_561_026_162_406_393_170,
                 elements: 6_815_987_066_798_852_301,
                 rounds_fired: 17_086_694_953_553_481_862,
             }

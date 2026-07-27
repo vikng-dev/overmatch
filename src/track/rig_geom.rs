@@ -1348,13 +1348,16 @@ mod tests {
         for side in [Side::Left, Side::Right] {
             let poly = rig.hard_stop_polyline(side, &p);
             let circles = rig.circles(side, Pose::Compression, &p);
-            // Chord sagitta bound: a wrap arc sweeps at most ~1.25π (an end circle wrapping its outer
-            // end) over `build_route`'s 10 segments, i.e. ≤ ~11.25° per half-segment.
+            // Chord sagitta bound: a wrap arc sweeps at most ~1.25π (an end circle wrapping its
+            // outer end) over `route::ARC_SEGMENTS` segments — the production constant, so the
+            // bound cannot drift from the discretisation it is bounding.
             let max_r = circles
                 .iter()
                 .map(|&(_, r)| r - pti)
                 .fold(0.0_f32, f32::max);
-            let sagitta = max_r * (1.0 - (1.25 * std::f32::consts::PI / 20.0).cos());
+            let half_segment =
+                1.25 * std::f32::consts::PI / (2.0 * crate::track::route::ARC_SEGMENTS as f32);
+            let sagitta = max_r * (1.0 - half_segment.cos());
             for &(c, r) in &circles {
                 for k in 0..96 {
                     let dir = Vec2::from_angle(std::f32::consts::TAU * k as f32 / 96.0);

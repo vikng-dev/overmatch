@@ -479,7 +479,10 @@ mod tests {
         let field = BlockField::new(vec![])
             .with_height(Some(height_grid(2, |i, _| if i == 1 { 255 } else { 0 })));
         let down = Vec3::NEG_Y;
-        for x in [-900.0_f32, -100.0, 0.0, 333.0, 1200.0] {
+        // Probe points as FRACTIONS of the half-extent, so re-scaling the world (`WORLD_SIZE`)
+        // keeps every sample inside the map instead of silently landing on the edge clamp.
+        for frac in [-0.7_f32, -0.08, 0.0, 0.26, 0.94] {
+            let x = frac * WORLD_HALF_EXTENT;
             let h = (x + WORLD_HALF_EXTENT) / (2.0 * WORLD_HALF_EXTENT) * HEIGHT_RANGE;
             let d = field.depth_along(Vec3::new(x, h - 0.07, 5.0), down, 0.5);
             assert!(
@@ -540,8 +543,9 @@ mod tests {
     #[test]
     fn ridge_graze_between_old_scan_checkpoints_is_caught() {
         use crate::terrain_grid::WORLD_HALF_EXTENT;
-        // A 45° tent ridge along z: nodes at x = −1280, 0, +1280 with h = 1280 − |x| (raw
-        // meters; the PNG's range bound does not constrain a test grid). Apex h = 1280 at x = 0.
+        // A 45° tent ridge along z: nodes at x = ∓`WORLD_HALF_EXTENT` and 0, with
+        // h = WORLD_HALF_EXTENT − |x| (raw meters; the PNG's range bound does not constrain a
+        // test grid). Apex h = WORLD_HALF_EXTENT at x = 0.
         let size = 3u32;
         let mut samples = Vec::with_capacity((size * size) as usize);
         for _j in 0..size {

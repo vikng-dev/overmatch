@@ -48,6 +48,14 @@ const WHEEL_ARC: [(f32, f32); 21] = [
     (0.766, 0.643),
 ];
 
+/// Ease frequency (rad/s) of a view wheel's RISE — settle ≈ 4.7/ω ≈ 100 ms.
+///
+/// The one rate in the track view that is TUNED rather than derived, and it lives here (rather than
+/// once per consumer) because it is a single playtest verdict: an instant rise is what a rigid wheel
+/// on a rigid obstacle physically does, it was tried, and Yan's 2026-07-17 A/B called it robotic
+/// (design `track-model/` HQ, step 22b (d)). See [`wheel_lift_step`].
+pub const WHEEL_LIFT_RISE_OMEGA: f32 = 45.0;
+
 /// View wheel-lift parameters. `reach` is the wheel's ground surface (wheel radius + the track
 /// plate riding between it and the ground); the lateral stations are the shoe's physics
 /// collocation columns. `max_lift`/`max_droop` are the two ends of the contact envelope, both
@@ -55,6 +63,7 @@ const WHEEL_ARC: [(f32, f32); 21] = [
 /// may raise the wheel, and how far below rest it may drop.
 pub struct WheelParams {
     pub reach: f32,
+    /// Rise ease rate (rad/s) — [`WHEEL_LIFT_RISE_OMEGA`] for every production consumer.
     pub ease_omega: f32,
     pub max_lift: f32,
     /// How far BELOW the rest line the wheel may droop (m). REQUIRED to be the caller's real
@@ -96,6 +105,14 @@ pub fn wheel_lift_target<O: TerrainOracle>(
 /// Advance one wheel's lift state toward `target`: implicit critically-damped rise
 /// (`v' = (v + ω²·e·Δt) / (1 + ωΔt)²` — stable for any ωΔt, settles ≈ 4.7/ω), ballistic fall
 /// (an upward launch decelerates first). `dy`/`dvel` are the caller's stored state.
+///
+/// The RISE rate ([`WHEEL_LIFT_RISE_OMEGA`]) is a playtest verdict, so it is NOT free to unify with
+/// the drawn belt's own instant-rise belly memory (`wrap::ConformEase`) on doctrinal grounds — even
+/// though the instant rise is the physically honest one. The asymmetry it leaves — belt up now,
+/// wheel up over ~100 ms — is bounded on the drawn side by `wrap::conformed_pts`' running-gear
+/// clamp, which caps the belly at the CURRENT circles whether or not they have arrived. MEASURED
+/// 2026-07-27 over the crest sweep, the lag is worth 0.23 mm of belt-vs-rim margin with that clamp
+/// in place, against the 112.78 mm the missing clamp was worth.
 pub fn wheel_lift_step(dy: &mut f32, dvel: &mut f32, target: f32, dt: f32, params: &WheelParams) {
     let err = target - *dy;
     if err >= 0.0 {
@@ -138,7 +155,7 @@ mod tests {
     fn params(max_droop: f32, max_lift: f32) -> WheelParams {
         WheelParams {
             reach: 0.4,
-            ease_omega: 45.0,
+            ease_omega: WHEEL_LIFT_RISE_OMEGA,
             max_lift,
             max_droop,
             lateral_stations: [-0.08, 0.0, 0.08],

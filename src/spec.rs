@@ -421,10 +421,13 @@ pub struct EngineSpec {
     pub rated_rpm: f32,
     /// `(rpm, N·m)` authoring points, ascending rpm.
     pub torque_curve: Vec<(f32, f32)>,
-    /// Zero-throttle engine drag (compression braking) as a fraction of peak torque,
-    /// reflected through the current gear. Diesel motoring torque runs ~20–30% of rated
-    /// (INFERRED band — no per-engine motoring curve reached); defaults to 0.25 when the
-    /// vehicle does not author one.
+    /// Zero-throttle engine drag (compression braking): the MID-BAND anchor of the sim's
+    /// rising motoring-torque curve, as a fraction of peak torque — the motoring torque
+    /// equals this fraction of peak at `(idle + governed)/2` rpm and grows linearly with
+    /// crank speed (`track::transmission::engine_drag` — pumping/friction losses rise with
+    /// speed). Diesel motoring torque runs ~20–30% of rated mid-band (INFERRED band — no
+    /// per-engine motoring curve reached); defaults to 0.25 when the vehicle does not
+    /// author one.
     #[serde(default = "default_drag_fraction")]
     pub drag_fraction: f32,
     /// Crank + flywheel + main-clutch rotational inertia J (kg·m²) — the stage-B engine

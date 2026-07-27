@@ -34,7 +34,9 @@ use crate::track::forces::{
 };
 use crate::track::oracle::{BlockField, TerrainOracle};
 use crate::track::transmission::{self, TransmissionInput, TransmissionParams};
-use crate::track::wheels::{WheelParams, wheel_lift_step, wheel_lift_target};
+use crate::track::wheels::{
+    WHEEL_LIFT_RISE_OMEGA, WheelParams, wheel_lift_step, wheel_lift_target,
+};
 use crate::track::wrap;
 
 /// The sandbox's terrain resource: the track core's [`BlockField`], probed at [`CONTACT_PROBE`]
@@ -360,10 +362,6 @@ fn force_params(geom: &RigGeom, rig: &RigSpec, envelope: &EnvelopeLaw) -> ForceP
     }
 }
 
-/// Critically-damped ease frequency (rad/s) of a wrap-view wheel's RISE (settle ≈ 4.7/ω ≈
-/// 100 ms). Integrated implicitly — see [`articulate_wheels_field`].
-const WHEEL_EASE_OMEGA: f32 = 45.0;
-
 /// The road wheels, placed directly from the terrain FIELD — wheels first, then the belt
 /// wraps them (`ground → wheels → belt`, acyclic; a belt-first order is circular). Probe + easing
 /// live in [`track::wheels`](crate::track::wheels): implicit critically-damped rise, ballistic
@@ -384,7 +382,7 @@ pub(super) fn articulate_wheels_field(
         // plate riding between it and the ground (pin→inner + pin→outer, both measured — no
         // mid-plate assumption).
         reach: geom.wheel_pin_radius() + geom.model.pin_to_outer,
-        ease_omega: WHEEL_EASE_OMEGA,
+        ease_omega: WHEEL_LIFT_RISE_OMEGA,
         // The physical contact envelope: up to the bump stop, down to the CHAIN-CLAMPED droop —
         // so a fully-drooped view wheel's drawn belt wrap stays feasible at chain-limited link
         // counts (the same `effective` the envelope law and hard-stop are built on).

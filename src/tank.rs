@@ -9,7 +9,9 @@ use bevy::prelude::*;
 
 mod integrity;
 mod model;
-mod scenario;
+// `pub(crate)` for its spawn POINTS: `terrain_grid`'s spawn regression test asserts every
+// shipped spawn point in one place (see `every_shipped_spawn_point_lands_above_the_shipped_terrain`).
+pub(crate) mod scenario;
 mod servo;
 mod spawn;
 mod view;

@@ -109,12 +109,22 @@ impl std::ops::DerefMut for BootedSim {
 /// while it ran, the collider-less tanks would free-fall through the terrain for the whole load —
 /// the same spawn-before-bind race the game keeps to a frame or two. Callers start the clock once
 /// the rig is bound.
-fn headless_app() -> App {
+/// `world` selects the ground: `None` the flat slab + authored test course, `Some(grid)` a
+/// synthetic height grid. Either marker is inserted before the first update, so
+/// `terrain_grid::decode_height_grid` sees it and never decodes the shipped map.
+fn headless_app_on(world: Option<crate::terrain_grid::HeightGrid>) -> App {
     let mut app = App::new();
-    // These gates are FIXTURED on the flat slab + authored test course (the 10°/20°/30° ramps,
+    // The gates are FIXTURED on the flat slab + authored test course (the 10°/20°/30° ramps,
     // the flat straight-line lanes): keep the heightmap world out even though the PNG ships in
-    // assets/. Inserted before the first update, so `terrain_grid::decode_height_grid` sees it.
-    app.insert_resource(crate::terrain_grid::ForceFlatWorld);
+    // assets/. The driving-feel probes pass their own analytic grid instead.
+    match world {
+        Some(grid) => {
+            app.insert_resource(grid);
+        }
+        None => {
+            app.insert_resource(crate::terrain_grid::ForceFlatWorld);
+        }
+    }
     app.add_plugins(
         DefaultPlugins
             .set(bevy::render::RenderPlugin {
@@ -220,11 +230,16 @@ fn boot_diagnosis(app: &App, elapsed: Duration) -> String {
 /// that lease, and the deadline clock only starts once the lease is in hand (a test queued behind a
 /// sibling must not burn its own boot budget waiting its turn).
 fn booted_sim() -> BootedSim {
+    booted_sim_on(None)
+}
+
+/// [`booted_sim`] over an explicitly chosen world — see [`headless_app_on`].
+fn booted_sim_on(world: Option<crate::terrain_grid::HeightGrid>) -> BootedSim {
     let lease = BOOT_LEASE
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-    let mut app = headless_app();
+    let mut app = headless_app_on(world);
 
     // Asset IO is genuinely async on wall-clock IO threads (the spec RON + tiger_1.glb), so poll
     // until the spawn gate opens and the app enters Playing. Each not-yet-Playing pass yields 1 ms
@@ -940,9 +955,10 @@ fn tiger_pivot_gate(mode: crate::track::transmission::TransmissionMode, min_yaw:
 }
 
 /// Tiger pivot, L600 fixed-radius adapter (the vehicle's authored architecture): the
-/// MARGINAL brake-gated neutral turn toward the DERIVED `neutral_d_full` = 0.2808 m/s
-/// (fix 3 deleted the unprovenanced 0.75 fraction that used to shrink the target).
-/// MEASURED on the declared data: 0.131 rad/s mean ground yaw, belts exactly ±0.281 m/s
+/// MARGINAL brake-gated neutral turn toward the DERIVED `neutral_d_full` = 0.2885 m/s
+/// (0.2808 before half_tread went 1.4904 → 1.5312; fix 3 deleted the unprovenanced 0.75
+/// fraction that used to shrink the target). MEASURED on the declared data: 0.131 rad/s
+/// mean ground yaw, belts exactly ±neutral_d_full
 /// (the belt-kinematic ceiling d/half-tread ≈ 0.188 rad/s, less scrub slip); gated at
 /// ≥ 0.10 rad/s (margin for platform float drift — the restoration literature's
 /// "technically yes, advisable no" crawl is exactly this regime).
@@ -1083,13 +1099,16 @@ fn gear_climb_monotone_tiger() {
 
 /// Deceleration on the real Tiger (L600, the authored architecture), both driver intents:
 ///
-/// * RELEASE (coast): engine drag at the declared `drag_fraction` (0.25 of peak torque),
-///   stage B: at the CRANK, reaching the belt through the engaged coupling — so the drag
-///   torque now decelerates crank AND belt together, and the belt's share is the old
+/// * RELEASE (coast): engine drag from the RISING motoring curve (descent round —
+///   `drag_fraction × peak` anchored at mid-band 1550 rpm, growing linearly with crank
+///   speed), stage B: at the CRANK, reaching the belt through the engaged coupling — so
+///   the drag torque decelerates crank AND belt together, and the belt's share is the old
 ///   force × `I_m/(I_m + k²J)` (F7: 32 000/(32 000 + 37.1²·4) ≈ 0.85), plus the shift
-///   windows are now genuinely drag-free (declutched). MEASURED on the declared data:
-///   6 → 2 m/s in 12.2 s (was 10.6 s pre-crank — the ≈ 15% slower coast is exactly the
-///   reflected-crank-inertia share; the gate's ≤ 14 s absorbs it with margin for float
+///   windows are genuinely drag-free (declutched). MEASURED on the declared data:
+///   6 → 2 m/s in 12.3 s (12.2 s under the old flat 462 N·m drag — the mid-band anchor is
+///   the point: the coast's downshift chain spends most of its time near mid-band where
+///   the curve reads ≈ 1×, so flat-ground coast feel is deliberately unchanged while
+///   overrun drag above governed grew; the gate's ≤ 14 s absorbs it with margin for float
 ///   drift, nothing else). The fix-round brief hoped for 8 s — unreachable without
 ///   rolling resistance, WHICH THE CONTACT MODEL DOES NOT HAVE (a real Tiger's ~25–35 kN
 ///   of rolling drag would dominate its own engine braking; ground resistance belongs to
@@ -1571,6 +1590,12 @@ struct GradeApproachResult {
 /// the ordinary down band) and W already shaped to full. This removes spawn slew/wheelspin from
 /// the question and isolates the scheduler under the DERIVED 191.2 kN grade demand. The only
 /// variant datum changed is shift addressing.
+///
+/// SCOPE (scheduler fix round): the fixture settles onto the face first and SEEDS the demand
+/// EMA at its declared demand, so it proves scheduler behavior GIVEN that demand — it is not
+/// evidence about contact-driven EMA acquisition. That acquisition (first-sample seed +
+/// convergence under sustained reactions) is pinned at unit level by
+/// `transmission::tests::demand_ema_seeds_from_first_sample_and_converges`.
 fn run_grade_approach_20_deg(
     addressing: crate::track::transmission::ShiftAddressing,
 ) -> GradeApproachResult {
@@ -1586,10 +1611,29 @@ fn run_grade_approach_20_deg(
     let approach_speed = 4.0;
     let mut transmission = fresh_tank_transmission(&app);
     transmission.0.gear = 6;
+    // Seed the demand EMA at the fixture's own DERIVED grade demand (scheduler fix round):
+    // a teleport-spawn otherwise starts the EMA from near-zero settle reactions and the
+    // scheduler's first ~13 confirm ticks argue against a load the fixture has DECLARED.
+    transmission.0.demand_n = 57_000.0 * 9.81 * 20.0_f32.to_radians().sin();
+    transmission.0.demand_initialized = true;
     {
         let mut e = app.world_mut().entity_mut(tank);
         e.get_mut::<avian3d::prelude::Position>().unwrap().0 = Vec3::new(0.0, 1.50, -37.0);
         e.get_mut::<avian3d::prelude::Rotation>().unwrap().0 = rot;
+        e.get_mut::<avian3d::prelude::LinearVelocity>().unwrap().0 = Vec3::ZERO;
+        e.get_mut::<avian3d::prelude::AngularVelocity>().unwrap().0 = Vec3::ZERO;
+    }
+    // Land the contact field BEFORE injecting the rolling approach (scheduler fix round):
+    // the old single-teleport start left the belts airborne and free-spinning for ~0.6 s —
+    // the spin blipped over the up band with the demand observer honestly reading "no
+    // load", committing a reserve-legal-looking F6→F7 the moment before ground contact.
+    // That is exactly the spawn-slew/wheelspin artifact this fixture documents removing
+    // (the old frozen landing predictor masked it by over-refusing every loaded upshift).
+    for _ in 0..128 {
+        drive_tick(&mut app, tank, 0.0, 0.0);
+    }
+    {
+        let mut e = app.world_mut().entity_mut(tank);
         e.get_mut::<avian3d::prelude::LinearVelocity>().unwrap().0 =
             rot * Vec3::NEG_Z * approach_speed;
         e.get_mut::<avian3d::prelude::AngularVelocity>().unwrap().0 = Vec3::ZERO;
@@ -1601,7 +1645,12 @@ fn run_grade_approach_20_deg(
         *e.get_mut::<crate::track::sim::TankTransmission>().unwrap() = transmission;
     }
 
-    let z0 = -37.0f32;
+    let z0 = app
+        .world()
+        .get::<avian3d::prelude::Position>(tank)
+        .expect("tank has position")
+        .0
+        .z;
     let mut previous_gear = 6u8;
     let mut trace = vec![6];
     let mut grade_shift = None;
@@ -1938,6 +1987,13 @@ fn real_tiger_30_deg_reports_capability_truthfully() {
     let (mut app, tank) = booted_offline_sim(TransmissionMode::FixedRadii);
     let mass = app.world().resource::<TankBlueprint>().spec.mass;
     let demand = mass * 9.81 * 30.0_f32.to_radians().sin();
+    // Fixture-validity precondition, deliberately restated with LOCAL literals (10% +
+    // 10 kN) rather than the crate's reserve-margin constants: if the shipped policy
+    // values drift, this precondition diverges from the scheduler and fails loudly here.
+    // Residual implementation-as-oracle (documented): `torque_at` and the ratio/radius
+    // reads below consume AUTHORED VEHICLE DATA through the params accessor, not
+    // scheduler logic — an independent restatement of the torque interpolation would
+    // re-implement the curve, not strengthen the test.
     let scheduler_margin = demand * 0.10 + 10_000.0;
     let max_launch_force = {
         let gear = app.world().resource::<crate::track::sim::TrackGear>();
@@ -2035,9 +2091,12 @@ fn real_tiger_30_deg_reports_capability_truthfully() {
 /// backward faster than the 0.25 m/s DERIVED hill-hold threshold with W held. Its shipped
 /// 96 kN/side brakes cannot arrest the 279.6 kN DERIVED grade demand by themselves. At the
 /// DERIVED 317.5 kN selection threshold, only F1-F2 are capable launch gears: F1 is capped at
-/// 500 kN DERIVED, F2 makes 341.9 kN DERIVED, and F3's 237.1 kN DERIVED fails. The Direct
-/// preselector must rescue the rollback through a paid shift, expose HILL HOLD throughout the
-/// latched rescue, arrest the hull, and resume uphill travel.
+/// 500 kN DERIVED, F2 makes 341.9 kN DERIVED, and F3's 237.1 kN DERIVED fails. Round-4 flow:
+/// the moving rollback is first braked CONTINUOUSLY by the `back_driven_intent` service
+/// envelope (the latch is near-rest-only now — no grab at speed); once the hull decelerates
+/// into the engagement zone the hold latches, the Direct preselector rescues through a paid
+/// shift exposing HILL HOLD, arrests the hull, and resumes uphill travel (measured: latch
+/// t114, capable F2 t142, arrest t134, +0.5 m t255).
 #[test]
 fn real_tiger_f8_30_deg_rollback_rescues_to_capable_gear() {
     use crate::track::transmission::{SchedulerState, TransmissionMode};
@@ -2149,8 +2208,10 @@ fn real_tiger_f8_30_deg_rollback_rescues_to_capable_gear() {
          {arrest_tick}, +0.5 m tick {progress_tick}, gears {gear_path:?}, states {state_trace:?}"
     );
     assert!(
-        reached_capable_tick <= 64,
-        "the Direct preselector must not remain silently stuck in F8 (trace {state_trace:?})"
+        reached_capable_tick <= 192,
+        "the Direct preselector must not remain silently stuck in F8 — the round-4 flow \
+         brakes to the near-rest zone first (measured latch ≈ t114, capable ≈ t142), so \
+         the bound covers braking + one paid rescue window (trace {state_trace:?})"
     );
     assert!(
         arrest_tick <= 4 * FIXED_TICKS_PER_SECOND,
@@ -2162,14 +2223,14 @@ fn real_tiger_f8_30_deg_rollback_rescues_to_capable_gear() {
     );
 }
 
-/// Synthetic inverse regression: retain the Tiger geometry/contact model and its shipped
-/// 96 kN/side brakes on the course's 30-degree face, but deliberately replace the engine curve
-/// and clutch with a 100 N m DERIVED test fixture. No claim is made about a real vehicle: this
-/// synthetic powertrain makes every gear incapable, so a grounded rollback with W held must expose
-/// GRADE LIMIT rather than HILL HOLD and must continue downhill without a hidden holding force.
-#[test]
-fn synthetic_weak_powertrain_30_deg_rollback_reports_grade_limit() {
-    use crate::track::transmission::{SchedulerState, TransmissionMode};
+/// Shared fixture for the two synthetic weak-powertrain 30-degree regressions: the REAL
+/// Tiger geometry/contact model on the course's 30-degree face, seated and settled, then
+/// the engine curve and clutch nerfed to a 100 N m DERIVED test value so every gear is
+/// incapable and the DYNAMIC brakes alone are unarrestable (static breakaway still holds
+/// at rest — the shipped 1.5x factor clears the 279.6 kN demand by the RON's authored
+/// margin). Returns `(app, tank, demand, uphill)`.
+fn synthetic_weak_30deg_fixture() -> (BootedSim, Entity, f32, Vec3) {
+    use crate::track::transmission::TransmissionMode;
     let (mut app, tank) = booted_offline_sim(TransmissionMode::FixedRadii);
     let course_rotation = Quat::from_rotation_x(30.0_f32.to_radians());
     let uphill = course_rotation * Vec3::NEG_Z;
@@ -2190,9 +2251,23 @@ fn synthetic_weak_powertrain_30_deg_rollback_reports_grade_limit() {
         e.get_mut::<avian3d::prelude::LinearVelocity>().unwrap().0 = Vec3::ZERO;
         e.get_mut::<avian3d::prelude::AngularVelocity>().unwrap().0 = Vec3::ZERO;
     }
-    for _ in 0..64 {
+    // Seat the suspension, ring down, and PARK — 256 ticks like the ramp probes' settle:
+    // 64 was not enough on the 30-degree face, and an unparked fixture starts its W tick
+    // already sliding, outside the near-rest zone the at-rest test is about. The parked
+    // belt reactions also seed the demand EMA with the real static grade load.
+    for _ in 0..256 {
         drive_tick(&mut app, tank, 0.0, 0.0);
     }
+    let parked = app
+        .world()
+        .get::<crate::track::sim::TankTransmission>(tank)
+        .expect("tank has transmission state")
+        .0
+        .park;
+    assert!(
+        parked,
+        "the fixture must reach a genuine park before the nerf"
+    );
     let (max_launch_force, brake_capacity) = {
         let mut gear = app
             .world_mut()
@@ -2217,12 +2292,83 @@ fn synthetic_weak_powertrain_30_deg_rollback_reports_grade_limit() {
     );
     assert!(
         2.0 * brake_capacity < demand,
-        "synthetic fixture must be unarrestable on brakes alone: brakes {:.0} N, demand \
+        "synthetic fixture must be unarrestable on DYNAMIC brakes alone: brakes {:.0} N, demand \
          {demand:.0} N",
         2.0 * brake_capacity
     );
+    (app, tank, demand, uphill)
+}
 
-    let initial_rollback_speed = 0.5;
+/// Codex round 5, restored 30-degree protection (a): GRADE LIMIT ENTRY observed on the
+/// live sim, not seeded by hand. At rest on the face with the demand EMA already carrying
+/// the parked grade load, held W must latch the hill hold near rest, and the launch
+/// selector — finding NO capable gear in the nerfed powertrain — must expose GRADE LIMIT
+/// while the full brake envelope (static breakaway at rest) holds the hull to
+/// centimeter-class drift.
+#[test]
+fn synthetic_weak_powertrain_30_deg_at_rest_enters_grade_limit() {
+    use crate::track::transmission::SchedulerState;
+    let (mut app, tank, _demand, _uphill) = synthetic_weak_30deg_fixture();
+    let start = app
+        .world()
+        .get::<avian3d::prelude::Position>(tank)
+        .expect("tank has position")
+        .0;
+    let mut entered_at = None;
+    for tick in 0..96 {
+        drive_tick(&mut app, tank, 1.0, 0.0);
+        let state = app
+            .world()
+            .get::<crate::track::sim::TankTransmission>(tank)
+            .expect("tank has transmission state")
+            .0;
+
+        if entered_at.is_none() && state.hill_hold && state.scheduler == SchedulerState::GradeLimit
+        {
+            entered_at = Some(tick);
+        }
+        if let Some(entry) = entered_at {
+            assert!(
+                state.hill_hold && state.scheduler == SchedulerState::GradeLimit,
+                "tick {tick}: GRADE LIMIT must persist once entered (entry {entry})"
+            );
+        }
+    }
+    let entered_at =
+        entered_at.expect("held W at rest on an impossible grade must ENTER GRADE LIMIT");
+    assert!(
+        entered_at <= 16,
+        "entry must be prompt from the settled at-rest state (took {entered_at} ticks)"
+    );
+    let end = app
+        .world()
+        .get::<avian3d::prelude::Position>(tank)
+        .expect("tank has position")
+        .0;
+    let drift = (end - start).length();
+    assert!(
+        drift < 0.05,
+        "the latched full envelope (static breakaway at rest) must hold the hull \
+         (drifted {drift:.3} m)"
+    );
+}
+
+/// Codex round 5, restored 30-degree protection (b) — renamed from the round-4
+/// `..._reports_grade_limit` whose name outlived its assertions: a MOVING weak-powertrain
+/// rollback with W held keeps sliding (dynamic brakes unarrestable by construction), the
+/// near-rest-only latch never grabs it, its status stays Normal — AND the
+/// `back_driven_intent` service braking is PROVEN by a deceleration bound: over the
+/// 1-second window the slide may gain at most 2.5 m/s where a free roll on 30 degrees
+/// would gain g.sin(30) ~ 4.9 m/s. If the cross-motion braking seam vanishes, this bound
+/// fails.
+#[test]
+fn synthetic_weak_powertrain_30_deg_moving_slide_brakes_without_latch() {
+    let (mut app, tank, demand, uphill) = synthetic_weak_30deg_fixture();
+    // Genuinely MOVING: from the parked fixture, a 0.5 m/s slide turned out to be
+    // arrestable by kinetic grip + the service envelope within the window (measured
+    // −0.006 m/s at the end — a knife-edge fixture); 2.0 m/s keeps the slide alive
+    // through the whole window while the braking bound still bites.
+    let initial_rollback_speed = 2.0;
     let mut transmission = fresh_tank_transmission(&app);
     transmission.0.gear = 8;
     let start_position = {
@@ -2246,14 +2392,26 @@ fn synthetic_weak_powertrain_30_deg_rollback_reports_grade_limit() {
             .get::<crate::track::sim::TankTransmission>(tank)
             .expect("tank has transmission state")
             .0;
+        let drive = world
+            .get::<crate::track::sim::TrackDrive>(tank)
+            .expect("tank drives");
+        let belt_m = (drive.sides[0].speed + drive.sides[1].speed) / 2.0;
+        // The latch domain is the SHAFT (belt), not the hull: the service envelope can
+        // legitimately arrest the BELTS while the hull skids on kinetic grip, and a
+        // belt inside the near-rest zone latching (then reporting GRADE LIMIT — locked
+        // belts, still sliding, no capable gear) is designed truth-telling. What must
+        // NEVER happen is a latch while the belt itself is moving.
+        if belt_m.abs() >= 0.25 {
+            assert!(
+                !state.hill_hold,
+                "tick {tick}: the near-rest-only latch must never grab a MOVING shaft \
+                 (belt {belt_m:.2} m/s — cross/rolling motion belongs to \
+                 back_driven_intent braking)"
+            );
+        }
         assert!(
-            state.hill_hold,
-            "tick {tick}: GRADE LIMIT must keep the brake latch"
-        );
-        assert_eq!(
-            state.scheduler,
-            SchedulerState::GradeLimit,
-            "tick {tick}: no synthetic gear has non-negative reserve"
+            !state.park,
+            "tick {tick}: no parking latch may appear under held W either"
         );
         final_course_speed = world
             .get::<avian3d::prelude::LinearVelocity>(tank)
@@ -2265,6 +2423,16 @@ fn synthetic_weak_powertrain_30_deg_rollback_reports_grade_limit() {
             "tick {tick}: deliberately insufficient brakes and power must not arrest the rollback"
         );
     }
+    // The braking bound: back_driven_intent's service envelope plus belt-locked kinetic
+    // grip must cap the 1-second speed change far under a free roll's +4.9 m/s gain
+    // (measured: the braked slide DEcelerates). A vanished cross-motion braking seam
+    // fails here.
+    assert!(
+        final_course_speed > -(initial_rollback_speed + 2.5),
+        "the slide must be continuously service-braked: reached {final_course_speed:.2} m/s \
+         where a free roll would pass {:.2}",
+        -(initial_rollback_speed + 4.9)
+    );
     let end_position = app
         .world()
         .get::<avian3d::prelude::Position>(tank)
@@ -2272,10 +2440,9 @@ fn synthetic_weak_powertrain_30_deg_rollback_reports_grade_limit() {
         .0;
     let downhill_distance = -(end_position - start_position).dot(uphill);
     println!(
-        "synthetic 30-deg weak-powertrain rollback: torque/clutch 100 N m, brakes {:.0} N/side, \
-         max launch {max_launch_force:.0} N, demand {demand:.0} N; GRADE LIMIT 64/64 ticks, \
-         final speed {final_course_speed:.3} m/s, downhill {downhill_distance:.3} m",
-        brake_capacity
+        "synthetic 30-deg weak-powertrain slide: max launch nerfed, demand {demand:.0} N; \
+         unlatched slide 64/64 ticks, final speed {final_course_speed:.3} m/s, downhill \
+         {downhill_distance:.3} m"
     );
     assert!(
         downhill_distance > 0.25,
@@ -2476,11 +2643,11 @@ fn capture_scripted_determinism_tick(
         .flatten()
         .any(|c| c.load > 0.0 && c.slip.abs() > 0.3);
     run.saw_steering_slip |=
-        tick >= 240 && drive.steer.abs() > f32::EPSILON && loaded_contact_is_slipping;
+        tick >= 300 && drive.steer.abs() > f32::EPSILON && loaded_contact_is_slipping;
     run.saw_shot |= sim.weapons.iter().any(|weapon| weapon.rounds_fired > 0);
     run.saw_projectile_spawn |= !projectiles.is_empty();
     run.saw_projectile_march |= projectiles.iter().any(|path| path.points.len() > 1);
-    if matches!(tick, 119 | 239 | 359) {
+    if matches!(tick, 119 | 299 | 479) {
         run.checkpoints.push(ScriptedPose {
             tick,
             position,
@@ -2567,8 +2734,12 @@ fn scripted_determinism_run() -> ScriptedDeterminismRun {
                 .world_mut()
                 .get_mut::<TankCommand>(tank)
                 .expect("controlled tank carries TankCommand");
-            command.throttle = if (120..420).contains(&tick) { 1.0 } else { 0.0 };
-            command.steer = if (240..420).contains(&tick) { 0.7 } else { 0.0 };
+            // Descent round: the straight run-up grew 60 ticks — the upshift confirmation
+            // dwell (UPSHIFT_CONFIRM_TICKS per shift) slows the flat gear walk, and the
+            // steering-slip witness needs the hull fast enough that the tight detent
+            // scrubs its loaded contacts past the slip band.
+            command.throttle = if (120..480).contains(&tick) { 1.0 } else { 0.0 };
+            command.steer = if (300..480).contains(&tick) { 0.7 } else { 0.0 };
             command.fire_primary = tick == 220;
             command.fire_secondary = (360..420).contains(&tick);
         }
@@ -2614,7 +2785,7 @@ fn assert_scripted_determinism_witnesses(run: &ScriptedDeterminismRun, label: &s
     };
     assert_eq!(
         [settled.tick, powered.tick, steered.tick],
-        [119, 239, 359],
+        [119, 299, 479],
         "{label} driving checkpoint ticks moved",
     );
 
@@ -2662,6 +2833,1347 @@ fn full_simulation_replay_is_bit_exact_for_six_hundred_ticks() {
     {
         panic!(
             "fresh full-sim worlds first differ at scripted tick {tick}:\nleft:  {left:#?}\nright: {right:#?}",
+        );
+    }
+}
+
+// --- Driving-feel probes ------------------------------------------------------------------------
+//
+// Reproducible, headless, deterministic driving experiments with per-tick telemetry: the three
+// reported feel symptoms (uphill upshift refusal, downhill overrun, slow turning) as scenarios that
+// write a CSV instead of asserting a threshold. They are `#[ignore]`d — they are INSTRUMENTS, not
+// gates; a gate that fires on a feel number would freeze the very law under investigation.
+//
+//   cargo test --lib -- --ignored --nocapture probe_climb_10pct
+//   cargo test --lib -- --ignored --nocapture probe_descend_10pct
+//   cargo test --lib -- --ignored --nocapture probe_turn_at_2ms
+//   cargo test --lib -- --ignored --nocapture probe_turn_radius_sweep
+//
+// Telemetry lands in `$SPIKE_DRIVE_PROBE_DIR` (default `target/drive-probe`), one CSV per scenario.
+// `SPIKE_DRIVE_PROBE_GRADE` overrides the ramp grade (rise/run, e.g. `0.15`) for a sweep, and
+// `SPIKE_DRIVE_PROBE_TURN_THROTTLE` the throttle held through the turn (default full).
+// The turn scenarios take `SPIKE_DRIVE_PROBE_STEER` (steer magnitude, which SELECTS the L600
+// detent: ≥ 0.15 wide, ≥ 0.55 tight); the sweep additionally takes `SPIKE_DRIVE_PROBE_GEARS` and
+// `SPIKE_DRIVE_PROBE_STEERS` (comma lists) plus the tick budgets `SPIKE_DRIVE_PROBE_RUNUP_S`,
+// `SPIKE_DRIVE_PROBE_TURN_S` and `SPIKE_DRIVE_PROBE_SETTLE_S`.
+//
+// Everything here is a READ-ONLY tap: the scenarios write only `TankCommand` and the initial pose
+// (the same two seams the existing transmission gates use), and every derived number is recomputed
+// through the production laws (`transmission::modeled_reserve_in_gear`,
+// `transmission::predict_shift_landing_m`) rather than a local restatement of them.
+
+/// Rise per unit run of the analytic ramp world, unless `SPIKE_DRIVE_PROBE_GRADE` overrides it.
+fn probe_grade(default: f32) -> f32 {
+    crate::env_parse("SPIKE_DRIVE_PROBE_GRADE").unwrap_or(default)
+}
+
+/// Steer magnitude held through a turn probe, unless `SPIKE_DRIVE_PROBE_STEER` overrides it.
+/// The magnitude SELECTS the L600 detent (`|steer| ≥ 0.15` wide, `≥ 0.55` tight, with release
+/// hysteresis); INSIDE a detent it does not scale the command at all — the geared constraint is
+/// `d = sign(steer)·κ(gear, step)·|m|`, so 0.3 and 0.5 command the same wide radius.
+fn probe_steer(default: f32) -> f32 {
+    crate::env_parse("SPIKE_DRIVE_PROBE_STEER").unwrap_or(default)
+}
+
+/// A comma-separated numeric env list (`"1,2,4"`), falling back to `default` when unset or empty.
+fn probe_list<T: std::str::FromStr + Copy>(name: &str, default: &[T]) -> Vec<T> {
+    match crate::env_value(name) {
+        Some(raw) if !raw.trim().is_empty() => raw
+            .split(',')
+            .filter(|entry| !entry.trim().is_empty())
+            .map(|entry| {
+                entry
+                    .trim()
+                    .parse::<T>()
+                    .unwrap_or_else(|_| panic!("{name}: {entry:?} is not a number"))
+            })
+            .collect(),
+        _ => default.to_vec(),
+    }
+}
+
+/// The analytic constant-grade world: a plane inclined along +X through `y = 0` at `x = 0`, so the
+/// origin sits where the flat slab put it and the spawn drop is unchanged. TWO samples per side is
+/// EXACT for a plane — the grid interpolates linearly inside a cell — so the oracle, the collider
+/// and the render mesh all read the authored grade everywhere, with no quantization to chase.
+fn ramp_grid(grade: f32) -> crate::terrain_grid::HeightGrid {
+    let half = crate::terrain_grid::WORLD_HALF_EXTENT;
+    let (lo, hi) = (-grade * half, grade * half);
+    crate::terrain_grid::HeightGrid::new(std::sync::Arc::from([lo, hi, lo, hi].as_slice()), 2)
+}
+
+/// Boot on [`ramp_grid`], settle onto the belt contacts, and hand back the controlled Tiger.
+/// No `TransmissionFeelTest` is inserted: these probes run the SPEC's declared architecture, which
+/// is what the reported symptoms were felt through.
+fn booted_ramp_sim(grade: f32) -> (BootedSim, Entity, crate::terrain_grid::HeightGrid) {
+    let grid = ramp_grid(grade);
+    let mut app = booted_sim_on(Some(grid.clone()));
+    start_fixed_clock(&mut app);
+    // Ground the CONTROLLED tank only, with a 900-tick budget (the flat boots keep their
+    // 300-tick all-tanks criterion): the landed spawn rule resolves height as the
+    // footprint-square MAX plus clearance, so on a ramp both duel tanks drop farther and
+    // bounce, and on steep grades the un-driven WINGMAN can toboggan far downhill before
+    // (ever) parking — every probe re-poses and drives the controlled tank away from
+    // spawn, so the wingman's settling is irrelevant to the traces.
+    let mut grounded = 0;
+    for _ in 0..900 {
+        app.update();
+        let world = app.world_mut();
+        grounded = world
+            .query_filtered::<&crate::track::sim::TrackContacts, With<Controlled>>()
+            .iter(world)
+            .map(|c| c.0.iter().filter(|side| !side.is_empty()).count())
+            .sum();
+        if grounded >= 2 {
+            break;
+        }
+    }
+    if grounded < 2 {
+        let world = app.world_mut();
+        let poses: Vec<(Vec3, usize)> = world
+            .query::<(
+                &avian3d::prelude::Position,
+                &crate::track::sim::TrackContacts,
+            )>()
+            .iter(world)
+            .map(|(p, c)| (p.0, c.0.iter().filter(|side| !side.is_empty()).count()))
+            .collect();
+        panic!(
+            "the controlled tank never grounded on the ramp (its sides {grounded}, tanks \
+             {poses:?}, surface under first {:?})",
+            poses.first().map(|(p, _)| grid.height_at(p.x, p.z))
+        );
+    }
+    let mut tank_q = app
+        .world_mut()
+        .query_filtered::<Entity, (With<Tank>, With<Controlled>)>();
+    let tank = tank_q.single(app.world()).expect("one controlled tank");
+    (app, tank, grid)
+}
+
+/// Yaw that points the hull's forward axis (local −Z) along `heading` in the XZ plane.
+fn heading_yaw(heading: Vec3) -> Quat {
+    Quat::from_rotation_arc(
+        Vec3::NEG_Z,
+        Vec3::new(heading.x, 0.0, heading.z).normalize(),
+    )
+}
+
+/// Teleport onto the ramp already tilted into the surface, then settle under zero input. The
+/// slope tilt is applied OUTSIDE the yaw (`tilt * yaw`) so the hull lies in the plane whichever
+/// way it faces — a yaw-then-pitch composition would bank a cross-slope heading instead.
+fn place_on_ramp(
+    app: &mut App,
+    tank: Entity,
+    grid: &crate::terrain_grid::HeightGrid,
+    grade: f32,
+    x: f32,
+    z: f32,
+    heading: Vec3,
+) {
+    let normal = Vec3::new(-grade, 1.0, 0.0).normalize();
+    let rotation = Quat::from_rotation_arc(Vec3::Y, normal) * heading_yaw(heading);
+    {
+        let mut e = app.world_mut().entity_mut(tank);
+        e.get_mut::<avian3d::prelude::Position>().unwrap().0 =
+            Vec3::new(x, grid.height_at(x, z) + 2.0, z);
+        e.get_mut::<avian3d::prelude::Rotation>().unwrap().0 = rotation;
+        e.get_mut::<avian3d::prelude::LinearVelocity>().unwrap().0 = Vec3::ZERO;
+        e.get_mut::<avian3d::prelude::AngularVelocity>().unwrap().0 = Vec3::ZERO;
+    }
+    // Drop, ring-down, and park latch — the same settle window the slope-park gates use.
+    for _ in 0..256 {
+        drive_tick(app, tank, 0.0, 0.0);
+    }
+}
+
+/// One tick of telemetry, in the columns [`PROBE_HEADER`] names.
+#[derive(Clone, Copy, Debug, Default)]
+struct ProbeSample {
+    speed: f32,
+    /// Signed hull speed along the hull's forward axis (the CSV's `fwd_speed`) — the
+    /// through-zero probes key on the HULL: the belts legitimately chatter tick-to-tick
+    /// under saturated braking (stop-force vs grip shear), the hull does not.
+    fwd_speed: f32,
+    yaw_rate: f32,
+    yaw_kinematic: f32,
+    gear: u8,
+    /// Which ladder is engaged (true = reverse) — the descent probes track the swap seam.
+    reverse: bool,
+    /// Parking-brake latch state — the park probe asserts engage/release edges.
+    park: bool,
+    /// The engaged L600 detent step: 0 straight, 1 wide, 2 tight.
+    steer_step: u8,
+    rpm: f32,
+    demand_n: f32,
+    reserve: f32,
+    reserve_next: f32,
+    belts: [f32; 2],
+    /// Per-side longitudinal ground force sum (N), signed POSITIVE when the belt drives the
+    /// hull forward and negative when it brakes — the same `belt_reaction` the transmission
+    /// was handed this tick.
+    belt_reaction: [f32; 2],
+    side_commands: [f32; 2],
+    position: Vec3,
+    /// Summed normal load over every loaded contact, both sides (N) — the measured weight the
+    /// footprint is carrying, so a turning moment can be normalized without an authored datum.
+    support_n: f32,
+    /// Fore-aft extent of the loaded contacts along the hull's forward axis (m) — the measured
+    /// ground-contact length `L` of the classical `M_t = μ_t·W·L/4` turning-resistance form.
+    footprint_m: f32,
+    scheduler: crate::track::transmission::SchedulerState,
+}
+
+const PROBE_HEADER: &str = "tick,t_s,x,y,z,speed,fwd_speed,grade,pitch_deg,yaw_rate,yaw_kin,\
+cmd_throttle,cmd_steer,drv_throttle,drv_steer,side_cmd_l,side_cmd_r,belt_l,belt_r,\
+react_l,react_r,contacts_l,contacts_r,gear,reverse,shift_ticks,steer_step,scheduler,rpm,\
+dec_shaft_rpm,demand_n,dec_reserve,dec_reserve_next,dec_margin,dec_landing_m,dec_landing_rpm,\
+grade_confirm,grade_target,clutch_out,park,hill_hold,dwell,last_shift_dir,support_n,footprint_m";
+
+/// A running scenario: the booted sim plus the open telemetry sink. `tick` writes exactly one CSV
+/// row per fixed tick, recomputing the shift scheduler's own decision inputs from the PRE-tick
+/// state and THIS tick's ground reactions — the exact pair `transmission::step` consumed.
+struct DriveProbe {
+    app: BootedSim,
+    tank: Entity,
+    grid: crate::terrain_grid::HeightGrid,
+    tp: crate::track::transmission::TransmissionParams,
+    fp: crate::track::forces::ForceParams,
+    half_tread: f32,
+    out: std::io::BufWriter<std::fs::File>,
+    path: std::path::PathBuf,
+    tick: u32,
+}
+
+/// Engine rad/s per rpm — the transmission module's own conversion, restated for the readout.
+const PROBE_RPM_TO_RAD: f32 = std::f32::consts::TAU / 60.0;
+const PROBE_DT: f32 = 1.0 / FIXED_TICKS_PER_SECOND as f32;
+
+impl DriveProbe {
+    fn open(scenario: &str, grade: f32) -> Self {
+        let (app, tank, grid) = booted_ramp_sim(grade);
+        let (tp, fp, half_tread) = {
+            let gear = app.world().resource::<crate::track::sim::TrackGear>();
+            (
+                gear.trans()
+                    .expect("the Tiger declares a transmission")
+                    .clone(),
+                gear.force_params().clone(),
+                gear.half_tread(),
+            )
+        };
+        let dir = std::path::PathBuf::from(
+            crate::env_value("SPIKE_DRIVE_PROBE_DIR")
+                .unwrap_or_else(|| "target/drive-probe".into()),
+        );
+        std::fs::create_dir_all(&dir).expect("the telemetry directory must be creatable");
+        let path = dir.join(format!("{scenario}.csv"));
+        let mut out = std::io::BufWriter::new(
+            std::fs::File::create(&path).expect("the telemetry file must be creatable"),
+        );
+        {
+            use std::io::Write as _;
+            writeln!(out, "{PROBE_HEADER}").expect("telemetry header");
+        }
+        // The grounding/settle window is deliberately OUTSIDE the trace: `booted_ramp_sim` hands
+        // back an already-grounded sim, and each scenario poses the hull before its first row.
+        Self {
+            app,
+            tank,
+            grid,
+            tp,
+            fp,
+            half_tread,
+            out,
+            path,
+            tick: 0,
+        }
+    }
+
+    fn pose(&mut self, grade: f32, x: f32, z: f32, heading: Vec3) {
+        let grid = self.grid.clone();
+        place_on_ramp(&mut self.app, self.tank, &grid, grade, x, z, heading);
+    }
+
+    /// Advance one fixed tick under `(throttle, steer)` and append its telemetry row.
+    fn tick(&mut self, throttle: f32, steer: f32) -> ProbeSample {
+        let pre = {
+            let world = self.app.world();
+            (
+                *world
+                    .get::<crate::track::sim::TrackDrive>(self.tank)
+                    .expect("tank drives"),
+                world
+                    .get::<crate::track::sim::TankTransmission>(self.tank)
+                    .expect("tank carries transmission state")
+                    .0,
+            )
+        };
+        drive_tick(&mut self.app, self.tank, throttle, steer);
+
+        let world = self.app.world();
+        let position = world
+            .get::<avian3d::prelude::Position>(self.tank)
+            .expect("tank has a position")
+            .0;
+        let rotation = world
+            .get::<avian3d::prelude::Rotation>(self.tank)
+            .expect("tank has a rotation")
+            .0;
+        let velocity = world
+            .get::<avian3d::prelude::LinearVelocity>(self.tank)
+            .expect("tank has velocity")
+            .0;
+        let angular = world
+            .get::<avian3d::prelude::AngularVelocity>(self.tank)
+            .expect("tank has angular velocity")
+            .0;
+        let drive = *world
+            .get::<crate::track::sim::TrackDrive>(self.tank)
+            .expect("tank drives");
+        let st = world
+            .get::<crate::track::sim::TankTransmission>(self.tank)
+            .expect("tank carries transmission state")
+            .0;
+        let effect = *world
+            .get::<crate::track::sim::TrackGripEffect>(self.tank)
+            .expect("tank carries its traction effect");
+        let contacts = world
+            .get::<crate::track::sim::TrackContacts>(self.tank)
+            .expect("tank carries its contact field");
+        let contact_counts = [contacts.0[0].len(), contacts.0[1].len()];
+
+        let forward = rotation * Vec3::NEG_Z;
+        // The footprint the turning moment acts through, MEASURED: total carried load and the
+        // fore-aft extent of the loaded contacts (the classical `L`), so `M_t = μ_t·W·L/4` can be
+        // normalized against the sim's own geometry rather than an authored contact length.
+        let (mut support_n, mut fore, mut aft) = (0.0f32, f32::NEG_INFINITY, f32::INFINITY);
+        for side in &contacts.0 {
+            for contact in side {
+                if contact.load <= 0.0 {
+                    continue;
+                }
+                support_n += contact.load;
+                let along = (contact.point - position).dot(forward);
+                fore = fore.max(along);
+                aft = aft.min(along);
+            }
+        }
+        let footprint_m = if fore > aft { fore - aft } else { 0.0 };
+        let horizontal_forward = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
+        let speed = Vec3::new(velocity.x, 0.0, velocity.z).length();
+        let forward_speed = velocity.dot(forward);
+        let yaw_rate = angular.dot(rotation * Vec3::Y);
+        let yaw_kinematic = (drive.sides[0].speed - drive.sides[1].speed) / (2.0 * self.half_tread);
+        let pitch_deg = forward.y.clamp(-1.0, 1.0).asin().to_degrees();
+        // The world's own grade along the heading, read through the surface the belts probe.
+        let step = 2.0;
+        let grade_here = if horizontal_forward == Vec3::ZERO {
+            0.0
+        } else {
+            let ahead = self.grid.height_at(
+                position.x + horizontal_forward.x * step,
+                position.z + horizontal_forward.z * step,
+            );
+            let behind = self.grid.height_at(
+                position.x - horizontal_forward.x * step,
+                position.z - horizontal_forward.z * step,
+            );
+            (ahead - behind) / (2.0 * step)
+        };
+
+        // --- The scheduler's own decision inputs, recomputed from the PRE-tick transmission state
+        // and THIS tick's belt reactions — exactly the pair `transmission::step` was handed.
+        // DEMAND is the one exception (review round): production updates the demand EMA BEFORE
+        // computing reserves or evaluating shifts, and nothing later in the tick rewrites it, so
+        // the POST-tick `st.demand_n` IS the value the scheduler priced this tick. Reading the
+        // pre-tick EMA here blamed the wrong gate across the first-initialization transient.
+        //
+        // The LADDER is the second exception (Codex round): production commits a direction
+        // swap — reverse flipped, gear reset to 1 — BEFORE the demand observer and every
+        // scheduling decision, so on the swap tick the decision state is the POST-swap
+        // ladder at gear 1, not the pre-tick ladder. Pricing the swap row on the old ladder
+        // put its shaft-rpm/reserve/landing columns on a gear the scheduler never consulted.
+        let (pre_drive, pre_st) = pre;
+        let dec_demand = st.demand_n;
+        let swap_committed = st.reverse != pre_st.reverse;
+        let (dec_reverse, dec_gear) = if swap_committed {
+            (st.reverse, 1u8)
+        } else {
+            (pre_st.reverse, pre_st.gear)
+        };
+        let dir = if dec_reverse { -1.0 } else { 1.0 };
+        let m = (pre_drive.sides[0].speed + pre_drive.sides[1].speed) / 2.0;
+        let shaft = dir * m;
+        let ladder: &[f32] = if dec_reverse {
+            &self.tp.gears_rev
+        } else {
+            &self.tp.gears_fwd
+        };
+        let top = ladder.len() as u8;
+        let current_ratio = ladder[(dec_gear.clamp(1, top) - 1) as usize];
+        let shaft_rpm_of = |sh: f32, g: f32| sh * g / self.tp.sprocket_radius / PROBE_RPM_TO_RAD;
+        let dec_shaft_rpm = shaft_rpm_of(shaft, current_ratio);
+        let dec_reserve = crate::track::transmission::modeled_reserve_in_gear(
+            &self.tp,
+            &self.fp,
+            shaft,
+            current_ratio,
+            dec_demand,
+        );
+        let dec_margin = crate::track::transmission::reserve_margin(dec_demand);
+        let r_mean = (effect.belt_reaction[0] + effect.belt_reaction[1]) / 2.0;
+        let landing = crate::track::transmission::predict_shift_landing_m(
+            &self.tp, &self.fp, m, r_mean, PROBE_DT,
+        );
+        let (dec_reserve_next, dec_landing_rpm) = if dec_gear < top {
+            let up = ladder[dec_gear as usize];
+            (
+                crate::track::transmission::modeled_reserve_in_gear(
+                    &self.tp, &self.fp, shaft, up, dec_demand,
+                ),
+                shaft_rpm_of(dir * landing, up),
+            )
+        } else {
+            (f32::NAN, f32::NAN)
+        };
+
+        let side_commands = crate::track::drive::DriveAxes {
+            throttle: drive.throttle,
+            steer: drive.steer,
+        }
+        .side_commands();
+        let rpm = st.omega_e / PROBE_RPM_TO_RAD;
+        let scheduler = match st.scheduler {
+            crate::track::transmission::SchedulerState::Normal => "normal".to_string(),
+            crate::track::transmission::SchedulerState::GradeShift { from, to } => {
+                format!("grade{from}->{to}")
+            }
+            crate::track::transmission::SchedulerState::HillHold => "hillhold".to_string(),
+            crate::track::transmission::SchedulerState::GradeLimit => "gradelimit".to_string(),
+        };
+
+        {
+            use std::io::Write as _;
+            writeln!(
+                self.out,
+                "{tick},{t:.5},{x:.4},{y:.4},{z:.4},{speed:.5},{fwd:.5},{grade:.6},{pitch:.4},\
+{yaw:.6},{yaw_kin:.6},{cmd_t:.4},{cmd_s:.4},{dt_:.6},{ds:.6},{scl:.6},{scr:.6},{bl:.6},{br:.6},\
+{rl:.2},{rr:.2},{cl},{cr},{gear},{rev},{shift},{detent},{sched},{rpm:.2},{dshaft:.2},{demand:.2},\
+{res:.2},{resn:.2},{marg:.2},{land:.5},{landrpm:.2},{gc},{gt},{clutch},{park},{hold},{dwell},{lsd},\
+{support:.1},{footprint:.4}",
+                tick = self.tick,
+                t = self.tick as f32 / FIXED_TICKS_PER_SECOND as f32,
+                x = position.x,
+                y = position.y,
+                z = position.z,
+                speed = speed,
+                fwd = forward_speed,
+                grade = grade_here,
+                pitch = pitch_deg,
+                yaw = yaw_rate,
+                yaw_kin = yaw_kinematic,
+                cmd_t = throttle,
+                cmd_s = steer,
+                dt_ = drive.throttle,
+                ds = drive.steer,
+                scl = side_commands[0],
+                scr = side_commands[1],
+                bl = drive.sides[0].speed,
+                br = drive.sides[1].speed,
+                rl = effect.belt_reaction[0],
+                rr = effect.belt_reaction[1],
+                cl = contact_counts[0],
+                cr = contact_counts[1],
+                gear = st.gear,
+                rev = u8::from(st.reverse),
+                shift = st.shift_ticks,
+                detent = st.steer_step,
+                sched = scheduler,
+                rpm = rpm,
+                dshaft = dec_shaft_rpm,
+                demand = st.demand_n,
+                res = dec_reserve,
+                resn = dec_reserve_next,
+                marg = dec_margin,
+                land = landing,
+                landrpm = dec_landing_rpm,
+                gc = st.grade_confirm_ticks,
+                gt = st.grade_target,
+                clutch = u8::from(st.clutch_out),
+                park = u8::from(st.park),
+                hold = u8::from(st.hill_hold),
+                dwell = st.dwell_ticks,
+                lsd = st.last_shift_dir,
+                support = support_n,
+                footprint = footprint_m,
+            )
+            .expect("telemetry row");
+        }
+        self.tick += 1;
+
+        ProbeSample {
+            speed,
+            fwd_speed: forward_speed,
+            yaw_rate,
+            yaw_kinematic,
+            gear: st.gear,
+            reverse: st.reverse,
+            park: st.park,
+            steer_step: st.steer_step,
+            rpm,
+            demand_n: st.demand_n,
+            reserve: dec_reserve,
+            reserve_next: dec_reserve_next,
+            belts: [drive.sides[0].speed, drive.sides[1].speed],
+            belt_reaction: effect.belt_reaction,
+            support_n,
+            footprint_m,
+            side_commands,
+            position,
+            scheduler: st.scheduler,
+        }
+    }
+
+    fn finish(mut self) -> std::path::PathBuf {
+        use std::io::Write as _;
+        self.out.flush().expect("telemetry flush");
+        self.path
+    }
+}
+
+/// A gear trace as `(tick, gear)` transitions — the compact form the summaries print.
+fn gear_transitions(samples: &[ProbeSample]) -> Vec<(usize, u8)> {
+    let mut trace: Vec<(usize, u8)> = Vec::new();
+    for (tick, sample) in samples.iter().enumerate() {
+        if trace.last().map(|&(_, g)| g) != Some(sample.gear) {
+            trace.push((tick, sample.gear));
+        }
+    }
+    trace
+}
+
+/// SYMPTOM 1 — uphill upshift refusal. Full throttle from rest, pointed straight up a constant
+/// grade. The trace answers whether the box ever leaves its launch gear, and (via `dec_reserve`,
+/// `dec_reserve_next`, `dec_landing_rpm`) WHICH of the three upshift gates refuses.
+#[test]
+#[ignore = "instrument, not a gate: writes driving telemetry"]
+fn probe_climb_10pct() {
+    let grade = probe_grade(0.10);
+    let mut probe = DriveProbe::open(&format!("climb-{:.0}pct", grade * 100.0), grade);
+    probe.pose(grade, -200.0, 0.0, Vec3::X);
+    let mut samples = Vec::new();
+    for _ in 0..(40 * FIXED_TICKS_PER_SECOND) {
+        samples.push(probe.tick(1.0, 0.0));
+    }
+    let last = *samples.last().expect("the climb recorded ticks");
+    let max_rpm = samples.iter().fold(0.0f32, |a, s| a.max(s.rpm));
+    let max_speed = samples.iter().fold(0.0f32, |a, s| a.max(s.speed));
+    let governed = probe.tp.engine.governed_rpm;
+    let up_band = probe.tp.shift_up_rpm;
+    let ticks_at_band = samples.iter().filter(|s| s.rpm >= up_band).count();
+    let mean_reserve_next = samples
+        .iter()
+        .filter(|s| s.reserve_next.is_finite())
+        .map(|s| s.reserve_next)
+        .sum::<f32>()
+        / samples.len().max(1) as f32;
+    println!(
+        "probe climb {grade_pct:.1}% grade -> {path}\n  \
+         gear trace (tick, gear): {trace:?}\n  \
+         max rpm {max_rpm:.0} (up band {up_band:.0}, governed {governed:.0}), \
+         ticks at/above up band {ticks_at_band}\n  \
+         max speed {max_speed:.3} m/s, final speed {speed:.3} m/s, climbed {climb:.1} m of x\n  \
+         final demand {demand:.0} N, reserve(cur) {res:.0} N, reserve(next) {resn:.0} N, \
+         mean reserve(next) {meanresn:.0} N, scheduler {sched:?}",
+        grade_pct = grade * 100.0,
+        trace = gear_transitions(&samples),
+        speed = last.speed,
+        climb = last.position.x + 200.0,
+        demand = last.demand_n,
+        res = last.reserve,
+        resn = last.reserve_next,
+        meanresn = mean_reserve_next,
+        sched = last.scheduler,
+        path = probe.finish().display(),
+    );
+}
+
+/// SYMPTOM 2 — downhill overrun. Launch down the same grade, then release the throttle and coast:
+/// the trace shows how far past the governor the crank is dragged. Descent round: on overrun the
+/// box HOLDS its gear (engine braking is the point) and the protective upshift is a last resort
+/// past the max-curve ceiling — expect the dial to climb toward the curve top in the held gear,
+/// not the old governed + 150 upshift walk.
+#[test]
+#[ignore = "instrument, not a gate: writes driving telemetry"]
+fn probe_descend_10pct() {
+    let grade = probe_grade(0.10);
+    let mut probe = DriveProbe::open(&format!("descend-{:.0}pct", grade * 100.0), grade);
+    probe.pose(grade, 300.0, 0.0, Vec3::NEG_X);
+    let launch = 4 * FIXED_TICKS_PER_SECOND;
+    let mut samples = Vec::new();
+    for tick in 0..(40 * FIXED_TICKS_PER_SECOND) {
+        let throttle = if tick < launch { 1.0 } else { 0.0 };
+        samples.push(probe.tick(throttle, 0.0));
+    }
+    let coast = &samples[launch..];
+    let max_rpm = coast.iter().fold(0.0f32, |a, s| a.max(s.rpm));
+    let max_speed = coast.iter().fold(0.0f32, |a, s| a.max(s.speed));
+    let governed = probe.tp.engine.governed_rpm;
+    let rated = probe.tp.max_curve_rpm();
+    let over = coast.iter().filter(|s| s.rpm > governed).count();
+    let last = *coast.last().expect("the descent recorded coast ticks");
+    println!(
+        "probe descend {grade_pct:.1}% grade -> {path}\n  \
+         gear trace (tick, gear): {trace:?}\n  \
+         coast max rpm {max_rpm:.0} (governed {governed:.0}, curve top {rated:.0}) = \
+         {over_pct:.1}% over governed; coast ticks above governed {over}\n  \
+         coast max speed {max_speed:.3} m/s, final speed {speed:.3} m/s, final gear F{gear}, \
+         final rpm {rpm:.0}, belts L {bl:.3} / R {br:.3}",
+        grade_pct = grade * 100.0,
+        trace = gear_transitions(&samples),
+        over_pct = (max_rpm / governed - 1.0) * 100.0,
+        speed = last.speed,
+        gear = last.gear,
+        rpm = last.rpm,
+        bl = last.belts[0],
+        br = last.belts[1],
+        path = probe.finish().display(),
+    );
+}
+
+/// SYMPTOM 3 — slow turning. Reach a low steady speed on the FLAT (grade 0), then hold full steer:
+/// the trace pairs the commanded side split (`side_cmd_l/r`, and the belt difference it produced)
+/// with the hull's measured yaw rate and the yaw rate that belt difference alone implies
+/// (`yaw_kin = (v_l − v_r) / 2b`). The gap between them is scrub; the gap between `yaw_kin` and the
+/// L600 detent's own `v / R` is the transmission's.
+#[test]
+#[ignore = "instrument, not a gate: writes driving telemetry"]
+fn probe_turn_at_2ms() {
+    const TARGET: f32 = 2.0;
+    // Hold the SAME throttle through the turn as through the straight run-up, so the only changed
+    // input is the steer command; `SPIKE_DRIVE_PROBE_TURN_THROTTLE` re-runs it part-throttle.
+    let turn_throttle: f32 = crate::env_parse("SPIKE_DRIVE_PROBE_TURN_THROTTLE").unwrap_or(1.0);
+    // Full lock by default (the tight detent); `SPIKE_DRIVE_PROBE_STEER=0.3` re-runs it wide.
+    let steer = probe_steer(1.0);
+    let mut probe = DriveProbe::open(&format!("turn-t{turn_throttle:.2}-s{steer:.2}"), 0.0);
+    probe.pose(0.0, 0.0, 0.0, Vec3::X);
+    // Phase 1: full throttle straight until the hull passes the target speed (bounded).
+    let mut spin_up = 0;
+    for tick in 0..(20 * FIXED_TICKS_PER_SECOND) {
+        let sample = probe.tick(1.0, 0.0);
+        spin_up = tick + 1;
+        if sample.speed >= TARGET {
+            break;
+        }
+    }
+    // Phase 2: same throttle, steer held at the selected magnitude.
+    let mut samples = Vec::new();
+    for _ in 0..(20 * FIXED_TICKS_PER_SECOND) {
+        samples.push(probe.tick(turn_throttle, steer));
+    }
+    // Read the settled turn from the last two seconds, clear of the steer slew and detent engage.
+    let settled = &samples[samples.len() - 2 * FIXED_TICKS_PER_SECOND..];
+    let mean =
+        |f: fn(&ProbeSample) -> f32| settled.iter().map(f).sum::<f32>() / settled.len() as f32;
+    let speed = mean(|s| s.speed);
+    let yaw = mean(|s| s.yaw_rate);
+    let yaw_kin = mean(|s| s.yaw_kinematic);
+    let belt_l = mean(|s| s.belts[0]);
+    let belt_r = mean(|s| s.belts[1]);
+    let cmd_l = mean(|s| s.side_commands[0]);
+    let cmd_r = mean(|s| s.side_commands[1]);
+    let last = *settled.last().expect("the turn recorded settled ticks");
+    let radii = &probe.tp.steer_radii_m;
+    let (tight, wide) = radii[(last.gear.clamp(1, radii.len() as u8) - 1) as usize];
+    println!(
+        "probe turn: steer {steer:.2} engaged at {TARGET:.1} m/s, throttle {turn_throttle:.2} \
+(flat) -> {path}\n  \
+         spin-up took {spin_up} ticks; settled gear F{gear}, detent radii tight {tight:.2} m / \
+         wide {wide:.2} m\n  \
+         commanded side split L {cmd_l:.3} / R {cmd_r:.3} (difference {cmd_d:.3}); \
+         belts L {belt_l:.3} / R {belt_r:.3} m/s (difference {belt_d:.3})\n  \
+         speed {speed:.3} m/s; yaw MEASURED {yaw:.4} rad/s vs belt-kinematic {yaw_kin:.4} rad/s \
+         vs detent v/R tight {yaw_tight:.4} / wide {yaw_wide:.4} rad/s\n  \
+         implied turn radius {radius:.2} m; gear trace (tick, gear): {trace:?}",
+        gear = last.gear,
+        cmd_d = cmd_l - cmd_r,
+        belt_d = belt_l - belt_r,
+        yaw_tight = speed / tight,
+        yaw_wide = speed / wide,
+        radius = if yaw.abs() > 1e-6 {
+            speed / yaw.abs()
+        } else {
+            f32::INFINITY
+        },
+        trace = gear_transitions(&samples),
+        path = probe.finish().display(),
+    );
+}
+
+// --- Turn-radius sweep ---------------------------------------------------------------------------
+//
+// The falsifiable experiment behind SYMPTOM 3. The shipped box is FixedRadii/L600: the commanded
+// belt-speed half-difference is `d = sign(steer)·κ(gear, step)·|m|`, so gear × detent selects a
+// COMMANDED radius `R_cmd = half_tread/κ` spanning 3.44 m (F1 tight) to 165 m (F8 wide). The
+// per-element grip law underneath is an isotropic friction circle at a single μ.
+//
+// Primary-source research says the real Tiger's radius table is pure gear-train kinematics and that
+// the physical turning resistance FALLS steeply with commanded radius (the empirical Nikitin curve:
+// ~0.9·μ at R = 3.5 m down to ~0.1·μ at R = 173 m). The prediction that follows for THIS sim is
+// that the scrub loss `1 − η`, with `η = ω·half_tread/d`, must be strongly radius-dependent — large
+// in a tight low-gear turn, near zero in a high-gear sweeper. A FLAT loss across the whole radius
+// span would instead indicate a defect in the force chain, not a friction curve.
+//
+// Secondary checksum: at the widest commanded radii the INNER track's longitudinal force must cross
+// from braking (negative `belt_reaction`) to driving (positive) — the classical free turning radius
+// — which validates the force balance end to end.
+//
+// The gear is reached HONESTLY: full throttle straight on the flat until the box lands the target
+// gear, then the steer command goes in immediately. That ordering is what makes the point hold: the
+// shift lands the gear with a torque-cut window of `shift_secs` (≈ 20 ticks) during which no further
+// shift can be selected, and the steer slew ([`crate::track::drive::DRIVE_SLEW_PER_SECOND`] = 4/s)
+// crosses the tight detent threshold in ~9 ticks — so the detent latches INSIDE the window, and an
+// engaged detent defers every upshift thereafter. Nothing is pre-seeded; no sim law is touched.
+
+/// One settled point of [`probe_turn_radius_sweep`] — everything the trend needs, per (gear, detent).
+struct TurnPoint {
+    target_gear: u8,
+    steer_cmd: f32,
+    /// Gear the box actually settled in (a bog downshift shows up here).
+    gear: u8,
+    /// Engaged detent step: 0 straight, 1 wide, 2 tight.
+    step: u8,
+    /// `κ = half_tread/R` for the settled (gear, step) — the table the constraint reads.
+    kappa: f32,
+    /// Commanded radius from the RON table for the settled (gear, step).
+    r_cmd: f32,
+    /// `v/|ω|` — the radius the hull actually described.
+    r_achieved: f32,
+    speed: f32,
+    rpm: f32,
+    /// `κ·|m|` — the half-difference the constraint asked for.
+    d_cmd: f32,
+    /// `(v_L − v_R)/2` — the half-difference the belts actually ran.
+    d_actual: f32,
+    /// Signed hull yaw rate (rad/s); negative is the right turn a positive steer commands.
+    yaw: f32,
+    /// `|ω|·half_tread/|d|` — how much of the belt difference became hull rotation.
+    eta: f32,
+    belts: [f32; 2],
+    /// Per-side longitudinal ground force (N), `[outer, inner]` for the commanded turn side.
+    reaction: [f32; 2],
+    /// The yaw-resisting couple the footprint actually produced (N·m): `(F_outer − F_inner)·b`.
+    /// This — not `1 − η` — is the sim's own analogue of a turning-resistance coefficient.
+    yaw_moment: f32,
+    /// `4·M/(W·L)` from the MEASURED carried load and contact length: the sim's emergent turning
+    /// friction coefficient in the units the Nikitin curve is quoted in.
+    mu_t_measured: f32,
+    /// The Nikitin reference `μ/(0.925 + 0.15·R_cmd/B)` at this commanded radius — a REFERENCE
+    /// CURVE for comparison only; no sim law reads it.
+    mu_t_nikitin: f32,
+    notes: Vec<String>,
+    path: std::path::PathBuf,
+}
+
+/// Drive one sweep point: run up to `target_gear` on the flat, then hold `steer_cmd` until the turn
+/// settles, and reduce the last `SPIKE_DRIVE_PROBE_SETTLE_S` seconds into a [`TurnPoint`].
+fn probe_turn_point(target_gear: u8, steer_cmd: f32) -> TurnPoint {
+    let run_up_secs: usize = crate::env_parse("SPIKE_DRIVE_PROBE_RUNUP_S").unwrap_or(120);
+    let turn_secs: usize = crate::env_parse("SPIKE_DRIVE_PROBE_TURN_S").unwrap_or(40);
+    let settle_secs: usize = crate::env_parse("SPIKE_DRIVE_PROBE_SETTLE_S").unwrap_or(3);
+    let settle = settle_secs * FIXED_TICKS_PER_SECOND;
+    assert!(
+        turn_secs >= 2 * settle_secs && settle_secs > 0,
+        "the turn window must hold two settle windows"
+    );
+
+    let mut probe = DriveProbe::open(&format!("turn-F{target_gear}-s{steer_cmd:.2}"), 0.0);
+    // Start deep in the −X/−Z quadrant, heading +X: a positive steer curves toward hull-right
+    // (+Z here), so the widest circle (R = 165 m) still closes well inside the world span.
+    probe.pose(0.0, -1000.0, -300.0, Vec3::X);
+    let mut notes = Vec::new();
+
+    // Phase 1 — honest run-up: full throttle, straight, until the box lands the target gear.
+    let mut run_up = 0usize;
+    let mut top_seen = 1u8;
+    let mut reached = false;
+    for _ in 0..(run_up_secs * FIXED_TICKS_PER_SECOND) {
+        let sample = probe.tick(1.0, 0.0);
+        run_up += 1;
+        top_seen = top_seen.max(sample.gear);
+        if sample.gear >= target_gear {
+            reached = true;
+            break;
+        }
+        if sample.position.x.abs() > 1100.0 || sample.position.z.abs() > 1100.0 {
+            notes.push("run-up hit the world guard before the gear landed".into());
+            break;
+        }
+    }
+    if !reached {
+        notes.push(format!(
+            "target gear NOT reached on the flat: topped out at F{top_seen} after {run_up} ticks"
+        ));
+    }
+
+    // Phase 2 — steer in and hold. The first ~1 s covers the command slew and the detent latch.
+    let mut turn = Vec::with_capacity(turn_secs * FIXED_TICKS_PER_SECOND);
+    for _ in 0..(turn_secs * FIXED_TICKS_PER_SECOND) {
+        turn.push(probe.tick(1.0, steer_cmd));
+    }
+
+    let mean = |window: &[ProbeSample], f: fn(&ProbeSample) -> f32| {
+        window.iter().map(f).sum::<f32>() / window.len() as f32
+    };
+    let settled = &turn[turn.len() - settle..];
+    let prior = &turn[turn.len() - 2 * settle..turn.len() - settle];
+    let last = *settled.last().expect("the turn recorded settled ticks");
+
+    let speed = mean(settled, |s| s.speed);
+    let yaw = mean(settled, |s| s.yaw_rate);
+    let belts = [mean(settled, |s| s.belts[0]), mean(settled, |s| s.belts[1])];
+    let reaction_lr = [
+        mean(settled, |s| s.belt_reaction[0]),
+        mean(settled, |s| s.belt_reaction[1]),
+    ];
+    let m = (belts[0] + belts[1]) / 2.0;
+    let d_actual = (belts[0] - belts[1]) / 2.0;
+    let (tp, fp, half_tread) = (probe.tp.clone(), probe.fp.clone(), probe.half_tread);
+    let idx = (last.gear.clamp(1, tp.steer_kappa.len() as u8) - 1) as usize;
+    let (k_tight, k_wide) = tp.steer_kappa[idx];
+    let (r_tight, r_wide) = tp.steer_radii_m[idx];
+    let (kappa, r_cmd) = match last.steer_step {
+        0 => (0.0, f32::INFINITY),
+        1 => (k_wide, r_wide),
+        _ => (k_tight, r_tight),
+    };
+    // The constraint's own target: sign(steer)·κ·|m|. Steer sign is the sweep's (positive).
+    let d_cmd = kappa * m.abs();
+    // The hull yaw sign is opposite the belt-difference convention (hull forward is −Z, so a
+    // faster LEFT belt yaws negative about the hull's up axis); η is taken on magnitudes.
+    let eta = if d_actual.abs() > 1e-6 {
+        yaw.abs() * half_tread / d_actual.abs()
+    } else {
+        f32::NAN
+    };
+    let r_achieved = if yaw.abs() > 1e-6 {
+        speed / yaw.abs()
+    } else {
+        f32::INFINITY
+    };
+    // The turning-resistance reading. The couple the two belts push through the tread arm is the
+    // moment the footprint's lateral scrub is resisting; normalizing it by the MEASURED carried
+    // load and contact length (`M_t = μ_t·W·L/4`) puts the sim's emergent number in the same units
+    // as the empirical Nikitin curve `μ_t = μ/(0.925 + 0.15·R/B)`, quoted here purely as a
+    // reference shape (B = tread = 2·half_tread).
+    let yaw_moment = (reaction_lr[0] - reaction_lr[1]) * half_tread;
+    let support_n = mean(settled, |s| s.support_n);
+    let footprint_m = mean(settled, |s| s.footprint_m);
+    let mu_t_measured = if support_n > 1.0 && footprint_m > 1e-3 {
+        4.0 * yaw_moment / (support_n * footprint_m)
+    } else {
+        f32::NAN
+    };
+    let mu_t_nikitin = fp.mu / (0.925 + 0.15 * r_cmd / (2.0 * half_tread));
+    if last.gear != target_gear {
+        notes.push(format!(
+            "settled in F{} — not the target F{target_gear}",
+            last.gear
+        ));
+    }
+    if last.steer_step == 0 {
+        notes.push("the detent NEVER engaged (straight-gear constraint)".into());
+    }
+    let settled_rpm = mean(settled, |s| s.rpm);
+    if settled_rpm < tp.engine.idle_rpm {
+        notes.push(format!(
+            "TURN BOG: the crank settled at {settled_rpm:.0} rpm, below idle \
+             {:.0} — the turn load lugged the engine and no lower gear was available",
+            tp.engine.idle_rpm
+        ));
+    }
+    let trace = gear_transitions(&turn);
+    if trace.len() > 1 {
+        notes.push(format!("gear moved during the turn: {trace:?}"));
+    }
+    if d_cmd > 1e-4 && (d_actual - d_cmd).abs() / d_cmd > 0.05 {
+        notes.push(format!(
+            "λ SLIP: belt difference {d_actual:.3} vs commanded {d_cmd:.3} m/s \
+             ({:+.1}%) — the geared constraint is not being met",
+            (d_actual / d_cmd - 1.0) * 100.0
+        ));
+    }
+    let drift = |f: fn(&ProbeSample) -> f32| {
+        let (a, b) = (mean(settled, f), mean(prior, f));
+        (a - b).abs() / a.abs().max(1e-3)
+    };
+    let (v_drift, w_drift) = (drift(|s| s.speed), drift(|s| s.yaw_rate));
+    if v_drift > 0.02 || w_drift > 0.02 {
+        notes.push(format!(
+            "not fully settled over the last {}s: speed drift {:.1}%, yaw drift {:.1}%",
+            2 * settle_secs,
+            v_drift * 100.0,
+            w_drift * 100.0
+        ));
+    }
+
+    TurnPoint {
+        target_gear,
+        steer_cmd,
+        gear: last.gear,
+        step: last.steer_step,
+        kappa,
+        r_cmd,
+        r_achieved,
+        speed,
+        rpm: settled_rpm,
+        d_cmd,
+        d_actual,
+        yaw,
+        eta,
+        belts,
+        // Positive steer runs the LEFT belt fast, so left is the OUTER track and right the inner.
+        reaction: reaction_lr,
+        yaw_moment,
+        mu_t_measured,
+        mu_t_nikitin,
+        notes,
+        path: probe.finish(),
+    }
+}
+
+/// THE RADIUS SWEEP — every reachable forward gear × both steering detents, as steady-state turns
+/// on the flat. Prints one table row per point (gear, detent, `R_cmd`, `R_achieved`, `v`, rpm,
+/// `d_cmd`, `d_actual`, `ω`, `η`, loss, per-side force with the inner-track sign, and the yaw
+/// moment against the Nikitin reference) and flags every point where the constraint slipped or the
+/// box left the target gear instead of pretending it settled.
+#[test]
+#[ignore = "instrument, not a gate: writes driving telemetry"]
+fn probe_turn_radius_sweep() {
+    let gears = probe_list("SPIKE_DRIVE_PROBE_GEARS", &[1u8, 2, 3, 4, 5, 6, 7, 8]);
+    // Tight then wide: `SPIKE_DRIVE_PROBE_STEER` re-points the tight entry, `..._STEERS` the list.
+    let steers = probe_list("SPIKE_DRIVE_PROBE_STEERS", &[probe_steer(1.0), 0.3f32]);
+    let mut points = Vec::new();
+    for &steer in &steers {
+        for &gear in &gears {
+            points.push(probe_turn_point(gear, steer));
+        }
+    }
+
+    println!(
+        "\nturn-radius sweep — FixedRadii/L600, flat ground, full throttle\n\
+         {:>4} {:>6} {:>7} {:>8} {:>9} {:>7} {:>7} {:>7} {:>7} {:>9} {:>6} {:>6} {:>10} {:>10} \
+{:>9} {:>7} {:>7}",
+        "gear",
+        "detent",
+        "kappa",
+        "R_cmd_m",
+        "R_achv_m",
+        "v_m/s",
+        "rpm",
+        "d_cmd",
+        "d_actl",
+        "yaw_rad/s",
+        "eta",
+        "loss",
+        "F_outer_N",
+        "F_inner_N",
+        "M_yaw_kNm",
+        "mu_t",
+        "nikitin",
+    );
+    for p in &points {
+        let detent = match p.step {
+            0 => "none",
+            1 => "wide",
+            _ => "tight",
+        };
+        println!(
+            "  F{gear} {detent:>6} {kappa:>7.4} {r_cmd:>8.2} {r_achv:>9.2} {v:>7.3} {rpm:>7.0} \
+{d_cmd:>7.3} {d_actual:>7.3} {yaw:>9.4} {eta:>6.3} {loss:>6.3} {fo:>10.0} {fi:>10.0} \
+{moment:>9.1} {mu_t:>7.3} {nikitin:>7.3}",
+            gear = p.gear,
+            kappa = p.kappa,
+            r_cmd = p.r_cmd,
+            r_achv = p.r_achieved,
+            v = p.speed,
+            rpm = p.rpm,
+            d_cmd = p.d_cmd,
+            d_actual = p.d_actual,
+            yaw = p.yaw,
+            eta = p.eta,
+            loss = 1.0 - p.eta,
+            fo = p.reaction[0],
+            fi = p.reaction[1],
+            moment = p.yaw_moment / 1000.0,
+            mu_t = p.mu_t_measured,
+            nikitin = p.mu_t_nikitin,
+        );
+    }
+    println!("\nper-point detail:");
+    for p in &points {
+        println!(
+            "  target F{target} steer {steer:.2} -> settled F{gear} step {step}, belts \
+             L {bl:.3} / R {br:.3} m/s, inner force {fi:.0} N ({sign}) -> {path}",
+            target = p.target_gear,
+            steer = p.steer_cmd,
+            gear = p.gear,
+            step = p.step,
+            bl = p.belts[0],
+            br = p.belts[1],
+            fi = p.reaction[1],
+            sign = if p.reaction[1] >= 0.0 {
+                "DRIVING"
+            } else {
+                "braking"
+            },
+            path = p.path.display(),
+        );
+        for note in &p.notes {
+            println!("      ! {note}");
+        }
+    }
+}
+
+// --- Descent-behavior probes (descent round) ----------------------------------------------------
+//
+// The rising motoring curve + the overrun gear hold give each gear a natural downhill
+// equilibrium; the signed-intent contract flows a held S through the stop into reverse; the
+// parking latch owns standstill. These probes are the slice's evidence: the per-gear
+// equilibrium table, the through-zero flow (with the reverse-ladder boundary-cycle assert
+// from the 2026-07-26 field report), and the latch hold/release. Same doctrine as the feel
+// probes above: TankCommand + initial pose are the only writes, all derived numbers come
+// through the production laws, and the CSVs land beside the others.
+
+/// Signed forward proxy for the descent probes: the mean belt speed (positive = rolling the
+/// F-ladder's way). The hull `speed` column is unsigned; the belts carry the sign.
+fn mean_belt(sample: &ProbeSample) -> f32 {
+    (sample.belts[0] + sample.belts[1]) / 2.0
+}
+
+/// Descent evidence (a): coast on the grade settles at a bounded per-gear equilibrium.
+/// Launch downhill under W until the box lands the target gear, release, and coast 30 s:
+/// the rising motoring curve balances the grade in mid-ladder gears (higher gear → higher
+/// equilibrium speed), low gears over-brake and walk down to the F1 creep seam, and the rpm
+/// stays bounded by the max-curve ceiling everywhere (the last-resort shift fires only past
+/// it). Prints the equilibrium table.
+#[test]
+#[ignore = "instrument, not a gate: writes driving telemetry"]
+fn probe_descend_equilibrium_gears() {
+    let grade = probe_grade(0.10);
+    let mut rows = Vec::new();
+    for target in [3u8, 4, 5] {
+        let mut probe = DriveProbe::open(
+            &format!("descend-eq-F{target}-{:.0}pct", grade * 100.0),
+            grade,
+        );
+        probe.pose(grade, 300.0, 0.0, Vec3::NEG_X);
+        let mut landed = false;
+        for _ in 0..(20 * FIXED_TICKS_PER_SECOND) {
+            if probe.tick(1.0, 0.0).gear >= target {
+                landed = true;
+                break;
+            }
+        }
+        assert!(landed, "the downhill launch never reached F{target}");
+        let mut samples = Vec::new();
+        for _ in 0..(30 * FIXED_TICKS_PER_SECOND) {
+            samples.push(probe.tick(0.0, 0.0));
+        }
+        // Bounded rpm: the over-rev slip guard's end-of-tick clamp is an EXACT bound on
+        // the raw crank state (ω units) — the crank may touch the ceiling (that fires
+        // the last resort) and ride at most to `max_curve + OVERREV margin`, never past
+        // it. The 0.01 rpm slack covers only the rad/s→rpm float round-trip, not physics.
+        let guard = probe.tp.max_curve_rpm() + crate::track::transmission::OVERREV_MARGIN_RPM;
+        let max_rpm = samples.iter().fold(0.0f32, |a, s| a.max(s.rpm));
+        assert!(
+            max_rpm <= guard + 0.01,
+            "F{target} coast: crank ran away past the over-rev guard point \
+             ({max_rpm:.0} vs {guard:.0} rpm)"
+        );
+        let tail = &samples[samples.len() - 2 * FIXED_TICKS_PER_SECOND..];
+        let mean = |f: fn(&ProbeSample) -> f32| tail.iter().map(f).sum::<f32>() / tail.len() as f32;
+        let (speed, rpm) = (mean(mean_belt), mean(|s| s.rpm));
+        let (lo, hi) = tail
+            .iter()
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |a, s| {
+                (a.0.min(mean_belt(s)), a.1.max(mean_belt(s)))
+            });
+        // Bounded equilibrium: the settled window stays inside a narrow speed band (the F1
+        // creep seam's clutch-hysteresis cycle is the widest legal band) and inside the
+        // gearing-implied top speed.
+        assert!(
+            hi - lo < 0.3 && hi <= probe.tp.geared_top_speed(),
+            "F{target} coast never settled (tail band {lo:.2}..{hi:.2} m/s)"
+        );
+        let last = tail.last().expect("tail has samples");
+        let settled_gear = last.gear;
+        assert!(
+            tail.iter().all(|s| s.gear == settled_gear),
+            "F{target} coast: gear still changing in the settled window"
+        );
+        rows.push((target, settled_gear, speed, rpm, probe.finish()));
+    }
+    println!("\ndescent equilibrium — 10% grade, coast from gear (release at landing):");
+    println!(
+        "  {:>9} {:>12} {:>11} {:>9}",
+        "released", "settled gear", "speed m/s", "rpm"
+    );
+    for (target, gear, speed, rpm, path) in &rows {
+        println!(
+            "  {:>9} {:>12} {:>11.2} {:>9.0}   {}",
+            format!("F{target}"),
+            format!("F{gear}"),
+            speed,
+            rpm,
+            path.display()
+        );
+    }
+}
+
+/// Descent evidence (b) + the 2026-07-26 field findings: hold S while descending. The tank
+/// must brake to a stop with no free-roll gap (the swap window keeps braking — the old seam
+/// released the brakes at the ladder swap and re-accelerated downhill), flow through zero
+/// into reverse WITHOUT a re-press, and back up the slope steadily — the reverse-ladder
+/// boundary limit cycle (R1→R2→R3→R1, same attractor as the measured F5↔F6 climb cycle)
+/// must be gone: no gear revisited in the steady tail.
+#[test]
+#[ignore = "instrument, not a gate: writes driving telemetry"]
+fn probe_descend_s_hold_flows_into_reverse_climb() {
+    let grade = probe_grade(0.10);
+    let mut probe = DriveProbe::open(&format!("descend-s-hold-{:.0}pct", grade * 100.0), grade);
+    probe.pose(grade, 300.0, 0.0, Vec3::NEG_X);
+    // Phase 1: the descend probe's own 4 s W launch downhill.
+    for _ in 0..(4 * FIXED_TICKS_PER_SECOND) {
+        probe.tick(1.0, 0.0);
+    }
+    // Phase 2: S held for 40 s — brake, cross zero, climb back up in reverse.
+    let mut samples = Vec::new();
+    for _ in 0..(40 * FIXED_TICKS_PER_SECOND) {
+        samples.push(probe.tick(-1.0, 0.0));
+    }
+
+    // The command shaper slews +1 → −1 over 0.5 s; the drivetrain's own contract starts
+    // once the brake command is actually in.
+    let slew = FIXED_TICKS_PER_SECOND / 2;
+    let crossing = samples
+        .iter()
+        .position(|s| s.fwd_speed < 0.0)
+        .expect("held S must carry the tank through zero into reverse");
+    assert!(crossing >= slew, "crossing cannot precede the command slew");
+    // No free-roll gap: while still rolling forward under the settled S command, the HULL
+    // never re-accelerates downhill (beyond suspension-pitch float noise) — including
+    // through the swap window, which used to carry neither drive nor brake. The belts are
+    // deliberately not the signal here: they chatter tick-to-tick under saturated braking
+    // (stop-force vs grip shear), which is slip physics, not a free roll.
+    let mut max_step = 0.0f32;
+    for pair in samples[slew..=crossing].windows(2) {
+        let dv = pair[1].fwd_speed - pair[0].fwd_speed;
+        max_step = max_step.max(dv);
+        assert!(
+            dv <= 0.01,
+            "free-roll gap: the hull re-accelerated {dv:.4} m/s in one tick while \
+             braking downhill toward the crossing"
+        );
+    }
+    // The swap engages the reverse ladder before the crossing completes and never flaps.
+    let swap = samples
+        .iter()
+        .position(|s| s.reverse)
+        .expect("the held S must engage the reverse ladder");
+    assert!(
+        samples[swap..].iter().all(|s| s.reverse),
+        "the reverse ladder must stay engaged once swapped"
+    );
+    // No gear churn at the crossing: the braking-chain downshifts before it and the launch
+    // upshifts after it are each legitimate, but no (ladder, gear) may be REVISITED inside
+    // ±1 s — a revisit is the flapping the crossing must not have.
+    let window = &samples
+        [crossing.saturating_sub(FIXED_TICKS_PER_SECOND)..crossing + FIXED_TICKS_PER_SECOND];
+    let mut crossing_seen: Vec<(bool, u8)> = Vec::new();
+    for s in window {
+        let state = (s.reverse, s.gear);
+        if crossing_seen.last() != Some(&state) {
+            assert!(
+                !crossing_seen.contains(&state),
+                "gear churn at the zero crossing: {}{} revisited (sequence {:?})",
+                if state.0 { 'R' } else { 'F' },
+                state.1,
+                crossing_seen
+            );
+            crossing_seen.push(state);
+        }
+    }
+    // Steady reverse climb: the field-reported boundary cycle means a gear REVISITED in the
+    // tail. Assert every settled-tail transition lands a fresh gear.
+    let tail = &samples[samples.len() - 15 * FIXED_TICKS_PER_SECOND..];
+    let transitions = gear_transitions(tail);
+    let mut seen = Vec::new();
+    for &(_, gear) in &transitions {
+        assert!(
+            !seen.contains(&gear),
+            "reverse-ladder boundary cycle: gear R{gear} revisited in the steady tail \
+             (transitions {transitions:?})"
+        );
+        seen.push(gear);
+    }
+    let last = samples.last().expect("phase 2 recorded ticks");
+    assert!(
+        last.fwd_speed < -0.2,
+        "the tank must be backing up the slope at the end (fwd {:.3})",
+        last.fwd_speed
+    );
+    println!(
+        "probe descend S-hold {grade_pct:.1}% -> {path}\n  \
+         crossing at tick {crossing} ({t_cross:.2} s after S), swap at {swap}, max forward \
+         re-accel step {max_step:.4} m/s/tick\n  \
+         phase-2 gear trace (tick, gear): {trace:?}\n  \
+         final: mean belt {belt:.2} m/s, gear R{gear}, rpm {rpm:.0}, x {x:.1}",
+        grade_pct = grade * 100.0,
+        t_cross = crossing as f32 / FIXED_TICKS_PER_SECOND as f32,
+        trace = gear_transitions(&samples),
+        belt = mean_belt(last),
+        gear = last.gear,
+        rpm = last.rpm,
+        x = last.position.x,
+        path = probe.finish().display(),
+    );
+}
+
+/// Descent evidence (c): the parking latch holds the grade and releases cleanly. Settled at
+/// standstill on the 10% grade under zero input, the latch must be engaged and hold the
+/// hull for 600 ticks with centimeter-class drift; the first W tick releases it and the
+/// tank pulls away uphill with no residual brake drag.
+#[test]
+#[ignore = "instrument, not a gate: writes driving telemetry"]
+fn probe_park_latch_10pct() {
+    let grade = probe_grade(0.10);
+    let mut probe = DriveProbe::open(&format!("park-latch-{:.0}pct", grade * 100.0), grade);
+    // Facing uphill; `pose` already settles 256 zero-input ticks, which latches the park.
+    probe.pose(grade, 0.0, 0.0, Vec3::X);
+    // Phase 1: 600 held ticks at zero input — the latch must hold the grade.
+    let mut hold = Vec::new();
+    for _ in 0..600 {
+        hold.push(probe.tick(0.0, 0.0));
+    }
+    let first = hold.first().expect("hold recorded ticks");
+    let last = hold.last().expect("hold recorded ticks");
+    assert!(
+        hold.iter().all(|s| s.park),
+        "the parking latch must stay engaged through the whole zero-input hold"
+    );
+    let drift = (last.position - first.position).length();
+    assert!(
+        drift < 0.03,
+        "the latch must hold the 10% grade (drifted {drift:.4} m over 600 ticks)"
+    );
+    // Phase 2: hold W — the latch releases on the first shaped-command tick and the tank
+    // pulls uphill promptly (residual brake drag would show up as a failure to launch).
+    let mut launch = Vec::new();
+    for _ in 0..(3 * FIXED_TICKS_PER_SECOND) {
+        launch.push(probe.tick(1.0, 0.0));
+    }
+    let release = launch
+        .iter()
+        .position(|s| !s.park)
+        .expect("W must release the parking latch");
+    assert!(
+        release <= 2,
+        "the latch must release within the first shaped ticks of W (took {release})"
+    );
+    assert!(
+        launch[release..].iter().all(|s| !s.park),
+        "the latch must not re-engage under held W"
+    );
+    let to_speed = launch.iter().position(|s| mean_belt(s) >= 1.0);
+    assert!(
+        to_speed.is_some_and(|t| t <= 2 * FIXED_TICKS_PER_SECOND),
+        "residual brake drag: the released tank never reached 1 m/s uphill within 2 s \
+         (got {:?})",
+        to_speed
+    );
+    let end = launch.last().expect("launch recorded ticks");
+    println!(
+        "probe park latch {grade_pct:.1}% -> {path}\n  \
+         hold: drift {drift:.4} m over 600 ticks, park held\n  \
+         release at W tick {release}; 1 m/s at tick {t1:?}; end speed {speed:.2} m/s, \
+         gear F{gear}, rpm {rpm:.0}",
+        grade_pct = grade * 100.0,
+        t1 = to_speed,
+        speed = mean_belt(end),
+        gear = end.gear,
+        rpm = end.rpm,
+        path = probe.finish().display(),
+    );
+}
+
+/// Field regression (Yan, rescaled 1.7×-steeper world): driving downhill the crank
+/// followed the belt to ~9000 rpm — three times its mechanical limit. Steep descents at
+/// 25% and 35%, BOTH facings: forward coast (the ceiling-rescue ladder walk is the
+/// containment) and backing down under held S (reverse-ladder territory: R4 tops out and
+/// the over-rev slip guard is the ONLY bound). Post-fix the SUSTAINED crank must stay at
+/// or below the guard point `max_curve_rpm + OVERREV_MARGIN_RPM`; brief transients above
+/// the CEILING during paid windows are physical and bounded by the same guard.
+#[test]
+#[ignore = "instrument, not a gate: writes driving telemetry"]
+fn probe_steep_descent_crank_bound() {
+    let mut rows = Vec::new();
+    for grade in [0.25f32, 0.35] {
+        for reverse in [false, true] {
+            let facing = if reverse { "reverse" } else { "forward" };
+            let mut probe =
+                DriveProbe::open(&format!("steep-{:.0}pct-{facing}", grade * 100.0), grade);
+            let guard_rpm =
+                probe.tp.max_curve_rpm() + crate::track::transmission::OVERREV_MARGIN_RPM;
+            let mut samples = Vec::new();
+            if reverse {
+                // Facing uphill; held S backs the tank down the slope on the R ladder.
+                probe.pose(grade, 400.0, 0.0, Vec3::X);
+                for _ in 0..(25 * FIXED_TICKS_PER_SECOND) {
+                    samples.push(probe.tick(-1.0, 0.0));
+                }
+            } else {
+                // Facing downhill; a short W launch releases the park latch, then coast.
+                probe.pose(grade, 400.0, 0.0, Vec3::NEG_X);
+                for _ in 0..(2 * FIXED_TICKS_PER_SECOND) {
+                    probe.tick(1.0, 0.0);
+                }
+                for _ in 0..(23 * FIXED_TICKS_PER_SECOND) {
+                    samples.push(probe.tick(0.0, 0.0));
+                }
+            }
+            let max_rpm = samples.iter().fold(0.0f32, |a, s| a.max(s.rpm));
+            // The guard's end-of-tick clamp is an EXACT bound on the raw crank state (ω
+            // units); 0.01 rpm covers only the rad/s→rpm float round-trip.
+            assert!(
+                max_rpm <= guard_rpm + 0.01,
+                "steep {facing} {:.0}%: crank hit {max_rpm:.0} rpm past the guard point \
+                 {guard_rpm:.0} — the field 9000-rpm runaway is back",
+                grade * 100.0
+            );
+            let last = *samples.last().expect("descent recorded ticks");
+            rows.push((
+                grade,
+                facing,
+                gear_transitions(&samples),
+                max_rpm,
+                last,
+                probe.finish(),
+            ));
+        }
+    }
+    println!("\nsteep-descent crank bound — guard = curve top + over-rev margin:");
+    for (grade, facing, trace, max_rpm, last, path) in &rows {
+        println!(
+            "  {:>3.0}% {facing:>7}: max rpm {max_rpm:.0}, final {gear}{g} @ {rpm:.0} rpm, \
+             fwd {fwd:.2} m/s\n      gear trace {trace:?}\n      {p}",
+            grade * 100.0,
+            gear = if last.reverse { 'R' } else { 'F' },
+            g = last.gear,
+            rpm = last.rpm,
+            fwd = last.fwd_speed,
+            p = path.display(),
         );
     }
 }

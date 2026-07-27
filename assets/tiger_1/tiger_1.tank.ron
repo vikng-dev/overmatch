@@ -61,8 +61,10 @@ TankSpec(
             governor_gain: 60_000.0,
             inertia: 16_000.0,
             // The DECLARED drivetrain (phase 2.5) — authored from the anchored tables in
-            // .agents/docs/design/track-model/tiger-transmission-data.md. Runs ONLY in the
-            // offline composition / sandbox (REV 13: MP stays on the governor above).
+            // .agents/docs/design/track-model/tiger-transmission-data.md. This declared
+            // architecture SHIPS everywhere, MP included (REV 14 replicates the full
+            // TransmissionState atomically; the governor knobs above remain shared belt-law
+            // data, not a separate MP path).
             // Architecture: "wheel controlled hydraulic operated regenerative" [ANCHOR] — the
             // L600 fixed-radius adapter is the historically right one.
             transmission: (
@@ -77,10 +79,15 @@ TankSpec(
                     // (rpm, N·m): 800→1300 INFERRED (~0.70 × peak); 2100→1850 ANCHOR
                     // (medium); 2500→1686 DERIVED (600 PS); 3000→1639 DERIVED (700 PS).
                     torque_curve: [(800.0, 1300.0), (2100.0, 1850.0), (2500.0, 1686.0), (3000.0, 1639.0)],
-                    // Compression braking at zero throttle, fraction of peak torque
-                    // reflected through the current gear: diesel motoring runs ~20–30%
-                    // of rated torque — INFERRED (no HL230 motoring curve reachable),
-                    // mid-band.
+                    // Compression braking at zero throttle: the MID-BAND anchor of
+                    // the rising motoring-torque curve, as a fraction of peak torque.
+                    // The sim's motoring torque equals drag_fraction × peak at
+                    // ω_mid = (idle + governed)/2 = 1550 rpm and grows linearly with
+                    // crank speed (1/3 base + 2/3 linear — pumping/friction losses
+                    // rise with speed; ≈ 1.41× at governed, ≈ 1.62× at rated), so each
+                    // gear has a bounded downhill equilibrium. Motoring runs ~20–30%
+                    // of rated torque mid-band — INFERRED (no HL230 motoring curve
+                    // reachable).
                     drag_fraction: 0.25,
                     // Crank + flywheel + main-clutch inertia J (kg·m²), the stage-B
                     // engine crank state. INFERRED by engine-class scaling (no HL230
@@ -103,11 +110,21 @@ TankSpec(
                     // matching max_speed 10.5.
                     forward_speeds_kmh: [2.8, 4.3, 6.2, 9.2, 14.1, 20.9, 30.5, 45.4],
                     reverse_speeds_kmh: [2.8, 4.3, 6.2, 9.2],
-                    // Auto-shift bands (INFERRED policy): up at 92% of governed; the largest
-                    // ratio step is 1.54, so post-upshift rpm ≈ 1497 stays above the 1400
-                    // down band — hysteresis by construction, no hunting.
+                    // Auto-shift bands (INFERRED policy): up at 92% of governed; down at
+                    // 1150 ≈ real OLVAR practice — hold the gear down to the low-torque
+                    // knee, not the mid-band. Against the engine's usable envelope (idle
+                    // 600, curve floor 800, peak torque @ 2100, governed 2500) a 1150 rpm
+                    // landing still makes ~1450 N·m (~78% of peak): a landed gear pulls,
+                    // and 1150 sits far clear of the idle-governor/lug region. The runtime
+                    // landing gate demands `landing ≥ down band + 150 rpm` at the END of
+                    // the torque-cut window (validated at load with the margin included):
+                    // the widest ratio step (F1→F2, 0.651) lands 2300 × 0.651 ≈ 1498, so
+                    // 1150 buys ~200 rpm of authored slack in EVERY gear. The previous
+                    // 1400 band left the F1→F2 landing 52 rpm SHORT of its own gate — the
+                    // box could never legally shift at the trigger rpm and only ever
+                    // shifted by over-running the band to the governor.
                     shift_up_rpm: 2300.0,
-                    shift_down_rpm: 1400.0,
+                    shift_down_rpm: 1150.0,
                     // OLVAR preselector: pre-selected shifts complete with drive uncoupled
                     // for a noticeable fraction of a second — INFERRED ~0.31 s, no shift-
                     // time datum reached.
@@ -145,10 +162,10 @@ TankSpec(
                     // `neutral_fraction` DELETED (fix 3, 2026-07-19): the 0.75 was an
                     // INFERRED feel scalar with no source. The marginal brake-gated
                     // neutral turn now uses the DERIVED datum directly:
-                    // neutral_d_full = κ_tight(F1) × v1_governed = 0.2808 m/s — the radii
-                    // table's own invariant (κ_tight(g) × v(g) ≈ 0.337 m/s @ 3000 rpm in
-                    // EVERY gear) makes that the correct emergent value for a fixed-radius
-                    // box.
+                    // neutral_d_full = κ_tight(F1) × v1_governed = 0.2885 m/s (with the
+                    // marker-measured half_tread 1.5312) — the radii table's own invariant
+                    // (κ_tight(g) × v(g) ≈ 0.346 m/s @ 3000 rpm in EVERY gear) makes that
+                    // the correct emergent value for a fixed-radius box.
                     // Mechanical recirculation efficiency ~0.9 — INFERRED.
                     recirculation: 0.9,
                 ),

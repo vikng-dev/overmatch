@@ -29,7 +29,7 @@ use super::rig_geom::RigGeom;
 use super::side::Side;
 use super::sim::TrackDrive;
 use super::terrain::TrackField;
-use super::wheels::{WheelParams, wheel_lift_step, wheel_lift_target};
+use super::wheels::{WHEEL_LIFT_RISE_OMEGA, WheelParams, wheel_lift_step, wheel_lift_target};
 use super::wrap;
 
 /// Ordering owner for the track view's presented-pose read: after physics writeback (Avian has
@@ -60,10 +60,6 @@ pub fn view_plugin(app: &mut App) {
 
 /// Downward terrain-probe reach (m) — for the wrap's conform and the view wheel lift.
 const PROBE_REACH: f32 = 0.5;
-/// View wheel-lift ease (rad/s; settle ≈ 4.7/ω ≈ 100 ms) — same cosmetic wheel doctrine as the
-/// sandbox. The travel band is no longer a constant: `max_lift` is the spec's bump stop and
-/// `max_droop` the loop-clamped droop (`TrackGear::max_droop`), both read per frame.
-const WHEEL_EASE_OMEGA: f32 = 45.0;
 /// Presented-pose discontinuity thresholds: a root that moves further than this in ONE frame is
 /// a teleport/respawn/snap-correction, not motion — reset the wrap filters and the wheel-lift
 /// state. `render_error` publishes no signal (it consumes oversized corrections silently), so the
@@ -476,7 +472,7 @@ fn drive_track_views(
             // fits) + the measured plate face offset to its ground face — the sandbox's form, no
             // mid-plate `thickness/2` assumption and no single shared wheel radius.
             reach: 0.0,
-            ease_omega: WHEEL_EASE_OMEGA,
+            ease_omega: WHEEL_LIFT_RISE_OMEGA,
             max_lift: blueprint.spec.track.suspension.bump_stop,
             max_droop: gear.max_droop(),
             lateral_stations: WHEEL_DISC_STATIONS,

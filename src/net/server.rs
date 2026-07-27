@@ -21,9 +21,14 @@ use super::{diagnostics, harness, open_gameplay_gate, physics, spawn_map};
 use crate::command::{ConsumeCommandEdges, TankCommand};
 use crate::damage::TankKnockedOut;
 use crate::state::GameplaySet;
+// The spawn-height rule and its constants live in `terrain_grid`: ONE rule for every spawn path in
+// every composition (see `terrain_grid::spawn_surface_height`), so the offline duel, the lanes, the
+// bot and the spawn-map overrides cannot drift apart. Spawn points here are HORIZONTAL (XZ) — Y is
+// sampled at the moment of spawn.
 use crate::tank::{
     PendingTankAssets, Rig, TankContent, TankSimSource, load_tank_assets, spawn_complete_tank,
 };
+use crate::terrain_grid::spawn_pos;
 use crate::{CombatantId, SimPlugin};
 
 const PORT: u16 = 5888;
@@ -177,16 +182,6 @@ pub(super) fn attach_replication_sender(add: On<Add, LinkOf>, mut commands: Comm
 /// Monotonic spawn-lane allocator; concurrent tanks must not overlap at spawn.
 #[derive(Resource, Default)]
 struct SpawnLane(u32);
-
-/// Clearance the spawn pose keeps above the ground, metres — the flat-pad spawn's `y = 2.0` over a
-/// surface at 0, reproduced over terrain as the footprint's max ground height + this.
-const SPAWN_CLEARANCE_M: f32 = 2.0;
-
-/// Half-side (m) of the conservative axis-aligned square footprint a spawn samples the ground
-/// over (10 m × 10 m — covers the hull at any yaw). Spawn Y is the MAXIMUM grid height over this
-/// square plus [`SPAWN_CLEARANCE_M`]: sampling only the root point buried the uphill axles by a
-/// measured 1.65 m on a legal slope click.
-const SPAWN_FOOTPRINT_HALF_M: f32 = 5.0;
 
 /// Occupancy radius (m) for spawn placement: a requested spawn point with any live tank root
 /// within this XZ distance counts as occupied (conservative cylinder around the tank volume).
@@ -424,43 +419,29 @@ fn validate_spawn_request(request: SetSpawnPoint) -> Option<Vec2> {
     ))
 }
 
-/// A lane pose, lifted onto the terrain: the lane's XZ, the ground under it, plus the standard
-/// clearance. On the flat-slab world this is exactly the old `y = 2.0` pose. The `SPIKE_SPAWN_POSE`
-/// harness override is honoured VERBATIM (it names an exact resting contact for the beached-rest
-/// repro) and is never lifted.
+/// A lane's spawn POINT — horizontal, like every spawn definition. Lane 0 is the base point, so
+/// the single-client case is unshifted.
+pub(crate) fn lane_spawn_xz(base_xz: Vec2, lane: u32) -> Vec2 {
+    base_xz + lane_offset(lane)
+}
+
+/// A lane pose: the lane's XZ resolved against the live surface (`terrain_grid::spawn_pos`). On the
+/// flat-slab world this is exactly the old `y = 2.0` pose.
+///
+/// `harness_pose` is the ONE documented exception to horizontal-only spawn data: `SPIKE_SPAWN_POSE`
+/// names an exact resting CONTACT for the beached-rest repro, so its Y is honoured verbatim and
+/// never re-sampled. It is a measurement instrument, not a spawn definition — an ordinary run never
+/// sets it.
 fn lane_spawn_pos(
-    base: Vec3,
+    harness_pose: Option<Vec3>,
     lane: u32,
-    harness_override: bool,
     height: Option<&crate::terrain_grid::HeightGrid>,
 ) -> Vec3 {
-    let pos = base + lane_offset(lane);
-    if harness_override {
-        return pos;
+    let xz = lane_spawn_xz(harness_pose.map_or(Vec2::ZERO, Vec3::xz), lane);
+    match harness_pose {
+        Some(pose) => Vec3::new(xz.x, pose.y, xz.y),
+        None => spawn_pos(height, xz),
     }
-    Vec3::new(
-        pos.x,
-        spawn_surface_height(height, pos.xz()) + SPAWN_CLEARANCE_M,
-        pos.z,
-    )
-}
-
-/// The authoritative spawn pose for a validated override: the client names X and Z, the authority
-/// resolves Y from the terrain it owns — never from the client.
-fn override_spawn_pos(xz: Vec2, ground_height: f32) -> Vec3 {
-    Vec3::new(xz.x, ground_height + SPAWN_CLEARANCE_M, xz.y)
-}
-
-/// The surface height under a spawn FOOTPRINT: the maximum grid height over the conservative
-/// [`SPAWN_FOOTPRINT_HALF_M`] square around the XZ (`HeightGrid::max_height_in_square` — a tank
-/// dropped at the center-point height on a slope spawns with its uphill running gear buried).
-/// Used by ALL spawn paths: lane spawns, override spawns, and the bot. Absent grid = the
-/// flat-slab fallback world, whose surface is y = 0, which reproduces exactly the lane spawn's
-/// `y = 2.0`.
-fn spawn_surface_height(grid: Option<&crate::terrain_grid::HeightGrid>, xz: Vec2) -> f32 {
-    grid.map_or(0.0, |grid| {
-        grid.max_height_in_square(xz.x, xz.y, SPAWN_FOOTPRINT_HALF_M)
-    })
 }
 
 /// Resolve a requested spawn XZ against live tank positions (Finding: two players clicking the
@@ -513,11 +494,12 @@ fn receive_spawn_points(
     }
 }
 
-/// Symmetric X offsets around the base spawn pose.
-fn lane_offset(lane: u32) -> Vec3 {
+/// Symmetric X offsets around the base spawn point. HORIZONTAL, like the spawn points it shifts:
+/// a lane fans a joining client sideways, it never decides how high the tank sits.
+fn lane_offset(lane: u32) -> Vec2 {
     let step = lane.div_ceil(2) as f32 * 8.0;
     let sign = if lane % 2 == 1 { 1.0 } else { -1.0 };
-    Vec3::new(sign * step, 0.0, 0.0)
+    Vec2::new(sign * step, 0.0)
 }
 
 /// Queues each newly connected client for [`spawn_pending_tanks`] (one predicted tank per client,
@@ -554,14 +536,14 @@ fn spawn_pending_tanks(
     // Harness override (`SPIKE_SPAWN_POSE`): place the tank onto a known resting contact for the
     // beached-rest repro; unset in every normal run, so the default flat-pad spawn stands.
     let harness_pose = harness::spawn_pose();
-    let (base_pos, spawn_rot) =
-        harness_pose.unwrap_or((Vec3::new(0.0, SPAWN_CLEARANCE_M, 0.0), Quat::IDENTITY));
+    let spawn_rot = harness_pose.map_or(Quat::IDENTITY, |(_, rot)| rot);
+    let harness_pos = harness_pose.map(|(pos, _)| pos);
     for (link, client_id) in pending.0.drain(..) {
         // Fan each client out onto its own lane (lane 0 = the base pose, so the single-client and
         // `SPIKE_SPAWN_POSE` cases are unshifted); the counter persists so reconnects don't collide.
         // The lane's XZ is unchanged; only its Y follows the ground now (`lane_spawn_pos`), so a
         // join onto a hillside no longer starts inside the terrain.
-        let spawn_pos = lane_spawn_pos(base_pos, lane.0, harness_pose.is_some(), height.as_deref());
+        let spawn_pos = lane_spawn_pos(harness_pos, lane.0, height.as_deref());
         lane.0 += 1;
         let root = spawn_player_tank(
             &mut commands,
@@ -637,18 +619,14 @@ fn spawn_player_tank(
 #[derive(Component)]
 struct Bot;
 
-/// The bot's home XZ (the old flat-pad `(0, 12)`); its Y comes from the same footprint-safe
-/// ground query every player spawn uses ([`bot_spawn_pos`] — the fixed `y = 2` pose measured
-/// 113.65 m underground on the shipped heightmap).
-const BOT_SPAWN_XZ: Vec2 = Vec2::new(0.0, 12.0);
+/// The bot's home spawn POINT — horizontal, like every spawn definition (the old flat-pad
+/// `(0, 12)`). Its Y is sampled at spawn time by the shared rule; the fixed `y = 2` pose it used to
+/// carry measured 113.65 m underground once the heightmap world landed.
+pub(crate) const BOT_SPAWN_XZ: Vec2 = Vec2::new(0.0, 12.0);
 
-/// The bot's spawn pose: home XZ lifted onto the terrain footprint like every other spawn.
+/// The bot's spawn pose: home XZ resolved against the live surface like every other spawn.
 fn bot_spawn_pos(height: Option<&crate::terrain_grid::HeightGrid>) -> Vec3 {
-    Vec3::new(
-        BOT_SPAWN_XZ.x,
-        spawn_surface_height(height, BOT_SPAWN_XZ) + SPAWN_CLEARANCE_M,
-        BOT_SPAWN_XZ.y,
-    )
+    spawn_pos(height, BOT_SPAWN_XZ)
 }
 
 /// Spawn the optional ownerless interpolation-test bot once.
@@ -847,8 +825,8 @@ fn respawn_player_tanks(
     // fresh tank never lands on top of another body and NaNs the solver. The base pose honors the
     // `SPIKE_SPAWN_POSE` harness override exactly as the connect path does.
     let harness_pose = harness::spawn_pose();
-    let (base_pos, spawn_rot) =
-        harness_pose.unwrap_or((Vec3::new(0.0, SPAWN_CLEARANCE_M, 0.0), Quat::IDENTITY));
+    let spawn_rot = harness_pose.map_or(Quat::IDENTITY, |(_, rot)| rot);
+    let harness_pos = harness_pose.map(|(pos, _)| pos);
     // Roots being swept this pass are NOT occupancy: their colliders despawn in the same command
     // flush the fresh tanks spawn in.
     let sweeping: Vec<Entity> = requests.iter().map(|(root, ..)| *root).collect();
@@ -875,10 +853,7 @@ fn respawn_player_tanks(
                                 xz.x, xz.y, spot.x, spot.y
                             );
                         }
-                        Some(override_spawn_pos(
-                            spot,
-                            spawn_surface_height(height.as_deref(), spot),
-                        ))
+                        Some(spawn_pos(height.as_deref(), spot))
                     }
                     None => {
                         info!(
@@ -895,7 +870,7 @@ fn respawn_player_tanks(
             None => None,
         }
         .unwrap_or_else(|| {
-            let pos = lane_spawn_pos(base_pos, lane.0, harness_pose.is_some(), height.as_deref());
+            let pos = lane_spawn_pos(harness_pos, lane.0, height.as_deref());
             lane.0 += 1;
             pos
         });
@@ -953,6 +928,8 @@ fn log_tank_commands(states: Query<(Entity, &ActionState<TankCommand>)>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The shared spawn rule these tests assert the server composes correctly.
+    use crate::terrain_grid::spawn_surface_height;
 
     #[test]
     fn combatant_ids_are_nonzero_unique_and_retained_for_respawn() {
@@ -1019,41 +996,77 @@ mod tests {
         );
     }
 
-    /// The override reproduces the flat-pad spawn's clearance: XZ from the client, Y from the
-    /// ground the AUTHORITY sampled, plus the same 2 m the lane spawn uses.
+    /// THE regression guard for "tanks spawn underground", netcode half: every spawn point this
+    /// layer owns — the lanes a joining client fans out onto, the interpolation bot, and the
+    /// extreme corners a spawn-map click can be clamped to — resolved through the shared rule
+    /// against the REAL heightmap.
+    ///
+    /// The sim half lives in `terrain_grid` and covers the offline duel; it cannot cover these,
+    /// because `tests/net_boundary.rs` forbids sim code from naming `crate::net`. Same rule, same
+    /// assertion helper, asserted from the layer that owns the points.
+    #[test]
+    fn every_netcode_spawn_point_lands_above_the_shipped_terrain() {
+        use crate::terrain_grid::tests::{assert_spawn_clears_terrain, shipped_grid};
+        let grid = shipped_grid();
+        assert_spawn_clears_terrain(&grid, "interpolation bot", BOT_SPAWN_XZ);
+        // Lanes fan out from the origin; 8 covers far more clients than a match holds.
+        for lane in 0..8 {
+            assert_spawn_clears_terrain(
+                &grid,
+                &format!("server lane {lane}"),
+                lane_spawn_xz(Vec2::ZERO, lane),
+            );
+        }
+        // The extremes a spawn-map click can reach, which the authority clamps to before resolving.
+        let limit = spawn_map::SPAWN_LIMIT_M;
+        for (name, xz) in [
+            ("spawn-map corner -,-", Vec2::new(-limit, -limit)),
+            ("spawn-map corner +,+", Vec2::new(limit, limit)),
+            ("spawn-map corner -,+", Vec2::new(-limit, limit)),
+            ("spawn-map corner +,-", Vec2::new(limit, -limit)),
+        ] {
+            assert_spawn_clears_terrain(&grid, name, xz);
+        }
+    }
+
+    /// The override reproduces the flat-pad spawn's clearance: XZ from the client, Y SAMPLED by the
+    /// authority from the ground it owns, plus the same 2 m every other spawn uses.
     #[test]
     fn override_pose_keeps_the_lane_spawn_clearance() {
-        let flat = override_spawn_pos(Vec2::new(10.0, -20.0), 0.0);
+        use crate::terrain_grid::{GRID_RESOLUTION, HeightGrid};
         assert_eq!(
-            flat,
+            spawn_pos(None, Vec2::new(10.0, -20.0)),
             Vec3::new(10.0, 2.0, -20.0),
             "over flat ground this is exactly the default lane spawn's y",
         );
-        let hill = override_spawn_pos(Vec2::new(10.0, -20.0), 37.5);
-        assert_eq!(hill, Vec3::new(10.0, 39.5, -20.0));
+        // A world sitting 37.5 m up: the client still only names XZ.
+        let n = GRID_RESOLUTION as usize;
+        let hill = HeightGrid::new(vec![37.5f32; n * n].into(), GRID_RESOLUTION);
+        assert_eq!(
+            spawn_pos(Some(&hill), Vec2::new(10.0, -20.0)),
+            Vec3::new(10.0, 39.5, -20.0),
+        );
     }
 
     /// The lane spawn keeps its XZ and its 2 m clearance; with no height grid (the flat-slab world)
     /// it is byte-for-byte the pose the server used before terrain. A `SPIKE_SPAWN_POSE` override is
-    /// passed through untouched — it names an exact resting contact, so lifting it would break the
-    /// beached-rest repro.
+    /// passed through untouched — it names an exact resting contact, so re-sampling it would break
+    /// the beached-rest repro (the one documented exception to horizontal-only spawn data).
     #[test]
     fn lane_spawn_keeps_its_xz_and_clearance() {
-        let base = Vec3::new(0.0, SPAWN_CLEARANCE_M, 0.0);
+        assert_eq!(lane_spawn_pos(None, 0, None), Vec3::new(0.0, 2.0, 0.0));
+        let fanned = lane_spawn_pos(None, 1, None);
+        let offset = lane_offset(1);
         assert_eq!(
-            lane_spawn_pos(base, 0, false, None),
-            Vec3::new(0.0, 2.0, 0.0)
-        );
-        assert_eq!(
-            lane_spawn_pos(base, 1, false, None),
-            base + lane_offset(1),
+            fanned,
+            Vec3::new(offset.x, 2.0, offset.y),
             "lane fan-out is unchanged over flat ground",
         );
         let harness = Vec3::new(3.0, 0.42, -7.0);
         assert_eq!(
-            lane_spawn_pos(harness, 0, true, None),
+            lane_spawn_pos(Some(harness), 0, None),
             harness,
-            "a harness spawn pose is never lifted",
+            "a harness spawn pose is never re-sampled",
         );
     }
 
@@ -1185,8 +1198,8 @@ mod tests {
     #[test]
     fn spawn_height_samples_the_tank_footprint_not_the_point() {
         use crate::terrain_grid::{GRID_RESOLUTION, HeightGrid};
-        // The production lattice (2.5 m spacing), flat except one 10 m node at (x=2.5, z=0) —
-        // inside the footprint square of a spawn at the origin.
+        // The production lattice (~0.977 m spacing), flat except one 10 m node one step off the
+        // origin — inside the footprint square of a spawn at the origin, outside its centre point.
         let n = GRID_RESOLUTION as usize;
         let mut samples = vec![0.0f32; n * n];
         let center = n / 2; // node at world 0
@@ -1196,17 +1209,17 @@ mod tests {
         assert_eq!(
             spawn_surface_height(Some(&grid), Vec2::ZERO),
             10.0,
-            "the footprint max sees the 2.5 m-offset bump"
+            "the footprint max sees the off-centre bump"
         );
         // Far away the footprint reads the flat ground.
         assert_eq!(
             spawn_surface_height(Some(&grid), Vec2::new(500.0, 500.0)),
             0.0
         );
-        // And the override pose composes it with the standard clearance.
+        // And the pose composes it with the standard clearance.
         assert_eq!(
-            override_spawn_pos(Vec2::ZERO, spawn_surface_height(Some(&grid), Vec2::ZERO)),
-            Vec3::new(0.0, 12.0, 0.0),
+            spawn_pos(Some(&grid), Vec2::ZERO),
+            Vec3::new(0.0, 12.0, 0.0)
         );
         // No grid = the flat-slab world: y = 2 exactly, for players and the bot alike.
         assert_eq!(spawn_surface_height(None, Vec2::ZERO), 0.0);

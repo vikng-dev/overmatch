@@ -28,6 +28,17 @@ pub fn client_plugin(app: &mut App) {
     );
 }
 
+/// The local duel's two spawn POINTS — horizontal only (XZ), like every spawn definition in the
+/// game. Their Y is sampled from the live surface at spawn time (`terrain_grid::spawn_pos`).
+///
+/// These used to be full poses with a hardcoded `y = 2.0`, which was correct for exactly one world:
+/// the flat slab. Once the heightmap world landed, `--offline` spawned both Tigers ~116 m UNDER the
+/// terrain (79 m after the 2560 → 1000 m re-scale) — they were never "falling through" anything,
+/// they simply started inside the hill. The net server had already been fixed for this class; the
+/// offline/single-player path had not, which is precisely why spawn Y is no longer authorable
+/// anywhere.
+pub(crate) const DUEL_SPAWN_XZ: [Vec2; 2] = [Vec2::new(10.0, 5.0), Vec2::new(10.0, -12.0)];
+
 /// Admit the local duel after presentation preloading, then construct both roots completely. This
 /// is an admission policy; assets do not initialize simulation state. Failed loads remain fatal.
 fn spawn_tank_when_loaded(
@@ -35,6 +46,7 @@ fn spawn_tank_when_loaded(
     asset_server: Res<AssetServer>,
     pending: Option<Res<PendingTankAssets>>,
     source: TankSimSource,
+    height: Option<Res<crate::terrain_grid::HeightGrid>>,
     mut next: ResMut<NextState<AppState>>,
 ) {
     let Some(pending) = pending else {
@@ -52,12 +64,17 @@ fn spawn_tank_when_loaded(
     let Some(content) = source.get() else {
         return;
     };
-    // Both bodies simulate; only the Controlled marker selects input ownership.
+    // Both bodies simulate; only the Controlled marker selects input ownership. Each spawn point is
+    // horizontal — the ground under it is sampled NOW, through the one rule every spawn path shares
+    // (`terrain_grid::spawn_pos`: footprint max + clearance), so the duel lands on whatever world
+    // this build actually has: heightmap, flat slab, or a re-authored map later.
+    let grid = height.as_deref();
     spawn_tank(
         &mut commands,
         content,
         pending.presentation(),
-        Transform::from_xyz(10.0, 2.0, 5.0).with_rotation(Quat::from_rotation_z(0.7)),
+        Transform::from_translation(crate::terrain_grid::spawn_pos(grid, DUEL_SPAWN_XZ[0]))
+            .with_rotation(Quat::from_rotation_z(0.7)),
         "Tiger I (A)",
         true,
     );
@@ -65,7 +82,7 @@ fn spawn_tank_when_loaded(
         &mut commands,
         content,
         pending.presentation(),
-        Transform::from_xyz(10.0, 2.0, -12.0),
+        Transform::from_translation(crate::terrain_grid::spawn_pos(grid, DUEL_SPAWN_XZ[1])),
         "Tiger I (B)",
         false,
     );

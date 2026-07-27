@@ -645,13 +645,15 @@ fn tag_hull_meshes(
 
 /// A directional light on the overlay layer, matching the world light's direction — without it the
 /// "on top" volumes (rendered by the overlay camera) get no scene light and read flat/dark.
+///
+/// Both the direction and the intensity come from `world`'s single sun definition rather than a
+/// second copy of the numbers: the overlay volumes are drawn OVER the same scene, so any drift
+/// between the two lights shows up as volumes lit from a different sun than the tank under them.
+/// No shadows — this light exists only to shade the overlay layer.
 fn spawn_overlay_light(mut commands: Commands) {
     commands.spawn((
-        DirectionalLight {
-            illuminance: 10_000.0,
-            ..default()
-        },
-        Transform::from_xyz(4.0, 8.0, 4.0).looking_at(Vec3::ZERO, Vec3::Y),
+        crate::world::sun_light(),
+        crate::world::sun_transform(),
         RenderLayers::layer(OVERLAY_LAYER),
     ));
 }

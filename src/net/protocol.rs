@@ -45,7 +45,12 @@ use crate::{CombatantId, ShotId};
 /// widened the manifest: every channel now rides [`WIRE_SURFACE`] with its delivery mode and
 /// direction, so a lane's CONFIG can no longer skew between two ends that shake hands. REV 19 has
 /// not shipped, so both landed as edits to it rather than a further bump.
-pub const PROTOCOL_REV: u32 = 19;
+///
+/// REV 20 (descent round): `TransmissionState` grew `band_confirm_ticks` — the upshift
+/// sustained-speed confirmation counter (`UPSHIFT_CONFIRM_TICKS`), replicated and rolled back
+/// atomically with the rest of the REV-14 transmission root and hashed in the determinism trace
+/// like every other discrete field.
+pub const PROTOCOL_REV: u32 = 20;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -757,7 +762,7 @@ pub(crate) const ROLLBACK_TANK_TRANSMISSION_OMEGA_E_RAD_S: f32 =
 /// delta no larger than this cannot by itself cross a reserve decision's absolute floor.
 pub(crate) const ROLLBACK_TANK_TRANSMISSION_DEMAND_N: f32 = RESERVE_MARGIN_FLOOR_N;
 /// Transmission divergence gate expressed as a Boolean 0/1 magnitude for trace attribution. The
-/// 14 discrete fields compare exactly; `omega_e` and `demand_n` use their declared bands above.
+/// 15 discrete fields compare exactly; `omega_e` and `demand_n` use their declared bands above.
 pub(crate) const ROLLBACK_TANK_TRANSMISSION: f32 = 1.0;
 /// Exact weapon-gate divergence gate expressed as a Boolean 0/1 magnitude for trace attribution.
 /// The complete component is integer/discrete state, so ordinary equality is bit-exact.
@@ -943,7 +948,7 @@ const WIRE_SURFACE_HASH: u64 = 0x8547_0760_1afc_dc0f;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x0a55_8028_8bc3_d1c1;
+const WIRE_TYPES_HASH: u64 = 0x92f9_8ac0_4b3f_3cf4;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -1127,7 +1132,7 @@ pub(crate) fn plugin(app: &mut App) {
                 ROLLBACK_TRACK_DRIVE,
             )
         });
-    // The declared transmission's correlated state: one atomic owner-predicted snapshot. Its 14
+    // The declared transmission's correlated state: one atomic owner-predicted snapshot. Its 15
     // discrete fields are exact; the two continuous floats inherit explicit physical tolerance
     // bands. Matching NaN payloads remain equal, while distinct NaNs still force reconciliation.
     app.component::<TankTransmission>()
@@ -1266,7 +1271,7 @@ mod tests {
     fn transmission_rollback_comparison_is_exact_for_discrete_and_tolerant_for_floats() {
         let base = TankTransmission(TransmissionState::for_governor());
 
-        let mut discrete = [base; 14];
+        let mut discrete = [base; 15];
         discrete[0].0.gear = 2;
         discrete[1].0.shift_ticks = 1;
         discrete[2].0.steer_step = 1;
@@ -1277,10 +1282,11 @@ mod tests {
         discrete[7].0.clutch_out = true;
         discrete[8].0.demand_initialized = true;
         discrete[9].0.grade_confirm_ticks = 1;
-        discrete[10].0.grade_target = 1;
-        discrete[11].0.scheduler = crate::track::transmission::SchedulerState::HillHold;
-        discrete[12].0.hill_hold = true;
-        discrete[13].0.hold_reengage_ticks = 1;
+        discrete[10].0.band_confirm_ticks = 1;
+        discrete[11].0.grade_target = 1;
+        discrete[12].0.scheduler = crate::track::transmission::SchedulerState::HillHold;
+        discrete[13].0.hill_hold = true;
+        discrete[14].0.hold_reengage_ticks = 1;
         for (index, variant) in discrete.iter().enumerate() {
             assert!(
                 tank_transmission_mismatch(&base, variant),
@@ -1527,7 +1533,7 @@ mod tests {
         );
     }
 
-    /// Handshake fixture: the complete REV-19 manifest fold is pinned as a concrete netcode
+    /// Handshake fixture: the complete REV-20 manifest fold is pinned as a concrete netcode
     /// `protocol_id`, so fixture drift is visible even when every constituent pin was edited.
     #[test]
     fn wire_manifest_fingerprint_is_pinned() {
@@ -1543,7 +1549,7 @@ mod tests {
             WIRE_DEP_LIGHTYEAR,
             PROTOCOL_REV,
         );
-        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0x75ff_0a65_3714_1c0a;
+        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0xba4b_d236_7af9_51d3;
         assert_eq!(
             wire_manifest, EXPECTED_WIRE_MANIFEST_FINGERPRINT,
             "wire manifest changed: re-pin to {wire_manifest:#018x}",

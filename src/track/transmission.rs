@@ -28,8 +28,10 @@
 //! `Bᵢ = clamp(Rᵢ − Qᵢ − vᵢ·I/dt, ±cap)` — at rest exactly the static balance `Rᵢ − Qᵢ`
 //! (a parked tank on a slope inside capacity holds EXACTLY), in motion strictly opposing
 //! where the belt is headed (settles creep, saturates against a slide, never pushes through
-//! zero). `cap` comes from the parking LATCH (zero command near standstill sets it, any
-//! drive command releases it), the hill-hold latch, the governor hold-blend entry envelope
+//! zero). `cap` comes from the parking LATCH (zero command near standstill sets it; any
+//! throttle OR steer intent releases it — steer by design, the neutral pivot must move the
+//! belts, and it re-latches when the stick returns to zero at standstill), the hill-hold
+//! latch, the governor hold-blend entry envelope
 //! while unlatched, or the service pedal (opposite-throttle driver intent). A latched belt
 //! strictly inside [`PARK_ENGAGE_SPEED`] gets the authored static breakaway multiplier; a
 //! moving belt, service braking, and every post-breach latched slide stay at dynamic
@@ -70,22 +72,74 @@
 //! `D` with a fixed-tick EMA (DERIVED time scale: 8 ticks / 64 Hz = 0.125 s). The filter freezes
 //! through shift windows. For every gear `j`, full-throttle capability at current speed is
 //! `F_j = min(torque_at(rpm_j)·G_j/r_s, 2·engine_force)` and reserve is `R_j = F_j − D`.
-//! Upshifts retain every stage-A/B gate and add `R_next ≥ 0.10·D + 10 kN`; a negative current
+//! Upshifts retain every stage-A/B gate, add `R_next ≥ 0.10·D + 10 kN`, and (descent round)
+//! must CONFIRM the up-band condition for [`UPSHIFT_CONFIRM_TICKS`] consecutive decision
+//! ticks — sustained speed, the mirror of the deficit's sustained load; a negative current
 //! reserve held for 13 decision ticks (DERIVED 0.203125 s) commands the highest lower gear that
 //! clears the same margin, bounded by the signed-landing and over-rev gates. This CONFIRMED deficit
-//! is a correction, not a preference: it is evaluated before an upshift and is exempt from the
-//! band anti-hunting reversal dwell. The scheduler names one target; vehicle data
+//! is a correction, not a preference: with a target it owns the decision — committing, or HOLDING
+//! the gear (a pending correction suppresses the ordinary upshift arm; only a None selection falls
+//! through). A SHALLOW deficit (inside the reserve-margin scale) waits out the post-upshift
+//! reversal dwell — the post-window re-acceleration shear rides the demand EMA and manufactured
+//! deficits at capability boundaries (the measured F5↔F6 / R1→R2→R3→R1 limit cycles); evidence
+//! keeps accumulating through the dwell, so it corrects at expiry. A DEEP deficit (beyond the
+//! margin scale — a genuine steep grade) overrides the deferral and corrects immediately, before
+//! window + dwell can bleed the landing sign negative. The scheduler names one target; vehicle data
 //! [`ShiftAddressing`] decides whether one window commits straight to it or a sequential box pays
 //! one window per adjacent step. Every sequential continuation re-runs selection; released intent
 //! or recovered demand cancels a stale target. Non-deficit ticks decay confirmation by one rather
 //! than erasing its history.
 //!
-//! Overrun protection (stage C): if the signed geared shaft exceeds governed rpm plus
-//! [`OVERRUN_UPSHIFT_MARGIN_RPM`], the box may upshift while coasting. The positive-landing gate,
-//! reserve gate, detent-domain gate, and reversal dwell remain; the ordinary landing-rpm band is
-//! waived because the protective shift's purpose is to lower an externally back-driven crank.
+//! Overrun protection (stage C, INVERTED in the descent round): on overrun — back-driven
+//! while coasting or service-braking, the hill doing the driving — the box HOLDS its gear.
+//! Engine braking is the point of being in gear on a descent, and the old
+//! governed-plus-margin protective upshift walked the ladder UP exactly there, shedding the
+//! reflected retardation (backwards vs real practice: "descend in the gear that climbs").
+//! The protective upshift survives only as a LAST RESORT at the mechanical-protection
+//! ceiling: when the signed geared shaft AND the crank ω_e both exceed the engine's max
+//! authored curve rpm ([`TransmissionParams::max_curve_rpm`] — the Tiger's rated 3000, the
+//! same ceiling the fix-1c over-rev gate measures downshifts against), the box may upshift
+//! regardless of intent to save the crank; between governed and that ceiling the climbing
+//! dial IS the warning.
 //!
-//! Anti-rollback (stage C): held forward command near rest with negative effective reserve latches
+//! THE SAFETY MECHANISM for the crank is the OVER-REV SLIP GUARD, not gear selection
+//! (Codex round 5, simplification doctrine): the coupling guard, the re-anchor condition,
+//! and the end-of-tick clamp bound the crank at `max_curve_rpm + OVERREV_MARGIN_RPM`
+//! unconditionally — order-proof, direction-symmetric, verified independent of every
+//! scheduling decision. Gear selection during overrun is therefore BEST-EFFORT, not
+//! load-bearing: the rescue picks the first higher gear whose STATICALLY-projected shaft
+//! rpm (current shaft through the candidate ratio — no window pricing) sits at or below
+//! the ceiling; Direct skips straight there, Sequential steps one gear per paid window
+//! toward it (gear index strictly rises, the ladder is finite — termination is trivial).
+//! A mispriced or overtaken landing costs one guard-clamped window and a re-decision, not
+//! a runaway; if no gear statically clears, the box holds and the guard alone owns the
+//! crank (a blind commit would only shed reflected braking). Three rounds of
+//! worst-case landing-pricing machinery (decayed predictors, sustained-reaction bounds,
+//! λ allowances) sprouted a defect per round while the guard beneath already made their
+//! success optional — they are deliberately DELETED, trading at most an occasional extra
+//! clamped window on extreme descents (the steep probes ride the guard identically with
+//! and without them). PRIORITY RULE: while the crank rescue is active (shaft AND crank
+//! past the ceiling) it owns the decision tick — no capability downshift may pre-empt it
+//! (structurally the over-rev gate already refuses every lower gear there; the explicit
+//! gate makes the priority a stated invariant rather than an emergent one). The
+//! scheduler-fix-round crank corroboration is retained unchanged:
+//! a belt transient the engaged coupling never carried endangers nothing and must not fire
+//! the rescue (BOTH speeds must read past the ceiling), and the same corroboration still
+//! binds the ORDINARY band arm whenever the shaft reads past governed +
+//! [`CRANK_CORROBORATION_MARGIN_RPM`], so no transient drives gear selection through either
+//! arm. Under PROPULSIVE intent ordinary band shifting is untouched — a driver pushing
+//! downhill still gets upshifts and high rpm. The reversal dwell remains on the protective
+//! shift; the ordinary landing-rpm band, the reserve gate, AND the landing-sign test are
+//! all waived for it (round 5: the static projection of a shaft the trigger already proved
+//! past the ceiling is positive by construction, and the guard — not the landing — bounds
+//! the crank) because its purpose is to lower an externally back-driven crank, not to
+//! accelerate — above the fuel cut every gear's modeled force is zero, so the reserve gate
+//! could never re-legalize the rescue while rpm only rose.
+//!
+//! Anti-rollback (stage C): a held PROPULSIVE command on the ENGAGED ladder — either
+//! direction (Codex round 3: backing up a slope is a climb, and every quantity here is
+//! already ladder-signed: `shaft = dir·m`, selection walks the engaged ladder, release
+//! compares `dir·f_c`) — near rest with negative effective reserve latches
 //! [`TransmissionState::hill_hold`]. The hold uses the existing full-envelope brake stop-force
 //! path—no extra force—and selects a capable launch gear through the same reserve rule. A shift
 //! cut has effective `F = 0`, so a sequential cascade can engage the hold even when its landing
@@ -93,9 +147,11 @@
 //! re-evaluated on every decision tick. Release compares transmitted coupling force against
 //! `D + min(selection_margin, max(0, R_selected) / 2)`: a margin-short but capable gear can release
 //! once it transmits its own modeled force. A release starts a [`HOLD_REENGAGE_TICKS`] cooldown;
-//! near-rest chatter cannot re-latch during it, but actual rollback faster than the engagement
-//! threshold overrides it. If no gear has non-negative reserve, [`SchedulerState::GradeLimit`]
-//! stays exposed and the declared brakes remain applied while W is held.
+//! near-rest chatter cannot re-latch during it, and it is never overridable (Codex round 4:
+//! the latch engages ONLY near rest — cross-motion intent-vs-motion belongs to the
+//! `back_driven_intent` service braking, which decelerates the hull back into the zone).
+//! If no gear has non-negative reserve, [`SchedulerState::GradeLimit`]
+//! stays exposed and the declared brakes remain applied while the climb command is held.
 //!
 //! Pure math, no ECS (like [`forces`]): callers own the state. [`TransmissionState`] is the
 //! only path-dependent state—gear, shift countdown, steering detent, direction, crank speed ω_e,
@@ -114,22 +170,25 @@
 //! | constant | class | rationale |
 //! |---|---|---|
 //! | [`GOVERNOR_CUT_RPM`] | SIM POLICY | numerical smoothing width so the top-speed equilibrium is a smooth root, not a hard clip; any governed engine gets the same treatment |
-//! | `DRAG_SAT_SPEED` (REMOVED, stage B) | — | the belt-side drag saturation ramp died with the belt-side drag term; engine-side drag saturates over the crank's own `ω_idle` (DERIVED from spec, no new const) — the same "fade only near standstill" role reflected engine-side, since any motoring crank sits at or above idle exactly as any driving belt exceeded 0.2 m/s |
+//! | `DRAG_SAT_SPEED` (REMOVED, stage B) | — | the belt-side drag saturation ramp died with the belt-side drag term; the engine-side spin-up fade is confined below the stall-guard floor `idle − STALL_GUARD_BAND_RPM` (DERIVED from spec, no new const), which the hard clamp makes unreachable for a live crank — so the affine motoring law holds exactly everywhere a running engine can be |
 //! | [`DRAG_THROTTLE_RELEASE`] | SIM POLICY | driver-intent shaping: where "open throttle" stops meaning "motoring"; part of the uniform input contract, same for every tank |
 //! | [`DEAD`] | SIM POLICY | input deadzone on one shared axis mapping |
 //! | [`PARK_ENGAGE_SPEED`] | SIM POLICY | latch threshold for "at rest" — a determinism/stability guard on the shared intent layer |
 //! | [`HILL_HOLD_ENGAGE_SPEED`] | SIM POLICY | anti-rollback near-rest threshold, DERIVED as `5 × PARK_ENGAGE_SPEED` = 0.25 m/s; gives the existing brake/grip law enough stopping distance through a sequential cut without becoming a moving brake |
 //! | [`DIRECTION_SWAP_SPEED`] | SIM POLICY | the intent seam where a held opposite throttle becomes a gear-direction change; uniform game semantics |
 //! | [`NEUTRAL_THROTTLE`], [`NEUTRAL_M_SPEED`] | SIM POLICY | regime-entry thresholds for the L600 neutral turn (the neutral turn's SPEED SCALE — [`TransmissionParams::neutral_d_full`] — is spec-DERIVED); `NEUTRAL_M_SPEED` doubles as the hybrid's blend width into its power-limited pivot regime |
-//! | [`POSTSHIFT_MARGIN_RPM`] | SIM POLICY | fix-1a anti-hunting: an upshift must PREDICT landing this far above the down band at the end of its own torque-cut window (the cut bleeds belt speed; the static band gap alone was erased in low gears — the measured 1-2-1-2 climb). Upshifts are also intent-gated (`propulsive > 0`) and L600-detent-deferred so the predictor is only consulted inside its domain (review round). Stage A: the predicted landing SHAFT speed must be POSITIVE on the engaged ladder — a sign-flipped landing always refuses (under `|m|` a backward landing read as high forward rpm and the gate blessed catastrophic on-grade upshifts) |
-//! | [`OVERRUN_UPSHIFT_MARGIN_RPM`] | SIM POLICY | engine-protection threshold above governed rpm for a coasting/downhill protective upshift; keeps ordinary band noise from invoking the exceptional no-intent path |
-//! | [`REVERSAL_DWELL_TICKS`] | SIM POLICY | fix-1b anti-hunting: a committed BAND shift blocks the OPPOSITE-direction BAND shift for this many ticks AFTER its interruption window (the dwell counts only outside the frozen window — review round); same-direction climbs stay free. A 13-tick CONFIRMED reserve deficit is a correction, not a preference, and is exempt |
+//! | [`POSTSHIFT_MARGIN_RPM`] | SIM POLICY | fix-1a anti-hunting: an upshift must PREDICT landing this far above the down band at the end of its own torque-cut window (the cut bleeds belt speed; the static band gap alone was erased in low gears — the measured 1-2-1-2 climb). ORDINARY upshifts are intent-gated (`propulsive > 0`) and L600-detent-deferred so the full predictor is only consulted inside its domain (review round; the protective ceiling rescue does not consult this predictor at all — round 5 made its selection best-effort STATIC projection, with the over-rev slip guard as the actual crank bound). Stage A: the predicted landing SHAFT speed must be POSITIVE on the engaged ladder — a sign-flipped landing always refuses (under `|m|` a backward landing read as high forward rpm and the gate blessed catastrophic on-grade upshifts) |
+//! | [`LANDING_REACTION_DECAY`] | SIM POLICY | fix-1a predictor honesty (scheduler fix round): the frozen pre-cut reaction is mostly drive shear, which the grip bristle sheds over [`forces::GRIP_SHEAR_MODULUS_M`] once the torque cut lands — the predictor decays it by this fixed per-tick factor (the deterministic stand-in for the exponential; no `exp()`), and decelerates the COUPLED vehicle mass recovered from the grip law's own authoring identity |
+//! | [`CRANK_CORROBORATION_MARGIN_RPM`] | SIM POLICY | rpm floor above governed past which a shaft reading must be crank-corroborated before the ORDINARY band arm may price it (scheduler fix round); the descent round demoted the protective upshift itself to the max-curve ceiling, so this margin no longer fires any shift on its own |
+//! | [`MOTORING_DRAG_BASE_SHARE`] | SIM POLICY | shape of the rising motoring-torque curve ([`engine_drag`]): the constant share of the mid-band magnitude, the remainder linear in crank speed — the physical split (Coulomb/compression base + viscous/pumping growth) is engine-class-uniform; the MAGNITUDE anchor stays the authored `drag_fraction × peak` |
+//! | [`REVERSAL_DWELL_TICKS`] | SIM POLICY | fix-1b anti-hunting: a committed BAND shift blocks the OPPOSITE-direction BAND shift for this many ticks AFTER its interruption window (the dwell counts only outside the frozen window — review round); same-direction climbs stay free. Descent round: a SHALLOW 13-tick CONFIRMED reserve deficit also waits out the POST-UPSHIFT dwell while HOLDING the gear (evidence keeps accumulating; the ordinary upshift is suppressed) — the post-window re-acceleration shear inflates the demand EMA and a bypass manufactured boundary limit cycles; a deficit DEEPER than the reserve-margin scale overrides the deferral immediately |
 //! | [`OVERREV_MARGIN_RPM`] | SIM POLICY | fix-1c: a downshift must land at least this far under the engine's max curve rpm — the box never commands an over-rev |
 //! | [`RESERVE_MARGIN_FRACTION`] | SIM POLICY | common capability headroom: DERIVED policy value 0.10 of filtered demand keeps a target away from the zero-acceleration knife edge |
 //! | [`RESERVE_MARGIN_FLOOR_N`] | SIM POLICY | common low-load/jitter floor: DERIVED policy value 10 kN total, 1.8% of Tiger weight and about half its fractional margin at the DERIVED 191.2 kN 20-degree demand |
 //! | [`DEMAND_FILTER_TICKS`] | SIM POLICY | deterministic reaction low-pass: DERIVED 8 decision ticks = 0.125 s at 64 Hz; frozen through shift cuts |
 //! | [`GRADE_CONFIRM_TICKS`] | SIM POLICY | persistence before a reserve downshift: DERIVED 13 ticks = 0.203125 s at 64 Hz, rejecting shorter load spikes |
-//! | [`HOLD_REENGAGE_TICKS`] | SIM POLICY | DERIVED 32-tick = 0.5 s anti-oscillation cooldown after hill-hold release; a real rollback faster than [`HILL_HOLD_ENGAGE_SPEED`] overrides it |
+//! | [`UPSHIFT_CONFIRM_TICKS`] | SIM POLICY | DERIVED = GRADE_CONFIRM_TICKS (the symmetry: downshifts confirm sustained LOAD, upshifts confirm sustained SPEED); HARD-reset consecutive evidence, so recoil/bump/crest transients that decay through the band inside the window can never arm a shift storm; the protective ceiling rescue is exempt |
+//! | [`HOLD_REENGAGE_TICKS`] | SIM POLICY | DERIVED 32-tick = 0.5 s anti-oscillation cooldown after hill-hold release; never overridable (round 4) — the latch is near-rest-only, and mid-motion braking is `back_driven_intent`'s job |
 //! | `gearbox.shift_addressing` / [`ShiftAddressing`] | VEHICLE DATA | the model accepts arbitrary targets; the spec declares whether this gearbox can address one directly or must step sequentially—an era/mechanism capability, not scheduler policy |
 //! | [`WIDE_ON`]/[`WIDE_OFF`]/[`TIGHT_ON`]/[`TIGHT_OFF`] | SIM POLICY | stick-to-detent input mapping with hysteresis; the DETENT RATIOS they select are spec |
 //! | [`TICK_HZ`] | SIM POLICY | the fixed simulation tick the shift countdown quantizes against |
@@ -220,8 +279,8 @@ const TICK_HZ: f32 = 64.0;
 
 /// Fix-1a anti-hunting margin (rpm): an upshift only commits if the belt state PREDICTED at
 /// the end of the shift's own torque-cut window (same integration law, drive torque cut,
-/// reaction frozen — [`predict_shift_landing_m`]) lands at least this far ABOVE the down
-/// band in the new gear. The static band gap (~100 rpm at the Tiger's widest step) is
+/// reaction DECAYING per [`LANDING_REACTION_DECAY`] — [`predict_shift_landing_m`]) lands at
+/// least this far ABOVE the down band in the new gear. The static band gap (~100 rpm at the Tiger's widest step) is
 /// erased by the cut's own belt-speed bleed in low gears (~2500 rpm per m/s slope in gear
 /// 2), which fired the down band the tick the freeze lifted — the measured 1-2-1-2 climb
 /// trace. SIM POLICY.
@@ -231,14 +290,42 @@ const TICK_HZ: f32 = 64.0;
 /// upshift intent — drag was already fully released (`hold_blend(1/0.5) = 0`), so the
 /// predictor's full-throttle arithmetic is bit-identical to stage A; at partial throttle
 /// the old predictor's drag term matched the old window's real drag, and both died
-/// together. What the margin covers is unchanged: the frozen-reaction bleed error
-/// (`r_mean/I × window`), which stage B does not touch.
+/// together.
+///
+/// What the margin covers (scheduler fix round — the predictor now decays the reaction and
+/// uses the coupled vehicle mass, [`predict_shift_landing_m`]): residual model error,
+/// chiefly the SUSTAINED grade component of the window's deceleration that outlives the
+/// decayed drive-shear reaction. On a steep sustained grade that residual can exceed the
+/// margin; what then prevents hunting is the architecture around the landing, not
+/// predictor exactness — the reversal dwell blocks the down band for 32 post-window ticks,
+/// and the upshift's own reserve gate guarantees the landed gear can out-pull the filtered
+/// demand and recover rpm inside that dwell.
 const POSTSHIFT_MARGIN_RPM: f32 = 150.0;
 
-/// Engine-protection overrun threshold (rpm): a positive signed shaft this far above the
-/// governed point may upshift without propulsive intent. The ordinary landing-band check is
-/// waived for that protective shift because lowering rpm is its purpose. SIM POLICY.
-const OVERRUN_UPSHIFT_MARGIN_RPM: f32 = 150.0;
+/// Fix-1a landing-predictor reaction decay, per predicted tick (scheduler fix round). The
+/// pre-cut reaction is dominated by the DRIVE shear the grip elements carry; once the
+/// torque cut lands, that shear is no longer sustained and the bristle field relaxes over
+/// [`forces::GRIP_SHEAR_MODULUS_M`] (75 mm) of relative motion — at the ~1 m/s slip scale
+/// of a loaded low-gear climb that is τ ≈ 75 ms ≈ 4.8 ticks at 64 Hz. The decay is the
+/// DETERMINISTIC per-tick multiplicative stand-in for that exponential: 0.8 ≈ 1 − dt/τ
+/// (no `exp()` in sim code); over a 20-tick window the geometric sum charges an effective
+/// Σρᵏ ≈ 4.9 ticks of full reaction instead of the frozen model's 20. SIM POLICY.
+const LANDING_REACTION_DECAY: f32 = 0.8;
+
+/// Standard gravity (m/s²) — the same constant the spec layer authors weights with
+/// (`spec.mass * 9.81` at the grip-stiffness authoring seam, `track::sim`). Needed here
+/// only to invert that identity for the landing predictor's coupled mass.
+const GRAVITY_M_PER_S2: f32 = 9.81;
+
+/// Crank-corroboration margin (rpm) above governed: past this floor a shaft reading is
+/// trusted by the ORDINARY band arm only if the crank reads past it too (scheduler fix
+/// round — a clutch-infeasible belt transient must not drive gear selection; locked driving
+/// keeps crank == shaft, propulsive slip puts the crank ABOVE the shaft, never below). The
+/// protective upshift that used to FIRE at this floor was demoted in the descent round: on
+/// overrun the box now holds its gear for engine braking, and the last-resort rescue sits at
+/// the mechanical-protection ceiling ([`TransmissionParams::max_curve_rpm`] — see the module
+/// doc and the decision block). SIM POLICY.
+const CRANK_CORROBORATION_MARGIN_RPM: f32 = 150.0;
 
 /// Fix-1b anti-hunting dwell (fixed ticks, 0.5 s at 64 Hz): after a shift commits, the
 /// OPPOSITE-direction shift stays blocked this long. Same-direction shifts stay free — a
@@ -247,8 +334,12 @@ const REVERSAL_DWELL_TICKS: u8 = 32;
 
 /// Fix-1c over-rev margin (rpm): a downshift is refused if its landing rpm in the lower
 /// gear would exceed the engine's max authored curve rpm minus this margin — the box never
-/// commands an over-rev. SIM POLICY.
-const OVERREV_MARGIN_RPM: f32 = 100.0;
+/// commands an over-rev. Codex round 3: the SAME margin sizes the over-rev slip guard's
+/// band ABOVE the curve top (`ω_over = max_curve_rpm + OVERREV_MARGIN_RPM`, see
+/// [`clutch_coupling`]) — one policy scale polices the ceiling from both sides.
+/// Crate-visible so read-only instrumentation (the steep-descent crank-bound probes) can
+/// assert against the guard point without restating it. SIM POLICY.
+pub(crate) const OVERREV_MARGIN_RPM: f32 = 100.0;
 
 /// Stage-C reserve margin as a fraction of the filtered mean-axis demand. Ten percent keeps a
 /// target gear away from the zero-acceleration knife edge without encoding a vehicle-specific
@@ -270,8 +361,27 @@ const DEMAND_FILTER_TICKS: f32 = 8.0;
 /// SIM POLICY.
 const GRADE_CONFIRM_TICKS: u8 = 13;
 
+/// Consecutive decision ticks the ordinary BAND upshift's condition — propulsive intent
+/// with the signed shaft rpm above the up band — must hold before the upshift ARMS
+/// (descent round, Yan-approved). DERIVED = [`GRADE_CONFIRM_TICKS`]: the deliberate
+/// symmetry is that DOWNSHIFTS confirm sustained LOAD for 13 ticks and UPSHIFTS now
+/// confirm sustained SPEED for the same 0.203125 s. The evidence is HARD-RESET, not leaky
+/// like the deficit's, and the difference is the signal: the deficit reads
+/// contact-reaction demand, which jitters tick-to-tick around a persistent truth (one
+/// clean sample must not erase twelve dirty ones), while the band condition reads the
+/// smooth integrated belt speed, where a single below-band tick genuinely refutes
+/// "sustained" — and a hard reset makes the gate immune to EVERY decaying transient
+/// shorter than the window. The reproduced failure: firing backward on a steep climb
+/// kicks the shaft above the band for a few ticks (the ~0.14 m/s recoil shove decays
+/// through the band in ~0.05–0.15 s on a grade the tank cannot actually sustain) and
+/// fired 1→2→3 shift storms that immediately collapsed; a leaky counter would still
+/// accumulate through exactly that shape. The PROTECTIVE ceiling rescue is exempt —
+/// crank safety must not wait a confirmation. SIM POLICY.
+const UPSHIFT_CONFIRM_TICKS: u8 = GRADE_CONFIRM_TICKS;
+
 /// Hill-hold anti-oscillation cooldown after a release (32 fixed ticks = 0.5 s DERIVED at 64 Hz).
-/// A genuine backward roll faster than [`HILL_HOLD_ENGAGE_SPEED`] overrides it. SIM POLICY.
+/// Never overridable (Codex round 4): the latch engages only near rest, so a genuine roll
+/// is braked by `back_driven_intent` until the hull re-enters the zone. SIM POLICY.
 const HOLD_REENGAGE_TICKS: u8 = 32;
 
 /// Fuel-governor cut width (rpm): torque ramps linearly to zero over this band past the
@@ -315,6 +425,19 @@ const CLUTCH_IN_M_SPEED: f32 = NEUTRAL_M_SPEED * 1.2;
 /// (throttle against the engaged ladder) is not propulsive — the engine keeps motoring, so
 /// drag stays engaged under it.
 const DRAG_THROTTLE_RELEASE: f32 = 0.5;
+
+/// Shape of the rising motoring-torque curve ([`engine_drag`], descent round): the CONSTANT
+/// share of the mid-band magnitude; the remaining `1 − share` scales linearly with crank
+/// speed, normalized at mid-band `ω_mid = (idle + governed)/2`. Physical premise
+/// (Chen–Flynn-form friction mean effective pressure): motoring losses are a Coulomb/
+/// compression base plus viscous/pumping terms that GROW with piston speed — roughly
+/// doubling across the operating range — so a back-driven crank resists harder the faster
+/// the hill spins it, and each gear acquires a natural downhill equilibrium speed instead
+/// of a flat-torque runaway. The split is engine-class-uniform SIM POLICY; the vehicle's
+/// authored `drag_fraction × peak_torque` stays the magnitude anchor (exact at ω_mid, so
+/// ordinary mid-band coast feel is unchanged). One third base / two thirds linear puts the
+/// Tiger at ≈ 0.59× at idle, 1× at 1550, ≈ 1.41× at governed 2500, ≈ 1.62× at rated 3000.
+const MOTORING_DRAG_BASE_SHARE: f32 = 1.0 / 3.0;
 
 /// Input deadzone on the throttle axis for direction/brake intent (matches the swap logic's
 /// historical deadband).
@@ -414,10 +537,14 @@ pub struct TransmissionParams {
     /// Static breakaway capacity multiplier for a latched, at-rest belt. Dynamic dissipation,
     /// service braking, and every moving slide use [`Self::brake_capacity_n`] unchanged.
     pub brake_static_factor: f32,
-    /// Zero-throttle engine drag (compression braking) as a fraction of peak torque,
-    /// reflected through the CURRENT gear — a drag TORQUE (design §3), never the negative
-    /// half of rated power. Diesel motoring/compression braking runs ~20–30% of rated
-    /// torque (INFERRED band, tagged at the authoring site).
+    /// Zero-throttle engine drag (compression braking): the MID-BAND anchor of the rising
+    /// motoring-torque curve, as a fraction of peak torque. [`engine_drag`] equals
+    /// `drag_fraction × peak` at `ω_mid = (idle + governed)/2` and grows linearly with
+    /// crank speed from a [`MOTORING_DRAG_BASE_SHARE`] base (descent round — pumping and
+    /// friction losses rise with speed, giving each gear a bounded downhill equilibrium).
+    /// A drag TORQUE at the crank (design §3), never the negative half of rated power.
+    /// Diesel motoring/compression braking runs ~20–30% of rated torque mid-band
+    /// (INFERRED band, tagged at the authoring site).
     pub drag_fraction: f32,
     /// Crank + flywheel + clutch rotational inertia J (kg·m²) — the engine-side inertia the
     /// stage-B crank state integrates against. Vehicle data (INFERRED at the authoring
@@ -555,13 +682,20 @@ impl TransmissionParams {
                     && a.reverse_speeds_kmh.windows(2).all(|w| w[0] < w[1]),
             ),
             (
-                // Every post-upshift landing must remain above the down band, or the box hunts
-                // up-down on a boundary speed.
+                // Every post-upshift landing must remain above the down band PLUS the runtime
+                // landing margin: the fix-1a gate demands `landing ≥ shift_down +
+                // POSTSHIFT_MARGIN_RPM` at the end of the torque-cut window, so a triple that
+                // clears only the bare down band can NEVER legally shift at its own trigger
+                // rpm — it "works" solely by over-running the band to the governor (the
+                // shipped Tiger's original 2300/1400 did exactly that: min step 0.651 landed
+                // 1498 < 1550). Fail loudly at asset load instead.
                 "gearbox shift-band hysteresis vs ratio steps",
                 a.forward_speeds_kmh
                     .windows(2)
                     .chain(a.reverse_speeds_kmh.windows(2))
-                    .all(|w| a.shift_up_rpm * w[0] / w[1] > a.shift_down_rpm),
+                    .all(|w| {
+                        a.shift_up_rpm * w[0] / w[1] > a.shift_down_rpm + POSTSHIFT_MARGIN_RPM
+                    }),
             ),
             (
                 "steering capacity/efficiency + brake_force",
@@ -734,6 +868,11 @@ pub struct TransmissionState {
     /// ticks increment it and other ticks decay it by one, so one contact-jitter sample cannot erase
     /// a nearly confirmed deficit. Saturating u8.
     pub grade_confirm_ticks: u8,
+    /// Consecutive decision-tick evidence that the ordinary up-band condition holds
+    /// (propulsive intent, signed shaft rpm above the up band). HARD-RESET by any
+    /// non-qualifying tick — see [`UPSHIFT_CONFIRM_TICKS`] for why this one is not leaky.
+    /// Saturating u8.
+    pub band_confirm_ticks: u8,
     /// Held reserve target (1-based; zero means none). Direct addressing retains it through its
     /// one interruption window; Sequential retains it across every adjacent window.
     pub grade_target: u8,
@@ -744,7 +883,8 @@ pub struct TransmissionState {
     /// threshold.
     pub hill_hold: bool,
     /// Remaining post-release hill-hold cooldown ticks. While nonzero, a near-rest deficit cannot
-    /// re-latch; actual backward motion past [`HILL_HOLD_ENGAGE_SPEED`] overrides the cooldown.
+    /// re-latch — never overridable (Codex round 4: the latch itself is near-rest-only, and a
+    /// moving roll is `back_driven_intent` braking territory until it re-enters the zone).
     pub hold_reengage_ticks: u8,
 }
 
@@ -805,7 +945,7 @@ pub(crate) struct TransmissionProjectionField {
 /// Adding state fails this destructure until the field is classified exactly once here.
 pub(crate) fn transmission_state_projection(
     state: &TransmissionState,
-) -> [TransmissionProjectionField; 16] {
+) -> [TransmissionProjectionField; 17] {
     let TransmissionState {
         gear,
         shift_ticks,
@@ -819,6 +959,7 @@ pub(crate) fn transmission_state_projection(
         demand_n,
         demand_initialized,
         grade_confirm_ticks,
+        band_confirm_ticks,
         grade_target,
         scheduler,
         hill_hold,
@@ -895,6 +1036,10 @@ pub(crate) fn transmission_state_projection(
             value: U8(grade_confirm_ticks),
         },
         TransmissionProjectionField {
+            name: "band_confirm_ticks",
+            value: U8(band_confirm_ticks),
+        },
+        TransmissionProjectionField {
             name: "grade_target",
             value: U8(grade_target),
         },
@@ -942,6 +1087,7 @@ impl TransmissionState {
             demand_n: 0.0,
             demand_initialized: false,
             grade_confirm_ticks: 0,
+            band_confirm_ticks: 0,
             grade_target: 0,
             scheduler: SchedulerState::Normal,
             hill_hold: false,
@@ -1068,48 +1214,89 @@ pub fn step(
     }
 }
 
-/// The engine's compression-braking drag torque at the CRANK (stage B — drag moved
-/// engine-side; the belt lost its separate `f_drag` term and drag reaches the belt only
-/// through the coupling): `drag_fraction × peak torque`, released as the fueling demand
-/// opens (`hold_blend(u/DRAG_THROTTLE_RELEASE)` — a brake command is not fueling, so drag
-/// stays engaged under it, exactly the old release contract), saturating over the crank's
-/// own speed scale ω_idle (the engine-side reflection of the old belt-side
-/// `DRAG_SAT_SPEED` role: fade only near a stopped crank — a motoring crank sits at or
-/// above idle and reads full drag, as any driving belt exceeded 0.2 m/s). ω_e is never
-/// negative, so the torque always opposes crank rotation.
+/// The engine's compression-braking (motoring) drag torque at the CRANK (stage B — drag
+/// moved engine-side; the belt lost its separate `f_drag` term and drag reaches the belt
+/// only through the coupling). Descent round: no longer a flat constant — the magnitude is
+/// the authored `drag_fraction × peak torque` AT MID-BAND, rising linearly with crank
+/// speed ([`MOTORING_DRAG_BASE_SHARE`]: one-third constant base + two-thirds linear in
+/// `ω/ω_mid`, `ω_mid = (idle + governed)/2` — pumping/friction losses grow with speed), so
+/// each gear has a bounded downhill equilibrium instead of a flat-torque runaway. Released
+/// as the fueling demand opens (`hold_blend(u/DRAG_THROTTLE_RELEASE)` — a brake command is
+/// not fueling, so drag stays engaged under it, exactly the old release contract). The
+/// affine law holds EXACTLY over the whole LIVE crank range (Codex round): the spin-up
+/// fade — the engine-side reflection of the old belt-side `DRAG_SAT_SPEED` role, keeping
+/// the torque zero-crossing at a stopped crank — is confined BELOW the stall-guard floor
+/// `idle − STALL_GUARD_BAND_RPM`, which the hard end-of-tick clamp makes the lowest speed
+/// a running crank can ever hold, so no reachable operating point sees the fade and the
+/// documented linear law (spec.rs / the RON comment) is the truth, not an approximation.
+/// ω_e is never negative, so both factors are non-negative and the torque always opposes
+/// crank rotation. Deterministic: one multiply-add, no transcendentals, f32.
 fn engine_drag(tp: &TransmissionParams, omega_e: f32, u_fuel: f32) -> f32 {
-    let omega_idle = tp.engine.idle_rpm * RPM_TO_RAD;
+    let omega_floor = (tp.engine.idle_rpm - STALL_GUARD_BAND_RPM) * RPM_TO_RAD;
+    let omega_mid = (tp.engine.idle_rpm + tp.engine.governed_rpm) * 0.5 * RPM_TO_RAD;
+    let rise = MOTORING_DRAG_BASE_SHARE + (1.0 - MOTORING_DRAG_BASE_SHARE) * (omega_e / omega_mid);
     tp.peak_torque_nm
         * tp.drag_fraction
+        * rise
         * forces::hold_blend(u_fuel / DRAG_THROTTLE_RELEASE)
-        * (omega_e / omega_idle).clamp(0.0, 1.0)
+        * (omega_e / omega_floor).clamp(0.0, 1.0)
 }
 
 /// Fix-1a: roll the shift's torque-cut window forward on the mean belt axis and return the
-/// PREDICTED landing speed `m`. Exactly the live integration's mean — per side
-/// `v += (Q − R)/I·dt` — under the shift window's own stage-B rules: the box is
+/// PREDICTED landing speed `m`, under the shift window's own stage-B rules: the box is
 /// DECLUTCHED, so the belt gets NO engine force and NO engine drag (the old predictor's
-/// drag-through-the-landing-gear term died with the belt-side drag), and the ground
-/// reaction is frozen at its current per-tick mean. Fixed-tick, f32-exact — prediction and
-/// reality run the same (now purely reaction-driven) window law. `max_speed` bounds this
-/// vehicle/mean axis, matching the live regenerative integration; it is not a per-belt bound.
+/// drag-through-the-landing-gear term died with the belt-side drag). `max_speed` bounds
+/// this vehicle/mean axis, matching the live regenerative integration; it is not a
+/// per-belt bound.
 ///
-/// DOMAIN (review round): valid for the PROPULSIVE straight-line case ONLY — the only case
-/// the scheduler consults it for (upshifts are intent-gated on `propulsive > 0` and
-/// detent-deferred on the L600). It carries no brake term and no λ/steer state, so under
-/// service braking or a geared turn it would over-predict the landing. Inside its domain,
-/// frozen-R is CONSERVATIVE (the true post-cut reaction collapses with the slip), and the
-/// mean-axis clamp is therefore the exact live speed-limit semantic in this domain.
-fn predict_shift_landing_m(
+/// THE WINDOW MODEL (scheduler fix round — the physical premise). The pre-cut `r_mean` is
+/// dominated by the DRIVE shear the grip elements carry, and cutting the drive is exactly
+/// what removes it: the bristle field relaxes over [`forces::GRIP_SHEAR_MODULUS_M`] of
+/// relative motion (~5 ticks — see [`LANDING_REACTION_DECAY`]), so the reaction DECAYS
+/// geometrically instead of staying frozen. And the mass that reaction decelerates is the
+/// COUPLED one: through the still-gripping (merely relaxing) bristle the belt pair carries
+/// the hull, so per side the inertia is `fp.inertia + (W/2)/g` — belt + reflected
+/// drivetrain plus this side's share of the sprung vehicle — with `W/2` recovered EXACTLY
+/// from the grip law's own authoring identity `grip_stiffness = μ·(W/2)/K`
+/// ([`forces::grip_stiffness`]; threshold-free inversion, no new vehicle datum). The old
+/// frozen-`r_mean`-over-belt-inertia form charged a 57 t Tiger's window as if 32 t of
+/// reflected belt inertia alone absorbed 20 ticks of full driving reaction: on a 10% grade
+/// it predicted a 156 rpm landing against a 1550 rpm floor and refused F1→F2 forever
+/// (measured governor-pinned at 2591 rpm / 0.67 m/s), while the same tank climbed F1→F4 on
+/// the flat. Units stay the live mean-axis convention (the per-side integration
+/// `v += (Q − R)/I·dt`): per-side mean reaction over per-side inertia.
+///
+/// Deterministic by construction: fixed `shift_ticks` iterations, one multiply-add per
+/// tick, no transcendentals — the exponential decay IS the per-tick multiplicative
+/// constant. A support-only rig (`grip_stiffness = 0`) contributes no vehicle mass and
+/// degenerates to the bare belt inertia, conservatively.
+///
+/// DOMAIN (review round; narrowed again in Codex round 3): valid for the PROPULSIVE
+/// straight-line case ONLY — the only case the ORDINARY band gate consults it for (band
+/// upshifts are intent-gated on `propulsive > 0` and detent-deferred on the L600). It
+/// carries no brake term and no λ/steer state; the GRADE paths read only its SIGN, which
+/// is robust in those regimes. The protective ceiling rescue does NOT consume it at all:
+/// its decayed reaction models DRIVE shear relaxing after a torque cut, which on genuine
+/// overrun would mis-model the hill-driven window — the rescue's selection is best-effort
+/// static projection with the over-rev slip guard as the crank's actual bound (round 5,
+/// module doc). The un-modeled
+/// residual (the sustained grade deceleration that outlives the drive shear) is owned by
+/// [`POSTSHIFT_MARGIN_RPM`]'s architecture note.
+pub(crate) fn predict_shift_landing_m(
     tp: &TransmissionParams,
     fp: &ForceParams,
     m: f32,
     r_mean: f32,
     dt: f32,
 ) -> f32 {
+    let side_vehicle_mass =
+        fp.grip_stiffness * forces::GRIP_SHEAR_MODULUS_M / (fp.mu.max(1e-3) * GRAVITY_M_PER_S2);
+    let i_coupled = fp.inertia + side_vehicle_mass;
     let mut pm = m;
+    let mut r = r_mean;
     for _ in 0..tp.shift_ticks {
-        pm = clamp_mean_speed(pm - r_mean / fp.inertia * dt, fp.max_speed);
+        pm = clamp_mean_speed(pm - r / i_coupled * dt, fp.max_speed);
+        r *= LANDING_REACTION_DECAY;
     }
     pm
 }
@@ -1159,12 +1346,16 @@ fn available_force_in_gear(
 }
 
 /// Positive capability headroom required of a selected gear (N, both tracks together).
-fn reserve_margin(demand: f32) -> f32 {
+pub(crate) fn reserve_margin(demand: f32) -> f32 {
     demand.max(0.0) * RESERVE_MARGIN_FRACTION + RESERVE_MARGIN_FLOOR_N
 }
 
 /// Modeled full-throttle reserve for one gear at the current shaft speed.
-fn modeled_reserve_in_gear(
+///
+/// Crate-visible (with [`reserve_margin`] and [`predict_shift_landing_m`]) so read-only
+/// instrumentation recomputes the scheduler's own decision inputs from this law instead of
+/// duplicating it — see the driving-feel probes in `headless_test`.
+pub(crate) fn modeled_reserve_in_gear(
     tp: &TransmissionParams,
     fp: &ForceParams,
     shaft: f32,
@@ -1237,6 +1428,7 @@ fn commit_grade_shift(st: &mut TransmissionState, tp: &TransmissionParams, targe
     st.last_shift_dir = -1;
     st.dwell_ticks = REVERSAL_DWELL_TICKS;
     st.grade_confirm_ticks = 0;
+    st.band_confirm_ticks = 0;
 }
 
 /// Re-evaluate a latched hill hold on a decision tick. Returns whether this call committed a new
@@ -1307,6 +1499,27 @@ fn refresh_hill_hold(
 /// the saturated idle governor keeps `τ_free > 0` for any sane torque curve). The
 /// end-of-tick hard floor in [`regenerative`] backstops the legal-but-extreme spec corner
 /// where even `τ_c = −capacity` cannot hold the floor (strongly negative τ_free).
+///
+/// OVER-REV SLIP GUARD (Codex round 3 — the stall guard's exact mirror, bought with field
+/// evidence: on the rescaled steep world a back-driven crank followed the belt to ~9000
+/// rpm, tripling its mechanical limit, because gear selection alone cannot bound the crank
+/// when the ladder runs out — a top-gear reverse descent has NO gear to shift to). If the
+/// transmitted τ_c would land the crank ABOVE `ω_over = max_curve_rpm +
+/// OVERREV_MARGIN_RPM`, τ_c is RAISED to land exactly at ω_over: the clutch slips rather
+/// than let the hill grenade the engine (the crew analogue: riding the clutch on an
+/// over-revving descent; engine DAMAGE stays deliberately unmodeled, exactly like stall
+/// death). At the guard point the crank still transmits its FULL motoring drag — the
+/// maximum braking sustainable without over-rev — so retardation degrades gracefully, it
+/// does not vanish. Scope of that claim (Codex round 4): in a STRAIGHT overrun both
+/// sprocket powers are regenerative, `net ≤ 0`, and the power gate cannot scale the
+/// transmitted torque — the guard-point drag reaches the belt in full (pinned by
+/// magnitude in `overrun_slip_guard_bounds_crank_at_top_gear`); under a simultaneously
+/// POWERED steer the common gate may scale τ_c with every other engine-borne force. The
+/// crank BOUND itself is unconditional either way — the guard, the re-anchor condition,
+/// and the end-of-tick clamp never pass ω_over regardless of scaling. The guard sits one
+/// OVERREV_MARGIN_RPM above the rescue trigger
+/// ([`TransmissionParams::max_curve_rpm`]), so the protective upshift's crank
+/// corroboration still reads past the ceiling and fires before the guard saturates.
 #[allow(clippy::too_many_arguments)]
 fn clutch_coupling(
     j_e: f32,
@@ -1319,6 +1532,7 @@ fn clutch_coupling(
     i_m: f32,
     f_other: f32,
     omega_floor: f32,
+    omega_over: f32,
     dt: f32,
     #[cfg(feature = "bitprobe")] probe: &mut TransmissionProbe,
 ) -> f32 {
@@ -1337,6 +1551,11 @@ fn clutch_coupling(
         // construction τ_guard < τ_c (less torque = higher landing), so the guard only
         // ever reduces — one-sided.
         tau_c = (tau_free - (omega_floor - omega_e) * j_e / dt).clamp(-capacity, capacity);
+    } else if omega_next > omega_over {
+        // Land exactly at the over-rev guard point: same formula, other side. By
+        // construction τ_guard > τ_c (more torque = lower landing), so this side only
+        // ever increases — one-sided, and mutually exclusive with the stall branch.
+        tau_c = (tau_free - (omega_over - omega_e) * j_e / dt).clamp(-capacity, capacity);
     }
     #[cfg(feature = "bitprobe")]
     {
@@ -1404,6 +1623,7 @@ fn regenerative(
             st.demand_n = 0.0;
             st.demand_initialized = false;
             st.grade_confirm_ticks = 0;
+            st.band_confirm_ticks = 0;
             st.grade_target = 0;
             st.scheduler = SchedulerState::Normal;
         }
@@ -1424,6 +1644,10 @@ fn regenerative(
     //     until near standstill, where the ladder swap above engages the opposite gears —
     //     never `|throttle|`-drive in the engaged direction (that was the measured
     //     "cannot decelerate" bug: full reverse at speed produced full FORWARD force);
+    //   * throttle WITH the ladder while the belt is BACK-DRIVEN (past the swap, or a
+    //     rollback under W) → drive AND service brakes together until the belt crosses
+    //     zero (`back_driven_intent` below — the through-zero half of the signed-intent
+    //     contract);
     //   * throttle released → coast under engine drag (compression braking through the
     //     CURRENT gear, growing as the box downshifts);
     //   * zero command at rest → the parking hold (unchanged).
@@ -1442,6 +1666,23 @@ fn regenerative(
         inp.throttle.abs().clamp(0.0, 1.0)
     } else {
         0.0
+    };
+    // Descent round (through-zero feel): a drive command held while the belt still moves
+    // AGAINST the engaged ladder keeps the driver's foot on the BRAKE as well. This closes
+    // the measured free-roll gap in the held-S stop→reverse flow: the ladder swap commits
+    // at |m| < DIRECTION_SWAP_SPEED while the hull still rolls the OLD way, `opposing`
+    // flips false the same tick, and the declutched swap window then carried NEITHER drive
+    // NOR brake — downhill the tank re-accelerated into its own reversal (the reported
+    // "jumpy" crossing). W while rolling backward is the symmetric case (the signed-intent
+    // contract: intent opposing MOTION brakes with everything; the same press flows into
+    // motion once the belt crosses zero and `back_driven_intent` drops). Thresholded at
+    // the existing −PARK_ENGAGE_SPEED policy scale so the at-rest numerical residual and
+    // a from-rest launch never read as back-driven.
+    let back_driven_intent = propulsive > 0.0 && dir * m < -PARK_ENGAGE_SPEED;
+    let service = if back_driven_intent {
+        propulsive
+    } else {
+        service
     };
 
     // Stage C demand observer: the contact reactions are the load signal the sim already owns.
@@ -1498,21 +1739,40 @@ fn regenerative(
     let current_reserve =
         modeled_reserve_in_gear(tp, fp, shaft, ladder[(st.gear - 1) as usize], st.demand_n);
 
-    // Stage C anti-rollback. Only held FORWARD propulsive intent can own the latch; release or
-    // reverse intent drops it immediately and lets the established direction-swap semantics run.
-    // Ordinary engagement is near rest on the existing PARK speed scale and only when the engaged
-    // gear cannot pull the filtered load (or a paid shift cut transmits zero). A genuine backward
-    // roll beyond the threshold also engages and overrides the post-release cooldown: that is
-    // rollback, not near-rest chatter. While latched, selection runs on EVERY decision tick so a
-    // changing EMA can retarget and GRADE LIMIT always describes current capability.
+    // Stage C anti-rollback. Only held PROPULSIVE intent on the ENGAGED ladder can own the
+    // latch — EITHER ladder (Codex round 3): every quantity in this block is already
+    // ladder-signed (`shaft = dir·m`, the selector walks `ladder`, release compares
+    // `dir·f_c`), and gating the latch on `!st.reverse` left the reverse climb WITHOUT the
+    // documented near-rest fallback — a confirmed reverse deficit whose landing sign had
+    // crossed could only lug/brake-cycle in its tall gear, since the deficit path's
+    // fallback owner ("decelerate into the hill-hold seam") did not exist on the R ladder.
+    // Backing up a slope is a climb; the hold, launch selection, and GRADE LIMIT truth are
+    // direction-agnostic. Release or OPPOSING intent drops the latch immediately and lets
+    // the established direction-swap semantics run.
+    //
+    // Engagement is NEAR REST ONLY (Codex round 4): the latch is the standstill seam of
+    // the climb, and |shaft| below the existing near-rest threshold is its whole domain.
+    // The round-3 form also engaged on `real_rollback` at ANY speed, which mis-fired on
+    // fast cross-motion — held reverse throttle while the hull still moves forward reads
+    // propulsive intent with `shaft = −5`, and the latch grabbed a 5 m/s "rollback" (the
+    // symmetric forward quadrant too); worse, a force-based release while cross-moving
+    // could re-latch the very next tick because the rollback arm overrode the cooldown.
+    // Intent-vs-motion at speed belongs to `back_driven_intent` (drive + full service
+    // brakes braking CONTINUOUSLY to rest — Yan's "jumpy S" seam family), after which the
+    // decelerated hull enters the zone and latches legitimately. The cooldown is likewise
+    // no longer overridable: a breach that accelerates past the threshold is being braked
+    // by `back_driven_intent` anyway, and re-latching mid-motion was exactly the
+    // release/re-latch chatter the cooldown exists to prevent. While latched, selection
+    // runs on EVERY decision tick so a changing EMA can retarget and GRADE LIMIT always
+    // describes current capability.
     let hold_cooldown_active = st.hold_reengage_ticks > 0;
     if hold_cooldown_active {
         st.hold_reengage_ticks -= 1;
     }
     let real_rollback = shaft < -HILL_HOLD_ENGAGE_SPEED;
-    let forward_intent = !st.reverse && inp.throttle > DEAD;
+    let climb_intent = propulsive > DEAD;
     let mut hill_hold_step_committed = false;
-    if !forward_intent {
+    if !climb_intent {
         st.hill_hold = false;
         if matches!(
             st.scheduler,
@@ -1522,18 +1782,27 @@ fn regenerative(
             st.grade_target = 0;
         }
     } else {
-        let in_engagement_zone = shaft.abs() < HILL_HOLD_ENGAGE_SPEED || real_rollback;
-        let effective_deficit = real_rollback
-            || current_reserve < 0.0
+        let in_engagement_zone = shaft.abs() < HILL_HOLD_ENGAGE_SPEED;
+        let effective_deficit = current_reserve < 0.0
             // During a paid interruption the selected gear's static capability is not being
-            // transmitted: effective F = 0, so reserve is `-D`. This catches a sequential cascade
-            // that loses the climb inside an otherwise-capable landing gear.
-            || (st.shift_ticks > 0 && st.demand_n > 0.0);
-        if !st.hill_hold
-            && in_engagement_zone
-            && (!hold_cooldown_active || real_rollback)
-            && effective_deficit
-        {
+            // transmitted: effective F = 0, so reserve is `-D`. This catches a cascade that
+            // loses the climb inside an otherwise-capable landing gear — the 20° Sequential
+            // approach loses it through ORDINARY band-down windows (scheduler Normal, no
+            // retained target), so the arm cannot be scoped to a grade-scheduler owner.
+            // Scoped instead by the ABSOLUTE reserve floor (Codex round 5): a window-masked
+            // load is a grade-class load only past [`RESERVE_MARGIN_FLOOR_N`] — the same
+            // 10 kN that separates load truth from contact jitter everywhere in stage C.
+            // Below it ("any positive demand", the old form), an ordinary tall-gear
+            // downshift near rest on FLAT ground with a few kN of residual demand EMA
+            // false-latched HILL HOLD out of nowhere.
+            //
+            // BANKED (quality-tier, Codex round 6): a SUSTAINED flat load above the 10 kN
+            // floor during a near-rest paid window — towing, terrain-snag, or collision
+            // classes, none of which exist in the game today — would still false-latch
+            // here (brakes on, HILL HOLD shown, released on capability like any hold).
+            // Revisit this arm if such mechanics ever land.
+            || (st.shift_ticks > 0 && st.demand_n > RESERVE_MARGIN_FLOOR_N);
+        if !st.hill_hold && in_engagement_zone && !hold_cooldown_active && effective_deficit {
             st.hill_hold = true;
         }
         if st.hill_hold && st.shift_ticks > 0 {
@@ -1574,6 +1843,23 @@ fn regenerative(
         let (dwell_ticks, last_shift_dir) = (st.dwell_ticks, st.last_shift_dir);
         let dwell_blocks = |shift_dir: i8| dwell_ticks > 0 && last_shift_dir == -shift_dir;
         let mut grade_step_committed = hill_hold_step_committed;
+        // PRIORITY RULE (Codex round 5, module doc): while shaft AND crank both read past
+        // the mechanical-protection ceiling, the crank rescue owns the decision tick — no
+        // capability downshift may pre-empt it. Structurally the over-rev gate already
+        // refuses every lower gear at such a shaft; this explicit gate turns that emergent
+        // fact into a stated invariant on both grade-commit paths below.
+        let ceiling = tp.max_curve_rpm();
+        let crank_rescue_active = rpm > ceiling && st.omega_e / RPM_TO_RAD > ceiling;
+
+        // Upshift confirmation (descent round, Yan-approved): sustained-SPEED evidence for
+        // the ordinary band arm, mirroring the deficit's sustained-LOAD evidence — HARD
+        // reset, so no decaying transient shorter than the window (the reproduced recoil
+        // kick on a steep climb) can arm a shift storm. See [`UPSHIFT_CONFIRM_TICKS`].
+        if propulsive > 0.0 && rpm > tp.shift_up_rpm {
+            st.band_confirm_ticks = st.band_confirm_ticks.saturating_add(1);
+        } else {
+            st.band_confirm_ticks = 0;
+        }
 
         // A held Sequential target is never an instruction to shift blindly. Re-run the same
         // selector against current intent, speed, and filtered demand at every continuation. A
@@ -1592,7 +1878,8 @@ fn regenerative(
                 st.grade_target = target;
                 st.scheduler = SchedulerState::GradeShift { from, to: target };
                 let next = st.gear - 1;
-                if shaft > -PARK_ENGAGE_SPEED
+                if !crank_rescue_active
+                    && shaft > -PARK_ENGAGE_SPEED
                     && grade_landing_positive
                     && shaft_rpm_geared(ladder[(next - 1) as usize])
                         <= tp.max_curve_rpm() - OVERREV_MARGIN_RPM
@@ -1620,61 +1907,190 @@ fn regenerative(
         } else {
             st.grade_confirm_ticks = st.grade_confirm_ticks.saturating_sub(1);
         }
+        // Raw confirmed deficit AND its correction target, computed INDEPENDENT of the
+        // dwell (Codex round): the deferral below must know whether a correction EXISTS
+        // before the ordinary arms run. The first cut gated `confirmed_deficit` on the
+        // dwell itself, which let control fall through to the ORDINARY upshift arm while
+        // deferring — a genuine deficit could be upshifted OVER, and that upshift reset
+        // `grade_confirm_ticks` and restarted the dwell: evidence erased, correction never
+        // fires.
         let confirmed_deficit = !grade_step_committed
             && propulsive > 0.0
             && st.gear > 1
             && shaft > -PARK_ENGAGE_SPEED
             && current_reserve < 0.0
             && st.grade_confirm_ticks >= GRADE_CONFIRM_TICKS;
+        let deficit_target = confirmed_deficit
+            .then(|| select_grade_target(tp, fp, ladder, shaft, st.gear, st.demand_n))
+            .flatten();
 
-        // A confirmed reserve deficit is a CORRECTION, not a preference. It owns the decision
-        // before either upshift arm and is exempt from reversal dwell: the full 13-tick persistence
-        // is the anti-hunting protection already paid for this correction.
-        if confirmed_deficit {
-            if grade_landing_positive
-                && let Some(target) =
-                    select_grade_target(tp, fp, ladder, shaft, st.gear, st.demand_n)
-            {
-                commit_grade_shift(st, tp, target);
-            }
-        } else {
-            // The ordinary intent gate remains: service braking never upshifts because the landing
-            // predictor has no brake term. The one exception is engine protection on a positive
-            // signed shaft above governed + margin while coasting/downhill. It keeps the same
-            // detent, reversal-dwell, positive-landing, and reserve gates; only propulsive intent
-            // and the ordinary landing-rpm band are waived.
-            let protective_upshift =
-                service == 0.0 && rpm > tp.engine.governed_rpm + OVERRUN_UPSHIFT_MARGIN_RPM;
-            let ordinary_upshift = propulsive > 0.0 && rpm > tp.shift_up_rpm;
+        // A confirmed reserve deficit is a CORRECTION, not a preference: with a target it
+        // owns the decision ahead of both upshift arms — by committing, or by HOLDING
+        // (`deficit_pending` suppresses the ordinary upshift below). It falls through to
+        // the ordinary arms ONLY when selection genuinely returns None (scheduler fix
+        // round: at governor-pinned cruise the equilibrium reserve is zero by definition
+        // and dithers negative, the leaky confirmation latches, and no legal lower gear
+        // exists — every candidate over-revs — so the old unconditional pre-emption
+        // silently swallowed the upshift arm forever).
+        //
+        // Descent round: a SHALLOW correction WAITS OUT the post-UPSHIFT reversal dwell.
+        // The demand EMA's reaction sample carries the rebuilding drive shear after a shift
+        // window, not just the grade: measured on the 10% climb, demand inflated 74 → 93 kN
+        // across the F5→F6 window and re-acceleration, manufacturing a "confirmed" deficit
+        // of −2..−3 kN against a 19 kN margin exactly at the capability boundary — a
+        // sustained F5↔F6 limit cycle (~2 s period; the reverse ladder's field-reported
+        // R1→R2→R3→R1 is the same attractor). Evidence still ACCUMULATES through the dwell
+        // (leaky, saturating), so a real-but-shallow grade deficit corrects at dwell
+        // expiry — at most 0.5 s late — while a transient the box itself created decays
+        // with the shear. The post-DOWNSHIFT dwell never blocks it (`dwell_blocks` is
+        // direction-aware): a deeper deficit is a same-direction correction and downshifts
+        // again freely.
+        //
+        // DEEP-deficit override (Codex round, near-arrest safety): a deficit deeper than
+        // the reserve-margin scale is not boundary dither — the pollution transient
+        // measured −2..−3 kN against a 19 kN margin, while a genuine steep grade reads
+        // tens of kN past it — so it corrects IMMEDIATELY, dwell or not. This is the
+        // earlier-intervention half of the near-arrest policy: a steep grade entered right
+        // after an upshift must not bleed speed through window + dwell until the predicted
+        // landing goes sign-negative and the correction becomes uncommittable (the lug).
+        // The landing-sign gate itself stays intact: in the extreme where the sign has
+        // ALREADY crossed, the correction holds (`deficit_pending`) and the vehicle
+        // decelerates into the near-rest hill-hold path, whose latch + full brake envelope
+        // and launch-gear selection are the designed owners of an arrested climb — that
+        // fallback is deliberate, not accidental.
+        let deep_deficit = -current_reserve > reserve_margin(st.demand_n);
+        let deficit_deferred = deficit_target.is_some() && dwell_blocks(-1) && !deep_deficit;
+        let mut deficit_step_committed = false;
+        if let Some(target) = deficit_target
+            && !deficit_deferred
+            && grade_landing_positive
+            // Priority rule: an active crank rescue owns the tick (see the block top).
+            && !crank_rescue_active
+        {
+            commit_grade_shift(st, tp, target);
+            deficit_step_committed = true;
+        }
+        // Pending = a correction target exists but did not commit this tick (dwell-deferred
+        // or landing-sign-blocked): HOLD — the ordinary upshift arm is suppressed so the
+        // pending correction can neither be upshifted over nor have its evidence reset.
+        let deficit_pending = deficit_target.is_some() && !deficit_step_committed;
+        if !deficit_step_committed {
+            // The ordinary intent gate remains: service braking never BAND-upshifts (the
+            // landing predictor has no brake term) and the L600 detent defers BAND upshifts
+            // (λ loads the outputs outside the predictor's domain). On OVERRUN the box now
+            // HOLDS its gear (descent round inversion): with no propulsive intent the
+            // ordinary arm never arms, and the PROTECTIVE upshift is a LAST RESORT at the
+            // mechanical-protection ceiling — the engine's max authored curve rpm
+            // (`max_curve_rpm`, the Tiger's rated 3000; the same ceiling the fix-1c
+            // over-rev gate measures downshift landings against). The old floor of
+            // governed + margin shed exactly the engine braking a descent exists to use;
+            // between governed and the ceiling the climbing dial is the warning, not a
+            // shift trigger. When it does fire, the protective shift keeps its scheduler-
+            // fix-round exemptions — free of the intent gate, the detent deferral, the
+            // landing-rpm band, and the reserve gate below: its purpose is to LOWER an
+            // externally back-driven crank, not to accelerate the vehicle, and descending
+            // under service brakes or mid-steer is the overrun's NORMAL case. It does not
+            // read the propulsive landing predictor at all: its selection is BEST-EFFORT
+            // static projection with the over-rev slip guard as the actual safety bound
+            // (Codex round 5 — see the module doc and the branch below). Reversal dwell
+            // still applies to it.
+            //
+            // BOTH speeds must read past the ceiling because the rescue protects the
+            // CRANK: a belt-side transient (contact/settle impulse) whose re-anchor is
+            // clutch-infeasible never carries the crank with it, so there is nothing to
+            // protect and it must not fire (measured on the 20° approach fixture: a
+            // few-tick belt spike past the old floor — with the reserve gate waived —
+            // upshifted F6→F7 mid-climb and cost the crest). A genuine overrun locks the
+            // crank to the geared shaft within ticks, so the real rescue is delayed only
+            // until the crank is actually in danger.
+            //
+            // The SAME corroboration binds the ORDINARY arm above the UNCHANGED
+            // corroboration floor, governed + CRANK_CORROBORATION_MARGIN_RPM (review
+            // round, invariants preserved through the descent inversion): a
+            // clutch-infeasible belt transient must not drive gear selection through
+            // EITHER arm — a shaft reading past governed + margin with the crank nowhere
+            // near it is by definition a spike the engaged coupling did not carry (locked
+            // driving keeps them equal; propulsive clutch slip puts the crank ABOVE the
+            // shaft, never below), and its band/landing/reserve arithmetic is evaluated
+            // at a fictitious operating point. Below the floor the ordinary gates stand
+            // unchanged: every in-band reading there is a physical operating point the
+            // reserve and landing gates already price.
+            let corroboration_floor = tp.engine.governed_rpm + CRANK_CORROBORATION_MARGIN_RPM;
+            let crank_rpm = st.omega_e / RPM_TO_RAD;
+            let shaft_past_floor = rpm > corroboration_floor;
+            let crank_past_floor = crank_rpm > corroboration_floor;
+            let protective_upshift = crank_rescue_active;
+            // `!deficit_pending` (Codex round): a pending correction HOLDS the gear — the
+            // ordinary arm must not upshift over it (the commit would reset the very
+            // confirmation evidence and dwell deferring the correction). The PROTECTIVE
+            // arm stays exempt from both this and the sustained-speed confirmation:
+            // crank protection outranks a capability correction and must not wait.
+            let ordinary_upshift = propulsive > 0.0
+                && rpm > tp.shift_up_rpm
+                && st.band_confirm_ticks >= UPSHIFT_CONFIRM_TICKS
+                && !detent_turn
+                && (!shaft_past_floor || crank_past_floor)
+                && !deficit_pending;
             if !grade_step_committed
                 && st.gear < top
                 && (ordinary_upshift || protective_upshift)
-                && !detent_turn
                 && !dwell_blocks(1)
             {
-                let g_up = ladder[st.gear as usize];
-                // The predictor returns a SIGNED m; the gate reads its SIGNED shaft speed
-                // (stage A): the landing must be POSITIVE on the engaged ladder AND clear the
-                // down band + margin. A sign-flipped landing always refuses the upshift — under
-                // `|m|` the traced grade case (r_mean = 221 kN, landing_m = −3.62) read as
-                // "9092 rpm" and PASSED, committing catastrophic on-grade upshifts. No
-                // at-rest threshold is needed HERE (review round): the rpm bound already
-                // demands a landing ≥ down band + margin — solidly positive, far above any
-                // numerical residual — so the sign check is a belt-and-braces refusal.
-                let landing = predict_shift_landing_m(tp, fp, m, r_mean, dt);
-                let landing_shaft = dir * landing;
-                let next_reserve = modeled_reserve_in_gear(tp, fp, shaft, g_up, st.demand_n);
-                if landing_shaft > 0.0
-                    && (protective_upshift
-                        || shaft_rpm_of(landing_shaft, g_up)
-                            >= tp.shift_down_rpm + POSTSHIFT_MARGIN_RPM)
-                    && next_reserve >= reserve_margin(st.demand_n)
-                {
-                    st.gear += 1;
+                let next_gear = if protective_upshift {
+                    // BEST-EFFORT rescue selection (Codex round 5 — the simplification
+                    // round; see the module doc's safety-mechanism paragraph): pick the
+                    // first higher gear whose STATICALLY-projected shaft rpm — the
+                    // current shaft through the candidate ratio, no window pricing —
+                    // sits at or below the ceiling. Direct skips straight there;
+                    // Sequential pays one adjacent step per window toward it (gear index
+                    // strictly rises, the ladder is finite: termination is trivial).
+                    // Safety does NOT ride on this choice: the over-rev slip guard
+                    // bounds the crank unconditionally, so a landing the hill overtakes
+                    // costs one guard-clamped window and a re-decision. Three rounds of
+                    // worst-case landing pricing (decayed predictor, sustained-reaction
+                    // bound, λ allowance) each sprouted a new defect while the guard
+                    // made their success optional — deliberately deleted. If no gear
+                    // statically clears (an extreme overspeed near the top of the
+                    // ladder), hold: a commit would only shed reflected engine braking
+                    // while the guard already owns the crank. The landing-rpm band AND
+                    // the reserve gate remain waived, same rationale as ever: the shift
+                    // lowers the crank, it does not accelerate, and above the fuel cut
+                    // every gear's modeled force is zero. The static projection is ≥
+                    // positive by the trigger (shaft past the ceiling), so no
+                    // landing-sign test applies here.
+                    ((st.gear + 1)..=top)
+                        .find(|&cand| shaft_rpm_of(shaft, ladder[(cand - 1) as usize]) <= ceiling)
+                        .map(|target| match tp.shift_addressing {
+                            ShiftAddressing::Direct => target,
+                            ShiftAddressing::Sequential => st.gear + 1,
+                        })
+                } else {
+                    // Ordinary band arm. The predictor returns a SIGNED m; the gate reads
+                    // its SIGNED shaft speed (stage A): the landing must be POSITIVE on
+                    // the engaged ladder AND clear the down band + margin AND the stage-C
+                    // reserve gate. A sign-flipped landing always refuses the upshift —
+                    // under `|m|` the traced grade case (r_mean = 221 kN, landing_m =
+                    // −3.62) read as "9092 rpm" and PASSED, committing catastrophic
+                    // on-grade upshifts. No at-rest threshold is needed HERE (review
+                    // round): the band bound already demands a landing ≥ down band +
+                    // margin — solidly positive, far above any numerical residual.
+                    let landing = predict_shift_landing_m(tp, fp, m, r_mean, dt);
+                    let landing_shaft = dir * landing;
+                    let g_up = ladder[st.gear as usize];
+                    let next_reserve = modeled_reserve_in_gear(tp, fp, shaft, g_up, st.demand_n);
+                    (landing_shaft > 0.0
+                        && shaft_rpm_of(landing_shaft, g_up)
+                            >= tp.shift_down_rpm + POSTSHIFT_MARGIN_RPM
+                        && next_reserve >= reserve_margin(st.demand_n))
+                    .then_some(st.gear + 1)
+                };
+                if let Some(next_gear) = next_gear {
+                    st.gear = next_gear;
                     st.shift_ticks = tp.shift_ticks;
                     st.last_shift_dir = 1;
                     st.dwell_ticks = REVERSAL_DWELL_TICKS;
                     st.grade_confirm_ticks = 0;
+                    st.band_confirm_ticks = 0;
                     st.grade_target = 0;
                     st.scheduler = SchedulerState::Normal;
                 }
@@ -1707,6 +2123,7 @@ fn regenerative(
                     st.last_shift_dir = -1;
                     st.dwell_ticks = REVERSAL_DWELL_TICKS;
                     st.grade_confirm_ticks = 0;
+                    st.band_confirm_ticks = 0;
                     st.grade_target = 0;
                     st.scheduler = SchedulerState::Normal;
                 }
@@ -1728,8 +2145,16 @@ fn regenerative(
     }
     let g = ladder[(st.gear - 1) as usize];
 
-    // --- Parking latch (driver intent, cont.): a zero command near standstill sets the
-    // lever; any drive command releases it. State, not a blend — see [`PARK_ENGAGE_SPEED`].
+    // --- Parking latch (driver intent, cont. — the Tiger manual's "am Hang" lever): a zero
+    // command near standstill sets the lever; any THROTTLE intent releases it instantly.
+    // STEER intent releases it too, by DESIGN CHOICE (descent round, recorded): a neutral
+    // pivot at standstill must move the belts, so steer alone releases the latch for the
+    // pivot arm, and the same rule re-latches automatically once the stick returns to zero
+    // at standstill — no separate re-arm input. Held, it runs the full-capacity stop-force
+    // path below (static breakaway at rest), so it holds any grade inside the declared
+    // brake capacity. State, not a blend — see [`PARK_ENGAGE_SPEED`]; the `park` bool is
+    // already REV-14 replicated state (projection/comparator/trace), deterministic from
+    // replicated inputs, so rollback/prediction see one latch and there is no wire change.
     if inp.throttle.abs() >= DEAD || inp.steer.abs() >= DEAD {
         st.park = false;
     } else if inp.speeds[0].abs().max(inp.speeds[1].abs()) < PARK_ENGAGE_SPEED {
@@ -1744,6 +2169,10 @@ fn regenerative(
     let omega_e = st.omega_e;
     let k = g / tp.sprocket_radius;
     let omega_floor = (tp.engine.idle_rpm - STALL_GUARD_BAND_RPM) * RPM_TO_RAD;
+    // The over-rev slip guard's crank bound (Codex round 3 — see [`clutch_coupling`]): one
+    // OVERREV_MARGIN_RPM above the rescue trigger, so the protective upshift's crank
+    // corroboration can still read past the ceiling before the clutch slip saturates.
+    let omega_over = (tp.max_curve_rpm() + OVERREV_MARGIN_RPM) * RPM_TO_RAD;
     #[cfg(feature = "bitprobe")]
     {
         bitprobe.gear_reduction = g;
@@ -1852,6 +2281,7 @@ fn regenerative(
             i_m,
             -(inp.reactions[0] + inp.reactions[1]),
             omega_floor,
+            omega_over,
             dt,
             #[cfg(feature = "bitprobe")]
             &mut bitprobe,
@@ -2171,22 +2601,30 @@ fn regenerative(
         let tau_impl = tau_free - (locked - omega_e) * tp.engine_inertia / dt;
         #[cfg(feature = "bitprobe")]
         {
-            let feasible = tau_impl.abs() <= tp.clutch_capacity && locked >= omega_floor;
+            let feasible = tau_impl.abs() <= tp.clutch_capacity
+                && locked >= omega_floor
+                && locked <= omega_over;
             bitprobe.reanchor_attempted = true;
             bitprobe.reanchor_locked = locked;
             bitprobe.reanchor_tau_impl = tau_impl;
             bitprobe.reanchor_feasible = feasible;
         }
-        if tau_impl.abs() <= tp.clutch_capacity && locked >= omega_floor {
+        // The snap respects BOTH guard points (Codex round 3): it may never land the
+        // crank below the stall floor NOR above the over-rev guard — past either, the
+        // clutch is slipping by policy and the honestly integrated crank stands.
+        if tau_impl.abs() <= tp.clutch_capacity && locked >= omega_floor && locked <= omega_over {
             st.omega_e = locked;
         }
     }
 
-    // --- Hard stall floor (review round FIX 2): the crank never ENDS a tick below
-    // ω_floor, whatever the spec's torque/drag corner did to τ_free — the floor IS the
-    // no-stall policy while stall death stays deliberately unmodeled (classification
-    // table). It also self-heals a NaN (f32::max drops the NaN operand).
-    st.omega_e = st.omega_e.max(omega_floor);
+    // --- Hard stall floor (review round FIX 2) and over-rev guard point (Codex round 3):
+    // the crank never ENDS a tick below ω_floor — the floor IS the no-stall policy while
+    // stall death stays deliberately unmodeled (classification table) — nor above ω_over,
+    // the over-rev slip guard's bound (engine DAMAGE equally unmodeled; the field-measured
+    // ~9000 rpm belt-following crank is exactly what this backstops). `max` first also
+    // self-heals a NaN (f32::max drops the NaN operand; the floor then rides through the
+    // `min` unchanged, since ω_floor < ω_over for every validated spec).
+    st.omega_e = st.omega_e.max(omega_floor).min(omega_over);
     #[cfg(feature = "bitprobe")]
     {
         bitprobe.omega_end = st.omega_e;

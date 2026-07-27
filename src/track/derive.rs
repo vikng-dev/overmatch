@@ -15,7 +15,7 @@
 //! case — real articulation also spends pin/bushing clearance and end connectors the shoe does not
 //! model. The limits are HAND-MEASURED and authored (`track.link_angle`); what survives here is
 //! the DEMAND side, [`wrap_joint_angle`], which is pure geometry, and the clearance test that
-//! stands on it (`super::rig_geom`).
+//! stands on it (`super::rig_geom`) — plus the drape ride that steps by it (`super::route`).
 
 use bevy::math::Vec3;
 
@@ -94,9 +94,10 @@ pub fn sprocket_pitch_radius(pitch: f32, teeth: u32) -> f32 {
 /// radius under half the pitch is geometrically impossible to wrap (the chord cannot exceed the
 /// diameter) and returns π.
 ///
-/// Test-only: the demand side feeds the wrap-clearance asset guard in `super::rig_geom`'s tests
-/// (plus the chord-relation pins below); the running game never consumes a wrap demand.
-#[cfg(test)]
+/// Two consumers, one relation: the wrap-clearance asset guard in `super::rig_geom`'s tests reads it
+/// as a DEMAND against the authored hinge limit, and `super::route`'s drape ride steps its
+/// hemisphere walk by it (the "pitch" there being the ride chord `route::sag_clip_chord`) — a chain
+/// of chords following a circle is the same geometry whether the chords are links or samples.
 pub fn wrap_joint_angle(pitch: f32, radius: f32) -> f32 {
     2.0 * (pitch / (2.0 * radius.max(1e-6))).clamp(-1.0, 1.0).asin()
 }

@@ -11,14 +11,28 @@
 //!
 //! # Where the shoe comes from
 //!
-//! The Tiger glb ships a TEMPLATE link that is not part of the tank: a `Link` node (the shoe mesh,
-//! still named `Tiger_track`) carrying `Pin_Start` / `Pin_End` marker empties and the `Link_Box`
-//! volume [`super::marker_model`] measures the shoe's faces from. It sits off to one side of the
-//! right sprocket and — because `Link_Box` carries no material — renders as a solid white box beside
-//! the tank. [`hide_link_template`] hides both; [`bind_link_template`] reads the mesh and the markers
-//! off the same nodes and hands them to the consumers' pools. Both systems run in BOTH binaries: the
-//! game used to hide neither, so every game session drew a stray white box and a loose shoe parked
-//! beside the hull.
+//! The Tiger glb ships a TEMPLATE link that is not part of the tank: a `Link` node (whose mesh is
+//! named `Link` too — the name-scan ambiguity the node resolution in [`bind_link_template`] guards
+//! against) carrying `Pin_Start` / `Pin_End` marker empties and the `Link_Box` volume
+//! [`super::marker_model`] measures the shoe's faces from. It sits off to one side of the right
+//! sprocket and — because `Link_Box` carries no material — renders as a solid white box beside the
+//! tank. [`hide_link_template`] hides both; [`bind_link_template`] reads the mesh, its MATERIAL and
+//! the markers off the same nodes and hands them to the consumers' pools. Both systems run in BOTH
+//! binaries: the game used to hide neither, so every game session drew a stray white box and a loose
+//! shoe parked beside the hull.
+//!
+//! # The shoe's LOOK is authored, not coded
+//!
+//! The shoe primitive carries `Mat_Track_Link` — a tiling worn-steel set of MEASURED three maps
+//! (albedo, normal, and a packed metalness/roughness) at MEASURED 512² each, with no
+//! `metallicFactor` authored so the glTF default of MEASURED 1.0 leaves the packed map in charge.
+//! The tiling is baked into the UV COORDINATES in the blend, and that part is load-bearing:
+//! `bevy_gltf` 0.19 honours `KHR_texture_transform` only on `base_color_texture` (bevy #15310), so a
+//! Blender Mapping node would tile the albedo and leave the other two at DERIVED 1× (the transform
+//! is simply dropped, so those maps keep the authored UVs) — visibly wrong, and awkward to diagnose.
+//! Scaling the UVs themselves keeps every map in step and needs no extension at all. This module
+//! therefore reads a material and never builds one; re-texturing the track is a blend edit plus a
+//! re-export.
 //!
 //! # The SCALE CONTRACT: the template is authored at 1.0, and that is verified, not carried
 //!
@@ -51,9 +65,20 @@
 //!     which is what makes the derivation checkable rather than merely plausible.
 //!
 //! Per frame each link spans two consecutive stations of the belt the view resampled at the link
-//! pitch — the SAME geometry the physics and the drawn line use. Articulation over a washboard and
-//! scrolling under drive both fall out for free: the stations articulate, and the resample carries
-//! the belt phase.
+//! pitch — the same stations the drawn line uses, and, everywhere it touches ground, the same
+//! geometry the physics walks: the lower run's convex envelope, tangents and wrap arcs come from
+//! [`super::route`]'s one shared builder for both. Articulation over a washboard and scrolling under
+//! drive both fall out for free: the stations articulate, and the resample carries the belt phase.
+//!
+//! The RETURN run is the one deliberate exception, and it is worth knowing about before chasing a
+//! "the shoes don't match the route" bug that is not one. The drawn drape is pushed out of EVERY
+//! circle ([`super::route::SagClip::EveryCircle`]) — including the sprocket and the idler it leaves
+//! at a tangent point — and the sim route's drape is not. That is not an oversight in either
+//! direction: unclipped, the drawn shoes sink tens of millimetres into the end wheels under any
+//! slack at all (very visible on a textured link), while clipping the SIM route lengthens it by
+//! millimetres the belt never budgeted, and that phantom strain slides a latched 20° hill hold. The
+//! view can absorb the extra length (`wrap::station_params` reads the drawn polyline as a uniform
+//! strain); the sim cannot.
 //!
 //! # The entity↔station map ROTATES with the belt phase
 //!
@@ -102,14 +127,19 @@ pub(crate) fn template_plugin(app: &mut App) {
 // The template: one read of the glb's own link
 // ---------------------------------------------------------------------------------------------
 
-/// The glb nodes this module reads and hides. `Link` is the shoe (its mesh is still named
-/// `Tiger_track`); `Link_Box` is the marker volume [`super::marker_model`] measures the shoe's faces
-/// from — it carries NO material, which is why it renders as a solid white box until it is hidden.
+/// The glb nodes this module reads and hides. `Link` is the shoe — and its MESH carries the same
+/// name, which is the ambiguity a name scan has to resolve structurally rather than by string.
+/// `Link_Box` is the marker volume [`super::marker_model`] measures the shoe's faces from — it
+/// carries NO material, which is why it renders as a solid white box until it is hidden.
 const LINK_NODE: &str = "Link";
 const LINK_BOX_NODE: &str = "Link_Box";
 /// The pin markers, parented under `Link`: the only meaningful datums it carries.
 const PIN_START_NODE: &str = "Pin_Start";
 const PIN_END_NODE: &str = "Pin_End";
+/// The material the blend assigns to the shoe primitive. Named here only so the refusal below can
+/// say what is missing — nothing reads it, because the material arrives as an asset handle on the
+/// glb's own primitive rather than by name.
+const LINK_MATERIAL: &str = "Mat_Track_Link";
 
 /// How far the template's composed world scale may sit from 1.0 before the bind refuses. A hair for
 /// the `f32` round trip through the export, and four orders of magnitude below the 0.808 the model
@@ -122,8 +152,9 @@ pub(crate) struct LinkTemplate {
     /// Per side: the authored shoe on the right, its genuine mirror on the left (see the module
     /// doc — a negative-X scale would be a winding flip, not a mirror).
     mesh: PerSide<Handle<Mesh>>,
-    /// One material for every link. The template's own mesh has no material in the glb (it would
-    /// render default-white), so every shoe on every tank in both tools gets the same dark steel.
+    /// One material for every link, read off the glb's own shoe primitive — the artist's
+    /// [`LINK_MATERIAL`], never a `StandardMaterial` built here. The look is therefore changed by
+    /// re-exporting the blend, not by editing this file.
     material: Handle<StandardMaterial>,
     /// Per side: mesh space → the canonical pin frame.
     frame: PerSide<LinkFrame>,
@@ -185,8 +216,8 @@ fn bind_link_template(
     transforms: Query<&Transform>,
     children: Query<&Children>,
     meshes_of: Query<&Mesh3d>,
+    materials_of: Query<&MeshMaterial3d<StandardMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
     geom: Res<RigGeom>,
 ) {
     let (mut link_box, mut pin_start, mut pin_end) = (None, None, None);
@@ -248,17 +279,34 @@ fn bind_link_template(
     // resolution above). Direct children only, then the node itself: `Link_Box` is also a child of
     // `Link` and carries its own primitive one level further down, so a descendant search could
     // pick up the marker box instead.
-    let Some(source) = children
+    let Some((shoe_entity, source)) = children
         .get(link_entity)
         .ok()
         .into_iter()
         .flatten()
-        .find_map(|&child| meshes_of.get(child).ok())
-        .or_else(|| meshes_of.get(link_entity).ok())
+        .find_map(|&child| meshes_of.get(child).ok().map(|mesh| (child, mesh)))
+        .or_else(|| {
+            meshes_of
+                .get(link_entity)
+                .ok()
+                .map(|mesh| (link_entity, mesh))
+        })
     else {
         return;
     };
     let Some(shoe) = meshes.get(&source.0) else {
+        return;
+    };
+
+    // The look is the ARTIST'S, read off the same primitive the mesh came from. A shoe that arrives
+    // without a material would render default-white on all 194 instances, and a fallback built here
+    // would silently re-introduce the code-side steel this module just stopped owning — so a broken
+    // export refuses at bind time, the same policy as the scale contract above.
+    let Ok(material) = materials_of.get(shoe_entity) else {
+        error_once!(
+            "track links: the `{LINK_NODE}` shoe primitive carries no material - re-export the glb \
+             with `{LINK_MATERIAL}` assigned to it; refusing to bind"
+        );
         return;
     };
     let triangles = shoe.indices().map_or(0, Indices::len) / 3;
@@ -282,12 +330,7 @@ fn bind_link_template(
 
     commands.insert_resource(LinkTemplate {
         mesh,
-        material: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.10, 0.10, 0.11),
-            perceptual_roughness: 0.85,
-            metallic: 0.4,
-            ..default()
-        }),
+        material: material.0.clone(),
         frame,
     });
 }

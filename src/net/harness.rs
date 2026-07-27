@@ -12,6 +12,9 @@
 //! | `SPIKE_CONTACT_PROBE` | flag; off | Client contact-graph diagnostic. |
 //! | `SPIKE_COST_TRACE` | path; off | Role-qualified fixed-tick cost JSONL. |
 //! | `SPIKE_COST_WARMUP` | ticks; `384` | Cost rows skipped before recording. |
+//! | `SPIKE_DRIVE_PROBE_DIR` | path; `target/drive-probe` | Driving-feel probe telemetry directory (test-only, `headless_test`). |
+//! | `SPIKE_DRIVE_PROBE_GRADE` | rise/run; per scenario | Driving-feel probe ramp grade (test-only). |
+//! | `SPIKE_DRIVE_PROBE_TURN_THROTTLE` | `f32`; `1.0` | Throttle held through the driving-feel turn probe (test-only). |
 //! | `SPIKE_FIRE_INTERVAL` | ticks; `256` | Combat primary-fire interval; zero disables clicks. |
 //! | `SPIKE_FIRE_SECONDARY` | flag; off | Hold the scripted secondary trigger. |
 //! | `SPIKE_FIRE_TICK` | tick; `300` | Scripted primary-fire tick. |

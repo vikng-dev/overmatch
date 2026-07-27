@@ -17,12 +17,14 @@ mod physics;
 mod protocol;
 mod render_error;
 mod rig;
-mod server;
+// `pub(crate)` for its spawn POINTS — see the note on `tank::scenario`.
+pub(crate) mod server;
 /// Real-UDP, loss-injected shot-transport integration tests.
 #[cfg(test)]
 mod shot_loss;
 mod shot_transport;
-mod spawn_map;
+// `pub(crate)` for `SPAWN_LIMIT_M` — the clamp the spawn regression test resolves its corners at.
+pub(crate) mod spawn_map;
 #[cfg(test)]
 mod test_harness;
 mod watchdog;
