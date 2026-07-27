@@ -23,7 +23,7 @@ use crate::ui_font::UiFonts;
 const SPAWN_MAP_KEY: KeyCode = KeyCode::KeyM;
 
 /// Half-extent of the terrain square, metres — taken straight from the terrain module's single home
-/// for the world mapping (world XZ ∈ [-1280, +1280], 2560 m on a side, centred on the origin), never
+/// for the world mapping (world XZ ∈ ±`terrain_grid::WORLD_HALF_EXTENT`, centred on the origin), never
 /// re-stated here. Both the server clamp ([`SPAWN_LIMIT_M`]) and the map's UV↔world mapping read it,
 /// so a re-authored world moves the map and the clamp together.
 pub(super) const WORLD_HALF_EXTENT_M: f32 = crate::terrain_grid::WORLD_HALF_EXTENT;
@@ -34,9 +34,9 @@ pub(super) const WORLD_HALF_EXTENT_M: f32 = crate::terrain_grid::WORLD_HALF_EXTE
 /// ONE home for the bound, read by BOTH ends: the authority clamps every request through it
 /// (`net::server::validate_spawn_request`), and the client applies the SAME clamp before sending
 /// ([`clamp_to_spawn_limit`]). That symmetry is what makes the marker honest — an edge click used to
-/// draw its dot 64 m outside the square the server would actually place the tank in, so the player was
-/// shown one point and respawned at another.
-pub(super) const SPAWN_LIMIT_M: f32 = WORLD_HALF_EXTENT_M * 0.95;
+/// draw its dot the whole 5 % outside the square the server would actually place the tank in, so the
+/// player was shown one point and respawned at another.
+pub(crate) const SPAWN_LIMIT_M: f32 = WORLD_HALF_EXTENT_M * 0.95;
 
 /// The map image: an 8-BIT RGB copy of the terrain heightmap, generated from the 16-bit source
 /// (`terrain/terrain_height.png`, python3/PIL: numpy `>> 8` downshift, LANCZOS resize to 1024²,
@@ -243,7 +243,7 @@ fn uv_to_world(uv: Vec2) -> Vec2 {
 ///
 /// The map maps clicks across the FULL ±[`WORLD_HALF_EXTENT_M`], but the server only ever places a
 /// tank within ±[`SPAWN_LIMIT_M`]. Before this, an edge click drew its marker on the terrain edge and
-/// then respawned the player 64 m inward of it. Clamping here (and marking the clamped point) makes
+/// then respawned the player the 5 % gap inward of it. Clamping here (and marking the clamped point) makes
 /// the server's clamp a no-op on everything the client sends: the dot IS the destination.
 fn clamp_to_spawn_limit(world: Vec2) -> Vec2 {
     world.clamp(Vec2::splat(-SPAWN_LIMIT_M), Vec2::splat(SPAWN_LIMIT_M))

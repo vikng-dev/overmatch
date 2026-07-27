@@ -13,7 +13,7 @@
 //!
 //! There is exactly ONE ground surface, and every consumer reads the SAME one:
 //!
-//! 1. The decoded map is downsampled ONCE to [`GRID_RESOLUTION`]² (2.5 m spacing) and THAT grid
+//! 1. The decoded map is downsampled ONCE to [`GRID_RESOLUTION`]² (~0.977 m spacing) and THAT grid
 //!    is the [`HeightGrid`] resource. No consumer ever sees the full-resolution decode.
 //! 2. [`HeightGrid::height_at`] is piecewise-TRIANGULAR, splitting every cell along the SAME
 //!    diagonal parry's heightfield triangulation uses (the anti-diagonal — pinned empirically by
@@ -41,34 +41,40 @@ use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, Mesh, PrimitiveTopology};
 use bevy::prelude::*;
 
-/// Side length (m) of the square heightmap world. The map was AUTHORED at a 2.5 km side: 4096 px
-/// spanning 2560 m is 0.625 m/px. Single home for the world mapping — the oracle term, collider,
-/// render mesh, and spawn queries all derive from this constant pair.
-pub const WORLD_SIZE: f32 = 2560.0;
+/// Side length (m) of the square heightmap world. The map's 4096 px are STRETCHED over this side
+/// (0.244 m/px), independently of what the map was authored at: the heightmap is a shape, this
+/// pair is the scale we choose to hang it at. Single home for the world mapping — the oracle term,
+/// collider, render mesh, and spawn queries all derive from this constant pair.
+///
+/// Re-scaled 2560 → 1000 m (with [`HEIGHT_RANGE`] 150 → 100 m): the SAME heights over a 2.56×
+/// smaller footprint, so every slope on the map steepens by ~1.7× (2.56 × 100/150). That is the
+/// point — a tighter, more dramatic battlefield — but it is a real physics change, not a view one:
+/// grades the tank used to climb at speed are now 1.7× steeper.
+pub const WORLD_SIZE: f32 = 1000.0;
 
 /// Half the world side (m): world XZ spans `[-WORLD_HALF_EXTENT, +WORLD_HALF_EXTENT]`, centered
 /// on the origin. Exposed for spawn-map bounds clamping / UV mapping (`net::spawn_map`).
 pub const WORLD_HALF_EXTENT: f32 = WORLD_SIZE / 2.0;
 
-/// Vertical range (m): a full-scale sample maps to this, zero to 0 m — CONFIRMED by the map's
-/// author (0..255 → 0..150 m). At 8 bits that quantizes height in ~0.588 m steps (150/255); a
-/// 16-bit re-export is expected from the author later, and the decode path already normalizes
-/// samples to full-scale-relative values regardless of bit depth, so a 16-bit grayscale PNG is a
-/// drop-in replacement (no code change).
-pub const HEIGHT_RANGE: f32 = 150.0;
+/// Vertical range (m): a full-scale sample maps to this, zero to 0 m. At 8 bits that quantizes
+/// height in ~0.392 m steps (100/255) — the shipped map is 16-bit, and the decode path normalizes
+/// samples to full-scale-relative values regardless of bit depth, so either bit depth is a
+/// drop-in. Paired with [`WORLD_SIZE`]: the two together set every slope on the map.
+pub const HEIGHT_RANGE: f32 = 100.0;
 
 /// The heightmap, relative to the resolved asset root (`crate::assets::asset_root`).
 const HEIGHT_MAP_PATH: &str = "terrain/terrain_height.png";
 
 /// Import-time Gaussian smoothing width, in source pixels; `0.0` = pass-through (the current
-/// setting — the shipped map is the author's 16-bit export, whose ~2.3 mm quantization steps
+/// setting — the shipped map is the author's 16-bit export, whose ~1.5 mm quantization steps
 /// need no de-terracing).
 ///
-/// Why it exists: an 8-BIT source quantizes height in 150/255 ≈ 0.588 m steps (±0.294 m error)
-/// — terracing at real obstacle scale for the suspension. The separable Gaussian
+/// Why it exists: an 8-BIT source quantizes height in [`HEIGHT_RANGE`]/255 ≈ 0.392 m steps
+/// (±0.196 m error) — terracing at real obstacle scale for the suspension. The separable Gaussian
 /// ([`gaussian_smooth`]) removes that BOUNDED quantization noise (≤ half a step) at the cost of
-/// rounding real terrain features smaller than ~the kernel radius (3σ ≈ 11 m on the ground at
-/// 0.625 m/px). Set this back to [`SMOOTH_KERNEL_SIGMA`] if an 8-bit map ever ships again.
+/// rounding real terrain features smaller than ~the kernel radius (3σ ≈ 4.4 m on the ground at
+/// the current 0.244 m/px — the width is in PIXELS, so it shrinks with the world). Set this back
+/// to [`SMOOTH_KERNEL_SIGMA`] if an 8-bit map ever ships again.
 ///
 /// Determinism: the blur is pure f32 arithmetic in a fixed order over identical bytes, so every
 /// peer computes the same grid bit-for-bit. The kernel weights are EMBEDDED CONSTANTS
@@ -106,7 +112,7 @@ const SMOOTH_KERNEL: [f32; 19] = [
     0.000_740_138_36, // k = 18
 ];
 
-/// Sample count per side of THE ground surface (2.5 m spacing over the 2560 m world): the decode
+/// Sample count per side of THE ground surface (~0.977 m spacing over the 1000 m world): the decode
 /// is downsampled ONCE to this, and the resulting grid is what the oracle, the collider, the
 /// render mesh, and spawn placement all read — see the ONE-SURFACE INVARIANT in the module doc.
 /// (The full 4096² decode is too heavy for parry, so the shared resolution is the collider's.)
@@ -117,21 +123,105 @@ pub(crate) const GRID_RESOLUTION: u32 = 1025;
 /// frustum culling works instead of drawing ~2.1M triangles every frame.
 pub(crate) const MESH_TILE_CELLS: usize = 128;
 
-/// World meters per tile of the terrain diffuse: the mesh's UVs are `world_xz / this`, sampled
-/// with a REPEAT-addressing sampler, so the placeholder 4k texture repeats every 8 m — ground
-/// detail at tank scale without a projector-obvious macro pattern. View-only (the UVs live on
-/// the client render mesh; grid/oracle/collider are untouched by texturing).
-pub(crate) const TEXTURE_TILE_M: f32 = 8.0;
+/// Real-world coverage the ACTIVE pack was authored at, metres per texture repeat. Poly Haven
+/// scans declare their physical size (`api.polyhaven.com/info/coast_sand_rocks_02` →
+/// `dimensions: [15000, 15000]`, millimetres — the unit is pinned by `rocks_ground_02`, which
+/// carries both `dimensions: [2000, 2000]` and the human-readable `scale: "2x2M"`). Recorded in
+/// the pack's `cc.txt` as part of its contract.
+///
+/// The imported packs, for the blending slice that will need one of these each:
+///
+/// | pack                  | authored |
+/// |-----------------------|----------|
+/// | `coast_sand_rocks_02` |   15 m   |  ACTIVE
+/// | `rocks_ground_02`     |    2 m   |  staged
+/// | `brown_mud_leaves_01` |  1.3 m   |  staged
+const COAST_SAND_ROCKS_02_AUTHORED_M: f32 = 15.0;
 
-/// The placeholder terrain diffuse (Poly Haven `coast_sand_rocks_02`, CC0 — see
-/// `assets/terrain/cc.txt`), relative to the asset root.
-pub(crate) const TEXTURE_PATH: &str = "terrain/coast_sand_rocks_02_diff_4k.jpg";
+/// World metres per repeat of the terrain surface pack: the mesh's UVs are `world_xz / this`,
+/// sampled with a REPEAT-addressing sampler. It is the active pack's AUTHORED size, not a taste
+/// setting — mapping a scan onto anything else silently resizes every pebble and rock in it. (It
+/// was 8 m, an import-time guess, which squeezed a 15 m patch into 8 m and rendered every feature
+/// at 0.53× life size: a 1 m boulder read as 53 cm, so the ground looked like a scale model.)
+/// In WORLD units, so a re-scaled world keeps the same physical texel density. View-only (the UVs
+/// live on the client render mesh; grid/oracle/collider are untouched by texturing).
+pub(crate) const TEXTURE_TILE_M: f32 = COAST_SAND_ROCKS_02_AUTHORED_M;
+
+/// The terrain surface pack in use — Poly Haven `coast_sand_rocks_02`, CC0 (see the pack folder's
+/// `cc.txt`), relative to the asset root. One folder per pack under `assets/terrain/`, each holding
+/// the three maps `world::spawn_environment` binds: albedo (`diff`/`col`, sRGB), OpenGL-convention
+/// tangent-space normals (`nor_gl`), and the glTF-ORM `arm` pack (R = AO, G = roughness,
+/// B = metallic). `brown_mud_leaves_01` and `rocks_ground_02` sit alongside at 2k, staged for the
+/// surface-blending slice; nothing loads them yet.
+///
+/// All three are **KTX2 (UASTC 4x4, zstd-supercompressed, full mip chain)**, built by
+/// `scripts/encode-terrain-ktx2.sh` from masters kept outside the repo. The format is not a
+/// packaging detail — it is the frame budget. A PNG/JPG load gives bevy a texture with ONE mip
+/// level, and a 4k map tiled every [`TEXTURE_TILE_M`] across the whole horizon then misses the
+/// texture cache on nearly every fetch (measured: 30 fps). Mips fix the sampling; the block
+/// compression cuts the resident bytes 4× on top. Do not "simplify" these back to PNG.
+pub(crate) const TEXTURE_PATH: &str = "terrain/coast_sand_rocks_02/coast_sand_rocks_02_diff.ktx2";
+/// Tangent-space normal map of [`TEXTURE_PATH`]'s pack — see it for the pack layout.
+pub(crate) const NORMAL_PATH: &str = "terrain/coast_sand_rocks_02/coast_sand_rocks_02_nor_gl.ktx2";
+/// AO / roughness / metallic pack of [`TEXTURE_PATH`]'s pack — see it for the channel layout.
+pub(crate) const ARM_PATH: &str = "terrain/coast_sand_rocks_02/coast_sand_rocks_02_arm.ktx2";
 
 /// Opt-out marker: insert BEFORE the first update to keep the flat slab + authored test course
 /// even when the heightmap PNG is present. Test fixtures (`headless_test`, whose transmission
 /// gates drive the authored ramps) and the armor sandbox insert this; product compositions do not.
 #[derive(Resource, Default)]
 pub struct ForceFlatWorld;
+
+/// Clearance every spawn keeps above the sampled surface, metres — the flat-pad spawn's `y = 2.0`
+/// over a surface at 0, reproduced over terrain as the footprint's max ground height plus this.
+pub(crate) const SPAWN_CLEARANCE_M: f32 = 2.0;
+
+/// Half-side (m) of the conservative axis-aligned square footprint a spawn samples the ground over
+/// (10 m × 10 m — covers the hull at any yaw). Spawn Y is the MAXIMUM grid height over this square,
+/// not the centre-point height: a tank dropped at the centre height on a slope spawns with its
+/// uphill running gear buried (measured 1.65 m of axle burial before this existed).
+pub(crate) const SPAWN_FOOTPRINT_HALF_M: f32 = 5.0;
+
+/// THE spawn-height rule. Every spawn in every composition — the offline duel, server lanes, the
+/// interpolation bot, spawn-map overrides, respawns — resolves its Y through this one function, at
+/// the moment it spawns.
+///
+/// **Spawn definitions are HORIZONTAL.** No authored or constant spawn carries a Y, because a
+/// hardcoded height is a claim about a specific world that stops being true the moment the map is
+/// re-authored or re-scaled. This is not hypothetical: the offline duel shipped two `y = 2.0`
+/// spawns that put both Tigers ~116 m under the terrain surface, and the fix was not to pick a
+/// better number — there is no number, only the surface at the time of asking.
+///
+/// Absent grid = the flat-slab fallback world, whose surface is y = 0 — which reproduces exactly
+/// the old flat-pad `y = 2.0` pose, so the authored test course is unchanged.
+pub(crate) fn spawn_surface_height(grid: Option<&HeightGrid>, xz: Vec2) -> f32 {
+    grid.map_or(0.0, |grid| {
+        // Fail loud (ADR-0011): outside the span there IS no surface — the parry collider ends and
+        // `height_at`'s clamped read would hand back an edge height for a point in the void, so the
+        // tank spawns over nothing and falls forever. Every caller either clamps into the placeable
+        // square first (`net::spawn_map::SPAWN_LIMIT_M`) or spawns at a compile-time constant, so
+        // reaching here out of bounds is a code bug, never client input.
+        assert!(
+            grid.contains_xz(xz.x, xz.y),
+            "spawn at ({}, {}) is outside the ±{WORLD_HALF_EXTENT} m world span — spawn points \
+             must be clamped into the placeable square before they are resolved",
+            xz.x,
+            xz.y,
+        );
+        grid.max_height_in_square(xz.x, xz.y, SPAWN_FOOTPRINT_HALF_M)
+    })
+}
+
+/// A horizontal spawn definition resolved against the live surface: the caller's XZ, the ground
+/// under its footprint, plus [`SPAWN_CLEARANCE_M`]. The ONE way to turn a spawn point into a pose
+/// — see [`spawn_surface_height`] for why no spawn carries an authored Y.
+pub(crate) fn spawn_pos(grid: Option<&HeightGrid>, xz: Vec2) -> Vec3 {
+    Vec3::new(
+        xz.x,
+        spawn_surface_height(grid, xz) + SPAWN_CLEARANCE_M,
+        xz.y,
+    )
+}
 
 /// The decoded height grid: heights in METERS as f32 (row-major, row = z, column = x), already
 /// bit-depth-normalized (8-bit `v` → `v / 255`, 16-bit → `v / 65535`, then × [`HEIGHT_RANGE`])
@@ -281,7 +371,8 @@ impl HeightGrid {
     /// THE WORLD ENDS AT THE COLLIDER EDGE: outside the grid span there is no ground — the ray
     /// meets the surface only where cells exist, exactly like the parry heightfield collider
     /// (which spans the same square and stops). Spawn placement clamps every tank inside
-    /// ±`net::spawn_map::SPAWN_LIMIT_M` (= 95% of the half-extent, ±1216 m), well off the edge.
+    /// ±`net::spawn_map::SPAWN_LIMIT_M` (= 95 % of the half-extent — derived, so it follows a
+    /// re-scaled world instead of naming a metre count that goes stale), well off the edge.
     /// This deliberately DISAGREES with `height_at`'s clamped, placement-only reads.
     ///
     /// `dir` need not be unit: `t` is in units of `dir`'s length.
@@ -466,9 +557,23 @@ impl HeightGrid {
 /// course world (deleting the PNG restores the old world). A PRESENT but undecodable/non-square
 /// map is a broken ship and panics (ADR-0011 fail-fast) — a peer silently falling back to flat
 /// while others load the map would desync the deterministic sim.
-pub(crate) fn decode_height_grid(mut commands: Commands, flat: Option<Res<ForceFlatWorld>>) {
+pub(crate) fn decode_height_grid(
+    mut commands: Commands,
+    flat: Option<Res<ForceFlatWorld>>,
+    // A grid inserted BEFORE the first update is an explicit synthetic world (the driving-feel
+    // probes' analytic ramps): decoding the shipped PNG over it would silently replace the
+    // fixture. Product compositions never pre-insert one, so this branch is dev-only in practice.
+    preset: Option<Res<HeightGrid>>,
+) {
     if flat.is_some() {
         info!("terrain: ForceFlatWorld set — keeping the flat slab + authored course");
+        return;
+    }
+    if let Some(preset) = preset {
+        info!(
+            "terrain: pre-inserted height grid {size}x{size} — skipping the shipped map decode",
+            size = preset.size(),
+        );
         return;
     }
     let path = crate::assets::asset_root().join(HEIGHT_MAP_PATH);
@@ -711,8 +816,47 @@ pub(crate) fn terrain_mesh_tiles(grid: &HeightGrid) -> Vec<Mesh> {
 }
 
 #[cfg(test)]
-mod tests {
+// `pub(crate)` so the netcode layer's own spawn test can share this module's spawn assertion
+// helper — one rule, one assertion, asserted from whichever layer owns the points.
+pub(crate) mod tests {
     use super::*;
+
+    /// The shipped heightmap, decoded through the real path — the ground every spawn assertion is
+    /// made against.
+    pub(crate) fn shipped_grid() -> HeightGrid {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets")
+            .join(HEIGHT_MAP_PATH);
+        grid_from_png(&std::fs::read(path).expect("shipped heightmap"))
+            .expect("shipped heightmap must decode")
+    }
+
+    /// One spawn point, one verdict: inside the world span, above the surface at its own XZ, and
+    /// above its whole FOOTPRINT (the rule that keeps the uphill running gear out of a slope —
+    /// clearing the centre sample alone is what used to bury axles by 1.65 m).
+    pub(crate) fn assert_spawn_clears_terrain(grid: &HeightGrid, name: &str, xz: Vec2) {
+        assert!(
+            grid.contains_xz(xz.x, xz.y),
+            "{name} spawns at ({}, {}), outside the ±{WORLD_HALF_EXTENT} m world span",
+            xz.x,
+            xz.y,
+        );
+        let spawned = spawn_pos(Some(grid), xz);
+        let surface = grid.height_at(xz.x, xz.y);
+        assert!(
+            spawned.y >= surface + SPAWN_CLEARANCE_M,
+            "{name} spawns at y {:.2} m with the surface at {surface:.2} m — {:.2} m of it is \
+             underground",
+            spawned.y,
+            surface - spawned.y,
+        );
+        let footprint = grid.max_height_in_square(xz.x, xz.y, SPAWN_FOOTPRINT_HALF_M);
+        assert!(
+            spawned.y >= footprint + SPAWN_CLEARANCE_M,
+            "{name} clears its centre point but not its footprint ({footprint:.2} m)",
+        );
+    }
+
     use avian3d::parry::math::{Pose, Vector};
     use avian3d::parry::query::Ray;
 
@@ -1115,7 +1259,8 @@ mod tests {
     }
 
     /// The SHIPPED asset, decoded through the real path: 4096² 16-bit source, downsampled ONCE
-    /// to [`GRID_RESOLUTION`]² (the ONE surface), using the full 0..150 m range. Also the LFS
+    /// to [`GRID_RESOLUTION`]² (the ONE surface), using the full `0..`[`HEIGHT_RANGE`] range (the
+    /// bounds below are derived from the constants, so a re-scaled world needs no edit). Also the LFS
     /// tripwire — a pointer file (~130 text bytes) fails the size guard here in CI instead of
     /// panicking at first boot on the droplet.
     #[test]
@@ -1234,6 +1379,140 @@ mod tests {
             triangles,
             130 * 130 * 2,
             "tiles must cover every cell exactly once"
+        );
+    }
+
+    /// The three surface maps `world::spawn_environment` binds must SHIP, and must still be
+    /// MIP-MAPPED KTX2 — run through bevy's own loader, not just sniffed. The runtime backstop
+    /// (`world::report_failed_terrain_map`) panics on a decode failure, but only on a machine with
+    /// a window; this catches the whole class in CI: a missing file, a Git-LFS POINTER from a
+    /// checkout without `lfs pull`, a map re-exported as PNG/JPG (single mip level — the 30 fps
+    /// regression that put these in KTX2 in the first place), or a `basis-universal` feature drop
+    /// that leaves UASTC untranscodable.
+    ///
+    /// Pinned against `CompressedImageFormats::BC` because the transcode target is a pure function
+    /// of the caller's flags, not of the test machine's GPU: desktop GPUs land on BC7, Apple
+    /// Silicon on ASTC 4x4 (`get_transcoded_formats`), and both are 8 bpp. The `is_srgb` argument
+    /// is the same one `world::MapEncoding` passes, so this also pins that only the albedo asks
+    /// for the sRGB variant.
+    #[test]
+    fn shipped_terrain_surface_maps_are_mipmapped_ktx2() {
+        use bevy::image::{CompressedImageFormats, ktx2_buffer_to_image};
+        // «KTX 20»\r\n\x1a\n — the KTX2 file identifier.
+        const KTX2_MAGIC: &[u8] = b"\xabKTX 20\xbb\r\n\x1a\n";
+        // 4096² ⇒ 13 levels down to 1×1. A map that lost its chain reports 1 and thrashes the
+        // texture cache at every grazing angle.
+        const FULL_MIP_CHAIN: u32 = 13;
+        for (path, is_srgb, what) in [
+            (TEXTURE_PATH, true, "albedo"),
+            (NORMAL_PATH, false, "normal"),
+            (ARM_PATH, false, "arm"),
+        ] {
+            let full = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("assets")
+                .join(path);
+            let bytes = std::fs::read(&full)
+                .unwrap_or_else(|err| panic!("terrain map missing at {}: {err}", full.display()));
+            assert!(
+                bytes.len() > 4096,
+                "{path} is {} bytes — a Git LFS POINTER, not the map",
+                bytes.len()
+            );
+            assert!(
+                bytes.starts_with(KTX2_MAGIC),
+                "the {what} map {path} must be KTX2 — rebuild it with scripts/encode-terrain-ktx2.sh"
+            );
+            let image = ktx2_buffer_to_image(&bytes, CompressedImageFormats::BC, is_srgb)
+                .unwrap_or_else(|err| panic!("{path} failed to transcode: {err:?}"));
+            let descriptor = &image.texture_descriptor;
+            assert_eq!(
+                (descriptor.size.width, descriptor.size.height),
+                (4096, 4096),
+                "the {what} map must be 4k"
+            );
+            assert_eq!(
+                descriptor.mip_level_count, FULL_MIP_CHAIN,
+                "the {what} map carries {} mip levels, not a full chain",
+                descriptor.mip_level_count
+            );
+            let format = format!("{:?}", descriptor.format);
+            let expected = if is_srgb {
+                "Bc7RgbaUnormSrgb"
+            } else {
+                "Bc7RgbaUnorm"
+            };
+            assert_eq!(format, expected, "the {what} map transcoded to {format}");
+        }
+    }
+
+    /// Normal mapping's PRECONDITION, guarded in CI instead of at first boot: `world` runs
+    /// `generate_tangents` on every tile and panics if it fails (ADR-0011), so the attributes
+    /// mikktspace requires — positions, normals, UV0, and indices on a triangle list — must all
+    /// survive any change to [`terrain_mesh_tiles`]. Without a tangent basis the normal map has
+    /// no frame to rotate its directions into and the ground renders flat/greasy.
+    #[test]
+    fn render_mesh_tiles_can_carry_a_tangent_basis() {
+        let grid = grid_from(9, |i, j| (i * 20 + j * 10) as u8);
+        for mut mesh in terrain_mesh_tiles(&grid) {
+            mesh.generate_tangents()
+                .expect("terrain tiles must support mikktspace tangent generation");
+            let Some(bevy::mesh::VertexAttributeValues::Float32x4(tangents)) =
+                mesh.attribute(Mesh::ATTRIBUTE_TANGENT)
+            else {
+                panic!("tangent generation must leave an f32x4 tangent attribute");
+            };
+            assert_eq!(tangents.len(), 9 * 9, "one tangent per grid node");
+            for t in tangents {
+                let axis = Vec3::new(t[0], t[1], t[2]);
+                assert!(
+                    (axis.length() - 1.0).abs() < 1e-3,
+                    "tangent {t:?} is not unit-length"
+                );
+                assert!(
+                    (t[3].abs() - 1.0).abs() < 1e-3,
+                    "tangent {t:?} must carry a ±1 handedness sign"
+                );
+            }
+        }
+    }
+
+    /// THE regression guard for "tanks spawn underground", sim half: the spawn points this layer
+    /// owns, resolved through the one shared rule against the REAL heightmap, must put the tank
+    /// above the surface at their own XZ.
+    ///
+    /// This is the whole bug class, not one bug. The offline duel shipped `y = 2.0` poses that sat
+    /// ~116 m under the terrain the moment the heightmap world landed, and nothing caught it
+    /// because no test ever compared a spawn against the ground it spawns on.
+    ///
+    /// Split by LAYER, not by taste: the netcode's own spawn points (lanes, bot, spawn-map clamp)
+    /// are asserted the same way in `net::server`, because `tests/net_boundary.rs` forbids the sim
+    /// from naming `crate::net` — single-player has to stay runnable with no netcode mounted. Both
+    /// halves call [`assert_spawn_clears_terrain`], so there is still one rule and one assertion.
+    #[test]
+    fn every_sim_spawn_point_lands_above_the_shipped_terrain() {
+        let grid = shipped_grid();
+        for (i, xz) in crate::tank::scenario::DUEL_SPAWN_XZ.iter().enumerate() {
+            assert_spawn_clears_terrain(&grid, &format!("offline duel {i}"), *xz);
+        }
+    }
+
+    /// A spawn point off the map is a code bug, and the rule says so instead of handing back an
+    /// edge-clamped height for a point in the void (where the collider does not exist, so the tank
+    /// would fall forever).
+    #[test]
+    #[should_panic(expected = "outside the")]
+    fn a_spawn_outside_the_world_span_fails_loud() {
+        let grid = grid_from(9, |_, _| 40);
+        spawn_pos(Some(&grid), Vec2::new(WORLD_HALF_EXTENT + 1.0, 0.0));
+    }
+
+    /// No grid = the flat-slab fallback world: the rule reproduces the historical `y = 2.0` pad
+    /// pose exactly, so the authored test course is untouched by any of this.
+    #[test]
+    fn the_flat_world_still_spawns_at_the_historical_pad_height() {
+        assert_eq!(
+            spawn_pos(None, Vec2::new(10.0, -12.0)),
+            Vec3::new(10.0, 2.0, -12.0)
         );
     }
 }

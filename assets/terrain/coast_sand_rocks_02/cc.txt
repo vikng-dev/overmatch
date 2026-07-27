@@ -1,0 +1,10 @@
+"coast_sand_rocks_02" (https://polyhaven.com/a/coast_sand_rocks_02) by Poly Haven (Rob Tuytel) is licensed under CC0 (https://creativecommons.org/publicdomain/zero/1.0/).
+
+AUTHORED SCALE: 15 x 15 m (Poly Haven `dimensions: [15000, 15000]` mm). This is part of the pack's
+contract, not a preference: the world UVs must repeat every 15 m or every feature in the scan is
+rendered at the wrong physical size. See `terrain_grid::COAST_SAND_ROCKS_02_AUTHORED_M`.
+At 4096² that is 273 px/m.
+
+THE ACTIVE PACK — `terrain_grid::{TEXTURE,NORMAL,ARM}_PATH` bind these three files. Shipped as
+KTX2 (UASTC 4x4 + zstd supercompression, full mip chain) at 4096², built from the 4k masters by
+scripts/encode-terrain-ktx2.sh.

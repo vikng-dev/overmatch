@@ -5,10 +5,15 @@ edition = "2024"
 default-run = "overmatch"
 
 [dependencies]
-# `jpeg`: the terrain ground diffuse ships as a 4k JPG (`assets/terrain/coast_sand_rocks_02_diff_4k.jpg`);
-# bevy's default image formats stop at PNG/HDR/KTX2, and a failed texture load leaves the terrain
-# material unprepared — the whole render mesh silently never draws.
-bevy = { version = "0.19", features = ["debug", "jpeg"] }
+# `basis-universal`: the terrain surface maps ship as KTX2 holding UASTC 4x4 blocks
+# (`scripts/encode-terrain-ktx2.sh`). `ktx2` + `zstd_rust` are already on through bevy's defaults
+# and handle the container and its supercompression, but the UASTC payload itself is transcoded at
+# load — to ASTC 4x4 on Apple Silicon, BC7 on other desktop GPUs — and THAT transcoder lives
+# behind this feature. Without it the load fails, which (by `world::report_failed_terrain_map`) is
+# now a panic rather than an invisible ground.
+# `jpeg`: not the terrain any more — kept because bevy's default formats stop at PNG/HDR/KTX2 and
+# dropping it would silently break any JPG that shows up in a glTF or a future asset.
+bevy = { version = "0.19", features = ["debug", "jpeg", "basis-universal"] }
 avian3d = { version = "0.7", features = ["serialize"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -25,6 +25,204 @@ const GROUND_SIZE: f32 = 1000.0;
 /// Thickness of the ground slab. Only the top face (at y=0) matters; the rest is buried.
 const GROUND_THICKNESS: f32 = 1.0;
 
+/// Sun elevation above the horizon, degrees — LOW, and deliberately so. Relief on a normal-mapped
+/// surface is carried by the cosine between the light and the perturbed normal, so a high sun
+/// (the old `(4, 8, 4)` placement was ~55°) flattens ground detail into near-uniform brightness
+/// no matter how good the map is: every ripple faces the light about equally. At a grazing angle
+/// the same bump swings from lit to self-shadowed across a few centimetres, which is what makes
+/// the terrain read as SURFACE instead of a photograph. Also the honest tactical light for a tank
+/// sim — long shadows are cover and a range cue.
+const SUN_ELEVATION_DEG: f32 = 17.0;
+
+/// Sun azimuth, degrees, measured from +X toward +Z. Unchanged from the old `(4, _, 4)` placement
+/// (both horizontal components equal ⇒ 45°), so lowering the sun does not rotate which side of
+/// the terrain's character is lit — only how hard.
+const SUN_AZIMUTH_DEG: f32 = 45.0;
+
+/// Sun intensity, lux. Raised with the elevation drop, not independently of it: a surface's lit
+/// brightness carries a `sin(elevation)` factor, so the old 10 000 lux at ~55° put ~8 200 lux on
+/// flat ground, and holding that at 17° would take ~28 000. 25 000 lands flat ground at ~7 300 —
+/// about a sixth of a stop darker than before, so the scene reads as evening rather than murk,
+/// without inventing brightness the geometry did not lose.
+const SUN_ILLUMINANCE_LUX: f32 = 25_000.0;
+
+/// Sun colour — a restrained golden-hour warm. Subtle on purpose: this is a legibility change, and
+/// a strongly orange key would tint the albedo readings the gunner uses to tell surfaces apart.
+const SUN_COLOR: Color = Color::srgb(1.0, 0.94, 0.86);
+
+/// Shadow normal bias for the sun. Bevy's default (1.8) is tuned for a mid-height light; at 17°
+/// the depth slope across one shadow-map texel grows by `cot(17°)/cot(55°)` ≈ 4.7×, which is
+/// exactly the geometry that produces acne (a surface shadowing itself in stripes). This is a
+/// deliberate but conservative nudge — the bias offsets the lookup ALONG the surface normal, so
+/// overshooting detaches contact shadows ("peter-panning", a tank hovering over its own shadow).
+/// If shadows look detached at the tracks, lower this before touching `shadow_depth_bias`.
+const SUN_SHADOW_NORMAL_BIAS: f32 = 2.6;
+
+/// The scene's sun as ONE definition, so the armor sandbox's overlay-layer copy
+/// (`sandbox::spawn_overlay_light`) cannot drift from the light the world actually uses. Shadow
+/// casting is the caller's call — the overlay light must not cast.
+pub(crate) fn sun_light() -> DirectionalLight {
+    DirectionalLight {
+        color: SUN_COLOR,
+        illuminance: SUN_ILLUMINANCE_LUX,
+        shadow_normal_bias: SUN_SHADOW_NORMAL_BIAS,
+        ..default()
+    }
+}
+
+/// Unit vector pointing FROM the scene TOWARD the sun, from [`SUN_ELEVATION_DEG`] /
+/// [`SUN_AZIMUTH_DEG`]. The one place that turns the two angles into a direction, so the key light
+/// and the sky it is embedded in can never disagree about where the sun is.
+fn toward_sun() -> Vec3 {
+    let (sin_elevation, cos_elevation) = SUN_ELEVATION_DEG.to_radians().sin_cos();
+    let (sin_azimuth, cos_azimuth) = SUN_AZIMUTH_DEG.to_radians().sin_cos();
+    Vec3::new(
+        cos_elevation * cos_azimuth,
+        sin_elevation,
+        cos_elevation * sin_azimuth,
+    )
+}
+
+/// Where the sun sits, from [`toward_sun`]. Only the ROTATION reaches the shader — bevy fits the
+/// shadow cascades around the camera, not around the light's position — so the 100 m stand-off is
+/// purely so the entity reads sensibly in debug views.
+pub(crate) fn sun_transform() -> Transform {
+    Transform::from_translation(toward_sun() * 100.0).looking_at(Vec3::ZERO, Vec3::Y)
+}
+
+/// Face resolution of the environment light's source cubemap, pixels. Small on purpose: the source
+/// is a smooth analytic sky with no small features, and bevy convolves it (Lambertian for diffuse,
+/// GGX per mip for specular) before anything samples it, so 128² per face resolves everything this
+/// sky contains — 393 kB, built in memory, never an asset on disk. MUST be a power of two;
+/// `GeneratedEnvironmentMapLight` panics otherwise.
+const SKY_CUBEMAP_FACE_PX: u32 = 128;
+
+/// Environment-light luminance, cd/m² — the fill level, and the number to turn if this is wrong.
+///
+/// Balanced AGAINST the sun rather than picked for looks. The 17° key puts
+/// `SUN_ILLUMINANCE_LUX · sin 17° ≈ 7300` lux on flat ground, i.e. ≈ 2300 cd/m² of diffuse
+/// radiance. This sky's upper hemisphere averages 0.41 of its own scale seen from a flat surface
+/// (cosine-weighted — measured, and pinned by `the_environment_fill_stays_a_fraction_of_the_sun`),
+/// so 600 cd/m² adds ≈ 245: about 11 % of the sun. That is the whole point of the number: enough
+/// that a shadowed face is lit by something, far too little to lift shadows into the lit side and
+/// undo the relief the low sun was chosen to create. Raising this is the fastest way to flatten the
+/// terrain again.
+///
+/// Metals are the reason it exists at all. A `metallic = 1.0` surface has NO diffuse response, so
+/// with only a directional light it renders black except where it happens to mirror the sun — which
+/// is exactly how the track links were reading. Specular reflection of this sky is what makes them
+/// metal instead of shadow.
+const SKY_ENVIRONMENT_INTENSITY: f32 = 600.0;
+
+/// The analytic golden-hour sky as LINEAR radiance ratios in `0..1` for one direction; the absolute
+/// level is [`SKY_ENVIRONMENT_INTENSITY`]. Deep blue overhead, warm haze at the horizon, a broad
+/// warm glow on the sun's side, and a dim warm bounce below — the ground half matters as much as
+/// the sky half, because it is what keeps the underside of a hull and the lower run of track darker
+/// than their tops (a uniform environment would flatten them exactly the way ambient light does).
+fn sky_radiance(dir: Vec3) -> Vec3 {
+    /// Straight up: the deep part of a low-sun sky.
+    const ZENITH: Vec3 = Vec3::new(0.22, 0.34, 0.55);
+    /// The horizon band, warm with the long air path.
+    const HAZE: Vec3 = Vec3::new(0.85, 0.65, 0.42);
+    /// The sun's own quarter of the sky.
+    const GLOW: Vec3 = Vec3::new(1.00, 0.78, 0.50);
+    /// Downward: dim, warm sand bounce, not black — the terrain is lit sand, not a void.
+    const GROUND: Vec3 = Vec3::new(0.10, 0.085, 0.07);
+
+    let up = dir.y.clamp(-1.0, 1.0);
+    if up >= 0.0 {
+        // `sqrt` hugs the gradient to the horizon, where a real low-sun sky keeps its warmth.
+        let t = up.sqrt();
+        let base = HAZE.lerp(ZENITH, t);
+        // The glow follows the KEY LIGHT's azimuth, so the reflection sliding along a track link
+        // agrees with the shadow that link is casting.
+        let sun_xz = toward_sun().xz().normalize_or_zero();
+        let toward = dir.xz().normalize_or_zero().dot(sun_xz).max(0.0);
+        base.lerp(GLOW, toward.powi(6) * (1.0 - t) * 0.6)
+    } else {
+        HAZE.lerp(GROUND, (-up).sqrt())
+    }
+}
+
+/// Direction through the centre of texel `(u, v)` of cubemap `face`, in the layer order wgpu (and
+/// glTF, and every cubemap format) uses: +X, −X, +Y, −Y, +Z, −Z.
+fn cube_face_direction(face: u32, u: f32, v: f32) -> Vec3 {
+    match face {
+        0 => Vec3::new(1.0, -v, -u),
+        1 => Vec3::new(-1.0, -v, u),
+        2 => Vec3::new(u, 1.0, v),
+        3 => Vec3::new(u, -1.0, -v),
+        4 => Vec3::new(u, -v, 1.0),
+        _ => Vec3::new(-u, -v, -1.0),
+    }
+    .normalize()
+}
+
+/// Build the environment light's source cubemap from [`sky_radiance`]. Six square layers of
+/// `Rgba8Unorm` — LINEAR, not sRGB, because what we author here are radiance ratios, not colours a
+/// display should decode.
+fn sky_cubemap() -> Image {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::image::Image;
+    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+
+    let size = SKY_CUBEMAP_FACE_PX;
+    let mut data = Vec::with_capacity((size * size * 6 * 4) as usize);
+    for face in 0..6 {
+        for y in 0..size {
+            for x in 0..size {
+                let texel = |k: u32| 2.0 * (k as f32 + 0.5) / size as f32 - 1.0;
+                let radiance = sky_radiance(cube_face_direction(face, texel(x), texel(y)));
+                data.extend_from_slice(&[
+                    (radiance.x * 255.0).round() as u8,
+                    (radiance.y * 255.0).round() as u8,
+                    (radiance.z * 255.0).round() as u8,
+                    u8::MAX,
+                ]);
+            }
+        }
+    }
+    Image::new(
+        Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 6,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8Unorm,
+        // Both worlds: the generator reads the asset back from `Assets<Image>` to size its
+        // convolution, so the main-world copy has to survive extraction.
+        RenderAssetUsages::all(),
+    )
+}
+
+/// Give every 3-D view image-based lighting, once, from the shared sky.
+///
+/// Attached to VIEWS rather than spawned as a light: an environment map on a camera lights that
+/// whole view, which is what "the sky" means here — as opposed to a `LightProbe`, which bounds it
+/// to a region. Doing it in `world` (rather than at each camera's spawn) is what keeps the game and
+/// the armor sandbox honestly identical, and it costs nothing where there is no camera: the
+/// dedicated server never matches this query, so it never even builds the cubemap.
+fn attach_environment_light(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    mut sky: Local<Option<Handle<Image>>>,
+    views: Query<Entity, (With<Camera3d>, Without<GeneratedEnvironmentMapLight>)>,
+) {
+    if views.is_empty() {
+        return;
+    }
+    let sky = sky.get_or_insert_with(|| images.add(sky_cubemap()));
+    for view in &views {
+        commands.entity(view).insert(GeneratedEnvironmentMapLight {
+            environment_map: sky.clone(),
+            intensity: SKY_ENVIRONMENT_INTENSITY,
+            ..default()
+        });
+    }
+}
+
 pub fn plugin(app: &mut App) {
     // Decode the heightmap FIRST (synchronous, ADR-0014), then spawn whichever world it selects:
     // the heightfield when the grid decoded, the flat slab + authored course otherwise.
@@ -32,6 +230,90 @@ pub fn plugin(app: &mut App) {
         Startup,
         (crate::terrain_grid::decode_height_grid, spawn_environment).chain(),
     );
+    app.add_systems(
+        Update,
+        (report_failed_terrain_map, attach_environment_light),
+    );
+}
+
+/// How a terrain surface map's bytes must be interpreted at LOAD time — the one texture decision
+/// that cannot be corrected downstream (the sampler hands the shader whatever the GPU format says).
+/// The diffuse carries COLOUR and is authored in sRGB; the normal and ARM maps carry DATA — a
+/// tangent-space direction, and three material scalars — and an sRGB transfer applied to those
+/// bends every direction and every roughness value.
+///
+/// Still ours to state even though the maps are KTX2: bevy does NOT read the container's transfer
+/// function for a UASTC payload — `is_srgb` is what picks the sRGB variant of the transcode target
+/// (`Astc { channel: UnormSrgb }` / `Bc7RgbaUnormSrgb` vs the plain `Unorm` forms).
+#[derive(Clone, Copy)]
+enum MapEncoding {
+    Srgb,
+    Linear,
+}
+
+/// Anisotropic-filter taps for the ground. The terrain is the one surface always seen at grazing
+/// angles out to the horizon, which is exactly the case isotropic filtering blurs; 8 is the usual
+/// quality/cost knee (16 costs more for little visible gain at this texel density). Only meaningful
+/// because the maps carry mip chains — anisotropy is a rule for choosing among mip levels, so on
+/// the old single-level PNGs it cost sampling work and bought nothing.
+const TERRAIN_ANISOTROPY: u16 = 8;
+
+/// Load one terrain surface map with the sampler EVERY terrain texture needs: repeat addressing
+/// (bevy's default clamps, which would smear the first [`crate::terrain_grid::TEXTURE_TILE_M`]
+/// tile across the whole map), trilinear filtering across the mip chain, and anisotropy. Async load
+/// is fine — this is pure view (ADR-0014), nothing sim-side reads it — but a FAILED load is fatal
+/// ([`report_failed_terrain_map`]). The sampler is orthogonal to the container: the same descriptor
+/// rides the KTX2 maps exactly as it rode the PNGs.
+fn terrain_map(
+    asset_server: &AssetServer,
+    path: &'static str,
+    encoding: MapEncoding,
+) -> Handle<Image> {
+    use bevy::image::{
+        ImageAddressMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor,
+    };
+    let is_srgb = matches!(encoding, MapEncoding::Srgb);
+    asset_server
+        .load_builder()
+        .with_settings(move |settings: &mut ImageLoaderSettings| {
+            settings.is_srgb = is_srgb;
+            let mut sampler = ImageSamplerDescriptor {
+                address_mode_u: ImageAddressMode::Repeat,
+                address_mode_v: ImageAddressMode::Repeat,
+                ..ImageSamplerDescriptor::default()
+            };
+            // Sets the three filters to Linear as well — wgpu REQUIRES that for anisotropy > 1.
+            sampler.set_anisotropic_filter(TERRAIN_ANISOTROPY);
+            settings.sampler = ImageSampler::Descriptor(sampler);
+        })
+        .load(path)
+}
+
+/// The terrain surface maps whose load must succeed, held by id for [`report_failed_terrain_map`].
+/// Only inserted by the heightmap world with a window — the flat slab / authored course and the
+/// dedicated server never load them, so they can never fail there.
+#[derive(Resource)]
+struct TerrainMaps([AssetId<Image>; 3]);
+
+/// Surface a failed terrain-map load instead of swallowing it (ADR-0011, the same stance as
+/// `spec::report_failed_spec`). A texture that fails to decode does NOT draw untextured: bevy
+/// leaves the material unprepared, so the whole ground silently stops rendering — the exact
+/// failure the `jpeg` feature note in `Cargo.toml` records us hitting once already. Required,
+/// in-repo asset ⇒ panic in every build.
+fn report_failed_terrain_map(
+    mut failures: MessageReader<bevy::asset::AssetLoadFailedEvent<Image>>,
+    required: Option<Res<TerrainMaps>>,
+) {
+    let Some(required) = required else {
+        return;
+    };
+    for failure in failures.read() {
+        if required.0.contains(&failure.id) {
+            let (path, err) = (&failure.path, &failure.error);
+            error!("required terrain map {path} failed to load: {err}");
+            panic!("required terrain map {path} failed to load: {err}");
+        }
+    }
 }
 
 fn spawn_environment(
@@ -43,13 +325,16 @@ fn spawn_environment(
     asset_server: Res<AssetServer>,
 ) {
     let mut blocks: Vec<Transform> = Vec::new();
+    // The sun (see [`sun_light`]). Cascades stay at bevy's defaults — 4 splits out to 150 m, first
+    // bound at 10 m — which is the right envelope for tank-scale play and is fitted around the
+    // CAMERA, so the low sun does not stretch them; what a low sun does stretch is the shadow
+    // texel's footprint along the light, which is what [`SUN_SHADOW_NORMAL_BIAS`] answers.
     commands.spawn((
         DirectionalLight {
-            illuminance: 10_000.0,
             shadow_maps_enabled: true,
-            ..default()
+            ..sun_light()
         },
-        Transform::from_xyz(4.0, 8.0, 4.0).looking_at(Vec3::ZERO, Vec3::Y),
+        sun_transform(),
     ));
 
     // The heightmap world: when the grid decoded, the heightfield IS the world — no flat slab,
@@ -65,26 +350,43 @@ fn spawn_environment(
         // The render mesh is view-only: windowed compositions have a primary window; the
         // dedicated server (and the headless harness) has none and must not pay for it.
         if !windows.is_empty() {
-            // The placeholder ground diffuse (CC0 — assets/terrain/cc.txt), world-space tiled
-            // by the mesh's UVs; the loader settings force REPEAT addressing (bevy's default
-            // sampler clamps, which would smear the first tile across the map). Async load is
-            // fine here: this is pure view (ADR-0014), nothing sim-side reads it.
-            use bevy::image::{
-                ImageAddressMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor,
-            };
-            let diffuse = asset_server
-                .load_builder()
-                .with_settings(|settings: &mut ImageLoaderSettings| {
-                    settings.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-                        address_mode_u: ImageAddressMode::Repeat,
-                        address_mode_v: ImageAddressMode::Repeat,
-                        ..ImageSamplerDescriptor::default()
-                    });
-                })
-                .load(crate::terrain_grid::TEXTURE_PATH);
+            // The ground surface pack (Poly Haven, CC0 — see the pack folder's `cc.txt`),
+            // world-space tiled by the mesh's UVs every `terrain_grid::TEXTURE_TILE_M`.
+            let diffuse = terrain_map(
+                &asset_server,
+                crate::terrain_grid::TEXTURE_PATH,
+                MapEncoding::Srgb,
+            );
+            let normal = terrain_map(
+                &asset_server,
+                crate::terrain_grid::NORMAL_PATH,
+                MapEncoding::Linear,
+            );
+            let arm = terrain_map(
+                &asset_server,
+                crate::terrain_grid::ARM_PATH,
+                MapEncoding::Linear,
+            );
+            commands.insert_resource(TerrainMaps([diffuse.id(), normal.id(), arm.id()]));
             let material = materials.add(StandardMaterial {
                 base_color_texture: Some(diffuse),
-                perceptual_roughness: 0.95,
+                // `nor_gl` is the OpenGL convention (+Y green points UP in tangent space) — what
+                // bevy and glTF expect, so NO flip. The pack's `nor_dx` sibling would need this
+                // `true`; picking the wrong one inverts every bump into a dent under a low sun,
+                // which is why the file name carries the convention.
+                normal_map_texture: Some(normal),
+                // glTF ORM packing — R = ambient occlusion, G = roughness, B = metallic. Poly
+                // Haven's `arm` IS that layout, so ONE image feeds both slots bevy reads it
+                // through (occlusion takes R, metallic-roughness takes G/B).
+                occlusion_texture: Some(arm.clone()),
+                metallic_roughness_texture: Some(arm),
+                // The shader MULTIPLIES these factors into the map (`perceptual_roughness *=
+                // mr.g`, `metallic *= mr.b` — bevy_pbr's `pbr_fragment.wgsl`), so 1.0 passes the
+                // roughness map through unscaled (the old 0.95 would have darkened every value).
+                // Metallic stays 0.0 rather than 1.0: the pack's B channel is all-zero (checked
+                // on import), so the render is identical either way, and hard-zero keeps a
+                // dielectric ground from turning to metal on a pack swap.
+                perceptual_roughness: 1.0,
                 metallic: 0.0,
                 ..default()
             });
@@ -92,13 +394,29 @@ fn spawn_environment(
             // from the grid's own samples with the collider's own cell diagonal — identical
             // geometry, chunked into world-space tiles (positions are absolute, transforms
             // identity) purely so bevy frustum-culls per tile.
-            for mesh in crate::terrain_grid::terrain_mesh_tiles(&grid) {
+            let started = std::time::Instant::now();
+            let mut tiles = 0usize;
+            for mut mesh in crate::terrain_grid::terrain_mesh_tiles(&grid) {
+                // Normal mapping needs a TANGENT basis: the map stores directions in the
+                // surface's own U/V frame, and without `ATTRIBUTE_TANGENT` bevy has nothing to
+                // rotate them into world space (the ground reads flat-then-greasy). mikktspace is
+                // the same generator the pack was baked against, so the basis matches the map by
+                // construction. Required, no fallback (ADR-0011): a tile that cannot carry a
+                // tangent basis is a broken ship, not a degraded one.
+                mesh.generate_tangents().unwrap_or_else(|err| {
+                    panic!("terrain render tile failed mikktspace tangent generation: {err}")
+                });
                 commands.spawn((
                     Transform::IDENTITY,
                     Mesh3d(meshes.add(mesh)),
                     MeshMaterial3d(material.clone()),
                 ));
+                tiles += 1;
             }
+            info!(
+                "terrain: {tiles} render tiles built with tangents in {ms} ms",
+                ms = started.elapsed().as_millis()
+            );
         }
         commands.insert_resource(TerrainMap {
             revision: 0,
@@ -228,12 +546,13 @@ fn spawn_test_course(
 
 /// Longest CAST any view-layer ground/aim ray needs, metres: the world is the
 /// ±`terrain_grid::WORLD_HALF_EXTENT` square, so no terrain sightline can exceed the full
-/// diagonal — 2560·√2 ≈ 3620.6 m — from any in-world origin; 3700 adds headroom (compile-time
-/// checked below). Purely a parry-traversal cap for the view layer (aim/sight picks, the bore
-/// dot, the camera pull-in): `aim::MAX_RANGE` (10 km) keeps its separate role as the far "sky"
-/// FALLBACK distance, so committed aim points and all in-range behavior are unchanged — nothing
-/// exists between the diagonal and 10 km for a ray to hit. Sim code must not read this.
-pub(crate) const VIEW_CAST_MAX_M: f32 = 3_700.0;
+/// diagonal — 1000·√2 ≈ 1414.2 m — from any in-world origin; 1500 adds headroom (compile-time
+/// checked below, so a re-scaled world fails the BUILD rather than silently clipping picks).
+/// Purely a parry-traversal cap for the view layer (aim/sight picks, the bore dot, the camera
+/// pull-in): `aim::MAX_RANGE` (10 km) keeps its separate role as the far "sky" FALLBACK distance,
+/// so committed aim points and all in-range behavior are unchanged — nothing exists between the
+/// diagonal and 10 km for a ray to hit. Sim code must not read this.
+pub(crate) const VIEW_CAST_MAX_M: f32 = 1_500.0;
 const _: () = assert!(
     VIEW_CAST_MAX_M * VIEW_CAST_MAX_M
         >= 2.0 * crate::terrain_grid::WORLD_SIZE * crate::terrain_grid::WORLD_SIZE,
@@ -257,4 +576,110 @@ pub fn ground_distance(spatial: &SpatialQuery, ray: Ray3d, max: f32) -> f32 {
         )
         .map(|hit| hit.distance)
         .unwrap_or(max)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Relative luminance — the eye's weighting, so "brighter" in these tests means what it means
+    /// on screen rather than what the raw channel sum says.
+    fn luminance(c: Vec3) -> f32 {
+        0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z
+    }
+
+    /// Deterministic cosine-weighted average of the sky over the upper hemisphere: what a flat,
+    /// upward-facing diffuse surface actually integrates (a nested elevation/azimuth lattice, so
+    /// the number is reproducible rather than sampled).
+    fn cosine_weighted_sky_average() -> f32 {
+        let (mut total, mut weight) = (0.0f32, 0.0f32);
+        for i in 0..180 {
+            let elevation = (i as f32 + 0.5) / 180.0 * std::f32::consts::FRAC_PI_2;
+            let (sin_e, cos_e) = elevation.sin_cos();
+            for j in 0..360 {
+                let azimuth = (j as f32 + 0.5) / 360.0 * std::f32::consts::TAU;
+                let (sin_a, cos_a) = azimuth.sin_cos();
+                let dir = Vec3::new(cos_e * cos_a, sin_e, cos_e * sin_a);
+                // Solid angle ∝ cos(elevation), Lambert's law contributes another sin(elevation).
+                let w = cos_e * sin_e;
+                total += luminance(sky_radiance(dir)) * w;
+                weight += w;
+            }
+        }
+        total / weight
+    }
+
+    /// THE balance the sun slice depends on, in a test instead of a comment: the environment map
+    /// must stay a FILL light. If a future tweak pushes the sky's contribution toward the sun's,
+    /// shadows lift, and the whole reason for a 17° key — relief you can read on the ground — is
+    /// gone. This fails long before that is visible in a screenshot.
+    #[test]
+    fn the_environment_fill_stays_a_fraction_of_the_sun() {
+        let average = cosine_weighted_sky_average();
+        assert!(
+            (0.35..0.50).contains(&average),
+            "the sky's cosine-weighted average is {average:.3}; SKY_ENVIRONMENT_INTENSITY's \
+             documented arithmetic assumes ≈ 0.41",
+        );
+        // Diffuse radiance the sun puts on flat ground, and what the sky adds on top of it.
+        let sun = SUN_ILLUMINANCE_LUX * SUN_ELEVATION_DEG.to_radians().sin() / std::f32::consts::PI;
+        let fill = SKY_ENVIRONMENT_INTENSITY * average;
+        let ratio = fill / sun;
+        assert!(
+            (0.05..0.20).contains(&ratio),
+            "environment fill is {:.0} cd/m² against the sun's {sun:.0} ({:.0} %) — outside the \
+             5–20 % band that keeps the scene sun-dominated",
+            fill,
+            ratio * 100.0,
+        );
+    }
+
+    /// The sky must be DIRECTIONAL, which is the whole difference between it and `AmbientLight`.
+    /// A uniform environment lights a hull's underside exactly like its deck and reads as flat
+    /// fill; this one has to stay much brighter above than below.
+    #[test]
+    fn the_sky_is_brighter_above_than_below() {
+        let zenith = luminance(sky_radiance(Vec3::Y));
+        let nadir = luminance(sky_radiance(Vec3::NEG_Y));
+        assert!(
+            zenith > nadir * 3.0,
+            "zenith {zenith:.3} vs ground bounce {nadir:.3} — too uniform to shape anything",
+        );
+    }
+
+    /// The warm quarter of the sky sits on the KEY LIGHT's side, so a reflection travelling along a
+    /// track link agrees with the shadow that link casts.
+    #[test]
+    fn the_warm_glow_follows_the_sun_azimuth() {
+        let horizon = |dir: Vec3| sky_radiance((dir * 0.99 + Vec3::Y * 0.05).normalize());
+        let sun_side = horizon(toward_sun().with_y(0.0).normalize());
+        let away = horizon(-toward_sun().with_y(0.0).normalize());
+        assert!(
+            luminance(sun_side) > luminance(away),
+            "the sun's side of the horizon must be the bright one",
+        );
+        assert!(
+            sun_side.x - sun_side.z > away.x - away.z,
+            "and the warm one (more red over blue)",
+        );
+    }
+
+    /// The constraints `GeneratedEnvironmentMapLight` PANICS on — square, power-of-two, and six
+    /// faces — plus the byte count, so a bad edit fails here rather than at first render.
+    #[test]
+    fn the_source_cubemap_matches_what_the_filter_requires() {
+        let sky = sky_cubemap();
+        let size = sky.texture_descriptor.size;
+        assert!(SKY_CUBEMAP_FACE_PX.is_power_of_two());
+        assert_eq!(
+            (size.width, size.height),
+            (SKY_CUBEMAP_FACE_PX, SKY_CUBEMAP_FACE_PX)
+        );
+        assert_eq!(size.depth_or_array_layers, 6, "a cubemap is six faces");
+        assert_eq!(
+            sky.data.as_ref().map(Vec::len),
+            Some((SKY_CUBEMAP_FACE_PX * SKY_CUBEMAP_FACE_PX * 6 * 4) as usize),
+            "four bytes per texel across six faces",
+        );
+    }
 }
