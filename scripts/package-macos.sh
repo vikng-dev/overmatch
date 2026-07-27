@@ -86,6 +86,18 @@ find "$APP/Contents/Resources/assets" -type f \
   \( -name '*.blend' -o -name '*.blend1' -o -name '.DS_Store' \) -delete
 find "$APP/Contents/Resources/assets" -type d -name backup -prune -exec rm -rf {} +
 
+# Info.plist notes (display research brief §5.6, .agents/docs/design/display/):
+#   LSApplicationCategoryType = games   — how the App Store / Launchpad classify us, and the key
+#     macOS reads to treat the process as a game.
+#   LSSupportsGameMode = true           — opts into macOS 26 Game Mode: sustained CPU/GPU priority
+#     and 2x Bluetooth sampling for controllers/audio while the app is in NATIVE fullscreen. That
+#     requirement is one more reason the fullscreen row is BorderlessFullscreen (toggleFullScreen:)
+#     rather than a CGDisplayCapture mode-set, which disqualifies an app from Game Mode entirely.
+#   LSMinimumSystemVersion = 11.0       — the first arm64 macOS. The build is Apple-Silicon-only
+#     (see the header), so 10.15 was claiming support for machines this binary cannot run on.
+#   NSPrefersDisplaySafeAreaCompatibilityMode is DELIBERATELY ABSENT: setting it scales the window
+#     ~0.96x and blurs it on notched displays to dodge a problem we do not have (a Spaces-fullscreen
+#     app is already auto-positioned inside the safe area). See the brief §1.
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -99,7 +111,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>$VERSION</string>
     <key>CFBundleVersion</key><string>$VERSION</string>
-    <key>LSMinimumSystemVersion</key><string>10.15</string>
+    <key>LSApplicationCategoryType</key><string>public.app-category.games</string>
+    <key>LSMinimumSystemVersion</key><string>11.0</string>
+    <key>LSSupportsGameMode</key><true/>
     <key>NSHighResolutionCapable</key><true/>
 </dict>
 </plist>

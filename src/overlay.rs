@@ -10,8 +10,6 @@ use bevy::ecs::world::DeferredWorld;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow, WindowFocused};
 
-use crate::ui_font::UiFonts;
-
 /// The client's full-screen overlays, ordered by PRIORITY via the derived `Ord`. The variants are
 /// declared LOW→HIGH, so the greatest is the top layer: `ConnectStatus` is the maximum (a connect /
 /// reconnect takes over everything), then `Menu` (an open menu is the top INTERACTIVE layer — Esc
@@ -53,6 +51,16 @@ impl Overlay {
             Overlay::ViewDead => 50,
         }
     }
+
+    /// The z-layer for CONTENT that rides the menu's scrim without being a scrim: today, exactly the
+    /// settings page (`settings::ui`). It is a rung of THIS ladder rather than a literal in that
+    /// module, so the one-scrim precedence stays readable in one place — above [`Overlay::Menu`]'s
+    /// backdrop (100) so it draws ON it, and below [`Overlay::SpawnMap`] (150) and [`Overlay::Death`]
+    /// (200) so a map or a death screen still covers it exactly as they cover the menu.
+    ///
+    /// It carries no `OverlayNode`: it is not part of the active set, declares no presence, and owns
+    /// no backdrop. The menu owns all of that; this is only where the menu's content draws.
+    pub(crate) const MENU_CONTENT_Z: i32 = Overlay::Menu.zindex() + 10;
 
     /// Whether this overlay CAPTURES input while active — play stops and the cursor frees. The menu is
     /// the obvious one; connect status too (there is no tank to drive until the link is up, and a
@@ -259,20 +267,27 @@ pub(crate) fn plugin(app: &mut App) {
         );
 }
 
-/// Spawn the Esc menu backdrop once, hidden. `apply_menu_visibility` reveals it whenever the menu is
-/// the scrim owner. Shares `ui_font::spawn_overlay` with the connect / death / pause overlays so the
-/// family reads as one, then stamps the one-scrim `GlobalZIndex` on the returned node.
-fn spawn_menu_overlay(mut commands: Commands, fonts: Res<UiFonts>) {
-    let node = crate::ui_font::spawn_overlay(
-        &mut commands,
-        &fonts.hud,
+/// Spawn the Esc menu backdrop once, hidden. [`apply_overlay_visibility`] reveals it whenever the
+/// menu is the scrim owner, and the `OverlayNode` hook stamps its one-scrim `GlobalZIndex`.
+///
+/// The menu is a BACKDROP ONLY — it carries no banner of its own. Its CONTENT is `settings::ui`'s
+/// page, which draws on its own rung of this module's z ladder ([`Overlay::MENU_CONTENT_Z`]) and is
+/// visible exactly while this overlay owns the scrim. That is why this no longer goes through
+/// `ui_font::spawn_overlay` (which always spawns a centred text child) as the connect / death /
+/// pause overlays still do: those three ARE a line of text, and this one is a surface behind one.
+/// The placeholder "MENU / Esc to close" banner it used to render is what the settings page
+/// replaced.
+fn spawn_menu_overlay(mut commands: Commands) {
+    commands.spawn((
         OverlayNode(Overlay::Menu),
-        "MENU\nEsc to close",
-        (),
-        Some(Color::srgba(0.0, 0.0, 0.0, 0.6)),
-    );
-    // The `GlobalZIndex` is stamped by the `OverlayNode` hook; only the initial hidden state is ours.
-    commands.entity(node).insert(Visibility::Hidden);
+        Node {
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
+        Visibility::Hidden,
+    ));
 }
 
 /// Esc toggles the menu presence directly on [`Overlays`] — the menu's one home, retiring the old
@@ -447,6 +462,17 @@ mod tests {
         assert!(
             Overlay::Death.zindex() > Overlay::Menu.zindex(),
             "Death draws over Menu though Menu outranks it — for the status line",
+        );
+        // The menu's CONTENT rung (the settings page) is bracketed by the ladder, not floating
+        // beside it: on the menu's backdrop, under everything that outranks the menu in draw order.
+        assert!(
+            Overlay::MENU_CONTENT_Z > Overlay::Menu.zindex(),
+            "the menu's content must draw ON the menu's scrim",
+        );
+        assert!(
+            Overlay::MENU_CONTENT_Z < Overlay::SpawnMap.zindex()
+                && Overlay::MENU_CONTENT_Z < Overlay::Death.zindex(),
+            "the map and the death screen must still cover the menu's content",
         );
     }
 

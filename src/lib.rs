@@ -70,9 +70,23 @@ pub use net::{run_client, run_server};
 /// here keeps `sight` from naming `crate::net` (the `tests/net_boundary.rs` guard). Mounted only by
 /// [`NetClientPlugin`]; single-player has `state::client_plugin`'s real pause instead.
 mod overlay;
+/// Render scale (research brief "Route A"): the 3D main pass renders at a fraction of the window
+/// through `MainPassResolutionOverride` and one bilinear upscale node, while bloom, tonemapping and
+/// the whole UI stay native. Ships — NOT `dev_tools`-gated; `settings::apply_settings` is the one
+/// writer of its resource. Render-app blast radius only: the camera still targets the window, so
+/// every `world_to_viewport` consumer (`aim`, `sight`, `hud`) is untouched. Mounted by `settings`
+/// itself (the one writer of its resource mounts the resource's owner), so it reaches every windowed
+/// root and no other.
+mod render_scale;
 /// The armor ballistics sandbox (`bin/armor_sandbox`). Public so the binary can mount it; not part
 /// of `GamePlugin`.
 pub mod sandbox;
+/// Player-facing graphics settings: the persisted model (`video.ron` in the platform config
+/// directory), the ONE reconciler that applies it to the rendering world, and the `Esc` settings
+/// page. Ships — NOT `dev_tools`-gated, and the only writer of the renderer's knobs. ONE mount per
+/// windowed root — `settings::plugin(PageEntry::…)` pulls in `render_scale`, the page and the page's
+/// entry declarer — and never the headless server.
+mod settings;
 mod shooting;
 /// The SHOT-LIFECYCLE recorder (`SPIKE_SHOT_TRACE=<path>`): an env-gated JSONL log of what happens to
 /// each [`ShotId`] on BOTH ends — the authority's fire/keyframe/terminal/damage emissions, and the
@@ -143,6 +157,7 @@ mod offline_feel_tests {
                 demand_n: 42_000.0,
                 demand_initialized: true,
                 grade_confirm_ticks: 9,
+                band_confirm_ticks: 4,
                 grade_target: 3,
                 scheduler: track::transmission::SchedulerState::GradeShift { from: 5, to: 3 },
                 hill_hold: true,
@@ -495,9 +510,18 @@ impl Plugin for ClientPlugin {
             track::view_plugin,
         ));
         app.add_plugins(drive_hud::plugin);
+        // Player graphics settings + the Esc settings page + the render-scale render-app half, all
+        // behind one mount. SP's pause surface is `AppState::Paused` (there is no overlay authority
+        // here), so the page's visibility is declared from the state — which is the plugin's one
+        // parameter, so mounting the page without a declarer is unrepresentable.
+        app.add_plugins(settings::plugin(settings::PageEntry::PauseState));
 
         // Physics visualization (collider/ray wireframes) + debug toggles, behind the `dev_tools`
         // feature (default-on, droppable from an optimized build via `--no-default-features`).
+        // (A dev perf panel used to ride this same gate; it was deleted 2026-07-27 — the settings
+        // page covers its render knobs and `cargo tracy` is the frame-cost instrument. Offline SP
+        // therefore registers no diagnostic plugins at all now, which is accepted: the net client
+        // still has `net::debug_hud`'s fps/frame-time card.)
         #[cfg(feature = "dev_tools")]
         app.add_plugins((avian3d::prelude::PhysicsDebugPlugin, debug::plugin));
     }
@@ -552,6 +576,12 @@ impl Plugin for NetClientPlugin {
             // The `M` spawn map — net-client only: a top view of the terrain whose click asks the
             // authority to place this player's NEXT respawn there (nothing teleports now).
             net::spawn_map_plugin,
+            // Player graphics settings + the Esc settings page + the render-scale render-app half,
+            // all behind one mount. The page IS the Esc menu's content (`Overlay::Menu` already
+            // blocks input, frees the cursor and owns the scrim), which is what the `OverlayMenu`
+            // entry names — and naming it is not optional, so the page cannot be mounted without the
+            // declarer that makes it visible.
+            settings::plugin(settings::PageEntry::OverlayMenu),
         ));
 
         // Physics visualization + debug toggles, same pair `ClientPlugin` mounts for SP
@@ -592,6 +622,9 @@ impl Plugin for GamePlugin {
 ///
 pub fn run_offline() {
     let mut app = App::new();
+    // Read the player's settings BEFORE the window is described — see `load_at_boot`, which also
+    // inserts the values and the boot report into the app.
+    let settings = settings::load_at_boot(&mut app);
     // Exe-relative asset root, exactly as `run_client` resolves it: a double-clicked binary
     // finds `assets/` beside it no matter the launch cwd.
     app.add_plugins(
@@ -606,6 +639,7 @@ pub fn run_offline() {
                     // ASCII hyphen: `lib.rs` is scanned by the ui_ascii guard now that the
                     // offline feel label spawns `Text` here (default-font surface).
                     title: "Overmatch - offline".into(),
+                    present_mode: settings.present_mode(),
                     ..default()
                 }),
                 ..default()

@@ -5,7 +5,9 @@
 //! knobs (per the minimalism directive).
 //!
 //! RTT comes from lightyear's `Link::stats` on the connected client entity; FPS/frame time from
-//! `FrameTimeDiagnosticsPlugin` (registered in `client::run`, since it is NOT in `DefaultPlugins`).
+//! `FrameTimeDiagnosticsPlugin`, which is NOT in `DefaultPlugins` and is therefore registered by
+//! THIS plugin — the sole registrar today; the `is_plugin_added` guard is insurance for a second
+//! windowed root, since `add_plugins` PANICS on a duplicate unique plugin.
 //!
 //! Anti-jitter: the card is a **fixed-width** row of label/value columns. Each metric is its own
 //! two-column flex row (`SpaceBetween`), so the value's *right* edge is pinned to the card's right
@@ -19,7 +21,7 @@ use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
 use lightyear::prelude::*;
 
-use crate::ui_font::UiFonts;
+use crate::ui_font::{PANEL_BG, TEXT, UiFonts};
 
 /// How often the readout text is rebuilt. Slow enough that the digits are readable, fast enough to
 /// still track the sim — the standard per-second refresh of a game perf overlay.
@@ -34,6 +36,9 @@ enum Metric {
 }
 
 pub fn plugin(app: &mut App) {
+    if !app.is_plugin_added::<FrameTimeDiagnosticsPlugin>() {
+        app.add_plugins(FrameTimeDiagnosticsPlugin::default());
+    }
     app.add_systems(Startup, spawn_debug_hud)
         .add_systems(Update, update_debug_hud);
 }
@@ -56,7 +61,7 @@ fn spawn_debug_hud(mut commands: Commands, fonts: Res<UiFonts>) {
                 row_gap: Val::Px(2.0),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.04, 0.06, 0.08, 0.62)),
+            BackgroundColor(PANEL_BG),
         ))
         .with_children(|card| {
             for (metric, label) in [
@@ -81,7 +86,7 @@ fn spawn_debug_hud(mut commands: Commands, fonts: Res<UiFonts>) {
                             font_size: FontSize::Px(15.0),
                             ..default()
                         },
-                        TextColor(Color::srgb(0.85, 0.95, 1.0)),
+                        TextColor(TEXT),
                     ));
                     row.spawn((
                         metric,
@@ -93,7 +98,7 @@ fn spawn_debug_hud(mut commands: Commands, fonts: Res<UiFonts>) {
                             font_size: FontSize::Px(15.0),
                             ..default()
                         },
-                        TextColor(Color::srgb(0.85, 0.95, 1.0)),
+                        TextColor(TEXT),
                     ));
                 });
             }

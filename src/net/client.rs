@@ -161,12 +161,25 @@ pub fn run() {
         .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(2)))
         .init_resource::<harness::SimulateInput>();
     } else {
+        // Read the player's settings BEFORE the window is described — see `load_at_boot`, which
+        // also inserts the values and the boot report into the app.
+        let settings = crate::settings::load_at_boot(&mut app);
         // Exe-relative asset root (see `asset_root`): a double-clicked `overmatch`/`overmatch.exe`
         // (or a macOS `.app`) finds `assets/` beside it no matter the launch cwd.
-        app.add_plugins(DefaultPlugins.set(AssetPlugin {
-            file_path: asset_root(),
-            ..default()
-        }));
+        app.add_plugins(
+            DefaultPlugins
+                .set(AssetPlugin {
+                    file_path: asset_root(),
+                    ..default()
+                })
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        present_mode: settings.present_mode(),
+                        ..default()
+                    }),
+                    ..default()
+                }),
+        );
         // Never drop below the 64 Hz tick: the default `WinitSettings::game()` throttles an
         // UNFOCUSED window to 60 Hz reactive updates — under tick rate, so an alt-tabbed client
         // drifts behind the server and resyncs on refocus (lightyear #1113's jitter class).
@@ -225,9 +238,8 @@ pub fn run() {
     // Diagnostic contact probe: per-tick broad/narrow-phase state for the predicted tank's
     // hull-vs-terrain pairs. Idle (nothing registered) unless `SPIKE_CONTACT_PROBE` is set.
     app.add_plugins(super::contact_probe::plugin);
-    // FPS + frame-time diagnostics for the bottom-right debug panel (`net::debug_hud`, mounted in
-    // `NetClientPlugin`) — NOT part of `DefaultPlugins`, so it must be added explicitly here.
-    app.add_plugins(bevy::diagnostic::FrameTimeDiagnosticsPlugin::default());
+    // (FPS + frame-time diagnostics used to be registered here. They now belong to their SOLE
+    // consumer, `net::debug_hud::plugin`, which `NetClientPlugin` mounts.)
 
     // Resolve once at startup. Raw socket addresses bypass DNS; hostnames select their resolver's
     // first IPv4 result because the UDP transport binds an IPv4 wildcard below.

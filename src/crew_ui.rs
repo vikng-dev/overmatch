@@ -11,7 +11,7 @@ use crate::damage::{
 };
 use crate::spec::{FireMode, ViewKind};
 use crate::tank::{Controlled, TankRoot, TankViews, Weapon, WeaponIndex};
-use crate::ui_font::UiFonts;
+use crate::ui_font::{PANEL_BG, TEXT, UiFonts};
 
 /// The controlled tank's crew bar: one cell per seat, driven by the `1`–`5` swap input.
 #[derive(Component)]
@@ -69,7 +69,7 @@ fn spawn_status_panel(mut commands: Commands, fonts: Res<UiFonts>) {
             font_size: FontSize::Px(15.0),
             ..default()
         },
-        TextColor(Color::srgb(0.85, 0.95, 1.0)),
+        TextColor(TEXT),
         Node {
             position_type: PositionType::Absolute,
             top: Val::Px(10.0),
@@ -78,7 +78,7 @@ fn spawn_status_panel(mut commands: Commands, fonts: Res<UiFonts>) {
             border_radius: BorderRadius::all(Val::Px(4.0)),
             ..default()
         },
-        BackgroundColor(Color::srgba(0.04, 0.06, 0.08, 0.62)),
+        BackgroundColor(PANEL_BG),
     ));
 }
 

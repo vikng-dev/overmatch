@@ -4,3 +4,58 @@
 [alias]
 track = "run --bin track_sandbox --features dev_ui"
 armor = "run --bin armor_sandbox --features dev_ui"
+
+# Tracy profiling session. `bevy/trace_tracy` is deliberately NOT a default feature: the tracy
+# client thread, the per-system spans and the GPU timestamp uploads cost real time even with no
+# profiler attached, so it must be opted into per run — which is what this alias is.
+#
+# One feature is enough: the `bevy` FACADE's `trace_tracy` already pulls in `trace` and `debug`
+# (checked in bevy 0.19's `bevy/Cargo.toml` — note `bevy_internal`'s same-named feature does NOT,
+# so don't carry that habit over from bevy_internal-based advice). Together they give:
+#   * the `info_span!`s — per-system CPU spans, the render-graph node spans, and the SHADOW pass
+#     span, which `RenderDiagnosticsPlugin` does not carry at all: Tracy is the ONLY way to see
+#     shadow cost;
+#   * the Tracy client that ships them.
+#
+# On a box where it runs, this alias is now the WHOLE frame-cost story. There was an in-game dev
+# panel (F4) with its own render A/B keys; it was deleted 2026-07-27 as superseded by the
+# player-facing settings page. No code IN THIS TREE mounts `RenderDiagnosticsPlugin`.
+#
+# BUT: THIS ALIAS MOUNTS IT ANYWAY, VIA BEVY. `bevy/trace_tracy` forwards to
+# `bevy_internal/trace_tracy`, which enables `bevy_render/tracing-tracy`, and `RenderPlugin::build`
+# adds `diagnostic::RenderDiagnosticsPlugin` under exactly that cfg (VERIFIED in the vendored
+# sources: bevy-0.19.0/Cargo.toml:2870, bevy_internal-0.19.0/Cargo.toml:457,
+# bevy_render-0.19.0/src/lib.rs:379). So "we don't mount it" is true of our code and FALSE of a
+# tracy run — the two statements below have to be read together.
+#
+# WHAT THAT MEANS ON THE M4: a `cargo tracy` run on Apple Silicon is EXPECTED to abort, and that is
+# not a bug in this alias. MEASURED 2026-07-26 (M4 / macOS 26.5 / Metal / wgpu 29): bevy's
+# `DiagnosticsRecorder` sees `Features::TIMESTAMP_QUERY` advertised and allocates a 256-entry
+# timestamp query set; Metal refuses `newCounterSampleBufferWithDescriptor` with "Cannot allocate
+# sample buffer"; wgpu-hal turns that into a `DeviceLost` render error and bevy's `error_handler`
+# quits the app within ~1 s of the first frame. Bevy's own plugin doc says timestamp queries are
+# Vulkan/DX12-only in practice — except that here it does not degrade to CPU-only, it CRASHES.
+#
+# So on macOS the profiling answer is Instruments / Xcode's Metal capture, NOT this alias; on a
+# Vulkan/DX12 box `cargo tracy` gives both the CPU render-graph spans (including the shadow pass,
+# which is the whole reason to reach for Tracy) and the GPU track.
+#
+# Workflow (on a Vulkan/DX12 box — see above for why this is not the macOS route):
+#   1. `brew install tracy` once. bevy 0.19 pulls tracing-tracy 0.11.4 / tracy-client 0.18.x, which
+#      speaks the Tracy 0.12.x wire protocol; a version skew shows up as the profiler refusing the
+#      connection with a protocol mismatch, and `brew info tracy` is where to check.
+#   2. `cargo tracy` (release: this repo's release profile is lto=thin + codegen-units=1, so the
+#      FIRST build after a feature change is long — the numbers are worthless off an unoptimized
+#      build, so pay it once).
+#   3. Launch the `tracy` profiler and hit Connect. EITHER order works — the client waits for a
+#      profiler and the profiler waits for a client — but connecting BEFORE the game window appears
+#      is what captures asset load and the first-frame pipeline compiles, which are exactly the
+#      spikes a post-launch connect misses.
+#   4. Read `Statistics` for the CPU span totals (sort by total time — the shadow pass and the
+#      main opaque pass are the two names to look for), and the `GPU` track where it exists. Note
+#      the release profile has `strip = true`, so Tracy's *sampling* callstacks are unusable —
+#      the instrumented zones (which is what these features add) are unaffected.
+#
+# Verified 2026-07-26: the feature combination builds, and it leaves `Cargo.lock` untouched — a
+# tracy session does not dirty the tree.
+tracy = "run --release --features bevy/trace_tracy"
