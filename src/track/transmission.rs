@@ -69,12 +69,19 @@
 //!
 //! Reserve scheduler (stage C): on every decision tick the regenerative adapters project the
 //! two owned ground reactions onto the signed `m` axis and low-pass the positive load demand
-//! `D` with a fixed-tick EMA (DERIVED time scale: 8 ticks / 64 Hz = 0.125 s). The filter freezes
+//! `D` with a fixed-tick ASYMMETRIC EMA (recoil round: rise [`DEMAND_FILTER_TICKS`] = 8 ticks
+//! = 0.125 s, fall [`DEMAND_FALL_FILTER_TICKS`] = 32 ticks = 0.5 s — pessimistic about LOSING
+//! load: rising demand is believed fast for safety, a collapsing sample slowly, because a
+//! rearward shot unloads the suspension and halves the raw sample for ~22–25 ticks, and the
+//! old symmetric 8-tick filter followed that dropout down into a falsely open reserve gate).
+//! The filter freezes
 //! through shift windows. For every gear `j`, full-throttle capability at current speed is
 //! `F_j = min(torque_at(rpm_j)·G_j/r_s, 2·engine_force)` and reserve is `R_j = F_j − D`.
-//! Upshifts retain every stage-A/B gate, add `R_next ≥ 0.10·D + 10 kN`, and (descent round)
-//! must CONFIRM the up-band condition for [`UPSHIFT_CONFIRM_TICKS`] consecutive decision
-//! ticks — sustained speed, the mirror of the deficit's sustained load; a negative current
+//! Upshifts retain every stage-A/B gate, add `R_next ≥ 0.10·D + 10 kN`, and (recoil round,
+//! superseding the descent round's band-only confirmation) must hold the FULL
+//! ordinary-upshift predicate — band AND landing AND reserve, every condition the commit
+//! itself needs — for [`UPSHIFT_CONFIRM_TICKS`] consecutive decision ticks, HARD-reset on
+//! any tick the predicate fails; a negative current
 //! reserve held for 13 decision ticks (DERIVED 0.203125 s) commands the highest lower gear that
 //! clears the same margin, bounded by the signed-landing and over-rev gates. This CONFIRMED deficit
 //! is a correction, not a preference: with a target it owns the decision — committing, or HOLDING
@@ -185,9 +192,10 @@
 //! | [`OVERREV_MARGIN_RPM`] | SIM POLICY | fix-1c: a downshift must land at least this far under the engine's max curve rpm — the box never commands an over-rev |
 //! | [`RESERVE_MARGIN_FRACTION`] | SIM POLICY | common capability headroom: DERIVED policy value 0.10 of filtered demand keeps a target away from the zero-acceleration knife edge |
 //! | [`RESERVE_MARGIN_FLOOR_N`] | SIM POLICY | common low-load/jitter floor: DERIVED policy value 10 kN total, 1.8% of Tiger weight and about half its fractional margin at the DERIVED 191.2 kN 20-degree demand |
-//! | [`DEMAND_FILTER_TICKS`] | SIM POLICY | deterministic reaction low-pass: DERIVED 8 decision ticks = 0.125 s at 64 Hz; frozen through shift cuts |
+//! | [`DEMAND_FILTER_TICKS`] | SIM POLICY | deterministic reaction low-pass, RISE time constant: DERIVED 8 decision ticks = 0.125 s at 64 Hz; frozen through shift cuts |
+//! | [`DEMAND_FALL_FILTER_TICKS`] | SIM POLICY | the same EMA's FALL time constant (recoil round): 32 ticks = 0.5 s, pessimistic about losing load — probe-bounded both ways (fall 16 still let the recoil load-dropout open the reserve gate; 32 suppresses it at ≤8 ticks of legit demand lag; ≥64 explodes capability-boundary upshift latency to hundreds of ticks) — do not retune blindly |
 //! | [`GRADE_CONFIRM_TICKS`] | SIM POLICY | persistence before a reserve downshift: DERIVED 13 ticks = 0.203125 s at 64 Hz, rejecting shorter load spikes |
-//! | [`UPSHIFT_CONFIRM_TICKS`] | SIM POLICY | DERIVED = GRADE_CONFIRM_TICKS (the symmetry: downshifts confirm sustained LOAD, upshifts confirm sustained SPEED); HARD-reset consecutive evidence, so recoil/bump/crest transients that decay through the band inside the window can never arm a shift storm; the protective ceiling rescue is exempt |
+//! | [`UPSHIFT_CONFIRM_TICKS`] | SIM POLICY | 8 ticks = 0.125 s of the FULL ordinary-upshift predicate (recoil round: the band-only confirmation saturated on a lugging climb while the landing gate that recoil actually flips stayed instantaneous); HARD-reset consecutive evidence, 2× the measured 4-tick recoil transient, ≤7 ticks worst measured legit-upshift latency; the protective ceiling rescue is exempt |
 //! | [`HOLD_REENGAGE_TICKS`] | SIM POLICY | DERIVED 32-tick = 0.5 s anti-oscillation cooldown after hill-hold release; never overridable (round 4) — the latch is near-rest-only, and mid-motion braking is `back_driven_intent`'s job |
 //! | `gearbox.shift_addressing` / [`ShiftAddressing`] | VEHICLE DATA | the model accepts arbitrary targets; the spec declares whether this gearbox can address one directly or must step sequentially—an era/mechanism capability, not scheduler policy |
 //! | [`WIDE_ON`]/[`WIDE_OFF`]/[`TIGHT_ON`]/[`TIGHT_OFF`] | SIM POLICY | stick-to-detent input mapping with hysteresis; the DETENT RATIOS they select are spec |
@@ -300,7 +308,11 @@ const TICK_HZ: f32 = 64.0;
 /// predictor exactness — the reversal dwell blocks the down band for 32 post-window ticks,
 /// and the upshift's own reserve gate guarantees the landed gear can out-pull the filtered
 /// demand and recover rpm inside that dwell.
-const POSTSHIFT_MARGIN_RPM: f32 = 150.0;
+/// Crate-visible (like [`reserve_margin`] and [`predict_shift_landing_m`]) so read-only
+/// instrumentation states the landing gate as `shift_down_rpm + POSTSHIFT_MARGIN_RPM` from
+/// THIS constant instead of restating the number — see the driving-feel probes in
+/// `headless_test`. Visibility only; no scheduling behaviour reads it differently.
+pub(crate) const POSTSHIFT_MARGIN_RPM: f32 = 150.0;
 
 /// Fix-1a landing-predictor reaction decay, per predicted tick (scheduler fix round). The
 /// pre-cut reaction is dominated by the DRIVE shear the grip elements carry; once the
@@ -351,33 +363,64 @@ const RESERVE_MARGIN_FRACTION: f32 = 0.10;
 /// margin on the DERIVED 191 kN 20-degree demand. SIM POLICY.
 pub(crate) const RESERVE_MARGIN_FLOOR_N: f32 = 10_000.0;
 
-/// Stage-C load filter time scale in fixed decision ticks. An EMA divisor of eight is a
+/// Stage-C load filter RISE time scale in fixed decision ticks. An EMA divisor of eight is a
 /// deterministic ~0.125 s DERIVED low-pass at the 64 Hz SIM POLICY; the state freezes while the box is declutched so
-/// torque-cut reaction transients cannot rewrite grade demand. SIM POLICY.
+/// torque-cut reaction transients cannot rewrite grade demand. Since the recoil round the
+/// filter is ASYMMETRIC: this constant governs a RISING sample only (safety — new load is
+/// believed fast, and the rising edge stays bit-identical to the old symmetric filter);
+/// a falling sample follows [`DEMAND_FALL_FILTER_TICKS`]. SIM POLICY.
 const DEMAND_FILTER_TICKS: f32 = 8.0;
+
+/// Stage-C load filter FALL time scale in fixed decision ticks (recoil round, Yan-accepted —
+/// M2 of the fire-backward-uphill study). "Pessimistic about losing load": a COLLAPSING
+/// demand sample is believed slowly, at 32 ticks = 0.5 s, while rising demand keeps the
+/// fast [`DEMAND_FILTER_TICKS`] rise. The measured mechanism: a rearward main-gun shot on
+/// a climb unloads the suspension, the raw contact-projected demand collapses ~50% for
+/// ~22–25 ticks, the old symmetric 8-tick EMA followed it down, and the stage-C reserve
+/// gate opened FALSELY — one leg of the reproduced F1→2→3→1 fire-backward-uphill shift
+/// storm (the other leg is [`UPSHIFT_CONFIRM_TICKS`]'s landing-gate flip). Probe-measured
+/// bounds, so nobody retunes this blindly: fall 16 still let the dropout fire the gate
+/// (17 ticks open); fall 32 suppresses it entirely at ≤8 ticks of added legit demand lag
+/// on the clean 10% climb; fall ≥64 explodes latency at capability-boundary upshifts
+/// (125–400 ticks) because the inflated post-window demand takes seconds to bleed off.
+/// SIM POLICY.
+const DEMAND_FALL_FILTER_TICKS: f32 = 32.0;
 
 /// Consecutive reserve-deficit decision ticks required before a grade downshift (13 ticks DERIVED
 /// = 0.203125 s DERIVED at the 64 Hz SIM POLICY). Shorter reaction spikes remain load telemetry, not shift commands.
 /// SIM POLICY.
 const GRADE_CONFIRM_TICKS: u8 = 13;
 
-/// Consecutive decision ticks the ordinary BAND upshift's condition — propulsive intent
-/// with the signed shaft rpm above the up band — must hold before the upshift ARMS
-/// (descent round, Yan-approved). DERIVED = [`GRADE_CONFIRM_TICKS`]: the deliberate
-/// symmetry is that DOWNSHIFTS confirm sustained LOAD for 13 ticks and UPSHIFTS now
-/// confirm sustained SPEED for the same 0.203125 s. The evidence is HARD-RESET, not leaky
-/// like the deficit's, and the difference is the signal: the deficit reads
-/// contact-reaction demand, which jitters tick-to-tick around a persistent truth (one
-/// clean sample must not erase twelve dirty ones), while the band condition reads the
-/// smooth integrated belt speed, where a single below-band tick genuinely refutes
-/// "sustained" — and a hard reset makes the gate immune to EVERY decaying transient
-/// shorter than the window. The reproduced failure: firing backward on a steep climb
-/// kicks the shaft above the band for a few ticks (the ~0.14 m/s recoil shove decays
-/// through the band in ~0.05–0.15 s on a grade the tank cannot actually sustain) and
-/// fired 1→2→3 shift storms that immediately collapsed; a leaky counter would still
-/// accumulate through exactly that shape. The PROTECTIVE ceiling rescue is exempt —
-/// crank safety must not wait a confirmation. SIM POLICY.
-const UPSHIFT_CONFIRM_TICKS: u8 = GRADE_CONFIRM_TICKS;
+/// Consecutive decision ticks the FULL ordinary-upshift predicate — every condition the
+/// commit itself needs: propulsive intent, signed shaft rpm above the up band, detent
+/// released, crank corroboration, no pending deficit correction, AND the fix-1a landing
+/// gate AND the stage-C reserve gate — must hold before the upshift ARMS (recoil round,
+/// Yan-accepted — M1 of the fire-backward-uphill study; supersedes the descent round's
+/// band-only counter at the old 13-tick value). The evidence is HARD-RESET by any tick
+/// the predicate fails, not leaky like the deficit's, and the difference is the signal:
+/// the deficit reads contact-reaction demand, which jitters tick-to-tick around a
+/// persistent truth (one clean sample must not erase twelve dirty ones), while a single
+/// tick that fails any commit condition genuinely refutes "ready" — a hard reset makes
+/// the gate immune to EVERY decaying transient shorter than the window.
+///
+/// Why the FULL predicate (the descent round's mistake, probe-measured): the band-only
+/// counter guarded a sub-condition that on a lugging climb is PERMANENTLY true — the
+/// probe showed `band_confirm_ticks` saturated at 255 in F1 on every steep grade — while
+/// the landing-band gate that a recoil actually flips was evaluated instantaneously. A
+/// rearward shot's ~0.14 m/s forward shove lifts the predicted landing past
+/// `shift_down + POSTSHIFT_MARGIN_RPM` for ~4 ticks (62 ms, measured uncontaminated on
+/// the 45% grade where the box refused), which committed the F1→2→3→1 shift storm and
+/// cost ~26% of the climb per shot at 40%.
+///
+/// Why N = 8 (probe-sized, `probe_fire_backward_uphill` + the integrator study): the
+/// recoil evidence lasts 4 consecutive ticks and is suppressed at N ≥ 6; legit upshifts
+/// on the clean 10% climb entered their commit with the full predicate already true for
+/// 11/13/13/1/1 ticks, so N = 8 costs at most 7 ticks ≈ 110 ms of added latency on the
+/// worst legit upshift (measured mean 2.8) while holding 2× margin over the recoil
+/// transient. The PROTECTIVE ceiling rescue is exempt — crank safety must not wait a
+/// confirmation. Crate-visible so read-only instrumentation (the driving-feel probes)
+/// states the requirement from THIS constant instead of restating the number. SIM POLICY.
+pub(crate) const UPSHIFT_CONFIRM_TICKS: u8 = 8;
 
 /// Hill-hold anti-oscillation cooldown after a release (32 fixed ticks = 0.5 s DERIVED at 64 Hz).
 /// Never overridable (Codex round 4): the latch engages only near rest, so a genuine roll
@@ -868,10 +911,14 @@ pub struct TransmissionState {
     /// ticks increment it and other ticks decay it by one, so one contact-jitter sample cannot erase
     /// a nearly confirmed deficit. Saturating u8.
     pub grade_confirm_ticks: u8,
-    /// Consecutive decision-tick evidence that the ordinary up-band condition holds
-    /// (propulsive intent, signed shaft rpm above the up band). HARD-RESET by any
-    /// non-qualifying tick — see [`UPSHIFT_CONFIRM_TICKS`] for why this one is not leaky.
-    /// Saturating u8.
+    /// Consecutive decision-tick evidence that the FULL ordinary-upshift predicate holds
+    /// (recoil round: propulsive intent, signed shaft rpm above the up band, detent
+    /// released, crank corroboration, no pending deficit correction, landing gate, reserve
+    /// gate). HARD-RESET by any non-qualifying tick — see [`UPSHIFT_CONFIRM_TICKS`] for
+    /// why this one is not leaky. Saturating u8. The wire slot is unchanged since REV 20
+    /// (same u8, same projection position); the COUNTED predicate — and so the field's
+    /// replicated dynamics — changed in REV 21 (it no longer saturates on a lugging climb:
+    /// a failing landing or reserve gate now zeroes it every decision tick).
     pub band_confirm_ticks: u8,
     /// Held reserve target (1-based; zero means none). Direct addressing retains it through its
     /// one interruption window; Sequential retains it across every adjacent window.
@@ -1698,7 +1745,19 @@ fn regenerative(
             bitprobe.demand_updated = true;
         }
         if st.demand_initialized {
-            st.demand_n += (sample - st.demand_n) / DEMAND_FILTER_TICKS;
+            // Recoil round (M2): asymmetric time constants. A RISING sample keeps the
+            // established 8-tick rise (safety — new load is believed fast; bit-identical
+            // to the old symmetric filter on every rising edge), a FALLING sample is
+            // believed at the slow 32-tick scale: the shot-unloaded suspension halves the
+            // raw sample for ~22–25 ticks and the symmetric filter followed it down far
+            // enough to open the reserve gate falsely — see [`DEMAND_FALL_FILTER_TICKS`]
+            // for the measured bounds. An equal sample moves nothing under either divisor.
+            let filter_ticks = if sample > st.demand_n {
+                DEMAND_FILTER_TICKS
+            } else {
+                DEMAND_FALL_FILTER_TICKS
+            };
+            st.demand_n += (sample - st.demand_n) / filter_ticks;
         } else {
             st.demand_n = sample;
             st.demand_initialized = true;
@@ -1829,6 +1888,36 @@ fn regenerative(
     // path deliberately waives this sign gate just as the protective-upshift arm deliberately
     // waives its ordinary landing-band gate for engine protection.
     let grade_landing_positive = dir * predict_shift_landing_m(tp, fp, m, r_mean, dt) > 0.0;
+    // Steering detents with hysteresis on |steer| — updated HERE, before the shift
+    // scheduler, so this tick's gear decisions and this tick's steering solve read ONE
+    // detent truth (recoil-round Codex review). The update used to live inside the
+    // FixedRadii steering arm BELOW the scheduler, so `detent_turn` read the PREVIOUS
+    // tick's step: seven qualifying straight ticks followed by a detent engage on the
+    // committing tick still incremented the confirmation to N and committed an ordinary
+    // upshift on the exact tick the turn began — and the same invocation then applied
+    // the λ constraint in the NEW gear, where the landing predictor is explicitly
+    // invalid. The update depends only on `inp.steer` and the previous step, and nothing
+    // between the old and new sites read it, so every non-engage tick is unchanged.
+    if mode == TransmissionMode::FixedRadii {
+        let a = inp.steer.abs();
+        st.steer_step = match st.steer_step {
+            0 => u8::from(a >= WIDE_ON),
+            1 => {
+                if a >= TIGHT_ON {
+                    2
+                } else {
+                    u8::from(a >= WIDE_OFF)
+                }
+            }
+            _ => {
+                if a < TIGHT_OFF {
+                    1
+                } else {
+                    2
+                }
+            }
+        };
+    }
     // Predictor-domain guard (review round): while the L600 detent is engaged the
     // constraint force λ loads the outputs in a way the predictor cannot model (it carries
     // no λ/steer state), so its landing prediction is invalid mid-geared-turn — DEFER
@@ -1850,16 +1939,6 @@ fn regenerative(
         // fact into a stated invariant on both grade-commit paths below.
         let ceiling = tp.max_curve_rpm();
         let crank_rescue_active = rpm > ceiling && st.omega_e / RPM_TO_RAD > ceiling;
-
-        // Upshift confirmation (descent round, Yan-approved): sustained-SPEED evidence for
-        // the ordinary band arm, mirroring the deficit's sustained-LOAD evidence — HARD
-        // reset, so no decaying transient shorter than the window (the reproduced recoil
-        // kick on a steep climb) can arm a shift storm. See [`UPSHIFT_CONFIRM_TICKS`].
-        if propulsive > 0.0 && rpm > tp.shift_up_rpm {
-            st.band_confirm_ticks = st.band_confirm_ticks.saturating_add(1);
-        } else {
-            st.band_confirm_ticks = 0;
-        }
 
         // A held Sequential target is never an instruction to shift blindly. Re-run the same
         // selector against current intent, speed, and filtered demand at every continuation. A
@@ -1974,6 +2053,63 @@ fn regenerative(
         // or landing-sign-blocked): HOLD — the ordinary upshift arm is suppressed so the
         // pending correction can neither be upshifted over nor have its evidence reset.
         let deficit_pending = deficit_target.is_some() && !deficit_step_committed;
+
+        // Crank-corroboration floor terms, hoisted here because the full-predicate
+        // confirmation below counts them; the corroboration RATIONALE lives on the
+        // ordinary arm's comment block further down.
+        let corroboration_floor = tp.engine.governed_rpm + CRANK_CORROBORATION_MARGIN_RPM;
+        let crank_rpm = st.omega_e / RPM_TO_RAD;
+        let shaft_past_floor = rpm > corroboration_floor;
+        let crank_past_floor = crank_rpm > corroboration_floor;
+
+        // Upshift confirmation (recoil round, Yan-accepted — M1 of the fire-backward-uphill
+        // study; supersedes the descent round's band-only counter): the counter counts the
+        // FULL ordinary-upshift predicate — every condition the commit itself needs — and
+        // HARD-resets on any tick where it fails. The band-only counter was blind to the
+        // gate a recoil actually flips: on a lugging climb the band sub-condition is
+        // permanently true (the counter saturated at 255) while the fix-1a landing gate
+        // stayed instantaneous, and a rearward shot lifts the predicted landing past it
+        // for ~4 measured ticks — enough to commit the F1→2→3→1 shift storm. See
+        // [`UPSHIFT_CONFIRM_TICKS`] for the probe evidence and the N = 8 sizing.
+        //
+        // The committed-this-tick flags short-circuit FIRST so the landing/reserve gates
+        // are never priced against a gear another arm already changed this tick (a commit
+        // also zeroes the counter itself, in `commit_grade_shift` and both commit sites
+        // below). The reversal dwell is deliberately NOT part of the counted predicate:
+        // it is itself a timer, and stacking the confirmation onto it would double-charge
+        // a legitimate post-downshift upshift — evidence accumulates through the dwell
+        // exactly like the deficit's does.
+        let upshift_ready = !grade_step_committed
+            && !deficit_step_committed
+            && propulsive > 0.0
+            && st.gear < top
+            && rpm > tp.shift_up_rpm
+            && !detent_turn
+            && (!shaft_past_floor || crank_past_floor)
+            && !deficit_pending
+            && {
+                // The fix-1a landing gate and the stage-C reserve gate, verbatim from the
+                // old commit arm (stage A: the predictor returns a SIGNED m, and the
+                // landing must be POSITIVE on the engaged ladder AND clear the down band
+                // + margin — a sign-flipped landing always refuses; under `|m|` the traced
+                // grade case, r_mean = 221 kN, landing_m = −3.62, read as "9092 rpm" and
+                // PASSED, committing catastrophic on-grade upshifts. No at-rest threshold
+                // is needed here: the band bound already demands a landing ≥ down band +
+                // margin, solidly positive, far above any numerical residual.)
+                let landing = predict_shift_landing_m(tp, fp, m, r_mean, dt);
+                let landing_shaft = dir * landing;
+                let g_up = ladder[st.gear as usize];
+                let next_reserve = modeled_reserve_in_gear(tp, fp, shaft, g_up, st.demand_n);
+                landing_shaft > 0.0
+                    && shaft_rpm_of(landing_shaft, g_up) >= tp.shift_down_rpm + POSTSHIFT_MARGIN_RPM
+                    && next_reserve >= reserve_margin(st.demand_n)
+            };
+        if upshift_ready {
+            st.band_confirm_ticks = st.band_confirm_ticks.saturating_add(1);
+        } else {
+            st.band_confirm_ticks = 0;
+        }
+
         if !deficit_step_committed {
             // The ordinary intent gate remains: service braking never BAND-upshifts (the
             // landing predictor has no brake term) and the L600 detent defers BAND upshifts
@@ -1987,7 +2123,8 @@ fn regenerative(
             // between governed and the ceiling the climbing dial is the warning, not a
             // shift trigger. When it does fire, the protective shift keeps its scheduler-
             // fix-round exemptions — free of the intent gate, the detent deferral, the
-            // landing-rpm band, and the reserve gate below: its purpose is to LOWER an
+            // landing-rpm band, and the reserve gate (all folded into `upshift_ready`
+            // above since the recoil round): its purpose is to LOWER an
             // externally back-driven crank, not to accelerate the vehicle, and descending
             // under service brakes or mid-steer is the overrun's NORMAL case. It does not
             // read the propulsive landing predictor at all: its selection is BEST-EFFORT
@@ -2014,23 +2151,18 @@ fn regenerative(
             // shaft, never below), and its band/landing/reserve arithmetic is evaluated
             // at a fictitious operating point. Below the floor the ordinary gates stand
             // unchanged: every in-band reading there is a physical operating point the
-            // reserve and landing gates already price.
-            let corroboration_floor = tp.engine.governed_rpm + CRANK_CORROBORATION_MARGIN_RPM;
-            let crank_rpm = st.omega_e / RPM_TO_RAD;
-            let shaft_past_floor = rpm > corroboration_floor;
-            let crank_past_floor = crank_rpm > corroboration_floor;
+            // reserve and landing gates already price. (The floor terms themselves are
+            // computed above the confirmation counter, which counts them.)
             let protective_upshift = crank_rescue_active;
-            // `!deficit_pending` (Codex round): a pending correction HOLDS the gear — the
-            // ordinary arm must not upshift over it (the commit would reset the very
-            // confirmation evidence and dwell deferring the correction). The PROTECTIVE
-            // arm stays exempt from both this and the sustained-speed confirmation:
-            // crank protection outranks a capability correction and must not wait.
-            let ordinary_upshift = propulsive > 0.0
-                && rpm > tp.shift_up_rpm
-                && st.band_confirm_ticks >= UPSHIFT_CONFIRM_TICKS
-                && !detent_turn
-                && (!shaft_past_floor || crank_past_floor)
-                && !deficit_pending;
+            // The ordinary arm IS the confirmed predicate (recoil round): `upshift_ready`
+            // carries every commit condition — intent, band, detent, corroboration,
+            // `!deficit_pending` (Codex round: a pending correction HOLDS the gear — the
+            // ordinary arm must not upshift over it, or the commit would reset the very
+            // confirmation evidence and dwell deferring the correction), landing, and
+            // reserve — and the counter requires it to have held N consecutive decision
+            // ticks. The PROTECTIVE arm stays exempt from all of it: crank protection
+            // outranks a capability correction and must not wait.
+            let ordinary_upshift = upshift_ready && st.band_confirm_ticks >= UPSHIFT_CONFIRM_TICKS;
             if !grade_step_committed
                 && st.gear < top
                 && (ordinary_upshift || protective_upshift)
@@ -2065,24 +2197,11 @@ fn regenerative(
                             ShiftAddressing::Sequential => st.gear + 1,
                         })
                 } else {
-                    // Ordinary band arm. The predictor returns a SIGNED m; the gate reads
-                    // its SIGNED shaft speed (stage A): the landing must be POSITIVE on
-                    // the engaged ladder AND clear the down band + margin AND the stage-C
-                    // reserve gate. A sign-flipped landing always refuses the upshift —
-                    // under `|m|` the traced grade case (r_mean = 221 kN, landing_m =
-                    // −3.62) read as "9092 rpm" and PASSED, committing catastrophic
-                    // on-grade upshifts. No at-rest threshold is needed HERE (review
-                    // round): the band bound already demands a landing ≥ down band +
-                    // margin — solidly positive, far above any numerical residual.
-                    let landing = predict_shift_landing_m(tp, fp, m, r_mean, dt);
-                    let landing_shaft = dir * landing;
-                    let g_up = ladder[st.gear as usize];
-                    let next_reserve = modeled_reserve_in_gear(tp, fp, shaft, g_up, st.demand_n);
-                    (landing_shaft > 0.0
-                        && shaft_rpm_of(landing_shaft, g_up)
-                            >= tp.shift_down_rpm + POSTSHIFT_MARGIN_RPM
-                        && next_reserve >= reserve_margin(st.demand_n))
-                    .then_some(st.gear + 1)
+                    // Ordinary band arm: `ordinary_upshift` already proved the landing and
+                    // reserve gates THIS tick — they live inside `upshift_ready`, the very
+                    // predicate the confirmation counted (recoil round) — so the adjacent
+                    // upshift commits unconditionally here.
+                    Some(st.gear + 1)
                 };
                 if let Some(next_gear) = next_gear {
                     st.gear = next_gear;
@@ -2355,25 +2474,9 @@ fn regenerative(
             }
         }
         TransmissionMode::FixedRadii => {
-            // Steering detents with hysteresis on |steer|.
-            let a = inp.steer.abs();
-            st.steer_step = match st.steer_step {
-                0 => u8::from(a >= WIDE_ON),
-                1 => {
-                    if a >= TIGHT_ON {
-                        2
-                    } else {
-                        u8::from(a >= WIDE_OFF)
-                    }
-                }
-                _ => {
-                    if a < TIGHT_OFF {
-                        1
-                    } else {
-                        2
-                    }
-                }
-            };
+            // The steering detent (`st.steer_step`) was already updated for THIS tick
+            // above the shift scheduler — one detent truth per tick; this arm only
+            // consumes it.
             let neutral = inp.throttle.abs() < NEUTRAL_THROTTLE && m.abs() < NEUTRAL_M_SPEED;
             if neutral {
                 // The marginal brake-gated neutral turn: a slow capacity-limited servo

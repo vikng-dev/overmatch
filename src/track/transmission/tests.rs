@@ -133,11 +133,13 @@ fn fresh(tp: &TransmissionParams) -> TransmissionState {
     TransmissionState::from_spec(tp)
 }
 
-/// [`fresh`] with the upshift sustained-speed confirmation PRE-PAID (descent round): most
-/// arithmetic fixtures pin OTHER gates at an operating point already above the up band, so
-/// they seed [`UPSHIFT_CONFIRM_TICKS`] worth of evidence rather than re-testing the
-/// confirmation dwell in every fixture. Tests OF the confirmation construct from `fresh`
-/// and pay it live (`upshift_confirmation_rejects_transient_band_excursions`).
+/// [`fresh`] with the upshift confirmation PRE-PAID (descent round; the recoil round made
+/// the counter full-predicate): most arithmetic fixtures pin OTHER gates at an operating
+/// point already above the up band, so they seed [`UPSHIFT_CONFIRM_TICKS`] worth of
+/// evidence rather than re-testing the confirmation dwell in every fixture (the committing
+/// tick still re-proves every gate live — the seeded counter only skips the wait). Tests
+/// OF the confirmation construct from `fresh` and pay it live
+/// (`upshift_confirmation_rejects_transient_band_excursions`).
 fn confirmed(tp: &TransmissionParams) -> TransmissionState {
     TransmissionState {
         band_confirm_ticks: UPSHIFT_CONFIRM_TICKS,
@@ -810,27 +812,78 @@ fn correction_priority_fixture() -> (ForceParams, TransmissionParams, f32, f32) 
 }
 
 /// D2 regression: a threshold-confirmed reserve deficit is a correction and must beat an
-/// otherwise-valid above-band upshift preference on the same decision tick.
+/// otherwise-valid above-band upshift preference on the same decision tick. Recoil-round
+/// Codex review (two passes) hardened this into a REAL two-leg collision proof. The
+/// arbitration is STRUCTURAL — the deficit path runs before `upshift_ready` is even
+/// evaluated, its commit zeroes `band_confirm_ticks`, and `deficit_step_committed`
+/// falsifies the predicate — so a seeded upshift counter alone proves nothing about the
+/// main leg (the counter never reaches N on the collision tick). The CONTROL leg is what
+/// makes the coverage honest: the identical state with the deficit confirmation ONE TICK
+/// FARTHER from crossing commits the F2→F3 upshift on that very tick, proving the
+/// upshift arm (band + landing + reserve + counter at N − 1, all asserted below) was
+/// genuinely one tick from firing in the main leg — where the deficit crosses on the
+/// same tick and must win with F1. This is the coverage
+/// `grade_confirmation_paces_commit_when_target_already_legal` defers to for its lifted
+/// band.
 #[test]
 fn confirmed_deficit_precedes_upshift_arm() {
     let (fp, tp, shaft, demand) = correction_priority_fixture();
-    let mut st = TransmissionState {
+    // The upshift arm must be one tick from ready ON ITS OWN TERMS, or this test pins
+    // nothing: prove band, landing, and reserve for the F2→F3 upshift all pass.
+    assert!(
+        shaft * tp.gears_fwd[1] / tp.sprocket_radius / RPM_TO_RAD > tp.shift_up_rpm,
+        "fixture must sit above the up band (the band leg of the upshift predicate)"
+    );
+    let g_up = tp.gears_fwd[2];
+    let landing = predict_shift_landing_m(&tp, &fp, shaft, demand / 2.0, 1.0 / 64.0);
+    assert!(
+        landing > 0.0
+            && landing * g_up / tp.sprocket_radius / RPM_TO_RAD
+                >= tp.shift_down_rpm + POSTSHIFT_MARGIN_RPM,
+        "fixture's predicted F3 landing must clear the fix-1a gate (the landing leg)"
+    );
+    assert!(
+        modeled_reserve_in_gear(&tp, &fp, shaft, g_up, demand) >= reserve_margin(demand),
+        "fixture's F3 reserve must clear the margin (the reserve leg)"
+    );
+    let contender = |grade_confirm_ticks: u8| TransmissionState {
         gear: 2,
         demand_n: demand,
         demand_initialized: true,
-        grade_confirm_ticks: GRADE_CONFIRM_TICKS - 1,
+        grade_confirm_ticks,
+        // One tick from an armed upshift: the counter crosses N on the stepped tick.
+        band_confirm_ticks: UPSHIFT_CONFIRM_TICKS - 1,
         ..fresh(&tp)
     };
+    let inp = input(1.0, 0.0, [shaft; 2], [demand / 2.0; 2]);
 
+    // CONTROL leg: the deficit confirmation sits one tick farther from crossing, so the
+    // deficit does NOT confirm on this tick — and the very same upshift-arm state must
+    // then commit F2→F3. This proves the upshift was genuinely one step from firing;
+    // without it, the main leg's F1 would pass even with the arbitration broken.
+    let mut control = contender(GRADE_CONFIRM_TICKS - 2);
     step(
         TransmissionMode::FixedRadii,
         &fp,
         Some(&tp),
-        &mut st,
-        &input(1.0, 0.0, [shaft; 2], [demand / 2.0; 2]),
+        &mut control,
+        &inp,
+    );
+    assert_eq!(
+        control.gear, 3,
+        "control: with the deficit unconfirmed on this tick, the armed upshift must \
+             commit F2->F3 — otherwise the main leg's collision is fictional"
     );
 
-    assert_eq!(st.gear, 1, "confirmed deficit must correct downward");
+    // MAIN leg: identical state, but the deficit confirmation crosses on the SAME tick
+    // as the upshift's — the deficit owns the tick and corrects downward.
+    let mut st = contender(GRADE_CONFIRM_TICKS - 1);
+    step(TransmissionMode::FixedRadii, &fp, Some(&tp), &mut st, &inp);
+    assert_eq!(
+        st.gear, 1,
+        "the confirmed deficit must correct DOWNWARD through the simultaneously-armed \
+             upshift (an F3 here means the upshift arm won the tick)"
+    );
 }
 
 /// D5, descent-round inversion of the old bypass (Codex round: the upshift arm is LIVE in
@@ -1465,12 +1518,17 @@ fn flat_downshift_window_does_not_latch_hill_hold() {
 /// legal and margin-clear from tick one (`correction_priority_fixture`: zero-length
 /// windows, so the landing predictor is a no-op and the over-rev gate passes), so the
 /// ONLY pacing gate is the confirmation itself: twelve quiet ticks, commit on exactly
-/// the thirteenth. (The band upshift arm is live at this operating point but its own
-/// sustained-speed confirmation shares the same 13-tick scale and the deficit owns the
-/// crossing tick.)
+/// the thirteenth. Recoil round: the band arm's upshift confirmation shortened to 8 <
+/// 13 ticks, so at this synthetic operating point (above the band with a fixture-capable
+/// UPPER gear — the contrived dead-zone torque curve) the now-faster ordinary arm would
+/// legally commit F2→F3 on tick 8 and steal the crossing this test pins; the up band is
+/// lifted out of the way so the DEFICIT pacing stays the mechanism under test (the
+/// deficit-vs-live-upshift same-tick priority is pinned by
+/// `confirmed_deficit_precedes_upshift_arm`).
 #[test]
 fn grade_confirmation_paces_commit_when_target_already_legal() {
-    let (fp, tp, shaft, demand) = correction_priority_fixture();
+    let (fp, mut tp, shaft, demand) = correction_priority_fixture();
+    tp.shift_up_rpm = 10_000.0;
     let mut st = TransmissionState {
         gear: 2,
         demand_n: demand,
@@ -1670,7 +1728,7 @@ fn reverse_ladder_hill_hold_engages_and_launches() {
 
 /// Codex rounds 3+4, minor — the FULL closed-loop pipeline the branch test
 /// (`steep_grade_after_upshift_corrects_before_lug`) seeds by hand: a REAL band upshift
-/// (paying the sustained-speed confirmation live, tick PINNED), the authored 20-tick
+/// (paying the recoil round's full-predicate confirmation live, tick PINNED), the authored 20-tick
 /// window with the demand EMA provably FROZEN, post-window EMA recovery pinned to the
 /// steep asymptote, the 13-tick deficit confirmation, and the correction committing on
 /// its exact measured tick — paced, in this fixture, by lower-gear over-rev/margin
@@ -1788,27 +1846,34 @@ fn steep_grade_full_loop_upshift_freeze_recover_confirm_correct() {
     }
     // MEASURED pins for this deterministic fixture (Codex round 4 — exact ticks, so a
     // regression in any pipeline stage moves a number instead of hiding in an
-    // eventually-happens bound):
-    //   * upshift on tick 16: ~3 ticks of drive to cross the band from 50 rpm below it,
-    //     then the 13-tick sustained-speed confirmation;
-    //   * correction on tick 84: window end (tick 36) + EMA recovery + the 13-tick
-    //     deficit confirmation are all long past (gc confirmed on tick 50) — the PACING
-    //     gate is lower-gear LEGALITY: F4 sits margin-short at speed and everything
-    //     below is over-rev/fuel-cut-illegal until the deficit bleeds m to ~1.4 m/s,
-    //     where F3 clears both the over-rev gate and the reserve margin and the
-    //     correction commits on that first legal tick. (The deep override's
-    //     dwell-crossing behavior is pinned separately in
-    //     `deep_deficit_overrides_post_upshift_deferral` — here the dwell expired on
-    //     tick 67 while no legal target existed yet.)
+    // eventually-happens bound; re-measured for the recoil round's 8-tick full-predicate
+    // upshift confirmation, which moved BOTH pins by exactly the 5 ticks the confirmation
+    // shortened by):
+    //   * upshift on tick 11 (was 16): ~3 ticks of drive to cross the band from 50 rpm
+    //     below it, then the 8-tick (was 13) full-predicate confirmation — the light
+    //     approach load keeps landing and reserve passing throughout, so the counted
+    //     predicate is continuously true from the band crossing;
+    //   * correction on tick 75 (was 84): the PACING gate is unchanged — lower-gear
+    //     LEGALITY (F4 sits margin-short at speed and everything below is over-rev/
+    //     fuel-cut-illegal until the deficit bleeds m to ~1.4 m/s, where F3 clears both
+    //     the over-rev gate and the reserve margin and the correction commits on that
+    //     first legal tick). It moved 9 ticks: 5 from the earlier upshift (window end
+    //     now tick 31; EMA recovery, 13-tick deficit confirmation, and dwell expiry all
+    //     anchor to it), plus 4 because the upshift now commits off 5 fewer drive ticks
+    //     — a slightly lower entry speed onto the steep grade, so m bleeds to the
+    //     F3-legal speed sooner. The M2 asymmetric demand fall does not touch this
+    //     trace — the post-window EMA only RISES here (12 kN → 2·steep), and the rise
+    //     path is bit-identical. (The deep override's dwell-crossing behavior is pinned
+    //     separately in `deep_deficit_overrides_post_upshift_deferral`.)
     assert_eq!(
         upshift_tick,
-        Some(16),
+        Some(11),
         "the confirmed upshift's tick moved — confirmation duration or drive arithmetic \
              changed"
     );
     assert_eq!(
         correction_tick,
-        Some(84),
+        Some(75),
         "the correction's tick moved — EMA rate, confirmation, over-rev legality, or \
              margin arithmetic changed"
     );
@@ -1871,13 +1936,16 @@ fn overrun_slip_guard_bounds_crank_at_top_gear() {
     }
 }
 
-/// Descent round, Yan-approved (the recoil shift-storm fix): the ordinary band upshift
-/// arms only after [`UPSHIFT_CONFIRM_TICKS`] CONSECUTIVE above-band propulsive ticks, and
-/// the evidence HARD-resets on any non-qualifying tick. Two recoil-class excursions of
-/// confirm − 1 ticks each (a fired shell's ~0.14 m/s shove decays through the band well
-/// inside the window on any grade the tank cannot sustain) must commit NOTHING — the
-/// second proves the reset, since a leaky counter would have accumulated across both —
-/// while genuinely sustained speed commits on exactly the confirm-th consecutive tick.
+/// Descent round, Yan-approved; recoil round re-scoped (the recoil shift-storm fix): the
+/// ordinary band upshift arms only after [`UPSHIFT_CONFIRM_TICKS`] CONSECUTIVE ticks of
+/// the FULL ordinary-upshift predicate (band, landing, and reserve all pass here — the
+/// unloaded operating point keeps them true, so the band excursion is the flipping
+/// sub-condition), and the evidence HARD-resets on any non-qualifying tick. Two
+/// recoil-class excursions of confirm − 1 ticks each (a fired shell's ~0.14 m/s shove
+/// decays through the band well inside the window on any grade the tank cannot sustain)
+/// must commit NOTHING — the second proves the reset, since a leaky counter would have
+/// accumulated across both — while genuinely sustained speed commits on exactly the
+/// confirm-th consecutive tick.
 #[test]
 fn upshift_confirmation_rejects_transient_band_excursions() {
     let (fp, tp) = (lab_fp(), lab_tp());
@@ -1923,6 +1991,70 @@ fn upshift_confirmation_rejects_transient_band_excursions() {
         committed_at,
         Some(UPSHIFT_CONFIRM_TICKS),
         "sustained speed must commit on exactly the confirm-th consecutive tick"
+    );
+}
+
+/// Recoil-round Codex review: the upshift confirmation must read THIS tick's hysteretic
+/// detent state, not the previous tick's. Seven qualifying straight ticks bring the
+/// counter to N − 1; the player then crosses WIDE_ON on the very tick that would commit.
+/// The stale read (detent updated below the scheduler) incremented to N and committed an
+/// ordinary upshift on the exact tick the turn began — then the same invocation applied
+/// the λ constraint in the NEW gear, where the landing predictor is explicitly invalid.
+/// One detent truth per tick: the engage tick must HARD-reset the evidence and refuse
+/// the shift. The straight control proves the fixture sat one tick from committing.
+#[test]
+fn detent_engage_on_the_committing_tick_resets_confirmation() {
+    let (fp, tp) = (lab_fp(), lab_tp());
+    let g1 = tp.gears_fwd[0];
+    let v_hi = (tp.shift_up_rpm + 80.0) * RPM_TO_RAD * tp.sprocket_radius / g1;
+    let at = |st: &mut TransmissionState, steer: f32| {
+        step(
+            TransmissionMode::FixedRadii,
+            &fp,
+            Some(&tp),
+            st,
+            &input(1.0, steer, [v_hi, v_hi], [0.0, 0.0]),
+        );
+    };
+
+    // Control: the identical straight stream commits on exactly the confirm-th tick.
+    let mut control = fresh(&tp);
+    for _ in 0..UPSHIFT_CONFIRM_TICKS {
+        at(&mut control, 0.0);
+    }
+    assert_eq!(
+        control.gear, 2,
+        "the straight control must commit on the confirm-th tick — otherwise the \
+             detent tick below proves nothing"
+    );
+
+    let mut st = fresh(&tp);
+    for tick in 0..(UPSHIFT_CONFIRM_TICKS - 1) {
+        at(&mut st, 0.0);
+        assert_eq!(
+            st.gear, 1,
+            "tick {tick}: still confirming, nothing may commit"
+        );
+    }
+    assert_eq!(
+        st.band_confirm_ticks,
+        UPSHIFT_CONFIRM_TICKS - 1,
+        "the fixture must sit exactly one tick from committing"
+    );
+    // The committing tick: the stick crosses WIDE_ON — the detent engages THIS tick.
+    at(&mut st, 0.3);
+    assert_eq!(
+        st.steer_step, 1,
+        "the wide detent must have engaged on this very tick"
+    );
+    assert_eq!(
+        st.gear, 1,
+        "no ordinary upshift may commit on the tick the detent engages"
+    );
+    assert_eq!(st.shift_ticks, 0, "no shift window may start");
+    assert_eq!(
+        st.band_confirm_ticks, 0,
+        "the engage tick must HARD-reset the confirmation evidence"
     );
 }
 

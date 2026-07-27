@@ -50,7 +50,15 @@ use crate::{CombatantId, ShotId};
 /// sustained-speed confirmation counter (`UPSHIFT_CONFIRM_TICKS`), replicated and rolled back
 /// atomically with the rest of the REV-14 transmission root and hashed in the determinism trace
 /// like every other discrete field.
-pub const PROTOCOL_REV: u32 = 20;
+///
+/// REV 21 (recoil round — the fire-backward-uphill shift-storm fix): NO wire-format change, but
+/// two REPLICATED transmission fields changed semantics/dynamics, which is sim-version skew (the
+/// alpha.9 lesson: silent sim skew passes the handshake and manifests as rollback storms):
+/// `band_confirm_ticks` now counts the FULL ordinary-upshift predicate for 8 consecutive decision
+/// ticks (was: the band sub-condition only, for 13 — it no longer saturates on a lugging climb),
+/// and the gated `demand_n` EMA became asymmetric (rise 8 ticks unchanged, fall 32 ticks). Two
+/// peers disagreeing on either law re-simulate different gear decisions from identical snapshots.
+pub const PROTOCOL_REV: u32 = 21;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -1533,7 +1541,7 @@ mod tests {
         );
     }
 
-    /// Handshake fixture: the complete REV-20 manifest fold is pinned as a concrete netcode
+    /// Handshake fixture: the complete REV-21 manifest fold is pinned as a concrete netcode
     /// `protocol_id`, so fixture drift is visible even when every constituent pin was edited.
     #[test]
     fn wire_manifest_fingerprint_is_pinned() {
@@ -1549,7 +1557,9 @@ mod tests {
             WIRE_DEP_LIGHTYEAR,
             PROTOCOL_REV,
         );
-        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0xba4b_d236_7af9_51d3;
+        // Re-pinned for REV 21 (recoil round: replicated transmission-field semantics change —
+        // `band_confirm_ticks` full-predicate counting, `demand_n` asymmetric fall).
+        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0xad9c_ef0b_fda9_e770;
         assert_eq!(
             wire_manifest, EXPECTED_WIRE_MANIFEST_FINGERPRINT,
             "wire manifest changed: re-pin to {wire_manifest:#018x}",

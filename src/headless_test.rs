@@ -143,6 +143,21 @@ fn headless_app_on(world: Option<crate::terrain_grid::HeightGrid>) -> App {
             .disable::<bevy::winit::WinitPlugin>(),
     )
     .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO));
+    // UPSTREAM WORKAROUND — bevy_image 0.19 panics (not errors) transcoding UASTC KTX2 when NO
+    // block-compressed format is supported: it sizes the SOURCE slice from the DESTINATION
+    // format's block geometry, so the Rgba8 fallback reads 4x too far. `backends: None` means no
+    // wgpu device, so nothing inserts `CompressedImageFormatSupport` and bevy_gltf resolves
+    // `CompressedImageFormats::NONE` in its `finish()` — every UASTC texture in the tank glb
+    // would abort the boot. Claiming ASTC 4x4 makes the arithmetic coincide and the transcode
+    // exact; headless never uploads a texture, so this only decides which bytes sit in RAM (and
+    // ASTC 4x4 is 8 bpp against RGBA8's 32 — it is also the cheaper lie). Must precede
+    // `app.finish()` below: that is when the loaders read the resource.
+    // Mechanism + suggested upstream fix: `.agents/docs/upstream/bevy-ktx2-uastc-fallback-length-panic.md`.
+    // DELETE THESE LINES when `tests/bevy_ktx2_uastc_fallback.rs` fails — that failure IS the
+    // signal that bevy fixed the transcode and the workaround has become dead weight.
+    app.insert_resource(bevy::image::CompressedImageFormatSupport(
+        bevy::image::CompressedImageFormats::ASTC_LDR,
+    ));
     // Physics + the SP spawn scenario are composition-root choices (see lib.rs SimPlugin note);
     // this exercises the single-player-shaped boot, headless.
     app.add_plugins((
@@ -2845,6 +2860,7 @@ fn full_simulation_replay_is_bit_exact_for_six_hundred_ticks() {
 // gates; a gate that fires on a feel number would freeze the very law under investigation.
 //
 //   cargo test --lib -- --ignored --nocapture probe_climb_10pct
+//   cargo test --lib -- --ignored --nocapture probe_fire_backward_uphill
 //   cargo test --lib -- --ignored --nocapture probe_descend_10pct
 //   cargo test --lib -- --ignored --nocapture probe_turn_at_2ms
 //   cargo test --lib -- --ignored --nocapture probe_turn_radius_sweep
@@ -2852,6 +2868,10 @@ fn full_simulation_replay_is_bit_exact_for_six_hundred_ticks() {
 // Telemetry lands in `$SPIKE_DRIVE_PROBE_DIR` (default `target/drive-probe`), one CSV per scenario.
 // `SPIKE_DRIVE_PROBE_GRADE` overrides the ramp grade (rise/run, e.g. `0.15`) for a sweep, and
 // `SPIKE_DRIVE_PROBE_TURN_THROTTLE` the throttle held through the turn (default full).
+// The fire scenario takes `SPIKE_DRIVE_PROBE_FIRE_YAW_DEG` (turret lay, default 180 = over the
+// rear deck), `SPIKE_DRIVE_PROBE_FIRE_SHOTS` (default 2; 0 runs the identical command stream
+// WITHOUT pulling the trigger — the control), `SPIKE_DRIVE_PROBE_FIRE_SETTLE_S`,
+// `SPIKE_DRIVE_PROBE_FIRE_GAP_S` and `SPIKE_DRIVE_PROBE_FIRE_RUN_S`.
 // The turn scenarios take `SPIKE_DRIVE_PROBE_STEER` (steer magnitude, which SELECTS the L600
 // detent: ≥ 0.15 wide, ≥ 0.55 tight); the sweep additionally takes `SPIKE_DRIVE_PROBE_GEARS` and
 // `SPIKE_DRIVE_PROBE_STEERS` (comma lists) plus the tick budgets `SPIKE_DRIVE_PROBE_RUNUP_S`,
@@ -3022,13 +3042,42 @@ struct ProbeSample {
     /// ground-contact length `L` of the classical `M_t = μ_t·W·L/4` turning-resistance form.
     footprint_m: f32,
     scheduler: crate::track::transmission::SchedulerState,
+    /// The UNFILTERED demand sample the observer fed the EMA this tick: the production
+    /// expression `max(0, dir·(R_l + R_r))`, so the CSV carries raw AND filtered load.
+    demand_raw: f32,
+    /// Consecutive-evidence counter behind the ordinary BAND upshift (`UPSHIFT_CONFIRM_TICKS`).
+    band_confirm: u8,
+    /// Remaining ticks of the declutched shift window (`st.shift_ticks`): non-zero means the
+    /// demand observer is frozen and no scheduling decision runs.
+    shift_ticks: u8,
+    /// Turret-yaw servo angle (degrees, hull-local): 0 forward, ±180 rearward. NaN when the
+    /// rig carries no `Turret_Yaw` servo.
+    turret_yaw_deg: f32,
+    /// `FireShell` events raised THIS tick — the production shot seam, not the command edge.
+    fired: u32,
+    /// The ordinary band upshift's PREDICTED landing rpm in the next gear — the fix-1a gate,
+    /// which must clear `shift_down_rpm + POSTSHIFT_MARGIN_RPM`.
+    landing_rpm: f32,
+    /// `reserve_margin(demand)` — the headroom the next gear's reserve must clear.
+    margin: f32,
+}
+
+/// Shot counter for the driving probes, incremented at the production `FireShell` seam so a
+/// probe row records shots that actually left the bore (the command edge alone is only intent:
+/// the reload gate, the crew requirement, or a corrupt bore pose all decline it silently).
+#[derive(Resource, Default)]
+struct ProbeShots(u32);
+
+fn count_probe_fire_shells(_: On<crate::ballistics::FireShell>, mut shots: ResMut<ProbeShots>) {
+    shots.0 += 1;
 }
 
 const PROBE_HEADER: &str = "tick,t_s,x,y,z,speed,fwd_speed,grade,pitch_deg,yaw_rate,yaw_kin,\
 cmd_throttle,cmd_steer,drv_throttle,drv_steer,side_cmd_l,side_cmd_r,belt_l,belt_r,\
 react_l,react_r,contacts_l,contacts_r,gear,reverse,shift_ticks,steer_step,scheduler,rpm,\
 dec_shaft_rpm,demand_n,dec_reserve,dec_reserve_next,dec_margin,dec_landing_m,dec_landing_rpm,\
-grade_confirm,grade_target,clutch_out,park,hill_hold,dwell,last_shift_dir,support_n,footprint_m";
+grade_confirm,grade_target,clutch_out,park,hill_hold,dwell,last_shift_dir,support_n,footprint_m,\
+demand_raw,band_confirm,shift_window,turret_yaw_deg,fired,cmd_fire";
 
 /// A running scenario: the booted sim plus the open telemetry sink. `tick` writes exactly one CSV
 /// row per fixed tick, recomputing the shift scheduler's own decision inputs from the PRE-tick
@@ -3043,6 +3092,8 @@ struct DriveProbe {
     out: std::io::BufWriter<std::fs::File>,
     path: std::path::PathBuf,
     tick: u32,
+    /// `TankServos::states` slot of the turret-yaw servo, resolved once at boot by node name.
+    turret_yaw_slot: Option<usize>,
 }
 
 /// Engine rad/s per rpm — the transmission module's own conversion, restated for the readout.
@@ -3051,7 +3102,19 @@ const PROBE_DT: f32 = 1.0 / FIXED_TICKS_PER_SECOND as f32;
 
 impl DriveProbe {
     fn open(scenario: &str, grade: f32) -> Self {
-        let (app, tank, grid) = booted_ramp_sim(grade);
+        let (mut app, tank, grid) = booted_ramp_sim(grade);
+        // Read-only taps, installed for every probe: the production shot seam (`FireShell`) and
+        // the turret-yaw servo slot. Neither writes sim state.
+        app.init_resource::<ProbeShots>()
+            .add_observer(count_probe_fire_shells);
+        let turret_yaw_slot = {
+            let world = app.world_mut();
+            world
+                .query::<(&Name, &crate::tank::ServoIndex, &crate::tank::TankRoot)>()
+                .iter(world)
+                .find(|(name, _, root)| root.0 == tank && name.as_str() == "Turret_Yaw")
+                .map(|(_, slot, _)| slot.0)
+        };
         let (tp, fp, half_tread) = {
             let gear = app.world().resource::<crate::track::sim::TrackGear>();
             (
@@ -3087,6 +3150,7 @@ impl DriveProbe {
             out,
             path,
             tick: 0,
+            turret_yaw_slot,
         }
     }
 
@@ -3097,6 +3161,22 @@ impl DriveProbe {
 
     /// Advance one fixed tick under `(throttle, steer)` and append its telemetry row.
     fn tick(&mut self, throttle: f32, steer: f32) -> ProbeSample {
+        self.tick_armed(throttle, steer, None, false)
+    }
+
+    /// [`Self::tick`] plus the turret/trigger seam: `aim` is the hull-local aim POINT the
+    /// production `aim::drive_aim_servos` chases (held every tick, as the game layer re-authors
+    /// it), and `fire` latches the one-tick primary edge `shooting::fire` consumes. Both are the
+    /// SAME two command fields a player uses — no impulse is injected and no sim law is touched,
+    /// so the recoil the trace records is the production `-mass·speed·RECOIL_FEEL` at the
+    /// production bore pose.
+    fn tick_armed(
+        &mut self,
+        throttle: f32,
+        steer: f32,
+        aim: Option<Vec3>,
+        fire: bool,
+    ) -> ProbeSample {
         let pre = {
             let world = self.app.world();
             (
@@ -3109,7 +3189,18 @@ impl DriveProbe {
                     .0,
             )
         };
+        let shots_before = self.app.world().resource::<ProbeShots>().0;
+        {
+            let mut cmd = self
+                .app
+                .world_mut()
+                .get_mut::<TankCommand>(self.tank)
+                .expect("tank carries a command");
+            cmd.aim = aim;
+            cmd.fire_primary = fire;
+        }
         drive_tick(&mut self.app, self.tank, throttle, steer);
+        let fired = self.app.world().resource::<ProbeShots>().0 - shots_before;
 
         let world = self.app.world();
         let position = world
@@ -3252,6 +3343,19 @@ impl DriveProbe {
             crate::track::transmission::SchedulerState::HillHold => "hillhold".to_string(),
             crate::track::transmission::SchedulerState::GradeLimit => "gradelimit".to_string(),
         };
+        // The observer's UNFILTERED sample in the production expression. It is what the EMA
+        // consumed on a decision tick and what it deliberately IGNORED inside a shift window
+        // (`shift_window > 0`), so raw-vs-filtered stays readable across the cut.
+        let demand_raw = (dir * (effect.belt_reaction[0] + effect.belt_reaction[1])).max(0.0);
+        let turret_yaw_deg = self
+            .turret_yaw_slot
+            .and_then(|slot| {
+                world
+                    .get::<crate::tank::TankServos>(self.tank)
+                    .and_then(|servos| servos.states.get(slot))
+                    .map(|state| state.current().to_degrees())
+            })
+            .unwrap_or(f32::NAN);
 
         {
             use std::io::Write as _;
@@ -3261,7 +3365,7 @@ impl DriveProbe {
 {yaw:.6},{yaw_kin:.6},{cmd_t:.4},{cmd_s:.4},{dt_:.6},{ds:.6},{scl:.6},{scr:.6},{bl:.6},{br:.6},\
 {rl:.2},{rr:.2},{cl},{cr},{gear},{rev},{shift},{detent},{sched},{rpm:.2},{dshaft:.2},{demand:.2},\
 {res:.2},{resn:.2},{marg:.2},{land:.5},{landrpm:.2},{gc},{gt},{clutch},{park},{hold},{dwell},{lsd},\
-{support:.1},{footprint:.4}",
+{support:.1},{footprint:.4},{demand_raw:.2},{bc},{sw},{turret:.4},{fired},{cmd_fire}",
                 tick = self.tick,
                 t = self.tick as f32 / FIXED_TICKS_PER_SECOND as f32,
                 x = position.x,
@@ -3307,6 +3411,12 @@ impl DriveProbe {
                 lsd = st.last_shift_dir,
                 support = support_n,
                 footprint = footprint_m,
+                demand_raw = demand_raw,
+                bc = st.band_confirm_ticks,
+                sw = st.shift_ticks,
+                turret = turret_yaw_deg,
+                fired = fired,
+                cmd_fire = u8::from(fire),
             )
             .expect("telemetry row");
         }
@@ -3332,6 +3442,13 @@ impl DriveProbe {
             side_commands,
             position,
             scheduler: st.scheduler,
+            demand_raw,
+            band_confirm: st.band_confirm_ticks,
+            shift_ticks: st.shift_ticks,
+            turret_yaw_deg,
+            fired,
+            landing_rpm: dec_landing_rpm,
+            margin: dec_margin,
         }
     }
 
@@ -3394,6 +3511,200 @@ fn probe_climb_10pct() {
         res = last.reserve,
         resn = last.reserve_next,
         meanresn = mean_reserve_next,
+        sched = last.scheduler,
+        path = probe.finish().display(),
+    );
+}
+
+/// SYMPTOM 4 — the reported FIRE-BACKWARD-UPHILL gear oscillation (field report: climbing in F1,
+/// each main-gun shot over the rear deck walks F1 → 2 → 3 → 1).
+///
+/// Full throttle straight up a constant grade with the turret laid at
+/// `SPIKE_DRIVE_PROBE_FIRE_YAW_DEG` (default 180°, over the rear deck), pulling the primary trigger
+/// once the climb has SETTLED and again after it re-settles. Both the lay and the trigger go
+/// through the production command seam (`TankCommand::aim` chased by `aim::drive_aim_servos`, and
+/// the one-tick `fire_primary` edge `shooting::fire` consumes) — NOTHING is injected, so the
+/// recoil is `shooting::fire`'s own `−mass·speed·RECOIL_FEEL` impulse applied at the tick-truth
+/// muzzle pose. Firing REARWARD while climbing therefore shoves the hull FORWARD, up the hill:
+/// exactly the transient the `UPSHIFT_CONFIRM_TICKS` hard-reset window was written against.
+///
+/// The columns that decide it are `demand_raw`/`demand_n` (raw vs filtered load), `dec_shaft_rpm`
+/// against the up band, `band_confirm` (the full-predicate upshift evidence counter), `dwell`,
+/// `shift_window`, `dec_reserve`/`dec_reserve_next` and `fired` (the production shot seam, not the
+/// command edge).
+///
+/// Knobs: `SPIKE_DRIVE_PROBE_GRADE`, `SPIKE_DRIVE_PROBE_FIRE_YAW_DEG`,
+/// `SPIKE_DRIVE_PROBE_FIRE_SHOTS` (0 runs the identical command stream with the trigger held out —
+/// the control), `SPIKE_DRIVE_PROBE_FIRE_SETTLE_S` (deadline after which the first shot goes
+/// regardless), `SPIKE_DRIVE_PROBE_FIRE_GAP_S`, `SPIKE_DRIVE_PROBE_FIRE_RUN_S`.
+#[test]
+#[ignore = "instrument, not a gate: writes driving telemetry"]
+fn probe_fire_backward_uphill() {
+    let grade = probe_grade(0.10);
+    let yaw_deg: f32 = crate::env_parse("SPIKE_DRIVE_PROBE_FIRE_YAW_DEG").unwrap_or(180.0);
+    let shots: usize = crate::env_parse("SPIKE_DRIVE_PROBE_FIRE_SHOTS").unwrap_or(2);
+    let settle_deadline_s: usize =
+        crate::env_parse("SPIKE_DRIVE_PROBE_FIRE_SETTLE_S").unwrap_or(12);
+    let gap_s: usize = crate::env_parse("SPIKE_DRIVE_PROBE_FIRE_GAP_S").unwrap_or(6);
+    let run_s: usize = crate::env_parse("SPIKE_DRIVE_PROBE_FIRE_RUN_S").unwrap_or(40);
+    let mut probe = DriveProbe::open(
+        &format!("fire-{:.0}pct-yaw{yaw_deg:.0}-n{shots}", grade * 100.0),
+        grade,
+    );
+    probe.pose(grade, -200.0, 0.0, Vec3::X);
+
+    // The hull-local aim POINT whose azimuth is `yaw_deg`: `drive_aim_servos` lays yaw at
+    // `(-x).atan2(-z)`, so a point at `(-R·sin θ, 0, -R·cos θ)` commands exactly θ. Level in the
+    // hull frame (y = 0) keeps the gun inside its −8°..+15° travel on any probe grade, and R is
+    // far enough away that each servo's own mount offset is irrelevant to the azimuth.
+    const AIM_RANGE: f32 = 1000.0;
+    let (sin, cos) = yaw_deg.to_radians().sin_cos();
+    let aim = Some(Vec3::new(-AIM_RANGE * sin, 0.0, -AIM_RANGE * cos));
+
+    // "Settled" = the climb has stopped changing: same gear, no shift window open, hull speed
+    // steady, and the turret actually ON its commanded lay. Only then is a shot's transient
+    // attributable to the shot.
+    const STEADY_TICKS: usize = 48;
+    let settled = |samples: &[ProbeSample]| {
+        samples.len() > STEADY_TICKS && {
+            let window = &samples[samples.len() - STEADY_TICKS..];
+            let last = window[window.len() - 1];
+            let turret_error = {
+                let raw = (last.turret_yaw_deg - yaw_deg).rem_euclid(360.0);
+                raw.min(360.0 - raw)
+            };
+            turret_error < 1.0
+                && last.shift_ticks == 0
+                && window
+                    .iter()
+                    .all(|s| s.gear == last.gear && s.shift_ticks == 0)
+                && (last.fwd_speed - window[0].fwd_speed).abs() < 0.01
+        }
+    };
+
+    let gap = gap_s * FIXED_TICKS_PER_SECOND;
+    let deadline = settle_deadline_s * FIXED_TICKS_PER_SECOND;
+    let mut samples: Vec<ProbeSample> = Vec::new();
+    let mut shot_ticks: Vec<usize> = Vec::new();
+    for tick in 0..(run_s * FIXED_TICKS_PER_SECOND) {
+        let spaced = shot_ticks.last().is_none_or(|&t| tick >= t + gap);
+        // The edge is asserted only when the run is armed; the reload gate may still decline it
+        // (`fired` is the truth), in which case it is re-asserted on the next armed tick.
+        let fire = shot_ticks.len() < shots
+            && spaced
+            && (settled(&samples) || (shot_ticks.is_empty() && tick >= deadline));
+        let sample = probe.tick_armed(1.0, 0.0, aim, fire);
+        if sample.fired > 0 {
+            shot_ticks.push(tick);
+        }
+        samples.push(sample);
+    }
+
+    // Per-shot transient: what the shot did to speed and rpm, how long the upshift evidence held,
+    // and how long the box stayed off the gear it was climbing in.
+    let up_band = probe.tp.shift_up_rpm;
+    // The fix-1a landing band, read from the production constants rather than restated.
+    let landing_gate = probe.tp.shift_down_rpm + crate::track::transmission::POSTSHIFT_MARGIN_RPM;
+    let mut shot_reports = Vec::new();
+    for &shot in &shot_ticks {
+        let pre = samples[shot.saturating_sub(1)];
+        let window_end = (shot + 4 * FIXED_TICKS_PER_SECOND).min(samples.len());
+        let window = &samples[shot..window_end];
+        let peak_speed = window.iter().fold(f32::MIN, |a, s| a.max(s.fwd_speed));
+        let min_speed = window.iter().fold(f32::MAX, |a, s| a.min(s.fwd_speed));
+        let peak_rpm = window.iter().fold(f32::MIN, |a, s| a.max(s.rpm));
+        let min_rpm = window.iter().fold(f32::MAX, |a, s| a.min(s.rpm));
+        let wrong_gear = window.iter().filter(|s| s.gear != pre.gear).count();
+        let recovered = window
+            .iter()
+            .enumerate()
+            .skip(1)
+            .find(|(i, s)| s.gear == pre.gear && window[..*i].iter().any(|w| w.gear != pre.gear))
+            .map(|(i, _)| i);
+        // The two gates the shot can flip, each stated as its DISTANCE before and one tick after
+        // the shot: the fix-1a landing band (`landing_rpm` vs `shift_down_rpm +
+        // POSTSHIFT_MARGIN_RPM`) and the stage-C reserve gate (`reserve_next` vs
+        // `reserve_margin(demand)`). `band_confirm` is reported alongside; since the recoil
+        // round it counts the FULL ordinary-upshift predicate (landing and reserve included),
+        // so on a lugging climb it reads 0 instead of the old saturated 255 — the counter now
+        // IS the gate under test.
+        let post = window.get(1).copied().unwrap_or(pre);
+        let confirm_needed = crate::track::transmission::UPSHIFT_CONFIRM_TICKS;
+        shot_reports.push(format!(
+            "  shot @tick {shot} (t {t:.2} s): gear F{gear} speed {v:.3} m/s rpm {rpm:.0}, \
+             band_confirm {bc} (needs {confirm_needed}, up band {up_band:.0})\n    \
+             speed {min_speed:.3}..{peak_speed:.3} m/s (Δ+{dv:.3}); rpm {min_rpm:.0}..{peak_rpm:.0} \
+             (Δ{drpm:+.0})\n    \
+             landing gate: {land_pre:.0} -> {land_post:.0} rpm against {land_gate:.0} \
+             (distance {dpre:+.0} -> {dpost:+.0})\n    \
+             reserve gate: {res_pre:.0} -> {res_post:.0} N against margin {marg_pre:.0} -> \
+             {marg_post:.0} (distance {rpre:+.0} -> {rpost:+.0})\n    \
+             off-gear ticks {wrong_gear} of {win}; gears {trace:?}{recov}",
+            t = shot as f32 / FIXED_TICKS_PER_SECOND as f32,
+            gear = pre.gear,
+            v = pre.fwd_speed,
+            rpm = pre.rpm,
+            bc = pre.band_confirm,
+            dv = peak_speed - pre.fwd_speed,
+            drpm = peak_rpm - pre.rpm,
+            land_pre = pre.landing_rpm,
+            land_post = post.landing_rpm,
+            land_gate = landing_gate,
+            dpre = pre.landing_rpm - landing_gate,
+            dpost = post.landing_rpm - landing_gate,
+            res_pre = pre.reserve_next,
+            res_post = post.reserve_next,
+            marg_pre = pre.margin,
+            marg_post = post.margin,
+            rpre = pre.reserve_next - pre.margin,
+            rpost = post.reserve_next - post.margin,
+            win = window.len(),
+            trace = gear_transitions(window),
+            recov = match recovered {
+                Some(i) => format!(", back in F{} after {i} ticks", pre.gear),
+                None => String::new(),
+            },
+        ));
+    }
+
+    let last = *samples.last().expect("the fire probe recorded ticks");
+    let weapon_note = {
+        let world = probe.app.world_mut();
+        world
+            .query::<(&crate::tank::Weapon, &crate::tank::Muzzle)>()
+            .iter(world)
+            .find(|(w, _)| matches!(w.trigger, crate::spec::Trigger::Primary))
+            .map(|(w, _)| {
+                format!(
+                    "{} — {:.1} kg at {:.0} m/s = {:.0} N·s of hull recoil (production \
+                     `-mass*speed*RECOIL_FEEL`)",
+                    w.name,
+                    w.mass,
+                    w.speed,
+                    w.mass * w.speed,
+                )
+            })
+            .unwrap_or_else(|| "no primary weapon found".into())
+    };
+    println!(
+        "probe fire-backward {grade_pct:.1}% grade, turret {yaw_deg:.0}°, {n} shot(s) -> {path}\n  \
+         weapon: {weapon_note}\n  \
+         gear trace (tick, gear): {trace:?}\n  \
+         shots landed at ticks {shot_ticks:?}\n\
+{reports}\n  \
+         final gear F{gear}, speed {speed:.3} m/s, rpm {rpm:.0}, climbed {climb:.1} m of x, \
+         demand {demand:.0} N (raw {raw:.0} N), reserve(cur) {res:.0} N, scheduler {sched:?}",
+        grade_pct = grade * 100.0,
+        n = shot_ticks.len(),
+        trace = gear_transitions(&samples),
+        reports = shot_reports.join("\n"),
+        gear = last.gear,
+        speed = last.fwd_speed,
+        rpm = last.rpm,
+        climb = last.position.x + 200.0,
+        demand = last.demand_n,
+        raw = last.demand_raw,
+        res = last.reserve,
         sched = last.scheduler,
         path = probe.finish().display(),
     );
