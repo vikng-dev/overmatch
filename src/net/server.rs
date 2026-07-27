@@ -54,6 +54,21 @@ pub fn run() {
     )
     // Headless composition needs its own application runner.
     .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(2)));
+    // UPSTREAM WORKAROUND — bevy_image 0.19 panics (not errors) transcoding UASTC KTX2 when NO
+    // block-compressed format is supported: it sizes the SOURCE slice from the DESTINATION
+    // format's block geometry, so the Rgba8 fallback reads 4x too far. `backends: None` above
+    // means no wgpu device, so nothing inserts `CompressedImageFormatSupport` and bevy_gltf
+    // resolves `CompressedImageFormats::NONE` in its `finish()` — every UASTC texture in the tank
+    // glb would abort the server on boot. Claiming ASTC 4x4 makes the arithmetic coincide and the
+    // transcode exact; the dedicated server never uploads a texture, so this only decides which
+    // bytes sit in RAM (and ASTC 4x4 is 8 bpp against RGBA8's 32 — it is also the cheaper lie).
+    // Must precede `app.run()`: that is when the loaders read the resource.
+    // Mechanism + suggested upstream fix: `.agents/docs/upstream/bevy-ktx2-uastc-fallback-length-panic.md`.
+    // DELETE THESE LINES when `tests/bevy_ktx2_uastc_fallback.rs` fails — that failure IS the
+    // signal that bevy fixed the transcode and the workaround has become dead weight.
+    app.insert_resource(bevy::image::CompressedImageFormatSupport(
+        bevy::image::CompressedImageFormats::ASTC_LDR,
+    ));
 
     app.add_plugins(ServerPlugins {
         tick_duration: Duration::from_secs_f64(1.0 / 64.0),

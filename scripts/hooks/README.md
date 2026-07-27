@@ -20,7 +20,14 @@ travel with the repo instead of living in the un-versioned `.git/hooks`.
 | Hook | Command | Mirrors | Cost |
 |------|---------|---------|------|
 | pre-commit | `cargo fmt --all --check` | CI `fmt` job | no compile |
-| pre-push | fmt + clippy + ordinary tests, excluding the exact 30-receiver stress probe | CI fmt, clippy, and ordinary-test lanes | compiles; warm cache = tens of seconds |
+| pre-push | tank glb mip gate, then fmt + clippy + ordinary tests, excluding the exact 30-receiver stress probe | release workflow's KTX2 gate; CI fmt, clippy, and ordinary-test lanes | ~30 ms + compile; warm cache = tens of seconds |
+
+The **tank glb mip gate** (`scripts/tank/glb_ktx2.py verify`) asserts every texture embedded in
+`assets/tiger_1/tiger_1.glb` is mipped KTX2. A glb exported straight out of Blender carries PNG/JPEG,
+which bevy uploads with one mip level — a shimmering tank that looks like a renderer bug. The bake is
+folded into the scripted export (`.agents/blender/export_tiger.py`), so this only fires on a glb that
+came from somewhere else; `release.yml` runs the same check, which is the gate `--no-verify` cannot
+skip. It reads the committed bytes out of the local git-lfs object cache, not the work tree.
 
 A green pre-push does not certify the separately bounded CI stress lane; CI remains authoritative.
 

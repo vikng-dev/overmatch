@@ -17,6 +17,28 @@ cd "$(git rev-parse --show-toplevel)"
 echo "pre-push ▸ git lfs pre-push"
 git lfs pre-push "$@"
 
+# Tank glb mip gate. Blender's glTF exporter embeds PNG/JPEG, and bevy uploads those with ONE mip
+# level — shimmer on every rivet at combat range, plus a texture-cache miss per fetch. The bake
+# (`scripts/encode-tank-ktx2.sh`) is folded into the scripted export, so the normal path is already
+# correct; this is the backstop for a glb that came from somewhere else, e.g. a hand-export out of
+# the Blender GUI. It must be IMPOSSIBLE to ship a mipless tank silently — a shimmery tank looks
+# like a renderer bug, not like a missing build step, so it would be hunted in the wrong place.
+#
+# Checks the COMMITTED bytes, not the work tree: the tracked glb is a git-lfs pointer, so resolve
+# HEAD's pointer to its object in the local lfs cache. (HEAD, not the pushed ref list — that list
+# arrives on STDIN, which belongs to `git lfs pre-push` above and must not be consumed twice. For
+# an ordinary `git push` of the current branch they are the same commit.) Falls back to the work
+# tree when the object was never fetched; `verify` no-ops on an unfetched pointer.
+# Costs ~30 ms: it reads the JSON chunk and 48 bytes per image, never the 63 MB payload.
+echo "pre-push ▸ tank glb is mip-baked (KTX2)"
+command -v python3 >/dev/null ||
+    { printf '\033[31m  no python3\033[0m — needed by the tank glb gate and by the mip bake\n' >&2; exit 1; }
+glb=assets/tiger_1/tiger_1.glb
+oid=$(git cat-file blob "HEAD:$glb" 2>/dev/null | sed -n 's/^oid sha256://p')
+obj="$(git rev-parse --git-dir)/lfs/objects/$(printf %.2s "$oid")/$(printf %s "$oid" | cut -c3-4)/$oid"
+[ -n "$oid" ] && [ -f "$obj" ] || obj="$glb"
+python3 scripts/tank/glb_ktx2.py verify --allow-pointer "$obj"
+
 echo "pre-push ▸ cargo fmt --all --check"
 cargo fmt --all --check >/dev/null || { printf '\033[31m  unformatted\033[0m — run: cargo fmt --all\n' >&2; exit 1; }
 

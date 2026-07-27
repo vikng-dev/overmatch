@@ -60,6 +60,19 @@ jobs:
             echo "::error::Release identity mismatch: tag=${GITHUB_REF_NAME} Cargo.toml=${cargo_version:-<missing>} Cargo.lock=${lock_version:-<missing>}"
             exit 1
           fi
+      # The tank glb ships inside every client archive. Blender's glTF exporter embeds PNG/JPEG,
+      # which bevy uploads with ONE mip level — a shimmering, cache-thrashing tank that reads as a
+      # renderer bug rather than a missing build step. The KTX2 mip bake is folded into the
+      # scripted export and gated again by `scripts/hooks/pre-push`, but a hook is one
+      # `--no-verify` away; this is the gate that makes shipping it *impossible*. It runs here, in
+      # the first job, so a mipless glb costs seconds instead of three cold Bevy builds. Milliseconds
+      # of work behind one targeted LFS fetch.
+      - name: Verify the tank glb is mip-baked (KTX2)
+        run: |
+          git lfs install --local
+          git lfs pull --include='assets/tiger_1/tiger_1.glb'
+          python3 scripts/tank/glb_ktx2.py verify assets/tiger_1/tiger_1.glb
+
       # A release client must match the server already running on our droplet. Require the tag to
       # name current main, then require a successful, non-skipped deploy job for that exact SHA.
       # This turns the README release order into an enforced invariant rather than operator lore.
