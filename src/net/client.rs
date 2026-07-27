@@ -174,7 +174,12 @@ pub fn run() {
                 })
                 .set(WindowPlugin {
                     primary_window: Some(Window {
-                        present_mode: settings.present_mode(),
+                        // `Unprobed` on purpose: the capability probe needs a surface, which needs
+                        // this window — the mapping self-negotiates until the probe lands.
+                        present_mode: settings.present_mode(crate::settings::PresentCaps::Unprobed),
+                        // Described at creation so a persisted fullscreen boots fullscreen instead
+                        // of flashing a window first.
+                        mode: settings.window_mode.to_window_mode(),
                         ..default()
                     }),
                     ..default()

@@ -3,13 +3,23 @@
 //!
 //! **Not `dev_tools`-gated** — this ships, and it is the ONLY thing that configures the renderer.
 //!
-//! # One writer, on purpose
+//! # Three writers: two player intent, one reality
 //!
 //! | Writer | Writes [`Settings`] | Writes the file |
 //! |---|---|---|
 //! | The settings page (`settings::ui`) | yes | **yes** — every change saves |
+//! | [`observe_window_mode`] (OS fullscreen toggle) | yes — window mode only | **yes** — the green button IS a deliberate choice |
+//! | [`normalize_vsync`] (a CONCLUSIVE capability probe answer) | yes — vsync only | **yes** — see [`Settings::effective_vsync`] |
 //!
-//! That table used to have three rows: a `dev_tools` perf panel carried function-key knobs that
+//! The third row is the odd one: it writes a value the player did NOT choose. It exists because a
+//! `video.ron` is portable between machines while the vsync ladder is not — a rung this surface
+//! cannot present is a stored value that can only ever be a lie, and the file is where the lie
+//! would otherwise persist. See [`Settings::effective_vsync`] for the whole argument. Because it
+//! spends a player's stored choice, it acts ONLY on a probe that positively reported the surface's
+//! capability list — never on a probe that could not ask ([`PresentCaps`] is a tri-state for
+//! exactly this reason).
+//!
+//! That table used to have three MORE rows: a `dev_tools` perf panel carried function-key knobs that
 //! wrote this same resource without persisting, plus a dev-only "shadows fully off" resource the
 //! player-facing ladder could not express. It was DELETED 2026-07-27 (Yan) as superseded — the
 //! settings page reaches everything it reached, `cargo tracy` (`.cargo/config.toml`) is the frame-cost
@@ -25,9 +35,11 @@
 //! Every field is `#[serde(default)]` and serde ignores unknown fields, so **adding a setting needs
 //! no migration in either direction**: an old file missing the new key loads it at its default, and
 //! an old build reading a newer file skips the key it doesn't know. `render_scale` was the first
-//! exercise of that and cost exactly one field; the entries still queued behind the display research
-//! (window mode, UI scale, frame cap) slot in the same way — a `Default`, a `skip_serializing_if`,
-//! and a row in `ui::Row::ORDER`; nothing else moves.
+//! exercise of that; the V2 slice (window mode, frame cap, UI scale) landed exactly that way — a
+//! `Default`, a `skip_serializing_if`, and a row in `ui::Row::ORDER`; nothing else moved. The one
+//! V2 entry that could NOT ride the free path was vsync's third rung — a `bool` field cannot grow
+//! one — and its key rename (`vsync` → `vsync_mode`, with the old key still read) is documented on
+//! [`VsyncMode`].
 //!
 //! **The policy, stated once so it is not re-litigated:**
 //!
@@ -35,8 +47,10 @@
 //! * RENAME a field — add `#[serde(alias = "old_name")]`. That is the ENTIRE rename story (it is
 //!   what rustup does), and it **never bumps [`SETTINGS_VERSION`]**.
 //! * Change a field's TYPE while keeping its on-disk shape — free, via `#[serde(from/into)]`. That
-//!   is how `vsync` became the two-rung [`VsyncMode`] ladder while still reading and writing the
-//!   `bool` v1 shipped.
+//!   is how `vsync` first became a two-rung [`VsyncMode`] ladder while still reading and writing
+//!   the `bool` v1 shipped. When the shape CANNOT hold the new type (the ladder's third rung), the
+//!   move is a new key plus a read-only legacy shadow of the old one — see [`VsyncMode`]'s
+//!   migration note; still no version bump.
 //! * Change a field's MEANING under the same name — the only thing serde cannot express, and the
 //!   only thing that bumps the version.
 //!
@@ -47,9 +61,17 @@
 use bevy::light::{CascadeShadowConfig, CascadeShadowConfigBuilder, DirectionalLightShadowMap};
 use bevy::prelude::*;
 use bevy::render::view::Msaa;
-use bevy::window::{PresentMode, PrimaryWindow};
+use bevy::ui::UiScale;
+use bevy::window::{MonitorSelection, PresentMode, PrimaryWindow, WindowMode};
 use serde::{Deserialize, Serialize};
 
+/// The end-of-frame frame-rate limiter — armed only by [`VsyncMode::Off`] plus a non-off
+/// [`FrameCap`]. Pure std timing; see its doc for the coarse-sleep-then-spin shape.
+mod limiter;
+/// The one-shot present-mode capability probe: creates a throwaway wgpu surface for the primary
+/// window IN THE RENDER WORLD, reads `Surface::get_capabilities().present_modes`, and shuttles the
+/// result into the main-world [`PresentCaps`]. Probe, don't guess — no `cfg(target_os)` anywhere.
+mod probe;
 /// The persistence SEAM — location, filename, format, write safety, tolerance. Swapping any of that
 /// is a rewrite of one file. Its doc records why the hand-roll beats every crate AND bevy's own
 /// first-party `bevy_settings` (settled: brief §1), and why the file is named `video.ron`.
@@ -62,9 +84,18 @@ mod ui;
 /// bump this; only a field whose MEANING changed under the same name does.
 const SETTINGS_VERSION: u32 = 1;
 
-/// The cascade count every shadow setting uses — **constant, and it must stay that way.**
-/// This is bevy's own default (`CascadeShadowConfigBuilder::num_cascades`), so the shipped look at
-/// [`ShadowDistance::M150`] is bit-identical to what the game rendered before this module existed.
+/// The DEFAULT cascade count — [`ShadowCascades::default`]'s value, and bevy's own default
+/// (`CascadeShadowConfigBuilder::num_cascades`), so the shipped look at [`ShadowDistance::M150`] is
+/// bit-identical to what the game rendered before this module existed.
+///
+/// **This used to be a hard constant, and the story below is why.** The count is a live row now
+/// ([`ShadowCascades`]), and changing it at runtime is safe ONLY because
+/// `vendor/bevy_light-0.19.0-cascade-count/` backports upstream PR #24807 (merged, milestone
+/// 0.19.1 — unreleased as of 2026-07-27); see
+/// `.agents/docs/upstream/bevy-cascade-count-stale-local-parallel.md` for the upstream record and
+/// the validation evidence. **The vendored patch must outlive this row**: dropping the
+/// `[patch.crates-io]` entry before bevy 0.19.1 ships reintroduces the crash below on the first
+/// grow step. Everything from MEASURED down is kept as the historical record of the mechanism.
 ///
 /// MEASURED 2026-07-26 (field crash): stepping a shadow knob from a 2-cascade setting back to a
 /// 4-cascade one panicked in `bevy_light-0.19.0/src/lib.rs:477`,
@@ -82,9 +113,10 @@ const SETTINGS_VERSION: u32 = 1;
 /// to debug. It is scheduling-dependent — whether any pooled thread misses a frame — so it is
 /// neither reliably reproducible nor reliably absent.
 ///
-/// The rule this leaves: **`maximum_distance` and the shadow-map SIZE are safe to change at runtime
-/// (no per-cascade array length moves); the cascade COUNT is not.** Cascade count is therefore a
-/// compile-time constant, not a setting and not a row.
+/// The rule this left ON STOCK 0.19.0: **`maximum_distance` and the shadow-map SIZE are safe to
+/// change at runtime (no per-cascade array length moves); the cascade COUNT is not.** The vendored
+/// backport (above) is what retired that rule — it resizes every thread slot before each view's
+/// par_iter, exactly as merged upstream — and is the sole reason [`ShadowCascades`] may exist.
 ///
 /// # The general hazard, and the audit that bounds it
 ///
@@ -116,8 +148,58 @@ const SETTINGS_VERSION: u32 = 1;
 ///   honest-limits section) — so there is no length for a stale `Local` to index with.
 pub(crate) const SHADOW_CASCADES: usize = 4;
 
-/// How far directional shadows are drawn before they stop — the far bound of the last cascade, given
-/// the cascade COUNT is pinned by [`SHADOW_CASCADES`].
+/// How many cascades the directional shadow map is split into — how gracefully shadow crispness
+/// falls off with distance, at a fixed [`ShadowResolution`] and [`ShadowDistance`]. Fewer cascades
+/// cost less (one shadow-map render pass each) and alias more near the camera.
+///
+/// **A live row only by grace of the vendored bevy_light patch** — see [`SHADOW_CASCADES`]'s doc
+/// for the crash that makes stock 0.19.0 unable to grow this at runtime, and for the vendor entry
+/// that must outlive this type.
+///
+/// No `Off` and no `1`: switching shadows off is [`ShadowDistance::Off`]'s job, and a single
+/// cascade stretched to the full distance is a quality floor nobody asked for — 2 is already the
+/// honest budget rung.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub(crate) enum ShadowCascades {
+    Two,
+    Three,
+    /// **The shipped default** — bevy's own `CascadeShadowConfigBuilder::num_cascades`, pinned as
+    /// [`SHADOW_CASCADES`].
+    #[default]
+    Four,
+}
+
+impl ShadowCascades {
+    /// The `CascadeShadowConfigBuilder::num_cascades` this asks for. The default rung IS
+    /// [`SHADOW_CASCADES`] — named here so the const and the ladder cannot drift apart.
+    pub(crate) const fn count(self) -> usize {
+        match self {
+            ShadowCascades::Two => 2,
+            ShadowCascades::Three => 3,
+            ShadowCascades::Four => SHADOW_CASCADES,
+        }
+    }
+
+    /// ASCII only — it reaches `Text`. The bare count, for the same honest-numbers reason
+    /// [`ShadowDistance::label`] quotes metres.
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            ShadowCascades::Two => "2",
+            ShadowCascades::Three => "3",
+            ShadowCascades::Four => "4",
+        }
+    }
+
+    /// Ascending in cost, like every other ladder here.
+    pub(crate) const ORDER: [ShadowCascades; 3] = [
+        ShadowCascades::Two,
+        ShadowCascades::Three,
+        ShadowCascades::Four,
+    ];
+}
+
+/// How far directional shadows are drawn before they stop — the far bound of the last cascade, with
+/// the cascade COUNT its own row ([`ShadowCascades`]).
 ///
 /// **Split from [`ShadowResolution`] on purpose** (Yan, 2026-07-27). Distance and map resolution are
 /// independent costs: distance widens the area each cascade must cover (cheap to raise on a machine
@@ -325,45 +407,49 @@ impl RenderScaleLevel {
     ];
 }
 
-/// Whether frames are locked to the display refresh. A two-rung LADDER rather than a `bool`, so it
-/// is shaped like every other row on the page: it has a [`VsyncMode::ORDER`] the arrows walk with
-/// the shared `step_in`, a [`VsyncMode::label`] the row renders, and a `Default` the sparse-write
-/// test reads — none of which a `bool` can carry, and each of which was a special case in the page
-/// before this type existed.
+/// Whether frames are locked to the display refresh — a THREE-rung ladder since V2 added
+/// [`VsyncMode::Fast`].
 ///
-/// # It is stored on disk as a BOOL, deliberately
+/// # The v1→v2 field migration, recorded once
 ///
-/// The field shipped as `vsync: bool` at [`SETTINGS_VERSION`] 1, and `video.ron` files carrying
-/// `vsync: false` are on players' disks now. A type mismatch is not a tolerated unknown key — RON
-/// fails the whole parse, so the file would be reported CORRUPT and every OTHER setting in it would
-/// reset too. `#[serde(from/into)]` keeps the on-disk shape byte-identical in both directions (an
-/// older build can still read a file this one wrote), which is strictly cheaper than a migration and
-/// is why [`SETTINGS_VERSION`] does not move.
+/// v1 shipped this as `vsync: bool` (later a two-rung enum bridged through
+/// `#[serde(from/into = "bool")]`), and `video.ron` files carrying `vsync: false` are on players'
+/// disks now. A `bool` has exactly two values, so the third rung CANNOT live under that field name —
+/// writing `vsync: Fast` would fail a v1 build's whole parse and reset every other setting with it.
+/// Per the module doc's policy this is therefore a NEW field, `vsync_mode` (see
+/// [`Settings::vsync`]), and [`SETTINGS_VERSION`] does not move:
 ///
-/// **The consequence, stated so it is not discovered later:** a THIRD rung cannot be added under
-/// this field name — `bool` has exactly two values. That is the module doc's "change a field's
-/// MEANING under the same name" case, so it would take a new field (free) or a version bump.
+/// * **reading old files**: the retired `vsync: bool` key is still read through
+///   [`Settings::legacy_vsync`] and absorbed by [`Settings::absorb_legacy_vsync`] — a player's
+///   saved `vsync: false` still lands on [`VsyncMode::Off`];
+/// * **old build reading a new file**: `vsync_mode` is an unknown key to a v1 build, so it is
+///   skipped and vsync comes up at its default (ON). That dropped-key downgrade is the documented
+///   cost of the rename, accepted because ON is the safe rung everywhere.
+///
+/// # Which rungs a machine actually gets
+///
+/// The ladder is capability-gated by [`PresentCaps`], the probe result — see `probe`. OFF needs
+/// `Immediate` (macOS Metal has it; Wayland refuses it), FAST needs `Mailbox` (Wayland has it;
+/// Metal does not). ON is `Fifo`, which every surface supports. The page offers only the rungs the
+/// surface reports; [`Settings::present_mode`] maps the probed-only modes to
+/// [`PresentMode::AutoNoVsync`] whenever the probe has not confirmed them, so even a config file
+/// carried over from another machine can never ask the backend for a mode it lacks.
+///
+/// A carried-over file can still NAME a rung this surface lacks, though, and that is a different
+/// problem: see [`Settings::effective_vsync`] (what such a rung resolves to, for every consumer)
+/// and [`normalize_vsync`] (which writes the resolution back once the probe lands).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
-#[serde(from = "bool", into = "bool")]
 pub(crate) enum VsyncMode {
-    /// [`PresentMode::AutoNoVsync`] — can tear, lower input lag.
+    /// Uncapped, may tear, lowest latency — [`PresentMode::Immediate`] where the surface supports
+    /// it. The ONE rung that arms the frame-cap row.
     Off,
-    /// **The shipped default** — [`PresentMode::Fifo`]. See [`Settings::present_mode`] for why those
-    /// two modes exactly.
+    /// Uncapped without tearing — [`PresentMode::Mailbox`] where the surface supports it (NVIDIA
+    /// calls this shape "Fast Sync").
+    Fast,
+    /// **The shipped default** — [`PresentMode::Fifo`], universally supported and traditionally
+    /// exactly what "VSync On" means.
     #[default]
     On,
-}
-
-impl From<bool> for VsyncMode {
-    fn from(on: bool) -> Self {
-        if on { VsyncMode::On } else { VsyncMode::Off }
-    }
-}
-
-impl From<VsyncMode> for bool {
-    fn from(mode: VsyncMode) -> Self {
-        matches!(mode, VsyncMode::On)
-    }
 }
 
 impl VsyncMode {
@@ -371,13 +457,325 @@ impl VsyncMode {
     pub(crate) const fn label(self) -> &'static str {
         match self {
             VsyncMode::Off => "OFF",
+            VsyncMode::Fast => "FAST",
             VsyncMode::On => "ON",
         }
     }
 
-    /// Ascending in cost, like every other ladder here — the right arrow moves toward more work per
-    /// frame.
-    pub(crate) const ORDER: [VsyncMode; 2] = [VsyncMode::Off, VsyncMode::On];
+    /// Ascending in cost, like every other ladder here — the right arrow moves toward more waiting
+    /// per frame.
+    pub(crate) const ORDER: [VsyncMode; 3] = [VsyncMode::Off, VsyncMode::Fast, VsyncMode::On];
+}
+
+/// What the window surface actually supports — the probe's answer (see `probe`), as a TRI-STATE.
+///
+/// **"We could not learn" is not "the surface lacks it", and the difference is a player's saved
+/// setting.** This was a two-field struct with a `probed: bool`, and the probe reported a FAILED
+/// surface creation as `probed: true` with an empty capability list — an inability to ask, dressed
+/// up as a conclusive negative answer. Read-only consumers survived that (an empty list gates the
+/// ladder down to the universally-supported ON, which is safe), but [`normalize_vsync`] is a
+/// WRITER: it would have taken the fabricated negative as authority, rewritten a perfectly valid
+/// stored FAST/OFF to ON, and SAVED it — a transient probe failure permanently eating the player's
+/// choice. So the two states are now distinct variants, and only [`PresentCaps::Reported`] is ever
+/// treated as evidence of a rung's absence.
+///
+/// **There are TWO ways to fail to learn, and wgpu makes the second one silent.** Creating the
+/// probe surface can error, and `Surface::get_capabilities` cannot error at all — wgpu 29 answers a
+/// failed query (and an adapter-incompatible surface) with an empty present-mode list. Since any
+/// presentable surface reports at least `Fifo`, `probe` maps BOTH to
+/// [`PresentCaps::Unavailable`], and a `Reported` value can only ever come from a list that
+/// actually had something in it.
+///
+/// Both unknown states behave identically at runtime, and identically to the pre-probe boot state
+/// this type has always had: the page offers every rung, [`Settings::effective_vsync`] is the
+/// identity (nothing is normalised on a guess), and [`Settings::present_mode`] answers with the
+/// self-negotiating [`PresentMode::AutoNoVsync`] for the uncapped rungs — bevy filters that against
+/// the real capabilities at surface-configure time, so an unprobed frame can never panic a backend.
+/// A concrete `Mailbox`/`Immediate` is still emitted ONLY from a positive [`PresentCaps::Reported`],
+/// which is the Metal-panic guard and is unchanged by any of this.
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(crate) enum PresentCaps {
+    /// The boot state: the probe has not answered yet. The two windowed roots describe their window
+    /// with this deliberately — it is what "we have no surface to ask about yet" looks like.
+    #[default]
+    Unprobed,
+    /// The probe ran and could NOT learn — it could not create a probe surface, or the capability
+    /// query came back empty (wgpu reports a failed query, and an adapter-incompatible surface, as
+    /// an empty present-mode list rather than an error; see `probe`). Terminal — the probe does not
+    /// retry — and deliberately NOT a statement about what the surface supports.
+    Unavailable,
+    /// The surface's own capability list, distilled to the two rungs the ladder gates on. The only
+    /// variant that is evidence a rung is missing, and it is only ever built from a NON-EMPTY list.
+    ///
+    /// Both flags `false` therefore means something specific and real: the surface answered with a
+    /// list that carries neither uncapped mode — `[Fifo]`, or `[Fifo, FifoRelaxed]`. That is the
+    /// genuine conclusive negative (it gates the ladder to ON alone and DOES normalise a stored
+    /// FAST/OFF), and it is exactly what an empty list is NOT.
+    Reported { immediate: bool, mailbox: bool },
+}
+
+impl PresentCaps {
+    /// Whether the probe has answered at all, either way. The `receive_probe` run condition — an
+    /// [`PresentCaps::Unavailable`] answer must stop the polling exactly as a reported one does.
+    pub(crate) const fn answered(self) -> bool {
+        !matches!(self, PresentCaps::Unprobed)
+    }
+
+    /// `PresentMode::Immediate` was POSITIVELY reported in the surface's capability list. Both
+    /// unknown states answer `false` — this is the question `present_mode` must ask before emitting
+    /// a concrete mode, and "we don't know" is not a yes.
+    pub(crate) const fn immediate(self) -> bool {
+        matches!(
+            self,
+            PresentCaps::Reported {
+                immediate: true,
+                ..
+            }
+        )
+    }
+
+    /// `PresentMode::Mailbox` was POSITIVELY reported. See [`PresentCaps::immediate`].
+    pub(crate) const fn mailbox(self) -> bool {
+        matches!(self, PresentCaps::Reported { mailbox: true, .. })
+    }
+
+    /// Whether the settings page should OFFER this rung. Both unknown states offer everything
+    /// (there is nothing to gate on, and the mapping below stays safe regardless); a reported list
+    /// offers only what it contains. FAST deliberately requires `Mailbox` specifically — falling
+    /// back to `Immediate` would make FAST and OFF the same rung twice on a Metal surface.
+    pub(crate) const fn offers(self, mode: VsyncMode) -> bool {
+        match self {
+            PresentCaps::Unprobed | PresentCaps::Unavailable => true,
+            PresentCaps::Reported { immediate, mailbox } => match mode {
+                VsyncMode::On => true,
+                VsyncMode::Fast => mailbox,
+                VsyncMode::Off => immediate,
+            },
+        }
+    }
+
+    /// The rung a stored `mode` actually RESOLVES to here: itself while it is offered, otherwise
+    /// [`VsyncMode::On`] — the universal `Fifo` rung, and the one every fallback chain in this
+    /// module already terminates at. Both unknown states resolve to `mode` unchanged, because
+    /// [`offers`] offers everything until there is something real to gate on — which is also what
+    /// makes [`normalize_vsync`] a no-op unless the surface conclusively answered.
+    ///
+    /// **Why ON rather than the adjacent rung.** A Wayland surface refuses `Immediate` but has
+    /// `Mailbox`, so a stored OFF *could* be walked to FAST instead — still uncapped, still the
+    /// player's "don't wait for the display". It deliberately is not: FAST is a different product
+    /// promise (no tearing, no frame cap) and picking it for the player is a guess about which half
+    /// of OFF they wanted. ON is the rung the surface can honour without inventing intent, and it is
+    /// the same one an unsupported rung's present mode already negotiates down to.
+    ///
+    /// [`offers`]: PresentCaps::offers
+    pub(crate) const fn resolve(self, mode: VsyncMode) -> VsyncMode {
+        if self.offers(mode) {
+            mode
+        } else {
+            VsyncMode::On
+        }
+    }
+}
+
+/// Windowed vs fullscreen. Two rungs on purpose: the fullscreen offered is winit's BORDERLESS
+/// fullscreen (`WindowMode::BorderlessFullscreen`), which on macOS is native Spaces fullscreen via
+/// `NSWindow toggleFullScreen` — the same thing the green traffic-light button does. Exclusive
+/// (`WindowMode::Fullscreen`) is deliberately unrepresentable here: bevy PANICS on an exclusive
+/// mode whose monitor cannot be resolved (the `--reset-display` escape hatch's origin story), and
+/// borderless is what every modern display stack actually wants.
+///
+/// The monitor selection is always [`MonitorSelection::Current`], which cannot panic for
+/// borderless: `bevy_winit::select_monitor` merely warns and passes `None` (= current) through.
+///
+/// **The row REFLECTS the OS, it does not own it** — see `observe_window_mode`: the player can
+/// toggle fullscreen with the green button, and the stored value follows reality rather than
+/// fighting it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub(crate) enum WindowModeSetting {
+    /// **The shipped default** — the window the game has always opened with.
+    #[default]
+    Windowed,
+    Fullscreen,
+}
+
+impl WindowModeSetting {
+    /// The `Window::mode` this asks for — the ONE mapping, used at boot window description and by
+    /// `apply_settings` alike.
+    pub(crate) const fn to_window_mode(self) -> WindowMode {
+        match self {
+            WindowModeSetting::Windowed => WindowMode::Windowed,
+            WindowModeSetting::Fullscreen => {
+                WindowMode::BorderlessFullscreen(MonitorSelection::Current)
+            }
+        }
+    }
+
+    /// The setting that DESCRIBES an observed OS state — the reflect-don't-fight direction.
+    pub(crate) const fn from_fullscreen(fullscreen: bool) -> Self {
+        if fullscreen {
+            WindowModeSetting::Fullscreen
+        } else {
+            WindowModeSetting::Windowed
+        }
+    }
+
+    /// ASCII only — it reaches `Text`.
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            WindowModeSetting::Windowed => "WINDOWED",
+            WindowModeSetting::Fullscreen => "FULLSCREEN",
+        }
+    }
+
+    pub(crate) const ORDER: [WindowModeSetting; 2] =
+        [WindowModeSetting::Windowed, WindowModeSetting::Fullscreen];
+}
+
+/// The frame-rate cap: `0` = off, anything else a target FPS honoured by `limiter`. Only ACTIVE
+/// while the EFFECTIVE rung is [`VsyncMode::Off`] (see [`Settings::effective_vsync`]) — with any
+/// present-mode wait in play the display is already the cap,
+/// and two competing limiters make a stutter machine (see [`Settings::frame_limit_period`], the one
+/// place that conjunction is decided).
+///
+/// Stored on disk as the bare `u16` (`#[serde(transparent)]`), so `frame_cap: 144` is what a player
+/// finds in `video.ron`. A hand-edited value is honoured as written while merely OUT of the UI
+/// ladder (144 renders and caps as 144); only [`FrameCap::fps`]'s clamp bounds truly absurd values.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(transparent)]
+pub(crate) struct FrameCap(pub(crate) u16);
+
+impl FrameCap {
+    pub(crate) const OFF: FrameCap = FrameCap(0);
+    /// The UI ladder: OFF, then MIN..=MAX in STEP increments.
+    pub(crate) const MIN_FPS: u16 = 30;
+    pub(crate) const MAX_FPS: u16 = 240;
+    const STEP_FPS: u16 = 10;
+    /// Number of discrete stops on the slider: OFF plus every STEP from MIN to MAX inclusive.
+    const STOPS: u16 = 2 + (Self::MAX_FPS - Self::MIN_FPS) / Self::STEP_FPS;
+
+    /// The cap in frames per second, or `None` for off. The clamp is the guard against a
+    /// hand-edited `frame_cap: 5` starving the game (or `60000` meaning "spin forever").
+    pub(crate) fn fps(self) -> Option<u16> {
+        (self.0 != 0).then(|| self.0.clamp(Self::MIN_FPS, Self::MAX_FPS))
+    }
+
+    /// The frame period this cap asks for, or `None` for off.
+    pub(crate) fn period(self) -> Option<std::time::Duration> {
+        self.fps()
+            .map(|fps| std::time::Duration::from_secs_f64(1.0 / f64::from(fps)))
+    }
+
+    /// ASCII only — it reaches `Text`.
+    pub(crate) fn label(self) -> String {
+        match self.fps() {
+            None => "OFF".to_string(),
+            Some(fps) => format!("{fps} FPS"),
+        }
+    }
+
+    /// The nearest slider stop for the current value (`0` = OFF). A hand-edited off-ladder value
+    /// (144) resolves to its nearest stop (140) the moment the player TOUCHES the control, and not
+    /// before.
+    fn stop(self) -> u16 {
+        match self.fps() {
+            None => 0,
+            Some(fps) => 1 + (fps - Self::MIN_FPS + Self::STEP_FPS / 2) / Self::STEP_FPS,
+        }
+    }
+
+    fn from_stop(stop: u16) -> Self {
+        if stop == 0 {
+            Self::OFF
+        } else {
+            Self(Self::MIN_FPS + (stop.min(Self::STOPS - 1) - 1) * Self::STEP_FPS)
+        }
+    }
+
+    /// One keyboard step along the ladder, saturating at both ends like every other row.
+    pub(crate) fn step(self, delta: i32) -> Self {
+        let stop = (i32::from(self.stop()) + delta).clamp(0, i32::from(Self::STOPS) - 1);
+        Self::from_stop(stop as u16)
+    }
+
+    /// Where the slider handle sits, `0.0..=1.0` (OFF is the far left).
+    pub(crate) fn fraction(self) -> f32 {
+        f32::from(self.stop()) / f32::from(Self::STOPS - 1)
+    }
+
+    /// The value a drag to `fraction` lands on — the inverse of [`FrameCap::fraction`], snapped to
+    /// the ladder.
+    pub(crate) fn from_fraction(fraction: f32) -> Self {
+        let stops = f32::from(Self::STOPS - 1);
+        Self::from_stop((fraction.clamp(0.0, 1.0) * stops).round() as u16)
+    }
+}
+
+/// UI scale, in percent — a multiplier on bevy's [`UiScale`] resource, so every `Val::Px` in the
+/// HUD and menus scales while the 3D world (and [`RenderScaleLevel`]) is untouched.
+///
+/// Stored on disk as the bare `u16` (`#[serde(transparent)]`): `ui_scale: 125`. Values outside the
+/// ladder are clamped by [`UiScalePercent::factor`] — a hand-edited `ui_scale: 500` must not make
+/// the settings page itself unreachable, which is also why the range is deliberately modest.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(transparent)]
+pub(crate) struct UiScalePercent(pub(crate) u16);
+
+impl Default for UiScalePercent {
+    fn default() -> Self {
+        Self(100)
+    }
+}
+
+impl UiScalePercent {
+    pub(crate) const MIN: u16 = 75;
+    pub(crate) const MAX: u16 = 150;
+    const STEP: u16 = 5;
+    const STOPS: u16 = 1 + (Self::MAX - Self::MIN) / Self::STEP;
+
+    /// The multiplier written to [`UiScale`]. Clamped — see the type doc.
+    pub(crate) fn factor(self) -> f32 {
+        f32::from(self.0.clamp(Self::MIN, Self::MAX)) / 100.0
+    }
+
+    /// ASCII only — it reaches `Text`.
+    pub(crate) fn label(self) -> String {
+        format!("{}%", self.0.clamp(Self::MIN, Self::MAX))
+    }
+
+    fn stop(self) -> u16 {
+        (self.0.clamp(Self::MIN, Self::MAX) - Self::MIN + Self::STEP / 2) / Self::STEP
+    }
+
+    fn from_stop(stop: u16) -> Self {
+        Self(Self::MIN + stop.min(Self::STOPS - 1) * Self::STEP)
+    }
+
+    /// One keyboard step along the ladder, saturating at both ends.
+    pub(crate) fn step(self, delta: i32) -> Self {
+        let stop = (i32::from(self.stop()) + delta).clamp(0, i32::from(Self::STOPS) - 1);
+        Self::from_stop(stop as u16)
+    }
+
+    /// Where the slider handle sits, `0.0..=1.0`.
+    pub(crate) fn fraction(self) -> f32 {
+        f32::from(self.stop()) / f32::from(Self::STOPS - 1)
+    }
+
+    /// The value a drag to `fraction` lands on, snapped to the ladder.
+    pub(crate) fn from_fraction(fraction: f32) -> Self {
+        let stops = f32::from(Self::STOPS - 1);
+        Self::from_stop((fraction.clamp(0.0, 1.0) * stops).round() as u16)
+    }
+}
+
+/// Read the retired v1 `vsync: bool` key: a bare bool in the file, `Some(bool)` in the shadow
+/// field. See [`Settings::legacy_vsync`] for why this exists (RON refuses a bare value into an
+/// `Option`).
+fn deserialize_legacy_vsync<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    bool::deserialize(deserializer).map(Some)
 }
 
 /// Whether a field still holds its default — the test behind every `skip_serializing_if` below.
@@ -416,15 +814,44 @@ pub(crate) struct Settings {
     pub(crate) shadow_distance: ShadowDistance,
     #[serde(skip_serializing_if = "is_default")]
     pub(crate) shadow_resolution: ShadowResolution,
+    /// The cascade count — live-changeable only because of the vendored bevy_light backport; see
+    /// [`ShadowCascades`] and [`SHADOW_CASCADES`].
+    #[serde(skip_serializing_if = "is_default")]
+    pub(crate) shadow_cascades: ShadowCascades,
     #[serde(skip_serializing_if = "is_default")]
     pub(crate) msaa: MsaaLevel,
-    /// Stored on disk as the `bool` it shipped as — see [`VsyncMode`].
-    #[serde(skip_serializing_if = "is_default")]
+    /// Persisted as `vsync_mode` — a NEW key, because the retired `vsync` key was a `bool` and the
+    /// ladder grew a third rung. See [`VsyncMode`]'s migration note.
+    #[serde(rename = "vsync_mode", skip_serializing_if = "is_default")]
     pub(crate) vsync: VsyncMode,
+    /// The retired v1 `vsync: bool` key — READ for back-compat, NEVER written. Folded into
+    /// [`Settings::vsync`] by [`Settings::absorb_legacy_vsync`] (which `store::parse` calls), after
+    /// which this is always `None`. Not a live setting: nothing outside the parse path may read it.
+    ///
+    /// The `deserialize_with` is load-bearing: the file carries a BARE bool (`vsync: false`), and
+    /// RON will not read a bare value into an `Option` (it demands `Some(false)`) — the shim reads
+    /// the bool and wraps it, while an absent key still takes the `default` `None`.
+    #[serde(
+        rename = "vsync",
+        default,
+        skip_serializing,
+        deserialize_with = "deserialize_legacy_vsync"
+    )]
+    pub(crate) legacy_vsync: Option<bool>,
     /// The fraction of the window the 3D pass renders at — applied by writing
     /// [`crate::render_scale::RenderScale`], which the render app extracts.
     #[serde(skip_serializing_if = "is_default")]
     pub(crate) render_scale: RenderScaleLevel,
+    /// Windowed / borderless fullscreen — see [`WindowModeSetting`], including the reflect-don't-
+    /// fight rule for OS-side toggles.
+    #[serde(skip_serializing_if = "is_default")]
+    pub(crate) window_mode: WindowModeSetting,
+    /// The frame-rate cap, active only under [`VsyncMode::Off`] — see [`FrameCap`].
+    #[serde(skip_serializing_if = "is_default")]
+    pub(crate) frame_cap: FrameCap,
+    /// UI scale percent — a multiplier on [`UiScale`]; see [`UiScalePercent`].
+    #[serde(skip_serializing_if = "is_default")]
+    pub(crate) ui_scale: UiScalePercent,
 }
 
 impl Default for Settings {
@@ -433,32 +860,116 @@ impl Default for Settings {
             version: SETTINGS_VERSION,
             shadow_distance: ShadowDistance::default(),
             shadow_resolution: ShadowResolution::default(),
+            shadow_cascades: ShadowCascades::default(),
             msaa: MsaaLevel::default(),
             vsync: VsyncMode::default(),
+            legacy_vsync: None,
             render_scale: RenderScaleLevel::default(),
+            window_mode: WindowModeSetting::default(),
+            frame_cap: FrameCap::default(),
+            ui_scale: UiScalePercent::default(),
         }
     }
 }
 
 impl Settings {
-    /// The present mode this configuration asks for. Split out so the window can be BUILT with it
-    /// (before the surface is ever configured) and so [`apply_settings`] reuses the one mapping.
+    /// The vsync rung this configuration is EFFECTIVELY running at on a surface with `caps` — the
+    /// one fact the present mode, the frame-cap gate and the page's greying all read, so that a
+    /// stored rung the surface cannot present is impossible to disagree about.
     ///
-    /// **Exactly two modes are reachable, and that is a safety property, not a simplification.**
-    /// On Metal, wgpu-hal's `Mailbox` and `FifoRelaxed` reach an `unreachable!()` — they **PANIC**,
-    /// with no fallback (wgpu-hal metal `adapter.rs`, `surface.rs`). `AutoVsync` is also avoided
-    /// even though it looks safe: bevy documents it as *FifoRelaxed → Fifo*, i.e. it names a
-    /// panicking mode as its first choice and only avoids it by capability negotiation. `Fifo` is
-    /// unconditional, universally supported, and traditionally exactly what "VSync On" means.
+    /// **The bug this exists to make unrepresentable.** A `video.ron` written on a Windows/Vulkan
+    /// machine can carry `vsync_mode: Fast`; copied to a Mac, `Mailbox` does not exist, the present
+    /// mode negotiates down (to `Immediate` in practice), and the page went on displaying FAST over
+    /// a surface that was tearing exactly like OFF. The mirror case is a stored OFF on Wayland,
+    /// where `Immediate` is refused: the surface ends up compositor-paced while the frame-cap row
+    /// stayed lit and armed, so the player had two limiters fighting over a rung they were not
+    /// actually on. Both are the same fault — three consumers each deciding for themselves what an
+    /// unsupported stored value means.
     ///
-    /// Keeping this a two-rung [`VsyncMode`] rather than a `PresentMode` field is what makes the
-    /// dangerous modes **unrepresentable** — neither a config file nor a UI row can ask for one, and
-    /// the exhaustive match below is where that property is now legible.
-    pub(crate) const fn present_mode(self) -> PresentMode {
-        match self.vsync {
+    /// **Only a REPORTED capability list resolves anything.** Both unknown states ([`PresentCaps`]'s
+    /// pre-probe and could-not-ask variants) are the identity here, deliberately: with nothing
+    /// learned, the player's stored rung is the best available statement of what they are on, so the
+    /// page keeps showing it and the frame-cap row keeps following it. `present_mode` is where
+    /// safety is enforced in that state, and it needs no help from this — it emits a concrete
+    /// uncapped mode only from a positive report and negotiates otherwise.
+    ///
+    /// [`normalize_vsync`] additionally writes this value back into [`Settings::vsync`] (and to
+    /// disk) once the probe lands, so the stored rung converges on the honest one instead of
+    /// sitting there as phantom state. The COST of that, stated so it is a known trade rather than
+    /// a surprise: a config roamed between a Metal laptop and a Vulkan desktop forgets FAST on the
+    /// laptop's first launch. Accepted, because the alternative is a file whose values only mean
+    /// something once you know which machine last read them.
+    pub(crate) const fn effective_vsync(self, caps: PresentCaps) -> VsyncMode {
+        caps.resolve(self.vsync)
+    }
+
+    /// The present mode this configuration asks for, GIVEN what the surface is known to support.
+    /// Split out so the window can be BUILT with it (before the surface is ever configured, with
+    /// [`PresentCaps::Unprobed`]) and so [`apply_settings`] reuses the one mapping.
+    ///
+    /// **The safety property, restated for the three-rung ladder.** On Metal, wgpu-hal's `Mailbox`
+    /// and `FifoRelaxed` reach an `unreachable!()` at surface-configure time — they PANIC if a
+    /// surface is actually configured with them (wgpu-hal metal `adapter.rs`, `surface.rs`). This
+    /// mapping therefore emits `Mailbox`/`Immediate` ONLY when the probe has positively reported
+    /// them in the surface's own capability list; in every other state the uncapped rungs answer
+    /// [`PresentMode::AutoNoVsync`], whose fallback chain bevy filters against the real
+    /// capabilities and terminates at the universal `Fifo`. `AutoVsync` stays unreachable — its
+    /// first fallback choice is the panicking `FifoRelaxed`, and `Fifo` says what "on" means
+    /// without negotiation.
+    pub(crate) const fn present_mode(self, caps: PresentCaps) -> PresentMode {
+        match self.effective_vsync(caps) {
             VsyncMode::On => PresentMode::Fifo,
-            VsyncMode::Off => PresentMode::AutoNoVsync,
+            VsyncMode::Fast => {
+                if caps.mailbox() {
+                    PresentMode::Mailbox
+                } else {
+                    PresentMode::AutoNoVsync
+                }
+            }
+            VsyncMode::Off => {
+                if caps.immediate() {
+                    PresentMode::Immediate
+                } else {
+                    PresentMode::AutoNoVsync
+                }
+            }
         }
+    }
+
+    /// The frame period `limiter` must enforce, or `None` for "do not limit". This is the ONE place
+    /// the "cap only under VSync OFF" conjunction is decided — the page greys the row from the same
+    /// fact ([`ui`] calls the row disabled exactly when this side of it is `None`-by-vsync), so the
+    /// picture and the limiter cannot disagree.
+    ///
+    /// It gates on the EFFECTIVE rung ([`Settings::effective_vsync`]), not the stored one, which is
+    /// what makes that agreement structural rather than a consequence of [`normalize_vsync`] having
+    /// already run: in the frames between a probe landing and the normalisation write, an
+    /// unsupported stored OFF still arms nothing.
+    pub(crate) fn frame_limit_period(self, caps: PresentCaps) -> Option<std::time::Duration> {
+        match self.effective_vsync(caps) {
+            VsyncMode::Off => self.frame_cap.period(),
+            VsyncMode::Fast | VsyncMode::On => None,
+        }
+    }
+
+    /// Fold the retired v1 `vsync: bool` key into the live [`VsyncMode`] — called by `store::parse`
+    /// right after deserialization, so the legacy key never escapes the persistence seam.
+    ///
+    /// The rule: the legacy key is honoured only while the NEW key holds its default. v1 files can
+    /// only ever carry `vsync: false` (the sparse writer skipped the default `true`), and a file
+    /// with both keys was hand-edited — an explicit non-default `vsync_mode` is the newer, more
+    /// specific statement, so it wins.
+    pub(crate) fn absorb_legacy_vsync(mut self) -> Self {
+        if let Some(legacy) = self.legacy_vsync.take()
+            && self.vsync == VsyncMode::default()
+        {
+            self.vsync = if legacy {
+                VsyncMode::On
+            } else {
+                VsyncMode::Off
+            };
+        }
+        self
     }
 }
 
@@ -483,12 +994,13 @@ pub(crate) struct StoreReport(store::LoadNote);
 /// defaults.
 ///
 /// It exists because a display setting can make the game unlaunchable on the machine that saved it —
-/// bevy panics on a `Fullscreen` whose monitor cannot be resolved, so a config written with a second
-/// display attached can brick boot once it is unplugged. A player in that state cannot reach the
-/// settings page to undo it, so the escape must live outside the app's own UI. (Nothing in
-/// [`Settings`] can cause that TODAY; the flag lands with the foundation because the window-mode row
-/// that can is the next slice, and an escape hatch added after the trap is an escape hatch that
-/// arrives too late.)
+/// bevy panics on an EXCLUSIVE `Fullscreen` whose monitor cannot be resolved, so a config written
+/// with a second display attached could brick boot once it is unplugged. A player in that state
+/// cannot reach the settings page to undo it, so the escape must live outside the app's own UI.
+/// (The window-mode row that landed deliberately keeps that state unrepresentable —
+/// [`WindowModeSetting`] is borderless-on-current-monitor only, which winit merely warns about —
+/// so nothing in [`Settings`] can cause it today either; the hatch stays because config files are
+/// hand-editable and future rows may not be so careful.)
 const RESET_FLAG: &str = "--reset-display";
 
 /// Read the player's settings INTO the app being built, and hand the values back.
@@ -548,7 +1060,7 @@ pub(crate) enum PageEntry {
 /// a render app — its render-half early-returns — but no path in this tree does that.)
 pub(crate) fn plugin(entry: PageEntry) -> impl Plugin {
     move |app: &mut App| {
-        app.add_plugins((crate::render_scale::plugin, ui::plugin))
+        app.add_plugins((crate::render_scale::plugin, probe::plugin, ui::plugin))
             .init_resource::<Settings>()
             .add_message::<SaveSettings>()
             // `Startup` applies the loaded file to a world that has just spawned its camera and sun;
@@ -561,12 +1073,29 @@ pub(crate) fn plugin(entry: PageEntry) -> impl Plugin {
             .add_systems(
                 Update,
                 (
+                    // BEFORE the page (and therefore before this frame's edits): the observed OS
+                    // state is this frame's baseline, which player input then overrides.
+                    observe_window_mode.before(ui::DeclareSettingsPage),
+                    // Same shape, same reason, for the capability side: the probe's answer is the
+                    // baseline the page renders and the player then edits. Runs only on a caps
+                    // change, which after boot means exactly once — when the probe lands.
+                    normalize_vsync
+                        .before(ApplySettings)
+                        .before(ui::DeclareSettingsPage)
+                        .run_if(resource_changed::<PresentCaps>),
                     apply_settings
                         .in_set(ApplySettings)
-                        .run_if(resource_changed::<Settings>),
+                        // Also on a capability-probe arrival: FAST/OFF may upgrade from the
+                        // negotiated `AutoNoVsync` to the probed `Mailbox`/`Immediate`.
+                        .run_if(
+                            resource_changed::<Settings>.or_else(resource_changed::<PresentCaps>),
+                        ),
                     save_on_request.after(ApplySettings),
                 ),
-            );
+            )
+            // The frame-rate limiter runs LAST in the frame, after everything that could still do
+            // work — see `limiter` for the coarse-sleep-then-spin shape and its measurement.
+            .add_systems(Last, limiter::limit_frame_rate);
         // Both declarers land in `DeclareSettingsPage`, which the page's input/refresh chain runs
         // `.after` — see that set's doc for the dropped-keypress bug the ordering exists to stop.
         match entry {
@@ -603,15 +1132,22 @@ fn apply_settings(
     // NOT optional: `plugin` mounts `render_scale::plugin` itself, so every path that can run this
     // system has the resource. That is the property the fold bought.
     mut render_scale: ResMut<crate::render_scale::RenderScale>,
+    // What the surface reported (or an unknown state, before/instead of that) — the gate on the
+    // uncapped modes.
+    caps: Res<PresentCaps>,
+    // bevy_ui's global multiplier. Present on every windowed root (it comes with `UiPlugin`); a
+    // bare-`App` test must init it, same as the shadow map above.
+    mut ui_scale: ResMut<UiScale>,
 ) {
     let msaa = settings.msaa.to_msaa();
     for mut camera_msaa in &mut cameras {
         camera_msaa.set_if_neq(msaa);
     }
 
-    // The two shadow rows are reconciled independently, because they are independent settings: the
-    // resolution applies whatever the distance says, and the distance's `Off` touches only the cast
-    // switch.
+    // The three shadow rows are reconciled independently, because they are independent settings:
+    // the resolution applies whatever the distance says, and the distance's `Off` touches only the
+    // cast switch. (The cascade-count row rides the same rebuild as the distance, below — the two
+    // share the one `CascadeShadowConfig`.)
     let size = settings.shadow_resolution.shadow_map_size();
     // Compare before writing: `DirectionalLightShadowMap` is extracted to the render world every
     // frame, and touching it through `ResMut` unconditionally would mark it changed forever. (Hand
@@ -623,13 +1159,17 @@ fn apply_settings(
     for (mut light, mut config) in &mut lights {
         // `Off` deliberately leaves the cascade config at its LAST value rather than rebuilding it
         // to something degenerate: nothing samples it while casting is disabled, and re-enabling
-        // must not depend on a zero-metre envelope having been repaired first. It also keeps the
-        // cascade array length — the one thing that must never move mid-run (see `SHADOW_CASCADES`)
-        // — untouched across the off/on edge.
+        // must not depend on a zero-metre envelope having been repaired first. A cascade-count
+        // change made while off therefore stays PENDING and lands on this same rebuild the moment a
+        // distance exists again — the row is inert while off, not lost.
         if let Some(maximum_distance) = distance.distance_m() {
-            // The cascade COUNT never varies — see `SHADOW_CASCADES`.
+            // The cascade COUNT may vary at runtime ONLY because the vendored bevy_light backport
+            // resizes the stale per-thread queues — see `SHADOW_CASCADES` for the crash this line
+            // used to be constant to avoid. Everything else the builder sets stays at the same
+            // `..default()` the world has always used, so the default row values reproduce the
+            // shipped picture bit-for-bit.
             let rebuilt = CascadeShadowConfigBuilder {
-                num_cascades: SHADOW_CASCADES,
+                num_cascades: settings.shadow_cascades.count(),
                 maximum_distance,
                 ..default()
             }
@@ -645,7 +1185,22 @@ fn apply_settings(
     }
 
     if let Some(window) = window {
-        window.into_inner().present_mode = settings.present_mode();
+        let mut window = window.into_inner();
+        window.present_mode = settings.present_mode(*caps);
+        // Guarded: `Window::mode` is also written by `observe_window_mode` (the reflect direction),
+        // and both writers keep it inside the two values `WindowModeSetting::to_window_mode` can
+        // produce — so equality here means "already agreed" and an unconditional write would only
+        // churn change ticks.
+        let mode = settings.window_mode.to_window_mode();
+        if window.mode != mode {
+            window.mode = mode;
+        }
+    }
+
+    // Guarded by hand — bevy's `UiScale` derives no `PartialEq`.
+    let factor = settings.ui_scale.factor();
+    if ui_scale.0 != factor {
+        ui_scale.0 = factor;
     }
 
     // `set_if_neq` rather than a plain write: this resource is extracted to the render world every
@@ -654,6 +1209,104 @@ fn apply_settings(
     render_scale.set_if_neq(crate::render_scale::RenderScale(
         settings.render_scale.fraction(),
     ));
+}
+
+/// Bring a stored vsync rung this surface cannot present down to the one it resolves to — the
+/// "observe reality" half of the vsync row, and the third writer in the module doc's table.
+///
+/// Runs only when [`PresentCaps`] changes, which on a real root is exactly twice: the frame the
+/// resource is inserted (still [`PresentCaps::Unprobed`]) and the frame the probe answers. A player
+/// editing the row afterwards can only reach offered rungs (`ui::Row::step` walks inside them), so
+/// there is nothing left to correct.
+///
+/// **Only a [`PresentCaps::Reported`] answer can move anything, and that is by construction rather
+/// than by a guard here**: `PresentCaps::resolve` is the identity on both unknown states, so the
+/// equality below short-circuits on a pre-probe frame AND on a probe that FAILED. That distinction
+/// is the whole reason the caps type is a tri-state — this system saves the value it writes, and a
+/// transient surface-creation failure must not be allowed to spend a player's stored FAST/OFF on a
+/// negative answer nobody actually gave (see [`PresentCaps`]).
+///
+/// It PERSISTS the correction, which is the deliberate part: everything downstream already reads
+/// the effective rung, so leaving the stored one alone would buy nothing but a file that disagrees
+/// with every consumer of it, and a page whose value flickers back to the unsupported rung the next
+/// time anything re-reads the file. See [`Settings::effective_vsync`] for the trade-off that costs.
+fn normalize_vsync(
+    caps: Res<PresentCaps>,
+    mut settings: ResMut<Settings>,
+    mut save: MessageWriter<SaveSettings>,
+) {
+    let effective = settings.effective_vsync(*caps);
+    if settings.vsync == effective {
+        return;
+    }
+    info!(
+        "settings: vsync {} is not supported by this surface -> {} (saved)",
+        settings.vsync.label(),
+        effective.label(),
+    );
+    settings.vsync = effective;
+    save.write(SaveSettings);
+}
+
+/// Reflect the OS's ACTUAL fullscreen state back into [`Settings`] and `Window::mode` — the
+/// "observe external changes" half of the window-mode row. On macOS the green traffic-light button
+/// toggles native fullscreen without bevy hearing about it: `Window::mode` goes stale, and a page
+/// that trusted it would either lie or fight the OS (writing the stale mode back would kick the
+/// player straight out of the fullscreen they just asked for).
+///
+/// **Edge-triggered, deliberately.** The system acts only when the observed state CHANGES between
+/// frames, never on a standing mismatch. A level-triggered version would fight winit's deferred
+/// transitions: while macOS animates into fullscreen, a commanded mode can sit "not yet real" for
+/// up to a second (winit parks it in `target_fullscreen`), and reconciling against that snapshot
+/// would revert the player's choice and then oscillate. An edge is only ever produced by the OS
+/// actually switching, so following edges follows truth.
+///
+/// Reaches winit through the same `WINIT_WINDOWS` thread-local + `NonSendMarker` pattern as
+/// `branding::set_window_icon` (the marker is load-bearing: off the main thread the thread-local
+/// is empty). Headless roots never mount this plugin; a windowed root before window creation just
+/// finds no winit window and returns.
+///
+/// This is a second WRITER of the settings file (via [`SaveSettings`]) beyond the page — accepted
+/// because the green button IS player intent, exactly as deliberate as a row click, and a player
+/// who fullscreens the game expects it to come back fullscreen.
+fn observe_window_mode(
+    _non_send_marker: bevy::ecs::system::NonSendMarker,
+    window: Option<Single<(Entity, &mut Window), With<PrimaryWindow>>>,
+    mut settings: ResMut<Settings>,
+    mut save: MessageWriter<SaveSettings>,
+    mut last_seen: Local<Option<bool>>,
+) {
+    let Some(window) = window else {
+        return;
+    };
+    let (entity, mut window) = window.into_inner();
+    let Some(fullscreen) = bevy::winit::WINIT_WINDOWS.with_borrow(|winit_windows| {
+        winit_windows
+            .get_window(entity)
+            .map(|winit_window| winit_window.fullscreen().is_some())
+    }) else {
+        return;
+    };
+    let previous = last_seen.replace(fullscreen);
+    // The first observation is a baseline, not an edge — and a same-state frame is nothing at all.
+    if previous.is_none_or(|previous| previous == fullscreen) {
+        return;
+    }
+    let observed = WindowModeSetting::from_fullscreen(fullscreen);
+    // Keep `Window::mode` truthful FIRST, whatever the settings say: bevy's change detection can
+    // only express "leave fullscreen" later if the component actually says it is fullscreen now.
+    let mode = observed.to_window_mode();
+    if window.mode != mode {
+        window.mode = mode;
+    }
+    if settings.window_mode != observed {
+        settings.window_mode = observed;
+        save.write(SaveSettings);
+        info!(
+            "settings: window mode -> {} (changed outside the settings page)",
+            observed.label()
+        );
+    }
 }
 
 /// Persist on request. Reads the settings AFTER [`ApplySettings`] so what is written is what the
@@ -716,6 +1369,19 @@ fn report_store_load(report: Option<Res<StoreReport>>) {
 mod tests {
     use super::*;
 
+    /// Every capability state the app can actually be in: the two "nothing is known" ones — the
+    /// pre-probe boot state and a probe that could not ask — plus the four lists a surface can
+    /// report. Enumerated once, so a grid test cannot quietly stop covering a variant.
+    fn every_caps_state() -> Vec<PresentCaps> {
+        let mut states = vec![PresentCaps::Unprobed, PresentCaps::Unavailable];
+        for immediate in [false, true] {
+            for mailbox in [false, true] {
+                states.push(PresentCaps::Reported { immediate, mailbox });
+            }
+        }
+        states
+    }
+
     /// The defaults must reproduce the picture the game shipped BEFORE settings existed, or merely
     /// adding this module changed the product. Bevy's own defaults are the reference.
     #[test]
@@ -728,6 +1394,11 @@ mod tests {
             Some(bevy_cascades.maximum_distance),
         );
         assert_eq!(SHADOW_CASCADES, bevy_cascades.num_cascades);
+        assert_eq!(
+            settings.shadow_cascades.count(),
+            SHADOW_CASCADES,
+            "the default cascade row must be the pinned bevy default"
+        );
         assert_eq!(
             settings.shadow_resolution.shadow_map_size(),
             DirectionalLightShadowMap::default().size,
@@ -756,6 +1427,8 @@ mod tests {
         app.init_resource::<Settings>()
             .init_resource::<DirectionalLightShadowMap>()
             .init_resource::<RenderScale>()
+            .init_resource::<PresentCaps>()
+            .init_resource::<UiScale>()
             .add_systems(Update, apply_settings);
         app.update();
         assert_eq!(
@@ -864,29 +1537,37 @@ mod tests {
     /// the index is 2` panic inside `bevy_light`'s `check_dir_light_mesh_visibility`, one shadow-knob
     /// press after the ladder wrapped from a 2-cascade setting to the 4-cascade default).
     ///
-    /// [`apply_settings`] is driven across the WHOLE distance × resolution grid twice — so every
-    /// combination is entered from another one, INCLUDING the off/on edges the split ladders made
-    /// newly reachable — and after each step the `CascadeShadowConfig` must still carry exactly
-    /// [`SHADOW_CASCADES`] bounds. That length sizes every per-cascade array downstream (the frusta,
-    /// the per-view visible-entity vectors, and the pooled thread-local queues that actually blew
-    /// up), so holding it invariant is what makes the crash unreachable.
+    /// The cascade count is a LIVE ROW now (safe only under the vendored bevy_light backport — see
+    /// [`SHADOW_CASCADES`]), so the invariant this test pins moved: after every step of the WHOLE
+    /// distance × resolution × cascades grid (twice, so every cell is entered from another one,
+    /// off/on edges included), the `CascadeShadowConfig`'s length must equal the LAST APPLIED
+    /// cascade row — moved by that row alone, never by the distance or resolution rows. That length
+    /// sizes every per-cascade array downstream (the frusta, the per-view visible-entity vectors,
+    /// and the pooled thread-local queues that blew up in the field), so "only the row moves it,
+    /// deliberately, through `apply_settings`" is the property that keeps the change auditable.
     ///
-    /// It also pins the two properties the split introduced: the rows are INDEPENDENT (the map is
-    /// resized whatever the distance says, including while off), and re-enabling after `Off`
-    /// restores casting — the failure mode where "off" is a one-way door.
+    /// A count changed WHILE OFF stays pending (the off branch touches nothing) and lands on the
+    /// next casting frame — the expected-length tracking below encodes exactly that.
     ///
-    /// What is deliberately NOT tested: the bevy panic itself is scheduling-dependent (it needs a
-    /// pooled thread-local that missed a frame's init), so a test that tried to reproduce it could
-    /// pass with the bug fully live — worse than no test. This pins the deterministic input
-    /// condition the bug requires instead.
+    /// It also pins the builder parameters the count rebuild must NOT move: `overlap_proportion`
+    /// and `minimum_distance` stay at bevy's `..default()` in every cell, so the default row values
+    /// keep reproducing the shipped picture.
+    ///
+    /// What is deliberately NOT tested: the (now vendored-away) bevy panic itself was
+    /// scheduling-dependent (it needs a pooled thread-local that missed a frame's init), so a test
+    /// that tried to reproduce it could pass with the bug fully live — worse than no test. The
+    /// backport's own validation lives with the vendor entry
+    /// (`.agents/docs/upstream/bevy-cascade-count-stale-local-parallel.md`).
     #[test]
-    fn applying_any_shadow_combination_never_changes_the_cascade_count() {
+    fn the_cascade_count_follows_its_row_and_only_its_row() {
         let mut app = App::new();
         app.init_resource::<Settings>()
             .init_resource::<DirectionalLightShadowMap>()
             // Not optional in the reconciler any more — `plugin` mounts `render_scale::plugin`, so
             // the only path without it is a bare-`App` test like this one.
             .init_resource::<crate::render_scale::RenderScale>()
+            .init_resource::<PresentCaps>()
+            .init_resource::<UiScale>()
             .add_systems(Update, apply_settings);
         let sun = app
             .world_mut()
@@ -904,25 +1585,48 @@ mod tests {
             .flat_map(|distance| {
                 ShadowResolution::ORDER
                     .into_iter()
-                    .map(move |resolution| (distance, resolution))
+                    .flat_map(move |resolution| {
+                        ShadowCascades::ORDER
+                            .into_iter()
+                            .map(move |cascades| (distance, resolution, cascades))
+                    })
             })
             .collect::<Vec<_>>();
+        // The reference for the parameters the count rebuild must never move.
+        let reference = CascadeShadowConfigBuilder::default().build();
+        // What the sun's config was last REBUILT with: the spawn value until the first casting
+        // frame, then whatever cascade row was live on the most recent casting frame. A count set
+        // while OFF is pending, not applied — that is the deliberate off-branch behaviour.
+        let mut applied_count = CascadeShadowConfig::default().bounds.len();
         // Two full laps, so every cell is also reached from the last cell of the previous lap.
-        for (distance, resolution) in grid.iter().copied().chain(grid.iter().copied()) {
+        for (distance, resolution, cascades) in grid.iter().copied().chain(grid.iter().copied()) {
             {
                 let mut settings = app.world_mut().resource_mut::<Settings>();
                 settings.shadow_distance = distance;
                 settings.shadow_resolution = resolution;
+                settings.shadow_cascades = cascades;
             }
             app.update();
+            if distance.casts() {
+                applied_count = cascades.count();
+            }
             let config = app
                 .world()
                 .get::<CascadeShadowConfig>(sun)
                 .expect("sun carries a cascade config");
             assert_eq!(
                 config.bounds.len(),
-                SHADOW_CASCADES,
-                "{distance:?}/{resolution:?} changed the cascade count — that is the bevy_light crash",
+                applied_count,
+                "{distance:?}/{resolution:?}/{cascades:?}: the cascade count must be exactly the \
+                 last one the row APPLIED — moved by the row alone, and only on a casting frame",
+            );
+            assert_eq!(
+                config.overlap_proportion, reference.overlap_proportion,
+                "{cascades:?} must not move the overlap — only the count and the far bound may vary",
+            );
+            assert_eq!(
+                config.minimum_distance, reference.minimum_distance,
+                "{cascades:?} must not move the minimum distance",
             );
             if let Some(want) = distance.distance_m() {
                 // The far bound is `nearest * base^(n-1)` with `base` itself a `powf`, so it
@@ -951,37 +1655,410 @@ mod tests {
         }
     }
 
-    /// **The Metal panic guard.** `Mailbox` and `FifoRelaxed` hit an `unreachable!()` in wgpu-hal's
-    /// Metal backend — they PANIC, no fallback — and `AutoVsync` names `FifoRelaxed` as its first
-    /// choice. Only `Fifo` and `AutoNoVsync` may ever be produced here.
-    ///
-    /// Now driven off [`VsyncMode::ORDER`] rather than `[true, false]`, so a rung added to the
-    /// ladder is covered by this guard the moment it exists.
+    /// **The Metal panic guard, capability-gated.** `Mailbox` and `FifoRelaxed` hit an
+    /// `unreachable!()` in wgpu-hal's Metal backend if a surface is CONFIGURED with them, and
+    /// `AutoVsync` names `FifoRelaxed` as its first fallback choice. The rule this pins, across the
+    /// WHOLE vsync × capability grid: a concrete uncapped mode (`Mailbox`/`Immediate`) may only be
+    /// produced when the probe positively reported it; every other cell answers `Fifo` or the
+    /// self-negotiating `AutoNoVsync`, and `AutoVsync`/`FifoRelaxed` are never produced at all.
     #[test]
-    fn only_the_metal_safe_present_modes_are_reachable() {
+    fn present_modes_are_probe_gated_and_metal_safe() {
         for vsync in VsyncMode::ORDER {
-            let mode = Settings { vsync, ..default() }.present_mode();
-            assert!(
-                matches!(mode, PresentMode::Fifo | PresentMode::AutoNoVsync),
-                "vsync={vsync:?} produced {mode:?}, which can panic on Metal",
+            for caps in every_caps_state() {
+                let mode = Settings { vsync, ..default() }.present_mode(caps);
+                match mode {
+                    PresentMode::Fifo | PresentMode::AutoNoVsync => {}
+                    PresentMode::Mailbox => assert!(
+                        caps.mailbox(),
+                        "vsync={vsync:?} caps={caps:?} produced Mailbox without the probe \
+                         confirming it — that is the Metal unreachable!()",
+                    ),
+                    PresentMode::Immediate => assert!(
+                        caps.immediate(),
+                        "vsync={vsync:?} caps={caps:?} produced Immediate without the probe \
+                         confirming it — that is the Wayland refusal",
+                    ),
+                    other => panic!(
+                        "vsync={vsync:?} caps={caps:?} produced {other:?}, which is never a safe \
+                         answer (AutoVsync's first fallback choice panics on Metal)",
+                    ),
+                }
+            }
+        }
+        // The three rungs at their intended best: ON is Fifo everywhere; FAST/OFF land on their
+        // concrete modes exactly when the surface reported them.
+        let probed_all = PresentCaps::Reported {
+            immediate: true,
+            mailbox: true,
+        };
+        let by_vsync = |vsync| Settings { vsync, ..default() };
+        assert_eq!(
+            by_vsync(VsyncMode::On).present_mode(probed_all),
+            PresentMode::Fifo,
+        );
+        assert_eq!(
+            by_vsync(VsyncMode::Fast).present_mode(probed_all),
+            PresentMode::Mailbox,
+        );
+        assert_eq!(
+            by_vsync(VsyncMode::Off).present_mode(probed_all),
+            PresentMode::Immediate,
+        );
+        // And every state where nothing is KNOWN — the boot window description, and a probe that
+        // could not ask — is always negotiation, never a gamble.
+        for caps in [PresentCaps::Unprobed, PresentCaps::Unavailable] {
+            for vsync in [VsyncMode::Fast, VsyncMode::Off] {
+                assert_eq!(
+                    by_vsync(vsync).present_mode(caps),
+                    PresentMode::AutoNoVsync,
+                    "{caps:?} must negotiate, not gamble",
+                );
+            }
+        }
+    }
+
+    /// Which rungs the page may OFFER, per capability state. FAST requires `Mailbox` specifically
+    /// (an Immediate-backed FAST would duplicate OFF on a Metal surface); OFF requires `Immediate`;
+    /// ON is unconditional; unprobed offers everything because there is nothing to gate on yet.
+    #[test]
+    fn the_offered_rungs_follow_the_probe() {
+        let offered = |caps: PresentCaps| -> Vec<VsyncMode> {
+            VsyncMode::ORDER
+                .into_iter()
+                .filter(|mode| caps.offers(*mode))
+                .collect()
+        };
+        assert_eq!(offered(PresentCaps::Unprobed), VsyncMode::ORDER.to_vec());
+        // A probe that could not ask knows no more than one that has not run: offer everything.
+        assert_eq!(offered(PresentCaps::Unavailable), VsyncMode::ORDER.to_vec());
+        // A Metal surface: [Fifo, Immediate].
+        assert_eq!(
+            offered(PresentCaps::Reported {
+                immediate: true,
+                mailbox: false,
+            }),
+            vec![VsyncMode::Off, VsyncMode::On],
+        );
+        // A Wayland surface: [Fifo, Mailbox] — Immediate refused.
+        assert_eq!(
+            offered(PresentCaps::Reported {
+                immediate: false,
+                mailbox: true,
+            }),
+            vec![VsyncMode::Fast, VsyncMode::On],
+        );
+        // A minimal surface: Fifo only. ON must always survive.
+        assert_eq!(
+            offered(PresentCaps::Reported {
+                immediate: false,
+                mailbox: false,
+            }),
+            vec![VsyncMode::On],
+        );
+    }
+
+    /// **Codex review finding, 2026-07-27: a persisted rung this surface cannot present.**
+    ///
+    /// A `video.ron` carrying `vsync_mode: Fast` opened on a Metal surface used to leave the page
+    /// showing FAST while the present mode negotiated away to something that tears exactly like
+    /// OFF. Now the rung RESOLVES (to ON), every consumer reads the resolved value, and
+    /// [`normalize_vsync`] writes it back — the page, the present mode and the frame-cap gate are
+    /// one fact rather than three readings of a dead one.
+    #[test]
+    fn a_persisted_rung_the_surface_cannot_present_is_normalized() {
+        // Metal: [Fifo, Immediate] — no Mailbox, so FAST is dead here.
+        let metal = PresentCaps::Reported {
+            immediate: true,
+            mailbox: false,
+        };
+        // Wayland: [Fifo, Mailbox] — Immediate refused, so OFF is dead here.
+        let wayland = PresentCaps::Reported {
+            immediate: false,
+            mailbox: true,
+        };
+
+        let stored_fast = Settings {
+            vsync: VsyncMode::Fast,
+            ..default()
+        };
+        assert_eq!(stored_fast.effective_vsync(metal), VsyncMode::On);
+        assert_eq!(
+            stored_fast.present_mode(metal),
+            PresentMode::Fifo,
+            "the mode a resolved-to-ON rung presents with is Fifo, not a negotiated AutoNoVsync",
+        );
+
+        let stored_off = Settings {
+            vsync: VsyncMode::Off,
+            frame_cap: FrameCap(120),
+            ..default()
+        };
+        assert_eq!(stored_off.effective_vsync(wayland), VsyncMode::On);
+        assert_eq!(
+            stored_off.frame_limit_period(wayland),
+            None,
+            "a rung the surface cannot present must not arm the limiter",
+        );
+        // Each rung still survives on a surface that DOES offer it, and pre-probe nothing is
+        // resolved away on a guess.
+        assert_eq!(stored_fast.effective_vsync(wayland), VsyncMode::Fast);
+        assert_eq!(stored_off.effective_vsync(metal), VsyncMode::Off);
+        for caps in [PresentCaps::Unprobed, metal, wayland] {
+            for vsync in VsyncMode::ORDER {
+                let settings = Settings { vsync, ..default() };
+                assert!(
+                    caps.offers(settings.effective_vsync(caps)),
+                    "{vsync:?} on {caps:?} resolved to a rung the surface does not offer",
+                );
+            }
+        }
+        assert_eq!(
+            Settings::default().effective_vsync(PresentCaps::Unprobed),
+            VsyncMode::On,
+        );
+        for vsync in VsyncMode::ORDER {
+            assert_eq!(
+                Settings { vsync, ..default() }.effective_vsync(PresentCaps::Unprobed),
+                vsync,
+                "unprobed must not normalise anything — nothing is known yet",
+            );
+        }
+    }
+
+    /// The write-back half of the same finding: when the probe lands, the STORED rung follows the
+    /// effective one and the file is asked to follow it too (no phantom state on disk), while a
+    /// supported rung — and the whole pre-probe state — is left alone.
+    #[test]
+    fn the_probe_arrival_writes_the_normalized_rung_back() {
+        let app_with = |vsync: VsyncMode, caps: PresentCaps| {
+            let mut app = App::new();
+            app.add_message::<SaveSettings>()
+                .insert_resource(Settings { vsync, ..default() })
+                .insert_resource(caps)
+                .add_systems(Update, normalize_vsync);
+            app.update();
+            app
+        };
+        let saves = |app: &App| {
+            app.world()
+                .resource::<bevy::ecs::message::Messages<SaveSettings>>()
+                .len()
+        };
+
+        let metal = PresentCaps::Reported {
+            immediate: true,
+            mailbox: false,
+        };
+        let app = app_with(VsyncMode::Fast, metal);
+        assert_eq!(app.world().resource::<Settings>().vsync, VsyncMode::On);
+        assert_eq!(
+            app.world().resource::<Settings>().vsync.label(),
+            "ON",
+            "the page renders the rung the surface is actually on",
+        );
+        assert_eq!(saves(&app), 1, "the correction is persisted, not just live");
+
+        // A supported rung is untouched, and so is a save-less frame.
+        let app = app_with(VsyncMode::Off, metal);
+        assert_eq!(app.world().resource::<Settings>().vsync, VsyncMode::Off);
+        assert_eq!(saves(&app), 0, "a supported rung must not rewrite the file");
+
+        // Pre-probe: nothing is known, so nothing is normalised (and nothing is written).
+        let app = app_with(VsyncMode::Fast, PresentCaps::Unprobed);
+        assert_eq!(app.world().resource::<Settings>().vsync, VsyncMode::Fast);
+        assert_eq!(saves(&app), 0);
+
+        // A surface that answered with a list carrying neither uncapped mode (`[Fifo]`) is a
+        // conclusive negative, and does normalise. An EMPTY list is not this — `probe` maps that to
+        // `Unavailable` before it can reach here (`probe::an_empty_capability_list_is_a_failed_
+        // query_not_an_answer`).
+        let app = app_with(
+            VsyncMode::Off,
+            PresentCaps::Reported {
+                immediate: false,
+                mailbox: false,
+            },
+        );
+        assert_eq!(app.world().resource::<Settings>().vsync, VsyncMode::On);
+        assert_eq!(saves(&app), 1);
+    }
+
+    /// **Codex adversarial pass, 2026-07-27: a probe FAILURE is not a negative answer.**
+    ///
+    /// `probe` used to report a surface it could not even create as "probed, capability list
+    /// empty". Normalisation is a writer that SAVES, so that fabricated negative would have spent
+    /// a player's perfectly valid stored FAST/OFF — permanently, on a machine whose surface
+    /// supports it — the first time a probe surface failed to be created. [`PresentCaps`] is a
+    /// tri-state so that cannot be expressed: this pins that the could-not-ask state moves nothing
+    /// and writes nothing, while leaving the safe presentation fallback exactly as it was.
+    #[test]
+    fn a_failed_probe_never_rewrites_the_stored_rung() {
+        for vsync in VsyncMode::ORDER {
+            let mut app = App::new();
+            app.add_message::<SaveSettings>()
+                .insert_resource(Settings {
+                    vsync,
+                    frame_cap: FrameCap(120),
+                    ..default()
+                })
+                .insert_resource(PresentCaps::Unavailable)
+                .add_systems(Update, normalize_vsync);
+            app.update();
+            let settings = *app.world().resource::<Settings>();
+            assert_eq!(
+                settings.vsync, vsync,
+                "a probe that could not ask must not rewrite {vsync:?}",
+            );
+            assert_eq!(
+                app.world()
+                    .resource::<bevy::ecs::message::Messages<SaveSettings>>()
+                    .len(),
+                0,
+                "a probe that could not ask must not write the file ({vsync:?})",
+            );
+            // The runtime behaviour that failure state is allowed to have: presentation still
+            // negotiates rather than gambling, and the stored rung still gates the frame cap.
+            assert_eq!(settings.effective_vsync(PresentCaps::Unavailable), vsync);
+            assert_ne!(
+                settings.present_mode(PresentCaps::Unavailable),
+                PresentMode::Mailbox,
+            );
+            assert_ne!(
+                settings.present_mode(PresentCaps::Unavailable),
+                PresentMode::Immediate,
+            );
+            assert_eq!(
+                settings
+                    .frame_limit_period(PresentCaps::Unavailable)
+                    .is_some(),
+                vsync == VsyncMode::Off,
+                "an unknown surface leaves the cap on the player's own rung ({vsync:?})",
+            );
+        }
+    }
+
+    /// The frame cap is armed by exactly one conjunction: a non-off cap AND an EFFECTIVE vsync OFF.
+    /// FAST and ON both already wait on the compositor, and two competing limiters make a stutter
+    /// machine.
+    #[test]
+    fn the_frame_cap_arms_only_under_vsync_off() {
+        let capped = Settings {
+            vsync: VsyncMode::Off,
+            frame_cap: FrameCap(120),
+            ..default()
+        };
+        let period = capped
+            .frame_limit_period(PresentCaps::Unprobed)
+            .expect("off + cap must limit");
+        assert!((period.as_secs_f64() - 1.0 / 120.0).abs() < 1e-9);
+        for vsync in [VsyncMode::Fast, VsyncMode::On] {
+            assert_eq!(
+                Settings {
+                    vsync,
+                    frame_cap: FrameCap(120),
+                    ..default()
+                }
+                .frame_limit_period(PresentCaps::Unprobed),
+                None,
+                "{vsync:?} must disarm the cap",
             );
         }
         assert_eq!(
             Settings {
-                vsync: VsyncMode::On,
+                vsync: VsyncMode::Off,
+                frame_cap: FrameCap::OFF,
                 ..default()
             }
-            .present_mode(),
-            PresentMode::Fifo,
-            "VSync ON is Fifo — NOT AutoVsync, whose first choice is the panicking FifoRelaxed",
+            .frame_limit_period(PresentCaps::Unprobed),
+            None,
+            "an off cap limits nothing even with vsync off",
+        );
+    }
+
+    /// The frame-cap ladder: OFF is the floor, the rungs ascend 30..=240 by 10, stepping saturates,
+    /// the slider fraction round-trips every stop, and a hand-edited off-ladder value is honoured
+    /// until touched (then snaps to its nearest stop).
+    #[test]
+    fn the_frame_cap_ladder_is_sane() {
+        assert_eq!(FrameCap::OFF.fps(), None);
+        assert_eq!(FrameCap::OFF.label(), "OFF");
+        assert_eq!(FrameCap::OFF.step(-1), FrameCap::OFF, "the floor saturates");
+        assert_eq!(FrameCap::OFF.step(1).fps(), Some(30), "OFF steps up to MIN");
+        assert_eq!(
+            FrameCap(30).step(-1),
+            FrameCap::OFF,
+            "MIN steps down to OFF"
+        );
+        assert_eq!(FrameCap(240).step(1).fps(), Some(240), "the top saturates");
+        // Every stop survives the slider's fraction round-trip.
+        let mut cap = FrameCap::OFF;
+        loop {
+            assert_eq!(FrameCap::from_fraction(cap.fraction()), cap, "{cap:?}");
+            let next = cap.step(1);
+            if next == cap {
+                break;
+            }
+            cap = next;
+        }
+        assert_eq!(cap.fps(), Some(240), "the walk ends at the ceiling");
+        // Hand-edited values: honoured as written, clamped only at the absurd ends, snapped to the
+        // ladder on first touch.
+        assert_eq!(FrameCap(144).fps(), Some(144));
+        assert_eq!(FrameCap(144).label(), "144 FPS");
+        assert_eq!(FrameCap(144).step(1).fps(), Some(150));
+        assert_eq!(FrameCap(5).fps(), Some(30));
+        assert_eq!(FrameCap(9999).fps(), Some(240));
+    }
+
+    /// The UI-scale ladder: 75..=150 by 5, default 100 (a no-op multiplier), saturating steps,
+    /// slider round-trip, and the factor clamp that keeps a hand-edited file from making the page
+    /// itself unreachable.
+    #[test]
+    fn the_ui_scale_ladder_is_sane() {
+        assert_eq!(UiScalePercent::default().factor(), 1.0);
+        assert_eq!(UiScalePercent::default().label(), "100%");
+        assert_eq!(UiScalePercent(75).step(-1), UiScalePercent(75));
+        assert_eq!(UiScalePercent(150).step(1), UiScalePercent(150));
+        assert_eq!(UiScalePercent(100).step(1), UiScalePercent(105));
+        let mut scale = UiScalePercent(UiScalePercent::MIN);
+        loop {
+            assert_eq!(
+                UiScalePercent::from_fraction(scale.fraction()),
+                scale,
+                "{scale:?}"
+            );
+            let next = scale.step(1);
+            if next == scale {
+                break;
+            }
+            scale = next;
+        }
+        assert_eq!(scale, UiScalePercent(UiScalePercent::MAX));
+        assert_eq!(UiScalePercent(500).factor(), 1.5, "absurd values clamp");
+        assert_eq!(UiScalePercent(10).factor(), 0.75);
+    }
+
+    /// The window-mode mapping: borderless-only (exclusive fullscreen is unrepresentable — it is
+    /// the mode that can panic on an unresolvable monitor), always the CURRENT monitor, and the
+    /// observe direction inverts it.
+    #[test]
+    fn window_mode_is_borderless_current_only() {
+        assert_eq!(
+            WindowModeSetting::Windowed.to_window_mode(),
+            WindowMode::Windowed,
         );
         assert_eq!(
-            Settings {
-                vsync: VsyncMode::Off,
-                ..default()
-            }
-            .present_mode(),
-            PresentMode::AutoNoVsync,
+            WindowModeSetting::Fullscreen.to_window_mode(),
+            WindowMode::BorderlessFullscreen(MonitorSelection::Current),
+        );
+        for setting in WindowModeSetting::ORDER {
+            let fullscreen = setting == WindowModeSetting::Fullscreen;
+            assert_eq!(WindowModeSetting::from_fullscreen(fullscreen), setting);
+        }
+        assert_eq!(
+            WindowModeSetting::default(),
+            WindowModeSetting::Windowed,
+            "a player who never opens the page gets the window the game always opened with"
         );
     }
 
@@ -999,39 +2076,88 @@ mod tests {
         let settings = Settings::default();
         assert!(is_default(&settings.shadow_distance));
         assert!(is_default(&settings.shadow_resolution));
+        assert!(is_default(&settings.shadow_cascades));
         assert!(is_default(&settings.msaa));
         assert!(is_default(&settings.vsync));
         assert!(is_default(&settings.render_scale));
+        assert!(is_default(&settings.window_mode));
+        assert!(is_default(&settings.frame_cap));
+        assert!(is_default(&settings.ui_scale));
+        assert!(
+            settings.legacy_vsync.is_none(),
+            "the legacy shadow field must default absent — it exists only inside a parse"
+        );
         assert_ne!(
             settings.version, 0,
             "the version stamp is the one field exempt from the sparse-write rule"
         );
     }
 
-    /// **The v1 on-disk compatibility of the VSync ladder.** [`VsyncMode`] is a two-rung enum in
-    /// memory and a plain `bool` on disk, because that is what shipped — and a RON type mismatch
-    /// fails the WHOLE parse, so getting this wrong would reset every other setting in the file too.
-    /// Both directions are pinned: this build reads what v1 wrote, and writes what a v1 build could
-    /// still read.
+    /// **The vsync field migration.** The ladder grew a third rung, which a `bool` cannot carry, so
+    /// the persisted key MOVED from `vsync` (bool) to `vsync_mode` (enum). This pins all three
+    /// sides of that story:
+    ///
+    /// * the new build never writes the old key (an older build reading a new file skips the
+    ///   unknown `vsync_mode` and lands on the safe default ON — the documented dropped-key cost);
+    /// * a v1 `vsync: false` on disk is still honoured through [`Settings::absorb_legacy_vsync`];
+    /// * a hand-edited file carrying BOTH keys resolves by "the more specific statement wins": a
+    ///   non-default `vsync_mode` beats the legacy bool.
     #[test]
-    fn vsync_is_a_ladder_in_memory_and_a_bool_on_disk() {
-        assert_eq!(VsyncMode::from(false), VsyncMode::Off);
-        assert_eq!(VsyncMode::from(true), VsyncMode::On);
-        assert!(!bool::from(VsyncMode::Off));
-        assert!(bool::from(VsyncMode::On));
+    fn vsync_moved_to_a_new_key_and_the_old_bool_is_absorbed() {
         let written = ron::ser::to_string(&Settings {
             vsync: VsyncMode::Off,
             ..default()
         })
         .expect("settings serialize");
         assert!(
-            written.contains("vsync:false") || written.contains("vsync: false"),
-            "the off rung must still write the v1 bool an older build can read: {written}",
+            written.contains("vsync_mode:Off"),
+            "the off rung must write the NEW key: {written}",
+        );
+        assert!(
+            !written.contains("vsync:"),
+            "the retired bool key must never be written again: {written}",
+        );
+
+        let absorb = |settings: Settings| settings.absorb_legacy_vsync();
+        assert_eq!(
+            absorb(Settings {
+                legacy_vsync: Some(false),
+                ..default()
+            })
+            .vsync,
+            VsyncMode::Off,
+            "a v1 `vsync: false` still means OFF",
+        );
+        assert_eq!(
+            absorb(Settings {
+                legacy_vsync: Some(true),
+                ..default()
+            })
+            .vsync,
+            VsyncMode::On,
+        );
+        assert_eq!(
+            absorb(Settings {
+                legacy_vsync: Some(false),
+                vsync: VsyncMode::Fast,
+                ..default()
+            })
+            .vsync,
+            VsyncMode::Fast,
+            "an explicit non-default vsync_mode beats the legacy bool",
+        );
+        let absorbed = absorb(Settings {
+            legacy_vsync: Some(false),
+            ..default()
+        });
+        assert!(
+            absorbed.legacy_vsync.is_none(),
+            "absorption must consume the legacy value — it never escapes the parse seam",
         );
         assert_eq!(
             VsyncMode::ORDER,
-            [VsyncMode::Off, VsyncMode::On],
-            "the right arrow must move toward more work per frame, like every other ladder",
+            [VsyncMode::Off, VsyncMode::Fast, VsyncMode::On],
+            "the right arrow must move toward more waiting per frame, like every other ladder",
         );
     }
 }

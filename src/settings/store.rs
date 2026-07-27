@@ -18,8 +18,8 @@
 //! separate file the cloud ignores.
 //!
 //! One config directory, split by FILENAME, so a future Steam Cloud manifest can include/exclude by
-//! name. Every field in [`Settings`] today, and every field queued behind the display research
-//! (window mode, render scale, UI scale, frame cap), is machine-local and belongs here.
+//! name. Every field in [`Settings`] today — the render ladders and the V2 display fields (window
+//! mode, frame cap, UI scale) alike — is machine-local and belongs here.
 //!
 //! **Binding for whoever adds keybindings: they go in a NEW `controls.ron`, never in this file.**
 //! And the on-disk key type must be OUR OWN enum, never `bevy::input::keyboard::KeyCode` — bevy
@@ -273,11 +273,16 @@ fn parse(text: &str) -> Parsed {
         return Parsed::FromTheFuture(probe.version);
     }
     match ron::de::from_str::<Settings>(text) {
-        // Stamp the current version so the next save records the shape actually written.
-        Ok(settings) => Parsed::Ok(Settings {
-            version: SETTINGS_VERSION,
-            ..settings
-        }),
+        // Stamp the current version so the next save records the shape actually written, and fold
+        // the retired v1 `vsync: bool` key into the live ladder HERE — the legacy shadow field
+        // never escapes the persistence seam.
+        Ok(settings) => Parsed::Ok(
+            Settings {
+                version: SETTINGS_VERSION,
+                ..settings
+            }
+            .absorb_legacy_vsync(),
+        ),
         Err(err) => Parsed::Corrupt(err.to_string()),
     }
 }
@@ -426,7 +431,8 @@ pub(super) fn reset() -> bool {
 mod tests {
     use super::*;
     use crate::settings::{
-        MsaaLevel, RenderScaleLevel, ShadowDistance, ShadowResolution, VsyncMode,
+        FrameCap, MsaaLevel, RenderScaleLevel, ShadowCascades, ShadowDistance, ShadowResolution,
+        UiScalePercent, VsyncMode, WindowModeSetting,
     };
 
     /// The env override wins on every platform — the hook a test or a packaged run needs so it
@@ -543,7 +549,7 @@ mod tests {
             ["version"],
             "a fully-default file is the version stamp and NOTHING else",
         );
-        // A non-default value IS written, and only that one — the two shadow rows are separate
+        // A non-default value IS written, and only that one — the shadow rows are separate
         // fields and diff separately.
         assert_eq!(
             keys_of(&Settings {
@@ -552,6 +558,44 @@ mod tests {
             }),
             ["version", "shadow_distance"],
         );
+        assert_eq!(
+            keys_of(&Settings {
+                shadow_cascades: ShadowCascades::Two,
+                ..Settings::default()
+            }),
+            ["version", "shadow_cascades"],
+            "the cascade row diffs sparsely like every other field — the default 4 writes nothing",
+        );
+    }
+
+    /// The cascade-count row's persistence, end to end through the real parse path: every rung
+    /// round-trips, the default writes no key (so today's 4 can still be changed for existing
+    /// players later), and a file from before the row existed loads at the default.
+    #[test]
+    fn the_shadow_cascades_key_round_trips_and_is_absent_by_default() {
+        for cascades in ShadowCascades::ORDER {
+            let original = Settings {
+                shadow_cascades: cascades,
+                ..Settings::default()
+            };
+            let text = ron::ser::to_string_pretty(&original, pretty_config()).unwrap();
+            assert_eq!(parse(&text), Parsed::Ok(original), "{text}");
+            assert_eq!(
+                text.contains("shadow_cascades"),
+                cascades != ShadowCascades::default(),
+                "only a non-default count may reach the disk: {text}",
+            );
+        }
+        // The bare key, as a player's hand-edit would write it.
+        let Parsed::Ok(edited) = parse("(version: 1, shadow_cascades: Two)") else {
+            panic!("the bare key must parse");
+        };
+        assert_eq!(edited.shadow_cascades, ShadowCascades::Two);
+        // A file from before the row existed: the standard absent-key path, at the default.
+        let Parsed::Ok(pre_row) = parse("(version: 1, shadow_distance: M300)") else {
+            panic!("a file from before the cascade row must load");
+        };
+        assert_eq!(pre_row.shadow_cascades, ShadowCascades::default());
     }
 
     /// Round-trip through the real serializer the save path uses, including the sparse form.
@@ -563,9 +607,20 @@ mod tests {
                 version: SETTINGS_VERSION,
                 shadow_distance: ShadowDistance::Off,
                 shadow_resolution: ShadowResolution::X4096,
+                shadow_cascades: ShadowCascades::Two,
                 msaa: MsaaLevel::Off,
                 vsync: VsyncMode::Off,
+                legacy_vsync: None,
                 render_scale: RenderScaleLevel::Percent67,
+                window_mode: WindowModeSetting::Fullscreen,
+                frame_cap: FrameCap(120),
+                ui_scale: UiScalePercent(125),
+            },
+            // The FAST rung — the value the retired bool field could not carry, i.e. the whole
+            // reason the key moved.
+            Settings {
+                vsync: VsyncMode::Fast,
+                ..Settings::default()
             },
         ] {
             let text = ron::ser::to_string_pretty(&original, pretty_config()).unwrap();
@@ -593,12 +648,23 @@ mod tests {
             "absent vsync takes the default"
         );
 
+        // Genuinely unknown keys (the V2 display fields graduated to known ones, so these are the
+        // next candidates a future build might write).
         let Parsed::Ok(unknown) =
-            parse("(shadow_distance: M100, window_mode: Fullscreen, frame_cap: 144)")
+            parse("(shadow_distance: M100, bloom: On, motion_blur: 2, hdr_output: true)")
         else {
             panic!("keys this build does not know must be skipped, not abort the parse");
         };
         assert_eq!(unknown.shadow_distance, ShadowDistance::M100);
+
+        // The V2 display fields landing as plain new fields is the contract's second exercise: a
+        // file from before them loads with every one at its default.
+        let Parsed::Ok(pre_v2) = parse("(version: 1, msaa: X2)") else {
+            panic!("a file from before the V2 display fields must load");
+        };
+        assert_eq!(pre_v2.window_mode, WindowModeSetting::default());
+        assert_eq!(pre_v2.frame_cap, FrameCap::OFF);
+        assert_eq!(pre_v2.ui_scale, UiScalePercent::default());
 
         // The render-scale row landing as a plain new field is the contract's first exercise: a
         // file written by the build BEFORE it existed must still load, at native.
@@ -632,11 +698,40 @@ mod tests {
         assert_eq!(settings.msaa, MsaaLevel::X2);
         assert_eq!(settings.vsync, VsyncMode::Off);
         assert_eq!(
+            settings.legacy_vsync, None,
+            "the legacy bool must be absorbed inside the parse, never handed onward"
+        );
+        assert_eq!(
             settings.shadow_distance,
             ShadowDistance::default(),
             "a retired key must leave its successor at the default, never abort the load"
         );
         assert_eq!(settings.shadow_resolution, ShadowResolution::default());
+    }
+
+    /// The vsync key migration THROUGH the real parse path (the pure absorb rule is pinned in
+    /// `settings::tests`): old key alone, new key alone, and the hand-edited both-keys file.
+    #[test]
+    fn the_vsync_key_migration_reads_old_new_and_both() {
+        let vsync_of = |text: &str| match parse(text) {
+            Parsed::Ok(settings) => settings.vsync,
+            other => panic!("{text} must parse: {other:?}"),
+        };
+        assert_eq!(vsync_of("(vsync: false)"), VsyncMode::Off);
+        assert_eq!(vsync_of("(vsync: true)"), VsyncMode::On);
+        assert_eq!(vsync_of("(vsync_mode: Fast)"), VsyncMode::Fast);
+        assert_eq!(vsync_of("(vsync_mode: Off)"), VsyncMode::Off);
+        assert_eq!(
+            vsync_of("(vsync: false, vsync_mode: Fast)"),
+            VsyncMode::Fast,
+            "a non-default new key is the more specific statement and wins",
+        );
+        assert_eq!(
+            vsync_of("(vsync: false, vsync_mode: On)"),
+            VsyncMode::Off,
+            "a DEFAULT new key is indistinguishable from an absent one, so the legacy bool is \
+             honoured — the documented edge of the migration",
+        );
     }
 
     /// The refuse-newer gate must fire even when the future file's SHAPE changed — which is the
@@ -730,9 +825,14 @@ mod tests {
             version: SETTINGS_VERSION,
             shadow_distance: ShadowDistance::M100,
             shadow_resolution: ShadowResolution::X1024,
+            shadow_cascades: ShadowCascades::Three,
             msaa: MsaaLevel::X2,
-            vsync: VsyncMode::Off,
+            vsync: VsyncMode::Fast,
+            legacy_vsync: None,
             render_scale: RenderScaleLevel::Percent75,
+            window_mode: WindowModeSetting::Fullscreen,
+            frame_cap: FrameCap(60),
+            ui_scale: UiScalePercent(110),
         };
         assert!(save(&wanted), "the save must land");
         let reloaded = load();
