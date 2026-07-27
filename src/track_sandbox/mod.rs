@@ -309,6 +309,10 @@ pub fn plugin(app: &mut App) {
     // the same pair). Its resource only becomes VISIBLE in `Update`, which is what
     // forces the deferred [`build_rig`] below.
     app.add_plugins((crate::spec::plugin, crate::bake::plugin))
+        // This is a WINDOWED root on `DefaultPlugins`, so it is on bevy's deadlocking exit path
+        // exactly like the game is: without this, quitting the sandbox wedges the process instead
+        // of ending it (see `crate::quit`).
+        .add_plugins(crate::quit::plugin)
         // The suspension cast/route/grip-column overlay + its readout panel. Self-gated on
         // `RigGeom` and on a `Hull` existing, so it simply no-ops on the pre-build frames.
         .add_plugins(suspension_viz::plugin)

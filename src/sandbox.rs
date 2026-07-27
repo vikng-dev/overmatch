@@ -250,6 +250,10 @@ pub fn plugin(app: &mut App) {
     // hit. Deliberately omits driving, aim, the game cameras, sight, and shooting.
     app.add_plugins((
         PhysicsPlugins::default().set(PhysicsInterpolationPlugin::interpolate_all()),
+        // This is a WINDOWED root on `DefaultPlugins`, so it is on bevy's deadlocking exit path
+        // exactly like the game is: without this, quitting the sandbox wedges the process instead
+        // of ending it (see `crate::quit`).
+        crate::quit::plugin,
         world::plugin,
         ballistics::plugin,
         damage::plugin,

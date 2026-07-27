@@ -70,6 +70,12 @@ pub use net::{run_client, run_server};
 /// here keeps `sight` from naming `crate::net` (the `tests/net_boundary.rs` guard). Mounted only by
 /// [`NetClientPlugin`]; single-player has `state::client_plugin`'s real pause instead.
 mod overlay;
+/// Shutting down: the macOS `Cmd+Q` route into [`AppExit`](bevy::app::AppExit), and the recall of
+/// bevy's render `SubApp` that keeps its exit teardown from deadlocking against its own render
+/// thread. Both are pure exit-path plumbing with no per-frame cost; mounted once per windowed root
+/// ([`ClientPlugin`] and [`NetClientPlugin`] — the headless server has no render app and no menu to
+/// be quit from).
+mod quit;
 /// Render scale (research brief "Route A"): the 3D main pass renders at a fraction of the window
 /// through `MainPassResolutionOverride` and one bilinear upscale node, while bloom, tonemapping and
 /// the whole UI stay native. Ships — NOT `dev_tools`-gated; `settings::apply_settings` is the one
@@ -489,6 +495,9 @@ impl Plugin for ClientPlugin {
             // spawn systems below always find it (see `ui_font`).
             ui_font::plugin,
             branding::plugin,
+            // Exit plumbing: `Cmd+Q` -> `AppExit` on macOS, and the render-app recall that keeps
+            // bevy's own exit teardown from deadlocking against the render thread (bevy#12912).
+            quit::plugin,
             // Pause/cursor handling (drives the states that `state::sim_plugin` owns).
             state::client_plugin,
             // Device gather: the only device→command translation.
@@ -573,6 +582,10 @@ impl Plugin for NetClientPlugin {
         // (Separate call: the tuple above is at bevy's 15-plugin tuple arity limit.)
         app.add_plugins((
             drive_hud::plugin,
+            // Exit plumbing: `Cmd+Q` -> `AppExit` on macOS, and the render-app recall that keeps
+            // bevy's own exit teardown from deadlocking against the render thread (bevy#12912).
+            // (Down here rather than beside `branding::plugin`: the tuple above is full.)
+            quit::plugin,
             // The `M` spawn map — net-client only: a top view of the terrain whose click asks the
             // authority to place this player's NEXT respawn there (nothing teleports now).
             net::spawn_map_plugin,
@@ -639,7 +652,12 @@ pub fn run_offline() {
                     // ASCII hyphen: `lib.rs` is scanned by the ui_ascii guard now that the
                     // offline feel label spawns `Text` here (default-font surface).
                     title: "Overmatch - offline".into(),
-                    present_mode: settings.present_mode(),
+                    // `Unprobed` on purpose: the capability probe needs a surface, which needs this
+                    // window — the mapping self-negotiates until the probe lands.
+                    present_mode: settings.present_mode(settings::PresentCaps::Unprobed),
+                    // Described at creation so a persisted fullscreen boots fullscreen instead of
+                    // flashing a window first.
+                    mode: settings.window_mode.to_window_mode(),
                     ..default()
                 }),
                 ..default()
