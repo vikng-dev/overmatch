@@ -29,3 +29,10 @@ pack above. No FreePBR content remains anywhere in this repository:
 
 The remaining embedded textures in tiger_1.glb come from the CC-BY Sketchfab models credited
 above.
+
+"Black rubber" (BlenderKit, assetBaseId c63361f1-a404-4c34-baf3-da38b95232f6) by antoine f
+(https://www.antoine-fraysse.fr/) is licensed under the BlenderKit Royalty Free license
+(https://www.blenderkit.com/docs/licenses/), free tier. NOT CC0: commercial use in a shipped
+game build is permitted; redistribution of the asset as an asset is not. Accepted by the
+project owner 2026-07-27. Used for the road-wheel tyre-band material `Black rubber` embedded
+in tiger_1.glb (BaseColor/Roughness/Normal at 2048x2048; Displacement unused).

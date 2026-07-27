@@ -1,5 +1,11 @@
-import bpy, math, os, statistics
+import bpy, math, os, statistics, sys
 from mathutils import Vector
+
+# Export goes through the shared helper, which folds the KTX2 mip bake into the export so a
+# mipless glb can never land on the tracked path — see .agents/blender/export_tiger.py.
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(bpy.data.filepath)))
+sys.path.insert(0, os.path.join(ROOT, ".agents", "blender"))
+import export_tiger  # noqa: E402  (path must be set first)
 SP="/private/tmp/claude-502/-Users-Yan-Desktop-github-vikng-dev-personal-overmatch/aa6ae501-da41-487d-a38f-23a2004cf55d/scratchpad"
 SRC = SP + "/metal512"
 TILE_M   = 0.35
@@ -55,5 +61,5 @@ link.data.materials.clear(); link.data.materials.append(m)
 for p in link.data.polygons: p.material_index = 0
 print(f"OK unwrap={len(link.data.uv_layers)}L tile={TILE_M}m mat={MAT_NAME} imgs=512px")
 bpy.ops.wm.save_mainfile()
-bpy.ops.export_scene.gltf(filepath=os.path.abspath("assets/tiger_1/tiger_1.glb"), export_format='GLB')
+export_tiger.export(root=ROOT)
 print("DONE")
