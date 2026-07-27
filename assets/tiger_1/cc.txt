@@ -1,2 +1,31 @@
+Models
+------
 "WW2 German Tiger" (https://skfb.ly/pzQxu) by gabriel.pronovost09 is licensed under Creative Commons Attribution (http://creativecommons.org/licenses/by/4.0/).
 "Mg34" (https://skfb.ly/oFApR) by Defroing is licensed under Creative Commons Attribution (http://creativecommons.org/licenses/by/4.0/).
+
+Textures
+--------
+"Metal046B" (https://ambientcg.com/view?id=Metal046B) by ambientCG (https://ambientcg.com)
+is licensed under CC0 1.0 Universal Public Domain Dedication
+(https://creativecommons.org/publicdomain/zero/1.0/). No attribution is required; this note is
+kept for provenance.
+
+Used for the track-link material `Mat_Track_Link` embedded in tiger_1.glb. Source pack
+Metal046B_1K-PNG; the Color, Roughness, Metalness and NormalGL maps are downscaled to 512x512
+and packed into the material. Displacement is unused; the pack ships no ambient-occlusion map.
+
+License note (2026-07-27)
+-------------------------
+The track-link material previously used FreePBR "worn-metal4", which is not CC0 and carried a
+paid-license obligation. Those maps have been fully removed and replaced by the CC0 Metal046B
+pack above. No FreePBR content remains anywhere in this repository:
+
+  * the exported tiger_1.glb embeds only the Metal046B-derived payloads (verified by decoding
+    every embedded image in the glb, not just by name);
+  * the FreePBR image datablocks were deleted from the authoring file assets/tiger_1/tiger_1.blend;
+  * git history and LFS are clean by construction -- the FreePBR-textured glb was never committed
+    (the last committed revision of tiger_1.glb predates the track-link material entirely: it has
+    15 materials, no Mat_Track_Link, and the Link primitive has neither UVs nor a material).
+
+The remaining embedded textures in tiger_1.glb come from the CC-BY Sketchfab models credited
+above.
