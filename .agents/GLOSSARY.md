@@ -203,7 +203,7 @@ invariant must widen the identity first.
 _Avoid_: projectile entity (an entity is local and transient; shot identity is plain correlated data)
 
 **Divergence continuity**:
-The Layer-1 rule (ADR-0015): contact and force laws must be continuous functions of pose and velocity, so tiny client/server divergence nudges a blend weight instead of flipping a force regime and bifurcating the sims. Precedents: the sphere-cast suspension probe and the static↔kinetic friction blend (`driving.rs`); binding on all future force laws, the track model included.
+The Layer-1 rule (ADR-0015): contact and force laws must be continuous functions of pose and velocity, so tiny client/server divergence nudges a blend weight instead of flipping a force regime and bifurcating the sims. Precedents: the sphere-cast suspension probe and the static↔kinetic friction blend, both from the retired `driving.rs` force law (the track model replaced it — see `src/track/forces.rs`); binding on all future force laws, the track model included.
 _Avoid_: "determinism" for this (continuity bounds divergence growth; determinism eliminates divergence)
 
 **Forward determinism / Replay determinism**:

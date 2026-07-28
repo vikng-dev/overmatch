@@ -107,7 +107,7 @@ impl Overlays {
     }
 
     /// Whether `overlay` is currently latched.
-    fn contains(&self, overlay: Overlay) -> bool {
+    pub(crate) fn contains(&self, overlay: Overlay) -> bool {
         self.active.contains(&overlay)
     }
 

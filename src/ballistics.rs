@@ -2365,9 +2365,10 @@ fn throw_spall_burst(
     // Nudge past the exit face so a fragment's first cast doesn't re-touch it — the same 1 mm
     // boundary nudge the march itself uses.
     const EPS: f32 = 1.0e-3;
-    // Spall (design §5). Budget = (material chewed / ref) × (residual energy / ref) × (caliber /
-    // ref), capped — both a fragment supply (cost) and a push (v_res²) are needed, so a thin/soft
-    // body or a barely-through round throws little. The cone's shape is fixed; only density scales.
+    // Spall (design §5). The fragment COUNT is supply only: (material chewed / ref) × (caliber /
+    // ref), capped. Residual energy is deliberately NOT a factor here — it is applied per fragment
+    // below as `shot_energy`, so a barely-through round throws its full complement of fragments and
+    // throws them weakly, rather than throwing fewer. The cone's shape is fixed; only density scales.
     const SPALL_MAX_FRAGMENTS: usize = 24;
     const SPALL_COST_REF: f32 = 100.0; // ref-mm (≈ a 100 mm steel plate)
     const SPALL_VRES_REF: f32 = 500.0; // m/s

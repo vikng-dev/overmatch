@@ -444,10 +444,6 @@ fn update_view_death_overlay(
     mut label: Query<&mut Text, With<ViewDeathText>>,
 ) {
     let has_controlled = controlled.entity().is_some();
-    // The overlay's `Visibility` lives on the full-screen node; its prompt `Text` on the child.
-    let (Ok(mut vis), Ok(mut text)) = (overlay_vis.single_mut(), label.single_mut()) else {
-        return;
-    };
 
     let (active_view, other_view, other_label) = match *mode {
         SightMode::ThirdPerson => (ViewKind::Commander, ViewKind::Gunner, "gunner optic"),
@@ -457,6 +453,28 @@ fn update_view_death_overlay(
     // The active view's crewman is down — the standalone condition for wanting this overlay. Gated on a
     // controlled tank existing (no station to be dead without one).
     let crewman_down = has_controlled && !view_available(&controlled, &views, active_view);
+
+    // Net client: DECLARE presence only; the shared reconciler owns visibility from the fully-declared
+    // set (suppressed under any higher overlay). We must not also write `Visibility` here — that would
+    // double-write it and read a not-yet-reconciled set.
+    //
+    // The declaration is deliberately made BEFORE the node lookup below and gated on nothing: presence
+    // is a fact about the crew, not about the view hierarchy. Were it to sit behind the lookup, a frame
+    // that failed to find the node would skip `declare` entirely and the set would LATCH the previous
+    // answer rather than clear it — `declare` is absolute, so it must be reached unconditionally to
+    // self-heal.
+    let single_player = match overlays {
+        Some(mut overlays) => {
+            overlays.declare(Overlay::ViewDead, crewman_down);
+            false
+        }
+        None => true,
+    };
+
+    // The overlay's `Visibility` lives on the full-screen node; its prompt `Text` on the child.
+    let (Ok(mut vis), Ok(mut text)) = (overlay_vis.single_mut(), label.single_mut()) else {
+        return;
+    };
 
     // Refresh the prompt whenever the active crewman is down (identical in both modes); a hidden node's
     // stale text is harmless and re-derived here before it can be shown again.
@@ -469,19 +487,13 @@ fn update_view_death_overlay(
         });
     }
 
-    match overlays {
-        // Net client: DECLARE presence only; the shared reconciler owns visibility from the fully-
-        // declared set (suppressed under any higher overlay). We must not also write `Visibility` here
-        // — that would double-write it and read a not-yet-reconciled set.
-        Some(mut overlays) => overlays.declare(Overlay::ViewDead, crewman_down),
-        // Single-player: no authority — draw whenever the active crewman is down.
-        None => {
-            vis.set_if_neq(if crewman_down {
-                Visibility::Visible
-            } else {
-                Visibility::Hidden
-            });
-        }
+    // Single-player: no authority — draw whenever the active crewman is down.
+    if single_player {
+        vis.set_if_neq(if crewman_down {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        });
     }
 }
 
@@ -501,5 +513,38 @@ fn update_toast(
         *visibility = Visibility::Visible;
     } else if *visibility != Visibility::Hidden {
         *visibility = Visibility::Hidden;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `update_view_death_overlay` must declare `ViewDead` presence even when the overlay node is
+    /// absent. `declare` is absolute, so a frame that skipped it would leave the previous answer
+    /// LATCHED — the failure this ordering rules out. The node cannot go missing today (it spawns at
+    /// `Startup` and never despawns), so this pins the decoupling rather than a live bug.
+    #[test]
+    fn declaration_survives_a_missing_overlay_node() {
+        let mut app = App::new();
+        app.init_resource::<SightMode>();
+        app.init_resource::<Overlays>();
+        // Latch it first: clearing a latched overlay is the direction that used to be skippable.
+        app.world_mut()
+            .resource_mut::<Overlays>()
+            .declare(Overlay::ViewDead, true);
+        app.add_systems(Update, update_view_death_overlay);
+
+        // No overlay node, no text child, no controlled tank — every query below the declaration
+        // fails to resolve.
+        app.update();
+
+        assert!(
+            !app.world()
+                .resource::<Overlays>()
+                .contains(Overlay::ViewDead),
+            "no controlled tank means no dead station, and the declaration must reach the set to \
+             clear it even though the overlay node is missing"
+        );
     }
 }

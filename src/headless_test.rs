@@ -2245,7 +2245,7 @@ fn real_tiger_f8_30_deg_rollback_rescues_to_capable_gear() {
     );
     assert!(
         reached_capable_tick <= 192,
-        "the Direct preselector must not remain silently stuck in F8 — the round-4 flow \
+        "the Direct preselector must not remain silently stuck in F8 — the rescue flow \
          brakes to the near-rest zone first (measured latch ≈ t114, capable ≈ t142), so \
          the bound covers braking + one paid rescue window (trace {state_trace:?})"
     );

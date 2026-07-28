@@ -2415,12 +2415,12 @@ fn crank_free_torque(
     let tau_idle =
         (idle_gain * (omega_idle - omega_e)).clamp(0.0, tp.torque_at(tp.engine.idle_rpm));
     let tau_ind = u_fuel * tp.torque_at(rpm);
-    let tau_free = tau_ind + tau_idle - engine_drag(tp, omega_e, u_fuel);
+    let tau_drag = engine_drag(tp, omega_e, u_fuel);
+    let tau_free = tau_ind + tau_idle - tau_drag;
 
     let p_avail = tp.torque_at(rpm) * omega_e;
     #[cfg(feature = "bitprobe")]
     {
-        let tau_drag = engine_drag(tp, omega_e, u_fuel);
         probe.u_fuel = u_fuel;
         probe.rpm = rpm;
         probe.tau_idle = tau_idle;
@@ -2644,9 +2644,14 @@ fn release_hill_hold(
     dir: f32,
     f_c: f32,
 ) {
+    // Nothing to release, and the threshold below is a pure function of state — so on the common
+    // path (no hold latched) neither term is worth computing.
+    if !st.hill_hold {
+        return;
+    }
     let selected_reserve = modeled_reserve_in_gear(tp, fp, shaft, g, st.demand_n);
     let release_margin = reserve_margin(st.demand_n).min(selected_reserve.max(0.0) * 0.5);
-    if st.hill_hold && dir * f_c >= st.demand_n + release_margin {
+    if dir * f_c >= st.demand_n + release_margin {
         st.hill_hold = false;
         st.hold_reengage_ticks = HOLD_REENGAGE_TICKS;
         st.scheduler = SchedulerState::Normal;

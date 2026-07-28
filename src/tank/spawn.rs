@@ -321,12 +321,16 @@ fn resolve_rig_nodes<'a>(geometry: &TankGeometry, spec: &'a TankSpec) -> RigNode
     // The gunner's chain feeds the rig's `turret`/`gun` (optic, camera, launched-turret): the
     // declared Pitch node + the Yaw servo above it in the extracted topology — the binder never
     // guesses which of several yaw/pitch mounts is the main one.
-    let yaw_indices: HashSet<usize> = servo_entries
-        .iter()
-        .zip(&servo_nodes)
-        .filter(|((_, servo), _)| servo.role == ServoRole::Yaw)
-        .filter_map(|(_, index)| *index)
-        .collect();
+    let servo_nodes_with_role = |role: ServoRole| -> HashSet<usize> {
+        servo_entries
+            .iter()
+            .zip(&servo_nodes)
+            .filter(|((_, servo), _)| servo.role == role)
+            .filter_map(|(_, index)| *index)
+            .collect()
+    };
+    let yaw_indices = servo_nodes_with_role(ServoRole::Yaw);
+    let pitch_indices = servo_nodes_with_role(ServoRole::Pitch);
     let turret_index = gunner_pitch
         .and_then(|pitch| first_geometry_ancestor(geometry, pitch, |i| yaw_indices.contains(&i)));
     // The single `Primary` weapon supplies the rig's main bore (`Rig.muzzle`) — what the bore HUD
@@ -342,8 +346,19 @@ fn resolve_rig_nodes<'a>(geometry: &TankGeometry, spec: &'a TankSpec) -> RigNode
     if primary_muzzle_index.is_none() {
         missing.push("<a Primary weapon>".into());
     }
-    if gunner_pitch.is_none() {
-        missing.push("<a Pitch servo above the Primary weapon's muzzle>".into());
+    // `spec.views` and `spec.servos` are independent maps: nothing in the spec format stops the
+    // gunner view naming a node that is not a declared servo. Assembly assumes it IS one — only
+    // servo nodes (plus hull/turret/weapon/volume/wheel nodes) are entered into `needed_nodes`, so a
+    // non-servo gunner node would resolve, pass this contract, then fail far downstream in
+    // `entity_at` with "needed nodes were spawned above". Checking the role here keeps the failure
+    // where the contract is stated, and the message names the offending node.
+    match gunner_pitch {
+        None => missing.push("<a Pitch servo above the Primary weapon's muzzle>".into()),
+        Some(index) if !pitch_indices.contains(&index) => missing.push(format!(
+            "<the Gunner view's node {:?}, declared as a Pitch servo>",
+            geometry.nodes[index].name
+        )),
+        Some(_) => {}
     }
     if turret_index.is_none() {
         missing.push("<a Yaw servo above the Primary weapon's muzzle>".into());
