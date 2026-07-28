@@ -90,6 +90,12 @@ pub struct ExtractedPointLight {
     pub shadow_map_near_z: f32,
     pub spot_light_angles: Option<(f32, f32)>,
     pub volumetric: bool,
+    // OVERMATCH PATCH: the light's `RenderLayers` mask, mirroring
+    // `ExtractedDirectionalLight::render_layers`. `prepare_lights` copies this onto the point/spot
+    // shadow view entities so that `queue_shadows`' per-view layer test is performed against the
+    // light's mask instead of an absent one (which defaults to layer 0 and silently drops every
+    // caster on any other layer).
+    pub render_layers: RenderLayers,
     pub soft_shadows_enabled: bool,
     /// whether this point light contributes diffuse light to lightmapped meshes
     pub affects_lightmapped_mesh_diffuse: bool,
@@ -330,6 +336,8 @@ pub fn extract_lights(
                 &GlobalTransform,
                 &ViewVisibility,
                 &CubemapFrusta,
+                // OVERMATCH PATCH: the light's own render layers, needed by the shadow views.
+                Option<&RenderLayers>,
                 Option<&VolumetricLight>,
             ),
             Or<(
@@ -338,6 +346,9 @@ pub fn extract_lights(
                 Changed<GlobalTransform>,
                 Changed<ViewVisibility>,
                 Changed<CubemapFrusta>,
+                // OVERMATCH PATCH: re-extract when the mask changes, so that the cached shadow
+                // views in `prepare_lights` are rebuilt with the new mask.
+                Changed<RenderLayers>,
                 Changed<VolumetricLight>,
             )>,
         >,
@@ -352,6 +363,8 @@ pub fn extract_lights(
                 &GlobalTransform,
                 &ViewVisibility,
                 &Frustum,
+                // OVERMATCH PATCH: the light's own render layers, needed by the shadow views.
+                Option<&RenderLayers>,
                 Option<&VolumetricLight>,
             ),
             Or<(
@@ -360,6 +373,9 @@ pub fn extract_lights(
                 Changed<GlobalTransform>,
                 Changed<ViewVisibility>,
                 Changed<Frustum>,
+                // OVERMATCH PATCH: re-extract when the mask changes, so that the cached shadow
+                // views in `prepare_lights` are rebuilt with the new mask.
+                Changed<RenderLayers>,
                 Changed<VolumetricLight>,
             )>,
         >,
@@ -450,6 +466,7 @@ pub fn extract_lights(
         transform,
         view_visibility,
         frusta,
+        maybe_layers,
         volumetric_light,
     ) in point_lights.iter()
     {
@@ -541,6 +558,8 @@ pub fn extract_lights(
             shadow_map_near_z: point_light.shadow_map_near_z,
             spot_light_angles: None,
             volumetric: volumetric_light.is_some(),
+            // OVERMATCH PATCH: carry the light's mask into the render world.
+            render_layers: maybe_layers.unwrap_or_default().clone(),
             affects_lightmapped_mesh_diffuse: point_light.affects_lightmapped_mesh_diffuse,
             #[cfg(feature = "experimental_pbr_pcss")]
             soft_shadows_enabled: point_light.soft_shadows_enabled,
@@ -562,6 +581,7 @@ pub fn extract_lights(
         transform,
         view_visibility,
         frustum,
+        maybe_layers,
         volumetric_light,
     ) in spot_lights.iter()
     {
@@ -654,6 +674,8 @@ pub fn extract_lights(
             shadow_map_near_z: spot_light.shadow_map_near_z,
             spot_light_angles: Some((spot_light.inner_angle, spot_light.outer_angle)),
             volumetric: volumetric_light.is_some(),
+            // OVERMATCH PATCH: carry the light's mask into the render world.
+            render_layers: maybe_layers.unwrap_or_default().clone(),
             affects_lightmapped_mesh_diffuse: spot_light.affects_lightmapped_mesh_diffuse,
             #[cfg(feature = "experimental_pbr_pcss")]
             soft_shadows_enabled: spot_light.soft_shadows_enabled,
@@ -1893,6 +1915,12 @@ pub fn prepare_lights(
                         light_entity: *light_entity,
                         cascade_index,
                     },
+                    // OVERMATCH PATCH: give the shadow view the LIGHT's render layers (not the
+                    // camera's). `queue_shadows` tests every caster against the shadow view's own
+                    // `RenderLayers`; without this the view has none, which defaults to layer 0 and
+                    // rejects every caster the light itself accepted in
+                    // `check_dir_light_mesh_visibility`.
+                    light.render_layers.clone(),
                 ));
 
                 if !matches!(gpu_preprocessing_mode, GpuPreprocessingMode::Culling) {
@@ -2091,6 +2119,9 @@ fn create_point_shadow_maps(
                 face_index,
             },
             RootNonCameraView(Core3d.intern()),
+            // OVERMATCH PATCH: give the shadow view the LIGHT's render layers (not the camera's).
+            // See the matching comment on the directional cascade views above.
+            light.render_layers.clone(),
         ));
 
         if !matches!(
@@ -2172,6 +2203,9 @@ fn create_spot_shadow_map(
             light_entity: *light_entity,
         },
         RootNonCameraView(Core3d.intern()),
+        // OVERMATCH PATCH: give the shadow view the LIGHT's render layers (not the camera's).
+        // See the matching comment on the directional cascade views above.
+        light.render_layers.clone(),
     ));
 
     if !matches!(
