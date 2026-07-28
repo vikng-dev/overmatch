@@ -54,7 +54,7 @@ const BARLOW_TEXT_FILES: &[&str] = &[
     "src/crew_ui.rs",
     "src/drive_hud.rs",
     "src/settings/ui.rs",
-    "src/sight.rs",
+    "src/sight/reticle.rs",
     "src/state.rs",
     "src/ui_font.rs",
     "src/net/client.rs",

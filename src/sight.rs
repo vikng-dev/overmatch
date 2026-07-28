@@ -1,25 +1,29 @@
-//! Gunner sight input, presentation, and aim-point commitment.
+//! Gunner sight input and aim-point commitment.
+//!
+//! The presentation half — every HUD widget that draws the sight picture — lives behind
+//! [`reticle`], which this module mounts and otherwise touches only to raise a [`Toast`].
+
+mod reticle;
 
 use avian3d::prelude::{Position, Rotation, SpatialQuery};
-use bevy::camera::visibility::RenderLayers;
 use bevy::ecs::system::SystemParam;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::math::Affine3A;
 use bevy::prelude::*;
 
 use crate::aim::{AimCommit, CommittedAim, MAX_RANGE, aim_distance};
-use crate::camera::{CameraKickApplied, GUNNER_FOV_FALLBACK, GunnerCameraPlaced, view_fov};
+use crate::camera::{GUNNER_FOV_FALLBACK, view_fov};
 use crate::command::{TankCommand, gather_commands};
 use crate::damage::{ControlledTank, VolumeOf};
 use crate::firecontrol::{RangeTable, Ranging};
-use crate::overlay::{self, Overlay, Overlays};
+use crate::render_policy::{CameraProfile, VisualScope};
 use crate::spec::ViewKind;
 use crate::state::{GameplaySet, PlayerInputSet};
 use crate::tank::{
-    Controlled, Hull, Rig, ServoIndex, ServoSpec, Tank, TankServos, TankViews, rig_world_pose,
-    shortest_angle,
+    Controlled, ServoIndex, ServoSpec, Tank, TankServos, TankViews, rig_world_pose, shortest_angle,
 };
-use crate::ui_font::UiFonts;
+
+use reticle::Toast;
 
 /// Whether the controlled tank's `kind` view is usable — its authored `requires` met (a dead
 /// gunner closes the optic, a dead commander closes third-person). A missing view is unusable.
@@ -238,93 +242,22 @@ impl GunnerIntent {
     }
 }
 
-/// The on-screen intent cursor — the marker the gun chases. It moves immediately with the mouse
-/// (position control) and drifts back to centre as the gun's lay catches up.
-#[derive(Component)]
-struct IntentReticle;
-
-/// Full-screen black overlay shown when the active view's crewman is dead, plus a center prompt
-/// telling the player to switch to the other view. Hidden when the view is alive.
-#[derive(Component)]
-struct ViewDeathOverlay;
-
-/// The prompt text inside the [`ViewDeathOverlay`] — its own (child) entity, so the overlay's
-/// `Visibility` (on the parent) and this `Text` are written separately.
-#[derive(Component)]
-struct ViewDeathText;
-
-/// Seconds a refusal toast stays up.
-const TOAST_SECONDS: f32 = 2.0;
-
-/// A brief on-screen message — used when a view switch is *refused* (the target view's crewman is
-/// down), so the silent Lshift no-op gets a reason. Ticks down in `update_toast`.
-#[derive(Resource, Default)]
-struct Toast {
-    message: String,
-    remaining: f32,
-}
-
-impl Toast {
-    fn show(&mut self, message: impl Into<String>) {
-        self.message = message.into();
-        self.remaining = TOAST_SECONDS;
-    }
-}
-
-/// The toast's text node (upper-centre); shown while [`Toast::remaining`] > 0.
-#[derive(Component)]
-struct ToastText;
-
-/// HUD dialed-range readout, hidden outside gunner view.
-#[derive(Component)]
-struct RangeReadout;
-
-/// The ranging reticle's static horizontal reference line, held on the sight centre. The moving range
-/// scale slides behind it; whichever graduation the line crosses is the dialed range.
-#[derive(Component)]
-struct ReticleLine;
-
-/// One moving range-scale graduation.
-#[derive(Component)]
-struct RangeScaleTick {
-    range: f32,
-    major: bool,
-}
-
 pub fn plugin(app: &mut App) {
     app.init_resource::<SightMode>()
-        .init_resource::<Toast>()
         // A/B harness: the active gunner-view scheme + the two free-look/elastic camera view-states.
         .init_resource::<GunnerScheme>()
         .init_resource::<GunnerFreeAim>()
         .init_resource::<ElasticCam>()
-        .add_systems(
-            Startup,
-            (
-                spawn_intent_reticle,
-                spawn_view_death_overlay,
-                spawn_toast,
-                spawn_range_readout,
-                spawn_ranging_reticle,
-            ),
-        )
+        // Every HUD widget the sight draws, and the systems that keep them in step. The presentation
+        // half orders itself against `toggle_sight` below.
+        .add_plugins(reticle::plugin)
         .add_systems(
             Update,
-            (
-                // Only the Lshift view toggle is player input (gated on the cursor); the overlay,
-                // toast, and range readout are presentation and keep updating with the cursor free.
-                toggle_sight.in_set(PlayerInputSet).in_set(SightToggled),
-                // On the net client this DECLARES `Overlay::ViewDead` (+ its prompt text) and leaves
-                // the visibility swap to the shared `overlay::apply_overlay_visibility` reconciler — so
-                // its declaration joins the `Declare` phase and its apply reads the fully-reconciled
-                // set (the ordering fix). In single-player (no `Overlays`) it still sets visibility
-                // itself. `Declare` is unconfigured in single-player, so it imposes nothing there.
-                update_view_death_overlay.in_set(overlay::OverlaySet::Declare),
-                // After `toggle_sight`, so a refused switch this frame shows its reason.
-                update_toast,
-                update_range_readout,
-            )
-                .chain()
+            // Only the Lshift view toggle is player input (gated on the cursor); the overlay, toast,
+            // and range readout are presentation and keep updating with the cursor free.
+            toggle_sight
+                .in_set(PlayerInputSet)
+                .in_set(SightToggled)
                 .in_set(GameplaySet),
         )
         // A/B harness: cycle the gunner-view scheme (`V`), then reseed the camera view-state on any
@@ -369,321 +302,15 @@ pub fn plugin(app: &mut App) {
                 .in_set(PlayerInputSet)
                 .in_set(GameplaySet),
         )
-        // Reconcile the controlled tank's optic render-layer hide every frame — continuous derived
-        // render state, no `run_if`/ordering edge (see the system's doc comment for why event-driven
-        // was the original defect). Plain `Update`/`GameplaySet`; it only writes on mismatch, so an
-        // unconditional schedule costs a read of each mesh's layer in steady state.
-        .add_systems(Update, reconcile_optic_render_layers.in_set(GameplaySet))
-        // The intent cursor reprojects through the gunner camera, so it runs after the camera's pose
-        // is final for the frame. Both inputs are render-rate — `intent` (mouse, Update) and the
-        // camera pose (which reads the VIEW gun's `GlobalTransform`, blended by
-        // `interpolate_servos` in Update) — so the reprojection is clean by construction, no
-        // aliasing.
+        // Declare the two view facts `render_policy` resolves: whose body the camera is riding, and
+        // which channels the camera draws. Continuous derived render state, no `run_if`/ordering
+        // edge (see each system's doc comment — event-driven was the original defect). Both are
+        // `set_if_neq` writes on ONE component per tank root and one per camera, so an
+        // unconditional schedule costs a handful of reads in steady state.
         .add_systems(
-            PostUpdate,
-            (update_intent_reticle, update_ranging_reticle)
-                .in_set(GameplaySet)
-                .after(TransformSystems::Propagate)
-                .after(GunnerCameraPlaced)
-                // After the hit-kick has displaced the camera's rendered pose, so the reticles
-                // reproject through the kicked view and the whole sight picture jolts together on a
-                // hit. Vacuous edge in SP/headless (the kick set is net-client-only, empty there).
-                .after(CameraKickApplied),
+            Update,
+            (mark_view_subject_body, apply_sight_camera_profile).in_set(GameplaySet),
         );
-}
-
-fn spawn_intent_reticle(mut commands: Commands) {
-    commands.spawn((
-        IntentReticle,
-        Node {
-            position_type: PositionType::Absolute,
-            width: Val::Px(8.0),
-            height: Val::Px(8.0),
-            border_radius: BorderRadius::MAX,
-            ..default()
-        },
-        BackgroundColor(Color::srgba(1.0, 0.7, 0.1, 0.9)),
-        Visibility::Hidden,
-    ));
-}
-
-/// The full-screen black overlay + center prompt, shown when the active view's crewman is dead.
-/// The prompt tells the player to press Lshift to switch to the other view (if its crewman is
-/// alive). Solid black — "your crewman's eyes are gone" (design §7a, view-death model).
-fn spawn_view_death_overlay(mut commands: Commands, fonts: Res<UiFonts>) {
-    commands
-        .spawn((
-            ViewDeathOverlay,
-            // `OverlayNode(ViewDead)` stamps the one-scrim contract's lowest z via its hook (in BOTH
-            // single-player and net — the hook always runs): the view-death black sits BELOW the death
-            // screen, so whole-crew death (Death latched) can never let this opaque black occlude "YOU
-            // DIED" — the spawn-order bug this redesign fixes. On the net client the marker ALSO hands
-            // this node's visibility to `overlay::apply_overlay_visibility`, which hard-suppresses it
-            // whenever a higher overlay owns the scrim; the z is the belt to that brace.
-            overlay::OverlayNode(Overlay::ViewDead),
-            Node {
-                width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
-                position_type: PositionType::Absolute,
-                flex_direction: FlexDirection::Column,
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                ..default()
-            },
-            BackgroundColor(Color::BLACK),
-            Visibility::Hidden,
-        ))
-        .with_children(|parent| {
-            parent.spawn((
-                ViewDeathText,
-                Text::new(""),
-                TextFont {
-                    // SemiBold: a full-screen crew-death prompt.
-                    font: fonts.hud.clone().into(),
-                    font_size: FontSize::Px(20.0),
-                    ..default()
-                },
-                TextColor(Color::srgb(0.9, 0.4, 0.3)),
-            ));
-        });
-}
-
-/// The refusal-toast text node: a centred banner in the upper third, hidden until a refused switch
-/// raises it. Its own entity carries both `Text` and `Visibility`, so `update_toast` writes one query.
-fn spawn_toast(mut commands: Commands, fonts: Res<UiFonts>) {
-    commands
-        .spawn(Node {
-            width: Val::Percent(100.0),
-            position_type: PositionType::Absolute,
-            top: Val::Percent(30.0),
-            justify_content: JustifyContent::Center,
-            ..default()
-        })
-        .with_children(|parent| {
-            parent.spawn((
-                ToastText,
-                Text::new(""),
-                TextFont {
-                    // SemiBold: a centred refusal banner.
-                    font: fonts.hud.clone().into(),
-                    font_size: FontSize::Px(22.0),
-                    ..default()
-                },
-                TextColor(Color::srgb(1.0, 0.75, 0.3)),
-                Visibility::Hidden,
-            ));
-        });
-}
-
-/// The dialed-range readout, parked bottom-left; populated/shown only in the optic.
-fn spawn_range_readout(mut commands: Commands, fonts: Res<UiFonts>) {
-    commands.spawn((
-        RangeReadout,
-        Text::new(""),
-        TextFont {
-            // SemiBold: an all-caps gunnery readout ("RANGE ... m").
-            font: fonts.hud.clone().into(),
-            font_size: FontSize::Px(16.0),
-            ..default()
-        },
-        TextColor(Color::srgba(1.0, 0.8, 0.3, 0.9)),
-        Node {
-            position_type: PositionType::Absolute,
-            bottom: Val::Px(24.0),
-            left: Val::Px(24.0),
-            ..default()
-        },
-        Visibility::Hidden,
-    ));
-}
-
-/// Show the dialed range in the optic so the player can read and correct their estimate; hidden in
-/// third-person (where scroll is the camera dolly, not ranging).
-fn update_range_readout(
-    mode: Res<SightMode>,
-    ranging: Res<Ranging>,
-    mut readout: Query<(&mut Text, &mut Visibility), With<RangeReadout>>,
-) {
-    let Ok((mut text, mut visibility)) = readout.single_mut() else {
-        return;
-    };
-    if *mode == SightMode::Gunner {
-        *text = Text::new(format!("RANGE {} m", ranging.range as i32));
-        *visibility = Visibility::Visible;
-    } else {
-        *visibility = Visibility::Hidden;
-    }
-}
-
-/// Reticle graticule colour — amber, grouping it with the other gunnery readouts.
-const RETICLE_COLOR: Color = Color::srgba(1.0, 0.8, 0.3, 0.85);
-
-/// Spawn the ranging reticle: the static centre line (held on the sight centre via a flex box, the
-/// same idiom as the white centre dot) and the pool of range graduations (200 m steps, majors
-/// numbered in hundreds of metres). All hidden until shown in the optic.
-fn spawn_ranging_reticle(mut commands: Commands, fonts: Res<UiFonts>) {
-    commands
-        .spawn(Node {
-            width: Val::Percent(100.0),
-            height: Val::Percent(100.0),
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center,
-            ..default()
-        })
-        .with_children(|parent| {
-            parent.spawn((
-                ReticleLine,
-                Node {
-                    width: Val::Px(96.0),
-                    height: Val::Px(2.0),
-                    ..default()
-                },
-                BackgroundColor(RETICLE_COLOR),
-                Visibility::Hidden,
-            ));
-        });
-
-    let mut range = 200.0_f32;
-    while range <= 4000.0 {
-        let major = (range as i32) % 400 == 0;
-        let width = if major { 24.0 } else { 12.0 };
-        let mut tick = commands.spawn((
-            RangeScaleTick { range, major },
-            Node {
-                position_type: PositionType::Absolute,
-                width: Val::Px(width),
-                height: Val::Px(2.0),
-                ..default()
-            },
-            BackgroundColor(RETICLE_COLOR),
-            Visibility::Hidden,
-        ));
-        if major {
-            // Label rides the tick: an absolute child offsets from the tick's own top-left.
-            tick.with_children(|parent| {
-                parent.spawn((
-                    Text::new(format!("{}", (range as i32) / 100)),
-                    TextFont {
-                        // Regular: a tiny reticle graduation number (12px).
-                        font: fonts.body.clone().into(),
-                        font_size: FontSize::Px(12.0),
-                        ..default()
-                    },
-                    TextColor(RETICLE_COLOR),
-                    Node {
-                        position_type: PositionType::Absolute,
-                        left: Val::Px(width + 5.0),
-                        top: Val::Px(-7.0),
-                        ..default()
-                    },
-                ));
-            });
-        }
-        range += 200.0;
-    }
-}
-
-/// Slide the range scale so each graduation sits at `θ(dialed) − θ(range)` above the sight centre: the
-/// dialed range lands on the [`ReticleLine`], nearer ranges above it, farther below, the whole scale
-/// riding up with the gun as range is dialed out. Reprojected through the gunner camera (after it has
-/// placed itself this frame), so it shares the rendered pose; hidden outside the optic. Reads the laid
-/// weapon's table — the main gun for now — which is the per-ammo ballistic scale.
-fn update_ranging_reticle(
-    mode: Res<SightMode>,
-    ranging: Res<Ranging>,
-    controlled: Query<&Rig, With<Controlled>>,
-    tables: Query<&RangeTable>,
-    camera: Single<(&Camera, &GlobalTransform)>,
-    mut line: Query<&mut Visibility, (With<ReticleLine>, Without<RangeScaleTick>)>,
-    mut ticks: Query<(&RangeScaleTick, &mut Node, &mut Visibility), Without<ReticleLine>>,
-) {
-    let gunner = *mode == SightMode::Gunner;
-    if let Ok(mut visibility) = line.single_mut() {
-        *visibility = if gunner {
-            Visibility::Visible
-        } else {
-            Visibility::Hidden
-        };
-    }
-
-    let table = controlled
-        .single()
-        .ok()
-        .and_then(|rig| tables.get(rig.muzzle).ok());
-    let (camera, cam_transform) = *camera;
-    let rot = cam_transform.rotation();
-    let forward = rot * Vec3::NEG_Z;
-    let right = rot * Vec3::X;
-
-    for (tick, mut node, mut visibility) in &mut ticks {
-        let Some(table) = table.filter(|_| gunner) else {
-            *visibility = Visibility::Hidden;
-            continue;
-        };
-        // Angle above centre = θ(dialed) − θ(this mark); rotate the sight line up by it about the
-        // camera's right axis (so the scale is screen-vertical regardless of hull roll) and reproject.
-        let angle = table.superelevation(ranging.range) - table.superelevation(tick.range);
-        let dir = Quat::from_axis_angle(right, angle) * forward;
-        match camera.world_to_viewport(cam_transform, cam_transform.translation() + dir) {
-            Ok(screen) => {
-                let half = if tick.major { 12.0 } else { 6.0 };
-                node.left = Val::Px(screen.x - half);
-                node.top = Val::Px(screen.y - 1.0);
-                *visibility = Visibility::Visible;
-            }
-            Err(_) => *visibility = Visibility::Hidden,
-        }
-    }
-}
-
-/// Place the intent cursor at the reprojection of the committed aim point — a resolved point on
-/// the world in BOTH regimes (a third-person commit resumed on entry, or the optic's own resolve),
-/// so its true screen position is exact at any range; no bearing-only shortcut, which would place a
-/// near floor aim too high by the mount parallax. As the gun (and so the camera/sight line) catches
-/// up, this drifts back to screen centre; hidden outside gunner view.
-///
-/// Reads the shared [`aim::CommittedAim`] (republished by `drive_gunner_aim` earlier this frame in
-/// `BeforeFixedMainLoop`) and the gunner camera's pose (which reads the VIEW gun's `GlobalTransform`,
-/// blended by `interpolate_servos` in `Update`) — a pure function of the committed intent and the
-/// camera, no aliasing.
-fn update_intent_reticle(
-    mode: Res<SightMode>,
-    committed: Res<CommittedAim>,
-    camera: Single<(&Camera, &GlobalTransform)>,
-    controlled: Query<(Entity, &Rig), With<Controlled>>,
-    hull: Query<&GlobalTransform, With<Hull>>,
-    mut reticle: Query<(&mut Node, &mut Visibility), With<IntentReticle>>,
-) {
-    let Ok((mut node, mut visibility)) = reticle.single_mut() else {
-        return;
-    };
-    if *mode != SightMode::Gunner {
-        *visibility = Visibility::Hidden;
-        return;
-    }
-    let Ok((tank, rig)) = controlled.single() else {
-        *visibility = Visibility::Hidden;
-        return;
-    };
-    let Ok(hull) = hull.get(rig.hull) else {
-        return;
-    };
-    let Some(local) = committed.get(tank) else {
-        *visibility = Visibility::Hidden;
-        return;
-    };
-    let (camera, cam_transform) = *camera;
-
-    let point = hull.affine().transform_point3(local);
-
-    match camera.world_to_viewport(cam_transform, point) {
-        Ok(screen) => {
-            node.left = Val::Px(screen.x - 4.0);
-            node.top = Val::Px(screen.y - 4.0);
-            *visibility = Visibility::Visible;
-        }
-        Err(_) => *visibility = Visibility::Hidden,
-    }
 }
 
 /// Toggle only to a view with a live crewman.
@@ -720,42 +347,46 @@ fn toggle_sight(
     };
 }
 
-/// Render layer for the controlled tank while the gunner optic is active.
-const OPTIC_HIDDEN_LAYER: usize = 1;
-
-/// Return the controlled-optic hidden layer; all other meshes use layer zero.
-fn desired_optic_layer(gunner: bool, is_controlled: bool) -> RenderLayers {
-    if gunner && is_controlled {
-        RenderLayers::layer(OPTIC_HIDDEN_LAYER)
-    } else {
-        RenderLayers::layer(0)
+/// Declare WHOSE BODY the local camera is riding, so the optic can drop it.
+///
+/// One [`VisualScope`] write per tank ROOT — never per mesh: `render_policy` supplies
+/// application-level inheritance, so the whole body (hull, turret, ~194 track shoes, every glb leaf
+/// that has not even loaded yet) follows this one component.
+///
+/// Runs every frame with no `run_if` and no ordering edge, for the reason the per-mesh sweep it
+/// replaces did: control can move between tanks with NO sight-mode event (a multiplayer respawn),
+/// and a tank can appear at any time. `set_if_neq` makes the steady state a read of one component
+/// per tank and nothing downstream — `render_policy` only re-resolves the subtree on a CHANGE.
+fn mark_view_subject_body(
+    controlled: Query<Entity, With<Controlled>>,
+    mut tanks: Query<(Entity, &mut VisualScope), With<Tank>>,
+) {
+    let subject = controlled.single().ok();
+    for (tank, mut scope) in &mut tanks {
+        scope.set_if_neq(if Some(tank) == subject {
+            VisualScope::VIEW_SUBJECT_BODY
+        } else {
+            VisualScope::WORLD_SOLID
+        });
     }
 }
 
-/// Reconcile every tank mesh's render layer from live sight mode, control ownership, and mesh set.
+/// Point the one 3D camera at the channel set its current view wants.
 ///
-/// Invariant: this runs every frame because control and asynchronously-instantiated meshes can
-/// change without a sight-mode event. `RenderLayers` does not inherit, so each mesh is written only
-/// when its layer differs.
-fn reconcile_optic_render_layers(
+/// This is the entire "hide the player's own tank in the gunner optic" mechanism now: ONE
+/// component on ONE entity, O(1) in the size of the world. The optic profile drops
+/// `ViewSubjectBody` and keeps drawing everything else — it is not a "hide" flag and it is not a
+/// second camera.
+fn apply_sight_camera_profile(
     mode: Res<SightMode>,
-    controlled: Query<Entity, With<Controlled>>,
-    tanks: Query<Entity, With<Tank>>,
-    children: Query<&Children>,
-    meshes: Query<Option<&RenderLayers>, With<Mesh3d>>,
-    mut commands: Commands,
+    mut cameras: Query<&mut CameraProfile, With<Camera3d>>,
 ) {
-    let controlled_tank = controlled.single().ok();
-    let gunner = *mode == SightMode::Gunner;
-    for tank in &tanks {
-        let desired = desired_optic_layer(gunner, Some(tank) == controlled_tank);
-        for entity in children.iter_descendants(tank) {
-            if let Ok(current) = meshes.get(entity)
-                && current != Some(&desired)
-            {
-                commands.entity(entity).insert(desired.clone());
-            }
-        }
+    let want = match *mode {
+        SightMode::Gunner => CameraProfile::BattlefieldOptic,
+        SightMode::ThirdPerson => CameraProfile::BattlefieldThirdPerson,
+    };
+    for mut profile in &mut cameras {
+        profile.set_if_neq(want);
     }
 }
 
@@ -1236,184 +867,176 @@ fn drive_free_aim(
     }
 }
 
-/// Show/hide the black overlay + prompt when the active view's crewman is dead. The prompt tells
-/// the player to press Lshift to switch to the other view if its crewman is alive; if both are
-/// dead, the prompt says so (the tank is effectively dead — 0 living crew imminent).
-///
-/// On the NET client this participates in the overlay authority: it runs in
-/// [`overlay::OverlaySet::Declare`] and only DECLARES `Overlay::ViewDead` presence (+ refreshes the
-/// prompt text), leaving the visibility swap to the shared `overlay::apply_overlay_visibility`
-/// reconciler that runs AFTER `Declare`. That split is the ordering fix: the one-scrim decision reads a
-/// fully-declared set, so this black is suppressed entirely whenever a higher overlay (the death screen
-/// above all, but also the menu / connect screen) owns the scrim — whole-crew death shows "YOU DIED",
-/// not this black. In single-player the `Overlays` resource is absent (`Option` is `None`) and this
-/// system sets the node's visibility itself, standalone as before: crewman down → black + prompt.
-fn update_view_death_overlay(
-    mode: Res<SightMode>,
-    controlled: ControlledTank,
-    views: Query<&TankViews, With<Controlled>>,
-    overlays: Option<ResMut<Overlays>>,
-    mut overlay_vis: Query<&mut Visibility, With<ViewDeathOverlay>>,
-    mut label: Query<&mut Text, With<ViewDeathText>>,
-) {
-    let has_controlled = controlled.entity().is_some();
-    // The overlay's `Visibility` lives on the full-screen node; its prompt `Text` on the child.
-    let (Ok(mut vis), Ok(mut text)) = (overlay_vis.single_mut(), label.single_mut()) else {
-        return;
-    };
-
-    let (active_view, other_view, other_label) = match *mode {
-        SightMode::ThirdPerson => (ViewKind::Commander, ViewKind::Gunner, "gunner optic"),
-        SightMode::Gunner => (ViewKind::Gunner, ViewKind::Commander, "third-person"),
-    };
-
-    // The active view's crewman is down — the standalone condition for wanting this overlay. Gated on a
-    // controlled tank existing (no station to be dead without one).
-    let crewman_down = has_controlled && !view_available(&controlled, &views, active_view);
-
-    // Refresh the prompt whenever the active crewman is down (identical in both modes); a hidden node's
-    // stale text is harmless and re-derived here before it can be shown again.
-    if crewman_down {
-        let other_available = view_available(&controlled, &views, other_view);
-        *text = Text::new(if other_available {
-            format!("Crewman down — [Lshift] for {other_label}")
-        } else {
-            "All view crew down".to_string()
-        });
-    }
-
-    match overlays {
-        // Net client: DECLARE presence only; the shared reconciler owns visibility from the fully-
-        // declared set (suppressed under any higher overlay). We must not also write `Visibility` here
-        // — that would double-write it and read a not-yet-reconciled set.
-        Some(mut overlays) => overlays.declare(Overlay::ViewDead, crewman_down),
-        // Single-player: no authority — draw whenever the active crewman is down.
-        None => {
-            vis.set_if_neq(if crewman_down {
-                Visibility::Visible
-            } else {
-                Visibility::Hidden
-            });
-        }
-    }
-}
-
-/// Tick the refusal toast: show its message while it has time left, then hide it. Set by
-/// `toggle_sight` when a view switch is refused (the target view's crewman is down).
-fn update_toast(
-    time: Res<Time>,
-    mut toast: ResMut<Toast>,
-    mut label: Query<(&mut Text, &mut Visibility), With<ToastText>>,
-) {
-    let Ok((mut text, mut visibility)) = label.single_mut() else {
-        return;
-    };
-    if toast.remaining > 0.0 {
-        toast.remaining -= time.delta_secs();
-        *text = Text::new(toast.message.clone());
-        *visibility = Visibility::Visible;
-    } else if *visibility != Visibility::Hidden {
-        *visibility = Visibility::Hidden;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Regression: the continuous reconcile handles mesh attachment and control changes.
-    #[test]
-    fn reconcile_lays_layers_across_transitions() {
-        let mut app = App::new();
-        app.init_resource::<SightMode>();
-        app.add_systems(Update, reconcile_optic_render_layers);
+    use crate::render_policy;
 
-        let world = app.world_mut();
-        let tank_a = world.spawn((Tank, Controlled)).id();
-        let a_direct = world
-            .spawn((Mesh3d(Handle::default()), ChildOf(tank_a)))
-            .id();
-        let a_subnode = world.spawn(ChildOf(tank_a)).id();
-        let a_nested = world
-            .spawn((Mesh3d(Handle::default()), ChildOf(a_subnode)))
-            .id();
-        let tank_b = world.spawn((Tank,)).id();
-        let b_mesh = world
-            .spawn((Mesh3d(Handle::default()), ChildOf(tank_b)))
-            .id();
+    /// The game's shape in miniature: one camera, the sun, two tanks with meshes at two depths, and
+    /// both sight systems plus the `render_policy` resolver wired exactly as the client mounts them.
+    struct Views {
+        app: App,
+        camera: Entity,
+        sun: Entity,
+    }
 
-        let hidden = RenderLayers::layer(OPTIC_HIDDEN_LAYER);
-        let shown = RenderLayers::layer(0);
-        let layer = |app: &App, e: Entity| {
-            app.world()
-                .entity(e)
-                .get::<RenderLayers>()
-                .cloned()
-                .expect("every mesh carries a RenderLayers after reconcile")
-        };
-
-        // 1. Third person: every mesh, both tanks, on layer 0.
-        app.update();
-        for e in [a_direct, a_nested, b_mesh] {
-            assert_eq!(layer(&app, e), shown, "third person: mesh {e:?} on layer 0");
+    impl Views {
+        fn new() -> Self {
+            let mut app = App::new();
+            app.init_resource::<SightMode>();
+            app.add_plugins(render_policy::plugin);
+            app.add_systems(Update, (mark_view_subject_body, apply_sight_camera_profile));
+            let camera = app
+                .world_mut()
+                .spawn((Camera3d::default(), CameraProfile::BattlefieldThirdPerson))
+                .id();
+            let sun = app
+                .world_mut()
+                .spawn(render_policy::LightProfile::BattlefieldSun)
+                .id();
+            Self { app, camera, sun }
         }
 
-        // 2. Gunner: the controlled tank's meshes hide; the opponent's stay visible.
-        *app.world_mut().resource_mut::<SightMode>() = SightMode::Gunner;
-        app.update();
-        assert_eq!(
-            layer(&app, a_direct),
-            hidden,
-            "gunner: own direct mesh hidden"
-        );
-        assert_eq!(
-            layer(&app, a_nested),
-            hidden,
-            "gunner: own nested mesh hidden"
-        );
-        assert_eq!(layer(&app, b_mesh), shown, "gunner: opponent stays visible");
+        fn tank(&mut self, controlled: bool) -> Entity {
+            let mut tank = self.app.world_mut().spawn((Tank, VisualScope::WORLD_SOLID));
+            if controlled {
+                tank.insert(Controlled);
+            }
+            tank.id()
+        }
 
-        // 3. A NEW mesh attaches under the controlled tank WHILE in the optic (the async-attach case
-        // the one-shot stamp missed) — the next frame lands it hidden.
-        let a_late = app
-            .world_mut()
-            .spawn((Mesh3d(Handle::default()), ChildOf(tank_a)))
-            .id();
-        app.update();
-        assert_eq!(
-            layer(&app, a_late),
-            hidden,
-            "async-attached mesh hides on the next reconcile (old event-driven design misses it)"
+        fn mesh(&mut self, parent: Entity) -> Entity {
+            self.app
+                .world_mut()
+                .spawn((Mesh3d(Handle::default()), ChildOf(parent)))
+                .id()
+        }
+
+        fn set_mode(&mut self, mode: SightMode) {
+            *self.app.world_mut().resource_mut::<SightMode>() = mode;
+        }
+
+        /// Does the player SEE this mesh right now? The law, not the bit.
+        fn drawn(&self, mesh: Entity) -> bool {
+            render_policy::reaches(self.app.world(), self.camera, mesh)
+        }
+
+        fn lit_by_sun(&self, mesh: Entity) -> bool {
+            render_policy::reaches(self.app.world(), self.sun, mesh)
+        }
+    }
+
+    /// Regression, carried over from the per-frame layer sweep this replaces: the five transitions
+    /// that each cost a bug once. Phase 3 (a mesh attaching asynchronously while the optic is up)
+    /// and phase 4 (control moving between tanks with NO `SightMode` write — the multiplayer
+    /// respawn) are the two that a one-shot, event-driven stamp gets wrong.
+    ///
+    /// Stated as "is it drawn", never as a layer number: the guarantees are about what the player
+    /// sees, and they must survive a renumbering of the channels.
+    #[test]
+    fn the_view_subject_follows_control_and_late_meshes() {
+        let mut views = Views::new();
+        let tank_a = views.tank(true);
+        let a_direct = views.mesh(tank_a);
+        let a_subnode = views.app.world_mut().spawn(ChildOf(tank_a)).id();
+        let a_nested = views.mesh(a_subnode);
+        let tank_b = views.tank(false);
+        let b_mesh = views.mesh(tank_b);
+
+        // 1. Third person: everything is drawn, both tanks.
+        views.app.update();
+        for mesh in [a_direct, a_nested, b_mesh] {
+            assert!(views.drawn(mesh), "third person: mesh {mesh:?} is drawn");
+        }
+
+        // 2. Gunner: the controlled tank's body drops out; the opponent's does not.
+        views.set_mode(SightMode::Gunner);
+        views.app.update();
+        assert!(!views.drawn(a_direct), "gunner: own direct mesh hidden");
+        assert!(!views.drawn(a_nested), "gunner: own nested mesh hidden");
+        assert!(views.drawn(b_mesh), "gunner: opponent stays visible");
+
+        // 3. A NEW mesh attaches under the controlled tank WHILE in the optic — the async glb
+        // arrival the one-shot stamp missed.
+        let a_late = views.mesh(tank_a);
+        views.app.update();
+        assert!(
+            !views.drawn(a_late),
+            "a mesh attached while the optic is up inherits its tank's scope"
         );
 
         // 4. Move `Controlled` to the opponent with NO `SightMode` write — the multiplayer respawn.
-        // Old tank's meshes return to layer 0; the newly controlled tank's meshes hide.
-        app.world_mut().entity_mut(tank_a).remove::<Controlled>();
-        app.world_mut().entity_mut(tank_b).insert(Controlled);
-        app.update();
-        for e in [a_direct, a_nested, a_late] {
-            assert_eq!(
-                layer(&app, e),
-                shown,
-                "respawn: stepped-out tank's mesh {e:?} back to layer 0"
+        views
+            .app
+            .world_mut()
+            .entity_mut(tank_a)
+            .remove::<Controlled>();
+        views.app.world_mut().entity_mut(tank_b).insert(Controlled);
+        views.app.update();
+        for mesh in [a_direct, a_nested, a_late] {
+            assert!(
+                views.drawn(mesh),
+                "respawn: the stepped-out tank's mesh {mesh:?} is world geometry again"
             );
         }
-        assert_eq!(
-            layer(&app, b_mesh),
-            hidden,
-            "respawn: newly controlled tank hides with no SightMode change (the bug)"
+        assert!(
+            !views.drawn(b_mesh),
+            "respawn: the newly controlled tank drops out with no SightMode change (the bug)"
         );
 
-        // 5. Back to third person: every mesh on layer 0 again.
-        *app.world_mut().resource_mut::<SightMode>() = SightMode::ThirdPerson;
-        app.update();
-        for e in [a_direct, a_nested, a_late, b_mesh] {
-            assert_eq!(
-                layer(&app, e),
-                shown,
-                "back to third person: mesh {e:?} on layer 0"
+        // 5. Back to third person: everything drawn again.
+        views.set_mode(SightMode::ThirdPerson);
+        views.app.update();
+        for mesh in [a_direct, a_nested, a_late, b_mesh] {
+            assert!(views.drawn(mesh), "back to third person: {mesh:?} is drawn");
+        }
+    }
+
+    /// The controlled tank must keep CASTING while the player is inside its optic. Hiding a body
+    /// from one camera and removing it from the sun are two different decisions, and the mechanism
+    /// this replaces could not tell them apart — anything it hid stopped casting, which is why the
+    /// track ribbon needed an exemption and an alpha trick to survive.
+    ///
+    /// Asserted in the SHAPE the game builds: an ordinary hull mesh and a shadow-proxy ribbon under
+    /// the same controlled tank, across the mode transition, because the proxy's whole failure mode
+    /// is being invisible while it fails.
+    #[test]
+    fn the_view_subject_and_its_shadow_proxy_keep_casting_in_the_gunner_optic() {
+        let mut views = Views::new();
+        let tank = views.tank(true);
+        let hull = views.mesh(tank);
+        let ribbon = views
+            .app
+            .world_mut()
+            .spawn((
+                Mesh3d(Handle::default()),
+                VisualScope::SHADOW_PROXY,
+                ChildOf(tank),
+            ))
+            .id();
+
+        for mode in [SightMode::ThirdPerson, SightMode::Gunner] {
+            views.set_mode(mode);
+            views.app.update();
+            assert!(
+                views.lit_by_sun(hull) && render_policy::casts_shadow(views.app.world(), hull),
+                "the player's own hull casts in every view"
+            );
+            assert!(
+                views.lit_by_sun(ribbon) && render_policy::casts_shadow(views.app.world(), ribbon),
+                "the track ribbon casts in every view — off the sun's mask the controlled tank's \
+                 tracks lose their shadow for as long as the sight is up"
+            );
+            assert!(
+                !views.drawn(ribbon),
+                "and no camera ever draws it, in either view"
             );
         }
+        assert!(
+            !views.drawn(hull),
+            "the hull is still dropped by the optic — the shadow guarantee is not a blanket"
+        );
     }
 
     /// The margin is pinned at the Tiger's authored 0.12 rad optic (≈0.054 rad) and scales with FOV

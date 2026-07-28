@@ -240,7 +240,7 @@ pub struct SideState {
     pub speed: f32,
     /// Belt travel (m) — advects the force stations; also the view's scroll phase. `f64`: it
     /// grows unbounded and an f32 loses sub-pitch precision within a long match's driving
-    /// distance (codex phase-B finding 8).
+    /// distance.
     pub phase: f64,
     /// The side's summed element grip force (N): `x` longitudinal, `y` lateral. Derived
     /// telemetry over the element field (the authoritative state is the caller-owned
@@ -475,28 +475,17 @@ pub fn contact_side<O: TerrainOracle>(
         state,
         ..Default::default()
     };
-    let belt_speed = state.speed;
-    let mut belt_reaction = 0.0;
 
     let pitch = polyline_len(input.loop_pts) / input.count.max(1) as f32;
     let (wraps, station_offset) = phase_decompose(state.phase, pitch);
     let mut stations = resample(input.loop_pts, pitch, station_offset);
     stations.truncate(input.count);
-    let n = stations.len();
-    if n < 3 {
+    if stations.len() < 3 {
         return (report, false);
     }
 
-    // The support datum: probes cast from the contact envelope (outer face + local free
-    // travel), so penetration measures the ground's intrusion into the suspension band, not
-    // into the rest face. The travel is position-dependent (unsprung arcs at 0, road-wheel
-    // span at full droop).
-    let travel_at = |z: f32| -> f32 { input.travel.at(z) };
-
-    let k = params.grip_stiffness;
-    // INVARIANT (REV-14): the caller owns
-    // FIXED-SIZE slabs, constructed `count * 3` at spawn ([`GripElements::for_links`]). The
-    // branch that used to live here cleared and re-sized mismatched slabs at runtime — which
+    // INVARIANT (REV-14): the caller owns FIXED-SIZE slabs, constructed `count * 3` at spawn
+    // ([`GripElements::for_links`]). The branch that used to live here cleared and re-sized mismatched slabs at runtime — which
     // erases valid strain exactly when it matters most: a predicted root that runs one
     // driving tick before its authoritative JIP seed arrives records a zeroed field into
     // local prediction history and replay follows it; a snapshot with one mismatched slab
@@ -512,34 +501,146 @@ pub fn contact_side<O: TerrainOracle>(
         elements.strain.len(),
         elements.dwell.len(),
     );
-    let elements_mode = sized && k > 0.0;
-    // Membership evidence pass 1 cannot put in `cols`: columns whose damped support load
-    // clipped to zero while elastic penetration remains — the pad is still ON the ground
-    // (a separating/noisy tick), and element strain must survive it. Station order —
-    // deterministic, fixed bound (`count * 3`).
+    let elements_mode = sized && params.grip_stiffness > 0.0;
+
+    let (cols, held) = collect_column_contacts(
+        input,
+        &stations,
+        wraps,
+        affine,
+        params,
+        oracle,
+        vel_at,
+        state.speed,
+        elements_mode,
+        &mut report,
+    );
+    let elem_g = if elements_mode {
+        update_grip_elements(&cols, &held, elements, params, dt, element_len, &mut report)
+    } else {
+        Vec::new()
+    };
+    let (elem_sum, belt_reaction) =
+        emit_contact_forces(&mut report, &cols, &elem_g, params.mu, elements_mode);
+
+    // The grip slot carries the summed element force (long, lat) — telemetry only (the
+    // element state is authoritative and lives with the caller). Belt dynamics (the governor
+    // tail, or the joint transmission) integrate AFTER this pass — `state.speed`/
+    // `state.phase` are returned untouched, the pre-tick truth the phase advection and the
+    // transmission both key on.
+    report.state.grip = elem_sum;
+    report.belt_reaction = belt_reaction;
+    (report, true)
+}
+
+/// One station segment × one lateral column, after support has resolved but before any force
+/// is emitted — the intermediate [`contact_side`] pass 1 produces and the element regime and
+/// pass 2 consume.
+struct ColumnContact {
+    p: Vec3,
+    normal: Vec3,
+    load: f32,
+    load_elastic: f32,
+    long_dir: Vec3,
+    lat_dir: Vec3,
+    has_plane: bool,
+    slip_long: f32,
+    slip_lat: f32,
+    /// Flat material-element index (`link * 3 + column`) — the per-element grip key.
+    element: usize,
+    #[cfg(feature = "bitprobe")]
+    probe_index: usize,
+}
+
+/// Sample the three-point piecewise-linear profile (`v` at `0`, `len/2`, `len`) at `x` — the
+/// same two-half interpolation the pressure profile itself is built from, so the penetration
+/// and the travel datum at the centroid are read off ONE shape.
+fn sample_halves(x: f32, len: f32, v: [f32; 3]) -> f32 {
+    let half = len / 2.0;
+    if x <= half {
+        v[0] + (v[1] - v[0]) * (x / half)
+    } else {
+        v[1] + (v[2] - v[1]) * ((x - half) / half)
+    }
+}
+
+/// Integrate the two-piece clipped-linear pressure profile `pen` (at `0`, `len/2`, `len`) over
+/// one segment. Returns `(∫pen, contacting length, centroid position along the segment)`, or
+/// `None` when the profile carries no positive area (the plate is clear of the ground).
+fn profile_resultant(len: f32, pen: [f32; 3]) -> Option<(f32, f32, f32)> {
+    let (a1, m1, l1) = clipped_linear_piece(0.0, len / 2.0, pen[0], pen[1]);
+    let (a2, m2, l2) = clipped_linear_piece(len / 2.0, len, pen[1], pen[2]);
+    let (area, moment, contact_len) = (a1 + a2, m1 + m2, l1 + l2);
+    if area <= 0.0 {
+        return None;
+    }
+    Some((area, contact_len, moment / area))
+}
+
+/// The contact's tangent frame and the slip it sees: the belt's drive direction projected into
+/// the contact plane, the lateral axis completing it, and the longitudinal/lateral slip speeds
+/// between belt surface and ground point. A segment whose drive direction is (nearly) parallel
+/// to the contact normal has no usable plane — the flag says so and every component is zero, so
+/// the caller emits support only.
+fn contact_frame(
+    affine: Affine3A,
+    tan2: Vec2,
+    normal: Vec3,
+    vel: Vec3,
+    belt_speed: f32,
+) -> (Vec3, Vec3, bool, f32, f32) {
+    let drive = -affine.transform_vector3(Vec3::new(0.0, tan2.y, tan2.x));
+    let long_plane = drive - drive.dot(normal) * normal;
+    let has_plane = long_plane.length() > 1e-4;
+    if !has_plane {
+        return (Vec3::ZERO, Vec3::ZERO, false, 0.0, 0.0);
+    }
+    let long_dir = long_plane.normalize();
+    let lat_dir = normal.cross(long_dir).normalize_or_zero();
+    (
+        long_dir,
+        lat_dir,
+        true,
+        belt_speed - vel.dot(long_dir),
+        vel.dot(lat_dir),
+    )
+}
+
+/// PASS 1 — geometry, support, and slip per contact column. Forces are NOT emitted yet: the
+/// elastic grip resultant needs this tick's total budget and load-weighted slip BEFORE
+/// per-contact traction can include it. Pass 2 emits apps in the exact support-then-traction
+/// per-contact order the one-pass law used — application order is the bit-reproducibility
+/// contract, and it is unchanged.
+///
+/// Returns the resolved contacts plus the membership evidence pass 1 cannot put in them:
+/// columns whose damped support load clipped to zero while elastic penetration remains — the
+/// pad is still ON the ground (a separating/noisy tick), and element strain must survive it.
+/// Station order — deterministic, fixed bound (`count * 3`).
+fn collect_column_contacts<O: TerrainOracle>(
+    input: &SideInput,
+    stations: &[Vec2],
+    wraps: i64,
+    affine: Affine3A,
+    params: &ForceParams,
+    oracle: &O,
+    vel_at: impl Fn(Vec3) -> Vec3,
+    belt_speed: f32,
+    elements_mode: bool,
+    report: &mut SideReport,
+) -> (Vec<ColumnContact>, Vec<(usize, f32)>) {
+    // `report` carries only the measurement-build probe slabs.
+    #[cfg(not(feature = "bitprobe"))]
+    let _ = &report;
+
+    let n = stations.len();
+    let mut cols: Vec<ColumnContact> = Vec::with_capacity(n);
     let mut held: Vec<(usize, f32)> = Vec::new();
 
-    // PASS 1 — geometry, support, and slip per contact column. Forces are NOT emitted yet:
-    // the elastic grip resultant needs this tick's total budget and load-weighted slip
-    // BEFORE per-contact traction can include it. Pass 2 emits apps in the exact
-    // support-then-traction per-contact order the one-pass law used — application order is
-    // the bit-reproducibility contract, and it is unchanged.
-    struct ColumnContact {
-        p: Vec3,
-        normal: Vec3,
-        load: f32,
-        load_elastic: f32,
-        long_dir: Vec3,
-        lat_dir: Vec3,
-        has_plane: bool,
-        slip_long: f32,
-        slip_lat: f32,
-        /// Flat material-element index (`link * 3 + column`) — the per-element grip key.
-        element: usize,
-        #[cfg(feature = "bitprobe")]
-        probe_index: usize,
-    }
-    let mut cols: Vec<ColumnContact> = Vec::with_capacity(n);
+    // The support datum: probes cast from the contact envelope (outer face + local free
+    // travel), so penetration measures the ground's intrusion into the suspension band, not
+    // into the rest face. The travel is position-dependent (unsprung arcs at 0, road-wheel
+    // span at full droop).
+    let travel_at = |z: f32| -> f32 { input.travel.at(z) };
 
     // Material identity under advection: station `i` samples arc `offset + i·pitch`, so the
     // material link there is `i − wraps` (mod count) — when the sampling offset wraps, the
@@ -574,14 +675,14 @@ pub fn contact_side<O: TerrainOracle>(
         // varies along the approach runs, so each probe carries its own offset. Ground-facing
         // segments only (hull-local outward normal pointing down): the suspension band exists
         // under the belly, never over the return run.
-        let (t_a, t_m, t_b) = if out2.y < 0.0 {
-            (travel_at(a.x), travel_at((a.x + b.x) / 2.0), travel_at(b.x))
+        let travel = if out2.y < 0.0 {
+            [travel_at(a.x), travel_at((a.x + b.x) / 2.0), travel_at(b.x)]
         } else {
-            (0.0, 0.0, 0.0)
+            [0.0; 3]
         };
-        let face_a = out * (params.face_offset + t_a);
-        let face_m = out * (params.face_offset + t_m);
-        let face_b = out * (params.face_offset + t_b);
+        let face_a = out * (params.face_offset + travel[0]);
+        let face_m = out * (params.face_offset + travel[1]);
+        let face_b = out * (params.face_offset + travel[2]);
 
         // The shoe is sampled as three lateral COLUMNS (measured faces + centre — see
         // [`SideInput::columns`]): each column runs the full profile machinery on its own
@@ -604,9 +705,15 @@ pub fn contact_side<O: TerrainOracle>(
             // reach of phantom penetration whose load points DOWN (−out), a self-burying
             // feedback (measured: the headless Tiger tail-sunk at 1.46 m of 4 s full
             // throttle).
-            let pen_a = oracle.depth_along(ca + face_a, out, params.probe_reach + t_a);
-            let pen_m = oracle.depth_along((ca + cb) / 2.0 + face_m, out, params.probe_reach + t_m);
-            let pen_b = oracle.depth_along(cb + face_b, out, params.probe_reach + t_b);
+            let pen = [
+                oracle.depth_along(ca + face_a, out, params.probe_reach + travel[0]),
+                oracle.depth_along(
+                    (ca + cb) / 2.0 + face_m,
+                    out,
+                    params.probe_reach + travel[1],
+                ),
+                oracle.depth_along(cb + face_b, out, params.probe_reach + travel[2]),
+            ];
             #[cfg(feature = "bitprobe")]
             let probe_index = {
                 let (query_a, query_m, query_b) =
@@ -621,7 +728,7 @@ pub fn contact_side<O: TerrainOracle>(
                     query_b,
                     out,
                     reach: params.probe_reach,
-                    depths: [pen_a, pen_m, pen_b],
+                    depths: pen,
                 });
                 report.bitprobe_elements.push(ElementOutputProbe {
                     station: i as u32,
@@ -631,34 +738,21 @@ pub fn contact_side<O: TerrainOracle>(
                 });
                 report.bitprobe_elements.len() - 1
             };
-            let pen_max = pen_a.max(pen_m).max(pen_b);
+            let pen_max = pen[0].max(pen[1]).max(pen[2]);
             if pen_max <= 0.0 {
                 continue;
             }
 
-            let (a1, m1, l1) = clipped_linear_piece(0.0, len / 2.0, pen_a, pen_m);
-            let (a2, m2, l2) = clipped_linear_piece(len / 2.0, len, pen_m, pen_b);
-            let (area, moment, contact_len) = (a1 + a2, m1 + m2, l1 + l2);
-            if area <= 0.0 {
+            let Some((area, contact_len, x_c)) = profile_resultant(len, pen) else {
                 continue;
-            }
+            };
             // Resultant at the terrain surface, on this column: the profile's own value at
             // the centroid position. (The normal force is offset-invariant along its own
-            // line; the traction lever is not.)
-            let x_c = moment / area;
-            let pen_c = if x_c <= len / 2.0 {
-                pen_a + (pen_m - pen_a) * (x_c / (len / 2.0))
-            } else {
-                pen_m + (pen_b - pen_m) * ((x_c - len / 2.0) / (len / 2.0))
-            }
-            .max(0.0);
-            // The centroid's own datum: interpolate the travel exactly like the penetration,
-            // so `p` lands on the terrain surface under a varying profile too.
-            let t_c = if x_c <= len / 2.0 {
-                t_a + (t_m - t_a) * (x_c / (len / 2.0))
-            } else {
-                t_m + (t_b - t_m) * ((x_c - len / 2.0) / (len / 2.0))
-            };
+            // line; the traction lever is not.) The centroid's own datum interpolates the
+            // travel exactly like the penetration, so `p` lands on the terrain surface under
+            // a varying profile too.
+            let pen_c = sample_halves(x_c, len, pen).max(0.0);
+            let t_c = sample_halves(x_c, len, travel);
             let p = ca + axis * x_c + out * (params.face_offset + t_c - pen_c);
 
             // Support: penalty spring along the belt's own inward normal, at the column's
@@ -687,21 +781,8 @@ pub fn contact_side<O: TerrainOracle>(
                 continue;
             }
 
-            let drive = -affine.transform_vector3(Vec3::new(0.0, tan2.y, tan2.x));
-            let long_plane = drive - drive.dot(normal) * normal;
-            let has_plane = long_plane.length() > 1e-4;
-            let (long_dir, lat_dir, slip_long, slip_lat) = if has_plane {
-                let long_dir = long_plane.normalize();
-                let lat_dir = normal.cross(long_dir).normalize_or_zero();
-                (
-                    long_dir,
-                    lat_dir,
-                    belt_speed - vel.dot(long_dir),
-                    vel.dot(lat_dir),
-                )
-            } else {
-                (Vec3::ZERO, Vec3::ZERO, 0.0, 0.0)
-            };
+            let (long_dir, lat_dir, has_plane, slip_long, slip_lat) =
+                contact_frame(affine, tan2, normal, vel, belt_speed);
 
             cols.push(ColumnContact {
                 p,
@@ -719,122 +800,155 @@ pub fn contact_side<O: TerrainOracle>(
             });
         }
     }
+    (cols, held)
+}
 
-    // The per-element isotropic shear regime (static-friction-design.md §3; see
-    // [`GripElements`]). Each grounded element integrates its own world-space shear vector;
-    // membership and budgets key on the ELASTIC load, never the damped actual load: the
-    // damped load carries the support damper's tick-scale transients, and feeding those into
-    // an integrating state amplified a marginal mm-scale Nyquist wobble into a full force
-    // limit cycle (measured: ±90 kN damped-load alternation over a ±11 kN elastic wobble,
-    // hull perfectly smooth — the support damper converts wobble rate into load asymmetry,
-    // grip fed it back). Force is the strain direction itself — isotropic, NO ellipse:
-    // lateral-vs-longitudinal asymmetry and turning resistance are left to emerge from
-    // footprint geometry.
-    let mut elem_g: Vec<Vec2> = Vec::new();
-    if elements_mode {
-        let elems = &mut *elements;
-        // Membership bounds from the side's nominal weight, recovered from the declared
-        // stiffness (`grip_stiffness = μ·W/2/K`) — no new vehicle datum.
-        let side_weight = k * GRIP_SHEAR_MODULUS_M / params.mu;
-        let enter = side_weight * GRIP_ELEMENT_ENTER_FRACTION;
-        let leave = side_weight * GRIP_ELEMENT_LEAVE_FRACTION;
-        let mut kept = vec![false; element_len];
-        elem_g = vec![Vec2::ZERO; cols.len()];
-        // The damping partner, normalized per unit budget: σ1 = 2ζ√(K·m) reduced through
-        // the stiffness derivation, at the LuGre-canonical ζ.
-        let d_coef =
-            2.0 * GRIP_ELEMENT_DAMPING_RATIO / (GRIP_SHEAR_MODULUS_M * params.mu * 9.81).sqrt();
-        for (idx, c) in cols.iter().enumerate() {
-            // ENTER above the high bound; STAY down to the low bound while already a member
-            // (hysteresis + dwell refresh). Never the damped load's sign — see
-            // [`GRIP_ELEMENT_ENTER_FRACTION`].
-            let member =
-                c.load_elastic >= enter || (c.load_elastic >= leave && elems.dwell[c.element] > 0);
-            if member {
-                elems.dwell[c.element] = GRIP_ELEMENT_LOSS_DWELL_TICKS;
-                kept[c.element] = true;
+/// One element's shear state after this tick: the Dupont elasto-plastic update — pure spring
+/// below breakaway or when slip unloads it, smoothstepping to full Dahl flow at one shear
+/// modulus of strain. The result is kept in the contact tangent plane (terrain curvature
+/// rotates it out) and capped at one shear modulus (the Dahl saturation the rational update
+/// converges to; the projection is the α < 1 safety net).
+fn advance_element_strain(j0: Vec3, sdot: Vec3, normal: Vec3, dt: f32) -> Vec3 {
+    let speed = sdot.length();
+    let alpha = if j0.dot(sdot) < 0.0 {
+        0.0
+    } else {
+        let m = ((j0.length() / GRIP_SHEAR_MODULUS_M - GRIP_BREAKAWAY) / (1.0 - GRIP_BREAKAWAY))
+            .clamp(0.0, 1.0);
+        m * m * (3.0 - 2.0 * m)
+    };
+    let mut j1 = (j0 + sdot * dt) / (1.0 + alpha * (dt / GRIP_SHEAR_MODULUS_M) * speed);
+    j1 -= j1.dot(normal) * normal;
+    let j_len = j1.length();
+    if j_len > GRIP_SHEAR_MODULUS_M {
+        j1 *= GRIP_SHEAR_MODULUS_M / j_len;
+    }
+    j1
+}
+
+/// Definitive departure only: the dwell rides out contact flicker; when it expires the pad has
+/// truly left the ground (cycled to the return run, or lifted off) and forgets — its shear was
+/// relieved by ground it no longer touches. `kept` flags the elements this tick found evidence
+/// for; every other element counts down.
+fn forget_departed_elements(kept: &[bool], elements: &mut GripElements) {
+    for ((&kept, dwell), strain) in kept
+        .iter()
+        .zip(elements.dwell.iter_mut())
+        .zip(elements.strain.iter_mut())
+    {
+        if !kept {
+            let d = dwell.saturating_sub(1);
+            *dwell = d;
+            if d == 0 {
+                *strain = Vec3::ZERO;
             }
-            if !c.has_plane || c.load_elastic <= 0.0 {
-                continue;
-            }
-            // World-space shear rate in FORCE convention: the direction friction pushes the
-            // hull (+slip_long along long_dir, −slip_lat along lat_dir — the kinetic law's
-            // signs, vectorized).
-            let sdot = c.long_dir * c.slip_long - c.lat_dir * c.slip_lat;
-            let j1 = if c.load_elastic >= enter {
-                let speed = sdot.length();
-                let j0 = elems.strain[c.element];
-                // Dupont elasto-plastic α, per element: pure spring below breakaway or when
-                // slip unloads it; smoothstep to full Dahl flow at one shear modulus of
-                // strain.
-                let alpha = if j0.dot(sdot) < 0.0 {
-                    0.0
-                } else {
-                    let m = ((j0.length() / GRIP_SHEAR_MODULUS_M - GRIP_BREAKAWAY)
-                        / (1.0 - GRIP_BREAKAWAY))
-                        .clamp(0.0, 1.0);
-                    m * m * (3.0 - 2.0 * m)
-                };
-                let mut j1 = (j0 + sdot * dt) / (1.0 + alpha * (dt / GRIP_SHEAR_MODULUS_M) * speed);
-                // Keep the strain in the contact tangent plane (terrain curvature rotates it
-                // out), and cap at one shear modulus (the Dahl saturation the rational update
-                // converges to; the projection is the α < 1 safety net).
-                j1 -= j1.dot(c.normal) * c.normal;
-                let j_len = j1.length();
-                if j_len > GRIP_SHEAR_MODULUS_M {
-                    j1 *= GRIP_SHEAR_MODULUS_M / j_len;
-                }
-                elems.strain[c.element] = j1;
-                j1
-            } else {
-                // Below the enter bound (hysteresis band, or a fading straggler): stored
-                // strain HELD, not integrated — the low-load policy (see
-                // [`GRIP_ELEMENT_ENTER_FRACTION`]); force still scales by the current
-                // elastic load, so engagement fades continuously.
-                elems.strain[c.element]
-            };
-            let mut g = j1 / GRIP_SHEAR_MODULUS_M + sdot * d_coef;
-            let g_len = g.length();
-            if g_len > 1.0 {
-                g /= g_len;
-            }
-            elem_g[idx] = Vec2::new(g.dot(c.long_dir), g.dot(c.lat_dir));
-        }
-        // Columns the damped support clipped out this tick but whose elastic penetration
-        // remains: still on the ground — membership continues, stored strain holds, no force
-        // (support omitted the contact entirely).
-        for &(el, e) in &held {
-            if e >= enter || (e >= leave && elems.dwell[el] > 0) {
-                elems.dwell[el] = GRIP_ELEMENT_LOSS_DWELL_TICKS;
-                kept[el] = true;
-            }
-        }
-        // Definitive departure only: the dwell rides out contact flicker; when it expires
-        // the pad has truly left the ground (cycled to the return run, or lifted off) and
-        // forgets — its shear was relieved by ground it no longer touches.
-        for ((&kept, dwell), strain) in kept
-            .iter()
-            .zip(elems.dwell.iter_mut())
-            .zip(elems.strain.iter_mut())
-        {
-            if !kept {
-                let d = dwell.saturating_sub(1);
-                *dwell = d;
-                if d == 0 {
-                    *strain = Vec3::ZERO;
-                }
-            }
-        }
-        #[cfg(feature = "bitprobe")]
-        for output in &mut report.bitprobe_elements {
-            let element = output.material as usize * 3 + output.column as usize;
-            output.strain = elems.strain[element];
-            output.dwell = u32::from(elems.dwell[element]);
         }
     }
+}
 
-    // PASS 2 — emit forces in the original per-contact order: support, then traction.
+/// The per-element isotropic shear regime (static-friction-design.md §3; see [`GripElements`]).
+/// Each grounded element integrates its own world-space shear vector; membership and budgets
+/// key on the ELASTIC load, never the damped actual load: the damped load carries the support
+/// damper's tick-scale transients, and feeding those into an integrating state amplified a
+/// marginal mm-scale Nyquist wobble into a full force limit cycle (measured: ±90 kN damped-load
+/// alternation over a ±11 kN elastic wobble, hull perfectly smooth — the support damper
+/// converts wobble rate into load asymmetry, grip fed it back). Force is the strain direction
+/// itself — isotropic, NO ellipse: lateral-vs-longitudinal asymmetry and turning resistance are
+/// left to emerge from footprint geometry.
+///
+/// Advances `elements` in place and returns each contact's capped grip direction as
+/// `(longitudinal, lateral)` components of a unit-bounded vector — pass 2 scales it by μ × that
+/// contact's elastic load.
+fn update_grip_elements(
+    cols: &[ColumnContact],
+    held: &[(usize, f32)],
+    elements: &mut GripElements,
+    params: &ForceParams,
+    dt: f32,
+    element_len: usize,
+    report: &mut SideReport,
+) -> Vec<Vec2> {
+    // `report` carries only the measurement-build probe slabs.
+    #[cfg(not(feature = "bitprobe"))]
+    let _ = &report;
+
+    // Membership bounds from the side's nominal weight, recovered from the declared
+    // stiffness (`grip_stiffness = μ·W/2/K`) — no new vehicle datum.
+    let side_weight = params.grip_stiffness * GRIP_SHEAR_MODULUS_M / params.mu;
+    let enter = side_weight * GRIP_ELEMENT_ENTER_FRACTION;
+    let leave = side_weight * GRIP_ELEMENT_LEAVE_FRACTION;
+    let mut kept = vec![false; element_len];
+    let mut elem_g = vec![Vec2::ZERO; cols.len()];
+    // The damping partner, normalized per unit budget: σ1 = 2ζ√(K·m) reduced through
+    // the stiffness derivation, at the LuGre-canonical ζ.
+    let d_coef =
+        2.0 * GRIP_ELEMENT_DAMPING_RATIO / (GRIP_SHEAR_MODULUS_M * params.mu * 9.81).sqrt();
+    for (idx, c) in cols.iter().enumerate() {
+        // ENTER above the high bound; STAY down to the low bound while already a member
+        // (hysteresis + dwell refresh). Never the damped load's sign — see
+        // [`GRIP_ELEMENT_ENTER_FRACTION`].
+        let member =
+            c.load_elastic >= enter || (c.load_elastic >= leave && elements.dwell[c.element] > 0);
+        if member {
+            elements.dwell[c.element] = GRIP_ELEMENT_LOSS_DWELL_TICKS;
+            kept[c.element] = true;
+        }
+        if !c.has_plane || c.load_elastic <= 0.0 {
+            continue;
+        }
+        // World-space shear rate in FORCE convention: the direction friction pushes the
+        // hull (+slip_long along long_dir, −slip_lat along lat_dir — the kinetic law's
+        // signs, vectorized).
+        let sdot = c.long_dir * c.slip_long - c.lat_dir * c.slip_lat;
+        let j1 = if c.load_elastic >= enter {
+            let j1 = advance_element_strain(elements.strain[c.element], sdot, c.normal, dt);
+            elements.strain[c.element] = j1;
+            j1
+        } else {
+            // Below the enter bound (hysteresis band, or a fading straggler): stored
+            // strain HELD, not integrated — the low-load policy (see
+            // [`GRIP_ELEMENT_ENTER_FRACTION`]); force still scales by the current
+            // elastic load, so engagement fades continuously.
+            elements.strain[c.element]
+        };
+        let mut g = j1 / GRIP_SHEAR_MODULUS_M + sdot * d_coef;
+        let g_len = g.length();
+        if g_len > 1.0 {
+            g /= g_len;
+        }
+        elem_g[idx] = Vec2::new(g.dot(c.long_dir), g.dot(c.lat_dir));
+    }
+    // Columns the damped support clipped out this tick but whose elastic penetration
+    // remains: still on the ground — membership continues, stored strain holds, no force
+    // (support omitted the contact entirely).
+    for &(el, e) in held {
+        if e >= enter || (e >= leave && elements.dwell[el] > 0) {
+            elements.dwell[el] = GRIP_ELEMENT_LOSS_DWELL_TICKS;
+            kept[el] = true;
+        }
+    }
+    forget_departed_elements(&kept, elements);
+    #[cfg(feature = "bitprobe")]
+    for output in &mut report.bitprobe_elements {
+        let element = output.material as usize * 3 + output.column as usize;
+        output.strain = elements.strain[element];
+        output.dwell = u32::from(elements.dwell[element]);
+    }
+    elem_g
+}
+
+/// PASS 2 — emit forces in the original per-contact order: support, then traction. Fills the
+/// report's application list and contact telemetry, and returns `(summed element force, summed
+/// longitudinal ground reaction)`.
+fn emit_contact_forces(
+    report: &mut SideReport,
+    cols: &[ColumnContact],
+    elem_g: &[Vec2],
+    mu: f32,
+    elements_mode: bool,
+) -> (Vec2, f32) {
     let mut elem_sum = Vec2::ZERO;
+    let mut belt_reaction = 0.0;
     for (idx, c) in cols.iter().enumerate() {
         report.apps.push(ForceApp {
             force: c.normal * c.load,
@@ -853,7 +967,7 @@ pub fn contact_side<O: TerrainOracle>(
             // saturated friction ellipse — so steady sliding converges; what changes is a
             // physical relaxation lag (~C/K of slip distance) in force DIRECTION during fast
             // slides, and fuller sub-saturation traction.
-            let grip_el = params.mu * c.load_elastic;
+            let grip_el = mu * c.load_elastic;
             let g = elem_g[idx];
             f_long = grip_el * g.x;
             f_lat = grip_el * g.y;
@@ -887,15 +1001,7 @@ pub fn contact_side<O: TerrainOracle>(
             output.f_lat = f_lat;
         }
     }
-
-    // The grip slot carries the summed element force (long, lat) — telemetry only (the
-    // element state is authoritative and lives with the caller). Belt dynamics (the governor
-    // tail, or the joint transmission) integrate AFTER this pass — `state.speed`/
-    // `state.phase` are returned untouched, the pre-tick truth the phase advection and the
-    // transmission both key on.
-    report.state.grip = elem_sum;
-    report.belt_reaction = belt_reaction;
-    (report, true)
+    (elem_sum, belt_reaction)
 }
 
 #[cfg(test)]
@@ -1337,8 +1443,8 @@ mod tests {
 
     #[test]
     fn phase_decompose_long_travel() {
-        // ≈10 km of accumulated travel: the precision regime the f64 phase exists for
-        // (codex phase-B finding 8) — boundary neighbours must stay canonical out here too.
+        // ≈10 km of accumulated travel: the precision regime the f64 phase exists for —
+        // boundary neighbours must stay canonical out here too.
         let pitch = 0.152_87_f32;
         let p = f64::from(pitch);
         let m = (10_000.0 / p).floor() * p;
