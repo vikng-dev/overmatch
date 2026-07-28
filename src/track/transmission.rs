@@ -167,39 +167,41 @@
 //!
 //! The module is the complete LAW; the spec block is the complete per-vehicle BEHAVIOR. The
 //! test: would a different tank author it differently? If yes it must live in the spec —
-//! everything below is what legitimately remains a module constant, with the rationale.
+//! below is what legitimately remains a module constant. The table is the INVENTORY and the
+//! classification only; each constant's own doc comment carries its rationale, its units and
+//! its measured bounds, and is the single source for them.
 //!
-//! | constant | class | rationale |
-//! |---|---|---|
-//! | [`GOVERNOR_CUT_RPM`] | SIM POLICY | numerical smoothing width so the top-speed equilibrium is a smooth root, not a hard clip; any governed engine gets the same treatment |
-//! | `DRAG_SAT_SPEED` (REMOVED, stage B) | — | the belt-side drag saturation ramp died with the belt-side drag term; the engine-side spin-up fade is confined below the stall-guard floor `idle − STALL_GUARD_BAND_RPM` (DERIVED from spec, no new const), which the hard clamp makes unreachable for a live crank — so the affine motoring law holds exactly everywhere a running engine can be |
-//! | [`DRAG_THROTTLE_RELEASE`] | SIM POLICY | driver-intent shaping: where "open throttle" stops meaning "motoring"; part of the uniform input contract, same for every tank |
-//! | [`DEAD`] | SIM POLICY | input deadzone on one shared axis mapping |
-//! | [`PARK_ENGAGE_SPEED`] | SIM POLICY | latch threshold for "at rest" — a determinism/stability guard on the shared intent layer |
-//! | [`HILL_HOLD_ENGAGE_SPEED`] | SIM POLICY | anti-rollback near-rest threshold, DERIVED as `5 × PARK_ENGAGE_SPEED` = 0.25 m/s; gives the existing brake/grip law enough stopping distance through a sequential cut without becoming a moving brake |
-//! | [`DIRECTION_SWAP_SPEED`] | SIM POLICY | the intent seam where a held opposite throttle becomes a gear-direction change; uniform game semantics |
-//! | [`NEUTRAL_THROTTLE`], [`NEUTRAL_M_SPEED`] | SIM POLICY | regime-entry thresholds for the L600 neutral turn (the neutral turn's SPEED SCALE — [`TransmissionParams::neutral_d_full`] — is spec-DERIVED); `NEUTRAL_M_SPEED` doubles as the hybrid's blend width into its power-limited pivot regime |
-//! | [`POSTSHIFT_MARGIN_RPM`] | SIM POLICY | fix-1a anti-hunting: an upshift must PREDICT landing this far above the down band at the end of its own torque-cut window (the cut bleeds belt speed; the static band gap alone was erased in low gears — the measured 1-2-1-2 climb). ORDINARY upshifts are intent-gated (`propulsive > 0`) and L600-detent-deferred so the full predictor is only consulted inside its domain (the protective ceiling rescue does not consult this predictor at all — its selection is a best-effort STATIC projection, with the over-rev slip guard as the actual crank bound). Stage A: the predicted landing SHAFT speed must be POSITIVE on the engaged ladder — a sign-flipped landing always refuses (under `|m|` a backward landing read as high forward rpm and the gate blessed catastrophic on-grade upshifts) |
-//! | [`LANDING_REACTION_DECAY`] | SIM POLICY | fix-1a predictor honesty: the frozen pre-cut reaction is mostly drive shear, which the grip bristle sheds over [`forces::GRIP_SHEAR_MODULUS_M`] once the torque cut lands — the predictor decays it by this fixed per-tick factor (the deterministic stand-in for the exponential; no `exp()`), and decelerates the COUPLED vehicle mass recovered from the grip law's own authoring identity |
-//! | [`CRANK_CORROBORATION_MARGIN_RPM`] | SIM POLICY | rpm floor above governed past which a shaft reading must be crank-corroborated before the ORDINARY band arm may price it; the protective upshift itself sits at the max-curve ceiling, so this margin fires no shift on its own |
-//! | [`MOTORING_DRAG_BASE_SHARE`] | SIM POLICY | shape of the rising motoring-torque curve ([`engine_drag`]): the constant share of the mid-band magnitude, the remainder linear in crank speed — the physical split (Coulomb/compression base + viscous/pumping growth) is engine-class-uniform; the MAGNITUDE anchor stays the authored `drag_fraction × peak` |
-//! | [`REVERSAL_DWELL_TICKS`] | SIM POLICY | fix-1b anti-hunting: a committed BAND shift blocks the OPPOSITE-direction BAND shift for this many ticks AFTER its interruption window (the dwell counts only outside the frozen window); same-direction climbs stay free. A SHALLOW 13-tick CONFIRMED reserve deficit also waits out the POST-UPSHIFT dwell while HOLDING the gear (evidence keeps accumulating; the ordinary upshift is suppressed) — the post-window re-acceleration shear inflates the demand EMA and a bypass manufactured boundary limit cycles; a deficit DEEPER than the reserve-margin scale overrides the deferral immediately |
-//! | [`OVERREV_MARGIN_RPM`] | SIM POLICY | fix-1c: a downshift must land at least this far under the engine's max curve rpm — the box never commands an over-rev |
-//! | [`RESERVE_MARGIN_FRACTION`] | SIM POLICY | common capability headroom: DERIVED policy value 0.10 of filtered demand keeps a target away from the zero-acceleration knife edge |
-//! | [`RESERVE_MARGIN_FLOOR_N`] | SIM POLICY | common low-load/jitter floor: DERIVED policy value 10 kN total, 1.8% of Tiger weight and about half its fractional margin at the DERIVED 191.2 kN 20-degree demand |
-//! | [`DEMAND_FILTER_TICKS`] | SIM POLICY | deterministic reaction low-pass, RISE time constant: DERIVED 8 decision ticks = 0.125 s at 64 Hz; frozen through shift cuts |
-//! | [`DEMAND_FALL_FILTER_TICKS`] | SIM POLICY | the same EMA's FALL time constant: 32 ticks = 0.5 s, pessimistic about losing load — probe-bounded both ways (fall 16 still let the recoil load-dropout open the reserve gate; 32 suppresses it at ≤8 ticks of legit demand lag; ≥64 explodes capability-boundary upshift latency to hundreds of ticks) — do not retune blindly |
-//! | [`GRADE_CONFIRM_TICKS`] | SIM POLICY | persistence before a reserve downshift: DERIVED 13 ticks = 0.203125 s at 64 Hz, rejecting shorter load spikes |
-//! | [`UPSHIFT_CONFIRM_TICKS`] | SIM POLICY | 8 ticks = 0.125 s of the FULL ordinary-upshift predicate (a band-only confirmation saturates on a lugging climb while the landing gate that recoil actually flips stays instantaneous); HARD-reset consecutive evidence, 2× the measured 4-tick recoil transient, ≤7 ticks worst measured legit-upshift latency; the protective ceiling rescue is exempt |
-//! | [`HOLD_REENGAGE_TICKS`] | SIM POLICY | DERIVED 32-tick = 0.5 s anti-oscillation cooldown after hill-hold release; never overridable — the latch is near-rest-only, and mid-motion braking is `back_driven_intent`'s job |
-//! | `gearbox.shift_addressing` / [`ShiftAddressing`] | VEHICLE DATA | the model accepts arbitrary targets; the spec declares whether this gearbox can address one directly or must step sequentially—an era/mechanism capability, not scheduler policy |
-//! | [`WIDE_ON`]/[`WIDE_OFF`]/[`TIGHT_ON`]/[`TIGHT_OFF`] | SIM POLICY | stick-to-detent input mapping with hysteresis; the DETENT RATIOS they select are spec |
-//! | [`TICK_HZ`] | SIM POLICY | the fixed simulation tick the shift countdown quantizes against |
-//! | [`K_IDLE_DROOP_RPM`] | SIM POLICY | idle-governor gain, expressed as the droop width: FULL recovery torque (`torque_at(idle)`) is reached ~50 rpm below idle. A governor stand-in, not an engine datum — any governed engine gets the same recovery shape; the TORQUE it recovers with is the vehicle's own curve |
-//! | [`STALL_GUARD_BAND_RPM`] | SIM POLICY | one-sided clamp band under idle: the coupling may never land the crank below `ω_floor = idle − band`, and `ω_floor` is ALSO a hard end-of-tick clamp on ω_e — the floor IS the no-stall policy while stall death is deliberately unmodeled, so no legal spec corner (e.g. strongly negative τ_free from a large drag fraction over a weak idle curve) may carry the crank below it or to a negative speed. Sized so the idle governor SATURATES before the guard floor (band = 2× the droop width). The spec layer keeps `ω_floor > 0` by requiring `idle_rpm ≥ 300` (band 100 + 100 margin, spec.rs) |
-//! | [`CLUTCH_OUT_M_SPEED`]/[`CLUTCH_IN_M_SPEED`] | SIM POLICY | coupling-seam hysteresis: declutch below 0.8×, re-engage at 1.2× of `NEUTRAL_M_SPEED` (or on any propulsive command) — a regime seam needs separated thresholds or it chatters, same doctrine as the steering detents |
-//! | [`REV_MATCH_BAND_RPM`] | SIM POLICY | proportional band of the declutched rev-match drive (`u_match = clamp((ω_target − ω_e)/band, 0, 1)`): full fueling one band below target, tapering to zero at it — smooth approach at 64 Hz instead of bang-bang chatter. Match AUTHORITY is the vehicle's own torque curve / J |
-//! | [`BELT_RUNAWAY_LIMIT_MULTIPLIER`] | SIM POLICY | pure numerical runaway protection on each regenerative output, DERIVED per vehicle as `1.5 × max_speed`; legal steering differential may exceed `max_speed`, and this ceiling must never bind in legal operation |
+//! | constant | class |
+//! |---|---|
+//! | [`GOVERNOR_CUT_RPM`] | SIM POLICY |
+//! | [`DRAG_THROTTLE_RELEASE`] | SIM POLICY |
+//! | [`DEAD`] | SIM POLICY |
+//! | [`PARK_ENGAGE_SPEED`] | SIM POLICY |
+//! | [`HILL_HOLD_ENGAGE_SPEED`] | SIM POLICY |
+//! | [`DIRECTION_SWAP_SPEED`] | SIM POLICY |
+//! | [`NEUTRAL_THROTTLE`], [`NEUTRAL_M_SPEED`] | SIM POLICY |
+//! | [`POSTSHIFT_MARGIN_RPM`] | SIM POLICY |
+//! | [`LANDING_REACTION_DECAY`] | SIM POLICY |
+//! | [`CRANK_CORROBORATION_MARGIN_RPM`] | SIM POLICY |
+//! | [`MOTORING_DRAG_BASE_SHARE`] | SIM POLICY |
+//! | [`REVERSAL_DWELL_TICKS`] | SIM POLICY |
+//! | [`OVERREV_MARGIN_RPM`] | SIM POLICY |
+//! | [`RESERVE_MARGIN_FRACTION`] | SIM POLICY |
+//! | [`RESERVE_MARGIN_FLOOR_N`] | SIM POLICY |
+//! | [`DEMAND_FILTER_TICKS`] | SIM POLICY |
+//! | [`DEMAND_FALL_FILTER_TICKS`] | SIM POLICY |
+//! | [`GRADE_CONFIRM_TICKS`] | SIM POLICY |
+//! | [`UPSHIFT_CONFIRM_TICKS`] | SIM POLICY |
+//! | [`HOLD_REENGAGE_TICKS`] | SIM POLICY |
+//! | [`WIDE_ON`]/[`WIDE_OFF`]/[`TIGHT_ON`]/[`TIGHT_OFF`] | SIM POLICY |
+//! | [`TICK_HZ`] | SIM POLICY |
+//! | [`K_IDLE_DROOP_RPM`] | SIM POLICY |
+//! | [`STALL_GUARD_BAND_RPM`] | SIM POLICY |
+//! | [`CLUTCH_OUT_M_SPEED`]/[`CLUTCH_IN_M_SPEED`] | SIM POLICY |
+//! | [`REV_MATCH_BAND_RPM`] | SIM POLICY |
+//! | [`BELT_RUNAWAY_LIMIT_MULTIPLIER`] | SIM POLICY |
+//! | `gearbox.shift_addressing` / [`ShiftAddressing`] | VEHICLE DATA |
+//! | `DRAG_SAT_SPEED` | REMOVED (stage B) — the belt-side drag saturation ramp died with the belt-side drag term; what replaces it is the engine-side spin-up fade confined below the stall-guard floor, DERIVED from spec with no new const ([`engine_drag`]) |
 //!
 //! Moved OUT of this module to the spec (they were vehicle data wearing const clothing):
 //! shift time (`gearbox.shift_secs` — a Tiger preselector and a T-34 crash box differ),
@@ -239,7 +241,8 @@ pub enum TransmissionMode {
 
 /// Gear-selection capability declared by the vehicle spec. The scheduler may name any target;
 /// this datum decides whether one interruption reaches it directly or pays one window per
-/// adjacent step.
+/// adjacent step. VEHICLE DATA, not scheduler policy: the model accepts arbitrary targets, and
+/// whether a gearbox can address one is an era/mechanism capability the spec declares.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Deserialize)]
 pub enum ShiftAddressing {
     /// Preselector/automatic capability: one shift event commits straight to the legal target.
@@ -303,6 +306,16 @@ const TICK_HZ: f32 = 64.0;
 /// predictor exactness — the reversal dwell blocks the down band for 32 post-window ticks,
 /// and the upshift's own reserve gate guarantees the landed gear can out-pull the filtered
 /// demand and recover rpm inside that dwell.
+///
+/// DOMAIN. ORDINARY upshifts are intent-gated (`propulsive > 0`) and L600-detent-deferred, so
+/// the full predictor is consulted only inside the domain it is valid on; the protective
+/// ceiling rescue does not consult it at all — its selection is a best-effort STATIC
+/// projection, with the over-rev slip guard as the actual crank bound (module doc).
+///
+/// The band bound is only half the gate. Stage A: the predicted landing SHAFT speed must also
+/// be POSITIVE on the engaged ladder, so a sign-flipped landing always refuses. Read through
+/// `|m|` a backward landing (traced: `r_mean` = 221 kN, `landing_m` = −3.62) read as
+/// "9092 rpm", cleared this margin, and blessed catastrophic on-grade upshifts.
 /// Crate-visible (like [`reserve_margin`] and [`predict_shift_landing_m`]) so read-only
 /// instrumentation states the landing gate as `shift_down_rpm + POSTSHIFT_MARGIN_RPM` from
 /// THIS constant instead of restating the number — see the driving-feel probes in
@@ -316,7 +329,9 @@ pub(crate) const POSTSHIFT_MARGIN_RPM: f32 = 150.0;
 /// of a loaded low-gear climb that is τ ≈ 75 ms ≈ 4.8 ticks at 64 Hz. The decay is the
 /// DETERMINISTIC per-tick multiplicative stand-in for that exponential: 0.8 ≈ 1 − dt/τ
 /// (no `exp()` in sim code); over a 20-tick window the geometric sum charges an effective
-/// Σρᵏ ≈ 4.9 ticks of full reaction instead of the frozen model's 20. SIM POLICY.
+/// Σρᵏ ≈ 4.9 ticks of full reaction instead of the frozen model's 20. The predictor that
+/// applies this decay also decelerates the COUPLED vehicle mass, recovered from the grip
+/// law's own authoring identity — see [`predict_shift_landing_m`]. SIM POLICY.
 const LANDING_REACTION_DECAY: f32 = 0.8;
 
 /// Standard gravity (m/s²) — the same constant the spec layer authors weights with
@@ -336,7 +351,16 @@ const CRANK_CORROBORATION_MARGIN_RPM: f32 = 150.0;
 
 /// Fix-1b anti-hunting dwell (fixed ticks, 0.5 s at 64 Hz): after a shift commits, the
 /// OPPOSITE-direction shift stays blocked this long. Same-direction shifts stay free — a
-/// rapid 1-2-3 climb must not slow down. SIM POLICY.
+/// rapid 1-2-3 climb must not slow down. The dwell counts only OUTSIDE the interruption
+/// window (the frozen window blocks every decision anyway, and draining the dwell inside it
+/// left ~12 of the promised 32 post-engagement ticks).
+///
+/// Second consumer: a SHALLOW confirmed reserve deficit waits this dwell out while HOLDING
+/// the gear rather than committing — evidence keeps accumulating and the ordinary upshift
+/// stays suppressed, so a real deficit corrects at expiry while the post-window
+/// re-acceleration shear that inflated the demand EMA decays. A deficit DEEPER than
+/// [`reserve_margin`] overrides the deferral immediately (measured limit cycles and the
+/// near-arrest rationale are on the deferral block in [`run_shift_decision`]). SIM POLICY.
 const REVERSAL_DWELL_TICKS: u8 = 32;
 
 /// Fix-1c over-rev margin (rpm): a downshift is refused if its landing rpm in the lower
@@ -348,14 +372,15 @@ const REVERSAL_DWELL_TICKS: u8 = 32;
 /// assert against the guard point without restating it. SIM POLICY.
 pub(crate) const OVERREV_MARGIN_RPM: f32 = 100.0;
 
-/// Stage-C reserve margin as a fraction of the filtered mean-axis demand. Ten percent keeps a
-/// target gear away from the zero-acceleration knife edge without encoding a vehicle-specific
-/// force. SIM POLICY.
+/// Stage-C reserve margin as a fraction of the filtered mean-axis demand — the common
+/// capability headroom. DERIVED policy value: ten percent keeps a target gear away from the
+/// zero-acceleration knife edge without encoding a vehicle-specific force. SIM POLICY.
 const RESERVE_MARGIN_FRACTION: f32 = 0.10;
 
-/// Stage-C absolute reserve floor (N, both tracks together). 10 kN is large enough to dominate
-/// contact-reaction float jitter yet only 1.8% of the Tiger's weight and about half the fractional
-/// margin on the DERIVED 191 kN 20-degree demand. SIM POLICY.
+/// Stage-C absolute reserve floor (N, both tracks together) — the common low-load/jitter floor.
+/// DERIVED policy value: 10 kN is large enough to dominate contact-reaction float jitter yet only
+/// 1.8% of the Tiger's weight and about half the fractional margin on the DERIVED 191.2 kN
+/// 20-degree demand. SIM POLICY.
 pub(crate) const RESERVE_MARGIN_FLOOR_N: f32 = 10_000.0;
 
 /// Stage-C load filter RISE time scale in fixed decision ticks. An EMA divisor of eight is a
@@ -423,26 +448,36 @@ const HOLD_REENGAGE_TICKS: u8 = 32;
 
 /// Fuel-governor cut width (rpm): torque ramps linearly to zero over this band past the
 /// governed rpm, so the top-speed equilibrium is a smooth root instead of a hard clip.
-/// INFERRED numerical policy, not vehicle data.
+/// INFERRED numerical policy, not vehicle data — a smoothing width, and any governed engine
+/// gets the same treatment. SIM POLICY.
 const GOVERNOR_CUT_RPM: f32 = 100.0;
 
 /// Idle-governor droop width (rpm): the idle governor's recovery torque ramps linearly from
 /// zero at idle to FULL `torque_at(idle)` this far below it (gain = `torque_at(idle) /
-/// (K_IDLE_DROOP_RPM·RPM_TO_RAD)` N·m per rad/s), saturating beyond. Stage B SIM POLICY —
-/// see the classification table.
+/// (K_IDLE_DROOP_RPM·RPM_TO_RAD)` N·m per rad/s), saturating beyond. Expressing the gain as a
+/// droop WIDTH is what keeps it policy: it is a governor stand-in, not an engine datum — any
+/// governed engine gets the same recovery shape, and the TORQUE it recovers with is the
+/// vehicle's own curve. SIM POLICY.
 const K_IDLE_DROOP_RPM: f32 = 50.0;
 
 /// Stall-guard band (rpm): the one-sided clamp under idle — the coupling reduces the clutch
 /// torque so the crank never lands below `idle − STALL_GUARD_BAND_RPM`. At 2× the idle
 /// droop width the idle governor is fully saturated at the guard floor, so `τ_free ≥
 /// torque_at(idle) − τ_drag_max > 0` there and the guard can always hold it (the clutch
-/// slips to protect the crank; stall DEATH is a later, playtest-gated rung). Stage B SIM
-/// POLICY — see the classification table.
+/// slips to protect the crank; stall DEATH is a later, playtest-gated rung).
+///
+/// `ω_floor` is ALSO a hard end-of-tick clamp on ω_e ([`settle_crank`]): the floor IS the
+/// no-stall policy while stall death stays deliberately unmodeled, so NO legal spec corner
+/// — e.g. a strongly negative `τ_free` from a large drag fraction over a weak idle curve,
+/// which even `τ_c = −capacity` cannot hold — may carry the crank below it or to a negative
+/// speed. The spec layer keeps `ω_floor > 0` by requiring `idle_rpm ≥ 300` (this 100 rpm band
+/// + 100 rpm margin + headroom, `spec.rs`). SIM POLICY.
 const STALL_GUARD_BAND_RPM: f32 = 100.0;
 
 /// Declutched rev-match proportional band (rpm): full fueling one band below the landing
-/// target, tapering to zero at it (`u_match = clamp((ω_target − ω_e)/band, 0, 1)`). Stage B
-/// SIM POLICY — see the classification table.
+/// target, tapering to zero at it (`u_match = clamp((ω_target − ω_e)/band, 0, 1)`) — a smooth
+/// approach at 64 Hz instead of bang-bang chatter. Only the BAND is policy; the match
+/// AUTHORITY is the vehicle's own torque curve over its own J. SIM POLICY.
 const REV_MATCH_BAND_RPM: f32 = 200.0;
 
 /// Clutch-seam hysteresis on |m| (stage B) — the coupling seam is a
@@ -460,7 +495,9 @@ const CLUTCH_IN_M_SPEED: f32 = NEUTRAL_M_SPEED * 1.2;
 /// PROPULSIVE throttle magnitude above which engine drag is fully released (blends out with
 /// the hold-blend shape below it): an open throttle is not motoring. A BRAKE command
 /// (throttle against the engaged ladder) is not propulsive — the engine keeps motoring, so
-/// drag stays engaged under it.
+/// drag stays engaged under it. Driver-intent SHAPING — where "open throttle" stops meaning
+/// "motoring" — and part of the uniform input contract, the same seam for every tank. SIM
+/// POLICY.
 const DRAG_THROTTLE_RELEASE: f32 = 0.5;
 
 /// Shape of the rising motoring-torque curve ([`engine_drag`]): the CONSTANT
@@ -476,8 +513,9 @@ const DRAG_THROTTLE_RELEASE: f32 = 0.5;
 /// Tiger at ≈ 0.59× at idle, 1× at 1550, ≈ 1.41× at governed 2500, ≈ 1.62× at rated 3000.
 const MOTORING_DRAG_BASE_SHARE: f32 = 1.0 / 3.0;
 
-/// Input deadzone on the throttle axis for direction/brake intent (matches the swap logic's
-/// historical deadband).
+/// Input deadzone for direction/brake intent on the THROTTLE axis, and for "is the stick at
+/// zero" on the STEER axis ([`update_park_latch`], [`update_hill_hold`]'s climb intent): one
+/// shared deadzone across the drive-axis mapping, the same for every tank. SIM POLICY.
 const DEAD: f32 = 0.05;
 
 /// Belt speed (m/s) below which a zero command LATCHES the parking brake (released by any
@@ -497,13 +535,20 @@ const HILL_HOLD_ENGAGE_SPEED: f32 = PARK_ENGAGE_SPEED * 5.0;
 const DIRECTION_SWAP_SPEED: f32 = 0.5;
 
 /// L600 neutral-turn entry: |throttle| below this AND |m| below [`NEUTRAL_M_SPEED`] puts the
-/// box in the brake-gated pivot regime instead of the radius constraint.
+/// box in the brake-gated pivot regime instead of the radius constraint. REGIME-ENTRY
+/// thresholds only — the neutral turn's SPEED SCALE is the spec-DERIVED
+/// [`TransmissionParams::neutral_d_full`], not a module constant. SIM POLICY.
 const NEUTRAL_THROTTLE: f32 = 0.1;
+/// The |m| half of that entry test, and — in the Hybrid — the `hold_blend` WIDTH over which
+/// the continuous curvature servo blends into the power-limited standstill pivot
+/// ([`steering_force`]). [`CLUTCH_OUT_M_SPEED`]/[`CLUTCH_IN_M_SPEED`] are derived from it.
+/// SIM POLICY.
 const NEUTRAL_M_SPEED: f32 = 0.5;
 
 /// Steering-detent hysteresis on |steer| (design: two steps per gear, `|steer| ≥ 0.5` tight):
 /// straight→wide engages at `WIDE_ON`, releases at `WIDE_OFF`; wide→tight at `TIGHT_ON`,
-/// back at `TIGHT_OFF`.
+/// back at `TIGHT_OFF`. STICK-TO-DETENT input mapping only — the detent RATIOS these select
+/// are spec ([`TransmissionParams::steer_kappa`], authored as `steering.radii`). SIM POLICY.
 const WIDE_ON: f32 = 0.15;
 const WIDE_OFF: f32 = 0.05;
 const TIGHT_ON: f32 = 0.55;
@@ -512,7 +557,7 @@ const TIGHT_OFF: f32 = 0.45;
 /// Pure numerical runaway protection for each regenerative belt output. The ceiling is
 /// DERIVED per vehicle as `1.5 × max_speed`; unlike the mean-axis top-speed limit, it has no
 /// physical role and must never bind in legal operation (including an authored outer-belt
-/// steering differential). SIM POLICY — see the classification table.
+/// steering differential, which may legally exceed `max_speed`). SIM POLICY.
 const BELT_RUNAWAY_LIMIT_MULTIPLIER: f32 = 1.5;
 
 /// The engine's declared operating envelope: a piecewise-linear torque curve (N·m over rpm,
@@ -2686,8 +2731,8 @@ fn apply_brake_stop_forces(
 /// policy and the honestly integrated crank stands.
 ///
 /// HARD STALL FLOOR and OVER-REV GUARD POINT: the crank never ENDS a tick below `ω_floor` — the
-/// floor IS the no-stall policy while stall death stays deliberately unmodeled (classification
-/// table) — nor above `ω_over`, the over-rev slip guard's bound (engine DAMAGE equally
+/// floor IS the no-stall policy while stall death stays deliberately unmodeled
+/// ([`STALL_GUARD_BAND_RPM`]) — nor above `ω_over`, the over-rev slip guard's bound (engine DAMAGE equally
 /// unmodeled; the field-measured ~9000 rpm belt-following crank is exactly what this backstops).
 /// `max` first also self-heals a NaN (f32::max drops the NaN operand; the floor then rides
 /// through the `min` unchanged, since `ω_floor < ω_over` for every validated spec).

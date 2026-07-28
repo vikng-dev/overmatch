@@ -198,13 +198,23 @@ B_{\max}=T_{\rm brake,sprocket}/r_s
 
 The Tiger’s declared \(r_s=0.3931\) m means 250 kN would equal **98.3 kN·m DERIVED** brake torque. That is only a comparison value, not valid provenance; ship values must come from an actual vehicle brake/output-torque source.
 
-Do not attenuate ground reaction with `(1-h)R`. Always apply `-R`, and turn ADR-0026 hold into a capacity-limited static brake:
+Do not attenuate ground reaction with `(1-h)R`. Always apply `-R`, and turn the ADR-0026 hold into a capacity-limited STOP force. As built in [`apply_brake_stop_forces`](/Users/Yan/Desktop/github/vikng-dev/personal/overmatch/src/track/transmission.rs:2662):
 
 \[
-B_i=\operatorname{clamp}(R_i-Q_{other,i},-hB_{\max},hB_{\max})
+B_i=\operatorname{clamp}\!\left(R_i-Q_i-\frac{v_iI}{\Delta t},\;-h B_{\max},\;+h B_{\max}\right)
 \]
 
-while stationary; when sliding, it saturates opposing motion. Thus hold remains smooth, but a slope exceeding brake capacity back-drives the belt honestly. The 20° Tiger load is about **95.6 kN/side DERIVED**, so brake capacity becomes testable rather than infinite.
+`Q_i` is THIS side's own assembled sprocket force — drive share, steering share and the L600 λ term — not the other side's; the brake reads the same `Q_i` it is about to be added to. `h` is the engagement envelope, the largest of the parking/hill-hold latch (1, full capacity), the governor hold-blend entry shape while unlatched, and the service-pedal command. `B_max` itself is two limits, not one — see the static/dynamic split under 2026-07-20 below.
+
+Two corrections to this section's original form, both of which the implementation has always had: the brake is priced against THIS side's `Q_i`, never against `Q_{other,i}`, and the stop-force term `v_iI/\Delta t` is present.
+
+The `v_iI/\Delta t` term is what makes this a STOP force rather than a static balance. `R_i-Q_i` alone is exactly the force that holds \(\dot v_i=0\): at rest that is the right answer, but on a belt already creeping it freezes the creep instead of removing it — the brake then sits at non-zero speed doing positive work against grip and drag, a passivity defect. Subtracting `v_iI/\Delta t` makes the unclamped force \(-Iv_i^{\rm unbraked,next}/\Delta t\), the force that lands the belt exactly on zero at the end of this tick. Three properties follow, and they are why the term is there:
+
+- at `v_i = 0` the term VANISHES and the law degenerates to `R_i-Q_i` bit-for-bit — the hold gates' original law, so a parked tank on a slope inside capacity holds EXACTLY;
+- in motion it strictly opposes where the belt is HEADED, so it settles creep to zero instead of parking \(\dot v_i\) at the creep speed;
+- it saturates at \(\pm hB_{\max}\) against a slide and can neither speed the belt up nor push it through zero.
+
+Thus hold remains smooth, but a slope exceeding brake capacity back-drives the belt honestly. The 20° Tiger load is about **95.6 kN/side DERIVED**, so brake capacity becomes testable rather than infinite.
 
 Retarding paths:
 
@@ -709,3 +719,184 @@ The offline FixedRadii HUD now renders the live detent with the authored gear-ta
 field is fixed-width and ASCII-only. Hybrid remains intentionally blank: its instantaneous target
 is internal continuous solve state, and duplicating that derivation in UI would make the display a
 second drivetrain law rather than a read of authored/live truth.
+
+## Descent ceiling and sustained-truth confirmation (2026-07-27) — REV 20 and REV 21
+
+Everything above stops at the 2026-07-20 line. Two arcs landed after it — REV 20's steep-descent
+overhaul and REV 21's upshift-confirmation fix — and both are SIM POLICY inside the regenerative
+adapters: the Governor parity path, the grip law, μ and the wire FORMAT are untouched. REV 21 did
+bump the protocol (`band_confirm_ticks` counts a different predicate and `demand_n` is gated
+differently, so the replicated dynamics of two existing slots changed) without changing a field.
+
+Two field/probe defects drive the whole batch. On a **rescaled 1.7× steeper world** a coasting
+descent let the crank follow the belt to **~9000 rpm MEASURED**, three times its mechanical limit,
+with a top-gear reverse descent having no gear left to shift into. And the
+`probe_fire_backward_uphill` instrument reproduced a fire-backward-uphill `F1→2→3→1` shift storm on
+a climb, costing **~26% of the climb per shot at 40% MEASURED**, from two independent legs — a
+confirmation counter watching the wrong condition, and a demand filter that believed a recoil.
+
+### 1. The demand EMA is asymmetric — rise 8 ticks, fall 32
+
+The stage-C filter `D_n = D_(n-1) + (sample − D_(n-1))/N` keeps its **8-tick = 0.125 s DERIVED**
+rise, and gains a separate **32-tick = 0.5 s DERIVED** fall. Rising demand is believed fast for
+safety; a COLLAPSING sample is believed slowly, because losing load is the claim that opens the
+reserve gate. The rise path is bit-identical to the old symmetric filter (a strictly greater sample
+takes the 8 divisor, an equal sample moves nothing under either), the first sample still seeds
+directly, and the whole update is still ABSENT during a shift window.
+
+The mechanism it kills, measured: a rearward main-gun shot on a climb unloads the suspension, the
+raw contact-projected demand collapses **~50% for ~22–25 ticks MEASURED**, the symmetric 8-tick EMA
+followed it down, and the reserve gate opened FALSELY — leg one of the storm. Probe-bounded on both
+sides so nobody retunes it blindly: **fall 16** still let the dropout fire the gate (**17 ticks
+open MEASURED**); **fall 32** suppresses it entirely at **≤8 ticks MEASURED** of added legitimate
+demand lag on the clean 10% climb; **fall ≥64** explodes capability-boundary upshift latency to
+**125–400 ticks MEASURED** because the inflated post-window demand takes seconds to bleed off.
+
+### 2. Upshift confirmation counts the FULL predicate, at 8 ticks
+
+The confirmation counter previously required only the up-BAND condition, for
+**13 ticks** (`UPSHIFT_CONFIRM_TICKS = GRADE_CONFIRM_TICKS`, on a downshift/upshift symmetry
+argument). It guarded the wrong thing: on a lugging climb the band sub-condition is PERMANENTLY
+true — the probe showed the counter saturated at **255 MEASURED** in F1 on every steep grade — while
+the fix-1a landing gate, the one a recoil actually flips, was evaluated instantaneously. A rearward
+shot's **~0.14 m/s MEASURED** forward shove lifts the predicted landing past
+`shift_down + POSTSHIFT_MARGIN_RPM` for **~4 ticks (62 ms) MEASURED**, and that was enough to
+commit — leg two.
+
+The counter now counts every condition the commit itself needs: propulsive intent, signed shaft rpm
+above the up band, detent released, crank corroboration, no pending deficit correction, AND the
+fix-1a landing gate AND the stage-C reserve gate. It is HARD-RESET by any tick the predicate fails
+— deliberately unlike the deficit's leaky counter, and the difference is the signal: the deficit
+reads contact-reaction demand that jitters around a persistent truth, while one tick failing a
+commit condition genuinely refutes "ready". A hard reset makes the gate immune to every decaying
+transient shorter than the window.
+
+`UPSHIFT_CONFIRM_TICKS = 8` is probe-sized, not inherited: the recoil evidence lasts
+**4 consecutive ticks MEASURED** and is suppressed at N ≥ 6, so 8 holds 2× margin; legitimate
+upshifts on the clean 10% climb entered their commit with the full predicate already true for
+**11/13/13/1/1 ticks MEASURED**, so N = 8 costs at most **7 ticks ≈ 110 ms DERIVED** on the worst
+legitimate upshift (**mean 2.8 MEASURED**). The reversal dwell is deliberately NOT part of the
+counted predicate — it is itself a timer, and stacking confirmation onto it would double-charge a
+legitimate post-downshift upshift. The protective ceiling rescue is exempt from the counter
+entirely: crank safety must not wait a confirmation.
+
+### 3. The protective upshift is CEILING-ONLY; overrun otherwise HOLDS the gear
+
+The stage-C review round installed a protective overrun upshift at governed + 150 rpm. That is now
+the REJECTED form, and its rejection is doctrine: engine braking is the POINT of being in gear on a
+descent, so a governed-plus-margin upshift walks the ladder UP and sheds exactly the reflected
+retardation the driver wants — backwards against real practice ("descend in the gear that climbs").
+On overrun — back-driven while coasting or service-braking, the hill doing the driving — the box
+now HOLDS its gear.
+
+The protective upshift survives only as a LAST RESORT at the mechanical-protection ceiling: the
+engine's max authored curve rpm (the Tiger's rated **3000**, the same ceiling the fix-1c over-rev
+gate measures downshift landings against). Between governed and that ceiling the climbing dial IS
+the warning. Three properties of the arm as built:
+
+- **Crank corroboration binds it.** BOTH the signed geared shaft and the crank ω_e must read past
+  the ceiling. A belt-side transient the engaged coupling never carried endangers nothing:
+  measured on the 20° approach fixture, a few-tick belt spike past the old floor (with the reserve
+  gate waived) upshifted F6→F7 mid-climb and cost the crest. A genuine overrun locks the crank to
+  the shaft within ticks, so the real rescue is delayed only until the crank is actually in danger.
+  The SAME corroboration now binds the ORDINARY band arm above governed +
+  `CRANK_CORROBORATION_MARGIN_RPM`, so no clutch-infeasible transient drives gear selection through
+  either arm.
+- **Selection is BEST-EFFORT and static.** The rescue picks the first higher gear whose STATICALLY
+  projected shaft rpm — the current shaft through the candidate ratio, no window pricing — sits at
+  or below the ceiling; Direct skips straight there, Sequential steps one gear per paid window
+  toward it (the index strictly rises on a finite ladder, so termination is trivial). If no gear
+  statically clears, the box HOLDS: a blind commit would only shed reflected braking. Worst-case
+  landing-pricing machinery — decayed predictors, sustained-reaction bounds, λ allowances — is
+  deliberately ABSENT; three attempts each sprouted a defect while the slip guard below already
+  made their success optional.
+- **It waives what it must and no more.** The ordinary landing-rpm band, the reserve gate, the
+  landing-sign test, the intent gate and the detent deferral are all waived — its purpose is to
+  lower an externally back-driven crank, not to accelerate, and descending under service brakes or
+  mid-steer is the overrun's NORMAL case. The reversal dwell still applies. Under PROPULSIVE intent
+  ordinary band shifting is untouched: a driver pushing downhill still gets upshifts and high rpm.
+
+A PRIORITY RULE makes the arm's precedence a stated invariant rather than an emergent one: while
+the crank rescue is active, it owns the decision tick and no capability downshift may pre-empt it.
+Structurally the over-rev gate already refuses every lower gear at such a shaft; the explicit gate
+says so.
+
+### 4. THE crank safety mechanism is the over-rev slip guard, not gear selection
+
+Gear selection cannot bound the crank when the ladder runs out, which is precisely the reverse
+top-gear descent the field regression found. The bound is therefore a guard in the coupling law,
+the stall guard's exact mirror: if the transmitted τ_c would land the crank ABOVE
+`ω_over = max_curve_rpm + OVERREV_MARGIN_RPM`, τ_c is RAISED to land exactly on ω_over — the clutch
+slips rather than let the hill grenade the engine (the crew analogue is riding the clutch on an
+over-revving descent; engine DAMAGE stays unmodeled, exactly like stall death). Three mechanisms
+enforce the same bound so it is order-proof: the coupling guard, the end-of-step re-anchor
+condition (a snap that would land past ω_over is refused and the honestly integrated slipping crank
+stands), and an unconditional end-of-tick clamp.
+
+Consequences worth stating, because they are what let §3's selection be best-effort:
+
+- The bound is **direction-symmetric and independent of every scheduling decision**. A mispriced or
+  overtaken rescue landing costs one guard-clamped window and a re-decision, not a runaway.
+- **Retardation degrades gracefully rather than vanishing.** At the guard point the crank still
+  transmits its FULL motoring drag — the maximum braking sustainable without over-rev. Scope of that
+  claim: in a STRAIGHT overrun both sprocket powers are regenerative, net ≤ 0, and the power gate
+  cannot scale the transmitted torque, so the guard-point drag reaches the belt in full; under a
+  simultaneously POWERED steer the common gate may scale τ_c with every other engine-borne force.
+  The crank BOUND is unconditional either way.
+- The guard sits one `OVERREV_MARGIN_RPM` ABOVE the rescue trigger, so the protective upshift's
+  crank corroboration still reads past the ceiling and fires before the clutch slip saturates.
+
+### 5. Reserve deficits split SHALLOW and DEEP against the post-upshift dwell
+
+A CONFIRMED reserve deficit remains a correction, not a preference — with a target it owns the
+decision ahead of both upshift arms, by committing or by HOLDING the gear (a pending correction
+suppresses the ordinary upshift arm; only a `None` selection falls through). What is new is that
+its urgency is now graded against the reversal dwell.
+
+A **SHALLOW** deficit — one inside the reserve-margin scale — waits out the post-UPSHIFT dwell. The
+reason is that the demand EMA's reaction sample carries the REBUILDING drive shear after a shift
+window, not just the grade: measured on the 10% climb, demand inflated **74 → 93 kN MEASURED**
+across the F5→F6 window and re-acceleration, manufacturing a "confirmed" deficit of
+**−2..−3 kN MEASURED** against a **19 kN MEASURED** margin exactly at the capability boundary — a
+sustained F5↔F6 limit cycle of **~2 s period MEASURED**, of which the reverse ladder's
+field-reported `R1→R2→R3→R1` is the same attractor. Evidence keeps ACCUMULATING through the dwell
+(the deficit counter is leaky and saturating), so a real-but-shallow deficit corrects at dwell
+expiry, at most 0.5 s late, while a transient the box itself created decays with the shear. The
+post-DOWNSHIFT dwell never blocks it: `dwell_blocks` is direction-aware and a deeper deficit is a
+same-direction correction.
+
+A **DEEP** deficit — beyond the margin scale, a genuine steep grade reading tens of kN past it
+where the pollution transient read single-digit kN — overrides the deferral and corrects
+IMMEDIATELY. This is the near-arrest half of the policy: a steep grade entered right after an
+upshift must not bleed speed through window plus dwell until the predicted landing goes sign-
+negative and the correction becomes uncommittable. The landing-sign gate itself stays intact; in
+the extreme where the sign has ALREADY crossed, the correction holds and the vehicle decelerates
+into the near-rest hill-hold path, whose latch, full brake envelope and launch-gear selection are
+the designed owners of an arrested climb. That fallback is deliberate, not accidental.
+
+### 6. The steering detent is evaluated once per tick, BEFORE the scheduler
+
+The detent hysteresis update used to live inside the FixedRadii steering arm, BELOW the scheduler,
+so the scheduler's `detent_turn` read the PREVIOUS tick's step. With confirmation now spanning
+eight ticks that became a race: seven qualifying straight ticks followed by a detent engage on the
+committing tick still incremented the confirmation to N and committed an ordinary upshift on the
+exact tick the turn began — and the same invocation then applied the λ constraint in the NEW gear,
+where the landing predictor is explicitly invalid. The update is hoisted above the scheduler so one
+detent truth serves this tick's gear decision and this tick's steering solve. It depends only on
+`steer` and the previous step, and nothing between the old and new sites read it, so every
+non-engage tick is unchanged.
+
+### Measured gates
+
+| gate | result |
+|---|---|
+| Fire backward uphill, 40% grade | flat through both shots; **+1.1 m MEASURED** climb recovered against the storming build |
+| Fire backward uphill, 34% grade | no limit cycle; ONE shift that proves genuinely sustainable (F3 locked, **3× MEASURED** climb rate) |
+| Legit 10% climb | `F1→F6` intact, **~1% MEASURED** cost from the added confirmation latency |
+| Steep descent crank bound (25%/35%, both facings) | sustained crank at or below `max_curve_rpm + OVERREV_MARGIN_RPM`; brief above-CEILING transients during paid windows are physical and bounded by the same guard (`probe_steep_descent_crank_bound`, was **~9000 rpm MEASURED**) |
+| Overrun below the ceiling | holds gear for engine braking (`overrun_below_ceiling_holds_gear_for_engine_braking`) |
+| Overrun at top gear | slip guard alone bounds the crank, drag magnitude pinned (`overrun_slip_guard_bounds_crank_at_top_gear`) |
+| Rescue selection | ladder walk under the guard or hold (`protective_rescue_walks_ladder_under_guard_or_holds`, `sequential_rescue_steps_toward_static_target`); not pre-empted by the deficit machinery (`crank_rescue_not_preempted_by_deficit_machinery`) |
+| Transient band excursion | refused (`upshift_confirmation_rejects_transient_band_excursions`); overrun shaft without crank corroboration refused (`upshift_arms_refuse_overrun_shaft_without_crank`) |
+| Detent race | engage on the committing tick resets confirmation (`detent_engage_on_the_committing_tick_resets_confirmation`) |
+| Deficit split | shallow defers through the post-upshift dwell (`confirmed_deficit_defers_through_post_upshift_dwell`); deep overrides it (`deep_deficit_overrides_post_upshift_deferral`) |
