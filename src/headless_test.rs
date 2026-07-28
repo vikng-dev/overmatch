@@ -113,10 +113,12 @@ impl std::ops::DerefMut for BootedSim {
 /// synthetic height grid. Either marker is inserted before the first update, so
 /// `terrain_grid::decode_height_grid` sees it and never decodes the shipped map.
 fn headless_app_on(world: Option<crate::terrain_grid::HeightGrid>) -> App {
-    let mut app = App::new();
+    let mut app = headless_shell();
     // The gates are FIXTURED on the flat slab + authored test course (the 10°/20°/30° ramps,
     // the flat straight-line lanes): keep the heightmap world out even though the PNG ships in
-    // assets/. The driving-feel probes pass their own analytic grid instead.
+    // assets/. The driving-feel probes pass their own analytic grid instead. Either marker only
+    // has to be in place before the FIRST UPDATE, so inserting it after the plugin group is the
+    // same thing to `terrain_grid::decode_height_grid`.
     match world {
         Some(grid) => {
             app.insert_resource(grid);
@@ -125,6 +127,32 @@ fn headless_app_on(world: Option<crate::terrain_grid::HeightGrid>) -> App {
             app.insert_resource(crate::terrain_grid::ForceFlatWorld);
         }
     }
+    // Physics + the SP spawn scenario are composition-root choices (see lib.rs SimPlugin note);
+    // this exercises the single-player-shaped boot, headless.
+    app.add_plugins((
+        avian3d::prelude::PhysicsPlugins::default(),
+        SimPlugin,
+        crate::tank::sp_spawn_plugin,
+    ))
+    .add_observer(assert_tank_state_at_add)
+    .add_observer(assert_range_table_at_add);
+
+    finish_plugins(&mut app);
+    app
+}
+
+/// The bare headless host every full-app fixture is built on: `DefaultPlugins` with no wgpu
+/// backend, no primary window and no winit runner, and nothing of ours mounted yet. The caller adds
+/// its own composition root and then calls [`finish_plugins`].
+///
+/// Split out of [`headless_app_on`] so a root OTHER than the game's — the dev sandboxes, which are
+/// their own composition roots on `DefaultPlugins` (see [`boot_sandbox_headless`]) — can be booted
+/// the same way instead of re-deriving this plugin-group surgery, the KTX2 workaround included.
+///
+/// The returned clock is FROZEN (`ManualDuration(ZERO)`); a caller that wants time picks its own
+/// strategy, as [`start_fixed_clock`] does.
+fn headless_shell() -> App {
+    let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
             .set(bevy::render::RenderPlugin {
@@ -158,24 +186,17 @@ fn headless_app_on(world: Option<crate::terrain_grid::HeightGrid>) -> App {
     app.insert_resource(bevy::image::CompressedImageFormatSupport(
         bevy::image::CompressedImageFormats::ASTC_LDR,
     ));
-    // Physics + the SP spawn scenario are composition-root choices (see lib.rs SimPlugin note);
-    // this exercises the single-player-shaped boot, headless.
-    app.add_plugins((
-        avian3d::prelude::PhysicsPlugins::default(),
-        SimPlugin,
-        crate::tank::sp_spawn_plugin,
-    ))
-    .add_observer(assert_tank_state_at_add)
-    .add_observer(assert_range_table_at_add);
+    app
+}
 
-    // `App::run` normally drives plugin finish/cleanup (some registration — e.g. Avian's
-    // diagnostics resources — happens in `Plugin::finish`); a bare `update()` loop must do it.
+/// `App::run` normally drives plugin finish/cleanup (some registration — e.g. Avian's diagnostics
+/// resources — happens in `Plugin::finish`); a bare `update()` loop must do it.
+fn finish_plugins(app: &mut App) {
     while app.plugins_state() == bevy::app::PluginsState::Adding {
         std::thread::sleep(Duration::from_millis(1));
     }
     app.finish();
     app.cleanup();
-    app
 }
 
 /// Reports each boot gate separately so a timeout identifies the unavailable prerequisite.
@@ -971,8 +992,8 @@ fn tiger_pivot_gate(mode: crate::track::transmission::TransmissionMode, min_yaw:
 
 /// Tiger pivot, L600 fixed-radius adapter (the vehicle's authored architecture): the
 /// MARGINAL brake-gated neutral turn toward the DERIVED `neutral_d_full` = 0.2885 m/s
-/// (0.2808 before half_tread went 1.4904 → 1.5312; fix 3 deleted the unprovenanced 0.75
-/// fraction that used to shrink the target). MEASURED on the declared data: 0.131 rad/s
+/// (0.2808 before half_tread went 1.4904 → 1.5312; no unprovenanced 0.75 fraction shrinks
+/// the target any more). MEASURED on the declared data: 0.131 rad/s
 /// mean ground yaw, belts exactly ±neutral_d_full
 /// (the belt-kinematic ceiling d/half-tread ≈ 0.188 rad/s, less scrub slip); gated at
 /// ≥ 0.10 rad/s (margin for platform float drift — the restoration literature's
@@ -985,7 +1006,7 @@ fn pivot_tiger_l600() {
     );
 }
 
-/// Tiger pivot, hybrid continuous adapter: POWER-limited (fix 2 — the standstill pivot
+/// Tiger pivot, hybrid continuous adapter: POWER-limited (the standstill pivot
 /// commands steer force up to capacity and the power-conservation scale is the binding
 /// limiter, so the rate settles where engine power balances scrub dissipation; the old
 /// neutral_d_full speed FLOOR used ~68 kW of the ~407 kW budget and pivoted at
@@ -1114,8 +1135,8 @@ fn gear_climb_monotone_tiger() {
 
 /// Deceleration on the real Tiger (L600, the authored architecture), both driver intents:
 ///
-/// * RELEASE (coast): engine drag from the RISING motoring curve (descent round —
-///   `drag_fraction × peak` anchored at mid-band 1550 rpm, growing linearly with crank
+/// * RELEASE (coast): engine drag from the RISING motoring curve
+///   (`drag_fraction × peak` anchored at mid-band 1550 rpm, growing linearly with crank
 ///   speed), stage B: at the CRANK, reaching the belt through the engaged coupling — so
 ///   the drag torque decelerates crank AND belt together, and the belt's share is the old
 ///   force × `I_m/(I_m + k²J)` (F7: 32 000/(32 000 + 37.1²·4) ≈ 0.85), plus the shift
@@ -1131,8 +1152,8 @@ fn gear_climb_monotone_tiger() {
 ///   tunable-by-feel here). Also pinned: past the command-shaper's release slew, coasting
 ///   never accelerates (the old code ACCELERATED on opposite input — the regression this
 ///   kills).
-/// * OPPOSITE THROTTLE: service brakes at the declared capacity, DUAL-anchored by fix 4
-///   and the review round (96 kN/side: the settled 20° park hold at 95.6 kN/side demand,
+/// * OPPOSITE THROTTLE: service brakes at the declared capacity, DUAL-anchored
+///   (96 kN/side: the settled 20° park hold at 95.6 kN/side demand,
 ///   0.343 g total service decel inside the 0.2–0.35 g WWII heavy-tank band; the old
 ///   250 kN was the circular grip-limit sizing — 1.17 s from 6 m/s was the
 ///   energy-impossible tell). Analytic prediction: 2 × 96 kN / 57 t = 3.37 m/s² in the
@@ -1606,7 +1627,7 @@ struct GradeApproachResult {
 /// the question and isolates the scheduler under the DERIVED 191.2 kN grade demand. The only
 /// variant datum changed is shift addressing.
 ///
-/// SCOPE (scheduler fix round): the fixture settles onto the face first and SEEDS the demand
+/// SCOPE: the fixture settles onto the face first and SEEDS the demand
 /// EMA at its declared demand, so it proves scheduler behavior GIVEN that demand — it is not
 /// evidence about contact-driven EMA acquisition. That acquisition (first-sample seed +
 /// convergence under sustained reactions) is pinned at unit level by
@@ -1626,7 +1647,7 @@ fn run_grade_approach_20_deg(
     let approach_speed = 4.0;
     let mut transmission = fresh_tank_transmission(&app);
     transmission.0.gear = 6;
-    // Seed the demand EMA at the fixture's own DERIVED grade demand (scheduler fix round):
+    // Seed the demand EMA at the fixture's own DERIVED grade demand:
     // a teleport-spawn otherwise starts the EMA from near-zero settle reactions and the
     // scheduler's first ~13 confirm ticks argue against a load the fixture has DECLARED.
     transmission.0.demand_n = 57_000.0 * 9.81 * 20.0_f32.to_radians().sin();
@@ -1638,7 +1659,7 @@ fn run_grade_approach_20_deg(
         e.get_mut::<avian3d::prelude::LinearVelocity>().unwrap().0 = Vec3::ZERO;
         e.get_mut::<avian3d::prelude::AngularVelocity>().unwrap().0 = Vec3::ZERO;
     }
-    // Land the contact field BEFORE injecting the rolling approach (scheduler fix round):
+    // Land the contact field BEFORE injecting the rolling approach:
     // the old single-teleport start left the belts airborne and free-spinning for ~0.6 s —
     // the spin blipped over the up band with the demand observer honestly reading "no
     // load", committing a reserve-legal-looking F6→F7 the moment before ground contact.
@@ -2106,9 +2127,9 @@ fn real_tiger_30_deg_reports_capability_truthfully() {
 /// backward faster than the 0.25 m/s DERIVED hill-hold threshold with W held. Its shipped
 /// 96 kN/side brakes cannot arrest the 279.6 kN DERIVED grade demand by themselves. At the
 /// DERIVED 317.5 kN selection threshold, only F1-F2 are capable launch gears: F1 is capped at
-/// 500 kN DERIVED, F2 makes 341.9 kN DERIVED, and F3's 237.1 kN DERIVED fails. Round-4 flow:
+/// 500 kN DERIVED, F2 makes 341.9 kN DERIVED, and F3's 237.1 kN DERIVED fails. The flow:
 /// the moving rollback is first braked CONTINUOUSLY by the `back_driven_intent` service
-/// envelope (the latch is near-rest-only now — no grab at speed); once the hull decelerates
+/// envelope (the latch is near-rest-only — no grab at speed); once the hull decelerates
 /// into the engagement zone the hold latches, the Direct preselector rescues through a paid
 /// shift exposing HILL HOLD, arrests the hull, and resumes uphill travel (measured: latch
 /// t114, capable F2 t142, arrest t134, +0.5 m t255).
@@ -2314,7 +2335,7 @@ fn synthetic_weak_30deg_fixture() -> (BootedSim, Entity, f32, Vec3) {
     (app, tank, demand, uphill)
 }
 
-/// Codex round 5, restored 30-degree protection (a): GRADE LIMIT ENTRY observed on the
+/// Restored 30-degree protection (a): GRADE LIMIT ENTRY observed on the
 /// live sim, not seeded by hand. At rest on the face with the demand EMA already carrying
 /// the parked grade load, held W must latch the hill hold near rest, and the launch
 /// selector — finding NO capable gear in the nerfed powertrain — must expose GRADE LIMIT
@@ -2368,8 +2389,7 @@ fn synthetic_weak_powertrain_30_deg_at_rest_enters_grade_limit() {
     );
 }
 
-/// Codex round 5, restored 30-degree protection (b) — renamed from the round-4
-/// `..._reports_grade_limit` whose name outlived its assertions: a MOVING weak-powertrain
+/// Restored 30-degree protection (b): a MOVING weak-powertrain
 /// rollback with W held keeps sliding (dynamic brakes unarrestable by construction), the
 /// near-rest-only latch never grabs it, its status stays Normal — AND the
 /// `back_driven_intent` service braking is PROVEN by a deceleration bound: over the
@@ -2749,7 +2769,7 @@ fn scripted_determinism_run() -> ScriptedDeterminismRun {
                 .world_mut()
                 .get_mut::<TankCommand>(tank)
                 .expect("controlled tank carries TankCommand");
-            // Descent round: the straight run-up grew 60 ticks — the upshift confirmation
+            // The straight run-up is long because the upshift confirmation
             // dwell (UPSHIFT_CONFIRM_TICKS per shift) slows the flat gear walk, and the
             // steering-slip witness needs the hull fast enough that the tight detent
             // scrubs its loaded contacts past the slip band.
@@ -3275,12 +3295,12 @@ impl DriveProbe {
 
         // --- The scheduler's own decision inputs, recomputed from the PRE-tick transmission state
         // and THIS tick's belt reactions — exactly the pair `transmission::step` was handed.
-        // DEMAND is the one exception (review round): production updates the demand EMA BEFORE
+        // DEMAND is the one exception: production updates the demand EMA BEFORE
         // computing reserves or evaluating shifts, and nothing later in the tick rewrites it, so
         // the POST-tick `st.demand_n` IS the value the scheduler priced this tick. Reading the
         // pre-tick EMA here blamed the wrong gate across the first-initialization transient.
         //
-        // The LADDER is the second exception (Codex round): production commits a direction
+        // The LADDER is the second exception: production commits a direction
         // swap — reverse flipped, gear reset to 1 — BEFORE the demand observer and every
         // scheduling decision, so on the swap tick the decision state is the POST-swap
         // ladder at gear 1, not the pre-tick ladder. Pricing the swap row on the old ladder
@@ -3711,7 +3731,7 @@ fn probe_fire_backward_uphill() {
 }
 
 /// SYMPTOM 2 — downhill overrun. Launch down the same grade, then release the throttle and coast:
-/// the trace shows how far past the governor the crank is dragged. Descent round: on overrun the
+/// the trace shows how far past the governor the crank is dragged. On overrun the
 /// box HOLDS its gear (engine braking is the point) and the protective upshift is a last resort
 /// past the max-curve ceiling — expect the dial to climb toward the curve top in the held gear,
 /// not the old governed + 150 upshift walk.
@@ -4147,7 +4167,7 @@ fn probe_turn_radius_sweep() {
     }
 }
 
-// --- Descent-behavior probes (descent round) ----------------------------------------------------
+// --- Descent-behavior probes ---------------------------------------------------------------------
 //
 // The rising motoring curve + the overrun gear hold give each gear a natural downhill
 // equilibrium; the signed-intent contract flows a held S through the stop into reverse; the
@@ -4487,4 +4507,124 @@ fn probe_steep_descent_crank_bound() {
             p = path.display(),
         );
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Dev-sandbox boot guards
+// ---------------------------------------------------------------------------------------------
+//
+// WHY THIS SECTION EXISTS. The two sandboxes are composition roots of their own — each mounts
+// `DefaultPlugins` in its `bin/` shell and then assembles a DIFFERENT subset of the game's plugins
+// than `ClientPlugin` does. Nothing else in the suite ever composed one, and CI cannot: the bins
+// carry `required-features = ["dev_ui"]`, so `cargo clippy --all-targets` (no `dev_ui`) SKIPS them
+// entirely and even the compile is unproven there. That left the sandboxes' wiring checked by
+// exactly one thing — a human running `cargo armor` / `cargo track` — and it rotted:
+// `sandbox::plugin` mounted `crew_ui`, whose status panel takes `Res<WeaponClock>`, while the
+// resource is inserted by `shooting::plugin` (and by the net composition), which the sandbox
+// deliberately does not mount. Every `armor_sandbox` boot died on its first `Update` with
+// "Parameter `Res<WeaponClock>` failed validation: Resource does not exist".
+//
+// WHAT THESE GUARD, therefore, is the SHAPE and not that one resource: booting a root and running
+// frames validates the parameters of every system the root schedules, so ANY resource a sandbox
+// forgets to provide for a plugin it borrowed from the game fails here — as does any observer or
+// startup system that faults on the sandbox's world. Frames are run past the deferred build both
+// roots do (`bake` inserts `TankBlueprint` with `Commands` at `Startup`, so the tank/rig only
+// materialize from the next schedule on), because the systems gated on that build are exactly the
+// ones a "did it survive one update" check would never reach.
+//
+// A THIRD windowed root belongs here the day it is added.
+
+/// Frames to run past `Startup`. Both roots need two updates to get their subject up (the `Startup`
+/// command flush, then the `Update` that consumes `TankBlueprint`); the rest are slack, so systems
+/// gated on the built rig/tank run for several ticks rather than once.
+const SANDBOX_BOOT_FRAMES: usize = 8;
+
+/// Boot one sandbox root headless and run [`SANDBOX_BOOT_FRAMES`] frames of it.
+///
+/// The clock is the fixed-tick one (one exact fixed loop per update), so `FixedUpdate` — physics,
+/// the belt field, the weapon-shaped systems — is exercised too, not just `Update`.
+///
+/// Serialized against every other full-app fixture by [`BOOT_LEASE`]: these boots parse the whole
+/// Tiger glb (`bake`) and run Avian, and the suite's rule is that full apps take turns.
+fn boot_sandbox_headless(root: fn(&mut App)) -> (App, MutexGuard<'static, ()>) {
+    let lease = BOOT_LEASE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut app = headless_shell();
+    app.add_plugins(root);
+    finish_plugins(&mut app);
+    start_fixed_clock(&mut app);
+    for _ in 0..SANDBOX_BOOT_FRAMES {
+        app.update();
+    }
+    (app, lease)
+}
+
+/// Every string rendered by a `Text` node this frame — the sandboxes' HUD surface, read without
+/// reaching into another module's private marker components.
+fn rendered_text(app: &mut App) -> Vec<String> {
+    let mut texts = app.world_mut().query::<&Text>();
+    texts.iter(app.world()).map(|text| text.0.clone()).collect()
+}
+
+/// The armour/penetration sandbox boots and keeps running.
+///
+/// The regression this pins is the `Res<WeaponClock>` panic described above, but the assertions
+/// deliberately go one step further than "it didn't panic": the target tank must actually be up and
+/// the shared status panel must have RENDERED it. The panicking system is `update_status_panel`, so
+/// a guard that only proved the app survived could be satisfied by a panel that silently drew
+/// nothing — which is the state the "just make the resource optional" fix would have produced.
+#[test]
+fn armor_sandbox_boots_headless() {
+    let (mut app, _lease) = boot_sandbox_headless(crate::sandbox::plugin);
+
+    let mut targets = app
+        .world_mut()
+        .query_filtered::<Entity, (With<Tank>, With<Controlled>)>();
+    assert_eq!(
+        targets.iter(app.world()).count(),
+        1,
+        "the armor sandbox must spawn exactly one Controlled target tank from the blueprint \
+         within {SANDBOX_BOOT_FRAMES} frames — the crew bar and the status panel are both scoped \
+         to `Controlled`, so without it they render nothing and this guard proves nothing",
+    );
+
+    let texts = rendered_text(&mut app);
+    assert!(
+        texts.iter().any(|text| text.contains("Weapons:")),
+        "the shared status panel (crew_ui::update_status_panel) rendered no weapons row in the \
+         armor sandbox; text nodes were {texts:?}",
+    );
+
+    // The frozen weapon clock the sandbox root inserts BECAUSE it does not simulate the gun: no
+    // system here advances it, and none arms a `WeaponGate` either, so the readouts derived
+    // against it stay true of a tank that has never fired. A clock that has moved means something
+    // started ticking it — at which point this sandbox is claiming to simulate a gun it does not
+    // have, and the comment on that `insert_resource` is a lie.
+    assert_eq!(
+        app.world().resource::<crate::WeaponClock>().0,
+        0,
+        "the armor sandbox's weapon clock advanced — it mounts no gun simulation, so a moving \
+         clock means the panel's reload readouts are now measured against a tick nothing else here \
+         respects",
+    );
+}
+
+/// The track-model sandbox boots and keeps running, through the deferred rig build.
+///
+/// `RigGeom` is the root's own "the rig is up" gate — nearly every system it schedules is
+/// `run_if(resource_exists::<RigGeom>)`, so a boot that never reaches it would exercise almost
+/// nothing and this guard would go quietly blind.
+#[test]
+fn track_sandbox_boots_headless() {
+    let (app, _lease) = boot_sandbox_headless(crate::track_sandbox::plugin);
+
+    assert!(
+        app.world()
+            .get_resource::<crate::track::rig_geom::RigGeom>()
+            .is_some(),
+        "the track sandbox never built its rig within {SANDBOX_BOOT_FRAMES} frames (build_rig \
+         waits on bake's TankBlueprint) — everything downstream is gated on RigGeom, so nothing \
+         past the plugin build was actually exercised",
+    );
 }
