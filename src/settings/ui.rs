@@ -31,18 +31,24 @@
 //!   slider.
 //! * Mouse — hover selects; the `<` `>` glyphs are REAL affordances (visible, hover-highlighted,
 //!   clickable — the invisible click-the-half-of-the-row scheme they replace was pure mystery
-//!   meat); a slider's track is click-to-set and drag-to-scrub. Every hit test is
-//!   `ComputedNode::contains_point`, i.e. bevy's own laid-out rect, so it cannot drift from what is
-//!   drawn. That rect is in PHYSICAL pixels and the cursor has to be converted to match —
-//!   [`mouse_input`]'s doc records the bug class, because getting it wrong makes the mouse dead in
-//!   total silence.
+//!   meat); a slider's track is click-to-set and drag-to-scrub.
+//!
+//! **Hit testing is `bevy_picking`'s, not ours.** `UiPickingPlugin` ships inside `UiPlugin`, so the
+//! backend already walks `UiStack` against every node on this card whether we ask or not; the page
+//! used to re-walk the same rects by hand. It reads the answers instead — [`Hovered`] for the
+//! highlight and the hover-selection, `Pointer<Press>` observers for the clicks — which deletes the
+//! hand-rolled cursor conversion, the hand-ordered "the arrow inside the row wins" (bubbling from
+//! the deepest node IS that rule) and the "not while hidden" gate (`InheritedVisibility`).
 //!
 //! Every change saves immediately — there is no Apply button to forget, and an atomic write makes
 //! that safe (`settings::save`). The one refinement: a slider DRAG saves once on release, not once
-//! per dragged frame. A drag also FREEZES its track's rect at the grab and maps the cursor through
-//! that for its whole life ([`ActiveDrag`]) — the UI SCALE row re-lays out the page it is being
-//! dragged on, so a live rect would be an output of the value it computes.
+//! per dragged frame. A drag also FREEZES its track's rect at the grab and maps the PHYSICAL cursor
+//! through that for its whole life ([`ActiveDrag`]) — the UI SCALE row re-lays out the page it is
+//! being dragged on, so a live rect would be an output of the value it computes. That is the one
+//! place this file still does pixel arithmetic, and the one place the physical-vs-logical bug class
+//! still bites; [`track_fraction`] records it.
 
+use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::text::LineHeight;
 use bevy::ui::{ComputedNode, UiGlobalTransform};
@@ -64,7 +70,7 @@ pub(super) struct SettingsPageVisible(bool);
 /// this set, and the page's input/refresh chain runs `.after` it — otherwise bevy is free to run the
 /// readers first, and the page consumes LAST frame's visibility on every open/close transition: the
 /// first keypress after opening is dropped, and the card lingers one frame after its owning surface
-/// closes (Codex review finding, 2026-07-27).
+/// closes.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) struct DeclareSettingsPage;
 
@@ -162,10 +168,13 @@ impl Row {
                 "How far shadows are drawn before they cut off. \
                  OFF disables them entirely, and may be removed later."
             }
-            // Says what it does NOT change, because a player who lowers this expecting more range
-            // gets neither.
+            // NOT independent of the distance row, despite reading like it: shadow bias is measured
+            // in texels, so a longer envelope's coarser texels detach a distant shadow from its
+            // caster by metres unless resolution rises with it. Measured 2026-07-28 — see
+            // `ShadowDistance`'s detachment table.
             Row::ShadowResolution => {
-                "How crisp shadows are, at any distance. Higher costs more memory and fill rate."
+                "How crisp shadows are, and how tightly distant ones stay attached. \
+                 Higher costs more memory."
             }
             // Honest about the trade: each cascade is a shadow render pass, and fewer of them
             // means the near ones cover more ground per texel.
@@ -406,7 +415,7 @@ struct RowLine(Row);
 
 /// One of a stepper row's `<` / `>` glyphs: a visible, hover-highlighted, clickable affordance.
 /// `delta` is what a click applies (`-1` left, `+1` right).
-#[derive(Component, Clone, Copy, PartialEq)]
+#[derive(Component, Clone, Copy)]
 struct ArrowGlyph {
     row: Row,
     delta: i32,
@@ -430,11 +439,6 @@ struct HintText;
 /// [`HINT_SLOT_HEIGHT_PX`].
 #[derive(Component)]
 struct HintSlot;
-
-/// Which arrow glyph the cursor is over this frame — written by [`mouse_input`], read by
-/// [`refresh_page`] for the hover highlight.
-#[derive(Resource, Default, PartialEq)]
-struct HoveredArrow(Option<(Row, i32)>);
 
 /// The slider drag in progress, if any. While `Some`, the mouse belongs to that slider: the value
 /// scrubs with the cursor every frame (even outside the track's rect — standard slider behaviour),
@@ -557,9 +561,11 @@ const CARD_PADDING_PX: f32 = 24.0;
 pub(super) fn plugin(app: &mut App) {
     app.init_resource::<SettingsPageVisible>()
         .init_resource::<Selection>()
-        .init_resource::<HoveredArrow>()
         .init_resource::<SliderDrag>()
         .add_systems(Startup, spawn_page)
+        // The click path is a `bevy_picking` observer, which runs in `PreUpdate` — ahead of
+        // everything below, so a click and the repaint that shows it land in the same frame.
+        .add_observer(page_pressed)
         .add_systems(
             Update,
             (
@@ -717,6 +723,8 @@ fn spawn_page(mut commands: Commands, fonts: Res<UiFonts>, settings: Res<Setting
 fn spawn_row(card: &mut ChildSpawnerCommands, fonts: &UiFonts, settings: &Settings, row: Row) {
     card.spawn((
         RowLine(row),
+        // Opts the line into picking's hover tracking — see [`mouse_input`].
+        Hovered::default(),
         Node {
             width: Val::Percent(100.0),
             justify_content: JustifyContent::SpaceBetween,
@@ -748,15 +756,14 @@ fn spawn_row(card: &mut ChildSpawnerCommands, fonts: &UiFonts, settings: &Settin
         .with_children(|controls| match row.kind() {
             RowKind::Stepper => {
                 spawn_arrow(controls, fonts, row, -1, "<");
-                controls
-                    .spawn(Node {
-                        width: Val::Px(STEPPER_VALUE_WELL_PX),
-                        justify_content: JustifyContent::Center,
-                        ..default()
-                    })
-                    .with_children(|well| {
-                        spawn_value_text(well, fonts, settings, row);
-                    });
+                spawn_value_well(
+                    controls,
+                    fonts,
+                    settings,
+                    row,
+                    STEPPER_VALUE_WELL_PX,
+                    JustifyContent::Center,
+                );
                 spawn_arrow(controls, fonts, row, 1, ">");
             }
             RowKind::Slider => {
@@ -795,22 +802,23 @@ fn spawn_row(card: &mut ChildSpawnerCommands, fonts: &UiFonts, settings: &Settin
                                 ));
                             });
                     });
-                controls
-                    .spawn(Node {
-                        width: Val::Px(SLIDER_VALUE_WELL_PX),
-                        justify_content: JustifyContent::FlexEnd,
-                        ..default()
-                    })
-                    .with_children(|well| {
-                        spawn_value_text(well, fonts, settings, row);
-                    });
+                spawn_value_well(
+                    controls,
+                    fonts,
+                    settings,
+                    row,
+                    SLIDER_VALUE_WELL_PX,
+                    JustifyContent::FlexEnd,
+                );
             }
         });
     });
 }
 
-/// A `<` / `>` affordance: dim at rest, bright on hover ([`refresh_page`] paints it from
-/// [`HoveredArrow`]), padded so its clickable rect is meaningfully larger than the glyph.
+/// A `<` / `>` affordance: dim at rest, bright on hover ([`refresh_page`] paints it from the glyph's
+/// own [`Hovered`]), padded so its clickable rect is meaningfully larger than the glyph. Picking
+/// honours that padding — the UI backend hit-tests the whole node rect and only narrows to a text
+/// SECTION when the point is inside a shaped run, so a click in the pad still resolves here.
 fn spawn_arrow(
     controls: &mut ChildSpawnerCommands,
     fonts: &UiFonts,
@@ -820,6 +828,7 @@ fn spawn_arrow(
 ) {
     controls.spawn((
         ArrowGlyph { row, delta },
+        Hovered::default(),
         Text::new(glyph),
         TextFont {
             // SemiBold: an affordance, not prose.
@@ -835,23 +844,33 @@ fn spawn_arrow(
     ));
 }
 
-fn spawn_value_text(
-    well: &mut ChildSpawnerCommands,
+/// The row's value, in a fixed-width well so the control beside it does not shuffle as the value
+/// text's width changes. `width`/`justify` are the only things the two row kinds disagree about.
+fn spawn_value_well(
+    controls: &mut ChildSpawnerCommands,
     fonts: &UiFonts,
     settings: &Settings,
     row: Row,
+    width: f32,
+    justify: JustifyContent,
 ) {
-    well.spawn((
-        RowValueText(row),
-        Text::new(row.value(settings)),
-        TextFont {
-            // SemiBold: the value is what the eye goes to.
-            font: fonts.hud.clone().into(),
-            font_size: FontSize::Px(18.0),
+    controls
+        .spawn(Node {
+            width: Val::Px(width),
+            justify_content: justify,
             ..default()
-        },
-        TextColor(TEXT),
-    ));
+        })
+        .with_child((
+            RowValueText(row),
+            Text::new(row.value(settings)),
+            TextFont {
+                // SemiBold: the value is what the eye goes to.
+                font: fonts.hud.clone().into(),
+                font_size: FontSize::Px(18.0),
+                ..default()
+            },
+            TextColor(TEXT),
+        ));
 }
 
 /// Arrow keys only — see the module doc on why `W`/`S` are not bound.
@@ -881,60 +900,93 @@ fn keyboard_input(
     }
 }
 
-/// Hover selects; the `<` `>` glyphs step on click; a slider's track sets on click and scrubs on
-/// drag. All hit tests use bevy's own laid-out rect (`ComputedNode::contains_point`), so the
-/// affordance matches the pixels at any window size or UI scale.
+/// Every click the page takes: an arrow steps its row, a slider's track sets the value there and
+/// GRABS itself for [`mouse_input`] to scrub until the button comes up.
 ///
-/// # The cursor must be in PHYSICAL pixels, and this whole system was dead until it was
+/// One observer rather than a hand-ordered pair of loops is what makes "the arrow inside the row
+/// wins over the row" a fact of the hierarchy: picking targets the DEEPEST node under the cursor and
+/// the event bubbles outwards from there, so the arrow — or the fill inside a track, which is why
+/// `press.entity` has become the TRACK by the time the second arm matches — is reached first and
+/// stops the walk. It cannot fire on a closed page either: the backend skips anything whose
+/// `InheritedVisibility` is false, which is exactly what [`refresh_page`] writes onto the card.
 ///
-/// `Window::cursor_position` returns LOGICAL pixels (bevy_window 0.19 `window.rs:614`: "The cursor
-/// position in this window in logical pixels", and its body is literally
-/// `physical_cursor_position() / scale_factor()`). Everything on the UI side of the test is
-/// PHYSICAL: `ComputedNode::size` is documented "in physical pixels" (bevy_ui 0.19 `ui_node.rs:30`,
-/// and every other resolved field on that type says the same), and `UiGlobalTransform` is built
-/// alongside those values in `ui_layout_system`, so `contains_point` (`ui_node.rs:223`) compares a
-/// point against a physical-pixel rect. Bevy's own picking backend does the conversion explicitly
-/// before calling the same function — `pointer_pos = pointer_location.position *
-/// camera.target_scaling_factor()` (`picking_backend.rs:133`).
-///
-/// MEASURED consequence on this project's target hardware: on a Retina 2x display every row's rect
-/// was twice as far out and twice as large as the cursor value being tested, so no row ever
-/// contained the cursor and the page's mouse support silently did nothing — no hover, no click.
-/// It is a silent class of bug precisely because 1x machines work fine.
-///
-/// [`Window::physical_cursor_position`] is used rather than a hand-rolled
-/// `cursor_position() * scale_factor()` because it is the value the logical accessor divides — same
-/// conversion, no round trip through a float divide and multiply. The picking backend also subtracts
-/// `Camera::physical_viewport_rect().min`; nothing here does, because this project never sets
-/// `Camera::viewport` (see [`crate::render_scale`], which scales the main pass through a resolution
-/// override precisely so the camera viewport stays the whole window).
-///
-/// [`track_fraction`] then works in that same physical space — cursor and track rect MUST be
-/// converted together or a drag lands the handle away from the cursor. The rect it works against
-/// during a drag is the one [`ActiveDrag`] froze at the grab, in that same physical space, for the
-/// feedback-loop reason that type's doc records.
-fn mouse_input(
-    visible: Res<SettingsPageVisible>,
-    buttons: Res<ButtonInput<MouseButton>>,
-    window: Option<Single<&Window, With<PrimaryWindow>>>,
-    lines: Query<(&RowLine, &ComputedNode, &UiGlobalTransform)>,
-    arrows: Query<(&ArrowGlyph, &ComputedNode, &UiGlobalTransform)>,
+/// The grab is the one moment the live track rect is read, because it is the rect the player just
+/// aimed at. Everything after maps through the frozen copy — see [`ActiveDrag`], and
+/// [`track_fraction`] for why the cursor has to be the PHYSICAL one to match it.
+fn page_pressed(
+    mut press: On<Pointer<Press>>,
+    arrows: Query<&ArrowGlyph>,
     tracks: Query<(&SliderTrack, &ComputedNode, &UiGlobalTransform)>,
+    window: Option<Single<&Window, With<PrimaryWindow>>>,
     caps: Res<PresentCaps>,
     mut selection: ResMut<Selection>,
-    mut hovered_arrow: ResMut<HoveredArrow>,
     mut drag: ResMut<SliderDrag>,
     mut settings: ResMut<Settings>,
     mut save: MessageWriter<SaveSettings>,
 ) {
-    let cursor = window.and_then(|window| window.physical_cursor_position());
+    if let Ok(arrow) = arrows.get(press.entity) {
+        press.propagate(false);
+        if press.button == PointerButton::Primary && arrow.row.enabled(&settings, *caps) {
+            change_row(arrow.row, arrow.delta, &mut settings, &mut save, *caps);
+        }
+    } else if let Ok((track, node, transform)) = tracks.get(press.entity) {
+        press.propagate(false);
+        let cursor = window.and_then(|window| window.physical_cursor_position());
+        if press.button != PointerButton::Primary || !track.0.enabled(&settings, *caps) {
+            return;
+        }
+        let Some(cursor) = cursor else { return };
+        selection.select(track.0);
+        let active = ActiveDrag::grab(track.0, node, transform);
+        drag.0 = Some(active);
+        // No save here — the release path in `mouse_input` writes the file once per drag.
+        scrub(active, cursor.x, &mut settings);
+    }
+}
 
-    // A drag in progress owns the mouse outright: scrub while held, save ONCE on release (or on
-    // the page closing under the drag), and never hover/click anything else meanwhile.
-    //
-    // The mapping deliberately does NOT consult `tracks` here — the geometry frozen at the grab is
-    // the whole rect this drag will ever use. See [`ActiveDrag`] for the layout feedback loop that
-    // re-reading the live rect closes.
+/// Put `active`'s row where `cursor_x` (PHYSICAL px) sits on its frozen track. Guarded, because
+/// `Settings` is a `ResMut` and a write is a change-tick bump — i.e. a re-`apply_settings` — even
+/// when the value lands where it already was, and a held-still drag is most of a drag's frames.
+fn scrub(active: ActiveDrag, cursor_x: f32, settings: &mut ResMut<Settings>) {
+    let mut next = **settings;
+    active
+        .row
+        .set_from_fraction(&mut next, active.fraction(cursor_x));
+    if next != **settings {
+        **settings = next;
+    }
+}
+
+/// The two things the mouse does per FRAME rather than per event: carry a grabbed slider, and move
+/// the selection to the hovered row. The drag lives here rather than in a `Pointer<Drag>` observer
+/// because a press-and-release that never moves the mouse produces no drag events at all, and the
+/// release is a frame fact anyway (the page can close under a held button).
+///
+/// [`Hovered`] is picking's own per-entity flag, true for the row line AND anything inside it (the
+/// CSS `:hover` rule — which is how hovering an ARROW still selects its row), and mutated only on
+/// enter/leave, so `Changed` fires twice per row crossed rather than every frame.
+///
+/// **The cursor is the PHYSICAL one**, because the rect [`ActiveDrag`] froze is physical — see
+/// [`track_fraction`] for the silent 2x that pins. `Window::physical_cursor_position` rather than a
+/// hand-rolled `cursor_position() * scale_factor()`: it is the value the logical accessor divides.
+/// A node's own `inverse_scale_factor` could NOT stand in — it folds in `UiScale` too
+/// (`bevy_ui::update` builds it as `target_scaling_factor * ui_scale`), so it converts to CSS
+/// pixels, not to the window-logical pixels a pointer reports.
+fn mouse_input(
+    visible: Res<SettingsPageVisible>,
+    buttons: Res<ButtonInput<MouseButton>>,
+    window: Option<Single<&Window, With<PrimaryWindow>>>,
+    rows: Query<(&RowLine, &Hovered), Changed<Hovered>>,
+    caps: Res<PresentCaps>,
+    mut selection: ResMut<Selection>,
+    mut drag: ResMut<SliderDrag>,
+    mut settings: ResMut<Settings>,
+    mut save: MessageWriter<SaveSettings>,
+) {
+    // A drag owns the mouse outright: scrub while held, save ONCE on release (or on the page closing
+    // under the drag), and never let the selection wander meanwhile. The mapping deliberately does
+    // NOT re-read the track — the geometry frozen at the grab is the whole rect this drag will ever
+    // use, for the layout feedback loop [`ActiveDrag`] records.
     if let Some(active) = drag.0 {
         if !visible.0 || !buttons.pressed(MouseButton::Left) {
             drag.0 = None;
@@ -944,74 +996,17 @@ fn mouse_input(
                 active.row.label(),
                 active.row.value(&settings)
             );
-        } else if let Some(cursor) = cursor {
-            let mut next = *settings;
-            active
-                .row
-                .set_from_fraction(&mut next, active.fraction(cursor.x));
-            if next != *settings {
-                *settings = next;
-            }
+        } else if let Some(cursor) = window.and_then(|window| window.physical_cursor_position()) {
+            scrub(active, cursor.x, &mut settings);
         }
-        hovered_arrow.set_if_neq(HoveredArrow(None));
         return;
     }
-
-    if !visible.0 {
-        hovered_arrow.set_if_neq(HoveredArrow(None));
-        return;
-    }
-    let Some(cursor) = cursor else {
-        hovered_arrow.set_if_neq(HoveredArrow(None));
-        return;
-    };
-    let clicked = buttons.just_pressed(MouseButton::Left);
-
-    // Arrows first: they sit INSIDE a row line, and the more specific target wins.
-    let mut arrow_hit = None;
-    for (arrow, node, transform) in &arrows {
-        if node.contains_point(*transform, cursor) && arrow.row.enabled(&settings, *caps) {
-            arrow_hit = Some(*arrow);
-            break;
-        }
-    }
-    hovered_arrow.set_if_neq(HoveredArrow(
-        arrow_hit.map(|arrow| (arrow.row, arrow.delta)),
-    ));
-
-    // Hover alone moves the selection (enabled rows only — a disabled row cannot be "described" by
-    // the footer hint it is excluded from acting on), so keyboard and mouse never disagree about
+    // Hover alone moves the selection, disabled rows excluded — a disabled row cannot be "described"
+    // by the footer hint it is excluded from acting on, so keyboard and mouse never disagree about
     // which row the hint is describing.
-    for (line, node, transform) in &lines {
-        if node.contains_point(*transform, cursor) && line.0.enabled(&settings, *caps) {
+    for (line, hovered) in &rows {
+        if hovered.get() && line.0.enabled(&settings, *caps) {
             selection.select(line.0);
-            break;
-        }
-    }
-
-    if !clicked {
-        return;
-    }
-    if let Some(arrow) = arrow_hit {
-        change_row(arrow.row, arrow.delta, &mut settings, &mut save, *caps);
-        return;
-    }
-    for (track, node, transform) in &tracks {
-        if track.0.enabled(&settings, *caps) && node.contains_point(*transform, cursor) {
-            selection.select(track.0);
-            // Freeze the rect the hit test just used — this click and every frame of the drag it
-            // starts map through THIS geometry, whatever the layout does meanwhile.
-            let active = ActiveDrag::grab(track.0, node, transform);
-            drag.0 = Some(active);
-            let mut next = *settings;
-            active
-                .row
-                .set_from_fraction(&mut next, active.fraction(cursor.x));
-            if next != *settings {
-                // No save here — the release path above writes the file once per drag.
-                *settings = next;
-            }
-            return;
         }
     }
 }
@@ -1060,7 +1055,9 @@ fn refresh_page(
     // The greying reads the EFFECTIVE vsync rung, not the stored one — see [`Row::enabled`].
     caps: Res<PresentCaps>,
     selection: Res<Selection>,
-    hovered_arrow: Res<HoveredArrow>,
+    // A scrubbing hand is not pointing at anything: an arrow the cursor crosses mid-drag must not
+    // light up, the same way hover does not move the selection then.
+    drag: Res<SliderDrag>,
     mut card: Query<&mut Visibility, With<SettingsCard>>,
     mut values: Query<
         (&RowValueText, &mut Text, &mut TextColor),
@@ -1079,7 +1076,7 @@ fn refresh_page(
         ),
     >,
     mut arrow_glyphs: Query<
-        (&ArrowGlyph, &mut TextColor),
+        (&ArrowGlyph, &Hovered, &mut TextColor),
         (
             Without<HintText>,
             Without<RowValueText>,
@@ -1121,9 +1118,9 @@ fn refresh_page(
             TEXT_DIM
         }));
     }
-    for (arrow, mut color) in &mut arrow_glyphs {
-        let hovered = hovered_arrow.0 == Some((arrow.row, arrow.delta));
-        color.set_if_neq(TextColor(if hovered { TEXT } else { TEXT_DIM }));
+    for (arrow, hovered, mut color) in &mut arrow_glyphs {
+        let lit = hovered.get() && drag.0.is_none() && arrow.row.enabled(&settings, *caps);
+        color.set_if_neq(TextColor(if lit { TEXT } else { TEXT_DIM }));
     }
     for (fill, mut node, mut color) in &mut fills {
         let width = Val::Percent(fill.0.slider_fraction(&settings).unwrap_or(0.0) * 100.0);
@@ -1350,7 +1347,7 @@ mod tests {
         }
     }
 
-    /// **Codex review finding, 2026-07-27.** A stored OFF the surface cannot present (Wayland
+    /// A stored OFF the surface cannot present (Wayland
     /// refuses `Immediate`) must grey the frame-cap row, because that is precisely what the limiter
     /// does with it — the row used to stay lit and armed over a compositor-paced surface. The gate
     /// is the EFFECTIVE rung, so this holds in the frames before `settings::normalize_vsync` has
@@ -1655,7 +1652,9 @@ mod tests {
     /// failure. Generous: the loop exits the moment the card has laid out.
     const LAYOUT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 
-    /// A headless app with the real card spawned and `UiScale` set to `ui_scale`.
+    /// A headless app running the REAL page — [`plugin`], not just [`spawn_page`] — with `UiScale`
+    /// set to `ui_scale`. The whole plugin, so the mouse test below exercises the wiring the game
+    /// ships (observer included) rather than a hand-assembled lookalike.
     ///
     /// The window and camera are load-bearing rather than ceremony: the UI's scale factor and
     /// viewport come from the camera's target (`propagate_ui_target_cameras`), and with no target at
@@ -1688,16 +1687,15 @@ mod tests {
         )
         .add_plugins(crate::ui_font::plugin)
         .init_resource::<Settings>()
+        // What `settings::plugin` would have supplied around the page; the rest of that plugin is
+        // disk IO and window observers this measurement has no use for.
+        .init_resource::<PresentCaps>()
+        .add_message::<SaveSettings>()
+        .add_plugins(plugin)
         .insert_resource(UiScale(ui_scale))
-        .add_systems(
-            Startup,
-            (
-                |mut commands: Commands| {
-                    commands.spawn(Camera2d);
-                },
-                spawn_page,
-            ),
-        );
+        .add_systems(Startup, |mut commands: Commands| {
+            commands.spawn(Camera2d);
+        });
 
         // `App::run` normally drives plugin finish/cleanup; a bare `update()` loop must do it.
         while app.plugins_state() == bevy::app::PluginsState::Adding {
@@ -1735,6 +1733,78 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
+    }
+
+    /// **The page's mouse is alive.** Hit testing moved to `bevy_picking`, and the whole failure
+    /// mode of a hit test is SILENCE: the page's mouse support was once dead on every Retina display
+    /// and said nothing, because "no node contains the cursor" and "no node was asked" look
+    /// identical from the outside. This is the tripwire — a synthetic pointer put on the ARROW's own
+    /// laid-out rect, pressed, and the setting expected to step.
+    ///
+    /// It exercises the real chain end to end: the backend walking `UiStack` against `ComputedNode`,
+    /// the hit resolving to the arrow (not the row line it sits in, and not the text run inside its
+    /// padding), the event reaching [`page_pressed`], and `change_row` moving [`Settings`]. Anything
+    /// that unhooks the page from picking — a lost observer, a card that never becomes visible, a
+    /// backend that stops running — fails here loudly instead of shipping a dead page.
+    ///
+    /// The pointer is driven by writing `PointerInput` directly, which is exactly what
+    /// `bevy_picking`'s own mouse plugin writes; no winit, no real cursor.
+    #[test]
+    fn a_picked_press_on_an_arrow_steps_its_row() {
+        use bevy::picking::pointer::{Location, PointerAction, PointerId, PointerInput};
+
+        let mut app = headless_card_app(1.0);
+        // Mid-ladder, so a step in either direction has somewhere to go.
+        app.insert_resource(Settings {
+            msaa: MsaaLevel::X2,
+            ..default()
+        });
+        app.insert_resource(SettingsPageVisible(true));
+        settle_with_font(&mut app);
+
+        // Where the MSAA row's `>` glyph actually laid out. Physical px, and the headless window is
+        // scale factor 1, so this doubles as the LOGICAL position a pointer reports.
+        let world = app.world_mut();
+        let mut arrows = world.query::<(&ArrowGlyph, &UiGlobalTransform)>();
+        let at = arrows
+            .iter(world)
+            .find(|(arrow, _)| arrow.row == Row::Msaa && arrow.delta == 1)
+            .map(|(_, transform)| transform.translation)
+            .expect("the MSAA row spawns a `>` arrow");
+        let mut windows = world.query_filtered::<Entity, With<PrimaryWindow>>();
+        let window = windows.single(world).expect("the harness made one window");
+        let location = Location {
+            target: bevy::camera::RenderTarget::Window(bevy::window::WindowRef::Primary)
+                .normalize(Some(window))
+                .expect("the primary window is a render target"),
+            position: at,
+        };
+
+        // Move first: a press is only routed to what the previous frame's hover map says is under
+        // the pointer, so the two have to be separate frames.
+        world.write_message(PointerInput::new(
+            PointerId::Mouse,
+            location.clone(),
+            PointerAction::Move { delta: Vec2::ZERO },
+        ));
+        app.update();
+        app.world_mut().write_message(PointerInput::new(
+            PointerId::Mouse,
+            location,
+            PointerAction::Press(PointerButton::Primary),
+        ));
+        app.update();
+
+        assert_eq!(
+            app.world().resource::<Settings>().msaa,
+            MsaaLevel::X4,
+            "a press on the MSAA row's `>` must step it — the mouse is not reaching the page",
+        );
+        assert_eq!(
+            app.world().resource::<Selection>().row(),
+            Row::Msaa,
+            "and the hovered row must be the selected one, so the footer hint agrees with the hand",
+        );
     }
 
     /// The hint SLOT laid out with `text` in it: its height and the scale factor it was laid out

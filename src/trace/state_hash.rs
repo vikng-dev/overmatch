@@ -549,7 +549,7 @@ mod tests {
         let transmission = sample_transmission();
         let a = hash_tank_state(p, q, lv, av, &drive, &grip, &transmission, &sim);
         let b = hash_tank_state(p, q, lv, av, &drive, &grip, &transmission, &sim);
-        // MEASURED for REV-20 (descent round: `band_confirm_ticks` joined the transmission
+        // MEASURED for REV-20 (`band_confirm_ticks` joined the transmission
         // projection); field order and bytes otherwise unchanged.
         assert_eq!(
             [
@@ -924,7 +924,7 @@ mod tests {
             &test_servos(),
             &sim,
         );
-        // MEASURED for REV-20 (descent round transmission projection), including reconciled
+        // MEASURED for REV-20 (transmission projection), including reconciled
         // servo, weapon gate, element, and rollback streams.
         assert_eq!(
             base,

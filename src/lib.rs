@@ -76,6 +76,12 @@ mod overlay;
 /// ([`ClientPlugin`] and [`NetClientPlugin`] — the headless server has no render app and no menu to
 /// be quit from).
 mod quit;
+/// The ONE module that knows a render-layer number or writes a bevy shadow marker: semantic
+/// channels, camera/light profiles, and the per-object `VisualScope` that resolves into both. Every
+/// other module declares intent and never touches `RenderLayers` — a source scan in that module
+/// enforces it. Mounted by each windowed root; the sandboxes deliberately keep their own layering
+/// (ADR-0031).
+mod render_policy;
 /// Render scale (research brief "Route A"): the 3D main pass renders at a fraction of the window
 /// through `MainPassResolutionOverride` and one bilinear upscale node, while bloom, tonemapping and
 /// the whole UI stay native. Ships — NOT `dev_tools`-gated; `settings::apply_settings` is the one
@@ -503,6 +509,10 @@ impl Plugin for ClientPlugin {
             // Device gather: the only device→command translation.
             command::client_plugin,
             tank::client_plugin,
+            // Resolves every `VisualScope`/`CameraProfile`/`LightProfile` into bevy's own render
+            // components. Mounted before the modules that declare them so the ordering reads in
+            // dependency order; the systems themselves are `PostUpdate` and order-independent.
+            render_policy::plugin,
             camera::plugin,
             aim::client_plugin,
             // `sight` owns the gunner-view toggle/mode that `camera` and `aim` branch on.
@@ -527,10 +537,9 @@ impl Plugin for ClientPlugin {
 
         // Physics visualization (collider/ray wireframes) + debug toggles, behind the `dev_tools`
         // feature (default-on, droppable from an optimized build via `--no-default-features`).
-        // (A dev perf panel used to ride this same gate; it was deleted 2026-07-27 — the settings
-        // page covers its render knobs and `cargo tracy` is the frame-cost instrument. Offline SP
-        // therefore registers no diagnostic plugins at all now, which is accepted: the net client
-        // still has `net::debug_hud`'s fps/frame-time card.)
+        // Offline SP registers no diagnostic plugins at all, which is accepted: the settings page
+        // covers the render knobs, `cargo tracy` is the frame-cost instrument, and the net client
+        // still has `net::debug_hud`'s fps/frame-time card.
         #[cfg(feature = "dev_tools")]
         app.add_plugins((avian3d::prelude::PhysicsDebugPlugin, debug::plugin));
     }
@@ -582,6 +591,10 @@ impl Plugin for NetClientPlugin {
         // (Separate call: the tuple above is at bevy's 15-plugin tuple arity limit.)
         app.add_plugins((
             drive_hud::plugin,
+            // The render-policy resolver (see `ClientPlugin`) — every windowed root needs it, or
+            // nothing that declares a scope or a profile is ever resolved. Down here rather than
+            // beside `camera::plugin`: the tuple above is at bevy's 15-plugin arity limit.
+            render_policy::plugin,
             // Exit plumbing: `Cmd+Q` -> `AppExit` on macOS, and the render-app recall that keeps
             // bevy's own exit teardown from deadlocking against the render thread (bevy#12912).
             // (Down here rather than beside `branding::plugin`: the tuple above is full.)

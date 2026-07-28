@@ -263,7 +263,7 @@ mod tests {
         assert!(!PresentCaps::Unavailable.immediate() && !PresentCaps::Unavailable.mailbox());
     }
 
-    /// **Codex adversarial pass, 2026-07-27: the silent half of the failure story.**
+    /// **The silent half of the failure story.**
     ///
     /// `Surface::get_capabilities` cannot report an error — wgpu 29 flattens a failed
     /// `surface_get_capabilities` into `SurfaceCapabilities::default()`, i.e. an EMPTY

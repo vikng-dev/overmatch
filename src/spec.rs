@@ -485,7 +485,7 @@ pub struct SteeringSpec {
     pub capacity: f32,
     /// Inner→outer recirculation efficiency η.
     pub recirculation: f32,
-    // `neutral_fraction` DELETED (transmission fix 3, 2026-07-19): it was an unprovenanced
+    // `neutral_fraction` DELETED: it was an unprovenanced
     // authored feel scalar; the L600 neutral turn now uses the DERIVED
     // `neutral_d_full = κ_tight(F1) × v1_governed` directly (the radii table's own
     // gear-independent invariant makes that the correct emergent pivot scale).
@@ -849,8 +849,7 @@ mod tests {
         assert_eq!(*gearbox.forward_speeds_kmh.last().unwrap(), 45.4);
         assert_eq!(steering.radii[0].0, 3.44);
         assert_eq!(steering.radii[7].1, 165.0);
-        // DELIBERATE pin update (transmission fix 4 + review round, 2026-07-19):
-        // brake_force re-anchored from the circular grip-limit sizing (250 kN — sized
+        // DELIBERATE pin: brake_force re-anchored from the circular grip-limit sizing (250 kN — sized
         // against the very μ it was meant to test, and energy-impossible for two 1940s
         // discs) to the DUAL anchor: the settled 20° park hold (W·sin 20°/2 ≈ 95.6
         // kN/side) and 0.343 g total service decel (inside the 0.2–0.35 g WWII heavy-tank
@@ -1118,7 +1117,7 @@ mod tests {
         );
     }
 
-    /// Transmission-block runtime invariants (codex-5): non-finite capacities NaN out the
+    /// Transmission-block runtime invariants: non-finite capacities NaN out the
     /// brake engagement scaling, hunting shift bands and unordered ladders break the shift
     /// logic's assumptions, and the u8 gear index must be able to address every gear. Each
     /// rejection is named; the shipped Tiger sheet passes (see
@@ -1138,8 +1137,8 @@ mod tests {
         }
         let cases: [(&str, fn(&mut TransmissionSpec)); 16] = [
             // Stage-B crank block: absurd-but-finite values must be refused outright, in
-            // BOTH directions (review round FIX 4 added the lower bounds — the coupling
-            // divides by J and the capacity gates every transmitted torque).
+            // BOTH directions — the lower bounds matter too: the coupling divides by J
+            // and the capacity gates every transmitted torque.
             ("inertia_kgm2", |tr| engine(tr).inertia_kgm2 = 0.0),
             ("inertia_kgm2", |tr| engine(tr).inertia_kgm2 = 0.05),
             ("inertia_kgm2", |tr| engine(tr).inertia_kgm2 = 250.0),
@@ -1152,7 +1151,7 @@ mod tests {
             ("clutch_capacity_nm", |tr| {
                 engine(tr).clutch_capacity_nm = 80_000.0;
             }),
-            // FIX 2/4: an idle under 300 rpm would put the sim's hard stall floor
+            // An idle under 300 rpm would put the sim's hard stall floor
             // (idle − 100) inside the spawn sentinel's territory.
             ("engine.idle_rpm floor", |tr| engine(tr).idle_rpm = 200.0),
             ("steering capacity", |tr| {
@@ -1208,7 +1207,7 @@ mod tests {
             err.contains("brake_static_factor") && err.contains("FixedRadii"),
             "missing brake_static_factor should be named with its architecture: {err}"
         );
-        // FIX 4, belt-inertia floor: with a transmission declared the coupling divides by
+        // Belt-inertia floor: with a transmission declared the coupling divides by
         // 2 × powertrain.inertia — a tiny-but-positive value passes the generic finite/> 0
         // check and must be caught by the transmission-block floor.
         let mut spec = fresh();

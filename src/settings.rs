@@ -19,14 +19,10 @@
 //! capability list — never on a probe that could not ask ([`PresentCaps`] is a tri-state for
 //! exactly this reason).
 //!
-//! That table used to have three MORE rows: a `dev_tools` perf panel carried function-key knobs that
-//! wrote this same resource without persisting, plus a dev-only "shadows fully off" resource the
-//! player-facing ladder could not express. It was DELETED 2026-07-27 (Yan) as superseded — the
-//! settings page reaches everything it reached, `cargo tracy` (`.cargo/config.toml`) is the frame-cost
-//! instrument, and shadows off is now a player-facing rung ([`ShadowDistance::Off`]). What the
-//! deletion buys is that a value can only be in this resource because the player put it there.
+//! The table is exhaustive: nothing else writes this resource, so a value can only be in it because
+//! the player put it there.
 //!
-//! The saving is still deliberately NOT "save whatever `Settings` holds when the app exits": only an
+//! The saving is deliberately NOT "save whatever `Settings` holds when the app exits": only an
 //! explicit [`SaveSettings`] writes the file, so a value that arrived any other way can never be
 //! laundered into the player's config.
 //!
@@ -84,9 +80,21 @@ mod ui;
 /// bump this; only a field whose MEANING changed under the same name does.
 const SETTINGS_VERSION: u32 = 1;
 
-/// The DEFAULT cascade count — [`ShadowCascades::default`]'s value, and bevy's own default
-/// (`CascadeShadowConfigBuilder::num_cascades`), so the shipped look at [`ShadowDistance::M150`] is
-/// bit-identical to what the game rendered before this module existed.
+/// The DEFAULT cascade count — [`ShadowCascades::default`]'s value, and the ONE number the whole
+/// shadow ladder is priced against.
+///
+/// **It was 4 (bevy's own `CascadeShadowConfigBuilder::num_cascades`) until 2026-07-28, and it is 3
+/// now.** MEASURED on an M4 (10 GPU cores, two idling Tigers, release, vsync off, 20 s settled
+/// windows): a cascade costs **~1.16 ms of frame time each**, while the whole 1024 → 4096 map-size
+/// axis spans 0.27 ms and the whole 150 → 1000 m distance axis costs ~0.71 ms (re-measured
+/// 2026-07-28 at the shipped 3 cascades / 4096 with track shadow proxies on; the first reading of
+/// this axis was ~1.17 ms at 4 cascades / 2048, which is the same axis priced against a costlier
+/// ladder). The cascade COUNT is the expensive axis and nothing else on this page is close, so
+/// dropping one cascade buys back more than the crispness and the envelope together cost — and the
+/// shipped envelope only spends 0.30 ms of that 0.71 ms axis anyway
+/// ([`ShadowDistance`]'s table). What keeps the picture honest at 3 is
+/// [`SHADOW_FIRST_CASCADE_FAR_BOUND_M`] — see its doc for the split arithmetic, which is the reason
+/// this drop is not simply a quality cut.
 ///
 /// **This used to be a hard constant, and the story below is why.** The count is a live row now
 /// ([`ShadowCascades`]), and changing it at runtime is safe ONLY because
@@ -146,7 +154,53 @@ const SETTINGS_VERSION: u32 = 1;
 ///   `View::main_pass_viewport`. Nothing is sized from it — view targets, depth and prepass textures
 ///   are all still allocated at the full `physical_target_size` (see [`crate::render_scale`]'s
 ///   honest-limits section) — so there is no length for a stale `Local` to index with.
-pub(crate) const SHADOW_CASCADES: usize = 4;
+pub(crate) const SHADOW_CASCADES: usize = 3;
+
+/// Far bound of the FIRST cascade, metres — the split knob, stated here instead of inherited from
+/// `CascadeShadowConfigBuilder::default()`'s **10.0**.
+///
+/// Bevy splits the camera frustum geometrically: cascade `i`'s far bound is
+/// `first · (maximum/first)^(i/(n−1))`. So `first` is not "how far the crisp cascade reaches", it is
+/// the RATIO between neighbouring cascades — and at a fixed count, raising it flattens the whole
+/// ladder. Bevy's 10.0 is a character-scale default (a 10 m first cascade is a room); on a 1 km map
+/// viewed from a tank it spends the entire cascade budget inside the first 10 m of the picture and
+/// leaves the far field to one enormous slab.
+///
+/// The arithmetic, at 16:9 / 45° vertical / 1964 px tall, in **screen pixels per shadow texel at the
+/// cascade's near bound** (the worst point in a cascade, and the number a player actually sees):
+///
+/// | config | worst px per texel |
+/// |---|---|
+/// | 4 casc, first 10, 150 m, 2048 (the old default) | 6.08 |
+/// | 3 casc, first 10, 1000 m, 4096 | 12.23 |
+/// | 3 casc, first 40, 1000 m, 4096 | 6.12 |
+/// | 3 casc, first 10, 350 m, 4096 | 7.24 |
+/// | **3 casc, first 40, 350 m, 4096 (the default)** | **3.64** |
+///
+/// That is the whole case for the constant: at bevy's 10.0 the cascade drop would halve far-field
+/// crispness, and 40.0 buys all of it back — at the 1000 m envelope it lands within 0.7 % of the old
+/// default while reaching 6.7× further, and at the 350 m envelope that actually ships it lands 1.7×
+/// CRISPER than the old default while still reaching 2.3× further. The quality is free because it
+/// comes out of near-field texel density nobody was looking at — the first cascade's texel grows
+/// 0.83 cm → 1.66 cm, which is still under two centimetres on a 3 m tank.
+///
+/// Note the two knobs are not interchangeable, which is why both are pinned: at the shipped 350 m
+/// envelope, winding this constant back to bevy's 10.0 would cost 7.24 against 3.64 — the ENVELOPE
+/// being short does not rescue a badly split ladder.
+///
+/// **Not a free parameter to nudge.** It is coupled to [`SHADOW_CASCADES`] through that exponent: at
+/// a different count, 40 m means a different ratio and the table above has to be recomputed.
+const SHADOW_FIRST_CASCADE_FAR_BOUND_M: f32 = 40.0;
+
+/// How much each cascade overlaps the previous one, as a fraction of the previous far bound — bevy's
+/// own default value, stated explicitly for the same reason as
+/// [`SHADOW_FIRST_CASCADE_FAR_BOUND_M`]: the builder's `..default()` is a silent third author of the
+/// picture, and one of its two silent values turned out to be wrong for this world.
+///
+/// Deliberately UNCHANGED at 0.2. It buys the blend band that hides the seam where a shadow crosses
+/// a cascade boundary, and it is paid for out of the near bound — the `(1 − overlap)` in the
+/// px-per-texel table above. Nothing measured argues with it, so it stays where it was, now visibly.
+const SHADOW_CASCADE_OVERLAP: f32 = 0.2;
 
 /// How many cascades the directional shadow map is split into — how gracefully shadow crispness
 /// falls off with distance, at a fixed [`ShadowResolution`] and [`ShadowDistance`]. Fewer cascades
@@ -156,16 +210,21 @@ pub(crate) const SHADOW_CASCADES: usize = 4;
 /// for the crash that makes stock 0.19.0 unable to grow this at runtime, and for the vendor entry
 /// that must outlive this type.
 ///
+/// **This is the expensive row** — the only one on this page worth a whole millisecond. MEASURED on
+/// an M4: ~1.16 ms per cascade, against 0.27 ms for the entire resolution ladder. A frame-rate
+/// complaint is almost always this row.
+///
 /// No `Off` and no `1`: switching shadows off is [`ShadowDistance::Off`]'s job, and a single
 /// cascade stretched to the full distance is a quality floor nobody asked for — 2 is already the
 /// honest budget rung.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub(crate) enum ShadowCascades {
     Two,
-    Three,
-    /// **The shipped default** — bevy's own `CascadeShadowConfigBuilder::num_cascades`, pinned as
-    /// [`SHADOW_CASCADES`].
+    /// **The shipped default**, pinned as [`SHADOW_CASCADES`] — 3 rather than bevy's 4 because the
+    /// fourth cascade costs ~1.16 ms and buys back less than [`SHADOW_FIRST_CASCADE_FAR_BOUND_M`]
+    /// gives away for nothing.
     #[default]
+    Three,
     Four,
 }
 
@@ -175,8 +234,8 @@ impl ShadowCascades {
     pub(crate) const fn count(self) -> usize {
         match self {
             ShadowCascades::Two => 2,
-            ShadowCascades::Three => 3,
-            ShadowCascades::Four => SHADOW_CASCADES,
+            ShadowCascades::Three => SHADOW_CASCADES,
+            ShadowCascades::Four => 4,
         }
     }
 
@@ -190,7 +249,6 @@ impl ShadowCascades {
         }
     }
 
-    /// Ascending in cost, like every other ladder here.
     pub(crate) const ORDER: [ShadowCascades; 3] = [
         ShadowCascades::Two,
         ShadowCascades::Three,
@@ -201,12 +259,60 @@ impl ShadowCascades {
 /// How far directional shadows are drawn before they stop — the far bound of the last cascade, with
 /// the cascade COUNT its own row ([`ShadowCascades`]).
 ///
-/// **Split from [`ShadowResolution`] on purpose** (Yan, 2026-07-27). Distance and map resolution are
-/// independent costs: distance widens the area each cascade must cover (cheap to raise on a machine
-/// with fill rate to spare, and what decides whether a distant treeline shades anything at all),
-/// resolution buys crispness at a fixed area. Pairing them into coupled Low/Medium/High presets — as
-/// this type used to — meant a player who wanted the far envelope had to pay for 4K maps too, and it
-/// hid which of the two a frame-rate complaint was actually about.
+/// **Split from [`ShadowResolution`] on purpose** (Yan, 2026-07-27), and the split is about COST,
+/// not about quality. As costs they really are independent, which is why they are two rows: distance
+/// widens the area each cascade must cover, resolution buys texels at a fixed area, and pairing them
+/// into coupled Low/Medium/High presets — as this type used to — meant a player who wanted the far
+/// envelope had to pay for 4K maps too, and hid which of the two a frame-rate complaint was about.
+///
+/// **As QUALITY they are coupled, and the doc here used to say otherwise** (corrected 2026-07-28).
+/// A cascade's texel is `frustum_diameter / map_size`, so distance grows it and resolution shrinks
+/// it, and the artefact that texel size drives is not blur — it is **peter-panning**, the shadow
+/// sliding off the object that casts it. `bevy_pbr` offsets the shadow lookup by
+/// `shadow_normal_bias · √2 · cascade_texel` along the surface normal (see [`crate::world`]'s
+/// `SUN_SHADOW_NORMAL_BIAS`), i.e. detachment is **3.68 × the cascade's texel**, in metres of world.
+/// Raising the distance without raising the resolution therefore buys far shadows that float:
+///
+/// | far cascade | texel | detachment |
+/// |---|---|---|
+/// | 150 m @ 2048 (the old default) | 12.4 cm | 0.46 m |
+/// | **350 m @ 4096 (the default)** | **14.5 cm** | **0.53 m** |
+/// | 700 m @ 4096 | 29 cm | 1.06 m |
+/// | 1000 m @ 4096 (the top rung) | 41 cm | 1.5 m |
+/// | 1000 m @ 2048 | 82 cm | 3.0 m — **a whole Tiger** |
+///
+/// That is why the distance default and the resolution default moved together, and it is the reason
+/// a player dragging this row to 1000 m on a 1024 map gets something visibly worse than the same
+/// row at 350 m. The rows stay separate because their COSTS are separable; the coupling is a fact
+/// about the picture that the labels cannot express, so it is written down here instead.
+///
+/// # Why the default is the FLOOR rung, not the far one (measured 2026-07-28)
+///
+/// The envelope was priced on an M4 at the shipped 3 cascades / 4096 / 40 m first bound, two tanks
+/// idling with track shadow proxies on, against shadows-off controls that agreed to 0.157 ms across
+/// the session:
+///
+/// | envelope | frame p50 | px per texel (lower = crisper) |
+/// |---|---|---|
+/// | 150 m (retired ceiling, reachable only via [`shadow_distance_override`]) | 14.56 ms | 2.44 |
+/// | **350 m** | **14.86 ms** | **3.64** |
+/// | 700 m | 15.38 ms | 5.12 |
+/// | 1000 m | 15.27 ms | 6.11 |
+///
+/// Two things fall out. The cost SATURATES: 700 and 1000 m are 0.11 ms apart, inside the session's
+/// own 0.23 ms repeatability, because past ~700 m the cascade already encloses the whole 1 km map.
+/// And crispness degrades monotonically with reach — under a geometric split a longer envelope
+/// spreads the same texels over more world, so 1000 m is 1.7× blurrier than 350 m for 0.41 ms more.
+/// Every column therefore argues the same way, which is what makes this an easy default: shorter is
+/// cheaper AND crisper, right down to the point where it starts cutting real shadows off.
+///
+/// That point is the floor, and it is physics, not taste (see the migration note: a 17° sun over
+/// 100 m of relief ⇒ ~327 m of self-shadowing). 350 m is the first rung above it, and it is also the
+/// LAST one worth paying for: past it the envelope reaches into sky this world has nothing to cast
+/// into, so the extra metres buy reach nobody can see while costing texel density everybody can.
+/// The 150 m row is in the table to show what the floor is protecting — it is cheaper and crisper
+/// still, and it is exactly the setting whose cut-off shadows started this work. The longer rungs
+/// stay on the ladder for other hardware and other worlds, not as the recommendation.
 ///
 /// **`Off` is reachable, and that RESCINDS a stated product rule.** The rule was: shadows are
 /// GAMEPLAY INFORMATION, not decoration — a hull-down tank's shadow, the shadow a barrel throws
@@ -218,17 +324,47 @@ impl ShadowCascades {
 /// measurement nobody has yet, and the whole-budget number needs the off state to exist. **Removing
 /// `Off` again once that measurement lands is a deliberately open question**, so nothing downstream
 /// may assume either way.
+///
+/// # The ladder moved on 2026-07-28, and old files migrate
+///
+/// The rungs were `100 / 150 / 300`; they are `350 / 700 / 1000` now. The old ceiling was never a
+/// choice anyone made — 150 m is bevy's stock `maximum_distance`, tuned for character-scale scenes —
+/// and it is below this world's PHYSICAL floor: at [`crate::world`]'s 17° sun a shadow runs 3.27×
+/// the caster's height, so 100 m of terrain relief self-shadows out to ~327 m. Under the old ladder
+/// a ridge simply stopped shading the valley behind it partway down, at every rung.
+///
+/// **`M100`/`M150`/`M300` are gone as VARIANTS and survive as `#[serde(alias)]`s** on the nearest
+/// surviving rung, so an existing `video.ron` loads without error and lands on a real ladder
+/// position. Migrating beats keeping them representable-but-hidden: `ui::step_in` treats a current
+/// value it cannot find in `ORDER` as index 0, so an off-ladder rung would send the next press of
+/// the right arrow to `Off` — a stored value the page cannot walk out of is worse than a stored
+/// value the page silently rounds. All three land on `M350` (|300 − 350| = 50 beats |300 − 700| =
+/// 400), which does mean a player who chose 100 m for frame rate is moved UP; that is accepted
+/// because the same release drops a cascade, and the 150 → 350 m they are moved across costs
+/// ~0.30 ms (table below) against the ~1.16 ms that one fewer cascade gives back — see
+/// [`SHADOW_CASCADES`]. `M350` being the DEFAULT as well as the migration target means the common
+/// case is a file that lands where a fresh install would.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub(crate) enum ShadowDistance {
     /// Nothing casts: [`apply_settings`] clears `DirectionalLight::shadow_maps_enabled`. This is the
     /// whole shadow budget in one A/B, and the rung whose future is undecided (see the type doc).
     Off,
-    M100,
-    /// **The shipped default** — bevy's own `CascadeShadowConfigBuilder::maximum_distance`, i.e. the
-    /// envelope the game rendered before this module existed.
+    /// **The shipped default**, and the physical floor for this world's sun — see the migration note
+    /// above for the 3.27× that produces it, and for why the three retired rungs all land here.
+    /// Chosen over the longer rungs on the measurement in the type doc's envelope table: everything
+    /// past ~350 m reaches into sky this world cannot shadow, so the extra metres are paid for and
+    /// not seen.
+    #[serde(alias = "M100", alias = "M150", alias = "M300")]
     #[default]
-    M150,
-    M300,
+    M350,
+    M700,
+    /// The map is 1 km across (`terrain_grid::WORLD_SIZE`), so this is the rung at which the whole
+    /// world casts and the draw volume stops growing — MEASURED: the cost curve saturates around
+    /// 700 m for exactly that reason (700 and 1000 m are within the session's own repeatability).
+    /// It was the shipped default for one day, 2026-07-28; the type doc's envelope table is why it
+    /// is a top rung instead. Only affordable together with [`ShadowResolution::X4096`] — at 2048 it
+    /// detaches a far shadow by a whole tank.
+    M1000,
 }
 
 impl ShadowDistance {
@@ -238,9 +374,9 @@ impl ShadowDistance {
     pub(crate) const fn distance_m(self) -> Option<f32> {
         match self {
             ShadowDistance::Off => None,
-            ShadowDistance::M100 => Some(100.0),
-            ShadowDistance::M150 => Some(150.0),
-            ShadowDistance::M300 => Some(300.0),
+            ShadowDistance::M350 => Some(350.0),
+            ShadowDistance::M700 => Some(700.0),
+            ShadowDistance::M1000 => Some(1000.0),
         }
     }
 
@@ -256,32 +392,48 @@ impl ShadowDistance {
     pub(crate) const fn label(self) -> &'static str {
         match self {
             ShadowDistance::Off => "OFF",
-            ShadowDistance::M100 => "100 M",
-            ShadowDistance::M150 => "150 M",
-            ShadowDistance::M300 => "300 M",
+            ShadowDistance::M350 => "350 M",
+            ShadowDistance::M700 => "700 M",
+            ShadowDistance::M1000 => "1000 M",
         }
     }
 
     /// Ascending in cost, so the settings page's right arrow always moves toward more shadow.
+    ///
+    /// **Every representable value must appear here** — see the type doc's migration note for the
+    /// `step_in` dead-end that an off-ladder variant would create. `the_retired_distance_rungs_migrate`
+    /// pins it.
     pub(crate) const ORDER: [ShadowDistance; 4] = [
         ShadowDistance::Off,
-        ShadowDistance::M100,
-        ShadowDistance::M150,
-        ShadowDistance::M300,
+        ShadowDistance::M350,
+        ShadowDistance::M700,
+        ShadowDistance::M1000,
     ];
 }
 
-/// Edge length of each cascade's shadow map — how CRISP a shadow is, independent of how far it is
-/// drawn (see [`ShadowDistance`] for why the two are separate rows).
+/// Edge length of each cascade's shadow map — how CRISP a shadow is at a given
+/// [`ShadowDistance`]. Separate ROWS because their costs are separable, NOT independent in quality:
+/// see [`ShadowDistance`] for the peter-panning that couples them, and for why this row's default
+/// moved in the same change as that one's.
+///
+/// **The cheap row.** MEASURED on an M4: the whole 1024 → 4096 span is 0.27 ms, against ~1.16 ms for
+/// a single cascade ([`ShadowCascades`]). Texel count is not what a tiled GPU is spending its shadow
+/// budget on; render-pass count is.
 ///
 /// Deliberately has no `Off`: switching shadows off is [`ShadowDistance::Off`]'s job, and two ways to
 /// express the same state is how a UI ends up with rows that contradict each other.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub(crate) enum ShadowResolution {
     X1024,
-    /// **The shipped default** — bevy's own `DirectionalLightShadowMap::default().size`.
-    #[default]
+    /// Bevy's own `DirectionalLightShadowMap::default().size`, and the shipped default until
+    /// 2026-07-28 — it detaches a far shadow by ~1.07 m at the shipped 350 m envelope and by ~3 m at
+    /// [`ShadowDistance::M1000`], so it is a budget rung now rather than the reference one.
     X2048,
+    /// **The shipped default.** 0.27 ms for 4× the texels — the cheapest quality on this page, and
+    /// what holds far-shadow detachment to half a metre at the shipped envelope (see
+    /// [`ShadowDistance`]'s table). It is also what makes the longer rungs usable at all: without it
+    /// [`ShadowDistance::M1000`] would peter-pan by a whole tank.
+    #[default]
     X4096,
 }
 
@@ -1119,6 +1271,38 @@ pub(crate) fn plugin(entry: PageEntry) -> impl Plugin {
     }
 }
 
+/// Dev-only far-shadow override, metres: `OVERMATCH_SHADOW_DISTANCE_M` replaces whatever
+/// [`ShadowDistance`] the settings row asks for, so the cascade envelope can be set to values the
+/// player-facing enum does not offer.
+///
+/// **Still earning its keep after the 2026-07-28 ladder change**, which is worth stating because the
+/// question it was built to answer — "does the whole map cast?" — is now a rung
+/// ([`ShadowDistance::M1000`]). What it is for now is the SPACE BETWEEN, BELOW and BEYOND the rungs:
+/// the ladder is four values and a sweep needs a continuum, so measuring where the cost curve
+/// actually saturates (it is flat by ~700 m on this 1 km map — see [`ShadowDistance`]'s envelope
+/// table) or what 2 km would do still needs this. It is also the only way to reach a RETIRED
+/// envelope: the 2026-07-28 decision sweep priced the old 150 m ceiling through
+/// `OVERMATCH_SHADOW_DISTANCE_M=150`, because no rung expresses it any more. A ladder rung is a
+/// product decision; this is the instrument that produces the evidence for the next one.
+///
+/// Read ONCE and cached: [`apply_settings`] runs every frame and must not touch the process
+/// environment there. Unset — every normal run, and every test — yields `None` and the enum decides,
+/// so this is inert rather than a second authority. It does NOT enable casting: with
+/// [`ShadowDistance::Off`] selected the light still stops casting, the override only sizes the
+/// envelope.
+///
+/// One sharp edge, since the value is unvalidated beyond `> 0`: a distance below
+/// [`SHADOW_FIRST_CASCADE_FAR_BOUND_M`] inverts the split (the cascade bounds run backwards) rather
+/// than being clamped. That threshold used to be bevy's 10 m and is 40 m now, so the useless range
+/// is wider than it was. Nothing asserts, because nothing should — the ladder's own floor is 350 m
+/// and this is an instrument, not a rung.
+fn shadow_distance_override() -> Option<f32> {
+    static OVERRIDE: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+    *OVERRIDE.get_or_init(|| {
+        crate::env_parse::<f32>("OVERMATCH_SHADOW_DISTANCE_M").filter(|metres| *metres > 0.0)
+    })
+}
+
 /// Reconcile the rendering world to [`Settings`]. The ONE writer of every knob below, which is what
 /// makes "the page and the picture cannot disagree" true by construction rather than by discipline.
 fn apply_settings(
@@ -1162,15 +1346,24 @@ fn apply_settings(
         // must not depend on a zero-metre envelope having been repaired first. A cascade-count
         // change made while off therefore stays PENDING and lands on this same rebuild the moment a
         // distance exists again — the row is inert while off, not lost.
-        if let Some(maximum_distance) = distance.distance_m() {
+        if let Some(maximum_distance) = shadow_distance_override().or_else(|| distance.distance_m())
+        {
             // The cascade COUNT may vary at runtime ONLY because the vendored bevy_light backport
             // resizes the stale per-thread queues — see `SHADOW_CASCADES` for the crash this line
-            // used to be constant to avoid. Everything else the builder sets stays at the same
-            // `..default()` the world has always used, so the default row values reproduce the
-            // shipped picture bit-for-bit.
+            // used to be constant to avoid.
+            //
+            // The split parameters are STATED, not inherited. `..default()` used to cover them, and
+            // that silently pinned `first_cascade_far_bound = 10.0` — a character-scale value that
+            // halves far-field crispness on a 1 km map (see `SHADOW_FIRST_CASCADE_FAR_BOUND_M`).
+            // The overlap is written out at the same value bevy defaults to, so that a builder field
+            // NOT listed here is a deliberate "bevy decides", not an oversight. Exactly one such
+            // field is left: `minimum_distance` (0.1 m), the near clip, which no row of this page
+            // has any business moving.
             let rebuilt = CascadeShadowConfigBuilder {
                 num_cascades: settings.shadow_cascades.count(),
                 maximum_distance,
+                first_cascade_far_bound: SHADOW_FIRST_CASCADE_FAR_BOUND_M,
+                overlap_proportion: SHADOW_CASCADE_OVERLAP,
                 ..default()
             }
             .build();
@@ -1382,26 +1575,64 @@ mod tests {
         states
     }
 
-    /// The defaults must reproduce the picture the game shipped BEFORE settings existed, or merely
-    /// adding this module changed the product. Bevy's own defaults are the reference.
+    /// The defaults, and WHOSE they are.
+    ///
+    /// **This test used to assert the shadow rows equalled bevy's own defaults** — the reasoning
+    /// being that merely adding a settings module must not change the product. That reasoning
+    /// expired on 2026-07-28, when the shadow defaults were retuned off measurement (see
+    /// [`SHADOW_CASCADES`], [`SHADOW_FIRST_CASCADE_FAR_BOUND_M`] and [`ShadowDistance`]'s ladder
+    /// note); the picture was DELIBERATELY changed, and pinning it to bevy would now assert the
+    /// opposite of the intent. So the three shadow rows are pinned to their own measured values, and
+    /// each one is stated as a divergence FROM bevy so that a silent drift back is still a failure.
+    ///
+    /// Everything else still answers to bevy, and still for the original reason.
     #[test]
     fn defaults_reproduce_the_shipped_render() {
         let settings = Settings::default();
         assert_eq!(settings.msaa.to_msaa(), Msaa::default());
+
         let bevy_cascades = CascadeShadowConfigBuilder::default();
+        // Moved 1000.0 -> 350.0 on 2026-07-28: the envelope was measured across the ladder and
+        // everything past ~350 m reaches into sky this 17°-sun world cannot shadow, so the far rungs
+        // cost frame time and texel density for reach nobody sees (see `ShadowDistance`'s table).
         assert_eq!(
             settings.shadow_distance.distance_m(),
-            Some(bevy_cascades.maximum_distance),
+            Some(350.0),
+            "the default envelope is this world's shadow horizon — a 17° sun over 100 m of relief \
+             self-shadows to ~327 m — not bevy's {} m character-scale default",
+            bevy_cascades.maximum_distance,
         );
-        assert_eq!(SHADOW_CASCADES, bevy_cascades.num_cascades);
         assert_eq!(
             settings.shadow_cascades.count(),
             SHADOW_CASCADES,
-            "the default cascade row must be the pinned bevy default"
+            "the default cascade row must be the pinned count"
+        );
+        assert_eq!(SHADOW_CASCADES, 3);
+        assert_eq!(
+            bevy_cascades.num_cascades, 4,
+            "we drop ONE cascade off bevy's default at ~1.16 ms each — if bevy's default moves, \
+             this trade has to be re-measured, not silently inherited",
         );
         assert_eq!(
             settings.shadow_resolution.shadow_map_size(),
+            4096,
+            "4× bevy's {} because 2048 detaches a far shadow by ~1 m at the shipped 350 m envelope, \
+             and by a whole tank at the M1000 rung",
             DirectionalLightShadowMap::default().size,
+        );
+        assert_eq!(
+            SHADOW_FIRST_CASCADE_FAR_BOUND_M, 40.0,
+            "the split knob that pays for the dropped cascade",
+        );
+        assert!(
+            SHADOW_FIRST_CASCADE_FAR_BOUND_M > bevy_cascades.first_cascade_far_bound,
+            "bevy's {} m first bound is a character-scale value; on a 1 km map it spends the whole \
+             cascade budget inside the first ten metres",
+            bevy_cascades.first_cascade_far_bound,
+        );
+        assert_eq!(
+            SHADOW_CASCADE_OVERLAP, bevy_cascades.overlap_proportion,
+            "the overlap is stated, not changed — if bevy moves it, we keep ours",
         );
         assert_eq!(
             settings.vsync,
@@ -1506,6 +1737,52 @@ mod tests {
         }
     }
 
+    /// **The 2026-07-28 ladder migration**, at the enum level (the same thing through a whole
+    /// `video.ron` is `store`'s `the_retired_shadow_distance_rungs_load_and_migrate`).
+    ///
+    /// Two claims. First: the three retired tokens still DESERIALIZE — `M100`/`M150`/`M300` are
+    /// `#[serde(alias)]`es on [`ShadowDistance::M350`], so no player's stored file becomes a parse
+    /// error. Second, and the reason migrating beat hiding them: whatever they land on must be ON
+    /// the ladder, because `ui::step_in` resolves a current value missing from `ORDER` to index 0 —
+    /// which is `Off`. An off-ladder rung would therefore turn the next press of the RIGHT arrow
+    /// into "shadows off", the one transition the page must never make by accident.
+    ///
+    /// The named list is the strongest guard available without `variant_count`: a fifth variant
+    /// added later and left out of `ORDER` would not fail here, so `ORDER`'s own doc carries the
+    /// rule in words as well.
+    #[test]
+    fn the_retired_distance_rungs_migrate_onto_the_ladder() {
+        assert_eq!(
+            ShadowDistance::ORDER,
+            [
+                ShadowDistance::Off,
+                ShadowDistance::M350,
+                ShadowDistance::M700,
+                ShadowDistance::M1000,
+            ],
+            "every representable rung must be on the ladder — see the test doc",
+        );
+        for retired in ["M100", "M150", "M300"] {
+            let parsed: ShadowDistance = ron::de::from_str(retired)
+                .unwrap_or_else(|error| panic!("{retired} must still deserialize: {error}"));
+            assert_eq!(
+                parsed,
+                ShadowDistance::M350,
+                "{retired} must migrate to the nearest surviving rung",
+            );
+            assert!(
+                ShadowDistance::ORDER.contains(&parsed),
+                "{retired} migrated to an off-ladder value, which `step_in` would resolve to Off",
+            );
+        }
+        // The migration is one-way by construction: the aliases are read-only names, so nothing can
+        // write a retired token back out.
+        assert_eq!(
+            ron::ser::to_string(&ShadowDistance::M350).expect("serializes"),
+            "M350",
+        );
+    }
+
     /// Both ladders ascend in cost, and the map sizes are powers of two — otherwise
     /// `bevy_light::validate_shadow_map_size` silently rounds them up and warns every launch.
     #[test]
@@ -1549,9 +1826,13 @@ mod tests {
     /// A count changed WHILE OFF stays pending (the off branch touches nothing) and lands on the
     /// next casting frame — the expected-length tracking below encodes exactly that.
     ///
-    /// It also pins the builder parameters the count rebuild must NOT move: `overlap_proportion`
-    /// and `minimum_distance` stay at bevy's `..default()` in every cell, so the default row values
-    /// keep reproducing the shipped picture.
+    /// It also pins the builder parameters the count rebuild must NOT move. Those used to be
+    /// "whatever `..default()` gave us"; two of the three are STATED constants now
+    /// ([`SHADOW_FIRST_CASCADE_FAR_BOUND_M`], [`SHADOW_CASCADE_OVERLAP`]), so the assertion below
+    /// checks them against OUR values rather than bevy's — the first bound in particular is
+    /// deliberately not bevy's, and reading it out of the built config in every cell is what proves
+    /// the builder is actually carrying it. `minimum_distance` is the one field still left to bevy
+    /// and is still checked against bevy's reference.
     ///
     /// What is deliberately NOT tested: the (now vendored-away) bevy panic itself was
     /// scheduling-dependent (it needs a pooled thread-local that missed a frame's init), so a test
@@ -1621,14 +1902,24 @@ mod tests {
                  last one the row APPLIED — moved by the row alone, and only on a casting frame",
             );
             assert_eq!(
-                config.overlap_proportion, reference.overlap_proportion,
+                config.overlap_proportion, SHADOW_CASCADE_OVERLAP,
                 "{cascades:?} must not move the overlap — only the count and the far bound may vary",
             );
             assert_eq!(
                 config.minimum_distance, reference.minimum_distance,
-                "{cascades:?} must not move the minimum distance",
+                "{cascades:?} must not move the minimum distance — the one field still bevy's",
             );
             if let Some(want) = distance.distance_m() {
+                // The stated first bound must survive every rebuild, at every count. It is not
+                // bevy's, so `..default()` creeping back over it would silently halve far-field
+                // crispness rather than fail anything.
+                let first = *config.bounds.first().expect("cascades exist");
+                assert!(
+                    (first - SHADOW_FIRST_CASCADE_FAR_BOUND_M).abs()
+                        <= SHADOW_FIRST_CASCADE_FAR_BOUND_M * 1e-4,
+                    "{distance:?}/{cascades:?}: the first cascade must end at \
+                     {SHADOW_FIRST_CASCADE_FAR_BOUND_M} m, got {first}",
+                );
                 // The far bound is `nearest * base^(n-1)` with `base` itself a `powf`, so it
                 // reproduces `distance_m` only to float precision (MEASURED: 200.00002 for 200.0). A
                 // relative tolerance — the claim is "the envelope moved", not "these bits match".
@@ -1757,7 +2048,7 @@ mod tests {
         );
     }
 
-    /// **Codex review finding, 2026-07-27: a persisted rung this surface cannot present.**
+    /// **A persisted rung this surface cannot present.**
     ///
     /// A `video.ron` carrying `vsync_mode: Fast` opened on a Metal surface used to leave the page
     /// showing FAST while the present mode negotiated away to something that tears exactly like
@@ -1883,7 +2174,7 @@ mod tests {
         assert_eq!(saves(&app), 1);
     }
 
-    /// **Codex adversarial pass, 2026-07-27: a probe FAILURE is not a negative answer.**
+    /// **A probe FAILURE is not a negative answer.**
     ///
     /// `probe` used to report a surface it could not even create as "probed, capability list
     /// empty". Normalisation is a writer that SAVES, so that fabricated negative would have spent

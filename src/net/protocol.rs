@@ -46,12 +46,12 @@ use crate::{CombatantId, ShotId};
 /// direction, so a lane's CONFIG can no longer skew between two ends that shake hands. REV 19 has
 /// not shipped, so both landed as edits to it rather than a further bump.
 ///
-/// REV 20 (descent round): `TransmissionState` grew `band_confirm_ticks` — the upshift
+/// REV 20: `TransmissionState` grew `band_confirm_ticks` — the upshift
 /// sustained-speed confirmation counter (`UPSHIFT_CONFIRM_TICKS`), replicated and rolled back
 /// atomically with the rest of the REV-14 transmission root and hashed in the determinism trace
 /// like every other discrete field.
 ///
-/// REV 21 (recoil round — the fire-backward-uphill shift-storm fix): NO wire-format change, but
+/// REV 21 (the fire-backward-uphill shift-storm fix): NO wire-format change, but
 /// two REPLICATED transmission fields changed semantics/dynamics, which is sim-version skew (the
 /// alpha.9 lesson: silent sim skew passes the handshake and manifests as rollback storms):
 /// `band_confirm_ticks` now counts the FULL ordinary-upshift predicate for 8 consecutive decision
@@ -1557,7 +1557,7 @@ mod tests {
             WIRE_DEP_LIGHTYEAR,
             PROTOCOL_REV,
         );
-        // Re-pinned for REV 21 (recoil round: replicated transmission-field semantics change —
+        // Re-pinned for REV 21 (replicated transmission-field semantics change —
         // `band_confirm_ticks` full-predicate counting, `demand_n` asymmetric fall).
         const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0xad9c_ef0b_fda9_e770;
         assert_eq!(

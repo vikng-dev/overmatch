@@ -86,8 +86,72 @@ fn spawn_tank_when_loaded(
         "Tiger I (B)",
         false,
     );
+    spawn_probe_tanks(&mut commands, content, pending.presentation(), grid);
     commands.remove_resource::<PendingTankAssets>();
     next.set(AppState::Playing);
+}
+
+/// Centre-to-centre spacing of the [`spawn_probe_tanks`] grid, metres. Wider than a Tiger's hull is
+/// long (8.45 m over the tracks) so the extra bodies never spawn interpenetrating — a stack of
+/// overlapping tanks would spend the whole capture resolving contacts and measure nothing useful.
+const PROBE_GRID_SPACING_M: f32 = 11.0;
+
+/// Where the grid's near edge sits: down +Z, in FRONT of the third-person camera. The camera spawns
+/// at `(10, 7, −7)` looking at `(10, 1, 5)` (`camera.rs`), i.e. behind Tiger A looking along +Z —
+/// so +Z is the only direction that puts probe tanks in frame as well as in the cascade volume.
+/// (Tiger B, at z = −12, is behind the camera and always was.)
+///
+/// 48 m rather than "just past the duel" because the ground between z ≈ 5 and z ≈ 30 falls at ~40°:
+/// tanks parked there SLIDE (measured — the first layout drifted 6..13 m downhill during a capture,
+/// which is both a moving scene and a pile of contact work). z ≈ 46..100 is the valley floor under
+/// that slope, flat to a couple of metres across the whole block, and still ~65..115 m from the
+/// camera — inside the 150 m cascade envelope with room to spare.
+const PROBE_GRID_NEAR_Z: f32 = 48.0;
+
+/// Columns in the block. Fixed rather than square-rooted so the grid keeps the same shape at every
+/// count: six columns at 11 m is 55 m across, inside the camera's horizontal FOV at the block's
+/// distance, and extra rows recede along the view axis where everything stays in frame.
+const PROBE_GRID_COLUMNS: usize = 6;
+
+/// Spawn `OVERMATCH_PROBE_TANKS` EXTRA idle Tigers in a grid in front of the duel, for render/sim
+/// cost profiling at caster counts the two-tank duel cannot reach (a 15v15 frame is 30 tanks).
+///
+/// Dev instrument, not content: unset (or `0`) spawns nothing, which is every normal run. The count
+/// is the TOTAL wanted, so `OVERMATCH_PROBE_TANKS=30` yields 30 tanks — the two duel Tigers plus 28
+/// here. They are ordinary complete tanks (same body, same tracks, same `RigidBody::Dynamic`), so a
+/// count sweep measures the real per-tank cost of both halves; nothing drives them.
+///
+/// Grid geometry is deliberately dumb — a square-ish block laid out on XZ and dropped onto the
+/// surface by the one shared rule (`terrain_grid::spawn_pos`), like every other spawn point.
+fn spawn_probe_tanks(
+    commands: &mut Commands,
+    content: TankContent,
+    presentation: TankPresentation,
+    grid: Option<&crate::terrain_grid::HeightGrid>,
+) {
+    let Some(total) = crate::env_parse::<usize>("OVERMATCH_PROBE_TANKS") else {
+        return;
+    };
+    let extra = total.saturating_sub(DUEL_SPAWN_XZ.len());
+    if extra == 0 {
+        return;
+    }
+    for index in 0..extra {
+        let (column, row) = (index % PROBE_GRID_COLUMNS, index / PROBE_GRID_COLUMNS);
+        // Centre the block on the duel's x so it fills the view symmetrically.
+        let x = DUEL_SPAWN_XZ[0].x
+            + (column as f32 - (PROBE_GRID_COLUMNS as f32 - 1.0) / 2.0) * PROBE_GRID_SPACING_M;
+        let z = PROBE_GRID_NEAR_Z + row as f32 * PROBE_GRID_SPACING_M;
+        spawn_tank(
+            commands,
+            content,
+            presentation.clone(),
+            Transform::from_translation(crate::terrain_grid::spawn_pos(grid, Vec2::new(x, z))),
+            &format!("Probe Tiger {index}"),
+            false,
+        );
+    }
+    info!("offline: spawned {extra} probe tanks (OVERMATCH_PROBE_TANKS={total})");
 }
 
 /// Spawn one complete dynamic tank for the local duel.

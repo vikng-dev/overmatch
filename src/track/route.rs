@@ -253,7 +253,7 @@ fn hemisphere_y(c: Vec2, r: f32, x: f32) -> Option<f32> {
 /// the silhouette corner — and a [`ride_bracket`] end clipped to the circle's abscissa range lands
 /// exactly there, except that the `t ↔ x` round trip can put it a float or two OUTSIDE, where the
 /// strict hemisphere answers `None` and the sample falls to the parabola BELOW the corner
-/// (MEASURED 2026-07-27, Codex counterexample: a 2.97 mm cut on a constructed equal-radius span,
+/// (MEASURED counterexample: a 2.97 mm cut on a constructed equal-radius span,
 /// against the 1 mm contract — pinned by
 /// `a_bracket_end_on_a_circles_lateral_boundary_still_rides_out`). The clamped `sqrt` absorbs that
 /// rounding; a sample whose parabola already sits above `c.y` is left where it is by the caller's
@@ -262,8 +262,8 @@ fn hemisphere_y(c: Vec2, r: f32, x: f32) -> Option<f32> {
 /// Called ONLY for a sample inside the circle's own ride bracket — exact float membership, decided
 /// where the bracket was computed — which is what makes the corner inclusion unable to falsely
 /// lift anything: a first cut used a spatial tolerance band here instead, and a legitimate sample
-/// 5 µm outside a circle was raised 0.25 m to its corner (Codex counterexample, 2026-07-27, pinned
-/// by `a_sample_just_outside_a_circle_is_not_lifted_to_its_corner`). The sim's
+/// 5 µm outside a circle was raised 0.25 m to its corner (counterexample pinned by
+/// `a_sample_just_outside_a_circle_is_not_lifted_to_its_corner`). The sim's
 /// [`SagClip::RoadWheels`] has no brackets at all and keeps the strict [`hemisphere_y`], so its
 /// bits cannot move through a function it never reaches.
 fn silhouette_y(c: Vec2, r: f32, x: f32) -> f32 {
@@ -275,7 +275,7 @@ fn silhouette_y(c: Vec2, r: f32, x: f32) -> f32 {
 /// float on each side — exactly the merge radius of [`sag_samples`]' dedup, which keeps the
 /// EARLIER of two bit-equal-or-adjacent abscissas and can therefore hand the projection a bracket
 /// end's immediate float neighbour instead of the end itself; an exact test there would drop the
-/// silhouette corner on that coincidence (Codex finding, 2026-07-27). One float wider and no more:
+/// silhouette corner on that coincidence. One float wider and no more:
 /// a float is the corner to `f32` (~1e-7 at hull scale), while the false-lift case this must keep
 /// excluding — a legitimate parabola sample near a circle — sat ~5 µm out, dozens of floats away
 /// (pinned by `a_sample_just_outside_a_circle_is_not_lifted_to_its_corner`).
@@ -494,8 +494,7 @@ fn sag_span_at(
     // projection loop's silhouette dispatch — exact float membership in `[t0, t1]` is what scopes
     // the corner-inclusive [`silhouette_y`] to the samples the bracket itself produced (a spatial
     // tolerance band was tried first and falsely lifted a legitimate sample 5 µm outside a circle —
-    // Codex counterexample, 2026-07-27, pinned by
-    // `a_sample_just_outside_a_circle_is_not_lifted_to_its_corner`). `RoadWheels` gets no brackets
+    // pinned by `a_sample_just_outside_a_circle_is_not_lifted_to_its_corner`). `RoadWheels` gets no brackets
     // at all: the sim path refines nothing and projects through the strict [`hemisphere_y`] only.
     // A circle no bigger than the inset cannot be cut deeper than the inset and is the one input
     // the bracket's `1/(2r)` would blow up on, so it gets `None` here.
@@ -869,8 +868,8 @@ mod tests {
     /// spawn datum's source above, and the shape the wrap's diagnostic loop degenerates to when the
     /// belly eats the whole budget — would depend on which consumer asked for it.
     ///
-    /// The no-op has three parts, and this test is the proof rather than the assumption Codex
-    /// flagged. Two are STRUCTURAL:
+    /// The no-op has three parts, and this test is the proof rather than an assumption. Two are
+    /// STRUCTURAL:
     ///
     /// * at zero slack the parabola IS the chord, so no circle's hemisphere stands above it and
     ///   [`sag_samples`] refines nothing — both settings emit the same `SAG_SEGMENTS + 1` abscissas;
@@ -1025,7 +1024,7 @@ mod tests {
     /// the vertical measure is worst at (the parabola's slope pushes the peak off the circle's own
     /// top). The band deliberately spans the promotion threshold too: below MEASURED 1 mm at its own
     /// abscissa the wheel is NOT promoted, so the ride is the only thing keeping the chord out of it.
-    /// **The lateral-boundary counterexample** (Codex, 2026-07-27): a deep drape between two
+    /// **The lateral-boundary counterexample**: a deep drape between two
     /// equal circles dives past both equators, so each circle's [`ride_bracket`] is clipped at the
     /// circle's own abscissa range — its end IS the silhouette corner `(c.x ± r, c.y)`. The strict
     /// [`hemisphere_y`] answers `None` at `|dx| ≥ r`, so before [`silhouette_y`] the corner sample
@@ -1083,7 +1082,7 @@ mod tests {
         assert!(!bracket_admits(None, 0.3), "no bracket admits nothing");
     }
 
-    /// **The false-lift counterexample** (Codex, 2026-07-27, against the FIRST boundary fix): a
+    /// **The false-lift counterexample** (against the FIRST boundary fix): a
     /// spatial tolerance band on [`silhouette_y`] lifted a legitimate sample sitting ~5 µm outside
     /// a circle 0.25 m up to its corner. The scoping is now exact bracket membership instead of a
     /// band, so a sample the bracket did not produce must stay on the parabola: the span is
