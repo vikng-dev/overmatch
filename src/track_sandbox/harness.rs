@@ -299,7 +299,7 @@ pub(super) fn harness_record(
 ) {
     let (transform, lin, ang) = *hull;
     let (yaw, pitch, _) = transform.rotation.to_euler(EulerRot::YXZ);
-    // Body-frame yaw rate: world av.y lies on slopes (codex parts-1/2 review #3).
+    // Body-frame yaw rate: world av.y lies on slopes.
     let yawrate_body = ang.0.dot(transform.rotation * Vec3::Y);
     let side_cmd = shaped.0.side_commands();
     let total: f32 = contacts.all().map(|c| c.load).sum();

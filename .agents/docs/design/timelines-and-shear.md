@@ -161,14 +161,15 @@ are one phenomenon — shear between two live entities:
   wall-clock, then stepped on the receiver's own clock. It was not a snapshot of any tick — it could
   not be co-indexed with anything, so it visibly passed behind a moving target. See §5.
 - **Getting shot is unfelt.** Two independent reasons, both structural, neither a smoothing artifact:
-  1. The local hit impulse is gated **off entirely** on the client — `on_hit_impulse` early-returns
-     under `Res<ClientReplica>` (`src/ballistics.rs:927–939`), a **whole-client** gate, so the
-     client never applies its own shove (correctly: the struck body is server-owned; a local shove
-     would fight replication).
+  1. The local hit's deposit is gated **off entirely** on the client — the march derives
+     `deposit = replica.is_none()` from `Res<ClientReplica>` (`src/ballistics.rs:1101`) and threads
+     it into `resolve_armor_crossing`, a **whole-client** gate, so the client never authors damage
+     of its own (correctly: the struck body is server-owned; a local write would fight
+     replication).
   2. The server's shove is **never delivered** either. The impulse is ~0.14 m/s (MEASURED, prior —
      the 2026-07 hit-feel investigation; memory `mp-hit-feel-view-layer`), which over an 80 ms
      window is `0.14 × 0.08 ≈ 1.1 cm` — **below `ROLLBACK_POSITION_M = 0.05 m`** (5 cm,
-     `src/net/protocol.rs:429`). The client's confirmed-vs-predicted comparison therefore reads the
+     `src/net/protocol.rs:751`). The client's confirmed-vs-predicted comparison therefore reads the
      shoved server state as *matching* its un-shoved prediction, never rolls back, and never adopts
      the shove. It is not smoothed away — it never enters the client's sim at all. (This is why
      ADR-0015 files hit *feel* as a view-layer cue, not a physics correction.)

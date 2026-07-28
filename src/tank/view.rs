@@ -5,6 +5,7 @@ use bevy::world_serialization::WorldInstanceReady;
 
 use super::model::GunBarrel;
 use super::servo::ServoSpec;
+use crate::render_policy::VisualScope;
 
 /// Name-keyed sim part table used to attach a separately loaded view tree.
 #[derive(Component)]
@@ -68,7 +69,11 @@ pub fn bind_tank_view(
         };
         // The launch observer may have fired before this view existed.
         if launched.contains(sim) {
-            commands.entity(sim).insert(Visibility::default());
+            // Same repair as `detach_view_on_turret_launch`, including the scope: a turret that
+            // came off before its presentation arrived is no less escaped.
+            commands
+                .entity(sim)
+                .insert((Visibility::default(), VisualScope::WORLD_SOLID));
             commands
                 .entity(entity)
                 .insert((ChildOf(sim), Transform::IDENTITY));
@@ -101,6 +106,15 @@ fn sync_view_barrels(
 }
 
 /// Reparent a launched turret's view subtree under its free simulation body.
+///
+/// The free body is no longer part of ANY tank, which makes it no longer part of the view subject's
+/// body either: it becomes ordinary world geometry, visible from the gunner optic like any other
+/// wreckage. Stated here rather than left to `render_policy`'s "no ancestor scope" default, because
+/// this is a claim about the turret and not about the absence of a parent.
+///
+/// The mechanism this replaces walked descendants of a `Tank` and therefore lost track of the
+/// subtree the moment it escaped: a turret blown off while the player sat in the optic stayed
+/// invisible for the rest of the round.
 fn detach_view_on_turret_launch(
     add: On<Add, crate::damage::LaunchedTurret>,
     views: Query<&ViewNode>,
@@ -109,8 +123,10 @@ fn detach_view_on_turret_launch(
     let Ok(view) = views.get(add.entity) else {
         return;
     };
-    // The detached sim body becomes a new visibility root.
-    commands.entity(add.entity).insert(Visibility::default());
+    // The detached sim body becomes a new visibility root — and a new rendering-policy root.
+    commands
+        .entity(add.entity)
+        .insert((Visibility::default(), VisualScope::WORLD_SOLID));
     commands
         .entity(view.0)
         .insert((ChildOf(add.entity), Transform::IDENTITY))
@@ -121,4 +137,45 @@ fn detach_view_on_turret_launch(
 pub fn view_attach_plugin(app: &mut App) {
     app.add_observer(detach_view_on_turret_launch);
     app.add_systems(Update, sync_view_barrels);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::render_policy::{self, CameraProfile};
+
+    /// A turret blown off the body the player is riding stops being part of that body.
+    ///
+    /// The regression this pins is silent and permanent: the mechanism this replaces swept
+    /// descendants of a `Tank`, so an escaped subtree froze at whatever it last held. Brew up while
+    /// in the gunner optic and the flying turret stayed invisible for the rest of the round —
+    /// visible to every other player, and to you from third person, but not from the sight you were
+    /// looking through when it happened.
+    #[test]
+    fn a_launched_turret_leaves_the_view_subject() {
+        let mut app = App::new();
+        app.add_plugins((render_policy::plugin, view_attach_plugin));
+        let world = app.world_mut();
+        let optic = world.spawn(CameraProfile::BattlefieldOptic).id();
+        let tank = world.spawn(VisualScope::VIEW_SUBJECT_BODY).id();
+        let view = world.spawn(ChildOf(tank)).id();
+        let armour = world.spawn((Mesh3d(Handle::default()), ChildOf(view))).id();
+        let turret = world.spawn((ChildOf(tank), ViewNode(view))).id();
+        app.update();
+        assert!(
+            !render_policy::reaches(app.world(), optic, armour),
+            "while attached, the turret is part of the body the optic drops"
+        );
+
+        // The launch, exactly as `damage::launch_turrets_on_cookoff` batches it.
+        app.world_mut()
+            .entity_mut(turret)
+            .remove::<ChildOf>()
+            .insert(crate::damage::LaunchedTurret);
+        app.update();
+        assert!(
+            render_policy::reaches(app.world(), optic, armour),
+            "an escaped turret is world geometry — visible from the sight it was blown off in"
+        );
+    }
 }

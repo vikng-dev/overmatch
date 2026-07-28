@@ -4,7 +4,6 @@ use std::time::Instant;
 
 use avian3d::prelude::{Forces, SpatialQuery, SpatialQueryFilter};
 use bevy::ecs::system::SystemParam;
-use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
 // `shot_trace::record` only evaluates its closure when tracing is armed.
 use serde_json::json;
@@ -13,6 +12,16 @@ use crate::damage::{DamageConsequences, VolumeOf, hit_ancestor};
 use crate::state::{GameplaySet, SimPhase};
 use crate::terrain_grid::HeightGrid;
 use crate::{ClientReplica, Layer, PredictedPresent, Replaying, ShotId};
+
+/// Server-sanctioned outcome bookkeeping: the client's reconciliation buffer and the bounded
+/// catch-up that replays it into a drawable flight. Netcode, not ballistics — the flight,
+/// penetration and spall math below never reads it.
+mod sanctioned;
+
+pub(crate) use sanctioned::{
+    SanctionedBounce, SanctionedBounceInsert, SanctionedShots, SanctionedTerminal,
+};
+use sanctioned::{SanctionedCatchUp, catch_up_sanctioned_chain};
 
 /// Gravity applied to shells each fixed tick (m/s²).
 const GRAVITY: Vec3 = Vec3::new(0.0, -9.81, 0.0);
@@ -365,315 +374,6 @@ pub(crate) const RICOCHET_HOLD_TICKS: u32 = 16;
 
 /// Configured margin before a replica consumes a known outcome that its local path missed.
 pub(crate) const OVERDUE_MARGIN_TICKS: u32 = 6;
-
-/// A server-sanctioned ricochet consumed by a client cosmetic shell.
-#[derive(Clone, Copy)]
-pub(crate) struct SanctionedBounce {
-    /// The exact server bounce point — where the re-seeded shell restarts.
-    pub origin: Vec3,
-    /// The post-bounce travel direction (unit; the receiver guards it before use).
-    pub direction: Vec3,
-    /// The post-bounce speed (m/s).
-    pub speed: f32,
-    /// Server tick where this bounce resolved.
-    pub bounce_tick: u32,
-    /// Zero-based ordinal, consumed strictly in order.
-    pub sequence: u32,
-}
-
-/// A server-sanctioned armor terminal consumed by a client cosmetic shell.
-#[derive(Clone, Copy)]
-pub(crate) struct SanctionedTerminal {
-    /// The server's impact position (embed point, or the perforation's entry face).
-    pub position: Vec3,
-    /// The struck face's outward normal, straight from the server's raycast.
-    pub normal: Vec3,
-    /// The server's penetration verdict — gates the flame lick, exactly as the authority's read did.
-    pub penetrated: bool,
-    /// Server tick where this terminal resolved.
-    pub impact_tick: u32,
-    /// Required number of prior bounces before this terminal may be consumed.
-    pub after_bounces: u32,
-}
-
-/// Per-shot sanctioned state: ordered bounces + the (at most one) terminal, plus an age for expiry.
-struct SanctionedShot {
-    bounces: Vec<SanctionedBounce>,
-    terminal: Option<SanctionedTerminal>,
-    /// Seconds since last touched — evicted once it outlives any shell that could still consume it.
-    age: f32,
-}
-
-/// Bounded client buffer of server-sanctioned outcomes, keyed by [`ShotId`].
-#[derive(Resource, Default)]
-pub(crate) struct SanctionedShots {
-    shots: std::collections::HashMap<ShotId, SanctionedShot>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SanctionedBounceInsert {
-    Inserted,
-    Duplicate,
-    Capacity,
-}
-
-impl SanctionedShots {
-    /// Configured expiry for unconsumed authority outcomes; recorded in trace metadata.
-    pub(crate) const MAX_AGE_SECS: f32 = 3.0;
-    /// DERIVED backstop: `30 combatants * 2 weapons * 750 rounds/min * 3 s / 60 = 2,250` shots;
-    /// 4,096 is the next power of two.
-    const MAX_SHOTS: usize = 4_096;
-    /// DERIVED: a shot cannot consume more bounces than the cosmetic segment-work horizon.
-    pub(crate) const MAX_BOUNCES_PER_SHOT: usize = MAX_COSMETIC_CATCH_UP_TICKS as usize;
-
-    /// Stable tie-break among already-buffered entries: the greatest tuple is evicted.
-    fn eviction_key(shot: ShotId) -> (u64, u8, u32) {
-        (shot.combatant.0, shot.weapon, shot.fire_tick)
-    }
-
-    /// This shot's entry, fresh-touched, with the over-cap eviction applied.
-    fn entry(&mut self, shot: ShotId) -> &mut SanctionedShot {
-        if self.shots.len() >= Self::MAX_SHOTS && !self.shots.contains_key(&shot) {
-            // Capacity overflow evicts one oldest entry; normal removal remains time-based. Equal
-            // ages use the stable ShotId-derived order so cosmetic traces reproduce across runs.
-            if let Some(oldest) = self
-                .shots
-                .iter()
-                .max_by(|(a_shot, a), (b_shot, b)| {
-                    a.age.total_cmp(&b.age).then_with(|| {
-                        Self::eviction_key(**a_shot).cmp(&Self::eviction_key(**b_shot))
-                    })
-                })
-                .map(|(k, _)| *k)
-            {
-                self.shots.remove(&oldest);
-            }
-        }
-        let entry = self.shots.entry(shot).or_insert_with(|| SanctionedShot {
-            bounces: Vec::new(),
-            terminal: None,
-            age: 0.0,
-        });
-        entry.age = 0.0;
-        entry
-    }
-
-    /// Insert a server-sanctioned bounce idempotently by `(shot, sequence)`.
-    pub(crate) fn insert(
-        &mut self,
-        shot: ShotId,
-        bounce: SanctionedBounce,
-    ) -> SanctionedBounceInsert {
-        let entry = self.entry(shot);
-        if entry.bounces.iter().any(|b| b.sequence == bounce.sequence) {
-            return SanctionedBounceInsert::Duplicate;
-        }
-        if entry.bounces.len() >= Self::MAX_BOUNCES_PER_SHOT {
-            return SanctionedBounceInsert::Capacity;
-        }
-        entry.bounces.push(bounce);
-        SanctionedBounceInsert::Inserted
-    }
-
-    /// Record a shot's terminal, idempotently by [`ShotId`].
-    ///
-    /// INVARIANT: [`TerminalReport`] permits at most one authority terminal, so first insert wins.
-    pub(crate) fn insert_terminal(&mut self, shot: ShotId, terminal: SanctionedTerminal) -> bool {
-        let entry = self.entry(shot);
-        if entry.terminal.is_some() {
-            return false;
-        }
-        entry.terminal = Some(terminal);
-        true
-    }
-
-    /// Whether anything is buffered under this exact [`ShotId`].
-    #[cfg(test)]
-    pub(crate) fn has_shot(&self, shot: ShotId) -> bool {
-        self.shots.contains_key(&shot)
-    }
-
-    /// The next ordered bounce, if it has arrived.
-    fn next(&self, shot: ShotId, consumed: usize) -> Option<SanctionedBounce> {
-        self.shots
-            .get(&shot)
-            .and_then(|e| e.bounces.iter().find(|b| b.sequence as usize == consumed))
-            .copied()
-    }
-
-    /// The terminal only after all of its preceding bounces have been consumed.
-    fn terminal(&self, shot: ShotId, consumed: usize) -> Option<SanctionedTerminal> {
-        self.shots
-            .get(&shot)
-            .and_then(|e| e.terminal)
-            .filter(|t| t.after_bounces as usize == consumed)
-    }
-
-    /// Age every tracked shot and evict those past [`Self::MAX_AGE_SECS`]. Driven by `net::client`.
-    pub(crate) fn age(&mut self, dt: f32) {
-        for entry in self.shots.values_mut() {
-            entry.age += dt;
-        }
-        self.shots.retain(|_, e| e.age <= Self::MAX_AGE_SECS);
-    }
-}
-
-/// One authority-bounded free-flight segment beginning at a sanctioned bounce.
-struct SanctionedFlightSegment {
-    bounce: SanctionedBounce,
-    points: Vec<Vec3>,
-}
-
-/// A client catch-up through every already-buffered authority outcome up to `present`.
-struct SanctionedCatchUp {
-    segments: Vec<SanctionedFlightSegment>,
-    position: Vec3,
-    velocity: Vec3,
-    terminal: Option<SanctionedTerminal>,
-}
-
-/// Why an authority-outcome chain cannot be reconstructed safely on this client.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SanctionedCatchUpReject {
-    IntervalBeyondCosmeticHorizon,
-    ChainBeyondCosmeticHorizon,
-}
-
-impl SanctionedCatchUpReject {
-    fn trace_reason(self) -> &'static str {
-        match self {
-            Self::IntervalBeyondCosmeticHorizon => "interval_beyond_cosmetic_horizon",
-            Self::ChainBeyondCosmeticHorizon => "chain_beyond_cosmetic_horizon",
-        }
-    }
-}
-
-/// Reserve one disconnected authority segment before integrating it.
-///
-/// INVARIANT: one cosmetic reconstruction may integrate at most
-/// [`MAX_COSMETIC_CATCH_UP_TICKS`] total steps and materialize at most that many authority
-/// segments. The segment limit also bounds same-tick bounce chains, whose elapsed steps are zero.
-fn reserve_sanctioned_catch_up_work(
-    integrated_ticks: &mut u32,
-    segments: &mut u32,
-    steps: u32,
-) -> Result<(), SanctionedCatchUpReject> {
-    if *segments >= MAX_COSMETIC_CATCH_UP_TICKS
-        || steps > MAX_COSMETIC_CATCH_UP_TICKS.saturating_sub(*integrated_ticks)
-    {
-        return Err(SanctionedCatchUpReject::ChainBeyondCosmeticHorizon);
-    }
-    *integrated_ticks += steps;
-    *segments += 1;
-    Ok(())
-}
-
-/// Fast-forward authority outcomes without integrating through a known later outcome.
-///
-/// INVARIANT: outcome ingress may retain early or out-of-order facts, but this is the sole path to
-/// [`fast_forward_shell`] for a sanctioned chain; every segment reserves bounded work before it can
-/// allocate or integrate.
-fn catch_up_sanctioned_chain(
-    shot: ShotId,
-    consumed: usize,
-    first: SanctionedBounce,
-    present: Option<u32>,
-    fallback_age: u32,
-    sanctioned: &SanctionedShots,
-    fallback_velocity: Vec3,
-    drag_k: f32,
-    dt: f32,
-) -> Result<SanctionedCatchUp, SanctionedCatchUpReject> {
-    enum NextOutcome {
-        Bounce(SanctionedBounce, u32),
-        Terminal(SanctionedTerminal, u32),
-    }
-
-    let mut segments = Vec::new();
-    let mut bounce = first;
-    let mut seed_velocity =
-        Dir3::new(bounce.direction).map_or(fallback_velocity, |dir| Vec3::from(dir) * bounce.speed);
-    let mut consumed = consumed + 1;
-    let mut integrated_ticks = 0;
-    let mut segment_count = 0;
-    loop {
-        let next = present.and_then(|present| {
-            let due_bounce = sanctioned.next(shot, consumed).and_then(|next| {
-                elapsed_ticks(present, next.bounce_tick)?;
-                let gap = elapsed_ticks(next.bounce_tick, bounce.bounce_tick)?;
-                Some((next, gap))
-            });
-            let due_terminal = sanctioned.terminal(shot, consumed).and_then(|terminal| {
-                elapsed_ticks(present, terminal.impact_tick)?;
-                let gap = elapsed_ticks(terminal.impact_tick, bounce.bounce_tick)?;
-                Some((terminal, gap))
-            });
-            match (due_bounce, due_terminal) {
-                (Some((next, bounce_gap)), Some((terminal, terminal_gap))) => {
-                    if terminal_gap <= bounce_gap {
-                        Some(NextOutcome::Terminal(terminal, terminal_gap))
-                    } else {
-                        Some(NextOutcome::Bounce(next, bounce_gap))
-                    }
-                }
-                (Some((next, gap)), None) => Some(NextOutcome::Bounce(next, gap)),
-                (None, Some((terminal, gap))) => Some(NextOutcome::Terminal(terminal, gap)),
-                (None, None) => None,
-            }
-        });
-
-        match next {
-            Some(NextOutcome::Bounce(next, gap)) => {
-                if gap > MAX_COSMETIC_CATCH_UP_TICKS {
-                    return Err(SanctionedCatchUpReject::IntervalBeyondCosmeticHorizon);
-                }
-                let steps = gap.saturating_sub(1);
-                reserve_sanctioned_catch_up_work(&mut integrated_ticks, &mut segment_count, steps)?;
-                let (_, velocity, points) =
-                    fast_forward_shell(bounce.origin, seed_velocity, drag_k, dt, steps);
-                segments.push(SanctionedFlightSegment { bounce, points });
-                bounce = next;
-                seed_velocity = Dir3::new(bounce.direction)
-                    .map_or(velocity, |dir| Vec3::from(dir) * bounce.speed);
-                consumed += 1;
-            }
-            Some(NextOutcome::Terminal(terminal, gap)) => {
-                if gap > MAX_COSMETIC_CATCH_UP_TICKS {
-                    return Err(SanctionedCatchUpReject::IntervalBeyondCosmeticHorizon);
-                }
-                let steps = gap.saturating_sub(1);
-                reserve_sanctioned_catch_up_work(&mut integrated_ticks, &mut segment_count, steps)?;
-                let (_, velocity, points) =
-                    fast_forward_shell(bounce.origin, seed_velocity, drag_k, dt, steps);
-                segments.push(SanctionedFlightSegment { bounce, points });
-                return Ok(SanctionedCatchUp {
-                    segments,
-                    position: terminal.position,
-                    velocity,
-                    terminal: Some(terminal),
-                });
-            }
-            None => {
-                let age = present
-                    .and_then(|present| elapsed_ticks(present, bounce.bounce_tick))
-                    .unwrap_or(fallback_age);
-                if age > MAX_COSMETIC_CATCH_UP_TICKS {
-                    return Err(SanctionedCatchUpReject::IntervalBeyondCosmeticHorizon);
-                }
-                reserve_sanctioned_catch_up_work(&mut integrated_ticks, &mut segment_count, age)?;
-                let (position, velocity, points) =
-                    fast_forward_shell(bounce.origin, seed_velocity, drag_k, dt, age);
-                segments.push(SanctionedFlightSegment { bounce, points });
-                return Ok(SanctionedCatchUp {
-                    segments,
-                    position,
-                    velocity,
-                    terminal: None,
-                });
-            }
-        }
-    }
-}
 
 /// Authority ricochet for a keyed shot.
 #[derive(Event)]
@@ -1246,10 +946,10 @@ fn on_fire_shell(
             Mesh3d(tracer_assets.mesh.clone()),
             MeshMaterial3d(tracer_assets.material.clone()),
             transform,
-            // A light streak neither casts nor receives shadow — without these the sun dragged a
-            // long capsule shadow across the terrain under every tracer.
-            NotShadowCaster,
-            NotShadowReceiver,
+            // A light streak neither casts nor receives shadow — without this the sun dragged a
+            // long capsule shadow across the terrain under every tracer. World geometry otherwise:
+            // it is a child of a SHELL, never of a tank, so it is drawn in every view.
+            crate::render_policy::VisualScope::WORLD_EFFECT,
             streak,
         ));
     }
@@ -1263,6 +963,75 @@ struct ProjectileMarchNet<'w> {
     sanctioned: Option<Res<'w, SanctionedShots>>,
     replaying: Option<Res<'w, Replaying>>,
     present: Option<Res<'w, PredictedPresent>>,
+}
+
+/// The world one shell march probes: armor geometry, the ownership hierarchy that classifies a hit,
+/// and the deterministic ground. Grouped as a [`SystemParam`] so the march's phase helpers share one
+/// parameter instead of five, exactly as [`ProjectileMarchNet`] groups the net state.
+#[derive(SystemParam)]
+struct ProjectileMarchWorld<'w, 's> {
+    spatial: SpatialQuery<'w, 's>,
+    volumes: Query<'w, 's, &'static BallisticVolume>,
+    owners: Query<'w, 's, &'static VolumeOf>,
+    parents: Query<'w, 's, &'static ChildOf>,
+    // The heightmap ground, when the heightmap world is live: the march's terrain contacts read
+    // the exact deterministic caster, not parry (see [`cast_march_segment`]). Absent on the flat
+    // fallback world, where the parry terrain cast remains.
+    grid: Option<Res<'w, HeightGrid>>,
+}
+
+/// The one shell a march phase is resolving: its pose, flight state, and the per-flight record every
+/// phase appends to. Grouped so each phase takes the shell as a single parameter.
+///
+/// The component wrappers are kept as [`Mut`] rather than plain `&mut`: a phase that writes nothing
+/// then marks nothing changed, exactly as the single fused loop did.
+struct MarchingShell<'a, 'w> {
+    entity: Entity,
+    transform: &'a mut Mut<'w, Transform>,
+    projectile: &'a mut Mut<'w, Projectile>,
+    terminal_report: &'a mut Mut<'w, TerminalReport>,
+    path: &'a mut Mut<'w, ShellPath>,
+    marks: &'a mut Mut<'w, PenetrationMarks>,
+    readout: &'a mut Mut<'w, ShellReadout>,
+    spall: &'a mut Mut<'w, SpallMarks>,
+    /// The shell's network identity, when it has one. `None` for SP and sandbox shells.
+    shot: Option<&'a Shot>,
+    /// The tank that fired this shell, read ONLY to exclude its own volumes from the march.
+    source: Option<&'a ShotSource>,
+}
+
+/// Where a shell's ray-march ended this tick, and how it ended.
+struct MarchStep {
+    /// Final position — the point the trail closes on.
+    position: Vec3,
+    /// Final travel direction; the mesh is re-oriented onto it.
+    direction: Dir3,
+    /// Final speed (m/s).
+    speed: f32,
+    /// The shell reached a terminal (terrain, embed, or a consumed authority verdict) and retires.
+    stopped: bool,
+    /// The shell froze at armor contact awaiting its authority verdict — distinct from `stopped`,
+    /// which despawns.
+    holding: bool,
+    /// HP the authority actually removed this step, across every crossing and every spall fragment.
+    damage_dealt: f32,
+}
+
+/// What a replica shell does at an armor contact its own march found (see
+/// [`resolve_replica_armor_contact`]).
+enum ReplicaArmorContact {
+    /// A buffered bounce re-seeded the shell from authority truth; the leftover step keeps marching.
+    Reseed {
+        /// The exact server bounce point the shell restarts from.
+        origin: Vec3,
+        /// `None` when the sanctioned direction is degenerate — the shell keeps its heading.
+        direction: Option<Dir3>,
+        speed: f32,
+    },
+    /// The shot ended at this contact: a buffered terminal, or an unkeyed shell failing closed.
+    Stopped,
+    /// A keyed shell froze hidden here, waiting for the authority's verdict (or expiry).
+    Holding,
 }
 
 fn integrate_projectiles(
@@ -1287,19 +1056,13 @@ fn integrate_projectiles(
         // camera fire, which excludes nothing.
         Option<&ShotSource>,
     )>,
-    volumes: Query<&BallisticVolume>,
-    owners: Query<&VolumeOf>,
+    world: ProjectileMarchWorld,
     mut bodies: Query<(Forces, Option<&mut crate::track::sim::TrackGripWake>)>,
     mut health: Query<&mut ComponentHealth>,
-    parents: Query<&ChildOf>,
     retain: Res<RetainSpentShells>,
     net: ProjectileMarchNet,
     // EXPERIMENTAL cost-attribution A/B lever (`SPIKE_MG_SHORTCIRCUIT`, default off — see the type).
     shortcircuit: Res<MgShortCircuit>,
-    // The heightmap ground, when the heightmap world is live: the march's terrain contacts read
-    // the exact deterministic caster, not parry (see [`cast_march_segment`]). Absent on the flat
-    // fallback world, where the parry terrain cast remains.
-    grid: Option<Res<HeightGrid>>,
     // Sim-cost recorder attribution sink (`SPIKE_COST_TRACE`): absent unless the recorder is armed, so
     // an unmeasured run pays only the `Option` check. This system's whole wall-time is stamped into it.
     mut cost: Option<ResMut<crate::cost::CostTrace>>,
@@ -1308,7 +1071,6 @@ fn integrate_projectiles(
     // of a shot's life (contact → hold → re-seed / terminal / dissolve), the half whose timings size
     // `RICOCHET_HOLD_TICKS`. Authority emissions are recorded in `net::shot_transport`.
     mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
-    spatial: SpatialQuery,
     time: Res<Time>,
     mut commands: Commands,
 ) {
@@ -1337,16 +1099,871 @@ fn integrate_projectiles(
     let dt = time.delta_secs();
     // Authority = not a replica: only then does a hit actually mutate health here.
     let deposit = replica.is_none();
+    let sanctioned = sanctioned.as_deref();
     // F3: the predicted present tick, if this is a net client — the clock the overdue-consumption
     // check below compares each sanctioned outcome's server tick against. Absent on the authority.
     let present = present.map(|p| p.0);
     // The tick every shot-lifecycle row this march writes is stamped with: the predicted present (the
     // tick each cosmetic shell lives at). Never read on the authority — every row site is `!deposit`.
     let now = present.unwrap_or(0);
+
+    for (
+        entity,
+        mut transform,
+        mut projectile,
+        mut damage_report,
+        mut terminal_report,
+        mut path,
+        mut marks,
+        mut readout,
+        mut spall,
+        shot,
+        held,
+        source,
+    ) in &mut projectiles
+    {
+        let mut shell = MarchingShell {
+            entity,
+            transform: &mut transform,
+            projectile: &mut projectile,
+            terminal_report: &mut terminal_report,
+            path: &mut path,
+            marks: &mut marks,
+            readout: &mut readout,
+            spall: &mut spall,
+            shot,
+            source,
+        };
+
+        if let Some(mut held) = held {
+            resolve_held_shell(
+                &mut shell,
+                &mut held,
+                sanctioned,
+                present,
+                now,
+                dt,
+                &mut shot_trace,
+                &mut commands,
+            );
+            continue;
+        }
+
+        if consume_overdue_sanctioned_outcome(
+            &mut shell,
+            deposit,
+            sanctioned,
+            present,
+            dt,
+            now,
+            &mut shot_trace,
+            &mut commands,
+        ) {
+            continue;
+        }
+
+        let Some(step) = march_shell_step(
+            &mut shell,
+            &world,
+            &mut health,
+            &mut bodies,
+            sanctioned,
+            deposit,
+            shortcircuit.0,
+            dt,
+            now,
+            &mut shot_trace,
+            &mut commands,
+        ) else {
+            continue;
+        };
+
+        // Reorient the shell to its travel direction so the mesh follows the (gravity-curved,
+        // ricochet-bent) path instead of holding its launch heading.
+        shell.transform.translation = step.position;
+        shell.transform.look_to(step.direction, Vec3::Y);
+        shell.path.points.push(step.position);
+
+        // A state snapshot cannot preserve how many shots caused its resulting HP. Raise one discrete,
+        // shot-attributed fact; `net::shot_transport` routes it reliably to the fire-time owner.
+        if deposit
+            && step.damage_dealt > 0.0
+            && !damage_report.0
+            && let Some(shot) = shot
+        {
+            commands.trigger(ShellDamage {
+                shot: shot.0,
+                amount: step.damage_dealt,
+            });
+            damage_report.0 = true;
+        }
+
+        if step.holding {
+            // Frozen at armor awaiting the bounce keyframe: keep the entity and its velocity untouched
+            // (`resolve_held_shell` drives the wait next tick). The freeze point was just recorded
+            // once, so the trail ends cleanly at the plate while the shell holds.
+        } else if step.stopped {
+            if retain.0 {
+                // Sandbox: freeze where it stopped — drop the live components so it is no longer
+                // integrated or labelled, but keep the stuck shell, its path, and its penetration
+                // marks on screen for study (the sandbox's `c` command clears them).
+                commands
+                    .entity(entity)
+                    .remove::<(Projectile, ShellReadout)>();
+            } else {
+                // Game: the spent shell is done.
+                commands.entity(entity).despawn();
+            }
+        } else if step.position.y < KILL_FLOOR {
+            // Left the world: cleared the map edge and fell into the void below the terrain. Despawn
+            // outright — there is no impact to inspect, so this ignores the sandbox's retain (unlike a
+            // real impact). This is what bounds a shell that never hits terrain; see `KILL_FLOOR`.
+            if !deposit && let Some(shot) = shot {
+                crate::shot_trace::record(
+                    &mut shot_trace,
+                    "end",
+                    now,
+                    shot.0,
+                    || json!({ "why": "kill_floor" }),
+                );
+            }
+            commands.entity(entity).despawn();
+        } else {
+            shell.projectile.velocity = Vec3::from(step.direction) * step.speed;
+            shell.readout.speed = step.speed;
+            shell.readout.capability = capability(shell.projectile.mass, step.speed);
+        }
+    }
+
+    // Attribute this system's whole wall-time to the current fixed tick (`SPIKE_COST_TRACE`). Inert
+    // (both `Option`s empty) unless the recorder is armed.
+    if let (Some(cost), Some(t0)) = (cost.as_mut(), march_t0) {
+        cost.record_march(t0.elapsed().as_secs_f64() * 1.0e6);
+    }
+}
+
+/// Resolve a shell frozen at armor waiting for the authority's verdict on that contact.
+///
+/// NET-CLIENT HOLD: a `Shot`-carrying shell — an observer's replica OR the shooter's own predicted
+/// round — frozen (and hidden, see the hold insert in [`resolve_replica_armor_contact`]) at armor
+/// contact, waiting the grace window for the server's verdict on this contact. It does NOT
+/// free-flight while held — it resolves from whichever sanctioned outcome arrives (a bounce keyframe
+/// → re-seed and continue; a terminal confirm → the full honest armor read at the server's position)
+/// or, past the window, degrades to fail-closed truncation. The authority never holds (it resolves
+/// shots for real), and a shell with no `Shot` never enters this state (it fail-closes on first
+/// contact instead).
+///
+/// The shell is fully resolved for this tick either way: the caller never marches it.
+fn resolve_held_shell(
+    shell: &mut MarchingShell,
+    held: &mut Mut<Held>,
+    sanctioned: Option<&SanctionedShots>,
+    present: Option<u32>,
+    now: u32,
+    dt: f32,
+    shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
+    commands: &mut Commands,
+) {
+    let entity = shell.entity;
+    let shot = shell.shot;
+    // The bounce we are waiting on (the next unconsumed ordinal for this shot), if it arrived.
+    let arrived = shot.zip(sanctioned).and_then(|(shot, buf)| {
+        buf.next(shot.0, shell.marks.ricochets.len())
+            .map(|bounce| (shot.0, buf, bounce))
+    });
+    if let Some((shot_id, sanctioned, first_bounce)) = arrived {
+        // RE-SEED through every authority outcome already buffered up to the present. A pure
+        // fast-forward may cover only the interval before the NEXT known bounce/terminal; it
+        // must not draw through a verdict the client already possesses.
+        let initial_age = present
+            .and_then(|present| elapsed_ticks(present, first_bounce.bounce_tick))
+            .unwrap_or(held.age);
+        let caught_up = match catch_up_sanctioned_chain(
+            shot_id,
+            shell.marks.ricochets.len(),
+            first_bounce,
+            present,
+            held.age,
+            sanctioned,
+            shell.projectile.velocity,
+            shell.projectile.drag_k,
+            dt,
+        ) {
+            Ok(caught_up) => caught_up,
+            Err(reject) => {
+                crate::shot_trace::record(
+                    shot_trace,
+                    "overdue",
+                    now,
+                    shot_id,
+                    || json!({ "res": "reject", "why": reject.trace_reason() }),
+                );
+                crate::shot_trace::record(
+                    shot_trace,
+                    "end",
+                    now,
+                    shot_id,
+                    || json!({ "why": "catch_up_reject" }),
+                );
+                commands.entity(entity).despawn();
+                return;
+            }
+        };
+        for (index, segment) in caught_up.segments.iter().enumerate() {
+            // The candidate contact and every later authority correction can be spatially
+            // displaced. Each server origin begins a disconnected view segment, never a
+            // fictional correction chord.
+            shell.path.begin_segment();
+            shell.path.points.extend(segment.points.iter().copied());
+            shell.marks.ricochets.push(segment.bounce.origin);
+            commands.trigger(Impact {
+                position: segment.bounce.origin,
+                normal: if index == 0 {
+                    held.normal
+                } else {
+                    segment.bounce.direction
+                },
+                caliber: shell.projectile.caliber,
+                surface: ImpactSurface::Armor,
+                penetrated: false,
+                deflection: Some(segment.bounce.direction),
+            });
+            if index == 0 {
+                crate::shot_trace::record(shot_trace, "hold", now, shot_id, || {
+                    json!({
+                        "held": held.waited,
+                        "aged": initial_age,
+                        "res": "bounce",
+                        "seq": segment.bounce.sequence,
+                        "bt": segment.bounce.bounce_tick,
+                    })
+                });
+            } else {
+                let late = present
+                    .and_then(|present| elapsed_ticks(present, segment.bounce.bounce_tick))
+                    .unwrap_or_default();
+                crate::shot_trace::record(
+                    shot_trace,
+                    "overdue",
+                    now,
+                    shot_id,
+                    || json!({ "res": "bounce", "late": late, "seq": segment.bounce.sequence, "via": "chain" }),
+                );
+            }
+        }
+
+        if let Some(terminal) = caught_up.terminal {
+            finish_at_sanctioned_terminal(shell, &terminal, commands);
+            let late = present
+                .and_then(|present| elapsed_ticks(present, terminal.impact_tick))
+                .unwrap_or_default();
+            crate::shot_trace::record(
+                shot_trace,
+                "overdue",
+                now,
+                shot_id,
+                || json!({ "res": "terminal", "late": late, "pen": terminal.penetrated, "via": "chain" }),
+            );
+            crate::shot_trace::record(
+                shot_trace,
+                "end",
+                now,
+                shot_id,
+                || json!({ "why": "terminal" }),
+            );
+            commands.entity(entity).despawn();
+            return;
+        }
+
+        resume_from_catch_up(shell, &caught_up);
+        // Un-hide (the hold's invisible-stop) and resume marching next tick.
+        commands
+            .entity(entity)
+            .remove::<Held>()
+            .insert(Visibility::Inherited);
+        return;
+    }
+    // Consume a terminal only after every preceding bounce; re-anchor at server truth.
+    let terminal = shot
+        .zip(sanctioned)
+        .and_then(|(s, buf)| buf.terminal(s.0, shell.marks.ricochets.len()));
+    if let Some(terminal) = terminal {
+        finish_at_sanctioned_terminal(shell, &terminal, commands);
+        if let Some(shot) = shot {
+            crate::shot_trace::record(shot_trace, "hold", now, shot.0, || {
+                json!({
+                    "held": held.waited,
+                    "res": "terminal",
+                    "it": terminal.impact_tick,
+                    "pen": terminal.penetrated,
+                })
+            });
+            crate::shot_trace::record(
+                shot_trace,
+                "end",
+                now,
+                shot.0,
+                || json!({ "why": "terminal" }),
+            );
+        }
+        commands.entity(entity).despawn();
+        return;
+    }
+    // Still waiting. Past the grace window, the shell degrades to the fail-closed fallback:
+    // an unavailable keyframe/confirm must never leave a round frozen forever. Otherwise stay
+    // frozen this tick.
+    held.waited += 1;
+    held.age += 1;
+    if held.waited > RICOCHET_HOLD_TICKS {
+        // F3(ii) — QUIET DISSOLVE, not a fabricated spark. No sanctioned outcome means either
+        // transport did not supply the authority verdict before this hold expired, or this
+        // client contacted interpolated geometry the authority missed. A spark would fabricate
+        // a confirmed contact in the latter case, so the hidden shell ends silently. The trace
+        // distinguishes a late/lost authority fact from a pose-divergent contact.
+        if let Some(shot) = shot {
+            crate::shot_trace::record(
+                shot_trace,
+                "hold",
+                now,
+                shot.0,
+                || json!({ "held": held.waited, "res": "expired" }),
+            );
+            crate::shot_trace::record(
+                shot_trace,
+                "end",
+                now,
+                shot.0,
+                || json!({ "why": "bounce_dissolve" }),
+            );
+        }
+        commands.entity(entity).despawn();
+    }
+}
+
+/// Consume an authority outcome this replica's own march missed, once it is overdue by more than
+/// [`OVERDUE_MARGIN_TICKS`].
+///
+/// Replica fallback: consume a known outcome by its tick when interpolated geometry missed it. The
+/// client's tank poses can differ from the server's, so a shell may fly clean past a plate the
+/// authority says it struck; past the margin the buffered verdict wins and the shell re-anchors on
+/// it.
+///
+/// Returns `true` when the shell was resolved (re-seeded, finalized, or despawned) and must not
+/// march this tick.
+#[must_use]
+fn consume_overdue_sanctioned_outcome(
+    shell: &mut MarchingShell,
+    // Authority = not a replica. The authority resolves shots for real and never consumes.
+    deposit: bool,
+    sanctioned: Option<&SanctionedShots>,
+    present: Option<u32>,
+    dt: f32,
+    now: u32,
+    shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
+    commands: &mut Commands,
+) -> bool {
+    if deposit {
+        return false;
+    }
+    let (Some(shot), Some(buf), Some(present)) = (shell.shot, sanctioned, present) else {
+        return false;
+    };
+    let entity = shell.entity;
+    let consumed = shell.marks.ricochets.len();
+    if let Some(bounce) = buf.next(shot.0, consumed) {
+        if let Some(re_age) = elapsed_ticks(present, bounce.bounce_tick)
+            && re_age > OVERDUE_MARGIN_TICKS
+        {
+            // Re-seed through every already-buffered outcome up to the present. This is the
+            // same authority-bounded catch-up as the held path: no free-flight segment may
+            // cross a later bounce/terminal the client already knows about.
+            let caught_up = match catch_up_sanctioned_chain(
+                shot.0,
+                consumed,
+                bounce,
+                Some(present),
+                re_age,
+                buf,
+                shell.projectile.velocity,
+                shell.projectile.drag_k,
+                dt,
+            ) {
+                Ok(caught_up) => caught_up,
+                Err(reject) => {
+                    crate::shot_trace::record(
+                        shot_trace,
+                        "overdue",
+                        now,
+                        shot.0,
+                        || json!({ "res": "reject", "why": reject.trace_reason() }),
+                    );
+                    crate::shot_trace::record(
+                        shot_trace,
+                        "end",
+                        now,
+                        shot.0,
+                        || json!({ "why": "catch_up_reject" }),
+                    );
+                    commands.entity(entity).despawn();
+                    return true;
+                }
+            };
+            for segment in &caught_up.segments {
+                shell.path.begin_segment();
+                shell.path.points.extend(segment.points.iter().copied());
+                shell.marks.ricochets.push(segment.bounce.origin);
+                commands.trigger(Impact {
+                    position: segment.bounce.origin,
+                    // The keyframe does not carry the surface normal; preserve the existing
+                    // overdue-path approximation from its sanctioned outgoing direction.
+                    normal: segment.bounce.direction,
+                    caliber: shell.projectile.caliber,
+                    surface: ImpactSurface::Armor,
+                    penetrated: false,
+                    deflection: Some(segment.bounce.direction),
+                });
+                let late = elapsed_ticks(present, segment.bounce.bounce_tick).unwrap_or_default();
+                crate::shot_trace::record(
+                    shot_trace,
+                    "overdue",
+                    now,
+                    shot.0,
+                    || json!({ "res": "bounce", "late": late, "seq": segment.bounce.sequence }),
+                );
+            }
+            if let Some(terminal) = caught_up.terminal {
+                finish_at_sanctioned_terminal(shell, &terminal, commands);
+                let late = elapsed_ticks(present, terminal.impact_tick).unwrap_or_default();
+                crate::shot_trace::record(
+                    shot_trace,
+                    "overdue",
+                    now,
+                    shot.0,
+                    || json!({ "res": "terminal", "late": late, "pen": terminal.penetrated, "via": "chain" }),
+                );
+                crate::shot_trace::record(
+                    shot_trace,
+                    "end",
+                    now,
+                    shot.0,
+                    || json!({ "why": "terminal" }),
+                );
+                commands.entity(entity).despawn();
+                return true;
+            }
+            resume_from_catch_up(shell, &caught_up);
+            return true;
+        }
+    } else if let Some(terminal) = buf.terminal(shot.0, consumed)
+        && let Some(late) = elapsed_ticks(present, terminal.impact_tick)
+        && late > OVERDUE_MARGIN_TICKS
+    {
+        // Finalize at the server's read — position, normal, and the `penetrated` verdict
+        // that gates the flame lick — the full honest armor read the authority resolved,
+        // even though this client's shell never touched the (mis-posed) plate. The trail
+        // reaches the server impact point, then the shell ends. (The `else if` is keyed on NO
+        // bounce being owed: `buf.terminal` would return `None` anyway while a bounce's
+        // keyframe is still in flight, by its `after_bounces` gate.)
+        finish_at_sanctioned_terminal(shell, &terminal, commands);
+        crate::shot_trace::record(
+            shot_trace,
+            "overdue",
+            now,
+            shot.0,
+            || json!({ "res": "terminal", "late": late, "pen": terminal.penetrated }),
+        );
+        crate::shot_trace::record(
+            shot_trace,
+            "end",
+            now,
+            shot.0,
+            || json!({ "why": "terminal" }),
+        );
+        commands.entity(entity).despawn();
+        return true;
+    }
+
+    false
+}
+
+/// Draw the shell's trail to the authority's terminal and read that impact exactly as the server did
+/// — position, struck-face normal, and the `penetrated` verdict that gates the flame lick.
+///
+/// The server's read is spatially disconnected from wherever this client's shell actually was, so
+/// the trail begins a new view segment rather than inventing a correction chord to it.
+fn finish_at_sanctioned_terminal(
+    shell: &mut MarchingShell,
+    terminal: &SanctionedTerminal,
+    commands: &mut Commands,
+) {
+    let caliber = shell.projectile.caliber;
+    shell.path.begin_segment();
+    shell.path.points.push(terminal.position);
+    commands.trigger(Impact {
+        position: terminal.position,
+        normal: terminal.normal,
+        caliber,
+        surface: ImpactSurface::Armor,
+        penetrated: terminal.penetrated,
+        deflection: None,
+    });
+}
+
+/// Re-anchor a cosmetic shell on the state its authority catch-up ended at, and refresh the readout
+/// the sandbox's info layer reads.
+fn resume_from_catch_up(shell: &mut MarchingShell, caught_up: &SanctionedCatchUp) {
+    shell.transform.translation = caught_up.position;
+    if let Ok(direction) = Dir3::new(caught_up.velocity) {
+        shell.transform.look_to(direction, Vec3::Y);
+    }
+    shell.projectile.velocity = caught_up.velocity;
+    shell.readout.speed = caught_up.velocity.length();
+    shell.readout.capability = capability(shell.projectile.mass, caught_up.velocity.length());
+}
+
+/// Ray-march one tick's travel budget for a single shell, resolving every surface it reaches.
+///
+/// Free flight until a surface, then resolve it — terrain stops the shell; a ballistic volume
+/// ricochets (too oblique) or is crossed (normalize → spend cost → perforate or embed) — and keep
+/// marching the leftover budget along the new direction. Returns `None` for a degenerate zero
+/// velocity, which leaves the shell untouched this tick.
+fn march_shell_step(
+    shell: &mut MarchingShell,
+    world: &ProjectileMarchWorld,
+    health: &mut Query<&mut ComponentHealth>,
+    bodies: &mut Query<(Forces, Option<&mut crate::track::sim::TrackGripWake>)>,
+    sanctioned: Option<&SanctionedShots>,
+    // Authority = not a replica: only then does a hit actually mutate health here.
+    deposit: bool,
+    // EXPERIMENTAL cost-attribution A/B arm (`SPIKE_MG_SHORTCIRCUIT`, default off — see
+    // [`MgShortCircuit`]).
+    shortcircuit: bool,
+    dt: f32,
+    now: u32,
+    shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
+    commands: &mut Commands,
+) -> Option<MarchStep> {
+    let shot = shell.shot;
+    // Accumulate the authority's actual HP decrease across every direct crossing and spall fragment
+    // this step. The caller's per-shell latch turns the aggregate into at most one discrete confirm.
+    let mut damage_dealt = 0.0;
+    // SHOOTER SELF-EXCLUSION (see [`not_own_volume`]): this round is transparent to the tank that
+    // fired it, for every cast below. Identical on the authority and on a replica — the one place
+    // both ends must agree about the shooter's own geometry, or the server's damage model and the
+    // client's cosmetic model describe different worlds.
+    let shooter = shell.source.map(|source| source.tank);
+    let not_own = |entity: Entity| not_own_volume(entity, shooter, &world.owners, &world.parents);
     // The march casts against terrain (which stops the shell) and ballistic volumes (which it
     // crosses) — split per [`cast_march_segment`], nearer hit wins. This filter serves the
     // interior probes (thickness / exit faces / spall), which are armor-only by construction.
     let armor = SpatialQueryFilter::from_mask(Layer::Armor);
+    // Nudge past each boundary we resolve so we don't immediately re-hit it.
+    const EPS: f32 = 1.0e-3;
+
+    // Advance free-flight (gravity + drag on the velocity, then the position step) through the
+    // shared per-tick kernel — the SAME [`advance_shell`] the FireEvent catch-up folds, so a
+    // caught-up shell and a natively-flown one can't diverge. `freeflight_pos` is this tick's
+    // free-flight landing point; the ray-march below overrides it only where the segment hits
+    // something. The march may *bend* the direction (normalization / ricochet), so we carry
+    // direction + speed and rebuild the velocity at the end rather than assuming a straight step.
+    let (freeflight_pos, stepped) = advance_shell(
+        shell.transform.translation,
+        shell.projectile.velocity,
+        shell.projectile.drag_k,
+        dt,
+    );
+    let Ok(mut dir) = Dir3::new(stepped) else {
+        return None;
+    };
+    let mut speed = stepped.length();
+    let mut pos = shell.transform.translation;
+    let mut remaining = speed * dt;
+    let mut stopped = false;
+    // Set when an observer shell freezes at armor contact to await its bounce keyframe (see the
+    // `!deposit` branch): the shell keeps its entity and velocity, and the `Held` handler above
+    // drives the wait on subsequent ticks — distinct from `stopped` (which despawns).
+    let mut holding = false;
+    // Whether the march has bent the shell off its original free-flight segment. Until it does,
+    // an open-air fly-out lands exactly on `freeflight_pos` (the shared advance); after a bend the
+    // leftover budget flies along the new direction instead.
+    let mut bent = false;
+    // AUTHORITY: whether this shell's ONE terminal (`ShellTerminal` — embed/perforation) has been
+    // emitted. A perforated shell can keep marching through the interior across fixed ticks, so
+    // this spawn-time latch supplies both the same-tick and cross-tick halves of the invariant
+    // without destroying `Shot`, which remains the damage-attribution identity. It also mutes
+    // post-terminal `ShellRicochet`s: the client's cosmetic shell ended at the terminal, so an
+    // interior bounce after it must not ride the wire.
+    let mut terminal_emitted = shell.terminal_report.0;
+
+    // Ray-march the step: free flight until a surface, then resolve it — terrain stops the
+    // shell; a ballistic volume ricochets (too oblique) or is crossed (normalize → spend cost →
+    // perforate or embed) — and keep marching the leftover budget along the new direction.
+    while remaining > EPS {
+        let origin = pos + dir * EPS;
+        let Some(step_hit) = cast_march_segment(
+            &world.spatial,
+            world.grid.as_deref(),
+            origin,
+            dir,
+            remaining,
+            &not_own,
+        ) else {
+            // Open air — fly out the rest of the step. On the original (unbent) segment this is
+            // exactly the shared `advance_shell` landing point; a `continue` past this point only
+            // ever follows a bend, so `bent` is the exact discriminant.
+            pos = if bent {
+                pos + dir * remaining
+            } else {
+                freeflight_pos
+            };
+            break;
+        };
+        // The ground stops the shell: same `Impact` read whether or not the MG short-circuit
+        // is armed (the B-arm's terrain stop was already identical); only the lifecycle row
+        // differs — the short-circuit records nothing, exactly as before.
+        let hit = match step_hit {
+            SegmentHit::Terrain { distance, normal } => {
+                let entry = origin + dir * distance;
+                let shorted =
+                    shortcircuit && shell.projectile.caliber < MG_SHORTCIRCUIT_CALIBER_MAX;
+                commands.trigger(Impact {
+                    position: entry,
+                    normal,
+                    caliber: shell.projectile.caliber,
+                    surface: ImpactSurface::Terrain,
+                    penetrated: false,
+                    deflection: None,
+                });
+                // A terrain stop is the one shot terminal that needs NO confirm: static,
+                // pose-independent geometry, so both ends already agree (ADR-0021's
+                // invariant). Recorded on the client so the analyzer can close the lifecycle
+                // of a shot that simply never reached armor.
+                if !shorted
+                    && !deposit
+                    && let Some(shot) = shot
+                {
+                    crate::shot_trace::record(
+                        shot_trace,
+                        "end",
+                        now,
+                        shot.0,
+                        || json!({ "why": "terrain" }),
+                    );
+                }
+                pos = entry;
+                stopped = true;
+                break;
+            }
+            SegmentHit::Armor(hit) => hit,
+        };
+        let entry = origin + dir * hit.distance;
+        let travelled = EPS + hit.distance;
+
+        // EXPERIMENTAL B-arm (`SPIKE_MG_SHORTCIRCUIT`): a sub-20 mm round stops dead at the first
+        // surface, skipping the entire penetration-resolution march below (thickness/span probes,
+        // ricochet, spall, HP). Population-preserving — same despawn-on-contact as the live path —
+        // so the A−B tick-cost delta isolates the resolution machinery. Default off (see the type).
+        if shortcircuit && shell.projectile.caliber < MG_SHORTCIRCUIT_CALIBER_MAX {
+            // Classify the first surface from the hit's volume ancestry (the same `hit_ancestor`
+            // rule the full march uses just below) so the read is honest even in the B-arm. The
+            // short-circuit stops dead without resolving penetration, so `penetrated: false`.
+            let surface = if hit_ancestor(hit.entity, &world.volumes, &world.parents).is_some() {
+                ImpactSurface::Armor
+            } else {
+                ImpactSurface::Terrain
+            };
+            commands.trigger(Impact {
+                position: entry,
+                normal: hit.normal,
+                caliber: shell.projectile.caliber,
+                surface,
+                penetrated: false,
+                deflection: None,
+            });
+            pos = entry;
+            stopped = true;
+            break;
+        }
+
+        // The struck `BallisticVolume` sits on the hit's ancestry (`hit_ancestor`, the shared
+        // hierarchy-resolution rule), keeping the node entity so transit damage and spall can
+        // address the component. No volume in the ancestry ⇒ classified terrain (an
+        // Armor-layer entity without ownership — same rule as before the cast split).
+        let resolved = hit_ancestor(hit.entity, &world.volumes, &world.parents)
+            .map(|(node, volume)| (node, volume.material_factor));
+        let Some((node_entity, factor)) = resolved else {
+            // Terrain-classified: stop here.
+            commands.trigger(Impact {
+                position: entry,
+                normal: hit.normal,
+                caliber: shell.projectile.caliber,
+                surface: ImpactSurface::Terrain,
+                penetrated: false,
+                deflection: None,
+            });
+            // A terrain stop is the one shot terminal that needs NO confirm: static, pose-independent
+            // geometry, so both ends already agree (ADR-0021's invariant). Recorded on the client so
+            // the analyzer can close the lifecycle of a shot that simply never reached armor, instead
+            // of filing it as never-consumed.
+            if !deposit && let Some(shot) = shot {
+                crate::shot_trace::record(
+                    shot_trace,
+                    "end",
+                    now,
+                    shot.0,
+                    || json!({ "why": "terrain" }),
+                );
+            }
+            pos = entry;
+            stopped = true;
+            break;
+        };
+
+        // Replica armor state machine: consume a buffered bounce/terminal, otherwise hold a keyed
+        // shell hidden; an unkeyed replica shell ends locally. INVARIANT: every replica arm below
+        // continues or breaks, so the physical armor resolution after it is authority-only.
+        if !deposit {
+            match resolve_replica_armor_contact(
+                shell, entry, hit.normal, sanctioned, now, shot_trace, commands,
+            ) {
+                ReplicaArmorContact::Reseed {
+                    origin,
+                    direction,
+                    speed: sanctioned_speed,
+                } => {
+                    if let Some(new_dir) = direction {
+                        dir = new_dir;
+                    }
+                    speed = sanctioned_speed;
+                    pos = origin;
+                    bent = true;
+                    remaining -= travelled;
+                    continue;
+                }
+                ReplicaArmorContact::Stopped => {
+                    pos = entry;
+                    stopped = true;
+                    break;
+                }
+                ReplicaArmorContact::Holding => {
+                    pos = entry;
+                    holding = true;
+                    break;
+                }
+            }
+        }
+
+        // Momentum: each branch below hands the struck body its share of the shell's momentum,
+        // `m·(v_in − v_out)` — a shell that stops dumps it all, a perforation less (it carries
+        // momentum out), a ricochet a partial normal-ward kick.
+        let (crossing, crossing_damage) = resolve_armor_crossing(
+            shell,
+            entry,
+            &hit,
+            dir,
+            speed,
+            node_entity,
+            factor,
+            &mut terminal_emitted,
+            world,
+            health,
+            bodies,
+            &armor,
+            deposit,
+            commands,
+        );
+        damage_dealt += crossing_damage;
+        // Every outcome leaves the round off its original free-flight segment (see the open-air
+        // break above), whether it bounced off the face or bent into the plate.
+        bent = true;
+        match crossing {
+            ArmorCrossing::Ricochet {
+                direction,
+                speed: bled,
+            } => {
+                dir = direction;
+                speed = bled;
+                pos = entry;
+                remaining -= travelled;
+                continue;
+            }
+            ArmorCrossing::Embedded { at } => {
+                pos = at;
+                stopped = true;
+                break;
+            }
+            ArmorCrossing::Perforated {
+                exit,
+                direction,
+                speed: residual,
+                span,
+            } => {
+                dir = direction;
+                speed = residual;
+                pos = exit;
+                remaining -= travelled + span;
+            }
+        }
+    }
+
+    Some(MarchStep {
+        position: pos,
+        direction: dir,
+        speed,
+        stopped,
+        holding,
+        damage_dealt,
+    })
+}
+
+/// How one authority-resolved crossing of a ballistic volume ended (design doc §§2–6).
+enum ArmorCrossing {
+    /// Too oblique and not overmatched: deflected off the face — no entry, no spall.
+    Ricochet { direction: Dir3, speed: f32 },
+    /// Defeated by the plate: buried partway through, where the march ends.
+    Embedded { at: Vec3 },
+    /// Punched through: the march resumes at the exit face carrying the residual speed.
+    Perforated {
+        exit: Vec3,
+        direction: Dir3,
+        speed: f32,
+        /// Line-of-sight metres spent inside the volume; the leftover travel budget pays for them.
+        span: f32,
+    },
+}
+
+/// Resolve one crossing of a ballistic volume — the penetration model itself (design doc §§2–6).
+///
+/// Ricochet (too oblique, unless overmatch suppresses it), or bite in: normalize toward the inward
+/// normal, spend the crossing's cost against the round's capability, and either embed or perforate.
+///
+/// AUTHORITY ONLY — every replica arm in [`resolve_replica_armor_contact`] ends the march before
+/// this is reached. Returns the outcome and the HP actually removed.
+fn resolve_armor_crossing(
+    shell: &mut MarchingShell,
+    // Where the round met the face, and the raw hit it came from (entity identity for the interior
+    // probes, and the outward normal).
+    entry: Vec3,
+    hit: &avian3d::prelude::RayHitData,
+    mut dir: Dir3,
+    mut speed: f32,
+    // The struck volume's node entity — where transit damage and spall address the component — and
+    // its authored reference-mm-per-metre.
+    node_entity: Entity,
+    factor: f32,
+    // Whether this shot's ONE `ShellTerminal` has already ridden the wire; latched here on the
+    // first perforation.
+    terminal_emitted: &mut bool,
+    world: &ProjectileMarchWorld,
+    health: &mut Query<&mut ComponentHealth>,
+    bodies: &mut Query<(Forces, Option<&mut crate::track::sim::TrackGripWake>)>,
+    armor: &SpatialQueryFilter,
+    // Authority = not a replica: only then does a crossing actually mutate health.
+    deposit: bool,
+    commands: &mut Commands,
+) -> (ArmorCrossing, f32) {
+    let shot = shell.shot;
+    let mut damage_dealt = 0.0;
     // Nudge past each boundary we resolve so we don't immediately re-hit it.
     const EPS: f32 = 1.0e-3;
     // How far ahead to search for a volume's far face — its full geometric thickness, even past the
@@ -1364,983 +1981,434 @@ fn integrate_projectiles(
     const NORMALIZATION: f32 = 0.2;
     // Overmatch when calibre ≥ this × the plate's thickness: ricochet suppressed, slope cancelled.
     const OVERMATCH_RATIO: f32 = 3.0;
-    // Spall (design §5). Budget = (material chewed / ref) × (residual energy / ref) × (caliber /
-    // ref), capped — both a fragment supply (cost) and a push (v_res²) are needed, so a thin/soft
-    // body or a barely-through round throws little. The cone's shape is fixed; only density scales.
+    // Main-penetrator transit damage = cost paid crossing the component × this (design §6).
+    const TRANSIT_K: f32 = 1.0;
+
+    // Momentum bookkeeping for this crossing: the incoming velocity (before any bend/bleed)
+    // and the body that owns the struck volume. Each resolution branch below hands the body
+    // its share of the shell's momentum, `m·(v_in − v_out)` — a shell that stops dumps it all,
+    // a perforation less (it carries momentum out), a ricochet a partial normal-ward kick.
+    let v_in = Vec3::from(dir) * speed;
+    let body = world.owners.get(node_entity).ok().map(|owner| owner.tank());
+
+    // Outward surface normal; angle of incidence is measured from it (0 = head-on).
+    let normal = Dir3::new(hit.normal).unwrap_or(-dir);
+    let incidence = Vec3::from(dir).angle_between(-Vec3::from(normal));
+
+    // Plate thickness *along its normal* (perpendicular, face to face) — the overmatch test:
+    // a round whose calibre dwarfs the plate cannot be deflected by it.
+    let thickness = world
+        .spatial
+        .cast_ray_predicate(
+            entry - Vec3::from(normal) * EPS,
+            -normal,
+            PROBE,
+            false,
+            armor,
+            &|e| e == hit.entity,
+        )
+        .map(|back| EPS + back.distance)
+        .unwrap_or(0.0);
+    let overmatched = thickness > 0.0 && shell.projectile.caliber >= OVERMATCH_RATIO * thickness;
+
+    // Ricochet: too oblique → deflect off the face (no entry, no spall) — unless overmatch
+    // suppresses it (design §4).
+    if !overmatched && incidence > RICOCHET_ANGLE {
+        // Shock: even a deflected hit jars an exposed component (barrel, optic) — scaled by
+        // impact energy (capability) and how square the graze was. Armor has no HP, so it
+        // shrugs the bounce off; a fragile module loses integrity without being one-shot.
+        if deposit && let Ok(mut hp) = health.get_mut(node_entity) {
+            let shock = SHOCK_K * capability(shell.projectile.mass, speed) * incidence.cos();
+            let before = hp.current;
+            hp.current = (before - shock).max(0.0);
+            damage_dealt += before - hp.current;
+        }
+        dir = reflect(dir, normal);
+        speed *= RICOCHET_BLEED;
+        if let Some(body) = body {
+            apply_hit_impulse(
+                bodies,
+                body,
+                shell.projectile.mass * (v_in - Vec3::from(dir) * speed),
+                entry,
+            );
+        }
+        // The bounce reads on the struck face: a hard bright spark fan, biased along the
+        // deflected (outgoing) direction — a ricochet throws its sparks the way it kicked off.
+        // It bit no steel, so `penetrated: false` (no flame lick — a bounce doesn't ignite).
+        commands.trigger(Impact {
+            position: entry,
+            normal: Vec3::from(normal),
+            caliber: shell.projectile.caliber,
+            surface: ImpactSurface::Armor,
+            penetrated: false,
+            deflection: Some(Vec3::from(dir)),
+        });
+        shell.marks.ricochets.push(entry);
+        shell.path.points.push(entry);
+        // AUTHORITY → CLIENTS: replicate this sanctioned bounce as the cause (ADR-0016) so
+        // every client re-seeds its cosmetic shell from truth rather than improvising. Only
+        // for a net-attributed shell (`Shot` present, stamped by the shared protocol stamp);
+        // SP/sandbox shells carry none and raise nothing. Muted after this shot's terminal
+        // (`!*terminal_emitted`) — an interior bounce past a perforation is invisible to the
+        // client shell, which ended at the terminal. `dir`/`speed` are already
+        // post-reflect/bleed (the outgoing state); `entry` is the bounce point.
+        // `net::shot_transport` observes this and stamps the bounce tick. The ordinal is this
+        // ricochet's 0-based index — the SAME count a client shell derives from its own
+        // `ricochets` — so multi-bounce shots re-seed in order. (Only reachable on the
+        // authority: the caller's `!deposit` branch already ended the march before here.)
+        if let Some(shot) = shot
+            && !*terminal_emitted
+        {
+            commands.trigger(ShellRicochet {
+                shot: shot.0,
+                origin: entry,
+                direction: Vec3::from(dir),
+                speed,
+                sequence: (shell.marks.ricochets.len() - 1) as u32,
+            });
+        }
+        return (
+            ArmorCrossing::Ricochet {
+                direction: dir,
+                speed,
+            },
+            damage_dealt,
+        );
+    }
+
+    // Normalize: a modest bend toward the inward normal as the round bites in (shortens the
+    // path it cuts and nudges the exit). Overmatch does NOT bend it further — the round drives
+    // through in roughly the same direction; overmatch instead cancels the *slope cost* below.
+    dir = bend_toward(dir, -normal, NORMALIZATION * incidence);
+    let span = world
+        .spatial
+        .cast_ray_predicate(entry + dir * EPS, dir, PROBE, false, armor, &|e| {
+            e == hit.entity
+        })
+        .map(|exit| EPS + exit.distance)
+        .unwrap_or(0.0);
+
+    // Cost = effective metres × the material's reference-mm-per-metre. An overmatched plate
+    // can't present its oblique line-of-sight to a round that dwarfs it, so it charges only
+    // the perpendicular thickness; otherwise the full slope span.
+    let cap = capability(shell.projectile.mass, speed);
+    let effective = if overmatched { thickness } else { span };
+    let cost = effective * factor;
+    if cap <= cost {
+        // Defeated: embed partway through (depth scaled by the capability it could pay).
+        let embed = entry + dir * span * (cap / cost);
+        shell.marks.events.push(PenetrationEvent {
+            entry,
+            exit: embed,
+            overmatched,
+        });
+        shell.path.points.push(embed);
+        // It buried itself here, spending all it had (`cap`) — deposit that as transit damage
+        // if the volume is a damageable component (design §6). No exit, so no spall.
+        if deposit && let Ok(mut hp) = health.get_mut(node_entity) {
+            let before = hp.current;
+            hp.current = (before - cap * TRANSIT_K).max(0.0);
+            damage_dealt += before - hp.current;
+        }
+        // The embed's visible face is the ENTRY surface — its normal is what sparks kick
+        // off of (the embed point itself is inside the plate). The round buried itself in the
+        // steel (`penetrated: true`): the hot-metal signature earns the brief flame lick, even
+        // though the plate ultimately defeated it — it bit in, it didn't bounce.
+        commands.trigger(Impact {
+            position: embed,
+            normal: Vec3::from(normal),
+            caliber: shell.projectile.caliber,
+            surface: ImpactSurface::Armor,
+            penetrated: true,
+            deflection: None,
+        });
+        // AUTHORITY → CLIENTS: the shot's TERMINAL (`ImpactConfirm` on the wire) — the same
+        // read the `Impact` above showed locally, so every client renders the identical honest
+        // embed (position/normal/flame lick). The `!*terminal_emitted` guard covers the
+        // perforate-then-embed-same-tick chain (the perforation already terminated the shot);
+        // no latch write is needed here — the embedded shell stops and despawns, so nothing
+        // after this can emit.
+        if let Some(shot) = shot
+            && !*terminal_emitted
+        {
+            commands.trigger(ShellTerminal {
+                shot: shot.0,
+                position: embed,
+                normal: Vec3::from(normal),
+                penetrated: true,
+                after_bounces: shell.marks.ricochets.len() as u32,
+            });
+        }
+        // Stopped: the body absorbs the full remaining momentum (v_out = 0).
+        if let Some(body) = body {
+            apply_hit_impulse(bodies, body, shell.projectile.mass * v_in, entry);
+        }
+        return (ArmorCrossing::Embedded { at: embed }, damage_dealt);
+    }
+
+    // Perforate: spend the cost (residual speed) and continue along the bent direction.
+    // The struck FACE reads here — the entry point, its outward normal — where the round
+    // punched through. This is the one place "penetrated" is unambiguously true (the round
+    // breached the plate into the interior), so the armor read earns its flame lick. Without
+    // this trigger a clean perforation was visually silent on the struck face.
+    commands.trigger(Impact {
+        position: entry,
+        normal: Vec3::from(normal),
+        caliber: shell.projectile.caliber,
+        surface: ImpactSurface::Armor,
+        penetrated: true,
+        deflection: None,
+    });
+    // AUTHORITY → CLIENTS: the shot's TERMINAL (`ImpactConfirm` on the wire). A perforation
+    // ends the COSMETIC shell at this entry-face read even though the authoritative shell
+    // marches on into the interior — the documented choice on [`ShellTerminal`]: what an
+    // external viewer sees at the struck plate IS this read, and the client cannot march the
+    // interior. Emitted for the FIRST perforation/embed only; [`TerminalReport`] mutes both
+    // same-tick interior crossings and later fixed ticks while `Shot` remains available for
+    // damage attribution.
+    if let Some(shot) = shot
+        && !*terminal_emitted
+    {
+        *terminal_emitted = true;
+        shell.terminal_report.0 = true;
+        commands.trigger(ShellTerminal {
+            shot: shot.0,
+            position: entry,
+            normal: Vec3::from(normal),
+            penetrated: true,
+            after_bounces: shell.marks.ricochets.len() as u32,
+        });
+    }
+    speed = speed_for(shell.projectile.mass, cap - cost);
+    // The body keeps the momentum the shell lost crossing it; the shell carries the rest on.
+    if let Some(body) = body {
+        apply_hit_impulse(
+            bodies,
+            body,
+            shell.projectile.mass * (v_in - Vec3::from(dir) * speed),
+            entry,
+        );
+    }
+    let exit = entry + dir * span;
+    shell.marks.events.push(PenetrationEvent {
+        entry,
+        exit,
+        overmatched,
+    });
+    shell.path.points.push(exit);
+
+    // Transit damage: the main penetrator drove through this volume — if it's a damageable
+    // component, deposit the cost it paid crossing (design §6). Armor has no HP, so no-op.
+    if deposit && let Ok(mut hp) = health.get_mut(node_entity) {
+        let before = hp.current;
+        hp.current = (before - cost * TRANSIT_K).max(0.0);
+        damage_dealt += before - hp.current;
+    }
+
+    // Spall: the exit face throws a cone of fragments sized by the material chewed and by the
+    // shot's residual energy (design §5) — see [`throw_spall_burst`].
+    damage_dealt += throw_spall_burst(
+        shell.spall,
+        exit,
+        dir,
+        cost,
+        shell.projectile.caliber,
+        speed,
+        world,
+        health,
+        armor,
+        deposit,
+    );
+
+    (
+        ArmorCrossing::Perforated {
+            exit,
+            direction: dir,
+            speed,
+            span,
+        },
+        damage_dealt,
+    )
+}
+
+/// Resolve one armor contact a REPLICA's own march found, where ballistics is cosmetic and the
+/// authority owns every armor verdict.
+///
+/// INVARIANT: every arm ends the caller's surface resolution — re-seed from a buffered bounce, stop
+/// on a buffered terminal (or, unkeyed, fail closed), or freeze hidden until a verdict arrives — so
+/// the physical armor resolution after it is authority-only.
+fn resolve_replica_armor_contact(
+    shell: &mut MarchingShell,
+    entry: Vec3,
+    // The struck face's outward normal, straight from this client's raycast.
+    hit_normal: Vec3,
+    sanctioned: Option<&SanctionedShots>,
+    now: u32,
+    shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
+    commands: &mut Commands,
+) -> ReplicaArmorContact {
+    let entity = shell.entity;
+    let shot = shell.shot;
+    let caliber = shell.projectile.caliber;
+    let consumed = shell.marks.ricochets.len();
+    let next_bounce = shot
+        .zip(sanctioned)
+        .and_then(|(s, buf)| buf.next(s.0, consumed));
+    if let Some(bounce) = next_bounce {
+        // Buffered bounce: re-seed from authority truth and keep the remaining step.
+        commands.trigger(Impact {
+            position: bounce.origin,
+            normal: hit_normal,
+            caliber,
+            surface: ImpactSurface::Armor,
+            penetrated: false,
+            deflection: Some(bounce.direction),
+        });
+        shell.path.begin_segment();
+        shell.path.points.push(bounce.origin);
+        shell.marks.ricochets.push(bounce.origin);
+        // Trace a buffered bounce separately from a shell that never contacted.
+        if let Some(shot) = shot {
+            crate::shot_trace::record(
+                shot_trace,
+                "contact",
+                now,
+                shot.0,
+                || json!({ "res": "pre_bounce", "seq": bounce.sequence, "bt": bounce.bounce_tick }),
+            );
+        }
+        return ReplicaArmorContact::Reseed {
+            origin: bounce.origin,
+            direction: Dir3::new(bounce.direction).ok(),
+            speed: bounce.speed,
+        };
+    }
+    // Buffered terminal: resolve at the authority read without a hold.
+    let terminal = shot
+        .zip(sanctioned)
+        .and_then(|(s, buf)| buf.terminal(s.0, consumed));
+    if let Some(terminal) = terminal {
+        finish_at_sanctioned_terminal(shell, &terminal, commands);
+        if let Some(shot) = shot {
+            crate::shot_trace::record(
+                shot_trace,
+                "contact",
+                now,
+                shot.0,
+                || json!({ "res": "pre_term", "it": terminal.impact_tick, "pen": terminal.penetrated }),
+            );
+            crate::shot_trace::record(
+                shot_trace,
+                "end",
+                now,
+                shot.0,
+                || json!({ "why": "terminal" }),
+            );
+        }
+        return ReplicaArmorContact::Stopped;
+    }
+    if let Some(shot) = shot {
+        // Hold a keyed shell hidden until the authority outcome or expiry.
+        commands.entity(entity).insert((
+            Held {
+                waited: 0,
+                age: 0,
+                normal: hit_normal,
+            },
+            Visibility::Hidden,
+        ));
+        // The corresponding `hold` row closes this trace interval.
+        crate::shot_trace::record(
+            shot_trace,
+            "contact",
+            now,
+            shot.0,
+            || json!({ "res": "hold" }),
+        );
+        return ReplicaArmorContact::Holding;
+    }
+    // No identity — fail closed immediately (pre-slice behaviour).
+    commands.trigger(Impact {
+        position: entry,
+        normal: hit_normal,
+        caliber,
+        surface: ImpactSurface::Armor,
+        penetrated: false,
+        deflection: None,
+    });
+    ReplicaArmorContact::Stopped
+}
+
+/// Throw the spall cone a perforation's exit face makes, appending one burst to the shell's record.
+///
+/// The *count* comes from the material chewed (`cost`) and the hole size (`caliber`) — the fragment
+/// supply; each fragment's *energy* comes from the shot's residual (v_res²) and its position in the
+/// cone (on-axis strongest). So a thin/soft body throws few fragments and a barely-through round
+/// throws weak ones — both extremes low (design §5). Each fragment then penetrates per its energy.
+///
+/// Returns the HP the authority actually removed; a replica resolves the identical geometry and the
+/// identical visual trace, and deposits nothing.
+fn throw_spall_burst(
+    spall: &mut Mut<SpallMarks>,
+    exit: Vec3,
+    dir: Dir3,
+    cost: f32,
+    caliber: f32,
+    speed: f32,
+    world: &ProjectileMarchWorld,
+    health: &mut Query<&mut ComponentHealth>,
+    armor: &SpatialQueryFilter,
+    // Only authority writes HP; replicas retain the visual trace.
+    deposit: bool,
+) -> f32 {
+    // Nudge past the exit face so a fragment's first cast doesn't re-touch it — the same 1 mm
+    // boundary nudge the march itself uses.
+    const EPS: f32 = 1.0e-3;
+    // Spall (design §5). The fragment COUNT is supply only: (material chewed / ref) × (caliber /
+    // ref), capped. Residual energy is deliberately NOT a factor here — it is applied per fragment
+    // below as `shot_energy`, so a barely-through round throws its full complement of fragments and
+    // throws them weakly, rather than throwing fewer. The cone's shape is fixed; only density scales.
     const SPALL_MAX_FRAGMENTS: usize = 24;
     const SPALL_COST_REF: f32 = 100.0; // ref-mm (≈ a 100 mm steel plate)
     const SPALL_VRES_REF: f32 = 500.0; // m/s
     const SPALL_CALIBER_REF: f32 = 0.088; // m (the 88)
     const SPALL_HALF_ANGLE: f32 = 0.35; // rad (~20°)
     const SPALL_RANGE: f32 = 6.0; // m — fragments are short-range
-    // Main-penetrator transit damage = cost paid crossing the component × this (design §6).
-    const TRANSIT_K: f32 = 1.0;
-
-    for (
-        entity,
-        mut transform,
-        mut projectile,
-        mut damage_report,
-        mut terminal_report,
-        mut path,
-        mut marks,
-        mut readout,
-        mut spall,
-        shot,
-        held,
-        source,
-    ) in &mut projectiles
-    {
-        // Accumulate the authority's actual HP decrease across every direct crossing and spall fragment
-        // this step. The per-shell latch below turns the aggregate into at most one discrete confirm.
-        let mut damage_dealt = 0.0;
-        // SHOOTER SELF-EXCLUSION (see [`not_own_volume`]): this round is transparent to the tank that
-        // fired it, for every cast below. Identical on the authority and on a replica — the one place
-        // both ends must agree about the shooter's own geometry, or the server's damage model and the
-        // client's cosmetic model describe different worlds.
-        let shooter = source.map(|source| source.tank);
-        let not_own = |entity: Entity| not_own_volume(entity, shooter, &owners, &parents);
-        // NET-CLIENT HOLD: a `Shot`-carrying shell — an observer's replica OR the shooter's own
-        // predicted round — frozen (and hidden, see the hold insert below) at armor contact, waiting
-        // the grace window for the server's verdict on this contact. It does NOT free-flight while
-        // held — it resolves from whichever sanctioned outcome arrives (a bounce keyframe → re-seed
-        // and continue; a terminal confirm → the full honest armor read at the server's position) or,
-        // past the window, degrades to fail-closed truncation. The authority never holds (it resolves
-        // shots for real), and a shell with no `Shot` never enters this state (it fail-closes on
-        // first contact below).
-        if let Some(mut held) = held {
-            // The bounce we are waiting on (the next unconsumed ordinal for this shot), if it arrived.
-            let arrived = shot.zip(sanctioned.as_ref()).and_then(|(shot, buf)| {
-                buf.next(shot.0, marks.ricochets.len())
-                    .map(|bounce| (shot.0, buf.as_ref(), bounce))
-            });
-            if let Some((shot_id, sanctioned, first_bounce)) = arrived {
-                // RE-SEED through every authority outcome already buffered up to the present. A pure
-                // fast-forward may cover only the interval before the NEXT known bounce/terminal; it
-                // must not draw through a verdict the client already possesses.
-                let initial_age = present
-                    .and_then(|present| elapsed_ticks(present, first_bounce.bounce_tick))
-                    .unwrap_or(held.age);
-                let caught_up = match catch_up_sanctioned_chain(
-                    shot_id,
-                    marks.ricochets.len(),
-                    first_bounce,
-                    present,
-                    held.age,
-                    sanctioned,
-                    projectile.velocity,
-                    projectile.drag_k,
-                    dt,
-                ) {
-                    Ok(caught_up) => caught_up,
-                    Err(reject) => {
-                        crate::shot_trace::record(
-                            &mut shot_trace,
-                            "overdue",
-                            now,
-                            shot_id,
-                            || json!({ "res": "reject", "why": reject.trace_reason() }),
-                        );
-                        crate::shot_trace::record(
-                            &mut shot_trace,
-                            "end",
-                            now,
-                            shot_id,
-                            || json!({ "why": "catch_up_reject" }),
-                        );
-                        commands.entity(entity).despawn();
-                        continue;
-                    }
-                };
-                for (index, segment) in caught_up.segments.iter().enumerate() {
-                    // The candidate contact and every later authority correction can be spatially
-                    // displaced. Each server origin begins a disconnected view segment, never a
-                    // fictional correction chord.
-                    path.begin_segment();
-                    path.points.extend(segment.points.iter().copied());
-                    marks.ricochets.push(segment.bounce.origin);
-                    commands.trigger(Impact {
-                        position: segment.bounce.origin,
-                        normal: if index == 0 {
-                            held.normal
-                        } else {
-                            segment.bounce.direction
-                        },
-                        caliber: projectile.caliber,
-                        surface: ImpactSurface::Armor,
-                        penetrated: false,
-                        deflection: Some(segment.bounce.direction),
-                    });
-                    if index == 0 {
-                        crate::shot_trace::record(&mut shot_trace, "hold", now, shot_id, || {
-                            json!({
-                                "held": held.waited,
-                                "aged": initial_age,
-                                "res": "bounce",
-                                "seq": segment.bounce.sequence,
-                                "bt": segment.bounce.bounce_tick,
-                            })
-                        });
-                    } else {
-                        let late = present
-                            .and_then(|present| elapsed_ticks(present, segment.bounce.bounce_tick))
-                            .unwrap_or_default();
-                        crate::shot_trace::record(
-                            &mut shot_trace,
-                            "overdue",
-                            now,
-                            shot_id,
-                            || json!({ "res": "bounce", "late": late, "seq": segment.bounce.sequence, "via": "chain" }),
-                        );
-                    }
-                }
-
-                if let Some(terminal) = caught_up.terminal {
-                    path.begin_segment();
-                    path.points.push(terminal.position);
-                    commands.trigger(Impact {
-                        position: terminal.position,
-                        normal: terminal.normal,
-                        caliber: projectile.caliber,
-                        surface: ImpactSurface::Armor,
-                        penetrated: terminal.penetrated,
-                        deflection: None,
-                    });
-                    let late = present
-                        .and_then(|present| elapsed_ticks(present, terminal.impact_tick))
-                        .unwrap_or_default();
-                    crate::shot_trace::record(
-                        &mut shot_trace,
-                        "overdue",
-                        now,
-                        shot_id,
-                        || json!({ "res": "terminal", "late": late, "pen": terminal.penetrated, "via": "chain" }),
-                    );
-                    crate::shot_trace::record(
-                        &mut shot_trace,
-                        "end",
-                        now,
-                        shot_id,
-                        || json!({ "why": "terminal" }),
-                    );
-                    commands.entity(entity).despawn();
-                    continue;
-                }
-
-                transform.translation = caught_up.position;
-                if let Ok(direction) = Dir3::new(caught_up.velocity) {
-                    transform.look_to(direction, Vec3::Y);
-                }
-                projectile.velocity = caught_up.velocity;
-                readout.speed = caught_up.velocity.length();
-                readout.capability = capability(projectile.mass, caught_up.velocity.length());
-                // Un-hide (the hold's invisible-stop) and resume marching next tick.
-                commands
-                    .entity(entity)
-                    .remove::<Held>()
-                    .insert(Visibility::Inherited);
-                continue;
-            }
-            // Consume a terminal only after every preceding bounce; re-anchor at server truth.
-            let terminal = shot
-                .zip(sanctioned.as_ref())
-                .and_then(|(s, buf)| buf.terminal(s.0, marks.ricochets.len()));
-            if let Some(terminal) = terminal {
-                path.begin_segment();
-                path.points.push(terminal.position);
-                commands.trigger(Impact {
-                    position: terminal.position,
-                    normal: terminal.normal,
-                    caliber: projectile.caliber,
-                    surface: ImpactSurface::Armor,
-                    penetrated: terminal.penetrated,
-                    deflection: None,
-                });
-                if let Some(shot) = shot {
-                    crate::shot_trace::record(&mut shot_trace, "hold", now, shot.0, || {
-                        json!({
-                            "held": held.waited,
-                            "res": "terminal",
-                            "it": terminal.impact_tick,
-                            "pen": terminal.penetrated,
-                        })
-                    });
-                    crate::shot_trace::record(
-                        &mut shot_trace,
-                        "end",
-                        now,
-                        shot.0,
-                        || json!({ "why": "terminal" }),
-                    );
-                }
-                commands.entity(entity).despawn();
-                continue;
-            }
-            // Still waiting. Past the grace window, the shell degrades to the fail-closed fallback:
-            // an unavailable keyframe/confirm must never leave a round frozen forever. Otherwise stay
-            // frozen this tick.
-            held.waited += 1;
-            held.age += 1;
-            if held.waited > RICOCHET_HOLD_TICKS {
-                // F3(ii) — QUIET DISSOLVE, not a fabricated spark. No sanctioned outcome means either
-                // transport did not supply the authority verdict before this hold expired, or this
-                // client contacted interpolated geometry the authority missed. A spark would fabricate
-                // a confirmed contact in the latter case, so the hidden shell ends silently. The trace
-                // distinguishes a late/lost authority fact from a pose-divergent contact.
-                if let Some(shot) = shot {
-                    crate::shot_trace::record(
-                        &mut shot_trace,
-                        "hold",
-                        now,
-                        shot.0,
-                        || json!({ "held": held.waited, "res": "expired" }),
-                    );
-                    crate::shot_trace::record(
-                        &mut shot_trace,
-                        "end",
-                        now,
-                        shot.0,
-                        || json!({ "why": "bounce_dissolve" }),
-                    );
-                }
-                commands.entity(entity).despawn();
-            }
-            continue;
-        }
-
-        // Replica fallback: consume a known outcome by its tick when interpolated geometry missed it.
-        if !deposit
-            && let (Some(shot), Some(buf), Some(present)) = (shot, sanctioned.as_ref(), present)
-        {
-            let consumed = marks.ricochets.len();
-            if let Some(bounce) = buf.next(shot.0, consumed) {
-                if let Some(re_age) = elapsed_ticks(present, bounce.bounce_tick)
-                    && re_age > OVERDUE_MARGIN_TICKS
-                {
-                    // Re-seed through every already-buffered outcome up to the present. This is the
-                    // same authority-bounded catch-up as the held path: no free-flight segment may
-                    // cross a later bounce/terminal the client already knows about.
-                    let caught_up = match catch_up_sanctioned_chain(
-                        shot.0,
-                        consumed,
-                        bounce,
-                        Some(present),
-                        re_age,
-                        buf.as_ref(),
-                        projectile.velocity,
-                        projectile.drag_k,
-                        dt,
-                    ) {
-                        Ok(caught_up) => caught_up,
-                        Err(reject) => {
-                            crate::shot_trace::record(
-                                &mut shot_trace,
-                                "overdue",
-                                now,
-                                shot.0,
-                                || json!({ "res": "reject", "why": reject.trace_reason() }),
-                            );
-                            crate::shot_trace::record(
-                                &mut shot_trace,
-                                "end",
-                                now,
-                                shot.0,
-                                || json!({ "why": "catch_up_reject" }),
-                            );
-                            commands.entity(entity).despawn();
-                            continue;
-                        }
-                    };
-                    for segment in &caught_up.segments {
-                        path.begin_segment();
-                        path.points.extend(segment.points.iter().copied());
-                        marks.ricochets.push(segment.bounce.origin);
-                        commands.trigger(Impact {
-                            position: segment.bounce.origin,
-                            // The keyframe does not carry the surface normal; preserve the existing
-                            // overdue-path approximation from its sanctioned outgoing direction.
-                            normal: segment.bounce.direction,
-                            caliber: projectile.caliber,
-                            surface: ImpactSurface::Armor,
-                            penetrated: false,
-                            deflection: Some(segment.bounce.direction),
-                        });
-                        let late =
-                            elapsed_ticks(present, segment.bounce.bounce_tick).unwrap_or_default();
-                        crate::shot_trace::record(
-                            &mut shot_trace,
-                            "overdue",
-                            now,
-                            shot.0,
-                            || json!({ "res": "bounce", "late": late, "seq": segment.bounce.sequence }),
-                        );
-                    }
-                    if let Some(terminal) = caught_up.terminal {
-                        path.begin_segment();
-                        path.points.push(terminal.position);
-                        commands.trigger(Impact {
-                            position: terminal.position,
-                            normal: terminal.normal,
-                            caliber: projectile.caliber,
-                            surface: ImpactSurface::Armor,
-                            penetrated: terminal.penetrated,
-                            deflection: None,
-                        });
-                        let late = elapsed_ticks(present, terminal.impact_tick).unwrap_or_default();
-                        crate::shot_trace::record(
-                            &mut shot_trace,
-                            "overdue",
-                            now,
-                            shot.0,
-                            || json!({ "res": "terminal", "late": late, "pen": terminal.penetrated, "via": "chain" }),
-                        );
-                        crate::shot_trace::record(
-                            &mut shot_trace,
-                            "end",
-                            now,
-                            shot.0,
-                            || json!({ "why": "terminal" }),
-                        );
-                        commands.entity(entity).despawn();
-                        continue;
-                    }
-                    transform.translation = caught_up.position;
-                    if let Ok(direction) = Dir3::new(caught_up.velocity) {
-                        transform.look_to(direction, Vec3::Y);
-                    }
-                    projectile.velocity = caught_up.velocity;
-                    readout.speed = caught_up.velocity.length();
-                    readout.capability = capability(projectile.mass, caught_up.velocity.length());
-                    continue;
-                }
-            } else if let Some(terminal) = buf.terminal(shot.0, consumed)
-                && let Some(late) = elapsed_ticks(present, terminal.impact_tick)
-                && late > OVERDUE_MARGIN_TICKS
-            {
-                // Finalize at the server's read — position, normal, and the `penetrated` verdict
-                // that gates the flame lick — the full honest armor read the authority resolved,
-                // even though this client's shell never touched the (mis-posed) plate. The trail
-                // reaches the server impact point, then the shell ends. (The `else if` is keyed on NO
-                // bounce being owed: `buf.terminal` would return `None` anyway while a bounce's
-                // keyframe is still in flight, by its `after_bounces` gate.)
-                path.begin_segment();
-                path.points.push(terminal.position);
-                commands.trigger(Impact {
-                    position: terminal.position,
-                    normal: terminal.normal,
-                    caliber: projectile.caliber,
-                    surface: ImpactSurface::Armor,
-                    penetrated: terminal.penetrated,
-                    deflection: None,
-                });
-                crate::shot_trace::record(
-                    &mut shot_trace,
-                    "overdue",
-                    now,
-                    shot.0,
-                    || json!({ "res": "terminal", "late": late, "pen": terminal.penetrated }),
-                );
-                crate::shot_trace::record(
-                    &mut shot_trace,
-                    "end",
-                    now,
-                    shot.0,
-                    || json!({ "why": "terminal" }),
-                );
-                commands.entity(entity).despawn();
-                continue;
-            }
-        }
-
-        // Advance free-flight (gravity + drag on the velocity, then the position step) through the
-        // shared per-tick kernel — the SAME [`advance_shell`] the FireEvent catch-up folds, so a
-        // caught-up shell and a natively-flown one can't diverge. `freeflight_pos` is this tick's
-        // free-flight landing point; the ray-march below overrides it only where the segment hits
-        // something. The march may *bend* the direction (normalization / ricochet), so we carry
-        // direction + speed and rebuild the velocity at the end rather than assuming a straight step.
-        let (freeflight_pos, stepped) = advance_shell(
-            transform.translation,
-            projectile.velocity,
-            projectile.drag_k,
-            dt,
-        );
-        let Ok(mut dir) = Dir3::new(stepped) else {
-            continue;
+    let mut damage_dealt = 0.0;
+    let count_f =
+        SPALL_MAX_FRAGMENTS as f32 * (cost / SPALL_COST_REF) * (caliber / SPALL_CALIBER_REF);
+    let count = (count_f.round() as i32).clamp(0, SPALL_MAX_FRAGMENTS as i32) as usize;
+    if count > 0 {
+        // Residual energy sets how hard each fragment is thrown (full at the reference exit
+        // speed); the on-axis fragments (`t→0`) keep the most of it.
+        let shot_energy = (speed / SPALL_VRES_REF).powi(2).clamp(0.0, 1.0);
+        let mut burst = SpallBurst {
+            origin: exit,
+            axis: dir,
+            half_angle: SPALL_HALF_ANGLE,
+            fragments: Vec::with_capacity(count),
         };
-        let mut speed = stepped.length();
-        let mut pos = transform.translation;
-        let mut remaining = speed * dt;
-        let mut stopped = false;
-        // Set when an observer shell freezes at armor contact to await its bounce keyframe (see the
-        // `!deposit` branch): the shell keeps its entity and velocity, and the `Held` handler above
-        // drives the wait on subsequent ticks — distinct from `stopped` (which despawns).
-        let mut holding = false;
-        // Whether the march has bent the shell off its original free-flight segment. Until it does,
-        // an open-air fly-out lands exactly on `freeflight_pos` (the shared advance); after a bend the
-        // leftover budget flies along the new direction instead.
-        let mut bent = false;
-        // AUTHORITY: whether this shell's ONE terminal (`ShellTerminal` — embed/perforation) has been
-        // emitted. A perforated shell can keep marching through the interior across fixed ticks, so
-        // this spawn-time latch supplies both the same-tick and cross-tick halves of the invariant
-        // without destroying `Shot`, which remains the damage-attribution identity. It also mutes
-        // post-terminal `ShellRicochet`s: the client's cosmetic shell ended at the terminal, so an
-        // interior bounce after it must not ride the wire.
-        let mut terminal_emitted = terminal_report.0;
-
-        // Ray-march the step: free flight until a surface, then resolve it — terrain stops the
-        // shell; a ballistic volume ricochets (too oblique) or is crossed (normalize → spend cost →
-        // perforate or embed) — and keep marching the leftover budget along the new direction.
-        while remaining > EPS {
-            let origin = pos + dir * EPS;
-            let Some(step_hit) =
-                cast_march_segment(&spatial, grid.as_deref(), origin, dir, remaining, &not_own)
-            else {
-                // Open air — fly out the rest of the step. On the original (unbent) segment this is
-                // exactly the shared `advance_shell` landing point; a `continue` past this point only
-                // ever follows a bend, so `bent` is the exact discriminant.
-                pos = if bent {
-                    pos + dir * remaining
-                } else {
-                    freeflight_pos
-                };
-                break;
-            };
-            // The ground stops the shell: same `Impact` read whether or not the MG short-circuit
-            // is armed (the B-arm's terrain stop was already identical); only the lifecycle row
-            // differs — the short-circuit records nothing, exactly as before.
-            let hit = match step_hit {
-                SegmentHit::Terrain { distance, normal } => {
-                    let entry = origin + dir * distance;
-                    let shorted =
-                        shortcircuit.0 && projectile.caliber < MG_SHORTCIRCUIT_CALIBER_MAX;
-                    commands.trigger(Impact {
-                        position: entry,
-                        normal,
-                        caliber: projectile.caliber,
-                        surface: ImpactSurface::Terrain,
-                        penetrated: false,
-                        deflection: None,
-                    });
-                    // A terrain stop is the one shot terminal that needs NO confirm: static,
-                    // pose-independent geometry, so both ends already agree (ADR-0021's
-                    // invariant). Recorded on the client so the analyzer can close the lifecycle
-                    // of a shot that simply never reached armor.
-                    if !shorted
-                        && !deposit
-                        && let Some(shot) = shot
-                    {
-                        crate::shot_trace::record(
-                            &mut shot_trace,
-                            "end",
-                            now,
-                            shot.0,
-                            || json!({ "why": "terrain" }),
-                        );
-                    }
-                    pos = entry;
-                    stopped = true;
-                    break;
-                }
-                SegmentHit::Armor(hit) => hit,
-            };
-            let entry = origin + dir * hit.distance;
-            let travelled = EPS + hit.distance;
-
-            // EXPERIMENTAL B-arm (`SPIKE_MG_SHORTCIRCUIT`): a sub-20 mm round stops dead at the first
-            // surface, skipping the entire penetration-resolution march below (thickness/span probes,
-            // ricochet, spall, HP). Population-preserving — same despawn-on-contact as the live path —
-            // so the A−B tick-cost delta isolates the resolution machinery. Default off (see the type).
-            if shortcircuit.0 && projectile.caliber < MG_SHORTCIRCUIT_CALIBER_MAX {
-                // Classify the first surface from the hit's volume ancestry (the same `hit_ancestor`
-                // rule the full march uses just below) so the read is honest even in the B-arm. The
-                // short-circuit stops dead without resolving penetration, so `penetrated: false`.
-                let surface = if hit_ancestor(hit.entity, &volumes, &parents).is_some() {
-                    ImpactSurface::Armor
-                } else {
-                    ImpactSurface::Terrain
-                };
-                commands.trigger(Impact {
-                    position: entry,
-                    normal: hit.normal,
-                    caliber: projectile.caliber,
-                    surface,
-                    penetrated: false,
-                    deflection: None,
-                });
-                pos = entry;
-                stopped = true;
-                break;
-            }
-
-            // The struck `BallisticVolume` sits on the hit's ancestry (`hit_ancestor`, the shared
-            // hierarchy-resolution rule), keeping the node entity so transit damage and spall can
-            // address the component. No volume in the ancestry ⇒ classified terrain (an
-            // Armor-layer entity without ownership — same rule as before the cast split).
-            let resolved = hit_ancestor(hit.entity, &volumes, &parents)
-                .map(|(node, volume)| (node, volume.material_factor));
-            let Some((node_entity, factor)) = resolved else {
-                // Terrain-classified: stop here.
-                commands.trigger(Impact {
-                    position: entry,
-                    normal: hit.normal,
-                    caliber: projectile.caliber,
-                    surface: ImpactSurface::Terrain,
-                    penetrated: false,
-                    deflection: None,
-                });
-                // A terrain stop is the one shot terminal that needs NO confirm: static, pose-independent
-                // geometry, so both ends already agree (ADR-0021's invariant). Recorded on the client so
-                // the analyzer can close the lifecycle of a shot that simply never reached armor, instead
-                // of filing it as never-consumed.
-                if !deposit && let Some(shot) = shot {
-                    crate::shot_trace::record(
-                        &mut shot_trace,
-                        "end",
-                        now,
-                        shot.0,
-                        || json!({ "why": "terrain" }),
-                    );
-                }
-                pos = entry;
-                stopped = true;
-                break;
-            };
-
-            // Replica armor state machine: consume a buffered bounce/terminal, otherwise hold a keyed
-            // shell hidden; an unkeyed replica shell ends locally. INVARIANT: every replica arm below
-            // continues or breaks, so the physical armor resolution after it is authority-only.
-            if !deposit {
-                let next_bounce = shot
-                    .zip(sanctioned.as_ref())
-                    .and_then(|(s, buf)| buf.next(s.0, marks.ricochets.len()));
-                if let Some(bounce) = next_bounce {
-                    // Buffered bounce: re-seed from authority truth and keep the remaining step.
-                    commands.trigger(Impact {
-                        position: bounce.origin,
-                        normal: hit.normal,
-                        caliber: projectile.caliber,
-                        surface: ImpactSurface::Armor,
-                        penetrated: false,
-                        deflection: Some(bounce.direction),
-                    });
-                    if let Ok(new_dir) = Dir3::new(bounce.direction) {
-                        dir = new_dir;
-                    }
-                    speed = bounce.speed;
-                    pos = bounce.origin;
-                    bent = true;
-                    path.begin_segment();
-                    path.points.push(bounce.origin);
-                    marks.ricochets.push(bounce.origin);
-                    remaining -= travelled;
-                    // Trace a buffered bounce separately from a shell that never contacted.
-                    if let Some(shot) = shot {
-                        crate::shot_trace::record(
-                            &mut shot_trace,
-                            "contact",
-                            now,
-                            shot.0,
-                            || json!({ "res": "pre_bounce", "seq": bounce.sequence, "bt": bounce.bounce_tick }),
-                        );
-                    }
-                    continue;
-                }
-                // Buffered terminal: resolve at the authority read without a hold.
-                let terminal = shot
-                    .zip(sanctioned.as_ref())
-                    .and_then(|(s, buf)| buf.terminal(s.0, marks.ricochets.len()));
-                if let Some(terminal) = terminal {
-                    path.begin_segment();
-                    path.points.push(terminal.position);
-                    commands.trigger(Impact {
-                        position: terminal.position,
-                        normal: terminal.normal,
-                        caliber: projectile.caliber,
-                        surface: ImpactSurface::Armor,
-                        penetrated: terminal.penetrated,
-                        deflection: None,
-                    });
-                    if let Some(shot) = shot {
-                        crate::shot_trace::record(
-                            &mut shot_trace,
-                            "contact",
-                            now,
-                            shot.0,
-                            || json!({ "res": "pre_term", "it": terminal.impact_tick, "pen": terminal.penetrated }),
-                        );
-                        crate::shot_trace::record(
-                            &mut shot_trace,
-                            "end",
-                            now,
-                            shot.0,
-                            || json!({ "why": "terminal" }),
-                        );
-                    }
-                    pos = entry;
-                    stopped = true;
-                    break;
-                }
-                if let Some(shot) = shot {
-                    // Hold a keyed shell hidden until the authority outcome or expiry.
-                    commands.entity(entity).insert((
-                        Held {
-                            waited: 0,
-                            age: 0,
-                            normal: hit.normal,
-                        },
-                        Visibility::Hidden,
-                    ));
-                    // The corresponding `hold` row closes this trace interval.
-                    crate::shot_trace::record(
-                        &mut shot_trace,
-                        "contact",
-                        now,
-                        shot.0,
-                        || json!({ "res": "hold" }),
-                    );
-                    pos = entry;
-                    holding = true;
-                    break;
-                }
-                // 3. No identity — fail closed immediately (pre-slice behaviour).
-                commands.trigger(Impact {
-                    position: entry,
-                    normal: hit.normal,
-                    caliber: projectile.caliber,
-                    surface: ImpactSurface::Armor,
-                    penetrated: false,
-                    deflection: None,
-                });
-                pos = entry;
-                stopped = true;
-                break;
-            }
-
-            // Momentum bookkeeping for this crossing: the incoming velocity (before any bend/bleed)
-            // and the body that owns the struck volume. Each resolution branch below hands the body
-            // its share of the shell's momentum, `m·(v_in − v_out)` — a shell that stops dumps it all,
-            // a perforation less (it carries momentum out), a ricochet a partial normal-ward kick.
-            let v_in = Vec3::from(dir) * speed;
-            let body = owners.get(node_entity).ok().map(|owner| owner.tank());
-
-            // Outward surface normal; angle of incidence is measured from it (0 = head-on).
-            let normal = Dir3::new(hit.normal).unwrap_or(-dir);
-            let incidence = Vec3::from(dir).angle_between(-Vec3::from(normal));
-
-            // Plate thickness *along its normal* (perpendicular, face to face) — the overmatch test:
-            // a round whose calibre dwarfs the plate cannot be deflected by it.
-            let thickness = spatial
-                .cast_ray_predicate(
-                    entry - Vec3::from(normal) * EPS,
-                    -normal,
-                    PROBE,
-                    false,
-                    &armor,
-                    &|e| e == hit.entity,
-                )
-                .map(|back| EPS + back.distance)
-                .unwrap_or(0.0);
-            let overmatched = thickness > 0.0 && projectile.caliber >= OVERMATCH_RATIO * thickness;
-
-            // Ricochet: too oblique → deflect off the face (no entry, no spall) — unless overmatch
-            // suppresses it (design §4).
-            if !overmatched && incidence > RICOCHET_ANGLE {
-                // Shock: even a deflected hit jars an exposed component (barrel, optic) — scaled by
-                // impact energy (capability) and how square the graze was. Armor has no HP, so it
-                // shrugs the bounce off; a fragile module loses integrity without being one-shot.
-                if deposit && let Ok(mut hp) = health.get_mut(node_entity) {
-                    let shock = SHOCK_K * capability(projectile.mass, speed) * incidence.cos();
-                    let before = hp.current;
-                    hp.current = (before - shock).max(0.0);
-                    damage_dealt += before - hp.current;
-                }
-                dir = reflect(dir, normal);
-                bent = true; // off the original free-flight segment (see the open-air break)
-                speed *= RICOCHET_BLEED;
-                if let Some(body) = body {
-                    apply_hit_impulse(
-                        &mut bodies,
-                        body,
-                        projectile.mass * (v_in - Vec3::from(dir) * speed),
-                        entry,
-                    );
-                }
-                // The bounce reads on the struck face: a hard bright spark fan, biased along the
-                // deflected (outgoing) direction — a ricochet throws its sparks the way it kicked off.
-                // It bit no steel, so `penetrated: false` (no flame lick — a bounce doesn't ignite).
-                commands.trigger(Impact {
-                    position: entry,
-                    normal: Vec3::from(normal),
-                    caliber: projectile.caliber,
-                    surface: ImpactSurface::Armor,
-                    penetrated: false,
-                    deflection: Some(Vec3::from(dir)),
-                });
-                marks.ricochets.push(entry);
-                path.points.push(entry);
-                // AUTHORITY → CLIENTS: replicate this sanctioned bounce as the cause (ADR-0016) so
-                // every client re-seeds its cosmetic shell from truth rather than improvising. Only
-                // for a net-attributed shell (`Shot` present, stamped by the shared protocol stamp);
-                // SP/sandbox shells carry none and raise nothing. Muted after this shot's terminal
-                // (`!terminal_emitted`) — an interior bounce past a perforation is invisible to the
-                // client shell, which ended at the terminal. `dir`/`speed` are already
-                // post-reflect/bleed (the outgoing state); `entry` is the bounce point.
-                // `net::shot_transport` observes this and stamps the bounce tick. The ordinal is this
-                // ricochet's 0-based index — the SAME count a client shell derives from its own
-                // `ricochets` — so multi-bounce shots re-seed in order. (Only reachable on the
-                // authority: the client `!deposit` branch above already broke before here.)
-                if let Some(shot) = shot
-                    && !terminal_emitted
-                {
-                    commands.trigger(ShellRicochet {
-                        shot: shot.0,
-                        origin: entry,
-                        direction: Vec3::from(dir),
-                        speed,
-                        sequence: (marks.ricochets.len() - 1) as u32,
-                    });
-                }
-                pos = entry;
-                remaining -= travelled;
-                continue;
-            }
-
-            // Normalize: a modest bend toward the inward normal as the round bites in (shortens the
-            // path it cuts and nudges the exit). Overmatch does NOT bend it further — the round drives
-            // through in roughly the same direction; overmatch instead cancels the *slope cost* below.
-            dir = bend_toward(dir, -normal, NORMALIZATION * incidence);
-            bent = true; // off the original free-flight segment (see the open-air break)
-            let span = spatial
-                .cast_ray_predicate(entry + dir * EPS, dir, PROBE, false, &armor, &|e| {
-                    e == hit.entity
-                })
-                .map(|exit| EPS + exit.distance)
-                .unwrap_or(0.0);
-
-            // Cost = effective metres × the material's reference-mm-per-metre. An overmatched plate
-            // can't present its oblique line-of-sight to a round that dwarfs it, so it charges only
-            // the perpendicular thickness; otherwise the full slope span.
-            let cap = capability(projectile.mass, speed);
-            let effective = if overmatched { thickness } else { span };
-            let cost = effective * factor;
-            if cap <= cost {
-                // Defeated: embed partway through (depth scaled by the capability it could pay).
-                let embed = entry + dir * span * (cap / cost);
-                marks.events.push(PenetrationEvent {
-                    entry,
-                    exit: embed,
-                    overmatched,
-                });
-                path.points.push(embed);
-                // It buried itself here, spending all it had (`cap`) — deposit that as transit damage
-                // if the volume is a damageable component (design §6). No exit, so no spall.
-                if deposit && let Ok(mut hp) = health.get_mut(node_entity) {
-                    let before = hp.current;
-                    hp.current = (before - cap * TRANSIT_K).max(0.0);
-                    damage_dealt += before - hp.current;
-                }
-                // The embed's visible face is the ENTRY surface — its normal is what sparks kick
-                // off of (the embed point itself is inside the plate). The round buried itself in the
-                // steel (`penetrated: true`): the hot-metal signature earns the brief flame lick, even
-                // though the plate ultimately defeated it — it bit in, it didn't bounce.
-                commands.trigger(Impact {
-                    position: embed,
-                    normal: Vec3::from(normal),
-                    caliber: projectile.caliber,
-                    surface: ImpactSurface::Armor,
-                    penetrated: true,
-                    deflection: None,
-                });
-                // AUTHORITY → CLIENTS: the shot's TERMINAL (`ImpactConfirm` on the wire) — the same
-                // read the `Impact` above showed locally, so every client renders the identical honest
-                // embed (position/normal/flame lick). The `!terminal_emitted` guard covers the
-                // perforate-then-embed-same-tick chain (the perforation already terminated the shot);
-                // no latch write is needed here — the embedded shell stops and despawns, so nothing
-                // after this can emit.
-                if let Some(shot) = shot
-                    && !terminal_emitted
-                {
-                    commands.trigger(ShellTerminal {
-                        shot: shot.0,
-                        position: embed,
-                        normal: Vec3::from(normal),
-                        penetrated: true,
-                        after_bounces: marks.ricochets.len() as u32,
-                    });
-                }
-                // Stopped: the body absorbs the full remaining momentum (v_out = 0).
-                if let Some(body) = body {
-                    apply_hit_impulse(&mut bodies, body, projectile.mass * v_in, entry);
-                }
-                pos = embed;
-                stopped = true;
-                break;
-            }
-
-            // Perforate: spend the cost (residual speed) and continue along the bent direction.
-            // The struck FACE reads here — the entry point, its outward normal — where the round
-            // punched through. This is the one place "penetrated" is unambiguously true (the round
-            // breached the plate into the interior), so the armor read earns its flame lick. Without
-            // this trigger a clean perforation was visually silent on the struck face.
-            commands.trigger(Impact {
-                position: entry,
-                normal: Vec3::from(normal),
-                caliber: projectile.caliber,
-                surface: ImpactSurface::Armor,
-                penetrated: true,
-                deflection: None,
-            });
-            // AUTHORITY → CLIENTS: the shot's TERMINAL (`ImpactConfirm` on the wire). A perforation
-            // ends the COSMETIC shell at this entry-face read even though the authoritative shell
-            // marches on into the interior — the documented choice on [`ShellTerminal`]: what an
-            // external viewer sees at the struck plate IS this read, and the client cannot march the
-            // interior. Emitted for the FIRST perforation/embed only; [`TerminalReport`] mutes both
-            // same-tick interior crossings and later fixed ticks while `Shot` remains available for
-            // damage attribution.
-            if let Some(shot) = shot
-                && !terminal_emitted
-            {
-                terminal_emitted = true;
-                terminal_report.0 = true;
-                commands.trigger(ShellTerminal {
-                    shot: shot.0,
-                    position: entry,
-                    normal: Vec3::from(normal),
-                    penetrated: true,
-                    after_bounces: marks.ricochets.len() as u32,
-                });
-            }
-            speed = speed_for(projectile.mass, cap - cost);
-            // The body keeps the momentum the shell lost crossing it; the shell carries the rest on.
-            if let Some(body) = body {
-                apply_hit_impulse(
-                    &mut bodies,
-                    body,
-                    projectile.mass * (v_in - Vec3::from(dir) * speed),
-                    entry,
-                );
-            }
-            let exit = entry + dir * span;
-            marks.events.push(PenetrationEvent {
-                entry,
-                exit,
-                overmatched,
-            });
-            path.points.push(exit);
-
-            // Transit damage: the main penetrator drove through this volume — if it's a damageable
-            // component, deposit the cost it paid crossing (design §6). Armor has no HP, so no-op.
-            if deposit && let Ok(mut hp) = health.get_mut(node_entity) {
-                let before = hp.current;
-                hp.current = (before - cost * TRANSIT_K).max(0.0);
-                damage_dealt += before - hp.current;
-            }
-
-            // Spall: the exit face throws a cone of fragments. The *count* comes from the material
-            // chewed (cost) and the hole size (caliber) — the fragment supply; each fragment's
-            // *energy* comes from the shot's residual (v_res²) and its position in the cone (on-axis
-            // strongest). So a thin/soft body throws few fragments and a barely-through round throws
-            // weak ones — both extremes low (design §5). Each fragment then penetrates per its energy.
-            let count_f = SPALL_MAX_FRAGMENTS as f32
-                * (cost / SPALL_COST_REF)
-                * (projectile.caliber / SPALL_CALIBER_REF);
-            let count = (count_f.round() as i32).clamp(0, SPALL_MAX_FRAGMENTS as i32) as usize;
-            if count > 0 {
-                // Residual energy sets how hard each fragment is thrown (full at the reference exit
-                // speed); the on-axis fragments (`t→0`) keep the most of it.
-                let shot_energy = (speed / SPALL_VRES_REF).powi(2).clamp(0.0, 1.0);
-                let mut burst = SpallBurst {
-                    origin: exit,
-                    axis: dir,
-                    half_angle: SPALL_HALF_ANGLE,
-                    fragments: Vec::with_capacity(count),
-                };
-                for (fdir, t) in spall_directions(dir, SPALL_HALF_ANGLE, count) {
-                    let birth_pen = FRAG_PEN_MAX * shot_energy * (1.0 - t);
-                    let (fragment, fragment_damage) = cast_spall_fragment(
-                        exit + Vec3::from(fdir) * EPS,
-                        fdir,
-                        birth_pen,
-                        SPALL_RANGE,
-                        &spatial,
-                        &volumes,
-                        &parents,
-                        &mut health,
-                        &armor,
-                        deposit,
-                    );
-                    damage_dealt += fragment_damage;
-                    burst.fragments.push(fragment);
-                }
-                spall.bursts.push(burst);
-            }
-
-            pos = exit;
-            remaining -= travelled + span;
+        for (fdir, t) in spall_directions(dir, SPALL_HALF_ANGLE, count) {
+            let birth_pen = FRAG_PEN_MAX * shot_energy * (1.0 - t);
+            let (fragment, fragment_damage) = cast_spall_fragment(
+                exit + Vec3::from(fdir) * EPS,
+                fdir,
+                birth_pen,
+                SPALL_RANGE,
+                &world.spatial,
+                &world.volumes,
+                &world.parents,
+                health,
+                armor,
+                deposit,
+            );
+            damage_dealt += fragment_damage;
+            burst.fragments.push(fragment);
         }
-
-        // Reorient the shell to its travel direction so the mesh follows the (gravity-curved,
-        // ricochet-bent) path instead of holding its launch heading.
-        transform.translation = pos;
-        transform.look_to(dir, Vec3::Y);
-        path.points.push(pos);
-
-        // A state snapshot cannot preserve how many shots caused its resulting HP. Raise one discrete,
-        // shot-attributed fact; `net::shot_transport` routes it reliably to the fire-time owner.
-        if deposit
-            && damage_dealt > 0.0
-            && !damage_report.0
-            && let Some(shot) = shot
-        {
-            commands.trigger(ShellDamage {
-                shot: shot.0,
-                amount: damage_dealt,
-            });
-            damage_report.0 = true;
-        }
-
-        if holding {
-            // Frozen at armor awaiting the bounce keyframe: keep the entity and its velocity untouched
-            // (the `Held` handler at the top of the loop drives the wait next tick). The freeze point
-            // was just recorded once, so the trail ends cleanly at the plate while the shell holds.
-        } else if stopped {
-            if retain.0 {
-                // Sandbox: freeze where it stopped — drop the live components so it is no longer
-                // integrated or labelled, but keep the stuck shell, its path, and its penetration
-                // marks on screen for study (the sandbox's `c` command clears them).
-                commands
-                    .entity(entity)
-                    .remove::<(Projectile, ShellReadout)>();
-            } else {
-                // Game: the spent shell is done.
-                commands.entity(entity).despawn();
-            }
-        } else if pos.y < KILL_FLOOR {
-            // Left the world: cleared the map edge and fell into the void below the terrain. Despawn
-            // outright — there is no impact to inspect, so this ignores the sandbox's retain (unlike a
-            // real impact). This is what bounds a shell that never hits terrain; see `KILL_FLOOR`.
-            if !deposit && let Some(shot) = shot {
-                crate::shot_trace::record(
-                    &mut shot_trace,
-                    "end",
-                    now,
-                    shot.0,
-                    || json!({ "why": "kill_floor" }),
-                );
-            }
-            commands.entity(entity).despawn();
-        } else {
-            projectile.velocity = Vec3::from(dir) * speed;
-            readout.speed = speed;
-            readout.capability = capability(projectile.mass, speed);
-        }
+        spall.bursts.push(burst);
     }
-
-    // Attribute this system's whole wall-time to the current fixed tick (`SPIKE_COST_TRACE`). Inert
-    // (both `Option`s empty) unless the recorder is armed.
-    if let (Some(cost), Some(t0)) = (cost.as_mut(), march_t0) {
-        cost.record_march(t0.elapsed().as_secs_f64() * 1.0e6);
-    }
+    damage_dealt
 }
 
 /// Apply a crossing's momentum share to the struck body. The declared `Forces` query keeps this
@@ -2454,413 +2522,6 @@ mod tests {
             elapsed_ticks(103, 105),
             None,
             "a future outcome is not misread as billions of elapsed ticks"
-        );
-    }
-
-    #[test]
-    fn sanctioned_outcome_buffer_holds_the_derived_thirty_player_automatic_horizon() {
-        const COMBATANTS: u64 = 30;
-        const WEAPONS: u8 = 2;
-        // DERIVED ceiling: 750 rounds/minute × 3 seconds / 60 = 37.5 rounds per weapon.
-        const SHOTS_PER_WEAPON: u32 = 38;
-        let mut sanctioned = SanctionedShots::default();
-
-        for combatant in 1..=COMBATANTS {
-            for weapon in 0..WEAPONS {
-                for fire_tick in 0..SHOTS_PER_WEAPON {
-                    let shot = ShotId {
-                        combatant: crate::CombatantId(combatant),
-                        weapon,
-                        fire_tick,
-                    };
-                    assert_eq!(
-                        sanctioned.insert(
-                            shot,
-                            SanctionedBounce {
-                                origin: Vec3::ZERO,
-                                direction: Vec3::X,
-                                speed: 500.0,
-                                bounce_tick: fire_tick,
-                                sequence: 0,
-                            }
-                        ),
-                        SanctionedBounceInsert::Inserted
-                    );
-                }
-            }
-        }
-
-        let expected = COMBATANTS as usize * WEAPONS as usize * SHOTS_PER_WEAPON as usize;
-        assert_eq!(
-            sanctioned.shots.len(),
-            expected,
-            "the configured outcome lifetime must not evict a valid 30-player automatic-fire horizon"
-        );
-    }
-
-    /// Equal-age overflow eviction is deterministic even though the buffer is a hash map.
-    #[test]
-    fn sanctioned_outcome_capacity_evicts_the_stable_highest_shot_id_on_an_age_tie() {
-        let mut sanctioned = SanctionedShots::default();
-        for fire_tick in 0..SanctionedShots::MAX_SHOTS as u32 {
-            let shot = ShotId {
-                combatant: crate::CombatantId(1),
-                weapon: 0,
-                fire_tick,
-            };
-            assert_eq!(
-                sanctioned.insert(
-                    shot,
-                    SanctionedBounce {
-                        origin: Vec3::ZERO,
-                        direction: Vec3::X,
-                        speed: 500.0,
-                        bounce_tick: fire_tick,
-                        sequence: 0,
-                    }
-                ),
-                SanctionedBounceInsert::Inserted
-            );
-        }
-
-        let incoming = ShotId {
-            combatant: crate::CombatantId(1),
-            weapon: 0,
-            fire_tick: SanctionedShots::MAX_SHOTS as u32,
-        };
-        assert_eq!(
-            sanctioned.insert(
-                incoming,
-                SanctionedBounce {
-                    origin: Vec3::ZERO,
-                    direction: Vec3::X,
-                    speed: 500.0,
-                    bounce_tick: incoming.fire_tick,
-                    sequence: 0,
-                }
-            ),
-            SanctionedBounceInsert::Inserted
-        );
-
-        assert!(
-            sanctioned.has_shot(ShotId {
-                combatant: crate::CombatantId(1),
-                weapon: 0,
-                fire_tick: 0,
-            }),
-            "the lowest stable tie-break key remains"
-        );
-        assert!(sanctioned.has_shot(incoming), "the new fact is retained");
-        assert!(
-            !sanctioned.has_shot(ShotId {
-                combatant: crate::CombatantId(1),
-                weapon: 0,
-                fire_tick: SanctionedShots::MAX_SHOTS as u32 - 1,
-            }),
-            "the previous highest stable tie-break key is evicted"
-        );
-    }
-
-    /// One malformed shot cannot grow more buffered bounces than cosmetic reconstruction can
-    /// consume. The bound is DERIVED from the shared segment horizon.
-    #[test]
-    fn sanctioned_outcome_rejects_distinct_bounces_beyond_the_per_shot_bound() {
-        let shot = ShotId {
-            combatant: crate::CombatantId(1),
-            weapon: 0,
-            fire_tick: 100,
-        };
-        let mut sanctioned = SanctionedShots::default();
-        for sequence in 0..MAX_COSMETIC_CATCH_UP_TICKS {
-            assert_eq!(
-                sanctioned.insert(
-                    shot,
-                    SanctionedBounce {
-                        origin: Vec3::ZERO,
-                        direction: Vec3::X,
-                        speed: 500.0,
-                        bounce_tick: 100 + sequence,
-                        sequence,
-                    }
-                ),
-                SanctionedBounceInsert::Inserted
-            );
-        }
-
-        assert_eq!(
-            sanctioned.insert(
-                shot,
-                SanctionedBounce {
-                    origin: Vec3::ZERO,
-                    direction: Vec3::X,
-                    speed: 500.0,
-                    bounce_tick: 100 + MAX_COSMETIC_CATCH_UP_TICKS,
-                    sequence: MAX_COSMETIC_CATCH_UP_TICKS,
-                }
-            ),
-            SanctionedBounceInsert::Capacity,
-            "the first distinct bounce beyond the reconstruction bound is rejected"
-        );
-        assert_eq!(
-            sanctioned.shots[&shot].bounces.len(),
-            MAX_COSMETIC_CATCH_UP_TICKS as usize
-        );
-    }
-
-    /// A catch-up with bounce 1 and a later terminal already buffered must partition free-flight at
-    /// both authority outcomes. It may not integrate bounce 0's outgoing state all the way to the
-    /// present and draw through facts it already knows.
-    #[test]
-    fn sanctioned_chain_stops_each_segment_before_the_next_known_outcome() {
-        let shot = ShotId {
-            combatant: crate::CombatantId(1),
-            weapon: 0,
-            fire_tick: 90,
-        };
-        let first = SanctionedBounce {
-            origin: Vec3::ZERO,
-            direction: Vec3::X,
-            speed: 10.0,
-            bounce_tick: 100,
-            sequence: 0,
-        };
-        let second = SanctionedBounce {
-            origin: Vec3::new(3.5, 0.0, 0.0),
-            direction: Vec3::Y,
-            speed: 10.0,
-            bounce_tick: 104,
-            sequence: 1,
-        };
-        let terminal = SanctionedTerminal {
-            position: Vec3::new(3.5, 3.5, 0.0),
-            normal: Vec3::NEG_Y,
-            penetrated: true,
-            impact_tick: 108,
-            after_bounces: 2,
-        };
-        let mut sanctioned = SanctionedShots::default();
-        sanctioned.insert(shot, first);
-        sanctioned.insert(shot, second);
-        sanctioned.insert_terminal(shot, terminal);
-
-        let caught_up = catch_up_sanctioned_chain(
-            shot,
-            0,
-            first,
-            Some(110),
-            0,
-            &sanctioned,
-            Vec3::X * first.speed,
-            0.0,
-            0.1,
-        )
-        .expect("the short authority chain is reconstructible");
-
-        assert_eq!(
-            caught_up.segments.len(),
-            2,
-            "both bounces partition the catch-up"
-        );
-        assert_eq!(caught_up.segments[0].bounce.sequence, 0);
-        assert_eq!(caught_up.segments[1].bounce.sequence, 1);
-        assert_eq!(
-            caught_up.segments[0].points.len(),
-            4,
-            "DERIVED fixture: origin plus three complete ticks before the tick-104 bounce"
-        );
-        assert!(
-            caught_up.segments[0]
-                .points
-                .iter()
-                .all(|point| point.x < second.origin.x),
-            "bounce 0 free-flight never crosses the already-known bounce 1 origin"
-        );
-        assert!(
-            caught_up.segments[1]
-                .points
-                .iter()
-                .all(|point| point.y < terminal.position.y),
-            "bounce 1 free-flight never crosses the already-known terminal"
-        );
-        assert_eq!(
-            caught_up.terminal.map(|terminal| terminal.position),
-            Some(terminal.position)
-        );
-        assert_eq!(caught_up.position, terminal.position);
-    }
-
-    /// A bogus authority tick must not turn cosmetic recovery into an unbounded integration. The
-    /// fallback is intentionally no trajectory: drawing a prefix would claim an authority path the
-    /// client cannot safely reconstruct.
-    #[test]
-    fn sanctioned_chain_rejects_an_implausibly_late_first_bounce() {
-        let shot = ShotId {
-            combatant: crate::CombatantId(1),
-            weapon: 0,
-            fire_tick: 90,
-        };
-        let first = SanctionedBounce {
-            origin: Vec3::ZERO,
-            direction: Vec3::X,
-            speed: 10.0,
-            bounce_tick: 100,
-            sequence: 0,
-        };
-        let sanctioned = SanctionedShots::default();
-
-        let caught_up = catch_up_sanctioned_chain(
-            shot,
-            0,
-            first,
-            Some(first.bounce_tick + MAX_COSMETIC_CATCH_UP_TICKS + 1),
-            0,
-            &sanctioned,
-            Vec3::X * first.speed,
-            0.0,
-            0.1,
-        );
-
-        assert!(
-            matches!(
-                caught_up,
-                Err(SanctionedCatchUpReject::IntervalBeyondCosmeticHorizon)
-            ),
-            "a catch-up beyond the configured cosmetic horizon must reject instead of drawing a partial trajectory"
-        );
-    }
-
-    /// A later authority fact cannot create an unbounded intermediate segment either. The entire
-    /// chain rejects, so the already-seen first bounce is not drawn as a misleading partial result.
-    #[test]
-    fn sanctioned_chain_rejects_an_implausible_inter_outcome_gap() {
-        let shot = ShotId {
-            combatant: crate::CombatantId(1),
-            weapon: 0,
-            fire_tick: 90,
-        };
-        let first = SanctionedBounce {
-            origin: Vec3::ZERO,
-            direction: Vec3::X,
-            speed: 10.0,
-            bounce_tick: 100,
-            sequence: 0,
-        };
-        let second = SanctionedBounce {
-            origin: Vec3::X,
-            direction: Vec3::Y,
-            speed: 10.0,
-            bounce_tick: first.bounce_tick + MAX_COSMETIC_CATCH_UP_TICKS + 1,
-            sequence: 1,
-        };
-        let mut sanctioned = SanctionedShots::default();
-        sanctioned.insert(shot, first);
-        sanctioned.insert(shot, second);
-
-        assert!(
-            matches!(
-                catch_up_sanctioned_chain(
-                    shot,
-                    0,
-                    first,
-                    Some(second.bounce_tick),
-                    0,
-                    &sanctioned,
-                    Vec3::X * first.speed,
-                    0.0,
-                    0.1,
-                ),
-                Err(SanctionedCatchUpReject::IntervalBeyondCosmeticHorizon)
-            ),
-            "the chain must not draw its first segment when the next sanctioned boundary is implausible"
-        );
-    }
-
-    /// Individually plausible segments may not accumulate into unbounded cosmetic work. This chain
-    /// would integrate 198 ticks: DERIVED as 99 pre-bounce steps plus 99 pre-terminal steps.
-    #[test]
-    fn sanctioned_chain_rejects_cumulative_multi_segment_work_beyond_its_horizon() {
-        let shot = ShotId {
-            combatant: crate::CombatantId(1),
-            weapon: 0,
-            fire_tick: 90,
-        };
-        let first = SanctionedBounce {
-            origin: Vec3::ZERO,
-            direction: Vec3::X,
-            speed: 10.0,
-            bounce_tick: 100,
-            sequence: 0,
-        };
-        let second = SanctionedBounce {
-            origin: Vec3::X,
-            direction: Vec3::Y,
-            speed: 10.0,
-            bounce_tick: first.bounce_tick + MAX_COSMETIC_CATCH_UP_TICKS,
-            sequence: 1,
-        };
-        let terminal = SanctionedTerminal {
-            position: Vec3::ONE,
-            normal: Vec3::Y,
-            penetrated: false,
-            impact_tick: second.bounce_tick + MAX_COSMETIC_CATCH_UP_TICKS,
-            after_bounces: 2,
-        };
-        let mut sanctioned = SanctionedShots::default();
-        sanctioned.insert(shot, first);
-        sanctioned.insert(shot, second);
-        sanctioned.insert_terminal(shot, terminal);
-
-        assert!(
-            matches!(
-                catch_up_sanctioned_chain(
-                    shot,
-                    0,
-                    first,
-                    Some(terminal.impact_tick),
-                    0,
-                    &sanctioned,
-                    Vec3::X * first.speed,
-                    0.0,
-                    0.1,
-                ),
-                Err(SanctionedCatchUpReject::ChainBeyondCosmeticHorizon)
-            ),
-            "the complete chain must fail closed once its combined integration exceeds the horizon"
-        );
-    }
-
-    /// A small true elapsed interval remains valid across the wrapping tick boundary.
-    #[test]
-    fn sanctioned_chain_accepts_a_small_wraparound_interval() {
-        let shot = ShotId {
-            combatant: crate::CombatantId(1),
-            weapon: 0,
-            fire_tick: u32::MAX - 3,
-        };
-        let first = SanctionedBounce {
-            origin: Vec3::ZERO,
-            direction: Vec3::X,
-            speed: 10.0,
-            bounce_tick: u32::MAX - 2,
-            sequence: 0,
-        };
-        let caught_up = catch_up_sanctioned_chain(
-            shot,
-            0,
-            first,
-            Some(3),
-            0,
-            &SanctionedShots::default(),
-            Vec3::X * first.speed,
-            0.0,
-            0.1,
-        )
-        .expect("a six-tick wrapping interval is inside the cosmetic horizon");
-
-        assert_eq!(
-            caught_up.segments[0].points.len(),
-            7,
-            "DERIVED: origin plus six integrated ticks"
         );
     }
 }

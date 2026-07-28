@@ -6,8 +6,7 @@
 //!
 //! Deliberately NOT in [`super::forces`]: the force core is per-side physics; input feel
 //! (slew), differential mixing, and the side clamp are vehicle command policy — a separate
-//! seam, so testing one belt never requires understanding keyboard shaping (codex commit-E
-//! review §2).
+//! seam, so testing one belt never requires understanding keyboard shaping.
 
 /// The two-axis drive intent/state in [−1, 1] per axis.
 #[derive(Clone, Copy, Default, PartialEq, Debug)]
@@ -17,7 +16,7 @@ pub struct DriveAxes {
 }
 
 /// Command slew (per second): the vehicle's input shaping, SEPARATE from the belt governor —
-/// folding them changes keyboard feel and damage-recovery semantics (codex phase-B #9).
+/// folding them changes keyboard feel and damage-recovery semantics.
 /// Provenance: adopted into the sandbox reference untuned; a playtest feel dial, not a physics
 /// constant.
 pub const DRIVE_SLEW_PER_SECOND: f32 = 4.0;

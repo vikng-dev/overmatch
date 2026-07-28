@@ -407,7 +407,7 @@ impl HeightGrid {
         // OWNERSHIP slop only: the global interval `[t0, t1] ⊆ [0, t_max]` stays a HARD bound
         // (no padding, no clamping) — a root behind the origin or past `t_max` is never a hit.
         // Clamping such a root to an endpoint turned micron-scale clearance into full-reach
-        // penetration for an away-facing probe (Codex alpha.11 blocker).
+        // penetration for an away-facing probe.
         const EPS_T: f32 = 1.0e-4;
         let cell = |w: f32| (w as usize).min(n - 2); // `as usize` saturates negatives to 0
         let (mut i, mut j) = (cell(u0 + du * t0), cell(v0 + dv * t0));
@@ -1125,7 +1125,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// Hard global bounds on the exact caster (Codex alpha.11 blocker): the ±EPS_T cell-window
+    /// Hard global bounds on the exact caster: the ±EPS_T cell-window
     /// padding is boundary-OWNERSHIP slop only. A plane root behind the origin or past `t_max`
     /// must be rejected outright — the old code accepted roots inside the padded window and
     /// clamped them onto `[0, t_max]`, turning micron-scale clearance into a full-reach

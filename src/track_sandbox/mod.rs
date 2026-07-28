@@ -893,7 +893,7 @@ fn toggle_pause(
             paused.0 = true;
             // The force adapter (the only system that slews ShapedDrive) is gated off while
             // paused — without this clear, resume would re-apply the pre-pause command and
-            // slew it down: stale thrust (codex parts-1/2 review #1).
+            // slew it down: stale thrust.
             raw.0 = crate::track::drive::DriveAxes::default();
             shaped.0 = crate::track::drive::DriveAxes::default();
         } else {
@@ -1564,7 +1564,7 @@ impl BeltState<'_> {
     /// (`reset_rig` clears those itself, because a teleport should).
     fn reseat(&mut self, link_count: usize) {
         *self.phase = BeltPhase::default();
-        // Stale contacts/dynamics display the pre-teleport tick (codex parts-1/2 review #2), and
+        // Stale contacts/dynamics display the pre-teleport tick, and
         // stale bristle strain is shear the pads never took.
         *self.contacts = BeltContacts::default();
         *self.dynamics = SideDynamics::default();

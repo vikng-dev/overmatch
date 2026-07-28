@@ -525,6 +525,12 @@ mod tests {
     /// `shadow_distance: M150` is on disk it is indistinguishable from a deliberate choice — that is the
     /// bug `television` had to write a 318-line archaeology system to undo.
     ///
+    /// **That "later" arrived on 2026-07-28**, when all three shadow defaults moved off measurement.
+    /// Every player who never opened the page picked the new picture up for free, and the only files
+    /// that had to be reasoned about at all were the ones carrying a DELIBERATE choice — which is
+    /// exactly the property this test exists to keep. It is the rule's first real payout, so it is
+    /// recorded here rather than left as a hypothetical.
+    ///
     /// `version` is the deliberate exception and must ALWAYS be written, or a fully-default file
     /// probes as version 0.
     ///
@@ -550,10 +556,11 @@ mod tests {
             "a fully-default file is the version stamp and NOTHING else",
         );
         // A non-default value IS written, and only that one — the shadow rows are separate
-        // fields and diff separately.
+        // fields and diff separately. (`M1000` rather than `M350`: the probe only has to be a rung
+        // that is NOT the default, and `M350` became the default on 2026-07-28.)
         assert_eq!(
             keys_of(&Settings {
-                shadow_distance: ShadowDistance::M300,
+                shadow_distance: ShadowDistance::M1000,
                 ..Settings::default()
             }),
             ["version", "shadow_distance"],
@@ -591,11 +598,54 @@ mod tests {
             panic!("the bare key must parse");
         };
         assert_eq!(edited.shadow_cascades, ShadowCascades::Two);
-        // A file from before the row existed: the standard absent-key path, at the default.
+        // A file from before the row existed: the standard absent-key path, at the default. The
+        // `M300` is deliberately a REAL such file's contents — a retired rung — so this also crosses
+        // the distance-ladder migration.
         let Parsed::Ok(pre_row) = parse("(version: 1, shadow_distance: M300)") else {
             panic!("a file from before the cascade row must load");
         };
         assert_eq!(pre_row.shadow_cascades, ShadowCascades::default());
+        assert_eq!(pre_row.shadow_distance, ShadowDistance::M350);
+    }
+
+    /// **The distance-ladder migration, through a whole file** (2026-07-28). The rungs went
+    /// `100/150/300` → `350/700/1000`; the retired tokens are `#[serde(alias)]`es on `M350`, so
+    /// every `video.ron` a player already has keeps loading, and keeps loading onto a rung the
+    /// settings page can actually walk. `settings::tests::the_retired_distance_rungs_migrate_onto_the_ladder`
+    /// carries the argument for migrating rather than hiding; this is the same claim at the level
+    /// that matters to a player — the file on their disk.
+    ///
+    /// It is a MIGRATION and not a rename, so it is deliberately lossy and deliberately one-way: all
+    /// three old rungs collapse onto the nearest survivor, and the next save writes the new token.
+    /// That is within the module doc's policy (a value's meaning is unchanged — 350 m still means
+    /// 350 m), so [`SETTINGS_VERSION`] does not move.
+    #[test]
+    fn the_retired_shadow_distance_rungs_load_and_migrate() {
+        for retired in ["M100", "M150", "M300"] {
+            let text = format!("(version: 1, shadow_distance: {retired}, msaa: X2)");
+            let Parsed::Ok(settings) = parse(&text) else {
+                panic!("{text} must still load — it is on players' disks");
+            };
+            assert_eq!(
+                settings.shadow_distance,
+                ShadowDistance::M350,
+                "{retired} must land on the nearest surviving rung",
+            );
+            assert_eq!(
+                settings.msaa,
+                MsaaLevel::X2,
+                "{retired} must not disturb the rest of the file",
+            );
+
+            // Round trip: what the next save writes must re-read as the migrated value, with no
+            // trace of the retired token left behind.
+            let written = ron::ser::to_string_pretty(&settings, pretty_config()).unwrap();
+            assert!(
+                !written.contains(retired),
+                "a retired token must never be written back: {written}",
+            );
+            assert_eq!(parse(&written), Parsed::Ok(settings), "{written}");
+        }
     }
 
     /// Round-trip through the real serializer the save path uses, including the sparse form.
@@ -606,7 +656,9 @@ mod tests {
             Settings {
                 version: SETTINGS_VERSION,
                 shadow_distance: ShadowDistance::Off,
-                shadow_resolution: ShadowResolution::X4096,
+                // A non-default rung on purpose: `X4096` became the default on 2026-07-28, so it
+                // would round-trip through an ABSENT key and stop exercising the written one.
+                shadow_resolution: ShadowResolution::X1024,
                 shadow_cascades: ShadowCascades::Two,
                 msaa: MsaaLevel::Off,
                 vsync: VsyncMode::Off,
@@ -633,10 +685,10 @@ mod tests {
     /// carrying a key this build has never heard of is ignored, not rejected.
     #[test]
     fn unknown_and_missing_fields_both_load_cleanly() {
-        let Parsed::Ok(missing) = parse("(shadow_distance: M300)") else {
+        let Parsed::Ok(missing) = parse("(shadow_distance: M700)") else {
             panic!("an old file must load");
         };
-        assert_eq!(missing.shadow_distance, ShadowDistance::M300);
+        assert_eq!(missing.shadow_distance, ShadowDistance::M700);
         assert_eq!(
             missing.msaa,
             MsaaLevel::default(),
@@ -651,11 +703,11 @@ mod tests {
         // Genuinely unknown keys (the V2 display fields graduated to known ones, so these are the
         // next candidates a future build might write).
         let Parsed::Ok(unknown) =
-            parse("(shadow_distance: M100, bloom: On, motion_blur: 2, hdr_output: true)")
+            parse("(shadow_distance: M350, bloom: On, motion_blur: 2, hdr_output: true)")
         else {
             panic!("keys this build does not know must be skipped, not abort the parse");
         };
-        assert_eq!(unknown.shadow_distance, ShadowDistance::M100);
+        assert_eq!(unknown.shadow_distance, ShadowDistance::M350);
 
         // The V2 display fields landing as plain new fields is the contract's second exercise: a
         // file from before them loads with every one at its default.
@@ -823,9 +875,12 @@ mod tests {
         );
         let wanted = Settings {
             version: SETTINGS_VERSION,
-            shadow_distance: ShadowDistance::M100,
+            // Every shadow row deliberately off its default, so the reload proves a WRITTEN key came
+            // back rather than an absent one landing on the same value. `Three` used to serve that
+            // purpose here; it became the default on 2026-07-28, hence `Two`.
+            shadow_distance: ShadowDistance::M350,
             shadow_resolution: ShadowResolution::X1024,
-            shadow_cascades: ShadowCascades::Three,
+            shadow_cascades: ShadowCascades::Two,
             msaa: MsaaLevel::X2,
             vsync: VsyncMode::Fast,
             legacy_vsync: None,
@@ -905,7 +960,7 @@ mod tests {
         let scratch = ScratchDir::new("reset");
         std::fs::create_dir_all(&scratch.dir).unwrap();
         assert!(save(&Settings {
-            shadow_distance: ShadowDistance::M300,
+            shadow_distance: ShadowDistance::M350,
             ..Settings::default()
         }));
         assert!(location().unwrap().exists());

@@ -198,6 +198,11 @@ fn spawn_camera(mut commands: Commands) {
             zoom: 0.0,
             target_zoom: 0.0,
         },
+        // WHAT THIS CAMERA DRAWS. The game's one 3D camera starts in the commander view, which sees
+        // the world AND the body it is riding; `sight::apply_sight_camera_profile` swaps this one
+        // component for the optic's profile and back. That single write is the whole "hide my own
+        // tank in the gunner sight" mechanism — see `render_policy`.
+        crate::render_policy::CameraProfile::BattlefieldThirdPerson,
         // The HUD reprojects world-anchored labels through this camera.
         HudCamera,
     ));
@@ -336,8 +341,8 @@ fn reaim_orbit_on_optic_exit(
 /// **sight line**, the bore depressed by the current superelevation: the aim commit lobs the gun up
 /// by that angle for the dialed range, so depressing the view by the same holds the reticle on the
 /// target while the barrel rides above it (dial range → barrel rises, view stays on target). The
-/// controlled tank's meshes are moved off this camera's render layer in gunner view (`sight`'s
-/// `reconcile_optic_render_layers`), so parking inside the mantlet clips no own geometry. The camera
+/// camera drops the `ViewSubjectBody` channel in gunner view (`sight`'s
+/// `apply_sight_camera_profile`), so parking inside the mantlet clips no own geometry. The camera
 /// reads the gun's live pose, so it lags the player's intent at the turret's slew
 /// rate (the WT "view follows the gun" feel). Narrow FOV for magnification.
 fn gunner_camera(

@@ -133,8 +133,7 @@ fn fresh(tp: &TransmissionParams) -> TransmissionState {
     TransmissionState::from_spec(tp)
 }
 
-/// [`fresh`] with the upshift confirmation PRE-PAID (descent round; the recoil round made
-/// the counter full-predicate): most arithmetic fixtures pin OTHER gates at an operating
+/// [`fresh`] with the upshift confirmation PRE-PAID: most arithmetic fixtures pin OTHER gates at an operating
 /// point already above the up band, so they seed [`UPSHIFT_CONFIRM_TICKS`] worth of
 /// evidence rather than re-testing the confirmation dwell in every fixture (the committing
 /// tick still re-proves every gate live — the seeded counter only skips the wait). Tests
@@ -638,8 +637,8 @@ fn hill_hold_margin_short_capable_gear_can_release() {
     assert!(!st.hill_hold, "a capable margin-short gear must release");
 }
 
-/// D1c regression, round-4 semantics: a successful handoff suppresses relatching for the
-/// FULL fixed cooldown — never overridable (the round-3 rollback override let a
+/// D1c regression: a successful handoff suppresses relatching for the
+/// FULL fixed cooldown — never overridable (a rollback override would let a
 /// force-based release re-latch the very next tick while cross-moving; mid-motion braking
 /// is `back_driven_intent`'s job, and the latch itself is near-rest-only) — and once the
 /// cooldown expires a still-standing deficit relatches normally.
@@ -684,7 +683,7 @@ fn hill_hold_release_cooldown_never_overridden_then_relatches() {
     );
     assert!(!st.hill_hold, "near-rest chatter must respect the cooldown");
 
-    // Round 4: a roll past the engagement threshold does NOT override the cooldown —
+    // A roll past the engagement threshold does NOT override the cooldown —
     // and could not latch anyway (the zone is near-rest-only); `back_driven_intent`
     // braking owns the moving hull.
     st.demand_n = deficit_demand;
@@ -718,7 +717,7 @@ fn hill_hold_release_cooldown_never_overridden_then_relatches() {
     );
 }
 
-/// Codex round 4: the hill-hold latch engages ONLY near rest. All four intent-vs-motion
+/// The hill-hold latch engages ONLY near rest. All four intent-vs-motion
 /// quadrants AT SPEED (|shaft| = 5 m/s ≫ the engagement threshold) must not latch — the
 /// counterexample was held reverse throttle with the hull still moving forward
 /// (propulsive intent, shaft = −5, the old rollback arm latched a 5 m/s "rollback"); the
@@ -812,8 +811,8 @@ fn correction_priority_fixture() -> (ForceParams, TransmissionParams, f32, f32) 
 }
 
 /// D2 regression: a threshold-confirmed reserve deficit is a correction and must beat an
-/// otherwise-valid above-band upshift preference on the same decision tick. Recoil-round
-/// Codex review (two passes) hardened this into a REAL two-leg collision proof. The
+/// otherwise-valid above-band upshift preference on the same decision tick. This is a REAL
+/// two-leg collision proof. The
 /// arbitration is STRUCTURAL — the deficit path runs before `upshift_ready` is even
 /// evaluated, its commit zeroes `band_confirm_ticks`, and `deficit_step_committed`
 /// falsifies the predicate — so a seeded upshift counter alone proves nothing about the
@@ -886,14 +885,13 @@ fn confirmed_deficit_precedes_upshift_arm() {
     );
 }
 
-/// D5, descent-round inversion of the old bypass (Codex round: the upshift arm is LIVE in
-/// this fixture — no masking): a SHALLOW confirmed deficit (inside the reserve-margin
+/// D5 (the upshift arm is LIVE in this fixture — no masking): a SHALLOW confirmed deficit (inside the reserve-margin
 /// scale, the demand-pollution class) is DEFERRED by the post-upshift reversal dwell while
 /// the pending correction HOLDS the gear — the operating point sits above the band
 /// (1800 > 1700) with a fully capable upper gear, so without the hold suppression the
 /// ordinary arm would commit F2→F3 on the first tick, resetting the very confirmation
 /// evidence and dwell that were deferring the correction (evidence erased, correction
-/// never fires — the Codex finding). The evidence keeps ACCUMULATING through the dwell, so
+/// never fires). The evidence keeps ACCUMULATING through the dwell, so
 /// the correction commits exactly at dwell expiry: F2 held throughout, then F1, and F3
 /// never. A post-DOWNSHIFT dwell never blocks the correction (same-direction;
 /// `dwell_blocks` is direction-aware) — `confirmed_deficit_precedes_upshift_arm` covers
@@ -949,7 +947,7 @@ fn confirmed_deficit_defers_through_post_upshift_dwell() {
     );
 }
 
-/// Codex round, near-arrest safety (the deep override): a deficit DEEPER than the
+/// Near-arrest safety (the deep override): a deficit DEEPER than the
 /// reserve-margin scale is a genuine steep grade, not post-shift demand pollution — it
 /// corrects IMMEDIATELY through the post-upshift dwell instead of deferring, before
 /// window + dwell can bleed the predicted landing sign negative and strand the correction.
@@ -986,7 +984,7 @@ fn deep_deficit_overrides_post_upshift_deferral() {
     );
 }
 
-/// Codex round, finding-3 pin (closed loop): a steep grade entered RIGHT AFTER an upshift —
+/// Closed-loop pin: a steep grade entered RIGHT AFTER an upshift —
 /// post-window state, reversal dwell fully live, confirmation nearly paid — must correct
 /// downward on its first confirmed tick via the deep override, while the predicted landing
 /// is still forward, and land moving forward after the paid window. Without the override
@@ -1195,7 +1193,7 @@ fn reserve_confirmation_decays_across_one_tick_jitter() {
     );
 }
 
-/// D6 regression, descent-round inversion: the protective upshift is a LAST RESORT at the
+/// D6 regression: the protective upshift is a LAST RESORT at the
 /// mechanical-protection ceiling (`max_curve_rpm` — the Tiger's rated 3000). A signed
 /// shaft + crank back-driven PAST the ceiling upshifts with the throttle released, and the
 /// declutched crank slows. Everything between governed and the ceiling HOLDS instead —
@@ -1239,9 +1237,9 @@ fn downhill_overrun_protective_upshift_lowers_crank_speed() {
     );
 }
 
-/// Descent-round inversion: on overrun BETWEEN governed and the mechanical-protection
+/// On overrun BETWEEN governed and the mechanical-protection
 /// ceiling the box HOLDS its gear — engine braking is the point of being in gear on a
-/// descent, and the old governed + margin protective upshift shed exactly that
+/// descent, and a governed + margin protective upshift would shed exactly that
 /// retardation. Coasting AND service-braking, with the crank fully corroborating the
 /// shaft (the honest back-driven case, not a belt transient): no shift commits and no
 /// window starts. The dial climbing past governed is the warning; only past
@@ -1287,7 +1285,7 @@ fn overrun_below_ceiling_holds_gear_for_engine_braking() {
     }
 }
 
-/// Codex round 5 (Path A — best-effort selection, guard-bounded): the ceiling rescue on
+/// Best-effort selection, guard-bounded: the ceiling rescue on
 /// the Tiger's 4-gear REVERSE ladder under sustained hill drive, CLOSED LOOP. Selection
 /// is the STATIC projection only (current shaft through the candidate ratio); the
 /// over-rev slip guard — not the selection — is the safety mechanism, so the honest
@@ -1395,9 +1393,9 @@ fn protective_rescue_walks_ladder_under_guard_or_holds() {
     assert_eq!(top.shift_ticks, 0, "no window may start at the top");
 }
 
-/// Codex round 5 (Path A): a SEQUENTIAL box steps ONE gear per paid window toward the
-/// static target, unconditionally — the round-3 adjacent-safe rule livelocked and the
-/// round-4 improvement predicate priced a window model that round 5 deleted; with the
+/// A SEQUENTIAL box steps ONE gear per paid window toward the
+/// static target, unconditionally — an adjacent-safe rule livelocks and an improvement
+/// predicate would price a window model this path does not have; with the
 /// slip guard bounding every intermediate window, stepping is always at least as good as
 /// holding, and the strictly rising gear index on a finite ladder terminates trivially.
 /// R2 far past the ceiling (static R3 ≈ 3120 is still over, R4 ≈ 2100 clears): the walk
@@ -1474,7 +1472,7 @@ fn sequential_rescue_steps_toward_static_target() {
     );
 }
 
-/// Codex round 5, finding 3: the hill-hold latch's window-deficit arm is scoped by the
+/// The hill-hold latch's window-deficit arm is scoped by the
 /// ABSOLUTE reserve floor — it fires only when the window-masked demand EMA exceeds
 /// [`RESERVE_MARGIN_FLOOR_N`] (10 kN, the stage-C jitter/truth divide; owner-based
 /// scoping was tried and broke the 20-degree Sequential band-cascade rescue the arm was
@@ -1514,11 +1512,11 @@ fn flat_downshift_window_does_not_latch_hill_hold() {
     }
 }
 
-/// Codex round 5, finding 5: the 13-tick grade confirmation ISOLATED — the target is
+/// The 13-tick grade confirmation ISOLATED — the target is
 /// legal and margin-clear from tick one (`correction_priority_fixture`: zero-length
 /// windows, so the landing predictor is a no-op and the over-rev gate passes), so the
 /// ONLY pacing gate is the confirmation itself: twelve quiet ticks, commit on exactly
-/// the thirteenth. Recoil round: the band arm's upshift confirmation shortened to 8 <
+/// the thirteenth. The band arm's upshift confirmation is 8 <
 /// 13 ticks, so at this synthetic operating point (above the band with a fixture-capable
 /// UPPER gear — the contrived dead-zone torque curve) the now-faster ordinary arm would
 /// legally commit F2→F3 on tick 8 and steal the crossing this test pins; the up band is
@@ -1536,7 +1534,7 @@ fn grade_confirmation_paces_commit_when_target_already_legal() {
         ..fresh(&tp)
     };
     let inp = input(1.0, 0.0, [shaft; 2], [demand / 2.0; 2]);
-    // INDEPENDENT literal (Codex round 6): 13 is pinned as a number, not derived from
+    // INDEPENDENT literal: 13 is pinned as a number, not derived from
     // GRADE_CONFIRM_TICKS — deriving both the loop bound and the expectation from the
     // constant meant changing the constant could never fail this test. 13 ties to the
     // constant's own doc: "13 ticks DERIVED = 0.203125 s at 64 Hz".
@@ -1555,7 +1553,7 @@ fn grade_confirmation_paces_commit_when_target_already_legal() {
     );
 }
 
-/// Codex round 5, finding 5: the deficit commit's landing-sign gate at its BOUNDARY. Same
+/// The deficit commit's landing-sign gate at its BOUNDARY. Same
 /// confirmed-deficit state (F6, saturated evidence, capable F3 target) either side of the
 /// reaction magnitude whose predicted 20-tick window bleed crosses m through zero
 /// (boundary ≈ 82.6 kN/side at m = 0.30 with the lab coupling): below it the correction
@@ -1602,7 +1600,7 @@ fn deficit_commit_honors_landing_sign_boundary() {
     assert_eq!(refuses.shift_ticks, 0, "no window may start on the refusal");
 }
 
-/// Codex round 5, priority rule: while shaft AND crank read past the ceiling the crank
+/// Priority rule: while shaft AND crank read past the ceiling the crank
 /// rescue owns the decision tick. The over-rev gate already makes every capability
 /// downshift ILLEGAL at such a shaft (a lower gear only raises rpm), so the fixture pins
 /// the observable half: a SATURATED confirmed deficit (huge demand EMA, evidence far past
@@ -1643,7 +1641,7 @@ fn crank_rescue_not_preempted_by_deficit_machinery() {
     );
 }
 
-/// Codex round 3, must-fix 3: the near-rest anti-rollback seam exists on the REVERSE
+/// The near-rest anti-rollback seam exists on the REVERSE
 /// ladder too. Backing up a DERIVED 20-degree grade in over-tall R4 (negative launch
 /// reserve at rest — the reverse mirror of `hill_hold_engages_selects_launch_gear...`):
 /// held S must latch the hold, Direct-address the capable launch gear, keep both belts
@@ -1726,9 +1724,9 @@ fn reverse_ladder_hill_hold_engages_and_launches() {
     );
 }
 
-/// Codex rounds 3+4, minor — the FULL closed-loop pipeline the branch test
+/// The FULL closed-loop pipeline the branch test
 /// (`steep_grade_after_upshift_corrects_before_lug`) seeds by hand: a REAL band upshift
-/// (paying the recoil round's full-predicate confirmation live, tick PINNED), the authored 20-tick
+/// (paying the full-predicate confirmation live, tick PINNED), the authored 20-tick
 /// window with the demand EMA provably FROZEN, post-window EMA recovery pinned to the
 /// steep asymptote, the 13-tick deficit confirmation, and the correction committing on
 /// its exact measured tick — paced, in this fixture, by lower-gear over-rev/margin
@@ -1799,7 +1797,7 @@ fn steep_grade_full_loop_upshift_freeze_recover_confirm_correct() {
         } else if let Some(up) = upshift_tick
             && (tick == up + tp.shift_ticks as usize || tick == up + tp.shift_ticks as usize + 1)
         {
-            // Codex round 5 (EMA-rate pins): the FIRST two unfrozen samples after the
+            // EMA-rate pins: the FIRST two unfrozen samples after the
             // window follow the 1/8 EMA exactly from the frozen 12 kN toward the 2·steep
             // asymptote — MEASURED 40 039 then 64 574 (±10 covers f32 accumulation).
             let expect = if tick == up + tp.shift_ticks as usize {
@@ -1844,16 +1842,14 @@ fn steep_grade_full_loop_upshift_freeze_recover_confirm_correct() {
             break;
         }
     }
-    // MEASURED pins for this deterministic fixture (Codex round 4 — exact ticks, so a
+    // MEASURED pins for this deterministic fixture — exact ticks, so a
     // regression in any pipeline stage moves a number instead of hiding in an
-    // eventually-happens bound; re-measured for the recoil round's 8-tick full-predicate
-    // upshift confirmation, which moved BOTH pins by exactly the 5 ticks the confirmation
-    // shortened by):
-    //   * upshift on tick 11 (was 16): ~3 ticks of drive to cross the band from 50 rpm
-    //     below it, then the 8-tick (was 13) full-predicate confirmation — the light
+    // eventually-happens bound:
+    //   * upshift on tick 11: ~3 ticks of drive to cross the band from 50 rpm
+    //     below it, then the 8-tick full-predicate confirmation — the light
     //     approach load keeps landing and reserve passing throughout, so the counted
     //     predicate is continuously true from the band crossing;
-    //   * correction on tick 75 (was 84): the PACING gate is unchanged — lower-gear
+    //   * correction on tick 75: the PACING gate is lower-gear
     //     LEGALITY (F4 sits margin-short at speed and everything below is over-rev/
     //     fuel-cut-illegal until the deficit bleeds m to ~1.4 m/s, where F3 clears both
     //     the over-rev gate and the reserve margin and the correction commits on that
@@ -1879,7 +1875,7 @@ fn steep_grade_full_loop_upshift_freeze_recover_confirm_correct() {
     );
 }
 
-/// Codex round 3 (field evidence: ~9000 rpm crank following the belt on the rescaled
+/// Field evidence (~9000 rpm crank following the belt on the rescaled
 /// steep world): the over-rev slip guard — the stall guard's mirror — bounds the crank at
 /// `max_curve_rpm + OVERREV_MARGIN_RPM` however fast the belt is back-driven, and the
 /// slipping clutch still transmits motoring drag (positive mean-axis force against the
@@ -1921,7 +1917,7 @@ fn overrun_slip_guard_bounds_crank_at_top_gear() {
             "top reverse gear: the guard, not a shift, owns this"
         );
     }
-    // Codex round 4 (magnitude, not just sign): at the guard point the steady slipping
+    // Magnitude, not just sign: at the guard point the steady slipping
     // clutch transmits EXACTLY the guard-point motoring drag — in a STRAIGHT overrun
     // both sprocket powers are regenerative (`net ≤ 0`), so the power gate cannot scale
     // it. Literal: τ_drag(3100) = 462.5·(1/3 + 2/3·(3100/1550)) = 770.8 N·m through
@@ -1936,8 +1932,7 @@ fn overrun_slip_guard_bounds_crank_at_top_gear() {
     }
 }
 
-/// Descent round, Yan-approved; recoil round re-scoped (the recoil shift-storm fix): the
-/// ordinary band upshift arms only after [`UPSHIFT_CONFIRM_TICKS`] CONSECUTIVE ticks of
+/// The ordinary band upshift arms only after [`UPSHIFT_CONFIRM_TICKS`] CONSECUTIVE ticks of
 /// the FULL ordinary-upshift predicate (band, landing, and reserve all pass here — the
 /// unloaded operating point keeps them true, so the band excursion is the flipping
 /// sub-condition), and the evidence HARD-resets on any non-qualifying tick. Two
@@ -1994,7 +1989,7 @@ fn upshift_confirmation_rejects_transient_band_excursions() {
     );
 }
 
-/// Recoil-round Codex review: the upshift confirmation must read THIS tick's hysteretic
+/// The upshift confirmation must read THIS tick's hysteretic
 /// detent state, not the previous tick's. Seven qualifying straight ticks bring the
 /// counter to N − 1; the player then crosses WIDE_ON on the very tick that would commit.
 /// The stale read (detent updated below the scheduler) incremented to N and committed an
@@ -2176,7 +2171,7 @@ fn shift_torque_interruption_window() {
 
 /// Fix-1a: the upshift commits only if the belt state PREDICTED at the end of the
 /// torque-cut window still lands above the down band + POSTSHIFT_MARGIN_RPM — under the
-/// HONEST window model (decayed reaction over the coupled mass, scheduler fix round).
+/// HONEST window model (decayed reaction over the coupled mass).
 /// Same operating point (1780 rpm in gear 1, landing ratio ≈ 1121 rpm unloaded), three
 /// loads:
 ///   * unloaded (flat, D ≈ 0): the predictor is a near-no-op and the shift engages —
@@ -2248,7 +2243,7 @@ fn upshift_landing_gate_blocks_shift_cut_hunting() {
     assert_eq!(st.shift_ticks, 0, "no window may have started");
 }
 
-/// Scheduler fix round, terrain regression: at the REALISTIC (authored) 20-tick window a
+/// Terrain regression: at the REALISTIC (authored) 20-tick window a
 /// mild-grade climb must upshift F1→F2 at its trigger rpm. Tiger tables with Tiger-weight
 /// grip coupling; the reaction is the grade demand itself (`W·sin θ / 2` per side). Honest
 /// window bleed at 2.5° ≈ 12 200 N × 4.94 effective ticks / 64 Hz / 44 500 kg ≈ 0.02 m/s →
@@ -2297,8 +2292,7 @@ fn mild_grade_upshift_proceeds_at_realistic_window() {
     }
 }
 
-/// Scheduler fix round, latch-out regression (threshold moved to the descent-round
-/// ceiling): the protective upshift must fire past `max_curve_rpm` even while SERVICE
+/// Latch-out regression at the ceiling: the protective upshift must fire past `max_curve_rpm` even while SERVICE
 /// BRAKING (opposing throttle), with a STEER detent engaged, and at a shaft/crank speed
 /// deep past the fuel cut where `available_force_in_gear` reads ZERO in every gear. Each
 /// of the old gates — `service == 0.0`, `!detent_turn`, and `next_reserve >= margin` —
@@ -2349,14 +2343,14 @@ fn protective_upshift_fires_under_brake_steer_and_fuel_cut() {
     );
 }
 
-/// Scheduler fix round (review): above the corroboration floor (governed +
+/// Above the corroboration floor (governed +
 /// [`CRANK_CORROBORATION_MARGIN_RPM`]) the crank must corroborate the shaft before the
 /// ORDINARY arm may price it. A belt spike to F6 governed + 200 rpm with the crank at
 /// idle is a clutch-infeasible transient (locked driving keeps crank == shaft rpm;
 /// propulsive clutch slip puts the crank ABOVE the shaft, never below): under full
 /// throttle the ORDINARY arm would otherwise price a fictitious operating point and
 /// commit F6→F7 (landing ≈ 1850 ≥ floor, reserve clears against the light demand);
-/// coasting, nothing may fire (the descent round holds gear on overrun below the
+/// coasting, nothing may fire (the box holds gear on overrun below the
 /// ceiling, and a transient must not fire the last resort either — it reads the same
 /// both-speeds corroboration at the ceiling). Both must refuse. The same full-throttle
 /// state with a corroborating crank commits — the guard tests the crank, not the
@@ -2410,8 +2404,7 @@ fn upshift_arms_refuse_overrun_shaft_without_crank() {
     assert_eq!(st.gear, 7, "a corroborated overrun must still upshift");
 }
 
-/// Scheduler fix round (review regression — the ACTUAL case the deficit restructure
-/// fixes): a CONFIRMED deficit whose selector finds NO legal lower gear must fall through
+/// The case the deficit restructure exists for: a CONFIRMED deficit whose selector finds NO legal lower gear must fall through
 /// and let a legal ordinary upshift commit. Operating point: F5 pushed into the fuel-cut
 /// dead zone just BELOW the overrun floor (governed + 120: torque_at = 0 → current
 /// reserve < 0 → the deficit confirms, but governed + 120 < governed + 150 so no
@@ -2454,7 +2447,7 @@ fn confirmed_deficit_without_target_falls_through_to_legal_upshift() {
     );
 }
 
-/// Scheduler fix round (review regression): the anti-hunting ARCHITECTURE across a whole
+/// The anti-hunting ARCHITECTURE across a whole
 /// realistic shift, not just its committing tick. Closed-loop belt (speeds fed back under
 /// a constant 2.5°-class reaction), Tiger tables, the authored 20-tick window. In this
 /// belt-only harness the cut bleeds the FULL frozen reaction (≈ 0.24 m/s — deliberately
@@ -2517,7 +2510,7 @@ fn shift_window_and_dwell_survive_landing_below_down_band() {
     );
 }
 
-/// Contact-driven demand acquisition at unit level (review round — the 20° approach
+/// Contact-driven demand acquisition at unit level (the 20° approach
 /// fixture now SEEDS its EMA by declaration, so its scope is scheduler behavior GIVEN the
 /// demand; THIS test pins that real reactions do initialize and track the observer): the
 /// first grounded sample seeds the EMA exactly (bit-equal), and a sustained changed load
@@ -2563,7 +2556,7 @@ fn demand_ema_seeds_from_first_sample_and_converges() {
     );
 }
 
-/// Scheduler fix round: the load-time band validator must include the runtime landing
+/// The load-time band validator must include the runtime landing
 /// margin. The Tiger's ORIGINAL shipped triple (2300 / 1400) cleared the bare down band,
 /// but its widest-step landing (2300 × 2.8/4.3 ≈ 1498 rpm) sat 52 rpm SHORT of the runtime
 /// gate's `1400 + POSTSHIFT_MARGIN_RPM` floor — legal-looking authoring that could never
@@ -2665,7 +2658,7 @@ fn landing_gate_refuses_sign_flipped_landing() {
     assert_eq!(st.shift_ticks, 0, "no shift may have committed");
 }
 
-/// Stage-A review round: the REVERSE-ladder mirror of the backslide test. Driving in
+/// Stage A: the REVERSE-ladder mirror of the backslide test. Driving in
 /// R (dir = −1) while back-driven FORWARD (m > 0 → shaft = dir·m < 0): no shifts in
 /// either direction, and the drive force stays R-SIGNED and non-zero (the governor
 /// must not cut on |shaft| — pre-fix, |m| = 2.5 in R1 read 2025 rpm, past the
@@ -2830,7 +2823,7 @@ fn readout_reports_crank_state() {
     );
 }
 
-/// Stage-A review round (FIX 1 regression): coasting to rest in a cruise gear must
+/// Stage A: coasting to rest in a cruise gear must
 /// complete the downshift chain to gear 1. The brake stop-force/integration order
 /// leaves a stable numerical residual at rest (measured ≈ −1.7e−9 m/s: Hybrid, gear
 /// 3, zero command, 20 kN/side reaction) — a hard `shaft >= 0` backslide guard read
@@ -2906,7 +2899,7 @@ fn dwell_blocks_reversal_not_same_direction() {
     );
     // OPPOSITE direction: drop below gear-3's down band. The downshift must wait out
     // the FULL dwell after the window — the dwell counts only outside the frozen
-    // window (review round), so the reversal engages exactly at
+    // window, so the reversal engages exactly at
     // window + REVERSAL_DWELL_TICKS.
     let v_low = rpm_v(tp.shift_down_rpm - 50.0, tp.gears_fwd[2]);
     let mut ticks = 0usize;
@@ -2924,7 +2917,7 @@ fn dwell_blocks_reversal_not_same_direction() {
     );
 }
 
-/// Review round (intent gate): ORDINARY band upshifts are considered only under
+/// Intent gate: ORDINARY band upshifts are considered only under
 /// PROPULSIVE drive — the landing predictor has no brake term, so consulting it under
 /// braking produced a false shift (predicted 1652 rpm on drag alone vs 1262 real under
 /// the brakes) followed by a reversal cycle. The operating point sits BELOW the
@@ -2953,7 +2946,7 @@ fn no_upshift_while_braking_or_coasting() {
     }
 }
 
-/// Review round (predictor-domain guard): while the L600 steering detent is engaged
+/// Predictor-domain guard: while the L600 steering detent is engaged
 /// the landing predictor has no λ/steer state, so ORDINARY band upshifts are DEFERRED
 /// until the detent releases; downshifts stay allowed mid-turn. (The last-resort
 /// protective shift is detent-exempt — this operating point sits below the
@@ -3003,7 +2996,7 @@ fn l600_detent_defers_upshift() {
     assert_eq!(st.gear, 2, "downshifts stay allowed during a detent turn");
 }
 
-/// Review round (fix B): releasing the steer at a standstill pivot must actively
+/// Releasing the steer at a standstill pivot must actively
 /// ARREST the belt difference — with zero ground reactions (airborne), only the servo
 /// can. The |m|-only blend weight zeroed both force terms at steer = 0 (w = 1,
 /// pivot_f = 0), leaving the belts counter-rotating forever; the steer-scaled weight
@@ -3196,10 +3189,10 @@ fn tiger_f8_wide_outer_belt_exceeds_mean_speed_limit() {
     );
 }
 
-/// Codex-4 regression: a tick that carries `m` through zero must not project the
+/// Regression: a tick that carries `m` through zero must not project the
 /// constraint onto the pre-tick |m| branch — that enforces `d = s·κ·m` on the wrong
 /// side of the cusp, flipping `d` AGAINST the commanded steer for a tick (a yaw
-/// impulse, and ringing if m chatters around zero). Codex's scenario: slow forward
+/// impulse, and ringing if m chatters around zero). The scenario: slow forward
 /// roll, tight detent, strong equal reactions during a shift interruption — the tick
 /// lands m well negative; `d` must stay on the steer's side.
 #[test]
@@ -3327,7 +3320,7 @@ fn static_brake_capacity_requires_every_hold_predicate() {
     );
 }
 
-/// Codex-2 regression, half 1: the parking brake SETTLES creep instead of freezing it.
+/// Regression, half 1: the parking brake SETTLES creep instead of freezing it.
 /// The old `B = clamp(R − Q, ±cap)` at a small positive belt speed with `R > Q` set
 /// `v̇ = 0` exactly — positive brake work cancelling grip and drag, preserving creep
 /// forever. The stop-force law lands the belt at zero.
@@ -3336,7 +3329,7 @@ fn parking_brake_settles_creep() {
     let (fp, tp) = (lab_fp(), lab_tp());
     let mut st = fresh(&tp);
     // Creep below the latch threshold, zero command, a ground reaction R > Q inside
-    // capacity (codex's exact configuration).
+    // capacity.
     let rep = step(
         TransmissionMode::Hybrid,
         &fp,
@@ -3353,7 +3346,7 @@ fn parking_brake_settles_creep() {
     }
 }
 
-/// Codex-2 regression, half 2: past a capacity breach the latched parking brake stays
+/// Regression, half 2: past a capacity breach the latched parking brake stays
 /// SATURATED against the slide — the blend-only envelope faded to zero once the
 /// back-driven belt passed `slip_saturation`, releasing the brake exactly when it was
 /// needed. The latched brake keeps rubbing at `B_max` however fast the belt slides.
@@ -3477,7 +3470,7 @@ fn brake_is_discretely_passive() {
 /// integrated engine power available plus released belt-inertia energy — regeneration
 /// recirculates, it does not create (the design's no-free-energy bound). Exercised over
 /// a launch, a driving turn, and a pivot, in both regenerative modes — and, for the
-/// codex-3 split, from an asymmetric rolling start with a hard steer command at gentle
+/// physical-power split, from an asymmetric rolling start with a hard steer command at gentle
 /// throttle (`F_s ≫ F_p`, `m > d > 0`): the case where one SPROCKET's power is negative
 /// while both MODAL powers read positive, so the modal split never charged η.
 #[test]
@@ -3487,7 +3480,7 @@ fn energy_bound_no_free_energy() {
         (TransmissionMode::Hybrid, 1.0, 0.0, [0.0f32, 0.0]),
         (TransmissionMode::Hybrid, 0.7, 0.6, [0.0, 0.0]),
         (TransmissionMode::Hybrid, 0.0, 1.0, [0.0, 0.0]),
-        // Codex-3: steer-dominant at a rolling start — inner sprocket goes negative.
+        // Steer-dominant at a rolling start — inner sprocket goes negative.
         (TransmissionMode::Hybrid, 0.2, 1.0, [4.0, 2.0]),
         (TransmissionMode::Hybrid, 0.2, -1.0, [4.0, 2.0]),
         (TransmissionMode::FixedRadii, 1.0, 0.0, [0.0, 0.0]),
@@ -3530,7 +3523,7 @@ fn energy_bound_no_free_energy() {
     }
 }
 
-/// Codex-3 pin: the recirculation split reads the PHYSICAL sprocket powers, not the
+/// The recirculation split reads the PHYSICAL sprocket powers, not the
 /// modal ones. Steer-only at an asymmetric rolling start (`F_p = 0`, saturated `F_s`,
 /// `v_L = 5, v_R = 3`): the outer sprocket delivers `F_s/2·v_L`, the inner ABSORBS
 /// `F_s/2·v_R` — physical net `= F_s/2·(v_L − η·v_R)`, while the modal split reads
@@ -3574,7 +3567,7 @@ fn recirculation_splits_physical_output_powers() {
     );
 }
 
-/// The codex-1 regression (the "cannot decelerate" bug): a forward-moving tank given
+/// The "cannot decelerate" regression: a forward-moving tank given
 /// full REVERSE throttle must brake monotonically to near standstill (service brakes),
 /// then engage the reverse ladder at the swap seam and actually drive backward — the
 /// old code fed `dir × |throttle|` through the still-forward ladder, producing full
@@ -3621,7 +3614,7 @@ fn opposite_throttle_at_speed_brakes_then_reverses() {
     );
 }
 
-/// Descent round (through-zero feel): after the ladder swap commits with the hull still
+/// Through-zero feel: after the ladder swap commits with the hull still
 /// rolling the OLD way, the held command keeps BRAKING through the declutched swap window.
 /// The old seam keyed `service` on the engaged ladder alone: the swap flipped `opposing`
 /// false the same tick, and the window then carried neither drive nor brake — a free-roll
@@ -3660,7 +3653,7 @@ fn held_reversal_keeps_braking_through_swap_window() {
 }
 
 /// Coast intent (stage B shape): zero throttle at speed applies the DECLARED
-/// compression-braking drag at the CRANK — descent round: the rising motoring curve
+/// compression-braking drag at the CRANK — the rising motoring curve
 /// `engine_drag(ω)`, anchored at `drag_fraction × peak` mid-band — and it reaches the
 /// belt only through the engaged coupling. With the belt speed HELD constant (this
 /// harness feeds fixed speeds), the crank must be steady too, so the clutch transmits
@@ -3708,7 +3701,7 @@ fn coast_drag_reaches_belt_through_coupling() {
     );
 }
 
-/// Codex round: DIRECT numeric pins of the motoring curve — the coupling tests above use
+/// DIRECT numeric pins of the motoring curve — the coupling tests above use
 /// `engine_drag` as their own oracle (they pin transmission THROUGH the clutch), so the
 /// curve itself is pinned here against hand-computed literals from the authored anchors.
 /// Tiger: D = drag_fraction × peak = 0.25 × 1850 = 462.5 N·m, ω_mid = (600 + 2500)/2 =
@@ -3737,7 +3730,7 @@ fn motoring_drag_curve_pins_documented_anchors() {
     }
 }
 
-/// Codex round: the rise REACHES THE BELT — converged locked-coast per-side forces at two
+/// The rise REACHES THE BELT — converged locked-coast per-side forces at two
 /// held speeds in the SAME gear, pinned as literals (not via `engine_drag`). Lab gear 3
 /// (G3/r_s = 33.26 per m): D = 550, ω_mid = 1200 →
 ///   1100 rpm: 550 × 0.9444 × 33.26 / 2 ≈ −8 639 N per side;
@@ -3788,7 +3781,7 @@ fn motoring_rise_reaches_belt_at_two_speeds() {
 /// PER-OUTPUT capacity (`F_s` bounded by `2 × capacity`, `±capacity` per belt) — not
 /// `±capacity/2`, which halves the yaw moment and left the Tiger under its own
 /// footprint scrub. At rest under full steer the Hybrid commands full steer FORCE
-/// outright (fix 2 — the power-limited pivot; the power scale cannot bind at v = 0),
+/// outright (the power-limited pivot; the power scale cannot bind at v = 0),
 /// and the L600's brake-gated neutral regime asks the semi-implicit servo for the
 /// exact-landing force `2·neutral_d_full·I/dt`, capacity-clamped — for the lab data
 /// both must land each side at the FULL per-output datum (which EXCEEDS the old
@@ -3807,7 +3800,7 @@ fn pivot_authority_is_per_output_capacity() {
             &input(0.0, 1.0, [0.0, 0.0], [0.0, 0.0]),
         );
         let expect = match mode {
-            // Fix 2: force command up to capacity, power-limited thereafter.
+            // Force command up to capacity, power-limited thereafter.
             TransmissionMode::Hybrid => tp.steer_capacity_n,
             // The neutral servo's exact-landing force, per-output capacity clamp.
             _ => (tp.neutral_d_full * fp.inertia / dt).min(tp.steer_capacity_n),
@@ -4049,8 +4042,8 @@ fn free_rev_reaches_steer_target_promptly() {
     );
 }
 
-/// Review round FIX 1: service braking must never TELEPORT the crank through an
-/// infeasible snap. The eager `exact` flag was decided at the pre-brake coupling
+/// Service braking must never TELEPORT the crank through an
+/// infeasible snap. An eager `exact` flag decided at the pre-brake coupling
 /// solve; the brake stop-force then dropped the belt ≈ 0.23 m/s per tick
 /// (120 kN / 8 t / 64 Hz) and the drift kill snapped the crank down with it —
 /// ≈ 20 rad/s per tick, an implied clutch torque
@@ -4115,7 +4108,7 @@ fn braking_never_teleports_crank_past_clutch_capacity() {
     );
 }
 
-/// Review round FIX 3: the coupling seam is a LATCH with hysteresis — a belt speed
+/// The coupling seam is a LATCH with hysteresis — a belt speed
 /// oscillating INSIDE the 0.4–0.6 m/s dead band (forced ±0.05 around the old single
 /// 0.5 threshold, which flipped the regime every crossing) produces ZERO regime
 /// flips; only genuine excursions past the separated thresholds transition it, once

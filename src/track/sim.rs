@@ -651,8 +651,8 @@ fn apply_track_forces(
         // Only dynamic bodies simulate the belt — and the guard sits BEFORE command shaping:
         // `TrackDrive` is replicated state, and a late-promotion tick that lands while the
         // body is still Static must not locally slew the replicated throttle/steer once and
-        // hand the first dynamic predicted tick an altered starting value (codex review
-        // 2026-07-25, finding 2). Forces are no-ops on kinematic/static bodies, remotes'
+        // hand the first dynamic predicted tick an altered starting value.
+        // Forces are no-ops on kinematic/static bodies, remotes'
         // `TrackDrive` is replicated for their track view, and interpolated remotes neither
         // receive nor simulate the private element field (ADR-0027 disclosure). Skipping
         // them entirely also keeps their replicated belt state from being fought by a

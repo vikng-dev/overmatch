@@ -376,6 +376,25 @@ fn write_meta(mut trace: ResMut<TraceWriter>, fixed: Res<Time<Fixed>>) {
     trace.write(&meta);
 }
 
+/// How many tank `frame` rows one frame may write — `SPIKE_TRACE_FRAME_ROWS`, unlimited when unset.
+///
+/// [`record_frame`] writes one row PER TANK, which is what makes the rows a per-tank pose record;
+/// but a frame-TIME profile only needs `t`/`dt`, and a 30-tank scene would pay 15× the serialization
+/// per frame for 29 redundant copies of the same timing — a recorder cost that grows with exactly
+/// the axis being measured. Capping the rows makes the recorder's overhead a constant across a
+/// caster-count sweep. Read once and cached: this runs every frame.
+///
+/// Truncation keeps an arbitrary subset (query order), so a capped trace is for TIMING only — pose
+/// analysis of a specific tank needs the cap left off.
+fn frame_row_cap() -> usize {
+    static CAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CAP.get_or_init(|| {
+        crate::env_parse::<usize>("SPIKE_TRACE_FRAME_ROWS")
+            .filter(|rows| *rows > 0)
+            .unwrap_or(usize::MAX)
+    })
+}
+
 /// Per render frame, per tank root: the pose that actually rendered this frame. Ordered
 /// `after(TransformSystems::Propagate)` so `GlobalTransform` already reflects the frame-interpolated
 /// + correction-adjusted `Position`/`Rotation` (MP) or avian's render interpolation (SP).
@@ -416,7 +435,7 @@ fn record_frame(
         .iter()
         .next()
         .map(GlobalTransform::to_scale_rotation_translation);
-    for (entity, global, controlled) in &roots {
+    for (entity, global, controlled) in roots.iter().take(frame_row_cap()) {
         let (_, rotation, translation) = global.to_scale_rotation_translation();
         let mut row = json!({
             "k": "frame",

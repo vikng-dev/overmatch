@@ -58,29 +58,36 @@ pop-in, which no netcode has to care about.
 
 ## 3. What the sim actually reads from the glb today (inventory)
 
-Full sweep 2026-07-05 (Explore agent, verified against source). The glb currently supplies four
-categories; the RON supplies scalars only (it names nodes, never coordinates).
+Full sweep 2026-07-05 (Explore agent, verified against source); node/symbol references re-pinned
+2026-07-28 after the module splits (`tank.rs` → `src/tank/`, `driving.rs` retired into
+`src/track/`). Cited by SYMBOL rather than line, because these pointers have now rotted twice.
+The glb currently supplies four categories; the RON supplies scalars only (it names nodes, never
+coordinates).
 
 **Trivial to bake — one Transform/Vec3/Quat per named node:**
-- servo rest quaternions (today lazily captured `tank.rs:981` — the exact field the
-  ConfirmedHistory bug corrupted) and each servo's local transform + static intermediate chain
-  transforms up to root (`rig_world_pose` chains, `tank.rs:524`)
-- muzzle local pose (shell origin/bore, `shooting.rs:132-143`), barrel rest translation (recoil
-  spring origin, `shooting.rs:61`)
-- roadwheel station local poses — suspension ray origin + down dir per wheel (`driving.rs:201`),
-  plus wheel count/side (today derived from `Wheel_L_/R_<n>` name pattern, `tank.rs:496`)
-- `Center_Of_Mass` empty position (`driving.rs:100-123`)
-- turret pivot offset (camera reads it once, `camera.rs:86-94`)
+- servo rest quaternions (spawn data since ADR-0014 — no longer a lazy first-tick capture, which
+  is the field the ConfirmedHistory bug corrupted; `tank::spawn::insert_servos`) and each servo's
+  local transform + static intermediate chain transforms up to root (`tank::model::rig_world_pose`)
+- muzzle local pose (shell origin/bore) and barrel rest translation (recoil spring origin) —
+  both built in `tank::spawn::insert_weapons`, consumed by `shooting`
+- roadwheel station local poses — the contact-envelope station geometry per wheel
+  (`track::forces` / `track::envelope`), plus wheel count/side (derived from the
+  `Wheel_L_/R_<n>` name pattern in `bake::roadwheel_side`)
+- `Center_Of_Mass` empty position (resolved in `tank::spawn::resolve_rig_nodes`, applied to the
+  root as pure data — it is deliberately NOT spawned as an entity)
+- turret pivot offset (camera reads it once, `camera::capture_turret_pivot`)
 
 **Structural/topology (data, not geometry):** the name→node map, the gun→turret ancestor walk
-(`tank.rs:855-864`), volume→owner mapping (`ballistics.rs:527-538`).
+(`tank::spawn::first_geometry_ancestor`), volume→owner mapping (`damage::VolumeOf`).
 
 **Mesh-derived — the dominant scope:**
-- **armor volume trimeshes** (~45 concave volumes, `TrimeshFromMesh` on the Armor layer,
-  `tank.rs:813`): the penetration march raycasts them for entry point, normal, perpendicular
-  thickness, slope span (`ballistics.rs:517-608`). Plate thickness is deliberately geometric —
-  the mesh IS the armor model.
-- **vehicle collision hulls** (`*_Collider` → `ConvexHullFromMesh`, `tank.rs:692`).
+- **armor volume trimeshes** (~45 concave volumes, `TrimeshFromMesh` on the Armor layer, built in
+  `tank::spawn::insert_ballistic_volumes`): the penetration march raycasts them for entry point,
+  normal, perpendicular thickness, slope span (`ballistics::march_shell_step` →
+  `ballistics::resolve_armor_crossing`). Plate thickness is deliberately geometric — the mesh IS
+  the armor model.
+- **vehicle collision hulls** (`*_Collider` → `ConvexHullFromMesh`,
+  `tank::spawn::insert_collision_proxies`).
 
 **Already data (no bake needed):** mass + inertia extents (authored, `NoAutoMass` — no density
 path to bake), drivetrain/suspension scalars, servo tuning + role/axis + travel, weapon
@@ -89,7 +96,8 @@ ballistics, recoil spring, RangeTable inputs, volume material/hp/crew/ammo facet
 **View couplings that constrain the split (§6):** both cameras, the gunner optic, the bore/intent
 HUD, component-HP labels, and the cook-off turret launch all address sim rig-node **entities by
 handle** (`rig.gun/turret/muzzle/hull`, volume nodes, wheels). Cook-off
-(`damage.rs:548-580`) additionally *reparents the glb turret node* into a free rigid body.
+(`damage::launch_turrets_on_cookoff`) additionally *reparents the glb turret node* into a free
+rigid body.
 
 ## 4. Who needs what (the data split, made coherent)
 
@@ -192,7 +200,8 @@ into the connect handshake; version the artifact format.
      construct identical shapes from identical bytes by construction.
 2. **glTF-as-data access** — RESOLVED (same pass):
    - The `gltf` 1.4.1 crate is already a direct dependency AND already parses this exact .glb
-     offline in the CI bind-contract test (`src/spec.rs:317`) — phase 2's parser exists in tree.
+     offline in the CI bind-contract test (`src/spec.rs`, the `gltf::Gltf::open` test) — phase 2's
+     parser exists in tree.
    - Phase-1 preload extraction is fully feasible with no scene spawn: `Assets<Gltf>` →
      `GltfNode` (local `Transform`, `extras`, names) → `GltfMesh`/`GltfPrimitive` →
      `Assets<Mesh>` → `ATTRIBUTE_POSITION.as_float3()` + `indices()`. glTF meshes are labeled

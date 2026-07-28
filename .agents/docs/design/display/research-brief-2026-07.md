@@ -141,7 +141,9 @@ only meaningful with exclusive). **Exclusive fullscreen: don't ship in alpha lin
 Windows-only at menu level, never boot into it.
 
 - Boot-time: mode/windowed size/present mode must be read BEFORE DefaultPlugins (window fields
-  at creation; bevy #17208/#17188). Today lib.rs:626 + net/client.rs:165 set only `title`.
+  at creation; bevy #17208/#17188). Since settings V2 both window-creation sites (lib.rs:664 +
+  net/client.rs:176) already read the stored settings for `present_mode`, `mode` and resolution,
+  not just `title` — this row is DONE for those fields.
 - Relaunch-only: shadow cascade COUNT (bevy Local<Parallel> crash, documented on
   `settings::SHADOW_CASCADES`), exclusive video mode (if ever).
 - Persistence: RON; per-user config dir (macOS ~/Library/Application Support/dev.vikng.overmatch/
@@ -161,7 +163,7 @@ New `src/render_scale.rs`, mounted in both windowed roots (as written, beside th
 3. Node `render_scale_upscale` in `Core3dSystems::EarlyPostProcess`: post_process_write(),
    fullscreen triangle, sample `uv * vec2(w/W, h/H)`; fork bevy blit with a FILTERING sampler.
 
-Why: camera still targets the window → aim.rs:285,387, sight.rs:627,679, hud.rs:132,192 need
+Why: camera still targets the window → aim.rs:285,387, sight/reticle.rs:364,416, hud.rs:132,192 need
 ZERO changes (world_to_viewport stays window-logical); vfx shaders don't read view.viewport;
 overlay.rs untouched. Blast radius = render app only. Limits (honest): no VRAM saving; bloom/
 tonemapping/UI don't scale (camera.rs:192-196 runs Hdr+Bloom::NATURAL — measure bloom before

@@ -325,16 +325,27 @@ fn spawn_environment(
     asset_server: Res<AssetServer>,
 ) {
     let mut blocks: Vec<Transform> = Vec::new();
-    // The sun (see [`sun_light`]). Cascades stay at bevy's defaults — 4 splits out to 150 m, first
-    // bound at 10 m — which is the right envelope for tank-scale play and is fitted around the
-    // CAMERA, so the low sun does not stretch them; what a low sun does stretch is the shadow
-    // texel's footprint along the light, which is what [`SUN_SHADOW_NORMAL_BIAS`] answers.
+    // The sun (see [`sun_light`]). NO cascade config is spawned here on purpose: `settings::
+    // apply_settings` is the single writer of the cascade ladder, so that the settings page and the
+    // picture cannot disagree. As of 2026-07-28 it writes 3 splits out to 350 m with the first bound
+    // at 40 m (`settings::SHADOW_CASCADES`, `ShadowDistance`'s default rung and
+    // `settings::SHADOW_FIRST_CASCADE_FAR_BOUND_M`) — none of which are bevy's defaults of 4 / 150 m
+    // / 10 m any more, and all of which are live player-facing rows. What IS decided here is the
+    // light itself: cascades are fitted around the CAMERA, so the low sun does not stretch them;
+    // what a low sun does stretch is the shadow texel's footprint along the light, which is what
+    // [`SUN_SHADOW_NORMAL_BIAS`] answers.
     commands.spawn((
         DirectionalLight {
             shadow_maps_enabled: true,
             ..sun_light()
         },
         sun_transform(),
+        // WHAT THE SUN LIGHTS AND CASTS FROM. Not optional and not cosmetic: the vendored bevy_pbr
+        // patch gives every shadow view its LIGHT's mask, so a sun with no profile is layer-0-only
+        // and silently stops shadowing everything `render_policy` has moved off the world channel —
+        // the local tank's whole body, and the track shadow ribbon. Pinned by
+        // `render_policy::tests::the_sun_reaches_every_channel`.
+        crate::render_policy::LightProfile::BattlefieldSun,
     ));
 
     // The heightmap world: when the grid decoded, the heightfield IS the world — no flat slab,

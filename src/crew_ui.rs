@@ -27,6 +27,15 @@ struct CrewSelect {
     source: Option<CrewStation>,
 }
 
+/// Mount the crew bar + vitals panel.
+///
+/// CONTRACT: the mounting root owes this plugin a [`crate::WeaponClock`] — [`update_status_panel`]
+/// derives each weapon's countdown against it and takes it as a plain `Res`, so a root that lacks
+/// one dies on its first `Update` with a parameter-validation panic. The game gets it from
+/// `shooting::plugin`, the net client/server from `net::protocol`, and a root that simulates no gun
+/// at all inserts a frozen one and says why (`sandbox::plugin`). It stays a hard requirement rather
+/// than an `Option` on purpose: absent, the panel could only invent a readout, and the tank whose
+/// reload state cannot be told is the one this card exists to report on.
 pub fn plugin(app: &mut App) {
     app.init_resource::<CrewSelect>()
         .add_systems(Startup, (spawn_crew_bar, spawn_status_panel))

@@ -278,6 +278,28 @@ pub fn plugin(app: &mut App) {
         // sandbox tank needs a `TankCommand` + the per-tick edge consumption for them to land.
         command::core_plugin,
     ))
+    // The weapon clock the shared status panel (`crew_ui::update_status_panel`) reads, FROZEN at
+    // tick 0 — this sandbox does not simulate the gun and must not pretend to.
+    //
+    // Every composition that mounts `crew_ui` owes it a clock: the game's `shooting::plugin` and
+    // the net composition (`net::protocol`) each insert one and then advance it. This root mounts
+    // NEITHER (the sandbox's shells come from the free-fly camera through `fire` below, not out of
+    // the target's barrel), so without this line the panel's `Res<WeaponClock>` fails parameter
+    // validation and the binary panics on its first `Update` — which is exactly what it did.
+    //
+    // Mounting `shooting::plugin` here to "do it properly" would be the dishonest fix, twice over:
+    // it would arm the target's own gun in a tool whose target is a passive test article, and it
+    // would not even produce a running clock — `advance_weapon_clock` is `in_state(Playing)` and
+    // this root has no `AppState` at all (`state::plugin` is the game's), so `in_state`'s absent-
+    // resource arm returns false forever and the clock would sit at 0 anyway, only with a live
+    // `tick_weapon_gate` on top of it.
+    //
+    // Frozen is CONSISTENT, not merely convenient: nothing here arms a `WeaponGate` either, so
+    // every gate stays at its spawn state and the readouts derived against tick 0 stay literally
+    // true of a tank that has never fired ("READY", a full belt). The half of that row this tool
+    // actually exists to show — `no-fire` when a penetration kills the gunner or wrecks the breech
+    // — is quality-derived and clock-independent, so it stays live.
+    .insert_resource(crate::WeaponClock::default())
     // Keep spent shells frozen in place (with their tracer + marks) for inspection.
     .insert_resource(ballistics::RetainSpentShells(true))
     // Default to smooth per-frame motion; `T` toggles to the true fixed-rate cadence.

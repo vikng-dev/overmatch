@@ -13,7 +13,7 @@ use super::model::{
     Gun, GunBarrel, Hull, Muzzle, Rig, Roadwheel, Tank, TankRoot, TankServos, TankSim, TankViews,
     TrackSide, Turret, ViewConfig, Weapon, WeaponGate, WeaponGateState, WeaponIndex, WeaponState,
 };
-use super::servo::{RemoteServos, ServoCommand, ServoIndex, ServoRest, ServoRole};
+use super::servo::{RemoteServos, ServoCommand, ServoIndex, ServoRest, ServoRole, ServoSpec};
 use super::view::{SimParts, bind_tank_view};
 use crate::Layer;
 use crate::bake::{TankBlueprint, TankGeometry};
@@ -21,7 +21,7 @@ use crate::ballistics::{ArmorVolume, BallisticVolume, ComponentHealth, Component
 use crate::damage::{Ammo, Crewman, TankCapabilities, VolumeOf};
 use crate::firecontrol::RangeTable;
 use crate::shooting::RecoilParams;
-use crate::spec::{TankSpec, TankSpecHandle, Trigger, ViewKind};
+use crate::spec::{TankSpec, TankSpecHandle, Trigger, ViewKind, VolumeSpec, WeaponSpec};
 use crate::track::sim::{TankTransmission, TrackGripElements, TrackGripWake};
 
 /// Presentation handles. Loading may gate admission or view attachment, never simulation data.
@@ -64,6 +64,12 @@ impl TankPresentation {
             WorldAssetRoot(self.scene.clone()),
             TankSpecHandle(self.spec.clone()),
             Tank,
+            // The ROOT of this body's rendering policy: the glb lands asynchronously over many
+            // frames and every leaf of it inherits from here, so the scope must exist before the
+            // first mesh does. Ordinary world geometry until the local player takes control, at
+            // which point `sight::mark_view_subject_body` flips this ONE component to
+            // `VIEW_SUBJECT_BODY` and the whole body follows (`render_policy`).
+            crate::render_policy::VisualScope::WORLD_SOLID,
         )
     }
 }
@@ -245,12 +251,32 @@ fn first_geometry_ancestor(
     }
 }
 
-/// Assemble only simulation-relevant geometry under `root`. Declared nodes resolve fail-fast, and
-/// all index-bearing collections are sorted before entity creation. The GLB scene is not consulted.
-fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankContent) {
-    let geometry = content.geometry();
-    let spec = content.spec();
-    // Wire-derived indices must never depend on HashMap iteration order.
+/// Every spec-declared node resolved to a geometry index, in the deterministic sorted orders the
+/// wire indices are assigned from. Produced by [`resolve_rig_nodes`], which asserts the rig
+/// contract before returning — so every field here is a node that exists and downstream assembly
+/// needs no unwrapping. An optional `barrel` is genuinely optional (a weapon that does not
+/// reciprocate), not an unresolved name.
+struct RigNodes<'a> {
+    servo_entries: Vec<(&'a String, &'a ServoSpec)>,
+    servo_nodes: Vec<usize>,
+    weapon_entries: Vec<(&'a String, &'a WeaponSpec)>,
+    weapon_nodes: Vec<(usize, Option<usize>)>,
+    volume_nodes: Vec<(&'a String, &'a VolumeSpec, usize)>,
+    /// The gunner view's node — the main mount's Pitch servo, anchor of the gun chain.
+    gunner_pitch: usize,
+    hull: usize,
+    center_of_mass: usize,
+    /// The Yaw servo above [`Self::gunner_pitch`] in the extracted topology.
+    turret: usize,
+    /// The single `Primary` weapon's muzzle — the rig's main bore.
+    primary_muzzle: usize,
+}
+
+/// Resolve every spec-declared node name against the extracted geometry, fail-fast: a single
+/// assertion names ALL missing nodes at once rather than panicking on the first. Index-bearing
+/// collections are sorted here because wire-derived indices must never depend on `HashMap`
+/// iteration order.
+fn resolve_rig_nodes<'a>(geometry: &TankGeometry, spec: &'a TankSpec) -> RigNodes<'a> {
     let mut servo_entries: Vec<_> = spec.servos.iter().collect();
     servo_entries.sort_by_key(|(node, _)| node.as_str());
     let mut weapon_entries: Vec<_> = spec.weapons.iter().collect();
@@ -292,19 +318,19 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
     let hull_index = resolve("Hull");
     let com_index = resolve("Center_Of_Mass");
 
-    // The extractor classifies these and returns roadwheels in their deterministic slot order.
-    let wheel_nodes = &geometry.roadwheels;
-    let collider_nodes = &geometry.collision_proxies;
-
     // The gunner's chain feeds the rig's `turret`/`gun` (optic, camera, launched-turret): the
     // declared Pitch node + the Yaw servo above it in the extracted topology — the binder never
     // guesses which of several yaw/pitch mounts is the main one.
-    let yaw_indices: HashSet<usize> = servo_entries
-        .iter()
-        .zip(&servo_nodes)
-        .filter(|((_, servo), _)| servo.role == ServoRole::Yaw)
-        .filter_map(|(_, index)| *index)
-        .collect();
+    let servo_nodes_with_role = |role: ServoRole| -> HashSet<usize> {
+        servo_entries
+            .iter()
+            .zip(&servo_nodes)
+            .filter(|((_, servo), _)| servo.role == role)
+            .filter_map(|(_, index)| *index)
+            .collect()
+    };
+    let yaw_indices = servo_nodes_with_role(ServoRole::Yaw);
+    let pitch_indices = servo_nodes_with_role(ServoRole::Pitch);
     let turret_index = gunner_pitch
         .and_then(|pitch| first_geometry_ancestor(geometry, pitch, |i| yaw_indices.contains(&i)));
     // The single `Primary` weapon supplies the rig's main bore (`Rig.muzzle`) — what the bore HUD
@@ -320,19 +346,35 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
     if primary_muzzle_index.is_none() {
         missing.push("<a Primary weapon>".into());
     }
-    if gunner_pitch.is_none() {
-        missing.push("<a Pitch servo above the Primary weapon's muzzle>".into());
+    // `spec.views` and `spec.servos` are independent maps: nothing in the spec format stops the
+    // gunner view naming a node that is not a declared servo. Assembly assumes it IS one — only
+    // servo nodes (plus hull/turret/weapon/volume/wheel nodes) are entered into `needed_nodes`, so a
+    // non-servo gunner node would resolve, pass this contract, then fail far downstream in
+    // `entity_at` with "needed nodes were spawned above". Checking the role here keeps the failure
+    // where the contract is stated, and the message names the offending node.
+    match gunner_pitch {
+        None => missing.push("<a Pitch servo above the Primary weapon's muzzle>".into()),
+        Some(index) if !pitch_indices.contains(&index) => missing.push(format!(
+            "<the Gunner view's node {:?}, declared as a Pitch servo>",
+            geometry.nodes[index].name
+        )),
+        Some(_) => {}
     }
     if turret_index.is_none() {
         missing.push("<a Yaw servo above the Primary weapon's muzzle>".into());
     }
-    if collider_nodes.is_empty() {
+    if geometry.collision_proxies.is_empty() {
         missing.push("*_Collider".into());
     }
-    if !wheel_nodes.iter().any(|&(_, side)| side == TrackSide::Left) {
+    if !geometry
+        .roadwheels
+        .iter()
+        .any(|&(_, side)| side == TrackSide::Left)
+    {
         missing.push("Wheel_L*".into());
     }
-    if !wheel_nodes
+    if !geometry
+        .roadwheels
         .iter()
         .any(|&(_, side)| side == TrackSide::Right)
     {
@@ -343,37 +385,69 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
         "tank model is missing required rig nodes: {missing:?}"
     );
 
-    // Include every used node and its ancestor chain. Extraction order is parent-first.
-    let mut needed: HashSet<usize> = HashSet::new();
-    {
-        let mut include = |mut index: usize| {
-            while index != 0 && needed.insert(index) {
-                index = geometry.nodes[index].parent.unwrap_or(0);
-            }
-        };
-        for index in servo_nodes.iter().flatten() {
-            include(*index);
-        }
-        for (muzzle, barrel) in &weapon_nodes {
-            include(muzzle.expect("contract checked"));
-            if let Some(barrel) = barrel {
-                include(*barrel);
-            }
-        }
-        for (_, _, index) in &volume_nodes {
-            include(index.expect("contract checked"));
-        }
-        for &(index, _) in wheel_nodes {
-            include(index);
-        }
-        for &index in collider_nodes {
-            include(index);
-        }
-        include(hull_index.expect("contract checked"));
-        include(turret_index.expect("contract checked"));
-        // The COM node is deliberately NOT spawned: its position is pure data, applied to the
-        // root below — nothing addresses it as an entity anymore.
+    let checked = |index: Option<usize>| index.expect("contract checked");
+    RigNodes {
+        servo_entries,
+        servo_nodes: servo_nodes.into_iter().map(checked).collect(),
+        weapon_entries,
+        weapon_nodes: weapon_nodes
+            .into_iter()
+            .map(|(muzzle, barrel)| (checked(muzzle), barrel))
+            .collect(),
+        volume_nodes: volume_nodes
+            .into_iter()
+            .map(|(name, volume, index)| (name, volume, checked(index)))
+            .collect(),
+        gunner_pitch: checked(gunner_pitch),
+        hull: checked(hull_index),
+        center_of_mass: checked(com_index),
+        turret: checked(turret_index),
+        primary_muzzle: checked(primary_muzzle_index),
     }
+}
+
+/// Every node the simulation body spawns: the used nodes plus their ancestor chains. The COM node
+/// is deliberately absent — its position is pure data, applied to the root, and nothing addresses
+/// it as an entity anymore.
+fn needed_nodes(geometry: &TankGeometry, nodes: &RigNodes) -> HashSet<usize> {
+    let mut needed: HashSet<usize> = HashSet::new();
+    let mut include = |mut index: usize| {
+        while index != 0 && needed.insert(index) {
+            index = geometry.nodes[index].parent.unwrap_or(0);
+        }
+    };
+    for &index in &nodes.servo_nodes {
+        include(index);
+    }
+    for &(muzzle, barrel) in &nodes.weapon_nodes {
+        include(muzzle);
+        if let Some(barrel) = barrel {
+            include(barrel);
+        }
+    }
+    for &(_, _, index) in &nodes.volume_nodes {
+        include(index);
+    }
+    for &(index, _) in &geometry.roadwheels {
+        include(index);
+    }
+    for &index in &geometry.collision_proxies {
+        include(index);
+    }
+    include(nodes.hull);
+    include(nodes.turret);
+    needed
+}
+
+/// Spawn one entity per needed node, parented per the extracted topology. Extraction order is
+/// parent-first, so a child always finds its parent already spawned. Returns the node-index →
+/// entity table; `None` marks a node the body does not need.
+fn spawn_node_entities(
+    commands: &mut Commands,
+    geometry: &TankGeometry,
+    root: Entity,
+    needed: &HashSet<usize>,
+) -> Vec<Option<Entity>> {
     let mut entities: Vec<Option<Entity>> = vec![None; geometry.nodes.len()];
     for (index, node) in geometry.nodes.iter().enumerate().skip(1) {
         if !needed.contains(&index) {
@@ -395,11 +469,24 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
             .id();
         entities[index] = Some(entity);
     }
-    let entity_at = |index: usize| entities[index].expect("needed nodes were spawned above");
+    entities
+}
 
-    // Servo rest rotations are spawn data, never first-tick captures.
-    for (slot, ((_, servo), index)) in servo_entries.iter().zip(&servo_nodes).enumerate() {
-        let index = index.expect("contract checked");
+/// Give each servo node its slot, role, and rest rotation. Servo rest rotations are spawn data,
+/// never first-tick captures.
+fn insert_servos(
+    commands: &mut Commands,
+    geometry: &TankGeometry,
+    root: Entity,
+    nodes: &RigNodes,
+    entity_at: impl Fn(usize) -> Entity,
+) {
+    for (slot, ((_, servo), &index)) in nodes
+        .servo_entries
+        .iter()
+        .zip(&nodes.servo_nodes)
+        .enumerate()
+    {
         commands.entity(entity_at(index)).insert((
             (*servo).clone(),
             ServoCommand::default(),
@@ -409,12 +496,24 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
             ServoRest(geometry.nodes[index].transform.rotation),
         ));
     }
+}
 
-    // A muzzle and optional barrel share one weapon slot; recoil rest is authored data.
-    for (slot, ((weapon_name, weapon), (muzzle_index, barrel_index))) in
-        weapon_entries.iter().zip(&weapon_nodes).enumerate()
+/// Bind each weapon's muzzle and optional recoiling barrel to one weapon slot. Recoil rest is
+/// authored data.
+fn insert_weapons(
+    commands: &mut Commands,
+    geometry: &TankGeometry,
+    root: Entity,
+    nodes: &RigNodes,
+    entity_at: impl Fn(usize) -> Entity,
+) {
+    for (slot, ((weapon_name, weapon), &(muzzle_index, barrel_index))) in nodes
+        .weapon_entries
+        .iter()
+        .zip(&nodes.weapon_nodes)
+        .enumerate()
     {
-        let muzzle = entity_at(muzzle_index.expect("contract checked"));
+        let muzzle = entity_at(muzzle_index);
         let barrel = barrel_index.map(&entity_at);
         let weapon_component = Weapon {
             name: (*weapon_name).clone(),
@@ -440,7 +539,7 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
             weapon_component,
             range_table,
         ));
-        if let (Some(barrel), Some(barrel_index)) = (barrel, *barrel_index) {
+        if let (Some(barrel), Some(barrel_index)) = (barrel, barrel_index) {
             commands
                 .entity(barrel)
                 .insert((GunBarrel, WeaponIndex(slot), TankRoot(root)));
@@ -453,22 +552,29 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
             }
         }
     }
+}
 
-    // --- Ballistic volumes: the volume bundle (design `armor-penetration-and-damage.md` §12;
-    // composition, not a `kind` enum — `material_factor` every volume has, optional facets layer
-    // roles on top) + a query-only trimesh collider per captured primitive, built from the
-    // extracted buffers. `trimesh_with_config(…, MERGE_DUPLICATE_VERTICES)` is the exact parry
-    // construction avian's `TrimeshFromMesh` performs (design §7.1, vendored-source proven), on
-    // the `Armor` layer with NO collision response (`filters = NONE`) so it never perturbs the
-    // body — watertight solids may be concave, fine for the march's raycast (ADR-0008).
-    //
-    // The extracted buffers are node-LOCAL and unscaled, and each collider is spawned as a child of
-    // its volume's node entity: avian's `ColliderTransform` composes the ancestor `Transform` scales
-    // onto the shape, so a volume authored at scale != 1 (the coax MG plates, and the roadwheels
-    // until their export bakes scale away) is sized right without pre-baking anything here — and
-    // stays right once the export DOES bake it, since identity scale composes to identity.
-    for (name, volume, index) in &volume_nodes {
-        let index = index.expect("contract checked");
+/// Ballistic volumes: the volume bundle (design `armor-penetration-and-damage.md` §12;
+/// composition, not a `kind` enum — `material_factor` every volume has, optional facets layer
+/// roles on top) + a query-only trimesh collider per captured primitive, built from the
+/// extracted buffers. `trimesh_with_config(…, MERGE_DUPLICATE_VERTICES)` is the exact parry
+/// construction avian's `TrimeshFromMesh` performs (design §7.1, vendored-source proven), on
+/// the `Armor` layer with NO collision response (`filters = NONE`) so it never perturbs the
+/// body — watertight solids may be concave, fine for the march's raycast (ADR-0008).
+///
+/// The extracted buffers are node-LOCAL and unscaled, and each collider is spawned as a child of
+/// its volume's node entity: avian's `ColliderTransform` composes the ancestor `Transform` scales
+/// onto the shape, so a volume authored at scale != 1 (the coax MG plates, and the roadwheels
+/// until their export bakes scale away) is sized right without pre-baking anything here — and
+/// stays right once the export DOES bake it, since identity scale composes to identity.
+fn insert_ballistic_volumes(
+    commands: &mut Commands,
+    geometry: &TankGeometry,
+    root: Entity,
+    nodes: &RigNodes,
+    entity_at: impl Fn(usize) -> Entity,
+) {
+    for &(name, volume, index) in &nodes.volume_nodes {
         let node = &geometry.nodes[index];
         let entity = entity_at(index);
         assert!(
@@ -548,11 +654,17 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
             ));
         }
     }
+}
 
-    // --- Collision proxies: a convex hull per captured primitive on the Vehicle layer.
-    // `Collider::convex_hull(points)` is exactly avian's `ConvexHullFromMesh` (it ignores
-    // indices — design §7.1). Collision-only: contributes no mass (the root authors its own).
-    for &index in collider_nodes {
+/// Collision proxies: a convex hull per captured primitive on the Vehicle layer.
+/// `Collider::convex_hull(points)` is exactly avian's `ConvexHullFromMesh` (it ignores
+/// indices — design §7.1). Collision-only: contributes no mass (the root authors its own).
+fn insert_collision_proxies(
+    commands: &mut Commands,
+    geometry: &TankGeometry,
+    entity_at: impl Fn(usize) -> Entity,
+) {
+    for &index in &geometry.collision_proxies {
         let node = &geometry.nodes[index];
         assert!(
             !node.primitives.is_empty(),
@@ -580,41 +692,25 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
                 CollisionLayers::new([Layer::Vehicle], LayerMask::ALL),
                 // Penetration backstops ONLY: the analytic belt model owns ALL tangential
                 // ground physics (phase B). Avian's default friction on these hulls would
-                // silently add grip/wall-climb beneath it (codex phase-B blocker 10).
+                // silently add grip/wall-climb beneath it.
                 Friction::ZERO.with_combine_rule(CoefficientCombine::Min),
             ));
         }
     }
+}
 
-    // --- Wheels: rig stations in name-sorted order (the track view reads their side/pose; the
-    // belt force model uses the BAKED rest circles — articulation is view-only).
-    //
-    // The station entity is ALSO the wheel's ballistic volume: the wheel ships as one unified mesh,
-    // so `Roadwheel` lands on an entity the volume loop above already gave `BallisticVolume` +
-    // `ArmorVolume` + a trimesh child. Nothing here conflicts — the two roles are disjoint
-    // components — and it is deliberate: the armour follows the station's rest pose, and the
-    // wheels being pure armour (no `hp`) means no damage path can despawn a station out from
-    // under the track rig.
-    //
-    // These nodes are also scene ROOTS in the current export (was: children of `Track_*` under
-    // `Hull`). The spawn loop maps `parent: Some(0) | None` to the tank root, so a top-level wheel
-    // simply parents to the root instead of the hull entity — and since `Hull`/`Track_*` were
-    // identity, every composed pose the sim reads (`root_position`, `rig_world_pose`, and the
-    // wheel's own local `Transform` the track view sorts by) is numerically unchanged.
-    for &(index, side) in wheel_nodes {
-        commands.entity(entity_at(index)).insert(Roadwheel { side });
-    }
-
-    // --- Structural markers.
-    let hull = entity_at(hull_index.expect("contract checked"));
-    let gun = entity_at(gunner_pitch.expect("contract checked"));
-    let turret = entity_at(turret_index.expect("contract checked"));
-    let muzzle = entity_at(primary_muzzle_index.expect("contract checked"));
-    commands.entity(hull).insert(Hull);
-    commands.entity(gun).insert(Gun);
-    commands.entity(turret).insert(Turret);
-
-    // ADR-0011: mass, inertia extents, and center of mass are authored; proxies add no mass.
+/// The root's own authored body: ADR-0011 mass, inertia extents, and center of mass (proxies add
+/// no mass), the capability + view configuration, the per-slot sim state, and the rig handles.
+fn insert_root_components(
+    commands: &mut Commands,
+    root: Entity,
+    spec: &TankSpec,
+    geometry: &TankGeometry,
+    entities: &[Option<Entity>],
+    com_index: usize,
+    weapon_count: usize,
+    rig: Rig,
+) {
     let (ex, ey, ez) = spec.inertia_extents;
     let parts: HashMap<String, Entity> = entities
         .iter()
@@ -627,7 +723,7 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
         NoAutoMass,
         NoAutoAngularInertia,
         NoAutoCenterOfMass,
-        CenterOfMass(geometry.nodes[com_index.expect("contract checked")].root_position),
+        CenterOfMass(geometry.nodes[com_index].root_position),
         // Per-tank capability requirements (design §7b) — drives `capability_effectiveness`.
         TankCapabilities(spec.capabilities.clone()),
         // Per-view FOV + gating requirement (camera FOV, view-death gate).
@@ -652,17 +748,73 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
         // `TankSim` sized to the spawned rig: every local recoil/tracer slot exists from birth;
         // authoritative readiness and belt supply live in the root's `WeaponGate`, while servo
         // integration lives in the root's separately constructed `TankServos`/`RemoteServos`.
-        // Weapon slots follow `weapon_entries`' sorted-by-name order — the same order the
-        // `WeaponIndex` loop above assigned, so slot i's state matches slot i's `Weapon`.
+        // Weapon slots follow `weapon_entries`' sorted-by-name order — the same order
+        // [`insert_weapons`] assigned `WeaponIndex` in, so slot i's state matches slot i's `Weapon`.
         TankSim {
-            weapons: vec![WeaponState::default(); weapon_entries.len()],
+            weapons: vec![WeaponState::default(); weapon_count],
         },
+        rig,
+        SimParts(parts),
+    ));
+}
+
+/// Assemble only simulation-relevant geometry under `root`. Declared nodes resolve fail-fast, and
+/// all index-bearing collections are sorted before entity creation. The GLB scene is not consulted.
+fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankContent) {
+    let geometry = content.geometry();
+    let spec = content.spec();
+    let nodes = resolve_rig_nodes(geometry, spec);
+
+    let needed = needed_nodes(geometry, &nodes);
+    let entities = spawn_node_entities(commands, geometry, root, &needed);
+    let entity_at = |index: usize| entities[index].expect("needed nodes were spawned above");
+
+    insert_servos(commands, geometry, root, &nodes, entity_at);
+    insert_weapons(commands, geometry, root, &nodes, entity_at);
+    insert_ballistic_volumes(commands, geometry, root, &nodes, entity_at);
+    insert_collision_proxies(commands, geometry, entity_at);
+
+    // --- Wheels: rig stations in name-sorted order (the track view reads their side/pose; the
+    // belt force model uses the BAKED rest circles — articulation is view-only).
+    //
+    // The station entity is ALSO the wheel's ballistic volume: the wheel ships as one unified mesh,
+    // so `Roadwheel` lands on an entity [`insert_ballistic_volumes`] already gave `BallisticVolume`
+    // + `ArmorVolume` + a trimesh child. Nothing here conflicts — the two roles are disjoint
+    // components — and it is deliberate: the armour follows the station's rest pose, and the
+    // wheels being pure armour (no `hp`) means no damage path can despawn a station out from
+    // under the track rig.
+    //
+    // These nodes are also scene ROOTS in the current export (was: children of `Track_*` under
+    // `Hull`). The spawn loop maps `parent: Some(0) | None` to the tank root, so a top-level wheel
+    // simply parents to the root instead of the hull entity — and since `Hull`/`Track_*` were
+    // identity, every composed pose the sim reads (`root_position`, `rig_world_pose`, and the
+    // wheel's own local `Transform` the track view sorts by) is numerically unchanged.
+    for &(index, side) in &geometry.roadwheels {
+        commands.entity(entity_at(index)).insert(Roadwheel { side });
+    }
+
+    // --- Structural markers.
+    let hull = entity_at(nodes.hull);
+    let gun = entity_at(nodes.gunner_pitch);
+    let turret = entity_at(nodes.turret);
+    let muzzle = entity_at(nodes.primary_muzzle);
+    commands.entity(hull).insert(Hull);
+    commands.entity(gun).insert(Gun);
+    commands.entity(turret).insert(Turret);
+
+    insert_root_components(
+        commands,
+        root,
+        spec,
+        geometry,
+        &entities,
+        nodes.center_of_mass,
+        nodes.weapon_entries.len(),
         Rig {
             hull,
             turret,
             gun,
             muzzle,
         },
-        SimParts(parts),
-    ));
+    );
 }
