@@ -21,11 +21,13 @@ use bevy::prelude::*;
 use bevy::world_serialization::WorldInstanceReady;
 
 use crate::bake::TankBlueprint;
+use crate::render_policy::VisualScope;
 use crate::tank::{Roadwheel, Tank, TrackSide, ViewNode};
 
 use super::gear_phase::{gear_spin_transform, spin_angle, sprocket_tooth_tip, tooth_angle};
 use super::link_view::{self, LinkFrame, LinkTemplate};
 use super::rig_geom::RigGeom;
+use super::shadow_proxy::{self, ProxyMode, ProxySide, ProxyStep};
 use super::side::Side;
 use super::sim::TrackDrive;
 use super::terrain::TrackField;
@@ -48,7 +50,10 @@ pub fn view_plugin(app: &mut App) {
     // procedural boxes and hid neither node until 2026-07-26, so every session drew a stray white
     // marker box and a loose shoe parked beside the hull.
     app.add_plugins(link_view::template_plugin);
-    app.add_systems(Update, bind_track_rigs);
+    // The belt's shadow caster ([`super::shadow_proxy`]). The knob is read ONCE, at plugin build:
+    // the A/B is a launch-time arm, not something a frame gets to change.
+    app.insert_resource(ProxyMode::from_env());
+    app.add_systems(Update, (bind_track_rigs, attach_shadow_proxies).chain());
     app.configure_sets(
         PostUpdate,
         TrackViewSet
@@ -73,7 +78,7 @@ pub(crate) const SNAP_TRANSLATION: f32 = 1.2;
 pub(crate) const SNAP_AXIS: f32 = 0.5;
 /// Wheel-lift probe stations across the DISC (m from the wheel's real x) — the Tiger's
 /// interleaved discs are 0.158 m wide, far narrower than the shoe: probing shoe-wide at an
-/// outboard wheel column would read geometry entirely beside the track (codex finding C).
+/// outboard wheel column would read geometry entirely beside the track.
 /// Interim until the bake carries disc bounds. (The wrap's conform keeps shoe-wide lateral stations
 /// at `plane_x` — [`RigSide::lateral_stations`] — because that IS the physics footprint.)
 const WHEEL_DISC_STATIONS: [f32; 3] = [-0.08, 0.0, 0.08];
@@ -147,6 +152,11 @@ struct RigSide {
     /// Tiger's shoe is authored ~16.85 mm outboard of the pin plane, and anchoring it on the pin
     /// plane would lose the authored overhang.
     link_center_x: f32,
+    /// This side's SHADOW CASTER ([`super::shadow_proxy`]): the low-poly ribbon that casts the
+    /// belt's shadow so the 5 552-triangle shoes do not have to. `None` under [`ProxyMode::Off`]
+    /// (the shoes cast, exactly as they shipped) and for the one frame between the rig binding and
+    /// [`attach_shadow_proxies`] running.
+    proxy: Option<ProxySide>,
 }
 
 struct RigWheel {
@@ -179,6 +189,11 @@ fn rebind_on_reinstance(
     for side in &rig.sides {
         for &link in &side.links {
             commands.entity(link).despawn();
+        }
+        // The shadow ribbon goes with them — `attach_shadow_proxies` spawns a fresh one (and a fresh
+        // mesh asset) against the rebound rig, and a leaked one would keep casting the old belt.
+        if let Some(proxy) = &side.proxy {
+            commands.entity(proxy.entity).despawn();
         }
     }
     commands.entity(ready.entity).remove::<TrackRig>();
@@ -370,6 +385,7 @@ fn bind_track_rigs(
                 links: links_l,
                 link_frame: template.frame(Side::Left),
                 link_center_x: geom.link_center_x(Side::Left),
+                proxy: None,
             },
             RigSide {
                 plane_x: geom.plane_x,
@@ -386,6 +402,7 @@ fn bind_track_rigs(
                 links: links_r,
                 link_frame: template.frame(Side::Right),
                 link_center_x: geom.link_center_x(Side::Right),
+                proxy: None,
             },
         ];
         info!(
@@ -409,6 +426,100 @@ fn bind_track_rigs(
     }
 }
 
+/// Hang the belt's SHADOW CASTER on a freshly bound rig: one ribbon entity per side
+/// ([`super::shadow_proxy`] — read its module doc first; the mechanism that hides the ribbon from
+/// the camera is not the obvious one, and the obvious one is broken upstream).
+///
+/// This system does NOT silence the shoes. The caster swap is atomic and lives in
+/// [`drive_track_views`], which flips it on the frame a real ribbon exists — see
+/// [`shadow_proxy::ProxySide::built`] for why spawning an empty proxy and silencing the shoes in
+/// the same breath is a silent total shadow loss waiting for its first slow frame.
+///
+/// A separate system rather than more parameters on [`bind_track_rigs`], which is already at twelve:
+/// this one needs two `Assets` writers, and the mesh it spawns cannot be built until the belt has
+/// been fitted once anyway. `Added<TrackRig>` fires the frame after the bind's `Commands` flush.
+fn attach_shadow_proxies(
+    mode: Res<ProxyMode>,
+    geom: Option<Res<RigGeom>>,
+    mut rigs: Query<(Entity, &mut TrackRig), Added<TrackRig>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    // One material for every proxy in the session — the ribbons differ in MESH, never in look.
+    mut material: Local<Option<Handle<StandardMaterial>>>,
+    mut commands: Commands,
+) {
+    if !mode.silences_links() || rigs.is_empty() {
+        return;
+    }
+    let Some(geom) = geom else {
+        return;
+    };
+    let material = material
+        .get_or_insert_with(|| {
+            materials.add(if *mode == ProxyMode::Visible {
+                shadow_proxy::visible_probe_material()
+            } else {
+                shadow_proxy::proxy_material()
+            })
+        })
+        .clone();
+    for (root, mut rig) in &mut rigs {
+        for (si, side) in rig.sides.iter_mut().enumerate() {
+            // An empty mesh until the first belt fit lands (`built`), so a proxy can never flash a
+            // fold of a half-initialised polyline — and, with the swap now atomic, so the shoes
+            // keep casting until this is real geometry.
+            let mesh = meshes.add(Mesh::new(
+                bevy::mesh::PrimitiveTopology::TriangleList,
+                bevy::asset::RenderAssetUsages::default(),
+            ));
+            let proxy = commands.spawn((
+                Name::new(if si == 0 {
+                    "Track shadow proxy L"
+                } else {
+                    "Track shadow proxy R"
+                }),
+                // Invisible to every camera, visible to every light — the ribbon's whole contract,
+                // declared instead of smuggled through a material (`render_policy`). It overrides
+                // the tank root's scope, so it keeps casting whichever view the player is in;
+                // `ProxyMode::Visible` is the one mode that wants to be LOOKED at, so it becomes
+                // ordinary world geometry instead.
+                if *mode == ProxyMode::Visible {
+                    VisualScope::WORLD_SOLID
+                } else {
+                    VisualScope::SHADOW_PROXY
+                },
+                Mesh3d(mesh.clone()),
+                MeshMaterial3d(material.clone()),
+                // Identity: the ribbon is authored directly in hull space, the frame the belt
+                // joints already live in.
+                Transform::IDENTITY,
+                ChildOf(root),
+            ));
+            side.proxy = Some(ProxySide {
+                entity: proxy.id(),
+                mesh,
+                built: false,
+                pending_frames: 0,
+                section: shadow_proxy::Section::from_shoe(
+                    side.link_center_x,
+                    geom.model.width,
+                    geom.model.pin_to_inner,
+                    geom.model.pin_to_outer,
+                ),
+            });
+        }
+        // Intent only — deliberately says nothing about triangles or silenced shoes, because at this
+        // point neither exists. `drive_track_views` logs the MEASURED geometry when the swap lands.
+        // (The line this replaces claimed "2 ribbons of 776 triangles" from `rig.count * 8` on the
+        // frame the ribbons were still empty, and that false success signal is what a reviewer read
+        // as proof the proxy was working while it cast nothing at all.)
+        info!(
+            "track shadow proxy: {mode:?} — 2 ribbons spawned for {} shoes/side, awaiting first fit",
+            rig.count
+        );
+    }
+}
+
 /// The per-frame seam: read each tank's presented root pose and replicated belt phase, lift the
 /// view wheels off the terrain field, fit the wrap, and write every view transform — all before
 /// propagation, so the whole tank renders one consistent frame.
@@ -420,8 +531,15 @@ fn drive_track_views(
     // per frame — well below the SystemParam ceiling.
     gear: Res<super::sim::TrackGear>,
     blueprint: Res<TankBlueprint>,
+    // The shadow ribbon's arm and the assets it writes into: one `Mesh` per tank SIDE, rewritten in
+    // place under [`ProxyMode::Dynamic`] (never shared — two tanks stand on different ground).
+    mode: Res<ProxyMode>,
+    mut proxy_meshes: ResMut<Assets<Mesh>>,
     mut tanks: Query<(&Transform, &TrackDrive, &mut TrackRig)>,
     mut views: Query<&mut Transform, Without<TrackRig>>,
+    // The caster swap's one write: `VisualScope::PROXIED_CASTER` onto this side's shoes, on the
+    // frame its ribbon first exists. Runs once per side per bind, never per frame.
+    mut commands: Commands,
 ) {
     let Some(field) = track.field.as_ref() else {
         return;
@@ -529,7 +647,7 @@ fn drive_track_views(
         // Both feel tiers are unconditional — parameter-free laws, so there is nothing to dial.
         let out = wrap::step(&input, field, &mut rig.wrap);
 
-        for (si, side) in rig.sides.iter().enumerate() {
+        for (si, side) in rig.sides.iter_mut().enumerate() {
             // The SHOES, on this frame's drawn pin joints: link `i` spans joint `i` → `i+1`, its
             // pin midpoint on the route and its own measured centre on `link_center_x`. The
             // entity↔joint map rotates with the belt phase, so a shoe's identity rides the belt
@@ -548,6 +666,51 @@ fn drive_track_views(
                     }
                 },
             );
+            // The SHADOW CASTER, on the same joints ([`super::shadow_proxy`]). Under `Static` this
+            // runs once and the ribbon then rides the hull unchanged; under `Dynamic` the mesh is
+            // rewritten every frame, which is what keeps the cast shadow honest over rough ground.
+            //
+            // This is also where the CASTER SWAP happens, and it is atomic on purpose: the shoes are
+            // silenced on the frame a non-empty ribbon first lands, never at spawn. Every guard in
+            // the chain below can legitimately fail (no mesh asset yet, a mid-bind belt under three
+            // joints) and each one used to mean a tank with no belt shadow at all.
+            if let Some(proxy) = &mut side.proxy {
+                // Write the mesh, and count what was ACTUALLY written. Zero covers every way this
+                // frame can fail to produce geometry, including the ones the `&&` chain swallows.
+                let mut triangles = 0;
+                if (!proxy.built || mode.rebuilds_every_frame())
+                    && let Some(mut mesh) = proxy_meshes.get_mut(&proxy.mesh)
+                    && let Some(fresh) = shadow_proxy::ribbon_mesh(&out[si].joints, proxy.section)
+                {
+                    triangles = fresh.indices().map_or(0, |indices| indices.len() / 3);
+                    *mesh = fresh;
+                }
+                match proxy.record_attempt(triangles) {
+                    ProxyStep::Idle => {}
+                    // The shoes keep rendering at full detail to the camera at every distance — this
+                    // is a CASTER swap, not an LOD. `PROXIED_CASTER` is the preset that says so: it
+                    // stops the shoe casting and leaves it RECEIVING, and it deliberately keeps
+                    // inheriting the tank's channel, so a silenced shoe still follows its tank into
+                    // and out of the gunner optic. MEASURED triangles, never `count * 8`: the
+                    // number in this line is the number of triangles that exist.
+                    ProxyStep::Silence => {
+                        for &link in &side.links {
+                            commands.entity(link).insert(VisualScope::PROXIED_CASTER);
+                        }
+                        info!(
+                            "track shadow proxy: {mode:?} side {si} — ribbon built, {triangles} \
+                             triangles MEASURED; {} shoes silenced",
+                            side.links.len()
+                        );
+                    }
+                    ProxyStep::Overdue => warn!(
+                        "track shadow proxy: side {si} still has no ribbon after {} frames — the \
+                         {} real shoes are carrying the belt's shadow at full cost",
+                        shadow_proxy::PROXY_READY_GRACE_FRAMES,
+                        side.links.len()
+                    ),
+                }
+            }
             // Wheels roll on the track's INNER face (pin line − `pin_to_inner`, the measured inner
             // offset — the pin does not run mid-plate, so it is not half the plate). Every axle
             // angle is NEGATIVE (Bevy +X rotation moves a wheel's bottom toward −Z, and positive

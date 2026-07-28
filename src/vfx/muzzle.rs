@@ -277,6 +277,12 @@ fn spawn_muzzle_light(
                 shadow_maps_enabled: shadows,
                 ..default()
             },
+            // "The hull occludes it like any object" is only true while the light can SEE the hull.
+            // This light does cast by default, and with the vendored shadow-view patch its shadow
+            // view inherits this mask — so without a profile it would neither light nor be occluded
+            // by the player's own tank (which lives on its own channel), and the track ribbon would
+            // stop casting from it too.
+            crate::render_policy::LightProfile::BattlefieldMuzzleFlash,
             Transform::from_translation(position),
         ))
         .id();
