@@ -65,11 +65,13 @@ impl VisibilityFilter for CombatDisclosure {
         //
         // `net::protocol::ImpactConfirm` is public (`NetworkTarget::All`) and carries `penetrated`,
         // which is NOT a contradiction of this line: it is a TRANSIENT, SPATIALLY-ANCHORED,
-        // PER-SHOT fact whose only job is to let an observer draw honestly the impact already on
-        // their screen — withholding the verdict would make the drawn flame lick a lie
-        // (`vfx`'s no-fake-assistance rule). What it discloses is one armor outcome at one point;
-        // what it never discloses is whose hull, how many, or any damage. Every public fire-visual
-        // fact is public by the same design decision (ADR-0016/0021).
+        // PER-SHOT fact whose only job is to let a client draw ONE impact honestly WHEN that impact
+        // is in view — withholding the verdict would make the drawn flame lick a lie (`vfx`'s
+        // no-fake-assistance rule). It is broadcast, so it also reaches clients facing the other
+        // way and clients a map away, which is exactly why it is judged as a disclosure and not as a
+        // render hint. What it discloses is one armor outcome at one point; what it never discloses
+        // is whose hull, how many, or any damage. Every public fire-visual fact is public by the
+        // same design decision (ADR-0016/0021).
         HullShock,
         TankServos,
         NetTrackGripAnchor,

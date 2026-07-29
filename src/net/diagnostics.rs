@@ -269,15 +269,23 @@ pub(crate) fn watch_rollback_metrics(
     mut watch: ResMut<RollbackWatch>,
 ) {
     if metrics.rollbacks != watch.last_count {
-        // The ordering instrument rides this line because a rollback is exactly when it changes:
-        // `unordered` counts shoves the budget released with no impact visual behind them, and
-        // `max_wait` is the worst delay the ordering rule has imposed. Those two numbers are what
-        // decide whether a presentation commit barrier is ever worth building (`net::adoption`).
-        let (unordered, max_wait) = presentation.budget_exceeded();
+        // The ordering instrument rides this line because a rollback is exactly when it changes.
+        // `net::adoption`'s shove ordering is BEST EFFORT, so both failure modes are reported:
+        // `budget` counts shoves the local patience budget released with no impact visual drawn for
+        // their episode, and `bypassed` counts shoves a rollback this client did not order landed
+        // ahead of their spark — the gap trigger arbitration structurally cannot close. Those are
+        // what decide whether a presentation commit barrier is ever worth building.
+        let tally = presentation.tally();
         info!(
             "client: ROLLBACK fired (PredictionMetrics.rollbacks={}, rollback_ticks={}, \
-             unordered_shoves={unordered}, max_shove_wait_ticks={max_wait})",
-            metrics.rollbacks, metrics.rollback_ticks
+             shoves_on_impact={}, shoves_on_budget={}, shoves_bypassed={}, \
+             max_shove_wait_ticks={})",
+            metrics.rollbacks,
+            metrics.rollback_ticks,
+            tally.released_on_impact,
+            tally.released_on_budget,
+            tally.bypassed,
+            tally.max_wait_ticks,
         );
         watch.last_count = metrics.rollbacks;
     }

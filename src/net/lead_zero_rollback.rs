@@ -43,11 +43,11 @@
 //!   entity the server explicitly updated, i.e. every driven tank.
 //!
 //! Neither gate can be observed at a lead of 8 with an anchored-away `ConfirmHistory`. That is why
-//! the fixtures below exist, and why they are `#[ignore]`d rather than deleted: they are RED on the
-//! current design and are the acceptance test for slice 2.
+//! the fixtures below exist: they were RED on the pre-slice-2 design and were its acceptance test.
 //!
-//! The lead-arithmetic guard is NOT ignored. It passes today and must fail loudly the moment
-//! someone edits a sync constant without understanding that these four numbers cancel.
+//! The lead-arithmetic guard stands apart from all of that: it asserts the premise the other
+//! fixtures are BUILT on, and must fail loudly the moment someone edits a sync constant without
+//! understanding that these four numbers cancel.
 
 use core::time::Duration;
 
@@ -70,7 +70,7 @@ use lightyear_core::timeline::NetworkTimeline;
 use lightyear_sync::prelude::client::RemoteTimeline;
 use lightyear_sync::timeline::sync::{SyncTargetTimeline, SyncedTimeline};
 
-use super::adoption::ORDERING_BUDGET_TICKS;
+use super::adoption::{ImpactPresentation, ORDERING_BUDGET_TICKS, OrderingTally};
 use crate::ballistics::{HullShock, HullShockLedger, Impact, ImpactSurface, ShockCause};
 use crate::tank::Tank;
 
@@ -157,6 +157,9 @@ struct Delivered {
     /// `PreUpdate`. This is what separates the two leads: a checkpoint level with the client is
     /// examined and marked processed, one in the client's future is neither.
     processed_on_arrival: Option<Tick>,
+    /// `net::adoption`'s ordering tallies after the run — which way the shove was released, and
+    /// what the wait cost.
+    ordering: OrderingTally,
 }
 
 fn observe_replay(timeline: Res<LocalTimeline>, mut delivered: ResMut<Delivered>) {
@@ -170,6 +173,12 @@ fn observe_replay(timeline: Res<LocalTimeline>, mut delivered: ResMut<Delivered>
 /// Two things separate this from `net::hull_shock_rollback`, and they are the whole point: the
 /// entity's `ConfirmHistory` is anchored ON [`producing_replicon_tick`] (an actively driven tank is
 /// explicitly confirmed at every checkpoint), and no mismatch is seeded by hand.
+///
+/// The frame ordering is the SHIPPING one, and that is load-bearing for the ordering assertions:
+/// the arrival `PreUpdate` runs with no spark drawn, because `ImpactConfirm` is a message drained in
+/// `Update` and the march cannot present it until a later frame. Only then does [`present_impact`]
+/// run, followed by the `PreUpdate` that may adopt. A fixture that drew the spark before the arrival
+/// frame would be asserting an order the real schedule cannot produce.
 ///
 /// SCOPE, honestly stated: like both older fixtures this deposits confirmed history directly rather
 /// than deserializing a replication message, so it executes the completed-tick scan gate and not
@@ -266,7 +275,6 @@ fn run_arrival(lead: Lead, visual: Visual) -> Delivered {
     }
 
     advance_to(&mut app, lead.present_tick());
-    present_impact(&mut app, visual);
     app.world_mut().run_schedule(PreUpdate);
     let processed_on_arrival = app
         .world()
@@ -278,11 +286,19 @@ fn run_arrival(lead: Lead, visual: Visual) -> Delivered {
     // frame: a shove must not be lost merely because it arrived a tick early.
     if lead == Lead::MinusOne {
         advance_to(&mut app, PRODUCING_TICK);
-        present_impact(&mut app, visual);
         app.world_mut().run_schedule(PreUpdate);
     }
 
+    // The arrival frame is over and NO spark can have been drawn for this hit yet — that is the
+    // schedule, not a fixture convenience: `ImpactConfirm` is a message drained in `Update`, so the
+    // earliest the ballistics march can present it is a later frame. This is what the player would
+    // have felt if the shove were allowed to outrun its own spark.
     let held_linear = app.world().get::<LinearVelocity>(root).unwrap().0;
+
+    // The later frame, with the march's presentation in it.
+    present_impact(&mut app, visual);
+    app.world_mut().run_schedule(PreUpdate);
+
     if visual == Visual::Missing {
         // Spend the ordering budget. A visual that has not been drawn by now is not coming, so the
         // shove must land anyway rather than be held for it forever.
@@ -293,6 +309,7 @@ fn run_arrival(lead: Lead, visual: Visual) -> Delivered {
         app.world_mut().run_schedule(PreUpdate);
     }
 
+    let ordering = app.world().resource::<ImpactPresentation>().tally();
     let live_linear = app.world().get::<LinearVelocity>(root).unwrap().0;
     let live_angular = app.world().get::<AngularVelocity>(root).unwrap().0;
     let live_shock = *app.world().get::<HullShock>(root).unwrap();
@@ -307,6 +324,7 @@ fn run_arrival(lead: Lead, visual: Visual) -> Delivered {
     delivered.live_shock = live_shock;
     delivered.realized_count = realized_count;
     delivered.processed_on_arrival = processed_on_arrival;
+    delivered.ordering = ordering;
     delivered
 }
 
@@ -382,7 +400,7 @@ fn the_zero_lead_shove_arrives_with_no_replayed_tick_at_all() {
     assert_eq!(delivered.live_angular, AUTHORITY_ANGULAR);
 }
 
-/// The contract both ignored fixtures assert: whatever route slice 2 takes, the server's hull
+/// The contract both delivery fixtures assert: whatever route the adoption takes, the server's hull
 /// velocity has to become the client's LIVE hull velocity.
 fn assert_delivered(lead: Lead) {
     let delivered = run_arrival(lead, Visual::Drawn);
@@ -406,7 +424,7 @@ fn assert_delivered(lead: Lead) {
 
 /// THE ORDERING RULE, at the lead where the schedule makes it bite. The shock and its
 /// `ImpactConfirm` leave the authority together, but the confirm is a MESSAGE drained in `Update`
-/// and presented by the NEXT frame's march, while the shock is replicated state adopted here in
+/// and presented by a LATER frame's march, while the shock is replicated state adopted here in
 /// `PreUpdate`. Without a rule the hull would lurch a frame before anything was seen to hit it.
 ///
 /// So: no spark drawn, no shove — and then the budget releases it anyway, because a shove that never
@@ -428,28 +446,45 @@ fn a_shove_waits_for_its_spark_and_the_budget_still_delivers_it() {
         delivered.live_shock, delivered.replayed_ticks,
     );
     assert_eq!(delivered.live_angular, AUTHORITY_ANGULAR);
-}
-
-/// The same run with the spark drawn: the shove lands on the FIRST eligible frame, so the ordering
-/// rule costs nothing whenever the visual is actually there. Without this the fixture above could
-/// pass on a rule that always waits out the full budget.
-#[test]
-fn a_drawn_spark_costs_the_shove_no_wait_at_all() {
-    let delivered = run_arrival(Lead::Zero, Visual::Drawn);
-
     assert_eq!(
-        delivered.held_linear, AUTHORITY_LINEAR,
-        "with the spark already drawn the shove must land immediately, not after the budget",
+        delivered.ordering,
+        OrderingTally {
+            released_on_budget: 1,
+            max_wait_ticks: ORDERING_BUDGET_TICKS,
+            ..default()
+        },
+        "the release must be attributed to the budget, and the wait it cost must be reported",
     );
 }
 
-/// GUARD ON THE LEAD ARITHMETIC — this one is NOT ignored.
+/// The same run with the spark drawn: the shove lands on the FIRST frame after the presentation, so
+/// the ordering rule costs no measurable wait whenever the visual is actually there. Without this
+/// the fixture above could pass on a rule that always waits out the full budget.
+#[test]
+fn a_drawn_spark_costs_the_shove_no_measurable_wait() {
+    let delivered = run_arrival(Lead::Zero, Visual::Drawn);
+
+    assert_eq!(
+        delivered.live_linear, AUTHORITY_LINEAR,
+        "the frame after the spark is drawn, the shove must land",
+    );
+    assert_eq!(
+        delivered.ordering,
+        OrderingTally {
+            released_on_impact: 1,
+            ..default()
+        },
+        "released against the spark, at zero local wait — not by the budget, and not bypassed",
+    );
+}
+
+/// GUARD ON THE LEAD ARITHMETIC.
 ///
 /// Reads the values `net::client::run` actually installs — `net::client::shipping_input_delay`,
 /// `net::harness::jitter_multiple`, and the `SyncConfig` defaults the `..default()` in that
 /// composition leaves alone — and asks lightyear's own `sync_objective` where the client's input
-/// timeline lands relative to a zero-RTT, zero-jitter server. The answer is the number the two
-/// ignored fixtures above are built on, so it is derived here and nowhere else.
+/// timeline lands relative to a zero-RTT, zero-jitter server. The answer is the number every fixture
+/// above is built on, so it is derived here and nowhere else.
 #[test]
 fn shipping_loopback_client_lead_is_exactly_zero_ticks() {
     let pings = PingManager::default();
