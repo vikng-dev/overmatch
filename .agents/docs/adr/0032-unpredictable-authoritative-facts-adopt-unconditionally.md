@@ -426,7 +426,13 @@ Round 7's contribution beyond the two fixes. **Adding a new latched value to `ne
 adding a row here**, with the reason it is safe stated in the same terms: what establishes it, what
 consumes it, and what stops the answer moving in between. A row that cannot state one is a defect.
 
-The two defective rows are marked and are fixed by slice 3.11.
+**PROVENANCE, stated because this arc has twice shipped a coverage claim it could not back.** Round 7
+reported assessing 23 latched values and finding 2 defective. The rows below are a RE-DERIVATION from
+the source, not a transcript of that list — the implementing session had the two findings and the
+class, not the review's own enumeration. It is 25 rows rather than 23, so the two are not in
+correspondence and neither number should be quoted as the other's. What the table is good for is the
+discipline it makes extensible; what it is NOT is independent evidence that exactly 21 values are safe.
+Both defective rows are marked and are fixed by slice 3.11.
 
 | Latched value | Established at | Consumed at | Why that is safe |
 |---|---|---|---|

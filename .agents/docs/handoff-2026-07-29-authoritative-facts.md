@@ -236,10 +236,13 @@ the gap is inside one `PreUpdate` on a `Predicted` hull — and that is now the 
 **Round 7 did not look for a third instance. It enumerated the class.** The defect shape both rounds 5
 and 6 found is *a value latched at one schedule point and consumed at another*, and round 7 assessed
 every such value in `src/net/adoption.rs`: 23 of them, 21 safe with stated reasons, 2 defective. That
-enumeration is the round's most valuable artifact and is now folded into ADR-0032 as **the latch audit
-table** — latched value → what establishes it → what consumes it → why the answer cannot move in
-between. Adding a new latched value to this module means adding a row. A row that cannot state a
-reason is a defect.
+enumeration is the round's most valuable artifact, and ADR-0032 now carries **a latch audit table** —
+latched value → what establishes it → what consumes it → why the answer cannot move in between.
+Adding a new latched value to this module means adding a row; a row that cannot state a reason is a
+defect. **The table is a RE-DERIVATION from the source, not round 7's list verbatim** — the
+implementing session had the two findings and the class, not the review's own 23 rows, and the table
+came out at 25. Do not quote the two numbers as each other, and do not read the table as independent
+proof that exactly 21 values are safe.
 
 **The High: the hull's PARTICIPATION in the restore was latched at the offer.** Everything rounds 5
 and 6 fixed is about what a rollback would RESOLVE; none of it asks whether the hull is in the
