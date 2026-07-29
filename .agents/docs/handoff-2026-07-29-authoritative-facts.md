@@ -235,14 +235,26 @@ the gap is inside one `PreUpdate` on a `Predicted` hull — and that is now the 
 
 **Round 7 did not look for a third instance. It enumerated the class.** The defect shape both rounds 5
 and 6 found is *a value latched at one schedule point and consumed at another*, and round 7 assessed
-every such value in `src/net/adoption.rs`: 23 of them, 21 safe with stated reasons, 2 defective. That
-enumeration is the round's most valuable artifact, and ADR-0032 now carries **a latch audit table** —
-latched value → what establishes it → what consumes it → why the answer cannot move in between.
-Adding a new latched value to this module means adding a row; a row that cannot state a reason is a
-defect. **The table is a RE-DERIVATION from the source, not round 7's list verbatim** — the
-implementing session had the two findings and the class, not the review's own 23 rows, and the table
-came out at 25. Do not quote the two numbers as each other, and do not read the table as independent
-proof that exactly 21 values are safe.
+every such value in `src/net/adoption.rs`: **23 rows, 21 safe with stated reasons, 2 defects appearing
+at 4 of them.** That enumeration is the round's most valuable artifact, and ADR-0032 now carries it as
+**the latch audit table** — latched value → what establishes it → what consumes it → why the answer
+cannot move in between. Adding a new latched value to this module means adding a row; a row that
+cannot state a reason is a defect.
+
+**The table in the ADR is a RECONCILIATION, and the reconciliation is the interesting part.** The
+implementing session enumerated the class independently before receiving round 7's list, found 25
+rows, and the two merge to 27 — **each pass having missed four rows the other found.** Round 7 lacked
+the `PredictionHistory` membership condition (the second half of `prepare_rollback`'s own query
+filter, sitting beside the `DisableRollback` condition it found twice); the implementer's pass lacked
+the request-time four-history verdict — which is the load-bearing step of the ADR's own `Undelivered`
+unreachability proof — plus the request-time frontier/age, the offer-time `Predicted`/`Remote`
+membership, and `carried` as a row in its own right. Every row is provenance-marked in the ADR.
+
+**So the honest verdict is that the enumeration is NOT saturating.** If prose enumeration by a careful
+reader converged, at least one of two independent passes would have been complete; neither was, and
+both passes missed in the same direction — conditions asserted structurally (a query filter, a
+schedule adjacency) rather than as named fields. 27 rows is the best current inventory, not a proof
+that the class has 27 members.
 
 **The High: the hull's PARTICIPATION in the restore was latched at the offer.** Everything rounds 5
 and 6 fixed is about what a rollback would RESOLVE; none of it asks whether the hull is in the
@@ -320,12 +332,28 @@ clean, no agent holds a lock, and the simplifier is idle.
    code — that instruction has caught a real error of mine in five of seven rounds, and rounds 3.9,
    3.10 and 3.11 each corrected one of the previous review's or brief's own claims. Round 7 closed the
    *latch* class and left the audit table in ADR-0032, so round 8's job is a different question, not a
-   fourth pass at the same one: **is the class boundary itself right?** Two specific things to put to
-   it — (a) the audit's soundness argument for the post-`Prepare` proof is a claim about what runs
-   between `RollbackSystems::Prepare` and `RollbackSystems::Rollback`, which is a DEPENDENCY property
-   like the `Undelivered` proof and has no tripwire; (b) `prepare_restores` mirrors lightyear's query
-   rather than observing its effect, so a lightyear change that keeps the archetype and changes the
-   restore would pass it silently.
+   fourth pass at the same one. Three specific things to put to it:
+
+   - **(a)** the audit's soundness argument for the post-`Prepare` proof is a claim about what runs
+     between `RollbackSystems::Prepare` and `RollbackSystems::Rollback` — a DEPENDENCY property like
+     the `Undelivered` proof, with no tripwire;
+   - **(b)** `prepare_restores` mirrors lightyear's QUERY rather than observing its EFFECT, so a
+     lightyear change that keeps the archetype and changes the restore passes it silently.
+     `prepare_rollback` clears the prediction history and re-anchors it at `rollback_tick`, which is
+     directly observable and would be the effect-side proof;
+   - **(c)** the one the reconciliation raised, and the sharpest: **prose enumeration of this class
+     demonstrably does not saturate.** Two independent passes each missed four rows, both in the same
+     direction — structurally-asserted conditions rather than named fields. Is the mechanical form
+     worth building? The module already has the precedent (`only_the_forced_rollback_slot_requests_a_forced_rollback`
+     is a source scan enforcing an invariant nobody has to remember). The saturating shape would be:
+     every field of every resource this module owns × every system reading it, wherever writer and
+     reader sit at different schedule positions, plus every condition one query asserts and another
+     site relies on.
+
+   Two rows also carry forward as scheduled re-assessments rather than review questions:
+   `ForcedRollbackSlot::installed` is safe partly *because it has no external consumer*, which slice 4
+   removes; and the `PresentedHit` eviction argument became load-bearing for two consumers when
+   slice 3.11 made `retirement` read the same ledger.
 2. **Slice 4 — `render_error`** (task #32, held all session). Fix the one-frame render freeze per
    rollback, and honour the `AdoptionCause` tag so an adopted authority impulse stays sharp instead
    of being smoothed like a misprediction. `AdoptionCause` currently has **no consumer** —

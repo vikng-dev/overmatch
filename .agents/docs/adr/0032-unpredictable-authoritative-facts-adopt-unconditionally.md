@@ -363,9 +363,10 @@ the counter is the tripwire that says the proof stopped holding.
 Rounds 5 and 6 both found the same defect shape — *a value latched at one schedule point and consumed
 at another* — and both fixes landed on exactly the instance the finding named. Round 7 stopped
 hunting instances and audited the class: every value `src/net/adoption.rs` establishes at one point in
-the schedule and acts on at another. **Two of them were defective; the rest are safe for stated
-reasons.** The audit is the table below, and it is the evidence that the class is closed rather than
-merely quiet.
+the schedule and acts on at another. **Two defects, showing up at four points; every other value is
+safe for a stated reason.** The audit is the table below — and the reconciliation of round 7's
+enumeration against an independent one turned out to say something sharper than "the class is closed",
+so read the *Is this the class?* note at the end of it before treating the class as shut.
 
 **The HIGH one was the hull's participation in the restore itself.** Everything rounds 5 and 6 fixed
 is about what a rollback would RESOLVE. None of it asks whether the hull is in the rollback at all.
@@ -422,45 +423,79 @@ see.
 
 ### The latch audit — every value established at one schedule point and consumed at another
 
-Round 7's contribution beyond the two fixes. **Adding a new latched value to `net::adoption` means
-adding a row here**, with the reason it is safe stated in the same terms: what establishes it, what
-consumes it, and what stops the answer moving in between. A row that cannot state one is a defect.
+Round 7's contribution beyond the two fixes, and the reason this ADR carries a table at all.
+**Adding a new latched value to `net::adoption` means adding a row here**, stating what establishes
+it, what consumes it, and what stops the answer moving in between. A row that cannot state the third
+is a defect.
 
-**PROVENANCE, stated because this arc has twice shipped a coverage claim it could not back.** Round 7
-reported assessing 23 latched values and finding 2 defective. The rows below are a RE-DERIVATION from
-the source, not a transcript of that list — the implementing session had the two findings and the
-class, not the review's own enumeration. It is 25 rows rather than 23, so the two are not in
-correspondence and neither number should be quoted as the other's. What the table is good for is the
-discipline it makes extensible; what it is NOT is independent evidence that exactly 21 values are safe.
-Both defective rows are marked and are fixed by slice 3.11.
+**PROVENANCE, and it is the most useful thing on this page.** The table below is a RECONCILIATION of
+two independent enumerations of the same class over the same source: round 7's, which found 23 rows,
+and the implementing session's, which found 25 without having seen round 7's. They merge to 27.
+**Each pass missed rows the other found — four each way.** That asymmetry, not the row count, is the
+finding: see *Is this the class?* below.
 
-| Latched value | Established at | Consumed at | Why that is safe |
+Provenance is marked per row. `BOTH` = independently found twice. `REVIEW` = round 7 had it and the
+implementer's pass did not. `IMPL` = the reverse.
+
+#### Offer-time latches, consumed at the request or later
+
+| Latched value | Later consumer | Assessment | Prov. |
 |---|---|---|---|
-| `AuthorityAdoption::staged` | offer | request, confirm | It IS the transaction. Every *condition* on it is re-established at the request; re-offering the same identity deliberately leaves it untouched. |
-| `staged_at` | first staging only | request, as `waited` | A LOCAL patience clock by definition — a re-offer must not restart it, which is the whole reason it is not re-stamped. |
-| `requested` | claim | next frame's request, confirm | Bookkeeping only: re-derived from `StateRollbackMetadata` / `PredictionManager` every frame and cleared when they disagree. |
-| **`ordering`** | `clear_to_order` | `retirement` | **DEFECTIVE — three meanings in one `None`.** Fixed: three-state enum, and `spark_pending` asks the presentation ledger. |
-| `adopted` ledger | close | offer | Monotone. A closed fact must never be re-offered; the bounded ring drops the OLDEST, and the watermark covers what it drops. |
-| `watermarks` | close | offer | Wrapping-newer comparison per (source, entity); `Entity` carries its own generation, so a respawn is a different key. |
-| `FactId::entity` | offer | request, confirm | Bevy generations make a despawn/respawn compare unequal, and a missing hull answers `Unready::Hull` rather than a stale row. |
-| `FactId::sequence`, `checkpoint` | offer | offer dedupe | Identity only; never an input to readiness or delivery. |
-| `produced_at` | offer | request, confirm | It is the tick the fact is ABOUT. Everything conditional is re-evaluated *at* it, never carried forward from it. |
-| `settled_at` | offer | request, confirm | Derived from `HullShock::tick`, an authority fact that cannot change for a given episode. Deliberately not a wire field, so the two cannot disagree. |
-| `cause` | offer | confirm | A property of the producer; checked at confirm against the installed claim's own cause, not trusted. |
-| `visual` (`victim`, `from`, `through`) | offer | request | All three are AUTHORITY facts read off the episode. Set membership, not a window over local time — which is what round 2 killed. |
-| **hull participation in `Prepare`** | offer (query filter) | request, confirm | **DEFECTIVE — never re-established.** Fixed: `prepare_restores`, asked at both. |
-| `PredictionHistory` membership | never asked | — | **DEFECTIVE by omission**, same fix. |
-| `restore_is_deliverable`, velocity half | offer | request | Round 5's finding; re-established at the request. |
-| `restore_is_deliverable`, pose half | offer | request | Round 6's finding; re-established at the request through the same signature. |
-| `hull_shock_mismatch` verdict | offer | — | Not carried. The mismatch is what the fact IS; once the authority published the episode it cannot un-happen, and dedupe is by identity. |
-| `last_confirmed_tick`, `last_confirmed_replicon_tick` | offer | — | Not carried: the request re-reads `ReplicationCheckpointMap` before it will claim. |
-| `now` (`LocalTimeline::tick`) | offer | — | Not carried: `age` and `waited` are both recomputed from the current tick every frame. |
-| `max_rollback_ticks` | — | request | Read fresh from the `PredictionManager` each frame. |
-| `ForcedRollbackSlot::claim` | request | confirm | Same `PreUpdate`, and `confirm_forced_rollback` `take`s it unconditionally every frame, so it cannot survive one. |
-| `ForcedRollbackSlot::installed` | confirm | `net::render_error`, later in the frame | Derived from `claim` filtered on the tick lightyear actually installed, and re-derived every frame. |
-| `ImpactPresentation::presented` | `Impact` observer, in the march | request, confirm | Entries are AUTHORITY tick + victim, so they do not decay with local time. The ring is sized from `SHOCK_EPISODE_TICKS + ORDERING_BUDGET_TICKS`; overflow drops the OLDEST, which can only cost a release-on-impact the budget then covers loudly. |
-| `ImpactPresentation::tally` | throughout | `net::diagnostics` | Instrumentation, monotone, and session-scoped on purpose — a reconnect clears `presented` and deliberately does not clear the tallies. |
-| `RestoresFrom` / `started` | confirm | confirm | Read and used in the same system, off the same `PredictionManager`. |
+| Offer-time `hull_shock_mismatch` between confirmed and predicted `HullShock` | the staged transaction itself | Safe. The authority episode is HISTORICAL — it cannot un-happen — and if another rollback delivers it first, confirmation retires it. (The implementer's pass called this "not carried", which is wrong: the staged fact's existence *is* the latched verdict.) | BOTH |
+| `FactId::entity` | request, confirm | Safe. Bevy generations make a despawn/respawn compare unequal, so reincarnation cannot collide; a despawn becomes a `hulls.get` failure and `Unready::Hull`. | BOTH |
+| `FactId::source`, `sequence`, `checkpoint` | offer dedupe, close | Safe. Source and sequence are historical; the checkpoint is exact identity and logging only. Never an input to readiness or delivery. | BOTH |
+| `cause` | slot identity, retirement | Safe. Immutable classification, and same-tick slot arbitration preserves `ExternalEvent`. | BOTH |
+| `produced_at` | restore target, age/window, retirement | Safe as a TARGET. It is the tick the fact is about; the frontier and replay-window reachability are both re-checked at the request. | BOTH |
+| `settled_at` | velocity delivery predicate | Safe under the fixed-step WRITER invariant: the simulation produces one final hull value per lightyear tick, so `insert_raw`'s same-tick replacement is idempotent in fact. Note the shape of that reason — it holds because of who writes the data, not because the type forbids the violation, so it does not survive a change of writer. | BOTH |
+| `visual` (`victim`, `from`, `through`) | presentation ordering | Safe as historical authority identity — set membership, never a window over local time, which is what round 2 killed. Ledger eviction is conservative in the ordering rule; see the `PresentedHit` row for the consumer slice 3.11 added. | BOTH |
+| Offer-time four-history readiness, velocity half | request, Prepare | Safe since `baade0b`: re-read at the request. Round 5's defect. | BOTH |
+| Offer-time four-history readiness, pose half | request, Prepare | Safe since `a0ac961`: re-read at the request through the same signature. Round 6's defect. (Round 7 carried these as one row; they are split here because they were two separate review findings.) | BOTH |
+| Offer-time `Predicted` / `Remote` / `HullShock` history membership | request, Prepare | Safe, and for a STRONGER reason than the lifecycle one. Round 7's argument is that no surviving-entity removal path exists and a despawn becomes a `hulls.get` failure — true. The structural argument is better because it survives a lifecycle change: `prepare_rollback`'s query does not consult `Predicted`, `Remote`, or the `HullShock` histories at all, so losing any of them could not exclude the hull from the restore. Losing `Predicted` would exclude it from `check_rollback`, which a FORCED request bypasses anyway. | REVIEW |
+| **Offer-time absence of `DisableRollback`** | request, Prepare, confirm | **DEFECTIVE.** A production writer (`net::rig`, in `Update`) inserts the marker between the offer and the request, and nothing re-checked it. Fixed by slice 3.11 — `prepare_restores`, asked at the request and after `Prepare`. | BOTH |
+| Offer-time `PredictionHistory` membership for the four rigid-body components | request, Prepare | Safe, and **it was never a live defect** — an earlier draft of this table said "defective by omission" and overstated it. `add_prediction_history` inserts the buffer and lightyear never removes it on a surviving entity: a component removal is recorded INTO the history (`add_predicted(tick, None)`), the buffer stays. It is asked anyway, because it is the second half of `prepare_rollback`'s membership condition and its safety is a DEPENDENCY lifecycle property with no tripwire. Round 7's participation rows name only `DisableRollback`. | IMPL |
+| Offer-time checkpoint frontier and `LocalTimeline::tick` | — | Not carried. The request re-reads `ReplicationCheckpointMap`, and `age` and `waited` are recomputed from the current tick every frame. | IMPL |
+
+#### Module state carried across frames
+
+| Latched value | Later consumer | Assessment | Prov. |
+|---|---|---|---|
+| `AuthorityAdoption::staged` | request, confirm | Safe. It IS the transaction; every *condition* on it is re-established at the request, and re-offering the same identity deliberately leaves it untouched. (A finer split of round 7's "staged transaction" consumer.) | IMPL |
+| `staged_at` | ordering wait | Safe. A LOCAL monotonic patience origin — a re-offer must not restart it, which is why it is not re-stamped — and it resets on reconnect and on close. | BOTH |
+| `ordering = Released` (was `Some(true/false)`) | retries, retirement | Safe. Both verdicts are irreversible historical decisions, and the latch is what makes the tally count facts rather than frames. | BOTH |
+| **`ordering = Unasked` (was `None`)** | retirement's `spark_pending` | **DEFECTIVE.** The same `None` also meant "not evaluated yet" and "there is no visual", and all three were counted as a pending spark. Fixed by slice 3.11 — three-state enum, every exit writes it, and `spark_pending` asks the presentation ledger. | BOTH |
+| `requested` | retry logic, retirement | Safe. Re-derived every frame against pending metadata / manager state, and our own adoption additionally requires the exact installed claim. | BOTH |
+| `adopted` ledger and sequence watermarks | later offers | Safe under the documented one-owner bound; the bounded ring drops the OLDEST and the watermark covers what it drops; reconnect resets timeline-specific identity. | BOTH |
+| `PresentedHit` ledger entries | `clear_to_order`, **and `retirement` since slice 3.11** | Safe — but the JUSTIFICATION had to be extended and round 7's does not cover the second consumer. Entries are historical (authority tick + victim) and cannot become false. Round 7's reasoning is that capacity eviction can only produce a conservative false negative in the ordering rule, ending in a budget release. Slice 3.11 made `retirement` read the same ledger, where that identical false negative would INFLATE `bypassed` instead. It is still safe, because `MAX_PRESENTED_HITS` is derived as `SHOCK_EPISODE_TICKS + ORDERING_BUDGET_TICKS` — nothing a staged fact can still ask about is evictable — but that derivation is now load-bearing for two consumers, not one. | BOTH |
+| `OrderingTally` | `net::diagnostics` | Counters are monotonic and session-scoped on purpose (reconnect clears `presented` and deliberately not the tallies). Round 7's caveat — `bypassed` can receive a defective classification — was the `ordering == None` defect and is closed. | BOTH |
+
+#### Request-time latches, consumed later in the same `PreUpdate`
+
+| Latched value | Later consumer | Assessment | Prov. |
+|---|---|---|---|
+| Request-time checkpoint frontier and age | slot claim, Prepare | Safe. Neither the timeline nor the frontier changes in that gap: `LocalTimeline` advances in `FixedFirst`, and replicon receive ran before this module. | REVIEW |
+| Request-time four-history verdict | Prepare | Safe with respect to history mutation: `check_rollback` consumes the forced request FIRST and then skips its policy branch, the only writer of `ConfirmedHistory` reachable in that gap. **This is the load-bearing row behind the `Undelivered` unreachability proof above** — and the implementer's pass discussed it in prose without listing it, which is exactly the kind of omission a table is supposed to prevent. | REVIEW |
+| **Request-time Prepare participation** | Prepare, confirmation | **DEFECTIVE.** Histories may be perfectly valid while `DisableRollback` excludes the entity — the two questions are independent and only one was asked. Fixed by slice 3.11. | BOTH |
+| `ForcedRollbackSlot::claim` | lightyear's `Check`, confirmation | Safe. The exact target is re-checked against the manager, the claim is `take`n unconditionally every frame so it cannot survive one, and a source scan pins that all production requesters go through the slot. | BOTH |
+| `max_rollback_ticks` | request | Safe. Read fresh from the `PredictionManager` each frame. | IMPL |
+
+#### Post-`Prepare` latches
+
+| Latched value | Later consumer | Assessment | Prov. |
+|---|---|---|---|
+| `started` and rollback kind (`RestoresFrom`) | retirement | Safe. Read directly off the installed current rollback and consumed immediately, in one system. | BOTH |
+| **`carried`** | retirement | **DEFECTIVE.** Safe only if `Prepare` selected the hull, and it did not ask — it read a `ConfirmedHistory` result that is a COUNTERFACTUAL when eligibility excluded the entity. This is the same defect as the participation rows seen from the consumer end, and listing it separately is what makes "gate the request" visibly insufficient on its own. Fixed by slice 3.11. | REVIEW |
+| `ForcedRollbackSlot::installed` | retirement, logging | Safe TODAY, and the reason has an expiry date: it is freshly overwritten after `Prepare`, derived from the current `started`, and **has no external consumer yet**. `net::render_error` becomes one in slice 4, at which point this row must be re-assessed rather than inherited. | BOTH |
+
+#### Is this the class?
+
+**No, and the reconciliation is the evidence.** Two careful enumerations of one class over one file, done independently, each missed four rows the other found:
+
+- Round 7 lacked the `PredictionHistory` membership condition — the second half of `prepare_rollback`'s own query filter, sitting directly beside the `DisableRollback` condition it did find twice.
+- The implementer's pass lacked the request-time four-history verdict, which is the load-bearing step of this ADR's own `Undelivered` unreachability proof; the request-time frontier and age; the offer-time `Predicted`/`Remote` membership; and `carried` as a row in its own right.
+
+If prose enumeration by a careful reader saturated, at least one of the two passes would have been complete. Neither was. So **27 rows is the best current inventory of the class, not a demonstration that the class has 27 members.** Treat it as a checklist that has caught real defects, not as a proof of exhaustiveness — and note that both passes' misses were in the same direction: a condition asserted structurally (a query filter, a schedule adjacency) is much easier to miss than a named field.
+
+What would actually saturate it is mechanical rather than editorial, and this module already has the precedent — `only_the_forced_rollback_slot_requests_a_forced_rollback` is a source scan that enforces an invariant no reviewer has to remember. The saturating form of this table is: every field of every resource this module owns, crossed with every system that reads it, wherever the writer and the reader sit at different schedule positions; plus every condition a query asserts at one site and another site relies on. Until something enforces that, this table is a discipline, not a guarantee.
 
 ### Correlating a spark with a fact is an identity test — and it took a wire field
 
