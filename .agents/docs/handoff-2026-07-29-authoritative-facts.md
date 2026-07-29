@@ -368,10 +368,25 @@ correctly not mistaken for character literals — and it has its own unit test, 
 on it. The membership conditions are pinned on the TYPE NAMES (`DisableRollback`,
 `PredictionHistory<Position>`, …) at exactly one occurrence each in production rather than on one
 `Has<..>` spelling, so an import alias is red. `prepare_restores` is counted on the bare identifier,
-so a turbofish or path-qualified call is caught. **The consumer list is DERIVED from the source** —
-every top-level `fn` naming `RollbackParticipation` — and asserted to be exactly the three, so a
-fourth consumer that names the type fails by construction instead of waiting for someone to extend a
-hard-coded list.
+so a turbofish or path-qualified call is caught. The consumer list is DERIVED from the source rather
+than hard-coded — every top-level `fn` naming `RollbackParticipation`, asserted to be exactly the
+three.
+
+**Slice 3.14 corrected that last one, and it is worth reading as a pattern.** "Derived" was still a
+line-shape heuristic: the helper skipped every line starting with whitespace, so a consumer written
+as a method in an `impl` or a `fn` in a nested `mod` was invisible to it and passed all four rules —
+**and the helper's own unit test asserted that omission as though it were intended.** An `impl` and a
+nested module are ordinary organization, not evasion, so "caught by construction" was overstated, in
+a narrower form of the exact claim round 9 had already blocked. The fix borrowed the rule shape that
+was already robust: `RollbackParticipation` is pinned by OCCURRENCE COUNT — five in production, each
+accounted for by name — so a new consumer is a new occurrence wherever and however it is written. The
+derived list stays, now doing only what it can do honestly: checking that each site it CAN read
+routes through the shared predicate. The stripper also gained a twenty-row table-driven test, since
+one test for the component every rule rests on was thin for its blast radius.
+
+*The lesson, stated generally:* prefer a rule whose failure mode is a **count that stops adding up**
+over one that depends on recognising the shape of a line. The first is blind to formatting; the
+second silently narrows every claim built on top of it.
 
 *Deliberately not built:* a dead-call check (needs dataflow, not text) and a cross-module scan for
 `prepare_restores` (it would have to infer which files are `#[cfg(test)]`-gated modules, and a gate
@@ -419,14 +434,24 @@ Two documentation corrections landed with it, both round 9 Lows — see *Residua
 **Guarded, not guaranteed** — `the_three_participation_sites_ask_one_shared_question` is a lexical
 scan of one file. It defends against a future author *accidentally* re-expressing the participation
 condition, which is the real threat model here: every defect this arc found was written by somebody
-who believed the condition was already asked. It does **not** defend against deliberate evasion and
-cannot without real AST analysis (a macro can generate a query type it never sees; a site can keep a
-live-looking `.whole_body()` call and branch on something else; `prepare_restores` is `pub(super)` and
-the scan reads only `adoption.rs`). The older
+who believed the condition was already asked. Concretely: a new consumer that NAMES
+`RollbackParticipation` is red wherever in `adoption.rs` it is written — column zero, a method in an
+`impl`, a `fn` in a nested `mod`, at any indentation — because the type is pinned by occurrence count
+and every occurrence is accounted for by name. A consumer that never names the type is invisible to
+it, and belongs to the runtime matrix and to review. It does **not** defend against deliberate
+evasion and cannot without real AST analysis (a macro can generate a query type it never sees; a site
+can keep a live-looking `.whole_body()` call and branch on something else; `prepare_restores` is
+`pub(super)` and the scan reads only `adoption.rs`). The older
 `only_the_forced_rollback_slot_requests_a_forced_rollback` carries the same limitation and now says
-so. **An AST check was assessed and not built**: `syn` in the test tree, plus item-walking and
-macro-expansion caveats, to move from "accident" to "evasion" against a threat model with no
-evidence behind it. Reconsider only if a lexical evasion is actually observed.
+so.
+
+**An AST check was assessed in 3.13 and not built — and 3.14 found the recorded reasoning wrong.** It
+had been declined because item walking defends only against deliberate evasion; in fact robust item
+walking would also have covered ordinary methods and nested modules, which the column-zero heuristic
+missed. That was the real case for it, and the occurrence count now closes it with no parser. What is
+left for a walk — macros, dataflow, cross-file callers — a `syn` walk over this one file would not
+close either. **Still declined, for the corrected reason.** Reconsider only if a lexical evasion is
+actually observed.
 
 **Residuals, open, with their real scope:**
 

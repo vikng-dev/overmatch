@@ -997,7 +997,9 @@ impl Unready {
 /// It is also what makes the divergence mechanically detectable: the source scan
 /// `the_three_participation_sites_ask_one_shared_question` pins that `DisableRollback` and the four
 /// rigid-body `PredictionHistory<..>` types are named in THIS declaration and nowhere else in the
-/// module, and that every consumer it can see routes through the shared predicate. That scan is a
+/// module, that this type itself is named a known number of times with every occurrence accounted
+/// for by name — so a new consumer is red wherever in the file it is written — and that every
+/// consumer it can read routes through the shared predicate. That scan is a
 /// GUARD RAIL and its own doc states its limits: it catches an offer-only re-expression written by
 /// accident, which is the real hazard, and it does not and cannot catch one written to evade a
 /// lexical reader. The checked contract underneath it is
@@ -3504,8 +3506,16 @@ mod tests {
     /// DERIVED RATHER THAN LISTED, which is the ninth review's point: slice 3.12 hard-coded three
     /// function names, so a FOURTH consumer of [`RollbackParticipation`] was invisible until
     /// somebody remembered to extend the list — the same "remember to update the copy" shape this
-    /// arc keeps finding in prose. Column-zero only, so nested `fn`s and method bodies are not
-    /// items and cannot be mistaken for one.
+    /// arc keeps finding in prose.
+    ///
+    /// COLUMN-ZERO ONLY, AND THAT IS A HOLE, NOT A DESIGN. A line beginning with whitespace is
+    /// skipped, so a method in an `impl` and a `fn` in a nested `mod` are not items here — and the
+    /// tenth review is right that an `impl` or a nested module is ORDINARY ORGANIZATION rather than
+    /// evasion, so a real fourth consumer could be written that way by accident. This function is
+    /// therefore no longer the only thing between a new consumer and a green test: the occurrence
+    /// count in [`the_three_participation_sites_ask_one_shared_question`] is, and it is blind to
+    /// indentation and to line shape. What this adds on top is per-consumer: it checks that each
+    /// site it CAN see routes its participation data through the shared predicate.
     fn top_level_functions(source: &str) -> Vec<(&str, &str)> {
         let mut items = Vec::new();
         let mut offset = 0;
@@ -3580,14 +3590,142 @@ mod tests {
         );
     }
 
-    /// [`top_level_functions`] is the other half the rules rest on: it must find column-zero items
-    /// whatever their visibility, and must not promote a nested `fn` to an item.
+    /// Every shape [`code_only`] has to get right, pinned. It is one hand-written lexer and EVERY
+    /// rule below rests on it, so its blast radius is the whole scan; until the tenth review these
+    /// cases were traced by hand and found correct but were not held there by anything.
+    ///
+    /// Each row hides `HIDE` inside something the compiler does not read and leaves `KEEP` in code.
+    /// A lexer that desynchronises — mistaking a lifetime for a character literal, honouring a
+    /// comment marker inside a string, letting a short terminator close a long raw string — either
+    /// leaks a `HIDE` or eats a `KEEP`, and the char and line invariants catch a strip that changes
+    /// the file's shape underneath every offset a failure reports.
     #[test]
-    fn the_scan_finds_top_level_functions_of_every_visibility() {
+    fn the_lexer_reads_every_literal_and_comment_shape_the_module_can_contain() {
+        for (shape, source) in [
+            (
+                "nested block comments below the top level",
+                "let KEEP = 0; /* HIDE /* HIDE /* HIDE */ HIDE */ HIDE */ let KEEP = 1;\n",
+            ),
+            (
+                "a block comment opened by the three-character `/*/`",
+                "/*/ HIDE */ let KEEP = 1;\n",
+            ),
+            (
+                "an unterminated block comment at end of file",
+                "let KEEP = 1;\n/* HIDE\n",
+            ),
+            (
+                "a multi-hash raw string containing its own shorter terminator",
+                "let KEEP = r##\"HIDE \"# HIDE\"##; let KEEP = 1;\n",
+            ),
+            (
+                "a raw string containing a line-comment opener",
+                "let KEEP = r\"HIDE // HIDE\"; let KEEP = 1;\n",
+            ),
+            (
+                "raw byte strings, hashed and not",
+                "let KEEP = br\"HIDE\"; let KEEP = br#\"HIDE\"#; let KEEP = 1;\n",
+            ),
+            (
+                "a raw IDENTIFIER, which is not a raw string",
+                "let r#KEEP = 1; let KEEP = \"HIDE\";\n",
+            ),
+            (
+                "a string containing a block-comment opener",
+                "let KEEP = \"HIDE /* HIDE\"; let KEEP = 1;\n",
+            ),
+            (
+                "a string containing a block-comment closer",
+                "let KEEP = \"HIDE */ HIDE\"; let KEEP = 1;\n",
+            ),
+            (
+                "a string containing a line-comment opener",
+                "let KEEP = \"HIDE // HIDE\"; let KEEP = 1;\n",
+            ),
+            (
+                "an unterminated string at end of file",
+                "let KEEP = 1; let KEEP = \"HIDE\n",
+            ),
+            (
+                "a line comment containing an unterminated quote",
+                "// HIDE it's HIDE\nlet KEEP = 1;\n",
+            ),
+            (
+                "a block comment containing an unterminated quote",
+                "/* HIDE don't HIDE */ let KEEP = 1;\n",
+            ),
+            (
+                "a block comment containing a raw-string opener",
+                "/* HIDE r#\" HIDE */ let KEEP = 1;\n",
+            ),
+            (
+                "a doc comment, inner and outer",
+                "/// HIDE\n//! HIDE\nlet KEEP = 1;\n",
+            ),
+            (
+                "the escaped-quote character literal",
+                "let KEEP = '\\''; let KEEP = 1;\n",
+            ),
+            (
+                "the escaped-backslash character literal",
+                "let KEEP = '\\\\'; let KEEP = \"HIDE\";\n",
+            ),
+            (
+                "a character literal containing a double quote",
+                "let KEEP = '\"'; let KEEP = \"HIDE\"; let KEEP = 1;\n",
+            ),
+            (
+                "byte characters, escaped and not",
+                "let KEEP = b'x'; let KEEP = b'\\''; let KEEP = \"HIDE\";\n",
+            ),
+            (
+                "a lifetime followed by a quote, and by a character literal",
+                "fn KEEP<'a>(x: &'a str) -> char { 'q' }\nlet KEEP = \"HIDE\";\n",
+            ),
+        ] {
+            let stripped = code_only(source);
+            assert_eq!(
+                stripped.matches("HIDE").count(),
+                0,
+                "{shape}: text the compiler does not read survived the strip, so a comment or a \
+                 literal can satisfy a `contains` rule again:\n{stripped}",
+            );
+            assert_eq!(
+                stripped.matches("KEEP").count(),
+                source.matches("KEEP").count(),
+                "{shape}: the strip ate CODE, so every count and every derived list below reads a \
+                 file the compiler never saw:\n{stripped}",
+            );
+            assert_eq!(
+                stripped.chars().count(),
+                source.chars().count(),
+                "{shape}: blanking changed the file's length, so every reported offset lies",
+            );
+            assert_eq!(
+                stripped.lines().count(),
+                source.lines().count(),
+                "{shape}: line structure was not preserved, so item boundaries lie",
+            );
+        }
+    }
+
+    /// [`top_level_functions`] is the other half the DERIVED consumer list rests on, and this test
+    /// pins both what it finds and what it cannot reach.
+    ///
+    /// AN EARLIER VERSION OF THIS TEST ASSERTED THE OMISSION AND STOPPED, which read as though the
+    /// omission were intended — the tenth review's blocking finding, and the fifth time this arc has
+    /// caught a document or a test claiming more than the code delivers. A method in an `impl` and a
+    /// `fn` in a nested `mod` are indented, so this helper cannot see them, and they are ordinary
+    /// organization rather than evasion. So the test now also demonstrates the compensating rule:
+    /// the occurrence count in [`the_three_participation_sites_ask_one_shared_question`] sees all
+    /// three consumers below, including the two the item scan misses.
+    #[test]
+    fn the_item_scan_is_column_zero_only_and_the_occurrence_count_covers_the_rest() {
         let source = concat!(
-            "fn plain() {\n    fn nested() {}\n}\n",
+            "fn plain(hulls: Query<RollbackParticipation>) {\n    fn nested() {}\n}\n",
             "pub(super) fn shared<const N: usize>(value: bool) -> bool {\n    value\n}\n",
-            "impl Thing {\n    fn method(&self) {}\n}\n",
+            "impl Thing {\n    fn method(&self, hulls: Query<RollbackParticipation>) {}\n}\n",
+            "mod extra {\n    fn fourth(hulls: Query<RollbackParticipation>) {}\n}\n",
         );
         let code = code_only(source);
         let names: Vec<&str> = top_level_functions(&code)
@@ -3597,8 +3735,16 @@ mod tests {
         assert_eq!(
             names,
             ["plain", "shared"],
-            "the item scan disagrees with what a column-zero `fn` is, so the consumer list it \
-             derives cannot be trusted",
+            "the item scan disagrees with what a column-zero `fn` is, so the per-consumer routing \
+             check it feeds cannot be trusted",
+        );
+        assert_eq!(
+            code.matches("RollbackParticipation").count(),
+            3,
+            "the occurrence count must see ALL THREE consumers — the column-zero one and the two \
+             the item scan structurally cannot reach. If it does not, the derived list is once \
+             again the only thing standing between a new consumer and a green test, which is \
+             exactly what the tenth review blocked on:\n{code}",
         );
     }
 
@@ -3633,8 +3779,18 @@ mod tests {
     /// expand to a query type this scan never sees. A consumer can keep a live-looking
     /// `.whole_body()` call and branch on something else entirely — the scan sees the call, not the
     /// dataflow. `prepare_restores` is `pub(super)`, and this scan reads only this file, so a caller
-    /// in another `net` module is out of range. Closing any of those needs real AST analysis, and
-    /// the case for building it is not made by this arc's evidence.
+    /// in another `net` module is out of range.
+    ///
+    /// **AST ANALYSIS, RE-DECIDED WITH THE TENTH REVIEW'S CORRECTION.** Slice 3.13 declined a `syn`
+    /// item walk on the grounds that it defends only against deliberate evasion. That reasoning was
+    /// WRONG, and knowing why matters more than the verdict: [`top_level_functions`] skips every
+    /// indented line, so a consumer written as a method or inside a nested `mod` was invisible to
+    /// it — and that is ordinary organization, not a dodge. A real item walk would have covered it.
+    /// What changes the trade is that the occurrence count above covers it too, at no cost and with
+    /// no parser: it is blind to indentation, to line shape and to rustfmt. What is left for an AST
+    /// walk is only the deliberate list in the paragraph above — macro expansion, dataflow, and
+    /// callers in other files — none of which a `syn` item walk over this one file would close
+    /// either. So it stays declined, now for a reason that survives reading the helper.
     ///
     /// **ADR-0032 claimed the offer-only re-expression "cannot be written without turning it red".
     /// The ninth review killed that, correctly.** It can be, deliberately. Accidentally, it cannot.
@@ -3649,10 +3805,11 @@ mod tests {
     ///
     /// NOT VACUOUS, in the two ways that matter. Every rule names an item that must exist and
     /// [`item_body`] panics if it does not, so deleting a site fails the test instead of emptying
-    /// it. And the consumer list is DERIVED from the source, so a fourth consumer that names
-    /// `RollbackParticipation` is caught by construction rather than by somebody remembering to add
-    /// a line here. A fourth consumer that never names the type is invisible to this test — that
-    /// one belongs to the runtime matrix and to review.
+    /// it. And no consumer list is hand-maintained: `RollbackParticipation` is pinned by OCCURRENCE
+    /// COUNT, so a fourth consumer that names the type is red wherever it is written — column zero,
+    /// a method in an `impl`, a `fn` in a nested `mod` — rather than only where a line-shape
+    /// heuristic happens to look. A fourth consumer that never names the type is invisible to this
+    /// test — that one belongs to the runtime matrix and to review.
     #[test]
     fn the_three_participation_sites_ask_one_shared_question() {
         let production = production_source_as_the_compiler_reads_it();
@@ -3694,9 +3851,40 @@ mod tests {
             );
         }
 
-        // THE CONSUMERS, DERIVED. Every top-level function that names the type is a site that has
-        // to route through the shared predicate; the expected set is asserted so that a fourth one
-        // fails here rather than passing unexamined.
+        // THE CONSUMERS, PINNED BY OCCURRENCE COUNT — the same rule shape the membership types
+        // above use, and the only shape that is blind to how the source is FORMATTED.
+        // `RollbackParticipation` is named a known number of times in production and every
+        // occurrence is accounted for by name: the declaration, the accessor `impl`'s header, and
+        // one query per consumer. A new consumer is a new occurrence WHEREVER it is written — a
+        // method in an `impl`, a `fn` in a nested `mod`, indented to any depth, split across lines
+        // however rustfmt likes — and it goes red here with no line-shape heuristic involved. The
+        // derived list below is column-zero only and would not see any of those, and the tenth
+        // review was right that an `impl` or a nested module is ordinary organization rather than
+        // evasion.
+        const CONSUMERS: [&str; 3] = [
+            "confirm_forced_rollback",
+            "offer_hull_shock_adoptions",
+            "request_staged_adoption",
+        ];
+        // `struct RollbackParticipation` and `impl RollbackParticipationItem`, the latter matching
+        // on the same prefix.
+        const DECLARATIONS: usize = 2;
+        assert_eq!(
+            production.matches("RollbackParticipation").count(),
+            DECLARATIONS + CONSUMERS.len(),
+            "`RollbackParticipation` is named {} times in production, not {}. Every occurrence is \
+             accounted for by name: the declaration, the `RollbackParticipationItem` accessor \
+             `impl`, and one query in each of {CONSUMERS:?}. An EXTRA occurrence is a new site \
+             asking whether `prepare_rollback` reaches the hull — check it against the audit table \
+             in ADR-0032, confirm it routes through the shared predicate, and then account for it \
+             here. A MISSING one is a site that stopped asking.",
+            production.matches("RollbackParticipation").count(),
+            DECLARATIONS + CONSUMERS.len(),
+        );
+
+        // THE CONSUMERS THIS SCAN CAN READ, DERIVED. On top of the count, every top-level function
+        // that names the type has to route the data through the shared predicate rather than
+        // branching on the flags itself.
         let mut consumers: Vec<&str> = top_level_functions(&production)
             .into_iter()
             .filter(|(_, body)| body.contains("RollbackParticipation"))
@@ -3712,18 +3900,13 @@ mod tests {
             .collect();
         consumers.sort_unstable();
         assert_eq!(
-            consumers,
-            [
-                "confirm_forced_rollback",
-                "offer_hull_shock_adoptions",
-                "request_staged_adoption",
-            ],
-            "the set of functions asking whether `prepare_rollback` reaches the hull has changed. \
-             All three of the listed ones have to ask: gating only the request leaves the \
-             post-`Prepare` proof reading a `ConfirmedHistory` lookup no restore performed, which is \
-             the half-fix the seventh review named. A NEW name here is a new consumer of the \
-             condition — check it against the audit table in ADR-0032 and then add it. A MISSING \
-             name is a site that stopped asking.",
+            consumers, CONSUMERS,
+            "the set of COLUMN-ZERO functions asking whether `prepare_rollback` reaches the hull \
+             has changed. All three of the listed ones have to ask: gating only the request leaves \
+             the post-`Prepare` proof reading a `ConfirmedHistory` lookup no restore performed, \
+             which is the half-fix the seventh review named. A MISSING name is a site that stopped \
+             asking. A NEW name is a new consumer — the occurrence count above is what catches one \
+             written anywhere else in the file.",
         );
 
         // And the accessors are the only route: nothing else in production may reach the predicate,
