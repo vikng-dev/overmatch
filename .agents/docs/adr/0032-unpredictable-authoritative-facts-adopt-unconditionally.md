@@ -479,7 +479,7 @@ what the old sentence did.
 | **`ordering = Unasked` (was `None`)** | retirement's `spark_pending` | **DEFECTIVE.** The same `None` also meant "not evaluated yet" and "there is no visual", and all three were counted as a pending spark. Fixed by slice 3.11 — three-state enum, every exit writes it, and `spark_pending` asks the presentation ledger. | BOTH |
 | `requested` | retry logic, retirement | Safe. Re-derived every frame against pending metadata / manager state, and our own adoption additionally requires the exact installed claim. | BOTH |
 | `adopted` ledger and sequence watermarks | later offers | Safe under the documented one-owner bound; the bounded ring drops the OLDEST and the watermark covers what it drops; reconnect resets timeline-specific identity. | BOTH |
-| **`PresentedHit` ledger entries** | `clear_to_order`, **and `retirement` since slice 3.11** | **WAS DEFECTIVE.** Entries are historical and cannot become false, but the CAPACITY argument was: `MAX_PRESENTED_HITS` was derived as `SHOCK_EPISODE_TICKS + ORDERING_BUDGET_TICKS`, i.e. as a budget in TICKS, while eviction is spent per ENTRY — and nothing bounds entries per tick, since every authority armor impact is appended and impacts are broadcast to every client. A staged fact's own spark could be drawn and then evicted by unrelated hits, after which `retirement` read "never drawn" and reported a BYPASS for a spark the player had seen. Slice 3.11 made this the row's second consumer and inverted the direction of the error; slice 3.12 removed the dependency instead of resizing it. The staged claim's drawn state now latches on `ImpactPresentation::watched`, keyed by the claim's authority identity, established at `AuthorityAdoption::offer` and outside the FIFO entirely; the buffer only SEEDS that latch for a spark drawn before its fact was staged, and losing an entry out of it can now only under-report, conservatively, in `clear_to_order`. | BOTH |
+| **`PresentedHit` ledger entries** | `clear_to_order`, **and `retirement` since slice 3.11** | **WAS DEFECTIVE.** Entries are historical and cannot become false, but the CAPACITY argument was: `MAX_PRESENTED_HITS` was derived as `SHOCK_EPISODE_TICKS + ORDERING_BUDGET_TICKS`, i.e. as a budget in TICKS, while eviction is spent per ENTRY — and nothing bounds entries per tick, since every authority armor impact is appended and impacts are broadcast to every client. A staged fact's own spark could be drawn and then evicted by unrelated hits, after which `retirement` read "never drawn" and reported a BYPASS for a spark the player had seen. Slice 3.11 made this the row's second consumer and inverted the direction of the error; slice 3.12 removed the dependency instead of resizing it. The staged claim's drawn state now latches on `ImpactPresentation::watched`, keyed by the claim's authority identity, established at `AuthorityAdoption::offer` and outside the FIFO entirely. **A residual survives, and slice 3.12's account of it was wrong in both directions — the ninth review's Low.** The buffer still SEEDS that latch, so a spark drawn before its fact was staged is exposed to eviction; the exposed interval is the whole PRE-STAGING window (the authority coalesces for up to `SHOCK_EPISODE_TICKS` before publishing, while the first hit's `ImpactConfirm` broadcasts at once, so the early spark can precede publication as well as replication and staging), and with no entries-per-tick bound 64 is headroom over it rather than a guarantee. Nor is the residual only conservative: an unseeded latch is a release-on-budget in `clear_to_order`, which is conservative, **and** a false `spark_pending: true` in `retirement`, which INFLATES `bypassed`. Accepted as a known best-effort limitation of the telemetry — no delivery decision reads the buffer — with `bypassed` read as an upper bound. | BOTH |
 | `OrderingTally` | `net::diagnostics` | Counters are monotonic and session-scoped on purpose (reconnect clears `presented` and deliberately not the tallies). Round 7's caveat — `bypassed` can receive a defective classification — was the `ordering == None` defect and is closed. | BOTH |
 
 #### Request-time latches, consumed later in the same `PreUpdate`
@@ -515,12 +515,30 @@ If prose enumeration by a careful reader saturated, at least one of the two pass
 
 The saturating form of this table would be: every field of every resource this module owns × every system that reads it, wherever writer and reader sit at different schedule positions, plus every condition a query asserts at one site and another relies on. **Round 8 assessed that and rejected it**, for reasons that survive re-reading: Bevy's schedule position is a composed partial order across plugins, sets and `run_if`s; field reads hide behind methods and helpers; whether a second site *relies* on a query condition is semantic rather than syntactic; it would flag historical identities, telemetry counters and irrelevant filters; and the allowlist needed to quiet it would become another hand-maintained copy of this table. A gate that cries wolf gets disabled.
 
-Two narrow contracts were built instead, and between them they would have caught the round-7 `Without<DisableRollback>` defect from both ends:
+**One contract and one guard rail were built instead**, and between them they would have caught the round-7 `Without<DisableRollback>` defect from both ends. They are not two contracts of equal weight, and an earlier version of this section implied they were.
 
-- **`net::lead_zero_rollback::prepare_restores_exactly_the_components_the_predicate_names`** — a runtime conformance matrix. Over `DisableRollback` present/absent × each of the four `PredictionHistory<C>` present/absent (32 archetypes), it runs lightyear's own `RollbackSystems::Prepare` and asserts, per component, that what was restored is what `prepare_restores` says, and that the whole-body verdict is the conjunction. This is what makes the query-mirror a CHECKED contract rather than a reading of the dependency's source at a point in time — and it closes the concern the slice-3.11 handoff filed against itself, that the predicate mirrors lightyear's query without observing its effect.
-- **`net::adoption::the_three_participation_sites_ask_one_shared_question`** — a source scan. `Without<DisableRollback>` may not appear in the module at all; the five `Has<..>` membership spellings may appear only inside the `RollbackParticipation` query-data type; the offer, the request and the confirmation must each name that type and route through `prepare_restores`; and nothing else in production may call that predicate directly. The offer-only expression that started this cannot be written without turning it red.
+- **THE CONTRACT — `net::lead_zero_rollback::prepare_restores_exactly_the_components_the_predicate_names`**, a runtime conformance matrix. Over `DisableRollback` present/absent × each of the four `PredictionHistory<C>` present/absent (32 archetypes), it runs lightyear's own `RollbackSystems::Prepare` and asserts, per component, that what was restored is what `prepare_restores` says, and that the whole-body verdict is the conjunction. This is what makes the query-mirror a CHECKED contract rather than a reading of the dependency's source at a point in time — and it closes the concern the slice-3.11 handoff filed against itself, that the predicate mirrors lightyear's query without observing its effect. It is load-bearing: it observes real behaviour, and a lightyear bump that moves the membership conditions fails here.
+- **THE GUARD RAIL — `net::adoption::the_three_participation_sites_ask_one_shared_question`**, a lexical source scan over one file, read with comments and literals stripped. `Without<DisableRollback>` may not appear in the module; `DisableRollback` and the four rigid-body `PredictionHistory<..>` types may be named exactly once each, in the `RollbackParticipation` declaration, which forecloses an import alias as well as a re-expression; the set of top-level functions naming that type is DERIVED from the source and asserted to be exactly the offer, the request and the confirmation, so a fourth consumer fails the test instead of waiting for someone to remember to extend a list; each must route through `prepare_restores` via the two accessors; and `prepare_restores` may be named nowhere else in production, counted on the bare identifier so a turbofish or path-qualified call is caught too.
 
-Neither can pass vacuously: the matrix's all-present cell demands four restores, so a run in which no rollback installed fails immediately, and its live values are distinct from both the authority's and `default()`; the scan panics rather than passing when an item it names is gone. Both were verified RED by mutation before being kept. **What they do not do is saturate the table** — they enforce one condition each, exactly, and the table remains a discipline for everything else.
+**What the guard rail guarantees, precisely — and this is the ninth review's finding.** It defends
+against a future author *accidentally* re-expressing the participation condition. That is the real
+threat model here: every defect this arc found was written by somebody who believed the condition was
+already asked. It does **not** defend against deliberate evasion, and no lexical scan can — a macro
+can generate a query type it never sees, a site can keep a live-looking `.whole_body()` call and
+branch on something else, and `prepare_restores` is `pub(super)` while the scan reads only
+`adoption.rs`. **An earlier version of this section said the offer-only re-expression "cannot be
+written without turning it red". That is false and the ninth review killed it** — it can be,
+deliberately. It was the same class of overstatement this arc has spent nine rounds catching in its
+own documents. The module's older `only_the_forced_rollback_slot_requests_a_forced_rollback` carries
+the identical limitation and now says so in its own doc.
+
+**An AST-based check was assessed in slice 3.13 and not built.** It would raise the bar from
+"accident" to "evasion" at the cost of a real Rust parser in the test tree (`syn` as a dev-dependency
+plus the item-walking and macro-expansion caveats that come with it), against a threat model this arc
+has no evidence for — the reviews found honest mistakes, never a dodge. Reconsider it if a lexical
+evasion is ever actually observed, and not before.
+
+Neither can pass vacuously: the matrix's all-present cell demands four restores, so a run in which no rollback installed fails immediately, and its live values are distinct from both the authority's and `default()`; the scan panics rather than passing when an item it names is gone, and its two helpers — the comment/literal stripper and the top-level-item finder — carry their own unit tests, because every rule rests on them. Both were verified RED by mutation before being kept, and slice 3.13 re-verified the scan against four fresh mutations: an import alias, a turbofish direct call, a fourth consumer, and an inline comment quoting a forbidden spelling (which must NOT trip it). **What they do not do is saturate the table** — they enforce one condition each, exactly, and the table remains a discipline for everything else.
 
 ### Correlating a spark with a fact is an identity test — and it took a wire field
 
@@ -632,9 +650,21 @@ impact from every combatant lands in the same buffer. What made this matter rath
 untidy is the second consumer slice 3.11 added: an evicted spark is a conservative false negative in
 `clear_to_order` and an INFLATED `bypassed` in `retirement`, and `bypassed` is the number that would
 justify replacing the ordering rule with a real presentation barrier. The fix is not a bigger number:
-the staged fact's drawn state now latches per fact, outside the buffer. The buffer's remaining job is
-to seed that latch across one gap — a spark drawn before its fact was staged — and 64 is a retention
-depth chosen for headroom over that gap, stated as a choice.
+the staged fact's drawn state now latches per fact, outside the buffer.
+
+**The buffer's remaining job is to SEED that latch, and the ninth review found slice 3.12's
+description of what that leaves exposed too narrow in both directions.** It is not "one replication
+gap". A coalesced episode's first hit broadcasts its own `ImpactConfirm` immediately while the
+episode itself is withheld for up to `SHOCK_EPISODE_TICKS`, so the early spark can precede the
+episode's PUBLICATION as well as its replication and the client's staging — the exposed interval is
+the entire pre-staging window, and every impact from every combatant lands in the same buffer across
+it. With no entries-per-tick bound, **64 is headroom over that window, not a bound on it.** And the
+error is not purely conservative: an unseeded latch is a release-on-budget in `clear_to_order`, which
+is, but the same unseeded latch is a false `spark_pending: true` in `retirement`, which inflates
+`bypassed` for a spark the player saw. That residual is ACCEPTED as a best-effort telemetry
+limitation — no delivery decision reads this buffer — and `bypassed` is therefore an upper bound.
+Removing it means keying drawn state before the fact exists, which is a design change rather than a
+constant.
 
 The last row needs saying out loud, because it is the shape of number this repo has been burned by
 before. The chain is: a representative ~10-tick catch-up at 64 Hz is 156.25 ms; at the Tiger's
@@ -662,10 +692,13 @@ to be derived, never measured, and 2.5× too large.
   hull's membership in `prepare_rollback`'s query — and the full list of values latched at one
   schedule point and consumed at another is the audit table above, which a new latched value is
   expected to extend.
-- **That membership condition is now two mechanical contracts rather than a prose assurance.** One
-  source scan holds it to a single spelling and a single predicate; one runtime matrix holds that
-  predicate against lightyear's own `Prepare` over all 32 archetypes the two conditions can produce.
-  Neither saturates the audit table, and the rejection of the scanner that would have tried to is
+- **That membership condition is now one mechanical contract with a guard rail on top, not a prose
+  assurance — and the difference between those two is stated rather than blurred.** The runtime
+  matrix holds `prepare_restores` against lightyear's own `Prepare` over all 32 archetypes the two
+  conditions can produce; that is the load-bearing check. The source scan holds the condition to a
+  single spelling and a single predicate, which defends against an ACCIDENTAL re-expression and, by
+  its nature, against nothing deliberate. Neither saturates the audit table, and the rejection of the
+  scanner that would have tried to — and of an AST-based scan that would harden the guard rail — is
   recorded above rather than left as an open intention.
 - **`HullShock` stays owner-private** through `CombatDisclosure`: persistent, per-target, aggregate
   state. Public `ImpactConfirm` is not a contradiction — transient, per-shot, spatially anchored, and

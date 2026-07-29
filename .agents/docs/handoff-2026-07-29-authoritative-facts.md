@@ -1,14 +1,18 @@
 # Handoff — authoritative-facts arc + simplifier experiment
 
-**Written 2026-07-29, header current as of slice 3.11.** State as of the slice-3.11 commit on
-`feat/authoritative-facts`; the code round 7 reviewed is `a0ac961`.
-Read this if the session ended mid-arc. It is written for whoever picks it up, human or agent.
+**Written 2026-07-29. CLOSED 2026-07-30 at slice 3.13 — this is the arc's final record.** State is
+the slice-3.13 commit on `feat/authoritative-facts`. Read this if the session ended mid-arc, or
+before starting slice 4.
 
-**Amended after round 8 (slice 3.12).** Round 8 judged the Prepare-participation fix sound and found
-one further defect — the presentation ledger's capacity derivation — plus an arithmetic error and an
-overstated methodological claim in this file and in ADR-0032. All three are corrected in place
-(§ *What round 7 found* and § *What is next*, item 1), and the two mechanical contracts round 8 asked
-for are built. §§ 2–4 below still describe the tree as it stood at slice 3.11.
+**Nine review rounds. Rounds 1–8 returned DO NOT SHIP; round 9 found no blocking runtime defect** and
+one blocking documentation defect: a source scan that claimed more than a lexical scan can deliver.
+Slice 3.13 strengthened what was cheaply strengthenable in that scan, and — the more important half —
+wrote down exactly what it does and does not guarantee, here, in the test's own doc, and in ADR-0032.
+
+§§ 2–4 below are a running record written at successive slices; where an early section describes the
+tree at slice 3.11 it says so. **The final subsection of § 3 is the summary that supersedes them:
+what is guaranteed mechanically, what is argued in prose, and what residuals are open.** Read that
+first.
 
 ---
 
@@ -32,11 +36,19 @@ The primitive is `src/net/adoption.rs`. `HullShock` is merely its first consumer
 
 ## 2. Where things stand
 
-### `feat/authoritative-facts` — 16 commits, HEAD `a0ac961`, **690 lib tests passing**
+### `feat/authoritative-facts` — HEAD at slice 3.13, **698 lib tests passing**
 
 ```
-a0ac961 revalidate the WHOLE rigid body at the request, not just the shove — wire unchanged at REV 24
-baade0b revalidate delivery at the REQUEST, not at the offer — wire unchanged at REV 24
+(3.13) the participation scan says what it guarantees — wire unchanged at REV 24
+c973bbb the staged fact's spark is retained per fact, and the participation mirror becomes
+        two checked contracts — wire unchanged at REV 24                            (slice 3.12)
+de50e3c docs: reconcile the latch audit against round 7's own 23 rows
+77d5beb docs: the latch audit table is a re-derivation, not round 7's list verbatim
+215c769 establish the hull's PARTICIPATION in the restore, not just what it would
+        resolve — wire unchanged at REV 24                                          (slice 3.11)
+b836406 docs: handoff — round 6 verdict, and the fix was only half a fix
+a0ac961 revalidate the WHOLE rigid body at the request, not just the shove          (slice 3.10)
+baade0b revalidate delivery at the REQUEST, not at the offer                        (slice 3.9)
 6b902eb docs: handoff — round 5 verdict, the determinacy argument is false
 906ff79 docs: handoff note for the authoritative-facts arc
 4f523b1 delivery is ESTABLISHED before a rollback is asked for — wire unchanged at REV 24
@@ -60,12 +72,12 @@ surface `0xf321_3c48_61b3_bfea`, types `0x268a_d4fb_e297_639b`, manifest `0x13cd
 
 ## 3. The review history — read this before trusting anything
 
-Codex has reviewed this arc **seven times** and returned DO NOT SHIP **all seven times**. (An earlier
-version of this line said six reviews and five DO NOT SHIP while all six table rows said DO NOT SHIP;
-it was six of six, and it is now seven of seven.) Every round found that the previous fix read as
-complete and was not — including the three rounds that were themselves fixing a partial fix. **Twice a
-newly added test asserted the defect as success, and twice a newly added test claimed coverage it did
-not have.**
+Codex has reviewed this arc **nine times**. Rounds 1–8 returned DO NOT SHIP; round 9 found no
+blocking runtime defect. (An earlier version of this line said six reviews and five DO NOT SHIP while
+all six table rows said DO NOT SHIP; it was six of six, then seven of seven, then eight of eight.)
+Every round through 8 found that the previous fix read as complete and was not — including the four
+rounds that were themselves fixing a partial fix. **Twice a newly added test asserted the defect as
+success, and three times a newly added test or document claimed coverage it did not have.**
 
 | Round | On | Verdict | What it found |
 |---|---|---|---|
@@ -76,6 +88,8 @@ not have.**
 | 5 | `4f523b1` | DO NOT SHIP | The determinacy argument is **false** — confirmed history is not append-only, and the predicate is proven at staging but never revalidated at the request. Fixed by slice 3.9 (below); round 5 passed C, E, F, G, H |
 | 6 | `baade0b` | DO NOT SHIP (1 High, 2 Low) | The revalidation covered **half the predicate**: only the velocities, while the offer proved all four rigid-body histories, so a late `Position` removal reached a claimed rollback that deleted the component and closed as `Adopted`. Plus two overstated coverage claims in the new tests and a false comment. Fixed by slice 3.10 (below); round 6 passed A, B, C, D, E, H |
 | 7 | `a0ac961` | DO NOT SHIP (1 High, 3 Low) | **Audited the CLASS, not another instance.** 23 latched values assessed, 21 safe with stated reasons, 2 defective: the hull's *participation* in `prepare_rollback` was latched at the offer and never re-established (silent loss — `DisableRollback` arrives, the restore skips the hull, `carried` is computed from a lookup no restore performed, the fact closes as `Adopted`), and `ordering == None` carried three meanings so `bypassed` was inflated. Plus a false justification for the pose asymmetry and a wrong count in this document. Fixed by slice 3.11 (below) |
+| 8 | `215c769` | DO NOT SHIP (1 Low) | The presentation ledger's capacity was DERIVED in ticks while eviction is spent per ENTRY, so an evicted spark inflated `bypassed`; plus an impossible 23/25/27 count and an overstated "both passes missed in the same direction". Fixed by slice 3.12 (`c973bbb`), which also built the two mechanical checks round 8 asked for |
+| 9 | `c973bbb` | No blocking runtime defect | The 32-cell matrix is genuinely non-vacuous, the eviction latch is wired at every seam, the ADR's 29/21/4/4 accounting is exact, the wire is untouched. **The blocker was documentation: the participation source scan claimed more than a lexical scan can deliver** (six named evasions), and two residual descriptions were wrong — pre-staging eviction can feed a FALSE value to `retirement`, not only a conservative one to `clear_to_order`, and the exposed window is the whole pre-staging span, not "one replication gap". Fixed by slice 3.13 |
 
 **The operational lesson, and it is the important part of this document: a green test suite has
 never once caught one of these.** The tests were written by the same reasoning that produced the
@@ -332,12 +346,117 @@ against six table rows all reading DO NOT SHIP. Corrected above; it is seven of 
 **Wire is UNCHANGED at `PROTOCOL_REV` 24.** No wire type, field, order or registration was touched;
 every change is client-local rollback bookkeeping.
 
+### What round 9 found, and what slice 3.13 did about it
+
+**Round 9 found no blocking runtime defect**, and confirmed four things that had been asserted rather
+than verified: the 32-cell conformance matrix is genuinely non-vacuous, the per-fact eviction latch is
+wired at every seam that reads drawn state, the ADR's 29 / 21 BOTH / 4 REVIEW / 4 IMPL accounting is
+exact, and the wire is untouched at REV 24.
+
+**The blocker was a document overclaiming, which is this arc's signature failure.** ADR-0032 said an
+offer-only re-expression of the participation condition "cannot be written without turning it red".
+It can — the scan was evadable by an import alias, a turbofish call, a macro-generated type, a dead
+`.whole_body()` call beside a different verdict, a fourth consumer that simply never names
+`RollbackParticipation`, and inline comments or string literals, since the stripper removed only
+full-line `//` comments.
+
+Slice 3.13 did two things, in this order.
+
+**(a) Strengthened what is cheaply and reliably strengthenable.** The stripper is now a real lexer —
+inline and block comments, strings, raw strings, byte strings and character literals, with lifetimes
+correctly not mistaken for character literals — and it has its own unit test, because every rule rests
+on it. The membership conditions are pinned on the TYPE NAMES (`DisableRollback`,
+`PredictionHistory<Position>`, …) at exactly one occurrence each in production rather than on one
+`Has<..>` spelling, so an import alias is red. `prepare_restores` is counted on the bare identifier,
+so a turbofish or path-qualified call is caught. **The consumer list is DERIVED from the source** —
+every top-level `fn` naming `RollbackParticipation` — and asserted to be exactly the three, so a
+fourth consumer that names the type fails by construction instead of waiting for someone to extend a
+hard-coded list.
+
+*Deliberately not built:* a dead-call check (needs dataflow, not text) and a cross-module scan for
+`prepare_restores` (it would have to infer which files are `#[cfg(test)]`-gated modules, and a gate
+that cries wolf gets disabled).
+
+**(b) Stated precisely what it guarantees**, in the test's doc, in ADR-0032 and here. See the next
+subsection.
+
+Two documentation corrections landed with it, both round 9 Lows — see *Residuals* below.
+
+### What is guaranteed mechanically, what is argued in prose, and what is open
+
+**This is the arc's summary. It supersedes the running record above where they disagree.**
+
+**Guaranteed mechanically — a test fails if it stops being true:**
+
+- The hull's membership in `prepare_rollback`'s restore, as `net::adoption::prepare_restores` states
+  it, matches what lightyear's own `RollbackSystems::Prepare` actually restores, per component, over
+  all 32 archetypes the two membership conditions produce
+  (`prepare_restores_exactly_the_components_the_predicate_names`). **This is the load-bearing
+  contract of the participation work.** A lightyear bump that moves a condition fails here.
+- The shove is delivered at leads 0, −1 and 8 through the real `Prepare` seam, with live restored
+  velocities asserted.
+- A hull excluded from `Prepare` is never requested and never adopted.
+- A late replicated change — a removal middle-inserted before the restore target — is revalidated at
+  the request, and a revalidation that never passes is dropped at the replay window, at exactly the
+  age asserted.
+- `request_forced_rollback` has exactly one production call site (source scan).
+- Every `HullShock` field is hashed into the `shk` trace stream, by destructuring.
+- The wire is byte-identical at `PROTOCOL_REV` 24 with all three hashes re-pinned.
+
+**Argued in prose, with a tripwire but no proof:**
+
+- `Retirement::Undelivered` is unreachable against pinned lightyear 0.28. Steps 2 and 3 of that proof
+  are DEPENDENCY properties; the branch, its ERROR log and its counter all survive the proof on
+  purpose.
+- Nothing moves the hull's archetype between `Prepare` and the post-`Prepare` proof. **This is round
+  8's open item (a) and it is still open** — a schedule-adjacency argument with no tripwire.
+- The latch audit table is the best current inventory of the "latched at one schedule point, consumed
+  at another" class, **not a proof that the class has 29 members.** Two independent enumerations each
+  missed four rows the other found.
+- `MAX_PRESENTED_HITS = 64` is a CHOSEN retention depth. It was `DERIVED` until round 8 killed the
+  derivation.
+
+**Guarded, not guaranteed** — `the_three_participation_sites_ask_one_shared_question` is a lexical
+scan of one file. It defends against a future author *accidentally* re-expressing the participation
+condition, which is the real threat model here: every defect this arc found was written by somebody
+who believed the condition was already asked. It does **not** defend against deliberate evasion and
+cannot without real AST analysis (a macro can generate a query type it never sees; a site can keep a
+live-looking `.whole_body()` call and branch on something else; `prepare_restores` is `pub(super)` and
+the scan reads only `adoption.rs`). The older
+`only_the_forced_rollback_slot_requests_a_forced_rollback` carries the same limitation and now says
+so. **An AST check was assessed and not built**: `syn` in the test tree, plus item-walking and
+macro-expansion caveats, to move from "accident" to "evasion" against a threat model with no
+evidence behind it. Reconsider only if a lexical evasion is actually observed.
+
+**Residuals, open, with their real scope:**
+
+1. **The pre-staging spark window.** `ImpactPresentation::watched` latches a staged fact's drawn state
+   per fact, so eviction cannot touch it from staging onward. Before staging, the answer lives only in
+   the `MAX_PRESENTED_HITS` FIFO. Round 9 corrected two things slice 3.12 got wrong here.
+   **(i) The exposed interval is the whole pre-staging window, not "one replication gap"** — the
+   authority coalesces impulses for up to `SHOCK_EPISODE_TICKS` before publishing an episode while the
+   first hit's `ImpactConfirm` broadcasts immediately, so an early spark can precede the episode's
+   *publication* as well as its replication and the client's staging; with no entries-per-tick bound,
+   64 is headroom over that window and not a bound on it. **(ii) A lost entry is not always
+   conservative** — it is a release-on-budget in `clear_to_order`, which is, but the same unseeded
+   latch is a false `spark_pending: true` in `retirement`, which INFLATES `bypassed`. Accepted as a
+   best-effort telemetry limitation: no delivery decision reads the buffer, and **`bypassed` must be
+   read as an upper bound.** Removing it means keying drawn state before the fact exists.
+2. **`ordering == Released` short-circuits `spark_pending`** at `adoption.rs`'s `retirement`, and the
+   latch is still reachable from `Unasked` and `HoldingForSpark`. Round 9 confirmed this is correctly
+   characterised; it stays as-is.
+3. **The post-`Prepare` archetype-stability argument** (round 8's item (a), above).
+4. **Nothing has been measured.** No two-client capture on a jittered link exists. The bypass rate,
+   the budget-expiry rate and the hitch feel are instrumented and unread. No claim in ADR-0032 should
+   be promoted to a product fact before that capture.
+
 ---
 
 ## 4. Running at handoff
 
-Nothing. Round 7's findings are all fixed in the slice-3.11 commit; no job is in flight, the branch is
-clean, no agent holds a lock, and the simplifier is idle.
+Nothing. Rounds 7, 8 and 9 are all answered as of slice 3.13; no job is in flight, the branch is
+clean, no agent holds a lock, and the simplifier is idle. **The arc is closed** — the next work is
+slice 4, below.
 
 ---
 
@@ -365,12 +484,14 @@ clean, no agent holds a lock, and the simplifier is idle.
      position is a composed partial order across plugins, sets and `run_if`s; reads hide behind
      methods; whether a second site *relies* on a query condition is semantic; it would flag
      harmless historical identities, telemetry counters and irrelevant filters; and the allowlist
-     would become another hand-maintained copy of the table. Two narrow contracts were built
-     instead — the matrix above, and
-     `net::adoption::the_three_participation_sites_ask_one_shared_question`, a source scan that pins
-     the participation condition to one spelling (`RollbackParticipation`) and one predicate across
-     the offer, the request and the confirmation. Both were verified RED by mutation. Neither
-     saturates the table; the table stays a discipline for everything else.
+     would become another hand-maintained copy of the table. One contract and one guard rail were
+     built instead — the matrix above, and
+     `net::adoption::the_three_participation_sites_ask_one_shared_question`, a lexical source scan
+     that pins the participation condition to one spelling (`RollbackParticipation`) and one
+     predicate across every consumer it can see. Both were verified RED by mutation. **Round 9
+     found the ADR describing them as two equal contracts and the scan claiming evasion-proof
+     coverage; slice 3.13 corrected both** — see *What round 9 found* above. Neither saturates the
+     table; the table stays a discipline for everything else.
 
    Of the two rows carried forward as scheduled re-assessments: `ForcedRollbackSlot::installed` is
    still safe partly *because it has no external consumer*, which slice 4 removes. The `PresentedHit`
@@ -378,12 +499,21 @@ clean, no agent holds a lock, and the simplifier is idle.
    while eviction spends ENTRIES, so a staged fact's own drawn spark could be evicted by unrelated
    impacts and `retirement` would then report a BYPASS for a spark the player had seen. The staged
    claim's drawn state latches per fact now (`ImpactPresentation::watched`, established at
-   `AuthorityAdoption::offer`, keyed by the claim's authority identity), outside the FIFO.
+   `AuthorityAdoption::offer`, keyed by the claim's authority identity), outside the FIFO. A residual
+   survives across the pre-staging window; round 9 corrected its stated scope, and *Residuals* above
+   is the accurate description.
 2. **Slice 4 — `render_error`** (task #32, held all session). Fix the one-frame render freeze per
    rollback, and honour the `AdoptionCause` tag so an adopted authority impulse stays sharp instead
    of being smoothed like a misprediction. `AdoptionCause` currently has **no consumer** —
    `ForcedRollbackSlot::installed()` is read only inside `net::adoption`. Held deliberately: I did
    not want presentation logic built on an adoption path that kept changing.
+
+   **Slice 4 is also when the `ForcedRollbackSlot::installed` audit row comes due.** ADR-0032 marks
+   it *Safe TODAY, and the reason has an expiry date*: it is freshly overwritten after `Prepare`,
+   derived from the current `started`, and **has no external consumer**. `net::render_error` becomes
+   that consumer. The row must be RE-ASSESSED, not inherited — a cross-schedule reader in another
+   module is a new latch question, and the arc's whole lesson is that the second reader is where the
+   condition drifts. Do it before writing the smoothing, not after.
 3. **#36 — the native-comparator bypass.** `HullShock` still carries a
    `with_rollback_condition(..)`, a second delivery path that ping influences. Originally scoped
    around "don't disturb the registration"; that constraint was imaginary (see §7) so re-scope it

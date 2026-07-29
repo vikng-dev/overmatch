@@ -455,11 +455,32 @@ impl VisualClaim {
 /// spark the player had already seen.
 ///
 /// What carries the staged fact's answer now is [`WatchedSpark`], which is per-fact and outside this
-/// FIFO entirely. This buffer's remaining job is to SEED that latch for a spark drawn before its
-/// fact was staged — the ordinary shape, since a hit's `ImpactConfirm` and its `HullShock` travel
-/// separately. So the number is a retention DEPTH chosen for headroom over that one gap, not a
-/// derivation: 64 is double the depth the module ran on, and losing an entry out of it can only
-/// under-report a spark, which costs a release-on-budget that logs loudly.
+/// FIFO entirely, and the latch closes the window from staging onward completely.
+///
+/// # THE RESIDUAL, AT ITS REAL SCOPE — the ninth review found the previous wording too kind twice
+///
+/// This buffer's remaining job is to SEED that latch, so an eviction still matters for a spark drawn
+/// BEFORE its fact was staged.
+///
+/// **That exposed interval is the whole pre-staging window, not "one replication gap".** The
+/// authority coalesces impulses for up to [`SHOCK_EPISODE_TICKS`] before it publishes the episode at
+/// all, and a coalesced episode's FIRST hit has its own `ImpactConfirm` broadcast immediately — so
+/// the early spark can precede the episode's publication, then its replication, then the frame the
+/// client stages the fact on. Every impact from every combatant lands in this one buffer over that
+/// whole span, and nothing bounds entries per tick, so **64 is headroom over that window and not a
+/// bound on it.** A busy enough server evicts through any fixed depth.
+///
+/// **And a lost entry is not always conservative.** In [`clear_to_order`] it is — an unseeded latch
+/// reads "not drawn", the fact waits and is released on budget, which logs loudly. But the same
+/// unseeded latch is what [`retirement`] reads through [`ImpactPresentation::shown_for`], and there
+/// a false "not drawn" becomes `spark_pending: true` and an INFLATED `bypassed` for a spark the
+/// player did see. That is the same direction of error slice 3.12 was fixing; the latch narrowed it
+/// from the entire lifetime of a staged fact to the pre-staging window, and did not remove it.
+/// It is accepted as a known best-effort limitation OF THE TELEMETRY — no delivery decision reads
+/// this buffer, and `bypassed` is the number that would justify replacing the ordering rule with a
+/// real presentation barrier, so it must be read as an upper bound. Removing the residual means
+/// keying the drawn state before the fact exists, which means an authority-keyed ledger with its own
+/// eviction policy; that is a design change, not a bigger constant.
 const MAX_PRESENTED_HITS: usize = 64;
 
 /// The staged claim's own drawn state, held OUTSIDE the eviction FIFO.
@@ -974,10 +995,13 @@ impl Unready {
 /// handed to a shared predicate, so the divergence was invisible to every reader of either site.
 ///
 /// It is also what makes the divergence mechanically detectable: the source scan
-/// `the_three_participation_sites_ask_one_shared_question` pins that `Has<DisableRollback>` and the
-/// four rigid-body `Has<PredictionHistory<..>>` spellings occur in THIS declaration and nowhere else
-/// in the module, and that all three consumers route through the shared predicate. An offer-only
-/// re-expression cannot be written without failing that test.
+/// `the_three_participation_sites_ask_one_shared_question` pins that `DisableRollback` and the four
+/// rigid-body `PredictionHistory<..>` types are named in THIS declaration and nowhere else in the
+/// module, and that every consumer it can see routes through the shared predicate. That scan is a
+/// GUARD RAIL and its own doc states its limits: it catches an offer-only re-expression written by
+/// accident, which is the real hazard, and it does not and cannot catch one written to evade a
+/// lexical reader. The checked contract underneath it is
+/// `net::lead_zero_rollback::prepare_restores_exactly_the_components_the_predicate_names`.
 #[derive(bevy::ecs::query::QueryData)]
 struct RollbackParticipation {
     /// `prepare_rollback`'s query filter, read as DATA. Excludes the hull from EVERY component's
@@ -1741,6 +1765,13 @@ impl RestoresFrom {
 /// being answered from `AuthorityAdoption::ordering.is_none()` instead, which was true in three
 /// different situations: the rule had not been consulted, the fact had no visual at all, and the
 /// rule was genuinely holding it. Two of those inflate the count.
+///
+/// ONE RESIDUAL SURVIVES AND `bypassed` MUST BE READ AS AN UPPER BOUND. A spark drawn before its
+/// fact was staged is known to this module only through [`MAX_PRESENTED_HITS`]'s FIFO, and if it was
+/// evicted before the staging that seeds [`WatchedSpark`] then `shown_for` answers false here for a
+/// spark the player saw. See the note on that constant for why the exposed window is the whole
+/// pre-staging span rather than one replication gap. No delivery decision reads it; this counter
+/// does.
 ///
 /// The latch's remaining job here is the one it can do: RELEASED is released, by either verdict, and
 /// a rollback carrying a fact the rule already let go missed nothing. Everything else asks the
@@ -3267,6 +3298,15 @@ mod tests {
     /// call site, [`ForcedRollbackSlot::claim`], because the single-slot arbitration and the cause
     /// tag are only invariants if there is no way around them. Test setup that stages a competing
     /// claim is legitimate and is why the scan stops at a file's in-file test module.
+    ///
+    /// SAME LIMITATION AS [`the_three_participation_sites_ask_one_shared_question`], stated here
+    /// too because the ninth review found the other one claiming more than it delivers. This is a
+    /// LEXICAL scan: it defends against a second call site written by somebody who did not know the
+    /// slot existed, which is the real threat model. It does not defend against evasion — an import
+    /// alias, a macro-generated call, or a `#[cfg(test)] mod` header spelled differently enough to
+    /// truncate the file early all pass it. It is also coarser than the participation scan on
+    /// purpose: it does not strip comments, so a file that merely NAMES `request_forced_rollback(`
+    /// in prose is an offender. That direction is the safe one for a bare-existence rule.
     #[test]
     fn only_the_forced_rollback_slot_requests_a_forced_rollback() {
         let mut offenders = Vec::new();
@@ -3298,32 +3338,155 @@ mod tests {
         );
     }
 
-    /// This module's production source with every comment line blanked, so a scan reads what the
-    /// COMPILER reads. The prose here quotes `Without<DisableRollback>` and every `Has<..>` spelling
-    /// repeatedly and must not be mistaken for an expression of them.
+    /// `source` with every comment and every string, byte-string and character literal blanked to
+    /// spaces, so a scan reads what the COMPILER reads rather than what the prose says. Newlines
+    /// survive, so item structure and any offset a failure reports still mean something.
     ///
-    /// Line structure is preserved rather than the lines deleted, so the function-boundary search
-    /// below still works and a failure's offsets still mean something.
-    fn production_source_without_comments() -> String {
+    /// SLICE 3.13 WIDENED THIS AND THE NARROW VERSION WAS A REAL HOLE. It blanked whole-line `//`
+    /// comments only, so an inline comment or a panic message satisfied a `contains` check — and
+    /// this module's panic messages quote the exact spellings the scan below forbids.
+    ///
+    /// It is a lexer, not a parser: it knows nothing about macros, `cfg`, or meaning.
+    fn code_only(source: &str) -> String {
+        let chars: Vec<char> = source.chars().collect();
+        let mut out = String::with_capacity(source.len());
+        let mut index = 0;
+        // Blanked, not deleted: a newline stays a newline so the line count is preserved.
+        let blanked = |character: char| if character == '\n' { '\n' } else { ' ' };
+        while index < chars.len() {
+            let current = chars[index];
+            let next = chars.get(index + 1).copied();
+
+            // `//` — and `///`, and `//!` — to the end of the line.
+            if current == '/' && next == Some('/') {
+                while index < chars.len() && chars[index] != '\n' {
+                    out.push(' ');
+                    index += 1;
+                }
+                continue;
+            }
+
+            // `/* .. */`, nested, possibly spanning lines.
+            if current == '/' && next == Some('*') {
+                let mut depth = 0usize;
+                while index < chars.len() {
+                    if chars[index] == '/' && chars.get(index + 1) == Some(&'*') {
+                        depth += 1;
+                        out.push_str("  ");
+                        index += 2;
+                        continue;
+                    }
+                    if chars[index] == '*' && chars.get(index + 1) == Some(&'/') {
+                        depth -= 1;
+                        out.push_str("  ");
+                        index += 2;
+                        if depth == 0 {
+                            break;
+                        }
+                        continue;
+                    }
+                    out.push(blanked(chars[index]));
+                    index += 1;
+                }
+                continue;
+            }
+
+            // A raw string: `r` then any run of `#` then `"`. No other valid Rust reaches that
+            // shape — a raw IDENTIFIER (`r#type`) has no quote, and an identifier ending in `r`
+            // cannot be followed by a bare string — so this needs no look-behind.
+            if current == 'r' {
+                let mut hashes = 0;
+                while chars.get(index + 1 + hashes) == Some(&'#') {
+                    hashes += 1;
+                }
+                if chars.get(index + 1 + hashes) == Some(&'"') {
+                    let terminator: String = std::iter::once('"')
+                        .chain(std::iter::repeat_n('#', hashes))
+                        .collect();
+                    let opening = index;
+                    index += hashes + 2;
+                    let tail: String = chars[index..].iter().collect();
+                    let length = tail
+                        .find(&terminator)
+                        .map_or(chars.len() - index, |offset| {
+                            tail[..offset].chars().count() + terminator.chars().count()
+                        });
+                    let closing = (index + length).min(chars.len());
+                    for character in &chars[opening..closing] {
+                        out.push(blanked(*character));
+                    }
+                    index = closing;
+                    continue;
+                }
+            }
+
+            // A character literal, which a LIFETIME is not: `'a'` closes two characters on, and an
+            // escape (`'\n'`) always starts with a backslash. Anything else after `'` is `'a` in a
+            // type position and stays code.
+            if current == '\'' {
+                if next != Some('\\') && chars.get(index + 2) != Some(&'\'') {
+                    out.push(current);
+                    index += 1;
+                    continue;
+                }
+                out.push(' ');
+                index += 1;
+                while index < chars.len() {
+                    if chars[index] == '\\' {
+                        out.push(' ');
+                        out.push(chars.get(index + 1).copied().map_or(' ', blanked));
+                        index += 2;
+                        continue;
+                    }
+                    let closing = chars[index] == '\'';
+                    out.push(blanked(chars[index]));
+                    index += 1;
+                    if closing {
+                        break;
+                    }
+                }
+                continue;
+            }
+
+            // An ordinary string. `b"..."` arrives here with its `b` already emitted as code, which
+            // is harmless — the `b` is not a spelling anything below asks about.
+            if current == '"' {
+                out.push(' ');
+                index += 1;
+                while index < chars.len() {
+                    if chars[index] == '\\' {
+                        out.push(' ');
+                        out.push(chars.get(index + 1).copied().map_or(' ', blanked));
+                        index += 2;
+                        continue;
+                    }
+                    let closing = chars[index] == '"';
+                    out.push(blanked(chars[index]));
+                    index += 1;
+                    if closing {
+                        break;
+                    }
+                }
+                continue;
+            }
+
+            out.push(current);
+            index += 1;
+        }
+        out
+    }
+
+    /// This module's production source, as the compiler reads it. See [`code_only`].
+    fn production_source_as_the_compiler_reads_it() -> String {
         let source = std::fs::read_to_string(file!()).expect("this file is readable");
         let production = source
             .split_once("\n#[cfg(test)]\nmod tests {")
-            .map_or(source.clone(), |(before, _)| before.to_string());
-        production
-            .lines()
-            .map(|line| {
-                if line.trim_start().starts_with("//") {
-                    ""
-                } else {
-                    line
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+            .map_or(source.as_str(), |(before, _)| before);
+        code_only(production)
     }
 
-    /// The text of one top-level item, from its `fn`/`struct` line to the `}` in column zero that
-    /// closes it. Panics if the item is gone, which is the point: a scan that silently covers
+    /// The text of one top-level item, from its `fn`/`struct`/`impl` line to the `}` in column zero
+    /// that closes it. Panics if the item is gone, which is the point: a scan that silently covers
     /// nothing is worse than no scan.
     fn item_body<'a>(source: &'a str, opener: &str) -> &'a str {
         let start = source
@@ -3336,29 +3499,163 @@ mod tests {
         &rest[..end]
     }
 
-    /// SOURCE SCAN, and the mechanical half of what the eighth review asked for. The hull's
-    /// participation in `prepare_rollback`'s restore is expressed ONCE, in
-    /// [`RollbackParticipation`], and all three sites that need it route through the shared
-    /// predicate.
+    /// Every top-level `fn` in `source`, as `(name, body)`.
+    ///
+    /// DERIVED RATHER THAN LISTED, which is the ninth review's point: slice 3.12 hard-coded three
+    /// function names, so a FOURTH consumer of [`RollbackParticipation`] was invisible until
+    /// somebody remembered to extend the list — the same "remember to update the copy" shape this
+    /// arc keeps finding in prose. Column-zero only, so nested `fn`s and method bodies are not
+    /// items and cannot be mistaken for one.
+    fn top_level_functions(source: &str) -> Vec<(&str, &str)> {
+        let mut items = Vec::new();
+        let mut offset = 0;
+        for line in source.split_inclusive('\n') {
+            let start = offset;
+            offset += line.len();
+            if line.starts_with(char::is_whitespace) {
+                continue;
+            }
+            let Some(signature) = line
+                .strip_prefix("fn ")
+                .or_else(|| line.split_once(" fn ").map(|(_, rest)| rest))
+            else {
+                continue;
+            };
+            let name = signature
+                .split(|character: char| !character.is_alphanumeric() && character != '_')
+                .next()
+                .unwrap_or_default();
+            if name.is_empty() {
+                continue;
+            }
+            let rest = &source[start..];
+            let end = rest
+                .find("\n}\n")
+                .unwrap_or_else(|| panic!("`{name}` is closed by a `}}` in column zero"));
+            items.push((name, &rest[..end]));
+        }
+        items
+    }
+
+    /// [`code_only`] is only worth trusting if it is itself checked, and every rule below rests on
+    /// it. Each line here is a shape this module's real source contains.
+    #[test]
+    fn the_scan_reads_code_and_not_prose() {
+        let source = concat!(
+            "let a = \"Without<DisableRollback>\"; // Has<DisableRollback>\n",
+            "/* Has<PredictionHistory<Position>> */ let b = 'x';\n",
+            "impl Wrapper<'_, '_> { }\n",
+            "let c = r#\"Has<PredictionHistory<Rotation>>\"#;\n",
+            "let d = \"an escaped quote \\\" and Has<PredictionHistory<LinearVelocity>>\";\n",
+            "let e = prepare_restores(true, [false]);\n",
+        );
+        let stripped = code_only(source);
+
+        for hidden in [
+            "Without<DisableRollback>",
+            "Has<DisableRollback>",
+            "Has<PredictionHistory<Position>>",
+            "Has<PredictionHistory<Rotation>>",
+            "Has<PredictionHistory<LinearVelocity>>",
+        ] {
+            assert!(
+                !stripped.contains(hidden),
+                "`{hidden}` survived the strip — a comment or literal can satisfy a `contains` \
+                 rule again, which is the hole slice 3.13 closed:\n{stripped}",
+            );
+        }
+        assert!(
+            stripped.contains("let a = ") && stripped.contains("let e = prepare_restores(true, "),
+            "the strip ate CODE, so every count below would be wrong:\n{stripped}",
+        );
+        assert!(
+            stripped.contains("impl Wrapper<'_, '_> {"),
+            "a lifetime was mistaken for a character literal, which desyncs the rest of the \
+             file:\n{stripped}",
+        );
+        assert_eq!(
+            stripped.lines().count(),
+            source.lines().count(),
+            "line structure was not preserved, so item boundaries and reported offsets lie",
+        );
+    }
+
+    /// [`top_level_functions`] is the other half the rules rest on: it must find column-zero items
+    /// whatever their visibility, and must not promote a nested `fn` to an item.
+    #[test]
+    fn the_scan_finds_top_level_functions_of_every_visibility() {
+        let source = concat!(
+            "fn plain() {\n    fn nested() {}\n}\n",
+            "pub(super) fn shared<const N: usize>(value: bool) -> bool {\n    value\n}\n",
+            "impl Thing {\n    fn method(&self) {}\n}\n",
+        );
+        let code = code_only(source);
+        let names: Vec<&str> = top_level_functions(&code)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(
+            names,
+            ["plain", "shared"],
+            "the item scan disagrees with what a column-zero `fn` is, so the consumer list it \
+             derives cannot be trusted",
+        );
+    }
+
+    /// SOURCE SCAN — A GUARD RAIL, NOT THE CONTRACT. The hull's participation in
+    /// `prepare_rollback`'s restore is expressed ONCE, in [`RollbackParticipation`], and every site
+    /// that consumes it routes through the shared predicate.
+    ///
+    /// THE LOAD-BEARING CONTRACT IS THE RUNTIME MATRIX. What holds [`prepare_restores`] to
+    /// lightyear's real behaviour is
+    /// `net::lead_zero_rollback::prepare_restores_exactly_the_components_the_predicate_names`,
+    /// which runs the dependency's own `RollbackSystems::Prepare` over all 32 archetypes the two
+    /// membership conditions can produce and compares the restore, per component, against this
+    /// module's answer. This test asks a cheaper and much narrower question — is the condition
+    /// still spelled in one place — and its value is bounded by that.
     ///
     /// WHAT IT WOULD HAVE CAUGHT: the seventh review's High verbatim. That defect was not a missing
     /// check — it was the same condition written two ways, `Without<DisableRollback>` as a query
     /// FILTER on the offer and nothing at all on the request and the confirmation. A filter is
     /// invisible to any function that is supposed to own the question, so no reader of either site
-    /// could see the divergence. Every one of the three rules below is red on that source.
+    /// could see the divergence. Every rule below is red on that source.
+    ///
+    /// # WHAT IT GUARANTEES, AND WHAT IT CANNOT
+    ///
+    /// This is a LEXICAL scan of one file, read with comments and literals stripped ([`code_only`]).
+    /// **It defends against a future author ACCIDENTALLY re-expressing the condition** — putting the
+    /// `Without` filter back on a query, adding a consumer that asks the question its own way,
+    /// calling the predicate directly with a subset of its own choosing, renaming a site out from
+    /// under a hard-coded list. That is the real threat model in this module: every defect this arc
+    /// found was written by somebody who believed the condition was already asked.
+    ///
+    /// **It does not defend against deliberate evasion, and no lexical scan can.** A macro can
+    /// expand to a query type this scan never sees. A consumer can keep a live-looking
+    /// `.whole_body()` call and branch on something else entirely — the scan sees the call, not the
+    /// dataflow. `prepare_restores` is `pub(super)`, and this scan reads only this file, so a caller
+    /// in another `net` module is out of range. Closing any of those needs real AST analysis, and
+    /// the case for building it is not made by this arc's evidence.
+    ///
+    /// **ADR-0032 claimed the offer-only re-expression "cannot be written without turning it red".
+    /// The ninth review killed that, correctly.** It can be, deliberately. Accidentally, it cannot.
+    /// Overstating a guard rail into a proof is the exact failure this arc has spent nine rounds
+    /// catching in its own documents.
     ///
     /// WHY THIS AND NOT THE GENERAL SCANNER. The saturating form the audit table imagines — every
     /// resource field × every cross-schedule reader — is not buildable honestly: Bevy's schedule
     /// order is a composed partial order across plugins, sets and `run_if`s; reads hide behind
     /// methods; and whether a second site RELIES on a condition is semantic. It would need an
-    /// allowlist, and the allowlist would be another hand-maintained copy of the table. This is the
-    /// narrow version that can be made exact.
+    /// allowlist, and the allowlist would be another hand-maintained copy of the table.
     ///
-    /// It is not vacuous: each rule names an item that must exist and [`item_body`] panics if it
-    /// does not, so deleting a site fails the test instead of emptying it.
+    /// NOT VACUOUS, in the two ways that matter. Every rule names an item that must exist and
+    /// [`item_body`] panics if it does not, so deleting a site fails the test instead of emptying
+    /// it. And the consumer list is DERIVED from the source, so a fourth consumer that names
+    /// `RollbackParticipation` is caught by construction rather than by somebody remembering to add
+    /// a line here. A fourth consumer that never names the type is invisible to this test — that
+    /// one belongs to the runtime matrix and to review.
     #[test]
     fn the_three_participation_sites_ask_one_shared_question() {
-        let production = production_source_without_comments();
+        let production = production_source_as_the_compiler_reads_it();
 
         assert!(
             !production.contains("Without<DisableRollback>"),
@@ -3368,64 +3665,79 @@ mod tests {
              cannot see it IS the seventh review's High.",
         );
 
-        // The five spellings of lightyear's membership conditions, and the ONE declaration allowed
-        // to contain them.
+        // The membership conditions, pinned on the TYPE NAMES rather than on one `Has<..>` spelling
+        // — so a re-expression cannot slip past by writing the query data differently or by
+        // importing the marker under another name. `DisableRollback` reaches this module through
+        // `lightyear::prelude::*`, so an alias would be a second occurrence and is red here.
         let declaration = item_body(&production, "\nstruct RollbackParticipation {");
         for condition in [
-            "Has<DisableRollback>",
-            "Has<PredictionHistory<Position>>",
-            "Has<PredictionHistory<Rotation>>",
-            "Has<PredictionHistory<LinearVelocity>>",
-            "Has<PredictionHistory<AngularVelocity>>",
+            "DisableRollback",
+            "PredictionHistory<Position>",
+            "PredictionHistory<Rotation>",
+            "PredictionHistory<LinearVelocity>",
+            "PredictionHistory<AngularVelocity>",
         ] {
             assert_eq!(
                 production.matches(condition).count(),
-                declaration.matches(condition).count(),
-                "`{condition}` is spelled outside `RollbackParticipation`. Every site asks this \
-                 through that one type, so the conditions cannot drift apart between the offer, the \
-                 request and the post-`Prepare` proof — which is exactly how they drifted before.",
+                1,
+                "`{condition}` is named more than once in production — outside \
+                 `RollbackParticipation`, or aliased into it. Every site asks this through that one \
+                 type, so the conditions cannot drift apart between the offer, the request and the \
+                 post-`Prepare` proof, which is exactly how they drifted before.",
             );
             assert_eq!(
-                declaration.matches(condition).count(),
+                declaration.matches(&format!("Has<{condition}>")).count(),
                 1,
-                "`RollbackParticipation` must carry `{condition}` exactly once — it is the mirror \
-                 of `prepare_rollback`'s query, and `net::lead_zero_rollback`'s conformance matrix \
-                 is what checks that mirror against the real restore.",
+                "`RollbackParticipation` must carry `Has<{condition}>` exactly once, read as DATA — \
+                 it is the mirror of `prepare_rollback`'s query, and `net::lead_zero_rollback`'s \
+                 conformance matrix is what checks that mirror against the real restore.",
             );
         }
 
-        // The three consumers, and the accessors that are the only route to `prepare_restores`.
-        for site in [
-            "\nfn offer_hull_shock_adoptions(",
-            "\nfn request_staged_adoption(",
-            "\nfn confirm_forced_rollback(",
-        ] {
-            let body = item_body(&production, site);
-            assert!(
-                body.contains("RollbackParticipation"),
-                "`{site}` no longer asks whether `prepare_rollback` reaches the hull. All three \
-                 have to: gating only the request leaves the post-`Prepare` proof reading a \
-                 `ConfirmedHistory` lookup no restore performed, which is the half-fix the seventh \
-                 review named.",
-            );
-            assert!(
-                body.contains(".whole_body()") || body.contains(".velocities()"),
-                "`{site}` carries the participation data without routing it through \
-                 `prepare_restores`. Branching on the flags here is how the question gets asked two \
-                 slightly different ways again.",
-            );
-        }
+        // THE CONSUMERS, DERIVED. Every top-level function that names the type is a site that has
+        // to route through the shared predicate; the expected set is asserted so that a fourth one
+        // fails here rather than passing unexamined.
+        let mut consumers: Vec<&str> = top_level_functions(&production)
+            .into_iter()
+            .filter(|(_, body)| body.contains("RollbackParticipation"))
+            .map(|(name, body)| {
+                assert!(
+                    body.contains(".whole_body()") || body.contains(".velocities()"),
+                    "`{name}` carries the participation data without routing it through \
+                     `prepare_restores`. Branching on the flags here is how the question gets asked \
+                     two slightly different ways again.",
+                );
+                name
+            })
+            .collect();
+        consumers.sort_unstable();
+        assert_eq!(
+            consumers,
+            [
+                "confirm_forced_rollback",
+                "offer_hull_shock_adoptions",
+                "request_staged_adoption",
+            ],
+            "the set of functions asking whether `prepare_rollback` reaches the hull has changed. \
+             All three of the listed ones have to ask: gating only the request leaves the \
+             post-`Prepare` proof reading a `ConfirmedHistory` lookup no restore performed, which is \
+             the half-fix the seventh review named. A NEW name here is a new consumer of the \
+             condition — check it against the audit table in ADR-0032 and then add it. A MISSING \
+             name is a site that stopped asking.",
+        );
 
-        // And the accessors are the only route: nothing else in production may call the predicate
-        // directly, or "routes through the shared predicate" stops meaning anything.
+        // And the accessors are the only route: nothing else in production may reach the predicate,
+        // or "routes through the shared predicate" stops meaning anything. Counted on the bare
+        // identifier rather than on `prepare_restores(`, so a turbofish or a path-qualified call is
+        // counted too; the definition is the one remaining occurrence.
         let accessors = item_body(&production, "\nimpl RollbackParticipationItem<'_, '_> {");
         assert_eq!(
-            production.matches("prepare_restores(").count(),
-            accessors.matches("prepare_restores(").count(),
-            "`prepare_restores` has production CALLERS outside `RollbackParticipation`'s two \
-             accessors (its own definition is spelled `prepare_restores<`, so it is not counted \
-             here). The accessors are what name WHICH components a site's verdict is defined on; a \
-             direct caller picks its own subset, which is the sixth review's finding in a new place.",
+            production.matches("prepare_restores").count(),
+            accessors.matches("prepare_restores").count() + 1,
+            "`prepare_restores` is named in production outside `RollbackParticipation`'s two \
+             accessors and its own definition. The accessors are what name WHICH components a \
+             site's verdict is defined on; a direct caller picks its own subset, which is the sixth \
+             review's finding in a new place.",
         );
     }
 }
