@@ -296,24 +296,40 @@ fn advance_to(app: &mut App, target: Tick) {
     }
 }
 
-/// RED ON THE CURRENT DESIGN. The steady-state shipping condition: the client is level with the
-/// completed checkpoint and the tank is explicitly confirmed there. The authority applied a hull
-/// impulse and published it; the client must end up moving.
+/// The steady-state shipping condition: the client is level with the completed checkpoint and the
+/// tank is explicitly confirmed there. The authority applied a hull impulse and published it; the
+/// client must end up moving. GREEN since slice 2, via `net::adoption` — neither lightyear route
+/// runs here, and neither has to.
 #[test]
-#[ignore = "SLICE 2 acceptance test: RED until authoritative hull facts are delivered at a client \
-            lead of 0 — the receive-time `confirmed_tick < current_tick` gate and the \
-            ConfirmHistory-contains skip in the completed-tick scan both discard it today"]
 fn an_authority_shock_reaches_the_live_hull_at_zero_lead() {
     assert_delivered(Lead::Zero);
 }
 
-/// RED ON THE CURRENT DESIGN, and the sibling the sync deadband makes reachable: the checkpoint
-/// lands one tick ahead of the client, which then catches up. The shove must survive the wait.
+/// The sibling the sync deadband makes reachable: the checkpoint lands one tick ahead of the
+/// client, which then catches up. The shove must survive the wait.
 #[test]
-#[ignore = "SLICE 2 acceptance test: RED until authoritative hull facts survive a checkpoint that \
-            arrives one tick ahead of the client (the sync controller's allowed deadband drift)"]
 fn an_authority_shock_reaches_the_live_hull_at_minus_one_lead() {
     assert_delivered(Lead::MinusOne);
+}
+
+/// THE ZERO-REPLAY PROOF, and the reason `net::adoption` restores end-of-`T` rather than end-of-
+/// `T−1`. At a lead of 0 the rollback's replay loop body runs ZERO times
+/// (`num_rollback_ticks = current_tick − rollback_tick = 0`), so nothing that depends on a system
+/// re-running can be delivered. The shove still arrives, because `prepare_rollback` — not the loop —
+/// is what writes the live hull velocity. Asserting the empty replay list is what stops a future
+/// edit from "fixing" the restore shape into one that silently drops the effect at this lead.
+#[test]
+fn the_zero_lead_shove_arrives_with_no_replayed_tick_at_all() {
+    let delivered = run_arrival(Lead::Zero);
+
+    assert_eq!(
+        delivered.replayed_ticks,
+        Vec::<u32>::new(),
+        "a lead-0 forced rollback has no replay window; if this list is non-empty the fixture no \
+         longer reproduces the regime it exists for",
+    );
+    assert_eq!(delivered.live_linear, AUTHORITY_LINEAR);
+    assert_eq!(delivered.live_angular, AUTHORITY_ANGULAR);
 }
 
 /// The contract both ignored fixtures assert: whatever route slice 2 takes, the server's hull

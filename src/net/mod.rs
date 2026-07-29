@@ -3,6 +3,9 @@
 use avian3d::schedule::PhysicsSystems;
 use bevy::prelude::*;
 
+/// Unconditional adoption of authoritative facts the client cannot predict — the forced-rollback
+/// primitive `HullShock` is merely the first consumer of.
+mod adoption;
 /// Does the arrival of an unpredicted authoritative component force the rollback that delivers
 /// the server's shove? The confirmation run behind the receiving half of combat.
 #[cfg(test)]

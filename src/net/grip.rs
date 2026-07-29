@@ -498,15 +498,24 @@ mod tests {
 
     #[test]
     fn competing_forced_rollback_does_not_claim_the_grip_checkpoint() {
+        let mut slot = super::super::adoption::ForcedRollbackSlot::default();
         let mut metadata = StateRollbackMetadata::default();
         metadata.request_forced_rollback(Tick(80));
 
-        assert!(!claim_checkpoint_rollback(&mut metadata, Tick(90)));
+        assert!(!claim_checkpoint_rollback(
+            &mut slot,
+            &mut metadata,
+            Tick(90)
+        ));
         assert_eq!(metadata.forced_rollback_tick(), Some(Tick(80)));
-        assert!(claim_checkpoint_rollback(&mut metadata, Tick(80)));
+        assert!(claim_checkpoint_rollback(
+            &mut slot,
+            &mut metadata,
+            Tick(80)
+        ));
 
         let mut clear = StateRollbackMetadata::default();
-        assert!(claim_checkpoint_rollback(&mut clear, Tick(90)));
+        assert!(claim_checkpoint_rollback(&mut slot, &mut clear, Tick(90)));
         assert_eq!(clear.forced_rollback_tick(), Some(Tick(90)));
     }
 

@@ -10,6 +10,7 @@ use bevy::prelude::*;
 use lightyear::core::confirmed_history::ConfirmedHistory;
 use lightyear::prelude::*;
 
+use super::adoption::{AdoptionCause, ForcedRollbackSlot};
 use super::protocol::{
     NetTank, ROLLBACK_POSITION_M, ROLLBACK_ROTATION_RAD, ROLLBACK_VELOCITY, angular_velocity_error,
     linear_velocity_error, position_error, rotation_error,
@@ -57,7 +58,10 @@ struct Check {
 }
 
 /// Return the newest confirmed sample at or before `tick` without consuming history.
-fn newest_present_at_or_before<C>(history: &ConfirmedHistory<C>, tick: Tick) -> Option<(Tick, &C)> {
+pub(super) fn newest_present_at_or_before<C>(
+    history: &ConfirmedHistory<C>,
+    tick: Tick,
+) -> Option<(Tick, &C)> {
     history.into_iter().take_while(|(t, _)| *t <= tick).last()
 }
 
@@ -97,6 +101,7 @@ fn check<C: Component>(
 fn rollback_watchdog(
     timeline: Res<LocalTimeline>,
     mut metadata: ResMut<StateRollbackMetadata>,
+    mut slot: ResMut<ForcedRollbackSlot>,
     manager: Query<&PredictionManager, With<IsSynced<InputTimeline>>>,
     #[allow(clippy::type_complexity)] tank: Query<
         (
@@ -217,7 +222,9 @@ fn rollback_watchdog(
     for component in &mut state.components {
         component.streak = 0;
     }
-    metadata.request_forced_rollback(rollback_tick);
+    // The coarse gate's verdict is by construction "your own prediction drifted", so this claim is
+    // tagged `AdoptionCause::Misprediction`: the view layer may hide this seam as hard as it likes.
+    slot.claim(&mut metadata, rollback_tick, AdoptionCause::Misprediction);
     info!(
         "watchdog: receive-time rollback check starved — forcing rollback at {rollback_tick:?}: \
          {name} off by {magnitude:.3} (bar {threshold}), depth {} ticks (current {current_tick:?})",

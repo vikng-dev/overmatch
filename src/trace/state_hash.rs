@@ -90,9 +90,9 @@ pub(super) struct TankStateHash {
     pub(super) rot: u64,
     pub(super) lv: u64,
     pub(super) av: u64,
-    /// The carried-state combination (fixed order: `drv, srv, rld, shk, rec, blt, trn, elm`) — kept so
+    /// The carried-state combination (fixed order: `drv, srv, rld, rec, blt, trn, elm`) — kept so
     /// existing analysis keyed on `hsim` still gets its single "did any carried state differ?"
-    /// boolean.
+    /// boolean. [`TankStateHash::shk`] is deliberately NOT a member; see its own note.
     pub(super) sim: u64,
     /// `TrackDrive` shaped throttle/steer.
     pub(super) drv: u64,
@@ -100,10 +100,15 @@ pub(super) struct TankStateHash {
     pub(super) srv: u64,
     /// Weapon gate (`ready_tick`, pause tick, then belt count), every weapon in slot order.
     pub(super) rld: u64,
-    /// Hull shock: episode count, its authority tick, and the cause tag. This is the ONE stream a
-    /// predicted owner is expected to disagree on for a few ticks — the client cannot know it was
-    /// shot until the message lands — so a `shk` mismatch names the delivery window rather than
-    /// simulation drift.
+    /// Hull shock: episode count, its authority tick, and the cause tag.
+    ///
+    /// SEPARATE, not folded into [`TankStateHash::sim`] or `combined`. This is the ONE stream a
+    /// predicted owner is EXPECTED to disagree with the authority on: the client cannot know it was
+    /// shot until the message lands, so every delivery window legitimately mismatches here. Folded
+    /// in, those windows read as unexplained carried-state drift and corrupt the divergence rate —
+    /// and `scripts/divergence/analyze.py` cannot even attribute them, because it decodes `hsim`
+    /// from the seven streams that ARE folded and does not consume `hshk`. Kept as its own
+    /// informational stream, a `shk` mismatch names the delivery window and nothing else.
     pub(super) shk: u64,
     /// Barrel recoil offset/velocity, every weapon in slot order.
     pub(super) rec: u64,
@@ -254,8 +259,10 @@ pub(super) fn hash_tank_state_with_elements(
     }
     let elm = hel.finish();
 
+    // `shk` is absent on purpose — see the note on `TankStateHash::shk`. Every other carried-state
+    // stream is a fact both worlds should already agree on tick-for-tick.
     let mut hs = Fnv64::new();
-    for sub in [drv, srv, rld, shk, rec, blt, trn, elm] {
+    for sub in [drv, srv, rld, rec, blt, trn, elm] {
         hs.write_u64(sub);
     }
     let sim_hash = hs.finish();
@@ -582,20 +589,21 @@ mod tests {
         let transmission = sample_transmission();
         let a = hash_tank_state(p, q, lv, av, &drive, &grip, &transmission, &sim);
         let b = hash_tank_state(p, q, lv, av, &drive, &grip, &transmission, &sim);
-        // MEASURED for REV-22 (the `shk` hull-shock stream joined the carried-state
-        // combination); every other stream's bytes are unchanged.
+        // RE-MEASURED when `shk` was UNFOLDED from the carried-state combination: only `combined`
+        // and `sim` move, and they move because the shock stream left them. Every per-family
+        // stream's bytes — `shk` included — are unchanged, which is what makes that reading safe.
         assert_eq!(
             [
                 a.combined, a.pos, a.rot, a.lv, a.av, a.sim, a.drv, a.srv, a.rld, a.shk, a.rec,
                 a.blt, a.trn, a.elm,
             ],
             [
-                10_249_927_933_982_373_632,
+                17_496_020_387_936_353_359,
                 5_276_285_167_157_175_194,
                 5_407_327_877_548_523_030,
                 8_825_002_124_784_658_797,
                 15_886_300_944_198_297_253,
-                6_954_686_685_048_163_228,
+                2_278_136_831_584_015_957,
                 3_269_583_271_824_065_410,
                 14_071_911_453_643_095_408,
                 3_439_918_263_059_415_993,
@@ -866,9 +874,10 @@ mod tests {
         }
     }
 
-    /// Every hull-shock field moves the `shk` stream and nothing else. This is what makes the
-    /// stream readable during a delivery window: an owner who has not yet been told it was shot
-    /// disagrees HERE and only here, so the analyzer sees a delivery gap, not simulation drift.
+    /// Every hull-shock field moves the `shk` stream and NOTHING else — not `sim`, not `combined`.
+    /// That containment is the whole point: an owner who has not yet been told it was shot
+    /// disagrees HERE and only here, so the analyzer sees a delivery gap rather than an
+    /// unattributable carried-state drift it has no decode for.
     #[test]
     fn hull_shock_fields_localize_to_the_shock_stream() {
         let (p, q, lv, av, drive, sim) = sample();
@@ -902,8 +911,11 @@ mod tests {
         for variant in [count, tick, cause] {
             let moved = hash(Some(&variant));
             assert_ne!(base.shk, moved.shk, "hull-shock field {variant:?} unhashed");
-            assert_ne!(base.sim, moved.sim);
-            assert_ne!(base.combined, moved.combined);
+            assert_eq!(
+                (base.sim, base.combined),
+                (moved.sim, moved.combined),
+                "a delivery-window shock disagreement must not read as carried-state drift",
+            );
             assert_eq!(
                 (base.drv, base.srv, base.rld, base.rec, base.blt, base.trn),
                 (
@@ -1012,13 +1024,14 @@ mod tests {
             &test_servos(),
             &sim,
         );
-        // MEASURED for REV-22 (the `shk` hull-shock stream), including reconciled
-        // servo, weapon gate, element, and rollback streams.
+        // RE-MEASURED when `shk` was unfolded from the carried-state combination. `simulation` and
+        // `rollback` derive from `combined`, so both move; the shock stream stays covered here as
+        // its own field, which is why this digest loses no rollback completeness.
         assert_eq!(
             base,
             CanonicalTankStateDigest {
-                simulation: 18_327_101_275_463_329_620,
-                rollback: 4_016_220_758_674_980_505,
+                simulation: 17_452_262_217_714_196_273,
+                rollback: 1_649_749_266_986_927_987,
                 position: 5_276_285_167_157_175_194,
                 rotation: 5_407_327_877_548_523_030,
                 linear_velocity: 8_825_002_124_784_658_797,

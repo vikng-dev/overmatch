@@ -1282,6 +1282,12 @@ pub(crate) fn plugin(app: &mut App) {
         FixedUpdate,
         bridge_action_state_to_tank_command.before(GameplaySet),
     );
+    // The DELIVERY half of the same seam, mounted here for the same reason both halves above are:
+    // the discriminator is a marker, not a composition root. `net::adoption` turns an arriving
+    // authoritative fact into a forced rollback without consulting any threshold — the registered
+    // condition on `HullShock` cannot, because at the client lead our sync config produces lightyear
+    // never dispatches it for an explicitly confirmed entity.
+    super::adoption::plugin(app);
 }
 
 /// Local-only rollback components must have no confirmed history: rollback restores them from

@@ -6,6 +6,7 @@ use lightyear::prelude::client::Remote;
 use lightyear::prelude::*;
 
 use crate::CombatantId;
+use crate::net::adoption::{AdoptionCause, ForcedRollbackSlot};
 use crate::net::protocol::{
     GripCheckpointChunk, GripRequestChannel, GripResyncRequest, NetTrackGripAnchor,
 };
@@ -50,9 +51,7 @@ pub(super) struct PendingGripCorrection {
     anchor_epochs: Vec<AnchorEpoch>,
 }
 
-fn wrapping_newer(candidate: u32, current: u32) -> bool {
-    candidate != current && candidate.wrapping_sub(current) as i32 > 0
-}
+use crate::net::adoption::wrapping_newer;
 
 fn checkpoint_position_is_newer(
     candidate_epoch: u32,
@@ -711,17 +710,15 @@ pub(super) fn checkpoint_rollback_baseline(state_entering_tick: Tick) -> Tick {
     Tick(state_entering_tick.0.saturating_sub(1))
 }
 
+/// An exact grip checkpoint repairs a field the owner PREDICTED and got wrong, so it claims the one
+/// forced-rollback slot as `AdoptionCause::Misprediction`. See `net::adoption` for why the tag is
+/// part of the request rather than something the view layer infers afterwards.
 pub(super) fn claim_checkpoint_rollback(
+    slot: &mut ForcedRollbackSlot,
     state_metadata: &mut StateRollbackMetadata,
     baseline: Tick,
 ) -> bool {
-    match state_metadata.forced_rollback_tick() {
-        Some(selected) => selected == baseline,
-        None => {
-            state_metadata.request_forced_rollback(baseline);
-            state_metadata.forced_rollback_tick() == Some(baseline)
-        }
-    }
+    slot.claim(state_metadata, baseline, AdoptionCause::Misprediction)
 }
 
 pub(super) fn request_checkpoint_rollback(
@@ -730,6 +727,7 @@ pub(super) fn request_checkpoint_rollback(
     managers: Query<&PredictionManager>,
     histories: Query<&PredictionHistory<TrackGripElements>>,
     mut state_metadata: Option<ResMut<StateRollbackMetadata>>,
+    mut slot: ResMut<ForcedRollbackSlot>,
     mut pending: ResMut<PendingGripCorrection>,
     mut watch: ResMut<AnchorWatch>,
     mut limiter: ResMut<GripRequestLimiter>,
@@ -819,7 +817,7 @@ pub(super) fn request_checkpoint_rollback(
     }
     // A different subsystem already owns this frame's forced rollback. Let it finish, then retry
     // this checkpoint; claiming success here would wedge installation on the other selected tick.
-    pending.rollback_requested = claim_checkpoint_rollback(state_metadata, target);
+    pending.rollback_requested = claim_checkpoint_rollback(&mut slot, state_metadata, target);
 }
 
 pub(super) fn install_checkpoint_after_history_restore(

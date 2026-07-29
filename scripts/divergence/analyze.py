@@ -64,6 +64,9 @@ SUB_LABEL = {"hpos": "pos", "hrot": "rot", "hlv": "lv", "hav": "av", "hsim": "si
 
 # The carried-state decode (src/trace.rs since the per-field split): `hsim` = the fixed-order
 # combination of these seven streams. Absent in older traces — attribution then reports "n/a".
+# `hshk` (hull shock) is deliberately NOT one of them and is not consumed here: the predicted owner
+# is EXPECTED to disagree with the authority there for the whole delivery window of every hit, so it
+# rides the trace as an informational stream outside `hsim` and `h`.
 SIM_SUBS = ("hdrv", "hsrv", "hrld", "hrec", "hblt", "htrn", "helm")
 SIM_LABEL = {"hdrv": "drive", "hsrv": "servo", "hrld": "reload", "hrec": "recoil",
              "hblt": "track-belt", "htrn": "transmission", "helm": "track-elements"}

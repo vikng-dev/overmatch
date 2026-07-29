@@ -706,10 +706,14 @@ fn record_tick(
             "hlv": hash.lv,
             "hav": hash.av,
             "hsim": hash.sim,
-            // The carried-state decode: which field family a `hsim` mismatch lives in.
+            // The carried-state decode: which field family a `hsim` mismatch lives in. These seven
+            // streams are exactly what `hsim` folds — `hshk` below is NOT one of them.
             "hdrv": hash.drv,
             "hsrv": hash.srv,
             "hrld": hash.rld,
+            // INFORMATIONAL, outside `hsim` and `h`. The owner legitimately disagrees with the
+            // authority here for the whole delivery window of every hit (see `TankStateHash::shk`),
+            // so folding it in would report every hit as unexplained drift.
             "hshk": hash.shk,
             "hrec": hash.rec,
             "hblt": hash.blt,
