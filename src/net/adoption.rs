@@ -3808,8 +3808,11 @@ mod tests {
     /// it. And no consumer list is hand-maintained: `RollbackParticipation` is pinned by OCCURRENCE
     /// COUNT, so a fourth consumer that names the type is red wherever it is written — column zero,
     /// a method in an `impl`, a `fn` in a nested `mod` — rather than only where a line-shape
-    /// heuristic happens to look. A fourth consumer that never names the type is invisible to this
-    /// test — that one belongs to the runtime matrix and to review.
+    /// heuristic happens to look. And the count is EXHAUSTIVE over naming sites, which is the one
+    /// place this scan's single-file range costs nothing: `RollbackParticipation` is private to this
+    /// module, so no code outside this file can name it at all. (`prepare_restores` is `pub(super)`
+    /// and its count carries the usual single-file caveat.) A fourth consumer that never names the
+    /// type is still invisible here — that one belongs to the runtime matrix and to review.
     #[test]
     fn the_three_participation_sites_ask_one_shared_question() {
         let production = production_source_as_the_compiler_reads_it();

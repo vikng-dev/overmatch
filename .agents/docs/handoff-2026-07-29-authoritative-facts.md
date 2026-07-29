@@ -437,8 +437,10 @@ condition, which is the real threat model here: every defect this arc found was 
 who believed the condition was already asked. Concretely: a new consumer that NAMES
 `RollbackParticipation` is red wherever in `adoption.rs` it is written — column zero, a method in an
 `impl`, a `fn` in a nested `mod`, at any indentation — because the type is pinned by occurrence count
-and every occurrence is accounted for by name. A consumer that never names the type is invisible to
-it, and belongs to the runtime matrix and to review. It does **not** defend against deliberate
+and every occurrence is accounted for by name. That count is *exhaustive over naming sites*: the type
+is private to the module, so no code outside `adoption.rs` can name it, which is the one place the
+scan's single-file range costs nothing. A consumer that never names the type is invisible to it, and
+belongs to the runtime matrix and to review. It does **not** defend against deliberate
 evasion and cannot without real AST analysis (a macro can generate a query type it never sees; a site
 can keep a live-looking `.whole_body()` call and branch on something else; `prepare_restores` is
 `pub(super)` and the scan reads only `adoption.rs`). The older
