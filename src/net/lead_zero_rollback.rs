@@ -48,6 +48,21 @@
 //! The lead-arithmetic guard stands apart from all of that: it asserts the premise the other
 //! fixtures are BUILT on, and must fail loudly the moment someone edits a sync constant without
 //! understanding that these four numbers cancel.
+//!
+//! # And two fixtures about the RESTORE, not the route
+//!
+//! Everything above is about whether an adoption is REQUESTED. Two later fixtures ask what
+//! `prepare_rollback` actually put on the hull, because `net::adoption`'s unit tests can only hand
+//! its classifier a verdict and read the counter that follows — they never execute the restore, and a
+//! counter that faithfully follows a wrong classifier is exactly how a lost shove reads as a healthy
+//! system. Both run lightyear's own `RollbackSystems::Prepare` and then read the LIVE hull velocity:
+//!
+//! - [`a_fact_whose_restore_cannot_carry_the_shove_is_never_requested`] — the authority's newest
+//!   confirmed velocity predates the episode's close, so no rollback to the producing tick can
+//!   deliver anything. Nothing may be requested and no counter may move.
+//! - [`a_rollback_this_module_did_not_order_delivers_the_shove_and_is_counted`] — somebody else's
+//!   rollback restores the authority's velocities while the fact waits for a spark. The hull moves,
+//!   so `bypassed` must move with it.
 
 use core::time::Duration;
 
@@ -62,7 +77,7 @@ use lightyear::core::confirmed_history::ConfirmedHistory;
 use lightyear::prelude::client::{Client, ClientPlugins, Connected, Remote};
 use lightyear::prelude::{
     InputTimeline, InputTimelineConfig, IsSynced, LocalTimeline, PeerId, PingManager, Predicted,
-    PredictionHistory, PredictionManager, RemoteId, ReplicationCheckpointMap,
+    PredictionHistory, PredictionManager, RemoteId, ReplicationCheckpointMap, RollbackSystems,
     StateRollbackMetadata, SyncConfig, Tick,
 };
 use lightyear_core::time::TickInstant;
@@ -70,7 +85,9 @@ use lightyear_core::timeline::NetworkTimeline;
 use lightyear_sync::prelude::client::RemoteTimeline;
 use lightyear_sync::timeline::sync::{SyncTargetTimeline, SyncedTimeline};
 
-use super::adoption::{ImpactPresentation, ORDERING_BUDGET_TICKS, OrderingTally};
+use super::adoption::{
+    AdoptionCause, ForcedRollbackSlot, ImpactPresentation, ORDERING_BUDGET_TICKS, OrderingTally,
+};
 use crate::ballistics::{
     AuthorityImpact, HullShock, HullShockLedger, Impact, ImpactSurface, ShockCause,
 };
@@ -171,9 +188,46 @@ impl Lead {
         }
     }
 
-    fn present_tick(self) -> Tick {
-        Tick(PRODUCING_TICK.0.wrapping_add_signed(self.ticks()))
+    /// Where the client stands when the checkpoint that CARRIES the episode lands, which is
+    /// `arrival` — the tick replication materialized it, not the tick the episode settled on. The
+    /// two are the same in every scenario but [`REPLICATION_LAG_TICKS`].
+    fn present_tick(self, arrival: Tick) -> Tick {
+        Tick(arrival.0.wrapping_add_signed(self.ticks()))
     }
+}
+
+/// How far behind the checkpoint that carries it an episode can have SETTLED.
+///
+/// Replication stamps a component change with the tick the message went out, so an episode that
+/// closed at [`PRODUCING_TICK`] materializes in the client's `ConfirmedHistory<HullShock>` at the
+/// next send tick. Any send interval above one tick produces this, and it is the shape that
+/// separates `AuthoritativeFact::produced_at` (the confirmed sample, and the restore target) from
+/// `AuthoritativeFact::settled_at` (the episode's close, and what a restore has to reach to have
+/// delivered anything). Four ticks is arbitrary in size and load-bearing in sign.
+const REPLICATION_LAG_TICKS: u32 = 4;
+
+/// A forced rollback ordered by a subsystem that is NOT `net::adoption`, and the tick it targets.
+///
+/// Staged through `ForcedRollbackSlot::claim` tagged `Misprediction`, which is literally the call
+/// `net::watchdog` makes — so this is a real production claimant, not a fixture poking
+/// `request_forced_rollback` behind the one-slot rule the source scan in `net::adoption` pins.
+#[derive(Resource, Clone, Copy)]
+struct CompetingClaim(Tick);
+
+/// Claim the slot once, on the first `PreUpdate` that runs after `net::adoption` has had its turn.
+fn claim_the_slot_for_someone_else(
+    claim: Option<Res<CompetingClaim>>,
+    mut metadata: ResMut<StateRollbackMetadata>,
+    mut slot: ResMut<ForcedRollbackSlot>,
+    mut claimed: Local<bool>,
+) {
+    let Some(claim) = claim else {
+        return;
+    };
+    if *claimed {
+        return;
+    }
+    *claimed = slot.claim(&mut metadata, claim.0, AdoptionCause::Misprediction);
 }
 
 /// WHEN this client drew the impact its shock belongs to, relative to the shock's arrival. The two
@@ -254,6 +308,48 @@ fn observe_replay(timeline: Res<LocalTimeline>, mut delivered: ResMut<Delivered>
 /// `confirmed_tick < current_tick`. [`shipping_loopback_client_lead_is_exactly_zero_ticks`] is what
 /// holds that premise in place.
 fn run_arrival(lead: Lead, visual: Visual) -> Delivered {
+    run_scenario(Scenario::new(lead, visual))
+}
+
+/// Everything about a run that a fixture is allowed to move, so that what a fixture DID move is
+/// visible at its call site. [`Scenario::new`] is the shape every pre-existing test was written
+/// against: replication carries the episode on the tick it closed, the authority's velocities are
+/// confirmed there too, and nobody else touches the forced-rollback slot.
+#[derive(Clone, Copy)]
+struct Scenario {
+    lead: Lead,
+    visual: Visual,
+    /// The tick replication MATERIALIZED the episode on — the confirmed `HullShock` sample's tick,
+    /// which is `AuthoritativeFact::produced_at` and the restore target. At or after the tick the
+    /// episode closed; see [`REPLICATION_LAG_TICKS`].
+    arrival: Tick,
+    /// The tick the authority's hull velocities were last confirmed at. Moving it BEFORE the
+    /// episode's close is how a fixture asks "what if the restore cannot carry the shove?".
+    velocities_confirmed_at: Tick,
+    /// A forced rollback claimed by a subsystem other than `net::adoption`, and its target tick.
+    competitor: Option<Tick>,
+}
+
+impl Scenario {
+    fn new(lead: Lead, visual: Visual) -> Self {
+        Self {
+            lead,
+            visual,
+            arrival: PRODUCING_TICK,
+            velocities_confirmed_at: PRODUCING_TICK,
+            competitor: None,
+        }
+    }
+}
+
+fn run_scenario(scenario: Scenario) -> Delivered {
+    let Scenario {
+        lead,
+        visual,
+        arrival,
+        velocities_confirmed_at,
+        competitor,
+    } = scenario;
     let mut app = crate::net::test_harness::base_app();
     app.add_plugins(ClientPlugins {
         tick_duration: crate::net::test_harness::TICK,
@@ -263,6 +359,18 @@ fn run_arrival(lead: Lead, visual: Visual) -> Delivered {
     app.insert_state(crate::state::AppState::Playing);
     app.init_resource::<Delivered>();
     app.add_systems(FixedPreUpdate, observe_replay);
+    if let Some(tick) = competitor {
+        app.insert_resource(CompetingClaim(tick));
+        // AFTER the watchdog set, which `net::adoption::request_staged_adoption` runs before: the
+        // competing claim must be unambiguously LATER than this module's own chance to claim, so
+        // "nobody here asked for this rollback" is a fact about the schedule and not a race.
+        app.add_systems(
+            PreUpdate,
+            claim_the_slot_for_someone_else
+                .after(super::watchdog::RollbackWatchdog)
+                .before(RollbackSystems::Check),
+        );
+    }
     crate::net::test_harness::finish(&mut app);
 
     app.world_mut().spawn((
@@ -273,17 +381,36 @@ fn run_arrival(lead: Lead, visual: Visual) -> Delivered {
         IsSynced::<InputTimeline>::default(),
     ));
 
+    // THE EPISODE, stamped with the tick replication carried it — which is `arrival`, at or after
+    // the tick `visual.shock().tick` says it closed on.
     let mut confirmed_shock = ConfirmedHistory::<HullShock>::default();
-    confirmed_shock.insert_present_explicit(PRODUCING_TICK, visual.shock());
+    confirmed_shock.insert_present_explicit(arrival, visual.shock());
     let mut predicted_shock_history = PredictionHistory::<HullShock>::default();
     predicted_shock_history.add_predicted(PRODUCING_TICK, Some(HullShock::default()));
 
+    // THE VALUE FOLLOWS THE TICK, and it has to: a confirmed sample stamped BEFORE the episode
+    // closed is the hull as the authority had it before the impulse, which is the same un-hit state
+    // the client predicted for itself. Stamping the post-hit velocity on a pre-hit tick would put a
+    // history on the wire that no authority can produce, and would make "the restore carried
+    // nothing" indistinguishable from delivery by value alone.
+    let (confirmed_linear_value, confirmed_angular_value) =
+        if velocities_confirmed_at.0 >= visual.shock().tick {
+            (AUTHORITY_LINEAR, AUTHORITY_ANGULAR)
+        } else {
+            (PREDICTED_LINEAR, PREDICTED_ANGULAR)
+        };
     let mut confirmed_linear = ConfirmedHistory::<LinearVelocity>::default();
-    confirmed_linear.insert_present_explicit(PRODUCING_TICK, LinearVelocity(AUTHORITY_LINEAR));
+    confirmed_linear.insert_present_explicit(
+        velocities_confirmed_at,
+        LinearVelocity(confirmed_linear_value),
+    );
     let mut predicted_linear = PredictionHistory::<LinearVelocity>::default();
     predicted_linear.add_predicted(PRODUCING_TICK, Some(LinearVelocity(PREDICTED_LINEAR)));
     let mut confirmed_angular = ConfirmedHistory::<AngularVelocity>::default();
-    confirmed_angular.insert_present_explicit(PRODUCING_TICK, AngularVelocity(AUTHORITY_ANGULAR));
+    confirmed_angular.insert_present_explicit(
+        velocities_confirmed_at,
+        AngularVelocity(confirmed_angular_value),
+    );
     let mut predicted_angular = PredictionHistory::<AngularVelocity>::default();
     predicted_angular.add_predicted(PRODUCING_TICK, Some(AngularVelocity(PREDICTED_ANGULAR)));
 
@@ -352,15 +479,15 @@ fn run_arrival(lead: Lead, visual: Visual) -> Delivered {
     ));
     app.world_mut().flush();
 
-    // The completed mutate tick: the authority has certified every replicated component at
-    // `PRODUCING_TICK`. This is what receive would have published.
+    // The completed mutate tick: the authority has certified every replicated component through
+    // `arrival`, the tick this checkpoint went out on. This is what receive would have published.
     {
         let mut checkpoints = app.world_mut().resource_mut::<ReplicationCheckpointMap>();
-        checkpoints.record(producing_replicon_tick(), PRODUCING_TICK);
+        checkpoints.record(producing_replicon_tick(), arrival);
         checkpoints.record_last_confirmed_tick(producing_replicon_tick());
     }
 
-    advance_to(&mut app, lead.present_tick());
+    advance_to(&mut app, lead.present_tick(arrival));
     if visual == Visual::DrawnBeforeArrival {
         present_impact(&mut app, EARLY_HIT_TICK);
     }
@@ -374,7 +501,7 @@ fn run_arrival(lead: Lead, visual: Visual) -> Delivered {
     // does not mark it processed, so it is re-examined on the next frame. Give the client that
     // frame: a shove must not be lost merely because it arrived a tick early.
     if lead == Lead::MinusOne {
-        advance_to(&mut app, PRODUCING_TICK);
+        advance_to(&mut app, arrival);
         app.world_mut().run_schedule(PreUpdate);
     }
 
@@ -398,7 +525,7 @@ fn run_arrival(lead: Lead, visual: Visual) -> Delivered {
         // shove must land anyway rather than be held for it forever.
         advance_to(
             &mut app,
-            Tick(PRODUCING_TICK.0.wrapping_add_signed(ORDERING_BUDGET_TICKS)),
+            Tick(arrival.0.wrapping_add_signed(ORDERING_BUDGET_TICKS)),
         );
         app.world_mut().run_schedule(PreUpdate);
     }
@@ -569,6 +696,98 @@ fn a_shove_waits_for_its_spark_and_the_budget_still_delivers_it() {
             ..default()
         },
         "the release must be attributed to the budget, and the wait it cost must be reported",
+    );
+}
+
+/// THE OTHER HALF OF THE SLICE-3.7 FINDING, at the schedule rather than at the predicate: a fact
+/// whose restore CANNOT carry the shove must never be requested, and must never be recorded as
+/// delivered.
+///
+/// The authority's newest confirmed hull velocity here predates the episode's close, so
+/// `prepare_rollback` at the producing tick would resolve a PRE-hit value. Lightyear would restore it
+/// happily — `get_state_at_or_before` finds the older sample and `authority_reaches` says yes — and
+/// the earlier rule then closed the fact as `Adopted` off its own installed claim without asking what
+/// the restore had actually put on the hull. The shove was lost in silence, permanently, on the
+/// success path.
+///
+/// What must happen instead: nothing. No rollback is ordered (the hull keeps the value it was
+/// predicting), no ordering verdict is reached, and above all no counter moves — a fact that was
+/// never requested cannot be `undelivered`, and the episode stays offerable if the authority ever
+/// confirms a velocity that reaches it.
+#[test]
+fn a_fact_whose_restore_cannot_carry_the_shove_is_never_requested() {
+    let delivered = run_scenario(Scenario {
+        velocities_confirmed_at: Tick(PRODUCING_TICK.0 - 4),
+        ..Scenario::new(Lead::Zero, Visual::Missing)
+    });
+
+    assert_eq!(
+        delivered.live_linear, LIVE_LINEAR,
+        "the client's own hull state must be left alone: a forced rollback here would install the \
+         authority's PRE-hit velocity under the producing tick's label, which is a render hitch \
+         that delivers nothing. Evidence: live shock = {:?}, ticks replayed = {:?}",
+        delivered.live_shock, delivered.replayed_ticks,
+    );
+    assert_eq!(delivered.live_angular, LIVE_ANGULAR);
+    assert_eq!(
+        delivered.ordering,
+        OrderingTally::default(),
+        "and NOTHING may be tallied. `released_on_budget` would mean the ordering rule spent a fact \
+         that was never deliverable; `undelivered` would mean we asked for a rollback we could have \
+         known was useless. The whole point of establishing delivery BEFORE requesting is that this \
+         line reads all zeroes.",
+    );
+}
+
+/// FINDING THE SLICE-3.7 REVIEW CAUGHT: `OrderingTally::bypassed` claims a shove LANDED, and until
+/// now nothing executed the restore that would have landed it. The unit fixtures in `net::adoption`
+/// hand `confirm_forced_rollback` a rollback tick and read the counter, which proves the counter
+/// follows the classifier — not that the hull moved.
+///
+/// This runs lightyear's own `RollbackSystems::Prepare` and reads the LIVE hull velocity afterwards.
+/// The rollback is ordered by somebody else through the same `ForcedRollbackSlot::claim` the
+/// watchdog uses, tagged `Misprediction`, while `net::adoption` is still holding the fact for a spark
+/// that never comes. That is the hole the ADR documents, and this is its size measured on a real
+/// restore.
+///
+/// AND IT IS THE SHAPE THE OLD CLASSIFIER UNDERCOUNTED. The episode SETTLED at
+/// [`PRODUCING_TICK`] and replication materialized it [`REPLICATION_LAG_TICKS`] later, so the
+/// confirmed `HullShock` sample — `AuthoritativeFact::produced_at`, and the restore target — sits at
+/// 104 while the velocities the restore resolves are the authority's tick-100 samples.
+/// `prepare_rollback` restores `get_state_at_or_before(104)`, which IS those samples, so the shove
+/// really is on the live hull; a classifier demanding the sample be at or after 104 called that
+/// nothing and left `bypassed` at zero. Both assertions below have to hold together — a live hull
+/// carrying the authority's velocity while the counter reads zero is precisely the dishonest state
+/// the counter exists to prevent.
+#[test]
+fn a_rollback_this_module_did_not_order_delivers_the_shove_and_is_counted() {
+    let arrival = Tick(PRODUCING_TICK.0 + REPLICATION_LAG_TICKS);
+    let delivered = run_scenario(Scenario {
+        arrival,
+        competitor: Some(arrival),
+        ..Scenario::new(Lead::Zero, Visual::Missing)
+    });
+
+    assert_eq!(
+        delivered.held_linear, AUTHORITY_LINEAR,
+        "`prepare_rollback` restored the hull from the authority's confirmed velocities on the \
+         ARRIVAL frame — before the ordering rule released anything. The restore is real: this is \
+         the live component after lightyear's own Prepare seam, not a predicate's opinion of it. \
+         Evidence: live shock = {:?}, ticks replayed = {:?}",
+        delivered.live_shock, delivered.replayed_ticks,
+    );
+    assert_eq!(delivered.live_linear, AUTHORITY_LINEAR);
+    assert_eq!(delivered.live_angular, AUTHORITY_ANGULAR);
+    assert_eq!(
+        delivered.ordering,
+        OrderingTally {
+            bypassed: 1,
+            ..default()
+        },
+        "the shove landed through a rollback this module did not order, while the fact was still \
+         waiting for its spark — one BYPASS, and nothing else. `released_on_budget` staying zero is \
+         the other half: the fact was spent by the bypass, so the budget never had to release it, \
+         and it was not re-requested for state already live.",
     );
 }
 

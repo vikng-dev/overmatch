@@ -100,7 +100,9 @@ pub(super) struct TankStateHash {
     pub(super) srv: u64,
     /// Weapon gate (`ready_tick`, pause tick, then belt count), every weapon in slot order.
     pub(super) rld: u64,
-    /// Hull shock: episode count, its authority tick, and the cause tag.
+    /// Hull shock: episode count, the authority tick it closed on, the tick it OPENED on, and the
+    /// cause tag — every field of `HullShock`, held exhaustive by
+    /// `hull_shock_fields_localize_to_the_shock_stream`.
     ///
     /// SEPARATE, not folded into [`TankStateHash::sim`] or `combined`. This is the ONE stream a
     /// predicted owner is EXPECTED to disagree with the authority on: the client cannot know it was
@@ -204,6 +206,11 @@ pub(super) fn hash_tank_state_with_elements(
     if let Some(shock) = shock {
         hsk.write_u32(shock.count);
         hsk.write_u32(shock.tick);
+        // The episode's OPEN tick is part of the claim, not decoration: `net::adoption` correlates a
+        // spark with a shove by membership in `[opened, tick]`, so two peers holding the same count
+        // and close tick over different spans disagree about which hits the episode is made of. A
+        // diagnostic that cannot see that disagreement cannot attribute it.
+        hsk.write_u32(shock.opened);
         hsk.write_u8(shock.cause as u8);
     }
     let shk = hsk.finish();
@@ -591,8 +598,12 @@ mod tests {
         let a = hash_tank_state(p, q, lv, av, &drive, &grip, &transmission, &sim);
         let b = hash_tank_state(p, q, lv, av, &drive, &grip, &transmission, &sim);
         // RE-MEASURED when `shk` was UNFOLDED from the carried-state combination: only `combined`
-        // and `sim` move, and they move because the shock stream left them. Every per-family
-        // stream's bytes — `shk` included — are unchanged, which is what makes that reading safe.
+        // and `sim` moved, and they moved because the shock stream left them. Every per-family
+        // stream's bytes — `shk` included — were unchanged, which is what made that reading safe.
+        // RE-MEASURED AGAIN when `HullShock::opened` entered the `shk` stream (REV 24 put the
+        // episode's own span on the wire and the hash had not followed). ONLY `shk` moves, which is
+        // the containment property this file exists to keep: a shock-stream change must not touch
+        // `combined`, `sim`, or any other family.
         assert_eq!(
             [
                 a.combined, a.pos, a.rot, a.lv, a.av, a.sim, a.drv, a.srv, a.rld, a.shk, a.rec,
@@ -608,7 +619,7 @@ mod tests {
                 3_269_583_271_824_065_410,
                 14_071_911_453_643_095_408,
                 3_439_918_263_059_415_993,
-                10_137_100_204_835_690_307,
+                17_404_910_983_234_936_864,
                 12_037_784_973_900_930_602,
                 16_317_528_332_690_472_771,
                 16_561_026_162_406_393_170,
@@ -879,6 +890,13 @@ mod tests {
     /// That containment is the whole point: an owner who has not yet been told it was shot
     /// disagrees HERE and only here, so the analyzer sees a delivery gap rather than an
     /// unattributable carried-state drift it has no decode for.
+    ///
+    /// EXHAUSTIVE BY CONSTRUCTION, not by an enumerated list. The list rotted once already: REV 24
+    /// added `HullShock::opened` and this test kept claiming "every hull-shock field" while varying
+    /// three of four, so two peers could disagree about an episode's span and produce identical `shk`
+    /// diagnostics. The variants below are built by DESTRUCTURING the struct and re-forming it field
+    /// by field, so a fifth field stops this file compiling — in the pattern and in every literal —
+    /// until someone decides what it does to the stream.
     #[test]
     fn hull_shock_fields_localize_to_the_shock_stream() {
         let (p, q, lv, av, drive, sim) = sample();
@@ -902,14 +920,42 @@ mod tests {
         };
         let base = hash(Some(&test_shock()));
 
-        let mut count = test_shock();
-        count.count = count.count.wrapping_add(1);
-        let mut tick = test_shock();
-        tick.tick = tick.tick.wrapping_add(1);
-        let mut cause = test_shock();
-        cause.cause = crate::ballistics::ShockCause::Ricochet;
+        let HullShock {
+            count,
+            tick,
+            opened,
+            cause,
+        } = test_shock();
+        let variants = [
+            HullShock {
+                count: count.wrapping_add(1),
+                tick,
+                opened,
+                cause,
+            },
+            HullShock {
+                count,
+                tick: tick.wrapping_add(1),
+                opened,
+                cause,
+            },
+            // Narrowed, not widened: `opened <= tick` is the authority's own invariant, and a
+            // fixture that broke it would be perturbing a value the producer cannot publish.
+            HullShock {
+                count,
+                tick,
+                opened: opened.wrapping_add(1),
+                cause,
+            },
+            HullShock {
+                count,
+                tick,
+                opened,
+                cause: crate::ballistics::ShockCause::Ricochet,
+            },
+        ];
 
-        for variant in [count, tick, cause] {
+        for variant in variants {
             let moved = hash(Some(&variant));
             assert_ne!(base.shk, moved.shk, "hull-shock field {variant:?} unhashed");
             assert_eq!(
@@ -1026,8 +1072,10 @@ mod tests {
             &sim,
         );
         // RE-MEASURED when `shk` was unfolded from the carried-state combination. `simulation` and
-        // `rollback` derive from `combined`, so both move; the shock stream stays covered here as
+        // `rollback` derive from `combined`, so both moved; the shock stream stays covered here as
         // its own field, which is why this digest loses no rollback completeness.
+        // RE-MEASURED AGAIN when `HullShock::opened` entered the `shk` stream. Only `shock` moves —
+        // `simulation` and `rollback` are unchanged, because `shk` is not folded into `combined`.
         assert_eq!(
             base,
             CanonicalTankStateDigest {
@@ -1040,7 +1088,7 @@ mod tests {
                 drive: 3_269_583_271_824_065_410,
                 servo: 14_071_911_453_643_095_408,
                 weapon_gate: 3_439_918_263_059_415_993,
-                shock: 10_137_100_204_835_690_307,
+                shock: 17_404_910_983_234_936_864,
                 recoil: 12_037_784_973_900_930_602,
                 belts: 16_317_528_332_690_472_771,
                 transmission: 16_561_026_162_406_393_170,

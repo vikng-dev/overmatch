@@ -112,6 +112,15 @@
 //! ledger's first span reaches back over nothing at all — its lower bound is at or after the tick
 //! the entity was spawned, which is at or after every impulse the previous incarnation took.
 //!
+//! ORDER, NOT WRAP-GENERAL ORDER — the assumption is worth stating rather than implying. That
+//! argument is plain numeric ordering on the authority's tick counter, and it is sound because
+//! lightyear 0.28's `Tick` is a u32 whose comparison is plain `u32::cmp` and whose arithmetic
+//! SATURATES (`lightyear_utils::wrapping_id`), on the documented assumption that a session never
+//! reaches the ~828-day boundary. At that boundary the timeline freezes rather than wrapping, so a
+//! pending episode stalls — it does not wrap into a span that falsely covers an older spark. The
+//! ordering claim is therefore exact for every session this game can have, and is NOT a wrap-general
+//! numeric proof; anything that made the tick counter genuinely wrap would have to re-derive it.
+//!
 //! This is an ordering PREFERENCE. It is not a commit barrier, and — the part that must not be
 //! overstated — it is not a guarantee; see the hole below. Nothing about the shove is weakened by
 //! waiting: the restore target stays [`AuthoritativeFact::produced_at`], so the impulse is still
@@ -152,10 +161,32 @@
 //! The gap is therefore MEASURED rather than claimed away. [`confirm_forced_rollback`] counts every
 //! rollback it did not order that delivered a still-waiting fact — [`OrderingTally::bypassed`],
 //! reported on the same diagnostics line as the ordering tallies. "Delivered" is ESTABLISHED and not
-//! assumed: [`restore_carries_the_shove`] asks whether the sample `prepare_rollback` actually
-//! restored the hull's velocities from is at or after the producing tick, because a state rollback
-//! whose newest confirmed sample predates the hit restores a PRE-hit velocity and carries nothing.
-//! A best-effort rule with a bypass counter is honest; a guarantee this shape cannot keep is not.
+//! assumed: [`restore_carries_the_shove`] asks whether the state `prepare_rollback` actually resolved
+//! the hull's velocities to is one the authority produced at or after the episode SETTLED
+//! ([`AuthoritativeFact::settled_at`]), because a state rollback whose newest confirmed sample
+//! predates the hit restores a PRE-hit velocity and carries nothing. A best-effort rule with a bypass
+//! counter is honest; a guarantee this shape cannot keep is not.
+//!
+//! # DELIVERY IS ESTABLISHED BEFORE ANYTHING IS REQUESTED, NOT DISCOVERED AFTERWARDS
+//!
+//! The same predicate is the READINESS gate, and that is the whole answer to "what if our own
+//! rollback restores a pre-hit velocity?". `prepare_rollback` restores from
+//! `get_state_at_or_before(rollback_tick)`, so proving that a sample EXISTS there
+//! ([`authority_reaches`]) proves only that lightyear will restore something — not that the something
+//! carries the event. [`offer_hull_shock_adoptions`] therefore asks [`restore_carries_the_shove`] at
+//! the tick it would target, over the same buffers, before the fact is ever staged: a fact whose
+//! restore provably cannot carry the shove is never offered, never staged, and never costs a
+//! rollback. Nothing writes confirmed history between that gate and `RollbackSystems::Prepare` in the
+//! same frame, so the gate's verdict IS `prepare_rollback`'s outcome.
+//!
+//! That leaves [`retirement`] free to insist on the stronger fact rather than assume it. Our own
+//! installed claim retires the fact as [`Retirement::Adopted`] only when the restore is established
+//! to have carried it; installed-but-not-carried is [`Retirement::Undelivered`] — logged at ERROR,
+//! counted in [`OrderingTally::undelivered`], and closed. Closed, not retried: a retry re-reads the
+//! confirmed histories this restore just read at the same target tick, so it cannot improve, and
+//! looping on it is the storm this module exists to avoid. The branch should never execute; it is
+//! there because "our own claim was installed" was previously treated as proof of delivery, and a
+//! success path that quietly loses the shove is precisely the defect that survives review.
 //!
 //! One bypass route is structural and worth naming on its own. `HullShock` is still registered
 //! `.with_rollback_condition(..)` in `net::protocol`, and that comparator is a pure function of two
@@ -304,6 +335,13 @@ pub(crate) struct OrderingTally {
     /// ([`restore_carries_the_shove`]): one that restored from the client's own prediction, or from
     /// a confirmed sample older than the hit, leaves the fact staged and is not counted here.
     pub(crate) bypassed: u32,
+    /// Shoves this module ordered a rollback for and LOST: its own claim was installed, and
+    /// `prepare_rollback` restored a hull velocity older than the event's settling tick, so the fact
+    /// was spent having delivered nothing. Should be permanently zero — `offer_hull_shock_adoptions`
+    /// establishes the same predicate before requesting — and is counted rather than asserted so a
+    /// disagreement between that gate and lightyear's restore shows up as a number instead of as a
+    /// missing shove.
+    pub(crate) undelivered: u32,
     /// Longest LOCAL wait the rule has imposed on a shove, in ticks.
     pub(crate) max_wait_ticks: i32,
 }
@@ -401,6 +439,11 @@ impl ImpactPresentation {
         self.tally.bypassed += 1;
     }
 
+    /// Tally one shove this module ordered a rollback for and did not receive.
+    fn note_undelivered(&mut self) {
+        self.tally.undelivered += 1;
+    }
+
     /// What the ordering rule has done so far.
     pub(crate) fn tally(&self) -> OrderingTally {
         self.tally
@@ -466,6 +509,27 @@ pub(crate) struct AuthoritativeFact {
     /// The authority tick whose END-OF-TICK state carries the fact. This is the restore target; see
     /// the module doc on why this primitive is state-checkpoint-shaped.
     pub(crate) produced_at: Tick,
+    /// The EARLIEST authority tick whose end-of-tick state already carries the WHOLE fact.
+    ///
+    /// Not the same tick as [`Self::produced_at`], and conflating them cost a review round.
+    /// `produced_at` is the tick of the CONFIRMED SAMPLE that certified the fact, and replication
+    /// stamps a value with the tick it was SENT, which can sit later than the tick the authority's
+    /// state actually settled on. `settled_at` is that settling tick: for a [`HullShock`] episode it
+    /// is the tick the episode CLOSED, because every impulse the episode is made of landed at a tick
+    /// in `[opened, tick]` (`arm` runs inside the ballistic march and `close_episode` runs after it,
+    /// on the same authority tick), so the authority's end-of-`tick` velocity contains all of them.
+    ///
+    /// It is what [`restore_carries_the_shove`] compares against, because `prepare_rollback` restores
+    /// the effective authoritative state AT OR BEFORE its target: a restore that resolves to any
+    /// sample in `[settled_at, produced_at]` has delivered the fact in full, and demanding
+    /// `produced_at` exactly would reject real deliveries and, worse, would pass readiness on facts
+    /// whose restore installs a PRE-event value.
+    ///
+    /// INVARIANT: `settled_at <= produced_at`. It is not asserted, it is self-enforcing — the
+    /// readiness gate resolves a sample at or before `produced_at` and requires it at or after
+    /// `settled_at`, so a fact violating the invariant can never satisfy the gate and is never
+    /// requested.
+    pub(crate) settled_at: Tick,
     /// What a spark has to be for this fact to count as ordered against it, when the fact has a
     /// visual at all. `None` means "nothing to wait for" and the fact is never held: that is
     /// correct for an [`AdoptionCause::Misprediction`], which has no visual by construction, and it
@@ -615,34 +679,44 @@ fn authority_reaches<C: Component + Clone>(
     confirmed.is_some_and(|history| history.get_state_at_or_before(tick).is_some())
 }
 
-/// Whether a state rollback that STARTED at `started` actually put the authority's post-hit hull
-/// velocity on the live hull — the predicate [`OrderingTally::bypassed`] means.
+/// Whether a state restore targeting `restored_at` puts the authority's POST-EVENT hull velocities
+/// on the live hull. ONE predicate, asked in the only two places the answer matters.
 ///
-/// `prepare_rollback` restores each velocity from the newest confirmed sample at or before the
-/// rollback's own start tick. A rollback deep enough to reach [`AuthoritativeFact::produced_at`]
-/// therefore delivers the shove only if that sample is itself at or after the producing tick; if the
-/// newest thing the authority has said about this hull's velocity predates the hit, the restore
-/// installs a PRE-hit value and carries nothing, whatever its start tick claims. Both velocities are
-/// required, because half a restored rigid body is not a state either peer ever had.
+/// - READINESS, at `restored_at = `[`AuthoritativeFact::produced_at`]: may this module request a
+///   rollback at all? A request whose restore installs a pre-event velocity buys a render hitch and
+///   delivers nothing.
+/// - BYPASS, at `restored_at = ` the start tick of a rollback somebody else ordered: did that
+///   rollback already land the shove? That is what [`OrderingTally::bypassed`] claims.
 ///
-/// Fails closed on a missing history for the same reason [`authority_reaches`] does.
+/// It MIRRORS `prepare_rollback` and does not paraphrase it. lightyear restores each component from
+/// `ConfirmedHistory::get_state_at_or_before(rollback_tick)` — the EFFECTIVE authoritative state at
+/// or before its target, with no requirement on how old the underlying sample is — so the question is
+/// not "was a sample stamped at the producing tick" but "is the state that lookup resolves one the
+/// authority produced at or after the event SETTLED". Hence the comparison is against
+/// [`AuthoritativeFact::settled_at`], never against `produced_at`: requiring the sample to be at or
+/// after the CONFIRMED-SAMPLE tick rejected genuine deliveries whenever replication materialized the
+/// fact later than the tick its state settled on, which is the ordinary shape at any send interval
+/// above one tick.
+///
+/// Both velocities are required, because half a restored rigid body is not a state either peer ever
+/// had. Fails closed on a missing history for the same reason [`authority_reaches`] does.
 fn restore_carries_the_shove(
     linear: Option<&ConfirmedHistory<LinearVelocity>>,
     angular: Option<&ConfirmedHistory<AngularVelocity>>,
-    started: Tick,
-    produced_at: Tick,
+    restored_at: Tick,
+    settled_at: Tick,
 ) -> bool {
-    fn sample_is_post_hit<C>(
+    fn resolves_post_event<C>(
         confirmed: Option<&ConfirmedHistory<C>>,
-        started: Tick,
-        produced_at: Tick,
+        restored_at: Tick,
+        settled_at: Tick,
     ) -> bool {
         confirmed
-            .and_then(|history| newest_present_at_or_before(history, started))
-            .is_some_and(|(sample, _)| sample - produced_at >= 0)
+            .and_then(|history| newest_present_at_or_before(history, restored_at))
+            .is_some_and(|(sample, _)| sample - settled_at >= 0)
     }
-    sample_is_post_hit(linear, started, produced_at)
-        && sample_is_post_hit(angular, started, produced_at)
+    resolves_post_event(linear, restored_at, settled_at)
+        && resolves_post_event(angular, restored_at, settled_at)
 }
 
 /// FIRST CONSUMER. Offer the authority's hull-shock episodes for adoption.
@@ -707,11 +781,30 @@ fn offer_hull_shock_adoptions(
         // The hull's whole rigid-body state has to come back from authority together — a pose
         // restored to `produced_at` beside a velocity that stayed at `now` is not a tick that ever
         // existed on either peer. If completeness cannot be proven, wait.
-        if !authority_reaches(position, produced_at)
-            || !authority_reaches(rotation, produced_at)
-            || !authority_reaches(linear, produced_at)
-            || !authority_reaches(angular, produced_at)
-        {
+        if !authority_reaches(position, produced_at) || !authority_reaches(rotation, produced_at) {
+            continue;
+        }
+        // THE EPISODE'S OWN SETTLING TICK, and the gate that has to be established BEFORE anything is
+        // requested. `authority_reaches` proves only that lightyear will restore SOMETHING from
+        // authority; it does not prove that the something carries the shove. A confirmed velocity
+        // history whose newest sample at or before `produced_at` predates the episode's close
+        // resolves to a PRE-hit value, and a rollback we ordered onto it would spend the fact having
+        // delivered nothing. Ask the same question `prepare_rollback` will answer, at the tick we
+        // would target, and do not offer a fact whose restore provably cannot carry it.
+        //
+        // This is a WAIT, not a drop: the offer is re-derived from replicated state every frame, and
+        // it costs no request, no slot, and no rollback while it is unsatisfied. It is also not a
+        // regime the shipping build reaches — every impulse of the episode CHANGES the hull's
+        // velocity, so the message that first carries the episode's `HullShock` carries the resulting
+        // velocity in the same replication group and stamps both with the same tick.
+        let settled_at = Tick(authority.tick);
+        if !restore_carries_the_shove(linear, angular, produced_at, settled_at) {
+            debug!(
+                "client: hull-shock episode #{} on {} is not deliverable at tick {} — the newest \
+                 confirmed hull velocity there predates the episode's close at {}, so a rollback \
+                 would restore a PRE-hit value. Waiting; nothing has been requested.",
+                authority.count, hull, produced_at.0, authority.tick,
+            );
             continue;
         }
         adoption.offer(
@@ -724,6 +817,7 @@ fn offer_hull_shock_adoptions(
                 },
                 cause: AdoptionCause::ExternalEvent,
                 produced_at,
+                settled_at,
                 // THE EPISODE'S OWN HITS, in the authority's terms — its own `opened`/`tick` pair,
                 // not `produced_at`. `produced_at` is the confirmed sample's tick, which is the right
                 // RESTORE target but may sit later than the close if replication did not send that
@@ -864,6 +958,9 @@ fn clear_to_order(
 /// second is counted as a BYPASS whenever it beat the spark. A rollback SHALLOWER than the producing
 /// tick, one whose confirmed samples predate the hit, and an INPUT rollback's restore at any depth
 /// carry none of this and retire nothing.
+///
+/// `carried` is asked of BOTH routes, ours included: an installed claim of our own that restored a
+/// pre-event velocity is [`Retirement::Undelivered`], not an adoption. See [`retirement`].
 #[allow(clippy::type_complexity)]
 fn confirm_forced_rollback(
     managers: Query<(&PredictionManager, Option<&Rollback>)>,
@@ -894,10 +991,29 @@ fn confirm_forced_rollback(
     // read, so "someone else's rollback delivered the shove" is established rather than inferred
     // from its start tick. A despawned hull answers `Err` and carries nothing.
     let carried = hulls.get(fact.id.entity).is_ok_and(|(linear, angular)| {
-        restore_carries_the_shove(linear, angular, started, fact.produced_at)
+        restore_carries_the_shove(linear, angular, started, fact.settled_at)
     });
     match retirement(&adoption, slot.installed(), started, kind, carried) {
         None | Some(Retirement::Keep) => return,
+        Some(Retirement::Undelivered) => {
+            presentation.note_undelivered();
+            error!(
+                "client: authoritative fact {:?} #{} on {} was ADOPTED BUT NOT DELIVERED — this \
+                 module's own forced rollback was installed at tick {} and `prepare_rollback` \
+                 restored a hull velocity older than the event's settling tick {}. The shove is \
+                 LOST: the fact is closed rather than re-requested, because the confirmed histories \
+                 a retry would read are the same ones this restore just read. The readiness gate in \
+                 `offer_hull_shock_adoptions` establishes exactly this before requesting, so \
+                 reaching here means that gate and `prepare_rollback` disagree ({} undelivered so \
+                 far)",
+                fact.id.source,
+                fact.id.sequence,
+                fact.id.entity,
+                started.0,
+                fact.settled_at.0,
+                presentation.tally().undelivered,
+            );
+        }
         Some(Retirement::Adopted) => debug!(
             "client: adopted authoritative fact {:?} #{} on {} (cause {:?}, checkpoint {:?}) — \
              restored end of tick {}",
@@ -942,6 +1058,9 @@ enum Retirement {
     Keep,
     /// This module's own claim was installed: the fact landed the way it was ordered.
     Adopted,
+    /// This module's own claim was installed AND the restore carried nothing. The fact is spent
+    /// having delivered nothing, and says so — see [`OrderingTally::undelivered`].
+    Undelivered,
     /// A confirmed-state rollback this module did not order restored the fact's producing tick from
     /// authority, so the shove is already on the live hull. `spark_pending` is whether it beat the
     /// visual — a BYPASS.
@@ -999,11 +1118,21 @@ impl RestoresFrom {
 ///   it having delivered nothing and would inflate [`OrderingTally::bypassed`] with rollbacks that
 ///   bypassed nothing.
 ///
-/// `Adopted` deliberately does NOT consult `carried`. Our own claim was installed and
-/// `prepare_rollback` did whatever the histories allowed; re-requesting the identical rollback would
-/// loop on a tick that cannot improve. The readiness gate is what keeps that case honest —
-/// [`authority_reaches`] refuses to offer a fact whose hull cannot be restored from authority at the
-/// producing tick at all.
+/// OUR OWN INSTALLED CLAIM IS NOT PROOF OF DELIVERY EITHER, and treating it as one was the fourth
+/// review's finding. The earlier rule returned `Adopted` from the claim identity alone, without
+/// consulting `carried`, so a rollback we ordered onto a confirmed history that resolved to a
+/// pre-event velocity closed the fact permanently having delivered nothing — silently, because
+/// `Adopted` is the success path. The argument for it ("otherwise it would loop") explains why blind
+/// re-requesting is undesirable; it does not justify RECORDING a delivery that did not happen.
+///
+/// So `Adopted` now means installed AND carried, and installed-but-not-carried is
+/// [`Retirement::Undelivered`]: loud, counted, and still closed — closing is what bounds it, since
+/// the histories a retry would read are the ones this restore just read, and nothing about the same
+/// target tick can improve. The case is unreachable on the shipping path by construction, because
+/// `offer_hull_shock_adoptions` establishes the same predicate over the same buffers at the same
+/// target tick BEFORE the fact is ever staged, and nothing writes confirmed history between that
+/// system and `RollbackSystems::Prepare` in the same frame. It exists because "unreachable" is what
+/// the previous three rounds each believed about the branch they were about to lose a shove in.
 fn retirement(
     adoption: &AuthorityAdoption,
     installed: Option<(Tick, AdoptionCause)>,
@@ -1016,7 +1145,11 @@ fn retirement(
         return Some(Retirement::Keep);
     }
     if adoption.requested && installed == Some((fact.produced_at, fact.cause)) {
-        return Some(Retirement::Adopted);
+        return Some(if carried {
+            Retirement::Adopted
+        } else {
+            Retirement::Undelivered
+        });
     }
     // A rollback SHALLOWER than the producing tick restores pre-hit state and replays forward from
     // it, so it carries none of the authority's post-hit hull velocity. Nothing to retire. Same
@@ -1082,64 +1215,94 @@ mod tests {
     /// OTHER two questions. The predicate itself has its own tests, over real histories.
     const CARRIED: bool = true;
 
-    /// A COALESCED episode closed at `tick`: its first hit landed a full window earlier and was
-    /// deferred, which is the widest span the authority can publish. Built through the same
-    /// [`VisualClaim::for_episode`] the production offer uses, so a fixture cannot assert a claim
-    /// shape production does not produce.
-    fn fact(entity: Entity, sequence: u32, checkpoint: u32, tick: u32) -> AuthoritativeFact {
-        episode_fact(
-            entity,
-            sequence,
-            checkpoint,
-            HullShock {
-                count: sequence,
-                tick,
-                opened: tick - (SHOCK_EPISODE_TICKS - 1),
-                cause: crate::ballistics::ShockCause::Perforation,
+    /// The authority's post-hit hull velocities — the measured 88 mm Δv the sibling fixtures deposit.
+    const AUTHORITY_LINEAR: Vec3 = Vec3::new(0.0, 0.0, -0.138_3);
+    const AUTHORITY_ANGULAR: Vec3 = Vec3::new(0.191_0, 0.0, 0.052_0);
+
+    /// The episode a hull's `sequence`-th [`HullShock`] publishes, closed at `tick`.
+    ///
+    /// THE SPAN IS DERIVED FROM THE SEQUENCE, and that is the point of the helper rather than an
+    /// economy. Production derives both from one `HullShockLedger`, so they cannot disagree: a FIRST
+    /// episode has no open episode to defer behind — `close_episode` publishes it on the tick it was
+    /// armed — so it spans that single tick, and only a LATER episode can have been deferred, by at
+    /// most `SHOCK_EPISODE_TICKS − 1` ticks. The previous helper took the span and the sequence
+    /// separately and always built a deferred span, so every `sequence: 1` caller was asserting on
+    /// exactly the `count: 1, opened != tick` shape the slice before this one removed from the wire
+    /// fixtures. No caller here can ask for it.
+    fn episode(sequence: u32, tick: u32) -> HullShock {
+        HullShock {
+            count: sequence,
+            tick,
+            opened: if sequence > 1 {
+                tick - (SHOCK_EPISODE_TICKS - 1)
+            } else {
+                tick
             },
-        )
+            cause: crate::ballistics::ShockCause::Perforation,
+        }
+    }
+
+    /// The offer `offer_hull_shock_adoptions` builds for a hull's `sequence`-th episode, in the
+    /// widest span that sequence can have.
+    fn fact(entity: Entity, sequence: u32, checkpoint: u32, tick: u32) -> AuthoritativeFact {
+        episode_fact(entity, checkpoint, episode(sequence, tick))
     }
 
     /// The offer `offer_hull_shock_adoptions` builds for `episode`.
-    fn episode_fact(
-        entity: Entity,
-        sequence: u32,
-        checkpoint: u32,
-        episode: HullShock,
-    ) -> AuthoritativeFact {
+    ///
+    /// The identity sequence is READ OFF the episode, never passed beside it: production takes both
+    /// from `HullShock::count` (`sequence: authority.count`), so a fixture that could set them apart
+    /// could assert on a fact no authority can publish. `produced_at` and `settled_at` coincide here
+    /// because the sample tick is the close tick; [`arriving_at`] is how a fixture separates them.
+    fn episode_fact(entity: Entity, checkpoint: u32, episode: HullShock) -> AuthoritativeFact {
         AuthoritativeFact {
             id: FactId {
                 source: FactSource::HullShock,
                 entity,
-                sequence,
+                sequence: episode.count,
                 checkpoint: RepliconTick::new(checkpoint),
             },
             cause: AdoptionCause::ExternalEvent,
             produced_at: Tick(episode.tick),
+            settled_at: Tick(episode.tick),
             visual: Some(VisualClaim::for_episode(VICTIM, &episode)),
+        }
+    }
+
+    /// The same fact, as it looks when REPLICATION materialized it later than the tick its state
+    /// settled on — the ordinary shape at any send interval above one tick, and the one that
+    /// separates the restore target from the event's own tick.
+    fn arriving_at(fact: AuthoritativeFact, produced_at: Tick) -> AuthoritativeFact {
+        assert!(
+            produced_at - fact.settled_at >= 0,
+            "a confirmed sample cannot predate the state it carries",
+        );
+        AuthoritativeFact {
+            produced_at,
+            ..fact
         }
     }
 
     /// A COALESCED episode: its first hit landed at `opened` inside an already-open episode's
     /// window, so it published at `tick` when that window expired rather than on its own tick.
+    ///
+    /// `count: 2` is forced, not chosen: a deferred episode had something to defer behind, so it is
+    /// never a hull's first.
     fn deferred_episode(opened: u32, tick: u32) -> HullShock {
+        assert!(
+            opened < tick && tick - opened < SHOCK_EPISODE_TICKS,
+            "a deferred episode opens strictly before it closes and inside one window",
+        );
         HullShock {
-            count: 2,
-            tick,
             opened,
-            cause: crate::ballistics::ShockCause::Perforation,
+            ..episode(2, tick)
         }
     }
 
     /// The episode a FRESH `HullShockLedger` publishes for its first hit: no open episode to defer
     /// behind, so it closes on the tick it was armed and spans that single tick.
     fn first_episode(tick: u32) -> HullShock {
-        HullShock {
-            count: 1,
-            tick,
-            opened: tick,
-            cause: crate::ballistics::ShockCause::Perforation,
-        }
+        episode(1, tick)
     }
 
     /// A hit the authority resolved at server tick `tick`, on `victim`, that this client has drawn.
@@ -1276,7 +1439,7 @@ mod tests {
     fn a_shove_waits_for_one_of_its_own_hits() {
         let mut adoption = AuthorityAdoption::default();
         let mut presentation = ImpactPresentation::default();
-        let deferred = episode_fact(hull(), 2, 51, deferred_episode(104, 116));
+        let deferred = episode_fact(hull(), 51, deferred_episode(104, 116));
         assert_eq!(adoption.offer(deferred, STAGED_AT), Offer::Staged);
 
         assert!(
@@ -1309,7 +1472,7 @@ mod tests {
     fn an_earlier_episodes_hit_cannot_release_the_next_episode() {
         let mut adoption = AuthorityAdoption::default();
         let mut presentation = ImpactPresentation::default();
-        let deferred = episode_fact(hull(), 2, 51, deferred_episode(104, 116));
+        let deferred = episode_fact(hull(), 51, deferred_episode(104, 116));
         assert_eq!(adoption.offer(deferred, STAGED_AT), Offer::Staged);
 
         presentation.present(drew(100, VICTIM));
@@ -1337,7 +1500,7 @@ mod tests {
     fn a_fresh_hulls_first_episode_claims_only_the_tick_it_landed_on() {
         let mut adoption = AuthorityAdoption::default();
         let mut presentation = ImpactPresentation::default();
-        let episode = episode_fact(hull(), 1, 50, first_episode(100));
+        let episode = episode_fact(hull(), 50, first_episode(100));
         assert_eq!(adoption.offer(episode, STAGED_AT), Offer::Staged);
 
         for stale in [85, 90, 99] {
@@ -1373,17 +1536,20 @@ mod tests {
         let mut presentation = ImpactPresentation::default();
 
         // The life that ended: an episode on the old entity, and the sparks the client drew for it.
+        // Its identity sequence and its `count` are ONE number — the old hull had been hit before,
+        // so both are 4. The earlier version of this fixture closed a `sequence: 4` fact carrying a
+        // `count: 1` episode, which no ledger can publish.
         let old_hull = hull();
         let died_at = 100;
         for tick in (died_at - 15)..died_at {
             presentation.present(drew(tick, VICTIM));
         }
-        adoption.close(episode_fact(old_hull, 4, 50, first_episode(died_at - 15)));
+        adoption.close(episode_fact(old_hull, 50, episode(4, died_at - 15)));
 
         // The life that began: a new `Entity`, the same combatant, a fresh ledger — so the first
         // episode it publishes is `count: 1` again, closed the tick its first hit landed.
         let reborn = Entity::from_raw_u32(8).expect("a second non-placeholder test entity");
-        let first = episode_fact(reborn, 1, 51, first_episode(died_at));
+        let first = episode_fact(reborn, 51, first_episode(died_at));
         assert_eq!(adoption.offer(first, STAGED_AT), Offer::Staged);
 
         assert!(
@@ -1406,11 +1572,15 @@ mod tests {
 
     /// The other half of the identity. Two tanks hit inside one episode window is ordinary in a
     /// duel; a spark on the other one explains nothing about THIS hull lurching.
+    ///
+    /// A COALESCED episode (`sequence: 2`), because the fixture needs a span with room inside it:
+    /// a first episode covers only its own tick, and then "the tick is inside the window" would be
+    /// true of nothing and the victim test would pass for the wrong reason.
     #[test]
     fn a_hit_on_another_combatant_never_releases_this_hulls_shove() {
         let mut adoption = AuthorityAdoption::default();
         let mut presentation = ImpactPresentation::default();
-        let episode = fact(hull(), 1, 50, 100);
+        let episode = fact(hull(), 2, 50, 100);
         assert_eq!(adoption.offer(episode, STAGED_AT), Offer::Staged);
 
         presentation.present(drew(99, BYSTANDER));
@@ -1496,7 +1666,8 @@ mod tests {
     fn a_retried_request_tallies_its_episode_once() {
         let mut adoption = AuthorityAdoption::default();
         let mut presentation = ImpactPresentation::default();
-        let episode = fact(hull(), 1, 50, 100);
+        // Coalesced, so tick 96 is one of the episode's own hits rather than a stale spark.
+        let episode = fact(hull(), 2, 50, 100);
         assert_eq!(adoption.offer(episode, STAGED_AT), Offer::Staged);
 
         presentation.present(drew(96, VICTIM));
@@ -1568,6 +1739,39 @@ mod tests {
                 CARRIED,
             ),
             Some(Retirement::Adopted),
+        );
+    }
+
+    /// FINDING THE SLICE-3.7 REVIEW CAUGHT, and the combination no earlier fixture covered:
+    /// REQUESTED, our own claim INSTALLED, and the restore carried NOTHING.
+    ///
+    /// The old rule answered `Adopted` from the claim identity alone, without consulting `carried`,
+    /// and `Adopted` closes the fact forever. So a rollback this module ordered onto a confirmed
+    /// history that resolved to a pre-event velocity retired the fact having delivered nothing, and
+    /// the shove was lost in silence — on the SUCCESS path, which is why three rounds of review over
+    /// the neighbouring branches never reached it.
+    ///
+    /// It must not answer `Keep` either: a retry re-reads the same buffers at the same target tick
+    /// and cannot improve, so `Keep` here is an unbounded re-request loop. The answer is a THIRD
+    /// outcome — spent, loud, and counted.
+    #[test]
+    fn an_installed_claim_that_restored_nothing_is_not_an_adoption() {
+        let mut adoption = AuthorityAdoption::default();
+        let episode = fact(hull(), 1, 50, 100);
+        assert_eq!(adoption.offer(episode, STAGED_AT), Offer::Staged);
+        adoption.requested = true;
+        let ours = Some((Tick(100), AdoptionCause::ExternalEvent));
+
+        assert_eq!(
+            retirement(&adoption, ours, Tick(100), RestoresFrom::Authority, false),
+            Some(Retirement::Undelivered),
+            "our own rollback was installed and `prepare_rollback` restored a PRE-hit velocity — \
+             recording that as an adoption is recording a delivery that did not happen",
+        );
+        assert_eq!(
+            retirement(&adoption, ours, Tick(100), RestoresFrom::Authority, CARRIED),
+            Some(Retirement::Adopted),
+            "the same claim over a restore that DID carry the shove is the ordinary success",
         );
     }
 
@@ -1657,68 +1861,132 @@ mod tests {
         );
     }
 
-    /// FINDING THE SLICE-3.6 REVIEW CAUGHT. `bypassed` claims the shove LANDED, so it has to be
-    /// decided from the histories `prepare_rollback` actually restored from — not from the rollback's
-    /// start tick, which says only how deep it went.
-    ///
-    /// The three ways a state rollback at a deep-enough tick still carries nothing, over real
-    /// [`ConfirmedHistory`] buffers: no history at all (lightyear's `prepare_rollback` takes the
-    /// other branch and restores the client's own prediction), a history whose newest sample predates
-    /// the hit, and one velocity resolved while the other is not.
-    #[test]
-    fn a_restore_carries_the_shove_only_when_its_samples_are_at_or_past_the_hit() {
-        const PRODUCED_AT: Tick = Tick(100);
-        const STARTED: Tick = Tick(104);
+    /// A hull-velocity history holding one authority sample at `sampled_at`.
+    fn confirmed_linear(sampled_at: Tick) -> ConfirmedHistory<LinearVelocity> {
+        let mut history = ConfirmedHistory::<LinearVelocity>::default();
+        history.insert_present_explicit(sampled_at, LinearVelocity(AUTHORITY_LINEAR));
+        history
+    }
 
-        let post_hit = || {
-            let mut history = ConfirmedHistory::<LinearVelocity>::default();
-            history.insert_present_explicit(PRODUCED_AT, LinearVelocity(Vec3::NEG_Z * 0.138_3));
-            history
-        };
-        let pre_hit = || {
-            let mut history = ConfirmedHistory::<AngularVelocity>::default();
-            history.insert_present_explicit(Tick(96), AngularVelocity(Vec3::ZERO));
-            history
-        };
-        let post_hit_angular = || {
-            let mut history = ConfirmedHistory::<AngularVelocity>::default();
-            history.insert_present_explicit(PRODUCED_AT, AngularVelocity(Vec3::Y * 0.191));
-            history
-        };
+    fn confirmed_angular(sampled_at: Tick) -> ConfirmedHistory<AngularVelocity> {
+        let mut history = ConfirmedHistory::<AngularVelocity>::default();
+        history.insert_present_explicit(sampled_at, AngularVelocity(AUTHORITY_ANGULAR));
+        history
+    }
+
+    /// FINDING THE SLICE-3.6 REVIEW CAUGHT, corrected by 3.7. `bypassed` claims the shove LANDED, so
+    /// it has to be decided from the histories `prepare_rollback` actually restored from — not from
+    /// the rollback's start tick, which says only how deep it went.
+    ///
+    /// AND NOT FROM THE PRODUCING TICK EITHER, which is what 3.7 caught. `prepare_rollback` restores
+    /// `get_state_at_or_before(rollback_tick)`: the EFFECTIVE authoritative state at or before its
+    /// target, with no condition on how old the underlying sample is. Requiring the sample to be at
+    /// or after [`AuthoritativeFact::produced_at`] therefore rejected the ordinary production shape —
+    /// an episode that settled at 100 whose `HullShock` only materialized in the checkpoint at 104 —
+    /// and undercounted a real delivery. The comparison is against
+    /// [`AuthoritativeFact::settled_at`]: the tick the authority's own state stopped moving on
+    /// account of this event.
+    #[test]
+    fn a_restore_carries_the_shove_when_it_resolves_to_a_settled_sample() {
+        /// The deferred episode Codex's counter-example is built on: opened at 88, closed at 100.
+        const SETTLED_AT: Tick = Tick(100);
+        /// Where replication materialized it — LATER than the close, and later than the velocity
+        /// samples the same restore resolves.
+        const PRODUCED_AT: Tick = Tick(104);
 
         assert!(
             restore_carries_the_shove(
-                Some(&post_hit()),
-                Some(&post_hit_angular()),
-                STARTED,
+                Some(&confirmed_linear(SETTLED_AT)),
+                Some(&confirmed_angular(SETTLED_AT)),
                 PRODUCED_AT,
+                SETTLED_AT,
             ),
-            "both velocities resolve to the authority's own post-hit sample",
+            "a rollback to 104 resolves the authority's tick-100 velocities as the effective state \
+             there, and tick 100 is when this episode settled — that IS a delivery, and the rule \
+             that compared against the tick-104 confirmed sample called it nothing",
         );
         assert!(
-            !restore_carries_the_shove(None, Some(&post_hit_angular()), STARTED, PRODUCED_AT),
-            "with no confirmed history `prepare_rollback` restores the client's own prediction — \
-             the un-hit one — so nothing was delivered and nothing was bypassed",
+            restore_carries_the_shove(
+                Some(&confirmed_linear(SETTLED_AT)),
+                Some(&confirmed_angular(SETTLED_AT)),
+                SETTLED_AT,
+                SETTLED_AT,
+            ),
+            "the boundary case: a restore exactly at the settling tick carries the whole episode",
         );
         assert!(
-            !restore_carries_the_shove(Some(&post_hit()), Some(&pre_hit()), STARTED, PRODUCED_AT),
-            "an angular sample older than the hit restores a PRE-hit value; half a restored rigid \
-             body is not the shove",
+            !restore_carries_the_shove(
+                Some(&confirmed_linear(Tick(99))),
+                Some(&confirmed_angular(SETTLED_AT)),
+                PRODUCED_AT,
+                SETTLED_AT,
+            ),
+            "one tick short of the close is one impulse short of the episode: the linear velocity \
+             restored there is a value the authority held BEFORE the episode finished",
         );
-        let stale_linear = {
-            let mut history = ConfirmedHistory::<LinearVelocity>::default();
-            history.insert_present_explicit(Tick(96), LinearVelocity(Vec3::ZERO));
-            history
-        };
+        assert!(
+            !restore_carries_the_shove(
+                Some(&confirmed_linear(SETTLED_AT)),
+                Some(&confirmed_angular(Tick(96))),
+                PRODUCED_AT,
+                SETTLED_AT,
+            ),
+            "half a restored rigid body is not the shove, whichever half is stale",
+        );
+        assert!(
+            !restore_carries_the_shove(
+                None,
+                Some(&confirmed_angular(SETTLED_AT)),
+                PRODUCED_AT,
+                SETTLED_AT,
+            ),
+            "with no confirmed history `prepare_rollback` takes the other branch and restores the \
+             client's own prediction — the un-hit one — so nothing was delivered",
+        );
+        assert!(
+            !restore_carries_the_shove(
+                Some(&confirmed_linear(SETTLED_AT)),
+                Some(&confirmed_angular(SETTLED_AT)),
+                Tick(99),
+                SETTLED_AT,
+            ),
+            "a restore SHALLOWER than the settling tick resolves nothing at or after it, so depth \
+             is still a necessary condition — it just was never a sufficient one",
+        );
+    }
+
+    /// THE READINESS DIRECTION OF THE SAME PREDICATE, which is what makes the loss in
+    /// [`an_installed_claim_that_restored_nothing_is_not_an_adoption`] unreachable rather than merely
+    /// detected.
+    ///
+    /// [`authority_reaches`] answers "will lightyear restore something from authority here?" and
+    /// nothing more. Over a velocity history whose newest sample at or before the producing tick
+    /// predates the episode, the answer is YES and the restored value is a PRE-hit velocity. So the
+    /// gate the offer runs has to be the delivery predicate at the tick it would target, not the
+    /// existence predicate.
+    #[test]
+    fn readiness_and_delivery_disagree_exactly_where_the_shove_would_be_lost() {
+        const SETTLED_AT: Tick = Tick(100);
+        const PRODUCED_AT: Tick = Tick(104);
+        let stale_linear = confirmed_linear(Tick(96));
+        let stale_angular = confirmed_angular(Tick(96));
+
+        assert!(
+            authority_reaches(Some(&stale_linear), PRODUCED_AT)
+                && authority_reaches(Some(&stale_angular), PRODUCED_AT),
+            "lightyear WILL restore these from authority: `get_state_at_or_before(104)` resolves \
+             the tick-96 sample. Existence is all this predicate ever claimed.",
+        );
         assert!(
             !restore_carries_the_shove(
                 Some(&stale_linear),
-                Some(&post_hit_angular()),
-                STARTED,
+                Some(&stale_angular),
                 PRODUCED_AT,
+                SETTLED_AT,
             ),
-            "a rollback that started PAST the producing tick still carries nothing when the newest \
-             thing the authority said about this velocity predates the hit",
+            "and what it restores is the hull as it was four ticks BEFORE the episode closed. \
+             Offering this fact would buy a forced rollback that installs a pre-hit velocity and \
+             then retire the shove against it.",
         );
     }
 
@@ -1726,27 +1994,33 @@ mod tests {
     /// function and the fixtures above hand it a verdict; this one runs `confirm_forced_rollback` on
     /// a real `PredictionManager` mid-rollback, with real confirmed histories on the staged fact's
     /// own entity, and reads the tally the diagnostics line reports.
+    ///
+    /// WHAT IT DOES NOT PROVE, stated because the previous version of this comment implied it did:
+    /// `prepare_rollback` is not run here, so this pins the SEAM — that the counter follows the
+    /// predicate over the fact's own entity — and not that the hull was restored. The restore itself
+    /// is executed for real in `net::lead_zero_rollback`
+    /// (`a_rollback_this_module_did_not_order_delivers_the_shove_and_is_counted`), which reads the
+    /// live hull velocity after lightyear's own `RollbackSystems::Prepare`.
     #[test]
     fn the_bypass_counter_only_moves_for_a_rollback_that_really_carried_the_shove() {
         use bevy::ecs::system::RunSystemOnce;
 
         /// Build the world mid-`FromState`-rollback at `started`, with the staged fact's hull
-        /// carrying confirmed velocities sampled at `sampled_at`.
+        /// carrying confirmed velocities sampled at `sampled_at`. The episode is the DEFERRED shape
+        /// that separates the two ticks: it settled at 100 and replication materialized it at 104.
         fn run(started: Tick, sampled_at: Tick) -> OrderingTally {
             let mut world = World::new();
             let hull = world.spawn_empty().id();
-            let mut linear = ConfirmedHistory::<LinearVelocity>::default();
-            linear.insert_present_explicit(sampled_at, LinearVelocity(Vec3::NEG_Z * 0.138_3));
-            let mut angular = ConfirmedHistory::<AngularVelocity>::default();
-            angular.insert_present_explicit(sampled_at, AngularVelocity(Vec3::Y * 0.191));
-            world.entity_mut(hull).insert((linear, angular));
+            world
+                .entity_mut(hull)
+                .insert((confirmed_linear(sampled_at), confirmed_angular(sampled_at)));
 
             let manager = PredictionManager::default();
             manager.set_rollback_tick(started);
             world.spawn((manager, Rollback::FromState));
 
             let mut adoption = AuthorityAdoption::default();
-            let episode = episode_fact(hull, 1, 50, first_episode(100));
+            let episode = arriving_at(episode_fact(hull, 50, deferred_episode(88, 100)), Tick(104));
             assert_eq!(adoption.offer(episode, STAGED_AT), Offer::Staged);
             world.insert_resource(adoption);
             world.init_resource::<ForcedRollbackSlot>();
@@ -1764,14 +2038,16 @@ mod tests {
                 bypassed: 1,
                 ..default()
             },
-            "a rollback this module did not order restored the authority's tick-100 velocities \
-             while the fact was still waiting for its spark — that IS the gap the counter measures",
+            "a rollback this module did not order resolved the authority's tick-100 velocities as \
+             the effective state at 104 while the fact was still waiting for its spark. The sample \
+             is OLDER than the tick-104 confirmed `HullShock` that certified the episode, and the \
+             rule that compared against that tick counted this real delivery as nothing.",
         );
         assert_eq!(
             run(Tick(104), Tick(96)),
             OrderingTally::default(),
-            "same depth, but the newest confirmed sample predates the hit, so the restore installed \
-             a PRE-hit velocity: nothing was delivered, so nothing may be counted as bypassed",
+            "same depth, but the newest confirmed sample predates the episode's close, so the \
+             restore installed a PRE-hit velocity: nothing was delivered, nothing may be counted",
         );
     }
 

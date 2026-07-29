@@ -275,16 +275,23 @@ pub(crate) fn watch_rollback_metrics(
         // drawn, and `bypassed` counts shoves a confirmed-state rollback this client did not order
         // landed ahead of their spark — the gap trigger arbitration structurally cannot close.
         // Those are what decide whether a presentation commit barrier is ever worth building.
+        //
+        // `undelivered` is not one of those two: it is a TRIPWIRE and must read zero forever. It
+        // counts shoves this module ordered a rollback for and did not receive, which
+        // `offer_hull_shock_adoptions` establishes cannot happen before it stages anything. A
+        // non-zero here means that readiness gate and lightyear's `prepare_rollback` disagree, and
+        // the ERROR log that accompanies each one says which fact was lost.
         let tally = presentation.tally();
         info!(
             "client: ROLLBACK fired (PredictionMetrics.rollbacks={}, rollback_ticks={}, \
              shoves_on_impact={}, shoves_on_budget={}, shoves_bypassed={}, \
-             max_shove_wait_ticks={})",
+             shoves_undelivered={}, max_shove_wait_ticks={})",
             metrics.rollbacks,
             metrics.rollback_ticks,
             tally.released_on_impact,
             tally.released_on_budget,
             tally.bypassed,
+            tally.undelivered,
             tally.max_wait_ticks,
         );
         watch.last_count = metrics.rollbacks;

@@ -139,6 +139,19 @@ Everything after the offer already exists and should not be re-implemented per f
   `ConfirmedHistory`, which is not a formality: `prepare_rollback` restores a component that has no
   confirmed history from the client's own `PredictionHistory` **even on a state rollback**, so a
   missing history is precisely the case in which authority does not reach.
+
+  **And EXISTENCE IS NOT DELIVERY** — the fourth review's finding, and the strongest single rule in
+  the module. `prepare_rollback` restores `get_state_at_or_before(rollback_tick)`, so proving a
+  sample exists there proves only that lightyear will restore *something*. Over a confirmed velocity
+  history whose newest sample at or before the producing tick predates the event, that something is
+  a PRE-hit velocity: the rollback lands, the seam costs a render hitch, and the shove is not there.
+  The velocity half of the gate is therefore the DELIVERY predicate at the tick the request would
+  target — the same predicate, over the same buffers, that decides `bypassed`. A fact whose restore
+  provably cannot carry the shove is never offered, never staged, and never costs a rollback; the
+  offer is re-derived every frame, so it costs nothing to wait. It is also not a regime the shipping
+  build reaches: every impulse of an episode CHANGES the hull's velocity, and `HullShock` and the
+  velocities ride the same replication group, so the message that first carries the episode carries
+  the velocity it produced and stamps both with the same tick.
 - **One slot, arbitrated.** `StateRollbackMetadata` holds a single `Option<Tick>`, and a second
   claimant does not queue — it silently narrows the first one's target. `ForcedRollbackSlot::claim`
   is therefore the only production caller of `request_forced_rollback` anywhere in `src/`, pinned by
@@ -224,12 +237,40 @@ The gap is therefore MEASURED rather than argued away: `OrderingTally::bypassed`
 confirmed-state rollback this module did not order that delivered a still-waiting fact, and it rides
 the `net::diagnostics` line beside `released_on_impact` and `released_on_budget`. "Delivered" is
 ESTABLISHED, not inferred from the rollback's depth: `restore_carries_the_shove` reads the same
-confirmed velocity histories `prepare_rollback` restored from and asks whether the sample it resolved
-is at or after the producing tick, because a deep rollback over a history whose newest sample
-predates the hit restores a PRE-hit velocity and carries nothing. A best-effort rule with a bypass
-counter is honest; a guarantee this shape cannot keep is not. The counters are also the evidence that
-would justify paying for a real barrier — until they read non-zero on a real link, building one would
-be speculation.
+confirmed velocity histories `prepare_rollback` restored from and asks what state that lookup
+resolves to, because a deep rollback over a history whose newest sample predates the hit restores a
+PRE-hit velocity and carries nothing. A best-effort rule with a bypass counter is honest; a guarantee
+this shape cannot keep is not. The counters are also the evidence that would justify paying for a
+real barrier — until they read non-zero on a real link, building one would be speculation.
+
+**The tick that predicate compares against is the event's, not the sample's**, and the fourth review
+caught it comparing the wrong one. `AuthoritativeFact::produced_at` is the tick of the CONFIRMED
+SAMPLE that certified the fact — the right restore target, because replication stamps a change with
+the tick it was SENT and the client can only ask for a tick the checkpoint reached. But that tick can
+sit later than the tick the authority's state actually settled on, and at any send interval above one
+tick it ordinarily does. An episode that closes at 100 and materializes in a checkpoint at 104 is
+delivered in full by a rollback to 104, because `get_state_at_or_before(104)` resolves the tick-100
+velocities — the authority's own post-hit state. A rule demanding the sample be at or after 104
+called that nothing. `AuthoritativeFact::settled_at` is the second tick, carried beside the first:
+for a `HullShock` episode it is the CLOSE tick, because every impulse the episode is made of landed
+in `[opened, tick]` and the end-of-`tick` velocity therefore contains all of them. The invariant
+`settled_at <= produced_at` is self-enforcing rather than asserted — the gate resolves a sample at or
+before `produced_at` and requires it at or after `settled_at`, so a fact that violated it could never
+pass and would never be requested.
+
+**And the same predicate now decides our own retirement.** `retirement` previously answered `Adopted`
+from the claim identity alone, so a rollback this module ordered onto a history that resolved to a
+pre-event velocity closed the fact permanently having delivered nothing — silently, on the success
+path. `Adopted` now means installed AND carried. Installed-but-not-carried is a third outcome:
+logged at ERROR, counted in `OrderingTally::undelivered`, and still closed, because a retry re-reads
+the buffers that restore just read at the same target tick and cannot improve, and looping on it is
+the storm this module exists to avoid. That branch should never execute — the readiness gate
+establishes the same predicate over the same buffers before the fact is ever staged, and nothing
+writes confirmed history between it and `RollbackSystems::Prepare` in the same frame. It exists
+because a success path that quietly loses the shove is exactly the defect that survives review, and
+because "unreachable" is what each of the previous three rounds believed about the branch it was
+about to lose a shove in. The counter is the tripwire; if it ever moves, that gate and lightyear's
+restore disagree.
 
 ### Correlating a spark with a fact is an identity test — and it took a wire field
 
@@ -261,6 +302,15 @@ construction: it is stamped on the first tick a pending impulse is observed and 
 publication, so `opened ≤ close` and the next episode's `opened` is strictly greater than this one's
 `close`. Consecutive episodes span disjoint ranges, and a fresh ledger's first span reaches back over
 nothing — its lower bound is at or after the tick the entity was spawned.
+
+Both halves of that are claims about PLAIN numeric order and are **not wrap-general**, which is worth
+saying because the ledger's deferral test one line away deliberately IS wrap-aware
+(`now.wrapping_sub(last)`). The tick counter the spans live in is lightyear 0.28's `Tick`: a `u32`
+compared with plain `u32::cmp` and advanced with SATURATING arithmetic, on that crate's documented
+assumption that a session never reaches the ~828-day boundary. At saturation the timeline freezes, so
+a pending episode stalls rather than wrapping into a span that falsely covers an older spark — the
+safe direction. Anything that made the counter genuinely wrap invalidates the ordering argument and
+not the deferral one.
 
 Both halves cost wire. `PROTOCOL_REV` 23 added `victim: Option<CombatantId>` to `ImpactConfirm` and
 `RicochetKeyframe` (both, because a ricochet arms an episode exactly as an embed does); REV 24 added
@@ -350,18 +400,24 @@ to be derived, never measured, and 2.5× too large.
   broadcast including to clients who will never render it. Naming a victim on it IS a deliberate
   disclosure decision rather than a no-op, and it is recorded as one above; the aggregate line the
   policy actually draws is unmoved.
-- **The trace keeps `shk` as its own stream.** Folding it into the divergence hash corrupts that
-  metric: the owner legitimately disagrees with the authority for the whole delivery window of every
-  hit, and folded windows read as unexplained drift.
+- **The trace keeps `shk` as its own stream, and it hashes every field.** Folding it into the
+  divergence hash corrupts that metric: the owner legitimately disagrees with the authority for the
+  whole delivery window of every hit, and folded windows read as unexplained drift. REV 24's `opened`
+  was added to the wire and NOT to the hash, so two peers could disagree about which hits an episode
+  covered and still produce identical `hshk` diagnostics; it is hashed now, and the exhaustiveness
+  test destructures `HullShock` so the next field cannot be forgotten the same way — an enumerated
+  list of "every field" is a list that rots.
 - **What would verify this is a real two-client capture on a jittered link, and it has not been
   taken.** The fixtures prove the mechanism delivers at leads 0, −1 and 8; they say nothing about how
   often the ordering rule is bypassed, how often the budget expires, or how the hitch feels. Those
   three numbers are already instrumented and reported; reading them is the next evidence, and no
   claim in this ADR should be promoted to a product fact before then.
-- **The wire moved to `PROTOCOL_REV` 24.** Client and server ship together behind a version-exact
-  handshake, so the cost is one coordinated release; `WIRE_TYPES_HASH` and the wire-manifest
-  fingerprint were re-pinned in the same diff, and `WIRE_SURFACE_HASH` is untouched because no type
-  was added, removed, renamed or reordered.
+- **The wire moved to `PROTOCOL_REV` 24, and has not moved since.** Client and server ship together
+  behind a version-exact handshake, so the cost is one coordinated release; `WIRE_TYPES_HASH` and the
+  wire-manifest fingerprint were re-pinned in that diff, and `WIRE_SURFACE_HASH` is untouched because
+  no type was added, removed, renamed or reordered. `AuthoritativeFact::settled_at` is deliberately
+  NOT a wire field: it is derived client-side from `HullShock::tick`, which REV 24 already carries.
+  A field would have added a way for the two to disagree.
 - **The lead-0 fixture measures a FLOOR, not a constant.** `PRESENTATION_DELAY_TICKS` is the one
   fixed step the schedule's ordering forces between a checkpoint's arrival and the frame that can
   present its spark. Bevy runs `FixedMain` zero or more times per frame, so a catch-up frame can put

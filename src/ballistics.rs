@@ -636,6 +636,16 @@ impl HullShockLedger {
     ///   therefore span DISJOINT tick ranges, with no appeal to `episode_ticks` arithmetic — which is
     ///   what makes a fresh ledger's single-tick first episode as exact as a deferred one's.
     ///
+    /// Both are claims about PLAIN numeric order and are NOT wrap-general — the assumption belongs in
+    /// the open, because the deferral test one line below deliberately IS wrap-aware
+    /// (`now.wrapping_sub(last)`) and the two could be mistaken for the same discipline. The tick
+    /// counter these spans live in is lightyear 0.28's `Tick`: a u32 compared with plain `u32::cmp`
+    /// and advanced with SATURATING arithmetic, on that crate's documented assumption that a session
+    /// never reaches the ~828-day boundary. At saturation the timeline freezes, so a pending episode
+    /// stalls rather than wrapping into a span that falsely covers an older spark — the direction
+    /// that is safe. Anything that made the counter genuinely wrap invalidates the ordering argument,
+    /// not the deferral one.
+    ///
     /// If this were ever NOT called on some tick, the stamp lands late and the published span is
     /// NARROWER than the truth. That direction is safe: a claim can only fail to match a spark it
     /// owns, never match one it does not.
@@ -3124,6 +3134,10 @@ mod march_tests {
         );
         for pair in spans.windows(2) {
             let ((_, closed), (opened, _)) = (pair[0], pair[1]);
+            // PLAIN `>`, deliberately, and the assumption is the one lightyear already makes: the
+            // authority tick counter is a u32 with saturating arithmetic and plain ordering, so it
+            // does not wrap inside any session this game can have (~828 days at 64 Hz). This is NOT
+            // a wrap-general proof of disjointness and must not be read as one.
             assert!(
                 opened > closed,
                 "episode spans must be disjoint: {:?} then {:?}",
