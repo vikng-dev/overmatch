@@ -8,6 +8,7 @@ use bevy::prelude::*;
 use lightyear::prediction::diagnostics::PredictionDiagnosticsPlugin;
 use lightyear::prelude::*;
 
+use super::adoption::ImpactPresentation;
 use super::protocol::NetTank;
 use crate::ballistics::ShellPath;
 use crate::tank::{RemoteServos, Rig, ServoIndex, ServoState, Tank, TankRoot, TankServos, Turret};
@@ -264,11 +265,18 @@ pub(crate) struct RollbackWatch {
 
 pub(crate) fn watch_rollback_metrics(
     metrics: Res<PredictionMetrics>,
+    presentation: Res<ImpactPresentation>,
     mut watch: ResMut<RollbackWatch>,
 ) {
     if metrics.rollbacks != watch.last_count {
+        // The ordering instrument rides this line because a rollback is exactly when it changes:
+        // `unordered` counts shoves the budget released with no impact visual behind them, and
+        // `max_wait` is the worst delay the ordering rule has imposed. Those two numbers are what
+        // decide whether a presentation commit barrier is ever worth building (`net::adoption`).
+        let (unordered, max_wait) = presentation.budget_exceeded();
         info!(
-            "client: ROLLBACK fired (PredictionMetrics.rollbacks={}, rollback_ticks={})",
+            "client: ROLLBACK fired (PredictionMetrics.rollbacks={}, rollback_ticks={}, \
+             unordered_shoves={unordered}, max_shove_wait_ticks={max_wait})",
             metrics.rollbacks, metrics.rollback_ticks
         );
         watch.last_count = metrics.rollbacks;

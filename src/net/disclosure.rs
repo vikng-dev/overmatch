@@ -59,8 +59,17 @@ impl VisibilityFilter for CombatDisclosure {
     type Scope = (
         NetCrew,
         WeaponGate,
-        // Owner-private: being shot is the owner's business, and a public shock counter would hand
-        // every observer a free hit-confirm the damage model never disclosed.
+        // Owner-private because it is PERSISTENT, PER-TARGET, AGGREGATE state: a public
+        // `HullShock` would let any observer poll any tank's running episode count and worst cause
+        // at any time, including tanks and engagements they never witnessed.
+        //
+        // `net::protocol::ImpactConfirm` is public (`NetworkTarget::All`) and carries `penetrated`,
+        // which is NOT a contradiction of this line: it is a TRANSIENT, SPATIALLY-ANCHORED,
+        // PER-SHOT fact whose only job is to let an observer draw honestly the impact already on
+        // their screen — withholding the verdict would make the drawn flame lick a lie
+        // (`vfx`'s no-fake-assistance rule). What it discloses is one armor outcome at one point;
+        // what it never discloses is whose hull, how many, or any damage. Every public fire-visual
+        // fact is public by the same design decision (ADR-0016/0021).
         HullShock,
         TankServos,
         NetTrackGripAnchor,

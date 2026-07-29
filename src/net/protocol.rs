@@ -787,13 +787,23 @@ pub(crate) const ROLLBACK_WEAPON_GATE: f32 = 1.0;
 pub(crate) const ROLLBACK_HULL_SHOCK: f32 = 1.0;
 /// One hull-shock EPISODE, in ticks (64 Hz → 0.25 s).
 ///
-/// DERIVED rather than tuned. An un-notified hit drifts the owner's prediction at the hit's own Δv
-/// until something reconciles it, and ordinary position reconciliation already does that once the
-/// drift reaches [`ROLLBACK_POSITION_M`]. A measured 88 mm hit is 0.1383 m/s, so the position gate
-/// would catch it unaided after 0.05 / 0.1383 = 0.36 s ≈ 23 ticks. The episode window sits inside
-/// that, so a shock is always delivered EARLIER than the fallback it replaces — while capping the
-/// rollbacks a sustained burst can force at 64 / 16 = 4 per second per hull, instead of the ~15 per
-/// second an MG's 900 rpm cyclic rate would produce one-per-pellet.
+/// DERIVED rather than tuned, and the derivation is a squeeze between two bounds.
+///
+/// CEILING — an un-notified hit drifts the owner's prediction at the hit's own Δv until something
+/// reconciles it, and ordinary position reconciliation already does that once the drift reaches
+/// [`ROLLBACK_POSITION_M`]. A measured 88 mm hit is 0.1383 m/s, so the position gate would catch it
+/// unaided after 0.05 / 0.1383 = 0.36 s ≈ 23 ticks. Past 23 the episode is no longer delivering the
+/// shock EARLIER than the fallback it replaces, which is the only reason it exists.
+///
+/// FLOOR — every published episode costs the owner one forced rollback, and a rollback costs one
+/// frame of render freeze (`net::render_error`). One hitch per shell is invisible; one per MG pellet
+/// is a stutter. At 900 rpm cyclic that is ~15 hitches per second unwindowed; 16 ticks caps it at
+/// 64 / 16 = 4 per second per hull, and there is no window inside the ceiling that gets it below
+/// 64 / 23 = 2.8. The FEEL argument therefore does not select a different number — it says the
+/// window must sit as HIGH inside its admissible band as the ceiling's margin allows, and that the
+/// residual 4-per-second hitch under sustained fire is a `render_error` cost to remove (#27), not a
+/// window to widen. 16 keeps 7 ticks of margin under the fallback and buys 3.75× fewer rollbacks
+/// than per-pellet; the last 30% would spend all of that margin.
 pub(crate) const SHOCK_EPISODE_TICKS: u32 = 16;
 /// Servo divergence gate expressed as a Boolean 0/1 magnitude for trace attribution. The aim
 /// angle and rate ride the physical bands below; the view-only `previous` is excluded. (The

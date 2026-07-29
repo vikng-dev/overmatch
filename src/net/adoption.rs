@@ -57,6 +57,48 @@
 //! it answers "has replay re-realized this episode from the restored history?", which must rewind
 //! with everything else. Using that same mark to suppress network-level requests would rewind the
 //! "I already asked" bit on every rollback and request forever. Two ledgers, two questions.
+//!
+//! # The shove must not OUTRUN its own spark
+//!
+//! The shove and the impact visual reach the player on two different carriers, and the schedule
+//! makes the shove systematically the faster one. `net::protocol::ImpactConfirm` is a MESSAGE: it is
+//! drained in `Update` by `net::client::receive_fire_events`, which is AFTER the frame's fixed loop,
+//! so the earliest the ballistics march can present it is the NEXT frame. `HullShock` is REPLICATED
+//! STATE: it is offered and installed here in `PreUpdate`, in the frame it arrives. Two facts the
+//! authority produced in one tick and sent in one server frame therefore land one client frame
+//! apart, shove first.
+//!
+//! Backwards is the one order that reads as broken. A shove that lands after its spark reads as
+//! impact-then-reaction, which is what a real impact does; a hull that lurches before anything is
+//! seen to hit it reads as a bug. So [`request_staged_adoption`] holds an
+//! [`AdoptionCause::ExternalEvent`] adoption until this client has PRESENTED an armor impact at or
+//! after the fact's producing tick — [`ImpactPresentation`], a monotonic tick comparison.
+//!
+//! This is an ORDERING rule, not a commit barrier. Nothing about the shove is weakened by waiting:
+//! the restore target stays [`AuthoritativeFact::produced_at`], so the impulse is still applied at
+//! the authority's tick, and the wait only deepens the replay by the frames it waited. Damage
+//! (`NetCrew`) is not held for it at all. And the wait is bounded by [`ORDERING_BUDGET_TICKS`]:
+//! past it the shove lands unordered rather than never, because a visual that has not arrived by
+//! then is not coming.
+//!
+//! ## KNOWN HOLE: the rule binds only where this module owns delivery
+//!
+//! `HullShock` is still registered `.with_rollback_condition(..)` in `net::protocol`, and that
+//! comparator is a pure function of two component values — it cannot consult
+//! [`ImpactPresentation`]. Whenever lightyear dispatches it, the rollback happens inside
+//! `RollbackSystems::Check` without ever reaching [`ForcedRollbackSlot`], and the ordering rule is
+//! bypassed; `confirm_forced_rollback` then simply retires the staged fact against a rollback it did
+//! not order.
+//!
+//! That is not a corner case. The receive-time dispatch is gated on `confirmed_tick < current_tick`,
+//! which is FALSE only at the zero/negative lead loopback produces and TRUE on every link with real
+//! latency. So today the ordering rule binds on loopback and is inert in WAN play, which is the
+//! opposite of where it is needed. Closing it means making this module the SOLE delivery route —
+//! registering an inert condition on `HullShock` so lightyear never rolls back on it directly. That
+//! is a one-line change and a rewrite of `net::hull_shock_rollback`'s positive control, but it
+//! retires the only delivery path that has ever run on a real link in favour of one whose readiness
+//! gates have only been exercised in fixtures, so it wants its own evidence rather than being
+//! bundled here.
 
 use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, Rotation};
 use bevy::prelude::*;
@@ -69,12 +111,22 @@ use lightyear::prelude::*;
 use super::protocol::ROLLBACK_VELOCITY;
 use super::protocol::hull_shock_mismatch;
 use super::watchdog::newest_present_at_or_before;
-use crate::ballistics::HullShock;
+use crate::ballistics::{HullShock, Impact, ImpactSurface, RICOCHET_HOLD_TICKS};
 
 /// DERIVED from `net::grip`'s `MAX_CHECKPOINT_LEDGERS`, for the same reason: one owner needs one
 /// entry, and 16 absorbs a reconnect's overlapping despawn/spawn without letting a per-entity
 /// ledger grow without bound.
 const MAX_FACT_LEDGERS: usize = 16;
+
+/// How long an external-event adoption waits for its impact visual before landing unordered.
+///
+/// DERIVED from [`RICOCHET_HOLD_TICKS`], the window a cosmetic shell ALREADY spends frozen at armor
+/// waiting for the same authority verdict this fact rode beside. Past it the shell quietly dissolves
+/// and no impact is ever presented for that shot, so a longer wait cannot buy a visual — it can only
+/// make the shove lag something that is never coming. It is an order of magnitude inside
+/// `RollbackPolicy::max_rollback_ticks` (100), so the wait can never be what puts a fact out of
+/// reach of replay.
+pub(super) const ORDERING_BUDGET_TICKS: i32 = RICOCHET_HOLD_TICKS as i32;
 
 /// WHY authority is overriding prediction. Every forced-rollback request carries one.
 ///
@@ -156,6 +208,76 @@ impl ForcedRollbackSlot {
     }
 }
 
+/// What this client has SHOWN, and how often a shove had to land without it.
+///
+/// The watermark is deliberately a SUPERSET of "an impact on MY hull": `HullShock` carries no shot
+/// identity and `crate::ballistics::Impact` carries no victim, so any armor impact this client draws
+/// advances it. A superset can only release the wait EARLIER — it can never block a shove — which is
+/// the safe direction for a rule whose failure mode would be a hit the player never feels. Narrowing
+/// it to the owner's own hull needs a victim on the impact fact, and is only worth adding if
+/// [`ImpactPresentation::unordered_shoves`] says the loose rule is missing cases.
+#[derive(Resource, Default)]
+pub(crate) struct ImpactPresentation {
+    /// Client tick of the newest armor impact this client PRESENTED. Monotonic within a connection.
+    newest_armor_impact: Option<Tick>,
+    /// Shoves installed behind their visual — the intended order.
+    ordered_shoves: u32,
+    /// Shoves [`ORDERING_BUDGET_TICKS`] released with no visual behind them. THE instrumented
+    /// number: a presentation commit barrier is only worth building if this is not ~0 in play.
+    unordered_shoves: u32,
+    /// Longest wait the ordering rule has imposed on a shove, in ticks.
+    max_wait_ticks: i32,
+}
+
+impl ImpactPresentation {
+    /// Record that an armor impact was drawn at `tick`.
+    fn present(&mut self, tick: Tick) {
+        if self
+            .newest_armor_impact
+            .is_none_or(|newest| tick - newest > 0)
+        {
+            self.newest_armor_impact = Some(tick);
+        }
+    }
+
+    /// Whether an armor impact has been drawn at or after `tick`.
+    fn shown_at_or_after(&self, tick: Tick) -> bool {
+        self.newest_armor_impact
+            .is_some_and(|newest| newest - tick >= 0)
+    }
+
+    /// Tally one resolved ordering decision. Called once per staged fact, not once per retry.
+    fn resolve(&mut self, ordered: bool, waited: i32) {
+        if ordered {
+            self.ordered_shoves += 1;
+        } else {
+            self.unordered_shoves += 1;
+        }
+        self.max_wait_ticks = self.max_wait_ticks.max(waited);
+    }
+
+    /// Shoves that landed with no visual behind them, and the worst wait paid so far.
+    pub(crate) fn budget_exceeded(&self) -> (u32, i32) {
+        (self.unordered_shoves, self.max_wait_ticks)
+    }
+}
+
+/// Stamp the presentation watermark from the impact the view layer is about to draw.
+///
+/// `crate::ballistics::Impact` IS the presentation signal — `vfx::impact` renders off this same
+/// trigger — so the watermark records what the player SEES, not what arrived on the wire. The march
+/// that raises it is skipped entirely on a replayed tick (`crate::Replaying`), so a rollback never
+/// re-stamps or rewinds this.
+fn note_presented_impact(
+    impact: On<Impact>,
+    timeline: Res<LocalTimeline>,
+    mut presentation: ResMut<ImpactPresentation>,
+) {
+    if impact.surface == ImpactSurface::Armor {
+        presentation.present(timeline.tick());
+    }
+}
+
 /// Which subsystem produced a fact. Two subsystems must never collide in the delivery ledger.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum FactSource {
@@ -226,6 +348,9 @@ pub(crate) struct AuthorityAdoption {
     /// Whether [`request_staged_adoption`] currently owns the forced-rollback slot for the staged
     /// fact. Bookkeeping only: it is re-derived from the slot every frame rather than trusted.
     requested: bool,
+    /// Whether the staged fact has already cleared the ordering rule, and with what verdict. Latched
+    /// so a retried request tallies [`ImpactPresentation`] once per FACT rather than once per frame.
+    ordering: Option<bool>,
     adopted: Vec<FactId>,
     watermarks: Vec<FactWatermark>,
 }
@@ -246,6 +371,7 @@ impl AuthorityAdoption {
             None => {
                 self.staged = Some(fact);
                 self.requested = false;
+                self.ordering = None;
                 Offer::Staged
             }
         }
@@ -287,6 +413,7 @@ impl AuthorityAdoption {
         }
         self.staged = None;
         self.requested = false;
+        self.ordering = None;
     }
 }
 
@@ -296,9 +423,13 @@ fn reset_adoption_state(
     _connected: On<Add, Connected>,
     mut adoption: ResMut<AuthorityAdoption>,
     mut slot: ResMut<ForcedRollbackSlot>,
+    mut presentation: ResMut<ImpactPresentation>,
 ) {
     *adoption = default();
     *slot = default();
+    // The watermark is a tick from the old timeline; the tallies are session instrumentation and
+    // deliberately survive, so a reconnect does not erase the number that decides the barrier.
+    presentation.newest_armor_impact = None;
 }
 
 /// Whether a forced restore at `tick` would replace this component with AUTHORITY, or silently
@@ -403,6 +534,7 @@ fn request_staged_adoption(
     mut metadata: Option<ResMut<StateRollbackMetadata>>,
     mut slot: ResMut<ForcedRollbackSlot>,
     mut adoption: ResMut<AuthorityAdoption>,
+    mut presentation: ResMut<ImpactPresentation>,
 ) {
     let Some(fact) = adoption.staged else {
         return;
@@ -449,7 +581,52 @@ fn request_staged_adoption(
         adoption.close(fact);
         return;
     }
+    if !clear_to_order(&mut adoption, &mut presentation, fact, age) {
+        return;
+    }
     adoption.requested = slot.claim(metadata, target, fact.cause);
+}
+
+/// THE ORDERING RULE. Whether the staged fact may land yet, given what the player has been SHOWN.
+///
+/// An [`AdoptionCause::ExternalEvent`] waits for an armor impact drawn at or after its producing
+/// tick, so the shove never outruns its own spark; see the module doc for why that direction is the
+/// only one that reads as broken. A [`AdoptionCause::Misprediction`] has no visual to be ordered
+/// against and is never held. The verdict latches on [`AuthorityAdoption::ordering`], so the tally
+/// counts facts, not the frames a fact spent being retried.
+fn clear_to_order(
+    adoption: &mut AuthorityAdoption,
+    presentation: &mut ImpactPresentation,
+    fact: AuthoritativeFact,
+    age: i32,
+) -> bool {
+    if fact.cause != AdoptionCause::ExternalEvent {
+        return true;
+    }
+    if adoption.ordering.is_some() {
+        return true;
+    }
+    let shown = presentation.shown_at_or_after(fact.produced_at);
+    if !shown && age < ORDERING_BUDGET_TICKS {
+        return false;
+    }
+    adoption.ordering = Some(shown);
+    presentation.resolve(shown, age);
+    if !shown {
+        // Not a correctness failure — the shove still lands at its authoritative tick. It is the
+        // measurement the relaxed ordering requirement asked for: how often the visual never showed
+        // up inside the budget, which is what would justify a presentation commit barrier.
+        warn!(
+            "client: authoritative fact {:?} #{} on {} landed UNORDERED — no armor impact drawn \
+             within {ORDERING_BUDGET_TICKS} ticks of its producing tick {} ({} unordered so far)",
+            fact.id.source,
+            fact.id.sequence,
+            fact.id.entity,
+            fact.produced_at.0,
+            presentation.unordered_shoves,
+        );
+    }
+    true
 }
 
 /// Record what lightyear ACTUALLY installed, and close the staged transaction only if it was ours.
@@ -505,7 +682,9 @@ pub(crate) struct OfferAuthoritativeFacts;
 pub(super) fn plugin(app: &mut App) {
     app.init_resource::<AuthorityAdoption>()
         .init_resource::<ForcedRollbackSlot>()
+        .init_resource::<ImpactPresentation>()
         .add_observer(reset_adoption_state)
+        .add_observer(note_presented_impact)
         // The request must exist before lightyear's rollback check consumes it, and before the
         // watchdog's — an authoritative event outranks a coarse "my prediction drifted" claim on
         // the single slot.
@@ -628,6 +807,98 @@ mod tests {
             Some((Tick(90), AdoptionCause::ExternalEvent)),
             "a correct physical event must never be re-tagged as the client's own error",
         );
+    }
+
+    /// Stage a fact and run the ordering rule against it exactly as `request_staged_adoption` does.
+    fn order(
+        adoption: &mut AuthorityAdoption,
+        presentation: &mut ImpactPresentation,
+        episode: AuthoritativeFact,
+        age: i32,
+    ) -> bool {
+        clear_to_order(adoption, presentation, episode, age)
+    }
+
+    /// THE ORDERING RULE. A shove waits for the spark, and lands the moment one is drawn at or after
+    /// its producing tick — the same frame ordering a real impact has.
+    #[test]
+    fn a_shove_waits_for_an_armor_impact_at_or_after_its_producing_tick() {
+        let mut adoption = AuthorityAdoption::default();
+        let mut presentation = ImpactPresentation::default();
+        let episode = fact(hull(), 1, 50, 100);
+        assert_eq!(adoption.offer(episode), Offer::Staged);
+
+        assert!(
+            !order(&mut adoption, &mut presentation, episode, 0),
+            "nothing has been drawn yet, so the shove would precede its own visual",
+        );
+        presentation.present(Tick(99));
+        assert!(
+            !order(&mut adoption, &mut presentation, episode, 1),
+            "an impact drawn BEFORE the producing tick belongs to an earlier hit",
+        );
+        presentation.present(Tick(100));
+        assert!(order(&mut adoption, &mut presentation, episode, 2));
+        assert_eq!(presentation.budget_exceeded(), (0, 2));
+    }
+
+    /// The wait is bounded. A visual that has not arrived within [`ORDERING_BUDGET_TICKS`] is not
+    /// coming, so the shove lands anyway — and says so, because that count is the whole instrument.
+    #[test]
+    fn the_budget_releases_a_shove_that_never_got_a_visual() {
+        let mut adoption = AuthorityAdoption::default();
+        let mut presentation = ImpactPresentation::default();
+        let episode = fact(hull(), 1, 50, 100);
+        assert_eq!(adoption.offer(episode), Offer::Staged);
+
+        assert!(!order(
+            &mut adoption,
+            &mut presentation,
+            episode,
+            ORDERING_BUDGET_TICKS - 1
+        ));
+        assert!(order(
+            &mut adoption,
+            &mut presentation,
+            episode,
+            ORDERING_BUDGET_TICKS
+        ));
+        assert_eq!(
+            presentation.budget_exceeded(),
+            (1, ORDERING_BUDGET_TICKS),
+            "a shove that landed with no visual behind it must be counted",
+        );
+    }
+
+    /// The verdict latches per FACT. A retried request — the slot was busy, or the request was
+    /// consumed without installing — must not tally the same episode twice.
+    #[test]
+    fn a_retried_request_tallies_its_episode_once() {
+        let mut adoption = AuthorityAdoption::default();
+        let mut presentation = ImpactPresentation::default();
+        let episode = fact(hull(), 1, 50, 100);
+        assert_eq!(adoption.offer(episode), Offer::Staged);
+
+        presentation.present(Tick(101));
+        for _ in 0..4 {
+            assert!(order(&mut adoption, &mut presentation, episode, 3));
+        }
+        assert_eq!(presentation.budget_exceeded(), (0, 3));
+        assert_eq!(presentation.ordered_shoves, 1);
+    }
+
+    /// Only a correct physical EVENT has a visual to be ordered against. The client's own
+    /// misprediction is an error the view layer hides, and holding it would delay a correction for a
+    /// spark that will never be drawn.
+    #[test]
+    fn a_misprediction_correction_is_never_held_for_a_visual() {
+        let mut adoption = AuthorityAdoption::default();
+        let mut presentation = ImpactPresentation::default();
+        let mut drift = fact(hull(), 1, 50, 100);
+        drift.cause = AdoptionCause::Misprediction;
+
+        assert!(order(&mut adoption, &mut presentation, drift, 0));
+        assert_eq!(presentation.budget_exceeded(), (0, 0));
     }
 
     /// The premise the whole module rests on, stated where it can fail loudly: a hit's Δv is under

@@ -70,7 +70,8 @@ use lightyear_core::timeline::NetworkTimeline;
 use lightyear_sync::prelude::client::RemoteTimeline;
 use lightyear_sync::timeline::sync::{SyncTargetTimeline, SyncedTimeline};
 
-use crate::ballistics::{HullShock, HullShockLedger, ShockCause};
+use super::adoption::ORDERING_BUDGET_TICKS;
+use crate::ballistics::{HullShock, HullShockLedger, Impact, ImpactSurface, ShockCause};
 use crate::tank::Tank;
 
 /// The tick the authority closes the shock episode on, and the completed Replicon checkpoint that
@@ -129,11 +130,26 @@ impl Lead {
     }
 }
 
+/// Whether this client has DRAWN the impact its shock belongs to by the time the fact is offered.
+///
+/// The shipping case is [`Visual::Drawn`]: `net::protocol::ImpactConfirm` leaves the authority in
+/// the same tick as the shock and the ballistics march presents it. [`Visual::Missing`] is the
+/// jitter/loss case the ordering budget exists for — a lost fire fact, or a cosmetic shell that
+/// quietly dissolved, so no spark is ever drawn for this hit.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Visual {
+    Drawn,
+    Missing,
+}
+
 /// What the run produced after the real `PreUpdate` schedule.
 #[derive(Resource, Default)]
 struct Delivered {
     live_linear: Vec3,
     live_angular: Vec3,
+    /// Live hull velocity at the moment the fact FIRST became eligible on every gate but ordering —
+    /// what the player would have felt if the shove were allowed to outrun its own spark.
+    held_linear: Vec3,
     live_shock: HullShock,
     realized_count: u32,
     replayed_ticks: Vec<u32>,
@@ -161,7 +177,7 @@ fn observe_replay(timeline: Res<LocalTimeline>, mut delivered: ResMut<Delivered>
 /// at a lead of 0 that path could not have recorded one, because it runs the comparator only when
 /// `confirmed_tick < current_tick`. [`shipping_loopback_client_lead_is_exactly_zero_ticks`] is what
 /// holds that premise in place.
-fn run_arrival(lead: Lead) -> Delivered {
+fn run_arrival(lead: Lead, visual: Visual) -> Delivered {
     let mut app = crate::net::test_harness::base_app();
     app.add_plugins(ClientPlugins {
         tick_duration: crate::net::test_harness::TICK,
@@ -250,6 +266,7 @@ fn run_arrival(lead: Lead) -> Delivered {
     }
 
     advance_to(&mut app, lead.present_tick());
+    present_impact(&mut app, visual);
     app.world_mut().run_schedule(PreUpdate);
     let processed_on_arrival = app
         .world()
@@ -261,6 +278,18 @@ fn run_arrival(lead: Lead) -> Delivered {
     // frame: a shove must not be lost merely because it arrived a tick early.
     if lead == Lead::MinusOne {
         advance_to(&mut app, PRODUCING_TICK);
+        present_impact(&mut app, visual);
+        app.world_mut().run_schedule(PreUpdate);
+    }
+
+    let held_linear = app.world().get::<LinearVelocity>(root).unwrap().0;
+    if visual == Visual::Missing {
+        // Spend the ordering budget. A visual that has not been drawn by now is not coming, so the
+        // shove must land anyway rather than be held for it forever.
+        advance_to(
+            &mut app,
+            Tick(PRODUCING_TICK.0.wrapping_add_signed(ORDERING_BUDGET_TICKS)),
+        );
         app.world_mut().run_schedule(PreUpdate);
     }
 
@@ -274,10 +303,31 @@ fn run_arrival(lead: Lead) -> Delivered {
         .expect("the evidence resource outlives the schedule");
     delivered.live_linear = live_linear;
     delivered.live_angular = live_angular;
+    delivered.held_linear = held_linear;
     delivered.live_shock = live_shock;
     delivered.realized_count = realized_count;
     delivered.processed_on_arrival = processed_on_arrival;
     delivered
+}
+
+/// Draw the armor impact this shock belongs to, at the client's current tick.
+///
+/// `crate::ballistics::Impact` is the real presentation signal — `vfx::impact` renders off it and
+/// `net::adoption` stamps its ordering watermark from it — so raising it here is the faithful
+/// stand-in for "the march consumed this shot's `ImpactConfirm` and the player saw the spark".
+fn present_impact(app: &mut App, visual: Visual) {
+    if visual == Visual::Missing {
+        return;
+    }
+    app.world_mut().trigger(Impact {
+        position: Vec3::ZERO,
+        normal: Vec3::Z,
+        caliber: 0.088,
+        surface: ImpactSurface::Armor,
+        penetrated: true,
+        deflection: None,
+    });
+    app.world_mut().flush();
 }
 
 /// Walk both the tick counter and `Time<Fixed>` forward to `target`, keeping them consistent — the
@@ -320,7 +370,7 @@ fn an_authority_shock_reaches_the_live_hull_at_minus_one_lead() {
 /// edit from "fixing" the restore shape into one that silently drops the effect at this lead.
 #[test]
 fn the_zero_lead_shove_arrives_with_no_replayed_tick_at_all() {
-    let delivered = run_arrival(Lead::Zero);
+    let delivered = run_arrival(Lead::Zero, Visual::Drawn);
 
     assert_eq!(
         delivered.replayed_ticks,
@@ -335,7 +385,7 @@ fn the_zero_lead_shove_arrives_with_no_replayed_tick_at_all() {
 /// The contract both ignored fixtures assert: whatever route slice 2 takes, the server's hull
 /// velocity has to become the client's LIVE hull velocity.
 fn assert_delivered(lead: Lead) {
-    let delivered = run_arrival(lead);
+    let delivered = run_arrival(lead, Visual::Drawn);
 
     assert_eq!(
         delivered.live_linear,
@@ -352,6 +402,45 @@ fn assert_delivered(lead: Lead) {
         delivered.processed_on_arrival,
     );
     assert_eq!(delivered.live_angular, AUTHORITY_ANGULAR);
+}
+
+/// THE ORDERING RULE, at the lead where the schedule makes it bite. The shock and its
+/// `ImpactConfirm` leave the authority together, but the confirm is a MESSAGE drained in `Update`
+/// and presented by the NEXT frame's march, while the shock is replicated state adopted here in
+/// `PreUpdate`. Without a rule the hull would lurch a frame before anything was seen to hit it.
+///
+/// So: no spark drawn, no shove — and then the budget releases it anyway, because a shove that never
+/// arrives is the one failure this seam is not allowed to have.
+#[test]
+fn a_shove_waits_for_its_spark_and_the_budget_still_delivers_it() {
+    let delivered = run_arrival(Lead::Zero, Visual::Missing);
+
+    assert_eq!(
+        delivered.held_linear, LIVE_LINEAR,
+        "with no armor impact drawn, the shove must NOT have landed yet — a hull that lurches \
+         before its spark reads as broken",
+    );
+    assert_eq!(
+        delivered.live_linear, AUTHORITY_LINEAR,
+        "after {ORDERING_BUDGET_TICKS} ticks the visual is not coming, and the shove must land \
+         anyway: ordering is a preference, delivery is not. Evidence: live shock = {:?}, ticks \
+         replayed = {:?}",
+        delivered.live_shock, delivered.replayed_ticks,
+    );
+    assert_eq!(delivered.live_angular, AUTHORITY_ANGULAR);
+}
+
+/// The same run with the spark drawn: the shove lands on the FIRST eligible frame, so the ordering
+/// rule costs nothing whenever the visual is actually there. Without this the fixture above could
+/// pass on a rule that always waits out the full budget.
+#[test]
+fn a_drawn_spark_costs_the_shove_no_wait_at_all() {
+    let delivered = run_arrival(Lead::Zero, Visual::Drawn);
+
+    assert_eq!(
+        delivered.held_linear, AUTHORITY_LINEAR,
+        "with the spark already drawn the shove must land immediately, not after the budget",
+    );
 }
 
 /// GUARD ON THE LEAD ARITHMETIC — this one is NOT ignored.
