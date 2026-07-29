@@ -289,6 +289,32 @@ the same function — once the fact's age passes `RollbackPolicy::max_rollback_t
 a WARN naming it, and the local tick advances at least once per tick, so the stall cannot be
 unbounded and the give-up cannot be silent.
 
+**WHAT is re-asked took a sixth review, and the first fix covered half of it.** Readiness is a claim
+about the hull's whole rigid body: the two velocity histories that carry the shove and the two pose
+histories that have to survive the restore beside them, because a pose restored to one tick next to a
+velocity left at another is not a state either peer ever had. The offer proved all four; the request
+re-proved only the velocities. So a late authoritative REMOVAL of `Position`, middle-inserted between
+the episode's close and the restore target, passed revalidation, the slot was claimed,
+`prepare_rollback` answered the removal by taking `Position` off the hull, and the fact closed as
+`Adopted` — because both velocities genuinely were carried, and every counter this module keeps is
+defined on the velocities. No tripwire could fire. Both sites now go through one function,
+`restore_is_deliverable`, whose signature is what stops the request's query shrinking again.
+
+**The two halves get DIFFERENT predicates, and that asymmetry is load-bearing.** `LinearVelocity` and
+`AngularVelocity` carry the fact — a `HullShock` episode is a velocity impulse and nothing else — so
+they get the strong question: the restore must resolve a value the authority held at or after
+`settled_at`. `Position` and `Rotation` carry none of the event; the impulse changes velocity and the
+pose only moves as later ticks integrate it, so a pose sample from before the close is still the
+authority's genuine pose at the restore target. They get the weaker question the offer already asked
+of them — will the restore leave a rigid body standing at all, or delete a component / leave the
+client's own prediction under an authority label. One predicate for all four is wrong in both
+directions. The weak one on the velocities is the slice-3.7 defect verbatim. The strong one on the
+pose is strictly stronger than what it replaces, so every verdict it changes turns a restorable pose
+into a wait — and those waits are reachable, because replication transmits only components that
+CHANGED and the `SameAsPrecedent` markers that would date a stationary hull's pose forward come from
+`check_rollback`'s policy branch, which our own forced request skips. A hull that was standing still
+when it was shot would stall until the replay window dropped its shove.
+
 The same round found the predicate reading one lookup where `prepare_rollback` reads another.
 `ConfirmedHistory` stores an authoritative REMOVAL as an ordinary entry, so a late removal
 middle-inserted between the event and the restore target makes `get_state_at_or_before` resolve
@@ -304,9 +330,14 @@ the proof is three steps rather than an assurance. (1) The branch is same-frame:
 `adoption.requested` and this module's own installed claim, and `ForcedRollbackSlot`'s claim is
 consumed every frame, so both hold only in the `PreUpdate` run that revalidated. (2) Nothing writes
 confirmed history in between: `net::watchdog` is read-only, `check_rollback` consumes the forced
-request first and then skips its whole policy branch — the only caller of
-`ConfirmedHistory::add_unchanged` — and replicon receive already ran. (3) The two lookups agree, by
-construction. Steps 2 and 3 are properties of a DEPENDENCY, not of this crate, and a lightyear bump
+request first and then skips its whole policy branch — the only writer of `ConfirmedHistory`
+REACHABLE IN THIS GAP — and replicon receive already ran. (3) The two lookups agree, by
+construction. The sixth review corrected step 2's wording: an earlier draft called that branch "the
+only caller of `ConfirmedHistory::add_unchanged`", which is false — `ConfirmedHistory::push_unchanged`
+calls it too, and lightyear's interpolation invokes that path. It does not break the proof, for a
+reason that has nothing to do with call counts: that path runs in `Update`, on `Interpolated`
+entities, while this gap is inside one `PreUpdate` on a `Predicted` hull. Steps 2 and 3 are
+properties of a DEPENDENCY, not of this crate, and a lightyear bump
 can retire either without touching a line here. That is exactly why the branch survives its own
 proof: a success path that quietly loses the shove is the defect that survives review, "unreachable"
 is what each of the previous rounds believed about the branch it was about to lose a shove in, and

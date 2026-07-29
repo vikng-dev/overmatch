@@ -73,6 +73,12 @@
 //! markers against late preceding samples. [`a_late_replicated_change_is_revalidated_before_the_request`]
 //! is the fixture that moves it, through lightyear's own insertion API, and pins that the module
 //! WAITS rather than spending the fact on the answer it got at staging.
+//!
+//! [`a_late_pose_removal_is_revalidated_before_the_request`] is its other half, and it exists
+//! because the first fix was only half a fix: readiness is a claim about all FOUR of the hull's
+//! rigid-body histories, and re-proving only the two the shove rides on let a late `Position`
+//! removal through to a claimed rollback that deleted the component while every counter in the
+//! module reported a clean adoption.
 
 use core::time::Duration;
 
@@ -220,15 +226,27 @@ const REPLICATION_LAG_TICKS: u32 = 4;
 /// A late replicated change to the hull's confirmed LINEAR-velocity history, applied AFTER the
 /// arrival frame staged the fact and BEFORE any frame that could request it.
 ///
-/// Both writes go through `ConfirmedHistory`'s own insertion API — the one
+/// WHAT EACH OF THE TWO WRITES DOES, because a fixture that names a mechanism it does not exercise
+/// is worse than one that names nothing. Applied in field order, against a history holding the
+/// authority's tick-[`PRODUCING_TICK`] sample, with the restore target at `arrival`:
+///
+/// 1. `newer_sample_at` carries the value the history already resolves to, so lightyear stores it as
+///    a `SameAsPrecedent` marker rather than a second copy. It sits strictly between `removed_at`
+///    and the restore target, which is what puts it ON the lookup's path:
+///    `get_state_at_or_before(target)` lands on THIS entry and has to walk back through it.
+/// 2. `removed_at` then MIDDLE-inserts an authoritative removal in front of it. That is the write
+///    that changes the verdict — the marker now resolves backwards to `Removed` instead of to the
+///    tick-100 value, which is lightyear's dynamic unchanged-marker behaviour and the reason the
+///    predicate cannot be evaluated once at staging.
+///
+/// Both go through `ConfirmedHistory`'s own insertion API — the one
 /// `record_confirmed_and_maybe_check` calls when a mutation is deserialized — so the fixture
 /// exercises lightyear's real sorted middle insertion and unchanged-state compression rather than a
 /// hand-assembled buffer that merely looks like their result.
 #[derive(Clone, Copy)]
 struct LateVelocityChange {
-    /// A NEWER authoritative sample. Its value equals the effective one, so lightyear stores it as
-    /// an unchanged marker — which is the entry whose effective value the removal below then
-    /// changes, the behaviour lightyear ships its own test for.
+    /// The tick a later authoritative sample is stamped with. Between `removed_at` and the restore
+    /// target, so the target's lookup RESOLVES THROUGH the unchanged marker it is stored as.
     newer_sample_at: Tick,
     /// The tick an authoritative REMOVAL is stamped with. Strictly between the episode's close and
     /// the restore target, so it MIDDLE-inserts and `get_state_at_or_before(target)` resolves it.
@@ -237,8 +255,27 @@ struct LateVelocityChange {
 
 impl LateVelocityChange {
     fn apply(self, history: &mut ConfirmedHistory<LinearVelocity>) {
+        assert!(
+            self.removed_at - self.newer_sample_at < 0,
+            "the removal has to land strictly BEFORE the marker, or the marker resolves to the \
+             pre-removal value and this fixture is claiming a mechanism it does not exercise",
+        );
         history.insert_present(self.newer_sample_at, LinearVelocity(AUTHORITY_LINEAR));
         history.insert_removed(self.removed_at);
+    }
+}
+
+/// The late replication both revalidation fixtures run on, stated ONCE because the arithmetic is
+/// the whole coverage claim and two copies of it can drift apart.
+///
+/// Against a restore target of [`PRODUCING_TICK`] + [`REPLICATION_LAG_TICKS`] = 104: the removal
+/// lands at 102 and the unchanged marker at 103, so `get_state_at_or_before(104)` lands on the
+/// MARKER and resolves back through it to the removal. An earlier version put the marker past the
+/// target, where the lookup never reached it and only the removal was doing any work.
+fn a_removal_the_restore_target_resolves() -> LateVelocityChange {
+    LateVelocityChange {
+        newer_sample_at: Tick(PRODUCING_TICK.0 + 3),
+        removed_at: Tick(PRODUCING_TICK.0 + 2),
     }
 }
 
@@ -323,6 +360,14 @@ struct Delivered {
     /// authoritative REMOVAL deletes it, which is a distinct failure from restoring a stale value
     /// and would otherwise read as an `unwrap` panic with nothing to say.
     live_velocity_removed: bool,
+    /// The same question for the POSE, and it needs its own field: the shove is a velocity impulse,
+    /// so every other piece of evidence here can read "delivered" while `prepare_rollback` has taken
+    /// `Position` or `Rotation` off the hull.
+    live_pose_removed: bool,
+    /// The staged fact's AGE at the end of the run — the last local tick minus the restore target.
+    /// What lets a fixture about the replay window pin the boundary it NAMES rather than assert
+    /// against "some tick past it".
+    final_age: i32,
 }
 
 fn observe_replay(timeline: Res<LocalTimeline>, mut delivered: ResMut<Delivered>) {
@@ -375,6 +420,11 @@ struct Scenario {
     /// Replication moving the confirmed history AFTER the fact is staged. `None` is the static
     /// history every other fixture here builds.
     late_change: Option<LateVelocityChange>,
+    /// The tick an authoritative REMOVAL of the hull's `Position` is stamped with, applied at the
+    /// same point in the run as [`Scenario::late_change`]. The POSE half of the same question: this
+    /// component carries none of the shove, so the two velocity histories can go on answering
+    /// "delivered" while a restore here deletes half the rigid body.
+    late_position_removal: Option<Tick>,
     /// Extra LOCAL ticks to spend past the run's own last frame, each with a `PreUpdate`. How a
     /// fixture asks what bounds a wait.
     extra_ticks: i32,
@@ -389,6 +439,7 @@ impl Scenario {
             velocities_confirmed_at: PRODUCING_TICK,
             competitor: None,
             late_change: None,
+            late_position_removal: None,
             extra_ticks: 0,
         }
     }
@@ -402,6 +453,7 @@ fn run_scenario(scenario: Scenario) -> Delivered {
         velocities_confirmed_at,
         competitor,
         late_change,
+        late_position_removal,
         extra_ticks,
     } = scenario;
     let mut app = crate::net::test_harness::base_app();
@@ -570,11 +622,24 @@ fn run_scenario(scenario: Scenario) -> Delivered {
     // is holding it; every frame from here reads a history that is no longer the one the offer's
     // gate saw. This is the only fixture in the file that does not freeze the history after setup.
     if let Some(change) = late_change {
+        assert!(
+            change.newer_sample_at - arrival <= 0,
+            "the unchanged marker must sit at or before the restore target ({}), or the target's \
+             lookup never reaches it and the fixture is not exercising marker resolution at all",
+            arrival.0,
+        );
         let mut history = app
             .world_mut()
             .get_mut::<ConfirmedHistory<LinearVelocity>>(root)
             .expect("the hull's confirmed linear-velocity history");
         change.apply(&mut history);
+    }
+    if let Some(removed_at) = late_position_removal {
+        let mut history = app
+            .world_mut()
+            .get_mut::<ConfirmedHistory<Position>>(root)
+            .expect("the hull's confirmed position history");
+        history.insert_removed(removed_at);
     }
 
     // The later frame, with the march's presentation in it — and the ticks that separate the two.
@@ -611,6 +676,11 @@ fn run_scenario(scenario: Scenario) -> Delivered {
     // `assert_eq!` on these still fails, and it fails with its own message instead of an `unwrap`.
     let live_velocity_removed = app.world().get::<LinearVelocity>(root).is_none()
         || app.world().get::<AngularVelocity>(root).is_none();
+    let live_pose_removed =
+        app.world().get::<Position>(root).is_none() || app.world().get::<Rotation>(root).is_none();
+    // `arrival` is the confirmed `HullShock` sample's tick, which IS `AuthoritativeFact::produced_at`
+    // and the restore target the age is measured against.
+    let final_age = app.world().resource::<LocalTimeline>().tick() - arrival;
     let live_linear = app
         .world()
         .get::<LinearVelocity>(root)
@@ -634,6 +704,8 @@ fn run_scenario(scenario: Scenario) -> Delivered {
     delivered.ordering = ordering;
     delivered.still_staged = still_staged;
     delivered.live_velocity_removed = live_velocity_removed;
+    delivered.live_pose_removed = live_pose_removed;
+    delivered.final_age = final_age;
     delivered
 }
 
@@ -925,9 +997,11 @@ fn a_drawn_spark_costs_the_shove_no_more_than_the_schedules_own_delay() {
 /// and the restore target. Both writes go through lightyear's own `ConfirmedHistory` API, so this
 /// exercises its real sorted middle insertion and its dynamic `SameAsPrecedent` resolution.
 ///
-/// WHAT `prepare_rollback` WOULD NOW DO: `get_state_at_or_before(100)` resolves the removal, so it
-/// would take `LinearVelocity` off the hull rather than install a velocity. The shove is not merely
-/// stale — it is not there.
+/// WHAT `prepare_rollback` WOULD NOW DO: the restore target is the confirmed `HullShock` sample's
+/// tick — [`PRODUCING_TICK`] + [`REPLICATION_LAG_TICKS`] = 104, NOT the episode's close at 100 — and
+/// `get_state_at_or_before(104)` lands on the marker at 103 and resolves back through it to the
+/// removal at 102. So the restore would take `LinearVelocity` off the hull rather than install a
+/// velocity. The shove is not merely stale — it is not there.
 ///
 /// WHAT MUST HAPPEN: the request revalidates and WAITS. The fact stays staged, nothing is claimed,
 /// the hull keeps the value it was predicting, and no counter moves — not `undelivered` (we asked
@@ -940,10 +1014,7 @@ fn a_drawn_spark_costs_the_shove_no_more_than_the_schedules_own_delay() {
 fn a_late_replicated_change_is_revalidated_before_the_request() {
     let delivered = run_scenario(Scenario {
         arrival: Tick(PRODUCING_TICK.0 + REPLICATION_LAG_TICKS),
-        late_change: Some(LateVelocityChange {
-            newer_sample_at: Tick(PRODUCING_TICK.0 + REPLICATION_LAG_TICKS + 2),
-            removed_at: Tick(PRODUCING_TICK.0 + 2),
-        }),
+        late_change: Some(a_removal_the_restore_target_resolves()),
         ..Scenario::new(Lead::Zero, Visual::Missing)
     });
 
@@ -976,12 +1047,19 @@ fn a_late_replicated_change_is_revalidated_before_the_request() {
 
 /// THE OTHER HALF OF THAT RULE: the wait is BOUNDED, and by something that says so out loud.
 ///
-/// The same run, carried past `RollbackPolicy::max_rollback_ticks`. A fact whose restore never
-/// becomes deliverable would otherwise sit in the single staging slot forever, blocking every later
-/// fact on every hull — a wait with no bound is its own defect, and "it stays staged" is only the
-/// right answer while something else ends it. The replay-window check runs first in
-/// `request_staged_adoption` every frame and closes the fact with a WARN once no replay could reach
-/// its producing tick.
+/// The same run, carried to `RollbackPolicy::max_rollback_ticks` and then one tick past it. A fact
+/// whose restore never becomes deliverable would otherwise sit in the single staging slot forever,
+/// blocking every later fact on every hull — a wait with no bound is its own defect, and "it stays
+/// staged" is only the right answer while something else ends it. The replay-window check runs first
+/// in `request_staged_adoption` every frame and closes the fact with a WARN once no replay could
+/// reach its producing tick.
+///
+/// BOTH SIDES OF THE BOUNDARY, because only one of them is the claim this fixture's name makes. An
+/// earlier version observed the fact staged at age {`ORDERING_BUDGET_TICKS`} and closed at age
+/// `window` + 1, and a rule that gave up anywhere in between would have passed it just as happily —
+/// which is a bound but not THIS bound, and "waits exactly as long as a replay could still reach
+/// the tick" is the whole reason the check is a window and not a timeout. So the run is done twice,
+/// one tick apart, and the ages are asserted rather than assumed.
 #[test]
 fn a_revalidation_that_never_passes_is_dropped_at_the_replay_window() {
     let window = i32::from(
@@ -989,33 +1067,120 @@ fn a_revalidation_that_never_passes_is_dropped_at_the_replay_window() {
             .rollback_policy
             .max_rollback_ticks,
     );
+    // The `Visual::Missing` run already spends the ordering budget, so the fact's age when that run
+    // ends is exactly the budget; every extra tick past it adds one to the age.
+    let carried_to = |age: i32| {
+        run_scenario(Scenario {
+            arrival: Tick(PRODUCING_TICK.0 + REPLICATION_LAG_TICKS),
+            late_change: Some(a_removal_the_restore_target_resolves()),
+            extra_ticks: age - ORDERING_BUDGET_TICKS,
+            ..Scenario::new(Lead::Zero, Visual::Missing)
+        })
+    };
+
+    let inside = carried_to(window);
+    assert_eq!(
+        inside.final_age, window,
+        "the fixture must actually stand ON the boundary, or the assertion below pins nothing",
+    );
+    assert!(
+        inside.still_staged,
+        "at age exactly {window} a replay CAN still reach the producing tick, so the fact must \
+         still be staged. Giving up here would be a timeout wearing the window's name.",
+    );
+    assert_eq!(
+        inside.ordering,
+        OrderingTally::default(),
+        "and nothing may have been tallied on the way to the boundary either",
+    );
+
+    let outside = carried_to(window + 1);
+    assert_eq!(outside.final_age, window + 1);
+    assert!(
+        !outside.still_staged,
+        "one tick further, past the {window}-tick replay window, no rollback could reach the \
+         producing tick — so the fact must be closed rather than retried forever. That is what \
+         stops the wait from being an unbounded stall on the single staging slot, and the pair of \
+         runs is what pins the give-up to THIS tick rather than to some tick.",
+    );
+    assert_eq!(
+        outside.live_linear, LIVE_LINEAR,
+        "and it must be dropped, not adopted: nothing may be installed on the hull on the way out",
+    );
+    assert_eq!(
+        outside.ordering,
+        OrderingTally::default(),
+        "a fact that was never requested cannot be `undelivered`, and one the ordering rule never \
+         released cannot be counted against the budget",
+    );
+}
+
+/// FINDING THE SLICE-3.10 REVIEW CAUGHT: THE REVALIDATION COVERED HALF THE PREDICATE.
+///
+/// [`a_late_replicated_change_is_revalidated_before_the_request`] closed the stale-readiness hole
+/// for the two VELOCITY histories. The offer proves more than that — it also proves the hull's
+/// `Position` and `Rotation` can be restored at the producing tick, because a pose restored to one
+/// tick beside a velocity left at another is not a state either peer ever had. The request re-proved
+/// only the velocities, so half the readiness answer was still being acted on frames after it was
+/// taken.
+///
+/// THE SHAPE, and it is the same one, moved to the other half of the rigid body. The arrival frame
+/// stages the fact with all four histories restorable. While the ordering rule holds it for a spark
+/// that never comes, an authoritative REMOVAL of `Position` middle-inserts between the episode's
+/// close and the restore target. The offer pass now correctly skips the hull — and that changes
+/// nothing, because re-offering never touches an already-staged fact. The velocity-only
+/// revalidation still said yes, the slot was claimed, and `prepare_rollback` answered the removal by
+/// taking `Position` OFF the hull. Then `confirm_forced_rollback` asked only whether the VELOCITIES
+/// were carried, which they were, and closed the fact as `Retirement::Adopted`.
+///
+/// SO NOTHING FIRED. Not `undelivered` — that counter is defined on the velocity predicate, which
+/// passed. Not `bypassed`. The hull ended the frame without a position and the module recorded a
+/// success. That is precisely the silent-loss shape the whole arc exists to remove, which is why the
+/// fix is the predicate at the request and not another counter.
+///
+/// WHAT MUST HAPPEN: the same WAIT. Nothing claimed, nothing tallied, the pose intact, and the fact
+/// still staged to be reconsidered when the authority confirms a pose there again.
+#[test]
+fn a_late_pose_removal_is_revalidated_before_the_request() {
     let delivered = run_scenario(Scenario {
         arrival: Tick(PRODUCING_TICK.0 + REPLICATION_LAG_TICKS),
-        late_change: Some(LateVelocityChange {
-            newer_sample_at: Tick(PRODUCING_TICK.0 + REPLICATION_LAG_TICKS + 2),
-            removed_at: Tick(PRODUCING_TICK.0 + 2),
-        }),
-        // The `Visual::Missing` run already spent the ordering budget; carry it the rest of the way
-        // past the window, plus one tick to land strictly outside it.
-        extra_ticks: window - ORDERING_BUDGET_TICKS + 1,
+        // Between the episode's close and the restore target, so `get_state_at_or_before(104)`
+        // resolves it exactly as the velocity fixture's removal is resolved.
+        late_position_removal: Some(Tick(PRODUCING_TICK.0 + 2)),
         ..Scenario::new(Lead::Zero, Visual::Missing)
     });
 
     assert!(
-        !delivered.still_staged,
-        "past the {window}-tick replay window no rollback could reach the producing tick, so the \
-         fact must be closed rather than retried forever — that is what stops the wait from being \
-         an unbounded stall on the single staging slot",
+        !delivered.live_pose_removed,
+        "the restore this frame would order resolves an authoritative REMOVAL of `Position`, so \
+         ordering it deletes half the hull's rigid body — and every velocity-shaped piece of \
+         evidence would still read as a clean delivery. Evidence: live shock = {:?}, ticks \
+         replayed = {:?}",
+        delivered.live_shock, delivered.replayed_ticks,
+    );
+    assert!(
+        !delivered.live_velocity_removed,
+        "and the velocities must be untouched too — this fixture must fail on the POSE or it is \
+         re-testing the sibling above",
     );
     assert_eq!(
         delivered.live_linear, LIVE_LINEAR,
-        "and it must be dropped, not adopted: nothing may be installed on the hull on the way out",
+        "nothing may be installed on the strength of a readiness answer that covered only the \
+         components the fact happens to deliver",
     );
+    assert_eq!(delivered.live_angular, LIVE_ANGULAR);
     assert_eq!(
         delivered.ordering,
         OrderingTally::default(),
-        "a fact that was never requested cannot be `undelivered`, and one the ordering rule never \
-         released cannot be counted against the budget",
+        "and NOTHING may be tallied. Before the fix this line read `released_on_budget: 1` and the \
+         fact closed as ADOPTED, because both velocities were genuinely carried — the counters \
+         cannot see a pose that was deleted beside them.",
+    );
+    assert!(
+        delivered.still_staged,
+        "a failed revalidation is a WAIT, not a drop, on this half of the predicate too: the \
+         authority can confirm a pose at the target again, and the replay window is what ends the \
+         wait if it never does",
     );
 }
 

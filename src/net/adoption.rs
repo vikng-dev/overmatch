@@ -183,6 +183,13 @@
 //! - [`request_staged_adoption`] asks it AGAIN, immediately before it claims the forced-rollback
 //!   slot, and that answer is the one the transaction rests on.
 //!
+//! WHAT is asked took a sixth. Readiness is a claim about the hull's WHOLE rigid body — the two
+//! velocities that carry the shove and the two pose components that must survive the restore beside
+//! them — and the second ask covered only the velocities, so a late `Position` removal reached a
+//! claimed rollback that deleted the component and still closed as an adoption. Both sites now go
+//! through [`restore_is_deliverable`], which is where the per-component predicates and the reason
+//! they DIFFER are written down.
+//!
 //! The second is not belt-and-braces. A fact is staged on one frame and requested on a LATER one —
 //! an [`AdoptionCause::ExternalEvent`] waits for its spark, for up to [`ORDERING_BUDGET_TICKS`] —
 //! and confirmed history is not append-only underneath it: `ConfirmedHistory::insert_raw` does a
@@ -791,6 +798,94 @@ fn restore_carries_the_shove(
         && resolves_post_event(angular, restored_at, settled_at)
 }
 
+/// Why a state restore at a given tick is not something this module may build on YET. Every variant
+/// is a WAIT; see [`request_staged_adoption`] for what bounds it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Unready {
+    /// The restore would not bring the hull's POSE back from authority.
+    Pose,
+    /// The restore would bring the pose back but would not carry the event's velocity change.
+    Shove,
+    /// There is no hull to read histories off — a despawn between staging and this frame.
+    Hull,
+}
+
+impl Unready {
+    /// What the wait is waiting for, for the two logs that report one.
+    fn reason(self) -> &'static str {
+        match self {
+            Unready::Pose => {
+                "the confirmed `Position`/`Rotation` a restore there resolves is an authoritative \
+                 REMOVAL, or is missing — so the restore would delete part of the rigid body, or \
+                 leave the client's own prediction standing under the authority's tick label"
+            }
+            Unready::Shove => {
+                "the newest confirmed hull VELOCITY a restore there resolves predates the event's \
+                 settling tick, so the restore would install a PRE-hit value and carry nothing"
+            }
+            Unready::Hull => "the hull no longer exists, so no restore can be established at all",
+        }
+    }
+}
+
+/// EVERY component-specific condition on a state restore at `restored_at`, asked in ONE place.
+///
+/// The offer and the request have to ask this of the SAME components. A fact is staged on one frame
+/// and requested many frames later, so both are real evaluations of a moving answer — and the sixth
+/// review found the request re-asking about only the two velocity histories. A late `Position`
+/// removal therefore passed revalidation, the slot was claimed, `prepare_rollback` took `Position`
+/// off the hull, and the fact closed as [`Retirement::Adopted`] because both velocities were carried.
+/// This signature is what stops that recurring: no caller can ask half the question, and the query
+/// that feeds it cannot silently shrink.
+///
+/// # TWO PREDICATES, ONE PER ROLE — and the asymmetry is the point, not an oversight
+///
+/// - `LinearVelocity` and `AngularVelocity` CARRY the fact. A `HullShock` episode is a velocity
+///   impulse and nothing else, so "was the shove delivered" is a question about these two alone.
+///   They get the strong predicate, [`restore_carries_the_shove`]: the restore must resolve a value
+///   the authority held at or after [`AuthoritativeFact::settled_at`].
+/// - `Position` and `Rotation` carry NONE of the event. The impulse changes velocity; the pose only
+///   moves as subsequent ticks integrate it, so at `settled_at` the authority's pose is still the
+///   pre-impulse pose and a pose sample from before the close is the authority's genuine pose at the
+///   restore target. The only thing that can go wrong for them is that the restore DESTROYS the
+///   component or never reaches authority at all, which is exactly what [`authority_reaches`] asks —
+///   the predicate the offer was already using for them.
+///
+/// # WHY ONE PREDICATE FOR ALL FOUR IS NOT AVAILABLE
+///
+/// It fails in both directions, so neither of the two can serve as the single answer.
+///
+/// `authority_reaches` on the velocities is the slice-3.7 defect verbatim: existence is satisfied by
+/// a PRE-hit sample, so the module requests a rollback that installs a pre-hit velocity and then
+/// retires the shove against it.
+///
+/// `restore_carries_the_shove` on the pose is strictly STRONGER than `authority_reaches` — it is
+/// that predicate plus a recency clause — so every verdict it changes turns a perfectly restorable
+/// pose into a WAIT, and those waits are reachable rather than theoretical. Replication transmits
+/// only components that CHANGED, so a hull that was standing still when it was shot publishes no new
+/// `Position`; and the `SameAsPrecedent` markers that would otherwise date its pose forward are
+/// written by `check_rollback`'s policy branch, which this module's own forced request skips. Such a
+/// fact would stall until the replay window dropped it — a shove lost to a clause protecting nothing.
+fn restore_is_deliverable(
+    position: Option<&ConfirmedHistory<Position>>,
+    rotation: Option<&ConfirmedHistory<Rotation>>,
+    linear: Option<&ConfirmedHistory<LinearVelocity>>,
+    angular: Option<&ConfirmedHistory<AngularVelocity>>,
+    restored_at: Tick,
+    settled_at: Tick,
+) -> Result<(), Unready> {
+    // The hull's whole rigid-body state has to come back from authority together — a pose restored
+    // to `restored_at` beside a velocity that stayed at `now` is not a tick that ever existed on
+    // either peer.
+    if !authority_reaches(position, restored_at) || !authority_reaches(rotation, restored_at) {
+        return Err(Unready::Pose);
+    }
+    if !restore_carries_the_shove(linear, angular, restored_at, settled_at) {
+        return Err(Unready::Shove);
+    }
+    Ok(())
+}
+
 /// FIRST CONSUMER. Offer the authority's hull-shock episodes for adoption.
 ///
 /// The trigger is the EXACT comparator [`hull_shock_mismatch`], not a magnitude: every field of
@@ -850,19 +945,10 @@ fn offer_hull_shock_adoptions(
         if !hull_shock_mismatch(authority, predicted) {
             continue;
         }
-        // The hull's whole rigid-body state has to come back from authority together — a pose
-        // restored to `produced_at` beside a velocity that stayed at `now` is not a tick that ever
-        // existed on either peer. If completeness cannot be proven, wait.
-        if !authority_reaches(position, produced_at) || !authority_reaches(rotation, produced_at) {
-            continue;
-        }
-        // THE EPISODE'S OWN SETTLING TICK, and an ECONOMY gate — not the authoritative one.
-        // `authority_reaches` proves only that lightyear will restore SOMETHING from authority; it
-        // does not prove that the something carries the shove. A confirmed velocity history whose
-        // newest sample at or before `produced_at` predates the episode's close resolves to a PRE-hit
-        // value, and a rollback ordered onto it would spend the fact having delivered nothing. Ask
-        // the same question `prepare_rollback` will answer, at the tick we would target, and do not
-        // occupy the single staging slot with a fact whose restore currently cannot carry it.
+        // THE READINESS GATE, and an ECONOMY one — not the authoritative evaluation. There is one
+        // staging slot, and a fact whose restore provably cannot be built on right now should not
+        // occupy it. [`restore_is_deliverable`] is the whole question, over all four of the hull's
+        // rigid-body histories, at the tick a rollback would target.
         //
         // IT DOES NOT SPEAK FOR THE FRAME THE FACT IS ACTUALLY REQUESTED ON, which can be many
         // frames later and over histories that have changed since. `request_staged_adoption` re-runs
@@ -870,17 +956,21 @@ fn offer_hull_shock_adoptions(
         // transaction rests on; this one only keeps the slot free.
         //
         // This is a WAIT, not a drop: the offer is re-derived from replicated state every frame, and
-        // it costs no request, no slot, and no rollback while it is unsatisfied. It is also not a
-        // regime the shipping build reaches — every impulse of the episode CHANGES the hull's
-        // velocity, so the message that first carries the episode's `HullShock` carries the resulting
-        // velocity in the same replication group and stamps both with the same tick.
+        // it costs no request, no slot, and no rollback while it is unsatisfied. The velocity half is
+        // also not a regime the shipping build reaches — every impulse of the episode CHANGES the
+        // hull's velocity, so the message that first carries the episode's `HullShock` carries the
+        // resulting velocity in the same replication group and stamps both with the same tick.
         let settled_at = Tick(authority.tick);
-        if !restore_carries_the_shove(linear, angular, produced_at, settled_at) {
+        if let Err(unready) =
+            restore_is_deliverable(position, rotation, linear, angular, produced_at, settled_at)
+        {
             debug!(
-                "client: hull-shock episode #{} on {} is not deliverable at tick {} — the newest \
-                 confirmed hull velocity there predates the episode's close at {}, so a rollback \
-                 would restore a PRE-hit value. Waiting; nothing has been requested.",
-                authority.count, hull, produced_at.0, authority.tick,
+                "client: hull-shock episode #{} on {} is not deliverable at tick {} — {}. Waiting; \
+                 nothing has been requested.",
+                authority.count,
+                hull,
+                produced_at.0,
+                unready.reason(),
             );
             continue;
         }
@@ -908,7 +998,7 @@ fn offer_hull_shock_adoptions(
 
 /// Claim the forced-rollback slot for the staged fact, once every generic readiness condition holds.
 ///
-/// THE DELIVERY PREDICATE IS RE-ESTABLISHED HERE, and this — not the offer's gate — is the
+/// THE WHOLE READINESS PREDICATE IS RE-ESTABLISHED HERE, and this — not the offer's gate — is the
 /// authoritative evaluation. A fact is staged on one frame and can be requested many frames later,
 /// because an [`AdoptionCause::ExternalEvent`] waits out [`ORDERING_BUDGET_TICKS`] for its spark;
 /// re-offering the same identity deliberately leaves the staged fact untouched
@@ -917,6 +1007,12 @@ fn offer_hull_shock_adoptions(
 /// changing under it — see [`restore_carries_the_shove`]. Proving readiness once at staging and
 /// acting on it later is therefore acting on a stale answer, which is how a fact gets permanently
 /// spent on a rollback that carries nothing.
+///
+/// WHOLE, not the delivery half. The sixth review found this re-asking only about the two VELOCITY
+/// histories while the offer had proven all four, so a late `Position` removal survived into a
+/// claimed rollback that deleted the component — and closed as an adoption, because every counter
+/// this module keeps is defined on the velocities. [`restore_is_deliverable`] is now the single
+/// question both sites ask, and its signature is what stops the query above shrinking again.
 ///
 /// A failed revalidation is a WAIT, not a drop: the whole point is that the answer can change, so
 /// nothing is claimed, nothing is tallied, and the fact stays staged to be reconsidered next frame.
@@ -927,7 +1023,12 @@ fn request_staged_adoption(
     timeline: Res<LocalTimeline>,
     checkpoints: Option<Res<ReplicationCheckpointMap>>,
     managers: Query<&PredictionManager>,
+    // ALL FOUR, because the offer proved all four. Re-proving a subset is proving a later frame's
+    // transaction on an earlier frame's histories for whatever it left out — see
+    // [`restore_is_deliverable`], whose signature is what keeps this tuple honest.
     hulls: Query<(
+        Option<&ConfirmedHistory<Position>>,
+        Option<&ConfirmedHistory<Rotation>>,
         Option<&ConfirmedHistory<LinearVelocity>>,
         Option<&ConfirmedHistory<AngularVelocity>>,
     )>,
@@ -983,16 +1084,27 @@ fn request_staged_adoption(
         adoption.close(fact);
         return;
     }
-    // THE REVALIDATION. Read the histories AS THEY ARE NOW, at the tick this frame would target.
-    // The offer's identical gate ran on the frame the fact was staged and cannot speak for this one.
-    if !hulls.get(fact.id.entity).is_ok_and(|(linear, angular)| {
-        restore_carries_the_shove(linear, angular, target, fact.settled_at)
-    }) {
+    // THE REVALIDATION. Read the histories AS THEY ARE NOW, at the tick this frame would target,
+    // and read ALL of them: the offer's identical gate ran on the frame the fact was staged and
+    // cannot speak for this one, for any component it covered.
+    let unready = match hulls.get(fact.id.entity) {
+        Err(_) => Some(Unready::Hull),
+        Ok((position, rotation, linear, angular)) => {
+            restore_is_deliverable(position, rotation, linear, angular, target, fact.settled_at)
+                .err()
+        }
+    };
+    if let Some(unready) = unready {
         debug!(
-            "client: authoritative fact {:?} #{} on {} is not deliverable at tick {} right now — \
-             the confirmed hull velocities a restore there would resolve do not reach the event's \
-             settling tick {}. Waiting; nothing has been claimed and the fact stays staged.",
-            fact.id.source, fact.id.sequence, fact.id.entity, target.0, fact.settled_at.0,
+            "client: authoritative fact {:?} #{} on {} is not deliverable at tick {} right now \
+             (event settled at {}) — {}. Waiting; nothing has been claimed and the fact stays \
+             staged.",
+            fact.id.source,
+            fact.id.sequence,
+            fact.id.entity,
+            target.0,
+            fact.settled_at.0,
+            unready.reason(),
         );
         return;
     }
@@ -1106,6 +1218,14 @@ fn confirm_forced_rollback(
     // WHAT THE RESTORE ACTUALLY PUT ON THE HULL. Read from the same histories `prepare_rollback`
     // read, so "someone else's rollback delivered the shove" is established rather than inferred
     // from its start tick. A despawned hull answers `Err` and carries nothing.
+    //
+    // VELOCITIES ONLY, and deliberately NOT [`restore_is_deliverable`]. This is a question about the
+    // PAST — the rollback has already been prepared — and the only thing that can retire the fact is
+    // whether the event's Δv is now on the live hull. Whatever that restore did to the pose is
+    // lightyear's doing and is not this fact's to answer for; re-asking the pose predicate here
+    // would leave a fact staged for a shove that is already live, and it would be re-requested for
+    // state that cannot change. The readiness question that DOES cover the pose is asked before the
+    // claim, where refusing still buys something.
     let carried = hulls.get(fact.id.entity).is_ok_and(|(linear, angular)| {
         restore_carries_the_shove(linear, angular, started, fact.settled_at)
     });
@@ -1261,9 +1381,15 @@ impl RestoresFrom {
 /// 2. NOTHING WRITES CONFIRMED HISTORY IN BETWEEN. Between the revalidation and
 ///    `RollbackSystems::Prepare` lie `net::watchdog`'s rollback check (read-only),
 ///    `RollbackSystems::Check` and `RollbackSystems::RemoveDisable`. `check_rollback` consumes the
-///    forced request FIRST and then skips its whole policy branch — which is the only caller of
-///    `ConfirmedHistory::add_unchanged` — and our claim guarantees the request is pending. Replicon
-///    receive already ran, before this module.
+///    forced request FIRST and then skips its whole policy branch — the only writer of
+///    `ConfirmedHistory` REACHABLE IN THIS GAP — and our claim guarantees the request is pending.
+///    Replicon receive already ran, before this module.
+///
+///    That is a claim about the GAP and not about the codebase, and the difference matters because
+///    the stronger version of it is false. `ConfirmedHistory::add_unchanged` has a second caller,
+///    `ConfirmedHistory::push_unchanged`, which lightyear's interpolation invokes. It is irrelevant
+///    here for a reason that has nothing to do with call counts: that path runs in `Update`, on
+///    `Interpolated` entities, and this gap is inside one `PreUpdate` on a `Predicted` hull.
 /// 3. THE TWO LOOKUPS AGREE. `prepare_rollback` restores
 ///    `ConfirmedHistory::get_state_at_or_before(rollback_tick)` and the predicate asks that exact
 ///    call plus the tick it resolved at, over the same component, at the same tick.
@@ -2121,9 +2247,14 @@ mod tests {
         );
 
         // The REAL insertion path, with its sorted middle insertion and its unchanged-state
-        // compression, rather than a hand-built buffer: a newer sample equal to the effective one
-        // is stored as an unchanged marker, and the removal then lands between the two.
-        linear.insert_present(Tick(106), LinearVelocity(AUTHORITY_LINEAR));
+        // compression, rather than a hand-built buffer: a later sample equal to the effective one is
+        // stored as an unchanged marker, and the removal then MIDDLE-inserts in front of it.
+        //
+        // The marker goes at 103 — BEFORE the restore target, not past it. Past it the target's
+        // lookup never reaches the marker and only the removal does any work, which is a coverage
+        // claim this fixture used to make and not keep. At 103 `get_state_at_or_before(104)` lands
+        // ON the marker and resolves back through it to the removal.
+        linear.insert_present(Tick(103), LinearVelocity(AUTHORITY_LINEAR));
         linear.insert_removed(Tick(102));
 
         assert!(
@@ -2178,6 +2309,111 @@ mod tests {
             "and what it restores is the hull as it was four ticks BEFORE the episode closed. \
              Offering this fact would buy a forced rollback that installs a pre-hit velocity and \
              then retire the shove against it.",
+        );
+    }
+
+    /// A pose history holding one authority sample at `sampled_at`.
+    fn confirmed_position(sampled_at: Tick) -> ConfirmedHistory<Position> {
+        let mut history = ConfirmedHistory::<Position>::default();
+        history.insert_present_explicit(sampled_at, Position::default());
+        history
+    }
+
+    fn confirmed_rotation(sampled_at: Tick) -> ConfirmedHistory<Rotation> {
+        let mut history = ConfirmedHistory::<Rotation>::default();
+        history.insert_present_explicit(sampled_at, Rotation::default());
+        history
+    }
+
+    /// FINDING THE SLICE-3.10 REVIEW CAUGHT, at the predicate. Two components carry the fact and two
+    /// only have to survive the restore, and [`restore_is_deliverable`] must apply the matching
+    /// question to each — a single predicate across all four is wrong in one direction or the other.
+    ///
+    /// The integration half is
+    /// `net::lead_zero_rollback::a_late_pose_removal_is_revalidated_before_the_request`, which runs
+    /// the real restore. This one pins the ASYMMETRY, which that fixture cannot see: it would pass
+    /// just as well against a module that had tightened the pose to the velocity predicate, and that
+    /// would silently stall every fact whose hull was standing still when it was shot.
+    #[test]
+    fn the_pose_is_asked_a_weaker_question_than_the_shove_and_that_is_deliberate() {
+        const SETTLED_AT: Tick = Tick(100);
+        const PRODUCED_AT: Tick = Tick(104);
+        /// A pose the authority last published well before the episode — the ordinary shape for a
+        /// hull that was not moving, since replication only transmits components that CHANGED.
+        const POSE_SAMPLED_AT: Tick = Tick(80);
+
+        let stale_pose_position = confirmed_position(POSE_SAMPLED_AT);
+        let stale_pose_rotation = confirmed_rotation(POSE_SAMPLED_AT);
+        assert_eq!(
+            restore_is_deliverable(
+                Some(&stale_pose_position),
+                Some(&stale_pose_rotation),
+                Some(&confirmed_linear(SETTLED_AT)),
+                Some(&confirmed_angular(SETTLED_AT)),
+                PRODUCED_AT,
+                SETTLED_AT,
+            ),
+            Ok(()),
+            "a pose sample 20 ticks older than the episode is still the authority's genuine pose at \
+             the restore target: the impulse changes VELOCITY, and the pose only moves as later \
+             ticks integrate it. Requiring pose recency would stall this fact until the replay \
+             window dropped it — a shove lost to a clause that protects nothing.",
+        );
+        assert!(
+            !restore_carries_the_shove(
+                Some(&confirmed_linear(POSE_SAMPLED_AT)),
+                Some(&confirmed_angular(POSE_SAMPLED_AT)),
+                PRODUCED_AT,
+                SETTLED_AT,
+            ),
+            "and the SAME sample tick on a velocity history is a refusal — which is the whole \
+             asymmetry, stated over one number so it cannot be read as a coincidence of fixtures",
+        );
+
+        // A removal middle-inserted between the episode and the restore target, the same shape the
+        // velocity fixtures use, through lightyear's own insertion API.
+        let mut removed_position = confirmed_position(SETTLED_AT);
+        removed_position.insert_present(Tick(103), Position::default());
+        removed_position.insert_removed(Tick(102));
+        assert_eq!(
+            restore_is_deliverable(
+                Some(&removed_position),
+                Some(&confirmed_rotation(SETTLED_AT)),
+                Some(&confirmed_linear(SETTLED_AT)),
+                Some(&confirmed_angular(SETTLED_AT)),
+                PRODUCED_AT,
+                SETTLED_AT,
+            ),
+            Err(Unready::Pose),
+            "but a restore that would DELETE the position is refused even though both velocities \
+             carry the shove perfectly — that combination is exactly what the request used to wave \
+             through, and `Retirement::Adopted` is what it then recorded",
+        );
+        assert_eq!(
+            restore_is_deliverable(
+                None,
+                Some(&confirmed_rotation(SETTLED_AT)),
+                Some(&confirmed_linear(SETTLED_AT)),
+                Some(&confirmed_angular(SETTLED_AT)),
+                PRODUCED_AT,
+                SETTLED_AT,
+            ),
+            Err(Unready::Pose),
+            "and so is a missing pose history: `prepare_rollback` takes the other branch there and \
+             restores the client's own prediction under the authority's tick label",
+        );
+        assert_eq!(
+            restore_is_deliverable(
+                Some(&confirmed_position(SETTLED_AT)),
+                Some(&confirmed_rotation(SETTLED_AT)),
+                Some(&confirmed_linear(Tick(96))),
+                Some(&confirmed_angular(SETTLED_AT)),
+                PRODUCED_AT,
+                SETTLED_AT,
+            ),
+            Err(Unready::Shove),
+            "with the pose sound, a pre-hit velocity is still a refusal, and it is reported as the \
+             OTHER reason — the two waits have different causes and the log has to say which",
         );
     }
 
