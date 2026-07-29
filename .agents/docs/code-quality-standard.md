@@ -383,6 +383,27 @@ anything**.
 If you find a bug while simplifying: **stop, report it, do not fix it in the same commit.** Fixing
 it silently inside a cleanup is how behaviour changes ship unreviewed.
 
+Adopting a library to replace hand-rolled code is the common case of this rule, and it is worth
+naming explicitly. Swapping in an upstream widget, scheduler, or state machine changes interaction
+semantics, focus, timing or feel even when the types line up. **That is a dedicated task with an
+owner decision, not a simplification.** Surface it as a scoped proposal — what exists hand-rolled,
+what upstream replaces it, what measurably changes for the player, migration order, risk — and let
+the owner schedule it. Do not perform it inside this stream.
+
+### C2b. New patterns are welcome — silent ones are not
+
+Introducing a new pattern is a legitimate and often valuable outcome. It is **not** forbidden.
+
+What makes it different from a local simplification is blast radius: a pattern is copied. Humans and
+agents both reproduce whatever they find, so a pattern introduced in one module becomes a codebase
+convention by imitation, without anyone deciding it should be. That is the cost to weigh — not the
+pattern itself.
+
+So: **consider patterns freely, apply them visibly.** A pattern-level change gets its own commit,
+its own justification, and an explicit note in the report saying it is a pattern and naming where
+else it would apply if adopted. If it is genuinely better, say so and argue for it. What is
+prohibited is a pattern arriving as a side effect of a cleanup commit, where nobody chose it.
+
 ### C3. Leave the suite green at every commit
 
 `cargo test --locked` and `cargo clippy --locked --all-targets -- -D warnings` pass at *each*
