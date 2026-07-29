@@ -923,19 +923,7 @@ mod tests {
             scene.nodes().map(|n| (n, Mat4::IDENTITY)).collect();
         let mut checked = 0;
         while let Some((node, parent)) = stack.pop() {
-            let local = match node.transform() {
-                gltf::scene::Transform::Matrix { matrix } => Mat4::from_cols_array_2d(&matrix),
-                gltf::scene::Transform::Decomposed {
-                    translation,
-                    rotation,
-                    scale,
-                } => Mat4::from_scale_rotation_translation(
-                    Vec3::from(scale),
-                    Quat::from_array(rotation),
-                    Vec3::from(translation),
-                ),
-            };
-            let world = parent * local;
+            let world = parent * crate::track::marker_model::node_matrix(&node);
             if matches!(node.name(), Some(LINK_NODE | LINK_BOX_NODE)) {
                 let scale = Vec3::new(
                     world.x_axis.truncate().length(),

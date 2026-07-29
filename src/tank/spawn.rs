@@ -661,8 +661,9 @@ fn insert_ballistic_volumes(
 }
 
 /// Collision proxies: a convex hull per captured primitive on the Vehicle layer.
-/// `Collider::convex_hull(points)` is exactly avian's `ConvexHullFromMesh` (it ignores
-/// indices — design §7.1). Collision-only: contributes no mass (the root authors its own).
+/// [`MeshGeometry::convex_hull_collider`](crate::bake::MeshGeometry::convex_hull_collider) is
+/// exactly avian's `ConvexHullFromMesh` (it ignores indices — design §7.1). Collision-only:
+/// contributes no mass (the root authors its own).
 fn insert_collision_proxies(
     commands: &mut Commands,
     geometry: &TankGeometry,
@@ -676,13 +677,7 @@ fn insert_collision_proxies(
             node.name
         );
         for primitive in &node.primitives {
-            let points: Vec<Vec3> = primitive
-                .positions
-                .iter()
-                .copied()
-                .map(Vec3::from)
-                .collect();
-            let collider = Collider::convex_hull(points).unwrap_or_else(|| {
+            let collider = primitive.convex_hull_collider().unwrap_or_else(|| {
                 panic!(
                     "collision proxy `{}` has a degenerate hull source",
                     node.name

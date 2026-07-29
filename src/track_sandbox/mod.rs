@@ -1295,10 +1295,10 @@ fn build_rig(
             // Solid-body collision (walls, hard bottoming): the ASSET'S OWN authored proxies — the
             // `*_Collider` nodes the artist modelled, captured by `bake::captures_mesh` and turned
             // into convex hulls exactly the way `tank::spawn::assemble_tank_body` turns them (same
-            // `Collider::convex_hull` over the same node-local POSITION buffers, which is precisely
-            // what avian's `ConvexHullFromMesh` does). Identical construction is the point, not
-            // tidiness: if the lab rig's collision shape differed from the shipped tank's, a feel
-            // verdict taken here would not be a verdict about the game.
+            // `MeshGeometry::convex_hull_collider` over the same node-local POSITION buffers, which
+            // is precisely what avian's `ConvexHullFromMesh` does). Identical construction is the
+            // point, not tidiness: if the lab rig's collision shape differed from the shipped tank's,
+            // a feel verdict taken here would not be a verdict about the game.
             //
             // The belt rays only probe DOWNWARD, so they cannot resist a vertical face — these
             // hulls are what stops the tank at a wall and what rests it when a trench bridge fails.
@@ -1306,13 +1306,7 @@ fn build_rig(
             for &index in &blueprint.geometry.collision_proxies {
                 let node = &blueprint.geometry.nodes[index];
                 for primitive in &node.primitives {
-                    let points: Vec<Vec3> = primitive
-                        .positions
-                        .iter()
-                        .copied()
-                        .map(Vec3::from)
-                        .collect();
-                    let collider = Collider::convex_hull(points).unwrap_or_else(|| {
+                    let collider = primitive.convex_hull_collider().unwrap_or_else(|| {
                         panic!(
                             "collision proxy `{}` has a degenerate hull source",
                             node.name
@@ -2020,43 +2014,7 @@ fn fly_camera(
     time: Res<Time<Real>>,
 ) {
     let mut transform = camera.into_inner();
-
-    const SENS: f32 = 0.003;
-    const PITCH_LIMIT: f32 = std::f32::consts::FRAC_PI_2 - 0.001;
-    let (mut yaw, mut pitch, _) = transform.rotation.to_euler(EulerRot::YXZ);
-    yaw -= motion.delta.x * SENS;
-    pitch = (pitch - motion.delta.y * SENS).clamp(-PITCH_LIMIT, PITCH_LIMIT);
-    transform.rotation = Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0);
-
-    const SPEED: f32 = 12.0;
-    let forward = Vec3::from(transform.forward())
-        .with_y(0.0)
-        .normalize_or_zero();
-    let right = Vec3::from(transform.right())
-        .with_y(0.0)
-        .normalize_or_zero();
-    let mut dir = Vec3::ZERO;
-    if keys.pressed(KeyCode::KeyW) {
-        dir += forward;
-    }
-    if keys.pressed(KeyCode::KeyS) {
-        dir -= forward;
-    }
-    if keys.pressed(KeyCode::KeyD) {
-        dir += right;
-    }
-    if keys.pressed(KeyCode::KeyA) {
-        dir -= right;
-    }
-    if keys.pressed(KeyCode::ShiftLeft) {
-        dir += Vec3::Y;
-    }
-    if keys.pressed(KeyCode::ControlLeft) {
-        dir -= Vec3::Y;
-    }
-    if dir != Vec3::ZERO {
-        transform.translation += dir.normalize() * SPEED * time.delta_secs();
-    }
+    crate::camera::free_fly_transform(&mut transform, &keys, motion.delta, time.delta_secs());
 }
 
 /// Run condition: the cursor is captured (mouse-look active).

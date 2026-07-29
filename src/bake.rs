@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
+use avian3d::prelude::Collider;
 use bevy::mesh::VertexAttributeValues;
 use bevy::prelude::*;
 use bevy::world_serialization::WorldInstanceReady;
@@ -43,6 +44,14 @@ pub(crate) struct NodeGeometry {
 pub(crate) struct MeshGeometry {
     pub positions: Vec<[f32; 3]>,
     pub indices: Vec<u32>,
+}
+
+impl MeshGeometry {
+    /// Build the convex-hull collider consumed by both the game and the track sandbox.
+    pub(crate) fn convex_hull_collider(&self) -> Option<Collider> {
+        let points = self.positions.iter().copied().map(Vec3::from).collect();
+        Collider::convex_hull(points)
+    }
 }
 
 /// The whole model, extracted as data — the sim skeleton's construction source,
