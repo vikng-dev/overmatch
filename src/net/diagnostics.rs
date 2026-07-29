@@ -278,8 +278,10 @@ pub(crate) fn watch_rollback_metrics(
         //
         // `undelivered` is not one of those two: it is a TRIPWIRE and must read zero forever. It
         // counts shoves this module ordered a rollback for and did not receive, which
-        // `offer_hull_shock_adoptions` establishes cannot happen before it stages anything. A
-        // non-zero here means that readiness gate and lightyear's `prepare_rollback` disagree, and
+        // `net::adoption::request_staged_adoption` establishes cannot happen — it re-reads the same
+        // confirmed histories at the same target tick in the same frame, immediately before it
+        // claims the slot. A non-zero here means that revalidation and lightyear's
+        // `prepare_rollback` disagree, which on a dependency bump is the first place it would show;
         // the ERROR log that accompanies each one says which fact was lost.
         let tally = presentation.tally();
         info!(

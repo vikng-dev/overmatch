@@ -167,26 +167,47 @@
 //! predates the hit restores a PRE-hit velocity and carries nothing. A best-effort rule with a bypass
 //! counter is honest; a guarantee this shape cannot keep is not.
 //!
-//! # DELIVERY IS ESTABLISHED BEFORE ANYTHING IS REQUESTED, NOT DISCOVERED AFTERWARDS
+//! # DELIVERY IS ESTABLISHED AT THE REQUEST, NOT AT THE OFFER AND NOT AFTERWARDS
 //!
-//! The same predicate is the READINESS gate, and that is the whole answer to "what if our own
-//! rollback restores a pre-hit velocity?". `prepare_rollback` restores from
-//! `get_state_at_or_before(rollback_tick)`, so proving that a sample EXISTS there
-//! ([`authority_reaches`]) proves only that lightyear will restore something — not that the something
-//! carries the event. [`offer_hull_shock_adoptions`] therefore asks [`restore_carries_the_shove`] at
-//! the tick it would target, over the same buffers, before the fact is ever staged: a fact whose
-//! restore provably cannot carry the shove is never offered, never staged, and never costs a
-//! rollback. Nothing writes confirmed history between that gate and `RollbackSystems::Prepare` in the
-//! same frame, so the gate's verdict IS `prepare_rollback`'s outcome.
+//! [`restore_carries_the_shove`] is the whole answer to "what if our own rollback restores a pre-hit
+//! velocity?". `prepare_rollback` restores from `get_state_at_or_before(rollback_tick)`, so proving
+//! that a sample EXISTS there ([`authority_reaches`]) proves only that lightyear will restore
+//! something — not that the something carries the event. The predicate asks the stronger question at
+//! the tick the restore would target, over the same buffers lightyear reads.
+//!
+//! WHERE it is asked is the part that took a fifth review. It is asked TWICE, and only the second
+//! one is load-bearing:
+//!
+//! - [`offer_hull_shock_adoptions`] asks it before staging, as an ECONOMY: there is one staging slot
+//!   and a fact that provably cannot be delivered right now should not occupy it.
+//! - [`request_staged_adoption`] asks it AGAIN, immediately before it claims the forced-rollback
+//!   slot, and that answer is the one the transaction rests on.
+//!
+//! The second is not belt-and-braces. A fact is staged on one frame and requested on a LATER one —
+//! an [`AdoptionCause::ExternalEvent`] waits for its spark, for up to [`ORDERING_BUDGET_TICKS`] —
+//! and confirmed history is not append-only underneath it: `ConfirmedHistory::insert_raw` does a
+//! sorted MIDDLE insertion with same-tick replacement, a `SameAsPrecedent` entry re-resolves when a
+//! late PRECEDING sample lands (lightyear ships a test for exactly that), and replicon's mutation
+//! transport is unordered with history-enabled entities accepting older mutations. Nor does a later
+//! offer pass rescue it: re-offering the same identity leaves the staged fact untouched, and an
+//! offer whose own gate now fails just skips the hull. An earlier version of this module proved
+//! readiness at staging and acted on it frames later without re-asking, and no test noticed because
+//! every fixture built a static history.
+//!
+//! A FAILED REVALIDATION IS A WAIT, NOT A DROP — the answer is expected to change, so nothing is
+//! claimed, nothing is tallied, and the fact stays staged. What bounds the wait is the replay-window
+//! check that runs first in the same function: once the fact's age passes
+//! `RollbackPolicy::max_rollback_ticks` it is closed with a WARN naming it. The local tick advances
+//! at least once per tick, so the stall is bounded and the give-up is loud.
 //!
 //! That leaves [`retirement`] free to insist on the stronger fact rather than assume it. Our own
 //! installed claim retires the fact as [`Retirement::Adopted`] only when the restore is established
 //! to have carried it; installed-but-not-carried is [`Retirement::Undelivered`] — logged at ERROR,
 //! counted in [`OrderingTally::undelivered`], and closed. Closed, not retried: a retry re-reads the
 //! confirmed histories this restore just read at the same target tick, so it cannot improve, and
-//! looping on it is the storm this module exists to avoid. The branch should never execute; it is
-//! there because "our own claim was installed" was previously treated as proof of delivery, and a
-//! success path that quietly loses the shove is precisely the defect that survives review.
+//! looping on it is the storm this module exists to avoid. The branch is unreachable against the
+//! pinned lightyear — see [`retirement`] for the three facts that make it so and for why it is kept
+//! anyway.
 //!
 //! One bypass route is structural and worth naming on its own. `HullShock` is still registered
 //! `.with_rollback_condition(..)` in `net::protocol`, and that comparator is a pure function of two
@@ -204,6 +225,7 @@ use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, Rotation};
 use bevy::prelude::*;
 use bevy_replicon::prelude::RepliconTick;
 use lightyear::core::confirmed_history::ConfirmedHistory;
+use lightyear::core::history_buffer::HistoryState;
 use lightyear::prelude::client::Remote;
 use lightyear::prelude::*;
 
@@ -337,10 +359,11 @@ pub(crate) struct OrderingTally {
     pub(crate) bypassed: u32,
     /// Shoves this module ordered a rollback for and LOST: its own claim was installed, and
     /// `prepare_rollback` restored a hull velocity older than the event's settling tick, so the fact
-    /// was spent having delivered nothing. Should be permanently zero — `offer_hull_shock_adoptions`
-    /// establishes the same predicate before requesting — and is counted rather than asserted so a
-    /// disagreement between that gate and lightyear's restore shows up as a number instead of as a
-    /// missing shove.
+    /// was spent having delivered nothing. Should be permanently zero — [`request_staged_adoption`]
+    /// re-establishes the same predicate over the same buffers in the same frame, immediately before
+    /// it claims — and is counted rather than asserted so a disagreement between that revalidation
+    /// and lightyear's restore shows up as a number instead of as a missing shove. See
+    /// [`retirement`] for what the unreachability proof rests on and how a dependency bump breaks it.
     pub(crate) undelivered: u32,
     /// Longest LOCAL wait the rule has imposed on a shove, in ticks.
     pub(crate) max_wait_ticks: i32,
@@ -606,6 +629,16 @@ impl AuthorityAdoption {
         }
     }
 
+    /// Whether a fact is currently mid-transaction.
+    ///
+    /// Exists so a fixture can tell a WAIT (the fact is still staged and will be reconsidered) from
+    /// a DROP (it was closed), which is the whole difference [`request_staged_adoption`]'s
+    /// revalidation turns on and is otherwise invisible from outside this module.
+    #[cfg(test)]
+    pub(super) fn is_staged(&self) -> bool {
+        self.staged.is_some()
+    }
+
     fn is_newer(&self, fact: &AuthoritativeFact) -> bool {
         !self.watermarks.iter().any(|watermark| {
             watermark.source == fact.id.source
@@ -665,18 +698,26 @@ fn reset_adoption_state(
 /// Whether a state restore at `tick` would replace this component with AUTHORITY, or leave the
 /// client's own prediction standing under a tick-`tick` label.
 ///
-/// Mirrors the branch `prepare_rollback` actually takes, and FAILS CLOSED on both of its negative
-/// cases. A component that HAS a [`ConfirmedHistory`] is restored from
+/// Mirrors the branch `prepare_rollback` actually takes, and FAILS CLOSED on all three of its
+/// negative cases. A component that HAS a [`ConfirmedHistory`] is restored from
 /// `get_state_at_or_before(rollback_tick)`; with no sample there, lightyear leaves the live value
 /// alone. A component with NO confirmed history takes the other branch entirely — `prepare_rollback`
 /// restores it from [`PredictionHistory`] even on a state rollback, which for a hull the client never
 /// knew was hit is its own un-hit prediction. Treating a missing history as "fine" was therefore
 /// backwards: it is the case in which authority provably does NOT reach.
+///
+/// The third case is an authoritative REMOVAL. `ConfirmedHistory` stores removals as ordinary
+/// entries, `get_state_at_or_before` resolves them like any other state, and `prepare_rollback`
+/// answers one by taking the component OFF the hull. A restore that deletes half the rigid body is
+/// not a restore this module may build on, so `Removed` is a NO here rather than a `Some`.
 fn authority_reaches<C: Component + Clone>(
     confirmed: Option<&ConfirmedHistory<C>>,
     tick: Tick,
 ) -> bool {
-    confirmed.is_some_and(|history| history.get_state_at_or_before(tick).is_some())
+    matches!(
+        confirmed.and_then(|history| history.get_state_at_or_before(tick)),
+        Some(HistoryState::Updated(_)),
+    )
 }
 
 /// Whether a state restore targeting `restored_at` puts the authority's POST-EVENT hull velocities
@@ -700,6 +741,29 @@ fn authority_reaches<C: Component + Clone>(
 ///
 /// Both velocities are required, because half a restored rigid body is not a state either peer ever
 /// had. Fails closed on a missing history for the same reason [`authority_reaches`] does.
+///
+/// # THE ANSWER CAN CHANGE UNDER IT, so ask it where the answer is USED
+///
+/// A confirmed history is NOT an append-only log and this predicate must not be evaluated as though
+/// it were: `ConfirmedHistory::insert_raw` does a sorted MIDDLE insertion with same-tick
+/// replacement, replicon's mutation transport is unordered, and a `SameAsPrecedent` entry resolves
+/// to whatever explicit sample most recently precedes it — so a late message can change what a
+/// lookup at a FIXED tick returns. That is why this function is called at the request transaction
+/// ([`request_staged_adoption`]) and not only at the offer; see [`offer_hull_shock_adoptions`].
+///
+/// TWO LOOKUPS, because one of them alone does not mirror `prepare_rollback`:
+///
+/// - `get_state_at_or_before(restored_at)` is literally the call lightyear makes, and it is what
+///   distinguishes a value from an authoritative REMOVAL. A removal middle-inserted between the
+///   event and the restore target shadows the older sample it follows, and `prepare_rollback`
+///   answers it by deleting the velocity rather than by installing one.
+/// - [`newest_present_at_or_before`] then supplies the TICK that value is known at, which
+///   `get_state_at_or_before` does not return. A `SameAsPrecedent` entry counts at its OWN tick and
+///   that is correct, not a leniency: the marker asserts the authority still held that value there,
+///   so a restore resolving it installs the authority's genuine state at that tick.
+///
+/// When the first lookup resolves `Updated`, the newest present entry at or before `restored_at` IS
+/// the entry it resolved, so the pair is one question and not two.
 fn restore_carries_the_shove(
     linear: Option<&ConfirmedHistory<LinearVelocity>>,
     angular: Option<&ConfirmedHistory<AngularVelocity>>,
@@ -711,8 +775,16 @@ fn restore_carries_the_shove(
         restored_at: Tick,
         settled_at: Tick,
     ) -> bool {
-        confirmed
-            .and_then(|history| newest_present_at_or_before(history, restored_at))
+        let Some(history) = confirmed else {
+            return false;
+        };
+        if !matches!(
+            history.get_state_at_or_before(restored_at),
+            Some(HistoryState::Updated(_)),
+        ) {
+            return false;
+        }
+        newest_present_at_or_before(history, restored_at)
             .is_some_and(|(sample, _)| sample - settled_at >= 0)
     }
     resolves_post_event(linear, restored_at, settled_at)
@@ -784,13 +856,18 @@ fn offer_hull_shock_adoptions(
         if !authority_reaches(position, produced_at) || !authority_reaches(rotation, produced_at) {
             continue;
         }
-        // THE EPISODE'S OWN SETTLING TICK, and the gate that has to be established BEFORE anything is
-        // requested. `authority_reaches` proves only that lightyear will restore SOMETHING from
-        // authority; it does not prove that the something carries the shove. A confirmed velocity
-        // history whose newest sample at or before `produced_at` predates the episode's close
-        // resolves to a PRE-hit value, and a rollback we ordered onto it would spend the fact having
-        // delivered nothing. Ask the same question `prepare_rollback` will answer, at the tick we
-        // would target, and do not offer a fact whose restore provably cannot carry it.
+        // THE EPISODE'S OWN SETTLING TICK, and an ECONOMY gate — not the authoritative one.
+        // `authority_reaches` proves only that lightyear will restore SOMETHING from authority; it
+        // does not prove that the something carries the shove. A confirmed velocity history whose
+        // newest sample at or before `produced_at` predates the episode's close resolves to a PRE-hit
+        // value, and a rollback ordered onto it would spend the fact having delivered nothing. Ask
+        // the same question `prepare_rollback` will answer, at the tick we would target, and do not
+        // occupy the single staging slot with a fact whose restore currently cannot carry it.
+        //
+        // IT DOES NOT SPEAK FOR THE FRAME THE FACT IS ACTUALLY REQUESTED ON, which can be many
+        // frames later and over histories that have changed since. `request_staged_adoption` re-runs
+        // this same predicate immediately before it claims the slot, and THAT is the evaluation the
+        // transaction rests on; this one only keeps the slot free.
         //
         // This is a WAIT, not a drop: the offer is re-derived from replicated state every frame, and
         // it costs no request, no slot, and no rollback while it is unsatisfied. It is also not a
@@ -830,10 +907,30 @@ fn offer_hull_shock_adoptions(
 }
 
 /// Claim the forced-rollback slot for the staged fact, once every generic readiness condition holds.
+///
+/// THE DELIVERY PREDICATE IS RE-ESTABLISHED HERE, and this — not the offer's gate — is the
+/// authoritative evaluation. A fact is staged on one frame and can be requested many frames later,
+/// because an [`AdoptionCause::ExternalEvent`] waits out [`ORDERING_BUDGET_TICKS`] for its spark;
+/// re-offering the same identity deliberately leaves the staged fact untouched
+/// ([`AuthorityAdoption::offer`]), and an offer pass whose own gate now fails simply skips the hull
+/// and leaves the staged fact alone. Meanwhile the confirmed histories the answer is read from keep
+/// changing under it — see [`restore_carries_the_shove`]. Proving readiness once at staging and
+/// acting on it later is therefore acting on a stale answer, which is how a fact gets permanently
+/// spent on a rollback that carries nothing.
+///
+/// A failed revalidation is a WAIT, not a drop: the whole point is that the answer can change, so
+/// nothing is claimed, nothing is tallied, and the fact stays staged to be reconsidered next frame.
+/// The wait is bounded by the rollback-window check ABOVE it, which runs first every frame and
+/// closes the fact loudly once `age` passes `RollbackPolicy::max_rollback_ticks`. `age` grows by at
+/// least one per tick, so the stall cannot be unbounded and the give-up cannot be silent.
 fn request_staged_adoption(
     timeline: Res<LocalTimeline>,
     checkpoints: Option<Res<ReplicationCheckpointMap>>,
     managers: Query<&PredictionManager>,
+    hulls: Query<(
+        Option<&ConfirmedHistory<LinearVelocity>>,
+        Option<&ConfirmedHistory<AngularVelocity>>,
+    )>,
     mut metadata: Option<ResMut<StateRollbackMetadata>>,
     mut slot: ResMut<ForcedRollbackSlot>,
     mut adoption: ResMut<AuthorityAdoption>,
@@ -886,7 +983,26 @@ fn request_staged_adoption(
         adoption.close(fact);
         return;
     }
+    // THE REVALIDATION. Read the histories AS THEY ARE NOW, at the tick this frame would target.
+    // The offer's identical gate ran on the frame the fact was staged and cannot speak for this one.
+    if !hulls.get(fact.id.entity).is_ok_and(|(linear, angular)| {
+        restore_carries_the_shove(linear, angular, target, fact.settled_at)
+    }) {
+        debug!(
+            "client: authoritative fact {:?} #{} on {} is not deliverable at tick {} right now — \
+             the confirmed hull velocities a restore there would resolve do not reach the event's \
+             settling tick {}. Waiting; nothing has been claimed and the fact stays staged.",
+            fact.id.source, fact.id.sequence, fact.id.entity, target.0, fact.settled_at.0,
+        );
+        return;
+    }
     // LOCAL patience: ticks this client has held the fact, counted from the frame it was staged.
+    //
+    // Deliberately AFTER the revalidation: `clear_to_order` LATCHES a verdict and tallies it once
+    // per fact, and spending that verdict on a frame the fact could not have been requested on
+    // would report a wait shorter than the one the player actually got. It touches nothing but this
+    // module's own two resources, so it cannot move a confirmed history between the revalidation
+    // and the claim below.
     let waited = adoption.staged_at.map_or(0, |staged| now - staged);
     if !clear_to_order(&mut adoption, &mut presentation, fact, waited) {
         return;
@@ -1002,10 +1118,11 @@ fn confirm_forced_rollback(
                  module's own forced rollback was installed at tick {} and `prepare_rollback` \
                  restored a hull velocity older than the event's settling tick {}. The shove is \
                  LOST: the fact is closed rather than re-requested, because the confirmed histories \
-                 a retry would read are the same ones this restore just read. The readiness gate in \
-                 `offer_hull_shock_adoptions` establishes exactly this before requesting, so \
-                 reaching here means that gate and `prepare_rollback` disagree ({} undelivered so \
-                 far)",
+                 a retry would read are the same ones this restore just read. \
+                 `request_staged_adoption` revalidated exactly this in this frame immediately \
+                 before claiming, so reaching here means that revalidation and `prepare_rollback` \
+                 disagree — suspect a lightyear change to `check_rollback`'s forced-request \
+                 shortcut or to `prepare_rollback`'s lookup ({} undelivered so far)",
                 fact.id.source,
                 fact.id.sequence,
                 fact.id.entity,
@@ -1128,11 +1245,33 @@ impl RestoresFrom {
 /// So `Adopted` now means installed AND carried, and installed-but-not-carried is
 /// [`Retirement::Undelivered`]: loud, counted, and still closed — closing is what bounds it, since
 /// the histories a retry would read are the ones this restore just read, and nothing about the same
-/// target tick can improve. The case is unreachable on the shipping path by construction, because
-/// `offer_hull_shock_adoptions` establishes the same predicate over the same buffers at the same
-/// target tick BEFORE the fact is ever staged, and nothing writes confirmed history between that
-/// system and `RollbackSystems::Prepare` in the same frame. It exists because "unreachable" is what
-/// the previous three rounds each believed about the branch they were about to lose a shove in.
+/// target tick can improve.
+///
+/// # IS `Undelivered` REACHABLE? The proof, and what it rests on
+///
+/// Against the PINNED lightyear 0.28 it is unreachable, and the argument is three steps rather than
+/// an assurance. It replaces a false one — "the offer's gate settled this" — which ignored that the
+/// offer runs on a different FRAME from the request.
+///
+/// 1. THE BRANCH IS SAME-FRAME. It needs `adoption.requested` AND
+///    `installed == Some((produced_at, cause))`. [`ForcedRollbackSlot::installed`] is derived from
+///    `claim`, which [`confirm_forced_rollback`] takes every frame, so it is non-`None` only in the
+///    `PreUpdate` run in which [`request_staged_adoption`] claimed. That system revalidates
+///    [`restore_carries_the_shove`] immediately before claiming.
+/// 2. NOTHING WRITES CONFIRMED HISTORY IN BETWEEN. Between the revalidation and
+///    `RollbackSystems::Prepare` lie `net::watchdog`'s rollback check (read-only),
+///    `RollbackSystems::Check` and `RollbackSystems::RemoveDisable`. `check_rollback` consumes the
+///    forced request FIRST and then skips its whole policy branch — which is the only caller of
+///    `ConfirmedHistory::add_unchanged` — and our claim guarantees the request is pending. Replicon
+///    receive already ran, before this module.
+/// 3. THE TWO LOOKUPS AGREE. `prepare_rollback` restores
+///    `ConfirmedHistory::get_state_at_or_before(rollback_tick)` and the predicate asks that exact
+///    call plus the tick it resolved at, over the same component, at the same tick.
+///
+/// Steps 2 and 3 are properties of a DEPENDENCY, not of this crate, and a lightyear bump can retire
+/// either without touching a line here. That is why the branch survives its own proof: the counter
+/// is the tripwire that says the proof stopped holding, and "unreachable" is what the previous three
+/// rounds each believed about the branch they were about to lose a shove in.
 fn retirement(
     adoption: &AuthorityAdoption,
     installed: Option<(Tick, AdoptionCause)>,
@@ -1955,9 +2094,61 @@ mod tests {
         );
     }
 
-    /// THE READINESS DIRECTION OF THE SAME PREDICATE, which is what makes the loss in
-    /// [`an_installed_claim_that_restored_nothing_is_not_an_adoption`] unreachable rather than merely
-    /// detected.
+    /// THE MUTATION THE TICK COMPARISON ALONE CANNOT SEE, and the reason the predicate makes
+    /// `prepare_rollback`'s own lookup its FIRST question.
+    ///
+    /// `ConfirmedHistory` stores an authoritative REMOVAL as an ordinary entry and middle-inserts it
+    /// in tick order, so a removal that arrives late can land BETWEEN the event and the restore
+    /// target. `get_state_at_or_before` then resolves `Removed` and `prepare_rollback` answers by
+    /// taking `LinearVelocity` OFF the hull — the shove is not merely stale, the component is gone.
+    /// The present-value iterator skips removals and would report the tick-100 sample the removal
+    /// shadows, i.e. would call this a delivery.
+    #[test]
+    fn a_removal_between_the_event_and_the_target_carries_nothing() {
+        const SETTLED_AT: Tick = Tick(100);
+        const PRODUCED_AT: Tick = Tick(104);
+
+        let mut linear = confirmed_linear(SETTLED_AT);
+        assert!(
+            restore_carries_the_shove(
+                Some(&linear),
+                Some(&confirmed_angular(SETTLED_AT)),
+                PRODUCED_AT,
+                SETTLED_AT,
+            ),
+            "the same history one insertion earlier IS a delivery — so what follows is the \
+             insertion's doing and not a fixture that never passed",
+        );
+
+        // The REAL insertion path, with its sorted middle insertion and its unchanged-state
+        // compression, rather than a hand-built buffer: a newer sample equal to the effective one
+        // is stored as an unchanged marker, and the removal then lands between the two.
+        linear.insert_present(Tick(106), LinearVelocity(AUTHORITY_LINEAR));
+        linear.insert_removed(Tick(102));
+
+        assert!(
+            !restore_carries_the_shove(
+                Some(&linear),
+                Some(&confirmed_angular(SETTLED_AT)),
+                PRODUCED_AT,
+                SETTLED_AT,
+            ),
+            "a restore at 104 now resolves an authoritative REMOVAL, so it delivers no velocity at \
+             all. `newest_present_at_or_before` alone still answers tick 100 here, which is exactly \
+             the disagreement with `prepare_rollback` that the state lookup closes.",
+        );
+        assert!(
+            !authority_reaches(Some(&linear), PRODUCED_AT),
+            "and the completeness predicate has to fail the same way, for the same reason: a \
+             restore that deletes half the rigid body is not authority reaching the hull",
+        );
+    }
+
+    /// THE READINESS DIRECTION OF THE SAME PREDICATE, which is what keeps the loss in
+    /// [`an_installed_claim_that_restored_nothing_is_not_an_adoption`] off the shipping path. It is
+    /// the predicate that does that, at the frame the request is made — see [`retirement`]; asking
+    /// it only at the offer, as an earlier version did, decides a later frame's transaction on an
+    /// earlier frame's histories.
     ///
     /// [`authority_reaches`] answers "will lightyear restore something from authority here?" and
     /// nothing more. Over a velocity history whose newest sample at or before the producing tick

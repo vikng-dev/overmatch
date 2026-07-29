@@ -264,13 +264,53 @@ pre-event velocity closed the fact permanently having delivered nothing — sile
 path. `Adopted` now means installed AND carried. Installed-but-not-carried is a third outcome:
 logged at ERROR, counted in `OrderingTally::undelivered`, and still closed, because a retry re-reads
 the buffers that restore just read at the same target tick and cannot improve, and looping on it is
-the storm this module exists to avoid. That branch should never execute — the readiness gate
-establishes the same predicate over the same buffers before the fact is ever staged, and nothing
-writes confirmed history between it and `RollbackSystems::Prepare` in the same frame. It exists
-because a success path that quietly loses the shove is exactly the defect that survives review, and
-because "unreachable" is what each of the previous three rounds believed about the branch it was
-about to lose a shove in. The counter is the tripwire; if it ever moves, that gate and lightyear's
-restore disagree.
+the storm this module exists to avoid.
+
+**Where that predicate is ASKED took a fifth review, and the answer is: at the request, not at the
+offer.** The version that reached round 5 asked it once, in `offer_hull_shock_adoptions`, on the
+argument that whether `prepare_rollback` will carry the shove is already determined at offer time and
+cannot change while `produced_at` is fixed. That argument is false twice over. Confirmed history is
+not append-only — `ConfirmedHistory::insert_raw` does a sorted MIDDLE insertion with same-tick
+replacement, `SameAsPrecedent` re-resolves against a late preceding sample (lightyear ships a test
+for it), and replicon's mutation transport is unordered with history-enabled entities accepting older
+mutations. And the control flow never revalidated: an `ExternalEvent` fact stays staged for the
+visual budget, often into later frames; re-offering the same identity leaves the staged fact
+untouched; a later offer pass that fails readiness merely skips the hull; and `request_staged_adoption`
+then consumed that staged fact and claimed the slot on an answer computed frames earlier. No test
+noticed, because every fixture in the arc built a static history and never moved it.
+
+So the predicate is asked TWICE and only the second one is load-bearing. The offer's gate is an
+ECONOMY — there is one staging slot and an undeliverable fact should not occupy it.
+`request_staged_adoption` re-runs it over the histories as they are at that moment, immediately
+before claiming, and that is the evaluation the transaction rests on. **A failed revalidation is a
+WAIT, not a drop**: the whole point is that the answer can change, so nothing is claimed, nothing is
+tallied, and the fact stays staged. The wait is bounded by the replay-window check that runs first in
+the same function — once the fact's age passes `RollbackPolicy::max_rollback_ticks` it is closed with
+a WARN naming it, and the local tick advances at least once per tick, so the stall cannot be
+unbounded and the give-up cannot be silent.
+
+The same round found the predicate reading one lookup where `prepare_rollback` reads another.
+`ConfirmedHistory` stores an authoritative REMOVAL as an ordinary entry, so a late removal
+middle-inserted between the event and the restore target makes `get_state_at_or_before` resolve
+`Removed` — `prepare_rollback` answers that by taking the velocity OFF the hull. The present-value
+iterator skips removals and would have reported the older sample the removal shadows, i.e. would have
+called it a delivery. `restore_carries_the_shove` now asks lightyear's own lookup first and uses the
+present-value scan only for the TICK it resolved at; `authority_reaches` fails closed on `Removed`
+for the same reason. A `SameAsPrecedent` entry still counts at its own tick, and that is correct
+rather than lenient: the marker asserts the authority still held that value there.
+
+**With the revalidation in place, `Undelivered` is unreachable against pinned lightyear 0.28** — and
+the proof is three steps rather than an assurance. (1) The branch is same-frame: it needs both
+`adoption.requested` and this module's own installed claim, and `ForcedRollbackSlot`'s claim is
+consumed every frame, so both hold only in the `PreUpdate` run that revalidated. (2) Nothing writes
+confirmed history in between: `net::watchdog` is read-only, `check_rollback` consumes the forced
+request first and then skips its whole policy branch — the only caller of
+`ConfirmedHistory::add_unchanged` — and replicon receive already ran. (3) The two lookups agree, by
+construction. Steps 2 and 3 are properties of a DEPENDENCY, not of this crate, and a lightyear bump
+can retire either without touching a line here. That is exactly why the branch survives its own
+proof: a success path that quietly loses the shove is the defect that survives review, "unreachable"
+is what each of the previous rounds believed about the branch it was about to lose a shove in, and
+the counter is the tripwire that says the proof stopped holding.
 
 ### Correlating a spark with a fact is an identity test — and it took a wire field
 

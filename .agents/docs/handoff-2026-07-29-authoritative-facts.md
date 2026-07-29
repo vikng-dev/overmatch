@@ -59,7 +59,7 @@ defect as success.**
 | 2 | `6cf5553` | DO NOT SHIP | Episode correlation swapped one invalid rule for another; `retirement` blind to rollback kind |
 | 3 | `8c33217` | DO NOT SHIP | Disjointness held only while `last_bump_tick` was `Some` — a fresh hull's first episode claimed 15 ticks it never held, and a prior life's spark could release a respawned hull |
 | 4 | `2a2e282` | DO NOT SHIP | Correlation **confirmed settled**; `Adopted` still retired facts whose restore carried nothing |
-| 5 | `4f523b1` | DO NOT SHIP | The determinacy argument is **false** — confirmed history is not append-only, and the predicate is proven at staging but never revalidated at the request |
+| 5 | `4f523b1` | DO NOT SHIP | The determinacy argument is **false** — confirmed history is not append-only, and the predicate is proven at staging but never revalidated at the request. Fixed by slice 3.9 (below); round 5 passed C, E, F, G, H |
 
 **The operational lesson, and it is the important part of this document: a green test suite has
 never once caught one of these.** The tests were written by the same reasoning that produced the
@@ -86,8 +86,8 @@ cannot change while `produced_at` is fixed, because `get_state_at_or_before(prod
 resolves samples ≤ `produced_at` and confirmed history only grows forward. So retrying is not merely
 unbounded — it is futile.
 
-**Round 5 confirmed that argument is FALSE**, on two independent grounds, and slice 3.9 is in
-flight against it:
+**Round 5 confirmed that argument is FALSE**, on two independent grounds, and slice 3.9 landed
+against it:
 
 1. **Confirmed history is not append-only.** `ConfirmedHistory::insert_raw` does sorted *middle*
    insertion with same-tick replacement; `SameAsPrecedent` explicitly changes its effective value
@@ -101,13 +101,50 @@ flight against it:
    also literally false — lightyear's `Check` path calls `ConfirmedHistory::add_unchanged` for all
    four relevant types between the gate and `Prepare`.
 
-So `Undelivered` is **not** provably unreachable, and closing-and-deduping it can permanently spend
-a fact on a stale readiness decision. The fix is to revalidate the delivery predicate as part of the
-actual request transaction, and to treat a failed revalidation as a **wait, not a drop**.
+   *One correction to that last sentence, found while fixing it and worth keeping:* `add_unchanged`
+   is reached only from `check_rollback`'s policy branch, and `check_rollback` consumes a pending
+   forced-rollback request BEFORE that branch and then skips it entirely. So on the frame this module
+   claims, it cannot run. It runs on the frames the fact spends WAITING — which is the whole window
+   the finding is about, so the finding stands; the "between the gate and `Prepare`" framing does not.
 
-**The test that was missing for five rounds:** one that *changes confirmed history between staging
-and requesting*. Both real-restore fixtures build static histories, which is exactly why this
-survived. Round 5 passed E but flagged this as its coverage limitation.
+### What slice 3.9 did about it
+
+**The predicate is now asked at the request transaction**, in `request_staged_adoption`, over the
+histories as they are at that moment, immediately before the slot claim. The offer's identical gate
+stays, demoted in writing to an ECONOMY: one staging slot, don't fill it with an undeliverable fact.
+
+**A failed revalidation is a WAIT, not a drop.** Nothing is claimed, nothing is tallied, the fact
+stays staged. The bound is the replay-window check that already runs first in the same function:
+once the fact's age passes `RollbackPolicy::max_rollback_ticks` it is closed with a WARN naming it,
+and the local tick advances at least once per tick — so the stall is bounded and the give-up is loud.
+
+**A second, unbriefed defect fell out of the same reading.** `restore_carries_the_shove` was scanning
+present values only, while `prepare_rollback` reads `get_state_at_or_before`, which resolves
+authoritative REMOVALS. A late removal middle-inserted between the event and the restore target made
+lightyear delete `LinearVelocity` from the hull while our predicate, seeing only the older sample the
+removal shadowed, called it a delivery. The predicate now asks lightyear's own lookup FIRST and uses
+the present-value scan only for the tick it resolved at; `authority_reaches` fails closed the same
+way. A `SameAsPrecedent` entry still counts at its own tick, deliberately — the marker asserts the
+authority still held that value there, so a restore resolving it installs the authority's real state.
+
+**`Undelivered` is now unreachable against pinned lightyear 0.28**, on three steps, all in the
+`retirement` doc: (1) the branch needs both `adoption.requested` and this module's own installed
+claim, and the slot's claim is consumed every frame, so it is same-frame with the revalidation;
+(2) between them, `net::watchdog` is read-only, `check_rollback` consumes the forced request and
+skips the whole policy branch that is the only caller of `ConfirmedHistory::add_unchanged`, and
+replicon receive already ran; (3) the two lookups now agree by construction. Steps 2 and 3 are
+DEPENDENCY properties. A lightyear bump can retire either without touching a line here, which is
+exactly why the branch, its ERROR log and its counter all stay.
+
+**The test that was missing for five rounds now exists.**
+`net::lead_zero_rollback::a_late_replicated_change_is_revalidated_before_the_request` stages the fact
+on the arrival frame, then moves the confirmed history through lightyear's own insertion API — a
+newer sample (compressed to an unchanged marker) plus a removal stamped before it, middle-inserted —
+and asserts the module waits, tallies nothing, and leaves the fact staged. Its sibling
+`a_revalidation_that_never_passes_is_dropped_at_the_replay_window` carries the same run past the
+window and asserts the fact is closed. Both were verified RED against the pre-3.9 code, where the
+module claimed the slot on the staging-time answer and `prepare_rollback` deleted the hull's
+`LinearVelocity` outright.
 
 **Round 5 passed C, E, F, G and H** — the close tick is the right comparison tick, the real-restore
 fixtures genuinely run lightyear's `Prepare`, the fixture helpers can no longer manufacture
@@ -128,10 +165,11 @@ Nothing else. The branch is clean, no agent holds a lock, and the simplifier is 
 
 ## 5. What is next, in order
 
-1. **Read round 5's verdict.** If it ships, the arc's blocking work is done. If not, file the
-   findings as slice 3.9 exactly as rounds 3.5–3.8 were filed: one brief per finding, with the
-   review's own file:line citations, and an explicit instruction to say where the brief is wrong
-   against the code — that instruction has caught a real error of mine in three of four rounds.
+1. **Send slice 3.9 to review as round 6.** Round 5's one finding is fixed (§3). File it the way
+   rounds 3.5–3.9 were filed: the review's own file:line citations, and an explicit instruction to
+   say where the brief is wrong against the code — that instruction has caught a real error of mine
+   in four of five rounds, and 3.9 corrected one of round 5's own claims (see the note under ground
+   2 above).
 2. **Slice 4 — `render_error`** (task #32, held all session). Fix the one-frame render freeze per
    rollback, and honour the `AdoptionCause` tag so an adopted authority impulse stays sharp instead
    of being smoothed like a misprediction. `AdoptionCause` currently has **no consumer** —

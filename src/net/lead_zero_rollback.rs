@@ -63,6 +63,16 @@
 //! - [`a_rollback_this_module_did_not_order_delivers_the_shove_and_is_counted`] — somebody else's
 //!   rollback restores the authority's velocities while the fact waits for a spark. The hull moves,
 //!   so `bypassed` must move with it.
+//!
+//! # And one about the HISTORY MOVING between staging and requesting
+//!
+//! Both of the above build a confirmed history once and never touch it again, which is the shape
+//! every fixture in this arc had and the reason a stale-readiness defect survived five reviews. An
+//! `ExternalEvent` fact is staged on one frame and requested on a later one, and confirmed history
+//! is not append-only in between: lightyear middle-inserts in tick order and re-resolves unchanged
+//! markers against late preceding samples. [`a_late_replicated_change_is_revalidated_before_the_request`]
+//! is the fixture that moves it, through lightyear's own insertion API, and pins that the module
+//! WAITS rather than spending the fact on the answer it got at staging.
 
 use core::time::Duration;
 
@@ -86,7 +96,8 @@ use lightyear_sync::prelude::client::RemoteTimeline;
 use lightyear_sync::timeline::sync::{SyncTargetTimeline, SyncedTimeline};
 
 use super::adoption::{
-    AdoptionCause, ForcedRollbackSlot, ImpactPresentation, ORDERING_BUDGET_TICKS, OrderingTally,
+    AdoptionCause, AuthorityAdoption, ForcedRollbackSlot, ImpactPresentation,
+    ORDERING_BUDGET_TICKS, OrderingTally,
 };
 use crate::ballistics::{
     AuthorityImpact, HullShock, HullShockLedger, Impact, ImpactSurface, ShockCause,
@@ -206,6 +217,31 @@ impl Lead {
 /// delivered anything). Four ticks is arbitrary in size and load-bearing in sign.
 const REPLICATION_LAG_TICKS: u32 = 4;
 
+/// A late replicated change to the hull's confirmed LINEAR-velocity history, applied AFTER the
+/// arrival frame staged the fact and BEFORE any frame that could request it.
+///
+/// Both writes go through `ConfirmedHistory`'s own insertion API — the one
+/// `record_confirmed_and_maybe_check` calls when a mutation is deserialized — so the fixture
+/// exercises lightyear's real sorted middle insertion and unchanged-state compression rather than a
+/// hand-assembled buffer that merely looks like their result.
+#[derive(Clone, Copy)]
+struct LateVelocityChange {
+    /// A NEWER authoritative sample. Its value equals the effective one, so lightyear stores it as
+    /// an unchanged marker — which is the entry whose effective value the removal below then
+    /// changes, the behaviour lightyear ships its own test for.
+    newer_sample_at: Tick,
+    /// The tick an authoritative REMOVAL is stamped with. Strictly between the episode's close and
+    /// the restore target, so it MIDDLE-inserts and `get_state_at_or_before(target)` resolves it.
+    removed_at: Tick,
+}
+
+impl LateVelocityChange {
+    fn apply(self, history: &mut ConfirmedHistory<LinearVelocity>) {
+        history.insert_present(self.newer_sample_at, LinearVelocity(AUTHORITY_LINEAR));
+        history.insert_removed(self.removed_at);
+    }
+}
+
 /// A forced rollback ordered by a subsystem that is NOT `net::adoption`, and the tick it targets.
 ///
 /// Staged through `ForcedRollbackSlot::claim` tagged `Misprediction`, which is literally the call
@@ -279,6 +315,14 @@ struct Delivered {
     /// `net::adoption`'s ordering tallies after the run — which way the shove was released, and
     /// what the wait cost.
     ordering: OrderingTally,
+    /// Whether the fact is STILL mid-transaction at the end of the run. What tells a WAIT (it will
+    /// be reconsidered) from a DROP (it was closed and can never be requested again) — the two are
+    /// otherwise indistinguishable from a hull that did not move.
+    still_staged: bool,
+    /// Whether the hull ended the run with a velocity component AT ALL. A restore that resolves an
+    /// authoritative REMOVAL deletes it, which is a distinct failure from restoring a stale value
+    /// and would otherwise read as an `unwrap` panic with nothing to say.
+    live_velocity_removed: bool,
 }
 
 fn observe_replay(timeline: Res<LocalTimeline>, mut delivered: ResMut<Delivered>) {
@@ -328,6 +372,12 @@ struct Scenario {
     velocities_confirmed_at: Tick,
     /// A forced rollback claimed by a subsystem other than `net::adoption`, and its target tick.
     competitor: Option<Tick>,
+    /// Replication moving the confirmed history AFTER the fact is staged. `None` is the static
+    /// history every other fixture here builds.
+    late_change: Option<LateVelocityChange>,
+    /// Extra LOCAL ticks to spend past the run's own last frame, each with a `PreUpdate`. How a
+    /// fixture asks what bounds a wait.
+    extra_ticks: i32,
 }
 
 impl Scenario {
@@ -338,6 +388,8 @@ impl Scenario {
             arrival: PRODUCING_TICK,
             velocities_confirmed_at: PRODUCING_TICK,
             competitor: None,
+            late_change: None,
+            extra_ticks: 0,
         }
     }
 }
@@ -349,6 +401,8 @@ fn run_scenario(scenario: Scenario) -> Delivered {
         arrival,
         velocities_confirmed_at,
         competitor,
+        late_change,
+        extra_ticks,
     } = scenario;
     let mut app = crate::net::test_harness::base_app();
     app.add_plugins(ClientPlugins {
@@ -512,6 +566,17 @@ fn run_scenario(scenario: Scenario) -> Delivered {
     // the spark came first and the shove has correctly already landed by here.)
     let held_linear = app.world().get::<LinearVelocity>(root).unwrap().0;
 
+    // REPLICATION MOVES UNDER THE STAGED FACT. The arrival frame has staged it and the ordering rule
+    // is holding it; every frame from here reads a history that is no longer the one the offer's
+    // gate saw. This is the only fixture in the file that does not freeze the history after setup.
+    if let Some(change) = late_change {
+        let mut history = app
+            .world_mut()
+            .get_mut::<ConfirmedHistory<LinearVelocity>>(root)
+            .expect("the hull's confirmed linear-velocity history");
+        change.apply(&mut history);
+    }
+
     // The later frame, with the march's presentation in it — and the ticks that separate the two.
     if visual == Visual::DrawnAfterArrival {
         let present = app.world().resource::<LocalTimeline>().tick() + PRESENTATION_DELAY_TICKS;
@@ -530,9 +595,30 @@ fn run_scenario(scenario: Scenario) -> Delivered {
         app.world_mut().run_schedule(PreUpdate);
     }
 
+    // Ticks the fixture spends deliberately past everything above, one `PreUpdate` each, to ask what
+    // BOUNDS a wait rather than only that one happened.
+    for _ in 0..extra_ticks {
+        let next = app.world().resource::<LocalTimeline>().tick() + 1;
+        advance_to(&mut app, next);
+        app.world_mut().run_schedule(PreUpdate);
+    }
+
     let ordering = app.world().resource::<ImpactPresentation>().tally();
-    let live_linear = app.world().get::<LinearVelocity>(root).unwrap().0;
-    let live_angular = app.world().get::<AngularVelocity>(root).unwrap().0;
+    let still_staged = app.world().resource::<AuthorityAdoption>().is_staged();
+    // A restore can RESOLVE AN AUTHORITATIVE REMOVAL, and `prepare_rollback` answers one by taking
+    // the component off the hull — so "the velocity is gone" is a state a fixture must be able to
+    // report rather than panic on. `Vec3::NAN` compares unequal to everything, so every existing
+    // `assert_eq!` on these still fails, and it fails with its own message instead of an `unwrap`.
+    let live_velocity_removed = app.world().get::<LinearVelocity>(root).is_none()
+        || app.world().get::<AngularVelocity>(root).is_none();
+    let live_linear = app
+        .world()
+        .get::<LinearVelocity>(root)
+        .map_or(Vec3::NAN, |velocity| velocity.0);
+    let live_angular = app
+        .world()
+        .get::<AngularVelocity>(root)
+        .map_or(Vec3::NAN, |velocity| velocity.0);
     let live_shock = *app.world().get::<HullShock>(root).unwrap();
     let realized_count = app.world().get::<HullShockLedger>(root).unwrap().applied();
     let mut delivered = app
@@ -546,6 +632,8 @@ fn run_scenario(scenario: Scenario) -> Delivered {
     delivered.realized_count = realized_count;
     delivered.processed_on_arrival = processed_on_arrival;
     delivered.ordering = ordering;
+    delivered.still_staged = still_staged;
+    delivered.live_velocity_removed = live_velocity_removed;
     delivered
 }
 
@@ -818,6 +906,116 @@ fn a_drawn_spark_costs_the_shove_no_more_than_the_schedules_own_delay() {
         },
         "released against the spark after the {PRESENTATION_DELAY_TICKS} tick(s) this run advanced \
          the clock by — not by the budget, and not bypassed",
+    );
+}
+
+/// FINDING THE SLICE-3.9 REVIEW CAUGHT: READINESS WAS PROVEN AT STAGING AND ACTED ON LATER.
+///
+/// Every other fixture in this file — and every unit fixture in `net::adoption` — builds a confirmed
+/// history during setup and never touches it again, so "the offer's gate settled this" and "the
+/// request's own answer" were the same sentence and no test could tell them apart. That is why the
+/// defect survived five reviews.
+///
+/// THE SHAPE. The arrival frame stages the fact: the authority's velocities are confirmed at the
+/// episode's close, so a restore at the producing tick would carry the shove and the offer's gate
+/// says yes. The ordering rule then holds it for a spark that never comes ([`Visual::Missing`]) — up
+/// to `ORDERING_BUDGET_TICKS` LOCAL ticks, which is many frames. In between, replication moves the
+/// history: a newer sample lands (stored as an unchanged marker, because its value matches) and then
+/// an authoritative REMOVAL arrives stamped BEFORE it, middle-inserting between the episode's close
+/// and the restore target. Both writes go through lightyear's own `ConfirmedHistory` API, so this
+/// exercises its real sorted middle insertion and its dynamic `SameAsPrecedent` resolution.
+///
+/// WHAT `prepare_rollback` WOULD NOW DO: `get_state_at_or_before(100)` resolves the removal, so it
+/// would take `LinearVelocity` off the hull rather than install a velocity. The shove is not merely
+/// stale — it is not there.
+///
+/// WHAT MUST HAPPEN: the request revalidates and WAITS. The fact stays staged, nothing is claimed,
+/// the hull keeps the value it was predicting, and no counter moves — not `undelivered` (we asked
+/// for a rollback we could have known was useless), not `released_on_budget` (the ordering rule
+/// spent a fact it could not deliver), not `bypassed`.
+///
+/// Before the fix this ran to the budget, claimed the slot on the staging-time answer, and spent the
+/// fact permanently on a restore that carried nothing.
+#[test]
+fn a_late_replicated_change_is_revalidated_before_the_request() {
+    let delivered = run_scenario(Scenario {
+        arrival: Tick(PRODUCING_TICK.0 + REPLICATION_LAG_TICKS),
+        late_change: Some(LateVelocityChange {
+            newer_sample_at: Tick(PRODUCING_TICK.0 + REPLICATION_LAG_TICKS + 2),
+            removed_at: Tick(PRODUCING_TICK.0 + 2),
+        }),
+        ..Scenario::new(Lead::Zero, Visual::Missing)
+    });
+
+    assert!(
+        !delivered.live_velocity_removed,
+        "the restore this frame would order resolves an authoritative REMOVAL, so ordering it takes \
+         `LinearVelocity` OFF the hull entirely — the hull ends the run without a velocity at all. \
+         Evidence: live shock = {:?}, ticks replayed = {:?}",
+        delivered.live_shock, delivered.replayed_ticks,
+    );
+    assert_eq!(
+        delivered.live_linear, LIVE_LINEAR,
+        "and the client's own hull state must be left alone otherwise: nothing may be installed on \
+         the strength of a readiness answer that stopped being true while the fact waited",
+    );
+    assert_eq!(delivered.live_angular, LIVE_ANGULAR);
+    assert_eq!(
+        delivered.ordering,
+        OrderingTally::default(),
+        "and NOTHING may be tallied. The readiness answer this fact was staged on stopped being \
+         true while it waited, and acting on it is what spends a fact on a rollback that carries \
+         nothing.",
+    );
+    assert!(
+        delivered.still_staged,
+        "a failed revalidation is a WAIT, not a drop: the answer is expected to change, so the fact \
+         must stay staged and be reconsidered rather than be closed and deduped forever",
+    );
+}
+
+/// THE OTHER HALF OF THAT RULE: the wait is BOUNDED, and by something that says so out loud.
+///
+/// The same run, carried past `RollbackPolicy::max_rollback_ticks`. A fact whose restore never
+/// becomes deliverable would otherwise sit in the single staging slot forever, blocking every later
+/// fact on every hull — a wait with no bound is its own defect, and "it stays staged" is only the
+/// right answer while something else ends it. The replay-window check runs first in
+/// `request_staged_adoption` every frame and closes the fact with a WARN once no replay could reach
+/// its producing tick.
+#[test]
+fn a_revalidation_that_never_passes_is_dropped_at_the_replay_window() {
+    let window = i32::from(
+        PredictionManager::default()
+            .rollback_policy
+            .max_rollback_ticks,
+    );
+    let delivered = run_scenario(Scenario {
+        arrival: Tick(PRODUCING_TICK.0 + REPLICATION_LAG_TICKS),
+        late_change: Some(LateVelocityChange {
+            newer_sample_at: Tick(PRODUCING_TICK.0 + REPLICATION_LAG_TICKS + 2),
+            removed_at: Tick(PRODUCING_TICK.0 + 2),
+        }),
+        // The `Visual::Missing` run already spent the ordering budget; carry it the rest of the way
+        // past the window, plus one tick to land strictly outside it.
+        extra_ticks: window - ORDERING_BUDGET_TICKS + 1,
+        ..Scenario::new(Lead::Zero, Visual::Missing)
+    });
+
+    assert!(
+        !delivered.still_staged,
+        "past the {window}-tick replay window no rollback could reach the producing tick, so the \
+         fact must be closed rather than retried forever — that is what stops the wait from being \
+         an unbounded stall on the single staging slot",
+    );
+    assert_eq!(
+        delivered.live_linear, LIVE_LINEAR,
+        "and it must be dropped, not adopted: nothing may be installed on the hull on the way out",
+    );
+    assert_eq!(
+        delivered.ordering,
+        OrderingTally::default(),
+        "a fact that was never requested cannot be `undelivered`, and one the ordering rule never \
+         released cannot be counted against the budget",
     );
 }
 
