@@ -245,7 +245,7 @@ fn uv_to_world(uv: Vec2) -> Vec2 {
 /// tank within ±[`SPAWN_LIMIT_M`]. Before this, an edge click drew its marker on the terrain edge and
 /// then respawned the player the 5 % gap inward of it. Clamping here (and marking the clamped point) makes
 /// the server's clamp a no-op on everything the client sends: the dot IS the destination.
-fn clamp_to_spawn_limit(world: Vec2) -> Vec2 {
+pub(super) fn clamp_to_spawn_limit(world: Vec2) -> Vec2 {
     world.clamp(Vec2::splat(-SPAWN_LIMIT_M), Vec2::splat(SPAWN_LIMIT_M))
 }
 
