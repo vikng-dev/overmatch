@@ -1,6 +1,7 @@
 # Handoff — authoritative-facts arc + simplifier experiment
 
-**Written 2026-07-29.** State as of commit `4f523b1` on `feat/authoritative-facts`.
+**Written 2026-07-29, header current as of slice 3.10.** State as of commit `a0ac961` on
+`feat/authoritative-facts`.
 Read this if the session ended mid-arc. It is written for whoever picks it up, human or agent.
 
 ---
@@ -25,9 +26,13 @@ The primitive is `src/net/adoption.rs`. `HullShock` is merely its first consumer
 
 ## 2. Where things stand
 
-### `feat/authoritative-facts` — 12 commits, HEAD `4f523b1`, **685 tests passing**
+### `feat/authoritative-facts` — 16 commits, HEAD `a0ac961`, **690 lib tests passing**
 
 ```
+a0ac961 revalidate the WHOLE rigid body at the request, not just the shove — wire unchanged at REV 24
+baade0b revalidate delivery at the REQUEST, not at the offer — wire unchanged at REV 24
+6b902eb docs: handoff — round 5 verdict, the determinacy argument is false
+906ff79 docs: handoff note for the authoritative-facts arc
 4f523b1 delivery is ESTABLISHED before a rollback is asked for — wire unchanged at REV 24
 2a2e282 the episode carries its own span, and `bypassed` is established — wire REV 24
 8c33217 correlate the shove with its spark by IDENTITY — wire REV 23
@@ -49,9 +54,10 @@ surface `0xf321_3c48_61b3_bfea`, types `0x268a_d4fb_e297_639b`, manifest `0x13cd
 
 ## 3. The review history — read this before trusting anything
 
-Codex has reviewed this arc **five times** and returned DO NOT SHIP **four times**. Every round
-found that the previous fix read as complete and was not. **Twice a newly added test asserted the
-defect as success.**
+Codex has reviewed this arc **six times** and returned DO NOT SHIP **five times**. Every round found
+that the previous fix read as complete and was not — including the two rounds that were themselves
+fixing a partial fix. **Twice a newly added test asserted the defect as success, and twice a newly
+added test claimed coverage it did not have.**
 
 | Round | On | Verdict | What it found |
 |---|---|---|---|
@@ -60,12 +66,20 @@ defect as success.**
 | 3 | `8c33217` | DO NOT SHIP | Disjointness held only while `last_bump_tick` was `Some` — a fresh hull's first episode claimed 15 ticks it never held, and a prior life's spark could release a respawned hull |
 | 4 | `2a2e282` | DO NOT SHIP | Correlation **confirmed settled**; `Adopted` still retired facts whose restore carried nothing |
 | 5 | `4f523b1` | DO NOT SHIP | The determinacy argument is **false** — confirmed history is not append-only, and the predicate is proven at staging but never revalidated at the request. Fixed by slice 3.9 (below); round 5 passed C, E, F, G, H |
+| 6 | `baade0b` | DO NOT SHIP (1 High, 2 Low) | The revalidation covered **half the predicate**: only the velocities, while the offer proved all four rigid-body histories, so a late `Position` removal reached a claimed rollback that deleted the component and closed as `Adopted`. Plus two overstated coverage claims in the new tests and a false comment. Fixed by slice 3.10 (below); round 6 passed A, B, C, D, E, H |
 
 **The operational lesson, and it is the important part of this document: a green test suite has
 never once caught one of these.** The tests were written by the same reasoning that produced the
 bug. What caught them, every time, was Codex reading our code against lightyear's actual source in
 `~/.cargo/registry/.../lightyear_prediction-0.28.0/`. Do not report "N tests passing" as evidence on
 this work. Keep the adversarial review in the loop until a round comes back clean.
+
+**The second lesson, which rounds 5 and 6 taught together: a fix aimed at one instance of a defect
+tends to land on exactly that instance.** Round 5 found readiness proven at staging and acted on
+later; the fix revalidated at the request — for the two components the finding named. Round 6 found
+the other two still stale. When a review names a defect, ask what CLASS it belongs to and enumerate
+the members before writing the fix. Round 6's Low findings are the same shape at test level: the
+fixture exercised the mechanism the finding named and quietly did not exercise the one it claimed to.
 
 ### What is now settled (round 4 verified, do not re-litigate)
 
@@ -78,7 +92,7 @@ this work. Keep the adversarial review in the loop until a round comes back clea
   `Rotation`, `LinearVelocity`, `AngularVelocity`.
 - All wire accounting.
 
-### What round 5 is testing
+### What round 5 found, and what slice 3.9 did about it (`baade0b`)
 
 `4f523b1` strengthened readiness instead of detecting failure after the fact, on this argument:
 at offer time, whether `prepare_rollback` will carry the shove is **already fully determined** and
@@ -107,7 +121,18 @@ against it:
    claims, it cannot run. It runs on the frames the fact spends WAITING — which is the whole window
    the finding is about, so the finding stands; the "between the gate and `Prepare`" framing does not.
 
-### What slice 3.9 did about it
+   *A correction round 6 made to my own round-5 reasoning, and the more useful of the two:* I argued
+   that `insert_raw`'s same-tick REPLACEMENT could not change an already-stored value, because two
+   different authoritative values cannot map to one lightyear tick. **That is not true, and it is not
+   the proof.** Replicon checkpoints and lightyear ticks are not in bijection — several checkpoints
+   can land on one tick, and each would replace the entry the previous one wrote. Production is safe
+   for an entirely different reason: the hull values in question are authored by the fixed-step
+   simulation, which produces one final value per lightyear tick, so the replacement is idempotent in
+   fact rather than by construction. Keep the real reason. An invariant that holds because of who
+   WRITES the data is a different, weaker thing from one that holds because the type cannot express
+   the violation, and only the second survives a change of writer.
+
+#### The fix
 
 **The predicate is now asked at the request transaction**, in `request_staged_adoption`, over the
 histories as they are at that moment, immediately before the slot claim. The offer's identical gate
@@ -131,7 +156,7 @@ authority still held that value there, so a restore resolving it installs the au
 `retirement` doc: (1) the branch needs both `adoption.requested` and this module's own installed
 claim, and the slot's claim is consumed every frame, so it is same-frame with the revalidation;
 (2) between them, `net::watchdog` is read-only, `check_rollback` consumes the forced request and
-skips the whole policy branch that is the only caller of `ConfirmedHistory::add_unchanged`, and
+skips the whole policy branch — the only writer of `ConfirmedHistory` reachable in that gap — and
 replicon receive already ran; (3) the two lookups now agree by construction. Steps 2 and 3 are
 DEPENDENCY properties. A lightyear bump can retire either without touching a line here, which is
 exactly why the branch, its ERROR log and its counter all stay.
@@ -151,25 +176,76 @@ fixtures genuinely run lightyear's `Prepare`, the fixture helpers can no longer 
 impossible shapes, the state hash is right with both re-pins correct, and the wire is byte-identical
 at REV 24 with `settled_at` correctly derived rather than transmitted. Do not re-litigate those.
 
+### What round 6 found, and what slice 3.10 did about it (`a0ac961`)
+
+Round 6 passed almost everything: the gap between revalidation and `slot.claim` is inert, the
+predicate's lookups match `prepare_rollback` for present values / removals / markers / empty
+histories, the narrow `Undelivered` unreachability proof holds, the age check runs before the failed
+revalidation and drops at 101 for a 100-tick window, the fixtures use lightyear's real sorted API
+with a genuinely middle-inserted removal, and the wire is clean at REV 24.
+
+**The one High: the revalidation covered half the predicate.** The offer checks all four rigid-body
+histories; `request_staged_adoption` re-checked only `LinearVelocity` and `AngularVelocity`. A late
+authoritative REMOVAL of `Position` therefore survived — the offer pass correctly stopped offering
+the hull and that changed nothing (re-offering never touches a staged fact), the velocity-only
+revalidation passed, the slot was claimed, `prepare_rollback` answered the removal by taking
+`Position` OFF the hull, and `confirm_forced_rollback` closed the fact as `Adopted` because both
+velocities were genuinely carried. **Every counter this module keeps is defined on the velocities, so
+nothing could fire.** Exactly the round-5 defect, still live for the other half.
+
+Both sites now call one function, `restore_is_deliverable`, and its signature is what stops the
+request's query shrinking again. **The two halves keep DIFFERENT predicates, deliberately:** the
+velocities CARRY the fact (a `HullShock` episode is a velocity impulse and nothing else), so they get
+the strong `restore_carries_the_shove`; the pose carries none of the event — the impulse changes
+velocity, and the pose only moves as later ticks integrate it — so it keeps the weaker
+`authority_reaches`, which asks only that the restore not delete the component or fall through to the
+client's own prediction. One predicate for all four is wrong in both directions, and the second
+direction is the non-obvious one: `restore_carries_the_shove` on the pose is strictly stronger, so
+every verdict it changes turns a restorable pose into a WAIT — and replication transmits only
+components that CHANGED, while the `SameAsPrecedent` markers that would date a stationary hull's pose
+forward come from `check_rollback`'s policy branch, which our own forced request skips. A hull that
+was standing still when it was shot would stall until the replay window dropped its shove.
+`confirm_forced_rollback` deliberately stays velocity-only; it asks whether the dv is already live,
+and refusing there would only re-request state that cannot change.
+
+`a_late_pose_removal_is_revalidated_before_the_request` runs the real `Prepare` and was verified RED
+on the deleted `Position` — a clean assertion, not a panic. `the_pose_is_asked_a_weaker_question_than_the_shove_and_that_is_deliberate`
+pins the asymmetry, which the integration fixture cannot see: that fixture would pass just as happily
+against a module that had tightened the pose to the velocity predicate.
+
+**Two Lows, both about tests overstating coverage.** The `SameAsPrecedent` marker in the revalidation
+fixtures sat at 106 while the restore target was 104, so the lookup never reached it and only the
+removal at 102 was load-bearing — moved to 103, where `get_state_at_or_before(104)` lands ON the
+marker and resolves back through it, with asserts in the fixture that keep both orderings true. And
+the replay-window fixture observed the fact closed at age 101 but would have passed on a give-up
+anywhere from 17 to 100; it now runs twice, one tick apart, and asserts the ages — staged at exactly
+100, closed at exactly 101.
+
+**One literally-false claim, corrected in both the `retirement` doc and ADR-0032.**
+`check_rollback`'s policy branch is not "the only caller of `ConfirmedHistory::add_unchanged`":
+`push_unchanged` calls it too, and lightyear's interpolation invokes that path
+(`lightyear_interpolation-0.28.0/src/plugin.rs`, `Update`, `With<Interpolated>`). The proof survives
+for a reason unrelated to call counts — that path runs in `Update` on `Interpolated` entities, while
+the gap is inside one `PreUpdate` on a `Predicted` hull — and that is now the wording.
+
 ---
 
 ## 4. Running at handoff
 
-- **Codex review round 5** — job `task-ms656qq8-419x6n`, phase `verifying`.
-  Fetch with `node <companion> result task-ms656qq8-419x6n --cwd <repo root>`.
-  The prompt is in the session scratchpad as `review-3.8.txt`; regenerate from §3 if lost.
-
-Nothing else. The branch is clean, no agent holds a lock, and the simplifier is idle.
+Nothing. Round 6's findings are all fixed in `a0ac961`; no job is in flight, the branch is clean, no
+agent holds a lock, and the simplifier is idle.
 
 ---
 
 ## 5. What is next, in order
 
-1. **Send slice 3.9 to review as round 6.** Round 5's one finding is fixed (§3). File it the way
-   rounds 3.5–3.9 were filed: the review's own file:line citations, and an explicit instruction to
-   say where the brief is wrong against the code — that instruction has caught a real error of mine
-   in four of five rounds, and 3.9 corrected one of round 5's own claims (see the note under ground
-   2 above).
+1. **Send slice 3.10 to review as round 7.** File it the way rounds 3.5–3.10 were filed: the review's
+   own file:line citations, and an explicit instruction to say where the brief is wrong against the
+   code — that instruction has caught a real error of mine in four of six rounds, and rounds 3.9 and
+   3.10 each corrected one of the previous review's own claims (see the two notes under ground 2
+   above). Round 7's job is to check whether 3.10's fix is, once again, only the instance and not the
+   class: the specific question to put to it is whether any OTHER readiness or delivery fact in this
+   module is established at one point and acted on at another.
 2. **Slice 4 — `render_error`** (task #32, held all session). Fix the one-frame render freeze per
    rollback, and honour the `AdoptionCause` tag so an adopted authority impulse stays sharp instead
    of being smoothed like a misprediction. `AdoptionCause` currently has **no consumer** —
