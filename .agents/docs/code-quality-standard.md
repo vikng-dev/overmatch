@@ -24,7 +24,7 @@ violated guardrail costs a deploy cycle or a silent desync.
 | `.agents/skills/writing-great-skills/SKILL.md` | information hierarchy; progressive disclosure; no-op pruning |
 | `tests/fn_length.rs` | the 300-line **function** ceiling, and the reasoning for function-not-file |
 | `tests/doc_citations.rs` | the doc-rot gate — comments may not cite dead paths or line numbers |
-| `.agents/docs/adr/` (31 ADRs) | settled decisions. Do not re-litigate; see §C.7 |
+| `.agents/docs/adr/` (32 ADRs) | settled decisions. Do not re-litigate; see §C.7 |
 | `.agents/GLOSSARY.md` | domain names. Use these, never invented synonyms |
 
 Use the codebase-design vocabulary **exactly**. Do not drift into "component", "service", "API",
