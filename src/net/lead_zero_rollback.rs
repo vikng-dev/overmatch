@@ -88,6 +88,19 @@
 //! does in `Update`, one schedule position after the `FixedLast` that would remove it. lightyear's
 //! `prepare_rollback` then skips the hull for every component, and a delivery verdict read off
 //! `ConfirmedHistory` cannot see that, because that buffer answers what a restore WOULD resolve.
+//!
+//! # And one that is a CONTRACT rather than a scenario
+//!
+//! Every fixture above asserts what this module does in a situation.
+//! [`prepare_restores_exactly_the_components_the_predicate_names`] asserts something about the
+//! DEPENDENCY: `net::adoption::prepare_restores` is a hand-written mirror of `prepare_rollback`'s
+//! query, and a mirror is only true at the moment it is written. It runs the real
+//! `RollbackSystems::Prepare` over all 32 archetypes the two membership conditions can produce and
+//! checks, per component, that what was restored is what the predicate says — so a lightyear bump
+//! that adds, drops or changes a membership condition fails here instead of silently making a
+//! paraphrase wrong. Its source-side twin lives in `net::adoption`
+//! (`the_three_participation_sites_ask_one_shared_question`) and pins that the condition is spelled
+//! once and consumed through one predicate.
 
 use core::time::Duration;
 
@@ -1274,6 +1287,233 @@ fn a_hull_excluded_from_prepare_is_never_requested_and_never_adopted() {
         !delivered.live_velocity_removed && !delivered.live_pose_removed,
         "the hull must still HAVE its rigid body: an excluded hull is untouched, not stripped",
     );
+}
+
+/// The pose the authority holds at the restore target, and what the live hull is doing instead.
+/// Distinct from each other and from `default()`, so "restored" cannot be satisfied by a component
+/// that was simply never written.
+const AUTHORITY_POSITION: Vec3 = Vec3::new(11.0, 12.0, 13.0);
+const LIVE_POSITION: Vec3 = Vec3::new(-7.0, -8.0, -9.0);
+fn authority_rotation() -> Quat {
+    Quat::from_rotation_y(0.75)
+}
+fn live_rotation() -> Quat {
+    Quat::from_rotation_x(-0.4)
+}
+
+/// One cell of the participation matrix: build a client, put the hull in the archetype the cell
+/// describes, order a real forced rollback, and report which of the four rigid-body components
+/// `prepare_rollback` ACTUALLY replaced with the authority's value.
+///
+/// The rollback is claimed through [`ForcedRollbackSlot::claim`] — the call `net::watchdog` makes —
+/// so this is lightyear's own forced-rollback path and not a hand-installed rollback tick. The
+/// target is the client's current tick, which makes the replay loop run zero times: everything read
+/// afterwards was written by `prepare_rollback` itself and by nothing downstream of it.
+///
+/// The order of the returned flags is `Position`, `Rotation`, `LinearVelocity`, `AngularVelocity` —
+/// the order `net::adoption::prepare_restores` takes them in.
+fn components_prepare_restored(excluded: bool, histories: [bool; 4]) -> [bool; 4] {
+    let mut app = crate::net::test_harness::base_app();
+    app.add_plugins(ClientPlugins {
+        tick_duration: crate::net::test_harness::TICK,
+    });
+    crate::state::sim_plugin(&mut app);
+    super::protocol::plugin(&mut app);
+    app.insert_state(crate::state::AppState::Playing);
+    app.insert_resource(CompetingClaim(PRODUCING_TICK));
+    app.add_systems(
+        PreUpdate,
+        claim_the_slot_for_someone_else
+            .after(super::watchdog::RollbackWatchdog)
+            .before(RollbackSystems::Check),
+    );
+    crate::net::test_harness::finish(&mut app);
+
+    app.world_mut().spawn((
+        Client::default(),
+        RemoteId(PeerId::Server),
+        Connected,
+        PredictionManager::default(),
+        IsSynced::<InputTimeline>::default(),
+    ));
+
+    let mut confirmed_position = ConfirmedHistory::<Position>::default();
+    confirmed_position.insert_present_explicit(PRODUCING_TICK, Position(AUTHORITY_POSITION));
+    let mut confirmed_rotation = ConfirmedHistory::<Rotation>::default();
+    confirmed_rotation.insert_present_explicit(PRODUCING_TICK, Rotation(authority_rotation()));
+    let mut confirmed_linear = ConfirmedHistory::<LinearVelocity>::default();
+    confirmed_linear.insert_present_explicit(PRODUCING_TICK, LinearVelocity(AUTHORITY_LINEAR));
+    let mut confirmed_angular = ConfirmedHistory::<AngularVelocity>::default();
+    confirmed_angular.insert_present_explicit(PRODUCING_TICK, AngularVelocity(AUTHORITY_ANGULAR));
+
+    let hull = app
+        .world_mut()
+        .spawn((
+            Predicted,
+            Remote,
+            ConfirmHistory::new(producing_replicon_tick()),
+            Tank,
+            VICTIM,
+            Position(LIVE_POSITION),
+            Rotation(live_rotation()),
+            LinearVelocity(LIVE_LINEAR),
+            AngularVelocity(LIVE_ANGULAR),
+            confirmed_position,
+            confirmed_rotation,
+            confirmed_linear,
+            confirmed_angular,
+        ))
+        .id();
+    app.world_mut().entity_mut(hull).insert((
+        Transform::default(),
+        RigidBody::Dynamic,
+        Mass(HULL_MASS),
+        AngularInertia::new(Vec3::splat(HULL_INERTIA)),
+        CenterOfMass(Vec3::ZERO),
+        NoAutoMass,
+        NoAutoAngularInertia,
+        NoAutoCenterOfMass,
+        GravityScale(0.0),
+    ));
+
+    app.world_mut().flush();
+
+    // THE CELL, applied by REMOVAL rather than by omission — and that is a property of lightyear,
+    // not a fixture style. `add_prediction_history::<C>` is an OBSERVER on `Add` of `C` or
+    // `Predicted`, so every predicted component gets its buffer the instant the hull is spawned; a
+    // cell built by not inserting one would silently be the all-present cell. (It is also why the
+    // audit table records the per-component half of this condition as never having been a live
+    // defect: nothing removes the buffer on a surviving entity.)
+    let mut hull_mut = app.world_mut().entity_mut(hull);
+    if !histories[0] {
+        hull_mut.remove::<PredictionHistory<Position>>();
+    }
+    if !histories[1] {
+        hull_mut.remove::<PredictionHistory<Rotation>>();
+    }
+    if !histories[2] {
+        hull_mut.remove::<PredictionHistory<LinearVelocity>>();
+    }
+    if !histories[3] {
+        hull_mut.remove::<PredictionHistory<AngularVelocity>>();
+    }
+    if excluded {
+        hull_mut.insert(DisableRollback);
+    }
+    app.world_mut().flush();
+
+    // The archetype the cell asked for is the archetype the hull has. Without this a removal that
+    // stopped working would turn half the matrix into copies of the all-present cell, silently.
+    let built = [
+        app.world()
+            .get::<PredictionHistory<Position>>(hull)
+            .is_some(),
+        app.world()
+            .get::<PredictionHistory<Rotation>>(hull)
+            .is_some(),
+        app.world()
+            .get::<PredictionHistory<LinearVelocity>>(hull)
+            .is_some(),
+        app.world()
+            .get::<PredictionHistory<AngularVelocity>>(hull)
+            .is_some(),
+    ];
+    assert_eq!(
+        built, histories,
+        "the fixture failed to build the archetype it is testing: `PredictionHistory` presence is \
+         {built:?} where the cell asked for {histories:?}",
+    );
+    assert_eq!(
+        app.world().get::<DisableRollback>(hull).is_some(),
+        excluded,
+        "and the whole-entity half of the cell has to be real too",
+    );
+
+    {
+        let mut checkpoints = app.world_mut().resource_mut::<ReplicationCheckpointMap>();
+        checkpoints.record(producing_replicon_tick(), PRODUCING_TICK);
+        checkpoints.record_last_confirmed_tick(producing_replicon_tick());
+    }
+
+    advance_to(&mut app, PRODUCING_TICK);
+    app.world_mut().run_schedule(PreUpdate);
+
+    let world = app.world();
+    [
+        world
+            .get::<Position>(hull)
+            .is_some_and(|value| value.0 == AUTHORITY_POSITION),
+        world
+            .get::<Rotation>(hull)
+            .is_some_and(|value| value.0 == authority_rotation()),
+        world
+            .get::<LinearVelocity>(hull)
+            .is_some_and(|value| value.0 == AUTHORITY_LINEAR),
+        world
+            .get::<AngularVelocity>(hull)
+            .is_some_and(|value| value.0 == AUTHORITY_ANGULAR),
+    ]
+}
+
+/// THE RUNTIME CONFORMANCE MATRIX, and the answer to the concern the slice-3.11 handoff filed
+/// against itself: `net::adoption::prepare_restores` MIRRORS lightyear's query rather than observing
+/// its effect, so a lightyear change that keeps the archetype and changes the restore would pass it
+/// silently.
+///
+/// This makes the mirror a CHECKED contract. Over `DisableRollback` present/absent × each of the
+/// four `PredictionHistory<C>` present/absent — 32 archetypes — it runs lightyear's own
+/// `RollbackSystems::Prepare` and asserts two things per cell:
+///
+/// 1. exactly which components the restore replaced with the authority's value, per component;
+/// 2. that `prepare_restores`' whole-body verdict is the conjunction of those four answers.
+///
+/// The second is what the module actually consumes; the first is what makes a failure diagnosable
+/// and is strictly stronger, because it pins WHICH condition governs WHICH component rather than
+/// only that some condition governs something.
+///
+/// WHAT IT WOULD HAVE CAUGHT: the seventh review's High, from the other side. That defect was a
+/// participation condition asked in one place and not the other two — and this fixture is what says
+/// the condition is real and exactly these two, so a module that stopped asking it produces a
+/// visible disagreement between the predicate and the restore rather than an argument.
+///
+/// IT CANNOT PASS VACUOUSLY. The cell `(excluded: false, all four histories present)` demands all
+/// four components carry the authority's value, so a run in which no rollback installed at all fails
+/// immediately; and the live values are distinct from the authority's and from `default()`, so
+/// "restored" cannot be satisfied by a component that was never written.
+///
+/// WHAT IT IS NOT: a claim about what `prepare_rollback` restores components FROM. That is
+/// `restore_carries_the_shove`'s question and has its own fixtures. This one is only about
+/// membership — who is in the restore.
+#[test]
+fn prepare_restores_exactly_the_components_the_predicate_names() {
+    for excluded in [false, true] {
+        for mask in 0..16u8 {
+            let histories = [mask & 1 != 0, mask & 2 != 0, mask & 4 != 0, mask & 8 != 0];
+            let restored = components_prepare_restored(excluded, histories);
+            let expected = histories.map(|present| present && !excluded);
+
+            assert_eq!(
+                restored, expected,
+                "lightyear's `prepare_rollback` no longer restores the components \
+                 `net::adoption::prepare_restores` says it does. Cell: DisableRollback = \
+                 {excluded}, PredictionHistory presence (Position, Rotation, LinearVelocity, \
+                 AngularVelocity) = {histories:?}. Restored = {restored:?}, expected = \
+                 {expected:?}. That predicate is a paraphrase of a DEPENDENCY's query filter, and \
+                 `net::adoption` decides whether to claim a rollback and whether a shove was \
+                 delivered from it — so a membership condition added, dropped or changed upstream \
+                 has to be re-mirrored here, not discovered in play.",
+            );
+            assert_eq!(
+                super::adoption::prepare_restores(excluded, histories).is_ok(),
+                restored.iter().all(|component| *component),
+                "the whole-body verdict and the restore disagree in cell DisableRollback = \
+                 {excluded}, histories = {histories:?}. This is the answer `restore_is_deliverable` \
+                 gates the request on: `Ok` while any component was skipped means claiming a \
+                 rollback that restores a partial rigid body, and `Err` while all four were \
+                 restored means refusing a shove that would have landed.",
+            );
+        }
+    }
 }
 
 /// GUARD ON THE LEAD ARITHMETIC.

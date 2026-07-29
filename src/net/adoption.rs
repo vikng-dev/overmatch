@@ -249,9 +249,9 @@ use lightyear::core::history_buffer::HistoryState;
 use lightyear::prelude::client::Remote;
 use lightyear::prelude::*;
 
+use super::protocol::hull_shock_mismatch;
 #[cfg(test)]
-use super::protocol::ROLLBACK_VELOCITY;
-use super::protocol::{SHOCK_EPISODE_TICKS, hull_shock_mismatch};
+use super::protocol::{ROLLBACK_VELOCITY, SHOCK_EPISODE_TICKS};
 use super::watchdog::newest_present_at_or_before;
 use crate::ballistics::{HullShock, Impact, ImpactSurface, RICOCHET_HOLD_TICKS};
 
@@ -442,36 +442,89 @@ impl VisualClaim {
     }
 }
 
-/// How many presented hits are retained. DERIVED: an episode cannot span more than
-/// [`SHOCK_EPISODE_TICKS`] ticks (it publishes the tick its window expires, and it opened after the
-/// previous one closed), and a fact is staged for at most [`ORDERING_BUDGET_TICKS`], so nothing older
-/// than `SHOCK_EPISODE_TICKS + ORDERING_BUDGET_TICKS` = 32 ticks can still be asked for. 32 entries
-/// is one per tick of that span — more than four times what the game's fastest weapon can deposit
-/// into it (900 rpm cyclic is one hit per ~4.3 ticks).
-/// Overflowing it drops the OLDEST, which can only cost a release-on-impact that the budget then
-/// covers loudly; it can never release a shove early.
-const MAX_PRESENTED_HITS: usize = (SHOCK_EPISODE_TICKS + ORDERING_BUDGET_TICKS as u32) as usize;
+/// How many presented hits are retained.
+///
+/// NOT DERIVED FROM TICKS, and the eighth review found the derivation that said it was. It read:
+/// an episode spans at most `SHOCK_EPISODE_TICKS`, a fact is staged for at most
+/// [`ORDERING_BUDGET_TICKS`], so 32 entries is one per tick of the widest span anything can still
+/// ask about. The two halves do not meet. The capacity is a budget in TICKS while the eviction is
+/// per ENTRY, and nothing bounds entries per tick: every authority armor impact is appended
+/// ([`note_presented_impact`]) and impacts are broadcast to every client, so one tick of a busy
+/// server can evict the whole ledger. A staged fact's own spark could be drawn and then pushed out
+/// by 32 unrelated hits, after which [`retirement`] read "never drawn" and reported a BYPASS for a
+/// spark the player had already seen.
+///
+/// What carries the staged fact's answer now is [`WatchedSpark`], which is per-fact and outside this
+/// FIFO entirely. This buffer's remaining job is to SEED that latch for a spark drawn before its
+/// fact was staged — the ordinary shape, since a hit's `ImpactConfirm` and its `HullShock` travel
+/// separately. So the number is a retention DEPTH chosen for headroom over that one gap, not a
+/// derivation: 64 is double the depth the module ran on, and losing an entry out of it can only
+/// under-report a spark, which costs a release-on-budget that logs loudly.
+const MAX_PRESENTED_HITS: usize = 64;
+
+/// The staged claim's own drawn state, held OUTSIDE the eviction FIFO.
+///
+/// A staged fact is one bounded, known thing; the impact stream is not, so the fact's answer may not
+/// be stored as a search over the stream. `drawn` is seeded from the ledger when the fact is staged
+/// (a spark drawn before its fact arrived still counts) and latches true from then on.
+///
+/// KEYED BY THE CLAIM, which is what makes a stale watch harmless rather than merely unread: the key
+/// IS the authority identity `(victim, from, through)`, so the only question a leftover watch can
+/// answer is the one it was seeded for. A later episode on the same hull opens after the previous
+/// one closed and therefore carries a different span.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct WatchedSpark {
+    claim: VisualClaim,
+    drawn: bool,
+}
 
 /// What this client has SHOWN, and what the ordering rule did with it.
 #[derive(Resource, Default)]
 pub(crate) struct ImpactPresentation {
     /// The authority-resolved armor hits this client has drawn, oldest first.
     presented: Vec<PresentedHit>,
+    /// The staged fact's claim and whether one of ITS hits has been drawn. See [`WatchedSpark`].
+    watched: Option<WatchedSpark>,
     tally: OrderingTally,
 }
 
 impl ImpactPresentation {
     /// Record that an armor impact belonging to `hit` was drawn.
     fn present(&mut self, hit: PresentedHit) {
+        if let Some(watched) = self.watched.as_mut() {
+            watched.drawn |= watched.claim.covers(hit);
+        }
         self.presented.push(hit);
         if self.presented.len() > MAX_PRESENTED_HITS {
             self.presented.remove(0);
         }
     }
 
+    /// Start retaining `claim`'s drawn state independently of the FIFO. Called from the ONE place a
+    /// fact is staged, [`AuthorityAdoption::offer`], which is why that function takes this resource.
+    ///
+    /// IDEMPOTENT, and it has to be: a producer re-offers the same fact every frame, and re-seeding
+    /// from the FIFO on a re-offer would hand back exactly the eviction the latch exists to survive.
+    fn watch(&mut self, claim: VisualClaim) {
+        if self.watched.is_some_and(|watched| watched.claim == claim) {
+            return;
+        }
+        self.watched = Some(WatchedSpark {
+            claim,
+            drawn: self.presented.iter().any(|hit| claim.covers(*hit)),
+        });
+    }
+
     /// Whether one of the hits `claim` is made of has been drawn.
+    ///
+    /// The latch answers for the claim it is keyed to. The FIFO scan is the fallback for a claim
+    /// nothing is watching, which production cannot reach — every staged fact with a visual was
+    /// watched when it was staged — and which is what a fixture asking about an unstaged claim gets.
     fn shown_for(&self, claim: VisualClaim) -> bool {
-        self.presented.iter().any(|hit| claim.covers(*hit))
+        match self.watched {
+            Some(watched) if watched.claim == claim => watched.drawn,
+            _ => self.presented.iter().any(|hit| claim.covers(*hit)),
+        }
     }
 
     /// Tally one resolved ordering decision. Called once per staged fact, not once per retry.
@@ -662,14 +715,25 @@ impl AuthorityAdoption {
     ///
     /// `now` is the caller's LOCAL tick and is recorded only on the frame the fact is first staged,
     /// which is what makes it a patience clock rather than a re-offer clock.
-    pub(crate) fn offer(&mut self, fact: AuthoritativeFact, now: Tick) -> Offer {
+    ///
+    /// `presentation` is taken because THIS is the one place a fact becomes staged, and a staged
+    /// fact's spark has to start being retained the moment it is — see [`WatchedSpark`]. Passing the
+    /// ledger through the signature is what makes that structural: a future producer added at
+    /// [`OfferAuthoritativeFacts`] cannot stage a fact without handing over the ledger its claim
+    /// will be answered from, so it cannot silently inherit the evicting search this replaced.
+    pub(crate) fn offer(
+        &mut self,
+        fact: AuthoritativeFact,
+        now: Tick,
+        presentation: &mut ImpactPresentation,
+    ) -> Offer {
         if self.adopted.contains(&fact.id) {
             return Offer::AlreadyAdopted;
         }
         if !self.is_newer(&fact) {
             return Offer::NotNewer;
         }
-        match self.staged {
+        let offer = match self.staged {
             Some(staged) if staged.id == fact.id => Offer::Staged,
             Some(_) => Offer::SlotBusy,
             None => {
@@ -679,7 +743,16 @@ impl AuthorityAdoption {
                 self.ordering = Ordering::Unasked;
                 Offer::Staged
             }
+        };
+        // Only for the fact that HOLDS the slot. `SlotBusy` means somebody else's claim is staged and
+        // watching a loser's claim would answer the wrong question; `watch` is idempotent, so the
+        // winner's re-offer every frame neither re-seeds nor drops what it has already latched.
+        if offer == Offer::Staged
+            && let Some(claim) = fact.visual
+        {
+            presentation.watch(claim);
         }
+        offer
     }
 
     /// Whether a fact is currently mid-transaction.
@@ -743,9 +816,11 @@ fn reset_adoption_state(
 ) {
     *adoption = default();
     *slot = default();
-    // The presented hits are ticks from the old timeline; the tallies are session instrumentation
-    // and deliberately survive, so a reconnect does not erase the number that decides the barrier.
+    // The presented hits and the staged claim's latch are ticks from the old timeline; the tallies
+    // are session instrumentation and deliberately survive, so a reconnect does not erase the number
+    // that decides the barrier.
     presentation.presented.clear();
+    presentation.watched = None;
 }
 
 /// Whether a state restore at `tick` would replace this component with AUTHORITY, or leave the
@@ -847,7 +922,7 @@ fn restore_carries_the_shove(
 /// Why a state restore at a given tick is not something this module may build on YET. Every variant
 /// is a WAIT; see [`request_staged_adoption`] for what bounds it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Unready {
+pub(super) enum Unready {
     /// The restore would not bring the hull's POSE back from authority.
     Pose,
     /// The restore would bring the pose back but would not carry the event's velocity change.
@@ -890,6 +965,48 @@ impl Unready {
     }
 }
 
+/// THE HULL'S PARTICIPATION in `prepare_rollback`'s restore, as ONE piece of query data.
+///
+/// Every site that asks whether a rollback reaches this hull names this type, so the conditions are
+/// spelled once and read identically everywhere. That is not tidiness: the seventh review's High was
+/// the SAME condition expressed two different ways — a `Without<DisableRollback>` filter on the
+/// offer's query and nothing at all on the request's — and a filter is the one shape that cannot be
+/// handed to a shared predicate, so the divergence was invisible to every reader of either site.
+///
+/// It is also what makes the divergence mechanically detectable: the source scan
+/// `the_three_participation_sites_ask_one_shared_question` pins that `Has<DisableRollback>` and the
+/// four rigid-body `Has<PredictionHistory<..>>` spellings occur in THIS declaration and nowhere else
+/// in the module, and that all three consumers route through the shared predicate. An offer-only
+/// re-expression cannot be written without failing that test.
+#[derive(bevy::ecs::query::QueryData)]
+struct RollbackParticipation {
+    /// `prepare_rollback`'s query filter, read as DATA. Excludes the hull from EVERY component's
+    /// restore at once.
+    excluded: Has<DisableRollback>,
+    position: Has<PredictionHistory<Position>>,
+    rotation: Has<PredictionHistory<Rotation>>,
+    linear: Has<PredictionHistory<LinearVelocity>>,
+    angular: Has<PredictionHistory<AngularVelocity>>,
+}
+
+impl RollbackParticipationItem<'_, '_> {
+    /// Membership for the WHOLE rigid body — the four components a readiness verdict is defined on.
+    fn whole_body(&self) -> Result<(), Unready> {
+        prepare_restores(
+            self.excluded,
+            [self.position, self.rotation, self.linear, self.angular],
+        )
+    }
+
+    /// Membership for the two components the shove RIDES ON, which is what a post-`Prepare` delivery
+    /// verdict is defined on. Asking about the pose here would answer a question this verdict does
+    /// not make: a hull whose `Position` history went missing still had its velocities restored, and
+    /// the shove really did land.
+    fn velocities(&self) -> Result<(), Unready> {
+        prepare_restores(self.excluded, [self.linear, self.angular])
+    }
+}
+
 /// EVERY ARCHETYPE CONDITION lightyear's `prepare_rollback` puts on a hull, asked in ONE place.
 ///
 /// The two questions this module asks about a restore are separable and both are necessary. The
@@ -917,8 +1034,16 @@ impl Unready {
 ///
 /// `N` is however many components the asking site's verdict covers — all four for readiness, the two
 /// velocities for the post-`Prepare` delivery proof. Passing a subset is not a weaker question, it is
-/// the question that site's answer is defined on.
-fn prepare_restores<const N: usize>(
+/// the question that site's answer is defined on. The two subsets are named on
+/// [`RollbackParticipation`]; no site assembles its own.
+///
+/// A MIRROR OF A DEPENDENCY'S QUERY IS ONLY A MIRROR AT THE MOMENT IT IS WRITTEN, which was the
+/// eighth review's point and is why this one is also CHECKED against the real thing:
+/// `net::lead_zero_rollback`'s conformance matrix runs lightyear's own `RollbackSystems::Prepare`
+/// over every combination of the conditions below and asserts that what was actually restored, per
+/// component, is what this function says. A lightyear bump that adds or drops a membership condition
+/// fails there instead of silently making this paraphrase wrong.
+pub(super) fn prepare_restores<const N: usize>(
     rollback_disabled: bool,
     prediction_histories: [bool; N],
 ) -> Result<(), Unready> {
@@ -989,12 +1114,11 @@ fn prepare_restores<const N: usize>(
 /// branch writes are not available to date a pose forward. That is a real property; it is just not
 /// what makes the weak predicate correct. NO SHIPPING SHAPE IS CLAIMED HERE, and the unit fixture
 /// that pins the policy pins the policy and says so.
-#[allow(clippy::too_many_arguments)]
 fn restore_is_deliverable(
-    rollback_disabled: bool,
-    // `Position`, `Rotation`, `LinearVelocity`, `AngularVelocity` — the same order, and the same
-    // components, as the four histories below.
-    prediction_histories: [bool; 4],
+    // The WHOLE-BODY membership verdict, which only `RollbackParticipation::whole_body` produces in
+    // production. Taken as a verdict rather than as raw flags so that this signature cannot be
+    // satisfied by a site that re-derived membership its own way.
+    participates: Result<(), Unready>,
     position: Option<&ConfirmedHistory<Position>>,
     rotation: Option<&ConfirmedHistory<Rotation>>,
     linear: Option<&ConfirmedHistory<LinearVelocity>>,
@@ -1004,7 +1128,7 @@ fn restore_is_deliverable(
 ) -> Result<(), Unready> {
     // FIRST, because it decides whether the rest of this function is about anything. A hull outside
     // `prepare_rollback`'s query keeps every live component it has, whatever these histories hold.
-    prepare_restores(rollback_disabled, prediction_histories)?;
+    participates?;
     // The hull's whole rigid-body state has to come back from authority together — a pose restored
     // to `restored_at` beside a velocity that stayed at `now` is not a tick that ever existed on
     // either peer.
@@ -1025,7 +1149,6 @@ fn restore_is_deliverable(
 /// the hull's prediction history is retained at the producing tick and that every authority-tracked
 /// part of its rigid-body state can be restored there. The generic half lives in
 /// [`request_staged_adoption`].
-#[allow(clippy::type_complexity)]
 fn offer_hull_shock_adoptions(
     timeline: Res<LocalTimeline>,
     checkpoints: Option<Res<ReplicationCheckpointMap>>,
@@ -1039,11 +1162,7 @@ fn offer_hull_shock_adoptions(
             // filter was the shape the seventh review found: it made the condition invisible to the
             // request and to the post-`Prepare` proof, and a filter cannot be handed to the one
             // function that is supposed to own the whole question.
-            Has<DisableRollback>,
-            Has<PredictionHistory<Position>>,
-            Has<PredictionHistory<Rotation>>,
-            Has<PredictionHistory<LinearVelocity>>,
-            Has<PredictionHistory<AngularVelocity>>,
+            RollbackParticipation,
             Option<&ConfirmedHistory<Position>>,
             Option<&ConfirmedHistory<Rotation>>,
             Option<&ConfirmedHistory<LinearVelocity>>,
@@ -1052,6 +1171,7 @@ fn offer_hull_shock_adoptions(
         (With<Predicted>, With<Remote>),
     >,
     mut adoption: ResMut<AuthorityAdoption>,
+    mut presentation: ResMut<ImpactPresentation>,
 ) {
     let Some(checkpoints) = checkpoints else {
         return;
@@ -1070,11 +1190,7 @@ fn offer_hull_shock_adoptions(
         confirmed_shock,
         predicted_shock,
         combatant,
-        rollback_disabled,
-        has_position,
-        has_rotation,
-        has_linear,
-        has_angular,
+        participation,
         position,
         rotation,
         linear,
@@ -1115,8 +1231,7 @@ fn offer_hull_shock_adoptions(
         // resulting velocity in the same replication group and stamps both with the same tick.
         let settled_at = Tick(authority.tick);
         if let Err(unready) = restore_is_deliverable(
-            rollback_disabled,
-            [has_position, has_rotation, has_linear, has_angular],
+            participation.whole_body(),
             position,
             rotation,
             linear,
@@ -1152,6 +1267,7 @@ fn offer_hull_shock_adoptions(
                 visual: combatant.map(|victim| VisualClaim::for_episode(*victim, authority)),
             },
             now,
+            &mut presentation,
         );
     }
 }
@@ -1188,21 +1304,17 @@ fn offer_hull_shock_adoptions(
 /// staging-time archetype, `prepare_rollback` skipped the marked hull entirely, and the fact closed
 /// as an adoption having restored NOTHING. The condition is data on both queries now, and
 /// [`prepare_restores`] is where it is asked.
-#[allow(clippy::type_complexity)]
 fn request_staged_adoption(
     timeline: Res<LocalTimeline>,
     checkpoints: Option<Res<ReplicationCheckpointMap>>,
     managers: Query<&PredictionManager>,
-    // ALL FOUR, because the offer proved all four — plus the archetype conditions that decide
-    // whether `prepare_rollback` reaches this hull at all. Re-proving a subset is proving a later
-    // frame's transaction on an earlier frame's world for whatever it left out; see
-    // [`restore_is_deliverable`], whose signature is what keeps this tuple honest.
+    // ALL FOUR, because the offer proved all four — plus [`RollbackParticipation`], the archetype
+    // conditions that decide whether `prepare_rollback` reaches this hull at all. Re-proving a
+    // subset is proving a later frame's transaction on an earlier frame's world for whatever it left
+    // out; [`restore_is_deliverable`]'s signature is what keeps this tuple honest, and the source
+    // scan is what keeps the participation half from being spelled a second way.
     hulls: Query<(
-        Has<DisableRollback>,
-        Has<PredictionHistory<Position>>,
-        Has<PredictionHistory<Rotation>>,
-        Has<PredictionHistory<LinearVelocity>>,
-        Has<PredictionHistory<AngularVelocity>>,
+        RollbackParticipation,
         Option<&ConfirmedHistory<Position>>,
         Option<&ConfirmedHistory<Rotation>>,
         Option<&ConfirmedHistory<LinearVelocity>>,
@@ -1265,19 +1377,8 @@ fn request_staged_adoption(
     // cannot speak for this one, for any component it covered.
     let unready = match hulls.get(fact.id.entity) {
         Err(_) => Some(Unready::Hull),
-        Ok((
-            rollback_disabled,
-            has_position,
-            has_rotation,
-            has_linear,
-            has_angular,
-            position,
-            rotation,
-            linear,
-            angular,
-        )) => restore_is_deliverable(
-            rollback_disabled,
-            [has_position, has_rotation, has_linear, has_angular],
+        Ok((participation, position, rotation, linear, angular)) => restore_is_deliverable(
+            participation.whole_body(),
             position,
             rotation,
             linear,
@@ -1392,13 +1493,10 @@ fn clear_to_order(
 ///
 /// `carried` is asked of BOTH routes, ours included: an installed claim of our own that restored a
 /// pre-event velocity is [`Retirement::Undelivered`], not an adoption. See [`retirement`].
-#[allow(clippy::type_complexity)]
 fn confirm_forced_rollback(
     managers: Query<(&PredictionManager, Option<&Rollback>)>,
     hulls: Query<(
-        Has<DisableRollback>,
-        Has<PredictionHistory<LinearVelocity>>,
-        Has<PredictionHistory<AngularVelocity>>,
+        RollbackParticipation,
         Option<&ConfirmedHistory<LinearVelocity>>,
         Option<&ConfirmedHistory<AngularVelocity>>,
     )>,
@@ -1446,12 +1544,12 @@ fn confirm_forced_rollback(
     // component and `PreviousVisual` and nothing else; and the only writer of `DisableRollback` in
     // lightyear is `check_rollback`'s deterministic skip-despawn bookkeeping, which runs BEFORE
     // `Prepare` and only over entities in `PredictionManager::deterministic_skip_despawn`.
-    let carried = hulls.get(fact.id.entity).is_ok_and(
-        |(rollback_disabled, has_linear, has_angular, linear, angular)| {
-            prepare_restores(rollback_disabled, [has_linear, has_angular]).is_ok()
+    let carried = hulls
+        .get(fact.id.entity)
+        .is_ok_and(|(participation, linear, angular)| {
+            participation.velocities().is_ok()
                 && restore_carries_the_shove(linear, angular, started, fact.settled_at)
-        },
-    );
+        });
     let outcome = retirement(
         &adoption,
         &presentation,
@@ -1844,10 +1942,17 @@ mod tests {
     #[test]
     fn a_re_offered_fact_is_requested_once() {
         let mut adoption = AuthorityAdoption::default();
+        let mut presentation = ImpactPresentation::default();
         let episode = fact(hull(), 1, 50, 100);
 
-        assert_eq!(adoption.offer(episode, STAGED_AT), Offer::Staged);
-        assert_eq!(adoption.offer(episode, STAGED_AT + 3), Offer::Staged);
+        assert_eq!(
+            adoption.offer(episode, STAGED_AT, &mut presentation),
+            Offer::Staged
+        );
+        assert_eq!(
+            adoption.offer(episode, STAGED_AT + 3, &mut presentation),
+            Offer::Staged
+        );
         assert_eq!(adoption.staged, Some(episode));
         assert_eq!(
             adoption.staged_at,
@@ -1858,7 +1963,10 @@ mod tests {
         adoption.close(episode);
         assert_eq!(adoption.staged, None);
         assert_eq!(adoption.staged_at, None);
-        assert_eq!(adoption.offer(episode, STAGED_AT), Offer::AlreadyAdopted);
+        assert_eq!(
+            adoption.offer(episode, STAGED_AT, &mut presentation),
+            Offer::AlreadyAdopted
+        );
     }
 
     /// A re-send of the SAME episode under a later checkpoint has a different [`FactId`], so exact
@@ -1867,13 +1975,17 @@ mod tests {
     #[test]
     fn a_later_checkpoint_carrying_the_same_episode_is_not_a_new_fact() {
         let mut adoption = AuthorityAdoption::default();
+        let mut presentation = ImpactPresentation::default();
         adoption.close(fact(hull(), 1, 50, 100));
 
         for stale in [fact(hull(), 1, 51, 104), fact(hull(), 0, 51, 104)] {
-            assert_eq!(adoption.offer(stale, STAGED_AT), Offer::NotNewer);
+            assert_eq!(
+                adoption.offer(stale, STAGED_AT, &mut presentation),
+                Offer::NotNewer
+            );
         }
         assert_eq!(
-            adoption.offer(fact(hull(), 2, 51, 104), STAGED_AT),
+            adoption.offer(fact(hull(), 2, 51, 104), STAGED_AT, &mut presentation),
             Offer::Staged,
         );
     }
@@ -1883,11 +1995,12 @@ mod tests {
     #[test]
     fn a_new_entity_incarnation_starts_a_new_sequence() {
         let mut adoption = AuthorityAdoption::default();
+        let mut presentation = ImpactPresentation::default();
         adoption.close(fact(hull(), 9, 50, 100));
 
         let reborn = Entity::from_raw_u32(8).expect("a second non-placeholder test entity");
         assert_eq!(
-            adoption.offer(fact(reborn, 1, 51, 104), STAGED_AT),
+            adoption.offer(fact(reborn, 1, 51, 104), STAGED_AT, &mut presentation),
             Offer::Staged
         );
     }
@@ -1897,12 +2010,16 @@ mod tests {
     #[test]
     fn a_second_fact_does_not_evict_the_staged_one() {
         let mut adoption = AuthorityAdoption::default();
+        let mut presentation = ImpactPresentation::default();
         let first = fact(hull(), 1, 50, 100);
         let other = Entity::from_raw_u32(8).expect("a second non-placeholder test entity");
 
-        assert_eq!(adoption.offer(first, STAGED_AT), Offer::Staged);
         assert_eq!(
-            adoption.offer(fact(other, 1, 50, 100), STAGED_AT),
+            adoption.offer(first, STAGED_AT, &mut presentation),
+            Offer::Staged
+        );
+        assert_eq!(
+            adoption.offer(fact(other, 1, 50, 100), STAGED_AT, &mut presentation),
             Offer::SlotBusy,
         );
         assert_eq!(adoption.staged, Some(first));
@@ -1958,7 +2075,10 @@ mod tests {
         let mut adoption = AuthorityAdoption::default();
         let mut presentation = ImpactPresentation::default();
         let deferred = episode_fact(hull(), 51, deferred_episode(104, 116));
-        assert_eq!(adoption.offer(deferred, STAGED_AT), Offer::Staged);
+        assert_eq!(
+            adoption.offer(deferred, STAGED_AT, &mut presentation),
+            Offer::Staged
+        );
 
         assert!(
             !order(&mut adoption, &mut presentation, deferred, 0),
@@ -1991,7 +2111,10 @@ mod tests {
         let mut adoption = AuthorityAdoption::default();
         let mut presentation = ImpactPresentation::default();
         let deferred = episode_fact(hull(), 51, deferred_episode(104, 116));
-        assert_eq!(adoption.offer(deferred, STAGED_AT), Offer::Staged);
+        assert_eq!(
+            adoption.offer(deferred, STAGED_AT, &mut presentation),
+            Offer::Staged
+        );
 
         presentation.present(drew(100, VICTIM));
         presentation.present(drew(103, VICTIM));
@@ -2019,7 +2142,10 @@ mod tests {
         let mut adoption = AuthorityAdoption::default();
         let mut presentation = ImpactPresentation::default();
         let episode = episode_fact(hull(), 50, first_episode(100));
-        assert_eq!(adoption.offer(episode, STAGED_AT), Offer::Staged);
+        assert_eq!(
+            adoption.offer(episode, STAGED_AT, &mut presentation),
+            Offer::Staged
+        );
 
         for stale in [85, 90, 99] {
             presentation.present(drew(stale, VICTIM));
@@ -2068,7 +2194,10 @@ mod tests {
         // episode it publishes is `count: 1` again, closed the tick its first hit landed.
         let reborn = Entity::from_raw_u32(8).expect("a second non-placeholder test entity");
         let first = episode_fact(reborn, 51, first_episode(died_at));
-        assert_eq!(adoption.offer(first, STAGED_AT), Offer::Staged);
+        assert_eq!(
+            adoption.offer(first, STAGED_AT, &mut presentation),
+            Offer::Staged
+        );
 
         assert!(
             !order(&mut adoption, &mut presentation, first, 1),
@@ -2099,7 +2228,10 @@ mod tests {
         let mut adoption = AuthorityAdoption::default();
         let mut presentation = ImpactPresentation::default();
         let episode = fact(hull(), 2, 50, 100);
-        assert_eq!(adoption.offer(episode, STAGED_AT), Offer::Staged);
+        assert_eq!(
+            adoption.offer(episode, STAGED_AT, &mut presentation),
+            Offer::Staged
+        );
 
         presentation.present(drew(99, BYSTANDER));
         assert!(
@@ -2126,7 +2258,10 @@ mod tests {
         let mut adoption = AuthorityAdoption::default();
         let mut presentation = ImpactPresentation::default();
         let episode = fact(hull(), 1, 50, 100);
-        assert_eq!(adoption.offer(episode, STAGED_AT), Offer::Staged);
+        assert_eq!(
+            adoption.offer(episode, STAGED_AT, &mut presentation),
+            Offer::Staged
+        );
 
         assert!(!order(
             &mut adoption,
@@ -2160,7 +2295,10 @@ mod tests {
         let mut presentation = ImpactPresentation::default();
         // Produced at 100 and not staged until 140: a link with real latency.
         let episode = fact(hull(), 1, 50, 100);
-        assert_eq!(adoption.offer(episode, STAGED_AT), Offer::Staged);
+        assert_eq!(
+            adoption.offer(episode, STAGED_AT, &mut presentation),
+            Offer::Staged
+        );
         assert!(
             STAGED_AT - episode.produced_at > ORDERING_BUDGET_TICKS,
             "the fixture only says something if the fact's AGE alone would already release it",
@@ -2186,7 +2324,10 @@ mod tests {
         let mut presentation = ImpactPresentation::default();
         // Coalesced, so tick 96 is one of the episode's own hits rather than a stale spark.
         let episode = fact(hull(), 2, 50, 100);
-        assert_eq!(adoption.offer(episode, STAGED_AT), Offer::Staged);
+        assert_eq!(
+            adoption.offer(episode, STAGED_AT, &mut presentation),
+            Offer::Staged
+        );
 
         presentation.present(drew(96, VICTIM));
         for _ in 0..4 {
@@ -2226,9 +2367,12 @@ mod tests {
         let mut adoption = AuthorityAdoption::default();
         // Nothing drawn: the fact's own spark is genuinely pending, which is the state
         // `Retirement::Delivered` reports as a bypass.
-        let presentation = ImpactPresentation::default();
+        let mut presentation = ImpactPresentation::default();
         let episode = fact(hull(), 1, 50, 100);
-        assert_eq!(adoption.offer(episode, STAGED_AT), Offer::Staged);
+        assert_eq!(
+            adoption.offer(episode, STAGED_AT, &mut presentation),
+            Offer::Staged
+        );
 
         assert_eq!(
             retirement(
@@ -2289,9 +2433,12 @@ mod tests {
         let mut adoption = AuthorityAdoption::default();
         // Nothing drawn: the fact's own spark is genuinely pending, which is the state
         // `Retirement::Delivered` reports as a bypass.
-        let presentation = ImpactPresentation::default();
+        let mut presentation = ImpactPresentation::default();
         let episode = fact(hull(), 1, 50, 100);
-        assert_eq!(adoption.offer(episode, STAGED_AT), Offer::Staged);
+        assert_eq!(
+            adoption.offer(episode, STAGED_AT, &mut presentation),
+            Offer::Staged
+        );
         adoption.requested = true;
         let ours = Some((Tick(100), AdoptionCause::ExternalEvent));
 
@@ -2330,9 +2477,12 @@ mod tests {
         let mut adoption = AuthorityAdoption::default();
         // Nothing drawn: the fact's own spark is genuinely pending, which is the state
         // `Retirement::Delivered` reports as a bypass.
-        let presentation = ImpactPresentation::default();
+        let mut presentation = ImpactPresentation::default();
         let episode = fact(hull(), 1, 50, 100);
-        assert_eq!(adoption.offer(episode, STAGED_AT), Offer::Staged);
+        assert_eq!(
+            adoption.offer(episode, STAGED_AT, &mut presentation),
+            Offer::Staged
+        );
 
         assert_eq!(
             retirement(
@@ -2370,9 +2520,12 @@ mod tests {
         let mut adoption = AuthorityAdoption::default();
         // Nothing drawn: the fact's own spark is genuinely pending, which is the state
         // `Retirement::Delivered` reports as a bypass.
-        let presentation = ImpactPresentation::default();
+        let mut presentation = ImpactPresentation::default();
         let episode = fact(hull(), 1, 50, 100);
-        assert_eq!(adoption.offer(episode, STAGED_AT), Offer::Staged);
+        assert_eq!(
+            adoption.offer(episode, STAGED_AT, &mut presentation),
+            Offer::Staged
+        );
         adoption.requested = true;
 
         for started in [Tick(100), Tick(101), Tick(140)] {
@@ -2433,8 +2586,7 @@ mod tests {
         const PRODUCED_AT: Tick = Tick(104);
         let deliverable = |rollback_disabled: bool, prediction_histories: [bool; 4]| {
             restore_is_deliverable(
-                rollback_disabled,
-                prediction_histories,
+                prepare_restores(rollback_disabled, prediction_histories),
                 Some(&confirmed_position(SETTLED_AT)),
                 Some(&confirmed_rotation(SETTLED_AT)),
                 Some(&confirmed_linear(SETTLED_AT)),
@@ -2485,7 +2637,10 @@ mod tests {
         let mut adoption = AuthorityAdoption::default();
         let mut presentation = ImpactPresentation::default();
         let episode = fact(hull(), 1, 50, 100);
-        assert_eq!(adoption.offer(episode, STAGED_AT), Offer::Staged);
+        assert_eq!(
+            adoption.offer(episode, STAGED_AT, &mut presentation),
+            Offer::Staged
+        );
         let bypassed = |adoption: &AuthorityAdoption, presentation: &ImpactPresentation| {
             retirement(
                 adoption,
@@ -2541,7 +2696,10 @@ mod tests {
         let mut drift = fact(hull(), 1, 50, 100);
         drift.cause = AdoptionCause::Misprediction;
         drift.visual = None;
-        assert_eq!(unheld.offer(drift, STAGED_AT), Offer::Staged);
+        assert_eq!(
+            unheld.offer(drift, STAGED_AT, &mut presentation),
+            Offer::Staged
+        );
         assert!(order(&mut unheld, &mut presentation, drift, 0));
         assert_eq!(
             unheld.ordering,
@@ -2556,6 +2714,84 @@ mod tests {
         );
     }
 
+    /// FINDING THE EIGHTH REVIEW CAUGHT, and it is the exact eviction the previous round's own
+    /// safety argument said could not happen.
+    ///
+    /// [`MAX_PRESENTED_HITS`] was derived as a span in TICKS — an episode's width plus the ordering
+    /// budget — on the reasoning that nothing older than that span can still be asked about. But the
+    /// capacity is spent per ENTRY, and nothing bounds entries per tick: every authority armor impact
+    /// is appended and impacts are broadcast to every client, so unrelated hits on other combatants
+    /// consume the same ledger. Draw the staged fact's own spark, let one busy moment of somebody
+    /// else's firefight push it out, and [`retirement`] read "never drawn" and reported a BYPASS —
+    /// inflating the ONE number that decides whether this rule has to become a real presentation
+    /// barrier, on a frame where the player had already seen the hit.
+    ///
+    /// THE FIXTURE IS DELIBERATELY OVER-CAPACITY BY ONE and asserts the eviction happened, because a
+    /// regression test for a FIFO that quietly grew a larger capacity would pass while proving
+    /// nothing. What holds the answer now is the per-fact latch, not the depth of this buffer, and
+    /// both consumers read it.
+    #[test]
+    fn an_evicted_spark_is_still_the_staged_facts_own_spark() {
+        let mut adoption = AuthorityAdoption::default();
+        let mut presentation = ImpactPresentation::default();
+        let episode = fact(hull(), 1, 50, 100);
+
+        // The spark comes FIRST, which is the ordinary shape: a hit's `ImpactConfirm` is a message
+        // drained in `Update` and its `HullShock` is replicated state, so the two arrive apart.
+        presentation.present(drew(100, VICTIM));
+        assert_eq!(
+            adoption.offer(episode, STAGED_AT, &mut presentation),
+            Offer::Staged
+        );
+
+        // Somebody else's firefight, on a combatant this fact knows nothing about.
+        for tick in 0..=MAX_PRESENTED_HITS as u32 {
+            presentation.present(drew(200 + tick, BYSTANDER));
+        }
+        let claim = episode
+            .visual
+            .expect("an external-event fact carries its claim");
+        assert!(
+            !presentation.presented.iter().any(|hit| claim.covers(*hit)),
+            "the fixture has to actually overflow the ledger past this fact's own hit, or it is \
+             asserting the fix on a ledger that never lost anything",
+        );
+
+        assert!(
+            presentation.shown_for(claim),
+            "the spark WAS drawn, and the staged fact's answer may not be a search over a buffer \
+             other combatants can evict it from",
+        );
+        assert_eq!(
+            retirement(
+                &adoption,
+                &presentation,
+                None,
+                Tick(100),
+                RestoresFrom::Authority,
+                CARRIED
+            ),
+            Some(Retirement::Delivered {
+                spark_pending: false
+            }),
+            "so an unrelated rollback that carries this shove BEAT NOTHING — the player had \
+             already been shown the hit, and counting it as a bypass would corrupt the metric that \
+             decides whether the ordering rule needs to become a barrier",
+        );
+
+        // And the rule's own consumer agrees: released ON IMPACT, not on the budget.
+        assert!(order(&mut adoption, &mut presentation, episode, 0));
+        assert_eq!(
+            presentation.tally(),
+            OrderingTally {
+                released_on_impact: 1,
+                ..default()
+            },
+            "an evicted spark released on the BUDGET would log a shove as unordered that the \
+             player watched land — conservative for the shove, and a lie in the diagnostics",
+        );
+    }
+
     /// A bypass is only a bypass while the ordering rule is still holding the fact. Once the rule
     /// has released it, an unrelated rollback that carries the shove missed nothing.
     #[test]
@@ -2563,7 +2799,10 @@ mod tests {
         let mut adoption = AuthorityAdoption::default();
         let mut presentation = ImpactPresentation::default();
         let episode = fact(hull(), 1, 50, 100);
-        assert_eq!(adoption.offer(episode, STAGED_AT), Offer::Staged);
+        assert_eq!(
+            adoption.offer(episode, STAGED_AT, &mut presentation),
+            Offer::Staged
+        );
 
         presentation.present(drew(100, VICTIM));
         assert!(order(&mut adoption, &mut presentation, episode, 0));
@@ -2814,8 +3053,7 @@ mod tests {
         let stale_pose_rotation = confirmed_rotation(POSE_SAMPLED_AT);
         assert_eq!(
             restore_is_deliverable(
-                false,
-                [true; 4],
+                prepare_restores(false, [true; 4]),
                 Some(&stale_pose_position),
                 Some(&stale_pose_rotation),
                 Some(&confirmed_linear(SETTLED_AT)),
@@ -2848,8 +3086,7 @@ mod tests {
         removed_position.insert_removed(Tick(102));
         assert_eq!(
             restore_is_deliverable(
-                false,
-                [true; 4],
+                prepare_restores(false, [true; 4]),
                 Some(&removed_position),
                 Some(&confirmed_rotation(SETTLED_AT)),
                 Some(&confirmed_linear(SETTLED_AT)),
@@ -2864,8 +3101,7 @@ mod tests {
         );
         assert_eq!(
             restore_is_deliverable(
-                false,
-                [true; 4],
+                prepare_restores(false, [true; 4]),
                 None,
                 Some(&confirmed_rotation(SETTLED_AT)),
                 Some(&confirmed_linear(SETTLED_AT)),
@@ -2879,8 +3115,7 @@ mod tests {
         );
         assert_eq!(
             restore_is_deliverable(
-                false,
-                [true; 4],
+                prepare_restores(false, [true; 4]),
                 Some(&confirmed_position(SETTLED_AT)),
                 Some(&confirmed_rotation(SETTLED_AT)),
                 Some(&confirmed_linear(Tick(96))),
@@ -2961,11 +3196,18 @@ mod tests {
             world.spawn((manager, Rollback::FromState));
 
             let mut adoption = AuthorityAdoption::default();
+            let mut presentation = ImpactPresentation::default();
             let episode = arriving_at(episode_fact(hull, 50, deferred_episode(88, 100)), Tick(104));
-            assert_eq!(adoption.offer(episode, STAGED_AT), Offer::Staged);
+            assert_eq!(
+                adoption.offer(episode, STAGED_AT, &mut presentation),
+                Offer::Staged
+            );
             world.insert_resource(adoption);
             world.init_resource::<ForcedRollbackSlot>();
-            world.init_resource::<ImpactPresentation>();
+            // THE LEDGER THE FACT WAS STAGED AGAINST, not a fresh one: the staged claim's spark
+            // retention is established at the offer, so a run that swapped in an empty resource here
+            // would be asking `retirement` a question production never asks it.
+            world.insert_resource(presentation);
 
             world
                 .run_system_once(confirm_forced_rollback)
@@ -3053,6 +3295,137 @@ mod tests {
             "`request_forced_rollback` must be reached only through \
              `net::adoption::ForcedRollbackSlot::claim`, which is what makes the ONE-slot rule and \
              the cause tag enforceable. Offending files: {offenders:?}",
+        );
+    }
+
+    /// This module's production source with every comment line blanked, so a scan reads what the
+    /// COMPILER reads. The prose here quotes `Without<DisableRollback>` and every `Has<..>` spelling
+    /// repeatedly and must not be mistaken for an expression of them.
+    ///
+    /// Line structure is preserved rather than the lines deleted, so the function-boundary search
+    /// below still works and a failure's offsets still mean something.
+    fn production_source_without_comments() -> String {
+        let source = std::fs::read_to_string(file!()).expect("this file is readable");
+        let production = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .map_or(source.clone(), |(before, _)| before.to_string());
+        production
+            .lines()
+            .map(|line| {
+                if line.trim_start().starts_with("//") {
+                    ""
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The text of one top-level item, from its `fn`/`struct` line to the `}` in column zero that
+    /// closes it. Panics if the item is gone, which is the point: a scan that silently covers
+    /// nothing is worse than no scan.
+    fn item_body<'a>(source: &'a str, opener: &str) -> &'a str {
+        let start = source
+            .find(opener)
+            .unwrap_or_else(|| panic!("`{opener}` is still in this module's production source"));
+        let rest = &source[start..];
+        let end = rest
+            .find("\n}\n")
+            .unwrap_or_else(|| panic!("`{opener}` is closed by a `}}` in column zero"));
+        &rest[..end]
+    }
+
+    /// SOURCE SCAN, and the mechanical half of what the eighth review asked for. The hull's
+    /// participation in `prepare_rollback`'s restore is expressed ONCE, in
+    /// [`RollbackParticipation`], and all three sites that need it route through the shared
+    /// predicate.
+    ///
+    /// WHAT IT WOULD HAVE CAUGHT: the seventh review's High verbatim. That defect was not a missing
+    /// check — it was the same condition written two ways, `Without<DisableRollback>` as a query
+    /// FILTER on the offer and nothing at all on the request and the confirmation. A filter is
+    /// invisible to any function that is supposed to own the question, so no reader of either site
+    /// could see the divergence. Every one of the three rules below is red on that source.
+    ///
+    /// WHY THIS AND NOT THE GENERAL SCANNER. The saturating form the audit table imagines — every
+    /// resource field × every cross-schedule reader — is not buildable honestly: Bevy's schedule
+    /// order is a composed partial order across plugins, sets and `run_if`s; reads hide behind
+    /// methods; and whether a second site RELIES on a condition is semantic. It would need an
+    /// allowlist, and the allowlist would be another hand-maintained copy of the table. This is the
+    /// narrow version that can be made exact.
+    ///
+    /// It is not vacuous: each rule names an item that must exist and [`item_body`] panics if it
+    /// does not, so deleting a site fails the test instead of emptying it.
+    #[test]
+    fn the_three_participation_sites_ask_one_shared_question() {
+        let production = production_source_without_comments();
+
+        assert!(
+            !production.contains("Without<DisableRollback>"),
+            "`Without<DisableRollback>` is back. The condition must be read as DATA — \
+             `RollbackParticipation` — because a query FILTER is the one shape that cannot be handed \
+             to `prepare_restores`, and expressing it as a filter on one site while the other two \
+             cannot see it IS the seventh review's High.",
+        );
+
+        // The five spellings of lightyear's membership conditions, and the ONE declaration allowed
+        // to contain them.
+        let declaration = item_body(&production, "\nstruct RollbackParticipation {");
+        for condition in [
+            "Has<DisableRollback>",
+            "Has<PredictionHistory<Position>>",
+            "Has<PredictionHistory<Rotation>>",
+            "Has<PredictionHistory<LinearVelocity>>",
+            "Has<PredictionHistory<AngularVelocity>>",
+        ] {
+            assert_eq!(
+                production.matches(condition).count(),
+                declaration.matches(condition).count(),
+                "`{condition}` is spelled outside `RollbackParticipation`. Every site asks this \
+                 through that one type, so the conditions cannot drift apart between the offer, the \
+                 request and the post-`Prepare` proof — which is exactly how they drifted before.",
+            );
+            assert_eq!(
+                declaration.matches(condition).count(),
+                1,
+                "`RollbackParticipation` must carry `{condition}` exactly once — it is the mirror \
+                 of `prepare_rollback`'s query, and `net::lead_zero_rollback`'s conformance matrix \
+                 is what checks that mirror against the real restore.",
+            );
+        }
+
+        // The three consumers, and the accessors that are the only route to `prepare_restores`.
+        for site in [
+            "\nfn offer_hull_shock_adoptions(",
+            "\nfn request_staged_adoption(",
+            "\nfn confirm_forced_rollback(",
+        ] {
+            let body = item_body(&production, site);
+            assert!(
+                body.contains("RollbackParticipation"),
+                "`{site}` no longer asks whether `prepare_rollback` reaches the hull. All three \
+                 have to: gating only the request leaves the post-`Prepare` proof reading a \
+                 `ConfirmedHistory` lookup no restore performed, which is the half-fix the seventh \
+                 review named.",
+            );
+            assert!(
+                body.contains(".whole_body()") || body.contains(".velocities()"),
+                "`{site}` carries the participation data without routing it through \
+                 `prepare_restores`. Branching on the flags here is how the question gets asked two \
+                 slightly different ways again.",
+            );
+        }
+
+        // And the accessors are the only route: nothing else in production may call the predicate
+        // directly, or "routes through the shared predicate" stops meaning anything.
+        let accessors = item_body(&production, "\nimpl RollbackParticipationItem<'_, '_> {");
+        assert_eq!(
+            production.matches("prepare_restores(").count(),
+            accessors.matches("prepare_restores(").count(),
+            "`prepare_restores` has production CALLERS outside `RollbackParticipation`'s two \
+             accessors (its own definition is spelled `prepare_restores<`, so it is not counted \
+             here). The accessors are what name WHICH components a site's verdict is defined on; a \
+             direct caller picks its own subset, which is the sixth review's finding in a new place.",
         );
     }
 }

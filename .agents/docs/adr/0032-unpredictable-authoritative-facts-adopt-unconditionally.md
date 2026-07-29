@@ -358,15 +358,21 @@ proof: a success path that quietly loses the shove is the defect that survives r
 is what each of the previous rounds believed about the branch it was about to lose a shove in, and
 the counter is the tripwire that says the proof stopped holding.
 
-### PARTICIPATION took a seventh review, and it closed the CLASS
+### PARTICIPATION took a seventh review, and the audit that came out of it
 
 Rounds 5 and 6 both found the same defect shape — *a value latched at one schedule point and consumed
 at another* — and both fixes landed on exactly the instance the finding named. Round 7 stopped
 hunting instances and audited the class: every value `src/net/adoption.rs` establishes at one point in
-the schedule and acts on at another. **Two defects, showing up at four points; every other value is
-safe for a stated reason.** The audit is the table below — and the reconciliation of round 7's
-enumeration against an independent one turned out to say something sharper than "the class is closed",
-so read the *Is this the class?* note at the end of it before treating the class as shut.
+the schedule and acts on at another. **Two defects, showing up at four points; every other value was
+safe for a stated reason.** The audit is the table below.
+
+**It did not close the class, and the eighth review is the proof.** Round 8 found a third defect
+inside a row round 7 had already assessed as safe: the `PresentedHit` ledger's capacity argument,
+whose derivation counted TICKS while its eviction spends ENTRIES. Slice 3.11 had made `retirement` a
+second consumer of that row and correctly noted the justification now carried two loads — and the
+justification was wrong for both. Read the *Is this the class?* note at the end of the table before
+treating the class as shut, and note what the round-8 finding says about a row whose assessment reads
+"derived": a derivation is a claim, and this arc has now lost one of them.
 
 **The HIGH one was the hull's participation in the restore itself.** Everything rounds 5 and 6 fixed
 is about what a rollback would RESOLVE. None of it asks whether the hull is in the rollback at all.
@@ -429,13 +435,21 @@ it, what consumes it, and what stops the answer moving in between. A row that ca
 is a defect.
 
 **PROVENANCE, and it is the most useful thing on this page.** The table below is a RECONCILIATION of
-two independent enumerations of the same class over the same source: round 7's, which found 23 rows,
-and the implementing session's, which found 25 without having seen round 7's. They merge to 27.
-**Each pass missed rows the other found — four each way.** That asymmetry, not the row count, is the
-finding: see *Is this the class?* below.
+two independent enumerations of the same class over the same source: round 7's, and the implementing
+session's, made without having seen round 7's. Counted in the table's own rows: **29 rows — 21 BOTH,
+4 REVIEW, 4 IMPL.** Each pass therefore accounts for 25 of them and each missed four the other
+found. That asymmetry, not the row count, is the finding: see *Is this the class?* below.
 
 Provenance is marked per row. `BOTH` = independently found twice. `REVIEW` = round 7 had it and the
 implementer's pass did not. `IMPL` = the reverse.
+
+**An earlier version of this paragraph said 23 / 25 / 27, which is arithmetically impossible with
+four each way, and the eighth review caught it.** The 23 is round 7's own count in round 7's own
+granularity; this table is finer in at least two places (the four-history readiness is split into its
+velocity and pose halves, which were two separate review findings, and the staged transaction is
+split into `AuthorityAdoption::staged` and the conditions on it). Two counts taken at different
+granularities are not comparable and nothing may be derived from their difference — which is exactly
+what the old sentence did.
 
 #### Offer-time latches, consumed at the request or later
 
@@ -465,7 +479,7 @@ implementer's pass did not. `IMPL` = the reverse.
 | **`ordering = Unasked` (was `None`)** | retirement's `spark_pending` | **DEFECTIVE.** The same `None` also meant "not evaluated yet" and "there is no visual", and all three were counted as a pending spark. Fixed by slice 3.11 — three-state enum, every exit writes it, and `spark_pending` asks the presentation ledger. | BOTH |
 | `requested` | retry logic, retirement | Safe. Re-derived every frame against pending metadata / manager state, and our own adoption additionally requires the exact installed claim. | BOTH |
 | `adopted` ledger and sequence watermarks | later offers | Safe under the documented one-owner bound; the bounded ring drops the OLDEST and the watermark covers what it drops; reconnect resets timeline-specific identity. | BOTH |
-| `PresentedHit` ledger entries | `clear_to_order`, **and `retirement` since slice 3.11** | Safe — but the JUSTIFICATION had to be extended and round 7's does not cover the second consumer. Entries are historical (authority tick + victim) and cannot become false. Round 7's reasoning is that capacity eviction can only produce a conservative false negative in the ordering rule, ending in a budget release. Slice 3.11 made `retirement` read the same ledger, where that identical false negative would INFLATE `bypassed` instead. It is still safe, because `MAX_PRESENTED_HITS` is derived as `SHOCK_EPISODE_TICKS + ORDERING_BUDGET_TICKS` — nothing a staged fact can still ask about is evictable — but that derivation is now load-bearing for two consumers, not one. | BOTH |
+| **`PresentedHit` ledger entries** | `clear_to_order`, **and `retirement` since slice 3.11** | **WAS DEFECTIVE.** Entries are historical and cannot become false, but the CAPACITY argument was: `MAX_PRESENTED_HITS` was derived as `SHOCK_EPISODE_TICKS + ORDERING_BUDGET_TICKS`, i.e. as a budget in TICKS, while eviction is spent per ENTRY — and nothing bounds entries per tick, since every authority armor impact is appended and impacts are broadcast to every client. A staged fact's own spark could be drawn and then evicted by unrelated hits, after which `retirement` read "never drawn" and reported a BYPASS for a spark the player had seen. Slice 3.11 made this the row's second consumer and inverted the direction of the error; slice 3.12 removed the dependency instead of resizing it. The staged claim's drawn state now latches on `ImpactPresentation::watched`, keyed by the claim's authority identity, established at `AuthorityAdoption::offer` and outside the FIFO entirely; the buffer only SEEDS that latch for a spark drawn before its fact was staged, and losing an entry out of it can now only under-report, conservatively, in `clear_to_order`. | BOTH |
 | `OrderingTally` | `net::diagnostics` | Counters are monotonic and session-scoped on purpose (reconnect clears `presented` and deliberately not the tallies). Round 7's caveat — `bypassed` can receive a defective classification — was the `ordering == None` defect and is closed. | BOTH |
 
 #### Request-time latches, consumed later in the same `PreUpdate`
@@ -490,12 +504,23 @@ implementer's pass did not. `IMPL` = the reverse.
 
 **No, and the reconciliation is the evidence.** Two careful enumerations of one class over one file, done independently, each missed four rows the other found:
 
-- Round 7 lacked the `PredictionHistory` membership condition — the second half of `prepare_rollback`'s own query filter, sitting directly beside the `DisableRollback` condition it did find twice.
+- Round 7 lacked the `PredictionHistory` membership condition — the second half of `prepare_rollback`'s own query filter, sitting directly beside the `DisableRollback` condition it did find twice — the offer-time checkpoint frontier and `LocalTimeline::tick`, `AuthorityAdoption::staged` as a row of its own, and `max_rollback_ticks`.
 - The implementer's pass lacked the request-time four-history verdict, which is the load-bearing step of this ADR's own `Undelivered` unreachability proof; the request-time frontier and age; the offer-time `Predicted`/`Remote` membership; and `carried` as a row in its own right.
 
-If prose enumeration by a careful reader saturated, at least one of the two passes would have been complete. Neither was. So **27 rows is the best current inventory of the class, not a demonstration that the class has 27 members.** Treat it as a checklist that has caught real defects, not as a proof of exhaustiveness — and note that both passes' misses were in the same direction: a condition asserted structurally (a query filter, a schedule adjacency) is much easier to miss than a named field.
+If prose enumeration by a careful reader saturated, at least one of the two passes would have been complete. Neither was. So **29 rows is the best current inventory of the class, not a demonstration that the class has 29 members.** Treat it as a checklist that has caught real defects, not as a proof of exhaustiveness.
 
-What would actually saturate it is mechanical rather than editorial, and this module already has the precedent — `only_the_forced_rollback_slot_requests_a_forced_rollback` is a source scan that enforces an invariant no reviewer has to remember. The saturating form of this table is: every field of every resource this module owns, crossed with every system that reads it, wherever the writer and the reader sit at different schedule positions; plus every condition a query asserts at one site and another site relies on. Until something enforces that, this table is a discipline, not a guarantee.
+**What the misses are LIKE, stated at the strength the evidence supports.** Six of the eight non-shared rows are conditions asserted structurally — a query filter, a schedule adjacency, a derived local — rather than named as a field, so there is a real TENDENCY for structural assertions to be missed. It is a tendency and not an established bias, and an earlier version of this paragraph overstated it into "both passes missed in the same direction", which the eighth review killed with the table's own contents. **Two of the eight are named fields**, and both were missed by round 7: `AuthorityAdoption::staged` and `max_rollback_ticks`. (The `staged` row describes itself as a finer split of round 7's "staged transaction" consumer while being marked `IMPL`; both are true, and together they are the counterexample — round 7 named the transaction, the implementer's pass named the field.) Overstating a methodological finding is the exact failure this arc keeps catching in its own tests, and the document that records that lesson does not get to commit it.
+
+#### What was built instead of the saturating scanner
+
+The saturating form of this table would be: every field of every resource this module owns × every system that reads it, wherever writer and reader sit at different schedule positions, plus every condition a query asserts at one site and another relies on. **Round 8 assessed that and rejected it**, for reasons that survive re-reading: Bevy's schedule position is a composed partial order across plugins, sets and `run_if`s; field reads hide behind methods and helpers; whether a second site *relies* on a query condition is semantic rather than syntactic; it would flag historical identities, telemetry counters and irrelevant filters; and the allowlist needed to quiet it would become another hand-maintained copy of this table. A gate that cries wolf gets disabled.
+
+Two narrow contracts were built instead, and between them they would have caught the round-7 `Without<DisableRollback>` defect from both ends:
+
+- **`net::lead_zero_rollback::prepare_restores_exactly_the_components_the_predicate_names`** — a runtime conformance matrix. Over `DisableRollback` present/absent × each of the four `PredictionHistory<C>` present/absent (32 archetypes), it runs lightyear's own `RollbackSystems::Prepare` and asserts, per component, that what was restored is what `prepare_restores` says, and that the whole-body verdict is the conjunction. This is what makes the query-mirror a CHECKED contract rather than a reading of the dependency's source at a point in time — and it closes the concern the slice-3.11 handoff filed against itself, that the predicate mirrors lightyear's query without observing its effect.
+- **`net::adoption::the_three_participation_sites_ask_one_shared_question`** — a source scan. `Without<DisableRollback>` may not appear in the module at all; the five `Has<..>` membership spellings may appear only inside the `RollbackParticipation` query-data type; the offer, the request and the confirmation must each name that type and route through `prepare_restores`; and nothing else in production may call that predicate directly. The offer-only expression that started this cannot be written without turning it red.
+
+Neither can pass vacuously: the matrix's all-present cell demands four restores, so a run in which no rollback installed fails immediately, and its live values are distinct from both the authority's and `default()`; the scan panics rather than passing when an item it names is gone. Both were verified RED by mutation before being kept. **What they do not do is saturate the table** — they enforce one condition each, exactly, and the table remains a discipline for everything else.
 
 ### Correlating a spark with a fact is an identity test — and it took a wire field
 
@@ -584,6 +609,7 @@ the next slice. Until then every adopted fact is smoothed exactly like a mispred
 | loopback client lead 0, and −1 under the deadband | DERIVED from four sync constants; guarded by `net::lead_zero_rollback`'s lead-arithmetic test |
 | `SHOCK_EPISODE_TICKS` = 16 | CHOSEN inside a DERIVED band of `1 ..= 23` — see below |
 | `ORDERING_BUDGET_TICKS` = `RICOCHET_HOLD_TICKS` = 16 ticks | DERIVED — see below |
+| `MAX_PRESENTED_HITS` = 64 | **CHOSEN for headroom, and it used to claim to be DERIVED** — see below |
 | a ~10-tick delivery catch-up, ~156 ms, and a <120 m dead zone | **DERIVED, and never measured** |
 
 **`SHOCK_EPISODE_TICKS` is a judgement, not a derivation.** Only the CEILING is arithmetic:
@@ -597,6 +623,18 @@ every window in the band beats per-pellet and none of them gets the hitch rate b
 spends frozen at armor waiting for the same authority verdict. Past it the shell dissolves and no
 impact is ever presented for that shot, so a longer wait cannot buy a visual — it can only make the
 shove lag something that is never coming.
+
+**`MAX_PRESENTED_HITS` is the one number in this table that lost a derivation.** It was
+`SHOCK_EPISODE_TICKS + ORDERING_BUDGET_TICKS` = 32, on the reasoning that nothing older than that
+span of ticks can still be asked about. The span is right; the units are not. Capacity is spent per
+ENTRY and the derivation counted TICKS, and nothing bounds entries per tick — every authority armor
+impact from every combatant lands in the same buffer. What made this matter rather than merely being
+untidy is the second consumer slice 3.11 added: an evicted spark is a conservative false negative in
+`clear_to_order` and an INFLATED `bypassed` in `retirement`, and `bypassed` is the number that would
+justify replacing the ordering rule with a real presentation barrier. The fix is not a bigger number:
+the staged fact's drawn state now latches per fact, outside the buffer. The buffer's remaining job is
+to seed that latch across one gap — a spark drawn before its fact was staged — and 64 is a retention
+depth chosen for headroom over that gap, stated as a choice.
 
 The last row needs saying out loud, because it is the shape of number this repo has been burned by
 before. The chain is: a representative ~10-tick catch-up at 64 Hz is 156.25 ms; at the Tiger's
@@ -624,6 +662,11 @@ to be derived, never measured, and 2.5× too large.
   hull's membership in `prepare_rollback`'s query — and the full list of values latched at one
   schedule point and consumed at another is the audit table above, which a new latched value is
   expected to extend.
+- **That membership condition is now two mechanical contracts rather than a prose assurance.** One
+  source scan holds it to a single spelling and a single predicate; one runtime matrix holds that
+  predicate against lightyear's own `Prepare` over all 32 archetypes the two conditions can produce.
+  Neither saturates the audit table, and the rejection of the scanner that would have tried to is
+  recorded above rather than left as an open intention.
 - **`HullShock` stays owner-private** through `CombatDisclosure`: persistent, per-target, aggregate
   state. Public `ImpactConfirm` is not a contradiction — transient, per-shot, spatially anchored, and
   broadcast including to clients who will never render it. Naming a victim on it IS a deliberate
