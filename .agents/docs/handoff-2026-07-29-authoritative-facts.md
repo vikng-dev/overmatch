@@ -1,7 +1,7 @@
 # Handoff — authoritative-facts arc + simplifier experiment
 
-**Written 2026-07-29, header current as of slice 3.10.** State as of commit `a0ac961` on
-`feat/authoritative-facts`.
+**Written 2026-07-29, header current as of slice 3.11.** State as of the slice-3.11 commit on
+`feat/authoritative-facts`; the code round 7 reviewed is `a0ac961`.
 Read this if the session ended mid-arc. It is written for whoever picks it up, human or agent.
 
 ---
@@ -54,10 +54,12 @@ surface `0xf321_3c48_61b3_bfea`, types `0x268a_d4fb_e297_639b`, manifest `0x13cd
 
 ## 3. The review history — read this before trusting anything
 
-Codex has reviewed this arc **six times** and returned DO NOT SHIP **five times**. Every round found
-that the previous fix read as complete and was not — including the two rounds that were themselves
-fixing a partial fix. **Twice a newly added test asserted the defect as success, and twice a newly
-added test claimed coverage it did not have.**
+Codex has reviewed this arc **seven times** and returned DO NOT SHIP **all seven times**. (An earlier
+version of this line said six reviews and five DO NOT SHIP while all six table rows said DO NOT SHIP;
+it was six of six, and it is now seven of seven.) Every round found that the previous fix read as
+complete and was not — including the three rounds that were themselves fixing a partial fix. **Twice a
+newly added test asserted the defect as success, and twice a newly added test claimed coverage it did
+not have.**
 
 | Round | On | Verdict | What it found |
 |---|---|---|---|
@@ -67,6 +69,7 @@ added test claimed coverage it did not have.**
 | 4 | `2a2e282` | DO NOT SHIP | Correlation **confirmed settled**; `Adopted` still retired facts whose restore carried nothing |
 | 5 | `4f523b1` | DO NOT SHIP | The determinacy argument is **false** — confirmed history is not append-only, and the predicate is proven at staging but never revalidated at the request. Fixed by slice 3.9 (below); round 5 passed C, E, F, G, H |
 | 6 | `baade0b` | DO NOT SHIP (1 High, 2 Low) | The revalidation covered **half the predicate**: only the velocities, while the offer proved all four rigid-body histories, so a late `Position` removal reached a claimed rollback that deleted the component and closed as `Adopted`. Plus two overstated coverage claims in the new tests and a false comment. Fixed by slice 3.10 (below); round 6 passed A, B, C, D, E, H |
+| 7 | `a0ac961` | DO NOT SHIP (1 High, 3 Low) | **Audited the CLASS, not another instance.** 23 latched values assessed, 21 safe with stated reasons, 2 defective: the hull's *participation* in `prepare_rollback` was latched at the offer and never re-established (silent loss — `DisableRollback` arrives, the restore skips the hull, `carried` is computed from a lookup no restore performed, the fact closes as `Adopted`), and `ordering == None` carried three meanings so `bypassed` was inflated. Plus a false justification for the pose asymmetry and a wrong count in this document. Fixed by slice 3.11 (below) |
 
 **The operational lesson, and it is the important part of this document: a green test suite has
 never once caught one of these.** The tests were written by the same reasoning that produced the
@@ -228,24 +231,98 @@ anywhere from 17 to 100; it now runs twice, one tick apart, and asserts the ages
 for a reason unrelated to call counts — that path runs in `Update` on `Interpolated` entities, while
 the gap is inside one `PreUpdate` on a `Predicted` hull — and that is now the wording.
 
+### What round 7 found, and what slice 3.11 did about it
+
+**Round 7 did not look for a third instance. It enumerated the class.** The defect shape both rounds 5
+and 6 found is *a value latched at one schedule point and consumed at another*, and round 7 assessed
+every such value in `src/net/adoption.rs`: 23 of them, 21 safe with stated reasons, 2 defective. That
+enumeration is the round's most valuable artifact and is now folded into ADR-0032 as **the latch audit
+table** — latched value → what establishes it → what consumes it → why the answer cannot move in
+between. Adding a new latched value to this module means adding a row. A row that cannot state a
+reason is a defect.
+
+**The High: the hull's PARTICIPATION in the restore was latched at the offer.** Everything rounds 5
+and 6 fixed is about what a rollback would RESOLVE; none of it asks whether the hull is in the
+rollback at all. `prepare_rollback`'s query is filtered `Without<DisableRollback>` and REQUIRES a
+`&mut PredictionHistory<C>` per component, and this module expressed that once — as a `Without` filter
+on the offer's query, which is the one shape it cannot hand to the shared predicate.
+
+The chain needs no adversarial timing. `net::rig::upgrade_predicted_to_dynamic` inserts
+`DisableRollback` in `Update`; `enable_rollback_after_first_tick` removes it in `FixedLast`; Bevy runs
+`RunFixedMainLoop` before `Update`, so the marker necessarily survives to the next `PreUpdate`. The
+request revalidated only histories and claimed the slot, `prepare_rollback` skipped the hull for every
+component, and `confirm_forced_rollback` then computed `carried` from a `ConfirmedHistory` lookup **no
+restore had performed** — that buffer answers "what WOULD a restore resolve", and is unchanged by the
+hull having been skipped. `carried` came back true and the fact closed as `Adopted`. A silent loss on
+the success path, again. The same hole let somebody else's rollback close the fact as `Delivered` and
+increment `bypassed` for a hull it never touched.
+
+**Codex's warning was that fixing the request filter alone would be partial, and it is honoured:
+`prepare_restores` is asked in BOTH places.** `restore_is_deliverable` calls it first, before any
+history is consulted (a hull the restore skips is not waiting for a better sample), and
+`confirm_forced_rollback` calls it over the two velocity components its verdict is defined on. An
+excluded hull now produces a WAIT at the request; if a future edit ever claims anyway it produces
+`Undelivered` — loud and counted — never `Adopted`. Both queries carry the condition as data; the
+`Without` filter is gone. That the archetype cannot move between `Prepare` and the proof is checked,
+not assumed: one `PreUpdate`, one Bevy sync point, `prepare_rollback`'s commands touch only the
+restored component and `PreviousVisual`, and lightyear's only writer of `DisableRollback` is
+`check_rollback`'s skip-despawn bookkeeping, which runs before `Prepare` over a different entity set.
+
+`net::lead_zero_rollback::a_hull_excluded_from_prepare_is_never_requested_and_never_adopted` is the
+test, and it was verified RED against the pre-3.11 code with the exact defect signature: the fact
+CLOSED, `released_on_budget: 1`, 16 ticks replayed by a real rollback, and the hull's `HullShock` still
+`default()` — a full rollback ordered and executed while the hull it was ordered for was untouched.
+Two unit fixtures cover the seam and the predicate.
+
+**Low 1: `ordering == None` carried three meanings and corrupted `bypassed`.** "Not yet evaluated",
+"there is no visual", and "the spark is genuinely pending" were one value, and `retirement` read all
+three as the third. `bypassed` is the number that would justify replacing this best-effort rule with a
+real presentation barrier, so an inflated count misleads exactly the decision it informs. The latch is
+now a three-state enum (`Unasked` / `HoldingForSpark` / `Released`) with every exit from
+`clear_to_order` writing it, and `spark_pending` no longer reads the latch for the pending question at
+all — it asks `ImpactPresentation`, the same ledger the rule reads, so a spark drawn since the rule
+last ran counts.
+
+**Low 2: the pose-asymmetry justification was factually wrong, though the asymmetry is right.** The
+claim that a stationary shipping hull publishes no new `Position` is false: `net::physics` disables
+Avian island sleeping, Avian's `writeback_solver_bodies` takes `&mut Position`/`&mut Rotation` for
+every solver body every step, and both the hit and the episode's close happen in `FixedUpdate` ahead
+of that step — so a stationary hull's pose IS marked changed before the checkpoint carrying its
+`HullShock`. **The weak pose predicate stays**, because it is correct for a reason that was never
+about the wire: the pose carries none of the event, so a recency clause on it can only refuse restores
+that are sound. Codex confirmed the other half independently (a forced request skips `check_rollback`'s
+policy branch, so it writes no `SameAsPrecedent` markers). The claim is replaced in `adoption.rs` and
+ADR-0032, and the tick-80 unit fixture now says it pins the POLICY and that its number is chosen to
+separate the two predicates, not claimed as a shipping shape.
+
+**Low 3: this document's own review count was internally false** — six reviews and five DO NOT SHIP,
+against six table rows all reading DO NOT SHIP. Corrected above; it is seven of seven now.
+
+**Wire is UNCHANGED at `PROTOCOL_REV` 24.** No wire type, field, order or registration was touched;
+every change is client-local rollback bookkeeping.
+
 ---
 
 ## 4. Running at handoff
 
-Nothing. Round 6's findings are all fixed in `a0ac961`; no job is in flight, the branch is clean, no
-agent holds a lock, and the simplifier is idle.
+Nothing. Round 7's findings are all fixed in the slice-3.11 commit; no job is in flight, the branch is
+clean, no agent holds a lock, and the simplifier is idle.
 
 ---
 
 ## 5. What is next, in order
 
-1. **Send slice 3.10 to review as round 7.** File it the way rounds 3.5–3.10 were filed: the review's
+1. **Send slice 3.11 to review as round 8.** File it the way rounds 3.5–3.11 were filed: the review's
    own file:line citations, and an explicit instruction to say where the brief is wrong against the
-   code — that instruction has caught a real error of mine in four of six rounds, and rounds 3.9 and
-   3.10 each corrected one of the previous review's own claims (see the two notes under ground 2
-   above). Round 7's job is to check whether 3.10's fix is, once again, only the instance and not the
-   class: the specific question to put to it is whether any OTHER readiness or delivery fact in this
-   module is established at one point and acted on at another.
+   code — that instruction has caught a real error of mine in five of seven rounds, and rounds 3.9,
+   3.10 and 3.11 each corrected one of the previous review's or brief's own claims. Round 7 closed the
+   *latch* class and left the audit table in ADR-0032, so round 8's job is a different question, not a
+   fourth pass at the same one: **is the class boundary itself right?** Two specific things to put to
+   it — (a) the audit's soundness argument for the post-`Prepare` proof is a claim about what runs
+   between `RollbackSystems::Prepare` and `RollbackSystems::Rollback`, which is a DEPENDENCY property
+   like the `Undelivered` proof and has no tripwire; (b) `prepare_restores` mirrors lightyear's query
+   rather than observing its effect, so a lightyear change that keeps the archetype and changes the
+   restore would pass it silently.
 2. **Slice 4 — `render_error`** (task #32, held all session). Fix the one-frame render freeze per
    rollback, and honour the `AdoptionCause` tag so an adopted authority impulse stays sharp instead
    of being smoothed like a misprediction. `AdoptionCause` currently has **no consumer** —

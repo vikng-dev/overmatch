@@ -310,10 +310,25 @@ of them — will the restore leave a rigid body standing at all, or delete a com
 client's own prediction under an authority label. One predicate for all four is wrong in both
 directions. The weak one on the velocities is the slice-3.7 defect verbatim. The strong one on the
 pose is strictly stronger than what it replaces, so every verdict it changes turns a restorable pose
-into a wait — and those waits are reachable, because replication transmits only components that
-CHANGED and the `SameAsPrecedent` markers that would date a stationary hull's pose forward come from
-`check_rollback`'s policy branch, which our own forced request skips. A hull that was standing still
-when it was shot would stall until the replay window dropped its shove.
+into a wait — and a wait costs a shove, because the fact sits in the single staging slot until the
+replay window drops it.
+
+**The reachability argument that used to be attached to that was FALSE, and the seventh review killed
+it.** It said replication transmits only components that CHANGED, so a hull standing still when it
+was shot publishes no new `Position` and the strong predicate would stall it. Three facts against
+that: `src/net/physics.rs` disables Avian's island sleeping for network physics; Avian's
+`writeback_solver_bodies` takes `&mut Position` and `&mut Rotation` for every `SolverBody` on every
+physics step; and both the hit and the `HullShock` close happen in `FixedUpdate`, ahead of Avian's
+`FixedPostUpdate` step. So even a numerically stationary hull has both pose components marked changed
+before the checkpoint that carries its `HullShock`, and the pose is confirmed at or after `settled_at`
+in the ordinary case. **The asymmetry is unchanged and still correct** — it rests on what the
+components MEAN for this fact, not on a claim about the wire, and no shipping shape is claimed for it
+now. The other half of the old argument survives review and is a real property, just not the one that
+makes the weak predicate right: a forced request makes `check_rollback` skip its policy branch, so the
+`SameAsPrecedent` markers that branch writes are not available to date a pose forward. The unit
+fixture pinning the policy (`the_pose_is_asked_a_weaker_question_than_the_shove_and_that_is_deliberate`)
+now says that it pins the POLICY and that its 20-tick-old pose is chosen to separate the two
+predicates, not claimed to be what the wire produces.
 
 The same round found the predicate reading one lookup where `prepare_rollback` reads another.
 `ConfirmedHistory` stores an authoritative REMOVAL as an ordinary entry, so a late removal
@@ -342,6 +357,104 @@ can retire either without touching a line here. That is exactly why the branch s
 proof: a success path that quietly loses the shove is the defect that survives review, "unreachable"
 is what each of the previous rounds believed about the branch it was about to lose a shove in, and
 the counter is the tripwire that says the proof stopped holding.
+
+### PARTICIPATION took a seventh review, and it closed the CLASS
+
+Rounds 5 and 6 both found the same defect shape — *a value latched at one schedule point and consumed
+at another* — and both fixes landed on exactly the instance the finding named. Round 7 stopped
+hunting instances and audited the class: every value `src/net/adoption.rs` establishes at one point in
+the schedule and acts on at another. **Two of them were defective; the rest are safe for stated
+reasons.** The audit is the table below, and it is the evidence that the class is closed rather than
+merely quiet.
+
+**The HIGH one was the hull's participation in the restore itself.** Everything rounds 5 and 6 fixed
+is about what a rollback would RESOLVE. None of it asks whether the hull is in the rollback at all.
+lightyear's `prepare_rollback::<C>` query is
+`(Entity, Option<&mut C>, &mut PredictionHistory<C>, Option<&mut ConfirmedHistory<C>>)` filtered
+`Without<DisableRollback>`, so membership is exactly two conditions — and this module expressed them
+once, as a `Without` filter on the offer's query. A filter cannot be handed to the function that owns
+the readiness question, and neither the request nor the post-`Prepare` proof re-established it.
+
+The chain is production-reachable and needs no adversarial timing. `net::rig`'s
+`upgrade_predicted_to_dynamic` inserts `DisableRollback` in `Update` when a late `Predicted` marker
+promotes an already-attached rig; `enable_rollback_after_first_tick` removes it in `FixedLast`. Bevy
+runs `RunFixedMainLoop` — and with it that remover — BEFORE `Update`, so an insertion necessarily
+survives to the next `PreUpdate`, which is the schedule this module lives in. A fact staged while the
+hull was eligible was then requested on a hull that was not: revalidation passed (it asked only about
+histories), the slot was claimed, `prepare_rollback` skipped the hull for every component, and
+`confirm_forced_rollback` computed `carried` from a `ConfirmedHistory` lookup **no restore had
+performed**. `carried` came back true and the fact closed as `Adopted`. Nothing delivered, nothing
+counted, on the success path. The same hole made a rollback somebody ELSE ordered close the fact as
+`Delivered` and increment `bypassed` for a hull it never touched.
+
+**Fixing only the request filter would have been another partial fix**, which is the trap rounds 5 and
+6 both fell into, so the fix is two changes. `prepare_restores` is the membership question, mirroring
+both of lightyear's conditions rather than paraphrasing them, and it is asked in both places:
+`restore_is_deliverable` calls it FIRST (before any history is consulted — a hull the restore skips is
+not waiting for a better sample), and `confirm_forced_rollback` calls it over the two velocity
+components its verdict is defined on. An excluded hull therefore produces a WAIT at the request, and
+if a future edit ever claims anyway it produces `Undelivered` — loud and counted — never `Adopted`.
+Both queries carry the condition as DATA now; the `Without` filter is gone, because a filter is the
+one shape the shared predicate cannot be given.
+
+That the archetype cannot move between `Prepare` and the proof is a checked claim, not an assumption:
+both run inside one `PreUpdate` with only Bevy's own sync point between them, `prepare_rollback`'s
+commands touch the restored component and `PreviousVisual` and nothing else, and lightyear's only
+writer of `DisableRollback` is `check_rollback`'s deterministic skip-despawn bookkeeping — which runs
+before `Prepare` and only over entities in `PredictionManager::deterministic_skip_despawn`.
+
+**The LOW one corrupted the metric that decides a design question.** `AuthorityAdoption::ordering` was
+an `Option<bool>` whose `None` carried three different situations: the rule had not been consulted
+(every early return in `request_staged_adoption` ahead of `clear_to_order`), the fact had no visual to
+be ordered against (a `Misprediction` returns before latching), and the rule genuinely had the fact
+and was holding it. `retirement` read that one `None` as "the spark is pending" and incremented
+`bypassed` in all three. No simulation state depended on it — but `bypassed` is precisely the number
+that would justify replacing this best-effort rule with a real presentation barrier, so an inflated
+count would mislead the decision it exists to inform.
+
+The latch is now a three-state `Ordering` enum (`Unasked` / `HoldingForSpark` / `Released`) and every
+exit from `clear_to_order` writes it, so the one state `retirement` must not observe is the one no
+exit writes. And `spark_pending` is no longer read off the latch at all: it is a question about what
+has been DRAWN, so it asks `ImpactPresentation` — the same ledger the rule reads — while using the
+latch only for the thing a latch can answer, that a released fact is released. A spark drawn between
+the frame the rule last ran and the frame the rollback lands now counts, which the latch could not
+see.
+
+### The latch audit — every value established at one schedule point and consumed at another
+
+Round 7's contribution beyond the two fixes. **Adding a new latched value to `net::adoption` means
+adding a row here**, with the reason it is safe stated in the same terms: what establishes it, what
+consumes it, and what stops the answer moving in between. A row that cannot state one is a defect.
+
+The two defective rows are marked and are fixed by slice 3.11.
+
+| Latched value | Established at | Consumed at | Why that is safe |
+|---|---|---|---|
+| `AuthorityAdoption::staged` | offer | request, confirm | It IS the transaction. Every *condition* on it is re-established at the request; re-offering the same identity deliberately leaves it untouched. |
+| `staged_at` | first staging only | request, as `waited` | A LOCAL patience clock by definition — a re-offer must not restart it, which is the whole reason it is not re-stamped. |
+| `requested` | claim | next frame's request, confirm | Bookkeeping only: re-derived from `StateRollbackMetadata` / `PredictionManager` every frame and cleared when they disagree. |
+| **`ordering`** | `clear_to_order` | `retirement` | **DEFECTIVE — three meanings in one `None`.** Fixed: three-state enum, and `spark_pending` asks the presentation ledger. |
+| `adopted` ledger | close | offer | Monotone. A closed fact must never be re-offered; the bounded ring drops the OLDEST, and the watermark covers what it drops. |
+| `watermarks` | close | offer | Wrapping-newer comparison per (source, entity); `Entity` carries its own generation, so a respawn is a different key. |
+| `FactId::entity` | offer | request, confirm | Bevy generations make a despawn/respawn compare unequal, and a missing hull answers `Unready::Hull` rather than a stale row. |
+| `FactId::sequence`, `checkpoint` | offer | offer dedupe | Identity only; never an input to readiness or delivery. |
+| `produced_at` | offer | request, confirm | It is the tick the fact is ABOUT. Everything conditional is re-evaluated *at* it, never carried forward from it. |
+| `settled_at` | offer | request, confirm | Derived from `HullShock::tick`, an authority fact that cannot change for a given episode. Deliberately not a wire field, so the two cannot disagree. |
+| `cause` | offer | confirm | A property of the producer; checked at confirm against the installed claim's own cause, not trusted. |
+| `visual` (`victim`, `from`, `through`) | offer | request | All three are AUTHORITY facts read off the episode. Set membership, not a window over local time — which is what round 2 killed. |
+| **hull participation in `Prepare`** | offer (query filter) | request, confirm | **DEFECTIVE — never re-established.** Fixed: `prepare_restores`, asked at both. |
+| `PredictionHistory` membership | never asked | — | **DEFECTIVE by omission**, same fix. |
+| `restore_is_deliverable`, velocity half | offer | request | Round 5's finding; re-established at the request. |
+| `restore_is_deliverable`, pose half | offer | request | Round 6's finding; re-established at the request through the same signature. |
+| `hull_shock_mismatch` verdict | offer | — | Not carried. The mismatch is what the fact IS; once the authority published the episode it cannot un-happen, and dedupe is by identity. |
+| `last_confirmed_tick`, `last_confirmed_replicon_tick` | offer | — | Not carried: the request re-reads `ReplicationCheckpointMap` before it will claim. |
+| `now` (`LocalTimeline::tick`) | offer | — | Not carried: `age` and `waited` are both recomputed from the current tick every frame. |
+| `max_rollback_ticks` | — | request | Read fresh from the `PredictionManager` each frame. |
+| `ForcedRollbackSlot::claim` | request | confirm | Same `PreUpdate`, and `confirm_forced_rollback` `take`s it unconditionally every frame, so it cannot survive one. |
+| `ForcedRollbackSlot::installed` | confirm | `net::render_error`, later in the frame | Derived from `claim` filtered on the tick lightyear actually installed, and re-derived every frame. |
+| `ImpactPresentation::presented` | `Impact` observer, in the march | request, confirm | Entries are AUTHORITY tick + victim, so they do not decay with local time. The ring is sized from `SHOCK_EPISODE_TICKS + ORDERING_BUDGET_TICKS`; overflow drops the OLDEST, which can only cost a release-on-impact the budget then covers loudly. |
+| `ImpactPresentation::tally` | throughout | `net::diagnostics` | Instrumentation, monotone, and session-scoped on purpose — a reconnect clears `presented` and deliberately does not clear the tallies. |
+| `RestoresFrom` / `started` | confirm | confirm | Read and used in the same system, off the same `PredictionManager`. |
 
 ### Correlating a spark with a fact is an identity test — and it took a wire field
 
@@ -466,6 +579,10 @@ to be derived, never measured, and 2.5× too large.
   That was the constraint the design was built around, not a happy outcome.
 - **`request_forced_rollback` now has exactly one production call site**, enforced by a source scan
   rather than by convention, and every forced rollback in the tree carries a cause.
+- **Every condition this module acts on is re-established where it is acted on**, including the
+  hull's membership in `prepare_rollback`'s query — and the full list of values latched at one
+  schedule point and consumed at another is the audit table above, which a new latched value is
+  expected to extend.
 - **`HullShock` stays owner-private** through `CombatDisclosure`: persistent, per-target, aggregate
   state. Public `ImpactConfirm` is not a contradiction — transient, per-shot, spatially anchored, and
   broadcast including to clients who will never render it. Naming a victim on it IS a deliberate

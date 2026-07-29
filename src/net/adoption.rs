@@ -190,6 +190,19 @@
 //! through [`restore_is_deliverable`], which is where the per-component predicates and the reason
 //! they DIFFER are written down.
 //!
+//! A SEVENTH found the same shape one level up, and closed the CLASS. Everything above is about
+//! what a restore would RESOLVE; none of it asks whether the hull is in the restore at all.
+//! `prepare_rollback`'s query excludes a hull carrying `DisableRollback` and any component with no
+//! `PredictionHistory`, and that condition was expressed once — as a `Without` filter on the offer.
+//! `net::rig` inserts that marker in `Update` on the late-prediction promotion path and removes it
+//! in `FixedLast`, which Bevy runs FIRST, so the marker necessarily survives into a later
+//! `PreUpdate`: the request claimed the slot on the staging-time archetype, the restore skipped the
+//! hull, and the fact closed as an adoption having delivered nothing — because `carried` was read
+//! from a `ConfirmedHistory` lookup no restore had performed. [`prepare_restores`] is that question,
+//! asked at the request AND after `RollbackSystems::Prepare`, and the same round's audit of every
+//! other value this module latches at one schedule point and consumes at another is recorded in
+//! ADR-0032.
+//!
 //! The second is not belt-and-braces. A fact is staged on one frame and requested on a LATER one —
 //! an [`AdoptionCause::ExternalEvent`] waits for its spark, for up to [`ORDERING_BUDGET_TICKS`] —
 //! and confirmed history is not append-only underneath it: `ConfirmedHistory::insert_raw` does a
@@ -358,11 +371,18 @@ pub(crate) struct OrderingTally {
     /// fact's own hits drawn at all.
     pub(crate) released_on_budget: u32,
     /// Shoves that landed WITHOUT this module's decision: a CONFIRMED-STATE rollback it did not
-    /// order restored the authority's post-hit hull state while the fact was still waiting for its
-    /// spark. THE honesty number — the ordering rule is best effort, and this is the size of the
-    /// gap. It counts only rollbacks whose restore is ESTABLISHED to have carried the shove
-    /// ([`restore_carries_the_shove`]): one that restored from the client's own prediction, or from
-    /// a confirmed sample older than the hit, leaves the fact staged and is not counted here.
+    /// order restored the authority's post-hit hull state while NONE of the fact's own hits had been
+    /// drawn. THE honesty number — the ordering rule is best effort, and this is the size of the
+    /// gap, so it is also the number that would justify replacing the rule with a real presentation
+    /// barrier. Everything it counts is therefore ESTABLISHED rather than assumed:
+    ///
+    /// - the restore reached this hull — see [`prepare_restores`]; a rollback that skipped it
+    ///   delivered nothing whatever its start tick says;
+    /// - it carried the event — see [`restore_carries_the_shove`]; one restoring from the client's
+    ///   own prediction, or from a confirmed sample older than the hit, leaves the fact staged;
+    /// - and it beat the SPARK, asked of [`ImpactPresentation`] rather than of the ordering latch.
+    ///   A fact the rule released, and a fact with no visual to be ordered against, bypassed
+    ///   nothing; reading the latch's absence counted both.
     pub(crate) bypassed: u32,
     /// Shoves this module ordered a rollback for and LOST: its own claim was installed, and
     /// `prepare_rollback` restored a hull velocity older than the event's settling tick, so the fact
@@ -592,6 +612,32 @@ pub(super) fn wrapping_newer(candidate: u32, current: u32) -> bool {
     candidate != current && candidate.wrapping_sub(current) as i32 > 0
 }
 
+/// WHERE THE STAGED FACT STANDS with the best-effort ordering rule.
+///
+/// Three states, because the `Option<bool>` this replaces had two and was being read for three. Its
+/// `None` meant "the rule has not been consulted" (every early return in
+/// [`request_staged_adoption`] ahead of [`clear_to_order`] leaves it there), and "there is no visual
+/// to be ordered against" (a [`AdoptionCause::Misprediction`] returns before latching), and "the
+/// rule has the fact and is holding it for a spark". [`retirement`] read that one `None` as the
+/// third meaning and counted [`OrderingTally::bypassed`] for all three.
+///
+/// No simulation state ever depended on the confusion — but `bypassed` is the number that decides
+/// whether this rule needs to become a real presentation barrier, so a count inflated by facts the
+/// rule never held would mislead exactly the decision it exists to inform.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum Ordering {
+    /// No frame has put the question yet: every request so far returned before reaching
+    /// [`clear_to_order`], because the fact was not requestable on it.
+    #[default]
+    Unasked,
+    /// The rule HAS the fact and is holding it: none of its own hits has been drawn and
+    /// [`ORDERING_BUDGET_TICKS`] has not run out.
+    HoldingForSpark,
+    /// The rule is not holding the fact — it either released it (by either verdict, tallied once)
+    /// or never had anything to hold it for.
+    Released,
+}
+
 /// The delivery ledger for authoritative facts. NOT rollback-tracked — see the module doc.
 #[derive(Resource, Default)]
 pub(crate) struct AuthorityAdoption {
@@ -603,9 +649,9 @@ pub(crate) struct AuthorityAdoption {
     /// Whether [`request_staged_adoption`] currently owns the forced-rollback slot for the staged
     /// fact. Bookkeeping only: it is re-derived from the slot every frame rather than trusted.
     requested: bool,
-    /// Whether the staged fact has already cleared the ordering rule, and with what verdict. Latched
-    /// so a retried request tallies [`ImpactPresentation`] once per FACT rather than once per frame.
-    ordering: Option<bool>,
+    /// Where the staged fact stands with the ordering rule. Latched so a retried request tallies
+    /// [`ImpactPresentation`] once per FACT rather than once per frame.
+    ordering: Ordering,
     adopted: Vec<FactId>,
     watermarks: Vec<FactWatermark>,
 }
@@ -630,7 +676,7 @@ impl AuthorityAdoption {
                 self.staged = Some(fact);
                 self.staged_at = Some(now);
                 self.requested = false;
-                self.ordering = None;
+                self.ordering = Ordering::Unasked;
                 Offer::Staged
             }
         }
@@ -683,7 +729,7 @@ impl AuthorityAdoption {
         self.staged = None;
         self.staged_at = None;
         self.requested = false;
-        self.ordering = None;
+        self.ordering = Ordering::Unasked;
     }
 }
 
@@ -808,6 +854,13 @@ enum Unready {
     Shove,
     /// There is no hull to read histories off — a despawn between staging and this frame.
     Hull,
+    /// The hull carries `DisableRollback`, so `prepare_rollback` skips it for EVERY component and a
+    /// rollback ordered for it restores nothing at all.
+    Excluded,
+    /// The hull is not excluded, but one of the four rigid-body components has no
+    /// `PredictionHistory` — lightyear's rollback-membership marker — so the restore would reach
+    /// only part of the body.
+    Unhistoried,
 }
 
 impl Unready {
@@ -824,11 +877,61 @@ impl Unready {
                  settling tick, so the restore would install a PRE-hit value and carry nothing"
             }
             Unready::Hull => "the hull no longer exists, so no restore can be established at all",
+            Unready::Excluded => {
+                "the hull carries `DisableRollback`, so `prepare_rollback` skips it entirely and \
+                 the rollback would restore NONE of its live components"
+            }
+            Unready::Unhistoried => {
+                "one of the hull's four rigid-body components has no `PredictionHistory`, which is \
+                 the membership `prepare_rollback`'s query REQUIRES — so the restore would reach \
+                 only part of the body"
+            }
         }
     }
 }
 
-/// EVERY component-specific condition on a state restore at `restored_at`, asked in ONE place.
+/// EVERY ARCHETYPE CONDITION lightyear's `prepare_rollback` puts on a hull, asked in ONE place.
+///
+/// The two questions this module asks about a restore are separable and both are necessary. The
+/// history predicates above ask what a restore WOULD RESOLVE if it happened. This asks whether the
+/// hull is in the restore at all — and the seventh review found it asked once, as a query filter on
+/// the offer, and never again.
+///
+/// `prepare_rollback::<C>` is registered once per predicted component; its query is
+/// `(Entity, Option<&mut C>, &mut PredictionHistory<C>, Option<&mut ConfirmedHistory<C>>)` filtered
+/// `Without<DisableRollback>`. Membership is therefore exactly two things, mirrored here rather than
+/// paraphrased:
+///
+/// - `DisableRollback` excludes the hull from every component's restore AT ONCE. It is a marker this
+///   codebase itself inserts in `Update` (`net::rig`'s late-prediction promotion) and removes in
+///   `FixedLast`, and Bevy runs `RunFixedMainLoop` BEFORE `Update`, so an insertion necessarily
+///   survives to the next `PreUpdate` — the schedule this module lives in. Reachable, not theoretical.
+/// - `PredictionHistory<C>` is REQUIRED in that query, not optional. A component without one is
+///   skipped even on a hull that is otherwise rolled back.
+///
+/// Asked at the REQUEST it refuses to claim a slot for a rollback that would restore nothing. Asked
+/// after `RollbackSystems::Prepare` it is what makes the delivery verdict a statement about what
+/// happened rather than a counterfactual: `restore_carries_the_shove` reads `ConfirmedHistory`, which
+/// answers "what WOULD a restore here resolve" whether or not any restore touched this hull, so on
+/// an excluded hull it reports a delivery that provably did not occur.
+///
+/// `N` is however many components the asking site's verdict covers — all four for readiness, the two
+/// velocities for the post-`Prepare` delivery proof. Passing a subset is not a weaker question, it is
+/// the question that site's answer is defined on.
+fn prepare_restores<const N: usize>(
+    rollback_disabled: bool,
+    prediction_histories: [bool; N],
+) -> Result<(), Unready> {
+    if rollback_disabled {
+        return Err(Unready::Excluded);
+    }
+    if !prediction_histories.into_iter().all(|present| present) {
+        return Err(Unready::Unhistoried);
+    }
+    Ok(())
+}
+
+/// EVERY condition on a state restore at `restored_at`, asked in ONE place.
 ///
 /// The offer and the request have to ask this of the SAME components. A fact is staged on one frame
 /// and requested many frames later, so both are real evaluations of a moving answer — and the sixth
@@ -837,6 +940,11 @@ impl Unready {
 /// off the hull, and the fact closed as [`Retirement::Adopted`] because both velocities were carried.
 /// This signature is what stops that recurring: no caller can ask half the question, and the query
 /// that feeds it cannot silently shrink.
+///
+/// The seventh review found the same shape one level up, in the condition the histories are read
+/// UNDER rather than in the histories themselves — whether the hull is in `prepare_rollback`'s query
+/// at all. [`prepare_restores`] is that question and it is asked FIRST here, because a hull the
+/// restore skips makes every history answer below a counterfactual.
 ///
 /// # TWO PREDICATES, ONE PER ROLE — and the asymmetry is the point, not an oversight
 ///
@@ -860,13 +968,33 @@ impl Unready {
 /// retires the shove against it.
 ///
 /// `restore_carries_the_shove` on the pose is strictly STRONGER than `authority_reaches` — it is
-/// that predicate plus a recency clause — so every verdict it changes turns a perfectly restorable
-/// pose into a WAIT, and those waits are reachable rather than theoretical. Replication transmits
-/// only components that CHANGED, so a hull that was standing still when it was shot publishes no new
-/// `Position`; and the `SameAsPrecedent` markers that would otherwise date its pose forward are
-/// written by `check_rollback`'s policy branch, which this module's own forced request skips. Such a
-/// fact would stall until the replay window dropped it — a shove lost to a clause protecting nothing.
+/// that predicate plus a recency clause — and a recency clause on the pose asks the restore to prove
+/// something about a component the event never touched. Every verdict it changes turns a perfectly
+/// restorable pose into a WAIT that protects nothing, and a wait costs a shove: the fact sits in the
+/// single staging slot until the replay window drops it.
+///
+/// A PREVIOUS VERSION OF THIS PARAGRAPH JUSTIFIED THAT WITH A FALSE REACHABILITY CLAIM, and the
+/// seventh review killed it. It said replication transmits only components that CHANGED, so a hull
+/// standing still when it was shot publishes no new `Position` and the strong predicate would stall
+/// it. Wrong: `net::physics` disables Avian's island sleeping for network physics, Avian's solver
+/// writeback takes `&mut Position` and `&mut Rotation` for every solver body on every physics step,
+/// and the hit and the episode's close both happen in `FixedUpdate` — before that step. So even a
+/// numerically stationary hull has both pose components marked changed before the checkpoint that
+/// carries its `HullShock`, and the pose is confirmed at or after `settled_at` in the ordinary case.
+///
+/// The asymmetry survives its own justification because it never rested on that shape. It rests on
+/// what the components MEAN for this fact, which is the first half above and is not a claim about
+/// replication at all. Codex confirmed the other half of the old argument independently: a forced
+/// request makes `check_rollback` skip its policy branch, so the `SameAsPrecedent` markers that
+/// branch writes are not available to date a pose forward. That is a real property; it is just not
+/// what makes the weak predicate correct. NO SHIPPING SHAPE IS CLAIMED HERE, and the unit fixture
+/// that pins the policy pins the policy and says so.
+#[allow(clippy::too_many_arguments)]
 fn restore_is_deliverable(
+    rollback_disabled: bool,
+    // `Position`, `Rotation`, `LinearVelocity`, `AngularVelocity` — the same order, and the same
+    // components, as the four histories below.
+    prediction_histories: [bool; 4],
     position: Option<&ConfirmedHistory<Position>>,
     rotation: Option<&ConfirmedHistory<Rotation>>,
     linear: Option<&ConfirmedHistory<LinearVelocity>>,
@@ -874,6 +1002,9 @@ fn restore_is_deliverable(
     restored_at: Tick,
     settled_at: Tick,
 ) -> Result<(), Unready> {
+    // FIRST, because it decides whether the rest of this function is about anything. A hull outside
+    // `prepare_rollback`'s query keeps every live component it has, whatever these histories hold.
+    prepare_restores(rollback_disabled, prediction_histories)?;
     // The hull's whole rigid-body state has to come back from authority together — a pose restored
     // to `restored_at` beside a velocity that stayed at `now` is not a tick that ever existed on
     // either peer.
@@ -904,12 +1035,21 @@ fn offer_hull_shock_adoptions(
             &ConfirmedHistory<HullShock>,
             &PredictionHistory<HullShock>,
             Option<&crate::CombatantId>,
+            // ROLLBACK MEMBERSHIP, read as DATA rather than expressed as a `Without` filter. The
+            // filter was the shape the seventh review found: it made the condition invisible to the
+            // request and to the post-`Prepare` proof, and a filter cannot be handed to the one
+            // function that is supposed to own the whole question.
+            Has<DisableRollback>,
+            Has<PredictionHistory<Position>>,
+            Has<PredictionHistory<Rotation>>,
+            Has<PredictionHistory<LinearVelocity>>,
+            Has<PredictionHistory<AngularVelocity>>,
             Option<&ConfirmedHistory<Position>>,
             Option<&ConfirmedHistory<Rotation>>,
             Option<&ConfirmedHistory<LinearVelocity>>,
             Option<&ConfirmedHistory<AngularVelocity>>,
         ),
-        (With<Predicted>, With<Remote>, Without<DisableRollback>),
+        (With<Predicted>, With<Remote>),
     >,
     mut adoption: ResMut<AuthorityAdoption>,
 ) {
@@ -925,8 +1065,21 @@ fn offer_hull_shock_adoptions(
         return;
     };
     let now = timeline.tick();
-    for (hull, confirmed_shock, predicted_shock, combatant, position, rotation, linear, angular) in
-        &hulls
+    for (
+        hull,
+        confirmed_shock,
+        predicted_shock,
+        combatant,
+        rollback_disabled,
+        has_position,
+        has_rotation,
+        has_linear,
+        has_angular,
+        position,
+        rotation,
+        linear,
+        angular,
+    ) in &hulls
     {
         let Some((produced_at, authority)) =
             newest_present_at_or_before(confirmed_shock, completed)
@@ -961,9 +1114,16 @@ fn offer_hull_shock_adoptions(
         // hull's velocity, so the message that first carries the episode's `HullShock` carries the
         // resulting velocity in the same replication group and stamps both with the same tick.
         let settled_at = Tick(authority.tick);
-        if let Err(unready) =
-            restore_is_deliverable(position, rotation, linear, angular, produced_at, settled_at)
-        {
+        if let Err(unready) = restore_is_deliverable(
+            rollback_disabled,
+            [has_position, has_rotation, has_linear, has_angular],
+            position,
+            rotation,
+            linear,
+            angular,
+            produced_at,
+            settled_at,
+        ) {
             debug!(
                 "client: hull-shock episode #{} on {} is not deliverable at tick {} — {}. Waiting; \
                  nothing has been requested.",
@@ -1019,14 +1179,30 @@ fn offer_hull_shock_adoptions(
 /// The wait is bounded by the rollback-window check ABOVE it, which runs first every frame and
 /// closes the fact loudly once `age` passes `RollbackPolicy::max_rollback_ticks`. `age` grows by at
 /// least one per tick, so the stall cannot be unbounded and the give-up cannot be silent.
+///
+/// WHOLE also means the hull's ROLLBACK MEMBERSHIP, which the seventh review found latched at the
+/// offer and never re-established. The offer's `Without<DisableRollback>` filter spoke for the frame
+/// the fact was staged on; `net::rig` inserts that marker in `Update` on the late-prediction
+/// promotion path and removes it in `FixedLast`, and Bevy runs `RunFixedMainLoop` before `Update`,
+/// so an insertion necessarily survives into a later `PreUpdate`. The request claimed the slot on the
+/// staging-time archetype, `prepare_rollback` skipped the marked hull entirely, and the fact closed
+/// as an adoption having restored NOTHING. The condition is data on both queries now, and
+/// [`prepare_restores`] is where it is asked.
+#[allow(clippy::type_complexity)]
 fn request_staged_adoption(
     timeline: Res<LocalTimeline>,
     checkpoints: Option<Res<ReplicationCheckpointMap>>,
     managers: Query<&PredictionManager>,
-    // ALL FOUR, because the offer proved all four. Re-proving a subset is proving a later frame's
-    // transaction on an earlier frame's histories for whatever it left out — see
+    // ALL FOUR, because the offer proved all four — plus the archetype conditions that decide
+    // whether `prepare_rollback` reaches this hull at all. Re-proving a subset is proving a later
+    // frame's transaction on an earlier frame's world for whatever it left out; see
     // [`restore_is_deliverable`], whose signature is what keeps this tuple honest.
     hulls: Query<(
+        Has<DisableRollback>,
+        Has<PredictionHistory<Position>>,
+        Has<PredictionHistory<Rotation>>,
+        Has<PredictionHistory<LinearVelocity>>,
+        Has<PredictionHistory<AngularVelocity>>,
         Option<&ConfirmedHistory<Position>>,
         Option<&ConfirmedHistory<Rotation>>,
         Option<&ConfirmedHistory<LinearVelocity>>,
@@ -1089,10 +1265,27 @@ fn request_staged_adoption(
     // cannot speak for this one, for any component it covered.
     let unready = match hulls.get(fact.id.entity) {
         Err(_) => Some(Unready::Hull),
-        Ok((position, rotation, linear, angular)) => {
-            restore_is_deliverable(position, rotation, linear, angular, target, fact.settled_at)
-                .err()
-        }
+        Ok((
+            rollback_disabled,
+            has_position,
+            has_rotation,
+            has_linear,
+            has_angular,
+            position,
+            rotation,
+            linear,
+            angular,
+        )) => restore_is_deliverable(
+            rollback_disabled,
+            [has_position, has_rotation, has_linear, has_angular],
+            position,
+            rotation,
+            linear,
+            angular,
+            target,
+            fact.settled_at,
+        )
+        .err(),
     };
     if let Some(unready) = unready {
         debug!(
@@ -1133,6 +1326,12 @@ fn request_staged_adoption(
 /// verdict latches on [`AuthorityAdoption::ordering`], so the tally counts facts, not the frames a
 /// fact spent being retried.
 ///
+/// EVERY EXIT WRITES THAT LATCH, which is what makes it readable as a state rather than as an
+/// absence. The three ways out are distinct facts about the rule — it had nothing to hold this fact
+/// for, it is holding it, it let it go — and [`retirement`] needs the middle one alone. The state it
+/// must NOT be able to observe is the one no exit here writes: `Ordering::Unasked`, meaning this
+/// function was never reached on this fact.
+///
 /// `waited` is LOCAL ticks since staging, not the fact's age.
 fn clear_to_order(
     adoption: &mut AuthorityAdoption,
@@ -1141,16 +1340,20 @@ fn clear_to_order(
     waited: i32,
 ) -> bool {
     let Some(claim) = fact.visual else {
+        // Nothing to be ordered against, so the rule is not holding this fact and never will be.
+        // That is RELEASED, not pending: it is precisely the state a bypass cannot occur in.
+        adoption.ordering = Ordering::Released;
         return true;
     };
-    if adoption.ordering.is_some() {
+    if adoption.ordering == Ordering::Released {
         return true;
     }
     let shown = presentation.shown_for(claim);
     if !shown && waited < ORDERING_BUDGET_TICKS {
+        adoption.ordering = Ordering::HoldingForSpark;
         return false;
     }
-    adoption.ordering = Some(shown);
+    adoption.ordering = Ordering::Released;
     presentation.resolve(shown, waited);
     if !shown {
         // Not a correctness failure — the shove still lands at its authoritative tick. It is the
@@ -1193,6 +1396,9 @@ fn clear_to_order(
 fn confirm_forced_rollback(
     managers: Query<(&PredictionManager, Option<&Rollback>)>,
     hulls: Query<(
+        Has<DisableRollback>,
+        Has<PredictionHistory<LinearVelocity>>,
+        Has<PredictionHistory<AngularVelocity>>,
         Option<&ConfirmedHistory<LinearVelocity>>,
         Option<&ConfirmedHistory<AngularVelocity>>,
     )>,
@@ -1219,30 +1425,58 @@ fn confirm_forced_rollback(
     // read, so "someone else's rollback delivered the shove" is established rather than inferred
     // from its start tick. A despawned hull answers `Err` and carries nothing.
     //
+    // TWO QUESTIONS, and the seventh review found only one of them being asked. A confirmed history
+    // answers "what WOULD a restore at `started` resolve here" — it says nothing about whether any
+    // restore touched this hull. [`prepare_restores`] is the other half: unless the hull was in
+    // `prepare_rollback`'s query, the lookup below is a counterfactual and reading a delivery out of
+    // it records a shove that provably never landed.
+    //
     // VELOCITIES ONLY, and deliberately NOT [`restore_is_deliverable`]. This is a question about the
     // PAST — the rollback has already been prepared — and the only thing that can retire the fact is
     // whether the event's Δv is now on the live hull. Whatever that restore did to the pose is
     // lightyear's doing and is not this fact's to answer for; re-asking the pose predicate here
     // would leave a fact staged for a shove that is already live, and it would be re-requested for
     // state that cannot change. The readiness question that DOES cover the pose is asked before the
-    // claim, where refusing still buys something.
-    let carried = hulls.get(fact.id.entity).is_ok_and(|(linear, angular)| {
-        restore_carries_the_shove(linear, angular, started, fact.settled_at)
-    });
-    match retirement(&adoption, slot.installed(), started, kind, carried) {
+    // claim, where refusing still buys something. `DisableRollback` is entity-level so it is fully
+    // covered by the velocity half; the per-component half is asked of exactly the two components
+    // this verdict speaks about.
+    //
+    // THE ARCHETYPE CANNOT HAVE MOVED between `Prepare` and here. Both are in one `PreUpdate` with
+    // only Bevy's own sync point between them; `prepare_rollback`'s commands touch the restored
+    // component and `PreviousVisual` and nothing else; and the only writer of `DisableRollback` in
+    // lightyear is `check_rollback`'s deterministic skip-despawn bookkeeping, which runs BEFORE
+    // `Prepare` and only over entities in `PredictionManager::deterministic_skip_despawn`.
+    let carried = hulls.get(fact.id.entity).is_ok_and(
+        |(rollback_disabled, has_linear, has_angular, linear, angular)| {
+            prepare_restores(rollback_disabled, [has_linear, has_angular]).is_ok()
+                && restore_carries_the_shove(linear, angular, started, fact.settled_at)
+        },
+    );
+    let outcome = retirement(
+        &adoption,
+        &presentation,
+        slot.installed(),
+        started,
+        kind,
+        carried,
+    );
+    match outcome {
         None | Some(Retirement::Keep) => return,
         Some(Retirement::Undelivered) => {
             presentation.note_undelivered();
             error!(
                 "client: authoritative fact {:?} #{} on {} was ADOPTED BUT NOT DELIVERED — this \
                  module's own forced rollback was installed at tick {} and `prepare_rollback` \
+                 either skipped this hull (`DisableRollback`, or a missing `PredictionHistory`) or \
                  restored a hull velocity older than the event's settling tick {}. The shove is \
                  LOST: the fact is closed rather than re-requested, because the confirmed histories \
                  a retry would read are the same ones this restore just read. \
                  `request_staged_adoption` revalidated exactly this in this frame immediately \
                  before claiming, so reaching here means that revalidation and `prepare_rollback` \
                  disagree — suspect a lightyear change to `check_rollback`'s forced-request \
-                 shortcut or to `prepare_rollback`'s lookup ({} undelivered so far)",
+                 shortcut, to `prepare_rollback`'s query or lookup, or a new writer of \
+                 `DisableRollback` between `RollbackSystems::Check` and `RollbackSystems::Prepare` \
+                 ({} undelivered so far)",
                 fact.id.source,
                 fact.id.sequence,
                 fact.id.entity,
@@ -1265,7 +1499,8 @@ fn confirm_forced_rollback(
             spark_pending: false,
         }) => debug!(
             "client: authoritative fact {:?} #{} on {} was carried by a rollback at tick {} this \
-             module did not order — already released by the ordering rule, so nothing was missed",
+             module did not order — its spark was already drawn, or it had none to wait for, so \
+             nothing was missed",
             fact.id.source, fact.id.sequence, fact.id.entity, started.0,
         ),
         Some(Retirement::Delivered {
@@ -1299,8 +1534,9 @@ enum Retirement {
     /// having delivered nothing, and says so — see [`OrderingTally::undelivered`].
     Undelivered,
     /// A confirmed-state rollback this module did not order restored the fact's producing tick from
-    /// authority, so the shove is already on the live hull. `spark_pending` is whether it beat the
-    /// visual — a BYPASS.
+    /// authority ONTO A HULL IT REACHED, so the shove is already live. `spark_pending` is whether it
+    /// beat the visual — a BYPASS — and is a question about what has been DRAWN, not about whether
+    /// the ordering rule happens to have latched a verdict yet.
     Delivered { spark_pending: bool },
 }
 
@@ -1398,8 +1634,22 @@ impl RestoresFrom {
 /// either without touching a line here. That is why the branch survives its own proof: the counter
 /// is the tripwire that says the proof stopped holding, and "unreachable" is what the previous three
 /// rounds each believed about the branch they were about to lose a shove in.
+///
+/// # `spark_pending` IS A QUESTION ABOUT WHAT WAS DRAWN, not about a latch
+///
+/// [`OrderingTally::bypassed`] claims a rollback this module did not order beat the fact's own
+/// spark, so the only fact that can answer it is whether that spark has been drawn — read from
+/// [`ImpactPresentation`], the same ledger [`clear_to_order`] reads. The seventh review found it
+/// being answered from `AuthorityAdoption::ordering.is_none()` instead, which was true in three
+/// different situations: the rule had not been consulted, the fact had no visual at all, and the
+/// rule was genuinely holding it. Two of those inflate the count.
+///
+/// The latch's remaining job here is the one it can do: RELEASED is released, by either verdict, and
+/// a rollback carrying a fact the rule already let go missed nothing. Everything else asks the
+/// ledger, so a spark drawn since the frame the rule last ran counts.
 fn retirement(
     adoption: &AuthorityAdoption,
+    presentation: &ImpactPresentation,
     installed: Option<(Tick, AdoptionCause)>,
     started: Tick,
     restores_from: RestoresFrom,
@@ -1424,7 +1674,10 @@ fn retirement(
         return Some(Retirement::Keep);
     }
     Some(Retirement::Delivered {
-        spark_pending: adoption.ordering.is_none(),
+        spark_pending: adoption.ordering != Ordering::Released
+            && fact
+                .visual
+                .is_some_and(|claim| !presentation.shown_for(claim)),
     })
 }
 
@@ -1971,11 +2224,21 @@ mod tests {
     #[test]
     fn only_this_modules_own_installed_claim_counts_as_an_adoption() {
         let mut adoption = AuthorityAdoption::default();
+        // Nothing drawn: the fact's own spark is genuinely pending, which is the state
+        // `Retirement::Delivered` reports as a bypass.
+        let presentation = ImpactPresentation::default();
         let episode = fact(hull(), 1, 50, 100);
         assert_eq!(adoption.offer(episode, STAGED_AT), Offer::Staged);
 
         assert_eq!(
-            retirement(&adoption, None, Tick(100), RestoresFrom::Authority, CARRIED),
+            retirement(
+                &adoption,
+                &presentation,
+                None,
+                Tick(100),
+                RestoresFrom::Authority,
+                CARRIED
+            ),
             Some(Retirement::Delivered {
                 spark_pending: true
             }),
@@ -1985,6 +2248,7 @@ mod tests {
         assert_eq!(
             retirement(
                 &adoption,
+                &presentation,
                 Some((Tick(100), AdoptionCause::Misprediction)),
                 Tick(100),
                 RestoresFrom::Authority,
@@ -1998,6 +2262,7 @@ mod tests {
         assert_eq!(
             retirement(
                 &adoption,
+                &presentation,
                 Some((Tick(100), AdoptionCause::ExternalEvent)),
                 Tick(100),
                 RestoresFrom::Authority,
@@ -2022,19 +2287,36 @@ mod tests {
     #[test]
     fn an_installed_claim_that_restored_nothing_is_not_an_adoption() {
         let mut adoption = AuthorityAdoption::default();
+        // Nothing drawn: the fact's own spark is genuinely pending, which is the state
+        // `Retirement::Delivered` reports as a bypass.
+        let presentation = ImpactPresentation::default();
         let episode = fact(hull(), 1, 50, 100);
         assert_eq!(adoption.offer(episode, STAGED_AT), Offer::Staged);
         adoption.requested = true;
         let ours = Some((Tick(100), AdoptionCause::ExternalEvent));
 
         assert_eq!(
-            retirement(&adoption, ours, Tick(100), RestoresFrom::Authority, false),
+            retirement(
+                &adoption,
+                &presentation,
+                ours,
+                Tick(100),
+                RestoresFrom::Authority,
+                false
+            ),
             Some(Retirement::Undelivered),
             "our own rollback was installed and `prepare_rollback` restored a PRE-hit velocity — \
              recording that as an adoption is recording a delivery that did not happen",
         );
         assert_eq!(
-            retirement(&adoption, ours, Tick(100), RestoresFrom::Authority, CARRIED),
+            retirement(
+                &adoption,
+                &presentation,
+                ours,
+                Tick(100),
+                RestoresFrom::Authority,
+                CARRIED
+            ),
             Some(Retirement::Adopted),
             "the same claim over a restore that DID carry the shove is the ordinary success",
         );
@@ -2046,15 +2328,32 @@ mod tests {
     #[test]
     fn a_shallower_rollback_retires_nothing() {
         let mut adoption = AuthorityAdoption::default();
+        // Nothing drawn: the fact's own spark is genuinely pending, which is the state
+        // `Retirement::Delivered` reports as a bypass.
+        let presentation = ImpactPresentation::default();
         let episode = fact(hull(), 1, 50, 100);
         assert_eq!(adoption.offer(episode, STAGED_AT), Offer::Staged);
 
         assert_eq!(
-            retirement(&adoption, None, Tick(99), RestoresFrom::Authority, CARRIED),
+            retirement(
+                &adoption,
+                &presentation,
+                None,
+                Tick(99),
+                RestoresFrom::Authority,
+                CARRIED
+            ),
             Some(Retirement::Keep)
         );
         assert_eq!(
-            retirement(&adoption, None, Tick(101), RestoresFrom::Authority, CARRIED),
+            retirement(
+                &adoption,
+                &presentation,
+                None,
+                Tick(101),
+                RestoresFrom::Authority,
+                CARRIED
+            ),
             Some(Retirement::Delivered {
                 spark_pending: true
             }),
@@ -2069,6 +2368,9 @@ mod tests {
     #[test]
     fn an_input_rollback_delivers_nothing_and_retires_nothing() {
         let mut adoption = AuthorityAdoption::default();
+        // Nothing drawn: the fact's own spark is genuinely pending, which is the state
+        // `Retirement::Delivered` reports as a bypass.
+        let presentation = ImpactPresentation::default();
         let episode = fact(hull(), 1, 50, 100);
         assert_eq!(adoption.offer(episode, STAGED_AT), Offer::Staged);
         adoption.requested = true;
@@ -2077,6 +2379,7 @@ mod tests {
             assert_eq!(
                 retirement(
                     &adoption,
+                    &presentation,
                     Some((Tick(100), AdoptionCause::ExternalEvent)),
                     started,
                     RestoresFrom::OwnPrediction,
@@ -2107,6 +2410,152 @@ mod tests {
         );
     }
 
+    /// FINDING THE SLICE-3.11 REVIEW CAUGHT, at the readiness predicate: the hull's PARTICIPATION in
+    /// `prepare_rollback` was asked once, as a query filter on the offer, and never again.
+    ///
+    /// The four confirmed histories here are the healthiest possible: the pose is restorable and both
+    /// velocities resolve the authority's post-event samples. That is the whole point — a confirmed
+    /// history answers "what WOULD a restore at this tick resolve", and its answer is IDENTICAL for a
+    /// hull lightyear's query filters out. Only the archetype tells the two apart, so only the
+    /// archetype can be the thing that is asked.
+    ///
+    /// BOTH exclusions, because `prepare_rollback`'s query has exactly two and a fix aimed at one of
+    /// them lands on one of them: `Without<DisableRollback>` on the entity, and a REQUIRED
+    /// `&mut PredictionHistory<C>` per component.
+    ///
+    /// And it is refused BEFORE the histories are consulted, which is why the two reasons are
+    /// distinct `Unready` variants rather than a shared one: a hull the restore skips is not waiting
+    /// for a better confirmed sample, and a log that said so would send the next reader to the wrong
+    /// buffer.
+    #[test]
+    fn a_hull_outside_prepares_query_is_refused_whatever_its_histories_say() {
+        const SETTLED_AT: Tick = Tick(100);
+        const PRODUCED_AT: Tick = Tick(104);
+        let deliverable = |rollback_disabled: bool, prediction_histories: [bool; 4]| {
+            restore_is_deliverable(
+                rollback_disabled,
+                prediction_histories,
+                Some(&confirmed_position(SETTLED_AT)),
+                Some(&confirmed_rotation(SETTLED_AT)),
+                Some(&confirmed_linear(SETTLED_AT)),
+                Some(&confirmed_angular(SETTLED_AT)),
+                PRODUCED_AT,
+                SETTLED_AT,
+            )
+        };
+
+        assert_eq!(
+            deliverable(false, [true; 4]),
+            Ok(()),
+            "the control: a hull in the query, over histories that carry the shove, is deliverable — \
+             or the refusals below prove nothing about the archetype",
+        );
+        assert_eq!(
+            deliverable(true, [true; 4]),
+            Err(Unready::Excluded),
+            "`DisableRollback` takes the hull out of EVERY `prepare_rollback::<C>` at once, so the \
+             rollback this fact would order restores nothing at all — and the module used to claim \
+             the slot for it and then read a delivery out of the untouched confirmed history",
+        );
+        for absent in 0..4 {
+            let mut prediction_histories = [true; 4];
+            prediction_histories[absent] = false;
+            assert_eq!(
+                deliverable(false, prediction_histories),
+                Err(Unready::Unhistoried),
+                "`PredictionHistory` is REQUIRED in that query, not optional, so a hull missing the \
+                 one for component {absent} is skipped for it — and a rigid body restored in part \
+                 is not a tick either peer ever had, which is the same rule the pose predicate \
+                 exists for",
+            );
+        }
+    }
+
+    /// FINDING THE SLICE-3.11 REVIEW CAUGHT, at the metric. `spark_pending` decides
+    /// [`OrderingTally::bypassed`], which is the ONE number that would justify turning this
+    /// best-effort rule into a real presentation barrier — so a count inflated by facts the rule
+    /// never held would corrupt exactly the decision it exists to inform.
+    ///
+    /// It used to be read off `AuthorityAdoption::ordering.is_none()`, and that `None` carried three
+    /// different situations. This walks all three over ONE staged fact so the distinction cannot be
+    /// read as a coincidence of fixtures, and it asks the question the counter's own wording asks:
+    /// had this fact's own spark been drawn?
+    #[test]
+    fn only_a_fact_whose_own_spark_is_still_undrawn_counts_as_bypassed() {
+        let mut adoption = AuthorityAdoption::default();
+        let mut presentation = ImpactPresentation::default();
+        let episode = fact(hull(), 1, 50, 100);
+        assert_eq!(adoption.offer(episode, STAGED_AT), Offer::Staged);
+        let bypassed = |adoption: &AuthorityAdoption, presentation: &ImpactPresentation| {
+            retirement(
+                adoption,
+                presentation,
+                None,
+                Tick(100),
+                RestoresFrom::Authority,
+                CARRIED,
+            ) == Some(Retirement::Delivered {
+                spark_pending: true,
+            })
+        };
+
+        assert_eq!(
+            adoption.ordering,
+            Ordering::Unasked,
+            "state 1: no frame has reached the rule yet — every early return in \
+             `request_staged_adoption` ahead of `clear_to_order` leaves it here",
+        );
+        assert!(
+            bypassed(&adoption, &presentation),
+            "and with nothing drawn for this episode that IS a bypass: the shove landed through \
+             somebody else's rollback before the player was shown anything",
+        );
+
+        assert!(!order(&mut adoption, &mut presentation, episode, 0));
+        assert_eq!(
+            adoption.ordering,
+            Ordering::HoldingForSpark,
+            "state 2: the rule has the fact and is holding it inside the budget",
+        );
+        assert!(bypassed(&adoption, &presentation), "still a bypass");
+
+        // The spark arrives, through the same ledger the rule reads. Nothing re-runs the rule — this
+        // is the frame ordering the schedule actually produces, since `confirm_forced_rollback` runs
+        // after `RollbackSystems::Prepare` and the request ran before `RollbackSystems::Check`.
+        presentation.present(drew(100, VICTIM));
+        assert!(
+            !bypassed(&adoption, &presentation),
+            "the fact's own hit HAS been drawn now, so a rollback carrying the shove did not \
+             outrun it — reading the LATCH instead of the ledger would still call this a bypass, \
+             and the latch is the thing that has not been updated",
+        );
+
+        assert!(order(&mut adoption, &mut presentation, episode, 0));
+        assert_eq!(adoption.ordering, Ordering::Released);
+        assert!(
+            !bypassed(&adoption, &presentation),
+            "state 3: released. A rollback carrying a fact the rule already let go missed nothing.",
+        );
+
+        let mut unheld = AuthorityAdoption::default();
+        let mut drift = fact(hull(), 1, 50, 100);
+        drift.cause = AdoptionCause::Misprediction;
+        drift.visual = None;
+        assert_eq!(unheld.offer(drift, STAGED_AT), Offer::Staged);
+        assert!(order(&mut unheld, &mut presentation, drift, 0));
+        assert_eq!(
+            unheld.ordering,
+            Ordering::Released,
+            "a fact with no visual is RELEASED, not pending: there is nothing for it to wait on, \
+             and the rule records that rather than leaving an absence for `retirement` to guess at",
+        );
+        assert!(
+            !bypassed(&unheld, &presentation),
+            "so a rollback that carries a misprediction correction can never be a BYPASS — there \
+             was no spark for it to beat. This is the state the old `is_none()` reading counted.",
+        );
+    }
+
     /// A bypass is only a bypass while the ordering rule is still holding the fact. Once the rule
     /// has released it, an unrelated rollback that carries the shove missed nothing.
     #[test]
@@ -2119,7 +2568,14 @@ mod tests {
         presentation.present(drew(100, VICTIM));
         assert!(order(&mut adoption, &mut presentation, episode, 0));
         assert_eq!(
-            retirement(&adoption, None, Tick(100), RestoresFrom::Authority, CARRIED),
+            retirement(
+                &adoption,
+                &presentation,
+                None,
+                Tick(100),
+                RestoresFrom::Authority,
+                CARRIED
+            ),
             Some(Retirement::Delivered {
                 spark_pending: false
             }),
@@ -2332,20 +2788,34 @@ mod tests {
     /// The integration half is
     /// `net::lead_zero_rollback::a_late_pose_removal_is_revalidated_before_the_request`, which runs
     /// the real restore. This one pins the ASYMMETRY, which that fixture cannot see: it would pass
-    /// just as well against a module that had tightened the pose to the velocity predicate, and that
-    /// would silently stall every fact whose hull was standing still when it was shot.
+    /// just as well against a module that had tightened the pose to the velocity predicate.
+    ///
+    /// WHAT THIS PINS IS THE POLICY, AND ONLY THE POLICY. A previous version of this comment called
+    /// the fixture's 20-tick-old pose "the ordinary shape for a hull that was not moving, since
+    /// replication only transmits components that CHANGED", and the seventh review found that
+    /// premise false: `net::physics` disables Avian island sleeping for network physics, Avian's
+    /// solver writeback takes `&mut Position` and `&mut Rotation` for every solver body every step,
+    /// and both the hit and the episode's close happen in `FixedUpdate` ahead of that step — so even
+    /// a stationary hull has a changed pose before the checkpoint carrying its `HullShock`. No
+    /// shipping shape is claimed here. What is asserted is the RULE the module applies: the pose is
+    /// asked whether a restore leaves a rigid body standing, never whether it is recent, because a
+    /// recency clause on a component the event never touched can only turn restorable facts into
+    /// waits — and a wait costs a shove.
     #[test]
     fn the_pose_is_asked_a_weaker_question_than_the_shove_and_that_is_deliberate() {
         const SETTLED_AT: Tick = Tick(100);
         const PRODUCED_AT: Tick = Tick(104);
-        /// A pose the authority last published well before the episode — the ordinary shape for a
-        /// hull that was not moving, since replication only transmits components that CHANGED.
+        /// A pose sample far enough behind the episode that the two predicates give visibly
+        /// different verdicts on it. Chosen to separate them, not claimed to be what the wire
+        /// produces; see the fixture doc.
         const POSE_SAMPLED_AT: Tick = Tick(80);
 
         let stale_pose_position = confirmed_position(POSE_SAMPLED_AT);
         let stale_pose_rotation = confirmed_rotation(POSE_SAMPLED_AT);
         assert_eq!(
             restore_is_deliverable(
+                false,
+                [true; 4],
                 Some(&stale_pose_position),
                 Some(&stale_pose_rotation),
                 Some(&confirmed_linear(SETTLED_AT)),
@@ -2356,8 +2826,9 @@ mod tests {
             Ok(()),
             "a pose sample 20 ticks older than the episode is still the authority's genuine pose at \
              the restore target: the impulse changes VELOCITY, and the pose only moves as later \
-             ticks integrate it. Requiring pose recency would stall this fact until the replay \
-             window dropped it — a shove lost to a clause that protects nothing.",
+             ticks integrate it. Requiring pose recency here would refuse a restore that is sound, \
+             and every refusal is a fact held in the single staging slot until the replay window \
+             drops it — a shove lost to a clause that protects nothing.",
         );
         assert!(
             !restore_carries_the_shove(
@@ -2377,6 +2848,8 @@ mod tests {
         removed_position.insert_removed(Tick(102));
         assert_eq!(
             restore_is_deliverable(
+                false,
+                [true; 4],
                 Some(&removed_position),
                 Some(&confirmed_rotation(SETTLED_AT)),
                 Some(&confirmed_linear(SETTLED_AT)),
@@ -2391,6 +2864,8 @@ mod tests {
         );
         assert_eq!(
             restore_is_deliverable(
+                false,
+                [true; 4],
                 None,
                 Some(&confirmed_rotation(SETTLED_AT)),
                 Some(&confirmed_linear(SETTLED_AT)),
@@ -2404,6 +2879,8 @@ mod tests {
         );
         assert_eq!(
             restore_is_deliverable(
+                false,
+                [true; 4],
                 Some(&confirmed_position(SETTLED_AT)),
                 Some(&confirmed_rotation(SETTLED_AT)),
                 Some(&confirmed_linear(Tick(96))),
@@ -2435,12 +2912,49 @@ mod tests {
         /// Build the world mid-`FromState`-rollback at `started`, with the staged fact's hull
         /// carrying confirmed velocities sampled at `sampled_at`. The episode is the DEFERRED shape
         /// that separates the two ticks: it settled at 100 and replication materialized it at 104.
-        fn run(started: Tick, sampled_at: Tick) -> OrderingTally {
+        /// WHETHER `prepare_rollback` TOUCHED THIS HULL AT ALL — the archetype half of the same
+        /// question, which the fixture could not previously express because the module never asked
+        /// it. `Restored` is the shape every earlier version of this fixture built by accident and
+        /// asserted deliveries against; the other two are the two ways lightyear's query excludes a
+        /// hull, and a confirmed history reads exactly the same in all three.
+        #[derive(Clone, Copy)]
+        enum InPrepare {
+            /// In the query: no `DisableRollback`, and a `PredictionHistory` per component.
+            Restored,
+            /// `DisableRollback` — excluded for EVERY component at once.
+            Disabled,
+            /// No `PredictionHistory<AngularVelocity>`, which that query REQUIRES.
+            Unhistoried,
+        }
+
+        fn run(started: Tick, sampled_at: Tick, membership: InPrepare) -> OrderingTally {
             let mut world = World::new();
             let hull = world.spawn_empty().id();
             world
                 .entity_mut(hull)
                 .insert((confirmed_linear(sampled_at), confirmed_angular(sampled_at)));
+            // The buffers are empty because nothing here reads them; what the fixture varies is
+            // whether the hull is in the ARCHETYPE `prepare_rollback` iterates.
+            match membership {
+                InPrepare::Restored => {
+                    world.entity_mut(hull).insert((
+                        PredictionHistory::<LinearVelocity>::default(),
+                        PredictionHistory::<AngularVelocity>::default(),
+                    ));
+                }
+                InPrepare::Disabled => {
+                    world.entity_mut(hull).insert((
+                        PredictionHistory::<LinearVelocity>::default(),
+                        PredictionHistory::<AngularVelocity>::default(),
+                        DisableRollback,
+                    ));
+                }
+                InPrepare::Unhistoried => {
+                    world
+                        .entity_mut(hull)
+                        .insert(PredictionHistory::<LinearVelocity>::default());
+                }
+            }
 
             let manager = PredictionManager::default();
             manager.set_rollback_tick(started);
@@ -2460,7 +2974,7 @@ mod tests {
         }
 
         assert_eq!(
-            run(Tick(104), Tick(100)),
+            run(Tick(104), Tick(100), InPrepare::Restored),
             OrderingTally {
                 bypassed: 1,
                 ..default()
@@ -2470,8 +2984,22 @@ mod tests {
              is OLDER than the tick-104 confirmed `HullShock` that certified the episode, and the \
              rule that compared against that tick counted this real delivery as nothing.",
         );
+        // FINDING THE SLICE-3.11 REVIEW CAUGHT, at this seam. Identical histories, identical depth,
+        // identical `Rollback::FromState` — and a hull `prepare_rollback`'s query filters out. The
+        // predicate above reads the same "yes" in every one of these runs, because a confirmed
+        // history answers what a restore WOULD resolve and knows nothing about whether one happened.
+        for excluded in [InPrepare::Disabled, InPrepare::Unhistoried] {
+            assert_eq!(
+                run(Tick(104), Tick(100), excluded),
+                OrderingTally::default(),
+                "a hull outside `prepare_rollback`'s query was not restored, so nothing was \
+                 delivered and `bypassed` may not move. Counting it would inflate the ONE number \
+                 that is supposed to say how often this rule is circumvented — with rollbacks that \
+                 did not reach the hull at all.",
+            );
+        }
         assert_eq!(
-            run(Tick(104), Tick(96)),
+            run(Tick(104), Tick(96), InPrepare::Restored),
             OrderingTally::default(),
             "same depth, but the newest confirmed sample predates the episode's close, so the \
              restore installed a PRE-hit velocity: nothing was delivered, nothing may be counted",

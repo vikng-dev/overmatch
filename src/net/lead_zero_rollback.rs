@@ -79,6 +79,15 @@
 //! rigid-body histories, and re-proving only the two the shove rides on let a late `Position`
 //! removal through to a claimed rollback that deleted the component while every counter in the
 //! module reported a clean adoption.
+//!
+//! # And one about the hull leaving the RESTORE, not the histories changing
+//!
+//! All three of those move a confirmed history. [`a_hull_excluded_from_prepare_is_never_requested_and_never_adopted`]
+//! moves the hull's ARCHETYPE instead: `DisableRollback` arrives between the frame that staged the
+//! fact and the frame that would request it — which is what `net::rig`'s late-prediction promotion
+//! does in `Update`, one schedule position after the `FixedLast` that would remove it. lightyear's
+//! `prepare_rollback` then skips the hull for every component, and a delivery verdict read off
+//! `ConfirmedHistory` cannot see that, because that buffer answers what a restore WOULD resolve.
 
 use core::time::Duration;
 
@@ -92,9 +101,9 @@ use bevy_replicon::prelude::RepliconTick;
 use lightyear::core::confirmed_history::ConfirmedHistory;
 use lightyear::prelude::client::{Client, ClientPlugins, Connected, Remote};
 use lightyear::prelude::{
-    InputTimeline, InputTimelineConfig, IsSynced, LocalTimeline, PeerId, PingManager, Predicted,
-    PredictionHistory, PredictionManager, RemoteId, ReplicationCheckpointMap, RollbackSystems,
-    StateRollbackMetadata, SyncConfig, Tick,
+    DisableRollback, InputTimeline, InputTimelineConfig, IsSynced, LocalTimeline, PeerId,
+    PingManager, Predicted, PredictionHistory, PredictionManager, RemoteId,
+    ReplicationCheckpointMap, RollbackSystems, StateRollbackMetadata, SyncConfig, Tick,
 };
 use lightyear_core::time::TickInstant;
 use lightyear_core::timeline::NetworkTimeline;
@@ -425,6 +434,11 @@ struct Scenario {
     /// component carries none of the shove, so the two velocity histories can go on answering
     /// "delivered" while a restore here deletes half the rigid body.
     late_position_removal: Option<Tick>,
+    /// Whether to put `DisableRollback` on the hull at the same point in the run as
+    /// [`Scenario::late_change`] — after the arrival frame staged the fact and before any frame that
+    /// could request it. The ARCHETYPE half of the same question: the two history knobs above move
+    /// what a restore would resolve, and this one moves whether the hull is in the restore at all.
+    late_rollback_disable: bool,
     /// Extra LOCAL ticks to spend past the run's own last frame, each with a `PreUpdate`. How a
     /// fixture asks what bounds a wait.
     extra_ticks: i32,
@@ -440,6 +454,7 @@ impl Scenario {
             competitor: None,
             late_change: None,
             late_position_removal: None,
+            late_rollback_disable: false,
             extra_ticks: 0,
         }
     }
@@ -454,6 +469,7 @@ fn run_scenario(scenario: Scenario) -> Delivered {
         competitor,
         late_change,
         late_position_removal,
+        late_rollback_disable,
         extra_ticks,
     } = scenario;
     let mut app = crate::net::test_harness::base_app();
@@ -640,6 +656,17 @@ fn run_scenario(scenario: Scenario) -> Delivered {
             .get_mut::<ConfirmedHistory<Position>>(root)
             .expect("the hull's confirmed position history");
         history.insert_removed(removed_at);
+    }
+    if late_rollback_disable {
+        // THE PRODUCTION INSERTION, at the point in the run production reaches it. `net::rig`'s
+        // `upgrade_predicted_to_dynamic` puts this marker on in `Update`; Bevy runs
+        // `RunFixedMainLoop` — and with it the `FixedLast` remover — BEFORE `Update`, so the marker
+        // necessarily survives to at least the next `PreUpdate`. This fixture writes it directly
+        // rather than driving the promotion path, because that path also flips the body to Dynamic
+        // and would change what the replay integrates; what is under test is the MARKER's effect on
+        // the rollback transaction, and lightyear reads nothing else off it.
+        app.world_mut().entity_mut(root).insert(DisableRollback);
+        app.world_mut().flush();
     }
 
     // The later frame, with the march's presentation in it — and the ticks that separate the two.
@@ -1181,6 +1208,71 @@ fn a_late_pose_removal_is_revalidated_before_the_request() {
         "a failed revalidation is a WAIT, not a drop, on this half of the predicate too: the \
          authority can confirm a pose at the target again, and the replay window is what ends the \
          wait if it never does",
+    );
+}
+
+/// FINDING THE SLICE-3.11 REVIEW CAUGHT: THE HULL'S PARTICIPATION IN `Prepare` WAS LATCHED AT THE
+/// OFFER.
+///
+/// The two fixtures above move a confirmed HISTORY under a staged fact. This one moves the hull's
+/// ARCHETYPE, which is the other way the offer's answer stops being true — and it was the way with
+/// no revalidation at all. `offer_hull_shock_adoptions` filtered `Without<DisableRollback>` and
+/// neither the request nor the post-`Prepare` proof re-established it.
+///
+/// THE PRODUCTION CHAIN, which is why this is a defect and not a hypothetical. `net::rig`'s
+/// `upgrade_predicted_to_dynamic` inserts `DisableRollback` in `Update` when a late `Predicted`
+/// marker promotes an already-attached rig; `enable_rollback_after_first_tick` removes it in
+/// `FixedLast`. Bevy runs `RunFixedMainLoop` before `Update`, so the remover cannot run until the
+/// NEXT frame's fixed loop — after that frame's `PreUpdate`. A fact staged while the hull was
+/// eligible is therefore requested, at least once, on a hull that is not.
+///
+/// WHAT LIGHTYEAR THEN DOES: `prepare_rollback`'s query is filtered `Without<DisableRollback>`, so
+/// the hull is skipped for EVERY component. Not "restored to a stale value" — not restored at all.
+///
+/// WHAT THE MODULE USED TO DO: claim the slot (the request never asked), let the rollback install,
+/// and then compute delivery from `ConfirmedHistory` — a lookup answering "what WOULD a restore
+/// resolve here", which is unchanged by the hull having been skipped. `carried` came back true and
+/// the fact closed as `Retirement::Adopted`. Nothing was delivered, nothing was counted, and the
+/// success path recorded a success.
+///
+/// WHAT MUST HAPPEN: the same WAIT the history fixtures get. Nothing claimed, nothing tallied, the
+/// hull untouched, and the fact still staged — the marker is removed on the next fixed tick, so this
+/// is a wait that production actually ends, and the replay window ends it if production does not.
+///
+/// AND IF A FUTURE EDIT DOES CLAIM ANYWAY, the outcome must be `Retirement::Undelivered` — loud and
+/// counted — never `Adopted`. `undelivered` staying zero here is asserted for the first reason and
+/// would be a PASS for the second; what makes the two distinguishable is `still_staged`.
+#[test]
+fn a_hull_excluded_from_prepare_is_never_requested_and_never_adopted() {
+    let delivered = run_scenario(Scenario {
+        arrival: Tick(PRODUCING_TICK.0 + REPLICATION_LAG_TICKS),
+        late_rollback_disable: true,
+        ..Scenario::new(Lead::Zero, Visual::Missing)
+    });
+
+    assert!(
+        delivered.still_staged,
+        "the fact was CLOSED. `prepare_rollback` cannot touch a hull carrying `DisableRollback`, so \
+         whatever closed it recorded a delivery that did not happen — and if it closed as \
+         `Adopted`, silently. Evidence: ordering = {:?}, live shock = {:?}, ticks replayed = {:?}",
+        delivered.ordering, delivered.live_shock, delivered.replayed_ticks,
+    );
+    assert_eq!(
+        delivered.ordering,
+        OrderingTally::default(),
+        "and NOTHING may be tallied. `released_on_budget` would mean the ordering rule spent a fact \
+         on a rollback that could not reach its hull; `bypassed` would mean somebody else's \
+         rollback delivered a shove to an entity it was filtered out of.",
+    );
+    assert_eq!(
+        delivered.live_linear, LIVE_LINEAR,
+        "and the hull keeps exactly what it was predicting — which is the honest reading of a \
+         rollback that skipped it, and is what every counter above must agree with",
+    );
+    assert_eq!(delivered.live_angular, LIVE_ANGULAR);
+    assert!(
+        !delivered.live_velocity_removed && !delivered.live_pose_removed,
+        "the hull must still HAVE its rigid body: an excluded hull is untouched, not stripped",
     );
 }
 
