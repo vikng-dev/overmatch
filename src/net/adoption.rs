@@ -70,9 +70,32 @@
 //!
 //! Backwards is the one order that reads as broken. A shove that lands after its spark reads as
 //! impact-then-reaction, which is what a real impact does; a hull that lurches before anything is
-//! seen to hit it reads as a bug. So [`request_staged_adoption`] holds an
-//! [`AdoptionCause::ExternalEvent`] adoption until this client has PRESENTED an armor impact
-//! belonging to the EPISODE the fact names ([`ImpactPresentation`]).
+//! seen to hit it reads as a bug. So [`request_staged_adoption`] holds an adoption that carries a
+//! [`VisualClaim`] until this client has PRESENTED one of the HITS that claim names
+//! ([`ImpactPresentation`]).
+//!
+//! ## Correlating a spark with a fact is an IDENTITY test, not a time window
+//!
+//! A shove and a spark are the same event only if they name the same hit. Two facts already on the
+//! wire say so, and the rule is a set-membership test on them rather than a tolerance:
+//!
+//! - WHICH EPISODE. `crate::ballistics::AuthorityImpact::tick` is the SERVER tick the authority
+//!   resolved the impact on — the same tick `HullShockLedger::arm` ran on. `HullShock::tick` is the
+//!   tick the episode CLOSED on. `HullShockLedger::close_episode` publishes only when
+//!   `now - last_close >= SHOCK_EPISODE_TICKS`, which makes
+//!   `(close - SHOCK_EPISODE_TICKS, close]` the EXACT set of arm ticks an episode covers: a deferred
+//!   hit publishes at `max(arm, last_close + SHOCK_EPISODE_TICKS)` so its arm tick can never be
+//!   older, and the previous episode's own hits are all at or before `last_close`, which is at or
+//!   before `close - SHOCK_EPISODE_TICKS`, so they can never be inside. Consecutive episodes on one
+//!   hull therefore have DISJOINT windows and no spark can satisfy two of them.
+//! - WHOSE HULL. `crate::ballistics::AuthorityImpact::victim` names the body the authority gave the
+//!   impulse to — literally the body whose ledger it armed — so a spark on another tank cannot
+//!   release this hull's shove.
+//!
+//! Neither half works in the client's own clock, and that is the point. A watermark stamped with
+//! the LOCAL tick a spark was drawn measures transit and frame scheduling, not which hit it was;
+//! no window over it can tell "my spark, drawn early because the ledger coalesced the episode" from
+//! "a different hit's spark". Both facts here are the authority's, so the comparison is exact.
 //!
 //! This is an ordering PREFERENCE. It is not a commit barrier, and — the part that must not be
 //! overstated — it is not a guarantee; see the hole below. Nothing about the shove is weakened by
@@ -84,14 +107,21 @@
 //!
 //! ## THE HOLE: trigger arbitration cannot order what it does not trigger
 //!
-//! lightyear restores EVERY registered predicted component on EVERY rollback, whatever caused it,
-//! and nothing in that restore consults this module. So a rollback to any tick at or past
-//! [`AuthoritativeFact::produced_at`] — a `Position` mismatch, an input mismatch,
-//! `net::watchdog`'s claim, or lightyear's own registered `HullShock` comparator — puts the
-//! authority's post-hit hull velocity on the live hull while the fact staged here is still waiting
-//! for its spark. This module owns which rollback it ASKS for; it does not own which rollbacks
-//! happen. Only a barrier on the shove's APPLICATION could close that, and this slice does not
-//! build one.
+//! lightyear restores every registered predicted component that HAS a [`ConfirmedHistory`] from
+//! that history on every CONFIRMED-STATE rollback, whatever caused it, and nothing in that restore
+//! consults this module. So a state rollback to any tick at or past
+//! [`AuthoritativeFact::produced_at`] — a `Position` mismatch, `net::watchdog`'s claim, or
+//! lightyear's own registered `HullShock` comparator — puts the authority's post-hit hull velocity
+//! on the live hull while the fact staged here is still waiting for its spark. This module owns
+//! which rollback it ASKS for; it does not own which rollbacks happen. Only a barrier on the shove's
+//! APPLICATION could close that, and this slice does not build one.
+//!
+//! An INPUT rollback is not in that set and must never be counted as one: `prepare_rollback`
+//! restores from [`PredictionHistory`], not [`ConfirmedHistory`], for `Rollback::FromInputs`, so it
+//! re-installs the client's own no-hit prediction and delivers nothing. [`retirement`] is told the
+//! rollback KIND for exactly this reason. Our own client disables input rollback outright
+//! (`net::client::shipping_rollback_policy`), and a test in this module holds that in place — but
+//! the helper does not RELY on it, because a masked defect with no tripwire is how this returns.
 //!
 //! The gap is therefore MEASURED rather than claimed away. [`confirm_forced_rollback`] counts every
 //! rollback it did not order that delivered a still-waiting fact — [`OrderingTally::bypassed`],
@@ -229,61 +259,88 @@ impl ForcedRollbackSlot {
 
 /// Everything the best-effort ordering rule has done so far. Read by `net::diagnostics`.
 ///
-/// Every field is named for what it MEASURES rather than for the intent behind it, because the
-/// watermark that feeds the first two is a superset (see [`ImpactPresentation`]) and a name like
-/// "ordered" would be claiming more than the number can carry.
+/// Every field is named for what it MEASURES rather than for the intent behind it: this rule cannot
+/// stop a rollback it did not order, so "ordered" would claim more than any of these numbers carry.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct OrderingTally {
-    /// Shoves released because SOME armor impact had been drawn for the fact's episode window.
+    /// Shoves released because one of the hits the fact is made of had been drawn.
     pub(crate) released_on_impact: u32,
-    /// Shoves released because [`ORDERING_BUDGET_TICKS`] of local patience ran out with no armor
-    /// impact drawn for the episode at all.
+    /// Shoves released because [`ORDERING_BUDGET_TICKS`] of local patience ran out with none of the
+    /// fact's own hits drawn at all.
     pub(crate) released_on_budget: u32,
-    /// Shoves that landed WITHOUT this module's decision: a rollback it did not order restored the
-    /// authority's post-hit hull state while the fact was still waiting for its spark. THE honesty
-    /// number — the ordering rule is best effort, and this is the size of the gap.
+    /// Shoves that landed WITHOUT this module's decision: a CONFIRMED-STATE rollback it did not
+    /// order restored the authority's post-hit hull state while the fact was still waiting for its
+    /// spark. THE honesty number — the ordering rule is best effort, and this is the size of the
+    /// gap. It counts only rollbacks that actually carried the shove; one that restores from the
+    /// client's own prediction leaves the fact staged and is not counted here.
     pub(crate) bypassed: u32,
     /// Longest LOCAL wait the rule has imposed on a shove, in ticks.
     pub(crate) max_wait_ticks: i32,
 }
 
-/// What this client has SHOWN, and what the ordering rule did with it.
+/// One authority-resolved hit this client has DRAWN, recorded in the AUTHORITY's terms.
 ///
-/// The watermark is deliberately a SUPERSET of "an impact on MY hull": `HullShock` carries no shot
-/// identity and `crate::ballistics::Impact` carries no victim, so any armor impact this client draws
-/// advances it. A superset can only release the wait EARLIER — it can never block a shove — which is
-/// the safe direction for a rule whose failure mode would be a hit the player never feels. It is
-/// also why [`OrderingTally::released_on_impact`] is not called "ordered": it counts shoves released
-/// against SOME spark, which is a superset of the shoves released against their OWN. Narrowing it to
-/// the owner's own hull needs a victim on the impact fact.
+/// The local tick it was drawn on is deliberately absent: it measures transit and frame scheduling,
+/// and no comparison against it can say which hit a spark was. See the module doc.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct PresentedHit {
+    /// The server tick the authority resolved this impact on.
+    tick: Tick,
+    /// The body the authority gave the impulse to, when the struck volume belonged to one.
+    victim: Option<crate::CombatantId>,
+}
+
+/// What a spark must BE for a fact to count as ordered against it.
+///
+/// The producer builds it, because only the producer knows how its own facts group hits; this
+/// module only checks membership. A fact with no claim is never held — see [`clear_to_order`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct VisualClaim {
+    /// The combatant the fact is about. A spark on another body is another tank's business.
+    pub(crate) victim: crate::CombatantId,
+    /// The authority ticks whose impacts belong to this fact, as the half-open range
+    /// `(after, through]`. Half-open BELOW is load-bearing: the previous episode's own hits land at
+    /// or before its close tick, which is exactly `after` in the worst case, so an inclusive bound
+    /// would let an earlier episode's spark release this one.
+    pub(crate) after: Tick,
+    pub(crate) through: Tick,
+}
+
+impl VisualClaim {
+    fn covers(self, hit: PresentedHit) -> bool {
+        hit.victim == Some(self.victim) && hit.tick - self.after > 0 && hit.tick - self.through <= 0
+    }
+}
+
+/// How many presented hits are retained. DERIVED: a claim can only ever ask about the
+/// [`SHOCK_EPISODE_TICKS`]-wide window ending at its own close tick, and a fact is staged for at most
+/// [`ORDERING_BUDGET_TICKS`], so nothing older than `SHOCK_EPISODE_TICKS + ORDERING_BUDGET_TICKS` =
+/// 32 ticks can still be asked for. 32 entries is one per tick of that span — more than four times
+/// what the game's fastest weapon can deposit into it (900 rpm cyclic is one hit per ~4.3 ticks).
+/// Overflowing it drops the OLDEST, which can only cost a release-on-impact that the budget then
+/// covers loudly; it can never release a shove early.
+const MAX_PRESENTED_HITS: usize = (SHOCK_EPISODE_TICKS + ORDERING_BUDGET_TICKS as u32) as usize;
+
+/// What this client has SHOWN, and what the ordering rule did with it.
 #[derive(Resource, Default)]
 pub(crate) struct ImpactPresentation {
-    /// Client tick of the newest armor impact this client PRESENTED. Monotonic within a connection.
-    newest_armor_impact: Option<Tick>,
+    /// The authority-resolved armor hits this client has drawn, oldest first.
+    presented: Vec<PresentedHit>,
     tally: OrderingTally,
 }
 
 impl ImpactPresentation {
-    /// Record that an armor impact was drawn at `tick`.
-    fn present(&mut self, tick: Tick) {
-        if self
-            .newest_armor_impact
-            .is_none_or(|newest| tick - newest > 0)
-        {
-            self.newest_armor_impact = Some(tick);
+    /// Record that an armor impact belonging to `hit` was drawn.
+    fn present(&mut self, hit: PresentedHit) {
+        self.presented.push(hit);
+        if self.presented.len() > MAX_PRESENTED_HITS {
+            self.presented.remove(0);
         }
     }
 
-    /// Whether an armor impact has been drawn for the EPISODE that closed at `produced_at`.
-    ///
-    /// The window is the episode's, not "at or after `produced_at`". `HullShockLedger` COALESCES:
-    /// every hit inside `SHOCK_EPISODE_TICKS` of the last published one is deferred into a single
-    /// later fact, so a legitimate spark for this episode was very likely drawn BEFORE the tick the
-    /// episode finally closed on. Comparing tick order would call that already-satisfied case "not
-    /// yet shown" and wait out the whole budget for a spark the player has already seen.
-    fn shown_for_episode(&self, produced_at: Tick) -> bool {
-        self.newest_armor_impact
-            .is_some_and(|newest| newest - produced_at >= -(SHOCK_EPISODE_TICKS as i32))
+    /// Whether one of the hits `claim` is made of has been drawn.
+    fn shown_for(&self, claim: VisualClaim) -> bool {
+        self.presented.iter().any(|hit| claim.covers(*hit))
     }
 
     /// Tally one resolved ordering decision. Called once per staged fact, not once per retry.
@@ -307,19 +364,26 @@ impl ImpactPresentation {
     }
 }
 
-/// Stamp the presentation watermark from the impact the view layer is about to draw.
+/// Record the impact the view layer is about to draw, in the authority's terms.
 ///
 /// `crate::ballistics::Impact` IS the presentation signal — `vfx::impact` renders off this same
-/// trigger — so the watermark records what the player SEES, not what arrived on the wire. The march
-/// that raises it is skipped entirely on a replayed tick (`crate::Replaying`), so a rollback never
+/// trigger — so this records what the player SEES, not what arrived on the wire. The march that
+/// raises it is skipped entirely on a replayed tick (`crate::Replaying`), so a rollback never
 /// re-stamps or rewinds this.
-fn note_presented_impact(
-    impact: On<Impact>,
-    timeline: Res<LocalTimeline>,
-    mut presentation: ResMut<ImpactPresentation>,
-) {
-    if impact.surface == ImpactSurface::Armor {
-        presentation.present(timeline.tick());
+///
+/// An impact with no [`crate::ballistics::AuthorityImpact`] is the resolver's OWN read, which on a
+/// client means an unkeyed shell that never had an authority fact to correlate with. It is drawn and
+/// not recorded: recording it would put an entry with no identity into the ledger, and the only
+/// thing an identity-less entry can do is match a claim it does not belong to.
+fn note_presented_impact(impact: On<Impact>, mut presentation: ResMut<ImpactPresentation>) {
+    if impact.surface != ImpactSurface::Armor {
+        return;
+    }
+    if let Some(authority) = impact.authority {
+        presentation.present(PresentedHit {
+            tick: Tick(authority.tick),
+            victim: authority.victim,
+        });
     }
 }
 
@@ -359,6 +423,11 @@ pub(crate) struct AuthoritativeFact {
     /// The authority tick whose END-OF-TICK state carries the fact. This is the restore target; see
     /// the module doc on why this primitive is state-checkpoint-shaped.
     pub(crate) produced_at: Tick,
+    /// What a spark has to be for this fact to count as ordered against it, when the fact has a
+    /// visual at all. `None` means "nothing to wait for" and the fact is never held: that is
+    /// correct for an [`AdoptionCause::Misprediction`], which has no visual by construction, and it
+    /// is a producer's own responsibility to supply one for an event that does.
+    pub(crate) visual: Option<VisualClaim>,
 }
 
 /// What [`AuthorityAdoption::offer`] did with an offered fact.
@@ -481,9 +550,9 @@ fn reset_adoption_state(
 ) {
     *adoption = default();
     *slot = default();
-    // The watermark is a tick from the old timeline; the tallies are session instrumentation and
-    // deliberately survive, so a reconnect does not erase the number that decides the barrier.
-    presentation.newest_armor_impact = None;
+    // The presented hits are ticks from the old timeline; the tallies are session instrumentation
+    // and deliberately survive, so a reconnect does not erase the number that decides the barrier.
+    presentation.presented.clear();
 }
 
 /// Whether a forced restore at `tick` would replace this component with AUTHORITY, or silently
@@ -518,6 +587,7 @@ fn offer_hull_shock_adoptions(
             Entity,
             &ConfirmedHistory<HullShock>,
             &PredictionHistory<HullShock>,
+            Option<&crate::CombatantId>,
             Option<&ConfirmedHistory<Position>>,
             Option<&ConfirmedHistory<Rotation>>,
             Option<&ConfirmedHistory<LinearVelocity>>,
@@ -539,7 +609,9 @@ fn offer_hull_shock_adoptions(
         return;
     };
     let now = timeline.tick();
-    for (hull, confirmed_shock, predicted_shock, position, rotation, linear, angular) in &hulls {
+    for (hull, confirmed_shock, predicted_shock, combatant, position, rotation, linear, angular) in
+        &hulls
+    {
         let Some((produced_at, authority)) =
             newest_present_at_or_before(confirmed_shock, completed)
         else {
@@ -577,6 +649,17 @@ fn offer_hull_shock_adoptions(
                 },
                 cause: AdoptionCause::ExternalEvent,
                 produced_at,
+                // THE EPISODE'S OWN HITS, in the authority's terms. `authority.tick` — not
+                // `produced_at` — is the tick the episode CLOSED on: `produced_at` is the confirmed
+                // sample's tick, which is the right RESTORE target but may sit later than the close
+                // if replication did not send that tick. `close_episode`'s arithmetic makes
+                // `(close - SHOCK_EPISODE_TICKS, close]` exactly the arm ticks this episode covers;
+                // see the module doc for the derivation.
+                visual: combatant.map(|victim| VisualClaim {
+                    victim: *victim,
+                    after: Tick(authority.tick) - SHOCK_EPISODE_TICKS,
+                    through: Tick(authority.tick),
+                }),
             },
             now,
         );
@@ -651,12 +734,13 @@ fn request_staged_adoption(
 /// THE ORDERING RULE, which is BEST EFFORT. Whether this module will request the staged fact yet,
 /// given what the player has been SHOWN.
 ///
-/// An [`AdoptionCause::ExternalEvent`] waits for an armor impact drawn for its episode, so the shove
+/// A fact carrying a [`VisualClaim`] waits for one of ITS OWN hits to have been drawn, so the shove
 /// this module orders does not outrun its own spark; see the module doc for why that direction is
-/// the only one that reads as broken, and for why nothing here can stop a rollback ordered elsewhere
-/// from landing the same shove early. A [`AdoptionCause::Misprediction`] has no visual to be ordered
-/// against and is never held. The verdict latches on [`AuthorityAdoption::ordering`], so the tally
-/// counts facts, not the frames a fact spent being retried.
+/// the only one that reads as broken, for how the claim identifies the hit, and for why nothing here
+/// can stop a rollback ordered elsewhere from landing the same shove early. A fact with no claim —
+/// an [`AdoptionCause::Misprediction`] — has no visual to be ordered against and is never held. The
+/// verdict latches on [`AuthorityAdoption::ordering`], so the tally counts facts, not the frames a
+/// fact spent being retried.
 ///
 /// `waited` is LOCAL ticks since staging, not the fact's age.
 fn clear_to_order(
@@ -665,13 +749,13 @@ fn clear_to_order(
     fact: AuthoritativeFact,
     waited: i32,
 ) -> bool {
-    if fact.cause != AdoptionCause::ExternalEvent {
+    let Some(claim) = fact.visual else {
         return true;
-    }
+    };
     if adoption.ordering.is_some() {
         return true;
     }
-    let shown = presentation.shown_for_episode(fact.produced_at);
+    let shown = presentation.shown_for(claim);
     if !shown && waited < ORDERING_BUDGET_TICKS {
         return false;
     }
@@ -682,13 +766,15 @@ fn clear_to_order(
         // measurement the relaxed ordering requirement asked for: how often the visual never showed
         // up inside the budget, which is what would justify a presentation commit barrier.
         warn!(
-            "client: authoritative fact {:?} #{} on {} landed UNORDERED — no armor impact drawn \
-             for the episode ending at tick {} within {ORDERING_BUDGET_TICKS} ticks of staging \
-             ({} released on budget so far)",
+            "client: authoritative fact {:?} #{} on {} landed UNORDERED — no armor impact on \
+             combatant {} was drawn for authority ticks {}..={} within {ORDERING_BUDGET_TICKS} \
+             ticks of staging ({} released on budget so far)",
             fact.id.source,
             fact.id.sequence,
             fact.id.entity,
-            fact.produced_at.0,
+            claim.victim.0,
+            claim.after.0.wrapping_add(1),
+            claim.through.0,
             presentation.tally().released_on_budget,
         );
     }
@@ -702,22 +788,24 @@ fn clear_to_order(
 ///
 /// Two ways a staged fact ends here, and they must not be conflated. OURS: this module's own claim
 /// is what lightyear installed, so the rollback it started is the one that was ordered against the
-/// spark. NOT OURS: some other subsystem's rollback landed at or past the producing tick, and
-/// because lightyear restores every registered predicted component on any rollback, that restore
-/// already put the shove on the live hull. The fact is spent either way — re-requesting it would buy
-/// a second render hitch for state that is already live — but only the first is an adoption this
-/// module ordered, and the second is counted as a BYPASS whenever it beat the spark. A rollback
-/// SHALLOWER than the producing tick carries none of this and retires nothing.
+/// spark. NOT OURS: some other subsystem's CONFIRMED-STATE rollback landed at or past the producing
+/// tick, and because such a rollback restores every registered predicted component from its
+/// confirmed history, that restore already put the shove on the live hull. The fact is spent either
+/// way — re-requesting it would buy a second render hitch for state that is already live — but only
+/// the first is an adoption this module ordered, and the second is counted as a BYPASS whenever it
+/// beat the spark. A rollback SHALLOWER than the producing tick, and an INPUT rollback at any depth,
+/// carry none of this and retire nothing.
 fn confirm_forced_rollback(
-    managers: Query<&PredictionManager>,
+    managers: Query<(&PredictionManager, Option<&Rollback>)>,
     mut slot: ResMut<ForcedRollbackSlot>,
     mut adoption: ResMut<AuthorityAdoption>,
     mut presentation: ResMut<ImpactPresentation>,
 ) {
-    let started = managers
-        .single()
-        .ok()
-        .and_then(PredictionManager::get_rollback_start_tick);
+    let manager = managers.single().ok();
+    let started = manager.and_then(|(manager, _)| manager.get_rollback_start_tick());
+    let kind = manager
+        .and_then(|(_, rollback)| rollback)
+        .map(RestoresFrom::of);
     slot.installed = slot.claim.take().filter(|(tick, _)| started == Some(*tick));
     if let Some((tick, cause)) = slot.installed() {
         debug!(
@@ -725,10 +813,10 @@ fn confirm_forced_rollback(
             tick.0,
         );
     }
-    let (Some(fact), Some(started)) = (adoption.staged, started) else {
+    let (Some(fact), Some(started), Some(kind)) = (adoption.staged, started, kind) else {
         return;
     };
-    match retirement(&adoption, slot.installed(), started) {
+    match retirement(&adoption, slot.installed(), started, kind) {
         None | Some(Retirement::Keep) => return,
         Some(Retirement::Adopted) => debug!(
             "client: adopted authoritative fact {:?} #{} on {} (cause {:?}, checkpoint {:?}) — \
@@ -774,25 +862,60 @@ enum Retirement {
     Keep,
     /// This module's own claim was installed: the fact landed the way it was ordered.
     Adopted,
-    /// A rollback this module did not order restored the fact's producing tick, so the shove is
-    /// already on the live hull. `spark_pending` is whether it beat the visual — a BYPASS.
+    /// A confirmed-state rollback this module did not order restored the fact's producing tick from
+    /// authority, so the shove is already on the live hull. `spark_pending` is whether it beat the
+    /// visual — a BYPASS.
     Delivered { spark_pending: bool },
+}
+
+/// WHERE a rollback restores predicted state FROM. The one property of a rollback that decides
+/// whether it can carry an authoritative fact at all.
+///
+/// `prepare_rollback` branches on `lightyear::prelude::Rollback`: `FromState` restores a component
+/// that has a [`ConfirmedHistory`] from that history, `FromInputs` restores every component from the
+/// client's own [`PredictionHistory`]. Named for the branch rather than for the cause because the
+/// branch is the whole reason the distinction matters here.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RestoresFrom {
+    /// The authority's confirmed history. Only this can deliver a fact the client cannot predict.
+    Authority,
+    /// The client's own prediction history — for a hull the client never knew was hit, its own
+    /// un-hit state. It re-installs the misprediction and delivers nothing.
+    OwnPrediction,
+}
+
+impl RestoresFrom {
+    fn of(rollback: &Rollback) -> Self {
+        match rollback {
+            Rollback::FromState => Self::Authority,
+            Rollback::FromInputs => Self::OwnPrediction,
+        }
+    }
 }
 
 /// THE RETIREMENT RULE, split out from [`confirm_forced_rollback`] because a `PredictionManager`'s
 /// rollback state cannot be fabricated in a unit test and this decision is where the whole
 /// correctness of the transaction sits.
 ///
-/// OURS is a claim IDENTITY, not a coincidence of ticks. [`ForcedRollbackSlot`] is global and
-/// lightyear rolls back for its own reasons — a `Position` mismatch, an input mismatch,
-/// `net::watchdog` — so "a rollback started at our target tick" is satisfied by rollbacks this
-/// module never asked for, and retiring against one spends a fact that may not have been delivered.
+/// Two things have to hold before a rollback spends a staged fact, and each has cost a review round:
+///
+/// - It must restore from AUTHORITY. An input rollback re-installs the client's own prediction, so
+///   closing a fact against one loses the shove outright. Our client disables input rollback, but
+///   this decides from the rollback in hand rather than from that configuration.
+/// - OURS is a claim IDENTITY, not a coincidence of ticks. [`ForcedRollbackSlot`] is global and
+///   lightyear rolls back for its own reasons — a `Position` mismatch, `net::watchdog` — so "a
+///   rollback started at our target tick" is satisfied by rollbacks this module never asked for, and
+///   retiring against one as an ADOPTION would credit the ordering rule for a shove it did not order.
 fn retirement(
     adoption: &AuthorityAdoption,
     installed: Option<(Tick, AdoptionCause)>,
     started: Tick,
+    restores_from: RestoresFrom,
 ) -> Option<Retirement> {
     let fact = adoption.staged?;
+    if restores_from == RestoresFrom::OwnPrediction {
+        return Some(Retirement::Keep);
+    }
     if adoption.requested && installed == Some((fact.produced_at, fact.cause)) {
         return Some(Retirement::Adopted);
     }
@@ -850,6 +973,12 @@ mod tests {
 
     use super::*;
 
+    /// The combatant every fixture's hull belongs to.
+    const VICTIM: crate::CombatantId = crate::CombatantId(3);
+    /// Somebody else, being shot at the same time.
+    const BYSTANDER: crate::CombatantId = crate::CombatantId(4);
+
+    /// One episode, closed at `tick`, exactly as `offer_hull_shock_adoptions` builds it.
     fn fact(entity: Entity, sequence: u32, checkpoint: u32, tick: u32) -> AuthoritativeFact {
         AuthoritativeFact {
             id: FactId {
@@ -860,6 +989,19 @@ mod tests {
             },
             cause: AdoptionCause::ExternalEvent,
             produced_at: Tick(tick),
+            visual: Some(VisualClaim {
+                victim: VICTIM,
+                after: Tick(tick) - SHOCK_EPISODE_TICKS,
+                through: Tick(tick),
+            }),
+        }
+    }
+
+    /// A hit the authority resolved at server tick `tick`, on `victim`, that this client has drawn.
+    fn drew(tick: u32, victim: crate::CombatantId) -> PresentedHit {
+        PresentedHit {
+            tick: Tick(tick),
+            victim: Some(victim),
         }
     }
 
@@ -977,32 +1119,29 @@ mod tests {
         clear_to_order(adoption, presentation, episode, waited)
     }
 
-    /// THE ORDERING RULE. A shove waits for a spark drawn for ITS EPISODE, and lands the moment one
-    /// is — including one drawn before the tick the coalesced episode finally closed on.
+    /// THE ORDERING RULE. A shove waits for one of ITS OWN hits to have been drawn, and lands the
+    /// moment one has — including a hit the authority resolved well before the tick the coalesced
+    /// episode finally closed on.
     ///
     /// `HullShockLedger` defers every hit inside [`SHOCK_EPISODE_TICKS`] of the last published one
-    /// into a single later fact, so "the spark came first" is the NORMAL shape for a burst, not an
-    /// earlier hit's leftovers. Only a spark older than the whole episode window belongs elsewhere.
+    /// into a single later fact, so "the spark came first" is the NORMAL shape for a burst. The
+    /// fixture is the burst: hit A closed its own episode at 100, hit B landed at 104 and could not
+    /// publish until 116, and B's spark was drawn 12 ticks before B's own fact exists.
     #[test]
-    fn a_shove_waits_for_an_armor_impact_drawn_for_its_own_episode() {
+    fn a_shove_waits_for_one_of_its_own_hits() {
         let mut adoption = AuthorityAdoption::default();
         let mut presentation = ImpactPresentation::default();
-        let episode = fact(hull(), 1, 50, 100);
-        assert_eq!(adoption.offer(episode, STAGED_AT), Offer::Staged);
+        let deferred = fact(hull(), 2, 51, 116);
+        assert_eq!(adoption.offer(deferred, STAGED_AT), Offer::Staged);
 
         assert!(
-            !order(&mut adoption, &mut presentation, episode, 0),
+            !order(&mut adoption, &mut presentation, deferred, 0),
             "nothing has been drawn yet, so the shove would precede its own visual",
         );
-        presentation.present(Tick(100 - SHOCK_EPISODE_TICKS - 1));
+        presentation.present(drew(104, VICTIM));
         assert!(
-            !order(&mut adoption, &mut presentation, episode, 1),
-            "an impact drawn before the episode window opened belongs to an earlier episode",
-        );
-        presentation.present(Tick(100 - SHOCK_EPISODE_TICKS + 1));
-        assert!(
-            order(&mut adoption, &mut presentation, episode, 2),
-            "a pellet's spark drawn inside the coalescing window IS this episode's spark",
+            order(&mut adoption, &mut presentation, deferred, 2),
+            "the hit the authority resolved at 104 IS what this deferred episode is made of",
         );
         assert_eq!(
             presentation.tally(),
@@ -1012,6 +1151,59 @@ mod tests {
                 ..default()
             },
         );
+    }
+
+    /// THE COUNTER-EXAMPLE THE SLICE-3.5 REVIEW CAUGHT, executable.
+    ///
+    /// Hit A lands and publishes at 100. Hit B lands at 104 but the open episode defers it to 116,
+    /// where it publishes as a SECOND fact. If B's own spark never arrives, the only armor impact
+    /// this client has drawn is A's — and A's is the previous episode's, so it must not release B.
+    /// A window measured in LOCAL ticks accepted it; the authority's own tick does not, because
+    /// `close_episode` cannot put two episodes' hits in one window.
+    #[test]
+    fn an_earlier_episodes_hit_cannot_release_the_next_episode() {
+        let mut adoption = AuthorityAdoption::default();
+        let mut presentation = ImpactPresentation::default();
+        let deferred = fact(hull(), 2, 51, 116);
+        assert_eq!(adoption.offer(deferred, STAGED_AT), Offer::Staged);
+
+        presentation.present(drew(100, VICTIM));
+        assert!(
+            !order(&mut adoption, &mut presentation, deferred, 1),
+            "tick 100 is the tick the PREVIOUS episode closed on, so the hit that drew that spark \
+             was published by that episode and cannot also belong to this one",
+        );
+        assert_eq!(
+            presentation.tally(),
+            OrderingTally::default(),
+            "a fact still waiting has resolved nothing",
+        );
+    }
+
+    /// The other half of the identity. Two tanks hit inside one episode window is ordinary in a
+    /// duel; a spark on the other one explains nothing about THIS hull lurching.
+    #[test]
+    fn a_hit_on_another_combatant_never_releases_this_hulls_shove() {
+        let mut adoption = AuthorityAdoption::default();
+        let mut presentation = ImpactPresentation::default();
+        let episode = fact(hull(), 1, 50, 100);
+        assert_eq!(adoption.offer(episode, STAGED_AT), Offer::Staged);
+
+        presentation.present(drew(99, BYSTANDER));
+        assert!(
+            !order(&mut adoption, &mut presentation, episode, 1),
+            "the tick is inside the window, but the hull is somebody else's",
+        );
+        presentation.present(PresentedHit {
+            tick: Tick(99),
+            victim: None,
+        });
+        assert!(
+            !order(&mut adoption, &mut presentation, episode, 2),
+            "an impact the authority never attributed to a body cannot be claimed by one",
+        );
+        presentation.present(drew(99, VICTIM));
+        assert!(order(&mut adoption, &mut presentation, episode, 3));
     }
 
     /// The wait is bounded. A visual that has not arrived within [`ORDERING_BUDGET_TICKS`] LOCAL
@@ -1083,7 +1275,7 @@ mod tests {
         let episode = fact(hull(), 1, 50, 100);
         assert_eq!(adoption.offer(episode, STAGED_AT), Offer::Staged);
 
-        presentation.present(Tick(101));
+        presentation.present(drew(96, VICTIM));
         for _ in 0..4 {
             assert!(order(&mut adoption, &mut presentation, episode, 3));
         }
@@ -1106,15 +1298,16 @@ mod tests {
         let mut presentation = ImpactPresentation::default();
         let mut drift = fact(hull(), 1, 50, 100);
         drift.cause = AdoptionCause::Misprediction;
+        drift.visual = None;
 
         assert!(order(&mut adoption, &mut presentation, drift, 0));
         assert_eq!(presentation.tally(), OrderingTally::default());
     }
 
     /// FINDING THE SLICE-3 REVIEW CAUGHT. A rollback that merely STARTS at the fact's producing tick
-    /// is not this module's rollback: lightyear rolls back for a `Position` mismatch, an input
-    /// mismatch or `net::watchdog`'s claim, and retiring against one of those spends a staged fact
-    /// this module never delivered. Only its own installed claim counts as an adoption.
+    /// is not this module's rollback: lightyear rolls back for a `Position` mismatch or
+    /// `net::watchdog`'s claim, and crediting one of those as an ADOPTION would report an ordering
+    /// this module never performed. Only its own installed claim counts as one.
     #[test]
     fn only_this_modules_own_installed_claim_counts_as_an_adoption() {
         let mut adoption = AuthorityAdoption::default();
@@ -1122,7 +1315,7 @@ mod tests {
         assert_eq!(adoption.offer(episode, STAGED_AT), Offer::Staged);
 
         assert_eq!(
-            retirement(&adoption, None, Tick(100)),
+            retirement(&adoption, None, Tick(100), RestoresFrom::Authority),
             Some(Retirement::Delivered {
                 spark_pending: true
             }),
@@ -1134,6 +1327,7 @@ mod tests {
                 &adoption,
                 Some((Tick(100), AdoptionCause::Misprediction)),
                 Tick(100),
+                RestoresFrom::Authority,
             ),
             Some(Retirement::Delivered {
                 spark_pending: true
@@ -1145,6 +1339,7 @@ mod tests {
                 &adoption,
                 Some((Tick(100), AdoptionCause::ExternalEvent)),
                 Tick(100),
+                RestoresFrom::Authority,
             ),
             Some(Retirement::Adopted),
         );
@@ -1160,15 +1355,59 @@ mod tests {
         assert_eq!(adoption.offer(episode, STAGED_AT), Offer::Staged);
 
         assert_eq!(
-            retirement(&adoption, None, Tick(99)),
+            retirement(&adoption, None, Tick(99), RestoresFrom::Authority),
             Some(Retirement::Keep)
         );
         assert_eq!(
-            retirement(&adoption, None, Tick(101)),
+            retirement(&adoption, None, Tick(101), RestoresFrom::Authority),
             Some(Retirement::Delivered {
                 spark_pending: true
             }),
             "a DEEPER rollback restores the fact's tick along the way, so the shove is already live",
+        );
+    }
+
+    /// FINDING THE SLICE-3.5 REVIEW CAUGHT. An INPUT rollback restores from the client's own
+    /// `PredictionHistory` (`prepare_rollback`'s non-`FromState` branch), which for a hull the
+    /// client never knew was hit is its un-hit prediction. Retiring against one at ANY depth would
+    /// close the fact having delivered nothing, and the shove would be lost outright.
+    #[test]
+    fn an_input_rollback_delivers_nothing_and_retires_nothing() {
+        let mut adoption = AuthorityAdoption::default();
+        let episode = fact(hull(), 1, 50, 100);
+        assert_eq!(adoption.offer(episode, STAGED_AT), Offer::Staged);
+        adoption.requested = true;
+
+        for started in [Tick(100), Tick(101), Tick(140)] {
+            assert_eq!(
+                retirement(
+                    &adoption,
+                    Some((Tick(100), AdoptionCause::ExternalEvent)),
+                    started,
+                    RestoresFrom::OwnPrediction,
+                ),
+                Some(Retirement::Keep),
+                "an input rollback at tick {} restored the client's own no-hit prediction — the \
+                 fact must stay staged, whatever the slot says",
+                started.0,
+            );
+        }
+    }
+
+    /// THE PRODUCTION INVARIANT, held in place rather than relied on. `net::client` disables input
+    /// rollback outright, which is why the case above has never shipped. [`retirement`] handles it
+    /// regardless; this fails the moment someone switches the policy back on without reading why.
+    #[test]
+    fn the_shipping_client_disables_input_rollback() {
+        assert!(
+            matches!(
+                super::super::client::shipping_rollback_policy().input,
+                RollbackMode::Disabled
+            ),
+            "input rollback is on again. `net::adoption::retirement` already refuses to retire a \
+             staged fact against one, so nothing is lost — but `net::hull_shock_rollback` and the \
+             lead-0 fixtures were all written against a client that never takes that branch, and \
+             they now cover less than they claim.",
         );
     }
 
@@ -1181,10 +1420,10 @@ mod tests {
         let episode = fact(hull(), 1, 50, 100);
         assert_eq!(adoption.offer(episode, STAGED_AT), Offer::Staged);
 
-        presentation.present(Tick(100));
+        presentation.present(drew(100, VICTIM));
         assert!(order(&mut adoption, &mut presentation, episode, 0));
         assert_eq!(
-            retirement(&adoption, None, Tick(100)),
+            retirement(&adoption, None, Tick(100), RestoresFrom::Authority),
             Some(Retirement::Delivered {
                 spark_pending: false
             }),

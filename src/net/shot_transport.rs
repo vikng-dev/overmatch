@@ -510,6 +510,7 @@ fn queue_ricochet(
         speed: ricochet.speed,
         bounce_tick: timeline.tick(),
         sequence: ricochet.sequence,
+        victim: ricochet.victim,
     };
     transport.enqueue_public(
         FireVisualFact::Ricochet(keyframe),
@@ -547,6 +548,7 @@ fn queue_terminal(
         penetrated: terminal.penetrated,
         impact_tick: timeline.tick(),
         after_bounces: terminal.after_bounces,
+        victim: terminal.victim,
     };
     transport.enqueue_public(
         FireVisualFact::Impact(confirm),
@@ -935,6 +937,7 @@ mod tests {
             speed: 500.0,
             bounce_tick: Tick(tick),
             sequence: 0,
+            victim: None,
         })
     }
 
@@ -1360,6 +1363,7 @@ mod tests {
             speed: 500.0,
             bounce_tick: Tick(104),
             sequence: 0,
+            victim: None,
         });
         let impact = FireVisualFact::Impact(ImpactConfirm {
             shot,
@@ -1368,6 +1372,7 @@ mod tests {
             penetrated: false,
             impact_tick: Tick(108),
             after_bounces: 1,
+            victim: None,
         });
 
         let mut single = ShotTransport::default();

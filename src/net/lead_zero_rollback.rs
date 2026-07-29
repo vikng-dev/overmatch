@@ -71,12 +71,32 @@ use lightyear_sync::prelude::client::RemoteTimeline;
 use lightyear_sync::timeline::sync::{SyncTargetTimeline, SyncedTimeline};
 
 use super::adoption::{ImpactPresentation, ORDERING_BUDGET_TICKS, OrderingTally};
-use crate::ballistics::{HullShock, HullShockLedger, Impact, ImpactSurface, ShockCause};
+use crate::ballistics::{
+    AuthorityImpact, HullShock, HullShockLedger, Impact, ImpactSurface, ShockCause,
+};
 use crate::tank::Tank;
 
 /// The tick the authority closes the shock episode on, and the completed Replicon checkpoint that
 /// certifies it.
 const PRODUCING_TICK: Tick = Tick(100);
+
+/// The combatant the fixture's hull belongs to — the victim the authority names on the impact fact
+/// this client re-draws, and on the `HullShock` episode it must be matched with.
+const VICTIM: crate::CombatantId = crate::CombatantId(1);
+
+/// FRAMES, in ticks, between the checkpoint's arrival and the frame that presents its spark.
+///
+/// Not a fixture convenience — it is the schedule. `ImpactConfirm` is a message drained in `Update`
+/// (`net::client::receive_fire_events`), which is AFTER the frame's fixed loop, so the ballistics
+/// march cannot present it before the NEXT fixed tick; lightyear advances `LocalTimeline` in
+/// `FixedFirst`. One tick is therefore the FLOOR on what the ordering rule can cost when the visual
+/// is actually there, and the fixture must pay it rather than freeze the clock and report zero.
+const PRESENTATION_DELAY_TICKS: i32 = 1;
+
+/// A hit the authority resolved 12 ticks before the episode carrying it closed — inside the
+/// `SHOCK_EPISODE_TICKS` window, so it is one of [`PRODUCING_TICK`]'s own hits, and drawn long before
+/// the shock arrives. See [`Visual::DrawnBeforeArrival`].
+const EARLY_HIT_TICK: u32 = PRODUCING_TICK.0 - 12;
 fn producing_replicon_tick() -> RepliconTick {
     RepliconTick::new(50)
 }
@@ -130,15 +150,22 @@ impl Lead {
     }
 }
 
-/// Whether this client has DRAWN the impact its shock belongs to by the time the fact is offered.
-///
-/// The shipping case is [`Visual::Drawn`]: `net::protocol::ImpactConfirm` leaves the authority in
-/// the same tick as the shock and the ballistics march presents it. [`Visual::Missing`] is the
-/// jitter/loss case the ordering budget exists for — a lost fire fact, or a cosmetic shell that
-/// quietly dissolved, so no spark is ever drawn for this hit.
+/// WHEN this client drew the impact its shock belongs to, relative to the shock's arrival. The two
+/// drawn cases are two real shapes the authority produces, not two fixture conveniences.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Visual {
-    Drawn,
+    /// THE COALESCED-EPISODE SHAPE, and the common one under automatic fire. `HullShockLedger`
+    /// defers every hit inside `SHOCK_EPISODE_TICKS` of an open episode, so the episode publishes
+    /// LATER than the hits it is made of and their sparks were drawn before the shock ever arrived.
+    /// [`EARLY_HIT_TICK`] is such a hit.
+    DrawnBeforeArrival,
+    /// THE ISOLATED-HIT SHAPE. The hit finds no open episode, so it closes on its own tick and the
+    /// shock and its `ImpactConfirm` leave the authority together — but the confirm is a MESSAGE
+    /// drained in `Update`, so the march cannot present it until a later fixed tick. This is the
+    /// case the ordering rule was written for, and it costs [`PRESENTATION_DELAY_TICKS`].
+    DrawnAfterArrival,
+    /// The jitter/loss case the ordering budget exists for — a lost fire fact, or a cosmetic shell
+    /// that quietly dissolved, so no spark is ever drawn for this hit.
     Missing,
 }
 
@@ -176,9 +203,11 @@ fn observe_replay(timeline: Res<LocalTimeline>, mut delivered: ResMut<Delivered>
 ///
 /// The frame ordering is the SHIPPING one, and that is load-bearing for the ordering assertions:
 /// the arrival `PreUpdate` runs with no spark drawn, because `ImpactConfirm` is a message drained in
-/// `Update` and the march cannot present it until a later frame. Only then does [`present_impact`]
-/// run, followed by the `PreUpdate` that may adopt. A fixture that drew the spark before the arrival
-/// frame would be asserting an order the real schedule cannot produce.
+/// `Update` and the march cannot present it until a later frame. The clock then ADVANCES by
+/// [`PRESENTATION_DELAY_TICKS`] before [`present_impact`] and the `PreUpdate` that may adopt, so the
+/// wait the tallies report is the wait the schedule actually imposes. A fixture that drew the spark
+/// before the arrival frame, or that held the clock still across it, would be asserting a timing the
+/// real schedule cannot produce.
 ///
 /// SCOPE, honestly stated: like both older fixtures this deposits confirmed history directly rather
 /// than deserializing a replication message, so it executes the completed-tick scan gate and not
@@ -238,7 +267,7 @@ fn run_arrival(lead: Lead, visual: Visual) -> Delivered {
             HullShock::default(),
             predicted_shock_history,
             confirmed_shock,
-            crate::CombatantId(1),
+            VICTIM,
         ))
         .id();
     app.world_mut()
@@ -275,6 +304,9 @@ fn run_arrival(lead: Lead, visual: Visual) -> Delivered {
     }
 
     advance_to(&mut app, lead.present_tick());
+    if visual == Visual::DrawnBeforeArrival {
+        present_impact(&mut app, EARLY_HIT_TICK);
+    }
     app.world_mut().run_schedule(PreUpdate);
     let processed_on_arrival = app
         .world()
@@ -289,15 +321,20 @@ fn run_arrival(lead: Lead, visual: Visual) -> Delivered {
         app.world_mut().run_schedule(PreUpdate);
     }
 
-    // The arrival frame is over and NO spark can have been drawn for this hit yet — that is the
-    // schedule, not a fixture convenience: `ImpactConfirm` is a message drained in `Update`, so the
-    // earliest the ballistics march can present it is a later frame. This is what the player would
-    // have felt if the shove were allowed to outrun its own spark.
+    // The arrival frame is over. For an ISOLATED hit no spark can have been drawn for it yet — that
+    // is the schedule, not a fixture convenience: `ImpactConfirm` is a message drained in `Update`,
+    // so the earliest the ballistics march can present it is a later frame. This is what the player
+    // would have felt if the shove were allowed to outrun its own spark. (For a COALESCED episode
+    // the spark came first and the shove has correctly already landed by here.)
     let held_linear = app.world().get::<LinearVelocity>(root).unwrap().0;
 
-    // The later frame, with the march's presentation in it.
-    present_impact(&mut app, visual);
-    app.world_mut().run_schedule(PreUpdate);
+    // The later frame, with the march's presentation in it — and the ticks that separate the two.
+    if visual == Visual::DrawnAfterArrival {
+        let present = app.world().resource::<LocalTimeline>().tick() + PRESENTATION_DELAY_TICKS;
+        advance_to(&mut app, present);
+        present_impact(&mut app, PRODUCING_TICK.0);
+        app.world_mut().run_schedule(PreUpdate);
+    }
 
     if visual == Visual::Missing {
         // Spend the ordering budget. A visual that has not been drawn by now is not coming, so the
@@ -328,15 +365,15 @@ fn run_arrival(lead: Lead, visual: Visual) -> Delivered {
     delivered
 }
 
-/// Draw the armor impact this shock belongs to, at the client's current tick.
+/// Draw the armor impact for the hit the authority resolved at `authority_tick`.
 ///
 /// `crate::ballistics::Impact` is the real presentation signal — `vfx::impact` renders off it and
-/// `net::adoption` stamps its ordering watermark from it — so raising it here is the faithful
-/// stand-in for "the march consumed this shot's `ImpactConfirm` and the player saw the spark".
-fn present_impact(app: &mut App, visual: Visual) {
-    if visual == Visual::Missing {
-        return;
-    }
+/// `net::adoption` records its ordering ledger from it — so raising it here is the faithful stand-in
+/// for "the march consumed this shot's `ImpactConfirm` and the player saw the spark". The
+/// [`AuthorityImpact`] is what `ballistics::finish_at_sanctioned_terminal` copies off the sanctioned
+/// terminal: the SERVER tick the impact resolved on and the body the authority gave the impulse to.
+/// It is the correlation handle, so a fixture without it would present a spark belonging to nothing.
+fn present_impact(app: &mut App, authority_tick: u32) {
     app.world_mut().trigger(Impact {
         position: Vec3::ZERO,
         normal: Vec3::Z,
@@ -344,6 +381,10 @@ fn present_impact(app: &mut App, visual: Visual) {
         surface: ImpactSurface::Armor,
         penetrated: true,
         deflection: None,
+        authority: Some(AuthorityImpact {
+            tick: authority_tick,
+            victim: Some(VICTIM),
+        }),
     });
     app.world_mut().flush();
 }
@@ -386,9 +427,14 @@ fn an_authority_shock_reaches_the_live_hull_at_minus_one_lead() {
 /// re-running can be delivered. The shove still arrives, because `prepare_rollback` — not the loop —
 /// is what writes the live hull velocity. Asserting the empty replay list is what stops a future
 /// edit from "fixing" the restore shape into one that silently drops the effect at this lead.
+///
+/// [`Visual::DrawnBeforeArrival`] is what makes the regime reachable at all now that the shove waits
+/// for its spark: an episode that publishes on the SAME tick the client is standing on can only be
+/// adopted with no replay if the spark is already drawn, which is exactly the coalesced-burst shape.
+/// An isolated hit pays a tick — see [`a_drawn_spark_costs_the_shove_only_the_schedules_own_delay`].
 #[test]
 fn the_zero_lead_shove_arrives_with_no_replayed_tick_at_all() {
-    let delivered = run_arrival(Lead::Zero, Visual::Drawn);
+    let delivered = run_arrival(Lead::Zero, Visual::DrawnBeforeArrival);
 
     assert_eq!(
         delivered.replayed_ticks,
@@ -398,12 +444,22 @@ fn the_zero_lead_shove_arrives_with_no_replayed_tick_at_all() {
     );
     assert_eq!(delivered.live_linear, AUTHORITY_LINEAR);
     assert_eq!(delivered.live_angular, AUTHORITY_ANGULAR);
+    assert_eq!(
+        delivered.ordering,
+        OrderingTally {
+            released_on_impact: 1,
+            ..default()
+        },
+        "a hit drawn {} ticks before its episode closed IS one of that episode's hits, so the rule \
+         costs nothing at all here — it neither waited nor fell through to the budget",
+        PRODUCING_TICK.0 - EARLY_HIT_TICK,
+    );
 }
 
 /// The contract both delivery fixtures assert: whatever route the adoption takes, the server's hull
 /// velocity has to become the client's LIVE hull velocity.
 fn assert_delivered(lead: Lead) {
-    let delivered = run_arrival(lead, Visual::Drawn);
+    let delivered = run_arrival(lead, Visual::DrawnAfterArrival);
 
     assert_eq!(
         delivered.live_linear,
@@ -457,12 +513,17 @@ fn a_shove_waits_for_its_spark_and_the_budget_still_delivers_it() {
     );
 }
 
-/// The same run with the spark drawn: the shove lands on the FIRST frame after the presentation, so
-/// the ordering rule costs no measurable wait whenever the visual is actually there. Without this
-/// the fixture above could pass on a rule that always waits out the full budget.
+/// The same run with the spark drawn: the shove lands on the FIRST `PreUpdate` after the
+/// presentation, costing the [`PRESENTATION_DELAY_TICKS`] the schedule itself imposes and not one
+/// tick more. Without this the fixture above could pass on a rule that always waits out the full
+/// budget.
+///
+/// The number is the CLAIM: `max_wait_ticks` is asserted equal to the schedule's own delay, so a
+/// rule that waited an extra frame — or a fixture that stopped advancing the clock and reported a
+/// zero it did not earn — fails here.
 #[test]
-fn a_drawn_spark_costs_the_shove_no_measurable_wait() {
-    let delivered = run_arrival(Lead::Zero, Visual::Drawn);
+fn a_drawn_spark_costs_the_shove_only_the_schedules_own_delay() {
+    let delivered = run_arrival(Lead::Zero, Visual::DrawnAfterArrival);
 
     assert_eq!(
         delivered.live_linear, AUTHORITY_LINEAR,
@@ -472,9 +533,11 @@ fn a_drawn_spark_costs_the_shove_no_measurable_wait() {
         delivered.ordering,
         OrderingTally {
             released_on_impact: 1,
+            max_wait_ticks: PRESENTATION_DELAY_TICKS,
             ..default()
         },
-        "released against the spark, at zero local wait — not by the budget, and not bypassed",
+        "released against the spark after exactly the {PRESENTATION_DELAY_TICKS} tick(s) the \
+         schedule costs — not by the budget, and not bypassed",
     );
 }
 

@@ -384,6 +384,10 @@ pub(crate) struct ShellRicochet {
     pub direction: Vec3,
     pub speed: f32,
     pub sequence: u32,
+    /// The combatant whose body took this bounce's impulse, if the struck volume belongs to one.
+    /// The SAME body [`apply_hit_impulse`] armed, so a client can tell whether a spark it draws is
+    /// one of the hits an arriving [`HullShock`] episode is made of.
+    pub victim: Option<crate::CombatantId>,
 }
 
 /// Authority armor terminal for a keyed shot.
@@ -398,6 +402,8 @@ pub(crate) struct ShellTerminal {
     pub penetrated: bool,
     /// Ricochets resolved before this terminal.
     pub after_bounces: u32,
+    /// The combatant whose body took this terminal's impulse — see [`ShellRicochet::victim`].
+    pub victim: Option<crate::CombatantId>,
 }
 
 /// Authority-only report that a keyed shot first lowered an HP pool. [`DamageReport`] emits it at
@@ -721,6 +727,21 @@ pub(crate) enum ImpactSurface {
     Armor,
 }
 
+/// The authority's own identity for an impact this client is only RE-DRAWING.
+///
+/// A replica never resolves an armor outcome itself: its cosmetic shell freezes at contact and the
+/// spark is drawn from the authority's sanctioned bounce or terminal (see
+/// [`resolve_replica_armor_contact`]). Those facts name the tick the authority resolved the impact
+/// on and the body it gave the impulse to, so a spark can be matched to the hits an arriving
+/// [`HullShock`] episode is made of instead of to "some armor impact, somewhere, recently".
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct AuthorityImpact {
+    /// The SERVER tick the impact resolved on — the same tick [`HullShockLedger::arm`] ran on.
+    pub(crate) tick: u32,
+    /// The combatant whose body took the impulse, if the struck volume belongs to one.
+    pub(crate) victim: Option<crate::CombatantId>,
+}
+
 /// A local shell impact consumed by simulation and view observers.
 #[derive(Event)]
 pub(crate) struct Impact {
@@ -735,6 +756,10 @@ pub(crate) struct Impact {
     pub(crate) penetrated: bool,
     /// Deflected direction for a ricochet; absent for other impacts.
     pub(crate) deflection: Option<Vec3>,
+    /// The authority fact this spark re-draws, when it is re-drawing one. `None` when the impact is
+    /// the resolver's OWN — the authority's live march, or an unkeyed sandbox/singleplayer shell —
+    /// which is exactly the case where there is no remote fact to correlate it with.
+    pub(crate) authority: Option<AuthorityImpact>,
 }
 
 /// Tags a debug impact marker for view observers.
@@ -964,6 +989,7 @@ fn on_fire_shell(
                         surface,
                         penetrated: false,
                         deflection: None,
+                        authority: None,
                     });
                 }
                 // The shot's picture ends here without a tracer ever flying — its whole flight fitted
@@ -1095,6 +1121,9 @@ struct ProjectileMarchWorld<'w, 's> {
     spatial: SpatialQuery<'w, 's>,
     volumes: Query<'w, 's, &'static BallisticVolume>,
     owners: Query<'w, 's, &'static VolumeOf>,
+    /// The struck body's match-local identity, when it has one. Read only to NAME the victim on the
+    /// authority facts a client re-draws; nothing in the march branches on it.
+    combatants: Query<'w, 's, &'static crate::CombatantId>,
     parents: Query<'w, 's, &'static ChildOf>,
     // The heightmap ground, when the heightmap world is live: the march's terrain contacts read
     // the exact deterministic caster, not parry (see [`cast_march_segment`]). Absent on the flat
@@ -1453,6 +1482,10 @@ fn resolve_held_shell(
                 surface: ImpactSurface::Armor,
                 penetrated: false,
                 deflection: Some(segment.bounce.direction),
+                authority: Some(AuthorityImpact {
+                    tick: segment.bounce.bounce_tick,
+                    victim: segment.bounce.victim,
+                }),
             });
             if index == 0 {
                 crate::shot_trace::record(shot_trace, "hold", now, shot_id, || {
@@ -1647,6 +1680,10 @@ fn consume_overdue_sanctioned_outcome(
                     surface: ImpactSurface::Armor,
                     penetrated: false,
                     deflection: Some(segment.bounce.direction),
+                    authority: Some(AuthorityImpact {
+                        tick: segment.bounce.bounce_tick,
+                        victim: segment.bounce.victim,
+                    }),
                 });
                 let late = elapsed_ticks(present, segment.bounce.bounce_tick).unwrap_or_default();
                 crate::shot_trace::record(
@@ -1732,6 +1769,10 @@ fn finish_at_sanctioned_terminal(
         surface: ImpactSurface::Armor,
         penetrated: terminal.penetrated,
         deflection: None,
+        authority: Some(AuthorityImpact {
+            tick: terminal.impact_tick,
+            victim: terminal.victim,
+        }),
     });
 }
 
@@ -1863,6 +1904,7 @@ fn march_shell_step(
                     surface: ImpactSurface::Terrain,
                     penetrated: false,
                     deflection: None,
+                    authority: None,
                 });
                 // A terrain stop is the one shot terminal that needs NO confirm: static,
                 // pose-independent geometry, so both ends already agree (ADR-0021's
@@ -1909,6 +1951,7 @@ fn march_shell_step(
                 surface,
                 penetrated: false,
                 deflection: None,
+                authority: None,
             });
             pos = entry;
             stopped = true;
@@ -1930,6 +1973,7 @@ fn march_shell_step(
                 surface: ImpactSurface::Terrain,
                 penetrated: false,
                 deflection: None,
+                authority: None,
             });
             // A terrain stop is the one shot terminal that needs NO confirm: static, pose-independent
             // geometry, so both ends already agree (ADR-0021's invariant). Recorded on the client so
@@ -2124,6 +2168,9 @@ fn resolve_armor_crossing(
     // a perforation less (it carries momentum out), a ricochet a partial normal-ward kick.
     let v_in = Vec3::from(dir) * speed;
     let body = world.owners.get(node_entity).ok().map(|owner| owner.tank());
+    // The identity of the body every branch below arms, carried on the authority facts so a client
+    // can tell whose hull a spark it re-draws belongs to.
+    let victim = body.and_then(|body| world.combatants.get(body).ok().copied());
 
     // Outward surface normal; angle of incidence is measured from it (0 = head-on).
     let normal = Dir3::new(hit.normal).unwrap_or(-dir);
@@ -2178,6 +2225,7 @@ fn resolve_armor_crossing(
             surface: ImpactSurface::Armor,
             penetrated: false,
             deflection: Some(Vec3::from(dir)),
+            authority: None,
         });
         shell.marks.ricochets.push(entry);
         shell.path.points.push(entry);
@@ -2201,6 +2249,7 @@ fn resolve_armor_crossing(
                 direction: Vec3::from(dir),
                 speed,
                 sequence: (shell.marks.ricochets.len() - 1) as u32,
+                victim,
             });
         }
         return (
@@ -2257,6 +2306,7 @@ fn resolve_armor_crossing(
             surface: ImpactSurface::Armor,
             penetrated: true,
             deflection: None,
+            authority: None,
         });
         // AUTHORITY → CLIENTS: the shot's TERMINAL (`ImpactConfirm` on the wire) — the same
         // read the `Impact` above showed locally, so every client renders the identical honest
@@ -2273,6 +2323,7 @@ fn resolve_armor_crossing(
                 normal: Vec3::from(normal),
                 penetrated: true,
                 after_bounces: shell.marks.ricochets.len() as u32,
+                victim,
             });
         }
         // Stopped: the body absorbs the full remaining momentum (v_out = 0).
@@ -2300,6 +2351,7 @@ fn resolve_armor_crossing(
         surface: ImpactSurface::Armor,
         penetrated: true,
         deflection: None,
+        authority: None,
     });
     // AUTHORITY → CLIENTS: the shot's TERMINAL (`ImpactConfirm` on the wire). A perforation
     // ends the COSMETIC shell at this entry-face read even though the authoritative shell
@@ -2319,6 +2371,7 @@ fn resolve_armor_crossing(
             normal: Vec3::from(normal),
             penetrated: true,
             after_bounces: shell.marks.ricochets.len() as u32,
+            victim,
         });
     }
     speed = speed_for(shell.projectile.mass, cap - cost);
@@ -2406,6 +2459,10 @@ fn resolve_replica_armor_contact(
             surface: ImpactSurface::Armor,
             penetrated: false,
             deflection: Some(bounce.direction),
+            authority: Some(AuthorityImpact {
+                tick: bounce.bounce_tick,
+                victim: bounce.victim,
+            }),
         });
         shell.path.begin_segment();
         shell.path.points.push(bounce.origin);
@@ -2478,6 +2535,7 @@ fn resolve_replica_armor_contact(
         surface: ImpactSurface::Armor,
         penetrated: false,
         deflection: None,
+        authority: None,
     });
     ReplicaArmorContact::Stopped
 }
@@ -3433,6 +3491,7 @@ mod march_tests {
                 speed: 480.0,
                 bounce_tick: 101,
                 sequence: 0,
+                victim: None,
             },
         );
         app.update();
@@ -3700,6 +3759,7 @@ mod march_tests {
                 // the hold/pre-armed paths under test don't read it.
                 bounce_tick: 0,
                 sequence: 0,
+                victim: None,
             },
         );
         let mut app = replica_world(buf);
@@ -3806,6 +3866,7 @@ mod march_tests {
                 // the hold/pre-armed paths under test don't read it.
                 bounce_tick: 0,
                 sequence: 0,
+                victim: None,
             },
         );
         app.update(); // the Held handler re-seeds this tick
@@ -3967,6 +4028,7 @@ mod march_tests {
                 speed: bounce.speed,
                 bounce_tick: 0,
                 sequence: 0,
+                victim: None,
             },
         );
         app.update();
@@ -4017,6 +4079,7 @@ mod march_tests {
             speed: 480.0,
             bounce_tick: 0,
             sequence: 0,
+            victim: None,
         };
         let b1 = SanctionedBounce {
             origin: Vec3::new(0.0, 2.0, 0.05),
@@ -4024,6 +4087,7 @@ mod march_tests {
             speed: 300.0,
             bounce_tick: 0,
             sequence: 1,
+            victim: None,
         };
         let mut buf = SanctionedShots::default();
         buf.insert(shot, b0);
@@ -4113,6 +4177,7 @@ mod march_tests {
                 speed: bounce.speed,
                 bounce_tick: 0,
                 sequence: 0,
+                victim: None,
             },
         );
         app.update();
@@ -4189,6 +4254,7 @@ mod march_tests {
                 speed: 500.0,
                 bounce_tick: shot.fire_tick + 5,
                 sequence: 0,
+                victim: None,
             },
         );
         let shell = spawn_free_shell(&mut app, Vec3::new(0.0, 20.0, 5.0), Vec3::Z, 800.0, shot);
@@ -4237,6 +4303,7 @@ mod march_tests {
                     penetrated: true,
                     impact_tick: shot.fire_tick + 5,
                     after_bounces: 0,
+                    victim: None,
                 },
             );
         let shell = spawn_free_shell(&mut app, Vec3::new(0.0, 20.0, 5.0), Vec3::Z, 800.0, shot);
@@ -4276,6 +4343,7 @@ mod march_tests {
                 // present(105) − bounce_tick(104) = 1 <= OVERDUE_MARGIN_TICKS — inside the margin.
                 bounce_tick: shot.fire_tick + 4,
                 sequence: 0,
+                victim: None,
             },
         );
         let shell = spawn_free_shell(&mut app, Vec3::new(0.0, 20.0, 5.0), Vec3::Z, 800.0, shot);
@@ -4451,6 +4519,7 @@ mod march_tests {
                     penetrated: true,
                     impact_tick: 0, // inert (no `PredictedPresent` — F3 overdue path off)
                     after_bounces: 0,
+                    victim: None,
                 },
             );
         app.update();
@@ -4495,6 +4564,7 @@ mod march_tests {
                 penetrated: true,
                 impact_tick: 0, // inert (no `PredictedPresent` — F3 overdue path off)
                 after_bounces: 0,
+                victim: None,
             },
         );
         let mut app = replica_world(buf);
@@ -4534,6 +4604,7 @@ mod march_tests {
                 penetrated: false,
                 impact_tick: 0, // inert (no `PredictedPresent` — F3 overdue path off)
                 after_bounces: 1,
+                victim: None,
             },
         );
         let mut app = replica_world(buf);
@@ -4562,6 +4633,7 @@ mod march_tests {
                 speed: 480.0,
                 bounce_tick: 0, // inert (no `PredictedPresent` — F3 overdue path off)
                 sequence: 0,
+                victim: None,
             },
         );
         for _ in 0..8 {
@@ -4614,6 +4686,7 @@ mod march_tests {
                     penetrated: true,
                     impact_tick: 0, // inert (no `PredictedPresent` — F3 overdue path off)
                     after_bounces: 0,
+                    victim: None,
                 },
             );
         app.update();
@@ -4640,6 +4713,7 @@ mod march_tests {
                 penetrated: true,
                 impact_tick: 0, // inert (dedup test — buffer semantics, not the march)
                 after_bounces: 0,
+                victim: None,
             },
         );
         // Even a corrupt divergent duplicate must not replace the first terminal.
@@ -4651,6 +4725,7 @@ mod march_tests {
                 penetrated: false,
                 impact_tick: 0, // inert (dedup test — buffer semantics, not the march)
                 after_bounces: 3,
+                victim: None,
             },
         );
         let stored = buf.terminal(shot, 0).expect("terminal stored");

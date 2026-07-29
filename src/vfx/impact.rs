@@ -1028,6 +1028,7 @@ mod tests {
             surface,
             penetrated,
             deflection,
+            authority: None,
         });
         app.world_mut().flush();
     }

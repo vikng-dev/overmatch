@@ -64,7 +64,14 @@ use crate::{CombatantId, ShotId};
 /// cause tag. It carries no force. Its only job is to be a fact the owner cannot predict, so its
 /// arrival forces the rollback that restores the sub-threshold hull velocity a hit actually
 /// produced. New wire type and new registration: surface, own-type graph, and REV all move.
-pub const PROTOCOL_REV: u32 = 22;
+///
+/// REV 23 (naming the victim on an impact): [`RicochetKeyframe`] and [`ImpactConfirm`] each gain
+/// `victim: Option<CombatantId>` — the body the authority gave the impulse to. Without it the owner
+/// can tell WHICH EPISODE a spark belongs to (the authority tick already rides both facts) but not
+/// WHOSE HULL, so `net::adoption`'s ordering rule could release one tank's shove against a spark
+/// drawn on another. No new type and no new registration, so the surface hash is unchanged; the
+/// own-type graph and REV move.
+pub const PROTOCOL_REV: u32 = 23;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -376,6 +383,13 @@ pub struct RicochetKeyframe {
     /// This bounce's 0-based ordinal within the shot — the SAME count an observer derives from its
     /// shell's own ricochets, so bounces re-seed in the order the server resolved them.
     pub sequence: u32,
+    /// The combatant whose hull took this bounce's impulse, if the struck volume belongs to one.
+    ///
+    /// It is the correlation handle for `net::adoption`'s ordering rule and nothing else: it names
+    /// the SAME body `ballistics::apply_hit_impulse` armed, so the owner can tell a spark that is one
+    /// of its own [`HullShock`] episode's hits from a spark on somebody else's tank. See
+    /// [`ImpactConfirm::victim`] for why this is not a widening of the disclosure policy.
+    pub victim: Option<crate::CombatantId>,
 }
 
 /// The authority-sanctioned terminal of a shot at armor.
@@ -399,6 +413,18 @@ pub struct ImpactConfirm {
     pub impact_tick: Tick,
     /// Ricochets the authority resolved before this terminal (the client's ordering gate).
     pub after_bounces: u32,
+    /// The combatant whose hull took this terminal's impulse, if the struck volume belongs to one.
+    ///
+    /// WHY THIS IS NOT A DISCLOSURE WIDENING. `net::disclosure` keeps [`HullShock`] owner-private
+    /// because it is PERSISTENT, PER-TARGET, AGGREGATE state. This field is none of those: it is one
+    /// transient per-shot fact, and every client can already derive the same answer by comparing
+    /// [`ImpactConfirm::position`] against the publicly replicated `Position` of every tank. Naming
+    /// it makes the derivation exact instead of geometric; it reveals nothing a client could not
+    /// already compute. What stays private is unchanged: whose hull has been hit HOW MANY times,
+    /// with what worst cause, and for how much damage.
+    ///
+    /// It exists for `net::adoption`'s ordering rule — see [`RicochetKeyframe::victim`].
+    pub victim: Option<crate::CombatantId>,
 }
 
 /// Stable identity for an owner-private damage confirmation. The receipt is plain data and remains
@@ -997,7 +1023,7 @@ const WIRE_SURFACE_HASH: u64 = 0xf321_3c48_61b3_bfea;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x312e_b8d5_2cae_f709;
+const WIRE_TYPES_HASH: u64 = 0x3930_d941_950c_345d;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -1766,9 +1792,9 @@ mod tests {
             WIRE_DEP_LIGHTYEAR,
             PROTOCOL_REV,
         );
-        // Re-pinned for REV 22 (the owner-private `HullShock` component: new registration, new
-        // own-type definitions).
-        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0xf8d9_cbca_7638_8215;
+        // Re-pinned for REV 23 (`victim` on `RicochetKeyframe` and `ImpactConfirm`: same
+        // registrations, changed own-type definitions).
+        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0xc62e_778c_83c0_14e3;
         assert_eq!(
             wire_manifest, EXPECTED_WIRE_MANIFEST_FINGERPRINT,
             "wire manifest changed: re-pin to {wire_manifest:#018x}",

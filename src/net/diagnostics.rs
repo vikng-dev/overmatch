@@ -271,10 +271,10 @@ pub(crate) fn watch_rollback_metrics(
     if metrics.rollbacks != watch.last_count {
         // The ordering instrument rides this line because a rollback is exactly when it changes.
         // `net::adoption`'s shove ordering is BEST EFFORT, so both failure modes are reported:
-        // `budget` counts shoves the local patience budget released with no impact visual drawn for
-        // their episode, and `bypassed` counts shoves a rollback this client did not order landed
-        // ahead of their spark — the gap trigger arbitration structurally cannot close. Those are
-        // what decide whether a presentation commit barrier is ever worth building.
+        // `budget` counts shoves the local patience budget released with none of their own hits
+        // drawn, and `bypassed` counts shoves a confirmed-state rollback this client did not order
+        // landed ahead of their spark — the gap trigger arbitration structurally cannot close.
+        // Those are what decide whether a presentation commit barrier is ever worth building.
         let tally = presentation.tally();
         info!(
             "client: ROLLBACK fired (PredictionMetrics.rollbacks={}, rollback_ticks={}, \
