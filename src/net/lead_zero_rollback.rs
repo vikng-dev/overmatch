@@ -1,0 +1,421 @@
+//! THE REGIME THE EXISTING FIXTURES CANNOT REACH: a client that is level with the server.
+//!
+//! # What the older fixtures test
+//!
+//! `net::arrival_rollback` and `net::hull_shock_rollback` both build the same world: the authority
+//! closes an episode at tick 100 and the client is already at tick 108. Eight ticks of lead, and
+//! the entity's Replicon `ConfirmHistory` is deliberately anchored at a *different* replicon tick
+//! from the completed checkpoint, so `ConfirmHistory::contains` is false there. Both choices were
+//! made to isolate the mechanism under test — and both of them route around the two gates that
+//! actually decide whether an authoritative shove is delivered on the shipping build.
+//!
+//! # What the shipping config actually produces
+//!
+//! lightyear places the client's input timeline at
+//!
+//! ```text
+//! objective = remote + rtt/2 + (jitter · jitter_multiple + tick · jitter_margin) + 1 + error_margin
+//!             - input_delay
+//! ```
+//!
+//! (`SyncedTimeline::sync_objective` for `InputTimeline`). On loopback both `rtt` and `jitter` are
+//! zero, so every jitter-scaled term vanishes and only the CONSTANTS survive:
+//! `jitter_margin` 1.0 + the fixed 1 + `error_margin` 1.0 − `SHIPPING_INPUT_DELAY_TICKS` 3 = **0**.
+//! `net::client::run` writes `SyncConfig { jitter_multiple, ..default() }`, so `jitter_margin` and
+//! `error_margin` keep their 1.0 upstream defaults and the cancellation is exact, not incidental.
+//! [`shipping_loopback_client_lead_is_exactly_zero_ticks`] derives that number from the configured
+//! values rather than restating it.
+//!
+//! Worse, the sync controller is allowed to sit up to `error_margin` behind the objective without
+//! correcting (`SyncContext::speed_adjustment` only acts once `offset.abs() > error_margin`), so
+//! the realised integer lead ranges over `{-1, 0}`.
+//!
+//! And an actively driven tank is explicitly confirmed at every checkpoint, so its `ConfirmHistory`
+//! *contains* the completed replicon tick — the opposite of what the older fixtures set up.
+//!
+//! # The two gates that then discard the shove
+//!
+//! - RECEIVE TIME: `record_confirmed_and_maybe_check` only runs the registered comparator when
+//!   `confirmed_tick < current_tick`. At lead 0 they are equal, so the comparator never runs and
+//!   no mismatch is ever recorded.
+//! - COMPLETED-TICK FALLBACK: `check_rollback`'s unchanged-entity scan returns early for any
+//!   entity whose `ConfirmHistory::contains` resolves the completed replicon tick — which is every
+//!   entity the server explicitly updated, i.e. every driven tank.
+//!
+//! Neither gate can be observed at a lead of 8 with an anchored-away `ConfirmHistory`. That is why
+//! the fixtures below exist, and why they are `#[ignore]`d rather than deleted: they are RED on the
+//! current design and are the acceptance test for slice 2.
+//!
+//! The lead-arithmetic guard is NOT ignored. It passes today and must fail loudly the moment
+//! someone edits a sync constant without understanding that these four numbers cancel.
+
+use core::time::Duration;
+
+use avian3d::prelude::{
+    AngularInertia, AngularVelocity, CenterOfMass, GravityScale, LinearVelocity, Mass,
+    NoAutoAngularInertia, NoAutoCenterOfMass, NoAutoMass, Position, RigidBody, Rotation,
+};
+use bevy::prelude::*;
+use bevy_replicon::client::confirm_history::ConfirmHistory;
+use bevy_replicon::prelude::RepliconTick;
+use lightyear::core::confirmed_history::ConfirmedHistory;
+use lightyear::prelude::client::{Client, ClientPlugins, Connected, Remote};
+use lightyear::prelude::{
+    InputTimeline, InputTimelineConfig, IsSynced, LocalTimeline, PeerId, PingManager, Predicted,
+    PredictionHistory, PredictionManager, RemoteId, ReplicationCheckpointMap,
+    StateRollbackMetadata, SyncConfig, Tick,
+};
+use lightyear_core::time::TickInstant;
+use lightyear_core::timeline::NetworkTimeline;
+use lightyear_sync::prelude::client::RemoteTimeline;
+use lightyear_sync::timeline::sync::{SyncTargetTimeline, SyncedTimeline};
+
+use crate::ballistics::{HullShock, HullShockLedger, ShockCause};
+use crate::tank::Tank;
+
+/// The tick the authority closes the shock episode on, and the completed Replicon checkpoint that
+/// certifies it.
+const PRODUCING_TICK: Tick = Tick(100);
+fn producing_replicon_tick() -> RepliconTick {
+    RepliconTick::new(50)
+}
+
+const HULL_MASS: f32 = 100.0;
+const HULL_INERTIA: f32 = 50.0;
+
+/// The hull velocity the authority recorded at [`PRODUCING_TICK`] — an 88 mm hit's measured Δv, the
+/// number the player is owed. Sub-`net::protocol::ROLLBACK_VELOCITY` by an order of magnitude, so
+/// the velocity comparator alone will never fetch it.
+const AUTHORITY_LINEAR: Vec3 = Vec3::new(0.0, 0.0, -0.138_3);
+const AUTHORITY_ANGULAR: Vec3 = Vec3::new(0.191_0, 0.0, 0.052_0);
+/// What the client predicted instead: an untouched hull.
+const PREDICTED_LINEAR: Vec3 = Vec3::ZERO;
+const PREDICTED_ANGULAR: Vec3 = Vec3::ZERO;
+/// What the live hull is doing when the message lands — neither value, so no assertion below can be
+/// satisfied by the fixture simply never having been written.
+const LIVE_LINEAR: Vec3 = Vec3::new(3.0, 0.0, 3.0);
+const LIVE_ANGULAR: Vec3 = Vec3::new(3.0, 3.0, 0.0);
+
+/// The episode the authority closed at [`PRODUCING_TICK`]. The client's copy is
+/// `HullShock::default()`: it had no way to know it was shot.
+fn authority_shock() -> HullShock {
+    HullShock {
+        count: 1,
+        tick: PRODUCING_TICK.0,
+        cause: ShockCause::Perforation,
+    }
+}
+
+/// Where the client's timeline sits relative to the completed checkpoint. Both values are reachable
+/// on the shipping loopback build; see the module doc.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Lead {
+    /// The steady-state loopback lead: client tick == confirmed tick.
+    Zero,
+    /// The controller's allowed deadband drift: the checkpoint is one tick in the CLIENT's future.
+    MinusOne,
+}
+
+impl Lead {
+    fn ticks(self) -> i32 {
+        match self {
+            Lead::Zero => 0,
+            Lead::MinusOne => -1,
+        }
+    }
+
+    fn present_tick(self) -> Tick {
+        Tick(PRODUCING_TICK.0.wrapping_add_signed(self.ticks()))
+    }
+}
+
+/// What the run produced after the real `PreUpdate` schedule.
+#[derive(Resource, Default)]
+struct Delivered {
+    live_linear: Vec3,
+    live_angular: Vec3,
+    live_shock: HullShock,
+    realized_count: u32,
+    replayed_ticks: Vec<u32>,
+    /// `StateRollbackMetadata::last_processed_tick` immediately after the checkpoint's FIRST
+    /// `PreUpdate`. This is what separates the two leads: a checkpoint level with the client is
+    /// examined and marked processed, one in the client's future is neither.
+    processed_on_arrival: Option<Tick>,
+}
+
+fn observe_replay(timeline: Res<LocalTimeline>, mut delivered: ResMut<Delivered>) {
+    delivered.replayed_ticks.push(timeline.tick().0);
+}
+
+/// Build a real lightyear client on the production registration, deposit the authority's
+/// end-of-episode sample at [`PRODUCING_TICK`], place the client at `lead` ticks relative to it,
+/// and run the real `PreUpdate` rollback schedule.
+///
+/// Two things separate this from `net::hull_shock_rollback`, and they are the whole point: the
+/// entity's `ConfirmHistory` is anchored ON [`producing_replicon_tick`] (an actively driven tank is
+/// explicitly confirmed at every checkpoint), and no mismatch is seeded by hand.
+///
+/// SCOPE, honestly stated: like both older fixtures this deposits confirmed history directly rather
+/// than deserializing a replication message, so it executes the completed-tick scan gate and not
+/// the receive-time one. Not seeding a mismatch is the faithful stand-in for the receive-time gate:
+/// at a lead of 0 that path could not have recorded one, because it runs the comparator only when
+/// `confirmed_tick < current_tick`. [`shipping_loopback_client_lead_is_exactly_zero_ticks`] is what
+/// holds that premise in place.
+fn run_arrival(lead: Lead) -> Delivered {
+    let mut app = crate::net::test_harness::base_app();
+    app.add_plugins(ClientPlugins {
+        tick_duration: crate::net::test_harness::TICK,
+    });
+    crate::state::sim_plugin(&mut app);
+    super::protocol::plugin(&mut app);
+    app.insert_state(crate::state::AppState::Playing);
+    app.init_resource::<Delivered>();
+    app.add_systems(FixedPreUpdate, observe_replay);
+    crate::net::test_harness::finish(&mut app);
+
+    app.world_mut().spawn((
+        Client::default(),
+        RemoteId(PeerId::Server),
+        Connected,
+        PredictionManager::default(),
+        IsSynced::<InputTimeline>::default(),
+    ));
+
+    let mut confirmed_shock = ConfirmedHistory::<HullShock>::default();
+    confirmed_shock.insert_present_explicit(PRODUCING_TICK, authority_shock());
+    let mut predicted_shock_history = PredictionHistory::<HullShock>::default();
+    predicted_shock_history.add_predicted(PRODUCING_TICK, Some(HullShock::default()));
+
+    let mut confirmed_linear = ConfirmedHistory::<LinearVelocity>::default();
+    confirmed_linear.insert_present_explicit(PRODUCING_TICK, LinearVelocity(AUTHORITY_LINEAR));
+    let mut predicted_linear = PredictionHistory::<LinearVelocity>::default();
+    predicted_linear.add_predicted(PRODUCING_TICK, Some(LinearVelocity(PREDICTED_LINEAR)));
+    let mut confirmed_angular = ConfirmedHistory::<AngularVelocity>::default();
+    confirmed_angular.insert_present_explicit(PRODUCING_TICK, AngularVelocity(AUTHORITY_ANGULAR));
+    let mut predicted_angular = PredictionHistory::<AngularVelocity>::default();
+    predicted_angular.add_predicted(PRODUCING_TICK, Some(AngularVelocity(PREDICTED_ANGULAR)));
+
+    let mut ledger_history = PredictionHistory::<HullShockLedger>::default();
+    ledger_history.add_predicted(PRODUCING_TICK, Some(HullShockLedger::default()));
+
+    let root = app
+        .world_mut()
+        .spawn((
+            Predicted,
+            Remote,
+            // THE EVASION THE OLDER FIXTURES RELY ON, REMOVED. A tank the server is actively
+            // driving is explicitly confirmed at every checkpoint, so `ConfirmHistory::contains`
+            // resolves the completed replicon tick and the unchanged-entity scan skips it.
+            ConfirmHistory::new(producing_replicon_tick()),
+            Tank,
+            Position::default(),
+            Rotation::default(),
+            HullShock::default(),
+            predicted_shock_history,
+            confirmed_shock,
+            crate::CombatantId(1),
+        ))
+        .id();
+    app.world_mut()
+        .entity_mut(root)
+        .insert((HullShockLedger::default(), ledger_history));
+    app.world_mut().entity_mut(root).insert((
+        Transform::default(),
+        RigidBody::Dynamic,
+        Mass(HULL_MASS),
+        AngularInertia::new(Vec3::splat(HULL_INERTIA)),
+        CenterOfMass(Vec3::ZERO),
+        NoAutoMass,
+        NoAutoAngularInertia,
+        NoAutoCenterOfMass,
+        // Gravity off and no contacts, so replay neither adds to nor bleeds the delivered shove.
+        GravityScale(0.0),
+    ));
+    app.world_mut().entity_mut(root).insert((
+        LinearVelocity(LIVE_LINEAR),
+        predicted_linear,
+        confirmed_linear,
+        AngularVelocity(LIVE_ANGULAR),
+        predicted_angular,
+        confirmed_angular,
+    ));
+    app.world_mut().flush();
+
+    // The completed mutate tick: the authority has certified every replicated component at
+    // `PRODUCING_TICK`. This is what receive would have published.
+    {
+        let mut checkpoints = app.world_mut().resource_mut::<ReplicationCheckpointMap>();
+        checkpoints.record(producing_replicon_tick(), PRODUCING_TICK);
+        checkpoints.record_last_confirmed_tick(producing_replicon_tick());
+    }
+
+    advance_to(&mut app, lead.present_tick());
+    app.world_mut().run_schedule(PreUpdate);
+    let processed_on_arrival = app
+        .world()
+        .resource::<StateRollbackMetadata>()
+        .last_processed_tick();
+
+    // A checkpoint one tick in the client's future cannot be acted on when it lands, and lightyear
+    // does not mark it processed, so it is re-examined on the next frame. Give the client that
+    // frame: a shove must not be lost merely because it arrived a tick early.
+    if lead == Lead::MinusOne {
+        advance_to(&mut app, PRODUCING_TICK);
+        app.world_mut().run_schedule(PreUpdate);
+    }
+
+    let live_linear = app.world().get::<LinearVelocity>(root).unwrap().0;
+    let live_angular = app.world().get::<AngularVelocity>(root).unwrap().0;
+    let live_shock = *app.world().get::<HullShock>(root).unwrap();
+    let realized_count = app.world().get::<HullShockLedger>(root).unwrap().applied();
+    let mut delivered = app
+        .world_mut()
+        .remove_resource::<Delivered>()
+        .expect("the evidence resource outlives the schedule");
+    delivered.live_linear = live_linear;
+    delivered.live_angular = live_angular;
+    delivered.live_shock = live_shock;
+    delivered.realized_count = realized_count;
+    delivered.processed_on_arrival = processed_on_arrival;
+    delivered
+}
+
+/// Walk both the tick counter and `Time<Fixed>` forward to `target`, keeping them consistent — the
+/// rollback path reads the timeline, the replay loop reads the fixed clock.
+fn advance_to(app: &mut App, target: Tick) {
+    let current = app.world().resource::<LocalTimeline>().tick();
+    let steps = target - current;
+    assert!(steps >= 0, "the fixture only ever moves the clock forward");
+    app.world_mut()
+        .resource_mut::<LocalTimeline>()
+        .apply_delta(steps);
+    for _ in 0..steps {
+        app.world_mut()
+            .resource_mut::<Time<Fixed>>()
+            .advance_by(crate::net::test_harness::TICK);
+    }
+}
+
+/// RED ON THE CURRENT DESIGN. The steady-state shipping condition: the client is level with the
+/// completed checkpoint and the tank is explicitly confirmed there. The authority applied a hull
+/// impulse and published it; the client must end up moving.
+#[test]
+#[ignore = "SLICE 2 acceptance test: RED until authoritative hull facts are delivered at a client \
+            lead of 0 — the receive-time `confirmed_tick < current_tick` gate and the \
+            ConfirmHistory-contains skip in the completed-tick scan both discard it today"]
+fn an_authority_shock_reaches_the_live_hull_at_zero_lead() {
+    assert_delivered(Lead::Zero);
+}
+
+/// RED ON THE CURRENT DESIGN, and the sibling the sync deadband makes reachable: the checkpoint
+/// lands one tick ahead of the client, which then catches up. The shove must survive the wait.
+#[test]
+#[ignore = "SLICE 2 acceptance test: RED until authoritative hull facts survive a checkpoint that \
+            arrives one tick ahead of the client (the sync controller's allowed deadband drift)"]
+fn an_authority_shock_reaches_the_live_hull_at_minus_one_lead() {
+    assert_delivered(Lead::MinusOne);
+}
+
+/// The contract both ignored fixtures assert: whatever route slice 2 takes, the server's hull
+/// velocity has to become the client's LIVE hull velocity.
+fn assert_delivered(lead: Lead) {
+    let delivered = run_arrival(lead);
+
+    assert_eq!(
+        delivered.live_linear,
+        AUTHORITY_LINEAR,
+        "at a client lead of {} tick(s) the authority's hull shove must still reach the client's \
+         LIVE hull velocity — this is what the player feels. Evidence: live shock = {:?} (the \
+         authority published {:?}), ledger realized {} episode(s), ticks replayed = {:?}, \
+         checkpoint processed on arrival = {:?}",
+        lead.ticks(),
+        delivered.live_shock,
+        authority_shock(),
+        delivered.realized_count,
+        delivered.replayed_ticks,
+        delivered.processed_on_arrival,
+    );
+    assert_eq!(delivered.live_angular, AUTHORITY_ANGULAR);
+}
+
+/// GUARD ON THE LEAD ARITHMETIC — this one is NOT ignored.
+///
+/// Reads the values `net::client::run` actually installs — `net::client::shipping_input_delay`,
+/// `net::harness::jitter_multiple`, and the `SyncConfig` defaults the `..default()` in that
+/// composition leaves alone — and asks lightyear's own `sync_objective` where the client's input
+/// timeline lands relative to a zero-RTT, zero-jitter server. The answer is the number the two
+/// ignored fixtures above are built on, so it is derived here and nowhere else.
+#[test]
+fn shipping_loopback_client_lead_is_exactly_zero_ticks() {
+    let pings = PingManager::default();
+    assert_eq!(
+        (pings.rtt(), pings.jitter()),
+        (Duration::ZERO, Duration::ZERO),
+        "the loopback premise: a fresh PingManager must report no latency and no jitter, so every \
+         jitter-scaled term in the objective drops out and only the constants remain",
+    );
+
+    let lead = loopback_client_lead_ticks();
+
+    assert!(
+        lead.abs() < 1.0 / 256.0,
+        "the shipping loopback client lead is {lead} ticks, not 0.\n\
+         \n\
+         WHAT THIS NUMBER IS: how far the client's predicted tick runs ahead of the server tick \
+         whose replicated state it is comparing against, on a zero-latency link. lightyear \
+         computes it as jitter_margin + 1 + error_margin - input_delay, which with our \
+         configuration is 1.0 + 1 + 1.0 - {} = 0.\n\
+         \n\
+         WHY IT MATTERS: at a lead of 0 the receive-time mismatch check is skipped outright \
+         (`record_confirmed_and_maybe_check` requires confirmed_tick < current_tick), so an \
+         authoritative fact the client could not predict has exactly one remaining route into the \
+         simulation — the completed-tick scan — and that route skips every entity the server \
+         explicitly confirmed at the checkpoint. Changing SHIPPING_INPUT_DELAY_TICKS, \
+         net::harness::jitter_multiple, or the SyncConfig jitter_margin / error_margin defaults \
+         moves this number and silently changes which of those routes is live. If you meant to \
+         move it, re-derive the ignored fixtures in this module against the new lead.",
+        shipping_input_delay_ticks(),
+    );
+}
+
+/// The client's steady-state lead over the server's confirmed tick at loopback, in ticks, computed
+/// from the production configuration rather than restated.
+///
+/// `InputTimeline::default()` carries an input delay of 0 in its context (the field is private to
+/// lightyear_sync and only the sync plugin writes it), so `sync_objective` returns the lead BEFORE
+/// the input-delay subtraction. That subtraction is a plain `- input_delay` in the objective, so
+/// applying it here from our own configured delay reproduces it exactly.
+fn loopback_client_lead_ticks() -> f32 {
+    let config = InputTimelineConfig::new(
+        SyncConfig {
+            jitter_multiple: super::harness::jitter_multiple(),
+            ..default()
+        },
+        super::client::shipping_input_delay(),
+    );
+    let mut remote = RemoteTimeline::default();
+    // Anchored away from tick 0 so a negative lead would read as a negative delta rather than
+    // wrapping the fixed-point instant.
+    remote.set_now(TickInstant::from(PRODUCING_TICK));
+    let objective = InputTimeline::default().sync_objective(
+        &remote,
+        &config,
+        &PingManager::default(),
+        crate::net::test_harness::TICK,
+    );
+    let before_input_delay = (objective - remote.current_estimate()).to_f32();
+    before_input_delay - f32::from(shipping_input_delay_ticks())
+}
+
+/// The fixed input delay the client ships, read off the production config. `net::client` already
+/// pins that this config is constant-shaped (minimum == maximum), which is what makes reading one
+/// field the whole answer for any RTT.
+fn shipping_input_delay_ticks() -> u16 {
+    let config = super::client::shipping_input_delay();
+    assert_eq!(
+        config.minimum_input_delay_ticks, config.maximum_input_delay_before_prediction,
+        "shipping_input_delay stopped being a constant delay — the loopback lead is no longer \
+         readable from one field, and this module's whole premise needs re-deriving",
+    );
+    config.minimum_input_delay_ticks
+}
