@@ -558,6 +558,9 @@ impl MiniTank {
             &self.elements,
             &self.transmission,
             &self.weapon_gate,
+            // The mini-tank models the grip field alone; it never takes an external impulse, so
+            // the shock stream is deliberately absent rather than a manufactured zero.
+            None,
             &self.servos,
             &self.sim,
         )
@@ -574,6 +577,9 @@ impl MiniTank {
             &self.elements,
             &self.transmission,
             &self.weapon_gate,
+            // The mini-tank models the grip field alone; it never takes an external impulse, so
+            // the shock stream is deliberately absent rather than a manufactured zero.
+            None,
             &self.servos,
             &self.sim,
         )

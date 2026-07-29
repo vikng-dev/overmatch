@@ -5,6 +5,7 @@ use bevy_replicon::prelude::{AppVisibilityExt, AuthorizedClient, VisibilityFilte
 use serde::{Deserialize, Serialize};
 
 use super::protocol::{NetCrew, NetTank, NetTrackGripAnchor};
+use crate::ballistics::HullShock;
 use crate::damage::{KnockoutReason, TankKnockedOut};
 use crate::tank::{TankServos, WeaponGate};
 use crate::track::sim::TrackGripElements;
@@ -58,6 +59,9 @@ impl VisibilityFilter for CombatDisclosure {
     type Scope = (
         NetCrew,
         WeaponGate,
+        // Owner-private: being shot is the owner's business, and a public shock counter would hand
+        // every observer a free hit-confirm the damage model never disclosed.
+        HullShock,
         TankServos,
         NetTrackGripAnchor,
         TrackGripElements,

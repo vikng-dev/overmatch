@@ -18,7 +18,7 @@ use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::disclosure::{NetTankStatus, apply_net_tank_status};
-use crate::ballistics::ComponentHealth;
+use crate::ballistics::{ComponentHealth, HullShock, HullShockLedger};
 use crate::command::TankCommand;
 use crate::damage::{
     CrewStation, Crewman, DamageConsequences, Dead, LaunchedTurret, PendingSwap, TankVolumes,
@@ -58,7 +58,13 @@ use crate::{CombatantId, ShotId};
 /// ticks (was: the band sub-condition only, for 13 — it no longer saturates on a lugging climb),
 /// and the gated `demand_n` EMA became asymmetric (rise 8 ticks unchanged, fall 32 ticks). Two
 /// peers disagreeing on either law re-simulate different gear decisions from identical snapshots.
-pub const PROTOCOL_REV: u32 = 21;
+///
+/// REV 22 (the receiving half of combat): one new owner-private replicated component,
+/// [`crate::ballistics::HullShock`] — an episode counter, the authority tick it changed on, and a
+/// cause tag. It carries no force. Its only job is to be a fact the owner cannot predict, so its
+/// arrival forces the rollback that restores the sub-threshold hull velocity a hit actually
+/// produced. New wire type and new registration: surface, own-type graph, and REV all move.
+pub const PROTOCOL_REV: u32 = 22;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -775,6 +781,20 @@ pub(crate) const ROLLBACK_TANK_TRANSMISSION: f32 = 1.0;
 /// Exact weapon-gate divergence gate expressed as a Boolean 0/1 magnitude for trace attribution.
 /// The complete component is integer/discrete state, so ordinary equality is bit-exact.
 pub(crate) const ROLLBACK_WEAPON_GATE: f32 = 1.0;
+/// Exact hull-shock divergence gate expressed as a Boolean 0/1 magnitude for trace attribution.
+/// Every [`HullShock`] field is discrete, so ordinary equality is bit-exact — and, unlike the hull
+/// velocity this component exists to deliver, that comparison has no tolerance to hide under.
+pub(crate) const ROLLBACK_HULL_SHOCK: f32 = 1.0;
+/// One hull-shock EPISODE, in ticks (64 Hz → 0.25 s).
+///
+/// DERIVED rather than tuned. An un-notified hit drifts the owner's prediction at the hit's own Δv
+/// until something reconciles it, and ordinary position reconciliation already does that once the
+/// drift reaches [`ROLLBACK_POSITION_M`]. A measured 88 mm hit is 0.1383 m/s, so the position gate
+/// would catch it unaided after 0.05 / 0.1383 = 0.36 s ≈ 23 ticks. The episode window sits inside
+/// that, so a shock is always delivered EARLIER than the fallback it replaces — while capping the
+/// rollbacks a sustained burst can force at 64 / 16 = 4 per second per hull, instead of the ~15 per
+/// second an MG's 900 rpm cyclic rate would produce one-per-pellet.
+pub(crate) const SHOCK_EPISODE_TICKS: u32 = 16;
 /// Servo divergence gate expressed as a Boolean 0/1 magnitude for trace attribution. The aim
 /// angle and rate ride the physical bands below; the view-only `previous` is excluded. (The
 /// determinism hash still consumes every raw servo float — tolerance lives only at the gate.)
@@ -854,6 +874,12 @@ pub(crate) fn weapon_gate_mismatch(a: &WeaponGate, b: &WeaponGate) -> bool {
     a != b
 }
 
+/// Whether two hull-shock snapshots differ. Every field is discrete and the component derives `Eq`,
+/// so this is the exact atomic comparison the owner's forced rollback rests on.
+pub(crate) fn hull_shock_mismatch(a: &HullShock, b: &HullShock) -> bool {
+    a != b
+}
+
 /// Whether two servo-integrator snapshots differ enough to force a rollback. Slot count is exact;
 /// the aim angle and rate compare within physical bands and the view-only `previous` is excluded
 /// (see [`ServoState::rollback_eq`]) — this de-sensitizes the gate that stormed on ULP aim jitter
@@ -915,12 +941,13 @@ const WIRE_SURFACE: &[&str] = &[
     "TrackDrive",
     "TankTransmission",
     "WeaponGate",
+    "HullShock",
     "TankServos",
     "TrackGripElements",
 ];
 
 /// Pinned hash for the ordered wire surface and a direct handshake-fingerprint input.
-const WIRE_SURFACE_HASH: u64 = 0x8547_0760_1afc_dc0f;
+const WIRE_SURFACE_HASH: u64 = 0xf321_3c48_61b3_bfea;
 
 // ---------------------------------------------------------------------------
 // Deep wire-surface coverage (field-level + external-dep skew)
@@ -956,7 +983,7 @@ const WIRE_SURFACE_HASH: u64 = 0x8547_0760_1afc_dc0f;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x92f9_8ac0_4b3f_3cf4;
+const WIRE_TYPES_HASH: u64 = 0x312e_b8d5_2cae_f709;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -1166,6 +1193,20 @@ pub(crate) fn plugin(app: &mut App) {
                 ROLLBACK_WEAPON_GATE,
             )
         });
+    // The receiving half of combat. Same exact owner-predicted shape as the gate above, and for the
+    // same reason: the owner cannot predict either. The difference is what the rollback is FOR — a
+    // hit's Δv is far under the velocity gate, so the shove only ever reaches the player as part of
+    // the state this arrival restores. Nothing about the impulse itself rides the wire.
+    app.component::<HullShock>()
+        .replicate()
+        .predict()
+        .with_rollback_condition(|a: &HullShock, b: &HullShock| {
+            crate::trace::note_if_tripped(
+                "HullShock",
+                u8::from(hull_shock_mismatch(a, b)).into(),
+                ROLLBACK_HULL_SHOCK,
+            )
+        });
     // Complete servo integrator state: one atomic owner-predicted snapshot, exact like the
     // transmission. Restoring current/previous/velocity at the producing tick makes replay derive
     // the same turret/gun transform before collider and recoil readers run.
@@ -1194,6 +1235,10 @@ pub(crate) fn plugin(app: &mut App) {
     // state is the separately authoritative `TankServos` component above).
     app.local_rollback::<TankSim>();
     app.add_observer(strip_confirmed_history::<TankSim>);
+    // The owner's "last realized shock" mark rides local rollback for the same reason `TankSim`
+    // does: replay must re-derive it from the restored tick, not inherit the abandoned future's.
+    app.local_rollback::<HullShockLedger>();
+    app.add_observer(strip_confirmed_history::<HullShockLedger>);
 
     app.add_systems(
         FixedPostUpdate,
@@ -1221,6 +1266,17 @@ pub(crate) fn plugin(app: &mut App) {
             .before(DamageConsequences),
     );
     app.add_systems(FixedUpdate, mirror_swap_from_net_crew.in_set(GameplaySet));
+    // Both halves of the hull-shock seam run inside `GameplaySet`, so replay re-runs them: the
+    // authority closes episodes after the march that arms them, and the owner re-realizes the
+    // arriving shock against the restored history.
+    app.add_systems(
+        FixedUpdate,
+        (
+            close_hull_shock_episodes.after(crate::state::SimPhase::ProjectileMarch),
+            realize_hull_shock,
+        )
+            .in_set(GameplaySet),
+    );
     // The sim reads `TankCommand`; bridge it before all `GameplaySet` consumers, including replay.
     app.add_systems(
         FixedUpdate,
@@ -1237,6 +1293,72 @@ fn strip_confirmed_history<C: Component + Clone>(
     commands
         .entity(add.entity)
         .try_remove::<ConfirmedHistory<C>>();
+}
+
+/// AUTHORITY: close an armed hull-shock episode and publish it. `Without<Remote>` is the same
+/// authority discriminator [`publish_servo_angles`] uses.
+///
+/// EPISODE granularity, not per-tick. Every impulse arms the ledger (`ballistics::apply_hit_impulse`)
+/// and this publishes at most one episode per hull per [`SHOCK_EPISODE_TICKS`]. An armed shock is
+/// DEFERRED, never dropped: an isolated hit finds no open episode and publishes in its own tick,
+/// while everything that lands inside an open one publishes together the tick it expires. Dropping
+/// instead of deferring would silently lose the hit that matters most — a main-gun round arriving
+/// four ticks behind an MG pellet — because nothing later would ever mention it.
+fn close_hull_shock_episodes(
+    timeline: Res<LocalTimeline>,
+    mut hulls: Query<(&mut HullShock, &mut HullShockLedger), Without<Remote>>,
+) {
+    let now = timeline.tick().0;
+    for (mut shock, mut ledger) in &mut hulls {
+        let Some(cause) = ledger.close_episode(now, SHOCK_EPISODE_TICKS) else {
+            continue;
+        };
+        *shock = HullShock {
+            count: shock.count.wrapping_add(1),
+            tick: now,
+            cause,
+        };
+    }
+}
+
+/// OWNER: mark an arrived hull shock realized, and say so when its replay window has already passed.
+///
+/// Nothing is applied here — the shove rides the state the rollback restored — which is exactly why
+/// this cannot quietly substitute for it. The one failure mode is a shock whose producing tick is
+/// older than the client can roll back to, so no replay could have restored the hull state carrying
+/// it; the honest response is to report it, not to invent motion. Modelled on the stale-checkpoint
+/// detection in `net::grip::client`, minus the correction it has and this deliberately has not.
+fn realize_hull_shock(
+    timeline: Res<LocalTimeline>,
+    managers: Query<&PredictionManager>,
+    mut hulls: Query<(Entity, &HullShock, &mut HullShockLedger), With<Remote>>,
+) {
+    let now = timeline.tick();
+    let window = managers
+        .single()
+        .ok()
+        .map(|manager| i32::from(manager.rollback_policy.max_rollback_ticks));
+    for (hull, shock, mut ledger) in &mut hulls {
+        if ledger.is_realized(shock.count) {
+            continue;
+        }
+        let age = now - Tick(shock.tick);
+        // The producing tick has not run locally yet. Leave the shock unrealized and retry rather
+        // than spend it against a tick this client has no history for.
+        if age < 0 {
+            continue;
+        }
+        if let Some(window) = window
+            && age > window
+        {
+            warn!(
+                "client: hull shock #{} on {hull} was stamped for tick {} ({age} ticks ago, \
+                 rollback window {window}) — no replay could restore the state that carries it",
+                shock.count, shock.tick,
+            );
+        }
+        ledger.realize(shock.count);
+    }
 }
 
 /// Bridge Lightyear input to the simulation command.
@@ -1274,6 +1396,73 @@ mod tests {
     use super::*;
     use crate::command::CrewSwap;
     use crate::damage::CrewStation;
+
+    /// The authority seam, end to end on the system that owns it: an armed ledger becomes a bumped
+    /// replicated counter in the same tick, a second shock inside the open episode publishes
+    /// nothing, and the deferred episode publishes when the window expires. The counter is the only
+    /// thing that moves — no force ever reaches the wire.
+    #[test]
+    fn the_authority_publishes_one_shock_per_episode_and_defers_the_rest() {
+        use crate::ballistics::ShockCause;
+
+        let mut world = World::new();
+        world.insert_resource(LocalTimeline::default());
+        world.resource_mut::<LocalTimeline>().apply_delta(100);
+        let hull = world
+            .spawn((HullShock::default(), HullShockLedger::default()))
+            .id();
+
+        let arm = |world: &mut World, cause| {
+            world.get_mut::<HullShockLedger>(hull).unwrap().arm(cause);
+        };
+        let close = |world: &mut World| {
+            world.run_system_once(close_hull_shock_episodes).unwrap();
+            *world.get::<HullShock>(hull).unwrap()
+        };
+
+        assert_eq!(
+            close(&mut world),
+            HullShock::default(),
+            "no hit, no episode"
+        );
+
+        arm(&mut world, ShockCause::Perforation);
+        assert_eq!(
+            close(&mut world),
+            HullShock {
+                count: 1,
+                tick: 100,
+                cause: ShockCause::Perforation,
+            },
+            "an isolated hit publishes in its own tick",
+        );
+
+        // A second hit four ticks later — one MG cyclic interval — must not publish a second
+        // episode, and must not be forgotten either.
+        world
+            .resource_mut::<LocalTimeline>()
+            .apply_delta(i32::from(4u8));
+        arm(&mut world, ShockCause::Ricochet);
+        assert_eq!(
+            close(&mut world).count,
+            1,
+            "a hit inside the open episode publishes nothing",
+        );
+
+        world
+            .resource_mut::<LocalTimeline>()
+            .apply_delta(SHOCK_EPISODE_TICKS as i32);
+        assert_eq!(
+            close(&mut world),
+            HullShock {
+                count: 2,
+                tick: 100 + 4 + SHOCK_EPISODE_TICKS,
+                cause: ShockCause::Ricochet,
+            },
+            "the deferred episode publishes once its window expires",
+        );
+        assert_eq!(close(&mut world).count, 2, "nothing is left armed");
+    }
 
     #[test]
     fn transmission_rollback_comparison_is_exact_for_discrete_and_tolerant_for_floats() {
@@ -1557,9 +1746,9 @@ mod tests {
             WIRE_DEP_LIGHTYEAR,
             PROTOCOL_REV,
         );
-        // Re-pinned for REV 21 (replicated transmission-field semantics change —
-        // `band_confirm_ticks` full-predicate counting, `demand_n` asymmetric fall).
-        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0xad9c_ef0b_fda9_e770;
+        // Re-pinned for REV 22 (the owner-private `HullShock` component: new registration, new
+        // own-type definitions).
+        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0xf8d9_cbca_7638_8215;
         assert_eq!(
             wire_manifest, EXPECTED_WIRE_MANIFEST_FINGERPRINT,
             "wire manifest changed: re-pin to {wire_manifest:#018x}",
@@ -1799,6 +1988,8 @@ mod tests {
         ("src/net/protocol.rs", "VolumeSnapshot"),
         ("src/net/protocol.rs", "CrewSnapshot"),
         ("src/net/protocol.rs", "LaunchedTurretPose"),
+        ("src/ballistics.rs", "ShockCause"),
+        ("src/ballistics.rs", "HullShock"),
         ("src/net/protocol.rs", "NetTrackGripAnchor"),
         ("src/net/protocol.rs", "FireChannel"),
         ("src/net/protocol.rs", "OutcomeChannel"),

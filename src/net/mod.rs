@@ -3,6 +3,10 @@
 use avian3d::schedule::PhysicsSystems;
 use bevy::prelude::*;
 
+/// Does the arrival of an unpredicted authoritative component force the rollback that delivers
+/// the server's shove? The confirmation run behind the receiving half of combat.
+#[cfg(test)]
+mod arrival_rollback;
 mod client;
 mod contact_probe;
 mod death_screen;
@@ -13,6 +17,10 @@ mod grip;
 mod harness;
 pub(crate) use harness::{env_flag, env_parse, env_value};
 mod hit_feel;
+/// Does an authority hull-shock bump reach the owner's live hull velocity? The receiving half of
+/// combat, on the production registration.
+#[cfg(test)]
+mod hull_shock_rollback;
 mod physics;
 mod protocol;
 mod render_error;

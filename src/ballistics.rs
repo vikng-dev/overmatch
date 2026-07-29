@@ -6,6 +6,7 @@ use avian3d::prelude::{Forces, SpatialQuery, SpatialQueryFilter};
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 // `shot_trace::record` only evaluates its closure when tracing is armed.
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::damage::{DamageConsequences, VolumeOf, hit_ancestor};
@@ -497,6 +498,127 @@ pub struct ComponentVolume;
 pub struct ComponentHealth {
     pub current: f32,
     pub max: f32,
+}
+
+/// What the authority was resolving when it applied an external impulse to a hull.
+///
+/// It names the episode for the owner; it is deliberately NOT a magnitude. No force, direction, or
+/// application point ever rides [`HullShock`].
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum ShockCause {
+    /// No shock has ever landed on this hull ([`HullShock::count`] is still zero).
+    #[default]
+    None,
+    /// A round deflected off a face and kicked the hull normal-ward.
+    Ricochet,
+    /// A round was defeated by the plate and dumped all its remaining momentum into the hull.
+    Embed,
+    /// A round punched through, leaving behind the momentum it spent crossing.
+    Perforation,
+}
+
+impl ShockCause {
+    /// Which cause survives when several resolutions land inside one open episode: the most severe.
+    /// A perforation and a graze in the same window are one episode, and the player is owed the
+    /// perforation's name for it.
+    const fn severity(self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::Ricochet => 1,
+            Self::Embed => 2,
+            Self::Perforation => 3,
+        }
+    }
+}
+
+/// Owner-private PROOF that the authority applied an impulse this hull could not have predicted.
+///
+/// The client cannot predict being shot, so its own copy never moves on its own. Registered
+/// `.replicate().predict()` behind an EXACT comparator (`net::protocol`), the arrival of a bumped
+/// `count` is a rollback to `tick` by itself — and that rollback restores every replicated
+/// predicted component at that tick, hull velocity included. THAT is how the shove is delivered;
+/// this component carries none of it. A hit's Δv (~0.14 m/s) is an order of magnitude under the
+/// velocity rollback gate, so without a forced rollback the authoritative velocity is compared,
+/// judged close enough, and discarded — the reason this component has to exist at all.
+///
+/// `count` is MONOTONIC because replication carries STATE, not TRANSITIONS: a bump-and-restore
+/// inside one send window is never observed as two events, only as a final value. A counter that
+/// only moves forward makes "have I already realized this?" a comparison rather than an event
+/// subscription that can miss.
+#[derive(Component, Clone, Copy, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct HullShock {
+    /// Episodes the authority has applied to this hull. Monotonic (wrapping); zero = never hit.
+    pub count: u32,
+    /// The authority tick this episode's counter changed — the tick whose restored hull state
+    /// carries the episode's accumulated shove, and the tick a replay must be able to reach.
+    pub tick: u32,
+    pub cause: ShockCause,
+}
+
+/// Local, never-replicated bookkeeping kept beside [`HullShock`]. Its two halves belong to
+/// different composition roles and never both run on one peer.
+///
+/// AUTHORITY half ([`HullShockLedger::arm`] / [`HullShockLedger::close_episode`]) implements the
+/// episode rule. OWNER half ([`HullShockLedger::realize`]) is the monotonic "last realized" mark
+/// that makes re-application during replay idempotent: the component is registered for local
+/// rollback, so a rollback rewinds it with the rest of the tick's state and replay re-realizes the
+/// shock against the restored history.
+#[derive(Component, Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct HullShockLedger {
+    pending: Option<ShockCause>,
+    last_bump_tick: Option<u32>,
+    applied_count: u32,
+}
+
+impl HullShockLedger {
+    /// AUTHORITY: record that an external impulse just landed on this hull. It is armed, not
+    /// published — [`Self::close_episode`] decides which tick the episode closes on.
+    pub(crate) fn arm(&mut self, cause: ShockCause) {
+        if self
+            .pending
+            .is_none_or(|open| cause.severity() > open.severity())
+        {
+            self.pending = Some(cause);
+        }
+    }
+
+    /// AUTHORITY: take the armed cause iff no episode has opened within `episode_ticks` of `now`.
+    ///
+    /// While an episode is open the armed cause is DEFERRED, not dropped — it closes the moment the
+    /// window expires. Dropping would silently lose the hit that matters most (a main-gun round
+    /// arriving a few ticks behind an MG pellet), because nothing later would ever mention it.
+    pub(crate) fn close_episode(&mut self, now: u32, episode_ticks: u32) -> Option<ShockCause> {
+        let cause = self.pending?;
+        if self
+            .last_bump_tick
+            .is_some_and(|last| now.wrapping_sub(last) < episode_ticks)
+        {
+            return None;
+        }
+        self.pending = None;
+        self.last_bump_tick = Some(now);
+        Some(cause)
+    }
+
+    /// OWNER: whether this monotonic count has already been realized on this timeline.
+    pub(crate) fn is_realized(&self, count: u32) -> bool {
+        self.applied_count == count
+    }
+
+    /// OWNER: mark a count realized. Rewound by local rollback, so replay re-realizes it.
+    pub(crate) fn realize(&mut self, count: u32) {
+        self.applied_count = count;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending(&self) -> Option<ShockCause> {
+        self.pending
+    }
+
+    #[cfg(test)]
+    pub(crate) fn applied(&self) -> u32 {
+        self.applied_count
+    }
 }
 
 /// One crossing of a ballistic volume by the penetrator: where it entered and exited the solid.
@@ -1057,7 +1179,11 @@ fn integrate_projectiles(
         Option<&ShotSource>,
     )>,
     world: ProjectileMarchWorld,
-    mut bodies: Query<(Forces, Option<&mut crate::track::sim::TrackGripWake>)>,
+    mut bodies: Query<(
+        Forces,
+        Option<&mut crate::track::sim::TrackGripWake>,
+        Option<&mut HullShockLedger>,
+    )>,
     mut health: Query<&mut ComponentHealth>,
     retain: Res<RetainSpentShells>,
     net: ProjectileMarchNet,
@@ -1631,7 +1757,11 @@ fn march_shell_step(
     shell: &mut MarchingShell,
     world: &ProjectileMarchWorld,
     health: &mut Query<&mut ComponentHealth>,
-    bodies: &mut Query<(Forces, Option<&mut crate::track::sim::TrackGripWake>)>,
+    bodies: &mut Query<(
+        Forces,
+        Option<&mut crate::track::sim::TrackGripWake>,
+        Option<&mut HullShockLedger>,
+    )>,
     sanctioned: Option<&SanctionedShots>,
     // Authority = not a replica: only then does a hit actually mutate health here.
     deposit: bool,
@@ -1956,7 +2086,11 @@ fn resolve_armor_crossing(
     terminal_emitted: &mut bool,
     world: &ProjectileMarchWorld,
     health: &mut Query<&mut ComponentHealth>,
-    bodies: &mut Query<(Forces, Option<&mut crate::track::sim::TrackGripWake>)>,
+    bodies: &mut Query<(
+        Forces,
+        Option<&mut crate::track::sim::TrackGripWake>,
+        Option<&mut HullShockLedger>,
+    )>,
     armor: &SpatialQueryFilter,
     // Authority = not a replica: only then does a crossing actually mutate health.
     deposit: bool,
@@ -2031,6 +2165,7 @@ fn resolve_armor_crossing(
                 body,
                 shell.projectile.mass * (v_in - Vec3::from(dir) * speed),
                 entry,
+                ShockCause::Ricochet,
             );
         }
         // The bounce reads on the struck face: a hard bright spark fan, biased along the
@@ -2142,7 +2277,13 @@ fn resolve_armor_crossing(
         }
         // Stopped: the body absorbs the full remaining momentum (v_out = 0).
         if let Some(body) = body {
-            apply_hit_impulse(bodies, body, shell.projectile.mass * v_in, entry);
+            apply_hit_impulse(
+                bodies,
+                body,
+                shell.projectile.mass * v_in,
+                entry,
+                ShockCause::Embed,
+            );
         }
         return (ArmorCrossing::Embedded { at: embed }, damage_dealt);
     }
@@ -2188,6 +2329,7 @@ fn resolve_armor_crossing(
             body,
             shell.projectile.mass * (v_in - Vec3::from(dir) * speed),
             entry,
+            ShockCause::Perforation,
         );
     }
     let exit = entry + dir * span;
@@ -2413,18 +2555,31 @@ fn throw_spall_burst(
 
 /// Apply a crossing's momentum share to the struck body. The declared `Forces` query keeps this
 /// immediate velocity write visible to Bevy's scheduler; static or non-rigid owners do not match.
+///
+/// The same match arms the body's [`HullShockLedger`], so the owner is told an unpredictable
+/// impulse happened exactly when one actually reached a body — never on a resolution the physics
+/// itself skipped. The ledger records only that it happened and why; the shove reaches the owner as
+/// part of the state the resulting rollback restores (see [`HullShock`]).
 fn apply_hit_impulse(
-    bodies: &mut Query<(Forces, Option<&mut crate::track::sim::TrackGripWake>)>,
+    bodies: &mut Query<(
+        Forces,
+        Option<&mut crate::track::sim::TrackGripWake>,
+        Option<&mut HullShockLedger>,
+    )>,
     body: Entity,
     impulse: Vec3,
     point: Vec3,
+    cause: ShockCause,
 ) {
-    if let Ok((forces, wake)) = bodies.get_mut(body) {
+    if let Ok((forces, wake, ledger)) = bodies.get_mut(body) {
         crate::track::sim::apply_explicit_impulse(
             forces,
             wake,
             crate::track::sim::ExplicitImpulse::AtPoint { impulse, point },
         );
+        if let Some(mut ledger) = ledger {
+            ledger.arm(cause);
+        }
     }
 }
 
@@ -2720,6 +2875,122 @@ mod march_tests {
                 );
             }
         }
+    }
+
+    /// The same crossing that moves the authority body ARMS its hull-shock ledger, and a replica
+    /// arms nothing — the mirror of [`hit_impulse_changes_only_the_authority_body`] on the fact the
+    /// owner is owed rather than on the momentum itself.
+    ///
+    /// Only ARMING is asserted here: publishing is the episode rule's decision (`net::protocol`),
+    /// and this world has no timeline to decide it on.
+    #[test]
+    fn hit_impulse_arms_the_hull_shock_ledger_only_on_the_authority() {
+        for replica in [false, true] {
+            let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.05), Vec3::new(0.0, 2.0, 0.0));
+            if replica {
+                app.insert_resource(crate::ClientReplica);
+            }
+            let body = app
+                .world_mut()
+                .spawn((
+                    RigidBody::Dynamic,
+                    Transform::default(),
+                    Mass(100.0),
+                    AngularInertia::new(Vec3::splat(50.0)),
+                    NoAutoMass,
+                    NoAutoAngularInertia,
+                    GravityScale(0.0),
+                    HullShockLedger::default(),
+                ))
+                .id();
+            let mut plates = app
+                .world_mut()
+                .query_filtered::<Entity, With<BallisticVolume>>();
+            let plate = plates.single(app.world()).expect("one plate");
+            app.world_mut().entity_mut(plate).insert(VolumeOf(body));
+            app.update();
+
+            assert_eq!(
+                app.world().get::<HullShockLedger>(body).unwrap().pending(),
+                None,
+                "an unstruck hull owes its owner nothing",
+            );
+            let impacts = fire_and_capture(&mut app, Vec3::new(0.0, 2.0, 2.0), Vec3::NEG_Z, 800.0);
+            assert_eq!(impacts.len(), 1, "the owned plate was crossed once");
+            let pending = app.world().get::<HullShockLedger>(body).unwrap().pending();
+
+            if replica {
+                assert_eq!(
+                    pending, None,
+                    "a replica never authors the fact it was shot — it is told",
+                );
+            } else {
+                assert!(
+                    pending.is_some(),
+                    "the crossing that moved the authority body must owe its owner a shock",
+                );
+            }
+        }
+    }
+
+    /// The episode rule, on the ledger that implements it: the first shock closes immediately, a
+    /// shock landing inside the open window is DEFERRED rather than dropped, and it closes the tick
+    /// the window expires. The deferral is the whole correctness argument — a main-gun round
+    /// arriving behind an MG pellet must not be silently swallowed.
+    #[test]
+    fn a_shock_inside_an_open_episode_is_deferred_not_dropped() {
+        const WINDOW: u32 = 16;
+        let mut ledger = HullShockLedger::default();
+
+        assert_eq!(ledger.close_episode(100, WINDOW), None, "nothing armed");
+        ledger.arm(ShockCause::Ricochet);
+        assert_eq!(
+            ledger.close_episode(100, WINDOW),
+            Some(ShockCause::Ricochet),
+            "an isolated shock closes in its own tick — no latency the player can feel",
+        );
+        assert_eq!(
+            ledger.close_episode(101, WINDOW),
+            None,
+            "nothing left armed"
+        );
+
+        // A burst: every pellet inside the open window coalesces into ONE episode, and the most
+        // severe cause is the one the owner is told about.
+        for tick in 104..=112 {
+            ledger.arm(ShockCause::Ricochet);
+            assert_eq!(
+                ledger.close_episode(tick, WINDOW),
+                None,
+                "tick {tick} is inside the open episode",
+            );
+        }
+        ledger.arm(ShockCause::Perforation);
+        ledger.arm(ShockCause::Ricochet);
+        assert_eq!(ledger.close_episode(115, WINDOW), None);
+        assert_eq!(
+            ledger.close_episode(116, WINDOW),
+            Some(ShockCause::Perforation),
+            "the deferred episode closes the tick its window expires, naming its worst hit",
+        );
+        assert_eq!(ledger.close_episode(117, WINDOW), None);
+    }
+
+    /// The owner half is a monotonic comparison, not an event subscription: replication carries
+    /// STATE, so a count that was bumped and restored inside one send window is only ever seen as a
+    /// final value, and rewinding the mark (what local rollback does) must re-arm realization.
+    #[test]
+    fn realization_is_a_rewindable_comparison_not_an_event() {
+        let mut ledger = HullShockLedger::default();
+        assert!(ledger.is_realized(0), "a never-shot hull owes nothing");
+        assert!(!ledger.is_realized(7));
+
+        ledger.realize(7);
+        assert!(ledger.is_realized(7), "realizing twice is a no-op");
+
+        // What a rollback does to this component: restore the pre-shock value from history.
+        let rewound = HullShockLedger::default();
+        assert!(!rewound.is_realized(7), "replay must re-realize the shock");
     }
 
     /// SHOOTER SELF-EXCLUSION ([`not_own_volume`]): a round is transparent to the tank that FIRED it.
