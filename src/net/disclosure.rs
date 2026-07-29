@@ -69,12 +69,20 @@ impl VisibilityFilter for CombatDisclosure {
         // honestly WHEN that impact is in view — withholding the verdict would make the drawn flame
         // lick a lie (`vfx`'s no-fake-assistance rule). It is broadcast, so it also reaches clients
         // facing the other way and clients a map away, which is exactly why it is judged as a
-        // disclosure and not as a render hint. What it discloses is one armor outcome at one point,
-        // on one named combatant — and `victim` adds nothing derivable, because every tank's
-        // `Position` is publicly replicated and the nearest one to `position` is the same answer.
-        // What it never discloses is HOW MANY times that hull has been hit, with what worst cause,
-        // or any damage; those are what makes `HullShock` aggregate and private. Every public
-        // fire-visual fact is public by the same design decision (ADR-0016/0021).
+        // disclosure and not as a render hint.
+        //
+        // `victim` IS NEW INFORMATION, and calling it derivable would be false: `position` is a
+        // point on a surface, a replicated `Position` is a tank ROOT, and the two resolve to
+        // different tanks whenever hulls are adjacent or overlapping — which is precisely why
+        // `net::adoption` could not infer it geometrically and needed the field. The decision is
+        // that one transient armor outcome may name its target, ACCEPTED for what it buys: a shove
+        // the client cannot predict is held until the client has drawn one of the hits that shove is
+        // made of, and an inexact victim releases the wrong tank's shove.
+        //
+        // The line this policy actually draws is unmoved. What is never disclosed is HOW MANY times
+        // a hull has been hit, with what worst cause, or any damage; those are what makes
+        // `HullShock` aggregate, persistent and private. Every public fire-visual fact is public by
+        // the same design decision (ADR-0016/0021).
         HullShock,
         TankServos,
         NetTrackGripAnchor,

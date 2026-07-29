@@ -54,6 +54,9 @@ fn authority_shock() -> HullShock {
     HullShock {
         count: 1,
         tick: PRODUCING_TICK.0,
+        // A hull's first episode has no open window to defer behind, so it closes on the tick it
+        // was armed and spans exactly that tick.
+        opened: PRODUCING_TICK.0,
         cause: ShockCause::Perforation,
     }
 }

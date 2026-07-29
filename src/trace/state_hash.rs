@@ -309,6 +309,7 @@ fn test_shock() -> HullShock {
     HullShock {
         count: 3,
         tick: 1_209,
+        opened: 1_197,
         cause: crate::ballistics::ShockCause::Perforation,
     }
 }

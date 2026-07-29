@@ -1,9 +1,9 @@
 # Unpredictable authoritative facts adopt unconditionally
 
 > **Status: accepted; landed local on `feat/authoritative-facts`, playtest pending. `PROTOCOL_REV`
-> is now 23: the owner-private `HullShock` registration re-pinned it to 22 earlier on the same
-> branch, and naming the victim on `ImpactConfirm`/`RicochetKeyframe` moved it again — see
-> *Correlating a spark with a fact*.**
+> is now 24: the owner-private `HullShock` registration re-pinned it to 22 earlier on the same
+> branch, naming the victim on `ImpactConfirm`/`RicochetKeyframe` moved it to 23, and giving
+> `HullShock` its own `opened` tick moved it again — see *Correlating a spark with a fact*.**
 
 A fact the client had no information to predict — that it was shot — reaches the player through a
 forced rollback that **no threshold can veto**. `net::adoption` decides WHETHER the authority's
@@ -133,9 +133,12 @@ Everything after the offer already exists and should not be re-implemented per f
   inside `PredictionManager`'s `max_rollback_ticks`. The component-specific half is the producer's:
   for the hull, that its `PredictionHistory` is retained at the producing tick and that every
   authority-tracked part of its rigid-body state (`Position`, `Rotation`, `LinearVelocity`,
-  `AngularVelocity`) can be restored there. A pose restored to the producing tick beside a velocity
-  that stayed at `now` is not a tick either peer ever had; if completeness cannot be PROVEN, the
-  offer waits and is re-derived next frame.
+  `AngularVelocity`) can be restored there FROM AUTHORITY. A pose restored to the producing tick
+  beside a velocity that stayed at `now` is not a tick either peer ever had; if completeness cannot
+  be PROVEN, the offer waits and is re-derived next frame. The gate fails CLOSED on a missing
+  `ConfirmedHistory`, which is not a formality: `prepare_rollback` restores a component that has no
+  confirmed history from the client's own `PredictionHistory` **even on a state rollback**, so a
+  missing history is precisely the case in which authority does not reach.
 - **One slot, arbitrated.** `StateRollbackMetadata` holds a single `Option<Tick>`, and a second
   claimant does not queue — it silently narrows the first one's target. `ForcedRollbackSlot::claim`
   is therefore the only production caller of `request_forced_rollback` anywhere in `src/`, pinned by
@@ -200,20 +203,33 @@ the authority's post-hit hull velocity on the live hull while the staged fact is
 its spark. This module owns which rollback it ASKS for; it does not own which rollbacks happen. Only
 a barrier on the shove's APPLICATION could close that, and this slice did not build one.
 
-An INPUT rollback is emphatically NOT in that set, and the first draft of the retirement rule got
-this wrong: `prepare_rollback` restores from `PredictionHistory` for `Rollback::FromInputs`, which
-for a hull the client never knew was hit is its own un-hit prediction. Closing a staged fact against
-one would lose the shove outright. `retirement` is therefore given the rollback KIND and refuses to
-retire against an input rollback at any depth. Our client disables input rollback
+An INPUT rollback's RESTORE is emphatically NOT in that set, and the first draft of the retirement
+rule got this wrong: `prepare_rollback` restores from `PredictionHistory` for `Rollback::FromInputs`,
+which for a hull the client never knew was hit is its own un-hit prediction. Closing a staged fact
+against one would lose the shove outright. `retirement` is therefore given the rollback KIND and
+refuses to retire against an input rollback at any depth. Our client disables input rollback
 (`net::client::shipping_rollback_policy`), which is why this never shipped; a test asserts that
 policy so the invariant cannot be switched off silently, but the rule does not rely on it.
 
+The narrower true statement, because the broad one is not lightyear's behaviour: an input rollback's
+REPLAY can still install the fact. `snap_to_confirmed_during_rollback` takes `Single<&Rollback>` and
+never branches on the variant, so at every replayed tick it overwrites any predicted component that
+has an exact confirmed sample there. An input rollback starting BEFORE the producing tick therefore
+replays through it and puts the authority's post-hit velocity live anyway. `retirement` still answers
+`Keep` — it cannot observe the replay — and this module then asks for a state rollback that
+re-installs state already live. The cost is one redundant rollback, i.e. one render hitch; the
+impulse is never re-executed, because it only exists as restored state. Accepted and recorded.
+
 The gap is therefore MEASURED rather than argued away: `OrderingTally::bypassed` counts every
 confirmed-state rollback this module did not order that delivered a still-waiting fact, and it rides
-the `net::diagnostics` line beside `released_on_impact` and `released_on_budget`. A best-effort rule
-with a bypass counter is honest; a guarantee this shape cannot keep is not. The counters are also the
-evidence that would justify paying for a real barrier — until they read non-zero on a real link,
-building one would be speculation.
+the `net::diagnostics` line beside `released_on_impact` and `released_on_budget`. "Delivered" is
+ESTABLISHED, not inferred from the rollback's depth: `restore_carries_the_shove` reads the same
+confirmed velocity histories `prepare_rollback` restored from and asks whether the sample it resolved
+is at or after the producing tick, because a deep rollback over a history whose newest sample
+predates the hit restores a PRE-hit velocity and carries nothing. A best-effort rule with a bypass
+counter is honest; a guarantee this shape cannot keep is not. The counters are also the evidence that
+would justify paying for a real barrier — until they read non-zero on a real link, building one would
+be speculation.
 
 ### Correlating a spark with a fact is an identity test — and it took a wire field
 
@@ -227,26 +243,42 @@ then A's spark — 16 local ticks away — satisfied B's window and released B's
 The replacement is set membership on two AUTHORITY facts:
 
 - **Which episode.** `AuthorityImpact::tick` is the server tick the impact resolved on, i.e. the tick
-  `HullShockLedger::arm` ran. `close_episode` publishes only when `now − last_close ≥
-  SHOCK_EPISODE_TICKS`, which makes `(close − SHOCK_EPISODE_TICKS, close]` the EXACT set of arm ticks
-  an episode covers — a deferred hit publishes at `max(arm, last_close + SHOCK_EPISODE_TICKS)` so its
-  arm tick can never be older, and the previous episode's hits are all at or before `last_close ≤
-  close − SHOCK_EPISODE_TICKS`. Consecutive episodes therefore have DISJOINT windows, and the
-  half-open lower bound is what keeps A out of B's.
+  `HullShockLedger::arm` ran. The episode names its own span: `HullShock::opened` is the tick of its
+  FIRST impulse and `HullShock::tick` the tick it closed on, so `[opened, tick]` is the set of
+  impulse ticks it covers.
 - **Whose hull.** `AuthorityImpact::victim` names the body the authority gave the impulse to — the
   same body whose ledger it armed.
 
-The victim is the wire change, and it is why `PROTOCOL_REV` moved to 23: `ImpactConfirm` and
-`RicochetKeyframe` each gained `victim: Option<CombatantId>`. Both facts are needed, because a
-ricochet arms an episode exactly as an embed does. The tick half needed nothing new — `impact_tick`
-and `bounce_tick` already rode both facts and were already buffered client-side in
+**The span is carried, and the second draft's derivation of it was the third review's finding.**
+Deriving `(close − SHOCK_EPISODE_TICKS, close]` looks equivalent and is not: `close_episode` defers
+only behind an OPEN episode, so the first impulse a fresh `HullShockLedger` ever sees publishes
+immediately and spans ONE tick. The derived window claimed fifteen ticks that episode never covered
+— and `tank::spawn` gives every fresh hull a default ledger while `net::server` respawns by
+despawning the entity and spawning a new one with the SAME `CombatantId`, so those fifteen ticks are
+exactly where the previous life's hits and their drawn sparks live. A prior life's spark could
+release a respawned hull's first shove. Carrying `opened` makes the span exact for every episode by
+construction: it is stamped on the first tick a pending impulse is observed and cleared on
+publication, so `opened ≤ close` and the next episode's `opened` is strictly greater than this one's
+`close`. Consecutive episodes span disjoint ranges, and a fresh ledger's first span reaches back over
+nothing — its lower bound is at or after the tick the entity was spawned.
+
+Both halves cost wire. `PROTOCOL_REV` 23 added `victim: Option<CombatantId>` to `ImpactConfirm` and
+`RicochetKeyframe` (both, because a ricochet arms an episode exactly as an embed does); REV 24 added
+`opened: u32` to `HullShock`. The impact tick needed nothing new — `impact_tick` and `bounce_tick`
+already rode both facts and were already buffered client-side in
 `SanctionedTerminal`/`SanctionedBounce`.
 
-This is NOT a widening of the disclosure policy. Every tank's `Position` is publicly replicated and
-`ImpactConfirm::position` is public, so the victim of an impact was already derivable by proximity;
-naming it makes the derivation exact rather than geometric. What stays owner-private is what made
-`HullShock` private in the first place: how many times a hull has been hit, with what worst cause,
-and for how much damage.
+**`victim` IS new exact target information, published deliberately.** The earlier claim that a
+public `Position` already made it derivable by proximity does not survive inspection, and it
+contradicted the reason the field was added: `ImpactConfirm::position` is a point on a SURFACE while
+a replicated `Position` is a tank ROOT, so nearest-root is a different question with a different
+answer whenever hulls are adjacent or overlapping; the poses an observer would compare against are
+its own interpolated ones, on a different timeline from `impact_tick`; and the fact is broadcast
+`NetworkTarget::All`, so the inference would have to hold for clients who never witnessed the
+contact. If geometric inference were exact enough, the field would not have been needed. What it buys
+is per-hull correctness of the spark/shove correlation — an inexact victim releases the tank beside
+the one that was hit. What stays owner-private is unmoved, and is what made `HullShock` private in
+the first place: how many times a hull has been hit, with what worst cause, and for how much damage.
 
 ### There is still a second delivery path, and ping decides when it runs
 
@@ -315,12 +347,9 @@ to be derived, never measured, and 2.5× too large.
   rather than by convention, and every forced rollback in the tree carries a cause.
 - **`HullShock` stays owner-private** through `CombatDisclosure`: persistent, per-target, aggregate
   state. Public `ImpactConfirm` is not a contradiction — transient, per-shot, spatially anchored, and
-  broadcast including to clients who will never render it — and that stays true now that it names a
-  victim, because a public `Position` already made the victim derivable.
-- **The wire moved to `PROTOCOL_REV` 23.** Client and server ship together behind a version-exact
-  handshake, so the cost is one coordinated release; `WIRE_TYPES_HASH` and the wire-manifest
-  fingerprint were re-pinned in the same diff, and `WIRE_SURFACE_HASH` is untouched because no type
-  was added, removed, renamed or reordered.
+  broadcast including to clients who will never render it. Naming a victim on it IS a deliberate
+  disclosure decision rather than a no-op, and it is recorded as one above; the aggregate line the
+  policy actually draws is unmoved.
 - **The trace keeps `shk` as its own stream.** Folding it into the divergence hash corrupts that
   metric: the owner legitimately disagrees with the authority for the whole delivery window of every
   hit, and folded windows read as unexplained drift.
@@ -329,6 +358,15 @@ to be derived, never measured, and 2.5× too large.
   often the ordering rule is bypassed, how often the budget expires, or how the hitch feels. Those
   three numbers are already instrumented and reported; reading them is the next evidence, and no
   claim in this ADR should be promoted to a product fact before then.
+- **The wire moved to `PROTOCOL_REV` 24.** Client and server ship together behind a version-exact
+  handshake, so the cost is one coordinated release; `WIRE_TYPES_HASH` and the wire-manifest
+  fingerprint were re-pinned in the same diff, and `WIRE_SURFACE_HASH` is untouched because no type
+  was added, removed, renamed or reordered.
+- **The lead-0 fixture measures a FLOOR, not a constant.** `PRESENTATION_DELAY_TICKS` is the one
+  fixed step the schedule's ordering forces between a checkpoint's arrival and the frame that can
+  present its spark. Bevy runs `FixedMain` zero or more times per frame, so a catch-up frame can put
+  several ticks between the arrival `PreUpdate` and the adopting one. The fixture pins that the rule
+  adds nothing to that minimum; it does not claim shipping always produces the number.
 
 ## Related
 

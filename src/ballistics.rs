@@ -558,7 +558,30 @@ pub struct HullShock {
     /// The authority tick this episode's counter changed — the tick whose restored hull state
     /// carries the episode's accumulated shove, and the tick a replay must be able to reach.
     pub tick: u32,
+    /// The authority tick this episode OPENED on: the tick of the FIRST impulse it is made of.
+    ///
+    /// `[opened, tick]` is the episode's own set of impulse ticks, and it is CARRIED rather than
+    /// derived because no arithmetic over `tick` alone reproduces it. `close_episode` publishes the
+    /// first impulse a fresh [`HullShockLedger`] ever sees IMMEDIATELY (there is no open episode to
+    /// defer behind), so that episode spans a single tick, while a deferred one can span up to
+    /// `SHOCK_EPISODE_TICKS − 1`. A fixed-width window ending at `tick` would therefore claim
+    /// fifteen ticks a fresh hull's first episode never covered — including, because a respawn keeps
+    /// the combatant identity and only replaces the entity, ticks belonging to the hull's PREVIOUS
+    /// life. `net::adoption` matches sparks against this range; see [`HullShockLedger::arm`].
+    pub opened: u32,
     pub cause: ShockCause,
+}
+
+/// One episode [`HullShockLedger::close_episode`] just published: what caused it, and the tick of
+/// the first impulse it is made of.
+///
+/// Returned as one value because the two are only meaningful together — [`HullShock::opened`] is
+/// what makes `[opened, tick]` the episode's exact span, and a caller that could write one without
+/// the other could publish a span the ledger never observed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct ClosedEpisode {
+    pub(crate) cause: ShockCause,
+    pub(crate) opened: u32,
 }
 
 /// Local, never-replicated bookkeeping kept beside [`HullShock`]. Its two halves belong to
@@ -572,13 +595,17 @@ pub struct HullShock {
 #[derive(Component, Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct HullShockLedger {
     pending: Option<ShockCause>,
+    /// The tick the OPEN (unpublished) group of impulses started on — see [`Self::close_episode`],
+    /// which is what stamps it. `None` exactly when `pending` is `None`.
+    opened_at: Option<u32>,
     last_bump_tick: Option<u32>,
     applied_count: u32,
 }
 
 impl HullShockLedger {
     /// AUTHORITY: record that an external impulse just landed on this hull. It is armed, not
-    /// published — [`Self::close_episode`] decides which tick the episode closes on.
+    /// published — [`Self::close_episode`] decides which tick the episode closes on, and stamps the
+    /// tick it opened on.
     pub(crate) fn arm(&mut self, cause: ShockCause) {
         if self
             .pending
@@ -593,8 +620,28 @@ impl HullShockLedger {
     /// While an episode is open the armed cause is DEFERRED, not dropped — it closes the moment the
     /// window expires. Dropping would silently lose the hit that matters most (a main-gun round
     /// arriving a few ticks behind an MG pellet), because nothing later would ever mention it.
-    pub(crate) fn close_episode(&mut self, now: u32, episode_ticks: u32) -> Option<ShockCause> {
+    ///
+    /// WHY THE OPEN TICK IS STAMPED HERE and not in [`Self::arm`]. `net::protocol` runs this EVERY
+    /// authority tick, after the march that arms the ledger
+    /// (`close_hull_shock_episodes.after(SimPhase::ProjectileMarch)`), so the first tick this sees a
+    /// pending cause IS the tick that cause was armed on. Stamping it in `arm` would mean plumbing a
+    /// tick through the whole ballistic march for a value the once-per-tick caller already holds.
+    ///
+    /// The stamp gives [`HullShock::opened`] two properties by CONSTRUCTION, and the ordering rule in
+    /// `net::adoption` rests on both:
+    ///
+    /// - `opened ≤ tick`, because it is written on a tick at or before the one that publishes;
+    /// - `opened` of the NEXT episode is strictly greater than this one's `tick`, because publishing
+    ///   clears it and only a later call can write it again. Consecutive episodes on one hull
+    ///   therefore span DISJOINT tick ranges, with no appeal to `episode_ticks` arithmetic — which is
+    ///   what makes a fresh ledger's single-tick first episode as exact as a deferred one's.
+    ///
+    /// If this were ever NOT called on some tick, the stamp lands late and the published span is
+    /// NARROWER than the truth. That direction is safe: a claim can only fail to match a spark it
+    /// owns, never match one it does not.
+    pub(crate) fn close_episode(&mut self, now: u32, episode_ticks: u32) -> Option<ClosedEpisode> {
         let cause = self.pending?;
+        let opened = *self.opened_at.get_or_insert(now);
         if self
             .last_bump_tick
             .is_some_and(|last| now.wrapping_sub(last) < episode_ticks)
@@ -602,8 +649,9 @@ impl HullShockLedger {
             return None;
         }
         self.pending = None;
+        self.opened_at = None;
         self.last_bump_tick = Some(now);
-        Some(cause)
+        Some(ClosedEpisode { cause, opened })
     }
 
     /// OWNER: whether this monotonic count has already been realized on this timeline.
@@ -3004,8 +3052,12 @@ mod march_tests {
         ledger.arm(ShockCause::Ricochet);
         assert_eq!(
             ledger.close_episode(100, WINDOW),
-            Some(ShockCause::Ricochet),
-            "an isolated shock closes in its own tick — no latency the player can feel",
+            Some(ClosedEpisode {
+                cause: ShockCause::Ricochet,
+                opened: 100,
+            }),
+            "an isolated shock closes in its own tick — no latency the player can feel, and it \
+             spans that ONE tick, not a window's worth",
         );
         assert_eq!(
             ledger.close_episode(101, WINDOW),
@@ -3028,10 +3080,63 @@ mod march_tests {
         assert_eq!(ledger.close_episode(115, WINDOW), None);
         assert_eq!(
             ledger.close_episode(116, WINDOW),
-            Some(ShockCause::Perforation),
-            "the deferred episode closes the tick its window expires, naming its worst hit",
+            Some(ClosedEpisode {
+                cause: ShockCause::Perforation,
+                opened: 104,
+            }),
+            "the deferred episode closes the tick its window expires, naming its worst hit and the \
+             tick its FIRST hit landed on",
         );
         assert_eq!(ledger.close_episode(117, WINDOW), None);
+    }
+
+    /// THE SPAN IS EXACT FOR EVERY EPISODE, INCLUDING THE FIRST — the property `net::adoption`'s
+    /// spark correlation rests on, and the one a `close − SHOCK_EPISODE_TICKS` window did not have.
+    ///
+    /// A fresh ledger has no open episode to defer behind, so its first hit publishes on its own
+    /// tick and spans exactly that tick. Every later episode opens strictly after the previous one
+    /// closed. So the spans of consecutive episodes on one hull never overlap, and a fresh hull's
+    /// first episode never reaches back over ticks it did not cover — which, because a respawn
+    /// keeps the combatant identity, is where a PREVIOUS life's hits live.
+    #[test]
+    fn episode_spans_never_overlap_and_a_fresh_ledgers_first_spans_one_tick() {
+        const WINDOW: u32 = 16;
+        let mut ledger = HullShockLedger::default();
+        let mut spans: Vec<(u32, u32)> = Vec::new();
+
+        // ONE monotonic clock, exactly as `close_hull_shock_episodes` sees it — every tick, after
+        // the march that arms. An isolated hit at 100, a burst at 104/110, an isolated one at 140.
+        const HITS: [u32; 4] = [100, 104, 110, 140];
+        for now in 100..=160 {
+            if HITS.contains(&now) {
+                ledger.arm(ShockCause::Embed);
+            }
+            if let Some(episode) = ledger.close_episode(now, WINDOW) {
+                spans.push((episode.opened, now));
+            }
+        }
+
+        assert_eq!(
+            spans,
+            vec![(100, 100), (104, 116), (140, 140)],
+            "the first hit publishes alone on its own tick; the burst coalesces into one episode \
+             spanning its first hit to the tick the window expired; the last is isolated again",
+        );
+        for pair in spans.windows(2) {
+            let ((_, closed), (opened, _)) = (pair[0], pair[1]);
+            assert!(
+                opened > closed,
+                "episode spans must be disjoint: {:?} then {:?}",
+                pair[0],
+                pair[1],
+            );
+        }
+        assert!(
+            spans
+                .iter()
+                .all(|(opened, closed)| closed - opened < WINDOW),
+            "no episode can span more than its window: {spans:?}",
+        );
     }
 
     /// The owner half is a monotonic comparison, not an event subscription: replication carries

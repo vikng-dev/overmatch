@@ -84,18 +84,24 @@ const PRODUCING_TICK: Tick = Tick(100);
 /// this client re-draws, and on the `HullShock` episode it must be matched with.
 const VICTIM: crate::CombatantId = crate::CombatantId(1);
 
-/// FRAMES, in ticks, between the checkpoint's arrival and the frame that presents its spark.
+/// The FLOOR, in ticks, on the gap between a checkpoint's arrival and the frame that can present its
+/// spark — and what this fixture advances the clock by.
 ///
-/// Not a fixture convenience — it is the schedule. `ImpactConfirm` is a message drained in `Update`
+/// Not a fixture convenience: `ImpactConfirm` is a message drained in `Update`
 /// (`net::client::receive_fire_events`), which is AFTER the frame's fixed loop, so the ballistics
-/// march cannot present it before the NEXT fixed tick; lightyear advances `LocalTimeline` in
-/// `FixedFirst`. One tick is therefore the FLOOR on what the ordering rule can cost when the visual
-/// is actually there, and the fixture must pay it rather than freeze the clock and report zero.
+/// march cannot present it before the NEXT fixed tick, and lightyear advances `LocalTimeline` in
+/// `FixedFirst`. One fixed step must therefore pass, and the fixture pays it rather than freezing the
+/// clock and reporting a zero it did not earn.
+///
+/// It is a FLOOR and NOT a shipping constant. Bevy runs `FixedMain` zero or more times per frame
+/// (`bevy_app::main_schedule`, `bevy_time::fixed`), so a catch-up frame can advance several ticks
+/// between the `PreUpdate` that received the checkpoint and the one that adopts. What the assertions
+/// below pin is that the rule costs the schedule's MINIMUM when the visual is there — never that
+/// shipping always produces this number.
 const PRESENTATION_DELAY_TICKS: i32 = 1;
 
-/// A hit the authority resolved 12 ticks before the episode carrying it closed — inside the
-/// `SHOCK_EPISODE_TICKS` window, so it is one of [`PRODUCING_TICK`]'s own hits, and drawn long before
-/// the shock arrives. See [`Visual::DrawnBeforeArrival`].
+/// A hit the authority resolved 12 ticks before the episode carrying it closed, and drawn long
+/// before the shock arrives. See [`Visual::DrawnBeforeArrival`] and [`coalesced_shock`].
 const EARLY_HIT_TICK: u32 = PRODUCING_TICK.0 - 12;
 fn producing_replicon_tick() -> RepliconTick {
     RepliconTick::new(50)
@@ -117,12 +123,32 @@ const PREDICTED_ANGULAR: Vec3 = Vec3::ZERO;
 const LIVE_LINEAR: Vec3 = Vec3::new(3.0, 0.0, 3.0);
 const LIVE_ANGULAR: Vec3 = Vec3::new(3.0, 3.0, 0.0);
 
-/// The episode the authority closed at [`PRODUCING_TICK`]. The client's copy is
-/// `HullShock::default()`: it had no way to know it was shot.
-fn authority_shock() -> HullShock {
+/// THE ISOLATED HIT: a fresh `HullShockLedger` finds no open episode, so the hit publishes on the
+/// tick it landed and the episode spans that one tick. The client's copy is `HullShock::default()`:
+/// it had no way to know it was shot.
+fn isolated_shock() -> HullShock {
     HullShock {
         count: 1,
         tick: PRODUCING_TICK.0,
+        opened: PRODUCING_TICK.0,
+        cause: ShockCause::Perforation,
+    }
+}
+
+/// THE COALESCED EPISODE: an earlier episode closed at [`EARLY_HIT_TICK`] − 4, this hit landed at
+/// [`EARLY_HIT_TICK`] four ticks later — inside the open window — and was deferred to
+/// [`PRODUCING_TICK`], `SHOCK_EPISODE_TICKS` after that close.
+///
+/// The `count: 2` is not decoration. An episode that opened 12 ticks before it closed CANNOT be a
+/// hull's first: `close_episode` publishes the first impulse a fresh ledger sees immediately, so a
+/// deferred span implies a previous episode, hence a previous count. A fixture asserting
+/// `count: 1` with `opened != tick` would be proving something on a premise the authority cannot
+/// produce.
+fn coalesced_shock() -> HullShock {
+    HullShock {
+        count: 2,
+        tick: PRODUCING_TICK.0,
+        opened: EARLY_HIT_TICK,
         cause: ShockCause::Perforation,
     }
 }
@@ -167,6 +193,18 @@ enum Visual {
     /// The jitter/loss case the ordering budget exists for — a lost fire fact, or a cosmetic shell
     /// that quietly dissolved, so no spark is ever drawn for this hit.
     Missing,
+}
+
+impl Visual {
+    /// The episode the authority published, which the drawn case DETERMINES rather than decorates: a
+    /// spark drawn before the shock arrives is only one of the episode's own hits if the episode
+    /// coalesced, and a coalesced episode is never a hull's first.
+    fn shock(self) -> HullShock {
+        match self {
+            Visual::DrawnBeforeArrival => coalesced_shock(),
+            Visual::DrawnAfterArrival | Visual::Missing => isolated_shock(),
+        }
+    }
 }
 
 /// What the run produced after the real `PreUpdate` schedule.
@@ -236,7 +274,7 @@ fn run_arrival(lead: Lead, visual: Visual) -> Delivered {
     ));
 
     let mut confirmed_shock = ConfirmedHistory::<HullShock>::default();
-    confirmed_shock.insert_present_explicit(PRODUCING_TICK, authority_shock());
+    confirmed_shock.insert_present_explicit(PRODUCING_TICK, visual.shock());
     let mut predicted_shock_history = PredictionHistory::<HullShock>::default();
     predicted_shock_history.add_predicted(PRODUCING_TICK, Some(HullShock::default()));
 
@@ -248,6 +286,21 @@ fn run_arrival(lead: Lead, visual: Visual) -> Delivered {
     confirmed_angular.insert_present_explicit(PRODUCING_TICK, AngularVelocity(AUTHORITY_ANGULAR));
     let mut predicted_angular = PredictionHistory::<AngularVelocity>::default();
     predicted_angular.add_predicted(PRODUCING_TICK, Some(AngularVelocity(PREDICTED_ANGULAR)));
+
+    // THE POSE, and it is not decoration. `net::adoption`'s readiness gate requires that EVERY
+    // authority-tracked part of the rigid body can be restored at the producing tick, and it fails
+    // CLOSED on a missing `ConfirmedHistory` because that is the case in which lightyear's
+    // `prepare_rollback` restores from the client's own prediction instead. A replicated, predicted
+    // tank has all four histories; a fixture that omitted two would be offering the adoption path a
+    // hull the shipping build never produces.
+    let mut confirmed_position = ConfirmedHistory::<Position>::default();
+    confirmed_position.insert_present_explicit(PRODUCING_TICK, Position::default());
+    let mut predicted_position = PredictionHistory::<Position>::default();
+    predicted_position.add_predicted(PRODUCING_TICK, Some(Position::default()));
+    let mut confirmed_rotation = ConfirmedHistory::<Rotation>::default();
+    confirmed_rotation.insert_present_explicit(PRODUCING_TICK, Rotation::default());
+    let mut predicted_rotation = PredictionHistory::<Rotation>::default();
+    predicted_rotation.add_predicted(PRODUCING_TICK, Some(Rotation::default()));
 
     let mut ledger_history = PredictionHistory::<HullShockLedger>::default();
     ledger_history.add_predicted(PRODUCING_TICK, Some(HullShockLedger::default()));
@@ -263,7 +316,11 @@ fn run_arrival(lead: Lead, visual: Visual) -> Delivered {
             ConfirmHistory::new(producing_replicon_tick()),
             Tank,
             Position::default(),
+            confirmed_position,
+            predicted_position,
             Rotation::default(),
+            confirmed_rotation,
+            predicted_rotation,
             HullShock::default(),
             predicted_shock_history,
             confirmed_shock,
@@ -430,8 +487,10 @@ fn an_authority_shock_reaches_the_live_hull_at_minus_one_lead() {
 ///
 /// [`Visual::DrawnBeforeArrival`] is what makes the regime reachable at all now that the shove waits
 /// for its spark: an episode that publishes on the SAME tick the client is standing on can only be
-/// adopted with no replay if the spark is already drawn, which is exactly the coalesced-burst shape.
-/// An isolated hit pays a tick — see [`a_drawn_spark_costs_the_shove_only_the_schedules_own_delay`].
+/// adopted with no replay if the spark is already drawn, which is exactly the coalesced-burst shape
+/// — and [`coalesced_shock`] is a burst the authority can actually publish, not a first episode with
+/// a span it could never have had. An isolated hit pays a tick; see
+/// [`a_drawn_spark_costs_the_shove_no_more_than_the_schedules_own_delay`].
 #[test]
 fn the_zero_lead_shove_arrives_with_no_replayed_tick_at_all() {
     let delivered = run_arrival(Lead::Zero, Visual::DrawnBeforeArrival);
@@ -470,7 +529,7 @@ fn assert_delivered(lead: Lead) {
          checkpoint processed on arrival = {:?}",
         lead.ticks(),
         delivered.live_shock,
-        authority_shock(),
+        Visual::DrawnAfterArrival.shock(),
         delivered.realized_count,
         delivered.replayed_ticks,
         delivered.processed_on_arrival,
@@ -514,15 +573,17 @@ fn a_shove_waits_for_its_spark_and_the_budget_still_delivers_it() {
 }
 
 /// The same run with the spark drawn: the shove lands on the FIRST `PreUpdate` after the
-/// presentation, costing the [`PRESENTATION_DELAY_TICKS`] the schedule itself imposes and not one
-/// tick more. Without this the fixture above could pass on a rule that always waits out the full
-/// budget.
+/// presentation, so the rule adds nothing to the delay the schedule already imposes. Without this
+/// the fixture above could pass on a rule that always waits out the full budget.
 ///
-/// The number is the CLAIM: `max_wait_ticks` is asserted equal to the schedule's own delay, so a
-/// rule that waited an extra frame — or a fixture that stopped advancing the clock and reported a
-/// zero it did not earn — fails here.
+/// WHAT IS PINNED, precisely: with the clock advanced by the ONE fixed step the schedule's ordering
+/// forces, `max_wait_ticks` is that one tick and not more. That is a FLOOR being met, not a shipping
+/// constant — `FixedMain` runs zero or more times per frame, so a catch-up frame can put several
+/// ticks between the arrival `PreUpdate` and the adopting one, and the rule would then report the
+/// larger number without being any slower. A rule that waited an extra frame of its own, or a fixture
+/// that froze the clock and reported a zero it did not earn, fails here.
 #[test]
-fn a_drawn_spark_costs_the_shove_only_the_schedules_own_delay() {
+fn a_drawn_spark_costs_the_shove_no_more_than_the_schedules_own_delay() {
     let delivered = run_arrival(Lead::Zero, Visual::DrawnAfterArrival);
 
     assert_eq!(
@@ -536,8 +597,8 @@ fn a_drawn_spark_costs_the_shove_only_the_schedules_own_delay() {
             max_wait_ticks: PRESENTATION_DELAY_TICKS,
             ..default()
         },
-        "released against the spark after exactly the {PRESENTATION_DELAY_TICKS} tick(s) the \
-         schedule costs — not by the budget, and not bypassed",
+        "released against the spark after the {PRESENTATION_DELAY_TICKS} tick(s) this run advanced \
+         the clock by — not by the budget, and not bypassed",
     );
 }
 

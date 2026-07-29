@@ -71,7 +71,15 @@ use crate::{CombatantId, ShotId};
 /// WHOSE HULL, so `net::adoption`'s ordering rule could release one tank's shove against a spark
 /// drawn on another. No new type and no new registration, so the surface hash is unchanged; the
 /// own-type graph and REV move.
-pub const PROTOCOL_REV: u32 = 23;
+///
+/// REV 24 (the episode's own span): [`crate::ballistics::HullShock`] gains `opened` — the authority
+/// tick of the FIRST impulse the episode is made of. It is carried rather than derived because
+/// `close − SHOCK_EPISODE_TICKS` is only the span of a DEFERRED episode: the first episode a fresh
+/// hull publishes spans a single tick, so the derived window claimed fifteen ticks it never covered,
+/// and a respawn keeps the combatant identity, so those ticks can hold the previous life's hits.
+/// `net::adoption` matches sparks against `[opened, tick]`. No new type and no new registration, so
+/// the surface hash is unchanged; the own-type graph and REV move.
+pub const PROTOCOL_REV: u32 = 24;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -388,7 +396,7 @@ pub struct RicochetKeyframe {
     /// It is the correlation handle for `net::adoption`'s ordering rule and nothing else: it names
     /// the SAME body `ballistics::apply_hit_impulse` armed, so the owner can tell a spark that is one
     /// of its own [`HullShock`] episode's hits from a spark on somebody else's tank. See
-    /// [`ImpactConfirm::victim`] for why this is not a widening of the disclosure policy.
+    /// [`ImpactConfirm::victim`] for what publishing it costs and what it buys.
     pub victim: Option<crate::CombatantId>,
 }
 
@@ -415,15 +423,26 @@ pub struct ImpactConfirm {
     pub after_bounces: u32,
     /// The combatant whose hull took this terminal's impulse, if the struck volume belongs to one.
     ///
-    /// WHY THIS IS NOT A DISCLOSURE WIDENING. `net::disclosure` keeps [`HullShock`] owner-private
-    /// because it is PERSISTENT, PER-TARGET, AGGREGATE state. This field is none of those: it is one
-    /// transient per-shot fact, and every client can already derive the same answer by comparing
-    /// [`ImpactConfirm::position`] against the publicly replicated `Position` of every tank. Naming
-    /// it makes the derivation exact instead of geometric; it reveals nothing a client could not
-    /// already compute. What stays private is unchanged: whose hull has been hit HOW MANY times,
-    /// with what worst cause, and for how much damage.
+    /// THIS IS NEW EXACT TARGET INFORMATION, PUBLISHED DELIBERATELY. It is not "already derivable":
+    /// [`ImpactConfirm::position`] is a point on a SURFACE while a tank's replicated `Position` is
+    /// its root, so nearest-root is a different question with a different answer whenever hulls are
+    /// adjacent or overlapping; the poses an observer would compare against are its own interpolated
+    /// ones, observed on a different timeline from [`ImpactConfirm::impact_tick`]; and this fact
+    /// rides `NetworkTarget::All`, so the inference would have to hold for clients who never
+    /// witnessed the contact. The field exists precisely BECAUSE geometric inference is not exact
+    /// enough for per-hull correctness — an argument that it adds nothing would be an argument that
+    /// it was not needed.
     ///
-    /// It exists for `net::adoption`'s ordering rule — see [`RicochetKeyframe::victim`].
+    /// WHAT IT BUYS. `net::adoption` holds an unpredictable hull shove until the client has drawn
+    /// one of the hits that shove is made of. Matching a spark to an episode needs BOTH the
+    /// authority tick (already on the wire) and the body — an inexact victim would release one
+    /// tank's shove against a spark drawn on the tank beside it, which is the exact defect the
+    /// ordering rule exists to prevent. See [`RicochetKeyframe::victim`].
+    ///
+    /// WHAT IT DOES NOT WIDEN. The line `net::disclosure` actually draws is PERSISTENT, PER-TARGET,
+    /// AGGREGATE state, which is why [`HullShock`] is owner-private. One transient, spatially
+    /// anchored, per-shot armor outcome now names its target; how many times that hull has been hit,
+    /// with what worst cause, and for how much damage all stay private.
     pub victim: Option<crate::CombatantId>,
 }
 
@@ -1023,7 +1042,7 @@ const WIRE_SURFACE_HASH: u64 = 0xf321_3c48_61b3_bfea;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x3930_d941_950c_345d;
+const WIRE_TYPES_HASH: u64 = 0x268a_d4fb_e297_639b;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -1356,13 +1375,14 @@ fn close_hull_shock_episodes(
 ) {
     let now = timeline.tick().0;
     for (mut shock, mut ledger) in &mut hulls {
-        let Some(cause) = ledger.close_episode(now, SHOCK_EPISODE_TICKS) else {
+        let Some(episode) = ledger.close_episode(now, SHOCK_EPISODE_TICKS) else {
             continue;
         };
         *shock = HullShock {
             count: shock.count.wrapping_add(1),
             tick: now,
-            cause,
+            opened: episode.opened,
+            cause: episode.cause,
         };
     }
 }
@@ -1478,9 +1498,10 @@ mod tests {
             HullShock {
                 count: 1,
                 tick: 100,
+                opened: 100,
                 cause: ShockCause::Perforation,
             },
-            "an isolated hit publishes in its own tick",
+            "an isolated hit publishes in its own tick, and SPANS that one tick",
         );
 
         // A second hit four ticks later — one MG cyclic interval — must not publish a second
@@ -1503,9 +1524,11 @@ mod tests {
             HullShock {
                 count: 2,
                 tick: 100 + 4 + SHOCK_EPISODE_TICKS,
+                opened: 104,
                 cause: ShockCause::Ricochet,
             },
-            "the deferred episode publishes once its window expires",
+            "the deferred episode publishes once its window expires, and names the tick its first \
+             hit landed on rather than leaving it to be guessed from the close tick",
         );
         assert_eq!(close(&mut world).count, 2, "nothing is left armed");
     }
@@ -1776,8 +1799,9 @@ mod tests {
         );
     }
 
-    /// Handshake fixture: the complete REV-21 manifest fold is pinned as a concrete netcode
-    /// `protocol_id`, so fixture drift is visible even when every constituent pin was edited.
+    /// Handshake fixture: the complete manifest fold at the CURRENT [`PROTOCOL_REV`] is pinned as a
+    /// concrete netcode `protocol_id`, so fixture drift is visible even when every constituent pin
+    /// was edited. The re-pin comment below records which REV the pinned value belongs to.
     #[test]
     fn wire_manifest_fingerprint_is_pinned() {
         // Pin the VERSION-INDEPENDENT wire manifest, not the full handshake tag: this trips on a
@@ -1792,9 +1816,9 @@ mod tests {
             WIRE_DEP_LIGHTYEAR,
             PROTOCOL_REV,
         );
-        // Re-pinned for REV 23 (`victim` on `RicochetKeyframe` and `ImpactConfirm`: same
-        // registrations, changed own-type definitions).
-        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0xc62e_778c_83c0_14e3;
+        // Re-pinned for REV 24 (`opened` on `HullShock`: same registrations, changed own-type
+        // definitions).
+        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0x13cd_6a8e_562f_0315;
         assert_eq!(
             wire_manifest, EXPECTED_WIRE_MANIFEST_FINGERPRINT,
             "wire manifest changed: re-pin to {wire_manifest:#018x}",
