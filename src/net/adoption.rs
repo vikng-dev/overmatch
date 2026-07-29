@@ -3679,8 +3679,11 @@ mod tests {
                 "let KEEP = b'x'; let KEEP = b'\\''; let KEEP = \"HIDE\";\n",
             ),
             (
+                // The middle `KEEP` sits BETWEEN the two lifetimes deliberately. A lexer that
+                // reads `'a` as a character literal blanks from there to the next apostrophe, and
+                // without a marker inside that span the row passes while the regression is live.
                 "a lifetime followed by a quote, and by a character literal",
-                "fn KEEP<'a>(x: &'a str) -> char { 'q' }\nlet KEEP = \"HIDE\";\n",
+                "fn KEEP<'a>(KEEP: &'a str) -> char { 'q' }\nlet KEEP = \"HIDE\";\n",
             ),
         ] {
             let stripped = code_only(source);
