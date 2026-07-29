@@ -11,6 +11,10 @@ wire-surface change, a stored-to-derived rollback change, a new dependency, or a
 
 ## Ranked backlog
 
+Entries 1, 2, 4, 5 and 9 are DONE (commits `9372443`, `1baef70`). Entries 3 and 6 remain
+blocked by the active-net-work exclusions. Entry 7 wants focused tests on its input-closure
+conventions before consolidation. Entry 8 is the one untouched safely-applicable item.
+
 ### 1. DONE IN THIS RUN — make the bake verifier use the sim's canonical pose composition
 
 - Files and symbols: `src/bake.rs::shadow_compare_on_instance_ready`,
@@ -26,7 +30,7 @@ wire-surface change, a stored-to-derived rollback change, a new dependency, or a
 - Applicability / C2: safely applicable; no owner decision. This deletes a duplicate behind an
   already-established interface and introduces no pattern.
 
-### 2. Reuse the existing glTF-node matrix conversion in the other shipped-asset checks
+### 2. DONE — Reuse the existing glTF-node matrix conversion in the other shipped-asset checks
 
 - Files and symbols: `src/track/marker_model.rs::node_matrix`,
   `src/track/link_view.rs::the_shipped_template_is_authored_at_unit_scale`, and
@@ -56,7 +60,7 @@ wire-surface change, a stored-to-derived rollback change, a new dependency, or a
   decision is required. Under C2b, the shared composition-root helper is a new pattern and should be
   introduced visibly in its own change, with every current occurrence migrated together.
 
-### 4. Share collision-proxy construction between the game spawn and the track sandbox
+### 4. DONE — Share collision-proxy construction between the game spawn and the track sandbox
 
 - Files and symbols: `src/tank/spawn.rs::insert_collision_proxies`,
   `src/track_sandbox/mod.rs::build_rig`, and `src/bake.rs::MeshGeometry`.
@@ -72,7 +76,7 @@ wire-surface change, a stored-to-derived rollback change, a new dependency, or a
 - Applicability / C2: safely applicable; no owner decision. The seam has MEASURED two current
   callers rather than one hypothetical adapter.
 
-### 5. Share the sandboxes' free-fly transform kernel
+### 5. DONE — Share the sandboxes' free-fly transform kernel
 
 - Files and symbols: `src/sandbox.rs::fly_camera` and
   `src/track_sandbox/mod.rs::fly_camera`; a shared pure kernel would naturally live in
@@ -131,7 +135,7 @@ wire-surface change, a stored-to-derived rollback change, a new dependency, or a
 - Applicability / C2: safely applicable; no owner decision. This touches an in-module test, not one
   of the protected top-level files under `tests/`.
 
-### 9. Reuse the phase-law `fold` in the sandbox belt tests
+### 9. DONE — Reuse the phase-law `fold` in the sandbox belt tests
 
 - Files and symbols: `src/track/gear_phase.rs::fold` and the test-local
   `src/track_sandbox/belt.rs::tests::fold`.
