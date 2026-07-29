@@ -59,7 +59,7 @@ defect as success.**
 | 2 | `6cf5553` | DO NOT SHIP | Episode correlation swapped one invalid rule for another; `retirement` blind to rollback kind |
 | 3 | `8c33217` | DO NOT SHIP | Disjointness held only while `last_bump_tick` was `Some` — a fresh hull's first episode claimed 15 ticks it never held, and a prior life's spark could release a respawned hull |
 | 4 | `2a2e282` | DO NOT SHIP | Correlation **confirmed settled**; `Adopted` still retired facts whose restore carried nothing |
-| 5 | `4f523b1` | *running at handoff* | — |
+| 5 | `4f523b1` | DO NOT SHIP | The determinacy argument is **false** — confirmed history is not append-only, and the predicate is proven at staging but never revalidated at the request |
 
 **The operational lesson, and it is the important part of this document: a green test suite has
 never once caught one of these.** The tests were written by the same reasoning that produced the
@@ -86,12 +86,33 @@ cannot change while `produced_at` is fixed, because `get_state_at_or_before(prod
 resolves samples ≤ `produced_at` and confirmed history only grows forward. So retrying is not merely
 unbounded — it is futile.
 
-**The one plausible way that argument fails, and what round 5 was asked to attack:** if a
-late-arriving packet can insert a confirmed sample at or before `produced_at` *after* the gate has
-already refused, then refusing at the gate converts a recoverable wait into a permanent drop — the
-exact inversion of the bug just fixed. Out-of-order delivery, a burst filling a gap, and history
-pruning are the cases. **If round 5 confirms this, the readiness gate must become a wait-and-retry
-rather than a refusal, and that is slice 3.9.**
+**Round 5 confirmed that argument is FALSE**, on two independent grounds, and slice 3.9 is in
+flight against it:
+
+1. **Confirmed history is not append-only.** `ConfirmedHistory::insert_raw` does sorted *middle*
+   insertion with same-tick replacement; `SameAsPrecedent` explicitly changes its effective value
+   when a late *preceding* sample arrives (lightyear ships a test for it at
+   `lightyear_core-0.28.0/src/confirmed_history.rs:648`); and replicon mutation transport is
+   unordered, with history-enabled entities accepting older mutations.
+2. **The control flow never revalidates.** The predicate gates the *offer*; an `ExternalEvent` fact
+   then stays staged for the visual budget, often into later frames; a later offer pass that fails
+   readiness merely `continue`s and leaves the staged fact alone; and `request_staged_adoption`
+   consumes it and claims the rollback without re-running the predicate. The same-frame premise is
+   also literally false — lightyear's `Check` path calls `ConfirmedHistory::add_unchanged` for all
+   four relevant types between the gate and `Prepare`.
+
+So `Undelivered` is **not** provably unreachable, and closing-and-deduping it can permanently spend
+a fact on a stale readiness decision. The fix is to revalidate the delivery predicate as part of the
+actual request transaction, and to treat a failed revalidation as a **wait, not a drop**.
+
+**The test that was missing for five rounds:** one that *changes confirmed history between staging
+and requesting*. Both real-restore fixtures build static histories, which is exactly why this
+survived. Round 5 passed E but flagged this as its coverage limitation.
+
+**Round 5 passed C, E, F, G and H** — the close tick is the right comparison tick, the real-restore
+fixtures genuinely run lightyear's `Prepare`, the fixture helpers can no longer manufacture
+impossible shapes, the state hash is right with both re-pins correct, and the wire is byte-identical
+at REV 24 with `settled_at` correctly derived rather than transmitted. Do not re-litigate those.
 
 ---
 
