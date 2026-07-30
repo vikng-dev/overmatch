@@ -137,6 +137,30 @@ mod ui_font;
 mod vfx;
 mod world;
 
+/// Configure Bevy's default plugin group for a GPU-less composition root.
+///
+/// This owns only the shared render-backend, primary-window, and winit-runner edits. Callers keep
+/// ownership of their asset/image workarounds, clocks, runners, and physics choices.
+pub(crate) fn gpu_less_default_plugins(
+    primary_window: Option<Window>,
+) -> bevy::app::PluginGroupBuilder {
+    DefaultPlugins
+        .set(bevy::render::RenderPlugin {
+            render_creation: bevy::render::settings::WgpuSettings {
+                backends: None,
+                ..default()
+            }
+            .into(),
+            ..default()
+        })
+        .set(WindowPlugin {
+            primary_window,
+            exit_condition: bevy::window::ExitCondition::DontExit,
+            ..default()
+        })
+        .disable::<bevy::winit::WinitPlugin>()
+}
+
 #[cfg(test)]
 mod offline_feel_tests {
     use super::*;

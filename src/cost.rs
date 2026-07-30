@@ -214,31 +214,15 @@ mod baseline {
 
     /// The single-player composition, headless: no GPU, no window, no winit — the same shape
     /// `headless_test` boots, on the world we actually ship (the heightmap; NO `ForceFlatWorld`
-    /// marker, so `terrain_grid::decode_height_grid` reads the real map). Deliberately not shared
-    /// with `headless_test`'s fixture: that module's helpers are private to it, and a measurement
-    /// rig that silently inherits a gate's fixture choices is worse than a duplicated twenty lines.
+    /// marker, so `terrain_grid::decode_height_grid` reads the real map). Deliberately a separate
+    /// fixture from `headless_test`: a measurement rig must not silently inherit a gate's fixture
+    /// choices.
     fn headless_sim() -> App {
         let mut app = App::new();
-        app.add_plugins(
-            DefaultPlugins
-                .set(bevy::render::RenderPlugin {
-                    render_creation: bevy::render::settings::WgpuSettings {
-                        backends: None,
-                        ..default()
-                    }
-                    .into(),
-                    ..default()
-                })
-                .set(WindowPlugin {
-                    primary_window: None,
-                    exit_condition: bevy::window::ExitCondition::DontExit,
-                    ..default()
-                })
-                .disable::<bevy::winit::WinitPlugin>(),
-        )
-        // Frozen clock during asset IO: colliderless tanks would otherwise free-fall for the whole
-        // load. Started (one exact fixed loop per `update`) once the rig is bound.
-        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO));
+        app.add_plugins(crate::gpu_less_default_plugins(None))
+            // Frozen clock during asset IO: colliderless tanks would otherwise free-fall for the whole
+            // load. Started (one exact fixed loop per `update`) once the rig is bound.
+            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO));
         app.add_plugins((
             avian3d::prelude::PhysicsPlugins::default(),
             SimPlugin,

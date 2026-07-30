@@ -1663,28 +1663,12 @@ mod tests {
     /// its own resolution, which is all `Camera::physical_viewport_size` reads.
     fn headless_card_app(ui_scale: f32) -> App {
         let mut app = App::new();
-        app.add_plugins(
-            DefaultPlugins
-                .set(bevy::render::RenderPlugin {
-                    render_creation: bevy::render::settings::WgpuSettings {
-                        backends: None,
-                        ..default()
-                    }
-                    .into(),
-                    ..default()
-                })
-                .set(WindowPlugin {
-                    // Wide enough that the card never flex-shrinks at any rung of the ladder (the
-                    // top rung asks for CARD_WIDTH_PX * 1.5 = 840 physical px).
-                    primary_window: Some(Window {
-                        resolution: bevy::window::WindowResolution::new(1920, 1080),
-                        ..default()
-                    }),
-                    exit_condition: bevy::window::ExitCondition::DontExit,
-                    ..default()
-                })
-                .disable::<bevy::winit::WinitPlugin>(),
-        )
+        app.add_plugins(crate::gpu_less_default_plugins(Some(Window {
+            // Wide enough that the card never flex-shrinks at any rung of the ladder (the
+            // top rung asks for CARD_WIDTH_PX * 1.5 = 840 physical px).
+            resolution: bevy::window::WindowResolution::new(1920, 1080),
+            ..default()
+        })))
         .add_plugins(crate::ui_font::plugin)
         .init_resource::<Settings>()
         // What `settings::plugin` would have supplied around the page; the rest of that plugin is
