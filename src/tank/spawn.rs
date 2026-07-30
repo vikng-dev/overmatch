@@ -170,6 +170,9 @@ pub(crate) fn spawn_complete_tank<B: Bundle>(
         // Complete REV-17 weapon gate, synchronously constructed from the same sorted spec data as
         // its weapon slots. Replicated client attachment must preserve the arriving authority value.
         weapon_gate(content.spec()),
+        // The REV-22 hull-shock counter starts at "never hit". Like the gate above, it is
+        // authority state a replicated client attachment must not overwrite.
+        crate::ballistics::HullShock::default(),
         // Complete servo integrator inventory is data-built in the same spawn flush. The glb is a
         // view and never initializes rollback state.
         tank_servos(content.spec()),
@@ -200,6 +203,7 @@ pub(crate) fn spawn_bitprobe_tank<B: Bundle>(
             TrackGripWake::default(),
             tank_transmission(content.spec()),
             weapon_gate(content.spec()),
+            crate::ballistics::HullShock::default(),
             tank_servos(content.spec()),
             root_bundle,
         ))
@@ -223,9 +227,9 @@ pub(crate) fn attach_replicated_tank_body<B: Bundle>(
     root_commands
         .insert((
             presentation.root_bundle(),
-            // TankTransmission, WeaponGate, TankServos, and TrackGripElements arrived in the
-            // predicted replication init snapshot. Do not overwrite current authority state with
-            // fresh spec-derived values.
+            // TankTransmission, WeaponGate, HullShock, TankServos, and TrackGripElements arrived in
+            // the predicted replication init snapshot. Do not overwrite current authority state
+            // with fresh spec-derived values.
             root_bundle,
         ))
         .observe(bind_tank_view);
@@ -753,6 +757,10 @@ fn insert_root_components(
         TankSim {
             weapons: vec![WeaponState::default(); weapon_count],
         },
+        // Local, never-replicated bookkeeping beside the replicated `HullShock`: the authority's
+        // episode window on one side, the owner's last-realized mark on the other. It rides every
+        // spawn path — including a replicated attachment, whose `HullShock` arrives instead.
+        crate::ballistics::HullShockLedger::default(),
         rig,
         SimParts(parts),
     ));

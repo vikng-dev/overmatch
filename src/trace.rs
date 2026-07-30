@@ -21,6 +21,7 @@ use chrono::Local as LocalTime;
 use serde_json::{Value, json};
 
 use crate::CombatantId;
+use crate::ballistics::HullShock;
 use crate::tank::{Controlled, RemoteServos, Tank, TankServos, TankSim, WeaponGate};
 use crate::track::sim::{
     TankTransmission, TrackContacts, TrackDrive, TrackGrip, TrackGripEffect, TrackGripElements,
@@ -531,7 +532,8 @@ fn record_tick(
             &TrackGrip,
             Option<&TrackGripElements>,
             &TankTransmission,
-            Option<&WeaponGate>,
+            // Paired only because bevy's query tuple arity tops out at 16; they are unrelated.
+            (Option<&WeaponGate>, Option<&HullShock>),
             Option<&TankServos>,
             Option<&RemoteServos>,
             &TrackContacts,
@@ -597,7 +599,7 @@ fn record_tick(
         grip,
         elements,
         transmission,
-        weapon_gate,
+        (weapon_gate, shock),
         servos,
         remote_servos,
         track_contacts,
@@ -665,6 +667,7 @@ fn record_tick(
             elements,
             transmission,
             weapon_gate,
+            shock,
             servo_states,
             sim,
         );
@@ -703,10 +706,15 @@ fn record_tick(
             "hlv": hash.lv,
             "hav": hash.av,
             "hsim": hash.sim,
-            // The carried-state decode: which field family a `hsim` mismatch lives in.
+            // The carried-state decode: which field family a `hsim` mismatch lives in. These seven
+            // streams are exactly what `hsim` folds — `hshk` below is NOT one of them.
             "hdrv": hash.drv,
             "hsrv": hash.srv,
             "hrld": hash.rld,
+            // INFORMATIONAL, outside `hsim` and `h`. The owner legitimately disagrees with the
+            // authority here for the whole delivery window of every hit (see `TankStateHash::shk`),
+            // so folding it in would report every hit as unexplained drift.
+            "hshk": hash.shk,
             "hrec": hash.rec,
             "hblt": hash.blt,
             "htrn": hash.trn,

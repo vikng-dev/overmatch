@@ -130,6 +130,25 @@ pub(crate) fn shipping_input_delay() -> InputDelayConfig {
     InputDelayConfig::fixed_input_delay(SHIPPING_INPUT_DELAY_TICKS)
 }
 
+/// The rollback policy the shipping client installs.
+///
+/// The input-rollback branch is a permanent no-op for us — we never rebroadcast inputs and our own
+/// inputs cannot mismatch (we author them), so `RollbackMode`'s input arm only costs a per-frame
+/// input-buffer scan. Disable it; STATE rollback (the real one, against replicated
+/// `Position`/`Rotation`/velocity) stays `Check`, and everything else keeps its `RollbackPolicy`
+/// default (`max_rollback_ticks: 100`).
+///
+/// A function rather than an inline literal because `net::adoption` ASSERTS the disabled input arm:
+/// an input rollback restores from the client's own prediction history and can carry no
+/// authoritative fact, so several fixtures there are written against a client that never takes that
+/// branch and must fail loudly if it starts to.
+pub(crate) fn shipping_rollback_policy() -> RollbackPolicy {
+    RollbackPolicy {
+        input: RollbackMode::Disabled,
+        ..default()
+    }
+}
+
 pub fn run() {
     let simulate = std::env::args().any(|a| a == "--simulate-input")
         || harness::env_flag("SPIKE_SIMULATE_INPUT", false);
@@ -343,16 +362,8 @@ pub fn run() {
         Link::new(conditioner),
         LocalAddr(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0)),
         PeerAddr(server_addr),
-        // (3) The input-rollback branch is a permanent no-op for us — we never rebroadcast
-        //     inputs and our own inputs can't mismatch (we author them), so `RollbackMode`'s
-        //     input arm only costs a per-frame input-buffer scan. Disable it; STATE rollback
-        //     (the real one, against replicated Position/Rotation/velocity) stays `Check`, and
-        //     everything else keeps its `RollbackPolicy` default (`max_rollback_ticks: 100`).
         PredictionManager {
-            rollback_policy: RollbackPolicy {
-                input: RollbackMode::Disabled,
-                ..default()
-            },
+            rollback_policy: shipping_rollback_policy(),
             // Let the sim SNAP: collapse lightyear's built-in visual correction to a single frame
             // (`decay_period` 1 ms / `decay_ratio` 1e-7 — the error underflows to ~0 the frame the
             // rollback lands), so the lightyear-visible pose reaches the corrected present at once.
@@ -1318,6 +1329,7 @@ fn consume_ricochet_keyframe(
             speed: keyframe.speed,
             bounce_tick: keyframe.bounce_tick.0,
             sequence: keyframe.sequence,
+            victim: keyframe.victim,
         },
     );
     let duplicate = result == SanctionedBounceInsert::Duplicate;
@@ -1353,6 +1365,7 @@ fn consume_impact_confirm(
             penetrated: confirm.penetrated,
             impact_tick: confirm.impact_tick.0,
             after_bounces: confirm.after_bounces,
+            victim: confirm.victim,
         },
     );
     crate::shot_trace::record(
@@ -2677,6 +2690,7 @@ mod tests {
                             speed: 600.0,
                             bounce_tick: Tick(43),
                             sequence: 0,
+                            victim: None,
                         }),
                         Tick(43),
                         &locally_fired,

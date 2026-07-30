@@ -8,6 +8,7 @@ use bevy::prelude::*;
 use lightyear::prediction::diagnostics::PredictionDiagnosticsPlugin;
 use lightyear::prelude::*;
 
+use super::adoption::ImpactPresentation;
 use super::protocol::NetTank;
 use crate::ballistics::ShellPath;
 use crate::tank::{RemoteServos, Rig, ServoIndex, ServoState, Tank, TankRoot, TankServos, Turret};
@@ -264,12 +265,36 @@ pub(crate) struct RollbackWatch {
 
 pub(crate) fn watch_rollback_metrics(
     metrics: Res<PredictionMetrics>,
+    presentation: Res<ImpactPresentation>,
     mut watch: ResMut<RollbackWatch>,
 ) {
     if metrics.rollbacks != watch.last_count {
+        // The ordering instrument rides this line because a rollback is exactly when it changes.
+        // `net::adoption`'s shove ordering is BEST EFFORT, so both failure modes are reported:
+        // `budget` counts shoves the local patience budget released with none of their own hits
+        // drawn, and `bypassed` counts shoves a confirmed-state rollback this client did not order
+        // landed ahead of their spark — the gap trigger arbitration structurally cannot close.
+        // Those are what decide whether a presentation commit barrier is ever worth building.
+        //
+        // `undelivered` is not one of those two: it is a TRIPWIRE and must read zero forever. It
+        // counts shoves this module ordered a rollback for and did not receive, which
+        // `net::adoption::request_staged_adoption` establishes cannot happen — it re-reads the same
+        // confirmed histories at the same target tick in the same frame, immediately before it
+        // claims the slot. A non-zero here means that revalidation and lightyear's
+        // `prepare_rollback` disagree, which on a dependency bump is the first place it would show;
+        // the ERROR log that accompanies each one says which fact was lost.
+        let tally = presentation.tally();
         info!(
-            "client: ROLLBACK fired (PredictionMetrics.rollbacks={}, rollback_ticks={})",
-            metrics.rollbacks, metrics.rollback_ticks
+            "client: ROLLBACK fired (PredictionMetrics.rollbacks={}, rollback_ticks={}, \
+             shoves_on_impact={}, shoves_on_budget={}, shoves_bypassed={}, \
+             shoves_undelivered={}, max_shove_wait_ticks={})",
+            metrics.rollbacks,
+            metrics.rollback_ticks,
+            tally.released_on_impact,
+            tally.released_on_budget,
+            tally.bypassed,
+            tally.undelivered,
+            tally.max_wait_ticks,
         );
         watch.last_count = metrics.rollbacks;
     }

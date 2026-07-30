@@ -6,6 +6,7 @@ use avian3d::prelude::{Forces, SpatialQuery, SpatialQueryFilter};
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 // `shot_trace::record` only evaluates its closure when tracing is armed.
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::damage::{DamageConsequences, VolumeOf, hit_ancestor};
@@ -383,6 +384,10 @@ pub(crate) struct ShellRicochet {
     pub direction: Vec3,
     pub speed: f32,
     pub sequence: u32,
+    /// The combatant whose body took this bounce's impulse, if the struck volume belongs to one.
+    /// The SAME body [`apply_hit_impulse`] armed, so a client can tell whether a spark it draws is
+    /// one of the hits an arriving [`HullShock`] episode is made of.
+    pub victim: Option<crate::CombatantId>,
 }
 
 /// Authority armor terminal for a keyed shot.
@@ -397,6 +402,8 @@ pub(crate) struct ShellTerminal {
     pub penetrated: bool,
     /// Ricochets resolved before this terminal.
     pub after_bounces: u32,
+    /// The combatant whose body took this terminal's impulse — see [`ShellRicochet::victim`].
+    pub victim: Option<crate::CombatantId>,
 }
 
 /// Authority-only report that a keyed shot first lowered an HP pool. [`DamageReport`] emits it at
@@ -499,6 +506,185 @@ pub struct ComponentHealth {
     pub max: f32,
 }
 
+/// What the authority was resolving when it applied an external impulse to a hull.
+///
+/// It names the episode for the owner; it is deliberately NOT a magnitude. No force, direction, or
+/// application point ever rides [`HullShock`].
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum ShockCause {
+    /// No shock has ever landed on this hull ([`HullShock::count`] is still zero).
+    #[default]
+    None,
+    /// A round deflected off a face and kicked the hull normal-ward.
+    Ricochet,
+    /// A round was defeated by the plate and dumped all its remaining momentum into the hull.
+    Embed,
+    /// A round punched through, leaving behind the momentum it spent crossing.
+    Perforation,
+}
+
+impl ShockCause {
+    /// Which cause survives when several resolutions land inside one open episode: the most severe.
+    /// A perforation and a graze in the same window are one episode, and the player is owed the
+    /// perforation's name for it.
+    const fn severity(self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::Ricochet => 1,
+            Self::Embed => 2,
+            Self::Perforation => 3,
+        }
+    }
+}
+
+/// Owner-private PROOF that the authority applied an impulse this hull could not have predicted.
+///
+/// The client cannot predict being shot, so its own copy never moves on its own. Registered
+/// `.replicate().predict()` behind an EXACT comparator (`net::protocol`), the arrival of a bumped
+/// `count` is a rollback to `tick` by itself — and that rollback restores every replicated
+/// predicted component at that tick, hull velocity included. THAT is how the shove is delivered;
+/// this component carries none of it. A hit's Δv (~0.14 m/s) is an order of magnitude under the
+/// velocity rollback gate, so without a forced rollback the authoritative velocity is compared,
+/// judged close enough, and discarded — the reason this component has to exist at all.
+///
+/// `count` is MONOTONIC because replication carries STATE, not TRANSITIONS: a bump-and-restore
+/// inside one send window is never observed as two events, only as a final value. A counter that
+/// only moves forward makes "have I already realized this?" a comparison rather than an event
+/// subscription that can miss.
+#[derive(Component, Clone, Copy, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct HullShock {
+    /// Episodes the authority has applied to this hull. Monotonic (wrapping); zero = never hit.
+    pub count: u32,
+    /// The authority tick this episode's counter changed — the tick whose restored hull state
+    /// carries the episode's accumulated shove, and the tick a replay must be able to reach.
+    pub tick: u32,
+    /// The authority tick this episode OPENED on: the tick of the FIRST impulse it is made of.
+    ///
+    /// `[opened, tick]` is the episode's own set of impulse ticks, and it is CARRIED rather than
+    /// derived because no arithmetic over `tick` alone reproduces it. `close_episode` publishes the
+    /// first impulse a fresh [`HullShockLedger`] ever sees IMMEDIATELY (there is no open episode to
+    /// defer behind), so that episode spans a single tick, while a deferred one can span up to
+    /// `SHOCK_EPISODE_TICKS − 1`. A fixed-width window ending at `tick` would therefore claim
+    /// fifteen ticks a fresh hull's first episode never covered — including, because a respawn keeps
+    /// the combatant identity and only replaces the entity, ticks belonging to the hull's PREVIOUS
+    /// life. `net::adoption` matches sparks against this range; see [`HullShockLedger::arm`].
+    pub opened: u32,
+    pub cause: ShockCause,
+}
+
+/// One episode [`HullShockLedger::close_episode`] just published: what caused it, and the tick of
+/// the first impulse it is made of.
+///
+/// Returned as one value because the two are only meaningful together — [`HullShock::opened`] is
+/// what makes `[opened, tick]` the episode's exact span, and a caller that could write one without
+/// the other could publish a span the ledger never observed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct ClosedEpisode {
+    pub(crate) cause: ShockCause,
+    pub(crate) opened: u32,
+}
+
+/// Local, never-replicated bookkeeping kept beside [`HullShock`]. Its two halves belong to
+/// different composition roles and never both run on one peer.
+///
+/// AUTHORITY half ([`HullShockLedger::arm`] / [`HullShockLedger::close_episode`]) implements the
+/// episode rule. OWNER half ([`HullShockLedger::realize`]) is the monotonic "last realized" mark
+/// that makes re-application during replay idempotent: the component is registered for local
+/// rollback, so a rollback rewinds it with the rest of the tick's state and replay re-realizes the
+/// shock against the restored history.
+#[derive(Component, Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct HullShockLedger {
+    pending: Option<ShockCause>,
+    /// The tick the OPEN (unpublished) group of impulses started on — see [`Self::close_episode`],
+    /// which is what stamps it. `None` exactly when `pending` is `None`.
+    opened_at: Option<u32>,
+    last_bump_tick: Option<u32>,
+    applied_count: u32,
+}
+
+impl HullShockLedger {
+    /// AUTHORITY: record that an external impulse just landed on this hull. It is armed, not
+    /// published — [`Self::close_episode`] decides which tick the episode closes on, and stamps the
+    /// tick it opened on.
+    pub(crate) fn arm(&mut self, cause: ShockCause) {
+        if self
+            .pending
+            .is_none_or(|open| cause.severity() > open.severity())
+        {
+            self.pending = Some(cause);
+        }
+    }
+
+    /// AUTHORITY: take the armed cause iff no episode has opened within `episode_ticks` of `now`.
+    ///
+    /// While an episode is open the armed cause is DEFERRED, not dropped — it closes the moment the
+    /// window expires. Dropping would silently lose the hit that matters most (a main-gun round
+    /// arriving a few ticks behind an MG pellet), because nothing later would ever mention it.
+    ///
+    /// WHY THE OPEN TICK IS STAMPED HERE and not in [`Self::arm`]. `net::protocol` runs this EVERY
+    /// authority tick, after the march that arms the ledger
+    /// (`close_hull_shock_episodes.after(SimPhase::ProjectileMarch)`), so the first tick this sees a
+    /// pending cause IS the tick that cause was armed on. Stamping it in `arm` would mean plumbing a
+    /// tick through the whole ballistic march for a value the once-per-tick caller already holds.
+    ///
+    /// The stamp gives [`HullShock::opened`] two properties by CONSTRUCTION, and the ordering rule in
+    /// `net::adoption` rests on both:
+    ///
+    /// - `opened ≤ tick`, because it is written on a tick at or before the one that publishes;
+    /// - `opened` of the NEXT episode is strictly greater than this one's `tick`, because publishing
+    ///   clears it and only a later call can write it again. Consecutive episodes on one hull
+    ///   therefore span DISJOINT tick ranges, with no appeal to `episode_ticks` arithmetic — which is
+    ///   what makes a fresh ledger's single-tick first episode as exact as a deferred one's.
+    ///
+    /// Both are claims about PLAIN numeric order and are NOT wrap-general — the assumption belongs in
+    /// the open, because the deferral test one line below deliberately IS wrap-aware
+    /// (`now.wrapping_sub(last)`) and the two could be mistaken for the same discipline. The tick
+    /// counter these spans live in is lightyear 0.28's `Tick`: a u32 compared with plain `u32::cmp`
+    /// and advanced with SATURATING arithmetic, on that crate's documented assumption that a session
+    /// never reaches the ~828-day boundary. At saturation the timeline freezes, so a pending episode
+    /// stalls rather than wrapping into a span that falsely covers an older spark — the direction
+    /// that is safe. Anything that made the counter genuinely wrap invalidates the ordering argument,
+    /// not the deferral one.
+    ///
+    /// If this were ever NOT called on some tick, the stamp lands late and the published span is
+    /// NARROWER than the truth. That direction is safe: a claim can only fail to match a spark it
+    /// owns, never match one it does not.
+    pub(crate) fn close_episode(&mut self, now: u32, episode_ticks: u32) -> Option<ClosedEpisode> {
+        let cause = self.pending?;
+        let opened = *self.opened_at.get_or_insert(now);
+        if self
+            .last_bump_tick
+            .is_some_and(|last| now.wrapping_sub(last) < episode_ticks)
+        {
+            return None;
+        }
+        self.pending = None;
+        self.opened_at = None;
+        self.last_bump_tick = Some(now);
+        Some(ClosedEpisode { cause, opened })
+    }
+
+    /// OWNER: whether this monotonic count has already been realized on this timeline.
+    pub(crate) fn is_realized(&self, count: u32) -> bool {
+        self.applied_count == count
+    }
+
+    /// OWNER: mark a count realized. Rewound by local rollback, so replay re-realizes it.
+    pub(crate) fn realize(&mut self, count: u32) {
+        self.applied_count = count;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending(&self) -> Option<ShockCause> {
+        self.pending
+    }
+
+    #[cfg(test)]
+    pub(crate) fn applied(&self) -> u32 {
+        self.applied_count
+    }
+}
+
 /// One crossing of a ballistic volume by the penetrator: where it entered and exited the solid.
 /// `(exit - entry).length()` is the geometric line-of-sight thickness — slope captured by geometry,
 /// no cosine term (design doc §2).
@@ -599,6 +785,21 @@ pub(crate) enum ImpactSurface {
     Armor,
 }
 
+/// The authority's own identity for an impact this client is only RE-DRAWING.
+///
+/// A replica never resolves an armor outcome itself: its cosmetic shell freezes at contact and the
+/// spark is drawn from the authority's sanctioned bounce or terminal (see
+/// [`resolve_replica_armor_contact`]). Those facts name the tick the authority resolved the impact
+/// on and the body it gave the impulse to, so a spark can be matched to the hits an arriving
+/// [`HullShock`] episode is made of instead of to "some armor impact, somewhere, recently".
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct AuthorityImpact {
+    /// The SERVER tick the impact resolved on — the same tick [`HullShockLedger::arm`] ran on.
+    pub(crate) tick: u32,
+    /// The combatant whose body took the impulse, if the struck volume belongs to one.
+    pub(crate) victim: Option<crate::CombatantId>,
+}
+
 /// A local shell impact consumed by simulation and view observers.
 #[derive(Event)]
 pub(crate) struct Impact {
@@ -613,6 +814,10 @@ pub(crate) struct Impact {
     pub(crate) penetrated: bool,
     /// Deflected direction for a ricochet; absent for other impacts.
     pub(crate) deflection: Option<Vec3>,
+    /// The authority fact this spark re-draws, when it is re-drawing one. `None` when the impact is
+    /// the resolver's OWN — the authority's live march, or an unkeyed sandbox/singleplayer shell —
+    /// which is exactly the case where there is no remote fact to correlate it with.
+    pub(crate) authority: Option<AuthorityImpact>,
 }
 
 /// Tags a debug impact marker for view observers.
@@ -842,6 +1047,7 @@ fn on_fire_shell(
                         surface,
                         penetrated: false,
                         deflection: None,
+                        authority: None,
                     });
                 }
                 // The shot's picture ends here without a tracer ever flying — its whole flight fitted
@@ -973,6 +1179,9 @@ struct ProjectileMarchWorld<'w, 's> {
     spatial: SpatialQuery<'w, 's>,
     volumes: Query<'w, 's, &'static BallisticVolume>,
     owners: Query<'w, 's, &'static VolumeOf>,
+    /// The struck body's match-local identity, when it has one. Read only to NAME the victim on the
+    /// authority facts a client re-draws; nothing in the march branches on it.
+    combatants: Query<'w, 's, &'static crate::CombatantId>,
     parents: Query<'w, 's, &'static ChildOf>,
     // The heightmap ground, when the heightmap world is live: the march's terrain contacts read
     // the exact deterministic caster, not parry (see [`cast_march_segment`]). Absent on the flat
@@ -1057,7 +1266,11 @@ fn integrate_projectiles(
         Option<&ShotSource>,
     )>,
     world: ProjectileMarchWorld,
-    mut bodies: Query<(Forces, Option<&mut crate::track::sim::TrackGripWake>)>,
+    mut bodies: Query<(
+        Forces,
+        Option<&mut crate::track::sim::TrackGripWake>,
+        Option<&mut HullShockLedger>,
+    )>,
     mut health: Query<&mut ComponentHealth>,
     retain: Res<RetainSpentShells>,
     net: ProjectileMarchNet,
@@ -1327,6 +1540,10 @@ fn resolve_held_shell(
                 surface: ImpactSurface::Armor,
                 penetrated: false,
                 deflection: Some(segment.bounce.direction),
+                authority: Some(AuthorityImpact {
+                    tick: segment.bounce.bounce_tick,
+                    victim: segment.bounce.victim,
+                }),
             });
             if index == 0 {
                 crate::shot_trace::record(shot_trace, "hold", now, shot_id, || {
@@ -1521,6 +1738,10 @@ fn consume_overdue_sanctioned_outcome(
                     surface: ImpactSurface::Armor,
                     penetrated: false,
                     deflection: Some(segment.bounce.direction),
+                    authority: Some(AuthorityImpact {
+                        tick: segment.bounce.bounce_tick,
+                        victim: segment.bounce.victim,
+                    }),
                 });
                 let late = elapsed_ticks(present, segment.bounce.bounce_tick).unwrap_or_default();
                 crate::shot_trace::record(
@@ -1606,6 +1827,10 @@ fn finish_at_sanctioned_terminal(
         surface: ImpactSurface::Armor,
         penetrated: terminal.penetrated,
         deflection: None,
+        authority: Some(AuthorityImpact {
+            tick: terminal.impact_tick,
+            victim: terminal.victim,
+        }),
     });
 }
 
@@ -1631,7 +1856,11 @@ fn march_shell_step(
     shell: &mut MarchingShell,
     world: &ProjectileMarchWorld,
     health: &mut Query<&mut ComponentHealth>,
-    bodies: &mut Query<(Forces, Option<&mut crate::track::sim::TrackGripWake>)>,
+    bodies: &mut Query<(
+        Forces,
+        Option<&mut crate::track::sim::TrackGripWake>,
+        Option<&mut HullShockLedger>,
+    )>,
     sanctioned: Option<&SanctionedShots>,
     // Authority = not a replica: only then does a hit actually mutate health here.
     deposit: bool,
@@ -1733,6 +1962,7 @@ fn march_shell_step(
                     surface: ImpactSurface::Terrain,
                     penetrated: false,
                     deflection: None,
+                    authority: None,
                 });
                 // A terrain stop is the one shot terminal that needs NO confirm: static,
                 // pose-independent geometry, so both ends already agree (ADR-0021's
@@ -1779,6 +2009,7 @@ fn march_shell_step(
                 surface,
                 penetrated: false,
                 deflection: None,
+                authority: None,
             });
             pos = entry;
             stopped = true;
@@ -1800,6 +2031,7 @@ fn march_shell_step(
                 surface: ImpactSurface::Terrain,
                 penetrated: false,
                 deflection: None,
+                authority: None,
             });
             // A terrain stop is the one shot terminal that needs NO confirm: static, pose-independent
             // geometry, so both ends already agree (ADR-0021's invariant). Recorded on the client so
@@ -1956,7 +2188,11 @@ fn resolve_armor_crossing(
     terminal_emitted: &mut bool,
     world: &ProjectileMarchWorld,
     health: &mut Query<&mut ComponentHealth>,
-    bodies: &mut Query<(Forces, Option<&mut crate::track::sim::TrackGripWake>)>,
+    bodies: &mut Query<(
+        Forces,
+        Option<&mut crate::track::sim::TrackGripWake>,
+        Option<&mut HullShockLedger>,
+    )>,
     armor: &SpatialQueryFilter,
     // Authority = not a replica: only then does a crossing actually mutate health.
     deposit: bool,
@@ -1990,6 +2226,9 @@ fn resolve_armor_crossing(
     // a perforation less (it carries momentum out), a ricochet a partial normal-ward kick.
     let v_in = Vec3::from(dir) * speed;
     let body = world.owners.get(node_entity).ok().map(|owner| owner.tank());
+    // The identity of the body every branch below arms, carried on the authority facts so a client
+    // can tell whose hull a spark it re-draws belongs to.
+    let victim = body.and_then(|body| world.combatants.get(body).ok().copied());
 
     // Outward surface normal; angle of incidence is measured from it (0 = head-on).
     let normal = Dir3::new(hit.normal).unwrap_or(-dir);
@@ -2031,6 +2270,7 @@ fn resolve_armor_crossing(
                 body,
                 shell.projectile.mass * (v_in - Vec3::from(dir) * speed),
                 entry,
+                ShockCause::Ricochet,
             );
         }
         // The bounce reads on the struck face: a hard bright spark fan, biased along the
@@ -2043,6 +2283,7 @@ fn resolve_armor_crossing(
             surface: ImpactSurface::Armor,
             penetrated: false,
             deflection: Some(Vec3::from(dir)),
+            authority: None,
         });
         shell.marks.ricochets.push(entry);
         shell.path.points.push(entry);
@@ -2066,6 +2307,7 @@ fn resolve_armor_crossing(
                 direction: Vec3::from(dir),
                 speed,
                 sequence: (shell.marks.ricochets.len() - 1) as u32,
+                victim,
             });
         }
         return (
@@ -2122,6 +2364,7 @@ fn resolve_armor_crossing(
             surface: ImpactSurface::Armor,
             penetrated: true,
             deflection: None,
+            authority: None,
         });
         // AUTHORITY → CLIENTS: the shot's TERMINAL (`ImpactConfirm` on the wire) — the same
         // read the `Impact` above showed locally, so every client renders the identical honest
@@ -2138,11 +2381,18 @@ fn resolve_armor_crossing(
                 normal: Vec3::from(normal),
                 penetrated: true,
                 after_bounces: shell.marks.ricochets.len() as u32,
+                victim,
             });
         }
         // Stopped: the body absorbs the full remaining momentum (v_out = 0).
         if let Some(body) = body {
-            apply_hit_impulse(bodies, body, shell.projectile.mass * v_in, entry);
+            apply_hit_impulse(
+                bodies,
+                body,
+                shell.projectile.mass * v_in,
+                entry,
+                ShockCause::Embed,
+            );
         }
         return (ArmorCrossing::Embedded { at: embed }, damage_dealt);
     }
@@ -2159,6 +2409,7 @@ fn resolve_armor_crossing(
         surface: ImpactSurface::Armor,
         penetrated: true,
         deflection: None,
+        authority: None,
     });
     // AUTHORITY → CLIENTS: the shot's TERMINAL (`ImpactConfirm` on the wire). A perforation
     // ends the COSMETIC shell at this entry-face read even though the authoritative shell
@@ -2178,6 +2429,7 @@ fn resolve_armor_crossing(
             normal: Vec3::from(normal),
             penetrated: true,
             after_bounces: shell.marks.ricochets.len() as u32,
+            victim,
         });
     }
     speed = speed_for(shell.projectile.mass, cap - cost);
@@ -2188,6 +2440,7 @@ fn resolve_armor_crossing(
             body,
             shell.projectile.mass * (v_in - Vec3::from(dir) * speed),
             entry,
+            ShockCause::Perforation,
         );
     }
     let exit = entry + dir * span;
@@ -2264,6 +2517,10 @@ fn resolve_replica_armor_contact(
             surface: ImpactSurface::Armor,
             penetrated: false,
             deflection: Some(bounce.direction),
+            authority: Some(AuthorityImpact {
+                tick: bounce.bounce_tick,
+                victim: bounce.victim,
+            }),
         });
         shell.path.begin_segment();
         shell.path.points.push(bounce.origin);
@@ -2336,6 +2593,7 @@ fn resolve_replica_armor_contact(
         surface: ImpactSurface::Armor,
         penetrated: false,
         deflection: None,
+        authority: None,
     });
     ReplicaArmorContact::Stopped
 }
@@ -2413,18 +2671,31 @@ fn throw_spall_burst(
 
 /// Apply a crossing's momentum share to the struck body. The declared `Forces` query keeps this
 /// immediate velocity write visible to Bevy's scheduler; static or non-rigid owners do not match.
+///
+/// The same match arms the body's [`HullShockLedger`], so the owner is told an unpredictable
+/// impulse happened exactly when one actually reached a body — never on a resolution the physics
+/// itself skipped. The ledger records only that it happened and why; the shove reaches the owner as
+/// part of the state the resulting rollback restores (see [`HullShock`]).
 fn apply_hit_impulse(
-    bodies: &mut Query<(Forces, Option<&mut crate::track::sim::TrackGripWake>)>,
+    bodies: &mut Query<(
+        Forces,
+        Option<&mut crate::track::sim::TrackGripWake>,
+        Option<&mut HullShockLedger>,
+    )>,
     body: Entity,
     impulse: Vec3,
     point: Vec3,
+    cause: ShockCause,
 ) {
-    if let Ok((forces, wake)) = bodies.get_mut(body) {
+    if let Ok((forces, wake, ledger)) = bodies.get_mut(body) {
         crate::track::sim::apply_explicit_impulse(
             forces,
             wake,
             crate::track::sim::ExplicitImpulse::AtPoint { impulse, point },
         );
+        if let Some(mut ledger) = ledger {
+            ledger.arm(cause);
+        }
     }
 }
 
@@ -2720,6 +2991,183 @@ mod march_tests {
                 );
             }
         }
+    }
+
+    /// The same crossing that moves the authority body ARMS its hull-shock ledger, and a replica
+    /// arms nothing — the mirror of [`hit_impulse_changes_only_the_authority_body`] on the fact the
+    /// owner is owed rather than on the momentum itself.
+    ///
+    /// Only ARMING is asserted here: publishing is the episode rule's decision (`net::protocol`),
+    /// and this world has no timeline to decide it on.
+    #[test]
+    fn hit_impulse_arms_the_hull_shock_ledger_only_on_the_authority() {
+        for replica in [false, true] {
+            let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.05), Vec3::new(0.0, 2.0, 0.0));
+            if replica {
+                app.insert_resource(crate::ClientReplica);
+            }
+            let body = app
+                .world_mut()
+                .spawn((
+                    RigidBody::Dynamic,
+                    Transform::default(),
+                    Mass(100.0),
+                    AngularInertia::new(Vec3::splat(50.0)),
+                    NoAutoMass,
+                    NoAutoAngularInertia,
+                    GravityScale(0.0),
+                    HullShockLedger::default(),
+                ))
+                .id();
+            let mut plates = app
+                .world_mut()
+                .query_filtered::<Entity, With<BallisticVolume>>();
+            let plate = plates.single(app.world()).expect("one plate");
+            app.world_mut().entity_mut(plate).insert(VolumeOf(body));
+            app.update();
+
+            assert_eq!(
+                app.world().get::<HullShockLedger>(body).unwrap().pending(),
+                None,
+                "an unstruck hull owes its owner nothing",
+            );
+            let impacts = fire_and_capture(&mut app, Vec3::new(0.0, 2.0, 2.0), Vec3::NEG_Z, 800.0);
+            assert_eq!(impacts.len(), 1, "the owned plate was crossed once");
+            let pending = app.world().get::<HullShockLedger>(body).unwrap().pending();
+
+            if replica {
+                assert_eq!(
+                    pending, None,
+                    "a replica never authors the fact it was shot — it is told",
+                );
+            } else {
+                assert!(
+                    pending.is_some(),
+                    "the crossing that moved the authority body must owe its owner a shock",
+                );
+            }
+        }
+    }
+
+    /// The episode rule, on the ledger that implements it: the first shock closes immediately, a
+    /// shock landing inside the open window is DEFERRED rather than dropped, and it closes the tick
+    /// the window expires. The deferral is the whole correctness argument — a main-gun round
+    /// arriving behind an MG pellet must not be silently swallowed.
+    #[test]
+    fn a_shock_inside_an_open_episode_is_deferred_not_dropped() {
+        const WINDOW: u32 = 16;
+        let mut ledger = HullShockLedger::default();
+
+        assert_eq!(ledger.close_episode(100, WINDOW), None, "nothing armed");
+        ledger.arm(ShockCause::Ricochet);
+        assert_eq!(
+            ledger.close_episode(100, WINDOW),
+            Some(ClosedEpisode {
+                cause: ShockCause::Ricochet,
+                opened: 100,
+            }),
+            "an isolated shock closes in its own tick — no latency the player can feel, and it \
+             spans that ONE tick, not a window's worth",
+        );
+        assert_eq!(
+            ledger.close_episode(101, WINDOW),
+            None,
+            "nothing left armed"
+        );
+
+        // A burst: every pellet inside the open window coalesces into ONE episode, and the most
+        // severe cause is the one the owner is told about.
+        for tick in 104..=112 {
+            ledger.arm(ShockCause::Ricochet);
+            assert_eq!(
+                ledger.close_episode(tick, WINDOW),
+                None,
+                "tick {tick} is inside the open episode",
+            );
+        }
+        ledger.arm(ShockCause::Perforation);
+        ledger.arm(ShockCause::Ricochet);
+        assert_eq!(ledger.close_episode(115, WINDOW), None);
+        assert_eq!(
+            ledger.close_episode(116, WINDOW),
+            Some(ClosedEpisode {
+                cause: ShockCause::Perforation,
+                opened: 104,
+            }),
+            "the deferred episode closes the tick its window expires, naming its worst hit and the \
+             tick its FIRST hit landed on",
+        );
+        assert_eq!(ledger.close_episode(117, WINDOW), None);
+    }
+
+    /// THE SPAN IS EXACT FOR EVERY EPISODE, INCLUDING THE FIRST — the property `net::adoption`'s
+    /// spark correlation rests on, and the one a `close − SHOCK_EPISODE_TICKS` window did not have.
+    ///
+    /// A fresh ledger has no open episode to defer behind, so its first hit publishes on its own
+    /// tick and spans exactly that tick. Every later episode opens strictly after the previous one
+    /// closed. So the spans of consecutive episodes on one hull never overlap, and a fresh hull's
+    /// first episode never reaches back over ticks it did not cover — which, because a respawn
+    /// keeps the combatant identity, is where a PREVIOUS life's hits live.
+    #[test]
+    fn episode_spans_never_overlap_and_a_fresh_ledgers_first_spans_one_tick() {
+        const WINDOW: u32 = 16;
+        let mut ledger = HullShockLedger::default();
+        let mut spans: Vec<(u32, u32)> = Vec::new();
+
+        // ONE monotonic clock, exactly as `close_hull_shock_episodes` sees it — every tick, after
+        // the march that arms. An isolated hit at 100, a burst at 104/110, an isolated one at 140.
+        const HITS: [u32; 4] = [100, 104, 110, 140];
+        for now in 100..=160 {
+            if HITS.contains(&now) {
+                ledger.arm(ShockCause::Embed);
+            }
+            if let Some(episode) = ledger.close_episode(now, WINDOW) {
+                spans.push((episode.opened, now));
+            }
+        }
+
+        assert_eq!(
+            spans,
+            vec![(100, 100), (104, 116), (140, 140)],
+            "the first hit publishes alone on its own tick; the burst coalesces into one episode \
+             spanning its first hit to the tick the window expired; the last is isolated again",
+        );
+        for pair in spans.windows(2) {
+            let ((_, closed), (opened, _)) = (pair[0], pair[1]);
+            // PLAIN `>`, deliberately, and the assumption is the one lightyear already makes: the
+            // authority tick counter is a u32 with saturating arithmetic and plain ordering, so it
+            // does not wrap inside any session this game can have (~828 days at 64 Hz). This is NOT
+            // a wrap-general proof of disjointness and must not be read as one.
+            assert!(
+                opened > closed,
+                "episode spans must be disjoint: {:?} then {:?}",
+                pair[0],
+                pair[1],
+            );
+        }
+        assert!(
+            spans
+                .iter()
+                .all(|(opened, closed)| closed - opened < WINDOW),
+            "no episode can span more than its window: {spans:?}",
+        );
+    }
+
+    /// The owner half is a monotonic comparison, not an event subscription: replication carries
+    /// STATE, so a count that was bumped and restored inside one send window is only ever seen as a
+    /// final value, and rewinding the mark (what local rollback does) must re-arm realization.
+    #[test]
+    fn realization_is_a_rewindable_comparison_not_an_event() {
+        let mut ledger = HullShockLedger::default();
+        assert!(ledger.is_realized(0), "a never-shot hull owes nothing");
+        assert!(!ledger.is_realized(7));
+
+        ledger.realize(7);
+        assert!(ledger.is_realized(7), "realizing twice is a no-op");
+
+        // What a rollback does to this component: restore the pre-shock value from history.
+        let rewound = HullShockLedger::default();
+        assert!(!rewound.is_realized(7), "replay must re-realize the shock");
     }
 
     /// SHOOTER SELF-EXCLUSION ([`not_own_volume`]): a round is transparent to the tank that FIRED it.
@@ -3162,6 +3610,7 @@ mod march_tests {
                 speed: 480.0,
                 bounce_tick: 101,
                 sequence: 0,
+                victim: None,
             },
         );
         app.update();
@@ -3429,6 +3878,7 @@ mod march_tests {
                 // the hold/pre-armed paths under test don't read it.
                 bounce_tick: 0,
                 sequence: 0,
+                victim: None,
             },
         );
         let mut app = replica_world(buf);
@@ -3535,6 +3985,7 @@ mod march_tests {
                 // the hold/pre-armed paths under test don't read it.
                 bounce_tick: 0,
                 sequence: 0,
+                victim: None,
             },
         );
         app.update(); // the Held handler re-seeds this tick
@@ -3696,6 +4147,7 @@ mod march_tests {
                 speed: bounce.speed,
                 bounce_tick: 0,
                 sequence: 0,
+                victim: None,
             },
         );
         app.update();
@@ -3746,6 +4198,7 @@ mod march_tests {
             speed: 480.0,
             bounce_tick: 0,
             sequence: 0,
+            victim: None,
         };
         let b1 = SanctionedBounce {
             origin: Vec3::new(0.0, 2.0, 0.05),
@@ -3753,6 +4206,7 @@ mod march_tests {
             speed: 300.0,
             bounce_tick: 0,
             sequence: 1,
+            victim: None,
         };
         let mut buf = SanctionedShots::default();
         buf.insert(shot, b0);
@@ -3842,6 +4296,7 @@ mod march_tests {
                 speed: bounce.speed,
                 bounce_tick: 0,
                 sequence: 0,
+                victim: None,
             },
         );
         app.update();
@@ -3918,6 +4373,7 @@ mod march_tests {
                 speed: 500.0,
                 bounce_tick: shot.fire_tick + 5,
                 sequence: 0,
+                victim: None,
             },
         );
         let shell = spawn_free_shell(&mut app, Vec3::new(0.0, 20.0, 5.0), Vec3::Z, 800.0, shot);
@@ -3966,6 +4422,7 @@ mod march_tests {
                     penetrated: true,
                     impact_tick: shot.fire_tick + 5,
                     after_bounces: 0,
+                    victim: None,
                 },
             );
         let shell = spawn_free_shell(&mut app, Vec3::new(0.0, 20.0, 5.0), Vec3::Z, 800.0, shot);
@@ -4005,6 +4462,7 @@ mod march_tests {
                 // present(105) − bounce_tick(104) = 1 <= OVERDUE_MARGIN_TICKS — inside the margin.
                 bounce_tick: shot.fire_tick + 4,
                 sequence: 0,
+                victim: None,
             },
         );
         let shell = spawn_free_shell(&mut app, Vec3::new(0.0, 20.0, 5.0), Vec3::Z, 800.0, shot);
@@ -4180,6 +4638,7 @@ mod march_tests {
                     penetrated: true,
                     impact_tick: 0, // inert (no `PredictedPresent` — F3 overdue path off)
                     after_bounces: 0,
+                    victim: None,
                 },
             );
         app.update();
@@ -4224,6 +4683,7 @@ mod march_tests {
                 penetrated: true,
                 impact_tick: 0, // inert (no `PredictedPresent` — F3 overdue path off)
                 after_bounces: 0,
+                victim: None,
             },
         );
         let mut app = replica_world(buf);
@@ -4263,6 +4723,7 @@ mod march_tests {
                 penetrated: false,
                 impact_tick: 0, // inert (no `PredictedPresent` — F3 overdue path off)
                 after_bounces: 1,
+                victim: None,
             },
         );
         let mut app = replica_world(buf);
@@ -4291,6 +4752,7 @@ mod march_tests {
                 speed: 480.0,
                 bounce_tick: 0, // inert (no `PredictedPresent` — F3 overdue path off)
                 sequence: 0,
+                victim: None,
             },
         );
         for _ in 0..8 {
@@ -4343,6 +4805,7 @@ mod march_tests {
                     penetrated: true,
                     impact_tick: 0, // inert (no `PredictedPresent` — F3 overdue path off)
                     after_bounces: 0,
+                    victim: None,
                 },
             );
         app.update();
@@ -4369,6 +4832,7 @@ mod march_tests {
                 penetrated: true,
                 impact_tick: 0, // inert (dedup test — buffer semantics, not the march)
                 after_bounces: 0,
+                victim: None,
             },
         );
         // Even a corrupt divergent duplicate must not replace the first terminal.
@@ -4380,6 +4844,7 @@ mod march_tests {
                 penetrated: false,
                 impact_tick: 0, // inert (dedup test — buffer semantics, not the march)
                 after_bounces: 3,
+                victim: None,
             },
         );
         let stored = buf.terminal(shot, 0).expect("terminal stored");
