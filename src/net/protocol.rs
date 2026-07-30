@@ -844,15 +844,15 @@ pub(crate) const ROLLBACK_HULL_SHOCK: f32 = 1.0;
 /// FLOOR — every published episode costs the owner one forced rollback, and a rollback costs one
 /// frame in which the VIEW lags the sim (`net::render_error`).
 ///
-/// WHAT THAT FRAME ACTUALLY LOOKS LIKE, because an earlier version of this paragraph said "one frame
-/// of render freeze" and that was wrong twice over. The offset is DECAYED before it is applied, so
-/// the frame renders most — not all — of the previous displayed pose: for a correction under about
-/// half a metre, 95.3% of it at 64 Hz, and past that the 3 m/s correction-speed cap bounds the step
-/// to ~4.7 cm per frame instead; beyond the 2 m snap threshold nothing is held back at all. And
-/// nothing is FROZEN in any case: `Position`, `Rotation`, the velocities, the replay and the fixed
-/// ticks all continue, and that layer writes only `Transform`. Both halves are pinned by
-/// `net::render_error`'s `the_rollback_frame_renders_a_decayed_near_hold_and_the_speed_cap_bounds_a_large_one`
-/// and `the_presentation_layer_never_writes_the_rollback_state_it_offsets`.
+/// WHAT THAT FRAME ACTUALLY LOOKS LIKE. The offset is DECAYED before it is applied, so the frame
+/// renders most — not all — of the previous displayed pose. DERIVED from the constants at 64 Hz:
+/// 95.305% retention applies through the 0.25 m near bracket; 0.5 m retains ~92.17%; the 3 m/s cap
+/// first binds at ~0.553 m and makes MORE of the old pose survive as error grows (95.31% at 1 m,
+/// 97.66% at 2 m). Exactly 2 m is still capped and smoothed; the first value above it snaps. Nothing
+/// is FROZEN: `Position`, `Rotation`, velocities, replay and fixed ticks all continue, and that
+/// layer writes only `Transform`. The boundaries and sim/view split are pinned by
+/// `net::render_error`'s `translation_decay_boundaries_are_derived_from_the_constants` and
+/// `the_presentation_layer_never_writes_the_rollback_state_it_offsets`.
 ///
 /// SO THE COST IS A VIEW LAG PER EPISODE, and the rate argument below is unchanged by the correction
 /// — it was always about how OFTEN, never about how deep. One per shell is invisible; one per MG

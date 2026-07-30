@@ -47,8 +47,10 @@ pub(super) fn base_app() -> App {
 /// `lightyear_avian3d-0.28.0/src/plugin.rs`). `net::physics` disables the plugin and owns the one
 /// ordering edge it needed, which is why the shipping client's rollbacks survive their own replay.
 ///
-/// [`base_app`] keeps the default composition because the fixtures built on it assert on
-/// VELOCITIES, which that sync does not touch, and moving them is not this slice's business.
+/// [`base_app`] remains valid only for its current assertions: its velocity fixtures use
+/// default-equal poses, disable gravity, and create no contacts, so transform sync cannot change
+/// velocity indirectly; the participation matrix replays zero ticks. A fixture that asserts pose
+/// across a positive-depth replay must use this function instead.
 pub(super) fn net_physics_app() -> App {
     let mut app = base_app_with(super::physics::physics_plugins());
     super::physics::plugin(&mut app);
@@ -83,23 +85,14 @@ pub(super) fn finish(app: &mut App) {
     app.cleanup();
 }
 
-/// The `PredictionManager` every fixture in this tree spawns.
+/// The shipping `PredictionManager` policy every fixture in this tree spawns.
 ///
-/// LIGHTYEAR DEFAULTS EXCEPT THE CORRECTION POLICY, which is the shipping one
-/// (`net::client::shipping_correction_policy`). Until slice 4 every fixture carried
-/// `PredictionManager::default()`, whose `CorrectionPolicy` is lightyear's 200 ms / 0.5 — a
-/// smoothing configuration the game has never run. Correction is the half of the rollback
-/// transaction `net::render_error` shares with lightyear, so a fixture that runs the default policy
-/// is exercising a different visual seam from the client.
-///
-/// The ROLLBACK policy is deliberately left at lightyear's default rather than raised to
-/// `net::client::shipping_rollback_policy`. Fixtures that care assert against it explicitly —
-/// `net::adoption::the_shipping_client_disables_input_rollback` is the tripwire that holds the
-/// shipping value in place, and `net::lead_zero_rollback::a_revalidation_that_never_passes_is_dropped_at_the_replay_window`
-/// derives its boundary FROM the manager it built. Folding the shipping rollback policy in here
-/// would silently change what those fixtures are measuring.
+/// These are production-path probes, so neither lightyear's 200 ms / 0.5 correction default nor its
+/// enabled input-rollback default is an admissible fixture convenience. The replay-window test
+/// derives its unchanged 100-tick state window from this manager rather than assuming it.
 pub(super) fn prediction_manager() -> lightyear::prelude::PredictionManager {
     lightyear::prelude::PredictionManager {
+        rollback_policy: super::client::shipping_rollback_policy(),
         correction_policy: super::client::shipping_correction_policy(),
         ..default()
     }

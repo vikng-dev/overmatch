@@ -40,7 +40,7 @@ use bevy::ecs::system::SystemParam;
 use lightyear::core::confirmed_history::ConfirmedHistory;
 use lightyear::prelude::{
     ControlledBy, LocalTimeline, PredictionManager, PredictionMetrics, ReplicationCheckpointMap,
-    Rollback, RollbackSystems, VisualCorrection,
+    Rollback, RollbackSystems,
 };
 
 /// Shared JSONL sink. Values pass through `serde_json::Value` so non-finite floats serialize as
@@ -400,9 +400,9 @@ fn frame_row_cap() -> usize {
 /// `after(TransformSystems::Propagate)` so `GlobalTransform` already reflects the frame-interpolated
 /// + correction-adjusted `Position`/`Rotation` (MP) or avian's render interpolation (SP).
 ///
-/// The net extras (`net`, `corr`, `conf`, `view_offset`) read prediction/correction state that only
-/// a real MP client mounts; every one is accessed OPTIONALLY, so the same system runs unchanged in
-/// the single-player composition (where those resources/components are simply absent at runtime) and
+/// The net extras (`net`, `conf`, `view_offset`) read prediction/correction state that only a real MP
+/// client mounts; every one is accessed OPTIONALLY, so the same system runs unchanged in the
+/// single-player composition (where those resources/components are simply absent at runtime) and
 /// emits an SP-shaped row.
 fn record_frame(
     mut trace: ResMut<TraceWriter>,
@@ -412,15 +412,11 @@ fn record_frame(
     // The optional world-camera pose permits camera-space analysis; headless rows omit it.
     camera: Query<&GlobalTransform, With<Camera3d>>,
     net: NetFrameCtx,
-    corr: Query<(
-        Option<&VisualCorrection<Position>>,
-        Option<&VisualCorrection<Rotation>>,
-    )>,
     // The predicted root's confirmed-authority history: lightyear seeds these buffers from every
     // replication receive (`add_confirmed_to_history`) and `prepare_rollback` reads them as the
-    // rollback source. `Option<&…>` per component and an unfiltered query (like `corr`) so the
-    // single-player composition — which never registers `ConfirmedHistory` — yields `(None, None)`
-    // rather than failing system-param validation.
+    // rollback source. `Option<&…>` per component and an unfiltered query so the single-player
+    // composition — which never registers `ConfirmedHistory` — yields `(None, None)` rather than
+    // failing system-param validation.
     conf: Query<(
         Option<&ConfirmedHistory<Position>>,
         Option<&ConfirmedHistory<LinearVelocity>>,
@@ -474,17 +470,6 @@ fn record_frame(
                 obj.insert("rb".into(), Value::from(metrics.rollbacks));
                 obj.insert("rbt".into(), Value::from(metrics.rollback_ticks));
             }
-            // `VisualCorrection` sits on the predicted root only while an error decays — omit the
-            // field entirely when at rest, so its mere presence marks a live correction. (No
-            // corrections exist in the SP-composition build, so the lookup yields nothing there.)
-            if let Ok((cp, cq)) = corr.get(entity) {
-                if let Some(correction) = cp {
-                    obj.insert("cp".into(), vec3(correction.error.0));
-                }
-                if let Some(correction) = cq {
-                    obj.insert("cq".into(), quat(correction.error.0));
-                }
-            }
             // The LATEST confirmed (server-authoritative) Position/LinearVelocity this predicted
             // root has received, plus the tick it belongs to. `ConfirmedHistory::newest_present`
             // is the buffer's most-recent present sample — `(tick, value)` — exactly the sample
@@ -501,9 +486,19 @@ fn record_frame(
                     obj.insert("confv".into(), vec3(velocity.0));
                 }
             }
-            // The render-space error offset this frame folds into the rendered `p`/`q`. Present only
-            // on the predicted root carrying `RenderErrorOffset`; omitted (not null) on every other row.
+            // The render-space error offset is the authoritative live correction: capture consumes
+            // lightyear's transient correction inputs in `PreUpdate`, and this component survives
+            // through the frame recorder. Keep the existing `cp`/`cq` schema names for analyzer
+            // compatibility, but omit each field when that axis is exactly spent so field presence
+            // still means correction activity. `vo`/`voq` remain the unconditional predicted-root
+            // view-offset record.
             if let Ok(offset) = view_offset.get(entity) {
+                if offset.translation != Vec3::ZERO {
+                    obj.insert("cp".into(), vec3(offset.translation));
+                }
+                if offset.rotation != Quat::IDENTITY {
+                    obj.insert("cq".into(), quat(offset.rotation));
+                }
                 obj.insert("vo".into(), vec3(offset.translation));
                 obj.insert("voq".into(), quat(offset.rotation));
             }
@@ -897,6 +892,85 @@ fn record_rollback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_post_update_frame_row_reports_the_live_render_error_as_correction_telemetry() {
+        let path = std::env::temp_dir().join(format!(
+            "overmatch-render-error-trace-test-{}.jsonl",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(TraceWriter {
+            sink: JsonlSink::create(&path).expect("test trace sink"),
+            role: "client",
+            sim_fields: false,
+        });
+        app.add_systems(PostUpdate, record_frame.after(TransformSystems::Propagate));
+        app.finish();
+        app.cleanup();
+
+        let translation = Vec3::new(0.2, -0.03, 0.04);
+        let rotation = Quat::from_rotation_y(0.15);
+        app.world_mut().spawn((
+            Tank,
+            GlobalTransform::from(Transform::from_translation(Vec3::new(4.0, 2.0, 1.0))),
+            crate::net::RenderErrorOffset {
+                translation,
+                rotation,
+            },
+        ));
+        app.world_mut().run_schedule(PostUpdate);
+        app.world_mut()
+            .remove_resource::<TraceWriter>()
+            .expect("the trace was enabled");
+
+        let contents = std::fs::read_to_string(&path).expect("frame row was flushed");
+        let row: Value = serde_json::from_str(
+            contents
+                .lines()
+                .last()
+                .expect("PostUpdate must write one frame row"),
+        )
+        .expect("frame row is valid JSON");
+        let decoded_vec3 = |field: &str| {
+            let values = row[field].as_array().expect("vector field is an array");
+            Vec3::new(
+                values[0].as_f64().unwrap() as f32,
+                values[1].as_f64().unwrap() as f32,
+                values[2].as_f64().unwrap() as f32,
+            )
+        };
+        let decoded_quat = |field: &str| {
+            let values = row[field].as_array().expect("quaternion field is an array");
+            Quat::from_xyzw(
+                values[0].as_f64().unwrap() as f32,
+                values[1].as_f64().unwrap() as f32,
+                values[2].as_f64().unwrap() as f32,
+                values[3].as_f64().unwrap() as f32,
+            )
+        };
+        assert_eq!(
+            decoded_vec3("cp"),
+            translation,
+            "translation telemetry must carry the authoritative live render offset",
+        );
+        assert_eq!(
+            decoded_quat("cq"),
+            rotation,
+            "rotation telemetry must carry the authoritative live render offset",
+        );
+        assert_eq!(
+            row.get("vo"),
+            row.get("cp"),
+            "the compatibility correction field and view-offset field describe the same value",
+        );
+        assert_eq!(row.get("voq"), row.get("cq"));
+
+        let _ = std::fs::remove_file(path);
+    }
 
     #[test]
     fn capture_path_formats_role_and_timestamp() {

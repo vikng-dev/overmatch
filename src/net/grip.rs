@@ -171,6 +171,28 @@ pub(super) fn install_server(app: &mut App) {
 }
 
 #[cfg(test)]
+pub(super) fn stage_checkpoint_for_test(
+    world: &mut World,
+    tank: Entity,
+    combatant: crate::CombatantId,
+    epoch: u32,
+    state_entering_tick: Tick,
+    field: TrackGripElements,
+) {
+    world
+        .resource_mut::<PendingGripCorrection>()
+        .stage(ExactCheckpoint {
+            tank,
+            combatant,
+            epoch,
+            state_entering_tick,
+            field,
+            hash: 0,
+        })
+        .expect("the fixture checkpoint must be admissible");
+}
+
+#[cfg(test)]
 mod tests {
     use super::checkpoint::fields_bit_equal;
     use super::*;

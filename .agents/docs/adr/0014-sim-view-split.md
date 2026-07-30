@@ -88,9 +88,10 @@ This does not weaken the split; it uses it. The decision is made entirely on the
 predicted root, inside the same `PreUpdate` rollback transaction that establishes delivery, and the
 sim pose is identical either way. It also corrects a claim this addendum used to imply and
 `net::protocol` used to state outright: a rollback frame was never a *render freeze*. The offset is
-decayed before it is applied — ~95% of the previous displayed pose survives a small correction at
-64 Hz, less under the 3 m/s correction-speed cap, and nothing at all past the 2 m snap threshold —
-and `Position`, `Rotation`, the velocities and the replay never stop.
+decayed before it is applied. DERIVED from the constants at 64 Hz, 95.305% retention holds through
+the 0.25 m near bracket, while the 3 m/s cap first binds at ~0.553 m and makes MORE of the old pose
+survive as error grows. Exactly 2 m is still capped and smoothed; values above it snap. `Position`,
+`Rotation`, the velocities and the replay never stop.
 
 ## Deferred — phase 2 (governed by the design sketch)
 

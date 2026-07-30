@@ -509,7 +509,7 @@ what the old sentence did.
 | `started` and rollback kind (`RestoresFrom`) | retirement | Safe. Read directly off the installed current rollback and consumed immediately, in one system. | BOTH |
 | **`carried`** | retirement | **DEFECTIVE.** Safe only if `Prepare` selected the hull, and it did not ask — it read a `ConfirmedHistory` result that is a COUNTERFACTUAL when eligibility excluded the entity. This is the same defect as the participation rows seen from the consumer end, and listing it separately is what makes "gate the request" visibly insufficient on its own. Fixed by slice 3.11. | REVIEW |
 | ~~`ForcedRollbackSlot::installed`~~ | ~~retirement, logging~~ | **DELETED by slice 4 (2026-07-30), which is what the expiry date bought.** The row read "safe TODAY, and the reason has an expiry date: it is freshly overwritten after `Prepare`, derived from the current `started`, and **has no external consumer yet**. `net::render_error` becomes one in slice 4, at which point this row must be re-assessed rather than inherited." The re-assessment found the field's *timing* was never the problem — the value is semantically the wrong answer for the consumer that was going to read it (see *The `AdoptionCause` tag* below) — so the field and its accessor are gone rather than guarded. `confirm_forced_rollback` now takes the claim into a LOCAL and consumes it in the same statement sequence; no confirmed value is stored anywhere. **The audit is one row shorter, not one row safer.** | BOTH |
-| `SharpCorrection` (the presentation occurrence slice 4 added) | `net::render_error::capture_render_error` | Not a latch, and deliberately shaped so it cannot become one. It is a message, written after `Prepare` from the ESTABLISHED `Retirement`, and DRAINED two system boundaries later in the same `PreUpdate` — unconditionally, whether or not any root matches it — so nothing survives the frame. It also names the exact `Entity`, generation included, so a despawned victim's occurrence cannot match its replacement. Pinned by `net::render_error::an_occurrence_is_drained_on_the_frame_it_is_written_even_with_no_rollback_to_apply_it_to` and `..._naming_the_previous_incarnation_of_an_index_cannot_sharpen_the_current_one`. | IMPL |
+| `SharpCorrection` (the presentation occurrence slice 4 added) | `net::render_error::capture_render_error` | Not a latch, and deliberately shaped so it cannot become one. It is a message, written after `Prepare` from the ESTABLISHED `Retirement`, and DRAINED after `Rollback` but before `EndRollback` in the same `PreUpdate` — unconditionally, whether or not any root matches it — so nothing survives the frame. It also names the exact `Entity`, generation included, so a despawned victim's occurrence cannot match its replacement. Pinned by `net::render_error::an_occurrence_is_drained_on_the_frame_it_is_written_even_with_no_rollback_to_apply_it_to`, `..._occurrences_spanning_adjacent_message_buffers_are_both_drained_by_one_capture`, and `..._naming_the_previous_incarnation_of_an_index_cannot_sharpen_the_current_one`. | IMPL |
 
 #### Is this the class?
 
@@ -734,10 +734,11 @@ to be derived, never measured, and 2.5× too large.
   correction established to have delivered the fact, so the shove is presented on the frame it lands
   — that was the residual this bullet called "`render_error`'s cost to remove", and removing it is
   what slice 4 did. And "render freeze" overstated what the smoothing ever did to the frames it does
-  smooth: the offset is DECAYED before it is applied (≈95% of the previous displayed pose survives a
-  small correction at 64 Hz, less under the 3 m/s correction-speed cap, nothing at all past the 2 m
-  snap threshold), and the SIM never stops — `Position`, `Rotation`, the velocities, replay and the
-  fixed ticks all continue, because that layer writes only `Transform`. What `SHOCK_EPISODE_TICKS`
+  smooth: the offset is DECAYED before it is applied. DERIVED from the constants at 64 Hz, 95.305%
+  retention holds through 0.25 m; the 3 m/s cap first binds at ~0.553 m and makes MORE of the old
+  pose survive as error grows. Exactly 2 m is capped and smoothed; values above it snap. The SIM
+  never stops — `Position`, `Rotation`, the velocities, replay and fixed ticks all continue,
+  because that layer writes only `Transform`. What `SHOCK_EPISODE_TICKS`
   still buys is the RATE at which coincident ordinary misprediction is re-presented: 64/16 = 4 per
   second per hull under sustained fire, against a DERIVED ~15 per second at 900 rpm cyclic if every
   pellet published its own episode.

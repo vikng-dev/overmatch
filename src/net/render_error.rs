@@ -14,12 +14,11 @@
 //! tank's rollback tripped every armed root, two rollbacks between observations collapsed into one,
 //! and no attribution survived.
 //!
-//! lightyear already computes the exact quantity and this module now reads it.
+//! Lightyear already captures the first half of the exact quantity.
 //! `lightyear_prediction::rollback::prepare_rollback` stores `PreviousVisual<C>` — the component
 //! value as it stood before the restore, which at `PreUpdate` IS the pose the previous frame
 //! displayed, because `FrameInterpolationSystems::Restore` does not run until `RunFixedMainLoop`.
-//! `lightyear_prediction::correction::update_frame_interpolation_post_rollback` then turns it into
-//! `VisualCorrection<D>`:
+//! After replay, this module evaluates the corrected timeline at the same sub-tick instant:
 //!
 //! ```text
 //! error = current_visual.diff(&previous_visual)
@@ -29,16 +28,20 @@
 //! Both sides are evaluated over the SAME tick pair and the SAME overstep, so they differ only by
 //! what the rollback did. No frame of travel is in it.
 //!
-//! ## Registration: `add_linear_correction_fn`, not `enable_correction`
+//! `PredictionHistory<C>`'s inner field is private, but the pinned 0.28 source implements public
+//! `Deref<Target = HistoryBuffer<C>>`, and `HistoryBuffer::get` is public. The corrected `tick - 1`
+//! sample is therefore directly readable after every positive-depth replay. At depth zero,
+//! `prepare_rollback` cleared that sample and replay cannot recreate it. The still-untouched
+//! `FrameInterpolate.previous_value` is the corrected value there by construction: a rollback whose
+//! baseline is the current tick cannot change an earlier tick. Capture inserts that value back into
+//! `PredictionHistory`, then reads history uniformly. This also lets lightyear's later
+//! `EndRollback` job rebuild frame interpolation instead of erasing its previous value.
 //!
-//! `PreviousVisual` is inserted only when `PredictionRegistry::has_correction::<C>()`, and the two
-//! registrations that set that flag are NOT interchangeable
-//! (`lightyear_prediction-0.28.0/src/registry.rs`): `enable_correction` flips the flag alone, while
-//! `add_correction_fn` (which `add_linear_correction_fn` calls) additionally mounts
-//! `add_correction_systems::<C, D>`. Under `enable_correction` `PreviousVisual` would still be
-//! inserted on every rollback, `VisualCorrection` would never be produced, and nothing would ever
-//! remove `PreviousVisual`. `net::protocol` therefore keeps `.add_linear_correction_fn()` on
-//! `Position` and `Rotation`, and this module consumes what it produces.
+//! `net::protocol` keeps `.add_linear_correction_fn()` rather than switching to
+//! `enable_correction()`: lightyear's `EndRollback` system still owns rebuilding
+//! `FrameInterpolate`. Capture runs after replay and before that set, consumes and unconditionally
+//! removes `PreviousVisual`, so lightyear rebuilds interpolation but emits no duplicate
+//! `VisualCorrection`.
 //!
 //! ## SIGN CONVENTIONS, and one asymmetry that is NOT ours to use
 //!
@@ -52,33 +55,9 @@
 //! The same file's `apply_diff` for rotation RIGHT-multiplies (`self.0 *= delta.0`) what `diff`
 //! LEFT-multiplied. Those are not the same rotation, and nothing here routes through `apply_diff`;
 //! this module composes the delta itself, on the left. That asymmetry is a latent upstream bug,
-//! currently inert only because `net::client`'s `CorrectionPolicy::instant_correction` decays
-//! lightyear's own applied error to ~0 — and, since slice 4, because this module REMOVES
-//! `VisualCorrection` from the roots it manages before `RollbackSystems::VisualCorrection` can read
-//! it. Not fixed here; the vendored crate is not modified.
-//!
-//! # ZERO-DEPTH ROLLBACKS PRODUCE NO CORRECTION AT ALL, and that is load-bearing
-//!
-//! `update_frame_interpolation_post_rollback` reads `history.get(tick - 1)` and `continue`s when it
-//! is `None`. `prepare_rollback` CLEARS the prediction history and re-seeds it with a single entry
-//! at the rollback tick, and `run_rollback` replays `current_tick - rollback_tick` times — zero when
-//! they are equal. So a rollback of depth 0 leaves the history holding only `tick`, the lookup at
-//! `tick - 1` misses, and lightyear emits no `VisualCorrection` (and, upstream's own leak, never
-//! removes `PreviousVisual`). Nothing is captured here, so the view takes the corrected pose
-//! immediately.
-//!
-//! That is the RIGHT answer for the only depth-0 rollback this game produces. `net::adoption` targets
-//! `AuthoritativeFact::produced_at`, which at the shipping loopback lead of 0 is the current tick —
-//! `net::lead_zero_rollback::the_zero_lead_shove_arrives_with_no_replayed_tick_at_all` pins that
-//! there is no replayed tick at all — and an adopted fact is precisely the correction that must stay
-//! SHARP. The other producers cannot reach depth 0: `net::watchdog` targets at most `current - 1`,
-//! and lightyear's own state-rollback routes need `confirmed_tick < current_tick` (receive time) or a
-//! recorded mismatch that only that same receive-time path can write.
-//!
-//! It is a COINCIDENCE OF TWO MECHANISMS, not a design, so it is pinned rather than trusted:
-//! `a_zero_depth_rollback_produces_no_visual_correction_so_nothing_is_accumulated` fails if lightyear
-//! starts emitting one, at which point this module would begin smoothing adoptions and the sharp
-//! rule below would have to carry that case too.
+//! currently inert because this module removes `PreviousVisual` before lightyear can create that
+//! correction, and removes any stale `VisualCorrection` already present on a managed root. Not
+//! fixed here; the vendored crate is not modified.
 //!
 //! # SHARP means: do not accumulate that root's correction AT ALL
 //!
@@ -105,11 +84,11 @@
 //!
 //! Classification and capture both happen inside the `PreUpdate` rollback transaction:
 //! `net::adoption::confirm_forced_rollback` establishes delivery after `RollbackSystems::Prepare`
-//! and writes the occurrence; [`capture_render_error`] runs after `RollbackSystems::EndRollback`,
-//! DRAINS the queue whether or not anything matches, and either accumulates the correction or
-//! refuses it. `PostUpdate` then only decays an already-classified offset and presents it. There is
-//! no value established at one schedule point and consumed at another, so this module contributes no
-//! row to ADR-0032's latch audit.
+//! and writes the occurrence; [`capture_render_error`] runs after replay and before
+//! `RollbackSystems::EndRollback`, DRAINS the queue whether or not anything matches, and either
+//! accumulates the correction or refuses it. `PostUpdate` then only decays an already-classified
+//! offset and presents it. There is no value established at one schedule point and consumed at
+//! another, so this module contributes no row to ADR-0032's latch audit.
 //!
 //! # THE PRESENTED POSE IS DERIVED, NOT ACCUMULATED
 //!
@@ -123,17 +102,21 @@
 //! `arm_render_error` additionally refuses to arm a root that frame interpolation has not armed, so
 //! the two predicates cannot diverge in the direction that matters.
 //!
-//! `Without<ChildOf>` mirrors the branch of `position_to_transform` this formula reproduces. A
-//! parented rigid body takes the reparenting branch, which this arithmetic does not reproduce, so
-//! such a root is left UNSMOOTHED rather than mispositioned. The predicted tank root is spawned at
-//! the top level (`tank::spawn`).
+//! The formula mirrors the top-level branch of `position_to_transform`. `arm_render_error` excludes
+//! `ChildOf`, and both capture and apply assert the same invariant so a later hierarchy transition
+//! fails loudly instead of silently accumulating an unapplied stale offset. The production tank
+//! root is spawned at the top level (`tank::spawn`).
 
 use avian3d::math::AsF32;
 use avian3d::prelude::{PhysicsSystems, Position, Rotation};
 use bevy::ecs::message::Messages;
 use bevy::prelude::*;
-use lightyear::frame_interpolation::FrameInterpolate;
-use lightyear::prelude::{Predicted, RollbackSystems, VisualCorrection};
+use lightyear::frame_interpolation::{FrameInterpolate, FrameInterpolationSystems};
+use lightyear::interpolation::prelude::InterpolationRegistry;
+use lightyear::prediction::correction::PreviousVisual;
+use lightyear::prelude::{
+    Diffable, LocalTimeline, Predicted, PredictionHistory, RollbackSystems, VisualCorrection,
+};
 
 use super::adoption::SharpCorrection;
 use super::protocol::NetTank;
@@ -171,19 +154,20 @@ pub struct RenderErrorApplied;
 /// Install client-side predicted-root smoothing.
 pub fn plugin(app: &mut App) {
     app.add_systems(Update, arm_render_error);
-    // INSIDE THE ROLLBACK TRANSACTION. `update_frame_interpolation_post_rollback` inserts
-    // `VisualCorrection` in `RollbackSystems::EndRollback` through `Commands`, and
-    // `net::adoption::confirm_forced_rollback` writes its occurrence between `Prepare` and
-    // `Rollback` — both strictly before this seam, in the same `PreUpdate`.
+    // INSIDE THE ROLLBACK TRANSACTION. `prepare_rollback` inserts `PreviousVisual`; replay has
+    // completed by this seam, while lightyear's `EndRollback` consumer has not run yet.
     app.add_systems(
         PreUpdate,
-        capture_render_error.after(RollbackSystems::EndRollback),
+        capture_render_error
+            .after(RollbackSystems::Rollback)
+            .before(RollbackSystems::EndRollback),
     );
     app.add_systems(
         PostUpdate,
         apply_render_error
             .in_set(RenderErrorApplied)
             .after(PhysicsSystems::Writeback)
+            .after(FrameInterpolationSystems::Interpolate)
             .before(TransformSystems::Propagate),
     );
     // The camera must consume the same presentation pose as the hull.
@@ -204,11 +188,10 @@ pub fn plugin(app: &mut App) {
 ///
 /// The `FrameInterpolate` requirements are not decoration. They make this module's arming a strict
 /// subset of `net::rig::arm_predicted_smoothing`'s, which is what keeps two independently written
-/// predicates from disagreeing: a root without frame interpolation gets no `VisualCorrection` from
-/// lightyear (`update_frame_interpolation_post_rollback` queries `&mut FrameInterpolate<C>`), so an
-/// armed offset there could never be captured — and its `Position` would not be marked changed every
-/// frame, which is the condition Avian's writeback gate needs. [`apply_render_error`] no longer
-/// depends on that gate, but arming past it would still be arming something that cannot work.
+/// predicates from disagreeing: capture needs the preceding tick stored there to normalize a
+/// depth-zero history, and the presented `Position`/`Rotation` must be evaluated at the same
+/// overstep as the captured correction. [`apply_render_error`] also runs explicitly after
+/// `FrameInterpolationSystems::Interpolate`.
 fn arm_render_error(
     tanks: Query<
         Entity,
@@ -218,6 +201,7 @@ fn arm_render_error(
             With<FrameInterpolate<Position>>,
             With<FrameInterpolate<Rotation>>,
             Without<RenderErrorOffset>,
+            Without<ChildOf>,
         ),
     >,
     mut commands: Commands,
@@ -228,23 +212,41 @@ fn arm_render_error(
     }
 }
 
+fn assert_top_level_root(entity: Entity, parent: Option<&ChildOf>) {
+    assert!(
+        parent.is_none(),
+        "render-error root {entity} acquired ChildOf after arming; the presentation formula is \
+         only valid for the top-level tank root"
+    );
+}
+
 /// Consume this rollback's same-tick correction: accumulate it, or refuse it as a delivered hit.
 ///
 /// CONSUME is literal for both inputs. The occurrence queue is DRAINED unconditionally, so an
 /// occurrence naming a root that no longer exists — or that this rollback did not correct — cannot
-/// survive to sharpen an unrelated correction on a later frame. The `VisualCorrection` components
-/// are REMOVED from every armed root that had one, so the same correction cannot be read twice:
-/// lightyear's own `add_visual_correction` only removes them once the decayed error falls under the
-/// registered rollback condition, which leaves the component alive into the next frame's
-/// `PreUpdate`. Removing them here also retires lightyear's `PostUpdate` application for these
-/// roots, which `CorrectionPolicy::instant_correction` had already reduced to ~0.
+/// survive to sharpen an unrelated correction on a later frame. `PreviousVisual` is removed from
+/// every managed root read at this seam, including depth zero where Lightyear otherwise leaks it;
+/// stale `VisualCorrection` components are removed with it. The only correction state allowed to
+/// survive the transaction is this module's already-classified `RenderErrorOffset`.
 fn capture_render_error(
+    time: Res<Time<Fixed>>,
+    timeline: Res<LocalTimeline>,
+    registry: Res<InterpolationRegistry>,
     mut occurrences: ResMut<Messages<SharpCorrection>>,
     mut roots: Query<(
         Entity,
-        &mut RenderErrorOffset,
+        &Position,
+        &Rotation,
+        &mut PredictionHistory<Position>,
+        &mut PredictionHistory<Rotation>,
+        &FrameInterpolate<Position>,
+        &FrameInterpolate<Rotation>,
+        Option<&PreviousVisual<Position>>,
+        Option<&PreviousVisual<Rotation>>,
         Option<&VisualCorrection<Position>>,
         Option<&VisualCorrection<Rotation>>,
+        &mut RenderErrorOffset,
+        Option<&ChildOf>,
     )>,
     mut commands: Commands,
 ) {
@@ -252,15 +254,42 @@ fn capture_render_error(
     // occurrence queued exactly in the cases where no root matched it.
     let sharp: Vec<SharpCorrection> = occurrences.drain().collect();
 
-    for (entity, mut offset, translation_error, rotation_error) in &mut roots {
-        if translation_error.is_none() && rotation_error.is_none() {
+    let tick = timeline.tick();
+    let overstep = time.overstep_fraction();
+    for (
+        entity,
+        position,
+        rotation,
+        mut position_history,
+        mut rotation_history,
+        position_interpolate,
+        rotation_interpolate,
+        previous_position,
+        previous_rotation,
+        stale_translation_error,
+        stale_rotation_error,
+        mut offset,
+        parent,
+    ) in &mut roots
+    {
+        assert_top_level_root(entity, parent);
+
+        if previous_position.is_none()
+            && previous_rotation.is_none()
+            && stale_translation_error.is_none()
+            && stale_rotation_error.is_none()
+        {
             continue;
         }
-        // `try_remove`, not `remove`: a root despawned between this system and the schedule's sync
-        // point is a lifecycle event, not an error to report, and the components are going with it.
-        commands
-            .entity(entity)
-            .try_remove::<(VisualCorrection<Position>, VisualCorrection<Rotation>)>();
+        // Unconditional for every managed root read at this seam. `PreviousVisual` otherwise leaks
+        // on depth zero, and either component surviving into a later frame would turn a one-shot
+        // rollback fact into a latch.
+        commands.entity(entity).try_remove::<(
+            PreviousVisual<Position>,
+            PreviousVisual<Rotation>,
+            VisualCorrection<Position>,
+            VisualCorrection<Rotation>,
+        )>();
         // KEYED ON THE WHOLE `Entity`, generation included: a despawned victim's occurrence must
         // not match the root that replaced it.
         if let Some(occurrence) = sharp.iter().find(|occurrence| occurrence.entity == entity) {
@@ -271,11 +300,43 @@ fn capture_render_error(
             );
             continue;
         }
-        if let Some(error) = translation_error {
-            offset.translation += error.error.f32();
+
+        // After replay, history[tick - 1] is the corrected timeline's preceding tick at every
+        // positive depth. At depth zero replay cannot create that entry; normalize the history with
+        // the still-untouched frame-interpolation sample. That sample is equally corrected because
+        // a current-tick baseline cannot alter any earlier tick. This also lets lightyear's
+        // EndRollback job rebuild FrameInterpolate from two values instead of erasing its previous
+        // value and snapping frame interpolation. `PredictionHistory` publicly derefs to
+        // `HistoryBuffer`, so capture then reads one source uniformly at every depth.
+        if position_history.get(tick - 1).is_none()
+            && let Some(previous) = position_interpolate.previous_value
+        {
+            // `HistoryBuffer::add` is append-only. Prepare left the current-tick anchor in place,
+            // so rebuild both values in ascending order rather than appending an older tick behind
+            // it and violating the buffer's sorted invariant.
+            position_history.clear();
+            position_history.add_predicted(tick - 1, Some(previous));
+            position_history.add_predicted(tick, Some(*position));
         }
-        if let Some(error) = rotation_error {
-            offset.rotation = (offset.rotation * error.error.f32()).normalize();
+        if let (Some(previous_visual), Some(corrected_previous)) =
+            (previous_position, position_history.get(tick - 1))
+        {
+            let corrected_visual = registry.interpolate(*corrected_previous, *position, overstep);
+            offset.translation += corrected_visual.diff(&previous_visual.0).0.f32();
+        }
+        if rotation_history.get(tick - 1).is_none()
+            && let Some(previous) = rotation_interpolate.previous_value
+        {
+            rotation_history.clear();
+            rotation_history.add_predicted(tick - 1, Some(previous));
+            rotation_history.add_predicted(tick, Some(*rotation));
+        }
+        if let (Some(previous_visual), Some(corrected_previous)) =
+            (previous_rotation, rotation_history.get(tick - 1))
+        {
+            let corrected_visual = registry.interpolate(*corrected_previous, *rotation, overstep);
+            let error = corrected_visual.diff(&previous_visual.0).0.f32();
+            offset.rotation = (offset.rotation * error).normalize();
         }
     }
 }
@@ -283,22 +344,27 @@ fn capture_render_error(
 /// Decay the classified offset and present it, re-derived from the sim pose.
 fn apply_render_error(
     time: Res<Time<Real>>,
-    mut roots: Query<
-        (&mut Transform, &Position, &Rotation, &mut RenderErrorOffset),
-        Without<ChildOf>,
-    >,
+    mut roots: Query<(
+        Entity,
+        &mut Transform,
+        &Position,
+        &Rotation,
+        &mut RenderErrorOffset,
+        Option<&ChildOf>,
+    )>,
 ) {
     let dt = time.delta_secs();
 
-    for (mut transform, position, rotation, mut offset) in &mut roots {
+    for (entity, mut transform, position, rotation, mut offset, parent) in &mut roots {
+        assert_top_level_root(entity, parent);
         decay_translation(&mut offset.translation, dt);
         decay_rotation(&mut offset.rotation, dt);
 
         // Avian's `position_to_transform` root branch, verbatim, plus the offset. Written through
         // `set_if_neq` so a spent offset neither writes nor dirties the root — which would propagate
-        // through the tank's ~194 link children for no visual difference. The zero cases are spelled
-        // out rather than folded into the arithmetic so the written value is BIT-IDENTICAL to
-        // Avian's, which is what makes the comparison skip.
+        // through the tank's DERIVED ~194 link children for no visual difference. The zero cases are
+        // spelled out rather than folded into the arithmetic so the written value is BIT-IDENTICAL
+        // to Avian's, which is what makes the comparison skip.
         let clean_translation = position.f32();
         let clean_rotation = rotation.f32();
         let presented = Transform {
@@ -380,31 +446,31 @@ mod tests {
     use bevy::ecs::message::Messages;
     use bevy::ecs::system::RunSystemOnce;
     use bevy::prelude::*;
+    use bevy_replicon::prelude::RepliconTick;
     use lightyear::core::confirmed_history::ConfirmedHistory;
     use lightyear::prelude::client::{Client, ClientPlugins, Connected};
     use lightyear::prelude::{
         Diffable, InputTimeline, IsSynced, LocalTimeline, PeerId, Predicted, PredictionHistory,
-        RemoteId, RollbackSystems, StateRollbackMetadata, Tick,
+        RemoteId, ReplicationCheckpointMap, RollbackSystems, StateRollbackMetadata, Tick,
     };
 
     use super::*;
     use crate::net::adoption::{AdoptionCause, ForcedRollbackSlot};
     use crate::net::test_harness::TICK;
+    use crate::track::sim::TrackGripElements;
 
     /// The tick a fixture rollback restores from, and the tick the client is on when it lands.
     ///
-    /// ONE TICK OF DEPTH, deliberately. It is the shallowest rollback for which lightyear produces
-    /// a `VisualCorrection` at all — `update_frame_interpolation_post_rollback` needs
-    /// `PredictionHistory::get(tick - 1)` to resolve, and `prepare_rollback` re-seeds the history
-    /// with a single entry at the rollback tick — so it is also the boundary the zero-depth fixture
-    /// sits one tick below.
+    /// ONE TICK OF DEPTH, deliberately. It is the shallowest rollback whose replay recreates
+    /// `PredictionHistory::get(tick - 1)`; the age-zero fixture sits one tick below and therefore
+    /// exercises normalization from `FrameInterpolate.previous_value`.
     const ROLLBACK_TICK: Tick = Tick(100);
     const CURRENT_TICK: Tick = Tick(101);
 
     /// The pose the client had on screen when the rollback landed.
     const PREDICTED_POSITION: Vec3 = Vec3::new(10.0, 2.0, -3.0);
-    /// The pose the authority's confirmed sample restores it to. 0.206 m away, which is inside the
-    /// NEAR decay bracket and well under the snap threshold.
+    /// The pose the authority's confirmed sample restores it to. DERIVED distance 0.206 m, inside
+    /// the NEAR decay bracket and well under the snap threshold.
     const AUTHORITY_POSITION: Vec3 = Vec3::new(10.2, 2.0, -3.05);
     /// A second authority pose, for the fixture that lands two rollbacks in a row.
     const LATER_AUTHORITY_POSITION: Vec3 = Vec3::new(10.35, 2.0, -3.02);
@@ -507,6 +573,11 @@ mod tests {
         });
         crate::state::sim_plugin(&mut app);
         crate::net::protocol::plugin(&mut app);
+        crate::net::grip::install_client(&mut app);
+        app.add_plugins((
+            lightyear::frame_interpolation::FrameInterpolationPlugin::<Position>::default(),
+            lightyear::frame_interpolation::FrameInterpolationPlugin::<Rotation>::default(),
+        ));
         app.insert_state(crate::state::AppState::Playing);
         app.add_plugins(plugin);
         app.init_resource::<PendingRollback>();
@@ -531,6 +602,10 @@ mod tests {
             IsSynced::<InputTimeline>::default(),
         ));
         advance_to(&mut app, CURRENT_TICK);
+        let checkpoint = RepliconTick::new(1);
+        let mut checkpoints = app.world_mut().resource_mut::<ReplicationCheckpointMap>();
+        checkpoints.record(checkpoint, CURRENT_TICK);
+        checkpoints.record_last_confirmed_tick(checkpoint);
         app
     }
 
@@ -541,6 +616,10 @@ mod tests {
         let mut predicted_rotation_history = PredictionHistory::<Rotation>::default();
         predicted_rotation_history
             .add_predicted(ROLLBACK_TICK, Some(Rotation(predicted_rotation())));
+        let grip = TrackGripElements::for_links(1);
+        let mut predicted_grip = PredictionHistory::<TrackGripElements>::default();
+        predicted_grip.add_predicted(ROLLBACK_TICK, Some(grip.clone()));
+        predicted_grip.add_predicted(CURRENT_TICK, Some(grip.clone()));
         let root = app
             .world_mut()
             .spawn((
@@ -549,6 +628,8 @@ mod tests {
                 Rotation(predicted_rotation()),
                 predicted_position,
                 predicted_rotation_history,
+                grip,
+                predicted_grip,
                 ConfirmedHistory::<Position>::default(),
                 ConfirmedHistory::<Rotation>::default(),
                 FrameInterpolate::<Position>::default(),
@@ -559,6 +640,53 @@ mod tests {
             .id();
         app.world_mut().flush();
         root
+    }
+
+    fn stage_age_zero_grip_checkpoint(app: &mut App, root: Entity) {
+        let mut corrected = TrackGripElements::for_links(1);
+        corrected.sides[0].strain[0] = Vec3::new(0.001, 0.0, 0.0);
+        crate::net::grip::stage_checkpoint_for_test(
+            app.world_mut(),
+            root,
+            crate::CombatantId(7),
+            1,
+            CURRENT_TICK + 1,
+            corrected,
+        );
+    }
+
+    fn set_half_overstep_visual_pose(app: &mut App, root: Entity) -> (Vec3, Quat, Vec3, Quat) {
+        let common_previous_position = PREDICTED_POSITION - Vec3::new(0.1, 0.0, 0.0);
+        let common_previous_rotation = Quat::IDENTITY;
+        let previous_displayed_position = common_previous_position.lerp(PREDICTED_POSITION, 0.5);
+        let previous_displayed_rotation = common_previous_rotation.slerp(predicted_rotation(), 0.5);
+        {
+            let mut interpolate = app
+                .world_mut()
+                .get_mut::<FrameInterpolate<Position>>(root)
+                .unwrap();
+            interpolate.previous_value = Some(Position(common_previous_position));
+            interpolate.current_value = Some(Position(PREDICTED_POSITION));
+        }
+        {
+            let mut interpolate = app
+                .world_mut()
+                .get_mut::<FrameInterpolate<Rotation>>(root)
+                .unwrap();
+            interpolate.previous_value = Some(Rotation(common_previous_rotation));
+            interpolate.current_value = Some(Rotation(predicted_rotation()));
+        }
+        app.world_mut().get_mut::<Position>(root).unwrap().0 = previous_displayed_position;
+        app.world_mut().get_mut::<Rotation>(root).unwrap().0 = previous_displayed_rotation;
+        app.world_mut()
+            .resource_mut::<Time<Fixed>>()
+            .accumulate_overstep(TICK / 2);
+        (
+            common_previous_position,
+            common_previous_rotation,
+            previous_displayed_position,
+            previous_displayed_rotation,
+        )
     }
 
     /// Deposit the authority's pose at `at`, which is what a restore targeting `at` resolves.
@@ -649,6 +777,10 @@ mod tests {
         let mut app = client_app();
         app.world_mut().resource_mut::<ReplayTravel>().0 = TRAVEL;
         let root = spawn_armed_root(&mut app);
+        app.world_mut()
+            .resource_mut::<Time<Fixed>>()
+            .accumulate_overstep(TICK / 2);
+        app.world_mut().get_mut::<Position>(root).unwrap().0 = PREDICTED_POSITION + TRAVEL * 0.5;
         confirm_pose(
             &mut app,
             root,
@@ -682,11 +814,9 @@ mod tests {
         );
     }
 
-    /// ONE-SHOT. `VisualCorrection` is a component that lightyear leaves on the entity until its
-    /// own decayed error falls under the registered rollback condition — which is the NEXT frame's
-    /// `PostUpdate` at the earliest — so a reader that merely looked at it would count the same
-    /// correction on every frame until then. The capture removes it, and a later frame with no
-    /// rollback therefore adds nothing.
+    /// ONE-SHOT. Capture removes `PreviousVisual` before lightyear can turn it into
+    /// `VisualCorrection`, and clears either stale correction component as well. A later frame with
+    /// no rollback therefore has no input that could add the correction again.
     #[test]
     fn a_correction_is_accumulated_once_and_a_later_frame_without_a_rollback_adds_nothing() {
         let mut app = client_app();
@@ -715,7 +845,12 @@ mod tests {
                     .world()
                     .get::<VisualCorrection<Rotation>>(root)
                     .is_none(),
-            "the consumed correction must be REMOVED, not left for the next frame to read again",
+            "lightyear must not retain a duplicate correction for the next frame",
+        );
+        assert!(
+            app.world().get::<PreviousVisual<Position>>(root).is_none()
+                && app.world().get::<PreviousVisual<Rotation>>(root).is_none(),
+            "the one-shot PreviousVisual inputs must be consumed in the rollback transaction",
         );
 
         advance_to(&mut app, CURRENT_TICK + 1);
@@ -804,6 +939,10 @@ mod tests {
                 .is_none(),
             "a refused correction must still be consumed, or the next frame smooths it after all",
         );
+        assert!(
+            app.world().get::<PreviousVisual<Position>>(root).is_none(),
+            "the sharp verdict must consume its rollback input too",
+        );
     }
 
     /// A rollback is world-wide and sharpness is per-root. The root the occurrence names goes
@@ -866,6 +1005,53 @@ mod tests {
             offset_of(&app, bystander).0,
             expected_translation_error(),
             "and the root neither occurrence named is untouched by either of them",
+        );
+    }
+
+    /// TWO MESSAGE BUFFERS, ONE READER PASS. The first occurrence is rotated into the older Bevy
+    /// message buffer before the second is written; capture does not run between them. This is the
+    /// queued-occurrence case distinct from two writes in one frame.
+    #[test]
+    fn occurrences_spanning_adjacent_message_buffers_are_both_drained_by_one_capture() {
+        let mut app = client_app();
+        let first = spawn_armed_root(&mut app);
+        let second = spawn_armed_root(&mut app);
+        for root in [first, second] {
+            confirm_pose(
+                &mut app,
+                root,
+                ROLLBACK_TICK,
+                AUTHORITY_POSITION,
+                authority_rotation(),
+            );
+        }
+
+        app.world_mut()
+            .resource_mut::<Messages<SharpCorrection>>()
+            .write(SharpCorrection {
+                entity: first,
+                restored_from: ROLLBACK_TICK,
+            });
+        app.world_mut()
+            .resource_mut::<Messages<SharpCorrection>>()
+            .update();
+        app.world_mut()
+            .resource_mut::<Messages<SharpCorrection>>()
+            .write(SharpCorrection {
+                entity: second,
+                restored_from: ROLLBACK_TICK,
+            });
+
+        order_rollback(&mut app, ROLLBACK_TICK);
+        run_pre_update(&mut app);
+
+        assert_eq!(offset_of(&app, first).0, Vec3::ZERO);
+        assert_eq!(offset_of(&app, second).0, Vec3::ZERO);
+        assert!(
+            app.world()
+                .resource::<Messages<SharpCorrection>>()
+                .is_empty(),
+            "one capture must drain both the older and newer message buffers",
         );
     }
 
@@ -1032,24 +1218,16 @@ mod tests {
         );
     }
 
-    /// ZERO-DEPTH ROLLBACKS PRODUCE NO CORRECTION, and this module therefore accumulates nothing.
-    ///
-    /// `prepare_rollback` clears the prediction history and re-seeds it with one entry at the
-    /// rollback tick, and `run_rollback` replays `current - rollback` times — zero here — so
-    /// `update_frame_interpolation_post_rollback`'s `history.get(tick - 1)` misses and it returns
-    /// before inserting `VisualCorrection`. The restore still HAPPENS, which is why this fixture
-    /// asserts the live pose moved: "nothing captured" must mean "lightyear produced nothing", not
-    /// "nothing rolled back".
-    ///
-    /// The result is right for the only depth-0 rollback this game produces — `net::adoption`'s, at
-    /// the shipping loopback lead of 0, which must be sharp anyway — and that is a COINCIDENCE OF
-    /// TWO MECHANISMS. This test is what fails if lightyear starts emitting a correction here, at
-    /// which point adopted shoves would begin to be smoothed and the sharp rule would have to cover
-    /// the case.
     #[test]
-    fn a_zero_depth_rollback_produces_no_visual_correction_so_nothing_is_accumulated() {
+    fn an_age_zero_grip_misprediction_captures_a_nonzero_offset_and_renders_a_decayed_near_hold() {
         let mut app = client_app();
         let root = spawn_armed_root(&mut app);
+        let (
+            common_previous_position,
+            common_previous_rotation,
+            previous_displayed_position,
+            previous_displayed_rotation,
+        ) = set_half_overstep_visual_pose(&mut app, root);
         confirm_pose(
             &mut app,
             root,
@@ -1057,8 +1235,8 @@ mod tests {
             AUTHORITY_POSITION,
             authority_rotation(),
         );
+        stage_age_zero_grip_checkpoint(&mut app, root);
 
-        order_rollback(&mut app, CURRENT_TICK);
         run_pre_update(&mut app);
 
         assert_near(
@@ -1066,14 +1244,141 @@ mod tests {
             AUTHORITY_POSITION,
             "the restore must have happened, or this fixture is asserting nothing",
         );
-        assert!(
-            app.world()
-                .get::<VisualCorrection<Position>>(root)
-                .is_none(),
-            "lightyear must not have produced a correction at zero depth — if it now does, this \
-             module has to decide what to do with it",
+        let corrected_displayed_position = common_previous_position.lerp(AUTHORITY_POSITION, 0.5);
+        let corrected_displayed_rotation =
+            common_previous_rotation.slerp(authority_rotation(), 0.5);
+        let (captured, captured_rotation) = offset_of(&app, root);
+        assert_near(
+            captured,
+            previous_displayed_position - corrected_displayed_position,
+            "the age-zero grip rollback must capture the displayed same-tick discontinuity",
         );
-        assert_eq!(offset_of(&app, root), (Vec3::ZERO, Quat::IDENTITY));
+        assert_near_rotation(
+            captured_rotation,
+            previous_displayed_rotation * corrected_displayed_rotation.inverse(),
+            "the age-zero grip rollback must capture the displayed rotation discontinuity",
+        );
+        assert_ne!(
+            captured,
+            Vec3::ZERO,
+            "the differing confirmed and live poses must not snap through a zero offset",
+        );
+
+        app.world_mut()
+            .resource_mut::<Time<Real>>()
+            .advance_by(TICK);
+        app.world_mut().run_schedule(PostUpdate);
+        let surviving = offset_of(&app, root).0;
+        assert!(
+            surviving.length() < captured.length() && surviving.length() > captured.length() * 0.94,
+            "the rollback frame must render a decayed near-hold: captured {captured:?}, surviving \
+             {surviving:?}",
+        );
+        assert_near(
+            app.world()
+                .get::<Transform>(root)
+                .expect("presented root")
+                .translation,
+            corrected_displayed_position + surviving,
+            "the presented pose must be the corrected sub-tick pose plus the surviving offset",
+        );
+        assert_near_rotation(
+            app.world()
+                .get::<Transform>(root)
+                .expect("presented root")
+                .rotation,
+            offset_of(&app, root).1 * corrected_displayed_rotation,
+            "the presented rotation must use the same corrected sub-tick pose as capture",
+        );
+    }
+
+    #[test]
+    fn an_age_zero_grip_rollback_carrying_an_adoption_leaves_its_pose_correction_sharp() {
+        let mut app = client_app();
+        let root = spawn_armed_root(&mut app);
+        let _ = set_half_overstep_visual_pose(&mut app, root);
+        confirm_pose(
+            &mut app,
+            root,
+            CURRENT_TICK,
+            AUTHORITY_POSITION,
+            authority_rotation(),
+        );
+        stage_age_zero_grip_checkpoint(&mut app, root);
+        order_sharp(&mut app, root);
+
+        run_pre_update(&mut app);
+
+        assert_near(
+            app.world().get::<Position>(root).expect("live position").0,
+            AUTHORITY_POSITION,
+            "the age-zero grip rollback must restore the differing authority pose",
+        );
+        assert_eq!(
+            offset_of(&app, root),
+            (Vec3::ZERO, Quat::IDENTITY),
+            "a delivered adoption carried by the grip rollback must stay sharp",
+        );
+    }
+
+    #[test]
+    fn an_age_zero_capture_rebuilds_prediction_history_in_tick_order_for_end_rollback() {
+        let mut app = client_app();
+        let root = spawn_armed_root(&mut app);
+        let (common_previous_position, common_previous_rotation, _, _) =
+            set_half_overstep_visual_pose(&mut app, root);
+        confirm_pose(
+            &mut app,
+            root,
+            CURRENT_TICK,
+            AUTHORITY_POSITION,
+            authority_rotation(),
+        );
+        stage_age_zero_grip_checkpoint(&mut app, root);
+
+        run_pre_update(&mut app);
+
+        let position_history = app
+            .world()
+            .get::<PredictionHistory<Position>>(root)
+            .expect("position history");
+        let position_ticks: Vec<Tick> = position_history
+            .buffer()
+            .iter()
+            .map(|(tick, _)| *tick)
+            .collect();
+        assert_eq!(
+            position_ticks,
+            vec![CURRENT_TICK - 1, CURRENT_TICK],
+            "the append-only history buffer must be rebuilt oldest-to-newest",
+        );
+        assert_eq!(
+            position_history.get(CURRENT_TICK - 1),
+            Some(&Position(common_previous_position)),
+        );
+        assert_eq!(
+            position_history.get(CURRENT_TICK),
+            Some(&Position(AUTHORITY_POSITION)),
+        );
+
+        let rotation_history = app
+            .world()
+            .get::<PredictionHistory<Rotation>>(root)
+            .expect("rotation history");
+        let rotation_ticks: Vec<Tick> = rotation_history
+            .buffer()
+            .iter()
+            .map(|(tick, _)| *tick)
+            .collect();
+        assert_eq!(rotation_ticks, vec![CURRENT_TICK - 1, CURRENT_TICK],);
+        assert_eq!(
+            rotation_history.get(CURRENT_TICK - 1),
+            Some(&Rotation(common_previous_rotation)),
+        );
+        assert_eq!(
+            rotation_history.get(CURRENT_TICK),
+            Some(&Rotation(authority_rotation())),
+        );
     }
 
     /// THE SIGN CONVENTION, held against lightyear's own `Diffable` impls rather than against a
@@ -1136,12 +1441,10 @@ mod tests {
         );
     }
 
-    /// ARMING IS A SUBSET OF FRAME INTERPOLATION'S. Without `FrameInterpolate`, lightyear produces
-    /// no `VisualCorrection` for a root at all (`update_frame_interpolation_post_rollback` queries
-    /// `&mut FrameInterpolate<C>`), so an offset armed there could never be captured — and the
-    /// `Position` change that Avian's writeback gate depends on would stop being marked every frame.
-    /// The two arming predicates are written in different modules and are not ordered against each
-    /// other, so this one is made the narrower of the two rather than merely documented.
+    /// ARMING IS A SUBSET OF FRAME INTERPOLATION'S. Capture needs the previous tick stored there to
+    /// normalize depth-zero history, and apply needs the sub-tick pose it produces. The two arming
+    /// predicates are written in different modules and are not ordered against each other, so this
+    /// one is made the narrower of the two rather than merely documented.
     #[test]
     fn a_predicted_root_is_not_armed_before_frame_interpolation_is_armed_on_it() {
         let mut world = World::new();
@@ -1165,6 +1468,42 @@ mod tests {
         assert!(
             world.get::<RenderErrorOffset>(root).is_some(),
             "and it must be armed once both interpolators are on it",
+        );
+    }
+
+    #[test]
+    fn a_parented_root_is_not_armed_and_a_later_parent_transition_fails_loudly() {
+        let mut world = World::new();
+        let parent = world.spawn_empty().id();
+        let initially_parented = world
+            .spawn((
+                Predicted,
+                NetTank,
+                FrameInterpolate::<Position>::default(),
+                FrameInterpolate::<Rotation>::default(),
+                ChildOf(parent),
+            ))
+            .id();
+        world
+            .run_system_once(arm_render_error)
+            .expect("the arming system runs");
+        assert!(
+            world.get::<RenderErrorOffset>(initially_parented).is_none(),
+            "the top-level-root invariant must be part of arming",
+        );
+
+        let (mut world, armed) = presentation_world(Vec3::ZERO, Quat::IDENTITY, TICK);
+        let parent = world.spawn_empty().id();
+        world.entity_mut(armed).insert(ChildOf(parent));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            world
+                .run_system_once(apply_render_error)
+                .expect("system validation succeeds before the invariant check")
+        }));
+        assert!(
+            result.is_err(),
+            "a root acquiring ChildOf after arming must fail loudly instead of silently retaining \
+             an unapplied stale offset",
         );
     }
 
@@ -1205,8 +1544,7 @@ mod tests {
         let held = world.get::<RenderErrorOffset>(root).unwrap().translation.x;
         assert!(
             (0.94..0.96).contains(&(held / 0.2)),
-            "a small correction must render as roughly 95% of the previous displayed pose, not as \
-             a freeze — held {held} of 0.2 m",
+            "the DERIVED near-bracket retention is roughly 95%, not a freeze — held {held} of 0.2 m",
         );
         assert!(held < 0.2, "and strictly less than all of it");
         assert_eq!(
@@ -1216,13 +1554,14 @@ mod tests {
         );
 
         // FAR regime: 1.0 m. The adaptive retain would remove 0.141 m, so the 3 m/s speed cap binds
-        // first and the frame holds MORE than the retain factor alone would suggest.
+        // above its DERIVED ~0.553 m crossover and the frame holds MORE than the retain factor
+        // alone would suggest.
         let (mut world, root) = presentation_world(Vec3::new(1.0, 0.0, 0.0), Quat::IDENTITY, TICK);
         world.run_system_once(apply_render_error).unwrap();
         let held = world.get::<RenderErrorOffset>(root).unwrap().translation.x;
         assert!(
             ((1.0 - held) - CAP_TRANSLATION_MPS * dt).abs() < 1e-5,
-            "past roughly half a metre the correction VELOCITY cap decides the step, not the \
+            "above the ~0.553 m crossover the correction VELOCITY cap decides the step, not the \
              adaptive retain — removed {} m, cap allows {} m",
             1.0 - held,
             CAP_TRANSLATION_MPS * dt,
@@ -1243,6 +1582,80 @@ mod tests {
             world.get::<Transform>(root).unwrap().translation,
             AUTHORITY_POSITION,
             "past the snap threshold the corrected pose is presented immediately",
+        );
+    }
+
+    #[test]
+    fn translation_decay_boundaries_are_derived_from_the_constants() {
+        let dt = TICK.as_secs_f32();
+        let adaptive_retain = |mag: f32| {
+            let t = ((mag - DECAY_LERP_LO_M) / (DECAY_LERP_HI_M - DECAY_LERP_LO_M)).clamp(0.0, 1.0);
+            (DECAY_RETAIN_NEAR + (DECAY_RETAIN_FAR - DECAY_RETAIN_NEAR) * t).powf(dt * 60.0)
+        };
+        let uncapped_reduction = |mag: f32| mag * (1.0 - adaptive_retain(mag));
+
+        let near_retain = DECAY_RETAIN_NEAR.powf(dt * 60.0);
+        let at_near = decay_magnitude(
+            DECAY_LERP_LO_M,
+            DECAY_LERP_LO_M,
+            DECAY_LERP_HI_M,
+            CAP_TRANSLATION_MPS,
+            SNAP_TRANSLATION_M,
+            dt,
+        );
+        assert!(
+            (at_near / DECAY_LERP_LO_M - near_retain).abs() < 1e-6,
+            "95.305% retention applies at the 0.25 m near boundary",
+        );
+        let half_metre_retain = adaptive_retain(0.5);
+        assert!(
+            (half_metre_retain - 0.9217).abs() < 1e-4,
+            "0.5 m is already in adaptive decay, retaining {half_metre_retain}",
+        );
+
+        let cap_step = CAP_TRANSLATION_MPS * dt;
+        let mut below = DECAY_LERP_LO_M;
+        let mut above = DECAY_LERP_HI_M;
+        for _ in 0..32 {
+            let middle = (below + above) * 0.5;
+            if uncapped_reduction(middle) < cap_step {
+                below = middle;
+            } else {
+                above = middle;
+            }
+        }
+        let crossover = (below + above) * 0.5;
+        assert!(
+            (0.552..0.554).contains(&crossover),
+            "the constants put the 3 m/s crossover at {crossover} m",
+        );
+        assert!(uncapped_reduction(crossover - 1e-4) < cap_step);
+        assert!(uncapped_reduction(crossover + 1e-4) > cap_step);
+
+        let at_snap = decay_magnitude(
+            SNAP_TRANSLATION_M,
+            DECAY_LERP_LO_M,
+            DECAY_LERP_HI_M,
+            CAP_TRANSLATION_MPS,
+            SNAP_TRANSLATION_M,
+            dt,
+        );
+        assert!(
+            (at_snap - (SNAP_TRANSLATION_M - cap_step)).abs() < 1e-6,
+            "exactly 2 m is capped and smoothed, not snapped",
+        );
+        let just_over_snap = f32::from_bits(SNAP_TRANSLATION_M.to_bits() + 1);
+        assert_eq!(
+            decay_magnitude(
+                just_over_snap,
+                DECAY_LERP_LO_M,
+                DECAY_LERP_HI_M,
+                CAP_TRANSLATION_MPS,
+                SNAP_TRANSLATION_M,
+                dt,
+            ),
+            0.0,
+            "the first representable value above 2 m snaps",
         );
     }
 
@@ -1294,7 +1707,7 @@ mod tests {
         );
     }
 
-    /// A SPENT OFFSET DOES NOT DIRTY THE ROOT. The tank root has ~194 link children, so a
+    /// A SPENT OFFSET DOES NOT DIRTY THE ROOT. The tank root has DERIVED ~194 link children, so a
     /// `Transform` write it does not need costs a propagation pass through all of them, every
     /// frame, forever — the steady state is no offset at all.
     #[test]
