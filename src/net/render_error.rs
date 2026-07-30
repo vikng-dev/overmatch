@@ -55,19 +55,26 @@
 //! ## SIGN CONVENTIONS, and one asymmetry that is NOT ours to use
 //!
 //! `lightyear_replication-0.28.0/src/impls/avian3d.rs`: translation `diff(&self, new) = new - self`,
-//! rotation `diff(&self, new) = new * self.inverse()` — a LEFT delta. So the captured error is
-//! `predicted_timeline(t) - corrected_timeline(t)` for translation and
-//! `predicted_timeline(t) * corrected_timeline(t)⁻¹` for rotation. Adding / left-multiplying that
-//! delta cancels the rollback correction while leaving later travel in the pose it is applied to.
-//! `the_captured_error_reproduces_the_previous_displayed_pose` pins the sign against lightyear's own
-//! `Diffable` impls rather than against a restatement of them.
+//! rotation `diff(&self, new) = new * self.inverse()` — a WORLD-LEFT delta. Translation stores that
+//! difference directly. Rotation instead stores a BODY-LOCAL offset `O`, presented as `R_sim * O`.
+//! If `C` is the corrected display, `P` is `PreviousVisual`, and `O_old` is the retained offset,
+//! capture derives `O_new = C⁻¹ * P * O_old`. This reconstructs the previous ACTUAL display because
+//! `C * O_new = P * O_old`.
 //!
-//! The same file's `apply_diff` for rotation RIGHT-multiplies (`self.0 *= delta.0`) what `diff`
-//! LEFT-multiplied. Those are not the same rotation, and nothing here routes through `apply_diff`;
-//! this module composes the delta itself, on the left. That asymmetry is a latent upstream bug,
-//! currently inert because this module removes `PreviousVisual` before lightyear can create that
-//! correction, and removes any stale `VisualCorrection` already present on a managed root. Not
-//! fixed here; the vendored crate is not modified.
+//! Avian 0.7 advances rotation by WORLD-LEFT multiplication: `R_sim' = F * R_sim`
+//! (`dynamics/integrator/mod.rs`). The body-local form therefore transports without distorting
+//! later travel: `(F * R_sim) * O = F * (R_sim * O)`.
+//! `the_body_local_rotation_offset_is_derived_explicitly_not_applied_as_diffables_left_delta` pins
+//! the frame conversion against lightyear's own `Diffable` impl.
+//!
+//! Ironically, the same upstream `Diffable` impl's `apply_diff` RIGHT-multiplies
+//! (`self.0 *= delta.0`) even though `diff` returns the WORLD-LEFT delta `P * C⁻¹`. Right
+//! multiplication is the correct side for TRANSPORT across Avian's later motion, but applying that
+//! unconverted delta is still wrong: the required body-local value is `C⁻¹ * P`. Nothing here
+//! routes through `apply_diff`; capture derives the local offset explicitly. The upstream asymmetry
+//! remains inert because this module removes `PreviousVisual` before lightyear can create that
+//! correction, and removes any stale `VisualCorrection` already present on a managed root. The
+//! vendored crate is not modified.
 //!
 //! # SHARP means: do not accumulate that root's correction AT ALL
 //!
@@ -99,9 +106,10 @@
 //! accumulates the correction or refuses it. The resulting `RenderErrorOffset` deliberately survives
 //! into `PostUpdate`, where it is decayed and composed onto the CURRENT interpolated pose. That
 //! crossing is safe because the offset is already an entity-keyed, one-shot classification of the
-//! correction at the previous display instant; applying it to the current pose lets
-//! `RunFixedMainLoop` travel pass through instead of subtracting it. The transient occurrence and
-//! `PreviousVisual` inputs do not cross the transaction, so they cannot become latches.
+//! correction at the previous display instant; adding translation and right-multiplying the
+//! body-local rotation offset onto the current pose lets `RunFixedMainLoop` travel pass through
+//! instead of subtracting it. The transient occurrence and `PreviousVisual` inputs do not cross the
+//! transaction, so they cannot become latches.
 //!
 //! # THE PRESENTED POSE IS DERIVED, NOT ACCUMULATED
 //!
@@ -138,6 +146,9 @@ use super::adoption::SharpCorrection;
 use super::protocol::NetTank;
 
 /// Presentation-only correction accumulated on the predicted root.
+///
+/// Translation is a world-space additive delta. Rotation is a body-local delta applied on the
+/// right of the current simulated rotation.
 #[derive(Component, Default, Debug, Clone, Copy, PartialEq)]
 pub struct RenderErrorOffset {
     pub translation: Vec3,
@@ -374,8 +385,16 @@ fn capture_render_error(
                     .flatten()
             });
             let corrected_visual = corrected_display(&registry, predecessor, rotation, overstep);
-            let error = corrected_visual.diff(&previous_visual.0).0.f32();
-            offset.rotation = (offset.rotation * error).normalize();
+            let corrected = corrected_visual.0.f32();
+            let previous = previous_visual.0.0.f32();
+            // Preserve the previous ACTUAL display, including a retained old offset:
+            //
+            //     corrected * O_new = previous * O_old
+            //     O_new = corrected^-1 * previous * O_old
+            //
+            // This is deliberately derived here instead of using `Diffable::apply_diff`: its
+            // rotation diff is world-left even though its application is right-multiplied.
+            offset.rotation = (corrected.inverse() * previous * offset.rotation).normalize();
         }
     }
 }
@@ -418,7 +437,7 @@ fn apply_render_error(
             rotation: if offset.rotation == Quat::IDENTITY {
                 clean_rotation
             } else {
-                (offset.rotation * clean_rotation).normalize()
+                (clean_rotation * offset.rotation).normalize()
             },
             scale: transform.scale,
         };
@@ -455,7 +474,8 @@ fn decay_translation(offset: &mut Vec3, dt: f32) {
 }
 
 fn decay_rotation(offset: &mut Quat, dt: f32) {
-    // Use the shortest-path quaternion representative.
+    // Use the shortest-path quaternion representative. Angle-to-identity and the slerp fraction are
+    // frame-independent, so the cap/snap/zero semantics are unchanged for a body-local offset.
     let mut q = *offset;
     if q.w < 0.0 {
         q = -q;
@@ -604,8 +624,8 @@ mod tests {
     /// A second authority pose, for the fixture that lands two rollbacks in a row.
     const LATER_AUTHORITY_POSITION: Vec3 = Vec3::new(10.35, 2.0, -3.02);
 
-    /// Rotations about DIFFERENT axes, so left- and right-composing the captured delta give
-    /// visibly different results. `the_captured_rotation_error_is_a_left_delta` depends on that.
+    /// Rotations about DIFFERENT axes, so world-left and body-local correction frames give visibly
+    /// different results.
     fn predicted_rotation() -> Quat {
         Quat::from_rotation_y(0.10)
     }
@@ -622,8 +642,8 @@ mod tests {
         PREDICTED_POSITION - AUTHORITY_POSITION
     }
 
-    fn expected_rotation_error() -> Quat {
-        predicted_rotation() * authority_rotation().inverse()
+    fn expected_rotation_offset() -> Quat {
+        authority_rotation().inverse() * predicted_rotation()
     }
 
     /// A forced rollback ordered through the PRODUCTION slot, exactly as `net::watchdog` orders one
@@ -694,7 +714,7 @@ mod tests {
         }
         for (mut position, mut rotation) in &mut roots {
             position.0 += travel.0;
-            rotation.0 = (rotation.0 * turn.0).normalize();
+            rotation.0 = (turn.0 * rotation.0).normalize();
         }
     }
 
@@ -1143,9 +1163,9 @@ mod tests {
         );
         assert_near_rotation(
             rotation,
-            expected_rotation_error(),
-            "the rotation offset must be the left delta that carries the corrected pose back to \
-             the previously displayed one",
+            expected_rotation_offset(),
+            "the rotation offset must be the body-local delta that carries the corrected pose back \
+             to the previously displayed one",
         );
     }
 
@@ -1824,7 +1844,7 @@ mod tests {
         );
         assert_near_rotation(
             app.world().get::<Rotation>(root).expect("live rotation").0,
-            authority_rotation() * Quat::IDENTITY.slerp(forward_turn, 0.5),
+            Quat::IDENTITY.slerp(forward_turn, 0.5) * authority_rotation(),
             "PostUpdate must display the independent forward rotation at the half-tick overstep",
         );
         assert_eq!(
@@ -1840,7 +1860,7 @@ mod tests {
                 .get::<FrameInterpolate<Rotation>>(root)
                 .expect("rotation interpolation")
                 .current_value,
-            Some(Rotation(authority_rotation() * forward_turn)),
+            Some(Rotation(forward_turn * authority_rotation())),
             "the fixed-tick endpoint must retain the full independent forward rotation",
         );
         assert_eq!(
@@ -1860,8 +1880,8 @@ mod tests {
         );
         assert_near_rotation(
             captured.rotation,
-            predicted_rotation() * authority_rotation().inverse(),
-            "the skipped-interpolation path must capture the exact raw left delta Pq * Cq^-1",
+            expected_rotation_offset(),
+            "the skipped-interpolation path must capture the exact raw body-local offset Cq^-1 * Pq",
         );
         assert!(
             app.world().get::<PreviousVisual<Position>>(root).is_none()
@@ -1886,11 +1906,22 @@ mod tests {
         );
         assert_near_rotation(
             corrected_display_rotation,
-            authority_rotation() * displayed_turn,
+            displayed_turn * authority_rotation(),
             "Lightyear's current display must contain the independent forward rotation",
         );
 
         let live_offset = offset_of(&app, root);
+        let mut expected_decayed_rotation = captured.rotation;
+        decay_rotation(
+            &mut expected_decayed_rotation,
+            app.world().resource::<Time<Real>>().delta_secs(),
+        );
+        assert_near_rotation(
+            live_offset.1,
+            expected_decayed_rotation,
+            "the live rotation offset must be exactly the captured body-local offset after normal \
+             one-frame decay",
+        );
         let rendered = app.world().get::<Transform>(root).expect("rendered root");
         assert_near(
             rendered.translation,
@@ -1899,8 +1930,8 @@ mod tests {
         );
         assert_near_rotation(
             rendered.rotation,
-            live_offset.1 * corrected_display_rotation,
-            "presentation must left-apply only the normally decayed rotation offset",
+            corrected_display_rotation * live_offset.1,
+            "presentation must right-apply only the normally decayed body-local rotation offset",
         );
         let undiscounted_target = PREDICTED_POSITION + displayed_travel;
         assert_near(
@@ -1913,11 +1944,24 @@ mod tests {
                 <= CAP_TRANSLATION_MPS * app.world().resource::<Time<Real>>().delta_secs() + 1e-5,
             "normal decay may reveal only its capped one-frame share of the correction",
         );
-        let undiscounted_rotation = predicted_rotation() * displayed_turn;
+        let avian_current_rotation = displayed_turn * authority_rotation();
         assert_near_rotation(
-            captured.rotation * corrected_display_rotation,
+            corrected_display_rotation,
+            avian_current_rotation,
+            "positive control: the fixture must model Avian's current = F * C world-left \
+             composition",
+        );
+        assert!(
+            (authority_rotation() * displayed_turn).angle_between(avian_current_rotation) > 1e-3,
+            "the noncommuting fixture must distinguish Avian's world-left composition from the old \
+             body-right helper convention",
+        );
+        let undiscounted_rotation = displayed_turn * predicted_rotation();
+        assert_near_rotation(
+            corrected_display_rotation * captured.rotation,
             undiscounted_rotation,
-            "the full captured delta must hide the rollback while preserving current-frame rotation",
+            "the full captured body-local offset must hide the rollback while preserving Avian's \
+             world-left current-frame rotation",
         );
         assert!(
             rendered.rotation.angle_between(undiscounted_rotation)
@@ -1935,6 +1979,50 @@ mod tests {
     fn a_depth_zero_rollback_reopens_the_raw_display_window_and_a_second_correction_is_smoothed() {
         let mut app = client_app();
         let root = spawn_root_through_shipping_arming(&mut app);
+        let first_predecessor_position = Position(PREDICTED_POSITION - Vec3::new(0.2, 0.0, 0.0));
+        let first_predecessor_rotation = Rotation(Quat::from_rotation_z(-0.08));
+        let (first_displayed_position, first_displayed_rotation) = stage_previous_display(
+            &mut app,
+            root,
+            Some(first_predecessor_position),
+            Some(first_predecessor_rotation),
+        );
+
+        assert_eq!(
+            (
+                app.world()
+                    .get::<FrameInterpolate<Position>>(root)
+                    .expect("position interpolation")
+                    .previous_value,
+                app.world()
+                    .get::<FrameInterpolate<Rotation>>(root)
+                    .expect("rotation interpolation")
+                    .previous_value,
+            ),
+            (
+                Some(first_predecessor_position),
+                Some(first_predecessor_rotation)
+            ),
+            "the raw-display window must begin closed by real predecessor samples",
+        );
+        app.world_mut().run_schedule(PostUpdate);
+        let initial_display = app.world().resource::<DisplayObservation>();
+        let (_, initial_position, initial_rotation) = initial_display
+            .roots
+            .iter()
+            .find(|(entity, ..)| *entity == root)
+            .copied()
+            .expect("the initial PostUpdate observer saw the root");
+        assert_near(
+            initial_position,
+            first_displayed_position,
+            "the first real PostUpdate must display the interpolated position",
+        );
+        assert_near_rotation(
+            initial_rotation,
+            first_displayed_rotation,
+            "the first real PostUpdate must display the interpolated rotation",
+        );
 
         confirm_pose(
             &mut app,
@@ -1943,22 +2031,23 @@ mod tests {
             AUTHORITY_POSITION,
             authority_rotation(),
         );
-        app.world_mut()
-            .resource_mut::<PendingCapturePredecessors>()
-            .0 = Some((None, None));
         order_rollback(&mut app, CURRENT_TICK);
         run_pre_update(&mut app);
 
         let first = captured_of(&app, root);
+        let first_corrected_display = first_predecessor_position.0.lerp(AUTHORITY_POSITION, 0.5);
+        let first_corrected_rotation = first_predecessor_rotation
+            .0
+            .slerp(authority_rotation(), 0.5);
         assert_near(
             first.translation,
-            expected_translation_error(),
-            "the first raw-display correction must be captured in full",
+            first_displayed_position - first_corrected_display,
+            "the first correction must compare the two interpolated displays at the same instant",
         );
         assert_near_rotation(
             first.rotation,
-            expected_rotation_error(),
-            "the first raw-display rotation correction must be captured in full",
+            first_corrected_rotation.inverse() * first_displayed_rotation,
+            "the first correction must be captured in the corrected display's body frame",
         );
         let position_interpolate = app
             .world()
@@ -1974,62 +2063,68 @@ mod tests {
                 rotation_interpolate.previous_value
             ),
             (None, None),
-            "Lightyear EndRollback must reinstall the no-predecessor state before another fixed tick",
+            "Lightyear EndRollback must transition Some to None and reopen the raw-display window",
         );
 
-        let second_predicted_position = Vec3::new(10.3, 2.1, -2.9);
+        // With the reopened window, Lightyear's real interpolation system skips. Its display
+        // observer therefore sees the raw corrected endpoint; the render offset is applied only
+        // afterwards to Transform.
+        app.world_mut().run_schedule(PostUpdate);
+        let reopened_display = app.world().resource::<DisplayObservation>();
+        let (_, reopened_position, reopened_rotation) = reopened_display
+            .roots
+            .iter()
+            .find(|(entity, ..)| *entity == root)
+            .copied()
+            .expect("the reopened-window PostUpdate observer saw the root");
+        assert_near(
+            reopened_position,
+            AUTHORITY_POSITION,
+            "without a predecessor, the intervening PostUpdate must display the raw position \
+             endpoint",
+        );
+        assert_near_rotation(
+            reopened_rotation,
+            authority_rotation(),
+            "without a predecessor, the intervening PostUpdate must display the raw rotation \
+             endpoint",
+        );
+        let retained = offset_of(&app, root);
+
         let second_corrected_position = Vec3::new(10.25, 2.05, -2.95);
-        let second_predicted_rotation = Quat::from_rotation_y(0.16);
         let second_corrected_rotation = Quat::from_rotation_x(0.09);
-        app.world_mut()
-            .get_mut::<Position>(root)
-            .expect("live position")
-            .0 = second_predicted_position;
-        app.world_mut()
-            .get_mut::<Rotation>(root)
-            .expect("live rotation")
-            .0 = second_predicted_rotation;
-        app.world_mut()
-            .get_mut::<FrameInterpolate<Position>>(root)
-            .expect("position interpolation")
-            .current_value = Some(Position(second_predicted_position));
-        app.world_mut()
-            .get_mut::<FrameInterpolate<Rotation>>(root)
-            .expect("rotation interpolation")
-            .current_value = Some(Rotation(second_predicted_rotation));
+        advance_to(&mut app, CURRENT_TICK + 1);
         confirm_pose(
             &mut app,
             root,
-            CURRENT_TICK,
+            CURRENT_TICK + 1,
             second_corrected_position,
             second_corrected_rotation,
         );
-        app.world_mut()
-            .resource_mut::<PendingCapturePredecessors>()
-            .0 = Some((None, None));
-        order_rollback(&mut app, CURRENT_TICK);
+        order_rollback(&mut app, CURRENT_TICK + 1);
         run_pre_update(&mut app);
 
         assert_eq!(
             previous_visuals_of(&app, root),
             (
-                Some(Position(second_predicted_position)),
-                Some(Rotation(second_predicted_rotation))
+                Some(Position(AUTHORITY_POSITION)),
+                Some(Rotation(authority_rotation()))
             ),
-            "the second rollback must capture the raw endpoint displayed in the reopened window",
+            "the second rollback must capture the raw endpoint established by the intervening real \
+             PostUpdate",
         );
-        let second_translation = second_predicted_position - second_corrected_position;
-        let second_rotation = second_predicted_rotation * second_corrected_rotation.inverse();
         let accumulated = captured_of(&app, root);
         assert_near(
             accumulated.translation,
-            first.translation + second_translation,
-            "the second raw endpoint correction must be added in full to the existing offset",
+            retained.0 + AUTHORITY_POSITION - second_corrected_position,
+            "the second raw endpoint correction must accumulate onto the retained translation \
+             offset",
         );
         assert_near_rotation(
             accumulated.rotation,
-            first.rotation * second_rotation,
-            "the second raw rotation correction must be added to the existing offset",
+            second_corrected_rotation.inverse() * authority_rotation() * retained.1,
+            "the second body-local correction must fold the retained offset into \
+             C2^-1 * P2 * O_old",
         );
         assert_eq!(
             (
@@ -2065,7 +2160,7 @@ mod tests {
         );
         assert_near_rotation(
             captured.rotation,
-            previous_rotation * frame_rotation.0.slerp(authority_rotation(), 0.5).inverse(),
+            frame_rotation.0.slerp(authority_rotation(), 0.5).inverse() * previous_rotation,
             "the absent rotation-history predecessor must fall back independently to the retained \
              pre-rollback frame sample",
         );
@@ -2099,11 +2194,11 @@ mod tests {
         );
         assert_near_rotation(
             captured.rotation,
-            previous_rotation
-                * history_rotation
-                    .0
-                    .slerp(authority_rotation(), 0.5)
-                    .inverse(),
+            history_rotation
+                .0
+                .slerp(authority_rotation(), 0.5)
+                .inverse()
+                * previous_rotation,
             "the present rotation-history predecessor must be the rotation input capture reads",
         );
         let before = app
@@ -2326,35 +2421,41 @@ mod tests {
         );
     }
 
-    /// The rotation half, and the upstream asymmetry it must not be routed through.
+    /// The rotation half, the required frame conversion, and the upstream asymmetry it must not be
+    /// routed through.
     ///
     /// `Diffable::diff` for `Rotation` is `new * self.inverse()` — a LEFT delta — while the same
-    /// impl's `apply_diff` is `self.0 *= delta.0`, a RIGHT multiplication. Those are not the same
-    /// rotation. This module composes the delta itself, on the left; nothing here calls
-    /// `apply_diff`, and this fixture pins WHY by showing the right-composition landing somewhere
-    /// else entirely.
+    /// impl's `apply_diff` is `self.0 *= delta.0`, a RIGHT multiplication. Right multiplication is
+    /// the side this module needs for transport across later Avian motion, but the raw left delta is
+    /// not the body-local value. Capture derives `corrected^-1 * previous` explicitly; it does not
+    /// pass `previous * corrected^-1` to `apply_diff`.
     #[test]
-    fn the_captured_rotation_error_is_a_left_delta_and_right_composing_it_is_a_different_rotation()
-    {
+    fn the_body_local_rotation_offset_is_derived_explicitly_not_applied_as_diffables_left_delta() {
         let corrected = Rotation(authority_rotation());
         let previous = Rotation(predicted_rotation());
-        let error = corrected.diff(&previous);
+        let world_left_error = corrected.diff(&previous);
 
         assert_near_rotation(
-            error.0 * corrected.0,
+            world_left_error.0 * corrected.0,
             previous.0,
-            "LEFT-composing the captured error onto the corrected pose must reproduce the previous \
-             displayed pose",
+            "Diffable::diff must produce the world-left delta P * C^-1",
         );
         assert!(
-            (corrected.0 * error.0).angle_between(previous.0) > 1e-3,
-            "and RIGHT-composing it — which is what `Diffable::apply_diff` does — must not, or this \
-             fixture is asserting nothing about the asymmetry",
+            (corrected.0 * world_left_error.0).angle_between(previous.0) > 1e-3,
+            "right-applying Diffable's unconverted world-left delta must miss the previous display, \
+             or this noncommuting fixture proves nothing",
+        );
+        let body_local_offset = corrected.0.inverse() * previous.0;
+        assert_near_rotation(
+            corrected.0 * body_local_offset,
+            previous.0,
+            "right-applying the explicitly derived body-local offset must reproduce the previous \
+             display",
         );
         assert_near_rotation(
-            error.0,
-            expected_rotation_error(),
-            "and it must be the same quantity the schedule fixtures expect",
+            body_local_offset,
+            expected_rotation_offset(),
+            "the explicit derivation must be the same quantity the schedule fixtures capture",
         );
     }
 
@@ -2604,7 +2705,7 @@ mod tests {
         decay_rotation(&mut expected_offset.rotation, TICK.as_secs_f32());
         let expected_transform = Transform {
             translation: before_position.f32() + expected_offset.translation,
-            rotation: (expected_offset.rotation * before_rotation.f32()).normalize(),
+            rotation: (before_rotation.f32() * expected_offset.rotation).normalize(),
             scale: before_transform.scale,
         };
 
