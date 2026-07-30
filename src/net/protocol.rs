@@ -842,13 +842,30 @@ pub(crate) const ROLLBACK_HULL_SHOCK: f32 = 1.0;
 /// the shock EARLIER than the fallback it replaces, which is the only reason it exists.
 ///
 /// FLOOR — every published episode costs the owner one forced rollback, and a rollback costs one
-/// frame of render freeze (`net::render_error`). One hitch per shell is invisible; one per MG pellet
-/// is a stutter. At 900 rpm cyclic that is ~15 hitches per second unwindowed; 16 ticks caps it at
+/// frame in which the VIEW lags the sim (`net::render_error`).
+///
+/// WHAT THAT FRAME ACTUALLY LOOKS LIKE, because an earlier version of this paragraph said "one frame
+/// of render freeze" and that was wrong twice over. The offset is DECAYED before it is applied, so
+/// the frame renders most — not all — of the previous displayed pose: for a correction under about
+/// half a metre, 95.3% of it at 64 Hz, and past that the 3 m/s correction-speed cap bounds the step
+/// to ~4.7 cm per frame instead; beyond the 2 m snap threshold nothing is held back at all. And
+/// nothing is FROZEN in any case: `Position`, `Rotation`, the velocities, the replay and the fixed
+/// ticks all continue, and that layer writes only `Transform`. Both halves are pinned by
+/// `net::render_error`'s `the_rollback_frame_renders_a_decayed_near_hold_and_the_speed_cap_bounds_a_large_one`
+/// and `the_presentation_layer_never_writes_the_rollback_state_it_offsets`.
+///
+/// SO THE COST IS A VIEW LAG PER EPISODE, and the rate argument below is unchanged by the correction
+/// — it was always about how OFTEN, never about how deep. One per shell is invisible; one per MG
+/// pellet is a stutter. At 900 rpm cyclic that is ~15 per second unwindowed; 16 ticks caps it at
 /// 64 / 16 = 4 per second per hull, and even the ceiling only reaches 64 / 23 = 2.8. So the feel
 /// argument sets no floor of its own — every window in the band beats per-pellet and none of them
-/// gets the hitch rate below ~3 per second. What it says instead is DIRECTIONAL: sit as HIGH in the
-/// band as the ceiling's margin allows, and treat the residual 4-per-second hitch under sustained
-/// fire as a `render_error` cost to remove (#27) rather than a window to widen.
+/// gets the rate below ~3 per second. What it says instead is DIRECTIONAL: sit as HIGH in the
+/// band as the ceiling's margin allows.
+///
+/// AND FOR AN ADOPTED HIT THE LAG IS NOW ZERO. Since slice 4 `net::render_error` refuses to
+/// accumulate a correction that carries a delivered authoritative event, so a hull-shock episode's
+/// own rollback is presented on the frame it lands. The residual view lag this constant trades
+/// against is the ordinary-misprediction one that happens to coincide with it.
 ///
 /// WHY 16 AND NOT 20 — 16 keeps 7 ticks of margin under the fallback and already buys 3.75× fewer
 /// rollbacks than per-pellet, where the last 30% of the band would spend nearly all of that margin
@@ -2888,8 +2905,8 @@ mod tests {
         use bevy_replicon::prelude::RepliconTick;
         use lightyear::prelude::client::{Client, ClientPlugins, Connected};
         use lightyear::prelude::{
-            InputTimeline, IsSynced, LocalTimeline, PeerId, Predicted, PredictionHistory,
-            PredictionManager, RemoteId, StateRollbackMetadata, Tick,
+            InputTimeline, IsSynced, LocalTimeline, PeerId, Predicted, PredictionHistory, RemoteId,
+            StateRollbackMetadata, Tick,
         };
 
         use crate::ballistics::FireShell;
@@ -3026,7 +3043,7 @@ mod tests {
             Client::default(),
             RemoteId(PeerId::Server),
             Connected,
-            PredictionManager::default(),
+            crate::net::test_harness::prediction_manager(),
             IsSynced::<InputTimeline>::default(),
         ));
 

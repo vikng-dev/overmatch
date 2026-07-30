@@ -285,8 +285,13 @@ pub(super) const ORDERING_BUDGET_TICKS: i32 = RICOCHET_HOLD_TICKS as i32;
 /// the correct state was always knowable locally, the seam is the client's fault, and the view
 /// layer should hide it as hard as it can. "The server is telling me something hit me" is a correct
 /// physical EVENT arriving late: smoothing it away would be smoothing away the hit itself, so it
-/// must stay SHARP. `net::render_error` is the consumer that acts on the distinction; this slice
-/// only carries the tag.
+/// must stay SHARP.
+///
+/// THE TAG IS NOT THE PRESENTATION SIGNAL, and slice 4 established that it cannot be. It records the
+/// INTENT of whoever claimed the forced-rollback slot; what `net::render_error` needs is what the
+/// rollback DELIVERED, which only [`retirement`] can say and which disagrees with the tag in both
+/// directions. See [`SharpCorrection`]. The tag's remaining jobs are same-tick slot arbitration
+/// ([`AdoptionCause::wins_over`]), logging, and the `ExternalEvent` predicate on that message.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum AdoptionCause {
     /// The client's own prediction drifted from authority. Hide the seam.
@@ -317,9 +322,15 @@ impl AdoptionCause {
 #[derive(Resource, Default)]
 pub(crate) struct ForcedRollbackSlot {
     /// This frame's claim, cleared by [`confirm_forced_rollback`] whether or not it was installed.
+    ///
+    /// THE ONLY FIELD, and slice 4 is why. There used to be a second one — `installed`, the
+    /// confirmed claim — stored here after `RollbackSystems::Prepare` so a future consumer could
+    /// read it. ADR-0032's latch audit carried it as "safe TODAY, and the reason has an expiry
+    /// date: it has no external consumer yet". The expiry arrived, and the resolution was to DELETE
+    /// the field rather than to guard it: [`confirm_forced_rollback`] now takes the claim into a
+    /// local value and consumes it in the same statement sequence, so there is no confirmed value
+    /// stored anywhere for a later schedule point to read stale.
     claim: Option<(Tick, AdoptionCause)>,
-    /// The tick and cause of the forced rollback lightyear ACTUALLY installed this frame.
-    installed: Option<(Tick, AdoptionCause)>,
 }
 
 impl ForcedRollbackSlot {
@@ -349,14 +360,44 @@ impl ForcedRollbackSlot {
         }
         owned
     }
+}
 
-    /// The tick and cause of the forced rollback installed this frame, if any.
-    ///
-    /// This is the surface `net::render_error` reads to decide whether to smooth a correction away
-    /// or leave it sharp.
-    pub(crate) fn installed(&self) -> Option<(Tick, AdoptionCause)> {
-        self.installed
-    }
+/// ONE PREDICTED ROOT whose correction on THIS rollback must be presented SHARP.
+///
+/// # Why the cause tag is not this signal, and never could be
+///
+/// Slice 4's original brief was "`net::render_error` reads the [`AdoptionCause`] the forced-rollback
+/// slot was tagged with". That is the wrong fact, semantically and not merely by timing. The tag
+/// records who CLAIMED the slot; this message records what the rollback DELIVERED, which is what
+/// [`retirement`] establishes and the two disagree in both directions:
+///
+/// - [`Retirement::Delivered`] — another subsystem's confirmed-state rollback carried the staged
+///   hit. The shove is live on the hull and must stay sharp, while the slot's cause reads `None` or
+///   [`AdoptionCause::Misprediction`].
+/// - [`Retirement::Undelivered`] — our own [`AdoptionCause::ExternalEvent`] claim was installed and
+///   `prepare_rollback` restored a PRE-hit velocity. There is no hit in that correction to keep
+///   sharp, while the slot's cause says there is.
+///
+/// No scheduling guard repairs that; the tag answers a different question.
+///
+/// # Why it names an ENTITY, and why it is a message
+///
+/// A rollback is world-wide and sharpness is per-root: two predicted roots can be corrected by one
+/// rollback and only one of them was shot. A global `Option` carries no target, so a replacement
+/// root spawned after a despawn would inherit the previous victim's sharpness — Bevy's `Entity`
+/// generation is what stops that, and it only helps if the signal carries one.
+///
+/// It is a MESSAGE and not stored state because the consumer is one system, two system boundaries
+/// later, inside the same `PreUpdate` rollback transaction: `net::render_error`'s capture DRAINS the
+/// queue every frame, whether or not any root matches. Nothing is left to be read on a later frame,
+/// so this is not a latch and needs no row in ADR-0032's audit table.
+#[derive(Message, Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) struct SharpCorrection {
+    /// The predicted root the delivered fact is about — [`FactId::entity`], generation included.
+    pub(super) entity: Entity,
+    /// The tick the rollback that delivered it restored from. Diagnostic: the consumer keys on the
+    /// entity, and the queue never survives the frame, so nothing needs this to disambiguate.
+    pub(super) restored_from: Tick,
 }
 
 /// Everything the best-effort ordering rule has done so far. Read by `net::diagnostics`.
@@ -1519,6 +1560,12 @@ fn clear_to_order(
 ///
 /// `carried` is asked of BOTH routes, ours included: an installed claim of our own that restored a
 /// pre-event velocity is [`Retirement::Undelivered`], not an adoption. See [`retirement`].
+///
+/// THE CONFIRMED CLAIM IS A LOCAL, and slice 4 made it one. It used to be written back to
+/// [`ForcedRollbackSlot`] so `net::render_error` could read it in `PostUpdate`; the field is gone
+/// and the value now lives only in this function's frame. The presentation signal this function
+/// emits instead — [`SharpCorrection`] — is derived from the ESTABLISHED [`Retirement`] below,
+/// after `carried` has been read, and not from the claim's cause tag.
 fn confirm_forced_rollback(
     managers: Query<(&PredictionManager, Option<&Rollback>)>,
     hulls: Query<(
@@ -1529,14 +1576,17 @@ fn confirm_forced_rollback(
     mut slot: ResMut<ForcedRollbackSlot>,
     mut adoption: ResMut<AuthorityAdoption>,
     mut presentation: ResMut<ImpactPresentation>,
+    mut sharp: MessageWriter<SharpCorrection>,
 ) {
     let manager = managers.single().ok();
     let started = manager.and_then(|(manager, _)| manager.get_rollback_start_tick());
     let kind = manager
         .and_then(|(_, rollback)| rollback)
         .map(RestoresFrom::of);
-    slot.installed = slot.claim.take().filter(|(tick, _)| started == Some(*tick));
-    if let Some((tick, cause)) = slot.installed() {
+    // TAKEN INTO A LOCAL and used below without being stored: the claim is cleared every frame
+    // whether or not lightyear installed it, and the confirmation it produces exists only here.
+    let installed = slot.claim.take().filter(|(tick, _)| started == Some(*tick));
+    if let Some((tick, cause)) = installed {
         debug!(
             "client: forced rollback installed at tick {} — cause {cause:?}",
             tick.0,
@@ -1576,14 +1626,18 @@ fn confirm_forced_rollback(
             participation.velocities().is_ok()
                 && restore_carries_the_shove(linear, angular, started, fact.settled_at)
         });
-    let outcome = retirement(
-        &adoption,
-        &presentation,
-        slot.installed(),
-        started,
-        kind,
-        carried,
-    );
+    let outcome = retirement(&adoption, &presentation, installed, started, kind, carried);
+    // THE PRESENTATION SIGNAL, produced from the ESTABLISHED retirement and not from the raw cause.
+    // `keeps_the_seam_sharp` is an exhaustive match over [`Retirement`], so a new outcome cannot be
+    // added without deciding this question for it.
+    if outcome.is_some_and(Retirement::keeps_the_seam_sharp)
+        && fact.cause == AdoptionCause::ExternalEvent
+    {
+        sharp.write(SharpCorrection {
+            entity: fact.id.entity,
+            restored_from: started,
+        });
+    }
     match outcome {
         None | Some(Retirement::Keep) => return,
         Some(Retirement::Undelivered) => {
@@ -1664,6 +1718,33 @@ enum Retirement {
     Delivered { spark_pending: bool },
 }
 
+impl Retirement {
+    /// Whether the correction this rollback produces on the fact's own root carries an authoritative
+    /// EVENT, and must therefore be presented sharp rather than smoothed away.
+    ///
+    /// The question is "is the hit on the live hull because of this rollback", which is exactly what
+    /// the two DELIVERING outcomes assert and the two others deny:
+    ///
+    /// - [`Retirement::Adopted`] — our claim was installed AND `carried`. The hit is live.
+    /// - [`Retirement::Delivered`] — somebody else's confirmed-state rollback carried it onto a hull
+    ///   it reached. The hit is equally live, and `spark_pending` is a telemetry question about
+    ///   ordering, not about delivery, so BOTH of its variants are sharp.
+    /// - [`Retirement::Keep`] — nothing of the fact landed; the correction, if any, is ordinary
+    ///   misprediction and smoothing it hides nothing the player is owed.
+    /// - [`Retirement::Undelivered`] — our claim was installed and the restore carried a PRE-hit
+    ///   velocity. There is no hit in this correction to keep sharp; going sharp here would expose a
+    ///   seam for nothing. This is the case a reader of [`AdoptionCause`] would get backwards.
+    ///
+    /// EXHAUSTIVE ON PURPOSE — no wildcard arm, so a fifth outcome is a compile error here rather
+    /// than a silent "not sharp".
+    fn keeps_the_seam_sharp(self) -> bool {
+        match self {
+            Retirement::Adopted | Retirement::Delivered { .. } => true,
+            Retirement::Keep | Retirement::Undelivered => false,
+        }
+    }
+}
+
 /// WHERE a rollback restores predicted state FROM. The one property of a rollback that decides
 /// whether it can carry an authoritative fact at all.
 ///
@@ -1734,10 +1815,11 @@ impl RestoresFrom {
 /// offer runs on a different FRAME from the request.
 ///
 /// 1. THE BRANCH IS SAME-FRAME. It needs `adoption.requested` AND
-///    `installed == Some((produced_at, cause))`. [`ForcedRollbackSlot::installed`] is derived from
-///    `claim`, which [`confirm_forced_rollback`] takes every frame, so it is non-`None` only in the
-///    `PreUpdate` run in which [`request_staged_adoption`] claimed. That system revalidates
-///    [`restore_carries_the_shove`] immediately before claiming.
+///    `installed == Some((produced_at, cause))`. `installed` is a LOCAL in
+///    [`confirm_forced_rollback`], derived from [`ForcedRollbackSlot::claim`], which that function
+///    takes every frame — so it is non-`None` only in the `PreUpdate` run in which
+///    [`request_staged_adoption`] claimed. That system revalidates [`restore_carries_the_shove`]
+///    immediately before claiming.
 /// 2. NOTHING WRITES CONFIRMED HISTORY IN BETWEEN. Between the revalidation and
 ///    `RollbackSystems::Prepare` lie `net::watchdog`'s rollback check (read-only),
 ///    `RollbackSystems::Check` and `RollbackSystems::RemoveDisable`. `check_rollback` consumes the
@@ -1826,6 +1908,10 @@ pub(super) fn plugin(app: &mut App) {
     app.init_resource::<AuthorityAdoption>()
         .init_resource::<ForcedRollbackSlot>()
         .init_resource::<ImpactPresentation>()
+        // The presentation signal `net::render_error` consumes. Registered HERE, with the producer,
+        // so the queue exists on every composition that can emit one — including the server, which
+        // never reaches the emitting branch, and every fixture that mounts only this plugin.
+        .add_message::<SharpCorrection>()
         .add_observer(reset_adoption_state)
         .add_observer(note_presented_impact)
         // The request must exist before lightyear's rollback check consumes it, and before the
@@ -2500,6 +2586,52 @@ mod tests {
             Some(Retirement::Adopted),
             "the same claim over a restore that DID carry the shove is the ordinary success",
         );
+        assert!(
+            !Retirement::Undelivered.keeps_the_seam_sharp(),
+            "an installed ExternalEvent claim that carried NOTHING has no hit in its correction — \
+             a presentation signal read off the cause tag would go sharp here for nothing, which \
+             is the direction of the error that made the tag unusable as the signal",
+        );
+    }
+
+    /// WHICH RETIREMENTS PRODUCE A SHARP SEAM, stated over every outcome rather than over the two
+    /// this module happens to reach today.
+    ///
+    /// The rule is DELIVERY, not intent: sharp exactly when the authority's post-hit state is on the
+    /// live hull because of this rollback. Both `Delivered` variants qualify — `spark_pending` is a
+    /// telemetry question about ORDERING and says nothing about whether the shove landed — and both
+    /// non-delivering outcomes do not.
+    ///
+    /// [`Retirement::Undelivered`] is the one this fixture can reach and no schedule-level fixture
+    /// can: the branch is unreachable against the pinned lightyear (see [`retirement`] for the
+    /// three-step proof) and is kept as a tripwire, so its presentation verdict has to be pinned
+    /// here or nowhere.
+    #[test]
+    fn only_the_two_retirements_that_delivered_the_fact_keep_the_seam_sharp() {
+        for (outcome, sharp) in [
+            (Retirement::Keep, false),
+            (Retirement::Adopted, true),
+            (Retirement::Undelivered, false),
+            (
+                Retirement::Delivered {
+                    spark_pending: false,
+                },
+                true,
+            ),
+            (
+                Retirement::Delivered {
+                    spark_pending: true,
+                },
+                true,
+            ),
+        ] {
+            assert_eq!(
+                outcome.keeps_the_seam_sharp(),
+                sharp,
+                "{outcome:?} must {} keep the seam sharp",
+                if sharp { "" } else { "NOT" },
+            );
+        }
     }
 
     /// The other half of the same rule. A rollback SHALLOWER than the producing tick restores
@@ -3195,7 +3327,15 @@ mod tests {
             Unhistoried,
         }
 
-        fn run(started: Tick, sampled_at: Tick, membership: InPrepare) -> OrderingTally {
+        /// The tallies AND the presentation occurrences one run produced. Both, from one run:
+        /// "the shove landed" and "the view was told to show it sharp" are separate claims, and a
+        /// fixture that read only the first could not see a presentation rule that smooths a
+        /// delivered hit away.
+        fn run(
+            started: Tick,
+            sampled_at: Tick,
+            membership: InPrepare,
+        ) -> (OrderingTally, Vec<Entity>, Entity) {
             let mut world = World::new();
             let hull = world.spawn_empty().id();
             world
@@ -3224,7 +3364,7 @@ mod tests {
                 }
             }
 
-            let manager = PredictionManager::default();
+            let manager = crate::net::test_harness::prediction_manager();
             manager.set_rollback_tick(started);
             world.spawn((manager, Rollback::FromState));
 
@@ -3241,15 +3381,22 @@ mod tests {
             // retention is established at the offer, so a run that swapped in an empty resource here
             // would be asking `retirement` a question production never asks it.
             world.insert_resource(presentation);
+            world.init_resource::<bevy::ecs::message::Messages<SharpCorrection>>();
 
             world
                 .run_system_once(confirm_forced_rollback)
                 .expect("the retirement seam runs");
-            world.resource::<ImpactPresentation>().tally()
+            let sharp = world
+                .resource_mut::<bevy::ecs::message::Messages<SharpCorrection>>()
+                .drain()
+                .map(|occurrence| occurrence.entity)
+                .collect();
+            (world.resource::<ImpactPresentation>().tally(), sharp, hull)
         }
 
+        let (tally, sharp, hull) = run(Tick(104), Tick(100), InPrepare::Restored);
         assert_eq!(
-            run(Tick(104), Tick(100), InPrepare::Restored),
+            tally,
             OrderingTally {
                 bypassed: 1,
                 ..default()
@@ -3259,25 +3406,44 @@ mod tests {
              is OLDER than the tick-104 confirmed `HullShock` that certified the episode, and the \
              rule that compared against that tick counted this real delivery as nothing.",
         );
+        assert_eq!(
+            sharp,
+            vec![hull],
+            "AND THE VIEW MUST BE TOLD. This rollback was somebody else's — the slot carries no \
+             claim of ours at all — so a presentation signal read off the cause tag would smooth \
+             a hit that is already on the live hull. The signal is derived from the RETIREMENT.",
+        );
         // FINDING THE SLICE-3.11 REVIEW CAUGHT, at this seam. Identical histories, identical depth,
         // identical `Rollback::FromState` — and a hull `prepare_rollback`'s query filters out. The
         // predicate above reads the same "yes" in every one of these runs, because a confirmed
         // history answers what a restore WOULD resolve and knows nothing about whether one happened.
         for excluded in [InPrepare::Disabled, InPrepare::Unhistoried] {
+            let (tally, sharp, _) = run(Tick(104), Tick(100), excluded);
             assert_eq!(
-                run(Tick(104), Tick(100), excluded),
+                tally,
                 OrderingTally::default(),
                 "a hull outside `prepare_rollback`'s query was not restored, so nothing was \
                  delivered and `bypassed` may not move. Counting it would inflate the ONE number \
                  that is supposed to say how often this rule is circumvented — with rollbacks that \
                  did not reach the hull at all.",
             );
+            assert!(
+                sharp.is_empty(),
+                "and the view may not be told to keep anything sharp either: refusing to smooth a \
+                 correction that carries no hit exposes a seam for nothing. Emitted: {sharp:?}",
+            );
         }
+        let (tally, sharp, _) = run(Tick(104), Tick(96), InPrepare::Restored);
         assert_eq!(
-            run(Tick(104), Tick(96), InPrepare::Restored),
+            tally,
             OrderingTally::default(),
             "same depth, but the newest confirmed sample predates the episode's close, so the \
              restore installed a PRE-hit velocity: nothing was delivered, nothing may be counted",
+        );
+        assert!(
+            sharp.is_empty(),
+            "nor told to render anything sharp — the correction on screen is the client's own \
+             misprediction and hiding it hides nothing the player is owed. Emitted: {sharp:?}",
         );
     }
 

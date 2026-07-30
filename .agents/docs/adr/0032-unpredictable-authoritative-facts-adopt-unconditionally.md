@@ -8,8 +8,10 @@
 A fact the client had no information to predict — that it was shot — reaches the player through a
 forced rollback that **no threshold can veto**. `net::adoption` decides WHETHER the authority's
 state replaces the client's, unconditionally and per fact; `net::render_error` decides HOW hard the
-resulting discontinuity is smoothed, from a cause tag the adoption carries. `HullShock` is the first
-consumer of that primitive, not its design.
+resulting discontinuity is smoothed — from what the rollback was ESTABLISHED to have delivered, per
+predicted root, and **not** from the cause tag the adoption carries, which slice 4 found is a
+different question (see *The `AdoptionCause` tag is NOT the presentation signal*). `HullShock` is the
+first consumer of that primitive, not its design.
 
 ## Context
 
@@ -97,7 +99,8 @@ seam in the same place.
 - ADOPTING AUTHORITY is unconditional. If the authority says a fact happened, the client adopts it —
   no magnitude test, no tolerance, no policy branch. The only questions asked are whether the
   adoption is *possible* (readiness) and whether it has already happened (dedupe).
-- HIDING THE SEAM is thresholded, view-only, and lives in `net::render_error`.
+- HIDING THE SEAM is thresholded, view-only, and lives in `net::render_error` — and since slice 4 it
+  is not hidden at all when the correction is established to carry the fact.
 
 `AdoptionCause` is the tag that connects them, and its two variants are not cosmetic. A
 `Misprediction` is the client's own error — the correct state was always knowable locally, so the
@@ -443,6 +446,13 @@ found. That asymmetry, not the row count, is the finding: see *Is this the class
 Provenance is marked per row. `BOTH` = independently found twice. `REVIEW` = round 7 had it and the
 implementer's pass did not. `IMPL` = the reverse.
 
+**The counts above are round 7's inventory and are not re-derived per slice.** Slice 4 struck one row
+out (`ForcedRollbackSlot::installed`, deleted rather than guarded) and added one (`SharpCorrection`,
+which is a message and not a latch, listed so the class stays enumerated rather than because it needs
+defending). Both are marked in place; the 29/21/4/4 figures are left as the reconciliation produced
+them, because the paragraph above is a finding about two enumerations of one file at one moment, and
+editing its arithmetic every slice would destroy the only thing it says.
+
 **An earlier version of this paragraph said 23 / 25 / 27, which is arithmetically impossible with
 four each way, and the eighth review caught it.** The 23 is round 7's own count in round 7's own
 granularity; this table is finer in at least two places (the four-history readiness is split into its
@@ -498,7 +508,8 @@ what the old sentence did.
 |---|---|---|---|
 | `started` and rollback kind (`RestoresFrom`) | retirement | Safe. Read directly off the installed current rollback and consumed immediately, in one system. | BOTH |
 | **`carried`** | retirement | **DEFECTIVE.** Safe only if `Prepare` selected the hull, and it did not ask — it read a `ConfirmedHistory` result that is a COUNTERFACTUAL when eligibility excluded the entity. This is the same defect as the participation rows seen from the consumer end, and listing it separately is what makes "gate the request" visibly insufficient on its own. Fixed by slice 3.11. | REVIEW |
-| `ForcedRollbackSlot::installed` | retirement, logging | Safe TODAY, and the reason has an expiry date: it is freshly overwritten after `Prepare`, derived from the current `started`, and **has no external consumer yet**. `net::render_error` becomes one in slice 4, at which point this row must be re-assessed rather than inherited. | BOTH |
+| ~~`ForcedRollbackSlot::installed`~~ | ~~retirement, logging~~ | **DELETED by slice 4 (2026-07-30), which is what the expiry date bought.** The row read "safe TODAY, and the reason has an expiry date: it is freshly overwritten after `Prepare`, derived from the current `started`, and **has no external consumer yet**. `net::render_error` becomes one in slice 4, at which point this row must be re-assessed rather than inherited." The re-assessment found the field's *timing* was never the problem — the value is semantically the wrong answer for the consumer that was going to read it (see *The `AdoptionCause` tag* below) — so the field and its accessor are gone rather than guarded. `confirm_forced_rollback` now takes the claim into a LOCAL and consumes it in the same statement sequence; no confirmed value is stored anywhere. **The audit is one row shorter, not one row safer.** | BOTH |
+| `SharpCorrection` (the presentation occurrence slice 4 added) | `net::render_error::capture_render_error` | Not a latch, and deliberately shaped so it cannot become one. It is a message, written after `Prepare` from the ESTABLISHED `Retirement`, and DRAINED two system boundaries later in the same `PreUpdate` — unconditionally, whether or not any root matches it — so nothing survives the frame. It also names the exact `Entity`, generation included, so a despawned victim's occurrence cannot match its replacement. Pinned by `net::render_error::an_occurrence_is_drained_on_the_frame_it_is_written_even_with_no_rollback_to_apply_it_to` and `..._naming_the_previous_incarnation_of_an_index_cannot_sharpen_the_current_one`. | IMPL |
 
 #### Is this the class?
 
@@ -620,11 +631,41 @@ the only delivery path that has ever run on a real link in favour of one whose r
 so far been exercised only in fixtures. It would also SHRINK the hole above, not close it — every
 other rollback cause still restores the same state.
 
-### The `AdoptionCause` tag currently has no consumer
+### The `AdoptionCause` tag is NOT the presentation signal — slice 4's finding (2026-07-30)
 
-`ForcedRollbackSlot::installed` is read only inside `net::adoption` today. The distinction between
-hiding a seam and keeping one sharp is carried, logged, and unused; `net::render_error` acts on it in
-the next slice. Until then every adopted fact is smoothed exactly like a misprediction.
+This section used to read: "`ForcedRollbackSlot::installed` is read only inside `net::adoption`
+today. The distinction between hiding a seam and keeping one sharp is carried, logged, and unused;
+`net::render_error` acts on it in the next slice."
+
+It does not, and it cannot. The tag records who **claimed** the forced-rollback slot; what the view
+layer needs is what the rollback **delivered**. This ADR already documents both ways those disagree,
+in `confirm_forced_rollback` / `retirement`:
+
+- `Retirement::Delivered` — another subsystem's confirmed-state rollback carried the staged hit onto
+  the live hull. The tag reads `None` or `Misprediction`, so a cause-tag reader would smooth away a
+  hit that is already live. `net::lead_zero_rollback::a_rollback_this_module_did_not_order_delivers_the_shove_and_is_counted`
+  is that case end to end, and it is the fixture that goes red if the signal is ever re-derived from
+  the tag.
+- `Retirement::Undelivered` — our own `ExternalEvent` claim was installed and `prepare_rollback`
+  restored a pre-hit velocity. The tag says "keep this sharp"; there is no hit in that correction to
+  keep sharp, so it would expose a seam for nothing.
+
+On top of that, `installed` was a single global `Option` carrying no target entity, while sharpness
+is per predicted root: one rollback corrects every armed root, and only one of them was shot.
+
+**So the signal is `SharpCorrection`** — an entity-keyed, one-shot message emitted from the
+established `Retirement` (`Adopted` and both `Delivered` variants; never `Keep` or `Undelivered`,
+pinned exhaustively by `only_the_two_retirements_that_delivered_the_fact_keep_the_seam_sharp`), and
+consumed in the same `PreUpdate`. `ForcedRollbackSlot::installed` is deleted. The tag's remaining
+jobs are same-tick slot arbitration (`AdoptionCause::wins_over`), logging, and the `ExternalEvent`
+predicate on the message.
+
+**What the consumer does with it**: `net::render_error` does not accumulate that root's correction at
+all. Not "decay it faster" — that still delays and attenuates the hit and introduces a feel threshold
+with no meaning — and not a smoothed/sharp split of one correction, because the corrected pose is the
+nonlinear result of the impulse, ordinary divergence, replay and contacts and the provenance to
+decompose it does not exist. Every other root in the same rollback smooths normally, and an older
+offset already decaying on the sharp root keeps decaying.
 
 ## Numbers, and which of them are DERIVED
 
@@ -686,12 +727,20 @@ to be derived, never measured, and 2.5× too large.
 
 ## Consequences
 
-- **Every adopted fact costs one render hitch.** A forced rollback is a pose discontinuity;
-  `net::render_error` smooths it into `RenderErrorOffset` and the shipped smoothing still leaves one
-  frame of render freeze per rollback. `SHOCK_EPISODE_TICKS` caps that at 64/16 = 4 per second per
-  hull under sustained fire, against a DERIVED ~15 per second at 900 rpm cyclic if every pellet
-  published its own episode. The residual is `render_error`'s cost to remove — a reason to fix the
-  smoothing, not to widen the episode window.
+- **~~Every adopted fact costs one render hitch.~~ Since slice 4 (2026-07-30) an adopted fact costs
+  none.** This bullet used to read: "A forced rollback is a pose discontinuity; `net::render_error`
+  smooths it into `RenderErrorOffset` and the shipped smoothing still leaves one frame of render
+  freeze per rollback." Both halves were wrong. `net::render_error` now refuses to accumulate a
+  correction established to have delivered the fact, so the shove is presented on the frame it lands
+  — that was the residual this bullet called "`render_error`'s cost to remove", and removing it is
+  what slice 4 did. And "render freeze" overstated what the smoothing ever did to the frames it does
+  smooth: the offset is DECAYED before it is applied (≈95% of the previous displayed pose survives a
+  small correction at 64 Hz, less under the 3 m/s correction-speed cap, nothing at all past the 2 m
+  snap threshold), and the SIM never stops — `Position`, `Rotation`, the velocities, replay and the
+  fixed ticks all continue, because that layer writes only `Transform`. What `SHOCK_EPISODE_TICKS`
+  still buys is the RATE at which coincident ordinary misprediction is re-presented: 64/16 = 4 per
+  second per hull under sustained fire, against a DERIVED ~15 per second at 900 rpm cyclic if every
+  pellet published its own episode.
 - **The coarse comparator gates are unchanged**, so no jitter-storm class is re-opened by this work.
   That was the constraint the design was built around, not a happy outcome.
 - **`request_forced_rollback` now has exactly one production call site**, enforced by a source scan

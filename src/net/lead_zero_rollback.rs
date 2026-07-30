@@ -115,8 +115,8 @@ use lightyear::core::confirmed_history::ConfirmedHistory;
 use lightyear::prelude::client::{Client, ClientPlugins, Connected, Remote};
 use lightyear::prelude::{
     DisableRollback, InputTimeline, InputTimelineConfig, IsSynced, LocalTimeline, PeerId,
-    PingManager, Predicted, PredictionHistory, PredictionManager, RemoteId,
-    ReplicationCheckpointMap, RollbackSystems, StateRollbackMetadata, SyncConfig, Tick,
+    PingManager, Predicted, PredictionHistory, RemoteId, ReplicationCheckpointMap, RollbackSystems,
+    StateRollbackMetadata, SyncConfig, Tick,
 };
 use lightyear_core::time::TickInstant;
 use lightyear_core::timeline::NetworkTimeline;
@@ -125,7 +125,7 @@ use lightyear_sync::timeline::sync::{SyncTargetTimeline, SyncedTimeline};
 
 use super::adoption::{
     AdoptionCause, AuthorityAdoption, ForcedRollbackSlot, ImpactPresentation,
-    ORDERING_BUDGET_TICKS, OrderingTally,
+    ORDERING_BUDGET_TICKS, OrderingTally, SharpCorrection,
 };
 use crate::ballistics::{
     AuthorityImpact, HullShock, HullShockLedger, Impact, ImpactSurface, ShockCause,
@@ -390,6 +390,32 @@ struct Delivered {
     /// What lets a fixture about the replay window pin the boundary it NAMES rather than assert
     /// against "some tick past it".
     final_age: i32,
+    /// Every [`SharpCorrection`] the run emitted, drained at the schedule point
+    /// `net::render_error::capture_render_error` drains them at.
+    ///
+    /// This is the PRESENTATION half of the transaction and it has to be evidence from the same run
+    /// as the delivery half: "the shove reached the live hull" and "the view was told to show it
+    /// sharp" are two different claims, and a fixture that only checks the first cannot see a
+    /// presentation rule that smooths a delivered hit away.
+    sharp: Vec<Entity>,
+    /// The predicted hull the run built, so a `sharp` entry can be checked against the entity it
+    /// must name rather than merely counted.
+    hull: Option<Entity>,
+}
+
+/// Drain the presentation occurrences exactly where the client's consumer drains them.
+///
+/// `net::render_error` is a CLIENT plugin and this fixture builds the shared protocol only, so
+/// nothing here would otherwise consume the queue. Draining it — rather than reading it at the end
+/// of the run — is what makes the recorded list per-frame occurrences rather than an accumulation
+/// that a one-shot bug could not be told apart from.
+fn collect_sharp_corrections(
+    mut occurrences: ResMut<bevy::ecs::message::Messages<SharpCorrection>>,
+    mut delivered: ResMut<Delivered>,
+) {
+    delivered
+        .sharp
+        .extend(occurrences.drain().map(|occurrence| occurrence.entity));
 }
 
 fn observe_replay(timeline: Res<LocalTimeline>, mut delivered: ResMut<Delivered>) {
@@ -494,6 +520,11 @@ fn run_scenario(scenario: Scenario) -> Delivered {
     app.insert_state(crate::state::AppState::Playing);
     app.init_resource::<Delivered>();
     app.add_systems(FixedPreUpdate, observe_replay);
+    // AFTER the rollback has run, which is where `net::render_error::capture_render_error` sits.
+    app.add_systems(
+        PreUpdate,
+        collect_sharp_corrections.after(RollbackSystems::EndRollback),
+    );
     if let Some(tick) = competitor {
         app.insert_resource(CompetingClaim(tick));
         // AFTER the watchdog set, which `net::adoption::request_staged_adoption` runs before: the
@@ -512,7 +543,7 @@ fn run_scenario(scenario: Scenario) -> Delivered {
         Client::default(),
         RemoteId(PeerId::Server),
         Connected,
-        PredictionManager::default(),
+        crate::net::test_harness::prediction_manager(),
         IsSynced::<InputTimeline>::default(),
     ));
 
@@ -746,6 +777,7 @@ fn run_scenario(scenario: Scenario) -> Delivered {
     delivered.live_velocity_removed = live_velocity_removed;
     delivered.live_pose_removed = live_pose_removed;
     delivered.final_age = final_age;
+    delivered.hull = Some(root);
     delivered
 }
 
@@ -862,6 +894,13 @@ fn assert_delivered(lead: Lead) {
         delivered.processed_on_arrival,
     );
     assert_eq!(delivered.live_angular, AUTHORITY_ANGULAR);
+    assert_eq!(
+        delivered.sharp,
+        vec![delivered.hull.expect("the run built a hull")],
+        "an ADOPTED fact must also tell the view to keep the seam sharp — exactly once, naming this \
+         hull. `net::render_error` refuses to smooth the correction it names, which is the whole \
+         reason the shove is visible on the frame it lands.",
+    );
 }
 
 /// THE ORDERING RULE, at the lead where the schedule makes it bite. The shock and its
@@ -937,6 +976,13 @@ fn a_fact_whose_restore_cannot_carry_the_shove_is_never_requested() {
          known was useless. The whole point of establishing delivery BEFORE requesting is that this \
          line reads all zeroes.",
     );
+    assert!(
+        delivered.sharp.is_empty(),
+        "and NOTHING may be told to render sharp. Every retirement here is `Keep`: no rollback \
+         carried this fact, so any correction on screen is ordinary misprediction and smoothing it \
+         hides nothing the player is owed. Emitted: {:?}",
+        delivered.sharp,
+    );
 }
 
 /// FINDING THE SLICE-3.7 REVIEW CAUGHT: `OrderingTally::bypassed` claims a shove LANDED, and until
@@ -988,6 +1034,16 @@ fn a_rollback_this_module_did_not_order_delivers_the_shove_and_is_counted() {
          waiting for its spark — one BYPASS, and nothing else. `released_on_budget` staying zero is \
          the other half: the fact was spent by the bypass, so the budget never had to release it, \
          and it was not re-requested for state already live.",
+    );
+    assert_eq!(
+        delivered.sharp,
+        vec![delivered.hull.expect("the run built a hull")],
+        "AND THE VIEW MUST BE TOLD, which is the case a reader of the cause tag gets backwards. \
+         The slot was claimed by somebody else and tagged `Misprediction`, so the tag says \
+         'hide this seam' while the restore put the authority's post-hit velocity on the live hull. \
+         The signal is derived from the RETIREMENT — `Delivered` — and not from the tag. \
+         Emitted: {:?}",
+        delivered.sharp,
     );
 }
 
@@ -1103,7 +1159,7 @@ fn a_late_replicated_change_is_revalidated_before_the_request() {
 #[test]
 fn a_revalidation_that_never_passes_is_dropped_at_the_replay_window() {
     let window = i32::from(
-        PredictionManager::default()
+        crate::net::test_harness::prediction_manager()
             .rollback_policy
             .max_rollback_ticks,
     );
@@ -1287,6 +1343,13 @@ fn a_hull_excluded_from_prepare_is_never_requested_and_never_adopted() {
         !delivered.live_velocity_removed && !delivered.live_pose_removed,
         "the hull must still HAVE its rigid body: an excluded hull is untouched, not stripped",
     );
+    assert!(
+        delivered.sharp.is_empty(),
+        "and the view must NOT be told to keep anything sharp. A rollback that skipped the hull \
+         delivered no hit, so refusing to smooth its correction would expose a seam for nothing. \
+         Emitted: {:?}",
+        delivered.sharp,
+    );
 }
 
 /// The pose the authority holds at the restore target, and what the live hull is doing instead.
@@ -1333,7 +1396,7 @@ fn components_prepare_restored(excluded: bool, histories: [bool; 4]) -> [bool; 4
         Client::default(),
         RemoteId(PeerId::Server),
         Connected,
-        PredictionManager::default(),
+        crate::net::test_harness::prediction_manager(),
         IsSynced::<InputTimeline>::default(),
     ));
 

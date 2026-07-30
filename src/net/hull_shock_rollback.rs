@@ -22,8 +22,8 @@ use bevy_replicon::prelude::RepliconTick;
 use lightyear::core::confirmed_history::ConfirmedHistory;
 use lightyear::prelude::client::{Client, ClientPlugins, Connected, Remote};
 use lightyear::prelude::{
-    InputTimeline, IsSynced, LocalTimeline, PeerId, Predicted, PredictionHistory,
-    PredictionManager, RemoteId, ReplicationCheckpointMap, Tick,
+    InputTimeline, IsSynced, LocalTimeline, PeerId, Predicted, PredictionHistory, RemoteId,
+    ReplicationCheckpointMap, Tick,
 };
 
 use crate::ballistics::{HullShock, HullShockLedger, ShockCause};
@@ -121,7 +121,7 @@ fn run_arrival(prediction: Prediction) -> Delivered {
         Client::default(),
         RemoteId(PeerId::Server),
         Connected,
-        PredictionManager::default(),
+        crate::net::test_harness::prediction_manager(),
         IsSynced::<InputTimeline>::default(),
     ));
 

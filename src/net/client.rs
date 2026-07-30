@@ -149,6 +149,23 @@ pub(crate) fn shipping_rollback_policy() -> RollbackPolicy {
     }
 }
 
+/// The visual-correction policy the shipping client installs.
+///
+/// Let the sim SNAP: `decay_period` 1 ms / `decay_ratio` 1e-7 collapses lightyear's built-in visual
+/// correction to a single frame — the error underflows to ~0 the frame the rollback lands — so the
+/// lightyear-visible pose reaches the corrected present at once. ALL visible smoothing lives in
+/// `net::render_error`, which offsets the render `Transform` and decays it with a capped correction
+/// velocity. Leaving lightyear's 200 ms / 0.5 DEFAULT here would double-smooth (and lightyear's has
+/// no velocity cap), reintroducing the lurch that layer exists to kill.
+///
+/// A FUNCTION rather than an inline literal, and every `PredictionManager` a FIXTURE spawns calls
+/// it too. Until slice 4 the test modules all carried `PredictionManager::default()` — the 200 ms /
+/// 0.5 policy — so every fixture in this tree exercised a smoothing configuration the game never
+/// runs. That divergence is closed here rather than by copying two constants into each fixture.
+pub(crate) fn shipping_correction_policy() -> CorrectionPolicy {
+    CorrectionPolicy::instant_correction()
+}
+
 pub fn run() {
     let simulate = std::env::args().any(|a| a == "--simulate-input")
         || harness::env_flag("SPIKE_SIMULATE_INPUT", false);
@@ -364,14 +381,7 @@ pub fn run() {
         PeerAddr(server_addr),
         PredictionManager {
             rollback_policy: shipping_rollback_policy(),
-            // Let the sim SNAP: collapse lightyear's built-in visual correction to a single frame
-            // (`decay_period` 1 ms / `decay_ratio` 1e-7 — the error underflows to ~0 the frame the
-            // rollback lands), so the lightyear-visible pose reaches the corrected present at once.
-            // ALL visible smoothing then lives in `net::render_error`, which offsets the render
-            // `Transform` and decays it with a capped correction velocity — the "view never snaps"
-            // layer. Leaving the default 200 ms half-life here would double-smooth (and lightyear's
-            // has no velocity cap), reintroducing the lurch this layer exists to kill.
-            correction_policy: CorrectionPolicy::instant_correction(),
+            correction_policy: shipping_correction_policy(),
             ..default()
         },
         // Explicitly own the input timeline configuration required by prediction.

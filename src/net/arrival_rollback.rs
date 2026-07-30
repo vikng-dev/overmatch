@@ -32,8 +32,8 @@ use bevy_replicon::prelude::RepliconTick;
 use lightyear::core::confirmed_history::ConfirmedHistory;
 use lightyear::prelude::client::{Client, ClientPlugins, Connected};
 use lightyear::prelude::{
-    InputTimeline, IsSynced, LocalTimeline, PeerId, Predicted, PredictionHistory,
-    PredictionManager, RemoteId, ReplicationCheckpointMap, StateRollbackMetadata, Tick,
+    InputTimeline, IsSynced, LocalTimeline, PeerId, Predicted, PredictionHistory, RemoteId,
+    ReplicationCheckpointMap, StateRollbackMetadata, Tick,
 };
 
 use crate::tank::{Tank, WeaponGate, WeaponGateState};
@@ -150,7 +150,7 @@ fn run_arrival(prediction: Prediction, route: Route) -> RestoredAtReplayStart {
         Client::default(),
         RemoteId(PeerId::Server),
         Connected,
-        PredictionManager::default(),
+        crate::net::test_harness::prediction_manager(),
         IsSynced::<InputTimeline>::default(),
     ));
 
