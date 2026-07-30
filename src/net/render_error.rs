@@ -19,12 +19,16 @@
 //! Lightyear already captures the first half of the exact quantity at the instant that matters.
 //! `lightyear_prediction::rollback::prepare_rollback` stores `PreviousVisual<C>` — the component
 //! value as it stood before the restore, which at `PreUpdate` is the pose the previous frame
-//! displayed. Capture then evaluates the corrected timeline at that SAME previous display instant,
-//! deliberately using the previous frame's fixed-time overstep before `RunFixedMainLoop`:
+//! displayed. Capture then asks what Lightyear would display from the corrected timeline at that
+//! SAME previous display instant, deliberately using the previous frame's fixed-time overstep
+//! before `RunFixedMainLoop`:
 //!
 //! ```text
-//! error = current_visual.diff(&previous_visual)
-//! current_visual = interpolate(history.get(tick - 1), component, overstep)
+//! predecessor = history.get(tick - 1) or retained FrameInterpolate.previous_value
+//! corrected_display = predecessor
+//!     .map(|p| interpolate(p, component, overstep))
+//!     .unwrap_or(component)
+//! error = corrected_display.diff(&previous_visual)
 //! ```
 //!
 //! Lightyear's own correction system documents this exact scheduling choice at
@@ -32,9 +36,10 @@
 //! later PostUpdate instant would subtract legitimate motion performed in `RunFixedMainLoop` and
 //! turn it back into a near-hold. At positive rollback depth, replay rebuilds the predecessor in
 //! history. At depth zero, the retained pre-rollback `FrameInterpolate.previous_value` supplies the
-//! shared `tick - 1` baseline. If neither source has a baseline, translation remains exactly
-//! computable because affine interpolation cancels the unknown shared value; rotation does not, so
-//! that one-tick-after-arming case is deliberately left sharp.
+//! shared `tick - 1` baseline. Those are two sources for one optional input, not separate correction
+//! strategies. If neither source supplies it, Lightyear's `visual_interpolation` skips and leaves the
+//! component at its raw endpoint, so capture compares the raw predicted and corrected endpoints on
+//! both axes.
 //!
 //! `PredictionHistory<C>`'s inner field is private, but the pinned 0.28 source implements public
 //! `Deref<Target = HistoryBuffer<C>>`, and `HistoryBuffer::get` is public. Capture only reads that
@@ -240,6 +245,23 @@ fn disable_if_parented(entity: Entity, parent: Option<&ChildOf>, commands: &mut 
     true
 }
 
+/// Reproduce Lightyear's display rule for one corrected component at capture's sample instant.
+///
+/// `visual_interpolation` interpolates only when `previous_value` exists; otherwise it skips and
+/// leaves the raw component untouched. The predecessor's two possible owners are selected by the
+/// caller, but once reduced to this optional input every capture path follows this one rule.
+fn corrected_display<C: Component + Clone>(
+    registry: &InterpolationRegistry,
+    predecessor: Option<&C>,
+    current: &C,
+    overstep: f32,
+) -> C {
+    predecessor.map_or_else(
+        || current.clone(),
+        |previous| registry.interpolate(previous.clone(), current.clone(), overstep),
+    )
+}
+
 /// Consume this rollback's same-instant correction: accumulate it, or refuse it as a delivered hit.
 ///
 /// CONSUME is literal for both inputs. The occurrence queue is DRAINED unconditionally, so an
@@ -332,26 +354,18 @@ fn capture_render_error(
         // travel must not become part of a rollback correction.
         //
         // Replay normally rebuilds tick - 1 in PredictionHistory. A depth-zero restore cannot; in
-        // that case FrameInterpolate still holds the pre-rollback tick - 1 sample, where predicted
-        // and corrected timelines agree. If both sources lack a translation baseline, affine
-        // interpolation cancels the unknown shared value and the same-instant error is exactly the
-        // endpoint error scaled by overstep. Quaternion interpolation does not have that
-        // cancellation: its intermediate left delta depends on the unknown baseline, so that
-        // one-tick-after-arming lifecycle is consumed without accumulating a rotation offset.
+        // that case FrameInterpolate may still hold the pre-rollback tick - 1 sample, where
+        // predicted and corrected timelines agree. These are the two providers for ONE optional
+        // predecessor. With it, Lightyear interpolates; without it, Lightyear skips interpolation
+        // and the raw corrected endpoint is the display. Both outcomes feed the same diff rule.
         if let Some(previous_visual) = previous_position {
             let predecessor = position_history.get(tick - 1).or_else(|| {
                 depth_zero
                     .then_some(position_interpolate.previous_value.as_ref())
                     .flatten()
             });
-            if let Some(previous) = predecessor {
-                let corrected_visual = registry.interpolate(*previous, *position, overstep);
-                offset.translation += corrected_visual.diff(&previous_visual.0).0.f32();
-            } else if depth_zero
-                && let Some(predicted_endpoint) = position_interpolate.current_value.as_ref()
-            {
-                offset.translation += position.diff(predicted_endpoint).0.f32() * overstep;
-            }
+            let corrected_visual = corrected_display(&registry, predecessor, position, overstep);
+            offset.translation += corrected_visual.diff(&previous_visual.0).0.f32();
         }
         if let Some(previous_visual) = previous_rotation {
             let predecessor = rotation_history.get(tick - 1).or_else(|| {
@@ -359,11 +373,9 @@ fn capture_render_error(
                     .then_some(rotation_interpolate.previous_value.as_ref())
                     .flatten()
             });
-            if let Some(previous) = predecessor {
-                let corrected_visual = registry.interpolate(*previous, *rotation, overstep);
-                let error = corrected_visual.diff(&previous_visual.0).0.f32();
-                offset.rotation = (offset.rotation * error).normalize();
-            }
+            let corrected_visual = corrected_display(&registry, predecessor, rotation, overstep);
+            let error = corrected_visual.diff(&previous_visual.0).0.f32();
+            offset.rotation = (offset.rotation * error).normalize();
         }
     }
 }
@@ -663,12 +675,26 @@ mod tests {
     #[derive(Resource, Default)]
     struct ReplayTravel(Vec3);
 
-    fn travel_during_replay(travel: Res<ReplayTravel>, mut roots: Query<&mut Position>) {
-        if travel.0 == Vec3::ZERO {
+    #[derive(Resource)]
+    struct ReplayRotation(Quat);
+
+    impl Default for ReplayRotation {
+        fn default() -> Self {
+            Self(Quat::IDENTITY)
+        }
+    }
+
+    fn travel_during_replay(
+        travel: Res<ReplayTravel>,
+        turn: Res<ReplayRotation>,
+        mut roots: Query<(&mut Position, &mut Rotation)>,
+    ) {
+        if travel.0 == Vec3::ZERO && turn.0 == Quat::IDENTITY {
             return;
         }
-        for mut position in &mut roots {
+        for (mut position, mut rotation) in &mut roots {
             position.0 += travel.0;
+            rotation.0 = (rotation.0 * turn.0).normalize();
         }
     }
 
@@ -720,6 +746,31 @@ mod tests {
         roots: Vec<CapturedRoot>,
     }
 
+    #[derive(Resource, Default)]
+    struct PreviousVisualObservation {
+        roots: Vec<(Entity, Option<Position>, Option<Rotation>)>,
+    }
+
+    fn observe_previous_visuals(
+        roots: Query<(
+            Entity,
+            Option<&PreviousVisual<Position>>,
+            Option<&PreviousVisual<Rotation>>,
+        )>,
+        mut observation: ResMut<PreviousVisualObservation>,
+    ) {
+        observation.roots = roots
+            .iter()
+            .map(|(entity, position, rotation)| {
+                (
+                    entity,
+                    position.map(|value| value.0),
+                    rotation.map(|value| value.0),
+                )
+            })
+            .collect();
+    }
+
     fn observe_capture(
         time: Res<Time<Fixed>>,
         roots: Query<(Entity, &RenderErrorOffset)>,
@@ -739,12 +790,20 @@ mod tests {
     #[derive(Resource, Default)]
     struct PendingForwardTravel(Option<Vec3>);
 
-    fn switch_to_forward_travel(
-        mut pending: ResMut<PendingForwardTravel>,
+    #[derive(Resource, Default)]
+    struct PendingForwardRotation(Option<Quat>);
+
+    fn switch_to_forward_motion(
+        mut pending_travel: ResMut<PendingForwardTravel>,
+        mut pending_rotation: ResMut<PendingForwardRotation>,
         mut travel: ResMut<ReplayTravel>,
+        mut rotation: ResMut<ReplayRotation>,
     ) {
-        if let Some(next) = pending.0.take() {
+        if let Some(next) = pending_travel.0.take() {
             travel.0 = next;
+        }
+        if let Some(next) = pending_rotation.0.take() {
+            rotation.0 = next;
         }
     }
 
@@ -790,9 +849,12 @@ mod tests {
         app.init_resource::<PendingRollback>();
         app.init_resource::<PendingSharp>();
         app.init_resource::<ReplayTravel>();
+        app.init_resource::<ReplayRotation>();
         app.init_resource::<PendingCapturePredecessors>();
         app.init_resource::<CaptureObservation>();
+        app.init_resource::<PreviousVisualObservation>();
         app.init_resource::<PendingForwardTravel>();
+        app.init_resource::<PendingForwardRotation>();
         app.init_resource::<DisplayObservation>();
         app.init_resource::<HistoriesBeforeCapture>();
         app.init_resource::<HistoriesAfterCapture>();
@@ -819,9 +881,15 @@ mod tests {
         );
         app.add_systems(
             PreUpdate,
+            observe_previous_visuals
+                .after(snapshot_histories_before_capture)
+                .before(capture_render_error),
+        );
+        app.add_systems(
+            PreUpdate,
             (
                 (observe_capture, snapshot_histories_after_capture).after(capture_render_error),
-                switch_to_forward_travel.after(observe_capture),
+                switch_to_forward_motion.after(observe_capture),
             )
                 .before(RollbackSystems::EndRollback),
         );
@@ -1588,6 +1656,16 @@ mod tests {
             .expect("the capture observer saw the armed root")
     }
 
+    fn previous_visuals_of(app: &App, root: Entity) -> (Option<Position>, Option<Rotation>) {
+        app.world()
+            .resource::<PreviousVisualObservation>()
+            .roots
+            .iter()
+            .find(|(entity, ..)| *entity == root)
+            .map(|(_, position, rotation)| (*position, *rotation))
+            .expect("the pre-capture observer saw the armed root")
+    }
+
     /// Bevy's first `update()` establishes the manual clock origin and has zero virtual delta. Prime
     /// that frame before a test whose observed update must expend a fixed tick.
     fn prime_full_frame_clock(app: &mut App) {
@@ -1672,34 +1750,300 @@ mod tests {
         )
     }
 
+    /// NO PREDECESSOR means Lightyear displays the raw endpoint; it does not invent an interpolated
+    /// timeline. This drives the production registration, shipping arming composition, the prior
+    /// PostUpdate display, the depth-zero rollback, the following fixed tick, and presentation
+    /// application. Distinct translation and rotation travel after capture prove the offset hides
+    /// only the rollback discontinuity.
     #[test]
-    fn an_age_zero_rollback_without_any_t_minus_one_sample_scales_translation_and_snaps_rotation() {
-        let (app, root, previous_displayed_position, _) =
-            run_age_zero_rollback((None, None), (None, None));
+    fn an_age_zero_rollback_without_any_t_minus_one_sample_smooths_the_full_raw_display_correction()
+    {
+        const FORWARD_TRAVEL: Vec3 = Vec3::new(0.0, 0.0, 0.3);
+        let forward_turn = Quat::from_rotation_z(0.08);
+
+        let mut app = client_app();
+        prime_full_frame_clock(&mut app);
+        let root = spawn_root_through_shipping_arming(&mut app);
+        let (previous_displayed_position, previous_displayed_rotation) =
+            stage_previous_display(&mut app, root, None, None);
+
+        // Positive control for the premise: without `previous_value`, Lightyear's real PostUpdate
+        // interpolation system skips and both the component and final Transform stay at raw P.
+        app.world_mut().run_schedule(PostUpdate);
+        assert_eq!(previous_displayed_position, PREDICTED_POSITION);
+        assert_eq!(previous_displayed_rotation, predicted_rotation());
+        let prior_display = app.world().resource::<DisplayObservation>();
+        let (_, prior_position, prior_rotation) = prior_display
+            .roots
+            .iter()
+            .find(|(entity, ..)| *entity == root)
+            .copied()
+            .expect("the prior PostUpdate display observer saw the armed root");
+        assert_near(
+            prior_position,
+            PREDICTED_POSITION,
+            "Lightyear must leave the raw predicted position displayed when no predecessor exists",
+        );
+        assert_near_rotation(
+            prior_rotation,
+            predicted_rotation(),
+            "Lightyear must leave the raw predicted rotation displayed when no predecessor exists",
+        );
+        let prior_transform = app.world().get::<Transform>(root).expect("rendered root");
+        assert_near(
+            prior_transform.translation,
+            PREDICTED_POSITION,
+            "the prior frame must actually render raw P, not merely stage it in interpolation state",
+        );
+        assert_near_rotation(
+            prior_transform.rotation,
+            predicted_rotation(),
+            "the prior frame must actually render raw Pq",
+        );
+
+        confirm_pose(
+            &mut app,
+            root,
+            CURRENT_TICK,
+            AUTHORITY_POSITION,
+            authority_rotation(),
+        );
+        stage_age_zero_grip_checkpoint(&mut app, root);
+        app.world_mut()
+            .resource_mut::<PendingCapturePredecessors>()
+            .0 = Some((None, None));
+        app.world_mut().resource_mut::<PendingForwardTravel>().0 = Some(FORWARD_TRAVEL);
+        app.world_mut().resource_mut::<PendingForwardRotation>().0 = Some(forward_turn);
+
+        app.update();
+
         assert_near(
             app.world().get::<Position>(root).expect("live position").0,
-            AUTHORITY_POSITION,
-            "the full frame must preserve the restored position when its forward tick has no travel",
+            AUTHORITY_POSITION + FORWARD_TRAVEL * 0.5,
+            "PostUpdate must display the independent forward travel at the half-tick overstep",
+        );
+        assert_near_rotation(
+            app.world().get::<Rotation>(root).expect("live rotation").0,
+            authority_rotation() * Quat::IDENTITY.slerp(forward_turn, 0.5),
+            "PostUpdate must display the independent forward rotation at the half-tick overstep",
+        );
+        assert_eq!(
+            app.world()
+                .get::<FrameInterpolate<Position>>(root)
+                .expect("position interpolation")
+                .current_value,
+            Some(Position(AUTHORITY_POSITION + FORWARD_TRAVEL)),
+            "the fixed-tick endpoint must retain the full independent forward travel",
+        );
+        assert_eq!(
+            app.world()
+                .get::<FrameInterpolate<Rotation>>(root)
+                .expect("rotation interpolation")
+                .current_value,
+            Some(Rotation(authority_rotation() * forward_turn)),
+            "the fixed-tick endpoint must retain the full independent forward rotation",
+        );
+        assert_eq!(
+            previous_visuals_of(&app, root),
+            (
+                Some(Position(PREDICTED_POSITION)),
+                Some(Rotation(predicted_rotation()))
+            ),
+            "prepare_rollback must capture the raw P/Pq that the prior PostUpdate displayed",
         );
         let captured = captured_of(&app, root);
         assert!((app.world().resource::<CaptureObservation>().overstep - 0.5).abs() < 1e-6);
         assert_near(
             captured.translation,
-            (previous_displayed_position - AUTHORITY_POSITION) * 0.5,
-            "linear interpolation cancels the unknown shared T-1 baseline, so the translation \
-             correction at the previous half-tick display instant is exactly half the endpoint \
-             correction",
+            PREDICTED_POSITION - AUTHORITY_POSITION,
+            "the skipped-interpolation path must capture the full raw endpoint correction P - C",
         );
-        assert_eq!(
+        assert_near_rotation(
             captured.rotation,
-            Quat::IDENTITY,
-            "without either history or frame interpolation's T-1 rotation, the same-instant \
-             quaternion correction is not reconstructible and this one-tick lifecycle snaps",
+            predicted_rotation() * authority_rotation().inverse(),
+            "the skipped-interpolation path must capture the exact raw left delta Pq * Cq^-1",
         );
         assert!(
             app.world().get::<PreviousVisual<Position>>(root).is_none()
                 && app.world().get::<PreviousVisual<Rotation>>(root).is_none(),
-            "the uncomputable axis must still consume its one-shot rollback input",
+            "both one-shot rollback inputs must be consumed after their full corrections are used",
+        );
+
+        let display = app.world().resource::<DisplayObservation>();
+        assert!((display.overstep - 0.5).abs() < 1e-6);
+        let (_, corrected_display_position, corrected_display_rotation) = display
+            .roots
+            .iter()
+            .find(|(entity, ..)| *entity == root)
+            .copied()
+            .expect("the current PostUpdate display observer saw the armed root");
+        let displayed_travel = FORWARD_TRAVEL * display.overstep;
+        let displayed_turn = Quat::IDENTITY.slerp(forward_turn, display.overstep);
+        assert_near(
+            corrected_display_position,
+            AUTHORITY_POSITION + displayed_travel,
+            "Lightyear's current display must contain the independent forward travel",
+        );
+        assert_near_rotation(
+            corrected_display_rotation,
+            authority_rotation() * displayed_turn,
+            "Lightyear's current display must contain the independent forward rotation",
+        );
+
+        let live_offset = offset_of(&app, root);
+        let rendered = app.world().get::<Transform>(root).expect("rendered root");
+        assert_near(
+            rendered.translation,
+            corrected_display_position + live_offset.0,
+            "presentation must apply only the normally decayed captured offset to the current pose",
+        );
+        assert_near_rotation(
+            rendered.rotation,
+            live_offset.1 * corrected_display_rotation,
+            "presentation must left-apply only the normally decayed rotation offset",
+        );
+        let undiscounted_target = PREDICTED_POSITION + displayed_travel;
+        assert_near(
+            rendered.translation,
+            undiscounted_target + (live_offset.0 - captured.translation),
+            "the rendered pose must be P plus current-frame travel, subject only to normal decay",
+        );
+        assert!(
+            rendered.translation.distance(undiscounted_target)
+                <= CAP_TRANSLATION_MPS * app.world().resource::<Time<Real>>().delta_secs() + 1e-5,
+            "normal decay may reveal only its capped one-frame share of the correction",
+        );
+        let undiscounted_rotation = predicted_rotation() * displayed_turn;
+        assert_near_rotation(
+            captured.rotation * corrected_display_rotation,
+            undiscounted_rotation,
+            "the full captured delta must hide the rollback while preserving current-frame rotation",
+        );
+        assert!(
+            rendered.rotation.angle_between(undiscounted_rotation)
+                <= CAP_ROTATION_DPS.to_radians()
+                    * app.world().resource::<Time<Real>>().delta_secs()
+                    + 1e-5,
+            "normal decay may reveal only its capped one-frame share of the rotation correction",
+        );
+    }
+
+    /// `EndRollback` reconstructs frame interpolation even when no fixed tick ran. At depth zero
+    /// its history lookup can produce `previous_value = None`, so the raw-display window can reopen
+    /// after any such rollback; it is not a one-time arming state.
+    #[test]
+    fn a_depth_zero_rollback_reopens_the_raw_display_window_and_a_second_correction_is_smoothed() {
+        let mut app = client_app();
+        let root = spawn_root_through_shipping_arming(&mut app);
+
+        confirm_pose(
+            &mut app,
+            root,
+            CURRENT_TICK,
+            AUTHORITY_POSITION,
+            authority_rotation(),
+        );
+        app.world_mut()
+            .resource_mut::<PendingCapturePredecessors>()
+            .0 = Some((None, None));
+        order_rollback(&mut app, CURRENT_TICK);
+        run_pre_update(&mut app);
+
+        let first = captured_of(&app, root);
+        assert_near(
+            first.translation,
+            expected_translation_error(),
+            "the first raw-display correction must be captured in full",
+        );
+        assert_near_rotation(
+            first.rotation,
+            expected_rotation_error(),
+            "the first raw-display rotation correction must be captured in full",
+        );
+        let position_interpolate = app
+            .world()
+            .get::<FrameInterpolate<Position>>(root)
+            .expect("position interpolation remains armed");
+        let rotation_interpolate = app
+            .world()
+            .get::<FrameInterpolate<Rotation>>(root)
+            .expect("rotation interpolation remains armed");
+        assert_eq!(
+            (
+                position_interpolate.previous_value,
+                rotation_interpolate.previous_value
+            ),
+            (None, None),
+            "Lightyear EndRollback must reinstall the no-predecessor state before another fixed tick",
+        );
+
+        let second_predicted_position = Vec3::new(10.3, 2.1, -2.9);
+        let second_corrected_position = Vec3::new(10.25, 2.05, -2.95);
+        let second_predicted_rotation = Quat::from_rotation_y(0.16);
+        let second_corrected_rotation = Quat::from_rotation_x(0.09);
+        app.world_mut()
+            .get_mut::<Position>(root)
+            .expect("live position")
+            .0 = second_predicted_position;
+        app.world_mut()
+            .get_mut::<Rotation>(root)
+            .expect("live rotation")
+            .0 = second_predicted_rotation;
+        app.world_mut()
+            .get_mut::<FrameInterpolate<Position>>(root)
+            .expect("position interpolation")
+            .current_value = Some(Position(second_predicted_position));
+        app.world_mut()
+            .get_mut::<FrameInterpolate<Rotation>>(root)
+            .expect("rotation interpolation")
+            .current_value = Some(Rotation(second_predicted_rotation));
+        confirm_pose(
+            &mut app,
+            root,
+            CURRENT_TICK,
+            second_corrected_position,
+            second_corrected_rotation,
+        );
+        app.world_mut()
+            .resource_mut::<PendingCapturePredecessors>()
+            .0 = Some((None, None));
+        order_rollback(&mut app, CURRENT_TICK);
+        run_pre_update(&mut app);
+
+        assert_eq!(
+            previous_visuals_of(&app, root),
+            (
+                Some(Position(second_predicted_position)),
+                Some(Rotation(second_predicted_rotation))
+            ),
+            "the second rollback must capture the raw endpoint displayed in the reopened window",
+        );
+        let second_translation = second_predicted_position - second_corrected_position;
+        let second_rotation = second_predicted_rotation * second_corrected_rotation.inverse();
+        let accumulated = captured_of(&app, root);
+        assert_near(
+            accumulated.translation,
+            first.translation + second_translation,
+            "the second raw endpoint correction must be added in full to the existing offset",
+        );
+        assert_near_rotation(
+            accumulated.rotation,
+            first.rotation * second_rotation,
+            "the second raw rotation correction must be added to the existing offset",
+        );
+        assert_eq!(
+            (
+                app.world()
+                    .get::<FrameInterpolate<Position>>(root)
+                    .expect("position interpolation")
+                    .previous_value,
+                app.world()
+                    .get::<FrameInterpolate<Rotation>>(root)
+                    .expect("rotation interpolation")
+                    .previous_value,
+            ),
+            (None, None),
+            "the second depth-zero EndRollback must reopen the same window again",
         );
     }
 
@@ -2011,28 +2355,6 @@ mod tests {
             error.0,
             expected_rotation_error(),
             "and it must be the same quantity the schedule fixtures expect",
-        );
-    }
-
-    /// WHY THE BASELINE-FREE ROTATION BRANCH SNAPS. Hold the predicted endpoint, corrected endpoint,
-    /// and overstep fixed; changing only their shared T-1 baseline changes the same-instant left
-    /// delta. Therefore those available endpoint inputs do not determine one exact quaternion
-    /// correction, unlike affine translation where the shared baseline cancels.
-    #[test]
-    fn a_rotation_correction_is_not_determined_by_endpoints_and_overstep_without_the_baseline() {
-        let correction_from = |baseline: Quat| {
-            let predicted = baseline.slerp(predicted_rotation(), 0.5);
-            let corrected = baseline.slerp(authority_rotation(), 0.5);
-            Rotation(corrected).diff(&Rotation(predicted)).0
-        };
-        let from_identity = correction_from(Quat::IDENTITY);
-        let from_tilted = correction_from(Quat::from_rotation_z(0.7));
-
-        assert!(
-            from_identity.angle_between(from_tilted) > 1e-3,
-            "two different shared baselines with identical endpoints and overstep must yield \
-             different intermediate correction deltas, or this fixture does not prove the missing \
-             input matters",
         );
     }
 
