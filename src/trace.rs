@@ -507,6 +507,23 @@ fn record_frame(
     }
 }
 
+#[cfg(test)]
+pub(crate) fn install_test_frame_trace(app: &mut App, path: &Path) {
+    app.insert_resource(TraceWriter {
+        sink: JsonlSink::create(path).expect("test trace sink"),
+        role: "client",
+        sim_fields: false,
+    });
+    app.add_systems(PostUpdate, record_frame.after(TransformSystems::Propagate));
+}
+
+#[cfg(test)]
+pub(crate) fn close_test_frame_trace(app: &mut App) {
+    app.world_mut()
+        .remove_resource::<TraceWriter>()
+        .expect("the test trace was enabled");
+}
+
 /// Per fixed tick, per tank root: sim truth (`Position`/`Rotation`/velocities are the rolled-back,
 /// replayed authority values) plus the derived contact state (grounded track sides, per-side belt
 /// loads, collision pairs). Runs in `FixedLast`, after the physics step and avian's contact update,
@@ -892,85 +909,6 @@ fn record_rollback(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_post_update_frame_row_reports_the_live_render_error_as_correction_telemetry() {
-        let path = std::env::temp_dir().join(format!(
-            "overmatch-render-error-trace-test-{}.jsonl",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_file(&path);
-
-        let mut app = App::new();
-        app.add_plugins(MinimalPlugins);
-        app.insert_resource(TraceWriter {
-            sink: JsonlSink::create(&path).expect("test trace sink"),
-            role: "client",
-            sim_fields: false,
-        });
-        app.add_systems(PostUpdate, record_frame.after(TransformSystems::Propagate));
-        app.finish();
-        app.cleanup();
-
-        let translation = Vec3::new(0.2, -0.03, 0.04);
-        let rotation = Quat::from_rotation_y(0.15);
-        app.world_mut().spawn((
-            Tank,
-            GlobalTransform::from(Transform::from_translation(Vec3::new(4.0, 2.0, 1.0))),
-            crate::net::RenderErrorOffset {
-                translation,
-                rotation,
-            },
-        ));
-        app.world_mut().run_schedule(PostUpdate);
-        app.world_mut()
-            .remove_resource::<TraceWriter>()
-            .expect("the trace was enabled");
-
-        let contents = std::fs::read_to_string(&path).expect("frame row was flushed");
-        let row: Value = serde_json::from_str(
-            contents
-                .lines()
-                .last()
-                .expect("PostUpdate must write one frame row"),
-        )
-        .expect("frame row is valid JSON");
-        let decoded_vec3 = |field: &str| {
-            let values = row[field].as_array().expect("vector field is an array");
-            Vec3::new(
-                values[0].as_f64().unwrap() as f32,
-                values[1].as_f64().unwrap() as f32,
-                values[2].as_f64().unwrap() as f32,
-            )
-        };
-        let decoded_quat = |field: &str| {
-            let values = row[field].as_array().expect("quaternion field is an array");
-            Quat::from_xyzw(
-                values[0].as_f64().unwrap() as f32,
-                values[1].as_f64().unwrap() as f32,
-                values[2].as_f64().unwrap() as f32,
-                values[3].as_f64().unwrap() as f32,
-            )
-        };
-        assert_eq!(
-            decoded_vec3("cp"),
-            translation,
-            "translation telemetry must carry the authoritative live render offset",
-        );
-        assert_eq!(
-            decoded_quat("cq"),
-            rotation,
-            "rotation telemetry must carry the authoritative live render offset",
-        );
-        assert_eq!(
-            row.get("vo"),
-            row.get("cp"),
-            "the compatibility correction field and view-offset field describe the same value",
-        );
-        assert_eq!(row.get("voq"), row.get("cq"));
-
-        let _ = std::fs::remove_file(path);
-    }
 
     #[test]
     fn capture_path_formats_role_and_timestamp() {

@@ -116,7 +116,7 @@ use lightyear::prelude::client::{Client, ClientPlugins, Connected, Remote};
 use lightyear::prelude::{
     DisableRollback, InputTimeline, InputTimelineConfig, IsSynced, LocalTimeline, PeerId,
     PingManager, Predicted, PredictionHistory, RemoteId, ReplicationCheckpointMap, RollbackSystems,
-    StateRollbackMetadata, SyncConfig, Tick,
+    StateRollbackMetadata, SyncConfig, Tick, VisualCorrection,
 };
 use lightyear_core::time::TickInstant;
 use lightyear_core::timeline::NetworkTimeline;
@@ -401,6 +401,10 @@ struct Delivered {
     /// The predicted hull the run built, so a `sharp` entry can be checked against the entity it
     /// must name rather than merely counted.
     hull: Option<Entity>,
+    /// Present only when the run mounts the shipping render-error composition.
+    render_offset: Option<(Vec3, Quat)>,
+    /// Whether Lightyear retained a duplicate position/rotation correction after render capture.
+    duplicate_visual_correction: bool,
 }
 
 /// Drain the presentation occurrences exactly where the client's consumer drains them.
@@ -481,6 +485,9 @@ struct Scenario {
     /// Extra LOCAL ticks to spend past the run's own last frame, each with a `PreUpdate`. How a
     /// fixture asks what bounds a wait.
     extra_ticks: i32,
+    /// Mount the shipping frame-interpolation and render-error plugins, so the real adoption's
+    /// `SharpCorrection` is consumed rather than collected by this fixture.
+    render_error: bool,
 }
 
 impl Scenario {
@@ -495,8 +502,58 @@ impl Scenario {
             late_position_removal: None,
             late_rollback_disable: false,
             extra_ticks: 0,
+            render_error: false,
         }
     }
+}
+
+fn scenario_app(render_error: bool) -> App {
+    let mut app = if render_error {
+        crate::net::test_harness::net_physics_app()
+    } else {
+        crate::net::test_harness::base_app()
+    };
+    app.add_plugins(ClientPlugins {
+        tick_duration: crate::net::test_harness::TICK,
+    });
+    crate::state::sim_plugin(&mut app);
+    super::protocol::plugin(&mut app);
+    if render_error {
+        super::rig::client_smoothing_plugin(&mut app);
+        super::render_error::plugin(&mut app);
+    }
+    app.insert_state(crate::state::AppState::Playing);
+    app
+}
+
+fn scenario_poses(render_error: bool) -> (Vec3, Quat, Vec3, Quat) {
+    if render_error {
+        (
+            AUTHORITY_POSITION,
+            authority_rotation(),
+            LIVE_POSITION,
+            live_rotation(),
+        )
+    } else {
+        (Vec3::ZERO, Quat::IDENTITY, Vec3::ZERO, Quat::IDENTITY)
+    }
+}
+
+fn arm_scenario_render_error(app: &mut App, root: Entity) {
+    app.world_mut()
+        .entity_mut(root)
+        .insert(super::protocol::NetTank);
+    app.world_mut().flush();
+    // Both predicates are production Update systems. The frame-interpolation marker arrives on the
+    // first pass; the strictly narrower render-error arming sees it on the second.
+    app.world_mut().run_schedule(Update);
+    app.world_mut().run_schedule(Update);
+    assert!(
+        app.world()
+            .get::<super::render_error::RenderErrorOffset>(root)
+            .is_some(),
+        "the real shipping arming path must own the integration root",
+    );
 }
 
 fn run_scenario(scenario: Scenario) -> Delivered {
@@ -510,21 +567,19 @@ fn run_scenario(scenario: Scenario) -> Delivered {
         late_position_removal,
         late_rollback_disable,
         extra_ticks,
+        render_error,
     } = scenario;
-    let mut app = crate::net::test_harness::base_app();
-    app.add_plugins(ClientPlugins {
-        tick_duration: crate::net::test_harness::TICK,
-    });
-    crate::state::sim_plugin(&mut app);
-    super::protocol::plugin(&mut app);
-    app.insert_state(crate::state::AppState::Playing);
+    let mut app = scenario_app(render_error);
     app.init_resource::<Delivered>();
     app.add_systems(FixedPreUpdate, observe_replay);
-    // AFTER the rollback has run, which is where `net::render_error::capture_render_error` sits.
-    app.add_systems(
-        PreUpdate,
-        collect_sharp_corrections.after(RollbackSystems::EndRollback),
-    );
+    // Drain at EndRollback, immediately after `net::render_error::capture_render_error` does in the
+    // shipping client. This fixture does not mount that consumer, so the occurrences remain for us.
+    if !render_error {
+        app.add_systems(
+            PreUpdate,
+            collect_sharp_corrections.after(RollbackSystems::EndRollback),
+        );
+    }
     if let Some(tick) = competitor {
         app.insert_resource(CompetingClaim(tick));
         // AFTER the watchdog set, which `net::adoption::request_staged_adoption` runs before: the
@@ -586,14 +641,16 @@ fn run_scenario(scenario: Scenario) -> Delivered {
     // `prepare_rollback` restores from the client's own prediction instead. A replicated, predicted
     // tank has all four histories; a fixture that omitted two would be offering the adoption path a
     // hull the shipping build never produces.
+    let (authority_position, authority_rotation, live_position, live_rotation) =
+        scenario_poses(render_error);
     let mut confirmed_position = ConfirmedHistory::<Position>::default();
-    confirmed_position.insert_present_explicit(PRODUCING_TICK, Position::default());
+    confirmed_position.insert_present_explicit(PRODUCING_TICK, Position(authority_position));
     let mut predicted_position = PredictionHistory::<Position>::default();
-    predicted_position.add_predicted(PRODUCING_TICK, Some(Position::default()));
+    predicted_position.add_predicted(PRODUCING_TICK, Some(Position(live_position)));
     let mut confirmed_rotation = ConfirmedHistory::<Rotation>::default();
-    confirmed_rotation.insert_present_explicit(PRODUCING_TICK, Rotation::default());
+    confirmed_rotation.insert_present_explicit(PRODUCING_TICK, Rotation(authority_rotation));
     let mut predicted_rotation = PredictionHistory::<Rotation>::default();
-    predicted_rotation.add_predicted(PRODUCING_TICK, Some(Rotation::default()));
+    predicted_rotation.add_predicted(PRODUCING_TICK, Some(Rotation(live_rotation)));
 
     let mut ledger_history = PredictionHistory::<HullShockLedger>::default();
     ledger_history.add_predicted(PRODUCING_TICK, Some(HullShockLedger::default()));
@@ -608,10 +665,10 @@ fn run_scenario(scenario: Scenario) -> Delivered {
             // resolves the completed replicon tick and the unchanged-entity scan skips it.
             ConfirmHistory::new(producing_replicon_tick()),
             Tank,
-            Position::default(),
+            Position(live_position),
             confirmed_position,
             predicted_position,
-            Rotation::default(),
+            Rotation(live_rotation),
             confirmed_rotation,
             predicted_rotation,
             HullShock::default(),
@@ -624,7 +681,11 @@ fn run_scenario(scenario: Scenario) -> Delivered {
         .entity_mut(root)
         .insert((HullShockLedger::default(), ledger_history));
     app.world_mut().entity_mut(root).insert((
-        Transform::default(),
+        Transform {
+            translation: live_position,
+            rotation: live_rotation,
+            ..default()
+        },
         RigidBody::Dynamic,
         Mass(HULL_MASS),
         AngularInertia::new(Vec3::splat(HULL_INERTIA)),
@@ -644,6 +705,9 @@ fn run_scenario(scenario: Scenario) -> Delivered {
         confirmed_angular,
     ));
     app.world_mut().flush();
+    if render_error {
+        arm_scenario_render_error(&mut app, root);
+    }
 
     // The completed mutate tick: the authority has certified every replicated component through
     // `arrival`, the tick this checkpoint went out on. This is what receive would have published.
@@ -778,6 +842,18 @@ fn run_scenario(scenario: Scenario) -> Delivered {
     delivered.live_pose_removed = live_pose_removed;
     delivered.final_age = final_age;
     delivered.hull = Some(root);
+    delivered.render_offset = app
+        .world()
+        .get::<super::render_error::RenderErrorOffset>(root)
+        .map(|offset| (offset.translation, offset.rotation));
+    delivered.duplicate_visual_correction = app
+        .world()
+        .get::<VisualCorrection<Position>>(root)
+        .is_some()
+        || app
+            .world()
+            .get::<VisualCorrection<Rotation>>(root)
+            .is_some();
     delivered
 }
 
@@ -871,6 +947,32 @@ fn the_zero_lead_shove_arrives_with_no_replayed_tick_at_all() {
         "a hit drawn {} ticks before its episode closed IS one of that episode's hits, so the rule \
          costs nothing at all here — it neither waited nor fell through to the budget",
         PRODUCING_TICK.0 - EARLY_HIT_TICK,
+    );
+}
+
+#[test]
+fn a_real_age_zero_adoption_keeps_its_differing_pose_sharp_through_render_capture() {
+    let delivered = run_scenario(Scenario {
+        render_error: true,
+        ..Scenario::new(Lead::Zero, Visual::DrawnBeforeArrival)
+    });
+
+    assert_eq!(
+        delivered.replayed_ticks,
+        Vec::<u32>::new(),
+        "the integration must remain the age-zero adoption path",
+    );
+    assert_eq!(delivered.live_linear, AUTHORITY_LINEAR);
+    assert_eq!(
+        delivered.render_offset,
+        Some((Vec3::ZERO, Quat::IDENTITY)),
+        "the real adoption retirement must emit the sharp occurrence that capture consumes; the \
+         deliberately differing authority pose may not accumulate any compensating offset",
+    );
+    assert!(
+        !delivered.duplicate_visual_correction,
+        "capture must consume the one-shot correction inputs before Lightyear can retain a \
+         duplicate visual correction",
     );
 }
 
