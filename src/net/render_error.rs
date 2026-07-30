@@ -1973,10 +1973,11 @@ mod tests {
     }
 
     /// `EndRollback` reconstructs frame interpolation even when no fixed tick ran. At depth zero
-    /// its history lookup can produce `previous_value = None`, so the raw-display window can reopen
-    /// after any such rollback; it is not a one-time arming state.
+    /// its history lookup can produce `previous_value = None`, so a second rollback at that same
+    /// tick must capture the raw endpoint and preserve the already-retained correction on screen.
     #[test]
-    fn a_depth_zero_rollback_reopens_the_raw_display_window_and_a_second_correction_is_smoothed() {
+    fn two_depth_zero_rollbacks_at_one_tick_reopen_the_raw_window_and_render_the_accumulated_error()
+    {
         let mut app = client_app();
         let root = spawn_root_through_shipping_arming(&mut app);
         let first_predecessor_position = Position(PREDICTED_POSITION - Vec3::new(0.2, 0.0, 0.0));
@@ -2093,15 +2094,14 @@ mod tests {
 
         let second_corrected_position = Vec3::new(10.25, 2.05, -2.95);
         let second_corrected_rotation = Quat::from_rotation_x(0.09);
-        advance_to(&mut app, CURRENT_TICK + 1);
         confirm_pose(
             &mut app,
             root,
-            CURRENT_TICK + 1,
+            CURRENT_TICK,
             second_corrected_position,
             second_corrected_rotation,
         );
-        order_rollback(&mut app, CURRENT_TICK + 1);
+        order_rollback(&mut app, CURRENT_TICK);
         run_pre_update(&mut app);
 
         assert_eq!(
@@ -2139,6 +2139,61 @@ mod tests {
             ),
             (None, None),
             "the second depth-zero EndRollback must reopen the same window again",
+        );
+
+        app.world_mut()
+            .resource_mut::<Time<Real>>()
+            .advance_by(TICK);
+        app.world_mut().run_schedule(PostUpdate);
+
+        let second_display = app.world().resource::<DisplayObservation>();
+        let (_, displayed_position, displayed_rotation) = second_display
+            .roots
+            .iter()
+            .find(|(entity, ..)| *entity == root)
+            .copied()
+            .expect("the second reopened-window PostUpdate observer saw the root");
+        assert_near(
+            displayed_position,
+            second_corrected_position,
+            "the second reopened window must expose the second raw corrected position before the \
+             render offset is applied",
+        );
+        assert_near_rotation(
+            displayed_rotation,
+            second_corrected_rotation,
+            "the second reopened window must expose the second raw corrected rotation before the \
+             render offset is applied",
+        );
+
+        let mut expected_decayed_translation = accumulated.translation;
+        let mut expected_decayed_rotation = accumulated.rotation;
+        decay_translation(&mut expected_decayed_translation, TICK.as_secs_f32());
+        decay_rotation(&mut expected_decayed_rotation, TICK.as_secs_f32());
+        let live_offset = offset_of(&app, root);
+        assert_near(
+            live_offset.0,
+            expected_decayed_translation,
+            "the accumulated translation error must undergo exactly one normal render-frame decay",
+        );
+        assert_near_rotation(
+            live_offset.1,
+            expected_decayed_rotation,
+            "the accumulated rotation error must undergo exactly one normal render-frame decay",
+        );
+
+        let rendered = app.world().get::<Transform>(root).expect("rendered root");
+        assert_near(
+            rendered.translation,
+            second_corrected_position + expected_decayed_translation,
+            "the rendered position must apply the decayed accumulated error to the second corrected \
+             endpoint",
+        );
+        assert_near_rotation(
+            rendered.rotation,
+            second_corrected_rotation * expected_decayed_rotation,
+            "the rendered rotation must right-apply the decayed accumulated body-local error to \
+             the second corrected endpoint",
         );
     }
 
@@ -2832,7 +2887,7 @@ mod tests {
 
     /// The track view detects discontinuities LOCALLY (pose delta per frame) because this
     /// module publishes no signal. That only works while its thresholds sit strictly below the
-    /// snap thresholds here: a correction consumed unsmoothed (>= these bounds) must always
+    /// snap thresholds here: a correction consumed unsmoothed (> these bounds) must always
     /// exceed the track's trip point, or a snapped hull keeps its old wrap filter memory and the
     /// tracks settle in from a stale pose. Changing either side's constants must confront this
     /// bracket.
@@ -2840,9 +2895,26 @@ mod tests {
     #[allow(clippy::assertions_on_constants)] // constant is the point: a compile-time bracket
     fn track_discontinuity_thresholds_bracket_render_error_snaps() {
         assert!(crate::track::view::SNAP_TRANSLATION < SNAP_TRANSLATION_M);
-        // The track compares AXIS CHORDS; a rotation snap of SNAP_ROTATION_DEG displaces at
-        // least one basis axis by 2·sin(θ/2) in the worst-aligned case it must still catch.
-        let snap_chord = 2.0 * (SNAP_ROTATION_DEG.to_radians() / 2.0).sin();
-        assert!(crate::track::view::SNAP_AXIS < snap_chord);
+        // For a unit checked axis e and unit rotation axis a, the chord is
+        // 2·sin(θ/2)·|a×e|. The track checks only Y and Z. The worst a lies halfway between them,
+        // where both cross-product magnitudes are 1/√2, so at least one checked chord is bounded
+        // below by 2·sin(θ/2)/√2.
+        let worst_checked_axis_chord =
+            2.0 * (SNAP_ROTATION_DEG.to_radians() / 2.0).sin() / std::f32::consts::SQRT_2;
+        assert!(crate::track::view::SNAP_AXIS < worst_checked_axis_chord);
+
+        // Demonstrate the limiting orientation at a just-over-threshold angle: both axes checked
+        // by `track::view` must trip even when the rotation axis splits the available displacement
+        // equally between them.
+        let just_over_snap_angle = (SNAP_ROTATION_DEG + 0.001).to_radians();
+        let worst_axis = (Vec3::Y + Vec3::Z).normalize();
+        let just_over_snap = Quat::from_axis_angle(worst_axis, just_over_snap_angle);
+        let y_chord = (just_over_snap * Vec3::Y - Vec3::Y).length();
+        let z_chord = (just_over_snap * Vec3::Z - Vec3::Z).length();
+        let expected_chord = 2.0 * (just_over_snap_angle / 2.0).sin() / std::f32::consts::SQRT_2;
+        assert!((y_chord - expected_chord).abs() < 1e-6);
+        assert!((z_chord - expected_chord).abs() < 1e-6);
+        assert!(crate::track::view::SNAP_AXIS < y_chord);
+        assert!(crate::track::view::SNAP_AXIS < z_chord);
     }
 }
