@@ -791,46 +791,7 @@ fn fly_camera(
     time: Res<Time<Real>>,
 ) {
     let mut transform = camera.into_inner();
-
-    const SENS: f32 = 0.003;
-    const PITCH_LIMIT: f32 = std::f32::consts::FRAC_PI_2 - 0.001;
-    let (mut yaw, mut pitch, _) = transform.rotation.to_euler(EulerRot::YXZ);
-    yaw -= motion.delta.x * SENS;
-    pitch = (pitch - motion.delta.y * SENS).clamp(-PITCH_LIMIT, PITCH_LIMIT);
-    transform.rotation = Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0);
-
-    // WASD on the horizontal plane in the camera's heading — looking down and pressing W keeps you
-    // moving forward over the ground, not diving into it. Shift/Ctrl change altitude. Near-vertical
-    // look leaves no horizontal heading, so `normalize_or_zero` just no-ops that frame.
-    const SPEED: f32 = 12.0;
-    let forward = Vec3::from(transform.forward())
-        .with_y(0.0)
-        .normalize_or_zero();
-    let right = Vec3::from(transform.right())
-        .with_y(0.0)
-        .normalize_or_zero();
-    let mut dir = Vec3::ZERO;
-    if keys.pressed(KeyCode::KeyW) {
-        dir += forward;
-    }
-    if keys.pressed(KeyCode::KeyS) {
-        dir -= forward;
-    }
-    if keys.pressed(KeyCode::KeyD) {
-        dir += right;
-    }
-    if keys.pressed(KeyCode::KeyA) {
-        dir -= right;
-    }
-    if keys.pressed(KeyCode::ShiftLeft) {
-        dir += Vec3::Y;
-    }
-    if keys.pressed(KeyCode::ControlLeft) {
-        dir -= Vec3::Y;
-    }
-    if dir != Vec3::ZERO {
-        transform.translation += dir.normalize() * SPEED * time.delta_secs();
-    }
+    crate::camera::free_fly_transform(&mut transform, &keys, motion.delta, time.delta_secs());
 }
 
 /// Left-click fires a shell straight down the view axis. The camera has no parent, so its

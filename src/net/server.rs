@@ -427,11 +427,9 @@ fn validate_spawn_request(request: SetSpawnPoint) -> Option<Vec2> {
     if !request.x.is_finite() || !request.z.is_finite() {
         return None;
     }
-    let limit = spawn_map::SPAWN_LIMIT_M;
-    Some(Vec2::new(
-        request.x.clamp(-limit, limit),
-        request.z.clamp(-limit, limit),
-    ))
+    Some(spawn_map::clamp_to_spawn_limit(Vec2::new(
+        request.x, request.z,
+    )))
 }
 
 /// A lane's spawn POINT — horizontal, like every spawn definition. Lane 0 is the base point, so
@@ -466,7 +464,6 @@ fn lane_spawn_pos(
 /// square) — plus whether it was nudged; `None` when everything within ~50 m is occupied (the
 /// caller falls back to the lane spawn). Pure, so the policy is unit-testable without a world.
 fn resolve_free_spawn_xz(desired: Vec2, occupied: &[Vec2]) -> Option<(Vec2, bool)> {
-    let limit = spawn_map::SPAWN_LIMIT_M;
     let free = |candidate: Vec2| {
         occupied.iter().all(|tank| {
             candidate.distance_squared(*tank) >= SPAWN_OCCUPIED_RADIUS_M * SPAWN_OCCUPIED_RADIUS_M
@@ -477,7 +474,7 @@ fn resolve_free_spawn_xz(desired: Vec2, occupied: &[Vec2]) -> Option<(Vec2, bool
     }
     for (radius, dirs) in SPAWN_SEARCH_RINGS {
         for &dir in dirs {
-            let candidate = (desired + dir * radius).clamp(Vec2::splat(-limit), Vec2::splat(limit));
+            let candidate = spawn_map::clamp_to_spawn_limit(desired + dir * radius);
             if free(candidate) {
                 return Some((candidate, true));
             }

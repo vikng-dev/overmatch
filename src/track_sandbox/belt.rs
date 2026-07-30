@@ -639,13 +639,7 @@ pub(super) fn draw_sample_points(
 mod tests {
     use super::super::rig_geom::{RigGeom, tiger_rig};
     use super::*;
-    use crate::track::gear_phase::tooth_tip_angle;
-
-    /// Signed representative of `angle` within one `period`, nearest zero — the same `fold` the
-    /// sprocket phase tests use to ask "how far off a tooth, and which way".
-    fn fold(angle: f32, period: f32) -> f32 {
-        (angle + period / 2.0).rem_euclid(period) - period / 2.0
-    }
+    use crate::track::gear_phase::{fold, tooth_tip_angle};
 
     /// The flat-ground conformed loop of a side: rest circles (road wheels un-articulated), taut
     /// envelope + sag budgeted to the material length — the same construction family

@@ -588,8 +588,8 @@ pub(super) fn write_ribbon(mesh: &mut Mesh, points: &[TrailPoint], head: Option<
 /// segments. Each station owns two adjacent vertices.
 fn ribbon_indices(segments: &[u32]) -> Vec<u32> {
     let mut indices = Vec::with_capacity(segments.len().saturating_sub(1) * 6);
-    for i in 0..segments.len().saturating_sub(1) {
-        if segments[i] != segments[i + 1] {
+    for (i, adjacent) in segments.windows(2).enumerate() {
+        if adjacent[0] != adjacent[1] {
             continue;
         }
         let base = i as u32 * 2;

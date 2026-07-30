@@ -7,12 +7,13 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
+use avian3d::prelude::Collider;
 use bevy::mesh::VertexAttributeValues;
 use bevy::prelude::*;
 use bevy::world_serialization::WorldInstanceReady;
 
 use crate::spec::{TankSpec, TankSpecHandle};
-use crate::tank::{SimParts, TrackSide};
+use crate::tank::{SimParts, TrackSide, rig_world_pose};
 
 /// One glTF node, extracted. `name` follows bevy_gltf's rule exactly (authored name, else
 /// `GltfNode{index}` — `bevy_gltf::loader::gltf_ext::scene::node_name`), so scene entities and
@@ -43,6 +44,14 @@ pub(crate) struct NodeGeometry {
 pub(crate) struct MeshGeometry {
     pub positions: Vec<[f32; 3]>,
     pub indices: Vec<u32>,
+}
+
+impl MeshGeometry {
+    /// Build the convex-hull collider consumed by both the game and the track sandbox.
+    pub(crate) fn convex_hull_collider(&self) -> Option<Collider> {
+        let points = self.positions.iter().copied().map(Vec3::from).collect();
+        Collider::convex_hull(points)
+    }
 }
 
 /// The whole model, extracted as data — the sim skeleton's construction source,
@@ -376,9 +385,14 @@ fn shadow_compare_on_instance_ready(
 
         // Composed root pose, bit-exact: catches any wrapper/intermediate divergence that local
         // comparisons can't see — this is the quantity `rig_world_pose` actually feeds the sim.
-        if let Some((position, rotation)) =
-            compose_scene_pose(entity, ready.entity, &parents, &transforms)
-        {
+        if let Some((position, rotation)) = rig_world_pose(
+            entity,
+            ready.entity,
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            &parents,
+            &transforms,
+        ) {
             if position.to_array().map(f32::to_bits)
                 != node.root_position.to_array().map(f32::to_bits)
                 || rotation.to_array().map(f32::to_bits)
@@ -508,30 +522,6 @@ fn nearest_extracted_ancestor<'a>(
         current = parents.get(current).ok()?.parent();
     }
     None
-}
-
-/// `rig_world_pose` with an identity root, over the full entity chain (loader wrappers included —
-/// identity transforms are bit-exact no-ops in this composition).
-fn compose_scene_pose(
-    entity: Entity,
-    root: Entity,
-    parents: &Query<&ChildOf>,
-    transforms: &Query<&Transform>,
-) -> Option<(Vec3, Quat)> {
-    let mut chain = Vec::new();
-    let mut current = entity;
-    while current != root {
-        chain.push(current);
-        current = parents.get(current).ok()?.parent();
-    }
-    let mut position = Vec3::ZERO;
-    let mut rotation = Quat::IDENTITY;
-    for &link in chain.iter().rev() {
-        let local = transforms.get(link).ok()?;
-        position += rotation * local.translation;
-        rotation *= local.rotation;
-    }
-    Some((position, rotation))
 }
 
 fn transform_bits_eq(a: &Transform, b: &Transform) -> bool {

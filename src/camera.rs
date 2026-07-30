@@ -1,6 +1,10 @@
-//! Third-person orbit camera: free-aim look, scroll-to-zoom dolly, ground-collision pull-in.
-//! The camera is also the aiming device, so look direction stays the player's — zoom only
-//! changes the orbit radius, which slides along the view axis and never moves the aim point.
+//! Camera transform kernels.
+//!
+//! The game's third-person orbit camera provides free-aim look, scroll-to-zoom dolly, and
+//! ground-collision pull-in. The camera is also the aiming device, so look direction stays the
+//! player's — zoom only changes the orbit radius, which slides along the view axis and never moves
+//! the aim point. [`free_fly_transform`] is the shared pure transform kernel behind the dev
+//! sandboxes' distinct ECS adapters.
 
 use avian3d::prelude::{PhysicsSystems, SpatialQuery};
 use bevy::camera::Hdr;
@@ -22,6 +26,56 @@ use crate::tank::{
     Controlled, Hull, Rig, Tank, TankViews, ViewNode, rig_world_pose, shortest_angle,
 };
 use crate::world::ground_distance;
+
+/// Apply one free-fly input frame to `transform`.
+///
+/// Mouse delta controls yaw/pitch without time scaling. WASD moves on the horizontal heading plane,
+/// Shift/Ctrl changes altitude, and translation integrates on real-time `delta_secs`.
+pub(crate) fn free_fly_transform(
+    transform: &mut Transform,
+    keys: &ButtonInput<KeyCode>,
+    mouse_delta: Vec2,
+    delta_secs: f32,
+) {
+    const SENS: f32 = 0.003;
+    const PITCH_LIMIT: f32 = std::f32::consts::FRAC_PI_2 - 0.001;
+    let (mut yaw, mut pitch, _) = transform.rotation.to_euler(EulerRot::YXZ);
+    yaw -= mouse_delta.x * SENS;
+    pitch = (pitch - mouse_delta.y * SENS).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+    transform.rotation = Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0);
+
+    // Looking down and pressing W keeps moving forward over the ground, not into it. Near-vertical
+    // look leaves no horizontal heading, so `normalize_or_zero` just no-ops that axis.
+    const SPEED: f32 = 12.0;
+    let forward = Vec3::from(transform.forward())
+        .with_y(0.0)
+        .normalize_or_zero();
+    let right = Vec3::from(transform.right())
+        .with_y(0.0)
+        .normalize_or_zero();
+    let mut dir = Vec3::ZERO;
+    if keys.pressed(KeyCode::KeyW) {
+        dir += forward;
+    }
+    if keys.pressed(KeyCode::KeyS) {
+        dir -= forward;
+    }
+    if keys.pressed(KeyCode::KeyD) {
+        dir += right;
+    }
+    if keys.pressed(KeyCode::KeyA) {
+        dir -= right;
+    }
+    if keys.pressed(KeyCode::ShiftLeft) {
+        dir += Vec3::Y;
+    }
+    if keys.pressed(KeyCode::ControlLeft) {
+        dir -= Vec3::Y;
+    }
+    if dir != Vec3::ZERO {
+        transform.translation += dir.normalize() * SPEED * delta_secs;
+    }
+}
 
 /// Zoom state on the camera entity. Scroll sets `target_zoom`; `zoom` eases toward it for a
 /// smooth dolly. 0 = out (far), 1 = in (near).
