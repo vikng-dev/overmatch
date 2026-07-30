@@ -16,6 +16,20 @@ first.
 
 ---
 
+## 0. PLAYTESTED AND ACCEPTED — 2026-07-30
+
+Yan played it on `feat/authoritative-facts` against the `OVERMATCH_BOT` circling shooter:
+*"looks pretty much perfect, i saw the impact rock both on myself and on others."*
+
+That closes the one thing eleven review rounds could not establish. The rounds proved the shove is
+DELIVERED — right hull, right episode, never silently dropped. They said nothing about whether
+0.1383 m/s is PERCEPTIBLE on a 57-tonne tank, which was the live risk that it might be correct and
+invisible. It is perceptible.
+
+The "on others" half is unplanned evidence worth keeping: non-owned tanks are INTERPOLATED, not
+predicted, so a visible rock on them means the impulse is real in the authority's simulation and
+survives replication — not an artifact of local prediction. No test in this arc covers that path.
+
 ## 1. What this arc is
 
 The server computes a hull impulse when a shell hits you (Δv = 0.1383 m/s for an 88mm). The client
