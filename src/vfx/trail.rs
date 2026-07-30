@@ -294,12 +294,7 @@ fn attach_trails(
                 NotShadowReceiver,
             ))
             .id();
-        ring.0.push_back(trail);
-        while ring.0.len() > TRAIL_CAP {
-            if let Some(old) = ring.0.pop_front() {
-                commands.entity(old).try_despawn();
-            }
-        }
+        crate::push_capped_entity(&mut commands, &mut ring.0, trail, TRAIL_CAP);
     }
 }
 

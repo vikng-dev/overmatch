@@ -161,6 +161,23 @@ pub(crate) fn gpu_less_default_plugins(
         .disable::<bevy::winit::WinitPlugin>()
 }
 
+/// Push an entity onto a capped FIFO, then evict the oldest entities until the cap is restored.
+///
+/// Cleanup uses `try_despawn` because another lifetime owner may already have removed an evictee.
+pub(crate) fn push_capped_entity(
+    commands: &mut Commands,
+    ring: &mut std::collections::VecDeque<Entity>,
+    entity: Entity,
+    cap: usize,
+) {
+    ring.push_back(entity);
+    while ring.len() > cap {
+        if let Some(old) = ring.pop_front() {
+            commands.entity(old).try_despawn();
+        }
+    }
+}
+
 #[cfg(test)]
 mod offline_feel_tests {
     use super::*;
