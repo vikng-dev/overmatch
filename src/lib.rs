@@ -76,6 +76,13 @@ mod overlay;
 /// ([`ClientPlugin`] and [`NetClientPlugin`] — the headless server has no render app and no menu to
 /// be quit from).
 mod quit;
+/// The RENDER-PASS cost recorder (`SPIKE_RENDER_COST=<path>`): an env-gated JSONL log of bevy's
+/// built-in per-pass `elapsed_cpu`/`elapsed_gpu` diagnostics, sampled once per second. Mounts
+/// `RenderDiagnosticsPlugin` itself, so it works without a tracy build; covers the main
+/// passes/prepass/bloom/tonemapping span sites but NOT the shadow pass (tracy is the shadow
+/// instrument). Off (zero cost) unless the env var is set; windowed clients only. Analyzed by
+/// `scripts/render/analyze.py`.
+mod render_cost;
 /// The ONE module that knows a render-layer number or writes a bevy shadow marker: semantic
 /// channels, camera/light profiles, and the per-object `VisualScope` that resolves into both. Every
 /// other module declares intent and never touches `RenderLayers` — a source scan in that module
