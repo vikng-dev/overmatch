@@ -850,6 +850,14 @@ adopted / delivered / dropped / undelivered; `bypassed → 0` with `adopted` hol
 acceptance denominator is CLIENT-OBSERVED state transitions with sequence deltas recorded — the
 measured 5-of-190 sequence gap (send-window coalescing hypothesis) stays open work, not a blocker.
 
+**A/B result (2026-07-31, same five seeds, per-fact rows on both arms).** Treatment:
+`bypassed = 0` on every seed (baseline 3–6 — wider than belt-first-only; seed 5 had six,
+including mid-belt), routes 100 % adopted (185–190 per run), `undelivered`/drops/unterminated
+all zero, zero budget releases (the seed-5 ricochet case released on impact), max hold 3–4 ticks
+against the 16-tick budget, `HullShock` `trg` zero, and total rollbacks DOWN ~10–20 % (269–289
+vs 301–349) — the native trigger had been ordering duplicate rollbacks adoption then re-ordered.
+Accepted.
+
 **Still open after this amendment:** the sequence-gap denominator (server-side per-episode
 telemetry), the real-link frequency and feel of visual-loss budget releases, and the application
 barrier — only if unrelated-rollback bypasses ever become material, which the capture found no
