@@ -1,9 +1,11 @@
 # Unpredictable authoritative facts adopt unconditionally
 
 > **Status: accepted; landed local on `feat/authoritative-facts`, playtest pending. `PROTOCOL_REV`
-> is now 24: the owner-private `HullShock` registration re-pinned it to 22 earlier on the same
-> branch, naming the victim on `ImpactConfirm`/`RicochetKeyframe` moved it to 23, and giving
-> `HullShock` its own `opened` tick moved it again — see *Correlating a spark with a fact*.**
+> is now 25: the owner-private `HullShock` registration re-pinned it to 22 earlier on the same
+> branch, naming the victim on `ImpactConfirm`/`RicochetKeyframe` moved it to 23, giving
+> `HullShock` its own `opened` tick moved it to 24 — see *Correlating a spark with a fact* — and
+> the 2026-07-31 amendment below (comparator ownership: the native `HullShock` condition is
+> permanently inert) moved it to 25.**
 
 A fact the client had no information to predict — that it was shot — reaches the player through a
 forced rollback that **no threshold can veto**. `net::adoption` decides WHETHER the authority's
@@ -617,7 +619,13 @@ is per-hull correctness of the spark/shove correlation — an inexact victim rel
 the one that was hit. What stays owner-private is unmoved, and is what made `HullShock` private in
 the first place: how many times a hull has been hit, with what worst cause, and for how much damage.
 
-### There is still a second delivery path, and ping decides when it runs
+### There is still a second delivery path, and ping decides when it runs — SUPERSEDED
+
+> **Superseded by the 2026-07-31 amendment below.** The capture this section asked for was taken
+> (`design/hullshock-delivery-capture-2026-07-31.md`); it corrected this section's premises — the
+> lead gate is necessary but not sufficient, real latency does not imply positive lead (measured
+> −0.76 tk at 40/5), and the "only path that has ever run on a real link" claim was false — and
+> the second path is now closed. The original text is kept for the record:
 
 `HullShock` remains registered with a native `.with_rollback_condition(..)` over
 `hull_shock_mismatch`. That comparator is a pure function of two component values, so it cannot
@@ -771,11 +779,13 @@ to be derived, never measured, and 2.5× too large.
   test destructures `HullShock` so the next field cannot be forgotten the same way — an enumerated
   list of "every field" is a list that rots.
 - **What would verify this is a real two-client capture on a jittered link, and it has not been
-  taken.** The fixtures prove the mechanism delivers at leads 0, −1 and 8; they say nothing about how
+  taken.** *(SUPERSEDED 2026-07-31: the capture was taken — see the amendment below and
+  `design/hullshock-delivery-capture-2026-07-31.md`.)* The fixtures prove the mechanism delivers at leads 0, −1 and 8; they say nothing about how
   often the ordering rule is bypassed, how often the budget expires, or how the hitch feels. Those
   three numbers are already instrumented and reported; reading them is the next evidence, and no
   claim in this ADR should be promoted to a product fact before then.
-- **The wire moved to `PROTOCOL_REV` 24, and has not moved since.** Client and server ship together
+- **The wire moved to `PROTOCOL_REV` 24, and has not moved since.** *(SUPERSEDED 2026-07-31:
+  REV 25, the amendment below — reconciliation semantics only, bytes unchanged.)* Client and server ship together
   behind a version-exact handshake, so the cost is one coordinated release; `WIRE_TYPES_HASH` and the
   wire-manifest fingerprint were re-pinned in that diff, and `WIRE_SURFACE_HASH` is untouched because
   no type was added, removed, renamed or reordered. `AuthoritativeFact::settled_at` is deliberately
@@ -786,6 +796,75 @@ to be derived, never measured, and 2.5× too large.
   present its spark. Bevy runs `FixedMain` zero or more times per frame, so a catch-up frame can put
   several ticks between the arrival `PreUpdate` and the adopting one. The fixture pins that the rule
   adds nothing to that minimum; it does not claim shipping always produces the number.
+
+---
+
+## Amendment (2026-07-31): comparator ownership — the native `HullShock` condition is inert
+
+**Decision.** `HullShock` remains explicitly registered `.replicate().predict()`, but its rollback
+condition is permanently inert (`|_, _| false` — explicit, because an omitted condition falls back
+to `PartialEq::ne` and silently re-arms the trigger). `net::adoption` is the sole INTENTIONAL
+present-value `HullShock` delivery policy at every prediction lead. `hull_shock_mismatch` survives
+as the fact detector, called directly by adoption on the confirmed histories. `PROTOCOL_REV` 24 →
+25 (the REV-21 precedent: identical bytes, different reconciliation semantics); wire surface and
+type hashes unchanged; only the manifest fingerprint re-pinned.
+
+**The evidence that gated it** (`design/hullshock-delivery-capture-2026-07-31.md`, five seeds,
+80/10, two clients + dedicated server). Adoption is clean in play: 176–183 facts per run staged,
+passed readiness, adopted, released on impact — zero budget releases, zero undelivered, zero
+replay-window drops, zero waits. The native comparator ordered exactly FOUR rollbacks per run —
+the first round of every MG belt, landing the shove a measured 1–3 ticks before its spark — and
+nothing else (the ~190 `HullShock` `trg` rows per run were receive-time TRIPS riding adoption's
+own forced rollbacks; trip-slot attribution is not order attribution). The old second-path
+section's premises did not survive the capture: receive-time dispatch needs more than
+`confirmed_tick < current_tick` (state mode `Check`, `should_check_mismatch_at`, unpruned
+history), and real latency does not imply positive lead (measured −0.76 tk at 40/5) — which path
+runs was never loopback-vs-WAN.
+
+**The structural carve-out, without which "sole" would be false.** Lightyear's presence
+mismatches (`(Some, None)` / `(None, Some)`) order rollback without consulting any registered
+condition. No production lifecycle reaches that shape — `HullShock` rides every spawn bundle, is
+never removed server-side, and respawn REPLACES the entity, so the client always receives it on
+the init/seed path that records no mismatch — and `net::hull_shock_rollback` pins the exception
+(`a_presence_mismatch_still_rolls_back_without_the_comparator`). Likewise, once ANY state
+rollback is ordered, `prepare_rollback` restores `HullShock` from confirmed history regardless of
+trigger: delivery by an unrelated rollback remains an observable preemption, which is why
+`Retirement::Delivered`, `OrderingTally::bypassed`, and the competing-rollback fixture all
+survive unchanged. Ordering stays BEST EFFORT — this amendment moves trigger ownership; it is not
+an application barrier.
+
+**Belt-first execution now** (the class the old trigger defeated): state arrival → staged → held
+for its spark → the march draws the episode's own hit → released on impact → forced rollback at
+the producing tick → sharp retirement. If the spark never draws — the cosmetic carrier rides a
+loss-bounded unordered channel — the CHOSEN 16-tick budget releases the shove anyway, still
+sharp: `a_missing_spark_spends_the_budget_and_still_delivers_sharply`. Both sequences are pinned
+in `net::hull_shock_rollback` on the production registration at the positive lead the native
+trigger used to own; the lead-0/−1 fixtures in `net::lead_zero_rollback` were already
+adoption-shaped and are untouched.
+
+**Acceptance instrument.** Per-fact ownership telemetry (`k:"fact"` rows in `SPIKE_TRACE`:
+staged with the visual-claim span, waiting, released, requested, retired with route and
+`carried`, dropped, spark) landed BEFORE the comparator flip so baseline and treatment captures
+read identically. The A/B gate on the same five seeds: every client-observed fact terminates as
+adopted / delivered / dropped / undelivered; `bypassed → 0` with `adopted` absorbing the old
+bypasses (recorded: 185–190 per run against a planning estimate of ≈ 181–183);
+`undelivered` and drops still 0; `trg == 0` for `HullShock` as SECONDARY wiring evidence only
+(the flip silences that instrument by construction, so it cannot be the primary gate). The
+acceptance denominator is CLIENT-OBSERVED state transitions with sequence deltas recorded — the
+measured 5-of-190 sequence gap (send-window coalescing hypothesis) stays open work, not a blocker.
+
+**A/B result (2026-07-31, same five seeds, per-fact rows on both arms).** Treatment:
+`bypassed = 0` on every seed (baseline 3–6 — wider than belt-first-only; seed 5 had six,
+including mid-belt), routes 100 % adopted (185–190 per run), `undelivered`/drops/unterminated
+all zero, zero budget releases (the seed-5 ricochet case released on impact), max hold 3–4 ticks
+against the 16-tick budget, `HullShock` `trg` zero, and total rollbacks DOWN ~10–20 % (269–289
+vs 301–349) — the native trigger had been ordering duplicate rollbacks adoption then re-ordered.
+Accepted.
+
+**Still open after this amendment:** the sequence-gap denominator (server-side per-episode
+telemetry), the real-link frequency and feel of visual-loss budget releases, and the application
+barrier — only if unrelated-rollback bypasses ever become material, which the capture found no
+evidence of.
 
 ## Related
 

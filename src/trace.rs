@@ -355,6 +355,10 @@ pub fn client_plugin(app: &mut App) {
         PreUpdate,
         clear_rollback_triggers.before(RollbackSystems::Check),
     );
+    app.add_systems(
+        PreUpdate,
+        record_fact_events.after(RollbackSystems::EndRollback),
+    );
     app.add_observer(record_rollback);
 }
 
@@ -810,6 +814,70 @@ static TRACE_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 /// Capped at 64 to bound a pathological burst; excess is dropped.
 static ROLLBACK_TRIGGERS: std::sync::Mutex<Vec<(&'static str, f32)>> =
     std::sync::Mutex::new(Vec::new());
+
+/// Per-fact adoption telemetry: lifecycle events pushed by `net::adoption` as a fact moves
+/// staged → (waiting…) → requested → retired/dropped, drained into `k:"fact"` rows by
+/// [`record_fact_events`]. This is the PRIMARY ownership instrument for the inert-comparator A/B:
+/// the tally counters aggregate, these rows account for EVERY client-observed fact individually —
+/// which route delivered it, what it waited on, and where its sequence jumped (the coalescing
+/// signal). Capped like the trigger slot; a burst past the cap drops events, never blocks.
+///
+/// Payload ticks (staged/produced/retired) are stamped by the EMITTING site; the row-level `tick`
+/// is merely when the drain wrote it, one schedule point later — read the payload, not the stamp.
+static FACT_EVENTS: std::sync::Mutex<Vec<Value>> = std::sync::Mutex::new(Vec::new());
+
+/// Push one fact-lifecycle event. The closure only runs in a traced run, so untraced call sites
+/// pay a single relaxed atomic load — same contract as [`note_rollback_trigger`].
+pub(crate) fn note_fact_event(build: impl FnOnce() -> Value) {
+    if !TRACE_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    if let Ok(mut events) = FACT_EVENTS.lock()
+        && events.len() < 256
+    {
+        events.push(build());
+    }
+}
+
+/// Drain the fact-event slot into `k:"fact"` rows. Runs after `EndRollback` so a frame's whole
+/// stage→request→retire arc lands in order before the drain; events emitted later in the frame
+/// (the spark observer fires from an `Update` drain) are written by the NEXT frame's pass.
+fn record_fact_events(
+    mut trace: ResMut<TraceWriter>,
+    real: Res<Time<Real>>,
+    timeline: Res<LocalTimeline>,
+) {
+    let drained = FACT_EVENTS
+        .lock()
+        .map(|mut events| std::mem::take(&mut *events))
+        .unwrap_or_default();
+    for mut event in drained {
+        if let Some(fields) = event.as_object_mut() {
+            fields.insert("k".into(), Value::from("fact"));
+            fields.insert("t".into(), num(real.elapsed_secs()));
+            fields.insert("tick".into(), Value::from(u64::from(timeline.tick().0)));
+        }
+        trace.write(&event);
+    }
+}
+
+/// Arm the fact-row fast path for a unit test that asserts on emitted rows. Process-global and
+/// never disarmed — harmless: test apps mount no `TraceWriter`, so events just accumulate to the
+/// cap and are dropped, and the closures' cost is paid only while some test is armed.
+#[cfg(test)]
+pub(crate) fn arm_fact_rows_for_test() {
+    TRACE_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Take everything in the fact slot. Parallel tests may interleave rows here; assert with
+/// `any()`, never with exact counts.
+#[cfg(test)]
+pub(crate) fn drain_fact_events_for_test() -> Vec<Value> {
+    FACT_EVENTS
+        .lock()
+        .map(|mut events| std::mem::take(&mut *events))
+        .unwrap_or_default()
+}
 
 /// Record that `component`'s rollback condition tripped this check, by `magnitude`. Called from
 /// [`note_if_tripped`] when a condition returns true. No-op

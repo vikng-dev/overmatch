@@ -191,6 +191,26 @@ fn isolated_shock() -> HullShock {
     }
 }
 
+/// The SECOND episode of the contention control: published (and checkpoint-covered) while the
+/// head is still staged and holding for its spark, but closing AFTER the head's replay window.
+/// That placement is load-bearing twice over: inside the window, the head's own replay SNAPS the
+/// newer confirmed samples in as it crosses their tick, live state then agrees, and no second
+/// fact is ever offered — replay-coalescing, not contention (found the hard way; the tally read
+/// one release instead of two). Its velocities are distinct so delivery is attributable — an
+/// assertion satisfied by the head's values would be reading the wrong restore.
+const FOLLOW_UP_TICK: Tick = Tick(103);
+const FOLLOW_UP_LINEAR: Vec3 = Vec3::new(0.0, 0.0, -0.276_6);
+const FOLLOW_UP_ANGULAR: Vec3 = Vec3::new(0.382_0, 0.0, 0.104_0);
+
+fn follow_up_shock() -> HullShock {
+    HullShock {
+        count: isolated_shock().count + 1,
+        tick: FOLLOW_UP_TICK.0,
+        opened: FOLLOW_UP_TICK.0,
+        cause: ShockCause::Perforation,
+    }
+}
+
 /// THE COALESCED EPISODE: an earlier episode closed at [`EARLY_HIT_TICK`] − 4, this hit landed at
 /// [`EARLY_HIT_TICK`] four ticks later — inside the open window — and was deferred to
 /// [`PRODUCING_TICK`], `SHOCK_EPISODE_TICKS` after that close.
@@ -517,6 +537,11 @@ struct Scenario {
     /// could request it. The ARCHETYPE half of the same question: the two history knobs above move
     /// what a restore would resolve, and this one moves whether the hull is in the restore at all.
     late_rollback_disable: bool,
+    /// A SECOND episode arriving while the head is staged and held: the single staging slot's
+    /// contention case. The newer fact is re-offered every frame (`SlotBusy`), stages the frame
+    /// after the head's transaction closes, holds for ITS OWN spark, and must then be adopted —
+    /// or the slot design has turned backpressure into loss.
+    follow_up_episode: bool,
     /// Extra LOCAL ticks to spend past the run's own last frame, each with a `PreUpdate`. How a
     /// fixture asks what bounds a wait.
     extra_ticks: i32,
@@ -536,6 +561,7 @@ impl Scenario {
             late_change: None,
             late_position_removal: None,
             late_rollback_disable: false,
+            follow_up_episode: false,
             extra_ticks: 0,
             render_error: false,
             synced: true,
@@ -592,6 +618,52 @@ fn arm_scenario_render_error(app: &mut App, root: Entity) {
     );
 }
 
+/// The mid-transaction mutations: replication (or production markers) moving under a staged
+/// fact. Split from [`run_scenario`] for length only — every knob still reads at the call site.
+fn apply_late_mutations(
+    app: &mut App,
+    root: Entity,
+    arrival: Tick,
+    late_change: Option<LateVelocityChange>,
+    late_position_removal: Option<Tick>,
+    late_rollback_disable: bool,
+) {
+    // REPLICATION MOVES UNDER THE STAGED FACT. The arrival frame has staged it and the ordering rule
+    // is holding it; every frame from here reads a history that is no longer the one the offer's
+    // gate saw. This is the only fixture in the file that does not freeze the history after setup.
+    if let Some(change) = late_change {
+        assert!(
+            change.newer_sample_at - arrival <= 0,
+            "the unchanged marker must sit at or before the restore target ({}), or the target's \
+             lookup never reaches it and the fixture is not exercising marker resolution at all",
+            arrival.0,
+        );
+        let mut history = app
+            .world_mut()
+            .get_mut::<ConfirmedHistory<LinearVelocity>>(root)
+            .expect("the hull's confirmed linear-velocity history");
+        change.apply(&mut history);
+    }
+    if let Some(removed_at) = late_position_removal {
+        let mut history = app
+            .world_mut()
+            .get_mut::<ConfirmedHistory<Position>>(root)
+            .expect("the hull's confirmed position history");
+        history.insert_removed(removed_at);
+    }
+    if late_rollback_disable {
+        // THE PRODUCTION INSERTION, at the point in the run production reaches it. `net::rig`'s
+        // `upgrade_predicted_to_dynamic` puts this marker on in `Update`; Bevy runs
+        // `RunFixedMainLoop` — and with it the `FixedLast` remover — BEFORE `Update`, so the marker
+        // necessarily survives to at least the next `PreUpdate`. This fixture writes it directly
+        // rather than driving the promotion path, because that path also flips the body to Dynamic
+        // and would change what the replay integrates; what is under test is the MARKER's effect on
+        // the rollback transaction, and lightyear reads nothing else off it.
+        app.world_mut().entity_mut(root).insert(DisableRollback);
+        app.world_mut().flush();
+    }
+}
+
 fn run_scenario(scenario: Scenario) -> Delivered {
     let Scenario {
         lead,
@@ -602,6 +674,7 @@ fn run_scenario(scenario: Scenario) -> Delivered {
         late_change,
         late_position_removal,
         late_rollback_disable,
+        follow_up_episode,
         extra_ticks,
         render_error,
         synced,
@@ -773,39 +846,31 @@ fn run_scenario(scenario: Scenario) -> Delivered {
     // the spark came first and the shove has correctly already landed by here.)
     let held_linear = app.world().get::<LinearVelocity>(root).unwrap().0;
 
-    // REPLICATION MOVES UNDER THE STAGED FACT. The arrival frame has staged it and the ordering rule
-    // is holding it; every frame from here reads a history that is no longer the one the offer's
-    // gate saw. This is the only fixture in the file that does not freeze the history after setup.
-    if let Some(change) = late_change {
-        assert!(
-            change.newer_sample_at - arrival <= 0,
-            "the unchanged marker must sit at or before the restore target ({}), or the target's \
-             lookup never reaches it and the fixture is not exercising marker resolution at all",
-            arrival.0,
+    apply_late_mutations(
+        &mut app,
+        root,
+        arrival,
+        late_change,
+        late_position_removal,
+        late_rollback_disable,
+    );
+
+    if follow_up_episode {
+        deposit_follow_up_episode(&mut app, root);
+        // One sparkless frame at the newer episode's tick, while the head still holds. The newer
+        // fact is offerable on this frame — its checkpoint is recorded and `now` has reached its
+        // tick — and the ONLY production offer outcome that leaves the HEAD staged is `SlotBusy`,
+        // which is what the assertion below reads: contention happened, nothing was displaced.
+        advance_to(&mut app, PRODUCING_TICK + 1);
+        app.world_mut().run_schedule(PreUpdate);
+        assert_eq!(
+            app.world()
+                .resource::<AuthorityAdoption>()
+                .staged_sequence(),
+            Some(visual.shock().count),
+            "the head must still hold the slot on the frame the newer fact became offerable — \
+             anything else means the fixture never created the SlotBusy contention it exists for",
         );
-        let mut history = app
-            .world_mut()
-            .get_mut::<ConfirmedHistory<LinearVelocity>>(root)
-            .expect("the hull's confirmed linear-velocity history");
-        change.apply(&mut history);
-    }
-    if let Some(removed_at) = late_position_removal {
-        let mut history = app
-            .world_mut()
-            .get_mut::<ConfirmedHistory<Position>>(root)
-            .expect("the hull's confirmed position history");
-        history.insert_removed(removed_at);
-    }
-    if late_rollback_disable {
-        // THE PRODUCTION INSERTION, at the point in the run production reaches it. `net::rig`'s
-        // `upgrade_predicted_to_dynamic` puts this marker on in `Update`; Bevy runs
-        // `RunFixedMainLoop` — and with it the `FixedLast` remover — BEFORE `Update`, so the marker
-        // necessarily survives to at least the next `PreUpdate`. This fixture writes it directly
-        // rather than driving the promotion path, because that path also flips the body to Dynamic
-        // and would change what the replay integrates; what is under test is the MARKER's effect on
-        // the rollback transaction, and lightyear reads nothing else off it.
-        app.world_mut().entity_mut(root).insert(DisableRollback);
-        app.world_mut().flush();
     }
 
     // The later frame, with the march's presentation in it — and the ticks that separate the two.
@@ -814,6 +879,10 @@ fn run_scenario(scenario: Scenario) -> Delivered {
         advance_to(&mut app, present);
         present_impact(&mut app, PRODUCING_TICK.0);
         app.world_mut().run_schedule(PreUpdate);
+    }
+
+    if follow_up_episode {
+        run_follow_up_delivery(&mut app);
     }
 
     if visual == Visual::Missing {
@@ -892,6 +961,43 @@ fn run_scenario(scenario: Scenario) -> Delivered {
     delivered
 }
 
+/// The contention deposit: while the head is staged and holding, a newer episode's confirmed
+/// samples and checkpoint land. From here every offer of the newer fact answers `SlotBusy` until
+/// the head's transaction closes. The head is UNAFFECTED: its readiness and restore read the
+/// newest samples at or before ITS tick, and the newer checkpoint still certifies it.
+fn deposit_follow_up_episode(app: &mut App, root: Entity) {
+    let mut shock = app
+        .world_mut()
+        .get_mut::<ConfirmedHistory<HullShock>>(root)
+        .expect("the hull's confirmed shock history");
+    shock.insert_present_explicit(FOLLOW_UP_TICK, follow_up_shock());
+    let mut linear = app
+        .world_mut()
+        .get_mut::<ConfirmedHistory<LinearVelocity>>(root)
+        .expect("the hull's confirmed linear history");
+    linear.insert_present_explicit(FOLLOW_UP_TICK, LinearVelocity(FOLLOW_UP_LINEAR));
+    let mut angular = app
+        .world_mut()
+        .get_mut::<ConfirmedHistory<AngularVelocity>>(root)
+        .expect("the hull's confirmed angular history");
+    angular.insert_present_explicit(FOLLOW_UP_TICK, AngularVelocity(FOLLOW_UP_ANGULAR));
+    let mut checkpoints = app.world_mut().resource_mut::<ReplicationCheckpointMap>();
+    checkpoints.record(RepliconTick::new(51), FOLLOW_UP_TICK);
+    checkpoints.record_last_confirmed_tick(RepliconTick::new(51));
+}
+
+/// The contention delivery: the head has retired, the slot is free. One frame past the newer
+/// episode's tick it stages and holds for its own spark; the spark draws; the next frame adopts.
+fn run_follow_up_delivery(app: &mut App) {
+    let stage_frame = app.world().resource::<LocalTimeline>().tick() + 1;
+    advance_to(app, stage_frame);
+    app.world_mut().run_schedule(PreUpdate);
+    present_impact(app, FOLLOW_UP_TICK.0);
+    let release_frame = app.world().resource::<LocalTimeline>().tick() + 1;
+    advance_to(app, release_frame);
+    app.world_mut().run_schedule(PreUpdate);
+}
+
 /// Draw the armor impact for the hit the authority resolved at `authority_tick`.
 ///
 /// `crate::ballistics::Impact` is the real presentation signal — `vfx::impact` renders off it and
@@ -946,6 +1052,53 @@ fn an_authority_shock_reaches_the_live_hull_at_zero_lead() {
 #[test]
 fn an_authority_shock_reaches_the_live_hull_at_minus_one_lead() {
     assert_delivered(Lead::MinusOne);
+}
+
+/// THE SINGLE STAGING SLOT UNDER CONTENTION — the backpressure case the inert comparator makes
+/// load-bearing. A second episode arrives while the head is staged and HELD for its spark; every
+/// offer of the newer fact answers `SlotBusy` until the head's transaction closes; the newer fact
+/// then stages, holds for its OWN spark, and is adopted with the SECOND episode's velocities. The
+/// old native trigger would have delivered the newer episode early and unordered; without it, a
+/// slot that turned backpressure into loss would fail exactly here.
+#[test]
+fn a_newer_fact_behind_a_held_head_is_adopted_after_the_head_releases() {
+    let delivered = run_scenario(Scenario {
+        follow_up_episode: true,
+        ..Scenario::new(Lead::Zero, Visual::DrawnAfterArrival)
+    });
+
+    assert_eq!(
+        delivered.live_linear, FOLLOW_UP_LINEAR,
+        "the LIVE hull must end on the SECOND episode's velocities — ending on the head's means \
+         the newer fact was never delivered",
+    );
+    assert_eq!(delivered.live_angular, FOLLOW_UP_ANGULAR);
+    assert_eq!(
+        delivered.realized_count,
+        follow_up_shock().count,
+        "the ledger must have realized BOTH episodes",
+    );
+    assert_eq!(
+        delivered.ordering,
+        OrderingTally {
+            released_on_impact: 2,
+            // EXACT: the head staged on the arrival frame, held through the contention frame,
+            // and released on its spark two ticks later; the newer fact's own wait was one tick.
+            max_wait_ticks: 2,
+            ..default()
+        },
+        "both facts must release on their own impacts — no bypass, no budget, no loss",
+    );
+    assert_eq!(
+        delivered.sharp.len(),
+        2,
+        "each adoption must emit its own sharp correction, got {:?}",
+        delivered.sharp,
+    );
+    assert_eq!(
+        delivered.forced_tick_after, None,
+        "no claim may outlive the run",
+    );
 }
 
 /// THE SAME-FRAME CONSUMPTION INVARIANT, pinned. `request_staged_adoption` claims the forced slot

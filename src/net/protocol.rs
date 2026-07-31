@@ -79,7 +79,23 @@ use crate::{CombatantId, ShotId};
 /// and a respawn keeps the combatant identity, so those ticks can hold the previous life's hits.
 /// `net::adoption` matches sparks against `[opened, tick]`. No new type and no new registration, so
 /// the surface hash is unchanged; the own-type graph and REV move.
-pub const PROTOCOL_REV: u32 = 24;
+///
+/// REV 25 (comparator ownership): NO wire-format change — the REV-21 precedent. [`HullShock`]'s
+/// registered rollback condition is permanently inert; `net::adoption` is the sole INTENTIONAL
+/// present-value `HullShock` delivery policy (lightyear's comparator-independent presence-mismatch
+/// recovery remains, and no production lifecycle exercises it). The bytes are identical, but two
+/// peers on opposite sides of this change reconcile the same `HullShock` snapshot with different
+/// ownership and presentation timing — the 5-seed capture measured the native comparator landing
+/// every belt-first shove 1–3 ticks before its spark, which is exactly the skew class REV exists
+/// to refuse. Surface and type hashes are unchanged; only the REV (and with it the manifest
+/// fingerprint) moves.
+pub const PROTOCOL_REV: u32 = 25;
+
+/// How many times the inert `HullShock` rollback condition has been dispatched, across every test
+/// in the process — see the registration for why this exists and how to read it soundly.
+#[cfg(test)]
+pub(crate) static HULL_SHOCK_DISPATCHES: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -826,10 +842,6 @@ pub(crate) const ROLLBACK_TANK_TRANSMISSION: f32 = 1.0;
 /// Exact weapon-gate divergence gate expressed as a Boolean 0/1 magnitude for trace attribution.
 /// The complete component is integer/discrete state, so ordinary equality is bit-exact.
 pub(crate) const ROLLBACK_WEAPON_GATE: f32 = 1.0;
-/// Exact hull-shock divergence gate expressed as a Boolean 0/1 magnitude for trace attribution.
-/// Every [`HullShock`] field is discrete, so ordinary equality is bit-exact — and, unlike the hull
-/// velocity this component exists to deliver, that comparison has no tolerance to hide under.
-pub(crate) const ROLLBACK_HULL_SHOCK: f32 = 1.0;
 /// One hull-shock EPISODE, in ticks (64 Hz → 0.25 s).
 ///
 /// CHOSEN inside a DERIVED band, not derived to a value. The band is `1 ..= 23` ticks and 16 is a
@@ -950,8 +962,11 @@ pub(crate) fn weapon_gate_mismatch(a: &WeaponGate, b: &WeaponGate) -> bool {
     a != b
 }
 
-/// Whether two hull-shock snapshots differ. Every field is discrete and the component derives `Eq`,
-/// so this is the exact atomic comparison the owner's forced rollback rests on.
+/// Whether two hull-shock snapshots differ. Every field is discrete and the component derives
+/// `Eq`, so this is the exact atomic comparison — but since REV 25 it is `net::adoption`'s FACT
+/// DETECTOR only, called directly on the confirmed histories. The registered rollback condition
+/// does NOT call it (it is permanently inert); changing this helper changes which facts adoption
+/// stages, never native reconciliation.
 pub(crate) fn hull_shock_mismatch(a: &HullShock, b: &HullShock) -> bool {
     a != b
 }
@@ -1273,19 +1288,35 @@ pub(crate) fn plugin(app: &mut App) {
                 ROLLBACK_WEAPON_GATE,
             )
         });
-    // The receiving half of combat. Same exact owner-predicted shape as the gate above, and for the
-    // same reason: the owner cannot predict either. The difference is what the rollback is FOR — a
-    // hit's Δv is far under the velocity gate, so the shove only ever reaches the player as part of
-    // the state this arrival restores. Nothing about the impulse itself rides the wire.
+    // The receiving half of combat. Same owner-predicted shape as the gate above — the owner
+    // cannot predict either — but the condition is PERMANENTLY INERT (REV 25): `net::adoption` is
+    // the sole intentional present-value `HullShock` rollback policy at every prediction lead, and
+    // this comparator was its one competitor. The 5-seed capture proved the competitor's only
+    // production effect was defeating the ordering rule — it ordered exactly the four
+    // belt-first-round rollbacks per run that landed the shove 1–3 ticks before its spark, while
+    // every mid-belt fact was already adoption's. `hull_shock_mismatch` remains the fact detector;
+    // adoption calls it directly on the confirmed histories.
+    //
+    // Registered explicitly rather than omitted, because an omitted condition falls back to
+    // `PartialEq::ne` and quietly re-arms the trigger. What an inert condition does NOT remove:
+    // lightyear's presence mismatches (`(Some, None)` / `(None, Some)`) order rollback without
+    // ever calling this closure, and once ANY state rollback is ordered, `prepare_rollback`
+    // restores `HullShock` from confirmed history regardless of trigger — those are structural
+    // framework recovery, not an application-selected delivery route, and no production lifecycle
+    // reaches them (the component rides every spawn bundle and is never removed; respawn replaces
+    // the entity, so the client always receives it on the no-mismatch init/seed path).
     app.component::<HullShock>()
         .replicate()
         .predict()
-        .with_rollback_condition(|a: &HullShock, b: &HullShock| {
-            crate::trace::note_if_tripped(
-                "HullShock",
-                u8::from(hull_shock_mismatch(a, b)).into(),
-                ROLLBACK_HULL_SHOCK,
-            )
+        .with_rollback_condition(|_: &HullShock, _: &HullShock| {
+            // Test-only dispatch attribution: the negative control must prove lightyear actually
+            // HANDED the pair to this closure and it declined — "no rollback" alone is satisfied
+            // by a deleted registration or a skipped scan. A global atomic because the closure is
+            // a plain fn with no world access; tests assert a delta >= 1 around their own run,
+            // which a parallel dispatcher can only push further in the passing direction.
+            #[cfg(test)]
+            HULL_SHOCK_DISPATCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            false
         });
     // Complete servo integrator state: one atomic owner-predicted snapshot, exact like the
     // transmission. Restoring current/previous/velocity at the producing tick makes replay derive
@@ -1839,7 +1870,7 @@ mod tests {
         );
         // Re-pinned for REV 24 (`opened` on `HullShock`: same registrations, changed own-type
         // definitions).
-        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0x13cd_6a8e_562f_0315;
+        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0x071e_8763_d8df_98b2;
         assert_eq!(
             wire_manifest, EXPECTED_WIRE_MANIFEST_FINGERPRINT,
             "wire manifest changed: re-pin to {wire_manifest:#018x}",

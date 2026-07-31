@@ -540,12 +540,14 @@ impl ShockCause {
 /// Owner-private PROOF that the authority applied an impulse this hull could not have predicted.
 ///
 /// The client cannot predict being shot, so its own copy never moves on its own. Registered
-/// `.replicate().predict()` behind an EXACT comparator (`net::protocol`), the arrival of a bumped
-/// `count` is a rollback to `tick` by itself — and that rollback restores every replicated
-/// predicted component at that tick, hull velocity included. THAT is how the shove is delivered;
-/// this component carries none of it. A hit's Δv (~0.14 m/s) is an order of magnitude under the
-/// velocity rollback gate, so without a forced rollback the authoritative velocity is compared,
-/// judged close enough, and discarded — the reason this component has to exist at all.
+/// `.replicate().predict()` with a permanently INERT rollback condition (`net::protocol`, REV 25):
+/// the arrival of a bumped `count` triggers nothing by itself — `net::adoption` observes the
+/// mismatch on the confirmed histories, holds it for its own drawn impact, and orders the
+/// rollback that restores every replicated predicted component at `tick`, hull velocity included.
+/// THAT is how the shove is delivered; this component carries none of it. A hit's Δv (~0.14 m/s)
+/// is an order of magnitude under the velocity rollback gate, so without that forced rollback the
+/// authoritative velocity is compared, judged close enough, and discarded — the reason this
+/// component has to exist at all.
 ///
 /// `count` is MONOTONIC because replication carries STATE, not TRANSITIONS: a bump-and-restore
 /// inside one send window is never observed as two events, only as a final value. A counter that
