@@ -244,34 +244,29 @@ pub fn run() {
                         //
                         // A hidden window's present returns `SurfaceError::Occluded` every frame
                         // (wgpu-hal metal surface.rs:122-157 workaround), so nothing ever
-                        // vsync-blocks — the 120 Hz reactive `WinitSettings` installed below is
-                        // what paces the hidden frame loop instead.
+                        // vsync-blocks and the hidden frame loop free-runs — the ACCEPTED cost;
+                        // see the measured note on `WinitSettings::continuous()` below.
                         visible: !hidden,
                         ..default()
                     }),
                     ..default()
                 }),
         );
-        if hidden {
-            // A hidden window never vsync-blocks (its Metal present returns
-            // `SurfaceError::Occluded` — see the `Window` literal above), so `continuous()` would
-            // free-run the frame loop flat-out. Reactive at 120 Hz still updates every cycle with
-            // no visible window: bevy's all-invisible branch (vendored bevy_winit
-            // state.rs:610-626) runs the app update whenever every window is invisible, so the
-            // wait is the only pacer. 120 Hz = 2x the 64 Hz fixed tick — comfortable headroom.
-            // Both modes get the cap: focus is meaningless for a window nobody can see.
-            let paced = bevy::winit::UpdateMode::reactive(Duration::from_secs_f64(1.0 / 120.0));
-            app.insert_resource(bevy::winit::WinitSettings {
-                focused_mode: paced,
-                unfocused_mode: paced,
-            });
-        } else {
-            // Never drop below the 64 Hz tick: the default `WinitSettings::game()` throttles an
-            // UNFOCUSED window to 60 Hz reactive updates — under tick rate, so an alt-tabbed
-            // client drifts behind the server and resyncs on refocus (lightyear #1113's jitter
-            // class). A VISIBLE window's actual pacing then comes from vsync/present on top.
-            app.insert_resource(bevy::winit::WinitSettings::continuous());
-        }
+        // Never drop below the 64 Hz tick: the default `WinitSettings::game()` throttles an
+        // UNFOCUSED window to 60 Hz reactive updates — under tick rate, so an alt-tabbed client
+        // drifts behind the server and resyncs on refocus (lightyear #1113's jitter class).
+        //
+        // `continuous()` holds for HIDDEN capture clients too — do not re-try a reactive cap
+        // here. MEASURED (2026-07-31, full 3840-tick capture): `UpdateMode::reactive(1/120)`
+        // STARVED the all-invisible event loop on macOS — the target received 78 of ~980
+        // fire_rx events, fire catch-up p50 34 ticks (baseline 8, max 65 vs ~13), fact lag
+        // p50 27 (baseline 7) — whatever the code-read of bevy_winit's all-invisible branch
+        // (state.rs:610-626) suggested. continuous()+hidden measured metric-identical to the
+        // visible baseline on the same seeds (catch-up p50 7-8, lag 7; four clean runs). The
+        // accepted cost is free-running CPU on capture runs (the invisible surface's
+        // `SurfaceError::Occluded` skips the vsync block); revisit only with a mechanism that
+        // PROVABLY wakes at >=64 Hz with zero visible windows.
+        app.insert_resource(bevy::winit::WinitSettings::continuous());
         if sim_windowed {
             app.init_resource::<harness::SimulateInput>();
         }
