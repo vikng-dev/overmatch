@@ -231,15 +231,23 @@
 //!
 //! One bypass route is structural and worth naming on its own. `HullShock` is still registered
 //! `.with_rollback_condition(..)` in `net::protocol`, and that comparator is a pure function of two
-//! component values — it cannot consult [`ImpactPresentation`]. Its receive-time dispatch is gated
-//! on `confirmed_tick < current_tick`, which is FALSE only at the zero/negative lead loopback
-//! produces and TRUE on every link with real latency, so it is inert on loopback and live in WAN
-//! play. Making this module the SOLE delivery route — registering an inert condition on `HullShock`
-//! so lightyear never rolls back on it directly — is a one-line change plus a rewrite of
-//! `net::hull_shock_rollback`'s positive control, but it retires the only delivery path that has
-//! ever run on a real link in favour of one whose readiness gates have only been exercised in
-//! fixtures, so it wants its own evidence rather than being bundled here. It would SHRINK the hole,
-//! not close it: every other rollback cause still restores the same state.
+//! component values — it cannot consult [`ImpactPresentation`]. Its receive-time dispatch requires
+//! `confirmed_tick < current_tick` — necessary but NOT sufficient: state mode `Check`,
+//! `should_check_mismatch_at`, and prediction history not yet pruned past the confirmed tick all
+//! gate the same dispatch (lightyear_prediction 0.28 registry.rs:416-458, manager.rs:225-239). Nor
+//! does real latency imply positive lead: `balanced()` spends ~3 ticks of input delay that absorbs
+//! the whole round trip below that RTT, and the measured lead at the 40/5 jitter condition is
+//! NEGATIVE (−0.76 tk, `.agents/docs/design/timelines-and-shear.md`) — so which path runs is set by
+//! whether latency exceeds what input delay absorbs, not by loopback-vs-WAN. Registering an inert
+//! condition on `HullShock` would remove only the value-mismatch TRIGGER, not a delivery path:
+//! presence mismatches (`(Some, None)` / `(None, Some)`) order rollback without ever calling the
+//! comparator (registry.rs:254-290), and once ANY state rollback is ordered, `prepare_rollback`
+//! restores `HullShock` from confirmed history regardless of what triggered it
+//! (rollback.rs:866-1009). The production edit is one line but the evidence bill is not:
+//! `net::hull_shock_rollback`'s positive control proves the native comparator DOES trigger and
+//! would need rewriting around adoption, so the change wants its own evidence rather than being
+//! bundled here. It would SHRINK the hole, not close it: every other rollback cause still restores
+//! the same state.
 
 use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, Rotation};
 use bevy::prelude::*;
