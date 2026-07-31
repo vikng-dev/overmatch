@@ -191,14 +191,7 @@ fn spawn_impact_marker(
             Transform::from_translation(impact.position),
         ))
         .id();
-    ring.0.push_back(marker);
-    // Evict from the front until back under the cap. `try_despawn` is a silent no-op if the marker
-    // is already gone (e.g. a scene reset despawned it out from under us).
-    while ring.0.len() > IMPACT_MARKER_CAP {
-        if let Some(old) = ring.0.pop_front() {
-            commands.entity(old).try_despawn();
-        }
-    }
+    crate::push_capped_entity(&mut commands, &mut ring.0, marker, IMPACT_MARKER_CAP);
 }
 
 #[cfg(test)]

@@ -173,27 +173,10 @@ pub fn run() {
 
     let mut app = App::new();
     if simulate && !sim_windowed {
-        app.add_plugins(
-            DefaultPlugins
-                .set(AssetPlugin {
-                    file_path: asset_root(),
-                    ..default()
-                })
-                .set(bevy::render::RenderPlugin {
-                    render_creation: bevy::render::settings::WgpuSettings {
-                        backends: None,
-                        ..default()
-                    }
-                    .into(),
-                    ..default()
-                })
-                .set(WindowPlugin {
-                    primary_window: None,
-                    exit_condition: bevy::window::ExitCondition::DontExit,
-                    ..default()
-                })
-                .disable::<bevy::winit::WinitPlugin>(),
-        )
+        app.add_plugins(crate::gpu_less_default_plugins(None).set(AssetPlugin {
+            file_path: asset_root(),
+            ..default()
+        }))
         .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(2)))
         .init_resource::<harness::SimulateInput>();
     } else {

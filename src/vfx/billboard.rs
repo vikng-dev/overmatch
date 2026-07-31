@@ -223,12 +223,7 @@ pub(crate) fn spawn_billboard_ring(
         entity.insert(FaceCamera);
     }
     let id = entity.id();
-    ring.push_back(id);
-    while ring.len() > cap {
-        if let Some(old) = ring.pop_front() {
-            commands.entity(old).try_despawn();
-        }
-    }
+    crate::push_capped_entity(commands, ring, id, cap);
     id
 }
 

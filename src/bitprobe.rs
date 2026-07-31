@@ -450,24 +450,8 @@ fn scripted_input(tick: u32) -> (f32, f32) {
 
 fn build_app() -> App {
     let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .set(bevy::render::RenderPlugin {
-                render_creation: bevy::render::settings::WgpuSettings {
-                    backends: None,
-                    ..default()
-                }
-                .into(),
-                ..default()
-            })
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: bevy::window::ExitCondition::DontExit,
-                ..default()
-            })
-            .disable::<bevy::winit::WinitPlugin>(),
-    )
-    .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO));
+    app.add_plugins(crate::gpu_less_default_plugins(None))
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO));
 
     // Match the network authority's no-interpolation/no-sleep Avian policy. The standalone probe
     // retains PhysicsTransformPlugin because Lightyear is intentionally absent and therefore cannot

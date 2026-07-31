@@ -153,24 +153,8 @@ fn headless_app_on(world: Option<crate::terrain_grid::HeightGrid>) -> App {
 /// strategy, as [`start_fixed_clock`] does.
 fn headless_shell() -> App {
     let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .set(bevy::render::RenderPlugin {
-                render_creation: bevy::render::settings::WgpuSettings {
-                    backends: None,
-                    ..default()
-                }
-                .into(),
-                ..default()
-            })
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: bevy::window::ExitCondition::DontExit,
-                ..default()
-            })
-            .disable::<bevy::winit::WinitPlugin>(),
-    )
-    .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO));
+    app.add_plugins(crate::gpu_less_default_plugins(None))
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO));
     // UPSTREAM WORKAROUND — bevy_image 0.19 panics (not errors) transcoding UASTC KTX2 when NO
     // block-compressed format is supported: it sizes the SOURCE slice from the DESTINATION
     // format's block geometry, so the Rgba8 fallback reads 4x too far. `backends: None` means no
