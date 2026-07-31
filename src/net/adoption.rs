@@ -635,6 +635,16 @@ fn note_presented_impact(impact: On<Impact>, mut presentation: ResMut<ImpactPres
             tick: Tick(authority.tick),
             victim: authority.victim,
         });
+        // The spark's side of the ordering question, joinable against the fact rows: whether a
+        // belt-first fact staged BEFORE its spark is a comparison of `staged.staged_at` against
+        // this row's payload tick — the authority tick the drawn impact resolved on.
+        crate::trace::note_fact_event(|| {
+            serde_json::json!({
+                "ev": "spark",
+                "at": authority.tick,
+                "victim": authority.victim.map(|victim| victim.0),
+            })
+        });
     }
 }
 
@@ -803,6 +813,24 @@ impl AuthorityAdoption {
                 self.staged_at = Some(now);
                 self.requested = false;
                 self.ordering = Ordering::Unasked;
+                // The per-fact ownership row the A/B instrument accounts every fact from. The
+                // claim span rides along because it is recorded nowhere else machine-readable —
+                // it is what decides whether a nearby spark covers this fact (the seed-5 ricochet
+                // ambiguity). Repeat offers take the `Staged` arm above and emit nothing;
+                // `SlotBusy` re-offers every frame and is deliberately not a row — the losing
+                // fact either stages later (its own row) or is superseded, which the sequence
+                // accounting shows as a jump.
+                crate::trace::note_fact_event(|| {
+                    serde_json::json!({
+                        "ev": "staged",
+                        "seq": fact.id.sequence,
+                        "ent": format!("{}", fact.id.entity),
+                        "at": fact.produced_at.0,
+                        "settled": fact.settled_at.0,
+                        "staged_at": now.0,
+                        "span": fact.visual.map(|claim| [claim.from.0, claim.through.0]),
+                    })
+                });
                 Offer::Staged
             }
         };
@@ -1446,6 +1474,13 @@ fn request_staged_adoption(
             target.0,
             manager.rollback_policy.max_rollback_ticks,
         );
+        crate::trace::note_fact_event(|| {
+            serde_json::json!({
+                "ev": "dropped",
+                "seq": fact.id.sequence,
+                "age": age,
+            })
+        });
         adoption.close(fact);
         return;
     }
@@ -1477,6 +1512,15 @@ fn request_staged_adoption(
             fact.settled_at.0,
             unready.reason(),
         );
+        // Once per frame the fact stalls — the analyzer dedups, the cap absorbs a pathological
+        // burst. A readiness stall is exactly what the ownership rows exist to make visible.
+        crate::trace::note_fact_event(|| {
+            serde_json::json!({
+                "ev": "waiting",
+                "seq": fact.id.sequence,
+                "why": unready.reason(),
+            })
+        });
         return;
     }
     // LOCAL patience: ticks this client has held the fact, counted from the frame it was staged.
@@ -1491,6 +1535,16 @@ fn request_staged_adoption(
         return;
     }
     adoption.requested = slot.claim(metadata, target, fact.cause);
+    if adoption.requested {
+        crate::trace::note_fact_event(|| {
+            serde_json::json!({
+                "ev": "requested",
+                "seq": fact.id.sequence,
+                "target": target.0,
+                "waited": waited,
+            })
+        });
+    }
 }
 
 /// THE ORDERING RULE, which is BEST EFFORT. Whether this module will request the staged fact yet,
@@ -1533,6 +1587,16 @@ fn clear_to_order(
     }
     adoption.ordering = Ordering::Released;
     presentation.resolve(shown, waited);
+    // The release verdict, latched once per fact: `shown` separates on-impact from on-budget —
+    // the same split the tally counts, but per fact and joinable against `staged`/`spark` rows.
+    crate::trace::note_fact_event(|| {
+        serde_json::json!({
+            "ev": "released",
+            "seq": fact.id.sequence,
+            "shown": shown,
+            "waited": waited,
+        })
+    });
     if !shown {
         // Not a correctness failure — the shove still lands at its authoritative tick. It is the
         // measurement the relaxed ordering requirement asked for: how often the visual never showed
@@ -1646,6 +1710,30 @@ fn confirm_forced_rollback(
         sharp.write(SharpCorrection {
             entity: fact.id.entity,
             restored_from: started,
+        });
+    }
+    // The terminal ownership row: which route spent the fact, and whether the restore carried the
+    // shove. `bypassed` is `Delivered { spark_pending: true }` — a rollback this module did not
+    // order landing before the spark — kept as its own label so the A/B can count the class the
+    // inert comparator exists to close.
+    if let Some(route) = outcome
+        && route != Retirement::Keep
+    {
+        crate::trace::note_fact_event(|| {
+            serde_json::json!({
+                "ev": "retired",
+                "seq": fact.id.sequence,
+                "at": fact.produced_at.0,
+                "route": match route {
+                    Retirement::Adopted => "adopted",
+                    Retirement::Delivered { spark_pending: false } => "delivered",
+                    Retirement::Delivered { spark_pending: true } => "bypassed",
+                    Retirement::Undelivered => "undelivered",
+                    Retirement::Keep => unreachable!("filtered above"),
+                },
+                "started": started.0,
+                "carried": carried,
+            })
         });
     }
     match outcome {
