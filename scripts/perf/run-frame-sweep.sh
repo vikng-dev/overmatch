@@ -15,22 +15,44 @@
 #     fully-occluded window's present returns SurfaceError::Occluded, nothing ever vsync-blocks,
 #     and the frame loop FREE-RUNS — frame times from a hidden window are fiction. The sweep
 #     steals focus once per condition (window churn); leave the machine alone while it runs.
+#     ENFORCED, not just documented: a real run refuses to start with SPIKE_SIM_WINDOWED
+#     exported (and scrubs it from the child's env regardless), the client records every
+#     window-occlusion transition into the frame stream, and the analyzer fails any condition
+#     whose occluded interval overlaps the measurement window.
 #   * warm shader cache: the FIRST launch after a rebuild stalls >10 s on Metal pipeline
 #     compilation. Discard the first sweep after every rebuild (or do one throwaway run first).
 #   * hands off keyboard/mouse during conditions — input changes the workload.
 #
-# Expected wall-clock: 6 conditions x (10 s warmup + 60 s measure + 15 s cooldown) ~ 9 min.
+# Expected wall-clock: 6 conditions x (startup + 10 s warmup + 60 s measure + 15 s cooldown)
+# ~ 9-12 min — each condition runs until its STREAM spans warmup+measure on the app's own clock
+# (startup does not eat the window), bounded by STARTUP_GRACE_S.
 # Products: $OUT/<cond>.client.jsonl raw frame streams, manifest.txt, analyzer table on stdout
 # (re-run any time: uv run scripts/perf/analyze.py --baseline m350-2 $OUT/*.client.jsonl).
 #
+# Per-condition validity gates (fail LOUD, never patch over — the failure class this harness
+# fights is "invalid capture masquerades as a real measurement"):
+#   * the client must still be ALIVE at the scheduled cutoff — a child that died early produced
+#     a partial stream, not evidence;
+#   * the injected video.ron must have been loaded, and the probe tanks spawned;
+#   * real mode only: the client must report `frame_cost: effective present mode Immediate,
+#     frame cap off` (proof the run was truly uncapped — Settings can silently normalize an
+#     unsupported vsync Off back to On, and a failed capability probe negotiates down to Fifo),
+#     and neither a vsync-normalization nor a probe-failure line may appear;
+#   * analyzer gates (also run per condition via --validate-only): monotonic timestamps, a row
+#     SPAN of at least warmup+duration (row COUNT cannot tell a 60 s run from a fast free-runner
+#     that died at 10 s), and — real mode — no occluded interval overlapping the measurement
+#     window.
+#
 # SMOKE mode (plumbing validation ONLY — hidden window, so every number is free-run garbage
-# by construction; it proves rows flow and gates fire, nothing else):
+# by construction; it proves rows flow and gates fire, nothing else; the output dir gets a
+# SMOKE-PLUMBING-ONLY.txt marker and the manifest says the same):
 #   SMOKE=1 scripts/perf/run-frame-sweep.sh /tmp/frame-sweep-smoke
 # =======================================================================
 #
 # Usage: run-frame-sweep.sh <out-dir>
 # Knobs (env): BIN (default target/release), DURATION_S (60), WARMUP_S (10), COOLDOWN_S (15),
-#   MIN_ROWS (DURATION_S*20 — a real run at 60 fps writes ~60*DURATION_S), SMOKE (off).
+#   MIN_ROWS (DURATION_S*20 — a real run at 60 fps writes ~60*DURATION_S), SMOKE (off),
+#   STARTUP_GRACE_S (60 — how much process startup the span deadline forgives).
 # Per-run graphics settings are injected via OVERMATCH_CONFIG_DIR: each condition gets its own
 # scratch config dir with a generated video.ron (vsync_mode: Off so frames are never
 # refresh-clamped), so the sweep never touches the developer's real settings. Tank count rides
@@ -55,6 +77,18 @@ else
   COOLDOWN_S="${COOLDOWN_S:-15}"
 fi
 MIN_ROWS="${MIN_ROWS:-$((DURATION_S * 20))}"
+# How much process startup (asset load, Metal pipeline compilation, window creation) the span
+# deadline forgives before a condition is called stalled — see the poll loop below.
+STARTUP_GRACE_S="${STARTUP_GRACE_S:-60}"
+
+# A real sweep with the hidden-capture env exported would inherit it into every child, the window
+# would never be shown, and every gate below would happily pass on free-run fiction. Refuse rather
+# than silently scrub: an operator who exported it should decide whether they meant SMOKE=1.
+if [[ -z "$SMOKE" && -n "${SPIKE_SIM_WINDOWED:-}" ]]; then
+  echo "REFUSING real sweep: SPIKE_SIM_WINDOWED is exported — a hidden window free-runs and every" >&2
+  echo "number would be fiction. unset it, or run SMOKE=1 for loudly-marked plumbing validation." >&2
+  exit 1
+fi
 
 [[ -x "$CLIENT" ]] || { echo "no client binary at $CLIENT — build it first (see runbook)" >&2; exit 1; }
 
@@ -74,7 +108,7 @@ if [[ -n "$SMOKE" ]]; then
 fi
 
 mkdir -p "$OUT"
-rm -f "$OUT"/*.jsonl "$OUT"/*.log "$OUT"/manifest.txt
+rm -f "$OUT"/*.jsonl "$OUT"/*.log "$OUT"/manifest.txt "$OUT"/SMOKE-PLUMBING-ONLY.txt
 rm -rf "$OUT"/cfg-*
 
 CLIENT_PID=""
@@ -91,13 +125,24 @@ trap 'exit 143' TERM
 if [[ -n "$SMOKE" ]]; then
   echo "SMOKE MODE: hidden window (SPIKE_SIM_WINDOWED=1) — the surface is Occluded, the loop" >&2
   echo "free-runs, and every frame time below is FICTION. Plumbing validation only." >&2
+  # The directory-level marker, so the numbers cannot later be mistaken for a measurement by
+  # someone (or some agent) who finds the files without this terminal scrollback.
+  cat >"$OUT/SMOKE-PLUMBING-ONLY.txt" <<'EOF'
+SMOKE / PLUMBING-ONLY sweep. The window was HIDDEN (SPIKE_SIM_WINDOWED=1): the surface is
+Occluded, present is discarded, and the frame loop free-runs. Every frame time in this
+directory is fiction by construction. This run proves that rows flow and gates fire — nothing
+else. Do not quote these numbers.
+EOF
 fi
 
 # Evidence provenance: which code, which binary, which ladder, which mode produced this sweep.
 {
   echo "commit: $(git -C "$REPO" rev-parse HEAD)$(git -C "$REPO" diff --quiet HEAD 2>/dev/null || echo ' (dirty)')"
-  echo "mode: $([[ -n "$SMOKE" ]] && echo 'SMOKE (hidden window — numbers are fiction)' || echo 'real (visible window)')"
+  echo "mode: $([[ -n "$SMOKE" ]] && echo 'SMOKE / PLUMBING-ONLY (hidden window — every number is free-run fiction)' || echo 'real (visible window)')"
   echo "duration_s: $DURATION_S  warmup_s: $WARMUP_S  cooldown_s: $COOLDOWN_S  min_rows: $MIN_ROWS  bin: $BIN"
+  echo "presentation gates: $([[ -n "$SMOKE" ]] \
+    && echo 'RELAXED — occlusion and effective-present-mode gates SKIPPED (hidden window by design)' \
+    || echo 'occlusion-free measurement window + effective present mode Immediate, frame cap off')"
   echo "conditions: ${CONDITIONS[*]}"
   echo "binary: $CLIENT  $(stat -f 'mtime=%Sm size=%z' "$CLIENT")"
   echo "host: $(uname -m) $(sysctl -n machdep.cpu.brand_string 2>/dev/null || uname -p)"
@@ -117,7 +162,10 @@ for entry in "${CONDITIONS[@]}"; do
   printf '(\n    version: 1,\n    shadow_distance: %s,\n    vsync_mode: Off,\n)\n' "$shadow" >"$cfg/video.ron"
 
   echo "== $cond: shadow_distance=$shadow tanks=$tanks (${WARMUP_S}s warmup + ${DURATION_S}s measure) =="
-  EXTRA=()
+  # Real mode SCRUBS the hidden-capture env pair from the child even though the refusal above
+  # already caught an exported SPIKE_SIM_WINDOWED — belt and suspenders, because run_offline's
+  # hidden mode silently activating is exactly the free-run fiction this sweep must never emit.
+  EXTRA=(-u SPIKE_SIM_WINDOWED -u SPIKE_SIM_VISIBLE)
   [[ -n "$SMOKE" ]] && EXTRA=(SPIKE_SIM_WINDOWED=1)
   env "${EXTRA[@]}" \
     OVERMATCH_CONFIG_DIR="$cfg" OVERMATCH_PROBE_TANKS="$tanks" \
@@ -126,28 +174,90 @@ for entry in "${CONDITIONS[@]}"; do
     "$CLIENT" --offline >"$OUT/$cond.log" 2>&1 &
   CLIENT_PID=$!
 
-  sleep "$((WARMUP_S + DURATION_S))"
+  # Run the condition until the STREAM spans warmup+duration on its own clock — `t` is
+  # app-elapsed time, so process startup (asset load, shader compilation, window creation; >10 s
+  # cold) is invisible to a wall-clock sleep and would silently eat the measurement window. The
+  # analyzer's span gate measures the stream, so the runner must feed it by the same clock.
+  # STARTUP_GRACE_S bounds how long startup may take before the condition is declared stalled.
+  stream="$OUT/$cond.client.jsonl"
+  deadline=$((SECONDS + WARMUP_S + DURATION_S + STARTUP_GRACE_S))
+  span_ok=""
+  while (( SECONDS < deadline )); do
+    sleep 1
+    # The child must still be ALIVE while the window fills (and not a zombie — kill -0 answers
+    # yes for a zombie, so ask ps for the state): a client that died mid-condition produced a
+    # partial stream whose row COUNT can still clear MIN_ROWS. Early death FAILS, loudly.
+    state="$(ps -o state= -p "$CLIENT_PID" 2>/dev/null || true)"
+    if [[ -z "$state" || "$state" == *Z* ]]; then
+      exit_status=0
+      wait "$CLIENT_PID" 2>/dev/null || exit_status=$?
+      CLIENT_PID=""
+      echo "$cond INVALID: client exited (status $exit_status) before the stream spanned $((WARMUP_S + DURATION_S))s — early death, not evidence (see $OUT/$cond.log)" >&2
+      exit 1
+    fi
+    [[ -f "$stream" ]] || continue
+    # First/last `t` straight off the JSONL (both row shapes carry it); a torn last line simply
+    # fails the extraction and this poll waits another second. The optional whitespace around the
+    # colon is not pedantry: without it a writer that pretty-separates its keys yields an EMPTY
+    # match here, the span never appears to advance, and the condition dies on the deadline with a
+    # "never armed" message that blames the app for a bug in this line.
+    t_pat='s/.*"t"[[:space:]]*:[[:space:]]*\([0-9.eE+-]*\).*/\1/p'
+    t_first="$(head -n1 "$stream" 2>/dev/null | sed -n "$t_pat")"
+    t_last="$(tail -n1 "$stream" 2>/dev/null | sed -n "$t_pat")"
+    if [[ -n "$t_first" && -n "$t_last" ]] && (( t_last - t_first >= WARMUP_S + DURATION_S )); then
+      span_ok=1
+      break
+    fi
+  done
+  if [[ -z "$span_ok" ]]; then
+    echo "$cond INVALID: stream never spanned $((WARMUP_S + DURATION_S))s within the $((WARMUP_S + DURATION_S + STARTUP_GRACE_S))s deadline — stalled or never armed (see $OUT/$cond.log)" >&2
+    exit 1
+  fi
   kill "$CLIENT_PID" 2>/dev/null || true
   wait "$CLIENT_PID" 2>/dev/null || true
   CLIENT_PID=""
 
   # Hard validity gates — a condition that never loaded its injected settings, never spawned its
-  # tanks, or produced a short stream is NOT evidence. Fail loud, never patch over.
-  stream="$OUT/$cond.client.jsonl"
+  # tanks, ran display-paced, or produced a short/occluded stream is NOT evidence. Fail loud.
   [[ -f "$stream" ]] || { echo "$cond INVALID: no frame stream at $stream (SPIKE_FRAME_COST never armed?)" >&2; exit 1; }
-  rows=$(wc -l <"$stream" | tr -d ' ')
-  [[ "$rows" -ge "$MIN_ROWS" ]] || { echo "$cond INVALID: $rows frame rows < required $MIN_ROWS (crashed / stalled / killed early?)" >&2; exit 1; }
   grep -q "settings: loaded $cfg/video.ron" "$OUT/$cond.log" || { echo "$cond INVALID: injected settings were not loaded (see $OUT/$cond.log)" >&2; exit 1; }
   if [[ "$tanks" -gt 2 ]]; then
     grep -q "offline: spawned $((tanks - 2)) probe tanks" "$OUT/$cond.log" || { echo "$cond INVALID: probe-tank spawn missing (see $OUT/$cond.log)" >&2; exit 1; }
   fi
-  echo "   $cond OK: $rows frame rows"
+  if [[ -z "$SMOKE" ]]; then
+    # Uncapped-run proof: the client states the post-probe EFFECTIVE mode (src/frame_cost.rs);
+    # only Immediate + frame cap off is a real free-of-display-pacing run. The settings-loaded
+    # grep above only proves the file PARSED — normalize_vsync can still have resolved Off to On.
+    grep -q "frame_cost: effective present mode Immediate, frame cap off" "$OUT/$cond.log" \
+      || { echo "$cond INVALID: no proof the run was uncapped — expected 'frame_cost: effective present mode Immediate, frame cap off' (see $OUT/$cond.log)" >&2; exit 1; }
+    if grep -qE 'settings: vsync .* is not supported by this surface' "$OUT/$cond.log"; then
+      echo "$cond INVALID: vsync Off was normalized away — the run was display-paced (see $OUT/$cond.log)" >&2; exit 1
+    fi
+    if grep -qE 'present-mode probe: (could not create|the surface reported no present modes)' "$OUT/$cond.log"; then
+      echo "$cond INVALID: the present-mode capability probe failed — AutoNoVsync may have negotiated down to Fifo (see $OUT/$cond.log)" >&2; exit 1
+    fi
+  fi
+  # Stream-shape gates, shared with the final analysis pass (--validate-only runs the same code):
+  # monotonic time, full warmup+duration SPAN, MIN_ROWS, and (real mode) no occluded interval
+  # overlapping the measurement window.
+  ( cd "$REPO" && uv run scripts/perf/analyze.py --validate-only --warmup-s "$WARMUP_S" \
+      --min-rows "$MIN_ROWS" --expected-duration-s "$DURATION_S" \
+      ${SMOKE:+--occluded-ok} "$stream" ) \
+    || { echo "$cond INVALID: frame stream failed the analyzer's validity gates (see above)" >&2; exit 1; }
+  # Presentation provenance into the manifest: the effective mode line verbatim, plus how many
+  # occlusion transitions the client observed (0 on a clean visible run after the initial show).
+  {
+    echo "$cond: $(grep -m1 -o 'frame_cost: effective present mode.*' "$OUT/$cond.log" || echo 'effective present mode NOT REPORTED')"
+    echo "$cond: occlusion transitions in stream: $(grep -c '"occluded"' "$stream" || true)"
+  } >>"$OUT/manifest.txt"
+  echo "   $cond OK: $(wc -l <"$stream" | tr -d ' ') rows (frame + occlusion)"
 
   sleep "$COOLDOWN_S"
 done
 
 cd "$REPO"
 uv run scripts/perf/analyze.py --warmup-s "$WARMUP_S" --min-rows "$MIN_ROWS" \
+  --expected-duration-s "$DURATION_S" ${SMOKE:+--occluded-ok} \
   --baseline "${CONDITIONS[1]%%:*}" "$OUT"/*.client.jsonl
 
 echo "sweep complete -> $OUT"
