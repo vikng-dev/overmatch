@@ -28,22 +28,27 @@ armor = "run --bin armor_sandbox --features dev_ui"
 # bevy_render-0.19.0/src/lib.rs:379). So "we don't mount it" is true of our code and FALSE of a
 # tracy run — the two statements below have to be read together.
 #
-# WHAT THAT MEANS ON THE M4: a `cargo tracy` run on Apple Silicon is EXPECTED to abort, and that is
-# not a bug in this alias. MEASURED 2026-07-26 (M4 / macOS 26.5 / Metal / wgpu 29): bevy's
-# `DiagnosticsRecorder` sees `Features::TIMESTAMP_QUERY` advertised and allocates a 256-entry
-# timestamp query set; Metal refuses `newCounterSampleBufferWithDescriptor` with "Cannot allocate
-# sample buffer"; wgpu-hal turns that into a `DeviceLost` render error and bevy's `error_handler`
-# quits the app within ~1 s of the first frame. Bevy's own plugin doc says timestamp queries are
-# Vulkan/DX12-only in practice — except that here it does not degrade to CPU-only, it CRASHES.
+# WHAT THAT MEANS ON THE M4: `cargo tracy` WORKS on macOS for the CPU spans (per-system, the
+# render-graph nodes, and the shadow pass) since the client's `client_render_plugin` (src/lib.rs)
+# removes TIMESTAMP_QUERY + PIPELINE_STATISTICS_QUERY on macOS via `WgpuSettings::disabled_features`
+# before device creation, so `DiagnosticsRecorder` never allocates the query sets Metal refuses.
+# The crash it retires, MEASURED 2026-07-26 (M4 / macOS 26.5 / Metal / wgpu 29), before the disable:
+# bevy's `DiagnosticsRecorder` saw `Features::TIMESTAMP_QUERY` advertised and allocated a 256-entry
+# timestamp query set; Metal refused `newCounterSampleBufferWithDescriptor` with "Cannot allocate
+# sample buffer"; wgpu-hal turned that into a `DeviceLost` render error and bevy's `error_handler`
+# quit the app within ~1 s of the first frame. VERIFIED FIXED 2026-07-31: a trace_tracy build with
+# the disable survived >18 s past the first frame, zero DeviceLost in the log.
 #
-# So on macOS the profiling answer is Instruments / Xcode's Metal capture, NOT this alias; on a
-# Vulkan/DX12 box `cargo tracy` gives both the CPU render-graph spans (including the shadow pass,
-# which is the whole reason to reach for Tracy) and the GPU track.
+# The GPU track remains Vulkan/DX12-only: bevy no-ops every encoder timestamp on macOS (vendored
+# bevy_render-0.19.0/src/diagnostic/internal.rs:744-760, citing bevy#22257) and wgpu#9414 reports
+# Metal4 timestamp queries return zeros anyway — so on macOS this alias is the CPU story, and
+# Instruments / Xcode's Metal capture remains the macOS GPU answer.
 #
-# Workflow (on a Vulkan/DX12 box — see above for why this is not the macOS route):
-#   1. `brew install tracy` once. bevy 0.19 pulls tracing-tracy 0.11.4 / tracy-client 0.18.x, which
-#      speaks the Tracy 0.12.x wire protocol; a version skew shows up as the profiler refusing the
-#      connection with a protocol mismatch, and `brew info tracy` is where to check.
+# Workflow:
+#   1. `brew install tracy` once. bevy 0.19 pulls tracing-tracy 0.11.4 → tracy-client 0.18.4 →
+#      tracy-client-sys 0.28.0, which speaks the Tracy 0.13.1 wire protocol; brew's tracy is 0.13.1
+#      today (2026-07-31). A version skew shows up as the profiler refusing the connection with a
+#      protocol mismatch, and `brew info tracy` is where to check.
 #   2. `cargo tracy` (release: this repo's release profile is lto=thin + codegen-units=1, so the
 #      FIRST build after a feature change is long — the numbers are worthless off an unoptimized
 #      build, so pay it once).

@@ -217,6 +217,10 @@ pub fn run() {
         // (or a macOS `.app`) finds `assets/` beside it no matter the launch cwd.
         app.add_plugins(
             DefaultPlugins
+                // On macOS this drops the GPU-query wgpu features whose timestamp query set Metal
+                // refuses to allocate (tracy builds DeviceLost-quit without it); see the helper's
+                // doc for the full causal chain and the vendored citations.
+                .set(crate::client_render_plugin())
                 .set(AssetPlugin {
                     file_path: asset_root(),
                     ..default()
