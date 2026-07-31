@@ -1374,7 +1374,17 @@ fn offer_hull_shock_adoptions(
 fn request_staged_adoption(
     timeline: Res<LocalTimeline>,
     checkpoints: Option<Res<ReplicationCheckpointMap>>,
-    managers: Query<&PredictionManager>,
+    // `IsSynced` gate, same spelling as `rollback_watchdog`'s: a claim made on a `Connected` but
+    // not-yet-synced frame goes into a slot nobody consumes — lightyear's `check_rollback` skips
+    // on its `Single<…, With<IsSynced<InputTimeline>>>` while the forced request survives — and
+    // the first sync then rewrites `LocalTimeline` in `PostUpdate`, so the request is judged next
+    // frame against a clock it was never claimed under and can be rejected as outside the replay
+    // window, which suppresses every native policy check for that frame (rollback.rs consumes the
+    // forced flag before the policy branches, rejected or not). Post-sync, the claim and its
+    // consumption read the same `LocalTimeline` in the same `PreUpdate`, so the window arithmetic
+    // here and in lightyear's `do_rollback` agree exactly; this gate is what makes that
+    // same-clock invariant hold by construction instead of by the pre-sync tick accident.
+    managers: Query<&PredictionManager, With<IsSynced<InputTimeline>>>,
     // ALL FOUR, because the offer proved all four — plus [`RollbackParticipation`], the archetype
     // conditions that decide whether `prepare_rollback` reaches this hull at all. Re-proving a
     // subset is proving a later frame's transaction on an earlier frame's world for whatever it left
