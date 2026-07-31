@@ -256,16 +256,18 @@ pub fn run() {
         // UNFOCUSED window to 60 Hz reactive updates — under tick rate, so an alt-tabbed client
         // drifts behind the server and resyncs on refocus (lightyear #1113's jitter class).
         //
-        // `continuous()` holds for HIDDEN capture clients too — do not re-try a reactive cap
-        // here. MEASURED (2026-07-31, full 3840-tick capture): `UpdateMode::reactive(1/120)`
-        // STARVED the all-invisible event loop on macOS — the target received 78 of ~980
-        // fire_rx events, fire catch-up p50 34 ticks (baseline 8, max 65 vs ~13), fact lag
-        // p50 27 (baseline 7) — whatever the code-read of bevy_winit's all-invisible branch
-        // (state.rs:610-626) suggested. continuous()+hidden measured metric-identical to the
-        // visible baseline on the same seeds (catch-up p50 7-8, lag 7; four clean runs). The
-        // accepted cost is free-running CPU on capture runs (the invisible surface's
-        // `SurfaceError::Occluded` skips the vsync block); revisit only with a mechanism that
-        // PROVABLY wakes at >=64 Hz with zero visible windows.
+        // `continuous()` holds for HIDDEN capture clients too. `UpdateMode::reactive(1/120)`
+        // was tried here (2026-07-31) and the capture degraded badly — the target received 78
+        // of ~980 fire_rx events, fire catch-up p50 34 ticks (baseline 8, max 65 vs ~13), fact
+        // lag p50 27 (baseline 7) — BUT that measurement is CONFOUNDED: it was the first run
+        // after a fresh build, i.e. a COLD Metal shader cache, which was later shown to stall
+        // clients all by itself (>10 s pipeline compilation after connect, keepalive death,
+        // reconnects burning lanes — clean on the warm rerun). Verdict: reactive is UNPROVEN
+        // either way; `continuous()` is kept because it is measured-good on a warm cache (four
+        // clean runs, catch-up p50 7-8, lag 7, metric-identical to the visible baseline) and is
+        // the smaller delta. The accepted cost is free-running CPU on capture runs (the
+        // invisible surface's `SurfaceError::Occluded` skips the vsync block). Anyone re-trying
+        // reactive must A/B it on a WARM cache.
         app.insert_resource(bevy::winit::WinitSettings::continuous());
         if sim_windowed {
             app.init_resource::<harness::SimulateInput>();

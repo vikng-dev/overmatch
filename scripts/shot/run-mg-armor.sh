@@ -67,6 +67,12 @@ TARGET_PID=$!
 # Lane assignment is connect-order: the first client to CONNECT gets lane 0, and the shooter's
 # hull-local -8,0,0 aim assumes the target holds lane 0. A fixed sleep raced that under load
 # (shooter connected first, took lane 0, aimed away — zero hits, gate-failed run).
+#
+# COLD-START MODE: the first capture after a rebuild can stall >10 s on Metal pipeline
+# compilation — the client's ESTABLISHED connection dies on keepalive, each auto-reconnect burns
+# a lane, and the run fails the validity gate loudly. The fix is simply to re-run (one throwaway
+# run warms the cache). Deliberately NOT auto-retried here: an evidence pipeline should fail
+# loud, not silently loop.
 for _ in {1..150}; do
   grep -q "client connected" "$OUT/server.log" 2>/dev/null && break
   sleep 0.2
