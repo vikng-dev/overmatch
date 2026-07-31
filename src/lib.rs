@@ -76,6 +76,14 @@ mod overlay;
 /// ([`ClientPlugin`] and [`NetClientPlugin`] — the headless server has no render app and no menu to
 /// be quit from).
 mod quit;
+/// The RENDER-PASS cost recorder (`SPIKE_RENDER_COST=<path>`): an env-gated JSONL log of bevy's
+/// built-in per-pass `elapsed_cpu`/`elapsed_gpu` diagnostics — fresh raw measurements per sample
+/// window only, never rolling averages, so spikes survive and dead passes go silent. Mounts
+/// `RenderDiagnosticsPlugin` itself, so it works without a tracy build; covers the main
+/// passes/prepass/bloom/tonemapping span sites but NOT the shadow pass (tracy is the shadow
+/// instrument). Off (zero cost) unless the env var is set; windowed clients only. Analyzed by
+/// `scripts/render/analyze.py`.
+mod render_cost;
 /// The ONE module that knows a render-layer number or writes a bevy shadow marker: semantic
 /// channels, camera/light profiles, and the per-object `VisualScope` that resolves into both. Every
 /// other module declares intent and never touches `RenderLayers` — a source scan in that module
@@ -159,6 +167,51 @@ pub(crate) fn gpu_less_default_plugins(
             ..default()
         })
         .disable::<bevy::winit::WinitPlugin>()
+}
+
+/// The windowed clients' `RenderPlugin`: stock settings everywhere except macOS, where the two
+/// GPU-query wgpu features are removed before device creation. Mounted by every windowed client
+/// composition root (the net client and the offline route) — never by the GPU-less server, which
+/// has its own [`gpu_less_default_plugins`] render settings.
+///
+/// WHY (the whole causal chain, MEASURED 2026-07-26 on the M4 / macOS 26.5 / Metal / wgpu 29):
+/// under the default `WgpuSettingsPriority::Functionality`, bevy takes the ADAPTER's feature set
+/// wholesale and only then applies `disabled_features`, before device creation (vendored
+/// bevy_render-0.19.0/src/renderer/mod.rs:298-315). A `bevy/trace_tracy` build auto-mounts
+/// `RenderDiagnosticsPlugin` (vendored bevy_render-0.19.0/src/lib.rs:379-380), whose
+/// `DiagnosticsRecorder` sees `TIMESTAMP_QUERY` on the device and allocates a 256-entry timestamp
+/// query set (`FrameData::new`, vendored bevy_render-0.19.0/src/diagnostic/internal.rs:236-254).
+/// Metal refuses `newCounterSampleBufferWithDescriptor` ("Cannot allocate sample buffer"),
+/// wgpu-hal turns that into a `DeviceLost` render error, and bevy's error handler quits the app
+/// within ~1 s of the first frame. Removing the feature HERE means the recorder never allocates
+/// the query set, so a tracy session survives on this Mac and keeps every CPU span (per-system,
+/// render-graph nodes, the shadow pass).
+///
+/// On macOS this costs nothing real: bevy already no-ops every encoder timestamp on macOS citing
+/// the bevy#22257 Tahoe flicker (`WriteTimestamp for CommandEncoder`, vendored
+/// bevy_render-0.19.0/src/diagnostic/internal.rs:744-760), and wgpu#9414 reports Metal4 timestamp
+/// queries return zeros anyway — the GPU-timestamp path is dead upstream on this platform.
+/// `PIPELINE_STATISTICS_QUERY` rides along because the same `FrameData::new` allocates a second
+/// query set for it and wgpu implements pipeline statistics only on Vulkan/DX12.
+///
+/// The cfg gate is the point: on Windows/Linux (Vulkan/DX12) both features stay enabled, so
+/// `elapsed_gpu` diagnostics and the tracy GPU track remain real there.
+pub(crate) fn client_render_plugin() -> bevy::render::RenderPlugin {
+    #[cfg(target_os = "macos")]
+    let disabled_features = Some(
+        bevy::render::settings::WgpuFeatures::TIMESTAMP_QUERY
+            | bevy::render::settings::WgpuFeatures::PIPELINE_STATISTICS_QUERY,
+    );
+    #[cfg(not(target_os = "macos"))]
+    let disabled_features = None;
+    bevy::render::RenderPlugin {
+        render_creation: bevy::render::settings::WgpuSettings {
+            disabled_features,
+            ..default()
+        }
+        .into(),
+        ..default()
+    }
 }
 
 /// Push an entity onto a capped FIFO, then evict the oldest entities until the cap is restored.
@@ -696,6 +749,10 @@ pub fn run_offline() {
     // finds `assets/` beside it no matter the launch cwd.
     app.add_plugins(
         DefaultPlugins
+            // On macOS this drops the GPU-query wgpu features whose timestamp query set Metal
+            // refuses to allocate (tracy builds DeviceLost-quit without it); see
+            // `client_render_plugin` for the full causal chain and the vendored citations.
+            .set(client_render_plugin())
             .set(bevy::asset::AssetPlugin {
                 // The same `String` conversion `net::client`'s wrapper applies.
                 file_path: assets::asset_root().to_string_lossy().into_owned(),

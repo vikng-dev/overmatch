@@ -217,6 +217,10 @@ pub fn run() {
         // (or a macOS `.app`) finds `assets/` beside it no matter the launch cwd.
         app.add_plugins(
             DefaultPlugins
+                // On macOS this drops the GPU-query wgpu features whose timestamp query set Metal
+                // refuses to allocate (tracy builds DeviceLost-quit without it); see the helper's
+                // doc for the full causal chain and the vendored citations.
+                .set(crate::client_render_plugin())
                 .set(AssetPlugin {
                     file_path: asset_root(),
                     ..default()
@@ -337,6 +341,9 @@ pub fn run() {
     app.add_plugins(crate::trace::client_plugin);
     // Per-fixed-tick sim-cost recorder: idle unless `SPIKE_COST_TRACE` is set (the MG-march cost spike).
     app.add_plugins(crate::cost::client_plugin);
+    // Per-render-pass cost recorder: idle unless `SPIKE_RENDER_COST` is set. Harmless in GPU-less
+    // simulate mode (no render app — the diagnostics it samples simply never appear).
+    app.add_plugins(crate::render_cost::client_plugin);
     // Shot-lifecycle recorder: public-shot arrivals, owner-private receipt/marker boundaries, and the
     // cosmetic shell lifecycle, all keyed by stable `ShotId`. Idle unless `SPIKE_SHOT_TRACE` is set.
     app.add_plugins(crate::shot_trace::client_plugin);
