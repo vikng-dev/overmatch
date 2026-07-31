@@ -35,7 +35,9 @@ choice:
    y = surface + the 2 m spawn clearance. Lane 1 restores the intended 8 m in-x separation.
 
 With those three, the topology behaves as designed: tanks settle at (149.3, 6.65, 293.9) and
-(157.3, 6.64, 293.9), ~500 MG rounds per belt strike armor at 8 m.
+(157.3, 6.64, 293.9), and 499 MG rounds per weapon strike armor at 8 m across four belts of ~150
+(one round per 6 ticks; the armor-striking weapon is **w=0** in the shot trace — both weapons are
+7.9 mm, so filter on `cf` rows, not on `w==1`).
 
 ## Results — five seeds, identical shape
 
@@ -60,17 +62,24 @@ camera-space transients.
   `ExternalEvent`, retired `Adopted`, released on impact. Zero budget releases, zero waits
   (`max_wait_ticks=0`), zero replay-window drops, zero UNORDERED, zero undelivered. The readiness
   gates ADR-0032 worried had "only ever been exercised in fixtures" pass continuously in play.
-- **The native comparator is live too** — HullShock trg on ~190 of ~300 rollback rows — and it is
-  **exactly what defeats the ordering rule**: every one of the 4 bypasses per run was delivered by
-  a rollback whose ONLY trigger attribution is HullShock.
+- **The native comparator ORDERS exactly 4 rollbacks per run — the 4 bypasses, and nothing else.**
+  (CORRECTED 2026-07-31, second vendor pass.) The ~190 rollback rows carrying a HullShock `trg`
+  are almost all adoption's OWN forced rollbacks wearing receive-time comparator TRIPS: the trg
+  slot records trips, not orders, and receive-time dispatch trips it on the same PreUpdate the
+  forced rollback fires. Matching rollback starts against the forced-install log lines leaves
+  only ~15 policy-ordered rollbacks per run, of which exactly 4 carry HullShock — the bypasses.
+  The comparator's ONLY observable production effect is the bypass class. (Related defect: the
+  trip-slot clear is ordered only `.before(RollbackSystems::Check)` with no edge against
+  `ReplicationSystems::Receive` — `src/trace.rs:838-848`'s "exact per-check attribution" claim
+  holds by scheduler accident, not by construction.)
 - **The bypasses are the first round of every belt, deterministically.** Server MG fire ticks show
-  belts of ~500 rounds with 224-tick reload gaps (seed 1: fires resume at 506/1624/2742/3860);
+  belts of ~150 rounds with 224-tick reload gaps (seed 1: fires resume at 506/1624/2742/3860);
   the bypassed facts are at 506/1624/2742/3861 in seed 1 and the same first-of-belt positions in
   every other seed. Mechanism: after a cold start or reload pause nothing is in flight, the
-  episode's `HullShock` update outruns its impact visual, and the native receive-time comparator
-  orders the rollback before adoption's spark-wait can hold it. Mid-belt, impacts are continuously
-  drawn, so every fact releases on impact with zero wait. This is a per-belt CLASS with a 100 %
-  hit rate, not a jitter race — seeds don't move it.
+  episode's `HullShock` update outruns its impact visual by a MEASURED 1–3 ticks, and the native
+  receive-time comparator orders the rollback before adoption's spark-wait can hold it. Mid-belt,
+  impacts are continuously drawn, so every fact releases on impact with zero wait. This is a
+  per-belt CLASS with a 100 % hit rate, not a jitter race — seeds don't move it.
 
 ### The denominator gap, now with a measured size
 
@@ -105,10 +114,16 @@ not another run of the same instrument.
 Re-scoped option (a) — inert `HullShock` comparator, adoption as the sole INTENTIONAL trigger,
 `Retirement::Delivered` + `OrderingTally::bypassed` retained — now has the real-link evidence the
 memo demanded before any behaviour change. The concrete prize is the belt-start class: 4 shoves
-per 4 belts landing ~8 ticks (≈ 125 ms) before their spark, every run. The falsification plan
-(three tests, `hull_shock_rollback` rewritten around adoption) and the A/B acceptance
-(native HullShock triggers → 0, every fact still accounted, `undelivered`/drops still 0, same
-seeds) are as the memo specifies.
+per 4 belts landing a MEASURED 1–3 ticks (16–47 ms) before their spark, every run (CORRECTED —
+the earlier "~8 ticks / 125 ms" read the rollback DEPTH field as the spark lead). Under adoption
+those same facts would have released ON IMPACT after a 1–3 tick hold, well inside the 16-tick
+budget, in 19 of 20 measured bypasses; the one open case is seed 5's first fact, whose belt-first
+round RICOCHETED and whose covering spark carries authority tick 566 against fact tick 567 —
+whether `VisualClaim::covers` spans it depends on `HullShock::opened`, which no current
+instrumentation records, so the A/B must tolerate (and explicitly classify) one possible budget
+release there. Acceptance per the grilled plan: per-fact ownership telemetry as the primary
+instrument, `bypassed → 0` with `adopted` holding ≈ 181–183 on the same seeds,
+`undelivered`/drops still 0, `trg == 0` as secondary wiring evidence only.
 
 ## Capture recipe (for repeat / A/B)
 
