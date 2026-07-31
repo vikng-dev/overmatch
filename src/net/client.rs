@@ -11,7 +11,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use bevy::app::ScheduleRunnerPlugin;
 use bevy::asset::AssetPlugin;
 use bevy::prelude::*;
-use bevy::window::PrimaryWindow;
+use bevy::window::{PrimaryWindow, WindowMode};
 use lightyear::interpolation::timeline::InterpolationConfig;
 use lightyear::prediction::correction::CorrectionPolicy;
 use lightyear::prelude::client::*;
@@ -170,6 +170,11 @@ pub fn run() {
     let simulate = std::env::args().any(|a| a == "--simulate-input")
         || harness::env_flag("SPIKE_SIMULATE_INPUT", false);
     let sim_windowed = simulate && harness::env_flag("SPIKE_SIM_WINDOWED", false);
+    // The capture scripts are the only users of `SPIKE_SIM_WINDOWED`, and what they want is the
+    // RenderApp (KTX2 transcode needs a real GPU device), not a window — so the window defaults to
+    // hidden and stops stealing focus from the operator. `SPIKE_SIM_VISIBLE=1` restores the
+    // eyes-on diagnostic.
+    let hidden = sim_windowed && !harness::env_flag("SPIKE_SIM_VISIBLE", false);
 
     let mut app = App::new();
     if simulate && !sim_windowed {
@@ -197,8 +202,27 @@ pub fn run() {
                         // this window — the mapping self-negotiates until the probe lands.
                         present_mode: settings.present_mode(crate::settings::PresentCaps::Unprobed),
                         // Described at creation so a persisted fullscreen boots fullscreen instead
-                        // of flashing a window first.
-                        mode: settings.window_mode.to_window_mode(),
+                        // of flashing a window first. A hidden capture client must NOT boot into
+                        // the player's persisted fullscreen — it stays a plain window.
+                        mode: if hidden {
+                            WindowMode::Windowed
+                        } else {
+                            settings.window_mode.to_window_mode()
+                        },
+                        // macOS invariant: bevy creates every winit window `with_visible(false)`
+                        // (for AccessKit) and then calls `set_visible(window.visible)`, which on
+                        // macOS is `makeKeyAndOrderFront` — key + front REGARDLESS of `focused`
+                        // (vendored bevy_winit winit_windows.rs:71,315-317; winit 0.30
+                        // macos/window_delegate.rs:904-909). So `visible` is the only lever that
+                        // stops a capture client stealing focus; `focused: false` would be a dead,
+                        // misleading field.
+                        //
+                        // KNOWN RISK: a hidden window's present returns `SurfaceError::Occluded`
+                        // every frame (wgpu-hal metal surface.rs:122-157 workaround), so the frame
+                        // loop free-runs instead of vsync-blocking. `WinitSettings::continuous()`
+                        // below stays UNCHANGED for now — the same-seed A/B decides whether a
+                        // reactive cap is needed.
+                        visible: !hidden,
                         ..default()
                     }),
                     ..default()
@@ -222,7 +246,8 @@ pub fn run() {
     app.add_plugins(physics::physics_plugins());
     // The render half of prediction (frame interpolation + armed rollback correction) — client
     // only; the server has no `Predicted` view to smooth. Mounted in simulate mode too: headless
-    // it idles harmlessly, and `SPIKE_SIM_WINDOWED` diagnoses the real presentation stack.
+    // it idles harmlessly, and `SPIKE_SIM_WINDOWED` runs the real presentation stack (hidden
+    // window by default; `SPIKE_SIM_VISIBLE=1` shows it for eyes-on diagnosis).
     app.add_plugins(client_smoothing_plugin);
     // The render-space error layer (client only): with `instant_correction` on the PredictionManager
     // below, lightyear snaps the sim pose to the corrected present in one frame; this layer
