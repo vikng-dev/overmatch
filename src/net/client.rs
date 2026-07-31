@@ -275,8 +275,9 @@ pub fn run() {
         if hidden {
             // The RUNTIME half of the hidden-window guard: the creation-time `mode`/`visible`
             // fields above are not enough on their own, because `settings::apply_settings` would
-            // re-apply a persisted fullscreen a frame later — see the marker's doc.
-            app.insert_resource(harness::HiddenCaptureWindow);
+            // re-apply a persisted fullscreen a frame later. The marker is settings-OWNED (this
+            // side only inserts it) — see its doc for the layering reason.
+            app.insert_resource(crate::settings::CaptureWindowPinned);
             // UNREACHABLE for a normal client: winit's `applicationDidFinishLaunching` makes even
             // an invisible client the ACTIVE macOS app — it forces `ActivationPolicy::Regular`
             // for an unbundled binary and then calls `activateIgnoringOtherApps` unconditionally
