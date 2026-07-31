@@ -166,6 +166,31 @@ pub(crate) fn shipping_correction_policy() -> CorrectionPolicy {
     CorrectionPolicy::instant_correction()
 }
 
+/// Renounce macOS app activation for a hidden capture client — registered only on the `hidden`
+/// path; see the registration site in [`run`] for the winit launch mechanism that makes a
+/// post-launch revocation the only option.
+///
+/// `Prohibited` means the process can never own the menu bar or become the active application
+/// again — exactly right for a headless-in-spirit capture — and the `deactivate` yields the focus
+/// winit already stole back to whatever the user had. The `NonSendMarker` pins the system to the
+/// main thread (the repo's `settings::probe` idiom), which is what makes the CHECKED
+/// `MainThreadMarker` constructor infallible here.
+#[cfg(target_os = "macos")]
+fn revoke_macos_activation(_non_send_marker: bevy::ecs::system::NonSendMarker) {
+    use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
+    let mtm = objc2_foundation::MainThreadMarker::new()
+        .expect("NonSendMarker pinned this system to the main thread");
+    let app = NSApplication::sharedApplication(mtm);
+    // The returned bool is "did the policy switch take"; a capture run has no UI to degrade, so
+    // log-and-continue is the right failure mode.
+    if !app.setActivationPolicy(NSApplicationActivationPolicy::Prohibited) {
+        warn!("capture client: macOS refused ActivationPolicy::Prohibited — focus may be stolen");
+    }
+    // SAFETY: a plain AppKit call with no invariants beyond main-thread, which `mtm` proves;
+    // `unsafe` only because the objc2 0.2 generation did not audit it as safe.
+    unsafe { app.deactivate() };
+}
+
 pub fn run() {
     let simulate = std::env::args().any(|a| a == "--simulate-input")
         || harness::env_flag("SPIKE_SIMULATE_INPUT", false);
@@ -217,21 +242,36 @@ pub fn run() {
                         // stops a capture client stealing focus; `focused: false` would be a dead,
                         // misleading field.
                         //
-                        // KNOWN RISK: a hidden window's present returns `SurfaceError::Occluded`
-                        // every frame (wgpu-hal metal surface.rs:122-157 workaround), so the frame
-                        // loop free-runs instead of vsync-blocking. `WinitSettings::continuous()`
-                        // below stays UNCHANGED for now — the same-seed A/B decides whether a
-                        // reactive cap is needed.
+                        // A hidden window's present returns `SurfaceError::Occluded` every frame
+                        // (wgpu-hal metal surface.rs:122-157 workaround), so nothing ever
+                        // vsync-blocks — the 120 Hz reactive `WinitSettings` installed below is
+                        // what paces the hidden frame loop instead.
                         visible: !hidden,
                         ..default()
                     }),
                     ..default()
                 }),
         );
-        // Never drop below the 64 Hz tick: the default `WinitSettings::game()` throttles an
-        // UNFOCUSED window to 60 Hz reactive updates — under tick rate, so an alt-tabbed client
-        // drifts behind the server and resyncs on refocus (lightyear #1113's jitter class).
-        app.insert_resource(bevy::winit::WinitSettings::continuous());
+        if hidden {
+            // A hidden window never vsync-blocks (its Metal present returns
+            // `SurfaceError::Occluded` — see the `Window` literal above), so `continuous()` would
+            // free-run the frame loop flat-out. Reactive at 120 Hz still updates every cycle with
+            // no visible window: bevy's all-invisible branch (vendored bevy_winit
+            // state.rs:610-626) runs the app update whenever every window is invisible, so the
+            // wait is the only pacer. 120 Hz = 2x the 64 Hz fixed tick — comfortable headroom.
+            // Both modes get the cap: focus is meaningless for a window nobody can see.
+            let paced = bevy::winit::UpdateMode::reactive(Duration::from_secs_f64(1.0 / 120.0));
+            app.insert_resource(bevy::winit::WinitSettings {
+                focused_mode: paced,
+                unfocused_mode: paced,
+            });
+        } else {
+            // Never drop below the 64 Hz tick: the default `WinitSettings::game()` throttles an
+            // UNFOCUSED window to 60 Hz reactive updates — under tick rate, so an alt-tabbed
+            // client drifts behind the server and resyncs on refocus (lightyear #1113's jitter
+            // class). A VISIBLE window's actual pacing then comes from vsync/present on top.
+            app.insert_resource(bevy::winit::WinitSettings::continuous());
+        }
         if sim_windowed {
             app.init_resource::<harness::SimulateInput>();
         }
@@ -240,6 +280,18 @@ pub fn run() {
             // fields above are not enough on their own, because `settings::apply_settings` would
             // re-apply a persisted fullscreen a frame later — see the marker's doc.
             app.insert_resource(harness::HiddenCaptureWindow);
+            // UNREACHABLE for a normal client: winit's `applicationDidFinishLaunching` makes even
+            // an invisible client the ACTIVE macOS app — it forces `ActivationPolicy::Regular`
+            // for an unbundled binary and then calls `activateIgnoringOtherApps` unconditionally
+            // (vendored winit 0.30 macos/app_state.rs:110-136) — so the capture process takes the
+            // menu bar and the keystroke sink once per launch, and the user's typing vanishes
+            // into a window that does not exist. bevy 0.19 exposes no macOS `EventLoopBuilder`
+            // hook to pre-empt that (`WinitPlugin`'s builder extensions cover
+            // x11/wayland/windows/android only), so the revocation must happen POST-launch:
+            // `Startup` runs after winit's didFinishLaunching, so it both revokes the policy and
+            // hands focus straight back.
+            #[cfg(target_os = "macos")]
+            app.add_systems(Startup, revoke_macos_activation);
         }
     }
 
