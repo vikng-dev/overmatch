@@ -52,6 +52,7 @@ mod drive_hud;
 /// Fire control: per-weapon superelevation range tables + the player-dialed range. Sits atop
 /// `ballistics`; the aim commit reads it to lob the aim point so the bore elevates for range.
 mod firecontrol;
+mod frame_cost;
 /// The dedicated-server guard: boots `SimPlugin` headless (no GPU/window/winit) and drives the
 /// tank via `TankCommand` — fails first if sim code grows a hard render dependency.
 #[cfg(test)]
@@ -623,6 +624,9 @@ impl Plugin for ClientPlugin {
             track::view_plugin,
         ));
         app.add_plugins(drive_hud::plugin);
+        // Per-frame wall-clock recorder (idle unless `SPIKE_FRAME_COST` is set) — mounted on this
+        // root so the offline frame-budget sweep needs no server; the net root mounts it too.
+        app.add_plugins(frame_cost::client_plugin);
         // Player graphics settings + the Esc settings page + the render-scale render-app half, all
         // behind one mount. SP's pause surface is `AppState::Paused` (there is no overlay authority
         // here), so the page's visibility is declared from the state — which is the plugin's one
