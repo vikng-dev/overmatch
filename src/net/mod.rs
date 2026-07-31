@@ -18,7 +18,7 @@ mod diagnostics;
 mod disclosure;
 mod grip;
 mod harness;
-pub(crate) use harness::{env_flag, env_parse, env_value};
+pub(crate) use harness::{HiddenCaptureWindow, env_flag, env_parse, env_value};
 mod hit_feel;
 /// Does an authority hull-shock bump reach the owner's live hull velocity? The receiving half of
 /// combat, on the production registration.

@@ -63,6 +63,15 @@ use lightyear::prelude::input::native::{ActionState, InputMarker};
 use crate::command::TankCommand;
 use crate::track::sim::{ExplicitImpulse, apply_explicit_impulse};
 
+/// Marker for a capture client running `SPIKE_SIM_WINDOWED` with its window hidden — the default;
+/// `SPIKE_SIM_VISIBLE=1` keeps this from being inserted. The window is deliberately created
+/// `Windowed` + invisible (see the `Window` literal in `net::client::run`), and
+/// `settings::apply_settings` keys off this marker to SKIP its window reconciliation: re-applying a
+/// persisted fullscreen at runtime would order the window front on macOS regardless of
+/// `visible: false`, defeating the no-focus-steal guarantee the creation-time fields bought.
+#[derive(Resource)]
+pub(crate) struct HiddenCaptureWindow;
+
 /// `--simulate-input` state: a fixed-tick counter driving a scripted throttle window, then a
 /// clean exit once enough time has passed to observe the forced rollback + convergence.
 /// `fire_tick` defaults to 300 (mid-drive, well clear of the perturbation); `SPIKE_FIRE_TICK`

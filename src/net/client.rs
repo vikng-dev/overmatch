@@ -235,6 +235,12 @@ pub fn run() {
         if sim_windowed {
             app.init_resource::<harness::SimulateInput>();
         }
+        if hidden {
+            // The RUNTIME half of the hidden-window guard: the creation-time `mode`/`visible`
+            // fields above are not enough on their own, because `settings::apply_settings` would
+            // re-apply a persisted fullscreen a frame later — see the marker's doc.
+            app.insert_resource(harness::HiddenCaptureWindow);
+        }
     }
 
     // Register the shared protocol before creating the client link.
