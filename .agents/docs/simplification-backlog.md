@@ -106,10 +106,10 @@ consolidation. Entry 8 is the one untouched safely-applicable item.
 - Applicability / C2: DONE in commit `b988714`; no owner decision under C2. This reusable C2b
   pattern was introduced as its own explicit change after the active trail work cleared.
 
-### 7. Put closed-loop winding and outward-normal math in one track helper
+### 7. DONE — Put closed-loop winding and outward-normal math in one track helper
 
-- Files and symbols: `src/track/shadow_proxy.rs::ribbon_mesh` and
-  `src/track_sandbox/suspension_viz.rs::{loop_winding,outward_normal}`.
+- Files and symbols: `src/track/loop_geom.rs` (the helper), consumed by
+  `src/track/shadow_proxy.rs::ribbon_mesh` and `src/track_sandbox/suspension_viz.rs`.
 - What is wrong: duplicated knowledge. The game shadow ribbon and the sandbox grip overlay both
   derive loop winding from signed area, then turn a normalized segment tangent into its outward
   normal. A sign drift would make either the shadow tube turn inside-out or the sandbox draw grip
@@ -120,8 +120,11 @@ consolidation. Entry 8 is the one untouched safely-applicable item.
   conventions require focused tests before consolidation.
 - Applicability / C2: safely applicable; no owner decision. Keep mesh winding correction and gizmo
   drawing in their existing modules.
+- DONE in commit `035518b`: the helper's wrapping walk accepts both closure conventions (the wrap
+  edge of an explicitly-closed list is degenerate, zero area); convention-pinning tests were
+  written and run before the callers moved.
 
-### 8. Remove duplicate present-mode offering assertions from the probe test
+### 8. DONE — Remove duplicate present-mode offering assertions from the probe test
 
 - Files and symbols: `src/settings/probe.rs::fake_capability_lists_gate_the_ladder_correctly` and
   `src/settings.rs::the_offered_rungs_follow_the_probe`.
@@ -133,6 +136,9 @@ consolidation. Entry 8 is the one untouched safely-applicable item.
   probe test and remove only the repeated `offered` helper/assertions.
 - Applicability / C2: safely applicable; no owner decision. This touches an in-module test, not one
   of the protected top-level files under `tests/`.
+- DONE in commit `035518b`: the settings test first gained the one `Reported` shape it was missing
+  (immediate + mailbox both true), so the ladder is pinned exhaustively in one place before the
+  probe-side duplicates were deleted.
 
 ### 9. DONE — Reuse the phase-law `fold` in the sandbox belt tests
 
