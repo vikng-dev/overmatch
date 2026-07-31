@@ -174,6 +174,63 @@ pub fn client_plugin(app: &mut App) {
                 .in_set(PlayerInputSet)
                 .in_set(GameplaySet),
         );
+    #[cfg(feature = "dev_tools")]
+    if crate::env_flag("SPIKE_AUTO_FIRE", false) {
+        info!("auto_fire: armed — {AUTO_FIRE_SCHEDULE}");
+        app.add_systems(
+            RunFixedMainLoop,
+            auto_fire
+                .after(gather_commands)
+                .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop)
+                .in_set(PlayerInputSet)
+                .in_set(GameplaySet),
+        );
+    }
+}
+
+/// The hardcoded auto-fire timeline, in `Time<Real>` seconds — the SAME clock `frame_cost` stamps
+/// its rows with, so a capture can be split into windows by these boundaries alone. Stated as one
+/// string because it is logged verbatim at arm time: the capture's own record of what it drove.
+#[cfg(feature = "dev_tools")]
+const AUTO_FIRE_SCHEDULE: &str =
+    "idle 0-20s, MG held 20-50s, idle 50-60s, main gun 60-75s, idle 75s+";
+
+/// Dev-only scripted trigger (`SPIKE_AUTO_FIRE=1`): drive the controlled tank's triggers off a
+/// hardcoded wall-clock schedule so a frame capture contains an idle window and a sustained-fire
+/// window measured in ONE session — comparing firing cost against a same-session idle baseline is
+/// the whole point, and a human holding the key would also be feeding the window mouse/keyboard
+/// input the sweep's validity rules forbid.
+///
+/// Deliberately knob-free (the timeline is the constant above): this exists to answer one question,
+/// not to become a scripting facility. It writes only the two trigger fields, after
+/// [`gather_commands`] has written the real devices, so it composes as an override rather than a
+/// second input source.
+#[cfg(feature = "dev_tools")]
+fn auto_fire(
+    time: Res<Time<Real>>,
+    mut phase: Local<u8>,
+    mut tanks: Query<&mut TankCommand, With<Controlled>>,
+) {
+    let t = time.elapsed_secs();
+    // Phase index over the schedule above; logged on change so the capture log carries the
+    // boundaries the analysis windows are cut on.
+    let now = match t {
+        _ if t < 20.0 => 0,
+        _ if t < 50.0 => 1,
+        _ if t < 60.0 => 2,
+        _ if t < 75.0 => 3,
+        _ => 4,
+    };
+    if now != *phase {
+        info!("auto_fire: phase {now} at t={t:.3}s");
+        *phase = now;
+    }
+    for mut command in &mut tanks {
+        // The MG is a held level; the main gun a latched click edge the fire tick consumes, so
+        // re-latching every frame simply fires as fast as the reload gate allows.
+        command.fire_secondary = now == 1;
+        command.fire_primary |= now == 3;
+    }
 }
 
 /// Translate devices through the bindings into the controlled tank's command. The only place in
