@@ -156,8 +156,19 @@ mod tests {
         // The Tiger's three wraps, from the current geometry (idler is the tightest).
         assert!((wrap_joint_angle(pitch, 0.3675).to_degrees() - 20.44).abs() < 0.02);
         assert!((wrap_joint_angle(pitch, 0.4126).to_degrees() - 18.19).abs() < 0.02);
-        // A circle the chain cannot wrap at all: the chord would have to exceed the diameter.
-        assert_eq!(wrap_joint_angle(pitch, pitch * 0.4), std::f32::consts::PI);
+        // A circle the chain cannot wrap at all: the chord would have to exceed the diameter, so
+        // the clamp engages and the demand saturates at a half-turn per joint. Within one ULP of
+        // π, not exactly π: the saturated branch is `2·asin(1.0)`, and how that rounds is a libm
+        // choice that differs by target (macOS arm64 asinf at opt-level 0 lands one ULP under
+        // x86_64 Linux's). No consumer reads the sentinel exactly — route steps by it on real
+        // radii and rig_geom compares it against the authored hinge limit — so an exact compare
+        // here guarded libm rounding, not geometry, and failed on arm64 while CI stayed green.
+        assert!(
+            (wrap_joint_angle(pitch, pitch * 0.4) - std::f32::consts::PI).abs()
+                <= 2.0 * f32::EPSILON,
+            "saturated wrap demand strayed past one ULP from π: {}",
+            wrap_joint_angle(pitch, pitch * 0.4),
+        );
         // ...and the degenerate radius is clamped rather than dividing by zero.
         assert!(wrap_joint_angle(pitch, 0.0).is_finite());
     }
