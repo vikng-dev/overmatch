@@ -38,7 +38,7 @@
 //! | `SPIKE_SIM_REVERSE` | flag; off | Straight reverse scripted drive. |
 //! | `SPIKE_SIM_TICKS` | ticks; script default | Override scripted run length. |
 //! | `SPIKE_SIM_VISIBLE` | flag; off | Show the sim-windowed window (default: hidden — no focus steal). |
-//! | `SPIKE_SIM_WINDOWED` | flag; off | Keep the presentation stack in simulate mode (window hidden by default). |
+//! | `SPIKE_SIM_WINDOWED` | flag; off | Keep the presentation stack in simulate mode (window hidden by default); in `--offline`, hidden-capture mode. |
 //! | `SPIKE_SPAWN_POSE` | `x,y,z,qx,qy,qz,qw`; off | Server spawn-pose override. |
 //! | `SPIKE_TRACE` | path; off | Role-qualified jitter/divergence JSONL. |
 //! | `SPIKE_TRACE_SIM_FIELDS` | flag; off | Add raw sim fields to trace tick rows. |

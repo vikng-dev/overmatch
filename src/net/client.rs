@@ -167,8 +167,9 @@ pub(crate) fn shipping_correction_policy() -> CorrectionPolicy {
 }
 
 /// Renounce macOS app activation for a hidden capture client — registered only on the `hidden`
-/// path; see the registration site in [`run`] for the winit launch mechanism that makes a
-/// post-launch revocation the only option.
+/// path (here and in `run_offline`, whose hidden-capture mode shares this contract); see the
+/// registration site in [`run`] for the winit launch mechanism that makes a post-launch revocation
+/// the only option.
 ///
 /// `Prohibited` means the process can never own the menu bar or become the active application
 /// again — exactly right for a headless-in-spirit capture — and the `deactivate` yields the focus
@@ -176,7 +177,7 @@ pub(crate) fn shipping_correction_policy() -> CorrectionPolicy {
 /// main thread (the repo's `settings::probe` idiom), which is what makes the CHECKED
 /// `MainThreadMarker` constructor infallible here.
 #[cfg(target_os = "macos")]
-fn revoke_macos_activation(_non_send_marker: bevy::ecs::system::NonSendMarker) {
+pub(crate) fn revoke_macos_activation(_non_send_marker: bevy::ecs::system::NonSendMarker) {
     use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
     let mtm = objc2_foundation::MainThreadMarker::new()
         .expect("NonSendMarker pinned this system to the main thread");
