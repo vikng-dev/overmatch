@@ -77,7 +77,8 @@ mod overlay;
 /// be quit from).
 mod quit;
 /// The RENDER-PASS cost recorder (`SPIKE_RENDER_COST=<path>`): an env-gated JSONL log of bevy's
-/// built-in per-pass `elapsed_cpu`/`elapsed_gpu` diagnostics, sampled once per second. Mounts
+/// built-in per-pass `elapsed_cpu`/`elapsed_gpu` diagnostics — fresh raw measurements per sample
+/// window only, never rolling averages, so spikes survive and dead passes go silent. Mounts
 /// `RenderDiagnosticsPlugin` itself, so it works without a tracy build; covers the main
 /// passes/prepass/bloom/tonemapping span sites but NOT the shadow pass (tracy is the shadow
 /// instrument). Off (zero cost) unless the env var is set; windowed clients only. Analyzed by
