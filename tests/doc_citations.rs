@@ -154,27 +154,6 @@ const ALLOWED_IDENTIFIERS: &[(&str, &str, &str)] = &[
         "Same ledger: REMOVED because the steering servo became an exact semi-implicit law, so no \
          proportional band exists to tune. The entry also records that its droop was a bug.",
     ),
-    // ---- OPEN: found by this gate, not yet fixed. ------------------------------------------
-    (
-        "src/vfx/billboard.rs",
-        "PUFF_CAP",
-        "OPEN. `BILLBOARD_CAP`'s doc cites 'the impact puffs' `PUFF_CAP` shape'; impact.rs has no \
-         such constant. The puffs ride the shared `BILLBOARD_CAP` ring and only the ground scars \
-         have their own cap, `GROUND_MARK_CAP` — which is what the sentence means.",
-    ),
-    (
-        "src/spec.rs",
-        "apply_tank_spec",
-        "OPEN. `TankSpec`'s doc says `tank::apply_tank_spec` copies the spec onto the rig; no \
-         function of that name exists anywhere in the tree.",
-    ),
-    (
-        "src/state.rs",
-        "focus_menu",
-        "OPEN. `collapse_focus`'s doc names `net::client::focus_menu` as one of its two callers; \
-         nothing named `focus_menu` exists. `overlay.rs` separately narrates it as folded into the \
-         single cursor owner, so the state.rs mention is a live pointer at a retired system.",
-    ),
 ];
 
 /// Line-number citations that stay, each with the reason it cannot be pinned by symbol.
