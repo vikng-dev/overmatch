@@ -233,6 +233,11 @@ def analyze(cmeta: dict, crows: list[dict], smeta: dict, srows: list[dict]) -> d
             holds.setdefault(r.get("res", "?"), []).append(r.get("held", 0))
     all_holds = [h for v in holds.values() for h in v]
 
+    # --- fire catch-up: (P − S) + one-way latency, per observed FireEvent -----------------
+    # The direct measurement of the "~10-tick catch-up" that ADR-0032 records as DERIVED, never
+    # measured. Own shots carry cu=0 by construction, so only observed fire matters here.
+    fire_cu = [r["cu"] for r in crows if r["k"] == "fire_rx" and not r.get("dup") and "cu" in r]
+
     # --- arrival lead (the hold window's cause) -------------------------------------------
     kf_lead = [tick_diff(r["t"], r["bt"]) for r in crows if r["k"] == "kf_rx" and not r.get("dup")]
     cf_lead = [tick_diff(r["t"], r["it"]) for r in crows if r["k"] == "cf_rx" and not r.get("dup")]
@@ -403,6 +408,7 @@ def analyze(cmeta: dict, crows: list[dict], smeta: dict, srows: list[dict]) -> d
         "no_spawn": len(no_spawn),
         "holds": {k: v for k, v in holds.items()},
         "all_holds": all_holds,
+        "fire_cu": fire_cu,
         "kf_lead": kf_lead,
         "cf_lead": cf_lead,
         "dmg_lead": dmg_lead,
@@ -540,6 +546,7 @@ def report(a: dict, samples: int) -> None:
         print(l)
 
     print("\n  ARRIVAL LEAD  (recv tick − server tick = (P − S) + one-way latency)")
+    print(f"    fire catch-up      {fmt_ticks(a['fire_cu'], hz)}")
     print(f"    ricochet keyframes {fmt_ticks(a['kf_lead'], hz)}")
     print(f"    impact confirms    {fmt_ticks(a['cf_lead'], hz)}")
     print(f"    damage confirms    {fmt_ticks(a['dmg_lead'], hz)}")
