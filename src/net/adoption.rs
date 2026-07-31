@@ -229,17 +229,27 @@
 //! pinned lightyear — see [`retirement`] for the three facts that make it so and for why it is kept
 //! anyway.
 //!
-//! One bypass route is structural and worth naming on its own. `HullShock` is still registered
-//! `.with_rollback_condition(..)` in `net::protocol`, and that comparator is a pure function of two
-//! component values — it cannot consult [`ImpactPresentation`]. Its receive-time dispatch is gated
-//! on `confirmed_tick < current_tick`, which is FALSE only at the zero/negative lead loopback
-//! produces and TRUE on every link with real latency, so it is inert on loopback and live in WAN
-//! play. Making this module the SOLE delivery route — registering an inert condition on `HullShock`
-//! so lightyear never rolls back on it directly — is a one-line change plus a rewrite of
-//! `net::hull_shock_rollback`'s positive control, but it retires the only delivery path that has
-//! ever run on a real link in favour of one whose readiness gates have only been exercised in
-//! fixtures, so it wants its own evidence rather than being bundled here. It would SHRINK the hole,
-//! not close it: every other rollback cause still restores the same state.
+//! Since REV 25 this module is the SOLE INTENTIONAL present-value `HullShock` rollback policy at
+//! every prediction lead: the registered condition in `net::protocol` is permanently inert. It
+//! used to be a live competitor — a pure function of two component values that could not consult
+//! [`ImpactPresentation`] — and the 5-seed capture
+//! (`.agents/docs/design/hullshock-delivery-capture-2026-07-31.md`) measured its only production
+//! effect: it ordered exactly the four belt-first-round rollbacks per run that landed the shove
+//! 1–3 ticks before its spark, the bypass class this module's ordering rule exists to prevent,
+//! while every mid-belt fact was already adopted here (which path runs is set by whether latency
+//! exceeds what input delay absorbs, not by loopback-vs-WAN — the measured lead at 40/5 is
+//! NEGATIVE, `.agents/docs/design/timelines-and-shear.md`).
+//!
+//! SOLE INTENTIONAL, with two structural residues that are lightyear's and not route selection:
+//! presence mismatches (`(Some, None)` / `(None, Some)`) order rollback without ever calling the
+//! registered condition — no production lifecycle reaches that shape (the component rides every
+//! spawn bundle, is never removed, and respawn replaces the entity, so the client always receives
+//! it on the no-mismatch init/seed path), and `net::hull_shock_rollback` pins the carve-out — and
+//! once ANY state rollback is ordered, `prepare_rollback` restores `HullShock` from confirmed
+//! history regardless of trigger. The second residue is why [`Retirement::Delivered`] and
+//! [`OrderingTally::bypassed`] survive: ownership of the TRIGGER moved here, but delivery by an
+//! unrelated confirmed-state rollback remains an observable preemption, classified and presented
+//! sharp exactly like an adoption.
 
 use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, Rotation};
 use bevy::prelude::*;
