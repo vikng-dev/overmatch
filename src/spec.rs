@@ -18,7 +18,7 @@ use crate::tank::{ServoSpec, Tank};
 use crate::track::transmission::{ShiftAddressing, TransmissionAuthoring, TransmissionParams};
 
 /// One tank variant's spec sheet — the typed contents of a `.tank.ron` file. Its fields *are* the
-/// components the sim consumes; `tank::apply_tank_spec` copies them onto the rig once ready.
+/// components the sim consumes; `tank::spawn_complete_tank` copies them onto the rig once ready.
 /// One ballistic volume's data, keyed by model node name in [`TankSpec::volumes`]. **Composition
 /// over a `kind` enum** (design `armor-penetration-and-damage.md` §2/§12): `material_factor` is the
 /// base every volume has (shell-resistance per metre), and optional facets layer roles on top:
