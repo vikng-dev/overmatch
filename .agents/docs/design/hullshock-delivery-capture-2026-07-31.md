@@ -127,9 +127,9 @@ instrument, `bypassed → 0` with `adopted` holding ≈ 181–183 on the same se
 
 ## Capture recipe (for repeat / A/B)
 
-Runner: scratchpad `evcap/run-seed.sh` of the 2026-07-31 session — `run-mg-armor.sh:32-64` plus
-the three fixes above; per-seed dirs with `server-trace`/`target-trace`/`shooter-trace` JSONL
-(distinct `SPIKE_TRACE` prefixes per process — a shared prefix makes the two clients clobber one
-`trace.client.jsonl`). Extraction: `evcap/extract.py` (tally regex, log-line counts, trg
-histogram). Both should be committed to `scripts/shot/` when the script's own defects are fixed
-(three open tasks).
+Runner: `scripts/shot/run-hullshock-capture.sh` — `run-mg-armor.sh` plus the three fixes above
+(which are now also baked into `run-mg-armor.sh` itself); per-seed dirs with
+`server-trace`/`target-trace`/`shooter-trace` JSONL (distinct `SPIKE_TRACE` prefixes per process —
+a shared prefix makes the two clients clobber one `trace.client.jsonl`). Extraction:
+`scripts/shot/extract-hullshock.py` (tally regex, log-line counts, trg histogram). A/B accounting
+over the per-fact `k="fact"` rows: `scripts/shot/ab-compare-hullshock.py`.
