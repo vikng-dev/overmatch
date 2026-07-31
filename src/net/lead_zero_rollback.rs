@@ -371,6 +371,13 @@ struct Delivered {
     /// `PreUpdate`. This is what separates the two leads: a checkpoint level with the client is
     /// examined and marked processed, one in the client's future is neither.
     processed_on_arrival: Option<Tick>,
+    /// `StateRollbackMetadata::forced_rollback_tick()` after the run's LAST `PreUpdate`. The
+    /// same-frame consumption invariant reads through this: lightyear consumes a forced request in
+    /// the same `PreUpdate` that claims it, so a `Some` here means a claim outlived its frame —
+    /// either the schedule moved (`request_staged_adoption` no longer precedes
+    /// `RollbackSystems::Check`) or the consumption gate diverged from the claim gate. Both are
+    /// the setup for a rejected request that suppresses a frame's native policy checks.
+    forced_tick_after: Option<Tick>,
     /// `net::adoption`'s ordering tallies after the run — which way the shove was released, and
     /// what the wait cost.
     ordering: OrderingTally,
@@ -452,6 +459,27 @@ fn run_arrival(lead: Lead, visual: Visual) -> Delivered {
     run_scenario(Scenario::new(lead, visual))
 }
 
+/// The client link, with or without `IsSynced<InputTimeline>`. Synced is the shipping steady
+/// state; unsynced is the connected-but-not-yet-synced window [`Scenario::synced`] exists to
+/// reach, where lightyear's `check_rollback` skips and a forced claim would go unconsumed.
+fn spawn_client_link(app: &mut App, synced: bool) -> Entity {
+    let link = app
+        .world_mut()
+        .spawn((
+            Client::default(),
+            RemoteId(PeerId::Server),
+            Connected,
+            crate::net::test_harness::prediction_manager(),
+        ))
+        .id();
+    if synced {
+        app.world_mut()
+            .entity_mut(link)
+            .insert(IsSynced::<InputTimeline>::default());
+    }
+    link
+}
+
 /// Everything about a run that a fixture is allowed to move, so that what a fixture DID move is
 /// visible at its call site. [`Scenario::new`] is the shape every pre-existing test was written
 /// against: replication carries the episode on the tick it closed, the authority's velocities are
@@ -460,6 +488,13 @@ fn run_arrival(lead: Lead, visual: Visual) -> Delivered {
 struct Scenario {
     lead: Lead,
     visual: Visual,
+    /// Whether the client link carries `IsSynced<InputTimeline>`. `true` is the shipping steady
+    /// state every pre-existing test runs in. `false` is the connected-but-not-yet-synced window:
+    /// lightyear's `check_rollback` skips on its `Single<…, With<IsSynced<…>>>` there, so a forced
+    /// request claimed on such a frame would sit unconsumed while the first sync rewrites
+    /// `LocalTimeline` under it — the one interleaving that can turn a valid claim into a
+    /// rejected one that suppresses a frame's native policy checks.
+    synced: bool,
     /// The tick replication MATERIALIZED the episode on — the confirmed `HullShock` sample's tick,
     /// which is `AuthoritativeFact::produced_at` and the restore target. At or after the tick the
     /// episode closed; see [`REPLICATION_LAG_TICKS`].
@@ -503,6 +538,7 @@ impl Scenario {
             late_rollback_disable: false,
             extra_ticks: 0,
             render_error: false,
+            synced: true,
         }
     }
 }
@@ -568,6 +604,7 @@ fn run_scenario(scenario: Scenario) -> Delivered {
         late_rollback_disable,
         extra_ticks,
         render_error,
+        synced,
     } = scenario;
     let mut app = scenario_app(render_error);
     app.init_resource::<Delivered>();
@@ -594,13 +631,7 @@ fn run_scenario(scenario: Scenario) -> Delivered {
     }
     crate::net::test_harness::finish(&mut app);
 
-    app.world_mut().spawn((
-        Client::default(),
-        RemoteId(PeerId::Server),
-        Connected,
-        crate::net::test_harness::prediction_manager(),
-        IsSynced::<InputTimeline>::default(),
-    ));
+    spawn_client_link(&mut app, synced);
 
     // THE EPISODE, stamped with the tick replication carried it — which is `arrival`, at or after
     // the tick `visual.shock().tick` says it closed on.
@@ -836,6 +867,10 @@ fn run_scenario(scenario: Scenario) -> Delivered {
     delivered.live_shock = live_shock;
     delivered.realized_count = realized_count;
     delivered.processed_on_arrival = processed_on_arrival;
+    delivered.forced_tick_after = app
+        .world()
+        .resource::<StateRollbackMetadata>()
+        .forced_rollback_tick();
     delivered.ordering = ordering;
     delivered.still_staged = still_staged;
     delivered.live_velocity_removed = live_velocity_removed;
@@ -911,6 +946,67 @@ fn an_authority_shock_reaches_the_live_hull_at_zero_lead() {
 #[test]
 fn an_authority_shock_reaches_the_live_hull_at_minus_one_lead() {
     assert_delivered(Lead::MinusOne);
+}
+
+/// THE SAME-FRAME CONSUMPTION INVARIANT, pinned. `request_staged_adoption` claims the forced slot
+/// and lightyear's `check_rollback` consumes it later in the SAME `PreUpdate`, reading the same
+/// `LocalTimeline` — which is why the replay-window arithmetic on the two sides can never
+/// disagree, and why a rejected forced request (which would suppress every native policy check
+/// for its frame, rollback.rs consumes the flag before the policy branches) is unreachable in the
+/// shipping composition. Nothing enforces that but the schedule: this fails if the claim ever
+/// outlives the `PreUpdate` that made it — a dependency bump moving the consumption, a gate
+/// diverging between the two, or a re-registration losing the `.before(RollbackSystems::Check)`.
+#[test]
+fn the_forced_request_is_consumed_in_the_same_preupdate_that_claims_it() {
+    let delivered = run_arrival(Lead::Zero, Visual::DrawnAfterArrival);
+
+    assert_eq!(
+        delivered.live_linear, AUTHORITY_LINEAR,
+        "the run must actually exercise a claim — an undelivered shove means no request was made \
+         and the invariant was vacuously true",
+    );
+    assert_eq!(
+        delivered.forced_tick_after, None,
+        "a forced-rollback claim survived past the end of the run: the same-PreUpdate consumption \
+         invariant is broken, and a claim judged on a later frame's clock can be rejected as \
+         outside the replay window — which silently suppresses that frame's native policy checks",
+    );
+}
+
+/// The connected-but-not-yet-synced window, held closed. Pre-sync, lightyear's `check_rollback`
+/// skips on its `Single<…, With<IsSynced<InputTimeline>>>` while the forced slot still accepts
+/// claims — and the first sync then rewrites `LocalTimeline` in `PostUpdate`, so a pre-sync claim
+/// would be judged next frame against a clock it was never made under. `request_staged_adoption`
+/// carries the same `IsSynced` gate as the watchdog precisely so no claim can enter that window:
+/// the fact stays staged and untallied until the timeline it would be measured against exists.
+#[test]
+fn a_claim_made_before_the_input_timeline_syncs_is_never_stranded() {
+    let delivered = run_scenario(Scenario {
+        synced: false,
+        ..Scenario::new(Lead::Zero, Visual::DrawnBeforeArrival)
+    });
+
+    assert_eq!(
+        delivered.forced_tick_after, None,
+        "adoption claimed the forced slot on an unsynced link — nothing consumes it there, and \
+         the first sync's timeline rewrite turns it into a rejected request that suppresses a \
+         frame's native policy checks",
+    );
+    assert!(
+        delivered.still_staged,
+        "the fact must WAIT for sync, not be spent or dropped: its ticks only mean something on \
+         the synced timeline",
+    );
+    assert_eq!(
+        delivered.ordering,
+        OrderingTally::default(),
+        "no ordering verdict may be latched on a frame the request could not have been made — the \
+         tally would report a wait the player never got",
+    );
+    assert_eq!(
+        delivered.live_linear, LIVE_LINEAR,
+        "no rollback ran, so the live hull velocity must be untouched",
+    );
 }
 
 /// THE ZERO-REPLAY PROOF, and the reason `net::adoption` restores end-of-`T` rather than end-of-
