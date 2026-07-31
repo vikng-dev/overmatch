@@ -1182,7 +1182,10 @@ pub(crate) fn plugin(app: &mut App) {
         // `LinearVelocity`, because replaying the settled contact against stale solver state
         // produced push-out velocities the honest server rest never had.
         // Mounted in shared `net::plugin`, so both ends register it — but only the client rolls
-        // back; the server pays only the per-tick `ContactGraph`/`ColliderAabb` snapshot cost.
+        // back. A pure server has no `PredictionRegistry`, so `local_rollback()` skips the generic
+        // per-tick history systems entirely (lightyear_prediction 0.28 registry.rs:1030-1041); what
+        // the server does pay is Avian's explicit `RollbackMovedProxies` copy, scheduled whenever
+        // this flag is true (lightyear_avian3d 0.28 plugin.rs:355-373).
         rollback_resources: true,
         ..default()
     });
@@ -1207,9 +1210,10 @@ pub(crate) fn plugin(app: &mut App) {
         })
         .add_linear_correction_fn()
         .add_linear_interpolation();
-    // Without an explicit condition these default to `PartialEq::ne` (exact bit equality), which
-    // f32 solver output essentially never satisfies between client and server — see the Position
-    // comment above for the coarsening rationale (same thresholds, applied uniformly).
+    // Without an explicit condition these default to `PartialEq::ne` — Avian's derived field-wise
+    // float equality over the vector fields, not a bitwise compare — which f32 solver output
+    // essentially never satisfies between client and server — see the Position comment above for
+    // the coarsening rationale (same thresholds, applied uniformly).
     app.component::<LinearVelocity>()
         .replicate()
         .predict()
