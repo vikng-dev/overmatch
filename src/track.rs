@@ -25,6 +25,7 @@ pub(crate) mod envelope;
 // whole point is that ONE measured constant seats twenty teeth cannot survive two copies of it.
 pub(crate) mod gear_phase;
 pub(crate) mod link_view;
+pub(crate) mod loop_geom;
 pub(crate) mod marker_model;
 pub(crate) mod rig_geom;
 pub mod route;
