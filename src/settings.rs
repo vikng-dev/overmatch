@@ -2046,6 +2046,16 @@ mod tests {
             }),
             vec![VsyncMode::On],
         );
+        // Everything reported (a typical Vulkan/X11 or Windows surface): every rung. With this the
+        // ladder is pinned for all four Reported shapes plus both non-answers — exhaustively HERE,
+        // which is what lets the probe test stick to the present-mode-list distillation.
+        assert_eq!(
+            offered(PresentCaps::Reported {
+                immediate: true,
+                mailbox: true,
+            }),
+            VsyncMode::ORDER.to_vec(),
+        );
     }
 
     /// **A persisted rung this surface cannot present.**

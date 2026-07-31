@@ -33,6 +33,7 @@ use super::derive;
 use super::rig_geom::{Pose, RigGeom};
 // `mod.rs`'s own sandbox state (a child module may read its parent's private items).
 use super::{Hull, RigSuspension};
+use crate::track::loop_geom::{loop_winding, outward_normal};
 use crate::track::route::{build_route, resample};
 use crate::track::side::Side;
 
@@ -369,69 +370,9 @@ fn draw_grip_columns(
     }
 }
 
-/// Sign of the loop's winding from its signed area: `+1` counter-clockwise in the side plane,
-/// `-1` clockwise. Needed because "outward" is a property of the loop, not of the segment.
-fn loop_winding(pts: &[Vec2]) -> f32 {
-    let twice_area: f32 = pts
-        .windows(2)
-        .map(|w| w[0].x * w[1].y - w[1].x * w[0].y)
-        .sum();
-    if twice_area >= 0.0 { 1.0 } else { -1.0 }
-}
-
-/// Unit outward normal of the segment `a -> b` for a loop of the given winding. For a CCW loop the
-/// outward normal is the right-hand normal `(t.y, -t.x)`; a CW loop flips it.
-fn outward_normal(a: Vec2, b: Vec2, winding: f32) -> Vec2 {
-    let t = (b - a).normalize_or_zero();
-    Vec2::new(t.y, -t.x) * winding
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A closed CCW unit square in the side plane.
-    fn square_ccw() -> Vec<Vec2> {
-        vec![
-            Vec2::new(0.0, 0.0),
-            Vec2::new(1.0, 0.0),
-            Vec2::new(1.0, 1.0),
-            Vec2::new(0.0, 1.0),
-            Vec2::new(0.0, 0.0),
-        ]
-    }
-
-    /// The property every sampler layer rests on: the stubs must point AWAY from the loop, in either
-    /// winding. Get this backwards and the grip columns draw inside the belt, where nothing is.
-    #[test]
-    fn outward_normal_points_out_of_the_loop_in_both_windings() {
-        let ccw = square_ccw();
-        let mut cw = ccw.clone();
-        cw.reverse();
-        for pts in [ccw, cw] {
-            let winding = loop_winding(&pts);
-            let centre = Vec2::new(0.5, 0.5);
-            for w in pts.windows(2) {
-                let out = outward_normal(w[0], w[1], winding);
-                let mid = (w[0] + w[1]) * 0.5;
-                assert!(
-                    out.dot(mid - centre) > 0.0,
-                    "normal {out} on segment {}->{} points inward",
-                    w[0],
-                    w[1],
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn winding_sign_follows_the_traversal() {
-        let ccw = square_ccw();
-        let mut cw = ccw.clone();
-        cw.reverse();
-        assert_eq!(loop_winding(&ccw), 1.0);
-        assert_eq!(loop_winding(&cw), -1.0);
-    }
 
     /// The lift is what the whole port turns on: a side-plane point must land at the hull's pose,
     /// on the correct side, with `(z, y)` unswapped — and it must MOVE with the hull, which is the

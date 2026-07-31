@@ -194,12 +194,9 @@ mod tests {
     /// backend's `get_capabilities` actually returns), and the rungs each one yields.
     #[test]
     fn fake_capability_lists_gate_the_ladder_correctly() {
-        let offered = |caps: PresentCaps| -> Vec<VsyncMode> {
-            VsyncMode::ORDER
-                .into_iter()
-                .filter(|mode| caps.offers(*mode))
-                .collect()
-        };
+        // What each distilled `PresentCaps` OFFERS is pinned exhaustively by
+        // `settings::the_offered_rungs_follow_the_probe`; this test owns only the
+        // present-mode-list → `PresentCaps` distillation.
 
         // Metal (macOS >= 10.13): Fifo + Immediate, no Mailbox — FAST must not be offered.
         let metal =
@@ -211,7 +208,6 @@ mod tests {
                 mailbox: false,
             },
         );
-        assert_eq!(offered(metal), vec![VsyncMode::Off, VsyncMode::On]);
 
         // Wayland: Fifo + Mailbox, Immediate refused — OFF must not be offered.
         let wayland =
@@ -223,7 +219,6 @@ mod tests {
                 mailbox: true,
             },
         );
-        assert_eq!(offered(wayland), vec![VsyncMode::Fast, VsyncMode::On]);
 
         // A typical Vulkan/X11 or Windows surface: everything.
         let vulkan = caps_from_present_modes(&[
@@ -232,7 +227,13 @@ mod tests {
             wgpu::PresentMode::Immediate,
             wgpu::PresentMode::Mailbox,
         ]);
-        assert_eq!(offered(vulkan), VsyncMode::ORDER.to_vec());
+        assert_eq!(
+            vulkan,
+            PresentCaps::Reported {
+                immediate: true,
+                mailbox: true,
+            },
+        );
 
         // A surface that reports a list with NEITHER uncapped mode in it — `[Fifo]`, or Fifo plus
         // FifoRelaxed. This is the genuine conclusive negative: the surface answered, and the
@@ -250,16 +251,13 @@ mod tests {
                 },
                 "{list:?} is a real answer, and it conclusively lacks both uncapped modes",
             );
-            assert_eq!(offered(neither), vec![VsyncMode::On]);
         }
 
         // A FAILED probe is a different thing entirely, and this is the whole point of the
-        // tri-state: it answers the poller so the probe stops, and it offers everything because it
-        // knows nothing. `settings::a_failed_probe_never_rewrites_the_stored_rung` pins the writer
-        // half.
+        // tri-state: it answers the poller so the probe stops, and it claims neither capability.
+        // `settings::a_failed_probe_never_rewrites_the_stored_rung` pins the writer half.
         assert!(PresentCaps::Unavailable.answered());
         assert!(!PresentCaps::Unprobed.answered());
-        assert_eq!(offered(PresentCaps::Unavailable), VsyncMode::ORDER.to_vec());
         assert!(!PresentCaps::Unavailable.immediate() && !PresentCaps::Unavailable.mailbox());
     }
 

@@ -122,6 +122,8 @@ use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
+use super::loop_geom;
+
 /// Which caster arrangement a session runs. `OVERMATCH_TRACK_SHADOW_PROXY`, a dev instrument in the
 /// shape of [`crate::env_parse`]'s other knobs — the A/B is the whole point of the prototype, and a
 /// rebuild per arm would make the two arms different binaries.
@@ -334,27 +336,16 @@ pub(crate) fn ribbon_mesh(stations: &[Vec2], section: Section) -> Option<Mesh> {
     if n < 3 {
         return None;
     }
-    // Which side of the loop is OUTWARD. The belt is a closed polygon in `(z, y)`; its signed area
-    // says which way it is wound, and the outward normal is the tangent turned the other way. Read
-    // from the polyline rather than assumed, because the wrap is free to emit either winding and a
-    // sign error here turns the ribbon inside out (a tube that hugs the wheels instead of the
-    // ground) without failing anything.
-    let twice_area: f32 = (0..n)
-        .map(|i| {
-            let (a, b) = (stations[i], stations[(i + 1) % n]);
-            a.x * b.y - b.x * a.y
-        })
-        .sum();
-    let winding = if twice_area >= 0.0 { 1.0 } else { -1.0 };
+    // Which side of the loop is OUTWARD: [`loop_geom`] reads it from the polyline, because the
+    // wrap is free to emit either winding and a sign error here turns the ribbon inside out (a
+    // tube that hugs the wheels instead of the ground) without failing anything.
+    let winding = loop_geom::loop_winding(stations);
 
     // Per-station outward normal: the MITRE of the two adjacent edges. Averaging the neighbours
     // rather than using one edge's normal is what keeps the four faces continuous around the
     // sprocket and idler arcs, where consecutive chords turn by several degrees.
-    let edge_normal = |i: usize| {
-        let (a, b) = (stations[i], stations[(i + 1) % n]);
-        let t = (b - a).normalize_or_zero();
-        winding * Vec2::new(t.y, -t.x)
-    };
+    let edge_normal =
+        |i: usize| loop_geom::outward_normal(stations[i], stations[(i + 1) % n], winding);
 
     let mut positions: Vec<[f32; 3]> = Vec::with_capacity(n * 4);
     let mut normals: Vec<[f32; 3]> = Vec::with_capacity(n * 4);
