@@ -685,7 +685,7 @@ offset already decaying on the sharp root keeps decaying.
 | `SHOCK_EPISODE_TICKS` = 16 | CHOSEN inside a DERIVED band of `1 ..= 23` — see below |
 | `ORDERING_BUDGET_TICKS` = `RICOCHET_HOLD_TICKS` = 16 ticks | DERIVED — see below |
 | `MAX_PRESENTED_HITS` = 64 | **CHOSEN for headroom, and it used to claim to be DERIVED** — see below |
-| a ~10-tick delivery catch-up, ~156 ms, and a <120 m dead zone | **DERIVED, and never measured** |
+| a ~10-tick delivery catch-up, ~156 ms, and a <120 m dead zone | ~~DERIVED, and never measured~~ **MEASURED 2026-07-31** — one claim, not three, and it is a latency curve: cu p50 = 5/8/13 ticks (78/125/203 ms, dead zone ~60/97/157 m) at 40/80/160 ms latency; the derived triple corresponded to a ~100 ms point we don't ship at. `.agents/docs/design/netcode-measured-numbers-2026-07-31.md` |
 
 **`SHOCK_EPISODE_TICKS` is a judgement, not a derivation.** Only the CEILING is arithmetic:
 `ROLLBACK_POSITION_M` 0.05 m ÷ 0.1383 m/s = 0.3615 s = 23.14 ticks, past which ordinary position
@@ -727,11 +727,21 @@ The last row needs saying out loud, because it is the shape of number this repo 
 before. The chain is: a representative ~10-tick catch-up at 64 Hz is 156.25 ms; at the Tiger's
 authored 773 m/s that is 120.8 m of flight; below roughly that range a shell's entire flight is
 consumed by the catch-up, so no spark can precede the shove and the ordering rule has no headroom to
-work in. Every step after the 10 is arithmetic. **Nothing measures the 10.** No capture exists, no
-constant in the tree is set from it, and it decides nothing in the code today — which is exactly why
-it has survived unpinned and why it is recorded here as an estimate rather than as a finding. A
-`~125 m` figure of the same shape circulated in this codebase for weeks in 2026-07 before turning out
-to be derived, never measured, and 2.5× too large.
+work in. Every step after the 10 is arithmetic. When this section was written, **nothing measured
+the 10** — no capture existed, no constant in the tree was set from it. A `~125 m` figure of the
+same shape circulated in this codebase for weeks in 2026-07 before turning out to be derived, never
+measured, and 2.5× too large.
+
+**MEASURED 2026-07-31** (`.agents/docs/design/netcode-measured-numbers-2026-07-31.md`): the "10" is
+a latency curve — `fire_rx` catch-up p50 is 5 ticks at 40 ms, 8 at 80 ms, 13 at 160 ms (one-way
+latency plus ≈2.7 ticks of sync margin), so the representative triple at the 80/10 test condition
+is **8 ticks / 125 ms / ~97 m**, and the derived one corresponded to a ~100 ms point. Same
+instrument (`scripts/shot/analyze.py` "fire catch-up"), ~1000 samples per run, seed spread ≤1 tick.
+The dead-zone CONSEQUENCE (single-shot spark-before-shove forfeit below the radius) remains
+evidenced only by the belt-first sub-population, which measured 1–3 ticks of spark lead at 8 m —
+against the derived pessimism. The queued "predict the impact" alternative was measured DEAD ON
+ARRIVAL — the causing FireEvent reaches the victim at median 0 to −1 ticks relative to the fact
+itself, so there is no earlier signal and this machinery is load-bearing, not a stopgap.
 
 ## Consequences
 

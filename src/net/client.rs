@@ -342,11 +342,16 @@ pub fn run() {
         ),
     };
     let jitter_multiple = harness::jitter_multiple();
+    let jitter_margin = harness::jitter_margin();
     let sync_config = SyncConfig {
         jitter_multiple,
+        jitter_margin,
         ..default()
     };
-    info!("client: input delay = {delay_label}; sync jitter_multiple = {jitter_multiple}");
+    info!(
+        "client: input delay = {delay_label}; sync jitter_multiple = {jitter_multiple}, \
+         jitter_margin = {jitter_margin}"
+    );
     if matches!(conditioner_mode, RecvConditionerMode::Seeded(_)) {
         app.add_systems(
             PreUpdate,
