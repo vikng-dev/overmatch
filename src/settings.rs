@@ -1303,6 +1303,21 @@ fn shadow_distance_override() -> Option<f32> {
     })
 }
 
+/// "An external capture harness has PINNED this window; settings must not manage it." Inserted by
+/// the harness that creates a hidden capture window (`SPIKE_SIM_WINDOWED` without
+/// `SPIKE_SIM_VISIBLE` — see `net::client::run`), whose window is deliberately `Windowed` +
+/// invisible: [`apply_settings`] re-applying a persisted fullscreen at runtime would order that
+/// window front on macOS regardless of `visible: false`, defeating the no-focus-steal guarantee
+/// the creation-time fields bought.
+///
+/// It lives HERE, not beside the harness, because of the layering gate (`tests/net_boundary`): the
+/// sim/settings layer may never name the netcode layer — single-player is a runtime mode with no
+/// netcode mounted — so the netcode-side harness inserts a settings-OWNED marker rather than
+/// settings reading a netcode-owned one. The marker states a window/presentation contract, which
+/// is settings' domain; who pins the window is the inserter's business.
+#[derive(Resource)]
+pub(crate) struct CaptureWindowPinned;
+
 /// Reconcile the rendering world to [`Settings`]. The ONE writer of every knob below, which is what
 /// makes "the page and the picture cannot disagree" true by construction rather than by discipline.
 fn apply_settings(
@@ -1322,6 +1337,9 @@ fn apply_settings(
     // bevy_ui's global multiplier. Present on every windowed root (it comes with `UiPlugin`); a
     // bare-`App` test must init it, same as the shadow map above.
     mut ui_scale: ResMut<UiScale>,
+    // Present exactly on a hidden capture client (`SPIKE_SIM_WINDOWED` without
+    // `SPIKE_SIM_VISIBLE`) — the window sub-block below must not run for it.
+    capture_pinned: Option<Res<CaptureWindowPinned>>,
 ) {
     let msaa = settings.msaa.to_msaa();
     for mut camera_msaa in &mut cameras {
@@ -1377,7 +1395,15 @@ fn apply_settings(
         }
     }
 
-    if let Some(window) = window {
+    // SKIPPED ENTIRELY for a hidden capture client: its window was deliberately created
+    // `Windowed` + invisible, and this runtime re-apply of a persisted fullscreen was flipping it
+    // to `BorderlessFullscreen` a frame later — macOS orders a fullscreen window front REGARDLESS
+    // of `visible: false`, defeating the whole no-focus-steal point of the hidden window. The
+    // present-mode write is skipped with it: nobody watches that window, and staying out of the
+    // sub-block keeps the capture window's state exactly as created.
+    if capture_pinned.is_none()
+        && let Some(window) = window
+    {
         let mut window = window.into_inner();
         window.present_mode = settings.present_mode(*caps);
         // Guarded: `Window::mode` is also written by `observe_window_mode` (the reflect direction),
@@ -1462,6 +1488,12 @@ fn normalize_vsync(
 /// This is a second WRITER of the settings file (via [`SaveSettings`]) beyond the page — accepted
 /// because the green button IS player intent, exactly as deliberate as a row click, and a player
 /// who fullscreens the game expects it to come back fullscreen.
+///
+/// NOT gated on [`CaptureWindowPinned`], deliberately, unlike [`apply_settings`]'s
+/// window sub-block: the first observation is a baseline, not an edge, so a hidden capture window
+/// booting `Windowed` writes nothing — and with the apply-side skip in place nothing ever commands
+/// that window fullscreen, so the OS edge this system needs cannot occur on a capture run. It
+/// therefore cannot spend the player's persisted fullscreen on a capture client's `Windowed` state.
 fn observe_window_mode(
     _non_send_marker: bevy::ecs::system::NonSendMarker,
     window: Option<Single<(Entity, &mut Window), With<PrimaryWindow>>>,

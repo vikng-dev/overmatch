@@ -6178,6 +6178,8 @@ dependencies = [
  "lightyear_sync",
  "lightyear_transport",
  "objc-sys",
+ "objc2-app-kit 0.2.2",
+ "objc2-foundation 0.2.2",
  "ron",
  "serde",
  "serde_json",

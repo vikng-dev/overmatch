@@ -54,6 +54,20 @@ bevy_replicon = "0.41"
 # macOS on arm64 only, but correctness here does not get to depend on that.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc-sys = "0.3"
+# AppKit bindings for the hidden-capture activation revocation in `net::client` (winit hardcodes
+# activate-at-launch; see `revoke_macos_activation`). Version-matched to winit 0.30's OWN
+# objc2-app-kit dependency (Cargo.lock pins both at 0.2.2), so this adds no second copy of the
+# crate to the graph — arboard's 0.3.x line is a separate, pre-existing major. Features are the
+# minimum for that one call site: `NSResponder` gates the `NSApplication` class itself,
+# `NSApplication` its methods, `NSRunningApplication` the activation-policy API. In this 0.2.x
+# generation `MainThreadMarker` lives in objc2-foundation, with `NSThread` gating its CHECKED
+# constructor (without it only the unsafe `new_unchecked` exists).
+objc2-app-kit = { version = "0.2.2", features = [
+    "NSApplication",
+    "NSResponder",
+    "NSRunningApplication",
+] }
+objc2-foundation = { version = "0.2.2", features = ["NSThread"] }
 
 [dev-dependencies]
 lightyear_sync = "0.28"

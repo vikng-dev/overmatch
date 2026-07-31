@@ -11,7 +11,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use bevy::app::ScheduleRunnerPlugin;
 use bevy::asset::AssetPlugin;
 use bevy::prelude::*;
-use bevy::window::PrimaryWindow;
+use bevy::window::{PrimaryWindow, WindowMode};
 use lightyear::interpolation::timeline::InterpolationConfig;
 use lightyear::prediction::correction::CorrectionPolicy;
 use lightyear::prelude::client::*;
@@ -166,10 +166,40 @@ pub(crate) fn shipping_correction_policy() -> CorrectionPolicy {
     CorrectionPolicy::instant_correction()
 }
 
+/// Renounce macOS app activation for a hidden capture client — registered only on the `hidden`
+/// path; see the registration site in [`run`] for the winit launch mechanism that makes a
+/// post-launch revocation the only option.
+///
+/// `Prohibited` means the process can never own the menu bar or become the active application
+/// again — exactly right for a headless-in-spirit capture — and the `deactivate` yields the focus
+/// winit already stole back to whatever the user had. The `NonSendMarker` pins the system to the
+/// main thread (the repo's `settings::probe` idiom), which is what makes the CHECKED
+/// `MainThreadMarker` constructor infallible here.
+#[cfg(target_os = "macos")]
+fn revoke_macos_activation(_non_send_marker: bevy::ecs::system::NonSendMarker) {
+    use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
+    let mtm = objc2_foundation::MainThreadMarker::new()
+        .expect("NonSendMarker pinned this system to the main thread");
+    let app = NSApplication::sharedApplication(mtm);
+    // The returned bool is "did the policy switch take"; a capture run has no UI to degrade, so
+    // log-and-continue is the right failure mode.
+    if !app.setActivationPolicy(NSApplicationActivationPolicy::Prohibited) {
+        warn!("capture client: macOS refused ActivationPolicy::Prohibited — focus may be stolen");
+    }
+    // SAFETY: a plain AppKit call with no invariants beyond main-thread, which `mtm` proves;
+    // `unsafe` only because the objc2 0.2 generation did not audit it as safe.
+    unsafe { app.deactivate() };
+}
+
 pub fn run() {
     let simulate = std::env::args().any(|a| a == "--simulate-input")
         || harness::env_flag("SPIKE_SIMULATE_INPUT", false);
     let sim_windowed = simulate && harness::env_flag("SPIKE_SIM_WINDOWED", false);
+    // The capture scripts are the only users of `SPIKE_SIM_WINDOWED`, and what they want is the
+    // RenderApp (KTX2 transcode needs a real GPU device), not a window — so the window defaults to
+    // hidden and stops stealing focus from the operator. `SPIKE_SIM_VISIBLE=1` restores the
+    // eyes-on diagnostic.
+    let hidden = sim_windowed && !harness::env_flag("SPIKE_SIM_VISIBLE", false);
 
     let mut app = App::new();
     if simulate && !sim_windowed {
@@ -197,8 +227,26 @@ pub fn run() {
                         // this window — the mapping self-negotiates until the probe lands.
                         present_mode: settings.present_mode(crate::settings::PresentCaps::Unprobed),
                         // Described at creation so a persisted fullscreen boots fullscreen instead
-                        // of flashing a window first.
-                        mode: settings.window_mode.to_window_mode(),
+                        // of flashing a window first. A hidden capture client must NOT boot into
+                        // the player's persisted fullscreen — it stays a plain window.
+                        mode: if hidden {
+                            WindowMode::Windowed
+                        } else {
+                            settings.window_mode.to_window_mode()
+                        },
+                        // macOS invariant: bevy creates every winit window `with_visible(false)`
+                        // (for AccessKit) and then calls `set_visible(window.visible)`, which on
+                        // macOS is `makeKeyAndOrderFront` — key + front REGARDLESS of `focused`
+                        // (vendored bevy_winit winit_windows.rs:71,315-317; winit 0.30
+                        // macos/window_delegate.rs:904-909). So `visible` is the only lever that
+                        // stops a capture client stealing focus; `focused: false` would be a dead,
+                        // misleading field.
+                        //
+                        // A hidden window's present returns `SurfaceError::Occluded` every frame
+                        // (wgpu-hal metal surface.rs:122-157 workaround), so nothing ever
+                        // vsync-blocks and the hidden frame loop free-runs — the ACCEPTED cost;
+                        // see the measured note on `WinitSettings::continuous()` below.
+                        visible: !hidden,
                         ..default()
                     }),
                     ..default()
@@ -207,9 +255,41 @@ pub fn run() {
         // Never drop below the 64 Hz tick: the default `WinitSettings::game()` throttles an
         // UNFOCUSED window to 60 Hz reactive updates — under tick rate, so an alt-tabbed client
         // drifts behind the server and resyncs on refocus (lightyear #1113's jitter class).
+        //
+        // `continuous()` holds for HIDDEN capture clients too. `UpdateMode::reactive(1/120)`
+        // was tried here (2026-07-31) and the capture degraded badly — the target received 78
+        // of ~980 fire_rx events, fire catch-up p50 34 ticks (baseline 8, max 65 vs ~13), fact
+        // lag p50 27 (baseline 7) — BUT that measurement is CONFOUNDED: it was the first run
+        // after a fresh build, i.e. a COLD Metal shader cache, which was later shown to stall
+        // clients all by itself (>10 s pipeline compilation after connect, keepalive death,
+        // reconnects burning lanes — clean on the warm rerun). Verdict: reactive is UNPROVEN
+        // either way; `continuous()` is kept because it is measured-good on a warm cache (four
+        // clean runs, catch-up p50 7-8, lag 7, metric-identical to the visible baseline) and is
+        // the smaller delta. The accepted cost is free-running CPU on capture runs (the
+        // invisible surface's `SurfaceError::Occluded` skips the vsync block). Anyone re-trying
+        // reactive must A/B it on a WARM cache.
         app.insert_resource(bevy::winit::WinitSettings::continuous());
         if sim_windowed {
             app.init_resource::<harness::SimulateInput>();
+        }
+        if hidden {
+            // The RUNTIME half of the hidden-window guard: the creation-time `mode`/`visible`
+            // fields above are not enough on their own, because `settings::apply_settings` would
+            // re-apply a persisted fullscreen a frame later. The marker is settings-OWNED (this
+            // side only inserts it) — see its doc for the layering reason.
+            app.insert_resource(crate::settings::CaptureWindowPinned);
+            // UNREACHABLE for a normal client: winit's `applicationDidFinishLaunching` makes even
+            // an invisible client the ACTIVE macOS app — it forces `ActivationPolicy::Regular`
+            // for an unbundled binary and then calls `activateIgnoringOtherApps` unconditionally
+            // (vendored winit 0.30 macos/app_state.rs:110-136) — so the capture process takes the
+            // menu bar and the keystroke sink once per launch, and the user's typing vanishes
+            // into a window that does not exist. bevy 0.19 exposes no macOS `EventLoopBuilder`
+            // hook to pre-empt that (`WinitPlugin`'s builder extensions cover
+            // x11/wayland/windows/android only), so the revocation must happen POST-launch:
+            // `Startup` runs after winit's didFinishLaunching, so it both revokes the policy and
+            // hands focus straight back.
+            #[cfg(target_os = "macos")]
+            app.add_systems(Startup, revoke_macos_activation);
         }
     }
 
@@ -222,7 +302,8 @@ pub fn run() {
     app.add_plugins(physics::physics_plugins());
     // The render half of prediction (frame interpolation + armed rollback correction) — client
     // only; the server has no `Predicted` view to smooth. Mounted in simulate mode too: headless
-    // it idles harmlessly, and `SPIKE_SIM_WINDOWED` diagnoses the real presentation stack.
+    // it idles harmlessly, and `SPIKE_SIM_WINDOWED` runs the real presentation stack (hidden
+    // window by default; `SPIKE_SIM_VISIBLE=1` shows it for eyes-on diagnosis).
     app.add_plugins(client_smoothing_plugin);
     // The render-space error layer (client only): with `instant_correction` on the PredictionManager
     // below, lightyear snaps the sim pose to the corrected present in one frame; this layer
