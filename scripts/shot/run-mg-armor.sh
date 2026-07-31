@@ -29,7 +29,11 @@ cleanup() {
   [[ -n "$TARGET_PID" ]] && wait "$TARGET_PID" 2>/dev/null || true
   [[ -n "$SERVER_PID" ]] && wait "$SERVER_PID" 2>/dev/null || true
 }
-trap cleanup EXIT INT TERM
+# A signal trap that RETURNS resumes the script in zsh — route INT/TERM through exit so the
+# EXIT trap does the cleanup exactly once and the script actually terminates.
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # SPIKE_SPAWN_POSE: the lane-spawn default sits at world origin, which on the heightmap world is
 # a slope — the tanks slide apart and the hull-local -8,0,0 aim never touches armor (verified:

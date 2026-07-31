@@ -47,22 +47,29 @@ patterns = {
     "landed_unordered": "landed UNORDERED",
     "adopted_not_delivered": "ADOPTED BUT NOT DELIVERED",
     "not_deliverable_waiting": "not deliverable",
-    "replay_window_drop": "replay window",
+    # The production WARNs at adoption.rs and protocol.rs both say "rollback window";
+    # an earlier revision grepped "replay window" and would have reported real drops as zero.
+    "replay_window_drop": "rollback window",
     "rollback_fired_lines": "ROLLBACK fired",
 }
 out["log_counts"] = {k: target_log.count(v) for k, v in patterns.items()}
 
-# --- rollback rows from the target trace ---
+# --- rollback + fact rows from the target trace ---
 rows = []
+dropped_fact_rows = 0
+bad_lines = 0
 trace_path = seed_dir / "target-trace.client.jsonl"
 if trace_path.exists():
     for line in trace_path.read_text(errors="replace").splitlines():
         try:
             row = json.loads(line)
         except json.JSONDecodeError:
+            bad_lines += 1
             continue
         if row.get("k") == "rollback":
             rows.append(row)
+        elif row.get("k") == "fact" and row.get("ev") == "dropped":
+            dropped_fact_rows += 1
 
 causes = Counter(r.get("cause") for r in rows)
 trg_components = Counter()
@@ -78,6 +85,10 @@ for r in rows:
 
 out["trace"] = {
     "rollback_rows": len(rows),
+    # Structured ground truth for drops; the log_counts grep above is corroboration only.
+    "dropped_fact_rows": dropped_fact_rows,
+    # One truncated final line is normal (the processes are killed mid-write); more is corruption.
+    "malformed_lines": bad_lines,
     "causes": dict(causes),
     "trg_component_rollbacks": dict(trg_components),
     "rollbacks_with_hullshock_trg": hullshock_rollbacks,

@@ -19,21 +19,28 @@ arms = sys.argv[2:] or ["evcap-baseline", "evcap-treatment"]
 
 
 def load(seed_dir):
-    facts, rollbacks = [], []
+    facts, rollbacks, bad = [], [], 0
     for line in (seed_dir / "target-trace.client.jsonl").read_text(errors="replace").splitlines():
         try:
             r = json.loads(line)
         except json.JSONDecodeError:
+            bad += 1
             continue
         if r.get("k") == "fact":
             facts.append(r)
         elif r.get("k") == "rollback":
             rollbacks.append(r)
-    return facts, rollbacks
+    return facts, rollbacks, bad
 
 
 def summarize(seed_dir):
-    facts, rollbacks = load(seed_dir)
+    facts, rollbacks, bad = load(seed_dir)
+    # An empty fact stream is a broken capture (pre-telemetry binaries or a dead link), and more
+    # than the one kill-truncated final line is corruption — either way this dir is not evidence.
+    if not facts:
+        raise SystemExit(f"{seed_dir}: no k=fact rows — not a valid capture for this comparison")
+    if bad > 1:
+        raise SystemExit(f"{seed_dir}: {bad} malformed trace lines — corrupted capture")
     staged = [f for f in facts if f["ev"] == "staged"]
     retired = [f for f in facts if f["ev"] == "retired"]
     released = [f for f in facts if f["ev"] == "released"]
@@ -79,12 +86,16 @@ def summarize(seed_dir):
     }
 
 
+missing = 0
 for arm in arms:
     print(f"=== {arm} ===")
     for seed in range(1, 6):
         d = base / arm / f"seed{seed}"
         if not (d / "target-trace.client.jsonl").exists():
             print(f"seed {seed}: MISSING")
+            missing += 1
             continue
         s = summarize(d)
         print(f"seed {seed}: {json.dumps(s)}")
+if missing:
+    raise SystemExit(f"{missing} seed dir(s) missing — the arms above are NOT comparable as printed")
