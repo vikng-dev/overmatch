@@ -191,10 +191,14 @@ fn isolated_shock() -> HullShock {
     }
 }
 
-/// The SECOND episode of the contention control: closes four ticks after the head's, while the
-/// head is still staged and holding for its spark. Its velocities are distinct so delivery is
-/// attributable — an assertion satisfied by the head's values would be reading the wrong restore.
-const FOLLOW_UP_TICK: Tick = Tick(104);
+/// The SECOND episode of the contention control: published (and checkpoint-covered) while the
+/// head is still staged and holding for its spark, but closing AFTER the head's replay window.
+/// That placement is load-bearing twice over: inside the window, the head's own replay SNAPS the
+/// newer confirmed samples in as it crosses their tick, live state then agrees, and no second
+/// fact is ever offered — replay-coalescing, not contention (found the hard way; the tally read
+/// one release instead of two). Its velocities are distinct so delivery is attributable — an
+/// assertion satisfied by the head's values would be reading the wrong restore.
+const FOLLOW_UP_TICK: Tick = Tick(103);
 const FOLLOW_UP_LINEAR: Vec3 = Vec3::new(0.0, 0.0, -0.276_6);
 const FOLLOW_UP_ANGULAR: Vec3 = Vec3::new(0.382_0, 0.0, 0.104_0);
 
@@ -853,6 +857,20 @@ fn run_scenario(scenario: Scenario) -> Delivered {
 
     if follow_up_episode {
         deposit_follow_up_episode(&mut app, root);
+        // One sparkless frame at the newer episode's tick, while the head still holds. The newer
+        // fact is offerable on this frame — its checkpoint is recorded and `now` has reached its
+        // tick — and the ONLY production offer outcome that leaves the HEAD staged is `SlotBusy`,
+        // which is what the assertion below reads: contention happened, nothing was displaced.
+        advance_to(&mut app, PRODUCING_TICK + 1);
+        app.world_mut().run_schedule(PreUpdate);
+        assert_eq!(
+            app.world()
+                .resource::<AuthorityAdoption>()
+                .staged_sequence(),
+            Some(visual.shock().count),
+            "the head must still hold the slot on the frame the newer fact became offerable — \
+             anything else means the fixture never created the SlotBusy contention it exists for",
+        );
     }
 
     // The later frame, with the march's presentation in it — and the ticks that separate the two.
@@ -971,11 +989,12 @@ fn deposit_follow_up_episode(app: &mut App, root: Entity) {
 /// The contention delivery: the head has retired, the slot is free. One frame past the newer
 /// episode's tick it stages and holds for its own spark; the spark draws; the next frame adopts.
 fn run_follow_up_delivery(app: &mut App) {
-    advance_to(app, FOLLOW_UP_TICK + 1);
+    let stage_frame = app.world().resource::<LocalTimeline>().tick() + 1;
+    advance_to(app, stage_frame);
     app.world_mut().run_schedule(PreUpdate);
     present_impact(app, FOLLOW_UP_TICK.0);
-    let next = app.world().resource::<LocalTimeline>().tick() + 1;
-    advance_to(app, next);
+    let release_frame = app.world().resource::<LocalTimeline>().tick() + 1;
+    advance_to(app, release_frame);
     app.world_mut().run_schedule(PreUpdate);
 }
 
@@ -1063,9 +1082,9 @@ fn a_newer_fact_behind_a_held_head_is_adopted_after_the_head_releases() {
         delivered.ordering,
         OrderingTally {
             released_on_impact: 2,
-            // The head's spark cost the schedule's own delay; the newer fact's wait spans its
-            // SlotBusy frames plus its own spark hold.
-            max_wait_ticks: delivered.ordering.max_wait_ticks,
+            // EXACT: the head staged on the arrival frame, held through the contention frame,
+            // and released on its spark two ticks later; the newer fact's own wait was one tick.
+            max_wait_ticks: 2,
             ..default()
         },
         "both facts must release on their own impacts — no bypass, no budget, no loss",

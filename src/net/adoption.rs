@@ -855,6 +855,13 @@ impl AuthorityAdoption {
         offer
     }
 
+    /// The staged fact's sequence, for fixtures that need to know WHICH fact holds the slot —
+    /// the contention control's evidence that a newer offerable fact answered `SlotBusy`.
+    #[cfg(test)]
+    pub(super) fn staged_sequence(&self) -> Option<u32> {
+        self.staged.map(|fact| fact.id.sequence)
+    }
+
     /// Whether a fact is currently mid-transaction.
     ///
     /// Exists so a fixture can tell a WAIT (the fact is still staged and will be reconsidered) from
@@ -914,6 +921,17 @@ fn reset_adoption_state(
     mut slot: ResMut<ForcedRollbackSlot>,
     mut presentation: ResMut<ImpactPresentation>,
 ) {
+    // The per-fact rows promise every `staged` a terminal; a reconnect abandoning a held fact
+    // must say so or the acceptance analyzer reads an intentional timeline reset as a lost fact.
+    if let Some(fact) = adoption.staged {
+        crate::trace::note_fact_event(|| {
+            serde_json::json!({
+                "ev": "dropped",
+                "seq": fact.id.sequence,
+                "why": "reconnect",
+            })
+        });
+    }
     *adoption = default();
     *slot = default();
     // The presented hits and the staged claim's latch are ticks from the old timeline; the tallies
@@ -2817,6 +2835,60 @@ mod tests {
                 started.0,
             );
         }
+    }
+
+    /// A reconnect is a NEW TIMELINE, and a fact held for its spark when it happens is abandoned
+    /// on purpose — but the per-fact rows promise every `staged` a terminal, so the abandonment
+    /// must say so. The acceptance analyzer otherwise reads an intentional reset as a lost fact.
+    #[test]
+    fn a_reconnect_abandons_the_staged_fact_with_a_terminal_row() {
+        crate::trace::arm_fact_rows_for_test();
+        let mut world = World::new();
+        world.init_resource::<ForcedRollbackSlot>();
+        let hull = world.spawn_empty().id();
+        let mut adoption = AuthorityAdoption::default();
+        let mut presentation = ImpactPresentation::default();
+        let fact = AuthoritativeFact {
+            id: FactId {
+                source: FactSource::HullShock,
+                entity: hull,
+                sequence: 7,
+                checkpoint: RepliconTick::new(9),
+            },
+            cause: AdoptionCause::ExternalEvent,
+            produced_at: Tick(40),
+            settled_at: Tick(40),
+            visual: None,
+        };
+        assert_eq!(
+            adoption.offer(fact, Tick(41), &mut presentation),
+            Offer::Staged,
+        );
+        world.insert_resource(adoption);
+        world.insert_resource(presentation);
+        // Discard the staged row (and whatever parallel armed tests pushed) so the assertion
+        // below reads only what the reconnect emits.
+        crate::trace::drain_fact_events_for_test();
+
+        world.add_observer(reset_adoption_state);
+        // `Connected`'s on_add hook demands the link shape a real connection has.
+        world.spawn((
+            lightyear::prelude::client::Client::default(),
+            RemoteId(PeerId::Server),
+            Connected,
+        ));
+        world.flush();
+
+        let rows = crate::trace::drain_fact_events_for_test();
+        assert!(
+            rows.iter()
+                .any(|row| row["ev"] == "dropped" && row["why"] == "reconnect" && row["seq"] == 7),
+            "the abandoned fact must get a terminal `dropped` row naming the reconnect, got {rows:?}",
+        );
+        assert!(
+            !world.resource::<AuthorityAdoption>().is_staged(),
+            "the reset itself must still clear the slot",
+        );
     }
 
     /// THE PRODUCTION INVARIANT, held in place rather than relied on. `net::client` disables input

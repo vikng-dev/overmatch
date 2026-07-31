@@ -779,11 +779,13 @@ to be derived, never measured, and 2.5× too large.
   test destructures `HullShock` so the next field cannot be forgotten the same way — an enumerated
   list of "every field" is a list that rots.
 - **What would verify this is a real two-client capture on a jittered link, and it has not been
-  taken.** The fixtures prove the mechanism delivers at leads 0, −1 and 8; they say nothing about how
+  taken.** *(SUPERSEDED 2026-07-31: the capture was taken — see the amendment below and
+  `design/hullshock-delivery-capture-2026-07-31.md`.)* The fixtures prove the mechanism delivers at leads 0, −1 and 8; they say nothing about how
   often the ordering rule is bypassed, how often the budget expires, or how the hitch feels. Those
   three numbers are already instrumented and reported; reading them is the next evidence, and no
   claim in this ADR should be promoted to a product fact before then.
-- **The wire moved to `PROTOCOL_REV` 24, and has not moved since.** Client and server ship together
+- **The wire moved to `PROTOCOL_REV` 24, and has not moved since.** *(SUPERSEDED 2026-07-31:
+  REV 25, the amendment below — reconciliation semantics only, bytes unchanged.)* Client and server ship together
   behind a version-exact handshake, so the cost is one coordinated release; `WIRE_TYPES_HASH` and the
   wire-manifest fingerprint were re-pinned in that diff, and `WIRE_SURFACE_HASH` is untouched because
   no type was added, removed, renamed or reordered. `AuthoritativeFact::settled_at` is deliberately
@@ -844,7 +846,8 @@ adoption-shaped and are untouched.
 staged with the visual-claim span, waiting, released, requested, retired with route and
 `carried`, dropped, spark) landed BEFORE the comparator flip so baseline and treatment captures
 read identically. The A/B gate on the same five seeds: every client-observed fact terminates as
-adopted / delivered / dropped / undelivered; `bypassed → 0` with `adopted` holding ≈ 181–183;
+adopted / delivered / dropped / undelivered; `bypassed → 0` with `adopted` absorbing the old
+bypasses (recorded: 185–190 per run against a planning estimate of ≈ 181–183);
 `undelivered` and drops still 0; `trg == 0` for `HullShock` as SECONDARY wiring evidence only
 (the flip silences that instrument by construction, so it cannot be the primary gate). The
 acceptance denominator is CLIENT-OBSERVED state transitions with sequence deltas recorded — the

@@ -91,6 +91,12 @@ use crate::{CombatantId, ShotId};
 /// fingerprint) moves.
 pub const PROTOCOL_REV: u32 = 25;
 
+/// How many times the inert `HullShock` rollback condition has been dispatched, across every test
+/// in the process — see the registration for why this exists and how to read it soundly.
+#[cfg(test)]
+pub(crate) static HULL_SHOCK_DISPATCHES: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
 pub const PROTOCOL_FINGERPRINT: u64 = protocol_fingerprint_for(
@@ -956,8 +962,11 @@ pub(crate) fn weapon_gate_mismatch(a: &WeaponGate, b: &WeaponGate) -> bool {
     a != b
 }
 
-/// Whether two hull-shock snapshots differ. Every field is discrete and the component derives `Eq`,
-/// so this is the exact atomic comparison the owner's forced rollback rests on.
+/// Whether two hull-shock snapshots differ. Every field is discrete and the component derives
+/// `Eq`, so this is the exact atomic comparison — but since REV 25 it is `net::adoption`'s FACT
+/// DETECTOR only, called directly on the confirmed histories. The registered rollback condition
+/// does NOT call it (it is permanently inert); changing this helper changes which facts adoption
+/// stages, never native reconciliation.
 pub(crate) fn hull_shock_mismatch(a: &HullShock, b: &HullShock) -> bool {
     a != b
 }
@@ -1295,7 +1304,16 @@ pub(crate) fn plugin(app: &mut App) {
     app.component::<HullShock>()
         .replicate()
         .predict()
-        .with_rollback_condition(|_: &HullShock, _: &HullShock| false);
+        .with_rollback_condition(|_: &HullShock, _: &HullShock| {
+            // Test-only dispatch attribution: the negative control must prove lightyear actually
+            // HANDED the pair to this closure and it declined — "no rollback" alone is satisfied
+            // by a deleted registration or a skipped scan. A global atomic because the closure is
+            // a plain fn with no world access; tests assert a delta >= 1 around their own run,
+            // which a parallel dispatcher can only push further in the passing direction.
+            #[cfg(test)]
+            HULL_SHOCK_DISPATCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            false
+        });
     // Complete servo integrator state: one atomic owner-predicted snapshot, exact like the
     // transmission. Restoring current/previous/velocity at the producing tick makes replay derive
     // the same turret/gun transform before collider and recoil readers run.

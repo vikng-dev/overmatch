@@ -403,6 +403,8 @@ fn advance(app: &mut App, ticks: i32) {
 /// the live hull untouched, the fact staged and held.
 #[test]
 fn a_disagreeing_shock_no_longer_rolls_back_on_the_native_comparator() {
+    let dispatched_before =
+        super::protocol::HULL_SHOCK_DISPATCHES.load(std::sync::atomic::Ordering::Relaxed);
     let delivered = run_arrival(
         Prediction::Disagrees,
         Hull::Deliverable,
@@ -410,6 +412,13 @@ fn a_disagreeing_shock_no_longer_rolls_back_on_the_native_comparator() {
         Phase2::None,
     );
 
+    assert!(
+        super::protocol::HULL_SHOCK_DISPATCHES.load(std::sync::atomic::Ordering::Relaxed)
+            > dispatched_before,
+        "the registered condition was never DISPATCHED — a deleted registration or a skipped \
+         unchanged-entity scan would pass every other assertion here while proving nothing \
+         about the inert closure",
+    );
     assert!(
         delivered.staged_after_first_frame,
         "the fact must STAGE — an unobserved mismatch would make this control vacuous: the run \

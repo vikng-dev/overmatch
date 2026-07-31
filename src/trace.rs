@@ -861,6 +861,24 @@ fn record_fact_events(
     }
 }
 
+/// Arm the fact-row fast path for a unit test that asserts on emitted rows. Process-global and
+/// never disarmed — harmless: test apps mount no `TraceWriter`, so events just accumulate to the
+/// cap and are dropped, and the closures' cost is paid only while some test is armed.
+#[cfg(test)]
+pub(crate) fn arm_fact_rows_for_test() {
+    TRACE_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Take everything in the fact slot. Parallel tests may interleave rows here; assert with
+/// `any()`, never with exact counts.
+#[cfg(test)]
+pub(crate) fn drain_fact_events_for_test() -> Vec<Value> {
+    FACT_EVENTS
+        .lock()
+        .map(|mut events| std::mem::take(&mut *events))
+        .unwrap_or_default()
+}
+
 /// Record that `component`'s rollback condition tripped this check, by `magnitude`. Called from
 /// [`note_if_tripped`] when a condition returns true. No-op
 /// when tracing is off (the atomic guard) — so the closures pay nothing in an untraced run, and the
