@@ -47,7 +47,10 @@ input ticks (ADR-0022/0029), so under jitter a client's own predicted fire may b
 the predicted round and fires on its own later schedule instead). That is the attestation
 design working, not a delivery defect, so the analyzer CLASSIFIES those own-tank identity
 drifts (`retimed_own_prediction`, `rejected_own_prediction`, `own_echo`) instead of failing
-them; cross-tank fires keep strict tick-exact exactly-once semantics.
+them; cross-tank fires keep strict tick-exact exactly-once semantics. Classification never
+excuses the transport: a re-timed or echoed own round must still show delivery (`fire_rx`),
+and a run whose client capture ends well before the server's is refused outright rather
+than scored against a shrunken client trace.
 
 Ticks are converted to milliseconds with the trace's own `tick_hz` (from the `meta` row),
 so a re-tuned tick rate does not silently rescale the report.
@@ -73,6 +76,12 @@ COVERAGE_TARGET = 0.99
 # DERIVED from `ballistics::TRACER_MAX_CALIBER`: at/above this, the shell owns the smoke ribbon
 # whose post-bounce consumption rows are under analysis.
 MAIN_GUN_MIN_CALIBER = 0.02
+# End-of-trace exclusion window: a server fire within this many ticks of the client trace's
+# last recorded row (on either side) cannot fairly be scored as lost — the capture stopped
+# before the ~8-tick (p50) catch-up delivery could land. 16 ticks is the hold-window scale and
+# comfortably covers the observed fire catch-up distribution. Twice this window is also the
+# maximum client/server trace-end skew the strict verifier accepts before refusing the run.
+TRACE_END_WINDOW_TICKS = 16
 
 
 def load(path: Path) -> tuple[dict, list[dict]]:
@@ -258,28 +267,54 @@ def analyze(cmeta: dict, crows: list[dict], smeta: dict, srows: list[dict]) -> d
 
     # c. own_echo: server-only own-tank keys left unpaired — the server's own re-scheduled
     #    rounds, observed by this client as fire_rx with the spawn correctly suppressed by the
-    #    echo-drop. DELIVERY for these means a fire_rx row; a missing fire_rx is a genuine
-    #    loss and stays strict-fatal — unless the server fired so close to the end of the
-    #    client capture that delivery could not have been recorded (see below).
+    #    echo-drop.
     own_echo = [k for k in server_only_own if k not in retimed_server_keys]
+
+    # DELIVERY for a re-timed or re-scheduled own round still means a fire_rx row: proximity
+    # pairing explains WHY the key drifted off the prediction, it does not excuse the
+    # transport. A missing fire_rx on either is a genuine loss and stays strict-fatal —
+    # unless the server fired so close to the end of the client capture that delivery could
+    # not have been recorded (see the exclusion window below).
+    retimed_missing_rx = [sk for _ck, sk in retimed_pairs if not client[sk].get("fire_rx")]
     own_echo_delivered = [k for k in own_echo if client[k].get("fire_rx")]
     own_echo_missing = [k for k in own_echo if not client[k].get("fire_rx")]
-    # End-of-trace exclusion window: a server fire within this many ticks of the client
-    # trace's last recorded row cannot fairly be scored as lost — the capture stopped before
-    # the ~8-tick (p50) catch-up delivery could land. 16 ticks is the hold-window scale and
-    # comfortably covers the observed fire catch-up distribution.
-    TRACE_END_WINDOW_TICKS = 16
+
+    # The exclusion bound is TWO-SIDED (|Δ| <= window): a signed test would exclude any fire
+    # arbitrarily far past the client trace's end, letting a stalled client capture excuse
+    # every later loss.
     last_client_tick = max((r["t"] for r in crows if "t" in r), default=None)
-    excluded_at_trace_end = [
-        k
-        for k in own_echo_missing
-        if last_client_tick is not None
-        and tick_diff(last_client_tick, k[2]) < TRACE_END_WINDOW_TICKS
-    ]
+    last_server_tick = max((r["t"] for r in srows if "t" in r), default=None)
+
+    def at_trace_end(key: tuple[int, int, int]) -> bool:
+        return (
+            last_client_tick is not None
+            and abs(tick_diff(last_client_tick, key[2])) <= TRACE_END_WINDOW_TICKS
+        )
+
+    excluded_at_trace_end = sorted(
+        k for k in own_echo_missing + retimed_missing_rx if at_trace_end(k)
+    )
     own_echo_lost = [k for k in own_echo_missing if k not in excluded_at_trace_end]
+    retimed_lost = [k for k in retimed_missing_rx if k not in excluded_at_trace_end]
+
+    # Overlap guard: every per-key verdict above presumes the two captures cover the same
+    # span. If the client trace ends more than two exclusion windows before the server trace,
+    # overlap is NOT established and the strict verifier refuses the run outright (fail loud,
+    # never classify against a shrunken client denominator).
+    client_trace_end_gap = (
+        tick_diff(last_server_tick, last_client_tick)
+        if last_server_tick is not None and last_client_tick is not None
+        else 0
+    )
 
     # d. Cross-tank fires: semantics completely unchanged — strict tick-exact exactly-once.
     observed_expected = {k for k in fired - own if k[0] != c_own}
+
+    # Damage/marker accounting joins on the AUTHORITATIVE key: a correctly re-timed or
+    # re-scheduled own round's damage confirm rides the server's fire key, not the client's
+    # predicted one. Resolve own identity to the tick-exact matches plus the retimed and echo
+    # server keys, or a correct marker on a re-timed shot reads as stray.
+    own_identity = own | retimed_server_keys | set(own_echo)
 
     # --- delivery / dedup -----------------------------------------------------------------
     delivered, lost = 0, []
@@ -413,7 +448,7 @@ def analyze(cmeta: dict, crows: list[dict], smeta: dict, srows: list[dict]) -> d
 
     # --- shooter marker delivery: discrete damage facts, never reconstructed from NetCrew --------
     damaging_keys = {key for key, kinds in server.items() if kinds.get("dmg")}
-    authored_damage = damaging_keys & own
+    authored_damage = damaging_keys & own_identity
     fresh_own_damage = {
         key
         for key in authored_damage
@@ -487,8 +522,11 @@ def analyze(cmeta: dict, crows: list[dict], smeta: dict, srows: list[dict]) -> d
         "own_echo_delivered": len(own_echo_delivered),
         "own_echo_lost": len(own_echo_lost),
         "own_echo_lost_keys": own_echo_lost,
+        "retimed_lost": len(retimed_lost),
+        "retimed_lost_keys": retimed_lost,
         "excluded_at_trace_end": len(excluded_at_trace_end),
         "trace_end_window_ticks": TRACE_END_WINDOW_TICKS,
+        "client_trace_end_gap_ticks": client_trace_end_gap,
         "expected": len(observed_expected),
         "delivered": delivered,
         "lost": len(lost),
@@ -528,10 +566,13 @@ def verification_failures(summary: dict) -> list[str]:
     scenario matrix. Receive duplicates are expected visual-copy traffic; only duplicate shell spawns
     and duplicate shooter-marker boundaries violate the exactly-once contracts.
 
-    Fatal: cross-tank lost/no_spawn, multi_spawn, and own echoes with no fire_rx (a genuine
-    delivery loss). NOT fatal, reported only: retimed and rejected own predictions — those are
-    the fail-closed input-attestation design (ADR-0022/0029) working as specified, and keys
-    excluded at the end of the trace, where delivery could not have been captured.
+    Fatal: cross-tank lost/no_spawn, multi_spawn, and any own-tank round — echoed OR
+    proximity-paired as retimed — with no fire_rx (a genuine delivery loss). NOT fatal,
+    reported only: delivered retimed and rejected own predictions — those are the fail-closed
+    input-attestation design (ADR-0022/0029) working as specified — and keys excluded at the
+    end of the trace, where delivery could not have been captured. A client trace that ends
+    more than two exclusion windows before the server's is refused outright: without capture
+    overlap none of the per-key verdicts are trustworthy.
     """
     failures: list[str] = []
 
@@ -539,8 +580,12 @@ def verification_failures(summary: dict) -> list[str]:
         if count:
             failures.append(f"{name}={count}")
 
+    gap = int(summary["client_trace_end_gap_ticks"])
+    if gap > 2 * TRACE_END_WINDOW_TICKS:
+        add("client_trace_ended_early_by_ticks", gap)
     add("lost_shots", summary["lost"])
     add("own_echo_lost", summary["own_echo_lost"])
+    add("retimed_lost", summary["retimed_lost"])
     add("duplicate_shots", summary["multi_spawn"])
     add("no_spawn_shots", summary["no_spawn"])
 
@@ -636,6 +681,10 @@ def report(a: dict, samples: int) -> None:
         deltas = "  ".join(f"+{d}t×{n}" for d, n in sorted(a["retimed_delta_hist"].items()))
         print(f"      re-timing histogram        {deltas}")
     print(
+        f"    retimed but LOST             {a['retimed_lost']}   "
+        "(paired server fire with no fire_rx — a genuine delivery loss, strict-fatal)"
+    )
+    print(
         f"    rejected predictions         {a['rejected_own_prediction']}   "
         "(server declined the unattested tick and never executed the predicted round)"
     )
@@ -652,9 +701,14 @@ def report(a: dict, samples: int) -> None:
     )
     print(
         f"    excluded_at_trace_end        {a['excluded_at_trace_end']}   "
-        f"(server fired within {a['trace_end_window_ticks']} ticks of the client capture's end — "
-        "delivery unobservable)"
+        f"(server fired within {a['trace_end_window_ticks']} ticks of the client capture's end, "
+        "either side — delivery unobservable)"
     )
+    if a["client_trace_end_gap_ticks"] > 2 * a["trace_end_window_ticks"]:
+        print(
+            f"    CLIENT TRACE ENDS EARLY      {a['client_trace_end_gap_ticks']} ticks before the "
+            "server trace — capture overlap not established; strict REFUSES this run"
+        )
 
     print("\n  EXACTLY-ONCE SHELL SPAWN")
     print(f"    shots spawning >1 shell      {a['multi_spawn']}   (must be 0 — a ShotId dedup failure)")
