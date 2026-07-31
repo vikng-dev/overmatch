@@ -52,6 +52,7 @@ mod drive_hud;
 /// Fire control: per-weapon superelevation range tables + the player-dialed range. Sits atop
 /// `ballistics`; the aim commit reads it to lob the aim point so the bore elevates for range.
 mod firecontrol;
+mod frame_cost;
 /// The dedicated-server guard: boots `SimPlugin` headless (no GPU/window/winit) and drives the
 /// tank via `TankCommand` — fails first if sim code grows a hard render dependency.
 #[cfg(test)]
@@ -623,6 +624,9 @@ impl Plugin for ClientPlugin {
             track::view_plugin,
         ));
         app.add_plugins(drive_hud::plugin);
+        // Per-frame wall-clock recorder (idle unless `SPIKE_FRAME_COST` is set) — mounted on this
+        // root so the offline frame-budget sweep needs no server; the net root mounts it too.
+        app.add_plugins(frame_cost::client_plugin);
         // Player graphics settings + the Esc settings page + the render-scale render-app half, all
         // behind one mount. SP's pause surface is `AppState::Paused` (there is no overlay authority
         // here), so the page's visibility is declared from the state — which is the plugin's one
@@ -741,6 +745,14 @@ impl Plugin for GamePlugin {
 /// lightyear plugins, no connection entity, nothing that can attempt a connect.
 ///
 pub fn run_offline() {
+    // Hidden-capture mode, the same contract as the net client's capture path (`net::run_client`'s
+    // composition): `SPIKE_SIM_WINDOWED` without `SPIKE_SIM_VISIBLE` keeps the full presentation
+    // stack but creates the window invisible — `visible: false` is the ONLY macOS lever that stops
+    // a capture run stealing focus (bevy's `set_visible(true)` is `makeKeyAndOrderFront`; see the
+    // window-field comments in `net::client`). Used by `scripts/perf/run-frame-sweep.sh`'s SMOKE
+    // mode; a hidden window's present returns `SurfaceError::Occluded` so the frame loop
+    // FREE-RUNS — plumbing validation only, never a frame-time measurement.
+    let hidden = env_flag("SPIKE_SIM_WINDOWED", false) && !env_flag("SPIKE_SIM_VISIBLE", false);
     let mut app = App::new();
     // Read the player's settings BEFORE the window is described — see `load_at_boot`, which also
     // inserts the values and the boot report into the app.
@@ -767,8 +779,14 @@ pub fn run_offline() {
                     // window — the mapping self-negotiates until the probe lands.
                     present_mode: settings.present_mode(settings::PresentCaps::Unprobed),
                     // Described at creation so a persisted fullscreen boots fullscreen instead of
-                    // flashing a window first.
-                    mode: settings.window_mode.to_window_mode(),
+                    // flashing a window first. A hidden capture run must NOT boot into the
+                    // player's persisted fullscreen — it stays a plain window.
+                    mode: if hidden {
+                        bevy::window::WindowMode::Windowed
+                    } else {
+                        settings.window_mode.to_window_mode()
+                    },
+                    visible: !hidden,
                     ..default()
                 }),
                 ..default()
@@ -776,6 +794,16 @@ pub fn run_offline() {
     );
     // Same policy as the net client: never drop below the 64 Hz tick when unfocused.
     app.insert_resource(bevy::winit::WinitSettings::continuous());
+    if hidden {
+        // The runtime half of the hidden-window guard: without the pin, `settings` re-applying a
+        // persisted fullscreen a frame later would order the window front regardless of
+        // `visible: false` (see `settings::CaptureWindowPinned`).
+        app.insert_resource(settings::CaptureWindowPinned);
+        // Post-launch activation revocation — winit's didFinishLaunching has already made even an
+        // invisible unbundled binary the active app; see the doc on the shared function.
+        #[cfg(target_os = "macos")]
+        app.add_systems(Startup, net::revoke_macos_activation);
+    }
     app.add_plugins(GamePlugin);
     // The offline transmission feel test (phase 2.5): an EXPLICIT override of the spec's
     // declared architecture (which is authoritative and mandatory since REV 14), seeded to
