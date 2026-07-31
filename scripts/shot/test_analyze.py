@@ -194,6 +194,129 @@ class StrictVerificationTests(unittest.TestCase):
         )
 
 
+class OwnFireIdentityTests(unittest.TestCase):
+    """The server fails closed on unattested input ticks (ADR-0022/0029), so a client's own
+    predicted fire may execute 1-3 ticks late (retimed), never execute (rejected), or appear
+    only on the server's own schedule (own echo). These are classified, never strict-fatal —
+    except an own echo whose fire_rx never arrived, which is a genuine delivery loss."""
+
+    def test_retimed_own_prediction_is_classified_not_lost_or_no_spawn(self) -> None:
+        # Client predicts its own round at ft=10; the server re-times it to ft=11. The echo of
+        # the server's fire arrives (fire_rx) and its spawn is rightly echo-dropped.
+        server = [row("fire", 11, 100, 11, cal=0.0079)]
+        client = [
+            row("spawn", 10, 100, 10, src="own"),
+            row("fire_rx", 19, 100, 11, dup=False, cu=8),
+        ]
+
+        result = analyze({"tick_hz": 64}, client, {"tick_hz": 64}, server)
+
+        self.assertEqual(result["retimed_own_prediction"], 1)
+        self.assertEqual(result["retimed_delta_hist"], {1: 1})
+        self.assertEqual(result["rejected_own_prediction"], 0)
+        self.assertEqual(result["own_echo"], 0)
+        self.assertEqual(result["lost"], 0)
+        self.assertEqual(result["no_spawn"], 0)
+        self.assertEqual(verification_failures(result), [])
+
+    def test_rejected_own_prediction_is_classified_not_lost(self) -> None:
+        # Client predicts at ft=10; no server fire lands within 3 ticks — the attestation
+        # fail-closed path declined it. The server fires on its own schedule at ft=30 instead,
+        # which the client observes as a delivered own echo.
+        server = [row("fire", 30, 100, 30, cal=0.0079)]
+        client = [
+            row("spawn", 10, 100, 10, src="own"),
+            row("fire_rx", 38, 100, 30, dup=False, cu=8),
+        ]
+
+        result = analyze({"tick_hz": 64}, client, {"tick_hz": 64}, server)
+
+        self.assertEqual(result["rejected_own_prediction"], 1)
+        self.assertEqual(result["rejected_own_keys"], [(100, 0, 10)])
+        self.assertEqual(result["retimed_own_prediction"], 0)
+        self.assertEqual(result["own_echo"], 1)
+        self.assertEqual(result["own_echo_delivered"], 1)
+        self.assertEqual(result["lost"], 0)
+        self.assertEqual(verification_failures(result), [])
+
+    def test_own_echo_with_fire_rx_is_not_no_spawn_and_strict_passes(self) -> None:
+        # A server-scheduled own round with no matching client prediction: the fire_rx is the
+        # delivery proof and the missing spawn is the echo-drop working, not a defect.
+        server = [
+            row("fire", 10, 100, 10, cal=0.0079),
+            row("fire", 30, 100, 30, cal=0.0079),
+        ]
+        client = [
+            row("spawn", 10, 100, 10, src="own"),
+            row("fire_rx", 38, 100, 30, dup=False, cu=8),
+        ]
+
+        result = analyze({"tick_hz": 64}, client, {"tick_hz": 64}, server)
+
+        self.assertEqual(result["own_shots"], 1)
+        self.assertEqual(result["own_echo"], 1)
+        self.assertEqual(result["own_echo_delivered"], 1)
+        self.assertEqual(result["own_echo_lost"], 0)
+        self.assertEqual(result["no_spawn"], 0)
+        self.assertEqual(verification_failures(result), [])
+
+    def test_own_echo_without_fire_rx_is_a_strict_fatal_loss(self) -> None:
+        # The echo at ft=30 never produced a fire_rx, and the client trace runs 70 ticks past
+        # it — that is a genuine delivery loss, not end-of-run truncation.
+        server = [
+            row("fire", 30, 100, 30, cal=0.0079),
+            row("fire", 100, 100, 100, cal=0.0079),
+        ]
+        client = [
+            row("spawn", 100, 100, 100, src="own"),
+        ]
+
+        result = analyze({"tick_hz": 64}, client, {"tick_hz": 64}, server)
+
+        self.assertEqual(result["own_echo"], 1)
+        self.assertEqual(result["own_echo_lost"], 1)
+        self.assertEqual(result["own_echo_lost_keys"], [(100, 0, 30)])
+        self.assertEqual(result["excluded_at_trace_end"], 0)
+        self.assertEqual(verification_failures(result), ["own_echo_lost=1"])
+
+    def test_own_echo_at_trace_end_is_excluded_not_fatal(self) -> None:
+        # The server fired after the client capture's last recorded row: delivery was
+        # unobservable, so the key is excluded_at_trace_end rather than scored as lost.
+        server = [
+            row("fire", 10, 100, 10, cal=0.0079),
+            row("fire", 20, 100, 20, cal=0.0079),
+        ]
+        client = [
+            row("spawn", 10, 100, 10, src="own"),
+        ]
+
+        result = analyze({"tick_hz": 64}, client, {"tick_hz": 64}, server)
+
+        self.assertEqual(result["own_echo"], 1)
+        self.assertEqual(result["own_echo_lost"], 0)
+        self.assertEqual(result["excluded_at_trace_end"], 1)
+        self.assertEqual(verification_failures(result), [])
+
+    def test_cross_tank_lost_fire_stays_strict_fatal(self) -> None:
+        # Another tank's fire never arriving is unchanged: strict exactly-once, no proximity
+        # re-join, no trace-end exclusion.
+        server = [
+            row("fire", 10, 100, 10, cal=0.0079),
+            row("fire", 10, 200, 10, cal=0.0079),
+        ]
+        client = [
+            row("spawn", 10, 100, 10, src="own"),
+        ]
+
+        result = analyze({"tick_hz": 64}, client, {"tick_hz": 64}, server)
+
+        self.assertEqual(result["expected"], 1)
+        self.assertEqual(result["lost"], 1)
+        self.assertEqual(result["retimed_own_prediction"], 0)
+        self.assertEqual(result["own_echo"], 0)
+        self.assertEqual(verification_failures(result), ["lost_shots=1"])
+
+
 class TransportCopyTests(unittest.TestCase):
     def test_copy_counts_keep_multiple_bounces_separate_and_split_policy(self) -> None:
         server = [
