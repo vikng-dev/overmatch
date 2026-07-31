@@ -1137,7 +1137,7 @@ mod jip_udp {
                 Link::new(None),
                 LocalAddr(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0)),
                 PeerAddr(server_addr),
-                PredictionManager::default(),
+                crate::net::test_harness::prediction_manager(),
                 InputTimelineConfig::new(SyncConfig::default(), InputDelayConfig::no_input_delay()),
                 NetcodeClient::new(
                     Authentication::Manual {

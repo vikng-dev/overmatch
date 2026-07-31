@@ -5,15 +5,15 @@ The ranking is by code-quality value: first the duplicated fact whose drift woul
 check lie, then other duplicated production knowledge, then test-only overlap. Change sizes are
 DERIVED estimates from the current source; they are not promises or line-count targets.
 
-The exclusions supplied for this run remain binding. An entry that crosses one is recorded so a
-future run does not have to rediscover it, but is not currently applicable. No entry proposes a
-wire-surface change, a stored-to-derived rollback change, a new dependency, or a lint-policy change.
+The exclusions supplied for the 2026-07-29 survey were binding for that run. An entry that crossed
+one was recorded so a future run would not have to rediscover it. No entry proposes a wire-surface
+change, a stored-to-derived rollback change, a new dependency, or a lint-policy change.
 
 ## Ranked backlog
 
-Entries 1, 2, 4, 5 and 9 are DONE (commits `9372443`, `1baef70`). Entries 3 and 6 remain
-blocked by the active-net-work exclusions. Entry 7 wants focused tests on its input-closure
-conventions before consolidation. Entry 8 is the one untouched safely-applicable item.
+Entries 1, 2, 4, 5 and 9 are DONE (commits `9372443`, `1baef70`). Entries 3 and 6 are DONE
+(commits `dbf02de`, `b988714`). Entry 7 wants focused tests on its input-closure conventions before
+consolidation. Entry 8 is the one untouched safely-applicable item.
 
 ### 1. DONE IN THIS RUN — make the bake verifier use the sim's canonical pose composition
 
@@ -44,11 +44,11 @@ conventions before consolidation. Entry 8 is the one untouched safely-applicable
   implementation; do not route through `Transform::from_matrix`, which would add a decomposition.
 - Applicability / C2: safely applicable; no owner decision and no new pattern.
 
-### 3. Give the GPU-less `DefaultPlugins` surgery one crate-owned implementation
+### 3. DONE — Give the GPU-less `DefaultPlugins` surgery one crate-owned implementation
 
 - Files and symbols: `src/bitprobe.rs::build_app`, `src/cost.rs::headless_sim`,
-  `src/headless_test.rs::headless_shell`, and `src/net/server.rs::run`; the same block also appears
-  in the currently excluded `src/net/client.rs` and `src/settings/ui.rs`.
+  `src/headless_test.rs::headless_shell`, `src/net/server.rs::run`, `src/net/client.rs::run`, and
+  `src/settings/ui.rs::headless_card_app`.
 - What is wrong: duplicated knowledge. Each root independently disables the render backend, primary
   window, and winit runner with the same `DefaultPlugins` edits. A Bevy upgrade currently requires
   coordinated edits in several composition roots. The KTX2/ASTC workaround is a separate concern
@@ -56,9 +56,9 @@ conventions before consolidation. Entry 8 is the one untouched safely-applicable
 - Estimated change: DERIVED about 60–90 source lines once every occurrence can move together.
 - Behaviour-preserving confidence: high if a crate-owned function performs only the current plugin
   edits and each caller retains its clock, runner, physics, and image-workaround choices.
-- Applicability / C2: not applicable in this run because occurrences are excluded. No C2 owner
-  decision is required. Under C2b, the shared composition-root helper is a new pattern and should be
-  introduced visibly in its own change, with every current occurrence migrated together.
+- Applicability / C2: DONE in commit `dbf02de`; no C2 owner decision. Under C2b, the shared
+  composition-root helper is a new pattern, introduced visibly in its own change with every current
+  occurrence migrated together.
 
 ### 4. DONE — Share collision-proxy construction between the game spawn and the track sandbox
 
@@ -92,20 +92,19 @@ conventions before consolidation. Entry 8 is the one untouched safely-applicable
   a visible C2b pattern, so it should be named in that change's report rather than arriving as a
   side-effect.
 
-### 6. Centralize capped FIFO entity eviction
+### 6. DONE — Centralize capped FIFO entity eviction
 
 - Files and symbols: `src/debug.rs::spawn_impact_marker`,
-  `src/vfx/billboard.rs::spawn_billboard_ring`, `src/vfx/muzzle.rs::spawn_muzzle_light`, and the
-  currently excluded `src/vfx/trail.rs::on_fire_shell`.
+  `src/vfx/billboard.rs::spawn_billboard_ring`, `src/vfx/muzzle.rs::spawn_muzzle_light`, and
+  `src/vfx/trail.rs::attach_trails`.
 - What is wrong: duplicated knowledge. Each site pushes an entity to a `VecDeque`, pops from the
   front while over a cap, and `try_despawn`s each evictee. That is one leak-bound rule repeated
   across debug markers, billboards, muzzle lights, and trails.
 - Estimated change: DERIVED about 20–35 source lines after every caller can migrate.
 - Behaviour-preserving confidence: high if the shared operation remains push-then-evict,
   oldest-first, and continues using `try_despawn`.
-- Applicability / C2: not applicable in this run because `src/vfx/trail.rs` is excluded. No owner
-  decision under C2. This is a reusable C2b pattern and should be introduced as its own explicit
-  change once the active trail work clears.
+- Applicability / C2: DONE in commit `b988714`; no owner decision under C2. This reusable C2b
+  pattern was introduced as its own explicit change after the active trail work cleared.
 
 ### 7. Put closed-loop winding and outward-normal math in one track helper
 
@@ -195,6 +194,6 @@ conventions before consolidation. Entry 8 is the one untouched safely-applicable
 No new C2 proposal arose from this survey. The significant behavior-changing library adoption—the
 settings controls moving from raw cursor math to Bevy widgets—was already surfaced by the prior
 branch commit in `design/bevy-ui-widgets-migration-proposal.md`, so this backlog neither duplicates
-that proposal nor applies it. The headless-root and capped-ring entries are C2b pattern changes, not
-C2 behavior changes; they are deferred because current exclusions prevent a complete, visible
-application.
+that proposal nor applies it. The headless-root and capped-ring entries were C2b pattern changes,
+not C2 behavior changes; after their exclusions lifted, commits `dbf02de` and `b988714` applied them
+completely and visibly.

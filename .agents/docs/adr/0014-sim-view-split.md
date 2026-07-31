@@ -76,6 +76,23 @@ render-side. The split is what made that possible — with sim truth and present
 separate planes, the correction offset had a place to live that provably cannot feed back into
 the simulation. Doctrine context in [[0015-divergence-doctrine]].
 
+## Addendum (2026-07-30): "all visible smoothing" is now "all visible smoothing of MISPREDICTION"
+
+Slice 4 gave the render-space layer a second verdict. A rollback whose correction carries an
+authoritative event the client structurally could not predict — a hull shock, established from what
+the rollback DELIVERED rather than from who claimed it ([[0032-unpredictable-authoritative-facts-adopt-unconditionally]]) —
+is **not** accumulated as an offset at all: the corrected pose already contains the hit, and the view
+takes it on the frame it lands. Smoothing a hit away is smoothing away the thing the player is owed.
+
+This does not weaken the split; it uses it. The decision is made entirely on the view plane, per
+predicted root, inside the same `PreUpdate` rollback transaction that establishes delivery, and the
+sim pose is identical either way. It also corrects a claim this addendum used to imply and
+`net::protocol` used to state outright: a rollback frame was never a *render freeze*. The offset is
+decayed before it is applied. DERIVED from the constants at 64 Hz, 95.305% retention holds through
+the 0.25 m near bracket, while the 3 m/s cap first binds at ~0.553 m and makes MORE of the old pose
+survive as error grows. Exactly 2 m is still capped and smoothed; values above it snap. `Position`,
+`Rotation`, the velocities and the replay never stop.
+
 ## Deferred — phase 2 (governed by the design sketch)
 
 Out of scope here; still owned by `design/sim-view-split-and-tank-bake.md`:

@@ -25,9 +25,12 @@ use bevy::render::render_resource::{
 use bevy::shader::ShaderRef;
 use bevy::transform::TransformSystems;
 
-/// Live-billboard ring cap — a leak bound, exactly the impact puffs' `PUFF_CAP` shape. Steady state
-/// is far below it (an 88 shot spawns ~4 billboards, each sub-second); the cap only bites on
-/// pathological refire (rollback-replayed fire seams, spawn storms), evicting oldest-first.
+/// Live-billboard ring cap — a leak bound over the ONE ring every consumer shares, the impact puffs
+/// included: they hold no cap of their own and are evicted against this one. Only the long-lived
+/// ground scars are insulated in a ring of their own (`GROUND_MARK_CAP`), so a multi-second scar
+/// survives a sub-second billboard storm. Steady state is far below this cap (an 88 shot spawns ~4
+/// billboards, each sub-second); it only bites on pathological refire (rollback-replayed fire seams,
+/// spawn storms), evicting oldest-first.
 pub(super) const BILLBOARD_CAP: usize = 96;
 
 pub(super) fn plugin(app: &mut App) {
@@ -220,12 +223,7 @@ pub(crate) fn spawn_billboard_ring(
         entity.insert(FaceCamera);
     }
     let id = entity.id();
-    ring.push_back(id);
-    while ring.len() > cap {
-        if let Some(old) = ring.pop_front() {
-            commands.entity(old).try_despawn();
-        }
-    }
+    crate::push_capped_entity(commands, ring, id, cap);
     id
 }
 

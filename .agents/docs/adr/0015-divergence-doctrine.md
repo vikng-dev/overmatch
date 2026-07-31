@@ -111,6 +111,13 @@ are the known bug class; use rounded shapes or ray/sphere stations.
 reintroduces legitimate mispredictions forever — you cannot predict the other tank's input — and
 this layer is how *any* correction is presented. It stays, whatever upstream ships.
 
+Since slice 4 (2026-07-30) that slogan carries an exception, and it is the point rather than a
+caveat: a correction established to have delivered an **authoritative event** the client could not
+predict is deliberately not smoothed at all — the view takes it on the frame it lands. Hiding a
+misprediction is hiding our own error; hiding a hit is hiding the event. Same layer, two verdicts;
+see [[0014-sim-view-split]]'s 2026-07-30 addendum and
+[[0032-unpredictable-authoritative-facts-adopt-unconditionally]].
+
 ### Strategy
 
 Ship the scaffold now — upstream timelines are not ours (#734 open since May 2025). File the

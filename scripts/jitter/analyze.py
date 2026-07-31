@@ -43,8 +43,8 @@ import numpy as np
 C_TRANSL = "#2a78d6"   # translational render jerk / divergence |Δp|
 C_VERT = "#1baf7a"     # vertical-only jerk / divergence |Δlv|
 C_ROT = "#4a3aa7"      # rotational jerk / divergence rot diff
-C_CP = "#eb6834"       # correction |cp| (m)
-C_CQ = "#e87ba4"       # correction cq angle
+C_CP = "#eb6834"       # live render-error offset |cp| (m)
+C_CQ = "#e87ba4"       # live render-error offset cq angle
 C_GND = "#008300"      # grounded track-side count
 C_HC = "#e34948"       # hull contacts
 C_THR = "#52514e"      # throttle
@@ -310,7 +310,7 @@ def frame_metrics(frames):
 
 
 def correction_series(chosen):
-    """Per-frame correction magnitude series (all valid frames of chosen entity)."""
+    """Per-frame live render-error magnitude series (all valid frames of chosen entity)."""
     t, cp_mag, cq_ang, active = [], [], [], []
     for f in chosen:
         t.append(f["t"])
@@ -848,7 +848,7 @@ def print_report(in_path, meta, role, is_net, ent, n_other, chosen, chosen_ticks
             print("    count 0")
 
         # correction
-        print("\n  VISUAL CORRECTION (rollback error decaying on the rendered pose)")
+        print("\n  RENDER-ERROR OFFSET (rollback error decaying on the rendered pose)")
         frac = float(np.mean(cs["active"])) if len(cs["active"]) else float("nan")
         cp_active = cs["cp"][cs["active"] == 1]
         cq_active = cs["cq"][cs["active"] == 1]
@@ -1007,11 +1007,11 @@ def build_png(out_path, in_path, role, is_net, fm, cs, chosen_ticks, rollbacks,
         elif key == "cp":
             _rollback_lines(ax, rollbacks)
             ax.plot(cs["t"], cs["cp"], color=C_CP, linewidth=1.2, zorder=3)
-            _style_axis(ax, "|cp|\n(m)", title="correction error — translation |cp| (m)")
+            _style_axis(ax, "|cp|\n(m)", title="render-error offset — translation |cp| (m)")
         elif key == "cq":
             _rollback_lines(ax, rollbacks)
             ax.plot(cs["t"], np.degrees(cs["cq"]), color=C_CQ, linewidth=1.2, zorder=3)
-            _style_axis(ax, "cq\n(deg)", title="correction error — rotation cq (deg)")
+            _style_axis(ax, "cq\n(deg)", title="render-error offset — rotation cq (deg)")
         elif key == "ctx":
             _rollback_lines(ax, rollbacks)
             ax.step(ck_wall, gnd, where="post", color=C_GND, linewidth=1.2,

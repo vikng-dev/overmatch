@@ -918,7 +918,7 @@ fn build_client(port: u16, client_id: u64, seed: u64, role: HarnessClient) -> Ap
             // client's predicted present `P` is what `fire_catch_up_ticks` measures a shot's age
             // against, so without it every arriving `FireEvent` would read as absurdly stale and be
             // rejected. Use the same fixed input delay as the shipping client.
-            PredictionManager::default(),
+            crate::net::test_harness::prediction_manager(),
             InputTimelineConfig::new(SyncConfig::default(), shipping_input_delay()),
             NetcodeClient::new(
                 Authentication::Manual {

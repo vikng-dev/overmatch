@@ -35,33 +35,17 @@ const PORT: u16 = 5888;
 
 pub fn run() {
     let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .set(bevy::render::RenderPlugin {
-                render_creation: bevy::render::settings::WgpuSettings {
-                    backends: None,
-                    ..default()
-                }
-                .into(),
-                ..default()
-            })
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: bevy::window::ExitCondition::DontExit,
-                ..default()
-            })
-            .disable::<bevy::winit::WinitPlugin>(),
-    )
-    // Headless composition needs its own application runner.
-    .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(2)));
+    app.add_plugins(crate::gpu_less_default_plugins(None))
+        // Headless composition needs its own application runner.
+        .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(2)));
     // UPSTREAM WORKAROUND — bevy_image 0.19 panics (not errors) transcoding UASTC KTX2 when NO
     // block-compressed format is supported: it sizes the SOURCE slice from the DESTINATION
-    // format's block geometry, so the Rgba8 fallback reads 4x too far. `backends: None` above
-    // means no wgpu device, so nothing inserts `CompressedImageFormatSupport` and bevy_gltf
-    // resolves `CompressedImageFormats::NONE` in its `finish()` — every UASTC texture in the tank
-    // glb would abort the server on boot. Claiming ASTC 4x4 makes the arithmetic coincide and the
-    // transcode exact; the dedicated server never uploads a texture, so this only decides which
-    // bytes sit in RAM (and ASTC 4x4 is 8 bpp against RGBA8's 32 — it is also the cheaper lie).
+    // format's block geometry, so the Rgba8 fallback reads 4x too far. The GPU-less plugin group
+    // means no wgpu device, so nothing inserts `CompressedImageFormatSupport` and bevy_gltf resolves
+    // `CompressedImageFormats::NONE` in its `finish()` — every UASTC texture in the tank glb would
+    // abort the server on boot. Claiming ASTC 4x4 makes the arithmetic coincide and the transcode
+    // exact; the dedicated server never uploads a texture, so this only decides which bytes sit in
+    // RAM (and ASTC 4x4 is 8 bpp against RGBA8's 32 — it is also the cheaper lie).
     // Must precede `app.run()`: that is when the loaders read the resource.
     // Mechanism + suggested upstream fix: `.agents/docs/upstream/bevy-ktx2-uastc-fallback-length-panic.md`.
     // DELETE THESE LINES when `tests/bevy_ktx2_uastc_fallback.rs` fails — that failure IS the

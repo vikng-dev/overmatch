@@ -31,7 +31,8 @@ pub(crate) enum Overlay {
     /// Above `Death` because it is opened FROM the death screen (pick where to come back, then press
     /// R), below `Menu` so Esc still reaches the menu over it.
     SpawnMap,
-    /// The Esc / alt-tab cursor-release menu (the net stand-in for SP pause; the sim never stops).
+    /// The Esc cursor-release menu (the net stand-in for SP pause; the sim never stops). Esc is the
+    /// only thing that opens it — losing focus releases the cursor without declaring an overlay.
     Menu,
     /// Not connected yet, or the in-game link dropped: "CONNECTING…" / "RECONNECTING…". Highest.
     ConnectStatus,
@@ -251,9 +252,6 @@ pub(crate) fn plugin(app: &mut App) {
         .add_systems(
             Update,
             (
-                // Focus loss is state, not a gated toggle: it declares the menu present unconditionally
-                // and reads nothing, so it belongs with the other owners.
-                focus_declare.in_set(OverlaySet::Declare),
                 // Esc's routing READS the set, so it runs in the toggle stage.
                 esc_toggle.in_set(OverlaySet::Toggle),
                 cursor_owner.in_set(OverlaySet::Cursor),
@@ -327,16 +325,12 @@ fn esc_menu_target(overlays: &Overlays) -> bool {
     !outranked
 }
 
-/// Alt-tab out declares the menu present (there is no online pause — the game keeps running behind the
-/// translucent overlay), preserving today's focus-loss behavior. Regaining focus does NOT auto-close
-/// the menu (matching the old `focus_menu`); the player closes it with Esc, and the cursor owner's
-/// deferred re-grab then takes over. Only the loss edge matters here; the cursor is the cursor owner's
-/// job.
-fn focus_declare(mut focus: MessageReader<WindowFocused>, mut overlays: ResMut<Overlays>) {
-    if let Some(false) = crate::state::collapse_focus(&mut focus) {
-        overlays.declare(Overlay::Menu, true);
-    }
-}
+// NOTE: alt-tabbing out no longer declares the menu. It used to (`focus_declare`), which was honest
+// about the cursor but dishonest about the game: online there is no pause, so the overlay covered a
+// tank that was still being shot at, and regaining focus left it up until Esc. Losing focus already
+// blocks input and releases the cursor through `input_blocked`'s `!window_focused` term, and the
+// regain edge re-grabs via `RefocusGrab` — so the overlay was decoration over a lie. Removing it also
+// makes two clients on one machine playable, which is how this build gets tested.
 
 /// The ONE cursor owner: blocked → release the cursor, unblocked → grab it, with the winit refocus-grab
 /// deferral as an implementation detail. Folds together the four old cursor sites (the menu open/close

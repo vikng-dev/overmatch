@@ -106,8 +106,8 @@ pub(crate) fn grab_now(window: &mut Window, cursor: &mut CursorOptions) {
 
 /// Collapse a frame's `WindowFocused` messages to the net result — whether the window ended the
 /// frame focused (the last event wins) — or `None` if focus didn't change this frame. Shared by the
-/// two focus watchers ([`release_on_focus_lost`] here and `net::client::focus_menu`), which both
-/// need only that final state, not the individual events.
+/// focus watchers ([`release_on_focus_lost`] here and `overlay::cursor_owner`), which both need
+/// only that final state, not the individual events.
 pub(crate) fn collapse_focus(focus: &mut MessageReader<WindowFocused>) -> Option<bool> {
     let mut ended_focused = None;
     for event in focus.read() {

@@ -286,12 +286,7 @@ fn spawn_muzzle_light(
             Transform::from_translation(position),
         ))
         .id();
-    ring.0.push_back(light);
-    while ring.0.len() > LIGHT_CAP {
-        if let Some(old) = ring.0.pop_front() {
-            commands.entity(old).try_despawn();
-        }
-    }
+    crate::push_capped_entity(commands, &mut ring.0, light, LIGHT_CAP);
 }
 
 /// Dress a main-gun shot: flash cluster + muzzle light + lingering smoke, all view entities hung
