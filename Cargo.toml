@@ -132,3 +132,14 @@ opt-level = 0
 strip = true
 lto = "thin"
 codegen-units = 1
+
+# The symbolicated release variant for profilers (`cargo build --profile profiling`, or
+# `--profile profiling` on any run/test invocation). Release's `strip = true` blinds every
+# SAMPLING profiler — Instruments and samply resolve stacks from the binary's symbols, so a
+# stripped build profiles as one anonymous blob — and sim numbers are only honest at release
+# optimization (the dev profile builds THIS crate at opt-level 1). Same codegen as release;
+# only symbols + debug info differ, so the numbers transfer.
+[profile.profiling]
+inherits = "release"
+strip = false
+debug = true
