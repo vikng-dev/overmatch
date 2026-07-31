@@ -229,25 +229,27 @@
 //! pinned lightyear — see [`retirement`] for the three facts that make it so and for why it is kept
 //! anyway.
 //!
-//! One bypass route is structural and worth naming on its own. `HullShock` is still registered
-//! `.with_rollback_condition(..)` in `net::protocol`, and that comparator is a pure function of two
-//! component values — it cannot consult [`ImpactPresentation`]. Its receive-time dispatch requires
-//! `confirmed_tick < current_tick` — necessary but NOT sufficient: state mode `Check`,
-//! `should_check_mismatch_at`, and prediction history not yet pruned past the confirmed tick all
-//! gate the same dispatch (lightyear_prediction 0.28 registry.rs:416-458, manager.rs:225-239). Nor
-//! does real latency imply positive lead: `balanced()` spends ~3 ticks of input delay that absorbs
-//! the whole round trip below that RTT, and the measured lead at the 40/5 jitter condition is
-//! NEGATIVE (−0.76 tk, `.agents/docs/design/timelines-and-shear.md`) — so which path runs is set by
-//! whether latency exceeds what input delay absorbs, not by loopback-vs-WAN. Registering an inert
-//! condition on `HullShock` would remove only the value-mismatch TRIGGER, not a delivery path:
+//! Since REV 25 this module is the SOLE INTENTIONAL present-value `HullShock` rollback policy at
+//! every prediction lead: the registered condition in `net::protocol` is permanently inert. It
+//! used to be a live competitor — a pure function of two component values that could not consult
+//! [`ImpactPresentation`] — and the 5-seed capture
+//! (`.agents/docs/design/hullshock-delivery-capture-2026-07-31.md`) measured its only production
+//! effect: it ordered exactly the four belt-first-round rollbacks per run that landed the shove
+//! 1–3 ticks before its spark, the bypass class this module's ordering rule exists to prevent,
+//! while every mid-belt fact was already adopted here (which path runs is set by whether latency
+//! exceeds what input delay absorbs, not by loopback-vs-WAN — the measured lead at 40/5 is
+//! NEGATIVE, `.agents/docs/design/timelines-and-shear.md`).
+//!
+//! SOLE INTENTIONAL, with two structural residues that are lightyear's and not route selection:
 //! presence mismatches (`(Some, None)` / `(None, Some)`) order rollback without ever calling the
-//! comparator (registry.rs:254-290), and once ANY state rollback is ordered, `prepare_rollback`
-//! restores `HullShock` from confirmed history regardless of what triggered it
-//! (rollback.rs:866-1009). The production edit is one line but the evidence bill is not:
-//! `net::hull_shock_rollback`'s positive control proves the native comparator DOES trigger and
-//! would need rewriting around adoption, so the change wants its own evidence rather than being
-//! bundled here. It would SHRINK the hole, not close it: every other rollback cause still restores
-//! the same state.
+//! registered condition — no production lifecycle reaches that shape (the component rides every
+//! spawn bundle, is never removed, and respawn replaces the entity, so the client always receives
+//! it on the no-mismatch init/seed path), and `net::hull_shock_rollback` pins the carve-out — and
+//! once ANY state rollback is ordered, `prepare_rollback` restores `HullShock` from confirmed
+//! history regardless of trigger. The second residue is why [`Retirement::Delivered`] and
+//! [`OrderingTally::bypassed`] survive: ownership of the TRIGGER moved here, but delivery by an
+//! unrelated confirmed-state rollback remains an observable preemption, classified and presented
+//! sharp exactly like an adoption.
 
 use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, Rotation};
 use bevy::prelude::*;
@@ -643,6 +645,16 @@ fn note_presented_impact(impact: On<Impact>, mut presentation: ResMut<ImpactPres
             tick: Tick(authority.tick),
             victim: authority.victim,
         });
+        // The spark's side of the ordering question, joinable against the fact rows: whether a
+        // belt-first fact staged BEFORE its spark is a comparison of `staged.staged_at` against
+        // this row's payload tick — the authority tick the drawn impact resolved on.
+        crate::trace::note_fact_event(|| {
+            serde_json::json!({
+                "ev": "spark",
+                "at": authority.tick,
+                "victim": authority.victim.map(|victim| victim.0),
+            })
+        });
     }
 }
 
@@ -811,6 +823,24 @@ impl AuthorityAdoption {
                 self.staged_at = Some(now);
                 self.requested = false;
                 self.ordering = Ordering::Unasked;
+                // The per-fact ownership row the A/B instrument accounts every fact from. The
+                // claim span rides along because it is recorded nowhere else machine-readable —
+                // it is what decides whether a nearby spark covers this fact (the seed-5 ricochet
+                // ambiguity). Repeat offers take the `Staged` arm above and emit nothing;
+                // `SlotBusy` re-offers every frame and is deliberately not a row — the losing
+                // fact either stages later (its own row) or is superseded, which the sequence
+                // accounting shows as a jump.
+                crate::trace::note_fact_event(|| {
+                    serde_json::json!({
+                        "ev": "staged",
+                        "seq": fact.id.sequence,
+                        "ent": format!("{}", fact.id.entity),
+                        "at": fact.produced_at.0,
+                        "settled": fact.settled_at.0,
+                        "staged_at": now.0,
+                        "span": fact.visual.map(|claim| [claim.from.0, claim.through.0]),
+                    })
+                });
                 Offer::Staged
             }
         };
@@ -823,6 +853,13 @@ impl AuthorityAdoption {
             presentation.watch(claim);
         }
         offer
+    }
+
+    /// The staged fact's sequence, for fixtures that need to know WHICH fact holds the slot —
+    /// the contention control's evidence that a newer offerable fact answered `SlotBusy`.
+    #[cfg(test)]
+    pub(super) fn staged_sequence(&self) -> Option<u32> {
+        self.staged.map(|fact| fact.id.sequence)
     }
 
     /// Whether a fact is currently mid-transaction.
@@ -884,6 +921,17 @@ fn reset_adoption_state(
     mut slot: ResMut<ForcedRollbackSlot>,
     mut presentation: ResMut<ImpactPresentation>,
 ) {
+    // The per-fact rows promise every `staged` a terminal; a reconnect abandoning a held fact
+    // must say so or the acceptance analyzer reads an intentional timeline reset as a lost fact.
+    if let Some(fact) = adoption.staged {
+        crate::trace::note_fact_event(|| {
+            serde_json::json!({
+                "ev": "dropped",
+                "seq": fact.id.sequence,
+                "why": "reconnect",
+            })
+        });
+    }
     *adoption = default();
     *slot = default();
     // The presented hits and the staged claim's latch are ticks from the old timeline; the tallies
@@ -1454,6 +1502,13 @@ fn request_staged_adoption(
             target.0,
             manager.rollback_policy.max_rollback_ticks,
         );
+        crate::trace::note_fact_event(|| {
+            serde_json::json!({
+                "ev": "dropped",
+                "seq": fact.id.sequence,
+                "age": age,
+            })
+        });
         adoption.close(fact);
         return;
     }
@@ -1485,6 +1540,15 @@ fn request_staged_adoption(
             fact.settled_at.0,
             unready.reason(),
         );
+        // Once per frame the fact stalls — the analyzer dedups, the cap absorbs a pathological
+        // burst. A readiness stall is exactly what the ownership rows exist to make visible.
+        crate::trace::note_fact_event(|| {
+            serde_json::json!({
+                "ev": "waiting",
+                "seq": fact.id.sequence,
+                "why": unready.reason(),
+            })
+        });
         return;
     }
     // LOCAL patience: ticks this client has held the fact, counted from the frame it was staged.
@@ -1499,6 +1563,16 @@ fn request_staged_adoption(
         return;
     }
     adoption.requested = slot.claim(metadata, target, fact.cause);
+    if adoption.requested {
+        crate::trace::note_fact_event(|| {
+            serde_json::json!({
+                "ev": "requested",
+                "seq": fact.id.sequence,
+                "target": target.0,
+                "waited": waited,
+            })
+        });
+    }
 }
 
 /// THE ORDERING RULE, which is BEST EFFORT. Whether this module will request the staged fact yet,
@@ -1541,6 +1615,16 @@ fn clear_to_order(
     }
     adoption.ordering = Ordering::Released;
     presentation.resolve(shown, waited);
+    // The release verdict, latched once per fact: `shown` separates on-impact from on-budget —
+    // the same split the tally counts, but per fact and joinable against `staged`/`spark` rows.
+    crate::trace::note_fact_event(|| {
+        serde_json::json!({
+            "ev": "released",
+            "seq": fact.id.sequence,
+            "shown": shown,
+            "waited": waited,
+        })
+    });
     if !shown {
         // Not a correctness failure — the shove still lands at its authoritative tick. It is the
         // measurement the relaxed ordering requirement asked for: how often the visual never showed
@@ -1654,6 +1738,30 @@ fn confirm_forced_rollback(
         sharp.write(SharpCorrection {
             entity: fact.id.entity,
             restored_from: started,
+        });
+    }
+    // The terminal ownership row: which route spent the fact, and whether the restore carried the
+    // shove. `bypassed` is `Delivered { spark_pending: true }` — a rollback this module did not
+    // order landing before the spark — kept as its own label so the A/B can count the class the
+    // inert comparator exists to close.
+    if let Some(route) = outcome
+        && route != Retirement::Keep
+    {
+        crate::trace::note_fact_event(|| {
+            serde_json::json!({
+                "ev": "retired",
+                "seq": fact.id.sequence,
+                "at": fact.produced_at.0,
+                "route": match route {
+                    Retirement::Adopted => "adopted",
+                    Retirement::Delivered { spark_pending: false } => "delivered",
+                    Retirement::Delivered { spark_pending: true } => "bypassed",
+                    Retirement::Undelivered => "undelivered",
+                    Retirement::Keep => unreachable!("filtered above"),
+                },
+                "started": started.0,
+                "carried": carried,
+            })
         });
     }
     match outcome {
@@ -2727,6 +2835,60 @@ mod tests {
                 started.0,
             );
         }
+    }
+
+    /// A reconnect is a NEW TIMELINE, and a fact held for its spark when it happens is abandoned
+    /// on purpose — but the per-fact rows promise every `staged` a terminal, so the abandonment
+    /// must say so. The acceptance analyzer otherwise reads an intentional reset as a lost fact.
+    #[test]
+    fn a_reconnect_abandons_the_staged_fact_with_a_terminal_row() {
+        crate::trace::arm_fact_rows_for_test();
+        let mut world = World::new();
+        world.init_resource::<ForcedRollbackSlot>();
+        let hull = world.spawn_empty().id();
+        let mut adoption = AuthorityAdoption::default();
+        let mut presentation = ImpactPresentation::default();
+        let fact = AuthoritativeFact {
+            id: FactId {
+                source: FactSource::HullShock,
+                entity: hull,
+                sequence: 7,
+                checkpoint: RepliconTick::new(9),
+            },
+            cause: AdoptionCause::ExternalEvent,
+            produced_at: Tick(40),
+            settled_at: Tick(40),
+            visual: None,
+        };
+        assert_eq!(
+            adoption.offer(fact, Tick(41), &mut presentation),
+            Offer::Staged,
+        );
+        world.insert_resource(adoption);
+        world.insert_resource(presentation);
+        // Discard the staged row (and whatever parallel armed tests pushed) so the assertion
+        // below reads only what the reconnect emits.
+        crate::trace::drain_fact_events_for_test();
+
+        world.add_observer(reset_adoption_state);
+        // `Connected`'s on_add hook demands the link shape a real connection has.
+        world.spawn((
+            lightyear::prelude::client::Client::default(),
+            RemoteId(PeerId::Server),
+            Connected,
+        ));
+        world.flush();
+
+        let rows = crate::trace::drain_fact_events_for_test();
+        assert!(
+            rows.iter()
+                .any(|row| row["ev"] == "dropped" && row["why"] == "reconnect" && row["seq"] == 7),
+            "the abandoned fact must get a terminal `dropped` row naming the reconnect, got {rows:?}",
+        );
+        assert!(
+            !world.resource::<AuthorityAdoption>().is_staged(),
+            "the reset itself must still clear the slot",
+        );
     }
 
     /// THE PRODUCTION INVARIANT, held in place rather than relied on. `net::client` disables input
