@@ -1544,7 +1544,7 @@ pub(crate) mod tests {
     /// The band comes from `shoe_lod_range(1)`, so "sited inside LOD1" keeps meaning that when a
     /// level is added or dropped from the chain. As the chain ships LOD1 is the last level, so its
     /// far edge is infinite and the far assertion is vacuous — written anyway, because re-adding a
-    /// LOD2 row re-arms it automatically, and 632.6 m of probe against a 924.8 m derived LOD2
+    /// LOD2 row re-arms it automatically, and 632.6 m of probe against an 805.0 m derived LOD2
     /// threshold is exactly the kind of thing that stops being true quietly.
     #[test]
     fn the_far_probe_placement_puts_every_probe_in_the_shoe_lod1_band() {

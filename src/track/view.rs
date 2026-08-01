@@ -153,7 +153,7 @@ struct RigSide {
     /// plane would lose the authored overhang.
     link_center_x: f32,
     /// This side's SHADOW CASTER ([`super::shadow_proxy`]): the low-poly ribbon that casts the
-    /// belt's shadow so the 3 058-triangle shoes do not have to. `None` under [`ProxyMode::Off`]
+    /// belt's shadow so the 3 056-triangle shoes do not have to. `None` under [`ProxyMode::Off`]
     /// (the shoes cast, exactly as they shipped) and for the one frame between the rig binding and
     /// [`attach_shadow_proxies`] running.
     proxy: Option<ProxySide>,

@@ -194,7 +194,7 @@ const PROBE_GRID_COLUMNS: usize = 6;
 /// # `OVERMATCH_PROBE_FAR=1`: the same block, on the far side of the shoe LOD
 ///
 /// The near block is the RIGHT default and the wrong half of one question. `track::link_view` swaps
-/// every shoe for a 386-triangle reduction beyond `SHOE_LOD1_DISTANCE_M`, and that costs ONE extra
+/// every shoe for a 477-triangle reduction beyond `SHOE_LOD1_DISTANCE_M`, and that costs ONE extra
 /// entity per shoe — at 194 shoes per tank and 30 tanks, 5 820 more walked by
 /// `check_visibility_ranges` every frame, whether or not any of them is far enough to matter. So the
 /// LOD has two frames to answer for: the FAR one, where the triangle win is real and the walk is

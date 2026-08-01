@@ -4,7 +4,7 @@
 //! Everything upstream of here draws the track as a LINE — the conformed pin line, the reference
 //! loop, the cast routes. A line is the right thing to reason about and the wrong thing to look at:
 //! you cannot see a shoe overhang a board edge, and you cannot see the belt articulate. This module
-//! lays the real shoe — the authored 5 552-triangle mesh, shipped as a MEASURED 3 058-triangle
+//! lays the real shoe — the authored 5 550-triangle mesh, shipped as a MEASURED 3 056-triangle
 //! planar reduction of it (`scripts/tank/diet/README.md`) — on the same stations the physics
 //! already walks, so the model is
 //! judged on actual track. It is the ONE home for that: the game shipped procedural `Cuboid` boxes
@@ -104,11 +104,12 @@
 //! # Distance LOD: extra shoe ENTITIES, not extra pools
 //!
 //! The shoes are the largest geometry pool a tank owns — the Tiger's MEASURED 97 links per side ×
-//! 2 sides = 194 shoes, at 3 058 triangles each, is ~593 k triangles per tank, and a 15v15 frame
+//! 2 sides = 194 shoes, at 3 056 triangles each, is ~593 k triangles per tank, and a 15v15 frame
 //! holds thirty of them. Beyond a few tens of metres none of that detail survives rasterisation, so
 //! every shoe carries a CHAIN of lower-detail siblings ([`SHOE_LOD_CHAIN`]) — machine reductions of
-//! the same shoe by `scripts/tank/diet/decimate_planar.py`, in the same mesh-local frame, on the
-//! same material. At 386 triangles the same belt costs ~75 k per tank.
+//! the same authored shoe, generated beside the tank glb by `.agents/blender/export_tiger.py`'s
+//! `LINK_LOD_TIERS`, in the same mesh-local frame and on the same material. At 477 triangles the
+//! same belt costs ~93 k per tank.
 //!
 //! The switch is bevy's own [`VisibilityRange`] — [`VisibilityRange::abrupt`], deliberately, because
 //! a crossfaded range compiles a second dithering permutation of every shoe pipeline for a
@@ -206,7 +207,7 @@ const LINK_LOD1_GLB: &str = "tiger_1/tiger_1_link.lod1.glb";
 /// fails the build if the wired distance ever stops covering it. So regenerating the reduced
 /// meshes is a TWO-CONSTANT update — this number, and the [`SHOE_LOD1_DISTANCE_M`] rounding that
 /// follows from it — and forgetting the second half fails in CI rather than in a player's optic.
-const WORST_DEV_LOD1_MM: f32 = 17.93;
+const WORST_DEV_LOD1_MM: f32 = 18.64;
 
 /// The main pass's WORST-CASE height in pixels, which is what the sub-pixel arithmetic below is
 /// indexed to.
@@ -250,14 +251,14 @@ fn sub_pixel_distance_m(worst_dev_mm: f32) -> f32 {
 ///
 /// # Where the number comes from
 ///
-/// [`sub_pixel_distance_m`] over [`WORST_DEV_LOD1_MM`]: `0.01793 / 5.556e-5 = 322.7 m`, rounded up
+/// [`sub_pixel_distance_m`] over [`WORST_DEV_LOD1_MM`]: `0.01864 / 5.556e-5 = 335.5 m`, rounded up
 /// to a clean 350 for margin. The base shoe's own 0.99 mm clears a pixel at 17.8 m even in the
 /// optic, which is the evidence that it is safe as the mesh a player walks up to.
 ///
 /// That margin is also why the ABRUPT range needs no hysteresis: a tank loitering exactly on the
 /// boundary flips between two silhouettes that differ by well under a pixel.
 ///
-/// The commander view would tolerate 49 m by the same arithmetic, and a great deal more of a
+/// The commander view would tolerate 51 m by the same arithmetic, and a great deal more of a
 /// battlefield sits inside 350 m than beyond it — but LOD selection is by distance and cannot see
 /// which camera is looking, so a threshold that satisfied the commander would show the gunner
 /// LOD1's faceting at 6.5×. If selection is ever made fov-aware, that is the number to use. And if
@@ -284,10 +285,10 @@ struct ShoeLevel {
 ///
 /// # Why the shipped LOD2 is an asset and not a row
 ///
-/// `tiger_1/tiger_1_link.lod2.glb` (192 triangles, MEASURED 51.38 mm worst deviation) is built,
+/// `tiger_1/tiger_1_link.lod2.glb` (237 triangles, MEASURED 44.72 mm worst deviation) is built,
 /// shipped and rendered-verified, and it is deliberately NOT wired. Its own arithmetic is what
-/// retires it: `sub_pixel_distance_m(51.38) = 924.8 m`, so its band would open at ~950 m — and the
-/// camera's far plane is 1 000 m on a 1 000 m world, which leaves the tier a ~50 m shell that
+/// retires it: `sub_pixel_distance_m(44.72) = 805.0 m`, so its band would open at ~850 m — and the
+/// camera's far plane is 1 000 m on a 1 000 m world, which leaves the tier a ~150 m shell that
 /// almost nothing is ever in. Against that, a wired third level costs a THIRD entity on all 194
 /// shoes of every tank, walked by `check_visibility_ranges` every frame whether or not anything is
 /// far enough to use it — 5 820 more entities in a 30-tank frame, paid in the near case, which is
@@ -893,7 +894,7 @@ fn lod_shoe_meshes(source: &Mesh) -> Result<PerSide<Mesh>, GenerateTangentsError
 /// one the pool holds and the one [`place_links`] poses.
 ///
 /// Persistent entities whose transforms are rewritten each frame — never rebuilt meshes and never
-/// immediate-mode gizmos: at ~97 links × 2 sides × 3 058 triangles a per-frame rebuild would be
+/// immediate-mode gizmos: at ~97 links × 2 sides × 3 056 triangles a per-frame rebuild would be
 /// ~593 k triangles of CPU work every frame, while identical mesh+material instances batch into two
 /// draws. Parked below the world until the first placement writes a real pose (the spawn lands via
 /// `Commands`, so the placer only sees it next frame, and an un-posed link must not flash on screen).
@@ -1213,8 +1214,8 @@ mod tests {
     /// a clean value" is allowed to cost.
     #[test]
     fn the_wired_thresholds_are_the_sub_pixel_derivation() {
-        /// How far above the derived distance a wired threshold may be rounded. 322.7 → 350 spends
-        /// 27.3 m of it; anything much larger is a different decision wearing a rounding's clothes.
+        /// How far above the derived distance a wired threshold may be rounded. 335.5 → 350 spends
+        /// 14.5 m of it; anything much larger is a different decision wearing a rounding's clothes.
         const ROUNDING_SLACK_M: f32 = 50.0;
 
         for (i, level) in SHOE_LOD_CHAIN.iter().enumerate() {
@@ -1242,10 +1243,10 @@ mod tests {
             );
         }
 
-        // The arithmetic itself, pinned against a hand-computed value: `0.01793 m / (0.12 / 2160)`.
+        // The arithmetic itself, pinned against a hand-computed value: `0.01864 m / (0.12 / 2160)`.
         // Without this the loop above would pass a `sub_pixel_distance_m` that had lost its units.
         assert!(
-            (sub_pixel_distance_m(WORST_DEV_LOD1_MM) - 322.74).abs() < 0.1,
+            (sub_pixel_distance_m(WORST_DEV_LOD1_MM) - 335.52).abs() < 0.1,
             "the derivation is `dev_m / (fov_rad / height_px)`, got {}",
             sub_pixel_distance_m(WORST_DEV_LOD1_MM),
         );
@@ -1670,16 +1671,24 @@ mod tests {
     ///
     /// # This test is EXPECTED TO FAIL on the currently shipped LOD1
     ///
-    /// It is not ignored, and it should not be. The shipped 386-triangle `lod1.glb` carries one
-    /// unsolved vertex whose incident sliver measures ~34 mm on its longest edge — about 1.7 px at
-    /// 350 m / 2160 px, i.e. resolvable. It passed the old area gate and it fails this one, which is
-    /// the correct result: the gate got stricter because the old one bounded the wrong quantity.
+    /// It is not ignored, and it should not be. It has now been run against TWO different LOD1
+    /// assets and failed on both, and the regeneration did not clear it — it made it worse:
     ///
-    /// The FIX IS AN ASSET, not a number. The reduced meshes are being regenerated from the blend
-    /// (socket-preserving planar reduction); a regeneration that welds or drops the degenerate
-    /// sliver clears this without a line changing here. Loosening the gate to make the suite green
-    /// would be re-introducing exactly the bug the gate was tightened to catch — if this ever has to
-    /// be parked, park it as `#[ignore = "..."]` naming the asset it waits on, never by widening the
+    /// | LOD1 asset | tris | worst defaulted triangle | px at 350 m / 2160 px |
+    /// |---|---|---|---|
+    /// | glb-route planar 60° + collapse 400 | 386 | 33.87 mm | 1.74 |
+    /// | SHIPPED — `.blend` route, planar 10° + collapse | 477 | 50.13 mm | 2.58 |
+    ///
+    /// So the hypothesis this test was left red against — "the blend-route regeneration will weld
+    /// or drop the degenerate sliver" — is DISPROVEN. A quadric collapse pass produces these
+    /// slivers whichever mesh it is fed, and a bigger triangle budget gives it longer edges to
+    /// leave behind. The fix has to be something that acts on the sliver itself: a degenerate-face
+    /// cleanup in `LINK_LOD_TIERS`' tier pipeline (`.agents/blender/export_tiger.py`), or tangents
+    /// generated per-tier from a mesh whose UVs are not degenerate there.
+    ///
+    /// The FIX IS STILL AN ASSET, not a number. Loosening the gate to make the suite green would be
+    /// re-introducing exactly the bug the gate was tightened to catch — if this ever has to be
+    /// parked, park it as `#[ignore = "..."]` naming the asset it waits on, never by widening the
     /// pixel budget.
     #[test]
     fn no_defaulted_tangent_touches_a_triangle_a_player_can_resolve() {
