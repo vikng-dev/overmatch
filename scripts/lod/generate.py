@@ -47,6 +47,7 @@ import bmesh  # noqa: E402
 import bpy  # noqa: E402
 
 import config as CONFIG  # noqa: E402
+import chain  # noqa: E402
 import measure as M  # noqa: E402
 import render_gate  # noqa: E402
 
@@ -902,16 +903,10 @@ def build_chain(asset, root, run_render_gate, out_dir):
 
 
 def merge_targeted(regenerated, root, only):
-    """Fold a `--asset` run back into the existing manifest, or refuse. Returns the full asset list.
+    """Fold a `--asset` run back into the committed manifest, or refuse. Returns the full list.
 
-    `--asset` regenerates ONE chain, and the manifest is required to cover every configured asset —
-    so writing only the selected one would replace a verifiable manifest with an unverifiable
-    subset, and the first anyone would know is `chain.py --verify` failing on a corpus nobody
-    touched. With one configured asset the question does not arise; with two it silently would.
-
-    So the other assets are carried over from the committed manifest, and if that manifest is
-    missing or does not already cover them, this REFUSES rather than writing a subset: there is
-    nothing to merge into, and a full run is the honest way to create one.
+    The shape logic is `chain.merge_asset_entries` (testable without Blender); this half is only
+    about finding the manifest to merge into and refusing loudly when there is not one.
     """
     if len(CONFIG.ASSETS) == 1:
         return regenerated
@@ -924,21 +919,13 @@ def merge_targeted(regenerated, root, only):
             f"from. Run a full generation first.",
         )
     with open(manifest_path, encoding="utf-8") as handle:
-        existing = {entry["name"]: entry for entry in json.load(handle).get("assets", [])}
-    merged = []
-    for asset in CONFIG.ASSETS:
-        fresh = next((e for e in regenerated if e["name"] == asset["name"]), None)
-        if fresh is not None:
-            merged.append(fresh)
-            continue
-        carried = existing.get(asset["name"])
-        if carried is None:
-            raise GenerationError(
-                "assets",
-                f"--asset {only!r} regenerates one chain, but the existing manifest has no entry "
-                f"for {asset['name']!r} to carry over. Run a full generation.",
-            )
-        merged.append(carried)
+        existing = json.load(handle).get("assets", [])
+    try:
+        merged = chain.merge_asset_entries(
+            regenerated, existing, [asset["name"] for asset in CONFIG.ASSETS]
+        )
+    except ValueError as exc:
+        raise GenerationError("assets", str(exc)) from exc
     log(f"merged  {only} into the existing manifest, carrying "
         f"{len(merged) - 1} other asset chain(s) forward")
     return merged

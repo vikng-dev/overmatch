@@ -319,10 +319,17 @@ EXPECTED_BLENDER_BUILD = "ec6e62d40fa9"
 EXPECTED_GLTF_EXPORTER = "5.1.20"
 BLENDER_OVERRIDE_ENV = "OVERMATCH_LOD_ALLOW_BLENDER"
 
-#: The generator's own sources, hashed into the manifest. `GENERATOR_VERSION` is a promise a human
-#: remembers to keep; this is the thing that actually changed. A manifest whose source digest does
-#: not match the tree was cut by code that is no longer here, whatever the version string says.
-GENERATOR_SOURCES = ("config.py", "measure.py", "generate.py", "render_gate.py", "chain.py")
+#: The sources that PRODUCE a corpus, hashed into the manifest. `GENERATOR_VERSION` is a promise a
+#: human remembers to keep; this is the thing that actually changed. A manifest whose source digest
+#: does not match the tree was cut by code that is no longer here, whatever the version string says.
+#:
+#: `chain.py` IS DELIBERATELY ABSENT. It is the verifier, and hashing the checker into the thing it
+#: checks is circular: it would make every edit to a verification message demand a twelve-minute
+#: regeneration of geometry that could not possibly have changed, which is the kind of friction
+#: that gets a check disabled rather than kept. What chain.py could get wrong is caught directly
+#: instead — it re-derives every switch distance and compares against the recorded one, so a
+#: derivation that drifts from the generator fails verification numerically rather than by hash.
+GENERATOR_SOURCES = ("config.py", "measure.py", "generate.py", "render_gate.py")
 
 
 def generator_digest():

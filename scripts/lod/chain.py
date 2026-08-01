@@ -663,6 +663,33 @@ def verify(manifest, tree):
     return failures, warnings
 
 
+def merge_asset_entries(regenerated, existing, configured_names):
+    """Fold a targeted regeneration back into a full asset list. Returns it, or raises ValueError.
+
+    `--asset` regenerates ONE chain, and a manifest is required to cover every configured asset — so
+    writing only the selected one would replace a verifiable manifest with an unverifiable subset,
+    and the first anyone would know is verification failing on a corpus nobody touched. With one
+    configured asset the question does not arise; with two it silently would.
+
+    Lives here rather than in the generator because it is manifest shape, not geometry, and because
+    here it can be tested without Blender.
+    """
+    by_name = {entry["name"]: entry for entry in existing}
+    fresh = {entry["name"]: entry for entry in regenerated}
+    merged = []
+    for name in configured_names:
+        if name in fresh:
+            merged.append(fresh[name])
+        elif name in by_name:
+            merged.append(by_name[name])
+        else:
+            raise ValueError(
+                f"targeted regeneration has no entry for {name!r} and the existing manifest has "
+                f"none to carry over — run a full generation"
+            )
+    return merged
+
+
 def format_chain(chains):
     lines = []
     for chain in chains:

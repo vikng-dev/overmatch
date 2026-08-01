@@ -532,6 +532,29 @@ class SecondRoundMutantTests(unittest.TestCase):
         self.assertTrue(any("FALLBACK material" in f for f in failures), failures)
 
 
+class TargetedRegenerationTests(unittest.TestCase):
+    """`--asset` must not replace a full manifest with a subset that cannot verify."""
+
+    def test_a_regenerated_asset_replaces_only_itself(self):
+        existing = [{"name": "alpha", "levels": ["old"]}, {"name": "beta", "levels": ["old"]}]
+        merged = chain.merge_asset_entries(
+            [{"name": "beta", "levels": ["new"]}], existing, ["alpha", "beta"]
+        )
+        self.assertEqual([e["name"] for e in merged], ["alpha", "beta"])
+        self.assertEqual(merged[0]["levels"], ["old"])
+        self.assertEqual(merged[1]["levels"], ["new"])
+
+    def test_the_configured_order_is_restored(self):
+        existing = [{"name": "beta"}, {"name": "alpha"}]
+        merged = chain.merge_asset_entries([], existing, ["alpha", "beta"])
+        self.assertEqual([e["name"] for e in merged], ["alpha", "beta"])
+
+    def test_an_asset_with_nothing_to_carry_over_is_refused(self):
+        with self.assertRaises(ValueError) as caught:
+            chain.merge_asset_entries([{"name": "beta"}], [], ["alpha", "beta"])
+        self.assertIn("run a full generation", str(caught.exception).lower())
+
+
 class ShippedManifestTests(unittest.TestCase):
     """The manifest actually committed to this tree, if it is here."""
 
