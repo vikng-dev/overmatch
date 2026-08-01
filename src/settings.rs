@@ -58,7 +58,9 @@ use bevy::light::{CascadeShadowConfig, CascadeShadowConfigBuilder, DirectionalLi
 use bevy::prelude::*;
 use bevy::render::view::Msaa;
 use bevy::ui::UiScale;
-use bevy::window::{MonitorSelection, PresentMode, PrimaryWindow, WindowMode};
+use bevy::window::{
+    Monitor, MonitorSelection, PresentMode, PrimaryWindow, WindowMode, WindowPosition,
+};
 use serde::{Deserialize, Serialize};
 
 /// The end-of-frame frame-rate limiter — armed only by [`VsyncMode::Off`] plus a non-off
@@ -783,6 +785,241 @@ impl WindowModeSetting {
         [WindowModeSetting::Windowed, WindowModeSetting::Fullscreen];
 }
 
+/// Which monitor the window is put on — the row that stops a two-display machine opening the game
+/// wherever the window manager last felt like.
+///
+/// # What it writes, and why that is `Window::position` rather than the window mode
+///
+/// The setting resolves to a [`MonitorSelection`] and is applied as
+/// `Window::position = WindowPosition::Centered(selection)`. Fullscreen is deliberately NOT given a
+/// monitor of its own: [`WindowModeSetting`] stays borderless-on-`Current`, and because the window
+/// has already been CENTRED on the chosen display, "current" is that display. One knob moves the
+/// window; fullscreen follows it. (The cost, stated: changing this row while already fullscreen
+/// moves nothing — a fullscreen window ignores `set_outer_position`. Leave fullscreen, pick the
+/// display, go back.)
+///
+/// # Why it lands at `Startup` and not on the boot `Window`
+///
+/// `Index` cannot be resolved when the window is CREATED. Bevy creates the primary window from
+/// `resumed` (vendored bevy_winit-0.19.0/src/state.rs:180) but only populates `WinitMonitors` from
+/// `about_to_wait` (state.rs:459-464), so `select_monitor`'s `Index(n) => monitors.nth(n)`
+/// (bevy_winit-0.19.0/src/winit_windows.rs:522) sees an EMPTY list and answers `None` — after which
+/// `winit_window_position` warns and declines to place the window at all
+/// (winit_windows.rs:495-497). Describing the boot window with this selection would therefore be a
+/// warning line and nothing else, which is why the two composition roots are untouched and
+/// [`apply_settings`] does the work on the first `Startup` frame instead — by which time
+/// `create_monitors` has run and the [`Monitor`] entities exist. The visible cost is honest and
+/// small: the window opens where the window manager put it and moves once, immediately.
+///
+/// # Why a stored selection is NEVER normalised back to the file
+///
+/// [`normalize_vsync`] exists because a vsync rung a surface lacks is a lie the file should stop
+/// telling. A monitor is the opposite case: displays are HOT-PLUGGED, so "display 2 is not here" is
+/// a statement about this minute, not about the machine. Persisting the fallback would spend the
+/// player's choice the first time they undocked, and they would have to re-pick it every time they
+/// plugged back in. So [`DisplaySelection::resolve`] is a read-side fallback only — it logs, it
+/// never writes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub(crate) enum DisplaySelection {
+    /// **The shipped default** — nothing is written, so the window manager places the window
+    /// exactly as it always has. The one rung that is not a decision, and the reason adding this
+    /// row changes no existing install's behaviour.
+    #[default]
+    Auto,
+    /// The OS's own main display. The only rung that would ALSO resolve at window-creation time
+    /// (`select_monitor` takes `primary_monitor` as a direct argument rather than through the
+    /// not-yet-populated list), and the one a capture harness should reach for when it just wants
+    /// the built-in panel.
+    Primary,
+    /// `MonitorSelection::Index(0)`. **One-based in the label, zero-based on the wire**: every
+    /// desktop OS numbers displays from 1, and `Index` counts from 0.
+    Display1,
+    Display2,
+    Display3,
+}
+
+impl DisplaySelection {
+    /// How many indexed rungs the ladder offers. Three is a deliberate ceiling rather than a
+    /// measured one: the row is a picker, not an enumeration, and a rung past the attached count
+    /// falls back loudly ([`DisplaySelection::resolve`]) instead of doing something silent.
+    const INDEXED: usize = 3;
+
+    /// The monitor this rung names, or `None` for [`DisplaySelection::Auto`] — which is not a
+    /// monitor at all, and is what makes "do not manage the window's position" representable.
+    pub(crate) const fn monitor(self) -> Option<MonitorSelection> {
+        match self {
+            DisplaySelection::Auto => None,
+            DisplaySelection::Primary => Some(MonitorSelection::Primary),
+            DisplaySelection::Display1 => Some(MonitorSelection::Index(0)),
+            DisplaySelection::Display2 => Some(MonitorSelection::Index(1)),
+            DisplaySelection::Display3 => Some(MonitorSelection::Index(2)),
+        }
+    }
+
+    /// The zero-based index into the attached-monitor list this rung asks for, or `None` for the
+    /// two rungs that name no index.
+    const fn index(self) -> Option<usize> {
+        match self {
+            DisplaySelection::Auto | DisplaySelection::Primary => None,
+            DisplaySelection::Display1 => Some(0),
+            DisplaySelection::Display2 => Some(1),
+            DisplaySelection::Display3 => Some(2),
+        }
+    }
+
+    /// The rung actually honoured with `attached` monitors present — itself, or
+    /// [`DisplaySelection::Primary`] when it names a display that is not here.
+    ///
+    /// **`attached == 0` is the identity**, and that is the same tri-state discipline
+    /// [`PresentCaps`] is built around: no [`Monitor`] entities means the monitor list has not been
+    /// synchronised yet (or there is no winit at all — every bare-`App` test), which is "we could
+    /// not learn", not "there are no displays". Falling back on that would let a headless frame
+    /// decide a player's row.
+    pub(crate) fn resolve(self, attached: usize) -> Self {
+        match self.index() {
+            Some(index) if attached > 0 && index >= attached => DisplaySelection::Primary,
+            _ => self,
+        }
+    }
+
+    /// The `Window::position` this rung asks for. `Automatic` for [`DisplaySelection::Auto`], which
+    /// bevy answers with "the window manager handles it" and no move at all
+    /// (`winit_window_position`, vendored bevy_winit-0.19.0/src/winit_windows.rs:458-461).
+    pub(crate) fn window_position(self) -> WindowPosition {
+        self.monitor()
+            .map_or(WindowPosition::Automatic, WindowPosition::Centered)
+    }
+
+    /// ASCII only — it reaches `Text`. One-based, per the variant docs.
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            DisplaySelection::Auto => "AUTO",
+            DisplaySelection::Primary => "PRIMARY",
+            DisplaySelection::Display1 => "DISPLAY 1",
+            DisplaySelection::Display2 => "DISPLAY 2",
+            DisplaySelection::Display3 => "DISPLAY 3",
+        }
+    }
+
+    /// The ladder. `Auto` first because it is the default and the "leave it alone" rung; the rest
+    /// ascend so the right arrow always walks further down the display list.
+    pub(crate) const ORDER: [DisplaySelection; 2 + DisplaySelection::INDEXED] = [
+        DisplaySelection::Auto,
+        DisplaySelection::Primary,
+        DisplaySelection::Display1,
+        DisplaySelection::Display2,
+        DisplaySelection::Display3,
+    ];
+}
+
+/// The screen-space error budget the LOD chain is allowed to spend, in PIXELS: the largest
+/// silhouette deviation a simplified mesh may project to before the next-finer level has to be
+/// used. Lower is crisper and costs more triangles.
+///
+/// **This slice lands the setting and [`LodPixelBudget`] alone — there is no consumer yet.** The
+/// LOD chain that reads it is unmerged; nothing in this tree changes behaviour because of this
+/// value today.
+///
+/// # The contract for whoever wires the consumer
+///
+/// Consumers recompute their `VisibilityRange` thresholds FROM this number when it changes — the
+/// budget is a screen-space quantity, so a threshold derived from it is only valid for the fov,
+/// resolution and render scale it was derived under. Recomputing is a HUMAN-RATE event (a settings
+/// row moved, a window resized, a render-scale rung changed), not a per-frame one: read
+/// [`LodPixelBudget`] behind `resource_changed` (plus whatever view-parameter change detection the
+/// consumer needs) and rebuild the ladder there, never in a per-entity loop.
+///
+/// Stored on disk as the bare `f32` (`#[serde(transparent)]`), so `lod_pixel_budget: 2.0` is what a
+/// player finds in `video.ron`. A hand-edited value outside the ladder is honoured as written and
+/// clamped only at the absurd ends by [`PixelBudget::pixels`] — the same shape [`FrameCap`] has.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(transparent)]
+pub(crate) struct PixelBudget(pub(crate) f32);
+
+impl Default for PixelBudget {
+    fn default() -> Self {
+        Self(1.0)
+    }
+}
+
+impl PixelBudget {
+    /// A budget under a pixel is below what a human eyeball can resolve on the silhouette, and one
+    /// over eight is a visibly popping model — the two ends of the range worth offering.
+    pub(crate) const MIN: f32 = 0.5;
+    pub(crate) const MAX: f32 = 8.0;
+    /// The ladder step. Half a pixel, so the low end — where the difference is actually visible —
+    /// is finely divided rather than jumping straight from 0.5 to 1.
+    const STEP: f32 = 0.5;
+    /// Number of discrete stops, MIN..=MAX inclusive — `1 + (MAX - MIN) / STEP`, written out
+    /// because a float-to-integer cast is not something to do in a `const` item.
+    /// `the_lod_pixel_budget_ladder_is_sane` pins it against the three constants above.
+    const STOPS: u16 = 16;
+
+    /// The budget in screen pixels. The clamp is the guard against a hand-edited
+    /// `lod_pixel_budget: 0.0` demanding an infinitely fine ladder (or a negative one inverting the
+    /// comparison every consumer will write).
+    ///
+    /// NaN is answered with the DEFAULT rather than clamped, because `f32::clamp` deliberately
+    /// passes NaN through — and a NaN budget is not a small error downstream: every comparison a
+    /// consumer writes against it is false, so an LOD ladder built from one silently selects
+    /// nothing. RON parses the token, so it is reachable from a hand-edited file.
+    pub(crate) fn pixels(self) -> f32 {
+        if self.0.is_nan() {
+            return Self::default().0;
+        }
+        self.0.clamp(Self::MIN, Self::MAX)
+    }
+
+    /// ASCII only — it reaches `Text`. Honest pixels, like every other value on this page.
+    pub(crate) fn label(self) -> String {
+        format!("{:.1} PX", self.pixels())
+    }
+
+    /// The nearest slider stop for the current value. A hand-edited off-ladder value (1.2) resolves
+    /// to its nearest stop the moment the player TOUCHES the control, and not before.
+    fn stop(self) -> u16 {
+        (((self.pixels() - Self::MIN) / Self::STEP).round() as u16).min(Self::STOPS - 1)
+    }
+
+    fn from_stop(stop: u16) -> Self {
+        Self(Self::MIN + f32::from(stop.min(Self::STOPS - 1)) * Self::STEP)
+    }
+
+    /// One keyboard step along the ladder, saturating at both ends like every other row.
+    pub(crate) fn step(self, delta: i32) -> Self {
+        let stop = (i32::from(self.stop()) + delta).clamp(0, i32::from(Self::STOPS) - 1);
+        Self::from_stop(stop as u16)
+    }
+
+    /// Where the slider handle sits, `0.0..=1.0`.
+    pub(crate) fn fraction(self) -> f32 {
+        f32::from(self.stop()) / f32::from(Self::STOPS - 1)
+    }
+
+    /// The value a drag to `fraction` lands on, snapped to the ladder.
+    pub(crate) fn from_fraction(fraction: f32) -> Self {
+        let stops = f32::from(Self::STOPS - 1);
+        Self::from_stop((fraction.clamp(0.0, 1.0) * stops).round() as u16)
+    }
+}
+
+/// The live screen-space error budget, in pixels — [`PixelBudget`]'s applied half, written by
+/// [`apply_settings`] exactly as `render_scale::RenderScale` is.
+///
+/// Separate from the settings field for the same reason that one is: the FILE is the player's
+/// intent and this is the value the world is configured with, so a consumer depends on one small
+/// resource instead of on the whole settings model. See [`PixelBudget`] for the recompute contract
+/// — this resource changing is the human-rate event a consumer rebuilds its `VisibilityRange`
+/// thresholds on.
+#[derive(Resource, Clone, Copy, PartialEq, Debug)]
+pub(crate) struct LodPixelBudget(pub(crate) f32);
+
+impl Default for LodPixelBudget {
+    fn default() -> Self {
+        Self(PixelBudget::default().pixels())
+    }
+}
+
 /// The frame-rate cap: `0` = off, anything else a target FPS honoured by `limiter`. Only ACTIVE
 /// while the EFFECTIVE rung is [`VsyncMode::Off`] (see [`Settings::effective_vsync`]) — with any
 /// present-mode wait in play the display is already the cap,
@@ -998,6 +1235,14 @@ pub(crate) struct Settings {
     /// fight rule for OS-side toggles.
     #[serde(skip_serializing_if = "is_default")]
     pub(crate) window_mode: WindowModeSetting,
+    /// Which monitor the window is centred on — see [`DisplaySelection`], including why the boot
+    /// window is NOT described with it and why an absent display is never written back.
+    #[serde(skip_serializing_if = "is_default")]
+    pub(crate) display: DisplaySelection,
+    /// The LOD screen-space error budget in pixels — see [`PixelBudget`]. Applied by writing
+    /// [`LodPixelBudget`]; nothing reads that resource yet.
+    #[serde(skip_serializing_if = "is_default")]
+    pub(crate) lod_pixel_budget: PixelBudget,
     /// The frame-rate cap, active only under [`VsyncMode::Off`] — see [`FrameCap`].
     #[serde(skip_serializing_if = "is_default")]
     pub(crate) frame_cap: FrameCap,
@@ -1018,6 +1263,8 @@ impl Default for Settings {
             legacy_vsync: None,
             render_scale: RenderScaleLevel::default(),
             window_mode: WindowModeSetting::default(),
+            display: DisplaySelection::default(),
+            lod_pixel_budget: PixelBudget::default(),
             frame_cap: FrameCap::default(),
             ui_scale: UiScalePercent::default(),
         }
@@ -1214,6 +1461,11 @@ pub(crate) fn plugin(entry: PageEntry) -> impl Plugin {
     move |app: &mut App| {
         app.add_plugins((crate::render_scale::plugin, probe::plugin, ui::plugin))
             .init_resource::<Settings>()
+            // The applied half of the LOD budget row. Initialised here rather than by each root for
+            // the same reason `render_scale::plugin` is mounted here: `apply_settings` is its one
+            // writer, so a root that had the page without the resource would panic on the first
+            // reconcile instead of merely missing a row.
+            .init_resource::<LodPixelBudget>()
             .add_message::<SaveSettings>()
             // `Startup` applies the loaded file to a world that has just spawned its camera and sun;
             // after that the reconcilers are change-driven, so they cost a resource-tick comparison
@@ -1340,6 +1592,15 @@ fn apply_settings(
     // Present exactly on a hidden capture client (`SPIKE_SIM_WINDOWED` without
     // `SPIKE_SIM_VISIBLE`) — the window sub-block below must not run for it.
     capture_pinned: Option<Res<CaptureWindowPinned>>,
+    // The applied half of the LOD budget row. Nothing reads it yet — see `PixelBudget`.
+    mut lod_budget: ResMut<LodPixelBudget>,
+    // The attached displays, as `bevy_winit::create_monitors` synchronised them. COUNTED only:
+    // `MonitorSelection::Index` indexes bevy's own `WinitMonitors` vec, so this system never needs
+    // the entities in order — only how many rungs of the ladder are real. Empty means "not
+    // synchronised yet", which `DisplaySelection::resolve` treats as unknown, not as zero.
+    monitors: Query<(), With<Monitor>>,
+    // The display row is EDGE-triggered — see the write below.
+    mut last_display: Local<Option<DisplaySelection>>,
 ) {
     let msaa = settings.msaa.to_msaa();
     for mut camera_msaa in &mut cameras {
@@ -1414,6 +1675,32 @@ fn apply_settings(
         if window.mode != mode {
             window.mode = mode;
         }
+
+        // The display row, EDGE-triggered on the SETTING rather than reconciled against
+        // `Window::position` every pass. It has to be, because that field is not ours alone: winit
+        // rewrites it to `WindowPosition::At(..)` on every `WindowEvent::Moved` (vendored
+        // bevy_winit-0.19.0/src/state.rs:381-383), so a player who drags the window has left it
+        // permanently unequal to the `Centered(..)` this row asks for. A level-triggered write
+        // would then snap the window back to the middle of the display every time ANY other row
+        // moved — MSAA, UI scale, a probe arrival. An edge is only ever produced by the row itself,
+        // and the FIRST observation counts as one on purpose: that is the launch application (see
+        // `DisplaySelection` for why the boot `Window` cannot carry this).
+        if last_display.replace(settings.display) != Some(settings.display) {
+            let attached = monitors.iter().count();
+            let resolved = settings.display.resolve(attached);
+            if resolved != settings.display {
+                warn!(
+                    "settings: {} is not attached ({attached} display(s) present) -> {} (not \
+                     saved — displays come back)",
+                    settings.display.label(),
+                    resolved.label(),
+                );
+            }
+            let position = resolved.window_position();
+            if window.position != position {
+                window.position = position;
+            }
+        }
     }
 
     // Guarded by hand — bevy's `UiScale` derives no `PartialEq`.
@@ -1428,6 +1715,11 @@ fn apply_settings(
     render_scale.set_if_neq(crate::render_scale::RenderScale(
         settings.render_scale.fraction(),
     ));
+
+    // Same discipline, and here it is the whole interface: a consumer rebuilds its
+    // `VisibilityRange` thresholds on this resource CHANGING, so marking it changed on a frame the
+    // player did not move the row would be a per-frame ladder rebuild. See `PixelBudget`.
+    lod_budget.set_if_neq(LodPixelBudget(settings.lod_pixel_budget.pixels()));
 }
 
 /// Bring a stored vsync rung this surface cannot present down to the one it resolves to — the
@@ -1692,6 +1984,7 @@ mod tests {
             .init_resource::<RenderScale>()
             .init_resource::<PresentCaps>()
             .init_resource::<UiScale>()
+            .init_resource::<LodPixelBudget>()
             .add_systems(Update, apply_settings);
         app.update();
         assert_eq!(
@@ -1881,6 +2174,7 @@ mod tests {
             .init_resource::<crate::render_scale::RenderScale>()
             .init_resource::<PresentCaps>()
             .init_resource::<UiScale>()
+            .init_resource::<LodPixelBudget>()
             .add_systems(Update, apply_settings);
         let sun = app
             .world_mut()
@@ -2395,6 +2689,214 @@ mod tests {
         );
     }
 
+    /// The display ladder's mapping onto bevy's own [`MonitorSelection`], pinned against the
+    /// vendored enum: `AUTO` names no monitor at all (and is therefore the only rung that leaves
+    /// `Window::position` on `Automatic`), the indexed rungs are ZERO-based on the wire while
+    /// their labels are one-based, and every representable rung is on `ORDER` — the same
+    /// `step_in`-dead-end rule [`ShadowDistance::ORDER`] carries.
+    #[test]
+    fn the_display_ladder_maps_onto_bevys_monitor_selection() {
+        assert_eq!(DisplaySelection::default(), DisplaySelection::Auto);
+        assert_eq!(DisplaySelection::Auto.monitor(), None);
+        assert_eq!(
+            DisplaySelection::Auto.window_position(),
+            WindowPosition::Automatic,
+            "the default rung must leave placement to the window manager — adding this row must \
+             not move any existing install's window",
+        );
+        assert_eq!(
+            DisplaySelection::Primary.monitor(),
+            Some(MonitorSelection::Primary),
+        );
+        for (rung, index) in [
+            (DisplaySelection::Display1, 0),
+            (DisplaySelection::Display2, 1),
+            (DisplaySelection::Display3, 2),
+        ] {
+            assert_eq!(
+                rung.monitor(),
+                Some(MonitorSelection::Index(index)),
+                "{rung:?}: the labels are one-based and `MonitorSelection::Index` is not",
+            );
+            assert_eq!(
+                rung.window_position(),
+                WindowPosition::Centered(MonitorSelection::Index(index)),
+            );
+        }
+        assert_eq!(
+            DisplaySelection::ORDER,
+            [
+                DisplaySelection::Auto,
+                DisplaySelection::Primary,
+                DisplaySelection::Display1,
+                DisplaySelection::Display2,
+                DisplaySelection::Display3,
+            ],
+            "every representable rung must be on the ladder, or `ui::step_in` resolves a stored \
+             off-ladder value to index 0",
+        );
+        assert_eq!(DisplaySelection::ORDER.len(), 2 + DisplaySelection::INDEXED);
+    }
+
+    /// **A stored display that is not plugged in.** The fallback is read-side and PRIMARY, and the
+    /// unknown state — no `Monitor` entities synchronised — moves nothing, exactly as
+    /// [`PresentCaps`]'s two unknown states move nothing. That second half is the load-bearing one:
+    /// every bare-`App` test and every frame before `create_monitors` runs reports zero monitors,
+    /// and a fallback there would let a headless frame overwrite a player's row.
+    #[test]
+    fn an_absent_display_falls_back_to_primary_and_an_unknown_count_never_does() {
+        // A laptop with the external unplugged: one display attached.
+        assert_eq!(
+            DisplaySelection::Display2.resolve(1),
+            DisplaySelection::Primary,
+        );
+        assert_eq!(
+            DisplaySelection::Display3.resolve(2),
+            DisplaySelection::Primary,
+        );
+        // Plugged back in: the stored rung is honoured again, which is the whole reason the
+        // fallback is never persisted.
+        assert_eq!(
+            DisplaySelection::Display2.resolve(2),
+            DisplaySelection::Display2,
+        );
+        for rung in DisplaySelection::ORDER {
+            assert_eq!(
+                rung.resolve(0),
+                rung,
+                "{rung:?}: an unsynchronised monitor list is not evidence of an absent display",
+            );
+            assert_eq!(
+                rung.resolve(DisplaySelection::INDEXED),
+                rung,
+                "{rung:?}: with every indexed rung attached, nothing falls back",
+            );
+            // Whatever it resolves to is always something this machine can actually honour.
+            let resolved = rung.resolve(1);
+            assert!(
+                resolved.index().is_none_or(|index| index < 1),
+                "{rung:?} resolved to {resolved:?}, which still names a display that is not here",
+            );
+        }
+        // The two rungs that name no index are never touched by any count.
+        for attached in 0..4 {
+            assert_eq!(
+                DisplaySelection::Auto.resolve(attached),
+                DisplaySelection::Auto
+            );
+            assert_eq!(
+                DisplaySelection::Primary.resolve(attached),
+                DisplaySelection::Primary,
+            );
+        }
+    }
+
+    /// The LOD budget row reaches the render world through exactly one door — [`apply_settings`]
+    /// writing [`LodPixelBudget`] — which is the same seam
+    /// `the_render_scale_row_is_applied_through_the_one_resource` pins for render scale. There is no
+    /// CONSUMER yet, so this resource is the entire contract that slice has to keep.
+    #[test]
+    fn the_lod_budget_row_is_applied_through_the_one_resource() {
+        let mut app = App::new();
+        app.init_resource::<Settings>()
+            .init_resource::<DirectionalLightShadowMap>()
+            .init_resource::<crate::render_scale::RenderScale>()
+            .init_resource::<PresentCaps>()
+            .init_resource::<UiScale>()
+            .init_resource::<LodPixelBudget>()
+            .add_systems(Update, apply_settings);
+        app.update();
+        assert_eq!(
+            app.world().resource::<LodPixelBudget>().0,
+            1.0,
+            "a default config must apply the default budget"
+        );
+
+        let mut budget = PixelBudget(PixelBudget::MIN);
+        loop {
+            app.world_mut().resource_mut::<Settings>().lod_pixel_budget = budget;
+            app.update();
+            assert_eq!(
+                app.world().resource::<LodPixelBudget>().0,
+                budget.pixels(),
+                "{budget:?} did not reach the resource",
+            );
+            let next = budget.step(1);
+            if next == budget {
+                break;
+            }
+            budget = next;
+        }
+        assert_eq!(
+            budget.pixels(),
+            PixelBudget::MAX,
+            "the walk ends at the top"
+        );
+
+        // A hand-edited absurd value is clamped on the way OUT, so no consumer ever sees a budget
+        // it has to defend against.
+        app.world_mut().resource_mut::<Settings>().lod_pixel_budget = PixelBudget(-3.0);
+        app.update();
+        assert_eq!(app.world().resource::<LodPixelBudget>().0, PixelBudget::MIN);
+        app.world_mut().resource_mut::<Settings>().lod_pixel_budget = PixelBudget(9999.0);
+        app.update();
+        assert_eq!(app.world().resource::<LodPixelBudget>().0, PixelBudget::MAX);
+    }
+
+    /// The LOD budget ladder: 0.5..=8.0 by 0.5, default 1.0, saturating steps, a slider round-trip
+    /// at every stop, and a hand-edited off-ladder value honoured until touched.
+    #[test]
+    fn the_lod_pixel_budget_ladder_is_sane() {
+        assert_eq!(PixelBudget::default().pixels(), 1.0);
+        assert_eq!(PixelBudget::default().label(), "1.0 PX");
+        assert_eq!(
+            PixelBudget(PixelBudget::MIN).step(-1),
+            PixelBudget(PixelBudget::MIN),
+            "the floor saturates",
+        );
+        assert_eq!(
+            PixelBudget(PixelBudget::MAX).step(1),
+            PixelBudget(PixelBudget::MAX),
+            "the ceiling saturates",
+        );
+        assert_eq!(PixelBudget(1.0).step(1), PixelBudget(1.5));
+        assert_eq!(PixelBudget(1.0).step(-1), PixelBudget(0.5));
+        let mut budget = PixelBudget(PixelBudget::MIN);
+        loop {
+            assert_eq!(
+                PixelBudget::from_fraction(budget.fraction()),
+                budget,
+                "{budget:?} did not survive the slider round-trip",
+            );
+            let next = budget.step(1);
+            if next == budget {
+                break;
+            }
+            budget = next;
+        }
+        assert_eq!(budget, PixelBudget(PixelBudget::MAX));
+        // Hand-edited values: honoured as written inside the range, clamped at the absurd ends,
+        // snapped to the ladder on first touch — the `FrameCap` shape.
+        assert_eq!(PixelBudget(1.2).pixels(), 1.2);
+        assert_eq!(PixelBudget(1.2).step(1), PixelBudget(1.5));
+        assert_eq!(PixelBudget(0.0).pixels(), PixelBudget::MIN);
+        assert_eq!(PixelBudget(-1.0).pixels(), PixelBudget::MIN);
+        assert_eq!(PixelBudget(1000.0).pixels(), PixelBudget::MAX);
+        assert_eq!(
+            PixelBudget(f32::NAN).pixels(),
+            PixelBudget::default().0,
+            "`f32::clamp` passes NaN through — a NaN budget makes every downstream comparison \
+             false, so it must be answered with the default instead",
+        );
+        // The stop count is written out rather than computed, so it is pinned against the three
+        // constants it is derived from.
+        assert_eq!(
+            PixelBudget::MIN + f32::from(PixelBudget::STOPS - 1) * PixelBudget::STEP,
+            PixelBudget::MAX,
+            "STOPS must be 1 + (MAX - MIN) / STEP",
+        );
+    }
+
     /// **What lets `is_default` be ONE generic function.** Every skipped field's `Settings::default`
     /// value must equal its own type's `Default`, or `skip_serializing_if = "is_default"` would
     /// either freeze a default into every player's file or omit a deliberate choice from it.
@@ -2414,6 +2916,8 @@ mod tests {
         assert!(is_default(&settings.vsync));
         assert!(is_default(&settings.render_scale));
         assert!(is_default(&settings.window_mode));
+        assert!(is_default(&settings.display));
+        assert!(is_default(&settings.lod_pixel_budget));
         assert!(is_default(&settings.frame_cap));
         assert!(is_default(&settings.ui_scale));
         assert!(

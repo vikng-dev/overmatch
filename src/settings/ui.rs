@@ -51,12 +51,13 @@
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::text::LineHeight;
-use bevy::ui::{ComputedNode, UiGlobalTransform};
+use bevy::ui::{ComputedNode, Overflow, ScrollPosition, UiGlobalTransform};
 use bevy::window::PrimaryWindow;
 
 use super::{
-    FrameCap, MsaaLevel, PresentCaps, RenderScaleLevel, SaveSettings, Settings, ShadowCascades,
-    ShadowDistance, ShadowResolution, UiScalePercent, VsyncMode, WindowModeSetting,
+    DisplaySelection, FrameCap, MsaaLevel, PixelBudget, PresentCaps, RenderScaleLevel,
+    SaveSettings, Settings, ShadowCascades, ShadowDistance, ShadowResolution, UiScalePercent,
+    VsyncMode, WindowModeSetting,
 };
 use crate::ui_font::{MODAL_BG, TEXT, TEXT_DIM, UiFonts};
 
@@ -84,9 +85,16 @@ pub(super) struct DeclareSettingsPage;
 #[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
 enum Row {
     RenderScale,
+    /// The LOD screen-space error budget, in pixels. Beside render scale because they are the two
+    /// rows that trade picture for frames by drawing LESS, rather than by drawing it differently.
+    /// No consumer yet — see `settings::PixelBudget`.
+    LodPixelBudget,
     /// Windowed / borderless fullscreen. Reflects OS-side toggles too — see
     /// `settings::observe_window_mode`.
     WindowMode,
+    /// Which monitor the window is centred on — see `settings::DisplaySelection`, including why a
+    /// rung naming an unplugged display falls back rather than being written back.
+    Display,
     /// How far shadows reach, `OFF` included — see [`ShadowDistance`] for why this is its own row.
     ShadowDistance,
     /// How crisp they are. Adjacent to the distance row so the pair reads as one subject, but it
@@ -114,9 +122,11 @@ enum RowKind {
 }
 
 impl Row {
-    const ORDER: [Row; 9] = [
+    const ORDER: [Row; 11] = [
         Row::RenderScale,
+        Row::LodPixelBudget,
         Row::WindowMode,
+        Row::Display,
         Row::ShadowDistance,
         Row::ShadowResolution,
         Row::ShadowCascades,
@@ -130,7 +140,9 @@ impl Row {
     const fn label(self) -> &'static str {
         match self {
             Row::RenderScale => "RENDER SCALE",
+            Row::LodPixelBudget => "DETAIL BUDGET",
             Row::WindowMode => "WINDOW MODE",
+            Row::Display => "DISPLAY",
             Row::ShadowDistance => "SHADOW DISTANCE",
             // "QUALITY", not "RESOLUTION": the value beside it is already a texel count, so the
             // label's job is to say what the number buys, not to name its unit twice.
@@ -155,9 +167,22 @@ impl Row {
                 "How much of the window the 3D world is drawn at, before upscaling. \
                  The HUD stays sharp. Below 100%, prefer 2X or OFF anti-aliasing."
             }
+            // Honest about the unit and about which direction is which: the number is an ERROR
+            // budget, so bigger is worse-looking and cheaper — the opposite of every other row on
+            // this page, and exactly the thing a label alone cannot say.
+            Row::LodPixelBudget => {
+                "Largest on-screen error, in pixels, a simplified model may show. \
+                 Lower is crisper and costs more."
+            }
             Row::WindowMode => {
                 "Borderless fullscreen on the current display. \
                  The OS's own fullscreen button is reflected here too."
+            }
+            // States the fallback, because unplugging a monitor is the common case and a row that
+            // silently did something else would read as broken.
+            Row::Display => {
+                "Which monitor the window opens on. \
+                 A display that is not attached falls back to the primary one."
             }
             // Honest about the cut-off, because that is what a player actually sees when they lower
             // it: shadows simply stop at a radius. The OFF caveat is stated at the point of contact
@@ -198,7 +223,9 @@ impl Row {
     /// a scrubbable control, not a disguised ladder).
     const fn kind(self) -> RowKind {
         match self {
-            Row::RenderScale | Row::FrameCap | Row::UiScale => RowKind::Slider,
+            Row::RenderScale | Row::LodPixelBudget | Row::FrameCap | Row::UiScale => {
+                RowKind::Slider
+            }
             _ => RowKind::Stepper,
         }
     }
@@ -240,7 +267,9 @@ impl Row {
     fn value(self, settings: &Settings) -> String {
         match self {
             Row::RenderScale => settings.render_scale.label().to_string(),
+            Row::LodPixelBudget => settings.lod_pixel_budget.label(),
             Row::WindowMode => settings.window_mode.label().to_string(),
+            Row::Display => settings.display.label().to_string(),
             Row::ShadowDistance => settings.shadow_distance.label().to_string(),
             Row::ShadowResolution => settings.shadow_resolution.label().to_string(),
             Row::ShadowCascades => settings.shadow_cascades.label().to_string(),
@@ -266,9 +295,15 @@ impl Row {
                 settings.render_scale =
                     step_in(&RenderScaleLevel::ORDER, settings.render_scale, delta);
             }
+            Row::LodPixelBudget => {
+                settings.lod_pixel_budget = settings.lod_pixel_budget.step(delta);
+            }
             Row::WindowMode => {
                 settings.window_mode =
                     step_in(&WindowModeSetting::ORDER, settings.window_mode, delta);
+            }
+            Row::Display => {
+                settings.display = step_in(&DisplaySelection::ORDER, settings.display, delta);
             }
             Row::ShadowDistance => {
                 settings.shadow_distance =
@@ -303,6 +338,7 @@ impl Row {
                 &RenderScaleLevel::ORDER,
                 settings.render_scale,
             )),
+            Row::LodPixelBudget => Some(settings.lod_pixel_budget.fraction()),
             Row::FrameCap => Some(settings.frame_cap.fraction()),
             Row::UiScale => Some(settings.ui_scale.fraction()),
             _ => None,
@@ -315,6 +351,9 @@ impl Row {
         match self {
             Row::RenderScale => {
                 settings.render_scale = ladder_at_fraction(&RenderScaleLevel::ORDER, fraction);
+            }
+            Row::LodPixelBudget => {
+                settings.lod_pixel_budget = PixelBudget::from_fraction(fraction);
             }
             Row::FrameCap => settings.frame_cap = FrameCap::from_fraction(fraction),
             Row::UiScale => settings.ui_scale = UiScalePercent::from_fraction(fraction),
@@ -399,6 +438,11 @@ impl Selection {
 /// The card node, so visibility is one write.
 #[derive(Component)]
 struct SettingsCard;
+
+/// The clipped, scrollable box the rows live in — everything between the title and the hint slot.
+/// Carries the [`ScrollPosition`] that [`scroll_rows`] drives.
+#[derive(Component)]
+struct RowViewport;
 
 /// The `LABEL` text of a row — carried so a disabled row can dim its label.
 #[derive(Component)]
@@ -554,6 +598,33 @@ const HINT_SLOT_HEIGHT_PX: f32 = HINT_LINE_HEIGHT_PX * 2.0;
 const CARD_WIDTH_PX: f32 = 560.0;
 const CARD_PADDING_PX: f32 = 24.0;
 
+/// The gap between the card's own children AND between the rows inside [`RowViewport`]. One
+/// constant because the rows used to be direct children of the card and inherited this value; when
+/// they moved into the viewport, two `row_gap`s that happened to agree would have been two numbers
+/// free to drift into a visible seam at the top and bottom of the scrolling list.
+const CARD_ROW_GAP_PX: f32 = 6.0;
+
+/// How much of the window height the card may occupy before its row list starts scrolling.
+///
+/// **The page outgrew the screen and this is the measured fix** (2026-08-01). MEASURED headless at
+/// the shipped 11 rows, in logical px: 506 at the 75% UI-scale rung, 666 at 100%, **1000 at 150%**
+/// — against the tests' 720 px `MIN_SUPPORTED_WINDOW_HEIGHT_PX`. The top rung was already over that floor at 9 rows
+/// (~875 px), so this is not a debt the two new rows created, only one they made impossible to keep
+/// ignoring: past the floor the card simply ran off the bottom of the screen, taking the footer
+/// hint and the control legend — the two things that explain the page — with it.
+///
+/// 90% rather than 100% so the scrim reads as a scrim: a card flush against both screen edges looks
+/// like a broken full-screen layout rather than a modal. The 10% also leaves the clipped row at the
+/// bottom visibly clipped, which is the only affordance a scroll view gets here — there is no
+/// scrollbar, deliberately (see [`scroll_rows`]: the keyboard walk carries the selection into view,
+/// so the bar would be decoration nobody needs to aim at).
+const CARD_MAX_HEIGHT_PERCENT: f32 = 90.0;
+
+/// How far one LINE-unit wheel notch scrolls the row list, in CSS px — roughly one row, so a notch
+/// moves the list by a readable unit instead of a hair or a page. Trackpads report
+/// `MouseScrollUnit::Pixel` and are used as-is.
+const WHEEL_LINE_PX: f32 = 40.0;
+
 /// The shared page: spawn, input, refresh. Mounted by `settings::plugin`, which also adds exactly
 /// one of the ENTRY declarers ([`declare_from_overlay_menu`] / [`declare_from_pause_state`]) — they
 /// are the one thing the two windowed roots do differently, which is why they are that plugin's
@@ -572,6 +643,9 @@ pub(super) fn plugin(app: &mut App) {
                 // Input first, then the refresh reads the same frame's result — so a keypress
                 // repaints immediately instead of one frame late.
                 (keyboard_input, mouse_input),
+                // After the input, so the selection this follows is the one the arrow key just
+                // moved rather than last frame's.
+                scroll_rows,
                 refresh_page,
             )
                 .chain()
@@ -638,10 +712,15 @@ fn spawn_page(mut commands: Commands, fonts: Res<UiFonts>, settings: Res<Setting
                 .spawn((
                     Node {
                         width: Val::Px(CARD_WIDTH_PX),
+                        // The card may never be taller than the window it is centred in — see
+                        // [`CARD_MAX_HEIGHT_PERCENT`]. This is what turns "the page is too tall"
+                        // from a card with its footer off the bottom of the screen into a card
+                        // whose row list scrolls.
+                        max_height: Val::Percent(CARD_MAX_HEIGHT_PERCENT),
                         padding: UiRect::all(Val::Px(CARD_PADDING_PX)),
                         border_radius: BorderRadius::all(Val::Px(6.0)),
                         flex_direction: FlexDirection::Column,
-                        row_gap: Val::Px(6.0),
+                        row_gap: Val::Px(CARD_ROW_GAP_PX),
                         ..default()
                     },
                     BackgroundColor(MODAL_BG),
@@ -658,13 +737,40 @@ fn spawn_page(mut commands: Commands, fonts: Res<UiFonts>, settings: Res<Setting
                         TextColor(TEXT),
                         Node {
                             margin: UiRect::bottom(Val::Px(10.0)),
+                            // The title, the hint slot and the legend are FIXED furniture: only the
+                            // row list may give up height when the card is taller than the window
+                            // (see [`RowViewport`]). Without this, flexbox's default `flex_shrink:
+                            // 1` would squeeze the title and the footer first — the two things a
+                            // player needs most when the page does not fit.
+                            flex_shrink: 0.0,
                             ..default()
                         },
                     ));
 
-                    for row in Row::ORDER {
-                        spawn_row(card, &fonts, &settings, row);
-                    }
+                    // The scrolling viewport. Every row lives inside it; nothing else does.
+                    card.spawn((
+                        RowViewport,
+                        ScrollPosition::default(),
+                        Node {
+                            width: Val::Percent(100.0),
+                            flex_direction: FlexDirection::Column,
+                            // The card's own `row_gap` spaces the title/viewport/hint/legend; this
+                            // one spaces the rows, at the value they had when they were direct
+                            // children of the card.
+                            row_gap: Val::Px(CARD_ROW_GAP_PX),
+                            overflow: Overflow::scroll_y(),
+                            // Load-bearing: a flex item's default `min_height: auto` is its CONTENT
+                            // height, so without this the viewport refuses to shrink, the card
+                            // grows past its `max_height` anyway, and nothing ever scrolls.
+                            min_height: Val::Px(0.0),
+                            ..default()
+                        },
+                    ))
+                    .with_children(|viewport| {
+                        for row in Row::ORDER {
+                            spawn_row(viewport, &fonts, &settings, row);
+                        }
+                    });
 
                     // The hint's fixed two-line SLOT, with the hint text inside it. See
                     // [`HINT_SLOT_HEIGHT_PX`] for why the reservation is a node of its own rather
@@ -675,6 +781,7 @@ fn spawn_page(mut commands: Commands, fonts: Res<UiFonts>, settings: Res<Setting
                             width: Val::Percent(100.0),
                             margin: UiRect::top(Val::Px(14.0)),
                             min_height: Val::Px(HINT_SLOT_HEIGHT_PX),
+                            flex_shrink: 0.0,
                             // The hint sits on the FIRST line and leaves the second empty.
                             // Stretching (the default) would instead hand the text node the
                             // slot's whole height, leaving the text's own height nowhere to be
@@ -710,6 +817,7 @@ fn spawn_page(mut commands: Commands, fonts: Res<UiFonts>, settings: Res<Setting
                         TextColor(TEXT_DIM),
                         Node {
                             margin: UiRect::top(Val::Px(6.0)),
+                            flex_shrink: 0.0,
                             ..default()
                         },
                     ));
@@ -1046,6 +1154,101 @@ fn change_row(
     info!("settings: {} -> {}", row.label(), row.value(&next));
 }
 
+/// Keep the row list scrolled somewhere useful: follow the wheel, and always keep the SELECTED row
+/// on screen.
+///
+/// **The selection-follow is the load-bearing half**, not the wheel. This page is walked with the
+/// arrow keys, and a selection that can leave the viewport is worse than no scrolling at all — the
+/// player presses Down, the highlight vanishes, and the value they are about to change is one they
+/// cannot see. So the wheel is a convenience and the follow is the contract, which is also why
+/// there is no scrollbar: nothing here needs to be aimed at with a mouse.
+///
+/// # The geometry is LAST frame's, and that is fine
+///
+/// `ComputedNode`/`UiGlobalTransform` are written in `PostUpdate`, so what this reads in `Update`
+/// is the layout the player is currently looking at — including the scroll already applied to it.
+/// The correction below is therefore a DELTA against a rect that already moved, which converges in
+/// one frame and self-corrects if it does not (a resize, a UI-scale drag, a row appearing). Solving
+/// it exactly would mean re-deriving taffy's layout here, to hide one frame nobody can see.
+///
+/// # Two pixel spaces, one of which is not the usual one
+///
+/// [`ScrollPosition`] is in CSS pixels — `bevy_ui`'s layout multiplies it by the node's scale
+/// factor on the way to physical (`bevy_ui::layout::update_uinode_geometry_recursive`,
+/// `scroll_pos.y * inverse_target_scale_factor.recip()`), and that factor folds `UiScale` in.
+/// `ComputedNode` sizes and `UiGlobalTransform` translations are PHYSICAL. So every rect
+/// measurement below is converted by the viewport's own `inverse_scale_factor` before it touches
+/// the scroll value. This is the same space mismatch [`track_fraction`] documents for the slider,
+/// with the opposite conversion; getting it wrong here is a scroll that overshoots by exactly the
+/// UI scale.
+///
+/// The clamp is ours to apply, not bevy's: layout clamps the value it RENDERS with
+/// (`clamped_scroll_position`) but writes that back only into `ComputedNode`, leaving the component
+/// free to accumulate an unbounded value — after which a wheel-up would spend a hundred notches
+/// doing nothing before the list moved.
+fn scroll_rows(
+    visible: Res<SettingsPageVisible>,
+    mut wheel: MessageReader<bevy::input::mouse::MouseWheel>,
+    selection: Res<Selection>,
+    viewport: Option<
+        Single<(&ComputedNode, &UiGlobalTransform, &mut ScrollPosition), With<RowViewport>>,
+    >,
+    rows: Query<(&RowLine, &ComputedNode, &UiGlobalTransform)>,
+) {
+    let Some(viewport) = viewport else {
+        return;
+    };
+    let (node, transform, mut scroll) = viewport.into_inner();
+    if !visible.0 {
+        // Drain, so a wheel spun over the game with the page shut does not arrive as a jump the
+        // next time it opens.
+        wheel.clear();
+        return;
+    }
+    // Physical -> CSS px, the space `ScrollPosition` is in. See the doc above.
+    let to_css = node.inverse_scale_factor();
+    let mut wanted = scroll.0.y;
+
+    for event in wheel.read() {
+        let lines = match event.unit {
+            bevy::input::mouse::MouseScrollUnit::Line => event.y * WHEEL_LINE_PX,
+            bevy::input::mouse::MouseScrollUnit::Pixel => event.y,
+        };
+        // Wheel-up is positive and means "move the content down", i.e. a SMALLER offset.
+        wanted -= lines;
+    }
+
+    // Then the selection, which wins: it is applied last, so a wheel that scrolled the selected row
+    // off screen is immediately undone rather than fighting the next arrow press.
+    let selected = selection.row();
+    if let Some((_, row_node, row_transform)) = rows.iter().find(|(line, _, _)| line.0 == selected)
+    {
+        let view_half = node.size().y / 2.0;
+        let row_half = row_node.size().y / 2.0;
+        // Both rects are physical and share an origin, so their difference is a physical distance.
+        let above =
+            (transform.translation.y - view_half) - (row_transform.translation.y - row_half);
+        let below =
+            (row_transform.translation.y + row_half) - (transform.translation.y + view_half);
+        if above > 0.0 {
+            wanted -= above * to_css;
+        } else if below > 0.0 {
+            wanted += below * to_css;
+        }
+    }
+
+    // Ours to apply — layout clamps only what it renders. `scrollbar_size` is in the sum because
+    // bevy's own `max_possible_offset` includes it, and a mismatch would leave the last row
+    // unreachable if a scrollbar ever appears.
+    let overflow = (node.content_size().y - node.size().y + node.scrollbar_size.y).max(0.0);
+    let wanted = wanted.clamp(0.0, overflow * to_css);
+    // Guarded: `ScrollPosition` is a `Mut`, and a write is a change-tick bump even when the value
+    // lands where it already was — which is every frame the page is merely open.
+    if scroll.0.y != wanted {
+        scroll.0.y = wanted;
+    }
+}
+
 /// Rebuild every value, the selection highlight, the slider fills, the enabled/disabled colours and
 /// the footer hint. Runs only while the page is up; the visibility write itself is `set_if_neq`, so
 /// a closed page costs one comparison per frame.
@@ -1270,6 +1473,57 @@ mod tests {
             RenderScaleLevel::Percent100,
             "holding right must stop at native, never wrap to the bottom rung"
         );
+    }
+
+    /// The display row walks the whole ladder and saturates at AUTO — which is the property that
+    /// matters, because AUTO is the only rung that hands placement back to the window manager. A
+    /// player who picked a display that then went away must be able to hold LEFT and get out; a
+    /// wrapping ladder would put "display 3" one keypress past it.
+    #[test]
+    fn the_display_row_walks_the_ladder_and_saturates_at_auto() {
+        let mut settings = Settings::default();
+        assert_eq!(Row::Display.value(&settings), "AUTO");
+        for expected in [
+            DisplaySelection::Primary,
+            DisplaySelection::Display1,
+            DisplaySelection::Display2,
+            DisplaySelection::Display3,
+            DisplaySelection::Display3,
+        ] {
+            Row::Display.step(&mut settings, 1, ALL_RUNGS);
+            assert_eq!(settings.display, expected);
+        }
+        for _ in 0..DisplaySelection::ORDER.len() + 2 {
+            Row::Display.step(&mut settings, -1, ALL_RUNGS);
+        }
+        assert_eq!(
+            settings.display,
+            DisplaySelection::Auto,
+            "holding left must land on AUTO, never wrap round to the far end of the ladder",
+        );
+    }
+
+    /// The detail-budget row is a SLIDER whose numbers get bigger as the picture gets worse — the
+    /// one row on this page where the right arrow means LESS quality. Pinned because it is exactly
+    /// the thing a future "make all the ladders ascend in quality" tidy-up would silently invert.
+    #[test]
+    fn the_detail_budget_row_steps_toward_a_coarser_picture() {
+        assert_eq!(Row::LodPixelBudget.kind(), RowKind::Slider);
+        let mut settings = Settings::default();
+        assert_eq!(Row::LodPixelBudget.value(&settings), "1.0 PX");
+        Row::LodPixelBudget.step(&mut settings, 1, ALL_RUNGS);
+        assert!(
+            settings.lod_pixel_budget.pixels() > PixelBudget::default().pixels(),
+            "the right arrow must raise the ERROR budget — see the row's hint",
+        );
+        for _ in 0..64 {
+            Row::LodPixelBudget.step(&mut settings, -1, ALL_RUNGS);
+        }
+        assert_eq!(settings.lod_pixel_budget.pixels(), PixelBudget::MIN);
+        for _ in 0..64 {
+            Row::LodPixelBudget.step(&mut settings, 1, ALL_RUNGS);
+        }
+        assert_eq!(settings.lod_pixel_budget.pixels(), PixelBudget::MAX);
     }
 
     /// The page's FIRST row is render scale: it is the one setting with a large, immediate frame
@@ -1652,6 +1906,14 @@ mod tests {
     /// failure. Generous: the loop exits the moment the card has laid out.
     const LAYOUT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 
+    /// The shortest window the settings page claims to be USABLE in, logical pixels — 720p, the
+    /// floor of what a Windows or Linux player can be running (every Apple-Silicon Mac this project
+    /// ships to defaults to 900+ logical px). It is no longer a height the card has to FIT inside —
+    /// [`CARD_MAX_HEIGHT_PERCENT`] makes that true at any window size — but the size the scroll
+    /// machinery is sized for, and the number [`CARD_MAX_HEIGHT_PERCENT`]'s measurements are quoted
+    /// against.
+    const MIN_SUPPORTED_WINDOW_HEIGHT_PX: f32 = 720.0;
+
     /// A headless app running the REAL page — [`plugin`], not just [`spawn_page`] — with `UiScale`
     /// set to `ui_scale`. The whole plugin, so the mouse test below exercises the wiring the game
     /// ships (observer included) rather than a hand-assembled lookalike.
@@ -1662,11 +1924,17 @@ mod tests {
     /// wraps into nonsense. No winit and no GPU are needed for that — a `Window` COMPONENT carries
     /// its own resolution, which is all `Camera::physical_viewport_size` reads.
     fn headless_card_app(ui_scale: f32) -> App {
+        headless_card_app_in(ui_scale, 1080)
+    }
+
+    /// [`headless_card_app`] in a window of a chosen HEIGHT — the knob the scroll tests need, since
+    /// whether the row list overflows is a fact about the window, not about the card. The width
+    /// stays 1920 for every caller: it only has to be wide enough that the card never flex-shrinks
+    /// at any rung of the ladder (the top rung asks for `CARD_WIDTH_PX * 1.5` = 840 physical px).
+    fn headless_card_app_in(ui_scale: f32, window_height: u32) -> App {
         let mut app = App::new();
         app.add_plugins(crate::gpu_less_default_plugins(Some(Window {
-            // Wide enough that the card never flex-shrinks at any rung of the ladder (the
-            // top rung asks for CARD_WIDTH_PX * 1.5 = 840 physical px).
-            resolution: bevy::window::WindowResolution::new(1920, 1080),
+            resolution: bevy::window::WindowResolution::new(1920, window_height),
             ..default()
         })))
         .add_plugins(crate::ui_font::plugin)
@@ -1788,6 +2056,232 @@ mod tests {
             app.world().resource::<Selection>().row(),
             Row::Msaa,
             "and the hovered row must be the selected one, so the footer hint agrees with the hand",
+        );
+    }
+
+    /// **How tall the whole card actually is**, in the PHYSICAL pixels `ComputedNode` reports —
+    /// i.e. how much window height the page needs to be fully readable at the UI scale the app was
+    /// built with.
+    ///
+    /// Measured off the CARD (the wrapper's single child), not the wrapper: the wrapper is
+    /// `100% x 100%` by construction and would report the window every time.
+    ///
+    /// **Deliberately NOT divided by `inverse_scale_factor`.** That value folds `UiScale` in
+    /// (`bevy_ui::update` builds it as `target_scaling_factor * ui_scale` — the same trap
+    /// [`mouse_input`]'s doc records), so dividing by it converts to CSS pixels and cancels the
+    /// very rescale this measurement exists to see: the card would report the same design height at
+    /// every rung and the ladder loop below would be pure ceremony. `headless_card_app`'s window is
+    /// scale factor 1, so what is returned here IS the logical window height the card occupies.
+    fn card_height(app: &mut App) -> f32 {
+        let world = app.world_mut();
+        let mut wrappers = world.query_filtered::<&Children, With<SettingsCard>>();
+        let card = *wrappers
+            .single(world)
+            .expect("the page spawns exactly one wrapper")
+            .first()
+            .expect("the wrapper holds the card");
+        world
+            .get::<ComputedNode>(card)
+            .expect("the card is a laid-out node")
+            .size()
+            .y
+    }
+
+    /// The row viewport's laid-out geometry: `(height, content height, scroll position)`, the first
+    /// two in PHYSICAL px and the third in the CSS px [`ScrollPosition`] is stored in.
+    fn viewport_state(app: &mut App) -> (f32, f32, f32) {
+        let world = app.world_mut();
+        let mut viewports =
+            world.query_filtered::<(&ComputedNode, &ScrollPosition), With<RowViewport>>();
+        let (node, scroll) = viewports
+            .single(world)
+            .expect("the card carries exactly one row viewport");
+        (node.size().y, node.content_size().y, scroll.0.y)
+    }
+
+    /// Whether the selected row is fully inside the viewport's rect — the contract
+    /// [`scroll_rows`] exists to keep. Both rects are physical, straight off the layout.
+    fn selected_row_is_visible(app: &mut App) -> bool {
+        let selected = app.world().resource::<Selection>().row();
+        let world = app.world_mut();
+        let mut viewports =
+            world.query_filtered::<(&ComputedNode, &UiGlobalTransform), With<RowViewport>>();
+        let (view_node, view_transform) = viewports.single(world).expect("one viewport");
+        let (view_center, view_half) = (view_transform.translation.y, view_node.size().y / 2.0);
+        let mut rows = world.query::<(&RowLine, &ComputedNode, &UiGlobalTransform)>();
+        let (row_center, row_half) = rows
+            .iter(world)
+            .find(|(line, _, _)| line.0 == selected)
+            .map(|(_, node, transform)| (transform.translation.y, node.size().y / 2.0))
+            .expect("the selected row is spawned");
+        // A whole pixel of slack for the `floor()` bevy applies to the rendered scroll offset.
+        row_center - row_half >= view_center - view_half - 1.0
+            && row_center + row_half <= view_center + view_half + 1.0
+    }
+
+    /// **The card never outgrows its window, and the row list is what gives.**
+    ///
+    /// Two claims, and the second is what stops the first being satisfied by a card that has simply
+    /// crushed its own contents:
+    ///
+    /// * the card is at most [`CARD_MAX_HEIGHT_PERCENT`] of the window at every UI-scale rung — the
+    ///   rung matters because `UiScale` multiplies the card and the type together (see
+    ///   [`the_hint_slot_is_two_lines_and_every_hint_fits_it`]), so the tallest rung binds;
+    /// * at the tallest rung the viewport's CONTENT is genuinely taller than the viewport, i.e. the
+    ///   scroll path is live rather than hypothetical. That is the measurement that made this
+    ///   machinery necessary in the first place (CARD_MAX_HEIGHT_PERCENT's doc records the
+    ///   numbers), and it is what keeps the sibling tests below from passing vacuously on a page
+    ///   that happens to fit.
+    #[test]
+    fn the_card_never_outgrows_its_window_and_the_rows_are_what_scroll() {
+        // Asked at the SMALLEST supported window, which is where the claim is worth anything.
+        const WINDOW_PX: f32 = MIN_SUPPORTED_WINDOW_HEIGHT_PX;
+        let mut overflows = Vec::new();
+        for ui in [
+            UiScalePercent(UiScalePercent::MIN),
+            UiScalePercent::default(),
+            UiScalePercent(UiScalePercent::MAX),
+        ] {
+            let mut app = headless_card_app_in(ui.factor(), WINDOW_PX as u32);
+            settle_with_font(&mut app);
+            let height = card_height(&mut app);
+            let ceiling = WINDOW_PX * CARD_MAX_HEIGHT_PERCENT / 100.0;
+            assert!(
+                height <= ceiling + 1.0,
+                "at {} the card lays out {height:.1} px in a {WINDOW_PX:.0} px window, past its \
+                 own {CARD_MAX_HEIGHT_PERCENT}% ceiling ({ceiling:.1} px) — `max_height` is not \
+                 binding, so the footer hint and the legend are off the bottom of the screen",
+                ui.label(),
+            );
+            let (view, content, _) = viewport_state(&mut app);
+            overflows.push(content - view);
+        }
+        assert!(
+            overflows.last().is_some_and(|overflow| *overflow > 1.0),
+            "at the top UI-scale rung the {} rows must actually overflow the viewport \
+             (overflows by rung: {overflows:.1?}) — if they do not, the scroll tests below are \
+             asserting nothing and this whole viewport is dead weight",
+            Row::ORDER.len(),
+        );
+    }
+
+    /// **Walking the selection can never lose it off the edge of the viewport.**
+    ///
+    /// This is the whole reason the page scrolls at all: it is driven with the arrow keys, so a
+    /// selection that can leave the clipped box is strictly worse than no scrolling — the highlight
+    /// vanishes and the player is editing a value they cannot see. The window here is deliberately
+    /// short (400 px, so the card is 360 and only a few rows fit at once) because that is the state
+    /// the contract is about; at 1080 px most of the list is visible and the walk proves little.
+    ///
+    /// Both directions, because the correction is two different branches of [`scroll_rows`] (a row
+    /// above the top scrolls back, a row below the bottom scrolls forward) and a page that only
+    /// followed downwards would look fine until the player pressed Up.
+    #[test]
+    fn walking_the_selection_keeps_every_row_inside_the_viewport() {
+        let mut app = headless_card_app_in(1.0, 400);
+        app.insert_resource(SettingsPageVisible(true));
+        settle_with_font(&mut app);
+
+        let (view, content, _) = viewport_state(&mut app);
+        assert!(
+            content > view + 1.0,
+            "the premise: in a 400 px window the {} rows must overflow the {view:.1} px viewport \
+             (content {content:.1} px), or this test proves nothing",
+            Row::ORDER.len(),
+        );
+
+        let indices = (0..Row::ORDER.len()).chain((0..Row::ORDER.len()).rev());
+        for index in indices {
+            app.world_mut().resource_mut::<Selection>().0 = index;
+            // `scroll_rows` corrects against the PREVIOUS frame's layout, so the fix lands on the
+            // next pass; a couple of pumps is convergence, not patience.
+            for _ in 0..4 {
+                app.update();
+                if selected_row_is_visible(&mut app) {
+                    break;
+                }
+            }
+            assert!(
+                selected_row_is_visible(&mut app),
+                "{:?} (index {index}) never scrolled into the viewport",
+                Row::ORDER[index],
+            );
+        }
+    }
+
+    /// The wheel scrolls the list, stops at both ends, and is INERT while the page is shut.
+    ///
+    /// The clamp is the half worth pinning: `bevy_ui` clamps only the offset it RENDERS with and
+    /// leaves the component free to run away (see [`scroll_rows`]), so an unclamped page would
+    /// answer the first wheel-up after a hard scroll-down by doing nothing at all, for as many
+    /// notches as it took to get there.
+    #[test]
+    fn the_wheel_scrolls_the_rows_and_stops_at_both_ends() {
+        use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
+
+        let mut app = headless_card_app_in(1.0, 400);
+        app.insert_resource(SettingsPageVisible(true));
+        settle_with_font(&mut app);
+        // Park the selection on the first row so its own follow-correction pins the top, and the
+        // wheel is the only thing moving the list.
+        app.world_mut().resource_mut::<Selection>().0 = 0;
+        app.update();
+        let window = {
+            let world = app.world_mut();
+            let mut windows = world.query_filtered::<Entity, With<PrimaryWindow>>();
+            windows.single(world).expect("the harness made one window")
+        };
+        let spin = |app: &mut App, y: f32, times: usize| {
+            for _ in 0..times {
+                app.world_mut().write_message(MouseWheel {
+                    unit: MouseScrollUnit::Line,
+                    x: 0.0,
+                    y,
+                    window,
+                    phase: bevy::input::touch::TouchPhase::Moved,
+                });
+                app.update();
+            }
+        };
+
+        let (_, content, top) = viewport_state(&mut app);
+        assert_eq!(top, 0.0, "the list starts at the top");
+
+        // Wheel DOWN (negative y) moves the content up, i.e. a larger offset. The selection is on
+        // row 0, so it is pushed off the top and dragged back — the scroll must still have moved.
+        spin(&mut app, -1.0, 1);
+        let (view, _, scrolled) = viewport_state(&mut app);
+        assert!(
+            scrolled > 0.0,
+            "one wheel notch must move the list ({scrolled} after a notch of {WHEEL_LINE_PX} px)",
+        );
+
+        // Far past the end: the clamp is the content overflow, not infinity.
+        app.world_mut().resource_mut::<Selection>().0 = Row::ORDER.len() - 1;
+        spin(&mut app, -1.0, 50);
+        let (_, _, bottom) = viewport_state(&mut app);
+        let overflow = content - view;
+        assert!(
+            bottom <= overflow + 1.0,
+            "the offset ran past the {overflow:.1} px of content there is to scroll ({bottom:.1}) \
+             — bevy clamps only what it renders, so an unclamped component silently banks the \
+             surplus",
+        );
+        assert!(bottom > 0.0, "the bottom of the list is not the top");
+
+        // And back, in one wheel travel rather than in however many notches were banked above.
+        app.world_mut().resource_mut::<Selection>().0 = 0;
+        spin(&mut app, 1.0, 50);
+        let (_, _, back) = viewport_state(&mut app);
+        assert_eq!(back, 0.0, "wheel-up must reach the top again");
+
+        // Shut the page and spin: nothing may be banked for the next open.
+        app.insert_resource(SettingsPageVisible(false));
+        spin(&mut app, -1.0, 10);
+        let (_, _, shut) = viewport_state(&mut app);
+        assert_eq!(
+            shut, 0.0,
+            "a wheel spun over the game with the page closed must not scroll the page",
         );
     }
 

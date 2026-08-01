@@ -431,8 +431,8 @@ pub(super) fn reset() -> bool {
 mod tests {
     use super::*;
     use crate::settings::{
-        FrameCap, MsaaLevel, RenderScaleLevel, ShadowCascades, ShadowDistance, ShadowResolution,
-        UiScalePercent, VsyncMode, WindowModeSetting,
+        DisplaySelection, FrameCap, MsaaLevel, PixelBudget, RenderScaleLevel, ShadowCascades,
+        ShadowDistance, ShadowResolution, UiScalePercent, VsyncMode, WindowModeSetting,
     };
 
     /// The env override wins on every platform — the hook a test or a packaged run needs so it
@@ -608,6 +608,72 @@ mod tests {
         assert_eq!(pre_row.shadow_distance, ShadowDistance::M350);
     }
 
+    /// **The two 2026-08-01 rows, end to end through the real parse path.** Both landed on the
+    /// module doc's free path (a `Default`, a `skip_serializing_if`, a row in `ui::Row::ORDER`), and
+    /// this is what "free" means at the level that matters: every rung round-trips, the default
+    /// writes no key, and a file from before either row existed loads at the default.
+    ///
+    /// The bare-key half is not ceremony — it is the SUPPORTED INTERFACE for the frame sweep.
+    /// `scripts/perf/run-frame-sweep.sh` generates a two-key `video.ron` per condition and relies on
+    /// serde treating every omitted field as its default; pinning the display key alongside it is
+    /// what makes "pin the window to a monitor from the file alone" a tested claim rather than a
+    /// hope.
+    #[test]
+    fn the_display_and_detail_keys_round_trip_and_are_absent_by_default() {
+        for display in DisplaySelection::ORDER {
+            let original = Settings {
+                display,
+                ..Settings::default()
+            };
+            let text = ron::ser::to_string_pretty(&original, pretty_config()).unwrap();
+            assert_eq!(parse(&text), Parsed::Ok(original), "{text}");
+            assert_eq!(
+                text.contains("display"),
+                display != DisplaySelection::default(),
+                "only a non-default display may reach the disk: {text}",
+            );
+        }
+        for budget in [PixelBudget::MIN, 1.0, 2.5, PixelBudget::MAX] {
+            let original = Settings {
+                lod_pixel_budget: PixelBudget(budget),
+                ..Settings::default()
+            };
+            let text = ron::ser::to_string_pretty(&original, pretty_config()).unwrap();
+            assert_eq!(parse(&text), Parsed::Ok(original), "{text}");
+            assert_eq!(
+                text.contains("lod_pixel_budget"),
+                PixelBudget(budget) != PixelBudget::default(),
+                "only a non-default budget may reach the disk: {text}",
+            );
+        }
+
+        // The sweep's own file shape: a version stamp plus exactly the keys the condition cares
+        // about, everything else omitted.
+        let Parsed::Ok(swept) = parse("(version: 1, vsync_mode: Off, display: Primary)") else {
+            panic!("the sweep's generated file must parse");
+        };
+        assert_eq!(swept.display, DisplaySelection::Primary);
+        assert_eq!(swept.vsync, VsyncMode::Off);
+        assert_eq!(swept.lod_pixel_budget, PixelBudget::default());
+
+        // The bare keys, as a player's hand-edit would write them — the budget as the transparent
+        // float it is on disk, not as a wrapper.
+        let Parsed::Ok(edited) = parse("(version: 1, display: Display2, lod_pixel_budget: 2.5)")
+        else {
+            panic!("the bare keys must parse");
+        };
+        assert_eq!(edited.display, DisplaySelection::Display2);
+        assert_eq!(edited.lod_pixel_budget, PixelBudget(2.5));
+
+        // A file from before either row existed: the standard absent-key path, at the defaults.
+        let Parsed::Ok(pre_row) = parse("(version: 1, msaa: X2)") else {
+            panic!("a file from before these rows must load");
+        };
+        assert_eq!(pre_row.display, DisplaySelection::default());
+        assert_eq!(pre_row.lod_pixel_budget, PixelBudget::default());
+        assert_eq!(pre_row.lod_pixel_budget.pixels(), 1.0);
+    }
+
     /// **The distance-ladder migration, through a whole file** (2026-07-28). The rungs went
     /// `100/150/300` → `350/700/1000`; the retired tokens are `#[serde(alias)]`es on `M350`, so
     /// every `video.ron` a player already has keeps loading, and keeps loading onto a rung the
@@ -665,6 +731,8 @@ mod tests {
                 legacy_vsync: None,
                 render_scale: RenderScaleLevel::Percent67,
                 window_mode: WindowModeSetting::Fullscreen,
+                display: DisplaySelection::Display2,
+                lod_pixel_budget: PixelBudget(2.5),
                 frame_cap: FrameCap(120),
                 ui_scale: UiScalePercent(125),
             },
@@ -886,6 +954,8 @@ mod tests {
             legacy_vsync: None,
             render_scale: RenderScaleLevel::Percent75,
             window_mode: WindowModeSetting::Fullscreen,
+            display: DisplaySelection::Display1,
+            lod_pixel_budget: PixelBudget(3.0),
             frame_cap: FrameCap(60),
             ui_scale: UiScalePercent(110),
         };
