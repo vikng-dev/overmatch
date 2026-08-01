@@ -18,9 +18,17 @@
 //!    at STARTUP from the in-memory [`HeightGrid`] — the identical object the oracle, the Avian
 //!    collider and spawn placement read. There is no build tool, no baked artefact and therefore
 //!    no way for a stale product to diverge from the decoded grid. (Re-arm a versioned manifest
-//!    the day generation becomes a build step for streaming or a 5 km map.) RTIN only ever
-//!    REMOVES vertices — it never moves one — so every kept vertex is an exact grid sample, and
-//!    `interior_vertices_are_exact_grid_samples` pins that pointwise.
+//!    the day generation becomes a build step for streaming or a 5 km map.)
+//!
+//!    RTIN only ever REMOVES vertices, never moves one, so every kept vertex is an exact grid
+//!    sample — `interior_vertices_are_exact_grid_samples` pins that pointwise. **That is a claim
+//!    about vertices and NOT about the surface**, and treating it as the latter is the mistake this
+//!    module was shipped with once already: RTIN also changes cell CONNECTIVITY, splitting cells
+//!    along the main diagonal where the canonical surface uses the anti-diagonal. Two tessellations
+//!    can agree at every grid node and still be different ground between them. So:
+//!    [`rtin::Rtin::canonicalize_cell_diagonals`] re-splits every fully refined cell onto the
+//!    canonical diagonal, and certification measures the exact CONTINUOUS maximum over the overlay
+//!    of the two triangulations ([`worst_deviation_m`]) rather than sampling nodes.
 //!
 //! 2. **NO SKIRTS. Every level keeps the exact full-density border row on all four edges.**
 //!    Borders are therefore identical across every level of every tile, so any level of tile A
@@ -202,15 +210,17 @@ pub(crate) struct TerrainLodLevel {
     /// The threshold fed to the RTIN extraction that produced this mesh.
     ///
     /// NOT the guarantee, and deliberately recorded separately from [`Self::rung`]: MEASURED on the
-    /// shipped map, the pyramid under-reports — an extraction at 5 cm produced a mesh deviating
-    /// 7.7 cm. That is not a port bug, it is what the metric means. The pyramid records, at each
-    /// node, the error of dropping that node from ITS OWN level's interpolation; a node three
-    /// levels down is measured against an edge that the coarse triangle no longer contains, so the
-    /// per-level errors COMPOUND rather than dominate. Martini/Cesium ship this metric as a
-    /// heuristic and so do we — but we never declare it. The declared rung comes from
-    /// [`Self::measured_dev_m`], which is the extracted mesh evaluated at every grid node.
+    /// shipped map, the pyramid under-reports the true continuous deviation by up to 15.9×. That is
+    /// not a port bug, it is what the metric means, twice over. The pyramid records at each node the
+    /// error of dropping that node from ITS OWN level's interpolation, so per-level errors COMPOUND
+    /// down the hierarchy rather than dominating; and it is a NODE metric, blind to everything the
+    /// two tessellations do between nodes. Martini/Cesium ship it as a heuristic and so do we — but
+    /// we never declare it. The declared rung comes from [`Self::measured_dev_m`], the exact
+    /// continuous maximum.
     pub(crate) extracted_at_m: f32,
-    /// The worst |mesh − grid| over every grid node inside the tile, metres. Always ≤ the rung.
+    /// The EXACT continuous maximum of |this level − the canonical surface| over the whole tile,
+    /// metres ([`worst_deviation_m`]) — every point, not every node. Always ≤ the declared rung;
+    /// that is the invariant the switch distance rests on.
     pub(crate) measured_dev_m: f32,
     /// Triangles in the extracted mesh (an OUTPUT of the error bound, never a target).
     pub(crate) triangles: usize,
@@ -443,52 +453,88 @@ fn tile_mesh(grid: &HeightGrid, ia: usize, ja: usize, size: usize, tris: &[[u32;
     mesh
 }
 
-/// The MEASURED worst deviation of a triangulation from the grid, metres: for every triangle, the
-/// plane it spans is evaluated at every grid NODE it covers and compared with that node's true
-/// height. Node-max is the standard RTIN/Martini/Cesium meaning of a terrain error bound and is
-/// the same meaning the shoe ladder's `worst_dev_mm` carries.
+/// The EXACT continuous worst deviation between a triangulation and THE canonical surface over the
+/// tile, metres — not a sampled statistic.
 ///
-/// This is a measurement, not a re-derivation of the pyramid: the pyramid's bound is what the
-/// EXTRACTION used, and this is what the extracted mesh actually does. The positional
-/// certification test asserts one against the other.
+/// # Why node sampling was wrong, and why this is exact
+///
+/// The first version of this function evaluated only grid NODES, on the reasoning that RTIN removes
+/// vertices without moving them. That reasoning is false as a claim about the SURFACE: RTIN also
+/// changes cell CONNECTIVITY. The canonical surface splits every cell along the ANTI-diagonal
+/// (`HeightGrid::height_at`, and parry's own triangulation with it); RTIN's alternating bintree
+/// gives roughly half its leaf cells the MAIN diagonal instead. Two triangulations of the same four
+/// corner heights, agreeing at all four nodes and disagreeing by half the cell's twist
+/// `|h₀₀ + h₁₁ − h₁₀ − h₀₁| / 2` at the centre. Codex MEASURED a case at 0.323 m — twelve times the
+/// node statistic — on a level declared at 5 cm.
+///
+/// Both surfaces are piecewise linear over the same square, so their difference is piecewise linear
+/// over the OVERLAY (common refinement) of the two triangulations, and its maximum is attained at
+/// an overlay VERTEX. Enumerating those vertices is not a search:
+///
+/// * every vertex of either triangulation is a grid node;
+/// * LOD edges are axis-aligned along grid lines, or 45° through grid nodes — so within any cell a
+///   LOD edge is a full cell diagonal, never a partial chord;
+/// * a LOD axis edge lies on a grid line, and a canonical anti-diagonal touches grid lines only at
+///   its two endpoints, which are nodes — no new vertex;
+/// * a LOD 45° edge crosses grid lines only at nodes — no new vertex;
+/// * within a cell, a LOD diagonal either COINCIDES with the canonical anti-diagonal (no new
+///   vertex) or is the MAIN diagonal, which meets it at exactly one point: the cell CENTRE.
+///
+/// So the overlay vertex set is exactly `grid nodes ∪ centres of cells the LOD splits the other
+/// way`, and evaluating at every node AND every cell centre is a superset of it. Centres inside a
+/// single linear region are redundant, never wrong. Hence: EXACT, in one pass, no sampling
+/// parameter to tune and nothing to alias past.
+///
+/// Implementation works in DOUBLED node coordinates, where a node is `(2i, 2j)` and a cell centre is
+/// `(2i+1, 2j+1)` — so both live on one integer lattice (the same-parity points) and every
+/// inside-test stays exact integer arithmetic. The canonical height at a cell centre has a closed
+/// form: the centre lies ON the anti-diagonal, where `height_at` reduces to the mean of the two
+/// corners that diagonal joins.
 pub(crate) fn worst_deviation_m(heights: &[f32], size: usize, tris: &[[u32; 3]]) -> f32 {
-    let node = |k: u32| (i64::from(k) % size as i64, i64::from(k) / size as i64);
+    let n = size as i64;
+    let node = |k: u32| (i64::from(k) % n, i64::from(k) / n);
+    let height = |i: i64, j: i64| f64::from(heights[(j * n + i) as usize]);
+    let canonical = |p: i64, q: i64| -> f64 {
+        if p & 1 == 0 {
+            height(p / 2, q / 2)
+        } else {
+            let (i, j) = (p >> 1, q >> 1);
+            (height(i + 1, j) + height(i, j + 1)) * 0.5
+        }
+    };
     let mut worst = 0.0f64;
     for tri in tris {
-        let (ax, ay) = node(tri[0]);
-        let (bx, by) = node(tri[1]);
-        let (cx, cy) = node(tri[2]);
+        let ((ax, ay), (bx, by), (cx, cy)) = (node(tri[0]), node(tri[1]), node(tri[2]));
+        let (ha, hb, hc) = (height(ax, ay), height(bx, by), height(cx, cy));
+        let (ax, ay, bx, by, cx, cy) = (ax * 2, ay * 2, bx * 2, by * 2, cx * 2, cy * 2);
         let area2 = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
         if area2 == 0 {
             continue;
         }
-        let (ha, hb, hc) = (
-            f64::from(heights[(ay * size as i64 + ax) as usize]),
-            f64::from(heights[(by * size as i64 + bx) as usize]),
-            f64::from(heights[(cy * size as i64 + cx) as usize]),
-        );
+        let inv = 1.0 / area2 as f64;
         let (x0, x1) = (ax.min(bx).min(cx), ax.max(bx).max(cx));
         let (y0, y1) = (ay.min(by).min(cy), ay.max(by).max(cy));
-        let inv = 1.0 / area2 as f64;
-        for y in y0..=y1 {
-            for x in x0..=x1 {
+        for q in y0..=y1 {
+            // Same-parity points only: even/even are nodes, odd/odd are cell centres. Mixed parity
+            // is an edge midpoint, which is never an overlay vertex.
+            let mut p = x0 + ((x0 ^ q) & 1);
+            while p <= x1 {
                 // Edge functions against each edge, all sharing the sign of `area2` inside the
-                // triangle (zero on an edge, which counts — shared edges are covered twice and
-                // both cover-events agree, which is exactly what "the mesh at this node" means).
-                let ea = (cx - bx) * (y - by) - (cy - by) * (x - bx);
-                let eb = (ax - cx) * (y - cy) - (ay - cy) * (x - cx);
-                let ec = (bx - ax) * (y - ay) - (by - ay) * (x - ax);
+                // triangle (zero on an edge counts — a shared edge is covered twice and both
+                // cover-events agree, which is exactly what "the surface here" means).
+                let ea = (cx - bx) * (q - by) - (cy - by) * (p - bx);
+                let eb = (ax - cx) * (q - cy) - (ay - cy) * (p - cx);
+                let ec = (bx - ax) * (q - ay) - (by - ay) * (p - ax);
                 let inside = if area2 > 0 {
                     ea >= 0 && eb >= 0 && ec >= 0
                 } else {
                     ea <= 0 && eb <= 0 && ec <= 0
                 };
-                if !inside {
-                    continue;
+                if inside {
+                    let plane = (ea as f64 * ha + eb as f64 * hb + ec as f64 * hc) * inv;
+                    worst = worst.max((plane - canonical(p, q)).abs());
                 }
-                let plane = (ea as f64 * ha + eb as f64 * hb + ec as f64 * hc) * inv;
-                let truth = f64::from(heights[(y * size as i64 + x) as usize]);
-                worst = worst.max((plane - truth).abs());
+                p += 2;
             }
         }
     }
@@ -647,22 +693,98 @@ pub(crate) mod rtin {
         /// (`v * size + u`) in the tile's own patch.
         ///
         /// `max_error < 0` extracts the EXACT surface (every error is ≥ 0, so every splittable
-        /// triangle splits): `2 · cells²` triangles, the full grid, which is the sanity gate.
+        /// triangle splits): `2 · cells²` triangles, and — after the diagonal canonicalization
+        /// below — the identical triangle SET `terrain_mesh_tiles` builds. That equality is the
+        /// sanity gate, and it is a connectivity claim, not a count.
         /// `max_error == 0` is NOT the same thing — a perfectly flat region has error exactly zero
         /// and would collapse.
         pub(crate) fn triangulate(&self, errors: &[f32], max_error: f32) -> Vec<[u32; 3]> {
             let last = (self.size - 1) as i32;
-            let mut out = Vec::new();
-            self.split(errors, max_error, &mut out, (0, 0), (last, last), (last, 0));
-            self.split(errors, max_error, &mut out, (last, last), (0, 0), (0, last));
-            out
+            let mut raw: Vec<[(i32, i32); 3]> = Vec::new();
+            self.split(errors, max_error, &mut raw, (0, 0), (last, last), (last, 0));
+            self.split(errors, max_error, &mut raw, (last, last), (0, 0), (0, last));
+            self.canonicalize_cell_diagonals(&mut raw);
+            let size = self.size as i32;
+            let index = |p: (i32, i32)| (p.1 * size + p.0) as u32;
+            raw.into_iter()
+                .map(|[a, b, c]| {
+                    // Counter-clockwise seen from +Y, the winding `terrain_mesh_tiles` emits and
+                    // the one bevy's default face culling keeps. In grid coordinates (x = i,
+                    // z = j) that is `uz·vx − ux·vz > 0` for the two edge vectors out of `a`.
+                    let (u, v) = ((b.0 - a.0, b.1 - a.1), (c.0 - a.0, c.1 - a.1));
+                    if u.1 * v.0 - u.0 * v.1 > 0 {
+                        [index(a), index(b), index(c)]
+                    } else {
+                        [index(a), index(c), index(b)]
+                    }
+                })
+                .collect()
+        }
+
+        /// Re-split every FULLY REFINED cell along the canonical ANTI-diagonal.
+        ///
+        /// # Why this exists (codex 2026-08-02, finding 1)
+        ///
+        /// The canonical surface splits every cell along the anti-diagonal — `HeightGrid::height_at`
+        /// evaluates it and parry's heightfield triangulates it, and the ONE-SURFACE invariant is
+        /// that claim. RTIN's bintree does NOT: its leaf orientation is fixed by position parity,
+        /// so roughly half of its leaf cells come out on the MAIN diagonal. The two agree at all
+        /// four corners and disagree by half the cell's twist, `|h₀₀ + h₁₁ − h₁₀ − h₀₁| / 2`, at the
+        /// centre — invisible to node sampling, MEASURED at 0.323 m in one shipped cell.
+        ///
+        /// Constraining the hierarchy itself to the anti-diagonal is not possible: the alternating
+        /// bintree's leaf parity is structural, not a choice at extraction time. But the fix does
+        /// not need the hierarchy — a cell covered by exactly TWO leaf triangles can be re-split
+        /// locally, because both splittings have the IDENTICAL four boundary edges and the
+        /// identical vertex set. Only the interior diagonal changes, so nothing outside the cell can
+        /// observe it: no crack, no T-junction, no change in triangle count.
+        ///
+        /// A cell covered by one leaf and one flank of a coarser triangle is left alone (it cannot
+        /// be re-split without touching that coarser triangle). Those cells keep a genuine
+        /// simplification error, which is exactly what `worst_deviation_m`'s overlay maximum now
+        /// measures and what the declared rung is quantized from.
+        fn canonicalize_cell_diagonals(&self, raw: &mut [[(i32, i32); 3]]) {
+            let cells = self.size - 1;
+            let mut halves = vec![[u32::MAX; 2]; cells * cells];
+            for (index, &[a, b, c]) in raw.iter().enumerate() {
+                // A leaf is half a grid cell: its `a`→`c` leg is one unit long in the L1 sense.
+                if (a.0 - c.0).abs() + (a.1 - c.1).abs() != 1 {
+                    continue;
+                }
+                let i = a.0.min(b.0).min(c.0) as usize;
+                let j = a.1.min(b.1).min(c.1) as usize;
+                let slot = &mut halves[j * cells + i];
+                if slot[0] == u32::MAX {
+                    slot[0] = index as u32;
+                } else {
+                    slot[1] = index as u32;
+                }
+            }
+            for (cell, slot) in halves.iter().enumerate() {
+                if slot[1] == u32::MAX {
+                    continue; // not fully refined — the other half belongs to a coarser triangle
+                }
+                let (i, j) = ((cell % cells) as i32, (cell / cells) as i32);
+                // Both halves share the cell's diagonal as their hypotenuse `a`–`b`; checking one
+                // identifies it. The anti-diagonal joins (i, j+1) and (i+1, j).
+                let [a, b, _] = raw[slot[0] as usize];
+                let anti = [(i, j + 1), (i + 1, j)];
+                if anti.contains(&a) && anti.contains(&b) {
+                    continue;
+                }
+                // Same four corners, same four boundary edges, canonical interior diagonal — and
+                // in the `(a, b, c)` shape whose winding fix reproduces `terrain_mesh_tiles`'
+                // `[i00, i01, i10]` / `[i10, i01, i11]` exactly.
+                raw[slot[0] as usize] = [(i, j), (i + 1, j), (i, j + 1)];
+                raw[slot[1] as usize] = [(i + 1, j), (i + 1, j + 1), (i, j + 1)];
+            }
         }
 
         fn split(
             &self,
             errors: &[f32],
             max_error: f32,
-            out: &mut Vec<[u32; 3]>,
+            out: &mut Vec<[(i32, i32); 3]>,
             a: (i32, i32),
             b: (i32, i32),
             c: (i32, i32),
@@ -676,16 +798,7 @@ pub(crate) mod rtin {
                 self.split(errors, max_error, out, b, c, (mx, my));
                 return;
             }
-            let index = |p: (i32, i32)| (p.1 * size + p.0) as u32;
-            // Counter-clockwise seen from +Y, the winding `terrain_mesh_tiles` emits and the one
-            // bevy's default face culling keeps. In grid coordinates (x = i, z = j) that is
-            // `uz·vx − ux·vz > 0` for the two edge vectors out of `a`.
-            let (u, v) = ((b.0 - a.0, b.1 - a.1), (c.0 - a.0, c.1 - a.1));
-            if u.1 * v.0 - u.0 * v.1 > 0 {
-                out.push([index(a), index(b), index(c)]);
-            } else {
-                out.push([index(a), index(c), index(b)]);
-            }
+            out.push([a, b, c]);
         }
     }
 }
@@ -915,40 +1028,181 @@ mod tests {
         heights
     }
 
-    /// THE sanity gate (memo §2): the extraction at a negative threshold must reproduce the full
-    /// grid EXACTLY — `2 · 128²` triangles per tile, `2 · 1024²` over the map. This is what pins
-    /// the ported hierarchy to the surface it claims to simplify: an off-by-one in the coordinate
-    /// table, a wrong parent count, or a mis-derived right-angle vertex all change this number.
+    /// THE sanity gate (memo §2), strengthened from a COUNT to a CONNECTIVITY claim: the extraction
+    /// at a negative threshold must reproduce not merely `2 · 128²` triangles per tile, but the
+    /// IDENTICAL triangle set `terrain_mesh_tiles` builds — same triples, same winding.
+    ///
+    /// Counting alone was the hole codex found: RTIN's alternating bintree emits the right NUMBER
+    /// of leaf triangles while splitting roughly half its cells along the main diagonal instead of
+    /// parry's anti-diagonal, which is a different SURFACE with identical corner heights. A count
+    /// test cannot see that; a set comparison against the canonical tessellation can, and it is
+    /// what pins `canonicalize_cell_diagonals` to the ONE-SURFACE invariant.
     #[test]
-    fn rtin_at_zero_error_reproduces_the_full_grid() {
+    fn rtin_at_zero_error_reproduces_the_canonical_tessellation() {
         let full = MESH_TILE_CELLS + 1;
         let hierarchy = rtin::Rtin::new(full);
         let grid = shipped_grid();
         assert_eq!(grid.size(), GRID_RESOLUTION);
         let ranges = mesh_tile_node_ranges(&grid);
         assert_eq!(ranges.len(), 64, "the shipped map is 8×8 render tiles");
+        let canonical = crate::terrain_grid::terrain_mesh_tiles(&grid);
         let mut total = 0usize;
-        for range in ranges {
+        for (t, (range, mesh)) in ranges.into_iter().zip(&canonical).enumerate() {
             let errors = hierarchy.error_pyramid(&patch(&grid, range));
-            let tris = hierarchy.triangulate(&errors, -1.0);
+            let mut ours = hierarchy.triangulate(&errors, -1.0);
             assert_eq!(
-                tris.len(),
+                ours.len(),
                 2 * MESH_TILE_CELLS * MESH_TILE_CELLS,
                 "exact extraction must be the full grid"
             );
-            total += tris.len();
+            total += ours.len();
+            let Some(Indices::U32(indices)) = mesh.indices() else {
+                panic!("the canonical tiler must carry u32 indices");
+            };
+            // Both index the tile's own 129² patch row-major, so the triples are directly
+            // comparable — once each is rotated to start at its lowest vertex. Rotation preserves
+            // winding and is the only freedom a triangle has; emission order is not part of the
+            // claim, the tessellation is.
+            let normalize = |tri: &mut [u32; 3]| {
+                let first = usize::from(tri[1] < tri[0] && tri[1] < tri[2])
+                    + 2 * usize::from(tri[2] < tri[0] && tri[2] < tri[1]);
+                *tri = [tri[first], tri[(first + 1) % 3], tri[(first + 2) % 3]];
+            };
+            let mut theirs: Vec<[u32; 3]> = indices
+                .chunks_exact(3)
+                .map(|tri| [tri[0], tri[1], tri[2]])
+                .collect();
+            ours.iter_mut().for_each(&normalize);
+            theirs.iter_mut().for_each(&normalize);
+            ours.sort_unstable();
+            theirs.sort_unstable();
+            assert_eq!(
+                ours, theirs,
+                "tile {t}: the exact extraction is not the canonical anti-diagonal tessellation"
+            );
         }
         assert_eq!(total, 2 * 1024 * 1024, "2,097,152 triangles over the map");
     }
 
-    /// The POSITIONAL certification (brief §6a): every kept level, on every tile of the shipped
-    /// map, must lie within its DECLARED rung of the grid at every grid node. The declared rung is
-    /// what the switch distance is computed from, so a level that quietly exceeds it is a level
-    /// shown too close.
+    /// LEVEL ZERO IS UNCHANGED, asserted against the constants rather than against itself.
     ///
-    /// Re-measured here from the extraction threshold the level records, independently of the
-    /// builder's own bookkeeping — the two paths must agree exactly, because the switch distance
-    /// downstream believes the bookkeeping.
+    /// `terrain_grid` grew three shared helpers for the ladder (`node_world_coord`,
+    /// `surface_normal_at`, `mesh_tile_node_ranges`) and `terrain_mesh_tiles` was rewritten in terms
+    /// of them. That is a refactor of the ONE surface every consumer reads, so it gets the regression
+    /// codex asked for: every vertex, normal, UV and index of every shipped tile recomputed here
+    /// from the raw constants — the pre-refactor expressions, no helper called — plus a content hash
+    /// over the whole set as the cheap tripwire for future diffs.
+    #[test]
+    fn level_zero_is_the_pre_lod_tiler_bit_for_bit() {
+        use crate::terrain_grid::{TEXTURE_TILE_M, WORLD_HALF_EXTENT, WORLD_SIZE};
+        let grid = shipped_grid();
+        let n = grid.size() as usize;
+        let cells = n - 1;
+        let step = WORLD_SIZE / cells as f32;
+        let world_at = |k: usize| -WORLD_HALF_EXTENT + k as f32 * step;
+        let normal_at = |i: usize, j: usize| -> [f32; 3] {
+            let (il, ih) = (i.saturating_sub(1), (i + 1).min(n - 1));
+            let (jl, jh) = (j.saturating_sub(1), (j + 1).min(n - 1));
+            let dhdx = (grid.sample(ih, j) - grid.sample(il, j)) / ((ih - il) as f32 * step);
+            let dhdz = (grid.sample(i, jh) - grid.sample(i, jl)) / ((jh - jl) as f32 * step);
+            Vec3::new(-dhdx, 1.0, -dhdz).normalize().to_array()
+        };
+        // FNV-1a over the exact bit patterns, so a one-ulp drift anywhere fails.
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        let mut eat = |bits: u32| {
+            hash = (hash ^ u64::from(bits)).wrapping_mul(0x0000_0100_0000_01b3);
+        };
+        let tiles = crate::terrain_grid::terrain_mesh_tiles(&grid);
+        assert_eq!(tiles.len(), 64);
+        let tiles_per_side = cells.div_ceil(MESH_TILE_CELLS);
+        let mut tile = 0usize;
+        for tz in 0..tiles_per_side {
+            for tx in 0..tiles_per_side {
+                let ia = tx * MESH_TILE_CELLS;
+                let ib = (ia + MESH_TILE_CELLS).min(cells);
+                let ja = tz * MESH_TILE_CELLS;
+                let jb = (ja + MESH_TILE_CELLS).min(cells);
+                let (w, h) = (ib - ia + 1, jb - ja + 1);
+                let mesh = &tiles[tile];
+                let (
+                    Some(bevy::mesh::VertexAttributeValues::Float32x3(positions)),
+                    Some(bevy::mesh::VertexAttributeValues::Float32x3(normals)),
+                    Some(bevy::mesh::VertexAttributeValues::Float32x2(uvs)),
+                    Some(Indices::U32(indices)),
+                ) = (
+                    mesh.attribute(Mesh::ATTRIBUTE_POSITION),
+                    mesh.attribute(Mesh::ATTRIBUTE_NORMAL),
+                    mesh.attribute(Mesh::ATTRIBUTE_UV_0),
+                    mesh.indices(),
+                )
+                else {
+                    panic!("tile {tile} lost an attribute");
+                };
+                assert_eq!(
+                    (positions.len(), normals.len(), uvs.len()),
+                    (w * h, w * h, w * h)
+                );
+                for j in ja..=jb {
+                    let z = world_at(j);
+                    for i in ia..=ib {
+                        let x = world_at(i);
+                        let k = (j - ja) * w + (i - ia);
+                        assert_eq!(
+                            positions[k],
+                            [x, grid.sample(i, j), z],
+                            "tile {tile} vertex"
+                        );
+                        assert_eq!(normals[k], normal_at(i, j), "tile {tile} normal");
+                        assert_eq!(
+                            uvs[k],
+                            [x / TEXTURE_TILE_M, z / TEXTURE_TILE_M],
+                            "tile {tile} uv"
+                        );
+                        for value in positions[k].iter().chain(&normals[k]) {
+                            eat(value.to_bits());
+                        }
+                        for value in &uvs[k] {
+                            eat(value.to_bits());
+                        }
+                    }
+                }
+                let mut expected: Vec<u32> = Vec::with_capacity((w - 1) * (h - 1) * 6);
+                for j in 0..h - 1 {
+                    for i in 0..w - 1 {
+                        let i00 = (j * w + i) as u32;
+                        let (i10, i01) = (i00 + 1, i00 + w as u32);
+                        expected.extend_from_slice(&[i00, i01, i10, i10, i01, i01 + 1]);
+                    }
+                }
+                assert_eq!(indices, &expected, "tile {tile} indices");
+                for &index in indices {
+                    eat(index);
+                }
+                tile += 1;
+            }
+        }
+        // The tripwire value, produced by this test on the shipped map. It is a CONSEQUENCE of the
+        // assertions above, not an independent claim — if it moves, one of them moved first.
+        assert_eq!(
+            hash, 0x70e7_f9e5_e6cf_c91b,
+            "the level-zero surface changed; the assertions above name which part"
+        );
+    }
+
+    /// The POSITIONAL certification (brief §6a): every kept level, on every tile of the shipped map,
+    /// must lie within its DECLARED rung of the CONTINUOUS canonical surface — not merely at grid
+    /// nodes. The declared rung is what the switch distance is computed from, so a level that
+    /// quietly exceeds it anywhere is a level shown too close.
+    ///
+    /// Certified against the OVERLAY maximum (see `worst_deviation_m`): grid nodes AND cell centres,
+    /// which together contain every vertex of the common refinement of the two triangulations, so
+    /// the maximum of their piecewise-linear difference is attained among the points evaluated. The
+    /// node-only version of this test passed on a ladder codex measured at 0.323 m on a level
+    /// declared at 5 cm; the difference is not a tolerance, it is a different quantity.
+    ///
+    /// A brute-force sub-cell sweep over one tile cross-checks that the overlay argument is not
+    /// merely self-consistent — if the exact maximum were being missed, dense sampling would find a
+    /// point above it.
     #[test]
     fn every_lod_level_stays_within_its_declared_deviation() {
         let grid = shipped_grid();
@@ -982,6 +1236,97 @@ mod tests {
                     "tile {t} deviation bookkeeping"
                 );
             }
+        }
+    }
+
+    /// The overlay-maximum argument, CHECKED rather than asserted: a dense sub-cell sweep over the
+    /// roughest tile must never find a point where the LOD surface departs from the canonical one by
+    /// more than `worst_deviation_m` reported. Sampling cannot prove a maximum — but it can falsify
+    /// one, and this is the test that would have caught the node-only version instantly.
+    #[test]
+    fn the_overlay_maximum_is_not_beaten_by_dense_sub_cell_sampling() {
+        let grid = shipped_grid();
+        let full = MESH_TILE_CELLS + 1;
+        let hierarchy = rtin::Rtin::new(full);
+        // The tile with the largest coarse-level deviation — where a missed maximum would show.
+        let ranges = mesh_tile_node_ranges(&grid);
+        let lod = build(&grid);
+        let (worst_tile, _) = lod
+            .tiles
+            .iter()
+            .enumerate()
+            .max_by(|a, b| {
+                let dev = |tile: &TerrainLodTile| {
+                    tile.levels
+                        .iter()
+                        .map(|level| level.measured_dev_m)
+                        .fold(0.0f32, f32::max)
+                };
+                dev(a.1).total_cmp(&dev(b.1))
+            })
+            .expect("the map has tiles");
+        let heights = patch(&grid, ranges[worst_tile]);
+        let errors = hierarchy.error_pyramid(&heights);
+        // The canonical surface inside the patch, evaluated the way `height_at` evaluates it.
+        let canonical = |x: f64, z: f64| -> f64 {
+            let (i0, j0) = ((x as usize).min(full - 2), (z as usize).min(full - 2));
+            let (fu, fv) = (x - i0 as f64, z - j0 as f64);
+            let h = |i: usize, j: usize| f64::from(heights[j * full + i]);
+            let (h00, h10, h01, h11) = (h(i0, j0), h(i0 + 1, j0), h(i0, j0 + 1), h(i0 + 1, j0 + 1));
+            if fu + fv <= 1.0 {
+                h00 + (h10 - h00) * fu + (h01 - h00) * fv
+            } else {
+                h11 + (h10 - h11) * (1.0 - fv) + (h01 - h11) * (1.0 - fu)
+            }
+        };
+        for &threshold in &TERRAIN_LOD_LADDER[1..] {
+            let tris = hierarchy.triangulate(&errors, threshold);
+            let reported = f64::from(worst_deviation_m(&heights, full, &tris));
+            // Rasterize each triangle over a 1/8-cell lattice.
+            const STEPS: i64 = 8;
+            let mut sampled = 0.0f64;
+            for tri in &tris {
+                let node = |k: u32| (i64::from(k) % full as i64, i64::from(k) / full as i64);
+                let ((ax, ay), (bx, by), (cx, cy)) = (node(tri[0]), node(tri[1]), node(tri[2]));
+                let (ha, hb, hc) = (
+                    f64::from(heights[(ay * full as i64 + ax) as usize]),
+                    f64::from(heights[(by * full as i64 + bx) as usize]),
+                    f64::from(heights[(cy * full as i64 + cx) as usize]),
+                );
+                let (ax, ay, bx, by, cx, cy) = (
+                    ax * STEPS,
+                    ay * STEPS,
+                    bx * STEPS,
+                    by * STEPS,
+                    cx * STEPS,
+                    cy * STEPS,
+                );
+                let area2 = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+                let inv = 1.0 / area2 as f64;
+                for q in ay.min(by).min(cy)..=ay.max(by).max(cy) {
+                    for p in ax.min(bx).min(cx)..=ax.max(bx).max(cx) {
+                        let ea = (cx - bx) * (q - by) - (cy - by) * (p - bx);
+                        let eb = (ax - cx) * (q - cy) - (ay - cy) * (p - cx);
+                        let ec = (bx - ax) * (q - ay) - (by - ay) * (p - ax);
+                        let inside = if area2 > 0 {
+                            ea >= 0 && eb >= 0 && ec >= 0
+                        } else {
+                            ea <= 0 && eb <= 0 && ec <= 0
+                        };
+                        if !inside {
+                            continue;
+                        }
+                        let plane = (ea as f64 * ha + eb as f64 * hb + ec as f64 * hc) * inv;
+                        let truth = canonical(p as f64 / STEPS as f64, q as f64 / STEPS as f64);
+                        sampled = sampled.max((plane - truth).abs());
+                    }
+                }
+            }
+            assert!(
+                sampled <= reported + 1.0e-6,
+                "δ {threshold}: dense sampling found {sampled} m, above the reported overlay \
+                 maximum {reported} m — the overlay vertex set is incomplete"
+            );
         }
     }
 
