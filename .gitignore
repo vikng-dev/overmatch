@@ -17,3 +17,6 @@
 # Cloudflare wrangler local cache
 .wrangler/
 __pycache__/
+
+# 32 x 2 MB of back-face probe frames, kept on disk so the worst frame can be cropped.
+scripts/tank/diet/out/
