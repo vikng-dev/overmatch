@@ -240,14 +240,21 @@ def _popup(title, message, icon='ERROR'):
 
 
 def _summary(glb, module):
-    """"71.1 MB mipless → 63.2 MB baked, mips verified (…)" from what the bake recorded."""
+    """"71.1 MB mipless → 63.2 MB baked, mips verified (…)" from what the bake recorded.
+
+    The shoe lines come last and are the ones worth reading on the stock-exporter door: that door
+    has no LOD stage in front of it, so `LAST_EXPORT['link']` says the tank glb is carrying the
+    AUTHORED shoe and names the door that reduces it (see `export_tiger._link_summary`).
+    """
     last = getattr(module, "LAST_EXPORT", {}) or {}
     out_mb = os.path.getsize(glb) / 1e6
     raw = last.get("raw_bytes")
     sizes = f"{raw / 1e6:.1f} MB mipless → {out_mb:.1f} MB baked" if raw else f"{out_mb:.1f} MB"
     verified = (last.get("verify") or "").strip()
     verified = f"mips verified ({verified})" if verified else "mips verified"
-    return f"{os.path.basename(glb)} — {sizes}, {verified}"
+    lines = [f"{os.path.basename(glb)} — {sizes}, {verified}"]
+    lines += [line for line in (last.get("link"), *(last.get("lods") or ())) if line]
+    return "\n".join(lines)
 
 
 def _stage_of(exc):
@@ -296,6 +303,11 @@ class OVERMATCH_OT_export_tank(Operator, ExportHelper):
             window.cursor_set('WAIT')
         try:
             module = _load_export_tiger(root)
+            # Say it before the window stops redrawing. The status bar will not repaint until this
+            # operator returns, so this lands in the Info editor after the fact — the console line
+            # `export_tiger.bake()` prints is what the user reads DURING the freeze. Both come from
+            # the same string so there is one wording to keep true.
+            self.report({'INFO'}, module.BAKE_NOTICE)
             # The chain: temp mipless export ▸ bake onto `glb` ▸ verify. The tracked path is only
             # written by a bake that succeeded, so a failure here leaves the previous glb alone.
             _SUPPRESS_CALLBACK = True   # our own export_scene.gltf must not re-trigger the hook
@@ -303,7 +315,7 @@ class OVERMATCH_OT_export_tank(Operator, ExportHelper):
                 module.export(root=root, glb=glb)
             finally:
                 _SUPPRESS_CALLBACK = False
-        except BaseException as exc:  # SystemExit-derived: see export_tiger.ExportError
+        except BaseException as exc:  # `export()` hands a GUI ExportFailed, `bake()` a SystemExit
             if isinstance(exc, KeyboardInterrupt):
                 raise
             message = f"{_stage_of(exc)} failed — {exc}"
