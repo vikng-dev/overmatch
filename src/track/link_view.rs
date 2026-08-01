@@ -125,12 +125,19 @@
 //!   * **Lifetime.** `despawn` is recursive over `Children`, so a rig rebind or a sandbox pool
 //!     shrink takes the LOD1 shoe with the shoe it belongs to.
 //!
+//! Sharing the material has one obligation the asset does not discharge: [`LINK_MATERIAL`] is
+//! NORMAL-MAPPED, and bevy's PBR shader drops normal mapping — silently — on a mesh with no
+//! `ATTRIBUTE_TANGENT`. The LOD1 primitive carries no material of its own, which is exactly the case
+//! `bevy_gltf` does NOT auto-generate tangents for, so [`lod1_shoe_meshes`] builds them at bind time
+//! and refuses the bind if it cannot. Otherwise the swap would change the LIGHTING as well as the
+//! silhouette, and the distance below is argued only about the silhouette.
+//!
 //! The cost of the pattern is entity count: the pool doubles, and every one of those entities is
 //! visited by `check_visibility_ranges` each frame. That is the trade a measurement sweep has to
 //! judge — the triangle win is only worth having if it is not eaten by the visibility walk.
 
 use bevy::camera::visibility::VisibilityRange;
-use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
+use bevy::mesh::{GenerateTangentsError, Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
 
 use super::forces::phase_decompose;
@@ -393,9 +400,9 @@ fn bind_link_template(
     let triangles = shoe.indices().map_or(0, Indices::len) / 3;
     let mirrored = mirrored_mesh(shoe);
 
-    // The LOD1 shoe, mirrored by the SAME construction — the two levels have to be reflections of
-    // each other for the same reason the two sides do, and reusing `mirrored_mesh` is what keeps
-    // that true without a second answer to "how is a shoe mirrored".
+    // The LOD1 shoe, tangent-generated and mirrored by [`lod1_shoe_meshes`] — the two levels have
+    // to be reflections of each other for the same reason the two sides do, and reusing
+    // `mirrored_mesh` is what keeps that true without a second answer to "how is a shoe mirrored".
     let lod1_source = lod1_handle
         .get_or_insert_with(|| {
             asset_server.load(
@@ -419,10 +426,29 @@ fn bind_link_template(
         return;
     };
     let lod1_triangles = lod1_shoe.indices().map_or(0, Indices::len) / 3;
-    let lod1_mirrored = mirrored_mesh(lod1_shoe);
+    let lod1_pair = match lod1_shoe_meshes(lod1_shoe) {
+        Ok(pair) => pair,
+        Err(err) => {
+            // Same policy as the missing-material refusal above, and for the same reason: the LOD1
+            // shoe wears the LOD0 shoe's NORMAL-MAPPED material, and bevy's PBR shader silently
+            // skips normal mapping on a mesh with no tangents. Binding an untangented LOD1 would
+            // therefore not fail — it would ship a 500 m line across the battlefield where every
+            // track flattens out, which is exactly the kind of lighting bug nobody traces back to a
+            // vertex attribute.
+            error_once!(
+                "track links: the LOD1 shoe `{LINK_LOD1_GLB}` cannot be given tangents ({err}) — \
+                 it renders under the normal-mapped `{LINK_MATERIAL}` and would light flat without \
+                 them; refusing to bind"
+            );
+            return;
+        }
+    };
 
     let mesh = PerSide::new(meshes.add(mirrored), source.0.clone());
-    let lod1 = PerSide::new(meshes.add(lod1_mirrored), lod1_source);
+    // BOTH sides are derived assets here, unlike LOD0 (whose right side is the glTF's own handle):
+    // the tangents are built in this process, so neither side is the loaded primitive any more.
+    // `lod1_source` stays alive in the `Local` handle, which is what keeps the load from unloading.
+    let lod1 = lod1_pair.map(|shoe| meshes.add(shoe));
 
     // The one lateral datum the markers cannot carry: how far outboard of the PIN PLANE the shoe's
     // centre is authored. `RigGeom` measures both (off `Link_Box` and off the pin markers), so this
@@ -607,8 +633,14 @@ fn mirrored_mesh(source: &Mesh) -> Mesh {
             }
         }
     }
-    // Tangents carry a handedness in `w`; mirroring flips it along with the x component. (The Tiger's
-    // shoe ships positions + normals only, but a re-export that adds a UV set would add these too.)
+    // Tangents, and this branch is LIVE for both levels of the shoe (the glb ships none, but the
+    // shoe's material is normal-mapped, so LOD0 gets them from `bevy_gltf`'s mikktspace pass at load
+    // and LOD1 from [`lod1_shoe_meshes`]). A tangent is `dP/du` with `w` recording the bitangent's
+    // handedness, so under the reflection `M = diag(-1, 1, 1)` — which leaves the UVs untouched —
+    // `T` transforms exactly like a position, `T' = M T`. The `w` flip is what keeps the BITANGENT
+    // a reflection too: `B = (N × T) w`, and a determinant-(−1) map obeys `M a × M b = −M (a × b)`,
+    // so `(N' × T') w' = −M (N × T) w'` equals `M B` only when `w' = −w`. Miss it and every
+    // normal-mapped detail on the left track lights as if lit from the opposite side.
     if let Some(VertexAttributeValues::Float32x4(values)) =
         mesh.attribute_mut(Mesh::ATTRIBUTE_TANGENT)
     {
@@ -644,6 +676,40 @@ fn mirrored_mesh(source: &Mesh) -> Mesh {
         }
     }
     mesh
+}
+
+/// The LOD1 shoe as the two mesh assets the pool binds — `[left, right]` — both carrying TANGENTS.
+///
+/// # Why the tangents are BUILT here rather than read
+///
+/// The LOD1 primitive ships POSITION, NORMAL and TEXCOORD_0 and nothing else, and — being a bare
+/// decimation with no look of its own — it carries NO glTF MATERIAL. `bevy_gltf` 0.19 runs its
+/// mikktspace pass only when the primitive's OWN material wants tangents (`needs_tangents`: a normal
+/// texture, or a clearcoat normal texture), and a material-free primitive resolves to the glTF
+/// default material, which wants nothing. So the loaded LOD1 mesh has no `ATTRIBUTE_TANGENT`.
+///
+/// That would be harmless if the shoe were unlit steel, but the LOD1 instance renders under the LOD0
+/// shoe's [`LINK_MATERIAL`], whose three MEASURED maps include a NORMAL map. bevy's PBR shader keys
+/// normal mapping on the `VERTEX_TANGENTS` shader def and simply drops the map when the mesh has no
+/// tangents — no warning, no error. The swap at [`SHOE_LOD1_DISTANCE_M`] would then change the
+/// LIGHTING as well as the silhouette, which is not what the distance was argued from.
+///
+/// # Generate BEFORE mirroring, never after
+///
+/// mikktspace is run ONCE, on the shoe as authored, and [`mirrored_mesh`] carries the result across
+/// the reflection analytically (`T' = M T`, `w' = −w` — the algebra is written out there). Doing it
+/// the other way round means a second mikktspace run over a reflected, rewound mesh, trusting it to
+/// re-derive the handedness the reflection implies; this way the handedness is a two-line identity
+/// that a test can check per vertex, it costs half the work, and there is still exactly ONE answer
+/// to "how is a shoe mirrored". A re-export that starts shipping tangents (or a material) is honored
+/// as-is: the generation is skipped and the artist's tangents are the ones that get mirrored.
+fn lod1_shoe_meshes(source: &Mesh) -> Result<PerSide<Mesh>, GenerateTangentsError> {
+    let mut right = source.clone();
+    if !right.contains_attribute(Mesh::ATTRIBUTE_TANGENT) {
+        right.generate_tangents()?;
+    }
+    let left = mirrored_mesh(&right);
+    Ok(PerSide::new(left, right))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1094,6 +1160,178 @@ mod tests {
             geometric.dot(Vec3::from(n[0])) > 0.99,
             "the mirrored face is inside-out: {geometric}",
         );
+    }
+
+    /// A flat quad in the xy plane with a plain UV mapping, indexed as two triangles — the smallest
+    /// thing mikktspace will produce a well-defined tangent frame for.
+    fn tangent_fixture() -> Mesh {
+        let mut mesh = Mesh::new(
+            PrimitiveTopology::TriangleList,
+            bevy::asset::RenderAssetUsages::default(),
+        );
+        mesh.insert_attribute(
+            Mesh::ATTRIBUTE_POSITION,
+            vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ],
+        );
+        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 0.0, 1.0]; 4]);
+        // v runs DOWN the quad (the glTF convention), so the bitangent is genuinely independent of
+        // the tangent's sign and `w` is not free to be either.
+        mesh.insert_attribute(
+            Mesh::ATTRIBUTE_UV_0,
+            vec![[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]],
+        );
+        mesh.insert_indices(Indices::U32(vec![0, 1, 2, 0, 2, 3]));
+        mesh
+    }
+
+    /// The tangent's HANDEDNESS across the mirror, per vertex, as the identity it is claimed to be:
+    /// the reflected bitangent must equal the reflection of the bitangent. `B = (N × T) w` and a
+    /// determinant-(−1) map obeys `M a × M b = −M (a × b)`, so negating `T.x` alone would leave the
+    /// left track's bitangents pointing the wrong way and every normal-mapped detail lit from the
+    /// wrong side — a bug with no silhouette and no error message.
+    #[test]
+    fn the_mirror_reflects_the_tangent_frame_and_not_just_the_tangent() {
+        let mut source = tangent_fixture();
+        source
+            .generate_tangents()
+            .expect("the fixture quad has positions, normals, UVs and indices");
+        let mirrored = mirrored_mesh(&source);
+
+        let frame = |mesh: &Mesh| {
+            let Some(VertexAttributeValues::Float32x3(n)) = mesh.attribute(Mesh::ATTRIBUTE_NORMAL)
+            else {
+                panic!("normals")
+            };
+            let Some(VertexAttributeValues::Float32x4(t)) = mesh.attribute(Mesh::ATTRIBUTE_TANGENT)
+            else {
+                panic!("tangents survive the mirror")
+            };
+            (n.clone(), t.clone())
+        };
+        let (source_n, source_t) = frame(&source);
+        let (mirror_n, mirror_t) = frame(&mirrored);
+
+        let reflect = Vec3::new(-1.0, 1.0, 1.0);
+        for v in 0..source_t.len() {
+            let tangent = |t: &[f32; 4]| Vec3::new(t[0], t[1], t[2]);
+            let bitangent = |n: &[f32; 3], t: &[f32; 4]| Vec3::from(*n).cross(tangent(t)) * t[3];
+            assert!(
+                tangent(&source_t[v]).length() > 0.9,
+                "vertex {v} has no usable tangent to mirror",
+            );
+            assert!(
+                (tangent(&mirror_t[v]) - reflect * tangent(&source_t[v])).length() < 1e-5,
+                "vertex {v}: the tangent is not the reflected tangent",
+            );
+            let want = reflect * bitangent(&source_n[v], &source_t[v]);
+            let got = bitangent(&mirror_n[v], &mirror_t[v]);
+            assert!(
+                (got - want).length() < 1e-5,
+                "vertex {v}: the mirrored bitangent is {got}, but the reflection of the source's \
+                 is {want} — the handedness `w` did not follow the reflection",
+            );
+        }
+    }
+
+    /// The SHIPPED LOD1 shoe, run through the real bind-time construction: both final meshes come
+    /// out carrying tangents.
+    ///
+    /// Asset-backed on purpose, in two halves. First the PREMISE is asserted against the glb — no
+    /// TANGENT accessor and no MATERIAL — because that pair is exactly what makes `bevy_gltf` skip
+    /// its own mikktspace pass (it runs only when the primitive's own material has a normal
+    /// texture). Then the mesh those accessors describe is pushed through [`lod1_shoe_meshes`], the
+    /// same call `bind_link_template` makes. If a re-export ever gives the primitive a material or
+    /// its own tangents the first half fails loudly and this comment is what explains why — the
+    /// generation then becomes redundant rather than wrong.
+    #[test]
+    fn the_shipped_lod1_shoe_binds_with_tangents_on_both_sides() {
+        let path = crate::assets::asset_root().join(LINK_LOD1_GLB);
+        let gltf::Gltf { document, mut blob } =
+            gltf::Gltf::open(&path).unwrap_or_else(|e| panic!("{LINK_LOD1_GLB} must open: {e}"));
+        let buffers = [blob.take().expect("the glb carries its binary chunk")];
+        let primitive = document
+            .meshes()
+            .next()
+            .expect("the LOD1 glb carries one mesh")
+            .primitives()
+            .next()
+            .expect("the LOD1 mesh carries one primitive");
+        assert!(
+            primitive.get(&gltf::Semantic::Tangents).is_none(),
+            "the LOD1 primitive now ships TANGENT - the bind-time generation is redundant",
+        );
+        assert!(
+            primitive.material().index().is_none(),
+            "the LOD1 primitive now carries a material - bevy_gltf may generate its tangents",
+        );
+
+        let reader = primitive.reader(|b| buffers.get(b.index()).map(Vec::as_slice));
+        let mut shoe = Mesh::new(
+            PrimitiveTopology::TriangleList,
+            bevy::asset::RenderAssetUsages::default(),
+        );
+        shoe.insert_attribute(
+            Mesh::ATTRIBUTE_POSITION,
+            reader
+                .read_positions()
+                .expect("the LOD1 shoe carries positions")
+                .collect::<Vec<_>>(),
+        );
+        shoe.insert_attribute(
+            Mesh::ATTRIBUTE_NORMAL,
+            reader
+                .read_normals()
+                .expect("the LOD1 shoe carries normals")
+                .collect::<Vec<_>>(),
+        );
+        shoe.insert_attribute(
+            Mesh::ATTRIBUTE_UV_0,
+            reader
+                .read_tex_coords(0)
+                .expect("the LOD1 shoe carries TEXCOORD_0")
+                .into_f32()
+                .collect::<Vec<_>>(),
+        );
+        shoe.insert_indices(Indices::U32(
+            reader
+                .read_indices()
+                .expect("the LOD1 shoe is indexed")
+                .into_u32()
+                .collect(),
+        ));
+
+        let bound = lod1_shoe_meshes(&shoe).expect("the shipped LOD1 shoe must take tangents");
+        let vertices = shoe.count_vertices();
+        for (side, mesh) in bound.iter() {
+            let Some(VertexAttributeValues::Float32x4(tangents)) =
+                mesh.attribute(Mesh::ATTRIBUTE_TANGENT)
+            else {
+                panic!(
+                    "the {side:?} LOD1 shoe has no tangents - it renders under the normal-mapped \
+                     {LINK_MATERIAL} and would light flat",
+                )
+            };
+            assert_eq!(
+                tangents.len(),
+                vertices,
+                "one tangent per vertex ({side:?})"
+            );
+            // A zeroed tangent is mikktspace's answer for a degenerate UV island, and the shader
+            // treats it as a valid frame - so "the attribute exists" is not the assertion.
+            let degenerate = tangents
+                .iter()
+                .filter(|t| Vec3::new(t[0], t[1], t[2]).length() < 0.5 || t[3].abs() < 0.5)
+                .count();
+            assert_eq!(
+                degenerate, 0,
+                "{degenerate} of {vertices} {side:?} LOD1 tangents are degenerate",
+            );
+        }
     }
 
     /// The slot rotation, which is the whole reason a shoe's identity rides the belt: driving one
