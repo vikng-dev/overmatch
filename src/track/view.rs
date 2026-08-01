@@ -406,8 +406,11 @@ fn bind_track_rigs(
             },
         ];
         info!(
-            "track rig bound: {} links/side, {} wheels/side; sprocket tooth tips L {:.2}° R {:.2}°",
+            "track rig bound: {} links/side (+{} LOD1 siblings/side, swapping at {:.0} m), {} \
+             wheels/side; sprocket tooth tips L {:.2}° R {:.2}°",
             spec.link_count,
+            spec.link_count,
+            link_view::SHOE_LOD1_DISTANCE_M,
             sides[0].wheels.len(),
             sl_tip.to_degrees(),
             sr_tip.to_degrees(),

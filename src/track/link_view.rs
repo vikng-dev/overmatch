@@ -98,7 +98,38 @@
 //! handedness. So the mirror is baked into a SECOND MESH ASSET instead ([`mirrored_mesh`]): positions
 //! and normals negated in x, triangle winding reversed to compensate. Both instances then render
 //! under ordinary positive-determinant transforms.
+//!
+//! # Distance LOD: a second shoe entity, not a second pool
+//!
+//! The shoes are the largest geometry pool a tank owns — the Tiger's MEASURED 97 links × 2 sides ×
+//! 518 triangles is ~100 k triangles per tank, and a 15v15 frame holds thirty of them, so the belt
+//! alone is ~3.0 M triangles of the scene. Beyond a few tens of metres none of that detail survives
+//! rasterisation, so every shoe carries a LOWER-DETAIL SIBLING: the artist's 194-triangle decimation
+//! of the same shoe, in the same mesh-local frame, on the same material — ~1.1 M for the same thirty
+//! tanks.
+//!
+//! The switch is bevy's own [`VisibilityRange`] — [`VisibilityRange::abrupt`], deliberately, because
+//! a crossfaded range compiles a second dithering permutation of every shoe pipeline for a
+//! transition nobody can see at [`SHOE_LOD1_DISTANCE_M`]. The LOD1 instance is spawned as a CHILD of
+//! the LOD0 shoe rather than as a second pooled sibling, and three separate mechanisms fall out of
+//! that for free:
+//!
+//!   * **Placement.** [`place_links`] writes ONE transform per shoe and ordinary propagation carries
+//!     the child, so the two levels can never disagree about where a link is — and there is no
+//!     second placement system to keep in step with the first.
+//!   * **Rendering policy.** `render_policy` resolves a mesh against its nearest scoped ANCESTOR, so
+//!     the child inherits its tank's channel and, once the shadow ribbon lands and the shoe is
+//!     silenced with `VisualScope::PROXIED_CASTER`, inherits the silence too. Nothing here mirrors a
+//!     layer or a shadow marker by hand; the one path that used to rewrite layers per mesh under the
+//!     controlled tank no longer exists.
+//!   * **Lifetime.** `despawn` is recursive over `Children`, so a rig rebind or a sandbox pool
+//!     shrink takes the LOD1 shoe with the shoe it belongs to.
+//!
+//! The cost of the pattern is entity count: the pool doubles, and every one of those entities is
+//! visited by `check_visibility_ranges` each frame. That is the trade a measurement sweep has to
+//! judge — the triangle win is only worth having if it is not eaten by the visibility walk.
 
+use bevy::camera::visibility::VisibilityRange;
 use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
 
@@ -141,6 +172,41 @@ const PIN_END_NODE: &str = "Pin_End";
 /// glb's own primitive rather than by name.
 const LINK_MATERIAL: &str = "Mat_Track_Link";
 
+/// The LOW-DETAIL shoe, exported beside the tank as its own glb: one node, one primitive, no
+/// material and no markers. It is loaded as a labelled PRIMITIVE rather than a scene, so nothing is
+/// instantiated and nothing needs hiding — and the look keeps coming from the template's own
+/// [`LINK_MATERIAL`], which is what makes the swap invisible in the first place.
+const LINK_LOD1_GLB: &str = "tiger_1/tiger_1_link.lod1.glb";
+
+/// Where a shoe drops to its low-detail sibling, metres from the camera. The ONE number this LOD
+/// has, and it is set by the GUNNER OPTIC rather than by the third-person view.
+///
+/// # Why the optic sets it
+///
+/// There is exactly one `Camera3d` in the game: the optic is that camera at the tank's authored
+/// gunner FOV (0.12 rad on the Tiger) instead of the commander's ~0.785 rad, so it magnifies ~6.5×.
+/// bevy's range table IS per-view (`VisibleEntityRanges` is keyed by camera entity), but with one
+/// camera there is no second view to give a different range to, and making the range track the
+/// current FOV would mean rewriting a `VisibilityRange` on every shoe entity in the world each time
+/// the player raises the sight — the exact O(tanks × meshes) view switch `render_policy` exists to
+/// have deleted. So one distance serves both views, and it is chosen for the demanding one.
+///
+/// # Where the number comes from
+///
+/// MEASURED point-to-surface deviation of the shipped `tiger_1_link.lod1.glb` from the full shoe:
+/// median 7.1 mm, p90 26.9 mm, worst 75.0 mm (the guide-horn tip and the outer connector boss). At
+/// 500 m through a 0.12 rad optic on a 1440-px-tall view — 8.3e-5 rad/px — those become 0.16 px,
+/// 0.65 px and 1.8 px, against a shoe that is itself only ~3 px long there. The swap is therefore
+/// below the pixel grid in the view that can see furthest, which is also why an ABRUPT range needs
+/// no hysteresis: a tank loitering exactly on the boundary flips between two silhouettes that differ
+/// by well under a pixel.
+///
+/// The commander view would tolerate ~150 m by the same arithmetic (0.785 rad over 1440 px puts the
+/// 75 mm worst case at one pixel by 137 m), and a smaller number here would buy a great deal more:
+/// most of a battlefield sits inside 500 m. That is a QUALITY decision, not a code one — the lever
+/// is this constant and the evidence is the paragraph above.
+pub(crate) const SHOE_LOD1_DISTANCE_M: f32 = 500.0;
+
 /// How far the template's composed world scale may sit from 1.0 before the bind refuses. A hair for
 /// the `f32` round trip through the export, and four orders of magnitude below the 0.808 the model
 /// used to carry — so it catches a re-export that forgets to apply the scale, and nothing else.
@@ -152,6 +218,10 @@ pub(crate) struct LinkTemplate {
     /// Per side: the authored shoe on the right, its genuine mirror on the left (see the module
     /// doc — a negative-X scale would be a winding flip, not a mirror).
     mesh: PerSide<Handle<Mesh>>,
+    /// Per side: the same shoe at LOD1, mirrored by the same construction. ONE handle per side for
+    /// the whole session — every link instance clones it, so a Tiger's 194 low-detail shoes are 194
+    /// references to two mesh assets.
+    lod1: PerSide<Handle<Mesh>>,
     /// One material for every link, read off the glb's own shoe primitive — the artist's
     /// [`LINK_MATERIAL`], never a `StandardMaterial` built here. The look is therefore changed by
     /// re-exporting the blend, not by editing this file.
@@ -184,6 +254,11 @@ pub(crate) struct LinkFrame {
 /// anything else — and so the sandbox's `mesh_layers` mesh tagger can exclude the shoe pool (the
 /// instances are nameless children of the hull, and without this marker they would fall through to
 /// the hull layer and fight the `links` switch for their visibility).
+///
+/// BOTH detail levels wear it. The consumers only ever reach a link by an entity id they were
+/// handed ([`place_links`] calls back with pool entities), so widening the marker costs them
+/// nothing — while a LOD1 child WITHOUT it would be a nameless hull descendant, exactly the case
+/// the tagger's exclusion exists for.
 #[derive(Component)]
 pub(crate) struct TrackLink;
 
@@ -218,6 +293,12 @@ fn bind_link_template(
     meshes_of: Query<&Mesh3d>,
     materials_of: Query<&MeshMaterial3d<StandardMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
+    // The LOD1 shoe is an ASSET LOAD rather than a scene read: it comes from its own glb
+    // ([`LINK_LOD1_GLB`]), so there is no node to find and nothing to hide.
+    asset_server: Res<AssetServer>,
+    // Held across the bind's retries — a handle dropped and re-taken every frame would keep
+    // cancelling and restarting the load it is waiting on.
+    mut lod1_handle: Local<Option<Handle<Mesh>>>,
     geom: Res<RigGeom>,
 ) {
     let (mut link_box, mut pin_start, mut pin_end) = (None, None, None);
@@ -311,7 +392,37 @@ fn bind_link_template(
     };
     let triangles = shoe.indices().map_or(0, Indices::len) / 3;
     let mirrored = mirrored_mesh(shoe);
+
+    // The LOD1 shoe, mirrored by the SAME construction — the two levels have to be reflections of
+    // each other for the same reason the two sides do, and reusing `mirrored_mesh` is what keeps
+    // that true without a second answer to "how is a shoe mirrored".
+    let lod1_source = lod1_handle
+        .get_or_insert_with(|| {
+            asset_server.load(
+                GltfAssetLabel::Primitive {
+                    mesh: 0,
+                    primitive: 0,
+                }
+                .from_asset(LINK_LOD1_GLB),
+            )
+        })
+        .clone();
+    if let bevy::asset::LoadState::Failed(err) = asset_server.load_state(&lod1_source) {
+        // Loud rather than a silent starve: without this the whole track — LOD0 included — simply
+        // never binds and the tank drives on invisible shoes, which reads as a placement bug.
+        error_once!(
+            "track links: the LOD1 shoe `{LINK_LOD1_GLB}` failed to load ({err}) — refusing to bind"
+        );
+        return;
+    }
+    let Some(lod1_shoe) = meshes.get(&lod1_source) else {
+        return;
+    };
+    let lod1_triangles = lod1_shoe.indices().map_or(0, Indices::len) / 3;
+    let lod1_mirrored = mirrored_mesh(lod1_shoe);
+
     let mesh = PerSide::new(meshes.add(mirrored), source.0.clone());
+    let lod1 = PerSide::new(meshes.add(lod1_mirrored), lod1_source);
 
     // The one lateral datum the markers cannot carry: how far outboard of the PIN PLANE the shoe's
     // centre is authored. `RigGeom` measures both (off `Link_Box` and off the pin markers), so this
@@ -327,9 +438,21 @@ fn bind_link_template(
         shoe_offset * 1000.0,
         triangles,
     );
+    // The LOD's whole ledger on one line: how much geometry the far shoe saves, and the two mesh
+    // assets every low-detail instance in the session shares (per side — the left is the mirror).
+    info!(
+        "track links: LOD1 bound - {lod1_triangles} triangles/shoe (−{}%) beyond \
+         {SHOE_LOD1_DISTANCE_M:.0} m, one mesh per side L {:?} R {:?}",
+        100 - (lod1_triangles * 100)
+            .checked_div(triangles.max(1))
+            .unwrap_or(0),
+        lod1.get(Side::Left).id(),
+        lod1.get(Side::Right).id(),
+    );
 
     commands.insert_resource(LinkTemplate {
         mesh,
+        lod1,
         material: material.0.clone(),
         frame,
     });
@@ -527,13 +650,21 @@ fn mirrored_mesh(source: &Mesh) -> Mesh {
 // The pool
 // ---------------------------------------------------------------------------------------------
 
-/// Spawn one pooled shoe on `side`, parented to `parent` (a hull-local frame in both consumers).
+/// Spawn one pooled shoe on `side`, parented to `parent` (a hull-local frame in both consumers),
+/// together with its LOD1 child. The returned entity is the LOD0 shoe — the one the pool holds and
+/// the one [`place_links`] poses.
 ///
 /// Persistent entities whose transforms are rewritten each frame — never rebuilt meshes and never
 /// immediate-mode gizmos: at ~97 links × 2 sides × 5 552 triangles a per-frame rebuild would be
 /// ~1.1 M triangles of CPU work every frame, while identical mesh+material instances batch into two
 /// draws. Parked below the world until the first placement writes a real pose (the spawn lands via
 /// `Commands`, so the placer only sees it next frame, and an un-posed link must not flash on screen).
+///
+/// The two levels' ranges MEET at [`SHOE_LOD1_DISTANCE_M`] — `[0, D)` and `[D, ∞)` — so exactly one
+/// of them is drawn at every distance, in every view, with no gap and no double-draw. The child
+/// carries the same [`TrackLink`] marker as its parent: it is a pooled shoe by every rule that
+/// matters to the consumers (the sandbox's mesh tagger excludes the pool by that marker, and would
+/// otherwise class a nameless hull descendant as hull geometry and repaint it under x-ray).
 pub(crate) fn spawn_link(
     commands: &mut Commands,
     template: &LinkTemplate,
@@ -545,8 +676,22 @@ pub(crate) fn spawn_link(
             TrackLink,
             Mesh3d(template.mesh.get(side).clone()),
             MeshMaterial3d(template.material.clone()),
+            VisibilityRange::abrupt(0.0, SHOE_LOD1_DISTANCE_M),
             Transform::from_xyz(0.0, -1000.0, 0.0),
             ChildOf(parent),
+        ))
+        .with_child((
+            TrackLink,
+            Mesh3d(template.lod1.get(side).clone()),
+            // The SAME material: the two levels differ in triangles and in nothing else, and a
+            // second material would put a second batch (and a visible shading seam) on the swap.
+            MeshMaterial3d(template.material.clone()),
+            VisibilityRange::abrupt(SHOE_LOD1_DISTANCE_M, f32::INFINITY),
+            // IDENTITY, and load-bearing: the LOD1 mesh is authored in the same mesh-local frame as
+            // the full shoe, so riding its parent's transform puts it exactly where the shoe was.
+            // It is also what makes the range test agree — both entities resolve to the same world
+            // origin, so they can never both be in (or both out of) range on the same frame.
+            Transform::IDENTITY,
         ))
         .id()
 }
@@ -625,6 +770,173 @@ mod tests {
 
     fn tiger_frames() -> PerSide<LinkFrame> {
         frames(PIN_START, PIN_END, SHOE_OUTBOARD)
+    }
+
+    /// A template whose four mesh handles are all DISTINCT, so a test can tell which one landed on
+    /// which entity. Built from a bare `Assets<Mesh>` rather than an `AssetPlugin` app: the only
+    /// thing under test is which handle `spawn_link` clones where.
+    fn fixture_template(assets: &mut Assets<Mesh>) -> LinkTemplate {
+        let mut fresh = || {
+            assets.add(Mesh::new(
+                PrimitiveTopology::TriangleList,
+                bevy::asset::RenderAssetUsages::default(),
+            ))
+        };
+        LinkTemplate {
+            mesh: PerSide::new(fresh(), fresh()),
+            lod1: PerSide::new(fresh(), fresh()),
+            material: Handle::default(),
+            frame: tiger_frames(),
+        }
+    }
+
+    /// Run `spawn_link` against a real `World` and hand back the pooled shoe and its child.
+    fn spawn_pair(world: &mut World, template: &LinkTemplate, side: Side) -> (Entity, Entity) {
+        let parent = world.spawn_empty().id();
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+        let mut commands = Commands::new(&mut queue, world);
+        let link = spawn_link(&mut commands, template, side, parent);
+        queue.apply(world);
+        let children = world
+            .entity(link)
+            .get::<Children>()
+            .expect("a shoe carries its LOD1 sibling");
+        assert_eq!(
+            children.len(),
+            1,
+            "exactly one sibling, never a second pool"
+        );
+        (link, children[0])
+    }
+
+    /// The LOD pair: two entities, two DIFFERENT meshes, one material, and ranges that meet.
+    ///
+    /// The handle assertion is the one that matters for cost — 388 shoes on a tank must be 388
+    /// references to the template's two LOD1 assets, not 388 meshes — and the range assertion is
+    /// what makes the pair a level-of-detail rather than a double-draw.
+    #[test]
+    fn a_shoe_and_its_lod1_sibling_split_the_distance_between_them() {
+        let mut assets = Assets::<Mesh>::default();
+        let template = fixture_template(&mut assets);
+        let mut world = World::new();
+
+        for side in Side::ALL {
+            let (link, lod1) = spawn_pair(&mut world, &template, side);
+            let mesh_of = |e: Entity| {
+                world
+                    .entity(e)
+                    .get::<Mesh3d>()
+                    .expect("a shoe is a mesh")
+                    .0
+                    .id()
+            };
+            assert_eq!(mesh_of(link), template.mesh.get(side).id());
+            assert_eq!(mesh_of(lod1), template.lod1.get(side).id());
+            assert_ne!(
+                mesh_of(link),
+                mesh_of(lod1),
+                "the two levels must be two meshes — a shared handle is not an LOD",
+            );
+            // The look is the artist's, once: a second material would mean a second batch and a
+            // shading seam on the swap.
+            assert_eq!(
+                world
+                    .entity(lod1)
+                    .get::<MeshMaterial3d<StandardMaterial>>()
+                    .map(|m| m.0.id()),
+                world
+                    .entity(link)
+                    .get::<MeshMaterial3d<StandardMaterial>>()
+                    .map(|m| m.0.id()),
+            );
+            // Coincident: the child rides its parent's transform, which is what lets one placement
+            // write serve both levels AND what makes the two range tests agree.
+            assert_eq!(
+                world.entity(lod1).get::<Transform>().copied(),
+                Some(Transform::IDENTITY),
+            );
+
+            let range = |e: Entity| {
+                world
+                    .entity(e)
+                    .get::<VisibilityRange>()
+                    .cloned()
+                    .expect("both levels are range-gated")
+            };
+            let (near, far) = (range(link), range(lod1));
+            assert!(
+                near.is_abrupt() && far.is_abrupt(),
+                "abrupt, so no shoe pipeline grows a crossfade permutation for a swap nobody sees",
+            );
+            assert_eq!(near.start_margin.start, 0.0);
+            assert_eq!(near.end_margin.end, SHOE_LOD1_DISTANCE_M);
+            assert_eq!(far.start_margin.start, SHOE_LOD1_DISTANCE_M);
+            assert!(far.end_margin.end.is_infinite(), "the far level never ends");
+
+            // COMPLEMENTARY: exactly one level is drawn at every distance — no gap where the track
+            // vanishes, no band where both are submitted.
+            for d in [
+                0.0,
+                1.0,
+                120.0,
+                SHOE_LOD1_DISTANCE_M - 0.01,
+                SHOE_LOD1_DISTANCE_M,
+                2_500.0,
+            ] {
+                assert_ne!(
+                    near.is_visible_at_all(d),
+                    far.is_visible_at_all(d),
+                    "at {d} m exactly one level must be visible",
+                );
+            }
+        }
+    }
+
+    /// The LOD1 sibling inherits the CASTER SWAP. When the shadow ribbon lands, `drive_track_views`
+    /// writes `VisualScope::PROXIED_CASTER` onto the pooled shoe and onto nothing else; the child
+    /// must go quiet with it, or a tank beyond [`SHOE_LOD1_DISTANCE_M`] would cast its whole belt
+    /// through the shadow map that the ribbon was built to replace.
+    ///
+    /// Asserted through `render_policy`'s own resolver rather than by reading a marker off the
+    /// spawn, because inheritance is exactly the mechanism being relied on: nothing in this module
+    /// writes a shadow marker or a layer, and this is the test that says so.
+    #[test]
+    fn silencing_a_shoe_silences_its_lod1_sibling() {
+        use crate::render_policy::{VisualScope, casts_shadow};
+
+        let mut assets = Assets::<Mesh>::default();
+        let template = fixture_template(&mut assets);
+        let mut app = App::new();
+        app.add_plugins(crate::render_policy::plugin);
+
+        let world = app.world_mut();
+        let tank = world.spawn(VisualScope::WORLD_SOLID).id();
+        let (link, lod1) = {
+            let mut queue = bevy::ecs::world::CommandQueue::default();
+            let mut commands = Commands::new(&mut queue, world);
+            let link = spawn_link(&mut commands, &template, Side::Right, tank);
+            queue.apply(world);
+            let child = world.entity(link).get::<Children>().expect("a sibling")[0];
+            (link, child)
+        };
+        app.update();
+        assert!(
+            casts_shadow(app.world(), link) && casts_shadow(app.world(), lod1),
+            "before the ribbon exists BOTH levels carry the belt's shadow, exactly as one shoe did",
+        );
+
+        app.world_mut()
+            .entity_mut(link)
+            .insert(VisualScope::PROXIED_CASTER);
+        app.update();
+        assert!(
+            !casts_shadow(app.world(), link),
+            "the swap silences the shoe it is written on",
+        );
+        assert!(
+            !casts_shadow(app.world(), lod1),
+            "and its LOD1 sibling, which is written on nothing at all",
+        );
     }
 
     /// The template's authored pose is a LEGAL on-track pose: `Link` carries no rotation, so a link
