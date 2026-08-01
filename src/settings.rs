@@ -1055,8 +1055,9 @@ pub(crate) struct AttachedDisplays {
     /// Which is exactly why this is an `Option<Entity>` and not a `bool`.
     /// [`DisplaySelection::monitor_on`] spends it as `MonitorSelection::Entity`, which resolves
     /// against the monitor list rather than against `primary_monitor()` — so a stale marker still
-    /// names a real, attached display instead of degrading into the no-op the Wayland finding was
-    /// about. The residual, stated: after the marked primary is unplugged the PRIMARY rung means
+    /// names a real, attached display instead of degrading into the Wayland no-op that
+    /// [`DisplaySelection::resolve`] describes. The residual, stated: after the marked primary is
+    /// unplugged the PRIMARY rung means
     /// "the first display" until bevy sees a new monitor it can mark. That is a bevy-side sync
     /// limitation, not one this module can observe its way out of.
     pub(crate) primary: Option<Entity>,
@@ -3271,8 +3272,7 @@ mod tests {
             .collect()
     }
 
-    /// **The boot window must not name a display bevy cannot resolve yet** (Codex, 2026-08-02 —
-    /// the still-open half of the HIGH finding).
+    /// **The boot window must not name a display bevy cannot resolve yet.**
     ///
     /// The trap, end to end: the roots described the window with the stored `Index(1)`; creation
     /// looked it up in an empty `WinitMonitors`, got `None`, and went fullscreen on
@@ -3357,7 +3357,7 @@ mod tests {
     }
 
     /// **Bevy's `PrimaryMonitor` marker is not a live fact, so the PRIMARY rung must not be spent
-    /// as `MonitorSelection::Primary`** (Codex, 2026-08-02, new MEDIUM).
+    /// as `MonitorSelection::Primary`.**
     ///
     /// `create_monitors` skips an already-seen monitor with `continue 'outer` BEFORE the marker
     /// insert (bevy_winit-0.19.0/src/system.rs:184-190 vs 217-219) and nothing anywhere removes or
@@ -3367,8 +3367,9 @@ mod tests {
     /// The hardening: whenever a marker exists, the rung is emitted as `MonitorSelection::Entity`,
     /// which `find_entity` resolves against the monitor list and which never consults the
     /// `primary_monitor()` that Wayland always answers `None` to. A STALE marker therefore still
-    /// names a real attached display instead of degrading into the no-op that the Wayland finding
-    /// was about. Where no marker survives, the documented `Index(0)` fallback takes over.
+    /// names a real attached display instead of degrading into the Wayland no-op
+    /// `a_machine_that_cannot_name_a_primary_falls_back_to_the_first_display` covers. Where no
+    /// marker survives, the documented `Index(0)` fallback takes over.
     #[test]
     fn the_primary_rung_survives_bevys_stale_monitor_markers() {
         let mut app = App::new();
@@ -3440,7 +3441,7 @@ mod tests {
 
     /// **The display row must reach FULLSCREEN, which is the mode the game is usually in.**
     ///
-    /// The bug this pins (Codex, 2026-08-01, severity HIGH): the row was applied ONLY as
+    /// The bug this pins: the row was applied ONLY as
     /// `Window::position`, and a fullscreen window ignores `set_outer_position`. Bevy picks a
     /// borderless window's monitor out of `Window::mode` alone —
     /// `if window.mode != cache.mode { … select_monitor(&monitor_selection) }`

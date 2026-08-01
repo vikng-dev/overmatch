@@ -606,12 +606,12 @@ const CARD_ROW_GAP_PX: f32 = 6.0;
 
 /// How much of the window height the card may occupy before its row list starts scrolling.
 ///
-/// **The page outgrew the screen and this is the measured fix** (2026-08-01). MEASURED headless at
+/// **The page outgrew the screen and this is the measured fix.** MEASURED 2026-08-01, headless, at
 /// the shipped 11 rows, in logical px: 506 at the 75% UI-scale rung, 666 at 100%, **1000 at 150%**
-/// — against the tests' 720 px `MIN_SUPPORTED_WINDOW_HEIGHT_PX`. The top rung was already over that floor at 9 rows
-/// (~875 px), so this is not a debt the two new rows created, only one they made impossible to keep
-/// ignoring: past the floor the card simply ran off the bottom of the screen, taking the footer
-/// hint and the control legend — the two things that explain the page — with it.
+/// — against the tests' 720 px `MIN_SUPPORTED_WINDOW_HEIGHT_PX`. The top rung was already over that
+/// floor at 9 rows (~875 px), so this is not a debt the two newest rows created, only one they made
+/// impossible to keep ignoring: past the floor the card simply ran off the bottom of the screen,
+/// taking the footer hint and the control legend — the two things that explain the page — with it.
 ///
 /// 90% rather than 100% so the scrim reads as a scrim: a card flush against both screen edges looks
 /// like a broken full-screen layout rather than a modal. The 10% also leaves the clipped row at the
@@ -2353,7 +2353,7 @@ mod tests {
     }
 
     /// **A trackpad's PIXEL delta is physical, and must be converted like every other physical
-    /// measurement here** (Codex, 2026-08-01).
+    /// measurement here.**
     ///
     /// winit's `MouseScrollDelta::PixelDelta` carries a `PhysicalPosition`
     /// (winit-0.30.13/src/event.rs:961-966) and bevy copies its components across unchanged

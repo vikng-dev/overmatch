@@ -608,10 +608,11 @@ mod tests {
         assert_eq!(pre_row.shadow_distance, ShadowDistance::M350);
     }
 
-    /// **The two 2026-08-01 rows, end to end through the real parse path.** Both landed on the
-    /// module doc's free path (a `Default`, a `skip_serializing_if`, a row in `ui::Row::ORDER`), and
-    /// this is what "free" means at the level that matters: every rung round-trips, the default
-    /// writes no key, and a file from before either row existed loads at the default.
+    /// **The display and detail-budget keys, end to end through the real parse path.** Both landed
+    /// on the module doc's free path (a `Default`, a `skip_serializing_if`, a row in
+    /// `ui::Row::ORDER`), and this is what "free" means at the level that matters: every rung
+    /// round-trips, the default writes no key, and a file from before either row existed loads at
+    /// the default.
     ///
     /// The bare-key half is not ceremony — it is the SUPPORTED INTERFACE for the frame sweep.
     /// `scripts/perf/run-frame-sweep.sh` generates a two-key `video.ron` per condition and relies on
@@ -674,7 +675,7 @@ mod tests {
         assert_eq!(pre_row.lod_pixel_budget.pixels(), 1.0);
     }
 
-    /// **A non-finite budget cannot survive the parse** (Codex, 2026-08-01).
+    /// **A non-finite budget cannot survive the parse.**
     ///
     /// RON accepts `NaN` and `inf`, and `Settings` derives `PartialEq` — so one `NaN` on disk makes
     /// the settings resource unequal to ITSELF, and the settings page's two no-op guards are
