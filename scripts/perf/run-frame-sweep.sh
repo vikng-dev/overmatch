@@ -41,14 +41,18 @@
 #     reads the app's requested mode, not the OS's pacing of the surface. Measured on the earlier
 #     shadow sweep: shadows fully OFF read 16.632 ms on the external panel and 12.057 ms on the
 #     built-in, same binary, same settings.
-#     ENFORCED, per condition: window 1 of the client is parked at {120,120} (GLOBAL coordinates —
-#     the origin lies on the main display) with osascript once the window exists, the position is
-#     RE-READ and must be exactly {120,120} or the condition is INVALID, and it is read once more at
-#     the end so a window that drifted or was dragged mid-condition invalidates it instead of being
-#     averaged in. Both reads go into the manifest. osascript needs Accessibility permission for the
-#     terminal running the sweep (System Settings > Privacy & Security > Accessibility); a failure
-#     of osascript ITSELF is INVALID too, never a skip — "could not park the window" and "the window
-#     is on the 60 Hz panel" are the same evidential state, and this guard exists to catch it.
+#     ENFORCED, but NOT from this script: the CLIENT parks its own window on the primary display at
+#     startup and records which monitor is presenting — name, refresh in millihertz, primary flag —
+#     as `{t, monitor, refresh_mhz, primary}` rows in the frame stream, at first resolution and on
+#     every change (src/frame_cost.rs). The analyzer then fails any condition whose measurement
+#     window is uncovered by a monitor row, covered by one below 100000 mHz, or split across two
+#     monitors. So the sweep gates on the MEASURED refresh of the surface that presented the
+#     frames, which is the quantity that poisons them.
+#     This replaces an osascript window-park guard that could never work: System Events reports
+#     ZERO windows for this unbundled winit binary on this macOS (verified with Accessibility
+#     granted and the process frontmost), so the guard's own failure mode fired on every run.
+#     A guard that cannot observe the thing it guards is worse than none — it teaches the operator
+#     to bypass it.
 #   * warm shader cache: the FIRST launch after a rebuild stalls >10 s on Metal pipeline
 #     compilation. Discard the first sweep after every rebuild (or do one throwaway run first).
 #   * hands off keyboard/mouse during conditions — input changes the workload.
@@ -64,9 +68,6 @@
 #   * the client must still be ALIVE at the scheduled cutoff — a child that died early produced
 #     a partial stream, not evidence;
 #   * the injected video.ron must have been loaded, and the probe tanks spawned;
-#   * real mode only: window 1 must park on the primary display before the measurement window opens
-#     and still be there at the end (the display precondition above) — both reads reach the
-#     manifest, and osascript failing to answer is itself a failed gate;
 #   * real mode only: the client must report `frame_cost: effective present mode Immediate,
 #     frame cap off` (proof the run was truly uncapped — Settings can silently normalize an
 #     unsupported vsync Off back to On, and a failed capability probe negotiates down to Fifo),
@@ -74,7 +75,7 @@
 #   * analyzer gates (also run per condition via --validate-only): monotonic timestamps, a row
 #     SPAN of at least warmup+duration (row COUNT cannot tell a 60 s run from a fast free-runner
 #     that died at 10 s), and — real mode — no occluded interval overlapping the measurement
-#     window.
+#     window, plus one >=100000 mHz monitor covering all of it (the display precondition above).
 #
 # SMOKE mode (plumbing validation ONLY — hidden window, so every number is free-run garbage
 # by construction; it proves rows flow and gates fire, nothing else; the output dir gets a
@@ -85,9 +86,7 @@
 # Usage: run-frame-sweep.sh <out-dir>
 # Knobs (env): BIN (default target/release), DURATION_S (60), WARMUP_S (10), COOLDOWN_S (15),
 #   MIN_ROWS (DURATION_S*20 — a real run at 60 fps writes ~60*DURATION_S), SMOKE (off),
-#   STARTUP_GRACE_S (60 — how much process startup the span deadline forgives),
-#   WINDOW_GRACE_S (STARTUP_GRACE_S — how long to wait for window 1 to exist before parking it),
-#   PARK_XY ("120,120" — where on the primary display the window is parked; both reads must match).
+#   STARTUP_GRACE_S (60 — how much process startup the span deadline forgives).
 # Per-run graphics settings are injected via OVERMATCH_CONFIG_DIR: each condition gets its own
 # scratch config dir with a generated video.ron (vsync_mode: Off so frames are never
 # refresh-clamped), so the sweep never touches the developer's real settings. Tank count rides
@@ -115,24 +114,9 @@ MIN_ROWS="${MIN_ROWS:-$((DURATION_S * 20))}"
 # How much process startup (asset load, Metal pipeline compilation, window creation) the span
 # deadline forgives before a condition is called stalled — see the poll loop below.
 STARTUP_GRACE_S="${STARTUP_GRACE_S:-60}"
-# Window parking (see the display precondition in the runbook). PARK_XY is a GLOBAL screen
-# coordinate: the origin sits on the main (built-in) display, so {120,120} is on it by construction
-# whatever else is plugged in. WINDOW_GRACE_S bounds the wait for window 1 to exist — the window is
-# created late in startup, after asset load and Metal pipeline compilation.
-PARK_XY="${PARK_XY:-120,120}"
-WINDOW_GRACE_S="${WINDOW_GRACE_S:-$STARTUP_GRACE_S}"
-
-# Strip whitespace, so an AppleScript list ("120, 120") compares against PARK_XY as written.
-norm_xy() { print -r -- "${1//[[:space:]]/}"; }
-# Position of the client's window 1, via System Events. Prints the reply (or the osascript error)
-# and returns osascript's status: an ERROR here is a failed gate, never a skip — a window that
-# cannot be read is a window that cannot be proven off the 60 Hz panel.
-window_pos() {
-  osascript -e "tell application \"System Events\" to tell (first process whose unix id is $CLIENT_PID) to get position of window 1" 2>&1
-}
-window_park() {
-  osascript -e "tell application \"System Events\" to tell (first process whose unix id is $CLIENT_PID) to set position of window 1 to {${PARK_XY%%,*}, ${PARK_XY##*,}}" 2>&1
-}
+# There is deliberately no window-parking knob here: the client parks its own window and records
+# the monitor that presented it (see the display precondition in the runbook), so the sweep's
+# display gate lives in the client and the analyzer, where it can observe what it claims.
 
 # A real sweep with the hidden-capture env exported would inherit it into every child, the window
 # would never be shown, and every gate below would happily pass on free-run fiction. Refuse rather
@@ -194,8 +178,8 @@ fi
   echo "mode: $([[ -n "$SMOKE" ]] && echo 'SMOKE / PLUMBING-ONLY (hidden window — every number is free-run fiction)' || echo 'real (visible window)')"
   echo "duration_s: $DURATION_S  warmup_s: $WARMUP_S  cooldown_s: $COOLDOWN_S  min_rows: $MIN_ROWS  bin: $BIN"
   echo "presentation gates: $([[ -n "$SMOKE" ]] \
-    && echo 'RELAXED — occlusion and effective-present-mode gates SKIPPED (hidden window by design)' \
-    || echo 'occlusion-free measurement window + effective present mode Immediate, frame cap off')"
+    && echo 'RELAXED — occlusion, display and effective-present-mode gates SKIPPED (hidden window by design)' \
+    || echo 'occlusion-free measurement window + one >=100000 mHz monitor throughout + effective present mode Immediate, frame cap off')"
   echo "conditions: ${CONDITIONS[*]}"
   echo "binary: $CLIENT  $(stat -f 'mtime=%Sm size=%z' "$CLIENT")"
   echo "host: $(uname -m) $(sysctl -n machdep.cpu.brand_string 2>/dev/null || uname -p)"
@@ -226,55 +210,6 @@ for entry in "${CONDITIONS[@]}"; do
     BEVY_ASSET_ROOT="$REPO" \
     "$CLIENT" --offline >"$OUT/$cond.log" 2>&1 &
   CLIENT_PID=$!
-
-  # ---- Park window 1 on the primary display (VALIDITY gate, see the runbook precondition) ----
-  # Ordered here on purpose: after the client is up, before the span deadline is armed and before
-  # any frame of the measurement window is written. Waiting for the window therefore does not eat
-  # the startup grace below, and no measured frame is ever presented on the 60 Hz external panel.
-  # SMOKE mode has no window to park (SPIKE_SIM_WINDOWED hides it) and no real numbers to poison.
-  pos_in="skipped (SMOKE: hidden window)"
-  pos_out="$pos_in"
-  if [[ -z "$SMOKE" ]]; then
-    park_deadline=$((SECONDS + WINDOW_GRACE_S))
-    parked=""
-    reply=""
-    while (( SECONDS < park_deadline )); do
-      # The window is created late in startup; a client that died on the way there is early death,
-      # not a parking problem, and says so.
-      state="$(ps -o state= -p "$CLIENT_PID" 2>/dev/null || true)"
-      if [[ -z "$state" || "$state" == *Z* ]]; then
-        echo "$cond INVALID: client exited during startup, before its window could be parked (see $OUT/$cond.log)" >&2
-        exit 1
-      fi
-      if reply="$(window_pos)"; then parked=1; break; fi
-      sleep 1
-    done
-    if [[ -z "$parked" ]]; then
-      echo "$cond INVALID: window not on primary display — 60Hz external pacing poisons frame times; see the runner header." >&2
-      echo "  window 1 of the client could not be read within ${WINDOW_GRACE_S}s; osascript said: ${reply:-<no reply>}" >&2
-      echo "  osascript failing IS the failure, not a skip: an unreadable window cannot be proven off the" >&2
-      echo "  60 Hz panel. If this is Accessibility permission, grant it to this terminal and re-run." >&2
-      exit 1
-    fi
-    if ! reply="$(window_park)"; then
-      echo "$cond INVALID: window not on primary display — 60Hz external pacing poisons frame times; see the runner header." >&2
-      echo "  osascript could not MOVE window 1 to {$PARK_XY}: ${reply:-<no reply>}" >&2
-      exit 1
-    fi
-    sleep 2
-    if ! pos_in="$(window_pos)"; then
-      echo "$cond INVALID: window not on primary display — 60Hz external pacing poisons frame times; see the runner header." >&2
-      echo "  osascript could not re-read window 1 after the move: ${pos_in:-<no reply>}" >&2
-      exit 1
-    fi
-    if [[ "$(norm_xy "$pos_in")" != "$(norm_xy "$PARK_XY")" ]]; then
-      echo "$cond INVALID: window not on primary display — 60Hz external pacing poisons frame times; see the runner header." >&2
-      echo "  asked for {$PARK_XY}, window reports [$pos_in] — the move was refused or undone. Frame times" >&2
-      echo "  from the external panel quantize to multiples of 16.67ms while every app-level gate here passes." >&2
-      exit 1
-    fi
-    echo "   $cond: window parked at [$pos_in]"
-  fi
 
   # Run the condition until the STREAM spans warmup+duration on its own clock — `t` is
   # app-elapsed time, so process startup (asset load, shader compilation, window creation; >10 s
@@ -315,22 +250,6 @@ for entry in "${CONDITIONS[@]}"; do
     echo "$cond INVALID: stream never spanned $((WARMUP_S + DURATION_S))s within the $((WARMUP_S + DURATION_S + STARTUP_GRACE_S))s deadline — stalled or never armed (see $OUT/$cond.log)" >&2
     exit 1
   fi
-  # Second read, while the client is still alive: a window that was parked and then DRIFTED (a
-  # dragged window, a display re-arrangement, a space switch) spent part of the measurement window
-  # somewhere this runner cannot vouch for. That is INVALID, not a footnote — the whole point of
-  # reading twice is that a failure to stay put is visible instead of silently averaged in.
-  if [[ -z "$SMOKE" ]]; then
-    if ! pos_out="$(window_pos)"; then
-      echo "$cond INVALID: window not on primary display — 60Hz external pacing poisons frame times; see the runner header." >&2
-      echo "  osascript could not re-read window 1 at the end of the condition: ${pos_out:-<no reply>}" >&2
-      exit 1
-    fi
-    if [[ "$(norm_xy "$pos_out")" != "$(norm_xy "$PARK_XY")" ]]; then
-      echo "$cond INVALID: window not on primary display — 60Hz external pacing poisons frame times; see the runner header." >&2
-      echo "  the window MOVED during the condition: parked at [$pos_in], ended at [$pos_out]." >&2
-      exit 1
-    fi
-  fi
   kill "$CLIENT_PID" 2>/dev/null || true
   wait "$CLIENT_PID" 2>/dev/null || true
   CLIENT_PID=""
@@ -357,28 +276,31 @@ for entry in "${CONDITIONS[@]}"; do
   fi
   # Stream-shape gates, shared with the final analysis pass (--validate-only runs the same code):
   # monotonic time, full warmup+duration SPAN, MIN_ROWS, and (real mode) no occluded interval
-  # overlapping the measurement window.
+  # overlapping the measurement window plus a fast-enough single monitor covering all of it.
+  # SMOKE relaxes both presentation gates for the same reason: its window is hidden, so it neither
+  # occludes honestly nor resolves a monitor at all, and its numbers are declared fiction.
   ( cd "$REPO" && uv run scripts/perf/analyze.py --validate-only --warmup-s "$WARMUP_S" \
       --min-rows "$MIN_ROWS" --expected-duration-s "$DURATION_S" \
-      ${SMOKE:+--occluded-ok} "$stream" ) \
+      ${SMOKE:+--occluded-ok --display-ok} "$stream" ) \
     || { echo "$cond INVALID: frame stream failed the analyzer's validity gates (see above)" >&2; exit 1; }
   # Presentation provenance into the manifest: the effective mode line verbatim, plus how many
-  # occlusion transitions the client observed (0 on a clean visible run after the initial show).
+  # occlusion transitions the client observed (0 on a clean visible run after the initial show),
+  # plus which display presented it — the client's own first-resolution line, quoted rather than
+  # asserted. The gate on it is the analyzer's, above; this is the human-readable receipt.
   {
     echo "$cond: $(grep -m1 -o 'frame_cost: effective present mode.*' "$OUT/$cond.log" || echo 'effective present mode NOT REPORTED')"
     echo "$cond: occlusion transitions in stream: $(grep -c '"occluded"' "$stream" || true)"
-    # Which display presented this condition, as the two positions that were actually read rather
-    # than as an assurance: both must equal PARK_XY or the condition never got here.
-    echo "$cond: window position parked [$pos_in] / at condition end [$pos_out] (asked {$PARK_XY})"
+    echo "$cond: $(grep -m1 -o 'frame_cost: presenting on monitor.*' "$OUT/$cond.log" || echo 'presenting monitor NOT REPORTED')"
+    echo "$cond: monitor rows in stream: $(grep -c '"monitor"' "$stream" || true) (>1 = the display changed during the run)"
   } >>"$OUT/manifest.txt"
-  echo "   $cond OK: $(wc -l <"$stream" | tr -d ' ') rows (frame + occlusion)"
+  echo "   $cond OK: $(wc -l <"$stream" | tr -d ' ') rows (frame + occlusion + monitor)"
 
   sleep "$COOLDOWN_S"
 done
 
 cd "$REPO"
 uv run scripts/perf/analyze.py --warmup-s "$WARMUP_S" --min-rows "$MIN_ROWS" \
-  --expected-duration-s "$DURATION_S" ${SMOKE:+--occluded-ok} \
+  --expected-duration-s "$DURATION_S" ${SMOKE:+--occluded-ok --display-ok} \
   --baseline "${CONDITIONS[1]%%:*}" "$OUT"/*.client.jsonl
 
 echo "sweep complete -> $OUT"
