@@ -10,6 +10,11 @@ meshes again. Read [THE SECOND RULE](#the-second-rule-a-base-mesh-is-human-domai
 before reaching for a decimator, and [Restoration](#restoration-putting-an-original-mesh-back)
 for how a base mesh gets put back.
 
+Two of them, `dedupe.py` and `singlesided.py`, no longer describe the shipped asset at all: the
+`.blend` now holds the MG dedupe and the back-face flags directly
+([below](#the-blend-holds-the-dedupe-and-the-culling-now-nothing-replays-them)). They stay as
+instruments for the NEXT vehicle, and as the record of how this one was measured.
+
 Nothing here runs in CI or in a hook. They are hand tools.
 
 ## THE TRACK SHOE'S LODs COME OUT OF THE .BLEND NOW, NOT OUT OF THIS DIRECTORY
@@ -96,11 +101,13 @@ legitimate.
     /Applications/Blender.app/Contents/MacOS/Blender -b assets/tiger_1/tiger_1.blend \
         --python-expr 'import sys; sys.path.insert(0, ".agents/blender"); import export_tiger; export_tiger.export()'
 
-That one run also replays the MG dedupe and the back-face flags onto the raw export before the
-bake (see [THE ONE RULE](#the-one-rule-never-re-export-this-glb-from-blender-to-apply-a-mesh-change)),
-so steps 3 and 4 below do NOT have to be re-run by hand afterwards — and the result is
-structurally identical to the previously shipped glb: same 64 meshes, 11 materials and 81 nodes,
-same names in the same order, nothing double-sided.
+That run is a PLAIN export — no replay stage, no surgery. The MG dedupe and the back-face flags
+come out of the `.blend`
+([below](#the-blend-holds-the-dedupe-and-the-culling-now-nothing-replays-them)), so steps 3 and 4
+below are not steps any more; they are the measurements that decided what the `.blend` should
+say. Measured 2026-08-01 against the previously shipped glb: same 64 meshes, 11 materials and 81
+nodes, same names in the same order, same node→mesh mapping, every mesh's decoded geometry and
+effective material equal, every KTX2 image payload hashing equal, nothing double-sided.
 
 Deterministic: independent headless runs produce byte-identical `tiger_1.glb`,
 `tiger_1_link.lod1.glb` and `tiger_1_link.lod2.glb`. Afterwards, the gates that apply are the two
@@ -122,20 +129,57 @@ If you re-export the tank for an actual art change, that is fine and correct —
 helper in `.agents/blender/` bakes the KTX2 back in. What is not fine is re-exporting to
 apply one of the edits below, because the bake is 60 s and the mistake is silent.
 
-**And the mips are not the only thing a re-export used to lose.** Two of the edits below live
-in the glb and cannot be authored in Blender at all, so a plain export reverted them with
-nothing to say so — measured 2026-08-01 against the shipped bytes: **67 meshes and 15 materials
-where the shipped glb has 64 and 11, and `doubleSided` back on every one of them.** That is
-[step 3](#3--machine-guns-dedupe-then-decimate-the-dedupe-ships-the-decimate-was-reverted)'s MG
-dedupe and [step 4](#4--back-face-culling)'s culling, undone. `export_tiger.py` now replays both
-onto the raw export before the bake — by invoking these same two scripts, not by copying them —
-so the export door and these tools cannot drift apart. If you add a third lossless glb-only edit,
-it belongs in that stage too, or the next re-export eats it.
+The mips were not the only thing a re-export used to lose — see
+[the section below](#the-blend-holds-the-dedupe-and-the-culling-now-nothing-replays-them) for
+what else it ate and why it no longer does.
 
 After ANY edit here, both of these must still pass:
 
     python3 scripts/tank/glb_ktx2.py verify assets/tiger_1/tiger_1.glb
     python3 scripts/tank/diet/validate.py assets/tiger_1/tiger_1.glb
+
+## THE .BLEND HOLDS THE DEDUPE AND THE CULLING NOW. NOTHING REPLAYS THEM.
+
+Two properties of the shipped glb used to be glb surgery, because Blender had no way to author
+either one *in that file*:
+
+* **the MG dedupe** — the coax and hull MG34 are the same model, imported twice, so the `.blend`
+  carried six mesh datablocks holding three meshes and eight materials holding four. The exporter
+  emitted every one: **67 meshes and 15 materials** against the shipped 64 and 11.
+* **back-face culling** — the exporter writes `doubleSided: true` for every material whose
+  `use_backface_culling` is off (`__gather_double_sided`, `io_scene_gltf2/blender/exp/material/
+  materials.py`; a material *with* the flag omits the key, which is glTF's single-sided default).
+  Every material in the `.blend` had it off, so every material shipped double-sided.
+
+For one day, `export_tiger.py` replayed both onto every raw export by invoking `dedupe.py` and
+`singlesided.py`. **That stage is gone.** A pipeline that repairs its input on every run is a
+workaround for a bad source, not a pipeline — and it left the `.blend` a file whose plain export
+was wrong, which is exactly the trap the next person opening it would fall into.
+
+[`.agents/blender/repair_source.py`](../../../.agents/blender/repair_source.py) fixed the source
+once, and is committed so the fix is a readable recipe rather than a binary that appeared:
+
+    blender -b assets/tiger_1/tiger_1.blend -P .agents/blender/repair_source.py -- --dry-run
+    blender -b assets/tiger_1/tiger_1.blend -P .agents/blender/repair_source.py
+
+It repoints the three coax objects at the hull's mesh datablocks, remaps and removes the four
+duplicate materials, and sets `use_backface_culling` on every material — then saves, once,
+explicitly. **It is the only script in this repo that saves the `.blend`**; `export_tiger.py`
+still never does. It is idempotent (a second run reports "already shares", changes nothing and
+does not save), and it verifies before it merges anything: every mesh attribute, every index and
+every material's node graph is decoded and hashed, to the same standard and for the same reason
+as `dedupe.py`'s glb-side check — the losing datablock is removed on the next line, so a pair
+that merely *looks* like a pair does not get merged. Run on the real `.blend` 2026-08-01: 67→64
+meshes, 30→26 materials, all three pairs and all four material pairs data-verified.
+
+The result of a plain export is strictly *cleaner* than the surgery ever produced. The glb-side
+dedupe dropped mesh entries without reclaiming their accessors; the fresh export never creates
+them. Measured: **15 fewer accessors, all of them previously unreferenced, and 664 576 fewer
+bytes of unreachable geometry**, with every mesh, node, material, mapping and image payload
+identical.
+
+Whether a *future* vehicle ships deduped and single-sided is a review question, not a script:
+see [THE THIRD RULE](#the-third-rule-model-quality-is-judged-at-review-not-asserted-by-the-export).
 
 ## THE SECOND RULE: a BASE mesh is human domain
 
@@ -157,7 +201,52 @@ The shoe's own tiers moved to the export stage on the same day
 travelled with them: LOD1 and LOD2 are machine-decimated, LOD0 is not.
 
 Everything in the diet that was NOT a simplification stayed: back-face culling, the MG
-dedupe, the deleted terrain textures. Those are lossless and they still ship.
+dedupe, the deleted terrain textures. Those are lossless and they still ship — the first two
+out of the `.blend` now
+([above](#the-blend-holds-the-dedupe-and-the-culling-now-nothing-replays-them)).
+
+## THE THIRD RULE: model quality is judged at REVIEW, not asserted by the export
+
+**These are review-time judgment rules for whoever — human or agent — is looking at a vehicle
+asset change. They are deliberately NOT script checks, and turning one into a script check is a
+change to be argued for, not a tidy-up.**
+
+The reasoning, from Yan, 2026-08-01, on the export verifier that was almost written:
+
+> "i don't want tiger-specific script validations, don't write a test or script that checks the
+> MG is indeed deduped. it's an agent-based model quality rule, not a script."
+
+A gate that asserts "this file has 64 meshes and 11 materials" is a gate that fails the day the
+model legitimately changes, and passes on every defect it was not told about. `export_tiger.py`
+is the door EVERY vehicle leaves Blender through; Tiger-shaped constants do not belong in it.
+What the export still enforces are properties of the *pipeline*, true of any model: the mip bake
+happened, the tier glbs are shaped the way the game's loader reads them, references resolve. The
+rest is judgment, and judgment is what a reviewer is for.
+
+So, when reviewing a vehicle asset or its `.blend`:
+
+1. **Duplicated geometry ships once.** Two objects that are the same model — a coax and a hull
+   MG34, a left and right roadwheel, a repeated fitting — should share ONE mesh datablock in the
+   `.blend`, not two copies of it. Ask whether anything in the file is imported twice. If it is,
+   fix the `.blend`; do not add a stage to the exporter. `dedupe.py`'s data-verified comparison
+   and `repair_source.py`'s bpy-side one are the tools for proving a pair really is a pair — a
+   name and a vertex count are not proof.
+2. **Materials are single-sided unless a surface is deliberately thin.** `doubleSided` turns off
+   the cheapest cull there is, and it pays for shading the inside of a closed hull nobody can see
+   into. Set `use_backface_culling` in the `.blend`. The exception is real — a single-layer sheet with no
+   back face modelled *needs* it — so the question is per material, and the way to answer it is
+   `backface.py` / `drive_bf.py` at 2 000 px, not an opinion. The Tiger's answer was 115 red
+   pixels in 128 M over 32 camera positions, all coincident faces rather than holes.
+3. **A base mesh is human domain.** [THE SECOND RULE](#the-second-rule-a-base-mesh-is-human-domain),
+   restated here because it is the same kind of rule: what a player walks up to is not a budget's
+   decision. Machine decimation is for distance tiers.
+4. **A fix belongs in the source, not in the stage that reads it.** If an export needs a
+   correction applied afterwards, the asset is wrong. Repair the asset, write the repair down as
+   a script if it is not a two-click job, and leave the pipeline a plain pipeline.
+
+`report.py` is the instrument for (1) and (2) on shipped bytes — it prints per-node mesh indices
+(two nodes on one index *is* the dedupe) and a `doubleSided materials: n/m` line. It reports; it
+does not gate. Read it, do not wire it.
 
 ## The tools
 
@@ -167,8 +256,8 @@ dedupe, the deleted terrain textures. Those are lossless and they still ship.
 |---|---|
 | `glblib.py` | GLB chunk reader/writer and accessor decoder. Every other pure-Python tool imports it. Owns `JSON_PAD` — see below. |
 | `inject.py` | Replace one primitive's POSITION/NORMAL/TEXCOORD_0/indices from a geometry-only glb, in place. Mesh name, mesh index, the node above it and the material binding are untouched. Takes a mesh index OR a mesh name. |
-| `dedupe.py` | Point named nodes at a shared mesh, proving the geometry is identical first — every decoded attribute element, every index and the effective material, not the counts — then garbage-collect the meshes and materials that orphans (with full index remapping). `dedupe.py selftest` proves the check both ways. |
-| `singlesided.py` | Drop `doubleSided` from materials, optionally sparing named ones. |
+| `dedupe.py` | Point named nodes at a shared mesh, proving the geometry is identical first — every decoded attribute element, every index and the effective material, not the counts — then garbage-collect the meshes and materials that orphans (with full index remapping). `dedupe.py selftest` proves the check both ways. **Nothing shipped is built by it any more** — the Tiger's `.blend` shares the datablocks directly. Still the tool for *proving* two primitives are one model. |
+| `singlesided.py` | Drop `doubleSided` from materials, optionally sparing named ones. **Nothing shipped is built by it any more** — `use_backface_culling` is set in the `.blend`. Kept for a glb whose source is not to hand. |
 | `extract.py` | Pull one mesh primitive out into a minimal geometry-only glb — the file Blender is allowed to touch. |
 | `extract_all.py` | Pull EVERY visible primitive out with its world transform baked, one mesh per primitive named `<node>::<material>`. Applies the same visibility rules `src/` does. `--nodes`, `--only`, `--with-link`, `SHOW_HIDDEN=1`. |
 | `rename.py` | Rename the mesh and node of a one-mesh glb and re-emit it compactly. |
@@ -223,13 +312,18 @@ Verified 2026-08-01 on Blender 5.1.2: re-running steps 1 and 2 reproduces all th
 these steps ever shipped — 518, 194 and 964 triangles — with **bit-identical vertex positions**.
 The decimation is deterministic; the recipe below is the record of what those assets were.
 
-**Steps 1, 2 and 3 are SUPERSEDED as shipped state.** The base-mesh decimations in 1 and 3 were
-reverted on 2026-08-01 (see [Restoration](#restoration-putting-an-original-mesh-back)), and the
-shoe's LOD tiers moved to the export stage the same day
-([above](#the-track-shoes-lods-come-out-of-the-blend-now-not-out-of-this-directory)) — so of
-what follows, only step 4 and the `alt964` half of step 2 describe anything currently in the
-repo. The rest is kept verbatim because the numbers are the record of what was measured and
-because everything downstream still starts from the `$W/shoe_src.glb` step 1 extracts.
+**ALL FOUR STEPS ARE SUPERSEDED AS SHIPPED STATE — none of them builds anything currently in
+the repo.** The base-mesh decimations in 1 and 3 were reverted on 2026-08-01 (see
+[Restoration](#restoration-putting-an-original-mesh-back)); the shoe's LOD tiers moved to the
+export stage the same day
+([above](#the-track-shoes-lods-come-out-of-the-blend-now-not-out-of-this-directory)); and the
+dedupe in 3 and the culling in 4 moved into the `.blend`
+([above](#the-blend-holds-the-dedupe-and-the-culling-now-nothing-replays-them)), so the two
+`dedupe.py`/`singlesided.py` invocations below are now no-ops against a fresh export. Of what
+follows, only the `alt964` half of step 2 still produces a file in the repo. The rest is kept
+verbatim because the numbers are the record of what was measured, because the PROBES in 3 and 4
+are still the way to answer those questions on a new model, and because everything downstream
+still starts from the `$W/shoe_src.glb` step 1 extracts.
 
 ### 1 — track shoe, 5 552 -> 518 triangles (SUPERSEDED — the extract is still the shared input)
 
@@ -258,7 +352,7 @@ lines are kept because the alt964 recipe beside them still depends on the same `
 `tiger_1_link.alt964.glb` is the candidate that keeps the pin bosses. Swapping it in is one
 `inject.py` call with mesh name `Link`; that trade is Yan's, not this directory's.
 
-### 3 — machine guns: dedupe, THEN decimate (the DEDUPE ships; the decimate was REVERTED)
+### 3 — machine guns: dedupe, THEN decimate (BOTH SUPERSEDED — the dedupe is in the .blend now)
 
 Order matters. `dedupe.py` proves the two meshes are geometrically identical before it
 repoints anything, so decimating first makes that check fail — correctly.
@@ -296,10 +390,17 @@ edges, and the collapse decimator floors at 1 139 triangles with spikes off the 
 Note the mesh reference switches from index (`15`) to name (`Object_0.002`) after the dedupe
 step, because the GC moved every index above 29.
 
-### 4 — back-face culling
+The `dedupe.py` invocation above is a no-op against a current export — the `.blend` already
+shares those three datablocks, so `dedupe.py` reports "already on mesh N" for each. What is NOT
+superseded is the `selftest` and the comparison behind it: that is how you prove a pair on the
+NEXT model, and `repair_source.py` re-implements the same standard on the bpy side.
 
-Steps 3 and 4 are the two the export stage replays for you (see THE ONE RULE); what follows is
-the PROBE that decided them, which is still a hand step and is still the thing to re-run if the
+### 4 — back-face culling (SUPERSEDED as an edit; the PROBE is the part that still matters)
+
+`singlesided.py` no longer has anything to strip — `use_backface_culling` is set on every
+material in the `.blend`
+([above](#the-blend-holds-the-dedupe-and-the-culling-now-nothing-replays-them)). What follows is
+the PROBE that decided it, which is still a hand step and is still the thing to re-run if the
 model gains a single-layer surface.
 
     python3 scripts/tank/diet/extract_all.py assets/tiger_1/tiger_1.glb $W/vis.glb --with-link
