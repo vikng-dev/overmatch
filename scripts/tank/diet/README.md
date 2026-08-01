@@ -2,9 +2,14 @@
 
 Twenty small scripts that decimated the track shoe, deduplicated the machine guns and turned
 back-face culling on, plus the instruments that proved each one safe. They exist because the
-assets they produced are **binary and otherwise unreproducible**: `assets/tiger_1/tiger_1.glb`
-is a tracked git-lfs blob whose `Link` and `Object_0.002` meshes are no longer anything a
-human authored, and the `.blend` they came from is untracked and 140 MB.
+assets they act on are **binary and otherwise unreproducible**: `assets/tiger_1/tiger_1.glb`
+is a tracked git-lfs blob, and the `.blend` it came from is untracked and 140 MB.
+
+The two decimations were REVERTED on 2026-08-01 — `Link` and `Object_0.002` are the authored
+meshes again — so the only machine-generated geometry the repo now ships is the distance-LOD
+shoe `tiger_1_link.lod1.glb`. Read [THE SECOND RULE](#the-second-rule-a-base-mesh-is-human-domain)
+before reaching for a decimator, and [Restoration](#restoration-putting-an-original-mesh-back)
+for how a base mesh gets put back.
 
 Nothing here runs in CI or in a hook. They are hand tools.
 
@@ -25,6 +30,25 @@ After ANY edit here, both of these must still pass:
 
     python3 scripts/tank/glb_ktx2.py verify assets/tiger_1/tiger_1.glb
     python3 scripts/tank/diet/validate.py assets/tiger_1/tiger_1.glb
+
+## THE SECOND RULE: a BASE mesh is human domain
+
+Standing instruction from Yan, 2026-08-01, after reviewing the shipped decimations:
+
+> "518 is not good, 964 is debatable (mangled and asymmetric). same for the MG.
+> model simplification is still human domain."
+
+The decimators in here may produce **distance-LOD candidates only**, and every candidate is
+an unwired asset until an eyeball says otherwise. What a player sees up close — the base
+mesh a node actually points at — is not something a quadric-collapse budget gets to decide.
+This is a quality rule, not a perf one, and it outranks any triangle target in this file.
+
+So: `decimate.py` output is legitimate for `tiger_1_link.lod1.glb` at 500 m, and is NOT
+legitimate for `Link` or `Object_0.002`. The 5 552-triangle shoe and the 7 701-triangle MG
+barrel are the shipped base, restored on 2026-08-01 — see [Restoration](#restoration-putting-an-original-mesh-back).
+
+Everything in the diet that was NOT a simplification stayed: back-face culling, the MG
+dedupe, the deleted terrain textures. Those are lossless and they still ship.
 
 ## The tools
 
@@ -69,7 +93,8 @@ faces should not spend budget. It does not pay off at a tight budget — on the 
 the MG barrel's floor either. It is kept because it built the 964-triangle shoe alternative,
 and because the negative result is worth not re-deriving.
 
-`decimate.py` is the one that shipped: import with `merge_vertices`, weld at 1e-5, triangulate,
+`decimate.py` is the one whose output still ships — as `tiger_1_link.lod1.glb` only, never as
+a base mesh: import with `merge_vertices`, weld at 1e-5, triangulate,
 binary-search a quadric-collapse ratio to a triangle budget, then rebuild hard edges from a
 dihedral angle. The collapse decimator drops custom split normals, so re-shading is not
 optional — and the angle is a real lever: 30 deg gives 993 verts, 12 deg gives 1 303 for the
@@ -86,7 +111,13 @@ Verified 2026-08-01 on Blender 5.1.2: re-running steps 1 and 2 reproduces all th
 shoe meshes — 518, 194 and 964 triangles — with **bit-identical vertex positions**. The
 decimation is deterministic; the recipe below is the asset's real source.
 
-### 1 — track shoe, 5 552 -> 518 triangles
+**Steps 1 and 3 are SUPERSEDED as shipped state.** Their decimations were reverted on
+2026-08-01 (see [Restoration](#restoration-putting-an-original-mesh-back)); they are kept
+verbatim because step 1 is still how `tiger_1_link.lod1.glb` is built, step 2 depends on the
+`$W/shoe_src.glb` step 1 extracts, and the numbers are the record of what was measured.
+Steps 2 and 4 ship as written.
+
+### 1 — track shoe, 5 552 -> 518 triangles (REVERTED — LOD1 in step 2 still uses this path)
 
     python3 scripts/tank/diet/extract.py assets/tiger_1/tiger_1.glb 1 $W/shoe_src.glb
     blender -b -P scripts/tank/diet/decimate.py -- $W/shoe_src.glb $W/shoe_lod0.glb 520 30
@@ -108,7 +139,7 @@ per-element analytic, so nothing samples this mesh.
 `tiger_1_link.alt964.glb` is the candidate that keeps the pin bosses. Swapping it in is one
 `inject.py` call with mesh name `Link`; that trade is Yan's, not this directory's.
 
-### 3 — machine guns: dedupe, THEN decimate
+### 3 — machine guns: dedupe, THEN decimate (the DEDUPE ships; the decimate was REVERTED)
 
 Order matters. `dedupe.py` proves the two meshes are geometrically identical before it
 repoints anything, so decimating first makes that check fail — correctly.
@@ -162,6 +193,104 @@ Re-verified 2026-08-01 on Blender 5.1.2 against the committed `tiger_1.glb`, thr
 fail-closed gate: **115 red pixels over 32 frames at 2 000 px, worst frame
 `p_el-15_az135.png` at 38** — the same number and the same worst frame as the run that
 decided the change. Frames land in `scripts/tank/diet/out/` (gitignored, never committed).
+
+## Restoration: putting an original mesh back
+
+Done 2026-08-01 for `Link` (518 -> 5 552) and `Object_0.002` (1 923 -> 7 701) under THE
+SECOND RULE above. The recipe is step 1 and step 3 run in the OTHER DIRECTION, and it is a
+recipe rather than a file copy for one reason: the current glb also carries the diet's
+lossless wins — `doubleSided` gone from all 11 materials, the MG dedupe with its garbage
+collection, the terrain textures deleted — and a file copy would throw all of that away
+along with the decimation. So the geometry is moved, not the file.
+
+`$ORIG` is the PRE-diet glb, i.e. the bytes of `b86c1af:assets/tiger_1/tiger_1.glb`. It is
+not in the worktree; materialise it from git-lfs and check it before trusting it, because a
+plain `git show` of an lfs path yields the 133-byte POINTER, not the asset:
+
+    git show b86c1af:assets/tiger_1/tiger_1.glb          # -> "version https://git-lfs..."
+
+Read the `oid sha256:` out of that pointer and take the object from the lfs cache
+(`.git/lfs/objects/<xx>/<yy>/<oid>`), or `git lfs fetch` it. Verify before use — 63 170 892
+bytes, and `shasum -a 256` equal to the pointer's oid.
+
+    python3 scripts/tank/diet/extract.py $ORIG 1  $W/shoe_orig.glb     # Link,         5 552 tris
+    python3 scripts/tank/diet/extract.py $ORIG 15 $W/barrel_orig.glb   # Object_0.002, 7 701 tris
+    python3 scripts/tank/diet/inject.py assets/tiger_1/tiger_1.glb \
+        Link $W/shoe_orig.glb  Object_0.002 $W/barrel_orig.glb
+
+Mesh 15 in the PRE-diet file is already `Object_0.002` — the dedupe GC only moved indices
+ABOVE 29, so the two files agree here. Inject by NAME anyway, as above; the name is what
+survives an index shift, and `inject.py` asserts the name matches exactly one mesh.
+
+The round trip is exactly lossless on this asset, which is worth having checked rather than
+assumed: both meshes store POSITION / NORMAL / TEXCOORD_0 as float32 and indices as
+`5123` (u16), carry no tangents and no second UV, and have one primitive each — so
+`extract.py`'s decode and `inject.py`'s re-encode reproduce every element bit-for-bit.
+Confirm it, do not trust it:
+
+Fenced rather than indented because the body is Python and the leading spaces would matter:
+
+```sh
+ORIG=/path/to/pre-diet/tiger_1.glb python3 - <<'EOF'
+import os, sys; sys.path.insert(0, "scripts/tank/diet")
+import glblib
+cur = glblib.Glb.load("assets/tiger_1/tiger_1.glb")
+org = glblib.Glb.load(os.environ["ORIG"])
+for mi in (1, 15):
+    c, o = (g.gltf["meshes"][mi]["primitives"][0] for g in (cur, org))
+    for k in ("POSITION", "NORMAL", "TEXCOORD_0"):
+        assert cur.read_accessor(c["attributes"][k]) == org.read_accessor(o["attributes"][k]), k
+    assert cur.read_accessor(c["indices"]) == org.read_accessor(o["indices"])
+    assert c.get("material") == o.get("material")
+print("both meshes bit-exact against the pre-diet file")
+EOF
+```
+
+### What the restoration must NOT disturb, and how that was shown
+
+Injecting geometry touches accessors, so the check that matters is a whole-file diff against
+the PRE-restoration glb rather than a look at the two meshes. Decode every mesh in both and
+compare digests; then compare the JSON sections and the image payloads directly. The
+2026-08-01 run reported **exactly two meshes changed — `Link` and `Object_0.002`** — with
+`materials`, `nodes`, `scenes`, `images`, `textures` and `samplers` all structurally
+identical and the KTX2 image bytes hashing equal. That is the evidence the dedupe, the
+culling and the mip chains survived; the tri counts alone would not have shown it.
+
+The four standing checks, all of which passed:
+
+    python3 scripts/tank/diet/validate.py assets/tiger_1/tiger_1.glb   # refs resolve, views in bounds
+    python3 scripts/tank/glb_ktx2.py verify assets/tiger_1/tiger_1.glb # 9 images, mip chains 10..13
+    python3 scripts/tank/diet/report.py assets/tiger_1/tiger_1.glb     # per-tank counts, doubleSided 0/11
+    python3 scripts/tank/diet/dedupe.py selftest                       # the equality check still refuses twins
+
+`report.py` after restoration: shoe 5 552, visible body 69 834, belt 194 x 5 552 = 1 077 088,
+**PER TANK 1 146 922 tris / 2 122 976 verts** — the pre-diet number, because the diet's
+remaining wins do not change triangle count. `doubleSided materials: 0/11` is the line that
+proves culling stayed on.
+
+### Renders
+
+Turntables of both restored meshes, beside the rejected decimations, at four azimuths in
+textured/clay and wireframe:
+
+    RES=900 python3 scripts/tank/diet/drive_render.py $OUT $W/link_tex 40,90,140,230 \
+        shoe_restored_5552=$W/shoe_restored.glb shoe_rejected_518=$W/shoe_dec518.glb
+    RES=900 MAT_COLOR=0.022 MAT_METAL=0.827 MAT_ROUGH=0.5 \
+    python3 scripts/tank/diet/drive_render.py $OUT - 40,90,140,230 \
+        barrel_restored_7701=$W/barrel_restored.glb barrel_rejected_1923=$W/barrel_dec1923.glb
+
+The barrel takes `-` for its texture directory and the `MAT_*` factors instead: its material
+(`Material.006`) carries NO textures, only a near-black base colour of 0.0220 at metallic
+0.827 — passing a texture directory there would render a lie. The shoe's `Mat_Track_Link`
+does have maps; build its directory with `dumpimg.py` on images 1 / 2 / 0 (albedo /
+roughness / normal), `basisu -unpack` each, and copy the `*_unpacked_rgb_RGBA32_level_0_*`
+PNGs — level 0 and RGBA32, not one of the transcoded formats, or the render judges the
+codec instead of the mesh.
+
+One artefact to expect and not chase: in `wire` mode the Wireframe modifier throws long
+spikes off both barrels, restored and decimated alike. That is the modifier meeting the MG
+jacket's 13 open shells and 207 boundary edges, not damage in the mesh — the clay and
+textured rows are the ones to read for the barrel.
 
 ## Two design decisions that look like bugs
 
