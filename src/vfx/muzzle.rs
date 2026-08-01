@@ -60,9 +60,6 @@ const LIGHT_CAP: usize = 12;
 /// The MG tracer-round brightness spike: a tracer round's muzzle light is this much brighter than a
 /// ball round's, so the flicker still reads harder exactly when a streak leaves the barrel.
 const MG_TRACER_LIGHT_BOOST: f32 = 1.5;
-/// [`MuzzleShadows::MgEveryNth`] fallback: only every this-many-th MG light casts a shadow (the 88
-/// always does in that mode). The measurement fallback if sustained MG shadow cost spikes.
-const MG_SHADOW_EVERY: u32 = 4;
 
 // --- The MG's dressing knobs (slice B): the 88's machinery at rifle scale.
 
@@ -96,10 +93,14 @@ const MG_SMOKE_PUSH: f32 = 0.7;
 const FAR_FULL_DRESSING: f32 = 400.0;
 
 pub(super) fn plugin(app: &mut App) {
+    let shadows = MuzzleShadows::from_env();
+    // The RESOLVED policy, logged verbatim as the token the env knob accepts — an A/B runner
+    // (`scripts/perf/run-fire-capture.sh`) greps this per condition and fails on a mismatch, so a
+    // typo'd or dropped `OVERMATCH_MUZZLE_SHADOWS` cannot silently measure the default arm twice.
+    info!("muzzle_shadows: resolved {}", shadows.token());
     app.init_resource::<MuzzleLightRing>()
         .init_resource::<MgSmokeCadence>()
-        .init_resource::<MgShadowCadence>()
-        .insert_resource(MuzzleShadows::from_env())
+        .insert_resource(shadows)
         .add_systems(Startup, setup_muzzle_assets)
         .add_observer(on_main_gun_fire)
         .add_observer(on_mg_fire)
@@ -107,25 +108,72 @@ pub(super) fn plugin(app: &mut App) {
 }
 
 /// Muzzle-light shadow policy, read once at plugin setup.
+///
+/// The default is [`Self::MainGunOnly`] on MEASURED evidence (M4, 2 tanks, `M350` shadows, vsync
+/// off, `scripts/perf/run-fire-capture.sh` 2026-07-31): a shadow-casting point light per MG round
+/// at the Tiger's 2 × 750 rpm is the single dominant cost of holding the trigger. Idle blew the
+/// 60 fps budget on 3.6% of frames; with both MGs firing that became ~42% — while the same scene
+/// with muzzle shadows off moved only 14.4% → 16.8%. p50 tracked it: 13.5 → 15.5 ms firing with
+/// MG shadow casting, 13.5 → 14.6 ms without.
+///
+/// The mechanism is that a point light's shadow is SIX cubemap faces, each re-submitting the
+/// shooter's own tank — and a Tiger is the project's known worst shadow caster (194 track links
+/// per pass). At ~25 rounds/s over a 0.05 s light lifetime that is a shadow cubemap being built,
+/// used for ~3 frames, and thrown away, continuously, for a 16 m glimmer that lasts long enough to
+/// be seen but nowhere near long enough for its SHADOW to be read.
 #[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(super) enum MuzzleShadows {
-    /// Every muzzle light casts a shadow (the decision's default).
+    /// The shipped decision: the 88's flash casts (one shot per ~3 s, a real lighting event), the
+    /// MGs' do not.
     #[default]
+    MainGunOnly,
+    /// Every muzzle light casts, MG rounds included — what shipped before the measurement above,
+    /// kept as that A/B's arm rather than deleted, since it is the only way to re-run it.
     On,
-    /// The 88 casts; MG lights cast only every [`MG_SHADOW_EVERY`]-th round (the cost fallback).
-    MgEveryNth,
     /// No muzzle light casts a shadow (the measurement baseline / hard fallback).
     Off,
 }
 
 impl MuzzleShadows {
+    /// Parse `OVERMATCH_MUZZLE_SHADOWS`. Every variant has an EXPLICIT token, the shipped default
+    /// included: an A/B arm that wants the shipped policy has to be able to NAME it, or its
+    /// "shipped" condition silently becomes whatever the default happens to be on the day — which
+    /// is exactly how this script's `shipped` arm came to export the legacy policy after the
+    /// default moved to [`Self::MainGunOnly`].
     fn from_env() -> Self {
-        match std::env::var("OVERMATCH_MUZZLE_SHADOWS").ok().as_deref() {
+        Self::parse(std::env::var("OVERMATCH_MUZZLE_SHADOWS").ok().as_deref())
+    }
+
+    /// The knob's whole grammar, split out so it is testable without writing process-global state.
+    fn parse(value: Option<&str>) -> Self {
+        match value {
             Some("off") => Self::Off,
-            Some("mg-nth") => Self::MgEveryNth,
-            // Unset, "on", or anything else: the default decision.
-            _ => Self::On,
+            Some("on") => Self::On,
+            Some("main-only") => Self::MainGunOnly,
+            // Unset or anything else: the default decision. Unrecognized values are visible in the
+            // resolved-policy log line, which is what the runner verifies against.
+            _ => Self::MainGunOnly,
         }
+    }
+
+    /// The token this policy is named by — the same string [`Self::from_env`] accepts, so the
+    /// logged value round-trips back through the knob.
+    fn token(self) -> &'static str {
+        match self {
+            Self::MainGunOnly => "main-only",
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+
+    /// Whether an MG round's muzzle light casts — the hot path this lever exists for.
+    fn mg_casts(self) -> bool {
+        self == Self::On
+    }
+
+    /// Whether the main gun's muzzle light casts.
+    fn main_gun_casts(self) -> bool {
+        self != Self::Off
     }
 }
 
@@ -242,11 +290,6 @@ struct MuzzleLightRing(std::collections::VecDeque<Entity>);
 /// Belt-position counter for the MG smoke ration ([`MG_SMOKE_EVERY`]); ticks once per MG round.
 #[derive(Resource, Default)]
 struct MgSmokeCadence(u32);
-
-/// Round counter for the [`MuzzleShadows::MgEveryNth`] fallback ([`MG_SHADOW_EVERY`]); ticks once
-/// per MG round, deciding which rounds' lights cast a shadow in that mode.
-#[derive(Resource, Default)]
-struct MgShadowCadence(u32);
 
 /// Spawn one transient muzzle light into the shared ring — the 88's and the MGs' common machinery;
 /// peak/range/lifetime/radius are the caller's scale knobs, `shadows` the lever-resolved decision.
@@ -461,7 +504,7 @@ fn on_main_gun_fire(
         LIGHT_RANGE,
         LIGHT_LIFETIME,
         0.4,
-        *shadows != MuzzleShadows::Off,
+        shadows.main_gun_casts(),
     );
 }
 
@@ -477,7 +520,6 @@ fn on_mg_fire(
     mut ring: ResMut<BillboardRing>,
     mut light_ring: ResMut<MuzzleLightRing>,
     mut cadence: ResMut<MgSmokeCadence>,
-    mut shadow_cadence: ResMut<MgShadowCadence>,
     shadows: Res<MuzzleShadows>,
     mut rng: ResMut<ViewRng>,
     camera: Query<&GlobalTransform, With<Camera3d>>,
@@ -596,16 +638,11 @@ fn on_mg_fire(
         );
     }
 
-    // --- Muzzle light: EVERY round now (the tracer-only gate is gone — a per-round glimmer reads as
+    // --- Muzzle light: EVERY round (the tracer-only gate is gone — a per-round glimmer reads as
     // real automatic fire). A tracer round spikes brighter so the streak still pops as it leaves the
-    // barrel. Shadow casting is the lever's call: On casts always, MgEveryNth casts every
-    // [`MG_SHADOW_EVERY`]-th round (the 88 unaffected), Off never.
-    shadow_cadence.0 = shadow_cadence.0.wrapping_add(1);
-    let mg_shadows = match *shadows {
-        MuzzleShadows::On => true,
-        MuzzleShadows::Off => false,
-        MuzzleShadows::MgEveryNth => shadow_cadence.0.is_multiple_of(MG_SHADOW_EVERY),
-    };
+    // barrel. It does NOT cast a shadow under the shipped lever: six cubemap faces of the shooter's
+    // own Tiger, per round, at 750 rpm, was the measured dominant cost of holding the trigger — see
+    // [`MuzzleShadows`] for the numbers.
     let peak = if fire.tracer {
         MG_LIGHT_PEAK_LUMENS * MG_TRACER_LIGHT_BOOST
     } else {
@@ -619,7 +656,7 @@ fn on_mg_fire(
         MG_LIGHT_RANGE,
         MG_LIGHT_LIFETIME,
         0.1,
-        mg_shadows,
+        shadows.mg_casts(),
     );
 }
 
@@ -652,9 +689,9 @@ mod tests {
 
     /// Minimal app carrying what BOTH fire observers + the agers read: bare asset stores, a
     /// fixed-seed view RNG, no camera (distance LOD treats that as near — full dressing). Defaults
-    /// to the shipped `MuzzleShadows::On`; `harness_shadows` overrides for the lever tests.
+    /// to the shipped `MuzzleShadows::MainGunOnly`; `harness_shadows` overrides for the lever tests.
     fn harness() -> App {
-        harness_shadows(MuzzleShadows::On)
+        harness_shadows(MuzzleShadows::default())
     }
 
     fn harness_shadows(mode: MuzzleShadows) -> App {
@@ -662,7 +699,6 @@ mod tests {
         app.init_resource::<BillboardRing>()
             .init_resource::<MuzzleLightRing>()
             .init_resource::<MgSmokeCadence>()
-            .init_resource::<MgShadowCadence>()
             .insert_resource(mode)
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<Image>>()
@@ -833,49 +869,77 @@ mod tests {
             (light.peak - ball_peak * MG_TRACER_LIGHT_BOOST).abs() < 1.0,
             "the tracer round's light spikes {MG_TRACER_LIGHT_BOOST}× the ball round's"
         );
-        // Under the default (shadows On) even the MG light casts.
+        // Under the shipped lever the MG light is present but does NOT cast — the whole point of
+        // the 2026-07-31 measurement (see [`MuzzleShadows`]).
         assert!(
-            point.shadow_maps_enabled,
-            "shadows On casts on the MG light"
+            !point.shadow_maps_enabled,
+            "the shipped lever spares the MG light its shadow cubemap"
         );
     }
 
-    /// The shadow lever: `On` casts on both guns, `Off` casts on neither, `MgEveryNth` spares the MG
-    /// except every [`MG_SHADOW_EVERY`]-th round while the 88 always casts.
+    /// The shadow lever: `MainGunOnly` (shipped) casts on the 88 alone, `On` casts on both guns,
+    /// `Off` casts on neither. The MG arm is the cost-bearing one — an MG round's light casting is
+    /// six cubemap faces of the shooter's own Tiger at 750 rpm.
     #[test]
     fn shadow_lever_gates_casting() {
-        // Off: neither gun casts.
-        let mut off = harness_shadows(MuzzleShadows::Off);
-        fire(&mut off, 0.088, 0);
-        fire_round(&mut off, MG_CALIBER, 0, true);
-        {
-            let world = off.world_mut();
+        /// A `(main gun casts, MG casts)` read of one fire of each gun under `mode`.
+        fn casting(mode: MuzzleShadows) -> (bool, bool) {
+            let mut main = harness_shadows(mode);
+            fire(&mut main, 0.088, 0);
+            let world = main.world_mut();
             let mut q = world.query::<&PointLight>();
-            for point in q.iter(world) {
-                assert!(!point.shadow_maps_enabled, "Off: no light casts");
-            }
+            let main_casts = q.single(world).expect("one 88 light").shadow_maps_enabled;
+
+            let mut mg = harness_shadows(mode);
+            fire_round(&mut mg, MG_CALIBER, 0, true);
+            let world = mg.world_mut();
+            let mut q = world.query::<&PointLight>();
+            let mg_casts = q.single(world).expect("one MG light").shadow_maps_enabled;
+            (main_casts, mg_casts)
         }
 
-        // MgEveryNth: the 88 casts; the MG casts only on the Nth round.
-        let mut nth = harness_shadows(MuzzleShadows::MgEveryNth);
-        fire(&mut nth, 0.088, 0);
-        {
-            let world = nth.world_mut();
-            let mut q = world.query::<(&MuzzleLight, &PointLight)>();
-            let (_, point) = q.single(world).expect("just the 88 light");
-            assert!(point.shadow_maps_enabled, "MgEveryNth: the 88 still casts");
-        }
-        // Walk one belt cycle of MG rounds: exactly one — the Nth — casts a shadow.
-        let mut walk = harness_shadows(MuzzleShadows::MgEveryNth);
-        for _ in 0..MG_SHADOW_EVERY {
-            fire_round(&mut walk, MG_CALIBER, 0, false);
-        }
-        let world = walk.world_mut();
-        let mut q = world.query::<&PointLight>();
-        let casters = q.iter(world).filter(|p| p.shadow_maps_enabled).count();
         assert_eq!(
-            casters, 1,
-            "MgEveryNth: exactly the {MG_SHADOW_EVERY}-th of a belt cycle casts"
+            casting(MuzzleShadows::MainGunOnly),
+            (true, false),
+            "the shipped lever: the 88's flash casts, the MG's glimmer does not"
+        );
+        assert_eq!(
+            casting(MuzzleShadows::default()),
+            (true, false),
+            "MainGunOnly IS the default — the A/B arms are opt-in only"
+        );
+        assert_eq!(casting(MuzzleShadows::On), (true, true), "On: both cast");
+        assert_eq!(
+            casting(MuzzleShadows::Off),
+            (false, false),
+            "Off: neither casts"
+        );
+    }
+
+    /// EVERY policy is nameable, and the name the client LOGS is the name the knob ACCEPTS. Both
+    /// halves are load-bearing for `scripts/perf/run-fire-capture.sh`, whose arms name a policy in
+    /// the env and then verify the client resolved that same token — an A/B whose "shipped" arm
+    /// could not name the shipped policy is how that script came to measure the legacy one twice.
+    #[test]
+    fn every_shadow_policy_has_a_token_that_round_trips() {
+        for mode in [
+            MuzzleShadows::MainGunOnly,
+            MuzzleShadows::On,
+            MuzzleShadows::Off,
+        ] {
+            assert_eq!(
+                MuzzleShadows::parse(Some(mode.token())),
+                mode,
+                "the logged token must parse back to the policy that logged it",
+            );
+        }
+        // Unset (the shipped default) and an unrecognized value both land on the default — the
+        // latter is caught by the runner's token check, not by a parse failure.
+        assert_eq!(MuzzleShadows::parse(None), MuzzleShadows::default());
+        assert_eq!(
+            MuzzleShadows::parse(Some("main_only")),
+            MuzzleShadows::MainGunOnly,
+            "an unrecognized value falls back to the default (and logs `main-only`)",
         );
     }
 
