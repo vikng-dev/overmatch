@@ -1486,11 +1486,50 @@ pub(crate) mod tests {
     /// are asserted the same way in `net::server`, because `tests/net_boundary.rs` forbids the sim
     /// from naming `crate::net` — single-player has to stay runnable with no netcode mounted. Both
     /// halves call [`assert_spawn_clears_terrain`], so there is still one rule and one assertion.
+    ///
+    /// The probe grid is in scope for exactly the same reason, and the FAR placement doubly so: it
+    /// is 28 hardcoded points, 60 m from the map edge, chosen by a scan rather than by playing there
+    /// — precisely the shape of thing that gets a coordinate wrong and falls forever.
     #[test]
     fn every_sim_spawn_point_lands_above_the_shipped_terrain() {
+        use crate::tank::scenario::{duel_spawn_xz, probe_spawn_xz};
+
         let grid = shipped_grid();
-        for (i, xz) in crate::tank::scenario::DUEL_SPAWN_XZ.iter().enumerate() {
-            assert_spawn_clears_terrain(&grid, &format!("offline duel {i}"), *xz);
+        // The count is capped by `OVERMATCH_PROBE_TANKS`, so a probe INDEX has no upper bound in
+        // principle. 28 is the block a 30-tank sweep spawns and the only one anyone places by hand.
+        const PROBES: usize = 28;
+        for far in [false, true] {
+            let placement = if far { "far" } else { "near" };
+            for (i, xz) in duel_spawn_xz(far).iter().enumerate() {
+                assert_spawn_clears_terrain(&grid, &format!("{placement} offline duel {i}"), *xz);
+            }
+            for i in 0..PROBES {
+                assert_spawn_clears_terrain(
+                    &grid,
+                    &format!("{placement} probe tank {i}"),
+                    probe_spawn_xz(far, i),
+                );
+            }
+        }
+    }
+
+    /// The far probe placement's REASON to exist, asserted as the number it is: every probe must
+    /// land beyond `track::link_view::SHOE_LOD1_DISTANCE_M` from the controlled tank, or the "far"
+    /// capture is measuring the near case under a different name. Measured to the tank rather than
+    /// the camera on purpose — the orbit camera sits BEHIND it, so this is the conservative end.
+    #[test]
+    fn the_far_probe_placement_puts_every_probe_beyond_the_shoe_lod_swap() {
+        use crate::tank::scenario::{duel_spawn_xz, probe_spawn_xz};
+
+        let anchor = duel_spawn_xz(true)[0];
+        for i in 0..28 {
+            let distance = probe_spawn_xz(true, i).distance(anchor);
+            assert!(
+                distance > crate::track::link_view::SHOE_LOD1_DISTANCE_M,
+                "far probe {i} is {distance:.0} m from the controlled tank — inside the {} m shoe \
+                 LOD swap, so it would render LOD0 like the near placement does",
+                crate::track::link_view::SHOE_LOD1_DISTANCE_M,
+            );
         }
     }
 

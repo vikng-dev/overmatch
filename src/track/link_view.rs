@@ -134,7 +134,9 @@
 //!
 //! The cost of the pattern is entity count: the pool doubles, and every one of those entities is
 //! visited by `check_visibility_ranges` each frame. That is the trade a measurement sweep has to
-//! judge — the triangle win is only worth having if it is not eaten by the visibility walk.
+//! judge — the triangle win is only worth having if it is not eaten by the visibility walk. The
+//! probe scenario can stand its 30-tank block on either side of the swap (`OVERMATCH_PROBE_FAR` —
+//! see [`crate::tank::scenario::probe_far`]), which is what makes both halves of that measurable.
 
 use bevy::camera::visibility::VisibilityRange;
 use bevy::mesh::{GenerateTangentsError, Indices, PrimitiveTopology, VertexAttributeValues};

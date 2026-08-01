@@ -8,6 +8,19 @@
 #   cargo build --locked --release --bin overmatch
 #   scripts/perf/run-frame-sweep.sh /tmp/frame-sweep-$(date +%Y%m%d)
 #
+# PLACEMENT — where the probe tanks stand relative to the camera, and therefore which side of the
+# shoe LOD's 500 m swap they render on (src/track/link_view.rs). Two sweeps, same runner:
+#   near (default):  scripts/perf/run-frame-sweep.sh $OUT-near
+#   far:             OVERMATCH_PROBE_FAR=1 scripts/perf/run-frame-sweep.sh $OUT-far
+# The flag needs no plumbing here — `env` below does not clear the inherited environment, so it
+# reaches the client as-is. Each condition's own log records the placement it spawned, the grid's
+# extent and its min/max distance from the controlled tank, so a capture is self-identifying:
+#   grep 'spawned .* probe tanks' $OUT/*.log
+# The two placements answer different questions and are NOT comparable to each other: far measures
+# whether the triangle win survives the extra `check_visibility_ranges` walk, near measures what
+# that walk costs when the rendered geometry is unchanged (pure overhead). Both are before/after
+# comparisons against the same placement on the parent commit.
+#
 # Preconditions — each is a VALIDITY condition, not a nicety:
 #   * machine quiet: no builds, no browser video, no other GPU load; plugged in; not thermally
 #     pre-loaded (an already-hot chassis measures the throttled machine, not the game)
