@@ -68,7 +68,7 @@
 //! would replace our pinned bounds with each LEVEL's own — drifting the anchor per level and
 //! opening sub-metre gaps and overlaps in the range chain.
 //!
-//! # TODO — THE SHADOW GATE IS NOT BUILT (brief §6c)
+//! # TODO — THE SHADOW GATE IS NOT BUILT
 //!
 //! Terrain is a `CastAndReceive` caster under the shipped 17° sun (`world::spawn_environment`), and
 //! bevy applies `VisibilityRange` while collecting directional shadow casters
@@ -79,11 +79,13 @@
 //! it.** DERIVED from the worst kept level (24.9 cm at the 25 cm rung), the shadow edge can move
 //! ~0.82 m.
 //!
-//! What is missing: the brief's shadow-mask difference and rendered-difference gates at the actual
-//! switch distances under the shipped sun, cascades, material and camera heights. Both need a GPU
-//! and a real render. Until they exist, the 25 cm and 50 cm rungs are certified for SILHOUETTE and
-//! SIGHTLINE only. If the gate later fails, the arbitrated fallback is a `render_policy` shadow
-//! proxy on the exact level, or receive-only colour terrain.
+//! What terrain still owes: two gates that need a GPU and a real render, so neither is here.
+//! (a) SHADOW MASK — render each tile at its switch distance under the shipped sun and cascades,
+//! once per level, and difference the resulting shadow masks. (b) RENDERED DIFFERENCE — the same
+//! pair rendered with the shipped material from tank-height camera pitches across representative
+//! azimuths, differenced as an image. Until both exist, the 25 cm and 50 cm rungs are certified for
+//! SILHOUETTE and SIGHTLINE only. If either fails, the fallback is a `render_policy` shadow proxy
+//! carrying the exact level, or colour terrain made receive-only.
 
 use std::time::Instant;
 
@@ -1053,9 +1055,9 @@ mod tests {
         heights
     }
 
-    /// THE sanity gate (memo §2), strengthened from a COUNT to a CONNECTIVITY claim: the extraction
-    /// at a negative threshold must reproduce not merely `2 · 128²` triangles per tile, but the
-    /// IDENTICAL triangle set `terrain_mesh_tiles` builds — same triples, same winding.
+    /// THE sanity gate, and it is a CONNECTIVITY claim rather than a count: the extraction at a
+    /// negative threshold must reproduce not merely `2 · 128²` triangles per tile, but the IDENTICAL
+    /// triangle set `terrain_mesh_tiles` builds — same triples, same winding.
     ///
     /// Counting alone cannot see the failure that matters: RTIN's alternating bintree emits the
     /// right NUMBER of leaf triangles while splitting roughly half its cells along the main diagonal
@@ -1213,10 +1215,10 @@ mod tests {
         );
     }
 
-    /// The POSITIONAL certification (brief §6a): every kept level, on every tile of the shipped map,
-    /// must lie within its DECLARED rung of the CONTINUOUS canonical surface — not merely at grid
-    /// nodes. The declared rung is what the switch distance is computed from, so a level that
-    /// quietly exceeds it anywhere is a level shown too close.
+    /// THE POSITIONAL CERTIFICATION: every kept level, on every tile of the shipped map, must lie
+    /// within its DECLARED rung of the CONTINUOUS canonical surface — not merely at grid nodes. The
+    /// declared rung is what the switch distance is computed from, so a level that quietly exceeds
+    /// it anywhere is a level shown too close.
     ///
     /// Certified against the OVERLAY maximum (see `worst_deviation_m`): grid nodes AND cell centres,
     /// which together contain every vertex of the common refinement of the two triangulations, so
@@ -1354,11 +1356,10 @@ mod tests {
         }
     }
 
-    /// THE FINDING that shapes this module (memo FOLKLORE-RISK #11, resolved by measurement):
-    /// **RTIN's error pyramid is a heuristic, not a bound.** An extraction at threshold τ can and
-    /// does produce a mesh deviating by MORE than τ, because the pyramid measures each node against
-    /// its own level's interpolation and those per-level errors compound down the hierarchy rather
-    /// than dominating one another.
+    /// **RTIN's error pyramid is a HEURISTIC, not a bound**, and that fact shapes this whole
+    /// module. An extraction at threshold τ can and does produce a mesh deviating by MORE than τ,
+    /// because the pyramid measures each node against its own level's interpolation and those
+    /// per-level errors compound down the hierarchy rather than dominating one another.
     ///
     /// This is why nothing in this module ever declares the extraction threshold. If the pyramid
     /// were ever tightened into a true bound the ratio below drops to 1.0 and this test still
@@ -1930,8 +1931,8 @@ mod tests {
     }
 }
 
-/// The TACTICAL certification (brief §6b): what a coarser level does to a SIGHTLINE, as opposed to
-/// what it does to a silhouette.
+/// THE TACTICAL CERTIFICATION: what a coarser level does to a SIGHTLINE, as opposed to what it does
+/// to a silhouette.
 ///
 /// The positional ladder is built on projected vertical error, and that metric structurally cannot
 /// see motion ALONG a pixel ray. Near tangency the ray-surface intersection satisfies
@@ -1955,14 +1956,18 @@ mod tests {
 ///   are exact while far tiles are coarse, which is the only configuration a player ever renders and
 ///   the only one in which a sightline crosses a switch.
 /// * **Stratified, with coverage RECORDED.** Rays are drawn from a full-factorial grid of eye
-///   height × pitch band × map region × azimuth octant, and the report states how many strata
-///   produced usable samples and which rungs were actually exercised. An unfilled stratum is a hole
-///   in the certification and is stated rather than averaged away.
+///   height × pitch band × map region × azimuth octant, and the report states how many strata met
+///   their quota and which rungs were actually exercised. A stratum short of quota is a thin corner
+///   of the certification and is stated rather than averaged away.
 ///
-/// **PROVISIONAL — measurement now, gate later.** The budgets are the one genuinely new dial terrain
-/// LOD introduces and they are Yan's to set (the brief proposes ≤ 5 m first-hit error at any legal
-/// engagement sightline and zero hull-revealing crest flips). Until then this runs, prints, and
-/// asserts only structural coverage. Turning it into a gate is one threshold per printed column.
+/// **PROVISIONAL — measurement now, gate later.** Terrain LOD is the first thing in this project to
+/// need a sightline budget, and no ratified one exists: unlike a positional threshold, "how far may
+/// a first hit move" and "may a coarse level ever reveal a hull the exact ground hides" are product
+/// questions about what a player is entitled to see, not engineering ones. Two candidate budgets are
+/// on the table — ≤ 5 m of first-hit error at any legal engagement sightline, and zero
+/// hull-revealing crest flips — and the current ladder meets both with an order of magnitude in
+/// hand, but until one is ratified this test asserts only structural coverage and prints the rest.
+/// Making it a gate is one threshold per printed column.
 #[cfg(test)]
 mod tactical {
     use super::*;
@@ -2421,9 +2426,9 @@ mod tactical {
             }
             let (median, p95, max) = quantiles(&mut errors);
             let covered = filled.iter().filter(|filled| **filled).count();
-            // Name the holes. A stratum that never yields a paired hit is a corner of the envelope
-            // this report does not cover, and it belongs in the output next to the numbers it is
-            // missing from — not averaged into a percentage.
+            // Name the strata that came up short. One that yields fewer than its quota of paired
+            // hits is a thin corner of the envelope — the numbers rest on less evidence there — and
+            // that belongs in the output beside them, not averaged into a percentage.
             let holes: Vec<String> = filled
                 .iter()
                 .enumerate()
@@ -2474,11 +2479,11 @@ mod tactical {
             let mut by_band = vec![0usize; RANGE_BANDS_M.len()];
             for (band, (lo, hi)) in RANGE_BANDS_M.into_iter().enumerate() {
                 for octant in 0..OCTANTS {
-                    // Same discipline as the ray sweep: re-draw the ORIGIN until the target at this
-                    // band's range and this octant's bearing lands on the map. Discarding instead
-                    // (the previous shape) silently starved the long bands — MEASURED 38 of a
+                    // Same discipline as the ray sweep: re-draw the ORIGIN until the target at
+                    // this band's range and this octant's bearing lands on the map. Simply
+                    // discarding an off-map draw starves the long bands instead — MEASURED 38 of a
                     // wanted 256 in the 800–1000 m band, on a map whose diagonal is 1414 m — and a
-                    // long-range crest flip is exactly the case the gate is for.
+                    // long-range crest flip is exactly the case this is here to catch.
                     let mut wanted = 32;
                     for _ in 0..RETRY_BUDGET * 8 {
                         if wanted == 0 {
@@ -2547,13 +2552,13 @@ mod tactical {
                 );
             }
 
-            // Structural assertions only — every number above is provisional. What IS gated is that
-            // the report has no holes: every stratum must produce its quota of paired hits and
-            // every range band its sightlines, so a number that looks clean cannot be a number
-            // nobody measured.
-            // Not 100 %: on a finite map some near-tangent corners of the envelope have no ground
-            // left to hit, and demanding total coverage would only invite widening the strata until
-            // the number looked good. The floor is high, the holes are named above, and a
+            // Structural assertions only — every number above is provisional. What IS gated is
+            // that the evidence is broad enough for the numbers to mean anything: at least 95 % of
+            // strata at full quota, and every range band non-empty.
+            //
+            // 95 % and not 100 %: on a finite map a few near-tangent corners have no ground left to
+            // hit whatever the origin, so a total-coverage rule could only be met by widening the
+            // strata until the number looked good. The strata short of quota are named above, and a
             // COLLAPSE in coverage — a caster regression, a ladder that stops producing geometry —
             // still fails here.
             assert!(
