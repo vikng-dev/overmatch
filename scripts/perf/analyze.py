@@ -6,8 +6,9 @@
 
 Consumes the raw one-row-per-frame `{t, frame_ms}` streams `scripts/perf/run-frame-sweep.sh`
 captures (one file per ladder condition; the recorder interleaves `{t, occluded}` rows on every
-window-occlusion transition and `{t, monitor, refresh_mhz, primary}` rows whenever the presenting
-monitor resolves or changes) and prints:
+window-occlusion transition, `{t, monitor, refresh_mhz, primary}` rows whenever the presenting
+monitor resolves or changes, and `{t, surface_w, surface_h}` rows whenever the physical surface
+size does) and prints:
   * per-condition p50/p95/p99/worst frame ms, with fps-equivalents and % of the 16.67 ms
     (60 fps) and 8.33 ms (120 fps) budgets;
   * a delta table against the ladder's baseline condition.
@@ -33,14 +34,19 @@ capture masquerades as a real measurement":
     still passes — the app's request is not the OS's pacing. (--display-ok is the same SMOKE-mode
     escape as --occluded-ok: a hidden window resolves no monitor and has no real numbers to
     poison.)
+  * unless --surface-ok: the measurement window must be covered by surface rows, all of them
+    EXACTLY EXPECTED_SURFACE physical pixels. Frame cost scales with shaded pixels, so a capture at
+    another surface size measures a different machine — and the same 1280x720 logical window is
+    1280x720 physical on the scale-1.0 external panel against 2560x1440 on the scale-2.0 built-in
+    one, a 4x difference in pixels that no other gate here can see.
 
 --validate-only runs exactly these gates and prints one OK line per stream, no tables — the
 runner's per-condition gate, so runner and analyzer cannot drift apart on what "valid" means.
 
 Usage:
     uv run scripts/perf/analyze.py [--warmup-s 10] [--min-rows 400] \
-        [--expected-duration-s 60] [--occluded-ok] [--display-ok] [--validate-only] \
-        [--baseline m350-2] out/m350-2.client.jsonl out/off-30.client.jsonl ...
+        [--expected-duration-s 60] [--occluded-ok] [--display-ok] [--surface-ok] \
+        [--validate-only] [--baseline m350-2] out/m350-2.client.jsonl out/off-30.client.jsonl ...
 
 Condition names are file basenames minus `.client.jsonl`/`.jsonl`.
 """
@@ -64,6 +70,13 @@ SPAN_TOLERANCE = 0.98
 # 60 Hz surface caps every condition at 16.67 ms and destroys the whole ladder, so this is a
 # validity threshold, not a preference.
 MIN_REFRESH_MHZ = 100_000
+# The physical surface every capture in this series was measured at: the client's 1280x720 logical
+# window on the built-in panel's scale factor of 2 (src/frame_cost.rs, SURFACE_LOGICAL). EXACT, not
+# a minimum — frame cost scales with shaded pixels, so a sweep captured at another size is not a
+# worse measurement of the same thing, it is a measurement of a different machine. The 60 Hz
+# external panel is scale 1.0, so a window born there is 1280x720 physical: a QUARTER of the pixels,
+# which reads as a ladder that is uniformly ~3x too fast while the refresh gate passes.
+EXPECTED_SURFACE = (2560, 1440)
 
 
 def fail(msg: str) -> NoReturn:
@@ -114,10 +127,26 @@ class MonitorRow(NamedTuple):
         return f"{self.name or '<unnamed>'} ({refresh}, primary={self.primary})"
 
 
+class SurfaceRow(NamedTuple):
+    """One `{t, surface_w, surface_h}` row: the physical size of the presented surface, from when."""
+
+    t: float
+    width: int
+    height: int
+
+    def size(self) -> tuple[int, int]:
+        return (self.width, self.height)
+
+    def describe(self) -> str:
+        return f"{self.width}x{self.height} physical"
+
+
 def parse_rows(
     path: Path,
-) -> tuple[list[tuple[float, float]], list[tuple[float, bool]], list[MonitorRow]]:
-    """Split a stream into frame, occlusion-transition and monitor rows, enforcing monotonic time.
+) -> tuple[
+    list[tuple[float, float]], list[tuple[float, bool]], list[MonitorRow], list[SurfaceRow]
+]:
+    """Split a stream into frame, occlusion, monitor and surface rows, enforcing monotonic time.
 
     Monotonicity is a validity gate, not pedantry: `t` is one process's `Time<Real>` elapsed
     clock, so time running backwards can only mean a spliced, concatenated or corrupted stream.
@@ -133,6 +162,7 @@ def parse_rows(
     frames: list[tuple[float, float]] = []
     occlusions: list[tuple[float, bool]] = []
     monitors: list[MonitorRow] = []
+    surfaces: list[SurfaceRow] = []
     last_t: float | None = None
     text = path.read_text()
     lines = text.splitlines()
@@ -153,10 +183,19 @@ def parse_rows(
             # Key PRESENCE, not truthiness, selects the row shape: an occlusion row carries
             # `occluded: false` as often as `true`, and a monitor row's `monitor`/`refresh_mhz`
             # are both legitimately null when the OS names no monitor or answers no refresh.
-            kind = "occluded" if "occluded" in row else "monitor" if "monitor" in row else "frame"
-            parsed: tuple[float, float] | tuple[float, bool] | MonitorRow
+            if "occluded" in row:
+                kind = "occluded"
+            elif "monitor" in row:
+                kind = "monitor"
+            elif "surface_w" in row:
+                kind = "surface"
+            else:
+                kind = "frame"
+            parsed: tuple[float, float] | tuple[float, bool] | MonitorRow | SurfaceRow
             if kind == "occluded":
                 parsed = (t, bool(row["occluded"]))
+            elif kind == "surface":
+                parsed = SurfaceRow(t, int(row["surface_w"]), int(row["surface_h"]))
             elif kind == "monitor":
                 refresh = row["refresh_mhz"]
                 name = row["monitor"]
@@ -180,9 +219,11 @@ def parse_rows(
             occlusions.append(parsed)
         elif kind == "monitor":
             monitors.append(parsed)
+        elif kind == "surface":
+            surfaces.append(parsed)
         else:
             frames.append(parsed)
-    return frames, occlusions, monitors
+    return frames, occlusions, monitors, surfaces
 
 
 def occluded_intervals(
@@ -213,18 +254,66 @@ def occluded_intervals(
     return intervals
 
 
+def states_in_window[Row: (MonitorRow, SurfaceRow)](
+    rows: list[Row], window_start: float
+) -> list[Row] | None:
+    """Collapse step-function rows to the states that actually cover the measurement window.
+
+    Everything at or before the window opens becomes the single state in force when it opened, and
+    every row after it is kept. Returns None when no row covers the window at all — which the
+    callers treat as INVALID, not as unremarkable, since "never resolved" and "resolved to the wrong
+    thing" are the same evidential state.
+
+    Shared by both presentation gates so they cannot drift apart on what "during the measurement"
+    means, and scoped this way for a concrete reason: the warmup is where the client parks and pins
+    its window (src/frame_cost.rs), so an early row naming the external panel or a 1280x720 surface
+    is the pre-park truth being corrected, not a failure.
+    """
+    covering = [row for row in rows if row.t <= window_start]
+    if not covering:
+        return None
+    return [covering[-1], *(row for row in rows if row.t > window_start)]
+
+
+def check_surface(path: Path, surfaces: list[SurfaceRow], window_start: float) -> None:
+    """Fail unless the measurement window was rendered, throughout, at EXPECTED_SURFACE pixels."""
+    expected = f"{EXPECTED_SURFACE[0]}x{EXPECTED_SURFACE[1]}"
+    if not surfaces:
+        fail(
+            f"{path}: no surface row in the stream — the client never stated how many pixels it was "
+            f"rendering, so this capture cannot be compared with anything. Old binary?"
+        )
+    states = states_in_window(surfaces, window_start)
+    if states is None:
+        fail(
+            f"{path}: the surface size was not resolved until t={surfaces[0].t:.1f}s, after the "
+            f"measurement window opened at t={window_start:.1f}s — the measured frames have no "
+            "pixel count at all"
+        )
+    for row in states:
+        if row.size() != EXPECTED_SURFACE:
+            scale = (row.width * row.height) / (EXPECTED_SURFACE[0] * EXPECTED_SURFACE[1])
+            fail(
+                f"{path}: rendered at {row.describe()}, not the expected {expected} — "
+                f"{scale:.2f}x the shaded pixels. Frame cost scales with pixels, so this is not a "
+                "noisier measurement of the same thing, it is a measurement of a different machine "
+                "and is not comparable with any other capture in this series. The usual cause is a "
+                "window that opened on the scale-1.0 external panel: same logical size, a quarter "
+                "of the pixels, and every other gate here passes."
+            )
+    # No separate mid-window RESIZE check, unlike the display gate: that gate accepts a SET of
+    # monitors (any panel at or above the refresh floor), so two of them can both be legal and the
+    # change between them still has to be caught. This one accepts exactly one size, so a resize
+    # necessarily moves to a size the loop above already rejected. A change check here would be
+    # unreachable code wearing the costume of a safety net.
+
+
 def check_display(path: Path, monitors: list[MonitorRow], window_start: float) -> None:
     """Fail unless the measurement window was presented, throughout, on one fast-enough monitor.
 
-    Scoped to the measurement window exactly like the occlusion gate, and for the same reason: the
-    warmup is where the client PARKS its window on the primary display (src/frame_cost.rs), so a
-    window born on the external panel legitimately records that panel and then the primary one a
-    moment later. Those pre-warmup rows are provenance, not failure — every row at or before the
-    window opens collapses into the one that was in force when it opened.
-
-    A measurement window no row covers is INVALID rather than unremarkable: "the window never
-    resolved a monitor" and "the window was on the 60 Hz panel" are the same evidential state, and
-    this gate exists because the state that LOOKS clean is the dangerous one.
+    Scoped to the measurement window via `states_in_window`, exactly like the occlusion and surface
+    gates: a window born on the external panel legitimately records that panel and then the primary
+    one a moment later, and this gate exists because the state that LOOKS clean is the dangerous one.
     """
     if not monitors:
         fail(
@@ -232,15 +321,13 @@ def check_display(path: Path, monitors: list[MonitorRow], window_start: float) -
             "presenting, so this capture cannot be proven off a 60 Hz panel (whose 16.67 ms pacing "
             "every other gate here passes). Old binary, or a window that never reached a screen?"
         )
-    covering = [row for row in monitors if row.t <= window_start]
-    if not covering:
+    states = states_in_window(monitors, window_start)
+    if states is None:
         fail(
             f"{path}: the presenting display was not resolved until t={monitors[0].t:.1f}s, after "
             f"the measurement window opened at t={window_start:.1f}s — the measured frames have no "
             "display provenance at all"
         )
-    # The state in force when the window opened, plus every change after it.
-    states = [covering[-1], *(row for row in monitors if row.t > window_start)]
     for row in states:
         if row.refresh_mhz is None or row.refresh_mhz < MIN_REFRESH_MHZ:
             fail(
@@ -267,16 +354,22 @@ def load_stream(
     expected_duration_s: float | None,
     occluded_ok: bool,
     display_ok: bool,
+    surface_ok: bool,
 ) -> list[float]:
     if not path.is_file():
         fail(f"{path} does not exist")
-    frames, occlusions, monitors = parse_rows(path)
+    frames, occlusions, monitors, surfaces = parse_rows(path)
     if not frames:
         fail(f"{path} has no frame rows")
     # Warmup is relative to the stream's own first row: `t` is app-elapsed time, and the first
     # seconds cover asset load, shader compilation and the settle after spawn. Every row shape
     # carries the same clock, so the bounds are taken across all of them.
-    stamps = [t for t, _ in frames] + [t for t, _ in occlusions] + [row.t for row in monitors]
+    stamps = (
+        [t for t, _ in frames]
+        + [t for t, _ in occlusions]
+        + [row.t for row in monitors]
+        + [row.t for row in surfaces]
+    )
     t_first = min(stamps)
     t_last = max(stamps)
     if expected_duration_s is not None:
@@ -291,6 +384,8 @@ def load_stream(
     window_start = t_first + warmup_s
     if not display_ok:
         check_display(path, monitors, window_start)
+    if not surface_ok:
+        check_surface(path, surfaces, window_start)
     if not occluded_ok:
         for start, end in occluded_intervals(occlusions, t_first, t_last):
             if end > window_start:
@@ -331,6 +426,12 @@ def main() -> int:
         "monitor, and its numbers are fiction)",
     )
     parser.add_argument(
+        "--surface-ok",
+        action="store_true",
+        help=f"skip the surface-size gate (normally exactly {EXPECTED_SURFACE[0]}x"
+        f"{EXPECTED_SURFACE[1]} physical; SMOKE mode only)",
+    )
+    parser.add_argument(
         "--validate-only",
         action="store_true",
         help="run the validity gates and print OK per stream; no tables",
@@ -354,6 +455,7 @@ def main() -> int:
             args.expected_duration_s,
             args.occluded_ok,
             args.display_ok,
+            args.surface_ok,
         )
         conditions[name] = {label: pct(kept, q) for label, q in STATS}
         counts[name] = len(kept)

@@ -32,6 +32,10 @@
 //!   logged with the stable token `frame_cost: presentation occluded=`. The analyzer fails any
 //!   stream whose occluded interval overlaps the post-warmup measurement window.
 //!
+//!   While occluded, the recorder also asks for focus back once a second
+//!   ([`raise_when_occluded`]) — parking the window on the primary display moved it off an empty
+//!   external desktop and into the middle of the operator's own windows, so it now needs to insist.
+//!
 //!   Scope, stated so nobody over-trusts it: this catches a window that becomes covered or
 //!   minimized DURING a run, which is the operator-error case. It is not the lever against a
 //!   window that was never shown at all — winit reports occlusion CHANGES, and a window created
@@ -82,6 +86,30 @@
 //! before the first `Startup` run, so a window born on the external panel is recorded there and
 //! then again after the move) — which is why the analyzer's gate is scoped to the MEASUREMENT
 //! window, exactly like the occlusion gate: pre-warmup churn is provenance, not a failure.
+//!
+//! # The surface size
+//!
+//! The refresh gate above passes on a window that is presenting the wrong NUMBER OF PIXELS, and
+//! that is the second way this sweep reads as fiction. The two panels have different scale
+//! factors: the ARZOPA is 1.0 and the built-in is 2.0, and bevy's default window is 1280x720
+//! LOGICAL (vendored bevy_window-0.19.0/src/window.rs, `WindowResolution::default` — 1280x720
+//! physical at scale 1.0). Born on the external panel the window is therefore a 1280x720 surface;
+//! every dataset this sweep is compared against was captured on the built-in panel, where the same
+//! logical window is a 2560x1440 surface. That is FOUR TIMES the shaded pixels. MEASURED: m350-2
+//! read 4.19 ms here against 11.83 ms for identical code on the built-in panel — a ladder whose
+//! every rung is three times too fast, with a refresh gate that passes.
+//!
+//! So the recorder also pins and records the surface:
+//!
+//! * **pins** the window to [`SURFACE_LOGICAL`] logical pixels at startup, and re-asserts it
+//!   whenever the scale factor changes ([`hold_surface_pin`]). The logical size is the invariant
+//!   worth pinning: it is what every prior capture held fixed, and at the built-in panel's scale
+//!   factor it is exactly the 2560x1440 physical surface those captures measured;
+//! * **records** `{t, surface_w, surface_h}` rows — bevy's own `Window::physical_size`, which is
+//!   what the render app configures the surface to and what the camera reports as
+//!   `physical_target_size`, so the recorded number is the one that costs GPU time rather than a
+//!   number that merely correlates with it. `scripts/perf/analyze.py` fails any measurement window
+//!   not covered by a surface row, covered by one that is not 2560x1440, or that resizes mid-window.
 
 use bevy::prelude::*;
 use bevy::window::{PrimaryWindow, WindowOccluded};
@@ -95,15 +123,26 @@ use crate::trace::{JsonlSink, role_path};
 /// of the window, sits on the main display, which owns the origin of this coordinate space.
 const PARK_AT: IVec2 = IVec2::new(120, 120);
 
-/// How often the presenting monitor is re-resolved. The identity of a panel is a step function
-/// driven by human-scale events (a drag, a cable), so 1 Hz places any change well inside the
-/// second of frames it invalidates — and the analyzer rejects the whole condition either way.
+/// How often the presenting monitor and surface size are re-resolved. Both are step functions
+/// driven by human-scale events (a drag, a cable, a resize), so 1 Hz places any change well inside
+/// the second of frames it invalidates — and the analyzer rejects the whole condition either way.
 const MONITOR_POLL_S: f64 = 1.0;
+
+/// The LOGICAL window size every frame-cost capture is pinned to — see the module doc's
+/// surface-size section. bevy's own default, stated explicitly because the default is only reached
+/// when nothing else has touched the window, and because the number that matters downstream is the
+/// PHYSICAL surface it becomes: 2560x1440 on the built-in panel's scale factor of 2, which is what
+/// `scripts/perf/analyze.py` gates on and what every dataset this sweep compares against measured.
+const SURFACE_LOGICAL: Vec2 = Vec2::new(1280.0, 720.0);
 
 /// Open frame-cost sink, present only when recording is armed.
 #[derive(Resource)]
 struct FrameCost {
     sink: JsonlSink,
+    /// Latest presentation-occlusion state, as last reported by winit. Kept beside the sink rather
+    /// than in a `Local` because two systems need it: the one that RECORDS the transition and the
+    /// one that tries to undo it ([`raise_when_occluded`]).
+    occluded: bool,
 }
 
 /// Mount the per-frame recorder when `SPIKE_FRAME_COST` is set.
@@ -120,30 +159,182 @@ pub fn client_plugin(app: &mut App) {
         }
     };
     info!("frame_cost: recording rows to {}", resolved.display());
-    app.insert_resource(FrameCost { sink });
-    app.add_systems(Startup, park_on_primary);
+    app.insert_resource(FrameCost {
+        sink,
+        occluded: false,
+    });
+    app.add_systems(Startup, park_and_pin);
     app.add_systems(
         Update,
         (
             sample,
             record_occlusion,
+            // After the recorder, so it acts on this frame's transition rather than last frame's.
+            raise_when_occluded,
             record_monitor,
+            // Before the recorder, so a re-pin lands in the same frame it is decided rather than
+            // leaving one poll's worth of rows claiming the size it was about to correct.
+            hold_surface_pin,
+            record_surface,
             report_present_mode,
-        ),
+        )
+            .chain(),
     );
 }
 
-/// Move the primary window onto the primary display, once, at startup — the anti-60 Hz half of the
-/// presenting-monitor signal (see the module doc).
+/// Move the primary window onto the primary display and pin its logical size, once, at startup —
+/// the two anti-fiction moves of the module doc (presenting monitor, surface size).
 ///
-/// Best-effort by design and silent about failure: whether the move landed is not this system's
-/// claim to make, it is [`record_monitor`]'s, and an operator who drags the window afterwards is
-/// caught by the same rows rather than fought by a re-parking loop.
-fn park_on_primary(mut windows: Query<&mut Window, With<PrimaryWindow>>) {
+/// Best-effort by design and silent about failure: whether either landed is not this system's claim
+/// to make, it is [`record_monitor`]'s and [`record_surface`]'s, and an operator who drags or
+/// resizes the window afterwards is caught by the same rows rather than fought by a re-parking loop.
+fn park_and_pin(mut windows: Query<&mut Window, With<PrimaryWindow>>) {
     let Ok(mut window) = windows.single_mut() else {
         return;
     };
     window.position = WindowPosition::At(PARK_AT);
+    window.resolution.set(SURFACE_LOGICAL.x, SURFACE_LOGICAL.y);
+}
+
+/// Re-assert the logical pin when the scale factor changes — the one event that silently breaks it.
+///
+/// `WindowResolution` stores a PHYSICAL size and a scale factor, and the two are updated by
+/// different winit events: `ScaleFactorChanged` writes the factor alone
+/// (`react_to_scale_factor_change`, vendored bevy_winit-0.19.0/src/state.rs) while the physical size
+/// only follows if a `Resized` arrives. So the moment the startup park carries the window from the
+/// scale-1.0 external panel to the scale-2.0 built-in one, a window pinned once at startup can be
+/// left claiming 1280x720 physical at scale 2 — half the logical size it was pinned to, a quarter of
+/// the pixels every comparable dataset was captured at, and nothing in the frame rows says so.
+///
+/// Triggered by the scale factor rather than by the size mismatch itself, deliberately: that is the
+/// event which invalidates the pin, so the re-assert is bounded by the number of monitor moves
+/// instead of becoming a resize request every second against an OS that may be refusing it.
+fn hold_surface_pin(
+    mut windows: Query<&mut Window, With<PrimaryWindow>>,
+    mut pinned_at_scale: Local<Option<f32>>,
+    mut next_poll_s: Local<f64>,
+    time: Res<Time<Real>>,
+) {
+    let t = time.elapsed_secs_f64();
+    if t < *next_poll_s {
+        return;
+    }
+    *next_poll_s = t + MONITOR_POLL_S;
+    let Ok(mut window) = windows.single_mut() else {
+        return;
+    };
+    let scale = window.resolution.scale_factor();
+    if *pinned_at_scale == Some(scale) {
+        return;
+    }
+    *pinned_at_scale = Some(scale);
+    // `set` is logical: it multiplies by the CURRENT scale factor, which is the whole point here.
+    // Guarded so a steady run never marks `Window` changed — every write to it costs bevy a pass
+    // through `changed_windows`, which talks to the OS.
+    let want = (SURFACE_LOGICAL * scale).as_uvec2();
+    if window.resolution.physical_size() != want {
+        info!(
+            "frame_cost: re-pinning surface to {}x{} logical at scale {scale} (was {}x{} physical, \
+             wanted {}x{}) at t={t:.3}s",
+            SURFACE_LOGICAL.x,
+            SURFACE_LOGICAL.y,
+            window.resolution.physical_width(),
+            window.resolution.physical_height(),
+            want.x,
+            want.y,
+        );
+        window.resolution.set(SURFACE_LOGICAL.x, SURFACE_LOGICAL.y);
+    }
+}
+
+/// Raise the capture window while — and only while — it is OCCLUDED.
+///
+/// Parking the window on the primary display fixed the refresh problem and created this one: on the
+/// external panel the window had an empty desktop to itself, and on the built-in one it lands in the
+/// middle of whatever the operator is running. MEASURED after the park landed: the window was
+/// covered 0.36 s after creation and stayed covered for the whole condition, so the sweep threw away
+/// a 75-second run at the occlusion gate — twice.
+///
+/// The trigger is occlusion, never a timer and never startup, and that is the whole design. A
+/// healthy capture never calls this, so the sweep does not become an app that grabs focus for a
+/// minute at a time; an occluded capture is already producing free-run fiction that the analyzer
+/// will reject, so at that moment the alternative to taking focus is not politeness, it is a
+/// discarded condition. This is the visible frame sweep, the opposite case to the hidden net-capture
+/// harness whose whole design is to never steal focus (`net::client`, `SPIKE_SIM_WINDOWED`).
+///
+/// Bounded to one request per poll, and loud each time: a window that asks and keeps losing leaves a
+/// legible trail instead of an invisible fight, and the occlusion rows still fail the run.
+fn raise_when_occluded(
+    mut windows: Query<&mut Window, With<PrimaryWindow>>,
+    cost: Res<FrameCost>,
+    mut next_poll_s: Local<f64>,
+    time: Res<Time<Real>>,
+) {
+    let t = time.elapsed_secs_f64();
+    if !cost.occluded || t < *next_poll_s {
+        return;
+    }
+    *next_poll_s = t + MONITOR_POLL_S;
+    let Ok(mut window) = windows.single_mut() else {
+        return;
+    };
+    // bevy turns this into `focus_window()` only on the false -> true EDGE (vendored
+    // bevy_winit-0.19.0/src/system.rs, `changed_windows`), which is exactly the shape wanted: while
+    // another app holds focus the field reads false, so each poll is one genuine request.
+    if !window.focused {
+        warn!("frame_cost: window occluded at t={t:.3}s — asking for focus back");
+        window.focused = true;
+    }
+}
+
+/// Append a `{t, surface_w, surface_h}` row whenever the physical surface size resolves or changes
+/// (see the module doc's surface-size section).
+///
+/// Reads bevy's `Window::physical_size` rather than winit's drawable, because bevy's number is the
+/// one with consequences: the render app configures the surface from it and the camera reports it as
+/// `physical_target_size` (which is what `render_scale`'s "the 3D main pass fills the … target" line
+/// prints). A row sourced from the OS could agree with the panel while the renderer quietly drew a
+/// quarter of it, which is the exact failure this gate exists to catch.
+fn record_surface(
+    mut cost: ResMut<FrameCost>,
+    time: Res<Time<Real>>,
+    mut last: Local<Option<UVec2>>,
+    mut next_poll_s: Local<f64>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+) {
+    let t = time.elapsed_secs_f64();
+    if t < *next_poll_s {
+        return;
+    }
+    *next_poll_s = t + MONITOR_POLL_S;
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let size = window.resolution.physical_size();
+    if *last == Some(size) {
+        return;
+    }
+    // A resize AFTER the first observation is the operator-error case (a dragged edge, a monitor
+    // move that re-scaled the surface) and is loud; the first observation is just provenance.
+    let message = format!(
+        "frame_cost: surface {}x{} physical ({}x{} logical at scale {})",
+        size.x,
+        size.y,
+        window.resolution.width(),
+        window.resolution.height(),
+        window.resolution.scale_factor(),
+    );
+    if last.is_some() {
+        warn!("{message} — CHANGED at t={t:.3}s");
+    } else {
+        info!("{message} at t={t:.3}s");
+    }
+    cost.sink.write(&json!({
+        "t": t,
+        "surface_w": size.x,
+        "surface_h": size.y,
+    }));
+    *last = Some(size);
 }
 
 /// The presenting panel's identity, as recorded — the tuple the analyzer gates on, so "changed" is
@@ -259,6 +450,7 @@ fn record_occlusion(
             "frame_cost: presentation occluded={} at t={t:.3}s",
             transition.occluded
         );
+        cost.occluded = transition.occluded;
         cost.sink
             .write(&json!({ "t": t, "occluded": transition.occluded }));
     }
