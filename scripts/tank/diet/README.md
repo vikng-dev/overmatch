@@ -5,11 +5,15 @@ back-face culling on, plus the instruments that proved each one safe. They exist
 assets they act on are **binary and otherwise unreproducible**: `assets/tiger_1/tiger_1.glb`
 is a tracked git-lfs blob, and the `.blend` it came from is untracked and 140 MB.
 
-The two decimations were REVERTED on 2026-08-01 — `Link` and `Object_0.002` are the authored
-meshes again — so the only machine-generated geometry the repo now ships is the distance-LOD
-shoe `tiger_1_link.lod1.glb`. Read [THE SECOND RULE](#the-second-rule-a-base-mesh-is-human-domain)
-before reaching for a decimator, and [Restoration](#restoration-putting-an-original-mesh-back)
-for how a base mesh gets put back.
+The two COLLAPSE decimations were REVERTED on 2026-08-01 — `Object_0.002` is the authored MG
+barrel again, and `Link` was restored before being re-cut by a different decimator. Read
+[THE SECOND RULE](#the-second-rule-a-base-mesh-is-human-domain) before reaching for one, and
+[Restoration](#restoration-putting-an-original-mesh-back) for how a base mesh gets put back.
+
+The shoe now ships a three-tier PLANAR chain instead — see
+[The planar LOD chain](#the-planar-lod-chain). That is a different decimator from the one the
+revert was about: planar dissolve never moves a vertex, which is why its output survived the
+eyeball that rejected collapse output at a comparable budget.
 
 Nothing here runs in CI or in a hook. They are hand tools.
 
@@ -72,6 +76,8 @@ dedupe, the deleted terrain textures. Those are lossless and they still ship.
 | `report.py` | Triangles and vertices PER TANK, using `src/`'s own visibility rules and `link_count` x 2. This is the number the commits quote. |
 | `validate.py` | Does every accessor, bufferView, index, material and texture reference still resolve, and is every view in bounds. |
 | `probe.py` | What triangle count can the collapse decimator actually REACH on this mesh, and how many shells and boundary edges are holding it there. |
+| `deviation.py` | Point-to-surface distance between an LOD and its source, BOTH directions, in mm. Area-weighted deterministic sampling. This is the number the pixel arithmetic turns into a switch distance. |
+| `uvcheck.py` | Whether the mapping survived: TEXCOORD_0 present, uv bbox, uv-degenerate triangles, longest uv edge vs the source's, and how many LOD verts still sit on an authored position with its authored UV. |
 | `thin.py` | Which primitives are open shells or single-layer sheets — the first-pass shortlist for the culling question. Advisory only; `backface.py` is what decides. |
 | `backface.py` | Renders the subject with every visible BACK FACE emitting red. A red pixel is a pixel that back-face culling turns into a hole. |
 | `drive_bf.py` | Runs `backface.py` over 32 camera positions and counts red pixels per glb. Fails closed: a nonzero Blender exit, a missing frame or a frame that is not `RES` x `RES` aborts with Blender's stderr and prints no total. |
@@ -81,11 +87,12 @@ dedupe, the deleted terrain textures. Those are lossless and they still ship.
 | tool | what it does |
 |---|---|
 | `render.py` | Headless turntable of a geometry-only glb: textured, clay, or clay with a wireframe overlay. Light rig scales with the subject. |
+| `belt.py` | The same rig over a ROW of shoes at track pitch. The shoe is never seen alone, and the belt caught damage four turntable azimuths did not — see [the fine-cylinder threshold](#the-fine-cylinder-threshold-what-the-deviation-number-cannot-see). |
 | `drive_render.py` | Runs `render.py` over several variants in both modes. |
 | `sheet.py` | Composes labelled contact sheets (PIL). `.jpg` output is ~5x smaller than `.png` for these and visually identical, which matters when the sheet is committed. |
 | `redcount.py` | Standalone red-pixel counter for a glob of `backface.py` frames. |
 
-### the two decimators
+### the three decimators
 
 `decimate2.py` adds a planar-dissolve pass before the collapse, on the theory that flat plate
 faces should not spend budget. It does not pay off at a tight budget — on the shoe it returns
@@ -93,8 +100,14 @@ faces should not spend budget. It does not pay off at a tight budget — on the 
 the MG barrel's floor either. It is kept because it built the 964-triangle shoe alternative,
 and because the negative result is worth not re-deriving.
 
-`decimate.py` is the one whose output still ships — as `tiger_1_link.lod1.glb` only, never as
-a base mesh: import with `merge_vertices`, weld at 1e-5, triangulate,
+`decimate_planar.py` is the one whose output ships today, at all three shoe tiers. It drives
+the DISSOLVE decimate rather than the collapse: coplanar faces merge into ngons and the export
+re-triangulates them, so no vertex ever moves and every surviving position is authored. It
+also carries the optional collapse pass the two tight tiers need. See
+[The planar LOD chain](#the-planar-lod-chain).
+
+`decimate.py` built the shoe and MG cuts that were reverted, and is kept because the recipes
+below still reference it: import with `merge_vertices`, weld at 1e-5, triangulate,
 binary-search a quadric-collapse ratio to a triangle budget, then rebuild hard edges from a
 dihedral angle. The collapse decimator drops custom split normals, so re-shading is not
 optional — and the angle is a real lever: 30 deg gives 993 verts, 12 deg gives 1 303 for the
@@ -107,17 +120,17 @@ Requires Blender 5.1 (`BLENDER=` env var, else `blender` on PATH), Python 3 with
 the render tools only, and `basisu` for textured renders. Run from the repo root. `$W` is a
 scratch directory.
 
-Verified 2026-08-01 on Blender 5.1.2: re-running steps 1 and 2 reproduces all three shipped
-shoe meshes — 518, 194 and 964 triangles — with **bit-identical vertex positions**. The
-decimation is deterministic; the recipe below is the asset's real source.
+Verified 2026-08-01 on Blender 5.1.2: re-running steps 1 and 2 reproduces the 518, 194 and
+964-triangle shoe meshes with **bit-identical vertex positions**. The decimation is
+deterministic; the recipes below are the real source of what they built.
 
-**Steps 1 and 3 are SUPERSEDED as shipped state.** Their decimations were reverted on
-2026-08-01 (see [Restoration](#restoration-putting-an-original-mesh-back)); they are kept
-verbatim because step 1 is still how `tiger_1_link.lod1.glb` is built, step 2 depends on the
-`$W/shoe_src.glb` step 1 extracts, and the numbers are the record of what was measured.
-Steps 2 and 4 ship as written.
+**Only step 4 still describes shipped state.** Step 1 and step 3 were reverted on 2026-08-01
+(see [Restoration](#restoration-putting-an-original-mesh-back)), and step 2's LOD1 was
+replaced on the same day by [The planar LOD chain](#the-planar-lod-chain), which is where the
+shoe's three shipped tiers now come from. What survives here: step 2's `alt964` line, step 4
+in full, and the `$W/shoe_src.glb` extraction in step 1 that every other recipe depends on.
 
-### 1 — track shoe, 5 552 -> 518 triangles (REVERTED — LOD1 in step 2 still uses this path)
+### 1 — track shoe, 5 552 -> 518 triangles (REVERTED — the extract line is still the entry point)
 
     python3 scripts/tank/diet/extract.py assets/tiger_1/tiger_1.glb 1 $W/shoe_src.glb
     blender -b -P scripts/tank/diet/decimate.py -- $W/shoe_src.glb $W/shoe_lod0.glb 520 30
@@ -128,7 +141,12 @@ Mesh 1 is `Link`. It is view-only: `src/track/marker_model.rs` measures the trac
 `REQUIRED_MESHES` does not include the shoe. Support is the contact envelope and grip is
 per-element analytic, so nothing samples this mesh.
 
-### 2 — LOD1 and the 964-triangle alternative
+### 2 — LOD1 and the 964-triangle alternative (LOD1 SUPERSEDED — see the planar chain)
+
+The `lod1.glb` line below built the 194-triangle collapse shoe that shipped until
+2026-08-01. It is no longer the recipe: `tiger_1_link.lod1.glb` is now 386 triangles from
+[The planar LOD chain](#the-planar-lod-chain). Kept for the record and because the
+`alt964` line still stands.
 
     blender -b -P scripts/tank/diet/decimate.py -- $W/shoe_src.glb $W/lod1.glb 200 30
     python3 scripts/tank/diet/rename.py $W/lod1.glb assets/tiger_1/tiger_1_link.lod1.glb Link_LOD1
@@ -291,6 +309,228 @@ One artefact to expect and not chase: in `wire` mode the Wireframe modifier thro
 spikes off both barrels, restored and decimated alike. That is the modifier meeting the MG
 jacket's 13 open shells and 207 boundary edges, not damage in the mesh — the clay and
 textured rows are the ones to read for the barrel.
+
+## The planar LOD chain
+
+Built 2026-08-01 on Blender 5.1.2. Supersedes step 1 and step 2 as the shoe's source: all
+three tiers now come from `decimate_planar.py`, and `tiger_1_link.lod1.glb` is no longer a
+`decimate.py` artefact.
+
+| tier | file | recipe | tris | verts | worst dev | p90 dev |
+|---|---|---|---|---|---|---|
+| authored | `tiger_1.glb` mesh 1 (was) | — | 5 552 | 10 530 | — | — |
+| LOD0 | `tiger_1.glb` mesh 1 `Link` | planar 10° | 3 058 | 3 477 | 0.99 mm | 0.15 mm |
+| LOD1 | `tiger_1_link.lod1.glb` | planar 60° all-boundaries + collapse 400 | 386 | 806 | 17.93 mm | 8.72 mm |
+| LOD2 | `tiger_1_link.lod2.glb` | planar 60° all-boundaries + collapse 200 | 192 | 501 | 51.38 mm | 25.88 mm |
+
+Deviation is `deviation.py`'s symmetric point-to-surface distance against the authored mesh,
+in mm on a 725 mm shoe. Per tank the LOD0 swap is **1 146 922 → 663 086 tris (−42%)** and
+**2 122 976 → 754 694 verts (−64%)**; the belt is 194 shoes × 2, so the shoe IS the tank.
+
+    W=$(mktemp -d)
+    python3 scripts/tank/diet/extract.py assets/tiger_1/tiger_1.glb 1 $W/shoe_src.glb
+
+    #                                                                    angle  collapse
+    ALL_BOUNDARIES=0 blender -b -P scripts/tank/diet/decimate_planar.py -- \
+        $W/shoe_src.glb $W/lod0.glb 10
+    ALL_BOUNDARIES=1 blender -b -P scripts/tank/diet/decimate_planar.py -- \
+        $W/shoe_src.glb $W/lod1.glb 60 400
+    ALL_BOUNDARIES=1 blender -b -P scripts/tank/diet/decimate_planar.py -- \
+        $W/shoe_src.glb $W/lod2.glb 60 200
+
+    python3 scripts/tank/diet/inject.py assets/tiger_1/tiger_1.glb Link $W/lod0.glb
+    python3 scripts/tank/diet/rename.py $W/lod1.glb assets/tiger_1/tiger_1_link.lod1.glb Link_LOD1
+    python3 scripts/tank/diet/rename.py $W/lod2.glb assets/tiger_1/tiger_1_link.lod2.glb Link_LOD2
+
+`DELIMIT` defaults to `UV,SHARP` and is left at that everywhere. Then the four standing
+checks from [Restoration](#what-the-restoration-must-not-disturb-and-how-that-was-shown), all
+of which passed: exactly one mesh changed (`Link`), materials / nodes / scenes / textures /
+samplers / images structurally identical, and all 9 KTX2 payloads hashing equal.
+
+### THE WELD IS THE WHOLE TRICK, and it must be TIGHT
+
+`bpy.ops.import_scene.gltf(merge_vertices=True)` **does not merge this mesh.** The shoe
+arrives fully split — 10 530 verts for 5 552 triangles — and stays that way. Split verts mean
+two faces sharing an edge do not share vertices, so the dissolve has no shared edge to work
+across and barely moves: 10° returns 4 736 triangles, a 15 % cut instead of a 45 % one. An
+explicit `remove_doubles` at 1e-5 takes it to **2 748 verts, one closed manifold shell, zero
+boundary and zero non-manifold edges**, and the same 10° then returns 3 058.
+
+Coarser is not better, and this is the counter-intuitive half. Widening the weld destroys the
+coplanarity the dissolve depends on, so the planar pass gets WORSE:
+
+| weld | after weld | after 60° planar |
+|---|---|---|
+| 1e-5 | 5 544 tris | **772** |
+| 1e-4 | 5 444 | 774 |
+| 1e-3 | 5 048 | 788 |
+| 3e-3 | 2 208 | 1 670 |
+| 6e-3 | 1 350 | 1 255 |
+
+Weld tight, dissolve wide. Do not reach for the weld as a decimation lever.
+
+### delimit: `{UV,SHARP}`, and why SHARP is free
+
+`UV` costs about 1 % of the reduction (10° gives 3 024 triangles without it, 3 058 with) and
+buys the guarantee that no face is dissolved across a UV seam — a face that spans two islands
+drags the albedo across the join. Always worth it.
+
+`SHARP` is a **no-op on this asset and is set anyway**: the welded shoe carries 0 sharp-flagged
+edges and 0 seams, because its shading comes from custom split normals rather than edge flags.
+`{UV,SHARP}` and `{UV}` produce byte-identical output at every angle tested. It costs nothing
+and it is correct on the next mesh, which may not be flag-free. `NORMAL` also measured as a
+no-op here; it is not set, because unlike SHARP it is not obviously harmless elsewhere.
+
+Blender's own defaults are `delimit=set()` and `angle_limit=5°` — worth knowing when comparing
+a headless run against something clicked in the GUI.
+
+### The fine-cylinder threshold: what the deviation number cannot see
+
+**The 10° preset flattens the pin sockets.** The socket is a finely tessellated cylinder whose
+facets meet at 4–5°, so any limit at or above 5° dissolves the whole thing into one facet. It
+reads as a blown-out specular smear where the authored mesh has a smooth recess.
+`.agents/scratch/shoe-lod-chain-renders/socket_angle_threshold.jpg` is the ladder.
+
+| angle | tris | worst dev | pin socket |
+|---|---|---|---|
+| 2° | 5 036 | 0.10 mm | intact |
+| 3° | 4 932 | 0.19 mm | intact |
+| 4° | 4 806 | 0.29 mm | intact |
+| 5° | 4 452 | 0.55 mm | **flattened** |
+| 6.5° | 4 252 | 0.58 mm | **flattened** |
+| 10° | 3 058 | 0.99 mm | **flattened** (shipped) |
+
+Two things follow, and both are general.
+
+**Deviation cannot catch this, and no threshold on it would have.** The socket is ~16 mm
+across, so flattening it moves the surface LESS than reducing the guide horn does — at 10° the
+worst 1 mm sits on the horn and the socket is under 0.5 mm. Deviation weights a feature by how
+far it moves; the eye weights it by whether a smooth cylinder just became a polygon. The
+renders are a deliverable because of this, not a courtesy, and the belt sheet is what caught
+it after four turntable azimuths did not.
+
+**The angle limit is not a free parameter — it is a property of how the source was
+tessellated.** A dihedral histogram of the welded shoe says so directly:
+
+| band | edges | what it is |
+|---|---|---|
+| 0–0.5° | 3 694 (44 %) | genuinely flat plate faces — the free win |
+| 0.5–5° | 865 (10 %) | **fine cylinders: the pin sockets** |
+| 5–12° | 1 860 (22 %) | fillets, horn caps, coarser curvature |
+| 45–91° | 1 851 (22 %) | hard plate edges, must survive any limit |
+
+Run that histogram before picking an angle on a new mesh. The safe limit is just under the
+band holding the smallest feature worth keeping; everything above it is a decision to spend
+that feature. On this shoe the saving at 10° **is** the fine curved detail — protecting it
+costs most of the win (4° keeps the socket at 4 806 tris, −13 %, against 3 058 at −45 %).
+
+Scale for the judgement: the crop shows the socket at ~10 px, which the main camera reaches at
+about 2.9 m and the gunner optic at about 19 m. Past ~10 m in the main view it is under 3 px
+and not resolvable. That makes 10° a real call rather than an obvious defect — and the call
+is Yan's, per the rule below.
+
+### LOD0 CHANGES NEED AN IN-GAME EYEBALL BEFORE MERGE
+
+LOD0 is the mesh a player sees up close, so
+[THE SECOND RULE](#the-second-rule-a-base-mesh-is-human-domain) applies to it in full: a
+triangle budget does not get to decide it, and neither does a deviation number. The 10° preset
+is here because **Yan validated it in the GUI**, not because it measured well.
+
+Any change to the LOD0 angle — including "improving" it to 4° to save the sockets — is an
+asset change that ships to players and needs Yan's eyeball **in the game**, not in these
+renders. LOD1 and LOD2 are distance tiers and do not: machine decimation is allowed there,
+which is what makes their collapse pass legitimate.
+
+### Why the tight tiers need a collapse pass
+
+Planar alone **floors at 772 triangles** on this mesh (60° with all-boundaries; 89° gives 768,
+so it is saturated, not merely slow). 300–500 is out of its reach, so LOD1 and LOD2 run a
+quadric collapse on top of the planar result. That pass moves vertices and drops the authored
+split normals, hence the re-shade at 30° — and it is flagged wherever it appears.
+
+The planar base is not incidental to it. Feeding the collapse a mesh with the redundant
+coplanar verts already gone measurably beats every other base at the same budget:
+
+| collapse base | tris | worst dev |
+|---|---|---|
+| planar 10° | 382 | 27.48 mm |
+| planar 20° all-boundaries | 396 | 25.29 mm |
+| planar 40° all-boundaries | 392 | 21.28 mm |
+| **planar 60° all-boundaries** | **386** | **17.93 mm** |
+
+The collapse itself floors at 188 triangles here (a closed shell with pin-hole handles), which
+is why the previous `lod1.glb` sat at 194 and why LOD2 targets 200.
+
+`all_boundaries` is off for LOD0 and on for the collapse tiers. It dissolves verts along ngon
+perimeters, which is most of the count at wide angles (60°: 772 triangles on, 1 758 off) but
+can move a silhouette vert — a fair trade at 500 m, not one to make on the base mesh.
+
+If the collapse is unwanted in the chain at all, a planar-only LOD1 is one command away:
+
+    ALL_BOUNDARIES=1 blender -b -P scripts/tank/diet/decimate_planar.py -- \
+        $W/shoe_src.glb $W/lod1_planar.glb 60      # 772 tris, worst 10.83 mm
+
+### Switch distances: the pixel arithmetic
+
+One pixel subtends `fov / height` radians, so a deviation `d` drops under a pixel beyond
+`D = d / (fov / height)`. At 1440 px the main camera (0.785 rad, `src/spec.rs`) is
+5.451e-4 rad/px and the gunner optic (0.12 rad, `tiger_1.tank.ron:326`) is 8.333e-5.
+
+| tier | worst dev | < 1 px beyond (main) | < 1 px beyond (optic) |
+|---|---|---|---|
+| LOD0 | 0.99 mm | 1.8 m | 11.9 m |
+| LOD1 | 17.93 mm | 32.9 m | 215.2 m |
+| LOD2 | 51.38 mm | 94.3 m | 616.6 m |
+
+**Suggested thresholds: D0→D1 at 250 m, D1→D2 at 650 m** — the optic numbers rounded up. The
+optic binds because LOD selection is by distance and cannot see which camera is looking; a
+threshold that satisfies the main camera at 33 m would show LOD1's faceting to a gunner at
+6.5× magnification. LOD0 clears one pixel by 11.9 m even in the optic, which is the evidence
+that it is safe as the base mesh at any range a player can get to.
+
+If LOD selection is ever made fov-aware, the main camera can switch at 35 m / 100 m instead
+and the belt gets much cheaper on every non-gunner view. And if the sight gains the discrete
+4×/8× steps `src/spec.rs` anticipates, these distances scale as `1/fov` and must be recomputed
+— an 8× step at 0.06 rad doubles both.
+
+### Determinism
+
+Same input, same output, byte for byte — verified by running each tier twice and hashing:
+
+| tier | sha256 of the geometry-only glb |
+|---|---|
+| LOD0 | `51efb873f7440ea5bcd4b5b3ce3206ca887e85a2853bc4ad9d3a98681ebef45c` |
+| LOD1 | `876a74a5b264ef5697fffa4861290cd8002ef3b30ff275819ed8c3b1edbe670d` |
+| LOD2 | `c42a515f4ff57aedd93a52aebe0c757fa78efbb8e69d132c3848a9a4afb86ca4` |
+
+Whole-file equality, not just vertex positions. `deviation.py` is deterministic for the same
+reason it is trustworthy — area-weighted Halton sampling, no RNG.
+
+### UV integrity
+
+`uvcheck.py <authored> <lod>` on all three. LOD0 comes back clean on every check: uv bbox
+identical, 0 degenerate triangles, longest uv edge 0.421 against the source's own 0.575, and
+**100 % of its vertices still on an authored position with the authored UV** — which is the
+planar dissolve's defining property stated as a measurement.
+
+LOD1 and LOD2 anchor 24 % and 6 % (the collapse moved the rest), and where they anchor the UV
+still matches exactly. The one check that does not come back clean is LOD2's longest uv edge,
+0.674 against 0.575 — a 17 % stretch on its single worst triangle. Recorded rather than fixed:
+it is a beyond-500 m tier where the shoe is under a pixel.
+
+### Renders
+
+    W=$(mktemp -d); OUT=.agents/scratch/shoe-lod-chain-renders
+    RES=900 python3 scripts/tank/diet/drive_render.py $W/frames $TEX 40,90,140,230 \
+        orig_5552=$W/shoe_src.glb lod0_3058=$W/lod0.glb \
+        lod1_386=assets/tiger_1/tiger_1_link.lod1.glb \
+        lod2_192=assets/tiger_1/tiger_1_link.lod2.glb
+    RES=900 ELEV=18 DIST_F=2.8 blender -b -P scripts/tank/diet/belt.py -- \
+        <glb> $W/frames/belt_<label>_tex tex $TEX 20 55 90
+
+`$TEX` is the shoe texture directory built with `dumpimg.py` + `basisu -unpack` as described
+under [Renders](#renders) above. `sheet.py` composes the four sheets. Read the belt sheets
+first — they are the ones that decide, and they are the ones that found the socket.
 
 ## Two design decisions that look like bugs
 
