@@ -1513,35 +1513,81 @@ pub(crate) mod tests {
         }
     }
 
-    /// The far probe placement's REASON to exist, asserted as the numbers it is: every probe must
-    /// land in the shoe chain's LOD1 BAND — past the first swap, short of the second — or the "far"
-    /// capture is measuring something other than the band it was placed for.
+    /// The far probe placement's REASON to exist, asserted as the quantity BEVY ACTUALLY MEASURES:
+    /// every probe's worst-case CAMERA-TO-SHOE distance must land inside the shoe chain's LOD1 band,
+    /// or the "far" capture is measuring something other than the band it was placed for.
     ///
-    /// Both halves matter. Inside `SHOE_LOD1_DISTANCE_M` the probes would render the base shoe like
-    /// the near placement already does, and the capture would be the near case under a different
-    /// name. Beyond `SHOE_LOD2_DISTANCE_M` they would render LOD2 — a legitimate thing to measure,
-    /// but not this placement, which was sited at 588..633 m to sit squarely in LOD1. Measured to
-    /// the tank rather than the camera on purpose — the orbit camera sits BEHIND it, so this is the
-    /// conservative end, and it is the end that can fall out of the band on the near side.
+    /// # Why the tank-centre distance is the wrong number
+    ///
+    /// This test used to compare the probe's XZ distance from the CONTROLLED TANK'S SPAWN POINT
+    /// against the thresholds, and called that "conservative" because the orbit camera sits behind
+    /// the tank. It is not conservative, it is a different quantity in three ways at once:
+    ///
+    ///   * `check_visibility_ranges` measures camera origin to MESH origin in 3D, not tank centre to
+    ///     tank centre in XZ.
+    ///   * The camera is only "behind" for one mouse-look heading. Look is free, so the body can be
+    ///     up to [`ORBIT_FAR`] TOWARD the probes — which subtracts from the distance rather than
+    ///     adding to it.
+    ///   * A shoe is not at its tank's origin: the belt spans the hull, so each of a probe's 194
+    ///     shoes sits up to a footprint half-diagonal off the spawn point, and the near ones are
+    ///     what cross a threshold first.
+    ///
+    /// So the bound asserted here is `probe XZ distance − ORBIT_FAR − footprint half-diagonal`,
+    /// against the band with an explicit [`BAND_MARGIN_M`] to spare. The terrain height difference
+    /// between the duel pad and the probe block is deliberately NOT subtracted: 3D distance is
+    /// `√(xz² + Δy²) ≥ xz`, so any height delta (and the camera's own lift above the hull) only
+    /// pushes the probes FURTHER away, which is the safe direction for the near edge and the only
+    /// edge a finite band's far side would need — see the far half below.
+    ///
+    /// # Read off the BAND, not off a threshold constant
+    ///
+    /// The band comes from `shoe_lod_range(1)`, so "sited inside LOD1" keeps meaning that when a
+    /// level is added or dropped from the chain. As the chain ships LOD1 is the last level, so its
+    /// far edge is infinite and the far assertion is vacuous — written anyway, because re-adding a
+    /// LOD2 row re-arms it automatically, and 632.6 m of probe against a 924.8 m derived LOD2
+    /// threshold is exactly the kind of thing that stops being true quietly.
     #[test]
     fn the_far_probe_placement_puts_every_probe_in_the_shoe_lod1_band() {
+        use crate::camera::ORBIT_FAR;
         use crate::tank::scenario::{duel_spawn_xz, probe_spawn_xz};
-        use crate::track::link_view::{SHOE_LOD1_DISTANCE_M, SHOE_LOD2_DISTANCE_M};
+        use crate::track::link_view::shoe_lod_range;
 
+        /// How much room the placement must have on either side of the band edge. A placement that
+        /// is inside its band by a metre is one heightmap re-author or one orbit tweak from being
+        /// outside it, and a capture that silently changes what it measures is worse than one that
+        /// fails to run.
+        const BAND_MARGIN_M: f32 = 25.0;
+
+        // The furthest a probe's own shoes reach from its spawn point, worst case: the corner of
+        // the square footprint every spawn is cleared over. The Tiger's belt (≈6.6 m long, ≈3.7 m
+        // outside-to-outside) fits well inside it, so this is a documented over-estimate rather
+        // than a measurement of the track — which is what a bound wants to be.
+        let shoe_reach = SPAWN_FOOTPRINT_HALF_M * std::f32::consts::SQRT_2;
+
+        let band = shoe_lod_range(1);
+        let (near_edge, far_edge) = (band.start_margin.start, band.end_margin.end);
         let anchor = duel_spawn_xz(true)[0];
         for i in 0..28 {
-            let distance = probe_spawn_xz(true, i).distance(anchor);
+            let xz = probe_spawn_xz(true, i).distance(anchor);
+            // Camera pulled the full orbit radius TOWARD the probe, and the probe's nearest shoe
+            // reaching back at it. Height deltas omitted on purpose: they only add.
+            let nearest = xz - ORBIT_FAR - shoe_reach;
+            // The far end needs the terms the other way round, and no orbit help: the camera can
+            // equally sit ORBIT_FAR on the far side, and the probe's furthest shoe reaches away.
+            let furthest = xz + ORBIT_FAR + shoe_reach;
             assert!(
-                distance > SHOE_LOD1_DISTANCE_M,
-                "far probe {i} is {distance:.0} m from the controlled tank — inside the \
-                 {SHOE_LOD1_DISTANCE_M} m first swap, so it would render the base shoe like the \
-                 near placement does",
+                nearest >= near_edge + BAND_MARGIN_M,
+                "far probe {i} sits {xz:.0} m from the controlled tank, but its nearest shoe can be \
+                 {nearest:.0} m from the camera (orbit {ORBIT_FAR} m + {shoe_reach:.1} m of hull) — \
+                 inside the {near_edge:.0} m swap plus {BAND_MARGIN_M} m of margin, so mid-capture \
+                 it would render the base shoe like the near placement does",
             );
             assert!(
-                distance < SHOE_LOD2_DISTANCE_M,
-                "far probe {i} is {distance:.0} m from the controlled tank — beyond the \
-                 {SHOE_LOD2_DISTANCE_M} m second swap, so it renders LOD2 rather than the LOD1 \
-                 band this placement was sited for",
+                furthest < far_edge - BAND_MARGIN_M,
+                "far probe {i} sits {xz:.0} m from the controlled tank, but its furthest shoe can \
+                 be {furthest:.0} m from the camera — past the {far_edge:.0} m end of the LOD1 \
+                 band (less {BAND_MARGIN_M} m of margin), so it would render the level below \
+                 rather than the band this placement was sited for",
             );
         }
     }

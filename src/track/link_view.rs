@@ -108,7 +108,7 @@
 //! holds thirty of them. Beyond a few tens of metres none of that detail survives rasterisation, so
 //! every shoe carries a CHAIN of lower-detail siblings ([`SHOE_LOD_CHAIN`]) — machine reductions of
 //! the same shoe by `scripts/tank/diet/decimate_planar.py`, in the same mesh-local frame, on the
-//! same material. At 386 and 192 triangles the same belt costs ~75 k and ~37 k per tank.
+//! same material. At 386 triangles the same belt costs ~75 k per tank.
 //!
 //! The switch is bevy's own [`VisibilityRange`] — [`VisibilityRange::abrupt`], deliberately, because
 //! a crossfaded range compiles a second dithering permutation of every shoe pipeline for a
@@ -136,11 +136,13 @@
 //! The cost of the pattern is entity count: the pool is multiplied by the number of levels, and
 //! every one of those entities is visited by `check_visibility_ranges` each frame. That is the trade
 //! a measurement sweep has to judge — the triangle win is only worth having if it is not eaten by
-//! the visibility walk, and at 194 shoes × 3 levels × 30 tanks the walk is ~17.5 k entities. The
-//! probe scenario can stand its 30-tank block on either side of the first swap
-//! (`OVERMATCH_PROBE_FAR` — see [`crate::tank::scenario::probe_far`]), which is what makes both
-//! halves of that measurable. If the near sweep says the walk costs more than the triangles save,
-//! the retreat is deleting a row from [`SHOE_LOD_CHAIN`]: the ranges re-derive around the gap.
+//! the visibility walk, and at 194 shoes × 2 levels × 30 tanks the walk is ~11.6 k entities. The
+//! probe scenario can stand its 30-tank block on either side of the swap (`OVERMATCH_PROBE_FAR` —
+//! see [`crate::tank::scenario::probe_far`]), which is what makes both halves of that measurable.
+//! If the near sweep says the walk costs more than the triangles save, the retreat is deleting a
+//! row from [`SHOE_LOD_CHAIN`]: the ranges re-derive around the gap. That retreat has already been
+//! taken ONCE, on the evidence rather than on a sweep — see [`SHOE_LOD_CHAIN`] for why the second
+//! reduction is shipped as an asset but not wired as a level.
 
 use bevy::camera::visibility::VisibilityRange;
 use bevy::mesh::{GenerateTangentsError, Indices, PrimitiveTopology, VertexAttributeValues};
@@ -185,17 +187,58 @@ const PIN_END_NODE: &str = "Pin_End";
 /// glb's own primitive rather than by name.
 const LINK_MATERIAL: &str = "Mat_Track_Link";
 
-/// The LOW-DETAIL shoes, exported beside the tank as their own glbs: one node, one primitive, no
-/// material and no markers each. They are loaded as labelled PRIMITIVES rather than scenes, so
-/// nothing is instantiated and nothing needs hiding — and the look keeps coming from the template's
-/// own [`LINK_MATERIAL`], which is what makes the swaps invisible in the first place.
+/// The LOW-DETAIL shoe, exported beside the tank as its own glb: one node, one primitive, no
+/// material and no markers. It is loaded as a labelled PRIMITIVE rather than a scene, so nothing is
+/// instantiated and nothing needs hiding — and the look keeps coming from the template's own
+/// [`LINK_MATERIAL`], which is what makes the swap invisible in the first place.
 const LINK_LOD1_GLB: &str = "tiger_1/tiger_1_link.lod1.glb";
-const LINK_LOD2_GLB: &str = "tiger_1/tiger_1_link.lod2.glb";
 
-/// Where a shoe drops to its first reduction, metres from the camera — and, below, to its second.
-/// Both are set by the GUNNER OPTIC rather than by the third-person view.
+// ---------------------------------------------------------------------------------------------
+// PER-ASSET NUMBERS — what an LOD mesh regeneration has to re-measure
+// ---------------------------------------------------------------------------------------------
+
+/// The MEASURED worst-case point-to-surface deviation of the shipped LOD1 shoe from the base shoe,
+/// MILLIMETRES (`scripts/tank/diet/README.md` records the measurement).
 ///
-/// # Why the optic sets them
+/// **This is a property of the MESH ASSET, not a tuning knob.** It and [`LINK_LOD1_GLB`] are the
+/// whole of what the asset contributes to the LOD policy: the switch distance is DERIVED from it
+/// through [`sub_pixel_distance_m`], and `the_wired_thresholds_are_the_sub_pixel_derivation`
+/// fails the build if the wired distance ever stops covering it. So regenerating the reduced
+/// meshes is a TWO-CONSTANT update — this number, and the [`SHOE_LOD1_DISTANCE_M`] rounding that
+/// follows from it — and forgetting the second half fails in CI rather than in a player's optic.
+const WORST_DEV_LOD1_MM: f32 = 17.93;
+
+/// The main pass's WORST-CASE height in pixels, which is what the sub-pixel arithmetic below is
+/// indexed to.
+///
+/// 2160 is 4K native, and it is a CEILING rather than a guess. The settings render-scale ladder
+/// ([`crate::settings::RenderScaleLevel`]) tops out at `Percent100` — native — so no setting can
+/// make the main pass TALLER than the display it is presented on, and borderless fullscreen takes
+/// the display's own resolution rather than a capped one. A SHORTER view only makes every threshold
+/// below more conservative: fewer pixels over the same FOV means each pixel subtends more angle, so
+/// a given deviation drops under one sooner. Deriving at 1440 and playing at 2160 would be the
+/// error that actually bites — the same deviation is then 1.5× the pixels it was argued to be.
+const LOD_REF_VIEW_HEIGHT_PX: f32 = 2160.0;
+
+/// The camera the distances are chosen for: the gunner optic's authored vertical FOV. Read off
+/// [`crate::camera::GUNNER_FOV_FALLBACK`] rather than retyped, so the two cannot drift.
+const LOD_REF_FOV_RAD: f32 = crate::camera::GUNNER_FOV_FALLBACK;
+
+/// The distance beyond which a worst-case surface deviation of `worst_dev_mm` subtends LESS THAN
+/// ONE PIXEL of the reference view — THE derivation behind every threshold in [`SHOE_LOD_CHAIN`],
+/// written once so a test can re-run it against the wired numbers.
+///
+/// One pixel subtends `fov / height` radians, so a deviation `d` metres drops below a pixel beyond
+/// `D = d / (fov / height)`. At [`LOD_REF_VIEW_HEIGHT_PX`] the optic is `0.12 / 2160 = 5.556e-5`
+/// rad/px, against the commander view's `0.785 / 2160 = 3.634e-4`.
+fn sub_pixel_distance_m(worst_dev_mm: f32) -> f32 {
+    (worst_dev_mm / 1000.0) / (LOD_REF_FOV_RAD / LOD_REF_VIEW_HEIGHT_PX)
+}
+
+/// Where a shoe drops to its reduction, metres from the camera. Set by the GUNNER OPTIC rather than
+/// by the third-person view, and by the 4K view rather than by the one the author happens to run.
+///
+/// # Why the optic sets it
 ///
 /// There is exactly one `Camera3d` in the game: the optic is that camera at the tank's authored
 /// gunner FOV (0.12 rad on the Tiger) instead of the commander's ~0.785 rad, so it magnifies ~6.5×.
@@ -203,63 +246,82 @@ const LINK_LOD2_GLB: &str = "tiger_1/tiger_1_link.lod2.glb";
 /// camera there is no second view to give a different range to, and making the ranges track the
 /// current FOV would mean rewriting a `VisibilityRange` on every shoe entity in the world each time
 /// the player raises the sight — the exact O(tanks × meshes) view switch `render_policy` exists to
-/// have deleted. So one set of distances serves both views, chosen for the demanding one.
+/// have deleted. So one distance serves both views, chosen for the demanding one.
 ///
-/// # Where the numbers come from
+/// # Where the number comes from
 ///
-/// One pixel subtends `fov / height` radians, so a MEASURED worst-case point-to-surface deviation
-/// `d` drops below a pixel beyond `D = d / (fov / height)`. At 1440 px the optic is
-/// `0.12 / 1440 = 8.333e-5` rad/px, against the main camera's `0.785 / 1440 = 5.451e-4`. The chain's
-/// measured deviations (`scripts/tank/diet/README.md`) give:
+/// [`sub_pixel_distance_m`] over [`WORST_DEV_LOD1_MM`]: `0.01793 / 5.556e-5 = 322.7 m`, rounded up
+/// to a clean 350 for margin. The base shoe's own 0.99 mm clears a pixel at 17.8 m even in the
+/// optic, which is the evidence that it is safe as the mesh a player walks up to.
 ///
-/// | tier | worst dev | < 1 px beyond (optic) | < 1 px beyond (main) |
-/// |------|-----------|-----------------------|----------------------|
-/// | base (3 058) |  0.99 mm |  11.9 m |  1.8 m |
-/// | LOD1 (386)   | 17.93 mm | 215.2 m | 32.9 m |
-/// | LOD2 (192)   | 51.38 mm | 616.6 m | 94.3 m |
-///
-/// `0.01793 / 8.333e-5 = 215.2` and `0.05138 / 8.333e-5 = 616.6`; the constants below round those up
-/// to 250 and 650 for margin. The base clears one pixel by 11.9 m even in the optic, which is the
-/// evidence that it is safe as the mesh a player walks up to.
-///
-/// That margin is also why the ABRUPT ranges need no hysteresis: a tank loitering exactly on a
+/// That margin is also why the ABRUPT range needs no hysteresis: a tank loitering exactly on the
 /// boundary flips between two silhouettes that differ by well under a pixel.
 ///
-/// The main camera would tolerate 35 m and 100 m by the same arithmetic, and a great deal more of a
-/// battlefield sits inside 250 m than beyond it — but LOD selection is by distance and cannot see
+/// The commander view would tolerate 49 m by the same arithmetic, and a great deal more of a
+/// battlefield sits inside 350 m than beyond it — but LOD selection is by distance and cannot see
 /// which camera is looking, so a threshold that satisfied the commander would show the gunner
-/// LOD1's faceting at 6.5×. If selection is ever made fov-aware, those are the numbers to use. And
-/// if the sight gains the discrete 4×/8× steps `spec.rs` anticipates, both distances scale as
-/// `1/fov` — an 8× step at 0.06 rad doubles them.
-pub(crate) const SHOE_LOD1_DISTANCE_M: f32 = 250.0;
-/// Where the first reduction hands over to the second. See [`SHOE_LOD1_DISTANCE_M`] for the
-/// arithmetic — 51.38 mm over 8.333e-5 rad/px is 616.6 m, rounded up.
-pub(crate) const SHOE_LOD2_DISTANCE_M: f32 = 650.0;
+/// LOD1's faceting at 6.5×. If selection is ever made fov-aware, that is the number to use. And if
+/// the sight gains the discrete 4×/8× steps `spec.rs` anticipates, the distance scales as `1/fov` —
+/// an 8× step at 0.06 rad doubles it.
+pub(crate) const SHOE_LOD1_DISTANCE_M: f32 = 350.0;
 
-/// The reduced levels below the base shoe, NEAREST FIRST: the glb each one loads, and the distance
-/// beyond which it takes over from the level above it. The base owns `[0, chain[0].1)`, level
-/// `1 + i` owns `[chain[i].1, chain[i + 1].1)`, and the last owns everything beyond — see
-/// [`lod_range`], which is the ONE place that arithmetic lives.
+/// One reduced level: the glb the bind loads, the MEASURED deviation that mesh carries, and the
+/// distance beyond which it takes over from the level above it. Deviation and distance travel
+/// TOGETHER because they are one claim — "this mesh is indistinguishable from here" — and a row
+/// that carried only the distance is a row an asset swap can silently falsify.
+struct ShoeLevel {
+    glb: &'static str,
+    worst_dev_mm: f32,
+    from_m: f32,
+}
+
+/// The reduced levels below the base shoe, NEAREST FIRST. The base owns `[0, chain[0].from_m)`,
+/// level `1 + i` owns `[chain[i].from_m, chain[i + 1].from_m)`, and the last owns everything
+/// beyond — see [`shoe_lod_range`], which is the ONE place that arithmetic lives.
 ///
-/// A slice rather than a fixed-size array on purpose: retreating from three tiers to two (if the
-/// near-placement sweep says the tripled `check_visibility_ranges` walk costs more than the
-/// triangles save) is deleting ONE ROW here. Nothing else in the module names a level count.
-const SHOE_LOD_CHAIN: &[(&str, f32)] = &[
-    (LINK_LOD1_GLB, SHOE_LOD1_DISTANCE_M),
-    (LINK_LOD2_GLB, SHOE_LOD2_DISTANCE_M),
-];
+/// A slice rather than a fixed-size array on purpose: adding or dropping a tier is ONE ROW here,
+/// and nothing else in the module names a level count.
+///
+/// # Why the shipped LOD2 is an asset and not a row
+///
+/// `tiger_1/tiger_1_link.lod2.glb` (192 triangles, MEASURED 51.38 mm worst deviation) is built,
+/// shipped and rendered-verified, and it is deliberately NOT wired. Its own arithmetic is what
+/// retires it: `sub_pixel_distance_m(51.38) = 924.8 m`, so its band would open at ~950 m — and the
+/// camera's far plane is 1 000 m on a 1 000 m world, which leaves the tier a ~50 m shell that
+/// almost nothing is ever in. Against that, a wired third level costs a THIRD entity on all 194
+/// shoes of every tank, walked by `check_visibility_ranges` every frame whether or not anything is
+/// far enough to use it — 5 820 more entities in a 30-tank frame, paid in the near case, which is
+/// the case that actually happens.
+///
+/// Re-add it when the world or the camera changes the premise — a larger map, a longer far plane,
+/// or an HLOD tier that wants a cheap silhouette to hand off to. That is one `ShoeLevel` row with
+/// its measured deviation and `sub_pixel_distance_m` rounded up; the ranges, the bind, the spawn
+/// and the tests all re-derive around it.
+const SHOE_LOD_CHAIN: &[ShoeLevel] = &[ShoeLevel {
+    glb: LINK_LOD1_GLB,
+    worst_dev_mm: WORST_DEV_LOD1_MM,
+    from_m: SHOE_LOD1_DISTANCE_M,
+}];
 
-/// The chain's levels and thresholds as one log-line phrase — `"2 reduced levels, LOD1 beyond 250
-/// m, LOD2 beyond 650 m"`. Lives here so a consumer's rig-bound line reports whatever the chain
-/// currently is, rather than naming one threshold that a chain edit would silently falsify.
+/// The chain's levels and thresholds as one log-line phrase — `"1 reduced level, LOD1 beyond 350
+/// m"`. Lives here so a consumer's rig-bound line reports whatever the chain currently is, rather
+/// than naming one threshold that a chain edit would silently falsify.
 pub(crate) fn lod_chain_summary() -> String {
     let levels = SHOE_LOD_CHAIN
         .iter()
         .enumerate()
-        .map(|(i, &(_, distance))| format!("LOD{} beyond {distance:.0} m", i + 1))
+        .map(|(i, level)| format!("LOD{} beyond {:.0} m", i + 1, level.from_m))
         .collect::<Vec<_>>()
         .join(", ");
-    format!("{} reduced levels, {levels}", SHOE_LOD_CHAIN.len())
+    format!(
+        "{} reduced {}, {levels}",
+        SHOE_LOD_CHAIN.len(),
+        if SHOE_LOD_CHAIN.len() == 1 {
+            "level"
+        } else {
+            "levels"
+        },
+    )
 }
 
 /// The range level `level` owns — `0` is the base shoe, `1 + i` is `SHOE_LOD_CHAIN[i]`.
@@ -270,15 +332,19 @@ pub(crate) fn lod_chain_summary() -> String {
 /// `visibility/range.rs`: `distance >= start_margin.start && distance < end_margin.end`), so every
 /// distance in `[0, ∞)` is owned by exactly one level. A hand-written table could gap or overlap;
 /// this cannot.
-fn lod_range(level: usize) -> VisibilityRange {
+///
+/// `pub(crate)` because the probe placement asserts itself against a BAND rather than against a
+/// threshold constant (`terrain_grid`'s far-probe test): a scenario sited "inside LOD1" has to keep
+/// meaning that when a level is added below or above it.
+pub(crate) fn shoe_lod_range(level: usize) -> VisibilityRange {
     let start = if level == 0 {
         0.0
     } else {
-        SHOE_LOD_CHAIN[level - 1].1
+        SHOE_LOD_CHAIN[level - 1].from_m
     };
     let end = SHOE_LOD_CHAIN
         .get(level)
-        .map_or(f32::INFINITY, |&(_, distance)| distance);
+        .map_or(f32::INFINITY, |level| level.from_m);
     VisibilityRange::abrupt(start, end)
 }
 
@@ -478,19 +544,20 @@ fn bind_link_template(
     // [`SHOE_LOD_CHAIN`] would leave a distance band with no shoe drawn in it at all, so a level
     // still loading starves the bind exactly like the base shoe does.
     if lod_handles.is_empty() {
-        lod_handles.extend(SHOE_LOD_CHAIN.iter().map(|&(path, _)| {
+        lod_handles.extend(SHOE_LOD_CHAIN.iter().map(|level| {
             asset_server.load(
                 GltfAssetLabel::Primitive {
                     mesh: 0,
                     primitive: 0,
                 }
-                .from_asset(path),
+                .from_asset(level.glb),
             )
         }));
     }
     let mut lods = Vec::with_capacity(SHOE_LOD_CHAIN.len());
     let mut lod_triangles = Vec::with_capacity(SHOE_LOD_CHAIN.len());
-    for (&(path, _), handle) in SHOE_LOD_CHAIN.iter().zip(lod_handles.iter()) {
+    for (level, handle) in SHOE_LOD_CHAIN.iter().zip(lod_handles.iter()) {
+        let path = level.glb;
         if let bevy::asset::LoadState::Failed(err) = asset_server.load_state(handle) {
             // Loud rather than a silent starve: without this the whole track — the base shoe
             // included — simply never binds and the tank drives on invisible shoes, which reads as
@@ -546,22 +613,32 @@ fn bind_link_template(
     // The LOD's whole ledger, one line per level: the band it owns, how much geometry it saves
     // against the base shoe, and the two mesh assets every instance of it in the session shares
     // (per side — the left is the mirror).
-    for (level, ((&(path, _), &tier_triangles), tier)) in SHOE_LOD_CHAIN
+    //
+    // The band is reported WITH THE ARITHMETIC THAT JUSTIFIES IT — the level's measured deviation
+    // and the distance beyond which that deviation is sub-pixel — so a capture log carries the
+    // claim as well as the number, and a frame stream captured against a regenerated asset says
+    // outright whether its thresholds still follow from its meshes.
+    for (index, ((chain, &tier_triangles), tier)) in SHOE_LOD_CHAIN
         .iter()
         .zip(lod_triangles.iter())
         .zip(lods.iter())
         .enumerate()
     {
-        let range = lod_range(level + 1);
+        let range = shoe_lod_range(index + 1);
+        let path = chain.glb;
         info!(
             "track links: LOD{} bound - `{path}`, {tier_triangles} triangles/shoe (−{}%) over \
-             [{:.0}, {:.0}) m, one mesh per side L {:?} R {:?}",
-            level + 1,
+             [{:.0}, {:.0}) m ({:.2} mm worst deviation, sub-pixel beyond {:.0} m at \
+             {LOD_REF_VIEW_HEIGHT_PX:.0} px through the {LOD_REF_FOV_RAD} rad optic), one mesh per \
+             side L {:?} R {:?}",
+            index + 1,
             100 - (tier_triangles * 100)
                 .checked_div(triangles.max(1))
                 .unwrap_or(0),
             range.start_margin.start,
             range.end_margin.end,
+            chain.worst_dev_mm,
+            sub_pixel_distance_m(chain.worst_dev_mm),
             tier.get(Side::Left).id(),
             tier.get(Side::Right).id(),
         );
@@ -786,9 +863,8 @@ fn mirrored_mesh(source: &Mesh) -> Mesh {
 /// That would be harmless if the shoe were unlit steel, but every reduced instance renders under the
 /// base shoe's [`LINK_MATERIAL`], whose three MEASURED maps include a NORMAL map. bevy's PBR shader
 /// keys normal mapping on the `VERTEX_TANGENTS` shader def and simply drops the map when the mesh
-/// has no tangents — no warning, no error. The swap at [`SHOE_LOD1_DISTANCE_M`] (and again at
-/// [`SHOE_LOD2_DISTANCE_M`]) would then change the LIGHTING as well as the silhouette, which is not
-/// what the distances were argued from.
+/// has no tangents — no warning, no error. The swap at [`SHOE_LOD1_DISTANCE_M`] would then change
+/// the LIGHTING as well as the silhouette, which is not what the distance was argued from.
 ///
 /// # Generate BEFORE mirroring, never after
 ///
@@ -822,7 +898,7 @@ fn lod_shoe_meshes(source: &Mesh) -> Result<PerSide<Mesh>, GenerateTangentsError
 /// draws. Parked below the world until the first placement writes a real pose (the spawn lands via
 /// `Commands`, so the placer only sees it next frame, and an un-posed link must not flash on screen).
 ///
-/// The levels' ranges MEET — `[0, 250)`, `[250, 650)`, `[650, ∞)` as the chain ships — so exactly
+/// The levels' ranges MEET — `[0, 350)` and `[350, ∞)` as the chain ships — so exactly
 /// one of them is drawn at every distance, in every view, with no gap and no double-draw. Both the
 /// meshes and the ranges come from the chain, so a level added or dropped there stays consistent
 /// here without touching this function. Every child carries the same [`TrackLink`] marker as its
@@ -839,7 +915,7 @@ pub(crate) fn spawn_link(
         TrackLink,
         Mesh3d(template.mesh.get(side).clone()),
         MeshMaterial3d(template.material.clone()),
-        lod_range(0),
+        shoe_lod_range(0),
         Transform::from_xyz(0.0, -1000.0, 0.0),
         ChildOf(parent),
     ));
@@ -850,7 +926,7 @@ pub(crate) fn spawn_link(
             // The SAME material: the levels differ in triangles and in nothing else, and a second
             // material would put a second batch (and a visible shading seam) on every swap.
             MeshMaterial3d(template.material.clone()),
-            lod_range(level + 1),
+            shoe_lod_range(level + 1),
             // IDENTITY, and load-bearing: every reduced mesh is authored in the same mesh-local
             // frame as the full shoe, so riding the parent's transform puts it exactly where the
             // shoe was. It is also what makes the range tests agree — all the levels resolve to the
@@ -997,7 +1073,7 @@ mod tests {
     /// `visibility/range.rs`: `is_visible_at_all` is `distance >= start_margin.start &&
     /// distance < end_margin.end`, i.e. HALF-OPEN `[start, end)`, and it is the exact predicate
     /// `check_visibility_ranges` uses to fill `VisibleEntityRanges`. So a boundary distance belongs
-    /// to the level BELOW it (250.0 m draws LOD1, not the base) — which is why the sweep below tests
+    /// to the level BELOW it (350.0 m draws LOD1, not the base) — which is why the sweep below tests
     /// each boundary itself, not just a value either side of it.
     #[test]
     fn every_distance_is_owned_by_exactly_one_shoe_level() {
@@ -1050,7 +1126,7 @@ mod tests {
                 "each level must be its own mesh — a shared handle is not an LOD",
             );
 
-            // The ranges themselves, as the chain's thresholds: [0, 250), [250, 650), [650, ∞).
+            // The ranges themselves, as the chain's thresholds: [0, 350) and [350, ∞) as it ships.
             let ranges: Vec<_> = levels.iter().map(|&e| range_of(e)).collect();
             for range in &ranges {
                 assert!(
@@ -1075,12 +1151,17 @@ mod tests {
                     .is_infinite(),
                 "the last level never ends",
             );
+            // The wired ranges carry the CHAIN's thresholds, in order — driven off the chain rather
+            // than off a literal list, so adding or dropping a level is still one row there.
             let thresholds: Vec<f32> = ranges[1..].iter().map(|r| r.start_margin.start).collect();
             assert_eq!(
                 thresholds,
-                vec![SHOE_LOD1_DISTANCE_M, SHOE_LOD2_DISTANCE_M],
+                SHOE_LOD_CHAIN.iter().map(|l| l.from_m).collect::<Vec<_>>(),
                 "the wired thresholds are the chain's, in order",
             );
+            // ...and the chain as it SHIPS is the one reduction at 350 m. Spelled out so a level
+            // added or dropped is a deliberate edit here, not a silent one.
+            assert_eq!(thresholds, vec![SHOE_LOD1_DISTANCE_M]);
 
             // TILING: exactly one level is drawn at every distance. Each threshold is probed AT the
             // boundary and a hair either side, because `[start, end)` is what decides which level
@@ -1112,6 +1193,62 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The wired thresholds ARE the sub-pixel derivation, re-run: every level's distance must cover
+    /// its own MEASURED deviation at [`LOD_REF_VIEW_HEIGHT_PX`] through the optic, and must not be
+    /// padded far past it.
+    ///
+    /// This is the test that makes an LOD asset swap safe. The reduced meshes are regenerated from
+    /// the blend by a separate workstream, and a regeneration changes exactly one thing this module
+    /// depends on: `ShoeLevel::worst_dev_mm`. Update that alone and the level now switches in CLOSER
+    /// than its own faceting is invisible — a silent, subtle, geometry-only regression that no
+    /// green suite would ever catch, because everything still binds, tiles and draws. So the
+    /// derivation is asserted, not just the numbers: forget the second half of the two-constant
+    /// update and CI fails here, naming the distance to write.
+    ///
+    /// The upper bound is the other half of the same claim. A distance far beyond the derivation is
+    /// not "safe margin", it is the reduction not being used — and it is what someone reaches for
+    /// to silence the lower bound without re-measuring. [`ROUNDING_SLACK_M`] is what "rounded up to
+    /// a clean value" is allowed to cost.
+    #[test]
+    fn the_wired_thresholds_are_the_sub_pixel_derivation() {
+        /// How far above the derived distance a wired threshold may be rounded. 322.7 → 350 spends
+        /// 27.3 m of it; anything much larger is a different decision wearing a rounding's clothes.
+        const ROUNDING_SLACK_M: f32 = 50.0;
+
+        for (i, level) in SHOE_LOD_CHAIN.iter().enumerate() {
+            let derived = sub_pixel_distance_m(level.worst_dev_mm);
+            assert!(
+                level.from_m >= derived,
+                "LOD{} ({}) switches in at {:.1} m, but its MEASURED {:.2} mm deviation only drops \
+                 under one pixel beyond {derived:.1} m at {LOD_REF_VIEW_HEIGHT_PX:.0} px through \
+                 the {LOD_REF_FOV_RAD} rad optic — a player would resolve the faceting. If the mesh \
+                 was regenerated, `from_m` has to follow `worst_dev_mm`: write {:.0}.",
+                i + 1,
+                level.glb,
+                level.from_m,
+                level.worst_dev_mm,
+                (derived / 50.0).ceil() * 50.0,
+            );
+            assert!(
+                level.from_m < derived + ROUNDING_SLACK_M,
+                "LOD{} ({}) switches in at {:.1} m, {:.1} m past the {derived:.1} m its deviation \
+                 needs — that is not rounding, it is the reduction never being reached",
+                i + 1,
+                level.glb,
+                level.from_m,
+                level.from_m - derived,
+            );
+        }
+
+        // The arithmetic itself, pinned against a hand-computed value: `0.01793 m / (0.12 / 2160)`.
+        // Without this the loop above would pass a `sub_pixel_distance_m` that had lost its units.
+        assert!(
+            (sub_pixel_distance_m(WORST_DEV_LOD1_MM) - 322.74).abs() < 0.1,
+            "the derivation is `dev_m / (fov_rad / height_px)`, got {}",
+            sub_pixel_distance_m(WORST_DEV_LOD1_MM),
+        );
     }
 
     /// EVERY reduced sibling inherits the CASTER SWAP. When the shadow ribbon lands,
@@ -1388,159 +1525,213 @@ mod tests {
         }
     }
 
-    /// EVERY SHIPPED reduced shoe — the whole of [`SHOE_LOD_CHAIN`] — run through the real bind-time
-    /// construction: both final meshes of every level come out carrying tangents.
-    ///
-    /// Asset-backed on purpose, in two halves. First the PREMISE is asserted against each glb — no
-    /// TANGENT accessor and no MATERIAL — because that pair is exactly what makes `bevy_gltf` skip
-    /// its own mikktspace pass (it runs only when the primitive's own material has a normal
-    /// texture). Then the mesh those accessors describe is pushed through [`lod_shoe_meshes`], the
-    /// same call `bind_link_template` makes. If a re-export ever gives a primitive a material or its
-    /// own tangents the first half fails loudly and this comment is what explains why — the
+    /// One SHIPPED reduced shoe read straight off disk, with the PREMISE the bind-time tangent
+    /// generation rests on asserted on the way past: no TANGENT accessor and no MATERIAL, because
+    /// that pair is exactly what makes `bevy_gltf` skip its own mikktspace pass (it runs only when
+    /// the primitive's own material has a normal texture). If a re-export ever gives a primitive a
+    /// material or its own tangents this fails loudly and this comment is what explains why — the
     /// generation then becomes redundant rather than wrong.
+    ///
+    /// Returns the mesh those accessors describe, ready to push through [`lod_shoe_meshes`] — the
+    /// same call `bind_link_template` makes.
+    fn shipped_reduced_shoe(glb: &str) -> Mesh {
+        let path = crate::assets::asset_root().join(glb);
+        let gltf::Gltf { document, mut blob } =
+            gltf::Gltf::open(&path).unwrap_or_else(|e| panic!("{glb} must open: {e}"));
+        let buffers = [blob.take().expect("the glb carries its binary chunk")];
+        let primitive = document
+            .meshes()
+            .next()
+            .unwrap_or_else(|| panic!("{glb} carries one mesh"))
+            .primitives()
+            .next()
+            .unwrap_or_else(|| panic!("{glb}'s mesh carries one primitive"));
+        assert!(
+            primitive.get(&gltf::Semantic::Tangents).is_none(),
+            "{glb}'s primitive now ships TANGENT - the bind-time generation is redundant",
+        );
+        assert!(
+            primitive.material().index().is_none(),
+            "{glb}'s primitive now carries a material - bevy_gltf may generate its tangents",
+        );
+
+        let reader = primitive.reader(|b| buffers.get(b.index()).map(Vec::as_slice));
+        let mut shoe = Mesh::new(
+            PrimitiveTopology::TriangleList,
+            bevy::asset::RenderAssetUsages::default(),
+        );
+        shoe.insert_attribute(
+            Mesh::ATTRIBUTE_POSITION,
+            reader
+                .read_positions()
+                .unwrap_or_else(|| panic!("{glb} carries positions"))
+                .collect::<Vec<_>>(),
+        );
+        shoe.insert_attribute(
+            Mesh::ATTRIBUTE_NORMAL,
+            reader
+                .read_normals()
+                .unwrap_or_else(|| panic!("{glb} carries normals"))
+                .collect::<Vec<_>>(),
+        );
+        shoe.insert_attribute(
+            Mesh::ATTRIBUTE_UV_0,
+            reader
+                .read_tex_coords(0)
+                .unwrap_or_else(|| panic!("{glb} carries TEXCOORD_0"))
+                .into_f32()
+                .collect::<Vec<_>>(),
+        );
+        shoe.insert_indices(Indices::U32(
+            reader
+                .read_indices()
+                .unwrap_or_else(|| panic!("{glb} is indexed"))
+                .into_u32()
+                .collect(),
+        ));
+        shoe
+    }
+
+    /// A bound mesh's tangents, positions and indices — the three attributes the gates below charge
+    /// against each other. Panics rather than returns, because every one of them is a bind-time
+    /// invariant, not a case to handle.
+    fn bound_attributes(mesh: &Mesh, what: &str) -> (Vec<[f32; 4]>, Vec<Vec3>, Vec<u32>) {
+        let Some(VertexAttributeValues::Float32x4(tangents)) =
+            mesh.attribute(Mesh::ATTRIBUTE_TANGENT)
+        else {
+            panic!(
+                "{what} has no tangents - it renders under the normal-mapped {LINK_MATERIAL} and \
+                 would light flat",
+            )
+        };
+        let Some(VertexAttributeValues::Float32x3(positions)) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("positions survive the bind ({what})")
+        };
+        let Some(Indices::U32(indices)) = mesh.indices() else {
+            panic!("the bound mesh is indexed ({what})")
+        };
+        (
+            tangents.clone(),
+            positions.iter().copied().map(Vec3::from).collect(),
+            indices.clone(),
+        )
+    }
+
+    /// EVERY SHIPPED reduced shoe — the whole of [`SHOE_LOD_CHAIN`] — run through the real bind-time
+    /// construction: both final meshes of every level come out carrying one tangent per vertex.
     ///
     /// Driven off the chain rather than off one named file, so adding a level cannot ship an
     /// untangented one: a new row is covered the moment it is added.
     ///
-    /// # What "usable" means, and why it is not "every vertex"
-    ///
-    /// mikktspace hands back NO tangent frame for a vertex it cannot solve, and `bevy_mesh`'s
-    /// `set_tangent` writes its default — `[0, 0, 0, 1]` — in that case, which the shader treats as
-    /// a valid frame and lights garbage from. So a zero tangent is a real defect, not a missing
-    /// attribute, and "the attribute exists" is not the assertion.
-    ///
-    /// The shipped 386-triangle LOD1 has exactly one such vertex (v548), and it is not a defect
-    /// anyone can see: its ONLY incident triangle is a MEASURED 7.45 mm² sliver left by the planar
-    /// decimator's edge collapse. The assertion is therefore made per TRIANGLE against the pixel
-    /// grid the LOD distances were argued from — a triangle bigger than one pixel at the distance
-    /// its own level takes over must carry three usable tangents. At the optic's 8.333e-5 rad/px a
-    /// pixel covers `(8.333e-5 · 250)² = 434 mm²` where LOD1 binds; the sliver is 1.7 % of that, and
-    /// 0.25 % of a pixel where LOD2 binds. Nothing the shader does to it can reach a pixel.
-    ///
-    /// This is a stricter gate than a count budget, not a looser one: it fails the moment a
-    /// re-export flattens any triangle a player could actually resolve, and it needs no number
-    /// updated when the decimator's slivers move.
+    /// Whether those tangents are USABLE is the next test's question, not this one's — split so a
+    /// red asset names itself as an asset defect instead of hiding inside "the bind works".
     #[test]
     fn every_shipped_reduced_shoe_binds_with_tangents_on_both_sides() {
-        // The gunner optic over a 1440-px view — the demanding camera, the one the switch
-        // distances were chosen for. See `SHOE_LOD1_DISTANCE_M`.
-        const OPTIC_RAD_PER_PX: f32 = 0.12 / 1440.0;
-
-        for &(glb, from_m) in SHOE_LOD_CHAIN {
-            let path = crate::assets::asset_root().join(glb);
-            let gltf::Gltf { document, mut blob } =
-                gltf::Gltf::open(&path).unwrap_or_else(|e| panic!("{glb} must open: {e}"));
-            let buffers = [blob.take().expect("the glb carries its binary chunk")];
-            let primitive = document
-                .meshes()
-                .next()
-                .unwrap_or_else(|| panic!("{glb} carries one mesh"))
-                .primitives()
-                .next()
-                .unwrap_or_else(|| panic!("{glb}'s mesh carries one primitive"));
-            assert!(
-                primitive.get(&gltf::Semantic::Tangents).is_none(),
-                "{glb}'s primitive now ships TANGENT - the bind-time generation is redundant",
-            );
-            assert!(
-                primitive.material().index().is_none(),
-                "{glb}'s primitive now carries a material - bevy_gltf may generate its tangents",
-            );
-
-            let reader = primitive.reader(|b| buffers.get(b.index()).map(Vec::as_slice));
-            let mut shoe = Mesh::new(
-                PrimitiveTopology::TriangleList,
-                bevy::asset::RenderAssetUsages::default(),
-            );
-            shoe.insert_attribute(
-                Mesh::ATTRIBUTE_POSITION,
-                reader
-                    .read_positions()
-                    .unwrap_or_else(|| panic!("{glb} carries positions"))
-                    .collect::<Vec<_>>(),
-            );
-            shoe.insert_attribute(
-                Mesh::ATTRIBUTE_NORMAL,
-                reader
-                    .read_normals()
-                    .unwrap_or_else(|| panic!("{glb} carries normals"))
-                    .collect::<Vec<_>>(),
-            );
-            shoe.insert_attribute(
-                Mesh::ATTRIBUTE_UV_0,
-                reader
-                    .read_tex_coords(0)
-                    .unwrap_or_else(|| panic!("{glb} carries TEXCOORD_0"))
-                    .into_f32()
-                    .collect::<Vec<_>>(),
-            );
-            shoe.insert_indices(Indices::U32(
-                reader
-                    .read_indices()
-                    .unwrap_or_else(|| panic!("{glb} is indexed"))
-                    .into_u32()
-                    .collect(),
-            ));
-
+        for level in SHOE_LOD_CHAIN {
+            let glb = level.glb;
+            let shoe = shipped_reduced_shoe(glb);
             let bound =
                 lod_shoe_meshes(&shoe).unwrap_or_else(|e| panic!("{glb} must take tangents: {e}"));
             let vertices = shoe.count_vertices();
-            // One pixel at the distance this level takes over, squared: the area below which a
-            // triangle cannot reach the grid the LOD distances were argued on.
-            let pixel_area = (OPTIC_RAD_PER_PX * from_m).powi(2);
-
             for (side, mesh) in bound.iter() {
-                let Some(VertexAttributeValues::Float32x4(tangents)) =
-                    mesh.attribute(Mesh::ATTRIBUTE_TANGENT)
-                else {
-                    panic!(
-                        "the {side:?} {glb} has no tangents - it renders under the normal-mapped \
-                         {LINK_MATERIAL} and would light flat",
-                    )
-                };
+                let (tangents, ..) = bound_attributes(mesh, &format!("{side:?} {glb}"));
                 assert_eq!(
                     tangents.len(),
                     vertices,
                     "one tangent per vertex ({side:?} {glb})"
                 );
+            }
+        }
+    }
 
-                let Some(VertexAttributeValues::Float32x3(positions)) =
-                    mesh.attribute(Mesh::ATTRIBUTE_POSITION)
-                else {
-                    panic!("positions survive the bind ({side:?} {glb})")
-                };
-                let Some(Indices::U32(indices)) = mesh.indices() else {
-                    panic!("the bound mesh is indexed ({side:?} {glb})")
-                };
-                // A zeroed tangent is what `bevy_mesh` writes when mikktspace declines to solve a
-                // vertex, and the shader treats it as a valid frame — so "the attribute exists" is
-                // not the assertion. Charged per TRIANGLE against the pixel grid: see the doc
-                // above for why the sub-pixel slivers the decimator leaves are exempt and a
-                // resolvable triangle never is.
+    /// No triangle a player can RESOLVE may carry a defaulted tangent.
+    ///
+    /// # Why a zeroed tangent is a defect and not a gap
+    ///
+    /// mikktspace hands back NO tangent frame for a vertex it cannot solve, and `bevy_mesh`'s
+    /// `set_tangent` writes its default — `[0, 0, 0, 1]` — in that case, which the shader treats as
+    /// a valid frame and lights garbage from. So "the attribute exists" is not the assertion; the
+    /// planar decimator leaves such vertices behind on the slivers its edge collapses produce, and
+    /// the question is only whether any of them is big enough to see.
+    ///
+    /// # Why the gate is EXTENT and not AREA
+    ///
+    /// This gate used to bound a defaulted triangle's AREA against one square pixel, and that was
+    /// wrong in the way that matters: rasterisation samples by COVERAGE, not by area. A long thin
+    /// sliver has almost no area and still crosses many pixel centres — a 34 mm × 0.4 mm triangle is
+    /// 7 mm² (a fraction of a pixel by area) and 1.7 pixels LONG, so it lights a visible streak of
+    /// garbage normal. The bound that actually says "cannot be resolved" is therefore the triangle's
+    /// worst-case projected EXTENT: its longest edge, which is its bounding-sphere diameter to
+    /// within a factor no gate should lean on, must be under one pixel at the distance its own level
+    /// SWITCHES IN, at [`LOD_REF_VIEW_HEIGHT_PX`], through the optic. Nearer than that the level is
+    /// not drawn at all; further and the extent only shrinks.
+    ///
+    /// # This test is EXPECTED TO FAIL on the currently shipped LOD1
+    ///
+    /// It is not ignored, and it should not be. The shipped 386-triangle `lod1.glb` carries one
+    /// unsolved vertex whose incident sliver measures ~34 mm on its longest edge — about 1.7 px at
+    /// 350 m / 2160 px, i.e. resolvable. It passed the old area gate and it fails this one, which is
+    /// the correct result: the gate got stricter because the old one bounded the wrong quantity.
+    ///
+    /// The FIX IS AN ASSET, not a number. The reduced meshes are being regenerated from the blend
+    /// (socket-preserving planar reduction); a regeneration that welds or drops the degenerate
+    /// sliver clears this without a line changing here. Loosening the gate to make the suite green
+    /// would be re-introducing exactly the bug the gate was tightened to catch — if this ever has to
+    /// be parked, park it as `#[ignore = "..."]` naming the asset it waits on, never by widening the
+    /// pixel budget.
+    #[test]
+    fn no_defaulted_tangent_touches_a_triangle_a_player_can_resolve() {
+        for level in SHOE_LOD_CHAIN {
+            let glb = level.glb;
+            let from_m = level.from_m;
+            let shoe = shipped_reduced_shoe(glb);
+            let bound =
+                lod_shoe_meshes(&shoe).unwrap_or_else(|e| panic!("{glb} must take tangents: {e}"));
+            // What one pixel of the reference view covers, in metres, at the distance this level
+            // takes over. The same `fov / height` the switch distances are derived from.
+            let pixel_m = (LOD_REF_FOV_RAD / LOD_REF_VIEW_HEIGHT_PX) * from_m;
+
+            for (side, mesh) in bound.iter() {
+                let what = format!("{side:?} {glb}");
+                let (tangents, positions, indices) = bound_attributes(mesh, &what);
                 let usable = |v: u32| {
                     let t = tangents[v as usize];
                     Vec3::new(t[0], t[1], t[2]).length() > 0.5 && t[3].abs() > 0.5
                 };
+                // The WORST offender, so a failure names the triangle to go and look at rather than
+                // whichever one the index order happened to reach first.
                 let mut worst: Option<(f32, [u32; 3])> = None;
                 for tri in indices.chunks_exact(3) {
-                    let p = |i: usize| Vec3::from(positions[tri[i] as usize]);
-                    let area = (p(1) - p(0)).cross(p(2) - p(0)).length() / 2.0;
                     if tri.iter().all(|&v| usable(v)) {
                         continue;
                     }
-                    if worst.is_none_or(|(a, _)| area > a) {
-                        worst = Some((area, [tri[0], tri[1], tri[2]]));
+                    let p = |i: usize| positions[tri[i] as usize];
+                    let extent = [
+                        (p(1) - p(0)).length(),
+                        (p(2) - p(1)).length(),
+                        (p(0) - p(2)).length(),
+                    ]
+                    .into_iter()
+                    .fold(0.0_f32, f32::max);
+                    if worst.is_none_or(|(e, _)| extent > e) {
+                        worst = Some((extent, [tri[0], tri[1], tri[2]]));
                     }
                 }
-                if let Some((area, tri)) = worst {
+                if let Some((extent, tri)) = worst {
                     assert!(
-                        area < pixel_area,
-                        "{side:?} {glb}: triangle {tri:?} covers {:.2} mm² but a vertex of it has \
-                         no usable tangent — at {from_m:.0} m, where this level takes over, one \
-                         pixel is only {:.2} mm², so it renders under the normal-mapped \
-                         {LINK_MATERIAL} with a garbage frame that a player can resolve",
-                        area * 1e6,
-                        pixel_area * 1e6,
+                        extent < pixel_m,
+                        "{what}: triangle {tri:?} spans {:.2} mm on its longest edge but a vertex \
+                         of it has no usable tangent — at {from_m:.0} m, where this level takes \
+                         over, one pixel of a {LOD_REF_VIEW_HEIGHT_PX:.0} px view through the \
+                         {LOD_REF_FOV_RAD} rad optic is only {:.2} mm, so it draws {:.2} px of \
+                         garbage normal frame under the normal-mapped {LINK_MATERIAL}. FIX THE \
+                         ASSET (weld or drop the degenerate sliver in the reduction), not this \
+                         budget.",
+                        extent * 1000.0,
+                        pixel_m * 1000.0,
+                        extent / pixel_m,
                     );
                 }
             }

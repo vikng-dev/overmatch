@@ -473,25 +473,41 @@ If the collapse is unwanted in the chain at all, a planar-only LOD1 is one comma
 ### Switch distances: the pixel arithmetic
 
 One pixel subtends `fov / height` radians, so a deviation `d` drops under a pixel beyond
-`D = d / (fov / height)`. At 1440 px the main camera (0.785 rad, `src/spec.rs`) is
-5.451e-4 rad/px and the gunner optic (0.12 rad, `tiger_1.tank.ron:326`) is 8.333e-5.
+`D = d / (fov / height)`. The height to use is the **worst case the game can be played at**,
+not the one the author's monitor happens to be: the settings render-scale ladder tops out at
+100 % native and borderless fullscreen takes the display's own resolution, so **2160 (4K
+native)** is the ceiling. Deriving at 1440 and playing at 2160 makes every deviation 1.5× the
+pixels it was argued to be. At 2160 px the main camera (0.785 rad, `src/spec.rs`) is
+3.634e-4 rad/px and the gunner optic (0.12 rad, `tiger_1.tank.ron:326`) is 5.556e-5.
 
 | tier | worst dev | < 1 px beyond (main) | < 1 px beyond (optic) |
 |---|---|---|---|
-| LOD0 | 0.99 mm | 1.8 m | 11.9 m |
-| LOD1 | 17.93 mm | 32.9 m | 215.2 m |
-| LOD2 | 51.38 mm | 94.3 m | 616.6 m |
+| LOD0 | 0.99 mm | 2.7 m | 17.8 m |
+| LOD1 | 17.93 mm | 49.3 m | 322.7 m |
+| LOD2 | 51.38 mm | 141.4 m | 924.8 m |
 
-**Suggested thresholds: D0→D1 at 250 m, D1→D2 at 650 m** — the optic numbers rounded up. The
-optic binds because LOD selection is by distance and cannot see which camera is looking; a
-threshold that satisfies the main camera at 33 m would show LOD1's faceting to a gunner at
-6.5× magnification. LOD0 clears one pixel by 11.9 m even in the optic, which is the evidence
-that it is safe as the base mesh at any range a player can get to.
+**Shipped threshold: D0→D1 at 350 m** — the optic number rounded up. The optic binds because
+LOD selection is by distance and cannot see which camera is looking; a threshold that
+satisfies the main camera at 49 m would show LOD1's faceting to a gunner at 6.5×
+magnification. LOD0 clears one pixel by 17.8 m even in the optic, which is the evidence that
+it is safe as the base mesh at any range a player can get to.
 
-If LOD selection is ever made fov-aware, the main camera can switch at 35 m / 100 m instead
-and the belt gets much cheaper on every non-gunner view. And if the sight gains the discrete
-4×/8× steps `src/spec.rs` anticipates, these distances scale as `1/fov` and must be recomputed
-— an 8× step at 0.06 rad doubles both.
+**LOD2 is built and shipped but NOT wired as a tier.** Its own arithmetic retires it: a band
+opening at ~950 m, on a 1 000 m world behind a 1 000 m far plane, is a ~50 m shell almost
+nothing is ever inside — while a wired tier costs a third entity on all 194 shoes of every
+tank, walked every frame in the near case that actually happens. See `SHOE_LOD_CHAIN` in
+`src/track/link_view.rs`; re-adding it is one row.
+
+The code owns this arithmetic, not this file: `WORST_DEV_LOD1_MM` and `LOD_REF_VIEW_HEIGHT_PX`
+in `src/track/link_view.rs`, checked against the wired distance by
+`the_wired_thresholds_are_the_sub_pixel_derivation`. **A mesh regeneration must update the
+measured deviation there and re-round the distance under it** — the test fails if the second
+half is forgotten.
+
+If LOD selection is ever made fov-aware, the main camera can switch at 50 m instead and the
+belt gets much cheaper on every non-gunner view. And if the sight gains the discrete 4×/8×
+steps `src/spec.rs` anticipates, these distances scale as `1/fov` and must be recomputed — an
+8× step at 0.06 rad doubles them.
 
 ### Determinism
 
