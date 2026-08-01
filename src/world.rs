@@ -465,18 +465,19 @@ fn spawn_environment(
 /// Deliberately the NARROWEST view the game has (the gunner optic): a narrow field demands the
 /// finest geometry, so seeding with it means the first frames are over-detailed rather than
 /// under-detailed. `terrain_lod::adapt_ranges` replaces it with the live profile on the first
-/// frame that has a window and a camera, at human rate thereafter.
+/// frame that has a window and a camera, at human rate thereafter. A window bevy has not sized yet
+/// reports zero height, which `TerrainLodView::new` reads as ABSENT rather than as a one-pixel
+/// viewport.
 fn terrain_lod_view(
     window: Option<&Window>,
     scale: Option<&crate::render_scale::RenderScale>,
 ) -> crate::terrain_lod::TerrainLodView {
-    let default = crate::terrain_lod::TerrainLodView::default();
-    crate::terrain_lod::TerrainLodView {
-        height_px: window.map_or(default.height_px, |window| {
+    crate::terrain_lod::TerrainLodView::new(
+        crate::camera::GUNNER_FOV_FALLBACK,
+        window.map_or(0.0, |window| {
             window.physical_height() as f32 * scale.map_or(1.0, |scale| scale.0)
         }),
-        ..default
-    }
+    )
 }
 
 /// Spawn a static, unit-cube collision block scaled/posed by `transform` (the Avian idiom: a

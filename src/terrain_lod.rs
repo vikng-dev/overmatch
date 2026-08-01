@@ -148,6 +148,27 @@ impl Default for TerrainLodView {
 }
 
 impl TerrainLodView {
+    /// A live profile from a camera's field and a rendered pixel height.
+    ///
+    /// A NON-POSITIVE height is not a small window, it is an ABSENT one — a window bevy has not
+    /// sized yet at Startup, or a zero render scale. Taking it literally would collapse every
+    /// switch distance onto the bounding radius and put the COARSEST level 94 m from the camera on
+    /// the frames the player first sees, which is the exact opposite of the conservative direction.
+    /// So an absent height falls back to the default profile's, and the next frame with a real
+    /// window corrects it.
+    pub(crate) fn new(fov_y_rad: f32, height_px: f32) -> Self {
+        let default = Self::default();
+        Self {
+            fov_y_rad,
+            height_px: if height_px > 0.0 {
+                height_px
+            } else {
+                default.height_px
+            },
+            ..default
+        }
+    }
+
     /// The distance (metres, camera → tile CENTRE) at or beyond which rung `rung` is legal for a
     /// tile whose bounding radius is `radius_m`.
     ///
@@ -847,12 +868,10 @@ fn adapt_ranges(
     let Ok(window) = windows.single() else {
         return;
     };
-    let height = window.physical_height() as f32 * scale.map_or(1.0, |scale| scale.0);
-    let wanted = TerrainLodView {
-        fov_y_rad: projection.fov,
-        height_px: height,
-        budget_px: TERRAIN_LOD_BUDGET_PX,
-    };
+    let wanted = TerrainLodView::new(
+        projection.fov,
+        window.physical_height() as f32 * scale.map_or(1.0, |scale| scale.0),
+    );
     let fov_moved = (wanted.fov_y_rad - current.fov_y_rad).abs()
         > FOV_HYSTERESIS * current.fov_y_rad.max(f32::MIN_POSITIVE);
     if !fov_moved && wanted.height_px == current.height_px && wanted.budget_px == current.budget_px
@@ -1330,8 +1349,15 @@ mod tests {
             })
             .collect();
 
-        // A default `Window` has no physical size, so the first pass wires a zero-height profile —
-        // exactly the degenerate case a headless start hits, and it must not panic.
+        // A zero pixel height is an ABSENT viewport (a window bevy has not sized yet), not a
+        // one-pixel one. Read literally it would collapse every threshold onto the bounding radius
+        // and put the COARSEST level 94 m from the camera on the first frames a player sees.
+        assert_eq!(
+            TerrainLodView::new(0.5, 0.0).height_px,
+            TerrainLodView::default().height_px,
+            "an unsized window must not be read as a zero-pixel viewport"
+        );
+
         app.update();
         app.world_mut()
             .get_mut::<Window>(window)
