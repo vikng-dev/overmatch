@@ -129,13 +129,11 @@ pub(crate) const MESH_TILE_CELLS: usize = 128;
 /// carries both `dimensions: [2000, 2000]` and the human-readable `scale: "2x2M"`). Recorded in
 /// the pack's `cc.txt` as part of its contract.
 ///
-/// The imported packs, for the blending slice that will need one of these each:
-///
-/// | pack                  | authored |
-/// |-----------------------|----------|
-/// | `coast_sand_rocks_02` |   15 m   |  ACTIVE
-/// | `rocks_ground_02`     |    2 m   |  staged
-/// | `brown_mud_leaves_01` |  1.3 m   |  staged
+/// Only the ACTIVE pack needs a constant. Two more were imported for a surface-blending slice
+/// that never came — `rocks_ground_02` (authored 2 m) and `brown_mud_leaves_01` (1.3 m) — and
+/// their maps were deleted on 2026-08-01 as dead weight: 32.2 MB nothing loaded. Their authored
+/// sizes survive here and in each folder's `cc.txt`, which is all the slice needs to re-import
+/// one through `scripts/encode-terrain-ktx2.sh`.
 const COAST_SAND_ROCKS_02_AUTHORED_M: f32 = 15.0;
 
 /// World metres per repeat of the terrain surface pack: the mesh's UVs are `world_xz / this`,
@@ -151,10 +149,10 @@ pub(crate) const TEXTURE_TILE_M: f32 = COAST_SAND_ROCKS_02_AUTHORED_M;
 /// `cc.txt`), relative to the asset root. One folder per pack under `assets/terrain/`, each holding
 /// the three maps `world::spawn_environment` binds: albedo (`diff`/`col`, sRGB), OpenGL-convention
 /// tangent-space normals (`nor_gl`), and the glTF-ORM `arm` pack (R = AO, G = roughness,
-/// B = metallic). `brown_mud_leaves_01` and `rocks_ground_02` sit alongside at 2k, staged for the
-/// surface-blending slice; nothing loads them yet.
+/// B = metallic). Two more pack folders sit alongside holding only their `cc.txt`: their maps
+/// were staged for a surface-blending slice, were never loaded, and were deleted on 2026-08-01.
 ///
-/// All three are **KTX2 (UASTC 4x4, zstd-supercompressed, full mip chain)**, built by
+/// Its three maps are **KTX2 (UASTC 4x4, zstd-supercompressed, full mip chain)**, built by
 /// `scripts/encode-terrain-ktx2.sh` from masters kept outside the repo. The format is not a
 /// packaging detail — it is the frame budget. A PNG/JPG load gives bevy a texture with ONE mip
 /// level, and a 4k map tiled every [`TEXTURE_TILE_M`] across the whole horizon then misses the
