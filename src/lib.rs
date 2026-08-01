@@ -784,15 +784,17 @@ pub fn run_offline() {
                     // window — the mapping self-negotiates until the probe lands.
                     present_mode: settings.present_mode(settings::PresentCaps::Unprobed),
                     // Described at creation so a persisted fullscreen boots fullscreen instead of
-                    // flashing a window first, and on the persisted DISPLAY where that can be
-                    // resolved this early (only `Primary` can — see `settings::DisplaySelection`;
-                    // an indexed rung is corrected by `apply_settings` on the first frame). A hidden
-                    // capture run must NOT boot into the player's persisted fullscreen — it stays a
-                    // plain window.
+                    // flashing a window first. The monitor is `at_window_creation`'s and NOT the
+                    // stored rung: naming an indexed display here would be cached unresolved by
+                    // bevy and would make the `Startup` correction unrepresentable — see
+                    // `settings::DisplaySelection`. A hidden capture run must NOT boot into the
+                    // player's persisted fullscreen — it stays a plain window.
                     mode: if hidden {
                         bevy::window::WindowMode::Windowed
                     } else {
-                        settings.window_mode.to_window_mode(settings.display)
+                        settings
+                            .window_mode
+                            .to_window_mode(settings.display.at_window_creation())
                     },
                     visible: !hidden,
                     ..default()

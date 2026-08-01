@@ -761,18 +761,21 @@ pub(crate) enum WindowModeSetting {
 }
 
 impl WindowModeSetting {
-    /// The `Window::mode` this asks for on `display` — the ONE mapping, used at boot window
+    /// The `Window::mode` this asks for on `monitor` — the ONE mapping, used at boot window
     /// description, by `apply_settings` and by `observe_window_mode` alike.
     ///
-    /// `display` is expected to be already RESOLVED against the attached monitors
-    /// ([`DisplaySelection::resolve`]) everywhere a monitor list exists. The boot roots pass the
-    /// raw stored value because there is no list yet — see [`DisplaySelection`]'s startup section.
-    pub(crate) const fn to_window_mode(self, display: DisplaySelection) -> WindowMode {
+    /// `monitor` is a MonitorSelection rather than a [`DisplaySelection`] because the two callers
+    /// derive it differently and must be free to: a running app resolves against the live monitor
+    /// list ([`DisplaySelection::monitor_on`]), while the boot roots may only name what window
+    /// CREATION can resolve ([`DisplaySelection::at_window_creation`]). `None` is "no opinion",
+    /// which for a borderless window means the display it is already on.
+    pub(crate) const fn to_window_mode(self, monitor: Option<MonitorSelection>) -> WindowMode {
         match self {
             WindowModeSetting::Windowed => WindowMode::Windowed,
-            WindowModeSetting::Fullscreen => {
-                WindowMode::BorderlessFullscreen(display.monitor_or_current())
-            }
+            WindowModeSetting::Fullscreen => WindowMode::BorderlessFullscreen(match monitor {
+                Some(monitor) => monitor,
+                None => MonitorSelection::Current,
+            }),
         }
     }
 
@@ -818,19 +821,33 @@ impl WindowModeSetting {
 /// re-asserted rather than fired once), the POSITION is edge-triggered (winit rewrites it out from
 /// under us — see the reconciler).
 ///
-/// # Why it lands at `Startup` rather than only on the boot `Window`
+/// # The boot window must NOT name an indexed display, and that is not an optimisation
 ///
 /// `Index` cannot be resolved when the window is CREATED. Bevy creates the primary window from
-/// `resumed` (vendored bevy_winit-0.19.0/src/state.rs:180) but only populates `WinitMonitors` from
-/// `about_to_wait` (state.rs:459-464), so `select_monitor`'s `Index(n) => monitors.nth(n)`
-/// (bevy_winit-0.19.0/src/winit_windows.rs:522) sees an EMPTY list and answers `None` — after which
-/// `winit_window_position` warns and declines to place the window at all
-/// (winit_windows.rs:495-497). The boot roots therefore pass the RAW stored selection (which costs
-/// nothing and lets the one rung that does resolve there — [`DisplaySelection::Primary`], handed to
-/// `select_monitor` as a direct argument rather than through the list — work at creation), and
-/// [`apply_settings`] does the real work on the first `Startup` frame, by which time
-/// `create_monitors` has run and the [`Monitor`] entities exist. The visible cost is honest and
-/// small: an indexed display opens where the window manager put it and moves once, immediately.
+/// `resumed` (vendored bevy_winit-0.19.0/src/state.rs:173-181) but only populates `WinitMonitors`
+/// from `about_to_wait` (state.rs:458-464), so `select_monitor`'s `Index(n) => monitors.nth(n)`
+/// (bevy_winit-0.19.0/src/winit_windows.rs:522) sees an EMPTY list and answers `None`. Creation
+/// then goes fullscreen on `Fullscreen::Borderless(None)` (winit_windows.rs:73-86) — the wrong
+/// display — and `winit_window_position` likewise warns and declines to place a windowed window
+/// (winit_windows.rs:493-497).
+///
+/// **The trap is what happens NEXT, and it is why the boot mode is deliberately weaker than the
+/// stored setting.** Bevy caches the window it was ASKED for, verbatim and unresolved:
+/// `CachedWindow(window.clone())` (bevy_winit-0.19.0/src/system.rs:88). Reissuing fullscreen is
+/// then gated on the component DIFFERING from that cache — `Changed<Window>` plus
+/// `if window.mode != cache.mode` (system.rs:305-326). So a boot window described with
+/// `BorderlessFullscreen(Index(1))` produces a cache saying `Index(1)`, and when [`apply_settings`]
+/// resolves the same `Index(1)` at `Startup` the value is EQUAL — the guarded write is skipped,
+/// `Changed` never fires, bevy never reissues, and the real winit window sits on creation's
+/// fallback monitor for the rest of the session. Naming the display twice is worse than naming it
+/// once.
+///
+/// So [`DisplaySelection::at_window_creation`] emits only what creation can actually honour:
+/// `Primary` (handed to `select_monitor` as a direct argument rather than through the empty list)
+/// resolves there and is passed through; every indexed rung is passed as "no opinion", so the boot
+/// mode is `Current`, the cache says `Current`, and `Startup`'s resolved `Index(n)` is a genuine
+/// CHANGE that bevy acts on. The visible cost is honest and small: an indexed display opens where
+/// the window manager put it and moves once, immediately.
 ///
 /// # Why a stored selection is NEVER normalised back to the file
 ///
@@ -888,14 +905,55 @@ impl DisplaySelection {
         }
     }
 
-    /// The monitor this rung names, defaulting to [`MonitorSelection::Current`] — the fullscreen
-    /// mapping, where "leave it alone" means "whichever display the window is already on" rather
-    /// than "no monitor" (a borderless window is always on one).
-    pub(crate) const fn monitor_or_current(self) -> MonitorSelection {
-        match self.monitor() {
-            Some(monitor) => monitor,
-            None => MonitorSelection::Current,
+    /// The monitor selection the BOOT window may carry — deliberately weaker than the stored rung.
+    ///
+    /// Only `Primary` survives window creation: `select_monitor` receives the primary handle as a
+    /// direct argument and looks every other rung up in a `WinitMonitors` that is still empty at
+    /// that point. An indexed rung is therefore passed as `None` ("no opinion", i.e. `Current`) —
+    /// **not** because naming it would merely fail, but because naming it would POISON bevy's
+    /// window cache and make the `Startup` correction unrepresentable. See the type doc.
+    pub(crate) const fn at_window_creation(self) -> Option<MonitorSelection> {
+        match self {
+            DisplaySelection::Primary => Some(MonitorSelection::Primary),
+            // `Auto` genuinely has no opinion; the indexed rungs have one that creation cannot act
+            // on and must not cache.
+            _ => None,
         }
+    }
+
+    /// The monitor selection this rung asks for on `displays` — the ONE mapping a RUNNING app
+    /// writes into `Window::mode` and `Window::position` alike. `None` is "leave placement alone"
+    /// ([`DisplaySelection::Auto`]).
+    ///
+    /// **The primary rung is emitted as `MonitorSelection::Entity`, not `Primary`**, whenever bevy
+    /// has actually marked a monitor. That is a deliberate hardening rather than a rename, because
+    /// bevy's `PrimaryMonitor` marker is not a live fact — see [`AttachedDisplays::primary`] for how
+    /// it goes stale. `Entity` is resolved by `find_entity` against the monitor list
+    /// (bevy_winit-0.19.0/src/winit_windows.rs:523, `winit_monitors.rs:29-35`), so it answers
+    /// deterministically for any monitor that is still attached and never consults the
+    /// `primary_monitor()` that Wayland always answers `None` to. The bare `Primary` is emitted only
+    /// in the state where nothing has been learned at all, where it is the honest request.
+    pub(crate) fn monitor_on(self, displays: AttachedDisplays) -> Option<MonitorSelection> {
+        match self.resolve(displays) {
+            DisplaySelection::Auto => None,
+            // After `resolve`, this rung means "the primary" only where a marker exists or where
+            // nothing is known yet; both are covered by preferring the entity when there is one.
+            DisplaySelection::Primary => Some(
+                displays
+                    .primary
+                    .map_or(MonitorSelection::Primary, MonitorSelection::Entity),
+            ),
+            indexed => indexed.monitor(),
+        }
+    }
+
+    /// The `Window::position` this rung asks for on `displays`. `Automatic` for
+    /// [`DisplaySelection::Auto`], which bevy answers with "the window manager handles it" and no
+    /// move at all (`winit_window_position`, vendored
+    /// bevy_winit-0.19.0/src/winit_windows.rs:458-461).
+    pub(crate) fn window_position_on(self, displays: AttachedDisplays) -> WindowPosition {
+        self.monitor_on(displays)
+            .map_or(WindowPosition::Automatic, WindowPosition::Centered)
     }
 
     /// The rung actually honoured on `displays` — itself, or a rung this machine can really reach.
@@ -914,10 +972,12 @@ impl DisplaySelection {
     ///   anything is attached, and it is what "the first display" means on a stack that refuses to
     ///   rank them.
     ///
-    /// [`AttachedDisplays::primary_known`] is what makes that decidable rather than a `cfg`: bevy
-    /// inserts `PrimaryMonitor` only on the entity whose handle matched `primary_monitor()`
+    /// [`AttachedDisplays::primary`] is what makes that decidable rather than a `cfg`: bevy inserts
+    /// `PrimaryMonitor` only on the entity whose handle matched `primary_monitor()`
     /// (bevy_winit-0.19.0/src/system.rs:217-219), so "monitors exist and none is marked" IS winit's
-    /// `None`, observed rather than guessed at per platform.
+    /// `None`, observed rather than guessed at per platform. It is a LAGGING observation, not a live
+    /// one — see that field for the hot-plug limitation and what [`DisplaySelection::monitor_on`]
+    /// does about it.
     ///
     /// **An EMPTY display list is the identity**, and that is the same tri-state discipline
     /// [`PresentCaps`] is built around: no [`Monitor`] entities means the list has not been
@@ -936,21 +996,14 @@ impl DisplaySelection {
         if !wants_primary {
             return self;
         }
-        if displays.primary_known {
+        if displays.primary.is_some() {
             DisplaySelection::Primary
         } else {
             // Index(0): always attached, and the only honest reading of "primary" where the window
-            // system declines to name one.
+            // system declines to name one — or where bevy's marker has gone stale (see
+            // `AttachedDisplays::primary`).
             DisplaySelection::Display1
         }
-    }
-
-    /// The `Window::position` this rung asks for. `Automatic` for [`DisplaySelection::Auto`], which
-    /// bevy answers with "the window manager handles it" and no move at all
-    /// (`winit_window_position`, vendored bevy_winit-0.19.0/src/winit_windows.rs:458-461).
-    pub(crate) fn window_position(self) -> WindowPosition {
-        self.monitor()
-            .map_or(WindowPosition::Automatic, WindowPosition::Centered)
     }
 
     /// ASCII only — it reaches `Text`. One-based, per the variant docs.
@@ -986,20 +1039,43 @@ pub(crate) struct AttachedDisplays {
     /// How many displays are attached. **ZERO means "not synchronised yet"**, never "no displays" —
     /// the tri-state discipline again.
     pub(crate) count: usize,
-    /// Whether any of them carries `PrimaryMonitor`, i.e. whether winit could name a primary at all.
-    pub(crate) primary_known: bool,
+    /// The monitor entity bevy has marked `PrimaryMonitor`, if one is still attached — i.e. the
+    /// display winit named as primary AT THE TIME IT WAS FIRST SEEN.
+    ///
+    /// # It is a lagging observation, and bevy will not correct it
+    ///
+    /// `create_monitors` skips a monitor it has seen before with `continue 'outer` BEFORE reaching
+    /// the marker insert (vendored bevy_winit-0.19.0/src/system.rs:184-190 vs 217-219), and there is
+    /// no code path anywhere that removes or re-assigns `PrimaryMonitor`. Only two things ever move
+    /// it: a previously-unseen monitor being spawned as the primary, and a removed monitor's whole
+    /// entity being despawned (system.rs:225-236). So across a hot-plug the marker can be WRONG in
+    /// both directions — the primary is unplugged and the display that inherits the role stays
+    /// unmarked, or the platform stops naming a primary while an old marker survives.
+    ///
+    /// Which is exactly why this is an `Option<Entity>` and not a `bool`.
+    /// [`DisplaySelection::monitor_on`] spends it as `MonitorSelection::Entity`, which resolves
+    /// against the monitor list rather than against `primary_monitor()` — so a stale marker still
+    /// names a real, attached display instead of degrading into the no-op the Wayland finding was
+    /// about. The residual, stated: after the marked primary is unplugged the PRIMARY rung means
+    /// "the first display" until bevy sees a new monitor it can mark. That is a bevy-side sync
+    /// limitation, not one this module can observe its way out of.
+    pub(crate) primary: Option<Entity>,
 }
 
 /// Gather [`AttachedDisplays`] from the world. One function, because `apply_settings` and
 /// `observe_window_mode` must resolve the display row IDENTICALLY — see `observe_window_mode` for
 /// what a disagreement between them costs.
+///
+/// The primary query demands `Monitor` as well as the marker so that a `PrimaryMonitor` on anything
+/// that is not an attached display cannot be spent as one — `MonitorSelection::Entity` is looked up
+/// by `find_entity`, and an entity that is not in the monitor list resolves to nothing.
 fn read_displays(
     monitors: &Query<(), With<Monitor>>,
-    primaries: &Query<(), With<PrimaryMonitor>>,
+    primaries: &Query<Entity, (With<Monitor>, With<PrimaryMonitor>)>,
 ) -> AttachedDisplays {
     AttachedDisplays {
         count: monitors.iter().count(),
-        primary_known: !primaries.is_empty(),
+        primary: primaries.iter().next(),
     }
 }
 
@@ -1732,10 +1808,10 @@ fn apply_settings(
     mut lod_budget: ResMut<LodPixelBudget>,
     // The attached displays, as `bevy_winit::create_monitors` synchronised them. COUNTED, never
     // ordered: `MonitorSelection::Index` indexes bevy's own `WinitMonitors` vec, so this system
-    // only needs how many rungs of the ladder are real — and whether winit could name a primary at
-    // all (`read_displays`).
+    // only needs how many rungs of the ladder are real — plus whichever monitor bevy last marked
+    // primary (`read_displays`).
     monitors: Query<(), With<Monitor>>,
-    primaries: Query<(), With<PrimaryMonitor>>,
+    primaries: Query<Entity, (With<Monitor>, With<PrimaryMonitor>)>,
     // The window PLACEMENT is edge-triggered on this pair — see the write below. The window MODE
     // beside it deliberately is not.
     mut last_placement: Local<Option<(WindowModeSetting, DisplaySelection)>>,
@@ -1805,9 +1881,10 @@ fn apply_settings(
     {
         let mut window = window.into_inner();
         window.present_mode = settings.present_mode(*caps);
-        let resolved = settings
-            .display
-            .resolve(read_displays(&monitors, &primaries));
+        let displays = read_displays(&monitors, &primaries);
+        // Both window fields below are derived through `monitor_on`, so the mode and the position
+        // can never name different displays.
+        let monitor = settings.display.monitor_on(displays);
 
         // The window MODE is LEVEL-triggered, and it carries the display row into fullscreen —
         // bevy resolves a borderless window's monitor out of this field alone (vendored
@@ -1821,7 +1898,14 @@ fn apply_settings(
         // every pass is what stops that write from silently stripping the monitor back to
         // `Current`. Still guarded, so an already-agreed field costs a comparison and no change
         // tick. (`observe_window_mode` resolves the display identically — see its doc.)
-        let mode = settings.window_mode.to_window_mode(resolved);
+        //
+        // This write is also the whole BOOT correction. The window was created before
+        // `WinitMonitors` existed, so an indexed rung could not be named there and the boot mode
+        // says `Current` (`DisplaySelection::at_window_creation`); bevy cached that unresolved
+        // request verbatim, and reissues fullscreen only where the component now DIFFERS from that
+        // cache (system.rs:305-326). Writing the resolved selection here is what produces that
+        // difference — which is why the boot window must never have carried it already.
+        let mode = settings.window_mode.to_window_mode(monitor);
         if window.mode != mode {
             window.mode = mode;
         }
@@ -1838,15 +1922,15 @@ fn apply_settings(
         // FIRST observation counts as an edge on purpose: that is the launch application.
         let placement = (settings.window_mode, settings.display);
         if last_placement.replace(placement) != Some(placement) {
+            let resolved = settings.display.resolve(displays);
             if resolved != settings.display {
-                let displays = read_displays(&monitors, &primaries);
                 warn!(
                     "settings: {} is not reachable ({} display(s) present, primary {}) -> {} \
                      (not saved — displays come back)",
                     settings.display.label(),
                     displays.count,
-                    if displays.primary_known {
-                        "known"
+                    if displays.primary.is_some() {
+                        "marked"
                     } else {
                         "unidentifiable"
                     },
@@ -1857,7 +1941,7 @@ fn apply_settings(
             // position there would be a change tick buying nothing — and worse, it would consume
             // the edge that has to still be available when fullscreen is left.
             if settings.window_mode == WindowModeSetting::Windowed {
-                let position = resolved.window_position();
+                let position = settings.display.window_position_on(displays);
                 if window.position != position {
                     window.position = position;
                 }
@@ -1965,7 +2049,7 @@ fn observe_window_mode(
     mut settings: ResMut<Settings>,
     mut save: MessageWriter<SaveSettings>,
     monitors: Query<(), With<Monitor>>,
-    primaries: Query<(), With<PrimaryMonitor>>,
+    primaries: Query<Entity, (With<Monitor>, With<PrimaryMonitor>)>,
     mut last_seen: Local<Option<bool>>,
 ) {
     let Some(window) = window else {
@@ -1992,7 +2076,7 @@ fn observe_window_mode(
     let mode = observed.to_window_mode(
         settings
             .display
-            .resolve(read_displays(&monitors, &primaries)),
+            .monitor_on(read_displays(&monitors, &primaries)),
     );
     if window.mode != mode {
         window.mode = mode;
@@ -2847,28 +2931,32 @@ mod tests {
     }
 
     /// The window-mode mapping: borderless-only (exclusive fullscreen is unrepresentable — it is
-    /// the mode that can panic on an unresolvable monitor), carrying the DISPLAY row's monitor,
+    /// the mode that can panic on an unresolvable monitor), carrying whatever monitor it is handed,
     /// defaulting to the current one, and the observe direction inverts it.
     #[test]
     fn window_mode_is_borderless_and_carries_the_display_row() {
-        for display in DisplaySelection::ORDER {
+        for monitor in [
+            None,
+            Some(MonitorSelection::Primary),
+            Some(MonitorSelection::Index(1)),
+        ] {
             assert_eq!(
-                WindowModeSetting::Windowed.to_window_mode(display),
+                WindowModeSetting::Windowed.to_window_mode(monitor),
                 WindowMode::Windowed,
-                "{display:?}: a windowed window has no fullscreen monitor to name",
+                "{monitor:?}: a windowed window has no fullscreen monitor to name",
             );
         }
         assert_eq!(
-            WindowModeSetting::Fullscreen.to_window_mode(DisplaySelection::Auto),
+            WindowModeSetting::Fullscreen.to_window_mode(None),
             WindowMode::BorderlessFullscreen(MonitorSelection::Current),
-            "AUTO means 'the display it is already on', which for a borderless window is Current",
+            "no opinion means 'the display it is already on', which for borderless is Current",
         );
         assert_eq!(
-            WindowModeSetting::Fullscreen.to_window_mode(DisplaySelection::Primary),
+            WindowModeSetting::Fullscreen.to_window_mode(Some(MonitorSelection::Primary)),
             WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
         );
         assert_eq!(
-            WindowModeSetting::Fullscreen.to_window_mode(DisplaySelection::Display2),
+            WindowModeSetting::Fullscreen.to_window_mode(Some(MonitorSelection::Index(1))),
             WindowMode::BorderlessFullscreen(MonitorSelection::Index(1)),
             "the display row has to reach fullscreen through the MODE — bevy reads the monitor \
              from this field alone, never from Window::position",
@@ -2894,7 +2982,7 @@ mod tests {
         assert_eq!(DisplaySelection::default(), DisplaySelection::Auto);
         assert_eq!(DisplaySelection::Auto.monitor(), None);
         assert_eq!(
-            DisplaySelection::Auto.window_position(),
+            DisplaySelection::Auto.window_position_on(ranked(3)),
             WindowPosition::Automatic,
             "the default rung must leave placement to the window manager — adding this row must \
              not move any existing install's window",
@@ -2914,8 +3002,28 @@ mod tests {
                 "{rung:?}: the labels are one-based and `MonitorSelection::Index` is not",
             );
             assert_eq!(
-                rung.window_position(),
+                rung.window_position_on(ranked(3)),
                 WindowPosition::Centered(MonitorSelection::Index(index)),
+            );
+        }
+        // The BOOT mapping is deliberately weaker: only the rung window creation can resolve
+        // survives, because caching an unresolved one strands the window (see the type doc).
+        assert_eq!(
+            DisplaySelection::Primary.at_window_creation(),
+            Some(MonitorSelection::Primary),
+            "the primary handle is passed to select_monitor directly, so it resolves at creation",
+        );
+        for rung in [
+            DisplaySelection::Auto,
+            DisplaySelection::Display1,
+            DisplaySelection::Display2,
+            DisplaySelection::Display3,
+        ] {
+            assert_eq!(
+                rung.at_window_creation(),
+                None,
+                "{rung:?} must not be named in the boot window — WinitMonitors is still empty, and \
+                 bevy caches the unresolved request verbatim",
             );
         }
         assert_eq!(
@@ -2933,11 +3041,22 @@ mod tests {
         assert_eq!(DisplaySelection::ORDER.len(), 2 + DisplaySelection::INDEXED);
     }
 
-    /// A machine with `count` displays, one of which winit can name as the primary.
+    /// A machine with `count` displays, one of which bevy has marked as the primary. The entity is
+    /// a placeholder because these are PURE resolution tests — only its presence is read; the
+    /// app-level tests below use real spawned monitor entities.
     fn ranked(count: usize) -> AttachedDisplays {
         AttachedDisplays {
             count,
-            primary_known: true,
+            primary: Some(Entity::PLACEHOLDER),
+        }
+    }
+
+    /// A machine with `count` displays and no `PrimaryMonitor` marker — Wayland, or a hot-plug that
+    /// took the marked monitor away.
+    fn unranked(count: usize) -> AttachedDisplays {
+        AttachedDisplays {
+            count,
+            primary: None,
         }
     }
 
@@ -3007,10 +3126,7 @@ mod tests {
     /// `None` rather than a `cfg`; the substitute is `Index(0)`, which is attached by definition.
     #[test]
     fn a_machine_that_cannot_name_a_primary_falls_back_to_the_first_display() {
-        let wayland = |count| AttachedDisplays {
-            count,
-            primary_known: false,
-        };
+        let wayland = unranked;
         assert_eq!(
             DisplaySelection::Primary.resolve(wayland(2)),
             DisplaySelection::Display1,
@@ -3043,19 +3159,21 @@ mod tests {
         );
         // Whatever the platform, the answer always names something reachable.
         for count in 1..4 {
-            for known in [false, true] {
+            for marked in [false, true] {
                 for rung in DisplaySelection::ORDER {
-                    let resolved = rung.resolve(AttachedDisplays {
-                        count,
-                        primary_known: known,
-                    });
+                    let displays = if marked {
+                        ranked(count)
+                    } else {
+                        unranked(count)
+                    };
+                    let resolved = rung.resolve(displays);
                     assert!(
                         resolved.index().is_none_or(|index| index < count),
-                        "{rung:?} on {count} display(s) (primary_known={known}) resolved to \
+                        "{rung:?} on {count} display(s) (marked={marked}) resolved to \
                          {resolved:?}, which names a display that is not there",
                     );
                     assert!(
-                        known || resolved != DisplaySelection::Primary,
+                        marked || resolved != DisplaySelection::Primary,
                         "{rung:?} resolved to PRIMARY on a machine with no identifiable primary",
                     );
                 }
@@ -3077,21 +3195,7 @@ mod tests {
             .init_resource::<LodPixelBudget>()
             .add_systems(Update, apply_settings);
         app.world_mut().spawn((Window::default(), PrimaryWindow));
-        for index in 0..monitors {
-            let monitor = app.world_mut().spawn(Monitor {
-                name: Some(format!("display {index}")),
-                physical_height: 1080,
-                physical_width: 1920,
-                physical_position: IVec2::new(1920 * index as i32, 0),
-                refresh_rate_millihertz: Some(60_000),
-                scale_factor: 1.0,
-                video_modes: Vec::new(),
-            });
-            let monitor = monitor.id();
-            if index == 0 {
-                app.world_mut().entity_mut(monitor).insert(PrimaryMonitor);
-            }
-        }
+        spawn_monitors(&mut app, monitors);
         app
     }
 
@@ -3101,6 +3205,237 @@ mod tests {
         let mut windows = world.query_filtered::<&Window, With<PrimaryWindow>>();
         let window = windows.single(world).expect("one primary window");
         (window.mode, window.position)
+    }
+
+    /// The real BOOT sequence, in the order bevy performs it — the thing a plain component test
+    /// cannot see, and the reason the first version of the fullscreen fix was still broken.
+    ///
+    /// 1. the roots describe the window (`boot_mode` — whatever `at_window_creation` allows);
+    /// 2. `create_windows` runs from `resumed` with an EMPTY `WinitMonitors`, so an indexed rung
+    ///    cannot resolve, and bevy caches the request verbatim as `CachedWindow`
+    ///    (bevy_winit-0.19.0/src/system.rs:88);
+    /// 3. `create_monitors` runs afterwards, from `about_to_wait` (state.rs:458-464) — only NOW do
+    ///    the [`Monitor`] entities exist;
+    /// 4. `Startup` runs `apply_settings`.
+    ///
+    /// The cached mode is RETURNED rather than stored in the world because bevy's `CachedWindow` is
+    /// `pub(crate)` and cannot be constructed here. That costs nothing: the value it would hold at
+    /// step 2 is exactly `boot_mode`, and the predicate that matters —
+    /// `if window.mode != cache.mode` (system.rs:326) — is then a comparison this test can make
+    /// itself. Asserting the component EQUALS the wanted selection is not enough and is precisely
+    /// what missed this: the stranded window's component was already correct.
+    fn booted_window_app(settings: Settings, monitors: usize, boot_mode: WindowMode) -> App {
+        let mut app = App::new();
+        app.insert_resource(settings)
+            .init_resource::<DirectionalLightShadowMap>()
+            .init_resource::<crate::render_scale::RenderScale>()
+            .init_resource::<PresentCaps>()
+            .init_resource::<UiScale>()
+            .init_resource::<LodPixelBudget>()
+            .add_systems(Update, apply_settings);
+        // Step 1-2: the window exists, described with the boot mode, before any monitor does.
+        app.world_mut().spawn((
+            Window {
+                mode: boot_mode,
+                ..default()
+            },
+            PrimaryWindow,
+        ));
+        // Step 3: the monitor list arrives afterwards.
+        spawn_monitors(&mut app, monitors);
+        app
+    }
+
+    /// `count` attached displays, the first marked `PrimaryMonitor` exactly as `create_monitors`
+    /// marks a newly-seen primary. Returns their entities, oldest first.
+    fn spawn_monitors(app: &mut App, count: usize) -> Vec<Entity> {
+        (0..count)
+            .map(|index| {
+                let monitor = app
+                    .world_mut()
+                    .spawn(Monitor {
+                        name: Some(format!("display {index}")),
+                        physical_height: 1080,
+                        physical_width: 1920,
+                        physical_position: IVec2::new(1920 * index as i32, 0),
+                        refresh_rate_millihertz: Some(60_000),
+                        scale_factor: 1.0,
+                        video_modes: Vec::new(),
+                    })
+                    .id();
+                if index == 0 {
+                    app.world_mut().entity_mut(monitor).insert(PrimaryMonitor);
+                }
+                monitor
+            })
+            .collect()
+    }
+
+    /// **The boot window must not name a display bevy cannot resolve yet** (Codex, 2026-08-02 —
+    /// the still-open half of the HIGH finding).
+    ///
+    /// The trap, end to end: the roots described the window with the stored `Index(1)`; creation
+    /// looked it up in an empty `WinitMonitors`, got `None`, and went fullscreen on
+    /// `Borderless(None)` — the wrong display; bevy cached the request UNRESOLVED; and then
+    /// `apply_settings` at `Startup` computed the very same `Index(1)`, found the component already
+    /// equal, and wrote nothing. `changed_windows` reissues only where the component DIFFERS from
+    /// that cache, so the real window stayed on the fallback monitor for the whole session while
+    /// every component-level assertion read as correct.
+    ///
+    /// So the claim here is not "the component says Index(1)" — it did before — but "**the
+    /// component CHANGED away from the cached boot mode**", which is bevy's reissue predicate.
+    #[test]
+    fn a_fullscreen_boot_on_an_indexed_display_changes_the_mode_bevy_cached() {
+        let settings = Settings {
+            window_mode: WindowModeSetting::Fullscreen,
+            display: DisplaySelection::Display2,
+            ..default()
+        };
+        // Exactly what the composition roots put in the boot window.
+        let cached = settings
+            .window_mode
+            .to_window_mode(settings.display.at_window_creation());
+        assert_eq!(
+            cached,
+            WindowMode::BorderlessFullscreen(MonitorSelection::Current),
+            "an indexed rung must NOT be named at creation — see `at_window_creation`",
+        );
+
+        let mut app = booted_window_app(settings, 3, cached);
+        app.update();
+        let (mode, _) = window_state(&mut app);
+        assert_eq!(
+            mode,
+            WindowMode::BorderlessFullscreen(MonitorSelection::Index(1)),
+            "Startup must resolve the stored display now that the monitors exist",
+        );
+        assert_ne!(
+            mode, cached,
+            "THE REGRESSION: the mode must differ from the one bevy cached at creation, or \
+             `changed_windows` never reissues fullscreen (system.rs:326) and the real window stays \
+             on creation's fallback monitor — which a component-equality assertion cannot see",
+        );
+
+        // CONTROL — the trap, reproduced. Had the boot window carried the resolved selection (what
+        // the roots used to do), Startup would compute the same value, write nothing, and leave the
+        // component EQUAL to the cache: correct-looking, and stranded.
+        let stranded_cache = WindowMode::BorderlessFullscreen(MonitorSelection::Index(1));
+        let mut app = booted_window_app(settings, 3, stranded_cache);
+        app.update();
+        let (mode, _) = window_state(&mut app);
+        assert_eq!(
+            mode, stranded_cache,
+            "the control's premise: naming the display twice produces no change at all",
+        );
+
+        // The PRIMARY rung is the one that may be named at creation, because `select_monitor` takes
+        // the primary handle as a direct argument rather than through the empty list. It therefore
+        // boots correct and needs no correction — but the mode still ends up as a resolvable
+        // selection rather than the bare `Primary` (see `monitor_on`'s hardening).
+        let primary = Settings {
+            window_mode: WindowModeSetting::Fullscreen,
+            display: DisplaySelection::Primary,
+            ..default()
+        };
+        let cached = primary
+            .window_mode
+            .to_window_mode(primary.display.at_window_creation());
+        assert_eq!(
+            cached,
+            WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
+        );
+        let mut app = booted_window_app(primary, 3, cached);
+        app.update();
+        let (mode, _) = window_state(&mut app);
+        assert!(
+            matches!(
+                mode,
+                WindowMode::BorderlessFullscreen(MonitorSelection::Entity(_))
+            ),
+            "the primary rung resolves to the marked monitor's entity, got {mode:?}",
+        );
+    }
+
+    /// **Bevy's `PrimaryMonitor` marker is not a live fact, so the PRIMARY rung must not be spent
+    /// as `MonitorSelection::Primary`** (Codex, 2026-08-02, new MEDIUM).
+    ///
+    /// `create_monitors` skips an already-seen monitor with `continue 'outer` BEFORE the marker
+    /// insert (bevy_winit-0.19.0/src/system.rs:184-190 vs 217-219) and nothing anywhere removes or
+    /// reassigns the marker; only a despawned monitor loses it (system.rs:225-236). So across a
+    /// hot-plug the marker can be wrong in both directions.
+    ///
+    /// The hardening: whenever a marker exists, the rung is emitted as `MonitorSelection::Entity`,
+    /// which `find_entity` resolves against the monitor list and which never consults the
+    /// `primary_monitor()` that Wayland always answers `None` to. A STALE marker therefore still
+    /// names a real attached display instead of degrading into the no-op that the Wayland finding
+    /// was about. Where no marker survives, the documented `Index(0)` fallback takes over.
+    #[test]
+    fn the_primary_rung_survives_bevys_stale_monitor_markers() {
+        let mut app = App::new();
+        let monitors = spawn_monitors(&mut app, 3);
+        let displays_now = |app: &mut App| {
+            let world = app.world_mut();
+            let mut all = world.query_filtered::<(), With<Monitor>>();
+            let count = all.iter(world).count();
+            let mut marked =
+                world.query_filtered::<Entity, (With<Monitor>, With<PrimaryMonitor>)>();
+            let primary = marked.iter(world).next();
+            AttachedDisplays { count, primary }
+        };
+
+        // The ordinary machine: the marker is fresh and the rung resolves through it BY ENTITY.
+        let displays = displays_now(&mut app);
+        assert_eq!(displays.primary, Some(monitors[0]));
+        assert_eq!(
+            DisplaySelection::Primary.monitor_on(displays),
+            Some(MonitorSelection::Entity(monitors[0])),
+            "a marked primary must be spent as the entity bevy marked, not as the platform query \
+             that Wayland answers None to",
+        );
+
+        // HOT-PLUG: the marked primary is unplugged. Bevy despawns its entity (system.rs:225-236)
+        // and — this is the limitation — never marks whichever display inherits the role.
+        app.world_mut().entity_mut(monitors[0]).despawn();
+        let displays = displays_now(&mut app);
+        assert_eq!(displays.count, 2);
+        assert_eq!(
+            displays.primary, None,
+            "the premise: bevy re-marks nothing, so the new primary is invisible to us",
+        );
+        assert_eq!(
+            DisplaySelection::Primary.monitor_on(displays),
+            Some(MonitorSelection::Index(0)),
+            "with no surviving marker the rung must fall back to a display that certainly exists — \
+             the documented residual is that PRIMARY then means 'the first display'",
+        );
+        assert_ne!(
+            DisplaySelection::Primary.monitor_on(displays),
+            Some(MonitorSelection::Primary),
+            "and it must never be the bare platform query, which is the no-op this all guards",
+        );
+
+        // The mirror case — a marker that OUTLIVES the platform's ability to name a primary — is
+        // indistinguishable from the healthy one through the ECS, and that is exactly why the
+        // entity form is used: it resolves against the monitor list either way. Pinned as an
+        // invariant over every state this module can observe.
+        for count in 1..4 {
+            for displays in [ranked(count), unranked(count)] {
+                let monitor = DisplaySelection::Primary.monitor_on(displays);
+                assert_ne!(
+                    monitor,
+                    Some(MonitorSelection::Primary),
+                    "{displays:?}: a synchronised monitor list must never leave the rung as the \
+                     bare platform query",
+                );
+                assert!(monitor.is_some(), "{displays:?}");
+            }
+        }
+        // The one state where the bare request IS right: nothing has been learned at all, so there
+        // is no entity to prefer and no evidence the platform cannot answer.
+        assert_eq!(
+            DisplaySelection::Primary.monitor_on(AttachedDisplays::default()),
+            Some(MonitorSelection::Primary),
+        );
     }
 
     /// **The display row must reach FULLSCREEN, which is the mode the game is usually in.**
