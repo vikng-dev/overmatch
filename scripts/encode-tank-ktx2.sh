@@ -50,15 +50,57 @@ cd "$(git rev-parse --show-toplevel)"
 
 IN="${1:-assets/tiger_1/tiger_1.glb}"
 OUT="${2:-assets/tiger_1/tiger_1.mipped.glb}"
-WORK="${TANK_KTX2_WORK:-${TMPDIR:-/tmp}/overmatch-tank-ktx2}"
 
 command -v basisu >/dev/null || { echo "need basisu: brew install basis_universal" >&2; exit 1; }
-rm -rf "$WORK"; mkdir -p "$WORK/src" "$WORK/ktx2"
+
+# ── work dir ─────────────────────────────────────────────────────────────────────────────────────
+# A FRESH dir per run, because two bakes can be in flight at once: the user exporting from the
+# Blender GUI while an agent runs a headless export. This used to be one fixed path
+# (`$TMPDIR/overmatch-tank-ktx2`) that the script opened by `rm -rf`-ing, so the second run deleted
+# the first one's half-encoded KTX2s and both produced garbage or died. mktemp makes that
+# impossible. `TANK_KTX2_WORK` still pins the path for tests and for poking at intermediates, but a
+# pinned dir is only cleared if it is empty/absent or carries the marker this script writes — it
+# will not `rm -rf` a directory that is somebody else's.
+MARKER=".overmatch-tank-ktx2"
+if [ -n "${TANK_KTX2_WORK:-}" ]; then
+    WORK="$TANK_KTX2_WORK"
+    KEEP_WORK=1     # caller named it, so it is the caller's to delete
+    if [ -e "$WORK" ]; then
+        [ -d "$WORK" ] || { echo "TANK_KTX2_WORK=$WORK exists and is not a directory" >&2; exit 1; }
+        if [ ! -e "$WORK/$MARKER" ] && [ -n "$(ls -A "$WORK" 2>/dev/null)" ]; then
+            echo "TANK_KTX2_WORK=$WORK is not empty and has no $MARKER — refusing to rm -rf it." >&2
+            echo "  Point TANK_KTX2_WORK somewhere disposable, or empty that dir yourself." >&2
+            exit 1
+        fi
+        rm -rf "$WORK"
+    fi
+else
+    WORK="$(mktemp -d "${TMPDIR:-/tmp}/overmatch-tank-ktx2.XXXXXXXX")"
+    KEEP_WORK=0     # ours: deleted on success, kept (and printed) on failure
+fi
+mkdir -p "$WORK/src" "$WORK/ktx2"
+: > "$WORK/$MARKER"
+
+cleanup() {
+    status=$?
+    if [ "$status" -ne 0 ]; then
+        echo "bake failed — work dir kept for inspection: $WORK" >&2
+    elif [ "$KEEP_WORK" -eq 0 ]; then
+        rm -rf "$WORK"
+    fi
+    exit "$status"
+}
+trap cleanup EXIT
 
 # ── unpack ───────────────────────────────────────────────────────────────────────────────────────
 # Split the glb into JSON + BIN, write every embedded image out as its own file, and record the
 # role each image plays in the materials that sample it. Roles drive the encoder flags below.
 python3 scripts/tank/glb_ktx2.py unpack "$IN" "$WORK"
+
+# The encode is the ~60 s the caller has to sit through, and it is the only phase with a countable
+# unit of work. Announcing the total here lets `export_tiger.bake()` — which reads this stdout line
+# by line — turn the `ktx2  ▸` lines below into a real percentage instead of a guess.
+echo "images ▸ $(grep -c '[^[:space:]]' "$WORK/roles.txt") to encode"
 
 # ── encode ───────────────────────────────────────────────────────────────────────────────────────
 # One basisu invocation per image. `roles.txt` lines are: <index> <role> <file>.

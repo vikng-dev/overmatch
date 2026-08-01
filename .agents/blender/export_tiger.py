@@ -51,6 +51,23 @@ so don't, without re-running that comparison.
 COST: the bake is ~60 s wall clock on the Tiger (measured, M-series, 9 images, UASTC level 2/3 +
 zstd 9). It is bit-for-bit reproducible — the same input glb bakes to the same sha256 — so a
 re-export that changed nothing produces no diff for git-lfs to store.
+
+THAT MINUTE LOOKS EXACTLY LIKE A HANG, SO IT HAS TO ANNOUNCE ITSELF
+-------------------------------------------------------------------
+The bake runs synchronously on Blender's main thread. While `subprocess.run` blocks, Blender's
+event loop does not turn: no redraw, no status bar, and `window.cursor_set('WAIT')` never even
+reaches the screen (the cursor is set on a window that will not be serviced until the call
+returns — macOS paints its own beachball over it). A user who has not been told stares at a frozen
+app for a minute and force-quits it, which is exactly what happened. So:
+
+  * `BAKE_NOTICE` is printed BEFORE the freeze starts, and the GUI operator also `self.report`s it.
+  * the bake's stdout is streamed line by line instead of inherited, so the per-image `ktx2  ▸`
+    lines land in the console as they happen — the freeze is visibly making progress.
+  * each of those lines ticks `window_manager.progress_update`, which on a platform whose
+    compositor still honours the app cursor shows the percentage on the mouse pointer.
+
+No modal operator, no threads: streaming a pipe is the whole mechanism. The console remains the
+honest channel on macOS, which is why the notice says where to look.
 """
 
 import os
@@ -69,17 +86,103 @@ GATE_RELPATH = "scripts/tank/glb_ktx2.py"
 #: one-line summary). The GUI door reports these back to the user; the scripted door prints them.
 LAST_EXPORT = {}
 
+#: Said before the UI goes dark. The console line is the load-bearing half on macOS: a GUI Blender
+#: launched from Finder writes stdout nowhere the user can see, so the notice names the fix.
+BAKE_NOTICE = (
+    "KTX2 mip bake starting — this takes ~60-90 s and BLENDER'S WINDOW WILL FREEZE for all of it "
+    "(no redraw, spinning cursor). That is normal. DO NOT force-quit: quitting mid-bake leaves the "
+    "previous good glb in place but wastes the export. Per-image progress prints to the system "
+    "console (Window ▸ Toggle System Console on Windows; on macOS relaunch Blender from a terminal "
+    "to see it)."
+)
+
+#: Emitted once per encoded image by `scripts/encode-tank-ktx2.sh`, and once up front with the
+#: total. The bake's progress meter is nothing more than counting these off the pipe.
+_IMAGE_LINE = "ktx2  ▸"
+_TOTAL_LINE = "images ▸"
+
 
 class ExportError(SystemExit):
     """A named failure stage, so a caller can say WHICH step failed without parsing prose.
 
-    Derives from SystemExit because that is what this module has always raised: a script door
-    failure must stop the headless Blender run, not be swallowed by a bare `except Exception`.
+    Derives from SystemExit because a headless `blender --background --python export.py` reports a
+    script failure through its EXIT CODE and nothing else: an unhandled `Exception` there prints a
+    traceback and still exits 0 (measured), while an unhandled `SystemExit` exits non-zero. CI and
+    every agent-driven export depend on that, so the internals keep raising this.
+
+    The cost is that SystemExit kills Blender's embedded interpreter outright when a script is run
+    from the Text Editor — the app vanishes with no dialog, indistinguishable from a crash. So the
+    doors do not let it escape into a GUI: `export()` converts it to `ExportFailed` there. See
+    `_surface`.
     """
 
     def __init__(self, stage, message):
         super().__init__(message)
         self.stage = stage
+
+
+class ExportFailed(Exception):
+    """The same failure, in the form a GUI can survive: an ordinary exception.
+
+    Carries `.stage` so `overmatch_export.py`'s `_stage_of` keeps naming the step that failed.
+    """
+
+    def __init__(self, stage, message):
+        super().__init__(message)
+        self.stage = stage
+
+
+def _surface(exc):
+    """Print a door failure loudly and re-raise it in the form this environment can survive.
+
+    Headless keeps the SystemExit (the exit code IS the report — see `ExportError`). Anything with
+    a UI gets `ExportFailed`, because a SystemExit escaping into Blender's Text Editor terminates
+    the embedded CPython and takes the whole app down with no message: the one failure mode that
+    looks like a crash. Either way the message reaches stdout first, so it is never lost.
+    """
+    stage = getattr(exc, "stage", None) or type(exc).__name__
+    print(f"\nEXPORT FAILED [{stage}]\n{exc}", file=sys.stderr)
+    sys.stderr.flush()
+    if bpy.app.background:
+        raise exc
+    raise ExportFailed(stage, str(exc)) from exc
+
+
+class _Progress:
+    """The window-manager progress cursor, or a no-op wherever there is no UI to drive it.
+
+    `progress_begin`/`progress_update` are the only feedback Blender can give from inside a
+    blocking call — they set the cursor directly rather than queueing a redraw. Every call is
+    guarded because this module runs headless as often as it runs in the GUI.
+    """
+
+    def __init__(self):
+        self.wm = None
+        if bpy.app.background:
+            return
+        try:
+            wm = bpy.context.window_manager
+            wm.progress_begin(0.0, 100.0)
+        except (AttributeError, RuntimeError):
+            return
+        self.wm = wm
+
+    def update(self, percent):
+        if self.wm is None:
+            return
+        try:
+            self.wm.progress_update(percent)
+        except (AttributeError, RuntimeError):
+            self.wm = None
+
+    def end(self):
+        if self.wm is None:
+            return
+        try:
+            self.wm.progress_end()
+        except (AttributeError, RuntimeError):
+            pass
+        self.wm = None
 
 
 def repo_root():
@@ -109,6 +212,43 @@ def preflight(root):
     return script
 
 
+def _run_bake(script, raw, glb, root):
+    """Run the bake with its stdout on a pipe, echoing and counting it. Returns the exit code.
+
+    The pipe is the entire progress mechanism. `subprocess.run` with an inherited stdout gives the
+    user a minute of nothing (the bake's own lines sit in Blender's console buffer behind a main
+    thread that never returns to the event loop); reading it line by line and printing with an
+    explicit flush puts each `ktx2  ▸` line on screen the moment the encoder finishes an image, and
+    ticks the cursor percentage with it.
+
+    stderr is folded into stdout so a basisu failure keeps its position in the sequence instead of
+    surfacing after everything else. PYTHONUNBUFFERED is set because the bake's own python phases
+    (unpack/repack/diff) would otherwise block-buffer into the pipe and arrive in one lump.
+    """
+    env = dict(os.environ, PYTHONUNBUFFERED="1")
+    progress = _Progress()
+    total, done = 0, 0
+    try:
+        proc = subprocess.Popen(
+            [script, raw, glb], cwd=root, env=env, text=True, bufsize=1,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        )
+        for line in proc.stdout:
+            print(line, end="", flush=True)
+            if line.startswith(_TOTAL_LINE):
+                # "images ▸ 9 to encode"
+                field = line[len(_TOTAL_LINE):].strip().split(" ", 1)[0]
+                total = int(field) if field.isdigit() else 0
+            elif line.startswith(_IMAGE_LINE):
+                done += 1
+                # Unknown total (an older bake script) still moves, it just cannot promise 100%.
+                progress.update(100.0 * done / total if total else min(90.0, 10.0 * done))
+        proc.stdout.close()
+        return proc.wait()
+    finally:
+        progress.end()
+
+
 def bake(root, raw, glb):
     """Mip-bake the mipless glb at `raw` onto `glb`, then gate the result. Returns `glb`.
 
@@ -125,14 +265,14 @@ def bake(root, raw, glb):
     # The bake unpacks, encodes one KTX2 per image with role-derived colour-space flags, repacks,
     # and finishes with the structural differ (accessor hashes on both sides). A non-zero exit
     # here means the tracked glb was NOT replaced.
-    try:
-        subprocess.run([script, raw, glb], cwd=root, check=True)
-    except subprocess.CalledProcessError as exc:
+    print(f"\nbake  ▸ {BAKE_NOTICE}\n", flush=True)
+    returncode = _run_bake(script, raw, glb, root)
+    if returncode != 0:
         raise ExportError(
             "bake",
-            f"export_tiger: mip bake failed (exit {exc.returncode}).\n"
+            f"export_tiger: mip bake failed (exit {returncode}).\n"
             f"  {glb} is UNCHANGED — the previous good glb is still in place.",
-        ) from exc
+        )
 
     # Same gate `scripts/hooks/pre-push` runs on the committed bytes. Milliseconds, and it makes
     # the export self-certifying instead of trusting the step above. `python3` may be missing from
@@ -161,7 +301,24 @@ def export(root=None, glb=None):
     """Export the open blend to `glb`, mip-baked. Returns the path written.
 
     Raises (loudly) rather than writing a mipless glb: see the module doc.
+
+    THE BOUNDARY: every failure below is an `ExportError`, i.e. a `SystemExit`, and this is the
+    point where that stops being safe. Run from Blender's Text Editor, an escaping SystemExit ends
+    the embedded interpreter and the whole application closes with no traceback and no dialog — the
+    single failure mode that is indistinguishable from a crash, and the reason this door catches
+    `BaseException` rather than `Exception`. `_surface` prints the message and re-raises in
+    whichever form the current environment survives.
     """
+    try:
+        return _export(root, glb)
+    except KeyboardInterrupt:
+        raise
+    except BaseException as exc:
+        _surface(exc)
+
+
+def _export(root, glb):
+    """`export()` minus the failure boundary — everything here may raise `ExportError` freely."""
     root = root or repo_root()
     glb = glb or os.path.join(root, GLB_RELPATH)
     preflight(root)  # fail before the minute of export, not after
