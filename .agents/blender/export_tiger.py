@@ -90,20 +90,27 @@ The tier glbs are written into the temp work directory and moved onto their trac
 after the tank glb's bake and mip gate have both passed — same rule as the tank glb itself, so a
 failed export leaves the whole tracked set at its last good state rather than half-updated.
 
-WHAT A RE-EXPORT USED TO THROW AWAY
-------------------------------------
-Two lossless edits live in the glb and cannot be authored in Blender: the MG dedupe (the coax
-and hull MG34s are one model, so the coax nodes are repointed at the hull's meshes and the
-orphans collected) and back-face culling (`doubleSided` off, measured safe at 2 000 px over 32
-camera positions). Blender writes `doubleSided: true` on everything and has no notion of two
-objects sharing one mesh across a glTF export, so a plain re-export reverted BOTH — measured
-against the shipped glb: 67 meshes and 15 materials against 64 and 11, and every material
-double-sided again. Nothing said so; the tank simply got heavier.
+WHAT A RE-EXPORT USED TO THROW AWAY — AND WHY THIS FILE NO LONGER CARES
+-----------------------------------------------------------------------
+Two properties of the shipped glb used to be glb surgery: the MG dedupe (the coax and hull MG34s
+are one model, so the coax nodes shared the hull's meshes and the orphans were collected) and
+back-face culling (`doubleSided` off, measured safe at 2 000 px over 32 camera positions). The
+.blend had neither, so a plain re-export reverted both — 67 meshes and 15 materials against 64
+and 11, and every material double-sided again — and this file grew a `_surgery` stage that
+replayed them onto every raw export.
 
-So `_surgery` replays them onto the raw export before the bake, by invoking the same
-`scripts/tank/diet/` tools their README documents. Same argument as the bake: the step is not a
-thing to remember. The stock-exporter door has no such stage in front of it, which is what the
-`Link … AUTHORED` line out of `bake()` is for.
+That stage is GONE, because replaying a fix onto every export is a workaround for a bad source,
+not a pipeline. `.agents/blender/repair_source.py` fixed the .blend once: the three coax objects
+now point at the hull's mesh datablocks (data-verified before the merge, same standard as
+`dedupe.py`) and every material carries `use_backface_culling`, which is the field the glTF
+exporter derives `doubleSided` from. A plain export now produces 64 meshes, 11 materials and
+nothing double-sided because that is what the .blend HOLDS.
+
+There is deliberately no counter-check here. A tank that ships duplicated meshes or a
+double-sided material is a MODEL-QUALITY problem, caught at review by a human or an agent reading
+`scripts/tank/diet/README.md`'s model-quality rules — not by a Tiger-shaped assertion wired into
+a general export door. What stays are the generic gates: the mip gate on the baked bytes, the
+tier-glb shape checks the game's loader depends on, and the `link ▸` line below.
 
 LOD0 IS AN ASSET DECISION, NOT A BUDGET. 10° is there because Yan validated it in the GUI. The
 angle is not free to be tuned by whoever next wants triangles: it is a property of how the shoe
@@ -191,32 +198,6 @@ LINK_LOD_TIERS = (
     LinkLod("LOD0", 10.0, None, None, LINK_OBJECT),
     LinkLod("LOD1", 10.0, 500, "assets/tiger_1/tiger_1_link.lod1.glb", "Link_LOD1"),
     LinkLod("LOD2", 10.0, 250, "assets/tiger_1/tiger_1_link.lod2.glb", "Link_LOD2"),
-)
-
-#: LOSSLESS GLB SURGERY THE .BLEND CANNOT EXPRESS, replayed onto every fresh export.
-#:
-#: Two edits live in the shipped glb and nowhere else, because Blender has no way to author
-#: either one. A plain re-export therefore REVERTS them, silently, and that is exactly what a
-#: measured comparison of a fresh export against the shipped bytes showed: 67 meshes and 15
-#: materials where the shipped glb has 64 and 11, and `doubleSided` back on all of them.
-#:
-#:   * the MG dedupe — the coax and hull MG34s are the same model, so the coax nodes are
-#:     repointed at the hull's meshes and the orphans garbage-collected. `dedupe.py` decodes and
-#:     hashes every element of both primitives before it repoints anything, so a mesh that has
-#:     drifted fails the export instead of being silently replaced by its twin.
-#:   * back-face culling — glTF's default is single-sided, Blender writes `doubleSided: true` on
-#:     everything, and the shipped tank was measured (32 camera positions at 2 000 px, 115 red
-#:     pixels in 128 M, all coincident faces rather than holes) to be safe without it.
-#:
-#: Both run on the RAW export, before the bake, so the bake's structural differ still compares
-#: what it is about to encode. Neither tool is duplicated here — they are the same scripts
-#: `scripts/tank/diet/README.md` steps 3 and 4 document, invoked rather than reimplemented.
-SURGERY_DEDUPE_RELPATH = "scripts/tank/diet/dedupe.py"
-SURGERY_SINGLESIDED_RELPATH = "scripts/tank/diet/singlesided.py"
-MG_DEDUPE = (
-    "Coax_MG_Barrel_Visual=Object_0.002",
-    "Coax_MG_Body_Visual=Object_8.002",
-    "Coax_MG__Mag_Visual=Object_9.002",
 )
 
 #: What a shipped tier glb must be for `link_view.rs` to load it as
@@ -443,38 +424,6 @@ def bake(root, raw, glb):
     if LAST_EXPORT["link"]:
         print(f"link  ▸ {LAST_EXPORT['link']}")
     return glb
-
-
-def _surgery(root, raw):
-    """Replay the glb-only edits onto the raw export: MG dedupe, then back-face culling.
-
-    In this order because the dedupe garbage-collects meshes and renumbers everything above them,
-    while `singlesided.py` works by material name and does not care. Both are stdlib-only repo
-    scripts run as subprocesses, for the same reason the bake is: one implementation, invoked from
-    both the script door and the GUI operator, rather than a second copy that can drift.
-    """
-    python = shutil.which("python3") or sys.executable
-    for relpath, extra in (
-        (SURGERY_DEDUPE_RELPATH, list(MG_DEDUPE)),
-        (SURGERY_SINGLESIDED_RELPATH, []),
-    ):
-        if not os.path.isfile(os.path.join(root, relpath)):
-            raise ExportError("surgery", f"export_tiger: missing {os.path.join(root, relpath)}")
-        done = subprocess.run(
-            [python, relpath, raw, *extra], cwd=root, capture_output=True, text=True,
-        )
-        if done.returncode != 0:
-            print(done.stdout, end="")
-            print(done.stderr, end="")
-            raise ExportError(
-                "surgery",
-                f"export_tiger: {os.path.basename(relpath)} refused this export "
-                f"(exit {done.returncode}). Nothing was written to the tracked path. If the two "
-                f"MG meshes have genuinely diverged in the blend, the dedupe pair in MG_DEDUPE is "
-                f"what has to change — do not skip the step.",
-            )
-        for line in done.stdout.strip().splitlines():
-            print(f"glb   ▸ {line.strip()}")
 
 
 # ── the track-shoe LOD stage ─────────────────────────────────────────────────────────────────────
@@ -721,6 +670,10 @@ def _link_reduced_to(link, mesh):
 def _link_summary(glb):
     """`Link 3056 tris` read off the SHIPPED bytes — the one line that says whether LOD0 is in.
 
+    INFORMATIONAL. It reports, it never fails the export: a glb whose shoe is the authored mesh is
+    a legitimate thing to have produced (the stock glTF exporter can do it), it is just not the
+    thing this pipeline produces, and the reader deserves to be told which one they got.
+
     Read from the glb rather than remembered from the reduction, because this also runs on the
     stock-exporter door (`overmatch_export.py`'s callback bakes a glb Blender wrote on its own,
     with no LOD stage in front of it). Comparing against the authored polygon count is what turns
@@ -743,9 +696,9 @@ def _link_summary(glb):
     if authored is not None and written == authored:
         return (
             f"Link {written} tris — AUTHORED, so the LOD stage did NOT run. This glb came straight "
-            f"from the stock glTF exporter, which also means it is missing the MG dedupe and the "
-            f"back-face flags. Re-export through File ▸ Export ▸ Overmatch Tank (or "
-            f"export_tiger.export()) to get the reduced shoe, the LOD glbs beside it and both."
+            f"from the stock glTF exporter: the shoe ships at full detail and the two tier glbs "
+            f"beside it were not rebuilt. Re-export through File ▸ Export ▸ Overmatch Tank (or "
+            f"export_tiger.export()) to get the reduced shoe and the LOD glbs."
         )
     return f"Link {written} tris"
 
@@ -822,7 +775,6 @@ def _export(root, glb):
                     "gltf-export", f"export_tiger: export_scene.gltf returned {result}"
                 )
         print(f"export ▸ {raw} — {os.path.getsize(raw) / 1e6:.1f} MB (mipless, temporary)")
-        _surgery(root, raw)
         bake(root=root, raw=raw, glb=glb)
 
         # Only now: the tank glb passed its bake and its gate, so the tier glbs beside it are
