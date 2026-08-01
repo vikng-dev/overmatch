@@ -87,6 +87,47 @@ _Avoid_: calling the view "the model" (that is the source `.glb`/`.blend`)
 **Bind window** (retired):
 The old hazard interval between a replicated tank root arriving and its sim body finishing an async scene-driven bind — the source of a run of netcode bugs. Closed by ADR-0014: the sim body is now complete at spawn, so a late scene is only a cosmetic view pop-in. The term should now describe *only* the view attach, or be deleted.
 
+## Geometry LOD
+
+(Model: geometry mipmapping — a mip chain for meshes. Decisions in the LOD ADR.)
+
+**Source** (L0):
+The artist's mesh as it sits in the .blend — level 0 of every chain, deviation zero *by definition, not by merit* (every mesh has finite geometric resolution). Never generated, never derived, never a manual step.
+_Avoid_: base model, raw model (the source IS the shipped L0)
+
+**Source hygiene** (re-encode):
+An artist-side rewrite of the source at its true information content (the 5,550-tri link collapsed to ~1.5k), done in the .blend, by a human, once — the result *becomes* the source. Authoring, not LOD generation: the mesh analogue of not shipping an 8K texture on a 13 cm prop.
+_Avoid_: LOD0 generation, decimation preset
+
+**Deviation**:
+Worst-case point-to-surface distance (mm) between a generated level and the source — the biggest lie the level tells about where the surface is. Measured **two-way** (one-way misses holes); never an average (averages hide the spike that pops). Travels with the level as `worst_dev_mm`.
+_Avoid_: error percentage, triangle reduction (those are inputs/outputs, not the lie)
+
+**Normal deviation**:
+Worst-case angular error (degrees) of the interpolated shading normal, two-way sampled. Positional deviation is blind to it, and a wrongly-lit pixel is visible over its triangle's whole projected *area*, not its sub-pixel displacement — so it gets its own numeric gate (with UV drift and tangent validity) instead of a human eyeball.
+
+**Pixel budget**:
+How many pixels of positional lie the current view tolerates. 1 px = sub-pixel = positionally indistinguishable from the source in that view. Per-view (optic tighter than commander), and a player-facing setting whose honest top rung is "indistinguishable from the raw model".
+
+**Sub-pixel distance**:
+Where a deviation drops below budget: `D = dev_m × height_px / (vfov_rad × budget_px)`. Worked number: 18.64 mm through the 0.12 rad optic at 2160 px, 1 px budget → 336 m. A test re-derives every wired threshold and prints the metres to write on mismatch.
+
+**Exact-world radius** (D₁) / **first lie** (e₁):
+The one declared constant of the system, seen from its two ends: within D₁ every surface renders exactly (source); beyond it, levels lie by at most the budget. e₁ is view-invariant mm; D₁ is its sub-pixel distance in the reference view (350 m optic ≈ 26 m commander, same e₁).
+_Avoid_: LOD bias, detail distance (engine-flavored words for other mechanisms)
+
+**Error ladder**:
+e_N = e₁ × 2^(N−1): each level doubles the allowed lie, doubling its switch distance (clean octaves) and roughly halving its triangles (tris ∝ 1/deviation on curved surfaces — measured 2.4× dev ⇒ 2.0× fewer tris). Triangle counts are OUTPUTS of the decimator hitting targets, never inputs. Full-chain storage converges to ≈ +100% of source — kilobytes; never a design driver.
+
+**The two walls**:
+The octaves a ladder can claim are bounded by the *left wall* — the source's intrinsic detail scale, the smallest deviation shedding ~half the triangles; targets below it emit near-copies (pure waste) — and the *right wall* — the map radius, past which a level never renders and is never generated. Optimal D₁ sits at the left wall, measured once game-wide; bigger maps automatically earn deeper ladders.
+
+**Magnification**:
+What happens closer than a level's band, including closer than the source's own resolution: nothing swaps in, the asset shows its finite detail — exactly as a texture goes soft inside mip 0. Not a defect. (Escape hatch if an eyeball ever objects: an additive near band rendering the pre-hygiene authored mesh — one chain row, parked.)
+
+**What sub-pixel does NOT cover**:
+The guarantee is positional only. Silhouette IS covered (silhouette error is surface deviation). Separately gated because deviation cannot see them: normal deviation, UV drift, defaulted tangents, degenerate faces, holes. The red-test class lives here — a 50 mm defaulted-tangent edge draws ~2.7× budget pixels of wrong shading at its own switch distance while passing every positional check.
+
 ## Gunnery
 
 **Servo**:
