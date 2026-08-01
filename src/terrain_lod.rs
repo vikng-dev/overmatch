@@ -673,6 +673,52 @@ pub(crate) mod rtin {
 // Spawning + the adaptive layer
 // ---------------------------------------------------------------------------------------------
 
+/// Give every level its mikktspace tangent basis, across the machine's cores.
+///
+/// Required, no fallback, at EVERY level and not just the finest (ADR-0011: a level that cannot
+/// carry a tangent basis is a broken ship, not a degraded one — the normal map has no frame to
+/// rotate its directions into and the ground renders flat and greasy).
+///
+/// Parallel because it is the startup cost that matters: MEASURED at 3.19 s single-threaded over
+/// the shipped map's 3.83 M pyramid triangles, against 134 ms for the whole of generation. The
+/// generator is per-mesh and stateless, so splitting the level list across threads changes nothing
+/// about the result — the same tangents in the same order, just sooner.
+fn generate_tangents(lod: &mut TerrainLod) {
+    let mut pending: Vec<(usize, usize, &mut Mesh)> = lod
+        .tiles
+        .iter_mut()
+        .enumerate()
+        .flat_map(|(tile, levels)| {
+            levels
+                .levels
+                .iter_mut()
+                .enumerate()
+                .map(move |(level, entry)| (tile, level, &mut entry.mesh))
+        })
+        .collect();
+    if pending.is_empty() {
+        return;
+    }
+    let threads = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZero::get)
+        .min(pending.len());
+    let chunk = pending.len().div_ceil(threads);
+    std::thread::scope(|scope| {
+        for batch in pending.chunks_mut(chunk) {
+            scope.spawn(move || {
+                for (tile, level, mesh) in batch {
+                    mesh.generate_tangents().unwrap_or_else(|err| {
+                        panic!(
+                            "terrain LOD tile {tile} level {level} failed mikktspace tangent \
+                             generation: {err}"
+                        )
+                    });
+                }
+            });
+        }
+    });
+}
+
 /// Build and spawn the whole terrain LOD ladder, logging the per-rung census. Called from
 /// `world::spawn_environment` in place of the flat tile loop, on windowed compositions only.
 pub(crate) fn spawn(
@@ -684,6 +730,8 @@ pub(crate) fn spawn(
 ) {
     let mut lod = build(grid);
     let tangents_started = Instant::now();
+    generate_tangents(&mut lod);
+    let tangents = tangents_started.elapsed();
     let mut census = vec![(0usize, 0usize, 0.0f32); TERRAIN_LOD_LADDER.len()];
     let mut entities = 0usize;
     let radius = lod.bounding_radius_m;
@@ -699,23 +747,16 @@ pub(crate) fn spawn(
             *tiles_kept += 1;
             *tris += level.triangles;
             *worst = worst.max(level.measured_dev_m);
-            // Normal mapping needs a TANGENT basis at every level, not just the finest (ADR-0011:
-            // a level that cannot carry one is a broken ship, not a degraded one). The mesh is
-            // MOVED out of the ladder here — what stays behind is the census, not the geometry,
-            // because the whole pyramid resident twice is 150 MB of nothing.
-            let mut mesh = std::mem::replace(
+            // The mesh (already tangented above) is MOVED out of the ladder here — what stays
+            // behind is the census, not the geometry, because the whole pyramid resident twice is
+            // ~200 MB of nothing.
+            let mesh = std::mem::replace(
                 &mut level.mesh,
                 Mesh::new(
                     PrimitiveTopology::TriangleList,
                     RenderAssetUsages::default(),
                 ),
             );
-            mesh.generate_tangents().unwrap_or_else(|err| {
-                panic!(
-                    "terrain LOD tile {tile_index} level {level_index} failed mikktspace tangent \
-                     generation: {err}"
-                )
-            });
             let start = starts[level_index];
             let end = starts
                 .get(level_index + 1)
@@ -759,7 +800,7 @@ pub(crate) fn spawn(
          @ {budget} px budget",
         tiles = lod.tiles.len(),
         gen = lod.build.as_millis(),
-        tan = tangents_started.elapsed().as_millis(),
+        tan = tangents.as_millis(),
         fov = view.fov_y_rad,
         height = view.height_px,
         budget = view.budget_px,
@@ -1192,6 +1233,43 @@ mod tests {
         assert!(lod.tiles.iter().all(|tile| !tile.levels.is_empty()));
     }
 
+    /// The STARTUP COST, measured: generation plus the mikktspace tangent basis every level needs —
+    /// the two terms that land on the loading screen and nowhere else. Ignored by default because
+    /// mikktspace over the whole pyramid is the heaviest thing in this module; run it
+    /// (`cargo test --lib startup_cost -- --ignored --nocapture`) whenever the ladder, the tiling,
+    /// or `MESH_TILE_CELLS` changes.
+    ///
+    /// It also serves as the tangent-basis certification for every level (ADR-0011): the pass
+    /// panics on any level mikktspace cannot handle, and it is the SAME pass startup runs.
+    #[test]
+    #[ignore = "measurement: mikktspace over the whole pyramid is the module's heaviest step"]
+    fn terrain_lod_startup_cost_is_measured() {
+        let grid = shipped_grid();
+        let mut lod = build(&grid);
+        let triangles: usize = lod
+            .tiles
+            .iter()
+            .flat_map(|tile| tile.levels.iter().map(|level| level.triangles))
+            .sum();
+        let started = std::time::Instant::now();
+        generate_tangents(&mut lod);
+        println!(
+            "terrain LOD startup: generation {} ms + tangents {} ms over {triangles} triangles \
+             on {} cores",
+            lod.build.as_millis(),
+            started.elapsed().as_millis(),
+            std::thread::available_parallelism().map_or(1, std::num::NonZero::get),
+        );
+        for tile in &lod.tiles {
+            for level in &tile.levels {
+                assert!(
+                    level.mesh.attribute(Mesh::ATTRIBUTE_TANGENT).is_some(),
+                    "every level must leave a tangent attribute"
+                );
+            }
+        }
+    }
+
     /// Small-angle conservatism, pinned with the numbers the doc comment claims: the wired form
     /// never switches to a coarser level SOONER than the exact projection would allow.
     #[test]
@@ -1414,7 +1492,7 @@ mod tactical {
     }
 
     /// Median / p95 / max of a sample set (sorted in place).
-    fn quantiles(samples: &mut Vec<f32>) -> (f32, f32, f32) {
+    fn quantiles(samples: &mut [f32]) -> (f32, f32, f32) {
         if samples.is_empty() {
             return (0.0, 0.0, 0.0);
         }
@@ -1455,7 +1533,7 @@ mod tactical {
             EYE_HEIGHTS_M.len()
         );
         let mut exercised = 0usize;
-        for rung in 1..TERRAIN_LOD_LADDER.len() {
+        for (rung, &declared) in TERRAIN_LOD_LADDER.iter().enumerate().skip(1) {
             let surface = LodSurface::new(&grid, &lod, rung);
             let drawn = |x: f32, z: f32| surface.height_at(x, z);
 
@@ -1534,7 +1612,6 @@ mod tactical {
                  p95 {p95:.2} m, max {max:.2} m; hit only-exact {only_exact}, only-LOD {only_lod}\n\
                  \x20   crest occlusion over {tested} sightlines: {reveals} REVEAL a hull the \
                  exact ground hides, {hides} hide one it shows",
-                declared = TERRAIN_LOD_LADDER[rung],
                 optic = view_optic.switch_distance_m(rung, lod.bounding_radius_m),
                 cmdr = view_cmdr.switch_distance_m(rung, lod.bounding_radius_m),
             );
