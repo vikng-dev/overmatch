@@ -753,6 +753,17 @@ pub(crate) fn heightfield_collider(grid: &HeightGrid) -> Collider {
 /// differences of the grid (view-only shading), UVs world-space-tiled
 /// (`world_xz / TEXTURE_TILE_M` — repeat-sampled, see [`TEXTURE_TILE_M`]). The dedicated server
 /// never builds this (`world::spawn_environment` gates it on a window existing).
+///
+/// Every terrain mesh — this one and every LOD level — is created with [`TERRAIN_MESH_USAGE`].
+/// RENDER-WORLD ONLY, and that is a size decision, not a style one: the ground never changes after
+/// startup, nothing in the main world reads its vertices back (the collider and the oracle read the
+/// GRID, and the pinned `Aabb` plus `NoAutoAabb` keep bevy from re-deriving bounds from the mesh),
+/// and the default flags mean "keep a full CPU copy forever as well". DERIVED from the census —
+/// ~2.9 M triangles and ~1.5 M tangented vertices across the ladder — that copy is ~100 MiB of
+/// resident nothing. Anything that later needs terrain geometry on the CPU should read the grid,
+/// which is the one surface anyway.
+pub(crate) const TERRAIN_MESH_USAGE: RenderAssetUsages = RenderAssetUsages::RENDER_WORLD;
+
 pub(crate) fn terrain_mesh_tiles(grid: &HeightGrid) -> Vec<Mesh> {
     let ranges = mesh_tile_node_ranges(grid);
     let mut meshes = Vec::with_capacity(ranges.len());
@@ -782,10 +793,7 @@ pub(crate) fn terrain_mesh_tiles(grid: &HeightGrid) -> Vec<Mesh> {
                 indices.extend_from_slice(&[i00, i01, i10, i10, i01, i11]);
             }
         }
-        let mut mesh = Mesh::new(
-            PrimitiveTopology::TriangleList,
-            RenderAssetUsages::default(),
-        );
+        let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, TERRAIN_MESH_USAGE);
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
         mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
         mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);

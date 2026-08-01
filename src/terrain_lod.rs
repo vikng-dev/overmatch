@@ -67,18 +67,35 @@
 //! `Changed<Mesh3d>` (`bevy_camera-0.19.0/src/visibility/mod.rs:568`), which fires on spawn and
 //! would replace our pinned bounds with each LEVEL's own — drifting the anchor per level and
 //! opening sub-metre gaps and overlaps in the range chain.
+//!
+//! # TODO — THE SHADOW GATE IS NOT BUILT (brief §6c, codex 2026-08-02 finding 2)
+//!
+//! Terrain is a `CastAndReceive` caster under the shipped 17° sun (`world::spawn_environment`), and
+//! bevy applies `VisibilityRange` while collecting directional shadow casters
+//! (`vendor/bevy_light-0.19.0-cascade-count/src/lib.rs:436`) — so a switched level casts the shadow
+//! too. A vertical occluder change `δh` moves its shadow edge horizontally by `δh·cot 17° ≈ 3.27 δh`
+//! on a flat receiver, and more where the ground runs near-parallel to the light. **The positional
+//! rung therefore UNDERPRICES the shadow by at least 3.27×, and no gate in this module measures
+//! it.** DERIVED from the worst kept level (24.9 cm at the 25 cm rung), the shadow edge can move
+//! ~0.82 m; from codex's pre-fix 0.323 m miss it was ~1.06 m.
+//!
+//! What is missing, and why it is not here: the brief's shadow-mask difference and
+//! rendered-difference gates at the actual switch distances under the shipped sun, cascades,
+//! material and camera heights. Both need a GPU and a real render, and this branch was built in a
+//! window where gated frame sweeps owned the GPU. Until they exist, the 25 cm and 50 cm rungs are
+//! certified for SILHOUETTE and SIGHTLINE only. If the gate later fails, the arbitrated fallback is
+//! a `render_policy` shadow proxy on the exact level, or receive-only colour terrain.
 
 use std::time::Instant;
 
-use bevy::asset::RenderAssetUsages;
 use bevy::camera::primitives::Aabb;
 use bevy::camera::visibility::{NoAutoAabb, VisibilityRange};
 use bevy::mesh::{Indices, Mesh, PrimitiveTopology};
 use bevy::prelude::*;
 
 use crate::terrain_grid::{
-    HeightGrid, MESH_TILE_CELLS, TEXTURE_TILE_M, mesh_tile_node_ranges, node_world_coord,
-    surface_normal_at,
+    HeightGrid, MESH_TILE_CELLS, TERRAIN_MESH_USAGE, TEXTURE_TILE_M, mesh_tile_node_ranges,
+    node_world_coord, surface_normal_at,
 };
 
 /// The DECLARED deviation ladder, metres. A level built at rung `r` is guaranteed to lie within
@@ -156,19 +173,33 @@ impl Default for TerrainLodView {
 }
 
 impl TerrainLodView {
-    /// A live profile from a camera's field and a rendered pixel height.
+    /// A live profile from a camera's field and a rendered pixel height, with both inputs treated
+    /// as UNTRUSTED.
     ///
     /// A NON-POSITIVE height is not a small window, it is an ABSENT one — a window bevy has not
     /// sized yet at Startup, or a zero render scale. Taking it literally would collapse every
     /// switch distance onto the bounding radius and put the COARSEST level 94 m from the camera on
     /// the frames the player first sees, which is the exact opposite of the conservative direction.
-    /// So an absent height falls back to the default profile's, and the next frame with a real
-    /// window corrects it.
+    ///
+    /// A non-finite or non-positive FOV is worse, because it is a DIVISOR: `NaN` produces `NaN`
+    /// range boundaries, which compare false against every distance — the ground simply stops being
+    /// drawn — and a negative one inverts the whole chain. `spec::TankSpec::validate` rejects such a
+    /// sheet outright, so this is the second line: a camera whose projection has been written by
+    /// anything other than an authored view (a debug tool, a half-initialised projection) still
+    /// leaves the ladder with a usable profile instead of an invisible world.
+    ///
+    /// Both fall back to the default profile's value, and the next frame with sane inputs corrects
+    /// it. Silently, on purpose: this is a per-frame view-layer read, and a fail-loud here would
+    /// panic the client on a transient.
     pub(crate) fn new(fov_y_rad: f32, height_px: f32) -> Self {
         let default = Self::default();
         Self {
-            fov_y_rad,
-            height_px: if height_px > 0.0 {
+            fov_y_rad: if fov_y_rad.is_finite() && fov_y_rad > 0.0 {
+                fov_y_rad
+            } else {
+                default.fov_y_rad
+            },
+            height_px: if height_px.is_finite() && height_px > 0.0 {
                 height_px
             } else {
                 default.height_px
@@ -442,10 +473,7 @@ fn tile_mesh(grid: &HeightGrid, ia: usize, ja: usize, size: usize, tris: &[[u32;
             indices.push(*slot);
         }
     }
-    let mut mesh = Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::default(),
-    );
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, TERRAIN_MESH_USAGE);
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
@@ -886,10 +914,7 @@ pub(crate) fn spawn(
             // ~200 MB of nothing.
             let mesh = std::mem::replace(
                 &mut level.mesh,
-                Mesh::new(
-                    PrimitiveTopology::TriangleList,
-                    RenderAssetUsages::default(),
-                ),
+                Mesh::new(PrimitiveTopology::TriangleList, TERRAIN_MESH_USAGE),
             );
             let start = starts[level_index];
             let end = starts
@@ -1637,10 +1662,7 @@ mod tests {
             extracted_at_m: TERRAIN_LOD_LADDER[rung],
             measured_dev_m: TERRAIN_LOD_LADDER[rung],
             triangles: 0,
-            mesh: Mesh::new(
-                PrimitiveTopology::TriangleList,
-                RenderAssetUsages::default(),
-            ),
+            mesh: Mesh::new(PrimitiveTopology::TriangleList, TERRAIN_MESH_USAGE),
         };
         let tile = TerrainLodTile {
             min: Vec3::new(-62.5, 0.0, -62.5),
@@ -1800,6 +1822,75 @@ mod tests {
                 assert!(
                     level.mesh.attribute(Mesh::ATTRIBUTE_TANGENT).is_some(),
                     "every level must leave a tangent attribute"
+                );
+            }
+        }
+    }
+
+    /// A NON-FINITE OR NON-POSITIVE FOV cannot reach the range chain. It is a DIVISOR: `NaN` makes
+    /// every boundary `NaN`, and a `NaN` boundary compares false against every distance — the
+    /// ground stops being drawn at all, with no error anywhere. A negative one inverts the chain.
+    /// `spec::TankSpec::validate` refuses to load such a sheet; this is the second line, for a
+    /// projection written by something that is not an authored view.
+    #[test]
+    fn an_invalid_fov_cannot_reach_the_range_chain() {
+        let lod = build(&shipped_grid());
+        for fov in [0.0, -0.5, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let view = TerrainLodView::new(fov, 1440.0);
+            assert_eq!(
+                view.fov_y_rad,
+                TerrainLodView::default().fov_y_rad,
+                "fov {fov} must fall back"
+            );
+            for tile in &lod.tiles {
+                for range in lod.ranges(tile, view) {
+                    assert!(
+                        range.start_margin.start.is_finite() && range.start_margin.start >= 0.0,
+                        "fov {fov} produced boundary {}",
+                        range.start_margin.start
+                    );
+                }
+                // And the chain still covers everything exactly once.
+                for distance in [0.0, 100.0, 1_000.0, 50_000.0] {
+                    assert_eq!(
+                        lod.ranges(tile, view)
+                            .iter()
+                            .filter(|range| range.is_visible_at_all(distance))
+                            .count(),
+                        1
+                    );
+                }
+            }
+        }
+        // Heights get the same treatment.
+        for height in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(
+                TerrainLodView::new(0.5, height).height_px,
+                TerrainLodView::default().height_px,
+                "height {height} must fall back"
+            );
+        }
+    }
+
+    /// Terrain meshes are RENDER-WORLD ONLY. The ground never changes after startup and nothing in
+    /// the main world reads its vertices back, so the default flags' permanent CPU copy — DERIVED at
+    /// ~100 MiB across this ladder — buys nothing. Pinned because the cost of losing it is invisible.
+    #[test]
+    fn terrain_meshes_do_not_keep_a_main_world_copy() {
+        assert_eq!(
+            TERRAIN_MESH_USAGE,
+            bevy::asset::RenderAssetUsages::RENDER_WORLD
+        );
+        let grid = shipped_grid();
+        for mesh in crate::terrain_grid::terrain_mesh_tiles(&grid) {
+            assert_eq!(mesh.asset_usage, TERRAIN_MESH_USAGE, "level zero");
+        }
+        for tile in &build(&grid).tiles {
+            for level in &tile.levels {
+                assert_eq!(
+                    level.mesh.asset_usage, TERRAIN_MESH_USAGE,
+                    "rung {}",
+                    level.rung
                 );
             }
         }
