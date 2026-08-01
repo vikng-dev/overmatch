@@ -18,5 +18,5 @@
 .wrangler/
 __pycache__/
 
-# 32 x 2 MB of back-face probe frames, kept on disk so the worst frame can be cropped.
-scripts/tank/diet/out/
+# Renders the LOD chain's rendered-difference gate writes when it is pointed at a kept directory.
+scripts/lod/out/

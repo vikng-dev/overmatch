@@ -39,6 +39,18 @@ obj="$(git rev-parse --git-dir)/lfs/objects/$(printf %.2s "$oid")/$(printf %s "$
 [ -n "$oid" ] && [ -f "$obj" ] || obj="$glb"
 python3 scripts/tank/glb_ktx2.py verify --allow-pointer "$obj"
 
+# LOD chain. The manifest is the SINGLE SEAM between the generated geometry chain and the runtime
+# that selects from it, and a seam nobody checks is a ledger — the last hand-written one drifted by
+# 112 m before anyone noticed. This re-derives every switch distance from the recorded deviations,
+# re-hashes every level glb, and refuses a manifest cut by a generator the tree no longer holds.
+# Stdlib-only and milliseconds: it reads a JSON file and hashes a few tens of kilobytes.
+echo "pre-push ▸ lod chain manifest"
+python3 scripts/lod/chain.py --verify
+for suite in test_chain test_refusals; do
+    python3 "scripts/lod/$suite.py" >/dev/null 2>&1 ||
+        { printf '\033[31m  lod %s failed\033[0m — run: python3 scripts/lod/%s.py\n' "$suite" "$suite" >&2; exit 1; }
+done
+
 echo "pre-push ▸ cargo fmt --all --check"
 cargo fmt --all --check >/dev/null || { printf '\033[31m  unformatted\033[0m — run: cargo fmt --all\n' >&2; exit 1; }
 

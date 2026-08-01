@@ -1,0 +1,536 @@
+"""Every measurement the ladder gates on — taken on decoded GLB bytes, never on a Blender datablock.
+
+CERTIFICATION ORDER IS SACRED (ADR 0033 §6): generate -> cleanup -> export -> DECODE THE SHIPPED
+GLB -> measure. A number taken off the mesh that went INTO the exporter certifies the exporter's
+input, not the asset; float32 quantisation, vertex splitting, index re-ordering and axis conversion
+all happen after it. So the only Blender datablock this module reads is the SOURCE (which is the
+artist's mesh by definition), and everything it is compared against arrives through `from_glb`.
+
+WHY THE WORST CASE IS PROVEN AND NOT SAMPLED. `certified_deviation` is a branch-and-bound over
+sub-triangles that exploits d(p) = distance(p, other surface) being 1-Lipschitz: over a patch S with
+corners v0,v1,v2,
+
+    max_{p in S} d(p) <= min_k ( d(v_k) + max_j |v_k - v_j| )
+
+— the covering-radius bound. The queue expands the largest upper bound first and stops when the best
+bound is within `tol` of the best sample seen, which BRACKETS the true worst case. The caller gates
+on the UPPER end, so a bracket that failed to close costs triangles and never honesty. Sampling, at
+any density anyone can afford, proves nothing about the spike that pops.
+
+WHAT DEVIATION CANNOT SEE, and therefore what else lives here: a vanished component (near-zero
+Hausdorff), a needle triangle whose interpolated normal is noise, a duplicated face, a NaN, a
+flipped winding, and a UV-degenerate face whose tangent bevy will default. Those are counted, not
+estimated.
+"""
+
+import json
+import math
+import struct
+
+import numpy as np
+
+# glTF componentType enum -> numpy dtype. Covers indices and vertex attributes alike.
+_COMPONENT = {5120: np.int8, 5121: np.uint8, 5122: np.int16, 5123: np.uint16,
+              5125: np.uint32, 5126: np.float32}
+_NCOMP = {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4, "MAT4": 16}
+
+
+class Refusal(Exception):
+    """A named, loud refusal: the asset is outside what this pipeline certifies (ADR 0033 §10)."""
+
+    def __init__(self, reason, detail):
+        super().__init__(f"{reason}: {detail}")
+        self.reason = reason
+        self.detail = detail
+
+
+# ── decoding the shipped bytes ───────────────────────────────────────────────────────────────────
+
+def glb_chunks(path):
+    """The JSON dict and the BIN blob of a glb. Stdlib + a struct unpack, no importer involved."""
+    with open(path, "rb") as handle:
+        blob = handle.read()
+    magic, _version, length = struct.unpack_from("<4sII", blob, 0)
+    if magic != b"glTF":
+        raise Refusal("not-a-glb", path)
+    offset, gltf, binary = 12, None, None
+    while offset < min(length, len(blob)):
+        chunk_length, chunk_type = struct.unpack_from("<II", blob, offset)
+        payload = blob[offset + 8: offset + 8 + chunk_length]
+        if chunk_type == 0x4E4F534A:
+            gltf = json.loads(payload)
+        elif chunk_type == 0x004E4942:
+            binary = payload
+        offset += 8 + chunk_length + (-chunk_length % 4)
+    if gltf is None:
+        raise Refusal("no-json-chunk", path)
+    return gltf, binary
+
+
+def _accessor(gltf, binary, index):
+    """One accessor as an (count, ncomp) array, honouring byteStride. Sparse accessors refused."""
+    accessor = gltf["accessors"][index]
+    if "sparse" in accessor:
+        raise Refusal("sparse-accessor", f"accessor {index}")
+    ncomp = _NCOMP[accessor["type"]]
+    dtype = _COMPONENT[accessor["componentType"]]
+    count = accessor["count"]
+    if "bufferView" not in accessor:
+        return np.zeros((count, ncomp), dtype=dtype)
+    view = gltf["bufferViews"][accessor["bufferView"]]
+    base = view.get("byteOffset", 0) + accessor.get("byteOffset", 0)
+    stride = view.get("byteStride") or np.dtype(dtype).itemsize * ncomp
+    raw = np.frombuffer(binary, dtype=np.uint8, count=stride * count, offset=base)
+    raw = raw.reshape(count, stride)[:, : np.dtype(dtype).itemsize * ncomp]
+    return np.ascontiguousarray(raw).view(dtype).reshape(count, ncomp)
+
+
+#: glTF is Y-up and right-handed; Blender is Z-up. The exporter rotates -90 deg about X on the way
+#: out, so a shipped position (x, y, z) is the Blender position (x, -z, y). Deviation is
+#: rotation-invariant, but the source surface lives in Blender coordinates and the two must be
+#: compared in ONE frame — measuring across the conversion would silently compare a mesh with a
+#: rotated copy of itself and report a hull-sized "deviation".
+def gltf_to_blender(points):
+    out = np.empty_like(points)
+    out[:, 0] = points[:, 0]
+    out[:, 1] = -points[:, 2]
+    out[:, 2] = points[:, 1]
+    return out
+
+
+def primitive_of(gltf, node_name=None):
+    """The single mesh primitive a chain level (or a named node) must be. Refuses anything else."""
+    meshes = gltf.get("meshes", [])
+    if node_name is None:
+        if len(meshes) != 1:
+            raise Refusal("multi-mesh-glb", f"{len(meshes)} meshes; a chain level holds exactly 1")
+        mesh = meshes[0]
+    else:
+        nodes = [n for n in gltf.get("nodes", []) if n.get("name") == node_name]
+        if len(nodes) != 1 or nodes[0].get("mesh") is None:
+            raise Refusal("node-not-found", f"{node_name!r} is not a single mesh node")
+        mesh = meshes[nodes[0]["mesh"]]
+    primitives = mesh["primitives"]
+    if len(primitives) != 1:
+        raise Refusal(
+            "multi-primitive-mesh",
+            f"mesh {mesh.get('name')!r} splits into {len(primitives)} primitives; the chain loader "
+            f"reads primitive 0 only, so the rest would never be drawn",
+        )
+    return primitives[0]
+
+
+def from_glb(path, node_name=None, name=None):
+    """A `Surface` built from the bytes on disk. THE decode every gate measures through."""
+    gltf, binary = glb_chunks(path)
+    primitive = primitive_of(gltf, node_name)
+    attributes = primitive["attributes"]
+    if primitive.get("mode", 4) != 4:
+        raise Refusal("not-triangles", f"{path} primitive mode {primitive.get('mode')}")
+    if "indices" not in primitive:
+        raise Refusal("non-indexed-primitive", path)
+    for required in ("POSITION", "NORMAL", "TEXCOORD_0"):
+        if required not in attributes:
+            raise Refusal("missing-attribute", f"{path} has no {required}")
+    for banned, reason in (("JOINTS_0", "skinned-mesh"), ("WEIGHTS_0", "skinned-mesh")):
+        if banned in attributes:
+            raise Refusal(reason, f"{path} carries {banned}")
+    if primitive.get("targets"):
+        raise Refusal("morph-mesh", f"{path} carries {len(primitive['targets'])} morph targets")
+
+    indices = _accessor(gltf, binary, primitive["indices"]).astype(np.int64).reshape(-1, 3)
+    positions = gltf_to_blender(_accessor(gltf, binary, attributes["POSITION"]).astype(np.float64))
+    normals = gltf_to_blender(_accessor(gltf, binary, attributes["NORMAL"]).astype(np.float64))
+    uvs = _accessor(gltf, binary, attributes["TEXCOORD_0"]).astype(np.float64)
+    return Surface(positions, indices, normals[indices], uvs[indices], name or path)
+
+
+def from_bpy_mesh(mesh, matrix=None, name="source"):
+    """A `Surface` from an evaluated Blender mesh — used for the SOURCE only.
+
+    `matrix` bakes world rotation and scale (never translation) into the coordinates, so every
+    distance downstream is a true world distance in metres.
+    """
+    import bpy  # only importable inside Blender; this path is Blender-only
+
+    work = mesh.copy()
+    if matrix is not None:
+        work.transform(matrix)
+    work.calc_loop_triangles()
+    triangles = work.loop_triangles
+    verts = np.empty((len(work.vertices), 3), dtype=np.float64)
+    flat = np.empty(len(work.vertices) * 3, dtype=np.float32)
+    work.vertices.foreach_get("co", flat)
+    verts[:] = flat.reshape(-1, 3)
+
+    tri_v = np.array([tuple(t.vertices) for t in triangles], dtype=np.int64)
+    tri_loops = np.array([tuple(t.loops) for t in triangles], dtype=np.int64)
+
+    corner = np.zeros(len(work.loops) * 3, dtype=np.float32)
+    work.corner_normals.foreach_get("vector", corner)
+    corner_n = corner.reshape(-1, 3).astype(np.float64)[tri_loops]
+
+    layer = work.uv_layers.active
+    if layer is None:
+        raise Refusal("no-uv-layer", name)
+    flat_uv = np.zeros(len(work.loops) * 2, dtype=np.float32)
+    layer.uv.foreach_get("vector", flat_uv)
+    corner_uv = flat_uv.reshape(-1, 2).astype(np.float64)[tri_loops]
+
+    bpy.data.meshes.remove(work)
+    return Surface(verts, tri_v, corner_n, corner_uv, name)
+
+
+# ── the surface ──────────────────────────────────────────────────────────────────────────────────
+
+class Surface:
+    """Positions, triangles, per-corner normals and UVs, plus every derived quality counter."""
+
+    def __init__(self, verts, tri_v, corner_n, corner_uv, name):
+        self.name = name
+        self.verts = np.ascontiguousarray(verts, dtype=np.float64)
+        self.tri_v = np.ascontiguousarray(tri_v, dtype=np.int64)
+        self.corner_n = np.ascontiguousarray(corner_n, dtype=np.float64)
+        self.corner_uv = np.ascontiguousarray(corner_uv, dtype=np.float64)
+
+        self.p0 = self.verts[self.tri_v[:, 0]]
+        self.p1 = self.verts[self.tri_v[:, 1]]
+        self.p2 = self.verts[self.tri_v[:, 2]]
+        cross = np.cross(self.p1 - self.p0, self.p2 - self.p0)
+        self.tri_area = 0.5 * np.linalg.norm(cross, axis=1)
+        self.tri_count = int(len(self.tri_v))
+        self.vert_count = int(len(self.verts))
+
+        uv0, uv1, uv2 = self.corner_uv[:, 0], self.corner_uv[:, 1], self.corner_uv[:, 2]
+        a, b = uv1 - uv0, uv2 - uv0
+        self.uv_area = 0.5 * np.abs(a[:, 0] * b[:, 1] - a[:, 1] * b[:, 0])
+
+        lo, hi = self.verts.min(axis=0), self.verts.max(axis=0)
+        self.bbox_min, self.bbox_max = lo, hi
+        self.diagonal = float(np.linalg.norm(hi - lo))
+        self.radius = 0.5 * self.diagonal
+        self._bvh = None
+
+    # -- geometry helpers ------------------------------------------------------------------------
+    @property
+    def bvh(self):
+        if self._bvh is None:
+            from mathutils.bvhtree import BVHTree
+
+            self._bvh = BVHTree.FromPolygons(
+                [tuple(v) for v in self.verts],
+                [tuple(int(i) for i in t) for t in self.tri_v],
+                all_triangles=True,
+            )
+        return self._bvh
+
+    def digest(self):
+        """A stable hash of the geometry — the cache key that collapses a decimation plateau.
+
+        Positions are rounded to a nanometre before hashing: two collapse ratios that produce the
+        SAME mesh must hash the same, and a float that differs in its last bit is the same mesh.
+        """
+        import hashlib
+
+        h = hashlib.sha256()
+        h.update(np.round(self.verts * 1e9).astype(np.int64).tobytes())
+        h.update(np.sort(self.tri_v, axis=1).tobytes())
+        return h.hexdigest()
+
+    def altitudes(self):
+        """Per-triangle minimum altitude (metres) — the sliver measure. 2*area / longest edge."""
+        e0 = np.linalg.norm(self.p1 - self.p0, axis=1)
+        e1 = np.linalg.norm(self.p2 - self.p1, axis=1)
+        e2 = np.linalg.norm(self.p0 - self.p2, axis=1)
+        longest = np.maximum(np.maximum(e0, e1), e2)
+        return np.where(longest > 0.0, 2.0 * self.tri_area / np.maximum(longest, 1e-30), 0.0)
+
+    def welded(self, tol=1e-9):
+        """Vertex indices remapped so coincident positions share one index (glTF splits corners).
+
+        Non-finite coordinates are folded to zero for the weld only. They are a defect in their own
+        right and `validity` counts them; letting a NaN through to the integer cast here would raise
+        a warning and make the topology counters meaningless on top of the real failure.
+        """
+        clean = np.nan_to_num(self.verts, nan=0.0, posinf=0.0, neginf=0.0)
+        keys = np.round(clean / tol).astype(np.int64)
+        _, inverse = np.unique(keys, axis=0, return_inverse=True)
+        return inverse.reshape(-1)
+
+    def components(self):
+        """Connected components over welded positions. A vanished part shows here and nowhere else."""
+        weld = self.welded()
+        n = int(weld.max()) + 1 if len(weld) else 0
+        parent = np.arange(n)
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        for tri in weld[self.tri_v]:
+            a = find(int(tri[0]))
+            for other in tri[1:]:
+                b = find(int(other))
+                if a != b:
+                    parent[b] = a
+        used = np.unique(weld[self.tri_v])
+        return len({find(int(v)) for v in used})
+
+    # -- the validity gates ----------------------------------------------------------------------
+    def validity(self, gates, floor_m=None):
+        """Every structural check, as plain counts. The caller compares them with the thresholds.
+
+        `floor_m` overrides the sliver altitude floor; generation passes the source-anchored one
+        (see `GATES["sliver_margin_vs_source"]`). Without it the bound is the absolute scale-aware
+        fraction alone, which is what the SOURCE itself is measured against.
+        """
+        weld = self.welded()
+        faces = np.sort(weld[self.tri_v], axis=1)
+        _, counts = np.unique(faces, axis=0, return_counts=True)
+        duplicates = int((counts - 1).sum())
+
+        nonfinite = int(
+            (~np.isfinite(self.verts)).sum()
+            + (~np.isfinite(self.corner_n)).sum()
+            + (~np.isfinite(self.corner_uv)).sum()
+        )
+
+        # Orientation: every edge shared by exactly two faces must be traversed once in each
+        # direction. A flipped winding shows as the same directed edge appearing twice.
+        directed = np.concatenate([
+            np.stack([weld[self.tri_v[:, 0]], weld[self.tri_v[:, 1]]], axis=1),
+            np.stack([weld[self.tri_v[:, 1]], weld[self.tri_v[:, 2]]], axis=1),
+            np.stack([weld[self.tri_v[:, 2]], weld[self.tri_v[:, 0]]], axis=1),
+        ])
+        undirected = np.sort(directed, axis=1)
+        _, inverse, edge_counts = np.unique(
+            undirected, axis=0, return_inverse=True, return_counts=True
+        )
+        inverse = inverse.reshape(-1)
+        interior = edge_counts[inverse] == 2
+        forward = directed[:, 0] < directed[:, 1]
+        order = np.argsort(inverse[interior], kind="stable")
+        pairs = forward[interior][order].reshape(-1, 2)
+        flips = int((pairs[:, 0] == pairs[:, 1]).sum())
+
+        altitudes = self.altitudes()
+        floor = (
+            gates["min_altitude_frac_of_diag"] * self.diagonal if floor_m is None else float(floor_m)
+        )
+        bad_uv = self.uv_area < gates["uv_area_eps"]
+        touched = np.zeros(self.vert_count, dtype=np.int64)
+        bad_touched = np.zeros(self.vert_count, dtype=np.int64)
+        np.add.at(touched, self.tri_v.reshape(-1), 1)
+        np.add.at(bad_touched, self.tri_v[bad_uv].reshape(-1), 1)
+
+        return {
+            "tris": self.tri_count,
+            "verts": self.vert_count,
+            "components": self.components(),
+            "duplicate_faces": duplicates,
+            "nonfinite_attrs": nonfinite,
+            "orientation_flips": flips,
+            "boundary_edges": int((edge_counts == 1).sum()),
+            "nonmanifold_edges": int((edge_counts > 2).sum()),
+            "min_altitude_m": float(altitudes.min()) if self.tri_count else 0.0,
+            "min_altitude_floor_m": float(floor),
+            "slivers_below_floor": int((altitudes < floor).sum()),
+            "min_tri_area_mm2": float(self.tri_area.min() * 1e6) if self.tri_count else 0.0,
+            "tangent_default_faces": int(bad_uv.sum()),
+            "tangent_default_verts": int(((touched > 0) & (touched == bad_touched)).sum()),
+            "bbox_mm": [round(float(v) * 1000.0, 4) for v in (self.bbox_max - self.bbox_min)],
+            "radius_m": round(self.radius, 6),
+        }
+
+
+# ── the certified deviation ──────────────────────────────────────────────────────────────────────
+
+def _one_way(src, dst, tol, max_nodes, target=None, rel_tol=0.0):
+    """Certified max over `src`'s surface of the distance to `dst`. Returns (lower, upper) metres.
+
+    STOPPING, and why it is not just `tol`. The bracket closes by subdividing patches until their
+    covering radius is small, so an ABSOLUTE tolerance costs work in inverse proportion to the
+    answer: proving "this deviation is 0.05 mm +/- 0.02 mm" needs a quarter of a million patches,
+    proving "this one is 3.9 mm +/- 0.04 mm" needs a few thousand. Three stops, all sound:
+
+      * `rel_tol` — a bracket proportional to the answer. 1 % of 3.9 mm is a bracket nobody can see.
+      * `target` reached from above — once the UPPER bound is under the target, the answer to the
+        only question being asked ("does this clear the rung?") is already yes; refining further
+        buys nothing.
+      * `target` exceeded from below — once a SAMPLED point is over the target the true worst case
+        is too, so the candidate is rejected without finishing the proof.
+
+    Both target stops are one-directional facts about the two-way maximum, which is why the caller
+    may apply them per direction.
+    """
+    import heapq
+
+    from mathutils import Vector
+
+    find = dst.bvh.find_nearest
+    cache = {}
+
+    def distance_at(key, point):
+        value = cache.get(key)
+        if value is None:
+            hit = find(Vector(point))
+            value = hit[3] if hit[0] is not None else 0.0
+            cache[key] = value
+        return value
+
+    best = 0.0
+    heap = []
+    counter = 0
+    for t in range(src.tri_count):
+        corners = (src.p0[t], src.p1[t], src.p2[t])
+        ids = src.tri_v[t]
+        distances = tuple(distance_at(int(ids[k]), corners[k]) for k in range(3))
+        best = max(best, max(distances))
+        bound = min(
+            distances[k] + max(float(np.linalg.norm(corners[k] - corners[j])) for j in range(3))
+            for k in range(3)
+        )
+        counter += 1
+        heapq.heappush(heap, (-bound, counter, corners, distances))
+
+    nodes = 0
+    while heap:
+        bound = -heap[0][0]
+        if bound <= best + max(tol, rel_tol * best) or nodes >= max_nodes:
+            break
+        if target is not None and (bound <= target or best > target):
+            break
+        _, _, corners, distances = heapq.heappop(heap)
+        nodes += 1
+        a, b, c = corners
+        ab, bc, ca = 0.5 * (a + b), 0.5 * (b + c), 0.5 * (c + a)
+        d_ab = distance_at(("m", tuple(ab)), ab)
+        d_bc = distance_at(("m", tuple(bc)), bc)
+        d_ca = distance_at(("m", tuple(ca)), ca)
+        best = max(best, d_ab, d_bc, d_ca)
+        for patch, patch_d in (
+            ((a, ab, ca), (distances[0], d_ab, d_ca)),
+            ((ab, b, bc), (d_ab, distances[1], d_bc)),
+            ((ca, bc, c), (d_ca, d_bc, distances[2])),
+            ((ab, bc, ca), (d_ab, d_bc, d_ca)),
+        ):
+            sub = min(
+                patch_d[k] + max(float(np.linalg.norm(patch[k] - patch[j])) for j in range(3))
+                for k in range(3)
+            )
+            if sub > best + max(tol, rel_tol * best):
+                counter += 1
+                heapq.heappush(heap, (-sub, counter, patch, patch_d))
+
+    top = -heap[0][0] if heap else best
+    return best, max(best, top)
+
+
+def vertex_deviation(a, b):
+    """Two-way max distance from each surface's VERTICES to the other surface, in millimetres.
+
+    The cheap check, and the only honest one for an IDENTITY comparison. Branch-and-bound cannot
+    close a bracket on two identical surfaces: the true worst case is zero, so the stop test
+    `bound <= best + tol` demands every patch be subdivided until its own covering radius is under
+    `tol` — a quarter-million sub-triangles per triangle, for a number everybody already knows. For
+    "did these bytes ship the mesh I measured", vertices plus matched triangle counts is the
+    statement worth making, and it costs one BVH query per vertex.
+    """
+    from mathutils import Vector
+
+    worst = 0.0
+    for source, target in ((a, b), (b, a)):
+        for point in source.verts:
+            hit = target.bvh.find_nearest(Vector(point))
+            if hit[0] is not None:
+                worst = max(worst, hit[3])
+    return worst * 1000.0
+
+
+def certified_deviation(a, b, tol, max_nodes, target_mm=None, rel_tol=0.0):
+    """TWO-WAY certified deviation between surfaces, in millimetres.
+
+    One-way misses holes: a level that deleted a boss is arbitrarily close to the source measured
+    from the level, and only the source->level direction sees the missing metal. Both directions are
+    run and the worst of the two is the deviation; both upper bounds are kept so the caller can gate
+    on a proven ceiling.
+
+    IDENTICAL SURFACES SHORT-CIRCUIT. Two meshes with the same geometry digest ARE the same mesh,
+    and the branch-and-bound is at its very worst on them: the true answer is zero, so no patch is
+    ever small enough to stop on and the search runs to `max_nodes` to say what the digest says in
+    microseconds. The search's own ceiling probe is exactly this case.
+    """
+    if a.digest() == b.digest():
+        return {"mm": 0.0, "mm_upper": 0.0, "a_to_b_mm": 0.0, "b_to_a_mm": 0.0,
+                "bracket_mm": 0.0, "identical": True}
+    target = None if target_mm is None else target_mm / 1000.0
+    lo_a, hi_a = _one_way(a, b, tol, max_nodes, target, rel_tol)
+    lo_b, hi_b = _one_way(b, a, tol, max_nodes, target, rel_tol)
+    return {
+        "mm": max(lo_a, lo_b) * 1000.0,
+        "mm_upper": max(hi_a, hi_b) * 1000.0,
+        "a_to_b_mm": lo_a * 1000.0,
+        "b_to_a_mm": lo_b * 1000.0,
+        "bracket_mm": (max(hi_a, hi_b) - max(lo_a, lo_b)) * 1000.0,
+    }
+
+
+# ── the diagnostic (never a gate) ────────────────────────────────────────────────────────────────
+
+def normal_angle_diagnostic(source, level, samples, seed=12345):
+    """Worst / p99 shading-normal angle between the pair, in degrees. DIAGNOSTIC ONLY (ADR 0033 §7).
+
+    No fixed angle can honestly gate shading: how visible a normal error is depends on roughness,
+    the normal map and the lighting, which is exactly what the rendered-difference gate measures
+    instead. This number is reported so a regression is legible, never so a build fails on it.
+
+    READ IT WITH ITS COMPANION `backface_corr_frac`. The correspondence is the nearest point, and on
+    a shoe with 3 mm walls the nearest point routinely lands on the FAR side of a wall — a surface
+    facing the other way, whose normal is ~180 deg off and has nothing to do with any shading error.
+    Those samples are excluded from the angle statistics and counted separately, because their
+    fraction is itself the signal (it rises as thin features are collapsed away). The angles below
+    are therefore maxima over surviving correspondences, not over the whole surface.
+    """
+    from mathutils import Vector
+
+    rng = np.random.default_rng(seed)
+    weights = source.tri_area / source.tri_area.sum()
+    picks = rng.choice(source.tri_count, size=samples, p=weights)
+    r1, r2 = rng.random(samples), rng.random(samples)
+    s = np.sqrt(r1)
+    b0, b1, b2 = (1.0 - s)[:, None], (s * (1.0 - r2))[:, None], (s * r2)[:, None]
+    points = b0 * source.p0[picks] + b1 * source.p1[picks] + b2 * source.p2[picks]
+    normals = (
+        b0 * source.corner_n[picks, 0]
+        + b1 * source.corner_n[picks, 1]
+        + b2 * source.corner_n[picks, 2]
+    )
+    normals /= np.linalg.norm(normals, axis=1, keepdims=True) + 1e-30
+
+    angles = []
+    backfacing = 0
+    face_normals = np.cross(level.p1 - level.p0, level.p2 - level.p0)
+    face_normals /= np.linalg.norm(face_normals, axis=1, keepdims=True) + 1e-30
+    for point, normal in zip(points, normals):
+        hit = level.bvh.find_nearest(Vector(point))
+        if hit[0] is None:
+            continue
+        cosine = float(np.clip(normal @ face_normals[hit[2]], -1.0, 1.0))
+        if cosine <= 0.0:
+            backfacing += 1  # nearest point is through a wall; not a shading statement
+            continue
+        angles.append(math.degrees(math.acos(cosine)))
+    total = len(angles) + backfacing
+    if not angles:
+        return {"max_deg": 0.0, "p99_deg": 0.0, "p95_deg": 0.0,
+                "backface_corr_frac": 1.0 if total else 0.0, "samples": total}
+    array = np.array(angles)
+    return {
+        "max_deg": round(float(array.max()), 3),
+        "p99_deg": round(float(np.percentile(array, 99)), 3),
+        "p95_deg": round(float(np.percentile(array, 95)), 3),
+        "backface_corr_frac": round(backfacing / total, 5),
+        "samples": total,
+    }

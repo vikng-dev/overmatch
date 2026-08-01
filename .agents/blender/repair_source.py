@@ -22,11 +22,12 @@ Two properties the shipped `tiger_1.glb` has, and the `.blend` did not:
     `io_scene_gltf2/blender/exp/material/materials.py` — `not use_backface_culling` is the whole
     rule, and a material WITH the flag omits the key entirely, which is the glTF default). Every
     material in the file had it off, so every material shipped double-sided. The measurement that
-    says culling is safe on this model is `scripts/tank/diet/README.md` step 4: 115 red pixels in
+    says culling is safe on this model was taken by the retired asset-diet pass (deleted with
+    ADR 0033's branch; renders kept at `.agents/scratch/asset-diet-renders/`): 115 red pixels in
     128 M over 32 camera positions at 2 000 px, all coincident faces rather than holes.
 
 Both were previously REPLAYED onto every raw export by a surgery stage in `export_tiger.py`,
-using `scripts/tank/diet/dedupe.py` and `singlesided.py`. That stage is gone. A pipeline stage
+using that pass's glb-surgery scripts. That stage is gone. A pipeline stage
 that repairs its input on every run is a workaround for a bad source; the source is now correct,
 and the export is a plain export again.
 
@@ -39,7 +40,7 @@ they have the same vertex count — every attribute of both meshes is decoded an
 indices, sharp flags, colour layers), plus the corner normals the exporter actually writes. Two
 meshes with equal counts and different vertices would pass a count check, get merged, and silently
 swap one model for another with nothing left to notice it. Same standard, and the same reasoning,
-as `scripts/tank/diet/dedupe.py`'s glb-side check.
+as the retired glb-side dedupe check it replaced.
 
 Materials are compared the same way: node type, every node input default, every link, and the
 image datablock behind any texture node. A material that merely LOOKS like its twin in the
@@ -67,7 +68,7 @@ import bpy
 #: The duplicate MG objects and the objects whose datablocks they should be sharing, BY OBJECT
 #: NAME. The right-hand side is the one that survives — the hull MG's `Object_*.002` meshes and
 #: `Material.006`..`.009` — because that is the set the shipped glb kept when the dedupe was still
-#: glb surgery (`scripts/tank/diet/README.md` step 3), so the repaired export reproduces the
+#: glb surgery (the retired asset-diet pass), so the repaired export reproduces the
 #: shipped bytes rather than an equivalent-but-different file.
 MG_MERGES = (
     ("Coax_MG_Barrel_Visual", "Hull_MG_Barrel_Visual"),

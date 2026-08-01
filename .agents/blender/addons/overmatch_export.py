@@ -242,9 +242,10 @@ def _popup(title, message, icon='ERROR'):
 def _summary(glb, module):
     """"71.1 MB mipless → 63.2 MB baked, mips verified (…)" from what the bake recorded.
 
-    The shoe lines come last and are the ones worth reading on the stock-exporter door: that door
-    has no LOD stage in front of it, so `LAST_EXPORT['link']` says the tank glb is carrying the
-    AUTHORED shoe and names the door that reduces it (see `export_tiger._link_summary`).
+    The shoe lines come last and are the ones worth reading on either door: `LAST_EXPORT['link']`
+    says whether the shipped `Link` is still the artist's mesh (L0 IS the source), and
+    `LAST_EXPORT['lod']` shouts when the generated chain beside it was cut from a different one
+    (see `export_tiger._link_summary` / `._lod_chain_notice`).
     """
     last = getattr(module, "LAST_EXPORT", {}) or {}
     out_mb = os.path.getsize(glb) / 1e6
@@ -253,7 +254,7 @@ def _summary(glb, module):
     verified = (last.get("verify") or "").strip()
     verified = f"mips verified ({verified})" if verified else "mips verified"
     lines = [f"{os.path.basename(glb)} — {sizes}, {verified}"]
-    lines += [line for line in (last.get("link"), *(last.get("lods") or ())) if line]
+    lines += [line for line in (last.get("link"), last.get("lod")) if line]
     return "\n".join(lines)
 
 
