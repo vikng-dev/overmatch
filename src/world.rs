@@ -234,6 +234,10 @@ pub fn plugin(app: &mut App) {
         Update,
         (report_failed_terrain_map, attach_environment_light),
     );
+    // The terrain LOD ladder's adaptive half: the levels are generated in `spawn_environment`
+    // above, and this keeps their switch distances honest as the optic toggles and the window
+    // resizes. Inert until a ladder exists, so the dedicated server pays nothing.
+    app.add_plugins(crate::terrain_lod::plugin);
 }
 
 /// How a terrain surface map's bytes must be interpreted at LOAD time — the one texture decision
@@ -322,6 +326,7 @@ fn spawn_environment(
     mut materials: ResMut<Assets<StandardMaterial>>,
     grid: Option<Res<crate::terrain_grid::HeightGrid>>,
     windows: Query<&Window>,
+    scale: Option<Res<crate::render_scale::RenderScale>>,
     asset_server: Res<AssetServer>,
 ) {
     let mut blocks: Vec<Transform> = Vec::new();
@@ -405,28 +410,18 @@ fn spawn_environment(
             // from the grid's own samples with the collider's own cell diagonal — identical
             // geometry, chunked into world-space tiles (positions are absolute, transforms
             // identity) purely so bevy frustum-culls per tile.
-            let started = std::time::Instant::now();
-            let mut tiles = 0usize;
-            for mut mesh in crate::terrain_grid::terrain_mesh_tiles(&grid) {
-                // Normal mapping needs a TANGENT basis: the map stores directions in the
-                // surface's own U/V frame, and without `ATTRIBUTE_TANGENT` bevy has nothing to
-                // rotate them into world space (the ground reads flat-then-greasy). mikktspace is
-                // the same generator the pack was baked against, so the basis matches the map by
-                // construction. Required, no fallback (ADR-0011): a tile that cannot carry a
-                // tangent basis is a broken ship, not a degraded one.
-                mesh.generate_tangents().unwrap_or_else(|err| {
-                    panic!("terrain render tile failed mikktspace tangent generation: {err}")
-                });
-                commands.spawn((
-                    Transform::IDENTITY,
-                    Mesh3d(meshes.add(mesh)),
-                    MeshMaterial3d(material.clone()),
-                ));
-                tiles += 1;
-            }
-            info!(
-                "terrain: {tiles} render tiles built with tangents in {ms} ms",
-                ms = started.elapsed().as_millis()
+            //
+            // Each tile ships as a LADDER rather than a single mesh (`terrain_lod`): the exact
+            // surface up close, then RTIN levels whose declared deviation is sub-pixel at the
+            // distance bevy switches them in. Generated HERE, from the in-memory grid, so there is
+            // no build product that can go stale against the surface the sim reads. Tangent
+            // generation (ADR-0011, required with no fallback) happens per level inside `spawn`.
+            crate::terrain_lod::spawn(
+                &mut commands,
+                &mut meshes,
+                &material,
+                &grid,
+                terrain_lod_view(windows.iter().next(), scale.as_deref()),
             );
         }
         commands.insert_resource(TerrainMap {
@@ -462,6 +457,26 @@ fn spawn_environment(
         revision: 0,
         blocks,
     });
+}
+
+/// The view profile the terrain ladder is FIRST wired for, at Startup — before any camera has
+/// spawned and therefore before any fov is knowable.
+///
+/// Deliberately the NARROWEST view the game has (the gunner optic): a narrow field demands the
+/// finest geometry, so seeding with it means the first frames are over-detailed rather than
+/// under-detailed. `terrain_lod::adapt_ranges` replaces it with the live profile on the first
+/// frame that has a window and a camera, at human rate thereafter.
+fn terrain_lod_view(
+    window: Option<&Window>,
+    scale: Option<&crate::render_scale::RenderScale>,
+) -> crate::terrain_lod::TerrainLodView {
+    let default = crate::terrain_lod::TerrainLodView::default();
+    crate::terrain_lod::TerrainLodView {
+        height_px: window.map_or(default.height_px, |window| {
+            window.physical_height() as f32 * scale.map_or(1.0, |scale| scale.0)
+        }),
+        ..default
+    }
 }
 
 /// Spawn a static, unit-cube collision block scaled/posed by `transform` (the Avian idiom: a
