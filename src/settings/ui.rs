@@ -1154,6 +1154,32 @@ fn change_row(
     info!("settings: {} -> {}", row.label(), row.value(&next));
 }
 
+/// How far one wheel message asks the list to travel, in the CSS pixels [`ScrollPosition`] is
+/// stored in. `to_css` is the viewport's `inverse_scale_factor`. Pure, so the unit question is
+/// testable without a laid-out UI — the same reason [`track_fraction`] is.
+///
+/// **The two units are in DIFFERENT SPACES, and only one of them needs converting.**
+///
+/// A `Line` delta is a count of notches — dimensionless — so multiplying it by a CSS-px constant
+/// already lands in the space wanted, and it SHOULD scale with the UI: a notch is "about one row",
+/// and rows get bigger with `UiScale`.
+///
+/// A `Pixel` delta (every trackpad) is winit's `MouseScrollDelta::PixelDelta`, whose payload is a
+/// `PhysicalPosition` (vendored winit-0.30.13/src/event.rs:961-966), and bevy copies its components
+/// across unchanged (bevy_winit-0.19.0/src/state.rs:342-349). So it arrives in PHYSICAL pixels and
+/// must be converted like every other physical measurement here. Without the conversion it is
+/// scaled a SECOND time by layout — `UiScale` is folded into the factor `ScrollPosition` is
+/// multiplied by (`bevy_ui::update`, `target_scaling_factor().unwrap_or(1.) * ui_scale.0`) — so the
+/// same flick of a finger would scroll 0.75x at the 75% rung and 1.5x at 150%, doubled again on a
+/// Retina target. A physical distance the hand moved must land the same physical distance of
+/// content whatever the UI scale is.
+fn wheel_delta_css(unit: bevy::input::mouse::MouseScrollUnit, y: f32, to_css: f32) -> f32 {
+    match unit {
+        bevy::input::mouse::MouseScrollUnit::Line => y * WHEEL_LINE_PX,
+        bevy::input::mouse::MouseScrollUnit::Pixel => y * to_css,
+    }
+}
+
 /// Keep the row list scrolled somewhere useful: follow the wheel, and always keep the SELECTED row
 /// on screen.
 ///
@@ -1210,12 +1236,8 @@ fn scroll_rows(
     let mut wanted = scroll.0.y;
 
     for event in wheel.read() {
-        let lines = match event.unit {
-            bevy::input::mouse::MouseScrollUnit::Line => event.y * WHEEL_LINE_PX,
-            bevy::input::mouse::MouseScrollUnit::Pixel => event.y,
-        };
         // Wheel-up is positive and means "move the content down", i.e. a SMALLER offset.
-        wanted -= lines;
+        wanted -= wheel_delta_css(event.unit, event.y, to_css);
     }
 
     // Then the selection, which wins: it is applied last, so a wheel that scrolled the selected row
@@ -1524,6 +1546,51 @@ mod tests {
             Row::LodPixelBudget.step(&mut settings, 1, ALL_RUNGS);
         }
         assert_eq!(settings.lod_pixel_budget.pixels(), PixelBudget::MAX);
+    }
+
+    /// **A saturated step is a no-op, and stays one whatever else is in the settings.**
+    ///
+    /// `change_row` and `scrub` both decide "nothing happened" by comparing whole [`Settings`]
+    /// values, so any field that breaks reflexive equality turns every held key and every
+    /// held-still drag frame into a settings write and a file save. A `NaN` budget did exactly that
+    /// (`store::a_non_finite_budget_cannot_survive_the_parse` is the fix at the boundary); this is
+    /// the property that fix protects, asserted where it is actually consumed.
+    #[test]
+    fn a_saturated_step_on_any_row_is_a_no_op() {
+        // The budget as a parser could deliver it after sanitisation, plus an ordinary off-ladder
+        // hand-edit, so this covers the shape the fix produces rather than only the default.
+        for budget in [
+            PixelBudget::default(),
+            PixelBudget(1.2),
+            PixelBudget(PixelBudget::MIN),
+        ] {
+            let settings = Settings {
+                lod_pixel_budget: budget,
+                ..default()
+            };
+            assert_eq!(
+                settings, settings,
+                "{budget:?}: settings must equal themselves, or every no-op guard on this page \
+                 fails open and the file is written every frame",
+            );
+            // Walk every row to BOTH ends and then step past them: the last step of each walk must
+            // land on a value that compares equal, which is what `change_row` returns early on.
+            for row in Row::ORDER {
+                for direction in [-1, 1] {
+                    let mut walked = settings;
+                    for _ in 0..64 {
+                        row.step(&mut walked, direction, ALL_RUNGS);
+                    }
+                    let saturated = walked;
+                    row.step(&mut walked, direction, ALL_RUNGS);
+                    assert_eq!(
+                        walked, saturated,
+                        "{row:?} stepping {direction} past the end of its ladder must compare \
+                         equal, or leaning on the key saves the file on every repeat",
+                    );
+                }
+            }
+        }
     }
 
     /// The page's FIRST row is render scale: it is the one setting with a large, immediate frame
@@ -2283,6 +2350,83 @@ mod tests {
             shut, 0.0,
             "a wheel spun over the game with the page closed must not scroll the page",
         );
+    }
+
+    /// **A trackpad's PIXEL delta is physical, and must be converted like every other physical
+    /// measurement here** (Codex, 2026-08-01).
+    ///
+    /// winit's `MouseScrollDelta::PixelDelta` carries a `PhysicalPosition`
+    /// (winit-0.30.13/src/event.rs:961-966) and bevy copies its components across unchanged
+    /// (bevy_winit-0.19.0/src/state.rs:342-349), while [`ScrollPosition`] is in CSS pixels — layout
+    /// multiplies it by a factor that folds `UiScale` in (`bevy_ui::update`,
+    /// `target_scaling_factor().unwrap_or(1.) * ui_scale.0`). Applying the raw delta therefore
+    /// scaled a trackpad flick twice: 0.75x at the 75% rung and 1.5x at 150%, doubled again on a
+    /// Retina target.
+    ///
+    /// Tested PURE, like [`track_fraction`], and for the usual reason plus one specific to this
+    /// page: the selection follow deliberately runs AFTER the wheel and overrides it, so a wheel
+    /// measured through a laid-out card measures the follow, not the unit conversion.
+    ///
+    /// The claim is an invariant rather than a table of magic numbers — the same physical flick
+    /// must move the same PHYSICAL distance of content at every rung, because the player's finger
+    /// moved the same distance across the same glass. The LINE unit is asserted in the OPPOSITE
+    /// direction: it is a dimensionless notch count, authored in CSS px, and it should scale with
+    /// the UI exactly as the rows it steps past do.
+    #[test]
+    fn a_pixel_wheel_delta_is_converted_out_of_physical_space() {
+        use bevy::input::mouse::MouseScrollUnit;
+
+        const FLICK_PHYSICAL_PX: f32 = 120.0;
+        // `to_css` is the viewport's `inverse_scale_factor`: 1 / (target scale factor * UiScale).
+        // The three UI rungs on a 1x target, then the same three on a 2x Retina target.
+        for (ui_scale, target_scale) in [
+            (0.75, 1.0),
+            (1.0, 1.0),
+            (1.5, 1.0),
+            (0.75, 2.0),
+            (1.0, 2.0),
+            (1.5, 2.0),
+        ] {
+            let combined = ui_scale * target_scale;
+            let to_css = 1.0 / combined;
+            let css = wheel_delta_css(MouseScrollUnit::Pixel, FLICK_PHYSICAL_PX, to_css);
+            // What the layout will actually move: the CSS delta re-multiplied by the very factor
+            // `bevy_ui` applies to `ScrollPosition`.
+            let physical_travel = css * combined;
+            assert!(
+                (physical_travel - FLICK_PHYSICAL_PX).abs() <= 1e-3,
+                "ui {ui_scale}x on a {target_scale}x target: a {FLICK_PHYSICAL_PX} px flick moved \
+                 {physical_travel} physical px of content. A trackpad delta arrives in PHYSICAL \
+                 pixels, so it must be converted to CSS before it reaches ScrollPosition — \
+                 otherwise the UI scale is applied to it twice.",
+            );
+            // CONTROL: the stored CSS value therefore has to DIFFER by rung. If it did not, nothing
+            // would be being converted and the assertion above would pass on a coincidence.
+            assert!(
+                (css - FLICK_PHYSICAL_PX * to_css).abs() <= 1e-3,
+                "ui {ui_scale}x on a {target_scale}x target: stored {css} css px",
+            );
+
+            // The LINE unit is the opposite case and must NOT be converted.
+            assert_eq!(
+                wheel_delta_css(MouseScrollUnit::Line, 1.0, to_css),
+                WHEEL_LINE_PX,
+                "ui {ui_scale}x on a {target_scale}x target: a wheel NOTCH is a dimensionless \
+                 count and must stay {WHEEL_LINE_PX} css px, scaling with the UI like the rows it \
+                 steps past",
+            );
+        }
+        // Both units agree that positive is up (the smaller offset `scroll_rows` subtracts toward),
+        // symmetrically, with a still hand moving nothing.
+        for unit in [MouseScrollUnit::Line, MouseScrollUnit::Pixel] {
+            assert!(wheel_delta_css(unit, 1.0, 0.5) > 0.0, "{unit:?}");
+            assert_eq!(
+                wheel_delta_css(unit, -1.0, 0.5),
+                -wheel_delta_css(unit, 1.0, 0.5),
+                "{unit:?}: the two directions must be symmetric",
+            );
+            assert_eq!(wheel_delta_css(unit, 0.0, 0.5), 0.0, "{unit:?}");
+        }
     }
 
     /// The hint SLOT laid out with `text` in it: its height and the scale factor it was laid out

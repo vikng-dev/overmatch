@@ -232,12 +232,15 @@ pub fn run() {
                         // this window — the mapping self-negotiates until the probe lands.
                         present_mode: settings.present_mode(crate::settings::PresentCaps::Unprobed),
                         // Described at creation so a persisted fullscreen boots fullscreen instead
-                        // of flashing a window first. A hidden capture client must NOT boot into
-                        // the player's persisted fullscreen — it stays a plain window.
+                        // of flashing a window first, and on the persisted DISPLAY where that can
+                        // be resolved this early (only `Primary` can — see
+                        // `settings::DisplaySelection`; an indexed rung is corrected by
+                        // `apply_settings` on the first frame). A hidden capture client must NOT
+                        // boot into the player's persisted fullscreen — it stays a plain window.
                         mode: if hidden {
                             WindowMode::Windowed
                         } else {
-                            settings.window_mode.to_window_mode()
+                            settings.window_mode.to_window_mode(settings.display)
                         },
                         // macOS invariant: bevy creates every winit window `with_visible(false)`
                         // (for AccessKit) and then calls `set_visible(window.visible)`, which on
