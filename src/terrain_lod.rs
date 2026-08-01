@@ -1131,6 +1131,38 @@ mod tests {
         }
     }
 
+    /// COVERAGE survives a degenerate view profile. A headless or not-yet-sized window reports a
+    /// zero pixel height, which collapses every switch distance onto the bounding radius: the
+    /// middle levels then own EMPTY intervals. That is fine and must stay fine — every distance is
+    /// still covered by exactly one level, so the ground never disappears and is never drawn
+    /// twice. Asserted by evaluating the chain, not by trusting it to be strictly increasing.
+    #[test]
+    fn the_range_chain_covers_every_distance_even_at_a_degenerate_view() {
+        let lod = build(&shipped_grid());
+        for view in [
+            TerrainLodView {
+                fov_y_rad: std::f32::consts::FRAC_PI_4,
+                height_px: 0.0,
+                budget_px: TERRAIN_LOD_BUDGET_PX,
+            },
+            TerrainLodView::default(),
+        ] {
+            for tile in &lod.tiles {
+                let ranges = lod.ranges(tile, view);
+                for distance in [0.0, 1.0, 93.0, 94.2, 200.0, 999.0, 5_000.0, 100_000.0] {
+                    let visible = ranges
+                        .iter()
+                        .filter(|range| range.is_visible_at_all(distance))
+                        .count();
+                    assert_eq!(
+                        visible, 1,
+                        "{visible} levels visible at {distance} m (view {view:?})"
+                    );
+                }
+            }
+        }
+    }
+
     /// The DERIVATION pin: every wired threshold is re-computed here from the constants alone —
     /// ladder rung, pixel budget, view profile, bounding radius — and must equal what the ladder
     /// hands the ECS. A literal metre count creeping into the wiring fails here, and so does a
@@ -1231,6 +1263,138 @@ mod tests {
         let resident: usize = census.iter().map(|(_, tris, _)| tris).sum();
         println!("  {entities} entities, {resident} triangles resident across the whole pyramid");
         assert!(lod.tiles.iter().all(|tile| !tile.levels.is_empty()));
+    }
+
+    /// A two-level ladder with no geometry — enough to exercise selection and the adaptive layer
+    /// without decoding a heightmap.
+    fn synthetic_ladder() -> TerrainLod {
+        let level = |rung: usize| TerrainLodLevel {
+            rung,
+            extracted_at_m: TERRAIN_LOD_LADDER[rung],
+            measured_dev_m: TERRAIN_LOD_LADDER[rung],
+            triangles: 0,
+            mesh: Mesh::new(
+                PrimitiveTopology::TriangleList,
+                RenderAssetUsages::default(),
+            ),
+        };
+        let tile = TerrainLodTile {
+            min: Vec3::new(-62.5, 0.0, -62.5),
+            max: Vec3::new(62.5, 20.0, 62.5),
+            levels: vec![level(0), level(2), level(4)],
+        };
+        TerrainLod {
+            bounding_radius_m: tile.bounding_radius_m(),
+            tiles: vec![tile],
+            build: std::time::Duration::ZERO,
+        }
+    }
+
+    /// THE ADAPTIVE LAYER: switching to the gunner optic must pull every terrain switch distance
+    /// OUT (a narrow field magnifies the same deviation, so the coarse level is only legal much
+    /// further away), and returning to the commander view must pull them back in.
+    ///
+    /// This is the whole reason terrain gets the adaptive layer on day one and the shoe does not:
+    /// a few hundred entities and a human-rate trigger. If it silently stopped firing, the ladder
+    /// would be selected for whatever view happened to be live at startup — which is why this
+    /// asserts the DIRECTION of the rewrite and not merely that something changed.
+    #[test]
+    fn the_adaptive_layer_rewrites_thresholds_when_the_view_changes() {
+        let mut app = App::new();
+        app.add_plugins(plugin);
+        app.insert_resource(TerrainLodLadder(synthetic_ladder()));
+        app.insert_resource(TerrainLodView {
+            fov_y_rad: std::f32::consts::FRAC_PI_4,
+            height_px: 1440.0,
+            budget_px: TERRAIN_LOD_BUDGET_PX,
+        });
+        let world = app.world_mut();
+        let window = world.spawn(Window::default()).id();
+        let camera = world
+            .spawn((
+                Camera3d::default(),
+                Projection::Perspective(PerspectiveProjection {
+                    fov: std::f32::consts::FRAC_PI_4,
+                    ..default()
+                }),
+            ))
+            .id();
+        let entities: Vec<Entity> = (0..3)
+            .map(|level| {
+                world
+                    .spawn((
+                        TerrainLodEntity { tile: 0, level },
+                        VisibilityRange::abrupt(0.0, f32::INFINITY),
+                    ))
+                    .id()
+            })
+            .collect();
+
+        // A default `Window` has no physical size, so the first pass wires a zero-height profile —
+        // exactly the degenerate case a headless start hits, and it must not panic.
+        app.update();
+        app.world_mut()
+            .get_mut::<Window>(window)
+            .expect("the test window")
+            .resolution
+            .set_physical_resolution(2560, 1440);
+        app.update();
+        let commander: Vec<f32> = entities
+            .iter()
+            .map(|&entity| {
+                app.world()
+                    .get::<VisibilityRange>(entity)
+                    .expect("the adaptive layer must write a range")
+                    .start_margin
+                    .start
+            })
+            .collect();
+
+        // Into the optic: the same deviations now cost 6.5× more distance to hide.
+        {
+            let mut lens = app
+                .world_mut()
+                .get_mut::<Projection>(camera)
+                .expect("the test camera");
+            let Projection::Perspective(projection) = lens.as_mut() else {
+                panic!("the test camera must carry a perspective projection");
+            };
+            projection.fov = crate::camera::GUNNER_FOV_FALLBACK;
+        }
+        app.update();
+        let optic: Vec<f32> = entities
+            .iter()
+            .map(|&entity| {
+                app.world()
+                    .get::<VisibilityRange>(entity)
+                    .expect("the adaptive layer must write a range")
+                    .start_margin
+                    .start
+            })
+            .collect();
+
+        assert_eq!(commander[0], 0.0, "the exact level always starts at zero");
+        assert_eq!(optic[0], 0.0);
+        for level in 1..3 {
+            assert!(
+                optic[level] > commander[level],
+                "the optic must push level {level} out ({} vs {})",
+                optic[level],
+                commander[level],
+            );
+        }
+        // And the rewrite is idempotent: no view change, no work.
+        app.update();
+        for (level, &entity) in entities.iter().enumerate() {
+            assert_eq!(
+                app.world()
+                    .get::<VisibilityRange>(entity)
+                    .expect("range")
+                    .start_margin
+                    .start,
+                optic[level],
+            );
+        }
     }
 
     /// The STARTUP COST, measured: generation plus the mikktspace tangent basis every level needs —
