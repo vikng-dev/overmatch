@@ -817,6 +817,14 @@ pub fn run_offline() {
         Update,
         cycle_transmission_feel.before(drive_hud::DriveHudUpdate),
     );
+    // The scripted-trigger capture hook (`SPIKE_AUTO_FIRE`), mounted HERE and nowhere else: this
+    // offline root has no netcode at all — no lightyear plugins, no connection entity — so the
+    // commands it writes cannot leave the process. Mounting it inside the shared device-gather
+    // plugin would put it in the packaged network client too (`dev_tools` is a default feature),
+    // where scripted trigger edges would ride the input bridge to a live server. See
+    // `command::offline_auto_fire_plugin`.
+    #[cfg(feature = "dev_tools")]
+    app.add_plugins(command::offline_auto_fire_plugin);
     app.run();
 }
 

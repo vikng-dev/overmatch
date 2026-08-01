@@ -7,7 +7,9 @@
 #
 # Fire is driven by the dev-only scripted trigger (SPIKE_AUTO_FIRE=1, src/command.rs `auto_fire`);
 # its hardcoded schedule IS the window map below. A human holding the key would also be feeding the
-# window input, which changes the workload the sweep is trying to measure.
+# window input, which changes the workload the sweep is trying to measure. The hook is mounted ONLY
+# by the offline root (`command::offline_auto_fire_plugin`, mounted in `run_offline`), which is why
+# every condition below launches `--offline`: under any network client the env var does nothing.
 #
 #   idle 0-20s | MG held 20-50s | idle 50-60s | main gun 60-75s | idle 75s+
 #
