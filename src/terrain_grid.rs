@@ -1513,22 +1513,35 @@ pub(crate) mod tests {
         }
     }
 
-    /// The far probe placement's REASON to exist, asserted as the number it is: every probe must
-    /// land beyond `track::link_view::SHOE_LOD1_DISTANCE_M` from the controlled tank, or the "far"
-    /// capture is measuring the near case under a different name. Measured to the tank rather than
-    /// the camera on purpose — the orbit camera sits BEHIND it, so this is the conservative end.
+    /// The far probe placement's REASON to exist, asserted as the numbers it is: every probe must
+    /// land in the shoe chain's LOD1 BAND — past the first swap, short of the second — or the "far"
+    /// capture is measuring something other than the band it was placed for.
+    ///
+    /// Both halves matter. Inside `SHOE_LOD1_DISTANCE_M` the probes would render the base shoe like
+    /// the near placement already does, and the capture would be the near case under a different
+    /// name. Beyond `SHOE_LOD2_DISTANCE_M` they would render LOD2 — a legitimate thing to measure,
+    /// but not this placement, which was sited at 588..633 m to sit squarely in LOD1. Measured to
+    /// the tank rather than the camera on purpose — the orbit camera sits BEHIND it, so this is the
+    /// conservative end, and it is the end that can fall out of the band on the near side.
     #[test]
-    fn the_far_probe_placement_puts_every_probe_beyond_the_shoe_lod_swap() {
+    fn the_far_probe_placement_puts_every_probe_in_the_shoe_lod1_band() {
         use crate::tank::scenario::{duel_spawn_xz, probe_spawn_xz};
+        use crate::track::link_view::{SHOE_LOD1_DISTANCE_M, SHOE_LOD2_DISTANCE_M};
 
         let anchor = duel_spawn_xz(true)[0];
         for i in 0..28 {
             let distance = probe_spawn_xz(true, i).distance(anchor);
             assert!(
-                distance > crate::track::link_view::SHOE_LOD1_DISTANCE_M,
-                "far probe {i} is {distance:.0} m from the controlled tank — inside the {} m shoe \
-                 LOD swap, so it would render LOD0 like the near placement does",
-                crate::track::link_view::SHOE_LOD1_DISTANCE_M,
+                distance > SHOE_LOD1_DISTANCE_M,
+                "far probe {i} is {distance:.0} m from the controlled tank — inside the \
+                 {SHOE_LOD1_DISTANCE_M} m first swap, so it would render the base shoe like the \
+                 near placement does",
+            );
+            assert!(
+                distance < SHOE_LOD2_DISTANCE_M,
+                "far probe {i} is {distance:.0} m from the controlled tank — beyond the \
+                 {SHOE_LOD2_DISTANCE_M} m second swap, so it renders LOD2 rather than the LOD1 \
+                 band this placement was sited for",
             );
         }
     }

@@ -153,7 +153,7 @@ struct RigSide {
     /// plane would lose the authored overhang.
     link_center_x: f32,
     /// This side's SHADOW CASTER ([`super::shadow_proxy`]): the low-poly ribbon that casts the
-    /// belt's shadow so the 5 552-triangle shoes do not have to. `None` under [`ProxyMode::Off`]
+    /// belt's shadow so the 3 058-triangle shoes do not have to. `None` under [`ProxyMode::Off`]
     /// (the shoes cast, exactly as they shipped) and for the one frame between the rig binding and
     /// [`attach_shadow_proxies`] running.
     proxy: Option<ProxySide>,
@@ -406,11 +406,11 @@ fn bind_track_rigs(
             },
         ];
         info!(
-            "track rig bound: {} links/side (+{} LOD1 siblings/side, swapping at {:.0} m), {} \
+            "track rig bound: {} links/side (+{} reduced siblings/side per level — {}), {} \
              wheels/side; sprocket tooth tips L {:.2}° R {:.2}°",
             spec.link_count,
             spec.link_count,
-            link_view::SHOE_LOD1_DISTANCE_M,
+            link_view::lod_chain_summary(),
             sides[0].wheels.len(),
             sl_tip.to_degrees(),
             sr_tip.to_degrees(),

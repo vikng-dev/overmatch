@@ -3,8 +3,11 @@
 //!
 //! # Why
 //!
-//! A Tiger carries `link_count × 2` real shoes (MEASURED 97 × 2 = 194 entities) at MEASURED 5 552
-//! triangles each — ~1.08 M triangles per tank. Every one of them is re-submitted into EVERY shadow
+//! A Tiger carries `link_count × 2` real shoes (MEASURED 97 × 2 = 194 entities) at MEASURED 3 058
+//! triangles each — ~593 k triangles per tank, and ~1.08 M before the shipped shoe became a planar
+//! reduction of the authored 5 552 (`scripts/tank/diet/README.md`; the cascade numbers below were
+//! MEASURED at the old count and are therefore the pessimistic end, not a stale claim about the
+//! asset). Every one of them is re-submitted into EVERY shadow
 //! cascade, with no detail reduction: MEASURED 2026-07-27, a tank costs 0.364 ms per cascade
 //! (`ms_per_cascade = 0.364 × tanks + 0.69`), i.e. 1.36 ms at four cascades against the 0.086 ms the
 //! same tank costs with shadows off. A tank's SHADOW is 16× its entire non-shadow cost, and the
@@ -479,7 +482,7 @@ mod tests {
             assert_eq!(indices.len(), count * 24, "{count} stations");
             assert_eq!(positions(&mesh).len(), count * 4);
         }
-        // 97 links/side against the shoe pool's 97 × 5 552.
+        // 97 links/side against the shoe pool's 97 × 3 058.
         assert_eq!(97 * 8, 776);
     }
 

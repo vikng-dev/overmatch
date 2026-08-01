@@ -56,9 +56,10 @@ const PROBE_FAR_DUEL_XZ: Vec2 = Vec2::new(-410.0, -440.0);
 ///
 /// Paired with [`PROBE_FAR_DUEL_XZ`] so the whole grid lands 588..633 m from the controlled tank's
 /// spawn (the orbit camera rides up to `ORBIT_FAR` = 18 m further back, so the RENDERED distances
-/// are those or larger) — every probe beyond `track::link_view::SHOE_LOD1_DISTANCE_M` with ~88 m of
-/// margin, and every probe inside the camera's 1 000 m far plane with room to spare. Its footprint
-/// relief is 0.24..2.45 m per tank, comparable to the near band's valley floor.
+/// are those or larger) — squarely inside the shoe chain's LOD1 band, past
+/// `track::link_view::SHOE_LOD1_DISTANCE_M` by ~338 m and short of `SHOE_LOD2_DISTANCE_M` by ~17 m
+/// at the far end — and every probe inside the camera's 1 000 m far plane with room to spare. Its
+/// footprint relief is 0.24..2.45 m per tank, comparable to the near band's valley floor.
 const PROBE_FAR_NEAR_Z: f32 = 148.0;
 
 /// Is this process running the FAR probe placement?
@@ -190,16 +191,19 @@ const PROBE_GRID_COLUMNS: usize = 6;
 /// # `OVERMATCH_PROBE_FAR=1`: the same block, on the far side of the shoe LOD
 ///
 /// The near block is the RIGHT default and the wrong half of one question. `track::link_view` swaps
-/// every shoe for a 194-triangle decimation beyond `SHOE_LOD1_DISTANCE_M`, and that costs an extra
-/// entity per shoe — ~11 640 of them at 30 tanks — walked by `check_visibility_ranges` every frame
-/// whether or not any of them is far enough to matter. So the LOD has two frames to answer for: the
-/// FAR one, where the triangle win is real and the walk is paid for, and the NEAR one, where the
-/// rendered geometry is byte-identical to before and the walk is pure overhead. The near block at
-/// 55..99 m can only show the second. This flag is the other placement, and nothing else.
+/// every shoe for a 386-triangle reduction beyond `SHOE_LOD1_DISTANCE_M` and a 192-triangle one
+/// beyond `SHOE_LOD2_DISTANCE_M`, and that costs TWO extra entities per shoe — at 194 shoes per tank
+/// and 30 tanks, 5 820 per level and 17 460 walked by `check_visibility_ranges` every frame, whether
+/// or not any of them is far enough to matter. So the LOD has two frames to answer for: the FAR one,
+/// where the
+/// triangle win is real and the walk is paid for, and the NEAR one, where the rendered geometry is
+/// byte-identical to before and the walk is pure overhead. The near block at 55..99 m can only show
+/// the second. This flag is the other placement, and nothing else.
 ///
 /// It moves the WHOLE offline scene, not just the grid, because the world is 1 000 m on a side
 /// (`terrain_grid::WORLD_SIZE`) and the camera sits at the duel: with the duel where it is, the
-/// furthest in-bounds probe is ~490 m away and every shoe is still LOD0. So the duel translates to
+/// furthest in-bounds probe is ~490 m away and every shoe is still the base mesh. So the duel
+/// translates to
 /// [`PROBE_FAR_DUEL_XZ`] and the grid to [`PROBE_FAR_NEAR_Z`] — same spacing, same columns, same
 /// shape, same count, 588..633 m of separation instead of 55..99 m.
 ///
