@@ -47,156 +47,11 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import config as CONFIG  # noqa: E402
+from manifest import (  # noqa: E402
+    Tree, derive, load, merge_asset_entries, sha256_file, switch_distance_m,
+)
 
 
-def switch_distance_m(deviation_mm, radius_m, view):
-    """D = dev_m * height_px / (2 tan(vfov/2) * budget_px) + radius. The ONE projection (§9).
-
-    Exact, not small-angle. The shortcut `dev_m * height / (vfov * budget)` agrees to 0.06 % at the
-    optic and is 5.5 % wrong at the commander FOV, which is precisely the kind of error that hides
-    in a narrow reference view and surfaces when someone quotes a wide one.
-    """
-    denominator = 2.0 * math.tan(float(view["vfov_rad"]) / 2.0) * float(view["budget_px"])
-    return (deviation_mm / 1000.0) * float(view["height_px"]) / denominator + radius_m
-
-
-class Tree:
-    """Where verification reads its files from: the work tree, or a git revision.
-
-    THE HOOK NEEDS THE SECOND ONE. A pre-push hook that verifies the work tree answers a question
-    nobody asked — a dirty-but-coherent tree can bless a completely different commit, and pushing a
-    branch that is not `HEAD`, or a tag, or several refs at once, was not covered at all. Reading
-    the manifest and the assets out of the REVISION BEING PUSHED is the only version of this check
-    that means what its name says.
-
-    LFS pointers are the reason it can be done cheaply. A tracked glb in a commit is a pointer file
-    whose `oid sha256:` IS the sha256 of the real bytes — the same number the manifest records — so
-    the whole hash comparison works without hydrating a single object.
-    """
-
-    def __init__(self, root, rev=None):
-        self.root = root
-        self.rev = rev
-
-    def read(self, relpath):
-        if self.rev is None:
-            with open(os.path.join(self.root, relpath), "rb") as handle:
-                return handle.read()
-        result = subprocess.run(
-            ["git", "show", f"{self.rev}:{relpath}"],
-            cwd=self.root, capture_output=True, check=False,
-        )
-        if result.returncode != 0:
-            raise FileNotFoundError(f"{relpath} is not in {self.rev}")
-        return result.stdout
-
-    def exists(self, relpath):
-        try:
-            self.read(relpath)
-        except FileNotFoundError:
-            return False
-        return True
-
-    def digest(self, relpath):
-        """sha256 of the file's real content, resolving an LFS pointer to its recorded oid."""
-        blob = self.read(relpath)
-        if blob.startswith(b"version https://git-lfs.github.com/spec/v1"):
-            for line in blob.splitlines():
-                if line.startswith(b"oid sha256:"):
-                    return line.split(b":", 1)[1].decode().strip()
-            raise ValueError(f"{relpath} is an LFS pointer with no sha256 oid")
-        return hashlib.sha256(blob).hexdigest()
-
-    def label(self):
-        return f"{self.rev}:{CONFIG.MANIFEST_RELPATH}" if self.rev else CONFIG.MANIFEST_RELPATH
-
-
-def load(root=None, path=None, rev=None):
-    # `root` is explicit for the hook: it runs `scripts/lod` EXTRACTED FROM the revision under
-    # test, into a temp directory that is not inside any work tree, so walking up for a `.git`
-    # finds nothing. Verifying a commit with a different tree's rules would be the same class of
-    # mistake one level up, which is why the scripts come from the revision and the root does not.
-    root = root or CONFIG.repo_root()
-    tree = Tree(root, rev)
-    if rev is None and path is not None:
-        with open(path, encoding="utf-8") as handle:
-            return json.load(handle), root, tree
-    return json.loads(tree.read(CONFIG.MANIFEST_RELPATH).decode()), root, tree
-
-
-def derive(manifest, view=None):
-    """The runtime chain, derived from measured deviations. The only place a threshold is computed.
-
-    Per level: the glb it loads, its triangle count, and the distance at or beyond which it is the
-    honest choice. That distance is the WORSE of two bounds (ADR 0033 §4):
-
-      * source-relative: the level's own lie must be under budget,
-      * pairwise: the level and the one it replaces may lie in OPPOSITE directions, so their
-        separation can reach e_{N-1} + e_N = 1.5 e_N. That separation is the pop, and pricing the
-        switch on source-relative deviation alone under-states it by up to a half octave.
-    """
-    view = view or manifest["ladder"]["reference_view"]
-    chains = []
-    for asset in manifest["assets"]:
-        levels = asset["levels"]
-        # THE SLACK IS AN ORIGIN RADIUS, OVER BOTH ADJACENT LEVELS.
-        #
-        # `VisibilityRange` tests the distance to the entity ORIGIN; the guarantee is about the
-        # surface, so the slack must be the farthest any shipped vertex sits FROM THAT ORIGIN — not
-        # half the AABB diagonal, which bounds distance from the box centre and is a different point
-        # entirely. Measured on the shipped Link: 0.400124 m from the origin against a 0.384004 m
-        # half-diagonal, so every switch was landing 16 mm early.
-        #
-        # And over BOTH levels at the boundary, because either one may be the mesh on screen there;
-        # taking the child's alone would under-slack whenever the parent is the bigger shape.
-        origin_radius = [
-            (level.get("validity") or {}).get("origin_radius_m", asset["source"]["radius_m"])
-            for level in levels
-        ]
-        rows = []
-        for index, level in enumerate(levels):
-            if level["role"] == "source":
-                rows.append({
-                    "level": level["level"], "rung": 0, "glb": level["glb"],
-                    "node": level.get("node"), "tris": level["tris"],
-                    "dev_source_mm": 0.0, "pairwise_mm": None,
-                    "switch_m": 0.0, "role": "source",
-                })
-                continue
-            radius = max(origin_radius[index - 1], origin_radius[index])
-            from_source = switch_distance_m(level["dev_source_mm_upper"], radius, view)
-            from_pairwise = switch_distance_m(level["pairwise_mm_upper"], radius, view)
-            rows.append({
-                "level": level["level"], "rung": level["rung"], "glb": level["glb"],
-                "node": level.get("node"), "tris": level["tris"],
-                "e_target_mm": level["e_target_mm"],
-                "dev_source_mm": level["dev_source_mm_upper"],
-                "pairwise_mm": level["pairwise_mm_upper"],
-                "switch_from_source_m": from_source,
-                "switch_from_pairwise_m": from_pairwise,
-                "switch_m": max(from_source, from_pairwise),
-                "origin_radius_m": radius,
-                "role": "generated",
-            })
-        chains.append({
-            "asset": asset["name"], "radius_m": max(origin_radius),
-            "termination": asset["termination"],
-            "right_wall_m": manifest["ladder"]["right_wall_m"], "levels": rows,
-        })
-    return chains
-
-
-def sha256_file(path):
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for block in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-#: Numeric fields every generated level must carry, all of which must be finite. A manifest whose
-#: numbers are NaN passed every comparison in the first version of this file: NaN fails every `>`
-#: and every `!=` test silently, so a corrupted manifest verified clean.
 LEVEL_NUMERIC_FIELDS = (
     "tris", "verts", "e_target_mm", "dev_source_mm", "dev_source_mm_upper",
     "pairwise_mm", "pairwise_mm_upper", "switch_m", "shed_fraction_vs_parent",
@@ -242,6 +97,10 @@ GATE_VIEW_NUMERIC_FIELDS = (
     "silhouette_band_px", "silhouette_band_frac",
 )
 
+#: Fields pinned by `config.RATIFICATION_EVIDENCE` and compared against it by the test suite, so
+#: the decision evidence quoted beside an unratified threshold cannot go stale a third time.
+PINNED_EVIDENCE_FIELDS = ("enumerated_outputs",)
+
 #: Generator provenance that must be present AND must match this tree.
 GENERATOR_PINNED_FIELDS = (
     ("blender", "EXPECTED_BLENDER", lambda v: v.split()[0]),
@@ -249,6 +108,19 @@ GENERATOR_PINNED_FIELDS = (
     ("gltf_exporter", "EXPECTED_GLTF_EXPORTER", lambda v: v),
 )
 
+#: THREE CLASSES, AND THE THIRD IS NAMED RATHER THAN HIDDEN.
+#:
+#:   1. RE-DERIVED — recomputed here from other recorded values and compared (every switch distance,
+#:      every gate summary and verdict, every defect score, the deviation record's internal
+#:      consistency). `test_chain.RederivationSweepTests` mutates each and demands a failure.
+#:   2. COMPARED — checked against this tree's configuration, the pinned toolchain, or the bytes on
+#:      disk (every threshold, every provenance field, every glb hash, every defect counter).
+#:   3. MEASURED — a number the pipeline observed that nothing can re-derive from the manifest
+#:      alone: the losing side of a `max`, a p99, a footprint size. These are required to be
+#:      PRESENT and FINITE, and what actually pins them is the level's glb hash plus regeneration —
+#:      the bytes are fixed and re-running the pipeline re-measures them. Saying "checked" of these
+#:      would be the overstatement an earlier version of this file made.
+#:
 #: Fields recorded for a HUMAN and deliberately not compared against anything.
 #:
 #: THE RULE THIS ENFORCES: every field the manifest records is either CHECKED or listed here. There
@@ -359,21 +231,69 @@ def _check_gate_record(gate, label, failures):
     if not ok:
         return False
 
-    # THE VERDICT MUST RE-DERIVE FROM THE METRICS.
+    # EVERYTHING BELOW IS RE-DERIVED FROM THE PER-VIEW METRICS AND COMPARED.
+    #
+    # Presence and finiteness are not checking. An adversarial review set all three `worst_*`
+    # summaries to -999 and inverted a per-view verdict, and verification returned zero failures:
+    # every field was there, every number was finite, and not one of them had to agree with
+    # anything. A summary nobody recomputes is a claim, and a claim recorded next to its own
+    # evidence is exactly what a manifest exists to stop.
     limit = CONFIG.RENDER_GATE["defect_fraction"]
-    derived = True
-    for view_name, view in views.items():
-        signal = view["signal"]
+    tolerance = 1.5e-6  # the records are rounded to six decimal places
+    derived_pass = True
+    worst = {"mean": 0.0, "frac": 0.0, "score": 0.0}
+    for view_name, view in sorted(views.items()):
+        view_label = f"{label} [{view_name}]"
+        signal, noise, defect = view["signal"], view["noise_floor"], view["defect_floor"]
+
+        span = defect["mean_abs_diff"] - noise["mean_abs_diff"]
+        score = (signal["mean_abs_diff"] - noise["mean_abs_diff"]) / span if span > 1e-9 else 1.0
+        score = max(0.0, score)
+        if abs(score - view["defect_score"]) > max(tolerance, abs(score) * 1e-5):
+            failures.append(
+                f"{view_label}: defect_score is recorded as {view['defect_score']} but its own "
+                f"signal/noise/defect means re-derive to {score:.6f}"
+            )
+            return False
+
         floor_ok = (
             signal["mean_abs_diff"] <= CONFIG.RENDER_GATE["max_mean_abs_diff"]
             and signal["frac_over"] <= CONFIG.RENDER_GATE["max_footprint_frac_over"]
         )
-        if not (signal["footprint_px"] > 0 and (view["defect_score"] <= limit or floor_ok)):
-            derived = False
-    if derived != gate["pass"]:
+        view_pass = signal["footprint_px"] > 0 and (view["defect_score"] <= limit or floor_ok)
+        if view_pass != view["pass"]:
+            failures.append(
+                f"{view_label}: records pass={view['pass']} but its own metrics re-derive to "
+                f"{view_pass} against the declared threshold {limit}"
+            )
+            return False
+        if view["under_absolute_floor"] != floor_ok:
+            failures.append(
+                f"{view_label}: records under_absolute_floor={view['under_absolute_floor']} but "
+                f"its metrics re-derive to {floor_ok}"
+            )
+            return False
+        derived_pass = derived_pass and view_pass
+        worst["mean"] = max(worst["mean"], signal["mean_abs_diff"])
+        worst["frac"] = max(worst["frac"], signal["frac_over"])
+        worst["score"] = max(worst["score"], view["defect_score"])
+
+    for key, recorded, recomputed in (
+        ("worst_mean_abs_diff", gate["worst_mean_abs_diff"], worst["mean"]),
+        ("worst_frac_over", gate["worst_frac_over"], worst["frac"]),
+        ("worst_defect_score", gate["worst_defect_score"], worst["score"]),
+    ):
+        if abs(recorded - recomputed) > tolerance:
+            failures.append(
+                f"{label}: {key} is recorded as {recorded} but the per-view records it summarises "
+                f"give {recomputed:.6f}"
+            )
+            return False
+
+    if derived_pass != gate["pass"]:
         failures.append(
             f"{label}: render gate records pass={gate['pass']} but its own numbers re-derive to "
-            f"{derived} — the verdict does not follow from the evidence beside it"
+            f"{derived_pass} — the verdict does not follow from the evidence beside it"
         )
         return False
 
@@ -625,6 +545,28 @@ def verify(manifest, tree):
             if level["role"] == "source":
                 previous = row
                 continue
+            # THE DEVIATION RECORD MUST BE INTERNALLY CONSISTENT. Without this, understating a
+            # level's certified deviation is invisible whenever the pairwise figure dominates the
+            # switch derivation: the rung-target check only bounds from above, and the derived
+            # distance does not move. Tying the four recorded numbers to each other makes any single
+            # one of them impossible to edit alone.
+            # 2e-6: each field is rounded to six places independently, so a comparison between two
+            # of them carries up to 1e-6 of rounding on its own before anything is wrong.
+            rounding = 2e-6
+            two_way = max(level["dev_source_to_level_mm"], level["dev_level_to_source_mm"])
+            if abs(level["dev_source_mm"] - two_way) > rounding:
+                failures.append(
+                    f"{label}: dev_source_mm is {level['dev_source_mm']} but the two directions it "
+                    f"summarises give {two_way}"
+                )
+            bracket = level["dev_source_mm_upper"] - level["dev_source_mm"]
+            if abs(bracket - level["dev_source_bracket_mm"]) > rounding:
+                failures.append(
+                    f"{label}: the certified bracket is recorded as "
+                    f"{level['dev_source_bracket_mm']} but upper - lower is {bracket:.6f}"
+                )
+            if bracket < -1e-9:
+                failures.append(f"{label}: certified upper bound is below its own lower bound")
             if level["dev_source_mm_upper"] > level["e_target_mm"] + 1e-9:
                 failures.append(
                     f"{label}: certified {level['dev_source_mm_upper']} mm exceeds its rung target "
@@ -661,33 +603,6 @@ def verify(manifest, tree):
                     )
             previous = row
     return failures, warnings
-
-
-def merge_asset_entries(regenerated, existing, configured_names):
-    """Fold a targeted regeneration back into a full asset list. Returns it, or raises ValueError.
-
-    `--asset` regenerates ONE chain, and a manifest is required to cover every configured asset — so
-    writing only the selected one would replace a verifiable manifest with an unverifiable subset,
-    and the first anyone would know is verification failing on a corpus nobody touched. With one
-    configured asset the question does not arise; with two it silently would.
-
-    Lives here rather than in the generator because it is manifest shape, not geometry, and because
-    here it can be tested without Blender.
-    """
-    by_name = {entry["name"]: entry for entry in existing}
-    fresh = {entry["name"]: entry for entry in regenerated}
-    merged = []
-    for name in configured_names:
-        if name in fresh:
-            merged.append(fresh[name])
-        elif name in by_name:
-            merged.append(by_name[name])
-        else:
-            raise ValueError(
-                f"targeted regeneration has no entry for {name!r} and the existing manifest has "
-                f"none to carry over — run a full generation"
-            )
-    return merged
 
 
 def format_chain(chains):

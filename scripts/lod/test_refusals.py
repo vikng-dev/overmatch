@@ -418,72 +418,121 @@ class BranchAndBoundTests(unittest.TestCase):
 
 
 class StaircaseEnumerationTests(unittest.TestCase):
-    """The enumeration walk, against a synthetic decimator whose realizable set is known.
+    """The enumeration walk, against synthetic decimators whose realizable set is known.
 
-    THE WALK IS THE PART THAT WAS WRONG, and the first island test did not exercise it: it supplied
-    an already-complete output table, so it proved the SCAN was exhaustive over a set it was handed
-    rather than that the set was complete. The oracle is injected here so the walk itself is driven,
-    including by an oracle that violates its contract the way the real one used to.
+    THE WALK IS THE PART THAT WAS WRONG, twice. First the oracle under it stopped within 1 % of its
+    budget, so the `reached - 1` jump stepped over outputs. Then the guard meant to catch that was
+    itself unsound: it accepted any count already in the output set, which `f(B) = B - 1` satisfies
+    while enumerating half the staircase. The oracle is injected here so both the walk and its
+    guard are driven directly, with no Blender.
     """
 
     @staticmethod
-    def exact_oracle(realizable, calls=None):
-        """The contract: the greatest realizable count at or below the budget."""
+    def exact(realizable, calls=None, cleaned=None):
+        """The contract: the greatest realizable count at or below the budget.
+
+        Returns `(step_count, shipped_key)`. `cleaned` maps a step count to what would ship after
+        the cleanup pass, so the two-domain handling can be exercised.
+        """
         ordered = sorted(realizable)
 
-        def decimate_at(budget):
+        def probe(budget):
             if calls is not None:
                 calls.append(budget)
             under = [value for value in ordered if value <= budget]
-            return under[-1] if under else None
+            if not under:
+                return None
+            step = under[-1]
+            return step, (cleaned or {}).get(step, step)
 
-        return decimate_at
+        return probe
 
     def test_every_realizable_output_is_found(self):
         realizable = {194, 200, 231, 316, 400, 583, 700, 855, 1000, 1661}
-        outputs, _budgets = M.enumerate_staircase(194, 1661, self.exact_oracle(realizable))
+        outputs, _by_key = M.enumerate_staircase(194, 1661, self.exact(realizable))
         self.assertEqual(outputs, sorted(realizable))
 
-    def test_one_decimation_per_output(self):
+    def test_one_decimation_per_output_plus_the_contract_checks(self):
         """The `reached - 1` jump is what makes exhaustive affordable; hold it to that."""
         realizable = {100, 250, 400, 620, 900, 1500}
         calls = []
-        outputs, _ = M.enumerate_staircase(100, 1500, self.exact_oracle(realizable, calls))
+        outputs, _ = M.enumerate_staircase(100, 1500, self.exact(realizable, calls))
         self.assertEqual(outputs, sorted(realizable))
-        self.assertEqual(len(calls), len(realizable))
+        # One call per output for the walk, plus one per output for the idempotence check.
+        self.assertEqual(len(calls), 2 * len(realizable))
 
-    def test_a_sloppy_oracle_is_caught_by_the_spot_checks(self):
-        """The real bug: a bisection that stopped within 1 % instead of finding the greatest.
+    def test_the_off_by_one_oracle_is_caught(self):
+        """Codex's counterexample: `f(B) = max(1, B-1)` over 1..10 enumerated only [1,3,5,7,9].
 
-        With such an oracle the walk jumps over real outputs. The spot checks re-probe budgets from
-        the skipped intervals and must refuse rather than return a quietly incomplete set.
+        Every answer it gives IS in the set it built, so a membership guard passes it. Asking
+        `probe(9) == 9` — the idempotence the contract implies for any realizable value — refuses
+        it immediately.
         """
+        def off_by_one(budget):
+            step = max(1, budget - 1)
+            return step, step
+
+        with self.assertRaises(M.EnumerationError) as caught:
+            M.enumerate_staircase(1, 10, off_by_one, spot_checks=48, seed=1)
+        self.assertIn("asked for a budget of exactly", str(caught.exception))
+
+    def test_a_one_percent_stop_is_caught(self):
+        """The original bug: a bisection that lands NEAR the greatest realizable count."""
         realizable = sorted({100, 300, 305, 310, 500, 505, 900, 1500})
 
         def sloppy(budget):
             under = [value for value in realizable if value <= budget]
             if not under:
                 return None
-            # Returns a realizable value under budget, but NOT the greatest — exactly the 1 % stop.
-            return under[0] if len(under) > 1 and budget > 400 else under[-1]
+            step = under[0] if len(under) > 1 and budget > 400 else under[-1]
+            return step, step
 
-        with self.assertRaises(M.EnumerationError) as caught:
+        with self.assertRaises(M.EnumerationError):
             M.enumerate_staircase(100, 1500, sloppy, spot_checks=64, seed=7)
-        self.assertIn("greatest realizable count", str(caught.exception))
 
     def test_an_oracle_that_overshoots_its_budget_is_refused(self):
         with self.assertRaises(M.EnumerationError):
-            M.enumerate_staircase(100, 500, lambda budget: budget + 10)
+            M.enumerate_staircase(100, 500, lambda budget: (budget + 10, budget + 10))
 
     def test_the_output_limit_refuses_rather_than_filling_memory(self):
         realizable = set(range(100, 900))
         with self.assertRaises(M.EnumerationError) as caught:
-            M.enumerate_staircase(100, 899, self.exact_oracle(realizable), max_outputs=50)
-        self.assertIn("refusing to hold them all", str(caught.exception))
+            M.enumerate_staircase(100, 899, self.exact(realizable), max_outputs=50)
+        message = str(caught.exception)
+        self.assertIn("refusing to hold them all", message)
+        # The remediation must name a setting that EXISTS.
+        # The remediation must name a setting that EXISTS — it named `config.MAX_ENUMERATED_OUTPUTS`,
+        # which never has.
+        self.assertIn("max_enumerated_outputs", message)
+        self.assertIn("SEARCH_LIMITS", message)
+        self.assertNotIn("config.MAX_ENUMERATED_OUTPUTS", message)
+        self.assertIn("max_enumerated_outputs", CONFIG.SEARCH_LIMITS)
 
     def test_a_floor_only_staircase_terminates(self):
-        outputs, _ = M.enumerate_staircase(194, 1661, self.exact_oracle({194}))
+        outputs, _ = M.enumerate_staircase(194, 1661, self.exact({194}))
         self.assertEqual(outputs, [194])
+
+    def test_cleanup_that_removes_a_face_does_not_lose_the_candidate(self):
+        """The two count domains, kept apart.
+
+        The walk steps on the DECIMATOR's count; the cache is keyed by what SHIPS after cleanup.
+        They differ the moment cleanup dissolves a degenerate face, and the earlier code stepped on
+        one while looking candidates up by the other — a `KeyError`, or a silently dropped
+        candidate, on that day. Here cleanup takes a face off two of the four outputs.
+        """
+        realizable = {100, 250, 400, 900}
+        cleaned = {250: 249, 900: 898}
+        outputs, by_key = M.enumerate_staircase(
+            100, 900, self.exact(realizable, cleaned=cleaned), spot_checks=16, seed=5
+        )
+        self.assertEqual(outputs, [100, 249, 400, 898])
+        # Every key the search will index by must resolve — this is the KeyError, caught.
+        for key in outputs:
+            self.assertIn(key, by_key)
+        table = {key: 1.0 for key in outputs}
+        best = M.pareto_minimal(outputs, lambda tris, _t: {"lo_mm": table[tris],
+                                                          "up_mm": table[tris]}, 2.0)
+        self.assertEqual(best["up_mm"], 1.0)
 
 
 class ParetoSearchTests(unittest.TestCase):
@@ -504,11 +553,11 @@ class ParetoSearchTests(unittest.TestCase):
         bisection lands on 600, walks down, fails at 500 and stops, shipping 600 triangles and
         comparing the WRONG incumbent against the sparse-chain shed threshold. Nothing here is
         pre-supplied: the output set comes out of `enumerate_staircase` driving a synthetic
-        decimator, which is the seam the previous version of this test skipped over.
+        decimator, which is the seam the first version of this test skipped over.
         """
         table = {300: 5.0, 400: 12.0, 500: 11.0, 600: 6.0, 800: 4.0}
         outputs, _ = M.enumerate_staircase(
-            300, 800, StaircaseEnumerationTests.exact_oracle(set(table)), spot_checks=32, seed=3
+            300, 800, StaircaseEnumerationTests.exact(set(table)), spot_checks=32, seed=3
         )
         self.assertEqual(outputs, [300, 400, 500, 600, 800])
         best = M.pareto_minimal(outputs, self.brackets(table), 8.0)

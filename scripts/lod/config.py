@@ -224,20 +224,10 @@ RENDER_GATE = {
     # switch be allowed to look different" is neither: it is a taste call about the game's own
     # assets, of exactly the kind e1 was, and e1 was ratified by Yan rather than picked here.
     #
-    # THE MEASUREMENT THAT WOULD INFORM THAT RULING, from the reference asset (worst of three
-    # viewpoints, so each is the least favourable angle). These are the CURRENT numbers, taken with
-    # the isolated defect reference; an earlier set measured against a tilted CHILD is not comparable
-    # and has been removed rather than left lying around next to the decision it would misinform:
-    #
-    #     L1  855 tris at   56 m   score 0.486600   PASS
-    #     L2  583 tris at  127 m   score 0.612477
-    #     L3  316 tris at  474 m   score 1.447666
-    #     L4  194 tris at 1050 m   score 0.730782
-    #
-    # L3 is the one to look at: at 474 m the switch changes the image MORE than 20-degree broken
-    # normals do on the same geometry. Beyond a few hundred metres shading stops being what changes
-    # and silhouette — already proven sub-pixel — is the whole story, so a ratified rule probably
-    # wants a minimum resolvable footprint below which this gate abstains and says so.
+    # THE MEASUREMENT THAT WOULD INFORM THAT RULING is `RATIFICATION_EVIDENCE` below, which is a
+    # CONSTANT rather than a comment for a reason: transcribed into prose it went stale twice, and
+    # both times it sat next to the decision it was supposed to inform, reading as current. A test
+    # now compares it against the shipped manifest, so it cannot rot a third time.
     "defect_normal_deg": 20.0,
     "defect_fraction": 0.50,
     # Absolute floors, kept only as an escape hatch: a pair whose difference is under these passes
@@ -273,6 +263,31 @@ RENDER_GATE = {
 #: The route for (2), when it matters: decode the KTX2 to PNG with `basisu` and rebuild the material
 #: from the decoded images, or render through the runtime instead of Blender.
 RENDER_GATE_BLOCKING = False
+
+#: The measurements that would inform that ruling, from the reference asset — worst of three
+#: viewpoints, so each is the least favourable angle.
+#:
+#: A CONSTANT, NOT A COMMENT, because as prose it went stale twice: it kept quoting scores from a
+#: superseded defect reference and triangle counts from before a regeneration, sitting next to the
+#: decision it exists to inform and reading as current the whole time. Stale evidence beside a
+#: pending decision is worse than no evidence. `test_chain.py` compares every number here against
+#: the shipped manifest, so a regeneration that moves any of them fails until this is refreshed.
+#:
+#: L3 is the one to look at: at 501 m the switch changes the image MORE than 20-degree broken
+#: normals do on the same geometry. Beyond a few hundred metres shading stops being what changes and
+#: silhouette — already proven sub-pixel — is the whole story, so a ratified rule probably wants a
+#: minimum resolvable footprint below which this gate abstains and says so.
+RATIFICATION_EVIDENCE = {
+    "levels": (
+        # (level, tris, switch_m, defect_score, verdict)
+        (1, 855, 55.9, 0.486600, "PASS"),
+        (2, 581, 126.6, 0.619408, "FAIL"),
+        (3, 315, 501.0, 1.673924, "FAIL"),
+        (4, 194, 1049.9, 0.729534, "FAIL"),
+    ),
+    "enumerated_outputs": 736,
+    "skipped_rung": (3, 533, 581, 0.0826),  # rung, best tris, incumbent tris, shed fraction
+}
 
 
 # ── the assets ───────────────────────────────────────────────────────────────────────────────────
@@ -323,13 +338,16 @@ BLENDER_OVERRIDE_ENV = "OVERMATCH_LOD_ALLOW_BLENDER"
 #: human remembers to keep; this is the thing that actually changed. A manifest whose source digest
 #: does not match the tree was cut by code that is no longer here, whatever the version string says.
 #:
-#: `chain.py` IS DELIBERATELY ABSENT. It is the verifier, and hashing the checker into the thing it
-#: checks is circular: it would make every edit to a verification message demand a twelve-minute
-#: regeneration of geometry that could not possibly have changed, which is the kind of friction
-#: that gets a check disabled rather than kept. What chain.py could get wrong is caught directly
-#: instead — it re-derives every switch distance and compares against the recorded one, so a
-#: derivation that drifts from the generator fails verification numerically rather than by hash.
-GENERATOR_SOURCES = ("config.py", "measure.py", "generate.py", "render_gate.py")
+#: THE LINE IS "CAN THIS CHANGE WHAT A MANIFEST SAYS", not "is this the generator". `manifest.py`
+#: is in the list because it derives every switch distance and merges targeted regenerations — the
+#: generator calls into it. `chain.py` is out because it can only change how a manifest is CHECKED,
+#: and forcing a twelve-minute Blender run to reword a failure message is the kind of friction that
+#: gets a check switched off rather than kept.
+#:
+#: That line was drawn in the wrong place once: chain.py was excluded while the generator imported
+#: it and called its merge, so verifier logic really was participating in production and the
+#: exclusion was unsound. The fix was to split the module, not to keep arguing for the exclusion.
+GENERATOR_SOURCES = ("config.py", "measure.py", "generate.py", "render_gate.py", "manifest.py")
 
 
 def generator_digest():
@@ -355,7 +373,7 @@ SCHEMA_VERSION = 1
 #: EXHAUSTIVE IS A PROMISE ABOUT COMPLETENESS, NOT ABOUT COST. Every enumerated output stays
 #: resident for the whole chain so that a plateau costs one certification rather than many, which
 #: means geometry storage grows with the number of distinct outputs — and that grows with the
-#: asset. A 1 661-triangle shoe enumerates 263 outputs; something twenty times larger would not
+#: asset. A 1 661-triangle shoe enumerates ~700 outputs; something twenty times larger would not
 #: merely be slower, it would be quadratically hungrier, and the first anyone would know is a
 #: machine swapping. So the limits are declared, and passing one is a NAMED REFUSAL rather than a
 #: slow death: raising them is a decision someone makes on purpose, having read this.
@@ -363,9 +381,12 @@ SEARCH_LIMITS = {
     "max_enumerated_outputs": 4_000,
     "max_retained_tris": 4_000_000,
     "max_enumeration_seconds": 900.0,
-    # Random budgets drawn from the intervals the walk jumped over, each of which must land on an
-    # output already enumerated. This is what verifies the decimation oracle's contract on real
-    # geometry; it caught nothing only because it was added after the bug it would have caught.
+    # Random budgets drawn from the intervals the walk jumped over, each of which must return THAT
+    # INTERVAL'S incumbent. Together with the idempotence check over every enumerated output (see
+    # `measure._verify_oracle`) this is what holds the decimator to its contract on real geometry.
+    # Accepting mere membership in the output set — the first version of this guard — is unsound:
+    # an oracle that answers B-1 to everything passes any number of such probes while enumerating
+    # only half the staircase.
     "max_enumeration_spot_checks": 48,
     "spot_check_seed": 20260802,
 }

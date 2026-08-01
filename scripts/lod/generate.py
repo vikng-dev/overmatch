@@ -47,7 +47,7 @@ import bmesh  # noqa: E402
 import bpy  # noqa: E402
 
 import config as CONFIG  # noqa: E402
-import chain  # noqa: E402
+import manifest as MANIFEST  # noqa: E402
 import measure as M  # noqa: E402
 import render_gate  # noqa: E402
 
@@ -396,7 +396,13 @@ class Candidates:
         limits = CONFIG.SEARCH_LIMITS
         retained_tris = 0
 
-        def decimate_at(budget):
+        def probe(budget):
+            """(step_count, shipped_key) — the decimator's count, and the count that would SHIP.
+
+            Two numbers on purpose: the walk steps on the decimator's staircase, the cache is keyed
+            by the mesh that ships after cleanup. They are equal until the day cleanup dissolves a
+            face, and on that day interchanging them loses a candidate or raises `KeyError`.
+            """
             nonlocal retained_tris
             elapsed = time.time() - started
             if elapsed > limits["max_enumeration_seconds"]:
@@ -428,11 +434,11 @@ class Candidates:
                         f"for the whole chain, so this grows with the square of an asset's size. "
                         f"Refusing rather than swapping."
                     )
-            return reached
+            return reached, shipped_tris
 
         try:
-            self.outputs, _budgets = M.enumerate_staircase(
-                floor_tris, ceiling_tris, decimate_at,
+            self.outputs, _by_key = M.enumerate_staircase(
+                floor_tris, ceiling_tris, probe,
                 spot_checks=limits["max_enumeration_spot_checks"],
                 seed=limits["spot_check_seed"],
                 max_outputs=limits["max_enumerated_outputs"],
@@ -895,6 +901,8 @@ def build_chain(asset, root, run_render_gate, out_dir):
         "sliver_floor_m": floor_m,
         "termination": termination,
         "deviation_evaluations": candidates.evaluations,
+        "enumerated_outputs": len(candidates.outputs),
+        "decimations": candidates.decimations,
         "skipped_rungs": skipped,
         "levels": levels,
         "material": material.name,
@@ -902,7 +910,7 @@ def build_chain(asset, root, run_render_gate, out_dir):
     }, levels
 
 
-def merge_targeted(regenerated, root, only):
+def merge_targeted(regenerated, root, only, generator):
     """Fold a `--asset` run back into the committed manifest, or refuse. Returns the full list.
 
     The shape logic is `chain.merge_asset_entries` (testable without Blender); this half is only
@@ -919,10 +927,12 @@ def merge_targeted(regenerated, root, only):
             f"from. Run a full generation first.",
         )
     with open(manifest_path, encoding="utf-8") as handle:
-        existing = json.load(handle).get("assets", [])
+        previous = json.load(handle)
     try:
-        merged = chain.merge_asset_entries(
-            regenerated, existing, [asset["name"] for asset in CONFIG.ASSETS]
+        merged = MANIFEST.merge_asset_entries(
+            regenerated, previous.get("assets", []),
+            [asset["name"] for asset in CONFIG.ASSETS],
+            MANIFEST.asset_provenance(generator), previous.get("generator"),
         )
     except ValueError as exc:
         raise GenerationError("assets", str(exc)) from exc
@@ -990,7 +1000,9 @@ def main(argv):
         if not manifest["assets"]:
             raise GenerationError("assets", f"no asset matched {only!r}")
         if only:
-            manifest["assets"] = merge_targeted(manifest["assets"], root, only)
+            manifest["assets"] = merge_targeted(
+                manifest["assets"], root, only, manifest["generator"]
+            )
 
         # Publish only now: a chain that failed a gate leaves every tracked path at its last good
         # state rather than half-updated.

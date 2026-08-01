@@ -58,7 +58,7 @@ python3 scripts/tank/glb_ktx2.py verify --allow-pointer "$obj"
 # The scripts are taken from the pushed revision too: verifying a commit with a different tree's
 # rules would be the same category of mistake one level up. CI re-runs all of this after LFS
 # hydration, which is the backstop for `--no-verify`.
-echo "pre-push ▸ lod chain manifest (per pushed revision)"
+echo "pre-push ▸ lod chain manifest (verifier, per pushed revision)"
 lod_tmp=$(mktemp -d)
 trap 'rm -rf "$lod_tmp"' EXIT
 checked=0
@@ -81,6 +81,11 @@ printf '%s\n' "$refs" | while read -r local_ref local_sha remote_ref remote_sha;
         { printf '\033[31m  LOD verification failed for %s\033[0m\n' "$local_sha" >&2; exit 1; }
     checked=$((checked + 1))
 done || exit 1
+# The unit suites run ONCE, from the WORK TREE, and that is the honest scope of them: they are
+# tests of the code in front of you, not of each pushed revision. Running them per-revision would
+# mean the shipped-manifest cases checking this tree's manifest with another revision's verifier —
+# a comparison of two unrelated things. CI runs both suites on the checked-out commit, which is the
+# pushed one, and that is where per-revision test coverage actually lives.
 python3 scripts/lod/test_chain.py >/dev/null 2>&1 ||
     { printf '\033[31m  lod test_chain failed\033[0m — run: python3 scripts/lod/test_chain.py\n' >&2; exit 1; }
 python3 scripts/lod/test_refusals.py >/dev/null 2>&1 ||

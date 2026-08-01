@@ -464,65 +464,96 @@ class EnumerationError(Exception):
     """The decimator's realizable outputs could not be enumerated completely. Never degrade."""
 
 
-def enumerate_staircase(floor_tris, ceiling_tris, decimate_at, spot_checks=0, seed=0,
-                        max_outputs=None):
-    """Every triangle count the decimator can realize in [floor, ceiling], ascending.
+def enumerate_staircase(floor_tris, ceiling_tris, probe, spot_checks=0, seed=0, max_outputs=None):
+    """Every mesh the decimator can realize in [floor, ceiling]. Returns (shipped_keys, by_key).
 
-    `decimate_at(budget) -> tris or None` must return the GREATEST realizable count at or below
-    `budget`. Given that, walking `budget <- reached - 1` from the ceiling visits every realizable
-    output exactly once: nothing realizable lies in `(reached, budget]` by the oracle's contract, so
-    the jump skips only budgets that would produce a mesh already seen.
+    `probe(budget)` returns `(step_count, shipped_key)` or `None`:
 
-    THE ORACLE'S CONTRACT IS THE WHOLE ALGORITHM, so it is verified rather than trusted. The first
-    version of this walk sat on top of a bisection that stopped within 1 % of its budget — so
-    `reached` was merely NEAR the greatest realizable count, the jump stepped over real outputs, and
-    an "exhaustive" search silently was not. `spot_checks` re-probes random budgets drawn from the
-    skipped intervals and demands each map to an output already enumerated; a violation raises
-    rather than quietly shrinking the candidate set. That check would have caught the 1 % stop on
-    its first run.
+      * `step_count` is what the DECIMATOR produced, and it is the domain the walk steps in. Its
+        contract is `step_count = max{ realizable r : r <= budget }`.
+      * `shipped_key` identifies the mesh that would actually SHIP — after the cleanup pass, which
+        may dissolve a degenerate face and lower the count.
 
-    It takes an injected oracle so the walk can be tested against a synthetic staircase — including
-    one with a lower feasible island and one with a deliberately sloppy oracle — with no Blender.
+    THE TWO ARE DIFFERENT NUMBERS AND MUST NOT BE INTERCHANGED. An earlier version stepped on the
+    raw count, cached candidates under the cleaned count, and then looked candidates up by the raw
+    one: correct only for as long as cleanup never removed a face, and a `KeyError` or a silently
+    dropped candidate on the day it did. They are separate parameters here so the mistake cannot be
+    made by accident, and each check below runs in the domain where it means something.
+
+    THE ORACLE'S CONTRACT IS THE WHOLE ALGORITHM, so it is verified rather than trusted — twice
+    over, because the first attempt at verifying it was itself unsound:
+
+      * IDEMPOTENCE. For every realizable `r`, `probe(r)` must return `r`: `r <= r` and `r` is
+        realizable, so the greatest realizable count at or below `r` is `r` itself. This is the
+        check that catches an oracle which systematically under-reports — `f(B) = B - 1` walks to
+        [1,3,5,7,9] over 1..10 and passes any number of interval probes, because every answer it
+        gives IS a member of the set it built. Asking `probe(9) == 9` catches it immediately.
+      * INTERVAL INCUMBENCY. A budget inside a skipped interval must return THAT INTERVAL'S
+        incumbent, not merely some count already enumerated. Accepting mere membership was the
+        earlier unsound guard.
+
+    The oracle is injected so all of this can be tested against synthetic staircases — including
+    deliberately sloppy ones — without Blender.
     """
     rng = np.random.default_rng(seed)
-    outputs = {}
+    by_key = {}
+    incumbents = {}
     skipped = []
     budget = ceiling_tris
     while budget >= floor_tris:
-        reached = decimate_at(budget)
-        if reached is None:
+        answer = probe(budget)
+        if answer is None:
             break
-        if reached > budget:
+        step_count, shipped_key = answer
+        if step_count > budget:
             raise EnumerationError(
-                f"the decimation oracle returned {reached} for a budget of {budget} — it must "
+                f"the decimation oracle returned {step_count} for a budget of {budget} — it must "
                 f"return the greatest realizable count AT OR BELOW the budget"
             )
-        outputs.setdefault(reached, budget)
-        if max_outputs is not None and len(outputs) > max_outputs:
+        by_key.setdefault(shipped_key, step_count)
+        incumbents.setdefault(step_count, step_count)
+        if max_outputs is not None and len(by_key) > max_outputs:
             raise EnumerationError(
                 f"more than {max_outputs} realizable outputs below {ceiling_tris} triangles; "
-                f"refusing to hold them all. Raise config.MAX_ENUMERATED_OUTPUTS deliberately, "
-                f"having thought about the memory and the certification time it buys"
+                f"refusing to hold them all. Raise "
+                f"config.SEARCH_LIMITS['max_enumerated_outputs'] deliberately, having thought "
+                f"about the memory and the certification time it buys"
             )
-        if reached + 1 <= budget:
-            skipped.append((reached + 1, budget))
-        if reached <= floor_tris:
+        if step_count + 1 <= budget:
+            skipped.append((step_count + 1, budget, step_count))
+        if step_count <= floor_tris:
             break
-        budget = reached - 1
+        budget = step_count - 1
 
+    _verify_oracle(probe, sorted(incumbents), skipped, spot_checks, rng)
+    return sorted(by_key), by_key
+
+
+def _verify_oracle(probe, realizable, skipped, spot_checks, rng):
+    """Hold the decimation oracle to its contract on the geometry it just walked."""
+    for value in realizable:
+        answer = probe(value)
+        if answer is None or answer[0] != value:
+            got = "nothing" if answer is None else answer[0]
+            raise EnumerationError(
+                f"the oracle realizes {value} triangles, but asked for a budget of exactly {value} "
+                f"it returns {got} — it is not returning the greatest realizable count at or below "
+                f"its budget, so the walk's jumps stepped over outputs and the candidate set is "
+                f"incomplete. No level chosen from it is minimal."
+            )
     for _ in range(spot_checks):
         if not skipped:
             break
-        low, high = skipped[int(rng.integers(0, len(skipped)))]
-        probe = int(rng.integers(low, high + 1))
-        reached = decimate_at(probe)
-        if reached not in outputs:
+        low, high, incumbent = skipped[int(rng.integers(0, len(skipped)))]
+        budget = int(rng.integers(low, high + 1))
+        answer = probe(budget)
+        got = None if answer is None else answer[0]
+        if got != incumbent:
             raise EnumerationError(
-                f"budget {probe} realizes {reached} triangles, which the enumeration never found — "
-                f"the decimation oracle is not returning the greatest realizable count below its "
-                f"budget, so the candidate set is incomplete and no level below it is minimal"
+                f"budget {budget} realizes {got} triangles, but the walk skipped that interval "
+                f"having been told its incumbent was {incumbent} — the enumeration is missing "
+                f"whatever lies between them"
             )
-    return sorted(outputs), outputs
 
 
 def pareto_minimal(outputs, deviation_for, target_mm):

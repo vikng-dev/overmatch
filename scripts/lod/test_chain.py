@@ -37,41 +37,57 @@ def validity_record(tris, verts, origin_radius=0.1):
 
 
 def view_record(passed):
-    """One rendered view's statistics. `passed` decides whether the numbers SUPPORT a pass."""
+    """One rendered view's statistics, INTERNALLY CONSISTENT.
+
+    The score is computed from the three means exactly as the gate computes it, because the verifier
+    now re-derives it — a fixture carrying a score its own numbers do not support would be testing
+    nothing except that the fixture is wrong.
+    """
+    noise_mean, defect_mean = 0.0005, 0.0105
+    signal_mean = 0.001 if passed else 0.5
     signal = {
         "footprint_px": 900,
-        "mean_abs_diff": 0.001 if passed else 0.5,
+        "mean_abs_diff": signal_mean,
         "p99_abs_diff": 0.002, "max_abs_diff": 0.003,
         "frac_over": 0.0 if passed else 0.5,
         "silhouette_band_px": 120, "silhouette_band_frac": 0.1,
     }
-    reference = {
-        "footprint_px": 900, "mean_abs_diff": 0.0005, "p99_abs_diff": 0.001,
-        "max_abs_diff": 0.002, "frac_over": 0.0,
-        "silhouette_band_px": 120, "silhouette_band_frac": 0.1,
-    }
+
+    def reference(mean):
+        return {
+            "footprint_px": 900, "mean_abs_diff": mean, "p99_abs_diff": 0.001,
+            "max_abs_diff": 0.002, "frac_over": 0.0,
+            "silhouette_band_px": 120, "silhouette_band_frac": 0.1,
+        }
+
+    score = round(max(0.0, (signal_mean - noise_mean) / (defect_mean - noise_mean)), 6)
+    floor_ok = (
+        signal_mean <= CONFIG.RENDER_GATE["max_mean_abs_diff"]
+        and signal["frac_over"] <= CONFIG.RENDER_GATE["max_footprint_frac_over"]
+    )
     return {
         "signal": signal,
-        "noise_floor": dict(reference),
-        "defect_floor": dict(reference),
-        "defect_score": 0.1 if passed else 2.0,
-        "under_absolute_floor": passed,
-        "pass": passed,
+        "noise_floor": reference(noise_mean),
+        "defect_floor": reference(defect_mean),
+        "defect_score": score,
+        "under_absolute_floor": floor_ok,
+        "pass": score <= CONFIG.RENDER_GATE["defect_fraction"] or floor_ok,
     }
 
 
 def gate_record(passed=True, material="decoded from probe.glb"):
-    """A render-gate record whose recorded verdict FOLLOWS from its recorded numbers."""
+    """A render-gate record whose recorded verdict and summaries FOLLOW from its per-view numbers."""
+    views = {name: view_record(passed) for name, _e, _a in CONFIG.RENDER_GATE["views"]}
     return {
-        "pass": passed,
-        "worst_defect_score": 0.1 if passed else 2.0,
-        "worst_mean_abs_diff": 0.001 if passed else 0.5,
-        "worst_frac_over": 0.0 if passed else 0.5,
+        "pass": all(view["pass"] for view in views.values()),
+        "worst_defect_score": max(view["defect_score"] for view in views.values()),
+        "worst_mean_abs_diff": max(view["signal"]["mean_abs_diff"] for view in views.values()),
+        "worst_frac_over": max(view["signal"]["frac_over"] for view in views.values()),
         "distance_m": 90.0, "tile_px": CONFIG.RENDER_GATE["tile_px"],
         "supersample": CONFIG.RENDER_GATE["supersample"],
         "samples": CONFIG.RENDER_GATE["samples"], "tile_vfov_rad": 0.0284,
         "material_source": material,
-        "views": {name: view_record(passed) for name, _e, _a in CONFIG.RENDER_GATE["views"]},
+        "views": views,
         "thresholds": {
             "defect_fraction": CONFIG.RENDER_GATE["defect_fraction"],
             "max_mean_abs_diff": CONFIG.RENDER_GATE["max_mean_abs_diff"],
@@ -138,7 +154,7 @@ def synthetic_manifest():
                  "glb": "a/l1.glb", "glb_sha256": "b" * 64, "node": "Probe_LOD2",
                  "e_target_mm": 7.78, "shed_fraction_vs_parent": 0.6, "glb_bytes": 4096,
                  "dev_source_mm": dev1, "dev_source_mm_upper": dev1,
-                 "dev_source_bracket_mm": 0.01, "dev_source_to_level_mm": dev1,
+                 "dev_source_bracket_mm": 0.0, "dev_source_to_level_mm": dev1,
                  "dev_level_to_source_mm": dev1 - 0.5,
                  "pairwise_mm": pair1, "pairwise_mm_upper": pair1,
                  "switch_m": round(switch1, 4),
@@ -452,9 +468,9 @@ class SecondRoundMutantTests(unittest.TestCase):
     def test_a_verdict_that_does_not_follow_from_its_numbers_is_refused(self):
         """`pass: true` beside metrics that say otherwise is a contradiction, not a pass."""
         def contradict(manifest):
-            gate = manifest["assets"][0]["levels"][1]["render_gate"]
-            gate["views"] = {name: view_record(False) for name in gate["views"]}
-            gate["worst_defect_score"] = 2.0
+            level = manifest["assets"][0]["levels"][1]
+            level["render_gate"] = gate_record(False)      # every number says FAIL, consistently
+            level["render_gate"]["pass"] = True            # ...and the verdict says otherwise
 
         failures = self.failures_for(contradict)
         self.assertTrue(any("does not follow from the evidence" in f for f in failures), failures)
@@ -533,12 +549,21 @@ class SecondRoundMutantTests(unittest.TestCase):
 
 
 class TargetedRegenerationTests(unittest.TestCase):
-    """`--asset` must not replace a full manifest with a subset that cannot verify."""
+    """`--asset` must not replace a full manifest with a subset, nor re-attest what it carried."""
+
+    PROVENANCE = {
+        "version": "2.3.0", "sources_sha256": "a" * 64, "blender": "5.1.2",
+        "blender_build": "ec6e62d40fa9", "gltf_exporter": "5.1.20",
+    }
+
+    def generator(self, **overrides):
+        return dict(self.PROVENANCE, **overrides)
 
     def test_a_regenerated_asset_replaces_only_itself(self):
         existing = [{"name": "alpha", "levels": ["old"]}, {"name": "beta", "levels": ["old"]}]
         merged = chain.merge_asset_entries(
-            [{"name": "beta", "levels": ["new"]}], existing, ["alpha", "beta"]
+            [{"name": "beta", "levels": ["new"]}], existing, ["alpha", "beta"],
+            self.PROVENANCE, self.generator(),
         )
         self.assertEqual([e["name"] for e in merged], ["alpha", "beta"])
         self.assertEqual(merged[0]["levels"], ["old"])
@@ -546,13 +571,200 @@ class TargetedRegenerationTests(unittest.TestCase):
 
     def test_the_configured_order_is_restored(self):
         existing = [{"name": "beta"}, {"name": "alpha"}]
-        merged = chain.merge_asset_entries([], existing, ["alpha", "beta"])
+        merged = chain.merge_asset_entries(
+            [], existing, ["alpha", "beta"], self.PROVENANCE, self.generator()
+        )
         self.assertEqual([e["name"] for e in merged], ["alpha", "beta"])
 
     def test_an_asset_with_nothing_to_carry_over_is_refused(self):
         with self.assertRaises(ValueError) as caught:
-            chain.merge_asset_entries([{"name": "beta"}], [], ["alpha", "beta"])
+            chain.merge_asset_entries(
+                [{"name": "beta"}], [], ["alpha", "beta"], self.PROVENANCE, self.generator()
+            )
         self.assertIn("run a full generation", str(caught.exception).lower())
+
+    def test_carrying_an_entry_under_different_provenance_is_refused(self):
+        """The forged certificate: an old chain re-attested to today's toolchain by accident.
+
+        The manifest has ONE generator block, so anything carried into a manifest written today
+        wears today's version, source digest, Blender build and exporter — whatever it was actually
+        cut with. A carry-over is only honest when those already agree.
+        """
+        for field, value in (
+            ("version", "9.9.9"), ("sources_sha256", "b" * 64),
+            ("blender", "5.2.0"), ("blender_build", "cafebabe"), ("gltf_exporter", "6.0.0"),
+        ):
+            with self.subTest(field=field):
+                with self.assertRaises(ValueError) as caught:
+                    chain.merge_asset_entries(
+                        [{"name": "beta"}], [{"name": "alpha"}], ["alpha", "beta"],
+                        self.PROVENANCE, self.generator(**{field: value}),
+                    )
+                message = str(caught.exception)
+                self.assertIn("different toolchain", message)
+                self.assertIn(field, message)
+
+    def test_a_matching_provenance_carries_cleanly(self):
+        merged = chain.merge_asset_entries(
+            [{"name": "beta"}], [{"name": "alpha", "levels": ["old"]}], ["alpha", "beta"],
+            self.PROVENANCE, self.generator(),
+        )
+        self.assertEqual(merged[0]["levels"], ["old"])
+
+
+class RederivationSweepTests(unittest.TestCase):
+    """Every field this pipeline calls "checked" must be RE-DERIVED, and here is the proof.
+
+    The meta-test's earlier definition of "checked" was "named in a field list", which turned out to
+    mean "present and finite" — an adversarial review set all three `worst_*` summaries to -999 and
+    inverted a per-view verdict, and verification reported nothing. Presence is not checking.
+
+    So this sweep perturbs each re-derived field IN THE SHIPPED MANIFEST, one at a time, and demands
+    that verification notices. A field that survives its own mutation is not being checked, whatever
+    a list says about it.
+    """
+
+    def setUp(self):
+        self.root = CONFIG.repo_root()
+        path = os.path.join(self.root, CONFIG.MANIFEST_RELPATH)
+        if not os.path.isfile(path):
+            self.skipTest(f"{CONFIG.MANIFEST_RELPATH} has not been generated yet")
+        with open(path, encoding="utf-8") as handle:
+            self.text = handle.read()
+
+    def mutated(self, mutate):
+        manifest = json.loads(self.text)
+        mutate(manifest)
+        return chain.verify(manifest, chain.Tree(self.root))[0]
+
+    def assert_caught(self, description, mutate):
+        failures = self.mutated(mutate)
+        self.assertTrue(failures, f"{description} was not caught by verification")
+
+    def first_gate(self, manifest):
+        return manifest["assets"][0]["levels"][1]["render_gate"]
+
+    def test_each_worst_summary_is_rederived(self):
+        for key in ("worst_mean_abs_diff", "worst_frac_over", "worst_defect_score"):
+            with self.subTest(key=key):
+                self.assert_caught(
+                    f"{key} = -999",
+                    lambda m, k=key: self.first_gate(m).__setitem__(k, -999),
+                )
+
+    def test_an_inverted_per_view_verdict_is_rederived(self):
+        for name, _e, _a in CONFIG.RENDER_GATE["views"]:
+            with self.subTest(view=name):
+                def invert(manifest, view_name=name):
+                    view = self.first_gate(manifest)["views"][view_name]
+                    view["pass"] = not view["pass"]
+
+                self.assert_caught(f"inverted pass on {name}", invert)
+
+    def test_a_tampered_defect_score_is_rederived_from_its_own_means(self):
+        def tamper(manifest):
+            self.first_gate(manifest)["views"]["three_quarter"]["defect_score"] = 0.0
+
+        self.assert_caught("defect_score forced to 0", tamper)
+
+    def test_a_tampered_signal_mean_breaks_its_own_score(self):
+        def tamper(manifest):
+            view = self.first_gate(manifest)["views"]["three_quarter"]
+            view["signal"]["mean_abs_diff"] = view["signal"]["mean_abs_diff"] * 3.0 + 0.01
+
+        self.assert_caught("signal mean moved without its score", tamper)
+
+    def test_a_tampered_under_absolute_floor_is_rederived(self):
+        def tamper(manifest):
+            view = self.first_gate(manifest)["views"]["three_quarter"]
+            view["under_absolute_floor"] = not view["under_absolute_floor"]
+
+        self.assert_caught("inverted under_absolute_floor", tamper)
+
+    def test_every_recorded_switch_distance_is_rederived(self):
+        for index in range(1, 5):
+            with self.subTest(level=index):
+                self.assert_caught(
+                    f"L{index} switch_m + 10",
+                    lambda m, i=index: m["assets"][0]["levels"][i].__setitem__(
+                        "switch_m", m["assets"][0]["levels"][i]["switch_m"] + 10.0
+                    ),
+                )
+
+    def test_every_origin_radius_feeds_a_rederived_switch(self):
+        """The slack is an input to the derivation, so moving it must break the recorded distance."""
+        self.assert_caught(
+            "L1 origin radius + 1 m",
+            lambda m: m["assets"][0]["levels"][1]["validity"].__setitem__("origin_radius_m", 1.4),
+        )
+
+    def test_inflating_any_deviation_number_is_caught(self):
+        """Every recorded deviation is pinned AGAINST INFLATION by the others.
+
+        Raise any one of them and something has to give: the two directions stop summing to their
+        maximum, the bracket stops being upper-minus-lower, the rung target is exceeded, or the
+        derived switch distance moves. This is the direction that matters for a certificate — a
+        level claiming a bigger lie than it tells is the shape of a forged bound.
+        """
+        for index in range(1, 5):
+            for key in ("dev_source_mm", "dev_source_mm_upper", "dev_source_bracket_mm",
+                        "dev_source_to_level_mm", "dev_level_to_source_mm", "pairwise_mm_upper"):
+                with self.subTest(level=index, key=key):
+                    self.assert_caught(
+                        f"L{index} {key} doubled",
+                        lambda m, i=index, k=key: m["assets"][0]["levels"][i].__setitem__(
+                            k, m["assets"][0]["levels"][i][k] * 2.0 + 1.0
+                        ),
+                    )
+
+    def test_lowering_the_number_that_drives_each_switch_is_caught(self):
+        """The switch is `max(source-relative, pairwise)`; whichever WINS is pinned downward too.
+
+        THE HONEST LIMIT, stated rather than glossed: the LOSING one is not. Halving a deviation
+        that is not the maximum changes no derivation, because nothing downstream reads it — it is a
+        recorded MEASUREMENT, and a manifest cannot re-derive a measurement from itself. What pins
+        those is the level's glb hash plus regeneration: the bytes are fixed, and re-running the
+        pipeline re-measures them. `test_inflating_any_deviation_number_is_caught` covers the
+        direction a forged certificate would actually move in.
+        """
+        for index in range(1, 5):
+            level = json.loads(self.text)["assets"][0]["levels"][index]
+            driver = (
+                "dev_source_mm_upper"
+                if level["dev_source_mm_upper"] >= level["pairwise_mm_upper"]
+                else "pairwise_mm_upper"
+            )
+            with self.subTest(level=index, driver=driver):
+                self.assert_caught(
+                    f"L{index} {driver} halved",
+                    lambda m, i=index, k=driver: m["assets"][0]["levels"][i].__setitem__(
+                        k, m["assets"][0]["levels"][i][k] * 0.5
+                    ),
+                )
+
+    def test_every_level_hash_is_compared_against_the_bytes(self):
+        for index in range(0, 5):
+            with self.subTest(level=index):
+                self.assert_caught(
+                    f"L{index} glb_sha256 rewritten",
+                    lambda m, i=index: m["assets"][0]["levels"][i].__setitem__(
+                        "glb_sha256", "f" * 64
+                    ),
+                )
+
+    def test_every_recorded_defect_counter_is_compared_against_its_limit(self):
+        for key in ("duplicate_faces", "nonfinite_attrs", "orientation_flips",
+                    "nonmanifold_edges", "tangent_default_faces", "tangent_default_verts",
+                    "slivers_below_floor"):
+            with self.subTest(key=key):
+                self.assert_caught(
+                    f"{key} = 3 on L1",
+                    lambda m, k=key: m["assets"][0]["levels"][1]["validity"].__setitem__(k, 3),
+                )
+
+    def test_the_unmutated_manifest_still_verifies(self):
+        """The control: without it, a sweep that fails everything would look like a pass."""
+        self.assertEqual(chain.verify(json.loads(self.text), chain.Tree(self.root))[0], [])
 
 
 class ShippedManifestTests(unittest.TestCase):
@@ -653,6 +865,7 @@ class ShippedManifestTests(unittest.TestCase):
         )
         checked |= {field for field, _c, _n in chain.GENERATOR_PINNED_FIELDS}
         checked |= {"schema_version", "version", "topology_floor_tris"}
+        checked |= set(chain.PINNED_EVIDENCE_FIELDS)
         checked |= set(CONFIG.GATES) | set(CONFIG.RENDER_GATE) | set(CONFIG.SEARCH_LIMITS)
         # The view NAMES are dict keys inside every gate record, and they are checked: the set of
         # them is compared against the configured viewpoints, so a missing or invented view fails.
@@ -676,6 +889,34 @@ class ShippedManifestTests(unittest.TestCase):
             f"these manifest fields are neither checked nor declared informational: "
             f"{unclassified}. Add each to a field list in chain.py or to INFORMATIONAL_FIELDS.",
         )
+
+    def test_the_ratification_evidence_matches_the_shipped_manifest(self):
+        """The pin on `config.RATIFICATION_EVIDENCE`, which went stale twice as prose.
+
+        Numbers quoted beside a pending decision have to BE the numbers, and a comment cannot be
+        held to that. This is what stops a regeneration from silently leaving the evidence Yan would
+        rule on describing a corpus that no longer exists.
+        """
+        asset = self.manifest["assets"][0]
+        levels = {level["level"]: level for level in asset["levels"]}
+        for index, tris, switch_m, score, verdict in CONFIG.RATIFICATION_EVIDENCE["levels"]:
+            level = levels[index]
+            self.assertEqual(level["tris"], tris, f"L{index} triangle count")
+            self.assertAlmostEqual(level["switch_m"], switch_m, places=1, msg=f"L{index} switch")
+            gate = level["render_gate"]
+            self.assertAlmostEqual(
+                gate["worst_defect_score"], score, places=6, msg=f"L{index} defect score"
+            )
+            self.assertEqual("PASS" if gate["pass"] else "FAIL", verdict, f"L{index} verdict")
+        self.assertEqual(
+            asset["enumerated_outputs"], CONFIG.RATIFICATION_EVIDENCE["enumerated_outputs"]
+        )
+        rung, best_tris, incumbent, shed = CONFIG.RATIFICATION_EVIDENCE["skipped_rung"]
+        skipped = {entry["rung"]: entry for entry in asset["skipped_rungs"]}
+        self.assertIn(rung, skipped)
+        self.assertEqual(skipped[rung]["best_tris"], best_tris)
+        self.assertAlmostEqual(skipped[rung]["shed_fraction"], shed, places=4)
+        self.assertEqual(levels[2]["tris"], incumbent, "the rung the skip was measured against")
 
     def test_the_right_wall_records_where_it_came_from(self):
         source = self.manifest["ladder"]["right_wall_source"]

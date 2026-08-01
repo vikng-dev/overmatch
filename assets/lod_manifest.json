@@ -4,7 +4,7 @@
   "generator": {
     "script": "scripts/lod/generate.py",
     "version": "2.2.0",
-    "sources_sha256": "08b2fbb7c4673ae186ba9f4da08b0098ec3c6f665601dd8fc6c1bc6ad373a707",
+    "sources_sha256": "231ed1a9d6d96ab3a9ec577eb9bfbf55e85ae9db9f3179095fc88c965120b7b7",
     "blender": "5.1.2",
     "blender_build": "ec6e62d40fa9",
     "gltf_exporter": "5.1.20"
@@ -125,6 +125,8 @@
       "sliver_floor_m": 1.180772072582993e-06,
       "termination": "topology_floor",
       "deviation_evaluations": 348,
+      "enumerated_outputs": 736,
+      "decimations": 1520,
       "skipped_rungs": [
         {
           "rung": 3,
