@@ -460,6 +460,71 @@ def _one_way(src, dst, tol, max_nodes, target=None, rel_tol=0.0):
     return branch_and_bound(seeds, distance_at, tol, max_nodes, target, rel_tol)
 
 
+class EnumerationError(Exception):
+    """The decimator's realizable outputs could not be enumerated completely. Never degrade."""
+
+
+def enumerate_staircase(floor_tris, ceiling_tris, decimate_at, spot_checks=0, seed=0,
+                        max_outputs=None):
+    """Every triangle count the decimator can realize in [floor, ceiling], ascending.
+
+    `decimate_at(budget) -> tris or None` must return the GREATEST realizable count at or below
+    `budget`. Given that, walking `budget <- reached - 1` from the ceiling visits every realizable
+    output exactly once: nothing realizable lies in `(reached, budget]` by the oracle's contract, so
+    the jump skips only budgets that would produce a mesh already seen.
+
+    THE ORACLE'S CONTRACT IS THE WHOLE ALGORITHM, so it is verified rather than trusted. The first
+    version of this walk sat on top of a bisection that stopped within 1 % of its budget — so
+    `reached` was merely NEAR the greatest realizable count, the jump stepped over real outputs, and
+    an "exhaustive" search silently was not. `spot_checks` re-probes random budgets drawn from the
+    skipped intervals and demands each map to an output already enumerated; a violation raises
+    rather than quietly shrinking the candidate set. That check would have caught the 1 % stop on
+    its first run.
+
+    It takes an injected oracle so the walk can be tested against a synthetic staircase — including
+    one with a lower feasible island and one with a deliberately sloppy oracle — with no Blender.
+    """
+    rng = np.random.default_rng(seed)
+    outputs = {}
+    skipped = []
+    budget = ceiling_tris
+    while budget >= floor_tris:
+        reached = decimate_at(budget)
+        if reached is None:
+            break
+        if reached > budget:
+            raise EnumerationError(
+                f"the decimation oracle returned {reached} for a budget of {budget} — it must "
+                f"return the greatest realizable count AT OR BELOW the budget"
+            )
+        outputs.setdefault(reached, budget)
+        if max_outputs is not None and len(outputs) > max_outputs:
+            raise EnumerationError(
+                f"more than {max_outputs} realizable outputs below {ceiling_tris} triangles; "
+                f"refusing to hold them all. Raise config.MAX_ENUMERATED_OUTPUTS deliberately, "
+                f"having thought about the memory and the certification time it buys"
+            )
+        if reached + 1 <= budget:
+            skipped.append((reached + 1, budget))
+        if reached <= floor_tris:
+            break
+        budget = reached - 1
+
+    for _ in range(spot_checks):
+        if not skipped:
+            break
+        low, high = skipped[int(rng.integers(0, len(skipped)))]
+        probe = int(rng.integers(low, high + 1))
+        reached = decimate_at(probe)
+        if reached not in outputs:
+            raise EnumerationError(
+                f"budget {probe} realizes {reached} triangles, which the enumeration never found — "
+                f"the decimation oracle is not returning the greatest realizable count below its "
+                f"budget, so the candidate set is incomplete and no level below it is minimal"
+            )
+    return sorted(outputs), outputs
+
+
 def pareto_minimal(outputs, deviation_for, target_mm):
     """The FEWEST-triangle realized output whose certified upper bound clears `target_mm`.
 

@@ -41,6 +41,7 @@ import hashlib
 import json
 import math
 import os
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -59,11 +60,64 @@ def switch_distance_m(deviation_mm, radius_m, view):
     return (deviation_mm / 1000.0) * float(view["height_px"]) / denominator + radius_m
 
 
-def load(root=None, path=None):
+class Tree:
+    """Where verification reads its files from: the work tree, or a git revision.
+
+    THE HOOK NEEDS THE SECOND ONE. A pre-push hook that verifies the work tree answers a question
+    nobody asked — a dirty-but-coherent tree can bless a completely different commit, and pushing a
+    branch that is not `HEAD`, or a tag, or several refs at once, was not covered at all. Reading
+    the manifest and the assets out of the REVISION BEING PUSHED is the only version of this check
+    that means what its name says.
+
+    LFS pointers are the reason it can be done cheaply. A tracked glb in a commit is a pointer file
+    whose `oid sha256:` IS the sha256 of the real bytes — the same number the manifest records — so
+    the whole hash comparison works without hydrating a single object.
+    """
+
+    def __init__(self, root, rev=None):
+        self.root = root
+        self.rev = rev
+
+    def read(self, relpath):
+        if self.rev is None:
+            with open(os.path.join(self.root, relpath), "rb") as handle:
+                return handle.read()
+        result = subprocess.run(
+            ["git", "show", f"{self.rev}:{relpath}"],
+            cwd=self.root, capture_output=True, check=False,
+        )
+        if result.returncode != 0:
+            raise FileNotFoundError(f"{relpath} is not in {self.rev}")
+        return result.stdout
+
+    def exists(self, relpath):
+        try:
+            self.read(relpath)
+        except FileNotFoundError:
+            return False
+        return True
+
+    def digest(self, relpath):
+        """sha256 of the file's real content, resolving an LFS pointer to its recorded oid."""
+        blob = self.read(relpath)
+        if blob.startswith(b"version https://git-lfs.github.com/spec/v1"):
+            for line in blob.splitlines():
+                if line.startswith(b"oid sha256:"):
+                    return line.split(b":", 1)[1].decode().strip()
+            raise ValueError(f"{relpath} is an LFS pointer with no sha256 oid")
+        return hashlib.sha256(blob).hexdigest()
+
+    def label(self):
+        return f"{self.rev}:{CONFIG.MANIFEST_RELPATH}" if self.rev else CONFIG.MANIFEST_RELPATH
+
+
+def load(root=None, path=None, rev=None):
     root = root or CONFIG.repo_root()
-    path = path or os.path.join(root, CONFIG.MANIFEST_RELPATH)
-    with open(path, encoding="utf-8") as handle:
-        return json.load(handle), root, path
+    tree = Tree(root, rev)
+    if rev is None and path is not None:
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle), root, tree
+    return json.loads(tree.read(CONFIG.MANIFEST_RELPATH).decode()), root, tree
 
 
 def derive(manifest, view=None):
@@ -142,7 +196,20 @@ def sha256_file(path):
 LEVEL_NUMERIC_FIELDS = (
     "tris", "verts", "e_target_mm", "dev_source_mm", "dev_source_mm_upper",
     "pairwise_mm", "pairwise_mm_upper", "switch_m", "shed_fraction_vs_parent",
+    "switch_from_source_dev_m", "switch_from_pairwise_m", "dev_source_bracket_mm",
+    "dev_source_to_level_mm", "dev_level_to_source_mm", "glb_bytes",
 )
+
+#: The same, for the SOURCE level. It has its own shape, and leaving it out meant L0 could carry a
+#: NaN triangle count through verification untouched — the one level every other level's deviation
+#: is measured against.
+SOURCE_LEVEL_NUMERIC_FIELDS = (
+    "tris", "verts", "e_target_mm", "dev_source_mm", "dev_source_mm_upper", "switch_m",
+    "shipped_dev_from_source_mm", "blender_source_verts",
+)
+
+#: Numerics on the asset's source record.
+SOURCE_NUMERIC_FIELDS = ("tris", "verts", "radius_m")
 
 #: Validity counters every level must carry, measured on ITS OWN decoded shipped bytes. Absence is
 #: a failure: "no record" and "a record of zero defects" are not the same statement, and only the
@@ -150,26 +217,189 @@ LEVEL_NUMERIC_FIELDS = (
 LEVEL_VALIDITY_FIELDS = (
     "tris", "verts", "components", "duplicate_faces", "nonfinite_attrs", "orientation_flips",
     "nonmanifold_edges", "slivers_below_floor", "tangent_default_faces", "tangent_default_verts",
-    "min_altitude_m", "origin_radius_m",
+    "min_altitude_m", "origin_radius_m", "min_altitude_floor_m", "min_tri_area_mm2",
+    "boundary_edges",
 )
 
-#: Render-gate fields required on every generated level.
-GATE_FIELDS = ("pass", "worst_defect_score", "worst_mean_abs_diff", "views", "thresholds")
+#: Render-gate fields required on every generated level, and which of them must be finite numbers.
+GATE_FIELDS = (
+    "pass", "worst_defect_score", "worst_mean_abs_diff", "worst_frac_over", "views", "thresholds",
+    "distance_m", "material_source", "tile_px", "supersample", "samples", "tile_vfov_rad",
+)
+GATE_NUMERIC_FIELDS = (
+    "worst_defect_score", "worst_mean_abs_diff", "worst_frac_over", "distance_m",
+    "tile_px", "supersample", "samples", "tile_vfov_rad",
+)
+
+#: Per-view statistics inside a gate record, and the numerics inside those.
+GATE_VIEW_FIELDS = ("signal", "noise_floor", "defect_floor", "defect_score", "pass")
+GATE_VIEW_NUMERIC_FIELDS = (
+    "footprint_px", "mean_abs_diff", "p99_abs_diff", "max_abs_diff", "frac_over",
+    "silhouette_band_px", "silhouette_band_frac",
+)
+
+#: Generator provenance that must be present AND must match this tree.
+GENERATOR_PINNED_FIELDS = (
+    ("blender", "EXPECTED_BLENDER", lambda v: v.split()[0]),
+    ("blender_build", "EXPECTED_BLENDER_BUILD", lambda v: v),
+    ("gltf_exporter", "EXPECTED_GLTF_EXPORTER", lambda v: v),
+)
+
+#: Fields recorded for a HUMAN and deliberately not compared against anything.
+#:
+#: THE RULE THIS ENFORCES: every field the manifest records is either CHECKED or listed here. There
+#: is no third state. `test_chain.py` walks the shipped manifest and fails on any key that is in
+#: neither set, so a field added later cannot quietly become decoration that looks like evidence —
+#: which is what `schema_version`, `defect_fraction` and the whole render record had become.
+INFORMATIONAL_FIELDS = frozenset({
+    "schema", "script", "right_wall_source", "provenance", "name", "note", "reason",
+    "render_gate_unratified_note", "identity_proof", "termination", "role", "node", "glb",
+    "object", "blend", "bbox_mm", "material", "render_material_source", "evaluated_digest",
+    "skipped_rungs", "rung", "level", "parent_level", "e_target_mm", "best_tris",
+    "shed_fraction", "floor_tris", "cleanup", "faces_before", "faces_after", "dissolve_dist_m",
+    "normal_diagnostic_deg", "max_deg", "p99_deg", "p95_deg", "backface_corr_frac", "samples",
+    "shipped_matches_source", "deviation_evaluations", "decimations", "reproducible",
+    "under_absolute_floor", "label", "sliver_floor_m", "topology_floor_tris",
+    "blend_sha256", "sources_sha256", "glb_sha256", "right_wall_m", "reference_view",
+    "vfov_rad", "height_px", "budget_px", "e1_mm", "octave", "skip_fraction", "max_rungs",
+    "numeric", "render", "render_views", "render_gate_blocking", "generator", "ladder", "gates",
+    "assets", "levels", "source", "validity", "render_gate", "views", "thresholds", "signal",
+    "noise_floor", "defect_floor", "search_limits",
+})
 
 
 def _finite(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
+def _require_numbers(record, fields, label, what, failures):
+    """Every named field must be present AND finite. Returns False on any violation."""
+    ok = True
+    for key in fields:
+        if key not in record:
+            failures.append(f"{label}: {what} has no {key!r}")
+            ok = False
+        elif not _finite(record[key]):
+            failures.append(f"{label}: {what} {key!r} is {record[key]!r}, not a finite number")
+            ok = False
+    return ok
+
+
+def _check_gate_record(gate, label, failures):
+    """A render-gate record, checked as EVIDENCE rather than as a field list.
+
+    Presence was not enough and the mutants proved it: a record whose every metric was NaN, or whose
+    per-level `defect_fraction` had been rewritten to 999, still carried `pass: true` and verified
+    clean. So the thresholds must match the tree, every metric must be a real number, and the
+    verdict must RE-DERIVE from the metrics — a recorded pass that the recorded numbers do not
+    support is a contradiction, and contradictions are exactly what a manifest is for catching.
+    """
+    ok = True
+    for key in GATE_FIELDS:
+        if key not in gate:
+            failures.append(f"{label}: render-gate record has no {key!r}")
+            ok = False
+    if not ok:
+        return False
+    if not isinstance(gate["pass"], bool):
+        failures.append(f"{label}: render-gate 'pass' is {gate['pass']!r}, not a boolean")
+        ok = False
+    ok = _require_numbers(gate, GATE_NUMERIC_FIELDS, label, "render gate", failures) and ok
+
+    thresholds = gate.get("thresholds") or {}
+    for key in ("defect_fraction", "max_mean_abs_diff", "max_footprint_frac_over",
+                "over_threshold"):
+        if key not in thresholds:
+            failures.append(f"{label}: render-gate thresholds have no {key!r}")
+            ok = False
+        elif thresholds[key] != CONFIG.RENDER_GATE[key]:
+            failures.append(
+                f"{label}: render gate was judged against {key}={thresholds[key]!r}, the tree "
+                f"declares {CONFIG.RENDER_GATE[key]!r}"
+            )
+            ok = False
+
+    views = gate.get("views") or {}
+    if not views:
+        failures.append(f"{label}: render gate recorded no views")
+        return False
+    expected_views = {name for name, _e, _a in CONFIG.RENDER_GATE["views"]}
+    if set(views) != expected_views:
+        failures.append(
+            f"{label}: render gate covered {sorted(views)}, config declares "
+            f"{sorted(expected_views)}"
+        )
+        ok = False
+    for view_name, view in views.items():
+        view_label = f"{label} [{view_name}]"
+        for key in GATE_VIEW_FIELDS:
+            if key not in view:
+                failures.append(f"{view_label}: view record has no {key!r}")
+                ok = False
+        if not ok:
+            continue
+        if not _finite(view.get("defect_score")):
+            failures.append(f"{view_label}: defect_score is not a finite number")
+            ok = False
+        for part in ("signal", "noise_floor", "defect_floor"):
+            ok = _require_numbers(
+                view.get(part) or {}, GATE_VIEW_NUMERIC_FIELDS, view_label, part, failures
+            ) and ok
+        if ok and view["signal"]["footprint_px"] <= 0:
+            failures.append(
+                f"{view_label}: an empty footprint — the gate never saw the asset, which is a "
+                f"failure and not a pass"
+            )
+            ok = False
+
+    if not ok:
+        return False
+
+    # THE VERDICT MUST RE-DERIVE FROM THE METRICS.
+    limit = CONFIG.RENDER_GATE["defect_fraction"]
+    derived = True
+    for view_name, view in views.items():
+        signal = view["signal"]
+        floor_ok = (
+            signal["mean_abs_diff"] <= CONFIG.RENDER_GATE["max_mean_abs_diff"]
+            and signal["frac_over"] <= CONFIG.RENDER_GATE["max_footprint_frac_over"]
+        )
+        if not (signal["footprint_px"] > 0 and (view["defect_score"] <= limit or floor_ok)):
+            derived = False
+    if derived != gate["pass"]:
+        failures.append(
+            f"{label}: render gate records pass={gate['pass']} but its own numbers re-derive to "
+            f"{derived} — the verdict does not follow from the evidence beside it"
+        )
+        return False
+
+    # THE PRECONDITION ON BLOCKING, made mechanical. A gate judged under fallback materials must
+    # not be allowed to block: the number would be measured with the wrong textures.
+    if CONFIG.RENDER_GATE_BLOCKING and str(gate["material_source"]).startswith("FELL BACK"):
+        failures.append(
+            f"{label}: RENDER_GATE_BLOCKING is on, but this level was judged under a FALLBACK "
+            f"material ({gate['material_source']}). Blocking on a number measured with the wrong "
+            f"textures certifies the wrong thing — fix the material path first (see "
+            f"config.RENDER_GATE_BLOCKING)"
+        )
+        return False
+    return True
+
+
 def _check_schema(manifest, failures):
     """Structure before semantics: everything below assumes these fields exist and are numbers.
 
-    THIS FUNCTION EXISTS BECAUSE THE VERIFIER PASSED FOUR MUTANTS. Removing every asset, every
-    `glb_sha256`, every `validity` record, and replacing every deviation with NaN each produced a
-    clean verification, because the checks were all of the form "if the field is here and wrong,
-    complain". A gate that only inspects what it is given certifies nothing about what it is not.
-    So: the shape is required first, and every requirement below is a positive assertion that a
-    field EXISTS, is FINITE, and matches the configuration in this tree.
+    THIS FUNCTION EXISTS BECAUSE THE VERIFIER PASSED MUTANTS — twice. First round: every asset
+    removed, every hash removed, every validity record removed, every number NaN. Second round,
+    after "strict schema validation" was claimed: `schema_version = 999`, L0's triangle count NaN,
+    render metrics NaN under `pass: true`, a per-level `defect_fraction` of 999, and provenance
+    fields deleted wholesale. Each verified clean.
+
+    The lesson both rounds teach is the same one: a check that only inspects what it is handed
+    certifies nothing about what it is not, and a field that is recorded but never compared is
+    decoration that reads as evidence. So the rule this file now enforces is that EVERY recorded
+    field is either checked here or named in `INFORMATIONAL_FIELDS`, with no third state, and
+    `test_chain.py` walks the shipped manifest to prove there is no field in neither set.
     """
     for key in ("schema", "schema_version", "generator", "ladder", "gates", "assets"):
         if key not in manifest:
@@ -177,6 +407,12 @@ def _check_schema(manifest, failures):
             return False
     if manifest["schema"] != "overmatch.lod.manifest":
         failures.append(f"unknown schema {manifest['schema']!r}")
+        return False
+    if manifest["schema_version"] != CONFIG.SCHEMA_VERSION:
+        failures.append(
+            f"manifest schema_version is {manifest['schema_version']!r}, this tree reads "
+            f"{CONFIG.SCHEMA_VERSION} — a manifest in a shape this code does not understand"
+        )
         return False
 
     declared = [asset["name"] for asset in CONFIG.ASSETS]
@@ -195,6 +431,14 @@ def _check_schema(manifest, failures):
             if key not in asset:
                 failures.append(f"{name}: asset record has no {key!r}")
                 ok = False
+        if not ok:
+            continue
+        ok = _require_numbers(
+            asset["source"], SOURCE_NUMERIC_FIELDS, name, "source record", failures
+        ) and ok
+        if not _finite(asset["topology_floor_tris"]):
+            failures.append(f"{name}: topology_floor_tris is not a finite number")
+            ok = False
         levels = asset.get("levels") or []
         if len(levels) < 2:
             failures.append(
@@ -215,25 +459,23 @@ def _check_schema(manifest, failures):
                     failures.append(f"{label}: no {key!r} — nothing to verify against")
                     ok = False
             validity = level.get("validity") or {}
-            for key in LEVEL_VALIDITY_FIELDS:
-                if key not in validity:
-                    failures.append(f"{label}: validity record has no {key!r}")
-                    ok = False
-                elif not _finite(validity[key]):
-                    failures.append(f"{label}: validity {key!r} is {validity[key]!r}, not a number")
-                    ok = False
+            ok = _require_numbers(
+                validity, LEVEL_VALIDITY_FIELDS, label, "validity record", failures
+            ) and ok
             if index == 0:
+                # L0's own numerics were omitted entirely, so the ONE level every deviation in the
+                # chain is measured against could carry a NaN triangle count through untouched.
+                ok = _require_numbers(
+                    level, SOURCE_LEVEL_NUMERIC_FIELDS, label, "source level", failures
+                ) and ok
+                if not level.get("identity_proof"):
+                    failures.append(f"{label}: no identity proof against the source")
+                    ok = False
                 continue
             if level.get("role") != "generated":
                 failures.append(f"{label}: role is {level.get('role')!r}, expected 'generated'")
                 ok = False
-            for key in LEVEL_NUMERIC_FIELDS:
-                if key not in level:
-                    failures.append(f"{label}: no {key!r}")
-                    ok = False
-                elif not _finite(level[key]):
-                    failures.append(f"{label}: {key!r} is {level[key]!r}, not a finite number")
-                    ok = False
+            ok = _require_numbers(level, LEVEL_NUMERIC_FIELDS, label, "level", failures) and ok
             gate = level.get("render_gate")
             if gate is None:
                 failures.append(
@@ -242,13 +484,7 @@ def _check_schema(manifest, failures):
                 )
                 ok = False
             else:
-                for key in GATE_FIELDS:
-                    if key not in gate:
-                        failures.append(f"{label}: render-gate record has no {key!r}")
-                        ok = False
-                if not gate.get("views"):
-                    failures.append(f"{label}: render gate recorded no views")
-                    ok = False
+                ok = _check_gate_record(gate, label, failures) and ok
     return ok
 
 
@@ -273,6 +509,20 @@ def _check_config_match(manifest, failures):
             "the generator's sources have changed since this manifest was cut — the version "
             "string can stay the same while the algorithm moves, which is what this catches"
         )
+    # THE BUILD, NOT JUST THE VERSION. Two Blenders can both say 5.1.2 and be different builds, and
+    # the glTF exporter is an add-on that moves on its own schedule and decides the bytes. Both were
+    # recorded and neither was ever compared, which made them decoration. Double generation inside
+    # one process cannot see a cross-build difference either, so this is the only place it is caught.
+    for field, constant, normalise in GENERATOR_PINNED_FIELDS:
+        recorded = generator.get(field)
+        expected = getattr(CONFIG, constant)
+        if not recorded:
+            failures.append(f"manifest records no {field!r} — toolchain provenance is missing")
+        elif normalise(str(recorded)) != expected:
+            failures.append(
+                f"{field}: manifest {recorded!r} != pinned {expected!r} (config.{constant}) — this "
+                f"corpus was cut by a different toolchain than the tree declares"
+            )
 
     ladder = manifest.get("ladder") or {}
     for key, declared in (("e1_mm", CONFIG.E1_MM), ("octave", CONFIG.OCTAVE),
@@ -310,6 +560,12 @@ def _check_config_match(manifest, failures):
     recorded_views = [tuple(v) for v in (gates.get("render_views") or [])]
     if recorded_views != [tuple(v) for v in CONFIG.RENDER_GATE["views"]]:
         failures.append("render-gate viewpoints differ from config")
+    limits = gates.get("search_limits") or {}
+    for key, declared in CONFIG.SEARCH_LIMITS.items():
+        if key not in limits:
+            failures.append(f"search limit {key!r} is not recorded in the manifest")
+        elif limits[key] != declared:
+            failures.append(f"search limit {key}: manifest {limits[key]!r} != config {declared!r}")
     if gates.get("render_gate_blocking") != CONFIG.RENDER_GATE_BLOCKING:
         failures.append(
             f"render_gate_blocking: manifest {gates.get('render_gate_blocking')!r} != config "
@@ -317,7 +573,7 @@ def _check_config_match(manifest, failures):
         )
 
 
-def verify(manifest, root):
+def verify(manifest, tree):
     """Every drift a manifest can suffer. Returns (failures, warnings); empty failures means clean.
 
     A WARNING is a recorded verdict that is deliberately not enforced yet — today that is only the
@@ -332,10 +588,10 @@ def verify(manifest, root):
 
     for chain, asset in zip(derive(manifest), manifest["assets"]):
         try:
-            blend = CONFIG.resolve_source(root, asset["source"]["blend"])
+            blend = CONFIG.resolve_source(tree.root, asset["source"]["blend"])
         except FileNotFoundError:
             blend = None  # untracked and absent: nothing to check, not a failure
-        if blend and sha256_file(blend) != asset["source"].get("blend_sha256"):
+        if tree.rev is None and blend and sha256_file(blend) != asset["source"].get("blend_sha256"):
             failures.append(
                 f"{asset['name']}: {asset['source']['blend']} has changed since generation — the "
                 f"chain is cut from a source that no longer exists"
@@ -343,10 +599,9 @@ def verify(manifest, root):
         previous = None
         for row, level in zip(chain["levels"], asset["levels"]):
             label = f"{asset['name']} L{level['level']}"
-            path = os.path.join(root, level["glb"])
-            if not os.path.isfile(path):
+            if not tree.exists(level["glb"]):
                 failures.append(f"{label}: missing {level['glb']}")
-            elif sha256_file(path) != level["glb_sha256"]:
+            elif tree.digest(level["glb"]) != level["glb_sha256"]:
                 failures.append(
                     f"{label}: {level['glb']} does not hash to the manifest's record — it was "
                     f"edited or rebuilt outside the pipeline"
@@ -469,23 +724,32 @@ def main():
     parser.add_argument("--manifest", default=None)
     parser.add_argument("--verify", action="store_true")
     parser.add_argument("--emit-rust", action="store_true")
+    parser.add_argument(
+        "--rev", default=None,
+        help="verify the manifest and assets AS OF this git revision rather than the work tree; "
+             "what scripts/hooks/pre-push runs on each SHA it is about to push",
+    )
     args = parser.parse_args()
 
-    manifest, root, path = load(path=args.manifest)
+    try:
+        manifest, root, tree = load(path=args.manifest, rev=args.rev)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"lod chain ▸ cannot read the manifest: {exc}", file=sys.stderr)
+        return 1
     if args.emit_rust:
         print(emit_rust(derive(manifest), manifest))
         return 0
     if args.verify:
-        failures, warnings = verify(manifest, root)
+        failures, warnings = verify(manifest, tree)
         for warning in warnings:
             print(f"lod chain \u25b8 WARNING: {warning}", file=sys.stderr)
         if failures:
-            print(f"lod chain ▸ {os.path.relpath(path, root)} FAILED:", file=sys.stderr)
+            print(f"lod chain ▸ {tree.label()} FAILED:", file=sys.stderr)
             for failure in failures:
                 print(f"  - {failure}", file=sys.stderr)
             return 1
         levels = sum(len(a["levels"]) for a in manifest["assets"])
-        print(f"lod chain ▸ {os.path.relpath(path, root)} verified: "
+        print(f"lod chain ▸ {tree.label()} verified: "
               f"{len(manifest['assets'])} asset(s), {levels} level(s)")
         return 0
     print(format_chain(derive(manifest)))

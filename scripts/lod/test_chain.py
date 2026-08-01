@@ -30,23 +30,61 @@ def validity_record(tris, verts, origin_radius=0.1):
     return {
         "tris": tris, "verts": verts, "components": 1, "duplicate_faces": 0,
         "nonfinite_attrs": 0, "orientation_flips": 0, "nonmanifold_edges": 0,
-        "slivers_below_floor": 0, "tangent_default_faces": 0, "tangent_default_verts": 0,
-        "min_altitude_m": 0.001, "origin_radius_m": origin_radius,
+        "boundary_edges": 0, "slivers_below_floor": 0, "tangent_default_faces": 0,
+        "tangent_default_verts": 0, "min_altitude_m": 0.001, "min_altitude_floor_m": 0.0001,
+        "min_tri_area_mm2": 1.0, "origin_radius_m": origin_radius,
     }
 
 
-def gate_record(passed=True):
+def view_record(passed):
+    """One rendered view's statistics. `passed` decides whether the numbers SUPPORT a pass."""
+    signal = {
+        "footprint_px": 900,
+        "mean_abs_diff": 0.001 if passed else 0.5,
+        "p99_abs_diff": 0.002, "max_abs_diff": 0.003,
+        "frac_over": 0.0 if passed else 0.5,
+        "silhouette_band_px": 120, "silhouette_band_frac": 0.1,
+    }
+    reference = {
+        "footprint_px": 900, "mean_abs_diff": 0.0005, "p99_abs_diff": 0.001,
+        "max_abs_diff": 0.002, "frac_over": 0.0,
+        "silhouette_band_px": 120, "silhouette_band_frac": 0.1,
+    }
     return {
-        "pass": passed, "worst_defect_score": 0.1, "worst_mean_abs_diff": 0.001,
-        "views": {"three_quarter": {"pass": passed}},
-        "thresholds": {"defect_fraction": CONFIG.RENDER_GATE["defect_fraction"]},
+        "signal": signal,
+        "noise_floor": dict(reference),
+        "defect_floor": dict(reference),
+        "defect_score": 0.1 if passed else 2.0,
+        "under_absolute_floor": passed,
+        "pass": passed,
+    }
+
+
+def gate_record(passed=True, material="decoded from probe.glb"):
+    """A render-gate record whose recorded verdict FOLLOWS from its recorded numbers."""
+    return {
+        "pass": passed,
+        "worst_defect_score": 0.1 if passed else 2.0,
+        "worst_mean_abs_diff": 0.001 if passed else 0.5,
+        "worst_frac_over": 0.0 if passed else 0.5,
+        "distance_m": 90.0, "tile_px": CONFIG.RENDER_GATE["tile_px"],
+        "supersample": CONFIG.RENDER_GATE["supersample"],
+        "samples": CONFIG.RENDER_GATE["samples"], "tile_vfov_rad": 0.0284,
+        "material_source": material,
+        "views": {name: view_record(passed) for name, _e, _a in CONFIG.RENDER_GATE["views"]},
+        "thresholds": {
+            "defect_fraction": CONFIG.RENDER_GATE["defect_fraction"],
+            "max_mean_abs_diff": CONFIG.RENDER_GATE["max_mean_abs_diff"],
+            "max_footprint_frac_over": CONFIG.RENDER_GATE["max_footprint_frac_over"],
+            "over_threshold": CONFIG.RENDER_GATE["over_threshold"],
+        },
     }
 
 
 def synthetic_manifest():
     """A two-level chain with hand-computed numbers, independent of any generation run.
 
-    Built FROM the configuration rather than beside it, because the verifier now compares the whole
+    Built FROM the configuration rather than beside it, because the verifier compares the whole
     configuration and a hand-typed copy would drift the moment a threshold moves — which is the same
     disease the manifest exists to cure.
     """
@@ -56,12 +94,14 @@ def synthetic_manifest():
     asset_name = CONFIG.ASSETS[0]["name"]
     return {
         "schema": "overmatch.lod.manifest",
-        "schema_version": 1,
+        "schema_version": CONFIG.SCHEMA_VERSION,
         "generator": {
             "script": "scripts/lod/generate.py",
             "version": CONFIG.GENERATOR_VERSION,
             "sources_sha256": CONFIG.generator_digest(),
-            "blender": "test",
+            "blender": CONFIG.EXPECTED_BLENDER,
+            "blender_build": CONFIG.EXPECTED_BLENDER_BUILD,
+            "gltf_exporter": CONFIG.EXPECTED_GLTF_EXPORTER,
         },
         "ladder": {
             "e1_mm": CONFIG.E1_MM, "octave": CONFIG.OCTAVE,
@@ -73,6 +113,7 @@ def synthetic_manifest():
             "numeric": dict(CONFIG.GATES),
             "render": {k: v for k, v in CONFIG.RENDER_GATE.items() if k != "views"},
             "render_views": [list(v) for v in CONFIG.RENDER_GATE["views"]],
+            "search_limits": dict(CONFIG.SEARCH_LIMITS),
             "render_gate_blocking": CONFIG.RENDER_GATE_BLOCKING,
         },
         "assets": [{
@@ -85,18 +126,25 @@ def synthetic_manifest():
             "termination": "right_wall",
             "skipped_rungs": [],
             "levels": [
-                {"level": 0, "rung": 0, "role": "source", "tris": 1000, "verts": 500,
+                {"level": 0, "rung": 0, "role": "source", "tris": 1000, "verts": 2400,
                  "glb": "a/source.glb", "glb_sha256": "a" * 64, "node": "Probe",
                  "e_target_mm": 0.0, "dev_source_mm": 0.0, "dev_source_mm_upper": 0.0,
                  "pairwise_mm": None, "switch_m": 0.0,
-                 "validity": validity_record(1000, 500, radius)},
-                {"level": 1, "rung": 2, "role": "generated", "tris": 400, "verts": 220,
+                 "blender_source_verts": 500, "shipped_dev_from_source_mm": 0.0,
+                 "shipped_matches_source": True,
+                 "identity_proof": "identical welded topology and positions",
+                 "validity": validity_record(1000, 2400, radius)},
+                {"level": 1, "rung": 2, "role": "generated", "tris": 400, "verts": 1100,
                  "glb": "a/l1.glb", "glb_sha256": "b" * 64, "node": "Probe_LOD2",
-                 "e_target_mm": 7.78, "shed_fraction_vs_parent": 0.6,
+                 "e_target_mm": 7.78, "shed_fraction_vs_parent": 0.6, "glb_bytes": 4096,
                  "dev_source_mm": dev1, "dev_source_mm_upper": dev1,
+                 "dev_source_bracket_mm": 0.01, "dev_source_to_level_mm": dev1,
+                 "dev_level_to_source_mm": dev1 - 0.5,
                  "pairwise_mm": pair1, "pairwise_mm_upper": pair1,
                  "switch_m": round(switch1, 4),
-                 "validity": validity_record(400, 220, radius),
+                 "switch_from_source_dev_m": chain.switch_distance_m(dev1, radius, VIEW),
+                 "switch_from_pairwise_m": chain.switch_distance_m(pair1, radius, VIEW),
+                 "validity": validity_record(400, 1100, radius),
                  "render_gate": gate_record(True)},
             ],
         }],
@@ -155,7 +203,7 @@ class DerivationTests(unittest.TestCase):
 
     def test_a_clean_synthetic_manifest_verifies(self):
         manifest = synthetic_manifest()
-        failures = [f for f in chain.verify(manifest, "/nonexistent-root")[0]
+        failures = [f for f in chain.verify(manifest, chain.Tree("/nonexistent-root"))[0]
                     if "missing" not in f]
         self.assertEqual(failures, [], failures)
 
@@ -163,7 +211,7 @@ class DerivationTests(unittest.TestCase):
         """`--no-render-gate` is for iterating on the search, never for a committed chain."""
         manifest = synthetic_manifest()
         del manifest["assets"][0]["levels"][1]["render_gate"]
-        failures, _ = chain.verify(manifest, "/nonexistent-root")
+        failures, _ = chain.verify(manifest, chain.Tree("/nonexistent-root"))
         self.assertTrue(any("no render-gate record" in f for f in failures), failures)
 
     def _failing_gate_manifest(self, blocking):
@@ -182,7 +230,7 @@ class DerivationTests(unittest.TestCase):
         CONFIG.RENDER_GATE_BLOCKING = True
         try:
             failures, warnings = chain.verify(
-                self._failing_gate_manifest(True), "/nonexistent-root"
+                self._failing_gate_manifest(True), chain.Tree("/nonexistent-root")
             )
         finally:
             CONFIG.RENDER_GATE_BLOCKING = original
@@ -195,7 +243,7 @@ class DerivationTests(unittest.TestCase):
         CONFIG.RENDER_GATE_BLOCKING = False
         try:
             failures, warnings = chain.verify(
-                self._failing_gate_manifest(False), "/nonexistent-root"
+                self._failing_gate_manifest(False), chain.Tree("/nonexistent-root")
             )
         finally:
             CONFIG.RENDER_GATE_BLOCKING = original
@@ -207,14 +255,14 @@ class DerivationTests(unittest.TestCase):
         """Ratifying the threshold must invalidate every manifest cut before the ruling."""
         manifest = synthetic_manifest()
         manifest["gates"]["render_gate_blocking"] = not CONFIG.RENDER_GATE_BLOCKING
-        failures, _ = chain.verify(manifest, "/nonexistent-root")
+        failures, _ = chain.verify(manifest, chain.Tree("/nonexistent-root"))
         self.assertTrue(any("render_gate_blocking" in f for f in failures), failures)
 
     def test_the_drifted_ledger_is_caught(self):
         """The 223.7-vs-335.5 shape: a recorded distance that no longer re-derives."""
         manifest = synthetic_manifest()
         manifest["assets"][0]["levels"][1]["switch_m"] = 223.7
-        failures, _ = chain.verify(manifest, "/nonexistent-root")
+        failures, _ = chain.verify(manifest, chain.Tree("/nonexistent-root"))
         self.assertTrue(
             any("drifted from the measurement" in f for f in failures),
             f"a stale hand-written switch distance must fail verification; got {failures}",
@@ -223,25 +271,25 @@ class DerivationTests(unittest.TestCase):
     def test_a_level_over_its_rung_is_caught(self):
         manifest = synthetic_manifest()
         manifest["assets"][0]["levels"][1]["dev_source_mm_upper"] = 99.0
-        failures, _ = chain.verify(manifest, "/nonexistent-root")
+        failures, _ = chain.verify(manifest, chain.Tree("/nonexistent-root"))
         self.assertTrue(any("exceeds its rung target" in f for f in failures), failures)
 
     def test_a_moved_right_wall_is_caught(self):
         manifest = synthetic_manifest()
         manifest["ladder"]["right_wall_m"] = 5000.0
-        failures, _ = chain.verify(manifest, "/nonexistent-root")
+        failures, _ = chain.verify(manifest, chain.Tree("/nonexistent-root"))
         self.assertTrue(any("right_wall_m" in f for f in failures), failures)
 
     def test_a_stale_generator_version_is_caught(self):
         manifest = synthetic_manifest()
         manifest["generator"]["version"] = "0.0.1"
-        failures, _ = chain.verify(manifest, "/nonexistent-root")
+        failures, _ = chain.verify(manifest, chain.Tree("/nonexistent-root"))
         self.assertTrue(any("regenerate" in f for f in failures), failures)
 
     def test_a_chain_that_grows_triangles_is_caught(self):
         manifest = synthetic_manifest()
         manifest["assets"][0]["levels"][1]["tris"] = 5000
-        failures, _ = chain.verify(manifest, "/nonexistent-root")
+        failures, _ = chain.verify(manifest, chain.Tree("/nonexistent-root"))
         self.assertTrue(any("is not fewer than" in f for f in failures), failures)
 
     def test_emit_rust_carries_the_derived_distance(self):
@@ -265,7 +313,7 @@ class MutantTests(unittest.TestCase):
     def failures_for(self, mutate):
         manifest = synthetic_manifest()
         mutate(manifest)
-        return chain.verify(manifest, "/nonexistent-root")[0]
+        return chain.verify(manifest, chain.Tree("/nonexistent-root"))[0]
 
     def test_a_manifest_with_no_assets_is_refused(self):
         failures = self.failures_for(lambda m: m.__setitem__("assets", []))
@@ -352,6 +400,138 @@ class MutantTests(unittest.TestCase):
         self.assertTrue(any("level indices" in f for f in failures), failures)
 
 
+class SecondRoundMutantTests(unittest.TestCase):
+    """The mutants that survived the FIRST attempt at strict schema validation.
+
+    Round one deleted assets, hashes and validity records and poisoned deviations with NaN. Round
+    two went after everything the new code required-but-never-compared: a schema version it checked
+    for presence only, the source level's own numerics (omitted from the field list entirely), a
+    render record whose metrics were NaN under `pass: true`, a per-level threshold rewritten to 999,
+    and the toolchain provenance deleted wholesale. Every one verified clean.
+
+    The rule that came out of it, and that `test_no_recorded_field_is_unclassified` enforces: every
+    field the manifest records is either CHECKED or named informational. There is no third state,
+    because the third state is a field that reads as evidence and is not.
+    """
+
+    def failures_for(self, mutate):
+        manifest = synthetic_manifest()
+        mutate(manifest)
+        return chain.verify(manifest, chain.Tree("/nonexistent-root"))[0]
+
+    def test_an_unreadable_schema_version_is_refused(self):
+        failures = self.failures_for(lambda m: m.__setitem__("schema_version", 999))
+        self.assertTrue(any("schema_version" in f for f in failures), failures)
+
+    def test_a_nan_triangle_count_on_the_source_level_is_refused(self):
+        """L0 is what every deviation in the chain is measured against."""
+        def poison(manifest):
+            manifest["assets"][0]["levels"][0]["tris"] = float("nan")
+
+        failures = self.failures_for(poison)
+        self.assertTrue(any("not a finite number" in f for f in failures), failures)
+
+    def test_nan_render_metrics_under_a_recorded_pass_are_refused(self):
+        def poison(manifest):
+            gate = manifest["assets"][0]["levels"][1]["render_gate"]
+            gate["worst_defect_score"] = float("nan")
+            for view in gate["views"].values():
+                view["signal"]["mean_abs_diff"] = float("nan")
+
+        failures = self.failures_for(poison)
+        self.assertTrue(any("not a finite number" in f for f in failures), failures)
+
+    def test_a_rewritten_per_level_threshold_is_refused(self):
+        """A gate judged against a threshold the tree does not declare judged nothing."""
+        def loosen(manifest):
+            manifest["assets"][0]["levels"][1]["render_gate"]["thresholds"]["defect_fraction"] = 999
+
+        failures = self.failures_for(loosen)
+        self.assertTrue(any("defect_fraction" in f for f in failures), failures)
+
+    def test_a_verdict_that_does_not_follow_from_its_numbers_is_refused(self):
+        """`pass: true` beside metrics that say otherwise is a contradiction, not a pass."""
+        def contradict(manifest):
+            gate = manifest["assets"][0]["levels"][1]["render_gate"]
+            gate["views"] = {name: view_record(False) for name in gate["views"]}
+            gate["worst_defect_score"] = 2.0
+
+        failures = self.failures_for(contradict)
+        self.assertTrue(any("does not follow from the evidence" in f for f in failures), failures)
+
+    def test_removed_toolchain_provenance_is_refused(self):
+        for field in ("blender", "blender_build", "gltf_exporter"):
+            with self.subTest(field=field):
+                failures = self.failures_for(lambda m, f=field: m["generator"].pop(f))
+                self.assertTrue(any(f"no {field!r}" in x for x in failures), failures)
+
+    def test_a_different_blender_build_is_refused(self):
+        failures = self.failures_for(
+            lambda m: m["generator"].__setitem__("blender_build", "deadbeef1234")
+        )
+        self.assertTrue(any("blender_build" in f for f in failures), failures)
+
+    def test_a_different_gltf_exporter_is_refused(self):
+        failures = self.failures_for(
+            lambda m: m["generator"].__setitem__("gltf_exporter", "4.0.1")
+        )
+        self.assertTrue(any("gltf_exporter" in f for f in failures), failures)
+
+    def test_removed_material_provenance_is_refused(self):
+        failures = self.failures_for(
+            lambda m: m["assets"][0]["levels"][1]["render_gate"].pop("material_source")
+        )
+        self.assertTrue(any("material_source" in f for f in failures), failures)
+
+    def test_a_gate_with_missing_views_is_refused(self):
+        def drop(manifest):
+            gate = manifest["assets"][0]["levels"][1]["render_gate"]
+            gate["views"] = {next(iter(gate["views"])): next(iter(gate["views"].values()))}
+
+        failures = self.failures_for(drop)
+        self.assertTrue(any("config declares" in f for f in failures), failures)
+
+    def test_an_empty_footprint_is_refused(self):
+        """Two frames that never saw the asset differ by nothing, which is not a pass."""
+        def blank(manifest):
+            for view in manifest["assets"][0]["levels"][1]["render_gate"]["views"].values():
+                view["signal"]["footprint_px"] = 0
+
+        failures = self.failures_for(blank)
+        self.assertTrue(any("empty footprint" in f for f in failures), failures)
+
+    def test_removed_search_limits_are_refused(self):
+        failures = self.failures_for(lambda m: m["gates"].pop("search_limits"))
+        self.assertTrue(any("search limit" in f for f in failures), failures)
+
+    def test_a_missing_l0_identity_proof_is_refused(self):
+        failures = self.failures_for(
+            lambda m: m["assets"][0]["levels"][0].pop("identity_proof")
+        )
+        self.assertTrue(any("identity proof" in f for f in failures), failures)
+
+    def test_a_nonfinite_source_record_is_refused(self):
+        failures = self.failures_for(
+            lambda m: m["assets"][0]["source"].__setitem__("tris", float("nan"))
+        )
+        self.assertTrue(any("source record" in f for f in failures), failures)
+
+    def test_a_fallback_material_cannot_be_blocked_on(self):
+        """The precondition beside RENDER_GATE_BLOCKING, enforced rather than written down."""
+        manifest = synthetic_manifest()
+        manifest["gates"]["render_gate_blocking"] = True
+        manifest["assets"][0]["levels"][1]["render_gate"]["material_source"] = (
+            "FELL BACK to the .blend material 'Mat' — importer cannot read KTX2"
+        )
+        original = CONFIG.RENDER_GATE_BLOCKING
+        CONFIG.RENDER_GATE_BLOCKING = True
+        try:
+            failures, _ = chain.verify(manifest, chain.Tree("/nonexistent-root"))
+        finally:
+            CONFIG.RENDER_GATE_BLOCKING = original
+        self.assertTrue(any("FALLBACK material" in f for f in failures), failures)
+
+
 class ShippedManifestTests(unittest.TestCase):
     """The manifest actually committed to this tree, if it is here."""
 
@@ -364,7 +544,7 @@ class ShippedManifestTests(unittest.TestCase):
             self.manifest = json.load(handle)
 
     def test_the_shipped_manifest_verifies(self):
-        failures, _ = chain.verify(self.manifest, self.root)
+        failures, _ = chain.verify(self.manifest, chain.Tree(self.root))
         self.assertEqual(failures, [], "\n".join(failures))
 
     def test_every_level_is_a_rung_of_the_global_grid(self):
@@ -429,6 +609,50 @@ class ShippedManifestTests(unittest.TestCase):
                 "the shipped decode should carry the exporter's split vertices, not Blender's",
             )
             self.assertIn("identity_proof", l0)
+
+    def test_no_recorded_field_is_unclassified(self):
+        """EVERY field the manifest records is either CHECKED or named informational.
+
+        There is no third state, because the third state is a field that reads as evidence and is
+        not — which is what `schema_version`, the source level's numerics, the whole render record
+        and the toolchain provenance each were, one review round after being added. A field added
+        later fails this test until someone decides which of the two it is.
+        """
+        checked = set(
+            chain.LEVEL_NUMERIC_FIELDS
+            + chain.SOURCE_LEVEL_NUMERIC_FIELDS
+            + chain.SOURCE_NUMERIC_FIELDS
+            + chain.LEVEL_VALIDITY_FIELDS
+            + chain.GATE_FIELDS
+            + chain.GATE_NUMERIC_FIELDS
+            + chain.GATE_VIEW_FIELDS
+            + chain.GATE_VIEW_NUMERIC_FIELDS
+        )
+        checked |= {field for field, _c, _n in chain.GENERATOR_PINNED_FIELDS}
+        checked |= {"schema_version", "version", "topology_floor_tris"}
+        checked |= set(CONFIG.GATES) | set(CONFIG.RENDER_GATE) | set(CONFIG.SEARCH_LIMITS)
+        # The view NAMES are dict keys inside every gate record, and they are checked: the set of
+        # them is compared against the configured viewpoints, so a missing or invented view fails.
+        checked |= {name for name, _e, _a in CONFIG.RENDER_GATE["views"]}
+        known = checked | chain.INFORMATIONAL_FIELDS
+
+        def walk(node, seen):
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    seen.add(key)
+                    walk(value, seen)
+            elif isinstance(node, list):
+                for item in node:
+                    walk(item, seen)
+
+        seen = set()
+        walk(self.manifest, seen)
+        unclassified = sorted(seen - known)
+        self.assertEqual(
+            unclassified, [],
+            f"these manifest fields are neither checked nor declared informational: "
+            f"{unclassified}. Add each to a field list in chain.py or to INFORMATIONAL_FIELDS.",
+        )
 
     def test_the_right_wall_records_where_it_came_from(self):
         source = self.manifest["ladder"]["right_wall_source"]

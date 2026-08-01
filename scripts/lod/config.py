@@ -165,7 +165,10 @@ GATES = {
 #: The rendered-difference gate — the authoritative attribute check (ADR 0033 §7).
 #:
 #: Each kept level is rendered against its PARENT at the parent->child switch distance, under the
-#: asset's own shipped material, and the two images are differenced. Pixels are counted over the
+#: asset's material, and the two images are differenced. (The material is taken from the shipped
+#: glb when it can be read back, and from the .blend when it cannot — see `RENDER_GATE_BLOCKING`;
+#: which one was used is recorded per level as `material_source` and is checked by verification.)
+#: Pixels are counted over the
 #: FOOTPRINT (the union of the two silhouettes plus a dilation), never over the whole frame: at
 #: 300 m a track shoe is 40 pixels across and a frame-wide mean would divide every difference by
 #: four thousand empty pixels and pass anything.
@@ -222,18 +225,19 @@ RENDER_GATE = {
     # assets, of exactly the kind e1 was, and e1 was ratified by Yan rather than picked here.
     #
     # THE MEASUREMENT THAT WOULD INFORM THAT RULING, from the reference asset (worst of three
-    # viewpoints, so each is the least favourable angle):
+    # viewpoints, so each is the least favourable angle). These are the CURRENT numbers, taken with
+    # the isolated defect reference; an earlier set measured against a tilted CHILD is not comparable
+    # and has been removed rather than left lying around next to the decision it would misinform:
     #
-    #     L1  855 tris at  56 m   score 0.550
-    #     L2  583 tris at 127 m   score 0.438
-    #     L3  316 tris at 474 m   score 0.643
-    #     L4  194 tris at 1050 m  score 7.684  <- see below
+    #     L1  855 tris at   56 m   score 0.486600   PASS
+    #     L2  583 tris at  127 m   score 0.612477
+    #     L3  316 tris at  474 m   score 1.447666
+    #     L4  194 tris at 1050 m   score 0.730782
     #
-    # L4's score is not a worse level, it is a degenerate BRACKET: at 1050 m the shoe is thirteen
-    # pixels across, a 20 deg normal tilt is invisible at that size, and the denominator collapses.
-    # The reading is that beyond a few hundred metres shading stops being the thing that changes and
-    # silhouette (already proven sub-pixel) is the whole story. A ratified rule probably wants a
-    # minimum resolvable footprint below which this gate abstains and says so.
+    # L3 is the one to look at: at 474 m the switch changes the image MORE than 20-degree broken
+    # normals do on the same geometry. Beyond a few hundred metres shading stops being what changes
+    # and silhouette — already proven sub-pixel — is the whole story, so a ratified rule probably
+    # wants a minimum resolvable footprint below which this gate abstains and says so.
     "defect_normal_deg": 20.0,
     "defect_fraction": 0.50,
     # Absolute floors, kept only as an escape hatch: a pair whose difference is under these passes
@@ -255,9 +259,19 @@ RENDER_GATE = {
 #: which is the exact failure mode this whole file exists to prevent. Every other gate here blocks
 #: unconditionally, because every other gate is measured or structural.
 #:
-#: FLIP IT TO True the moment Yan rules on the number. Nothing else has to change: the levels are
-#: already measured against it, and `scripts/lod/chain.py --verify` reads this flag out of the
-#: manifest, so the ruling turns a recorded warning into a refusal everywhere at once.
+#: TWO THINGS MUST BE TRUE BEFORE IT CAN BE FLIPPED, and both are enforced rather than remembered:
+#:
+#:   1. Yan rules on `defect_fraction`. It is a taste call of exactly the kind e1 was.
+#:   2. The gate must render the SHIPPED material. It does not today: it re-imports the L0 glb, and
+#:      on this asset every texture comes back empty because the mip bake writes KTX2 via
+#:      `KHR_texture_basisu` and Blender's importer cannot read it, so the gate falls back to the
+#:      .blend material and records that per level. Blocking on a number measured under the wrong
+#:      textures would be a gate certifying the wrong thing — the failure this file exists to
+#:      prevent. `chain.py` REFUSES a blocking manifest whose levels record a fallback, so flipping
+#:      this flag without fixing the material fails verification instead of shipping a false pass.
+#:
+#: The route for (2), when it matters: decode the KTX2 to PNG with `basisu` and rebuild the material
+#: from the decoded images, or render through the runtime instead of Blender.
 RENDER_GATE_BLOCKING = False
 
 
@@ -287,7 +301,7 @@ ASSETS = (
 #: Bumped whenever the generation ALGORITHM changes in a way that can move a shipped level. The
 #: manifest records it; a mismatch between a committed manifest and this constant means the chain
 #: was cut by a different pipeline than the one in the tree.
-GENERATOR_VERSION = "2.1.0"
+GENERATOR_VERSION = "2.2.0"
 
 #: The toolchain the corpus was cut with, ASSERTED before generation rather than merely recorded.
 #:
@@ -296,7 +310,13 @@ GENERATOR_VERSION = "2.1.0"
 #: tells you which build produced a chain; asserting it first is what stops two machines producing
 #: two different corpora and nobody noticing. Set `OVERMATCH_LOD_ALLOW_BLENDER` to override for a
 #: deliberate upgrade — which is a corpus regeneration review, per ADR 0033's "Simplifier choice".
+#: ALL THREE ARE ASSERTED, because a version string is the weakest of the three. Two Blenders can
+#: report 5.1.2 and be different builds; the glTF exporter is an add-on that moves on its own
+#: schedule and decides the bytes; and double generation inside ONE process cannot see either kind
+#: of difference, which is precisely the gap it looks like it closes.
 EXPECTED_BLENDER = "5.1.2"
+EXPECTED_BLENDER_BUILD = "ec6e62d40fa9"
+EXPECTED_GLTF_EXPORTER = "5.1.20"
 BLENDER_OVERRIDE_ENV = "OVERMATCH_LOD_ALLOW_BLENDER"
 
 #: The generator's own sources, hashed into the manifest. `GENERATOR_VERSION` is a promise a human
@@ -319,6 +339,29 @@ def generator_digest():
 
 #: Where the manifest lands. Committed; the single seam between generation and runtime.
 MANIFEST_RELPATH = "assets/lod_manifest.json"
+
+#: The manifest format this tree reads and writes. Bumped when the SHAPE changes, not the contents.
+SCHEMA_VERSION = 1
+
+#: What the exhaustive search is allowed to spend before it refuses.
+#:
+#: EXHAUSTIVE IS A PROMISE ABOUT COMPLETENESS, NOT ABOUT COST. Every enumerated output stays
+#: resident for the whole chain so that a plateau costs one certification rather than many, which
+#: means geometry storage grows with the number of distinct outputs — and that grows with the
+#: asset. A 1 661-triangle shoe enumerates 263 outputs; something twenty times larger would not
+#: merely be slower, it would be quadratically hungrier, and the first anyone would know is a
+#: machine swapping. So the limits are declared, and passing one is a NAMED REFUSAL rather than a
+#: slow death: raising them is a decision someone makes on purpose, having read this.
+SEARCH_LIMITS = {
+    "max_enumerated_outputs": 4_000,
+    "max_retained_tris": 4_000_000,
+    "max_enumeration_seconds": 900.0,
+    # Random budgets drawn from the intervals the walk jumped over, each of which must land on an
+    # output already enumerated. This is what verifies the decimation oracle's contract on real
+    # geometry; it caught nothing only because it was added after the bug it would have caught.
+    "max_enumeration_spot_checks": 48,
+    "spot_check_seed": 20260802,
+}
 
 
 def repo_root(start=None):

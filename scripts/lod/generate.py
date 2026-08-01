@@ -88,20 +88,31 @@ def assert_toolchain():
     different corpora with nobody the wiser. ADR 0033 makes a toolchain bump a corpus regeneration
     review, and this is where that becomes mechanical rather than remembered.
     """
-    running = bpy.app.version_string.split()[0]
-    if running == CONFIG.EXPECTED_BLENDER:
+    running = {
+        "Blender version": (bpy.app.version_string.split()[0], CONFIG.EXPECTED_BLENDER),
+        "Blender build": (bpy.app.build_hash.decode(), CONFIG.EXPECTED_BLENDER_BUILD),
+        "glTF exporter": (_exporter_version(), CONFIG.EXPECTED_GLTF_EXPORTER),
+    }
+    wrong = [
+        f"{what} is {actual!r}, pinned to {expected!r}"
+        for what, (actual, expected) in running.items()
+        if actual != expected
+    ]
+    if not wrong:
         return
+    # ALL THREE, not just the version string. Two builds can report the same version, and the glTF
+    # exporter is a separately-versioned add-on that decides the bytes — recording either without
+    # comparing it is provenance theatre. Double generation inside one process cannot see a
+    # cross-build difference at all, so this assertion is the only thing that can.
     allowed = os.environ.get(CONFIG.BLENDER_OVERRIDE_ENV, "")
-    if allowed in (running, "1", "yes", "any"):
-        log(f"  toolchain: Blender {running} != pinned {CONFIG.EXPECTED_BLENDER}, allowed by "
-            f"{CONFIG.BLENDER_OVERRIDE_ENV}")
+    if allowed in ("1", "yes", "any"):
+        log(f"  toolchain: {'; '.join(wrong)} — allowed by {CONFIG.BLENDER_OVERRIDE_ENV}")
         return
     raise GenerationError(
         "toolchain",
-        f"this Blender is {running}, the corpus is pinned to {CONFIG.EXPECTED_BLENDER}. A "
-        f"simplifier is a program: a point release can move every level in the game. Set "
-        f"{CONFIG.BLENDER_OVERRIDE_ENV}={running} to regenerate the whole corpus deliberately, "
-        f"and update config.EXPECTED_BLENDER with the result.",
+        "; ".join(wrong) + ". A simplifier is a program: a point release can move every level in "
+        f"the game. Set {CONFIG.BLENDER_OVERRIDE_ENV}=1 to regenerate the whole corpus "
+        f"deliberately, and update the config.EXPECTED_* constants with what it reports.",
     )
 
 
@@ -168,8 +179,11 @@ def shipped_material(l0_path, node_name):
             material = ob.data.materials[0]
             break
     if material is not None:
+        # `node.image.name` on a node whose image is None crashes — which is the SECOND thing that
+        # would go wrong on an asset whose textures the importer cannot read, right after the thing
+        # this list exists to detect. The name has to come from the node when there is no image.
         empty = [
-            node.image.name
+            node.image.name if node.image is not None else f"<{node.name}: no image>"
             for node in material.node_tree.nodes
             if node.type == "TEX_IMAGE" and (node.image is None or not node.image.has_data)
         ]
@@ -232,12 +246,22 @@ def _evaluated_triangles(obj):
 
 
 def _fit_collapse(obj, budget):
-    """Drive a quadric collapse to at most `budget` triangles. Returns the triangles it reached.
+    """The GREATEST realizable triangle count <= `budget`, with the modifier left driving it.
 
-    The ratio is an internal edge-count lever, not a triangle count, so the only honest way to hit
-    an integer budget is to ask the modifier — 28 halvings resolve it to 4e-9. Returns None when the
-    budget is below the mesh's topology floor, which the caller treats as the end of the ladder
-    rather than as an error.
+    THE CONTRACT IS "GREATEST", AND IT USED TO BE "WITHIN 1 %". The bisection stopped as soon as it
+    landed inside a percent of the budget, which is fine if you only want a mesh of roughly that
+    size and fatal for the enumeration built on top of it: `enumerate_staircase` steps from one
+    output to `reached - 1`, and that step is only sound when `reached` is the greatest realizable
+    count at or below the budget. An early stop meant outputs in `(reached, budget]` were never
+    visited, so the "exhaustive" search could miss a level outright.
+
+    So the bisection now runs to convergence. It is sound because the modifier's output count is
+    monotone non-decreasing in `ratio` — more ratio, more triangles kept — which makes the
+    largest ratio whose count is under budget the one carrying the greatest such count. 28 halvings
+    resolve the ratio to 4e-9, against steps of order 1/edge_count, so the interval cannot straddle
+    two steps by the end. `_spot_check_enumeration` re-tests that claim on real geometry every run.
+
+    Returns `(reached, ratio)`, or `(None, None)` below the mesh's topology floor.
     """
     modifier = obj.modifiers.new("Collapse", "DECIMATE")
     modifier.decimate_type = "COLLAPSE"
@@ -253,15 +277,13 @@ def _fit_collapse(obj, budget):
             low = middle
         else:
             high = middle
-        if best and budget * 0.99 <= best[1] <= budget:
-            break
     if best is None:
         modifier.ratio = 0.0
         bpy.context.view_layer.update()
-        return None
+        return None, None
     modifier.ratio = best[0]
     bpy.context.view_layer.update()
-    return best[1]
+    return best[1], best[0]
 
 
 def cleanup(mesh, scale_m):
@@ -317,7 +339,7 @@ def candidate_mesh(source_obj, budget, scale_m):
     """
     work = _fresh_copy(source_obj, f"cand_{budget}")
     try:
-        reached = _fit_collapse(work, budget)
+        reached, _ratio = _fit_collapse(work, budget)
         if reached is None:
             return None, None
         mesh = _baked(work, f"cand_{budget}_mesh")
@@ -359,18 +381,35 @@ class Candidates:
         self.decimations = 0
 
     def enumerate_outputs(self, floor_tris, ceiling_tris):
-        """Every realizable output in [floor, ceiling], ascending. One decimation per output."""
-        budget = ceiling_tris
-        found = []
-        while budget >= floor_tris:
+        """Every realizable output in [floor, ceiling], ascending. One decimation per output.
+
+        The walk itself lives in `measure.enumerate_staircase` — away from `bpy`, so it can be
+        tested against a synthetic staircase — and this method supplies the oracle plus the declared
+        refusal limits. The oracle's contract ("greatest realizable count at or below the budget")
+        is spot-checked on real geometry every run: `MAX_ENUMERATION_SPOT_CHECKS` random budgets are
+        drawn from the intervals the walk jumped over, and each must land on an output already
+        found. That is the check that catches a decimator whose bisection stops early, which is
+        exactly how the previous "exhaustive" enumeration was silently incomplete.
+        """
+        started = time.time()
+        limits = CONFIG.SEARCH_LIMITS
+        retained_tris = 0
+
+        def decimate_at(budget):
+            nonlocal retained_tris
+            elapsed = time.time() - started
+            if elapsed > limits["max_enumeration_seconds"]:
+                raise M.EnumerationError(
+                    f"enumeration passed {elapsed:.0f}s (limit "
+                    f"{limits['max_enumeration_seconds']}s) after {self.decimations} decimations — "
+                    f"refusing rather than running unbounded. Raise the limit deliberately."
+                )
             mesh, reached = candidate_mesh(self.source_obj, budget, self.source.diagonal)
             self.decimations += 1
             if mesh is None:
-                break
+                return None
             surface = M.from_bpy_mesh(mesh, None, f"cand{budget}")
             bpy.data.meshes.remove(mesh)
-            # `reached` steps the budget axis (the decimator's own staircase); `surface.tri_count`
-            # is what the level would actually ship, after cleanup, and is what gets certified.
             shipped_tris = surface.tri_count
             if shipped_tris not in self.by_tris:
                 # THE BUDGET IS KEPT, not just the count it produced. Rebuilding a chosen level
@@ -380,13 +419,29 @@ class Candidates:
                     "tris": shipped_tris, "budget": budget, "surface": surface,
                     "lo_mm": None, "up_mm": None,
                 }
-                found.append(shipped_tris)
-            if reached <= floor_tris:
-                break
-            budget = reached - 1
-        self.outputs = sorted(set(found))
+                retained_tris += shipped_tris
+                if retained_tris > limits["max_retained_tris"]:
+                    raise M.EnumerationError(
+                        f"holding {retained_tris} triangles of candidate geometry (limit "
+                        f"{limits['max_retained_tris']}) — every enumerated output stays resident "
+                        f"for the whole chain, so this grows with the square of an asset's size. "
+                        f"Refusing rather than swapping."
+                    )
+            return reached
+
+        try:
+            self.outputs, _budgets = M.enumerate_staircase(
+                floor_tris, ceiling_tris, decimate_at,
+                spot_checks=limits["max_enumeration_spot_checks"],
+                seed=limits["spot_check_seed"],
+                max_outputs=limits["max_enumerated_outputs"],
+            )
+        except M.EnumerationError as exc:
+            raise GenerationError("enumeration", str(exc)) from exc
         log(f"  enumerated {len(self.outputs)} realizable outputs in [{floor_tris}, "
-            f"{ceiling_tris}] from {self.decimations} decimations")
+            f"{ceiling_tris}] from {self.decimations} decimations "
+            f"({limits['max_enumeration_spot_checks']} spot checks passed, "
+            f"{time.time() - started:.0f}s)")
         return self.outputs
 
     def deviation(self, tris, target_mm):
@@ -846,6 +901,49 @@ def build_chain(asset, root, run_render_gate, out_dir):
     }, levels
 
 
+def merge_targeted(regenerated, root, only):
+    """Fold a `--asset` run back into the existing manifest, or refuse. Returns the full asset list.
+
+    `--asset` regenerates ONE chain, and the manifest is required to cover every configured asset —
+    so writing only the selected one would replace a verifiable manifest with an unverifiable
+    subset, and the first anyone would know is `chain.py --verify` failing on a corpus nobody
+    touched. With one configured asset the question does not arise; with two it silently would.
+
+    So the other assets are carried over from the committed manifest, and if that manifest is
+    missing or does not already cover them, this REFUSES rather than writing a subset: there is
+    nothing to merge into, and a full run is the honest way to create one.
+    """
+    if len(CONFIG.ASSETS) == 1:
+        return regenerated
+    manifest_path = os.path.join(root, CONFIG.MANIFEST_RELPATH)
+    if not os.path.isfile(manifest_path):
+        raise GenerationError(
+            "assets",
+            f"--asset {only!r} regenerates one chain, but {CONFIG.MANIFEST_RELPATH} does not exist "
+            f"and the other {len(CONFIG.ASSETS) - 1} configured asset(s) have nowhere to come "
+            f"from. Run a full generation first.",
+        )
+    with open(manifest_path, encoding="utf-8") as handle:
+        existing = {entry["name"]: entry for entry in json.load(handle).get("assets", [])}
+    merged = []
+    for asset in CONFIG.ASSETS:
+        fresh = next((e for e in regenerated if e["name"] == asset["name"]), None)
+        if fresh is not None:
+            merged.append(fresh)
+            continue
+        carried = existing.get(asset["name"])
+        if carried is None:
+            raise GenerationError(
+                "assets",
+                f"--asset {only!r} regenerates one chain, but the existing manifest has no entry "
+                f"for {asset['name']!r} to carry over. Run a full generation.",
+            )
+        merged.append(carried)
+    log(f"merged  {only} into the existing manifest, carrying "
+        f"{len(merged) - 1} other asset chain(s) forward")
+    return merged
+
+
 # ── entry point ──────────────────────────────────────────────────────────────────────────────────
 
 def main(argv):
@@ -861,13 +959,13 @@ def main(argv):
     work = tempfile.mkdtemp(prefix="lod-chain-")
     manifest = {
         "schema": "overmatch.lod.manifest",
-        "schema_version": 1,
+        "schema_version": CONFIG.SCHEMA_VERSION,
         "generator": {
             "script": "scripts/lod/generate.py",
             "version": CONFIG.GENERATOR_VERSION,
             "sources_sha256": CONFIG.generator_digest(),
-            "blender": f"{bpy.app.version_string} ({bpy.app.build_hash.decode()})",
-            "blender_expected": CONFIG.EXPECTED_BLENDER,
+            "blender": bpy.app.version_string.split()[0],
+            "blender_build": bpy.app.build_hash.decode(),
             "gltf_exporter": _exporter_version(),
         },
         "ladder": {
@@ -883,6 +981,7 @@ def main(argv):
             "numeric": {k: v for k, v in CONFIG.GATES.items()},
             "render": {k: v for k, v in CONFIG.RENDER_GATE.items() if k != "views"},
             "render_views": [list(v) for v in CONFIG.RENDER_GATE["views"]],
+            "search_limits": dict(CONFIG.SEARCH_LIMITS),
             "render_gate_blocking": CONFIG.RENDER_GATE_BLOCKING,
             "render_gate_unratified_note": (
                 "defect_fraction is not ratified; a failing rendered-difference gate is RECORDED "
@@ -903,6 +1002,8 @@ def main(argv):
             manifest["assets"].append(entry)
         if not manifest["assets"]:
             raise GenerationError("assets", f"no asset matched {only!r}")
+        if only:
+            manifest["assets"] = merge_targeted(manifest["assets"], root, only)
 
         # Publish only now: a chain that failed a gate leaves every tracked path at its last good
         # state rather than half-updated.

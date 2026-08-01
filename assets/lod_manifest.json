@@ -3,10 +3,10 @@
   "schema_version": 1,
   "generator": {
     "script": "scripts/lod/generate.py",
-    "version": "2.1.0",
-    "sources_sha256": "2d263173763e68c76b17835a7d6984cdb482fc5e3eec0aedd609a7fbd467edb1",
-    "blender": "5.1.2 (ec6e62d40fa9)",
-    "blender_expected": "5.1.2",
+    "version": "2.2.0",
+    "sources_sha256": "7bc91cea500e7a2da73336e6268a6215b8fc3f292eee602237f2369e71b5d28c",
+    "blender": "5.1.2",
+    "blender_build": "ec6e62d40fa9",
     "gltf_exporter": "5.1.20"
   },
   "ladder": {
@@ -71,6 +71,13 @@
         200.0
       ]
     ],
+    "search_limits": {
+      "max_enumerated_outputs": 4000,
+      "max_retained_tris": 4000000,
+      "max_enumeration_seconds": 900.0,
+      "max_enumeration_spot_checks": 48,
+      "spot_check_seed": 20260802
+    },
     "render_gate_blocking": false,
     "render_gate_unratified_note": "defect_fraction is not ratified; a failing rendered-difference gate is RECORDED and reported, not enforced. Every other gate blocks unconditionally."
   },
@@ -117,14 +124,14 @@
       "topology_floor_tris": 194,
       "sliver_floor_m": 1.180772072582993e-06,
       "termination": "topology_floor",
-      "deviation_evaluations": 186,
+      "deviation_evaluations": 348,
       "skipped_rungs": [
         {
           "rung": 3,
           "e_target_mm": 15.56,
-          "best_tris": 537,
-          "shed_fraction": 0.0789,
-          "reason": "sheds 7.9% of L2, below SKIP_FRACTION 30%"
+          "best_tris": 533,
+          "shed_fraction": 0.0826,
+          "reason": "sheds 8.3% of L2, below SKIP_FRACTION 30%"
         }
       ],
       "levels": [
@@ -355,9 +362,9 @@
           "e_target_mm": 7.78,
           "glb": "assets/tiger_1/tiger_1_link.rung2.glb",
           "node": "Link_LOD2",
-          "tris": 583,
-          "verts": 1681,
-          "shed_fraction_vs_parent": 0.318129,
+          "tris": 581,
+          "verts": 1675,
+          "shed_fraction_vs_parent": 0.320468,
           "parent_level": "L1",
           "dev_source_mm": 6.949885,
           "dev_source_mm_upper": 7.019371,
@@ -370,8 +377,8 @@
           "switch_from_source_dev_m": 126.5971,
           "switch_from_pairwise_m": 126.5969,
           "validity": {
-            "tris": 583,
-            "verts": 1681,
+            "tris": 581,
+            "verts": 1675,
             "components": 1,
             "duplicate_faces": 0,
             "nonfinite_attrs": 0,
@@ -393,16 +400,16 @@
             "origin_radius_m": 0.400113
           },
           "cleanup": {
-            "faces_before": 583,
-            "faces_after": 583,
+            "faces_before": 581,
+            "faces_after": 581,
             "dissolve_dist_m": 7.680082776371103e-07
           },
           "reproducible": true,
           "normal_diagnostic_deg": {
             "max_deg": 90.0,
-            "p99_deg": 88.233,
-            "p95_deg": 46.027,
-            "backface_corr_frac": 0.0136,
+            "p99_deg": 88.264,
+            "p95_deg": 45.787,
+            "backface_corr_frac": 0.01345,
             "samples": 20000
           },
           "render_gate": {
@@ -418,10 +425,10 @@
                   "footprint_px": 3021,
                   "silhouette_band_px": 659,
                   "silhouette_band_frac": 0.179076,
-                  "mean_abs_diff": 0.013501,
+                  "mean_abs_diff": 0.013631,
                   "p99_abs_diff": 0.254608,
                   "max_abs_diff": 0.556128,
-                  "frac_over": 0.03244
+                  "frac_over": 0.033102
                 },
                 "noise_floor": {
                   "footprint_px": 3036,
@@ -441,7 +448,7 @@
                   "max_abs_diff": 0.374265,
                   "frac_over": 0.073331
                 },
-                "defect_score": 0.612477,
+                "defect_score": 0.619408,
                 "under_absolute_floor": false,
                 "pass": false
               },
@@ -450,7 +457,7 @@
                   "footprint_px": 1254,
                   "silhouette_band_px": 365,
                   "silhouette_band_frac": 0.225448,
-                  "mean_abs_diff": 0.032065,
+                  "mean_abs_diff": 0.032064,
                   "p99_abs_diff": 0.296424,
                   "max_abs_diff": 0.443137,
                   "frac_over": 0.074163
@@ -473,19 +480,19 @@
                   "max_abs_diff": 0.461029,
                   "frac_over": 0.617038
                 },
-                "defect_score": 0.157597,
+                "defect_score": 0.157591,
                 "under_absolute_floor": false,
                 "pass": true
               },
               "edge_on": {
                 "signal": {
-                  "footprint_px": 933,
-                  "silhouette_band_px": 259,
-                  "silhouette_band_frac": 0.217282,
-                  "mean_abs_diff": 0.035679,
-                  "p99_abs_diff": 0.322,
+                  "footprint_px": 934,
+                  "silhouette_band_px": 258,
+                  "silhouette_band_frac": 0.216443,
+                  "mean_abs_diff": 0.035885,
+                  "p99_abs_diff": 0.321983,
                   "max_abs_diff": 0.453186,
-                  "frac_over": 0.099678
+                  "frac_over": 0.101713
                 },
                 "noise_floor": {
                   "footprint_px": 962,
@@ -505,14 +512,14 @@
                   "max_abs_diff": 0.477941,
                   "frac_over": 0.415975
                 },
-                "defect_score": 0.205109,
+                "defect_score": 0.206389,
                 "under_absolute_floor": false,
                 "pass": true
               }
             },
-            "worst_mean_abs_diff": 0.035679,
-            "worst_frac_over": 0.099678,
-            "worst_defect_score": 0.612477,
+            "worst_mean_abs_diff": 0.035885,
+            "worst_frac_over": 0.101713,
+            "worst_defect_score": 0.619408,
             "thresholds": {
               "max_mean_abs_diff": 0.02,
               "max_footprint_frac_over": 0.02,
@@ -523,8 +530,8 @@
             "pass": false,
             "material_source": "FELL BACK to the .blend material 'Mat_Track_Link' \u2014 imported material 'Mat_Track_Link.001' has 3 texture(s) with no pixel data (albedo, roughness, normal) \u2014 Blender cannot read the KHR_texture_basisu KTX2 images the bake writes"
           },
-          "glb_sha256": "2736e787c387dd7793becaae2d705c31731d3dd957bdb2b8a216c3b82af021bc",
-          "glb_bytes": 58320
+          "glb_sha256": "9cd545f5f724bf1bc3d6f14b41b5b40c787762c971e145b9cc5aac1ba3c4340d",
+          "glb_bytes": 58116
         },
         {
           "level": 3,
@@ -533,28 +540,28 @@
           "e_target_mm": 31.12,
           "glb": "assets/tiger_1/tiger_1_link.rung4.glb",
           "node": "Link_LOD4",
-          "tris": 316,
-          "verts": 948,
-          "shed_fraction_vs_parent": 0.457976,
+          "tris": 315,
+          "verts": 945,
+          "shed_fraction_vs_parent": 0.457831,
           "parent_level": "L2",
-          "dev_source_mm": 26.081597,
-          "dev_source_mm_upper": 26.338998,
-          "dev_source_bracket_mm": 0.257401,
-          "dev_source_to_level_mm": 20.461518,
+          "dev_source_mm": 27.56831,
+          "dev_source_mm_upper": 27.841808,
+          "dev_source_bracket_mm": 0.273497,
+          "dev_source_to_level_mm": 27.56831,
           "dev_level_to_source_mm": 26.081597,
-          "pairwise_mm": 25.955055,
-          "pairwise_mm_upper": 26.212517,
-          "switch_m": 473.933,
-          "switch_from_source_dev_m": 473.933,
-          "switch_from_pairwise_m": 471.6591,
+          "pairwise_mm": 27.56831,
+          "pairwise_mm_upper": 27.841808,
+          "switch_m": 500.9511,
+          "switch_from_source_dev_m": 500.9511,
+          "switch_from_pairwise_m": 500.9511,
           "validity": {
-            "tris": 316,
-            "verts": 948,
+            "tris": 315,
+            "verts": 945,
             "components": 1,
             "duplicate_faces": 0,
             "nonfinite_attrs": 0,
             "orientation_flips": 0,
-            "boundary_edges": 42,
+            "boundary_edges": 41,
             "nonmanifold_edges": 0,
             "min_altitude_m": 4.699579201713601e-06,
             "min_altitude_floor_m": 1.180772072582993e-06,
@@ -571,21 +578,21 @@
             "origin_radius_m": 0.400113
           },
           "cleanup": {
-            "faces_before": 316,
-            "faces_after": 316,
+            "faces_before": 315,
+            "faces_after": 315,
             "dissolve_dist_m": 7.680082776371103e-07
           },
           "reproducible": true,
           "normal_diagnostic_deg": {
             "max_deg": 90.0,
-            "p99_deg": 89.73,
-            "p95_deg": 86.663,
-            "backface_corr_frac": 0.0736,
+            "p99_deg": 89.705,
+            "p95_deg": 86.701,
+            "backface_corr_frac": 0.07075,
             "samples": 20000
           },
           "render_gate": {
             "label": "tiger_1_link_L3",
-            "distance_m": 473.933,
+            "distance_m": 500.951,
             "tile_px": 512,
             "tile_vfov_rad": 0.0284767,
             "samples": 64,
@@ -593,104 +600,104 @@
             "views": {
               "three_quarter": {
                 "signal": {
-                  "footprint_px": 146,
-                  "silhouette_band_px": 169,
-                  "silhouette_band_frac": 0.536508,
-                  "mean_abs_diff": 0.028787,
-                  "p99_abs_diff": 0.31391,
-                  "max_abs_diff": 0.427451,
-                  "frac_over": 0.082192
+                  "footprint_px": 128,
+                  "silhouette_band_px": 155,
+                  "silhouette_band_frac": 0.547703,
+                  "mean_abs_diff": 0.033645,
+                  "p99_abs_diff": 0.32887,
+                  "max_abs_diff": 0.406373,
+                  "frac_over": 0.117188
                 },
                 "noise_floor": {
-                  "footprint_px": 153,
-                  "silhouette_band_px": 160,
-                  "silhouette_band_frac": 0.511182,
-                  "mean_abs_diff": 0.00302,
-                  "p99_abs_diff": 0.01801,
-                  "max_abs_diff": 0.021078,
+                  "footprint_px": 130,
+                  "silhouette_band_px": 151,
+                  "silhouette_band_frac": 0.537367,
+                  "mean_abs_diff": 0.002428,
+                  "p99_abs_diff": 0.015522,
+                  "max_abs_diff": 0.019608,
                   "frac_over": 0.0
                 },
                 "defect_floor": {
-                  "footprint_px": 154,
-                  "silhouette_band_px": 158,
-                  "silhouette_band_frac": 0.50641,
-                  "mean_abs_diff": 0.020819,
-                  "p99_abs_diff": 0.232696,
-                  "max_abs_diff": 0.256863,
-                  "frac_over": 0.084416
+                  "footprint_px": 131,
+                  "silhouette_band_px": 150,
+                  "silhouette_band_frac": 0.533808,
+                  "mean_abs_diff": 0.021077,
+                  "p99_abs_diff": 0.239191,
+                  "max_abs_diff": 0.260049,
+                  "frac_over": 0.076336
                 },
-                "defect_score": 1.447666,
+                "defect_score": 1.673924,
                 "under_absolute_floor": false,
                 "pass": false
               },
               "grazing": {
                 "signal": {
-                  "footprint_px": 123,
-                  "silhouette_band_px": 174,
-                  "silhouette_band_frac": 0.585859,
-                  "mean_abs_diff": 0.043741,
-                  "p99_abs_diff": 0.348823,
-                  "max_abs_diff": 0.514461,
-                  "frac_over": 0.146341
+                  "footprint_px": 109,
+                  "silhouette_band_px": 159,
+                  "silhouette_band_frac": 0.593284,
+                  "mean_abs_diff": 0.044457,
+                  "p99_abs_diff": 0.303961,
+                  "max_abs_diff": 0.47402,
+                  "frac_over": 0.174312
                 },
                 "noise_floor": {
-                  "footprint_px": 127,
-                  "silhouette_band_px": 169,
-                  "silhouette_band_frac": 0.570946,
-                  "mean_abs_diff": 0.004118,
-                  "p99_abs_diff": 0.028539,
-                  "max_abs_diff": 0.035784,
+                  "footprint_px": 111,
+                  "silhouette_band_px": 157,
+                  "silhouette_band_frac": 0.585821,
+                  "mean_abs_diff": 0.004153,
+                  "p99_abs_diff": 0.031985,
+                  "max_abs_diff": 0.03799,
                   "frac_over": 0.0
                 },
                 "defect_floor": {
-                  "footprint_px": 129,
-                  "silhouette_band_px": 167,
-                  "silhouette_band_frac": 0.564189,
-                  "mean_abs_diff": 0.079526,
-                  "p99_abs_diff": 0.371245,
-                  "max_abs_diff": 0.406373,
-                  "frac_over": 0.317829
+                  "footprint_px": 113,
+                  "silhouette_band_px": 155,
+                  "silhouette_band_frac": 0.578358,
+                  "mean_abs_diff": 0.080154,
+                  "p99_abs_diff": 0.351824,
+                  "max_abs_diff": 0.366422,
+                  "frac_over": 0.327434
                 },
-                "defect_score": 0.525448,
+                "defect_score": 0.530309,
                 "under_absolute_floor": false,
                 "pass": false
               },
               "edge_on": {
                 "signal": {
-                  "footprint_px": 82,
-                  "silhouette_band_px": 98,
-                  "silhouette_band_frac": 0.544444,
-                  "mean_abs_diff": 0.042949,
-                  "p99_abs_diff": 0.254868,
-                  "max_abs_diff": 0.313235,
-                  "frac_over": 0.158537
+                  "footprint_px": 67,
+                  "silhouette_band_px": 96,
+                  "silhouette_band_frac": 0.588957,
+                  "mean_abs_diff": 0.041952,
+                  "p99_abs_diff": 0.253941,
+                  "max_abs_diff": 0.272059,
+                  "frac_over": 0.164179
                 },
                 "noise_floor": {
-                  "footprint_px": 82,
-                  "silhouette_band_px": 96,
-                  "silhouette_band_frac": 0.539326,
-                  "mean_abs_diff": 0.003067,
-                  "p99_abs_diff": 0.017985,
-                  "max_abs_diff": 0.018382,
+                  "footprint_px": 69,
+                  "silhouette_band_px": 93,
+                  "silhouette_band_frac": 0.574074,
+                  "mean_abs_diff": 0.003055,
+                  "p99_abs_diff": 0.012951,
+                  "max_abs_diff": 0.014951,
                   "frac_over": 0.0
                 },
                 "defect_floor": {
-                  "footprint_px": 84,
-                  "silhouette_band_px": 94,
-                  "silhouette_band_frac": 0.52809,
-                  "mean_abs_diff": 0.075563,
-                  "p99_abs_diff": 0.45014,
-                  "max_abs_diff": 0.454412,
-                  "frac_over": 0.22619
+                  "footprint_px": 70,
+                  "silhouette_band_px": 92,
+                  "silhouette_band_frac": 0.567901,
+                  "mean_abs_diff": 0.077192,
+                  "p99_abs_diff": 0.45239,
+                  "max_abs_diff": 0.456618,
+                  "frac_over": 0.228571
                 },
-                "defect_score": 0.550127,
+                "defect_score": 0.524664,
                 "under_absolute_floor": false,
                 "pass": false
               }
             },
-            "worst_mean_abs_diff": 0.043741,
-            "worst_frac_over": 0.158537,
-            "worst_defect_score": 1.447666,
+            "worst_mean_abs_diff": 0.044457,
+            "worst_frac_over": 0.174312,
+            "worst_defect_score": 1.673924,
             "thresholds": {
               "max_mean_abs_diff": 0.02,
               "max_footprint_frac_over": 0.02,
@@ -701,8 +708,8 @@
             "pass": false,
             "material_source": "FELL BACK to the .blend material 'Mat_Track_Link' \u2014 imported material 'Mat_Track_Link.001' has 3 texture(s) with no pixel data (albedo, roughness, normal) \u2014 Blender cannot read the KHR_texture_basisu KTX2 images the bake writes"
           },
-          "glb_sha256": "9fd6ce1fda13ff6f07c7a24d2090c8a6a646a1449fb01bc2e22a7d5f7e261c73",
-          "glb_bytes": 33256
+          "glb_sha256": "3af61f7773559a59cce29c6e851bd5a3c99781daaf4e44498bc0ba5692962ed3",
+          "glb_bytes": 33156
         },
         {
           "level": 4,
@@ -713,7 +720,7 @@
           "node": "Link_LOD5",
           "tris": 194,
           "verts": 582,
-          "shed_fraction_vs_parent": 0.386076,
+          "shed_fraction_vs_parent": 0.384127,
           "parent_level": "L3",
           "dev_source_mm": 56.222763,
           "dev_source_mm_upper": 56.759201,
@@ -783,7 +790,7 @@
                   "footprint_px": 12,
                   "silhouette_band_px": 72,
                   "silhouette_band_frac": 0.857143,
-                  "mean_abs_diff": 0.002798,
+                  "mean_abs_diff": 0.002839,
                   "p99_abs_diff": 0.007681,
                   "max_abs_diff": 0.007843,
                   "frac_over": 0.0
@@ -797,7 +804,7 @@
                   "max_abs_diff": 0.133088,
                   "frac_over": 0.083333
                 },
-                "defect_score": 0.730782,
+                "defect_score": 0.729534,
                 "under_absolute_floor": false,
                 "pass": false
               },
@@ -847,7 +854,7 @@
                   "footprint_px": 6,
                   "silhouette_band_px": 41,
                   "silhouette_band_frac": 0.87234,
-                  "mean_abs_diff": 0.011193,
+                  "mean_abs_diff": 0.011152,
                   "p99_abs_diff": 0.029534,
                   "max_abs_diff": 0.030147,
                   "frac_over": 0.0
@@ -861,14 +868,14 @@
                   "max_abs_diff": 0.119608,
                   "frac_over": 0.166667
                 },
-                "defect_score": 0.236639,
+                "defect_score": 0.237743,
                 "under_absolute_floor": true,
                 "pass": true
               }
             },
             "worst_mean_abs_diff": 0.03848,
             "worst_frac_over": 0.2,
-            "worst_defect_score": 0.730782,
+            "worst_defect_score": 0.729534,
             "thresholds": {
               "max_mean_abs_diff": 0.02,
               "max_footprint_frac_over": 0.02,
