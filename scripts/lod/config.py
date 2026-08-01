@@ -148,10 +148,15 @@ GATES = {
     "uv_area_eps": 1.0e-12,
     "max_tangent_default_faces": 0,
     "max_tangent_default_verts": 0,
-    # Structural: duplicate faces, non-finite attributes, orientation flips across a shared edge.
+    # Structural: duplicate faces, non-finite attributes, orientation flips across a shared edge,
+    # and edges with more than two faces on them. The last one was measured and REPORTED for a
+    # while before it was enforced, which is its own lesson: a counter nothing compares against is
+    # decoration. A non-manifold edge has no consistent normal or tangent frame, and the ballistics
+    # bake treats a non-watertight volume as zero armour, silently.
     "max_duplicate_faces": 0,
     "max_nonfinite": 0,
     "max_orientation_flips": 0,
+    "max_nonmanifold_edges": 0,
     # A vanished small part has a near-zero Hausdorff distance, so deviation cannot see it. Counted
     # by connected component after welding coincident positions.
     "components_must_match": True,
@@ -282,7 +287,35 @@ ASSETS = (
 #: Bumped whenever the generation ALGORITHM changes in a way that can move a shipped level. The
 #: manifest records it; a mismatch between a committed manifest and this constant means the chain
 #: was cut by a different pipeline than the one in the tree.
-GENERATOR_VERSION = "2.0.0"
+GENERATOR_VERSION = "2.1.0"
+
+#: The toolchain the corpus was cut with, ASSERTED before generation rather than merely recorded.
+#:
+#: A decimator is a program, not a specification: Blender's collapse can change its tie-breaking in
+#: a point release and quietly move every level in the game. Recording the version after the fact
+#: tells you which build produced a chain; asserting it first is what stops two machines producing
+#: two different corpora and nobody noticing. Set `OVERMATCH_LOD_ALLOW_BLENDER` to override for a
+#: deliberate upgrade — which is a corpus regeneration review, per ADR 0033's "Simplifier choice".
+EXPECTED_BLENDER = "5.1.2"
+BLENDER_OVERRIDE_ENV = "OVERMATCH_LOD_ALLOW_BLENDER"
+
+#: The generator's own sources, hashed into the manifest. `GENERATOR_VERSION` is a promise a human
+#: remembers to keep; this is the thing that actually changed. A manifest whose source digest does
+#: not match the tree was cut by code that is no longer here, whatever the version string says.
+GENERATOR_SOURCES = ("config.py", "measure.py", "generate.py", "render_gate.py", "chain.py")
+
+
+def generator_digest():
+    """sha256 over the generator's sources, in a fixed order."""
+    import hashlib
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    digest = hashlib.sha256()
+    for name in GENERATOR_SOURCES:
+        with open(os.path.join(here, name), "rb") as handle:
+            digest.update(name.encode())
+            digest.update(handle.read())
+    return digest.hexdigest()
 
 #: Where the manifest lands. Committed; the single seam between generation and runtime.
 MANIFEST_RELPATH = "assets/lod_manifest.json"

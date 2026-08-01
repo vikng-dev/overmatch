@@ -208,7 +208,16 @@ class Surface:
         lo, hi = self.verts.min(axis=0), self.verts.max(axis=0)
         self.bbox_min, self.bbox_max = lo, hi
         self.diagonal = float(np.linalg.norm(hi - lo))
+        #: Half the AABB diagonal. A SHAPE measure — use it for scale-relative thresholds, never
+        #: for the runtime slack: it bounds distance from the box CENTRE, and bevy's abrupt
+        #: `VisibilityRange` measures to the entity ORIGIN, which is somewhere else entirely.
         self.radius = 0.5 * self.diagonal
+        #: Farthest vertex from the object ORIGIN — the honest slack for origin-anchored selection.
+        #: On the shipped Link this is 0.400124 m against a half-diagonal of 0.384004 m, so the old
+        #: slack switched every level 16 mm early.
+        self.origin_radius = (
+            float(np.linalg.norm(self.verts, axis=1).max()) if len(self.verts) else 0.0
+        )
         self._bvh = None
 
     # -- geometry helpers ------------------------------------------------------------------------
@@ -342,31 +351,92 @@ class Surface:
             "tangent_default_verts": int(((touched > 0) & (touched == bad_touched)).sum()),
             "bbox_mm": [round(float(v) * 1000.0, 4) for v in (self.bbox_max - self.bbox_min)],
             "radius_m": round(self.radius, 6),
+            "origin_radius_m": round(self.origin_radius, 6),
         }
 
 
 # ── the certified deviation ──────────────────────────────────────────────────────────────────────
 
-def _one_way(src, dst, tol, max_nodes, target=None, rel_tol=0.0):
-    """Certified max over `src`'s surface of the distance to `dst`. Returns (lower, upper) metres.
+def _patch_bound(corners, distances):
+    """The covering-radius bound over one sub-triangle: min_k ( d(v_k) + max_j |v_k - v_j| ).
 
-    STOPPING, and why it is not just `tol`. The bracket closes by subdividing patches until their
-    covering radius is small, so an ABSOLUTE tolerance costs work in inverse proportion to the
-    answer: proving "this deviation is 0.05 mm +/- 0.02 mm" needs a quarter of a million patches,
-    proving "this one is 3.9 mm +/- 0.04 mm" needs a few thousand. Three stops, all sound:
+    Valid because d is 1-Lipschitz and |p - v_k| is convex, so its maximum over the triangle is
+    attained at another CORNER — a triangle being the convex hull of its three vertices.
+    """
+    return min(
+        distances[k] + max(float(np.linalg.norm(corners[k] - corners[j])) for j in range(3))
+        for k in range(3)
+    )
 
-      * `rel_tol` — a bracket proportional to the answer. 1 % of 3.9 mm is a bracket nobody can see.
-      * `target` reached from above — once the UPPER bound is under the target, the answer to the
-        only question being asked ("does this clear the rung?") is already yes; refining further
-        buys nothing.
-      * `target` exceeded from below — once a SAMPLED point is over the target the true worst case
-        is too, so the candidate is rejected without finishing the proof.
 
-    Both target stops are one-directional facts about the two-way maximum, which is why the caller
-    may apply them per direction.
+def branch_and_bound(seeds, distance_at, tol, max_nodes, target=None, rel_tol=0.0):
+    """Bracket max over the seed patches of a 1-Lipschitz `distance_at`. Returns (lower, upper).
+
+    `distance_at(key, point) -> float` is injected rather than reached for, so the bound itself can
+    be regression-tested against a synthetic field with a KNOWN interior maximum, without Blender
+    and without a BVH. That is not a convenience: the previous version of this function returned an
+    "upper bound" that was not one, and no test could have caught it because the only way to call
+    it was through a mesh whose true worst case nobody knew independently.
+
+    THE PRUNED PATCHES ARE PART OF THE ANSWER. A child whose bound is already within tolerance is
+    not queued — expanding it cannot improve the lower bound enough to matter — but its bound still
+    BOUNDS a region of the surface, and that region may hold a maximum above every point sampled so
+    far. Dropping it on the floor and then reporting `max(best, live_heap_top)` reports a number
+    that is not an upper bound at all. Every pruned bound is folded into `pruned` and into the
+    returned upper endpoint, which is what makes the endpoint's name true.
+
+    STOPPING. `tol`/`rel_tol` close the bracket; `target` stops as soon as the caller's actual
+    question is decided — upper already under it (accept) or a SAMPLED point already over it
+    (reject). Both are sound one-directional facts, which is why a caller may apply them per
+    direction of a two-way measurement.
     """
     import heapq
 
+    best = 0.0
+    pruned = 0.0
+    heap = []
+    counter = 0
+    for corners, distances in seeds:
+        best = max(best, max(distances))
+        counter += 1
+        heapq.heappush(heap, (-_patch_bound(corners, distances), counter, corners, distances))
+
+    nodes = 0
+    while heap:
+        live = -heap[0][0]
+        slack = max(tol, rel_tol * best)
+        if live <= best + slack or nodes >= max_nodes:
+            break
+        if target is not None and (live <= target or best > target):
+            break
+        _, _, corners, distances = heapq.heappop(heap)
+        nodes += 1
+        a, b, c = corners
+        ab, bc, ca = 0.5 * (a + b), 0.5 * (b + c), 0.5 * (c + a)
+        d_ab = distance_at(("m", tuple(ab)), ab)
+        d_bc = distance_at(("m", tuple(bc)), bc)
+        d_ca = distance_at(("m", tuple(ca)), ca)
+        best = max(best, d_ab, d_bc, d_ca)
+        slack = max(tol, rel_tol * best)
+        for patch, patch_d in (
+            ((a, ab, ca), (distances[0], d_ab, d_ca)),
+            ((ab, b, bc), (d_ab, distances[1], d_bc)),
+            ((ca, bc, c), (d_ca, d_bc, distances[2])),
+            ((ab, bc, ca), (d_ab, d_bc, d_ca)),
+        ):
+            sub = _patch_bound(patch, patch_d)
+            if sub > best + slack:
+                counter += 1
+                heapq.heappush(heap, (-sub, counter, patch, patch_d))
+            else:
+                pruned = max(pruned, sub)
+
+    live = -heap[0][0] if heap else 0.0
+    return best, max(best, pruned, live)
+
+
+def _one_way(src, dst, tol, max_nodes, target=None, rel_tol=0.0):
+    """Certified max over `src`'s surface of the distance to `dst`. Returns (lower, upper) metres."""
     from mathutils import Vector
 
     find = dst.bvh.find_nearest
@@ -380,52 +450,70 @@ def _one_way(src, dst, tol, max_nodes, target=None, rel_tol=0.0):
             cache[key] = value
         return value
 
-    best = 0.0
-    heap = []
-    counter = 0
+    seeds = []
     for t in range(src.tri_count):
         corners = (src.p0[t], src.p1[t], src.p2[t])
         ids = src.tri_v[t]
-        distances = tuple(distance_at(int(ids[k]), corners[k]) for k in range(3))
-        best = max(best, max(distances))
-        bound = min(
-            distances[k] + max(float(np.linalg.norm(corners[k] - corners[j])) for j in range(3))
-            for k in range(3)
+        seeds.append(
+            (corners, tuple(distance_at(int(ids[k]), corners[k]) for k in range(3)))
         )
-        counter += 1
-        heapq.heappush(heap, (-bound, counter, corners, distances))
+    return branch_and_bound(seeds, distance_at, tol, max_nodes, target, rel_tol)
 
-    nodes = 0
-    while heap:
-        bound = -heap[0][0]
-        if bound <= best + max(tol, rel_tol * best) or nodes >= max_nodes:
-            break
-        if target is not None and (bound <= target or best > target):
-            break
-        _, _, corners, distances = heapq.heappop(heap)
-        nodes += 1
-        a, b, c = corners
-        ab, bc, ca = 0.5 * (a + b), 0.5 * (b + c), 0.5 * (c + a)
-        d_ab = distance_at(("m", tuple(ab)), ab)
-        d_bc = distance_at(("m", tuple(bc)), bc)
-        d_ca = distance_at(("m", tuple(ca)), ca)
-        best = max(best, d_ab, d_bc, d_ca)
-        for patch, patch_d in (
-            ((a, ab, ca), (distances[0], d_ab, d_ca)),
-            ((ab, b, bc), (d_ab, distances[1], d_bc)),
-            ((ca, bc, c), (d_ca, d_bc, distances[2])),
-            ((ab, bc, ca), (d_ab, d_bc, d_ca)),
-        ):
-            sub = min(
-                patch_d[k] + max(float(np.linalg.norm(patch[k] - patch[j])) for j in range(3))
-                for k in range(3)
-            )
-            if sub > best + max(tol, rel_tol * best):
-                counter += 1
-                heapq.heappush(heap, (-sub, counter, patch, patch_d))
 
-    top = -heap[0][0] if heap else best
-    return best, max(best, top)
+def pareto_minimal(outputs, deviation_for, target_mm):
+    """The FEWEST-triangle realized output whose certified upper bound clears `target_mm`.
+
+    `outputs` is every triangle count the decimator can actually produce, ascending;
+    `deviation_for(tris, target_mm)` returns that output's bracket as `{"lo_mm", "up_mm"}`.
+
+    PROVEN MINIMAL BY EXHAUSTION, which is the whole point. The previous search bisected
+    feasible/infeasible budgets and walked down until the first failure — assuming the monotonicity
+    this pipeline's own doctrine says does not hold, so a lower feasible ISLAND below an infeasible
+    step was invisible and the winner was not minimal. Scanning ascending and returning the first
+    feasible output means everything smaller has been measured and rejected, with no assumption
+    about the shape of the curve at all.
+
+    It lives here, away from `bpy`, so the logic can be tested against a synthetic non-monotone
+    feasibility function without Blender.
+    """
+    for tris in outputs:
+        entry = deviation_for(tris, target_mm)
+        if entry is not None and entry["up_mm"] <= target_mm:
+            return entry
+    return None
+
+
+def same_surface(a, b, tol=1e-9):
+    """Are these two decodes the SAME surface? Returns (verdict, reason).
+
+    L0 is the source (ADR 0033 §1) and that has to be PROVEN, not sampled. Vertex distance plus a
+    triangle count does not prove it: the exporter splits corners by (position, normal, uv), so the
+    same shoe decodes to 3 888 vertices out of an 815-vertex Blender mesh, and a mesh could match at
+    every vertex and still differ in how the vertices are joined — an interior face flipped,
+    re-triangulated across the other diagonal, or a hole punched between coincident corners.
+
+    So the comparison is on the CANONICAL TOPOLOGY: weld coincident positions, then compare the
+    welded position set and the welded triangle set as sets. That is invariant to the exporter's
+    vertex splitting and index ordering, and it is not invariant to anything that changes the
+    surface. Positions are compared at `tol` (a nanometre) because the shipped buffer is float32.
+    """
+    if a.tri_count != b.tri_count:
+        return False, f"triangle counts differ: {a.tri_count} against {b.tri_count}"
+    keys_a = np.round(a.verts / tol).astype(np.int64)
+    keys_b = np.round(b.verts / tol).astype(np.int64)
+    uniq_a, inv_a = np.unique(keys_a, axis=0, return_inverse=True)
+    uniq_b, inv_b = np.unique(keys_b, axis=0, return_inverse=True)
+    if uniq_a.shape != uniq_b.shape or not np.array_equal(uniq_a, uniq_b):
+        return False, (
+            f"welded position sets differ: {len(uniq_a)} against {len(uniq_b)} distinct positions"
+        )
+    # `np.unique` returns the welded positions sorted, so equal position sets means the welded
+    # INDEX spaces already agree and the triangle sets are directly comparable.
+    tris_a = np.unique(np.sort(inv_a.reshape(-1)[a.tri_v], axis=1), axis=0)
+    tris_b = np.unique(np.sort(inv_b.reshape(-1)[b.tri_v], axis=1), axis=0)
+    if tris_a.shape != tris_b.shape or not np.array_equal(tris_a, tris_b):
+        return False, "welded triangle sets differ — same points, joined differently"
+    return True, "identical welded topology and positions"
 
 
 def vertex_deviation(a, b):

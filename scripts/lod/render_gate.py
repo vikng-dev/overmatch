@@ -272,8 +272,10 @@ def compare(pairs, material, render_config, view, out_dir):
         parent(seed)     the level being replaced
         parent(seed+1)   the NOISE FLOOR — Cycles disagreeing with itself on identical geometry
         child(seed)      the level under test: the SIGNAL
-        child, tilted    the DEFECT FLOOR — the same child with every shading normal rotated by a
-                         declared angle: positionally perfect, lit wrong, i.e. the red-test class
+        parent, tilted   the DEFECT FLOOR — the PARENT with every shading normal rotated by a
+                         declared angle: same geometry, lit wrong, i.e. the red-test class in
+                         isolation. Tilting the child instead would fold the child's ordinary LOD
+                         difference into the denominator and deflate every score.
 
     and the verdict is where the signal sits between them:
 
@@ -314,7 +316,12 @@ def compare(pairs, material, render_config, view, out_dir):
             ("parent", parent, seed, 0.0),
             ("control", parent, seed + 1, 0.0),
             ("child", child, seed, 0.0),
-            ("defect", child, seed, tilt),
+            # THE DEFECT IS THE PARENT WITH BROKEN NORMALS, NOT THE CHILD. Tilting the child put its
+            # ordinary LOD difference into the denominator alongside the injected defect, so the
+            # bracket measured "decimation plus broken normals" and every score was deflated by
+            # however large the decimation difference already was. Tilting the PARENT isolates the
+            # defect: parent-vs-tilted-parent differs by the normals and by nothing else.
+            ("defect", parent, seed, tilt),
         ):
             mesh = _mesh_from_surface(surface, f"{label}_{role}", role_tilt)
             mesh.materials.clear()

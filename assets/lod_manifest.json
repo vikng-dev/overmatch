@@ -3,8 +3,11 @@
   "schema_version": 1,
   "generator": {
     "script": "scripts/lod/generate.py",
-    "version": "2.0.0",
-    "blender": "5.1.2 (ec6e62d40fa9)"
+    "version": "2.1.0",
+    "sources_sha256": "2d263173763e68c76b17835a7d6984cdb482fc5e3eec0aedd609a7fbd467edb1",
+    "blender": "5.1.2 (ec6e62d40fa9)",
+    "blender_expected": "5.1.2",
+    "gltf_exporter": "5.1.20"
   },
   "ladder": {
     "e1_mm": 3.89,
@@ -36,6 +39,7 @@
       "max_duplicate_faces": 0,
       "max_nonfinite": 0,
       "max_orientation_flips": 0,
+      "max_nonmanifold_edges": 0,
       "components_must_match": true
     },
     "render": {
@@ -106,20 +110,21 @@
             179.2438,
             178.9648
           ],
-          "radius_m": 0.384004
+          "radius_m": 0.384004,
+          "origin_radius_m": 0.400124
         }
       },
       "topology_floor_tris": 194,
       "sliver_floor_m": 1.180772072582993e-06,
       "termination": "topology_floor",
-      "deviation_evaluations": 39,
+      "deviation_evaluations": 186,
       "skipped_rungs": [
         {
           "rung": 3,
           "e_target_mm": 15.56,
-          "best_tris": 531,
-          "shed_fraction": 0.0892,
-          "reason": "sheds 8.9% of L2, below SKIP_FRACTION 30%"
+          "best_tris": 537,
+          "shed_fraction": 0.0789,
+          "reason": "sheds 7.9% of L2, below SKIP_FRACTION 30%"
         }
       ],
       "levels": [
@@ -128,7 +133,7 @@
           "rung": 0,
           "role": "source",
           "tris": 1661,
-          "verts": 815,
+          "verts": 3888,
           "glb": "assets/tiger_1/tiger_1.glb",
           "node": "Link",
           "e_target_mm": 0.0,
@@ -138,7 +143,7 @@
           "switch_m": 0.0,
           "validity": {
             "tris": 1661,
-            "verts": 815,
+            "verts": 3888,
             "components": 1,
             "duplicate_faces": 0,
             "nonfinite_attrs": 0,
@@ -146,7 +151,7 @@
             "boundary_edges": 39,
             "nonmanifold_edges": 0,
             "min_altitude_m": 4.723088290331972e-06,
-            "min_altitude_floor_m": 7.680082776371103e-07,
+            "min_altitude_floor_m": 1.180772072582993e-06,
             "slivers_below_floor": 0,
             "min_tri_area_mm2": 0.06204593061884272,
             "tangent_default_faces": 0,
@@ -156,12 +161,14 @@
               179.2438,
               178.9648
             ],
-            "radius_m": 0.384004
+            "radius_m": 0.384004,
+            "origin_radius_m": 0.400124
           },
           "glb_sha256": "3f02434ddb8a43668fc0855f5df40f2bac021d99227c0643494e161438dcaa4e",
-          "shipped_tris": 1661,
+          "blender_source_verts": 815,
           "shipped_dev_from_source_mm": 0.0,
-          "shipped_matches_source": true
+          "shipped_matches_source": true,
+          "identity_proof": "identical welded topology and positions"
         },
         {
           "level": 1,
@@ -175,15 +182,15 @@
           "shed_fraction_vs_parent": 0.48525,
           "parent_level": "L0",
           "dev_source_mm": 3.057159,
-          "dev_source_mm_upper": 3.076481,
-          "dev_source_bracket_mm": 0.019322,
+          "dev_source_mm_upper": 3.087723,
+          "dev_source_bracket_mm": 0.030564,
           "dev_source_to_level_mm": 3.057159,
           "dev_level_to_source_mm": 3.04603,
           "pairwise_mm": 3.057159,
-          "pairwise_mm_upper": 3.076481,
-          "switch_m": 55.6942,
-          "switch_from_source_dev_m": 55.6942,
-          "switch_from_pairwise_m": 55.6942,
+          "pairwise_mm_upper": 3.087723,
+          "switch_m": 55.9124,
+          "switch_from_source_dev_m": 55.9124,
+          "switch_from_pairwise_m": 55.9124,
           "validity": {
             "tris": 855,
             "verts": 2283,
@@ -204,13 +211,15 @@
               180.0426,
               178.8887
             ],
-            "radius_m": 0.38409
+            "radius_m": 0.38409,
+            "origin_radius_m": 0.400124
           },
           "cleanup": {
             "faces_before": 855,
             "faces_after": 855,
             "dissolve_dist_m": 7.680082776371103e-07
           },
+          "reproducible": true,
           "normal_diagnostic_deg": {
             "max_deg": 90.0,
             "p99_deg": 40.005,
@@ -220,7 +229,7 @@
           },
           "render_gate": {
             "label": "tiger_1_link_L1",
-            "distance_m": 55.694,
+            "distance_m": 55.912,
             "tile_px": 512,
             "tile_vfov_rad": 0.0284767,
             "samples": 64,
@@ -228,104 +237,104 @@
             "views": {
               "three_quarter": {
                 "signal": {
-                  "footprint_px": 6693,
-                  "silhouette_band_px": 734,
-                  "silhouette_band_frac": 0.098829,
-                  "mean_abs_diff": 0.042332,
-                  "p99_abs_diff": 0.320157,
-                  "max_abs_diff": 0.543382,
-                  "frac_over": 0.085313
+                  "footprint_px": 6649,
+                  "silhouette_band_px": 724,
+                  "silhouette_band_frac": 0.098196,
+                  "mean_abs_diff": 0.026008,
+                  "p99_abs_diff": 0.328324,
+                  "max_abs_diff": 0.55,
+                  "frac_over": 0.071891
                 },
                 "noise_floor": {
-                  "footprint_px": 6726,
-                  "silhouette_band_px": 685,
-                  "silhouette_band_frac": 0.09243,
-                  "mean_abs_diff": 0.00304,
-                  "p99_abs_diff": 0.017341,
-                  "max_abs_diff": 0.064461,
+                  "footprint_px": 6682,
+                  "silhouette_band_px": 678,
+                  "silhouette_band_frac": 0.09212,
+                  "mean_abs_diff": 0.003021,
+                  "p99_abs_diff": 0.015931,
+                  "max_abs_diff": 0.057353,
                   "frac_over": 0.0
                 },
                 "defect_floor": {
-                  "footprint_px": 6693,
-                  "silhouette_band_px": 734,
-                  "silhouette_band_frac": 0.098829,
-                  "mean_abs_diff": 0.074536,
-                  "p99_abs_diff": 0.353118,
-                  "max_abs_diff": 0.565441,
-                  "frac_over": 0.247722
+                  "footprint_px": 6683,
+                  "silhouette_band_px": 675,
+                  "silhouette_band_frac": 0.091737,
+                  "mean_abs_diff": 0.050261,
+                  "p99_abs_diff": 0.302628,
+                  "max_abs_diff": 0.412745,
+                  "frac_over": 0.17133
                 },
-                "defect_score": 0.549569,
+                "defect_score": 0.4866,
                 "under_absolute_floor": false,
-                "pass": false
+                "pass": true
               },
               "grazing": {
                 "signal": {
-                  "footprint_px": 7162,
-                  "silhouette_band_px": 757,
-                  "silhouette_band_frac": 0.095593,
-                  "mean_abs_diff": 0.033316,
-                  "p99_abs_diff": 0.302206,
-                  "max_abs_diff": 0.513971,
-                  "frac_over": 0.062413
+                  "footprint_px": 7113,
+                  "silhouette_band_px": 738,
+                  "silhouette_band_frac": 0.094001,
+                  "mean_abs_diff": 0.02101,
+                  "p99_abs_diff": 0.295314,
+                  "max_abs_diff": 0.509314,
+                  "frac_over": 0.056094
                 },
                 "noise_floor": {
-                  "footprint_px": 7181,
-                  "silhouette_band_px": 728,
-                  "silhouette_band_frac": 0.092047,
-                  "mean_abs_diff": 0.003462,
-                  "p99_abs_diff": 0.024314,
-                  "max_abs_diff": 0.078921,
+                  "footprint_px": 7133,
+                  "silhouette_band_px": 705,
+                  "silhouette_band_frac": 0.089946,
+                  "mean_abs_diff": 0.003438,
+                  "p99_abs_diff": 0.023284,
+                  "max_abs_diff": 0.057598,
                   "frac_over": 0.0
                 },
                 "defect_floor": {
-                  "footprint_px": 7162,
-                  "silhouette_band_px": 757,
-                  "silhouette_band_frac": 0.095593,
-                  "mean_abs_diff": 0.187447,
-                  "p99_abs_diff": 0.472549,
-                  "max_abs_diff": 0.615931,
-                  "frac_over": 0.618403
+                  "footprint_px": 7136,
+                  "silhouette_band_px": 702,
+                  "silhouette_band_frac": 0.089564,
+                  "mean_abs_diff": 0.179171,
+                  "p99_abs_diff": 0.447953,
+                  "max_abs_diff": 0.476471,
+                  "frac_over": 0.600476
                 },
-                "defect_score": 0.162263,
+                "defect_score": 0.099993,
                 "under_absolute_floor": false,
                 "pass": true
               },
               "edge_on": {
                 "signal": {
-                  "footprint_px": 4456,
-                  "silhouette_band_px": 429,
-                  "silhouette_band_frac": 0.08782,
-                  "mean_abs_diff": 0.039905,
-                  "p99_abs_diff": 0.291362,
-                  "max_abs_diff": 0.530882,
-                  "frac_over": 0.065081
+                  "footprint_px": 4415,
+                  "silhouette_band_px": 436,
+                  "silhouette_band_frac": 0.089878,
+                  "mean_abs_diff": 0.02412,
+                  "p99_abs_diff": 0.277069,
+                  "max_abs_diff": 0.52549,
+                  "frac_over": 0.053681
                 },
                 "noise_floor": {
-                  "footprint_px": 4469,
-                  "silhouette_band_px": 414,
-                  "silhouette_band_frac": 0.084784,
-                  "mean_abs_diff": 0.002626,
-                  "p99_abs_diff": 0.017647,
-                  "max_abs_diff": 0.043873,
+                  "footprint_px": 4432,
+                  "silhouette_band_px": 417,
+                  "silhouette_band_frac": 0.085997,
+                  "mean_abs_diff": 0.002645,
+                  "p99_abs_diff": 0.017326,
+                  "max_abs_diff": 0.044363,
                   "frac_over": 0.0
                 },
                 "defect_floor": {
-                  "footprint_px": 4456,
-                  "silhouette_band_px": 429,
-                  "silhouette_band_frac": 0.08782,
-                  "mean_abs_diff": 0.206062,
-                  "p99_abs_diff": 0.505882,
-                  "max_abs_diff": 0.545343,
-                  "frac_over": 0.517729
+                  "footprint_px": 4434,
+                  "silhouette_band_px": 415,
+                  "silhouette_band_frac": 0.085585,
+                  "mean_abs_diff": 0.194137,
+                  "p99_abs_diff": 0.484314,
+                  "max_abs_diff": 0.498284,
+                  "frac_over": 0.485792
                 },
-                "defect_score": 0.183247,
+                "defect_score": 0.112146,
                 "under_absolute_floor": false,
                 "pass": true
               }
             },
-            "worst_mean_abs_diff": 0.042332,
-            "worst_frac_over": 0.085313,
-            "worst_defect_score": 0.549569,
+            "worst_mean_abs_diff": 0.026008,
+            "worst_frac_over": 0.071891,
+            "worst_defect_score": 0.4866,
             "thresholds": {
               "max_mean_abs_diff": 0.02,
               "max_footprint_frac_over": 0.02,
@@ -333,10 +342,11 @@
               "defect_fraction": 0.5,
               "defect_normal_deg": 20.0
             },
-            "pass": false
+            "pass": true,
+            "material_source": "FELL BACK to the .blend material 'Mat_Track_Link' \u2014 imported material 'Mat_Track_Link.001' has 3 texture(s) with no pixel data (albedo, roughness, normal) \u2014 Blender cannot read the KHR_texture_basisu KTX2 images the bake writes"
           },
-          "glb_sha256": "6cc295f7f9b34e427d0ea5c2a05e2c5ab5e4a09ba44381a3a7631fbdf8d75f00",
-          "glb_bytes": 79220
+          "glb_sha256": "405f27a2b0f57d5b2e4fde5c5fe4f0e7efca269d2ec58008f602bf66b13434ad",
+          "glb_bytes": 79216
         },
         {
           "level": 2,
@@ -356,9 +366,9 @@
           "dev_level_to_source_mm": 6.319632,
           "pairwise_mm": 6.949885,
           "pairwise_mm_upper": 7.019359,
-          "switch_m": 126.581,
-          "switch_from_source_dev_m": 126.581,
-          "switch_from_pairwise_m": 126.5808,
+          "switch_m": 126.5971,
+          "switch_from_source_dev_m": 126.5971,
+          "switch_from_pairwise_m": 126.5969,
           "validity": {
             "tris": 583,
             "verts": 1681,
@@ -379,13 +389,15 @@
               181.57,
               176.739
             ],
-            "radius_m": 0.384724
+            "radius_m": 0.384724,
+            "origin_radius_m": 0.400113
           },
           "cleanup": {
             "faces_before": 583,
             "faces_after": 583,
             "dissolve_dist_m": 7.680082776371103e-07
           },
+          "reproducible": true,
           "normal_diagnostic_deg": {
             "max_deg": 90.0,
             "p99_deg": 88.233,
@@ -395,7 +407,7 @@
           },
           "render_gate": {
             "label": "tiger_1_link_L2",
-            "distance_m": 126.581,
+            "distance_m": 126.597,
             "tile_px": 512,
             "tile_vfov_rad": 0.0284767,
             "samples": 64,
@@ -403,104 +415,104 @@
             "views": {
               "three_quarter": {
                 "signal": {
-                  "footprint_px": 3019,
-                  "silhouette_band_px": 660,
-                  "silhouette_band_frac": 0.179397,
-                  "mean_abs_diff": 0.013508,
-                  "p99_abs_diff": 0.25352,
-                  "max_abs_diff": 0.555882,
-                  "frac_over": 0.032461
+                  "footprint_px": 3021,
+                  "silhouette_band_px": 659,
+                  "silhouette_band_frac": 0.179076,
+                  "mean_abs_diff": 0.013501,
+                  "p99_abs_diff": 0.254608,
+                  "max_abs_diff": 0.556128,
+                  "frac_over": 0.03244
                 },
                 "noise_floor": {
-                  "footprint_px": 3034,
-                  "silhouette_band_px": 620,
-                  "silhouette_band_frac": 0.169677,
-                  "mean_abs_diff": 0.002028,
-                  "p99_abs_diff": 0.014216,
-                  "max_abs_diff": 0.035049,
+                  "footprint_px": 3036,
+                  "silhouette_band_px": 618,
+                  "silhouette_band_frac": 0.16913,
+                  "mean_abs_diff": 0.002014,
+                  "p99_abs_diff": 0.01348,
+                  "max_abs_diff": 0.034069,
                   "frac_over": 0.0
                 },
                 "defect_floor": {
-                  "footprint_px": 3019,
-                  "silhouette_band_px": 660,
-                  "silhouette_band_frac": 0.179397,
-                  "mean_abs_diff": 0.028267,
-                  "p99_abs_diff": 0.301407,
-                  "max_abs_diff": 0.539216,
-                  "frac_over": 0.100033
+                  "footprint_px": 3041,
+                  "silhouette_band_px": 611,
+                  "silhouette_band_frac": 0.167306,
+                  "mean_abs_diff": 0.020769,
+                  "p99_abs_diff": 0.248726,
+                  "max_abs_diff": 0.374265,
+                  "frac_over": 0.073331
                 },
-                "defect_score": 0.437517,
+                "defect_score": 0.612477,
                 "under_absolute_floor": false,
-                "pass": true
+                "pass": false
               },
               "grazing": {
                 "signal": {
                   "footprint_px": 1254,
                   "silhouette_band_px": 365,
                   "silhouette_band_frac": 0.225448,
-                  "mean_abs_diff": 0.032079,
-                  "p99_abs_diff": 0.29514,
-                  "max_abs_diff": 0.443382,
-                  "frac_over": 0.073365
+                  "mean_abs_diff": 0.032065,
+                  "p99_abs_diff": 0.296424,
+                  "max_abs_diff": 0.443137,
+                  "frac_over": 0.074163
                 },
                 "noise_floor": {
                   "footprint_px": 1302,
                   "silhouette_band_px": 308,
                   "silhouette_band_frac": 0.191304,
-                  "mean_abs_diff": 0.004342,
-                  "p99_abs_diff": 0.030625,
-                  "max_abs_diff": 0.062745,
+                  "mean_abs_diff": 0.004388,
+                  "p99_abs_diff": 0.029412,
+                  "max_abs_diff": 0.076961,
                   "frac_over": 0.0
                 },
                 "defect_floor": {
-                  "footprint_px": 1254,
-                  "silhouette_band_px": 365,
-                  "silhouette_band_frac": 0.225448,
-                  "mean_abs_diff": 0.18034,
-                  "p99_abs_diff": 0.471466,
-                  "max_abs_diff": 0.607353,
-                  "frac_over": 0.614035
+                  "footprint_px": 1303,
+                  "silhouette_band_px": 307,
+                  "silhouette_band_frac": 0.190683,
+                  "mean_abs_diff": 0.180007,
+                  "p99_abs_diff": 0.43701,
+                  "max_abs_diff": 0.461029,
+                  "frac_over": 0.617038
                 },
-                "defect_score": 0.157598,
+                "defect_score": 0.157597,
                 "under_absolute_floor": false,
                 "pass": true
               },
               "edge_on": {
                 "signal": {
-                  "footprint_px": 935,
-                  "silhouette_band_px": 255,
-                  "silhouette_band_frac": 0.214286,
-                  "mean_abs_diff": 0.035601,
-                  "p99_abs_diff": 0.320422,
-                  "max_abs_diff": 0.457598,
-                  "frac_over": 0.099465
+                  "footprint_px": 933,
+                  "silhouette_band_px": 259,
+                  "silhouette_band_frac": 0.217282,
+                  "mean_abs_diff": 0.035679,
+                  "p99_abs_diff": 0.322,
+                  "max_abs_diff": 0.453186,
+                  "frac_over": 0.099678
                 },
                 "noise_floor": {
                   "footprint_px": 962,
                   "silhouette_band_px": 229,
                   "silhouette_band_frac": 0.192275,
-                  "mean_abs_diff": 0.002679,
-                  "p99_abs_diff": 0.014652,
-                  "max_abs_diff": 0.020343,
+                  "mean_abs_diff": 0.002668,
+                  "p99_abs_diff": 0.014461,
+                  "max_abs_diff": 0.024755,
                   "frac_over": 0.0
                 },
                 "defect_floor": {
-                  "footprint_px": 935,
-                  "silhouette_band_px": 255,
-                  "silhouette_band_frac": 0.214286,
-                  "mean_abs_diff": 0.177321,
-                  "p99_abs_diff": 0.505304,
-                  "max_abs_diff": 0.552941,
-                  "frac_over": 0.458824
+                  "footprint_px": 964,
+                  "silhouette_band_px": 227,
+                  "silhouette_band_frac": 0.190596,
+                  "mean_abs_diff": 0.163612,
+                  "p99_abs_diff": 0.46801,
+                  "max_abs_diff": 0.477941,
+                  "frac_over": 0.415975
                 },
-                "defect_score": 0.188511,
+                "defect_score": 0.205109,
                 "under_absolute_floor": false,
                 "pass": true
               }
             },
-            "worst_mean_abs_diff": 0.035601,
-            "worst_frac_over": 0.099465,
-            "worst_defect_score": 0.437517,
+            "worst_mean_abs_diff": 0.035679,
+            "worst_frac_over": 0.099678,
+            "worst_defect_score": 0.612477,
             "thresholds": {
               "max_mean_abs_diff": 0.02,
               "max_footprint_frac_over": 0.02,
@@ -508,10 +520,11 @@
               "defect_fraction": 0.5,
               "defect_normal_deg": 20.0
             },
-            "pass": true
+            "pass": false,
+            "material_source": "FELL BACK to the .blend material 'Mat_Track_Link' \u2014 imported material 'Mat_Track_Link.001' has 3 texture(s) with no pixel data (albedo, roughness, normal) \u2014 Blender cannot read the KHR_texture_basisu KTX2 images the bake writes"
           },
-          "glb_sha256": "b35f983c7e6a9c261ae4c4f9797aedf593cef6d479acb728af83bf5db300b61d",
-          "glb_bytes": 58324
+          "glb_sha256": "2736e787c387dd7793becaae2d705c31731d3dd957bdb2b8a216c3b82af021bc",
+          "glb_bytes": 58320
         },
         {
           "level": 3,
@@ -531,9 +544,9 @@
           "dev_level_to_source_mm": 26.081597,
           "pairwise_mm": 25.955055,
           "pairwise_mm_upper": 26.212517,
-          "switch_m": 473.9169,
-          "switch_from_source_dev_m": 473.9169,
-          "switch_from_pairwise_m": 471.643,
+          "switch_m": 473.933,
+          "switch_from_source_dev_m": 473.933,
+          "switch_from_pairwise_m": 471.6591,
           "validity": {
             "tris": 316,
             "verts": 948,
@@ -554,13 +567,15 @@
               185.2631,
               175.939
             ],
-            "radius_m": 0.385162
+            "radius_m": 0.385162,
+            "origin_radius_m": 0.400113
           },
           "cleanup": {
             "faces_before": 316,
             "faces_after": 316,
             "dissolve_dist_m": 7.680082776371103e-07
           },
+          "reproducible": true,
           "normal_diagnostic_deg": {
             "max_deg": 90.0,
             "p99_deg": 89.73,
@@ -570,7 +585,7 @@
           },
           "render_gate": {
             "label": "tiger_1_link_L3",
-            "distance_m": 473.917,
+            "distance_m": 473.933,
             "tile_px": 512,
             "tile_vfov_rad": 0.0284767,
             "samples": 64,
@@ -581,101 +596,101 @@
                   "footprint_px": 146,
                   "silhouette_band_px": 169,
                   "silhouette_band_frac": 0.536508,
-                  "mean_abs_diff": 0.028755,
-                  "p99_abs_diff": 0.31413,
-                  "max_abs_diff": 0.427696,
-                  "frac_over": 0.089041
+                  "mean_abs_diff": 0.028787,
+                  "p99_abs_diff": 0.31391,
+                  "max_abs_diff": 0.427451,
+                  "frac_over": 0.082192
                 },
                 "noise_floor": {
                   "footprint_px": 153,
                   "silhouette_band_px": 160,
                   "silhouette_band_frac": 0.511182,
-                  "mean_abs_diff": 0.002946,
-                  "p99_abs_diff": 0.016539,
-                  "max_abs_diff": 0.020343,
+                  "mean_abs_diff": 0.00302,
+                  "p99_abs_diff": 0.01801,
+                  "max_abs_diff": 0.021078,
                   "frac_over": 0.0
                 },
                 "defect_floor": {
-                  "footprint_px": 146,
-                  "silhouette_band_px": 169,
-                  "silhouette_band_frac": 0.536508,
-                  "mean_abs_diff": 0.043062,
-                  "p99_abs_diff": 0.371397,
-                  "max_abs_diff": 0.384069,
-                  "frac_over": 0.157534
+                  "footprint_px": 154,
+                  "silhouette_band_px": 158,
+                  "silhouette_band_frac": 0.50641,
+                  "mean_abs_diff": 0.020819,
+                  "p99_abs_diff": 0.232696,
+                  "max_abs_diff": 0.256863,
+                  "frac_over": 0.084416
                 },
-                "defect_score": 0.643359,
+                "defect_score": 1.447666,
                 "under_absolute_floor": false,
                 "pass": false
               },
               "grazing": {
                 "signal": {
                   "footprint_px": 123,
-                  "silhouette_band_px": 173,
-                  "silhouette_band_frac": 0.584459,
-                  "mean_abs_diff": 0.043633,
-                  "p99_abs_diff": 0.348686,
-                  "max_abs_diff": 0.510539,
-                  "frac_over": 0.154472
+                  "silhouette_band_px": 174,
+                  "silhouette_band_frac": 0.585859,
+                  "mean_abs_diff": 0.043741,
+                  "p99_abs_diff": 0.348823,
+                  "max_abs_diff": 0.514461,
+                  "frac_over": 0.146341
                 },
                 "noise_floor": {
                   "footprint_px": 127,
-                  "silhouette_band_px": 168,
-                  "silhouette_band_frac": 0.569492,
-                  "mean_abs_diff": 0.004387,
-                  "p99_abs_diff": 0.030907,
-                  "max_abs_diff": 0.034804,
+                  "silhouette_band_px": 169,
+                  "silhouette_band_frac": 0.570946,
+                  "mean_abs_diff": 0.004118,
+                  "p99_abs_diff": 0.028539,
+                  "max_abs_diff": 0.035784,
                   "frac_over": 0.0
                 },
                 "defect_floor": {
-                  "footprint_px": 123,
-                  "silhouette_band_px": 173,
-                  "silhouette_band_frac": 0.584459,
-                  "mean_abs_diff": 0.087524,
-                  "p99_abs_diff": 0.495931,
-                  "max_abs_diff": 0.561275,
-                  "frac_over": 0.276423
+                  "footprint_px": 129,
+                  "silhouette_band_px": 167,
+                  "silhouette_band_frac": 0.564189,
+                  "mean_abs_diff": 0.079526,
+                  "p99_abs_diff": 0.371245,
+                  "max_abs_diff": 0.406373,
+                  "frac_over": 0.317829
                 },
-                "defect_score": 0.472064,
+                "defect_score": 0.525448,
                 "under_absolute_floor": false,
-                "pass": true
+                "pass": false
               },
               "edge_on": {
                 "signal": {
                   "footprint_px": 82,
                   "silhouette_band_px": 98,
                   "silhouette_band_frac": 0.544444,
-                  "mean_abs_diff": 0.043074,
-                  "p99_abs_diff": 0.255593,
-                  "max_abs_diff": 0.310784,
+                  "mean_abs_diff": 0.042949,
+                  "p99_abs_diff": 0.254868,
+                  "max_abs_diff": 0.313235,
                   "frac_over": 0.158537
                 },
                 "noise_floor": {
                   "footprint_px": 82,
                   "silhouette_band_px": 96,
                   "silhouette_band_frac": 0.539326,
-                  "mean_abs_diff": 0.00307,
-                  "p99_abs_diff": 0.01426,
-                  "max_abs_diff": 0.018627,
+                  "mean_abs_diff": 0.003067,
+                  "p99_abs_diff": 0.017985,
+                  "max_abs_diff": 0.018382,
                   "frac_over": 0.0
                 },
                 "defect_floor": {
-                  "footprint_px": 82,
-                  "silhouette_band_px": 98,
-                  "silhouette_band_frac": 0.544444,
-                  "mean_abs_diff": 0.081788,
-                  "p99_abs_diff": 0.419113,
-                  "max_abs_diff": 0.467157,
-                  "frac_over": 0.329268
+                  "footprint_px": 84,
+                  "silhouette_band_px": 94,
+                  "silhouette_band_frac": 0.52809,
+                  "mean_abs_diff": 0.075563,
+                  "p99_abs_diff": 0.45014,
+                  "max_abs_diff": 0.454412,
+                  "frac_over": 0.22619
                 },
-                "defect_score": 0.508194,
+                "defect_score": 0.550127,
                 "under_absolute_floor": false,
                 "pass": false
               }
             },
-            "worst_mean_abs_diff": 0.043633,
+            "worst_mean_abs_diff": 0.043741,
             "worst_frac_over": 0.158537,
-            "worst_defect_score": 0.643359,
+            "worst_defect_score": 1.447666,
             "thresholds": {
               "max_mean_abs_diff": 0.02,
               "max_footprint_frac_over": 0.02,
@@ -683,10 +698,11 @@
               "defect_fraction": 0.5,
               "defect_normal_deg": 20.0
             },
-            "pass": false
+            "pass": false,
+            "material_source": "FELL BACK to the .blend material 'Mat_Track_Link' \u2014 imported material 'Mat_Track_Link.001' has 3 texture(s) with no pixel data (albedo, roughness, normal) \u2014 Blender cannot read the KHR_texture_basisu KTX2 images the bake writes"
           },
-          "glb_sha256": "64132286a0292de5354b738ef4133d1f1ee87e18b84b87e785fc28e97102e09e",
-          "glb_bytes": 33260
+          "glb_sha256": "9fd6ce1fda13ff6f07c7a24d2090c8a6a646a1449fb01bc2e22a7d5f7e261c73",
+          "glb_bytes": 33256
         },
         {
           "level": 4,
@@ -700,15 +716,15 @@
           "shed_fraction_vs_parent": 0.386076,
           "parent_level": "L3",
           "dev_source_mm": 56.222763,
-          "dev_source_mm_upper": 56.633074,
-          "dev_source_bracket_mm": 0.410311,
+          "dev_source_mm_upper": 56.759201,
+          "dev_source_bracket_mm": 0.536438,
           "dev_source_to_level_mm": 56.222763,
           "dev_level_to_source_mm": 42.021334,
           "pairwise_mm": 57.803843,
           "pairwise_mm_upper": 58.373325,
-          "switch_m": 1049.8427,
-          "switch_from_source_dev_m": 1018.5558,
-          "switch_from_pairwise_m": 1049.8427,
+          "switch_m": 1049.8588,
+          "switch_from_source_dev_m": 1020.8394,
+          "switch_from_pairwise_m": 1049.8588,
           "validity": {
             "tris": 194,
             "verts": 582,
@@ -729,13 +745,15 @@
               182.2386,
               167.814
             ],
-            "radius_m": 0.384426
+            "radius_m": 0.384426,
+            "origin_radius_m": 0.39802
           },
           "cleanup": {
             "faces_before": 194,
             "faces_after": 194,
             "dissolve_dist_m": 7.680082776371103e-07
           },
+          "reproducible": true,
           "normal_diagnostic_deg": {
             "max_deg": 89.994,
             "p99_deg": 89.3,
@@ -745,7 +763,7 @@
           },
           "render_gate": {
             "label": "tiger_1_link_L4",
-            "distance_m": 1049.843,
+            "distance_m": 1049.859,
             "tile_px": 512,
             "tile_vfov_rad": 0.0284767,
             "samples": 64,
@@ -756,62 +774,62 @@
                   "footprint_px": 11,
                   "silhouette_band_px": 74,
                   "silhouette_band_frac": 0.870588,
-                  "mean_abs_diff": 0.008779,
-                  "p99_abs_diff": 0.086912,
-                  "max_abs_diff": 0.096569,
-                  "frac_over": 0.0
+                  "mean_abs_diff": 0.009291,
+                  "p99_abs_diff": 0.091985,
+                  "max_abs_diff": 0.102206,
+                  "frac_over": 0.090909
                 },
                 "noise_floor": {
                   "footprint_px": 12,
                   "silhouette_band_px": 72,
                   "silhouette_band_frac": 0.857143,
-                  "mean_abs_diff": 0.003125,
-                  "p99_abs_diff": 0.013081,
-                  "max_abs_diff": 0.013971,
+                  "mean_abs_diff": 0.002798,
+                  "p99_abs_diff": 0.007681,
+                  "max_abs_diff": 0.007843,
                   "frac_over": 0.0
                 },
                 "defect_floor": {
-                  "footprint_px": 11,
-                  "silhouette_band_px": 74,
-                  "silhouette_band_frac": 0.870588,
-                  "mean_abs_diff": 0.024554,
-                  "p99_abs_diff": 0.243088,
-                  "max_abs_diff": 0.270098,
-                  "frac_over": 0.090909
+                  "footprint_px": 12,
+                  "silhouette_band_px": 72,
+                  "silhouette_band_frac": 0.857143,
+                  "mean_abs_diff": 0.011683,
+                  "p99_abs_diff": 0.11923,
+                  "max_abs_diff": 0.133088,
+                  "frac_over": 0.083333
                 },
-                "defect_score": 0.263848,
-                "under_absolute_floor": true,
-                "pass": true
+                "defect_score": 0.730782,
+                "under_absolute_floor": false,
+                "pass": false
               },
               "grazing": {
                 "signal": {
                   "footprint_px": 5,
                   "silhouette_band_px": 77,
                   "silhouette_band_frac": 0.939024,
-                  "mean_abs_diff": 0.038529,
-                  "p99_abs_diff": 0.184941,
-                  "max_abs_diff": 0.192647,
+                  "mean_abs_diff": 0.03848,
+                  "p99_abs_diff": 0.184706,
+                  "max_abs_diff": 0.192402,
                   "frac_over": 0.2
                 },
                 "noise_floor": {
                   "footprint_px": 7,
                   "silhouette_band_px": 74,
                   "silhouette_band_frac": 0.91358,
-                  "mean_abs_diff": 0.012325,
-                  "p99_abs_diff": 0.047225,
-                  "max_abs_diff": 0.048284,
+                  "mean_abs_diff": 0.012395,
+                  "p99_abs_diff": 0.046549,
+                  "max_abs_diff": 0.047549,
                   "frac_over": 0.0
                 },
                 "defect_floor": {
-                  "footprint_px": 5,
-                  "silhouette_band_px": 77,
-                  "silhouette_band_frac": 0.939024,
-                  "mean_abs_diff": 0.015735,
-                  "p99_abs_diff": 0.075529,
-                  "max_abs_diff": 0.078676,
-                  "frac_over": 0.0
+                  "footprint_px": 7,
+                  "silhouette_band_px": 74,
+                  "silhouette_band_frac": 0.91358,
+                  "mean_abs_diff": 0.056758,
+                  "p99_abs_diff": 0.203671,
+                  "max_abs_diff": 0.209069,
+                  "frac_over": 0.285714
                 },
-                "defect_score": 7.684457,
+                "defect_score": 0.58799,
                 "under_absolute_floor": false,
                 "pass": false
               },
@@ -820,37 +838,37 @@
                   "footprint_px": 4,
                   "silhouette_band_px": 44,
                   "silhouette_band_frac": 0.916667,
-                  "mean_abs_diff": 0.017953,
-                  "p99_abs_diff": 0.068961,
-                  "max_abs_diff": 0.071079,
+                  "mean_abs_diff": 0.017892,
+                  "p99_abs_diff": 0.068723,
+                  "max_abs_diff": 0.070833,
                   "frac_over": 0.0
                 },
                 "noise_floor": {
                   "footprint_px": 6,
                   "silhouette_band_px": 41,
                   "silhouette_band_frac": 0.87234,
-                  "mean_abs_diff": 0.010743,
-                  "p99_abs_diff": 0.029755,
-                  "max_abs_diff": 0.030392,
+                  "mean_abs_diff": 0.011193,
+                  "p99_abs_diff": 0.029534,
+                  "max_abs_diff": 0.030147,
                   "frac_over": 0.0
                 },
                 "defect_floor": {
-                  "footprint_px": 4,
-                  "silhouette_band_px": 44,
-                  "silhouette_band_frac": 0.916667,
-                  "mean_abs_diff": 0.000613,
-                  "p99_abs_diff": 0.001909,
-                  "max_abs_diff": 0.001961,
-                  "frac_over": 0.0
+                  "footprint_px": 6,
+                  "silhouette_band_px": 41,
+                  "silhouette_band_frac": 0.87234,
+                  "mean_abs_diff": 0.039502,
+                  "p99_abs_diff": 0.118101,
+                  "max_abs_diff": 0.119608,
+                  "frac_over": 0.166667
                 },
-                "defect_score": 1.0,
+                "defect_score": 0.236639,
                 "under_absolute_floor": true,
                 "pass": true
               }
             },
-            "worst_mean_abs_diff": 0.038529,
+            "worst_mean_abs_diff": 0.03848,
             "worst_frac_over": 0.2,
-            "worst_defect_score": 7.684457,
+            "worst_defect_score": 0.730782,
             "thresholds": {
               "max_mean_abs_diff": 0.02,
               "max_footprint_frac_over": 0.02,
@@ -858,13 +876,15 @@
               "defect_fraction": 0.5,
               "defect_normal_deg": 20.0
             },
-            "pass": false
+            "pass": false,
+            "material_source": "FELL BACK to the .blend material 'Mat_Track_Link' \u2014 imported material 'Mat_Track_Link.001' has 3 texture(s) with no pixel data (albedo, roughness, normal) \u2014 Blender cannot read the KHR_texture_basisu KTX2 images the bake writes"
           },
-          "glb_sha256": "15427f728cdcc7005baa17f9d09293ee90e18b5e5e65cd0c55d4f71b95ed084f",
-          "glb_bytes": 20816
+          "glb_sha256": "a03407bf58d3f2d6c3c92e6c9dc2961a834d63d2125d8c0c2172c8e36f5045a9",
+          "glb_bytes": 20812
         }
       ],
-      "material": "Mat_Track_Link"
+      "material": "Mat_Track_Link",
+      "render_material_source": "FELL BACK to the .blend material 'Mat_Track_Link' \u2014 imported material 'Mat_Track_Link.001' has 3 texture(s) with no pixel data (albedo, roughness, normal) \u2014 Blender cannot read the KHR_texture_basisu KTX2 images the bake writes"
     }
   ]
 }

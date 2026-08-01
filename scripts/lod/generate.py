@@ -7,23 +7,29 @@ WHAT THIS IS. ADR 0033's generation stage: one global octave grid of deviation t
 SPARSE subset of it, triangle counts as outputs. Nothing in this file knows what a track shoe is —
 the assets are rows in `config.ASSETS`, and every threshold is a constant in `config.py`.
 
-THE SEARCH IS OVER UNIQUE INTEGER TRIANGLE TARGETS, NOT OVER RATIOS (ADR 0033 §5). Measured error
-is not monotone in collapse ratio and the ratio->mesh map has long plateaus, so a ratio bisection
-spends its evaluations re-measuring meshes it has already seen and can converge onto the wrong side
-of a step. Candidates are therefore addressed by triangle budget, and cached by the HASH OF THE MESH
-THEY PRODUCE: two budgets that alias to one mesh cost one deviation certification between them.
+THE SEARCH IS OVER UNIQUE INTEGER TRIANGLE TARGETS, NOT OVER RATIOS (ADR 0033 §5), and it is
+EXHAUSTIVE rather than a bisection. Measured error is not monotone in collapse ratio, so a
+bisection assumes exactly the property the doctrine denies and can step straight over a lower
+feasible island. Instead every mesh the decimator can produce is enumerated once (see
+`Candidates.enumerate_outputs`, which costs one decimation per distinct output), and each rung
+scans them in ASCENDING triangle order and takes the first that clears its target — so everything
+smaller has been measured and rejected, and the winner is minimal by exhaustion.
 
 THE ORDER IS SACRED (ADR 0033 §6). Per level: decimate -> cleanup -> export -> decode the written
 glb -> measure everything on those bytes. The search itself measures pre-export candidates, because
 choosing which candidate to ship has to be cheap; but a chosen candidate is re-certified from the
 file, and if the file disagrees with the search the level FAILS. The search is an optimiser, the
-decode is the certificate.
+decode is the certificate. That includes L0, which is not generated but IS decoded: its identity
+with the source is proven on welded topology, and its validity is measured on the shipped bytes
+rather than inherited from the Blender mesh that produced them.
 
-WHAT FAILS THE RUN, LOUDLY (ADR 0033 §10): a skinned or morph-target source, a multi-material or
-multi-primitive source, a level whose certified upper bound misses its rung after export, a level
-that lost a component, a sliver below the scale-aware altitude floor, a defaulted tangent, a
-duplicate face, a non-finite attribute, a flipped winding, or a rendered difference over the
-declared thresholds. Nothing degrades silently.
+WHAT FAILS THE RUN, LOUDLY (ADR 0033 §10): an unexpected Blender build; a skinned or morph-target
+source; a multi-material or multi-primitive source; a shipped L0 that is not the source; a level
+whose certified upper bound misses its rung after export; a level that lost a component; a sliver
+below the scale-aware altitude floor; a defaulted tangent; a duplicate face; a non-manifold edge; a
+non-finite attribute; a flipped winding; a level that does not reproduce byte-for-byte when built
+twice; and — once its threshold is ratified — a rendered difference over budget. Nothing degrades
+silently.
 """
 
 import hashlib
@@ -61,6 +67,44 @@ def log(line):
     print(line, flush=True)
 
 
+def _exporter_version():
+    """The glTF exporter add-on's version, which moves independently of Blender's own."""
+    try:
+        import io_scene_gltf2
+
+        return ".".join(str(part) for part in getattr(io_scene_gltf2, "bl_info", {}).get(
+            "version", ("unknown",)
+        ))
+    except ImportError:
+        return "unknown"
+
+
+def assert_toolchain():
+    """Refuse to cut a corpus with an unexpected Blender. Named override for a deliberate upgrade.
+
+    A decimator is a program, not a specification. Blender's collapse can change a tie-break in a
+    point release and silently move every level in the game; recording the version afterwards says
+    which build produced a chain, but only asserting it first stops two machines producing two
+    different corpora with nobody the wiser. ADR 0033 makes a toolchain bump a corpus regeneration
+    review, and this is where that becomes mechanical rather than remembered.
+    """
+    running = bpy.app.version_string.split()[0]
+    if running == CONFIG.EXPECTED_BLENDER:
+        return
+    allowed = os.environ.get(CONFIG.BLENDER_OVERRIDE_ENV, "")
+    if allowed in (running, "1", "yes", "any"):
+        log(f"  toolchain: Blender {running} != pinned {CONFIG.EXPECTED_BLENDER}, allowed by "
+            f"{CONFIG.BLENDER_OVERRIDE_ENV}")
+        return
+    raise GenerationError(
+        "toolchain",
+        f"this Blender is {running}, the corpus is pinned to {CONFIG.EXPECTED_BLENDER}. A "
+        f"simplifier is a program: a point release can move every level in the game. Set "
+        f"{CONFIG.BLENDER_OVERRIDE_ENV}={running} to regenerate the whole corpus deliberately, "
+        f"and update config.EXPECTED_BLENDER with the result.",
+    )
+
+
 def sha256_file(path):
     digest = hashlib.sha256()
     with open(path, "rb") as handle:
@@ -96,6 +140,51 @@ def refuse_unsupported(obj):
     if not materials:
         raise M.Refusal("no-material", f"{obj.name!r} has no material to render the gate under")
     return materials[0]
+
+
+def shipped_material(l0_path, node_name):
+    """The material as it SHIPS: imported back out of the L0 glb. Returns (material, provenance).
+
+    The gate is supposed to render the bytes, materials included — taking the material from the
+    .blend renders the artist's inputs, not the asset. So the shipped glb is re-imported and its
+    material used instead.
+
+    IT CAN LEGITIMATELY FAIL, and then it says so instead of pretending. The tank glb's textures are
+    baked to KTX2 (`scripts/encode-tank-ktx2.sh`, via `KHR_texture_basisu`) because bevy needs mips;
+    Blender's glTF importer does not read that extension, so the images can come back empty. A
+    material with no image data would render a flat grey asset and the gate would go on producing
+    confident numbers about a shading comparison it was no longer making. So every image node is
+    checked for actual pixels, and on failure the caller is told which material it is getting.
+    """
+    before = set(bpy.data.objects)
+    try:
+        bpy.ops.import_scene.gltf(filepath=l0_path)
+    except (RuntimeError, TypeError) as exc:
+        return None, f"glb import failed: {exc}"
+    imported = [ob for ob in bpy.data.objects if ob not in before]
+    material, reason = None, "node not found in the imported glb"
+    for ob in imported:
+        if ob.name.split(".")[0] == node_name and ob.type == "MESH" and ob.data.materials:
+            material = ob.data.materials[0]
+            break
+    if material is not None:
+        empty = [
+            node.image.name
+            for node in material.node_tree.nodes
+            if node.type == "TEX_IMAGE" and (node.image is None or not node.image.has_data)
+        ]
+        if empty:
+            reason = (
+                f"imported material {material.name!r} has {len(empty)} texture(s) with no pixel "
+                f"data ({', '.join(empty[:3])}) — Blender cannot read the KHR_texture_basisu KTX2 "
+                f"images the bake writes"
+            )
+            material = None
+        else:
+            reason = f"decoded from {os.path.basename(l0_path)} (material {material.name!r})"
+    for ob in imported:
+        bpy.data.objects.remove(ob, do_unlink=True)
+    return material, reason
 
 
 def evaluated_source(obj):
@@ -219,118 +308,113 @@ def _baked(obj, name):
 
 
 def candidate_mesh(source_obj, budget, scale_m):
-    """One candidate: collapse to `budget` triangles, then the cleanup pass. Returns a mesh or None."""
+    """One candidate: collapse to `budget` triangles, then the cleanup pass.
+
+    Returns `(mesh, reached)` or `(None, None)`, where `reached` is the count the DECIMATOR landed
+    on, before cleanup. The enumeration walks the budget axis by `reached - 1`, and that step is
+    only sound against the decimator's own staircase: cleanup can dissolve a degenerate afterwards
+    and lower the count, and stepping from the lowered number would jump over realizable outputs.
+    """
     work = _fresh_copy(source_obj, f"cand_{budget}")
     try:
         reached = _fit_collapse(work, budget)
         if reached is None:
-            return None
+            return None, None
         mesh = _baked(work, f"cand_{budget}_mesh")
     finally:
         _drop(work)
     cleanup(mesh, scale_m)
-    return mesh
+    return mesh, reached
 
 
 class Candidates:
-    """Deviation for a triangle budget, memoised by the HASH OF THE MESH the budget produced.
+    """Every mesh the decimator can actually produce, and the deviation of the ones worth measuring.
 
-    THE PLATEAU IS THE REASON. The map from triangle budget to output mesh is a staircase: on the
-    reference asset a run of adjacent budgets collapses to one identical mesh, and every one of them
-    would otherwise pay for its own branch-and-bound. Keyed by mesh hash rather than by budget, a
-    plateau costs exactly one certification however many budgets land on it.
+    ENUMERATION, NOT BISECTION. The previous version bisected feasible/infeasible budgets and then
+    walked down in 2 % steps until the first failure — which assumes the very monotonicity this
+    pipeline's own design doc says does not hold. A lower feasible ISLAND below an infeasible step
+    is invisible to that search, so its winner was not proven minimal and a sparse-chain skip
+    decision could be made against the wrong incumbent.
 
-    A CACHED BRACKET IS ONLY REUSED WHEN IT DECIDES. The search stops its branch-and-bound as soon
-    as the current rung's question is answered, so a bracket measured against a 15.56 mm rung can be
-    far too loose to answer a 3.89 mm one. Reuse is therefore conditional: an upper bound under the
-    new target accepts, a sampled lower bound over it rejects, and anything in between re-runs the
-    proof against the tighter target. Never the other way round — a loose bound must not decide a
-    question it was not asked.
+    The realized outputs are enumerated exactly instead, and cheaply. `_fit_collapse(B)` returns the
+    largest realizable triangle count <= B; call it R. Then for every budget in [R, B] the answer is
+    also R, because R is realizable and nothing realizable lies in (R, B]. So the next distinct
+    output is at budget R-1, and walking `B <- R-1` from the ceiling to the floor visits EVERY
+    realizable output exactly once, at one decimation each. Roughly two hundred on the reference
+    asset, and the enumeration is shared by every rung of the chain.
+
+    Deviation is then certified in increasing triangle order and the FIRST feasible output is the
+    Pareto minimum, with no monotonicity assumed anywhere: everything smaller has been measured and
+    rejected. Rejections are nearly free — a single sampled point above the target ends the proof —
+    which is what makes an exhaustive scan affordable.
     """
 
     def __init__(self, source_obj, source_surface, gates):
         self.source_obj = source_obj
         self.source = source_surface
         self.gates = gates
-        self.by_budget = {}
-        self.by_hash = {}
+        self.by_tris = {}
+        self.outputs = []          # realized triangle counts, ascending
         self.evaluations = 0
+        self.decimations = 0
 
-    def _mesh_for(self, budget):
-        if budget in self.by_budget:
-            return self.by_budget[budget]
-        mesh = candidate_mesh(self.source_obj, budget, self.source.diagonal)
-        if mesh is None:
-            self.by_budget[budget] = None
-            return None
-        surface = M.from_bpy_mesh(mesh, None, f"cand{budget}")
-        bpy.data.meshes.remove(mesh)
-        entry = self.by_hash.setdefault(
-            surface.digest(),
-            {"tris": surface.tri_count, "surface": surface, "lo_mm": None, "up_mm": None},
-        )
-        self.by_budget[budget] = entry
-        return entry
+    def enumerate_outputs(self, floor_tris, ceiling_tris):
+        """Every realizable output in [floor, ceiling], ascending. One decimation per output."""
+        budget = ceiling_tris
+        found = []
+        while budget >= floor_tris:
+            mesh, reached = candidate_mesh(self.source_obj, budget, self.source.diagonal)
+            self.decimations += 1
+            if mesh is None:
+                break
+            surface = M.from_bpy_mesh(mesh, None, f"cand{budget}")
+            bpy.data.meshes.remove(mesh)
+            # `reached` steps the budget axis (the decimator's own staircase); `surface.tri_count`
+            # is what the level would actually ship, after cleanup, and is what gets certified.
+            shipped_tris = surface.tri_count
+            if shipped_tris not in self.by_tris:
+                # THE BUDGET IS KEPT, not just the count it produced. Rebuilding a chosen level
+                # means re-running the decimator, and its input is a BUDGET; feeding back the
+                # post-cleanup triangle count would ask for a different mesh than the one certified.
+                self.by_tris[shipped_tris] = {
+                    "tris": shipped_tris, "budget": budget, "surface": surface,
+                    "lo_mm": None, "up_mm": None,
+                }
+                found.append(shipped_tris)
+            if reached <= floor_tris:
+                break
+            budget = reached - 1
+        self.outputs = sorted(set(found))
+        log(f"  enumerated {len(self.outputs)} realizable outputs in [{floor_tris}, "
+            f"{ceiling_tris}] from {self.decimations} decimations")
+        return self.outputs
 
-    def at(self, budget, target_mm):
-        """The candidate at `budget`, with a bracket good enough to decide `target_mm`."""
-        entry = self._mesh_for(budget)
-        if entry is None:
-            return None
+    def deviation(self, tris, target_mm):
+        """Certified deviation for the realized output at `tris`, decisive for `target_mm`.
+
+        Cached by triangle count, which is a proxy for the mesh: the enumeration produces exactly
+        one mesh per count. A cached bracket is REUSED ONLY WHEN IT DECIDES the new target — an
+        upper bound under it accepts, a sampled lower bound over it rejects — because the search
+        stops as soon as the current rung's question is answered and a bracket measured against a
+        coarse rung can be far too loose to answer a fine one.
+        """
+        entry = self.by_tris[tris]
         if entry["up_mm"] is not None and (
             entry["up_mm"] <= target_mm or entry["lo_mm"] > target_mm
         ):
-            log(f"    probe budget={budget:>5} -> {entry['tris']:>5} tris  CACHED "
-                f"[{entry['lo_mm']:.3f}, {entry['up_mm']:.3f}] mm")
             return entry
         started = time.time()
-        deviation = M.certified_deviation(
+        result = M.certified_deviation(
             self.source, entry["surface"],
             self.gates["deviation_tol_m"], self.gates["deviation_max_nodes_search"],
             target_mm=target_mm, rel_tol=self.gates["deviation_rel_tol_search"],
         )
         self.evaluations += 1
-        entry["lo_mm"] = deviation["mm"]
-        entry["up_mm"] = deviation["mm_upper"]
-        log(f"    probe budget={budget:>5} -> {entry['tris']:>5} tris  dev in "
-            f"[{deviation['mm']:.3f}, {deviation['mm_upper']:.3f}] mm vs target "
-            f"{target_mm:.3f}  {time.time() - started:.1f}s")
+        entry["lo_mm"] = result["mm"]
+        entry["up_mm"] = result["mm_upper"]
+        log(f"    probe {tris:>5} tris  dev in [{result['mm']:.3f}, {result['mm_upper']:.3f}] mm "
+            f"vs target {target_mm:.3f}  {time.time() - started:.1f}s")
         return entry
-
-
-def pareto_minimal(candidates, target_mm, floor_tris, ceiling_tris):
-    """Fewest triangles whose certified UPPER bound clears `target_mm`. None if nothing does.
-
-    Bisection over INTEGER TRIANGLE BUDGETS finds a feasible one; a downward refinement then walks
-    past the plateau the bisection landed on, because the staircase means the first feasible budget
-    a bisection finds is generally not the smallest one on its own step. Acceptance is on the upper
-    bound throughout, so an unclosed bracket costs triangles and never honesty.
-    """
-    def feasible(budget):
-        probe = candidates.at(budget, target_mm)
-        return probe is not None and probe["up_mm"] <= target_mm
-
-    low, high = floor_tris, ceiling_tris
-    if not feasible(high):
-        return None
-    best = high
-    while high - low > 1:
-        middle = (low + high) // 2
-        if feasible(middle):
-            best = high = middle
-        else:
-            low = middle
-
-    # Walk down past the plateau: 2 % steps until one stops clearing the target. Bounded, and every
-    # repeat inside a plateau is a cache hit.
-    walk = best
-    while walk > floor_tris:
-        step = max(1, int(round(candidates.at(walk, target_mm)["tris"] * 0.02)))
-        nxt = max(floor_tris, walk - step)
-        if nxt == walk or not feasible(nxt):
-            break
-        best = walk = nxt
-    return candidates.at(best, target_mm)
 
 
 # ── export ───────────────────────────────────────────────────────────────────────────────────────
@@ -345,6 +429,13 @@ def write_level_glb(mesh, node_name, path):
     the tangent gate is about UV area rather than about a TANGENT accessor.
     """
     mesh.materials.clear()
+    # The MESH DATABLOCK NAME lands in the glb's JSON chunk, so it has to be a property of the
+    # level and not of how the level was found. It used to carry the search's scratch name — a
+    # shipped asset containing `cand_860_mesh`, and worse, bytes that changed whenever the search
+    # landed on a different budget for geometry that was identical. Naming it after the node makes
+    # the file a function of the geometry alone, which is what the manifest's hash is supposed to
+    # mean and what the double-generation check is supposed to prove.
+    mesh.name = node_name
     obj = bpy.data.objects.new(node_name, mesh)
     if obj.name != node_name:
         bpy.data.objects.remove(obj, do_unlink=True)
@@ -388,20 +479,14 @@ def sliver_floor_m(gates, source, source_validity):
     )
 
 
-def certify(source, shipped, target_mm, gates, source_validity, floor_m):
-    """Every numeric gate, on the decoded shipped bytes. Returns (report, failures)."""
-    deviation = M.certified_deviation(
-        source, shipped, gates["deviation_tol_m"], gates["deviation_max_nodes_certify"],
-        rel_tol=gates["deviation_rel_tol_certify"],
-    )
-    validity = shipped.validity(gates, floor_m)
-    failures = []
+def validity_failures(validity, source_validity, gates):
+    """The structural gates, as a list of named failures. Empty means clean.
 
-    if deviation["mm_upper"] > target_mm:
-        failures.append(
-            f"deviation upper bound {deviation['mm_upper']:.4f} mm exceeds the rung target "
-            f"{target_mm:.4f} mm on the SHIPPED bytes"
-        )
+    Split out of `certify` so the SHIPPED L0 bytes go through exactly the same checks the generated
+    levels do. They did not before: L0's record was copied from the Blender source, so the one level
+    the whole ladder is measured against was the only one never validated as it ships.
+    """
+    failures = []
     if gates["components_must_match"] and validity["components"] != source_validity["components"]:
         failures.append(
             f"component count {validity['components']} != source {source_validity['components']} "
@@ -413,25 +498,37 @@ def certify(source, shipped, target_mm, gates, source_validity, floor_m):
             f"{validity['min_altitude_floor_m'] * 1000:.5f} mm "
             f"(worst {validity['min_altitude_m'] * 1000:.6f} mm)"
         )
-    if validity["duplicate_faces"] > gates["max_duplicate_faces"]:
-        failures.append(f"{validity['duplicate_faces']} duplicate face(s)")
-    if validity["nonfinite_attrs"] > gates["max_nonfinite"]:
-        failures.append(f"{validity['nonfinite_attrs']} non-finite attribute component(s)")
-    if validity["orientation_flips"] > gates["max_orientation_flips"]:
-        failures.append(
-            f"{validity['orientation_flips']} edge(s) traversed the same way by both their faces "
-            f"— inconsistent winding"
-        )
-    if validity["tangent_default_faces"] > gates["max_tangent_default_faces"]:
-        failures.append(
-            f"{validity['tangent_default_faces']} face(s) with degenerate UV area would take a "
-            f"DEFAULTED tangent at bind"
-        )
-    if validity["tangent_default_verts"] > gates["max_tangent_default_verts"]:
-        failures.append(
-            f"{validity['tangent_default_verts']} vertex/vertices whose every incident face has "
-            f"degenerate UV area"
-        )
+    for key, limit, description in (
+        ("duplicate_faces", gates["max_duplicate_faces"], "duplicate face(s)"),
+        ("nonfinite_attrs", gates["max_nonfinite"], "non-finite attribute component(s)"),
+        ("orientation_flips", gates["max_orientation_flips"],
+         "edge(s) traversed the same way by both their faces — inconsistent winding"),
+        ("nonmanifold_edges", gates["max_nonmanifold_edges"],
+         "edge(s) shared by more than two faces — no consistent normal or tangent frame there, "
+         "and a non-watertight volume bakes to zero armour silently"),
+        ("tangent_default_faces", gates["max_tangent_default_faces"],
+         "face(s) with degenerate UV area would take a DEFAULTED tangent at bind"),
+        ("tangent_default_verts", gates["max_tangent_default_verts"],
+         "vertex/vertices whose every incident face has degenerate UV area"),
+    ):
+        if validity[key] > limit:
+            failures.append(f"{validity[key]} {description}")
+    return failures
+
+
+def certify(source, shipped, target_mm, gates, source_validity, floor_m):
+    """Every numeric gate, on the decoded shipped bytes. Returns (report, failures)."""
+    deviation = M.certified_deviation(
+        source, shipped, gates["deviation_tol_m"], gates["deviation_max_nodes_certify"],
+        rel_tol=gates["deviation_rel_tol_certify"],
+    )
+    validity = shipped.validity(gates, floor_m)
+    failures = validity_failures(validity, source_validity, gates)
+    if deviation["mm_upper"] > target_mm:
+        failures.insert(0, (
+            f"deviation upper bound {deviation['mm_upper']:.4f} mm exceeds the rung target "
+            f"{target_mm:.4f} mm on the SHIPPED bytes"
+        ))
     return {"deviation": deviation, "validity": validity}, failures
 
 
@@ -479,46 +576,62 @@ def build_chain(asset, root, run_render_gate, out_dir):
     _drop(probe)
     log(f"  topology floor {floor_tris} tris (collapse at ratio 0)")
 
-    # L0 is the source, and it ships inside another glb; certify those bytes against it.
-    l0 = {"level": 0, "rung": 0, "role": "source", "tris": source.tri_count,
-          "verts": source.vert_count, "glb": asset["l0_glb"], "node": asset["l0_node"],
-          "e_target_mm": 0.0, "dev_source_mm": 0.0, "dev_source_mm_upper": 0.0,
-          "pairwise_mm": None, "switch_m": 0.0, "validity": source_validity}
+    # L0 IS THE SOURCE, and it ships inside another glb, so BOTH halves are proven on the decoded
+    # bytes: that the surface is the same one, and that those bytes pass every validity gate the
+    # generated levels pass. The validity record used to be copied from the Blender source, which
+    # is a different mesh by construction — the exporter splits 815 Blender vertices into 3 888
+    # glTF ones — so it was a measurement of something that does not ship.
     l0_path = os.path.join(root, asset["l0_glb"])
-    if os.path.isfile(l0_path):
-        shipped_l0 = M.from_glb(l0_path, asset["l0_node"], "L0")
-        l0_dev_mm = M.vertex_deviation(source, shipped_l0)
-        l0["glb_sha256"] = sha256_file(l0_path)
-        l0["shipped_tris"] = shipped_l0.tri_count
-        l0["shipped_dev_from_source_mm"] = round(l0_dev_mm, 9)
-        # Float32 in the buffer, on a 0.77 m part: a micron of quantisation is the noise floor of
-        # "identical", and anything the exporter actually changed is thousands of times larger.
-        l0["shipped_matches_source"] = bool(
-            shipped_l0.tri_count == source.tri_count and l0_dev_mm < 1.0e-3
-        )
-        log(f"  L0     shipped in {asset['l0_glb']} :: {asset['l0_node']} — "
-            f"{shipped_l0.tri_count} tris, vertex deviation from source {l0_dev_mm:.9f} mm  "
-            f"{'IS the source' if l0['shipped_matches_source'] else 'IS NOT the source'}")
-        if not l0["shipped_matches_source"]:
-            raise GenerationError(
-                "L0",
-                f"{asset['l0_glb']} ships {shipped_l0.tri_count} triangles for "
-                f"{asset['l0_node']!r} against the source's {source.tri_count}, and its vertices "
-                f"sit {l0_dev_mm:.6f} mm off the evaluated source. L0 IS the source (ADR 0033 §1) "
-                f"— re-export the host glb before cutting a chain whose every deviation is "
-                f"measured against a surface that does not ship.",
-            )
-    else:
+    if not os.path.isfile(l0_path):
         raise GenerationError("L0", f"{l0_path} does not exist; L0 has nowhere to ship")
+    shipped_l0 = M.from_glb(l0_path, asset["l0_node"], "L0")
+    identical, identity_reason = M.same_surface(source, shipped_l0)
+    l0_dev_mm = M.vertex_deviation(source, shipped_l0)
+    l0_validity = shipped_l0.validity(CONFIG.GATES, floor_m)
+    l0_failures = validity_failures(l0_validity, source_validity, CONFIG.GATES)
+    log(f"  L0     shipped in {asset['l0_glb']} :: {asset['l0_node']} — "
+        f"{shipped_l0.tri_count} tris / {shipped_l0.vert_count} decoded verts, "
+        f"vertex deviation {l0_dev_mm:.9f} mm, origin radius "
+        f"{l0_validity['origin_radius_m']:.6f} m — {identity_reason}")
+    if not identical or l0_dev_mm >= 1.0e-3:
+        raise GenerationError(
+            "L0",
+            f"{asset['l0_glb']} does not ship the source for {asset['l0_node']!r}: "
+            f"{identity_reason}; vertices sit {l0_dev_mm:.6f} mm off it. L0 IS the source "
+            f"(ADR 0033 §1) — re-export the host glb before cutting a chain whose every deviation "
+            f"is measured against a surface that does not ship.",
+        )
+    if l0_failures:
+        raise GenerationError(
+            "L0", f"the SHIPPED L0 bytes fail validity:\n    - " + "\n    - ".join(l0_failures)
+        )
+    l0 = {
+        "level": 0, "rung": 0, "role": "source", "tris": shipped_l0.tri_count,
+        "verts": shipped_l0.vert_count, "glb": asset["l0_glb"], "node": asset["l0_node"],
+        "e_target_mm": 0.0, "dev_source_mm": 0.0, "dev_source_mm_upper": 0.0,
+        "pairwise_mm": None, "switch_m": 0.0,
+        "validity": l0_validity,
+        "glb_sha256": sha256_file(l0_path),
+        "blender_source_verts": source.vert_count,
+        "shipped_dev_from_source_mm": round(l0_dev_mm, 9),
+        "shipped_matches_source": True,
+        "identity_proof": identity_reason,
+    }
 
     candidates = Candidates(obj, source, CONFIG.GATES)
+    # Once per asset, shared by every rung: the complete set of meshes this decimator can produce.
+    candidates.enumerate_outputs(floor_tris, source.tri_count)
     levels = [l0]
     skipped = []
-    previous = {"tris": source.tri_count, "surface": source, "label": "L0"}
+    previous = {"tris": l0["tris"], "surface": shipped_l0, "label": "L0",
+                "validity": l0_validity}
     termination = "right_wall"
 
     for rung, target_mm in CONFIG.rungs():
-        best = pareto_minimal(candidates, target_mm, floor_tris, source.tri_count)
+        best = M.pareto_minimal(
+            [t for t in candidates.outputs if t <= source.tri_count],
+            candidates.deviation, target_mm,
+        )
         if best is None:
             skipped.append({"rung": rung, "e_target_mm": round(target_mm, 4),
                             "reason": "no candidate meets the target",
@@ -543,13 +656,35 @@ def build_chain(asset, root, run_render_gate, out_dir):
         log(f"  rung {rung} e={target_mm:.3f} mm: {best['tris']} tris "
             f"(sheds {shed:.1%} of {previous['label']}) -> {relpath}")
 
-        mesh = candidate_mesh(obj, best["tris"], source.diagonal)
+        mesh, _reached = candidate_mesh(obj, best["budget"], source.diagonal)
         if mesh is None:
             raise GenerationError("generate", f"rung {rung}: the chosen budget went below the floor")
         cleanup_report = cleanup(mesh, source.diagonal)
         staged = os.path.join(out_dir, os.path.basename(relpath))
         write_level_glb(mesh, node_name, staged)
         bpy.data.meshes.remove(mesh)
+
+        # DOUBLE GENERATION, on the bytes. The whole level is built and exported a second time and
+        # the two files are compared by hash. Recording a Blender version says which build produced
+        # a chain; this says the pipeline produces the SAME chain twice, which is the property
+        # anyone re-running it actually depends on. It costs a decimation and a 30 KB export —
+        # the expensive half (certification) is not repeated.
+        repeat_mesh, _ = candidate_mesh(obj, best["budget"], source.diagonal)
+        cleanup(repeat_mesh, source.diagonal)
+        repeat_path = os.path.join(out_dir, f"repeat_{os.path.basename(relpath)}")
+        # The SAME node name: it lands in the JSON chunk, so a different one would guarantee a
+        # different hash and prove nothing. `write_level_glb` frees the name on its way out.
+        write_level_glb(repeat_mesh, node_name, repeat_path)
+        bpy.data.meshes.remove(repeat_mesh)
+        first_hash, second_hash = sha256_file(staged), sha256_file(repeat_path)
+        os.remove(repeat_path)
+        if first_hash != second_hash:
+            raise GenerationError(
+                "reproducibility",
+                f"rung {rung} generated two different files from the same inputs "
+                f"({first_hash[:16]} against {second_hash[:16]}) — the pipeline is not "
+                f"deterministic, so no manifest it writes can be verified by regeneration",
+            )
 
         shipped = M.from_glb(staged, None, f"rung{rung}")
         report, failures = certify(
@@ -567,8 +702,14 @@ def build_chain(asset, root, run_render_gate, out_dir):
                 + "\n    - ".join(failures),
             )
 
-        switch_from_source = CONFIG.switch_distance_m(report["deviation"]["mm_upper"], source.radius)
-        switch_from_pairwise = CONFIG.switch_distance_m(pairwise["mm_upper"], source.radius)
+        # The slack is the farthest vertex from the ORIGIN — the point `VisibilityRange` measures
+        # to — taken over BOTH levels at this boundary, since either may be the one on screen there.
+        slack = max(
+            report["validity"]["origin_radius_m"],
+            previous["validity"]["origin_radius_m"],
+        )
+        switch_from_source = CONFIG.switch_distance_m(report["deviation"]["mm_upper"], slack)
+        switch_from_pairwise = CONFIG.switch_distance_m(pairwise["mm_upper"], slack)
         switch = max(switch_from_source, switch_from_pairwise)
         diagnostic = M.normal_angle_diagnostic(
             source, shipped, CONFIG.RENDER_GATE["normal_samples"]
@@ -603,9 +744,11 @@ def build_chain(asset, root, run_render_gate, out_dir):
             "switch_from_pairwise_m": round(switch_from_pairwise, 4),
             "validity": report["validity"],
             "cleanup": cleanup_report,
+            "reproducible": True,
             "normal_diagnostic_deg": diagnostic,
         })
-        previous = {"tris": shipped.tri_count, "surface": shipped, "label": f"L{level_index}"}
+        previous = {"tris": shipped.tri_count, "surface": shipped,
+                    "label": f"L{level_index}", "validity": report["validity"]}
 
         if best["tris"] <= floor_tris:
             termination = "topology_floor"
@@ -628,20 +771,33 @@ def build_chain(asset, root, run_render_gate, out_dir):
             f"successor when this starts mattering is meshoptimizer (ADR 0033, Simplifier choice).")
 
     render_reports = []
+    render_material_source = "not run"
     if run_render_gate and len(levels) > 1:
         pairs = []
-        parents = [source] + [
+        # L0's parent is the DECODED SHIPPED L0, not the Blender source surface: the gate renders
+        # what ships, at every level of the chain including the top one.
+        parents = [shipped_l0] + [
             M.from_glb(level["staged"], None, f"L{level['level']}") for level in levels[1:-1]
         ]
         for level, parent in zip(levels[1:], parents):
             child = M.from_glb(level["staged"], None, f"L{level['level']}")
             pairs.append((f"{asset['name']}_L{level['level']}", parent, child, level["switch_m"]))
+        gate_material, render_material_source = shipped_material(l0_path, asset["l0_node"])
+        if gate_material is None:
+            render_material_source = (
+                f"FELL BACK to the .blend material {material.name!r} — {render_material_source}"
+            )
+            gate_material = material
+        log(f"  render gate material: {render_material_source}")
         log(f"  render gate: {len(pairs)} pair(s) x {len(CONFIG.RENDER_GATE['views'])} view(s), "
-            f"Cycles {CONFIG.RENDER_GATE['samples']} spp at {CONFIG.RENDER_GATE['tile_px']} px")
+            f"Cycles {CONFIG.RENDER_GATE['samples']} spp at "
+            f"{CONFIG.RENDER_GATE['tile_px']}x{CONFIG.RENDER_GATE['supersample']} px")
         render_reports = render_gate.compare(
-            pairs, material, CONFIG.RENDER_GATE, CONFIG.REFERENCE_VIEW,
+            pairs, gate_material, CONFIG.RENDER_GATE, CONFIG.REFERENCE_VIEW,
             os.path.join(out_dir, "renders"),
         )
+        for report in render_reports:
+            report["material_source"] = render_material_source
         for level, report in zip(levels[1:], render_reports):
             level["render_gate"] = report
             log(f"         render L{level['level']} vs {level['parent_level']} at "
@@ -686,6 +842,7 @@ def build_chain(asset, root, run_render_gate, out_dir):
         "skipped_rungs": skipped,
         "levels": levels,
         "material": material.name,
+        "render_material_source": render_material_source,
     }, levels
 
 
@@ -700,6 +857,7 @@ def main(argv):
     if "--no-render-gate" in argv:
         run_render_gate = False
 
+    assert_toolchain()
     work = tempfile.mkdtemp(prefix="lod-chain-")
     manifest = {
         "schema": "overmatch.lod.manifest",
@@ -707,7 +865,10 @@ def main(argv):
         "generator": {
             "script": "scripts/lod/generate.py",
             "version": CONFIG.GENERATOR_VERSION,
+            "sources_sha256": CONFIG.generator_digest(),
             "blender": f"{bpy.app.version_string} ({bpy.app.build_hash.decode()})",
+            "blender_expected": CONFIG.EXPECTED_BLENDER,
+            "gltf_exporter": _exporter_version(),
         },
         "ladder": {
             "e1_mm": CONFIG.E1_MM,

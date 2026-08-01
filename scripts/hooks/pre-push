@@ -43,8 +43,19 @@ python3 scripts/tank/glb_ktx2.py verify --allow-pointer "$obj"
 # that selects from it, and a seam nobody checks is a ledger — the last hand-written one drifted by
 # 112 m before anyone noticed. This re-derives every switch distance from the recorded deviations,
 # re-hashes every level glb, and refuses a manifest cut by a generator the tree no longer holds.
-# Stdlib-only and milliseconds: it reads a JSON file and hashes a few tens of kilobytes.
+#
+# IT VERIFIES THE WORK TREE, so the work tree must BE what is being pushed for that to mean
+# anything. A dirty-but-self-consistent tree can otherwise bless a different committed tree
+# entirely: the manifest on disk matches the glbs on disk, neither is what HEAD holds, and the hook
+# says fine. So the LOD paths are required clean first. CI re-runs the same verification on the
+# checked-out commit after LFS hydration, which is the backstop for `--no-verify`.
 echo "pre-push ▸ lod chain manifest"
+lod_paths='assets/lod_manifest.json assets/tiger_1 scripts/lod'
+if ! git diff --quiet HEAD -- $lod_paths || [ -n "$(git ls-files --others --exclude-standard -- $lod_paths)" ]; then
+    printf '\033[31m  LOD paths are dirty\033[0m — the manifest on disk is not the one being pushed.\n' >&2
+    git status --short -- $lod_paths >&2
+    exit 1
+fi
 python3 scripts/lod/chain.py --verify
 for suite in test_chain test_refusals; do
     python3 "scripts/lod/$suite.py" >/dev/null 2>&1 ||
