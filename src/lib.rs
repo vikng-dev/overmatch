@@ -627,6 +627,11 @@ impl Plugin for ClientPlugin {
         // Per-frame wall-clock recorder (idle unless `SPIKE_FRAME_COST` is set) — mounted on this
         // root so the offline frame-budget sweep needs no server; the net root mounts it too.
         app.add_plugins(frame_cost::client_plugin);
+        // Per-render-pass cost recorder (idle unless `SPIKE_RENDER_COST` is set), the render-side
+        // companion to the recorder above. Mounted here for the same reason: the offline captures
+        // (`scripts/perf/run-fire-capture.sh`) set both variables and run with no server, and
+        // without this mount the render-cost half asked for was silently never written.
+        app.add_plugins(render_cost::client_plugin);
         // Player graphics settings + the Esc settings page + the render-scale render-app half, all
         // behind one mount. SP's pause surface is `AppState::Paused` (there is no overlay authority
         // here), so the page's visibility is declared from the state — which is the plugin's one

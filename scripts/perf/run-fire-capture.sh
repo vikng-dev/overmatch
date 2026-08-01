@@ -91,6 +91,9 @@ for entry in "${CONDITIONS[@]}"; do
   CLIENT_PID=$!
 
   stream="$OUT/$cond.client.jsonl"
+  # `role_path` (src/trace.rs) inserts the role before the extension, so the recorders write
+  # `<cond>.client.jsonl` and `<cond>.render.client.jsonl` from the values exported above.
+  render_stream="$OUT/$cond.render.client.jsonl"
   deadline=$((SECONDS + RUN_S + STARTUP_GRACE_S))
   span_ok=""
   while (( SECONDS < deadline )); do
@@ -123,6 +126,14 @@ for entry in "${CONDITIONS[@]}"; do
   [[ -f "$stream" ]] || { echo "$cond INVALID: no frame stream at $stream" >&2; exit 1; }
   grep -q "settings: loaded $cfg/video.ron" "$OUT/$cond.log" || { echo "$cond INVALID: injected settings were not loaded" >&2; exit 1; }
   grep -q "auto_fire: armed" "$OUT/$cond.log" || { echo "$cond INVALID: the scripted trigger never armed — nothing fired" >&2; exit 1; }
+  # The render-cost half was requested, so its absence is a failed run, not a quiet one: before
+  # 2026-07-31 the offline root never mounted `render_cost::client_plugin` and this stream was
+  # never written, while the capture still reported success.
+  if [[ ! -s "$render_stream" ]]; then
+    echo "$cond INVALID: SPIKE_RENDER_COST was requested but $render_stream is missing or empty (see $OUT/$cond.log)" >&2
+    exit 1
+  fi
+  grep -q "render_cost: recording rows to" "$OUT/$cond.log" || { echo "$cond INVALID: the render-cost recorder never armed (see $OUT/$cond.log)" >&2; exit 1; }
   grep -q "frame_cost: effective present mode Immediate, frame cap off" "$OUT/$cond.log" \
     || { echo "$cond INVALID: no proof the run was uncapped (see $OUT/$cond.log)" >&2; exit 1; }
   if grep -qE 'settings: vsync .* is not supported by this surface' "$OUT/$cond.log"; then
@@ -136,6 +147,7 @@ for entry in "${CONDITIONS[@]}"; do
     echo "$cond: $(grep -m1 -o 'frame_cost: effective present mode.*' "$OUT/$cond.log")"
     echo "$cond: occlusion transitions in stream: $(grep -c '"occluded"' "$stream" || true)"
     echo "$cond: auto-fire phases: $(grep -c 'auto_fire: phase' "$OUT/$cond.log" || true)"
+    echo "$cond: render-cost rows: $(wc -l <"$render_stream" | tr -d ' ')"
   } >>"$OUT/manifest.txt"
   echo "   $cond OK: $(wc -l <"$stream" | tr -d ' ') rows"
   sleep 5
