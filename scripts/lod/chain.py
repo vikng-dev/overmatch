@@ -112,6 +112,10 @@ class Tree:
 
 
 def load(root=None, path=None, rev=None):
+    # `root` is explicit for the hook: it runs `scripts/lod` EXTRACTED FROM the revision under
+    # test, into a temp directory that is not inside any work tree, so walking up for a `.git`
+    # finds nothing. Verifying a commit with a different tree's rules would be the same class of
+    # mistake one level up, which is why the scripts come from the revision and the root does not.
     root = root or CONFIG.repo_root()
     tree = Tree(root, rev)
     if rev is None and path is not None:
@@ -729,10 +733,15 @@ def main():
         help="verify the manifest and assets AS OF this git revision rather than the work tree; "
              "what scripts/hooks/pre-push runs on each SHA it is about to push",
     )
+    parser.add_argument(
+        "--repo", default=None,
+        help="the work tree to run git against; needed when this script has been extracted out of "
+             "a revision into a temp directory that is not itself inside a repository",
+    )
     args = parser.parse_args()
 
     try:
-        manifest, root, tree = load(path=args.manifest, rev=args.rev)
+        manifest, root, tree = load(root=args.repo, path=args.manifest, rev=args.rev)
     except (FileNotFoundError, ValueError) as exc:
         print(f"lod chain ▸ cannot read the manifest: {exc}", file=sys.stderr)
         return 1

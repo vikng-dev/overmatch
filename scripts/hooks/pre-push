@@ -77,7 +77,7 @@ printf '%s\n' "$refs" | while read -r local_ref local_sha remote_ref remote_sha;
     git archive "$local_sha" scripts/lod | tar -x -C "$lod_tmp" ||
         { printf '\033[31m  cannot extract scripts/lod from %s\033[0m\n' "$local_sha" >&2; exit 1; }
     echo "  ▸ $local_ref -> ${local_sha}"
-    python3 "$lod_tmp/scripts/lod/chain.py" --verify --rev "$local_sha" ||
+    python3 "$lod_tmp/scripts/lod/chain.py" --verify --rev "$local_sha" --repo "$(pwd)" ||
         { printf '\033[31m  LOD verification failed for %s\033[0m\n' "$local_sha" >&2; exit 1; }
     checked=$((checked + 1))
 done || exit 1
