@@ -1913,200 +1913,329 @@ mod tests {
     }
 }
 
-/// The TACTICAL harness (brief §6b, codex finding 1): what a coarser level does to a SIGHTLINE, as
-/// opposed to what it does to a silhouette.
+/// The TACTICAL certification (brief §6b, codex 2026-08-01 finding 1): what a coarser level does to
+/// a SIGHTLINE, as opposed to what it does to a silhouette.
 ///
-/// The whole positional ladder is built on projected vertical error, and codex's first finding is
-/// that projected error cannot see motion ALONG a pixel ray. Near tangency the ray-surface
-/// intersection satisfies `δt ≈ δh / (d_y − ∇h·d_xz)`, whose denominator goes to zero exactly where
-/// tanks look at each other: a deviation that is invisible on screen can move a first-hit hundreds
-/// of metres and decide whether a hull is behind a crest or on top of it.
+/// The positional ladder is built on projected vertical error, and that metric structurally cannot
+/// see motion ALONG a pixel ray. Near tangency the ray-surface intersection satisfies
+/// `δt ≈ δh / (d_y − ∇h·d_xz)`, whose denominator goes to zero exactly where tanks look at each
+/// other: a deviation invisible on screen can move a first-hit by hundreds of metres and decide
+/// whether a hull sits behind a crest or on top of it.
 ///
-/// So this module MEASURES two things the positional gate cannot:
-/// * **first-hit distance error** — exact surface vs each level, over the tank/optic camera-height
-///   envelope at grazing pitches;
-/// * **crest-occlusion flips** — observer-to-target sightlines at hull height, counting the cases
-///   where the two surfaces DISAGREE about whether the target is visible, split by direction
-///   (a level that REVEALS a hull the exact ground hides is the dangerous one).
+/// # What this measures, and how it is kept honest
 ///
-/// **PROVISIONAL — measurement now, gate later.** The budgets for these numbers are the one
-/// genuinely new dial terrain LOD introduces and they are Yan's to set (the brief's proposal is
-/// ≤ 5 m first-hit error at any legal engagement sightline and zero hull-revealing flips). Until
-/// then `tactical_ray_harness_reports` runs, prints, and asserts only that it exercised the
-/// surfaces — turning it into a gate is a one-line change once the numbers are ratified.
+/// * **Exact intersection on both sides.** No marching. Both surfaces are piecewise linear, so a
+///   ray meets them in closed form: the canonical side through `HeightGrid::cast_ray` (already
+///   pinned against parry to 3.3e-4 m), the LOD side through [`Surface::cast`], a cell-walking
+///   exact caster over the selected triangles, itself pinned against that same reference by
+///   `the_tactical_caster_agrees_with_the_pinned_terrain_caster`. The previous version marched both
+///   at 0.25 m and claimed the resolution cancelled — codex falsified that, correctly: two
+///   piecewise-linear surfaces can cross and re-separate between the same pair of samples, so
+///   identical sampling aliases differently on each side and the difference of two aliased casts is
+///   not the difference of two surfaces.
+/// * **The surface the observer would actually see.** [`Ladder::selected`] picks a level PER TILE
+///   from the camera-to-AABB-centre distance and the live view profile — the same arithmetic
+///   `check_visibility_ranges` performs — instead of capping the whole map at one rung. Near tiles
+///   are exact while far tiles are coarse, which is the only configuration a player ever renders and
+///   the only one in which a sightline crosses a switch.
+/// * **Stratified, with coverage RECORDED.** Rays are drawn from a full-factorial grid of eye
+///   height × pitch band × map region × azimuth octant, and the report states how many strata
+///   produced usable samples and which rungs were actually exercised. An unfilled stratum is a hole
+///   in the certification and is stated rather than averaged away.
+///
+/// **PROVISIONAL — measurement now, gate later.** The budgets are the one genuinely new dial terrain
+/// LOD introduces and they are Yan's to set (the brief proposes ≤ 5 m first-hit error at any legal
+/// engagement sightline and zero hull-revealing crest flips). Until then this runs, prints, and
+/// asserts only structural coverage. Turning it into a gate is one threshold per printed column.
 #[cfg(test)]
 mod tactical {
     use super::*;
-    use crate::terrain_grid::{WORLD_HALF_EXTENT, WORLD_SIZE, tests::shipped_grid};
+    use crate::terrain_grid::{
+        WORLD_HALF_EXTENT, WORLD_SIZE, node_world_coord, tests::shipped_grid,
+    };
 
-    /// Marching step along a ray, metres. BOTH surfaces are sampled by the SAME marcher at this
-    /// step, so the reported error is a difference between two SURFACES and the marching
-    /// resolution cancels — it is not an exact caster compared against an approximate one. The
-    /// residual is the risk of stepping over a crest thinner than a quarter-cell, which is below
-    /// the grid's own 0.977 m resolution and therefore below what the surfaces can express.
-    const MARCH_STEP_M: f32 = 0.25;
-
-    /// The whole map's drawn surface at one rung: every tile at the coarsest level it keeps whose
-    /// declared rung is within the given one — i.e. the ground a player actually sees once that
-    /// rung's switch distance is passed.
-    struct LodSurface {
-        /// World-space triangles, read back from the levels' own meshes (the geometry that ships,
-        /// not a re-derivation of it).
-        tris: Vec<[Vec3; 3]>,
-        /// The at-most-two triangles covering each unit grid cell, `u32::MAX` for empty. A cell
-        /// centre can lie exactly ON a leaf triangle's hypotenuse, which is why there are two.
+    /// One tile-level's geometry, indexed for O(1) point location.
+    ///
+    /// Triangles are stored as GLOBAL grid-node indices rather than positions: every LOD vertex is
+    /// an exact grid sample (`interior_vertices_are_exact_grid_samples`), so the grid IS the vertex
+    /// buffer and the whole pyramid costs 12 bytes a triangle here instead of 36.
+    struct TileLevel {
+        tris: Vec<[u32; 3]>,
+        /// The at-most-two triangles covering each of the tile's `MESH_TILE_CELLS²` cells. Two,
+        /// because a cell centre can lie exactly ON a diagonal.
         cells: Vec<[u32; 2]>,
-        cells_per_side: usize,
-        step: f32,
     }
 
-    impl LodSurface {
-        fn new(grid: &HeightGrid, lod: &TerrainLod, rung: usize) -> Self {
-            let cells_per_side = grid.size() as usize - 1;
-            let step = WORLD_SIZE / cells_per_side as f32;
-            let mut tris: Vec<[Vec3; 3]> = Vec::new();
-            let mut cells = vec![[u32::MAX; 2]; cells_per_side * cells_per_side];
-            for tile in &lod.tiles {
-                let Some(level) = tile.levels.iter().rfind(|level| level.rung <= rung) else {
-                    continue;
-                };
-                let Some(bevy::mesh::VertexAttributeValues::Float32x3(positions)) =
-                    level.mesh.attribute(Mesh::ATTRIBUTE_POSITION)
-                else {
-                    panic!("a level must carry f32x3 positions");
-                };
-                let Some(Indices::U32(indices)) = level.mesh.indices() else {
-                    panic!("a level must carry u32 indices");
-                };
-                let node = |p: &[f32; 3]| {
-                    (
-                        ((p[0] + WORLD_HALF_EXTENT) / step).round() as i64,
-                        ((p[2] + WORLD_HALF_EXTENT) / step).round() as i64,
-                    )
-                };
-                for tri in indices.chunks_exact(3) {
-                    let p = [
-                        positions[tri[0] as usize],
-                        positions[tri[1] as usize],
-                        positions[tri[2] as usize],
-                    ];
-                    let id = tris.len() as u32;
-                    tris.push([
-                        Vec3::from_array(p[0]),
-                        Vec3::from_array(p[1]),
-                        Vec3::from_array(p[2]),
-                    ]);
-                    // Which unit cells does this triangle cover? Work in DOUBLED node
-                    // coordinates so a cell centre is the integer point (2i+1, 2j+1) and every
-                    // inside test is exact integer arithmetic.
-                    let (a, b, c) = (node(&p[0]), node(&p[1]), node(&p[2]));
-                    let (ax, ay) = (a.0 * 2, a.1 * 2);
-                    let (bx, by) = (b.0 * 2, b.1 * 2);
-                    let (cx, cy) = (c.0 * 2, c.1 * 2);
-                    let area2 = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
-                    if area2 == 0 {
-                        continue;
-                    }
-                    let lo_i = a.0.min(b.0).min(c.0).max(0);
-                    let hi_i = a.0.max(b.0).max(c.0).min(cells_per_side as i64);
-                    let lo_j = a.1.min(b.1).min(c.1).max(0);
-                    let hi_j = a.1.max(b.1).max(c.1).min(cells_per_side as i64);
-                    for j in lo_j..hi_j {
-                        for i in lo_i..hi_i {
-                            let (x, y) = (i * 2 + 1, j * 2 + 1);
-                            let ea = (cx - bx) * (y - by) - (cy - by) * (x - bx);
-                            let eb = (ax - cx) * (y - cy) - (ay - cy) * (x - cx);
-                            let ec = (bx - ax) * (y - ay) - (by - ay) * (x - ax);
-                            let inside = if area2 > 0 {
-                                ea >= 0 && eb >= 0 && ec >= 0
-                            } else {
-                                ea <= 0 && eb <= 0 && ec <= 0
-                            };
-                            if !inside {
-                                continue;
-                            }
-                            let slot = &mut cells[(j as usize) * cells_per_side + i as usize];
-                            if slot[0] == u32::MAX {
-                                slot[0] = id;
-                            } else if slot[1] == u32::MAX {
-                                slot[1] = id;
+    /// The whole ladder, indexed and ready for selection: `levels[tile][level]`.
+    struct Ladder<'a> {
+        grid: &'a HeightGrid,
+        lod: TerrainLod,
+        levels: Vec<Vec<TileLevel>>,
+        tiles_per_side: usize,
+    }
+
+    impl<'a> Ladder<'a> {
+        fn new(grid: &'a HeightGrid) -> Self {
+            let lod = build(grid);
+            let full = MESH_TILE_CELLS + 1;
+            let n = grid.size() as usize;
+            let ranges = mesh_tile_node_ranges(grid);
+            let mut levels = Vec::with_capacity(lod.tiles.len());
+            for (tile, [ia, _, ja, _]) in lod.tiles.iter().zip(&ranges) {
+                let mut per_level = Vec::with_capacity(tile.levels.len());
+                for level in &tile.levels {
+                    let Some(Indices::U32(indices)) = level.mesh.indices() else {
+                        panic!("a level must carry u32 indices");
+                    };
+                    let mut tris = Vec::with_capacity(indices.len() / 3);
+                    let mut cells = vec![[u32::MAX; 2]; MESH_TILE_CELLS * MESH_TILE_CELLS];
+                    for tri in indices.chunks_exact(3) {
+                        let local =
+                            |k: u32| ((k as usize % full) as i64, (k as usize / full) as i64);
+                        let (a, b, c) = (local(tri[0]), local(tri[1]), local(tri[2]));
+                        let id = tris.len() as u32;
+                        tris.push([
+                            ((ja + a.1 as usize) * n + ia + a.0 as usize) as u32,
+                            ((ja + b.1 as usize) * n + ia + b.0 as usize) as u32,
+                            ((ja + c.1 as usize) * n + ia + c.0 as usize) as u32,
+                        ]);
+                        // Doubled coordinates: a cell centre is the integer point (2i+1, 2j+1), so
+                        // the coverage test stays exact integer arithmetic.
+                        let (ax, ay) = (a.0 * 2, a.1 * 2);
+                        let (bx, by) = (b.0 * 2, b.1 * 2);
+                        let (cx, cy) = (c.0 * 2, c.1 * 2);
+                        let area2 = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+                        if area2 == 0 {
+                            continue;
+                        }
+                        for j in a.1.min(b.1).min(c.1)..a.1.max(b.1).max(c.1) {
+                            for i in a.0.min(b.0).min(c.0)..a.0.max(b.0).max(c.0) {
+                                let (x, y) = (i * 2 + 1, j * 2 + 1);
+                                let ea = (cx - bx) * (y - by) - (cy - by) * (x - bx);
+                                let eb = (ax - cx) * (y - cy) - (ay - cy) * (x - cx);
+                                let ec = (bx - ax) * (y - ay) - (by - ay) * (x - ax);
+                                let inside = if area2 > 0 {
+                                    ea >= 0 && eb >= 0 && ec >= 0
+                                } else {
+                                    ea <= 0 && eb <= 0 && ec <= 0
+                                };
+                                if !inside {
+                                    continue;
+                                }
+                                let slot = &mut cells[j as usize * MESH_TILE_CELLS + i as usize];
+                                if slot[0] == u32::MAX {
+                                    slot[0] = id;
+                                } else if slot[1] == u32::MAX {
+                                    slot[1] = id;
+                                }
                             }
                         }
                     }
+                    per_level.push(TileLevel { tris, cells });
                 }
+                levels.push(per_level);
             }
+            let tiles_per_side = (grid.size() as usize - 1).div_ceil(MESH_TILE_CELLS);
             Self {
-                tris,
-                cells,
-                cells_per_side,
-                step,
+                grid,
+                lod,
+                levels,
+                tiles_per_side,
             }
         }
 
-        /// The DRAWN surface height at world `(x, z)`, or `None` off the map.
-        fn height_at(&self, x: f32, z: f32) -> Option<f32> {
-            if x.abs() > WORLD_HALF_EXTENT || z.abs() > WORLD_HALF_EXTENT {
+        /// World position of a global grid node index.
+        fn vertex(&self, k: u32) -> Vec3 {
+            let n = self.grid.size() as usize;
+            let (i, j) = (k as usize % n, k as usize / n);
+            Vec3::new(
+                node_world_coord(self.grid, i),
+                self.grid.sample(i, j),
+                node_world_coord(self.grid, j),
+            )
+        }
+
+        /// The tile containing world `(x, z)`.
+        fn tile_at(&self, x: f32, z: f32) -> usize {
+            let cells = self.grid.size() as usize - 1;
+            let step = WORLD_SIZE / cells as f32;
+            let clamp = |w: f32| (((w + WORLD_HALF_EXTENT) / step) as usize).min(cells - 1);
+            (clamp(z) / MESH_TILE_CELLS) * self.tiles_per_side + clamp(x) / MESH_TILE_CELLS
+        }
+
+        /// The surface a camera at `eye` under view profile `view` would actually be shown: one
+        /// level per tile, chosen by the same distance-to-AABB-centre rule
+        /// `check_visibility_ranges` applies (`bevy_camera-0.19.0/src/visibility/range.rs:263`).
+        fn selected(&self, eye: Vec3, view: TerrainLodView) -> Surface<'_> {
+            let choice = self
+                .lod
+                .tiles
+                .iter()
+                .map(|tile| {
+                    let centre = (tile.min + tile.max) * 0.5;
+                    let distance = (eye - centre).length();
+                    self.lod
+                        .ranges(tile, view)
+                        .iter()
+                        .position(|range| range.is_visible_at_all(distance))
+                        // Past every end margin cannot happen while the chain reaches infinity;
+                        // the coarsest level is the safe read if it ever does.
+                        .unwrap_or(tile.levels.len() - 1)
+                })
+                .collect();
+            Surface {
+                ladder: self,
+                choice,
+            }
+        }
+    }
+
+    /// One concrete drawn surface: the ladder plus a level choice per tile.
+    struct Surface<'a> {
+        ladder: &'a Ladder<'a>,
+        choice: Vec<usize>,
+    }
+
+    impl Surface<'_> {
+        /// EXACT first hit of `origin + t·dir` (unit `dir`) with the drawn surface, or `None`.
+        ///
+        /// A 2-D DDA walks the grid cells the ray's XZ footprint crosses, in ray order, and each
+        /// cell's at-most-two triangles are solved in closed form. The walk keeps a running best and
+        /// stops only once a cell's ENTRY parameter passes it — necessary because a coarse triangle
+        /// registered in an early cell can be struck in a late one, so "first cell with a hit" is
+        /// not "first hit".
+        ///
+        /// The world ends at the grid span, exactly as it does for the collider and
+        /// `HeightGrid::cast_ray`.
+        fn cast(&self, origin: Vec3, dir: Vec3, t_max: f32) -> Option<f32> {
+            let ladder = self.ladder;
+            let n = ladder.grid.size() as usize;
+            let last = (n - 1) as f32;
+            let (u0, v0) = (
+                (origin.x + WORLD_HALF_EXTENT) / WORLD_SIZE * last,
+                (origin.z + WORLD_HALF_EXTENT) / WORLD_SIZE * last,
+            );
+            let (du, dv) = (dir.x / WORLD_SIZE * last, dir.z / WORLD_SIZE * last);
+            let (mut t0, mut t1) = (0.0f32, t_max);
+            for (o, d) in [(u0, du), (v0, dv)] {
+                if d == 0.0 {
+                    if !(0.0..=last).contains(&o) {
+                        return None;
+                    }
+                } else {
+                    let (ta, tb) = ((0.0 - o) / d, (last - o) / d);
+                    t0 = t0.max(ta.min(tb));
+                    t1 = t1.min(ta.max(tb));
+                }
+            }
+            if t0 > t1 {
                 return None;
             }
-            let n = self.cells_per_side;
-            let i = (((x + WORLD_HALF_EXTENT) / self.step) as usize).min(n - 1);
-            let j = (((z + WORLD_HALF_EXTENT) / self.step) as usize).min(n - 1);
-            let mut fallback = None;
-            for &id in &self.cells[j * n + i] {
+            let cell = |w: f32| (w as usize).min(n - 2);
+            let (mut i, mut j) = (cell(u0 + du * t0), cell(v0 + dv * t0));
+            let (mut t_in, mut best) = (t0, None::<f32>);
+            for _ in 0..2 * n {
+                if best.is_some_and(|found| t_in > found) {
+                    break;
+                }
+                let t_u = if du > 0.0 {
+                    ((i + 1) as f32 - u0) / du
+                } else if du < 0.0 {
+                    (i as f32 - u0) / du
+                } else {
+                    f32::INFINITY
+                };
+                let t_v = if dv > 0.0 {
+                    ((j + 1) as f32 - v0) / dv
+                } else if dv < 0.0 {
+                    (j as f32 - v0) / dv
+                } else {
+                    f32::INFINITY
+                };
+                let t_out = t_u.min(t_v).min(t1);
+                if let Some(hit) = self.cell_hit(i, j, origin, dir, (t0, t1)) {
+                    best = Some(best.map_or(hit, |found: f32| found.min(hit)));
+                }
+                if t_out >= t1 {
+                    break;
+                }
+                if t_u <= t_out {
+                    if du > 0.0 {
+                        i += 1;
+                    } else if i == 0 {
+                        break;
+                    } else {
+                        i -= 1;
+                    }
+                }
+                if t_v <= t_out {
+                    if dv > 0.0 {
+                        j += 1;
+                    } else if j == 0 {
+                        break;
+                    } else {
+                        j -= 1;
+                    }
+                }
+                if i > n - 2 || j > n - 2 {
+                    break;
+                }
+                t_in = t_out;
+            }
+            best
+        }
+
+        /// The nearest crossing of the triangles registered to grid cell `(i, j)`, within the hard
+        /// clip `[t0, t1]`. Exact: each triangle's plane makes the crossing one division, and XZ
+        /// barycentric containment decides whether that crossing lies ON the triangle. The surface
+        /// is single-valued in XZ, so the projected test is the whole membership question.
+        fn cell_hit(
+            &self,
+            i: usize,
+            j: usize,
+            origin: Vec3,
+            dir: Vec3,
+            (t0, t1): (f32, f32),
+        ) -> Option<f32> {
+            let ladder = self.ladder;
+            let tile = (j / MESH_TILE_CELLS) * ladder.tiles_per_side + i / MESH_TILE_CELLS;
+            let level = &ladder.levels[tile][self.choice[tile]];
+            let local = (j % MESH_TILE_CELLS) * MESH_TILE_CELLS + (i % MESH_TILE_CELLS);
+            let mut best: Option<f32> = None;
+            for &id in &level.cells[local] {
                 if id == u32::MAX {
                     continue;
                 }
-                let [a, b, c] = self.tris[id as usize];
+                let [a, b, c] = level.tris[id as usize].map(|k| ladder.vertex(k));
+                let normal = (b - a).cross(c - a);
+                let denominator = normal.dot(dir);
+                if denominator == 0.0 {
+                    continue;
+                }
+                let t = normal.dot(a - origin) / denominator;
+                if t < t0 || t > t1 || best.is_some_and(|found| t >= found) {
+                    continue;
+                }
+                let p = origin + dir * t;
                 let area = (b.x - a.x) * (c.z - a.z) - (b.z - a.z) * (c.x - a.x);
                 if area == 0.0 {
                     continue;
                 }
                 let inv = 1.0 / area;
-                let wa = ((c.x - b.x) * (z - b.z) - (c.z - b.z) * (x - b.x)) * inv;
-                let wb = ((a.x - c.x) * (z - c.z) - (a.z - c.z) * (x - c.x)) * inv;
-                let wc = ((b.x - a.x) * (z - a.z) - (b.z - a.z) * (x - a.x)) * inv;
-                let height = wa * a.y + wb * b.y + wc * c.y;
-                fallback = Some(height);
-                const EPS: f32 = -1.0e-4;
+                let wa = ((c.x - b.x) * (p.z - b.z) - (c.z - b.z) * (p.x - b.x)) * inv;
+                let wb = ((a.x - c.x) * (p.z - c.z) - (a.z - c.z) * (p.x - c.x)) * inv;
+                let wc = ((b.x - a.x) * (p.z - a.z) - (b.z - a.z) * (p.x - a.x)) * inv;
+                const EPS: f32 = -1.0e-5; // shared-edge ownership slop only
                 if wa >= EPS && wb >= EPS && wc >= EPS {
-                    return Some(height);
+                    best = Some(t);
                 }
             }
-            fallback
+            best
         }
     }
 
-    /// First hit of a ray against a height function, marched. `t` is in metres along a unit `dir`.
-    fn march(
-        height: &impl Fn(f32, f32) -> Option<f32>,
-        origin: Vec3,
-        dir: Vec3,
-        t_max: f32,
-    ) -> Option<f32> {
-        let mut previous: Option<(f32, f32)> = None; // (t, ray_y − surface)
-        let mut t = 0.0f32;
-        while t <= t_max {
-            let p = origin + dir * t;
-            if let Some(h) = height(p.x, p.z) {
-                let gap = p.y - h;
-                if gap <= 0.0 {
-                    // Linear crossing between the last clear sample and this one.
-                    return Some(match previous {
-                        Some((t0, g0)) if g0 > 0.0 => t0 + (t - t0) * g0 / (g0 - gap),
-                        _ => t,
-                    });
-                }
-                previous = Some((t, gap));
-            } else {
-                previous = None;
-            }
-            t += MARCH_STEP_M;
-        }
-        None
-    }
-
-    /// A deterministic LCG stream (no platform RNG), the same generator shape `terrain_grid`'s
-    /// seeded pins use.
+    /// A deterministic LCG stream (no platform RNG), the generator shape `terrain_grid`'s seeded
+    /// pins use.
     fn lcg(seed: u64) -> impl FnMut() -> f32 {
         let mut state = seed;
         move || {
@@ -2127,124 +2256,347 @@ mod tactical {
         (at(0.5), at(0.95), at(1.0))
     }
 
-    /// PROVISIONAL measurement, not a gate. Prints, per rung:
-    /// * grazing-ray first-hit distance error (median / p95 / max) and hit-disagreement counts;
-    /// * crest-occlusion flips on hull-height sightlines, split into REVEALS (the LOD ground shows
-    ///   a hull the exact ground hides — the tactically dangerous direction) and HIDES.
+    /// Eye heights spanning the tank/optic envelope: hull roof, commander's head, tallest legal
+    /// optic ride. Every engagement sightline is drawn from this band.
+    const EYE_HEIGHTS_M: [f32; 3] = [1.5, 2.2, 3.0];
+    /// Depression bands, radians. The first is the near-tangent case the whole harness exists for;
+    /// the last is ordinary gunnery depression, present so the grazing numbers have a control.
+    const PITCH_BANDS_RAD: [(f32, f32); 4] = [
+        (0.0017, 0.0087),
+        (0.0087, 0.0349),
+        (0.0349, 0.0698),
+        (0.0698, 0.1745),
+    ];
+    /// Map regions the observer is drawn from (2×2 quadrants).
+    const REGIONS: usize = 4;
+    /// Azimuth octants.
+    const OCTANTS: usize = 8;
+    /// PAIRED hits wanted per (eye × pitch band × region × octant) stratum.
+    const PER_STRATUM: usize = 3;
+    /// Draws allowed per stratum while chasing that quota. Bounded so a genuinely unreachable
+    /// stratum (a grazing ray that leaves the map whatever the origin) still reports as empty
+    /// instead of looping.
+    const RETRY_BUDGET: usize = 40;
+    /// Sightline range bands, metres — engagement ranges on a 1 km map.
+    const RANGE_BANDS_M: [(f32, f32); 4] = [
+        (200.0, 400.0),
+        (400.0, 600.0),
+        (600.0, 800.0),
+        (800.0, 1000.0),
+    ];
+
+    /// PROVISIONAL measurement, not a gate — see the module doc. Prints, per view profile:
+    /// first-hit distance error against the exact ground, hit/miss disagreements, crest-occlusion
+    /// flips split by direction, and the stratum coverage behind every one of those numbers.
     ///
     /// Run it with `cargo test --lib tactical -- --nocapture`.
     #[test]
     fn tactical_ray_harness_reports() {
         let grid = shipped_grid();
-        let lod = build(&grid);
-        let exact = |x: f32, z: f32| grid.contains_xz(x, z).then(|| grid.height_at(x, z));
-        // The tank/optic camera-height envelope: hull roof, commander's head, and the tallest
-        // legal optic ride — the band every engagement sightline is drawn from.
-        const EYE_HEIGHTS_M: [f32; 3] = [1.5, 2.2, 3.0];
-        const RAYS: usize = 384;
-        const SIGHTLINES: usize = 768;
-        let view_optic = TerrainLodView {
-            fov_y_rad: crate::camera::GUNNER_FOV_FALLBACK,
-            height_px: 2160.0,
-            budget_px: TERRAIN_LOD_BUDGET_PX,
-        };
-        let view_cmdr = TerrainLodView {
-            fov_y_rad: std::f32::consts::FRAC_PI_4,
-            ..view_optic
-        };
+        let ladder = Ladder::new(&grid);
+        let radius = ladder.lod.bounding_radius_m;
+        let strata = EYE_HEIGHTS_M.len() * PITCH_BANDS_RAD.len() * REGIONS * OCTANTS;
         println!(
-            "TACTICAL HARNESS (PROVISIONAL — budgets await ratification). Map {WORLD_SIZE} m, \
-             marched at {MARCH_STEP_M} m, {RAYS} grazing rays × {} eye heights, {SIGHTLINES} \
-             hull-height sightlines.",
-            EYE_HEIGHTS_M.len()
+            "TACTICAL HARNESS (PROVISIONAL — budgets await ratification)\n  exact ray/triangle on \
+             both surfaces; per-tile level selection from camera-to-AABB distance; {strata} strata \
+             × {PER_STRATUM} paired hits"
         );
-        let mut exercised = 0usize;
-        for (rung, &declared) in TERRAIN_LOD_LADDER.iter().enumerate().skip(1) {
-            let surface = LodSurface::new(&grid, &lod, rung);
-            let drawn = |x: f32, z: f32| surface.height_at(x, z);
+        let mut switched_somewhere = false;
+        for (name, view) in [
+            (
+                "gunner optic 4K (fov 0.120 rad)",
+                TerrainLodView::new(crate::camera::GUNNER_FOV_FALLBACK, 2160.0),
+            ),
+            (
+                "commander 4K (fov 0.785 rad)",
+                TerrainLodView::new(std::f32::consts::FRAC_PI_4, 2160.0),
+            ),
+        ] {
+            println!(
+                "\n  {name} — switch distances: {}",
+                (1..TERRAIN_LOD_LADDER.len())
+                    .map(|rung| format!(
+                        "δ{:.2}@{:.0}m",
+                        TERRAIN_LOD_LADDER[rung],
+                        view.switch_distance_m(rung, radius)
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
 
-            // ---- grazing first-hit sweep -------------------------------------------------
-            let mut next = lcg(0x9E37_79B9_7F4A_7C15 ^ rung as u64);
+            // ---- stratified grazing first-hit sweep -----------------------------------------
+            let mut next = lcg(0x9E37_79B9_7F4A_7C15);
             let mut errors: Vec<f32> = Vec::new();
-            let (mut both, mut only_exact, mut only_lod) = (0usize, 0usize, 0usize);
-            let mut worst_at = 0.0f32;
-            for _ in 0..RAYS {
-                let x = (next() * 2.0 - 1.0) * WORLD_HALF_EXTENT * 0.95;
-                let z = (next() * 2.0 - 1.0) * WORLD_HALF_EXTENT * 0.95;
-                let azimuth = next() * std::f32::consts::TAU;
-                // Grazing band: 0.1° to 4° below horizontal, where the first-hit denominator is
-                // small and a centimetre of height is worth tens of metres of range.
-                let pitch = 0.0017 + next() * 0.0681;
-                for eye in EYE_HEIGHTS_M {
-                    let origin = Vec3::new(x, grid.height_at(x, z) + eye, z);
-                    let dir = Vec3::new(
-                        pitch.cos() * azimuth.cos(),
-                        -pitch.sin(),
-                        pitch.cos() * azimuth.sin(),
-                    )
-                    .normalize();
-                    let a = march(&exact, origin, dir, 1500.0);
-                    let b = march(&drawn, origin, dir, 1500.0);
-                    match (a, b) {
-                        (Some(a), Some(b)) => {
-                            both += 1;
-                            errors.push((a - b).abs());
-                            if (a - b).abs() > worst_at {
-                                worst_at = (a - b).abs();
+            let (mut paired, mut only_exact, mut only_lod, mut neither) = (0, 0, 0, 0);
+            let mut filled = vec![false; strata];
+            // Which rung the tile containing the exact first hit was SELECTED at — the column that
+            // says whether the sweep crossed a switch at all, or merely re-measured level zero.
+            let mut by_rung = vec![0usize; TERRAIN_LOD_LADDER.len()];
+            let mut worst_by_rung = vec![0.0f32; TERRAIN_LOD_LADDER.len()];
+            let mut stratum = 0usize;
+            for eye in EYE_HEIGHTS_M {
+                for (lo, hi) in PITCH_BANDS_RAD {
+                    for region in 0..REGIONS {
+                        for octant in 0..OCTANTS {
+                            // Re-draw within the stratum until it yields its quota of PAIRED hits.
+                            // A near-tangent ray can legitimately leave the map without ever meeting
+                            // the ground, and letting that count as a filled stratum would hand back
+                            // a coverage number that is really a miss-rate. The retry budget is
+                            // bounded, so a genuinely unreachable stratum still reports as empty.
+                            let mut wanted = PER_STRATUM;
+                            for _ in 0..RETRY_BUDGET {
+                                if wanted == 0 {
+                                    break;
+                                }
+                                let half = WORLD_HALF_EXTENT * 0.95;
+                                let (qx, qz) = (region % 2, region / 2);
+                                let x = -half + (qx as f32 + next()) * half;
+                                let z = -half + (qz as f32 + next()) * half;
+                                let azimuth = (octant as f32 + next()) * std::f32::consts::TAU
+                                    / OCTANTS as f32;
+                                let pitch = lo + next() * (hi - lo);
+                                let origin = Vec3::new(x, grid.height_at(x, z) + eye, z);
+                                let dir = Vec3::new(
+                                    pitch.cos() * azimuth.cos(),
+                                    -pitch.sin(),
+                                    pitch.cos() * azimuth.sin(),
+                                )
+                                .normalize();
+                                let surface = ladder.selected(origin, view);
+                                let exact = grid.cast_ray(origin, dir, 1500.0).map(|hit| hit.t);
+                                let drawn = surface.cast(origin, dir, 1500.0);
+                                match (exact, drawn) {
+                                    (Some(a), Some(b)) => {
+                                        paired += 1;
+                                        wanted -= 1;
+                                        filled[stratum] = true;
+                                        let error = (a - b).abs();
+                                        errors.push(error);
+                                        let hit = origin + dir * a;
+                                        let tile = ladder.tile_at(hit.x, hit.z);
+                                        let rung = ladder.lod.tiles[tile].levels
+                                            [surface.choice[tile]]
+                                            .rung;
+                                        by_rung[rung] += 1;
+                                        worst_by_rung[rung] = worst_by_rung[rung].max(error);
+                                    }
+                                    (Some(_), None) => only_exact += 1,
+                                    (None, Some(_)) => only_lod += 1,
+                                    (None, None) => neither += 1,
+                                }
                             }
+                            stratum += 1;
                         }
-                        (Some(_), None) => only_exact += 1,
-                        (None, Some(_)) => only_lod += 1,
-                        (None, None) => {}
                     }
                 }
             }
-            exercised += both;
             let (median, p95, max) = quantiles(&mut errors);
+            let covered = filled.iter().filter(|filled| **filled).count();
+            // Name the holes. A stratum that never yields a paired hit is a corner of the envelope
+            // this report does not cover, and it belongs in the output next to the numbers it is
+            // missing from — not averaged into a percentage.
+            let holes: Vec<String> = filled
+                .iter()
+                .enumerate()
+                .filter(|(_, hit)| !**hit)
+                .map(|(index, _)| {
+                    let octant = index % OCTANTS;
+                    let region = index / OCTANTS % REGIONS;
+                    let band = index / (OCTANTS * REGIONS) % PITCH_BANDS_RAD.len();
+                    let eye = index / (OCTANTS * REGIONS * PITCH_BANDS_RAD.len());
+                    format!(
+                        "eye {:.1} m / pitch {:.2}–{:.2}° / quadrant {region} / octant {octant}",
+                        EYE_HEIGHTS_M[eye],
+                        PITCH_BANDS_RAD[band].0.to_degrees(),
+                        PITCH_BANDS_RAD[band].1.to_degrees(),
+                    )
+                })
+                .collect();
+            println!(
+                "    first-hit error over {paired} paired hits: median {median:.3} m, p95 \
+                 {p95:.3} m, max {max:.3} m\n    disagreements: only-exact {only_exact}, only-LOD \
+                 {only_lod} (both missed {neither})\n    coverage: {covered}/{strata} strata \
+                 produced a paired hit{}\n    by SELECTED rung at the hit — {}",
+                if holes.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "\n    UNCOVERED (a grazing ray from here leaves the map whatever the \
+                         origin): {}",
+                        holes.join("; ")
+                    )
+                },
+                by_rung
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, count)| **count > 0)
+                    .map(|(rung, count)| format!(
+                        "δ{:.2}: {count} hits, worst {:.3} m",
+                        TERRAIN_LOD_LADDER[rung], worst_by_rung[rung]
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            );
 
-            // ---- crest occlusion ----------------------------------------------------------
-            let mut next = lcg(0xB5AD_4ECE_DA1C_E2A9 ^ rung as u64);
+            // ---- crest occlusion, stratified by range band and azimuth ----------------------
             const HULL_M: f32 = 1.8;
-            let (mut reveals, mut hides, mut tested) = (0usize, 0usize, 0usize);
-            for _ in 0..SIGHTLINES {
-                let x = (next() * 2.0 - 1.0) * WORLD_HALF_EXTENT * 0.9;
-                let z = (next() * 2.0 - 1.0) * WORLD_HALF_EXTENT * 0.9;
-                let azimuth = next() * std::f32::consts::TAU;
-                let range = 200.0 + next() * 800.0;
-                let (tx, tz) = (x + range * azimuth.cos(), z + range * azimuth.sin());
-                if !grid.contains_xz(tx, tz) {
-                    continue;
-                }
-                let from = Vec3::new(x, grid.height_at(x, z) + 2.2, z);
-                let to = Vec3::new(tx, grid.height_at(tx, tz) + HULL_M, tz);
-                let span = to - from;
-                let distance = span.length();
-                let dir = span / distance;
-                // Blocked = the surface interrupts the segment before the target.
-                let blocked = |height: &dyn Fn(f32, f32) -> Option<f32>| {
-                    march(&|x, z| height(x, z), from, dir, distance - 0.5).is_some()
-                };
-                tested += 1;
-                match (blocked(&exact), blocked(&drawn)) {
-                    (true, false) => reveals += 1,
-                    (false, true) => hides += 1,
-                    _ => {}
+            let mut next = lcg(0xB5AD_4ECE_DA1C_E2A9);
+            let (mut reveals, mut hides, mut tested, mut discarded) = (0, 0, 0, 0);
+            let mut by_band = vec![0usize; RANGE_BANDS_M.len()];
+            for (band, (lo, hi)) in RANGE_BANDS_M.into_iter().enumerate() {
+                for octant in 0..OCTANTS {
+                    // Same discipline as the ray sweep: re-draw the ORIGIN until the target at this
+                    // band's range and this octant's bearing lands on the map. Discarding instead
+                    // (the previous shape) silently starved the long bands — MEASURED 38 of a
+                    // wanted 256 in the 800–1000 m band, on a map whose diagonal is 1414 m — and a
+                    // long-range crest flip is exactly the case the gate is for.
+                    let mut wanted = 32;
+                    for _ in 0..RETRY_BUDGET * 8 {
+                        if wanted == 0 {
+                            break;
+                        }
+                        let half = WORLD_HALF_EXTENT * 0.98;
+                        let x = (next() * 2.0 - 1.0) * half;
+                        let z = (next() * 2.0 - 1.0) * half;
+                        let azimuth =
+                            (octant as f32 + next()) * std::f32::consts::TAU / OCTANTS as f32;
+                        let range = lo + next() * (hi - lo);
+                        let (tx, tz) = (x + range * azimuth.cos(), z + range * azimuth.sin());
+                        if !grid.contains_xz(tx, tz) {
+                            discarded += 1;
+                            continue;
+                        }
+                        wanted -= 1;
+                        let from = Vec3::new(x, grid.height_at(x, z) + 2.2, z);
+                        let to = Vec3::new(tx, grid.height_at(tx, tz) + HULL_M, tz);
+                        let span = to - from;
+                        let distance = span.length();
+                        let dir = span / distance;
+                        let reach = distance - 0.5;
+                        let surface = ladder.selected(from, view);
+                        tested += 1;
+                        by_band[band] += 1;
+                        match (
+                            grid.cast_ray(from, dir, reach).is_some(),
+                            surface.cast(from, dir, reach).is_some(),
+                        ) {
+                            (true, false) => reveals += 1,
+                            (false, true) => hides += 1,
+                            _ => {}
+                        }
+                    }
                 }
             }
-
             println!(
-                "  rung δ ≤ {declared:.2} m (switch: optic {optic:.0} m, commander {cmdr:.0} m)\n\
-                 \x20   first-hit error over {both} grazing rays: median {median:.2} m, \
-                 p95 {p95:.2} m, max {max:.2} m; hit only-exact {only_exact}, only-LOD {only_lod}\n\
-                 \x20   crest occlusion over {tested} sightlines: {reveals} REVEAL a hull the \
-                 exact ground hides, {hides} hide one it shows",
-                optic = view_optic.switch_distance_m(rung, lod.bounding_radius_m),
-                cmdr = view_cmdr.switch_distance_m(rung, lod.bounding_radius_m),
+                "    crest occlusion over {tested} sightlines ({discarded} discarded off-map): \
+                 {reveals} REVEAL a hull the exact ground hides, {hides} hide one it shows\n    \
+                 coverage by range band: {}",
+                RANGE_BANDS_M
+                    .iter()
+                    .zip(&by_band)
+                    .map(|((lo, hi), count)| format!("{lo:.0}–{hi:.0} m: {count}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+
+            let switched = by_rung.iter().skip(1).sum::<usize>() > 0;
+            switched_somewhere |= switched;
+            if !switched {
+                println!(
+                    "    NOTE: every hit landed on an exact-level tile. At this profile the \
+                     nearest coarse switch is {:.0} m and the farthest a camera can be from any \
+                     tile centre on a {WORLD_SIZE} m map is ~{:.0} m — terrain LOD never fires in \
+                     this view, so these zeroes are the honest answer and not a passing gate.",
+                    view.switch_distance_m(
+                        ladder.lod.tiles[0]
+                            .levels
+                            .get(1)
+                            .map_or(TERRAIN_LOD_LADDER.len() - 1, |level| level.rung),
+                        radius,
+                    ),
+                    WORLD_SIZE * std::f32::consts::SQRT_2 / 2.0 + radius,
+                );
+            }
+
+            // Structural assertions only — every number above is provisional. What IS gated is that
+            // the report has no holes: every stratum must produce its quota of paired hits and
+            // every range band its sightlines, so a number that looks clean cannot be a number
+            // nobody measured.
+            // Not 100 %: on a finite map some near-tangent corners of the envelope have no ground
+            // left to hit, and demanding total coverage would only invite widening the strata until
+            // the number looked good. The floor is high, the holes are named above, and a
+            // COLLAPSE in coverage — a caster regression, a ladder that stops producing geometry —
+            // still fails here.
+            assert!(
+                covered * 100 >= strata * 95,
+                "{name}: only {covered}/{strata} strata produced a paired hit — uncovered: {}",
+                holes.join("; ")
+            );
+            assert!(
+                by_band.iter().all(|count| *count > 0),
+                "{name}: a range band produced no sightline"
             );
         }
+        // Across the profiles, at least one must actually cross a switch. Without this the harness
+        // could report all-zero forever while measuring the exact surface against itself — which is
+        // exactly how a broken ladder walks through a green suite.
         assert!(
-            exercised > RAYS,
-            "the harness must actually intersect the surfaces ({exercised} paired hits)"
+            switched_somewhere,
+            "no view profile exercised a coarse level; the harness is measuring nothing"
+        );
+    }
+
+    /// The exact caster is pinned against the one the repo already trusts: on a surface built from
+    /// the EXACT level everywhere, [`Surface::cast`] must agree with `HeightGrid::cast_ray` — which
+    /// is itself pinned against parry to 3.3e-4 m over a seeded direction sweep. Without this the
+    /// tactical numbers would rest on an unverified caster, which is the shape of the defect codex
+    /// found in the marched version.
+    #[test]
+    fn the_tactical_caster_agrees_with_the_pinned_terrain_caster() {
+        let grid = shipped_grid();
+        let ladder = Ladder::new(&grid);
+        // Level zero everywhere: the drawn surface IS the canonical one, so any disagreement is the
+        // caster's own and not the ladder's.
+        let surface = Surface {
+            ladder: &ladder,
+            choice: vec![0; ladder.lod.tiles.len()],
+        };
+        let mut next = lcg(0x243F_6A88_85A3_08D3);
+        let (mut worst, mut hits) = (0.0f32, 0u32);
+        for _ in 0..512 {
+            let x = (next() * 2.0 - 1.0) * WORLD_HALF_EXTENT * 0.95;
+            let z = (next() * 2.0 - 1.0) * WORLD_HALF_EXTENT * 0.95;
+            let origin = Vec3::new(x, grid.height_at(x, z) + 0.5 + next() * 30.0, z);
+            // Steep to shallow-grazing: a shallow ray amplifies any surface mismatch by
+            // 1/sin(elevation), so this is the harshest agreement the two casters face.
+            let elevation = 0.03 + next() * 1.47;
+            let azimuth = next() * std::f32::consts::TAU;
+            let dir = Vec3::new(
+                elevation.cos() * azimuth.cos(),
+                -elevation.sin(),
+                elevation.cos() * azimuth.sin(),
+            )
+            .normalize();
+            match (
+                grid.cast_ray(origin, dir, 1500.0).map(|hit| hit.t),
+                surface.cast(origin, dir, 1500.0),
+            ) {
+                (Some(a), Some(b)) => {
+                    hits += 1;
+                    worst = worst.max((a - b).abs());
+                }
+                (None, None) => {}
+                (a, b) => {
+                    panic!(
+                        "hit/no-hit disagreement at {origin:?} dir {dir:?}: {a:?} vs parry {b:?}"
+                    )
+                }
+            }
+        }
+        assert!(hits > 300, "the sweep must exercise hits ({hits})");
+        assert!(
+            worst < 1.0e-2,
+            "the tactical caster disagrees with the pinned one by {worst} m over {hits} hits"
         );
     }
 }
