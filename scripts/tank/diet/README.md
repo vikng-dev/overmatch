@@ -96,10 +96,18 @@ legitimate.
     /Applications/Blender.app/Contents/MacOS/Blender -b assets/tiger_1/tiger_1.blend \
         --python-expr 'import sys; sys.path.insert(0, ".agents/blender"); import export_tiger; export_tiger.export()'
 
-Deterministic: three independent headless runs produced byte-identical `tiger_1.glb`,
+That one run also replays the MG dedupe and the back-face flags onto the raw export before the
+bake (see [THE ONE RULE](#the-one-rule-never-re-export-this-glb-from-blender-to-apply-a-mesh-change)),
+so steps 3 and 4 below do NOT have to be re-run by hand afterwards — and the result is
+structurally identical to the previously shipped glb: same 64 meshes, 11 materials and 81 nodes,
+same names in the same order, nothing double-sided.
+
+Deterministic: independent headless runs produce byte-identical `tiger_1.glb`,
 `tiger_1_link.lod1.glb` and `tiger_1_link.lod2.glb`. Afterwards, the gates that apply are the two
-under [THE ONE RULE](#the-one-rule-never-re-export-this-glb-from-blender-to-apply-a-mesh-change)
-plus `validate.py` on each tier glb.
+under THE ONE RULE plus `validate.py` on each tier glb.
+
+Cost of the chain, off `report.py`: **662 698 triangles per tank against 1 146 534** — 194 shoes
+at 3 056 instead of 5 550, before any distance tier is drawn.
 
 ## THE ONE RULE: never re-export this glb from Blender to apply a mesh change
 
@@ -113,6 +121,16 @@ geometry, in isolation, on a stripped one-mesh file.
 If you re-export the tank for an actual art change, that is fine and correct — the export
 helper in `.agents/blender/` bakes the KTX2 back in. What is not fine is re-exporting to
 apply one of the edits below, because the bake is 60 s and the mistake is silent.
+
+**And the mips are not the only thing a re-export used to lose.** Two of the edits below live
+in the glb and cannot be authored in Blender at all, so a plain export reverted them with
+nothing to say so — measured 2026-08-01 against the shipped bytes: **67 meshes and 15 materials
+where the shipped glb has 64 and 11, and `doubleSided` back on every one of them.** That is
+[step 3](#3--machine-guns-dedupe-then-decimate-the-dedupe-ships-the-decimate-was-reverted)'s MG
+dedupe and [step 4](#4--back-face-culling)'s culling, undone. `export_tiger.py` now replays both
+onto the raw export before the bake — by invoking these same two scripts, not by copying them —
+so the export door and these tools cannot drift apart. If you add a third lossless glb-only edit,
+it belongs in that stage too, or the next re-export eats it.
 
 After ANY edit here, both of these must still pass:
 
@@ -279,6 +297,10 @@ Note the mesh reference switches from index (`15`) to name (`Object_0.002`) afte
 step, because the GC moved every index above 29.
 
 ### 4 — back-face culling
+
+Steps 3 and 4 are the two the export stage replays for you (see THE ONE RULE); what follows is
+the PROBE that decided them, which is still a hand step and is still the thing to re-run if the
+model gains a single-layer surface.
 
     python3 scripts/tank/diet/extract_all.py assets/tiger_1/tiger_1.glb $W/vis.glb --with-link
     RES=2000 python3 scripts/tank/diet/drive_bf.py $W/vis.glb
