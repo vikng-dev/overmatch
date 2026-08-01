@@ -93,9 +93,14 @@ const MG_SMOKE_PUSH: f32 = 0.7;
 const FAR_FULL_DRESSING: f32 = 400.0;
 
 pub(super) fn plugin(app: &mut App) {
+    let shadows = MuzzleShadows::from_env();
+    // The RESOLVED policy, logged verbatim as the token the env knob accepts — an A/B runner
+    // (`scripts/perf/run-fire-capture.sh`) greps this per condition and fails on a mismatch, so a
+    // typo'd or dropped `OVERMATCH_MUZZLE_SHADOWS` cannot silently measure the default arm twice.
+    info!("muzzle_shadows: resolved {}", shadows.token());
     app.init_resource::<MuzzleLightRing>()
         .init_resource::<MgSmokeCadence>()
-        .insert_resource(MuzzleShadows::from_env())
+        .insert_resource(shadows)
         .add_systems(Startup, setup_muzzle_assets)
         .add_observer(on_main_gun_fire)
         .add_observer(on_mg_fire)
@@ -130,12 +135,34 @@ pub(super) enum MuzzleShadows {
 }
 
 impl MuzzleShadows {
+    /// Parse `OVERMATCH_MUZZLE_SHADOWS`. Every variant has an EXPLICIT token, the shipped default
+    /// included: an A/B arm that wants the shipped policy has to be able to NAME it, or its
+    /// "shipped" condition silently becomes whatever the default happens to be on the day — which
+    /// is exactly how this script's `shipped` arm came to export the legacy policy after the
+    /// default moved to [`Self::MainGunOnly`].
     fn from_env() -> Self {
-        match std::env::var("OVERMATCH_MUZZLE_SHADOWS").ok().as_deref() {
+        Self::parse(std::env::var("OVERMATCH_MUZZLE_SHADOWS").ok().as_deref())
+    }
+
+    /// The knob's whole grammar, split out so it is testable without writing process-global state.
+    fn parse(value: Option<&str>) -> Self {
+        match value {
             Some("off") => Self::Off,
             Some("on") => Self::On,
-            // Unset or anything else: the default decision.
+            Some("main-only") => Self::MainGunOnly,
+            // Unset or anything else: the default decision. Unrecognized values are visible in the
+            // resolved-policy log line, which is what the runner verifies against.
             _ => Self::MainGunOnly,
+        }
+    }
+
+    /// The token this policy is named by — the same string [`Self::from_env`] accepts, so the
+    /// logged value round-trips back through the knob.
+    fn token(self) -> &'static str {
+        match self {
+            Self::MainGunOnly => "main-only",
+            Self::On => "on",
+            Self::Off => "off",
         }
     }
 
@@ -886,6 +913,33 @@ mod tests {
             casting(MuzzleShadows::Off),
             (false, false),
             "Off: neither casts"
+        );
+    }
+
+    /// EVERY policy is nameable, and the name the client LOGS is the name the knob ACCEPTS. Both
+    /// halves are load-bearing for `scripts/perf/run-fire-capture.sh`, whose arms name a policy in
+    /// the env and then verify the client resolved that same token — an A/B whose "shipped" arm
+    /// could not name the shipped policy is how that script came to measure the legacy one twice.
+    #[test]
+    fn every_shadow_policy_has_a_token_that_round_trips() {
+        for mode in [
+            MuzzleShadows::MainGunOnly,
+            MuzzleShadows::On,
+            MuzzleShadows::Off,
+        ] {
+            assert_eq!(
+                MuzzleShadows::parse(Some(mode.token())),
+                mode,
+                "the logged token must parse back to the policy that logged it",
+            );
+        }
+        // Unset (the shipped default) and an unrecognized value both land on the default — the
+        // latter is caught by the runner's token check, not by a parse failure.
+        assert_eq!(MuzzleShadows::parse(None), MuzzleShadows::default());
+        assert_eq!(
+            MuzzleShadows::parse(Some("main_only")),
+            MuzzleShadows::MainGunOnly,
+            "an unrecognized value falls back to the default (and logs `main-only`)",
         );
     }
 
