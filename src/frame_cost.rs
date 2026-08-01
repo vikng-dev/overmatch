@@ -62,16 +62,19 @@
 //!   primary panel by construction whatever else is plugged in;
 //! * **records** which monitor is actually presenting, as `{t, monitor, refresh_mhz, primary}`
 //!   rows in the same stream and on the same clock as the frames — at first resolution and again
-//!   on every change. The park is best-effort; the ROW is the evidence, and
-//!   `scripts/perf/analyze.py` fails any stream whose measurement window is covered by a monitor
-//!   below 100 000 mHz, is not covered by a monitor row at all, or changes monitor mid-window.
+//!   on every change, by polling winit's own `current_monitor()` (see [`record_monitor`], which
+//!   also records why bevy's `OnMonitor` relationship cannot serve here). The park is
+//!   best-effort; the ROW is the evidence, and `scripts/perf/analyze.py` fails any stream whose
+//!   measurement window is covered by a monitor below 100 000 mHz, is not covered by a monitor row
+//!   at all, or changes monitor mid-window.
 //!
 //! The parking is deliberately NOT a gate here: a client that refuses to measure is a worse
 //! instrument than one that measures and states its own display provenance. Being wrong about the
 //! panel and being unable to say which panel are the same evidential state, and both fail in the
 //! analyzer — which is also why `refresh_mhz` is written as `null` rather than omitted when winit
-//! cannot answer (vendored bevy_window-0.19.0/src/monitor.rs: `Monitor::refresh_rate_millihertz`
-//! is an `Option`).
+//! cannot answer (winit's `MonitorHandle::refresh_rate_millihertz` is an `Option`; on macOS it
+//! falls back to `CVDisplayLink` because `CGDisplayModeGetRefreshRate` reports 0 for the built-in
+//! panel — vendored winit-0.30.13/src/platform_impl/macos/monitor.rs).
 //!
 //! Rows on CHANGE rather than per frame, polled once a second: the identity of the presenting
 //! panel is a step function, and a row per frame would drown the frame rows it is meant to
@@ -81,7 +84,7 @@
 //! window, exactly like the occlusion gate: pre-warmup churn is provenance, not a failure.
 
 use bevy::prelude::*;
-use bevy::window::{Monitor, OnMonitor, PrimaryMonitor, PrimaryWindow, WindowOccluded};
+use bevy::window::{PrimaryWindow, WindowOccluded};
 use serde_json::json;
 
 use crate::settings::{PresentCaps, Settings};
@@ -155,35 +158,50 @@ struct MonitorFacts {
 /// Append a `{t, monitor, refresh_mhz, primary}` row whenever the window's presenting monitor
 /// resolves or changes (see the module doc's presenting-monitor section).
 ///
-/// The monitor is read through the window's `OnMonitor` relationship, which bevy maintains from
-/// winit's `current_monitor()` — the OS's own answer to "which panel is this surface on", not an
-/// inference from coordinates (vendored bevy_winit-0.19.0/src/system.rs, `changed_windows`). It is
-/// absent for the first frames: the relationship is inserted after window creation, so a stream
-/// simply has no monitor row until then, and the analyzer treats a measurement window that no row
-/// covers as INVALID rather than as unremarkable.
+/// Asks winit's `current_monitor()` directly, once a second, rather than reading bevy's `OnMonitor`
+/// relationship — which is the same underlying call, but arrives through a change-detection path
+/// that a capture never triggers. `changed_windows` is filtered by `Changed<Window>` and runs in
+/// `Last` (vendored bevy_winit-0.19.0/src/lib.rs and src/system.rs), so the relationship is
+/// evaluated only on frames where something WROTE to the `Window` component. On a hands-off capture
+/// that is the startup park and nothing else, and at that instant the freshly created window is not
+/// yet on a screen, so `current_monitor()` answers None and no relationship is inserted; the window
+/// then never changes again and bevy never asks a second time. MEASURED: zero monitor rows across a
+/// whole condition, which the analyzer correctly called invalid. Polling the OS ourselves removes
+/// the dependency on being asked at the right moment.
+///
+/// The window handle lives in a thread-local, so this is a non-send system exactly like
+/// `settings::observe_window_mode`. `current_monitor()` is None until the window is mapped, which
+/// costs a poll or two at startup and is why the analyzer treats an unresolved measurement window
+/// as INVALID rather than as unremarkable.
 fn record_monitor(
+    _non_send_marker: bevy::ecs::system::NonSendMarker,
     mut cost: ResMut<FrameCost>,
     time: Res<Time<Real>>,
     mut last: Local<Option<MonitorFacts>>,
     mut next_poll_s: Local<f64>,
-    windows: Query<&OnMonitor, With<PrimaryWindow>>,
-    monitors: Query<(&Monitor, Has<PrimaryMonitor>)>,
+    windows: Query<Entity, With<PrimaryWindow>>,
 ) {
     let t = time.elapsed_secs_f64();
     if t < *next_poll_s {
         return;
     }
     *next_poll_s = t + MONITOR_POLL_S;
-    let Ok(on_monitor) = windows.single() else {
+    let Ok(entity) = windows.single() else {
         return;
     };
-    let Ok((monitor, primary)) = monitors.get(on_monitor.0) else {
+    let resolved = bevy::winit::WINIT_WINDOWS.with_borrow(|winit_windows| {
+        let winit_window = winit_windows.get_window(entity)?;
+        let current = winit_window.current_monitor()?;
+        Some(MonitorFacts {
+            // The panel's own report, in millihertz — the quantity that paces presentation, as
+            // opposed to the present mode the app asked for.
+            refresh_mhz: current.refresh_rate_millihertz(),
+            primary: winit_window.primary_monitor().as_ref() == Some(&current),
+            name: current.name(),
+        })
+    });
+    let Some(facts) = resolved else {
         return;
-    };
-    let facts = MonitorFacts {
-        name: monitor.name.clone(),
-        refresh_mhz: monitor.refresh_rate_millihertz,
-        primary,
     };
     if last.as_ref() == Some(&facts) {
         return;

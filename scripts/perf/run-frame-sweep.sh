@@ -285,13 +285,18 @@ for entry in "${CONDITIONS[@]}"; do
     || { echo "$cond INVALID: frame stream failed the analyzer's validity gates (see above)" >&2; exit 1; }
   # Presentation provenance into the manifest: the effective mode line verbatim, plus how many
   # occlusion transitions the client observed (0 on a clean visible run after the initial show),
-  # plus which display presented it — the client's own first-resolution line, quoted rather than
-  # asserted. The gate on it is the analyzer's, above; this is the human-readable receipt.
+  # plus which display presented it. The gate on it is the analyzer's, above; this is the
+  # human-readable receipt.
+  # The LAST monitor line, not the first: bevy creates the window before the client's startup park
+  # runs, so on a machine with the 60 Hz panel attached the FIRST line routinely names that panel
+  # and would make a perfectly valid capture read as a poisoned one. Both lines stay in the log,
+  # and the row count below says whether there was more than one.
+  monitor_line="$(grep -o 'frame_cost: presenting on monitor.*' "$OUT/$cond.log" | tail -1)"
   {
     echo "$cond: $(grep -m1 -o 'frame_cost: effective present mode.*' "$OUT/$cond.log" || echo 'effective present mode NOT REPORTED')"
     echo "$cond: occlusion transitions in stream: $(grep -c '"occluded"' "$stream" || true)"
-    echo "$cond: $(grep -m1 -o 'frame_cost: presenting on monitor.*' "$OUT/$cond.log" || echo 'presenting monitor NOT REPORTED')"
-    echo "$cond: monitor rows in stream: $(grep -c '"monitor"' "$stream" || true) (>1 = the display changed during the run)"
+    echo "$cond: ${monitor_line:-presenting monitor NOT REPORTED} <- in force at the end"
+    echo "$cond: monitor rows in stream: $(grep -c '"monitor"' "$stream" || true) (1 = never moved; 2 is normally the startup park off the external panel, inside warmup — the analyzer gates on the state in force once warmup ends)"
   } >>"$OUT/manifest.txt"
   echo "   $cond OK: $(wc -l <"$stream" | tr -d ' ') rows (frame + occlusion + monitor)"
 
