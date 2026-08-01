@@ -153,15 +153,28 @@ LINK_DELIMIT = frozenset({"UV"})
 #: up to. `relpath` is where the level ships: `None` for LOD0, which is not a file but the `Link`
 #: mesh INSIDE the tank glb.
 #:
-#: The measured numbers behind the two budgets (`scripts/tank/diet/README.md` carries the full
-#: table): planar alone floors at 1 354 triangles even at 60°, so the distance tiers cannot be
-#: reached without a collapse pass; and the collapse itself floors at ~213 triangles on this shoe,
-#: which is why LOD2 asks for 250 and not the 192 the retired glb-surgery route reached from its
-#: welded copy. A budget below the floor is a loud failure, not a silent near-miss.
+#: THE BUDGETS ARE SET BY DEVIATION, NOT BY ROUND NUMBERS. `src/track/link_view.rs` swaps levels at
+#: distances derived from each level's measured worst point-to-surface deviation — one pixel in the
+#: gunner optic is 8.333e-5 rad, so a level is honest beyond `worst_dev / 8.333e-5` metres and
+#: nowhere nearer. Measured with `scripts/tank/diet/deviation.py` against the authored mesh:
+#:
+#:     LOD0  3 056 tris   0.99 mm ->  11.9 m   (planar only: no vertex moves)
+#:     LOD1    477 tris  18.64 mm -> 223.7 m   (shipped switch: 250 m)
+#:     LOD2    237 tris  44.72 mm -> 536.7 m   (shipped switch: 650 m)
+#:
+#: LOD1 asks for 500 rather than the ~380 a triangle-first reading would pick because the collapse
+#: falls off a cliff there — 429 triangles measures 22.9 mm, which is only honest beyond 275 m and
+#: would put faceting inside the shipped 250 m band. Triangles are the free variable; the switch
+#: distance is the constraint.
+#:
+#: Planar alone floors at 1 354 triangles even at 60°, so the distance tiers cannot be reached
+#: without the collapse pass; the collapse itself floors at ~213 triangles on this shoe, which is
+#: why LOD2 asks for 250 and not the 192 the retired glb-surgery route reached from its welded
+#: copy. A budget below the floor is a loud failure, not a silent near-miss.
 LinkLod = namedtuple("LinkLod", "label angle_deg collapse_tris relpath node")
 LINK_LOD_TIERS = (
     LinkLod("LOD0", 10.0, None, None, LINK_OBJECT),
-    LinkLod("LOD1", 10.0, 386, "assets/tiger_1/tiger_1_link.lod1.glb", "Link_LOD1"),
+    LinkLod("LOD1", 10.0, 500, "assets/tiger_1/tiger_1_link.lod1.glb", "Link_LOD1"),
     LinkLod("LOD2", 10.0, 250, "assets/tiger_1/tiger_1_link.lod2.glb", "Link_LOD2"),
 )
 
