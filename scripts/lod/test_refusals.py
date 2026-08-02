@@ -271,6 +271,56 @@ class ValidityTests(unittest.TestCase):
             surface.validity(self.gates)["origin_radius_m"], 5.0, places=6
         )
 
+    def test_the_digest_separates_meshes_that_differ_only_in_uv(self):
+        """Codex's counterexample: same positions and topology, one with a collapsed UV.
+
+        Their validity differs — `tangent_default_faces` 0 against 2 — so treating them as one
+        candidate can discard the good one and keep the broken one, or the reverse. Identity has to
+        cover every attribute the gates measure.
+        """
+        good = self.surface("uv_good.glb", SQUARE_POS, SQUARE_IDX, SQUARE_UV)
+        collapsed = self.surface(
+            "uv_collapsed.glb", SQUARE_POS, SQUARE_IDX, [[0, 0], [0, 0], [0, 0], [0, 0]]
+        )
+        self.assertEqual(good.validity(self.gates)["tangent_default_faces"], 0)
+        self.assertEqual(collapsed.validity(self.gates)["tangent_default_faces"], 2)
+        self.assertNotEqual(good.digest(), collapsed.digest())
+
+    def test_the_digest_separates_meshes_that_differ_only_in_winding(self):
+        """Same points, one triangle wound the other way: `orientation_flips` 0 against 1."""
+        good = self.surface("wind_good.glb", SQUARE_POS, [0, 1, 2, 0, 2, 3], SQUARE_UV)
+        flipped = self.surface("wind_flipped.glb", SQUARE_POS, [0, 1, 2, 0, 3, 2], SQUARE_UV)
+        self.assertEqual(good.validity(self.gates)["orientation_flips"], 0)
+        self.assertEqual(flipped.validity(self.gates)["orientation_flips"], 1)
+        self.assertNotEqual(good.digest(), flipped.digest())
+
+    def test_the_digest_separates_meshes_that_differ_only_in_normals(self):
+        normals = [[0, 0, 1]] * 4
+        tilted = [[0, 0.5, 0.866]] * 4
+        a = M.from_glb(build_glb(os.path.join(self.dir, "n_a.glb"), SQUARE_POS, SQUARE_IDX,
+                                 normals=normals, uvs=SQUARE_UV))
+        b = M.from_glb(build_glb(os.path.join(self.dir, "n_b.glb"), SQUARE_POS, SQUARE_IDX,
+                                 normals=tilted, uvs=SQUARE_UV))
+        self.assertNotEqual(a.digest(), b.digest())
+
+    def test_the_digest_separates_uv_areas_either_side_of_the_gate_epsilon(self):
+        """The key must be at least as sharp as the finest test applied to what it keys.
+
+        Executed counterexample: UV areas of 5e-13 and 1.5e-12 straddle `uv_area_eps = 1e-12`, so
+        they differ in `tangent_default_faces` — and the digest, which rounded UVs to 1e-7, gave
+        them the same key. One of the two was then discarded as a duplicate, arbitrarily.
+        """
+        below = [[0, 0], [1e-6, 0], [0, 1e-6]]        # uv area 5e-13
+        above = [[0, 0], [3e-6, 0], [0, 1e-6]]        # uv area 1.5e-12
+        positions = [[0, 0, 0], [1, 0, 0], [0, 1, 0]]
+        a = M.from_glb(build_glb(os.path.join(self.dir, "uv_below.glb"), positions, [0, 1, 2],
+                                 uvs=below))
+        b = M.from_glb(build_glb(os.path.join(self.dir, "uv_above.glb"), positions, [0, 1, 2],
+                                 uvs=above))
+        self.assertEqual(a.validity(self.gates)["tangent_default_faces"], 1)
+        self.assertEqual(b.validity(self.gates)["tangent_default_faces"], 0)
+        self.assertNotEqual(a.digest(), b.digest())
+
     def test_the_digest_ignores_index_order_but_not_geometry(self):
         """The cache key that collapses a decimation plateau — it must key on the MESH, not the file."""
         a = self.surface("d1.glb", SQUARE_POS, SQUARE_IDX, SQUARE_UV)
@@ -417,6 +467,162 @@ class BranchAndBoundTests(unittest.TestCase):
         self.assertLessEqual(upper - lower, 0.05)
 
 
+class BisectionTests(unittest.TestCase):
+    """WHERE THE ENUMERATION'S CONTRACT IS ACTUALLY ESTABLISHED.
+
+    The enumeration cannot prove its oracle honest — it can only ask it, and a consistently wrong
+    oracle answers consistently. So the property "returns the greatest realizable count at or below
+    the budget" is proven HERE, where it is arithmetic rather than a conversation: over synthetic
+    staircases whose answer is computed independently from the staircase's own definition.
+    """
+
+    @staticmethod
+    def staircase(steps):
+        """A monotone non-decreasing count(ratio), as the decimate modifier's is.
+
+        `steps` is a list of (ratio_threshold, count), ascending. The realizable set is the counts.
+        """
+        ordered = sorted(steps)
+
+        def evaluate(ratio):
+            count = ordered[0][1]
+            for threshold, value in ordered:
+                if ratio >= threshold:
+                    count = value
+            return count
+
+        return evaluate, [value for _t, value in ordered]
+
+    def truth(self, realizable, budget):
+        under = [value for value in realizable if value <= budget]
+        return max(under) if under else None
+
+    def test_the_bisection_returns_the_greatest_count_under_every_budget(self):
+        """EVERY budget in the range, not a sample of them — the name has to be true."""
+        evaluate, realizable = self.staircase(
+            [(0.0, 12), (0.1, 40), (0.25, 41), (0.4, 190), (0.55, 191), (0.7, 640), (0.9, 1661)]
+        )
+        for budget in range(0, 1700):
+            count, _ratio = M.bisect_to_budget(evaluate, budget)
+            self.assertEqual(count, self.truth(realizable, budget), f"at budget {budget}")
+
+    def test_a_plateau_narrower_than_a_fixed_halving_count_is_still_found(self):
+        """The executed counterexample against the retired fixed-28-halving bisection.
+
+        A 1e-10-wide plateau at 999 is invisible to 28 halvings, which return 100 for a budget of
+        1000. Exhausting the bracket removes the precondition rather than assuming Blender's ratio
+        quantisation is coarse enough to make it safe — nobody had measured that.
+        """
+        # 0.3, not 0.5: a plateau sitting ON a dyadic rational is found by the first probe,
+        # which would make the counterexample accidental rather than structural.
+        evaluate, realizable = self.staircase([(0.0, 100), (0.3, 999), (0.3 + 1e-10, 2000)])
+        self.assertEqual(self.truth(realizable, 1000), 999)
+        self.assertEqual(M.bisect_to_budget(evaluate, 1000)[0], 999)
+
+        def fixed_halvings(budget, halvings):
+            low, high, best = 0.0, 1.0, None
+            for _ in range(halvings):
+                middle = (low + high) / 2.0
+                count = evaluate(middle)
+                if count <= budget:
+                    best = (count, middle)
+                    low = middle
+                else:
+                    high = middle
+            return best[0] if best else None
+
+        self.assertEqual(fixed_halvings(1000, 28), 100, "28 halvings miss the narrow plateau")
+        self.assertEqual(fixed_halvings(1000, 40), 999, "more halvings find it — hence no fixed N")
+
+    def test_adjacent_steps_are_resolved(self):
+        """Steps one triangle apart — the case a coarse bracket would merge."""
+        evaluate, realizable = self.staircase([(0.0, 100), (0.5, 101), (0.5000001, 102)])
+        for budget, expected in ((100, 100), (101, 101), (102, 102), (150, 102)):
+            with self.subTest(budget=budget):
+                self.assertEqual(M.bisect_to_budget(evaluate, budget)[0], expected)
+
+    def test_the_top_step_at_exactly_ratio_one_is_found(self):
+        """`(low + high) / 2` never produces 1.0, so a step living only there was invisible.
+
+        Executed counterexample: `evaluate(r) = 2000 if r == 1.0 else 100` returned 100 for a budget
+        of 2000. Monotonicity makes `evaluate(1.0)` the largest count there is — if it fits the
+        budget it IS the answer, and the search never had to start.
+        """
+        seen = []
+
+        def evaluate(ratio):
+            seen.append(ratio)
+            return 2000 if ratio == 1.0 else 100
+
+        count, ratio = M.bisect_to_budget(evaluate, 2000)
+        self.assertEqual(count, 2000)
+        self.assertEqual(ratio, 1.0)
+        self.assertIn(1.0, seen, "the ceiling must actually be evaluated")
+
+    def test_both_endpoints_are_evaluated(self):
+        seen = []
+
+        def evaluate(ratio):
+            seen.append(ratio)
+            return int(ratio * 1000)
+
+        M.bisect_to_budget(evaluate, 500)
+        self.assertIn(0.0, seen)
+        self.assertIn(1.0, seen)
+
+    def test_a_budget_below_the_floor_returns_nothing(self):
+        evaluate, _ = self.staircase([(0.0, 194), (0.5, 800)])
+        self.assertEqual(M.bisect_to_budget(evaluate, 100), (None, None))
+
+    def test_the_returned_ratio_reproduces_the_returned_count(self):
+        evaluate, _ = self.staircase([(0.0, 12), (0.3, 300), (0.6, 900), (0.85, 1661)])
+        count, ratio = M.bisect_to_budget(evaluate, 700)
+        self.assertEqual(count, 300)
+        self.assertEqual(evaluate(ratio), count)
+
+    def test_a_one_percent_early_stop_would_break_the_property(self):
+        """The regression this pipeline actually shipped, shown breaking the contract.
+
+        Reproduces the retired early stop against the same staircase the honest bisection is held
+        to, so the difference between "about this big" and "the greatest at or below" is a measured
+        fact in the suite rather than a remembered story.
+        """
+        # Two realizable counts inside 1 % of each other: the early stop takes the first one it
+        # lands on and never looks up. That is precisely how outputs went missing.
+        evaluate, realizable = self.staircase(
+            [(0.0, 100), (0.2, 995), (0.9, 999), (0.95, 2000)]
+        )
+
+        def early_stopping(budget):
+            low, high, best = 0.0, 1.0, None
+            for _ in range(28):
+                middle = (low + high) / 2.0
+                count = evaluate(middle)
+                if count <= budget:
+                    best = (count, middle)
+                    low = middle
+                else:
+                    high = middle
+                if best and budget * 0.99 <= best[0] <= budget:
+                    break
+            return best if best else (None, None)
+
+        disagreements = [
+            budget for budget in range(100, 2001)
+            if early_stopping(budget)[0] != self.truth(realizable, budget)
+        ]
+        self.assertTrue(
+            disagreements,
+            "the early stop must be shown to violate the property the enumeration relies on",
+        )
+        self.assertIn(1000, disagreements, "budget 1000 realizes 999, the early stop returns 995")
+        for budget in range(100, 2001):
+            self.assertEqual(
+                M.bisect_to_budget(evaluate, budget)[0], self.truth(realizable, budget),
+                f"the converged bisection must hold at budget {budget}",
+            )
+
+
 class StaircaseEnumerationTests(unittest.TestCase):
     """The enumeration walk, against synthetic decimators whose realizable set is known.
 
@@ -449,14 +655,14 @@ class StaircaseEnumerationTests(unittest.TestCase):
 
     def test_every_realizable_output_is_found(self):
         realizable = {194, 200, 231, 316, 400, 583, 700, 855, 1000, 1661}
-        outputs, _by_key = M.enumerate_staircase(194, 1661, self.exact(realizable))
+        outputs = sorted(M.enumerate_staircase(194, 1661, self.exact(realizable)))
         self.assertEqual(outputs, sorted(realizable))
 
     def test_one_decimation_per_output_plus_the_contract_checks(self):
         """The `reached - 1` jump is what makes exhaustive affordable; hold it to that."""
         realizable = {100, 250, 400, 620, 900, 1500}
         calls = []
-        outputs, _ = M.enumerate_staircase(100, 1500, self.exact(realizable, calls))
+        outputs = sorted(M.enumerate_staircase(100, 1500, self.exact(realizable, calls)))
         self.assertEqual(outputs, sorted(realizable))
         # One call per output for the walk, plus one per output for the idempotence check.
         self.assertEqual(len(calls), 2 * len(realizable))
@@ -509,8 +715,46 @@ class StaircaseEnumerationTests(unittest.TestCase):
         self.assertIn("max_enumerated_outputs", CONFIG.SEARCH_LIMITS)
 
     def test_a_floor_only_staircase_terminates(self):
-        outputs, _ = M.enumerate_staircase(194, 1661, self.exact({194}))
+        outputs = sorted(M.enumerate_staircase(194, 1661, self.exact({194})))
         self.assertEqual(outputs, [194])
+
+    def test_a_consistently_capped_oracle_is_NOT_detected(self):
+        """THE TRUST BOUNDARY, pinned as a test so nobody re-derives a stronger claim from green.
+
+        `lambda b: (min(b, 5), min(b, 5))` answers every question this enumeration can ask, exactly
+        as the contract requires, while concealing everything above 5. It passes — and it SHOULD
+        pass here, because an enumeration interrogating its own oracle is circular and no amount of
+        probing changes that. The contract is established in `BisectionTests`, over staircases whose
+        answers are known independently; the spot checks below only catch an oracle contradicting
+        ITSELF. If this test ever starts failing, the claim has quietly grown and the docstrings
+        need re-reading.
+        """
+        capped = M.enumerate_staircase(
+            1, 10, lambda b: (min(b, 5), min(b, 5)), spot_checks=48, seed=20260802
+        )
+        self.assertEqual(sorted(capped), [1, 2, 3, 4, 5])
+
+    def test_two_meshes_with_the_same_triangle_count_are_both_kept(self):
+        """Candidates are keyed by GEOMETRY, not by triangle count.
+
+        Keying by count assumed one mesh per count. Two cleaned meshes can carry the same count and
+        different geometry, and the loser was dropped silently — possibly the only one that met a
+        rung. Here two decimator steps clean down to the same 400 triangles with different shapes.
+        """
+        realizable = sorted({100, 402, 405, 900})
+        # Both 402 and 405 clean to 400 triangles, but they are different meshes.
+        keys = {100: "d-100", 402: "d-400-a", 405: "d-400-b", 900: "d-900"}
+
+        def probe(budget):
+            under = [value for value in realizable if value <= budget]
+            if not under:
+                return None
+            step = under[-1]
+            return step, keys[step]
+
+        by_key = M.enumerate_staircase(100, 900, probe, spot_checks=16, seed=11)
+        self.assertEqual(sorted(by_key), ["d-100", "d-400-a", "d-400-b", "d-900"])
+        self.assertEqual(len(by_key), 4, "neither same-sized mesh may be discarded")
 
     def test_cleanup_that_removes_a_face_does_not_lose_the_candidate(self):
         """The two count domains, kept apart.
@@ -522,9 +766,10 @@ class StaircaseEnumerationTests(unittest.TestCase):
         """
         realizable = {100, 250, 400, 900}
         cleaned = {250: 249, 900: 898}
-        outputs, by_key = M.enumerate_staircase(
+        by_key = M.enumerate_staircase(
             100, 900, self.exact(realizable, cleaned=cleaned), spot_checks=16, seed=5
         )
+        outputs = sorted(by_key)
         self.assertEqual(outputs, [100, 249, 400, 898])
         # Every key the search will index by must resolve — this is the KeyError, caught.
         for key in outputs:
@@ -556,9 +801,9 @@ class ParetoSearchTests(unittest.TestCase):
         decimator, which is the seam the first version of this test skipped over.
         """
         table = {300: 5.0, 400: 12.0, 500: 11.0, 600: 6.0, 800: 4.0}
-        outputs, _ = M.enumerate_staircase(
+        outputs = sorted(M.enumerate_staircase(
             300, 800, StaircaseEnumerationTests.exact(set(table)), spot_checks=32, seed=3
-        )
+        ))
         self.assertEqual(outputs, [300, 400, 500, 600, 800])
         best = M.pareto_minimal(outputs, self.brackets(table), 8.0)
         self.assertIsNotNone(best)

@@ -298,9 +298,9 @@ struct ShoeLevel {
 ///
 /// | level | glb | tris | dev (mm) | from (m) |
 /// |---|---|---|---|---|
-/// | L1 | `rung1` | 855 | 3.088 | 55.91 |
-/// | L2 | `rung2` | 581 | 7.019 | 126.60 |
-/// | L3 | `rung4` | 315 | 27.842 | 500.95 |
+/// | L1 | `rung1` | 854 | 3.088 | 55.91 |
+/// | L2 | `rung2` | 580 | 7.019 | 126.60 |
+/// | L3 | `rung4` | 314 | 27.842 | 500.95 |
 /// | L4 | `rung5` | 194 | 58.373 | 1 049.86 |
 ///
 /// L4 is the ladder's TOPOLOGY FLOOR — the decimator could not shed another triangle without
@@ -316,19 +316,19 @@ struct ShoeLevel {
 const SHOE_LOD_CHAIN: &[ShoeLevel] = &[
     ShoeLevel {
         glb: "tiger_1/tiger_1_link.rung1.glb",
-        tris: 855,
+        tris: 854,
         worst_dev_mm: 3.087723,
         from_m: 55.9124,
     },
     ShoeLevel {
         glb: "tiger_1/tiger_1_link.rung2.glb",
-        tris: 581,
+        tris: 580,
         worst_dev_mm: 7.019371,
         from_m: 126.5971,
     },
     ShoeLevel {
         glb: "tiger_1/tiger_1_link.rung4.glb",
-        tris: 315,
+        tris: 314,
         worst_dev_mm: 27.841808,
         from_m: 500.9511,
     },
@@ -938,19 +938,28 @@ fn mirrored_mesh(source: &Mesh) -> Mesh {
 /// nothing else that matters here, so a second copy of this per level would be a second place for
 /// the handedness algebra below to go wrong.
 ///
-/// # Why the tangents are BUILT here rather than read
+/// # The tangents are READ, and the generation is the fallback that must never fire
 ///
-/// The reduced primitives ship POSITION, NORMAL and TEXCOORD_0 and nothing else, and — being bare
-/// machine reductions with no look of their own — they carry NO glTF MATERIAL. `bevy_gltf` 0.19 runs
-/// its mikktspace pass only when the primitive's OWN material wants tangents (`needs_tangents`: a
-/// normal texture, or a clearcoat normal texture), and a material-free primitive resolves to the
-/// glTF default material, which wants nothing. So a loaded reduced mesh has no `ATTRIBUTE_TANGENT`.
+/// The shipped levels now BAKE `TANGENT` (`scripts/lod/generate.py` runs mikktspace before export
+/// and the manifest certifies `tangent_default_verts: 0` on the DECODED BYTES), so this function's
+/// generation branch is dead on the assets as they ship — which is the point of the branch, not an
+/// argument for deleting it.
+///
+/// It exists because of what `bevy_gltf` 0.19 does NOT do. Its own mikktspace pass runs only when a
+/// primitive's OWN material wants tangents (`needs_tangents`: a normal texture, or a clearcoat
+/// normal texture), and these primitives carry NO glTF material at all — being bare machine
+/// reductions with no look of their own, they resolve to the glTF default material, which wants
+/// nothing. So an untangented reduced primitive would arrive with NO `ATTRIBUTE_TANGENT` and bevy
+/// would not notice.
 ///
 /// That would be harmless if the shoe were unlit steel, but every reduced instance renders under the
 /// base shoe's [`LINK_MATERIAL`], whose three MEASURED maps include a NORMAL map. bevy's PBR shader
 /// keys normal mapping on the `VERTEX_TANGENTS` shader def and simply drops the map when the mesh
 /// has no tangents — no warning, no error. Every swap in [`SHOE_LOD_CHAIN`] would then change
-/// the LIGHTING as well as the silhouette, which is not what the distance was argued from.
+/// the LIGHTING as well as the silhouette, which is not what the distance was argued from. So an
+/// export that stopped baking tangents degrades to a runtime mikktspace pass instead of to flat
+/// lighting, and `no_defaulted_tangent_touches_a_triangle_a_player_can_resolve` is what says the
+/// shipped bytes are not relying on it.
 ///
 /// # Generate BEFORE mirroring, never after
 ///
@@ -1644,12 +1653,21 @@ mod tests {
         }
     }
 
-    /// One SHIPPED reduced shoe read straight off disk, with the PREMISE the bind-time tangent
-    /// generation rests on asserted on the way past: no TANGENT accessor and no MATERIAL, because
-    /// that pair is exactly what makes `bevy_gltf` skip its own mikktspace pass (it runs only when
-    /// the primitive's own material has a normal texture). If a re-export ever gives a primitive a
-    /// material or its own tangents this fails loudly and this comment is what explains why — the
-    /// generation then becomes redundant rather than wrong.
+    /// One SHIPPED reduced shoe read straight off disk, EXACTLY as `bevy_gltf` would present it —
+    /// every attribute the primitive actually carries, TANGENT included, and nothing invented here.
+    ///
+    /// The two assertions on the way past are the premises the bind rests on, and they now point in
+    /// OPPOSITE directions:
+    ///
+    ///   * TANGENT must be PRESENT. The generator bakes it (`scripts/lod/generate.py`) and the
+    ///     manifest certifies it on the decoded bytes, so a re-export that stopped baking would
+    ///     silently fall back to [`lod_shoe_meshes`]' runtime mikktspace — a safety net, not a plan,
+    ///     and precisely the path that used to produce defaulted tangents on real geometry. Reading
+    ///     the attribute through rather than regenerating it is what makes the gates below charge
+    ///     against the BYTES THAT SHIP.
+    ///   * MATERIAL must be ABSENT, unchanged: a material-free primitive is what keeps `bevy_gltf`
+    ///     from running a mikktspace pass of its own over what the exporter already solved, and it
+    ///     is what lets every level share the base shoe's [`LINK_MATERIAL`].
     ///
     /// Returns the mesh those accessors describe, ready to push through [`lod_shoe_meshes`] — the
     /// same call `bind_link_template` makes.
@@ -1666,8 +1684,9 @@ mod tests {
             .next()
             .unwrap_or_else(|| panic!("{glb}'s mesh carries one primitive"));
         assert!(
-            primitive.get(&gltf::Semantic::Tangents).is_none(),
-            "{glb}'s primitive now ships TANGENT - the bind-time generation is redundant",
+            primitive.get(&gltf::Semantic::Tangents).is_some(),
+            "{glb}'s primitive ships NO TANGENT - the export stopped baking them, so the shoe now \
+             relies on a runtime mikktspace pass that nothing certified",
         );
         assert!(
             primitive.material().index().is_none(),
@@ -1699,6 +1718,13 @@ mod tests {
                 .read_tex_coords(0)
                 .unwrap_or_else(|| panic!("{glb} carries TEXCOORD_0"))
                 .into_f32()
+                .collect::<Vec<_>>(),
+        );
+        shoe.insert_attribute(
+            Mesh::ATTRIBUTE_TANGENT,
+            reader
+                .read_tangents()
+                .unwrap_or_else(|| panic!("{glb} carries TANGENT"))
                 .collect::<Vec<_>>(),
         );
         shoe.insert_indices(Indices::U32(
@@ -1775,63 +1801,62 @@ mod tests {
         }
     }
 
-    /// No triangle a player can RESOLVE may carry a defaulted tangent.
+    /// NO SHIPPED SHOE CARRIES A DEFAULTED TANGENT — the standing gate on what the glbs actually
+    /// hold, and on the fact that bevy generates none of it.
     ///
     /// # Why a zeroed tangent is a defect and not a gap
     ///
     /// mikktspace hands back NO tangent frame for a vertex it cannot solve, and `bevy_mesh`'s
     /// `set_tangent` writes its default — `[0, 0, 0, 1]` — in that case, which the shader treats as
-    /// a valid frame and lights garbage from. So "the attribute exists" is not the assertion; the
-    /// planar decimator leaves such vertices behind on the slivers its edge collapses produce, and
-    /// the question is only whether any of them is big enough to see.
+    /// a valid frame and lights garbage from. So "the attribute exists" is not the assertion. A
+    /// quadric collapse leaves such vertices behind on the slivers its edge collapses produce, and
+    /// they light a streak of wrong normal under the normal-mapped [`LINK_MATERIAL`] with no
+    /// silhouette change and no error message anywhere.
     ///
-    /// # Why the gate is EXTENT and not AREA
+    /// # What this gate guards NOW
     ///
-    /// This gate used to bound a defaulted triangle's AREA against one square pixel, and that was
-    /// wrong in the way that matters: rasterisation samples by COVERAGE, not by area. A long thin
-    /// sliver has almost no area and still crosses many pixel centres — a 34 mm × 0.4 mm triangle is
-    /// 7 mm² (a fraction of a pixel by area) and 1.7 pixels LONG, so it lights a visible streak of
-    /// garbage normal. The bound that actually says "cannot be resolved" is therefore the triangle's
-    /// worst-case projected EXTENT: its longest edge, which is its bounding-sphere diameter to
-    /// within a factor no gate should lean on, must be under one pixel at the distance its own level
-    /// SWITCHES IN, at [`LOD_REF_VIEW_HEIGHT_PX`], through the optic. Nearer than that the level is
-    /// not drawn at all; further and the extent only shrinks.
+    /// Three things, and the first two are the reason the third can be absolute:
     ///
-    /// # This test is EXPECTED TO FAIL on the currently shipped ladder
+    ///   1. **The shipped bytes CARRY tangents.** `scripts/lod/generate.py` bakes `TANGENT` into
+    ///      every level glb (and into `tiger_1.glb`'s own `Link`), and the manifest certifies
+    ///      `tangent_default_verts: 0` on the DECODED bytes. [`shipped_reduced_shoe`] refuses a
+    ///      primitive without the accessor, so a re-export that stopped baking fails here rather
+    ///      than quietly falling back.
+    ///   2. **Bevy generates NOTHING.** [`lod_shoe_meshes`]' mikktspace branch is skipped when the
+    ///      attribute is present, so the right-hand mesh must be the glb's tangents unchanged and
+    ///      the left must be their exact analytic reflection. Asserted below: a runtime pass
+    ///      creeping back in is a different mesh being certified from the one that ships.
+    ///   3. **Not one defaulted tangent, anywhere.** Not "none big enough to resolve" — NONE. The
+    ///      pixel arithmetic is kept in the report as the thing that explains why a future one
+    ///      matters, not as the bar it has to clear.
     ///
-    /// It is not ignored, and it should not be. It has now been run against FOUR generations of
-    /// reduced shoe and failed on every one:
+    /// # It was RED for four asset generations, and what fixed it
     ///
     /// | asset | tris | worst defaulted triangle | switches at | px there |
     /// |---|---|---|---|---|
     /// | glb-route planar 60° + collapse 400 | 386 | 33.87 mm | 350 m | 1.74 |
     /// | `.blend` route, planar 10° + collapse | 477 | 50.13 mm | 350 m | 2.58 |
-    /// | pipeline v2 `rung1` | 855 | 50.16 mm | 55.9 m | **16.15** |
+    /// | pipeline v2 `rung1`, tangents generated at BIND | 855 | 50.16 mm | 55.9 m | **16.15** |
+    /// | pipeline v2 `rung1`, tangents BAKED at export | 854 | none | 55.9 m | — |
     ///
-    /// The v2 ladder made the SYMPTOM worse without the asset getting worse, and the reason is
-    /// worth writing down because it is the whole argument for this gate: v2 switches on MEASURED
-    /// deviation instead of a hand-picked 350 m, so `rung1` takes over at 55.9 m — where a pixel is
-    /// 3.11 mm rather than 20 mm. The same ~50 mm sliver is 16 pixels long instead of 2.6. Deriving
-    /// the switch honestly is what made the defect legible.
+    /// Two things had to be true at once, which is why three regenerations did not clear it. The
+    /// needle cleanup removed the sliver (one triangle out of each of L1/L2/L3 — the counts moved
+    /// 855/581/315 → 854/580/314), and baking the tangents moved the mikktspace pass to where the
+    /// mesh can be inspected and certified before it ships. Either alone leaves a runtime generator
+    /// deciding, per load, what the lighting looks like.
     ///
-    /// # The pipeline's own tangent gate does NOT see these, and that is the finding
+    /// The middle row is also the record of a real gap between two gates, worth keeping: the
+    /// manifest certified `tangent_default_verts: 0` for that asset and BEVY still defaulted one
+    /// vertex, because `scripts/lod/measure.py` counts a vertex whose faces ALL have zero UV area
+    /// and none of those faces did. A numeric gate on the source data is not a gate on what the
+    /// runtime's own solver returns. That is why this test reads the SHIPPED bytes through the REAL
+    /// bind path rather than trusting the manifest, and why it stays that way now that it is green.
     ///
-    /// `assets/lod_manifest.json` certifies `tangent_default_faces: 0` and
-    /// `tangent_default_verts: 0` for every level, against `max_*: 0` gates. Both are true as
-    /// `scripts/lod/measure.py` defines them — a face with zero UV AREA, and a vertex ALL of whose
-    /// faces have zero UV area. That is the condition under which mikktspace can produce nothing at
-    /// all, and it is not the condition under which BEVY'S mikktspace produces nothing: this test
-    /// runs the real [`lod_shoe_meshes`] over the real decoded glb and finds vertices whose tangent
-    /// comes back as `bevy_mesh`'s `[0, 0, 0, 1]` default anyway. The report below prints, per
-    /// level, whether the offending triangles are UV-degenerate by the pipeline's own test — so the
-    /// two gates can be compared rather than argued about.
-    ///
-    /// The FIX IS AN ASSET (or the generator's cleanup), not a number. Loosening the gate to make
-    /// the suite green would be re-introducing exactly the bug it was tightened to catch — if this
-    /// ever has to be parked, park it as `#[ignore = "..."]` naming what it waits on, never by
-    /// widening the pixel budget.
+    /// If this ever goes red again the FIX IS AN ASSET (or the generator's cleanup), not a number.
+    /// If it has to be parked, park it as `#[ignore = "..."]` naming what it waits on — never by
+    /// widening a budget.
     #[test]
-    fn no_defaulted_tangent_touches_a_triangle_a_player_can_resolve() {
+    fn no_shipped_shoe_carries_a_defaulted_tangent() {
         // EVERY level is surveyed before anything is asserted, and the whole survey is the failure
         // message. A test that panicked on the first bad level would report one row of a ladder
         // whose other rows are the evidence for what is actually wrong with it.
@@ -1844,6 +1869,17 @@ mod tests {
             let shoe = shipped_reduced_shoe(glb);
             let bound =
                 lod_shoe_meshes(&shoe).unwrap_or_else(|e| panic!("{glb} must take tangents: {e}"));
+            // BEVY GENERATED NOTHING. With TANGENT present `lod_shoe_meshes` clones instead of
+            // solving, so the right-hand mesh must carry the glb's own tangents unchanged. If a
+            // runtime mikktspace pass ever creeps back in, everything below certifies a mesh that
+            // is not the one shipping — and it would do so silently, because a generated frame is
+            // usually fine and only sometimes is not.
+            let (shipped, ..) = bound_attributes(&shoe, &format!("shipped {glb}"));
+            let (right, ..) = bound_attributes(bound.get(Side::Right), &format!("bound {glb}"));
+            assert_eq!(
+                shipped, right,
+                "{glb}: the bind re-solved tangents the export already baked",
+            );
             // What the pixel budget covers, in metres, at the distance this level takes over — the
             // SAME exact projection [`sub_pixel_distance_m`] inverts, less the origin-radius slack
             // it adds (which is the conservative direction here: a smaller pixel to clear).
@@ -1907,7 +1943,9 @@ mod tests {
                     .filter(|&&v| !usable(v))
                     .map(|&v| (v, tangents[v as usize]))
                     .collect();
-                failed |= extent >= pixel_m;
+                // ANY defaulted tangent fails, not just a resolvable one — the levels are
+                // certified to have none. The extent is what the report explains it WITH.
+                failed = true;
                 report.push_str(&format!(
                     "  LOD{level} {what}: {defaulted_verts} defaulted verts on {touching} triangles \
                      ({uv_degenerate} of them UV-degenerate by measure.py's own test); worst is \
@@ -1924,12 +1962,13 @@ mod tests {
 
         assert!(
             !failed,
-            "a defaulted tangent lands on a triangle a player can RESOLVE, under the normal-mapped \
+            "a SHIPPED shoe carries a defaulted tangent, under the normal-mapped \
              {LINK_MATERIAL}:\n{report}\nFIX THE ASSET (weld or drop the degenerate sliver in the \
-             reduction, or generate the tangents in the pipeline), not this budget. Note that \
-             assets/lod_manifest.json certifies tangent_default_verts: 0 for every level — the \
-             UV-degenerate counts above are what that gate measures, and the defaulted-vertex \
-             counts are what bevy actually produces.",
+             reduction, and bake the tangents at export), never a budget here. The px figures are \
+             how visible it is, not the bar it has to clear — the levels are certified to carry \
+             NONE. Note also that assets/lod_manifest.json's own tangent_default_verts: 0 is not \
+             this claim: it counts faces with zero UV AREA, and a mesh has passed that gate while \
+             still defaulting a vertex here.",
         );
     }
 

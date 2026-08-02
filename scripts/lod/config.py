@@ -148,6 +148,20 @@ GATES = {
     "uv_area_eps": 1.0e-12,
     "max_tangent_default_faces": 0,
     "max_tangent_default_verts": 0,
+    # THE TANGENTS THAT SHIP, not a proxy for them. The UV-area test above is a necessary condition
+    # and it is NOT the loader's: bevy runs mikktspace, which declines a corner for reasons that
+    # test cannot see. Measured on this corpus — every level had zero UV-degenerate faces and three
+    # of them still contained one corner mikktspace gives up on. So the levels now BAKE their
+    # tangents at export and this gates the baked values, which is what the loader will use
+    # verbatim (`bevy_gltf` generates tangents only when the attribute is absent).
+    "max_degenerate_tangents": 0,
+    "tangent_min_length": 1.0e-6,
+    # What the cleanup pass dissolves, as a fraction of the mesh's bounding diagonal. 7.7 um on the
+    # reference shoe: enough to take out the 4.7 um NEEDLE the decimator inherits from the source
+    # (the one corner mikktspace declines a tangent for), and well clear of the next-thinnest
+    # features at 21 um. Three orders of magnitude below e1, so it cannot move a level's deviation
+    # anywhere the ladder can express — and the deviation is re-certified afterwards regardless.
+    "cleanup_dissolve_frac_of_diag": 1.0e-5,
     # Structural: duplicate faces, non-finite attributes, orientation flips across a shared edge,
     # and edges with more than two faces on them. The last one was measured and REPORTED for a
     # while before it was enforced, which is its own lesson: a counter nothing compares against is
@@ -216,20 +230,28 @@ RENDER_GATE = {
     #
     # 20 deg is chosen as the defect because it is the scale at which a wrong normal is unarguably
     # a bug rather than a shading nuance, and it is well inside what a dropped custom-normal layer
-    # produces. 0.5 says a shipped switch must be closer to correct than to broken.
+    # produces.
     #
-    # `defect_fraction` IS NOT RATIFIED, and until it is this gate reports instead of blocking —
-    # see `RENDER_GATE_BLOCKING` below. Everything else in this file is either measured (e1, the
-    # right wall) or structural (a duplicate face is a defect at any threshold). "How much may a
-    # switch be allowed to look different" is neither: it is a taste call about the game's own
-    # assets, of exactly the kind e1 was, and e1 was ratified by Yan rather than picked here.
-    #
-    # THE MEASUREMENT THAT WOULD INFORM THAT RULING is `RATIFICATION_EVIDENCE` below, which is a
-    # CONSTANT rather than a comment for a reason: transcribed into prose it went stale twice, and
-    # both times it sat next to the decision it was supposed to inform, reading as current. A test
-    # now compares it against the shipped manifest, so it cannot rot a third time.
+    # `defect_fraction` = 2.0 is RATIFIED (Yan, 2026-08-02) after an in-game eyeball on the showcase
+    # branch: the worst score this corpus produces, 1.674 at the L2|L3 switch, is imperceptible
+    # through the optic. So a switch may look up to twice as different as broken normals do and
+    # still ship — which sounds loose until you remember what the denominator is measuring, and that
+    # every level under it is ALSO proven sub-pixel in position. The provenance of that ruling is in
+    # `RATIFICATION_EVIDENCE`, and a test holds it against the shipped manifest so it cannot rot.
     "defect_normal_deg": 20.0,
-    "defect_fraction": 0.50,
+    "defect_fraction": 2.00,
+    # Below this on-screen size the gate ABSTAINS instead of scoring (Yan, 2026-08-02).
+    #
+    # PICKED FROM THE L4 GEOMETRY, which is the class it exists to kill. At its 1050 m switch the
+    # shoe is 13.1 pixels across in the reference view; a 20-degree normal tilt is invisible at that
+    # size, so the defect reference collapses and the score becomes a ratio of two nothings — L4
+    # scored 7.68 in one round and 0.73 in the next off the same geometry. At L3's 501 m switch the
+    # shoe is 27.5 pixels across and the bracket is meaningful. 20 px sits between them.
+    #
+    # The measure is the asset's PROJECTED DIAMETER, not the renderer's pixel count: it is a
+    # property of the geometry and the distance, so the verifier re-derives it from the recorded
+    # bounding box rather than trusting a number the renderer reported about itself.
+    "min_footprint_px": 20.0,
     # Absolute floors, kept only as an escape hatch: a pair whose difference is under these passes
     # regardless of the bracket, so a degenerate defect reference cannot fail an invisible switch.
     "max_mean_abs_diff": 0.020,        # mean |dI| over the interior, 0..1
@@ -249,20 +271,29 @@ RENDER_GATE = {
 #: which is the exact failure mode this whole file exists to prevent. Every other gate here blocks
 #: unconditionally, because every other gate is measured or structural.
 #:
-#: TWO THINGS MUST BE TRUE BEFORE IT CAN BE FLIPPED, and both are enforced rather than remembered:
+#: RATIFIED TRUE (Yan, 2026-08-02) — but REQUESTED is not ARMED, and the difference is mechanical
+#: rather than remembered.
 #:
-#:   1. Yan rules on `defect_fraction`. It is a taste call of exactly the kind e1 was.
-#:   2. The gate must render the SHIPPED material. It does not today: it re-imports the L0 glb, and
-#:      on this asset every texture comes back empty because the mip bake writes KTX2 via
-#:      `KHR_texture_basisu` and Blender's importer cannot read it, so the gate falls back to the
-#:      .blend material and records that per level. Blocking on a number measured under the wrong
-#:      textures would be a gate certifying the wrong thing — the failure this file exists to
-#:      prevent. `chain.py` REFUSES a blocking manifest whose levels record a fallback, so flipping
-#:      this flag without fixing the material fails verification instead of shipping a false pass.
+#: Blocking arms only when the gate renders the SHIPPED material. It does not today: the gate
+#: re-imports the L0 glb and every texture comes back empty, because the mip bake writes KTX2 via
+#: `KHR_texture_basisu` and Blender's importer cannot read it, so it falls back to the .blend
+#: material and records that per level. Blocking on a number measured under the wrong textures would
+#: be a gate certifying the wrong thing — the failure this file exists to prevent.
 #:
-#: The route for (2), when it matters: decode the KTX2 to PNG with `basisu` and rebuild the material
-#: from the decoded images, or render through the runtime instead of Blender.
-RENDER_GATE_BLOCKING = False
+#: So the effective flag is `RENDER_GATE_BLOCKING and no level fell back` (`chain.effective_render_
+#: blocking`), the manifest records both halves, and the moment the material path is honest the
+#: enforcement arms itself with no second decision to remember. The route to that: decode the KTX2
+#: to PNG with `basisu` and rebuild the material, or render through the runtime instead of Blender.
+RENDER_GATE_BLOCKING = True
+
+#: The thresholds a render-gate record must carry — DECLARED ONCE, read by the renderer that writes
+#: them and by the verifier that requires them. A hand-counted list on the verifier's side required
+#: four of the five the renderer wrote, so DELETING `defect_normal_deg` from a level verified clean.
+#: Nothing here is counted by hand any more: both sides iterate this tuple.
+RECORDED_GATE_THRESHOLDS = (
+    "defect_fraction", "defect_normal_deg", "max_mean_abs_diff", "max_footprint_frac_over",
+    "over_threshold", "min_footprint_px",
+)
 
 #: The measurements that would inform that ruling, from the reference asset — worst of three
 #: viewpoints, so each is the least favourable angle.
@@ -278,15 +309,26 @@ RENDER_GATE_BLOCKING = False
 #: silhouette — already proven sub-pixel — is the whole story, so a ratified rule probably wants a
 #: minimum resolvable footprint below which this gate abstains and says so.
 RATIFICATION_EVIDENCE = {
+    # WHO RULED, ON WHAT, AND FROM WHAT. Recorded here and copied into the manifest, because the
+    # threshold it settles is a taste call, and a taste call without its provenance is just a number.
+    "ruling": {
+        "by": "Yan",
+        "date": "2026-08-02",
+        "method": "in-game eyeball on the showcase branch, through the gunner optic",
+        "finding": "the worst score this corpus produces (1.674, at the L2|L3 switch distance) is "
+                   "imperceptible through the optic",
+        "decided": "defect_fraction = 2.0; abstain below min_footprint_px = 20 px; blocking arms "
+                   "when the render uses the shipped material",
+    },
     "levels": (
         # (level, tris, switch_m, defect_score, verdict)
-        (1, 855, 55.9, 0.486600, "PASS"),
-        (2, 581, 126.6, 0.619408, "FAIL"),
-        (3, 315, 501.0, 1.673924, "FAIL"),
-        (4, 194, 1049.9, 0.729534, "FAIL"),
+        (1, 854, 55.9, 0.486600, "PASS"),
+        (2, 580, 126.6, 0.619408, "PASS"),
+        (3, 314, 501.0, 1.673924, "PASS"),
+        (4, 194, 1049.9, None, "ABSTAIN"),
     ),
     "enumerated_outputs": 736,
-    "skipped_rung": (3, 533, 581, 0.0826),  # rung, best tris, incumbent tris, shed fraction
+    "skipped_rung": (3, 532, 580, 0.0828),  # rung, best tris, incumbent tris, shed fraction
 }
 
 

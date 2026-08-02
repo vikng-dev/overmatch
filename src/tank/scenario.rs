@@ -202,7 +202,7 @@ const PROBE_GRID_COLUMNS: usize = 6;
 /// # `OVERMATCH_PROBE_FAR=1`: the same block, on the far side of the shoe LOD
 ///
 /// The near block is the RIGHT default and the wrong half of one question. `track::link_view` swaps
-/// every shoe down a ladder of reductions (`SHOE_LOD_CHAIN`, 855 → 194 triangles against a
+/// every shoe down a ladder of reductions (`SHOE_LOD_CHAIN`, 854 → 194 triangles against a
 /// 1 661-triangle base), and that costs ONE extra entity per shoe PER LEVEL — at 194 shoes per tank,
 /// four reduced levels and 30 tanks, 23 280 more walked by `check_visibility_ranges` every frame,
 /// whether or not any of them is far enough to matter. So the LOD has two frames to answer for: the

@@ -49,7 +49,10 @@ class Refusal(Exception):
 def glb_chunks(path):
     """The JSON dict and the BIN blob of a glb. Stdlib + a struct unpack, no importer involved."""
     with open(path, "rb") as handle:
-        blob = handle.read()
+        return glb_chunks_from_bytes(handle.read(), path)
+
+
+def glb_chunks_from_bytes(blob, path="<bytes>"):
     magic, _version, length = struct.unpack_from("<4sII", blob, 0)
     if magic != b"glTF":
         raise Refusal("not-a-glb", path)
@@ -122,27 +125,48 @@ def primitive_of(gltf, node_name=None):
 
 def from_glb(path, node_name=None, name=None):
     """A `Surface` built from the bytes on disk. THE decode every gate measures through."""
-    gltf, binary = glb_chunks(path)
+    with open(path, "rb") as handle:
+        return surface_from_bytes(handle.read(), node_name, name or path)
+
+
+def surface_from_bytes(blob, node_name=None, name=None):
+    """The same decode, from bytes already in hand.
+
+    Split out so the VERIFIER can re-derive a level's record from the shipped bytes without a file
+    path — it resolves LFS pointers to their objects itself. Verification that compares a recorded
+    count against another recorded count proves the manifest is self-consistent and nothing about
+    the asset; this is the entry point that makes it about the asset.
+    """
+    gltf, binary = glb_chunks_from_bytes(blob, name or "<bytes>")
     primitive = primitive_of(gltf, node_name)
     attributes = primitive["attributes"]
     if primitive.get("mode", 4) != 4:
-        raise Refusal("not-triangles", f"{path} primitive mode {primitive.get('mode')}")
+        raise Refusal("not-triangles", f"{name} primitive mode {primitive.get('mode')}")
     if "indices" not in primitive:
-        raise Refusal("non-indexed-primitive", path)
+        raise Refusal("non-indexed-primitive", name)
     for required in ("POSITION", "NORMAL", "TEXCOORD_0"):
         if required not in attributes:
-            raise Refusal("missing-attribute", f"{path} has no {required}")
+            raise Refusal("missing-attribute", f"{name} has no {required}")
     for banned, reason in (("JOINTS_0", "skinned-mesh"), ("WEIGHTS_0", "skinned-mesh")):
         if banned in attributes:
-            raise Refusal(reason, f"{path} carries {banned}")
+            raise Refusal(reason, f"{name} carries {banned}")
     if primitive.get("targets"):
-        raise Refusal("morph-mesh", f"{path} carries {len(primitive['targets'])} morph targets")
+        raise Refusal("morph-mesh", f"{name} carries {len(primitive['targets'])} morph targets")
 
     indices = _accessor(gltf, binary, primitive["indices"]).astype(np.int64).reshape(-1, 3)
     positions = gltf_to_blender(_accessor(gltf, binary, attributes["POSITION"]).astype(np.float64))
     normals = gltf_to_blender(_accessor(gltf, binary, attributes["NORMAL"]).astype(np.float64))
     uvs = _accessor(gltf, binary, attributes["TEXCOORD_0"]).astype(np.float64)
-    return Surface(positions, indices, normals[indices], uvs[indices], name or path)
+    # TANGENT is vec4: xyz is the tangent, w the bitangent sign. Decoded when present because the
+    # loader USES it verbatim rather than generating one — so it is part of what ships, and the
+    # gate measures it rather than a proxy for it.
+    tangents = None
+    if "TANGENT" in attributes:
+        raw = _accessor(gltf, binary, attributes["TANGENT"]).astype(np.float64)
+        tangents = np.concatenate(
+            [gltf_to_blender(raw[:, :3]), raw[:, 3:4]], axis=1
+        )
+    return Surface(positions, indices, normals[indices], uvs[indices], name, tangents)
 
 
 def from_bpy_mesh(mesh, matrix=None, name="source"):
@@ -186,8 +210,11 @@ def from_bpy_mesh(mesh, matrix=None, name="source"):
 class Surface:
     """Positions, triangles, per-corner normals and UVs, plus every derived quality counter."""
 
-    def __init__(self, verts, tri_v, corner_n, corner_uv, name):
+    def __init__(self, verts, tri_v, corner_n, corner_uv, name, tangents=None):
         self.name = name
+        #: Per-vertex vec4 tangents AS SHIPPED, or None when the file carries none (in which
+        #: case the loader generates them and this pipeline can only gate a proxy).
+        self.tangents = None if tangents is None else np.ascontiguousarray(tangents)
         self.verts = np.ascontiguousarray(verts, dtype=np.float64)
         self.tri_v = np.ascontiguousarray(tri_v, dtype=np.int64)
         self.corner_n = np.ascontiguousarray(corner_n, dtype=np.float64)
@@ -234,16 +261,46 @@ class Surface:
         return self._bvh
 
     def digest(self):
-        """A stable hash of the geometry — the cache key that collapses a decimation plateau.
+        """A stable hash of EVERYTHING THAT SHIPS — the candidate identity, and a plateau's key.
 
-        Positions are rounded to a nanometre before hashing: two collapse ratios that produce the
-        SAME mesh must hash the same, and a float that differs in its last bit is the same mesh.
+        It hashed positions and SORTED triangle indices, which threw away exactly the attributes the
+        gates measure: sorting each triangle discards its winding, and normals and UVs were not in
+        it at all. Two meshes differing only in winding, or only in a collapsed UV, hashed
+        identically — so one of them was silently dropped as a duplicate candidate, and it could be
+        the one with a defect (or the only one that met a rung).
+
+        What goes in: positions, per-corner normals and per-corner UVs AT FULL PRECISION, and each
+        triangle's corner ORDER. What stays out: only the arbitrary choices a serializer makes —
+        which corner is listed first (each triangle is rotated to start at its lowest vertex index,
+        which preserves winding while ignoring the rotation) and the order triangles appear in
+        (rows are sorted).
+
+        NOTHING IS QUANTISED ANY MORE, and that is the point. Rounding UVs to 1e-7 was coarser than
+        `uv_area_eps = 1e-12`, the finest epsilon a gate consumes — so two candidates with UV areas
+        of 5e-13 and 1.5e-12, which differ in `tangent_default_faces`, hashed identically and one of
+        them was discarded as a duplicate. A key used to decide which candidates exist must be at
+        least as sharp as every test applied to them; the cheapest way to guarantee that against
+        gates not yet written is to keep the bits.
         """
         import hashlib
 
+        # Rotate each triangle to start at its smallest index: winding-preserving, listing-agnostic.
+        starts = np.argmin(self.tri_v, axis=1)
+        columns = (starts[:, None] + np.arange(3)[None, :]) % 3
+        rows = np.take_along_axis(self.tri_v, columns, axis=1)
+        normals = np.take_along_axis(
+            self.corner_n, columns[:, :, None].repeat(3, axis=2), axis=1
+        )
+        uvs = np.take_along_axis(self.corner_uv, columns[:, :, None].repeat(2, axis=2), axis=1)
+
+        # Sort by the triangle rows only; the attributes ride along so equal geometry with
+        # different attributes still separates.
+        order = np.lexsort(rows.T[::-1])
         h = hashlib.sha256()
-        h.update(np.round(self.verts * 1e9).astype(np.int64).tobytes())
-        h.update(np.sort(self.tri_v, axis=1).tobytes())
+        h.update(np.ascontiguousarray(self.verts).tobytes())
+        h.update(np.ascontiguousarray(rows[order]).tobytes())
+        h.update(np.ascontiguousarray(normals[order]).tobytes())
+        h.update(np.ascontiguousarray(uvs[order]).tobytes())
         return h.hexdigest()
 
     def altitudes(self):
@@ -334,9 +391,31 @@ class Surface:
         np.add.at(touched, self.tri_v.reshape(-1), 1)
         np.add.at(bad_touched, self.tri_v[bad_uv].reshape(-1), 1)
 
+        # THE TANGENTS THAT SHIP. `tangent_default_faces` above is a necessary condition on the
+        # UVs; this is the thing itself. mikktspace declines a corner for reasons a UV-area test
+        # cannot see — measured on this corpus, three levels had zero UV-degenerate faces and one
+        # give-up tangent each.
+        if self.tangents is None:
+            # Absent is not clean. The caller decides whether a level is allowed to lack them;
+            # this only reports what is there, and zero baked tangents is a fact, not a pass.
+            baked, degenerate, worst = 0, 0, 0.0
+        else:
+            lengths = np.linalg.norm(self.tangents[:, :3], axis=1)
+            signs = np.abs(self.tangents[:, 3])
+            bad = (
+                (lengths < gates["tangent_min_length"])
+                | (~np.isfinite(self.tangents).all(axis=1))
+                | (np.abs(signs - 1.0) > 1e-3)
+            )
+            baked, degenerate = int(len(lengths)), int(bad.sum())
+            worst = float(lengths.min())
+
         return {
             "tris": self.tri_count,
             "verts": self.vert_count,
+            "baked_tangents": baked,
+            "degenerate_tangents": degenerate,
+            "min_tangent_length": round(worst, 9),
             "components": self.components(),
             "duplicate_faces": duplicates,
             "nonfinite_attrs": nonfinite,
@@ -464,36 +543,101 @@ class EnumerationError(Exception):
     """The decimator's realizable outputs could not be enumerated completely. Never degrade."""
 
 
+#: Hard cap on bisection steps. The ordinary case exhausts its bracket in ~60; the worst case
+#: walks `high` down through the denormals and needs ~1075. This is a runaway guard, not the
+#: stopping rule — the stopping rule is that the bracket holds no representable ratio.
+BISECTION_MAX_STEPS = 1100
+
+
+def bisect_to_budget(evaluate, budget, max_steps=BISECTION_MAX_STEPS):
+    """The GREATEST count `evaluate` can reach at or below `budget`. Returns (count, ratio).
+
+    `evaluate(ratio) -> count` must be monotone non-decreasing — for the Blender decimate modifier
+    it is, since a larger ratio keeps more triangles. Given only that, this is exact: it runs until
+    the bracket is EXHAUSTED at f64 resolution (the midpoint stops being strictly between the ends),
+    so no plateau can hide inside the final interval however narrow it is.
+
+    IT USED TO RUN A FIXED 28 HALVINGS, and that made the claim conditional on a minimum plateau
+    width nobody had established. Executed counterexample: a staircase realizing 100, 999 and 2000
+    where the 999 plateau is 1e-10 wide returns 100 at a budget of 1000 — 28 halvings cannot see it,
+    32 can. Rather than assume Blender's ratio quantisation is coarse enough (it may well be; nobody
+    measured it), the loop now exhausts the bracket and the precondition disappears.
+
+    THIS IS WHERE THE ENUMERATION'S CONTRACT IS ESTABLISHED, and it is deliberately a pure function
+    of an injected `evaluate` so it can be checked against synthetic staircases whose answer is
+    known independently — see `test_refusals.BisectionTests`. That matters because the enumeration
+    built on top cannot establish it: an enumerator can only ask the oracle, and an oracle that lies
+    consistently answers every question consistently. The honesty has to come from here.
+    """
+    # BOTH ENDPOINTS ARE EVALUATED, and neither is reachable by halving an open interval.
+    #
+    # Ratio 0 is the floor: by monotonicity nothing below it exists, so a budget under it is
+    # unreachable and there is nothing to bisect. Without it the "everything exceeds the budget"
+    # case walks `high` down through a thousand denormals.
+    #
+    # Ratio 1 is the ceiling, and it was the hole. `(low + high) / 2` never produces 1.0, so an
+    # evaluator whose top step exists ONLY at exactly 1.0 was invisible: `evaluate(r) = 2000 if
+    # r == 1.0 else 100` returned 100 for a budget of 2000. By monotonicity `evaluate(1.0)` is the
+    # largest count there is, so if it fits the budget it IS the answer and no search is needed.
+    floor_count = evaluate(0.0)
+    if floor_count > budget:
+        return None, None
+    ceiling_count = evaluate(1.0)
+    if ceiling_count <= budget:
+        return ceiling_count, 1.0
+
+    low, high, best = 0.0, 1.0, (floor_count, 0.0)
+    for _ in range(max_steps):
+        middle = (low + high) / 2.0
+        if middle <= low or middle >= high:
+            return best                 # the bracket holds no representable ratio: exhausted
+        count = evaluate(middle)
+        if count <= budget:
+            best = (count, middle)
+            low = middle
+        else:
+            high = middle
+    raise EnumerationError(
+        f"the budget bisection did not exhaust its bracket in {max_steps} steps — the evaluator "
+        f"is not behaving like a monotone step function"
+    )
+
+
 def enumerate_staircase(floor_tris, ceiling_tris, probe, spot_checks=0, seed=0, max_outputs=None):
-    """Every mesh the decimator can realize in [floor, ceiling]. Returns (shipped_keys, by_key).
+    """Every mesh the decimator realizes in [floor, ceiling]. Returns `{key: step_count}`.
 
-    `probe(budget)` returns `(step_count, shipped_key)` or `None`:
+    `probe(budget)` returns `(step_count, key)` or `None`:
 
-      * `step_count` is what the DECIMATOR produced, and it is the domain the walk steps in. Its
-        contract is `step_count = max{ realizable r : r <= budget }`.
-      * `shipped_key` identifies the mesh that would actually SHIP — after the cleanup pass, which
-        may dissolve a degenerate face and lower the count.
+      * `step_count` is what the DECIMATOR produced, and it is the domain the walk steps in.
+      * `key` identifies the mesh that would actually SHIP — a GEOMETRY HASH, not a triangle count.
+        Two different cleaned meshes can carry the same count, and keying by count silently threw
+        one of them away, possibly the only one that met a rung.
 
-    THE TWO ARE DIFFERENT NUMBERS AND MUST NOT BE INTERCHANGED. An earlier version stepped on the
-    raw count, cached candidates under the cleaned count, and then looked candidates up by the raw
-    one: correct only for as long as cleanup never removed a face, and a `KeyError` or a silently
-    dropped candidate on the day it did. They are separate parameters here so the mistake cannot be
-    made by accident, and each check below runs in the domain where it means something.
+    THE TWO ARE DIFFERENT THINGS AND MUST NOT BE INTERCHANGED. An earlier version stepped on the raw
+    count, cached candidates under the cleaned count, and looked candidates up by the raw one:
+    correct only until cleanup dissolved a face, then a `KeyError` or a lost candidate.
 
-    THE ORACLE'S CONTRACT IS THE WHOLE ALGORITHM, so it is verified rather than trusted — twice
-    over, because the first attempt at verifying it was itself unsound:
+    ── WHAT THIS FUNCTION PROVES, AND WHAT IT TAKES ON TRUST ────────────────────────────────────
 
-      * IDEMPOTENCE. For every realizable `r`, `probe(r)` must return `r`: `r <= r` and `r` is
-        realizable, so the greatest realizable count at or below `r` is `r` itself. This is the
-        check that catches an oracle which systematically under-reports — `f(B) = B - 1` walks to
-        [1,3,5,7,9] over 1..10 and passes any number of interval probes, because every answer it
-        gives IS a member of the set it built. Asking `probe(9) == 9` catches it immediately.
-      * INTERVAL INCUMBENCY. A budget inside a skipped interval must return THAT INTERVAL'S
-        incumbent, not merely some count already enumerated. Accepting mere membership was the
-        earlier unsound guard.
+    IT IS EXHAUSTIVE **GIVEN** AN ORACLE THAT MEETS ITS CONTRACT — `probe(B)` returning the greatest
+    realizable count at or below `B`. Given that, walking `budget <- step_count - 1` from the ceiling
+    visits every realizable output exactly once, because nothing realizable lies in the interval the
+    jump skips.
 
-    The oracle is injected so all of this can be tested against synthetic staircases — including
-    deliberately sloppy ones — without Blender.
+    IT CANNOT VERIFY THAT CONTRACT, and does not claim to. An enumeration interrogating its own
+    oracle is circular: `lambda b: (min(b, 5), min(b, 5))` answers every question this function can
+    ask, perfectly consistently, while concealing everything above 5. No number of probes finds
+    that, because the probes are addressed to the liar. `test_refusals` pins this as a KNOWN,
+    UNDETECTABLE case so nobody re-derives a stronger claim from a green suite.
+
+    The contract is established instead where it is a mathematical property rather than a
+    conversation: `bisect_to_budget` runs to convergence over a monotone evaluator, and is proven
+    on synthetic staircases whose answers are known by construction.
+
+    THE SPOT CHECKS ARE REGRESSION DEFENCE, NOT PROOF. They catch an oracle that becomes internally
+    INCONSISTENT — the 1 %-early-stop class, where `probe(r)` stops agreeing with `r` for a value
+    the walk itself found realizable, and the `f(B) = B - 1` class. That is the failure this
+    pipeline actually shipped once, so it is worth catching cheaply. It is not the same as proof.
     """
     rng = np.random.default_rng(seed)
     by_key = {}
@@ -504,13 +648,13 @@ def enumerate_staircase(floor_tris, ceiling_tris, probe, spot_checks=0, seed=0, 
         answer = probe(budget)
         if answer is None:
             break
-        step_count, shipped_key = answer
+        step_count, key = answer
         if step_count > budget:
             raise EnumerationError(
                 f"the decimation oracle returned {step_count} for a budget of {budget} — it must "
                 f"return the greatest realizable count AT OR BELOW the budget"
             )
-        by_key.setdefault(shipped_key, step_count)
+        by_key.setdefault(key, step_count)
         incumbents.setdefault(step_count, step_count)
         if max_outputs is not None and len(by_key) > max_outputs:
             raise EnumerationError(
@@ -525,21 +669,27 @@ def enumerate_staircase(floor_tris, ceiling_tris, probe, spot_checks=0, seed=0, 
             break
         budget = step_count - 1
 
-    _verify_oracle(probe, sorted(incumbents), skipped, spot_checks, rng)
-    return sorted(by_key), by_key
+    _check_oracle_consistency(probe, sorted(incumbents), skipped, spot_checks, rng)
+    return by_key
 
 
-def _verify_oracle(probe, realizable, skipped, spot_checks, rng):
-    """Hold the decimation oracle to its contract on the geometry it just walked."""
+def _check_oracle_consistency(probe, realizable, skipped, spot_checks, rng):
+    """Catch an oracle that contradicts ITSELF. Not a proof of honesty — see `enumerate_staircase`.
+
+    Both checks below are implications of the contract, so a violation is decisive: the oracle is
+    broken. Neither can detect an oracle that is wrong CONSISTENTLY, because both ask that same
+    oracle. They exist because the two failures this pipeline actually had — a bisection stopping
+    within 1 % of its budget, and the `B - 1` shape — are both self-contradictory, and cheap to
+    catch on real geometry every run.
+    """
     for value in realizable:
         answer = probe(value)
         if answer is None or answer[0] != value:
             got = "nothing" if answer is None else answer[0]
             raise EnumerationError(
                 f"the oracle realizes {value} triangles, but asked for a budget of exactly {value} "
-                f"it returns {got} — it is not returning the greatest realizable count at or below "
-                f"its budget, so the walk's jumps stepped over outputs and the candidate set is "
-                f"incomplete. No level chosen from it is minimal."
+                f"it returns {got} — it contradicts itself, so the walk's jumps stepped over "
+                f"outputs and the candidate set is incomplete"
             )
     for _ in range(spot_checks):
         if not skipped:
@@ -559,8 +709,9 @@ def _verify_oracle(probe, realizable, skipped, spot_checks, rng):
 def pareto_minimal(outputs, deviation_for, target_mm):
     """The FEWEST-triangle realized output whose certified upper bound clears `target_mm`.
 
-    `outputs` is every triangle count the decimator can actually produce, ascending;
-    `deviation_for(tris, target_mm)` returns that output's bracket as `{"lo_mm", "up_mm"}`.
+    `outputs` is every candidate the decimator can produce, ASCENDING BY TRIANGLE COUNT and
+    identified by an opaque key (a geometry digest — two distinct meshes can share a count);
+    `deviation_for(key, target_mm)` returns that candidate's bracket as `{"lo_mm", "up_mm"}`.
 
     PROVEN MINIMAL BY EXHAUSTION, which is the whole point. The previous search bisected
     feasible/infeasible budgets and walked down until the first failure — assuming the monotonicity
@@ -572,8 +723,8 @@ def pareto_minimal(outputs, deviation_for, target_mm):
     It lives here, away from `bpy`, so the logic can be tested against a synthetic non-monotone
     feasibility function without Blender.
     """
-    for tris in outputs:
-        entry = deviation_for(tris, target_mm)
+    for key in outputs:
+        entry = deviation_for(key, target_mm)
         if entry is not None and entry["up_mm"] <= target_mm:
             return entry
     return None

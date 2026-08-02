@@ -38,6 +38,29 @@ def switch_distance_m(deviation_mm, radius_m, view):
     return (deviation_mm / 1000.0) * float(view["height_px"]) / denominator + radius_m
 
 
+def screen_footprint_px(bbox_mm, distance_m, view):
+    """The asset's projected diameter in reference-view pixels at `distance_m`.
+
+    A property of the GEOMETRY and the distance, so the verifier can re-derive it from the recorded
+    bounding box instead of trusting a pixel count the renderer reported about itself. It decides
+    whether the rendered-difference gate has anything to look at (`RENDER_GATE["min_footprint_px"]`).
+    """
+    diameter = math.sqrt(sum((value / 1000.0) ** 2 for value in bbox_mm))
+    pixels_per_radian = float(view["height_px"]) / (2.0 * math.tan(float(view["vfov_rad"]) / 2.0))
+    return diameter / distance_m * pixels_per_radian
+
+
+def tile_vfov_rad(render_config, view):
+    """The gate tile's FOV that preserves the reference view's pixels-per-radian.
+
+    Production, not diagnostics: it decides what the render gate actually looked at. It lives here
+    so the renderer and the verifier compute it from one expression — a duplicated two-line formula
+    is a drift waiting to happen, and the verifier's job is to catch drift, not to have some.
+    """
+    pixels_per_radian = float(view["height_px"]) / (2.0 * math.tan(float(view["vfov_rad"]) / 2.0))
+    return 2.0 * math.atan(0.5 * render_config["tile_px"] / pixels_per_radian)
+
+
 class Tree:
     """Where verification reads its files from: the work tree, or a git revision.
 
@@ -74,6 +97,45 @@ class Tree:
         except FileNotFoundError:
             return False
         return True
+
+    def blob(self, relpath):  # noqa: D401
+        """The file's REAL bytes, resolving an LFS pointer to its object. None if unavailable.
+
+        The tracked glbs are LFS pointers, so `read` gives 40 lines of text rather than a mesh. The
+        verifier needs the actual bytes to re-derive anything from them, and the object is normally
+        right there in the local cache — the same lookup `scripts/hooks/pre-push` already does for
+        the tank glb. When it is not (a revision whose objects were never fetched or have been
+        pruned), this returns None and the caller REFUSES rather than skipping quietly.
+        """
+        try:
+            raw = self.read(relpath)
+        except FileNotFoundError:
+            return None
+        if not raw.startswith(b"version https://git-lfs.github.com/spec/v1"):
+            return raw
+        oid = None
+        for line in raw.splitlines():
+            if line.startswith(b"oid sha256:"):
+                oid = line.split(b":", 1)[1].decode().strip()
+        if oid is None:
+            return None
+        # --git-common-dir, NOT --git-dir: a linked worktree has its own private gitdir, and the
+        # LFS object store lives in the COMMON one. Asking for the private dir finds no objects and
+        # makes every level look unverifiable — which is how a check that cannot see its evidence
+        # turns into a check that quietly passes on something else.
+        git_dir = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"], cwd=self.root,
+            capture_output=True, text=True, check=False,
+        ).stdout.strip()
+        if not git_dir:
+            return None
+        if not os.path.isabs(git_dir):
+            git_dir = os.path.join(self.root, git_dir)
+        path = os.path.join(git_dir, "lfs", "objects", oid[:2], oid[2:4], oid)
+        if not os.path.isfile(path):
+            return None
+        with open(path, "rb") as handle:
+            return handle.read()
 
     def digest(self, relpath):
         """sha256 of the file's real content, resolving an LFS pointer to its recorded oid."""

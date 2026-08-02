@@ -43,10 +43,20 @@ the failure would be silent from then on. So the export lands in a temp file, th
 and the tracked path is only ever written by the bake's own successful output. A failed bake
 leaves the previous good glb untouched and raises.
 
-EXPORT SETTINGS are plain defaults — `export_format='GLB'` and nothing else. Verified last
-session against the shipped pipeline by dry-run export from an unmodified blend: zero structural
-difference, identical size, matching generator string. Adding an argument here changes the asset,
-so don't, without re-running that comparison.
+EXPORT SETTINGS are `export_format='GLB'` and `export_tangents=True`, and the second one is a
+deliberate, ratified change rather than a default anyone should add to.
+
+TANGENTS ARE BAKED because the loader otherwise invents them. `bevy_gltf` generates tangents only
+when the attribute is ABSENT (`loader/mod.rs:838`), so a glb without them ships a mesh whose
+shading basis is computed at load by code no export gate ever saw. That is not hypothetical here:
+the generated track-shoe levels each carried one vertex that mikktspace gives up on, while every
+export-side check reported clean, because the checks were measuring the UVs and the loader was
+measuring something else. The LOD levels bake theirs; this makes the tank glb — which carries L0,
+the surface the whole error ladder is anchored to — do the same, so what is certified is what
+renders. Yan ratified the cost (the file grows by roughly a third; it is LFS).
+
+Everything else stays plain. Adding any OTHER argument changes the asset, so don't, without
+re-running the structural comparison the bake's differ performs.
 
 THIS DOOR NO LONGER REDUCES ANYTHING — L0 IS THE SOURCE
 -------------------------------------------------------
@@ -346,6 +356,8 @@ def bake(root, raw, glb):
     LAST_EXPORT["link"] = _link_summary(glb)
     if LAST_EXPORT["link"]:
         print(f"link  ▸ {LAST_EXPORT['link']}")
+    LAST_EXPORT["tangents"] = _check_tangents(glb)
+    print(f"tan   \u25b8 {LAST_EXPORT['tangents']}")
     LAST_EXPORT["lod"] = _lod_chain_notice(root, glb)
     if LAST_EXPORT["lod"]:
         print(f"lod   ▸ {LAST_EXPORT['lod']}")
@@ -405,6 +417,39 @@ def _link_summary(glb):
             f"assets/lod_manifest.json is measured against a surface that does not ship."
         )
     return f"Link {written} tris (the source, unmodified)"
+
+
+def _check_tangents(glb):
+    """Every primitive the loader would generate tangents for must already carry them.
+
+    THE RULE IS THE LOADER'S, not a blanket. `bevy_gltf` generates tangents when the attribute is
+    absent AND the material needs them, which means a normal map (`needs_tangents`). So a primitive
+    with a normal-mapped material and no TANGENT ships a shading basis computed at load by code no
+    export gate ever saw — the class this bake exists to close. A primitive whose material has no
+    normal map needs none and gets none: on this model that is the ballistic and collider volumes,
+    which wear `Mat_Armor` and `Mat_Collider` and are not rendered surfaces at all.
+
+    Checked on the BAKED BYTES, so it covers the stock-exporter door too.
+    """
+    gltf = _glb_json(glb)
+    materials = gltf.get("materials", [])
+    missing = []
+    for mesh in gltf.get("meshes", []):
+        for primitive in mesh["primitives"]:
+            index = primitive.get("material")
+            if index is None or "normalTexture" not in materials[index]:
+                continue
+            if "TANGENT" not in primitive["attributes"]:
+                missing.append(f"{mesh.get('name')} ({materials[index].get('name')})")
+    if missing:
+        raise ExportError(
+            "tangents",
+            f"{len(missing)} normal-mapped primitive(s) ship without tangents, so bevy would "
+            f"generate them at load and nothing here certified what renders: "
+            f"{', '.join(missing[:6])}",
+        )
+    total = sum(len(mesh["primitives"]) for mesh in gltf.get("meshes", []))
+    return f"{total} primitives, every normal-mapped one carries baked tangents"
 
 
 def _lod_chain_notice(root, glb):
@@ -488,7 +533,9 @@ def _export(root, glb):
     try:
         # Straight out of the exporter, with the arguments the module doc froze. Nothing swaps a
         # mesh, nothing stacks a modifier: what the .blend holds is what ships.
-        result = bpy.ops.export_scene.gltf(filepath=raw, export_format="GLB")
+        result = bpy.ops.export_scene.gltf(
+            filepath=raw, export_format="GLB", export_tangents=True
+        )
         if "FINISHED" not in result:
             raise ExportError("gltf-export", f"export_tiger: export_scene.gltf returned {result}")
         print(f"export ▸ {raw} — {os.path.getsize(raw) / 1e6:.1f} MB (mipless, temporary)")
