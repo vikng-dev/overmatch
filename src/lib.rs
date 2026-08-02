@@ -122,6 +122,10 @@ mod tank;
 /// The world heightmap: PNG → shared height grid (oracle ground term, heightfield collider,
 /// client render mesh, server spawn heights). See the module doc for the mapping constants.
 pub mod terrain_grid;
+/// The terrain render LOD ladder: RTIN/Martini error-bounded levels per render tile, generated at
+/// startup from the SAME decoded grid the collider and oracle read, selected by `VisibilityRange`.
+/// View-only — the oracle, the collider and `height_at` are untouched. See the module doc.
+mod terrain_lod;
 /// The jitter-trace recorder (`SPIKE_TRACE=<path>`): an env-gated JSONL log of rendered vs. simulated
 /// pose, rollback events, and correction decay — passive instrumentation for the MP hull-jitter
 /// investigation. Off (zero cost) unless the env var is set. Net-specific rows are `#[cfg(net)]`.
