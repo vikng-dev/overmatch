@@ -89,6 +89,24 @@ jobs:
         if: matrix.task == 'clippy'
         run: cargo clippy --profile ci --locked --all-targets -- -D warnings
 
+      # The LOD chain, before the Cargo lane so a bad corpus fails fast and cheaply. It runs HERE
+      # rather than only in `scripts/hooks/pre-push` because a hook is bypassable (`--no-verify`)
+      # and, worse, verifies the mutable worktree rather than the commits being pushed — a dirty but
+      # self-consistent tree could bless a different committed tree. This runs on the checked-out
+      # commit, after `git lfs pull` has hydrated the pointers into real glbs, which is what makes
+      # the hash comparison mean anything.
+      #
+      # Stdlib + numpy, no Blender: verification re-derives every switch distance from the recorded
+      # deviations, re-hashes every level, compares the whole gate configuration against the tree,
+      # and refuses a manifest that is missing hashes, validity records, gate records or assets.
+      - name: LOD chain manifest
+        if: matrix.task == 'tests'
+        run: |
+          python3 -m pip install --quiet --disable-pip-version-check numpy
+          python3 scripts/lod/chain.py --verify
+          python3 scripts/lod/test_chain.py
+          python3 scripts/lod/test_refusals.py
+
       - name: Tests
         if: matrix.task == 'tests'
         run: |

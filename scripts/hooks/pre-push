@@ -14,8 +14,13 @@ cd "$(git rev-parse --show-toplevel)"
 # never runs — without this line a push ships the pointers but not the objects, and CI dies
 # at "Git LFS pull (R2)" with "object not found" (the alpha.9 outage). First, before the
 # cargo lanes: `git lfs pre-push` reads the ref list from STDIN, which must reach it intact.
+# STDIN carries the ref list and is READ ONCE, then replayed to everything that needs it. Both
+# `git lfs pre-push` and the LOD lane below consume it, and the second reader would otherwise get
+# an empty stream and silently check nothing.
+refs=$(cat)
+
 echo "pre-push ▸ git lfs pre-push"
-git lfs pre-push "$@"
+printf '%s\n' "$refs" | git lfs pre-push "$@"
 
 # Tank glb mip gate. Blender's glTF exporter embeds PNG/JPEG, and bevy uploads those with ONE mip
 # level — shimmer on every rivet at combat range, plus a texture-cache miss per fetch. The bake
@@ -35,9 +40,56 @@ command -v python3 >/dev/null ||
     { printf '\033[31m  no python3\033[0m — needed by the tank glb gate and by the mip bake\n' >&2; exit 1; }
 glb=assets/tiger_1/tiger_1.glb
 oid=$(git cat-file blob "HEAD:$glb" 2>/dev/null | sed -n 's/^oid sha256://p')
-obj="$(git rev-parse --git-dir)/lfs/objects/$(printf %.2s "$oid")/$(printf %s "$oid" | cut -c3-4)/$oid"
+obj="$(git rev-parse --git-common-dir)/lfs/objects/$(printf %.2s "$oid")/$(printf %s "$oid" | cut -c3-4)/$oid"
 [ -n "$oid" ] && [ -f "$obj" ] || obj="$glb"
 python3 scripts/tank/glb_ktx2.py verify --allow-pointer "$obj"
+
+# LOD chain. The manifest is the SINGLE SEAM between the generated geometry chain and the runtime
+# that selects from it, and a seam nobody checks is a ledger — the last hand-written one drifted by
+# 112 m before anyone noticed.
+#
+# IT VERIFIES THE COMMITS BEING PUSHED, not the work tree. Verifying the work tree answers a
+# question nobody asked: a dirty-but-coherent tree blesses a different commit, and pushing a branch
+# that is not HEAD, a tag, or several refs at once was not covered at all. `chain.py --rev` reads
+# the manifest and the assets out of each pushed revision instead — and it costs nothing extra,
+# because a tracked glb in a commit is an LFS pointer whose `oid sha256:` IS the sha256 of the real
+# bytes, which is the same number the manifest records. No hydration, no checkout, no temp tree.
+#
+# The scripts are taken from the pushed revision too: verifying a commit with a different tree's
+# rules would be the same category of mistake one level up. CI re-runs all of this after LFS
+# hydration, which is the backstop for `--no-verify`.
+echo "pre-push ▸ lod chain manifest (verifier, per pushed revision)"
+lod_tmp=$(mktemp -d)
+trap 'rm -rf "$lod_tmp"' EXIT
+checked=0
+printf '%s\n' "$refs" | while read -r local_ref local_sha remote_ref remote_sha; do
+    [ -n "$local_sha" ] || continue
+    case "$local_sha" in
+        *[!0]*) ;;                       # a real object
+        *) continue ;;                   # all zeros: this ref is being deleted
+    esac
+    git cat-file -e "$local_sha^{commit}" 2>/dev/null || continue
+    if ! git cat-file -e "$local_sha:assets/lod_manifest.json" 2>/dev/null; then
+        continue                         # a revision predating the LOD pipeline
+    fi
+    rm -rf "$lod_tmp/scripts"
+    mkdir -p "$lod_tmp/scripts"
+    git archive "$local_sha" scripts/lod | tar -x -C "$lod_tmp" ||
+        { printf '\033[31m  cannot extract scripts/lod from %s\033[0m\n' "$local_sha" >&2; exit 1; }
+    echo "  ▸ $local_ref -> ${local_sha}"
+    python3 "$lod_tmp/scripts/lod/chain.py" --verify --rev "$local_sha" --repo "$(pwd)" ||
+        { printf '\033[31m  LOD verification failed for %s\033[0m\n' "$local_sha" >&2; exit 1; }
+    checked=$((checked + 1))
+done || exit 1
+# The unit suites run ONCE, from the WORK TREE, and that is the honest scope of them: they are
+# tests of the code in front of you, not of each pushed revision. Running them per-revision would
+# mean the shipped-manifest cases checking this tree's manifest with another revision's verifier —
+# a comparison of two unrelated things. CI runs both suites on the checked-out commit, which is the
+# pushed one, and that is where per-revision test coverage actually lives.
+python3 scripts/lod/test_chain.py >/dev/null 2>&1 ||
+    { printf '\033[31m  lod test_chain failed\033[0m — run: python3 scripts/lod/test_chain.py\n' >&2; exit 1; }
+python3 scripts/lod/test_refusals.py >/dev/null 2>&1 ||
+    { printf '\033[31m  lod test_refusals failed\033[0m — run: python3 scripts/lod/test_refusals.py\n' >&2; exit 1; }
 
 echo "pre-push ▸ cargo fmt --all --check"
 cargo fmt --all --check >/dev/null || { printf '\033[31m  unformatted\033[0m — run: cargo fmt --all\n' >&2; exit 1; }
