@@ -983,17 +983,92 @@ pub(crate) struct TerrainLodLadder(pub(crate) TerrainLod);
 /// walk of a few hundred entities for a sub-pixel difference.
 const FOV_HYSTERESIS: f32 = 0.10;
 
-/// Rewrite every terrain LOD threshold when the view profile changes — fov (the optic toggle, a
-/// magnification step), rendered height (window resize), or render scale.
+/// Which level the ladder is currently showing. [`TerrainLodClamp::Adaptive`] is the product
+/// behaviour and the default; every other value pins the whole map to one rung so a human can look
+/// at that rung directly.
 ///
-/// Affordable BECAUSE terrain is a few hundred entities and the profile changes at human rate.
-/// The thresholds stay octave-shared: this writes at most one distinct value per (rung, profile),
-/// never a per-tile float, so the permanent range table grows by a handful of slots per profile
-/// the player actually visits.
+/// The clamp exists because two of this ladder's properties are not testable from a terminal: what
+/// a rung looks like in motion, and what its SHADOW does under the shipped low sun (the one gate
+/// this module still owes — see the module doc). Both need eyes on a running frame, and switching
+/// them in at their real distances puts them a kilometre away where nobody can judge them.
+///
+/// Only `dev_tools` mounts anything that can move this off `Adaptive`, so on a shipped client it is
+/// a resource that is read once per profile change and never written.
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(crate) enum TerrainLodClamp {
+    /// Live selection: every tile picks its level from the camera distance.
+    #[default]
+    Adaptive,
+    /// Every tile pinned to one rung of [`TERRAIN_LOD_LADDER`], regardless of distance.
+    ///
+    /// Unconstructible without `dev_tools`, and the dead-code warning that produces on a release
+    /// build is the shipped-client guarantee stated by the compiler: nothing there can move the
+    /// clamp off `Adaptive`.
+    #[cfg_attr(
+        not(feature = "dev_tools"),
+        expect(
+            dead_code,
+            reason = "only the dev_tools rung cycler constructs this; see the variant doc"
+        )
+    )]
+    Rung(usize),
+}
+
+impl TerrainLodClamp {
+    /// The level index this clamp selects on `tile`, and whether that was a COARSER fallback.
+    ///
+    /// A tile only carries the rungs that produced a distinct mesh on it, so a forced rung is often
+    /// one the tile does not keep. The fallback is the nearest KEPT rung that is COARSER, never
+    /// finer: a coarser level is what this tile shows a little further out anyway, so the clamped
+    /// picture stays a picture the ladder can actually produce. If the tile keeps nothing that
+    /// coarse, its coarsest level is the closest thing to the request.
+    fn level_on(self, tile: &TerrainLodTile) -> Option<(usize, bool)> {
+        let Self::Rung(rung) = self else {
+            return None;
+        };
+        let exact = tile.levels.iter().position(|level| level.rung == rung);
+        Some(match exact {
+            Some(level) => (level, false),
+            None => (
+                tile.levels
+                    .iter()
+                    .position(|level| level.rung > rung)
+                    .unwrap_or(tile.levels.len() - 1),
+                true,
+            ),
+        })
+    }
+}
+
+/// A range that no distance satisfies: `is_visible_at_all` needs `d >= start && d < end`, which
+/// `∞ ..∞` can never give. How the clamp hides the levels it is not showing, without touching the
+/// ladder's own thresholds — one extra value in bevy's permanent range table, on dev builds only.
+fn never_visible() -> VisibilityRange {
+    VisibilityRange {
+        start_margin: f32::INFINITY..f32::INFINITY,
+        end_margin: f32::INFINITY..f32::INFINITY,
+        use_aabb: true,
+    }
+}
+
+/// THE ONE WRITER of terrain visibility ranges. Rewrites every threshold when the view profile
+/// changes — fov (the optic toggle, a magnification step), rendered height (window resize), render
+/// scale — or when the dev clamp moves.
+///
+/// Affordable BECAUSE terrain is a few hundred entities and both triggers are human-rate. The
+/// thresholds stay octave-shared: this writes at most one distinct value per (rung, profile), never
+/// a per-tile float, so the permanent range table grows by a handful of slots per profile the player
+/// actually visits.
+///
+/// The clamp rides THIS path rather than a parallel one on purpose. A second writer would race this
+/// one for the same components, and whichever ran last would win a frame at a time — the clamp would
+/// appear to work and then flicker back the moment the player toggled the optic.
 fn adapt_ranges(
     mut commands: Commands,
     ladder: Option<Res<TerrainLodLadder>>,
     current: Option<ResMut<TerrainLodView>>,
+    clamp: Res<TerrainLodClamp>,
+    mut applied: Local<Option<TerrainLodClamp>>,
     camera: Query<&Projection, With<Camera3d>>,
     windows: Query<&Window>,
     scale: Option<Res<crate::render_scale::RenderScale>>,
@@ -1014,29 +1089,130 @@ fn adapt_ranges(
     );
     let fov_moved = (wanted.fov_y_rad - current.fov_y_rad).abs()
         > FOV_HYSTERESIS * current.fov_y_rad.max(f32::MIN_POSITIVE);
-    if !fov_moved && wanted.height_px == current.height_px && wanted.budget_px == current.budget_px
-    {
+    let view_moved =
+        fov_moved || wanted.height_px != current.height_px || wanted.budget_px != current.budget_px;
+    let clamp_moved = *applied != Some(*clamp);
+    if !view_moved && !clamp_moved {
         return;
     }
     *current = wanted;
+    *applied = Some(*clamp);
+    let (mut pinned, mut fallback) = (0usize, 0usize);
     for (entity, marker) in &entities {
         let Some(tile) = ladder.0.tiles.get(marker.tile) else {
             continue;
         };
-        if let Some(range) = ladder.0.ranges(tile, wanted).get(marker.level) {
-            commands.entity(entity).insert(range.clone());
-        }
+        let range = match clamp.level_on(tile) {
+            Some((level, coarser)) => {
+                if marker.level == 0 {
+                    pinned += 1;
+                    fallback += usize::from(coarser);
+                }
+                if marker.level == level {
+                    VisibilityRange::abrupt(0.0, f32::INFINITY)
+                } else {
+                    never_visible()
+                }
+            }
+            None => match ladder.0.ranges(tile, wanted).get(marker.level) {
+                Some(range) => range.clone(),
+                None => continue,
+            },
+        };
+        commands.entity(entity).insert(range);
     }
-    info!(
-        "terrain LOD: view profile → fov {fov:.3} rad × {height:.0} px, thresholds rewritten",
-        fov = wanted.fov_y_rad,
-        height = wanted.height_px,
-    );
+    match *clamp {
+        TerrainLodClamp::Adaptive if clamp_moved => info!(
+            "terrain LOD clamp: ADAPTIVE — live thresholds restored (fov {fov:.3} rad × \
+             {height:.0} px)",
+            fov = wanted.fov_y_rad,
+            height = wanted.height_px,
+        ),
+        TerrainLodClamp::Adaptive => info!(
+            "terrain LOD: view profile → fov {fov:.3} rad × {height:.0} px, thresholds rewritten",
+            fov = wanted.fov_y_rad,
+            height = wanted.height_px,
+        ),
+        TerrainLodClamp::Rung(0) => {
+            info!("terrain LOD clamp: EXACT ({pinned} tiles at full density)")
+        }
+        TerrainLodClamp::Rung(rung) => info!(
+            "terrain LOD clamp: δ{declared:.2} ({at} tiles at their {declared:.2} level, \
+             {fallback} coarser-fallback)",
+            declared = TERRAIN_LOD_LADDER[rung],
+            at = pinned - fallback,
+        ),
+    }
 }
 
-/// Mount the adaptive layer. Generation itself is driven by `world::spawn_environment`.
+/// Mount the adaptive layer, and on dev builds the rung cycler. Generation itself is driven by
+/// `world::spawn_environment`.
 pub(crate) fn plugin(app: &mut App) {
-    app.add_systems(Update, adapt_ranges);
+    app.init_resource::<TerrainLodClamp>()
+        .add_systems(Update, adapt_ranges);
+    // The eyeball rig. `dev_tools` is a DEFAULT feature, so this ships to playtest builds and not
+    // to a release client; without it nothing can move `TerrainLodClamp` off `Adaptive` and the
+    // resource is inert.
+    #[cfg(feature = "dev_tools")]
+    app.add_systems(Update, cycle_clamp.before(adapt_ranges));
+}
+
+/// The dev key that cycles the terrain rung clamp: ADAPTIVE → EXACT → each rung the map actually
+/// keeps → back to ADAPTIVE.
+///
+/// `K` because it is free — `G` gizmos, `X` x-ray, `F` camera detach, `M` spawn map, `T` optic, `L`
+/// and the digits are taken (`debug`, `command`, `sight`, `net::spawn_map`).
+#[cfg(feature = "dev_tools")]
+const CLAMP_CYCLE_KEY: KeyCode = KeyCode::KeyK;
+
+/// Step the clamp on each press of [`CLAMP_CYCLE_KEY`].
+///
+/// The cycle visits EXACT plus every rung at least one tile keeps, read off the built ladder rather
+/// than off [`TERRAIN_LOD_LADDER`] — a rung no tile carries would be a press that changes nothing,
+/// which is worse than no key at all when the whole point is to see the difference.
+#[cfg(feature = "dev_tools")]
+fn cycle_clamp(
+    // OPTIONAL because `world::plugin` mounts this module on the dedicated server too, and a
+    // headless composition has no `InputPlugin` and therefore no keyboard resource at all.
+    keys: Option<Res<ButtonInput<KeyCode>>>,
+    ladder: Option<Res<TerrainLodLadder>>,
+    mut clamp: ResMut<TerrainLodClamp>,
+    mut explained: Local<bool>,
+) {
+    let (Some(keys), Some(ladder)) = (keys, ladder) else {
+        return;
+    };
+    if !keys.just_pressed(CLAMP_CYCLE_KEY) {
+        return;
+    }
+    let mut rungs: Vec<usize> = ladder
+        .0
+        .tiles
+        .iter()
+        .flat_map(|tile| tile.levels.iter().map(|level| level.rung))
+        .collect();
+    rungs.sort_unstable();
+    rungs.dedup();
+    *clamp = match *clamp {
+        TerrainLodClamp::Adaptive => rungs.first().map_or(TerrainLodClamp::Adaptive, |rung| {
+            TerrainLodClamp::Rung(*rung)
+        }),
+        TerrainLodClamp::Rung(rung) => rungs
+            .iter()
+            .find(|kept| **kept > rung)
+            .map_or(TerrainLodClamp::Adaptive, |rung| {
+                TerrainLodClamp::Rung(*rung)
+            }),
+    };
+    if !*explained && matches!(*clamp, TerrainLodClamp::Rung(_)) {
+        *explained = true;
+        info!(
+            "terrain LOD clamp: every tile is pinned to the requested rung; a tile that does not \
+             keep that rung shows its nearest COARSER kept level, which is what it would show a \
+             little further out anyway. Press {CLAMP_CYCLE_KEY:?} to step, and again past the \
+             coarsest rung to return to ADAPTIVE."
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1788,6 +1964,149 @@ mod tests {
                 optic[level],
             );
         }
+    }
+
+    /// `VisibilityRange` is not `Debug`, so comparisons quote its four margin bounds instead.
+    fn bounds(range: &VisibilityRange) -> [f32; 4] {
+        [
+            range.start_margin.start,
+            range.start_margin.end,
+            range.end_margin.start,
+            range.end_margin.end,
+        ]
+    }
+
+    /// A three-level synthetic tile plus the ECS scaffolding the rewrite system needs.
+    fn clamp_fixture() -> (App, Vec<Entity>) {
+        let mut app = App::new();
+        app.add_plugins(plugin);
+        app.insert_resource(TerrainLodLadder(synthetic_ladder()));
+        app.insert_resource(TerrainLodView {
+            fov_y_rad: std::f32::consts::FRAC_PI_4,
+            height_px: 1440.0,
+            budget_px: TERRAIN_LOD_BUDGET_PX,
+        });
+        let world = app.world_mut();
+        world.spawn(Window::default());
+        world.spawn((
+            Camera3d::default(),
+            Projection::Perspective(PerspectiveProjection {
+                fov: std::f32::consts::FRAC_PI_4,
+                ..default()
+            }),
+        ));
+        let entities: Vec<Entity> = (0..3)
+            .map(|level| {
+                world
+                    .spawn((
+                        TerrainLodEntity { tile: 0, level },
+                        VisibilityRange::abrupt(0.0, f32::INFINITY),
+                    ))
+                    .id()
+            })
+            .collect();
+        (app, entities)
+    }
+
+    /// The clamp is INERT until it is engaged: with the resource at its default the ladder writes
+    /// exactly the adaptive thresholds it would write with no clamp in the code at all.
+    ///
+    /// This is also the shipped-client claim. `dev_tools` is the only thing that mounts a system
+    /// able to move `TerrainLodClamp`, so on a release build the resource is permanently `Adaptive`
+    /// and what this test asserts is the whole of the clamp's effect there: none.
+    #[test]
+    fn the_rung_clamp_is_inert_until_it_is_engaged() {
+        let (mut app, entities) = clamp_fixture();
+        assert_eq!(
+            *app.world().resource::<TerrainLodClamp>(),
+            TerrainLodClamp::Adaptive,
+            "the clamp must default to live selection"
+        );
+        app.update();
+        let ladder = synthetic_ladder();
+        let view = *app.world().resource::<TerrainLodView>();
+        let expected = ladder.ranges(&ladder.tiles[0], view);
+        for (level, &entity) in entities.iter().enumerate() {
+            assert_eq!(
+                bounds(app.world().get::<VisibilityRange>(entity).expect("range")),
+                bounds(&expected[level]),
+                "level {level} must carry its adaptive threshold"
+            );
+        }
+    }
+
+    /// Engaged, the clamp pins every tile to ONE level: the requested rung shows over `[0, ∞)` and
+    /// every other level of the tile is given a range no distance can satisfy. Returning to
+    /// `Adaptive` restores the live thresholds — the clamp must not be a one-way door.
+    #[test]
+    fn the_rung_clamp_pins_one_level_and_releases_cleanly() {
+        let (mut app, entities) = clamp_fixture();
+        app.update();
+        let ladder = synthetic_ladder();
+        // The synthetic tile keeps rungs 0, 2 and 4. Ask for 4 — its own level — then for 3, which
+        // it does not keep and must answer with the nearest COARSER kept level, also 4.
+        for (rung, wanted) in [(4usize, 2usize), (3, 2), (0, 0)] {
+            *app.world_mut().resource_mut::<TerrainLodClamp>() = TerrainLodClamp::Rung(rung);
+            app.update();
+            for (level, &entity) in entities.iter().enumerate() {
+                let range = app.world().get::<VisibilityRange>(entity).expect("range");
+                if level == wanted {
+                    assert_eq!(
+                        bounds(range),
+                        bounds(&VisibilityRange::abrupt(0.0, f32::INFINITY)),
+                        "rung {rung} must show level {wanted} everywhere"
+                    );
+                } else {
+                    assert!(
+                        !range.is_visible_at_all(0.0)
+                            && !range.is_visible_at_all(500.0)
+                            && !range.is_visible_at_all(f32::MAX),
+                        "rung {rung} must hide level {level} at every distance"
+                    );
+                }
+            }
+        }
+        // And back: the live chain returns unchanged.
+        *app.world_mut().resource_mut::<TerrainLodClamp>() = TerrainLodClamp::Adaptive;
+        app.update();
+        let view = *app.world().resource::<TerrainLodView>();
+        let expected = ladder.ranges(&ladder.tiles[0], view);
+        for (level, &entity) in entities.iter().enumerate() {
+            assert_eq!(
+                bounds(app.world().get::<VisibilityRange>(entity).expect("range")),
+                bounds(&expected[level]),
+                "level {level} must be back on its adaptive threshold"
+            );
+        }
+    }
+
+    /// The fallback rule, on the shipped ladder rather than a fixture: for every rung, every tile
+    /// resolves to exactly one kept level, and a tile that does not keep the rung resolves to a
+    /// COARSER one — never a finer one, which would show detail the clamp was asked to hide.
+    #[test]
+    fn the_clamp_falls_back_to_coarser_levels_only() {
+        let lod = build(&shipped_grid());
+        for rung in 0..TERRAIN_LOD_LADDER.len() {
+            for (t, tile) in lod.tiles.iter().enumerate() {
+                let (level, coarser) = TerrainLodClamp::Rung(rung)
+                    .level_on(tile)
+                    .expect("a pinned clamp always resolves");
+                let kept = tile.levels[level].rung;
+                assert_eq!(
+                    coarser,
+                    kept != rung,
+                    "tile {t} rung {rung}: fallback flag disagrees with the level it chose"
+                );
+                if coarser {
+                    assert!(
+                        kept > rung || level == tile.levels.len() - 1,
+                        "tile {t} rung {rung} fell back to the FINER level {kept}"
+                    );
+                }
+            }
+        }
+        // Adaptive resolves to no level at all — that is what makes it the live path.
+        assert!(TerrainLodClamp::Adaptive.level_on(&lod.tiles[0]).is_none());
     }
 
     /// The STARTUP COST, measured: generation plus the mikktspace tangent basis every level needs —
