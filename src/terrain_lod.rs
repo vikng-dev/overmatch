@@ -59,12 +59,12 @@
 //! per-channel rules nobody can hold in their head. All figures MEASURED on the shipped map,
 //! 2026-08-02.
 //!
-//! 1. **Shadows.** Terrain casts under the shipped 17° sun, and bevy applies `VisibilityRange`
-//!    while collecting directional shadow casters
-//!    (`vendor/bevy_light-0.19.0-cascade-count/src/lib.rs:436`), so a switched level casts the
-//!    switched shadow. A vertical occluder change `δh` moves its shadow edge horizontally by
-//!    `δh·cot 17° ≈ 3.27 δh` on a flat receiver, and further where the ground runs near-parallel to
-//!    the light — so the positional rung underprices the shadow by at least 3.27×. DERIVED from the
+//! 1. **Shadows.** Terrain casts under the shipped 17° sun, and the vendored
+//!    `check_dir_light_mesh_visibility` consults `VisibilityRange` while collecting directional
+//!    shadow casters, so a switched level casts the switched shadow — the shadow pass selects the
+//!    same LOD the main camera did. A vertical occluder change `δh` moves its shadow edge
+//!    horizontally by `δh·cot 17° ≈ 3.27 δh` on a flat receiver, and further where the ground runs
+//!    near-parallel to the light — so the positional rung underprices it by 3.27×. DERIVED from the
 //!    worst kept level (0.4946 m at the 50 cm rung) the edge can move ~1.6 m in world space. On
 //!    screen it is much smaller, because a horizontal displacement seen from tank height is heavily
 //!    foreshortened and because a level is only shown at or beyond the distance where its own
