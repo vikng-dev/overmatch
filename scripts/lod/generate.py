@@ -256,35 +256,30 @@ def _fit_collapse(obj, budget):
     count at or below the budget. An early stop meant outputs in `(reached, budget]` were never
     visited, so the "exhaustive" search could miss a level outright.
 
-    So the bisection now runs to convergence. It is sound because the modifier's output count is
-    monotone non-decreasing in `ratio` — more ratio, more triangles kept — which makes the
-    largest ratio whose count is under budget the one carrying the greatest such count. 28 halvings
-    resolve the ratio to 4e-9, against steps of order 1/edge_count, so the interval cannot straddle
-    two steps by the end. `_spot_check_enumeration` re-tests that claim on real geometry every run.
+    The bisection itself is `measure.bisect_to_budget`, kept as a pure function of an injected
+    evaluator so the property can be PROVEN on synthetic staircases whose answer is known
+    independently. That separation is the point: the enumeration built on top cannot establish this
+    contract by asking about it, so it has to be established here, where it is arithmetic.
 
     Returns `(reached, ratio)`, or `(None, None)` below the mesh's topology floor.
     """
     modifier = obj.modifiers.new("Collapse", "DECIMATE")
     modifier.decimate_type = "COLLAPSE"
     modifier.use_collapse_triangulate = True
-    low, high, best = 0.0, 1.0, None
-    for _ in range(28):
-        middle = (low + high) / 2.0
-        modifier.ratio = middle
+
+    def evaluate(ratio):
+        modifier.ratio = ratio
         bpy.context.view_layer.update()
-        count = _evaluated_triangles(obj)
-        if count <= budget:
-            best = (middle, count)
-            low = middle
-        else:
-            high = middle
-    if best is None:
+        return _evaluated_triangles(obj)
+
+    count, ratio = M.bisect_to_budget(evaluate, budget)
+    if count is None:
         modifier.ratio = 0.0
         bpy.context.view_layer.update()
         return None, None
-    modifier.ratio = best[0]
+    modifier.ratio = ratio
     bpy.context.view_layer.update()
-    return best[1], best[0]
+    return count, ratio
 
 
 def cleanup(mesh, scale_m):
@@ -376,8 +371,8 @@ class Candidates:
         self.source_obj = source_obj
         self.source = source_surface
         self.gates = gates
-        self.by_tris = {}
-        self.outputs = []          # realized triangle counts, ascending
+        self.entries = {}
+        self.outputs = []          # candidate KEYS (geometry digests), ascending by triangles
         self.evaluations = 0
         self.decimations = 0
 
@@ -385,12 +380,17 @@ class Candidates:
         """Every realizable output in [floor, ceiling], ascending. One decimation per output.
 
         The walk itself lives in `measure.enumerate_staircase` — away from `bpy`, so it can be
-        tested against a synthetic staircase — and this method supplies the oracle plus the declared
-        refusal limits. The oracle's contract ("greatest realizable count at or below the budget")
-        is spot-checked on real geometry every run: `MAX_ENUMERATION_SPOT_CHECKS` random budgets are
-        drawn from the intervals the walk jumped over, and each must land on an output already
-        found. That is the check that catches a decimator whose bisection stops early, which is
-        exactly how the previous "exhaustive" enumeration was silently incomplete.
+        tested against synthetic staircases — and this method supplies the oracle plus the declared
+        refusal limits.
+
+        WHAT IS PROVEN AND WHERE. The walk is exhaustive GIVEN an oracle returning the greatest
+        realizable count at or below its budget. That contract is established in
+        `measure.bisect_to_budget`, which runs to convergence over a monotone evaluator and is
+        proven on synthetic staircases whose answers are known independently — NOT here, and not by
+        the spot checks, which can only ask the same oracle they are trying to audit. The spot
+        checks catch an oracle that contradicts ITSELF (the 1 %-early-stop and `B - 1` shapes, both
+        of which this pipeline actually shipped); they cannot catch one that is wrong consistently.
+        `measure.enumerate_staircase` states that boundary in full.
         """
         started = time.time()
         limits = CONFIG.SEARCH_LIMITS
@@ -417,16 +417,19 @@ class Candidates:
                 return None
             surface = M.from_bpy_mesh(mesh, None, f"cand{budget}")
             bpy.data.meshes.remove(mesh)
-            shipped_tris = surface.tri_count
-            if shipped_tris not in self.by_tris:
+            # KEYED BY GEOMETRY, NOT BY TRIANGLE COUNT. Two different cleaned meshes can carry the
+            # same count, and keying by the count discarded one of them arbitrarily — possibly the
+            # only one that met a rung. The digest is the identity; the count is an attribute.
+            key = surface.digest()
+            if key not in self.entries:
                 # THE BUDGET IS KEPT, not just the count it produced. Rebuilding a chosen level
                 # means re-running the decimator, and its input is a BUDGET; feeding back the
                 # post-cleanup triangle count would ask for a different mesh than the one certified.
-                self.by_tris[shipped_tris] = {
-                    "tris": shipped_tris, "budget": budget, "surface": surface,
+                self.entries[key] = {
+                    "tris": surface.tri_count, "budget": budget, "surface": surface,
                     "lo_mm": None, "up_mm": None,
                 }
-                retained_tris += shipped_tris
+                retained_tris += surface.tri_count
                 if retained_tris > limits["max_retained_tris"]:
                     raise M.EnumerationError(
                         f"holding {retained_tris} triangles of candidate geometry (limit "
@@ -434,15 +437,18 @@ class Candidates:
                         f"for the whole chain, so this grows with the square of an asset's size. "
                         f"Refusing rather than swapping."
                     )
-            return reached, shipped_tris
+            return reached, key
 
         try:
-            self.outputs, _by_key = M.enumerate_staircase(
+            M.enumerate_staircase(
                 floor_tris, ceiling_tris, probe,
                 spot_checks=limits["max_enumeration_spot_checks"],
                 seed=limits["spot_check_seed"],
                 max_outputs=limits["max_enumerated_outputs"],
             )
+            # Ascending by triangle count, which is the order the Pareto scan needs; the KEY stays
+            # the geometry digest, so two distinct meshes of equal size are both candidates.
+            self.outputs = sorted(self.entries, key=lambda k: self.entries[k]["tris"])
         except M.EnumerationError as exc:
             raise GenerationError("enumeration", str(exc)) from exc
         log(f"  enumerated {len(self.outputs)} realizable outputs in [{floor_tris}, "
@@ -451,16 +457,19 @@ class Candidates:
             f"{time.time() - started:.0f}s)")
         return self.outputs
 
-    def deviation(self, tris, target_mm):
-        """Certified deviation for the realized output at `tris`, decisive for `target_mm`.
+    def deviation(self, key, target_mm):
+        """Certified deviation for the candidate `key`, decisive for `target_mm`.
 
-        Cached by triangle count, which is a proxy for the mesh: the enumeration produces exactly
-        one mesh per count. A cached bracket is REUSED ONLY WHEN IT DECIDES the new target — an
-        upper bound under it accepts, a sampled lower bound over it rejects — because the search
-        stops as soon as the current rung's question is answered and a bracket measured against a
-        coarse rung can be far too loose to answer a fine one.
+        Cached by GEOMETRY DIGEST. It was cached by triangle count, which assumed one mesh per
+        count — true of the reference asset and not true in general, and the day it broke the loser
+        would have been dropped without a word.
+
+        A cached bracket is REUSED ONLY WHEN IT DECIDES the new target — an upper bound under it
+        accepts, a sampled lower bound over it rejects — because the search stops as soon as the
+        current rung's question is answered, and a bracket measured against a coarse rung can be far
+        too loose to answer a fine one.
         """
-        entry = self.by_tris[tris]
+        entry = self.entries[key]
         if entry["up_mm"] is not None and (
             entry["up_mm"] <= target_mm or entry["lo_mm"] > target_mm
         ):
@@ -474,8 +483,9 @@ class Candidates:
         self.evaluations += 1
         entry["lo_mm"] = result["mm"]
         entry["up_mm"] = result["mm_upper"]
-        log(f"    probe {tris:>5} tris  dev in [{result['mm']:.3f}, {result['mm_upper']:.3f}] mm "
-            f"vs target {target_mm:.3f}  {time.time() - started:.1f}s")
+        log(f"    probe {entry['tris']:>5} tris  dev in [{result['mm']:.3f}, "
+            f"{result['mm_upper']:.3f}] mm vs target {target_mm:.3f}  "
+            f"{time.time() - started:.1f}s")
         return entry
 
 
@@ -690,10 +700,7 @@ def build_chain(asset, root, run_render_gate, out_dir):
     termination = "right_wall"
 
     for rung, target_mm in CONFIG.rungs():
-        best = M.pareto_minimal(
-            [t for t in candidates.outputs if t <= source.tri_count],
-            candidates.deviation, target_mm,
-        )
+        best = M.pareto_minimal(candidates.outputs, candidates.deviation, target_mm)
         if best is None:
             skipped.append({"rung": rung, "e_target_mm": round(target_mm, 4),
                             "reason": "no candidate meets the target",

@@ -75,7 +75,7 @@ def view_record(passed):
     }
 
 
-def gate_record(passed=True, material="decoded from probe.glb"):
+def gate_record(passed=True, material="decoded from probe.glb", distance_m=90.0):
     """A render-gate record whose recorded verdict and summaries FOLLOW from its per-view numbers."""
     views = {name: view_record(passed) for name, _e, _a in CONFIG.RENDER_GATE["views"]}
     return {
@@ -83,9 +83,10 @@ def gate_record(passed=True, material="decoded from probe.glb"):
         "worst_defect_score": max(view["defect_score"] for view in views.values()),
         "worst_mean_abs_diff": max(view["signal"]["mean_abs_diff"] for view in views.values()),
         "worst_frac_over": max(view["signal"]["frac_over"] for view in views.values()),
-        "distance_m": 90.0, "tile_px": CONFIG.RENDER_GATE["tile_px"],
+        "distance_m": distance_m, "tile_px": CONFIG.RENDER_GATE["tile_px"],
         "supersample": CONFIG.RENDER_GATE["supersample"],
-        "samples": CONFIG.RENDER_GATE["samples"], "tile_vfov_rad": 0.0284,
+        "samples": CONFIG.RENDER_GATE["samples"],
+        "tile_vfov_rad": chain.tile_vfov_rad(CONFIG.RENDER_GATE, VIEW),
         "material_source": material,
         "views": views,
         "thresholds": {
@@ -161,7 +162,7 @@ def synthetic_manifest():
                  "switch_from_source_dev_m": chain.switch_distance_m(dev1, radius, VIEW),
                  "switch_from_pairwise_m": chain.switch_distance_m(pair1, radius, VIEW),
                  "validity": validity_record(400, 1100, radius),
-                 "render_gate": gate_record(True)},
+                 "render_gate": gate_record(True, distance_m=round(switch1, 4))},
             ],
         }],
     }
@@ -238,7 +239,8 @@ class DerivationTests(unittest.TestCase):
         """
         manifest = synthetic_manifest()
         manifest["gates"]["render_gate_blocking"] = blocking
-        manifest["assets"][0]["levels"][1]["render_gate"] = gate_record(False)
+        level = manifest["assets"][0]["levels"][1]
+        level["render_gate"] = gate_record(False, distance_m=level["switch_m"])
         return manifest
 
     def test_a_failing_render_gate_blocks_once_the_threshold_is_ratified(self):
@@ -469,7 +471,9 @@ class SecondRoundMutantTests(unittest.TestCase):
         """`pass: true` beside metrics that say otherwise is a contradiction, not a pass."""
         def contradict(manifest):
             level = manifest["assets"][0]["levels"][1]
-            level["render_gate"] = gate_record(False)      # every number says FAIL, consistently
+            level["render_gate"] = gate_record(          # every number says FAIL, consistently
+                False, distance_m=level["switch_m"]
+            )
             level["render_gate"]["pass"] = True            # ...and the verdict says otherwise
 
         failures = self.failures_for(contradict)
@@ -760,6 +764,104 @@ class RederivationSweepTests(unittest.TestCase):
                 self.assert_caught(
                     f"{key} = 3 on L1",
                     lambda m, k=key: m["assets"][0]["levels"][1]["validity"].__setitem__(k, 3),
+                )
+
+    def test_the_gate_distance_must_be_the_switch_distance(self):
+        """A gate run at the wrong distance measured the wrong pop."""
+        self.assert_caught(
+            "distance_m = -999",
+            lambda m: self.first_gate(m).__setitem__("distance_m", -999),
+        )
+
+    def test_the_render_parameters_must_match_config(self):
+        for key in ("tile_px", "supersample", "samples"):
+            with self.subTest(key=key):
+                self.assert_caught(
+                    f"{key} = 999",
+                    lambda m, k=key: self.first_gate(m).__setitem__(k, 999),
+                )
+
+    def test_the_tile_fov_must_preserve_the_reference_resolution(self):
+        self.assert_caught(
+            "tile_vfov_rad doubled",
+            lambda m: self.first_gate(m).__setitem__(
+                "tile_vfov_rad", self.first_gate(m)["tile_vfov_rad"] * 2
+            ),
+        )
+
+    def test_every_recorded_threshold_must_match_config(self):
+        """Not a chosen four — `defect_normal_deg = 999` described a defect nobody declared."""
+        manifest = json.loads(self.text)
+        for key in self.first_gate(manifest)["thresholds"]:
+            with self.subTest(key=key):
+                self.assert_caught(
+                    f"thresholds.{key} = 999",
+                    lambda m, k=key: self.first_gate(m)["thresholds"].__setitem__(k, 999),
+                )
+
+    def test_an_unknown_recorded_threshold_is_refused(self):
+        self.assert_caught(
+            "an invented threshold",
+            lambda m: self.first_gate(m)["thresholds"].__setitem__("invented_limit", 1),
+        )
+
+    def test_the_pairwise_lower_bound_cannot_exceed_its_upper(self):
+        for index in range(1, 5):
+            with self.subTest(level=index):
+                self.assert_caught(
+                    f"L{index} pairwise_mm = 999",
+                    lambda m, i=index: m["assets"][0]["levels"][i].__setitem__(
+                        "pairwise_mm", 999
+                    ),
+                )
+
+    def test_both_component_switch_distances_are_rederived(self):
+        """Checking only their maximum let BOTH be set to -999 without a word."""
+        for index in range(1, 5):
+            for key in ("switch_from_source_dev_m", "switch_from_pairwise_m"):
+                with self.subTest(level=index, key=key):
+                    self.assert_caught(
+                        f"L{index} {key} = -999",
+                        lambda m, i=index, k=key: m["assets"][0]["levels"][i].__setitem__(k, -999),
+                    )
+
+    def test_both_components_set_together_is_still_caught(self):
+        def wreck(manifest):
+            level = manifest["assets"][0]["levels"][1]
+            level["switch_from_source_dev_m"] = -999
+            level["switch_from_pairwise_m"] = -999
+
+        self.assert_caught("both components = -999", wreck)
+
+    def test_the_shed_fraction_is_rederived_from_the_triangle_counts(self):
+        for index in range(1, 5):
+            with self.subTest(level=index):
+                self.assert_caught(
+                    f"L{index} shed_fraction_vs_parent = -999",
+                    lambda m, i=index: m["assets"][0]["levels"][i].__setitem__(
+                        "shed_fraction_vs_parent", -999
+                    ),
+                )
+
+    def test_a_validity_record_that_describes_another_mesh_is_caught(self):
+        for index in range(0, 5):
+            for key in ("tris", "verts"):
+                with self.subTest(level=index, key=key):
+                    self.assert_caught(
+                        f"L{index} validity.{key} = 999",
+                        lambda m, i=index, k=key: m["assets"][0]["levels"][i][
+                            "validity"
+                        ].__setitem__(k, 999),
+                    )
+
+    def test_the_rung_target_is_rederived_from_the_global_grid(self):
+        for index in range(1, 5):
+            with self.subTest(level=index):
+                self.assert_caught(
+                    f"L{index} e_target_mm halved",
+                    lambda m, i=index: m["assets"][0]["levels"][i].__setitem__(
+                        "e_target_mm", m["assets"][0]["levels"][i]["e_target_mm"] / 2
+                    ),
                 )
 
     def test_the_unmutated_manifest_still_verifies(self):

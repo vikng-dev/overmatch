@@ -464,36 +464,75 @@ class EnumerationError(Exception):
     """The decimator's realizable outputs could not be enumerated completely. Never degrade."""
 
 
+#: Halvings the budget bisection runs. 28 resolves a ratio in [0,1] to 4e-9, against decimator
+#: steps of order 1/edge_count — so the final interval cannot straddle two steps.
+BISECTION_HALVINGS = 28
+
+
+def bisect_to_budget(evaluate, budget, halvings=BISECTION_HALVINGS):
+    """The GREATEST count `evaluate` can reach at or below `budget`. Returns (count, ratio).
+
+    `evaluate(ratio) -> count` must be monotone non-decreasing — for the Blender decimate modifier
+    it is, since a larger ratio keeps more triangles. Given that, the largest ratio whose count is
+    under budget carries the largest such count, and the bisection converges onto it.
+
+    THIS IS WHERE THE ENUMERATION'S CONTRACT IS ESTABLISHED, and it is deliberately a pure function
+    of an injected `evaluate` so that it can be PROVEN on synthetic staircases whose answer is known
+    independently — see `test_refusals.BisectionTests`. That matters because the enumeration built
+    on top cannot establish it: an enumerator can only ask the oracle, and an oracle that lies
+    consistently answers every question consistently. The honesty has to come from here.
+
+    It runs to convergence. It used to stop as soon as the result was within 1 % of the budget,
+    which is fine for "give me a mesh about this big" and fatal for "give me the greatest realizable
+    count at or below this budget" — the property the whole enumeration rests on.
+    """
+    low, high, best = 0.0, 1.0, None
+    for _ in range(halvings):
+        middle = (low + high) / 2.0
+        count = evaluate(middle)
+        if count <= budget:
+            best = (count, middle)
+            low = middle
+        else:
+            high = middle
+    return best if best is not None else (None, None)
+
+
 def enumerate_staircase(floor_tris, ceiling_tris, probe, spot_checks=0, seed=0, max_outputs=None):
-    """Every mesh the decimator can realize in [floor, ceiling]. Returns (shipped_keys, by_key).
+    """Every mesh the decimator realizes in [floor, ceiling]. Returns `{key: step_count}`.
 
-    `probe(budget)` returns `(step_count, shipped_key)` or `None`:
+    `probe(budget)` returns `(step_count, key)` or `None`:
 
-      * `step_count` is what the DECIMATOR produced, and it is the domain the walk steps in. Its
-        contract is `step_count = max{ realizable r : r <= budget }`.
-      * `shipped_key` identifies the mesh that would actually SHIP — after the cleanup pass, which
-        may dissolve a degenerate face and lower the count.
+      * `step_count` is what the DECIMATOR produced, and it is the domain the walk steps in.
+      * `key` identifies the mesh that would actually SHIP — a GEOMETRY HASH, not a triangle count.
+        Two different cleaned meshes can carry the same count, and keying by count silently threw
+        one of them away, possibly the only one that met a rung.
 
-    THE TWO ARE DIFFERENT NUMBERS AND MUST NOT BE INTERCHANGED. An earlier version stepped on the
-    raw count, cached candidates under the cleaned count, and then looked candidates up by the raw
-    one: correct only for as long as cleanup never removed a face, and a `KeyError` or a silently
-    dropped candidate on the day it did. They are separate parameters here so the mistake cannot be
-    made by accident, and each check below runs in the domain where it means something.
+    THE TWO ARE DIFFERENT THINGS AND MUST NOT BE INTERCHANGED. An earlier version stepped on the raw
+    count, cached candidates under the cleaned count, and looked candidates up by the raw one:
+    correct only until cleanup dissolved a face, then a `KeyError` or a lost candidate.
 
-    THE ORACLE'S CONTRACT IS THE WHOLE ALGORITHM, so it is verified rather than trusted — twice
-    over, because the first attempt at verifying it was itself unsound:
+    ── WHAT THIS FUNCTION PROVES, AND WHAT IT TAKES ON TRUST ────────────────────────────────────
 
-      * IDEMPOTENCE. For every realizable `r`, `probe(r)` must return `r`: `r <= r` and `r` is
-        realizable, so the greatest realizable count at or below `r` is `r` itself. This is the
-        check that catches an oracle which systematically under-reports — `f(B) = B - 1` walks to
-        [1,3,5,7,9] over 1..10 and passes any number of interval probes, because every answer it
-        gives IS a member of the set it built. Asking `probe(9) == 9` catches it immediately.
-      * INTERVAL INCUMBENCY. A budget inside a skipped interval must return THAT INTERVAL'S
-        incumbent, not merely some count already enumerated. Accepting mere membership was the
-        earlier unsound guard.
+    IT IS EXHAUSTIVE **GIVEN** AN ORACLE THAT MEETS ITS CONTRACT — `probe(B)` returning the greatest
+    realizable count at or below `B`. Given that, walking `budget <- step_count - 1` from the ceiling
+    visits every realizable output exactly once, because nothing realizable lies in the interval the
+    jump skips.
 
-    The oracle is injected so all of this can be tested against synthetic staircases — including
-    deliberately sloppy ones — without Blender.
+    IT CANNOT VERIFY THAT CONTRACT, and does not claim to. An enumeration interrogating its own
+    oracle is circular: `lambda b: (min(b, 5), min(b, 5))` answers every question this function can
+    ask, perfectly consistently, while concealing everything above 5. No number of probes finds
+    that, because the probes are addressed to the liar. `test_refusals` pins this as a KNOWN,
+    UNDETECTABLE case so nobody re-derives a stronger claim from a green suite.
+
+    The contract is established instead where it is a mathematical property rather than a
+    conversation: `bisect_to_budget` runs to convergence over a monotone evaluator, and is proven
+    on synthetic staircases whose answers are known by construction.
+
+    THE SPOT CHECKS ARE REGRESSION DEFENCE, NOT PROOF. They catch an oracle that becomes internally
+    INCONSISTENT — the 1 %-early-stop class, where `probe(r)` stops agreeing with `r` for a value
+    the walk itself found realizable, and the `f(B) = B - 1` class. That is the failure this
+    pipeline actually shipped once, so it is worth catching cheaply. It is not the same as proof.
     """
     rng = np.random.default_rng(seed)
     by_key = {}
@@ -504,13 +543,13 @@ def enumerate_staircase(floor_tris, ceiling_tris, probe, spot_checks=0, seed=0, 
         answer = probe(budget)
         if answer is None:
             break
-        step_count, shipped_key = answer
+        step_count, key = answer
         if step_count > budget:
             raise EnumerationError(
                 f"the decimation oracle returned {step_count} for a budget of {budget} — it must "
                 f"return the greatest realizable count AT OR BELOW the budget"
             )
-        by_key.setdefault(shipped_key, step_count)
+        by_key.setdefault(key, step_count)
         incumbents.setdefault(step_count, step_count)
         if max_outputs is not None and len(by_key) > max_outputs:
             raise EnumerationError(
@@ -525,21 +564,27 @@ def enumerate_staircase(floor_tris, ceiling_tris, probe, spot_checks=0, seed=0, 
             break
         budget = step_count - 1
 
-    _verify_oracle(probe, sorted(incumbents), skipped, spot_checks, rng)
-    return sorted(by_key), by_key
+    _check_oracle_consistency(probe, sorted(incumbents), skipped, spot_checks, rng)
+    return by_key
 
 
-def _verify_oracle(probe, realizable, skipped, spot_checks, rng):
-    """Hold the decimation oracle to its contract on the geometry it just walked."""
+def _check_oracle_consistency(probe, realizable, skipped, spot_checks, rng):
+    """Catch an oracle that contradicts ITSELF. Not a proof of honesty — see `enumerate_staircase`.
+
+    Both checks below are implications of the contract, so a violation is decisive: the oracle is
+    broken. Neither can detect an oracle that is wrong CONSISTENTLY, because both ask that same
+    oracle. They exist because the two failures this pipeline actually had — a bisection stopping
+    within 1 % of its budget, and the `B - 1` shape — are both self-contradictory, and cheap to
+    catch on real geometry every run.
+    """
     for value in realizable:
         answer = probe(value)
         if answer is None or answer[0] != value:
             got = "nothing" if answer is None else answer[0]
             raise EnumerationError(
                 f"the oracle realizes {value} triangles, but asked for a budget of exactly {value} "
-                f"it returns {got} — it is not returning the greatest realizable count at or below "
-                f"its budget, so the walk's jumps stepped over outputs and the candidate set is "
-                f"incomplete. No level chosen from it is minimal."
+                f"it returns {got} — it contradicts itself, so the walk's jumps stepped over "
+                f"outputs and the candidate set is incomplete"
             )
     for _ in range(spot_checks):
         if not skipped:
@@ -559,8 +604,9 @@ def _verify_oracle(probe, realizable, skipped, spot_checks, rng):
 def pareto_minimal(outputs, deviation_for, target_mm):
     """The FEWEST-triangle realized output whose certified upper bound clears `target_mm`.
 
-    `outputs` is every triangle count the decimator can actually produce, ascending;
-    `deviation_for(tris, target_mm)` returns that output's bracket as `{"lo_mm", "up_mm"}`.
+    `outputs` is every candidate the decimator can produce, ASCENDING BY TRIANGLE COUNT and
+    identified by an opaque key (a geometry digest — two distinct meshes can share a count);
+    `deviation_for(key, target_mm)` returns that candidate's bracket as `{"lo_mm", "up_mm"}`.
 
     PROVEN MINIMAL BY EXHAUSTION, which is the whole point. The previous search bisected
     feasible/infeasible budgets and walked down until the first failure — assuming the monotonicity
@@ -572,8 +618,8 @@ def pareto_minimal(outputs, deviation_for, target_mm):
     It lives here, away from `bpy`, so the logic can be tested against a synthetic non-monotone
     feasibility function without Blender.
     """
-    for tris in outputs:
-        entry = deviation_for(tris, target_mm)
+    for key in outputs:
+        entry = deviation_for(key, target_mm)
         if entry is not None and entry["up_mm"] <= target_mm:
             return entry
     return None

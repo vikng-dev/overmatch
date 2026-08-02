@@ -38,6 +38,17 @@ def switch_distance_m(deviation_mm, radius_m, view):
     return (deviation_mm / 1000.0) * float(view["height_px"]) / denominator + radius_m
 
 
+def tile_vfov_rad(render_config, view):
+    """The gate tile's FOV that preserves the reference view's pixels-per-radian.
+
+    Production, not diagnostics: it decides what the render gate actually looked at. It lives here
+    so the renderer and the verifier compute it from one expression — a duplicated two-line formula
+    is a drift waiting to happen, and the verifier's job is to catch drift, not to have some.
+    """
+    pixels_per_radian = float(view["height_px"]) / (2.0 * math.tan(float(view["vfov_rad"]) / 2.0))
+    return 2.0 * math.atan(0.5 * render_config["tile_px"] / pixels_per_radian)
+
+
 class Tree:
     """Where verification reads its files from: the work tree, or a git revision.
 

@@ -39,8 +39,14 @@ THREE THINGS THIS GATE DELIBERATELY DOES NOT MEASURE, each learned by measuring 
 
 import math
 import os
+import sys
 
 import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# Production, shared with the verifier so the tile FOV is ONE expression, not two.
+from manifest import tile_vfov_rad  # noqa: E402
 
 
 def _engine(scene):
@@ -161,12 +167,6 @@ def _build_scene(config, material):
     scene.collection.objects.link(camera)
     scene.camera = camera
     return scene, camera, material
-
-
-def tile_vfov_rad(render_config, view):
-    """The tile FOV that preserves the reference view's pixels-per-radian."""
-    pixels_per_radian = float(view["height_px"]) / (2.0 * math.tan(float(view["vfov_rad"]) / 2.0))
-    return 2.0 * math.atan(0.5 * render_config["tile_px"] / pixels_per_radian)
 
 
 def _aim(camera, centre, distance, elevation_deg, azimuth_deg):

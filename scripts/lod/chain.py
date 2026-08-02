@@ -49,6 +49,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config as CONFIG  # noqa: E402
 from manifest import (  # noqa: E402
     Tree, derive, load, merge_asset_entries, sha256_file, switch_distance_m,
+    tile_vfov_rad,
 )
 
 
@@ -182,18 +183,42 @@ def _check_gate_record(gate, label, failures):
         ok = False
     ok = _require_numbers(gate, GATE_NUMERIC_FIELDS, label, "render gate", failures) and ok
 
+    # EVERY recorded threshold, not a chosen four: a record naming `defect_normal_deg = 999` was
+    # describing a gate run against a defect nobody declared, and nothing looked.
     thresholds = gate.get("thresholds") or {}
     for key in ("defect_fraction", "max_mean_abs_diff", "max_footprint_frac_over",
                 "over_threshold"):
         if key not in thresholds:
             failures.append(f"{label}: render-gate thresholds have no {key!r}")
             ok = False
-        elif thresholds[key] != CONFIG.RENDER_GATE[key]:
+    for key, recorded in thresholds.items():
+        if key not in CONFIG.RENDER_GATE:
+            failures.append(f"{label}: render gate records an unknown threshold {key!r}")
+            ok = False
+        elif recorded != CONFIG.RENDER_GATE[key]:
             failures.append(
-                f"{label}: render gate was judged against {key}={thresholds[key]!r}, the tree "
+                f"{label}: render gate was judged against {key}={recorded!r}, the tree "
                 f"declares {CONFIG.RENDER_GATE[key]!r}"
             )
             ok = False
+
+    # The RENDER PARAMETERS are config, and a record claiming otherwise describes a run this tree
+    # cannot reproduce.
+    for key in ("tile_px", "supersample", "samples"):
+        if gate[key] != CONFIG.RENDER_GATE[key]:
+            failures.append(
+                f"{label}: render gate ran at {key}={gate[key]!r}, the tree declares "
+                f"{CONFIG.RENDER_GATE[key]!r}"
+            )
+            ok = False
+    expected_fov = tile_vfov_rad(CONFIG.RENDER_GATE, CONFIG.REFERENCE_VIEW)
+    if abs(gate["tile_vfov_rad"] - expected_fov) > 1e-7:
+        failures.append(
+            f"{label}: the gate tile's FOV is recorded as {gate['tile_vfov_rad']} but the tile size "
+            f"and reference view give {expected_fov:.8f} — it did not preserve the reference "
+            f"view's pixels-per-radian, so its pixels are not the player's"
+        )
+        ok = False
 
     views = gate.get("views") or {}
     if not views:
@@ -497,6 +522,81 @@ def _check_config_match(manifest, failures):
         )
 
 
+def _check_level_cross_fields(asset, levels, index, row, failures):
+    """Constraints BETWEEN records, which is where the second round of mutants walked straight in.
+
+    Re-deriving a record from its own contents is not enough when the record sits next to the thing
+    it should agree with. Each of these was a passing mutation: a gate run distance of -999 beside
+    the switch it was supposed to measure, a shed fraction of -999 beside the two triangle counts
+    that define it, a validity record claiming 999 triangles beside a level claiming 315, both
+    component switch distances at -999 beside the maximum they are supposed to bracket.
+    """
+    level = levels[index]
+    label = f"{asset['name']} L{level['level']}"
+    validity = level["validity"]
+
+    # The validity record is a measurement OF THIS LEVEL's bytes, so its own counts must match.
+    for key in ("tris", "verts"):
+        if validity[key] != level[key]:
+            failures.append(
+                f"{label}: the validity record describes {validity[key]} {key} but the level "
+                f"records {level[key]} — one of them is not about these bytes"
+            )
+
+    if index == 0:
+        return
+
+    # The rung fixes the target: e_N = e1 * octave^(N-1), and nothing else is a rung of the grid.
+    expected_target = CONFIG.E1_MM * CONFIG.OCTAVE ** (level["rung"] - 1)
+    if abs(level["e_target_mm"] - expected_target) > 1e-6:
+        failures.append(
+            f"{label}: rung {level['rung']} is {expected_target:.6f} mm on the global grid, but "
+            f"this level records a target of {level['e_target_mm']} mm"
+        )
+
+    # The shed fraction is arithmetic on two triangle counts that are both right here.
+    parent_tris = levels[index - 1]["tris"]
+    expected_shed = 1.0 - level["tris"] / parent_tris
+    if abs(level["shed_fraction_vs_parent"] - expected_shed) > 1e-4:
+        failures.append(
+            f"{label}: records shedding {level['shed_fraction_vs_parent']} of its parent, but "
+            f"{level['tris']} against {parent_tris} triangles is {expected_shed:.6f}"
+        )
+    if expected_shed < CONFIG.SKIP_FRACTION - 1e-9:
+        failures.append(
+            f"{label}: sheds {expected_shed:.4f} of L{levels[index - 1]['level']}, under the "
+            f"declared SKIP_FRACTION {CONFIG.SKIP_FRACTION} — it should not have earned a level"
+        )
+
+    # A lower bound above its own upper bound is not a bracket.
+    if level["pairwise_mm"] > level["pairwise_mm_upper"] + 2e-6:
+        failures.append(
+            f"{label}: pairwise deviation {level['pairwise_mm']} exceeds its own certified upper "
+            f"bound {level['pairwise_mm_upper']}"
+        )
+
+    # Both COMPONENT distances re-derive, and the switch is their maximum. Checking only the
+    # maximum let both components be set to -999 without a word.
+    slack = row["origin_radius_m"]
+    view = CONFIG.REFERENCE_VIEW
+    for key, deviation in (
+        ("switch_from_source_dev_m", level["dev_source_mm_upper"]),
+        ("switch_from_pairwise_m", level["pairwise_mm_upper"]),
+    ):
+        expected = switch_distance_m(deviation, slack, view)
+        if abs(level[key] - expected) > 1e-3:
+            failures.append(
+                f"{label}: {key} is recorded as {level[key]} m but its deviation and slack give "
+                f"{expected:.4f} m"
+            )
+    components = max(level["switch_from_source_dev_m"], level["switch_from_pairwise_m"])
+    if abs(level["switch_m"] - components) > 1e-3:
+        failures.append(
+            f"{label}: switch_m is {level['switch_m']} m but the two component distances it takes "
+            f"the maximum of give {components:.4f} m"
+        )
+
+
 def verify(manifest, tree):
     """Every drift a manifest can suffer. Returns (failures, warnings); empty failures means clean.
 
@@ -521,7 +621,7 @@ def verify(manifest, tree):
                 f"chain is cut from a source that no longer exists"
             )
         previous = None
-        for row, level in zip(chain["levels"], asset["levels"]):
+        for index, (row, level) in enumerate(zip(chain["levels"], asset["levels"])):
             label = f"{asset['name']} L{level['level']}"
             if not tree.exists(level["glb"]):
                 failures.append(f"{label}: missing {level['glb']}")
@@ -542,6 +642,7 @@ def verify(manifest, tree):
             ):
                 if validity[key] > limit:
                     failures.append(f"{label}: recorded {validity[key]} {key} against a limit of {limit}")
+            _check_level_cross_fields(asset, asset["levels"], index, row, failures)
             if level["role"] == "source":
                 previous = row
                 continue
@@ -588,6 +689,11 @@ def verify(manifest, tree):
                     f"{previous['switch_m']:.1f} m"
                 )
             gate = level["render_gate"]
+            if abs(gate["distance_m"] - level["switch_m"]) > 1e-3:
+                failures.append(
+                    f"{label}: the render gate was run at {gate['distance_m']} m but this level "
+                    f"switches at {level['switch_m']} m — it judged the pop at the wrong distance"
+                )
             if not gate.get("pass", False):
                 verdict = (
                     f"{label}: render gate recorded a FAIL (defect score "
