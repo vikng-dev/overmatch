@@ -1960,14 +1960,43 @@ mod tests {
 ///   their quota and which rungs were actually exercised. A stratum short of quota is a thin corner
 ///   of the certification and is stated rather than averaged away.
 ///
-/// **PROVISIONAL — measurement now, gate later.** Terrain LOD is the first thing in this project to
-/// need a sightline budget, and no ratified one exists: unlike a positional threshold, "how far may
-/// a first hit move" and "may a coarse level ever reveal a hull the exact ground hides" are product
-/// questions about what a player is entitled to see, not engineering ones. Two candidate budgets are
-/// on the table — ≤ 5 m of first-hit error at any legal engagement sightline, and zero
-/// hull-revealing crest flips — and the current ladder meets both with an order of magnitude in
-/// hand, but until one is ratified this test asserts only structural coverage and prints the rest.
-/// Making it a gate is one threshold per printed column.
+/// # THE GATE IS ASYMMETRIC, and deliberately so
+///
+/// The two things this measures are not the same kind of thing, and they do not get the same kind
+/// of threshold.
+///
+/// * **Hull-revealing crest flips: HARD GATE at ZERO.** A coarse level that shows a hull the exact
+///   ground hides is not a quality regression, it is a different battle: the player shoots something
+///   the server says is behind a ridge, and no amount of "it was only one sightline" makes that
+///   acceptable. Zero, across every profile in [`GATED_PROFILES`]. The opposite direction — LOD
+///   ground HIDING a hull the exact ground shows — is reported but not gated: it costs the player a
+///   shot they were entitled to, which is a fairness cost rather than a correctness one, and it is
+///   self-limiting because the hidden target's own client sees the same thing.
+///
+/// * **First-hit distance error: a CANARY with a loose tripwire, not a designed budget.** The 5 m
+///   assert exists to catch a class change, not to encode a tolerance anybody derived. Along-ray
+///   slide is mostly DEPTH displacement — the hit point moves toward or away from the eye along the
+///   line of sight, where it subtends almost no angle — so metres of it can be nearly invisible while
+///   a centimetre of the same deviation across the ray would not be. The number is printed every run
+///   precisely so the trend is legible; if it starts creeping the right response is to look, not to
+///   raise the constant.
+///
+/// Why gate the sightline at all, when the positional rung already bounds the geometry:
+///
+/// * **The pixel budget is becoming a PLAYER SETTING.** [`TERRAIN_LOD_BUDGET_PX`] is one constant
+///   today, but the quality row it is destined for was sketched as wide as ~8 px for low-end
+///   machines — an 8× cut in every switch distance, dragging coarse levels an order of magnitude
+///   closer to the camera than the profile this ladder was designed around. A gate that only held
+///   at 1 px would expire the day that setting ships, so the whole envelope is swept, and the
+///   result is a MEASURED ceiling rather than an assumed one: this ladder holds zero reveals
+///   through 4 px and produces its first at 5 px, so `MAX_CERTIFIED_BUDGET_PX` is 4 and the shipped
+///   constant is asserted to sit inside it. **The sketched 8 px rung cannot ship on this ladder**
+///   without either a re-run that passes or a tactical floor on switch distance.
+/// * **It exercises the REAL selection path end to end.** Level choice, AABB anchoring, the range
+///   chain, the compacted index buffers and the drawn geometry all participate. That is the class
+///   that produced the two worst defects this module has had — a distance measured to the world
+///   origin instead of the tile, and a harness that decoded compacted indices as grid coordinates —
+///   and neither was visible to any test that checked geometry in isolation.
 #[cfg(test)]
 mod tactical {
     use super::*;
@@ -2314,9 +2343,71 @@ mod tactical {
         (800.0, 1000.0),
     ];
 
-    /// PROVISIONAL measurement, not a gate — see the module doc. Prints, per view profile:
-    /// first-hit distance error against the exact ground, hit/miss disagreements, crest-occlusion
-    /// flips split by direction, and the stratum coverage behind every one of those numbers.
+    /// The widest pixel budget at which this ladder is CERTIFIED, and therefore the widest the
+    /// quality row may offer. Every switch distance scales as `1/budget`
+    /// ([`sub_pixel_distance_m`]), so a larger budget drags coarse levels toward the camera.
+    ///
+    /// MEASURED on the shipped map, sweeping the crest gate at the commander field: zero
+    /// hull-revealing flips through 4 px, and the first reveal appears at 5 px. The quality row was
+    /// sketched with a ~8 px low-end rung; **that rung is not certified and must not ship on this
+    /// ladder.** Widening past this needs either a re-run of the gate that passes, or a tactical
+    /// FLOOR on switch distance — a rung held back beyond what the pixel budget alone would allow,
+    /// because projected error provably cannot bound sightline error (module doc).
+    const MAX_CERTIFIED_BUDGET_PX: f32 = 4.0;
+
+    /// The SHIPPED budget must sit inside the certified envelope, checked at COMPILE time because
+    /// there is no frame at which it could be checked usefully: raising the quality row past what
+    /// the gate covers is the one edit that widens terrain selection without any test noticing,
+    /// since every assertion in this module runs at the profiles named in [`gated_profiles`] rather
+    /// than at whatever the game is configured for.
+    const _: () = assert!(
+        TERRAIN_LOD_BUDGET_PX <= MAX_CERTIFIED_BUDGET_PX,
+        "the shipped terrain LOD pixel budget is outside the certified envelope — widen the \
+         tactical gate first, or hold the rungs back"
+    );
+
+    /// The FIRST-HIT CANARY, metres. Not a derived tolerance — see the module doc: along-ray slide
+    /// is mostly depth displacement and is nearly invisible angularly, so this bound is loose on
+    /// purpose and its job is to notice a change of class, not to draw a quality line. The measured
+    /// value is printed every run so the trend, not the threshold, is the thing being watched.
+    const FIRST_HIT_CANARY_M: f32 = 5.0;
+
+    /// The view profiles the gate is enforced across: the two shipped fields at native 4K and one
+    /// pixel, plus the commander field at [`MAX_CERTIFIED_BUDGET_PX`]. The last is the binding case
+    /// — widest field × loosest budget puts the coarsest geometry nearest the eye — and it is what
+    /// makes that constant a certified number rather than an aspiration.
+    fn gated_profiles() -> [(&'static str, TerrainLodView); 3] {
+        let commander = std::f32::consts::FRAC_PI_4;
+        [
+            (
+                "gunner optic 4K @ 1 px",
+                TerrainLodView::new(crate::camera::GUNNER_FOV_FALLBACK, 2160.0),
+            ),
+            (
+                "commander 4K @ 1 px",
+                TerrainLodView::new(commander, 2160.0),
+            ),
+            (
+                "commander 4K @ 4 px (widest certified quality setting)",
+                TerrainLodView {
+                    budget_px: MAX_CERTIFIED_BUDGET_PX,
+                    ..TerrainLodView::new(commander, 2160.0)
+                },
+            ),
+        ]
+    }
+
+    /// THE TACTICAL GATE. Prints, per view profile: first-hit distance error against the exact
+    /// ground, hit/miss disagreements, crest-occlusion flips split by direction, and the stratum
+    /// coverage behind every one of those numbers.
+    ///
+    /// Enforced, across every profile in [`gated_profiles`]:
+    /// * **zero hull-revealing crest flips** — HARD, the whole point;
+    /// * first-hit error under the [`FIRST_HIT_CANARY_M`] tripwire — loose, a class-change canary
+    ///   rather than a quality line (module doc);
+    /// * enough coverage for either number to mean anything.
+    ///
+    /// Hide-flips and the error distribution are REPORTED, not gated.
     ///
     /// Run it with `cargo test --lib tactical -- --nocapture`.
     #[test]
@@ -2326,21 +2417,12 @@ mod tactical {
         let radius = ladder.lod.bounding_radius_m;
         let strata = EYE_HEIGHTS_M.len() * PITCH_BANDS_RAD.len() * REGIONS * OCTANTS;
         println!(
-            "TACTICAL HARNESS (PROVISIONAL — budgets await ratification)\n  exact ray/triangle on \
-             both surfaces; per-tile level selection from camera-to-AABB distance; {strata} strata \
-             × {PER_STRATUM} paired hits"
+            "TACTICAL GATE — zero hull-revealing crest flips (hard), first-hit error under \
+             {FIRST_HIT_CANARY_M} m (canary)\n  exact ray/triangle on both surfaces; per-tile level \
+             selection from camera-to-AABB distance; {strata} strata × {PER_STRATUM} paired hits"
         );
         let mut switched_somewhere = false;
-        for (name, view) in [
-            (
-                "gunner optic 4K (fov 0.120 rad)",
-                TerrainLodView::new(crate::camera::GUNNER_FOV_FALLBACK, 2160.0),
-            ),
-            (
-                "commander 4K (fov 0.785 rad)",
-                TerrainLodView::new(std::f32::consts::FRAC_PI_4, 2160.0),
-            ),
-        ] {
+        for (name, view) in gated_profiles() {
             println!(
                 "\n  {name} — switch distances: {}",
                 (1..TERRAIN_LOD_LADDER.len())
@@ -2552,15 +2634,32 @@ mod tactical {
                 );
             }
 
-            // Structural assertions only — every number above is provisional. What IS gated is
-            // that the evidence is broad enough for the numbers to mean anything: at least 95 % of
-            // strata at full quota, and every range band non-empty.
-            //
-            // 95 % and not 100 %: on a finite map a few near-tangent corners have no ground left to
-            // hit whatever the origin, so a total-coverage rule could only be met by widening the
-            // strata until the number looked good. The strata short of quota are named above, and a
-            // COLLAPSE in coverage — a caster regression, a ladder that stops producing geometry —
-            // still fails here.
+            // THE HARD GATE. A coarse level may never show a hull the exact ground hides — the
+            // player would shoot something the server has behind a ridge. Zero, at every profile,
+            // no allowance. The opposite direction (`hides`) is reported above and deliberately
+            // ungated: it costs a shot the player was entitled to, which is a fairness cost rather
+            // than a correctness one, and the hidden target's own client sees the same ground.
+            assert_eq!(
+                reveals, 0,
+                "{name}: {reveals} of {tested} sightlines REVEAL a hull the exact ground hides"
+            );
+
+            // THE CANARY. Loose on purpose and not a derived tolerance (module doc): along-ray
+            // slide is mostly depth displacement and subtends almost no angle, so this is watching
+            // for a change of CLASS. The distribution is printed above; if it starts creeping, read
+            // it — do not raise this.
+            assert!(
+                max <= FIRST_HIT_CANARY_M,
+                "{name}: worst first-hit error {max:.3} m is past the {FIRST_HIT_CANARY_M} m \
+                 canary — median {median:.3} m, p95 {p95:.3} m"
+            );
+
+            // And the evidence has to be broad enough for either verdict to mean anything: at least
+            // 95 % of strata at full quota, and every range band non-empty. 95 % and not 100 %
+            // because on a finite map a few near-tangent corners have no ground left to hit whatever
+            // the origin, so a total-coverage rule could only be met by widening the strata until
+            // the number looked good. The strata short of quota are named above, and a COLLAPSE in
+            // coverage — a caster regression, a ladder that stops producing geometry — still fails.
             assert!(
                 covered * 100 >= strata * 95,
                 "{name}: only {covered}/{strata} strata met their {PER_STRATUM}-hit quota — short: \
