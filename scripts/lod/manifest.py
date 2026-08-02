@@ -98,6 +98,41 @@ class Tree:
             return False
         return True
 
+    def blob(self, relpath):  # noqa: D401
+        """The file's REAL bytes, resolving an LFS pointer to its object. None if unavailable.
+
+        The tracked glbs are LFS pointers, so `read` gives 40 lines of text rather than a mesh. The
+        verifier needs the actual bytes to re-derive anything from them, and the object is normally
+        right there in the local cache — the same lookup `scripts/hooks/pre-push` already does for
+        the tank glb. When it is not (a revision whose objects were never fetched or have been
+        pruned), this returns None and the caller REFUSES rather than skipping quietly.
+        """
+        try:
+            raw = self.read(relpath)
+        except FileNotFoundError:
+            return None
+        if not raw.startswith(b"version https://git-lfs.github.com/spec/v1"):
+            return raw
+        oid = None
+        for line in raw.splitlines():
+            if line.startswith(b"oid sha256:"):
+                oid = line.split(b":", 1)[1].decode().strip()
+        if oid is None:
+            return None
+        git_dir = subprocess.run(
+            ["git", "rev-parse", "--git-dir"], cwd=self.root,
+            capture_output=True, text=True, check=False,
+        ).stdout.strip()
+        if not git_dir:
+            return None
+        if not os.path.isabs(git_dir):
+            git_dir = os.path.join(self.root, git_dir)
+        path = os.path.join(git_dir, "lfs", "objects", oid[:2], oid[2:4], oid)
+        if not os.path.isfile(path):
+            return None
+        with open(path, "rb") as handle:
+            return handle.read()
+
     def digest(self, relpath):
         """sha256 of the file's real content, resolving an LFS pointer to its recorded oid."""
         blob = self.read(relpath)

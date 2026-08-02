@@ -694,12 +694,9 @@ def build_chain(asset, root, run_render_gate, out_dir):
     identical, identity_reason = M.same_surface(source, shipped_l0)
     l0_dev_mm = M.vertex_deviation(source, shipped_l0)
     l0_validity = shipped_l0.validity(CONFIG.GATES, floor_m)
-    # L0 ships inside the host glb, which this pipeline does not export and which carries no
-    # tangents — so its tangents are still loader-generated. Named here rather than silently
-    # exempted; closing it means re-exporting the host with tangents, which is an asset decision.
-    l0_failures = validity_failures(
-        l0_validity, source_validity, CONFIG.GATES, require_baked_tangents=False
-    )
+    # L0 bakes its tangents too now (Yan ratified the host re-export), so it is held to exactly
+    # the same rule as every generated level: one tangent per vertex, and none degenerate.
+    l0_failures = validity_failures(l0_validity, source_validity, CONFIG.GATES)
     log(f"  L0     shipped in {asset['l0_glb']} :: {asset['l0_node']} — "
         f"{shipped_l0.tri_count} tris / {shipped_l0.vert_count} decoded verts, "
         f"vertex deviation {l0_dev_mm:.9f} mm, origin radius "
@@ -727,12 +724,7 @@ def build_chain(asset, root, run_render_gate, out_dir):
         "shipped_dev_from_source_mm": round(l0_dev_mm, 9),
         "shipped_matches_source": True,
         "identity_proof": identity_reason,
-        "tangents_are_baked": False,
-        "tangent_note": (
-            "L0 ships inside the host glb, which carries no TANGENT attribute, so bevy generates "
-            "its tangents at load. Measured clean today (Blender's mikktspace declines nothing on "
-            "this mesh) but outside the certified-bytes guarantee every generated level has."
-        ),
+        "tangents_are_baked": True,
     }
 
     candidates = Candidates(obj, source, CONFIG.GATES)

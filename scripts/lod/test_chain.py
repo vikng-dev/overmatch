@@ -11,7 +11,10 @@ the small-angle projection besides. `the_drifted_ledger_is_caught` reconstructs 
 and asserts `verify` refuses it.
 """
 
+import hashlib
 import json
+import struct
+import tempfile
 import math
 import os
 import sys
@@ -23,6 +26,19 @@ import chain  # noqa: E402
 import config as CONFIG  # noqa: E402
 
 VIEW = CONFIG.REFERENCE_VIEW
+
+
+def _rebuild_glb(gltf, binary):
+    """Re-serialise a decoded glb. Only the JSON chunk changes; the BIN blob rides along."""
+    text = json.dumps(gltf).encode()
+    text += b" " * ((-len(text)) % 4)
+    padded = binary + b"\x00" * ((-len(binary)) % 4)
+    total = 12 + 8 + len(text) + 8 + len(padded)
+    return b"".join([
+        struct.pack("<4sII", b"glTF", 2, total),
+        struct.pack("<II", len(text), 0x4E4F534A), text,
+        struct.pack("<II", len(padded), 0x004E4942), padded,
+    ])
 
 
 def validity_record(tris, verts, origin_radius=0.1, bbox_mm=(700.0, 180.0, 180.0)):
@@ -157,7 +173,7 @@ def synthetic_manifest():
                  "blender_source_verts": 500, "shipped_dev_from_source_mm": 0.0,
                  "shipped_matches_source": True,
                  "identity_proof": "identical welded topology and positions",
-                 "tangents_are_baked": False,
+                 "tangents_are_baked": True,
                  "validity": validity_record(1000, 2400, radius)},
                 {"level": 1, "rung": 2, "role": "generated", "tris": 400, "verts": 1100,
                  "glb": "a/l1.glb", "glb_sha256": "b" * 64, "node": "Probe_LOD2",
@@ -987,6 +1003,90 @@ class RederivationSweepTests(unittest.TestCase):
                 "bbox_mm", [v * 2 for v in m["assets"][0]["levels"][1]["render_gate"]["bbox_mm"]]
             ),
         )
+
+    def test_a_stripped_tangent_attribute_is_refused_even_with_a_matching_hash(self):
+        """The bypass that record-vs-record checking could never catch.
+
+        Strip TANGENT from a level's bytes, update the manifest to the new (correct) hash, and leave
+        the validity record describing tangents that are no longer there: every recorded number
+        agreed with every other recorded number, and verification passed. Only decoding the bytes
+        finds it.
+        """
+        import measure as measure_module
+
+        level = json.loads(self.text)["assets"][0]["levels"][1]
+        original = open(os.path.join(self.root, level["glb"]), "rb").read()
+        gltf, binary = measure_module.glb_chunks_from_bytes(original, level["glb"])
+        for mesh in gltf["meshes"]:
+            for primitive in mesh["primitives"]:
+                primitive["attributes"].pop("TANGENT", None)
+        stripped = _rebuild_glb(gltf, binary)
+
+        directory = tempfile.mkdtemp(prefix="lod-stripped-")
+        os.makedirs(os.path.join(directory, os.path.dirname(level["glb"])), exist_ok=True)
+        for other in json.loads(self.text)["assets"][0]["levels"]:
+            source = os.path.join(self.root, other["glb"])
+            target = os.path.join(directory, other["glb"])
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(source, "rb") as handle:
+                data = handle.read()
+            if other["glb"] == level["glb"]:
+                data = stripped
+            with open(target, "wb") as handle:
+                handle.write(data)
+
+        manifest = json.loads(self.text)
+        # the honest new hash, and the STALE validity record left in place
+        manifest["assets"][0]["levels"][1]["glb_sha256"] = hashlib.sha256(stripped).hexdigest()
+        failures, _ = chain.verify(manifest, chain.Tree(directory))
+        self.assertTrue(
+            any("NO TANGENT" in f or "baked_tangents" in f for f in failures),
+            f"a stripped attribute with a correct hash must be caught by decoding: {failures}",
+        )
+
+    def test_shrinking_both_bboxes_cannot_buy_an_abstention(self):
+        """The gate bbox AND the validity record's copy, moved together — still refused."""
+        def shrink(manifest):
+            level = manifest["assets"][0]["levels"][3]
+            gate = level["render_gate"]
+            gate["bbox_mm"] = [value / 10.0 for value in gate["bbox_mm"]]
+            level["validity"]["bbox_mm"] = list(gate["bbox_mm"])
+            gate["screen_footprint_px"] = round(
+                chain.screen_footprint_px(gate["bbox_mm"], gate["distance_m"], VIEW), 4
+            )
+            gate["abstained"] = True
+            gate["pass"] = None
+            gate["reason"] = "too small to judge"
+
+        self.assert_caught("both bboxes shrunk together", shrink)
+
+    def test_removing_the_validity_bbox_cannot_buy_an_abstention(self):
+        """`bbox_mm` was optional, so deleting it deleted the comparison that used it."""
+        def remove(manifest):
+            level = manifest["assets"][0]["levels"][3]
+            gate = level["render_gate"]
+            level["validity"].pop("bbox_mm")
+            gate["bbox_mm"] = [value / 10.0 for value in gate["bbox_mm"]]
+            gate["screen_footprint_px"] = round(
+                chain.screen_footprint_px(gate["bbox_mm"], gate["distance_m"], VIEW), 4
+            )
+            gate["abstained"] = True
+            gate["pass"] = None
+            gate["reason"] = "too small to judge"
+
+        self.assert_caught("validity bbox removed", remove)
+
+    def test_every_byte_derived_counter_is_bound_to_the_bytes(self):
+        """A sweep: each recorded validity counter must lose to what the file actually contains."""
+        for key in ("tris", "verts", "components", "duplicate_faces", "orientation_flips",
+                    "nonmanifold_edges", "boundary_edges", "baked_tangents"):
+            with self.subTest(key=key):
+                self.assert_caught(
+                    f"L1 validity.{key} + 7",
+                    lambda m, k=key: m["assets"][0]["levels"][1]["validity"].__setitem__(
+                        k, m["assets"][0]["levels"][1]["validity"][k] + 7
+                    ),
+                )
 
     def test_the_unmutated_manifest_still_verifies(self):
         """The control: without it, a sweep that fails everything would look like a pass."""

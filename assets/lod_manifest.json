@@ -4,7 +4,7 @@
   "generator": {
     "script": "scripts/lod/generate.py",
     "version": "2.2.0",
-    "sources_sha256": "cacea30f349eb52cc65162e6117bb3b130de606dce833a6a49aa81b4a9c8e620",
+    "sources_sha256": "2ae0a1ff638b62a3e2fab88685fb23a3a818e8738c0f6cc5160ae08e41255885",
     "blender": "5.1.2",
     "blender_build": "ec6e62d40fa9",
     "gltf_exporter": "5.1.20"
@@ -156,7 +156,7 @@
           "rung": 0,
           "role": "source",
           "tris": 1661,
-          "verts": 3888,
+          "verts": 4747,
           "glb": "assets/tiger_1/tiger_1.glb",
           "node": "Link",
           "e_target_mm": 0.0,
@@ -166,10 +166,10 @@
           "switch_m": 0.0,
           "validity": {
             "tris": 1661,
-            "verts": 3888,
-            "baked_tangents": 0,
+            "verts": 4747,
+            "baked_tangents": 4747,
             "degenerate_tangents": 0,
-            "min_tangent_length": 0.0,
+            "min_tangent_length": 0.999937512,
             "components": 1,
             "duplicate_faces": 0,
             "nonfinite_attrs": 0,
@@ -190,13 +190,12 @@
             "radius_m": 0.384004,
             "origin_radius_m": 0.400124
           },
-          "glb_sha256": "3f02434ddb8a43668fc0855f5df40f2bac021d99227c0643494e161438dcaa4e",
+          "glb_sha256": "988b9938e94060e6c5eb614889754990e544cfda9f2506ddb3b45af5e8808ed9",
           "blender_source_verts": 815,
           "shipped_dev_from_source_mm": 0.0,
           "shipped_matches_source": true,
           "identity_proof": "identical welded topology and positions",
-          "tangents_are_baked": false,
-          "tangent_note": "L0 ships inside the host glb, which carries no TANGENT attribute, so bevy generates its tangents at load. Measured clean today (Blender's mikktspace declines nothing on this mesh) but outside the certified-bytes guarantee every generated level has."
+          "tangents_are_baked": true
         },
         {
           "level": 1,

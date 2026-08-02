@@ -49,7 +49,10 @@ class Refusal(Exception):
 def glb_chunks(path):
     """The JSON dict and the BIN blob of a glb. Stdlib + a struct unpack, no importer involved."""
     with open(path, "rb") as handle:
-        blob = handle.read()
+        return glb_chunks_from_bytes(handle.read(), path)
+
+
+def glb_chunks_from_bytes(blob, path="<bytes>"):
     magic, _version, length = struct.unpack_from("<4sII", blob, 0)
     if magic != b"glTF":
         raise Refusal("not-a-glb", path)
@@ -122,21 +125,33 @@ def primitive_of(gltf, node_name=None):
 
 def from_glb(path, node_name=None, name=None):
     """A `Surface` built from the bytes on disk. THE decode every gate measures through."""
-    gltf, binary = glb_chunks(path)
+    with open(path, "rb") as handle:
+        return surface_from_bytes(handle.read(), node_name, name or path)
+
+
+def surface_from_bytes(blob, node_name=None, name=None):
+    """The same decode, from bytes already in hand.
+
+    Split out so the VERIFIER can re-derive a level's record from the shipped bytes without a file
+    path — it resolves LFS pointers to their objects itself. Verification that compares a recorded
+    count against another recorded count proves the manifest is self-consistent and nothing about
+    the asset; this is the entry point that makes it about the asset.
+    """
+    gltf, binary = glb_chunks_from_bytes(blob, name or "<bytes>")
     primitive = primitive_of(gltf, node_name)
     attributes = primitive["attributes"]
     if primitive.get("mode", 4) != 4:
-        raise Refusal("not-triangles", f"{path} primitive mode {primitive.get('mode')}")
+        raise Refusal("not-triangles", f"{name} primitive mode {primitive.get('mode')}")
     if "indices" not in primitive:
-        raise Refusal("non-indexed-primitive", path)
+        raise Refusal("non-indexed-primitive", name)
     for required in ("POSITION", "NORMAL", "TEXCOORD_0"):
         if required not in attributes:
-            raise Refusal("missing-attribute", f"{path} has no {required}")
+            raise Refusal("missing-attribute", f"{name} has no {required}")
     for banned, reason in (("JOINTS_0", "skinned-mesh"), ("WEIGHTS_0", "skinned-mesh")):
         if banned in attributes:
-            raise Refusal(reason, f"{path} carries {banned}")
+            raise Refusal(reason, f"{name} carries {banned}")
     if primitive.get("targets"):
-        raise Refusal("morph-mesh", f"{path} carries {len(primitive['targets'])} morph targets")
+        raise Refusal("morph-mesh", f"{name} carries {len(primitive['targets'])} morph targets")
 
     indices = _accessor(gltf, binary, primitive["indices"]).astype(np.int64).reshape(-1, 3)
     positions = gltf_to_blender(_accessor(gltf, binary, attributes["POSITION"]).astype(np.float64))
@@ -151,7 +166,7 @@ def from_glb(path, node_name=None, name=None):
         tangents = np.concatenate(
             [gltf_to_blender(raw[:, :3]), raw[:, 3:4]], axis=1
         )
-    return Surface(positions, indices, normals[indices], uvs[indices], name or path, tangents)
+    return Surface(positions, indices, normals[indices], uvs[indices], name, tangents)
 
 
 def from_bpy_mesh(mesh, matrix=None, name="source"):

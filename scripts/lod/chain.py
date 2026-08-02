@@ -47,6 +47,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import config as CONFIG  # noqa: E402
+import measure as M  # noqa: E402
 from manifest import (  # noqa: E402
     Tree, derive, load, merge_asset_entries, sha256_file, screen_footprint_px,
     switch_distance_m, tile_vfov_rad,
@@ -80,6 +81,11 @@ LEVEL_VALIDITY_FIELDS = (
     "min_altitude_m", "origin_radius_m", "min_altitude_floor_m", "min_tri_area_mm2",
     "boundary_edges", "baked_tangents", "degenerate_tangents", "min_tangent_length",
 )
+
+#: Validity fields that are LISTS rather than numbers, and are re-derived from the bytes like the
+#: rest. `bbox_mm` was optional, so removing it removed the comparison with it — and an abstention
+#: could then be bought by shrinking the gate's own copy.
+LEVEL_VALIDITY_VECTORS = ("bbox_mm",)
 
 #: Recorded per level and CHECKED: whether the level's tangents ship in its bytes. False is legal
 #: only for L0, which lives inside a host glb this pipeline does not export.
@@ -140,7 +146,6 @@ INFORMATIONAL_FIELDS = frozenset({
     "shed_fraction", "floor_tris", "cleanup", "faces_before", "faces_after", "dissolve_dist_m",
     "normal_diagnostic_deg", "max_deg", "p99_deg", "p95_deg", "backface_corr_frac", "samples",
     "shipped_matches_source", "deviation_evaluations", "decimations", "reproducible",
-    "tangent_note",
     "under_absolute_floor", "label", "sliver_floor_m", "topology_floor_tris",
     "blend_sha256", "sources_sha256", "glb_sha256", "right_wall_m", "reference_view",
     "vfov_rad", "height_px", "budget_px", "e1_mm", "octave", "skip_fraction", "max_rungs",
@@ -492,6 +497,16 @@ def _check_schema(manifest, failures):
             ok = _require_numbers(
                 validity, LEVEL_VALIDITY_FIELDS, label, "validity record", failures
             ) and ok
+            for key in LEVEL_VALIDITY_VECTORS:
+                value = validity.get(key)
+                if not isinstance(value, list) or not value or not all(
+                    _finite(component) for component in value
+                ):
+                    failures.append(
+                        f"{label}: validity {key!r} is {value!r} — required, and every component "
+                        f"must be a finite number"
+                    )
+                    ok = False
             if index == 0:
                 # L0's own numerics were omitted entirely, so the ONE level every deviation in the
                 # chain is measured against could carry a NaN triangle count through untouched.
@@ -687,6 +702,95 @@ def _check_level_cross_fields(asset, levels, index, row, failures):
         )
 
 
+#: Validity fields that are NOT re-derivable from a level's own bytes, with why.
+#:
+#: `min_altitude_floor_m` is the SOURCE-anchored sliver floor — a property of the corpus, not of one
+#: level's mesh — so it is compared as a recorded number and used as an input when re-deriving the
+#: rest. `components` is derived from the bytes and included below.
+VALIDITY_NOT_FROM_OWN_BYTES = ("min_altitude_floor_m",)
+
+
+def _check_decoded_bytes(asset, level, tree, failures):
+    """Re-derive the level's whole validity record FROM THE SHIPPED BYTES and compare it.
+
+    THIS IS THE ROOT FIX FOR TWO SEPARATE BYPASSES, and both worked the same way: verification
+    compared a recorded number against another recorded number, which proves the manifest agrees
+    with itself and says nothing about the asset. Stripping a level's TANGENT attribute and updating
+    its hash left the stale validity record describing tangents that were no longer there, and
+    verification passed. Shrinking the gate's bounding box AND the validity record's copy of it
+    bought an abstention on a level that should have been scored, and verification passed.
+
+    So the bytes are decoded — the verifier already reads them to hash them — and every counter is
+    recomputed. A record can no longer describe a mesh that is not in the file, because the file is
+    what the record is checked against.
+    """
+    label = f"{asset['name']} L{level['level']}"
+    if not tree.exists(level["glb"]):
+        return                      # the missing-file failure is raised by the hash check
+    blob = tree.blob(level["glb"])
+    if blob is None:
+        failures.append(
+            f"{label}: {level['glb']} is an LFS pointer whose object is not available locally, so "
+            f"nothing about these bytes can be verified. Run `git lfs pull` (CI does) — a level "
+            f"that cannot be decoded is not a level that passed."
+        )
+        return
+    try:
+        surface = M.surface_from_bytes(blob, level.get("node"), label)
+    except M.Refusal as refusal:
+        failures.append(f"{label}: the shipped bytes do not decode — {refusal}")
+        return
+
+    recorded = level["validity"]
+    derived = surface.validity(CONFIG.GATES, recorded["min_altitude_floor_m"])
+
+    for key in LEVEL_VALIDITY_FIELDS:
+        if key in VALIDITY_NOT_FROM_OWN_BYTES:
+            continue
+        if isinstance(derived[key], float):
+            if abs(derived[key] - recorded[key]) > 1e-9:
+                failures.append(
+                    f"{label}: validity records {key}={recorded[key]}, the shipped bytes give "
+                    f"{derived[key]}"
+                )
+        elif derived[key] != recorded[key]:
+            failures.append(
+                f"{label}: validity records {key}={recorded[key]}, the shipped bytes give "
+                f"{derived[key]}"
+            )
+    for key in LEVEL_VALIDITY_VECTORS:
+        if [round(float(v), 4) for v in recorded[key]] != [
+            round(float(v), 4) for v in derived[key]
+        ]:
+            failures.append(
+                f"{label}: validity records {key}={recorded[key]}, the shipped bytes give "
+                f"{derived[key]}"
+            )
+
+    # The two counts the whole tangent guarantee rests on, taken from the accessor itself.
+    # EVERY level, L0 included — the host glb bakes its tangents now, so there is no exemption
+    # left to make. The two counts the whole tangent guarantee rests on, taken from the accessor.
+    if surface.tangents is None:
+        failures.append(
+            f"{label}: the shipped bytes carry NO TANGENT attribute — bevy would generate tangents "
+            f"at load and nothing here certified what renders"
+        )
+    elif len(surface.tangents) != surface.vert_count:
+        failures.append(
+            f"{label}: {len(surface.tangents)} tangents for {surface.vert_count} vertices in the "
+            f"shipped bytes"
+        )
+
+    gate = level.get("render_gate") or {}
+    if "bbox_mm" in gate and [round(float(v), 4) for v in gate["bbox_mm"]] != [
+        round(float(v), 4) for v in derived["bbox_mm"]
+    ]:
+        failures.append(
+            f"{label}: the render gate measured a {gate['bbox_mm']} mm box; the shipped bytes are "
+            f"{derived['bbox_mm']} mm"
+        )
+
+
 def verify(manifest, tree):
     """Every drift a manifest can suffer. Returns (failures, warnings); empty failures means clean.
 
@@ -731,15 +835,14 @@ def verify(manifest, tree):
             # ones among those present, so zero baked tangents scored a clean zero and passed —
             # which is exactly the state an exporter omission would leave behind, with bevy
             # generating uncertified tangents at load.
-            if level["role"] == "generated":
-                if not level.get("tangents_are_baked"):
-                    failures.append(f"{label}: does not record baked tangents")
-                elif validity["baked_tangents"] != validity["verts"]:
-                    failures.append(
-                        f"{label}: {validity['baked_tangents']} baked tangents for "
-                        f"{validity['verts']} vertices — a generated level bakes one per vertex, or "
-                        f"the loader generates them and nothing certified what renders"
-                    )
+            if not level.get("tangents_are_baked"):
+                failures.append(f"{label}: does not record baked tangents")
+            elif validity["baked_tangents"] != validity["verts"]:
+                failures.append(
+                    f"{label}: {validity['baked_tangents']} baked tangents for "
+                    f"{validity['verts']} vertices — every level bakes one per vertex, or the "
+                    f"loader generates them and nothing certified what renders"
+                )
             for key, limit in (
                 ("duplicate_faces", CONFIG.GATES["max_duplicate_faces"]),
                 ("nonfinite_attrs", CONFIG.GATES["max_nonfinite"]),
@@ -752,6 +855,7 @@ def verify(manifest, tree):
             ):
                 if validity[key] > limit:
                     failures.append(f"{label}: recorded {validity[key]} {key} against a limit of {limit}")
+            _check_decoded_bytes(asset, level, tree, failures)
             _check_level_cross_fields(asset, asset["levels"], index, row, failures)
             if level["role"] == "source":
                 previous = row
