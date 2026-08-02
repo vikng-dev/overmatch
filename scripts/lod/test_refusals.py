@@ -303,6 +303,24 @@ class ValidityTests(unittest.TestCase):
                                  normals=tilted, uvs=SQUARE_UV))
         self.assertNotEqual(a.digest(), b.digest())
 
+    def test_the_digest_separates_uv_areas_either_side_of_the_gate_epsilon(self):
+        """The key must be at least as sharp as the finest test applied to what it keys.
+
+        Executed counterexample: UV areas of 5e-13 and 1.5e-12 straddle `uv_area_eps = 1e-12`, so
+        they differ in `tangent_default_faces` — and the digest, which rounded UVs to 1e-7, gave
+        them the same key. One of the two was then discarded as a duplicate, arbitrarily.
+        """
+        below = [[0, 0], [1e-6, 0], [0, 1e-6]]        # uv area 5e-13
+        above = [[0, 0], [3e-6, 0], [0, 1e-6]]        # uv area 1.5e-12
+        positions = [[0, 0, 0], [1, 0, 0], [0, 1, 0]]
+        a = M.from_glb(build_glb(os.path.join(self.dir, "uv_below.glb"), positions, [0, 1, 2],
+                                 uvs=below))
+        b = M.from_glb(build_glb(os.path.join(self.dir, "uv_above.glb"), positions, [0, 1, 2],
+                                 uvs=above))
+        self.assertEqual(a.validity(self.gates)["tangent_default_faces"], 1)
+        self.assertEqual(b.validity(self.gates)["tangent_default_faces"], 0)
+        self.assertNotEqual(a.digest(), b.digest())
+
     def test_the_digest_ignores_index_order_but_not_geometry(self):
         """The cache key that collapses a decimation plateau — it must key on the MESH, not the file."""
         a = self.surface("d1.glb", SQUARE_POS, SQUARE_IDX, SQUARE_UV)
@@ -522,6 +540,35 @@ class BisectionTests(unittest.TestCase):
         for budget, expected in ((100, 100), (101, 101), (102, 102), (150, 102)):
             with self.subTest(budget=budget):
                 self.assertEqual(M.bisect_to_budget(evaluate, budget)[0], expected)
+
+    def test_the_top_step_at_exactly_ratio_one_is_found(self):
+        """`(low + high) / 2` never produces 1.0, so a step living only there was invisible.
+
+        Executed counterexample: `evaluate(r) = 2000 if r == 1.0 else 100` returned 100 for a budget
+        of 2000. Monotonicity makes `evaluate(1.0)` the largest count there is — if it fits the
+        budget it IS the answer, and the search never had to start.
+        """
+        seen = []
+
+        def evaluate(ratio):
+            seen.append(ratio)
+            return 2000 if ratio == 1.0 else 100
+
+        count, ratio = M.bisect_to_budget(evaluate, 2000)
+        self.assertEqual(count, 2000)
+        self.assertEqual(ratio, 1.0)
+        self.assertIn(1.0, seen, "the ceiling must actually be evaluated")
+
+    def test_both_endpoints_are_evaluated(self):
+        seen = []
+
+        def evaluate(ratio):
+            seen.append(ratio)
+            return int(ratio * 1000)
+
+        M.bisect_to_budget(evaluate, 500)
+        self.assertIn(0.0, seen)
+        self.assertIn(1.0, seen)
 
     def test_a_budget_below_the_floor_returns_nothing(self):
         evaluate, _ = self.staircase([(0.0, 194), (0.5, 800)])

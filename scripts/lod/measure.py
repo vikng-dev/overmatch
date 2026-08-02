@@ -254,11 +254,18 @@ class Surface:
         identically — so one of them was silently dropped as a duplicate candidate, and it could be
         the one with a defect (or the only one that met a rung).
 
-        What goes in: positions, per-corner normals and per-corner UVs, and each triangle's corner
-        ORDER. What stays out: the arbitrary choices a serializer makes — which corner is listed
-        first (each triangle is rotated to start at its lowest vertex index, which preserves winding
-        while ignoring the rotation), the order triangles appear in (rows are sorted), and float
-        noise below a nanometre / 1e-7 of a UV unit.
+        What goes in: positions, per-corner normals and per-corner UVs AT FULL PRECISION, and each
+        triangle's corner ORDER. What stays out: only the arbitrary choices a serializer makes —
+        which corner is listed first (each triangle is rotated to start at its lowest vertex index,
+        which preserves winding while ignoring the rotation) and the order triangles appear in
+        (rows are sorted).
+
+        NOTHING IS QUANTISED ANY MORE, and that is the point. Rounding UVs to 1e-7 was coarser than
+        `uv_area_eps = 1e-12`, the finest epsilon a gate consumes — so two candidates with UV areas
+        of 5e-13 and 1.5e-12, which differ in `tangent_default_faces`, hashed identically and one of
+        them was discarded as a duplicate. A key used to decide which candidates exist must be at
+        least as sharp as every test applied to them; the cheapest way to guarantee that against
+        gates not yet written is to keep the bits.
         """
         import hashlib
 
@@ -271,16 +278,14 @@ class Surface:
         )
         uvs = np.take_along_axis(self.corner_uv, columns[:, :, None].repeat(2, axis=2), axis=1)
 
-        quantised = np.concatenate([
-            rows.astype(np.int64),
-            np.round(normals.reshape(len(rows), -1) * 1e6).astype(np.int64),
-            np.round(uvs.reshape(len(rows), -1) * 1e7).astype(np.int64),
-        ], axis=1)
-        order = np.lexsort(quantised.T[::-1])
-
+        # Sort by the triangle rows only; the attributes ride along so equal geometry with
+        # different attributes still separates.
+        order = np.lexsort(rows.T[::-1])
         h = hashlib.sha256()
-        h.update(np.round(self.verts * 1e9).astype(np.int64).tobytes())
-        h.update(np.ascontiguousarray(quantised[order]).tobytes())
+        h.update(np.ascontiguousarray(self.verts).tobytes())
+        h.update(np.ascontiguousarray(rows[order]).tobytes())
+        h.update(np.ascontiguousarray(normals[order]).tobytes())
+        h.update(np.ascontiguousarray(uvs[order]).tobytes())
         return h.hexdigest()
 
     def altitudes(self):
@@ -376,6 +381,8 @@ class Surface:
         # cannot see — measured on this corpus, three levels had zero UV-degenerate faces and one
         # give-up tangent each.
         if self.tangents is None:
+            # Absent is not clean. The caller decides whether a level is allowed to lack them;
+            # this only reports what is there, and zero baked tangents is a fact, not a pass.
             baked, degenerate, worst = 0, 0, 0.0
         else:
             lengths = np.linalg.norm(self.tangents[:, :3], axis=1)
@@ -547,12 +554,22 @@ def bisect_to_budget(evaluate, budget, max_steps=BISECTION_MAX_STEPS):
     built on top cannot establish it: an enumerator can only ask the oracle, and an oracle that lies
     consistently answers every question consistently. The honesty has to come from here.
     """
-    # Ratio 0 first, which is both the floor and the bound on the search: by monotonicity nothing
-    # below it exists, so a budget under it is unreachable and there is nothing to bisect. Without
-    # this the "everything exceeds the budget" case walks `high` down through a thousand denormals.
+    # BOTH ENDPOINTS ARE EVALUATED, and neither is reachable by halving an open interval.
+    #
+    # Ratio 0 is the floor: by monotonicity nothing below it exists, so a budget under it is
+    # unreachable and there is nothing to bisect. Without it the "everything exceeds the budget"
+    # case walks `high` down through a thousand denormals.
+    #
+    # Ratio 1 is the ceiling, and it was the hole. `(low + high) / 2` never produces 1.0, so an
+    # evaluator whose top step exists ONLY at exactly 1.0 was invisible: `evaluate(r) = 2000 if
+    # r == 1.0 else 100` returned 100 for a budget of 2000. By monotonicity `evaluate(1.0)` is the
+    # largest count there is, so if it fits the budget it IS the answer and no search is needed.
     floor_count = evaluate(0.0)
     if floor_count > budget:
         return None, None
+    ceiling_count = evaluate(1.0)
+    if ceiling_count <= budget:
+        return ceiling_count, 1.0
 
     low, high, best = 0.0, 1.0, (floor_count, 0.0)
     for _ in range(max_steps):

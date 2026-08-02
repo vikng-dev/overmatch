@@ -301,8 +301,13 @@ def cleanup(mesh, scale_m):
     So the distance is now 1e-5 of the diagonal, 7.7 um on this shoe. What that spans is worth
     stating plainly: it removes the 4.7 um needle and leaves the next-thinnest features (21 um and
     56 um edges) untouched, and it is three orders of magnitude below e1 = 3.89 mm — the finest lie
-    the ladder can even express. Everything is re-certified after this pass, on the shipped bytes,
-    so if it moved anything that mattered the deviation gates would say so.
+    the ladder can even express.
+
+    MEASURED CONSEQUENCE on the reference asset: one triangle left L1, L2 and L3 (855->854,
+    581->580, 315->314). L4 did NOT change — it is at the topology floor and never contained the
+    needle, which is also why it was the one level whose tangents were already clean. Every
+    certified deviation is unchanged to six decimals. Everything is re-certified after this pass on
+    the shipped bytes, so if it had moved anything that mattered the deviation gates would say so.
     """
     bm = bmesh.new()
     bm.from_mesh(mesh)
@@ -566,7 +571,7 @@ def sliver_floor_m(gates, source, source_validity):
     )
 
 
-def validity_failures(validity, source_validity, gates):
+def validity_failures(validity, source_validity, gates, require_baked_tangents=True):
     """The structural gates, as a list of named failures. Empty means clean.
 
     Split out of `certify` so the SHIPPED L0 bytes go through exactly the same checks the generated
@@ -584,6 +589,16 @@ def validity_failures(validity, source_validity, gates):
             f"{validity['slivers_below_floor']} triangle(s) below the scale-aware altitude floor "
             f"{validity['min_altitude_floor_m'] * 1000:.5f} mm "
             f"(worst {validity['min_altitude_m'] * 1000:.6f} mm)"
+        )
+    # PRESENCE FIRST. `degenerate_tangents` counts bad tangents among those that EXIST, so a level
+    # that shipped none at all scored a clean zero and passed — and would have gone back to
+    # loader-generated, uncertified tangents without a word. A generated level carries one tangent
+    # per vertex or it does not ship.
+    if require_baked_tangents and validity["baked_tangents"] != validity["verts"]:
+        failures.append(
+            f"{validity['baked_tangents']} baked tangents for {validity['verts']} vertices — a "
+            f"generated level must BAKE a tangent per vertex, or bevy generates them at load and "
+            f"nothing here certified what renders"
         )
     for key, limit, description in (
         ("duplicate_faces", gates["max_duplicate_faces"], "duplicate face(s)"),
@@ -679,7 +694,12 @@ def build_chain(asset, root, run_render_gate, out_dir):
     identical, identity_reason = M.same_surface(source, shipped_l0)
     l0_dev_mm = M.vertex_deviation(source, shipped_l0)
     l0_validity = shipped_l0.validity(CONFIG.GATES, floor_m)
-    l0_failures = validity_failures(l0_validity, source_validity, CONFIG.GATES)
+    # L0 ships inside the host glb, which this pipeline does not export and which carries no
+    # tangents — so its tangents are still loader-generated. Named here rather than silently
+    # exempted; closing it means re-exporting the host with tangents, which is an asset decision.
+    l0_failures = validity_failures(
+        l0_validity, source_validity, CONFIG.GATES, require_baked_tangents=False
+    )
     log(f"  L0     shipped in {asset['l0_glb']} :: {asset['l0_node']} — "
         f"{shipped_l0.tri_count} tris / {shipped_l0.vert_count} decoded verts, "
         f"vertex deviation {l0_dev_mm:.9f} mm, origin radius "
@@ -707,6 +727,12 @@ def build_chain(asset, root, run_render_gate, out_dir):
         "shipped_dev_from_source_mm": round(l0_dev_mm, 9),
         "shipped_matches_source": True,
         "identity_proof": identity_reason,
+        "tangents_are_baked": False,
+        "tangent_note": (
+            "L0 ships inside the host glb, which carries no TANGENT attribute, so bevy generates "
+            "its tangents at load. Measured clean today (Blender's mikktspace declines nothing on "
+            "this mesh) but outside the certified-bytes guarantee every generated level has."
+        ),
     }
 
     candidates = Candidates(obj, source, CONFIG.GATES)
@@ -833,6 +859,7 @@ def build_chain(asset, root, run_render_gate, out_dir):
             "validity": report["validity"],
             "cleanup": cleanup_report,
             "reproducible": True,
+            "tangents_are_baked": True,
             "normal_diagnostic_deg": diagnostic,
         })
         previous = {"tris": shipped.tri_count, "surface": shipped,

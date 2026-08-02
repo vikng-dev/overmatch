@@ -25,7 +25,7 @@ import config as CONFIG  # noqa: E402
 VIEW = CONFIG.REFERENCE_VIEW
 
 
-def validity_record(tris, verts, origin_radius=0.1):
+def validity_record(tris, verts, origin_radius=0.1, bbox_mm=(700.0, 180.0, 180.0)):
     """A clean validity record — every field the strict schema requires, all zero defects."""
     return {
         "tris": tris, "verts": verts, "components": 1, "duplicate_faces": 0,
@@ -34,6 +34,7 @@ def validity_record(tris, verts, origin_radius=0.1):
         "tangent_default_verts": 0, "min_altitude_m": 0.001, "min_altitude_floor_m": 0.0001,
         "min_tri_area_mm2": 1.0, "origin_radius_m": origin_radius,
         "baked_tangents": verts, "degenerate_tangents": 0, "min_tangent_length": 0.999999,
+        "bbox_mm": list(bbox_mm),
     }
 
 
@@ -156,6 +157,7 @@ def synthetic_manifest():
                  "blender_source_verts": 500, "shipped_dev_from_source_mm": 0.0,
                  "shipped_matches_source": True,
                  "identity_proof": "identical welded topology and positions",
+                 "tangents_are_baked": False,
                  "validity": validity_record(1000, 2400, radius)},
                 {"level": 1, "rung": 2, "role": "generated", "tris": 400, "verts": 1100,
                  "glb": "a/l1.glb", "glb_sha256": "b" * 64, "node": "Probe_LOD2",
@@ -168,6 +170,7 @@ def synthetic_manifest():
                  "switch_from_source_dev_m": chain.switch_distance_m(dev1, radius, VIEW),
                  "switch_from_pairwise_m": chain.switch_distance_m(pair1, radius, VIEW),
                  "validity": validity_record(400, 1100, radius),
+                 "tangents_are_baked": True,
                  "render_gate": gate_record(True, distance_m=round(switch1, 4))},
             ],
         }],
@@ -933,6 +936,58 @@ class RederivationSweepTests(unittest.TestCase):
             lambda m: m["ladder"]["ratification"].__setitem__("by", "somebody else"),
         )
 
+    def test_a_level_that_baked_no_tangents_is_refused(self):
+        """Zero baked tangents scored a clean zero on the DEGENERATE counter and passed."""
+        for index in range(1, 5):
+            with self.subTest(level=index):
+                self.assert_caught(
+                    f"L{index} baked_tangents = 0",
+                    lambda m, i=index: m["assets"][0]["levels"][i]["validity"].__setitem__(
+                        "baked_tangents", 0
+                    ),
+                )
+
+    def test_a_level_that_stops_claiming_baked_tangents_is_refused(self):
+        self.assert_caught(
+            "L1 tangents_are_baked = False",
+            lambda m: m["assets"][0]["levels"][1].__setitem__("tangents_are_baked", False),
+        )
+
+    def test_a_partial_tangent_buffer_is_refused(self):
+        self.assert_caught(
+            "L1 baked_tangents one short",
+            lambda m: m["assets"][0]["levels"][1]["validity"].__setitem__(
+                "baked_tangents", m["assets"][0]["levels"][1]["validity"]["verts"] - 1
+            ),
+        )
+
+    def test_a_shrunken_gate_bbox_cannot_buy_an_abstention(self):
+        """The bypass: shrink one level's gate bbox tenfold, declare it too small to judge.
+
+        Re-deriving the footprint from the gate record's OWN box only proves the record agrees with
+        itself. Binding it to the level's decoded bytes is what makes the re-derivation mean
+        anything.
+        """
+        def shrink(manifest):
+            gate = manifest["assets"][0]["levels"][3]["render_gate"]
+            gate["bbox_mm"] = [value / 10.0 for value in gate["bbox_mm"]]
+            gate["screen_footprint_px"] = round(
+                chain.screen_footprint_px(gate["bbox_mm"], gate["distance_m"], VIEW), 4
+            )
+            gate["abstained"] = True
+            gate["pass"] = None
+            gate["reason"] = "too small to judge"
+
+        self.assert_caught("L3 gate bbox shrunk tenfold", shrink)
+
+    def test_a_gate_bbox_that_is_not_the_levels_bbox_is_refused(self):
+        self.assert_caught(
+            "L1 gate bbox inflated",
+            lambda m: m["assets"][0]["levels"][1]["render_gate"].__setitem__(
+                "bbox_mm", [v * 2 for v in m["assets"][0]["levels"][1]["render_gate"]["bbox_mm"]]
+            ),
+        )
+
     def test_the_unmutated_manifest_still_verifies(self):
         """The control: without it, a sweep that fails everything would look like a pass."""
         self.assertEqual(chain.verify(json.loads(self.text), chain.Tree(self.root))[0], [])
@@ -1043,6 +1098,7 @@ class ShippedManifestTests(unittest.TestCase):
         checked |= {name for name, _e, _a in CONFIG.RENDER_GATE["views"]}
         # Re-derived: abstention from the recorded box and distance; the ruling against config.
         checked |= {"abstained", "screen_footprint_px", "bbox_mm", "ratification"}
+        checked |= set(chain.TANGENT_PRESENCE_FIELDS)
         checked |= set(CONFIG.RATIFICATION_EVIDENCE["ruling"])
         known = checked | chain.INFORMATIONAL_FIELDS
 

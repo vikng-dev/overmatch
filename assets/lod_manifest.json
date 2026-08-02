@@ -4,7 +4,7 @@
   "generator": {
     "script": "scripts/lod/generate.py",
     "version": "2.2.0",
-    "sources_sha256": "a9b7b737e29fd5f3496678fb612922ece316a33ebee9d3b868f746b07cf58bdf",
+    "sources_sha256": "cacea30f349eb52cc65162e6117bb3b130de606dce833a6a49aa81b4a9c8e620",
     "blender": "5.1.2",
     "blender_build": "ec6e62d40fa9",
     "gltf_exporter": "5.1.20"
@@ -99,7 +99,7 @@
         "blend": "assets/tiger_1/tiger_1.blend",
         "blend_sha256": "ad1edfade72bb783a2bdb1b9699bd3df5b2e1c91ae9266cb233ccc2ac7f7a2ed",
         "object": "Link",
-        "evaluated_digest": "80f8c212fb777da438276645f9cd4538539657e224f4adcff54b1ab8ebb816e0",
+        "evaluated_digest": "9055711c7a1f497fc713cac27e4e662b66b29b110e8b4c3d67bbf75169186f71",
         "tris": 1661,
         "verts": 815,
         "radius_m": 0.384004,
@@ -194,7 +194,9 @@
           "blender_source_verts": 815,
           "shipped_dev_from_source_mm": 0.0,
           "shipped_matches_source": true,
-          "identity_proof": "identical welded topology and positions"
+          "identity_proof": "identical welded topology and positions",
+          "tangents_are_baked": false,
+          "tangent_note": "L0 ships inside the host glb, which carries no TANGENT attribute, so bevy generates its tangents at load. Measured clean today (Blender's mikktspace declines nothing on this mesh) but outside the certified-bytes guarantee every generated level has."
         },
         {
           "level": 1,
@@ -249,6 +251,7 @@
             "dissolve_dist_m": 7.680082776371104e-06
           },
           "reproducible": true,
+          "tangents_are_baked": true,
           "normal_diagnostic_deg": {
             "max_deg": 90.0,
             "p99_deg": 40.035,
@@ -439,6 +442,7 @@
             "dissolve_dist_m": 7.680082776371104e-06
           },
           "reproducible": true,
+          "tangents_are_baked": true,
           "normal_diagnostic_deg": {
             "max_deg": 90.0,
             "p99_deg": 88.277,
@@ -629,6 +633,7 @@
             "dissolve_dist_m": 7.680082776371104e-06
           },
           "reproducible": true,
+          "tangents_are_baked": true,
           "normal_diagnostic_deg": {
             "max_deg": 90.0,
             "p99_deg": 89.711,
@@ -819,6 +824,7 @@
             "dissolve_dist_m": 7.680082776371104e-06
           },
           "reproducible": true,
+          "tangents_are_baked": true,
           "normal_diagnostic_deg": {
             "max_deg": 89.994,
             "p99_deg": 89.3,

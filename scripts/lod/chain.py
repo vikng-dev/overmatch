@@ -81,6 +81,10 @@ LEVEL_VALIDITY_FIELDS = (
     "boundary_edges", "baked_tangents", "degenerate_tangents", "min_tangent_length",
 )
 
+#: Recorded per level and CHECKED: whether the level's tangents ship in its bytes. False is legal
+#: only for L0, which lives inside a host glb this pipeline does not export.
+TANGENT_PRESENCE_FIELDS = ("tangents_are_baked",)
+
 #: Render-gate fields required on every generated level, and which of them must be finite numbers.
 GATE_FIELDS = (
     "pass", "worst_defect_score", "worst_mean_abs_diff", "worst_frac_over", "views", "thresholds",
@@ -136,6 +140,7 @@ INFORMATIONAL_FIELDS = frozenset({
     "shed_fraction", "floor_tris", "cleanup", "faces_before", "faces_after", "dissolve_dist_m",
     "normal_diagnostic_deg", "max_deg", "p99_deg", "p95_deg", "backface_corr_frac", "samples",
     "shipped_matches_source", "deviation_evaluations", "decimations", "reproducible",
+    "tangent_note",
     "under_absolute_floor", "label", "sliver_floor_m", "topology_floor_tris",
     "blend_sha256", "sources_sha256", "glb_sha256", "right_wall_m", "reference_view",
     "vfov_rad", "height_px", "budget_px", "e1_mm", "octave", "skip_fraction", "max_rungs",
@@ -184,7 +189,7 @@ def _require_numbers(record, fields, label, what, failures):
     return ok
 
 
-def _check_gate_record(gate, label, failures):
+def _check_gate_record(gate, label, failures, level_bbox_mm=None):
     """A render-gate record, checked as EVIDENCE rather than as a field list.
 
     Presence was not enough and the mutants proved it: a record whose every metric was NaN, or whose
@@ -202,9 +207,22 @@ def _check_gate_record(gate, label, failures):
     if not ok:
         return False
 
-    # ABSTENTION IS RE-DERIVED FROM GEOMETRY, never trusted. It is the one verdict that can be
-    # claimed without rendering anything, so it is the one most worth recomputing: the asset's
-    # projected diameter at the evaluation distance against the ratified minimum.
+    # ABSTENTION IS RE-DERIVED FROM GEOMETRY, never trusted. It is the one verdict claimable
+    # without rendering anything, so it is the one most worth recomputing: the asset's projected
+    # diameter at the evaluation distance against the ratified minimum.
+    #
+    # AND THE GEOMETRY IS BOUND TO THE LEVEL'S OWN, which is what made the re-derivation worth
+    # anything. Recomputing from the gate record's own bounding box only proves the record is
+    # self-consistent: shrinking one level's gate bbox tenfold and setting `abstained` accordingly
+    # verified clean, while the bytes that ship derive 27.6 px and should have been scored.
+    if level_bbox_mm is not None and [round(float(v), 4) for v in gate["bbox_mm"]] != [
+        round(float(v), 4) for v in level_bbox_mm
+    ]:
+        failures.append(
+            f"{label}: the render gate measured a {gate['bbox_mm']} mm box, but this level's "
+            f"decoded bytes are {level_bbox_mm} mm — it judged something else"
+        )
+        return False
     expected_footprint = screen_footprint_px(
         gate["bbox_mm"], gate["distance_m"], CONFIG.REFERENCE_VIEW
     )
@@ -496,7 +514,9 @@ def _check_schema(manifest, failures):
                 )
                 ok = False
             else:
-                ok = _check_gate_record(gate, label, failures) and ok
+                ok = _check_gate_record(
+                    gate, label, failures, (level.get("validity") or {}).get("bbox_mm")
+                ) and ok
     return ok
 
 
@@ -707,6 +727,19 @@ def verify(manifest, tree):
                     f"edited or rebuilt outside the pipeline"
                 )
             validity = level["validity"]
+            # A GENERATED level must carry a tangent per vertex. `degenerate_tangents` counts bad
+            # ones among those present, so zero baked tangents scored a clean zero and passed —
+            # which is exactly the state an exporter omission would leave behind, with bevy
+            # generating uncertified tangents at load.
+            if level["role"] == "generated":
+                if not level.get("tangents_are_baked"):
+                    failures.append(f"{label}: does not record baked tangents")
+                elif validity["baked_tangents"] != validity["verts"]:
+                    failures.append(
+                        f"{label}: {validity['baked_tangents']} baked tangents for "
+                        f"{validity['verts']} vertices — a generated level bakes one per vertex, or "
+                        f"the loader generates them and nothing certified what renders"
+                    )
             for key, limit in (
                 ("duplicate_faces", CONFIG.GATES["max_duplicate_faces"]),
                 ("nonfinite_attrs", CONFIG.GATES["max_nonfinite"]),
