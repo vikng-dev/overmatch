@@ -2025,33 +2025,66 @@ mod tests {
         app
     }
 
-    /// Pump the app until the hint's font has actually LOADED. Nothing may be measured before this:
-    /// the reserved slot is a `min_height`, so an unshaped (or unfindable) font reports exactly the
-    /// height the test is looking for and every assertion below would pass vacuously.
+    /// Pump the app until BOTH bundled fonts have LOADED and the card has stopped moving. Nothing
+    /// may be measured before this: an unshaped (or unfindable) font measures as nothing, so the
+    /// reserved hint slot reports exactly the `min_height` the test is looking for and every
+    /// assertion below would pass vacuously.
+    ///
+    /// # Both weights, because the card draws with both
+    ///
+    /// [`UiFonts`] resolves two handles and this page uses each of them: Regular for the row labels,
+    /// the hint and the legend, SemiBold for the 30 px title, every value and both arrow glyphs. They
+    /// are two independent async loads and the IO pool may finish them in different FRAMES, so a card
+    /// waited on by Regular alone can still be laid out with every SemiBold node measuring zero — a
+    /// real card that is simply too short: no title, and rows shrunk to their label's height.
+    ///
+    /// That is not a hypothetical. It is what failed
+    /// [`the_wheel_scrolls_the_rows_and_stops_at_both_ends`] on a loaded CI runner and nowhere else:
+    /// the test cached a 242 px overflow off the SemiBold-less card, SemiBold arrived during the 50
+    /// wheel notches that followed, and [`scroll_rows`] then correctly clamped to the settled card's
+    /// real 306 px. On a fast machine the two loads land in the same frame and the wrong height is
+    /// never observed, which is exactly the shape of a race that only ever fails under contention.
+    ///
+    /// # And then the layout, run until it stops moving
+    ///
+    /// A font that lands is re-measured and re-laid-out over the following passes, and how many
+    /// passes that takes is bevy's business rather than a number worth guessing — the same reason
+    /// [`hint_layout`] settles by repetition instead of by a fixed count.
     fn settle_with_font(app: &mut App) {
         let started = std::time::Instant::now();
         loop {
             app.update();
-            let body = app
-                .world()
-                .resource::<crate::ui_font::UiFonts>()
-                .body
-                .clone();
-            let state = app.world().resource::<AssetServer>().load_state(&body);
-            if state.is_loaded() {
-                // One more pass so the loaded font reaches the text pipeline and the card relays out.
-                app.update();
-                app.update();
-                return;
+            let fonts = app.world().resource::<crate::ui_font::UiFonts>().clone();
+            let server = app.world().resource::<AssetServer>();
+            let states = [
+                ("SemiBold", server.load_state(&fonts.hud)),
+                ("Regular", server.load_state(&fonts.body)),
+            ];
+            if states.iter().all(|(_, state)| state.is_loaded()) {
+                break;
             }
             assert!(
-                started.elapsed() < LAYOUT_DEADLINE && !state.is_failed(),
-                "the hint font never loaded headless after {:?} ({state:?}) — assets/fonts/\
-                 BarlowCondensed-Regular.ttf is what the whole measurement rests on",
+                started.elapsed() < LAYOUT_DEADLINE
+                    && !states.iter().any(|(_, state)| state.is_failed()),
+                "the page's fonts never loaded headless after {:?} ({states:?}) — assets/fonts/\
+                 BarlowCondensed-SemiBold.ttf and -Regular.ttf are what the whole measurement rests \
+                 on",
                 started.elapsed(),
             );
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
+        // The card's height, the viewport's rect and its content: the three numbers every
+        // measurement below is taken from, so a frame that repeats all three is a settled layout.
+        let mut last = None;
+        for _ in 0..32 {
+            app.update();
+            let now = (card_height(app), viewport_state(app));
+            if last == Some(now) {
+                return;
+            }
+            last = Some(now);
+        }
+        panic!("the card never settled on a layout with both fonts loaded (last {last:?})");
     }
 
     /// **The page's mouse is alive.** Hit testing moved to `bevy_picking`, and the whole failure
@@ -2311,22 +2344,24 @@ mod tests {
             }
         };
 
-        let (_, content, top) = viewport_state(&mut app);
+        let (_, _, top) = viewport_state(&mut app);
         assert_eq!(top, 0.0, "the list starts at the top");
 
         // Wheel DOWN (negative y) moves the content up, i.e. a larger offset. The selection is on
         // row 0, so it is pushed off the top and dragged back — the scroll must still have moved.
         spin(&mut app, -1.0, 1);
-        let (view, _, scrolled) = viewport_state(&mut app);
+        let (_, _, scrolled) = viewport_state(&mut app);
         assert!(
             scrolled > 0.0,
             "one wheel notch must move the list ({scrolled} after a notch of {WHEEL_LINE_PX} px)",
         );
 
-        // Far past the end: the clamp is the content overflow, not infinity.
+        // Far past the end: the clamp is the content overflow, not infinity. The overflow is read
+        // in the SAME breath as the offset it bounds, because that is what the clamp is a statement
+        // about — the card the player is looking at now, not the one measured twenty frames ago.
         app.world_mut().resource_mut::<Selection>().0 = Row::ORDER.len() - 1;
         spin(&mut app, -1.0, 50);
-        let (_, _, bottom) = viewport_state(&mut app);
+        let (view, content, bottom) = viewport_state(&mut app);
         let overflow = content - view;
         assert!(
             bottom <= overflow + 1.0,
