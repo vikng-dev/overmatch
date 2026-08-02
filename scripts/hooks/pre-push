@@ -40,7 +40,7 @@ command -v python3 >/dev/null ||
     { printf '\033[31m  no python3\033[0m — needed by the tank glb gate and by the mip bake\n' >&2; exit 1; }
 glb=assets/tiger_1/tiger_1.glb
 oid=$(git cat-file blob "HEAD:$glb" 2>/dev/null | sed -n 's/^oid sha256://p')
-obj="$(git rev-parse --git-dir)/lfs/objects/$(printf %.2s "$oid")/$(printf %s "$oid" | cut -c3-4)/$oid"
+obj="$(git rev-parse --git-common-dir)/lfs/objects/$(printf %.2s "$oid")/$(printf %s "$oid" | cut -c3-4)/$oid"
 [ -n "$oid" ] && [ -f "$obj" ] || obj="$glb"
 python3 scripts/tank/glb_ktx2.py verify --allow-pointer "$obj"
 

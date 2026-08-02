@@ -119,8 +119,12 @@ class Tree:
                 oid = line.split(b":", 1)[1].decode().strip()
         if oid is None:
             return None
+        # --git-common-dir, NOT --git-dir: a linked worktree has its own private gitdir, and the
+        # LFS object store lives in the COMMON one. Asking for the private dir finds no objects and
+        # makes every level look unverifiable — which is how a check that cannot see its evidence
+        # turns into a check that quietly passes on something else.
         git_dir = subprocess.run(
-            ["git", "rev-parse", "--git-dir"], cwd=self.root,
+            ["git", "rev-parse", "--git-common-dir"], cwd=self.root,
             capture_output=True, text=True, check=False,
         ).stdout.strip()
         if not git_dir:
