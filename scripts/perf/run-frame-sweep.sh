@@ -8,6 +8,19 @@
 #   cargo build --locked --release --bin overmatch
 #   scripts/perf/run-frame-sweep.sh /tmp/frame-sweep-$(date +%Y%m%d)
 #
+# PLACEMENT — where the probe tanks stand relative to the camera, and therefore which side of the
+# shoe LOD's 500 m swap they render on (src/track/link_view.rs). Two sweeps, same runner:
+#   near (default):  scripts/perf/run-frame-sweep.sh $OUT-near
+#   far:             OVERMATCH_PROBE_FAR=1 scripts/perf/run-frame-sweep.sh $OUT-far
+# The flag needs no plumbing here — `env` below does not clear the inherited environment, so it
+# reaches the client as-is. Each condition's own log records the placement it spawned, the grid's
+# extent and its min/max distance from the controlled tank, so a capture is self-identifying:
+#   grep 'spawned .* probe tanks' $OUT/*.log
+# The two placements answer different questions and are NOT comparable to each other: far measures
+# whether the triangle win survives the extra `check_visibility_ranges` walk, near measures what
+# that walk costs when the rendered geometry is unchanged (pure overhead). Both are before/after
+# comparisons against the same placement on the parent commit.
+#
 # Preconditions — each is a VALIDITY condition, not a nicety:
 #   * machine quiet: no builds, no browser video, no other GPU load; plugged in; not thermally
 #     pre-loaded (an already-hot chassis measures the throttled machine, not the game)
@@ -19,6 +32,43 @@
 #     exported (and scrubs it from the child's env regardless), the client records every
 #     window-occlusion transition into the frame stream, and the analyzer fails any condition
 #     whose occluded interval overlaps the measurement window.
+#   * the window must be presented on the PRIMARY (built-in, 120 Hz ProMotion) display. This Mac
+#     also drives a 60 Hz external panel (ARZOPA 2560x1600), and bevy opens the game window THERE
+#     whenever it is connected. macOS then paces presentation on that panel to multiples of
+#     16.67 ms no matter what present mode the app negotiated: every condition quantizes to ~60 fps,
+#     every rung of the ladder reads the same, and the sweep is a fiction that LOOKS clean —
+#     the "effective present mode Immediate, frame cap off" gate below still PASSES, because it
+#     reads the app's requested mode, not the OS's pacing of the surface. Measured on the earlier
+#     shadow sweep: shadows fully OFF read 16.632 ms on the external panel and 12.057 ms on the
+#     built-in, same binary, same settings.
+#     ENFORCED, but NOT from this script: the CLIENT parks its own window on the primary display at
+#     startup and records which monitor is presenting — name, refresh in millihertz, primary flag —
+#     as `{t, monitor, refresh_mhz, primary}` rows in the frame stream, at first resolution and on
+#     every change (src/frame_cost.rs). The analyzer then fails any condition whose measurement
+#     window is uncovered by a monitor row, covered by one below 100000 mHz, or split across two
+#     monitors. So the sweep gates on the MEASURED refresh of the surface that presented the
+#     frames, which is the quantity that poisons them.
+#     This replaces an osascript window-park guard that could never work: System Events reports
+#     ZERO windows for this unbundled winit binary on this macOS (verified with Accessibility
+#     granted and the process frontmost), so the guard's own failure mode fired on every run.
+#     A guard that cannot observe the thing it guards is worse than none — it teaches the operator
+#     to bypass it.
+#   * the surface must be 2560x1440 PHYSICAL pixels — the second, quieter half of the same story.
+#     The two panels have different scale factors (built-in 2.0, ARZOPA 1.0) and bevy's window is
+#     1280x720 LOGICAL, so the very same window is a 2560x1440 surface on the built-in panel and a
+#     1280x720 one on the external: a QUARTER of the shaded pixels, for a ladder that reads
+#     uniformly ~3x too fast. MEASURED with the refresh gate above already passing: m350-2 read
+#     4.19 ms against 11.83 ms for identical code captured on the built-in panel. Frame cost is
+#     proportional to pixels, so this is not a noisier measurement of the same thing — it is a
+#     different machine, and no ladder captured at one size may be compared with one captured at
+#     the other.
+#     ENFORCED the same way and in the same places: the client pins its window to 1280x720 logical
+#     at startup and re-pins whenever the scale factor changes (a monitor move updates the factor
+#     without necessarily resizing the surface, which silently halves the logical size), records
+#     `{t, surface_w, surface_h}` rows, and the analyzer fails any condition whose measurement
+#     window is uncovered by a surface row or covered by one that is not exactly 2560x1440.
+#     Cross-check in the client's own log: `render scale: native — the 3D main pass fills the
+#     [2560, 1440] target`.
 #   * warm shader cache: the FIRST launch after a rebuild stalls >10 s on Metal pipeline
 #     compilation. Discard the first sweep after every rebuild (or do one throwaway run first).
 #   * hands off keyboard/mouse during conditions — input changes the workload.
@@ -41,7 +91,8 @@
 #   * analyzer gates (also run per condition via --validate-only): monotonic timestamps, a row
 #     SPAN of at least warmup+duration (row COUNT cannot tell a 60 s run from a fast free-runner
 #     that died at 10 s), and — real mode — no occluded interval overlapping the measurement
-#     window.
+#     window, plus one >=100000 mHz monitor and one 2560x1440 surface covering all of it (the
+#     display and surface preconditions above).
 #
 # SMOKE mode (plumbing validation ONLY — hidden window, so every number is free-run garbage
 # by construction; it proves rows flow and gates fire, nothing else; the output dir gets a
@@ -80,6 +131,9 @@ MIN_ROWS="${MIN_ROWS:-$((DURATION_S * 20))}"
 # How much process startup (asset load, Metal pipeline compilation, window creation) the span
 # deadline forgives before a condition is called stalled — see the poll loop below.
 STARTUP_GRACE_S="${STARTUP_GRACE_S:-60}"
+# There is deliberately no window-parking knob here: the client parks its own window and records
+# the monitor that presented it (see the display precondition in the runbook), so the sweep's
+# display gate lives in the client and the analyzer, where it can observe what it claims.
 
 # A real sweep with the hidden-capture env exported would inherit it into every child, the window
 # would never be shown, and every gate below would happily pass on free-run fiction. Refuse rather
@@ -141,8 +195,8 @@ fi
   echo "mode: $([[ -n "$SMOKE" ]] && echo 'SMOKE / PLUMBING-ONLY (hidden window — every number is free-run fiction)' || echo 'real (visible window)')"
   echo "duration_s: $DURATION_S  warmup_s: $WARMUP_S  cooldown_s: $COOLDOWN_S  min_rows: $MIN_ROWS  bin: $BIN"
   echo "presentation gates: $([[ -n "$SMOKE" ]] \
-    && echo 'RELAXED — occlusion and effective-present-mode gates SKIPPED (hidden window by design)' \
-    || echo 'occlusion-free measurement window + effective present mode Immediate, frame cap off')"
+    && echo 'RELAXED — occlusion, display, surface and effective-present-mode gates SKIPPED (hidden window by design)' \
+    || echo 'occlusion-free measurement window + one >=100000 mHz monitor + a 2560x1440 surface throughout + effective present mode Immediate, frame cap off')"
   echo "conditions: ${CONDITIONS[*]}"
   echo "binary: $CLIENT  $(stat -f 'mtime=%Sm size=%z' "$CLIENT")"
   echo "host: $(uname -m) $(sysctl -n machdep.cpu.brand_string 2>/dev/null || uname -p)"
@@ -239,25 +293,45 @@ for entry in "${CONDITIONS[@]}"; do
   fi
   # Stream-shape gates, shared with the final analysis pass (--validate-only runs the same code):
   # monotonic time, full warmup+duration SPAN, MIN_ROWS, and (real mode) no occluded interval
-  # overlapping the measurement window.
+  # overlapping the measurement window, plus a fast-enough single monitor and a full-size surface
+  # covering all of it. SMOKE relaxes all three presentation gates for the same reason: its window
+  # is hidden, so it neither occludes honestly nor resolves a monitor or a real surface, and its
+  # numbers are declared fiction.
   ( cd "$REPO" && uv run scripts/perf/analyze.py --validate-only --warmup-s "$WARMUP_S" \
       --min-rows "$MIN_ROWS" --expected-duration-s "$DURATION_S" \
-      ${SMOKE:+--occluded-ok} "$stream" ) \
+      ${SMOKE:+--occluded-ok --display-ok --surface-ok} "$stream" ) \
     || { echo "$cond INVALID: frame stream failed the analyzer's validity gates (see above)" >&2; exit 1; }
   # Presentation provenance into the manifest: the effective mode line verbatim, plus how many
-  # occlusion transitions the client observed (0 on a clean visible run after the initial show).
+  # occlusion transitions the client observed (0 on a clean visible run after the initial show),
+  # plus which display presented it. The gate on it is the analyzer's, above; this is the
+  # human-readable receipt.
+  # The LAST monitor line, not the first: bevy creates the window before the client's startup park
+  # runs, so on a machine with the 60 Hz panel attached the FIRST line routinely names that panel
+  # and would make a perfectly valid capture read as a poisoned one. Both lines stay in the log,
+  # and the row count below says whether there was more than one.
+  monitor_line="$(grep -o 'frame_cost: presenting on monitor.*' "$OUT/$cond.log" | tail -1)"
+  # Same tail-not-head rule for the surface, and for the same reason: the first line is the size the
+  # window was born at on whichever panel bevy opened it on. The render-scale line is the renderer's
+  # independent word for the same number — a cross-check from the other side of the pipeline.
+  surface_line="$(grep -o 'frame_cost: surface .*' "$OUT/$cond.log" | tail -1)"
+  scale_line="$(grep -o 'render scale: .*' "$OUT/$cond.log" | tail -1)"
   {
     echo "$cond: $(grep -m1 -o 'frame_cost: effective present mode.*' "$OUT/$cond.log" || echo 'effective present mode NOT REPORTED')"
     echo "$cond: occlusion transitions in stream: $(grep -c '"occluded"' "$stream" || true)"
+    echo "$cond: ${monitor_line:-presenting monitor NOT REPORTED} <- in force at the end"
+    echo "$cond: monitor rows in stream: $(grep -c '"monitor"' "$stream" || true) (1 = never moved; 2 is normally the startup park off the external panel, inside warmup — the analyzer gates on the state in force once warmup ends)"
+    echo "$cond: ${surface_line:-surface size NOT REPORTED} <- in force at the end"
+    echo "$cond: ${scale_line:-render scale NOT REPORTED} <- the renderer's own word for the same size"
+    echo "$cond: surface rows in stream: $(grep -c '"surface_w"' "$stream" || true) (1 = never resized; 2 is normally the startup re-pin after the park changed the scale factor)"
   } >>"$OUT/manifest.txt"
-  echo "   $cond OK: $(wc -l <"$stream" | tr -d ' ') rows (frame + occlusion)"
+  echo "   $cond OK: $(wc -l <"$stream" | tr -d ' ') rows (frame + occlusion + monitor)"
 
   sleep "$COOLDOWN_S"
 done
 
 cd "$REPO"
 uv run scripts/perf/analyze.py --warmup-s "$WARMUP_S" --min-rows "$MIN_ROWS" \
-  --expected-duration-s "$DURATION_S" ${SMOKE:+--occluded-ok} \
+  --expected-duration-s "$DURATION_S" ${SMOKE:+--occluded-ok --display-ok --surface-ok} \
   --baseline "${CONDITIONS[1]%%:*}" "$OUT"/*.client.jsonl
 
 echo "sweep complete -> $OUT"

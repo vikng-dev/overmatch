@@ -39,6 +39,72 @@ pub fn client_plugin(app: &mut App) {
 /// anywhere.
 pub(crate) const DUEL_SPAWN_XZ: [Vec2; 2] = [Vec2::new(10.0, 5.0), Vec2::new(10.0, -12.0)];
 
+/// Where the duel stands under the FAR probe placement (`OVERMATCH_PROBE_FAR` — see
+/// [`spawn_probe_tanks`]). Tiger A's point; Tiger B keeps its 17 m offset behind it, so the duel's
+/// own geometry (and the camera's relationship to it) is the one it always has.
+///
+/// MEASURED off the shipped heightmap, not chosen by eye: the footprint relief under both duel
+/// points is 0.22 m / 0.29 m (`terrain_grid::SPAWN_FOOTPRINT_HALF_M` square), the flattest pad on
+/// the map that has a matching flat block 600 m down +Z, and the ground between the two rises
+/// nowhere above the sight line — so the probe block is actually IN FRAME rather than behind a
+/// crest. Flat matters for the same reason it did for the near band: parked tanks on a grade slide,
+/// and a sliding scene measures contact resolution instead of the thing under test.
+const PROBE_FAR_DUEL_XZ: Vec2 = Vec2::new(-410.0, -440.0);
+
+/// Where the FAR grid's near edge sits, world z. Same units and same meaning as
+/// [`PROBE_GRID_NEAR_Z`]: an absolute world coordinate, not an offset from the duel.
+///
+/// Paired with [`PROBE_FAR_DUEL_XZ`] so the whole grid lands 588..633 m from the controlled tank's
+/// spawn — squarely inside ONE of the shoe chain's coarse bands (L3's `[501, 1050)` m as the ladder
+/// currently certifies), and every probe inside the camera's 1 000 m far plane with room to spare.
+/// Its footprint relief is 0.24..2.45 m per tank, comparable to the near band's valley floor.
+///
+/// The band claim is asserted against the distance BEVY measures — camera to shoe, orbit radius and
+/// hull extent taken off the near end — by `terrain_grid`'s
+/// `the_far_probe_placement_puts_every_probe_in_one_coarse_shoe_band`, which is where the margin
+/// arithmetic lives, and which reads the band off the chain rather than naming a level. Nothing here
+/// should be re-derived by hand: the ladder is regenerated, and WHICH level owns 588..633 m is an
+/// output of that regeneration.
+const PROBE_FAR_NEAR_Z: f32 = 148.0;
+
+/// Is this process running the FAR probe placement?
+///
+/// A dev/profiling lever on the offline path only, like [`spawn_probe_tanks`]'s own count: unset is
+/// every normal run, and nothing outside the probe grid consults it.
+pub(crate) fn probe_far() -> bool {
+    crate::env_flag("OVERMATCH_PROBE_FAR", false)
+}
+
+/// The duel's two spawn points under the placement in force. `far` is [`probe_far`] — passed rather
+/// than read so the terrain-clearance test can assert BOTH placements without touching the process
+/// environment.
+pub(crate) fn duel_spawn_xz(far: bool) -> [Vec2; 2] {
+    if !far {
+        return DUEL_SPAWN_XZ;
+    }
+    // A pure TRANSLATION of the authored duel, so the far scene differs from the near one in where
+    // it stands and in nothing else.
+    let shift = PROBE_FAR_DUEL_XZ - DUEL_SPAWN_XZ[0];
+    DUEL_SPAWN_XZ.map(|xz| xz + shift)
+}
+
+/// Probe `index`'s spawn point under the placement in force — the grid's one geometry, shared by
+/// the spawn and by the test that checks every one of those points against the shipped terrain.
+pub(crate) fn probe_spawn_xz(far: bool, index: usize) -> Vec2 {
+    let (column, row) = (index % PROBE_GRID_COLUMNS, index / PROBE_GRID_COLUMNS);
+    let near_z = if far {
+        PROBE_FAR_NEAR_Z
+    } else {
+        PROBE_GRID_NEAR_Z
+    };
+    Vec2::new(
+        // Centre the block on the duel's x so it fills the view symmetrically.
+        duel_spawn_xz(far)[0].x
+            + (column as f32 - (PROBE_GRID_COLUMNS as f32 - 1.0) / 2.0) * PROBE_GRID_SPACING_M,
+        near_z + row as f32 * PROBE_GRID_SPACING_M,
+    )
+}
+
 /// Admit the local duel after presentation preloading, then construct both roots completely. This
 /// is an admission policy; assets do not initialize simulation state. Failed loads remain fatal.
 fn spawn_tank_when_loaded(
@@ -69,11 +135,13 @@ fn spawn_tank_when_loaded(
     // (`terrain_grid::spawn_pos`: footprint max + clearance), so the duel lands on whatever world
     // this build actually has: heightmap, flat slab, or a re-authored map later.
     let grid = height.as_deref();
+    let far = probe_far();
+    let duel = duel_spawn_xz(far);
     spawn_tank(
         &mut commands,
         content,
         pending.presentation(),
-        Transform::from_translation(crate::terrain_grid::spawn_pos(grid, DUEL_SPAWN_XZ[0]))
+        Transform::from_translation(crate::terrain_grid::spawn_pos(grid, duel[0]))
             .with_rotation(Quat::from_rotation_z(0.7)),
         "Tiger I (A)",
         true,
@@ -82,11 +150,11 @@ fn spawn_tank_when_loaded(
         &mut commands,
         content,
         pending.presentation(),
-        Transform::from_translation(crate::terrain_grid::spawn_pos(grid, DUEL_SPAWN_XZ[1])),
+        Transform::from_translation(crate::terrain_grid::spawn_pos(grid, duel[1])),
         "Tiger I (B)",
         false,
     );
-    spawn_probe_tanks(&mut commands, content, pending.presentation(), grid);
+    spawn_probe_tanks(&mut commands, content, pending.presentation(), grid, far);
     commands.remove_resource::<PendingTankAssets>();
     next.set(AppState::Playing);
 }
@@ -96,10 +164,11 @@ fn spawn_tank_when_loaded(
 /// overlapping tanks would spend the whole capture resolving contacts and measure nothing useful.
 const PROBE_GRID_SPACING_M: f32 = 11.0;
 
-/// Where the grid's near edge sits: down +Z, in FRONT of the third-person camera. The camera spawns
-/// at `(10, 7, −7)` looking at `(10, 1, 5)` (`camera.rs`), i.e. behind Tiger A looking along +Z —
-/// so +Z is the only direction that puts probe tanks in frame as well as in the cascade volume.
-/// (Tiger B, at z = −12, is behind the camera and always was.)
+/// Where the grid's near edge sits in the DEFAULT placement: down +Z, in FRONT of the third-person
+/// camera. The camera spawns at `(10, 7, −7)` looking at `(10, 1, 5)` (`camera.rs`), i.e. behind
+/// Tiger A looking along +Z — so +Z is the only direction that puts probe tanks in frame as well as
+/// in the cascade volume. (Tiger B, at z = −12, is behind the camera and always was.) The far
+/// placement keeps every one of those properties and only moves the scene: [`PROBE_FAR_NEAR_Z`].
 ///
 /// 48 m rather than "just past the duel" because the ground between z ≈ 5 and z ≈ 30 falls at ~40°:
 /// tanks parked there SLIDE (measured — the first layout drifted 6..13 m downhill during a capture,
@@ -123,11 +192,34 @@ const PROBE_GRID_COLUMNS: usize = 6;
 ///
 /// Grid geometry is deliberately dumb — a square-ish block laid out on XZ and dropped onto the
 /// surface by the one shared rule (`terrain_grid::spawn_pos`), like every other spawn point.
+///
+/// # `OVERMATCH_PROBE_FAR=1`: the same block, on the far side of the shoe LOD
+///
+/// The near block is the RIGHT default and the wrong half of one question. `track::link_view` swaps
+/// every shoe down a ladder of reductions (`SHOE_LOD_CHAIN`, 855 → 194 triangles against a
+/// 1 661-triangle base), and that costs ONE extra entity per shoe PER LEVEL — at 194 shoes per tank,
+/// four reduced levels and 30 tanks, 23 280 more walked by `check_visibility_ranges` every frame,
+/// whether or not any of them is far enough to matter. So the LOD has two frames to answer for: the
+/// FAR one, where the triangle win is real and the walk is paid for, and the NEAR one, where the
+/// rendered geometry is the base mesh exactly as before and the walk is pure overhead. The near
+/// block at 55..99 m can only show the second. This flag is the other placement, and nothing else.
+///
+/// It moves the WHOLE offline scene, not just the grid, because the world is 1 000 m on a side
+/// (`terrain_grid::WORLD_SIZE`) and the camera sits at the duel: with the duel where it is, the
+/// furthest in-bounds probe is ~490 m away and every shoe is still the base mesh. So the duel
+/// translates to
+/// [`PROBE_FAR_DUEL_XZ`] and the grid to [`PROBE_FAR_NEAR_Z`] — same spacing, same columns, same
+/// shape, same count, 588..633 m of separation instead of 55..99 m.
+///
+/// One thing the far placement inherently is NOT: a shadow-caster measurement. The cascade envelope
+/// is ~150 m, so the far probes cast nothing into it. That is a property of distance, not of this
+/// lever — the shadow ladder is what the near placement is for.
 fn spawn_probe_tanks(
     commands: &mut Commands,
     content: TankContent,
     presentation: TankPresentation,
     grid: Option<&crate::terrain_grid::HeightGrid>,
+    far: bool,
 ) {
     let Some(total) = crate::env_parse::<usize>("OVERMATCH_PROBE_TANKS") else {
         return;
@@ -136,22 +228,42 @@ fn spawn_probe_tanks(
     if extra == 0 {
         return;
     }
+    let anchor = duel_spawn_xz(far)[0];
+    let (mut nearest, mut furthest) = (f32::INFINITY, 0.0f32);
     for index in 0..extra {
-        let (column, row) = (index % PROBE_GRID_COLUMNS, index / PROBE_GRID_COLUMNS);
-        // Centre the block on the duel's x so it fills the view symmetrically.
-        let x = DUEL_SPAWN_XZ[0].x
-            + (column as f32 - (PROBE_GRID_COLUMNS as f32 - 1.0) / 2.0) * PROBE_GRID_SPACING_M;
-        let z = PROBE_GRID_NEAR_Z + row as f32 * PROBE_GRID_SPACING_M;
+        let xz = probe_spawn_xz(far, index);
+        let distance = xz.distance(anchor);
+        nearest = nearest.min(distance);
+        furthest = furthest.max(distance);
         spawn_tank(
             commands,
             content,
             presentation.clone(),
-            Transform::from_translation(crate::terrain_grid::spawn_pos(grid, Vec2::new(x, z))),
+            Transform::from_translation(crate::terrain_grid::spawn_pos(grid, xz)),
             &format!("Probe Tiger {index}"),
             false,
         );
     }
-    info!("offline: spawned {extra} probe tanks (OVERMATCH_PROBE_TANKS={total})");
+    // Self-documenting capture: a frame stream is evidence for a placement, and the placement is
+    // this line. Distances are to the CONTROLLED tank's spawn — the camera orbits up to 18 m behind
+    // that point (`camera::orbit_camera`'s `ORBIT_FAR`), so the rendered distances are these or
+    // greater, which is the direction that keeps a "beyond the LOD swap" claim conservative.
+    info!(
+        "offline: spawned {extra} probe tanks (OVERMATCH_PROBE_TANKS={total}) — {} placement, grid \
+         x {:.0}..{:.0} z {:.0}..{:.0}, {nearest:.0}..{furthest:.0} m from the controlled tank at \
+         ({:.0}, {:.0})",
+        if far {
+            "FAR (OVERMATCH_PROBE_FAR=1)"
+        } else {
+            "near"
+        },
+        probe_spawn_xz(far, 0).x,
+        probe_spawn_xz(far, extra.min(PROBE_GRID_COLUMNS) - 1).x,
+        probe_spawn_xz(far, 0).y,
+        probe_spawn_xz(far, extra - 1).y,
+        anchor.x,
+        anchor.y,
+    );
 }
 
 /// Spawn one complete dynamic tank for the local duel.

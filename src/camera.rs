@@ -125,6 +125,20 @@ struct TurretPivot(Option<Vec3>);
 /// Height of the orbit pivot above the turret ring.
 const PIVOT_LIFT: f32 = 2.5;
 
+/// The orbit radius at full zoom-out — how far the camera body can sit from [`orbit_pivot`] along
+/// the view axis. A feel knob for [`orbit_camera`], and a BOUND for anything that has to reason
+/// about where the camera can actually be relative to the tank it follows: mouse-look is free, so
+/// the body can be this far to any side of the pivot, INCLUDING toward whatever is being measured.
+/// `terrain_grid`'s far-probe placement test spends it that way — a probe's camera-to-shoe distance
+/// is its tank-to-tank distance minus this, worst case.
+///
+/// A ground ray only ever pulls the body IN (`ground_distance`), so this is a true maximum.
+pub(crate) const ORBIT_FAR: f32 = 18.0;
+
+/// The orbit radius at full zoom-in. Paired with [`ORBIT_FAR`] purely as the other end of the
+/// dolly; nothing outside [`orbit_camera`] needs it.
+const ORBIT_NEAR: f32 = 5.0;
+
 /// The orbit pivot in world space: the turret ring (root pose × captured offset), lifted a little.
 /// THE point the camera body is placed from ([`orbit_camera`]) and the optic-exit re-aim aims from
 /// ([`reaim_orbit_on_optic_exit`]) — one formula, because the re-aim's collinearity guarantee
@@ -339,8 +353,6 @@ fn orbit_camera(
     // Orbit around the shared pivot (`orbit_pivot` — the re-aim reconstructs this same point). The
     // camera sits on the line through the pivot along its view axis; the ground ray pulls it in
     // near terrain.
-    const ORBIT_FAR: f32 = 18.0;
-    const ORBIT_NEAR: f32 = 5.0;
     let pivot_point = orbit_pivot(tank_transform, turret_local);
     let distance = ORBIT_FAR + (ORBIT_NEAR - ORBIT_FAR) * orbit.zoom;
     let back_ray = Ray3d::new(pivot_point, -transform.forward());
