@@ -9,6 +9,7 @@ which is why these can run in a hook alongside `test_chain.py` (the BVH-backed d
 need Blender and is exercised by generation itself).
 """
 
+import collections
 import json
 import os
 import struct
@@ -532,15 +533,27 @@ class GateParityTests(unittest.TestCase):
         self.assertTrue(any("baked tangents" in f for f in failures), failures)
 
     def test_verification_routes_its_structural_gates_through_the_shared_list(self):
-        """OBSERVED, not grepped: the shared function is replaced and its calls are counted.
+        """OBSERVED, not grepped: the shared function is REPLACED and every call it gets is counted.
 
-        WHAT THIS ESTABLISHES: verification really does invoke the shared gate list for every level,
-        and when that list is neutered every structural failure disappears — so those failures flow
-        through it rather than through a second copy beside it.
+        WHAT THIS ESTABLISHES: a whole `chain.verify` of the shipped manifest reaches
+        `measure.validity_gate_failures` once per level and once for nothing else. Each call is
+        identified by the (tris, verts) of the record it was handed rather than merely tallied, so
+        five calls that all re-checked L0, or four calls that skipped a level, fail here just as
+        loudly as a missing call would. The structural gates verification applies are therefore the
+        ones in the shared list, for every level, and not a second copy beside it.
 
-        WHAT IT DOES NOT: it cannot prove no OTHER check anywhere ever duplicates a gate. Nothing
-        short of reading the file does, and the grep below is that, kept for the one thing it is
-        actually good at — catching a private gate list reappearing under a familiar name.
+        WHAT IT DOES NOT ESTABLISH, in two parts, because the honest version is not one sentence:
+
+          1. It cannot prove that no OTHER check anywhere duplicates a gate. Nothing short of
+             reading the source does, and `test_neither_caller_keeps_a_private_gate_list` is that
+             reading — kept for the one thing a text scan is actually good at.
+          2. THERE IS NO NEUTER-AND-EXPECT-SILENCE HALF, and that is a decision rather than an
+             omission. Replacing the shared list with a function that returns no failures does NOT
+             make a mutated counter stop being refused: `chain._check_decoded_bytes` compares every
+             recorded counter against the decoded bytes and SHOULD catch it there too. So the
+             failure would not vanish — and if it did, that would still not be evidence about a
+             second gate list. An experiment whose outcome means the same thing either way is not
+             evidence, and asserting it would have made this test read stronger than it is.
         """
         import json
 
@@ -556,7 +569,7 @@ class GateParityTests(unittest.TestCase):
         original = M.validity_gate_failures
 
         def counting(validity, source_validity, gates, **kwargs):
-            calls.append(validity.get("tris"))
+            calls.append((validity.get("tris"), validity.get("verts")))
             return original(validity, source_validity, gates, **kwargs)
 
         M.validity_gate_failures = counting
@@ -564,41 +577,81 @@ class GateParityTests(unittest.TestCase):
             chain.verify(manifest, chain.Tree(root))
         finally:
             M.validity_gate_failures = original
+
+        levels = manifest["assets"][0]["levels"]
+        expected = collections.Counter((level["tris"], level["verts"]) for level in levels)
         self.assertEqual(
-            len(calls), len(manifest["assets"][0]["levels"]),
-            "every level must be put through the shared gate list exactly once",
+            len(expected), len(levels),
+            "this test identifies a level by its (tris, verts); a corpus where two levels share "
+            "both would need a different identifier before the count below means anything",
+        )
+        self.assertEqual(
+            collections.Counter(calls), expected,
+            f"every level must go through the shared gate list EXACTLY ONCE, identified by the "
+            f"record it was handed: expected {sorted(expected)}, saw {sorted(calls)}",
         )
 
-        # NO NEUTER-AND-EXPECT-SILENCE HALF, deliberately. Removing the gate list does not make a
-        # mutated counter stop failing, because the byte-vs-record comparison catches that too and
-        # SHOULD — so a vanishing failure would not have been evidence of a second gate list, and
-        # asserting it would have been a test that looked stronger than it was. The structural
-        # claim is carried by `test_neither_caller_keeps_a_private_gate_list`, which checks the one
-        # thing that is actually decidable: no limit is read anywhere outside the shared list.
-
     def test_neither_caller_keeps_a_private_gate_list(self):
+        """A TEXT TRIPWIRE, said plainly — the name is a claim this mechanism cannot prove alone.
+
+        WHAT IT CHECKS: both callers really do call the shared function, generation keeps no
+        `validity_failures` of its own, and NEITHER FILE SPELLS a `max_*` limit's name at all, in
+        either quote style. Quoting the key is how every ordinary reading is written: `GATES["x"]`,
+        `GATES['x']`, `.get("x")`, `CONFIG.GATES["x"]`, an alias `g["x"]` — so refusing the name
+        outright covers all of them at once, and the reading it enforces is that a limit is only
+        ever consulted inside `measure.validity_gate_failures`, which is handed the whole dict.
+
+        WHAT EVADES IT, stated because a heuristic that hides its holes reads as a proof: a key
+        assembled at runtime (`GATES["max_" + name]`), a name held in a variable or built by an
+        f-string, or a second gate table constructed from `CONFIG.GATES` without spelling any key.
+        A text scan cannot decide those. The half of this pair that OBSERVES rather than reads is
+        `test_verification_routes_its_structural_gates_through_the_shared_list`.
+        """
         directory = os.path.dirname(os.path.abspath(M.__file__))
-        generate_source = open(os.path.join(directory, "generate.py")).read()
-        chain_source = open(os.path.join(directory, "chain.py")).read()
-        self.assertIn("M.validity_gate_failures(", generate_source)
-        self.assertIn("M.validity_gate_failures(", chain_source)
-        self.assertNotIn("def validity_failures(", generate_source)
-        for limit in (key for key in CONFIG.GATES if key.startswith("max_")):
-            self.assertNotIn(
-                f'CONFIG.GATES["{limit}"]', chain_source,
-                f"{limit} is consulted directly in chain.py — the gate list is the only place a "
-                f"limit may be read, or there are two lists again",
+        sources = {
+            name: open(os.path.join(directory, name), encoding="utf-8").read()
+            for name in ("generate.py", "chain.py")
+        }
+        for name, source in sources.items():
+            self.assertIn(
+                "M.validity_gate_failures(", source, f"{name} does not call the shared gate list"
             )
+        self.assertNotIn("def validity_failures(", sources["generate.py"])
+        for limit in (key for key in CONFIG.GATES if key.startswith("max_")):
+            for name, source in sources.items():
+                for spelling in (f'"{limit}"', f"'{limit}'"):
+                    self.assertNotIn(
+                        spelling, source,
+                        f"{name} names the limit {limit} directly ({spelling}) — the shared gate "
+                        f"list is the only place a limit may be read, or there are two lists again",
+                    )
 
 
 class DecoderCoverageTests(unittest.TestCase):
-    """Everything the decoder can compute is either VERIFIED or explicitly classified.
+    """Everything the decoder can compute is either VERIFIED or explicitly classified — as a
+    VALIDITY record, which is the part that took a second look to get right.
 
     A property the decoder produces but the verifier never compares is invisible: the manifest can
     say anything about it and nothing looks. `radius_m` was exactly that — measured from the bytes,
     recorded in every level, and compared against nothing. This test is the standing form of that
     audit, so the next field someone adds to `validity()` has to be classified before it can ship.
+
+    SCOPED TO THE RECORD TYPE. `chain.INFORMATIONAL_FIELDS` is one flat set covering every record in
+    the manifest — level rows, gate records, the asset header, the ladder — so excusing a DECODED
+    property against it means a future `validity()` field named `samples`, `level`, `material` or
+    `bbox_mm` would be waved through by a decision made about a different record entirely. The
+    allowance used here is `VALIDITY_INFORMATIONAL` below, which is about validity records only.
     """
+
+    #: Names a decoded VALIDITY record may carry WITHOUT being compared against the bytes.
+    #:
+    #: EMPTY, and that is the current truth: every field `Surface.validity` produces is re-derived at
+    #: verification and compared. It exists so that the first exception has to be a deliberate line
+    #: here with a reason beside it, rather than a name that happens to collide with something
+    #: declared informational for another record. Anything listed must ALSO be declared informational
+    #: in `chain.py` — the assertion below holds that, so this set cannot quietly become a second,
+    #: laxer classification of the same field.
+    VALIDITY_INFORMATIONAL = frozenset()
 
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="lod-coverage-")
@@ -612,13 +665,19 @@ class DecoderCoverageTests(unittest.TestCase):
         ))
         produced = set(surface.validity(CONFIG.GATES))
         verified = set(chain.LEVEL_VALIDITY_FIELDS) | set(chain.LEVEL_VALIDITY_VECTORS)
-        classified = chain.INFORMATIONAL_FIELDS
+        classified = self.VALIDITY_INFORMATIONAL
+        self.assertLessEqual(
+            classified, chain.INFORMATIONAL_FIELDS,
+            "a validity field excused here must also be declared informational in chain.py, or the "
+            "manifest walk and this test disagree about the same name",
+        )
         unaccounted = produced - verified - classified
         self.assertEqual(
             unaccounted, set(),
             f"these decoded properties are neither verified nor classified: {sorted(unaccounted)}. "
-            f"Add each to chain.LEVEL_VALIDITY_FIELDS (if it should be compared against the bytes) "
-            f"or to INFORMATIONAL_FIELDS (if it is for a human).",
+            f"Add each to chain.LEVEL_VALIDITY_FIELDS or LEVEL_VALIDITY_VECTORS (if it should be "
+            f"compared against the bytes) or to this class's VALIDITY_INFORMATIONAL, with a reason "
+            f"(and to chain.INFORMATIONAL_FIELDS, which the manifest walk reads).",
         )
 
 
