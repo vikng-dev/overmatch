@@ -38,6 +38,18 @@ def switch_distance_m(deviation_mm, radius_m, view):
     return (deviation_mm / 1000.0) * float(view["height_px"]) / denominator + radius_m
 
 
+def screen_footprint_px(bbox_mm, distance_m, view):
+    """The asset's projected diameter in reference-view pixels at `distance_m`.
+
+    A property of the GEOMETRY and the distance, so the verifier can re-derive it from the recorded
+    bounding box instead of trusting a pixel count the renderer reported about itself. It decides
+    whether the rendered-difference gate has anything to look at (`RENDER_GATE["min_footprint_px"]`).
+    """
+    diameter = math.sqrt(sum((value / 1000.0) ** 2 for value in bbox_mm))
+    pixels_per_radian = float(view["height_px"]) / (2.0 * math.tan(float(view["vfov_rad"]) / 2.0))
+    return diameter / distance_m * pixels_per_radian
+
+
 def tile_vfov_rad(render_config, view):
     """The gate tile's FOV that preserves the reference view's pixels-per-radian.
 

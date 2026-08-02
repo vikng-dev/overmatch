@@ -33,6 +33,7 @@ def validity_record(tris, verts, origin_radius=0.1):
         "boundary_edges": 0, "slivers_below_floor": 0, "tangent_default_faces": 0,
         "tangent_default_verts": 0, "min_altitude_m": 0.001, "min_altitude_floor_m": 0.0001,
         "min_tri_area_mm2": 1.0, "origin_radius_m": origin_radius,
+        "baked_tangents": verts, "degenerate_tangents": 0, "min_tangent_length": 0.999999,
     }
 
 
@@ -75,10 +76,16 @@ def view_record(passed):
     }
 
 
-def gate_record(passed=True, material="decoded from probe.glb", distance_m=90.0):
+def gate_record(passed=True, material="decoded from probe.glb", distance_m=90.0,
+                bbox_mm=(700.0, 180.0, 180.0)):
     """A render-gate record whose recorded verdict and summaries FOLLOW from its per-view numbers."""
     views = {name: view_record(passed) for name, _e, _a in CONFIG.RENDER_GATE["views"]}
+    footprint = chain.screen_footprint_px(list(bbox_mm), distance_m, VIEW)
     return {
+        "abstained": False,
+        "screen_footprint_px": round(footprint, 4),
+        "min_footprint_px": CONFIG.RENDER_GATE["min_footprint_px"],
+        "bbox_mm": list(bbox_mm),
         "pass": all(view["pass"] for view in views.values()),
         "worst_defect_score": max(view["defect_score"] for view in views.values()),
         "worst_mean_abs_diff": max(view["signal"]["mean_abs_diff"] for view in views.values()),
@@ -89,11 +96,9 @@ def gate_record(passed=True, material="decoded from probe.glb", distance_m=90.0)
         "tile_vfov_rad": chain.tile_vfov_rad(CONFIG.RENDER_GATE, VIEW),
         "material_source": material,
         "views": views,
+        # The same single declaration the renderer and the verifier both read.
         "thresholds": {
-            "defect_fraction": CONFIG.RENDER_GATE["defect_fraction"],
-            "max_mean_abs_diff": CONFIG.RENDER_GATE["max_mean_abs_diff"],
-            "max_footprint_frac_over": CONFIG.RENDER_GATE["max_footprint_frac_over"],
-            "over_threshold": CONFIG.RENDER_GATE["over_threshold"],
+            key: CONFIG.RENDER_GATE[key] for key in CONFIG.RECORDED_GATE_THRESHOLDS
         },
     }
 
@@ -125,6 +130,7 @@ def synthetic_manifest():
             "skip_fraction": CONFIG.SKIP_FRACTION, "max_rungs": CONFIG.MAX_RUNGS,
             "right_wall_m": round(CONFIG.RIGHT_WALL_M, 6),
             "right_wall_source": CONFIG.RIGHT_WALL_SOURCE, "reference_view": VIEW,
+            "ratification": dict(CONFIG.RATIFICATION_EVIDENCE["ruling"]),
         },
         "gates": {
             "numeric": dict(CONFIG.GATES),
@@ -255,19 +261,26 @@ class DerivationTests(unittest.TestCase):
         self.assertTrue(any("render gate recorded a FAIL" in f for f in failures), failures)
         self.assertEqual(warnings, [])
 
-    def test_a_failing_render_gate_warns_while_the_threshold_is_unratified(self):
-        """Recorded and shouted about, but not enforced — and never silently dropped."""
-        original = CONFIG.RENDER_GATE_BLOCKING
-        CONFIG.RENDER_GATE_BLOCKING = False
-        try:
-            failures, warnings = chain.verify(
-                self._failing_gate_manifest(False), chain.Tree("/nonexistent-root")
-            )
-        finally:
-            CONFIG.RENDER_GATE_BLOCKING = original
+    def test_a_failing_render_gate_only_warns_while_the_gate_is_DISARMED(self):
+        """Ratified is not armed: a verdict measured under fallback textures cannot block.
+
+        Recorded and shouted about, never silently dropped — and it arms itself the moment the
+        render is honest, with no second decision for anyone to remember.
+        """
+        manifest = self._failing_gate_manifest(True)
+        for level in manifest["assets"][0]["levels"][1:]:
+            level["render_gate"]["material_source"] = "FELL BACK to the .blend material 'Mat'"
+        failures, warnings = chain.verify(manifest, chain.Tree("/nonexistent-root"))
         self.assertEqual([f for f in failures if "render gate" in f], [])
         self.assertTrue(any("render gate recorded a FAIL" in w for w in warnings), warnings)
-        self.assertTrue(any("unratified" in w for w in warnings), warnings)
+        self.assertTrue(any("NOT ARMED" in w for w in warnings), warnings)
+
+    def test_the_gate_arms_itself_once_the_material_is_honest(self):
+        """The other half: same failing verdict, shipped material, and it blocks."""
+        failures, _ = chain.verify(
+            self._failing_gate_manifest(True), chain.Tree("/nonexistent-root")
+        )
+        self.assertTrue(any("render gate recorded a FAIL" in f for f in failures), failures)
 
     def test_a_manifest_recording_a_stale_blocking_flag_is_refused(self):
         """Ratifying the threshold must invalidate every manifest cut before the ruling."""
@@ -536,20 +549,23 @@ class SecondRoundMutantTests(unittest.TestCase):
         )
         self.assertTrue(any("source record" in f for f in failures), failures)
 
-    def test_a_fallback_material_cannot_be_blocked_on(self):
-        """The precondition beside RENDER_GATE_BLOCKING, enforced rather than written down."""
+    def test_a_fallback_material_disarms_the_gate_rather_than_condemning_the_manifest(self):
+        """The precondition beside RENDER_GATE_BLOCKING, enforced rather than written down.
+
+        A verdict measured with the wrong textures must not block — but the manifest is not thereby
+        invalid, it is unenforced, and the difference is the whole of Yan's ruling: the constant
+        flips today and enforcement arms itself when the render is honest.
+        """
         manifest = synthetic_manifest()
-        manifest["gates"]["render_gate_blocking"] = True
         manifest["assets"][0]["levels"][1]["render_gate"]["material_source"] = (
             "FELL BACK to the .blend material 'Mat' — importer cannot read KTX2"
         )
-        original = CONFIG.RENDER_GATE_BLOCKING
-        CONFIG.RENDER_GATE_BLOCKING = True
-        try:
-            failures, _ = chain.verify(manifest, chain.Tree("/nonexistent-root"))
-        finally:
-            CONFIG.RENDER_GATE_BLOCKING = original
-        self.assertTrue(any("FALLBACK material" in f for f in failures), failures)
+        armed, reason = chain.effective_render_blocking(manifest)
+        self.assertFalse(armed)
+        self.assertIn("fallback material", reason)
+        failures, warnings = chain.verify(manifest, chain.Tree("/nonexistent-root"))
+        self.assertEqual([f for f in failures if "render gate" in f], [])
+        self.assertTrue(any("NOT ARMED" in w for w in warnings), warnings)
 
 
 class TargetedRegenerationTests(unittest.TestCase):
@@ -864,6 +880,59 @@ class RederivationSweepTests(unittest.TestCase):
                     ),
                 )
 
+    def test_abstention_is_rederived_from_the_geometry(self):
+        """The one verdict claimable without rendering anything, so the one most worth recomputing."""
+        self.assert_caught(
+            "L4 claims it was scored",
+            lambda m: m["assets"][0]["levels"][4]["render_gate"].__setitem__("abstained", False),
+        )
+        self.assert_caught(
+            "L1 claims it abstained",
+            lambda m: m["assets"][0]["levels"][1]["render_gate"].__setitem__("abstained", True),
+        )
+
+    def test_an_abstention_may_not_carry_a_verdict(self):
+        self.assert_caught(
+            "L4 abstained but records a pass",
+            lambda m: m["assets"][0]["levels"][4]["render_gate"].__setitem__("pass", True),
+        )
+
+    def test_the_recorded_footprint_is_rederived_from_the_bounding_box(self):
+        for index in range(1, 5):
+            with self.subTest(level=index):
+                self.assert_caught(
+                    f"L{index} screen_footprint_px doubled",
+                    lambda m, i=index: m["assets"][0]["levels"][i]["render_gate"].__setitem__(
+                        "screen_footprint_px",
+                        m["assets"][0]["levels"][i]["render_gate"]["screen_footprint_px"] * 2,
+                    ),
+                )
+
+    def test_a_rewritten_abstention_threshold_is_refused(self):
+        self.assert_caught(
+            "min_footprint_px = 1",
+            lambda m: m["assets"][0]["levels"][4]["render_gate"].__setitem__(
+                "min_footprint_px", 1.0
+            ),
+        )
+
+    def test_every_baked_tangent_count_is_gated(self):
+        """The tangents that SHIP — the gate the UV proxy could not stand in for."""
+        for index in range(1, 5):
+            with self.subTest(level=index):
+                self.assert_caught(
+                    f"L{index} degenerate_tangents = 1",
+                    lambda m, i=index: m["assets"][0]["levels"][i]["validity"].__setitem__(
+                        "degenerate_tangents", 1
+                    ),
+                )
+
+    def test_the_ratification_provenance_must_match_the_tree(self):
+        self.assert_caught(
+            "a different ruler",
+            lambda m: m["ladder"]["ratification"].__setitem__("by", "somebody else"),
+        )
+
     def test_the_unmutated_manifest_still_verifies(self):
         """The control: without it, a sweep that fails everything would look like a pass."""
         self.assertEqual(chain.verify(json.loads(self.text), chain.Tree(self.root))[0], [])
@@ -972,6 +1041,9 @@ class ShippedManifestTests(unittest.TestCase):
         # The view NAMES are dict keys inside every gate record, and they are checked: the set of
         # them is compared against the configured viewpoints, so a missing or invented view fails.
         checked |= {name for name, _e, _a in CONFIG.RENDER_GATE["views"]}
+        # Re-derived: abstention from the recorded box and distance; the ruling against config.
+        checked |= {"abstained", "screen_footprint_px", "bbox_mm", "ratification"}
+        checked |= set(CONFIG.RATIFICATION_EVIDENCE["ruling"])
         known = checked | chain.INFORMATIONAL_FIELDS
 
         def walk(node, seen):
@@ -1006,6 +1078,12 @@ class ShippedManifestTests(unittest.TestCase):
             self.assertEqual(level["tris"], tris, f"L{index} triangle count")
             self.assertAlmostEqual(level["switch_m"], switch_m, places=1, msg=f"L{index} switch")
             gate = level["render_gate"]
+            if verdict == "ABSTAIN":
+                self.assertTrue(gate["abstained"], f"L{index} should abstain")
+                self.assertIsNone(score, "an abstaining level has no score to record")
+                self.assertIsNone(gate["pass"], "an abstention is not a verdict")
+                continue
+            self.assertFalse(gate["abstained"], f"L{index} should be scored")
             self.assertAlmostEqual(
                 gate["worst_defect_score"], score, places=6, msg=f"L{index} defect score"
             )

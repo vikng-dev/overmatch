@@ -291,14 +291,22 @@ def cleanup(mesh, scale_m):
     tangent, so bevy hands the shader a defaulted one and the level draws a wrongly lit band while
     passing every positional check.
 
-    The dissolve distance is scale-relative (1e-6 of the mesh's bounding diagonal, sub-micron on a
-    track shoe): large enough to catch a true degenerate, far too small to move a vertex anyone
-    could measure. Everything is re-certified after this pass, on the shipped bytes, so the cleanup
-    cannot smuggle in a change of its own.
+    THE DISTANCE IS DECLARED IN `config.GATES["cleanup_dissolve_frac_of_diag"]` and it had to grow.
+    At 1e-6 of the bounding diagonal (0.77 um here) it removed nothing real, and the decimator kept
+    producing a NEEDLE — a 50 mm triangle 4.7 um thick — inherited from the source. That needle
+    passes every positional gate honestly (its altitude is above the sliver floor, which is anchored
+    to the source's own worst) and still breaks the loader: after decimation the corner at its tip
+    ends up with a fan of one, and mikktspace declines to give it a tangent.
+
+    So the distance is now 1e-5 of the diagonal, 7.7 um on this shoe. What that spans is worth
+    stating plainly: it removes the 4.7 um needle and leaves the next-thinnest features (21 um and
+    56 um edges) untouched, and it is three orders of magnitude below e1 = 3.89 mm — the finest lie
+    the ladder can even express. Everything is re-certified after this pass, on the shipped bytes,
+    so if it moved anything that mattered the deviation gates would say so.
     """
     bm = bmesh.new()
     bm.from_mesh(mesh)
-    distance = max(scale_m * 1.0e-6, 1.0e-9)
+    distance = max(scale_m * CONFIG.GATES["cleanup_dissolve_frac_of_diag"], 1.0e-9)
     before = len(bm.faces)
     bmesh.ops.dissolve_degenerate(bm, dist=distance, edges=bm.edges[:])
     loose_verts = [v for v in bm.verts if not v.link_faces]
@@ -496,9 +504,16 @@ def write_level_glb(mesh, node_name, path):
 
     No material from either direction: the slots are cleared AND `export_materials='NONE'` is
     passed, because a level wears the source's material at bind time and a second copy in these
-    bytes would be a second answer to how the asset looks. `export_tangents=False` for the same
-    reason the source does not carry them: they are generated at bind from the UVs, which is why
-    the tangent gate is about UV area rather than about a TANGENT accessor.
+    bytes would be a second answer to how the asset looks.
+
+    TANGENTS ARE BAKED, and that is a correctness fix rather than an optimisation. They used to be
+    left out and generated at bind, so the shipped bytes did not contain the thing that renders and
+    the pipeline's tangent gate measured a PROXY for it — zero UV-degenerate faces, a necessary
+    condition and not the loader's. Measured on this corpus: every level had zero UV-degenerate
+    faces, and three of them still contained one corner that mikktspace gives up on and hands the
+    shader a defaulted tangent. Baking closes the gap by construction — `bevy_gltf` generates
+    tangents only when the attribute is ABSENT (`loader/mod.rs:838`), so what is certified here is
+    what renders, and the gate can measure the values themselves.
     """
     mesh.materials.clear()
     # The MESH DATABLOCK NAME lands in the glb's JSON chunk, so it has to be a property of the
@@ -529,7 +544,7 @@ def write_level_glb(mesh, node_name, path):
             export_materials="NONE",
             export_normals=True,
             export_texcoords=True,
-            export_tangents=False,
+            export_tangents=True,
         )
         if "FINISHED" not in result:
             raise GenerationError("export", f"export_scene.gltf returned {result} for {path}")
@@ -582,6 +597,10 @@ def validity_failures(validity, source_validity, gates):
          "face(s) with degenerate UV area would take a DEFAULTED tangent at bind"),
         ("tangent_default_verts", gates["max_tangent_default_verts"],
          "vertex/vertices whose every incident face has degenerate UV area"),
+        ("degenerate_tangents", gates["max_degenerate_tangents"],
+         "BAKED tangent(s) the loader would use verbatim that are zero-length, non-finite, or "
+         "carry a bitangent sign that is not +/-1 — mikktspace gave up on them, and unlike the UV "
+         "test above this is the thing itself rather than a necessary condition on it"),
     ):
         if validity[key] > limit:
             failures.append(f"{validity[key]} {description}")
@@ -869,14 +888,24 @@ def build_chain(asset, root, run_render_gate, out_dir):
             report["material_source"] = render_material_source
         for level, report in zip(levels[1:], render_reports):
             level["render_gate"] = report
+            if report["abstained"]:
+                log(f"         render L{level['level']} vs {level['parent_level']} at "
+                    f"{report['distance_m']:.0f} m: ABSTAINS — "
+                    f"{report['screen_footprint_px']:.1f} px across, under the ratified "
+                    f"{report['min_footprint_px']:.0f} px")
+                continue
             log(f"         render L{level['level']} vs {level['parent_level']} at "
                 f"{report['distance_m']:.0f} m: worst mean |dI|={report['worst_mean_abs_diff']:.4f} "
                 f"frac>{CONFIG.RENDER_GATE['over_threshold']}={report['worst_frac_over']:.4f}  "
                 f"defect score={report['worst_defect_score']:.3f} "
                 f"(0=render noise, 1={CONFIG.RENDER_GATE['defect_normal_deg']:g}deg broken "
-                f"normals) -> {'PASS' if report['pass'] else 'FAIL'}")
-        bad = [r for r in render_reports if not r["pass"]]
-        if bad and CONFIG.RENDER_GATE_BLOCKING:
+                f"normals, limit {CONFIG.RENDER_GATE['defect_fraction']:g}) -> "
+                f"{'PASS' if report['pass'] else 'FAIL'}")
+        bad = [r for r in render_reports if not r["abstained"] and not r["pass"]]
+        armed = CONFIG.RENDER_GATE_BLOCKING and not str(
+            render_material_source
+        ).startswith("FELL BACK")
+        if bad and armed:
             raise GenerationError(
                 "render-gate",
                 "the rendered difference exceeded the declared thresholds for: "
@@ -885,10 +914,11 @@ def build_chain(asset, root, run_render_gate, out_dir):
         if bad:
             log("  ***********************************************************************")
             log(f"  RENDER GATE FAILED for {', '.join(r['label'] for r in bad)} — and did NOT")
-            log("  block, because config.RENDER_GATE_BLOCKING is False: the defect_fraction it")
-            log("  judges against is NOT RATIFIED. Every number is recorded per level in the")
-            log("  manifest and this warning is repeated by `chain.py --verify`. Ratify the")
-            log("  threshold and set RENDER_GATE_BLOCKING = True to make this a refusal.")
+            log("  block. Blocking is RATIFIED but not ARMED: this run judged the levels under a")
+            log("  FALLBACK material, because Blender cannot read the KTX2 textures the mip bake")
+            log("  writes, and blocking on a number measured with the wrong textures would")
+            log("  certify the wrong thing. Every number is recorded per level and this warning is")
+            log("  repeated by `chain.py --verify`. Fix the material path and it arms itself.")
             log("  ***********************************************************************")
 
     return {
@@ -980,6 +1010,9 @@ def main(argv):
             "right_wall_m": round(CONFIG.RIGHT_WALL_M, 6),
             "right_wall_source": CONFIG.RIGHT_WALL_SOURCE,
             "reference_view": CONFIG.REFERENCE_VIEW,
+            # The ruling travels WITH the corpus, not just beside it in a source file: a threshold
+            # someone ratified by eye is only meaningful next to who ruled and on what.
+            "ratification": dict(CONFIG.RATIFICATION_EVIDENCE["ruling"]),
         },
         "gates": {
             "numeric": {k: v for k, v in CONFIG.GATES.items()},

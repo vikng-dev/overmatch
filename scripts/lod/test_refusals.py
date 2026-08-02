@@ -271,6 +271,38 @@ class ValidityTests(unittest.TestCase):
             surface.validity(self.gates)["origin_radius_m"], 5.0, places=6
         )
 
+    def test_the_digest_separates_meshes_that_differ_only_in_uv(self):
+        """Codex's counterexample: same positions and topology, one with a collapsed UV.
+
+        Their validity differs — `tangent_default_faces` 0 against 2 — so treating them as one
+        candidate can discard the good one and keep the broken one, or the reverse. Identity has to
+        cover every attribute the gates measure.
+        """
+        good = self.surface("uv_good.glb", SQUARE_POS, SQUARE_IDX, SQUARE_UV)
+        collapsed = self.surface(
+            "uv_collapsed.glb", SQUARE_POS, SQUARE_IDX, [[0, 0], [0, 0], [0, 0], [0, 0]]
+        )
+        self.assertEqual(good.validity(self.gates)["tangent_default_faces"], 0)
+        self.assertEqual(collapsed.validity(self.gates)["tangent_default_faces"], 2)
+        self.assertNotEqual(good.digest(), collapsed.digest())
+
+    def test_the_digest_separates_meshes_that_differ_only_in_winding(self):
+        """Same points, one triangle wound the other way: `orientation_flips` 0 against 1."""
+        good = self.surface("wind_good.glb", SQUARE_POS, [0, 1, 2, 0, 2, 3], SQUARE_UV)
+        flipped = self.surface("wind_flipped.glb", SQUARE_POS, [0, 1, 2, 0, 3, 2], SQUARE_UV)
+        self.assertEqual(good.validity(self.gates)["orientation_flips"], 0)
+        self.assertEqual(flipped.validity(self.gates)["orientation_flips"], 1)
+        self.assertNotEqual(good.digest(), flipped.digest())
+
+    def test_the_digest_separates_meshes_that_differ_only_in_normals(self):
+        normals = [[0, 0, 1]] * 4
+        tilted = [[0, 0.5, 0.866]] * 4
+        a = M.from_glb(build_glb(os.path.join(self.dir, "n_a.glb"), SQUARE_POS, SQUARE_IDX,
+                                 normals=normals, uvs=SQUARE_UV))
+        b = M.from_glb(build_glb(os.path.join(self.dir, "n_b.glb"), SQUARE_POS, SQUARE_IDX,
+                                 normals=tilted, uvs=SQUARE_UV))
+        self.assertNotEqual(a.digest(), b.digest())
+
     def test_the_digest_ignores_index_order_but_not_geometry(self):
         """The cache key that collapses a decimation plateau — it must key on the MESH, not the file."""
         a = self.surface("d1.glb", SQUARE_POS, SQUARE_IDX, SQUARE_UV)
@@ -448,13 +480,41 @@ class BisectionTests(unittest.TestCase):
         return max(under) if under else None
 
     def test_the_bisection_returns_the_greatest_count_under_every_budget(self):
+        """EVERY budget in the range, not a sample of them — the name has to be true."""
         evaluate, realizable = self.staircase(
             [(0.0, 12), (0.1, 40), (0.25, 41), (0.4, 190), (0.55, 191), (0.7, 640), (0.9, 1661)]
         )
-        for budget in range(10, 1700, 7):
-            with self.subTest(budget=budget):
-                count, _ratio = M.bisect_to_budget(evaluate, budget)
-                self.assertEqual(count, self.truth(realizable, budget))
+        for budget in range(0, 1700):
+            count, _ratio = M.bisect_to_budget(evaluate, budget)
+            self.assertEqual(count, self.truth(realizable, budget), f"at budget {budget}")
+
+    def test_a_plateau_narrower_than_a_fixed_halving_count_is_still_found(self):
+        """The executed counterexample against the retired fixed-28-halving bisection.
+
+        A 1e-10-wide plateau at 999 is invisible to 28 halvings, which return 100 for a budget of
+        1000. Exhausting the bracket removes the precondition rather than assuming Blender's ratio
+        quantisation is coarse enough to make it safe — nobody had measured that.
+        """
+        # 0.3, not 0.5: a plateau sitting ON a dyadic rational is found by the first probe,
+        # which would make the counterexample accidental rather than structural.
+        evaluate, realizable = self.staircase([(0.0, 100), (0.3, 999), (0.3 + 1e-10, 2000)])
+        self.assertEqual(self.truth(realizable, 1000), 999)
+        self.assertEqual(M.bisect_to_budget(evaluate, 1000)[0], 999)
+
+        def fixed_halvings(budget, halvings):
+            low, high, best = 0.0, 1.0, None
+            for _ in range(halvings):
+                middle = (low + high) / 2.0
+                count = evaluate(middle)
+                if count <= budget:
+                    best = (count, middle)
+                    low = middle
+                else:
+                    high = middle
+            return best[0] if best else None
+
+        self.assertEqual(fixed_halvings(1000, 28), 100, "28 halvings miss the narrow plateau")
+        self.assertEqual(fixed_halvings(1000, 40), 999, "more halvings find it — hence no fixed N")
 
     def test_adjacent_steps_are_resolved(self):
         """Steps one triangle apart — the case a coarse bracket would merge."""
@@ -488,7 +548,7 @@ class BisectionTests(unittest.TestCase):
 
         def early_stopping(budget):
             low, high, best = 0.0, 1.0, None
-            for _ in range(M.BISECTION_HALVINGS):
+            for _ in range(28):
                 middle = (low + high) / 2.0
                 count = evaluate(middle)
                 if count <= budget:

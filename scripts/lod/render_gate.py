@@ -45,8 +45,10 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import config as CONFIG  # noqa: E402
+
 # Production, shared with the verifier so the tile FOV is ONE expression, not two.
-from manifest import tile_vfov_rad  # noqa: E402
+from manifest import screen_footprint_px, tile_vfov_rad  # noqa: E402
 
 
 def _engine(scene):
@@ -307,6 +309,30 @@ def compare(pairs, material, render_config, view, out_dir):
 
     results = []
     for label, parent, child, distance in pairs:
+        # ABSTENTION FIRST, because rendering an asset too small to judge produces a number that
+        # looks like a verdict. Below the ratified minimum the defect reference collapses — a
+        # 20-degree normal tilt is invisible on a thirteen-pixel object — and the score becomes a
+        # ratio of two nothings (the same L4 geometry scored 7.68 in one round and 0.73 in the
+        # next). The gate says so and scores nothing.
+        bbox_mm = [round(float(v) * 1000.0, 4) for v in (child.bbox_max - child.bbox_min)]
+        footprint_px = screen_footprint_px(bbox_mm, distance, view)
+        if footprint_px < render_config["min_footprint_px"]:
+            results.append({
+                "label": label,
+                "distance_m": round(distance, 3),
+                "abstained": True,
+                "screen_footprint_px": round(footprint_px, 4),
+                "min_footprint_px": render_config["min_footprint_px"],
+                "bbox_mm": bbox_mm,
+                "reason": (
+                    f"the asset is {footprint_px:.1f} px across at {distance:.0f} m, under the "
+                    f"ratified {render_config['min_footprint_px']:.0f} px this gate needs to have "
+                    f"an opinion — the defect reference collapses at that size, so any score would "
+                    f"be a ratio of two nothings"
+                ),
+                "pass": None,
+            })
+            continue
         centre = tuple(0.5 * (parent.bbox_min + parent.bbox_max))
         camera.data.lens_unit = "FOV"
         camera.data.angle = tile_vfov_rad(render_config, view)
@@ -375,6 +401,10 @@ def compare(pairs, material, render_config, view, out_dir):
         results.append({
             "label": label,
             "distance_m": round(distance, 3),
+            "abstained": False,
+            "screen_footprint_px": round(footprint_px, 4),
+            "min_footprint_px": render_config["min_footprint_px"],
+            "bbox_mm": bbox_mm,
             "tile_px": render_config["tile_px"],
             "tile_vfov_rad": round(tile_vfov_rad(render_config, view), 8),
             "samples": render_config["samples"],
@@ -383,12 +413,11 @@ def compare(pairs, material, render_config, view, out_dir):
             "worst_mean_abs_diff": round(worst_mean, 6),
             "worst_frac_over": round(worst_frac, 6),
             "worst_defect_score": round(worst_score, 6),
+            # ONE DECLARATION, TWO READERS. The verifier requires exactly this set, so a threshold
+            # cannot be recorded here and go unchecked there — which is how deleting one of the
+            # five from a level used to verify clean.
             "thresholds": {
-                "max_mean_abs_diff": render_config["max_mean_abs_diff"],
-                "max_footprint_frac_over": render_config["max_footprint_frac_over"],
-                "over_threshold": render_config["over_threshold"],
-                "defect_fraction": render_config["defect_fraction"],
-                "defect_normal_deg": render_config["defect_normal_deg"],
+                key: render_config[key] for key in CONFIG.RECORDED_GATE_THRESHOLDS
             },
             "pass": bool(passed),
         })

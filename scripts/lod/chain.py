@@ -48,8 +48,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import config as CONFIG  # noqa: E402
 from manifest import (  # noqa: E402
-    Tree, derive, load, merge_asset_entries, sha256_file, switch_distance_m,
-    tile_vfov_rad,
+    Tree, derive, load, merge_asset_entries, sha256_file, screen_footprint_px,
+    switch_distance_m, tile_vfov_rad,
 )
 
 
@@ -78,7 +78,7 @@ LEVEL_VALIDITY_FIELDS = (
     "tris", "verts", "components", "duplicate_faces", "nonfinite_attrs", "orientation_flips",
     "nonmanifold_edges", "slivers_below_floor", "tangent_default_faces", "tangent_default_verts",
     "min_altitude_m", "origin_radius_m", "min_altitude_floor_m", "min_tri_area_mm2",
-    "boundary_edges",
+    "boundary_edges", "baked_tangents", "degenerate_tangents", "min_tangent_length",
 )
 
 #: Render-gate fields required on every generated level, and which of them must be finite numbers.
@@ -149,6 +149,28 @@ def _finite(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
+def effective_render_blocking(manifest):
+    """Is the rendered-difference gate ARMED? Returns (armed, reason).
+
+    RATIFIED is not ARMED. Yan ruled the threshold, so `config.RENDER_GATE_BLOCKING` is True; but a
+    verdict measured under a FALLBACK material was measured with the wrong textures, and blocking on
+    it would be a gate certifying the wrong thing. So the flag arms itself the moment the material
+    path is honest, with no second decision for anyone to remember — and until then the failures are
+    recorded and shouted about rather than enforced.
+    """
+    if not CONFIG.RENDER_GATE_BLOCKING:
+        return False, "config.RENDER_GATE_BLOCKING is False"
+    for asset in manifest.get("assets", []):
+        for level in asset.get("levels", []):
+            gate = level.get("render_gate") or {}
+            if str(gate.get("material_source", "")).startswith("FELL BACK"):
+                return False, (
+                    f"{asset.get('name')} L{level.get('level')} was judged under a fallback "
+                    f"material ({gate.get('material_source')})"
+                )
+    return True, "ratified and rendering the shipped material"
+
+
 def _require_numbers(record, fields, label, what, failures):
     """Every named field must be present AND finite. Returns False on any violation."""
     ok = True
@@ -172,6 +194,55 @@ def _check_gate_record(gate, label, failures):
     support is a contradiction, and contradictions are exactly what a manifest is for catching.
     """
     ok = True
+    for key in ("abstained", "screen_footprint_px", "min_footprint_px", "bbox_mm", "distance_m",
+                "material_source"):
+        if key not in gate:
+            failures.append(f"{label}: render-gate record has no {key!r}")
+            ok = False
+    if not ok:
+        return False
+
+    # ABSTENTION IS RE-DERIVED FROM GEOMETRY, never trusted. It is the one verdict that can be
+    # claimed without rendering anything, so it is the one most worth recomputing: the asset's
+    # projected diameter at the evaluation distance against the ratified minimum.
+    expected_footprint = screen_footprint_px(
+        gate["bbox_mm"], gate["distance_m"], CONFIG.REFERENCE_VIEW
+    )
+    # 1e-2 px: the bounding box is recorded rounded to 0.1 um, so the re-derivation carries a
+    # little rounding of its own before anything is actually wrong.
+    if abs(gate["screen_footprint_px"] - expected_footprint) > 1e-2:
+        failures.append(
+            f"{label}: records a {gate['screen_footprint_px']} px footprint but its bounding box "
+            f"at {gate['distance_m']} m gives {expected_footprint:.4f} px"
+        )
+        return False
+    if gate["min_footprint_px"] != CONFIG.RENDER_GATE["min_footprint_px"]:
+        failures.append(
+            f"{label}: abstention was judged against {gate['min_footprint_px']} px, the tree "
+            f"declares {CONFIG.RENDER_GATE['min_footprint_px']}"
+        )
+        return False
+    should_abstain = expected_footprint < CONFIG.RENDER_GATE["min_footprint_px"]
+    if bool(gate["abstained"]) != should_abstain:
+        failures.append(
+            f"{label}: records abstained={gate['abstained']} but a {expected_footprint:.1f} px "
+            f"footprint against a {CONFIG.RENDER_GATE['min_footprint_px']:.0f} px minimum means "
+            f"{should_abstain}"
+        )
+        return False
+    if gate["abstained"]:
+        # Nothing was scored, so nothing may be recorded as if it had been.
+        if gate.get("pass") is not None:
+            failures.append(
+                f"{label}: abstained, but records a verdict {gate['pass']!r} — an abstention is "
+                f"not a pass"
+            )
+            return False
+        if not gate.get("reason"):
+            failures.append(f"{label}: abstained without recording why")
+            return False
+        return True
+
     for key in GATE_FIELDS:
         if key not in gate:
             failures.append(f"{label}: render-gate record has no {key!r}")
@@ -186,8 +257,7 @@ def _check_gate_record(gate, label, failures):
     # EVERY recorded threshold, not a chosen four: a record naming `defect_normal_deg = 999` was
     # describing a gate run against a defect nobody declared, and nothing looked.
     thresholds = gate.get("thresholds") or {}
-    for key in ("defect_fraction", "max_mean_abs_diff", "max_footprint_frac_over",
-                "over_threshold"):
+    for key in CONFIG.RECORDED_GATE_THRESHOLDS:
         if key not in thresholds:
             failures.append(f"{label}: render-gate thresholds have no {key!r}")
             ok = False
@@ -322,16 +392,9 @@ def _check_gate_record(gate, label, failures):
         )
         return False
 
-    # THE PRECONDITION ON BLOCKING, made mechanical. A gate judged under fallback materials must
-    # not be allowed to block: the number would be measured with the wrong textures.
-    if CONFIG.RENDER_GATE_BLOCKING and str(gate["material_source"]).startswith("FELL BACK"):
-        failures.append(
-            f"{label}: RENDER_GATE_BLOCKING is on, but this level was judged under a FALLBACK "
-            f"material ({gate['material_source']}). Blocking on a number measured with the wrong "
-            f"textures certifies the wrong thing — fix the material path first (see "
-            f"config.RENDER_GATE_BLOCKING)"
-        )
-        return False
+    # The fallback-material precondition is NOT a failure here any more: it disarms the gate rather
+    # than condemning the manifest. `effective_render_blocking` owns that decision once, for the
+    # whole corpus, and says so loudly — see `RENDER_GATE_BLOCKING`.
     return True
 
 
@@ -481,6 +544,13 @@ def _check_config_match(manifest, failures):
         value = ladder.get(key)
         if not _finite(value) or abs(float(value) - float(declared)) > 1e-6:
             failures.append(f"ladder {key}: manifest {value!r} != config {declared}")
+    ruling = ladder.get("ratification") or {}
+    if ruling != dict(CONFIG.RATIFICATION_EVIDENCE["ruling"]):
+        failures.append(
+            "the manifest's ratification provenance differs from config.RATIFICATION_EVIDENCE — "
+            "the threshold this corpus was judged against is not the one the tree records a ruling "
+            "for"
+        )
     view = ladder.get("reference_view") or {}
     for key in ("vfov_rad", "height_px", "budget_px"):
         if not _finite(view.get(key)) or abs(
@@ -609,6 +679,12 @@ def verify(manifest, tree):
     if not _check_schema(manifest, failures):
         return failures, warnings
     _check_config_match(manifest, failures)
+    armed, arming_reason = effective_render_blocking(manifest)
+    if not armed and CONFIG.RENDER_GATE_BLOCKING:
+        warnings.append(
+            f"the rendered-difference gate is RATIFIED but NOT ARMED: {arming_reason}. It arms "
+            f"itself once that is fixed — no second decision to remember."
+        )
 
     for chain, asset in zip(derive(manifest), manifest["assets"]):
         try:
@@ -638,6 +714,7 @@ def verify(manifest, tree):
                 ("nonmanifold_edges", CONFIG.GATES["max_nonmanifold_edges"]),
                 ("tangent_default_faces", CONFIG.GATES["max_tangent_default_faces"]),
                 ("tangent_default_verts", CONFIG.GATES["max_tangent_default_verts"]),
+                ("degenerate_tangents", CONFIG.GATES["max_degenerate_tangents"]),
                 ("slivers_below_floor", 0),
             ):
                 if validity[key] > limit:
@@ -689,6 +766,14 @@ def verify(manifest, tree):
                     f"{previous['switch_m']:.1f} m"
                 )
             gate = level["render_gate"]
+            if gate.get("abstained"):
+                warnings.append(
+                    f"{label}: render gate ABSTAINED — {gate['screen_footprint_px']:.1f} px across "
+                    f"at {gate['distance_m']:.0f} m, under the ratified "
+                    f"{gate['min_footprint_px']:.0f} px (Yan, 2026-08-02)"
+                )
+                previous = row
+                continue
             if abs(gate["distance_m"] - level["switch_m"]) > 1e-3:
                 failures.append(
                     f"{label}: the render gate was run at {gate['distance_m']} m but this level "
@@ -700,13 +785,10 @@ def verify(manifest, tree):
                     f"{gate.get('worst_defect_score')} against a limit of "
                     f"{gate.get('thresholds', {}).get('defect_fraction')})"
                 )
-                if CONFIG.RENDER_GATE_BLOCKING:
+                if armed:
                     failures.append(verdict)
                 else:
-                    warnings.append(
-                        verdict + " — NOT enforced: defect_fraction is unratified "
-                        "(config.RENDER_GATE_BLOCKING is False)"
-                    )
+                    warnings.append(f"{verdict} — NOT enforced: {arming_reason}")
             previous = row
     return failures, warnings
 

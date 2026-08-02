@@ -142,7 +142,16 @@ def from_glb(path, node_name=None, name=None):
     positions = gltf_to_blender(_accessor(gltf, binary, attributes["POSITION"]).astype(np.float64))
     normals = gltf_to_blender(_accessor(gltf, binary, attributes["NORMAL"]).astype(np.float64))
     uvs = _accessor(gltf, binary, attributes["TEXCOORD_0"]).astype(np.float64)
-    return Surface(positions, indices, normals[indices], uvs[indices], name or path)
+    # TANGENT is vec4: xyz is the tangent, w the bitangent sign. Decoded when present because the
+    # loader USES it verbatim rather than generating one — so it is part of what ships, and the
+    # gate measures it rather than a proxy for it.
+    tangents = None
+    if "TANGENT" in attributes:
+        raw = _accessor(gltf, binary, attributes["TANGENT"]).astype(np.float64)
+        tangents = np.concatenate(
+            [gltf_to_blender(raw[:, :3]), raw[:, 3:4]], axis=1
+        )
+    return Surface(positions, indices, normals[indices], uvs[indices], name or path, tangents)
 
 
 def from_bpy_mesh(mesh, matrix=None, name="source"):
@@ -186,8 +195,11 @@ def from_bpy_mesh(mesh, matrix=None, name="source"):
 class Surface:
     """Positions, triangles, per-corner normals and UVs, plus every derived quality counter."""
 
-    def __init__(self, verts, tri_v, corner_n, corner_uv, name):
+    def __init__(self, verts, tri_v, corner_n, corner_uv, name, tangents=None):
         self.name = name
+        #: Per-vertex vec4 tangents AS SHIPPED, or None when the file carries none (in which
+        #: case the loader generates them and this pipeline can only gate a proxy).
+        self.tangents = None if tangents is None else np.ascontiguousarray(tangents)
         self.verts = np.ascontiguousarray(verts, dtype=np.float64)
         self.tri_v = np.ascontiguousarray(tri_v, dtype=np.int64)
         self.corner_n = np.ascontiguousarray(corner_n, dtype=np.float64)
@@ -234,16 +246,41 @@ class Surface:
         return self._bvh
 
     def digest(self):
-        """A stable hash of the geometry — the cache key that collapses a decimation plateau.
+        """A stable hash of EVERYTHING THAT SHIPS — the candidate identity, and a plateau's key.
 
-        Positions are rounded to a nanometre before hashing: two collapse ratios that produce the
-        SAME mesh must hash the same, and a float that differs in its last bit is the same mesh.
+        It hashed positions and SORTED triangle indices, which threw away exactly the attributes the
+        gates measure: sorting each triangle discards its winding, and normals and UVs were not in
+        it at all. Two meshes differing only in winding, or only in a collapsed UV, hashed
+        identically — so one of them was silently dropped as a duplicate candidate, and it could be
+        the one with a defect (or the only one that met a rung).
+
+        What goes in: positions, per-corner normals and per-corner UVs, and each triangle's corner
+        ORDER. What stays out: the arbitrary choices a serializer makes — which corner is listed
+        first (each triangle is rotated to start at its lowest vertex index, which preserves winding
+        while ignoring the rotation), the order triangles appear in (rows are sorted), and float
+        noise below a nanometre / 1e-7 of a UV unit.
         """
         import hashlib
 
+        # Rotate each triangle to start at its smallest index: winding-preserving, listing-agnostic.
+        starts = np.argmin(self.tri_v, axis=1)
+        columns = (starts[:, None] + np.arange(3)[None, :]) % 3
+        rows = np.take_along_axis(self.tri_v, columns, axis=1)
+        normals = np.take_along_axis(
+            self.corner_n, columns[:, :, None].repeat(3, axis=2), axis=1
+        )
+        uvs = np.take_along_axis(self.corner_uv, columns[:, :, None].repeat(2, axis=2), axis=1)
+
+        quantised = np.concatenate([
+            rows.astype(np.int64),
+            np.round(normals.reshape(len(rows), -1) * 1e6).astype(np.int64),
+            np.round(uvs.reshape(len(rows), -1) * 1e7).astype(np.int64),
+        ], axis=1)
+        order = np.lexsort(quantised.T[::-1])
+
         h = hashlib.sha256()
         h.update(np.round(self.verts * 1e9).astype(np.int64).tobytes())
-        h.update(np.sort(self.tri_v, axis=1).tobytes())
+        h.update(np.ascontiguousarray(quantised[order]).tobytes())
         return h.hexdigest()
 
     def altitudes(self):
@@ -334,9 +371,29 @@ class Surface:
         np.add.at(touched, self.tri_v.reshape(-1), 1)
         np.add.at(bad_touched, self.tri_v[bad_uv].reshape(-1), 1)
 
+        # THE TANGENTS THAT SHIP. `tangent_default_faces` above is a necessary condition on the
+        # UVs; this is the thing itself. mikktspace declines a corner for reasons a UV-area test
+        # cannot see — measured on this corpus, three levels had zero UV-degenerate faces and one
+        # give-up tangent each.
+        if self.tangents is None:
+            baked, degenerate, worst = 0, 0, 0.0
+        else:
+            lengths = np.linalg.norm(self.tangents[:, :3], axis=1)
+            signs = np.abs(self.tangents[:, 3])
+            bad = (
+                (lengths < gates["tangent_min_length"])
+                | (~np.isfinite(self.tangents).all(axis=1))
+                | (np.abs(signs - 1.0) > 1e-3)
+            )
+            baked, degenerate = int(len(lengths)), int(bad.sum())
+            worst = float(lengths.min())
+
         return {
             "tris": self.tri_count,
             "verts": self.vert_count,
+            "baked_tangents": baked,
+            "degenerate_tangents": degenerate,
+            "min_tangent_length": round(worst, 9),
             "components": self.components(),
             "duplicate_faces": duplicates,
             "nonfinite_attrs": nonfinite,
@@ -464,38 +521,54 @@ class EnumerationError(Exception):
     """The decimator's realizable outputs could not be enumerated completely. Never degrade."""
 
 
-#: Halvings the budget bisection runs. 28 resolves a ratio in [0,1] to 4e-9, against decimator
-#: steps of order 1/edge_count — so the final interval cannot straddle two steps.
-BISECTION_HALVINGS = 28
+#: Hard cap on bisection steps. The ordinary case exhausts its bracket in ~60; the worst case
+#: walks `high` down through the denormals and needs ~1075. This is a runaway guard, not the
+#: stopping rule — the stopping rule is that the bracket holds no representable ratio.
+BISECTION_MAX_STEPS = 1100
 
 
-def bisect_to_budget(evaluate, budget, halvings=BISECTION_HALVINGS):
+def bisect_to_budget(evaluate, budget, max_steps=BISECTION_MAX_STEPS):
     """The GREATEST count `evaluate` can reach at or below `budget`. Returns (count, ratio).
 
     `evaluate(ratio) -> count` must be monotone non-decreasing — for the Blender decimate modifier
-    it is, since a larger ratio keeps more triangles. Given that, the largest ratio whose count is
-    under budget carries the largest such count, and the bisection converges onto it.
+    it is, since a larger ratio keeps more triangles. Given only that, this is exact: it runs until
+    the bracket is EXHAUSTED at f64 resolution (the midpoint stops being strictly between the ends),
+    so no plateau can hide inside the final interval however narrow it is.
+
+    IT USED TO RUN A FIXED 28 HALVINGS, and that made the claim conditional on a minimum plateau
+    width nobody had established. Executed counterexample: a staircase realizing 100, 999 and 2000
+    where the 999 plateau is 1e-10 wide returns 100 at a budget of 1000 — 28 halvings cannot see it,
+    32 can. Rather than assume Blender's ratio quantisation is coarse enough (it may well be; nobody
+    measured it), the loop now exhausts the bracket and the precondition disappears.
 
     THIS IS WHERE THE ENUMERATION'S CONTRACT IS ESTABLISHED, and it is deliberately a pure function
-    of an injected `evaluate` so that it can be PROVEN on synthetic staircases whose answer is known
-    independently — see `test_refusals.BisectionTests`. That matters because the enumeration built
-    on top cannot establish it: an enumerator can only ask the oracle, and an oracle that lies
+    of an injected `evaluate` so it can be checked against synthetic staircases whose answer is
+    known independently — see `test_refusals.BisectionTests`. That matters because the enumeration
+    built on top cannot establish it: an enumerator can only ask the oracle, and an oracle that lies
     consistently answers every question consistently. The honesty has to come from here.
-
-    It runs to convergence. It used to stop as soon as the result was within 1 % of the budget,
-    which is fine for "give me a mesh about this big" and fatal for "give me the greatest realizable
-    count at or below this budget" — the property the whole enumeration rests on.
     """
-    low, high, best = 0.0, 1.0, None
-    for _ in range(halvings):
+    # Ratio 0 first, which is both the floor and the bound on the search: by monotonicity nothing
+    # below it exists, so a budget under it is unreachable and there is nothing to bisect. Without
+    # this the "everything exceeds the budget" case walks `high` down through a thousand denormals.
+    floor_count = evaluate(0.0)
+    if floor_count > budget:
+        return None, None
+
+    low, high, best = 0.0, 1.0, (floor_count, 0.0)
+    for _ in range(max_steps):
         middle = (low + high) / 2.0
+        if middle <= low or middle >= high:
+            return best                 # the bracket holds no representable ratio: exhausted
         count = evaluate(middle)
         if count <= budget:
             best = (count, middle)
             low = middle
         else:
             high = middle
-    return best if best is not None else (None, None)
+    raise EnumerationError(
+        f"the budget bisection did not exhaust its bracket in {max_steps} steps — the evaluator "
+        f"is not behaving like a monotone step function"
+    )
 
 
 def enumerate_staircase(floor_tris, ceiling_tris, probe, spot_checks=0, seed=0, max_outputs=None):
