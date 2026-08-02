@@ -569,6 +569,23 @@ pub(crate) fn decode_height_grid(
         info!("terrain: ForceFlatWorld set — keeping the flat slab + authored course");
         return;
     }
+    if crate::lod_showcase::enabled() {
+        // A GRID of zeros, not "no grid": the missing-file branch below drops the resource, and the
+        // world then builds its flat slab AND its authored obstacle course, which is scenery in
+        // front of the thing being looked at. A zero grid keeps the real terrain path — same
+        // decode-free construction, same collider, same render tiles, same oracle — so the one
+        // surface stays one surface and it is level everywhere. Flattening only the render mesh
+        // would leave the tanks standing on invisible hills, which is the exact class of bug the
+        // one-surface doctrine exists to make impossible.
+        let size = GRID_RESOLUTION;
+        let samples = vec![0.0_f32; (size as usize) * (size as usize)];
+        info!(
+            "terrain: OVERMATCH_LOD_SHOWCASE set — {size}x{size} grid FLATTENED to y = 0 (oracle, \
+             collider and render mesh all from these samples)",
+        );
+        commands.insert_resource(HeightGrid::new(samples.into(), size));
+        return;
+    }
     if let Some(preset) = preset {
         info!(
             "terrain: pre-inserted height grid {size}x{size} — skipping the shipped map decode",
@@ -1527,11 +1544,142 @@ pub(crate) mod tests {
     /// are asserted the same way in `net::server`, because `tests/net_boundary.rs` forbids the sim
     /// from naming `crate::net` — single-player has to stay runnable with no netcode mounted. Both
     /// halves call [`assert_spawn_clears_terrain`], so there is still one rule and one assertion.
+    ///
+    /// The probe grid is in scope for exactly the same reason, and the FAR placement doubly so: it
+    /// is 28 hardcoded points, 60 m from the map edge, chosen by a scan rather than by playing there
+    /// — precisely the shape of thing that gets a coordinate wrong and falls forever.
     #[test]
     fn every_sim_spawn_point_lands_above_the_shipped_terrain() {
+        use crate::tank::scenario::{duel_spawn_xz, probe_spawn_xz};
+
         let grid = shipped_grid();
-        for (i, xz) in crate::tank::scenario::DUEL_SPAWN_XZ.iter().enumerate() {
-            assert_spawn_clears_terrain(&grid, &format!("offline duel {i}"), *xz);
+        // The count is capped by `OVERMATCH_PROBE_TANKS`, so a probe INDEX has no upper bound in
+        // principle. 28 is the block a 30-tank sweep spawns and the only one anyone places by hand.
+        const PROBES: usize = 28;
+        for far in [false, true] {
+            let placement = if far { "far" } else { "near" };
+            for (i, xz) in duel_spawn_xz(far).iter().enumerate() {
+                assert_spawn_clears_terrain(&grid, &format!("{placement} offline duel {i}"), *xz);
+            }
+            for i in 0..PROBES {
+                assert_spawn_clears_terrain(
+                    &grid,
+                    &format!("{placement} probe tank {i}"),
+                    probe_spawn_xz(far, i),
+                );
+            }
+        }
+    }
+
+    /// The far probe placement's REASON to exist, asserted as the quantity BEVY ACTUALLY MEASURES:
+    /// every probe's worst-case CAMERA-TO-SHOE distance must land inside ONE band of the shoe chain,
+    /// and that band must not be the base shoe's — or the "far" capture is measuring something other
+    /// than a reduced belt.
+    ///
+    /// # Why the tank-centre distance is the wrong number
+    ///
+    /// This test used to compare the probe's XZ distance from the CONTROLLED TANK'S SPAWN POINT
+    /// against the thresholds, and called that "conservative" because the orbit camera sits behind
+    /// the tank. It is not conservative, it is a different quantity in three ways at once:
+    ///
+    ///   * `check_visibility_ranges` measures camera origin to MESH origin in 3D, not tank centre to
+    ///     tank centre in XZ.
+    ///   * The camera is only "behind" for one mouse-look heading. Look is free, so the body can be
+    ///     up to [`ORBIT_FAR`] TOWARD the probes — which subtracts from the distance rather than
+    ///     adding to it.
+    ///   * A shoe is not at its tank's origin: the belt spans the hull, so each of a probe's 194
+    ///     shoes sits up to a footprint half-diagonal off the spawn point, and the near ones are
+    ///     what cross a threshold first.
+    ///
+    /// So the bound asserted here is `probe XZ distance − ORBIT_FAR − footprint half-diagonal`,
+    /// against the band with an explicit [`BAND_MARGIN_M`] to spare. The terrain height difference
+    /// between the duel pad and the probe block is deliberately NOT subtracted: 3D distance is
+    /// `√(xz² + Δy²) ≥ xz`, so any height delta (and the camera's own lift above the hull) only
+    /// pushes the probes FURTHER away, which is the safe direction for the near edge and the only
+    /// edge a finite band's far side would need — see the far half below.
+    ///
+    /// # Read off the BAND, not off a level number
+    ///
+    /// The band is FOUND — the level whose range contains the block — rather than named, because
+    /// WHICH level owns 588..633 m is an output of `scripts/lod/generate.py`, not a decision anyone
+    /// made. The chain that shipped when this placement was sited had one reduction opening at
+    /// 350 m; the certified ladder that replaced it has four, and the block now sits in L3's
+    /// `[501, 1050)` m. Nothing about the placement changed and nothing about it needed to. A test
+    /// that had named `shoe_lod_range(1)` would have gone red on a regeneration that broke nothing.
+    ///
+    /// What the test still refuses is the two ways the placement can stop meaning anything: the
+    /// block STRADDLING a threshold (half the tanks on one mesh, half on another, and a capture
+    /// that averages them), and the block landing back on the BASE shoe (the near placement with
+    /// extra steps).
+    #[test]
+    fn the_far_probe_placement_puts_every_probe_in_one_coarse_shoe_band() {
+        use crate::camera::ORBIT_FAR;
+        use crate::tank::scenario::{duel_spawn_xz, probe_spawn_xz};
+        use crate::track::link_view::{shoe_lod_levels, shoe_lod_range};
+
+        /// How much room the placement must have on either side of the band edge. A placement that
+        /// is inside its band by a metre is one heightmap re-author or one orbit tweak from being
+        /// outside it, and a capture that silently changes what it measures is worse than one that
+        /// fails to run.
+        const BAND_MARGIN_M: f32 = 25.0;
+
+        // The furthest a probe's own shoes reach from its spawn point, worst case: the corner of
+        // the square footprint every spawn is cleared over. The Tiger's belt (≈6.6 m long, ≈3.7 m
+        // outside-to-outside) fits well inside it, so this is a documented over-estimate rather
+        // than a measurement of the track — which is what a bound wants to be.
+        let shoe_reach = SPAWN_FOOTPRINT_HALF_M * std::f32::consts::SQRT_2;
+        let level_at = |d: f32| {
+            (0..shoe_lod_levels())
+                .find(|&l| shoe_lod_range(l).is_visible_at_all(d))
+                .unwrap_or_else(|| panic!("the chain tiles [0, inf), so {d} m is owned"))
+        };
+
+        let anchor = duel_spawn_xz(true)[0];
+        let mut band: Option<usize> = None;
+        for i in 0..28 {
+            let xz = probe_spawn_xz(true, i).distance(anchor);
+            // Camera pulled the full orbit radius TOWARD the probe, and the probe's nearest shoe
+            // reaching back at it. Height deltas omitted on purpose: they only add.
+            let nearest = xz - ORBIT_FAR - shoe_reach;
+            // The far end needs the terms the other way round, and no orbit help: the camera can
+            // equally sit ORBIT_FAR on the far side, and the probe's furthest shoe reaches away.
+            let furthest = xz + ORBIT_FAR + shoe_reach;
+            let level = level_at(nearest);
+            assert!(
+                level > 0,
+                "far probe {i} sits {xz:.0} m from the controlled tank, but its nearest shoe can be \
+                 {nearest:.0} m from the camera (orbit {ORBIT_FAR} m + {shoe_reach:.1} m of hull), \
+                 which is still the BASE shoe's band — the far placement would render exactly what \
+                 the near one does",
+            );
+            assert_eq!(
+                level_at(furthest),
+                level,
+                "far probe {i} STRADDLES a threshold: its shoes span {nearest:.0}..{furthest:.0} m \
+                 from the camera, which crosses out of LOD{level}'s band — the capture would \
+                 average two meshes",
+            );
+            let previous = *band.get_or_insert(level);
+            assert_eq!(
+                previous, level,
+                "far probe {i} is in LOD{level} while an earlier probe of the same block is in \
+                 LOD{previous} — the block must be ONE level",
+            );
+
+            let owned = shoe_lod_range(level);
+            let (near_edge, far_edge) = (owned.start_margin.start, owned.end_margin.end);
+            assert!(
+                nearest >= near_edge + BAND_MARGIN_M,
+                "far probe {i}'s nearest shoe can be {nearest:.0} m from the camera — inside \
+                 LOD{level}'s {near_edge:.0} m opening plus {BAND_MARGIN_M} m of margin, so \
+                 mid-capture it would drop to the level above",
+            );
+            assert!(
+                furthest < far_edge - BAND_MARGIN_M,
+                "far probe {i}'s furthest shoe can be {furthest:.0} m from the camera — past the \
+                 {far_edge:.0} m end of LOD{level}'s band (less {BAND_MARGIN_M} m of margin), so it \
+                 would render the level below rather than the band this placement was sited for",
+            );
         }
     }
 

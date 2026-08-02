@@ -30,7 +30,11 @@
 # Validity conditions are the frame sweep's, for the same reasons (see run-frame-sweep.sh):
 # visible unoccluded frontmost window, machine quiet, hands off, warm shader cache. Gates enforced
 # below: injected settings loaded, uncapped present mode proven, no occlusion overlapping the
-# measurement window, monotonic full-span stream.
+# measurement window, monotonic full-span stream — plus, inherited from the shared analyzer, the
+# display gate: the client parks its window on the primary display and records the presenting
+# monitor, and a measurement window paced by a panel below 100000 mHz is INVALID here too. This
+# capture is as poisonable by the 60 Hz external panel as the sweep is, so it takes the same gate
+# rather than opting out of it.
 # =======================================================================
 
 set -eu
