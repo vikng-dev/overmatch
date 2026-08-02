@@ -58,7 +58,10 @@ use bevy::light::{CascadeShadowConfig, CascadeShadowConfigBuilder, DirectionalLi
 use bevy::prelude::*;
 use bevy::render::view::Msaa;
 use bevy::ui::UiScale;
-use bevy::window::{MonitorSelection, PresentMode, PrimaryWindow, WindowMode};
+use bevy::window::{
+    Monitor, MonitorSelection, PresentMode, PrimaryMonitor, PrimaryWindow, WindowMode,
+    WindowPosition,
+};
 use serde::{Deserialize, Serialize};
 
 /// The end-of-frame frame-rate limiter — armed only by [`VsyncMode::Off`] plus a non-off
@@ -736,12 +739,19 @@ impl PresentCaps {
 /// mode whose monitor cannot be resolved (the `--reset-display` escape hatch's origin story), and
 /// borderless is what every modern display stack actually wants.
 ///
-/// The monitor selection is always [`MonitorSelection::Current`], which cannot panic for
-/// borderless: `bevy_winit::select_monitor` merely warns and passes `None` (= current) through.
+/// The monitor selection comes from [`DisplaySelection`] and defaults to
+/// [`MonitorSelection::Current`], none of which can panic for borderless:
+/// `bevy_winit::select_monitor` merely warns and passes `None` (= current) through.
+///
+/// **The monitor rides THIS field, not `Window::position`** — see [`DisplaySelection`]'s fullscreen
+/// section. A fullscreen window ignores `set_outer_position`, and bevy picks a borderless window's
+/// monitor out of `Window::mode` alone (vendored bevy_winit-0.19.0/src/system.rs:326-334), so the
+/// display row has to reach fullscreen through here or not at all.
 ///
 /// **The row REFLECTS the OS, it does not own it** — see `observe_window_mode`: the player can
 /// toggle fullscreen with the green button, and the stored value follows reality rather than
-/// fighting it.
+/// fighting it. That writer computes this mapping with the SAME resolved display this one does,
+/// which is load-bearing rather than tidy — see `observe_window_mode` for the clobber it prevents.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub(crate) enum WindowModeSetting {
     /// **The shipped default** — the window the game has always opened with.
@@ -751,14 +761,21 @@ pub(crate) enum WindowModeSetting {
 }
 
 impl WindowModeSetting {
-    /// The `Window::mode` this asks for — the ONE mapping, used at boot window description and by
-    /// `apply_settings` alike.
-    pub(crate) const fn to_window_mode(self) -> WindowMode {
+    /// The `Window::mode` this asks for on `monitor` — the ONE mapping, used at boot window
+    /// description, by `apply_settings` and by `observe_window_mode` alike.
+    ///
+    /// `monitor` is a MonitorSelection rather than a [`DisplaySelection`] because the two callers
+    /// derive it differently and must be free to: a running app resolves against the live monitor
+    /// list ([`DisplaySelection::monitor_on`]), while the boot roots may only name what window
+    /// CREATION can resolve ([`DisplaySelection::at_window_creation`]). `None` is "no opinion",
+    /// which for a borderless window means the display it is already on.
+    pub(crate) const fn to_window_mode(self, monitor: Option<MonitorSelection>) -> WindowMode {
         match self {
             WindowModeSetting::Windowed => WindowMode::Windowed,
-            WindowModeSetting::Fullscreen => {
-                WindowMode::BorderlessFullscreen(MonitorSelection::Current)
-            }
+            WindowModeSetting::Fullscreen => WindowMode::BorderlessFullscreen(match monitor {
+                Some(monitor) => monitor,
+                None => MonitorSelection::Current,
+            }),
         }
     }
 
@@ -781,6 +798,439 @@ impl WindowModeSetting {
 
     pub(crate) const ORDER: [WindowModeSetting; 2] =
         [WindowModeSetting::Windowed, WindowModeSetting::Fullscreen];
+}
+
+/// Which monitor the window is put on — the row that stops a two-display machine opening the game
+/// wherever the window manager last felt like.
+///
+/// # It takes TWO fields to move a window, because bevy reads two
+///
+/// * **Windowed** — `Window::position = WindowPosition::Centered(selection)`.
+/// * **Borderless fullscreen** — `Window::mode = BorderlessFullscreen(selection)`, through
+///   [`WindowModeSetting::to_window_mode`].
+///
+/// The second is not redundancy, and assuming it was is the bug this doc used to describe. A
+/// fullscreen window ignores `set_outer_position`, and bevy resolves a borderless window's monitor
+/// from `Window::mode` ALONE — `if window.mode != cache.mode { … select_monitor(&monitor_selection) }`
+/// (vendored bevy_winit-0.19.0/src/system.rs:326-334) — never from the position beside it. So a
+/// player whose file said `window_mode: Fullscreen` plus `display: Display2` booted fullscreen
+/// wherever `Current` landed, and moving the row while fullscreen did nothing at all.
+///
+/// The two are applied differently on purpose, and [`apply_settings`] states which is which:
+/// the MODE is level-triggered (it is also written by `observe_window_mode`, so it must be
+/// re-asserted rather than fired once), the POSITION is edge-triggered (winit rewrites it out from
+/// under us — see the reconciler).
+///
+/// # The boot window must NOT name an indexed display, and that is not an optimisation
+///
+/// `Index` cannot be resolved when the window is CREATED. Bevy creates the primary window from
+/// `resumed` (vendored bevy_winit-0.19.0/src/state.rs:173-181) but only populates `WinitMonitors`
+/// from `about_to_wait` (state.rs:458-464), so `select_monitor`'s `Index(n) => monitors.nth(n)`
+/// (bevy_winit-0.19.0/src/winit_windows.rs:522) sees an EMPTY list and answers `None`. Creation
+/// then goes fullscreen on `Fullscreen::Borderless(None)` (winit_windows.rs:73-86) — the wrong
+/// display — and `winit_window_position` likewise warns and declines to place a windowed window
+/// (winit_windows.rs:493-497).
+///
+/// **The trap is what happens NEXT, and it is why the boot mode is deliberately weaker than the
+/// stored setting.** Bevy caches the window it was ASKED for, verbatim and unresolved:
+/// `CachedWindow(window.clone())` (bevy_winit-0.19.0/src/system.rs:88). Reissuing fullscreen is
+/// then gated on the component DIFFERING from that cache — `Changed<Window>` plus
+/// `if window.mode != cache.mode` (system.rs:305-326). So a boot window described with
+/// `BorderlessFullscreen(Index(1))` produces a cache saying `Index(1)`, and when [`apply_settings`]
+/// resolves the same `Index(1)` at `Startup` the value is EQUAL — the guarded write is skipped,
+/// `Changed` never fires, bevy never reissues, and the real winit window sits on creation's
+/// fallback monitor for the rest of the session. Naming the display twice is worse than naming it
+/// once.
+///
+/// So [`DisplaySelection::at_window_creation`] emits only what creation can actually honour:
+/// `Primary` (handed to `select_monitor` as a direct argument rather than through the empty list)
+/// resolves there and is passed through; every indexed rung is passed as "no opinion", so the boot
+/// mode is `Current`, the cache says `Current`, and `Startup`'s resolved `Index(n)` is a genuine
+/// CHANGE that bevy acts on. The visible cost is honest and small: an indexed display opens where
+/// the window manager put it and moves once, immediately.
+///
+/// # Why a stored selection is NEVER normalised back to the file
+///
+/// [`normalize_vsync`] exists because a vsync rung a surface lacks is a lie the file should stop
+/// telling. A monitor is the opposite case: displays are HOT-PLUGGED, so "display 2 is not here" is
+/// a statement about this minute, not about the machine. Persisting the fallback would spend the
+/// player's choice the first time they undocked, and they would have to re-pick it every time they
+/// plugged back in. So [`DisplaySelection::resolve`] is a read-side fallback only — it logs, it
+/// never writes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub(crate) enum DisplaySelection {
+    /// **The shipped default** — nothing is written, so the window manager places the window
+    /// exactly as it always has. The one rung that is not a decision, and the reason adding this
+    /// row changes no existing install's behaviour.
+    #[default]
+    Auto,
+    /// The OS's own main display. The only rung that would ALSO resolve at window-creation time
+    /// (`select_monitor` takes `primary_monitor` as a direct argument rather than through the
+    /// not-yet-populated list), and the one a capture harness should reach for when it just wants
+    /// the built-in panel.
+    Primary,
+    /// `MonitorSelection::Index(0)`. **One-based in the label, zero-based on the wire**: every
+    /// desktop OS numbers displays from 1, and `Index` counts from 0.
+    Display1,
+    Display2,
+    Display3,
+}
+
+impl DisplaySelection {
+    /// How many indexed rungs the ladder offers. Three is a deliberate ceiling rather than a
+    /// measured one: the row is a picker, not an enumeration, and a rung past the attached count
+    /// falls back loudly ([`DisplaySelection::resolve`]) instead of doing something silent.
+    const INDEXED: usize = 3;
+
+    /// The monitor this rung names, or `None` for [`DisplaySelection::Auto`] — which is not a
+    /// monitor at all, and is what makes "do not manage the window's position" representable.
+    pub(crate) const fn monitor(self) -> Option<MonitorSelection> {
+        match self {
+            DisplaySelection::Auto => None,
+            DisplaySelection::Primary => Some(MonitorSelection::Primary),
+            DisplaySelection::Display1 => Some(MonitorSelection::Index(0)),
+            DisplaySelection::Display2 => Some(MonitorSelection::Index(1)),
+            DisplaySelection::Display3 => Some(MonitorSelection::Index(2)),
+        }
+    }
+
+    /// The zero-based index into the attached-monitor list this rung asks for, or `None` for the
+    /// two rungs that name no index.
+    const fn index(self) -> Option<usize> {
+        match self {
+            DisplaySelection::Auto | DisplaySelection::Primary => None,
+            DisplaySelection::Display1 => Some(0),
+            DisplaySelection::Display2 => Some(1),
+            DisplaySelection::Display3 => Some(2),
+        }
+    }
+
+    /// The monitor selection the BOOT window may carry — deliberately weaker than the stored rung.
+    ///
+    /// Only `Primary` survives window creation: `select_monitor` receives the primary handle as a
+    /// direct argument and looks every other rung up in a `WinitMonitors` that is still empty at
+    /// that point. An indexed rung is therefore passed as `None` ("no opinion", i.e. `Current`) —
+    /// **not** because naming it would merely fail, but because naming it would POISON bevy's
+    /// window cache and make the `Startup` correction unrepresentable. See the type doc.
+    pub(crate) const fn at_window_creation(self) -> Option<MonitorSelection> {
+        match self {
+            DisplaySelection::Primary => Some(MonitorSelection::Primary),
+            // `Auto` genuinely has no opinion; the indexed rungs have one that creation cannot act
+            // on and must not cache.
+            _ => None,
+        }
+    }
+
+    /// The monitor selection this rung asks for on `displays` — the ONE mapping a RUNNING app
+    /// writes into `Window::mode` and `Window::position` alike. `None` is "leave placement alone"
+    /// ([`DisplaySelection::Auto`]).
+    ///
+    /// **The primary rung is emitted as `MonitorSelection::Entity`, not `Primary`**, whenever bevy
+    /// has actually marked a monitor. That is a deliberate hardening rather than a rename, because
+    /// bevy's `PrimaryMonitor` marker is not a live fact — see [`AttachedDisplays::primary`] for how
+    /// it goes stale. `Entity` is resolved by `find_entity` against the monitor list
+    /// (bevy_winit-0.19.0/src/winit_windows.rs:523, `winit_monitors.rs:29-35`), so it answers
+    /// deterministically for any monitor that is still attached and never consults the
+    /// `primary_monitor()` that Wayland always answers `None` to. The bare `Primary` is emitted only
+    /// in the state where nothing has been learned at all, where it is the honest request.
+    pub(crate) fn monitor_on(self, displays: AttachedDisplays) -> Option<MonitorSelection> {
+        match self.resolve(displays) {
+            DisplaySelection::Auto => None,
+            // After `resolve`, this rung means "the primary" only where a marker exists or where
+            // nothing is known yet; both are covered by preferring the entity when there is one.
+            DisplaySelection::Primary => Some(
+                displays
+                    .primary
+                    .map_or(MonitorSelection::Primary, MonitorSelection::Entity),
+            ),
+            indexed => indexed.monitor(),
+        }
+    }
+
+    /// The `Window::position` this rung asks for on `displays`. `Automatic` for
+    /// [`DisplaySelection::Auto`], which bevy answers with "the window manager handles it" and no
+    /// move at all (`winit_window_position`, vendored
+    /// bevy_winit-0.19.0/src/winit_windows.rs:458-461).
+    pub(crate) fn window_position_on(self, displays: AttachedDisplays) -> WindowPosition {
+        self.monitor_on(displays)
+            .map_or(WindowPosition::Automatic, WindowPosition::Centered)
+    }
+
+    /// The rung actually honoured on `displays` — itself, or a rung this machine can really reach.
+    ///
+    /// Two substitutions, and the second is not the obvious one:
+    ///
+    /// * a `DisplayN` naming a display that is not attached becomes the primary rung;
+    /// * **the primary rung itself becomes `Display1` where no primary is IDENTIFIABLE.** winit
+    ///   documents `ActiveEventLoop::primary_monitor` as "Returns `None` if it can't identify any
+    ///   monitor as a primary one", and then, verbatim: "**Wayland / Web:** Always returns `None`"
+    ///   (vendored winit-0.30.13/src/event_loop.rs:405-411). Bevy hands `MonitorSelection::Primary`
+    ///   straight to that optional handle (`Primary => primary_monitor`,
+    ///   bevy_winit-0.19.0/src/winit_windows.rs:521), so on Wayland both the explicit PRIMARY rung
+    ///   AND the unplugged-display fallback above would have resolved to `None` — a warning and a
+    ///   window that never moves. `Index(0)` is the documented substitute: it always exists when
+    ///   anything is attached, and it is what "the first display" means on a stack that refuses to
+    ///   rank them.
+    ///
+    /// [`AttachedDisplays::primary`] is what makes that decidable rather than a `cfg`: bevy inserts
+    /// `PrimaryMonitor` only on the entity whose handle matched `primary_monitor()`
+    /// (bevy_winit-0.19.0/src/system.rs:217-219), so "monitors exist and none is marked" IS winit's
+    /// `None`, observed rather than guessed at per platform. It is a LAGGING observation, not a live
+    /// one — see that field for the hot-plug limitation and what [`DisplaySelection::monitor_on`]
+    /// does about it.
+    ///
+    /// **An EMPTY display list is the identity**, and that is the same tri-state discipline
+    /// [`PresentCaps`] is built around: no [`Monitor`] entities means the list has not been
+    /// synchronised yet (or there is no winit at all — every bare-`App` test), which is "we could
+    /// not learn", not "there are no displays". Falling back on that would let a headless frame
+    /// decide a player's row.
+    pub(crate) fn resolve(self, displays: AttachedDisplays) -> Self {
+        if displays.count == 0 {
+            return self;
+        }
+        let wants_primary = match self {
+            DisplaySelection::Auto => return DisplaySelection::Auto,
+            DisplaySelection::Primary => true,
+            indexed => indexed.index().is_some_and(|index| index >= displays.count),
+        };
+        if !wants_primary {
+            return self;
+        }
+        if displays.primary.is_some() {
+            DisplaySelection::Primary
+        } else {
+            // Index(0): always attached, and the only honest reading of "primary" where the window
+            // system declines to name one — or where bevy's marker has gone stale (see
+            // `AttachedDisplays::primary`).
+            DisplaySelection::Display1
+        }
+    }
+
+    /// ASCII only — it reaches `Text`. One-based, per the variant docs.
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            DisplaySelection::Auto => "AUTO",
+            DisplaySelection::Primary => "PRIMARY",
+            DisplaySelection::Display1 => "DISPLAY 1",
+            DisplaySelection::Display2 => "DISPLAY 2",
+            DisplaySelection::Display3 => "DISPLAY 3",
+        }
+    }
+
+    /// The ladder. `Auto` first because it is the default and the "leave it alone" rung; the rest
+    /// ascend so the right arrow always walks further down the display list.
+    pub(crate) const ORDER: [DisplaySelection; 2 + DisplaySelection::INDEXED] = [
+        DisplaySelection::Auto,
+        DisplaySelection::Primary,
+        DisplaySelection::Display1,
+        DisplaySelection::Display2,
+        DisplaySelection::Display3,
+    ];
+}
+
+/// What this machine's display list looks like RIGHT NOW — the fact
+/// [`DisplaySelection::resolve`] is resolved against, gathered once by [`read_displays`] so the two
+/// window writers cannot form different opinions of it.
+///
+/// Both fields are observations of bevy's own [`Monitor`] entities rather than platform guesses;
+/// see [`DisplaySelection::resolve`] for what each one decides.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(crate) struct AttachedDisplays {
+    /// How many displays are attached. **ZERO means "not synchronised yet"**, never "no displays" —
+    /// the tri-state discipline again.
+    pub(crate) count: usize,
+    /// The monitor entity bevy has marked `PrimaryMonitor`, if one is still attached — i.e. the
+    /// display winit named as primary AT THE TIME IT WAS FIRST SEEN.
+    ///
+    /// # It is a lagging observation, and bevy will not correct it
+    ///
+    /// `create_monitors` skips a monitor it has seen before with `continue 'outer` BEFORE reaching
+    /// the marker insert (vendored bevy_winit-0.19.0/src/system.rs:184-190 vs 217-219), and there is
+    /// no code path anywhere that removes or re-assigns `PrimaryMonitor`. Only two things ever move
+    /// it: a previously-unseen monitor being spawned as the primary, and a removed monitor's whole
+    /// entity being despawned (system.rs:225-236). So across a hot-plug the marker can be WRONG in
+    /// both directions — the primary is unplugged and the display that inherits the role stays
+    /// unmarked, or the platform stops naming a primary while an old marker survives.
+    ///
+    /// Which is exactly why this is an `Option<Entity>` and not a `bool`.
+    /// [`DisplaySelection::monitor_on`] spends it as `MonitorSelection::Entity`, which resolves
+    /// against the monitor list rather than against `primary_monitor()` — so a stale marker still
+    /// names a real, attached display instead of degrading into the Wayland no-op that
+    /// [`DisplaySelection::resolve`] describes. The residual, stated: after the marked primary is
+    /// unplugged the PRIMARY rung means
+    /// "the first display" until bevy sees a new monitor it can mark. That is a bevy-side sync
+    /// limitation, not one this module can observe its way out of.
+    pub(crate) primary: Option<Entity>,
+}
+
+/// Gather [`AttachedDisplays`] from the world. One function, because `apply_settings` and
+/// `observe_window_mode` must resolve the display row IDENTICALLY — see `observe_window_mode` for
+/// what a disagreement between them costs.
+///
+/// The primary query demands `Monitor` as well as the marker so that a `PrimaryMonitor` on anything
+/// that is not an attached display cannot be spent as one — `MonitorSelection::Entity` is looked up
+/// by `find_entity`, and an entity that is not in the monitor list resolves to nothing.
+fn read_displays(
+    monitors: &Query<(), With<Monitor>>,
+    primaries: &Query<Entity, (With<Monitor>, With<PrimaryMonitor>)>,
+) -> AttachedDisplays {
+    AttachedDisplays {
+        count: monitors.iter().count(),
+        primary: primaries.iter().next(),
+    }
+}
+
+/// The screen-space error budget the LOD chain is allowed to spend, in PIXELS: the largest
+/// silhouette deviation a simplified mesh may project to before the next-finer level has to be
+/// used. Lower is crisper and costs more triangles.
+///
+/// **This slice lands the setting and [`LodPixelBudget`] alone — there is no consumer yet.** The
+/// LOD chain that reads it is unmerged; nothing in this tree changes behaviour because of this
+/// value today.
+///
+/// # The contract for whoever wires the consumer
+///
+/// Consumers recompute their `VisibilityRange` thresholds FROM this number when it changes — the
+/// budget is a screen-space quantity, so a threshold derived from it is only valid for the fov,
+/// resolution and render scale it was derived under. Recomputing is a HUMAN-RATE event (a settings
+/// row moved, a window resized, a render-scale rung changed), not a per-frame one: read
+/// [`LodPixelBudget`] behind `resource_changed` (plus whatever view-parameter change detection the
+/// consumer needs) and rebuild the ladder there, never in a per-entity loop.
+///
+/// Stored on disk as the bare `f32` (`#[serde(transparent)]`), so `lod_pixel_budget: 2.0` is what a
+/// player finds in `video.ron`. A hand-edited value outside the ladder is honoured as written and
+/// clamped only at the absurd ends by [`PixelBudget::pixels`] — the same shape [`FrameCap`] has.
+///
+/// # Non-finite values are normalised AT THE PARSE, not at the read
+///
+/// RON accepts `NaN` and `inf`, and [`Settings`] derives `PartialEq` — so a single `NaN` on disk
+/// makes the whole settings resource **unequal to itself**. That is not a rendering problem
+/// (`pixels` already answers NaN with the default, so no consumer sees one); it is a WRITE
+/// AMPLIFICATION problem, because the page's two no-op guards are equality tests: `change_row`
+/// returns early when a step produced the same settings, and `scrub` skips a drag frame that landed
+/// where it already was. With a NaN in the struct both comparisons are permanently false, so a
+/// held-still drag saves the file every frame and a saturated keypress on an unrelated row saves on
+/// every repeat.
+///
+/// So the fix belongs at the boundary, where the bad value enters: [`PixelBudget`]'s own
+/// `Deserialize` sanitises. NaN becomes the default, the infinities become the endpoint they point
+/// at, and every FINITE value — including deliberately off-ladder ones like `1.2` — is preserved
+/// exactly, because honouring a hand-edit until it is touched is the behaviour this type shares with
+/// [`FrameCap`]. [`PixelBudget::pixels`]'s own NaN guard stays as the second line: it covers a value
+/// constructed in code, which no parser sees.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize)]
+#[serde(transparent)]
+pub(crate) struct PixelBudget(pub(crate) f32);
+
+impl<'de> Deserialize<'de> for PixelBudget {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(Self::sanitized(f32::deserialize(deserializer)?))
+    }
+}
+
+impl Default for PixelBudget {
+    fn default() -> Self {
+        Self(1.0)
+    }
+}
+
+impl PixelBudget {
+    /// A budget under a pixel is below what a human eyeball can resolve on the silhouette, and one
+    /// over eight is a visibly popping model — the two ends of the range worth offering.
+    pub(crate) const MIN: f32 = 0.5;
+    pub(crate) const MAX: f32 = 8.0;
+    /// The ladder step. Half a pixel, so the low end — where the difference is actually visible —
+    /// is finely divided rather than jumping straight from 0.5 to 1.
+    const STEP: f32 = 0.5;
+    /// Number of discrete stops, MIN..=MAX inclusive — `1 + (MAX - MIN) / STEP`, written out
+    /// because a float-to-integer cast is not something to do in a `const` item.
+    /// `the_lod_pixel_budget_ladder_is_sane` pins it against the three constants above.
+    const STOPS: u16 = 16;
+
+    /// The value a NON-FINITE `budget` is stored as. The parse boundary — see the type doc for why
+    /// a NaN must never be allowed to REACH the struct, not merely be handled on the way out.
+    ///
+    /// A finite value is returned untouched, off-ladder or not: this normalises what cannot be
+    /// compared, it does not enforce the ladder (that is `step`'s job, on first touch).
+    fn sanitized(budget: f32) -> Self {
+        if budget.is_nan() {
+            Self::default()
+        } else if budget == f32::INFINITY {
+            Self(Self::MAX)
+        } else if budget == f32::NEG_INFINITY {
+            Self(Self::MIN)
+        } else {
+            Self(budget)
+        }
+    }
+
+    /// The budget in screen pixels. The clamp is the guard against a hand-edited
+    /// `lod_pixel_budget: 0.0` demanding an infinitely fine ladder (or a negative one inverting the
+    /// comparison every consumer will write).
+    ///
+    /// NaN is answered with the DEFAULT rather than clamped, because `f32::clamp` deliberately
+    /// passes NaN through — and a NaN budget is not a small error downstream: every comparison a
+    /// consumer writes against it is false, so an LOD ladder built from one silently selects
+    /// nothing. [`PixelBudget::sanitized`] means no PARSED value can be one; this covers a budget
+    /// constructed in code.
+    pub(crate) fn pixels(self) -> f32 {
+        if self.0.is_nan() {
+            return Self::default().0;
+        }
+        self.0.clamp(Self::MIN, Self::MAX)
+    }
+
+    /// ASCII only — it reaches `Text`. Honest pixels, like every other value on this page.
+    pub(crate) fn label(self) -> String {
+        format!("{:.1} PX", self.pixels())
+    }
+
+    /// The nearest slider stop for the current value. A hand-edited off-ladder value (1.2) resolves
+    /// to its nearest stop the moment the player TOUCHES the control, and not before.
+    fn stop(self) -> u16 {
+        (((self.pixels() - Self::MIN) / Self::STEP).round() as u16).min(Self::STOPS - 1)
+    }
+
+    fn from_stop(stop: u16) -> Self {
+        Self(Self::MIN + f32::from(stop.min(Self::STOPS - 1)) * Self::STEP)
+    }
+
+    /// One keyboard step along the ladder, saturating at both ends like every other row.
+    pub(crate) fn step(self, delta: i32) -> Self {
+        let stop = (i32::from(self.stop()) + delta).clamp(0, i32::from(Self::STOPS) - 1);
+        Self::from_stop(stop as u16)
+    }
+
+    /// Where the slider handle sits, `0.0..=1.0`.
+    pub(crate) fn fraction(self) -> f32 {
+        f32::from(self.stop()) / f32::from(Self::STOPS - 1)
+    }
+
+    /// The value a drag to `fraction` lands on, snapped to the ladder.
+    pub(crate) fn from_fraction(fraction: f32) -> Self {
+        let stops = f32::from(Self::STOPS - 1);
+        Self::from_stop((fraction.clamp(0.0, 1.0) * stops).round() as u16)
+    }
+}
+
+/// The live screen-space error budget, in pixels — [`PixelBudget`]'s applied half, written by
+/// [`apply_settings`] exactly as `render_scale::RenderScale` is.
+///
+/// Separate from the settings field for the same reason that one is: the FILE is the player's
+/// intent and this is the value the world is configured with, so a consumer depends on one small
+/// resource instead of on the whole settings model. See [`PixelBudget`] for the recompute contract
+/// — this resource changing is the human-rate event a consumer rebuilds its `VisibilityRange`
+/// thresholds on.
+#[derive(Resource, Clone, Copy, PartialEq, Debug)]
+pub(crate) struct LodPixelBudget(pub(crate) f32);
+
+impl Default for LodPixelBudget {
+    fn default() -> Self {
+        Self(PixelBudget::default().pixels())
+    }
 }
 
 /// The frame-rate cap: `0` = off, anything else a target FPS honoured by `limiter`. Only ACTIVE
@@ -998,6 +1448,14 @@ pub(crate) struct Settings {
     /// fight rule for OS-side toggles.
     #[serde(skip_serializing_if = "is_default")]
     pub(crate) window_mode: WindowModeSetting,
+    /// Which monitor the window is centred on — see [`DisplaySelection`], including why the boot
+    /// window is NOT described with it and why an absent display is never written back.
+    #[serde(skip_serializing_if = "is_default")]
+    pub(crate) display: DisplaySelection,
+    /// The LOD screen-space error budget in pixels — see [`PixelBudget`]. Applied by writing
+    /// [`LodPixelBudget`]; nothing reads that resource yet.
+    #[serde(skip_serializing_if = "is_default")]
+    pub(crate) lod_pixel_budget: PixelBudget,
     /// The frame-rate cap, active only under [`VsyncMode::Off`] — see [`FrameCap`].
     #[serde(skip_serializing_if = "is_default")]
     pub(crate) frame_cap: FrameCap,
@@ -1018,6 +1476,8 @@ impl Default for Settings {
             legacy_vsync: None,
             render_scale: RenderScaleLevel::default(),
             window_mode: WindowModeSetting::default(),
+            display: DisplaySelection::default(),
+            lod_pixel_budget: PixelBudget::default(),
             frame_cap: FrameCap::default(),
             ui_scale: UiScalePercent::default(),
         }
@@ -1214,6 +1674,11 @@ pub(crate) fn plugin(entry: PageEntry) -> impl Plugin {
     move |app: &mut App| {
         app.add_plugins((crate::render_scale::plugin, probe::plugin, ui::plugin))
             .init_resource::<Settings>()
+            // The applied half of the LOD budget row. Initialised here rather than by each root for
+            // the same reason `render_scale::plugin` is mounted here: `apply_settings` is its one
+            // writer, so a root that had the page without the resource would panic on the first
+            // reconcile instead of merely missing a row.
+            .init_resource::<LodPixelBudget>()
             .add_message::<SaveSettings>()
             // `Startup` applies the loaded file to a world that has just spawned its camera and sun;
             // after that the reconcilers are change-driven, so they cost a resource-tick comparison
@@ -1340,6 +1805,17 @@ fn apply_settings(
     // Present exactly on a hidden capture client (`SPIKE_SIM_WINDOWED` without
     // `SPIKE_SIM_VISIBLE`) — the window sub-block below must not run for it.
     capture_pinned: Option<Res<CaptureWindowPinned>>,
+    // The applied half of the LOD budget row. Nothing reads it yet — see `PixelBudget`.
+    mut lod_budget: ResMut<LodPixelBudget>,
+    // The attached displays, as `bevy_winit::create_monitors` synchronised them. COUNTED, never
+    // ordered: `MonitorSelection::Index` indexes bevy's own `WinitMonitors` vec, so this system
+    // only needs how many rungs of the ladder are real — plus whichever monitor bevy last marked
+    // primary (`read_displays`).
+    monitors: Query<(), With<Monitor>>,
+    primaries: Query<Entity, (With<Monitor>, With<PrimaryMonitor>)>,
+    // The window PLACEMENT is edge-triggered on this pair — see the write below. The window MODE
+    // beside it deliberately is not.
+    mut last_placement: Local<Option<(WindowModeSetting, DisplaySelection)>>,
 ) {
     let msaa = settings.msaa.to_msaa();
     for mut camera_msaa in &mut cameras {
@@ -1406,13 +1882,71 @@ fn apply_settings(
     {
         let mut window = window.into_inner();
         window.present_mode = settings.present_mode(*caps);
-        // Guarded: `Window::mode` is also written by `observe_window_mode` (the reflect direction),
-        // and both writers keep it inside the two values `WindowModeSetting::to_window_mode` can
-        // produce — so equality here means "already agreed" and an unconditional write would only
-        // churn change ticks.
-        let mode = settings.window_mode.to_window_mode();
+        let displays = read_displays(&monitors, &primaries);
+        // Both window fields below are derived through `monitor_on`, so the mode and the position
+        // can never name different displays.
+        let monitor = settings.display.monitor_on(displays);
+
+        // The window MODE is LEVEL-triggered, and it carries the display row into fullscreen —
+        // bevy resolves a borderless window's monitor out of this field alone (vendored
+        // bevy_winit-0.19.0/src/system.rs:326-334), never out of the position below, so this is the
+        // only route the row has while fullscreen.
+        //
+        // Level rather than edge, because this field is NOT ours alone in the other direction
+        // either: `observe_window_mode` writes it whenever the OS toggles fullscreen, and it can do
+        // so on a frame that leaves `Settings` untouched (the player picked FULLSCREEN on the page,
+        // so the observed state already matches the stored one and nothing is saved). Re-asserting
+        // every pass is what stops that write from silently stripping the monitor back to
+        // `Current`. Still guarded, so an already-agreed field costs a comparison and no change
+        // tick. (`observe_window_mode` resolves the display identically — see its doc.)
+        //
+        // This write is also the whole BOOT correction. The window was created before
+        // `WinitMonitors` existed, so an indexed rung could not be named there and the boot mode
+        // says `Current` (`DisplaySelection::at_window_creation`); bevy cached that unresolved
+        // request verbatim, and reissues fullscreen only where the component now DIFFERS from that
+        // cache (system.rs:305-326). Writing the resolved selection here is what produces that
+        // difference — which is why the boot window must never have carried it already.
+        let mode = settings.window_mode.to_window_mode(monitor);
         if window.mode != mode {
             window.mode = mode;
+        }
+
+        // The window POSITION is EDGE-triggered, on the (mode, display) pair. It has to be, because
+        // this field is not ours alone either: winit rewrites it to `WindowPosition::At(..)` on
+        // every `WindowEvent::Moved` (vendored bevy_winit-0.19.0/src/state.rs:381-383), so a player
+        // who drags the window has left it permanently unequal to the `Centered(..)` this row asks
+        // for. A level-triggered write would then snap the window back to the middle of the display
+        // every time ANY other row moved — MSAA, UI scale, a probe arrival.
+        //
+        // The WINDOW MODE is in the edge, not just the display, because leaving fullscreen is
+        // exactly when a position that was ignored while fullscreen becomes meaningful again. The
+        // FIRST observation counts as an edge on purpose: that is the launch application.
+        let placement = (settings.window_mode, settings.display);
+        if last_placement.replace(placement) != Some(placement) {
+            let resolved = settings.display.resolve(displays);
+            if resolved != settings.display {
+                warn!(
+                    "settings: {} is not reachable ({} display(s) present, primary {}) -> {} \
+                     (not saved — displays come back)",
+                    settings.display.label(),
+                    displays.count,
+                    if displays.primary.is_some() {
+                        "marked"
+                    } else {
+                        "unidentifiable"
+                    },
+                    resolved.label(),
+                );
+            }
+            // Only while WINDOWED: a fullscreen window ignores `set_outer_position`, so writing a
+            // position there would be a change tick buying nothing — and worse, it would consume
+            // the edge that has to still be available when fullscreen is left.
+            if settings.window_mode == WindowModeSetting::Windowed {
+                let position = settings.display.window_position_on(displays);
+                if window.position != position {
+                    window.position = position;
+                }
+            }
         }
     }
 
@@ -1428,6 +1962,11 @@ fn apply_settings(
     render_scale.set_if_neq(crate::render_scale::RenderScale(
         settings.render_scale.fraction(),
     ));
+
+    // Same discipline, and here it is the whole interface: a consumer rebuilds its
+    // `VisibilityRange` thresholds on this resource CHANGING, so marking it changed on a frame the
+    // player did not move the row would be a per-frame ladder rebuild. See `PixelBudget`.
+    lod_budget.set_if_neq(LodPixelBudget(settings.lod_pixel_budget.pixels()));
 }
 
 /// Bring a stored vsync rung this surface cannot present down to the one it resolves to — the
@@ -1494,11 +2033,24 @@ fn normalize_vsync(
 /// booting `Windowed` writes nothing — and with the apply-side skip in place nothing ever commands
 /// that window fullscreen, so the OS edge this system needs cannot occur on a capture run. It
 /// therefore cannot spend the player's persisted fullscreen on a capture client's `Windowed` state.
+///
+/// # Why it resolves the DISPLAY row too
+///
+/// This writer must produce the same `Window::mode` [`apply_settings`] would, monitor included,
+/// because there is one path on which its write is the LAST word: the player picks FULLSCREEN on
+/// the settings page, `apply_settings` writes `BorderlessFullscreen(Index(n))`, the OS completes
+/// the transition, and this system sees the edge — at which point the observed state already equals
+/// the stored one, so `Settings` is NOT written, so `apply_settings` (which runs on
+/// `resource_changed::<Settings>`) does not run again to correct anything. A `Current` written here
+/// would stand, and bevy would re-apply fullscreen on whatever monitor the window happened to be
+/// on. Hence the same [`read_displays`] + [`DisplaySelection::resolve`] the reconciler uses.
 fn observe_window_mode(
     _non_send_marker: bevy::ecs::system::NonSendMarker,
     window: Option<Single<(Entity, &mut Window), With<PrimaryWindow>>>,
     mut settings: ResMut<Settings>,
     mut save: MessageWriter<SaveSettings>,
+    monitors: Query<(), With<Monitor>>,
+    primaries: Query<Entity, (With<Monitor>, With<PrimaryMonitor>)>,
     mut last_seen: Local<Option<bool>>,
 ) {
     let Some(window) = window else {
@@ -1520,7 +2072,13 @@ fn observe_window_mode(
     let observed = WindowModeSetting::from_fullscreen(fullscreen);
     // Keep `Window::mode` truthful FIRST, whatever the settings say: bevy's change detection can
     // only express "leave fullscreen" later if the component actually says it is fullscreen now.
-    let mode = observed.to_window_mode();
+    // The MONITOR in it is the settings row's, resolved exactly as `apply_settings` resolves it —
+    // see this function's doc for the path on which this write is the last word.
+    let mode = observed.to_window_mode(
+        settings
+            .display
+            .monitor_on(read_displays(&monitors, &primaries)),
+    );
     if window.mode != mode {
         window.mode = mode;
     }
@@ -1692,6 +2250,7 @@ mod tests {
             .init_resource::<RenderScale>()
             .init_resource::<PresentCaps>()
             .init_resource::<UiScale>()
+            .init_resource::<LodPixelBudget>()
             .add_systems(Update, apply_settings);
         app.update();
         assert_eq!(
@@ -1881,6 +2440,7 @@ mod tests {
             .init_resource::<crate::render_scale::RenderScale>()
             .init_resource::<PresentCaps>()
             .init_resource::<UiScale>()
+            .init_resource::<LodPixelBudget>()
             .add_systems(Update, apply_settings);
         let sun = app
             .world_mut()
@@ -2372,17 +2932,35 @@ mod tests {
     }
 
     /// The window-mode mapping: borderless-only (exclusive fullscreen is unrepresentable — it is
-    /// the mode that can panic on an unresolvable monitor), always the CURRENT monitor, and the
-    /// observe direction inverts it.
+    /// the mode that can panic on an unresolvable monitor), carrying whatever monitor it is handed,
+    /// defaulting to the current one, and the observe direction inverts it.
     #[test]
-    fn window_mode_is_borderless_current_only() {
+    fn window_mode_is_borderless_and_carries_the_display_row() {
+        for monitor in [
+            None,
+            Some(MonitorSelection::Primary),
+            Some(MonitorSelection::Index(1)),
+        ] {
+            assert_eq!(
+                WindowModeSetting::Windowed.to_window_mode(monitor),
+                WindowMode::Windowed,
+                "{monitor:?}: a windowed window has no fullscreen monitor to name",
+            );
+        }
         assert_eq!(
-            WindowModeSetting::Windowed.to_window_mode(),
-            WindowMode::Windowed,
+            WindowModeSetting::Fullscreen.to_window_mode(None),
+            WindowMode::BorderlessFullscreen(MonitorSelection::Current),
+            "no opinion means 'the display it is already on', which for borderless is Current",
         );
         assert_eq!(
-            WindowModeSetting::Fullscreen.to_window_mode(),
-            WindowMode::BorderlessFullscreen(MonitorSelection::Current),
+            WindowModeSetting::Fullscreen.to_window_mode(Some(MonitorSelection::Primary)),
+            WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
+        );
+        assert_eq!(
+            WindowModeSetting::Fullscreen.to_window_mode(Some(MonitorSelection::Index(1))),
+            WindowMode::BorderlessFullscreen(MonitorSelection::Index(1)),
+            "the display row has to reach fullscreen through the MODE — bevy reads the monitor \
+             from this field alone, never from Window::position",
         );
         for setting in WindowModeSetting::ORDER {
             let fullscreen = setting == WindowModeSetting::Fullscreen;
@@ -2392,6 +2970,710 @@ mod tests {
             WindowModeSetting::default(),
             WindowModeSetting::Windowed,
             "a player who never opens the page gets the window the game always opened with"
+        );
+    }
+
+    /// The display ladder's mapping onto bevy's own [`MonitorSelection`], pinned against the
+    /// vendored enum: `AUTO` names no monitor at all (and is therefore the only rung that leaves
+    /// `Window::position` on `Automatic`), the indexed rungs are ZERO-based on the wire while
+    /// their labels are one-based, and every representable rung is on `ORDER` — the same
+    /// `step_in`-dead-end rule [`ShadowDistance::ORDER`] carries.
+    #[test]
+    fn the_display_ladder_maps_onto_bevys_monitor_selection() {
+        assert_eq!(DisplaySelection::default(), DisplaySelection::Auto);
+        assert_eq!(DisplaySelection::Auto.monitor(), None);
+        assert_eq!(
+            DisplaySelection::Auto.window_position_on(ranked(3)),
+            WindowPosition::Automatic,
+            "the default rung must leave placement to the window manager — adding this row must \
+             not move any existing install's window",
+        );
+        assert_eq!(
+            DisplaySelection::Primary.monitor(),
+            Some(MonitorSelection::Primary),
+        );
+        for (rung, index) in [
+            (DisplaySelection::Display1, 0),
+            (DisplaySelection::Display2, 1),
+            (DisplaySelection::Display3, 2),
+        ] {
+            assert_eq!(
+                rung.monitor(),
+                Some(MonitorSelection::Index(index)),
+                "{rung:?}: the labels are one-based and `MonitorSelection::Index` is not",
+            );
+            assert_eq!(
+                rung.window_position_on(ranked(3)),
+                WindowPosition::Centered(MonitorSelection::Index(index)),
+            );
+        }
+        // The BOOT mapping is deliberately weaker: only the rung window creation can resolve
+        // survives, because caching an unresolved one strands the window (see the type doc).
+        assert_eq!(
+            DisplaySelection::Primary.at_window_creation(),
+            Some(MonitorSelection::Primary),
+            "the primary handle is passed to select_monitor directly, so it resolves at creation",
+        );
+        for rung in [
+            DisplaySelection::Auto,
+            DisplaySelection::Display1,
+            DisplaySelection::Display2,
+            DisplaySelection::Display3,
+        ] {
+            assert_eq!(
+                rung.at_window_creation(),
+                None,
+                "{rung:?} must not be named in the boot window — WinitMonitors is still empty, and \
+                 bevy caches the unresolved request verbatim",
+            );
+        }
+        assert_eq!(
+            DisplaySelection::ORDER,
+            [
+                DisplaySelection::Auto,
+                DisplaySelection::Primary,
+                DisplaySelection::Display1,
+                DisplaySelection::Display2,
+                DisplaySelection::Display3,
+            ],
+            "every representable rung must be on the ladder, or `ui::step_in` resolves a stored \
+             off-ladder value to index 0",
+        );
+        assert_eq!(DisplaySelection::ORDER.len(), 2 + DisplaySelection::INDEXED);
+    }
+
+    /// A machine with `count` displays, one of which bevy has marked as the primary. The entity is
+    /// a placeholder because these are PURE resolution tests — only its presence is read; the
+    /// app-level tests below use real spawned monitor entities.
+    fn ranked(count: usize) -> AttachedDisplays {
+        AttachedDisplays {
+            count,
+            primary: Some(Entity::PLACEHOLDER),
+        }
+    }
+
+    /// A machine with `count` displays and no `PrimaryMonitor` marker — Wayland, or a hot-plug that
+    /// took the marked monitor away.
+    fn unranked(count: usize) -> AttachedDisplays {
+        AttachedDisplays {
+            count,
+            primary: None,
+        }
+    }
+
+    /// **A stored display that is not plugged in.** The fallback is read-side and PRIMARY, and the
+    /// unknown state — no `Monitor` entities synchronised — moves nothing, exactly as
+    /// [`PresentCaps`]'s two unknown states move nothing. That second half is the load-bearing one:
+    /// every bare-`App` test and every frame before `create_monitors` runs reports zero monitors,
+    /// and a fallback there would let a headless frame overwrite a player's row.
+    #[test]
+    fn an_absent_display_falls_back_to_primary_and_an_unknown_count_never_does() {
+        // A laptop with the external unplugged: one display attached.
+        assert_eq!(
+            DisplaySelection::Display2.resolve(ranked(1)),
+            DisplaySelection::Primary,
+        );
+        assert_eq!(
+            DisplaySelection::Display3.resolve(ranked(2)),
+            DisplaySelection::Primary,
+        );
+        // Plugged back in: the stored rung is honoured again, which is the whole reason the
+        // fallback is never persisted.
+        assert_eq!(
+            DisplaySelection::Display2.resolve(ranked(2)),
+            DisplaySelection::Display2,
+        );
+        for rung in DisplaySelection::ORDER {
+            assert_eq!(
+                rung.resolve(AttachedDisplays::default()),
+                rung,
+                "{rung:?}: an unsynchronised monitor list is not evidence of an absent display",
+            );
+            assert_eq!(
+                rung.resolve(ranked(DisplaySelection::INDEXED)),
+                rung,
+                "{rung:?}: with every indexed rung attached, nothing falls back",
+            );
+            // Whatever it resolves to is always something this machine can actually honour.
+            let resolved = rung.resolve(ranked(1));
+            assert!(
+                resolved.index().is_none_or(|index| index < 1),
+                "{rung:?} resolved to {resolved:?}, which still names a display that is not here",
+            );
+        }
+        // The two rungs that name no index are never touched by any count.
+        for count in 0..4 {
+            assert_eq!(
+                DisplaySelection::Auto.resolve(ranked(count)),
+                DisplaySelection::Auto
+            );
+            assert_eq!(
+                DisplaySelection::Primary.resolve(ranked(count)),
+                DisplaySelection::Primary,
+            );
+        }
+    }
+
+    /// **Wayland has no primary monitor, so the primary RUNG cannot be the end of the chain.**
+    ///
+    /// winit: "Returns `None` if it can't identify any monitor as a primary one … **Wayland / Web:**
+    /// Always returns `None`" (winit-0.30.13/src/event_loop.rs:405-411). Bevy passes
+    /// `MonitorSelection::Primary` straight to that optional handle, so on a Wayland session BOTH
+    /// the explicit PRIMARY rung and the unplugged-display fallback would have resolved to nothing,
+    /// bevy would have warned, and the window would never have moved — the row would be silently
+    /// dead on a whole platform.
+    ///
+    /// The observation is `PrimaryMonitor`'s absence WHILE monitors exist, which is exactly winit's
+    /// `None` rather than a `cfg`; the substitute is `Index(0)`, which is attached by definition.
+    #[test]
+    fn a_machine_that_cannot_name_a_primary_falls_back_to_the_first_display() {
+        let wayland = unranked;
+        assert_eq!(
+            DisplaySelection::Primary.resolve(wayland(2)),
+            DisplaySelection::Display1,
+            "the PRIMARY rung must land on something winit can actually resolve",
+        );
+        assert_eq!(
+            DisplaySelection::Display3.resolve(wayland(2)),
+            DisplaySelection::Display1,
+            "and so must the absent-display fallback, which routes through the same rung",
+        );
+        // Nothing else moves: an attached indexed rung and AUTO are untouched by the platform.
+        assert_eq!(
+            DisplaySelection::Display2.resolve(wayland(2)),
+            DisplaySelection::Display2,
+        );
+        assert_eq!(
+            DisplaySelection::Auto.resolve(wayland(2)),
+            DisplaySelection::Auto,
+        );
+        // The unknown state still wins over the platform question — nothing is decided on a list
+        // that has not been synchronised, whether or not it could rank what it does not have.
+        for rung in DisplaySelection::ORDER {
+            assert_eq!(rung.resolve(wayland(0)), rung);
+        }
+        // On a stack that CAN rank displays the substitution never happens, so this cannot silently
+        // become the behaviour everywhere.
+        assert_eq!(
+            DisplaySelection::Primary.resolve(ranked(2)),
+            DisplaySelection::Primary,
+        );
+        // Whatever the platform, the answer always names something reachable.
+        for count in 1..4 {
+            for marked in [false, true] {
+                for rung in DisplaySelection::ORDER {
+                    let displays = if marked {
+                        ranked(count)
+                    } else {
+                        unranked(count)
+                    };
+                    let resolved = rung.resolve(displays);
+                    assert!(
+                        resolved.index().is_none_or(|index| index < count),
+                        "{rung:?} on {count} display(s) (marked={marked}) resolved to \
+                         {resolved:?}, which names a display that is not there",
+                    );
+                    assert!(
+                        marked || resolved != DisplaySelection::Primary,
+                        "{rung:?} resolved to PRIMARY on a machine with no identifiable primary",
+                    );
+                }
+            }
+        }
+    }
+
+    /// A bare `App` carrying everything [`apply_settings`] needs, plus a primary window and
+    /// `monitors` attached displays (the first of them marked primary, as every ranked platform
+    /// does). The window is the real bevy component, which is what `bevy_winit` reads — no winit is
+    /// needed to pin what this system WRITES onto it, and none is available in a test binary.
+    fn window_app(settings: Settings, monitors: usize) -> App {
+        let mut app = App::new();
+        app.insert_resource(settings)
+            .init_resource::<DirectionalLightShadowMap>()
+            .init_resource::<crate::render_scale::RenderScale>()
+            .init_resource::<PresentCaps>()
+            .init_resource::<UiScale>()
+            .init_resource::<LodPixelBudget>()
+            .add_systems(Update, apply_settings);
+        app.world_mut().spawn((Window::default(), PrimaryWindow));
+        spawn_monitors(&mut app, monitors);
+        app
+    }
+
+    /// The primary window's mode and position, as `bevy_winit` would read them.
+    fn window_state(app: &mut App) -> (WindowMode, WindowPosition) {
+        let world = app.world_mut();
+        let mut windows = world.query_filtered::<&Window, With<PrimaryWindow>>();
+        let window = windows.single(world).expect("one primary window");
+        (window.mode, window.position)
+    }
+
+    /// The real BOOT sequence, in the order bevy performs it — the thing a plain component test
+    /// cannot see, and the reason the first version of the fullscreen fix was still broken.
+    ///
+    /// 1. the roots describe the window (`boot_mode` — whatever `at_window_creation` allows);
+    /// 2. `create_windows` runs from `resumed` with an EMPTY `WinitMonitors`, so an indexed rung
+    ///    cannot resolve, and bevy caches the request verbatim as `CachedWindow`
+    ///    (bevy_winit-0.19.0/src/system.rs:88);
+    /// 3. `create_monitors` runs afterwards, from `about_to_wait` (state.rs:458-464) — only NOW do
+    ///    the [`Monitor`] entities exist;
+    /// 4. `Startup` runs `apply_settings`.
+    ///
+    /// The cached mode is RETURNED rather than stored in the world because bevy's `CachedWindow` is
+    /// `pub(crate)` and cannot be constructed here. That costs nothing: the value it would hold at
+    /// step 2 is exactly `boot_mode`, and the predicate that matters —
+    /// `if window.mode != cache.mode` (system.rs:326) — is then a comparison this test can make
+    /// itself. Asserting the component EQUALS the wanted selection is not enough and is precisely
+    /// what missed this: the stranded window's component was already correct.
+    fn booted_window_app(settings: Settings, monitors: usize, boot_mode: WindowMode) -> App {
+        let mut app = App::new();
+        app.insert_resource(settings)
+            .init_resource::<DirectionalLightShadowMap>()
+            .init_resource::<crate::render_scale::RenderScale>()
+            .init_resource::<PresentCaps>()
+            .init_resource::<UiScale>()
+            .init_resource::<LodPixelBudget>()
+            .add_systems(Update, apply_settings);
+        // Step 1-2: the window exists, described with the boot mode, before any monitor does.
+        app.world_mut().spawn((
+            Window {
+                mode: boot_mode,
+                ..default()
+            },
+            PrimaryWindow,
+        ));
+        // Step 3: the monitor list arrives afterwards.
+        spawn_monitors(&mut app, monitors);
+        app
+    }
+
+    /// `count` attached displays, the first marked `PrimaryMonitor` exactly as `create_monitors`
+    /// marks a newly-seen primary. Returns their entities, oldest first.
+    fn spawn_monitors(app: &mut App, count: usize) -> Vec<Entity> {
+        (0..count)
+            .map(|index| {
+                let monitor = app
+                    .world_mut()
+                    .spawn(Monitor {
+                        name: Some(format!("display {index}")),
+                        physical_height: 1080,
+                        physical_width: 1920,
+                        physical_position: IVec2::new(1920 * index as i32, 0),
+                        refresh_rate_millihertz: Some(60_000),
+                        scale_factor: 1.0,
+                        video_modes: Vec::new(),
+                    })
+                    .id();
+                if index == 0 {
+                    app.world_mut().entity_mut(monitor).insert(PrimaryMonitor);
+                }
+                monitor
+            })
+            .collect()
+    }
+
+    /// **The boot window must not name a display bevy cannot resolve yet.**
+    ///
+    /// The trap, end to end: the roots described the window with the stored `Index(1)`; creation
+    /// looked it up in an empty `WinitMonitors`, got `None`, and went fullscreen on
+    /// `Borderless(None)` — the wrong display; bevy cached the request UNRESOLVED; and then
+    /// `apply_settings` at `Startup` computed the very same `Index(1)`, found the component already
+    /// equal, and wrote nothing. `changed_windows` reissues only where the component DIFFERS from
+    /// that cache, so the real window stayed on the fallback monitor for the whole session while
+    /// every component-level assertion read as correct.
+    ///
+    /// So the claim here is not "the component says Index(1)" — it did before — but "**the
+    /// component CHANGED away from the cached boot mode**", which is bevy's reissue predicate.
+    #[test]
+    fn a_fullscreen_boot_on_an_indexed_display_changes_the_mode_bevy_cached() {
+        let settings = Settings {
+            window_mode: WindowModeSetting::Fullscreen,
+            display: DisplaySelection::Display2,
+            ..default()
+        };
+        // Exactly what the composition roots put in the boot window.
+        let cached = settings
+            .window_mode
+            .to_window_mode(settings.display.at_window_creation());
+        assert_eq!(
+            cached,
+            WindowMode::BorderlessFullscreen(MonitorSelection::Current),
+            "an indexed rung must NOT be named at creation — see `at_window_creation`",
+        );
+
+        let mut app = booted_window_app(settings, 3, cached);
+        app.update();
+        let (mode, _) = window_state(&mut app);
+        assert_eq!(
+            mode,
+            WindowMode::BorderlessFullscreen(MonitorSelection::Index(1)),
+            "Startup must resolve the stored display now that the monitors exist",
+        );
+        assert_ne!(
+            mode, cached,
+            "THE REGRESSION: the mode must differ from the one bevy cached at creation, or \
+             `changed_windows` never reissues fullscreen (system.rs:326) and the real window stays \
+             on creation's fallback monitor — which a component-equality assertion cannot see",
+        );
+
+        // CONTROL — the trap, reproduced. Had the boot window carried the resolved selection (what
+        // the roots used to do), Startup would compute the same value, write nothing, and leave the
+        // component EQUAL to the cache: correct-looking, and stranded.
+        let stranded_cache = WindowMode::BorderlessFullscreen(MonitorSelection::Index(1));
+        let mut app = booted_window_app(settings, 3, stranded_cache);
+        app.update();
+        let (mode, _) = window_state(&mut app);
+        assert_eq!(
+            mode, stranded_cache,
+            "the control's premise: naming the display twice produces no change at all",
+        );
+
+        // The PRIMARY rung is the one that may be named at creation, because `select_monitor` takes
+        // the primary handle as a direct argument rather than through the empty list. It therefore
+        // boots correct and needs no correction — but the mode still ends up as a resolvable
+        // selection rather than the bare `Primary` (see `monitor_on`'s hardening).
+        let primary = Settings {
+            window_mode: WindowModeSetting::Fullscreen,
+            display: DisplaySelection::Primary,
+            ..default()
+        };
+        let cached = primary
+            .window_mode
+            .to_window_mode(primary.display.at_window_creation());
+        assert_eq!(
+            cached,
+            WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
+        );
+        let mut app = booted_window_app(primary, 3, cached);
+        app.update();
+        let (mode, _) = window_state(&mut app);
+        assert!(
+            matches!(
+                mode,
+                WindowMode::BorderlessFullscreen(MonitorSelection::Entity(_))
+            ),
+            "the primary rung resolves to the marked monitor's entity, got {mode:?}",
+        );
+    }
+
+    /// **Bevy's `PrimaryMonitor` marker is not a live fact, so the PRIMARY rung must not be spent
+    /// as `MonitorSelection::Primary`.**
+    ///
+    /// `create_monitors` skips an already-seen monitor with `continue 'outer` BEFORE the marker
+    /// insert (bevy_winit-0.19.0/src/system.rs:184-190 vs 217-219) and nothing anywhere removes or
+    /// reassigns the marker; only a despawned monitor loses it (system.rs:225-236). So across a
+    /// hot-plug the marker can be wrong in both directions.
+    ///
+    /// The hardening: whenever a marker exists, the rung is emitted as `MonitorSelection::Entity`,
+    /// which `find_entity` resolves against the monitor list and which never consults the
+    /// `primary_monitor()` that Wayland always answers `None` to. A STALE marker therefore still
+    /// names a real attached display instead of degrading into the Wayland no-op
+    /// `a_machine_that_cannot_name_a_primary_falls_back_to_the_first_display` covers. Where no
+    /// marker survives, the documented `Index(0)` fallback takes over.
+    #[test]
+    fn the_primary_rung_survives_bevys_stale_monitor_markers() {
+        let mut app = App::new();
+        let monitors = spawn_monitors(&mut app, 3);
+        let displays_now = |app: &mut App| {
+            let world = app.world_mut();
+            let mut all = world.query_filtered::<(), With<Monitor>>();
+            let count = all.iter(world).count();
+            let mut marked =
+                world.query_filtered::<Entity, (With<Monitor>, With<PrimaryMonitor>)>();
+            let primary = marked.iter(world).next();
+            AttachedDisplays { count, primary }
+        };
+
+        // The ordinary machine: the marker is fresh and the rung resolves through it BY ENTITY.
+        let displays = displays_now(&mut app);
+        assert_eq!(displays.primary, Some(monitors[0]));
+        assert_eq!(
+            DisplaySelection::Primary.monitor_on(displays),
+            Some(MonitorSelection::Entity(monitors[0])),
+            "a marked primary must be spent as the entity bevy marked, not as the platform query \
+             that Wayland answers None to",
+        );
+
+        // HOT-PLUG: the marked primary is unplugged. Bevy despawns its entity (system.rs:225-236)
+        // and — this is the limitation — never marks whichever display inherits the role.
+        app.world_mut().entity_mut(monitors[0]).despawn();
+        let displays = displays_now(&mut app);
+        assert_eq!(displays.count, 2);
+        assert_eq!(
+            displays.primary, None,
+            "the premise: bevy re-marks nothing, so the new primary is invisible to us",
+        );
+        assert_eq!(
+            DisplaySelection::Primary.monitor_on(displays),
+            Some(MonitorSelection::Index(0)),
+            "with no surviving marker the rung must fall back to a display that certainly exists — \
+             the documented residual is that PRIMARY then means 'the first display'",
+        );
+        assert_ne!(
+            DisplaySelection::Primary.monitor_on(displays),
+            Some(MonitorSelection::Primary),
+            "and it must never be the bare platform query, which is the no-op this all guards",
+        );
+
+        // The mirror case — a marker that OUTLIVES the platform's ability to name a primary — is
+        // indistinguishable from the healthy one through the ECS, and that is exactly why the
+        // entity form is used: it resolves against the monitor list either way. Pinned as an
+        // invariant over every state this module can observe.
+        for count in 1..4 {
+            for displays in [ranked(count), unranked(count)] {
+                let monitor = DisplaySelection::Primary.monitor_on(displays);
+                assert_ne!(
+                    monitor,
+                    Some(MonitorSelection::Primary),
+                    "{displays:?}: a synchronised monitor list must never leave the rung as the \
+                     bare platform query",
+                );
+                assert!(monitor.is_some(), "{displays:?}");
+            }
+        }
+        // The one state where the bare request IS right: nothing has been learned at all, so there
+        // is no entity to prefer and no evidence the platform cannot answer.
+        assert_eq!(
+            DisplaySelection::Primary.monitor_on(AttachedDisplays::default()),
+            Some(MonitorSelection::Primary),
+        );
+    }
+
+    /// **The display row must reach FULLSCREEN, which is the mode the game is usually in.**
+    ///
+    /// The bug this pins: the row was applied ONLY as
+    /// `Window::position`, and a fullscreen window ignores `set_outer_position`. Bevy picks a
+    /// borderless window's monitor out of `Window::mode` alone —
+    /// `if window.mode != cache.mode { … select_monitor(&monitor_selection) }`
+    /// (bevy_winit-0.19.0/src/system.rs:326-334) — so a file saying `window_mode: Fullscreen` plus
+    /// `display: Display2` booted fullscreen wherever `Current` happened to land, and moving the row
+    /// while fullscreen did nothing at all. Worse, the position edge was CONSUMED by that useless
+    /// pass, so leaving fullscreen afterwards never applied the display either.
+    ///
+    /// Three claims, in the order a player meets them: boot, a live change while fullscreen, and
+    /// the walk back out to windowed.
+    #[test]
+    fn a_fullscreen_window_follows_the_display_row_and_still_places_itself_after_leaving() {
+        // BOOT: a persisted fullscreen on display 2, three displays attached.
+        let mut app = window_app(
+            Settings {
+                window_mode: WindowModeSetting::Fullscreen,
+                display: DisplaySelection::Display2,
+                ..default()
+            },
+            3,
+        );
+        app.update();
+        let (mode, _) = window_state(&mut app);
+        assert_eq!(
+            mode,
+            WindowMode::BorderlessFullscreen(MonitorSelection::Index(1)),
+            "a persisted fullscreen must boot on the persisted DISPLAY, not on Current",
+        );
+
+        // LIVE: the player walks the row while still fullscreen. The mode is level-triggered, so it
+        // follows — the edge-triggered position could not have.
+        app.world_mut().resource_mut::<Settings>().display = DisplaySelection::Display3;
+        app.update();
+        let (mode, _) = window_state(&mut app);
+        assert_eq!(
+            mode,
+            WindowMode::BorderlessFullscreen(MonitorSelection::Index(2)),
+            "changing the display row while fullscreen must move the window",
+        );
+
+        // And an unrelated row must NOT disturb it — the level-triggered write is guarded.
+        app.world_mut().resource_mut::<Settings>().msaa = MsaaLevel::Off;
+        app.update();
+        let (mode, position) = window_state(&mut app);
+        assert_eq!(
+            mode,
+            WindowMode::BorderlessFullscreen(MonitorSelection::Index(2))
+        );
+        assert_eq!(
+            position,
+            WindowPosition::Automatic,
+            "nothing may write a position while fullscreen — it is ignored, and spending the edge \
+             there is what stranded the window on the way back out",
+        );
+
+        // LEAVING: the position edge must still be available, because it was never spent.
+        app.world_mut().resource_mut::<Settings>().window_mode = WindowModeSetting::Windowed;
+        app.update();
+        let (mode, position) = window_state(&mut app);
+        assert_eq!(mode, WindowMode::Windowed);
+        assert_eq!(
+            position,
+            WindowPosition::Centered(MonitorSelection::Index(2)),
+            "leaving fullscreen must place the window on the display the row names",
+        );
+    }
+
+    /// The other half of the edge: once placed, the window STAYS where the player drags it. winit
+    /// rewrites `Window::position` to `At(..)` on every `Moved` event, so a level-triggered write
+    /// would re-centre the window every time any unrelated row moved.
+    #[test]
+    fn an_unrelated_row_never_re_centres_a_window_the_player_moved() {
+        let mut app = window_app(
+            Settings {
+                display: DisplaySelection::Display2,
+                ..default()
+            },
+            3,
+        );
+        app.update();
+        assert_eq!(
+            window_state(&mut app).1,
+            WindowPosition::Centered(MonitorSelection::Index(1)),
+            "the launch application",
+        );
+
+        // What winit does when the player drags the window (state.rs:381-383).
+        let dragged = WindowPosition::At(IVec2::new(37, 21));
+        {
+            let world = app.world_mut();
+            let mut windows = world.query_filtered::<&mut Window, With<PrimaryWindow>>();
+            windows.single_mut(world).expect("one window").position = dragged;
+        }
+        for row in [MsaaLevel::Off, MsaaLevel::X2, MsaaLevel::X4] {
+            app.world_mut().resource_mut::<Settings>().msaa = row;
+            app.update();
+            assert_eq!(
+                window_state(&mut app).1,
+                dragged,
+                "{row:?}: an unrelated row must not drag the window back to the middle",
+            );
+        }
+        // But the row itself still moves it.
+        app.world_mut().resource_mut::<Settings>().display = DisplaySelection::Display3;
+        app.update();
+        assert_eq!(
+            window_state(&mut app).1,
+            WindowPosition::Centered(MonitorSelection::Index(2)),
+        );
+    }
+
+    /// The LOD budget row reaches the render world through exactly one door — [`apply_settings`]
+    /// writing [`LodPixelBudget`] — which is the same seam
+    /// `the_render_scale_row_is_applied_through_the_one_resource` pins for render scale. There is no
+    /// CONSUMER yet, so this resource is the entire contract that slice has to keep.
+    #[test]
+    fn the_lod_budget_row_is_applied_through_the_one_resource() {
+        let mut app = App::new();
+        app.init_resource::<Settings>()
+            .init_resource::<DirectionalLightShadowMap>()
+            .init_resource::<crate::render_scale::RenderScale>()
+            .init_resource::<PresentCaps>()
+            .init_resource::<UiScale>()
+            .init_resource::<LodPixelBudget>()
+            .add_systems(Update, apply_settings);
+        app.update();
+        assert_eq!(
+            app.world().resource::<LodPixelBudget>().0,
+            1.0,
+            "a default config must apply the default budget"
+        );
+
+        let mut budget = PixelBudget(PixelBudget::MIN);
+        loop {
+            app.world_mut().resource_mut::<Settings>().lod_pixel_budget = budget;
+            app.update();
+            assert_eq!(
+                app.world().resource::<LodPixelBudget>().0,
+                budget.pixels(),
+                "{budget:?} did not reach the resource",
+            );
+            let next = budget.step(1);
+            if next == budget {
+                break;
+            }
+            budget = next;
+        }
+        assert_eq!(
+            budget.pixels(),
+            PixelBudget::MAX,
+            "the walk ends at the top"
+        );
+
+        // A hand-edited absurd value is clamped on the way OUT, so no consumer ever sees a budget
+        // it has to defend against.
+        app.world_mut().resource_mut::<Settings>().lod_pixel_budget = PixelBudget(-3.0);
+        app.update();
+        assert_eq!(app.world().resource::<LodPixelBudget>().0, PixelBudget::MIN);
+        app.world_mut().resource_mut::<Settings>().lod_pixel_budget = PixelBudget(9999.0);
+        app.update();
+        assert_eq!(app.world().resource::<LodPixelBudget>().0, PixelBudget::MAX);
+    }
+
+    /// The LOD budget ladder: 0.5..=8.0 by 0.5, default 1.0, saturating steps, a slider round-trip
+    /// at every stop, and a hand-edited off-ladder value honoured until touched.
+    #[test]
+    fn the_lod_pixel_budget_ladder_is_sane() {
+        assert_eq!(PixelBudget::default().pixels(), 1.0);
+        assert_eq!(PixelBudget::default().label(), "1.0 PX");
+        assert_eq!(
+            PixelBudget(PixelBudget::MIN).step(-1),
+            PixelBudget(PixelBudget::MIN),
+            "the floor saturates",
+        );
+        assert_eq!(
+            PixelBudget(PixelBudget::MAX).step(1),
+            PixelBudget(PixelBudget::MAX),
+            "the ceiling saturates",
+        );
+        assert_eq!(PixelBudget(1.0).step(1), PixelBudget(1.5));
+        assert_eq!(PixelBudget(1.0).step(-1), PixelBudget(0.5));
+        let mut budget = PixelBudget(PixelBudget::MIN);
+        loop {
+            assert_eq!(
+                PixelBudget::from_fraction(budget.fraction()),
+                budget,
+                "{budget:?} did not survive the slider round-trip",
+            );
+            let next = budget.step(1);
+            if next == budget {
+                break;
+            }
+            budget = next;
+        }
+        assert_eq!(budget, PixelBudget(PixelBudget::MAX));
+        // Hand-edited values: honoured as written inside the range, clamped at the absurd ends,
+        // snapped to the ladder on first touch — the `FrameCap` shape.
+        assert_eq!(PixelBudget(1.2).pixels(), 1.2);
+        assert_eq!(PixelBudget(1.2).step(1), PixelBudget(1.5));
+        assert_eq!(PixelBudget(0.0).pixels(), PixelBudget::MIN);
+        assert_eq!(PixelBudget(-1.0).pixels(), PixelBudget::MIN);
+        assert_eq!(PixelBudget(1000.0).pixels(), PixelBudget::MAX);
+        assert_eq!(
+            PixelBudget(f32::NAN).pixels(),
+            PixelBudget::default().0,
+            "`f32::clamp` passes NaN through — a NaN budget makes every downstream comparison \
+             false, so it must be answered with the default instead",
+        );
+        // The sanitiser, which is what the parse boundary applies — see
+        // `a_non_finite_budget_cannot_survive_the_parse` for the same claim through real RON.
+        assert_eq!(PixelBudget::sanitized(f32::NAN), PixelBudget::default());
+        assert_eq!(
+            PixelBudget::sanitized(f32::INFINITY),
+            PixelBudget(PixelBudget::MAX),
+        );
+        assert_eq!(
+            PixelBudget::sanitized(f32::NEG_INFINITY),
+            PixelBudget(PixelBudget::MIN),
+        );
+        assert_eq!(
+            PixelBudget::sanitized(1.2),
+            PixelBudget(1.2),
+            "a FINITE off-ladder value is preserved — the sanitiser normalises what cannot be \
+             compared, it does not enforce the ladder",
+        );
+        assert_eq!(PixelBudget::sanitized(-4.0), PixelBudget(-4.0));
+        // The stop count is written out rather than computed, so it is pinned against the three
+        // constants it is derived from.
+        assert_eq!(
+            PixelBudget::MIN + f32::from(PixelBudget::STOPS - 1) * PixelBudget::STEP,
+            PixelBudget::MAX,
+            "STOPS must be 1 + (MAX - MIN) / STEP",
         );
     }
 
@@ -2414,6 +3696,8 @@ mod tests {
         assert!(is_default(&settings.vsync));
         assert!(is_default(&settings.render_scale));
         assert!(is_default(&settings.window_mode));
+        assert!(is_default(&settings.display));
+        assert!(is_default(&settings.lod_pixel_budget));
         assert!(is_default(&settings.frame_cap));
         assert!(is_default(&settings.ui_scale));
         assert!(

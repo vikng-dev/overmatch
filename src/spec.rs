@@ -732,6 +732,31 @@ impl TankSpec {
                 }
             }
         }
+        // Every view's FOV is a DIVISOR downstream, not merely a camera setting: the terrain LOD
+        // ladder derives every switch distance from `dev / fov` (`terrain_lod::sub_pixel_distance_m`)
+        // and the sight derives its cursor-travel margin and sensitivity from it. A NaN authored
+        // here propagates into NaN range boundaries, which compare false against every distance and
+        // silently delete the ground; a negative one inverts the range chain. Neither is a picture
+        // bug that leads back to a spec sheet, so the sheet refuses them.
+        for (kind, view) in &self.views {
+            if !view.fov.is_finite() || view.fov <= 0.0 {
+                return Err(format!(
+                    "view `{}`: fov must be finite and > 0 radians (got {})",
+                    kind.label(),
+                    view.fov
+                )
+                .into());
+            }
+            if view.fov >= core::f32::consts::PI {
+                return Err(format!(
+                    "view `{}`: fov must be < π radians — a perspective projection has no \
+                     half-angle at or past 90° (got {})",
+                    kind.label(),
+                    view.fov
+                )
+                .into());
+            }
+        }
         Ok(())
     }
 }
@@ -984,6 +1009,41 @@ mod tests {
             .expect("tiger_1.tank.ron must parse");
         spec.validate()
             .expect("the shipped sheet must be semantically valid");
+    }
+
+    /// `validate()` rejects a FOV that would silently delete the picture instead of showing a wrong
+    /// one. The field is a DIVISOR downstream — the terrain LOD ladder derives every switch distance
+    /// from `dev / fov` — so `NaN` propagates into `NaN` range boundaries, which compare false
+    /// against every distance and simply stop drawing the ground, with nothing anywhere pointing
+    /// back at a spec sheet. Negative inverts the chain; ≥ π has no perspective half-angle.
+    #[test]
+    fn validate_rejects_a_fov_that_is_not_an_angle() {
+        let with_fov = |fov: f32| {
+            let mut spec: TankSpec =
+                ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron")).unwrap();
+            spec.views.get_mut(&ViewKind::Gunner).unwrap().fov = fov;
+            spec
+        };
+        for fov in [
+            0.0,
+            -0.12,
+            f32::NAN,
+            f32::INFINITY,
+            core::f32::consts::PI,
+            4.0,
+        ] {
+            let err = with_fov(fov)
+                .validate()
+                .expect_err(&format!("fov {fov} must be refused"))
+                .to_string();
+            assert!(err.contains("fov") && err.contains("Gunner"), "{err}");
+        }
+        // The authored value, and the widest legal field, still pass.
+        for fov in [0.12, core::f32::consts::FRAC_PI_4, 3.0] {
+            with_fov(fov)
+                .validate()
+                .unwrap_or_else(|err| panic!("fov {fov} must be accepted: {err}"));
+        }
     }
 
     /// `validate()` rejects each silently-bricked `FireMode` value, and its error names the weapon.

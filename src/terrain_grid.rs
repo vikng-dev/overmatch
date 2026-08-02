@@ -275,8 +275,10 @@ impl HeightGrid {
         WORLD_HALF_EXTENT
     }
 
-    /// One sample (meters).
-    fn sample(&self, i: usize, j: usize) -> f32 {
+    /// One sample (meters). `pub(crate)` because the render-LOD ladder
+    /// ([`crate::terrain_lod`]) reads the SAME slab rather than resampling — the ONE-SURFACE
+    /// invariant is what makes that ladder legal in the first place.
+    pub(crate) fn sample(&self, i: usize, j: usize) -> f32 {
         self.samples[j * self.size as usize + i]
     }
 
@@ -751,66 +753,105 @@ pub(crate) fn heightfield_collider(grid: &HeightGrid) -> Collider {
 /// differences of the grid (view-only shading), UVs world-space-tiled
 /// (`world_xz / TEXTURE_TILE_M` — repeat-sampled, see [`TEXTURE_TILE_M`]). The dedicated server
 /// never builds this (`world::spawn_environment` gates it on a window existing).
+///
+/// Every terrain mesh — this one and every LOD level — is created with [`TERRAIN_MESH_USAGE`].
+/// RENDER-WORLD ONLY, and that is a size decision, not a style one: the ground never changes after
+/// startup, nothing in the main world reads its vertices back (the collider and the oracle read the
+/// GRID, and the pinned `Aabb` plus `NoAutoAabb` keep bevy from re-deriving bounds from the mesh),
+/// and the default flags mean "keep a full CPU copy forever as well". DERIVED from the census —
+/// ~2.9 M triangles and ~1.5 M tangented vertices across the ladder — that copy is ~100 MiB of
+/// resident nothing. Anything that later needs terrain geometry on the CPU should read the grid,
+/// which is the one surface anyway.
+pub(crate) const TERRAIN_MESH_USAGE: RenderAssetUsages = RenderAssetUsages::RENDER_WORLD;
+
 pub(crate) fn terrain_mesh_tiles(grid: &HeightGrid) -> Vec<Mesh> {
-    let n = grid.size() as usize;
-    let cells = n - 1;
-    let step = WORLD_SIZE / cells as f32;
-    let tiles_per_side = cells.div_ceil(MESH_TILE_CELLS);
-    let world_at = |k: usize| -WORLD_HALF_EXTENT + k as f32 * step;
-    // Shading normal at node (i, j): central differences of the grid, one-sided at the edges.
-    let normal_at = |i: usize, j: usize| -> [f32; 3] {
-        let (il, ih) = (i.saturating_sub(1), (i + 1).min(n - 1));
-        let (jl, jh) = (j.saturating_sub(1), (j + 1).min(n - 1));
-        let dhdx = (grid.sample(ih, j) - grid.sample(il, j)) / ((ih - il) as f32 * step);
-        let dhdz = (grid.sample(i, jh) - grid.sample(i, jl)) / ((jh - jl) as f32 * step);
-        Vec3::new(-dhdx, 1.0, -dhdz).normalize().to_array()
-    };
-    let mut meshes = Vec::with_capacity(tiles_per_side * tiles_per_side);
-    for tz in 0..tiles_per_side {
-        for tx in 0..tiles_per_side {
-            // Node range of this tile, inclusive: the last row/column is shared with the next
-            // tile (same world positions and heights, so no seam).
-            let ia = tx * MESH_TILE_CELLS;
-            let ib = (ia + MESH_TILE_CELLS).min(cells);
-            let ja = tz * MESH_TILE_CELLS;
-            let jb = (ja + MESH_TILE_CELLS).min(cells);
-            let (w, h) = (ib - ia + 1, jb - ja + 1);
-            let mut positions: Vec<[f32; 3]> = Vec::with_capacity(w * h);
-            let mut normals: Vec<[f32; 3]> = Vec::with_capacity(w * h);
-            let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(w * h);
-            for j in ja..=jb {
-                let z = world_at(j);
-                for i in ia..=ib {
-                    let x = world_at(i);
-                    positions.push([x, grid.sample(i, j), z]);
-                    normals.push(normal_at(i, j));
-                    uvs.push([x / TEXTURE_TILE_M, z / TEXTURE_TILE_M]);
-                }
+    let ranges = mesh_tile_node_ranges(grid);
+    let mut meshes = Vec::with_capacity(ranges.len());
+    for [ia, ib, ja, jb] in ranges {
+        let (w, h) = (ib - ia + 1, jb - ja + 1);
+        let mut positions: Vec<[f32; 3]> = Vec::with_capacity(w * h);
+        let mut normals: Vec<[f32; 3]> = Vec::with_capacity(w * h);
+        let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(w * h);
+        for j in ja..=jb {
+            let z = node_world_coord(grid, j);
+            for i in ia..=ib {
+                let x = node_world_coord(grid, i);
+                positions.push([x, grid.sample(i, j), z]);
+                normals.push(surface_normal_at(grid, i, j));
+                uvs.push([x / TEXTURE_TILE_M, z / TEXTURE_TILE_M]);
             }
-            let mut indices: Vec<u32> = Vec::with_capacity((w - 1) * (h - 1) * 6);
-            for j in 0..h - 1 {
-                for i in 0..w - 1 {
-                    let i00 = (j * w + i) as u32;
-                    let i10 = i00 + 1; // +x
-                    let i01 = i00 + w as u32; // +z
-                    let i11 = i01 + 1;
-                    // Counter-clockwise seen from +Y (up), split along the shared edge
-                    // i01–i10: the SAME anti-diagonal parry and `height_at` use.
-                    indices.extend_from_slice(&[i00, i01, i10, i10, i01, i11]);
-                }
-            }
-            let mut mesh = Mesh::new(
-                PrimitiveTopology::TriangleList,
-                RenderAssetUsages::default(),
-            );
-            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-            mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-            mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-            mesh.insert_indices(Indices::U32(indices));
-            meshes.push(mesh);
         }
+        let mut indices: Vec<u32> = Vec::with_capacity((w - 1) * (h - 1) * 6);
+        for j in 0..h - 1 {
+            for i in 0..w - 1 {
+                let i00 = (j * w + i) as u32;
+                let i10 = i00 + 1; // +x
+                let i01 = i00 + w as u32; // +z
+                let i11 = i01 + 1;
+                // Counter-clockwise seen from +Y (up), split along the shared edge
+                // i01–i10: the SAME anti-diagonal parry and `height_at` use.
+                indices.extend_from_slice(&[i00, i01, i10, i10, i01, i11]);
+            }
+        }
+        let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, TERRAIN_MESH_USAGE);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+        mesh.insert_indices(Indices::U32(indices));
+        meshes.push(mesh);
     }
     meshes
+}
+
+/// World coordinate (m) of grid node index `k` along either axis — the single mapping
+/// [`HeightGrid::height_at`] inverts, exposed so the render mesh and the LOD ladder place their
+/// vertices at exactly the same points instead of each rebuilding the arithmetic.
+pub(crate) fn node_world_coord(grid: &HeightGrid, k: usize) -> f32 {
+    -WORLD_HALF_EXTENT + k as f32 * (WORLD_SIZE / (grid.size() - 1) as f32)
+}
+
+/// THE shading normal at grid node `(i, j)`: central differences over the FULL grid, one-sided at
+/// the map edges.
+///
+/// Single home because the LOD ladder must sample this at the vertices it KEEPS — a normal
+/// recomputed from a simplified mesh would make shading pop with the geometry, which is the one
+/// thing a screen-space-error ladder is supposed to make invisible. It reads across tile borders
+/// by construction (it takes the grid, not a tile patch), so neighbouring tiles agree on their
+/// shared row's normal at every level.
+pub(crate) fn surface_normal_at(grid: &HeightGrid, i: usize, j: usize) -> [f32; 3] {
+    let n = grid.size() as usize;
+    let step = WORLD_SIZE / (n - 1) as f32;
+    let (il, ih) = (i.saturating_sub(1), (i + 1).min(n - 1));
+    let (jl, jh) = (j.saturating_sub(1), (j + 1).min(n - 1));
+    let dhdx = (grid.sample(ih, j) - grid.sample(il, j)) / ((ih - il) as f32 * step);
+    let dhdz = (grid.sample(i, jh) - grid.sample(i, jl)) / ((jh - jl) as f32 * step);
+    Vec3::new(-dhdx, 1.0, -dhdz).normalize().to_array()
+}
+
+/// The render TILING: one inclusive node range `[ia, ib, ja, jb]` per [`MESH_TILE_CELLS`]² tile,
+/// row-major in `(tz, tx)`. The last row/column of each tile is SHARED with the next one (same
+/// world position, same height, so no seam), which is why the ranges overlap by a node.
+///
+/// Single home so [`terrain_mesh_tiles`] and [`crate::terrain_lod`] cannot drift into two
+/// different tilings — the LOD ladder's crack-freeness is a claim about neighbours, and it is only
+/// true if both agree on who the neighbours are.
+pub(crate) fn mesh_tile_node_ranges(grid: &HeightGrid) -> Vec<[usize; 4]> {
+    let cells = grid.size() as usize - 1;
+    let tiles_per_side = cells.div_ceil(MESH_TILE_CELLS);
+    let mut ranges = Vec::with_capacity(tiles_per_side * tiles_per_side);
+    for tz in 0..tiles_per_side {
+        for tx in 0..tiles_per_side {
+            let ia = tx * MESH_TILE_CELLS;
+            let ja = tz * MESH_TILE_CELLS;
+            ranges.push([
+                ia,
+                (ia + MESH_TILE_CELLS).min(cells),
+                ja,
+                (ja + MESH_TILE_CELLS).min(cells),
+            ]);
+        }
+    }
+    ranges
 }
 
 #[cfg(test)]
