@@ -128,6 +128,10 @@ mod tank;
 /// The world heightmap: PNG → shared height grid (oracle ground term, heightfield collider,
 /// client render mesh, server spawn heights). See the module doc for the mapping constants.
 pub mod terrain_grid;
+/// The terrain render LOD ladder: RTIN/Martini error-bounded levels per render tile, generated at
+/// startup from the SAME decoded grid the collider and oracle read, selected by `VisibilityRange`.
+/// View-only — the oracle, the collider and `height_at` are untouched. See the module doc.
+mod terrain_lod;
 /// The jitter-trace recorder (`SPIKE_TRACE=<path>`): an env-gated JSONL log of rendered vs. simulated
 /// pose, rollback events, and correction decay — passive instrumentation for the MP hull-jitter
 /// investigation. Off (zero cost) unless the env var is set. Net-specific rows are `#[cfg(net)]`.
@@ -794,12 +798,17 @@ pub fn run_offline() {
                     // window — the mapping self-negotiates until the probe lands.
                     present_mode: settings.present_mode(settings::PresentCaps::Unprobed),
                     // Described at creation so a persisted fullscreen boots fullscreen instead of
-                    // flashing a window first. A hidden capture run must NOT boot into the
+                    // flashing a window first. The monitor is `at_window_creation`'s and NOT the
+                    // stored rung: naming an indexed display here would be cached unresolved by
+                    // bevy and would make the `Startup` correction unrepresentable — see
+                    // `settings::DisplaySelection`. A hidden capture run must NOT boot into the
                     // player's persisted fullscreen — it stays a plain window.
                     mode: if hidden {
                         bevy::window::WindowMode::Windowed
                     } else {
-                        settings.window_mode.to_window_mode()
+                        settings
+                            .window_mode
+                            .to_window_mode(settings.display.at_window_creation())
                     },
                     visible: !hidden,
                     ..default()

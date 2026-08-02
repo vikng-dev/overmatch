@@ -571,57 +571,6 @@ def sliver_floor_m(gates, source, source_validity):
     )
 
 
-def validity_failures(validity, source_validity, gates, require_baked_tangents=True):
-    """The structural gates, as a list of named failures. Empty means clean.
-
-    Split out of `certify` so the SHIPPED L0 bytes go through exactly the same checks the generated
-    levels do. They did not before: L0's record was copied from the Blender source, so the one level
-    the whole ladder is measured against was the only one never validated as it ships.
-    """
-    failures = []
-    if gates["components_must_match"] and validity["components"] != source_validity["components"]:
-        failures.append(
-            f"component count {validity['components']} != source {source_validity['components']} "
-            f"— a part vanished, and a vanished part has near-zero Hausdorff distance"
-        )
-    if validity["slivers_below_floor"] > 0:
-        failures.append(
-            f"{validity['slivers_below_floor']} triangle(s) below the scale-aware altitude floor "
-            f"{validity['min_altitude_floor_m'] * 1000:.5f} mm "
-            f"(worst {validity['min_altitude_m'] * 1000:.6f} mm)"
-        )
-    # PRESENCE FIRST. `degenerate_tangents` counts bad tangents among those that EXIST, so a level
-    # that shipped none at all scored a clean zero and passed — and would have gone back to
-    # loader-generated, uncertified tangents without a word. A generated level carries one tangent
-    # per vertex or it does not ship.
-    if require_baked_tangents and validity["baked_tangents"] != validity["verts"]:
-        failures.append(
-            f"{validity['baked_tangents']} baked tangents for {validity['verts']} vertices — a "
-            f"generated level must BAKE a tangent per vertex, or bevy generates them at load and "
-            f"nothing here certified what renders"
-        )
-    for key, limit, description in (
-        ("duplicate_faces", gates["max_duplicate_faces"], "duplicate face(s)"),
-        ("nonfinite_attrs", gates["max_nonfinite"], "non-finite attribute component(s)"),
-        ("orientation_flips", gates["max_orientation_flips"],
-         "edge(s) traversed the same way by both their faces — inconsistent winding"),
-        ("nonmanifold_edges", gates["max_nonmanifold_edges"],
-         "edge(s) shared by more than two faces — no consistent normal or tangent frame there, "
-         "and a non-watertight volume bakes to zero armour silently"),
-        ("tangent_default_faces", gates["max_tangent_default_faces"],
-         "face(s) with degenerate UV area would take a DEFAULTED tangent at bind"),
-        ("tangent_default_verts", gates["max_tangent_default_verts"],
-         "vertex/vertices whose every incident face has degenerate UV area"),
-        ("degenerate_tangents", gates["max_degenerate_tangents"],
-         "BAKED tangent(s) the loader would use verbatim that are zero-length, non-finite, or "
-         "carry a bitangent sign that is not +/-1 — mikktspace gave up on them, and unlike the UV "
-         "test above this is the thing itself rather than a necessary condition on it"),
-    ):
-        if validity[key] > limit:
-            failures.append(f"{validity[key]} {description}")
-    return failures
-
-
 def certify(source, shipped, target_mm, gates, source_validity, floor_m):
     """Every numeric gate, on the decoded shipped bytes. Returns (report, failures)."""
     deviation = M.certified_deviation(
@@ -629,7 +578,7 @@ def certify(source, shipped, target_mm, gates, source_validity, floor_m):
         rel_tol=gates["deviation_rel_tol_certify"],
     )
     validity = shipped.validity(gates, floor_m)
-    failures = validity_failures(validity, source_validity, gates)
+    failures = M.validity_gate_failures(validity, source_validity, gates)
     if deviation["mm_upper"] > target_mm:
         failures.insert(0, (
             f"deviation upper bound {deviation['mm_upper']:.4f} mm exceeds the rung target "
@@ -696,7 +645,7 @@ def build_chain(asset, root, run_render_gate, out_dir):
     l0_validity = shipped_l0.validity(CONFIG.GATES, floor_m)
     # L0 bakes its tangents too now (Yan ratified the host re-export), so it is held to exactly
     # the same rule as every generated level: one tangent per vertex, and none degenerate.
-    l0_failures = validity_failures(l0_validity, source_validity, CONFIG.GATES)
+    l0_failures = M.validity_gate_failures(l0_validity, source_validity, CONFIG.GATES)
     log(f"  L0     shipped in {asset['l0_glb']} :: {asset['l0_node']} — "
         f"{shipped_l0.tri_count} tris / {shipped_l0.vert_count} decoded verts, "
         f"vertex deviation {l0_dev_mm:.9f} mm, origin radius "
@@ -724,6 +673,10 @@ def build_chain(asset, root, run_render_gate, out_dir):
         "shipped_dev_from_source_mm": round(l0_dev_mm, 9),
         "shipped_matches_source": True,
         "identity_proof": identity_reason,
+        # The geometry fingerprint the VERIFIER re-derives from these bytes. Recorded here, where
+        # L0 has just been proven identical to the evaluated .blend source, so the number carries
+        # that proof forward to a verifier that cannot run Blender.
+        "welded_digest": shipped_l0.welded_digest(),
         "tangents_are_baked": True,
     }
 

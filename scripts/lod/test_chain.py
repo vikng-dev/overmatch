@@ -13,6 +13,7 @@ and asserts `verify` refuses it.
 
 import hashlib
 import json
+import shutil
 import struct
 import tempfile
 import math
@@ -20,12 +21,32 @@ import os
 import sys
 import unittest
 
+import numpy as np
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import chain  # noqa: E402
 import config as CONFIG  # noqa: E402
 
 VIEW = CONFIG.REFERENCE_VIEW
+
+
+def _numeric_paths(node, path=()):
+    """Every path to a numeric leaf — the sweep is over the document, not over a curated list."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            yield from _numeric_paths(value, path + (key,))
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            yield from _numeric_paths(value, path + (index,))
+    elif isinstance(node, (int, float)) and not isinstance(node, bool):
+        yield path
+
+
+def _set_path(node, path, value):
+    for key in path[:-1]:
+        node = node[key]
+    node[path[-1]] = value
 
 
 def _rebuild_glb(gltf, binary):
@@ -50,7 +71,7 @@ def validity_record(tris, verts, origin_radius=0.1, bbox_mm=(700.0, 180.0, 180.0
         "tangent_default_verts": 0, "min_altitude_m": 0.001, "min_altitude_floor_m": 0.0001,
         "min_tri_area_mm2": 1.0, "origin_radius_m": origin_radius,
         "baked_tangents": verts, "degenerate_tangents": 0, "min_tangent_length": 0.999999,
-        "bbox_mm": list(bbox_mm),
+        "bbox_mm": list(bbox_mm), "radius_m": 0.4,
     }
 
 
@@ -394,7 +415,7 @@ class MutantTests(unittest.TestCase):
                     level[key] = float("nan")
 
         failures = self.failures_for(poison)
-        self.assertTrue(any("not a finite number" in f for f in failures), failures)
+        self.assertTrue(any("non-finite" in f for f in failures), failures)
 
     def test_a_manifest_naming_an_unknown_asset_is_refused(self):
         failures = self.failures_for(
@@ -417,13 +438,22 @@ class MutantTests(unittest.TestCase):
         failures = self.failures_for(loosen)
         self.assertTrue(any("max_duplicate_faces" in f for f in failures), failures)
 
-    def test_a_manifest_with_recorded_defects_is_refused(self):
-        """A recorded non-zero defect count must fail verification, not just generation."""
+    def test_a_manifest_whose_bytes_are_absent_cannot_pass(self):
+        """Verification without the bytes is not verification, and does not quietly succeed.
+
+        This used to assert that a RECORDED defect count was refused, which the verifier caught with
+        a second hand-maintained loop over the recorded numbers. That loop is gone: defect counters
+        are now re-derived from the decoded bytes, so a recorded lie is caught by disagreeing with
+        the file (`RederivationSweepTests.test_every_recorded_defect_counter_is_compared_against_
+        its_limit`, against the real corpus). What is left to assert here — and it matters — is that
+        a manifest whose assets are not present cannot pass by default.
+        """
         def defect(manifest):
             manifest["assets"][0]["levels"][1]["validity"]["nonmanifold_edges"] = 3
 
         failures = self.failures_for(defect)
-        self.assertTrue(any("nonmanifold_edges" in f for f in failures), failures)
+        self.assertTrue(failures, "a manifest with no readable assets must never verify clean")
+        self.assertTrue(any("missing" in f for f in failures), failures)
 
     def test_a_manifest_cut_by_different_generator_sources_is_refused(self):
         failures = self.failures_for(
@@ -479,7 +509,7 @@ class SecondRoundMutantTests(unittest.TestCase):
             manifest["assets"][0]["levels"][0]["tris"] = float("nan")
 
         failures = self.failures_for(poison)
-        self.assertTrue(any("not a finite number" in f for f in failures), failures)
+        self.assertTrue(any("non-finite" in f for f in failures), failures)
 
     def test_nan_render_metrics_under_a_recorded_pass_are_refused(self):
         def poison(manifest):
@@ -489,7 +519,7 @@ class SecondRoundMutantTests(unittest.TestCase):
                 view["signal"]["mean_abs_diff"] = float("nan")
 
         failures = self.failures_for(poison)
-        self.assertTrue(any("not a finite number" in f for f in failures), failures)
+        self.assertTrue(any("non-finite" in f for f in failures), failures)
 
     def test_a_rewritten_per_level_threshold_is_refused(self):
         """A gate judged against a threshold the tree does not declare judged nothing."""
@@ -566,7 +596,7 @@ class SecondRoundMutantTests(unittest.TestCase):
         failures = self.failures_for(
             lambda m: m["assets"][0]["source"].__setitem__("tris", float("nan"))
         )
-        self.assertTrue(any("source record" in f for f in failures), failures)
+        self.assertTrue(any("non-finite" in f for f in failures), failures)
 
     def test_a_fallback_material_disarms_the_gate_rather_than_condemning_the_manifest(self):
         """The precondition beside RENDER_GATE_BLOCKING, enforced rather than written down.
@@ -1087,6 +1117,274 @@ class RederivationSweepTests(unittest.TestCase):
                         k, m["assets"][0]["levels"][1]["validity"][k] + 7
                     ),
                 )
+
+    def test_a_forged_sliver_floor_is_refused(self):
+        """The floor was read from the record and used as its own threshold.
+
+        Lowering the recorded number lowered the bar it was checked against, so a level could
+        legalise a sliver by editing the manifest. The verifier now DERIVES the corpus floor from
+        decoded L0 and this tree's config, and the recorded copy has to match it.
+        """
+        for index in range(0, 5):
+            with self.subTest(level=index):
+                self.assert_caught(
+                    f"L{index} sliver floor lowered 10x",
+                    lambda m, i=index: m["assets"][0]["levels"][i]["validity"].__setitem__(
+                        "min_altitude_floor_m",
+                        m["assets"][0]["levels"][i]["validity"]["min_altitude_floor_m"] / 10.0,
+                    ),
+                )
+
+    def test_the_derived_floor_matches_what_generation_recorded(self):
+        """The derivation and the corpus agree — otherwise the check above is vacuous."""
+        import measure as measure_module
+
+        l0 = json.loads(self.text)["assets"][0]["levels"][0]
+        surface = measure_module.surface_from_bytes(
+            open(os.path.join(self.root, l0["glb"]), "rb").read(), l0["node"], "L0"
+        )
+        plain = surface.validity(CONFIG.GATES)
+        derived = chain._derived_corpus_floor(plain, surface.diagonal, CONFIG.GATES)
+        for level in json.loads(self.text)["assets"][0]["levels"]:
+            self.assertAlmostEqual(
+                level["validity"]["min_altitude_floor_m"], derived, places=12,
+                msg=f"L{level['level']}",
+            )
+
+    def test_a_level_that_split_into_two_pieces_is_refused(self):
+        """`components_must_match` was compared at generation and never again.
+
+        A detached triangle bolted onto L1 — with every byte-derived field and the hash honestly
+        updated to describe the broken bytes — verified clean, because the verifier's gate list
+        simply did not contain the check. Now both sides run the same list.
+        """
+        import measure as measure_module
+        from test_refusals import build_glb
+
+        level = json.loads(self.text)["assets"][0]["levels"][1]
+        surface = measure_module.surface_from_bytes(
+            open(os.path.join(self.root, level["glb"]), "rb").read(), None, "L1"
+        )
+        # glTF space is Y-up; the decode flipped it, so flip back on the way out.
+        def to_gltf(points):
+            out = np.empty_like(points)
+            out[:, 0], out[:, 1], out[:, 2] = points[:, 0], points[:, 2], -points[:, 1]
+            return out
+
+        verts = to_gltf(surface.verts)
+        corner_uv = surface.corner_uv.reshape(-1, 2)
+        corner_n = to_gltf(surface.corner_n.reshape(-1, 3))
+        # rebuild as one vertex per corner, then append a detached triangle far away
+        # DETACH AN EXISTING TRIANGLE rather than adding one: the triangle count, the vertex
+        # count, the shed fraction and the bounding box all stay exactly as recorded, so the ONLY
+        # thing that differs is that the level is now in two pieces. A mutant that also moves those
+        # other numbers trips an earlier check and never reaches the gate this test is about.
+        positions = verts[surface.tri_v.reshape(-1)]
+        centre = (positions.min(axis=0) + positions.max(axis=0)) / 2.0
+        positions[-3:] = [centre, centre + [0.002, 0, 0], centre + [0, 0.002, 0]]
+        normals = corner_n
+        uvs = corner_uv
+        tangents = np.tile([1.0, 0.0, 0.0, 1.0], (len(positions), 1))
+        indices = list(range(len(positions)))
+
+        directory = tempfile.mkdtemp(prefix="lod-split-")
+        for other in json.loads(self.text)["assets"][0]["levels"]:
+            target = os.path.join(directory, other["glb"])
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(os.path.join(self.root, other["glb"]), "rb") as handle:
+                data = handle.read()
+            with open(target, "wb") as handle:
+                handle.write(data)
+        broken = os.path.join(directory, level["glb"])
+        build_glb(broken, positions, indices, normals=normals, uvs=uvs, tangents=tangents,
+                  node_name=level["node"])
+        blob = open(broken, "rb").read()
+
+        # An HONEST manifest for the broken bytes: real hash, real recomputed validity.
+        manifest = json.loads(self.text)
+        entry = manifest["assets"][0]["levels"][1]
+        entry["glb_sha256"] = hashlib.sha256(blob).hexdigest()
+        rebuilt = measure_module.surface_from_bytes(blob, level["node"], "L1")
+        floor = entry["validity"]["min_altitude_floor_m"]
+        entry["validity"] = rebuilt.validity(CONFIG.GATES, floor)
+        entry["tris"], entry["verts"] = rebuilt.tri_count, rebuilt.vert_count
+
+        failures, _ = chain.verify(manifest, chain.Tree(directory))
+        self.assertEqual(rebuilt.components(), 2, "the mutant must really have two pieces")
+        self.assertTrue(
+            any("component count" in f for f in failures),
+            f"a level that split in two must be refused at verification: {failures}",
+        )
+
+    @staticmethod
+    def _thinnest_triangle_apex(surface):
+        """(vertex index, unit direction toward the opposite edge) for the thinnest triangle.
+
+        THE VERTEX THAT SETS THE CORPUS BAR. The sliver floor is `min_altitude / margin`, and a
+        triangle's minimum altitude is the distance from the vertex opposite its longest edge to
+        that edge — so pushing THIS vertex toward THAT edge lowers the minimum altitude by (almost
+        exactly) the distance moved, and lowers the floor every level is judged against with it.
+        Any other vertex would move the geometry fingerprint without moving the bar, which is the
+        half of the story a fingerprint-only mutation cannot tell.
+        """
+        altitudes = surface.altitudes()
+        triangle = surface.tri_v[int(np.argmin(altitudes))]
+        points = surface.verts[triangle]
+        edges = [float(np.linalg.norm(points[(k + 1) % 3] - points[k])) for k in range(3)]
+        apex = (int(np.argmax(edges)) + 2) % 3          # the corner the longest edge does not touch
+        stand_off = points[apex]
+        base, other = [points[k] for k in range(3) if k != apex]
+        along = (other - base) / np.linalg.norm(other - base)
+        foot = base + along * float(np.dot(stand_off - base, along))
+        return int(triangle[apex]), (foot - stand_off) / np.linalg.norm(foot - stand_off)
+
+    def test_a_poisoned_l0_cannot_lower_the_corpus_floor(self):
+        """L0 is the BASELINE, so choosing it freely re-judges every level. BYTES, not a digest.
+
+        The probe that found this moved one interior vertex of L0 by 0.9 um, updated the hash and
+        recomputed every level's validity against the new bar — and the whole manifest verified
+        clean, because the corpus sliver floor is DERIVED FROM L0: thin L0's thinnest triangle and
+        every other level is judged against a lower bar for free.
+
+        SO THIS TEST PERFORMS THAT REGRESSION RATHER THAN DESCRIBING IT. It decodes the shipped
+        `tiger_1.glb`, moves the apex of L0's thinnest triangle 0.9 um toward the edge it stands off
+        (every split corner of that one POSITION, so the weld stays intact and the level is still
+        one component — a torn weld is a different refusal), patches those float32s back into the
+        BIN chunk, re-encodes the glb, and writes an HONEST manifest for the result: the real
+        sha256 of the poisoned bytes and every level's validity recomputed against the floor the
+        poisoned L0 derives. Measured here, that floor falls from 1.1808 um to 0.9558 um.
+
+        Both halves are asserted, and the first is what makes the second worth having:
+
+          - with the fingerprint re-derived from the poisoned bytes, the corpus verifies CLEAN. Not
+            one other check in the verifier notices a re-judged corpus.
+          - with the fingerprint AS GENERATION RECORDED IT — at the moment L0 had just been proven
+            identical to the evaluated .blend source — verification refuses, and that is the only
+            failure it reports.
+
+        See `verify`'s trust-boundary note for what this does and does not establish: the
+        fingerprint binds the bytes to a recorded number, not to the artist.
+        """
+        import measure as measure_module
+
+        levels = json.loads(self.text)["assets"][0]["levels"]
+        source = levels[0]
+        with open(os.path.join(self.root, source["glb"]), "rb") as handle:
+            original = handle.read()
+        gltf, binary = measure_module.glb_chunks_from_bytes(original, source["glb"])
+        surface = measure_module.surface_from_bytes(original, source["node"], "L0")
+        recorded_floor = source["validity"]["min_altitude_floor_m"]
+
+        target, direction = self._thinnest_triangle_apex(surface)
+        coincident = np.where(
+            np.all(np.abs(surface.verts - surface.verts[target]) < 1e-12, axis=1)
+        )[0]
+        # glTF is Y-up and the decode rotated it into Blender's frame, so rotate the step back on
+        # the way to the bytes: a Blender step (x, y, z) is the glTF step (x, z, -y).
+        step = direction * 0.9e-6
+        gltf_step = np.array([step[0], step[2], -step[1]], dtype=np.float64)
+
+        primitive = measure_module.primitive_of(gltf, source["node"])
+        accessor = gltf["accessors"][primitive["attributes"]["POSITION"]]
+        view = gltf["bufferViews"][accessor["bufferView"]]
+        self.assertEqual(accessor["componentType"], 5126, "POSITION is float32 in this glb")
+        self.assertNotIn("byteStride", view, "POSITION is tightly packed in this glb")
+        base = view.get("byteOffset", 0) + accessor.get("byteOffset", 0)
+        blob = bytearray(binary)
+        for index in coincident:
+            at = base + int(index) * 12
+            before = np.frombuffer(bytes(blob[at:at + 12]), dtype="<f4").astype(np.float64)
+            blob[at:at + 12] = (before + gltf_step).astype("<f4").tobytes()
+        poisoned = _rebuild_glb(gltf, bytes(blob))
+
+        # The mutant is real, and it is the mutation this test says it is.
+        mutant = measure_module.surface_from_bytes(poisoned, source["node"], "L0")
+        moved = float(np.linalg.norm(mutant.verts[target] - surface.verts[target]))
+        self.assertAlmostEqual(moved, 0.9e-6, places=9, msg="the poison must be a 0.9 um move")
+        self.assertEqual(mutant.components(), 1, "the weld must survive; a tear is another refusal")
+        self.assertNotEqual(mutant.welded_digest(), source["welded_digest"])
+
+        directory = tempfile.mkdtemp(prefix="lod-poisoned-l0-")
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        for level in levels:
+            target_path = os.path.join(directory, level["glb"])
+            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+            if level["level"] == 0:
+                data = poisoned
+            else:
+                with open(os.path.join(self.root, level["glb"]), "rb") as handle:
+                    data = handle.read()
+            with open(target_path, "wb") as handle:
+                handle.write(data)
+
+        # AN HONEST MANIFEST FOR THE POISONED CORPUS: the real hash, and every level's validity
+        # re-measured against the floor the poisoned baseline derives — exactly what someone who
+        # wanted a lower bar would write, and exactly what the earlier version of this test skipped.
+        manifest = json.loads(self.text)
+        poisoned_levels = manifest["assets"][0]["levels"]
+        poisoned_levels[0]["glb_sha256"] = hashlib.sha256(poisoned).hexdigest()
+        floor = chain._derived_corpus_floor(
+            mutant.validity(CONFIG.GATES), mutant.diagonal, CONFIG.GATES
+        )
+        self.assertLess(
+            floor, recorded_floor - 1e-7,
+            f"the poison must actually lower the corpus bar: {recorded_floor} m -> {floor} m",
+        )
+        for level in poisoned_levels:
+            with open(os.path.join(directory, level["glb"]), "rb") as handle:
+                decoded = measure_module.surface_from_bytes(
+                    handle.read(), level.get("node"), f"L{level['level']}"
+                )
+            level["validity"] = decoded.validity(CONFIG.GATES, floor)
+
+        # WITHOUT THE FINGERPRINT THERE IS NOTHING: re-derive it from the poisoned bytes, as an
+        # attacker rewriting the manifest alongside the assets would, and the corpus verifies clean.
+        rewritten = json.loads(json.dumps(manifest))
+        rewritten["assets"][0]["levels"][0]["welded_digest"] = mutant.welded_digest()
+        failures, _ = chain.verify(rewritten, chain.Tree(directory))
+        self.assertEqual(
+            failures, [],
+            f"nothing but the fingerprint sees a 0.9 um L0 poison, so this half has to hold for "
+            f"the next half to mean anything: {failures}",
+        )
+
+        # WITH IT: the recorded fingerprint no longer describes the bytes, and that is the refusal.
+        failures, _ = chain.verify(manifest, chain.Tree(directory))
+        self.assertTrue(
+            any("geometry fingerprint" in f for f in failures),
+            f"a poisoned L0 must be refused on the recorded geometry fingerprint: {failures}",
+        )
+        self.assertEqual(
+            len(failures), 1,
+            f"and refused SPECIFICALLY on it — every other number in this corpus was recomputed "
+            f"honestly against the poisoned baseline: {failures}",
+        )
+
+        self.assert_caught(
+            "L0 welded_digest no longer matches its bytes",
+            lambda m: m["assets"][0]["levels"][0].__setitem__("welded_digest", "0" * 64),
+        )
+        self.assert_caught(
+            "L0 welded_digest removed",
+            lambda m: m["assets"][0]["levels"][0].pop("welded_digest"),
+        )
+
+    def test_no_manifest_number_may_be_non_finite(self):
+        """A NaN loses every comparison silently, so any binding that reads it passes blind.
+
+        Parameterised over every numeric leaf in the shipped manifest rather than a list somebody
+        curated: a probe found 206 leaves that accepted NaN, all in records no named check covered.
+        """
+        manifest = json.loads(self.text)
+        paths = list(_numeric_paths(manifest))
+        self.assertGreater(len(paths), 100, "the sweep must actually be sweeping something")
+        for poison in (float("nan"), float("inf"), float("-inf")):
+            for path in paths:
+                with self.subTest(poison=poison, path=".".join(str(p) for p in path)):
+                    self.assert_caught(
+                        f"{path} = {poison}",
+                        lambda m, p=path, v=poison: _set_path(m, p, v),
+                    )
 
     def test_the_unmutated_manifest_still_verifies(self):
         """The control: without it, a sweep that fails everything would look like a pass."""

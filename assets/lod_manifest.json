@@ -4,7 +4,7 @@
   "generator": {
     "script": "scripts/lod/generate.py",
     "version": "2.2.0",
-    "sources_sha256": "da648052dbacf2a232b99535ebdfdc8b579688e98e4a69fae7a0a6cb10d5a083",
+    "sources_sha256": "be6f8cbeaa05987583cd8cd085e4438b5fcde76300261eae7365317f50ddf20c",
     "blender": "5.1.2",
     "blender_build": "ec6e62d40fa9",
     "gltf_exporter": "5.1.20"
@@ -195,6 +195,7 @@
           "shipped_dev_from_source_mm": 0.0,
           "shipped_matches_source": true,
           "identity_proof": "identical welded topology and positions",
+          "welded_digest": "dc487520228dddde4b65cdc77c52f9f51545494ac6dcde0521605d6cdb334f60",
           "tangents_are_baked": true
         },
         {
