@@ -340,10 +340,21 @@ const SHOE_LOD_CHAIN: &[ShoeLevel] = &[
     },
 ];
 
-/// The number of reduced levels below the base shoe — `SHOE_LOD_CHAIN.len()`, named so the showcase
-/// can talk about "level `n`" without importing the chain's rows.
+/// The number of levels the chain has, base INCLUDED — so `0..shoe_lod_levels()` is every index
+/// [`shoe_lod_range`] and [`shoe_lod_tris`] accept. Named so a consumer can walk the ladder without
+/// importing its rows.
 pub(crate) fn shoe_lod_levels() -> usize {
     SHOE_LOD_CHAIN.len() + 1
+}
+
+/// Level `level`'s MEASURED triangle count — `0` is the base shoe, `1 + i` is `SHOE_LOD_CHAIN[i]`.
+/// The manifest's numbers, so a legend that quotes them quotes the manifest.
+pub(crate) fn shoe_lod_tris(level: usize) -> usize {
+    if level == 0 {
+        SHOE_BASE_TRIS
+    } else {
+        SHOE_LOD_CHAIN[level - 1].tris
+    }
 }
 
 /// The chain's levels and thresholds as one log-line phrase — `"4 reduced levels, LOD1 beyond 56 m,
@@ -447,6 +458,20 @@ pub(crate) struct LinkFrame {
 /// the tagger's exclusion exists for.
 #[derive(Component)]
 pub(crate) struct TrackLink;
+
+/// WHICH level of [`SHOE_LOD_CHAIN`] a shoe entity is — `0` is the base shoe, `1 + i` is
+/// `SHOE_LOD_CHAIN[i]`. The same index [`shoe_lod_range`] and [`shoe_lod_tris`] take.
+///
+/// Every level already carries the range that SELECTS it; this says which level it IS. The
+/// distinction matters exactly once — for a consumer that wants to OVERRIDE the selection, which is
+/// [`crate::lod_showcase`] and nothing else — and it is a tag rather than a lookup because the
+/// alternative is matching a spawned entity's `Mesh3d` handle back against `LinkTemplate::lods`,
+/// i.e. the same fact recovered by search instead of recorded.
+///
+/// It is NOT a knob and nothing reads it on the production path: in a process with no showcase this
+/// is one index-sized component on entities that already exist.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct ShoeLod(pub(crate) usize);
 
 /// Hide the glb's template link the moment it appears.
 ///
@@ -974,6 +999,7 @@ pub(crate) fn spawn_link(
 ) -> Entity {
     let mut shoe = commands.spawn((
         TrackLink,
+        ShoeLod(0),
         Mesh3d(template.mesh.get(side).clone()),
         MeshMaterial3d(template.material.clone()),
         shoe_lod_range(0),
@@ -983,6 +1009,7 @@ pub(crate) fn spawn_link(
     for (level, tier) in template.lods.iter().enumerate() {
         shoe.with_child((
             TrackLink,
+            ShoeLod(level + 1),
             Mesh3d(tier.get(side).clone()),
             // The SAME material: the levels differ in triangles and in nothing else, and a second
             // material would put a second batch (and a visible shading seam) on every swap.
@@ -1226,6 +1253,12 @@ mod tests {
             // an output of generation, so it is exactly the thing a regeneration can change without
             // anyone noticing.
             assert_eq!(thresholds, vec![55.9124, 126.5971, 500.9511, 1049.8588]);
+
+            // Every level is TAGGED with its own index, which is what lets the showcase override
+            // a selection without matching mesh handles back to the template.
+            for (i, &e) in levels.iter().enumerate() {
+                assert_eq!(world.entity(e).get::<ShoeLod>().copied(), Some(ShoeLod(i)));
+            }
 
             // TILING: exactly one level is drawn at every distance. Each threshold is probed AT the
             // boundary and a hair either side, because `[start, end)` is what decides which level

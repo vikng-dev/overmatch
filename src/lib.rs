@@ -60,6 +60,12 @@ mod headless_test;
 /// The shared tank-state HUD (world-anchored capability/crew/damage readouts). Mounted by both
 /// `GamePlugin` and the sandbox; each tags its own world camera with `hud::HudCamera`.
 mod hud;
+/// `OVERMATCH_LOD_SHOWCASE=1`: a flat map, the player at one edge, and a clamped PAIR of Tigers at
+/// every switch distance in the shoe LOD chain — the two meshes the pipeline's rendered-difference
+/// gate compared, side by side, at the range it compared them. A dev eyeball harness for a gate
+/// verdict (the L2→L3 switch scores 1.674 against an 0.5 allowance); adds nothing to a process that
+/// does not set the variable.
+mod lod_showcase;
 /// The networking implementation. Executables enter through [`run_client`] and [`run_server`];
 /// the adapter tree is private to the library.
 mod net;
@@ -736,6 +742,10 @@ impl Plugin for GamePlugin {
             SimPlugin,
             // The single-player scenario: two-tank duel spawn, first tank controlled.
             tank::sp_spawn_plugin,
+            // The LOD eyeball harness's runtime half — the per-tank shoe clamp and its one-shot
+            // camera aim. Adds NO systems unless `OVERMATCH_LOD_SHOWCASE` is set, and the scenario
+            // spawn above lays out the pairs instead of the duel under the same variable.
+            lod_showcase::plugin,
             ClientPlugin,
             // Passive jitter-trace recorder (frame + tick rows; no net extras in this build). Idle
             // unless `SPIKE_TRACE` is set.

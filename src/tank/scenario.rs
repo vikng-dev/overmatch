@@ -135,6 +135,12 @@ fn spawn_tank_when_loaded(
     // (`terrain_grid::spawn_pos`: footprint max + clearance), so the duel lands on whatever world
     // this build actually has: heightmap, flat slab, or a re-authored map later.
     let grid = height.as_deref();
+    if crate::lod_showcase::enabled() {
+        spawn_lod_showcase(&mut commands, content, pending.presentation(), grid);
+        commands.remove_resource::<PendingTankAssets>();
+        next.set(AppState::Playing);
+        return;
+    }
     let far = probe_far();
     let duel = duel_spawn_xz(far);
     spawn_tank(
@@ -264,6 +270,48 @@ fn spawn_probe_tanks(
         anchor.x,
         anchor.y,
     );
+}
+
+/// Stand up the LOD showcase INSTEAD of the duel: the player at the map's edge, and one clamped
+/// pair per switch in the shoe chain (`OVERMATCH_LOD_SHOWCASE` — see [`crate::lod_showcase`]).
+///
+/// It replaces the duel rather than adding to it because the whole scene is the instrument: a
+/// second free Tiger parked at (10, 5) is 490 m off to one side of a range everything else is laid
+/// out along, and the Tab possession swap would hand the player a probe whose belt is pinned to one
+/// level.
+///
+/// The layout and the legend both come from `lod_showcase`, which derives them from the chain; this
+/// function's whole job is turning poses into tanks and putting the legend next to them in the log.
+fn spawn_lod_showcase(
+    commands: &mut Commands,
+    content: TankContent,
+    presentation: TankPresentation,
+    grid: Option<&crate::terrain_grid::HeightGrid>,
+) {
+    for line in crate::lod_showcase::legend() {
+        info!("{line}");
+    }
+    for tank in crate::lod_showcase::layout() {
+        let root = spawn_complete_tank(
+            commands,
+            content,
+            presentation.clone(),
+            (
+                Transform::from_translation(crate::terrain_grid::spawn_pos(grid, tank.xz))
+                    .with_rotation(tank.yaw),
+                Name::new(tank.name),
+                RigidBody::Dynamic,
+            ),
+        );
+        if tank.controlled {
+            commands.entity(root).insert(Controlled);
+        }
+        if let Some(level) = tank.clamp {
+            commands
+                .entity(root)
+                .insert(crate::lod_showcase::LodClamp(level));
+        }
+    }
 }
 
 /// Spawn one complete dynamic tank for the local duel.

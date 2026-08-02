@@ -567,6 +567,23 @@ pub(crate) fn decode_height_grid(
         info!("terrain: ForceFlatWorld set — keeping the flat slab + authored course");
         return;
     }
+    if crate::lod_showcase::enabled() {
+        // A GRID of zeros, not "no grid": the missing-file branch below drops the resource, and the
+        // world then builds its flat slab AND its authored obstacle course, which is scenery in
+        // front of the thing being looked at. A zero grid keeps the real terrain path — same
+        // decode-free construction, same collider, same render tiles, same oracle — so the one
+        // surface stays one surface and it is level everywhere. Flattening only the render mesh
+        // would leave the tanks standing on invisible hills, which is the exact class of bug the
+        // one-surface doctrine exists to make impossible.
+        let size = GRID_RESOLUTION;
+        let samples = vec![0.0_f32; (size as usize) * (size as usize)];
+        info!(
+            "terrain: OVERMATCH_LOD_SHOWCASE set — {size}x{size} grid FLATTENED to y = 0 (oracle, \
+             collider and render mesh all from these samples)",
+        );
+        commands.insert_resource(HeightGrid::new(samples.into(), size));
+        return;
+    }
     if let Some(preset) = preset {
         info!(
             "terrain: pre-inserted height grid {size}x{size} — skipping the shipped map decode",
