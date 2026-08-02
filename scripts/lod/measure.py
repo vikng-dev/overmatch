@@ -869,3 +869,72 @@ def normal_angle_diagnostic(source, level, samples, seed=12345):
         "backface_corr_frac": round(backfacing / total, 5),
         "samples": total,
     }
+
+
+def validity_gate_failures(validity, source_validity, gates, require_baked_tangents=True):
+    """The structural gates, as a list of named failures. Empty means clean.
+
+    ONE IMPLEMENTATION, TWO CALLERS — generation and verification — and that is the point of it
+    living here rather than in either of them. Twice now a gate existed at generation and was simply
+    absent from the verifier: `components_must_match` was compared when a level was cut and never
+    again, so a manifest describing a level that had split into two pieces verified clean as long as
+    every recorded number honestly described the broken bytes. Parity enforced by a test would have
+    needed writing and remembering; parity by construction cannot drift, because there is only one
+    list and both sides read it.
+
+    The caller supplies the values. Generation measures them from what it just built; verification
+    RE-DERIVES them from the decoded shipped bytes, including `source_validity` — which is decoded
+    L0, not a number the manifest asserted about itself.
+    """
+    failures = []
+    if gates["components_must_match"] and validity["components"] != source_validity["components"]:
+        failures.append(
+            f"component count {validity['components']} != source {source_validity['components']} "
+            f"— a part vanished, and a vanished part has near-zero Hausdorff distance"
+        )
+    if validity["slivers_below_floor"] > 0:
+        failures.append(
+            f"{validity['slivers_below_floor']} triangle(s) below the scale-aware altitude floor "
+            f"{validity['min_altitude_floor_m'] * 1000:.5f} mm "
+            f"(worst {validity['min_altitude_m'] * 1000:.6f} mm)"
+        )
+    # PRESENCE FIRST. `degenerate_tangents` counts bad tangents among those that EXIST, so a level
+    # that shipped none at all scored a clean zero and passed — and would have gone back to
+    # loader-generated, uncertified tangents without a word. A generated level carries one tangent
+    # per vertex or it does not ship.
+    if require_baked_tangents and validity["baked_tangents"] != validity["verts"]:
+        failures.append(
+            f"{validity['baked_tangents']} baked tangents for {validity['verts']} vertices — a "
+            f"generated level must BAKE a tangent per vertex, or bevy generates them at load and "
+            f"nothing here certified what renders"
+        )
+    for key, limit_key, description in STRUCTURAL_GATES:
+        if validity[key] > gates[limit_key]:
+            failures.append(f"{validity[key]} {description}")
+    return failures
+
+
+#: The structural gate table: (validity counter, config limit, what a violation means).
+#:
+#: DECLARED, so it can be ENUMERATED. `test_refusals` walks it against `config.GATES` and demands
+#: every declared `max_*` limit actually gate something — a limit nobody consults is a threshold
+#: that reads as protection and is not. And because generation and verification both call the one
+#: function above, a gate added here is enforced on both sides at once; parity is by construction
+#: rather than by a test that has to be remembered.
+STRUCTURAL_GATES = (
+        ("duplicate_faces", "max_duplicate_faces", "duplicate face(s)"),
+        ("nonfinite_attrs", "max_nonfinite", "non-finite attribute component(s)"),
+        ("orientation_flips", "max_orientation_flips",
+         "edge(s) traversed the same way by both their faces — inconsistent winding"),
+        ("nonmanifold_edges", "max_nonmanifold_edges",
+         "edge(s) shared by more than two faces — no consistent normal or tangent frame there, "
+         "and a non-watertight volume bakes to zero armour silently"),
+        ("tangent_default_faces", "max_tangent_default_faces",
+         "face(s) with degenerate UV area would take a DEFAULTED tangent at bind"),
+        ("tangent_default_verts", "max_tangent_default_verts",
+         "vertex/vertices whose every incident face has degenerate UV area"),
+        ("degenerate_tangents", "max_degenerate_tangents",
+         "BAKED tangent(s) the loader would use verbatim that are zero-length, non-finite, or "
+         "carry a bitangent sign that is not +/-1 — mikktspace gave up on them, and unlike the UV "
+         "test above this is the thing itself rather than a necessary condition on it"),
+)

@@ -25,7 +25,8 @@ import measure as M  # noqa: E402
 
 
 def build_glb(path, positions, indices, normals=None, uvs=None, extra_attrs=None,
-              primitives=None, targets=None, mode=4, indexed=True, mesh_count=1):
+              primitives=None, targets=None, mode=4, indexed=True, mesh_count=1,
+              tangents=None, node_name=None):
     """A minimal, valid glb carrying exactly what the caller asked for. Handwritten on purpose."""
     positions = np.asarray(positions, dtype=np.float32)
     indices = np.asarray(indices, dtype=np.uint32).reshape(-1)
@@ -62,6 +63,9 @@ def build_glb(path, positions, indices, normals=None, uvs=None, extra_attrs=None
 
     attributes = {"POSITION": position_accessor, "NORMAL": normal_accessor,
                   "TEXCOORD_0": uv_accessor}
+    if tangents is not None:
+        tangents = np.asarray(tangents, dtype=np.float32)
+        attributes["TANGENT"] = add(tangents, "VEC4", 5126, len(tangents))
     if extra_attrs:
         for name in extra_attrs:
             attributes[name] = uv_accessor
@@ -77,7 +81,7 @@ def build_glb(path, positions, indices, normals=None, uvs=None, extra_attrs=None
         "asset": {"version": "2.0"},
         "scene": 0,
         "scenes": [{"nodes": list(range(mesh_count))}],
-        "nodes": [{"name": f"Node{i}", "mesh": i} for i in range(mesh_count)],
+        "nodes": [{"name": node_name or f"Node{i}", "mesh": i} for i in range(mesh_count)],
         "meshes": meshes,
         "accessors": accessors,
         "bufferViews": views,
@@ -465,6 +469,82 @@ class BranchAndBoundTests(unittest.TestCase):
         )
         self.assertAlmostEqual(lower, truth, places=2)
         self.assertLessEqual(upper - lower, 0.05)
+
+
+class GateParityTests(unittest.TestCase):
+    """Generation and verification enforce the SAME gates, and every declared limit gates something.
+
+    Twice a gate existed at generation and was simply absent from the verifier — `components_must_
+    match` was compared when a level was cut and never again, and the sliver floor was re-derived
+    against a threshold the manifest supplied for itself. Both are the same bug: two lists that were
+    supposed to agree.
+
+    There is one list now. `measure.validity_gate_failures` is what generation calls and what
+    verification calls, so parity holds by construction; these tests hold the remaining edge — that
+    the list actually consults every limit the configuration declares, and that both callers really
+    are calling it.
+    """
+
+    @staticmethod
+    def clean_validity():
+        return {
+            "tris": 10, "verts": 30, "components": 1, "duplicate_faces": 0, "nonfinite_attrs": 0,
+            "orientation_flips": 0, "nonmanifold_edges": 0, "boundary_edges": 0,
+            "slivers_below_floor": 0, "tangent_default_faces": 0, "tangent_default_verts": 0,
+            "min_altitude_m": 0.01, "min_altitude_floor_m": 0.001, "min_tri_area_mm2": 1.0,
+            "origin_radius_m": 0.4, "bbox_mm": [1.0, 1.0, 1.0],
+            "baked_tangents": 30, "degenerate_tangents": 0, "min_tangent_length": 1.0,
+        }
+
+    def test_every_declared_limit_gates_something(self):
+        """A `max_*` limit nobody consults is a threshold that reads as protection and is not."""
+        declared = {key for key in CONFIG.GATES if key.startswith("max_")}
+        consulted = {limit for _counter, limit, _description in M.STRUCTURAL_GATES}
+        self.assertEqual(
+            declared - consulted, set(),
+            "these limits are declared in config.GATES and consulted by nothing",
+        )
+
+    def test_each_gate_in_the_table_actually_fires(self):
+        for counter, limit, _description in M.STRUCTURAL_GATES:
+            with self.subTest(gate=counter):
+                validity = self.clean_validity()
+                validity[counter] = CONFIG.GATES[limit] + 1
+                failures = M.validity_gate_failures(validity, self.clean_validity(), CONFIG.GATES)
+                self.assertTrue(failures, f"{counter} over its limit produced no failure")
+
+    def test_the_component_gate_fires(self):
+        validity = self.clean_validity()
+        validity["components"] = 2
+        failures = M.validity_gate_failures(validity, self.clean_validity(), CONFIG.GATES)
+        self.assertTrue(any("component count" in f for f in failures), failures)
+
+    def test_the_sliver_gate_fires(self):
+        validity = self.clean_validity()
+        validity["slivers_below_floor"] = 1
+        failures = M.validity_gate_failures(validity, self.clean_validity(), CONFIG.GATES)
+        self.assertTrue(any("altitude floor" in f for f in failures), failures)
+
+    def test_the_tangent_presence_gate_fires(self):
+        validity = self.clean_validity()
+        validity["baked_tangents"] = 0
+        failures = M.validity_gate_failures(validity, self.clean_validity(), CONFIG.GATES)
+        self.assertTrue(any("baked tangents" in f for f in failures), failures)
+
+    def test_the_verifier_and_generator_share_the_gate_function(self):
+        import inspect
+
+        import chain
+        source = inspect.getsource(chain)
+        self.assertIn("M.validity_gate_failures(", source,
+                      "the verifier must call the shared gate list")
+        generate_source = open(
+            os.path.join(os.path.dirname(os.path.abspath(M.__file__)), "generate.py")
+        ).read()
+        self.assertIn("M.validity_gate_failures(", generate_source,
+                      "generation must call the shared gate list")
+        self.assertNotIn("def validity_failures(", generate_source,
+                         "generation must not keep a private copy of the gate list")
 
 
 class BisectionTests(unittest.TestCase):

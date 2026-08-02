@@ -4,7 +4,7 @@
   "generator": {
     "script": "scripts/lod/generate.py",
     "version": "2.2.0",
-    "sources_sha256": "da648052dbacf2a232b99535ebdfdc8b579688e98e4a69fae7a0a6cb10d5a083",
+    "sources_sha256": "054d3eac5860fe955ed8ad040219f4b3ee6c14af65e7e21485514f3a39dd825b",
     "blender": "5.1.2",
     "blender_build": "ec6e62d40fa9",
     "gltf_exporter": "5.1.20"

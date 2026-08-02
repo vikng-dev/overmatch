@@ -20,6 +20,8 @@ import os
 import sys
 import unittest
 
+import numpy as np
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import chain  # noqa: E402
@@ -1087,6 +1089,104 @@ class RederivationSweepTests(unittest.TestCase):
                         k, m["assets"][0]["levels"][1]["validity"][k] + 7
                     ),
                 )
+
+    def test_a_forged_sliver_floor_is_refused(self):
+        """The floor was read from the record and used as its own threshold.
+
+        Lowering the recorded number lowered the bar it was checked against, so a level could
+        legalise a sliver by editing the manifest. The verifier now DERIVES the corpus floor from
+        decoded L0 and this tree's config, and the recorded copy has to match it.
+        """
+        for index in range(0, 5):
+            with self.subTest(level=index):
+                self.assert_caught(
+                    f"L{index} sliver floor lowered 10x",
+                    lambda m, i=index: m["assets"][0]["levels"][i]["validity"].__setitem__(
+                        "min_altitude_floor_m",
+                        m["assets"][0]["levels"][i]["validity"]["min_altitude_floor_m"] / 10.0,
+                    ),
+                )
+
+    def test_the_derived_floor_matches_what_generation_recorded(self):
+        """The derivation and the corpus agree — otherwise the check above is vacuous."""
+        import measure as measure_module
+
+        l0 = json.loads(self.text)["assets"][0]["levels"][0]
+        surface = measure_module.surface_from_bytes(
+            open(os.path.join(self.root, l0["glb"]), "rb").read(), l0["node"], "L0"
+        )
+        plain = surface.validity(CONFIG.GATES)
+        derived = chain._derived_corpus_floor(plain, surface.diagonal, CONFIG.GATES)
+        for level in json.loads(self.text)["assets"][0]["levels"]:
+            self.assertAlmostEqual(
+                level["validity"]["min_altitude_floor_m"], derived, places=12,
+                msg=f"L{level['level']}",
+            )
+
+    def test_a_level_that_split_into_two_pieces_is_refused(self):
+        """`components_must_match` was compared at generation and never again.
+
+        A detached triangle bolted onto L1 — with every byte-derived field and the hash honestly
+        updated to describe the broken bytes — verified clean, because the verifier's gate list
+        simply did not contain the check. Now both sides run the same list.
+        """
+        import measure as measure_module
+        from test_refusals import build_glb
+
+        level = json.loads(self.text)["assets"][0]["levels"][1]
+        surface = measure_module.surface_from_bytes(
+            open(os.path.join(self.root, level["glb"]), "rb").read(), None, "L1"
+        )
+        # glTF space is Y-up; the decode flipped it, so flip back on the way out.
+        def to_gltf(points):
+            out = np.empty_like(points)
+            out[:, 0], out[:, 1], out[:, 2] = points[:, 0], points[:, 2], -points[:, 1]
+            return out
+
+        verts = to_gltf(surface.verts)
+        corner_uv = surface.corner_uv.reshape(-1, 2)
+        corner_n = to_gltf(surface.corner_n.reshape(-1, 3))
+        # rebuild as one vertex per corner, then append a detached triangle far away
+        # DETACH AN EXISTING TRIANGLE rather than adding one: the triangle count, the vertex
+        # count, the shed fraction and the bounding box all stay exactly as recorded, so the ONLY
+        # thing that differs is that the level is now in two pieces. A mutant that also moves those
+        # other numbers trips an earlier check and never reaches the gate this test is about.
+        positions = verts[surface.tri_v.reshape(-1)]
+        centre = (positions.min(axis=0) + positions.max(axis=0)) / 2.0
+        positions[-3:] = [centre, centre + [0.002, 0, 0], centre + [0, 0.002, 0]]
+        normals = corner_n
+        uvs = corner_uv
+        tangents = np.tile([1.0, 0.0, 0.0, 1.0], (len(positions), 1))
+        indices = list(range(len(positions)))
+
+        directory = tempfile.mkdtemp(prefix="lod-split-")
+        for other in json.loads(self.text)["assets"][0]["levels"]:
+            target = os.path.join(directory, other["glb"])
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(os.path.join(self.root, other["glb"]), "rb") as handle:
+                data = handle.read()
+            with open(target, "wb") as handle:
+                handle.write(data)
+        broken = os.path.join(directory, level["glb"])
+        build_glb(broken, positions, indices, normals=normals, uvs=uvs, tangents=tangents,
+                  node_name=level["node"])
+        blob = open(broken, "rb").read()
+
+        # An HONEST manifest for the broken bytes: real hash, real recomputed validity.
+        manifest = json.loads(self.text)
+        entry = manifest["assets"][0]["levels"][1]
+        entry["glb_sha256"] = hashlib.sha256(blob).hexdigest()
+        rebuilt = measure_module.surface_from_bytes(blob, level["node"], "L1")
+        floor = entry["validity"]["min_altitude_floor_m"]
+        entry["validity"] = rebuilt.validity(CONFIG.GATES, floor)
+        entry["tris"], entry["verts"] = rebuilt.tri_count, rebuilt.vert_count
+
+        failures, _ = chain.verify(manifest, chain.Tree(directory))
+        self.assertEqual(rebuilt.components(), 2, "the mutant must really have two pieces")
+        self.assertTrue(
+            any("component count" in f for f in failures),
+            f"a level that split in two must be refused at verification: {failures}",
+        )
 
     def test_the_unmutated_manifest_still_verifies(self):
         """The control: without it, a sweep that fails everything would look like a pass."""

@@ -707,10 +707,48 @@ def _check_level_cross_fields(asset, levels, index, row, failures):
 #: `min_altitude_floor_m` is the SOURCE-anchored sliver floor — a property of the corpus, not of one
 #: level's mesh — so it is compared as a recorded number and used as an input when re-deriving the
 #: rest. `components` is derived from the bytes and included below.
-VALIDITY_NOT_FROM_OWN_BYTES = ("min_altitude_floor_m",)
+VALIDITY_NOT_FROM_OWN_BYTES = ()
 
 
-def _check_decoded_bytes(asset, level, tree, failures):
+def _derived_corpus_floor(l0_validity, l0_diagonal_m, gates):
+    """The sliver floor, DERIVED — never read out of the manifest and used as its own input.
+
+    It is `max(frac_of_diag x diagonal, source_worst / margin)`, exactly as generation computes it,
+    and every input comes from decoded L0 or from this tree's config. The manifest's copy is then
+    compared against this rather than trusted.
+
+    IT WAS TRUSTED, AND THAT WAS THE WHOLE GATE. The floor was read from the level's own record and
+    fed back in as the threshold to re-derive against, so lowering the recorded number lowered the
+    bar it was checked against: a 1.17e-7 m sliver injected into a level, with every byte-derived
+    field and the hash honestly updated and only the floor moved, verified clean. A threshold a
+    manifest can choose for itself is not a threshold.
+    """
+    return max(
+        gates["min_altitude_frac_of_diag"] * l0_diagonal_m,
+        l0_validity["min_altitude_m"] / gates["sliver_margin_vs_source"],
+    )
+
+
+def _decode_level(tree, level, label, failures):
+    """The level's shipped bytes as a Surface, or None with a named failure."""
+    if not tree.exists(level["glb"]):
+        return None                 # the missing-file failure is raised by the hash check
+    blob = tree.blob(level["glb"])
+    if blob is None:
+        failures.append(
+            f"{label}: {level['glb']} is an LFS pointer whose object is not available locally, so "
+            f"nothing about these bytes can be verified. Run `git lfs pull` (CI does) — a level "
+            f"that cannot be decoded is not a level that passed."
+        )
+        return None
+    try:
+        return M.surface_from_bytes(blob, level.get("node"), label)
+    except M.Refusal as refusal:
+        failures.append(f"{label}: the shipped bytes do not decode — {refusal}")
+        return None
+
+
+def _check_decoded_bytes(asset, level, tree, failures, l0_derived=None, floor_m=None):
     """Re-derive the level's whole validity record FROM THE SHIPPED BYTES and compare it.
 
     THIS IS THE ROOT FIX FOR TWO SEPARATE BYPASSES, and both worked the same way: verification
@@ -725,24 +763,18 @@ def _check_decoded_bytes(asset, level, tree, failures):
     what the record is checked against.
     """
     label = f"{asset['name']} L{level['level']}"
-    if not tree.exists(level["glb"]):
-        return                      # the missing-file failure is raised by the hash check
-    blob = tree.blob(level["glb"])
-    if blob is None:
-        failures.append(
-            f"{label}: {level['glb']} is an LFS pointer whose object is not available locally, so "
-            f"nothing about these bytes can be verified. Run `git lfs pull` (CI does) — a level "
-            f"that cannot be decoded is not a level that passed."
-        )
-        return
-    try:
-        surface = M.surface_from_bytes(blob, level.get("node"), label)
-    except M.Refusal as refusal:
-        failures.append(f"{label}: the shipped bytes do not decode — {refusal}")
+    surface = _decode_level(tree, level, label, failures)
+    if surface is None:
         return
 
     recorded = level["validity"]
-    derived = surface.validity(CONFIG.GATES, recorded["min_altitude_floor_m"])
+    derived = surface.validity(CONFIG.GATES, floor_m)
+    if abs(recorded["min_altitude_floor_m"] - floor_m) > 1e-12:
+        failures.append(
+            f"{label}: records a sliver floor of {recorded['min_altitude_floor_m']} m, but decoded "
+            f"L0 and this tree's config derive {floor_m} m — a threshold a manifest can choose for "
+            f"itself is not a threshold"
+        )
 
     for key in LEVEL_VALIDITY_FIELDS:
         if key in VALIDITY_NOT_FROM_OWN_BYTES:
@@ -780,6 +812,14 @@ def _check_decoded_bytes(asset, level, tree, failures):
             f"{label}: {len(surface.tangents)} tangents for {surface.vert_count} vertices in the "
             f"shipped bytes"
         )
+
+    # THE SAME GATE LIST GENERATION USES, against values re-derived from the bytes — including
+    # `source_validity`, which is decoded L0 rather than a number the manifest asserted. This is
+    # where `components_must_match` finally applies at verification: it was compared when a level
+    # was cut and never again, so a level that had split into two pieces verified clean.
+    if l0_derived is not None:
+        for failure in M.validity_gate_failures(derived, l0_derived, CONFIG.GATES):
+            failures.append(f"{label}: {failure}")
 
     gate = level.get("render_gate") or {}
     if "bbox_mm" in gate and [round(float(v), 4) for v in gate["bbox_mm"]] != [
@@ -820,6 +860,15 @@ def verify(manifest, tree):
                 f"{asset['name']}: {asset['source']['blend']} has changed since generation — the "
                 f"chain is cut from a source that no longer exists"
             )
+        # DECODE L0 FIRST: it is the source of both the component count every level is compared
+        # against and the corpus sliver floor, and neither may come from the manifest.
+        l0_surface = _decode_level(tree, asset["levels"][0], f"{asset['name']} L0", failures)
+        l0_derived = floor_m = None
+        if l0_surface is not None:
+            l0_plain = l0_surface.validity(CONFIG.GATES)
+            floor_m = _derived_corpus_floor(l0_plain, l0_surface.diagonal, CONFIG.GATES)
+            l0_derived = l0_surface.validity(CONFIG.GATES, floor_m)
+
         previous = None
         for index, (row, level) in enumerate(zip(chain["levels"], asset["levels"])):
             label = f"{asset['name']} L{level['level']}"
@@ -855,7 +904,10 @@ def verify(manifest, tree):
             ):
                 if validity[key] > limit:
                     failures.append(f"{label}: recorded {validity[key]} {key} against a limit of {limit}")
-            _check_decoded_bytes(asset, level, tree, failures)
+            if l0_derived is not None:
+                _check_decoded_bytes(
+                    asset, level, tree, failures, l0_derived, floor_m
+                )
             _check_level_cross_fields(asset, asset["levels"], index, row, failures)
             if level["role"] == "source":
                 previous = row
