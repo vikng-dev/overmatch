@@ -673,6 +673,10 @@ def build_chain(asset, root, run_render_gate, out_dir):
         "shipped_dev_from_source_mm": round(l0_dev_mm, 9),
         "shipped_matches_source": True,
         "identity_proof": identity_reason,
+        # The geometry fingerprint the VERIFIER re-derives from these bytes. Recorded here, where
+        # L0 has just been proven identical to the evaluated .blend source, so the number carries
+        # that proof forward to a verifier that cannot run Blender.
+        "welded_digest": shipped_l0.welded_digest(),
         "tangents_are_baked": True,
     }
 

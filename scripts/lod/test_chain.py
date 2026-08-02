@@ -30,6 +30,24 @@ import config as CONFIG  # noqa: E402
 VIEW = CONFIG.REFERENCE_VIEW
 
 
+def _numeric_paths(node, path=()):
+    """Every path to a numeric leaf — the sweep is over the document, not over a curated list."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            yield from _numeric_paths(value, path + (key,))
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            yield from _numeric_paths(value, path + (index,))
+    elif isinstance(node, (int, float)) and not isinstance(node, bool):
+        yield path
+
+
+def _set_path(node, path, value):
+    for key in path[:-1]:
+        node = node[key]
+    node[path[-1]] = value
+
+
 def _rebuild_glb(gltf, binary):
     """Re-serialise a decoded glb. Only the JSON chunk changes; the BIN blob rides along."""
     text = json.dumps(gltf).encode()
@@ -52,7 +70,7 @@ def validity_record(tris, verts, origin_radius=0.1, bbox_mm=(700.0, 180.0, 180.0
         "tangent_default_verts": 0, "min_altitude_m": 0.001, "min_altitude_floor_m": 0.0001,
         "min_tri_area_mm2": 1.0, "origin_radius_m": origin_radius,
         "baked_tangents": verts, "degenerate_tangents": 0, "min_tangent_length": 0.999999,
-        "bbox_mm": list(bbox_mm),
+        "bbox_mm": list(bbox_mm), "radius_m": 0.4,
     }
 
 
@@ -396,7 +414,7 @@ class MutantTests(unittest.TestCase):
                     level[key] = float("nan")
 
         failures = self.failures_for(poison)
-        self.assertTrue(any("not a finite number" in f for f in failures), failures)
+        self.assertTrue(any("non-finite" in f for f in failures), failures)
 
     def test_a_manifest_naming_an_unknown_asset_is_refused(self):
         failures = self.failures_for(
@@ -419,13 +437,22 @@ class MutantTests(unittest.TestCase):
         failures = self.failures_for(loosen)
         self.assertTrue(any("max_duplicate_faces" in f for f in failures), failures)
 
-    def test_a_manifest_with_recorded_defects_is_refused(self):
-        """A recorded non-zero defect count must fail verification, not just generation."""
+    def test_a_manifest_whose_bytes_are_absent_cannot_pass(self):
+        """Verification without the bytes is not verification, and does not quietly succeed.
+
+        This used to assert that a RECORDED defect count was refused, which the verifier caught with
+        a second hand-maintained loop over the recorded numbers. That loop is gone: defect counters
+        are now re-derived from the decoded bytes, so a recorded lie is caught by disagreeing with
+        the file (`RederivationSweepTests.test_every_recorded_defect_counter_is_compared_against_
+        its_limit`, against the real corpus). What is left to assert here — and it matters — is that
+        a manifest whose assets are not present cannot pass by default.
+        """
         def defect(manifest):
             manifest["assets"][0]["levels"][1]["validity"]["nonmanifold_edges"] = 3
 
         failures = self.failures_for(defect)
-        self.assertTrue(any("nonmanifold_edges" in f for f in failures), failures)
+        self.assertTrue(failures, "a manifest with no readable assets must never verify clean")
+        self.assertTrue(any("missing" in f for f in failures), failures)
 
     def test_a_manifest_cut_by_different_generator_sources_is_refused(self):
         failures = self.failures_for(
@@ -481,7 +508,7 @@ class SecondRoundMutantTests(unittest.TestCase):
             manifest["assets"][0]["levels"][0]["tris"] = float("nan")
 
         failures = self.failures_for(poison)
-        self.assertTrue(any("not a finite number" in f for f in failures), failures)
+        self.assertTrue(any("non-finite" in f for f in failures), failures)
 
     def test_nan_render_metrics_under_a_recorded_pass_are_refused(self):
         def poison(manifest):
@@ -491,7 +518,7 @@ class SecondRoundMutantTests(unittest.TestCase):
                 view["signal"]["mean_abs_diff"] = float("nan")
 
         failures = self.failures_for(poison)
-        self.assertTrue(any("not a finite number" in f for f in failures), failures)
+        self.assertTrue(any("non-finite" in f for f in failures), failures)
 
     def test_a_rewritten_per_level_threshold_is_refused(self):
         """A gate judged against a threshold the tree does not declare judged nothing."""
@@ -568,7 +595,7 @@ class SecondRoundMutantTests(unittest.TestCase):
         failures = self.failures_for(
             lambda m: m["assets"][0]["source"].__setitem__("tris", float("nan"))
         )
-        self.assertTrue(any("source record" in f for f in failures), failures)
+        self.assertTrue(any("non-finite" in f for f in failures), failures)
 
     def test_a_fallback_material_disarms_the_gate_rather_than_condemning_the_manifest(self):
         """The precondition beside RENDER_GATE_BLOCKING, enforced rather than written down.
@@ -1187,6 +1214,41 @@ class RederivationSweepTests(unittest.TestCase):
             any("component count" in f for f in failures),
             f"a level that split in two must be refused at verification: {failures}",
         )
+
+    def test_a_poisoned_l0_cannot_lower_the_corpus_floor(self):
+        """L0 is the BASELINE, so choosing it freely re-judges every level.
+
+        Moving one interior vertex of L0 by 0.9 um — with its hash honestly updated and every
+        level's validity recomputed against the new bar — lowered the corpus sliver floor from
+        1.18 um to 0.77 um and the whole manifest verified clean. The welded geometry fingerprint,
+        recorded when generation had just proven L0 identical to the .blend source, is what stops
+        it. See `verify`'s trust-boundary note for what this does and does not establish.
+        """
+        self.assert_caught(
+            "L0 welded_digest no longer matches its bytes",
+            lambda m: m["assets"][0]["levels"][0].__setitem__("welded_digest", "0" * 64),
+        )
+        self.assert_caught(
+            "L0 welded_digest removed",
+            lambda m: m["assets"][0]["levels"][0].pop("welded_digest"),
+        )
+
+    def test_no_manifest_number_may_be_non_finite(self):
+        """A NaN loses every comparison silently, so any binding that reads it passes blind.
+
+        Parameterised over every numeric leaf in the shipped manifest rather than a list somebody
+        curated: a probe found 206 leaves that accepted NaN, all in records no named check covered.
+        """
+        manifest = json.loads(self.text)
+        paths = list(_numeric_paths(manifest))
+        self.assertGreater(len(paths), 100, "the sweep must actually be sweeping something")
+        for poison in (float("nan"), float("inf"), float("-inf")):
+            for path in paths:
+                with self.subTest(poison=poison, path=".".join(str(p) for p in path)):
+                    self.assert_caught(
+                        f"{path} = {poison}",
+                        lambda m, p=path, v=poison: _set_path(m, p, v),
+                    )
 
     def test_the_unmutated_manifest_still_verifies(self):
         """The control: without it, a sweep that fails everything would look like a pass."""

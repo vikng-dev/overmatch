@@ -303,6 +303,28 @@ class Surface:
         h.update(np.ascontiguousarray(uvs[order]).tobytes())
         return h.hexdigest()
 
+    def welded_digest(self, tol=1e-9):
+        """A hash of the WELDED surface: coincident positions merged, triangles as a set.
+
+        Invariant to how a serializer splits corners — the same shoe is 815 vertices in Blender and
+        4 747 in the shipped glb, and this gives both the same digest — and sensitive to any change
+        in where the surface is or how it is joined. That combination is what lets generation record
+        a geometry fingerprint the VERIFIER can re-derive from decoded bytes without Blender.
+
+        Not a substitute for `digest`, which keys candidates and must separate meshes differing only
+        in an attribute. This one is about geometric identity across a re-encode.
+        """
+        import hashlib
+
+        clean = np.nan_to_num(self.verts, nan=0.0, posinf=0.0, neginf=0.0)
+        keys = np.round(clean / tol).astype(np.int64)
+        unique, inverse = np.unique(keys, axis=0, return_inverse=True)
+        triangles = np.unique(np.sort(inverse.reshape(-1)[self.tri_v], axis=1), axis=0)
+        h = hashlib.sha256()
+        h.update(unique.tobytes())
+        h.update(triangles.tobytes())
+        return h.hexdigest()
+
     def altitudes(self):
         """Per-triangle minimum altitude (metres) — the sliver measure. 2*area / longest edge."""
         e0 = np.linalg.norm(self.p1 - self.p0, axis=1)

@@ -80,6 +80,7 @@ LEVEL_VALIDITY_FIELDS = (
     "nonmanifold_edges", "slivers_below_floor", "tangent_default_faces", "tangent_default_verts",
     "min_altitude_m", "origin_radius_m", "min_altitude_floor_m", "min_tri_area_mm2",
     "boundary_edges", "baked_tangents", "degenerate_tangents", "min_tangent_length",
+    "radius_m",
 )
 
 #: Validity fields that are LISTS rather than numbers, and are re-derived from the bytes like the
@@ -147,7 +148,7 @@ INFORMATIONAL_FIELDS = frozenset({
     "normal_diagnostic_deg", "max_deg", "p99_deg", "p95_deg", "backface_corr_frac", "samples",
     "shipped_matches_source", "deviation_evaluations", "decimations", "reproducible",
     "under_absolute_floor", "label", "sliver_floor_m", "topology_floor_tris",
-    "blend_sha256", "sources_sha256", "glb_sha256", "right_wall_m", "reference_view",
+    "blend_sha256", "sources_sha256", "glb_sha256", "welded_digest", "right_wall_m", "reference_view",
     "vfov_rad", "height_px", "budget_px", "e1_mm", "octave", "skip_fraction", "max_rungs",
     "numeric", "render", "render_views", "render_gate_blocking", "generator", "ladder", "gates",
     "assets", "levels", "source", "validity", "render_gate", "views", "thresholds", "signal",
@@ -179,6 +180,18 @@ def effective_render_blocking(manifest):
                     f"material ({gate.get('material_source')})"
                 )
     return True, "ratified and rendering the shipped material"
+
+
+def _nonfinite_paths(node, path=()):
+    """Every path in the document whose leaf is a non-finite number."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            yield from _nonfinite_paths(value, path + (str(key),))
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            yield from _nonfinite_paths(value, path + (str(index),))
+    elif isinstance(node, float) and not math.isfinite(node):
+        yield ".".join(path)
 
 
 def _require_numbers(record, fields, label, what, failures):
@@ -442,6 +455,21 @@ def _check_schema(manifest, failures):
             return False
     if manifest["schema"] != "overmatch.lod.manifest":
         failures.append(f"unknown schema {manifest['schema']!r}")
+        return False
+    # EVERY numeric leaf, everywhere, must be finite — not just the ones a check happens to name.
+    #
+    # A field-by-field list only defends the fields on it, and a NaN defeats every `abs(x-y) > tol`
+    # binding silently, because every comparison with NaN is False. Sweeping the whole document
+    # takes microseconds and removes the entire class rather than the instances anyone thought of:
+    # a probe found 206 numeric leaves that accepted NaN, all of them in records no named check
+    # covered. There is no legitimate NaN or infinity anywhere in a manifest.
+    nonfinite = sorted(_nonfinite_paths(manifest))
+    if nonfinite:
+        failures.append(
+            f"{len(nonfinite)} non-finite number(s) in the manifest, starting at "
+            f"{', '.join(nonfinite[:4])} — a NaN loses every comparison silently, so any binding "
+            f"that reads it passes without looking"
+        )
         return False
     if manifest["schema_version"] != CONFIG.SCHEMA_VERSION:
         failures.append(
@@ -843,6 +871,13 @@ def verify(manifest, tree):
     if not _check_schema(manifest, failures):
         return failures, warnings
     _check_config_match(manifest, failures)
+    if failures:
+        # STOP HERE. Everything below derives numbers from the ladder and the reference view, and
+        # deriving from a configuration this tree has already rejected is meaningless — worse, it
+        # is where a hostile value gets to raise instead of being reported: `math.tan(inf)` throws,
+        # so a poisoned `vfov_rad` turned a verifier that should say "this manifest is wrong" into
+        # a traceback. A refusal has to look like a refusal.
+        return failures, warnings
     armed, arming_reason = effective_render_blocking(manifest)
     if not armed and CONFIG.RENDER_GATE_BLOCKING:
         warnings.append(
@@ -862,9 +897,42 @@ def verify(manifest, tree):
             )
         # DECODE L0 FIRST: it is the source of both the component count every level is compared
         # against and the corpus sliver floor, and neither may come from the manifest.
+        #
+        # ── WHAT BINDS L0, AND WHAT DOES NOT ─────────────────────────────────────────────────
+        #
+        # L0 is the BASELINE: the floor every sliver is judged against and the component count
+        # every level is compared to are both derived from it. So it is worth being exact about
+        # what stops it being chosen freely, because a probe moving ONE interior vertex of L0 by
+        # 0.9 um — with its hash honestly updated — lowered the corpus floor from 1.18 um to
+        # 0.77 um and the whole manifest verified clean.
+        #
+        # BOUND: the decoded bytes must reproduce `welded_digest`, a split-invariant fingerprint of
+        # L0's geometry recorded at generation, at the moment L0 had just been proven identical to
+        # the evaluated .blend source. Moving any vertex, or joining the surface differently,
+        # changes it. That closes the bytes-only attack the probe used.
+        #
+        # NOT BOUND, and this is the honest limit: the fingerprint lives in the same manifest as
+        # everything else. Someone who rewrites the assets AND the manifest together can produce a
+        # self-consistent corpus that verifies — the fingerprint makes that a VISIBLE diff on a
+        # named field rather than a silent byte swap, but it is not a signature. What actually
+        # defends this is the .blend digest (checked whenever the untracked source is present), code
+        # review, and git history. This verifier proves a corpus is internally consistent and
+        # consistent WITH ITS BYTES; it does not prove the bytes are the ones an artist authored.
         l0_surface = _decode_level(tree, asset["levels"][0], f"{asset['name']} L0", failures)
         l0_derived = floor_m = None
         if l0_surface is not None:
+            recorded_digest = asset["levels"][0].get("welded_digest")
+            if not recorded_digest:
+                failures.append(
+                    f"{asset['name']} L0: no welded_digest — the baseline every other level is "
+                    f"judged against is unbound to the source generation certified it from"
+                )
+            elif l0_surface.welded_digest() != recorded_digest:
+                failures.append(
+                    f"{asset['name']} L0: the shipped bytes do not reproduce the recorded geometry "
+                    f"fingerprint. L0 sets the sliver floor and the component count for the whole "
+                    f"corpus, so a changed baseline silently re-judges every level."
+                )
             l0_plain = l0_surface.validity(CONFIG.GATES)
             floor_m = _derived_corpus_floor(l0_plain, l0_surface.diagonal, CONFIG.GATES)
             l0_derived = l0_surface.validity(CONFIG.GATES, floor_m)
@@ -879,31 +947,16 @@ def verify(manifest, tree):
                     f"{label}: {level['glb']} does not hash to the manifest's record — it was "
                     f"edited or rebuilt outside the pipeline"
                 )
-            validity = level["validity"]
-            # A GENERATED level must carry a tangent per vertex. `degenerate_tangents` counts bad
-            # ones among those present, so zero baked tangents scored a clean zero and passed —
-            # which is exactly the state an exporter omission would leave behind, with bevy
-            # generating uncertified tangents at load.
+            # THE ONLY GATE PATH IS THE SHARED LIST, inside `_check_decoded_bytes`, against values
+            # re-derived from the decoded bytes. A second hand-maintained copy of the counters used
+            # to sit here, comparing the RECORDED numbers — which is both weaker (a record can lie)
+            # and exactly the two-lists-that-must-agree arrangement whose drift produced two of this
+            # week's findings. The claim "one list" is only true if this is not here.
+            #
+            # `tangents_are_baked` stays: it is a manifest ASSERTION rather than a byte measurement,
+            # so nothing in the decoder can check it and it belongs on this side.
             if not level.get("tangents_are_baked"):
                 failures.append(f"{label}: does not record baked tangents")
-            elif validity["baked_tangents"] != validity["verts"]:
-                failures.append(
-                    f"{label}: {validity['baked_tangents']} baked tangents for "
-                    f"{validity['verts']} vertices — every level bakes one per vertex, or the "
-                    f"loader generates them and nothing certified what renders"
-                )
-            for key, limit in (
-                ("duplicate_faces", CONFIG.GATES["max_duplicate_faces"]),
-                ("nonfinite_attrs", CONFIG.GATES["max_nonfinite"]),
-                ("orientation_flips", CONFIG.GATES["max_orientation_flips"]),
-                ("nonmanifold_edges", CONFIG.GATES["max_nonmanifold_edges"]),
-                ("tangent_default_faces", CONFIG.GATES["max_tangent_default_faces"]),
-                ("tangent_default_verts", CONFIG.GATES["max_tangent_default_verts"]),
-                ("degenerate_tangents", CONFIG.GATES["max_degenerate_tangents"]),
-                ("slivers_below_floor", 0),
-            ):
-                if validity[key] > limit:
-                    failures.append(f"{label}: recorded {validity[key]} {key} against a limit of {limit}")
             if l0_derived is not None:
                 _check_decoded_bytes(
                     asset, level, tree, failures, l0_derived, floor_m

@@ -531,20 +531,95 @@ class GateParityTests(unittest.TestCase):
         failures = M.validity_gate_failures(validity, self.clean_validity(), CONFIG.GATES)
         self.assertTrue(any("baked tangents" in f for f in failures), failures)
 
-    def test_the_verifier_and_generator_share_the_gate_function(self):
-        import inspect
+    def test_verification_routes_its_structural_gates_through_the_shared_list(self):
+        """OBSERVED, not grepped: the shared function is replaced and its calls are counted.
+
+        WHAT THIS ESTABLISHES: verification really does invoke the shared gate list for every level,
+        and when that list is neutered every structural failure disappears — so those failures flow
+        through it rather than through a second copy beside it.
+
+        WHAT IT DOES NOT: it cannot prove no OTHER check anywhere ever duplicates a gate. Nothing
+        short of reading the file does, and the grep below is that, kept for the one thing it is
+        actually good at — catching a private gate list reappearing under a familiar name.
+        """
+        import json
 
         import chain
-        source = inspect.getsource(chain)
-        self.assertIn("M.validity_gate_failures(", source,
-                      "the verifier must call the shared gate list")
-        generate_source = open(
-            os.path.join(os.path.dirname(os.path.abspath(M.__file__)), "generate.py")
-        ).read()
-        self.assertIn("M.validity_gate_failures(", generate_source,
-                      "generation must call the shared gate list")
-        self.assertNotIn("def validity_failures(", generate_source,
-                         "generation must not keep a private copy of the gate list")
+
+        root = CONFIG.repo_root()
+        manifest_path = os.path.join(root, CONFIG.MANIFEST_RELPATH)
+        if not os.path.isfile(manifest_path):
+            self.skipTest("no manifest generated yet")
+        manifest = json.load(open(manifest_path, encoding="utf-8"))
+
+        calls = []
+        original = M.validity_gate_failures
+
+        def counting(validity, source_validity, gates, **kwargs):
+            calls.append(validity.get("tris"))
+            return original(validity, source_validity, gates, **kwargs)
+
+        M.validity_gate_failures = counting
+        try:
+            chain.verify(manifest, chain.Tree(root))
+        finally:
+            M.validity_gate_failures = original
+        self.assertEqual(
+            len(calls), len(manifest["assets"][0]["levels"]),
+            "every level must be put through the shared gate list exactly once",
+        )
+
+        # NO NEUTER-AND-EXPECT-SILENCE HALF, deliberately. Removing the gate list does not make a
+        # mutated counter stop failing, because the byte-vs-record comparison catches that too and
+        # SHOULD — so a vanishing failure would not have been evidence of a second gate list, and
+        # asserting it would have been a test that looked stronger than it was. The structural
+        # claim is carried by `test_neither_caller_keeps_a_private_gate_list`, which checks the one
+        # thing that is actually decidable: no limit is read anywhere outside the shared list.
+
+    def test_neither_caller_keeps_a_private_gate_list(self):
+        directory = os.path.dirname(os.path.abspath(M.__file__))
+        generate_source = open(os.path.join(directory, "generate.py")).read()
+        chain_source = open(os.path.join(directory, "chain.py")).read()
+        self.assertIn("M.validity_gate_failures(", generate_source)
+        self.assertIn("M.validity_gate_failures(", chain_source)
+        self.assertNotIn("def validity_failures(", generate_source)
+        for limit in (key for key in CONFIG.GATES if key.startswith("max_")):
+            self.assertNotIn(
+                f'CONFIG.GATES["{limit}"]', chain_source,
+                f"{limit} is consulted directly in chain.py — the gate list is the only place a "
+                f"limit may be read, or there are two lists again",
+            )
+
+
+class DecoderCoverageTests(unittest.TestCase):
+    """Everything the decoder can compute is either VERIFIED or explicitly classified.
+
+    A property the decoder produces but the verifier never compares is invisible: the manifest can
+    say anything about it and nothing looks. `radius_m` was exactly that — measured from the bytes,
+    recorded in every level, and compared against nothing. This test is the standing form of that
+    audit, so the next field someone adds to `validity()` has to be classified before it can ship.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="lod-coverage-")
+
+    def test_every_decoded_property_is_verified_or_classified(self):
+        import chain
+
+        surface = M.from_glb(build_glb(
+            os.path.join(self.dir, "probe.glb"), SQUARE_POS, SQUARE_IDX, uvs=SQUARE_UV,
+            tangents=[[1, 0, 0, 1]] * 4,
+        ))
+        produced = set(surface.validity(CONFIG.GATES))
+        verified = set(chain.LEVEL_VALIDITY_FIELDS) | set(chain.LEVEL_VALIDITY_VECTORS)
+        classified = chain.INFORMATIONAL_FIELDS
+        unaccounted = produced - verified - classified
+        self.assertEqual(
+            unaccounted, set(),
+            f"these decoded properties are neither verified nor classified: {sorted(unaccounted)}. "
+            f"Add each to chain.LEVEL_VALIDITY_FIELDS (if it should be compared against the bytes) "
+            f"or to INFORMATIONAL_FIELDS (if it is for a human).",
+        )
 
 
 class BisectionTests(unittest.TestCase):
