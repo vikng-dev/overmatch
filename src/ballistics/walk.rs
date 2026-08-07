@@ -67,10 +67,17 @@ mod tests;
 /// `[enter, enter]`, which is not material presence). Two coplanar triangles of ONE face must
 /// collapse to one crossing; two different shells sharing an entry plane must stay distinct,
 /// because their exits differ. Only primitive identity separates those cases.
+///
+/// The primitive is an `Entity` rather than an index because the bind already gives every glb mesh
+/// primitive its own collider entity (`tank::spawn::insert_ballistic_volumes`), so the identity the
+/// walk needs already exists and is stable for the frame — an index would be a second, weaker name
+/// for the same thing.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct PrimitiveKey {
+    /// The `BallisticVolume` node — where the factor, the HP and the damage address live.
     pub volume: Entity,
-    pub primitive: u32,
+    /// The collider entity carrying this primitive's geometry.
+    pub primitive: Entity,
 }
 
 /// One triangle crossing along a sample ray, as the spatial adapter reports it.
@@ -83,7 +90,7 @@ pub struct PrimitiveKey {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FaceHit {
     pub volume: Entity,
-    pub primitive: u32,
+    pub primitive: Entity,
     /// Diagnostic identity only. It never participates in coincidence clustering or in the
     /// topological reduction (those are geometric, so a re-triangulated mesh cannot change the
     /// answer); it exists so a [`WalkError`] can name the offending faces.

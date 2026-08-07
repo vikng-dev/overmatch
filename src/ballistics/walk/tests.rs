@@ -21,6 +21,13 @@ fn volume(index: u32) -> Entity {
     Entity::from_raw_u32(index).expect("test entity index must be non-zero-invalid")
 }
 
+/// Synthetic collider identity. The bind gives every glb mesh primitive its own collider entity;
+/// fixtures name them by a small index in the same space, offset so a primitive can never collide
+/// with a volume id.
+fn prim(index: u32) -> Entity {
+    Entity::from_raw_u32(index + 1_000).expect("test entity index must be non-zero-invalid")
+}
+
 /// A plate crossing: `[enter, exit)` on one primitive, faces square to the ray.
 fn plate(vol: u32, primitive: u32, enter: f32, exit: f32) -> Vec<FaceHit> {
     oblique_plate(vol, primitive, enter, exit, -AXIS, AXIS)
@@ -49,14 +56,14 @@ fn oblique_plate(
     vec![
         FaceHit {
             volume: volume(vol),
-            primitive,
+            primitive: prim(primitive),
             triangle: primitive * 100,
             t: enter,
             true_normal: entry_normal.normalize(),
         },
         FaceHit {
             volume: volume(vol),
-            primitive,
+            primitive: prim(primitive),
             triangle: primitive * 100 + 1,
             t: exit,
             true_normal: exit_normal.normalize(),
@@ -141,7 +148,7 @@ impl Slab {
     fn key(&self) -> PrimitiveKey {
         PrimitiveKey {
             volume: volume(self.vol),
-            primitive: self.primitive,
+            primitive: prim(self.primitive),
         }
     }
 
@@ -175,7 +182,7 @@ impl Slab {
                 };
                 (t < length).then_some(FaceHit {
                     volume: volume(self.vol),
-                    primitive: self.primitive,
+                    primitive: prim(self.primitive),
                     triangle: self.primitive * 100 + face,
                     t,
                     true_normal,
@@ -272,21 +279,21 @@ fn a_face_diagonal_hit_is_one_crossing() {
     let hits = vec![
         FaceHit {
             volume: volume(1),
-            primitive: 0,
+            primitive: prim(0),
             triangle: 0,
             t: 1.0,
             true_normal: -AXIS,
         },
         FaceHit {
             volume: volume(1),
-            primitive: 0,
+            primitive: prim(0),
             triangle: 1,
             t: 1.0,
             true_normal: -AXIS,
         },
         FaceHit {
             volume: volume(1),
-            primitive: 0,
+            primitive: prim(0),
             triangle: 2,
             t: 1.125,
             true_normal: AXIS,
@@ -313,7 +320,7 @@ fn a_shared_vertex_cluster_is_one_crossing() {
     {
         hits.push(FaceHit {
             volume: volume(1),
-            primitive: 0,
+            primitive: prim(0),
             triangle: index as u32,
             t: 1.0,
             true_normal: normal.normalize(),
@@ -321,7 +328,7 @@ fn a_shared_vertex_cluster_is_one_crossing() {
     }
     hits.push(FaceHit {
         volume: volume(1),
-        primitive: 0,
+        primitive: prim(0),
         triangle: 9,
         t: 1.5,
         true_normal: AXIS,
@@ -340,14 +347,14 @@ fn an_exact_edge_tangent_toggles_nothing() {
     let hits = vec![
         FaceHit {
             volume: volume(1),
-            primitive: 0,
+            primitive: prim(0),
             triangle: 0,
             t: 1.0,
             true_normal: -AXIS,
         },
         FaceHit {
             volume: volume(1),
-            primitive: 0,
+            primitive: prim(0),
             triangle: 1,
             t: 1.0,
             true_normal: AXIS,
@@ -376,13 +383,13 @@ fn starting_inside_with_declared_presence_charges_the_partial_chord() {
     let volumes = table(&[(1, 1000.0)]);
     let key = PrimitiveKey {
         volume: volume(1),
-        primitive: 0,
+        primitive: prim(0),
     };
     let mut corridor = corridor(
         4.0,
         vec![FaceHit {
             volume: volume(1),
-            primitive: 0,
+            primitive: prim(0),
             triangle: 0,
             t: 0.25,
             true_normal: AXIS,
@@ -404,7 +411,7 @@ fn starting_inside_without_declared_presence_is_a_structured_error() {
         4.0,
         vec![FaceHit {
             volume: volume(1),
-            primitive: 0,
+            primitive: prim(0),
             triangle: 7,
             t: 0.25,
             true_normal: AXIS,
@@ -524,21 +531,21 @@ fn a_second_entry_into_an_open_primitive_is_a_structured_error() {
     let hits = vec![
         FaceHit {
             volume: volume(1),
-            primitive: 0,
+            primitive: prim(0),
             triangle: 0,
             t: 0.25,
             true_normal: -AXIS,
         },
         FaceHit {
             volume: volume(1),
-            primitive: 0,
+            primitive: prim(0),
             triangle: 1,
             t: 0.5,
             true_normal: -AXIS,
         },
         FaceHit {
             volume: volume(1),
-            primitive: 0,
+            primitive: prim(0),
             triangle: 2,
             t: 1.0,
             true_normal: AXIS,
@@ -648,7 +655,7 @@ fn a_corridor_starting_inside_a_volume_grants_no_free_crossing() {
         1.0,
         vec![FaceHit {
             volume: volume(1),
-            primitive: 0,
+            primitive: prim(0),
             triangle: 0,
             t: 0.125,
             true_normal: AXIS,
@@ -656,7 +663,7 @@ fn a_corridor_starting_inside_a_volume_grants_no_free_crossing() {
     );
     corridor.initial_presence = vec![PrimitiveKey {
         volume: volume(1),
-        primitive: 0,
+        primitive: prim(0),
     }];
     let result = walk(&corridor, &volumes);
     assert_eq!(result.cost, 125.0);
@@ -1690,7 +1697,7 @@ fn the_handoff_seeds_every_sample_that_starts_inside_material() {
             seed.inside,
             vec![PrimitiveKey {
                 volume: volume(1),
-                primitive: 0
+                primitive: prim(0)
             }]
         );
     }
