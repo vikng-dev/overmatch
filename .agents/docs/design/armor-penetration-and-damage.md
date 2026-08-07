@@ -804,10 +804,16 @@ Enforced mechanically, not by eyeball:
 
 **Open tabs (§13):** k (sample count) and the ring layout; the weld-ε value; equal-factor run
 merging for spall accounting (an ownership switch mid-steel is one run, keyed by factor value);
-whether ricochet-shock on exposed components adopts the same factor-step gate; what "significant
-step" means numerically (sandbox knob); the lateral-asymmetry kick (§13.5, deliberately omitted).
-Material near-ties need nothing: `max` needs no tie-break for cost, and damage has no ownership at
-all.
+whether ricochet-shock on exposed components adopts the same factor-step gate; the
+lateral-asymmetry kick (§13.5, deliberately omitted). Material near-ties need nothing: `max`
+needs no tie-break for cost, and damage has no ownership at all.
+**Track belt ballistics (RULED IN, 2026-08-07, design pending):** Yan — links, sprockets and
+idlers "should be part of the ballistics, and track links will even have health later."
+Sprocket/idler are rig-mounted and land as ordinary Cast volumes. The BELT is the open design:
+194 links on a dynamic wrap — ballistic volumes extract from static glb nodes, so shootable
+tracks need a belt-geometry→volumes mapping (the collider cousin of the track wrap view),
+plus the future per-link health model. Until it lands, shots pass through the belt run
+unresisted — a known, deliberate gap, not an oversight.
 
 ## Build status (2026-06-27)
 
