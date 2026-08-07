@@ -628,9 +628,14 @@ today independent of unions.
 3. **ε-weld:** runs separated by less than the weld tolerance merge into one run. Semantics
    sharpened 2026-08-04:
    - **It merges event topology, not material.** One entry face (ricochet/normalization/incidence
-     once, at the outer face), one exit (spall once, at the true inner face, budget = the run's
-     *summed* cost), overmatch against the run's summed factor-weighted thickness. No spall
-     "developing" in a 0.4mm void, no second ricochet check mid-sandwich.
+     once, at the outer face), one exit at the true inner face, overmatch against the run's summed
+     factor-weighted thickness. No second ricochet check mid-sandwich.
+   - **Spall follows the field law, not the run** (RULED 2026-08-07, superseding this section's
+     original "spall once per welded run", which contradicted §13.2): welding deletes only the
+     void's exit/entry face pair; the direct material step it exposes still obeys §13.2 — a
+     downward factor step at a welded joint spalls with its own budget, an equal-factor joint
+     emits nothing. A 0.4mm void still never "develops" spall of its own — voids have no events,
+     material steps do.
    - **It never charges the gap.** Cost integrates material chords only — welding deletes phantom
      *faces*; it cannot create phantom *steel*.
    - **Measure the gap perpendicular, not along the ray** — else grazing incidence un-welds exactly
@@ -638,6 +643,13 @@ today independent of unions.
      (knob): far above export jitter, two orders below real spaced armor (Schürzen at 100s of mm).
    - Welds across differing factors are fine (RHA sandwiched with cast = one run for events; each
      chord charges its own factor).
+   - **Chained welds are budgeted** (RULED 2026-08-07): chaining A~B~C is transitive, but the
+     cumulative omitted void per welded run is capped at ε itself. Cap = tolerance = the same 2mm
+     knob, deliberately — it bounds both extremes at once: a single two-plate sandwich welds
+     across up to 2mm of air, and a picket fence of near-touching plates can never collapse into
+     one run by chaining. Welding also requires **face compatibility** — the exit and next-entry
+     normals must describe opposing sides of a common gap (cosine bound, bounded along-ray
+     lookahead), else a grazing side face would weld to unrelated geometry far downrange.
 4. **Walk the boundary list:** each sub-chord carries `max`-factor + the presence set. Integrate
    cost; deposit per-entity damage; fire boundary laws at steps. Interior gaps ≥ ε between runs are
    free flight — **spaced armor is emergent**.
@@ -701,6 +713,14 @@ are shells with r→0, k=1** — the same primitive degenerates to the pure ray,
   the aggregate sees the mean, not the asymmetry. If ever wanted, the mean lateral offset of
   covered samples is the ready-made kick direction. Knob, not now.
 - **Sampling noise at very small η** — k is the resolution dial; the sandbox chooses it.
+
+**Impulse ownership across rigid bodies (safe default, 2026-08-07):** when an event's presence set
+spans several *rigid bodies* (only possible when distinct bodies overlap in space — hulls in
+contact, a shot threading a wreck seam; within one tank every volume shares the body, so the
+question cannot arise), the full momentum exchange goes to the body owning the **entrance
+surface** — the first body physically touched. Anything behind it is shoved through contact by
+the physics engine. Damage attribution stays per-presence as always; only the shove is routed.
+Revisit only if seam-threading shots ever matter.
 
 ### 13.6 Invariants — the machine-checkable contract
 
