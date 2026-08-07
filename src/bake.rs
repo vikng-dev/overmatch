@@ -1040,13 +1040,18 @@ mod tests {
                 ("EngineBlock", 2),
                 ("Flesh", 5),
                 ("GunSteel", 6),
-                ("MildSteel", 22),
+                // 26, was 22: the running gear joined the ballistics 2026-08-07 — `Sprocket_L/R`
+                // and `Idler_L/R`, one primitive each, `Mat_RunningGear_Paint` -> `MildSteel`.
+                // Machinery `Stahlguß`, not `Panzerguß`, so MildSteel and not Cast.
+                ("MildSteel", 26),
                 ("RHA", 17),
                 ("Rubber", 16),
             ]),
             "the Tiger's substance census moved — see the doc above before re-pinning"
         );
-        assert_eq!(geometry.ballistic_volumes.len(), 61);
+        // 65, was 61: the same four nodes. Total primitives are UNCHANGED at 88 — these objects
+        // always had exactly one material slot, so this is a re-classification, not new geometry.
+        assert_eq!(geometry.ballistic_volumes.len(), 65);
     }
 
     /// The manifold gate refuses what silently-zero armour is made of, and names it. Driven on
