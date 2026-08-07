@@ -925,6 +925,73 @@ fn a_thin_oblique_slab_is_one_event_not_several() {
     assert!((walked.events[0].cost - chord * 1000.0).abs() < 1.0);
 }
 
+/// A watertight CONCAVE primitive — the two arms of a bracket, 400 mm apart — is one mesh crossed
+/// at two genuinely separate places. Sharing a primitive says the samples met the same BODY; it
+/// must not be mistaken for meeting the same CROSSING, or two events collapse into one: one
+/// entrance law instead of two, one summed overmatch thickness, and one exit where there are two.
+#[test]
+fn a_concave_primitive_crossed_twice_stays_two_events() {
+    let volumes = table(&[(1, 1000.0)]);
+    let laws = WalkLaws::default();
+    let frame = DiscFrame {
+        u: Vec3::X,
+        v: Vec3::Y,
+    };
+    let walked = walk_disc(
+        &DiscCorridor {
+            origin: Vec3::ZERO,
+            axis: AXIS,
+            length: 2.0,
+            radius: 0.02,
+            frame,
+            samples: vec![
+                sample(Vec3::ZERO, plate(1, 0, 0.2, 0.3)),
+                sample(Vec3::X * 0.02, plate(1, 0, 0.7, 0.8)),
+            ],
+        },
+        &volumes,
+        &laws,
+    )
+    .unwrap();
+
+    assert_eq!(walked.events.len(), 2, "400 mm apart is not one crossing");
+    for event in &walked.events {
+        assert_eq!(event.coverage, 0.5, "each arm is met by one sample of two");
+        assert!((event.cost - 50.0).abs() < 0.1, "{}", event.cost);
+    }
+    assert!(walked.events[0].end < walked.events[1].start);
+}
+
+/// The other half of the same rule: the SAME primitive crossed by two samples at overlapping
+/// depths is one crossing. Concavity must not shatter an ordinary hit.
+#[test]
+fn a_concave_primitive_crossed_together_stays_one_event() {
+    let volumes = table(&[(1, 1000.0)]);
+    let laws = WalkLaws::default();
+    // Deliberately NOT coplanar entry faces (a curved cast surface), so only the shared-primitive
+    // branch can associate them.
+    let a = slab(1, 0, 0.2, 0.3, Vec3::new(0.0, 0.7, -0.7));
+    let b = slab(1, 0, 0.22, 0.32, Vec3::new(0.0, -0.7, -0.7));
+    let walked = walk_disc(
+        &DiscCorridor {
+            origin: Vec3::ZERO,
+            axis: AXIS,
+            length: 2.0,
+            radius: 0.02,
+            frame: DiscFrame {
+                u: Vec3::X,
+                v: Vec3::Y,
+            },
+            samples: vec![sample(Vec3::ZERO, a), sample(Vec3::X * 0.02, b)],
+        },
+        &volumes,
+        &laws,
+    )
+    .unwrap();
+    assert_eq!(walked.events.len(), 1);
+    assert_eq!(walked.events[0].coverage, 1.0);
+}
+
 /// A half-covered disc engages half the world: `η ≈ 0.5` and half the cost. Armor-zone boundaries
 /// grade over one caliber (§13.5's accepted cost), rather than snapping at a sharp line.
 #[test]

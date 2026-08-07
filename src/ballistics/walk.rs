@@ -212,15 +212,12 @@ pub struct WalkLaws {
     /// Reference-mm per metre of the reference substance (RHA), the divisor turning a cost back
     /// into steel-equivalent METRES so it can be compared against a caliber.
     pub rha_reference: f32,
-    /// Minimum factor step that counts as a surface for the boundary laws (§13.3's "meaningful
-    /// factor step").
-    ///
-    /// OPEN KNOB, deliberately 0.0 (§13's own open tab: "what 'significant step' means numerically
-    /// — sandbox knob"). At 0.0 every step is a surface, and the thick-soft-volume pathology is
-    /// killed by the factor-weighted overmatch instead: an 80 mm forearm is ~1.6 mm steel-
-    /// equivalent, so every caliber overmatches it and nothing deflects off an arm (§13.3). Raising
-    /// this is a second, independent lever and must not be tuned without a measured reason.
-    pub significant_step: f32,
+    // NO `significant_step` knob. §13's "meaningful factor step" is still an open tab, and a
+    // declared-but-unread knob is a false affordance — it advertises a lever whose default is
+    // correct only by accident. The pathology it was meant to gate (a thick soft volume deflecting
+    // a main-gun round) is already dead by a different mechanism: factor-weighted overmatch
+    // (§13.3), which is exercised by `an_arm_does_not_ricochet_an_88`. Add the knob back only with
+    // a reader and a test.
 }
 
 impl Default for WalkLaws {
@@ -249,7 +246,6 @@ impl Default for WalkLaws {
             normalization: 0.2,
             overmatch_ratio: 3.0,
             rha_reference: 1000.0,
-            significant_step: 0.0,
         }
     }
 }
@@ -1174,11 +1170,35 @@ pub fn walk_disc(
             }
             let run_a = &walks[sa].runs[ra];
             let run_b = &walks[sb].runs[rb];
+
+            // BRANCH 1 — shared primitive, AND longitudinally adjacent.
+            //
+            // Identity alone is not the relation. One watertight CONCAVE primitive can be crossed
+            // twice by the disc at genuinely separate places — the two arms of a bracket 400 mm
+            // apart are the same mesh, and unioning them would collapse two crossings into one
+            // event: one entrance law instead of two, one summed overmatch thickness, one exit.
+            // Sharing a primitive says the samples are on the same BODY; adjacency says they are on
+            // the same CROSSING. The bound is the weld lookahead — runs that would be weld-adjacent
+            // if they lay on one ray.
             let shares_primitive = run_a
                 .primitives
                 .iter()
                 .any(|key| run_b.primitives.binary_search(key).is_ok());
-            let compatible = shares_primitive || {
+            let longitudinal_gap = (run_b.start - run_a.end)
+                .max(run_a.start - run_b.end)
+                .max(0.0);
+            let adjacent = longitudinal_gap <= laws.weld_max_lookahead;
+
+            // BRANCH 2 — one surface, whatever the mesh partition.
+            //
+            // This is what keeps seam invisibility (§13.6): two flush plates of DIFFERENT entities
+            // must associate, or a shot near their seam would resolve as two crossings where a
+            // mid-plate shot resolves as one. It also carries the oblique-slab case that pure
+            // longitudinal overlap cannot — the ring's chords shift by `r·tan(incidence)` and stop
+            // overlapping entirely, yet every entry point still lies on the one plane. The plane
+            // test is itself longitudinally aware: two parallel faces 400 mm apart are 400 mm apart
+            // ALONG the shared normal, so it cannot merge them.
+            let coplanar = {
                 let na = run_a.entry_normal;
                 let nb = run_b.entry_normal;
                 let pa =
@@ -1190,7 +1210,8 @@ pub fn walk_disc(
                     && mean != Vec3::ZERO
                     && (pa - pb).dot(mean).abs() <= laws.event_plane_tolerance
             };
-            if compatible {
+
+            if (shares_primitive && adjacent) || coplanar {
                 let (ra_root, rb_root) = (find(&mut parent, a), find(&mut parent, b));
                 if ra_root != rb_root {
                     parent[ra_root.max(rb_root)] = ra_root.min(rb_root);
