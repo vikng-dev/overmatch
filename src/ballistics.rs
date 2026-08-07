@@ -30,6 +30,15 @@ mod sanctioned;
 )]
 mod walk;
 
+/// The spatial half of the §13 walk: turning a corridor of world rays into EVERY face crossing along
+/// them, with each face's true (winding) orientation. Avian's own all-hits query cannot express it —
+/// see the module doc.
+#[allow(
+    dead_code,
+    reason = "slice-2 adapter; wired into the march by the resolver swap"
+)]
+mod collect;
+
 pub(crate) use sanctioned::{
     SanctionedBounce, SanctionedBounceInsert, SanctionedShots, SanctionedTerminal,
 };

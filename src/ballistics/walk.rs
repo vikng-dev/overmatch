@@ -293,6 +293,20 @@ pub enum WalkError {
         open: Vec<PrimitiveKey>,
         length: f32,
     },
+    /// The spatial collector could not probe a candidate it was handed. Never softened into "that
+    /// volume contributed nothing" — an unprobed volume and an absent one are the same silence.
+    CollectorFailed {
+        volume: Entity,
+        reason: &'static str,
+    },
+    /// One corridor produced more face crossings than the collector will hold. A ceiling, not a
+    /// budget: the alternative is a truncated hit list, which is unpairable topology wearing the
+    /// costume of valid geometry.
+    CorridorOverflow {
+        volume: Entity,
+        collected: usize,
+        limit: usize,
+    },
     /// The corridor handed to [`finish`] is not the one [`begin`] asked for. Accepting it silently
     /// would resolve one contact's geometry against another contact's entrance decision — an
     /// overmatch verdict, a normalization bend and a ricochet test all belonging to a surface the
