@@ -17,7 +17,8 @@
 //! kill, and a defaulted material factor is the same defect wearing the registry's clothes.
 
 use serde::Deserialize;
-use std::collections::HashMap;
+use serde::de::{self, MapAccess, Visitor};
+use std::collections::BTreeMap;
 
 /// The shipped registry, embedded so the walk never depends on asset-server timing (the same reason
 /// [`crate::bake`] embeds the Tiger spec).
@@ -40,7 +41,76 @@ pub struct Substance {
 #[derive(Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct SubstanceRegistry {
-    substances: HashMap<String, Substance>,
+    substances: SubstanceMap,
+}
+
+/// The substance table, with its validity enforced AT PARSE.
+///
+/// A plain `HashMap` cannot carry the contract: serde fills one by repeated insertion, so a
+/// duplicated key silently overwrites and the file's second `"RHA"` wins with nobody told. Nor does
+/// a derived map reject a factor that cannot be a field value. Both are the §13.1 defect class
+/// dressed as data — a registry that answers `Ok` for a file it should have refused hands the walk
+/// a wrong number instead of an error, and wrong armour is worse than absent armour because nothing
+/// downstream can tell.
+///
+/// Validity is therefore checked where the entries arrive, not later at [`crate::ballistics`]'s
+/// `VolumeTable`: that one guards the WALK, this one guards the FILE, and a bad file must fail at
+/// the bake rather than at the first shot that happens to cross the offending plate.
+#[derive(Clone, Debug, Default)]
+struct SubstanceMap(BTreeMap<String, Substance>);
+
+impl<'de> Deserialize<'de> for SubstanceMap {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct MapVisitor;
+
+        impl<'de> Visitor<'de> for MapVisitor {
+            type Value = SubstanceMap;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a map of material datablock name to substance")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
+                // BTreeMap, not HashMap: the diagnostic vocabulary and any future iteration are then
+                // ordered by construction rather than by hash seed.
+                let mut out: BTreeMap<String, Substance> = BTreeMap::new();
+                while let Some((name, substance)) = access.next_entry::<String, Substance>()? {
+                    let factor = substance.factor;
+                    if !factor.is_finite() {
+                        return Err(de::Error::custom(format!(
+                            "substance {name:?} has a non-finite factor ({factor}) — a factor is a \
+                             field value the union walk takes `max` over and integrates; NaN \
+                             poisons both the maximum and the sort order"
+                        )));
+                    }
+                    if factor < 0.0 {
+                        return Err(de::Error::custom(format!(
+                            "substance {name:?} has a negative factor ({factor}) — negative \
+                             resistance breaks §13.6 monotonicity: adding the volume would LOWER \
+                             protection along the ray"
+                        )));
+                    }
+                    // `-0.0` is canonicalized so "no resistance" has exactly one bit pattern; the
+                    // walk coalesces canonical spans by factor BITS, and a second zero would cut a
+                    // span where the field never changed.
+                    let substance = Substance {
+                        factor: if factor == 0.0 { 0.0 } else { factor },
+                        ..substance
+                    };
+                    if out.insert(name.clone(), substance).is_some() {
+                        return Err(de::Error::custom(format!(
+                            "substance {name:?} is declared twice — the datablock name is the join \
+                             key between materials.blend and this file, so a duplicate means two \
+                             different answers for one key and the file cannot say which is meant"
+                        )));
+                    }
+                }
+                Ok(SubstanceMap(out))
+            }
+        }
+
+        deserializer.deserialize_map(MapVisitor)
+    }
 }
 
 /// Why a registry could not be used. Both arms name the offending text so the failure is readable
@@ -95,13 +165,11 @@ impl SubstanceRegistry {
         reason = "slice-3 seam: the bake binds to this when the walk lands"
     )]
     pub fn get(&self, name: &str) -> Result<Substance, SubstanceError> {
-        self.substances.get(name).copied().ok_or_else(|| {
-            // Sorted so the diagnostic is stable across runs — `HashMap` iteration order is not.
-            let mut known: Vec<String> = self.substances.keys().cloned().collect();
-            known.sort();
+        self.substances.0.get(name).copied().ok_or_else(|| {
             SubstanceError::Unknown {
                 name: name.to_string(),
-                known,
+                // Already ordered: the table is a `BTreeMap`, so the diagnostic is stable run to run.
+                known: self.substances.0.keys().cloned().collect(),
             }
         })
     }
@@ -121,7 +189,7 @@ impl SubstanceRegistry {
         reason = "slice-3 seam: the bake binds to this when the walk lands"
     )]
     pub fn len(&self) -> usize {
-        self.substances.len()
+        self.substances.0.len()
     }
 }
 
@@ -194,5 +262,59 @@ mod tests {
         )
         .expect_err("deny_unknown_fields must reject a stray key");
         assert!(matches!(err, SubstanceError::Parse(_)));
+    }
+
+    /// A duplicated datablock name means two different answers for one join key. Serde's default
+    /// map fill would silently keep the last one; the file must be refused instead, naming the key.
+    #[test]
+    fn a_duplicated_substance_name_fails_the_parse() {
+        let err = SubstanceRegistry::from_ron(
+            r#"(substances: {
+                "RHA":  (factor: 1000.0, paintable: true),
+                "Cast": (factor:  900.0, paintable: true),
+                "RHA":  (factor:   10.0, paintable: false),
+            })"#,
+        )
+        .expect_err("a duplicate key must not silently overwrite");
+        assert!(err.to_string().contains("RHA"), "{err}");
+        assert!(err.to_string().contains("twice"), "{err}");
+    }
+
+    /// A negative factor breaks §13.6 monotonicity — adding the volume would LOWER protection.
+    #[test]
+    fn a_negative_factor_fails_the_parse() {
+        let err = SubstanceRegistry::from_ron(
+            r#"(substances: { "Rubber": (factor: -50.0, paintable: false) })"#,
+        )
+        .expect_err("a negative factor must not parse");
+        assert!(err.to_string().contains("Rubber"), "{err}");
+        assert!(err.to_string().contains("negative"), "{err}");
+    }
+
+    /// A non-finite factor poisons both the union `max` and the total order the walk sorts on.
+    #[test]
+    fn a_non_finite_factor_fails_the_parse() {
+        for literal in ["NaN", "inf", "-inf"] {
+            let err = SubstanceRegistry::from_ron(&format!(
+                r#"(substances: {{ "Flesh": (factor: {literal}, paintable: false) }})"#
+            ))
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("Flesh"),
+                "factor {literal} must be refused by name, got {err}"
+            );
+        }
+    }
+
+    /// `-0.0` is canonicalized: "no resistance" gets exactly one bit pattern, because the walk
+    /// coalesces its canonical spans by factor BITS and a second zero would cut a span where the
+    /// field never changed.
+    #[test]
+    fn negative_zero_is_canonicalized() {
+        let registry = SubstanceRegistry::from_ron(
+            r#"(substances: { "Void": (factor: -0.0, paintable: false) })"#,
+        )
+        .expect("zero resistance is legal, it is just nothing");
+        assert_eq!(registry.factor("Void").unwrap().to_bits(), 0.0f32.to_bits());
     }
 }
