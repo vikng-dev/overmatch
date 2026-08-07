@@ -1909,3 +1909,180 @@ fn an_empty_disc_is_a_miss() {
     assert!(walked.events.is_empty());
     assert_eq!(begin(&walked, &AP_88, &laws), Begin::Miss);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Mutant-ledger fixtures
+// ---------------------------------------------------------------------------------------------
+//
+// Each of these was written because an adversarial review MUTATED the law it names and the whole
+// suite stayed green. A test that cannot fail when its law is deleted is not testing the law, and
+// the gap is always the same shape: the fixture happened to sit where the mutation makes no
+// difference. They are kept apart from the tests they harden only so that the reason they exist
+// stays legible.
+
+/// `max` over the covering volumes, mutated to "whichever active entity comes last", survived the
+/// monotonicity test — because the entity iteration order happened to end on the steel. The fixture
+/// has to be run in BOTH id orders, and the assertion has to be equality, not merely "not lower":
+/// flesh clipped into a turret wall must change the cost by exactly nothing.
+#[test]
+fn a_weaker_volume_inside_steel_cannot_dilute_it_in_either_id_order() {
+    for (steel, flesh) in [(9u32, 1u32), (1u32, 9u32)] {
+        let volumes = table(&[(steel, 1000.0), (flesh, 10.0)]);
+        let bare = walk(&corridor(2.0, plate(steel, 0, 0.2, 0.8)), &volumes);
+        let mut clipped = plate(steel, 0, 0.2, 0.8);
+        clipped.extend(plate(flesh, 0, 0.3, 0.5));
+        let clipped = walk(&corridor(2.0, clipped), &volumes);
+        assert_eq!(
+            bare.cost.to_bits(),
+            clipped.cost.to_bits(),
+            "steel id {steel}, flesh id {flesh}: {} vs {}",
+            bare.cost,
+            clipped.cost
+        );
+        assert_eq!(bare.spans, clipped.spans);
+        // …and the flesh is still charged for ITS OWN chord, at its own factor (§13.2's damage law).
+        let share = clipped
+            .presence
+            .iter()
+            .find(|p| p.entity == volume(flesh))
+            .expect("the clipped volume is still present");
+        assert!((share.cost - 2.0).abs() < 1.0e-3, "{}", share.cost);
+    }
+}
+
+/// Deleting the weld FACE-COMPATIBILITY guard left the whole suite green: the existing
+/// unrelated-plate fixture is rejected by the perpendicular-gap guard first, so it never exercised
+/// this rule at all.
+///
+/// Here both faces are near-tangent and face the SAME way — a wedge tip, not two sides of a void.
+/// Every other guard passes (0.9 mm perpendicular, 20 mm lookahead, inside the chain budget), so
+/// only face compatibility can reject it.
+#[test]
+fn a_micro_gap_between_same_facing_faces_does_not_weld() {
+    let volumes = table(&[(1, 1000.0), (2, 1000.0)]);
+    let grazing_out = Vec3::new(0.0, 0.999, 0.045);
+    let grazing_in = Vec3::new(0.0, 0.999, -0.045);
+
+    // Same-facing: `n_exit · n_entry ≈ +1`. Not a gap with two sides.
+    let mut same = oblique_plate(1, 0, 0.2, 0.3, Vec3::new(0.0, -0.999, -0.045), grazing_out);
+    same.extend(oblique_plate(
+        2,
+        0,
+        0.32,
+        0.42,
+        grazing_in,
+        Vec3::new(0.0, -0.999, 0.045),
+    ));
+    let same = walk(&corridor(2.0, same), &volumes);
+    assert_eq!(same.runs.len(), 2, "same-facing micro-gaps are not one run");
+
+    // The control: identical geometry and identical gap, faces OPPOSED. Now it welds, so the
+    // rejection above is the face test and nothing else.
+    let mut opposed = oblique_plate(1, 0, 0.2, 0.3, Vec3::new(0.0, -0.999, -0.045), grazing_out);
+    opposed.extend(oblique_plate(
+        2,
+        0,
+        0.32,
+        0.42,
+        Vec3::new(0.0, -0.999, -0.045),
+        Vec3::new(0.0, 0.999, 0.045),
+    ));
+    let opposed = walk(&corridor(2.0, opposed), &volumes);
+    assert_eq!(opposed.runs.len(), 1);
+    assert_eq!(opposed.runs[0].joints, 1);
+}
+
+/// Deleting the weld LOOKAHEAD ceiling also left the suite green. At grazing incidence
+/// `|axis · n| → 0` turns any along-ray distance into a small perpendicular one, so without a hard
+/// bound the weld reaches arbitrarily far downrange. 60 mm along the ray is 1.2 mm perpendicular
+/// here — inside the 2 mm tolerance, and rejected only by the 50 mm ceiling.
+#[test]
+fn a_long_grazing_gap_is_rejected_by_the_lookahead_ceiling() {
+    let volumes = table(&[(1, 1000.0), (2, 1000.0)]);
+    let out = Vec3::new(0.0, 0.9998, 0.02);
+    let into = Vec3::new(0.0, -0.9998, -0.02);
+    let pair = |gap: f32| {
+        let mut hits = oblique_plate(1, 0, 0.2, 0.3, into, out);
+        hits.extend(oblique_plate(2, 0, 0.3 + gap, 0.5, into, out));
+        walk(&corridor(2.0, hits), &volumes)
+    };
+    // 60 mm along the ray: 1.2 mm perpendicular, so every other guard would let it through.
+    assert_eq!(pair(0.06).runs.len(), 2, "60 mm of void is not a micro-gap");
+    // 40 mm, same faces, same 0.8 mm perpendicular reading: inside the ceiling, so it welds.
+    assert_eq!(pair(0.04).runs.len(), 1);
+}
+
+/// A single covered sample IS the disc mean, and re-normalizing it changes the low bits. The
+/// axis-aligned fragment fixture could not see that — its normal is exactly `-Z`, which normalizes
+/// to itself. Search for an oblique normal where `normalize` is genuinely not idempotent, then
+/// assert the fragment degeneracy on THAT.
+#[test]
+fn the_fragment_degeneracy_survives_a_normal_that_normalization_would_move() {
+    let laws = WalkLaws::default();
+    let volumes = table(&[(1, 1000.0)]);
+    // Search on the value that actually REACHES the walk: the fixture normalizes what it is given,
+    // the walk's aggregation normalizes again, and the mutant normalizes a third time. Only the
+    // last of those may move the bits, so the candidate has to be tested at that exact depth.
+    let front = (1..200_000u32)
+        .map(|step| Vec3::new(0.0, step as f32 * 3.7e-5, -1.0))
+        .find(|raw| {
+            let once = unit_or_zero(raw.normalize());
+            unit_or_zero(once).to_array() != once.to_array()
+        })
+        .expect("some oblique f32 normal must survive normalization with different bits");
+
+    let hits = oblique_plate(1, 0, 0.25, 0.375, front, -front);
+    let single = walk(&corridor(2.0, hits.clone()), &volumes);
+    let walked = walk_disc(&point_disc(2.0, sample(Vec3::ZERO, hits)), &volumes, &laws).unwrap();
+
+    assert_eq!(walked.events.len(), 1);
+    assert_eq!(
+        walked.events[0].entry_normal.to_array(),
+        single.runs[0].entry_normal.to_array(),
+        "r → 0, k = 1 must be the single-ray walk to the bit, not to a tolerance"
+    );
+    assert_eq!(walked.events[0].cost.to_bits(), single.cost.to_bits());
+}
+
+/// Seam invisibility (§13.6) on the nastiest arrangement the review could build: three abutting
+/// plates at non-binary coordinates, a lower-factor volume buried across two of the seams, entity
+/// ids running BACKWARDS through the stack, and every rotation and reversal of the hit list. All of
+/// it must be byte-identical to one thick slab.
+///
+/// The factors are 997 and 311 — prime, not powers of two — so no arithmetic here is exact by
+/// accident. What makes it come out identical is structural: canonical spans are cut only where the
+/// union maximum changes, so three plates of one substance are ONE span and the seams never enter
+/// the arithmetic at all.
+#[test]
+fn three_abutting_plates_are_byte_identical_to_one_slab_in_every_order() {
+    let volumes = table(&[(7, 997.0), (5, 997.0), (3, 997.0), (11, 311.0)]);
+    let (a, b, c, d) = (0.137_f32, 0.291_f32, 0.447_8_f32, 0.601_3_f32);
+
+    let one = walk(&corridor(2.0, plate(7, 0, a, d)), &volumes);
+
+    let mut split = plate(7, 0, a, b);
+    split.extend(plate(5, 0, b, c));
+    split.extend(plate(3, 0, c, d));
+    // A softer volume buried straight through two seams: more boundaries, same maximum.
+    split.extend(plate(11, 0, 0.2, 0.5));
+
+    for shift in 0..split.len() {
+        let mut permuted = split.clone();
+        permuted.rotate_left(shift);
+        for reversed in [false, true] {
+            if reversed {
+                permuted.reverse();
+            }
+            let result = walk(&corridor(2.0, permuted.clone()), &volumes);
+            assert_eq!(
+                result.cost.to_bits(),
+                one.cost.to_bits(),
+                "shift {shift}, reversed {reversed}: {} vs {}",
+                result.cost,
+                one.cost
+            );
+            assert_eq!(result.spans, one.spans);
+            assert_eq!(result.events, one.events);
+        }
+    }
+}
