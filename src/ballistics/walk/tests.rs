@@ -1124,6 +1124,95 @@ fn a_concave_primitive_crossed_twice_stays_two_events() {
     assert!(walked.events[0].end < walked.events[1].start);
 }
 
+/// Sharing a primitive is not a merge licence, and neither is "within the weld LOOKAHEAD".
+///
+/// The two arms of one bracket, 40 mm of air apart, are the same mesh and comfortably inside the
+/// 50 mm lookahead — and they are still two crossings. The lookahead bounds where a weld may be
+/// LOOKED for; only a weld-CLASS void (one §13.4 would actually have deleted) makes two runs one.
+#[test]
+fn a_weld_lookahead_sized_gap_is_not_a_merge_licence() {
+    let volumes = table(&[(1, 1000.0)]);
+    let laws = WalkLaws::default();
+    let walked = walk_disc(
+        &DiscCorridor {
+            origin: Vec3::ZERO,
+            axis: AXIS,
+            length: 2.0,
+            radius: 0.02,
+            frame: DiscFrame {
+                u: Vec3::X,
+                v: Vec3::Y,
+            },
+            samples: vec![
+                sample(Vec3::ZERO, plate(1, 0, 0.20, 0.30)),
+                sample(Vec3::X * 0.02, plate(1, 0, 0.34, 0.44)),
+            ],
+        },
+        &volumes,
+        &laws,
+    )
+    .unwrap();
+
+    // 40 mm of air: inside the lookahead, twenty times the weld tolerance.
+    assert!(0.04 < laws.event_longitudinal_ceiling);
+    assert!(0.04 > laws.weld_perp);
+    assert_eq!(walked.events.len(), 2, "40 mm of air is not one crossing");
+    for event in &walked.events {
+        assert_eq!(event.coverage, 0.5);
+    }
+}
+
+/// The coplanar branch gets the longitudinal ceiling too.
+///
+/// At grazing incidence two runs 80 mm apart ALONG THE RAY can sit within a couple of millimetres of
+/// one plane — the plane test alone says "one surface" and means it. But no single surface patch
+/// sampled by a disc this size presents runs that far apart, so the ceiling is what refuses. Without
+/// it the plane test stretches down a grazing corridor without limit.
+#[test]
+fn the_coplanar_branch_is_bounded_longitudinally_too() {
+    let volumes = table(&[(1, 1000.0), (2, 1000.0)]);
+    let laws = WalkLaws::default();
+    let normal = Vec3::new(0.0, 0.999, -0.045).normalize();
+    // Chosen so the two entry points land 1.8 mm apart along the shared normal — INSIDE the plane
+    // tolerance, so this fixture pins the ceiling and nothing else.
+    let offset = Vec3::new(0.0, 0.004_054, 0.0);
+    let (near, far) = (0.20f32, 0.33f32);
+    let separation = ((AXIS * near) - (offset + AXIS * far)).dot(normal).abs();
+    assert!(
+        separation < laws.event_plane_tolerance,
+        "the fixture must be coplanar within tolerance, got {separation}"
+    );
+    assert!(
+        far - 0.25 > laws.event_longitudinal_ceiling,
+        "and beyond the ceiling"
+    );
+
+    let walked = walk_disc(
+        &DiscCorridor {
+            origin: Vec3::ZERO,
+            axis: AXIS,
+            length: 2.0,
+            radius: 0.02,
+            frame: DiscFrame {
+                u: Vec3::X,
+                v: Vec3::Y,
+            },
+            samples: vec![
+                sample(Vec3::ZERO, oblique_plate(1, 0, near, 0.25, normal, -normal)),
+                sample(offset, oblique_plate(2, 0, far, 0.38, normal, -normal)),
+            ],
+        },
+        &volumes,
+        &laws,
+    )
+    .unwrap();
+    assert_eq!(
+        walked.events.len(),
+        2,
+        "80 mm apart is not one surface patch"
+    );
+}
+
 /// The other half of the same rule: the SAME primitive crossed by two samples at overlapping
 /// depths is one crossing. Concavity must not shatter an ordinary hit.
 #[test]

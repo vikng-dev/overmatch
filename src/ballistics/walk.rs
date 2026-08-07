@@ -207,6 +207,21 @@ pub struct WalkLaws {
     /// by `r·tan(incidence)`, so one sample can exit before another enters and one ordinary plate
     /// would split into several crossing events.
     pub event_plane_tolerance: f32,
+    /// Hard ceiling (m) on how far apart along the ray two runs may be and still belong to one
+    /// crossing — applied to BOTH association branches.
+    ///
+    /// Its own tolerance domain, deliberately not the weld lookahead it happens to share a value
+    /// with. The weld bound answers "could a micro-void between these two runs be deleted"; this one
+    /// answers "could one surface patch, sampled by a disc, present these two runs at all". Reusing
+    /// the weld bound as a MERGE LICENCE was the defect: 50 mm of air is not a micro-gap, and a rule
+    /// that treats it as one merges genuinely separate crossings.
+    ///
+    /// TIGHT, KNOWINGLY: a thin slab at ~72° spreads consecutive ring samples by ~47 mm, so the
+    /// oblique degeneracy clears this by millimetres. Raising it re-admits the merges the ceiling
+    /// exists to stop; lowering it shatters grazing hits. If a case ever needs both, the honest
+    /// replacement is the disc's own geometric reach, `2·r·tan(incidence)`, which is what physically
+    /// bounds the spread — measured, not guessed.
+    pub event_longitudinal_ceiling: f32,
     /// Past this incidence (rad, from the surface normal) an un-overmatched round ricochets.
     pub ricochet_angle: f32,
     /// Speed retained through a FULLY covered ricochet. Partial coverage bleeds proportionally less
@@ -246,6 +261,7 @@ impl Default for WalkLaws {
             // ~25°.
             event_plane_cos: 0.9,
             event_plane_tolerance: 2.0e-3,
+            event_longitudinal_ceiling: 5.0e-2,
             // Carried verbatim from the serial resolver so slice 2 is a resolution change, not a
             // retune.
             ricochet_angle: 1.221,
@@ -1336,33 +1352,43 @@ pub fn walk_disc(
             let run_a = &walks[sa].runs[ra];
             let run_b = &walks[sb].runs[rb];
 
-            // BRANCH 1 — shared primitive, AND longitudinally adjacent.
+            // Association takes TWO conjuncts, always: the runs must be longitudinally coherent AND
+            // related. Either alone merges crossings that are not one.
+            //
+            // LONGITUDINAL. A hard ceiling first — beyond it no single surface patch sampled by this
+            // disc could present both runs, whatever else they have in common. Within it, the two
+            // branches ask different questions, because they measure different things.
+            let overlap = run_a.start < run_b.end && run_b.start < run_a.end;
+            let gap_along = (run_b.start - run_a.end)
+                .max(run_a.start - run_b.end)
+                .max(0.0);
+            let within_ceiling = gap_along <= laws.event_longitudinal_ceiling;
+
+            // BRANCH 1 — same primitive, and the runs actually touch.
             //
             // Identity alone is not the relation. One watertight CONCAVE primitive can be crossed
-            // twice by the disc at genuinely separate places — the two arms of a bracket 400 mm
-            // apart are the same mesh, and unioning them would collapse two crossings into one
-            // event: one entrance law instead of two, one summed overmatch thickness, one exit.
-            // Sharing a primitive says the samples are on the same BODY; adjacency says they are on
-            // the same CROSSING. The bound is the weld lookahead — runs that would be weld-adjacent
-            // if they lay on one ray.
+            // twice by the disc at genuinely separate places — the two arms of a bracket are the same
+            // mesh, and unioning them collapses two crossings into one: one entrance law instead of
+            // two, one summed overmatch thickness, one exit where there are two. So the runs must
+            // overlap, or be separated by no more than a WELD-CLASS void — the same micro-gap §13.4
+            // would have deleted had the two runs lain on one ray. "Inside the weld LOOKAHEAD" is not
+            // that: the lookahead bounds where a weld may be looked for, never what qualifies as one.
             let shares_primitive = run_a
                 .primitives
                 .iter()
                 .any(|key| run_b.primitives.binary_search(key).is_ok());
-            let longitudinal_gap = (run_b.start - run_a.end)
-                .max(run_a.start - run_b.end)
-                .max(0.0);
-            let adjacent = longitudinal_gap <= laws.weld_max_lookahead;
+            let facing = unit_or_zero(run_a.entry_normal + run_b.entry_normal);
+            let weld_class = gap_along * corridor.axis.dot(facing).abs() <= laws.weld_perp;
 
             // BRANCH 2 — one surface, whatever the mesh partition.
             //
             // This is what keeps seam invisibility (§13.6): two flush plates of DIFFERENT entities
-            // must associate, or a shot near their seam would resolve as two crossings where a
-            // mid-plate shot resolves as one. It also carries the oblique-slab case that pure
-            // longitudinal overlap cannot — the ring's chords shift by `r·tan(incidence)` and stop
-            // overlapping entirely, yet every entry point still lies on the one plane. The plane
-            // test is itself longitudinally aware: two parallel faces 400 mm apart are 400 mm apart
-            // ALONG the shared normal, so it cannot merge them.
+            // must associate, or a shot near their seam resolves as two crossings where a mid-plate
+            // shot resolves as one. It also carries the oblique slab that no along-ray test can —
+            // the ring's chords shift by `r·tan(incidence)` and stop overlapping entirely, yet every
+            // entry point still lies on the one plane. The plane test IS the longitudinal measure for
+            // parallel faces (two faces 400 mm apart are 400 mm apart along their shared normal); the
+            // ceiling above is what stops it stretching down a grazing corridor without limit.
             let coplanar = {
                 let na = run_a.entry_normal;
                 let nb = run_b.entry_normal;
@@ -1370,13 +1396,12 @@ pub fn walk_disc(
                     corridor.origin + corridor.samples[sa].offset + corridor.axis * run_a.start;
                 let pb =
                     corridor.origin + corridor.samples[sb].offset + corridor.axis * run_b.start;
-                let mean = unit_or_zero(na + nb);
                 na.dot(nb) >= laws.event_plane_cos
-                    && mean != Vec3::ZERO
-                    && (pa - pb).dot(mean).abs() <= laws.event_plane_tolerance
+                    && facing != Vec3::ZERO
+                    && (pa - pb).dot(facing).abs() <= laws.event_plane_tolerance
             };
 
-            if (shares_primitive && adjacent) || coplanar {
+            if within_ceiling && ((shares_primitive && (overlap || weld_class)) || coplanar) {
                 let (ra_root, rb_root) = (find(&mut parent, a), find(&mut parent, b));
                 if ra_root != rb_root {
                     parent[ra_root.max(rb_root)] = ra_root.min(rb_root);
