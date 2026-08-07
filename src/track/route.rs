@@ -809,6 +809,13 @@ mod tests {
     /// cleanup. (Asset re-exports legitimately move these values — re-pin from the printed
     /// actuals when the GLB or authored counts change on purpose.)
     ///
+    /// DELIBERATE RE-PIN, 2026-08-07 (material-bind arc): the road wheels were re-modelled as
+    /// five-shell mixed-substance objects, and the new tread radius measures 0.386441 m against the
+    /// old 0.386968 — 0.53 mm smaller. That moves `hull_rest_y` by 0.56 mm (0.09624 → 0.09680) and
+    /// the loop length by 0.05 mm, so every hash below moved with it. Re-pinned from the printed
+    /// actuals, reported, and NOT a code change: the four assertions are byte-for-byte the previous
+    /// ones with new numbers.
+    ///
     /// These numbers held THROUGH the end-circle sag clip, and that is the point of the
     /// [`SagClip::RoadWheels`] setting above: moving the drape onto the sprocket and idler
     /// hemispheres would have left the vertex count at 172 but moved 9 of them (the return run's
@@ -842,23 +849,23 @@ mod tests {
         assert_eq!(loop_route.pts.len(), 172, "loop route vertex count moved");
         assert_eq!(
             route_bits_hash(&loop_route),
-            0x553a_c4ba_777d_a774,
+            0x6f42_aac4_734d_8c32,
             "loop route bits moved (TrackGear::loop_pts would change)"
         );
         assert_eq!(
             loop_route.total().to_bits(),
-            0x414a_9637,
+            0x414a_961a,
             "loop length bits moved"
         );
         assert_eq!(taut_route.pts.len(), 60, "taut route vertex count moved");
         assert_eq!(
             route_bits_hash(&taut_route),
-            0x9b28_2f46_9bbb_413e,
+            0x257e_7393_e8ea_b63e,
             "taut route bits moved (hull_rest_y datum would change)"
         );
         assert_eq!(
             belly_y.to_bits(),
-            0x3dc5_1704,
+            0x3dc6_3ea4,
             "hull_rest_y source bits moved"
         );
     }

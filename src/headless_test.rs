@@ -710,9 +710,12 @@ fn a_replica_coax_shell_clears_the_shooters_mantlet() {
     // configuration in which a self-hit silently swallows the tracer.
     app.insert_resource(ClientReplica);
 
-    // The coax's muzzle pose, then pushed 12 cm BACK down the bore — the recoil retraction that puts a
-    // mid-burst round's origin inside `Gun_Mantlet_Ballistic` (the muzzle clears the mantlet by ~7 cm;
-    // the coax recoil spring pulls it ~10 cm back). This is the origin the server puts on the wire.
+    // The coax's muzzle pose, then pushed 20 cm BACK down the bore — the recoil retraction that puts a
+    // mid-burst round's origin inside `Gun_Mask` as well as the coax barrel. RE-MEASURED against the
+    // 2026-08-07 model (was 12 cm against the pre-restructure one, where `Gun_Mantlet_Ballistic`
+    // reached the barrel at 8 cm): the coax muzzle moved 5.6 cm rearward and the mask now starts
+    // 20 cm back down the bore. The number is a fact about the geometry, so it moves with it — what
+    // the test asserts is unchanged: the origin is INSIDE the shooter's own armour.
     let shot = app
         .world_mut()
         .run_system_once(
@@ -741,8 +744,8 @@ fn a_replica_coax_shell_clears_the_shooters_mantlet() {
                 let direction = Dir3::new(up * Vec3::from(bore)).expect("elevated bore");
                 CoaxShot {
                     // The recoil retraction, down the BORE (the axis the barrel slides on) — the origin
-                    // a mid-burst round is actually fired from, inside `Gun_Mantlet_Ballistic`.
-                    origin: origin - Vec3::from(bore) * 0.12,
+                    // a mid-burst round is actually fired from, inside `Gun_Mask`.
+                    origin: origin - Vec3::from(bore) * 0.20,
                     direction,
                     tank,
                     slot: slot.0,
