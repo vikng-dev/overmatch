@@ -219,22 +219,35 @@ pub struct WalkLaws {
     /// by `r·tan(incidence)`, so one sample can exit before another enters and one ordinary plate
     /// would split into several crossing events.
     pub event_plane_tolerance: f32,
-    /// Ceiling on `2·tan(incidence)` when sizing the disc's own longitudinal reach — so the reach is
-    /// at most this many disc DIAMETERS, whatever the geometry says.
+    /// Along-ray slop (m) allowed between where a sample's run STARTS and where one shared surface
+    /// predicts it should. The longitudinal sibling of [`event_plane_tolerance`](Self::event_plane_tolerance),
+    /// and deliberately not derived from it: a perpendicular tolerance divided by `cos(incidence)`
+    /// grows without bound as the ray goes parallel to the surface, which is the runaway the
+    /// longitudinal conjunct exists to stop.
     ///
-    /// The reach itself is not a knob. How far apart along the ray one surface patch can present two
-    /// of a disc's runs is a GEOMETRIC fact: `2·r·tan(incidence)`, the spread between the extreme
-    /// ring samples where the plane cuts them. A fixed constant in its place is wrong in both
-    /// directions at once, and shipped that way — 50 mm shattered one plane into three events for an
-    /// 88 at 80° and for a 120 at 75° (the anticipated calibre/incidence cliff, MEASURED by codex
-    /// 2026-08-07), while at small calibre and steep incidence it was far more permissive than the
-    /// geometry ever is.
+    /// It bounds a RESIDUAL, so it can be tight without shattering anything. Every sample of one
+    /// plane has residual zero BY CONSTRUCTION however far apart along the ray they land, and real
+    /// faceting is carried by transitivity — adjacent ring samples are a quarter radius apart, so
+    /// their shared surface is locally flat even where the plate is not.
+    pub event_residual_tolerance: f32,
+    /// Ceiling on `sec(incidence)` — dimensionless, and the only knob left in the association
+    /// geometry.
     ///
-    /// What IS a knob is the numerical cap, because `tan` diverges as the ray goes parallel to the
-    /// surface. Ten diameters puts it at ~84°, comfortably above both measured cases (5.7 and 3.7
-    /// diameters) and far above the ricochet angle that keeps most rounds from getting there at all,
-    /// while an 88's samples reach at most 0.88 m — still one plate face at that angle.
-    pub event_reach_cap: f32,
+    /// DIMENSIONS, EXPLICITLY, because getting this wrong is exactly what round 4 caught. The
+    /// predicted separation of two samples is `−(d·n̄)/(axis·n̄)`, whose worst case over a disc is
+    /// `|d| = 2r` with `d` up the plane's steepest line: `2·r·sin(i)·sec(i) = 2·r·tan(i)`. Capping
+    /// the SECANT at `C` therefore caps the reach at `2·r·C·sin(i) ≤ 2·r·C` — that is `C` DIAMETERS,
+    /// not `C` radii. The previous formulation capped `2·tan` itself, which made the same `10` mean
+    /// ten RADII, five diameters, and split a valid ring-only same-plane contact in two.
+    ///
+    /// GENEROUS, deliberately. Its only job is numerical: the division blows up as the ray goes
+    /// parallel to the surface. Below it the relation is EXACT, and a cap that engages anywhere a
+    /// valid crossing can happen does not bound the geometry, it mispredicts it — which is precisely
+    /// the defect round 4 caught. A hundred engages past 89.43°, an order beyond any incidence at
+    /// which a round both declines to ricochet and still presents a resolvable chord; and the module
+    /// already refuses to toggle on faces within `tangent_cos` of edge-on, whose secant would be
+    /// 10 000. The reach it implies is never the operative bound — the residual is.
+    pub event_secant_cap: f32,
     /// Past this incidence (rad, from the surface normal) an un-overmatched round ricochets.
     pub ricochet_angle: f32,
     /// Speed retained through a FULLY covered ricochet. Partial coverage bleeds proportionally less
@@ -274,7 +287,8 @@ impl Default for WalkLaws {
             // ~25°.
             event_plane_cos: 0.9,
             event_plane_tolerance: 2.0e-3,
-            event_reach_cap: 10.0,
+            event_residual_tolerance: 1.0e-2,
+            event_secant_cap: 100.0,
             // Carried verbatim from the serial resolver so slice 2 is a resolution change, not a
             // retune.
             ricochet_angle: 1.221,
@@ -1396,7 +1410,16 @@ pub fn walk_disc(
                 .max(run_a.start - run_b.end)
                 .max(0.0);
             let facing = unit_or_zero(run_a.entry_normal + run_b.entry_normal);
-            let within_ceiling = gap_along <= disc_reach(corridor, facing, laws);
+            // Not "are these close enough along the ray" — one plane can put two samples half a
+            // metre apart and mean it — but "are they where ONE surface would have put them".
+            //
+            // This is BRANCH 2's conjunct alone. Branch 1 has its own longitudinal relation
+            // (`overlap || weld_class`) and must not get this one: the same primitive crossed twice
+            // at overlapping depths is one crossing even when its faces are a curved cast surface
+            // with no shared plane to predict from, and a residual measured against a `n̄` that is
+            // the average of two unrelated normals would shatter it.
+            let residual = separation_residual(corridor, (sa, run_a), (sb, run_b), facing, laws);
+            let one_surface = residual.abs() <= laws.event_residual_tolerance;
 
             // BRANCH 1 — same primitive, and the runs actually touch.
             //
@@ -1420,8 +1443,10 @@ pub fn walk_disc(
             // shot resolves as one. It also carries the oblique slab that no along-ray test can —
             // the ring's chords shift by `r·tan(incidence)` and stop overlapping entirely, yet every
             // entry point still lies on the one plane. The plane test IS the longitudinal measure for
-            // parallel faces (two faces 400 mm apart are 400 mm apart along their shared normal); the
-            // ceiling above is what stops it stretching down a grazing corridor without limit.
+            // parallel faces (two faces 400 mm apart are 400 mm apart along their shared normal);
+            // the residual is what stops it stretching down a grazing corridor without limit, since
+            // a fixed PERPENDICULAR tolerance buys `tolerance / cos(incidence)` of along-ray slack —
+            // 44 mm at 87°, and unbounded as the ray goes parallel.
             let coplanar = {
                 let na = run_a.entry_normal;
                 let nb = run_b.entry_normal;
@@ -1434,7 +1459,7 @@ pub fn walk_disc(
                     && (pa - pb).dot(facing).abs() <= laws.event_plane_tolerance
             };
 
-            if within_ceiling && ((shares_primitive && (overlap || weld_class)) || coplanar) {
+            if (shares_primitive && (overlap || weld_class)) || (coplanar && one_surface) {
                 let (ra_root, rb_root) = (find(&mut parent, a), find(&mut parent, b));
                 if ra_root != rb_root {
                     parent[ra_root.max(rb_root)] = ra_root.min(rb_root);
@@ -1467,28 +1492,46 @@ pub fn walk_disc(
     })
 }
 
-/// How far apart along the ray one surface patch can present two of THIS disc's runs.
+/// Where ONE shared surface would put sample `b`'s run relative to sample `a`'s, along the ray.
 ///
-/// `2·r·tan(incidence)` — the spread between the extreme ring samples where a plane at that
-/// incidence cuts them, which is the geometry §13.5 named when it rejected the fixed ceiling. It is
-/// derived, not tuned: a wider disc reaches further, and a shallower approach stretches the same
-/// disc down the ray. The measured cliff the constant caused (an 88 at 80° and a 120 at 75° each
-/// shattering one plane into three events) is the same statement read the other way — 50 mm is a
-/// tenth of what an 88 at 80° actually spans.
+/// Exact, not bounded: two rays offset laterally by `d` meet a plane of normal `n̄` at progresses
+/// differing by `−(d·n̄)/(axis·n̄)`. That is the whole geometry of "these two runs are the same
+/// surface seen by two samples", and its worst case over a disc — `|d| = 2r`, `d` up the plane's
+/// steepest line — is the `2·r·tan(incidence)` §13.5 named.
 ///
-/// Two bounds keep it honest at the ends. The FLOOR is the plane tolerance: head-on, `tan` is zero
-/// and the reach would be too, so two reads of one flat face could not associate through the
-/// rounding that put them a hair apart. The CEILING is [`WalkLaws::event_reach_cap`], because `tan`
-/// diverges as the ray goes parallel to the surface, and a divergent bound is no bound.
-fn disc_reach(corridor: &DiscCorridor, facing: Vec3, laws: &WalkLaws) -> f32 {
-    let cos = corridor.axis.dot(facing).abs().clamp(0.0, 1.0);
-    // `tan = sin/cos`, capped rather than evaluated as the cosine goes to zero.
-    let doubled = if cos <= 0.0 {
-        laws.event_reach_cap
+/// Bounding the SEPARATION by that worst case (which is what shipped) is not the same statement, and
+/// the difference is not academic. The worst case is reached only by diametrically opposite samples;
+/// every other pair on the same plane is closer, so a bound sized for the extreme admits pairs that
+/// are nowhere near one surface, while a bound sized for the typical pair rejects the extreme. Codex
+/// measured the second half of that: an 88 at 80° whose axis and intermediates passed through an
+/// opening, leaving only the two opposite rim samples on one plane, split into two events — a valid
+/// contact refused because it sat exactly at the extreme the bound was cut to.
+///
+/// The RESIDUAL has no such tension. It is zero for one surface at every incidence, every calibre,
+/// and every pair, however far apart along the ray they land; and for two genuinely separate
+/// crossings that happen to lie near one plane it is the distance between them, which is what the
+/// longitudinal conjunct was always trying to measure.
+///
+/// The secant cap is the only approximation, and it exists solely because the division diverges as
+/// the ray goes parallel to the surface — see [`WalkLaws::event_secant_cap`] for its dimensions.
+fn separation_residual(
+    corridor: &DiscCorridor,
+    (sa, run_a): (usize, &WeldedRun),
+    (sb, run_b): (usize, &WeldedRun),
+    facing: Vec3,
+    laws: &WalkLaws,
+) -> f32 {
+    let lateral = corridor.samples[sb].offset - corridor.samples[sa].offset;
+    let denominator = corridor.axis.dot(facing);
+    // `1/x = sec·sign(x)`, so the cap applies to the magnitude and the direction survives it.
+    let secant = if denominator == 0.0 {
+        laws.event_secant_cap
     } else {
-        (2.0 * (1.0 - cos * cos).max(0.0).sqrt() / cos).min(laws.event_reach_cap)
+        (1.0 / denominator.abs()).min(laws.event_secant_cap)
     };
-    (corridor.radius * doubled).max(laws.event_plane_tolerance)
+    let sign = if denominator < 0.0 { -1.0 } else { 1.0 };
+    let predicted = -lateral.dot(facing) * secant * sign;
+    (run_b.start - run_a.start) - predicted
 }
 
 fn build_event(

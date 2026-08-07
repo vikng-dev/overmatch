@@ -1171,41 +1171,57 @@ fn a_weld_lookahead_sized_gap_is_not_a_merge_licence() {
     }
 }
 
-/// The coplanar branch is bounded longitudinally too — by the disc's own reach.
+/// The coplanar branch is bounded longitudinally too — by where ONE surface would have put things.
 ///
 /// At grazing incidence two runs far apart ALONG THE RAY can sit within a couple of millimetres of
-/// one plane, and the plane test alone says "one surface" and means it. What bounds it is not a
-/// constant: it is how far apart one surface patch can present two of THIS disc's runs, which is
-/// `2·r·tan(incidence)`. So the fixture states the bound from both sides at ONE incidence, with the
-/// perpendicular reading held inside tolerance throughout — the longitudinal bound is the only thing
-/// under test.
+/// one plane, and the plane test alone says "one surface" and means it. What bounds it is neither a
+/// constant nor a worst-case reach: it is the RESIDUAL between where sample `b`'s run starts and
+/// where the shared surface predicts it, `−(d·n̄)/(axis·n̄)` for that pair's own lateral offset.
 ///
-/// The old form of this test asserted that 80 mm apart at ~87° stays two crossings. That was the
-/// FIXED 50 mm ceiling speaking, and it is not true of the geometry: a 40 mm disc at that incidence
-/// spreads its samples across nearly a metre, so 80 mm is comfortably inside one patch. Ceilings
-/// that do not scale are wrong in both directions at once, which is the finding this replaces.
+/// So the fixture states the bound from both sides at ONE incidence, with the perpendicular reading
+/// held inside tolerance throughout — the longitudinal conjunct is the only thing under test — and
+/// both arms are placed by the RESIDUAL, not by a reach. The previous form of this test derived its
+/// arms from the implementation's capped reach, which is how it inherited that cap's half-scale
+/// error; a fixture must not take its expected values from the code it is checking.
+///
+/// The original 80 mm-at-87° assertion is restored as the far arm, because under the residual
+/// relation it is true again: those two runs are 40 mm from where one plane would put them.
 #[test]
-fn the_coplanar_branch_is_bounded_by_the_discs_own_reach() {
+fn the_coplanar_branch_is_bounded_by_where_one_surface_would_put_things() {
     let volumes = table(&[(1, 1000.0), (2, 1000.0)]);
     let laws = WalkLaws::default();
     let normal = Vec3::new(0.0, 0.999, -0.045).normalize();
     let radius = 0.02f32;
     let near = 0.20f32;
     let near_end = 0.25f32;
-    // The reach at this incidence, from the same geometry the law uses: `2·r·tan`, capped.
-    let cos = AXIS.dot(normal).abs();
-    let reach = (radius * (2.0 * (1.0 - cos * cos).sqrt() / cos).min(laws.event_reach_cap))
-        .max(laws.event_plane_tolerance);
 
-    // Lateral offset chosen so the two entry points land 1.8 mm apart along the shared normal —
-    // INSIDE the plane tolerance — whatever `far` is. Derived, so both arms are honestly coplanar.
-    let offset_for = |far: f32| Vec3::new(0.0, ((near - far) * normal.z - 0.0018) / normal.y, 0.0);
-    let events_at = |far: f32| {
-        let offset = offset_for(far);
+    // What ONE plane predicts for a pair whose lateral offset is `d`, written out here rather than
+    // read from the implementation — a fixture must not take its expected values from the code it is
+    // checking, which is how the previous form of this test inherited a mis-scaled cap.
+    let secant = (1.0 / AXIS.dot(normal).abs()).min(laws.event_secant_cap);
+    let sign = if AXIS.dot(normal) < 0.0 { -1.0 } else { 1.0 };
+    let predicted = |d: Vec3| -d.dot(normal) * secant * sign;
+
+    // BOTH arms sit the SAME distance apart along the ray — 130 mm, five times the near run's whole
+    // length — and differ only in how far off the shared plane the far one is. That is the point:
+    // longitudinal distance is not the question, and a bound written in it cannot ask the right one.
+    let far = 0.33f32;
+    // Lateral offset solved so the two entry points land `perpendicular` apart along the shared
+    // normal. At this incidence `cos ≈ 0.045`, so the plane tolerance alone would buy 44 mm of
+    // along-ray slack — the runaway the residual exists to bound.
+    let offset_for = |perpendicular: f32| {
+        Vec3::new(
+            0.0,
+            ((near - far) * normal.z - perpendicular) / normal.y,
+            0.0,
+        )
+    };
+    let events_at = |perpendicular: f32| {
+        let offset = offset_for(perpendicular);
         let separation = ((AXIS * near) - (offset + AXIS * far)).dot(normal).abs();
         assert!(
             separation < laws.event_plane_tolerance,
-            "the fixture must stay coplanar within tolerance, got {separation}"
+            "BOTH arms are coplanar within tolerance, or this tests the wrong conjunct: {separation}"
         );
         assert!(
             offset.length() <= radius,
@@ -1241,21 +1257,40 @@ fn the_coplanar_branch_is_bounded_by_the_discs_own_reach() {
         .events
         .len()
     };
+    let residual_at = |perpendicular: f32| (far - near) - predicted(offset_for(perpendicular));
 
-    // INSIDE the reach: one patch, and the plane test is believed.
-    let inside = near_end + reach * 0.4;
-    assert_eq!(
-        events_at(inside),
-        1,
-        "within the disc's reach ({reach} m) two coplanar runs ARE one surface",
+    assert!(
+        far - near_end > 0.05,
+        "the runs really are far apart along the ray: {} m",
+        far - near_end,
     );
 
-    // BEYOND it: no disc this size can present both, whatever the plane test says.
-    let beyond = near_end + reach * 1.75;
+    // WHERE ONE SURFACE WOULD PUT IT.
+    let on_surface = 0.00015_f32;
+    assert!(
+        residual_at(on_surface).abs() <= laws.event_residual_tolerance,
+        "the near arm must sit where one plane would put it, got residual {}",
+        residual_at(on_surface),
+    );
     assert_eq!(
-        events_at(beyond),
+        events_at(on_surface),
+        1,
+        "130 mm apart and still one surface, because that is where one plane puts them",
+    );
+
+    // AND WHERE IT WOULD NOT — the original 80 mm-at-87° assertion, now true for the right reason:
+    // 1.8 mm off the plane is 40 mm off along the ray, and the plane test alone would believe it.
+    let displaced = 0.0018_f32;
+    assert!(
+        residual_at(displaced).abs() > laws.event_residual_tolerance,
+        "the far arm must be off the shared surface, got residual {}",
+        residual_at(displaced),
+    );
+    assert_eq!(
+        events_at(displaced),
         2,
-        "past the disc's reach ({reach} m) the plane test alone must not merge them",
+        "{} m from where one plane would put it, the plane test alone must not merge them",
+        residual_at(displaced).abs(),
     );
 }
 
@@ -2420,5 +2455,89 @@ fn a_boundary_at_the_restart_belongs_to_the_corridor_not_the_seed() {
     assert!(
         walked.inside_at(0.35, &laws).is_empty(),
         "and past the exit the ray is out",
+    );
+}
+
+/// RING-ONLY CONTACT: the two OPPOSITE rim samples, and nothing between them.
+///
+/// Codex's production-layout probe, made permanent. An 88 at 80° meets a 10 mm plane, but its axis
+/// and every intermediate sample thread an opening — only the two diametrically opposite rim samples
+/// touch, 0.499 m apart along the ray. They are on ONE plane, so it is one crossing.
+///
+/// The full-disc cliff fixture cannot see this. There, the intermediate samples bridge the extremes
+/// transitively in small steps, so a bound that is too tight for the diameter still yields one event
+/// and the defect hides. Here there is exactly one pair, and it sits at the worst case a disc can
+/// present — which is precisely where a bound cut to the worst case has no margin left. Codex
+/// measured two events: DERIVED gap 0.441 m against a capped reach of 0.440 m, a valid contact
+/// refused by a millimetre.
+///
+/// Under the residual relation the worst case is not a threshold at all. `−(d·n̄)/(axis·n̄)` predicts
+/// 0.499 m for this pair, the runs are 0.499 m apart, and the residual is zero — the same answer it
+/// gives for two samples a millimetre apart on the same plate.
+#[test]
+fn a_ring_only_contact_on_one_plane_is_one_event() {
+    let volumes = table(&[(1, 1000.0)]);
+    let laws = WalkLaws::default();
+    let radius = 0.044f32;
+    let incidence = 80.0_f32.to_radians();
+    let normal = Vec3::new(0.0, incidence.sin(), -incidence.cos());
+    let frame = DiscFrame {
+        u: Vec3::X,
+        v: Vec3::Y,
+    };
+    let slab = Slab::at(1, 0, 1.0, normal, 0.010 / incidence.cos());
+
+    // Sample 0 is the axis; ring sample k is at angle `TAU·k/12`. Indices 4 and 10 are the ±v
+    // extremes — diametrically opposite, and the pair the plane spreads furthest along the ray.
+    let touching = [4usize, 10];
+    let offsets = disc_offsets(&frame, radius, DEFAULT_RING);
+    let samples: Vec<SampleCorridor> = offsets
+        .iter()
+        .enumerate()
+        .map(|(index, &offset)| {
+            if touching.contains(&index) {
+                sample(offset, slab.hits(offset, AXIS, 4.0, false))
+            } else {
+                // Through the opening: this ray meets nothing at all.
+                sample(offset, Vec::new())
+            }
+        })
+        .collect();
+
+    let separation = (offsets[touching[1]] - offsets[touching[0]]).length();
+    assert!(
+        (separation - 2.0 * radius).abs() < 1.0e-6,
+        "the pair really is diametrically opposite: {separation} m apart",
+    );
+    let spread = 2.0 * radius * incidence.tan();
+    assert!(
+        (spread - 0.499).abs() < 1.0e-3,
+        "and one plane spreads them {spread} m along the ray",
+    );
+
+    let walked = walk_disc(
+        &DiscCorridor {
+            anchor: Vec3::ZERO,
+            origin: Vec3::ZERO,
+            axis: AXIS,
+            length: 4.0,
+            radius,
+            frame,
+            samples,
+        },
+        &volumes,
+        &laws,
+    )
+    .expect("one plane resolves");
+
+    assert_eq!(
+        walked.events.len(),
+        1,
+        "two rim samples on ONE plane are one crossing, {spread} m apart or not",
+    );
+    assert!(
+        (walked.events[0].coverage - 2.0 / 13.0).abs() < 1.0e-6,
+        "and it engaged exactly the two samples that touched: {}",
+        walked.events[0].coverage,
     );
 }
