@@ -5139,4 +5139,56 @@ mod march_tests {
         assert_eq!(terminals.len(), 1, "one terminal per shot");
         assert!(terminals[0].penetrated);
     }
+
+    /// FREE PENETRATION IS THE ONE OUTCOME WORSE THAN A STOPPED SHELL.
+    ///
+    /// Every observed instance of the prune defect landed on a TRANSIT corridor, where a dropped
+    /// entry leaves a bare exit and the walk shouts `UnexpectedExit` — wrong, but loud, and the
+    /// driver fails closed on it. The same dropped face on an ENTRANCE corridor is silent: `begin`
+    /// sees no material, returns [`walk::Begin::Miss`], and `resolve_crossing` flies the round
+    /// through the whole examined corridor with zero cost, zero damage and NO `Impact` at all. That
+    /// is armour that was never modelled, which is precisely the defect class §13 exists to kill,
+    /// and it would leave no trace in any log.
+    ///
+    /// So: put the entrance corridor's origin exactly on a plate's face, and a few ULP either side
+    /// of it, by spawning the shell one march nudge in front. Whatever else happens, the round may
+    /// not pass through unremarked.
+    #[test]
+    fn an_entrance_corridor_that_starts_on_a_face_never_passes_through_unremarked() {
+        let face = 0.525_f32;
+        for step in -4i32..=4 {
+            let spawn = f32::from_bits((face + MARCH_EPS).to_bits().wrapping_add_signed(step));
+            let mut app = world_with_trimesh_plates(&[slab(0.05, 0.5)]);
+            app.init_resource::<TerminalLog>();
+            app.add_observer(capture_terminal);
+            spawn_headon_shell_at(&mut app, a_shot(), Vec3::new(0.0, 2.0, spawn));
+            for _ in 0..8 {
+                app.update();
+            }
+
+            let impacts = app.world().resource::<ImpactLog>().0.clone();
+            assert!(
+                !impacts.is_empty(),
+                "the round met the plate at {step} ULP and something was reported for it — a \
+                 silent pass-through is free armour",
+            );
+            assert!(
+                impacts
+                    .iter()
+                    .all(|impact| matches!(impact.surface, ImpactSurface::Armor)),
+                "and what was reported is the plate, not the ground beyond it: {impacts:?}",
+                impacts = impacts.iter().map(|i| i.position).collect::<Vec<_>>(),
+            );
+            // With the face collected the crossing resolves honestly: an 88 through 50 mm.
+            assert!(
+                impacts[0].penetrated,
+                "at {step} ULP the crossing resolved, rather than failing closed",
+            );
+            assert_eq!(
+                app.world().resource::<TerminalLog>().0.len(),
+                1,
+                "and it reported its one terminal",
+            );
+        }
+    }
 }
