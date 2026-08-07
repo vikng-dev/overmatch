@@ -673,7 +673,12 @@ samples. Per event:
   Incidence, the ricochet test, normalization, and overmatch (§13.3, factor-weighted) consume `n̄`
   unchanged. This also *repairs* the point model: a point normal at an edge or on curved cast is
   degenerate (today's `unwrap_or(-dir)`); the patch average is smooth everywhere — corners average
-  to their bisector. Ricochet bleed and impulse exchange scale by η.
+  to their bisector. **Ricochet bleed, impulse exchange, AND the deflection angle scale by η**
+  (RULED 2026-08-07 — angle scaling added): the outgoing direction blends from the incoming ray
+  toward the full-ricochet direction by η, and normalization on penetrating entries scales the
+  same way. η = 1 is the classic bounce; η → 0 fades to undisturbed flight. Continuity is the
+  point — 1mm of aim must never flip the outcome between "flies past" and "full bounce". Whether
+  a bounce happens at all stays with the factor-weighted overmatch law (mass/velocity live there).
 - **Transit:** `cost = (1/k) Σᵢ costᵢ`, each sample's cost its union-max-factor chord integral,
   uncovered samples contributing 0 — automatically `η × mean covered chord cost`, where
   **η = the covered fraction, the engagement fraction**. Spend against capability unchanged.
@@ -692,8 +697,8 @@ none survive — recorded so they aren't re-invented):
   slit, the plate-edge graze, and the mantlet MG port are just different (η, n̄) pairs; the
   geometry around the axis is the fact, indifferent to how steel is partitioned into meshes.
 - *Scrape thresholds* — an edge skim's covered samples see ~90° incidence on `n̄`, so the
-  **existing ricochet law** fires with η-scaled bleed: a graze IS a partial ricochet. Continuous,
-  no cliff, no lottery.
+  **existing ricochet law** fires with η-scaled bleed *and deflection*: a graze IS a partial
+  ricochet. Continuous, no cliff, no lottery.
 - *Nearest-contact re-aim / capsule shapecast* — the aggregates are the resolution; the "capsule"
   is implemented as the sub-ray ring itself (same raycast machinery, same determinism posture, no
   new parry query type).
@@ -711,7 +716,8 @@ are shells with r→0, k=1** — the same primitive degenerates to the pure ray,
   truth). Chosen over sharp-line legibility — the sharp line is what bred every seam pathology.
 - **Lateral asymmetry unmodeled:** a corner clip physically torques the shell away from the plate;
   the aggregate sees the mean, not the asymmetry. If ever wanted, the mean lateral offset of
-  covered samples is the ready-made kick direction. Knob, not now.
+  covered samples is the ready-made kick direction. Knob, not now (re-affirmed 2026-08-07:
+  torque/tumble stays deferred; only the η-scaled deflection magnitude ships).
 - **Sampling noise at very small η** — k is the resolution dial; the sandbox chooses it.
 
 **Impulse ownership across rigid bodies (safe default, 2026-08-07):** when an event's presence set
