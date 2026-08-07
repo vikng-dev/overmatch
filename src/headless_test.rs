@@ -1270,12 +1270,35 @@ fn slope_park_holds_20_deg_tiger() {
     );
 }
 
-/// Static-breakaway acceptance gate on the real Tiger and the course's 30° face. The DERIVED
-/// arithmetic is 2 × 96,000 N × 1.5 = 288,000 N static capacity against
-/// 57,000 kg × 9.81 m/s² × sin(30°) = 279,585 N demand: an 8,415 N DERIVED margin. Zero input
-/// must latch the park brake and hold through the same four-second MEASURED window as the 20° gate.
+/// BENCHMARK, not a requirement: what the Tiger's holding power measures on the course's 30° face
+/// right now (Yan ruling, 2026-08-07 — *"there is no requirement for a tiger to hold on 30 deg, it
+/// should be purely emergent — the holding power is purely a benchmark of how much it can hold
+/// right now"*). Nothing in the design says a 57-tonne tank with 1940s Argus discs must hold half a
+/// g of slope; the number is an OUTPUT of the brake model, the geometry and the contact law, and it
+/// is recorded here so that it cannot move without someone saying so.
+///
+/// The park latch itself IS still a requirement — zero input at rest must latch, whatever the
+/// latch then holds — so that assertion keeps its teeth below.
+///
+/// ANCHOR: the 2026-08-07 wheel redesign. The road wheels became five-shell mixed-substance objects
+/// and their tread radius measured 0.386441 m against the old 0.386968 — 0.53 mm smaller — which is
+/// the entire cause of the drift moving 0.0055 → 0.0928 m. Confirmed by A/B: forcing the OLD radius
+/// into this same branch's geometry returns the drift to 0.0055 m, and a sweep between them is FLAT
+/// at ~0.005 m until it falls off a cliff inside a 10 µm window (0.386470 → 0.0063 m, 0.386460 →
+/// 0.0561 m). The shipped radius sits ~30 µm the wrong side of that cliff, so this is a discrete
+/// contact-regime change — a road wheel's engagement flipping — and NOT a gradual weakening.
+///
+/// That is also why the band is tight rather than generous. The measurement is bit-stable here
+/// (0.0928 m on five consecutive runs), so the tolerance exists to absorb platform float variation,
+/// not run-to-run noise; and the regime it guards is 15× away (0.006 m if the geometry crosses back
+/// over the cliff), so ±0.005 m cannot mask a regime change while still catching any real drift in
+/// the brake model or the contact law.
+///
+/// RE-PIN CONSCIOUSLY. When the geometry or the brake model changes on purpose, this number moves
+/// with it — read the new value off the printed MEASURED line, put it here, and say why in the
+/// commit. A silent re-pin turns the tripwire back into the acceptance gate it used to be.
 #[test]
-fn slope_park_holds_30_deg_tiger() {
+fn slope_park_benchmarks_the_30_deg_holding_power_tiger() {
     use crate::track::transmission::TransmissionMode;
     let (mut app, tank) = booted_offline_sim(TransmissionMode::FixedRadii);
     let course_rotation = Quat::from_rotation_x(30.0_f32.to_radians());
@@ -1334,9 +1357,15 @@ fn slope_park_holds_30_deg_tiger() {
         st.park,
         "zero input at rest on the 30-degree ramp must latch the park brake"
     );
+    // The BENCHMARK. See the doc above: this asserts what the holding power IS, not what it owes.
+    const MEASURED_DRIFT_M: f32 = 0.0928;
+    const BAND_M: f32 = 0.005;
     assert!(
-        drift < 0.05,
-        "the latched static brake must hold the 30-degree ramp (drifted {drift:.3} m over 4 s)"
+        (drift - MEASURED_DRIFT_M).abs() < BAND_M,
+        "30-degree holding power moved: drifted {drift:.4} m over 4 s against the pinned \
+         {MEASURED_DRIFT_M:.4} m ± {BAND_M}. This is a benchmark, not a requirement — if the \
+         geometry or the brake model changed on purpose, re-pin to the measured value and say so \
+         in the commit; if nothing changed on purpose, something regressed."
     );
 }
 
