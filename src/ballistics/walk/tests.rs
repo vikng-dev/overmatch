@@ -2344,3 +2344,60 @@ fn one_plane_stays_one_event_across_the_calibre_incidence_cliff() {
         );
     }
 }
+
+/// THE SEED CONTRACT'S OTHER FLOAT BOUNDARY.
+///
+/// `admit` already handles a face a hair BEHIND a corridor origin: seeded, the seed owns it;
+/// unseeded, the ray is sitting on it and it lands at `t = 0`. Nothing handled the same face a hair
+/// in FRONT while seeded — and that is the same physical situation with the rounding falling the
+/// other way.
+///
+/// It is reachable, and not rarely. The restart `t` is computed from the AGGREGATE entrance plane
+/// while each span's boundary came from that sample's OWN ray, so the two agree only to within
+/// rounding; at oblique incidence, where the ring's crossings spread along the ray, a live 72°
+/// crossing put them 1.4e-8 apart. Read as an exact comparison that hair decided between "the seed
+/// owns this entry" and "the corridor does", they both claimed it, and `UnexpectedEntry` stopped an
+/// 88 dead on a 20 mm plate it should have gone straight through.
+///
+/// So "ON the boundary" is a tolerance here, the same [`coincident`] the rest of the module uses.
+#[test]
+fn a_boundary_at_the_restart_belongs_to_the_corridor_not_the_seed() {
+    let volumes = table(&[(1, 1000.0)]);
+    let laws = WalkLaws::default();
+    let walked = walk(
+        &RayCorridor {
+            origin: Vec3::ZERO,
+            axis: AXIS,
+            length: 1.0,
+            initial_presence: Vec::new(),
+            hits: plate(1, 0, 0.20, 0.30),
+        },
+        &volumes,
+    );
+    let key = PrimitiveKey {
+        volume: volume(1),
+        primitive: prim(0),
+    };
+    // A hair either side of the boundary is the boundary. Well inside the topology tolerance, and
+    // an order above the 1.4e-8 the live crossing produced.
+    let hair = 1.0e-7;
+
+    for t in [0.20, 0.20 + hair, 0.20 - hair] {
+        assert!(
+            walked.inside_at(t, &laws).is_empty(),
+            "an entry AT the restart is the new corridor's to process, not the seed's (t = {t})",
+        );
+    }
+    for t in [0.30, 0.30 + hair, 0.30 - hair, 0.25] {
+        assert_eq!(
+            walked.inside_at(t, &laws),
+            vec![key],
+            "an exit at or after the restart must be seeded, or it has nothing to pair with \
+             (t = {t})",
+        );
+    }
+    assert!(
+        walked.inside_at(0.35, &laws).is_empty(),
+        "and past the exit the ray is out",
+    );
+}

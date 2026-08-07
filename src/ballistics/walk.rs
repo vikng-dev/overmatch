@@ -481,18 +481,28 @@ impl RayWalk {
     /// presence.
     ///
     /// The interval is `(open, close]` — the entry face must be STRICTLY behind the restart. A face
-    /// sitting exactly on the handoff plane arrives in the new corridor's own hit list at `t = 0`
-    /// and is processed there, so seeding it as well would double-count the entry
-    /// ([`WalkError::UnexpectedEntry`]). An exit sitting exactly on the plane, conversely, must be
-    /// seeded or it has nothing to pair with.
-    pub fn inside_at(&self, t: f32) -> Vec<PrimitiveKey> {
+    /// sitting on the handoff plane arrives in the new corridor's own hit list at `t = 0` and is
+    /// processed there, so seeding it as well would double-count the entry
+    /// ([`WalkError::UnexpectedEntry`]). An exit sitting on the plane, conversely, must be seeded or
+    /// it has nothing to pair with.
+    ///
+    /// "ON the plane" is a TOLERANCE, not an equality, and that is the whole reason this takes laws.
+    /// The restart `t` is computed from the aggregate entrance plane while each span's boundary came
+    /// from that sample's own ray, so the two agree only to within rounding — at oblique incidence,
+    /// where the ring's crossings spread along the ray, they were measured 1.4e-8 apart. Read as an
+    /// exact comparison, that hair decides between "the seed owns this entry" and "the corridor
+    /// does", and getting it wrong is `UnexpectedEntry` and a round stopped dead on a plate it
+    /// should have crossed. [`coincident`] is the module's existing answer to "do these two `t` name
+    /// one boundary", so it is the one used here.
+    pub fn inside_at(&self, t: f32, laws: &WalkLaws) -> Vec<PrimitiveKey> {
         self.primitives
             .iter()
             .filter(|presence| {
-                presence
-                    .spans
-                    .iter()
-                    .any(|(open, close)| *open < t && t <= *close)
+                presence.spans.iter().any(|(open, close)| {
+                    let entered = *open < t && !coincident(*open, t, laws);
+                    let still_inside = t <= *close || coincident(*close, t, laws);
+                    entered && still_inside
+                })
             })
             .map(|presence| presence.key)
             .collect()
@@ -1275,7 +1285,7 @@ impl DiscWalk {
     /// its own interior state: a shell that perforates an outer plate while a ring sample is already
     /// inside the crewman behind it resumes KNOWING that, because the ray it would have to guess
     /// about is one this walk already covered.
-    pub fn resume_at(&self, t: f32) -> Vec<SampleSeed> {
+    pub fn resume_at(&self, t: f32, laws: &WalkLaws) -> Vec<SampleSeed> {
         self.walks
             .iter()
             .enumerate()
@@ -1283,7 +1293,7 @@ impl DiscWalk {
                 sample,
                 offset: self.offsets[sample],
                 t,
-                inside: walk.inside_at(t),
+                inside: walk.inside_at(t, laws),
             })
             .collect()
     }
@@ -1910,7 +1920,7 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Begin {
                 // walked rather than a guess about a re-projected disc.
                 offset: offset + entrance.axis * (t - axis_t),
                 t,
-                inside: walk.inside_at(t),
+                inside: walk.inside_at(t, laws),
             }
         })
         .collect();

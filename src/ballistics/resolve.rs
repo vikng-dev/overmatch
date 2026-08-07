@@ -607,7 +607,7 @@ fn perforate_or_embed(
             // Read at the point the NEXT corridor will actually start from — the march nudges every
             // cast origin off the face it is leaving, and a seed taken one nudge earlier describes a
             // plate the round has already cleared.
-            let seeds = transit.resume_at(t + super::MARCH_EPS);
+            let seeds = transit.resume_at(t + super::MARCH_EPS, &context.laws);
             (
                 ArmorCrossing::Perforated {
                     exit: transit.origin + transit.axis * t,
