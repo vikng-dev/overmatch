@@ -489,9 +489,30 @@ it. Do not write engine code from memory.
 
 ## 12. Model↔code binding contract (LOCKED, 2026-06-27)
 
-The seam between the two parallel workstreams (model authoring vs the `ballistics` march). **Model
-side owns geometry** (`.blend` / `.glb`); **code side owns the material/HP scalars** (RON). They do
-not edit the same files. Authored to by the model handoff and bound to by the code.
+> **SUPERSEDED IN PART — classifier precedent, 2026-08-07 (Yan: "churn desired. no legacy, we're
+> setting precedent").** The name-marker convention below (`Ballistic_*` / `*_Ballistic`) is
+> **retired and stripped from the source .blend**; the drift lint dies with it. The three concerns
+> now separate cleanly:
+>
+> - **MEMBERSHIP = material, per primitive.** A primitive marches iff its material datablock name
+>   is a key in the global substance registry (`assets/materials/materials.ron`, mirrored by
+>   `assets/materials/materials.blend`, LINKED never appended). Wearing a registry material IS the
+>   declaration — so **decor must never wear a substance material**, and a substance primitive is
+>   subject to the per-primitive manifold gate. Factors live in the registry keyed by substance
+>   name; per-node `material_factor` in the tank RON dies at the slice-3 landing ("no numbers in
+>   the model" survives — the numbers just moved from per-node RON to the one registry).
+> - **BEHAVIOR = RON facets, by node name, components only.** `volumes` shrinks to nodes carrying
+>   facets (hp / crew / function); plates and wheels vanish from the RON entirely. Both directions
+>   fail loud: a facet key without a model node breaks the bind; **material-implied lints** replace
+>   the old drift lint (Flesh without a crew facet warns, Ammunition without an ammo facet warns).
+> - **IDENTITY = free-form names, never parsed.** Names address (servos, weapons, views, facets);
+>   they never classify. The `_Collider` suffix match and the `Wheel_{L,R}_{n}` pattern are
+>   sanctioned residue to be replaced by **explicit RON declarations** in the same slice — after
+>   which no `ends_with`/prefix scan survives anywhere in the bind path.
+>
+> Legibility in Blender comes from collections + the substances' distinct viewport colors (a free
+> x-ray), not from names. Paint is a **runtime livery** composed onto `paintable` substances —
+> never a material assignment in the source.
 
 - **Ballistic volumes are named nodes parented to their rig part** (Hull / Turret / Gun), inheriting
   its motion exactly like `*_Collider` (ADR-0008). Turret armor parents under `Turret`.
@@ -751,9 +772,10 @@ Enforced mechanically, not by eyeball:
   (**fix**) or a deliberate opening (**bless** — turret ring, MG port, vision slits: historical
   weakspots consciously kept as gameplay, with exact knowledge of how they'll play at every gun in
   the game). The bless-list is where weakspots are decided, not discovered by players as bugs.
-- **Per-plate manifold gate:** weld-by-position, then closed-manifold test, per `Ballistic_*` node.
-  (The mesh-unification open tab's watertightness gate, now *per plate* — a far easier standard
-  than mutual fit, since each plate can be a dumb extruded solid.)
+- **Per-primitive manifold gate:** weld-by-position, then closed-manifold + positive-orientation
+  test, per substance primitive (classifier precedent 2026-08-07 — the gate keys off the material,
+  not a name). (The mesh-unification open tab's watertightness gate, now *per primitive* — a far
+  easier standard than mutual fit, since each plate can be a dumb extruded solid.)
 
 ### 13.7 Authoring contract (amends the §12 mesh bullet; revised 2026-08-04)
 
@@ -772,6 +794,13 @@ Enforced mechanically, not by eyeball:
   become caliber-gated, η-graded weakspots by the disc law, and are *blessed* in the fuzzer.
 - The remaining geometry sin is the **super-caliber accidental corridor** — hunted by the fuzzer,
   not the eyeball.
+- **Substance boundaries are geometry, never paint** (2026-08-07, wheels precedent): a
+  mixed-substance part is authored as one object holding **one closed shell per substance
+  region**, each shell wearing its substance material — the Tiger road wheel is five islands
+  (two steel bodies, two rubber rims, one axle) in one object with `[MildSteel, Rubber]` slots.
+  Manifold is judged per shell, not per object; multiple closed shells per object are legal and
+  expected. Assigning a substance to *faces* of a shared shell is forbidden — the walk pairs
+  entry/exit per closed surface, and a painted-on boundary has no exit face to pair.
 
 **Open tabs (§13):** k (sample count) and the ring layout; the weld-ε value; equal-factor run
 merging for spall accounting (an ownership switch mid-steel is one run, keyed by factor value);
