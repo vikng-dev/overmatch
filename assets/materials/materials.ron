@@ -11,16 +11,34 @@
 // DOCTRINE (Yan ruling 2026-08-07): factors are PHYSICS-HONEST, never bent for gameplay.
 // If flesh is 0.01 and a 7.92 penetrates, it penetrates, period. Feel belongs to the laws
 // and the hp/damage model, not to material constants. (Sibling of the VFX honesty doctrine.)
+// THE PRINCIPLE (research pass 2026-08-07): a factor tracks ALLOY AND HEAT TREATMENT, never the
+// FORMING PROCESS. "It was cast" says nothing ballistic on its own — what resists a shell is what
+// the steel is made of and what was done to it afterwards. Casting, rolling and forging only matter
+// insofar as they correlate with those two, and on German wartime steels they correlate WEAKLY:
+// the same process spans armor and machinery grades. So a new substance is earned by a different
+// alloy/treatment, not by a different way of shaping it.
 //   - Tiger armor = rolled homogeneous nickel-steel, NOT face-hardened -> RHA everywhere, no
 //     FaceHardened substance needed for this tank.
-//   - `Cast` = 900: German cast armor ran ~5-15% below rolled ballistically; mid of range.
+//   - `Cast` = 900 — cast ARMOR (Panzerguß) specifically, NOT "anything cast". German wartime
+//     practice names `Panzer-Stahlguß` (armor-grade cast steel, alloyed and heat-treated to an
+//     acceptance spec) and plain `Stahlguß` (ordinary cast steel, machinery) as DISTINCT GRADES
+//     with distinct acceptance requirements — Spielberger reproduces the acceptance specs, and they
+//     are not the same document. Eliding the two promotes every machinery casting on the vehicle to
+//     armor, which is how a cast gearbox housing ends up resisting like a mantlet. Cast armor ran
+//     ~5-15% below rolled ballistically; 900 is the mid of that range. If it is cast and it is NOT
+//     armor-grade, it is `MildSteel` — see the note there.
 //   - `GunSteel` unified at 1000 (was 800): forged autofrettaged gun steel >= RHA quality;
 //     the old barrel-1000/breech-800 split was unresearched gameplay residue, and gun-part
 //     fragility is the hp/damage model's job. The breech hardened 800->1000 when the material
 //     bind landed (2026-08-07) — this table is what it reads now.
-//   - `MildSteel`: stamped/welded structural steel (wheel bodies, forged rims) at ~0.8x RHA.
-//     The wheels softened 1000->800 with that same landing; running-gear shots were a real weak
-//     axis.
+//   - `MildSteel` = 800: NON-ARMOUR structural and machinery steel — WROUGHT OR CAST. The name is
+//     the one weak spot in this table: it reads like a forming process and is not one. It covers
+//     the stamped/welded wheel bodies and forged rims, and equally the CAST running gear (sprockets
+//     and idlers, 2026-08-07) — a sprocket is plain `Stahlguß`, machinery steel that happens to be
+//     cast, so it belongs here and NOT in `Cast` (see the principle above). At ~0.8x RHA.
+//     The wheels softened 1000->800 when the material bind landed; running-gear shots were a real
+//     weak axis. Rename to `Structural` if the name ever misleads someone into the `Cast` mistake
+//     this note exists to prevent.
 //   - `EngineBlock` = 150: homogenized box — grey cast iron ~0.4x RHA, ~30-40% metal fraction
 //     along a shot line -> 0.4 x 0.35 ~= 0.14. HL210 fork (first ~250 Tigers, aluminium
 //     block) would sit ~100; declare the vehicle's date to settle it. Transmission shares
