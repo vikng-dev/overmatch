@@ -527,10 +527,16 @@ fn two_shells_on_one_entry_plane_stay_distinct() {
     assert_eq!(result.presence.len(), 2);
 }
 
-/// A second entry into a primitive already open means the mesh is not the closed positively-oriented
-/// shell the bake gate promises.
+/// UNBALANCED nesting is still a structured error — §13.7 legalized several shells per primitive,
+/// not arbitrary face sequences.
+///
+/// Two entries and one exit is a shell that never closed, and the walk says so. What CHANGED is
+/// which error it is: the second entry is no longer a contradiction in itself (see `Field`), so the
+/// defect surfaces where it actually is — a primitive still open when the corridor ends. The mesh is
+/// not the closed positively-oriented shell the bake gate promises either way, and nothing about it
+/// resolves silently.
 #[test]
-fn a_second_entry_into_an_open_primitive_is_a_structured_error() {
+fn unbalanced_nesting_in_one_primitive_is_a_structured_error() {
     let volumes = table(&[(1, 1000.0)]);
     let hits = vec![
         FaceHit {
@@ -557,7 +563,28 @@ fn a_second_entry_into_an_open_primitive_is_a_structured_error() {
     ];
     assert!(matches!(
         walk_ray(1, &corridor(4.0, hits), &volumes, &WalkLaws::default()),
-        Err(WalkError::UnexpectedEntry { sample: 1, .. })
+        Err(WalkError::IncompleteCorridor { sample: 1, .. })
+    ));
+}
+
+/// AND SO IS AN EXIT WITH NOTHING OPEN. The other half of the fail-loud posture, which depth
+/// counting must not soften: a mesh whose entry face was dropped, or whose winding is inverted,
+/// presents an exit the ray was never inside, and free armour is what silence there would buy.
+#[test]
+fn an_exit_below_depth_zero_is_still_a_structured_error() {
+    let volumes = table(&[(1, 1000.0)]);
+    // enter, exit, exit — the last one has no shell left to close.
+    let mut hits = plate(1, 0, 0.25, 0.5);
+    hits.push(FaceHit {
+        volume: volume(1),
+        primitive: prim(0),
+        triangle: 9,
+        t: 0.75,
+        true_normal: AXIS,
+    });
+    assert!(matches!(
+        walk_ray(2, &corridor(4.0, hits), &volumes, &WalkLaws::default()),
+        Err(WalkError::UnexpectedExit { sample: 2, .. })
     ));
 }
 
@@ -2540,4 +2567,117 @@ fn a_ring_only_contact_on_one_plane_is_one_event() {
         "and it engaged exactly the two samples that touched: {}",
         walked.events[0].coverage,
     );
+}
+
+// -------------------------------------------------------------------------------------------
+// §13.7 — several closed shells inside ONE primitive
+// -------------------------------------------------------------------------------------------
+//
+// The road wheels are the standing precedent: bodies and axle authored as one MildSteel primitive.
+// A ray through one meets `enter, enter, exit, exit`, and the §13.6 fuzzer measured 0.47% of a
+// million rays failing closed on exactly that shape — the sixteen wheels, `Hull_Rear` and
+// `Turret_Cupola`. These state what the three arrangements must resolve to.
+
+/// A shell NESTED inside another, 3 mm in: one presence, one run, charged once.
+///
+/// This is the wheel. Presence is presence — §13.2 takes `max(factor)` over what is present, and a
+/// primitive cannot be more present for being doubly so — which is the same answer the per-ENTITY
+/// union already gives when two primitives of one volume overlap.
+#[test]
+fn a_shell_nested_inside_another_in_one_primitive_is_one_presence() {
+    let volumes = table(&[(1, 1000.0)]);
+    // Outer shell [0.20, 0.60); inner shell 3 mm inside it, entirely contained.
+    let mut hits = plate(1, 0, 0.20, 0.60);
+    hits.extend(plate(1, 0, 0.203, 0.597));
+    let walked = walk(&corridor(4.0, hits), &volumes);
+
+    assert_eq!(
+        walked.runs.len(),
+        1,
+        "one primitive, one continuous presence"
+    );
+    assert_eq!(walked.presence.len(), 1, "and one entity presence, not two",);
+    assert_eq!(
+        walked.presence[0].spans,
+        vec![(0.20, 0.60)],
+        "the union of the shells — the outermost pair",
+    );
+    // Charged ONCE across the union, not twice across the overlap. (Not a byte assertion: these
+    // distances are not binary-exact, so the tolerance is arithmetic noise, four orders below the
+    // 394 reference-mm a double charge would have added.)
+    assert!(
+        (walked.cost - 0.40 * 1000.0).abs() < 1.0e-3,
+        "{}",
+        walked.cost
+    );
+}
+
+/// Shells that OVERLAP without nesting — `enter, enter, exit, exit` with the second starting 92 mm
+/// into the first — are still one presence, for the same reason.
+#[test]
+fn overlapping_shells_in_one_primitive_are_one_presence() {
+    let volumes = table(&[(1, 1000.0)]);
+    let mut hits = plate(1, 0, 0.20, 0.40);
+    hits.extend(plate(1, 0, 0.292, 0.50));
+    let walked = walk(&corridor(4.0, hits), &volumes);
+
+    assert_eq!(walked.runs.len(), 1);
+    assert_eq!(walked.presence[0].spans, vec![(0.20, 0.50)]);
+    // The 108 mm the two shells share is charged once. Summing would give 0.30 + 0.108.
+    assert!(
+        (walked.cost - 0.30 * 1000.0).abs() < 1.0e-3,
+        "{}",
+        walked.cost
+    );
+}
+
+/// DISJOINT shells 92 mm apart in one primitive are TWO crossings, because that is what the
+/// association law says — 92 mm of air is not a weld, whoever authored the two shells.
+///
+/// Legalizing multi-shell primitives is about the PAIRING, and it must not become a licence to merge:
+/// two events here, two entrance reads, two exits.
+#[test]
+fn disjoint_shells_in_one_primitive_are_still_two_crossings() {
+    let volumes = table(&[(1, 1000.0)]);
+    let laws = WalkLaws::default();
+    let mut hits = plate(1, 0, 0.20, 0.30);
+    hits.extend(plate(1, 0, 0.392, 0.50));
+    assert!(
+        0.092 > laws.weld_max_lookahead,
+        "the gap is past the lookahead, so no weld can even be looked for",
+    );
+    let walked = walk(&corridor(4.0, hits), &volumes);
+
+    assert_eq!(walked.runs.len(), 2, "92 mm of air is two crossings");
+    assert_eq!(
+        walked.presence[0].spans,
+        vec![(0.20, 0.30), (0.392, 0.50)],
+        "two separate presences of the one primitive",
+    );
+    assert!(
+        (walked.cost - (0.10 + 0.108) * 1000.0).abs() < 1.0e-3,
+        "{}",
+        walked.cost
+    );
+}
+
+/// §13.6 IDEMPOTENCE, on the shape that made depth counting necessary. A duplicated shell coincides
+/// face-for-face with the original, so the topology reduction collapses it before the field ever
+/// sees it: depth two and depth one are the same presence, and the walk is bit-identical.
+#[test]
+fn a_duplicated_shell_in_one_primitive_changes_nothing() {
+    let volumes = table(&[(1, 1000.0)]);
+    let once = walk(&corridor(4.0, plate(1, 0, 0.25, 0.75)), &volumes);
+    let mut doubled = plate(1, 0, 0.25, 0.75);
+    doubled.extend(plate(1, 0, 0.25, 0.75));
+    let twice = walk(&corridor(4.0, doubled), &volumes);
+
+    assert_eq!(
+        once.cost.to_bits(),
+        twice.cost.to_bits(),
+        "bit-identical cost"
+    );
+    assert_eq!(once.spans, twice.spans);
+    assert_eq!(once.presence, twice.presence);
+    assert_eq!(once.primitives, twice.primitives);
 }
