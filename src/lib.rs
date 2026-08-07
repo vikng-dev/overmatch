@@ -124,6 +124,11 @@ mod shot_trace;
 mod sight;
 mod spec;
 mod state;
+/// The global substance registry (`assets/materials/materials.ron`): the material library's numeric
+/// half, keyed by the Blender material datablock name assigned to each `*_Ballistic` mesh. Parsed
+/// and pinned by tests; NOT yet bound by the bake — slice 3 of the §13 union-walk arc swaps the
+/// per-node `material_factor` for a lookup here.
+mod substances;
 mod tank;
 /// The world heightmap: PNG → shared height grid (oracle ground term, heightfield collider,
 /// client render mesh, server spawn heights). See the module doc for the mapping constants.
