@@ -16,9 +16,11 @@
 //   - `Cast` = 900: German cast armor ran ~5-15% below rolled ballistically; mid of range.
 //   - `GunSteel` unified at 1000 (was 800): forged autofrettaged gun steel >= RHA quality;
 //     the old barrel-1000/breech-800 split was unresearched gameplay residue, and gun-part
-//     fragility is the hp/damage model's job. Breech hardens 800->1000 at code-arc landing.
+//     fragility is the hp/damage model's job. The breech hardened 800->1000 when the material
+//     bind landed (2026-08-07) — this table is what it reads now.
 //   - `MildSteel`: stamped/welded structural steel (wheel bodies, forged rims) at ~0.8x RHA.
-//     Wheels soften 1000->800 at code-arc landing; running-gear shots were a real weak axis.
+//     The wheels softened 1000->800 with that same landing; running-gear shots were a real weak
+//     axis.
 //   - `EngineBlock` = 150: homogenized box — grey cast iron ~0.4x RHA, ~30-40% metal fraction
 //     along a shot line -> 0.4 x 0.35 ~= 0.14. HL210 fork (first ~250 Tigers, aluminium
 //     block) would sit ~100; declare the vehicle's date to settle it. Transmission shares
