@@ -4817,4 +4817,206 @@ mod march_tests {
             last.position
         );
     }
+
+    // -----------------------------------------------------------------------------------------
+    // §13.1's pathology table, end to end
+    // -----------------------------------------------------------------------------------------
+    //
+    // The core tests state these as laws over synthetic hit lists. These state them as OUTCOMES, on
+    // real trimesh colliders, through the live march — because §13.1 is a table of things the
+    // resolver DID, and only the resolver can be asked whether it still does them.
+
+    /// A box as an outward-wound triangle mesh — the shape production armour actually is.
+    ///
+    /// Winding is the whole point: the collector reads a face's orientation from it (parry's normal
+    /// is flipped to oppose the ray and cannot tell entry from exit), so a mesh wound inwards would
+    /// invert every crossing. Each face is listed counter-clockwise seen from OUTSIDE.
+    fn box_trimesh(size: Vec3) -> Collider {
+        let h = size * 0.5;
+        let vertices: Vec<Vec3> = [
+            (-1.0, -1.0, -1.0),
+            (1.0, -1.0, -1.0),
+            (1.0, 1.0, -1.0),
+            (-1.0, 1.0, -1.0),
+            (-1.0, -1.0, 1.0),
+            (1.0, -1.0, 1.0),
+            (1.0, 1.0, 1.0),
+            (-1.0, 1.0, 1.0),
+        ]
+        .into_iter()
+        .map(|(x, y, z)| Vec3::new(x * h.x, y * h.y, z * h.z))
+        .collect();
+        let indices = vec![
+            [0, 3, 2],
+            [0, 2, 1], // -Z
+            [4, 5, 6],
+            [4, 6, 7], // +Z
+            [0, 1, 5],
+            [0, 5, 4], // -Y
+            [3, 7, 6],
+            [3, 6, 2], // +Y
+            [0, 4, 7],
+            [0, 7, 3], // -X
+            [1, 2, 6],
+            [1, 6, 5], // +X
+        ];
+        Collider::trimesh(vertices, indices)
+    }
+
+    /// A world of outward-wound trimesh plates, all one substance.
+    fn world_with_trimesh_plates(plates: &[(Vec3, Vec3)]) -> App {
+        let mut app = world_with_plate(Vec3::splat(0.01), Vec3::new(0.0, -500.0, 0.0));
+        for (size, at) in plates {
+            app.world_mut().spawn((
+                Transform::from_translation(*at),
+                RigidBody::Static,
+                box_trimesh(*size),
+                CollisionLayers::new([Layer::Armor], LayerMask::ALL),
+                BallisticVolume {
+                    material_factor: STEEL,
+                },
+            ));
+        }
+        for _ in 0..8 {
+            app.update();
+        }
+        app
+    }
+
+    /// Fire head-on at the plates and report whether the round CAME OUT the far side.
+    ///
+    /// Perforate-versus-defeat is the observable that needs no velocity read and no tolerance: a
+    /// defeated round despawns where it stopped, a perforating one flies on. Straddling the
+    /// capability with the arrangement under test turns "was that plate charged" into a boolean.
+    fn perforates(plates: &[(Vec3, Vec3)]) -> bool {
+        let mut app = world_with_trimesh_plates(plates);
+        let shell = app
+            .world_mut()
+            .spawn((
+                Projectile {
+                    velocity: Vec3::NEG_Z * 800.0,
+                    caliber: 0.088,
+                    mass: 10.2,
+                    drag_k: drag_k(0.088, 10.2),
+                    disc: test_disc(Vec3::NEG_Z),
+                },
+                DamageReport::default(),
+                TerminalReport::default(),
+                ShellPath {
+                    points: vec![Vec3::new(0.0, 2.0, 2.0)],
+                    segment_starts: Vec::new(),
+                },
+                PenetrationMarks::default(),
+                SpallMarks::default(),
+                ShellReadout {
+                    speed: 800.0,
+                    capability: capability(10.2, 800.0),
+                },
+                Transform::from_translation(Vec3::new(0.0, 2.0, 2.0))
+                    .looking_to(Vec3::NEG_Z, Vec3::Y),
+            ))
+            .id();
+        for _ in 0..6 {
+            app.update();
+        }
+        app.world().get::<Projectile>(shell).is_some()
+    }
+
+    fn slab(thickness: f32, centre: f32) -> (Vec3, Vec3) {
+        (Vec3::new(3.0, 3.0, thickness), Vec3::new(0.0, 2.0, centre))
+    }
+
+    /// §13.1's headline defect, as an outcome. The serial resolver entered an overlapping second
+    /// plate from inside, found no exit face ahead, and crossed it for FREE; the union charges the
+    /// space once — neither zero nor twice.
+    ///
+    /// Two arrangements, each pinning one direction against the 88's capability (~261 reference-mm):
+    /// a union of 325 mm must defeat the round even though its first plate alone (150 mm) would not,
+    /// and a union of 250 mm must let it through even though the two plates SUMMED (300 mm) would
+    /// not.
+    #[test]
+    fn overlapping_trimesh_plates_charge_their_union_once() {
+        // Undercharge — the defect that shipped. Union 325 mm.
+        assert!(
+            perforates(&[slab(0.15, 0.05)]),
+            "the first plate alone does not defeat the round",
+        );
+        assert!(
+            !perforates(&[slab(0.15, 0.05), slab(0.20, -0.10)]),
+            "the overlapped second plate is charged, not crossed for free",
+        );
+
+        // Overcharge — War Thunder's failure mode. Union 250 mm, sum 300 mm.
+        assert!(
+            perforates(&[slab(0.15, 0.05), slab(0.15, -0.05)]),
+            "the shared 50 mm is charged ONCE; summing it would have defeated the round",
+        );
+        assert!(
+            !perforates(&[slab(0.30, 0.0)]),
+            "300 mm really is beyond it — the control that makes the line above mean something",
+        );
+    }
+
+    /// SEAM INVISIBILITY as an outcome: plates meeting exactly resolve as the one plate they add up
+    /// to, on BOTH sides of the capability. Under the serial resolver the 1 mm nudge hopped the
+    /// shared face and the second plate was free, so perfect abutment bought nothing — which is why
+    /// the authoring standard and the resolver had to be redesigned together.
+    #[test]
+    fn exactly_abutting_trimesh_plates_resolve_as_one_plate() {
+        for (total, split) in [
+            (0.25f32, [slab(0.125, 0.0625), slab(0.125, -0.0625)]),
+            (0.325, [slab(0.15, 0.0875), slab(0.175, -0.0875)]),
+        ] {
+            assert_eq!(
+                perforates(&split),
+                perforates(&[slab(total, 0.0)]),
+                "abutment must resolve as the {total} m plate it is",
+            );
+        }
+    }
+
+    /// η, end to end. A round whose AXIS misses an oblique plate while its rim clips it deflects —
+    /// which the point model could not do at all, the centre ray having missed — and deflects LESS
+    /// than the same plate struck square-on. That is §13.5's graded weakspot and §13.5's "a graze IS
+    /// a partial ricochet" in one observable: the deflection angle scales with the engagement.
+    #[test]
+    fn a_rim_only_graze_deflects_less_than_a_full_engagement() {
+        // A 75°-oblique plate whose +Y edge sits at y = 2.0.
+        let plate = |app: &mut App| {
+            app.world_mut().spawn((
+                Transform::from_translation(Vec3::new(0.0, 1.7, 0.0))
+                    .with_rotation(Quat::from_rotation_y(75.0_f32.to_radians())),
+                RigidBody::Static,
+                box_trimesh(Vec3::new(3.0, 0.6, 0.1)),
+                CollisionLayers::new([Layer::Armor], LayerMask::ALL),
+                BallisticVolume {
+                    material_factor: STEEL,
+                },
+            ));
+        };
+        let deflection_at = |height: f32| -> Option<Vec3> {
+            let mut app = world_with_trimesh_plates(&[]);
+            plate(&mut app);
+            for _ in 0..8 {
+                app.update();
+            }
+            let impacts =
+                fire_and_capture(&mut app, Vec3::new(0.0, height, 2.0), Vec3::NEG_Z, 800.0);
+            impacts.first().and_then(|impact| impact.deflection)
+        };
+
+        let full = deflection_at(1.7).expect("a square-on oblique hit deflects");
+        let rim = deflection_at(2.02).expect("a rim clip still deflects — the disc reaches it");
+        let turn = |d: Vec3| Vec3::NEG_Z.angle_between(d.normalize());
+        assert!(
+            turn(rim) > 0.0,
+            "the graze really does turn the round: {rim:?}"
+        );
+        assert!(
+            turn(rim) < turn(full) * 0.9,
+            "a rim clip turns it LESS than a full engagement: {} vs {}",
+            turn(rim),
+            turn(full)
+        );
+    }
 }

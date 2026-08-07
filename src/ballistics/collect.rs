@@ -159,17 +159,26 @@ fn collect_trimesh(
     rotation: Rotation,
     out: &mut Vec<FaceHit>,
 ) -> Result<(), WalkError> {
-    let ray = avian3d::parry::query::Ray::new(origin, axis);
-    // Prune by AABB, then test the triangle exactly. The BVH is only a filter here — a node that
-    // survives still gets a real intersection test, so the pruning arithmetic cannot change WHICH
-    // crossings exist, only how many triangles are examined.
+    // Prune by BOX OVERLAP against the corridor's own extent, not by a ray cast against each node.
     //
-    // `leaves` walks depth-first in a fixed order, but nothing downstream depends on that: the walk
-    // sorts.
-    for index in mesh
-        .bvh()
-        .leaves(|node| node.cast_ray(&ray, length) < f32::MAX)
-    {
+    // A ray cast is the obvious prune and it is subtly wrong here: an axis-aligned face's AABB is
+    // DEGENERATE (zero thickness in one axis), and a corridor origin sitting exactly on such a face
+    // — which the transit corridor's does, every time, because it IS that face's position — can miss
+    // it entirely. The entry then vanishes and the walk reports an exit it never entered. Overlap
+    // has no such boundary case, prunes nearly as well, and every surviving leaf still gets an exact
+    // intersection test, so the prune cannot change WHICH crossings exist either way.
+    let far = origin + axis * length;
+    let lo = origin.min(far);
+    let hi = origin.max(far);
+    for index in mesh.bvh().leaves(|node| {
+        let aabb = node.aabb();
+        aabb.maxs.x >= lo.x
+            && aabb.mins.x <= hi.x
+            && aabb.maxs.y >= lo.y
+            && aabb.mins.y <= hi.y
+            && aabb.maxs.z >= lo.z
+            && aabb.mins.z <= hi.z
+    }) {
         let triangle = mesh.triangle(index);
         let Some((t, normal)) = cross_triangle(origin, axis, triangle.a, triangle.b, triangle.c)
         else {
